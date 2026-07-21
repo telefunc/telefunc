@@ -150,11 +150,17 @@ function txProxy(txDb: object, topDb: object, sink: CaptureSink, announce: () =>
     get(target, prop, receiver) {
       if (isWriteOp(prop)) {
         const base = Reflect.get(target, prop, receiver) as (...a: unknown[]) => unknown
-        // `target` is the RAW tx db, passed ONLY as an execution handle for the capture-recovery savepoint.
-        // Planning and registry keying still read `topDb` — that invariant is what keeps this apart from
-        // the separate question of which db owns session identity. Never the PROXY: `execute` on it is
-        // intercepted as raw SQL, so a SAVEPOINT through it would coarsen the whole transaction.
-        return captureMutation(prop, base.bind(target), topDb, sink, target, root) // plan on topDb; run on tx; buffer
+        // The context makes the two-identity rule structural: `target` (the RAW tx db, never the proxy) is
+        // ONLY the execution handle for the capture-recovery savepoint; planning and registry keying read
+        // `identityDb` — which is what keeps this apart from the separate question of which db owns session
+        // identity. The ROOT keys the write queue, so parent and savepoint serialize together.
+        return captureMutation(prop, base.bind(target), {
+          sinkMode: 'transaction',
+          identityDb: topDb,
+          sink,
+          executionHandle: target,
+          serializationKey: root,
+        })
       }
       if (prop === 'transaction') {
         return wrapTransaction(target, savepointScope(topDb, sink, announce, root))
@@ -172,7 +178,7 @@ function txProxy(txDb: object, topDb: object, sink: CaptureSink, announce: () =>
         // ORM buffer in one atomic local tick; the single coarse-all carries the remote side.
         const base = Reflect.get(target, prop, receiver)
         if (typeof base === 'function') {
-          return captureRawSql((base as (...a: unknown[]) => unknown).bind(target), topDb, announce)
+          return captureRawSql((base as (...a: unknown[]) => unknown).bind(target), announce)
         }
       }
       return Reflect.get(target, prop, receiver)

@@ -1,9 +1,9 @@
 export { reactiveDrizzle }
 export type { Reactive }
 
-import { captureMutation, captureRawSql } from './writeCapture.js'
+import { type WriteContext, captureMutation, captureRawSql } from './writeCapture.js'
 import type { CaptureSink } from './writeChanges.js'
-import { ingestLocal, ingestWrite } from './dbRuntime.js'
+import { announceCoarse, ingestLocal, ingestWrite } from './dbRuntime.js'
 import { configureChangeRuntime } from './changeRuntime.js'
 import type { ChangeTransport } from './changeTransport.js'
 import { captureTransactions, isWriteOp } from './writeProxy.js'
@@ -88,6 +88,7 @@ function reactiveDrizzle<TDb extends ReactiveDatabase>(baseDb: TDb, options?: Re
   probeOldNewReturning(db)
   // Autocommit writes ingest into THIS db's graphs immediately; a transaction buffers and flushes here once.
   const ingest: CaptureSink = (changes) => ingestWrite(db, { changes })
+  const autocommit = { sinkMode: 'autocommit', identityDb: db, sink: ingest } as const satisfies WriteContext
   // A committed transaction that ran raw SQL flushes locally in one tick and announces its remote half once.
   const localIngest: CaptureSink = (changes) => ingestLocal(db, { changes })
   return new Proxy(db, {
@@ -105,7 +106,7 @@ function reactiveDrizzle<TDb extends ReactiveDatabase>(baseDb: TDb, options?: Re
         // ingestWrite) so the live reads they affect refetch. Keyed to `db` (the top db) so it reaches the
         // SAME registry the reads acquired from; no sink → autocommit ingest.
         const base = Reflect.get(target, prop, receiver) as (...a: unknown[]) => unknown
-        return captureMutation(prop, base.bind(target), db)
+        return captureMutation(prop, base.bind(target), autocommit)
       }
       if (prop === 'transaction') {
         // Writes INSIDE the transaction must capture too (a forwarded raw tx db would bypass capture) — and
@@ -118,7 +119,7 @@ function reactiveDrizzle<TDb extends ReactiveDatabase>(baseDb: TDb, options?: Re
         // (`announceCoarse`, which owns both halves of that) rather than executing silently uncaptured.
         const base = Reflect.get(target, prop, receiver)
         if (typeof base === 'function') {
-          return captureRawSql((base as (...a: unknown[]) => unknown).bind(target), db)
+          return captureRawSql((base as (...a: unknown[]) => unknown).bind(target), () => announceCoarse(db))
         }
       }
       return Reflect.get(target, prop, receiver)

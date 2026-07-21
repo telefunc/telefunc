@@ -110,8 +110,13 @@ describe('reactiveDrizzle — client surface', () => {
     const base = { select: () => ({}), insert }
     const db = reactive(base) as unknown as { insert: unknown }
     void db.insert // property access drives the proxy get
-    // Capture is keyed to the db so it reaches the SAME registry the reads acquired from.
-    expect(captureMutation).toHaveBeenCalledWith('insert', expect.any(Function), base)
+    // Capture is keyed to the db (the context's identityDb) so it reaches the SAME registry the reads
+    // acquired from — and the entry's context is the autocommit one.
+    expect(captureMutation).toHaveBeenCalledWith(
+      'insert',
+      expect.any(Function),
+      expect.objectContaining({ sinkMode: 'autocommit', identityDb: base }),
+    )
   })
 
   // EVERY write op, not just the one. The op list is a hand-maintained set, and dropping a member from it
@@ -123,7 +128,11 @@ describe('reactiveDrizzle — client surface', () => {
     const base = { select: () => ({}), insert: vi.fn(), update: vi.fn(), delete: vi.fn() }
     const db = reactive(base) as unknown as Record<string, unknown>
     void db[op]
-    expect(captureMutation).toHaveBeenCalledWith(op, expect.any(Function), base)
+    expect(captureMutation).toHaveBeenCalledWith(
+      op,
+      expect.any(Function),
+      expect.objectContaining({ sinkMode: 'autocommit', identityDb: base }),
+    )
   })
 
   it('…and a NON-write member does not, so the check above is not just matching everything', () => {

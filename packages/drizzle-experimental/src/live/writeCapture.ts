@@ -1,10 +1,10 @@
 export { captureMutation, captureRawSql }
+export type { WriteContext }
 
 import { type Table, isTable } from 'drizzle-orm'
 import { demoteOldNewReturning, markOldNewProven, oldNewProvenOf } from './writeCapabilities.js'
 import { relationKeyOf } from '../extract/columns.js'
 import { report } from './captureReport.js'
-import { announceCoarse, ingestWrite } from './dbRuntime.js'
 import {
   type CaptureSink,
   captureBothOrCoarse,
@@ -39,34 +39,57 @@ import type { Row, TableChange } from '../router/events.js'
 // ir/relation.ts) — NOT the bare table name. The read side registers its graphs under the same identity, so
 // a write to `a.users` reaches live queries on `a.users` and not the different physical table `b.users`.
 
+/** Everything ONE captured write needs to know about the world it runs in, discriminated by which delivery
+ *  world that is — the two identities that used to thread through here as `db`/`tx`/`txRoot` positionals
+ *  (with optional parameters silently encoding autocommit-vs-transaction) are structural members now, so
+ *  the raw-handle-vs-registry-key rule is enforced by the type rather than documented at three call sites. */
+type WriteContext =
+  | {
+      /** AUTOCOMMIT: statements run on the identity db itself; whole captured writes serialize per builder
+       *  (`wrapWrite`), and there is no savepoint to bracket a substitution with. */
+      sinkMode: 'autocommit'
+      /** The db capture PLANS against and keys the registry to — the graphs live on the db the reads
+       *  acquired from. */
+      identityDb: object
+      /** Where a captured batch goes — the db's publishing ingest (local feed + cross-instance publish). */
+      sink: CaptureSink
+      executionHandle?: undefined
+      serializationKey?: undefined
+    }
+  | {
+      /** INSIDE A TRANSACTION: writes buffer until the commit boundary flushes them as one tick. */
+      sinkMode: 'transaction'
+      /** Still the TOP db, never a tx handle — a tx db is not recognized as its own driver. */
+      identityDb: object
+      /** The transaction's buffer. */
+      sink: CaptureSink
+      /** The RAW tx db, passed ONLY as the execution handle for the capture-recovery savepoint. NEVER the
+       *  tx proxy: `execute` on the proxy is intercepted as raw SQL, so a SAVEPOINT through it would
+       *  coarsen the whole transaction. */
+      executionHandle: object
+      /** The PHYSICAL transaction root every captured write on this connection serializes on. A nested
+       *  transaction is a SAVEPOINT on the same connection: keying per handle gave parent and child
+       *  separate queues, let their savepoints interleave, and turned a transaction plain Drizzle commits
+       *  into "savepoint does not exist" → 25P02. */
+      serializationKey: object
+    }
+
 function captureMutation(
   op: Op,
   baseMethod: (...a: unknown[]) => unknown,
-  db: object,
-  emit?: CaptureSink,
-  tx?: object,
-  txRoot?: object,
+  context: WriteContext,
 ): (...a: unknown[]) => unknown {
-  const sink: CaptureSink = emit ?? ((changes) => ingestWrite(db, { changes }))
   return (...args: unknown[]) => {
     const table = args[0]
     // insert/update/delete all take the target table as their first argument.
     if (!isTable(table)) return baseMethod(...args)
-    return wrapWrite(baseMethod(...args), table, op, db, sink, tx, txRoot)
+    return wrapWrite(baseMethod(...args), table, op, context)
   }
 }
 
 /** Wrap a mutation builder so its terminal (`await` / `.execute()`) runs the write and captures its change;
  *  chain methods (`values`/`set`/`where`/`returning`/…) re-wrap so the terminal stays captured. */
-function wrapWrite(
-  builder: unknown,
-  table: Table,
-  op: Op,
-  db: object,
-  sink: CaptureSink,
-  tx?: object,
-  txRoot?: object,
-): unknown {
+function wrapWrite(builder: unknown, table: Table, op: Op, context: WriteContext): unknown {
   return new Proxy(builder as object, {
     get(target, prop, receiver) {
       // EVERY promise terminal routes through the captured run — `.catch()`/`.finally()` included. A
@@ -84,7 +107,7 @@ function wrapWrite(
       // neighbour rewinding. Observed — three concurrent inserts on one transaction committed one row.
       // Outside a transaction there is nothing to serialize and writes stay fully concurrent.
       const start = (args?: unknown[]): Promise<unknown> => {
-        const run = () => runWrite(target, table, op, db, sink, tx, args)
+        const run = () => runWrite(target, table, op, context, args)
         // INSIDE A TRANSACTION, keyed by the ROOT of the physical transaction rather than by this scope's own
         // handle: a nested transaction is a SAVEPOINT on the same connection, so keying per handle gave
         // parent and child separate queues, let their savepoints interleave, and turned a transaction plain
@@ -97,7 +120,7 @@ function wrapWrite(
         // CAPTURE's full RETURNING and hand that caller capture's rows where plain Drizzle returns the plain
         // count-shape twice — and their two taps shadowed and restored one `_prepare` out of order. Different
         // builders keep different queues, so unrelated autocommit writes stay fully concurrent.
-        return serializeOn(tx ? (txRoot ?? tx) : target, run)
+        return serializeOn(context.serializationKey ?? target, run)
       }
       // WHETHER this member executes is `writeTerminals`' question; the branches below only differ on the
       // signature each verb takes. Every one is gated on the underlying builder ACTUALLY having it: PG write
@@ -116,7 +139,7 @@ function wrapWrite(
       }
       // Driver terminals execute DIRECTLY rather than through the QueryPromise — SYNCHRONOUS on node:sqlite.
       if (isDriverTerminal(prop, target) && has(prop as string)) {
-        return (...args: unknown[]) => runDirectTerminal(target, prop as string, args, table, op, db, sink)
+        return (...args: unknown[]) => runDirectTerminal(target, prop as string, args, table, op, context)
       }
       // A prepared write executes LATER; hand back a wrapped prepared query so each execution invalidates.
       if (prop === 'prepare') {
@@ -124,16 +147,16 @@ function wrapWrite(
         if (typeof prepare === 'function') {
           // Planned HERE, from the builder as it stands at `prepare()` — after that the shape is frozen, so
           // one plan covers every execution of the prepared statement.
-          const plan = planCapture(target, table, op, db)
+          const plan = planCapture(target, table, op, context.identityDb)
           return (...args: unknown[]) =>
-            wrapPrepared((prepare as (...a: unknown[]) => unknown).apply(target, args), table, op, sink, plan)
+            wrapPrepared((prepare as (...a: unknown[]) => unknown).apply(target, args), table, op, context.sink, plan)
         }
       }
       const value = Reflect.get(target, prop, receiver)
       if (typeof value !== 'function') return value
       return (...args: unknown[]) => {
         const next = (value as (...a: unknown[]) => unknown).apply(target, args)
-        return isWriteBuilder(next) ? wrapWrite(next, table, op, db, sink, tx, txRoot) : next
+        return isWriteBuilder(next) ? wrapWrite(next, table, op, context) : next
       }
     },
   })
@@ -152,12 +175,11 @@ function runDirectTerminal(
   args: unknown[],
   table: Table,
   op: Op,
-  db: object,
-  sink: CaptureSink,
+  context: WriteContext,
 ): unknown {
   const base = (builder as Record<string, (...a: unknown[]) => unknown>)[prop]!
   const result = base.apply(builder, args)
-  const emit = (rows: unknown) => emitSafely(sink, directChanges(rows, builder, table, op, db))
+  const emit = (rows: unknown) => emitSafely(context.sink, directChanges(rows, builder, table, op, context.identityDb))
   if (isThenable(result)) {
     return Promise.resolve(result).then((rows) => {
       emit(rows)
@@ -214,11 +236,7 @@ function wrapPrepared(prepared: unknown, table: Table, op: Op, sink: CaptureSink
  *  only decides WHEN. INSIDE A TRANSACTION the caller passes an announce that records the intent instead, so
  *  nothing is announced until the outer COMMIT and a rollback announces nothing: announcing mid-transaction
  *  would tell every other instance to refetch state that may never exist. */
-function captureRawSql(
-  base: (...a: unknown[]) => unknown,
-  db: object,
-  announce: () => void = () => announceCoarse(db),
-) {
+function captureRawSql(base: (...a: unknown[]) => unknown, announce: () => void) {
   return (...args: unknown[]) => {
     const result = base(...args)
     // The statement has already run, so its announcement is never allowed to fail the caller for it.
@@ -246,16 +264,15 @@ async function runWrite(
   builder: unknown,
   table: Table,
   op: Op,
-  db: object,
-  sink: CaptureSink,
-  tx: object | undefined,
+  context: WriteContext,
   executeArgs?: unknown[],
   // The strategy this write runs under — freshly classified by default. The recovery from a refused
   // substitution passes `AS_WRITTEN` instead: the one plan that provably cannot substitute, which is what
   // makes that recovery single-shot by construction. The plan value IS the recovery state — one fact, one
   // representation, never a flag beside a plan that contradicts it.
-  plan: Plan = planCapture(builder, table, op, db),
+  plan: Plan = planCapture(builder, table, op, context.identityDb),
 ): Promise<unknown> {
+  const { identityDb: db, sink, executionHandle } = context
   const relationId = relationKeyOf(table)
 
   if (plan.strategy === 'asWritten') {
@@ -283,14 +300,14 @@ async function runWrite(
   // unresolvable position means capture's layout cannot answer their projection, so the substitution is
   // refused rather than approximated.
   const callerPositions = callerPositionsOf(plan, op)
-  if (callerPositions === UNMAPPABLE) return recoverAsWritten(builder, table, op, db, sink, tx, executeArgs)
+  if (callerPositions === UNMAPPABLE) return recoverAsWritten(builder, table, op, context, executeArgs)
 
   if (plan.strategy === 'bothImages') {
     const { images } = plan
     const outcome = await runSubstituted(
       () => substituteOldNew(builder, table, images),
       builder,
-      tx,
+      executionHandle,
       executeArgs,
       relationId,
       callerPositions,
@@ -303,7 +320,7 @@ async function runWrite(
         demoteOldNewReturning(db)
         report('old-new-demoted', { relation: relationId })
       }
-      return recoverAsWritten(builder, table, op, db, sink, tx, executeArgs)
+      return recoverAsWritten(builder, table, op, context, executeArgs)
     }
     if (!oldNewProvenOf(db)) markOldNewProven(db) // it worked; later writes pay nothing for the guard
     // Which image is which answer (delete→old, update→new) is the layout's to say — see imageLayout.ts.
@@ -318,12 +335,12 @@ async function runWrite(
   const outcome = await runSubstituted(
     () => substituteFullRow(builder, table),
     builder,
-    tx,
+    executionHandle,
     executeArgs,
     relationId,
     callerPositions,
   )
-  if (outcome === SUBSTITUTION_REFUSED) return recoverAsWritten(builder, table, op, db, sink, tx, executeArgs)
+  if (outcome === SUBSTITUTION_REFUSED) return recoverAsWritten(builder, table, op, context, executeArgs)
   emitCaptured(sink, relationId, outcome, outcome.rows && captureOrCoarse(op, relationId, outcome.rows, plan))
   return plan.deliver(outcome, outcome.rows)
 }
@@ -360,18 +377,16 @@ function emitCaptured(
  *     Where no savepoint could be established (a non-PG dialect, or a driver that would not issue one) the
  *     substitution is never attempted at all, so there is no refusal to recover from.
  *
- *  The transaction handle is threaded through for that bracket; capture is still keyed on the TOP db
- *  (`txProxy` passes `topDb`) so registry ownership of the graphs stays with the db that owns them. */
+ *  The context's execution handle carries that bracket; capture stays keyed on the context's identity db
+ *  so registry ownership of the graphs stays with the db that owns them. */
 async function recoverAsWritten(
   builder: unknown,
   table: Table,
   op: Op,
-  db: object,
-  sink: CaptureSink,
-  tx: object | undefined,
+  context: WriteContext,
   executeArgs: unknown[] | undefined,
 ): Promise<unknown> {
-  return runWrite(builder, table, op, db, sink, tx, executeArgs, AS_WRITTEN)
+  return runWrite(builder, table, op, context, executeArgs, AS_WRITTEN)
 }
 
 /** A drizzle write query builder, distinguished from a plain method return (a `toSQL()` object, a Promise). */

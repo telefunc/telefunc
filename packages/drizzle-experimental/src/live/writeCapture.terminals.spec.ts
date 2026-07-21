@@ -16,7 +16,7 @@ import { sql } from 'drizzle-orm'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { captureMutation, captureRawSql } from './writeCapture.js'
 import { isBuilderTerminal, isCoarseAllSurface, isDriverTerminal, isPreparedTerminal } from './writeTerminals.js'
-import { registryFor } from './dbRuntime.js'
+import { announceCoarse, registryFor } from './dbRuntime.js'
 import type { TableChange } from '../router/events.js'
 
 const users = pgTable('users', { id: integer('id').primaryKey(), name: text('name') })
@@ -70,9 +70,11 @@ let pg: ReturnType<typeof pgDrizzle>
 type AnyBuilder = (table: unknown) => any
 function capturing(db: object, op: 'insert' | 'update' | 'delete', method: (t: never) => unknown) {
   const batches: TableChange[][] = []
-  const wrapped = captureMutation(op, method as (...a: unknown[]) => unknown, db, (changes) =>
-    batches.push(changes),
-  ) as AnyBuilder
+  const wrapped = captureMutation(op, method as (...a: unknown[]) => unknown, {
+    sinkMode: 'autocommit',
+    identityDb: db,
+    sink: (changes) => batches.push(changes),
+  }) as AnyBuilder
   return { wrapped, batches }
 }
 
@@ -137,7 +139,10 @@ describe('write capture — RAW SQL fails closed over the db’s watched tables'
     }
     registryFor(db).router.register(graph)
     const ingested = vi.spyOn(registryFor(db).router, 'ingest')
-    const run = captureRawSql(() => 'driver-result', db)
+    const run = captureRawSql(
+      () => 'driver-result',
+      () => announceCoarse(db),
+    ) // what the entry wires
     expect(run()).toBe('driver-result') // the caller's raw result is untouched
     expect(ingested.mock.calls.map(([batch]) => batch.changes)).toEqual([
       [
@@ -152,7 +157,10 @@ describe('write capture — RAW SQL fails closed over the db’s watched tables'
   it('emits nothing when the db has no registered graphs (nothing to invalidate)', () => {
     const db = {}
     const ingested = vi.spyOn(registryFor(db).router, 'ingest')
-    const run = captureRawSql(() => 'ok', db)
+    const run = captureRawSql(
+      () => 'ok',
+      () => announceCoarse(db),
+    )
     expect(run()).toBe('ok')
     expect(ingested).not.toHaveBeenCalled()
     ingested.mockRestore()

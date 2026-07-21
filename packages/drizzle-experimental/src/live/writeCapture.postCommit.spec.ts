@@ -44,9 +44,11 @@ const DDL = 'create table users (id int primary key, name text, at timestamptz, 
 type AnyBuilder = (table: unknown) => any
 function capturing(db: object, op: 'insert' | 'update' | 'delete', method: (t: never) => unknown) {
   const batches: TableChange[][] = []
-  const wrapped = captureMutation(op, method as (...a: unknown[]) => unknown, db, (changes) =>
-    batches.push(changes),
-  ) as AnyBuilder
+  const wrapped = captureMutation(op, method as (...a: unknown[]) => unknown, {
+    sinkMode: 'autocommit',
+    identityDb: db,
+    sink: (changes) => batches.push(changes),
+  }) as AnyBuilder
   return { wrapped, batches }
 }
 

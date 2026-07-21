@@ -15,7 +15,7 @@ import { drizzle as pgDrizzle } from 'drizzle-orm/pglite'
 import { and, eq, sql } from 'drizzle-orm'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { captureMutation } from './writeCapture.js'
-import { registryFor } from './dbRuntime.js'
+import { ingestWrite, registryFor } from './dbRuntime.js'
 import { compileQuery } from '../compile/compile.js'
 import { extractQueryShape } from '../extract/queryShape.js'
 import { createLiveGraph } from '../graph/liveGraph.js'
@@ -41,9 +41,11 @@ let pg: ReturnType<typeof pgDrizzle>
 type AnyBuilder = (table: unknown) => any
 function capturing(db: object, op: 'insert' | 'update' | 'delete', method: (t: never) => unknown) {
   const batches: TableChange[][] = []
-  const wrapped = captureMutation(op, method as (...a: unknown[]) => unknown, db, (changes) =>
-    batches.push(changes),
-  ) as AnyBuilder
+  const wrapped = captureMutation(op, method as (...a: unknown[]) => unknown, {
+    sinkMode: 'autocommit',
+    identityDb: db,
+    sink: (changes) => batches.push(changes),
+  }) as AnyBuilder
   return { wrapped, batches }
 }
 
@@ -301,8 +303,12 @@ describe('write capture — an emitted change lands in the space the graphs actu
     const { graph, routable } = await watching(db)
     const before = graph.invalidationSeq()
 
-    // The default sink — ingestWrite → router → graph, the real path.
-    const insert = captureMutation('insert', db.insert.bind(db) as (...a: unknown[]) => unknown, db) as AnyBuilder
+    // The publishing sink — ingestWrite → router → graph, the real path (what the entry wires for autocommit).
+    const insert = captureMutation('insert', db.insert.bind(db) as (...a: unknown[]) => unknown, {
+      sinkMode: 'autocommit',
+      identityDb: db,
+      sink: (changes) => ingestWrite(db, { changes }),
+    }) as AnyBuilder
     await insert(members).values({ id: 1, teamId: 10 })
 
     expect(graph.invalidationSeq()).toBeGreaterThan(before) // fired: the change was readable

@@ -30,9 +30,11 @@ const users = pgTable('users', { id: integer('id').primaryKey(), name: text('nam
 type AnyBuilder = (table: unknown) => any
 function capturing(db: object, op: 'insert' | 'update' | 'delete', method: (t: never) => unknown) {
   const batches: TableChange[][] = []
-  const wrapped = captureMutation(op, method as (...a: unknown[]) => unknown, db, (changes) =>
-    batches.push(changes),
-  ) as AnyBuilder
+  const wrapped = captureMutation(op, method as (...a: unknown[]) => unknown, {
+    sinkMode: 'autocommit',
+    identityDb: db,
+    sink: (changes) => batches.push(changes),
+  }) as AnyBuilder
   return { wrapped, batches }
 }
 
@@ -52,9 +54,13 @@ describe('write capture — a capture fault NEVER fails a committed write (isola
   it('a throwing sink does NOT reject the caller; the row is committed and the plain result is returned', async () => {
     const { client, pg } = await freshPg()
     const thrown: TableChange[][] = []
-    const wrapped = captureMutation('insert', pg.insert.bind(pg) as (...a: unknown[]) => unknown, pg, (changes) => {
-      thrown.push(changes)
-      throw new Error('sink exploded')
+    const wrapped = captureMutation('insert', pg.insert.bind(pg) as (...a: unknown[]) => unknown, {
+      sinkMode: 'autocommit',
+      identityDb: pg,
+      sink: (changes) => {
+        thrown.push(changes)
+        throw new Error('sink exploded')
+      },
     }) as AnyBuilder
     const result = await wrapped(users).values({ id: 30, name: 'committed' }) // must NOT reject
     expect(result).toEqual({ rows: [], fields: [], affectedRows: 1 }) // exactly plain drizzle's result
@@ -69,9 +75,13 @@ describe('write capture — a capture fault NEVER fails a committed write (isola
   it('a sink that throws on BOTH the precise feed and the coarse fallback still does not reject the caller', async () => {
     const { client, pg } = await freshPg()
     let calls = 0
-    const wrapped = captureMutation('insert', pg.insert.bind(pg) as (...a: unknown[]) => unknown, pg, () => {
-      calls++
-      throw new Error('sink always explodes')
+    const wrapped = captureMutation('insert', pg.insert.bind(pg) as (...a: unknown[]) => unknown, {
+      sinkMode: 'autocommit',
+      identityDb: pg,
+      sink: () => {
+        calls++
+        throw new Error('sink always explodes')
+      },
     }) as AnyBuilder
     const result = await wrapped(users).values({ id: 31, name: 'still-committed' })
     expect(result).toEqual({ rows: [], fields: [], affectedRows: 1 })
