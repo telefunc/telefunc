@@ -15,7 +15,10 @@ import { laneKey as laneKeyOf } from '../../../server/adapter/cloudflare/room/co
 import type { CommitWire } from '../../../server/adapter/cloudflare/room/do.js'
 import { Fanout } from '../../../server/adapter/cloudflare/room/fanout.js'
 import { ROUTE_RENEW_EVERY_MS, ROUTE_TTL_MS } from '../../../server/adapter/cloudflare/room/routes.js'
-import { CloudflareLaneSubscription } from '../../../server/adapter/cloudflare/room/subscription.js'
+import {
+  CloudflareLaneSubscription,
+  CloudflareLaneSubscriptionMultiplexer,
+} from '../../../server/adapter/cloudflare/room/subscription.js'
 import { GEN_ORPHAN_GRACE_MS } from '../../../server/adapter/cloudflare/room/storage.js'
 import type { BackendFixture } from '../harness.js'
 import {
@@ -46,6 +49,7 @@ import {
   cloudflareRoomStub,
   disposeCloudflareRoomStubs,
   evictReceiver,
+  failReceiverUninstalls,
   flushCloudflareAuthorityClock,
   holdReceiverDeliveries,
   holdReceiverProbes,
@@ -129,6 +133,39 @@ describe('cloudflare — CF-specific mechanics', () => {
       await evictReceiver(roomId, inc, laneKey, subscriber, leaseId)
     })
 
+    it('rejects a held old-generation probe after drop and legal reuse of the same incarnation id', async () => {
+      const { roomId, inc, stub } = await openCfRoom()
+      const laneKey = laneKeyOf(SEMANTIC)
+      const subscriber = 'subscriber-do-probe-generation-fence'
+      const leaseId = 'lease-old-probe'
+      await installReceiver(roomId, inc, laneKey, subscriber, leaseId, () => {})
+      await holdReceiverProbes(subscriber)
+
+      const pending = stub.registerRoute(roomId, inc, laneKey, subscriber, leaseId, null)
+      await waitForReceiverProbe(subscriber)
+      const head = await readHeadOrThrow(fx.backend, roomId)
+      const { head: closing, leaseId: closeLease } = await enterClosing(fx.backend, roomId, head)
+      accepted(await fx.backend.commitLane(roomId, inc, CONTROL, bytes('closed'), { closingLease: closeLease }))
+      const tombstone = okHead(await finalizeClose(fx.backend, roomId, closing, closeLease))
+      await fx.backend.dropGeneration(roomId, inc)
+      okHead(
+        await fx.backend.compareExchangeHead(
+          roomId,
+          { expect: { rev: tombstone.rev } },
+          { head: { currentInc: inc, state: 'open', config: tombstone.config } },
+        ),
+      )
+
+      await releaseReceiverProbes(subscriber)
+      expect(await pending).toEqual({
+        rejected: true,
+        reason: `generation '${inc}' was invalidated`,
+        terminal: true,
+      })
+      expect(acceptedCommit(await stub.commitLane(roomId, inc, SEMANTIC, bytes('no-stale-route'))).receivers).toBe(0)
+      await evictReceiver(roomId, inc, laneKey, subscriber, leaseId)
+    })
+
     it('closes locally even when unsubscribe transport teardown fails', async () => {
       let closedCalls = 0
       const states: string[] = []
@@ -150,6 +187,45 @@ describe('cloudflare — CF-specific mechanics', () => {
       expect(sub.state()).toBe('closed')
       expect(states).toEqual(['closed'])
       expect(closedCalls).toBe(1)
+    })
+
+    it('isolates throwing state observers so attachment and shared-route teardown still complete', async () => {
+      let remoteUnsubscribes = 0
+      let localDetaches = 0
+      let emptyCalls = 0
+      const sharedStates: string[] = []
+      const shared = new CloudflareLaneSubscription({
+        establish: async () => ({ ready: true }),
+        renew: async () => true,
+        unsubscribe: async () => {
+          remoteUnsubscribes += 1
+        },
+      })
+      shared.onStateChange(() => {
+        throw new Error('shared observer failure')
+      })
+      shared.onStateChange((state) => sharedStates.push(state))
+      const mux = new CloudflareLaneSubscriptionMultiplexer(shared, () => {
+        emptyCalls += 1
+      })
+      const attachment = mux.attach(() => {
+        localDetaches += 1
+      })
+      attachment.onStateChange(() => {
+        throw new Error('attachment observer failure')
+      })
+      shared.start()
+      await attachment.ready
+
+      await attachment.unsubscribe()
+      expect(attachment.state()).toBe('closed')
+      expect(shared.state()).toBe('closed')
+      expect({ remoteUnsubscribes, localDetaches, emptyCalls }).toEqual({
+        remoteUnsubscribes: 1,
+        localDetaches: 1,
+        emptyCalls: 1,
+      })
+      expect(sharedStates).toEqual(['closed'])
     })
 
     it('re-establishment replaces the lease in one row: the acceptance snapshot has no duplicate target', async () => {
@@ -473,6 +549,47 @@ describe('cloudflare — CF-specific mechanics', () => {
       expect(await settled(evicted.delivery)).toBe('resolved')
     })
 
+    it('makes a late mux attachment await re-establishment after K=3 authority eviction', async () => {
+      const { roomId, inc } = await openCfRoom()
+      let failuresRemaining = 3
+      const firstSeen: string[] = []
+      const lateSeen: string[] = []
+      const first = fx.backend.subscribeLane(roomId, inc, SEMANTIC, (payload) => {
+        if (failuresRemaining > 0) {
+          failuresRemaining -= 1
+          throw new Error('target failed')
+        }
+        firstSeen.push(text(payload))
+      })
+      await first.ready
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        const frame = accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, bytes(`bad-${attempt}`)))
+        expect(await settled(frame.delivery)).toBe('rejected')
+      }
+
+      // Keep the first re-establishment attempt pending behind the production retry scheduler. A stale
+      // handout of the shared historical ready promise would resolve the late attachment immediately.
+      const controls = cloudflareRenewalControls(fx.backend)
+      controls.forceEstablishmentFailures(1)
+      const late = fx.backend.subscribeLane(roomId, inc, SEMANTIC, (payload) => lateSeen.push(text(payload)))
+      let lateReady = false
+      void late.ready.then(() => {
+        lateReady = true
+      })
+      await waitUntil(async () => late.state() === 'lost')
+      expect(lateReady).toBe(false)
+
+      await controls.advance(250)
+      await late.ready
+      const fresh = accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, bytes('fresh')))
+      expect(fresh.receivers).toBe(1)
+      await fresh.delivery
+      expect(firstSeen).toEqual(['fresh'])
+      expect(lateSeen).toEqual(['fresh'])
+      await late.unsubscribe()
+      await first.unsubscribe()
+    })
+
     it('resets the consecutive counter after a successful target handoff', async () => {
       const { roomId, inc } = await openCfRoom()
       let fail = true
@@ -551,6 +668,30 @@ describe('cloudflare — CF-specific mechanics', () => {
   })
 
   describe('alarm janitor — observation-aged orphan generations', () => {
+    it('keeps the durable generation retry source when subscriber uninstall fails', async () => {
+      const { roomId, inc, stub } = await openCfRoom()
+      const laneKey = laneKeyOf(SEMANTIC)
+      const subscriber = 'subscriber-do-retryable-generation-drop'
+      const leaseId = 'lease-retryable-drop'
+      await installReceiver(roomId, inc, laneKey, subscriber, leaseId, () => {})
+      await stub.registerRoute(roomId, inc, laneKey, subscriber, leaseId, null)
+
+      const head = await readHeadOrThrow(fx.backend, roomId)
+      const { head: closing, leaseId: closeLease } = await enterClosing(fx.backend, roomId, head)
+      accepted(await fx.backend.commitLane(roomId, inc, CONTROL, bytes('closed'), { closingLease: closeLease }))
+      await finalizeClose(fx.backend, roomId, closing, closeLease)
+
+      await failReceiverUninstalls(subscriber, 1)
+      await expect(stub.dropGeneration(inc)).rejects.toThrow()
+      expect(await stub.listGenerations()).toContain(inc)
+
+      const retried = await stub.dropGeneration(inc)
+      if ('error' in retried) throw new Error(retried.error)
+      expect(retried.droppedSubscribers).toEqual([[laneKey, subscriber]])
+      expect(await stub.listGenerations()).not.toContain(inc)
+      await evictReceiver(roomId, inc, laneKey, subscriber, leaseId)
+    })
+
     it('keeps an orphan for the full 60s grace, then deletes only that non-current generation', async () => {
       const roomId = nextId('cf-room')
       const { inc: orphan, head } = await openRoom(fx.backend, roomId)
@@ -600,6 +741,56 @@ describe('cloudflare — CF-specific mechanics', () => {
       await releaseReceiverDeliveries(subscriber)
       await stub.awaitDelivery(held.deliveryToken)
       expect(seen).toEqual([])
+    })
+
+    it('closes an alarm-dropped mux instead of renewing it into a reused incarnation id', async () => {
+      const roomId = nextId('cf-alarm-mux-room')
+      const { inc: orphan, head } = await openRoom(fx.backend, roomId)
+      const oldSeen: string[] = []
+      const old = fx.backend.subscribeLane(roomId, orphan, SEMANTIC, (payload) => oldSeen.push(text(payload)))
+      await old.ready
+
+      const { head: orphanClosing, leaseId: orphanLease } = await enterClosing(fx.backend, roomId, head)
+      accepted(await fx.backend.commitLane(roomId, orphan, CONTROL, bytes('closed'), { closingLease: orphanLease }))
+      const firstTombstone = okHead(await finalizeClose(fx.backend, roomId, orphanClosing, orphanLease))
+      const { inc: current, head: currentHead } = await openRoom(fx.backend, roomId, { prior: firstTombstone })
+      const stub = await cloudflareRoomStub(roomId)
+
+      await stub.runJanitor()
+      fx.advanceAuthority(GEN_ORPHAN_GRACE_MS)
+      await fx.backend.readHead(roomId)
+      await stub.runJanitor()
+      expect(await stub.listGenerations()).not.toContain(orphan)
+
+      const { head: currentClosing, leaseId: currentLease } = await enterClosing(fx.backend, roomId, currentHead)
+      accepted(await fx.backend.commitLane(roomId, current, CONTROL, bytes('closed'), { closingLease: currentLease }))
+      const secondTombstone = okHead(await finalizeClose(fx.backend, roomId, currentClosing, currentLease))
+      okHead(
+        await fx.backend.compareExchangeHead(
+          roomId,
+          { expect: { rev: secondTombstone.rev } },
+          { head: { currentInc: orphan, state: 'open', config: secondTombstone.config } },
+        ),
+      )
+
+      const controls = cloudflareRenewalControls(fx.backend)
+      await controls.advance(ROUTE_RENEW_EVERY_MS)
+      expect(old.state()).toBe('closed')
+      const withoutFreshSubscription = accepted(
+        await fx.backend.commitLane(roomId, orphan, SEMANTIC, bytes('must-have-no-old-target')),
+      )
+      expect(withoutFreshSubscription.receivers).toBe(0)
+      await withoutFreshSubscription.delivery
+
+      const freshSeen: string[] = []
+      const fresh = fx.backend.subscribeLane(roomId, orphan, SEMANTIC, (payload) => freshSeen.push(text(payload)))
+      await fresh.ready
+      const onlyFresh = accepted(await fx.backend.commitLane(roomId, orphan, SEMANTIC, bytes('fresh-only')))
+      expect(onlyFresh.receivers).toBe(1)
+      await onlyFresh.delivery
+      expect(oldSeen).toEqual([])
+      expect(freshSeen).toEqual(['fresh-only'])
+      await fresh.unsubscribe()
     })
 
     it('schedules and re-arms a real workerd alarm without the runJanitor test RPC', async () => {

@@ -39,14 +39,23 @@ export class TelefuncRoomSubscriberDurableObject extends DurableObject {
   #releaseProbeGate: (() => void) | null = null
   #pendingProbes = 0
   readonly #probeWaiters = new Set<() => void>()
+  #forcedUninstallFailures = 0
 
   async installRoute(identity: SubscriberRouteIdentity, leaseId: string): Promise<void> {
     this.#installed.set(identityKey(identity), leaseId)
   }
 
   async uninstallRoute(identity: SubscriberRouteIdentity, leaseId: string): Promise<void> {
+    if (this.#forcedUninstallFailures > 0) {
+      this.#forcedUninstallFailures -= 1
+      throw new Error('forced subscriber uninstall failure')
+    }
     const key = identityKey(identity)
     if (this.#installed.get(key) === leaseId) this.#installed.delete(key)
+  }
+
+  async failUninstalls(count: number): Promise<void> {
+    this.#forcedUninstallFailures = Math.max(0, count)
   }
 
   // Dark conformance controls: they pause before the at-most-once addressability check, allowing workerd

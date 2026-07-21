@@ -48,7 +48,7 @@ export function initSchema(sql: SqlStorage): void {
       lease_id TEXT, lease_until INTEGER, expires_at INTEGER
     );
     CREATE TABLE IF NOT EXISTS gen (
-      inc TEXT PRIMARY KEY, revision INTEGER NOT NULL, orphan_since INTEGER
+      inc TEXT PRIMARY KEY, token TEXT NOT NULL, revision INTEGER NOT NULL, orphan_since INTEGER
     );
     CREATE TABLE IF NOT EXISTS cell (
       inc TEXT NOT NULL, key TEXT NOT NULL, bytes BLOB NOT NULL, expires_at INTEGER,
@@ -133,6 +133,14 @@ export function hasGeneration(sql: SqlStorage, inc: string): boolean {
   return sql.exec('SELECT 1 FROM gen WHERE inc = ? LIMIT 1', inc).toArray().length > 0
 }
 
+// Non-reusable authority identity for one registered generation. The incarnation string is reusable
+// only after `dropGenerationRows()` removes this row; the next legal installation receives a fresh
+// token from the head CX revision. Async route probes carry this token across their await so an answer
+// obtained for an old generation can never authorize a lease in a later reuse of the same inc string.
+export function readGenerationToken(sql: SqlStorage, inc: string): string | null {
+  return sql.exec<{ token: string }>('SELECT token FROM gen WHERE inc = ?', inc).toArray()[0]?.token ?? null
+}
+
 export function listGenerations(sql: SqlStorage): string[] {
   return sql
     .exec<{ inc: string }>('SELECT inc FROM gen')
@@ -212,7 +220,11 @@ function storeHead(sql: SqlStorage, next: HeadWriteNext, now: number, mintRev: (
   // A generation exists from the moment its inc is installed (registered inside this same CX) — that is
   // what makes the fresh-inc guard deterministic. Empty until written; never re-zeroed on re-store.
   if (next.head.currentInc !== null) {
-    sql.exec('INSERT OR IGNORE INTO gen (inc, revision, orphan_since) VALUES (?, 0, NULL)', next.head.currentInc)
+    sql.exec(
+      'INSERT OR IGNORE INTO gen (inc, token, revision, orphan_since) VALUES (?, ?, 0, NULL)',
+      next.head.currentInc,
+      rev,
+    )
     sql.exec('UPDATE gen SET orphan_since = NULL WHERE inc = ?', next.head.currentInc)
   }
   const stored: StoredHead = {

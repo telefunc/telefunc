@@ -19,10 +19,12 @@ export const realSubscriptionScheduler: SubscriptionScheduler = {
 }
 
 export type EstablishResult = { ready: true } | { ready: false; retryable: boolean; reason: string }
+export type SubscriptionRouteResult = boolean | { renewed: boolean; terminal?: boolean; reason?: string }
 
 export type CloudflareLaneSubscriptionOperations = {
   establish(): Promise<EstablishResult>
-  renew(): Promise<boolean>
+  renew(): Promise<SubscriptionRouteResult>
+  validate?(): Promise<SubscriptionRouteResult>
   unsubscribe(): Promise<void>
   closed?(): void
 }
@@ -44,6 +46,10 @@ export class CloudflareLaneSubscription implements LaneSubscription {
   #cancelScheduled: (() => void) | null = null
   #renewalFailures = 0
   #closedNotified = false
+  #currentReady!: Promise<void>
+  #settleCurrentReady!: { resolve: () => void; reject: (error: unknown) => void }
+  #currentReadySettled = false
+  #validation: Promise<void> | null = null
 
   constructor(operations: CloudflareLaneSubscriptionOperations, options: CloudflareLaneSubscriptionOptions = {}) {
     this.#operations = operations
@@ -55,6 +61,7 @@ export class CloudflareLaneSubscription implements LaneSubscription {
     // A caller may attach after the asynchronous first attempt. Observe internally without changing the
     // promise the caller receives, so a fail-closed establishment never becomes an unhandled rejection.
     void this.ready.catch(() => {})
+    this.#resetCurrentReady()
   }
 
   start(): void {
@@ -69,6 +76,27 @@ export class CloudflareLaneSubscription implements LaneSubscription {
   onStateChange(cb: (state: ReadinessState) => void): () => void {
     this.#listeners.add(cb)
     return () => this.#listeners.delete(cb)
+  }
+
+  // Readiness for a local attachment created after the shared lifecycle's first establishment. Unlike
+  // the SPI's historical one-shot `ready`, this follows the CURRENT route epoch: lost/establishing waits
+  // for the next successful establishment and closed rejects.
+  currentReady(): Promise<void> {
+    if (this.#state === 'ready') return Promise.resolve()
+    if (this.#state === 'closed') return Promise.reject(new Error('shared subscription lifecycle closed'))
+    return this.#currentReady
+  }
+
+  // A route can be authority-evicted (K=3) while the local timer still says ready. A late attachment
+  // validates the exact lease before inheriting readiness; a missing live route drives the shared
+  // lifecycle through lost -> re-establish, while a generation-token mismatch closes it terminally.
+  ensureCurrentReady(): Promise<void> {
+    if (this.#state !== 'ready' || this.#operations.validate === undefined) return this.currentReady()
+    if (this.#validation !== null) return this.#validation
+    this.#validation = this.#validateCurrentRoute().finally(() => {
+      this.#validation = null
+    })
+    return this.#validation
   }
 
   async unsubscribe(): Promise<void> {
@@ -102,6 +130,7 @@ export class CloudflareLaneSubscription implements LaneSubscription {
         this.#readySettled = true
         // The first establishing->ready transition belongs only to `ready`, never onStateChange.
         this.#state = 'ready'
+        this.#resolveCurrentReady()
         this.#settle.resolve()
       } else {
         // A transient first failure already rejected `ready`; a later bounded recovery is observable on
@@ -121,6 +150,7 @@ export class CloudflareLaneSubscription implements LaneSubscription {
       // Initial failure/terminal exhaustion is represented by the ready rejection; do not duplicate it on
       // the later-transition callback surface.
       this.#state = 'closed'
+      this.#rejectCurrentReady(new Error(result.reason))
       this.#notifyClosed()
       return
     }
@@ -136,14 +166,19 @@ export class CloudflareLaneSubscription implements LaneSubscription {
   async #renew(): Promise<void> {
     this.#cancelScheduled = null
     if (this.#state !== 'ready') return
-    let renewed = false
+    let outcome: { renewed: boolean; terminal: boolean; reason?: string } = { renewed: false, terminal: false }
     try {
-      renewed = await this.#operations.renew()
+      outcome = normalizeRouteResult(await this.#operations.renew())
     } catch {
       // Transport failure is a renewal failure and participates in the same K=2 transition.
     }
     if (this.#state !== 'ready') return
-    if (renewed) {
+    if (outcome.terminal) {
+      this.#cancelTimer()
+      this.#close(new Error(outcome.reason ?? 'subscription generation invalidated'))
+      return
+    }
+    if (outcome.renewed) {
       this.#renewalFailures = 0
       this.#scheduleRenewal()
       return
@@ -208,18 +243,81 @@ export class CloudflareLaneSubscription implements LaneSubscription {
 
   #transition(state: ReadinessState): void {
     if (this.#state === state) return
+    if (state === 'lost') this.#resetCurrentReady()
     this.#state = state
-    for (const listener of this.#listeners) listener(state)
+    if (state === 'ready') this.#resolveCurrentReady()
+    if (state === 'closed') this.#rejectCurrentReady(new Error('shared subscription lifecycle closed'))
+    for (const listener of [...this.#listeners]) notifyObserver(listener, state)
   }
 
   #notifyClosed(): void {
     if (this.#closedNotified) return
     this.#closedNotified = true
-    this.#operations.closed?.()
+    try {
+      this.#operations.closed?.()
+    } catch {
+      // State observers and local cleanup hooks cannot corrupt the terminal lifecycle.
+    }
   }
 
   #isClosed(): boolean {
     return this.#state === 'closed'
+  }
+
+  async #validateCurrentRoute(): Promise<void> {
+    let outcome: { renewed: boolean; terminal: boolean; reason?: string }
+    try {
+      outcome = normalizeRouteResult(await this.#operations.validate!())
+    } catch {
+      outcome = { renewed: false, terminal: false }
+    }
+    if (this.#state !== 'ready') return this.currentReady()
+    if (outcome.terminal) {
+      this.#close(new Error(outcome.reason ?? 'subscription generation invalidated'))
+      return this.currentReady()
+    }
+    if (!outcome.renewed) {
+      this.#transition('lost')
+      await this.#attemptReestablish(0)
+      await this.currentReady()
+    }
+  }
+
+  #resetCurrentReady(): void {
+    this.#currentReadySettled = false
+    this.#currentReady = new Promise<void>((resolve, reject) => {
+      this.#settleCurrentReady = { resolve, reject }
+    })
+    void this.#currentReady.catch(() => {})
+  }
+
+  #resolveCurrentReady(): void {
+    if (this.#currentReadySettled) return
+    this.#currentReadySettled = true
+    this.#settleCurrentReady.resolve()
+  }
+
+  #rejectCurrentReady(error: Error): void {
+    if (this.#currentReadySettled) return
+    this.#currentReadySettled = true
+    this.#settleCurrentReady.reject(error)
+  }
+}
+
+function normalizeRouteResult(result: SubscriptionRouteResult): {
+  renewed: boolean
+  terminal: boolean
+  reason?: string
+} {
+  if (typeof result === 'boolean') return { renewed: result, terminal: false }
+  return { renewed: result.renewed, terminal: result.terminal === true, reason: result.reason }
+}
+
+function notifyObserver(listener: (state: ReadinessState) => void, state: ReadinessState): void {
+  try {
+    listener(state)
+  } catch {
+    // User observation is isolated from state advancement and teardown.
   }
 }
 
@@ -242,6 +340,7 @@ export class CloudflareLaneSubscriptionMultiplexer {
   }
 
   attach(detachLocal: () => void): LaneSubscription {
+    const firstAttachment = this.#attachments.size === 0
     let closed = false
     let readySettled = false
     let settleReady!: { resolve: () => void; reject: (error: unknown) => void }
@@ -260,9 +359,14 @@ export class CloudflareLaneSubscriptionMultiplexer {
         if (this.#attachments.size === 0) this.#notifyEmpty()
         return
       }
-      for (const listener of listeners) listener(state)
+      if (state === 'ready' && !readySettled) {
+        readySettled = true
+        settleReady.resolve()
+      }
+      for (const listener of [...listeners]) notifyObserver(listener, state)
     })
-    void this.#shared.ready.then(
+    const attachmentReadiness = firstAttachment ? this.#shared.ready : this.#shared.ensureCurrentReady()
+    void attachmentReadiness.then(
       () => {
         if (closed || readySettled) return
         readySettled = true
@@ -279,17 +383,30 @@ export class CloudflareLaneSubscriptionMultiplexer {
       close(error) {
         if (closed) return
         closed = true
-        detachLocal()
-        offShared()
+        try {
+          detachLocal()
+        } catch {
+          // Local observer cleanup cannot block route teardown.
+        }
+        try {
+          offShared()
+        } catch {
+          // Listener removal is best effort; `closed` still guards any late callback.
+        }
         if (!readySettled) {
           readySettled = true
           settleReady.reject(error)
         }
-        for (const listener of listeners) listener('closed')
+        for (const listener of [...listeners]) notifyObserver(listener, 'closed')
         listeners.clear()
       },
     }
     this.#attachments.add(attachment)
+    if (this.#shared.state() === 'closed') {
+      attachment.close(new Error('shared subscription lifecycle closed'))
+      this.#attachments.delete(attachment)
+      if (this.#attachments.size === 0) this.#notifyEmpty()
+    }
 
     return {
       ready,
@@ -321,7 +438,7 @@ export class CloudflareLaneSubscriptionMultiplexer {
   }
 
   lifecycleClosed(error: Error): void {
-    for (const attachment of this.#attachments) attachment.close(error)
+    for (const attachment of [...this.#attachments]) attachment.close(error)
     this.#attachments.clear()
     this.#notifyEmpty()
   }
@@ -329,6 +446,10 @@ export class CloudflareLaneSubscriptionMultiplexer {
   #notifyEmpty(): void {
     if (this.#emptyNotified) return
     this.#emptyNotified = true
-    this.#onEmpty()
+    try {
+      this.#onEmpty()
+    } catch {
+      // A bookkeeping observer cannot corrupt terminal teardown.
+    }
   }
 }

@@ -76,13 +76,15 @@ type RoomStub = {
     subscriber: string,
     leaseId: string,
     bucket: string | null,
+    expectedGenerationToken?: string | null,
   ): Promise<RegisterWire>
   renewRoute(
     inc: string,
     laneKey: string,
     subscriber: string,
     leaseId: string,
-  ): Promise<{ ok: boolean; expiresAt?: number }>
+    expectedGenerationToken?: string | null,
+  ): Promise<{ ok: boolean; expiresAt?: number; terminal?: boolean }>
   unsubscribeRoute(inc: string, laneKey: string, subscriber: string, leaseId: string): Promise<void>
   listGenerations(): Promise<string[]>
   dropGeneration(inc: string): Promise<DropWire>
@@ -101,6 +103,7 @@ type SubscriberStub = {
   [Symbol.dispose]?: () => void
   installRoute(identity: SubscriberRouteIdentity, leaseId: string): Promise<void>
   uninstallRoute(identity: SubscriberRouteIdentity, leaseId: string): Promise<void>
+  failUninstalls(count: number): Promise<void>
   holdDeliveries(): Promise<void>
   releaseDeliveries(): Promise<void>
   waitForDelivery(): Promise<void>
@@ -318,6 +321,10 @@ export async function releaseReceiverProbes(subscriber: string): Promise<void> {
 
 export async function waitForReceiverProbe(subscriber: string): Promise<void> {
   await (await subscriberStub(subscriber)).waitForProbe()
+}
+
+export async function failReceiverUninstalls(subscriber: string, count: number): Promise<void> {
+  await (await subscriberStub(subscriber)).failUninstalls(count)
 }
 
 export async function flushCloudflareAuthorityClock(): Promise<void> {
@@ -573,9 +580,10 @@ class CloudflareRoomBackend implements RoomBackendSpi {
     }
 
     let leaseId = crypto.randomUUID()
+    let generationToken: string | null = null
     const register = async (): Promise<RegisterWire> => {
       await clockPush
-      return this.#stub(roomId).registerRoute(roomId, inc, laneKey, subscriber, leaseId, null)
+      return this.#stub(roomId).registerRoute(roomId, inc, laneKey, subscriber, leaseId, null, generationToken)
     }
     let mux!: CloudflareLaneSubscriptionMultiplexer
     const sharedSubscription = new CloudflareLaneSubscription(
@@ -589,9 +597,15 @@ class CloudflareRoomBackend implements RoomBackendSpi {
             throw new Error('forced establishment transport failure')
           }
           const result = await register()
-          return 'ok' in result
-            ? { ready: true }
-            : { ready: false, retryable: result.reason.includes('not addressable'), reason: result.reason }
+          if ('ok' in result) {
+            generationToken = result.generationToken
+            return { ready: true }
+          }
+          return {
+            ready: false,
+            retryable: result.terminal !== true && result.reason.includes('not addressable'),
+            reason: result.reason,
+          }
         },
         renew: async () => {
           await clockPush
@@ -599,7 +613,21 @@ class CloudflareRoomBackend implements RoomBackendSpi {
             this.#forcedRenewalFailures -= 1
             return false
           }
-          return (await this.#stub(roomId).renewRoute(inc, laneKey, subscriber, leaseId)).ok
+          const result = await this.#stub(roomId).renewRoute(inc, laneKey, subscriber, leaseId, generationToken)
+          return {
+            renewed: result.ok,
+            terminal: result.terminal,
+            reason: result.terminal === true ? `generation '${inc}' was invalidated` : undefined,
+          }
+        },
+        validate: async () => {
+          await clockPush
+          const result = await this.#stub(roomId).renewRoute(inc, laneKey, subscriber, leaseId, generationToken)
+          return {
+            renewed: result.ok,
+            terminal: result.terminal,
+            reason: result.terminal === true ? `generation '${inc}' was invalidated` : undefined,
+          }
         },
         unsubscribe: async () => {
           await clockPush
