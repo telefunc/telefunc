@@ -16,8 +16,8 @@ import { sql } from 'drizzle-orm'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { captureMutation, captureRawSql } from './writeCapture.js'
 import { isBuilderTerminal, isCoarseAllSurface, isDriverTerminal, isPreparedTerminal } from './writeTerminals.js'
-import { announceCoarse, registryFor } from './dbRuntime.js'
-import type { TableChange } from '../router/events.js'
+import { announceCoarse, registryFor } from '../bus/dbRuntime.js'
+import type { TableChange } from '../bus/router/events.js'
 
 const users = pgTable('users', { id: integer('id').primaryKey(), name: text('name') })
 const sqUsers = sqliteTable('users', { id: sInt('id').primaryKey(), name: sText('name') })

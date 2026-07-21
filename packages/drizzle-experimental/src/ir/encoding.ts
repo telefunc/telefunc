@@ -1,7 +1,7 @@
 export { sortedContent, equiKey, correlationKey, keyedRow, canonicalRow, positionalRow }
 
 import { frame, canonicalValue } from './canonical.js'
-import type { Row } from '../router/events.js'
+import type { Row } from '../bus/router/events.js'
 
 // HOW A ROW BECOMES A STRING. Every incremental operator decides "same or not same" by comparing encodings,
 // so these functions are what make a retraction cancel the insert it should cancel — and what makes two

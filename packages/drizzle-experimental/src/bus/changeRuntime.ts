@@ -10,7 +10,7 @@ import { registryFor } from './dbRuntime.js'
 import { CHANGE_CODEC_VERSION, decodeChangePayload, encodeChangePayload } from './changeCodec.js'
 import { type ChangeSubscription, type ChangeTransport, defaultChangeTransport } from './changeTransport.js'
 import { type OriginSequence, coarsenClosingBet, observeEnvelopeSequence } from './changeSequence.js'
-import type { ChangeBatch } from '../router/events.js'
+import type { ChangeBatch } from './router/events.js'
 
 // Per-logical-database bus runtime: owns transport/namespace resolution, publication order and origin
 // suppression, subscription lifetime and the quiescence rule that permits transport rotation. A committed

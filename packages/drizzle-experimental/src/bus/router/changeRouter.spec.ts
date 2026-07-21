@@ -8,8 +8,8 @@
 // Deterministic — ingest is synchronous.
 
 import { describe, expect, it, vi } from 'vitest'
-import type { ApplyOutcome } from '../engine/graph/liveGraph.js'
-import { relationIdOf } from '../ir/relation.js'
+import type { ApplyOutcome } from '../../engine/graph/liveGraph.js'
+import { relationIdOf } from '../../ir/relation.js'
 import { type RoutableGraph, createRouter } from './changeRouter.js'
 import type { ChangeBatch, TableChange } from './events.js'
 

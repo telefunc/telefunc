@@ -1,12 +1,12 @@
 export { isWriteOp, captureTransactions }
 
-import { report } from './captureReport.js'
-import { ingestLocal, ingestWrite, registryFor } from './dbRuntime.js'
-import { publishCoarseAll } from './changeRuntime.js'
+import { report } from '../bus/captureReport.js'
+import { ingestLocal, ingestWrite, registryFor } from '../bus/dbRuntime.js'
+import { publishCoarseAll } from '../bus/changeRuntime.js'
 import { captureMutation, captureRawSql } from './writeCapture.js'
 import { isCoarseAllSurface } from './writeTerminals.js'
 import { type CaptureSink, emitSafely } from './writeChanges.js'
-import type { TableChange } from '../router/events.js'
+import type { TableChange } from '../bus/router/events.js'
 
 // THE WRITE-SIDE PROXY MACHINERY: which db members are writes, which are raw execution surfaces, and the
 // whole of what a `db.transaction(cb)` has to do so that one committed transaction is one atomic graph tick.

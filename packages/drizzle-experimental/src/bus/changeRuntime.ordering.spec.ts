@@ -29,7 +29,7 @@ import {
   setChangeTransport,
 } from './changeRuntime.js'
 import { change, engine, flush, resetEngine, twoInstances, watching } from './changeRuntime.testKit.js'
-import type { TableChange } from '../router/events.js'
+import type { TableChange } from './router/events.js'
 
 beforeEach(resetEngine)
 

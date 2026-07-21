@@ -15,7 +15,7 @@ import type { Live } from '../primitive/live.js'
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import { extractQueryShape } from '../extract/queryShape.js'
 import type { AcquireRequest, ReadToken } from '../engine/graph/registry.js'
-import { registryFor } from './dbRuntime.js'
+import { registryFor } from '../bus/dbRuntime.js'
 import { compilePlanFor, wrapLiveSelect } from './readCapture.js'
 
 type UserRow = { id: number; tag: string }

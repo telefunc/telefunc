@@ -18,7 +18,7 @@ import { eq } from 'drizzle-orm'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { captureMutation } from './writeCapture.js'
 import { probeOldNewReturning } from './writeCapabilities.js'
-import type { TableChange } from '../router/events.js'
+import type { TableChange } from '../bus/router/events.js'
 
 // A VALID decoder that is not pure: it appends its own invocation number. Nothing here is pathological —
 // `fromDriver` is called once per value per statement, and this simply makes each call visible. It is the

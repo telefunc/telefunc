@@ -113,7 +113,7 @@ const browserRuntimePackageAllowlist = new Set(['@tanstack/query-core', 'telefun
 describe('import-graph boundary', () => {
   it('ir/ + compile/ + graph/ + router/ import zero drizzle-orm (the ORM-agnostic engine)', () => {
     const offenders = productionFiles()
-      .filter((file) => under(file, ['ir', 'engine/compile', 'engine/graph', 'router']))
+      .filter((file) => under(file, ['ir', 'engine/compile', 'engine/graph', 'bus/router']))
       .filter((file) => importsOf(file, 'drizzle-orm'))
       .map((file) => relative(srcDir, file))
     expect(offenders).toEqual([])
@@ -121,7 +121,7 @@ describe('import-graph boundary', () => {
 
   it('graph/ + router/ import zero binding/ (hydration is injected, R1)', () => {
     const offenders = productionFiles()
-      .filter((file) => under(file, ['engine/graph', 'router']))
+      .filter((file) => under(file, ['engine/graph', 'bus/router']))
       .filter((file) => importsBinding(file))
       .map((file) => relative(srcDir, file))
     expect(offenders).toEqual([])

@@ -1,9 +1,9 @@
 export { captureMismatch, captureOrCoarse, captureBothOrCoarse, changesFromRows, emitSafely, coarse }
 export type { CaptureSink, CaptureMismatch, Images }
 
-import { report } from './captureReport.js'
+import { report } from '../bus/captureReport.js'
 import type { Op, Plan, PrecisePlan, SubstitutionPlan } from './writePlan.js'
-import type { Row, TableChange } from '../router/events.js'
+import type { Row, TableChange } from '../bus/router/events.js'
 
 // Turning what a write statement returned into the `TableChange`s the graphs read. Everything here runs
 // AFTER the database has applied the write, so nothing in this module may fail the caller: a row set that

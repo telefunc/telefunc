@@ -10,9 +10,9 @@
 
 export { type RoutableGraph, type Router, createRouter }
 
-import type { ApplyOutcome } from '../engine/graph/liveGraph.js'
-import { report } from '../live/captureReport.js'
-import { describeRelationId, parseRelationId } from '../ir/relation.js'
+import type { ApplyOutcome } from '../../engine/graph/liveGraph.js'
+import { report } from '../captureReport.js'
+import { describeRelationId, parseRelationId } from '../../ir/relation.js'
 import type { ChangeBatch, TableChange } from './events.js'
 
 /** What the router indexes and drives. Each graph yields its own identity key; a batch that touches

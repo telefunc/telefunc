@@ -10,7 +10,7 @@ import { drizzle } from 'drizzle-orm/pglite'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { getRawContext, provideTelefuncContext } from 'telefunc'
 import { reactiveDrizzle } from './reactiveDrizzle.js'
-import { registryFor } from './dbRuntime.js'
+import { registryFor } from '../bus/dbRuntime.js'
 
 // Deterministic flush — the cell coalesces its invalidation with queueMicrotask; a macrotask hop also
 // clears the sync-mode context null timer between phases.

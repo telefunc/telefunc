@@ -14,7 +14,7 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { RlsStatus } from '../ir/types.js'
-import type { ChangeSubscription, ChangeTransport } from './changeTransport.js'
+import type { ChangeSubscription, ChangeTransport } from '../bus/changeTransport.js'
 
 const probes = vi.hoisted(() => ({
   acquire: vi.fn(),
@@ -27,7 +27,7 @@ const probes = vi.hoisted(() => ({
 }))
 
 // Everything except the subscription and the transport is stubbed — this spec is about ORDER and OWNERSHIP.
-vi.mock('./dbRuntime.js', () => ({
+vi.mock('../bus/dbRuntime.js', () => ({
   registryFor: () => ({
     router: { ingest: vi.fn(), register: vi.fn(), unregister: vi.fn(), watchedTables: () => [] },
     acquire: async (request: unknown) => {
@@ -67,7 +67,7 @@ vi.mock('../primitive/live.js', () => ({
   },
 }))
 
-import { setChangeTransport } from './changeRuntime.js'
+import { setChangeTransport } from '../bus/changeRuntime.js'
 import { wrapLiveSelect } from './readCapture.js'
 
 /** A broker that counts what the runtime asked of it. With `autoAdmit` off the SUBSCRIBE stays

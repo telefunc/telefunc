@@ -4,7 +4,7 @@ export type { WriteContext }
 import { type Table, isTable } from 'drizzle-orm'
 import { demoteOldNewReturning, markOldNewProven, oldNewProvenOf } from './writeCapabilities.js'
 import { relationKeyOf } from '../extract/columns.js'
-import { report } from './captureReport.js'
+import { report } from '../bus/captureReport.js'
 import {
   type CaptureSink,
   captureBothOrCoarse,
@@ -24,7 +24,7 @@ import {
   substituteFullRow,
   substituteOldNew,
 } from './writeSubstitution.js'
-import type { Row, TableChange } from '../router/events.js'
+import type { Row, TableChange } from '../bus/router/events.js'
 
 // The write-capture INTERCEPTION facade. `reactiveDrizzle`'s proxy routes insert/update/delete here. The
 // write runs as plain Drizzle; the terminal is intercepted to capture the changed rows and feed a

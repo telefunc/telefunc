@@ -14,7 +14,7 @@ import type { RlsStatus } from '../../ir/types.js'
 import { assertUsage } from '../../utils/assert.js'
 import type { HydrationExecutor } from './hydrate.js'
 import { type LiveGraph, createLiveGraph } from './liveGraph.js'
-import { type RoutableGraph, type Router, createRouter } from '../../router/changeRouter.js'
+import { type RoutableGraph, type Router, createRouter } from '../../bus/router/changeRouter.js'
 import { SubscriberFence } from './subscriberFence.js'
 
 type AcquireRequest = {

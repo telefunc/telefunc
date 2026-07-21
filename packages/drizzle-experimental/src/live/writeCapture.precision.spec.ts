@@ -15,12 +15,12 @@ import { drizzle as pgDrizzle } from 'drizzle-orm/pglite'
 import { and, eq, sql } from 'drizzle-orm'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { captureMutation } from './writeCapture.js'
-import { ingestWrite, registryFor } from './dbRuntime.js'
+import { ingestWrite, registryFor } from '../bus/dbRuntime.js'
 import { compileQuery } from '../engine/compile/compile.js'
 import { extractQueryShape } from '../extract/queryShape.js'
 import { createLiveGraph } from '../engine/graph/liveGraph.js'
 import { QueryBuilder } from 'drizzle-orm/pg-core'
-import type { TableChange } from '../router/events.js'
+import type { TableChange } from '../bus/router/events.js'
 
 const users = pgTable('users', { id: integer('id').primaryKey(), name: text('name') })
 const composite = pgTable('composite', { a: integer('a'), b: integer('b'), v: text('v') }, (t) => [

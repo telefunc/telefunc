@@ -11,8 +11,8 @@
 import type { ChangeTransport } from './changeTransport.js'
 import { createInMemoryChangeTransport } from './changeTransport.js'
 import { acquireSubscription, changeTopicFor, setChangeTransport } from './changeRuntime.js'
-import type { RoutableGraph } from '../router/changeRouter.js'
-import type { TableChange } from '../router/events.js'
+import type { RoutableGraph } from './router/changeRouter.js'
+import type { TableChange } from './router/events.js'
 
 export { engine, resetEngine } from './changeRuntime.registryMock.js'
 

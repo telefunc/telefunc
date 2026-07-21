@@ -10,15 +10,15 @@ import { eq, sql } from 'drizzle-orm'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { provideTelefuncContext } from 'telefunc'
 
-vi.mock('./dbRuntime.js', async (importActual) => {
-  const actual = await importActual<typeof import('./dbRuntime.js')>()
+vi.mock('../bus/dbRuntime.js', async (importActual) => {
+  const actual = await importActual<typeof import('../bus/dbRuntime.js')>()
   return { ...actual, ingestWrite: vi.fn(), ingestLocal: vi.fn() }
 })
-import { ingestLocal, ingestWrite, registryFor } from './dbRuntime.js'
+import { ingestLocal, ingestWrite, registryFor } from '../bus/dbRuntime.js'
 import { reactiveDrizzle } from './reactiveDrizzle.js'
-import { createInMemoryChangeTransport } from './changeTransport.js'
-import { changeTopicFor, setChangeTransport } from './changeRuntime.js'
-import type { ChangeBatch } from '../router/events.js'
+import { createInMemoryChangeTransport } from '../bus/changeTransport.js'
+import { changeTopicFor, setChangeTransport } from '../bus/changeRuntime.js'
+import type { ChangeBatch } from '../bus/router/events.js'
 
 const tick = () => new Promise<void>((resolve) => setTimeout(resolve, 0))
 const users = pgTable('users', { id: integer('id').primaryKey(), name: text('name') })

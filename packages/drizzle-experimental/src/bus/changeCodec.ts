@@ -23,7 +23,7 @@ export type { ChangeEnvelope }
 
 import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
-import type { Row, TableChange } from '../router/events.js'
+import type { Row, TableChange } from './router/events.js'
 
 /** Bumped when the envelope shape changes. A receiver that does not recognise the version coarsens rather
  *  than interpreting a payload it does not understand. */

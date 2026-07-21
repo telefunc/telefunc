@@ -6,7 +6,7 @@ import { dialectOf, driverOf } from '../binding/database.js'
 import { oldNewReturningOf } from './writeCapabilities.js'
 import { primaryKeyOf } from '../extract/columns.js'
 import type { Dialect } from '../ir/types.js'
-import type { Row } from '../router/events.js'
+import type { Row } from '../bus/router/events.js'
 import { type ImageLayout, imageLayoutOf } from './imageLayout.js'
 import type { Substituted } from './writeSubstitution.js'
 

@@ -3,9 +3,9 @@ export type { Reactive }
 
 import { type WriteContext, captureMutation, captureRawSql } from './writeCapture.js'
 import type { CaptureSink } from './writeChanges.js'
-import { announceCoarse, ingestWrite } from './dbRuntime.js'
-import { configureChangeRuntime } from './changeRuntime.js'
-import type { ChangeTransport } from './changeTransport.js'
+import { announceCoarse, ingestWrite } from '../bus/dbRuntime.js'
+import { configureChangeRuntime } from '../bus/changeRuntime.js'
+import type { ChangeTransport } from '../bus/changeTransport.js'
 import { captureTransactions, isWriteOp } from './writeProxy.js'
 import { isCoarseAllSurface } from './writeTerminals.js'
 import { wrapLiveSelect } from './readCapture.js'

@@ -18,7 +18,7 @@ export { type LiveGraph, type LiveGraphSpec, type ApplyOutcome, type GraphCore, 
 
 import type { CompiledGraph, StatefulGraph, Change } from '../compile/compile.js'
 import type { RlsStatus } from '../../ir/types.js'
-import type { RowChange, TableChange } from '../../router/events.js'
+import type { RowChange, TableChange } from '../../bus/router/events.js'
 import { rowChanged } from '../compile/rowSpace.js'
 import { assertUsage } from '../../utils/assert.js'
 import type { HydrationExecutor } from './hydrate.js'

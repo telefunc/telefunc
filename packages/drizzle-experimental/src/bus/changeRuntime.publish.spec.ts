@@ -35,7 +35,7 @@ import {
   watching,
   wireTap,
 } from './changeRuntime.testKit.js'
-import type { TableChange } from '../router/events.js'
+import type { TableChange } from './router/events.js'
 
 beforeEach(resetEngine)
 

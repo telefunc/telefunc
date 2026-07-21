@@ -17,7 +17,7 @@ import { drizzle as pgDrizzle } from 'drizzle-orm/pglite'
 import { eq } from 'drizzle-orm'
 import { describe, expect, it } from 'vitest'
 import { captureMutation } from './writeCapture.js'
-import type { TableChange } from '../router/events.js'
+import type { TableChange } from '../bus/router/events.js'
 
 const users = pgTable('users', { id: integer('id').primaryKey(), name: text('name') })
 

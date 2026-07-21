@@ -20,10 +20,10 @@ describe('the diagnostics seam is the only one', () => {
     // diagnostic goes through it. Four modules had grown their own direct calls, each one an unguarded
     // console away from turning a recovered write into a failed one.
     const files = productionFiles()
-    expect(files).toContain('live/captureReport.ts') // FAIL CLOSED: a moved directory must not read as clean
+    expect(files).toContain('bus/captureReport.ts') // FAIL CLOSED: a moved directory must not read as clean
 
     const callers = files.filter((file) => /\bconsole\.error\s*\(/.test(readFileSync(resolve(srcDir, file), 'utf8')))
-    expect(callers).toEqual(['live/captureReport.ts'])
+    expect(callers).toEqual(['bus/captureReport.ts'])
   })
 
   it('scopes its claim to console.error — console.warn is a different, advisory seam', () => {

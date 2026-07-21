@@ -2,7 +2,7 @@ export { createStatefulVariant }
 
 import type { Change, SeedDescriptor, StatefulGraph } from '../compile/compile.js'
 import type { RlsStatus } from '../../ir/types.js'
-import type { RowChange, TableChange } from '../../router/events.js'
+import type { RowChange, TableChange } from '../../bus/router/events.js'
 import { type HydrationExecutor, type Seed, createSeed } from './hydrate.js'
 import { type ShadowIndex, matchesResidual, pkOf, pruneRow } from './shadow.js'
 import { rowChanged } from '../compile/rowSpace.js'

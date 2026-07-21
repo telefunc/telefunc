@@ -1,4 +1,4 @@
-// The engine read-capture. `reactiveDrizzle(db).select(...)` produces a CHAINABLE
+// The Drizzle read-capture edge. `reactiveDrizzle(db).select(...)` produces a CHAINABLE
 // live-builder (via wrapLiveSelect) whose terminal `.live()` runs the pipeline: extractQueryShape →
 // compileQuery → registry.acquire (eager-async hydrate in the prologue) → new LiveCell(rows) +
 // attachSource → Live<Row[]>. The cell is this package's OWN primitive (src/primitive/live.ts) — telefunc
@@ -13,7 +13,7 @@
 //
 // ABANDONMENT — a `.live()` whose handle is never serialized (the telefunction throws, or returns
 // something else). Its token and subscription ref are released when the Live is COLLECTED, via the
-// FinalizationRegistry below. That is unbounded by spec and in practice the next GC; see the honest limit
+// lifecycle core in `bus/readLifetime.ts`. That is unbounded by spec and in practice the next GC; see the honest limit
 // in the docs. It replaces a per-request sweep that required `reactiveDrizzle(db)` to be called before the
 // body's first await — a usage rule the owner rejected — and which was in any case a leaky net: a handle
 // created after the sweep had run was never swept at all.
@@ -38,73 +38,9 @@ import { identityOf } from '../extract/identity.js'
 import { extractQueryShape } from '../extract/queryShape.js'
 import { parseRelationId } from '../ir/relation.js'
 import type { QueryShape, RlsStatus } from '../ir/types.js'
-import type { ReadToken } from '../engine/graph/registry.js'
-import { registryFor } from './dbRuntime.js'
-import { acquireSubscription, type SubscriptionRef } from './changeRuntime.js'
-
-/** The two refs a live read holds from the moment a graph token joins its change subscription until the read
- *  ends — under ONE owner that knows WHICH of the three ways it ended. The token and the subscription have
- *  the same owner at every moment, so they travel together; `redeemed` is this object's PRIVATE state, not a
- *  field a caller reads, because whether activation has happened is the whole of what distinguishes abandon's
- *  two behaviors, and `token.release()` on a redeemed token is a usage error rather than a no-op. */
-type ReadLifetime = {
-  /** Serialize-time activation: redeem the token and hand back the teardown the channel lease runs on close. */
-  activate(): () => void
-  /** The handle was collected without ever being serialized: give both refs back — UNLESS activation
-   *  already did, in which case the channel lease owns them and touching them here would throw. */
-  abandon(): void
-  /** The read failed before it produced a handle to own these: give both back now, deterministically,
-   *  rather than leaving them for a collector that has nothing to collect. */
-  fail(): void
-}
-
-function createReadLifetime(token: ReadToken, subscription: SubscriptionRef): ReadLifetime {
-  let redeemed = false
-  const releaseBoth = () => {
-    token.release()
-    subscription.release()
-  }
-  return {
-    activate() {
-      const lease = token.redeem()
-      redeemed = true
-      return () => {
-        lease.release()
-        subscription.release()
-      }
-    },
-    abandon() {
-      if (redeemed) return // activated: the wire channel's lease owns these and releases them on close
-      releaseBoth()
-    },
-    fail: releaseBoth,
-  }
-}
-
-/** Reclaims an ABANDONED live read once its handle is collected — the finalizer simply asks the lifetime to
- *  abandon itself.
- *
- *  The registered value must not reach the Live, or the Live is never collected and this never fires. That is
- *  why the graph's `notify` goes through `invalidationSink()` below: the token closes over `notify`, and the
- *  finalizer holds the lifetime that holds the token, so a `notify` that closed over the Live strongly would
- *  keep every abandoned handle alive forever — a silently dead net that still looks like a net. */
-const abandonedReads = new FinalizationRegistry<ReadLifetime>((lifetime) => lifetime.abandon())
-
-/** The graph's invalidation sink for one read, holding the Live WEAKLY.
- *
- *  Deliberately its own function so its closure scope contains the WeakRef and nothing else: closures
- *  declared in one scope share a context, so building this inline beside a strong `live` binding could
- *  retain the Live through that shared context and defeat the finalizer. A collected Live simply stops
- *  receiving invalidations, which is correct — nobody is holding it to receive them. */
-function invalidationSink(): { notify: () => void; hold: (live: LiveCell<Row[]>) => void } {
-  let ref: WeakRef<LiveCell<Row[]>> | undefined
-  return {
-    notify: () => ref?.deref()?.invalidate(),
-    hold: (live) => {
-      ref = new WeakRef(live)
-    },
-  }
-}
+import { registryFor } from '../bus/dbRuntime.js'
+import { acquireSubscription } from '../bus/changeRuntime.js'
+import { createReadLifetime, invalidationSink, registerAbandonedRead, type ReadLifetime } from '../bus/readLifetime.js'
 
 /** Wrap a live SELECT builder into a CHAINABLE builder: `from`/`where`/… forward to the underlying
  *  drizzle builder and re-wrap the result (so the chain stays live); non-builder returns (`toSQL`,
@@ -146,7 +82,7 @@ async function captureAndBuild(builder: unknown, db: object): Promise<Live<Row[]
   // The sink forwards graph invalidations to a Live that does not exist yet, and holds it weakly once it
   // does. It is only ever CALLED at redeem-time or later, by which point the Live exists — an un-redeemed
   // token is inert, so no fire reaches it before activation.
-  const sink = invalidationSink()
+  const sink = invalidationSink<LiveCell<Row[]>>()
 
   // OWNERSHIP MOVES ONCE, FORWARD. From here to `acquire`, only the subscription is held, so a failure gives
   // just it back. Once the token joins it, `lifetime` owns both. Once the handle is registered, the finalizer
@@ -181,7 +117,7 @@ async function captureAndBuild(builder: unknown, db: object): Promise<Live<Row[]
     live.attachSource({ subscribe: () => lifetime!.activate() })
     // The handoff. After this the handle owns both refs — the channel lease if it is serialized, the
     // finalizer if it is collected without ever being. Last fallible statement on purpose.
-    abandonedReads.register(live, lifetime)
+    registerAbandonedRead(live, lifetime)
     // Just return the cell: it IS the `Live<Row[]>` the telefunction hands back, and the wire replacer
     // serializes it. No `.client` re-type — the public type simply doesn't advertise the producer verbs.
     return live

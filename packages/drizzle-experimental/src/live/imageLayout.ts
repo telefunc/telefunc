@@ -2,7 +2,7 @@ export { imageLayoutOf }
 export type { ImageLayout }
 
 import { type Column, SQL, sql } from 'drizzle-orm'
-import type { Row } from '../router/events.js'
+import type { Row } from '../bus/router/events.js'
 import type { Images } from './writeChanges.js'
 import type { Op } from './writePlan.js'
 

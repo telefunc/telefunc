@@ -15,7 +15,7 @@ import { eq } from 'drizzle-orm'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { captureMutation } from './writeCapture.js'
 import { oldNewProvenOf, oldNewReturningOf, probeOldNewReturning } from './writeCapabilities.js'
-import type { TableChange } from '../router/events.js'
+import type { TableChange } from '../bus/router/events.js'
 
 const users = pgTable('users', { id: integer('id').primaryKey(), name: text('name') })
 
