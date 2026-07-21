@@ -1,6 +1,6 @@
 export { statefulPlan, isAggregate, semiJoinable }
 
-import { conjunctsOf } from '../../drizzle/extract/predicate.js'
+import { conjunctsOf } from '../../ir/predicateAlgebra.js'
 import {
   type IStreamBuilder,
   type RootStreamBuilder,

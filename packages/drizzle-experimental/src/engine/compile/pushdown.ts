@@ -9,7 +9,7 @@
 
 export { type InputPlan, type Change, pushdownOf, applyChange }
 
-import { conjunctsOf } from '../../drizzle/extract/predicate.js'
+import { conjunctsOf } from '../../ir/predicateAlgebra.js'
 import type { ColRef, Predicate, ScalarExpr, SelectShape, TableRef } from '../../ir/types.js'
 import { dirtyFrontier } from './dirty.js'
 import { type Row, projectRaw, qualifiedRowView, requalify, sigmaMatch } from './rowSpace.js'

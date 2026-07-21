@@ -29,7 +29,8 @@ import { QueryBuilder, alias, boolean, integer, pgTable, text, timestamp } from 
 import { describe, expect, it } from 'vitest'
 import { eval3, rowView } from '../../ir/eval.js'
 import type { CompareOp, Dialect, Predicate, ScalarExpr, Tri } from '../../ir/types.js'
-import { conjunctsOf, extractPredicate, parsePredicate, toNNF } from './predicate.js'
+import { conjunctsOf } from '../../ir/predicateAlgebra.js'
+import { extractPredicate, parsePredicate, toNNF } from './predicate.js'
 
 const requireFrom = createRequire(import.meta.url)
 function drizzleVersion(): string {

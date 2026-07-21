@@ -1,4 +1,4 @@
-export { extractPredicate, parsePredicate, toNNF, conjunctsOf }
+export { extractPredicate, parsePredicate, toNNF }
 export { isSelectBuilder }
 
 import type { Column, SQL } from 'drizzle-orm'
@@ -30,13 +30,6 @@ function parsePredicate(condition: SQL | undefined, opts?: { dialect?: Dialect }
   }
   const predicate = parseExpression(tokenize(condition.queryChunks), ctx, condition)
   return { predicate, tables: [...ctx.tables], exact: ctx.exact }
-}
-
-/** The top-level AND conjuncts, each of which can be pushed to the single input it
- *  references. A top-level OR (or a between, which carries its own ` and `) is one
- *  conjunct. Flattening happens during parse, so this is a shallow read. */
-function conjunctsOf(predicate: Predicate): Predicate[] {
-  return predicate.kind === 'and' ? predicate.parts : [predicate]
 }
 
 // ── Grammar ─────────────────────────────────────────────────────────

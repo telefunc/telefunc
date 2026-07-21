@@ -1,4 +1,4 @@
-export { conjunction }
+export { conjunction, conjunctsOf }
 
 import type { Predicate } from './types.js'
 
@@ -16,4 +16,9 @@ function conjunction(parts: Predicate[]): Predicate {
   if (parts.length === 0) return { kind: 'true' }
   if (parts.length === 1) return parts[0]!
   return { kind: 'and', parts }
+}
+
+/** The top-level AND conjuncts, each of which can be pushed to the single input it references. */
+function conjunctsOf(predicate: Predicate): Predicate[] {
+  return predicate.kind === 'and' ? predicate.parts : [predicate]
 }

@@ -1,9 +1,11 @@
 export { registryFor, ingestWrite, ingestLocal, announceCoarse }
 
 import { type Registry, createRegistry } from '../engine/graph/registry.js'
-import type { ChangeBatch } from './router/events.js'
+import { report } from './captureReport.js'
+import type { ChangeBatch, TableChange } from './router/events.js'
 import { publishBatch, publishCoarseAll } from './changeRuntime.js'
-import { emitSafely } from '../drizzle/writeChanges.js'
+
+export type CaptureSink = (changes: TableChange[]) => void
 
 // The db-scoped reactive runtime: ONE registry per db instance owns BOTH paths — reads acquire graphs
 // from it (`registryFor(db).acquire(...)`), and captured writes feed those same graphs through it
@@ -67,4 +69,21 @@ function announceCoarse(db: object): void {
     )
   }
   publishCoarseAll(db)
+}
+
+/** Emit captured changes without failing a write that has already committed. A partial precise feed retries
+ *  once as one coarse marker per touched table; even a failed fallback is only reported. */
+export function emitSafely(sink: CaptureSink, changes: TableChange[]): void {
+  try {
+    sink(changes)
+  } catch (error) {
+    const tables = [...new Set(changes.map((change) => change.table))]
+    report('capture-failed', { relation: tables.join(', '), cause: error })
+    if (changes.every((change) => change.kind === 'coarse')) return
+    try {
+      sink(tables.map((table) => ({ table, kind: 'coarse' })))
+    } catch (fallbackError) {
+      report('capture-failed', { relation: tables.join(', '), cause: fallbackError })
+    }
+  }
 }

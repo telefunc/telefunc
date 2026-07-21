@@ -45,16 +45,18 @@ function importsBinding(file: string): boolean {
 /** Every runtime module specifier in one TypeScript source file: static imports, side-effect imports,
  *  re-exports, and dynamic imports. The compiler AST distinguishes erased type-only clauses from value
  *  edges; a regex that only understood `from` was the false-green this gate exists to prevent. */
-function runtimeImportSpecifiersOf(file: string): string[] {
+const computedDynamicImport = '<computed dynamic import>'
+
+function importSpecifiersOf(file: string, runtimeOnly: boolean): string[] {
   const source = readFileSync(file, 'utf8')
   const tree = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
   const specifiers: string[] = []
 
   for (const statement of tree.statements) {
-    if (ts.isImportDeclaration(statement) && importDeclarationIsRuntime(statement)) {
+    if (ts.isImportDeclaration(statement) && (!runtimeOnly || importDeclarationIsRuntime(statement))) {
       if (ts.isStringLiteralLike(statement.moduleSpecifier)) specifiers.push(statement.moduleSpecifier.text)
     }
-    if (ts.isExportDeclaration(statement) && exportDeclarationIsRuntime(statement)) {
+    if (ts.isExportDeclaration(statement) && (!runtimeOnly || exportDeclarationIsRuntime(statement))) {
       if (statement.moduleSpecifier && ts.isStringLiteralLike(statement.moduleSpecifier))
         specifiers.push(statement.moduleSpecifier.text)
     }
@@ -65,12 +67,26 @@ function runtimeImportSpecifiersOf(file: string): string[] {
       const argument = node.arguments[0]
       // A computed runtime edge cannot be proven browser-safe, so make it an explicit forbidden
       // specifier rather than silently omitting it from the graph.
-      specifiers.push(argument && ts.isStringLiteralLike(argument) ? argument.text : '<computed dynamic import>')
+      specifiers.push(argument && ts.isStringLiteralLike(argument) ? argument.text : computedDynamicImport)
     }
     ts.forEachChild(node, visitDynamicImports)
   }
   ts.forEachChild(tree, visitDynamicImports)
   return specifiers
+}
+
+const runtimeImportSpecifiersOf = (file: string): string[] => importSpecifiersOf(file, true)
+const allImportSpecifiersOf = (file: string): string[] => importSpecifiersOf(file, false)
+
+/** Whether one core module reaches into the Drizzle quarantine. Type-only edges count: they are still an
+ *  architectural dependency. A computed dynamic edge fails closed because its target cannot be proven safe. */
+function importsDrizzleQuarantine(file: string): boolean {
+  return allImportSpecifiersOf(file).some((specifier) => {
+    if (specifier === computedDynamicImport) return true
+    if (!specifier.startsWith('.')) return false
+    const target = resolve(dirname(file), specifier.replace(/\.js$/, '.ts'))
+    return under(target, ['drizzle'])
+  })
 }
 
 function importDeclarationIsRuntime(node: ts.ImportDeclaration): boolean {
@@ -112,16 +128,19 @@ const browserRuntimePackageAllowlist = new Set(['@tanstack/query-core', 'telefun
 
 describe('import-graph boundary', () => {
   it('ir/ + compile/ + graph/ + router/ import zero drizzle-orm (the ORM-agnostic engine)', () => {
-    const offenders = productionFiles()
-      .filter((file) => under(file, ['ir', 'engine/compile', 'engine/graph', 'bus/router']))
-      .filter((file) => importsOf(file, 'drizzle-orm'))
+    const coreFiles = productionFiles().filter((file) => under(file, ['ir', 'engine', 'bus', 'primitive', 'utils']))
+    // `captureReport` is stable core, not an exemption hidden beside the Drizzle edge.
+    expect(coreFiles.map((file) => relative(srcDir, file).replace(/\\/g, '/'))).toContain('bus/captureReport.ts')
+
+    const offenders = coreFiles
+      .filter((file) => importsOf(file, 'drizzle-orm') || importsDrizzleQuarantine(file))
       .map((file) => relative(srcDir, file))
     expect(offenders).toEqual([])
   })
 
   it('graph/ + router/ import zero binding/ (hydration is injected, R1)', () => {
     const offenders = productionFiles()
-      .filter((file) => under(file, ['engine/graph', 'bus/router']))
+      .filter((file) => under(file, ['engine', 'bus']))
       .filter((file) => importsBinding(file))
       .map((file) => relative(srcDir, file))
     expect(offenders).toEqual([])

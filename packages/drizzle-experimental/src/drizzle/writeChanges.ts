@@ -1,5 +1,7 @@
-export { captureMismatch, captureOrCoarse, captureBothOrCoarse, changesFromRows, emitSafely, coarse }
-export type { CaptureSink, CaptureMismatch, Images }
+export { captureMismatch, captureOrCoarse, captureBothOrCoarse, changesFromRows, coarse }
+export { emitSafely } from '../bus/dbRuntime.js'
+export type { CaptureSink } from '../bus/dbRuntime.js'
+export type { CaptureMismatch, Images }
 
 import { report } from '../bus/captureReport.js'
 import type { Op, Plan, PrecisePlan, SubstitutionPlan } from './writePlan.js'
@@ -20,9 +22,6 @@ import type { Row, TableChange } from '../bus/router/events.js'
 // which makes two previously-coarse classes exact: an update that MOVES the primary key (the old key is
 // right there), and any update a STATELESS live query must decide membership for (it can compare the two
 // images instead of assuming the row may have entered or left).
-
-/** Where a captured batch goes: straight to the db's graphs (autocommit) or a transaction buffer. */
-type CaptureSink = (changes: TableChange[]) => void
 
 /** A row's two images, as the write statement returned them. */
 type Images = { old: Row; new: Row }
@@ -166,26 +165,3 @@ function keyOf(row: Row, plan: PrecisePlan): Row {
 }
 
 const coarse = (table: string): TableChange => ({ table, kind: 'coarse' })
-
-// ── emission, which must never fail the caller's write ──────────────
-
-/** Emit captured changes WITHOUT ever failing the caller's write. By the time we get here the DATABASE HAS
- *  ALREADY COMMITTED, so a sink/router/transport fault must never turn a committed write into a caller-visible
- *  rejection — the caller's result and failure behaviour stay exactly plain Drizzle's. A precise feed that
- *  throws part-way is retried ONCE as a single coarse marker, so the graphs end up soundly over-fired rather
- *  than half-applied; if even that fails the fault is reported and dropped (live queries on the table may be
- *  stale until the next write, which is the honest degradation). */
-function emitSafely(sink: CaptureSink, changes: TableChange[]): void {
-  try {
-    sink(changes)
-  } catch (error) {
-    const tables = [...new Set(changes.map((change) => change.table))]
-    report('capture-failed', { relation: tables.join(', '), cause: error })
-    if (changes.every((change) => change.kind === 'coarse')) return // the coarse fallback itself failed
-    try {
-      sink(tables.map(coarse)) // degrade: coarsen EVERY touched table rather than leave a feed half-applied
-    } catch (fallbackError) {
-      report('capture-failed', { relation: tables.join(', '), cause: fallbackError })
-    }
-  }
-}
