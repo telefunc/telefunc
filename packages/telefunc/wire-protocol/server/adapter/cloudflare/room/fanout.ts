@@ -1,8 +1,9 @@
 // The ordered at-most-once invariant (I5/I8) — the exact non-poisoning chain of readiness-ordering.md §3.
 // One ephemeral promise chain per (incarnation, laneKey): frame N+1's attempt begins only after frame N's
 // attempt SETTLED (success or failure), so a failed frame never poisons the lane and each frame's promise
-// rejects only on its own failure. The chains live in the room DO's memory and are discarded on
-// close/eviction — no state survives into a new incarnation.
+// rejects only on its own failure. The chains live in the backend's ephemeral delivery host and are
+// discarded on close/eviction — no state survives into a new incarnation. W2c hosts them in its facade
+// because Miniflare serializes a stalled service-binding relay across lanes; W3-C owns final DO wiring.
 //
 // `deliver` is the handoff seam: in production the room DO RPCs each target subscriber DO
 // (telefuncBroadcastDeliver); the parity fixture points it at a Node callback so the same chain drives

@@ -15,6 +15,8 @@ import {
 
 export type StoredHead = HeadSnapshot & { rev: string; expiresAt: number | null }
 
+export const GEN_ORPHAN_GRACE_MS = 60_000
+
 export type HeadCxOutcome =
   | { ok: true; head: StoredHead }
   | { ok: true; deleted: true }
@@ -45,7 +47,9 @@ export function initSchema(sql: SqlStorage): void {
       rev TEXT NOT NULL, inc TEXT, state TEXT NOT NULL, config BLOB NOT NULL,
       lease_id TEXT, lease_until INTEGER, expires_at INTEGER
     );
-    CREATE TABLE IF NOT EXISTS gen (inc TEXT PRIMARY KEY, revision INTEGER NOT NULL);
+    CREATE TABLE IF NOT EXISTS gen (
+      inc TEXT PRIMARY KEY, revision INTEGER NOT NULL, orphan_since INTEGER
+    );
     CREATE TABLE IF NOT EXISTS cell (
       inc TEXT NOT NULL, key TEXT NOT NULL, bytes BLOB NOT NULL, expires_at INTEGER,
       PRIMARY KEY (inc, key)
@@ -130,20 +134,39 @@ export function hasGeneration(sql: SqlStorage, inc: string): boolean {
 }
 
 export function listGenerations(sql: SqlStorage): string[] {
-  return sql.exec<{ inc: string }>('SELECT inc FROM gen').toArray().map((row) => row.inc)
+  return sql
+    .exec<{ inc: string }>('SELECT inc FROM gen')
+    .toArray()
+    .map((row) => row.inc)
 }
 
-function headCxMatches(cx: HeadCx, current: StoredHead | null, now: number): boolean {
+function headCxMatches(sql: SqlStorage, cx: HeadCx, current: StoredHead | null, now: number): boolean {
   if (cx.expect === 'absent') return current === null
-  if (current === null || current.rev !== cx.expect.rev) return false
+  if (current === null) return false
   const expect = cx.expect
   if ('closingLeaseExpired' in expect) {
-    return current.state === 'closing' && current.closeLease !== undefined && current.closeLease.until < now
+    return (
+      sql
+        .exec(
+          "SELECT 1 FROM head WHERE id = 1 AND rev = ? AND state = 'closing' AND lease_until IS NOT NULL AND lease_until < ?",
+          expect.rev,
+          now,
+        )
+        .toArray().length === 1
+    )
   }
   if ('closingLease' in expect) {
-    return current.state === 'closing' && current.closeLease?.id === expect.closingLease
+    return (
+      sql
+        .exec(
+          "SELECT 1 FROM head WHERE id = 1 AND rev = ? AND state = 'closing' AND lease_id = ?",
+          expect.rev,
+          expect.closingLease,
+        )
+        .toArray().length === 1
+    )
   }
-  return true
+  return sql.exec('SELECT 1 FROM head WHERE id = 1 AND rev = ?', expect.rev).toArray().length === 1
 }
 
 // Head CX — the whole compare-and-store, meant to be called INSIDE `transactionSync`. Validation throws
@@ -160,7 +183,7 @@ export function compareExchangeHead(
   // Operation legality precedes the compare for the delete path only; every other transition is validated
   // against the head the compare actually matched, so a genuine race still conflicts.
   assertDeleteLegal(next, current)
-  if (!headCxMatches(cx, current, now)) return { conflict: true, current }
+  if (!headCxMatches(sql, cx, current, now)) return { conflict: true, current }
   if ('delete' in next) {
     sql.exec('DELETE FROM head WHERE id = 1')
     return { ok: true, deleted: true }
@@ -189,7 +212,8 @@ function storeHead(sql: SqlStorage, next: HeadWriteNext, now: number, mintRev: (
   // A generation exists from the moment its inc is installed (registered inside this same CX) — that is
   // what makes the fresh-inc guard deterministic. Empty until written; never re-zeroed on re-store.
   if (next.head.currentInc !== null) {
-    sql.exec('INSERT OR IGNORE INTO gen (inc, revision) VALUES (?, 0)', next.head.currentInc)
+    sql.exec('INSERT OR IGNORE INTO gen (inc, revision, orphan_since) VALUES (?, 0, NULL)', next.head.currentInc)
+    sql.exec('UPDATE gen SET orphan_since = NULL WHERE inc = ?', next.head.currentInc)
   }
   const stored: StoredHead = {
     rev,
@@ -208,18 +232,25 @@ export type CellsRead = { revision: string; cells: Map<string, Uint8Array> } | {
 
 // Reads require only generation existence (staleInc iff head absent or currentInc ≠ inc); they stay
 // available while 'closing' because the closer's tail needs them.
-export function readCells(sql: SqlStorage, inc: string, sel: { keys: string[] } | { prefix: string }, now: number): CellsRead {
+export function readCells(
+  sql: SqlStorage,
+  inc: string,
+  sel: { keys: string[] } | { prefix: string },
+  now: number,
+): CellsRead {
   const head = readLiveHead(sql, now)
   if (head === null || head.currentInc !== inc) return { staleInc: true }
   const revision = String(readRevision(sql, inc))
   const cells = new Map<string, Uint8Array>()
   if ('keys' in sel) {
     for (const key of sel.keys) {
-      const row = sql.exec<{ bytes: ArrayBuffer; expires_at: number | null }>(
-        'SELECT bytes, expires_at FROM cell WHERE inc = ? AND key = ?',
-        inc,
-        key,
-      ).toArray()[0]
+      const row = sql
+        .exec<{ bytes: ArrayBuffer; expires_at: number | null }>(
+          'SELECT bytes, expires_at FROM cell WHERE inc = ? AND key = ?',
+          inc,
+          key,
+        )
+        .toArray()[0]
       if (row === undefined || (row.expires_at !== null && row.expires_at <= now)) continue
       cells.set(key, toBytes(row.bytes))
     }
@@ -281,12 +312,20 @@ export type OrderMark = { seq: number; timestamp: number }
 
 // seq strictly increases; the timestamp is clamped so it never moves backwards within a domain. A lapsed
 // order row restarts the domain — matching the memory reference's lazy expiry.
-export function advanceOrder(sql: SqlStorage, inc: string, domain: string, now: number, ttlMs: number | undefined): OrderMark {
-  const row = sql.exec<{ seq: number; ts: number; expires_at: number | null }>(
-    'SELECT seq, ts, expires_at FROM ord WHERE inc = ? AND domain = ?',
-    inc,
-    domain,
-  ).toArray()[0]
+export function advanceOrder(
+  sql: SqlStorage,
+  inc: string,
+  domain: string,
+  now: number,
+  ttlMs: number | undefined,
+): OrderMark {
+  const row = sql
+    .exec<{ seq: number; ts: number; expires_at: number | null }>(
+      'SELECT seq, ts, expires_at FROM ord WHERE inc = ? AND domain = ?',
+      inc,
+      domain,
+    )
+    .toArray()[0]
   const live = row !== undefined && !(row.expires_at !== null && row.expires_at <= now) ? row : undefined
   const mark: OrderMark = { seq: (live?.seq ?? 0) + 1, timestamp: Math.max(now, live?.ts ?? 0) }
   const expiresAt = ttlMs === undefined ? null : now + ttlMs
@@ -310,4 +349,33 @@ export function dropGenerationRows(sql: SqlStorage, inc: string): void {
   sql.exec('DELETE FROM rt_chunk WHERE inc = ?', inc)
   sql.exec('DELETE FROM route WHERE inc = ?', inc)
   sql.exec('DELETE FROM gen WHERE inc = ?', inc)
+}
+
+// Orphan age is observation-based: the close path does not write cleanup metadata. A mechanical sweep
+// first stamps every non-current generation it sees, then returns only entries whose full grace window
+// has elapsed. The caller deletes those entries with dropGenerationRows(), preserving physical scoping.
+export function observeAndListGraceAgedOrphans(
+  sql: SqlStorage,
+  currentInc: string | null,
+  now: number,
+  graceMs: number,
+): string[] {
+  if (currentInc !== null) {
+    sql.exec('UPDATE gen SET orphan_since = NULL WHERE inc = ?', currentInc)
+    sql.exec('UPDATE gen SET orphan_since = ? WHERE inc != ? AND orphan_since IS NULL', now, currentInc)
+    return sql
+      .exec<{ inc: string }>(
+        'SELECT inc FROM gen WHERE inc != ? AND orphan_since IS NOT NULL AND orphan_since + ? <= ?',
+        currentInc,
+        graceMs,
+        now,
+      )
+      .toArray()
+      .map((row) => row.inc)
+  }
+  sql.exec('UPDATE gen SET orphan_since = ? WHERE orphan_since IS NULL', now)
+  return sql
+    .exec<{ inc: string }>('SELECT inc FROM gen WHERE orphan_since IS NOT NULL AND orphan_since + ? <= ?', graceMs, now)
+    .toArray()
+    .map((row) => row.inc)
 }

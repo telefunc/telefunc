@@ -6,6 +6,8 @@
 // inc-scoped, so a surviving old-inc subscription can never be a target of a recreated room (I11).
 
 export const ROUTE_TTL_MS = 90_000
+export const ROUTE_RENEW_EVERY_MS = ROUTE_TTL_MS / 3
+export const ROUTE_RENEW_FAILURE_LIMIT = 2
 
 // Establishment: the open-head check happens in the DO (it holds the head); this UPSERT replaces any
 // prior lease for the same (inc, lane, subscriber) in a single statement.
@@ -84,7 +86,13 @@ export function snapshotRoutes(sql: SqlStorage, inc: string, laneKey: string, no
 export function routeExists(sql: SqlStorage, inc: string, laneKey: string, subscriber: string, now: number): boolean {
   return (
     sql
-      .exec('SELECT 1 FROM route WHERE inc = ? AND lane_key = ? AND subscriber = ? AND expires_at > ? LIMIT 1', inc, laneKey, subscriber, now)
+      .exec(
+        'SELECT 1 FROM route WHERE inc = ? AND lane_key = ? AND subscriber = ? AND expires_at > ? LIMIT 1',
+        inc,
+        laneKey,
+        subscriber,
+        now,
+      )
       .toArray().length > 0
   )
 }

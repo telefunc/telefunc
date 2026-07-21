@@ -31,7 +31,11 @@ function toBytes(value: ArrayBuffer | Uint8Array): Uint8Array {
 // lane's retained never counts twice.
 export function assertRetainedCapacity(sql: SqlStorage, inc: string, key: string, size: number, cap: number): void {
   const row = sql
-    .exec<{ total: number }>('SELECT COALESCE(SUM(size), 0) AS total FROM rt_manifest WHERE inc = ? AND lane_key != ?', inc, key)
+    .exec<{ total: number }>(
+      'SELECT COALESCE(SUM(size), 0) AS total FROM rt_manifest WHERE inc = ? AND lane_key != ?',
+      inc,
+      key,
+    )
     .toArray()[0]
   const total = (row?.total ?? 0) + size
   if (total > cap) throw new Error(`commitLane: retained aggregate ${total} bytes exceeds the ${cap} byte cap`)
@@ -47,13 +51,22 @@ export function installRetained(
   mark: OrderMark,
 ): void {
   const key = laneKey(lane)
-  const previous = sql.exec<{ gen: number }>('SELECT gen FROM rt_manifest WHERE inc = ? AND lane_key = ?', inc, key).toArray()[0]
+  const previous = sql
+    .exec<{ gen: number }>('SELECT gen FROM rt_manifest WHERE inc = ? AND lane_key = ?', inc, key)
+    .toArray()[0]
   const gen = (previous?.gen ?? 0) + 1
   const chunkCount = Math.max(1, Math.ceil(payload.byteLength / MAX_RETAINED_CHUNK_BYTES))
   for (let i = 0; i < chunkCount; i++) {
     const slice = payload.subarray(i * MAX_RETAINED_CHUNK_BYTES, (i + 1) * MAX_RETAINED_CHUNK_BYTES)
     // Copy out of the subarray view so SQLite stores exactly the chunk bytes.
-    sql.exec('INSERT OR REPLACE INTO rt_chunk (inc, lane_key, gen, i, bytes) VALUES (?, ?, ?, ?, ?)', inc, key, gen, i, new Uint8Array(slice))
+    sql.exec(
+      'INSERT OR REPLACE INTO rt_chunk (inc, lane_key, gen, i, bytes) VALUES (?, ?, ?, ?, ?)',
+      inc,
+      key,
+      gen,
+      i,
+      new Uint8Array(slice),
+    )
   }
   const parts = laneToParts(lane)
   sql.exec(
@@ -84,7 +97,12 @@ export function readRetained(
     .toArray()[0]
   if (manifest === undefined) return null
   const chunks = sql
-    .exec<{ bytes: ArrayBuffer }>('SELECT bytes FROM rt_chunk WHERE inc = ? AND lane_key = ? AND gen = ? ORDER BY i', inc, key, manifest.gen)
+    .exec<{ bytes: ArrayBuffer }>(
+      'SELECT bytes FROM rt_chunk WHERE inc = ? AND lane_key = ? AND gen = ? ORDER BY i',
+      inc,
+      key,
+      manifest.gen,
+    )
     .toArray()
   const payload = new Uint8Array(manifest.size)
   let offset = 0

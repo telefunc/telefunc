@@ -33,6 +33,7 @@ import type {
   RetainedWire,
 } from '../../../server/adapter/cloudflare/room/do.js'
 import { Fanout } from '../../../server/adapter/cloudflare/room/fanout.js'
+import { ROUTE_RENEW_EVERY_MS, ROUTE_RENEW_FAILURE_LIMIT } from '../../../server/adapter/cloudflare/room/routes.js'
 import type { BackendFixture, BackendHarness } from '../harness.js'
 import { bundleWorker } from './bundle.js'
 
@@ -41,22 +42,46 @@ const MAX_RETAINED_BYTES = 16 * 1024 * 1024
 
 // A DO stub's RPC surface, as this facade uses it.
 type RoomStub = {
+  [Symbol.dispose]?: () => void
   readHead(): Promise<HeadWire | null>
   compareExchangeHead(cx: HeadCx, next: HeadNextWire): Promise<HeadCxWire>
   readCells(inc: string, sel: { keys: string[] } | { prefix: string }): Promise<CellsWire>
-  compareExchangeCells(inc: string, revision: string, mutations: Array<{ key: string; set?: { bytesB64: string; ttlMs?: number } }>): Promise<CxResult>
-  commitLane(inc: string, lane: LaneId, payload: Uint8Array, opts?: { retain?: boolean; orderTtlMs?: number; closingLease?: string }): Promise<CommitWire>
+  compareExchangeCells(
+    inc: string,
+    revision: string,
+    mutations: Array<{ key: string; set?: { bytesB64: string; ttlMs?: number } }>,
+  ): Promise<CxResult>
+  commitLane(
+    inc: string,
+    lane: LaneId,
+    payload: Uint8Array,
+    opts?: { retain?: boolean; orderTtlMs?: number; closingLease?: string },
+  ): Promise<CommitWire>
   readRetained(inc: string, lane: LaneId): Promise<RetainedWire | null>
   listRetained(inc: string): Promise<LaneId[]>
   deleteRetainedLane(inc: string, lane?: LaneId): Promise<void>
-  registerRoute(inc: string, laneKey: string, subscriber: string, leaseId: string, bucket: string | null): Promise<RegisterWire>
-  renewRoute(inc: string, laneKey: string, subscriber: string, leaseId: string): Promise<{ ok: boolean; expiresAt?: number }>
+  registerRoute(
+    inc: string,
+    laneKey: string,
+    subscriber: string,
+    leaseId: string,
+    bucket: string | null,
+  ): Promise<RegisterWire>
+  renewRoute(
+    inc: string,
+    laneKey: string,
+    subscriber: string,
+    leaseId: string,
+  ): Promise<{ ok: boolean; expiresAt?: number }>
   unsubscribeRoute(inc: string, laneKey: string, subscriber: string, leaseId: string): Promise<void>
   listGenerations(): Promise<string[]>
   dropGeneration(inc: string): Promise<DropWire>
   directoryPut(roomId: string, incTag: string): Promise<void>
   directoryDelete(roomId: string, incTag: string): Promise<void>
-  directoryList(prefix: string, cursor?: string): Promise<{ entries: { roomId: string; incTag: string }[]; cursor?: string }>
+  directoryList(
+    prefix: string,
+    cursor?: string,
+  ): Promise<{ entries: { roomId: string; incTag: string }[]; cursor?: string }>
   runJanitor(): Promise<{ prunedRoutes: number }>
 }
 
@@ -72,6 +97,11 @@ type Shared = {
 let sharedPromise: Promise<Shared> | null = null
 // subscriberName → the live Node receiver, so the DELIVER service binding can invoke it and await it.
 const receivers = new Map<string, LaneReceiver>()
+const lowLevelStubs = new Set<RoomStub>()
+
+function disposeRoomStub(stub: RoomStub): void {
+  stub[Symbol.dispose]?.()
+}
 
 // The controlled authority clock: a logical number kept identical on both sides (this is what makes the
 // exact `until === authorityNow() + durationMs` assertions hold). advanceAuthority is synchronous, so the
@@ -96,7 +126,11 @@ function setClock(value: number): void {
 // (per-target failure). A vanished receiver (unsubscribed mid-flight) is skipped, at-most-once. This is
 // the subscriber-isolate side of the CF handoff: the room DO's fan-out RPC target, collapsed here to the
 // in-process receiver the same way production would dispatch inside the subscriber DO.
-export async function deliverToReceiver(subscriber: string, frame: Uint8Array, info: { seq: number; timestamp: number }): Promise<void> {
+export async function deliverToReceiver(
+  subscriber: string,
+  frame: Uint8Array,
+  info: { seq: number; timestamp: number },
+): Promise<void> {
   const receiver = receivers.get(subscriber)
   if (receiver === undefined) return
   const result = receiver(new Uint8Array(frame), { seq: info.seq, timestamp: info.timestamp }) as unknown
@@ -115,6 +149,12 @@ async function getShared(): Promise<Shared> {
       compatibilityDate: '2025-01-01',
       compatibilityFlags: ['nodejs_compat'],
       durableObjects: { ROOM: { className: 'TelefuncRoomDurableObject', useSQLite: true } },
+      serviceBindings: {
+        TELEFUNC_ROOM_SUBSCRIBER_PROBE: async (request) => {
+          const subscriber = decodeURIComponent(new URL(request.url).pathname.slice(1))
+          return new Response(null, { status: receivers.has(subscriber) ? 204 : 404 })
+        },
+      },
     })
     const ns = (await mf.getDurableObjectNamespace('ROOM')) as unknown as Namespace
     return { mf, ns }
@@ -126,6 +166,8 @@ export async function disposeSharedMiniflare(): Promise<void> {
   const pending = sharedPromise
   sharedPromise = null
   receivers.clear()
+  for (const stub of lowLevelStubs) disposeRoomStub(stub)
+  lowLevelStubs.clear()
   if (pending === null) return
   try {
     const shared = await pending
@@ -142,7 +184,14 @@ export async function disposeSharedMiniflare(): Promise<void> {
 export async function cloudflareRoomStub(roomId: string): Promise<RoomStub> {
   const shared = await getShared()
   await clockPush
-  return shared.ns.get(shared.ns.idFromName(roomId))
+  const stub = shared.ns.get(shared.ns.idFromName(roomId))
+  lowLevelStubs.add(stub)
+  return stub
+}
+
+export function disposeCloudflareRoomStubs(): void {
+  for (const stub of lowLevelStubs) disposeRoomStub(stub)
+  lowLevelStubs.clear()
 }
 
 export function installReceiver(subscriber: string, receiver: LaneReceiver): void {
@@ -179,6 +228,50 @@ function nextToWire(next: HeadNext): HeadNextWire {
 
 // ── the readiness lifecycle, facade side ──
 
+type RenewalScheduler = {
+  schedule(delayMs: number, task: () => Promise<void>): () => void
+}
+
+const realRenewalScheduler: RenewalScheduler = {
+  schedule(delayMs, task) {
+    const handle = setTimeout(() => void task(), delayMs)
+    return () => clearTimeout(handle)
+  },
+}
+
+class ManualRenewalScheduler implements RenewalScheduler {
+  #now = 0
+  #sequence = 0
+  readonly #tasks = new Map<number, { at: number; task: () => Promise<void> }>()
+
+  schedule(delayMs: number, task: () => Promise<void>): () => void {
+    const id = ++this.#sequence
+    this.#tasks.set(id, { at: this.#now + delayMs, task })
+    return () => this.#tasks.delete(id)
+  }
+
+  async advance(ms: number): Promise<void> {
+    const target = this.#now + ms
+    for (;;) {
+      let next: { id: number; at: number; task: () => Promise<void> } | null = null
+      for (const [id, entry] of this.#tasks) {
+        if (entry.at <= target && (next === null || entry.at < next.at || (entry.at === next.at && id < next.id))) {
+          next = { id, ...entry }
+        }
+      }
+      if (next === null) break
+      this.#tasks.delete(next.id)
+      this.#now = next.at
+      await next.task()
+    }
+    this.#now = target
+  }
+
+  clear(): void {
+    this.#tasks.clear()
+  }
+}
+
 class CfLaneSubscription implements LaneSubscription {
   readonly ready: Promise<void>
   #state: ReadinessState = 'establishing'
@@ -186,9 +279,22 @@ class CfLaneSubscription implements LaneSubscription {
   #settled = false
   readonly #listeners = new Set<(state: ReadinessState) => void>()
   readonly #onUnsubscribe: () => Promise<void>
+  readonly #onRenew: () => Promise<boolean>
+  readonly #onReestablish: () => Promise<boolean>
+  readonly #scheduler: RenewalScheduler
+  #cancelRenewal: (() => void) | null = null
+  #renewalFailures = 0
 
-  constructor(onUnsubscribe: () => Promise<void>) {
+  constructor(
+    onUnsubscribe: () => Promise<void>,
+    onRenew: () => Promise<boolean>,
+    onReestablish: () => Promise<boolean>,
+    scheduler: RenewalScheduler = realRenewalScheduler,
+  ) {
     this.#onUnsubscribe = onUnsubscribe
+    this.#onRenew = onRenew
+    this.#onReestablish = onReestablish
+    this.#scheduler = scheduler
     this.ready = new Promise<void>((resolve, reject) => {
       this.#settle = { resolve, reject }
     })
@@ -206,6 +312,7 @@ class CfLaneSubscription implements LaneSubscription {
 
   async unsubscribe(): Promise<void> {
     if (this.#state === 'closed') return
+    this.#cancelTimer()
     await this.#onUnsubscribe()
     this.#transition('closed')
   }
@@ -218,6 +325,7 @@ class CfLaneSubscription implements LaneSubscription {
     this.#settled = true
     this.#state = 'ready'
     this.#settle.resolve()
+    this.#scheduleRenewal()
   }
 
   failEstablishment(reason: string): void {
@@ -228,7 +336,59 @@ class CfLaneSubscription implements LaneSubscription {
   }
 
   generationDropped(): void {
+    this.#cancelTimer()
     this.#transition('closed')
+  }
+
+  backendDisposed(): void {
+    this.#cancelTimer()
+    this.#transition('closed')
+  }
+
+  #scheduleRenewal(): void {
+    if (this.#state === 'closed') return
+    this.#cancelRenewal = this.#scheduler.schedule(ROUTE_RENEW_EVERY_MS, () => this.#renew())
+  }
+
+  async #renew(): Promise<void> {
+    this.#cancelRenewal = null
+    if (this.#state === 'closed') return
+    let renewed = false
+    try {
+      renewed = await this.#onRenew()
+    } catch {
+      // Transport loss is a renewal failure; it participates in the same K=2 state machine.
+    }
+    if (this.#state === 'closed') return
+    if (renewed) {
+      this.#renewalFailures = 0
+      this.#scheduleRenewal()
+      return
+    }
+    this.#renewalFailures += 1
+    if (this.#renewalFailures < ROUTE_RENEW_FAILURE_LIMIT) {
+      this.#scheduleRenewal()
+      return
+    }
+
+    this.#transition('lost')
+    let reestablished = false
+    try {
+      reestablished = await this.#onReestablish()
+    } catch {
+      // Stay lost and retry through the same timer path.
+    }
+    if (this.#state === 'closed') return
+    if (reestablished) {
+      this.#renewalFailures = 0
+      this.#transition('ready')
+    }
+    this.#scheduleRenewal()
+  }
+
+  #cancelTimer(): void {
+    this.#cancelRenewal?.()
+    this.#cancelRenewal = null
   }
 
   #transition(state: ReadinessState): void {
@@ -250,7 +410,10 @@ class CloudflareRoomBackend implements RoomBackendSpi {
   }
 
   readonly #ns: Namespace
+  readonly #renewalScheduler: RenewalScheduler
+  readonly #stubs = new Map<string, RoomStub>()
   #disposed = false
+  #forcedRenewalFailures = 0
   // The ephemeral delivery chains, driven in the subscriber isolate (this facade) over the acceptance-time
   // route snapshot the DO returns — one Fanout per room so the (inc, laneKey) chains stay isolated. This
   // is the SAME fanout.ts algorithm the production room DO uses; only its host differs (the workerd
@@ -259,8 +422,20 @@ class CloudflareRoomBackend implements RoomBackendSpi {
   // subscriberName → its live subscription, so a dropped generation can close the right ones.
   readonly #subs = new Map<string, { inc: string; laneKey: string; sub: CfLaneSubscription }>()
 
-  constructor(ns: Namespace) {
+  constructor(ns: Namespace, renewalScheduler: RenewalScheduler = realRenewalScheduler) {
     this.#ns = ns
+    this.#renewalScheduler = renewalScheduler
+  }
+
+  forceRenewalFailures(count: number): void {
+    this.#forcedRenewalFailures = count
+  }
+
+  async advanceRenewalTimers(ms: number): Promise<void> {
+    if (!(this.#renewalScheduler instanceof ManualRenewalScheduler)) {
+      throw new Error('advanceRenewalTimers requires the conformance scheduler')
+    }
+    await this.#renewalScheduler.advance(ms)
   }
 
   #fanoutFor(roomId: string): Fanout {
@@ -277,7 +452,12 @@ class CloudflareRoomBackend implements RoomBackendSpi {
   }
 
   #stub(roomId: string): RoomStub {
-    return this.#ns.get(this.#ns.idFromName(roomId))
+    let stub = this.#stubs.get(roomId)
+    if (stub === undefined) {
+      stub = this.#ns.get(this.#ns.idFromName(roomId))
+      this.#stubs.set(roomId, stub)
+    }
+    return stub
   }
 
   #directory(): RoomStub {
@@ -299,11 +479,14 @@ class CloudflareRoomBackend implements RoomBackendSpi {
     roomId: string,
     cx: HeadCx,
     next: HeadNext,
-  ): Promise<{ ok: true; head: RoomHead } | { ok: true; deleted: true } | { conflict: true; current: RoomHead | null }> {
+  ): Promise<
+    { ok: true; head: RoomHead } | { ok: true; deleted: true } | { conflict: true; current: RoomHead | null }
+  > {
     await this.#preflight()
     const wire = await this.#stub(roomId).compareExchangeHead(cx, nextToWire(next))
     if ('error' in wire) throw new Error(wire.error)
-    if ('conflict' in wire) return { conflict: true, current: wire.current === null ? null : headFromWire(wire.current) }
+    if ('conflict' in wire)
+      return { conflict: true, current: wire.current === null ? null : headFromWire(wire.current) }
     if ('deleted' in wire) return { ok: true, deleted: true }
     return { ok: true, head: headFromWire(wire.head) }
   }
@@ -321,7 +504,12 @@ class CloudflareRoomBackend implements RoomBackendSpi {
     return { revision: wire.revision, cells }
   }
 
-  async compareExchangeCells(roomId: string, inc: string, revision: string, mutations: CellMutation[]): Promise<CxResult> {
+  async compareExchangeCells(
+    roomId: string,
+    inc: string,
+    revision: string,
+    mutations: CellMutation[],
+  ): Promise<CxResult> {
     await this.#preflight()
     const wire = mutations.map((mutation) =>
       mutation.set === undefined
@@ -346,7 +534,10 @@ class CloudflareRoomBackend implements RoomBackendSpi {
     // the current payload. `delivery` rejects only on this frame's own handoff failure and its promises
     // settle in commit order because the chain is settlement-gated.
     const fanout = this.#fanoutFor(roomId)
-    const token = fanout.enqueue(inc, laneKeyOf(lane), wire.targets, payload, { seq: wire.seq, timestamp: wire.timestamp })
+    const token = fanout.enqueue(inc, laneKeyOf(lane), wire.targets, payload, {
+      seq: wire.seq,
+      timestamp: wire.timestamp,
+    })
     const delivery = fanout.await(token)
     // Mark the rejection observed so a delivery the caller awaits only later (a failed handoff) is never a
     // spurious unhandled rejection; the caller still sees it when it awaits (promises fan out to handlers).
@@ -378,20 +569,38 @@ class CloudflareRoomBackend implements RoomBackendSpi {
     this.#assertLive()
     const laneKey = laneKeyOf(lane)
     const subscriber = crypto.randomUUID()
-    const leaseId = crypto.randomUUID()
+    let leaseId = crypto.randomUUID()
     // The subscriber isolate installs its local receiver BEFORE any RPC (readiness-ordering §2.3 step 1).
     receivers.set(subscriber, receiver)
-    const sub = new CfLaneSubscription(async () => {
+    const register = async (): Promise<RegisterWire> => {
       await clockPush
-      await this.#stub(roomId).unsubscribeRoute(inc, laneKey, subscriber, leaseId)
-      receivers.delete(subscriber)
-      this.#subs.delete(subscriber)
-    })
+      return this.#stub(roomId).registerRoute(inc, laneKey, subscriber, leaseId, null)
+    }
+    const sub = new CfLaneSubscription(
+      async () => {
+        await clockPush
+        await this.#stub(roomId).unsubscribeRoute(inc, laneKey, subscriber, leaseId)
+        receivers.delete(subscriber)
+        this.#subs.delete(subscriber)
+      },
+      async () => {
+        await clockPush
+        if (this.#forcedRenewalFailures > 0) {
+          this.#forcedRenewalFailures -= 1
+          return false
+        }
+        return (await this.#stub(roomId).renewRoute(inc, laneKey, subscriber, leaseId)).ok
+      },
+      async () => {
+        leaseId = crypto.randomUUID()
+        return 'ok' in (await register())
+      },
+      this.#renewalScheduler,
+    )
     this.#subs.set(subscriber, { inc, laneKey, sub })
     void (async () => {
       try {
-        await clockPush
-        const result = await this.#stub(roomId).registerRoute(inc, laneKey, subscriber, leaseId, null)
+        const result = await register()
         if ('ok' in result) {
           sub.establish()
         } else {
@@ -450,6 +659,25 @@ class CloudflareRoomBackend implements RoomBackendSpi {
 
   async dispose(): Promise<void> {
     this.#disposed = true
+    for (const [subscriber, entry] of this.#subs) {
+      entry.sub.backendDisposed()
+      receivers.delete(subscriber)
+    }
+    this.#subs.clear()
+    if (this.#renewalScheduler instanceof ManualRenewalScheduler) this.#renewalScheduler.clear()
+    for (const stub of this.#stubs.values()) disposeRoomStub(stub)
+    this.#stubs.clear()
+  }
+}
+
+export function cloudflareRenewalControls(backend: RoomBackendSpi): {
+  forceFailures(count: number): void
+  advance(ms: number): Promise<void>
+} {
+  if (!(backend instanceof CloudflareRoomBackend)) throw new Error('expected the Cloudflare conformance backend')
+  return {
+    forceFailures: (count) => backend.forceRenewalFailures(count),
+    advance: (ms) => backend.advanceRenewalTimers(ms),
   }
 }
 
@@ -464,7 +692,7 @@ export const cloudflareHarness: BackendHarness = {
     // against the wrong scenario).
     setClock(Date.now())
     await clockPush
-    const backend = new CloudflareRoomBackend(shared.ns)
+    const backend = new CloudflareRoomBackend(shared.ns, new ManualRenewalScheduler())
     return {
       backend,
       // Cloudflare RPCs the target (relayed here to the receiver closure) and awaits it, so the handoff

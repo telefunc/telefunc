@@ -1,8 +1,9 @@
 /// <reference types="@cloudflare/workers-types" />
 // The class shell of the Cloudflare Room backend: `TelefuncRoomDurableObject` (one DO per room). It owns
 // the RPC surface the Room backend seam calls, the room DO's own authority clock (used for lease minting,
-// commit preconditions and TTLs — never a caller clock), the ephemeral delivery chains, and the alarm
-// janitor. Storage, retained chunking, routes and fanout are the four invariant modules alongside it.
+// commit preconditions and TTLs — never a caller clock), acceptance-time route snapshots, and the alarm
+// janitor. Storage, retained chunking, routes and fanout are the four invariant modules alongside it; the
+// W2c facade hosts fanout because Miniflare serializes a stalled service-binding relay across lanes.
 //
 // DARK: this class is not published as a binding, not exported from any barrel, and not wired to any Room
 // call site — that is W3-C. W2c proves it passes the conformance suite in local workerd.
@@ -20,8 +21,10 @@ import {
   directoryList,
   directoryPut,
   dropGenerationRows,
+  GEN_ORPHAN_GRACE_MS,
   initSchema,
   listGenerations,
+  observeAndListGraceAgedOrphans,
   readCells,
   readLiveHead,
   type StoredHead,
@@ -49,7 +52,15 @@ export type HeadWire = {
   closeLease?: { id: string; until: number }
 }
 export type HeadNextWire =
-  | { head: { currentInc: string | null; state: 'open' | 'closing' | 'closed'; configB64: string; closeLease?: { id: string; durationMs: number } }; ttlMs?: number }
+  | {
+      head: {
+        currentInc: string | null
+        state: 'open' | 'closing' | 'closed'
+        configB64: string
+        closeLease?: { id: string; durationMs: number }
+      }
+      ttlMs?: number
+    }
   | { delete: true }
 export type HeadCxWire =
   | { ok: true; head: HeadWire }
@@ -67,6 +78,12 @@ export type CommitWire =
 export type RetainedWire = { payloadB64: string; seq: number; timestamp: number }
 export type RegisterWire = { ok: true; expiresAt: number } | { rejected: true; reason: string }
 export type DropWire = { droppedSubscribers: Array<[string, string]> } | { error: string }
+
+type RoomEnv = {
+  // W2c's local-workerd host supplies this addressability seam. W3-C replaces the dark host wiring
+  // with the final subscriber DO binding without changing registration semantics.
+  TELEFUNC_ROOM_SUBSCRIBER_PROBE: Fetcher
+}
 
 function headToWire(head: StoredHead): HeadWire {
   const wire: HeadWire = {
@@ -127,7 +144,8 @@ export class TelefuncRoomDurableObject extends DurableObject {
     } catch (error) {
       return { error: (error as Error).message }
     }
-    if ('conflict' in outcome) return { conflict: true, current: outcome.current === null ? null : headToWire(outcome.current) }
+    if ('conflict' in outcome)
+      return { conflict: true, current: outcome.current === null ? null : headToWire(outcome.current) }
     if ('deleted' in outcome) return { ok: true, deleted: true }
     return { ok: true, head: headToWire(outcome.head) }
   }
@@ -171,8 +189,7 @@ export class TelefuncRoomDurableObject extends DurableObject {
     // structured error the facade rethrows.
     try {
       this.ctx.storage.transactionSync(() => {
-        const head = readLiveHead(this.#sql, now)
-        if (head === null || !commitPreconditionHolds(head, inc, lane, opts?.closingLease, now)) return
+        if (!commitPreconditionHolds(this.#sql, inc, lane, opts?.closingLease, now)) return
         if (opts?.retain === true) assertRetainedCapacity(this.#sql, inc, key, frame.byteLength, this.#maxRetainedBytes)
         const mark = advanceOrder(this.#sql, inc, key, now, opts?.orderTtlMs)
         if (opts?.retain === true) installRetained(this.#sql, inc, lane, frame, mark)
@@ -184,14 +201,22 @@ export class TelefuncRoomDurableObject extends DurableObject {
     }
     if (accepted === null) return { stale: true }
     const settled: { seq: number; timestamp: number; targets: string[] } = accepted
-    return { accepted: true, seq: settled.seq, timestamp: settled.timestamp, receivers: settled.targets.length, targets: settled.targets }
+    return {
+      accepted: true,
+      seq: settled.seq,
+      timestamp: settled.timestamp,
+      receivers: settled.targets.length,
+      targets: settled.targets,
+    }
   }
 
   // ── retained ──
 
   async readRetained(inc: string, lane: LaneId): Promise<RetainedWire | null> {
     const entry = readRetained(this.#sql, inc, lane)
-    return entry === null ? null : { payloadB64: bytesToBase64(entry.payload), seq: entry.seq, timestamp: entry.timestamp }
+    return entry === null
+      ? null
+      : { payloadB64: bytesToBase64(entry.payload), seq: entry.seq, timestamp: entry.timestamp }
   }
 
   async listRetained(inc: string): Promise<LaneId[]> {
@@ -204,25 +229,41 @@ export class TelefuncRoomDurableObject extends DurableObject {
 
   // ── routes / readiness ──
 
-  async registerRoute(inc: string, laneKey: string, subscriber: string, leaseId: string, bucket: string | null): Promise<RegisterWire> {
+  async registerRoute(
+    inc: string,
+    laneKey: string,
+    subscriber: string,
+    leaseId: string,
+    bucket: string | null,
+  ): Promise<RegisterWire> {
     const now = authorityNow()
-    const head = readLiveHead(this.#sql, now)
-    // Establishment open-head check: a mismatch fails registration (ready rejects, fail-closed). The
-    // addressability probe (readiness-ordering §2.3) lives in the subscriber isolate — the facade only
-    // registers a route it has a live receiver for.
-    if (head === null || head.currentInc !== inc || head.state !== 'open') {
-      return { rejected: true, reason: `room has no open incarnation '${inc}'` }
+    // Probe before persisting a target. Stubs are never stored; the stable subscriber name is. The open
+    // head check and route UPSERT then share one SQL transaction after this await.
+    const probe = await (this.env as RoomEnv).TELEFUNC_ROOM_SUBSCRIBER_PROBE.fetch(
+      `https://telefunc.invalid/${encodeURIComponent(subscriber)}`,
+    )
+    if (!probe.ok) {
+      return { rejected: true, reason: `subscriber '${subscriber}' is not addressable` }
     }
     let expiresAt = 0
+    let registered = false
     this.ctx.storage.transactionSync(() => {
+      const head = readLiveHead(this.#sql, now)
+      if (head === null || head.currentInc !== inc || head.state !== 'open') return
       expiresAt = upsertRoute(this.#sql, inc, laneKey, subscriber, leaseId, bucket, now)
+      registered = true
     })
-    return { ok: true, expiresAt }
+    return registered ? { ok: true, expiresAt } : { rejected: true, reason: `room has no open incarnation '${inc}'` }
   }
 
-  async renewRoute(inc: string, laneKey: string, subscriber: string, leaseId: string): Promise<{ ok: boolean; expiresAt?: number }> {
+  async renewRoute(
+    inc: string,
+    laneKey: string,
+    subscriber: string,
+    leaseId: string,
+  ): Promise<{ ok: boolean; expiresAt?: number }> {
     const now = authorityNow()
-    let result: { ok: true; expiresAt: number } | { ok: false } = { ok: false }
+    let result!: ReturnType<typeof renewRoute>
     this.ctx.storage.transactionSync(() => {
       result = renewRoute(this.#sql, inc, laneKey, subscriber, leaseId, now)
     })
@@ -236,8 +277,6 @@ export class TelefuncRoomDurableObject extends DurableObject {
   // ── generation lifecycle ──
 
   async listGenerations(): Promise<string[]> {
-    // Reclaim lapsed TTL data opportunistically; reads already filter it, so this only frees rows.
-    this.ctx.storage.transactionSync(() => this.#sweep(authorityNow()))
     return listGenerations(this.#sql)
   }
 
@@ -269,7 +308,10 @@ export class TelefuncRoomDurableObject extends DurableObject {
     this.ctx.storage.transactionSync(() => directoryDelete(this.#sql, roomId, incTag))
   }
 
-  async directoryList(prefix: string, cursor?: string): Promise<{ entries: { roomId: string; incTag: string }[]; cursor?: string }> {
+  async directoryList(
+    prefix: string,
+    cursor?: string,
+  ): Promise<{ entries: { roomId: string; incTag: string }[]; cursor?: string }> {
     return directoryList(this.#sql, prefix, cursor)
   }
 
@@ -294,8 +336,15 @@ export class TelefuncRoomDurableObject extends DurableObject {
     this.#sql.exec('DELETE FROM cell WHERE expires_at IS NOT NULL AND expires_at <= ?', now)
     this.#sql.exec('DELETE FROM ord WHERE expires_at IS NOT NULL AND expires_at <= ?', now)
     this.#sql.exec('DELETE FROM route WHERE expires_at <= ?', now)
+    const currentInc = readLiveHead(this.#sql, now)?.currentInc ?? null
+    for (const inc of observeAndListGraceAgedOrphans(this.#sql, currentInc, now, GEN_ORPHAN_GRACE_MS)) {
+      dropGenerationRows(this.#sql, inc)
+    }
     // A lapsed tombstone is reclaimed through the delete path (this backend has no native head TTL).
-    this.#sql.exec("DELETE FROM head WHERE id = 1 AND state = 'closed' AND expires_at IS NOT NULL AND expires_at <= ?", now)
+    this.#sql.exec(
+      "DELETE FROM head WHERE id = 1 AND state = 'closed' AND expires_at IS NOT NULL AND expires_at <= ?",
+      now,
+    )
   }
 }
 
@@ -303,20 +352,32 @@ export class TelefuncRoomDurableObject extends DurableObject {
 // closing-control branch outright, which is what makes every other lane stale while closing. `now` is
 // authority time, so an expired lease is stale even with the correct id.
 function commitPreconditionHolds(
-  head: StoredHead,
+  sql: SqlStorage,
   inc: string,
   lane: LaneId,
   closingLease: string | undefined,
   now: number,
 ): boolean {
-  if (head.currentInc !== inc) return false
-  if (closingLease === undefined) return head.state === 'open'
+  const hasClosingLease = closingLease === undefined ? 0 : 1
   return (
-    lane.kind === 'control' &&
-    head.state === 'closing' &&
-    head.closeLease !== undefined &&
-    head.closeLease.id === closingLease &&
-    now <= head.closeLease.until
+    sql
+      .exec(
+        `SELECT 1 FROM head
+         WHERE id = 1 AND inc = ?
+           AND (
+             (? = 0 AND state = 'open')
+             OR
+             (? = 1 AND ? = 'control' AND state = 'closing'
+               AND lease_id = ? AND lease_until IS NOT NULL AND ? <= lease_until)
+           )`,
+        inc,
+        hasClosingLease,
+        hasClosingLease,
+        lane.kind,
+        closingLease ?? '',
+        now,
+      )
+      .toArray().length === 1
   )
 }
 
