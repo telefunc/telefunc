@@ -19,7 +19,14 @@
     "./tanstack-query": {
       "types": "./dist/tanstack-query/index.d.ts",
       "default": "./dist/tanstack-query/index.js"
+    },
+    "./telefunc-server": {
+      "types": "./dist/telefunc-server.d.ts",
+      "default": "./dist/telefunc-server.js"
     }
+  },
+  "telefunc": {
+    "server": "@telefunc/drizzle-experimental/telefunc-server"
   },
   "files": [
     "dist"
