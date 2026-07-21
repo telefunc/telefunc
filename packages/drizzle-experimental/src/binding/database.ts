@@ -20,7 +20,7 @@ type RlsStatus = boolean | 'unknown'
 
 /** Runs raw SQL against the executing connection and returns the result rows. Injected
  *  in tests; derived from the db by default. */
-type RowRunner = (sqlText: string) => Promise<Record<string, unknown>[]>
+type RowRunner = (query: SQL) => Promise<Record<string, unknown>[]>
 
 /** The registered `[entityKind]` discriminator of any drizzle value, or undefined. */
 function entityKindOf(value: unknown): string | undefined {
@@ -93,13 +93,15 @@ async function probeAuthority(
   if (dialect === 'pg') {
     const row = one(
       await run(
-        `select current_database() as database, current_user as role, current_setting('search_path') as search_path`,
+        sql.raw(
+          `select current_database() as database, current_user as role, current_setting('search_path') as search_path`,
+        ),
       ),
     )
     return { database: str(row.database), role: str(row.role), searchPath: str(row.search_path) }
   }
   // sqlite has no roles/search_path; authority is the attached database file(s)
-  const rows = await run('pragma database_list')
+  const rows = await run(sql.raw('pragma database_list'))
   return { database: rows.map((r) => `${str(r.name)}:${str(r.file)}`).join(';'), role: '', searchPath: '' }
 }
 
@@ -124,7 +126,7 @@ async function rlsEnabledOf(db: AnyDb, table: string, opts?: { run?: RowRunner; 
   const schema = opts?.schema ?? 'public'
   try {
     const rows = await run(
-      `select c.relrowsecurity as rls from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.relname = '${lit(table)}' and n.nspname = '${lit(schema)}'`,
+      sql`select c.relrowsecurity as rls from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.relname = ${table} and n.nspname = ${schema}`,
     )
     if (rows.length === 0) return 'unknown'
     const value = rows[0]!.rls
@@ -141,18 +143,17 @@ async function rlsEnabledOf(db: AnyDb, table: string, opts?: { run?: RowRunner; 
 /** A row runner derived from a drizzle db. sqlite runs through `db.all`; pg through
  *  `db.execute`. Result shapes differ per driver, so rows are normalized. */
 function rowRunnerFor(db: AnyDb): RowRunner {
-  const dialect = dialectOf(db)
-  const runner = db as { execute?: (q: SQL) => unknown; all?: (q: SQL) => unknown }
-  return async (text) => {
-    const query = sql.raw(text)
-    const raw = dialect === 'sqlite' ? await runner.all!(query) : await runner.execute!(query)
-    return normalizeRows(raw)
-  }
+  return (query) => queryRows(db, query)
 }
 
 /** Execute a built drizzle `SQL` (not raw text) against the connection and normalize the
  *  result rows — the hydration executor's read primitive. */
 async function executeSql(db: AnyDb, query: SQL): Promise<Record<string, unknown>[]> {
+  return queryRows(db, query)
+}
+
+/** The one dialect dispatch for built and raw SQL alike. */
+async function queryRows(db: AnyDb, query: SQL): Promise<Record<string, unknown>[]> {
   const runner = db as { execute?: (q: SQL) => unknown; all?: (q: SQL) => unknown }
   const raw = dialectOf(db) === 'sqlite' ? await runner.all!(query) : await runner.execute!(query)
   return normalizeRows(raw)
@@ -171,8 +172,4 @@ function one(rows: Record<string, unknown>[]): Record<string, unknown> {
 
 function str(value: unknown): string {
   return value == null ? '' : String(value)
-}
-
-function lit(value: string): string {
-  return value.replace(/'/g, "''")
 }

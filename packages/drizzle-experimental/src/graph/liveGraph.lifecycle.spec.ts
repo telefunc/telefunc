@@ -93,6 +93,27 @@ describe('a change routed during the scan is buffered and replayed exactly once'
     // value → FIRES. If id 1 stranded (team 5 still present), team 5 would not be new → no fire.
     expect(graph.apply([{ table: 'users', kind: 'insert', new: { id: 3, team_id: 5 } }]).invalidated).toBe(true)
   })
+
+  it('a key-only delete replayed during the seed retracts the snapshot row by its routed key', async () => {
+    let resolveScan!: (rows: Row[]) => void
+    const scanPromise = new Promise<Row[]>((resolve) => (resolveScan = resolve))
+    const build = () => qb.selectDistinct({ team: users.teamId }).from(users)
+    const graph = createLiveGraph({
+      kind: 'stateful',
+      instanceKey: 'key-only',
+      tables: ['users'],
+      instantiate: () => compileQuery(extractQueryShape(build(), { dialect: 'pg' })).instantiate() as StatefulGraph,
+      executor: { scan: () => scanPromise },
+      maxStateRows: 1e9,
+    })
+
+    graph.apply([{ table: 'users', kind: 'delete', key: { id: 1 } }])
+    resolveScan([{ id: 1, team_id: 5 }])
+    await graph.ready()
+
+    // The replay removed the snapshot row: team 5 is new again, so adding it invalidates DISTINCT.
+    expect(graph.apply([{ table: 'users', kind: 'insert', new: { id: 2, team_id: 5 } }]).invalidated).toBe(true)
+  })
 })
 
 describe('fault() permanently demotes a corrupt graph to coarse', () => {

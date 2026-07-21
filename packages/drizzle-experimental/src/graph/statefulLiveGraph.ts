@@ -6,6 +6,7 @@ import { type HydrationExecutor, type Seed, createSeed } from './hydrate.js'
 import { type ShadowIndex, matchesResidual, pkOf, pruneRow } from './shadow.js'
 import { rowChanged } from '../compile/rowSpace.js'
 import type { ApplyOutcome, GraphCore, GraphVariant } from './liveGraph.js'
+import { SubscriberFence } from './subscriberFence.js'
 
 // THE STATEFUL VARIANT — the seed / reseed / demote machine, and the only variant that keeps row history.
 //
@@ -110,7 +111,7 @@ function createStatefulVariant(spec: StatefulSpec, core: GraphCore): GraphVarian
           const raced = oneShot.length > 0
           for (const change of oneShot)
             for (const descriptor of byTable.get(change.table) ?? [])
-              replaySeedRace(descriptor, built.get(descriptor.inputId)!, change)
+              reconcileShadow(descriptor, built.get(descriptor.inputId)!, change, 'old-or-key')
           for (const descriptor of graph!.seeds)
             graph!.seedInput(descriptor.inputId, built.get(descriptor.inputId)!.rows())
           graph!.flushSeed()
@@ -133,10 +134,7 @@ function createStatefulVariant(spec: StatefulSpec, core: GraphCore): GraphVarian
           // one: waiters on the finished cycle hang, and waiters on the running one are released early
           // against a graph that is seeding again.
           core.settle()
-          if (raced) {
-            core.fire()
-            spec.notifyIdentity?.()
-          }
+          SubscriberFence.notifyReseedRace(raced, () => core.fire(), spec.notifyIdentity)
         },
         onDemote() {
           core.demote()
@@ -185,7 +183,7 @@ function createStatefulVariant(spec: StatefulSpec, core: GraphCore): GraphVarian
             new: change.new,
           }
           graph!.feedInput(descriptor.inputId, resolvedChange)
-          updateShadow(descriptor, shadows.get(descriptor.inputId)!, resolvedChange)
+          reconcileShadow(descriptor, shadows.get(descriptor.inputId)!, resolvedChange, 'old')
         }
         // A dirty-only witness (a subquery inner table) has no descriptor above, so it is fed here or its
         // change is dropped. No-op for a seed table — witnesses and seed inputs are disjoint.
@@ -247,20 +245,9 @@ function resolveOld(descriptor: SeedDescriptor, shadow: ShadowIndex, change: Tab
   return { kind: 'coarse' }
 }
 
-/** Keep the shadow in lockstep with the engine feed: the old tuple leaves, a σ-matching new
- *  tuple enters. */
-function updateShadow(descriptor: SeedDescriptor, shadow: ShadowIndex, change: Change): void {
-  if (change.old !== undefined) {
-    const pk = pkOf(descriptor, change.old)
-    if (pk !== undefined) shadow.remove(pk)
-  }
-  if (change.new !== undefined && matchesResidual(descriptor, change.new)) {
-    const pk = pkOf(descriptor, change.new)
-    if (pk !== undefined) shadow.put(pk, pruneRow(descriptor, change.new))
-  }
-}
-
-/** One-shot seed-race guard — NOT warming; do not add passes. A change routed during the scan may
+/** Reconcile the shadow after a live feed or a one-shot seed race. A live feed has already resolved
+ *  `old`; a seed race must fall back to the routed key because the scan may contain that row. A change
+ *  routed during the scan may
  *  or may not already be reflected in the scan's consistent snapshot; replay it against the seeded
  *  shadow so the outcome is idempotent regardless. Retract whatever the snapshot holds for the OLD-
  *  image PK (the change's OWN old key — NOT the new PK, or a PK-CHANGING update would strand the old
@@ -268,8 +255,13 @@ function updateShadow(descriptor: SeedDescriptor, shadow: ShadowIndex, change: C
  *  DELETE → retract old; UPDATE → retract old.pk + insert new.pk (correct even when the PK changes).
  *  Reconciles the SHADOW only — the engine is seeded once from the final shadow, so it never sees an
  *  intermediate retract/insert and a net-zero replay is invisible. */
-function replaySeedRace(descriptor: SeedDescriptor, shadow: ShadowIndex, change: TableChange): void {
-  const oldKeyRow = change.old ?? change.key
+function reconcileShadow(
+  descriptor: SeedDescriptor,
+  shadow: ShadowIndex,
+  change: TableChange,
+  oldKeySource: 'old' | 'old-or-key',
+): void {
+  const oldKeyRow = change.old ?? (oldKeySource === 'old-or-key' ? change.key : undefined)
   if (oldKeyRow !== undefined) {
     const oldPk = pkOf(descriptor, oldKeyRow)
     if (oldPk !== undefined) shadow.remove(oldPk)

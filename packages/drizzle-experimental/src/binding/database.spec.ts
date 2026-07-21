@@ -1,4 +1,5 @@
 import { MySqlDialect } from 'drizzle-orm/mysql-core'
+import { type SQL, sql } from 'drizzle-orm'
 import { drizzle as pgDrizzle } from 'drizzle-orm/node-postgres'
 import { drizzle as sqliteDrizzle } from 'drizzle-orm/node-sqlite'
 import { drizzle as pjDrizzle } from 'drizzle-orm/postgres-js'
@@ -6,7 +7,15 @@ import { Client, Pool } from 'pg'
 import postgres from 'postgres'
 import { afterAll, describe, expect, it } from 'vitest'
 import { StatementSync } from 'node:sqlite'
-import { type RowRunner, dialectOf, driverOf, rlsEnabledOf, semanticEnvironmentKeyOf } from './database.js'
+import {
+  type RowRunner,
+  dialectOf,
+  driverOf,
+  executeSql,
+  rlsEnabledOf,
+  rowRunnerFor,
+  semanticEnvironmentKeyOf,
+} from './database.js'
 
 // drizzle-orm rc.4 node-sqlite calls StatementSync.setReturnArrays() (added Node 22.16 / 24.0; ABSENT
 // in 23.x). Where it is missing, the real sqlite authority probe fail-closes (production-correct) and
@@ -82,6 +91,33 @@ describe('dialect & driver detection', () => {
   })
 })
 
+describe('one SQL execution dispatch', () => {
+  it('routes raw probes and built hydration SQL through the dialect-specific runner', async () => {
+    const query = sql.raw('select 1')
+    const sqliteCalls: SQL[] = []
+    const sqlite = {
+      dialect: (sqliteDb as unknown as { dialect: unknown }).dialect,
+      all: async (received: SQL) => {
+        sqliteCalls.push(received)
+        return [{ value: 'sqlite' }]
+      },
+    }
+    const pgCalls: SQL[] = []
+    const pg = {
+      dialect: (pgPoolDb as unknown as { dialect: unknown }).dialect,
+      execute: async (received: SQL) => {
+        pgCalls.push(received)
+        return { rows: [{ value: 'pg' }] }
+      },
+    }
+
+    await expect(rowRunnerFor(sqlite)(query)).resolves.toEqual([{ value: 'sqlite' }])
+    await expect(executeSql(pg, query)).resolves.toEqual([{ value: 'pg' }])
+    expect(sqliteCalls).toEqual([query])
+    expect(pgCalls).toEqual([query])
+  })
+})
+
 describe('semanticEnvironmentKeyOf — pinned to a provable session', () => {
   it('a single-session client (pg Client) probes and reflects the actual authority', async () => {
     const asSvc = await semanticEnvironmentKeyOf(pgClientDb, { run: authority('svc') })
@@ -129,6 +165,25 @@ describe('rlsEnabledOf — real catalog path, never assumes off', () => {
   it('reports unknown when the catalog row is missing or the query fails', async () => {
     await expect(rlsEnabledOf(pgPoolDb, 'ghost', { run: runReturning([]) })).resolves.toBe('unknown')
     await expect(rlsEnabledOf(pgPoolDb, 'users', { run: runThrows })).resolves.toBe('unknown')
+  })
+
+  it('binds the relation name and schema as parameters', async () => {
+    const table = "users' or true --"
+    const schema = "tenant' or true --"
+    let captured: SQL | undefined
+    await rlsEnabledOf(pgPoolDb, table, {
+      schema,
+      run: async (query) => {
+        captured = query
+        return [{ rls: false }]
+      },
+    })
+    const dialect = (pgPoolDb as unknown as { dialect: { sqlToQuery(query: SQL): { sql: string; params: unknown[] } } })
+      .dialect
+    const rendered = dialect.sqlToQuery(captured!)
+    expect(rendered.sql).not.toContain(table)
+    expect(rendered.sql).not.toContain(schema)
+    expect(rendered.params).toEqual([table, schema])
   })
 
   it('reports false for engines without per-table RLS', async () => {

@@ -14,6 +14,7 @@ import { assertUsage } from '../utils/assert.js'
 import type { HydrationExecutor } from './hydrate.js'
 import { type LiveGraph, createLiveGraph } from './liveGraph.js'
 import { type RoutableGraph, type Router, createRouter } from '../router/changeRouter.js'
+import { SubscriberFence } from './subscriberFence.js'
 
 type AcquireRequest = {
   instanceKey: string
@@ -88,8 +89,21 @@ function createRegistry(config: { maxStateRowsPerInput: number }): Registry {
     if (entry.tokens + entry.leases === 0) entry.dispose()
   }
 
-  function mintToken(entry: Entry, identityKey: string, seqAtRead: number, notify: () => void): ReadToken {
-    entry.tokens++
+  /** Transfer ownership without exposing a zero-ref state: take the destination before dropping source. */
+  function transfer(entry: Entry, from: 'tokens' | 'leases', to: 'tokens' | 'leases'): void {
+    entry[to]++
+    entry[from]--
+  }
+
+  function mintToken(
+    entry: Entry,
+    identityKey: string,
+    fence: SubscriberFence,
+    notify: () => void,
+    transferFrom?: 'tokens' | 'leases',
+  ): ReadToken {
+    if (transferFrom) transfer(entry, transferFrom, 'tokens')
+    else entry.tokens++
     // Seam 1 (db.live serialize-time activation): an un-redeemed token joins NO sink — it is INERT.
     // The subscription is made at REDEEM (activation), when the channel that consumes `notify` exists.
     // Any invalidation during the read window (mint→redeem) would fire into a not-yet-wired channel;
@@ -98,16 +112,15 @@ function createRegistry(config: { maxStateRowsPerInput: number }): Registry {
     let phase: 'open' | 'redeemed' | 'released' = 'open'
     return {
       instanceKey: identityKey,
-      seqAtRead,
+      seqAtRead: fence.seqAtRead,
       redeem() {
         assertUsage(phase === 'open', 'read token already redeemed or released')
         phase = 'redeemed'
-        entry.leases++ // add the lease BEFORE dropping the token — refcount never dips to zero
-        entry.tokens--
+        transfer(entry, 'tokens', 'leases')
         const unsubscribe = subscribe(identityKey, notify) // seam 1: join the sink AT activation
         // Seam 2 — the σ-read→activation fence: a change landed between the σ-read (seqAtRead, captured
         // at mint) and this activation, so the just-wired channel would miss it. Replay exactly once.
-        if (entry.graph.invalidationSeq() > seqAtRead) notify()
+        fence.replayAtActivation(entry.graph.invalidationSeq(), notify)
         let released = false
         return {
           release() {
@@ -131,8 +144,14 @@ function createRegistry(config: { maxStateRowsPerInput: number }): Registry {
     }
   }
 
-  function attach(entry: Entry, request: AcquireRequest): AcquireResult {
-    const token = mintToken(entry, request.instanceKey, entry.graph.invalidationSeq(), request.notify)
+  function attach(entry: Entry, request: AcquireRequest, transferFrom?: 'tokens' | 'leases'): AcquireResult {
+    const token = mintToken(
+      entry,
+      request.instanceKey,
+      new SubscriberFence(entry.graph.invalidationSeq()),
+      request.notify,
+      transferFrom,
+    )
     return { graph: entry.graph, token }
   }
 
@@ -189,12 +208,12 @@ function createRegistry(config: { maxStateRowsPerInput: number }): Registry {
           // that is mid-rebuild while believing it precise. Re-checking after every await is what makes
           // this generation-aware without a generation counter.
           while (existing.graph.state() === 'seeding') await existing.graph.ready()
-          return attach(existing, request)
-        } finally {
-          existing.tokens-- // release the provisional; `attach` already took the real ref above
-          // Deliberately no sweep here. On the success path `attach` holds a token, so the count cannot
-          // be zero; on the throw path the entry is either still held by someone else or was already
+          return attach(existing, request, 'tokens')
+        } catch (error) {
+          existing.tokens--
+          // Deliberately no sweep here. The entry is either still held by someone else or was already
           // disposed by the release that raced us.
+          throw error
         }
       }
 

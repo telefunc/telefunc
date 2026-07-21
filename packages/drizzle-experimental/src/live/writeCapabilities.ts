@@ -63,7 +63,7 @@ function oldNewProvenOf(db: AnyDb): boolean {
  *  to guard. */
 function markOldNewProven(db: AnyDb): void {
   const capability = oldNewSupport.get(db as object)
-  if (capability?.supported) capability.proven = true
+  if (capability?.supported) oldNewSupport.set(db as object, { ...capability, proven: true })
 }
 
 /** Believe the statement over the version number, permanently for this db. Called when a write that relied
@@ -82,7 +82,7 @@ function probeOldNewReturning(db: AnyDb): Promise<boolean> {
   if (started) return started
   const probe = runOldNewProbe(db).then(
     (capability) => {
-      oldNewSupport.set(key, capability)
+      oldNewSupport.set(key, { ...capability })
       return capability.supported
     },
     () => {
@@ -141,7 +141,7 @@ function isPermissionDenied(error: unknown): boolean {
  *  no privileges, which is the whole point of using it as the fallback. */
 async function serverVersionNum(db: AnyDb): Promise<number> {
   try {
-    const rows = await rowRunnerFor(db)('show server_version_num')
+    const rows = await rowRunnerFor(db)(sql.raw('show server_version_num'))
     const value = rows[0] ? Object.values(rows[0])[0] : undefined
     const version = Number.parseInt(str(value), 10)
     return Number.isFinite(version) ? version : 0
