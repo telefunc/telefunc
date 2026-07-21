@@ -1,46 +1,42 @@
-import { readFileSync } from 'node:fs'
-import { describe, expect, it } from 'vitest'
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterAll, describe, expect, it } from 'vitest'
 import { LiveCell } from './primitive/live.js'
-import { installLiveReplacer } from './primitive/wireServer.js'
-// SPEC-ONLY deep import of the installed telefunc's BUILT serializer. Not on telefunc's public entry, and
+// SPEC-ONLY deep imports of the installed telefunc's BUILT modules. Not on telefunc's public entry, and
 // nothing at runtime reaches this way — the package talks to core exclusively through the public extension
-// seam. But the dependency being pinned here IS core's internal serialize behaviour, so the spec has to
-// look at the thing it depends on.
+// seam. But the dependencies being pinned here ARE core's internals — the extension scanner and the
+// serializer's request-start snapshot semantics — so the spec has to look at the things it depends on.
 //
 // Deliberately `dist/`, not `../../telefunc/node/…` source: importing the source drags telefunc's .ts into
 // THIS package's tsc program under THIS package's compilerOptions, which fails on core files needing a
-// newer lib (`Uint8Array.toBase64`). Reading the built .d.ts avoids recompiling core — and it is also the
-// more faithful target, since `dist/` is what a consumer installs. Requires telefunc to be built; it is a
+// newer lib (`Uint8Array.toBase64`). The built .d.ts avoids recompiling core — and it is also the more
+// faithful target, since `dist/` is what a consumer installs. Requires telefunc to be built; it is a
 // workspace dependency, so the repo's build already does that.
+import { getExtensionImports } from '../../telefunc/dist/node/shared/discoverExtensions.js'
 import { serializeTelefunctionResult } from '../../telefunc/dist/node/server/runTelefunc/serializeTelefunctionResult.js'
+import { getServerConfig } from '../../telefunc/dist/node/server/serverConfig.js'
 
-// THE VERSION BOUNDARY, as an executable check rather than a number in package.json.
+// THE VERSION BOUNDARY, as executable checks rather than a number in package.json.
 //
-// This package registers its wire replacer from `reactiveDrizzle()`, and the documented shape calls that at
-// MODULE LEVEL in a `.telefunc.ts` file — so registration happens while telefunc loads the telefunc files,
-// which is AFTER a request has already resolved its config. A telefunc whose serializer reads that
-// request-start snapshot never sees the replacer: the Live serializes as an ordinary object, no error is
-// raised anywhere, and the client silently receives something that was never replaced. Every released
-// telefunc through 0.2.22 behaves that way.
+// This package registers its wire replacer at server BOOT through telefunc's auto-load seam: core scans
+// the project root's package.json for `@telefunc/*` dependencies whose manifest declares
+// `"telefunc": { "server": … }`, and injects that import into every transformed `.telefunc.*` module —
+// so the registration precedes the request-start config snapshot core's serializer reads. Both halves of
+// that seam (`config.extensions` + the scanner) shipped in telefunc 0.2.21 (commit 56573c1f, first
+// released in v0.2.21) — the floor this file enforces.
 //
-// TWO COMPLEMENTARY CHECKS, and neither substitutes for the other:
+// THREE COMPLEMENTARY CHECKS, none substituting for another:
 //
-//  - the BEHAVIOUR test proves the telefunc actually installed HAS the seam this package needs. It says
-//    nothing about what the manifest promises — it passed identically while `peerDependencies.telefunc`
-//    still said `>=0.2.0`, because the workspace core is fixed either way.
-//  - the MANIFEST test proves the declared floor cannot drift back below the release that carries the fix.
-//    It says nothing about whether the installed core works — only about what consumers are promised.
-//
-// The first without the second is what let a stale `>=0.2.0` sit unnoticed: a user installing against a
-// released 0.2.x would have resolved a core that silently serializes the Live as a plain object, and no
-// test in this repo would have objected.
-//
-// Red-provable in both directions: revert the union read in telefunc's serializeTelefunctionResult (rebuild
-// dist — that is the artifact this spec loads) and the behaviour test goes red with the silent plain-object
-// miss; loosen the manifest floor and the manifest test goes red.
+//  - the MANIFEST test proves the declared floor cannot drift below the release that carries the seam;
+//  - the DISCOVERY test proves core's REAL scanner finds this package's REAL manifest bytes;
+//  - the BOOT-ORDER test proves the entry's registration reaches a snapshot taken after boot — and its
+//    control proves a snapshot taken BEFORE the entry misses it, which is why boot-time registration is
+//    the supported path and a lazily-registering setup must rely on `reactiveDrizzle()`'s belt from the
+//    SECOND request on (core's request-side ordering is a ledgered core follow-up, not this package's).
 
-/** The release that first carries telefunc's live-config union read in `serializeTelefunctionResult`. */
-const REQUIRED_TELEFUNC_MINIMUM = [0, 2, 23] as const
+/** The release that first carries telefunc's extension seam AND the auto-load scanner (both in 56573c1f). */
+const REQUIRED_TELEFUNC_MINIMUM = [0, 2, 21] as const
 
 /** Exactly the range syntaxes this gate claims to understand, ANCHORED to the whole string: `>=x.y.z`,
  *  `^x.y.z`, and a bare exact `x.y.z`. For each, the lowest admitted version is the triple itself. */
@@ -50,10 +46,9 @@ const SUPPORTED_RANGE = /^(?:>=|\^)?(\d+)\.(\d+)\.(\d+)$/
  *  reason about.
  *
  *  It used to scan for the first `x.y.z` anywhere in the string and ignore everything around it, which made
- *  the gate green-light precisely the ranges it exists to reject: `<=0.2.23` and `<0.2.23` (which admit
- *  older releases, and in the second case ONLY older ones) both "passed", as did the union
- *  `>=0.2.23 || >=0.2.0`, whose second arm re-admits everything the first excludes. An operator-blind read
- *  of a range is not a floor.
+ *  the gate green-light precisely the ranges it exists to reject: `<=0.2.21` and `<0.2.21` (which admit
+ *  older releases, and in the second case ONLY older ones) both "passed", as did a union whose second arm
+ *  re-admits everything the first excludes. An operator-blind read of a range is not a floor.
  *
  *  Unknown syntax now THROWS rather than guessing. A gate that cannot parse its input must not return an
  *  answer: widening the grammar has to be a deliberate edit here, with a control added below for whatever
@@ -76,11 +71,11 @@ const atLeast = (actual: readonly number[], required: readonly number[]) =>
     : actual[1]! !== required[1]!
       ? actual[1]! > required[1]!
       : actual[2]! >= required[2]!
-
 describe('telefunc compatibility — the declared peer floor', () => {
-  it('peerDependencies.telefunc admits nothing below the release that carries the fix', () => {
+  it('peerDependencies.telefunc admits nothing below the release that carries the extension seam', () => {
     // Reads THIS package's own manifest, so loosening the range is what fails — the check the behaviour
-    // test structurally cannot make, since the workspace core is fixed regardless of what is declared.
+    // tests structurally cannot make, since the workspace core carries the seam regardless of what is
+    // declared.
     const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as {
       peerDependencies: Record<string, string>
     }
@@ -89,50 +84,76 @@ describe('telefunc compatibility — the declared peer floor', () => {
     expect(
       atLeast(minimumOf(range!), REQUIRED_TELEFUNC_MINIMUM),
       `peerDependencies.telefunc is "${range}", which admits a telefunc older than ` +
-        `${REQUIRED_TELEFUNC_MINIMUM.join('.')} — those releases silently serialize a Live as a plain object`,
+        `${REQUIRED_TELEFUNC_MINIMUM.join('.')} — those releases have no config.extensions seam at all`,
     ).toBe(true)
   })
 
   it('CONTROL: the floor comparison rejects a lower range and accepts a higher one', () => {
     // Without this, the assertion above could pass because `atLeast` is simply permissive.
     expect(atLeast(minimumOf('>=0.2.0'), REQUIRED_TELEFUNC_MINIMUM)).toBe(false)
-    expect(atLeast(minimumOf('>=0.2.22'), REQUIRED_TELEFUNC_MINIMUM)).toBe(false)
-    expect(atLeast(minimumOf('>=0.2.23'), REQUIRED_TELEFUNC_MINIMUM)).toBe(true)
+    expect(atLeast(minimumOf('>=0.2.20'), REQUIRED_TELEFUNC_MINIMUM)).toBe(false)
+    expect(atLeast(minimumOf('>=0.2.21'), REQUIRED_TELEFUNC_MINIMUM)).toBe(true)
     expect(atLeast(minimumOf('>=0.3.0'), REQUIRED_TELEFUNC_MINIMUM)).toBe(true) // a legitimate future raise
     expect(atLeast(minimumOf('^1.0.0'), REQUIRED_TELEFUNC_MINIMUM)).toBe(true)
-    expect(atLeast(minimumOf('0.2.23'), REQUIRED_TELEFUNC_MINIMUM)).toBe(true) // bare exact pin
+    expect(atLeast(minimumOf('0.2.21'), REQUIRED_TELEFUNC_MINIMUM)).toBe(true) // bare exact pin
   })
 
   it('CONTROL: an UNSAFE OPERATOR is rejected, not silently read as a floor', () => {
     // The false green this gate shipped with: reading the first `x.y.z` anywhere ignored the operator, so
-    // `<=0.2.23` (admits every older release) and `<0.2.23` (admits ONLY older ones) both passed — the gate
+    // `<=0.2.21` (admits every older release) and `<0.2.21` (admits ONLY older ones) both passed — the gate
     // green-lighting exactly what it exists to reject. They must now fail loudly instead.
-    expect(() => minimumOf('<=0.2.23')).toThrow(/Cannot determine a version floor/)
-    expect(() => minimumOf('<0.2.23')).toThrow(/Cannot determine a version floor/)
+    expect(() => minimumOf('<=0.2.21')).toThrow(/Cannot determine a version floor/)
+    expect(() => minimumOf('<0.2.21')).toThrow(/Cannot determine a version floor/)
     expect(() => minimumOf('<0.3.0')).toThrow(/Cannot determine a version floor/)
   })
 
   it('CONTROL: a UNION is rejected — a safe first arm does not make the range safe', () => {
-    // `>=0.2.23 || >=0.2.0` reads as satisfied by the first arm while the second re-admits everything the
+    // `>=0.2.21 || >=0.2.0` reads as satisfied by the first arm while the second re-admits everything the
     // first excludes. Parsing only the leading triple could never see that.
-    expect(() => minimumOf('>=0.2.23 || >=0.2.0')).toThrow(/Cannot determine a version floor/)
-    expect(() => minimumOf('>=0.2.23 || <0.2.23')).toThrow(/Cannot determine a version floor/)
+    expect(() => minimumOf('>=0.2.21 || >=0.2.0')).toThrow(/Cannot determine a version floor/)
+    expect(() => minimumOf('>=0.2.21 || <0.2.21')).toThrow(/Cannot determine a version floor/)
   })
 
   it('CONTROL: other unparsable forms fail closed rather than guessing', () => {
-    for (const unsupported of ['*', 'x', '~0.2.23', '0.2.x', '>=0.2.23 <0.3.0', '0.2.0 - 0.2.30', 'latest', '']) {
+    for (const unsupported of ['*', 'x', '~0.2.21', '0.2.x', '>=0.2.21 <0.3.0', '0.2.0 - 0.2.30', 'latest', '']) {
       expect(() => minimumOf(unsupported), `expected ${JSON.stringify(unsupported)} to be rejected`).toThrow()
     }
   })
 })
+describe('telefunc compatibility — the auto-load seam, driven end to end', () => {
+  // A project root whose package.json depends on this package, with this package's REAL manifest bytes
+  // resolvable from it — what core's scanner reads in a user's app. The fixture fakes the LAYOUT only;
+  // the manifest content is byte-identical to ours, so a drifted `telefunc` field or specifier fails here.
+  const root = mkdtempSync(join(tmpdir(), 'tf-autoload-'))
+  afterAll(() => rmSync(root, { recursive: true, force: true }))
 
-describe('telefunc compatibility — the installed core has the seam', () => {
-  it('the installed telefunc consults a replacer registered AFTER the request resolved its config', () => {
-    // Reproduce runTelefunc's ordering: the request resolves its config, THEN the telefunc files evaluate
-    // and this package registers. `installLiveReplacer()` is the real registration path — the same call
-    // `reactiveDrizzle()` makes — so this pins the shipping seam, not a stand-in for it.
-    const snapshotTakenBeforeRegistration: never[] = [] // what a request that resolved config first carries
-    installLiveReplacer()
+  it('core’s REAL scanner discovers this package’s REAL manifest and emits the server import', () => {
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ name: 'fixture-app', dependencies: { '@telefunc/drizzle-experimental': '*' } }),
+    )
+    const pkgDir = join(root, 'node_modules', '@telefunc', 'drizzle-experimental')
+    mkdirSync(pkgDir, { recursive: true })
+    writeFileSync(join(pkgDir, 'package.json'), readFileSync(new URL('../package.json', import.meta.url)))
+    expect(getExtensionImports(root, 'server')).toEqual(["import '@telefunc/drizzle-experimental/telefunc-server';"])
+    // …and nothing is declared for the client side: the reviver belongs to the tanstack-query adapter,
+    // which registers at ITS import. An empty list here is that decision, pinned.
+    expect(getExtensionImports(root, 'client')).toEqual([])
+  })
+
+  it('the entry’s boot-time registration reaches a snapshot taken afterwards — and the serializer replaces', async () => {
+    // The ordering the auto-load seam guarantees, reproduced with the REAL pieces: a snapshot taken
+    // BEFORE the entry evaluates (core's per-request `getServerConfig()`), the entry import (what the
+    // injected `import '@telefunc/drizzle-experimental/telefunc-server'` evaluates at boot), and a
+    // snapshot taken AFTER — the one a request arriving after boot resolves.
+    const before = getServerConfig().extensionResponseTypes
+    await import('./telefunc-server.js') // the real entry, side effect only
+    const after = getServerConfig().extensionResponseTypes
+    // The CONTROL that makes the ordering claim falsifiable: core's serializer reads the request-start
+    // snapshot, so a snapshot from before boot-time registration MISSES the replacer. This is exactly why
+    // the entry must run at boot, and what a lazily-registering setup's first request would see.
+    expect(before.some((replacer) => replacer.prefix === '!TelefuncLive:')).toBe(false)
+    expect(after.some((replacer) => replacer.prefix === '!TelefuncLive:')).toBe(true)
 
     const live = new LiveCell([{ id: 1, text: 'a' }])
     const result = serializeTelefunctionResult({
@@ -150,14 +171,11 @@ describe('telefunc compatibility — the installed core has the seam', () => {
       abortSignal: new AbortController().signal,
       streamTransport: 'INLINE' as never,
       useNodeStream: false,
-      serverConfig: { extensionResponseTypes: snapshotTakenBeforeRegistration, log: { shieldErrors: {} as never } },
+      serverConfig: { extensionResponseTypes: after, log: { shieldErrors: {} as never } },
     })
-
     expect(result.type).toBe('text')
     const body = (result as { body: string }).body
-    // The Live must have been REPLACED. Against a snapshot-only telefunc this fails with the body carrying
-    // the cell's own shape instead — silently, which is what makes the version floor worth enforcing.
-    expect(body).toContain('!TelefuncLive:')
+    expect(body).toContain('!TelefuncLive:') // replaced through the snapshot a post-boot request carries
     expect(body).toContain('channelId')
   })
 

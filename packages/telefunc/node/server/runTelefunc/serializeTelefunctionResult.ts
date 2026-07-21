@@ -22,7 +22,6 @@ import { STREAM_TRANSPORT, type StreamTransport } from '../../../wire-protocol/c
 import { textEncoder } from '../../../wire-protocol/frame.js'
 import { uint8ArrayToBase64url } from '../../../wire-protocol/base64url.js'
 import type { StreamingProducer, StreamingValueServer } from '../../../wire-protocol/types.js'
-import { getServerConfig } from '../serverConfig.js'
 import { type RequestContext } from '../context/requestContext.js'
 import type { Context } from '../context/context.js'
 import type { ReplacerType, TypeContract, ServerReplacerContext } from '../../../wire-protocol/types.js'
@@ -65,36 +64,13 @@ function serializeTelefunctionResult(runContext: {
   streamTransport: StreamTransport
   useNodeStream: boolean
   serverConfig: {
-    extensionResponseTypes?: ReplacerType<TypeContract, ServerReplacerContext>[]
+    extensionResponseTypes: ReplacerType<TypeContract, ServerReplacerContext>[]
     log: { shieldErrors: ShieldLogConfig }
   }
   valueShields?: ValueShields
 }): SerializeResult {
   const { requestContext } = runContext
-  // Consult the LIVE config here, not just the request-start snapshot on `runContext`.
-  //
-  // A request resolves its config BEFORE it loads the user's `.telefunc.js` files, and an extension may
-  // register while those files evaluate — `config.extensions.push(…)` at module level is a supported way to
-  // install one. Reading the snapshot made every such extension's `responseTypes` invisible to the very
-  // request that loaded it: the value it exists to encode serialized as an ordinary object instead, with no
-  // error anywhere, so the client silently received something that was never replaced.
-  //
-  // Built-in types never had this problem — they are a static list — which is why it stayed hidden until an
-  // externally-registered response type was tried. Serialization happens well after the files are loaded, so
-  // the live config is what a request must be judged against. (See the standing TO-DO at the snapshot site
-  // in runTelefunc.ts, which already suspected the copy was unnecessary.)
-  //
-  // A UNION rather than a replacement, deliberately. In production the snapshot is always a prefix of the
-  // live list, so the union IS the live list. Where they differ is a caller that hands in types directly
-  // without registering them globally — which is how `ref-identity.spec.ts` drives the pipeline. Replacing
-  // the snapshot silently took that seam away and broke it; unioning can only ever ADD types, so no existing
-  // behaviour is lost and late registrations become visible.
-  const extensionResponseTypes = [
-    ...new Set([
-      ...(runContext.serverConfig.extensionResponseTypes ?? []),
-      ...getServerConfig().extensionResponseTypes,
-    ]),
-  ]
+  const { extensionResponseTypes } = runContext.serverConfig
 
   const bodyValue = runContext.telefunctionAborted
     ? { ret: runContext.telefunctionReturn, abort: true }

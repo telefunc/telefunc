@@ -39,11 +39,11 @@
     "@brillout/json-serializer": "^0.5.25",
     "@tanstack/db-ivm": "0.1.18"
   },
-  "// telefunc peer floor": "Requires the serializer's LIVE-config union read for response types registered during telefunc-file evaluation (telefunc PR: serializeTelefunctionResult). On 0.2.0-0.2.22 the serializer read the request-start config snapshot, so the replacer this package registers from a module-level reactiveDrizzle() was invisible to the very request that loaded it and a Live serialized as a plain object with NO error. 0.2.23 is the next unreleased patch at time of writing (main was 0.2.22); if the fix ships under a different number, raise this floor to match at release time. Enforced by src/compat.spec.ts, which fails if the installed telefunc lacks the fix.",
+  "// telefunc peer floor": "Requires telefunc's extension seam (config.extensions + responseTypes) AND the auto-load scanner that discovers the telefunc.server field above — both shipped in the extension-system commit first released in v0.2.21. Registration happens at server boot through that scanner (like @telefunc/rxjs), which is what makes it precede every request's config snapshot; reactiveDrizzle() keeps an idempotent late registration for setups the root-scanning discovery cannot see. Enforced by src/compat.spec.ts (floor grammar fail-closed; scanner + boot-order driven against built core dist).",
   "peerDependencies": {
     "@tanstack/query-core": ">=5.66.0",
     "drizzle-orm": "1.0.0-rc.4",
-    "telefunc": ">=0.2.23"
+    "telefunc": ">=0.2.21"
   },
   "peerDependenciesMeta": {
     "@tanstack/query-core": {
