@@ -32,12 +32,12 @@ import type {
   RegisterWire,
   RetainedWire,
 } from '../../../server/adapter/cloudflare/room/do.js'
+import { Fanout } from '../../../server/adapter/cloudflare/room/fanout.js'
 import type { BackendFixture, BackendHarness } from '../harness.js'
 import { bundleWorker } from './bundle.js'
 
 const DIRECTORY_DO_NAME = '__telefunc_room_directory__'
 const MAX_RETAINED_BYTES = 16 * 1024 * 1024
-const noop = (): void => {}
 
 // A DO stub's RPC surface, as this facade uses it.
 type RoomStub = {
@@ -46,7 +46,6 @@ type RoomStub = {
   readCells(inc: string, sel: { keys: string[] } | { prefix: string }): Promise<CellsWire>
   compareExchangeCells(inc: string, revision: string, mutations: Array<{ key: string; set?: { bytesB64: string; ttlMs?: number } }>): Promise<CxResult>
   commitLane(inc: string, lane: LaneId, payload: Uint8Array, opts?: { retain?: boolean; orderTtlMs?: number; closingLease?: string }): Promise<CommitWire>
-  awaitDelivery(token: string): Promise<void>
   readRetained(inc: string, lane: LaneId): Promise<RetainedWire | null>
   listRetained(inc: string): Promise<LaneId[]>
   deleteRetainedLane(inc: string, lane?: LaneId): Promise<void>
@@ -91,27 +90,17 @@ function setClock(value: number): void {
   })
 }
 
-async function deliverHandler(request: Request): Promise<Response> {
-  const subscriber = request.headers.get('x-subscriber') ?? ''
+// The handoff to one subscriber: invoke its live local receiver and, since the receiver is typed
+// `=> void`, await a thenable return (the stalling-receiver trace). A throw rejects THIS frame's delivery
+// (per-target failure). A vanished receiver (unsubscribed mid-flight) is skipped, at-most-once. This is
+// the subscriber-isolate side of the CF handoff: the room DO's fan-out RPC target, collapsed here to the
+// in-process receiver the same way production would dispatch inside the subscriber DO.
+async function deliverToReceiver(subscriber: string, frame: Uint8Array, info: { seq: number; timestamp: number }): Promise<void> {
   const receiver = receivers.get(subscriber)
-  // Addressability probe: the room DO pings once at first registration.
-  if (request.headers.get('x-probe') !== null) {
-    return new Response(receiver !== undefined ? 'ok' : 'no', { status: receiver !== undefined ? 200 : 404 })
-  }
-  if (receiver === undefined) return new Response('gone', { status: 410 })
-  const seq = Number(request.headers.get('x-seq'))
-  const timestamp = Number(request.headers.get('x-ts'))
-  const payload = new Uint8Array(await request.arrayBuffer())
-  try {
-    // A receiver is typed `=> void`; a thenable return extends the handoff attempt (the stalling-receiver
-    // trace), so it is awaited. A throw rejects THIS frame's delivery (per-target failure).
-    const result = receiver(payload, { seq, timestamp }) as unknown
-    if (result !== null && typeof result === 'object' && typeof (result as { then?: unknown }).then === 'function') {
-      await result
-    }
-    return new Response('ok', { status: 200 })
-  } catch {
-    return new Response('receiver-threw', { status: 500 })
+  if (receiver === undefined) return
+  const result = receiver(new Uint8Array(frame), { seq: info.seq, timestamp: info.timestamp }) as unknown
+  if (result !== null && typeof result === 'object' && typeof (result as { then?: unknown }).then === 'function') {
+    await result
   }
 }
 
@@ -125,7 +114,6 @@ async function getShared(): Promise<Shared> {
       compatibilityDate: '2025-01-01',
       compatibilityFlags: ['nodejs_compat'],
       durableObjects: { ROOM: { className: 'TelefuncRoomDurableObject', useSQLite: true } },
-      serviceBindings: { DELIVER: deliverHandler },
     })
     const ns = (await mf.getDurableObjectNamespace('ROOM')) as unknown as Namespace
     return { mf, ns }
@@ -244,14 +232,25 @@ class CloudflareRoomBackend implements RoomBackendSpi {
 
   readonly #ns: Namespace
   #disposed = false
-  // per (roomId, inc, laneKey) ordered observation of the DO's delivery attempts, so delivery promises
-  // settle in commit order deterministically across the RPC seam.
-  readonly #deliverGates = new Map<string, Promise<void>>()
+  // The ephemeral delivery chains, driven in the subscriber isolate (this facade) over the acceptance-time
+  // route snapshot the DO returns — one Fanout per room so the (inc, laneKey) chains stay isolated. This
+  // is the SAME fanout.ts algorithm the production room DO uses; only its host differs (the workerd
+  // service-binding relay serializes a stalled handoff across lanes, so the chain runs here instead).
+  readonly #fanouts = new Map<string, Fanout>()
   // subscriberName → its live subscription, so a dropped generation can close the right ones.
   readonly #subs = new Map<string, { inc: string; laneKey: string; sub: CfLaneSubscription }>()
 
   constructor(ns: Namespace) {
     this.#ns = ns
+  }
+
+  #fanoutFor(roomId: string): Fanout {
+    let fanout = this.#fanouts.get(roomId)
+    if (fanout === undefined) {
+      fanout = new Fanout(deliverToReceiver)
+      this.#fanouts.set(roomId, fanout)
+    }
+    return fanout
   }
 
   #assertLive(): void {
@@ -321,17 +320,18 @@ class CloudflareRoomBackend implements RoomBackendSpi {
     opts?: { retain?: boolean; orderTtlMs?: number; closingLease?: string },
   ): Promise<CommitResult> {
     await this.#preflight()
-    const stub = this.#stub(roomId)
-    const wire = await stub.commitLane(inc, lane, payload, opts)
+    const wire = await this.#stub(roomId).commitLane(inc, lane, payload, opts)
     if ('error' in wire) throw new Error(wire.error)
     if ('stale' in wire) return { stale: true }
-    const chainKey = `${roomId} ${inc} ${laneKeyOf(lane)}`
-    const previousGate = this.#deliverGates.get(chainKey) ?? Promise.resolve()
-    // Observe THIS frame's delivery only after the previous frame's was observed: the DO settles attempts
-    // in chain order, so awaiting them in that order makes the delivery promises settle in commit order.
-    const token = wire.token
-    const delivery = previousGate.then(() => stub.awaitDelivery(token))
-    this.#deliverGates.set(chainKey, delivery.then(noop, noop))
+    // Acceptance is done and the target snapshot is fixed; the ordered at-most-once chain runs here over
+    // the current payload. `delivery` rejects only on this frame's own handoff failure and its promises
+    // settle in commit order because the chain is settlement-gated.
+    const fanout = this.#fanoutFor(roomId)
+    const token = fanout.enqueue(inc, laneKeyOf(lane), wire.targets, payload, { seq: wire.seq, timestamp: wire.timestamp })
+    const delivery = fanout.await(token)
+    // Mark the rejection observed so a delivery the caller awaits only later (a failed handoff) is never a
+    // spurious unhandled rejection; the caller still sees it when it awaits (promises fan out to handlers).
+    void delivery.catch(() => {})
     return { accepted: true, seq: wire.seq, timestamp: wire.timestamp, receivers: wire.receivers, delivery }
   }
 
@@ -398,6 +398,8 @@ class CloudflareRoomBackend implements RoomBackendSpi {
     await this.#preflight()
     const wire = await this.#stub(roomId).dropGeneration(inc)
     if ('error' in wire) throw new Error(wire.error)
+    // The dropped incarnation's delivery chains never continue into a recreation.
+    this.#fanoutFor(roomId).clearIncarnation(inc)
     // Close the local subscriptions whose generation just vanished — their channel is terminal.
     for (const [, subscriber] of wire.droppedSubscribers) {
       const entry = this.#subs.get(subscriber)

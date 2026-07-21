@@ -10,9 +10,8 @@
 import { DurableObject } from 'cloudflare:workers'
 import type { CellMutation, CxResult, HeadCx, HeadNext, LaneId } from '../../../../backend/spi.js'
 import { base64ToBytes, bytesToBase64, laneKey as laneKeyOf } from './codec.js'
-import { Fanout } from './fanout.js'
 import { assertRetainedCapacity, deleteRetained, installRetained, listRetained, readRetained } from './retained.js'
-import { deleteRoute, pruneExpiredRoutes, renewRoute, ROUTE_TTL_MS, snapshotRoutes, upsertRoute } from './routes.js'
+import { deleteRoute, pruneExpiredRoutes, renewRoute, snapshotRoutes, upsertRoute } from './routes.js'
 import {
   advanceOrder,
   compareExchangeCells,
@@ -60,7 +59,9 @@ export type HeadCxWire =
 export type CellsWire = { revision: string; cells: Array<[string, string]> } | { staleInc: true }
 export type CellMutationWire = { key: string; set?: { bytesB64: string; ttlMs?: number } }
 export type CommitWire =
-  | { accepted: true; seq: number; timestamp: number; receivers: number; token: string }
+  // `targets` is the acceptance-time route snapshot; the subscriber-isolate (the facade in the
+  // conformance lane) drives the ordered delivery chain over it. `receivers` is its size.
+  | { accepted: true; seq: number; timestamp: number; receivers: number; targets: string[] }
   | { stale: true }
   | { error: string }
 export type RetainedWire = { payloadB64: string; seq: number; timestamp: number }
@@ -89,39 +90,20 @@ function nextFromWire(next: HeadNextWire): HeadNext {
   return next.ttlMs === undefined ? { head } : { head, ttlMs: next.ttlMs }
 }
 
-// The header carried alongside every delivery/probe fetch to the relay/subscriber.
-const PROBE_MARKER = '__telefunc_room_probe__'
-
-// The room DO's bindings: the fan-out seam (a service binding in the conformance lane; a subscriber-DO
-// namespace in production, W3-C).
-type RoomEnv = { DELIVER: { fetch: (request: Request) => Promise<Response> } }
-
 // Extends the `cloudflare:workers` DurableObject base so the Room backend seam can call its methods over
-// RPC (a plain class would only expose `fetch`). One DO per room.
-export class TelefuncRoomDurableObject extends DurableObject<RoomEnv> {
+// RPC (a plain class would only expose `fetch`). One DO per room. The room DO owns all durable state
+// (head, cells, order, retained, routes, directory) and the acceptance transaction; the ephemeral
+// delivery chain (fanout.ts) is driven by the subscriber isolate over the acceptance-time route snapshot
+// this DO returns — in production the room DO would RPC each subscriber DO, wiring gated to W3-C.
+export class TelefuncRoomDurableObject extends DurableObject {
   readonly #sql: SqlStorage
-  readonly #fanout: Fanout
   readonly #maxRetainedBytes: number
 
-  constructor(ctx: DurableObjectState, env: RoomEnv) {
-    super(ctx, env)
+  constructor(ctx: DurableObjectState, env: unknown) {
+    super(ctx, env as never)
     this.#sql = ctx.storage.sql
     initSchema(this.#sql)
     this.#maxRetainedBytes = 16 * 1024 * 1024
-    // The handoff seam. In this dark spike the room DO hands a frame to the DELIVER service binding keyed
-    // by the persisted subscriber name; the fixture maps that name to the real receiver. Production
-    // resolves a subscriber DO stub via idFromName(name) — that wiring is W3-C.
-    this.#fanout = new Fanout(async (subscriber, frame, info) => {
-      const deliverer = this.env.DELIVER
-      const res = await deliverer.fetch(
-        new Request('http://telefunc-room-deliver/', {
-          method: 'POST',
-          headers: { 'x-subscriber': subscriber, 'x-seq': String(info.seq), 'x-ts': String(info.timestamp) },
-          body: frame,
-        }),
-      )
-      if (!res.ok) throw new Error(`deliver to '${subscriber}' failed: ${res.status}`)
-    })
   }
 
   // ── head ──
@@ -202,12 +184,7 @@ export class TelefuncRoomDurableObject extends DurableObject<RoomEnv> {
     }
     if (accepted === null) return { stale: true }
     const settled: { seq: number; timestamp: number; targets: string[] } = accepted
-    const token = this.#fanout.enqueue(inc, key, settled.targets, frame, { seq: settled.seq, timestamp: settled.timestamp })
-    return { accepted: true, seq: settled.seq, timestamp: settled.timestamp, receivers: settled.targets.length, token }
-  }
-
-  async awaitDelivery(token: string): Promise<void> {
-    await this.#fanout.await(token)
+    return { accepted: true, seq: settled.seq, timestamp: settled.timestamp, receivers: settled.targets.length, targets: settled.targets }
   }
 
   // ── retained ──
@@ -230,13 +207,12 @@ export class TelefuncRoomDurableObject extends DurableObject<RoomEnv> {
   async registerRoute(inc: string, laneKey: string, subscriber: string, leaseId: string, bucket: string | null): Promise<RegisterWire> {
     const now = authorityNow()
     const head = readLiveHead(this.#sql, now)
-    // Establishment open-head check: a mismatch fails registration (ready rejects, fail-closed).
+    // Establishment open-head check: a mismatch fails registration (ready rejects, fail-closed). The
+    // addressability probe (readiness-ordering §2.3) lives in the subscriber isolate — the facade only
+    // registers a route it has a live receiver for.
     if (head === null || head.currentInc !== inc || head.state !== 'open') {
       return { rejected: true, reason: `room has no open incarnation '${inc}'` }
     }
-    // Addressability probe: one no-op ping to the target; an unaddressable target fails registration.
-    const addressable = await this.#probe(subscriber)
-    if (!addressable) return { rejected: true, reason: `subscriber '${subscriber}' is not addressable` }
     let expiresAt = 0
     this.ctx.storage.transactionSync(() => {
       expiresAt = upsertRoute(this.#sql, inc, laneKey, subscriber, leaseId, bucket, now)
@@ -255,17 +231,6 @@ export class TelefuncRoomDurableObject extends DurableObject<RoomEnv> {
 
   async unsubscribeRoute(inc: string, laneKey: string, subscriber: string, leaseId: string): Promise<void> {
     this.ctx.storage.transactionSync(() => deleteRoute(this.#sql, inc, laneKey, subscriber, leaseId))
-  }
-
-  async #probe(subscriber: string): Promise<boolean> {
-    try {
-      const res = await this.env.DELIVER.fetch(
-        new Request('http://telefunc-room-deliver/', { method: 'POST', headers: { 'x-subscriber': subscriber, 'x-probe': PROBE_MARKER } }),
-      )
-      return res.ok
-    } catch {
-      return false
-    }
   }
 
   // ── generation lifecycle ──
@@ -291,7 +256,6 @@ export class TelefuncRoomDurableObject extends DurableObject<RoomEnv> {
     this.ctx.storage.transactionSync(() => {
       dropGenerationRows(this.#sql, inc)
     })
-    this.#fanout.clearIncarnation(inc)
     return { droppedSubscribers }
   }
 
