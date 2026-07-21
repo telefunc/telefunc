@@ -187,5 +187,43 @@ for (const harness of installedBackends) {
       gate.resolve()
       await stuck.delivery
     })
+
+    it("discards a dropped generation's accepted attempt before legal reuse of the same incarnation id", async () => {
+      if (!fx.traces.handoffAwaitsReceiver) return
+      const gate = deferred()
+      const entered = deferred()
+      const old = fx.backend.subscribeLane(roomId, inc, SEMANTIC, async () => {
+        entered.resolve()
+        await gate.promise
+      })
+      await old.ready
+      const blocker = accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, bytes('blocker')))
+      await entered.promise
+      const droppedAttempt = accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, bytes('old-frame')))
+
+      const head = await readHeadOrThrow(fx.backend, roomId)
+      const { head: closing, leaseId } = await enterClosing(fx.backend, roomId, head)
+      accepted(await fx.backend.commitLane(roomId, inc, CONTROL, bytes('closed'), { closingLease: leaseId }))
+      const tombstone = okHead(await finalizeClose(fx.backend, roomId, closing, leaseId))
+      await fx.backend.dropGeneration(roomId, inc)
+
+      const reused = okHead(
+        await fx.backend.compareExchangeHead(
+          roomId,
+          { expect: { rev: tombstone.rev } },
+          { head: { currentInc: inc, state: 'open', config: tombstone.config } },
+        ),
+      )
+      expect(reused.currentInc).toBe(inc)
+      const fresh = collector()
+      const freshSub = fx.backend.subscribeLane(roomId, inc, SEMANTIC, fresh.receiver)
+      await freshSub.ready
+      await accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, bytes('new-frame'))).delivery
+
+      gate.resolve()
+      await Promise.all([blocker.delivery, droppedAttempt.delivery])
+      expect(fresh.payloads()).toEqual(['new-frame'])
+      await freshSub.unsubscribe()
+    })
   })
 }

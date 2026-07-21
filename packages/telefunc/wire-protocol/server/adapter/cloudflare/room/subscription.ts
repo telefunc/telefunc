@@ -74,8 +74,13 @@ export class CloudflareLaneSubscription implements LaneSubscription {
   async unsubscribe(): Promise<void> {
     if (this.#state === 'closed') return
     this.#cancelTimer()
-    await this.#operations.unsubscribe()
-    this.#close(new Error('subscription unsubscribed'))
+    try {
+      await this.#operations.unsubscribe()
+    } finally {
+      // Detach is local-first and terminal even when the transport cannot remove the durable route.
+      // The guarded route then becomes unreachable locally and dies by lease expiry.
+      this.#close(new Error('subscription unsubscribed'))
+    }
   }
 
   generationDropped(): void {
@@ -215,5 +220,115 @@ export class CloudflareLaneSubscription implements LaneSubscription {
 
   #isClosed(): boolean {
     return this.#state === 'closed'
+  }
+}
+
+type LocalAttachment = {
+  close(error: Error): void
+}
+
+// One production lease lifecycle per local (room, incarnation, lane, representative), with callback
+// attachments behind it. The first attachment owns registration; only the last detach tears the route
+// down. Each returned subscription still has its own terminal local state.
+export class CloudflareLaneSubscriptionMultiplexer {
+  readonly #shared: CloudflareLaneSubscription
+  readonly #onEmpty: () => void
+  readonly #attachments = new Set<LocalAttachment>()
+  #emptyNotified = false
+
+  constructor(shared: CloudflareLaneSubscription, onEmpty: () => void) {
+    this.#shared = shared
+    this.#onEmpty = onEmpty
+  }
+
+  attach(detachLocal: () => void): LaneSubscription {
+    let closed = false
+    let readySettled = false
+    let settleReady!: { resolve: () => void; reject: (error: unknown) => void }
+    const listeners = new Set<(state: ReadinessState) => void>()
+    const ready = new Promise<void>((resolve, reject) => {
+      settleReady = { resolve, reject }
+    })
+    void ready.catch(() => {})
+
+    let attachment!: LocalAttachment
+    const offShared = this.#shared.onStateChange((state) => {
+      if (closed) return
+      if (state === 'closed') {
+        attachment.close(new Error('shared subscription lifecycle closed'))
+        this.#attachments.delete(attachment)
+        if (this.#attachments.size === 0) this.#notifyEmpty()
+        return
+      }
+      for (const listener of listeners) listener(state)
+    })
+    void this.#shared.ready.then(
+      () => {
+        if (closed || readySettled) return
+        readySettled = true
+        settleReady.resolve()
+      },
+      (error) => {
+        if (closed || readySettled) return
+        readySettled = true
+        settleReady.reject(error)
+      },
+    )
+
+    attachment = {
+      close(error) {
+        if (closed) return
+        closed = true
+        detachLocal()
+        offShared()
+        if (!readySettled) {
+          readySettled = true
+          settleReady.reject(error)
+        }
+        for (const listener of listeners) listener('closed')
+        listeners.clear()
+      },
+    }
+    this.#attachments.add(attachment)
+
+    return {
+      ready,
+      state: () => (closed ? 'closed' : this.#shared.state()),
+      onStateChange: (listener) => {
+        if (closed) return () => {}
+        listeners.add(listener)
+        return () => listeners.delete(listener)
+      },
+      unsubscribe: async () => {
+        if (closed) return
+        attachment.close(new Error('subscription unsubscribed'))
+        this.#attachments.delete(attachment)
+        if (this.#attachments.size > 0) return
+        this.#notifyEmpty()
+        await this.#shared.unsubscribe()
+      },
+    }
+  }
+
+  generationDropped(): void {
+    this.#shared.generationDropped()
+    this.lifecycleClosed(new Error('subscription generation dropped'))
+  }
+
+  backendDisposed(): void {
+    this.#shared.backendDisposed()
+    this.lifecycleClosed(new Error('subscription backend disposed'))
+  }
+
+  lifecycleClosed(error: Error): void {
+    for (const attachment of this.#attachments) attachment.close(error)
+    this.#attachments.clear()
+    this.#notifyEmpty()
+  }
+
+  #notifyEmpty(): void {
+    if (this.#emptyNotified) return
+    this.#emptyNotified = true
+    this.#onEmpty()
   }
 }

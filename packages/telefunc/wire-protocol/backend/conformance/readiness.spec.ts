@@ -59,6 +59,26 @@ for (const harness of installedBackends) {
         expect(latch.payloads()).toEqual(['K'])
       })
 
+      it('keeps the shared route live until the last local sibling detaches', async () => {
+        const detached = collector()
+        const survivor = collector()
+        const first = fx.backend.subscribeLane(roomId, inc, SEMANTIC, detached.receiver)
+        const second = fx.backend.subscribeLane(roomId, inc, SEMANTIC, survivor.receiver)
+        await Promise.all([first.ready, second.ready])
+
+        await first.unsubscribe()
+        expect(first.state()).toBe('closed')
+        expect(second.state()).toBe('ready')
+
+        const result = accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, bytes('survivor')))
+        expect(result.receivers).toBe(fx.expectedReceivers.oneLocalSubscriptionAfterSiblingDetach)
+        await result.delivery
+        await survivor.waitFor(1)
+        expect(detached.payloads()).toEqual([])
+        expect(survivor.payloads()).toEqual(['survivor'])
+        await second.unsubscribe()
+      })
+
       it('rejects ready for an incarnation that is not the open one (fail-closed)', async () => {
         const sub = fx.backend.subscribeLane(roomId, 'inc-that-never-was', SEMANTIC, () => {})
         expect(await settled(sub.ready)).toBe('rejected')

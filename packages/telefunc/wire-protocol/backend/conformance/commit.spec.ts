@@ -117,20 +117,37 @@ for (const harness of installedBackends) {
     // ── I5 ──
 
     describe('I5 — acceptance and delivery are separated', () => {
+      it('counts snapshot targets in the declared authority granularity and reaches both local callbacks', async () => {
+        const first = collector()
+        const second = collector()
+        const firstSub = fx.backend.subscribeLane(roomId, inc, SEMANTIC, first.receiver)
+        const secondSub = fx.backend.subscribeLane(roomId, inc, SEMANTIC, second.receiver)
+        await Promise.all([firstSub.ready, secondSub.ready])
+
+        const result = accepted(await commit(SEMANTIC, 'two-local'))
+        expect(result.receivers).toBe(fx.expectedReceivers.twoLocalSubscriptionsSameLane)
+        await result.delivery
+        await Promise.all([first.waitFor(1), second.waitFor(1)])
+        expect(first.payloads()).toEqual(['two-local'])
+        expect(second.payloads()).toEqual(['two-local'])
+      })
+
       it('counts receivers as the targets snapshotted at acceptance, not successful deliveries', async () => {
         if (!fx.traces.perTargetFailure) return
         const good = collector()
+        let badCalls = 0
         const bad = fx.backend.subscribeLane(roomId, inc, SEMANTIC, () => {
+          badCalls += 1
           throw new Error('receiver blew up')
         })
         const goodSub = fx.backend.subscribeLane(roomId, inc, SEMANTIC, good.receiver)
         await Promise.all([bad.ready, goodSub.ready])
 
         const result = accepted(await commit(SEMANTIC, 'K'))
-        expect(result.receivers).toBe(fx.expectedReceivers.twoLocalSubscriptionsSameLane)
         expect(await settled(result.delivery)).toBe('rejected')
         // acceptance stood: the healthy target still got the frame and the order advanced
         await good.waitFor(1)
+        expect(badCalls).toBe(1)
         expect(good.payloads()).toEqual(['K'])
         expect(accepted(await commit(SEMANTIC, 'next')).seq).toBe(result.seq + 1)
       })

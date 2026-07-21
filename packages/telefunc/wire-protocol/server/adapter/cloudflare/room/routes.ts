@@ -11,11 +11,19 @@ export const ROUTE_RENEW_FAILURE_LIMIT = 2
 export const ROUTE_DELIVERY_FAILURE_LIMIT = 3
 
 export type RouteTarget = { subscriber: string; leaseId: string }
+export type RouteInstallation = {
+  roomId: string
+  inc: string
+  laneKey: string
+  subscriber: string
+  leaseId: string
+}
 
 // Establishment: the open-head check happens in the DO (it holds the head); this UPSERT replaces any
 // prior lease for the same (inc, lane, subscriber) in a single statement.
 export function upsertRoute(
   sql: SqlStorage,
+  roomId: string,
   inc: string,
   laneKey: string,
   subscriber: string,
@@ -26,7 +34,8 @@ export function upsertRoute(
 ): number {
   const expiresAt = now + ttlMs
   sql.exec(
-    'INSERT OR REPLACE INTO route (inc, lane_key, subscriber, lease_id, bucket, expires_at, failures) VALUES (?, ?, ?, ?, ?, ?, 0)',
+    'INSERT OR REPLACE INTO route (room_id, inc, lane_key, subscriber, lease_id, bucket, expires_at, failures) VALUES (?, ?, ?, ?, ?, ?, ?, 0)',
+    roomId,
     inc,
     laneKey,
     subscriber,
@@ -35,6 +44,22 @@ export function upsertRoute(
     expiresAt,
   )
   return expiresAt
+}
+
+export function listRouteInstallations(sql: SqlStorage, inc: string): RouteInstallation[] {
+  return sql
+    .exec<{ room_id: string; inc: string; lane_key: string; subscriber: string; lease_id: string }>(
+      'SELECT room_id, inc, lane_key, subscriber, lease_id FROM route WHERE inc = ?',
+      inc,
+    )
+    .toArray()
+    .map((row) => ({
+      roomId: row.room_id,
+      inc: row.inc,
+      laneKey: row.lane_key,
+      subscriber: row.subscriber,
+      leaseId: row.lease_id,
+    }))
 }
 
 // Renewal compares all four fields (inc, lane_key, subscriber, leaseId); a stale lease id matches nothing

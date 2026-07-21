@@ -18,6 +18,7 @@ export class Fanout {
   // inc -> laneKey -> the lane's current chain tail. Nested so an incarnation's chains drop as a unit and
   // no key separator is needed.
   readonly #chains = new Map<string, Map<string, Promise<void>>>()
+  readonly #incarnationFences = new Map<string, { active: boolean }>()
   readonly #attempts = new Map<string, Promise<void>>()
   #tokenSeq = 0
 
@@ -37,8 +38,13 @@ export class Fanout {
     // commit returns; no deferred attempt can observe those later writes.
     const acceptedFrame = new Uint8Array(frame)
     const acceptedTargets = targets.map((target) => ({ ...target }))
+    let fence = this.#incarnationFences.get(inc)
+    if (fence === undefined) {
+      fence = { active: true }
+      this.#incarnationFences.set(inc, fence)
+    }
     const previous = lanes.get(laneKey) ?? Promise.resolve()
-    const attempt = previous.then(() => this.#fanout(acceptedTargets, acceptedFrame, info))
+    const attempt = previous.then(() => (fence.active ? this.#fanout(acceptedTargets, acceptedFrame, info) : undefined))
     // Settlement gate: the next frame starts after this one settles, success OR failure.
     lanes.set(laneKey, attempt.then(noop, noop))
     const token = `d-${++this.#tokenSeq}`
@@ -59,6 +65,9 @@ export class Fanout {
 
   // Incarnation-scoped teardown: a dropped/closed generation's chains never continue into a recreation.
   clearIncarnation(inc: string): void {
+    const fence = this.#incarnationFences.get(inc)
+    if (fence !== undefined) fence.active = false
+    this.#incarnationFences.delete(inc)
     this.#chains.delete(inc)
   }
 

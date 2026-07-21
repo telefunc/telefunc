@@ -32,6 +32,7 @@ export type BackendFixture = {
   // routed representative subscriber DOs.
   expectedReceivers: {
     twoLocalSubscriptionsSameLane: number
+    oneLocalSubscriptionAfterSiblingDetach: number
   }
   // Authority time as the BACKEND sees it — never the caller's clock. Lease expiry, commit preconditions
   // and TTLs are all resolved against this, so the scenarios drive it explicitly instead of waiting.
@@ -62,7 +63,7 @@ export const memoryHarness: BackendHarness = {
     return {
       backend,
       traces: { handoffAwaitsReceiver: true, perTargetFailure: true, cxAppliesSynchronously: true },
-      expectedReceivers: { twoLocalSubscriptionsSameLane: 2 },
+      expectedReceivers: { twoLocalSubscriptionsSameLane: 2, oneLocalSubscriptionAfterSiblingDetach: 1 },
       authorityNow: () => clock,
       advanceAuthority: (ms) => {
         clock += ms

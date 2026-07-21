@@ -33,6 +33,7 @@ import type {
 } from '../../../server/adapter/cloudflare/room/do.js'
 import {
   CloudflareLaneSubscription,
+  CloudflareLaneSubscriptionMultiplexer,
   realSubscriptionScheduler,
   type SubscriptionScheduler,
 } from '../../../server/adapter/cloudflare/room/subscription.js'
@@ -98,10 +99,14 @@ export type { RoomStub }
 type Namespace = { idFromName(name: string): unknown; get(id: unknown): RoomStub }
 type SubscriberStub = {
   [Symbol.dispose]?: () => void
-  installRoute(identity: SubscriberRouteIdentity): Promise<void>
-  uninstallRoute(identity: SubscriberRouteIdentity): Promise<void>
+  installRoute(identity: SubscriberRouteIdentity, leaseId: string): Promise<void>
+  uninstallRoute(identity: SubscriberRouteIdentity, leaseId: string): Promise<void>
   holdDeliveries(): Promise<void>
   releaseDeliveries(): Promise<void>
+  waitForDelivery(): Promise<void>
+  holdProbes(): Promise<void>
+  releaseProbes(): Promise<void>
+  waitForProbe(): Promise<void>
   telefuncBroadcastDeliver(request: SubscriberDeliveryRequest): Promise<void>
 }
 type SubscriberNamespace = { idFromName(name: string): unknown; get(id: unknown): SubscriberStub }
@@ -271,17 +276,24 @@ export async function installReceiver(
   inc: string,
   laneKey: string,
   subscriber: string,
+  leaseId: string,
   receiver: LaneReceiver,
 ): Promise<void> {
   const identity = { roomId, inc, laneKey, subscriber }
   addReceiver(identity, receiver)
-  await (await subscriberStub(subscriber)).installRoute(identity)
+  await (await subscriberStub(subscriber)).installRoute(identity, leaseId)
 }
 
-export async function evictReceiver(roomId: string, inc: string, laneKey: string, subscriber: string): Promise<void> {
+export async function evictReceiver(
+  roomId: string,
+  inc: string,
+  laneKey: string,
+  subscriber: string,
+  leaseId: string,
+): Promise<void> {
   const identity = { roomId, inc, laneKey, subscriber }
   removeReceiver(identity)
-  await (await subscriberStub(subscriber)).uninstallRoute(identity)
+  await (await subscriberStub(subscriber)).uninstallRoute(identity, leaseId)
 }
 
 export async function holdReceiverDeliveries(subscriber: string): Promise<void> {
@@ -290,6 +302,26 @@ export async function holdReceiverDeliveries(subscriber: string): Promise<void> 
 
 export async function releaseReceiverDeliveries(subscriber: string): Promise<void> {
   await (await subscriberStub(subscriber)).releaseDeliveries()
+}
+
+export async function waitForReceiverDelivery(subscriber: string): Promise<void> {
+  await (await subscriberStub(subscriber)).waitForDelivery()
+}
+
+export async function holdReceiverProbes(subscriber: string): Promise<void> {
+  await (await subscriberStub(subscriber)).holdProbes()
+}
+
+export async function releaseReceiverProbes(subscriber: string): Promise<void> {
+  await (await subscriberStub(subscriber)).releaseProbes()
+}
+
+export async function waitForReceiverProbe(subscriber: string): Promise<void> {
+  await (await subscriberStub(subscriber)).waitForProbe()
+}
+
+export async function flushCloudflareAuthorityClock(): Promise<void> {
+  await clockPush
 }
 
 // ── head marshalling ──
@@ -371,8 +403,9 @@ class CloudflareRoomBackend implements RoomBackendSpi {
   #disposed = false
   #forcedRenewalFailures = 0
   #forcedEstablishmentFailures = 0
-  // Fully-scoped local ownership; delivery chains themselves live only in the room DO.
-  readonly #subs = new Map<string, { identity: SubscriberRouteIdentity; sub: CloudflareLaneSubscription }>()
+  // Fully-scoped local ownership; one shared route lifecycle sits behind each local callback mux.
+  // Delivery chains themselves live only in the room DO.
+  readonly #muxes = new Map<string, { identity: SubscriberRouteIdentity; mux: CloudflareLaneSubscriptionMultiplexer }>()
 
   constructor(
     ns: Namespace,
@@ -530,23 +563,31 @@ class CloudflareRoomBackend implements RoomBackendSpi {
     const laneKey = laneKeyOf(lane)
     const subscriber = this.#subscriberName(roomId)
     const identity: SubscriberRouteIdentity = { roomId, inc, laneKey, subscriber }
-    const subscriptionKey = crypto.randomUUID()
-    let leaseId = crypto.randomUUID()
-    // The subscriber isolate installs its local receiver BEFORE any RPC (readiness-ordering §2.3 step 1).
+    const muxKey = receiverKey(identity)
+    const existing = this.#muxes.get(muxKey)
     addReceiver(identity, receiver)
+    if (existing !== undefined) {
+      return existing.mux.attach(() => {
+        removeReceiver(identity, receiver)
+      })
+    }
+
+    let leaseId = crypto.randomUUID()
     const register = async (): Promise<RegisterWire> => {
       await clockPush
       return this.#stub(roomId).registerRoute(roomId, inc, laneKey, subscriber, leaseId, null)
     }
-    const sub = new CloudflareLaneSubscription(
+    let mux!: CloudflareLaneSubscriptionMultiplexer
+    const sharedSubscription = new CloudflareLaneSubscription(
       {
         establish: async () => {
-          await this.#subscriberStub(subscriber).installRoute(identity)
+          leaseId = crypto.randomUUID()
+          // The subscriber isolate installs its local mux identity BEFORE any room RPC.
+          await this.#subscriberStub(subscriber).installRoute(identity, leaseId)
           if (this.#forcedEstablishmentFailures > 0) {
             this.#forcedEstablishmentFailures -= 1
             throw new Error('forced establishment transport failure')
           }
-          leaseId = crypto.randomUUID()
           const result = await register()
           return 'ok' in result
             ? { ready: true }
@@ -562,24 +603,37 @@ class CloudflareRoomBackend implements RoomBackendSpi {
         },
         unsubscribe: async () => {
           await clockPush
-          await this.#stub(roomId).unsubscribeRoute(inc, laneKey, subscriber, leaseId)
-          this.#subs.delete(subscriptionKey)
-          if (removeReceiver(identity, receiver)) await this.#subscriberStub(subscriber).uninstallRoute(identity)
+          let failure: unknown
+          try {
+            await this.#stub(roomId).unsubscribeRoute(inc, laneKey, subscriber, leaseId)
+          } catch (error) {
+            failure = error
+          }
+          try {
+            await this.#subscriberStub(subscriber).uninstallRoute(identity, leaseId)
+          } catch (error) {
+            failure ??= error
+          }
+          if (failure !== undefined) throw failure
         },
         closed: () => {
-          this.#subs.delete(subscriptionKey)
-          if (removeReceiver(identity, receiver)) {
-            void this.#subscriberStub(subscriber)
-              .uninstallRoute(identity)
-              .catch(() => {})
-          }
+          mux.lifecycleClosed(new Error('shared subscription lifecycle closed'))
+          void this.#subscriberStub(subscriber)
+            .uninstallRoute(identity, leaseId)
+            .catch(() => {})
         },
       },
       { scheduler: this.#renewalScheduler, jitter: () => 0.5 },
     )
-    this.#subs.set(subscriptionKey, { identity, sub })
-    sub.start()
-    return sub
+    mux = new CloudflareLaneSubscriptionMultiplexer(sharedSubscription, () => {
+      if (this.#muxes.get(muxKey)?.mux === mux) this.#muxes.delete(muxKey)
+    })
+    this.#muxes.set(muxKey, { identity, mux })
+    const attachment = mux.attach(() => {
+      removeReceiver(identity, receiver)
+    })
+    sharedSubscription.start()
+    return attachment
   }
 
   async listGenerations(roomId: string): Promise<string[]> {
@@ -594,14 +648,14 @@ class CloudflareRoomBackend implements RoomBackendSpi {
     // The dropped incarnation's delivery chains never continue into a recreation.
     // Close the local subscriptions whose generation just vanished — their channel is terminal.
     for (const [laneKey, subscriber] of wire.droppedSubscribers) {
-      for (const entry of this.#subs.values()) {
+      for (const entry of this.#muxes.values()) {
         if (
           entry.identity.roomId === roomId &&
           entry.identity.inc === inc &&
           entry.identity.laneKey === laneKey &&
           entry.identity.subscriber === subscriber
         ) {
-          entry.sub.generationDropped()
+          entry.mux.generationDropped()
         }
       }
     }
@@ -627,10 +681,10 @@ class CloudflareRoomBackend implements RoomBackendSpi {
 
   async dispose(): Promise<void> {
     this.#disposed = true
-    for (const entry of this.#subs.values()) {
-      entry.sub.backendDisposed()
+    for (const entry of this.#muxes.values()) {
+      entry.mux.backendDisposed()
     }
-    this.#subs.clear()
+    this.#muxes.clear()
     if (this.#renewalScheduler instanceof ManualRenewalScheduler) this.#renewalScheduler.clear()
     for (const stub of this.#stubs.values()) disposeRoomStub(stub)
     this.#stubs.clear()
@@ -670,7 +724,7 @@ export const cloudflareHarness: BackendHarness = {
       // extends to the receiver and a throw is visible on that frame. CX application is genuinely async
       // (an RPC hop), so the barrier-forced I13(c) variant is carried via concurrentHeadCxBarrier.
       traces: { handoffAwaitsReceiver: true, perTargetFailure: true, cxAppliesSynchronously: false },
-      expectedReceivers: { twoLocalSubscriptionsSameLane: 1 },
+      expectedReceivers: { twoLocalSubscriptionsSameLane: 1, oneLocalSubscriptionAfterSiblingDetach: 1 },
       authorityNow: () => clockValue,
       advanceAuthority: (ms: number) => setClock(clockValue + ms),
       // Both head-CX requests are issued back-to-back with no await between, so both are in flight before
