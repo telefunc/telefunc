@@ -60,15 +60,17 @@ for (const harness of installedBackends) {
       })
 
       it('keeps the shared route live until the last local sibling detaches', async () => {
-        const detached = collector()
         const survivor = collector()
-        const first = fx.backend.subscribeLane(roomId, inc, SEMANTIC, detached.receiver)
-        const second = fx.backend.subscribeLane(roomId, inc, SEMANTIC, survivor.receiver)
+        const detached = collector()
+        const first = fx.backend.subscribeLane(roomId, inc, SEMANTIC, survivor.receiver)
+        const second = fx.backend.subscribeLane(roomId, inc, SEMANTIC, detached.receiver)
         await Promise.all([first.ready, second.ready])
 
-        await first.unsubscribe()
-        expect(first.state()).toBe('closed')
-        expect(second.state()).toBe('ready')
+        // Detach the most recently attached sibling. Independent lease lifecycles would let this one
+        // delete the representative's current route and strand the still-ready first subscription.
+        await second.unsubscribe()
+        expect(second.state()).toBe('closed')
+        expect(first.state()).toBe('ready')
 
         const result = accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, bytes('survivor')))
         expect(result.receivers).toBe(fx.expectedReceivers.oneLocalSubscriptionAfterSiblingDetach)
@@ -76,7 +78,7 @@ for (const harness of installedBackends) {
         await survivor.waitFor(1)
         expect(detached.payloads()).toEqual([])
         expect(survivor.payloads()).toEqual(['survivor'])
-        await second.unsubscribe()
+        await first.unsubscribe()
       })
 
       it('rejects ready for an incarnation that is not the open one (fail-closed)', async () => {
