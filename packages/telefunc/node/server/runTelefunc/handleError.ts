@@ -3,11 +3,12 @@ export { handleError }
 import type { ViteDevServer } from 'vite'
 import { hasProp } from '../../../utils/hasProp.js'
 import { getViteDevServer } from '../globalContext.js'
+import { StreamTruncatedError } from '../../../wire-protocol/server/request/StreamReader.js'
 
 function handleError(err: unknown) {
   // Client disconnected mid-stream — not a bug, nothing to log.
   if (hasProp(err, 'code') && err.code === 'ERR_STREAM_PREMATURE_CLOSE') return
-  if (hasProp(err, 'message') && typeof err.message === 'string' && err.message.includes('Client disconnected')) return
+  if (err instanceof StreamTruncatedError) return
   if (hasProp(err, 'message') && typeof err.message === 'string' && err.message.includes('Channel timed out')) return
 
   // We ensure we print a string; Cloudflare Workers doesn't seem to properly stringify `Error` objects.

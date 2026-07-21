@@ -11,11 +11,11 @@ import { createPushReadableStream, type PushReadableStream } from '../push-reada
 import { createPushReadable, type PushReadable } from '../push-readable.js'
 import { uint8ArrayToBase64url } from '../base64url.js'
 import { textEncoder } from '../frame.js'
-import { parseSseRequestMetadata } from '../sse-request.js'
-import { OversizeFrameError, StreamReader } from './request/StreamReader.js'
+import { parseSseRequestMetadata, type SseRequestMetadata } from '../sse-request.js'
+import { OversizeFrameError, StreamReader, StreamTruncatedError } from './request/StreamReader.js'
 import { getChannelMux } from './mux.js'
 import type { ReconcileOutcome, ServerTransport } from './mux.js'
-import { encode } from '../shared-ws.js'
+import { encode, ProtocolViolationError } from '../shared-ws.js'
 
 type SseChannelHttpResponse = {
   statusCode: 200 | 400
@@ -72,13 +72,28 @@ class SseConnectionTransport {
     const useNodeStream = readable !== undefined
     try {
       const reader = new StreamReader(source)
-      const metadata = parseSseRequestMetadata(await reader.readMetadata(this.mux.maxMetadataBytes))
+      const rawMetadata = await reader.readMetadata(this.mux.maxMetadataBytes)
+      let metadata: SseRequestMetadata
+      try {
+        metadata = parseSseRequestMetadata(rawMetadata)
+      } catch {
+        // Malformed metadata is untrusted client ingress, not a truncation — same class as the decode seam.
+        throw new ProtocolViolationError()
+      }
       if (metadata.streamResponse) return await this.handleStreamResponsePost(metadata.connId, reader, useNodeStream)
       if (metadata.streamRequest) return await this.handleStreamRequestPost(metadata.connId, reader)
       return await this.handleBatchPost(metadata.connId, reader)
     } catch (err) {
-      if (!isExpectedRequestError(err)) console.error('[telefunc][channel] internal error handling an SSE POST', err)
-      return badRequest()
+      // A typed protocol-input fault is the client's: answer 400 and stay quiet. Anything else is our
+      // bug — rethrow so the request pipeline (`runTelefunc`) logs it and masks it as a 500.
+      if (
+        err instanceof ProtocolViolationError ||
+        err instanceof OversizeFrameError ||
+        err instanceof StreamTruncatedError
+      ) {
+        return badRequest()
+      }
+      throw err
     }
   }
 
@@ -289,12 +304,6 @@ function shouldSendReconciled(
 ): outcome is ReconcileOutcome {
   if (outcome === null) return false
   return outcome.deliverTo !== undefined || !connection.closed
-}
-
-function isExpectedRequestError(err: unknown): boolean {
-  if (err instanceof OversizeFrameError) return true
-  if (!(err instanceof Error)) return true
-  return err.message.includes('disconnected') || err.message.includes('JSON') || err.name === 'SyntaxError'
 }
 
 function badRequest(): SseChannelHttpResponse {
