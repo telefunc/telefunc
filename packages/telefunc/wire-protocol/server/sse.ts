@@ -132,8 +132,12 @@ class SseConnectionTransport {
   private async handleStreamRequestPost(connId: string, reader: StreamReader): Promise<SseChannelHttpResponse> {
     const connection = await this.resolveConnection(connId)
     if (!connection) return badRequest()
-    if (!(await this.waitReady(connection))) return badRequest()
+    // The open-ack is the client's duplex probe (ACK ⇒ its upload bytes reached the server) and must
+    // not wait on reconcile settlement, or a slow attach would falsely demote a healthy duplex wire to
+    // sticky batch. Dispatch safety is owned by `runStreamResponse` releasing `ready` only after
+    // RECONCILED — the read loop below still waits on that gate, so early bytes sit unread until then.
     this.sendNow(connection, encode.streamRequestOpenAck())
+    if (!(await this.waitReady(connection))) return badRequest()
     try {
       while (true) {
         const raw = await this.readFrameOrNull(connection, reader)
