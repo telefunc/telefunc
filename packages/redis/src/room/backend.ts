@@ -44,7 +44,13 @@ import {
   COMMIT_LUA,
   decodeFrameHeader,
   DEFAULT_ROOM_PREFIX,
+  DIRECTORY_DELETE_CMD,
+  DIRECTORY_DELETE_KEYS,
+  DIRECTORY_DELETE_LUA,
   directoryIndexKey,
+  DIRECTORY_PUT_CMD,
+  DIRECTORY_PUT_KEYS,
+  DIRECTORY_PUT_LUA,
   directoryTagsKey,
   escapeGlob,
   gensKey,
@@ -59,6 +65,9 @@ import {
   parseLaneKey,
   retainedKey,
   retainedKeyPrefix,
+  RETAINED_DELETE_CMD,
+  RETAINED_DELETE_LUA,
+  retainedSizeKey,
   revKey,
 } from './layout.js'
 
@@ -67,6 +76,26 @@ const DIRECTORY_PAGE_SIZE = 100
 const STABLE_READ_ATTEMPTS = 8
 const SCAN_COUNT = 250
 const NEWLINE = 0x0a
+const SUBSCRIPTION_RETRY_ATTEMPTS = 5
+
+function defaultSubscriptionRetryDelay(attempt: number): number {
+  const ceiling = Math.min(4_000, 250 * 2 ** (attempt - 1))
+  return Math.floor(ceiling * (0.5 + Math.random() * 0.5))
+}
+
+function roomGenerationKey(roomId: string, inc: string): string {
+  return `${roomId.length}:${roomId}${inc}`
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+type RedisRoomBackendTestHooks = {
+  beforeSubscribe?: (channel: string) => void | Promise<void>
+  beforeDropGenerationUnregister?: (info: { roomId: string; inc: string }) => void | Promise<void>
+  beforeDirectoryDeleteApply?: (info: { roomId: string; incTag: string }) => void | Promise<void>
+}
 
 export type RedisRoomBackendOptions = {
   redis: Redis
@@ -75,13 +104,18 @@ export type RedisRoomBackendOptions = {
   // The authority clock. When supplied (conformance), every time-sensitive Lua receives this frozen,
   // advanceable value as `now_ms` and JS-side logical filtering resolves against it too; a backend that
   // instead consulted a caller's `Date.now()` would fail every I13 killer. When absent (production), the
-  // Lua falls back to `redis.call('TIME')` — the central server clock — and JS filtering approximates
-  // with `Date.now()` (the PX backstop is the authoritative physical reclaimer there).
+  // Lua and JS read paths fall back to Redis TIME — the central server clock. Date.now() is never an
+  // authority source.
   authorityNow?: () => number
   // Test seam (sanctioned by readiness-ordering §2.2's holdRegistration/holdRetainedRead hooks): a
   // callback invoked inside the stable-read window — after the result set is enumerated, before
   // rev_after — so a scenario can force an insert/delete/expiry between rev_before and rev_after.
   stableReadProbe?: (info: { roomId: string; inc: string }) => void | Promise<void>
+  // The fixture injects the real subscriber connection so live reconnect / PING-failure probes exercise
+  // the production state machine. Production callers omit this and the backend creates the duplicate.
+  subscriber?: Redis
+  subscriptionRetryDelay?: (attempt: number) => number
+  testHooks?: RedisRoomBackendTestHooks
 }
 
 // The stored head, exactly as the Lua encodes it. `config` is opaque base64; `until`/`exp` are authority
@@ -174,6 +208,7 @@ class RedisLaneSubscription implements LaneSubscription {
   readonly ready: Promise<void>
   #state: ReadinessState = 'establishing'
   #settle!: { resolve: () => void; reject: (err: unknown) => void }
+  #readySettled = false
   readonly #listeners = new Set<(state: ReadinessState) => void>()
   readonly #receiver: LaneReceiver
   #detach: () => Promise<void> | void
@@ -202,28 +237,44 @@ class RedisLaneSubscription implements LaneSubscription {
 
   async unsubscribe(): Promise<void> {
     if (this.closed) return
-    await this.#detach()
-    this.#transition('closed')
+    try {
+      await this.#detach()
+    } finally {
+      this.#close(new Error('subscribeLane: unsubscribed before initial establishment'))
+    }
   }
 
-  establish(): void {
-    // `ready` represents the first establishment itself. `onStateChange` is reserved for
-    // subsequent renewal loss / re-establishment transitions, so the initial ready edge is not
-    // emitted (the memory reference has the same observable behavior).
-    this.#state = 'ready'
-    this.#settle.resolve()
+  established(): void {
+    if (this.closed) return
+    if (!this.#readySettled) {
+      // The first establishing -> ready edge settles the one ready promise and is deliberately NOT an
+      // onStateChange emission. A ready after any loss is a re-establishment and is emitted below.
+      this.#readySettled = true
+      this.#state = 'ready'
+      this.#settle.resolve()
+      return
+    }
+    this.#transition('ready')
   }
 
-  failEstablishment(reason: string): void {
-    this.#transition('closed')
-    this.#settle.reject(new Error(reason))
+  connectionLost(reason: unknown): void {
+    if (this.closed || this.#state === 'lost') return
+    if (!this.#readySettled) {
+      this.#readySettled = true
+      this.#settle.reject(reason)
+    }
+    this.#transition('lost')
+  }
+
+  failPermanently(reason: unknown): void {
+    this.#close(reason)
   }
 
   // The generation this subscription belongs to was dropped: its channel is gone for good, so the
   // subscription is terminal rather than merely lost.
   generationDropped(): void {
     this.#detach = () => {}
-    this.#transition('closed')
+    this.#close(new Error('subscribeLane: generation dropped before initial establishment'))
   }
 
   deliver(payload: Uint8Array, info: { seq: number; timestamp: number }): void {
@@ -234,6 +285,15 @@ class RedisLaneSubscription implements LaneSubscription {
     if (this.#state === state) return
     this.#state = state
     for (const cb of this.#listeners) cb(state)
+  }
+
+  #close(reason: unknown): void {
+    if (this.closed) return
+    if (!this.#readySettled) {
+      this.#readySettled = true
+      this.#settle.reject(reason)
+    }
+    this.#transition('closed')
   }
 }
 
@@ -246,18 +306,33 @@ export class RedisRoomBackend implements RoomBackendSpi {
   readonly #prefix: string
   readonly #authorityNow?: () => number
   readonly #stableReadProbe?: (info: { roomId: string; inc: string }) => void | Promise<void>
+  readonly #subscriptionRetryDelay: (attempt: number) => number
+  readonly #testHooks?: RedisRoomBackendTestHooks
   // Dispatch: a channel's live subscriptions; the broker delivers on the shared subscriber connection.
   readonly #channelSubs = new Map<string, Set<RedisLaneSubscription>>()
-  // Incarnation → its live subscriptions, so dropGeneration can tear them down (I11 / hygiene).
-  readonly #incSubs = new Map<string, Set<RedisLaneSubscription>>()
+  // Every same-channel subscriber awaits one shared SUBSCRIBE ack. Successful channels stay recorded
+  // until connection loss or the final local unsubscribe.
+  readonly #channelAcks = new Map<string, Promise<void>>()
+  readonly #subscribedChannels = new Set<string>()
+  // Room-generation identity owns teardown. An inc string alone is not globally unique across rooms.
+  readonly #roomGenSubs = new Map<string, Set<RedisLaneSubscription>>()
+  readonly #subOwners = new Map<RedisLaneSubscription, string>()
   #disposed = false
 
   constructor(options: RedisRoomBackendOptions) {
     this.#publisher = options.redis
-    this.#subscriber = options.redis.duplicate()
+    this.#subscriptionRetryDelay = options.subscriptionRetryDelay ?? defaultSubscriptionRetryDelay
+    this.#subscriber =
+      options.subscriber ??
+      options.redis.duplicate({
+        autoResubscribe: false,
+        retryStrategy: (attempt) =>
+          attempt <= SUBSCRIPTION_RETRY_ATTEMPTS ? this.#subscriptionRetryDelay(attempt) : null,
+      })
     this.#prefix = options.prefix ?? DEFAULT_ROOM_PREFIX
     this.#authorityNow = options.authorityNow
     this.#stableReadProbe = options.stableReadProbe
+    this.#testHooks = options.testHooks
     this.capabilities = {
       receivers: 'global',
       maxRetainedPayloadBytes: options.maxRetainedPayloadBytes ?? DEFAULT_MAX_RETAINED_BYTES,
@@ -268,14 +343,24 @@ export class RedisRoomBackend implements RoomBackendSpi {
     this.#publisher.defineCommand(COMMIT_CMD, { numberOfKeys: COMMIT_KEYS, lua: COMMIT_LUA })
     // Variable key count (head, rev, then one key per mutation) — numberOfKeys is supplied per call.
     this.#publisher.defineCommand(CELLS_CX_CMD, { lua: CELLS_CX_LUA })
+    this.#publisher.defineCommand(RETAINED_DELETE_CMD, { lua: RETAINED_DELETE_LUA })
+    this.#publisher.defineCommand(DIRECTORY_PUT_CMD, { numberOfKeys: DIRECTORY_PUT_KEYS, lua: DIRECTORY_PUT_LUA })
+    this.#publisher.defineCommand(DIRECTORY_DELETE_CMD, {
+      numberOfKeys: DIRECTORY_DELETE_KEYS,
+      lua: DIRECTORY_DELETE_LUA,
+    })
     this.#subscriber.on('messageBuffer', this.#onMessage)
+    this.#subscriber.on('close', this.#onSubscriberClose)
+    this.#subscriber.on('ready', this.#onSubscriberReady)
+    this.#subscriber.on('end', this.#onSubscriberEnd)
   }
 
   // ── head ──
 
   async readHead(roomId: string): Promise<{ head: RoomHead } | null> {
     this.#assertLive()
-    const stored = this.#liveHead(await this.#publisher.get(headKey(this.#prefix, roomId)))
+    const raw = await this.#publisher.get(headKey(this.#prefix, roomId))
+    const stored = this.#liveHead(raw, await this.#authorityNowMs())
     return stored === null ? null : { head: toPublicHead(stored) }
   }
 
@@ -317,7 +402,7 @@ export class RedisRoomBackend implements RoomBackendSpi {
     // silent PX expiry does NOT bump rev and is hidden by the logical expiresAt filter instead.
     for (let attempt = 0; attempt < STABLE_READ_ATTEMPTS; attempt++) {
       const [headRaw, revBefore] = await this.#publisher.mget(hKey, rKey)
-      const head = this.#liveHead(headRaw ?? null)
+      const head = this.#parseHead(headRaw ?? null)
       // Reads need only generation existence — available while 'closing' (the closer's tail needs them).
       if (head === null || (head.inc ?? null) !== inc) return { staleInc: true }
       const logicalKeys = 'keys' in sel ? sel.keys : await this.#scanCellKeys(roomId, inc, sel.prefix)
@@ -328,7 +413,7 @@ export class RedisRoomBackend implements RoomBackendSpi {
       const before = revBefore ?? '0'
       const after = revAfter ?? '0'
       if (before !== after) continue
-      const now = this.#authNow()
+      const now = await this.#authorityNowMs()
       const cells = new Map<string, Uint8Array>()
       for (let i = 0; i < logicalKeys.length; i++) {
         const value = values[i]
@@ -383,13 +468,12 @@ export class RedisRoomBackend implements RoomBackendSpi {
     this.#assertLive()
     const key = laneKey(lane)
     const channel = channelKey(this.#prefix, roomId, inc, key)
-    // Over-cap retain is rejected before the atomic record runs, so a throw never advances the order.
-    if (opts?.retain === true) await this.#assertRetainedCapacity(roomId, inc, key, payload.byteLength)
     const reply = (await callDefinedCommand(this.#publisher, COMMIT_CMD, [
       headKey(this.#prefix, roomId),
       orderKey(this.#prefix, roomId, inc, key),
       retainedKey(this.#prefix, roomId, inc, key),
       channel,
+      retainedSizeKey(this.#prefix, roomId, inc),
       this.#nowArg(),
       inc,
       lane.kind,
@@ -397,6 +481,7 @@ export class RedisRoomBackend implements RoomBackendSpi {
       opts?.retain === true ? '1' : '0',
       opts?.orderTtlMs === undefined ? '' : String(opts.orderTtlMs),
       toBuffer(payload),
+      String(this.capabilities.maxRetainedPayloadBytes),
     ])) as string
     const parsed = JSON.parse(reply) as
       | { stale: true }
@@ -417,26 +502,12 @@ export class RedisRoomBackend implements RoomBackendSpi {
   }
 
   // Resolves once every pub/sub frame published before it on `channel` has been dispatched to the local
-  // receiver(s). A no-op when the channel has no local subscriber (nothing to flush). Never rejects —
-  // Redis exposes no per-target failure (BackendTraces.perTargetFailure is false).
+  // receiver(s). A no-op when the channel has no local subscriber (nothing to flush). A PING transport
+  // failure rejects THIS frame's delivery; Redis still exposes no receiver-callback failure.
   #deliveryFlush(channel: string): Promise<void> {
     const set = this.#channelSubs.get(channel)
     if (set === undefined || set.size === 0) return Promise.resolve()
-    return this.#subscriber.ping().then(
-      () => {},
-      () => {},
-    )
-  }
-
-  async #assertRetainedCapacity(roomId: string, inc: string, key: string, newBytes: number): Promise<void> {
-    const cap = this.capabilities.maxRetainedPayloadBytes
-    const thisKey = retainedKey(this.#prefix, roomId, inc, key)
-    let total = newBytes
-    for (const physical of await this.#scanKeys(`${escapeGlob(retainedKeyPrefix(this.#prefix, roomId, inc))}*`)) {
-      if (physical === thisKey) continue
-      total += await this.#publisher.strlen(physical)
-    }
-    if (total > cap) throw new Error(`commitLane: retained aggregate ${total} bytes exceeds the ${cap} byte cap`)
+    return this.#subscriber.ping().then(() => {})
   }
 
   // ── retained ──
@@ -462,12 +533,17 @@ export class RedisRoomBackend implements RoomBackendSpi {
 
   async deleteRetained(roomId: string, inc: string, lane?: LaneId): Promise<void> {
     this.#assertLive()
+    const size = retainedSizeKey(this.#prefix, roomId, inc)
     if (lane !== undefined) {
-      await this.#publisher.del(retainedKey(this.#prefix, roomId, inc, laneKey(lane)))
+      await callDefinedCommand(this.#publisher, RETAINED_DELETE_CMD, [
+        '2',
+        size,
+        retainedKey(this.#prefix, roomId, inc, laneKey(lane)),
+      ])
       return
     }
     const keys = await this.#scanKeys(`${escapeGlob(retainedKeyPrefix(this.#prefix, roomId, inc))}*`)
-    if (keys.length > 0) await this.#publisher.unlink(...keys)
+    await callDefinedCommand(this.#publisher, RETAINED_DELETE_CMD, [String(keys.length + 1), size, ...keys])
   }
 
   // ── subscriptions ──
@@ -475,45 +551,115 @@ export class RedisRoomBackend implements RoomBackendSpi {
   subscribeLane(roomId: string, inc: string, lane: LaneId, receiver: LaneReceiver): LaneSubscription {
     this.#assertLive()
     const channel = channelKey(this.#prefix, roomId, inc, laneKey(lane))
+    const owner = roomGenerationKey(roomId, inc)
     let sub: RedisLaneSubscription
-    sub = new RedisLaneSubscription(receiver, () => this.#detach(sub, inc, channel))
-    this.#track(this.#incSubs, inc, sub)
+    sub = new RedisLaneSubscription(receiver, () => this.#detach(sub, owner, channel))
+    this.#track(this.#roomGenSubs, owner, sub)
+    this.#subOwners.set(sub, owner)
     void this.#establish(sub, roomId, inc, channel)
     return sub
   }
 
   async #establish(sub: RedisLaneSubscription, roomId: string, inc: string, channel: string): Promise<void> {
+    const head = this.#parseHead(await this.#publisher.get(headKey(this.#prefix, roomId)))
+    if (head === null || (head.inc ?? null) !== inc || head.state !== 'open') {
+      this.#untrackSubscriptionOwner(sub)
+      sub.failPermanently(new Error(`subscribeLane: room '${roomId}' has no open incarnation '${inc}'`))
+      return
+    }
+    // Local dispatch is installed before the broker command is issued. Every subscriber of this channel
+    // then awaits the ONE shared in-flight SUBSCRIBE ack; a second local subscriber can never skip it.
+    this.#track(this.#channelSubs, channel, sub)
     try {
-      const head = this.#liveHead(await this.#publisher.get(headKey(this.#prefix, roomId)))
-      if (head === null || (head.inc ?? null) !== inc || head.state !== 'open') {
-        this.#untrack(this.#incSubs, inc, sub)
-        sub.failEstablishment(`subscribeLane: room '${roomId}' has no open incarnation '${inc}'`)
-        return
-      }
-      // Register dispatch, then take the SUBSCRIBE ack as the durability barrier: a commit accepted after
-      // `ready` resolves must see this registration.
-      const set = this.#channelSubs.get(channel)
-      const first = set === undefined || set.size === 0
-      this.#track(this.#channelSubs, channel, sub)
-      if (first) await this.#subscriber.subscribe(channel)
-      if (sub.closed) return // unsubscribed while establishing
-      sub.establish()
-    } catch (err) {
-      this.#untrack(this.#channelSubs, channel, sub)
-      this.#untrack(this.#incSubs, inc, sub)
-      sub.failEstablishment(`subscribeLane: establishment failed for '${channel}': ${String(err)}`)
+      await this.#ensureChannelSubscribed(channel)
+      if (!sub.closed) sub.established()
+    } catch {
+      // #ensureChannelSubscribed closes every subscriber on bounded exhaustion. Connection loss before
+      // exhaustion moves this subscription to lost and a later ack emits ready via onStateChange.
     }
   }
 
-  async #detach(sub: RedisLaneSubscription, inc: string, channel: string): Promise<void> {
-    this.#untrack(this.#incSubs, inc, sub)
+  #ensureChannelSubscribed(channel: string): Promise<void> {
+    if (this.#subscribedChannels.has(channel)) return Promise.resolve()
+    const existing = this.#channelAcks.get(channel)
+    if (existing !== undefined) return existing
+
+    let ack: Promise<void>
+    ack = this.#subscribeWithRetry(channel)
+      .then(async () => {
+        const set = this.#channelSubs.get(channel)
+        if (set === undefined || set.size === 0) {
+          if (!this.#disposed && this.#subscriber.status !== 'end') await this.#subscriber.unsubscribe(channel)
+          return
+        }
+        this.#subscribedChannels.add(channel)
+        for (const sub of set) sub.established()
+      })
+      .catch((err: unknown) => {
+        this.#subscriptionExhausted(channel, err)
+        throw err
+      })
+      .finally(() => {
+        if (this.#channelAcks.get(channel) === ack) this.#channelAcks.delete(channel)
+      })
+    this.#channelAcks.set(channel, ack)
+    return ack
+  }
+
+  async #subscribeWithRetry(channel: string): Promise<void> {
+    let lastError: unknown = new Error(`subscribeLane: SUBSCRIBE '${channel}' failed`)
+    for (let attempt = 1; attempt <= SUBSCRIPTION_RETRY_ATTEMPTS; attempt++) {
+      if (this.#disposed) throw new Error('RedisRoomBackend: disposed during subscription establishment')
+      const set = this.#channelSubs.get(channel)
+      if (set === undefined || set.size === 0) return
+      try {
+        await this.#testHooks?.beforeSubscribe?.(channel)
+        await this.#subscriber.subscribe(channel)
+        return
+      } catch (err) {
+        lastError = err
+        for (const sub of set) sub.connectionLost(err)
+        if (attempt < SUBSCRIPTION_RETRY_ATTEMPTS) await delay(this.#subscriptionRetryDelay(attempt))
+      }
+    }
+    throw lastError
+  }
+
+  #subscriptionExhausted(channel: string, reason: unknown): void {
+    this.#subscribedChannels.delete(channel)
+    const set = this.#channelSubs.get(channel)
+    if (set === undefined) return
+    this.#channelSubs.delete(channel)
+    for (const sub of set) {
+      this.#untrackSubscriptionOwner(sub)
+      sub.failPermanently(reason)
+    }
+  }
+
+  async #detach(sub: RedisLaneSubscription, owner: string, channel: string): Promise<void> {
+    this.#untrack(this.#roomGenSubs, owner, sub)
+    this.#subOwners.delete(sub)
+    await this.#detachChannel(sub, channel)
+  }
+
+  async #detachChannel(sub: RedisLaneSubscription, channel: string): Promise<void> {
     const set = this.#channelSubs.get(channel)
     if (set === undefined) return
     set.delete(sub)
-    if (set.size === 0) {
-      this.#channelSubs.delete(channel)
-      if (!this.#disposed) await this.#subscriber.unsubscribe(channel)
+    if (set.size !== 0) return
+    this.#channelSubs.delete(channel)
+    await this.#channelAcks.get(channel)?.catch(() => {})
+    const subscribed = this.#subscribedChannels.delete(channel)
+    if (subscribed && !this.#disposed && this.#subscriber.status !== 'end') {
+      await this.#subscriber.unsubscribe(channel)
     }
+  }
+
+  #untrackSubscriptionOwner(sub: RedisLaneSubscription): void {
+    const owner = this.#subOwners.get(sub)
+    if (owner === undefined) return
+    this.#untrack(this.#roomGenSubs, owner, sub)
+    this.#subOwners.delete(sub)
   }
 
   readonly #onMessage = (channelBytes: Buffer, frame: Buffer): void => {
@@ -526,6 +672,32 @@ export class RedisRoomBackend implements RoomBackendSpi {
     for (const sub of [...set]) if (!sub.closed) sub.deliver(copy, info)
   }
 
+  readonly #onSubscriberClose = (): void => {
+    if (this.#disposed) return
+    this.#subscribedChannels.clear()
+    const reason = new Error('subscribeLane: Redis subscriber connection lost')
+    for (const set of this.#channelSubs.values()) for (const sub of set) sub.connectionLost(reason)
+  }
+
+  readonly #onSubscriberReady = (): void => {
+    if (this.#disposed) return
+    for (const channel of this.#channelSubs.keys()) void this.#ensureChannelSubscribed(channel).catch(() => {})
+  }
+
+  readonly #onSubscriberEnd = (): void => {
+    if (this.#disposed) return
+    const reason = new Error('subscribeLane: Redis subscriber reconnect attempts exhausted')
+    for (const [channel, set] of this.#channelSubs) {
+      this.#subscribedChannels.delete(channel)
+      for (const sub of set) {
+        this.#untrackSubscriptionOwner(sub)
+        sub.failPermanently(reason)
+      }
+    }
+    this.#channelSubs.clear()
+    this.#channelAcks.clear()
+  }
+
   // ── generation lifecycle ──
 
   async listGenerations(roomId: string): Promise<string[]> {
@@ -535,33 +707,35 @@ export class RedisRoomBackend implements RoomBackendSpi {
 
   async dropGeneration(roomId: string, inc: string): Promise<void> {
     this.#assertLive()
-    const head = this.#liveHead(await this.#publisher.get(headKey(this.#prefix, roomId)))
+    const head = this.#parseHead(await this.#publisher.get(headKey(this.#prefix, roomId)))
     if ((head?.inc ?? null) === inc) {
       throw new Error(`dropGeneration: refusing to drop the current incarnation '${inc}' of room '${roomId}'`)
     }
-    await this.#publisher.srem(gensKey(this.#prefix, roomId), inc)
+    // Physical cleanup and old-subscription teardown happen while the generation remains LISTED. That
+    // entry is the fresh-inc guard's publication boundary: a crash before the final SREM is resumable and
+    // cannot expose surviving data as reusable.
     const keys = await this.#scanKeys(`${escapeGlob(genPrefix(this.#prefix, roomId, inc))}:*`)
     if (keys.length > 0) await this.#publisher.unlink(...keys)
-    const subs = this.#incSubs.get(inc)
+    const owner = roomGenerationKey(roomId, inc)
+    const subs = this.#roomGenSubs.get(owner)
     if (subs !== undefined) {
       for (const sub of [...subs]) {
         await this.#detachChannelOnly(sub)
+        this.#subOwners.delete(sub)
         sub.generationDropped()
       }
-      this.#incSubs.delete(inc)
+      this.#roomGenSubs.delete(owner)
     }
+    await this.#testHooks?.beforeDropGenerationUnregister?.({ roomId, inc })
+    await this.#publisher.srem(gensKey(this.#prefix, roomId), inc)
   }
 
   // Teardown used by dropGeneration/dispose: remove the sub from its channel and UNSUBSCRIBE when the
-  // channel goes empty, without touching #incSubs (the caller manages that).
+  // channel goes empty, without touching #roomGenSubs (the caller manages that).
   async #detachChannelOnly(sub: RedisLaneSubscription): Promise<void> {
     for (const [channel, set] of this.#channelSubs) {
       if (!set.has(sub)) continue
-      set.delete(sub)
-      if (set.size === 0) {
-        this.#channelSubs.delete(channel)
-        if (!this.#disposed) await this.#subscriber.unsubscribe(channel)
-      }
+      await this.#detachChannel(sub, channel)
       return
     }
   }
@@ -570,19 +744,22 @@ export class RedisRoomBackend implements RoomBackendSpi {
 
   async directoryPut(roomId: string, incTag: string): Promise<void> {
     this.#assertLive()
-    await Promise.all([
-      this.#publisher.zadd(directoryIndexKey(this.#prefix), 0, roomId),
-      this.#publisher.hset(directoryTagsKey(this.#prefix), roomId, incTag),
+    await callDefinedCommand(this.#publisher, DIRECTORY_PUT_CMD, [
+      directoryIndexKey(this.#prefix),
+      directoryTagsKey(this.#prefix),
+      roomId,
+      incTag,
     ])
   }
 
   async directoryDelete(roomId: string, incTag: string): Promise<void> {
     this.#assertLive()
-    const current = await this.#publisher.hget(directoryTagsKey(this.#prefix), roomId)
-    if (current !== incTag) return // tag-guarded: a stale tag never deletes
-    await Promise.all([
-      this.#publisher.hdel(directoryTagsKey(this.#prefix), roomId),
-      this.#publisher.zrem(directoryIndexKey(this.#prefix), roomId),
+    await this.#testHooks?.beforeDirectoryDeleteApply?.({ roomId, incTag })
+    await callDefinedCommand(this.#publisher, DIRECTORY_DELETE_CMD, [
+      directoryIndexKey(this.#prefix),
+      directoryTagsKey(this.#prefix),
+      roomId,
+      incTag,
     ])
   }
 
@@ -617,7 +794,14 @@ export class RedisRoomBackend implements RoomBackendSpi {
     this.#disposed = true
     for (const set of this.#channelSubs.values()) for (const sub of set) sub.generationDropped()
     this.#channelSubs.clear()
-    this.#incSubs.clear()
+    this.#channelAcks.clear()
+    this.#subscribedChannels.clear()
+    this.#roomGenSubs.clear()
+    this.#subOwners.clear()
+    this.#subscriber.off('messageBuffer', this.#onMessage)
+    this.#subscriber.off('close', this.#onSubscriberClose)
+    this.#subscriber.off('ready', this.#onSubscriberReady)
+    this.#subscriber.off('end', this.#onSubscriberEnd)
     try {
       await this.#subscriber.quit()
     } catch {
@@ -631,20 +815,26 @@ export class RedisRoomBackend implements RoomBackendSpi {
     if (this.#disposed) throw new Error('RedisRoomBackend: used after dispose()')
   }
 
-  #authNow(): number {
-    return this.#authorityNow !== undefined ? this.#authorityNow() : Date.now()
-  }
-
   #nowArg(): string {
     return this.#authorityNow !== undefined ? String(this.#authorityNow()) : ''
   }
 
+  async #authorityNowMs(): Promise<number> {
+    if (this.#authorityNow !== undefined) return this.#authorityNow()
+    const [seconds, microseconds] = await this.#publisher.time()
+    return Number(seconds) * 1_000 + Math.floor(Number(microseconds) / 1_000)
+  }
+
+  #parseHead(raw: string | null): StoredHead | null {
+    return raw === null ? null : (JSON.parse(raw) as StoredHead)
+  }
+
   // Decode a stored head, treating a logically-expired tombstone as absent (a lapsed tombstone reopens
   // the absence epoch — I1). A pure read never deletes; the head-CX/commit Lua reclaim the PX backstop.
-  #liveHead(raw: string | null): StoredHead | null {
-    if (raw === null) return null
-    const stored = JSON.parse(raw) as StoredHead
-    if (stored.exp !== undefined && stored.exp <= this.#authNow()) return null
+  #liveHead(raw: string | null, authorityNow: number): StoredHead | null {
+    const stored = this.#parseHead(raw)
+    if (stored === null) return null
+    if (stored.exp !== undefined && stored.exp <= authorityNow) return null
     return stored
   }
 

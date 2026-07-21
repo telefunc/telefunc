@@ -19,7 +19,14 @@ import type {
   BackendHarness,
   BackendTraces,
 } from '../../../telefunc/wire-protocol/backend/conformance/harness.js'
-import { CELLS_CX_LUA, COMMIT_LUA, HEAD_CX_LUA } from './layout.js'
+import {
+  CELLS_CX_LUA,
+  COMMIT_LUA,
+  DIRECTORY_DELETE_LUA,
+  DIRECTORY_PUT_LUA,
+  HEAD_CX_LUA,
+  RETAINED_DELETE_LUA,
+} from './layout.js'
 import { RedisRoomBackend } from './backend.js'
 
 const REDIS_TRACES: BackendTraces = {
@@ -49,6 +56,9 @@ const concurrentHeadCxBarrier = async <T>(first: () => Promise<T>, second: () =>
 }
 
 export type StableReadProbe = (info: { roomId: string; inc: string }) => void | Promise<void>
+export type SubscribeProbe = (channel: string) => void | Promise<void>
+export type DropGenerationProbe = (info: { roomId: string; inc: string }) => void | Promise<void>
+export type DirectoryDeleteProbe = (info: { roomId: string; incTag: string }) => void | Promise<void>
 
 // The fixture the shared suite consumes, widened with the seams the Redis-specific stable-read scenarios
 // use: the raw client (to force an insert/delete out of band), the concrete backend, and a settable
@@ -56,26 +66,48 @@ export type StableReadProbe = (info: { roomId: string; inc: string }) => void | 
 export type RedisBackendFixture = BackendFixture & {
   backend: RedisRoomBackend
   redis: Redis
+  subscriber: Redis
+  subscriberId: number
   prefix: string
   setStableReadProbe(fn: StableReadProbe | null): void
+  setBeforeSubscribe(fn: SubscribeProbe | null): void
+  setBeforeDropGenerationUnregister(fn: DropGenerationProbe | null): void
+  setBeforeDirectoryDeleteApply(fn: DirectoryDeleteProbe | null): void
 }
 
 export async function createRedisFixture(
   url: string,
-  opts: { maxRetainedPayloadBytes?: number } = {},
+  opts: { maxRetainedPayloadBytes?: number; useRedisAuthority?: boolean } = {},
 ): Promise<RedisBackendFixture> {
   const redis = new Redis(url, { maxRetriesPerRequest: 2, lazyConnect: false })
+  const subscriber = new Redis(url, {
+    autoResubscribe: false,
+    lazyConnect: false,
+    maxRetriesPerRequest: 1,
+    retryStrategy: (attempt) => (attempt <= 5 ? 0 : null),
+  })
+  const subscriberId = Number(await subscriber.client('ID'))
   const prefix = uniquePrefix()
   // Authority time starts ALIGNED with the caller clock and only `advanceAuthority` moves it.
   let clock = Date.now()
   let probe: StableReadProbe | null = null
+  let beforeSubscribe: SubscribeProbe | null = null
+  let beforeDropGenerationUnregister: DropGenerationProbe | null = null
+  let beforeDirectoryDeleteApply: DirectoryDeleteProbe | null = null
 
   const backend = new RedisRoomBackend({
     redis,
+    subscriber,
     prefix,
     maxRetainedPayloadBytes: opts.maxRetainedPayloadBytes,
-    authorityNow: () => clock,
+    authorityNow: opts.useRedisAuthority === true ? undefined : () => clock,
     stableReadProbe: (info) => probe?.(info),
+    subscriptionRetryDelay: () => 0,
+    testHooks: {
+      beforeSubscribe: (channel) => beforeSubscribe?.(channel),
+      beforeDropGenerationUnregister: (info) => beforeDropGenerationUnregister?.(info),
+      beforeDirectoryDeleteApply: (info) => beforeDirectoryDeleteApply?.(info),
+    },
   })
 
   // Pre-cache the scripts so a head-CX race never pays a one-off NOSCRIPT round-trip that could perturb
@@ -84,11 +116,16 @@ export async function createRedisFixture(
     redis.script('LOAD', HEAD_CX_LUA),
     redis.script('LOAD', CELLS_CX_LUA),
     redis.script('LOAD', COMMIT_LUA),
+    redis.script('LOAD', RETAINED_DELETE_LUA),
+    redis.script('LOAD', DIRECTORY_PUT_LUA),
+    redis.script('LOAD', DIRECTORY_DELETE_LUA),
   ])
 
   return {
     backend,
     redis,
+    subscriber,
+    subscriberId,
     prefix,
     traces: REDIS_TRACES,
     authorityNow: () => clock,
@@ -98,6 +135,15 @@ export async function createRedisFixture(
     concurrentHeadCxBarrier,
     setStableReadProbe: (fn) => {
       probe = fn
+    },
+    setBeforeSubscribe: (fn) => {
+      beforeSubscribe = fn
+    },
+    setBeforeDropGenerationUnregister: (fn) => {
+      beforeDropGenerationUnregister = fn
+    },
+    setBeforeDirectoryDeleteApply: (fn) => {
+      beforeDirectoryDeleteApply = fn
     },
     dispose: async () => {
       await backend.dispose()

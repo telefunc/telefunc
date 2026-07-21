@@ -13,6 +13,7 @@
 //   revision:  tf:room:{rid}:g:<inc>:rev    INCR'd by every cell CX — the coarse per-generation revision
 //   order:     tf:room:{rid}:g:<inc>:o:<laneKey>   "<seq>:<ts>:<expiresAt|''>"
 //   retained:  tf:room:{rid}:g:<inc>:rt:<laneKey>  12-byte framed [seq][ts_hi][ts_lo] .. payload bytes
+//   rt-size:   tf:room:{rid}:g:<inc>:rt-size       aggregate retained PAYLOAD bytes (headers excluded)
 //   channels:  tf:room:{rid}:ch:<inc>:<laneKey>    PUBLISH/SUBSCRIBE — INC-SCOPED (an old-inc SUBSCRIBE
 //                                                  can never hear a recreation — I11)
 //   gens:      tf:room:{rid}:gens           SET of incs — SADD'd by the head-CX that installs an inc,
@@ -65,6 +66,9 @@ export function retainedKeyPrefix(prefix: string, roomId: string, inc: string): 
 }
 export function retainedKey(prefix: string, roomId: string, inc: string, laneKey: string): string {
   return `${retainedKeyPrefix(prefix, roomId, inc)}${laneKey}`
+}
+export function retainedSizeKey(prefix: string, roomId: string, inc: string): string {
+  return `${genPrefix(prefix, roomId, inc)}:rt-size`
 }
 export function channelKey(prefix: string, roomId: string, inc: string, laneKey: string): string {
   return `${roomTag(prefix, roomId)}:ch:${inc}:${laneKey}`
@@ -156,15 +160,13 @@ local function conflict()
   return '{"tag":"conflict","current":null}'
 end
 
--- operation legality of the tombstone delete is decided BEFORE any compare, so misuse throws even where
--- the compare would have conflicted (spi.md §2 — the delete row only).
+-- Operation legality of the tombstone delete is decided BEFORE any compare, so misuse throws even where
+-- the compare would have conflicted (spi.md §2 — the delete row only). A legal delete still goes through
+-- the selected HeadCx compare form below: guarded takeover/finalize forms cannot bypass their predicates.
 if nx.kind == 'delete' then
   if from ~= 'closed' then
     return redis.error_reply("head CX: {delete} is legal only against a 'closed' tombstone, not '" .. from .. "'")
   end
-  if (not cur) or cur.rev ~= cx.rev then return conflict() end
-  redis.call('DEL', head_key)
-  return '{"tag":"deleted"}'
 end
 
 -- compare, by cx form
@@ -181,6 +183,11 @@ elseif cur ~= nil and cur.rev == cx.rev then
   end
 end
 if not matches then return conflict() end
+
+if nx.kind == 'delete' then
+  redis.call('DEL', head_key)
+  return '{"tag":"deleted"}'
+end
 
 -- transition-table legality (throws), validated against the head the compare matched
 local transition = from .. ' + ' .. cx.form .. ' -> ' .. nx.state
@@ -261,14 +268,14 @@ return 'committed'
 
 export const CELLS_CX_CMD = 'tfRoomCellsCx'
 
-// COMMIT — atomic acceptance: head precondition (one boolean, two branches), order advance, optional
-// retained install, then PUBLISH (the broker handoff; `delivery` settles on this reply, receivers = its
-// count). Supplying a closing lease selects the narrow closing-control branch, which is what makes every
-// other lane stale while closing (I12).
-//   KEYS: [1]=head [2]=order [3]=retained [4]=channel
-//   ARGV: [1]=now [2]=inc [3]=laneKind [4]=closingLease('') [5]=retain('0'|'1') [6]=orderTtlMs('') [7]=payload
+// COMMIT — atomic acceptance: head precondition (one boolean, two branches), retained aggregate-cap
+// validation, order advance, optional retained install, then PUBLISH. Supplying a closing lease selects
+// the narrow closing-control branch, which is what makes every other lane stale while closing (I12).
+//   KEYS: [1]=head [2]=order [3]=retained [4]=channel [5]=retained aggregate payload size
+//   ARGV: [1]=now [2]=inc [3]=laneKind [4]=closingLease('') [5]=retain('0'|'1')
+//         [6]=orderTtlMs('') [7]=payload [8]=aggregate retained payload cap
 export const COMMIT_LUA = `${NOW_FN}
-local head_key, order_key, retained_key, channel_key = KEYS[1], KEYS[2], KEYS[3], KEYS[4]
+local head_key, order_key, retained_key, channel_key, retained_size_key = KEYS[1], KEYS[2], KEYS[3], KEYS[4], KEYS[5]
 local now = tf_now(ARGV[1])
 local head = tf_head(head_key, now)
 local ok = false
@@ -281,6 +288,21 @@ if head and head.inc == ARGV[2] then
   end
 end
 if not ok then return '{"stale":true}' end
+
+-- The counter is aggregate PAYLOAD bytes. A stored frame has a fixed 12-byte order header, excluded
+-- when replacing an existing retained lane. The check precedes every acceptance mutation.
+local retained_total = nil
+if ARGV[5] == '1' then
+  local current_total = tonumber(redis.call('GET', retained_size_key) or '0')
+  local old_frame_bytes = redis.call('STRLEN', retained_key)
+  local old_payload_bytes = 0
+  if old_frame_bytes > 12 then old_payload_bytes = old_frame_bytes - 12 end
+  retained_total = current_total - old_payload_bytes + string.len(ARGV[7])
+  if retained_total > tonumber(ARGV[8]) then
+    return redis.error_reply('commitLane: retained aggregate ' .. retained_total .. ' bytes exceeds the ' .. ARGV[8] .. ' byte cap')
+  end
+end
+
 -- advance the lane's order domain: seq strictly increasing, timestamp clamped non-decreasing; a
 -- logically-expired mark resets (matches the reference).
 local base_seq, base_ts = 0, 0
@@ -300,13 +322,62 @@ if ARGV[6] ~= '' then redis.call('PEXPIRE', order_key, tonumber(ARGV[6])) end
 local ts_hi = math.floor(ts / 4294967296)
 local ts_lo = ts - ts_hi * 4294967296
 local frame = struct.pack('>I4I4I4', seq, ts_hi, ts_lo) .. ARGV[7]
-if ARGV[5] == '1' then redis.call('SET', retained_key, frame) end
+if ARGV[5] == '1' then
+  redis.call('SET', retained_key, frame)
+  redis.call('SET', retained_size_key, retained_total)
+end
 local receivers = redis.call('PUBLISH', channel_key, frame)
 return '{"accepted":true,"seq":' .. seq .. ',"timestamp":' .. ts .. ',"receivers":' .. receivers .. '}'
 `
 
 export const COMMIT_CMD = 'tfRoomCommit'
-export const COMMIT_KEYS = 4
+export const COMMIT_KEYS = 5
+
+// Retained deletion updates the aggregate payload counter in the same atomic record as payload removal.
+// KEYS[1] is the counter; KEYS[2..] are the selected retained lane keys.
+export const RETAINED_DELETE_LUA = `
+local size_key = KEYS[1]
+local total = tonumber(redis.call('GET', size_key) or '0')
+for i = 2, #KEYS do
+  local frame_bytes = redis.call('STRLEN', KEYS[i])
+  if frame_bytes > 0 then
+    local payload_bytes = 0
+    if frame_bytes > 12 then payload_bytes = frame_bytes - 12 end
+    total = total - payload_bytes
+    redis.call('DEL', KEYS[i])
+  end
+end
+if total <= 0 then
+  redis.call('DEL', size_key)
+  total = 0
+else
+  redis.call('SET', size_key, total)
+end
+return total
+`
+
+export const RETAINED_DELETE_CMD = 'tfRoomRetainedDelete'
+
+// Directory records use two co-slotted global keys. Put and compare-delete are each one atomic record,
+// so stale cleanup cannot erase (or de-index) a concurrent newer tag.
+export const DIRECTORY_PUT_LUA = `
+redis.call('ZADD', KEYS[1], 0, ARGV[1])
+redis.call('HSET', KEYS[2], ARGV[1], ARGV[2])
+return 1
+`
+
+export const DIRECTORY_PUT_CMD = 'tfRoomDirectoryPut'
+export const DIRECTORY_PUT_KEYS = 2
+
+export const DIRECTORY_DELETE_LUA = `
+if redis.call('HGET', KEYS[2], ARGV[1]) ~= ARGV[2] then return 0 end
+redis.call('HDEL', KEYS[2], ARGV[1])
+redis.call('ZREM', KEYS[1], ARGV[1])
+return 1
+`
+
+export const DIRECTORY_DELETE_CMD = 'tfRoomDirectoryDelete'
+export const DIRECTORY_DELETE_KEYS = 2
 
 // The 12-byte publish/retained header, shared by the commit Lua (`struct.pack('>I4I4I4', …)`) and the
 // JS decoders. `ts` is split into two u32s to stay ms-accurate beyond ~50 days.
