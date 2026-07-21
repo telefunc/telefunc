@@ -65,18 +65,9 @@ const liveReplacer: ReplacerType<LiveContract, ServerReplacerContext> = {
 
 let installed = false
 
-/** Register the Live replacer with telefunc, at most once per process. TWO callers, deliberately:
- *
- *   - the `telefunc-server` auto-load entry, injected by core's extension scanner ahead of every
- *     transformed telefunc module — so registration precedes serialization for any SSR/preloaded request.
- *     NOT process-start eager: a DIRECT first request with no prior server import still snapshots its
- *     config before the module evaluates (see telefunc-server.ts for the full contract and the residual);
- *   - `reactiveDrizzle()`, the idempotent belt for setups the scanner cannot see: discovery reads the
- *     project ROOT's package.json, so a dependency declared only in a nested workspace package (or a
- *     bundler without telefunc's transform) is never scanned. Late registration serves later requests.
- *
- *  Importing the package root still registers nothing — the registration stays an internal detail the
- *  public API never asks the user to perform. */
+/** Register the Live replacer with telefunc, at most once per process. Called from `reactiveDrizzle()`
+ *  rather than at import time, so merely importing this package registers nothing — and so the
+ *  registration is an internal detail the public API never asks the user to perform. */
 function installLiveReplacer(): void {
   if (installed) return
   installed = true
