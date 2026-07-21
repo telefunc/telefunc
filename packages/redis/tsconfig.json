@@ -12,5 +12,9 @@
     "noUncheckedIndexedAccess": true,
     "lib": ["DOM", "ESNext"]
   },
-  "include": ["src/**/*.ts"]
+  "include": ["src/**/*.ts"],
+  "// src/room": "The dark Room backend spike imports the telefunc SPI by source path (cross-package),",
+  "// src/room (2)": "so it is excluded from this emit build (it is never shipped) and type-checked",
+  "// src/room (3)": "separately via tsconfig.room.json (noEmit — rootDir is not enforced there).",
+  "exclude": ["src/room/**"]
 }
