@@ -1,4 +1,4 @@
-export { testRun, testRunUpgrade }
+export { testRun }
 
 import { page, test, expect, run, getServerUrl, autoRetry } from '@brillout/test-e2e'
 import { navigate } from './e2e-utils'
@@ -48,14 +48,6 @@ const serverIsReadyMessage = (log: string) =>
   log.includes('Server running at') ||
   (log.includes('Local:') && log.includes('http://localhost:3000'))
 
-function testRunUpgrade(cmd: RunCmd) {
-  run(cmd, {
-    serverIsReadyMessage,
-    tolerateError: (log) => tolerateError(log, { tolerateWsConnectionFailure: false }),
-  })
-  testUpgrade(cmd === 'pnpm dev')
-}
-
 function testRun(cmd: RunCmd) {
   run(cmd, {
     serverIsReadyMessage,
@@ -86,6 +78,10 @@ function testRun(cmd: RunCmd) {
   testClose()
 
   testChannel(isDev)
+
+  // Runs in every variant: asserts exactly-once commit where the env upgrades (['sse','ws']),
+  // and zero commits everywhere else — each non-upgrading variant doubles as the control.
+  testUpgrade()
 
   testFunction()
 

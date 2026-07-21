@@ -9,7 +9,7 @@ export { testUpgrade }
 import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
 import { navigate, getResult, getCleanupState, resetCleanupState } from '../../e2e-utils'
 
-function testUpgrade(isDev: boolean) {
+function testUpgrade() {
   const transports = parseChannelTransports(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS)
   const expectsUpgrade = transports.length > 1 && transports[transports.length - 1] === 'ws'
   const label = expectsUpgrade ? 'upgrade' : 'upgrade control (sse-only)'
@@ -76,8 +76,6 @@ function testUpgrade(isDev: boolean) {
       expect(ss.upgrade_preparedCount).toBe('0')
     }
   })
-
-  void isDev
 }
 
 function parseChannelTransports(raw: string | undefined): string[] {
