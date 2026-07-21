@@ -53,10 +53,28 @@ function captureMismatch(rows: Row[], columns: string[], pk: string[], requireKe
     const missing = columns.filter((column) => !(column in row))
     if (missing.length > 0) return { rowIndex, reason: 'missing-columns', detail: missing.join(', ') }
     if (!requireKey) continue
-    const unkeyed = pk.filter((field) => row[field] === undefined || row[field] === null)
-    if (unkeyed.length > 0) return { rowIndex, reason: 'missing-key', detail: unkeyed.join(', ') }
+    const unkeyed = unkeyedBy(row, pk)
+    if (unkeyed) return { rowIndex, ...unkeyed }
   }
   return undefined
+}
+
+/** The KEY half alone, for rows whose SHAPE is already settled by construction — `ImageLayout.split`'s, whose
+ *  every field key exists whatever the statement returned (see its note). Asking those rows for their shape
+ *  would be asking a question with one possible answer; asking them for a usable retraction key is not. */
+function captureUnkeyed(rows: Row[], pk: string[]): CaptureMismatch {
+  for (const [rowIndex, row] of rows.entries()) {
+    const unkeyed = unkeyedBy(row, pk)
+    if (unkeyed) return { rowIndex, ...unkeyed }
+  }
+  return undefined
+}
+
+/** The PK fields this row cannot be addressed by — absent, or NULL. One implementation, so both callers
+ *  report the same thing. */
+function unkeyedBy(row: Row, pk: string[]): { reason: 'missing-key'; detail: string } | undefined {
+  const unkeyed = pk.filter((field) => row[field] === undefined || row[field] === null)
+  return unkeyed.length > 0 ? { reason: 'missing-key', detail: unkeyed.join(', ') } : undefined
 }
 
 /** Precise changes when the captured rows are a trustworthy full image, else ONE coarse marker. */
@@ -67,10 +85,12 @@ function captureOrCoarse(op: Op, relationId: string, rows: Row[], plan: PreciseP
   return [coarse(relationId)]
 }
 
-/** Precise changes from BOTH images, else one coarse marker. The image that has to be trustworthy is the
- *  one the change is built from — the OLD image always (it carries the retraction key), plus whatever the
- *  layout says is decisive for this op (`ImageLayout.decisive`: an update's NEW images; nothing for a
- *  delete, whose NEW is the all-NULL non-row). */
+/** Precise changes from BOTH images, else one coarse marker.
+ *
+ *  One KEY check, on the OLD image — which is the whole of what this path can be asked. Its rows come from
+ *  `ImageLayout.split`, which is total in the fields, so a shape check over them cannot disagree; only
+ *  whether the retraction key is usable can. The change is built from the OLD image (it carries that key),
+ *  and a key that is absent or NULL coarsens rather than addressing nothing. */
 function captureBothOrCoarse(
   op: Op,
   relationId: string,
@@ -78,13 +98,11 @@ function captureBothOrCoarse(
   plan: Extract<SubstitutionPlan, { strategy: 'bothImages' }>,
 ): TableChange[] {
   const emitted = (row: Row) => physicalRow(row, plan.physical)
-  const mismatch =
-    captureMismatch(
-      pairs.map((pair) => pair.old),
-      plan.columns,
-      plan.pk,
-      true, // the retraction key is the OLD image's to provide — op is never 'insert' on this path
-    ) ?? captureMismatch(plan.images.decisive(pairs, op), plan.columns, plan.pk, /* requireKey */ false)
+  // op is never 'insert' on this path, so a retraction key is always required.
+  const mismatch = captureUnkeyed(
+    pairs.map((pair) => pair.old),
+    plan.pk,
+  )
   if (mismatch) {
     report('capture-mismatch', { relation: relationId, mismatch })
     return [coarse(relationId)]

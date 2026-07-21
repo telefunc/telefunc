@@ -26,11 +26,14 @@ import { getResult, navigate } from '../../e2e-utils'
 // where they are actually observable — `writeTransport.spec.ts`, against `router.ingest` directly, with
 // mutation-gated controls (`admitBatch` reverted to the owning-table rule flips those tests).
 //
-// RUNNER CAVEAT (Windows). @brillout/test-e2e's teardown does not return here after a passing run — the
-// suite prints PASS and then hangs killing the dev server — so the evidence for this lane is `PASS` with
-// zero FAILs rather than a process exit code. The dev server also orphans vite's HMR port on a failed run
-// (the playground's `fuser -k` is a Linux no-op), which then masquerades as a startup failure on the NEXT
-// run; clear it with `taskkill -F -T -PID <pid>` before re-running.
+// RUNNER CAVEAT (Windows-only, and only for running this lane off its supported platform). This suite's
+// supported runner is Ubuntu — `test-e2e.config.mjs` pins it there because the playground scripts are
+// bash-only — and none of the below applies there. On a Windows dev box @brillout/test-e2e's teardown does
+// not return after a passing run (the suite prints PASS and then hangs killing the dev server), so the
+// evidence is `PASS` with zero FAILs rather than a process exit code; and a failed run orphans vite's HMR
+// port, because `pnpm dev`'s `fuser -k 24679/tcp` — which does reclaim the port on Linux — finds no `fuser`
+// on Windows and is skipped. The orphan then masquerades as a startup failure on the NEXT run; clear it with
+// `taskkill -F -T -PID <pid>` before re-running.
 
 type State = { todosCount: number; notesCount: number; todosFetches: number; notesFetches: number }
 

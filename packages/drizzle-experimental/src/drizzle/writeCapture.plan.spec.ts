@@ -24,8 +24,9 @@ import { drizzle as pgPoolDrizzle } from 'drizzle-orm/node-postgres'
 import { integer, pgTable, text } from 'drizzle-orm/pg-core'
 import { drizzle as pgDrizzle } from 'drizzle-orm/pglite'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { captureMismatch } from './writeChanges.js'
-import { planCapture } from './writePlan.js'
+import { captureBothOrCoarse, captureMismatch } from './writeChanges.js'
+import { imageLayoutOf } from './imageLayout.js'
+import { type SubstitutionPlan, planCapture } from './writePlan.js'
 
 const keyed = pgTable('keyed', { id: integer('id').primaryKey(), name: text('name') })
 const unkeyed = pgTable('unkeyed', { a: integer('a'), b: text('b') }) // NO primary key
@@ -272,6 +273,42 @@ describe('capture mismatch — captured rows are verified, not trusted', () => {
     expect(captureMismatch([{ a: 1, b: null }], composite, composite, true)).toMatchObject({
       reason: 'missing-key',
       detail: 'b',
+    })
+  })
+
+  // The BOTH-IMAGES lane asks a narrower question, because its rows come from `ImageLayout.split` and are
+  // total in the fields by construction: only the OLD image's retraction key can disagree. These two pin
+  // that it still fails closed on the one thing it does check.
+  describe('both images — verified by KEY alone', () => {
+    const layout = imageLayoutOf(['id', 'name'])
+    const plan = {
+      strategy: 'bothImages',
+      pk: ['id'],
+      columns: ['id', 'name'],
+      physical: { id: 'id', name: 'name' },
+      callerOrder: [],
+      images: layout,
+      deliver: () => undefined,
+    } satisfies Extract<SubstitutionPlan, { strategy: 'bothImages' }>
+
+    it('an OLD image with no usable key coarsens rather than retracting nothing', () => {
+      const pairs = [layout.split({})] // every field key present, every value absent
+      expect(captureBothOrCoarse('update', 'public.keyed', pairs, plan)).toEqual([
+        { table: 'public.keyed', kind: 'coarse' },
+      ])
+    })
+
+    it('CONTROL: a complete pair is precise, keyed by the OLD image', () => {
+      const pairs = [layout.split({ o0: 1, n0: 2, o1: 'before', n1: 'after' })]
+      expect(captureBothOrCoarse('update', 'public.keyed', pairs, plan)).toEqual([
+        {
+          table: 'public.keyed',
+          kind: 'update',
+          old: { id: 1, name: 'before' },
+          new: { id: 2, name: 'after' },
+          key: { id: 1 },
+        },
+      ])
     })
   })
 })

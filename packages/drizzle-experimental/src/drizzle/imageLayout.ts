@@ -46,13 +46,17 @@ type ImageLayout = {
    *  `index*2+1` (new) otherwise, exactly the image `delivered` picks; `-1` for a field this layout does
    *  not carry. */
   rawPositionOf: (field: string, op: Op) => number
-  /** One raw row's `o<i>`/`n<i>` values, split back into field-keyed `{old, new}` rows. */
+  /** One raw row's `o<i>`/`n<i>` values, split back into field-keyed `{old, new}` rows.
+   *
+   *  TOTAL in the fields, and downstream depends on it: both images carry a key for every field whatever the
+   *  row held. Nothing is papered over — an alias cannot be absent to begin with. Capture owns this
+   *  RETURNING selection and drizzle builds its row mapper FROM that selection, writing one entry per
+   *  selected column unconditionally (rc.4's default `makeDefaultQueryMapper`, its optional JIT mapper and
+   *  the legacy `mapResultRow` alike). A narrowed answer is therefore a missing VALUE, never a missing key
+   *  — so capture verifies these rows by KEY alone (`captureUnkeyed`), a shape check having nothing to find. */
   split: (row: Row) => Images
   /** The image the caller's own plain RETURNING would have been handed. */
   delivered: (pair: Images, op: Op) => Row
-  /** The images that must ADDITIONALLY validate as real rows beyond the old one: the NEW images for an
-   *  update, nothing for a delete (its NEW is the all-NULL non-row). */
-  decisive: (pairs: Images[], op: Op) => Row[]
 }
 
 const OLD_IMAGE = 'tf_old__'
@@ -90,6 +94,5 @@ function imageLayoutOf(fields: string[]): ImageLayout {
       return images
     },
     delivered: (pair, op) => (op === 'delete' ? pair.old : pair.new),
-    decisive: (pairs, op) => (op === 'delete' ? [] : pairs.map((pair) => pair.new)),
   }
 }
