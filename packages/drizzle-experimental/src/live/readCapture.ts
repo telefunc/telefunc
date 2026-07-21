@@ -42,24 +42,53 @@ import type { ReadToken } from '../graph/registry.js'
 import { registryFor } from './dbRuntime.js'
 import { acquireSubscription, type SubscriptionRef } from './changeRuntime.js'
 
-/** What one live read holds between `.live()` and either its activation or its collection: the graph's
- *  read token and the db's change-subscription ref. The two have exactly the same owner at every moment,
- *  so they travel together and are dropped by whichever of them ends the read. `redeemed` is flipped by
- *  serialize-time activation, after which the channel lease owns both and the finalizer must not touch
- *  them — `token.release()` on a redeemed token is a usage error, not a no-op. */
-type ReadOwnership = { token: ReadToken; subscription: SubscriptionRef; redeemed: boolean }
+/** The two refs a live read holds from the moment a graph token joins its change subscription until the read
+ *  ends — under ONE owner that knows WHICH of the three ways it ended. The token and the subscription have
+ *  the same owner at every moment, so they travel together; `redeemed` is this object's PRIVATE state, not a
+ *  field a caller reads, because whether activation has happened is the whole of what distinguishes abandon's
+ *  two behaviors, and `token.release()` on a redeemed token is a usage error rather than a no-op. */
+type ReadLifetime = {
+  /** Serialize-time activation: redeem the token and hand back the teardown the channel lease runs on close. */
+  activate(): () => void
+  /** The handle was collected without ever being serialized: give both refs back — UNLESS activation
+   *  already did, in which case the channel lease owns them and touching them here would throw. */
+  abandon(): void
+  /** The read failed before it produced a handle to own these: give both back now, deterministically,
+   *  rather than leaving them for a collector that has nothing to collect. */
+  fail(): void
+}
 
-/** Releases what an ABANDONED live read held, once the handle is collected.
+function createReadLifetime(token: ReadToken, subscription: SubscriptionRef): ReadLifetime {
+  let redeemed = false
+  const releaseBoth = () => {
+    token.release()
+    subscription.release()
+  }
+  return {
+    activate() {
+      const lease = token.redeem()
+      redeemed = true
+      return () => {
+        lease.release()
+        subscription.release()
+      }
+    },
+    abandon() {
+      if (redeemed) return // activated: the wire channel's lease owns these and releases them on close
+      releaseBoth()
+    },
+    fail: releaseBoth,
+  }
+}
+
+/** Reclaims an ABANDONED live read once its handle is collected — the finalizer simply asks the lifetime to
+ *  abandon itself.
  *
- *  The held value must not reach the Live, or the Live is never collected and this never fires. That is
- *  why the graph's `notify` goes through `invalidationSink()` below: the token closes over `notify`, and
- *  the finalizer holds the token, so a `notify` that closed over the Live strongly would keep every
- *  abandoned handle alive forever — a silently dead net that still looks like a net. */
-const abandonedReads = new FinalizationRegistry<ReadOwnership>((owned) => {
-  if (owned.redeemed) return // activated: the wire channel's lease owns these and releases them on close
-  owned.token.release()
-  owned.subscription.release()
-})
+ *  The registered value must not reach the Live, or the Live is never collected and this never fires. That is
+ *  why the graph's `notify` goes through `invalidationSink()` below: the token closes over `notify`, and the
+ *  finalizer holds the lifetime that holds the token, so a `notify` that closed over the Live strongly would
+ *  keep every abandoned handle alive forever — a silently dead net that still looks like a net. */
+const abandonedReads = new FinalizationRegistry<ReadLifetime>((lifetime) => lifetime.abandon())
 
 /** The graph's invalidation sink for one read, holding the Live WEAKLY.
  *
@@ -114,10 +143,16 @@ async function captureAndBuild(builder: unknown, db: object): Promise<Live<Row[]
   // here — a plain awaited builder or a non-Live telefunction never subscribes. The subscription is per-DB,
   // not per-table: one topic carries every change and the router filters locally.
   const subscription = await acquireSubscription(db)
-  // EVERY way out of this read has to give the ref back, or a db stays subscribed for a live query that
-  // does not exist. Up to the handoff below that is this flag's job; after it, the channel lease's (on
-  // activation) or the finalizer's (on abandonment).
-  let handedOff = false
+  // The sink forwards graph invalidations to a Live that does not exist yet, and holds it weakly once it
+  // does. It is only ever CALLED at redeem-time or later, by which point the Live exists — an un-redeemed
+  // token is inert, so no fire reaches it before activation.
+  const sink = invalidationSink()
+
+  // OWNERSHIP MOVES ONCE, FORWARD. From here to `acquire`, only the subscription is held, so a failure gives
+  // just it back. Once the token joins it, `lifetime` owns both. Once the handle is registered, the finalizer
+  // (on collection) and the channel lease (on activation) own them, and this function is out of the picture —
+  // which is why `register` is the LAST thing that can throw.
+  let lifetime: ReadLifetime | undefined
   try {
     const env = {
       dialect,
@@ -127,10 +162,6 @@ async function captureAndBuild(builder: unknown, db: object): Promise<Live<Row[]
     const { instanceKey } = identityOf(builder, env)
     const rlsEnabled = await anyRlsEnabled(db, shape.tables)
 
-    // The sink forwards graph invalidations to a Live that does not exist yet, and holds it weakly once it
-    // does. It is only ever CALLED at redeem-time or later, by which point the Live exists — an un-redeemed
-    // token is inert, so no fire reaches it before activation.
-    const sink = invalidationSink()
     // Only the token is needed here — the graph drives invalidation through the sink.
     const { token } = await registryFor(db).acquire({
       instanceKey,
@@ -140,41 +171,27 @@ async function captureAndBuild(builder: unknown, db: object): Promise<Live<Row[]
       executor: hydrationExecutorOf(db),
       notify: sink.notify,
     })
+    lifetime = createReadLifetime(token, subscription)
 
-    let rows: Row[]
-    try {
-      rows = (await builder) as Row[] // the initial result is a plain read; the graph signals staleness
-    } catch (error) {
-      token.release() // the σ-read failed, so nothing will ever own this token — release it here
-      throw error
-    }
-
-    const owned: ReadOwnership = { token, subscription, redeemed: false }
+    const rows = (await builder) as Row[] // the initial result is a plain read; the graph signals staleness
     const live = new LiveCell<Row[]>(rows)
     sink.hold(live)
-    // From here the handle owns both refs: its channel lease releases them if it is serialized, and the
-    // finalizer releases them if it is collected without ever being.
-    abandonedReads.register(live, owned)
-    handedOff = true
-    live.attachSource({
-      subscribe: () => {
-        // Serialize-time activation (SYNC): redeem the token — subscribe its notify to the graph's sink
-        // and replay the seqAtRead fence — and mark it activated so the finalizer leaves it alone. The
-        // returned teardown releases the lease when the last owning channel closes, and with it the read's
-        // share of the db's subscription.
-        const lease = token.redeem()
-        owned.redeemed = true
-        return () => {
-          lease.release()
-          subscription.release()
-        }
-      },
-    })
+    // Serialize-time activation (SYNC) redeems the token — subscribing its notify to the graph's sink,
+    // replaying the seqAtRead fence, and marking it activated so the finalizer leaves it alone.
+    live.attachSource({ subscribe: () => lifetime!.activate() })
+    // The handoff. After this the handle owns both refs — the channel lease if it is serialized, the
+    // finalizer if it is collected without ever being. Last fallible statement on purpose.
+    abandonedReads.register(live, lifetime)
     // Just return the cell: it IS the `Live<Row[]>` the telefunction hands back, and the wire replacer
     // serializes it. No `.client` re-type — the public type simply doesn't advertise the producer verbs.
     return live
-  } finally {
-    if (!handedOff) subscription.release()
+  } catch (error) {
+    // EVERY way out has to give the refs back, or a db stays subscribed for a live query that does not
+    // exist. If a token ever joined the subscription, the lifetime owns both and fails them together;
+    // before that, only the subscription is outstanding. The handed-off handle never reaches here.
+    if (lifetime) lifetime.fail()
+    else subscription.release()
+    throw error
   }
 }
 
