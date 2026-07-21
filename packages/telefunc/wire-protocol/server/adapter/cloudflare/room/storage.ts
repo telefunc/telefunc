@@ -15,6 +15,13 @@ import {
 
 export type StoredHead = HeadSnapshot & { rev: string; expiresAt: number | null }
 
+export type RouteGenerationCapture = {
+  inc: string
+  token: string
+  createdAt: number
+  expiresAt: number
+}
+
 export const GEN_ORPHAN_GRACE_MS = 60_000
 
 export type HeadCxOutcome =
@@ -74,10 +81,75 @@ export function initSchema(sql: SqlStorage): void {
       PRIMARY KEY (inc, lane_key, subscriber)
     );
     CREATE TABLE IF NOT EXISTS route_capture (
-      attempt_id TEXT PRIMARY KEY, inc TEXT NOT NULL, token TEXT NOT NULL
+      attempt_id TEXT PRIMARY KEY, inc TEXT NOT NULL, token TEXT NOT NULL,
+      created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL
     );
     CREATE TABLE IF NOT EXISTS directory (room_id TEXT PRIMARY KEY, inc_tag TEXT NOT NULL);
   `)
+}
+
+// Durable idempotency for generation-capture response loss. `created_at` is supplied by the internal
+// lifecycle and checked against the room authority clock before insertion; `expires_at` is minted and
+// touched only by the authority. An absent attempt whose creation epoch is outside the bounded capture
+// window therefore fails closed instead of silently pinning a legally reused generation.
+export function readRouteGenerationCapture(sql: SqlStorage, attemptId: string): RouteGenerationCapture | null {
+  const row = sql
+    .exec<{ inc: string; token: string; created_at: number; expires_at: number }>(
+      'SELECT inc, token, created_at, expires_at FROM route_capture WHERE attempt_id = ?',
+      attemptId,
+    )
+    .toArray()[0]
+  return row === undefined
+    ? null
+    : { inc: row.inc, token: row.token, createdAt: row.created_at, expiresAt: row.expires_at }
+}
+
+export function insertRouteGenerationCapture(
+  sql: SqlStorage,
+  attemptId: string,
+  inc: string,
+  token: string,
+  createdAt: number,
+  expiresAt: number,
+): void {
+  sql.exec(
+    'INSERT OR IGNORE INTO route_capture (attempt_id, inc, token, created_at, expires_at) VALUES (?, ?, ?, ?, ?)',
+    attemptId,
+    inc,
+    token,
+    createdAt,
+    expiresAt,
+  )
+}
+
+export function touchRouteGenerationCapture(
+  sql: SqlStorage,
+  attemptId: string,
+  inc: string,
+  token: string,
+  createdAt: number,
+  now: number,
+  ttlMs: number,
+): boolean {
+  return (
+    sql.exec(
+      'UPDATE route_capture SET expires_at = ? WHERE attempt_id = ? AND inc = ? AND token = ? AND created_at = ? AND expires_at > ?',
+      now + ttlMs,
+      attemptId,
+      inc,
+      token,
+      createdAt,
+      now,
+    ).rowsWritten === 1
+  )
+}
+
+export function deleteExpiredRouteGenerationCaptures(sql: SqlStorage, now: number): number {
+  return sql.exec('DELETE FROM route_capture WHERE expires_at <= ?', now).rowsWritten
+}
+
+export function countRouteGenerationCaptures(sql: SqlStorage): number {
+  return sql.exec<{ count: number }>('SELECT COUNT(*) AS count FROM route_capture').toArray()[0]?.count ?? 0
 }
 
 // ── directory (best-effort projection; hosted on a singleton DO — one row per roomId, tag-guarded) ──

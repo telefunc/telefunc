@@ -70,8 +70,13 @@ type RoomStub = {
   readRetained(inc: string, lane: LaneId): Promise<RetainedWire | null>
   listRetained(inc: string): Promise<LaneId[]>
   deleteRetainedLane(inc: string, lane?: LaneId): Promise<void>
-  captureRouteGeneration(inc: string, attemptId?: string | null): Promise<GenerationWire>
+  captureRouteGeneration(
+    inc: string,
+    attemptId?: string | null,
+    attemptCreatedAt?: number | null,
+  ): Promise<GenerationWire>
   releaseRouteGenerationCapture(attemptId: string): Promise<void>
+  countRouteGenerationCaptures(): Promise<number>
   registerRoute(
     roomId: string,
     inc: string,
@@ -80,6 +85,8 @@ type RoomStub = {
     leaseId: string,
     bucket: string | null,
     expectedGenerationToken: string,
+    captureAttemptId?: string | null,
+    captureCreatedAt?: number | null,
   ): Promise<RegisterWire>
   renewRoute(
     inc: string,
@@ -87,6 +94,8 @@ type RoomStub = {
     subscriber: string,
     leaseId: string,
     expectedGenerationToken?: string | null,
+    captureAttemptId?: string | null,
+    captureCreatedAt?: number | null,
   ): Promise<{ ok: boolean; expiresAt?: number; terminal?: boolean }>
   unsubscribeRoute(inc: string, laneKey: string, subscriber: string, leaseId: string): Promise<void>
   listGenerations(): Promise<string[]>
@@ -590,6 +599,9 @@ class CloudflareRoomBackend implements RoomBackendSpi {
     let leaseId = crypto.randomUUID()
     let generationToken: string | null = null
     const generationCaptureAttemptId = crypto.randomUUID()
+    // Stable for the lifecycle: retries carry the same authority-aligned epoch, so once its pin ages
+    // out the authority can distinguish that delayed retry from a genuinely fresh subscription.
+    const generationCaptureCreatedAt = clockValue
     let mux!: CloudflareLaneSubscriptionMultiplexer
     const sharedSubscription = new CloudflareLaneSubscription(
       {
@@ -597,7 +609,11 @@ class CloudflareRoomBackend implements RoomBackendSpi {
           await clockPush
           let captured: GenerationWire
           try {
-            captured = await this.#stub(roomId).captureRouteGeneration(inc, generationCaptureAttemptId)
+            captured = await this.#stub(roomId).captureRouteGeneration(
+              inc,
+              generationCaptureAttemptId,
+              generationCaptureCreatedAt,
+            )
             if (this.#forcedGenerationCaptureFailures > 0) {
               this.#forcedGenerationCaptureFailures -= 1
               throw new Error('forced generation-capture transport failure')
@@ -634,6 +650,8 @@ class CloudflareRoomBackend implements RoomBackendSpi {
             attemptLeaseId,
             null,
             generationToken,
+            generationCaptureAttemptId,
+            generationCaptureCreatedAt,
           )
           if ('ok' in result) {
             return { ready: true }
@@ -658,6 +676,8 @@ class CloudflareRoomBackend implements RoomBackendSpi {
             subscriber,
             renewalLeaseId,
             renewalGenerationToken,
+            generationCaptureAttemptId,
+            generationCaptureCreatedAt,
           )
           return {
             renewed: result.ok,
@@ -675,6 +695,8 @@ class CloudflareRoomBackend implements RoomBackendSpi {
             subscriber,
             validationLeaseId,
             validationGenerationToken,
+            generationCaptureAttemptId,
+            generationCaptureCreatedAt,
           )
           return {
             renewed: result.ok,

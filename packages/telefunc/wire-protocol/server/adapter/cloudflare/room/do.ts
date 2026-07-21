@@ -20,6 +20,7 @@ import {
   recordRouteDeliveryFailure,
   recordRouteDeliverySuccess,
   renewRoute,
+  ROUTE_CAPTURE_TTL_MS,
   snapshotRoutes,
   type RouteInstallation,
   upsertRoute,
@@ -29,6 +30,8 @@ import {
   advanceOrder,
   compareExchangeCells,
   compareExchangeHead,
+  countRouteGenerationCaptures,
+  deleteExpiredRouteGenerationCaptures,
   directoryDelete,
   directoryList,
   directoryPut,
@@ -40,6 +43,9 @@ import {
   readCells,
   readGenerationToken,
   readLiveHead,
+  readRouteGenerationCapture,
+  insertRouteGenerationCapture,
+  touchRouteGenerationCapture,
   type StoredHead,
 } from './storage.js'
 
@@ -299,33 +305,79 @@ export class TelefuncRoomDurableObject extends DurableObject {
 
   // ── routes / readiness ──
 
-  async captureRouteGeneration(inc: string, attemptId: string | null = null): Promise<GenerationWire> {
+  async captureRouteGeneration(
+    inc: string,
+    attemptId: string | null = null,
+    attemptCreatedAt: number | null = null,
+  ): Promise<GenerationWire> {
     let generationToken: string | null = null
+    let invalidAttempt = false
     this.ctx.storage.transactionSync(() => {
+      const now = authorityNow()
       if (attemptId !== null) {
-        const prior = this.#sql
-          .exec<{ inc: string; token: string }>('SELECT inc, token FROM route_capture WHERE attempt_id = ?', attemptId)
-          .toArray()[0]
-        if (prior !== undefined) {
-          if (prior.inc === inc) generationToken = prior.token
+        const prior = readRouteGenerationCapture(this.#sql, attemptId)
+        if (prior !== null) {
+          if (
+            attemptCreatedAt !== null &&
+            prior.inc === inc &&
+            prior.createdAt === attemptCreatedAt &&
+            touchRouteGenerationCapture(
+              this.#sql,
+              attemptId,
+              inc,
+              prior.token,
+              attemptCreatedAt,
+              now,
+              ROUTE_CAPTURE_TTL_MS,
+            )
+          ) {
+            generationToken = prior.token
+          } else {
+            invalidAttempt = true
+          }
+          return
+        }
+        // This is the critical absent-row distinction. A genuinely fresh internal attempt carries an
+        // authority-aligned creation epoch inside the bounded capture window. Once its durable row has
+        // expired and been swept, the same old epoch can never be reinterpreted as a new first capture.
+        if (
+          attemptCreatedAt === null ||
+          !Number.isSafeInteger(attemptCreatedAt) ||
+          attemptCreatedAt > now ||
+          attemptCreatedAt + ROUTE_CAPTURE_TTL_MS <= now
+        ) {
+          invalidAttempt = true
           return
         }
       }
-      const head = readLiveHead(this.#sql, authorityNow())
+      const head = readLiveHead(this.#sql, now)
       if (head?.currentInc === inc && head.state === 'open') {
         generationToken = readGenerationToken(this.#sql, inc)
         if (generationToken !== null && attemptId !== null) {
-          // Durable idempotency for a lost first capture response. This fence intentionally survives
-          // generation drop/reuse until the owning lifecycle closes and releases it.
-          this.#sql.exec(
-            'INSERT OR IGNORE INTO route_capture (attempt_id, inc, token) VALUES (?, ?, ?)',
+          insertRouteGenerationCapture(
+            this.#sql,
             attemptId,
             inc,
             generationToken,
+            attemptCreatedAt!,
+            now + ROUTE_CAPTURE_TTL_MS,
           )
+          const pinned = readRouteGenerationCapture(this.#sql, attemptId)
+          if (
+            pinned === null ||
+            pinned.inc !== inc ||
+            pinned.token !== generationToken ||
+            pinned.createdAt !== attemptCreatedAt
+          ) {
+            generationToken = null
+            invalidAttempt = true
+          }
         }
       }
     })
+    if (invalidAttempt) {
+      return { rejected: true, reason: 'generation capture attempt is absent, expired, or invalid', terminal: true }
+    }
     return generationToken === null
       ? { rejected: true, reason: `room has no open incarnation '${inc}'`, terminal: true }
       : { ok: true, generationToken }
@@ -337,6 +389,10 @@ export class TelefuncRoomDurableObject extends DurableObject {
     })
   }
 
+  async countRouteGenerationCaptures(): Promise<number> {
+    return countRouteGenerationCaptures(this.#sql)
+  }
+
   async registerRoute(
     roomId: string,
     inc: string,
@@ -345,6 +401,8 @@ export class TelefuncRoomDurableObject extends DurableObject {
     leaseId: string,
     bucket: string | null,
     expectedGenerationToken: string,
+    captureAttemptId: string | null = null,
+    captureCreatedAt: number | null = null,
   ): Promise<RegisterWire> {
     // Probe the actual representative subscriber DO through the same no-op delivery RPC used by fanout.
     // Stubs are derived from names and never persisted. The open-head check and UPSERT then share one SQL
@@ -375,6 +433,7 @@ export class TelefuncRoomDurableObject extends DurableObject {
     let expiresAt = 0
     let registered = false
     let generationChanged = false
+    let captureInvalid = false
     this.ctx.storage.transactionSync(() => {
       // Mint the full TTL from durable registration, never from before the awaited addressability probe.
       const now = authorityNow()
@@ -384,11 +443,27 @@ export class TelefuncRoomDurableObject extends DurableObject {
         generationChanged = true
         return
       }
+      if (
+        captureAttemptId !== null &&
+        (captureCreatedAt === null ||
+          !touchRouteGenerationCapture(
+            this.#sql,
+            captureAttemptId,
+            inc,
+            probedGenerationToken,
+            captureCreatedAt,
+            now,
+            ROUTE_CAPTURE_TTL_MS,
+          ))
+      ) {
+        captureInvalid = true
+        return
+      }
       expiresAt = upsertRoute(this.#sql, roomId, inc, laneKey, subscriber, leaseId, bucket, now)
       registered = true
     })
     if (registered) return { ok: true, expiresAt, generationToken: probedGenerationToken }
-    return generationChanged
+    return generationChanged || captureInvalid
       ? { rejected: true, reason: `generation '${inc}' was invalidated`, terminal: true }
       : { rejected: true, reason: `room has no open incarnation '${inc}'`, terminal: true }
   }
@@ -399,6 +474,8 @@ export class TelefuncRoomDurableObject extends DurableObject {
     subscriber: string,
     leaseId: string,
     expectedGenerationToken: string | null = null,
+    captureAttemptId: string | null = null,
+    captureCreatedAt: number | null = null,
   ): Promise<{ ok: boolean; expiresAt?: number; terminal?: boolean }> {
     const now = authorityNow()
     let result!: ReturnType<typeof renewRoute>
@@ -408,6 +485,22 @@ export class TelefuncRoomDurableObject extends DurableObject {
       if (
         currentGenerationToken === null ||
         (expectedGenerationToken !== null && currentGenerationToken !== expectedGenerationToken)
+      ) {
+        generationInvalid = true
+        return
+      }
+      if (
+        captureAttemptId !== null &&
+        (captureCreatedAt === null ||
+          !touchRouteGenerationCapture(
+            this.#sql,
+            captureAttemptId,
+            inc,
+            currentGenerationToken,
+            captureCreatedAt,
+            now,
+            ROUTE_CAPTURE_TTL_MS,
+          ))
       ) {
         generationInvalid = true
         return
@@ -492,6 +585,7 @@ export class TelefuncRoomDurableObject extends DurableObject {
   async #runSweep(now: number): Promise<number> {
     let orphanIncs: string[] = []
     this.ctx.storage.transactionSync(() => {
+      deleteExpiredRouteGenerationCaptures(this.#sql, now)
       this.#sql.exec('DELETE FROM cell WHERE expires_at IS NOT NULL AND expires_at <= ?', now)
       this.#sql.exec('DELETE FROM ord WHERE expires_at IS NOT NULL AND expires_at <= ?', now)
       const currentInc = readLiveHead(this.#sql, now)?.currentInc ?? null

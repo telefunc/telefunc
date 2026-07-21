@@ -14,7 +14,11 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { laneKey as laneKeyOf } from '../../../server/adapter/cloudflare/room/codec.js'
 import type { CommitWire, RegisterWire } from '../../../server/adapter/cloudflare/room/do.js'
 import { Fanout } from '../../../server/adapter/cloudflare/room/fanout.js'
-import { ROUTE_RENEW_EVERY_MS, ROUTE_TTL_MS } from '../../../server/adapter/cloudflare/room/routes.js'
+import {
+  ROUTE_CAPTURE_TTL_MS,
+  ROUTE_RENEW_EVERY_MS,
+  ROUTE_TTL_MS,
+} from '../../../server/adapter/cloudflare/room/routes.js'
 import {
   CloudflareLaneSubscription,
   CloudflareLaneSubscriptionMultiplexer,
@@ -428,6 +432,63 @@ describe('cloudflare — CF-specific mechanics', () => {
       expect(frame.receivers).toBe(0)
       await frame.delivery
       expect(seen).toEqual([])
+    })
+
+    it('reclaims an abandoned capture pin, rejects its delayed retry, and admits a fresh lifecycle', async () => {
+      const { roomId, inc, stub } = await openCfRoom()
+      const abandonedAttemptId = `abandoned-${crypto.randomUUID()}`
+      const abandonedCreatedAt = fx.authorityNow()
+      const firstCapture = await stub.captureRouteGeneration(inc, abandonedAttemptId, abandonedCreatedAt)
+      expect(firstCapture).toMatchObject({ ok: true })
+      expect(await stub.countRouteGenerationCaptures()).toBe(1)
+
+      const head = await readHeadOrThrow(fx.backend, roomId)
+      const { head: closing, leaseId } = await enterClosing(fx.backend, roomId, head)
+      accepted(await fx.backend.commitLane(roomId, inc, CONTROL, bytes('closed'), { closingLease: leaseId }))
+      const tombstone = okHead(await finalizeClose(fx.backend, roomId, closing, leaseId))
+      await fx.backend.dropGeneration(roomId, inc)
+      okHead(
+        await fx.backend.compareExchangeHead(
+          roomId,
+          { expect: { rev: tombstone.rev } },
+          { head: { currentInc: inc, state: 'open', config: tombstone.config } },
+        ),
+      )
+
+      // The lifecycle disappeared without its best-effort release. Age the authority clock through the
+      // capture lease, then exercise the production mechanical sweep rather than deleting test state.
+      fx.advanceAuthority(ROUTE_CAPTURE_TTL_MS)
+      await fx.backend.readHead(roomId)
+      await stub.runJanitor()
+      expect(await stub.countRouteGenerationCaptures()).toBe(0)
+
+      // The same stable id/epoch is now recognizably stale. Absence must fail closed, never reinterpret
+      // this as a first capture of the legally reused current generation.
+      const delayedRetry = await stub.captureRouteGeneration(inc, abandonedAttemptId, abandonedCreatedAt)
+      expect(delayedRetry).toMatchObject({ rejected: true, terminal: true })
+      if ('rejected' in delayedRetry) expect(delayedRetry.reason).toContain('capture attempt')
+      expect(await stub.countRouteGenerationCaptures()).toBe(0)
+
+      const seen = collector()
+      const fresh = fx.backend.subscribeLane(roomId, inc, SEMANTIC, seen.receiver)
+      await fresh.ready
+      expect(await stub.countRouteGenerationCaptures()).toBe(1)
+      const renewals = cloudflareRenewalControls(fx.backend)
+      fx.advanceAuthority(ROUTE_RENEW_EVERY_MS)
+      await fx.backend.readHead(roomId)
+      await renewals.advance(ROUTE_RENEW_EVERY_MS)
+      fx.advanceAuthority(ROUTE_CAPTURE_TTL_MS - ROUTE_RENEW_EVERY_MS)
+      await fx.backend.readHead(roomId)
+      await stub.runJanitor()
+      // The original capture lifetime has elapsed, but the live route's successful ttl/3 renewal
+      // touched the exact pin, so mechanical orphan reclamation must retain it.
+      expect(await stub.countRouteGenerationCaptures()).toBe(1)
+      const frame = accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, bytes('fresh-generation')))
+      expect(frame.receivers).toBe(1)
+      await frame.delivery
+      expect(seen.payloads()).toEqual(['fresh-generation'])
+      await fresh.unsubscribe()
+      expect(await stub.countRouteGenerationCaptures()).toBe(0)
     })
 
     it('never lets a retryable tokenless establishment rebind across drop and exact incarnation reuse', async () => {

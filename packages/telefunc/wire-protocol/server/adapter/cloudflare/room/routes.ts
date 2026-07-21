@@ -9,6 +9,10 @@ export const ROUTE_TTL_MS = 90_000
 export const ROUTE_RENEW_EVERY_MS = ROUTE_TTL_MS / 3
 export const ROUTE_RENEW_FAILURE_LIMIT = 2
 export const ROUTE_DELIVERY_FAILURE_LIMIT = 3
+// A capture pin is refreshed by every successful establishment/renewal and shares the route lease's
+// authority-bounded lifetime. That comfortably contains the five-attempt initial retry schedule, while
+// a crashed lifecycle with no route activity becomes mechanically reclaimable.
+export const ROUTE_CAPTURE_TTL_MS = ROUTE_TTL_MS
 
 export type RouteTarget = { subscriber: string; leaseId: string }
 export type RouteInstallation = {
