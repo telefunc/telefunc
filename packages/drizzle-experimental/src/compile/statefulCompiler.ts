@@ -20,7 +20,7 @@ import { type ExistsSpec, applyExists, correlationKey } from './existsStage.js'
 import { applyJoins } from './joinStage.js'
 import { type Change, type InputPlan, applyChange, pushdownOf } from './pushdown.js'
 import { projectFnOf, wholeRowFn } from './projectStage.js'
-import { type Row, qualifiedKey } from './rowSpace.js'
+import { type Row, qualifiedKey, rowChanged } from './rowSpace.js'
 import { type SetOpBranch, applySetOps } from './setOpsStage.js'
 import { applyWindow } from './windowStage.js'
 import { assertUsage } from '../utils/assert.js'
@@ -51,22 +51,39 @@ function statefulPlan(shape: SelectShape): GraphPlan {
   }
 }
 
-type FeedInput = { plan: InputPlan; builder?: RootStreamBuilder<Row> }
+type FeedInput = { plan: InputPlan; builder: RootStreamBuilder<Row> }
+
+/** How a change REACHES this graph, in the two genuinely different ways it can.
+ *
+ *  A SEED is a real dataflow input: rows are projected, σ-filtered and fed to an operator stream, and it
+ *  carries hydrated state. A WITNESS is a relation this graph only ever mentions inside a SUBQUERY — no
+ *  input, no stream, no state; all that is true of it is that a real change to it may move the subquery's
+ *  value, so it dirties the batch.
+ *
+ *  THE TWO ROLES ARE NOT MUTUALLY EXCLUSIVE, which is why they are separate collections rather than one
+ *  list with a nullable builder. `covered` is computed PER BRANCH while this is per GRAPH, so under a
+ *  set-op the SAME relation can be a base input of one arm and a subquery-only mention of another — it is
+ *  then both a seed and a witness, and BOTH roles must fire. Telling them apart by "does this feed have a
+ *  builder" made that work by accident; here it is the shape of the data. */
+type Feeds = {
+  seeds: Map<string, FeedInput[]>
+  witnesses: Set<string>
+}
 type SeedInput = { descriptor: SeedDescriptor; plan: InputPlan; builder: RootStreamBuilder<Row> }
 
 function statefulGraph(shape: SelectShape): StatefulGraph {
   const graph = new D2()
   const audit = createInputAudit()
   const dirty = createDirtySink(audit)
-  const registry = new Map<string, FeedInput[]>()
+  const feeds: Feeds = { seeds: new Map(), witnesses: new Set() }
   const genesis: RootStreamBuilder<Row>[] = []
   let dataFired = false
   let pendingDirty = false
 
   const combined =
     shape.setOps.length > 0
-      ? buildSetOps(graph, shape, registry, genesis, dirty, audit)
-      : buildBranch(graph, shape, registry, genesis, dirty, audit)
+      ? buildSetOps(graph, shape, feeds, genesis, dirty, audit)
+      : buildBranch(graph, shape, feeds, genesis, dirty, audit)
   audit.consume(combined)
   if (combined) {
     combined.pipe(
@@ -94,24 +111,27 @@ function statefulGraph(shape: SelectShape): StatefulGraph {
   dataFired = false
   dirty.reset()
 
-  // The seedable inputs are every real db-backed feed (a self-join yields one per alias); the
-  // dirty-only DISCARD feeds and the internal aggregate genesis inputs hold no hydrated state.
+  // Every seed feed is db-backed and hydrated (a self-join yields one per alias). Witnesses are not here:
+  // having no input to seed is the whole of what makes them witnesses.
   const seedable = new Map<string, SeedInput>()
-  for (const feeds of registry.values())
-    for (const feed of feeds)
-      if (feed.builder !== undefined) {
-        assertUsage(!seedable.has(feed.plan.alias), `duplicate seed input id: ${feed.plan.alias}`)
-        seedable.set(feed.plan.alias, { descriptor: descriptorOf(feed.plan), plan: feed.plan, builder: feed.builder })
-      }
+  for (const list of feeds.seeds.values())
+    for (const feed of list) {
+      assertUsage(!seedable.has(feed.plan.alias), `duplicate seed input id: ${feed.plan.alias}`)
+      seedable.set(feed.plan.alias, { descriptor: descriptorOf(feed.plan), plan: feed.plan, builder: feed.builder })
+    }
 
   // The one place a captured change becomes an engine feed: project + σ-filter via the input
   // adapter, buffer the pruned delta, and remember any row-space dirty. `apply` fans a whole
   // commit table-wise; `feedInput` gives the live graph per-alias control (no cross-alias fan).
-  const pump = (plan: InputPlan, builder: RootStreamBuilder<Row> | undefined, change: Change): void => {
+  const pump = (plan: InputPlan, builder: RootStreamBuilder<Row>, change: Change): void => {
     const delta = applyChange(plan, change)
     if (delta.dirty) pendingDirty = true
-    if (builder && delta.data.length > 0) builder.sendData(new MultiSet(delta.data))
+    if (delta.data.length > 0) builder.sendData(new MultiSet(delta.data))
   }
+  /** A relation watched ONLY through a subquery: any real change to it may move that subquery's value, so
+   *  it dirties the batch. No projection, no σ, no state — `rowChanged` is the whole rule, and it is the
+   *  same row-equality every other tier uses. */
+  const witnessDirtied = (change: Change): boolean => feeds.witnesses.has(change.table) && rowChanged(change)
   const runBatch = (): FireResult => {
     graph.run()
     if (pendingDirty) dirty.signal()
@@ -125,8 +145,10 @@ function statefulGraph(shape: SelectShape): StatefulGraph {
 
   return {
     apply(commit) {
-      for (const change of commit)
-        for (const feed of registry.get(change.table) ?? []) pump(feed.plan, feed.builder, change)
+      for (const change of commit) {
+        for (const feed of feeds.seeds.get(change.table) ?? []) pump(feed.plan, feed.builder, change)
+        if (witnessDirtied(change)) pendingDirty = true
+      }
       return runBatch()
     },
     seeds: [...seedable.values()].map((input) => input.descriptor),
@@ -153,13 +175,13 @@ function statefulGraph(shape: SelectShape): StatefulGraph {
       assertUsage(input, `feedInput: unknown input id ${inputId}`)
       pump(input.plan, input.builder, change)
     },
-    // The dirty-only witnesses for `change.table` — the builderless feeds a subquery inner table registered.
-    // The live driver already feeds seed inputs by descriptor, and a witness table is never also a seed
-    // input (registerDirtyTable only fires for an UNCOVERED table), so the `builder === undefined` guard
-    // pumps ONLY witnesses — feeding a seed feed here too would double-count its dataflow.
+    // The WITNESS half of a change, for the live driver — which feeds seed inputs by descriptor and would
+    // otherwise never touch a relation this graph only mentions inside a subquery. Independent of the seed
+    // half BY CONSTRUCTION: a relation that is both (a base input of one set-op arm, a subquery mention of
+    // another) is fed as a seed there and dirtied as a witness here, and neither role can shadow the other.
+    // Same rule `apply` uses, so the two entry points cannot drift.
     feedDirtyWitness(change) {
-      for (const feed of registry.get(change.table) ?? [])
-        if (feed.builder === undefined) pump(feed.plan, undefined, change)
+      if (witnessDirtied(change)) pendingDirty = true
     },
     runBatch,
   }
@@ -184,7 +206,7 @@ function descriptorOf(plan: InputPlan): SeedDescriptor {
 function buildBranch(
   graph: D2,
   shape: SelectShape,
-  registry: Map<string, FeedInput[]>,
+  feeds: Feeds,
   genesis: RootStreamBuilder<Row>[],
   dirty: DirtySink,
   audit: InputAudit,
@@ -197,17 +219,18 @@ function buildBranch(
   const covered = new Set<string>()
   for (const plan of inputs) {
     const builder = graph.newInput<Row>()
-    register(registry, plan, builder)
+    register(feeds.seeds, plan, builder)
     audit.declare(builder, plan.relationId)
     streams.set(plan.alias, builder)
     covered.add(plan.relationId)
   }
 
   const existsRoots: Array<IStreamBuilder<Row>> = []
-  const existsSpecs = specs.map((leaf) => buildExistsSpec(graph, leaf, registry, covered, audit, existsRoots))
-  // Scalar/negated-subquery inner tables (not a base input, not a set-op branch) fire dirty
-  // on any change — the scalar-subquery row.
-  for (const table of subqueryInnerTables(trimmed)) if (!covered.has(table)) registerDirtyTable(registry, table)
+  const existsSpecs = specs.map((leaf) => buildExistsSpec(graph, leaf, feeds.seeds, covered, audit, existsRoots))
+  // Relations this branch mentions ONLY inside a subquery (scalar / negated / non-decorrelatable): nothing
+  // to build, so they are recorded as witnesses. `covered` is this BRANCH's inputs, so the same relation can
+  // already be a seed of another arm — it then holds both roles, which the two collections allow.
+  for (const table of subqueryInnerTables(trimmed)) if (!covered.has(table)) feeds.witnesses.add(table)
 
   const joined = applyJoins(trimmed, streams, crossResidual, dirty)
   // EVERY stream built for this branch, not just the base inputs: the EXISTS inner roots were created and
@@ -248,12 +271,12 @@ function dedupeStrings(stream: IStreamBuilder<string>): IStreamBuilder<string> {
 function buildSetOps(
   graph: D2,
   shape: SelectShape,
-  registry: Map<string, FeedInput[]>,
+  feeds: Feeds,
   genesis: RootStreamBuilder<Row>[],
   dirty: DirtySink,
   audit: InputAudit,
 ): IStreamBuilder<string> | undefined {
-  const main = buildBranch(graph, { ...shape, setOps: [] }, registry, genesis, dirty, audit)
+  const main = buildBranch(graph, { ...shape, setOps: [] }, feeds, genesis, dirty, audit)
   const branches: SetOpBranch[] = []
   let degrade = false
   for (const op of shape.setOps) {
@@ -261,8 +284,7 @@ function buildSetOps(
     // can't be built exactly, or one carrying per-arm ORDER/LIMIT/OFFSET (which selects WHICH rows
     // the arm contributes — unsound to ignore under a downstream UNION distinct, where a bounded
     // arm's row swap can add a value new to the union), forces a dirty degradation.
-    const stream =
-      op.right.kind === 'select' ? buildBranch(graph, op.right, registry, genesis, dirty, audit) : undefined
+    const stream = op.right.kind === 'select' ? buildBranch(graph, op.right, feeds, genesis, dirty, audit) : undefined
     if (stream) branches.push({ kind: op.type, stream })
     if (!stream || op.orderBy.length > 0 || op.limit !== undefined || op.offset !== undefined) degrade = true
   }
@@ -342,27 +364,11 @@ function buildExistsSpec(
 
 // ── Shared helpers ──────────────────────────────────────────────────
 
-function register(registry: Map<string, FeedInput[]>, plan: InputPlan, builder?: RootStreamBuilder<Row>): void {
-  const list = registry.get(plan.relationId) ?? []
+/** Record a real dataflow input under its ROUTING identity, which is what an incoming change carries. */
+function register(seeds: Map<string, FeedInput[]>, plan: InputPlan, builder: RootStreamBuilder<Row>): void {
+  const list = seeds.get(plan.relationId) ?? []
   list.push({ plan, builder })
-  registry.set(plan.relationId, list)
-}
-
-/** Register an inner subquery / scalar-subquery relation as a dirty-only input: it has no
- *  dataflow sink, but a change to it fires the dirty witness (the scalar-subquery row). Keyed by
- *  routing identity; it is never seeded, so it needs no SQL-addressable name. */
-function registerDirtyTable(registry: Map<string, FeedInput[]>, relationId: string): void {
-  const plan: InputPlan = {
-    alias: relationId,
-    table: relationId,
-    relationId,
-    primaryKey: [],
-    columns: '*',
-    residual: { kind: 'true' },
-    gate: { kind: 'true' },
-    dirtyActive: true,
-  }
-  register(registry, plan) // no builder: a dirty-only input has no dataflow sink; only its adapter's dirty flag matters
+  seeds.set(plan.relationId, list)
 }
 
 /** The inner tables of scalar / negated / non-decorrelatable subqueries referenced by this
