@@ -22,7 +22,6 @@ import {
 import { TAG, ProtocolViolationError, decodeClientFrame, encode } from '../shared-ws.js'
 import type { ChannelFrame, PreparePayload, ReconcilePayload, ReconciledPayload } from '../shared-ws.js'
 import { IndexedPeer, type PeerSender } from './IndexedPeer.js'
-import { recordUpgradeCommitted, recordUpgradePrepared } from './upgrade-observer.js'
 import type { ServerChannel } from './channel.js'
 
 // Single-instance kernel: owns channels, sessions, per-connection runtime. Transports talk
@@ -433,7 +432,6 @@ class ChannelMux {
     })
     this.stagedByPrevSession.set(payload.sessionId, connection)
     this.stagedBytes += rawByteLength
-    recordUpgradePrepared()
     this.send(connection, encode.ready({ upgradeId: payload.upgradeId }))
     return null
   }
@@ -481,7 +479,6 @@ class ChannelMux {
   ): Promise<ReconcileOutcome> {
     try {
       const outcome = await this.reconcile(wsEntry, wsConnection, ctrl)
-      recordUpgradeCommitted()
       return { ...outcome, deliverTo: wsConnection, upgradeId }
     } catch (err) {
       oldEntry.state.retiredByBarrier = false
