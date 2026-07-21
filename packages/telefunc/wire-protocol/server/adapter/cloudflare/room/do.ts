@@ -2,8 +2,8 @@
 // The class shell of the Cloudflare Room backend: `TelefuncRoomDurableObject` (one DO per room). It owns
 // the RPC surface the Room backend seam calls, the room DO's own authority clock (used for lease minting,
 // commit preconditions and TTLs — never a caller clock), acceptance-time route snapshots, and the alarm
-// janitor. Storage, retained chunking, routes and fanout are the four invariant modules alongside it; the
-// W2c facade hosts fanout because Miniflare serializes a stalled service-binding relay across lanes.
+// janitor. Storage, retained chunking, routes and fanout are the invariant modules alongside it. The
+// per-lane fanout chains live here at the single room authority, including across facade instances.
 //
 // DARK: this class is not published as a binding, not exported from any barrel, and not wired to any Room
 // call site — that is W3-C. W2c proves it passes the conformance suite in local workerd.
@@ -11,8 +11,18 @@
 import { DurableObject } from 'cloudflare:workers'
 import type { CellMutation, CxResult, HeadCx, HeadNext, LaneId } from '../../../../backend/spi.js'
 import { base64ToBytes, bytesToBase64, laneKey as laneKeyOf } from './codec.js'
+import { Fanout, type RouteTarget } from './fanout.js'
 import { assertRetainedCapacity, deleteRetained, installRetained, listRetained, readRetained } from './retained.js'
-import { deleteRoute, pruneExpiredRoutes, renewRoute, snapshotRoutes, upsertRoute } from './routes.js'
+import {
+  deleteRoute,
+  pruneExpiredRoutes,
+  recordRouteDeliveryFailure,
+  recordRouteDeliverySuccess,
+  renewRoute,
+  snapshotRoutes,
+  upsertRoute,
+} from './routes.js'
+import type { SubscriberDeliveryRequest, SubscriberRouteIdentity } from './subscriber.js'
 import {
   advanceOrder,
   compareExchangeCells,
@@ -70,20 +80,28 @@ export type HeadCxWire =
 export type CellsWire = { revision: string; cells: Array<[string, string]> } | { staleInc: true }
 export type CellMutationWire = { key: string; set?: { bytesB64: string; ttlMs?: number } }
 export type CommitWire =
-  // `targets` is the acceptance-time route snapshot; the subscriber-isolate (the facade in the
-  // conformance lane) drives the ordered delivery chain over it. `receivers` is its size.
-  | { accepted: true; seq: number; timestamp: number; receivers: number; targets: string[] }
+  | { accepted: true; seq: number; timestamp: number; receivers: number; deliveryToken: string }
   | { stale: true }
   | { error: string }
 export type RetainedWire = { payloadB64: string; seq: number; timestamp: number }
 export type RegisterWire = { ok: true; expiresAt: number } | { rejected: true; reason: string }
 export type DropWire = { droppedSubscribers: Array<[string, string]> } | { error: string }
 
-type RoomEnv = {
-  // W2c's local-workerd host supplies this addressability seam. W3-C replaces the dark host wiring
-  // with the final subscriber DO binding without changing registration semantics.
-  TELEFUNC_ROOM_SUBSCRIBER_PROBE: Fetcher
+type SubscriberStub = {
+  telefuncBroadcastDeliver(request: SubscriberDeliveryRequest): Promise<void>
 }
+
+type SubscriberNamespace = {
+  idFromName(name: string): unknown
+  get(id: unknown): SubscriberStub
+}
+
+type RoomEnv = {
+  TELEFUNC_ROOM_SUBSCRIBER: SubscriberNamespace
+  TELEFUNC_ROOM_ALARM_INTERVAL_MS?: string
+}
+
+export const ROOM_ALARM_INTERVAL_MS = 30_000
 
 function headToWire(head: StoredHead): HeadWire {
   const wire: HeadWire = {
@@ -109,18 +127,50 @@ function nextFromWire(next: HeadNextWire): HeadNext {
 
 // Extends the `cloudflare:workers` DurableObject base so the Room backend seam can call its methods over
 // RPC (a plain class would only expose `fetch`). One DO per room. The room DO owns all durable state
-// (head, cells, order, retained, routes, directory) and the acceptance transaction; the ephemeral
-// delivery chain (fanout.ts) is driven by the subscriber isolate over the acceptance-time route snapshot
-// this DO returns — in production the room DO would RPC each subscriber DO, wiring gated to W3-C.
+// (head, cells, order, retained, routes, directory), acceptance transaction, and ephemeral delivery
+// chains. Fanout dispatches to actual representative subscriber DO stubs derived from persisted names.
 export class TelefuncRoomDurableObject extends DurableObject {
   readonly #sql: SqlStorage
+  readonly #fanout: Fanout
   readonly #maxRetainedBytes: number
+  readonly #alarmIntervalMs: number
 
   constructor(ctx: DurableObjectState, env: unknown) {
     super(ctx, env as never)
     this.#sql = ctx.storage.sql
     initSchema(this.#sql)
     this.#maxRetainedBytes = 16 * 1024 * 1024
+    const configuredInterval = Number((env as RoomEnv).TELEFUNC_ROOM_ALARM_INTERVAL_MS)
+    this.#alarmIntervalMs =
+      Number.isFinite(configuredInterval) && configuredInterval > 0 ? configuredInterval : ROOM_ALARM_INTERVAL_MS
+    this.#fanout = new Fanout(async (target, frame, info) => {
+      const namespace = (this.env as RoomEnv).TELEFUNC_ROOM_SUBSCRIBER
+      const subscriber = namespace.get(namespace.idFromName(target.subscriber))
+      try {
+        await subscriber.telefuncBroadcastDeliver({
+          roomId: info.roomId,
+          inc: info.inc,
+          laneKey: info.laneKey,
+          subscriber: target.subscriber,
+          frame,
+          seq: info.seq,
+          timestamp: info.timestamp,
+        })
+        this.ctx.storage.transactionSync(() => {
+          recordRouteDeliverySuccess(this.#sql, info.inc, info.laneKey, target.subscriber, target.leaseId)
+        })
+      } catch (error) {
+        this.ctx.storage.transactionSync(() => {
+          recordRouteDeliveryFailure(this.#sql, info.inc, info.laneKey, target.subscriber, target.leaseId)
+        })
+        throw error
+      }
+    })
+    // Schedule on the runtime clock; sweep predicates use the room authority clock. The test binding only
+    // shortens this cadence and never replaces the production alarm path.
+    this.ctx.blockConcurrencyWhile(async () => {
+      if ((await this.ctx.storage.getAlarm()) === null) await this.#armAlarm()
+    })
   }
 
   // ── head ──
@@ -175,6 +225,7 @@ export class TelefuncRoomDurableObject extends DurableObject {
   // ── commit ──
 
   async commitLane(
+    roomId: string,
     inc: string,
     lane: LaneId,
     payload: Uint8Array,
@@ -183,7 +234,7 @@ export class TelefuncRoomDurableObject extends DurableObject {
     const now = authorityNow()
     const key = laneKeyOf(lane)
     const frame = payload instanceof Uint8Array ? payload : new Uint8Array(payload)
-    let accepted: { seq: number; timestamp: number; targets: string[] } | null = null
+    let accepted: { seq: number; timestamp: number; targets: RouteTarget[] } | null = null
     // The acceptance transaction encodes the SAME precondition branch as Redis/memory. Zero-row match ⇒
     // stale. Over-cap retain throws BEFORE the order advances (the tx rolls back), surfaced as a
     // structured error the facade rethrows.
@@ -200,14 +251,25 @@ export class TelefuncRoomDurableObject extends DurableObject {
       return { error: (error as Error).message }
     }
     if (accepted === null) return { stale: true }
-    const settled: { seq: number; timestamp: number; targets: string[] } = accepted
+    const settled: { seq: number; timestamp: number; targets: RouteTarget[] } = accepted
+    const deliveryToken = this.#fanout.enqueue(inc, key, settled.targets, frame, {
+      roomId,
+      inc,
+      laneKey: key,
+      seq: settled.seq,
+      timestamp: settled.timestamp,
+    })
     return {
       accepted: true,
       seq: settled.seq,
       timestamp: settled.timestamp,
       receivers: settled.targets.length,
-      targets: settled.targets,
+      deliveryToken,
     }
+  }
+
+  async awaitDelivery(token: string): Promise<void> {
+    await this.#fanout.await(token)
   }
 
   // ── retained ──
@@ -230,6 +292,7 @@ export class TelefuncRoomDurableObject extends DurableObject {
   // ── routes / readiness ──
 
   async registerRoute(
+    roomId: string,
     inc: string,
     laneKey: string,
     subscriber: string,
@@ -237,12 +300,14 @@ export class TelefuncRoomDurableObject extends DurableObject {
     bucket: string | null,
   ): Promise<RegisterWire> {
     const now = authorityNow()
-    // Probe before persisting a target. Stubs are never stored; the stable subscriber name is. The open
-    // head check and route UPSERT then share one SQL transaction after this await.
-    const probe = await (this.env as RoomEnv).TELEFUNC_ROOM_SUBSCRIBER_PROBE.fetch(
-      `https://telefunc.invalid/${encodeURIComponent(subscriber)}`,
-    )
-    if (!probe.ok) {
+    // Probe the actual representative subscriber DO through the same no-op delivery RPC used by fanout.
+    // Stubs are derived from names and never persisted. The open-head check and UPSERT then share one SQL
+    // transaction after the addressability await.
+    const namespace = (this.env as RoomEnv).TELEFUNC_ROOM_SUBSCRIBER
+    const identity: SubscriberRouteIdentity = { roomId, inc, laneKey, subscriber }
+    try {
+      await namespace.get(namespace.idFromName(subscriber)).telefuncBroadcastDeliver({ ...identity, probe: true })
+    } catch {
       return { rejected: true, reason: `subscriber '${subscriber}' is not addressable` }
     }
     let expiresAt = 0
@@ -295,6 +360,7 @@ export class TelefuncRoomDurableObject extends DurableObject {
     this.ctx.storage.transactionSync(() => {
       dropGenerationRows(this.#sql, inc)
     })
+    this.#fanout.clearIncarnation(inc)
     return { droppedSubscribers }
   }
 
@@ -318,7 +384,11 @@ export class TelefuncRoomDurableObject extends DurableObject {
   // ── alarm janitor ──
 
   async alarm(): Promise<void> {
-    this.ctx.storage.transactionSync(() => this.#sweep(authorityNow()))
+    try {
+      this.ctx.storage.transactionSync(() => this.#sweep(authorityNow()))
+    } finally {
+      await this.#armAlarm()
+    }
   }
 
   // Test/janitor hook: run the sweep on demand (expired cells/routes/order rows + lapsed tombstone).
@@ -345,6 +415,10 @@ export class TelefuncRoomDurableObject extends DurableObject {
       "DELETE FROM head WHERE id = 1 AND state = 'closed' AND expires_at IS NOT NULL AND expires_at <= ?",
       now,
     )
+  }
+
+  async #armAlarm(): Promise<void> {
+    await this.ctx.storage.setAlarm(Date.now() + this.#alarmIntervalMs)
   }
 }
 

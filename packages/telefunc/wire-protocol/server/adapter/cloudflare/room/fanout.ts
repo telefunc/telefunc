@@ -1,16 +1,15 @@
 // The ordered at-most-once invariant (I5/I8) — the exact non-poisoning chain of readiness-ordering.md §3.
 // One ephemeral promise chain per (incarnation, laneKey): frame N+1's attempt begins only after frame N's
 // attempt SETTLED (success or failure), so a failed frame never poisons the lane and each frame's promise
-// rejects only on its own failure. The chains live in the backend's ephemeral delivery host and are
-// discarded on close/eviction — no state survives into a new incarnation. W2c hosts them in its facade
-// because Miniflare serializes a stalled service-binding relay across lanes; W3-C owns final DO wiring.
+// rejects only on its own failure. The chains live at the unique room authority and are discarded with
+// their incarnation, so no state survives recreation and no facade-local tail can reorder a shared room.
 //
 // `deliver` is the handoff seam: in production the room DO RPCs each target subscriber DO
-// (telefuncBroadcastDeliver); the parity fixture points it at a Node callback so the same chain drives
-// real receivers. Either way the attempt is the backend's ONE handoff — never retried, never rolled back.
+// (`telefuncBroadcastDeliver`). The attempt is the backend's ONE handoff — never retried or rolled back.
 
-export type DeliveryInfo = { seq: number; timestamp: number }
-export type DeliverFn = (subscriber: string, frame: Uint8Array, info: DeliveryInfo) => Promise<void>
+export type DeliveryInfo = { roomId: string; inc: string; laneKey: string; seq: number; timestamp: number }
+export type RouteTarget = { subscriber: string; leaseId: string }
+export type DeliverFn = (target: RouteTarget, frame: Uint8Array, info: DeliveryInfo) => Promise<void>
 
 const noop = (): void => {}
 
@@ -28,14 +27,18 @@ export class Fanout {
 
   // Enqueue one frame's handoff attempt onto its lane chain. Returns a token the caller resolves later
   // via `await`, so acceptance can return before the attempt runs (no reentrant delivery inside commit).
-  enqueue(inc: string, laneKey: string, targets: string[], frame: Uint8Array, info: DeliveryInfo): string {
+  enqueue(inc: string, laneKey: string, targets: RouteTarget[], frame: Uint8Array, info: DeliveryInfo): string {
     let lanes = this.#chains.get(inc)
     if (lanes === undefined) {
       lanes = new Map<string, Promise<void>>()
       this.#chains.set(inc, lanes)
     }
+    // Acceptance owns immutable delivery inputs. A caller may reuse or mutate its buffer as soon as
+    // commit returns; no deferred attempt can observe those later writes.
+    const acceptedFrame = new Uint8Array(frame)
+    const acceptedTargets = targets.map((target) => ({ ...target }))
     const previous = lanes.get(laneKey) ?? Promise.resolve()
-    const attempt = previous.then(() => this.#fanout(targets, frame, info))
+    const attempt = previous.then(() => this.#fanout(acceptedTargets, acceptedFrame, info))
     // Settlement gate: the next frame starts after this one settles, success OR failure.
     lanes.set(laneKey, attempt.then(noop, noop))
     const token = `d-${++this.#tokenSeq}`
@@ -59,7 +62,7 @@ export class Fanout {
     this.#chains.delete(inc)
   }
 
-  async #fanout(targets: string[], frame: Uint8Array, info: DeliveryInfo): Promise<void> {
-    await Promise.all(targets.map((subscriber) => this.#deliver(subscriber, frame, info)))
+  async #fanout(targets: RouteTarget[], frame: Uint8Array, info: DeliveryInfo): Promise<void> {
+    await Promise.all(targets.map((target) => this.#deliver(target, frame, info)))
   }
 }

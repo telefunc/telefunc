@@ -70,7 +70,7 @@ export function initSchema(sql: SqlStorage): void {
     );
     CREATE TABLE IF NOT EXISTS route (
       inc TEXT NOT NULL, lane_key TEXT NOT NULL, subscriber TEXT NOT NULL,
-      lease_id TEXT NOT NULL, bucket TEXT, expires_at INTEGER NOT NULL,
+      lease_id TEXT NOT NULL, bucket TEXT, expires_at INTEGER NOT NULL, failures INTEGER NOT NULL DEFAULT 0,
       PRIMARY KEY (inc, lane_key, subscriber)
     );
     CREATE TABLE IF NOT EXISTS directory (room_id TEXT PRIMARY KEY, inc_tag TEXT NOT NULL);
@@ -97,9 +97,9 @@ export function directoryList(
 ): { entries: { roomId: string; incTag: string }[]; cursor?: string } {
   const matching = sql
     .exec<{ room_id: string; inc_tag: string }>(
-      'SELECT room_id, inc_tag FROM directory WHERE room_id >= ? AND room_id < ? ORDER BY room_id',
+      'SELECT room_id, inc_tag FROM directory WHERE substr(room_id, 1, length(?)) = ? ORDER BY room_id',
       prefix,
-      `${prefix}￿`,
+      prefix,
     )
     .toArray()
   const start = cursor === undefined ? 0 : matching.findIndex((row) => row.room_id > cursor)
@@ -257,10 +257,10 @@ export function readCells(
   } else {
     const rows = sql
       .exec<{ key: string; bytes: ArrayBuffer; expires_at: number | null }>(
-        'SELECT key, bytes, expires_at FROM cell WHERE inc = ? AND key >= ? AND key < ?',
+        'SELECT key, bytes, expires_at FROM cell WHERE inc = ? AND substr(key, 1, length(?)) = ?',
         inc,
         sel.prefix,
-        `${sel.prefix}￿`,
+        sel.prefix,
       )
       .toArray()
     for (const row of rows) {

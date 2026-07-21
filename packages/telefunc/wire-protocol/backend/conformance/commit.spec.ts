@@ -127,7 +127,7 @@ for (const harness of installedBackends) {
         await Promise.all([bad.ready, goodSub.ready])
 
         const result = accepted(await commit(SEMANTIC, 'K'))
-        expect(result.receivers).toBe(2)
+        expect(result.receivers).toBe(fx.expectedReceivers.twoLocalSubscriptionsSameLane)
         expect(await settled(result.delivery)).toBe('rejected')
         // acceptance stood: the healthy target still got the frame and the order advanced
         await good.waitFor(1)

@@ -27,6 +27,12 @@ export type BackendTraces = {
 export type BackendFixture = {
   backend: RoomBackendSpi
   traces: BackendTraces
+  // Exact authority-target counts for scenarios whose physical target granularity is backend-specific.
+  // These are mappings, never lower bounds or skips: memory counts callbacks, Redis connections, and CF
+  // routed representative subscriber DOs.
+  expectedReceivers: {
+    twoLocalSubscriptionsSameLane: number
+  }
   // Authority time as the BACKEND sees it — never the caller's clock. Lease expiry, commit preconditions
   // and TTLs are all resolved against this, so the scenarios drive it explicitly instead of waiting.
   authorityNow(): number
@@ -56,6 +62,7 @@ export const memoryHarness: BackendHarness = {
     return {
       backend,
       traces: { handoffAwaitsReceiver: true, perTargetFailure: true, cxAppliesSynchronously: true },
+      expectedReceivers: { twoLocalSubscriptionsSameLane: 2 },
       authorityNow: () => clock,
       advanceAuthority: (ms) => {
         clock += ms

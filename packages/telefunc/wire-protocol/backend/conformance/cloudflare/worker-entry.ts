@@ -7,6 +7,7 @@
 // startup and only ever runs inside workerd.
 
 import { __setRoomAuthorityNowHook, TelefuncRoomDurableObject } from '../../../server/adapter/cloudflare/room/do.js'
+import { TelefuncRoomSubscriberDurableObject } from '../../../server/adapter/cloudflare/room/subscriber.js'
 
 // The controlled authority clock. It is a module global (shared with the DO instances in this isolate —
 // the same seam production leaves as Date.now()), set by the facade through the control fetch below, and
@@ -14,7 +15,7 @@ import { __setRoomAuthorityNowHook, TelefuncRoomDurableObject } from '../../../s
 let controlledClock = 0
 __setRoomAuthorityNowHook(() => controlledClock)
 
-export { TelefuncRoomDurableObject }
+export { TelefuncRoomDurableObject, TelefuncRoomSubscriberDurableObject }
 
 export default {
   async fetch(request: Request): Promise<Response> {

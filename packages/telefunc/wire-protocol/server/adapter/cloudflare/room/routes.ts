@@ -8,6 +8,9 @@
 export const ROUTE_TTL_MS = 90_000
 export const ROUTE_RENEW_EVERY_MS = ROUTE_TTL_MS / 3
 export const ROUTE_RENEW_FAILURE_LIMIT = 2
+export const ROUTE_DELIVERY_FAILURE_LIMIT = 3
+
+export type RouteTarget = { subscriber: string; leaseId: string }
 
 // Establishment: the open-head check happens in the DO (it holds the head); this UPSERT replaces any
 // prior lease for the same (inc, lane, subscriber) in a single statement.
@@ -23,7 +26,7 @@ export function upsertRoute(
 ): number {
   const expiresAt = now + ttlMs
   sql.exec(
-    'INSERT OR REPLACE INTO route (inc, lane_key, subscriber, lease_id, bucket, expires_at) VALUES (?, ?, ?, ?, ?, ?)',
+    'INSERT OR REPLACE INTO route (inc, lane_key, subscriber, lease_id, bucket, expires_at, failures) VALUES (?, ?, ?, ?, ?, ?, 0)',
     inc,
     laneKey,
     subscriber,
@@ -70,16 +73,65 @@ export function deleteRoute(sql: SqlStorage, inc: string, laneKey: string, subsc
 }
 
 // The delivery target snapshot at acceptance: live (non-expired) routes for this (inc, lane) only.
-export function snapshotRoutes(sql: SqlStorage, inc: string, laneKey: string, now: number): string[] {
+export function snapshotRoutes(sql: SqlStorage, inc: string, laneKey: string, now: number): RouteTarget[] {
   return sql
-    .exec<{ subscriber: string }>(
-      'SELECT subscriber FROM route WHERE inc = ? AND lane_key = ? AND expires_at > ?',
+    .exec<{ subscriber: string; lease_id: string }>(
+      'SELECT subscriber, lease_id FROM route WHERE inc = ? AND lane_key = ? AND expires_at > ?',
       inc,
       laneKey,
       now,
     )
     .toArray()
-    .map((row) => row.subscriber)
+    .map((row) => ({ subscriber: row.subscriber, leaseId: row.lease_id }))
+}
+
+// Delivery outcomes are guarded by the snapshotted lease. A late failure from a replaced lease cannot
+// increment or evict its successor. Success resets the consecutive-failure count; the third matching
+// failure removes the route before the next acceptance snapshot.
+export function recordRouteDeliverySuccess(
+  sql: SqlStorage,
+  inc: string,
+  laneKey: string,
+  subscriber: string,
+  leaseId: string,
+): void {
+  sql.exec(
+    'UPDATE route SET failures = 0 WHERE inc = ? AND lane_key = ? AND subscriber = ? AND lease_id = ?',
+    inc,
+    laneKey,
+    subscriber,
+    leaseId,
+  )
+}
+
+export function recordRouteDeliveryFailure(
+  sql: SqlStorage,
+  inc: string,
+  laneKey: string,
+  subscriber: string,
+  leaseId: string,
+  limit: number = ROUTE_DELIVERY_FAILURE_LIMIT,
+): { matched: boolean; evicted: boolean } {
+  const changed = sql.exec(
+    'UPDATE route SET failures = failures + 1 WHERE inc = ? AND lane_key = ? AND subscriber = ? AND lease_id = ?',
+    inc,
+    laneKey,
+    subscriber,
+    leaseId,
+  ).rowsWritten
+  if (changed !== 1) return { matched: false, evicted: false }
+  const failures = sql
+    .exec<{ failures: number }>(
+      'SELECT failures FROM route WHERE inc = ? AND lane_key = ? AND subscriber = ? AND lease_id = ?',
+      inc,
+      laneKey,
+      subscriber,
+      leaseId,
+    )
+    .toArray()[0]?.failures
+  if (failures === undefined || failures < limit) return { matched: true, evicted: false }
+  deleteRoute(sql, inc, laneKey, subscriber, leaseId)
+  return { matched: true, evicted: true }
 }
 
 // A single route's current lease id, for the addressability/expiry checks the DO runs.
