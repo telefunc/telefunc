@@ -1,6 +1,7 @@
 export { createStatefulVariant }
 
 import type { Change, SeedDescriptor, StatefulGraph } from '../compile/compile.js'
+import type { RlsStatus } from '../ir/types.js'
 import type { RowChange, TableChange } from '../router/events.js'
 import { type HydrationExecutor, type Seed, createSeed } from './hydrate.js'
 import { type ShadowIndex, matchesResidual, pkOf, pruneRow } from './shadow.js'
@@ -43,8 +44,8 @@ type StatefulSpec = {
   instantiate: () => StatefulGraph
   executor: HydrationExecutor
   maxStateRows: number
-  /** rls (true / 'unknown') → born coarse (never hydrates row state). */
-  bornCoarse?: boolean
+  /** RLS status stays three-valued until this owner makes the born-state decision. */
+  rlsStatus?: RlsStatus
   /** Notify this identity's subscribers from OUTSIDE a routed batch.
    *
    *  Every other invalidation reaches subscribers because the router notifies each affected identity
@@ -145,9 +146,8 @@ function createStatefulVariant(spec: StatefulSpec, core: GraphCore): GraphVarian
     seed.start()
   }
 
-  // BORN: a graph the binding marked coarse (RLS true / unknown) never hydrates row state; everything else
-  // starts its first seed cycle immediately.
-  if (spec.bornCoarse) {
+  // BORN: RLS true / unknown never hydrates row state; known false starts its first seed cycle immediately.
+  if (spec.rlsStatus === true || spec.rlsStatus === 'unknown') {
     core.toState('coarse')
     core.settle()
   } else {

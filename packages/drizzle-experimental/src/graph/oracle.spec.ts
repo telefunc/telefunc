@@ -176,7 +176,7 @@ async function acquireLive<St>(m: Mechanic<St>, key: string): Promise<LiveGraph>
   const acquired = await registry.acquire({
     instanceKey: key,
     tables: m.tables,
-    rlsEnabled: false,
+    rlsStatus: false,
     compilePlan: () => compileQuery(extractQueryShape(m.build(), { dialect: 'pg' })),
     executor: hydrationExecutorOf(db),
     notify: () => {},

@@ -20,6 +20,7 @@ const probes = vi.hoisted(() => ({
   snapshotRead: vi.fn(),
   acquireFails: false,
   readFails: false,
+  rlsStatus: false as boolean | 'unknown',
 }))
 
 // Everything except the subscription and the transport is stubbed — this spec is about ORDER and OWNERSHIP.
@@ -37,7 +38,7 @@ vi.mock('./dbRuntime.js', () => ({
 vi.mock('../binding/database.js', () => ({
   dialectOf: () => 'pg',
   isSingleSession: () => true,
-  rlsEnabledOf: async () => false,
+  rlsEnabledOf: async () => probes.rlsStatus,
   semanticEnvironmentKeyOf: async () => 'env',
   driverOf: () => 'PgliteDatabase',
   entityKindOf: () => undefined,
@@ -112,6 +113,7 @@ beforeEach(() => {
   probes.snapshotRead.mockClear()
   probes.acquireFails = false
   probes.readFails = false
+  probes.rlsStatus = false
   host.sources.length = 0
 })
 
@@ -133,6 +135,18 @@ describe('captureAndBuild — the readiness barrier gates the whole read', () =>
 
     expect(probes.acquire).toHaveBeenCalledTimes(1) // only AFTER the subscription exists
     expect(probes.snapshotRead).toHaveBeenCalledTimes(1)
+  })
+
+  it('preserves unknown RLS status into graph acquisition instead of flattening it to true', async () => {
+    const db = {}
+    const broker = brokerTransport({ autoAdmit: true })
+    setChangeTransport(db, broker.transport)
+    probes.rlsStatus = 'unknown'
+
+    await liveRead(db)
+
+    expect(probes.acquire).toHaveBeenCalledWith(expect.objectContaining({ rlsStatus: 'unknown' }))
+    host.sources[0]!.subscribe()()
   })
 })
 

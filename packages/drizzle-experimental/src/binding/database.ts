@@ -3,7 +3,7 @@ export { rowRunnerFor }
 export type { RlsStatus, RowRunner }
 
 import { type SQL, entityKind, sql } from 'drizzle-orm'
-import type { Dialect } from '../ir/types.js'
+import type { Dialect, RlsStatus } from '../ir/types.js'
 import { assertUsage } from '../utils/assert.js'
 
 // Facts read off a live drizzle database instance. Dialect/driver come from drizzle's
@@ -13,10 +13,6 @@ import { assertUsage } from '../utils/assert.js'
 // change — so it is discovered by probing the connection, and fails closed when it can't.
 
 type AnyDb = { dialect?: unknown; $client?: unknown }
-
-/** true / false when known; `'unknown'` when discovery isn't possible — consumers
- *  treat unknown as coarse and must never read it as "off". */
-type RlsStatus = boolean | 'unknown'
 
 /** Runs raw SQL against the executing connection and returns the result rows. Injected
  *  in tests; derived from the db by default. */

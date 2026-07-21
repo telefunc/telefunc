@@ -11,8 +11,8 @@ export {
 }
 
 import { Column, type SQL, Subquery, type Table, getTableColumns, getTableName, is, isTable } from 'drizzle-orm'
-import { entityKindOf, type RlsStatus } from '../binding/database.js'
-import type { ColRef, TableRef } from '../ir/types.js'
+import { entityKindOf } from '../binding/database.js'
+import type { ColRef, RlsStatus, TableRef } from '../ir/types.js'
 import { relationIdOf } from '../ir/relation.js'
 import { frame } from '../utils/canonical.js'
 

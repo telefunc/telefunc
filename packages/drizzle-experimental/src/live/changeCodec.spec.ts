@@ -335,7 +335,7 @@ describe('change codec — the rejected shapes are shapes that would SILENTLY MI
     const { graph, token } = await registry.acquire({
       instanceKey: 'codec-consequence',
       tables: shape.tables,
-      rlsEnabled: false,
+      rlsStatus: false,
       compilePlan: () => compileQuery(shape),
       executor: hydrationExecutorOf(db),
       notify,

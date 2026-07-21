@@ -70,7 +70,7 @@ export function req(over: Partial<AcquireRequest> & { compilePlan: AcquireReques
   return {
     instanceKey: over.instanceKey ?? 'inst-1',
     tables: over.tables ?? ['users'],
-    rlsEnabled: over.rlsEnabled ?? false,
+    rlsStatus: over.rlsStatus ?? false,
     compilePlan: over.compilePlan,
     executor: over.executor ?? fakeExecutor(),
     notify: over.notify ?? (() => {}),

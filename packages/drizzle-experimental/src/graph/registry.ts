@@ -10,6 +10,7 @@
 export { type Registry, type AcquireRequest, type ReadToken, createRegistry }
 
 import type { GraphPlan, StatefulGraph } from '../compile/compile.js'
+import type { RlsStatus } from '../ir/types.js'
 import { assertUsage } from '../utils/assert.js'
 import type { HydrationExecutor } from './hydrate.js'
 import { type LiveGraph, createLiveGraph } from './liveGraph.js'
@@ -19,7 +20,7 @@ import { SubscriberFence } from './subscriberFence.js'
 type AcquireRequest = {
   instanceKey: string
   tables: string[]
-  rlsEnabled: boolean
+  rlsStatus: RlsStatus
   /** Compile this query to a plan — run once per new identity (no cross-instance plan cache). */
   compilePlan: () => GraphPlan | Promise<GraphPlan>
   executor: HydrationExecutor
@@ -240,8 +241,8 @@ function createRegistry(config: { maxStateRowsPerInput: number }): Registry {
   }
 }
 
-/** The live-graph spec for a compiled plan: coarse plans and RLS-gated stateful plans are
- *  born coarse; stateless plans are born live; other stateful plans seed. */
+/** The live-graph spec for a compiled plan. The registry preserves RLS's three-valued status;
+ *  the stateful variant owns the born-state decision. */
 function specOf(
   plan: GraphPlan,
   request: AcquireRequest,
@@ -257,7 +258,7 @@ function specOf(
     instantiate: () => plan.instantiate() as StatefulGraph,
     executor: request.executor,
     maxStateRows,
-    bornCoarse: request.rlsEnabled, // rls / 'unknown' → born coarse (never hydrates row state)
+    rlsStatus: request.rlsStatus,
     notifyIdentity, // the async reseed cut reaches subscribers through the same sinks the router uses
   }
 }

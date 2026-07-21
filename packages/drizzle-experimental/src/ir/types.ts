@@ -6,6 +6,9 @@
 
 export type Dialect = 'pg' | 'sqlite'
 
+/** Whether row-level security is known on, known off, or could not be discovered. */
+export type RlsStatus = boolean | 'unknown'
+
 /** Three-valued truth. `undefined` is SQL's third value (a comparison touching
  *  NULL, a not-yet-captured column, or an operand the compiler could not read). */
 export type Tri = true | false | undefined

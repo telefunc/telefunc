@@ -148,17 +148,19 @@ describe('coarsen() intentionally demotes a graph to coarse', () => {
 // ── E1 — RLS-gated stateful born coarse ─────────────────────────────
 
 describe('RLS-gated stateful graphs are born coarse', () => {
-  it('the born-coarse gate (rlsEnabled true OR unknown) → coarse; no gate (false) → seeds', () => {
-    const gated = createLiveGraph({
-      kind: 'stateful',
-      instanceKey: 'k',
-      tables: ['users'],
-      instantiate: () => statefulFake([fakeSeed('users', 'users')]),
-      executor: neverExecutor(),
-      maxStateRows: 1e9,
-      bornCoarse: true, // the registry sets this for RlsStatus true OR 'unknown'
-    })
-    expect(gated.state()).toBe('coarse')
+  it('true AND unknown are born coarse; known false seeds', () => {
+    for (const rlsStatus of [true, 'unknown'] as const) {
+      const gated = createLiveGraph({
+        kind: 'stateful',
+        instanceKey: `k-${rlsStatus}`,
+        tables: ['users'],
+        instantiate: () => statefulFake([fakeSeed('users', 'users')]),
+        executor: neverExecutor(),
+        maxStateRows: 1e9,
+        rlsStatus,
+      })
+      expect(gated.state()).toBe('coarse')
+    }
 
     const hydrating = createLiveGraph({
       kind: 'stateful',
@@ -167,27 +169,30 @@ describe('RLS-gated stateful graphs are born coarse', () => {
       instantiate: () => statefulFake([fakeSeed('users', 'users')]),
       executor: neverExecutor(),
       maxStateRows: 1e9,
+      rlsStatus: false,
     })
     expect(hydrating.state()).toBe('seeding')
   })
 
-  it('the registry maps a truthy rlsEnabled to the born-coarse gate', async () => {
-    const registry = createRegistry({ maxStateRowsPerInput: 100 })
+  it('the registry preserves true AND unknown through spec construction', async () => {
     const plan = {
       tables: ['users'],
       stateless: false,
       coarse: false,
       instantiate: () => statefulFake([fakeSeed('users', 'users')]),
     }
-    const r = await registry.acquire({
-      instanceKey: 'i',
-      tables: ['users'],
-      rlsEnabled: true,
-      compilePlan: () => plan,
-      executor: neverExecutor(),
-      notify: () => {},
-    })
-    expect(r.graph.state()).toBe('coarse')
+    for (const rlsStatus of [true, 'unknown'] as const) {
+      const registry = createRegistry({ maxStateRowsPerInput: 100 })
+      const r = await registry.acquire({
+        instanceKey: `i-${rlsStatus}`,
+        tables: ['users'],
+        rlsStatus,
+        compilePlan: () => plan,
+        executor: { scan: async () => [] },
+        notify: () => {},
+      })
+      expect(r.graph.state()).toBe('coarse')
+    }
   })
 })
 

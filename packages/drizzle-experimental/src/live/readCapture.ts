@@ -37,7 +37,7 @@ import { schemaFingerprint } from '../extract/columns.js'
 import { identityOf } from '../extract/identity.js'
 import { extractQueryShape } from '../extract/queryShape.js'
 import { parseRelationId } from '../ir/relation.js'
-import type { QueryShape } from '../ir/types.js'
+import type { QueryShape, RlsStatus } from '../ir/types.js'
 import type { ReadToken } from '../graph/registry.js'
 import { registryFor } from './dbRuntime.js'
 import { acquireSubscription, type SubscriptionRef } from './changeRuntime.js'
@@ -160,13 +160,13 @@ async function captureAndBuild(builder: unknown, db: object): Promise<Live<Row[]
       schemaFingerprint: schemaFingerprint(tableObjectsOf(builder)),
     }
     const { instanceKey } = identityOf(builder, env)
-    const rlsEnabled = await anyRlsEnabled(db, shape.tables)
+    const rlsStatus = await rlsStatusOf(db, shape.tables)
 
     // Only the token is needed here — the graph drives invalidation through the sink.
     const { token } = await registryFor(db).acquire({
       instanceKey,
       tables: shape.tables,
-      rlsEnabled,
+      rlsStatus,
       compilePlan: compilePlanFor(db, shape),
       executor: hydrationExecutorOf(db),
       notify: sink.notify,
@@ -216,14 +216,15 @@ function tableObjectsOf(builder: unknown): Table[] {
   return tables
 }
 
-/** Whether any referenced relation has (or may have) row-level security — `true`/`'unknown'` both
- *  gate the graph to born-coarse (never assume off). `tables` carries ROUTING identities, so each is
+/** The first non-false row-level-security status across referenced relations. `true` and `'unknown'`
+ *  remain distinct here; the stateful graph later makes the shared born-coarse decision. `tables` carries ROUTING identities, so each is
  *  decoded back to the schema/name pair the catalog probe addresses: a schema-qualified relation is
  *  probed in ITS schema rather than assumed to live in `public`. */
-async function anyRlsEnabled(db: object, tables: string[]): Promise<boolean> {
+async function rlsStatusOf(db: object, tables: string[]): Promise<RlsStatus> {
   for (const id of tables) {
     const { name, schema } = parseRelationId(id)
-    if ((await rlsEnabledOf(db, name, schema ? { schema } : undefined)) !== false) return true
+    const status = await rlsEnabledOf(db, name, schema ? { schema } : undefined)
+    if (status !== false) return status
   }
   return false
 }

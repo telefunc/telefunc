@@ -17,6 +17,7 @@
 export { type LiveGraph, type LiveGraphSpec, type ApplyOutcome, type GraphCore, type GraphVariant, createLiveGraph }
 
 import type { CompiledGraph, StatefulGraph, Change } from '../compile/compile.js'
+import type { RlsStatus } from '../ir/types.js'
 import type { RowChange, TableChange } from '../router/events.js'
 import { rowChanged } from '../compile/rowSpace.js'
 import { assertUsage } from '../utils/assert.js'
@@ -36,8 +37,8 @@ type LiveGraphSpec =
       instantiate: () => StatefulGraph
       executor: HydrationExecutor
       maxStateRows: number
-      /** rls (true / 'unknown') → born coarse (never hydrates row state). */
-      bornCoarse?: boolean
+      /** RLS status stays three-valued until the stateful variant makes the born-state decision. */
+      rlsStatus?: RlsStatus
       /** Notify this identity's subscribers from OUTSIDE a routed batch — see statefulLiveGraph.ts. */
       notifyIdentity?: () => void
     }
