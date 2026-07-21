@@ -67,9 +67,11 @@ The dependency direction is intentional:
 | `tanstack-query/` | The optional query-function consumer. | Imports the browser-safe primitive contract, never the server graph or Drizzle edge. |
 | `drizzle/` | Every private shape read and every source-specific execution decision. | May adapt into the core; the core must never import back into this directory. |
 
-`engine/compile/importGraph.spec.ts` parses static, re-export, and dynamic imports across the core. It fails on a
-computed dynamic import, rejects unapproved bare runtime dependencies, and rejects any path from the core into
-`drizzle/`. This is an architectural gate, not a convention.
+`engine/compile/importGraph.spec.ts` parses static imports, re-exports, inline TypeScript import types, and dynamic
+imports across the core. Type edges count architecturally but erase from the runtime graph; computed dynamic imports
+fail closed. The gate rejects any path from the core into `drizzle/`. Separately, the TanStack browser closure rejects
+bare runtime dependencies outside its explicit browser-safe allowlist. This is an architectural gate, not a
+convention.
 
 ### Why each Drizzle module is quarantined
 

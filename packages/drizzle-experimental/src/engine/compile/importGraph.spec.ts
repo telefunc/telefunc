@@ -47,8 +47,7 @@ function importsBinding(file: string): boolean {
  *  edges; a regex that only understood `from` was the false-green this gate exists to prevent. */
 const computedDynamicImport = '<computed dynamic import>'
 
-function importSpecifiersOf(file: string, runtimeOnly: boolean): string[] {
-  const source = readFileSync(file, 'utf8')
+function importSpecifiersIn(source: string, file: string, runtimeOnly: boolean): string[] {
   const tree = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
   const specifiers: string[] = []
 
@@ -62,17 +61,30 @@ function importSpecifiersOf(file: string, runtimeOnly: boolean): string[] {
     }
   }
 
-  const visitDynamicImports = (node: ts.Node): void => {
+  const visitNonStatementImports = (node: ts.Node): void => {
+    // `type T = import('./module.js').T` is an ImportTypeNode, not a CallExpression. It erases at runtime,
+    // but the all-edges graph must still see it: a core type that names the Drizzle quarantine is still an
+    // architectural dependency. ImportDeclaration and ExportDeclaration type edges are collected in the
+    // statement pass above; the controls below pin all three spellings independently.
+    if (!runtimeOnly && ts.isImportTypeNode(node)) {
+      const argument = node.argument
+      if (ts.isLiteralTypeNode(argument) && ts.isStringLiteralLike(argument.literal))
+        specifiers.push(argument.literal.text)
+    }
     if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword) {
       const argument = node.arguments[0]
       // A computed runtime edge cannot be proven browser-safe, so make it an explicit forbidden
       // specifier rather than silently omitting it from the graph.
       specifiers.push(argument && ts.isStringLiteralLike(argument) ? argument.text : computedDynamicImport)
     }
-    ts.forEachChild(node, visitDynamicImports)
+    ts.forEachChild(node, visitNonStatementImports)
   }
-  ts.forEachChild(tree, visitDynamicImports)
+  ts.forEachChild(tree, visitNonStatementImports)
   return specifiers
+}
+
+function importSpecifiersOf(file: string, runtimeOnly: boolean): string[] {
+  return importSpecifiersIn(readFileSync(file, 'utf8'), file, runtimeOnly)
 }
 
 const runtimeImportSpecifiersOf = (file: string): string[] => importSpecifiersOf(file, true)
@@ -80,13 +92,17 @@ const allImportSpecifiersOf = (file: string): string[] => importSpecifiersOf(fil
 
 /** Whether one core module reaches into the Drizzle quarantine. Type-only edges count: they are still an
  *  architectural dependency. A computed dynamic edge fails closed because its target cannot be proven safe. */
-function importsDrizzleQuarantine(file: string): boolean {
-  return allImportSpecifiersOf(file).some((specifier) => {
+function importSpecifiersReachDrizzle(specifiers: string[], file: string): boolean {
+  return specifiers.some((specifier) => {
     if (specifier === computedDynamicImport) return true
     if (!specifier.startsWith('.')) return false
     const target = resolve(dirname(file), specifier.replace(/\.js$/, '.ts'))
     return under(target, ['drizzle'])
   })
+}
+
+function importsDrizzleQuarantine(file: string): boolean {
+  return importSpecifiersReachDrizzle(allImportSpecifiersOf(file), file)
 }
 
 function importDeclarationIsRuntime(node: ts.ImportDeclaration): boolean {
@@ -125,6 +141,32 @@ function valueImportGraph(entry: string): { files: string[]; bare: string[] } {
 }
 
 const browserRuntimePackageAllowlist = new Set(['@tanstack/query-core', 'telefunc/client'])
+
+describe('import-edge classifier', () => {
+  const controlFile = resolve(srcDir, 'engine/compile/typeEdgeControl.ts')
+
+  it('counts import type and export type as architecture edges, but not runtime edges', () => {
+    const source = [
+      "import type { Plan } from '../../drizzle/writePlan.js'",
+      "export type { CaptureSink } from '../../drizzle/writeChanges.js'",
+    ].join('\n')
+
+    expect(importSpecifiersIn(source, controlFile, false)).toEqual([
+      '../../drizzle/writePlan.js',
+      '../../drizzle/writeChanges.js',
+    ])
+    expect(importSpecifiersIn(source, controlFile, true)).toEqual([])
+  })
+
+  it('treats an inline import type into drizzle/ as a quarantine leak, but erases it from the runtime graph', () => {
+    const source = "type Leak = import('../../drizzle/writePlan.js').Plan"
+
+    const architectureEdges = importSpecifiersIn(source, controlFile, false)
+    expect(architectureEdges).toEqual(['../../drizzle/writePlan.js'])
+    expect(importSpecifiersReachDrizzle(architectureEdges, controlFile)).toBe(true)
+    expect(importSpecifiersIn(source, controlFile, true)).toEqual([])
+  })
+})
 
 describe('import-graph boundary', () => {
   it('ir/ + compile/ + graph/ + router/ import zero drizzle-orm (the ORM-agnostic engine)', () => {
