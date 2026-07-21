@@ -491,6 +491,96 @@ describe('cloudflare — CF-specific mechanics', () => {
       expect(await stub.countRouteGenerationCaptures()).toBe(0)
     })
 
+    it('does not touch capture pins when nonexistent or stale exact-route renewal predicates fail', async () => {
+      const { roomId, inc, stub } = await openCfRoom()
+      const createdAt = fx.authorityNow()
+      const noRouteAttempt = `no-route-${crypto.randomUUID()}`
+      const staleLeaseAttempt = `stale-lease-${crypto.randomUUID()}`
+      const noRouteCapture = await stub.captureRouteGeneration(inc, noRouteAttempt, createdAt)
+      const staleLeaseCapture = await stub.captureRouteGeneration(inc, staleLeaseAttempt, createdAt)
+      if ('rejected' in noRouteCapture) throw new Error(noRouteCapture.reason)
+      if ('rejected' in staleLeaseCapture) throw new Error(staleLeaseCapture.reason)
+      expect(noRouteCapture.generationToken).toBe(staleLeaseCapture.generationToken)
+
+      const laneKey = laneKeyOf(SEMANTIC)
+      const subscriber = 'capture-negative-touch-subscriber'
+      await installReceiver(roomId, inc, laneKey, subscriber, 'live-lease', () => {})
+      const registered = await stub.registerRoute(
+        roomId,
+        inc,
+        laneKey,
+        subscriber,
+        'live-lease',
+        null,
+        staleLeaseCapture.generationToken,
+        staleLeaseAttempt,
+        createdAt,
+      )
+      expect(registered).toMatchObject({ ok: true })
+
+      fx.advanceAuthority(ROUTE_CAPTURE_TTL_MS - 1)
+      await fx.backend.readHead(roomId)
+      expect(
+        await stub.renewRoute(
+          inc,
+          laneKey,
+          'subscriber-that-never-existed',
+          'lease-that-never-existed',
+          noRouteCapture.generationToken,
+          noRouteAttempt,
+          createdAt,
+        ),
+      ).toEqual({ ok: false })
+      expect(
+        await stub.renewRoute(
+          inc,
+          laneKey,
+          subscriber,
+          'stale-lease',
+          staleLeaseCapture.generationToken,
+          staleLeaseAttempt,
+          createdAt,
+        ),
+      ).toEqual({ ok: false })
+
+      fx.advanceAuthority(1)
+      await fx.backend.readHead(roomId)
+      await stub.runJanitor()
+      expect(await stub.countRouteGenerationCaptures()).toBe(0)
+    })
+
+    it('cannot keep an abandoned capture pin alive with rejected renewals across three TTL windows', async () => {
+      const { roomId, inc, stub } = await openCfRoom()
+      const createdAt = fx.authorityNow()
+      const attemptId = `repeated-negative-touch-${crypto.randomUUID()}`
+      const captured = await stub.captureRouteGeneration(inc, attemptId, createdAt)
+      if ('rejected' in captured) throw new Error(captured.reason)
+      const laneKey = laneKeyOf(SEMANTIC)
+
+      for (let window = 0; window < 3; window += 1) {
+        fx.advanceAuthority(ROUTE_CAPTURE_TTL_MS - 1)
+        await fx.backend.readHead(roomId)
+        const rejected = await stub.renewRoute(
+          inc,
+          laneKey,
+          'subscriber-that-never-existed',
+          'lease-that-never-existed',
+          captured.generationToken,
+          attemptId,
+          createdAt,
+        )
+        expect(rejected.ok).toBe(false)
+        if (window > 0) expect(rejected.terminal).toBe(true)
+      }
+
+      // Cross the third original TTL boundary. The expired row may remain physically present until
+      // this mechanical sweep, but none of the rejected renewals may have extended its authority lease.
+      fx.advanceAuthority(3)
+      await fx.backend.readHead(roomId)
+      await stub.runJanitor()
+      expect(await stub.countRouteGenerationCaptures()).toBe(0)
+    })
+
     it('never lets a retryable tokenless establishment rebind across drop and exact incarnation reuse', async () => {
       const { roomId, inc } = await openCfRoom()
       const controls = cloudflareRenewalControls(fx.backend)

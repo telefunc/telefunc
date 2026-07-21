@@ -489,23 +489,39 @@ export class TelefuncRoomDurableObject extends DurableObject {
         generationInvalid = true
         return
       }
-      if (
-        captureAttemptId !== null &&
-        (captureCreatedAt === null ||
-          !touchRouteGenerationCapture(
-            this.#sql,
-            captureAttemptId,
-            inc,
-            currentGenerationToken,
-            captureCreatedAt,
-            now,
-            ROUTE_CAPTURE_TTL_MS,
-          ))
-      ) {
-        generationInvalid = true
-        return
+      if (captureAttemptId !== null) {
+        const capture = readRouteGenerationCapture(this.#sql, captureAttemptId)
+        if (
+          captureCreatedAt === null ||
+          capture === null ||
+          capture.inc !== inc ||
+          capture.token !== currentGenerationToken ||
+          capture.createdAt !== captureCreatedAt ||
+          capture.expiresAt <= now
+        ) {
+          generationInvalid = true
+          return
+        }
       }
       result = renewRoute(this.#sql, inc, laneKey, subscriber, leaseId, now)
+      if (
+        result.ok &&
+        captureAttemptId !== null &&
+        !touchRouteGenerationCapture(
+          this.#sql,
+          captureAttemptId,
+          inc,
+          currentGenerationToken,
+          captureCreatedAt!,
+          now,
+          ROUTE_CAPTURE_TTL_MS,
+        )
+      ) {
+        // The read-only capture validation and exact route renewal share this synchronous transaction;
+        // an exact capture cannot disappear between them. Throwing rolls back the route renewal if that
+        // invariant is ever violated instead of committing a live route without its generation fence.
+        throw new Error('route capture changed during exact renewal')
+      }
     })
     if (generationInvalid) return { ok: false, terminal: true }
     // A missing/non-live exact route inside the SAME generation is recoverable: the subscription
