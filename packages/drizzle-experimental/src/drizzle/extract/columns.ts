@@ -12,9 +12,9 @@ export {
 
 import { Column, type SQL, Subquery, type Table, getTableColumns, getTableName, is, isTable } from 'drizzle-orm'
 import { entityKindOf } from '../binding/database.js'
-import type { ColRef, RlsStatus, TableRef } from '../ir/types.js'
-import { relationIdOf } from '../ir/relation.js'
-import { frame } from '../ir/canonical.js'
+import type { ColRef, RlsStatus, TableRef } from '../../ir/types.js'
+import { relationIdOf } from '../../ir/relation.js'
+import { frame } from '../../ir/canonical.js'
 
 // drizzle's per-table metadata lives under globally-registered symbols; the public
 // types don't surface them, so read them directly.

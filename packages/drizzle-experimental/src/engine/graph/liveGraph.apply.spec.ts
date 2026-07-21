@@ -13,7 +13,7 @@ import { eq, gt } from 'drizzle-orm'
 import * as pg from 'drizzle-orm/pg-core'
 import { describe, expect, it } from 'vitest'
 import { type StatefulGraph, compileQuery } from '../compile/compile.js'
-import { extractQueryShape } from '../../extract/queryShape.js'
+import { extractQueryShape } from '../../drizzle/extract/queryShape.js'
 import { type LiveGraph, createLiveGraph } from './liveGraph.js'
 import {
   fakeSeed,

@@ -18,8 +18,8 @@ import type {
   SelectShape,
   SetOp,
   SetOpKind,
-} from '../ir/types.js'
-import { relationIdOf } from '../ir/relation.js'
+} from '../../ir/types.js'
+import { relationIdOf } from '../../ir/relation.js'
 import { colRefOf, collectTables, relationKeyOf, tableOf, tableRefOf } from './columns.js'
 import { extractPredicate } from './predicate.js'
 import { type SqlToken, readAggCall, tokenize } from './sqlChunks.js'

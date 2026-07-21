@@ -27,8 +27,8 @@ import { createRequire } from 'node:module'
 import { dirname, join } from 'node:path'
 import { QueryBuilder, alias, boolean, integer, pgTable, text, timestamp } from 'drizzle-orm/pg-core'
 import { describe, expect, it } from 'vitest'
-import { eval3, rowView } from '../ir/eval.js'
-import type { CompareOp, Dialect, Predicate, ScalarExpr, Tri } from '../ir/types.js'
+import { eval3, rowView } from '../../ir/eval.js'
+import type { CompareOp, Dialect, Predicate, ScalarExpr, Tri } from '../../ir/types.js'
 import { conjunctsOf, extractPredicate, parsePredicate, toNNF } from './predicate.js'
 
 const requireFrom = createRequire(import.meta.url)

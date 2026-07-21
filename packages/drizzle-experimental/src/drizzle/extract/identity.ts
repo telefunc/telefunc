@@ -2,8 +2,8 @@ export { identityOf, planKeyOf, instanceKeyOf, canonicalValue }
 export type { Identity, IdentityEnv }
 
 import { Placeholder, fillPlaceholders, is } from 'drizzle-orm'
-import { assertUsage } from '../utils/assert.js'
-import { canonicalValue, frame } from '../ir/canonical.js'
+import { assertUsage } from '../../utils/assert.js'
+import { canonicalValue, frame } from '../../ir/canonical.js'
 
 type Identity = {
   /** The graph-state key: the structural plan key (semantic environment / dialect / schema

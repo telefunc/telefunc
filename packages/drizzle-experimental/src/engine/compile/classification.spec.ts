@@ -11,7 +11,7 @@ import { sql } from 'drizzle-orm'
 import * as pg from 'drizzle-orm/pg-core'
 import { describe, expect, it } from 'vitest'
 import type { SelectShape } from '../../ir/types.js'
-import { extractQueryShape } from '../../extract/queryShape.js'
+import { extractQueryShape } from '../../drizzle/extract/queryShape.js'
 import { coarsePlan, compileQuery } from './compile.js'
 
 const users = pg.pgTable('users', {

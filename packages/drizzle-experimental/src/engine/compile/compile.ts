@@ -21,7 +21,7 @@ export {
   coarsePlan,
 }
 
-import { conjunctsOf } from '../../extract/predicate.js'
+import { conjunctsOf } from '../../drizzle/extract/predicate.js'
 import type { Predicate, QueryShape, SelectShape } from '../../ir/types.js'
 import { assertUsage } from '../../utils/assert.js'
 import { joinsExact } from './joinStage.js'

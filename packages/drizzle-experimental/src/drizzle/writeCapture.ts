@@ -3,7 +3,7 @@ export type { WriteContext }
 
 import { type Table, isTable } from 'drizzle-orm'
 import { demoteOldNewReturning, markOldNewProven, oldNewProvenOf } from './writeCapabilities.js'
-import { relationKeyOf } from '../extract/columns.js'
+import { relationKeyOf } from './extract/columns.js'
 import { report } from '../bus/captureReport.js'
 import {
   type CaptureSink,

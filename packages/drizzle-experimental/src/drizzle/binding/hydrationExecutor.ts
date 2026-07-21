@@ -8,9 +8,9 @@
 export { hydrationExecutorOf }
 
 import { type SQL, and, sql } from 'drizzle-orm'
-import type { SeedDescriptor } from '../engine/compile/compile.js'
-import type { HydrationExecutor } from '../engine/graph/hydrate.js'
-import type { Predicate, SqlSource } from '../ir/types.js'
+import type { SeedDescriptor } from '../../engine/compile/compile.js'
+import type { HydrationExecutor } from '../../engine/graph/hydrate.js'
+import type { Predicate, SqlSource } from '../../ir/types.js'
 import { executeSql } from './database.js'
 
 function hydrationExecutorOf(db: unknown): HydrationExecutor {

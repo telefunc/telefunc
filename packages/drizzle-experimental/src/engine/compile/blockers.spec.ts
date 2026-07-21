@@ -6,7 +6,7 @@
 import { asc, sql } from 'drizzle-orm'
 import * as pg from 'drizzle-orm/pg-core'
 import { describe, expect, it } from 'vitest'
-import { extractQueryShape } from '../../extract/queryShape.js'
+import { extractQueryShape } from '../../drizzle/extract/queryShape.js'
 import type { SelectShape } from '../../ir/types.js'
 import {
   D2,

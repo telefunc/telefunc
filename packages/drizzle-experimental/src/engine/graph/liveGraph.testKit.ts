@@ -14,7 +14,7 @@ import * as pg from 'drizzle-orm/pg-core'
 import { expect } from 'vitest'
 import { type SeedDescriptor, type StatefulGraph, compileQuery } from '../compile/compile.js'
 import type { Row } from '../compile/rowSpace.js'
-import { extractQueryShape } from '../../extract/queryShape.js'
+import { extractQueryShape } from '../../drizzle/extract/queryShape.js'
 import type { HydrationExecutor } from './hydrate.js'
 import { type LiveGraph, type LiveGraphSpec, createLiveGraph } from './liveGraph.js'
 

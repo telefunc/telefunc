@@ -1,6 +1,6 @@
 import { alias, integer, pgSchema, pgTable, primaryKey, text, varchar } from 'drizzle-orm/pg-core'
 import { describe, expect, it } from 'vitest'
-import { relationIdOf } from '../ir/relation.js'
+import { relationIdOf } from '../../ir/relation.js'
 import {
   colRefOf,
   primaryKeyOf,

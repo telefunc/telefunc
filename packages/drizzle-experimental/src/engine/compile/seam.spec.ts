@@ -7,7 +7,7 @@ import { and, eq, gt, lt } from 'drizzle-orm'
 import { alias } from 'drizzle-orm/pg-core'
 import * as pg from 'drizzle-orm/pg-core'
 import { describe, expect, it } from 'vitest'
-import { extractQueryShape } from '../../extract/queryShape.js'
+import { extractQueryShape } from '../../drizzle/extract/queryShape.js'
 import { type Change, type StatefulGraph, compileQuery } from './compile.js'
 
 const users = pg.pgTable('users', {

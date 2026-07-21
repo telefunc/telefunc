@@ -4,11 +4,11 @@ export type { Substituted, SubstitutionOutcome }
 
 import { type Column, SQL, type Table, getTableColumns, sql } from 'drizzle-orm'
 import type { ImageLayout } from './imageLayout.js'
-import { dialectOf } from '../binding/database.js'
+import { dialectOf } from './binding/database.js'
 import { report } from '../bus/captureReport.js'
 import { writeConfigOf } from './writePlan.js'
 import type { Row } from '../bus/router/events.js'
-import { causeChain } from '../utils/causeChain.js'
+import { causeChain } from './causeChain.js'
 
 // The adapter around drizzle's execution machinery for a write whose RETURNING capture CHOSE. The caller
 // never asked for that clause, so the whole of this module exists to make one guarantee: capture's own

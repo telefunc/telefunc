@@ -2,7 +2,7 @@ export { tokenize, textOf, isText, splitOn, stripParens, readAggCall }
 export type { SqlToken }
 
 import { Column, Param, Placeholder, SQL, StringChunk, is } from 'drizzle-orm'
-import type { AggFn } from '../ir/types.js'
+import type { AggFn } from '../../ir/types.js'
 
 // drizzle conditions carry no AST — only `SQL.queryChunks`: interleaved string
 // fragments, Column/Param objects, nested SQL (the operands of and/or/not), raw

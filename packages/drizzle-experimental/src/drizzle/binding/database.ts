@@ -3,8 +3,8 @@ export { rowRunnerFor }
 export type { RlsStatus, RowRunner }
 
 import { type SQL, entityKind, sql } from 'drizzle-orm'
-import type { Dialect, RlsStatus } from '../ir/types.js'
-import { assertUsage } from '../utils/assert.js'
+import type { Dialect, RlsStatus } from '../../ir/types.js'
+import { assertUsage } from '../../utils/assert.js'
 
 // Facts read off a live drizzle database instance. Dialect/driver come from drizzle's
 // `[entityKind]` discriminators (stable across the v1 line). Connection *authority*

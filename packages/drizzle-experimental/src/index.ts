@@ -15,6 +15,6 @@
 // `.data`, and the producer verbs stay internal. The client-side query adapter is the separate
 // `./tanstack-query` subpath, so importing this root pulls in no TanStack dependency.
 
-export { reactiveDrizzle } from './live/reactiveDrizzle.js'
+export { reactiveDrizzle } from './drizzle/reactiveDrizzle.js'
 export { derived } from './primitive/live.js'
 export type { Live } from './primitive/live.js'

@@ -8,7 +8,7 @@
 export { createDirtySink, dirtyFrontier, containsUnknown }
 export type { DirtySink }
 
-import { conjunctsOf } from '../../extract/predicate.js'
+import { conjunctsOf } from '../../drizzle/extract/predicate.js'
 import { type IStreamBuilder, concat, map, output } from '../graph/ivm.js'
 import type { Predicate } from '../../ir/types.js'
 import { conjunction } from '../../ir/predicateAlgebra.js'

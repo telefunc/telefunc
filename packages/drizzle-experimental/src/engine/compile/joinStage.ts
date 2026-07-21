@@ -11,7 +11,7 @@
 
 export { applyJoins, joinsExact }
 
-import { conjunctsOf } from '../../extract/predicate.js'
+import { conjunctsOf } from '../../drizzle/extract/predicate.js'
 import { type IStreamBuilder, type KeyValue, filter, join as joinOp, keyBy, map } from '../graph/ivm.js'
 import type { JoinShape, Predicate, SelectShape } from '../../ir/types.js'
 import type { DirtySink } from './dirty.js'

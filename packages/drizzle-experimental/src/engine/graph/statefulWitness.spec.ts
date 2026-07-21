@@ -16,7 +16,7 @@
 import { gt, sql } from 'drizzle-orm'
 import { describe, expect, it } from 'vitest'
 import { type StatefulGraph, compileQuery } from '../compile/compile.js'
-import { extractQueryShape } from '../../extract/queryShape.js'
+import { extractQueryShape } from '../../drizzle/extract/queryShape.js'
 import type { HydrationExecutor } from './hydrate.js'
 import { type LiveGraph, createLiveGraph } from './liveGraph.js'
 import { qb, settle, teams, users } from './liveGraph.testKit.js'

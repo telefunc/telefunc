@@ -38,7 +38,7 @@ vi.mock('../bus/dbRuntime.js', () => ({
   }),
   ingestWrite: vi.fn(),
 }))
-vi.mock('../binding/database.js', () => ({
+vi.mock('./binding/database.js', () => ({
   dialectOf: () => 'pg',
   isSingleSession: () => true,
   rlsEnabledOf: async () => probes.rlsStatuses[probes.rlsProbeIndex++] ?? false,
@@ -46,11 +46,11 @@ vi.mock('../binding/database.js', () => ({
   driverOf: () => 'PgliteDatabase',
   entityKindOf: () => undefined,
 }))
-vi.mock('../extract/queryShape.js', () => ({ extractQueryShape: () => ({ tables: probes.tables }) }))
-vi.mock('../extract/columns.js', () => ({ schemaFingerprint: () => 'fp', primaryKeyOf: () => ['id'] }))
-vi.mock('../extract/identity.js', () => ({ identityOf: () => ({ planKey: 'pk', instanceKey: 'ik' }) }))
-vi.mock('../binding/hydrationExecutor.js', () => ({ hydrationExecutorOf: () => async () => [] }))
-vi.mock('../binding/drizzleShape.js', () => ({ selectConfigOf: () => null }))
+vi.mock('./extract/queryShape.js', () => ({ extractQueryShape: () => ({ tables: probes.tables }) }))
+vi.mock('./extract/columns.js', () => ({ schemaFingerprint: () => 'fp', primaryKeyOf: () => ['id'] }))
+vi.mock('./extract/identity.js', () => ({ identityOf: () => ({ planKey: 'pk', instanceKey: 'ik' }) }))
+vi.mock('./binding/hydrationExecutor.js', () => ({ hydrationExecutorOf: () => async () => [] }))
+vi.mock('./binding/drizzleShape.js', () => ({ selectConfigOf: () => null }))
 vi.mock('../engine/compile/compile.js', () => ({ compileQuery: () => ({}), coarsePlan: () => ({}) }))
 
 /** The Live the engine mints — `attachSource` is captured so a test can drive serialize-time activation

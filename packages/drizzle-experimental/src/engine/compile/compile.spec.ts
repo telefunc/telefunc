@@ -1,7 +1,7 @@
 import { and, eq, gt, or, sql } from 'drizzle-orm'
 import * as pg from 'drizzle-orm/pg-core'
 import { describe, expect, it, vi } from 'vitest'
-import { extractQueryShape } from '../../extract/queryShape.js'
+import { extractQueryShape } from '../../drizzle/extract/queryShape.js'
 import type { QueryShape } from '../../ir/types.js'
 import { type Change, compileQuery } from './compile.js'
 

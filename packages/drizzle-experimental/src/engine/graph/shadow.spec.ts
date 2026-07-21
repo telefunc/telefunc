@@ -7,7 +7,7 @@ import { gt, sql } from 'drizzle-orm'
 import * as pg from 'drizzle-orm/pg-core'
 import { describe, expect, it } from 'vitest'
 import { type SeedDescriptor, type StatefulGraph, compileQuery } from '../compile/compile.js'
-import { extractQueryShape } from '../../extract/queryShape.js'
+import { extractQueryShape } from '../../drizzle/extract/queryShape.js'
 import { createShadow, matchesResidual, pkOf, pruneRow } from './shadow.js'
 
 const users = pg.pgTable('users', {

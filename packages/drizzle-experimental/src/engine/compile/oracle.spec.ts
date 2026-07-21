@@ -13,7 +13,7 @@ import { and, between, count, eq, gt, inArray, isNull, like, sql, sum } from 'dr
 import * as pg from 'drizzle-orm/pg-core'
 import { drizzle } from 'drizzle-orm/pglite'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { extractQueryShape } from '../../extract/queryShape.js'
+import { extractQueryShape } from '../../drizzle/extract/queryShape.js'
 import { type Change, compileQuery } from './compile.js'
 import { canonicalValue } from '../../ir/canonical.js'
 

@@ -1,8 +1,8 @@
 export { oldNewReturningOf, oldNewProvenOf, markOldNewProven, demoteOldNewReturning, probeOldNewReturning }
 
 import { type SQL, sql } from 'drizzle-orm'
-import { dialectOf, rowRunnerFor } from '../binding/database.js'
-import { causeChain } from '../utils/causeChain.js'
+import { dialectOf, rowRunnerFor } from './binding/database.js'
+import { causeChain } from './causeChain.js'
 
 type AnyDb = { dialect?: unknown; $client?: unknown }
 

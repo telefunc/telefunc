@@ -3,7 +3,7 @@ export { registryFor, ingestWrite, ingestLocal, announceCoarse }
 import { type Registry, createRegistry } from '../engine/graph/registry.js'
 import type { ChangeBatch } from './router/events.js'
 import { publishBatch, publishCoarseAll } from './changeRuntime.js'
-import { emitSafely } from '../live/writeChanges.js'
+import { emitSafely } from '../drizzle/writeChanges.js'
 
 // The db-scoped reactive runtime: ONE registry per db instance owns BOTH paths — reads acquire graphs
 // from it (`registryFor(db).acquire(...)`), and captured writes feed those same graphs through it

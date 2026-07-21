@@ -7,8 +7,8 @@ import { drizzle as sqliteDrizzle } from 'drizzle-orm/node-sqlite'
 import * as pgCore from 'drizzle-orm/pg-core'
 import * as sqliteCore from 'drizzle-orm/sqlite-core'
 import { describe, expect, it, vi } from 'vitest'
-import { relationIdOf } from '../ir/relation.js'
-import type { CoarseShape, Predicate, ProjItem, SelectShape } from '../ir/types.js'
+import { relationIdOf } from '../../ir/relation.js'
+import type { CoarseShape, Predicate, ProjItem, SelectShape } from '../../ir/types.js'
 import { crossCheckRenderedTables, extractQueryShape, renderedRelationsFromSQL } from './queryShape.js'
 
 const requireFrom = createRequire(import.meta.url)

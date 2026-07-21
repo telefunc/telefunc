@@ -11,7 +11,7 @@ import { isCoarseAllSurface } from './writeTerminals.js'
 import { wrapLiveSelect } from './readCapture.js'
 import { probeOldNewReturning } from './writeCapabilities.js'
 import { installLiveReplacer } from '../primitive/wireServer.js'
-import { dialectOf } from '../binding/database.js'
+import { dialectOf } from './binding/database.js'
 import { assertUsage } from '../utils/assert.js'
 import type { Reactive, ReactiveDatabase } from './reactiveDrizzle.types.js'
 

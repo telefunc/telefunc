@@ -7,9 +7,9 @@ import { PGlite } from '@electric-sql/pglite'
 import * as pg from 'drizzle-orm/pg-core'
 import { drizzle } from 'drizzle-orm/pglite'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { type SeedDescriptor, type StatefulGraph, compileQuery } from '../engine/compile/compile.js'
+import { type SeedDescriptor, type StatefulGraph, compileQuery } from '../../engine/compile/compile.js'
 import { extractQueryShape } from '../extract/queryShape.js'
-import { relationIdOf } from '../ir/relation.js'
+import { relationIdOf } from '../../ir/relation.js'
 import { hydrationExecutorOf } from './hydrationExecutor.js'
 
 let client: PGlite
