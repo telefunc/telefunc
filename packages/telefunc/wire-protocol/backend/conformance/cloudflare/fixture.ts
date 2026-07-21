@@ -60,6 +60,7 @@ type RoomStub = {
   runJanitor(): Promise<{ prunedRoutes: number }>
 }
 
+export type { RoomStub }
 type Namespace = { idFromName(name: string): unknown; get(id: unknown): RoomStub }
 
 // ── shared per-process runtime (one Miniflare, reused across the file's tests) ──
@@ -95,7 +96,7 @@ function setClock(value: number): void {
 // (per-target failure). A vanished receiver (unsubscribed mid-flight) is skipped, at-most-once. This is
 // the subscriber-isolate side of the CF handoff: the room DO's fan-out RPC target, collapsed here to the
 // in-process receiver the same way production would dispatch inside the subscriber DO.
-async function deliverToReceiver(subscriber: string, frame: Uint8Array, info: { seq: number; timestamp: number }): Promise<void> {
+export async function deliverToReceiver(subscriber: string, frame: Uint8Array, info: { seq: number; timestamp: number }): Promise<void> {
   const receiver = receivers.get(subscriber)
   if (receiver === undefined) return
   const result = receiver(new Uint8Array(frame), { seq: info.seq, timestamp: info.timestamp }) as unknown
@@ -132,6 +133,24 @@ export async function disposeSharedMiniflare(): Promise<void> {
   } catch {
     // already gone
   }
+}
+
+// ── low-level primitives for the CF-specific scenarios (route lease lifecycle, eviction, barrier race) ──
+// These reach past the SPI facade to drive the route table and delivery chain directly, which is where the
+// CF-specific properties (readiness-ordering §2.3/§3) live.
+
+export async function cloudflareRoomStub(roomId: string): Promise<RoomStub> {
+  const shared = await getShared()
+  await clockPush
+  return shared.ns.get(shared.ns.idFromName(roomId))
+}
+
+export function installReceiver(subscriber: string, receiver: LaneReceiver): void {
+  receivers.set(subscriber, receiver)
+}
+
+export function evictReceiver(subscriber: string): void {
+  receivers.delete(subscriber)
 }
 
 // ── head marshalling ──
