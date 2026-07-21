@@ -13,6 +13,7 @@
 // path needs a real GC and lives in readCapture.spec.
 
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import type { RlsStatus } from '../ir/types.js'
 import type { ChangeSubscription, ChangeTransport } from './changeTransport.js'
 
 const probes = vi.hoisted(() => ({
@@ -20,7 +21,9 @@ const probes = vi.hoisted(() => ({
   snapshotRead: vi.fn(),
   acquireFails: false,
   readFails: false,
-  rlsStatus: false as boolean | 'unknown',
+  tables: ['accounts'],
+  rlsStatuses: [false] as RlsStatus[],
+  rlsProbeIndex: 0,
 }))
 
 // Everything except the subscription and the transport is stubbed — this spec is about ORDER and OWNERSHIP.
@@ -38,12 +41,12 @@ vi.mock('./dbRuntime.js', () => ({
 vi.mock('../binding/database.js', () => ({
   dialectOf: () => 'pg',
   isSingleSession: () => true,
-  rlsEnabledOf: async () => probes.rlsStatus,
+  rlsEnabledOf: async () => probes.rlsStatuses[probes.rlsProbeIndex++] ?? false,
   semanticEnvironmentKeyOf: async () => 'env',
   driverOf: () => 'PgliteDatabase',
   entityKindOf: () => undefined,
 }))
-vi.mock('../extract/queryShape.js', () => ({ extractQueryShape: () => ({ tables: ['accounts'] }) }))
+vi.mock('../extract/queryShape.js', () => ({ extractQueryShape: () => ({ tables: probes.tables }) }))
 vi.mock('../extract/columns.js', () => ({ schemaFingerprint: () => 'fp', primaryKeyOf: () => ['id'] }))
 vi.mock('../extract/identity.js', () => ({ identityOf: () => ({ planKey: 'pk', instanceKey: 'ik' }) }))
 vi.mock('../binding/hydrationExecutor.js', () => ({ hydrationExecutorOf: () => async () => [] }))
@@ -113,7 +116,9 @@ beforeEach(() => {
   probes.snapshotRead.mockClear()
   probes.acquireFails = false
   probes.readFails = false
-  probes.rlsStatus = false
+  probes.tables = ['accounts']
+  probes.rlsStatuses = [false]
+  probes.rlsProbeIndex = 0
   host.sources.length = 0
 })
 
@@ -137,15 +142,21 @@ describe('captureAndBuild — the readiness barrier gates the whole read', () =>
     expect(probes.snapshotRead).toHaveBeenCalledTimes(1)
   })
 
-  it('preserves unknown RLS status into graph acquisition instead of flattening it to true', async () => {
+  it.each([
+    { name: 'unknown then true', statuses: ['unknown', true] as RlsStatus[], expected: true as RlsStatus },
+    { name: 'true then unknown', statuses: [true, 'unknown'] as RlsStatus[], expected: true as RlsStatus },
+    { name: 'false then unknown', statuses: [false, 'unknown'] as RlsStatus[], expected: 'unknown' as RlsStatus },
+    { name: 'all false', statuses: [false, false] as RlsStatus[], expected: false as RlsStatus },
+  ])('aggregates RLS status: $name → $expected', async ({ statuses, expected }) => {
     const db = {}
     const broker = brokerTransport({ autoAdmit: true })
     setChangeTransport(db, broker.transport)
-    probes.rlsStatus = 'unknown'
+    probes.tables = statuses.map((_, index) => `table_${index}`)
+    probes.rlsStatuses = statuses
 
     await liveRead(db)
 
-    expect(probes.acquire).toHaveBeenCalledWith(expect.objectContaining({ rlsStatus: 'unknown' }))
+    expect(probes.acquire).toHaveBeenCalledWith(expect.objectContaining({ rlsStatus: expected }))
     host.sources[0]!.subscribe()()
   })
 })

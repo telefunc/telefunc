@@ -1,6 +1,7 @@
 import { readFileSync, readdirSync } from 'node:fs'
 import { dirname, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import ts from 'typescript'
 import { describe, expect, it } from 'vitest'
 
 const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), '..')
@@ -41,26 +42,73 @@ function importsBinding(file: string): boolean {
   return /(?:from\s+|import\s*\(?\s*)['"][^'"]*\/binding\/[^'"]*['"]/.test(source)
 }
 
-/** Runtime-only relative imports/re-exports. `import type` is deliberately absent: it erases from the
- *  browser bundle, which is exactly the boundary this graph checks. */
-function valueImportsOf(file: string): string[] {
+/** Every runtime module specifier in one TypeScript source file: static imports, side-effect imports,
+ *  re-exports, and dynamic imports. The compiler AST distinguishes erased type-only clauses from value
+ *  edges; a regex that only understood `from` was the false-green this gate exists to prevent. */
+function runtimeImportSpecifiersOf(file: string): string[] {
   const source = readFileSync(file, 'utf8')
-  const imports = source.matchAll(
-    /(?:^|\n)\s*(?!import\s+type\b)(?:import(?:[^'\"]*?\sfrom\s+|\s*)|export\s+(?!type\b)[^'\"]*?\sfrom\s+)['\"](\.[^'\"]+)['\"]/g,
-  )
-  return [...imports].map((match) => resolve(dirname(file), match[1]!.replace(/\.js$/, '.ts')))
+  const tree = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
+  const specifiers: string[] = []
+
+  for (const statement of tree.statements) {
+    if (ts.isImportDeclaration(statement) && importDeclarationIsRuntime(statement)) {
+      if (ts.isStringLiteralLike(statement.moduleSpecifier)) specifiers.push(statement.moduleSpecifier.text)
+    }
+    if (ts.isExportDeclaration(statement) && exportDeclarationIsRuntime(statement)) {
+      if (statement.moduleSpecifier && ts.isStringLiteralLike(statement.moduleSpecifier))
+        specifiers.push(statement.moduleSpecifier.text)
+    }
+  }
+
+  const visitDynamicImports = (node: ts.Node): void => {
+    if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword) {
+      const argument = node.arguments[0]
+      // A computed runtime edge cannot be proven browser-safe, so make it an explicit forbidden
+      // specifier rather than silently omitting it from the graph.
+      specifiers.push(argument && ts.isStringLiteralLike(argument) ? argument.text : '<computed dynamic import>')
+    }
+    ts.forEachChild(node, visitDynamicImports)
+  }
+  ts.forEachChild(tree, visitDynamicImports)
+  return specifiers
 }
 
-function valueImportClosure(entry: string): string[] {
+function importDeclarationIsRuntime(node: ts.ImportDeclaration): boolean {
+  const clause = node.importClause
+  if (!clause) return true // side-effect import
+  if (clause.isTypeOnly) return false
+  if (clause.name) return true // default value import
+  const bindings = clause.namedBindings
+  if (!bindings || ts.isNamespaceImport(bindings)) return true
+  return bindings.elements.length === 0 || bindings.elements.some((element) => !element.isTypeOnly)
+}
+
+function exportDeclarationIsRuntime(node: ts.ExportDeclaration): boolean {
+  if (node.isTypeOnly) return false
+  const clause = node.exportClause
+  if (!clause || ts.isNamespaceExport(clause)) return true
+  return clause.elements.length === 0 || clause.elements.some((element) => !element.isTypeOnly)
+}
+
+function valueImportGraph(entry: string): { files: string[]; bare: string[] } {
   const seen = new Set<string>()
+  const bare = new Set<string>()
   const visit = (file: string): void => {
     if (seen.has(file)) return
     seen.add(file)
-    for (const imported of valueImportsOf(file)) visit(imported)
+    for (const specifier of runtimeImportSpecifiersOf(file)) {
+      if (specifier.startsWith('.')) visit(resolve(dirname(file), specifier.replace(/\.js$/, '.ts')))
+      else bare.add(specifier)
+    }
   }
   visit(entry)
-  return [...seen].map((file) => relative(srcDir, file).replace(/\\/g, '/')).sort()
+  return {
+    files: [...seen].map((file) => relative(srcDir, file).replace(/\\/g, '/')).sort(),
+    bare: [...bare].sort(),
+  }
 }
+
+const browserRuntimePackageAllowlist = new Set(['@tanstack/query-core', 'telefunc/client'])
 
 describe('import-graph boundary', () => {
   it('ir/ + compile/ + graph/ + router/ import zero drizzle-orm (the ORM-agnostic engine)', () => {
@@ -90,13 +138,19 @@ describe('import-graph boundary', () => {
   })
 
   it('the tanstack-query entry pulls only its browser-safe runtime graph', () => {
-    expect(valueImportClosure(resolve(srcDir, 'tanstack-query/index.ts'))).toEqual([
+    expect(valueImportGraph(resolve(srcDir, 'tanstack-query/index.ts')).files).toEqual([
       'primitive/taps.ts',
       'primitive/wireClient.ts',
       'primitive/wireConstants.ts',
       'tanstack-query/index.ts',
       'tanstack-query/live.ts',
     ])
+  })
+
+  it('the tanstack-query runtime graph imports only explicitly browser-safe bare packages', () => {
+    const { bare } = valueImportGraph(resolve(srcDir, 'tanstack-query/index.ts'))
+    expect(bare.filter((specifier) => !browserRuntimePackageAllowlist.has(specifier))).toEqual([])
+    expect(bare).toEqual(['@tanstack/query-core', 'telefunc/client']) // proves the classifier sees allowed imports too
   })
 })
 

@@ -216,17 +216,20 @@ function tableObjectsOf(builder: unknown): Table[] {
   return tables
 }
 
-/** The first non-false row-level-security status across referenced relations. `true` and `'unknown'`
- *  remain distinct here; the stateful graph later makes the shared born-coarse decision. `tables` carries ROUTING identities, so each is
- *  decoded back to the schema/name pair the catalog probe addresses: a schema-qualified relation is
- *  probed in ITS schema rather than assumed to live in `public`. */
+/** Aggregate row-level-security status across referenced relations. Known true dominates unknown;
+ *  unknown survives only when no relation is known true. The stateful graph later makes the shared
+ *  born-coarse decision. `tables` carries ROUTING identities, so each is decoded back to the schema/name
+ *  pair the catalog probe addresses: a schema-qualified relation is probed in ITS schema rather than
+ *  assumed to live in `public`. */
 async function rlsStatusOf(db: object, tables: string[]): Promise<RlsStatus> {
+  let sawUnknown = false
   for (const id of tables) {
     const { name, schema } = parseRelationId(id)
     const status = await rlsEnabledOf(db, name, schema ? { schema } : undefined)
-    if (status !== false) return status
+    if (status === true) return true
+    if (status === 'unknown') sawUnknown = true
   }
-  return false
+  return sawUnknown ? 'unknown' : false
 }
 
 /** A drizzle query builder, distinguished from a plain method return (metadata, `toSQL()` result). */
