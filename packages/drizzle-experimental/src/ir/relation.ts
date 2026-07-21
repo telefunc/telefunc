@@ -31,7 +31,7 @@
 
 export { relationIdOf, parseRelationId, describeRelationId }
 
-import { frame } from '../utils/canonical.js'
+import { frame } from './canonical.js'
 
 /** What an identity is computed from — the drizzle-free projection of a TableRef. */
 type RelationName = { name: string; schema?: string }

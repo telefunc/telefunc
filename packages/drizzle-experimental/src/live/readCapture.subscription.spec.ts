@@ -51,7 +51,7 @@ vi.mock('../extract/columns.js', () => ({ schemaFingerprint: () => 'fp', primary
 vi.mock('../extract/identity.js', () => ({ identityOf: () => ({ planKey: 'pk', instanceKey: 'ik' }) }))
 vi.mock('../binding/hydrationExecutor.js', () => ({ hydrationExecutorOf: () => async () => [] }))
 vi.mock('../binding/drizzleShape.js', () => ({ selectConfigOf: () => null }))
-vi.mock('../compile/compile.js', () => ({ compileQuery: () => ({}), coarsePlan: () => ({}) }))
+vi.mock('../engine/compile/compile.js', () => ({ compileQuery: () => ({}), coarsePlan: () => ({}) }))
 
 /** The Live the engine mints — `attachSource` is captured so a test can drive serialize-time activation
  *  and the channel close that follows it. Stands in for the package's own `LiveCell`; before the boundary

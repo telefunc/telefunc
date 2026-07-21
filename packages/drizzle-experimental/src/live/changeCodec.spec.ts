@@ -9,9 +9,9 @@ import { drizzle } from 'drizzle-orm/pglite'
 import { describe, expect, it, vi } from 'vitest'
 import { CHANGE_CODEC_VERSION, type ChangeEnvelope, decodeChangePayload, encodeChangePayload } from './changeCodec.js'
 import { hydrationExecutorOf } from '../binding/hydrationExecutor.js'
-import { compileQuery } from '../compile/compile.js'
+import { compileQuery } from '../engine/compile/compile.js'
 import { extractQueryShape } from '../extract/queryShape.js'
-import { createRegistry } from '../graph/registry.js'
+import { createRegistry } from '../engine/graph/registry.js'
 import type { TableChange } from '../router/events.js'
 
 const roundTrip = (changes: TableChange[]): TableChange[] => {

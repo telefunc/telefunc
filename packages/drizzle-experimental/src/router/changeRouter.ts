@@ -10,7 +10,7 @@
 
 export { type RoutableGraph, type Router, createRouter }
 
-import type { ApplyOutcome } from '../graph/liveGraph.js'
+import type { ApplyOutcome } from '../engine/graph/liveGraph.js'
 import { report } from '../live/captureReport.js'
 import { describeRelationId, parseRelationId } from '../ir/relation.js'
 import type { ChangeBatch, TableChange } from './events.js'

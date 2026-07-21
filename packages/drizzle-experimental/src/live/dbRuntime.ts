@@ -1,6 +1,6 @@
 export { registryFor, ingestWrite, ingestLocal, announceCoarse }
 
-import { type Registry, createRegistry } from '../graph/registry.js'
+import { type Registry, createRegistry } from '../engine/graph/registry.js'
 import type { ChangeBatch } from '../router/events.js'
 import { publishBatch, publishCoarseAll } from './changeRuntime.js'
 import { emitSafely } from './writeChanges.js'
