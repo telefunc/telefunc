@@ -19,21 +19,26 @@ import { getServerConfig } from '../../telefunc/dist/node/server/serverConfig.js
 
 // THE VERSION BOUNDARY, as executable checks rather than a number in package.json.
 //
-// This package registers its wire replacer at server BOOT through telefunc's auto-load seam: core scans
-// the project root's package.json for `@telefunc/*` dependencies whose manifest declares
-// `"telefunc": { "server": … }`, and injects that import into every transformed `.telefunc.*` module —
-// so the registration precedes the request-start config snapshot core's serializer reads. Both halves of
-// that seam (`config.extensions` + the scanner) shipped in telefunc 0.2.21 (commit 56573c1f, first
-// released in v0.2.21) — the floor this file enforces.
+// This package registers its wire replacer through telefunc's auto-load seam: core scans the project
+// root's package.json for `@telefunc/*` dependencies whose manifest declares `"telefunc": { "server": … }`
+// and injects that import AHEAD OF every transformed `.telefunc.*` module — so registration precedes
+// serialization for any SSR/preloaded request. It is NOT process-start eager: a DIRECT first request with
+// no prior server import snapshots its config before the module evaluates, and that one request misses
+// the replacer — the standing envelope of every `telefunc.server` extension on main (@telefunc/rxjs
+// included), ledgered as a core follow-up. Both halves of the seam (`config.extensions` + the scanner)
+// shipped in telefunc 0.2.21 (commit 56573c1f, first released in v0.2.21) — the floor this file enforces.
 //
-// THREE COMPLEMENTARY CHECKS, none substituting for another:
+// FOUR COMPLEMENTARY CHECKS, none substituting for another and none claiming more than it composes:
 //
 //  - the MANIFEST test proves the declared floor cannot drift below the release that carries the seam;
 //  - the DISCOVERY test proves core's REAL scanner finds this package's REAL manifest bytes;
-//  - the BOOT-ORDER test proves the entry's registration reaches a snapshot taken after boot — and its
-//    control proves a snapshot taken BEFORE the entry misses it, which is why boot-time registration is
-//    the supported path and a lazily-registering setup must rely on `reactiveDrizzle()`'s belt from the
-//    SECOND request on (core's request-side ordering is a ledgered core follow-up, not this package's).
+//  - the REGISTRATION-MECHANISM test proves importing the entry registers, and that a snapshot taken
+//    after the import serializes a Live (it imports the entry BY HAND — it does not compose the real
+//    scanner→transform→module-eval→request schedule, so it proves the mechanism, not end-to-end order);
+//  - the PINNED-RESIDUAL test asserts the CURRENT TRUTH that a snapshot from before any server import
+//    misses the replacer. If registration ever becomes genuinely process-start eager (a core fix, an
+//    eager entry), this case goes RED — deliberately, so the claims above get rewritten rather than
+//    silently overclaiming.
 
 /** The release that first carries telefunc's extension seam AND the auto-load scanner (both in 56573c1f). */
 const REQUIRED_TELEFUNC_MINIMUM = [0, 2, 21] as const
@@ -127,6 +132,10 @@ describe('telefunc compatibility — the auto-load seam, driven end to end', () 
   const root = mkdtempSync(join(tmpdir(), 'tf-autoload-'))
   afterAll(() => rmSync(root, { recursive: true, force: true }))
 
+  // Captured BEFORE anything in this file imports the entry — the module-eval schedule a DIRECT first
+  // request sees (its per-request `getServerConfig()` runs before loadTelefuncFiles evaluates modules).
+  const snapshotBeforeAnyServerImport = getServerConfig().extensionResponseTypes
+
   it('core’s REAL scanner discovers this package’s REAL manifest and emits the server import', () => {
     writeFileSync(
       join(root, 'package.json'),
@@ -141,18 +150,13 @@ describe('telefunc compatibility — the auto-load seam, driven end to end', () 
     expect(getExtensionImports(root, 'client')).toEqual([])
   })
 
-  it('the entry’s boot-time registration reaches a snapshot taken afterwards — and the serializer replaces', async () => {
-    // The ordering the auto-load seam guarantees, reproduced with the REAL pieces: a snapshot taken
-    // BEFORE the entry evaluates (core's per-request `getServerConfig()`), the entry import (what the
-    // injected `import '@telefunc/drizzle-experimental/telefunc-server'` evaluates at boot), and a
-    // snapshot taken AFTER — the one a request arriving after boot resolves.
-    const before = getServerConfig().extensionResponseTypes
+  it('REGISTRATION MECHANISM: importing the entry registers, and a later snapshot serializes the Live', async () => {
+    // The entry is imported BY HAND here — this composes import→snapshot→serialize, NOT the real
+    // scanner→transform→module-eval→request schedule, so it proves the registration mechanism and the
+    // post-registration snapshot semantics, nothing more. What a request scheduled BEFORE the import
+    // sees is the pinned-residual case below.
     await import('./telefunc-server.js') // the real entry, side effect only
     const after = getServerConfig().extensionResponseTypes
-    // The CONTROL that makes the ordering claim falsifiable: core's serializer reads the request-start
-    // snapshot, so a snapshot from before boot-time registration MISSES the replacer. This is exactly why
-    // the entry must run at boot, and what a lazily-registering setup's first request would see.
-    expect(before.some((replacer) => replacer.prefix === '!TelefuncLive:')).toBe(false)
     expect(after.some((replacer) => replacer.prefix === '!TelefuncLive:')).toBe(true)
 
     const live = new LiveCell([{ id: 1, text: 'a' }])
@@ -177,6 +181,37 @@ describe('telefunc compatibility — the auto-load seam, driven end to end', () 
     const body = (result as { body: string }).body
     expect(body).toContain('!TelefuncLive:') // replaced through the snapshot a post-boot request carries
     expect(body).toContain('channelId')
+  })
+
+  it('PINNED RESIDUAL (current truth): a snapshot from before any server import misses the replacer', () => {
+    // The direct-first-request schedule, measured: `getServerConfig()` ran at module scope above, before
+    // this file imported the entry — exactly a request whose config resolves before loadTelefuncFiles
+    // evaluates the injected import. Core's serializer reads that snapshot, so the Live serializes as a
+    // plain object, silently. The standing envelope of every telefunc.server extension on main; the core
+    // snapshot-ordering fix is the ledgered follow-up. IF THIS CASE GOES RED, registration has become
+    // genuinely process-start eager — rewrite the package's ordering claims (package.json,
+    // telefunc-server.ts, wireServer.ts) alongside flipping this to a positive assertion.
+    expect(snapshotBeforeAnyServerImport.some((replacer) => replacer.prefix === '!TelefuncLive:')).toBe(false)
+    const live = new LiveCell([{ id: 1, text: 'a' }])
+    const result = serializeTelefunctionResult({
+      telefunctionReturn: live,
+      telefunctionName: 'onGetTodos',
+      telefuncFilePath: '/app/Todos.telefunc.ts',
+      telefunctionAborted: false,
+      context: {} as never,
+      requestContext: {
+        responseAbort: { abort: () => {}, onAbort: () => {} },
+        trackPending: () => () => {},
+        markComplete: () => {},
+        abortSignal: new AbortController().signal,
+      } as never,
+      abortSignal: new AbortController().signal,
+      streamTransport: 'INLINE' as never,
+      useNodeStream: false,
+      serverConfig: { extensionResponseTypes: snapshotBeforeAnyServerImport, log: { shieldErrors: {} as never } },
+    })
+    const body = (result as { body: string }).body
+    expect(body).not.toContain('!TelefuncLive:') // unreplaced — the residual, pinned rather than papered over
   })
 
   it('CONTROL: a value this package does not brand is left alone — the check above can fail', () => {

@@ -39,7 +39,7 @@
     "@brillout/json-serializer": "^0.5.25",
     "@tanstack/db-ivm": "0.1.18"
   },
-  "// telefunc peer floor": "Requires telefunc's extension seam (config.extensions + responseTypes) AND the auto-load scanner that discovers the telefunc.server field above — both shipped in the extension-system commit first released in v0.2.21. Registration happens at server boot through that scanner (like @telefunc/rxjs), which is what makes it precede every request's config snapshot; reactiveDrizzle() keeps an idempotent late registration for setups the root-scanning discovery cannot see. Enforced by src/compat.spec.ts (floor grammar fail-closed; scanner + boot-order driven against built core dist).",
+  "// telefunc peer floor": "Requires telefunc's extension seam (config.extensions + responseTypes) AND the auto-load scanner that discovers the telefunc.server field above — both shipped in the extension-system commit first released in v0.2.21. The scanner injects the entry ahead of every transformed telefunc module (like @telefunc/rxjs), so registration precedes serialization for any SSR/preloaded request; a DIRECT first request with no prior server import races the config snapshot — the standing envelope of every telefunc.server extension on main, ledgered as a core follow-up. reactiveDrizzle() keeps an idempotent late registration for setups the root-scanning discovery cannot see. Enforced by src/compat.spec.ts (floor grammar fail-closed; scanner, registration mechanism, and the pinned residual driven against built core dist).",
   "peerDependencies": {
     "@tanstack/query-core": ">=5.66.0",
     "drizzle-orm": "1.0.0-rc.4",
