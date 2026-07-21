@@ -7,13 +7,7 @@
 // GATED: skips cleanly without TELEFUNC_TEST_REAL_REDIS (never fake green).
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import {
-  bytes,
-  cellsOf,
-  nextId,
-  openRoom,
-  text,
-} from '../../../telefunc/wire-protocol/backend/conformance/scenario.js'
+import { bytes, cellsOf, nextId, openRoom, text } from '../../../telefunc/wire-protocol/backend/conformance/scenario.js'
 import { revKey } from './layout.js'
 import { createRedisFixture, type RedisBackendFixture } from './fixture.js'
 
@@ -55,9 +49,9 @@ describe.skipIf(url === undefined || url === '')('Redis stable-read — forced c
     fx.setStableReadProbe(async () => {
       if (fired++ > 0) return
       const rev = await currentRev()
-      expect(await fx.backend.compareExchangeCells(roomId, inc, rev, [{ key: 'member/bob', set: { bytes: bytes('B') } }])).toBe(
-        'committed',
-      )
+      expect(
+        await fx.backend.compareExchangeCells(roomId, inc, rev, [{ key: 'member/bob', set: { bytes: bytes('B') } }]),
+      ).toBe('committed')
     })
 
     const read = cellsOf(await fx.backend.readCells(roomId, inc, { prefix: 'member/' }))
@@ -120,7 +114,9 @@ describe.skipIf(url === undefined || url === '')('Redis stable-read — forced c
     fx.setStableReadProbe(async () => {
       await fx.redis.incr(revKey(fx.prefix, roomId, inc))
     })
-    await expect(fx.backend.readCells(roomId, inc, { prefix: 'member/' })).rejects.toThrow(/stable read did not converge/)
+    await expect(fx.backend.readCells(roomId, inc, { prefix: 'member/' })).rejects.toThrow(
+      /stable read did not converge/,
+    )
     fx.setStableReadProbe(null)
   })
 })

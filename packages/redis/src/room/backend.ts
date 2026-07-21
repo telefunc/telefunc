@@ -28,7 +28,11 @@ import type {
   RoomBackendSpi,
   RoomHead,
 } from '../../../telefunc/wire-protocol/backend/spi.js'
-import { MAX_CLOSE_LEASE_MS, MIN_CLOSE_LEASE_MS, ROOM_SPI_VERSION } from '../../../telefunc/wire-protocol/backend/spi.js'
+import {
+  MAX_CLOSE_LEASE_MS,
+  MIN_CLOSE_LEASE_MS,
+  ROOM_SPI_VERSION,
+} from '../../../telefunc/wire-protocol/backend/spi.js'
 import {
   cellKey,
   cellKeyPrefix,
@@ -149,7 +153,8 @@ function encodeCx(cx: HeadCx): string {
   if (cx.expect === 'absent') return JSON.stringify({ form: 'absent' })
   const expect = cx.expect
   if ('closingLeaseExpired' in expect) return JSON.stringify({ form: 'takeover', rev: expect.rev })
-  if ('closingLease' in expect) return JSON.stringify({ form: 'finalize', rev: expect.rev, closingLease: expect.closingLease })
+  if ('closingLease' in expect)
+    return JSON.stringify({ form: 'finalize', rev: expect.rev, closingLease: expect.closingLease })
   return JSON.stringify({ form: 'generic', rev: expect.rev })
 }
 
@@ -202,7 +207,10 @@ class RedisLaneSubscription implements LaneSubscription {
   }
 
   establish(): void {
-    this.#transition('ready')
+    // `ready` represents the first establishment itself. `onStateChange` is reserved for
+    // subsequent renewal loss / re-establishment transitions, so the initial ready edge is not
+    // emitted (the memory reference has the same observable behavior).
+    this.#state = 'ready'
     this.#settle.resolve()
   }
 
@@ -309,7 +317,7 @@ export class RedisRoomBackend implements RoomBackendSpi {
     // silent PX expiry does NOT bump rev and is hidden by the logical expiresAt filter instead.
     for (let attempt = 0; attempt < STABLE_READ_ATTEMPTS; attempt++) {
       const [headRaw, revBefore] = await this.#publisher.mget(hKey, rKey)
-      const head = this.#liveHead(headRaw)
+      const head = this.#liveHead(headRaw ?? null)
       // Reads need only generation existence — available while 'closing' (the closer's tail needs them).
       if (head === null || (head.inc ?? null) !== inc) return { staleInc: true }
       const logicalKeys = 'keys' in sel ? sel.keys : await this.#scanCellKeys(roomId, inc, sel.prefix)
@@ -334,7 +342,12 @@ export class RedisRoomBackend implements RoomBackendSpi {
     throw new Error(`readCells: stable read did not converge in ${STABLE_READ_ATTEMPTS} attempts (room '${roomId}')`)
   }
 
-  async compareExchangeCells(roomId: string, inc: string, revision: string, mutations: CellMutation[]): Promise<CxResult> {
+  async compareExchangeCells(
+    roomId: string,
+    inc: string,
+    revision: string,
+    mutations: CellMutation[],
+  ): Promise<CxResult> {
     this.#assertLive()
     const keys: string[] = [headKey(this.#prefix, roomId), revKey(this.#prefix, roomId, inc)]
     const argv: Array<string | Buffer> = [this.#nowArg(), inc, revision]
@@ -343,7 +356,11 @@ export class RedisRoomBackend implements RoomBackendSpi {
       if (mutation.set === undefined) {
         argv.push('del', '', '')
       } else {
-        argv.push('set', mutation.set.ttlMs === undefined ? '' : String(mutation.set.ttlMs), toBuffer(mutation.set.bytes))
+        argv.push(
+          'set',
+          mutation.set.ttlMs === undefined ? '' : String(mutation.set.ttlMs),
+          toBuffer(mutation.set.bytes),
+        )
       }
     }
     const reply = (await callDefinedCommand(this.#publisher, CELLS_CX_CMD, [
@@ -381,7 +398,9 @@ export class RedisRoomBackend implements RoomBackendSpi {
       opts?.orderTtlMs === undefined ? '' : String(opts.orderTtlMs),
       toBuffer(payload),
     ])) as string
-    const parsed = JSON.parse(reply) as { stale: true } | { accepted: true; seq: number; timestamp: number; receivers: number }
+    const parsed = JSON.parse(reply) as
+      | { stale: true }
+      | { accepted: true; seq: number; timestamp: number; receivers: number }
     if ('stale' in parsed) return { stale: true }
     // The PUBLISH inside the atomic record IS the broker handoff, and the broker's per-connection FIFO
     // is what orders the attempt (receivers = the PUBLISH count). `delivery` then flushes local dispatch:
@@ -456,7 +475,8 @@ export class RedisRoomBackend implements RoomBackendSpi {
   subscribeLane(roomId: string, inc: string, lane: LaneId, receiver: LaneReceiver): LaneSubscription {
     this.#assertLive()
     const channel = channelKey(this.#prefix, roomId, inc, laneKey(lane))
-    const sub = new RedisLaneSubscription(receiver, () => this.#detach(sub, inc, channel))
+    let sub: RedisLaneSubscription
+    sub = new RedisLaneSubscription(receiver, () => this.#detach(sub, inc, channel))
     this.#track(this.#incSubs, inc, sub)
     void this.#establish(sub, roomId, inc, channel)
     return sub

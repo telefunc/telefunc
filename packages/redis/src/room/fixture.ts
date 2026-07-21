@@ -13,7 +13,7 @@
 //       cxAppliesSynchronously=false — which OBLIGATES concurrentHeadCxBarrier (the suite throws without
 //       it) and the barrier-forced I13(c) variant in the Redis-specific spec.
 
-import Redis from 'ioredis'
+import { Redis } from 'ioredis'
 import type {
   BackendFixture,
   BackendHarness,
@@ -80,7 +80,11 @@ export async function createRedisFixture(
 
   // Pre-cache the scripts so a head-CX race never pays a one-off NOSCRIPT round-trip that could perturb
   // the FIFO ordering the barrier relies on.
-  await Promise.all([redis.script('LOAD', HEAD_CX_LUA), redis.script('LOAD', CELLS_CX_LUA), redis.script('LOAD', COMMIT_LUA)])
+  await Promise.all([
+    redis.script('LOAD', HEAD_CX_LUA),
+    redis.script('LOAD', CELLS_CX_LUA),
+    redis.script('LOAD', COMMIT_LUA),
+  ])
 
   return {
     backend,

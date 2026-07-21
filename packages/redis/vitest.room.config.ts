@@ -17,10 +17,7 @@ const repoRoot = fileURLToPath(new URL('../../', import.meta.url))
 export default defineConfig({
   test: {
     root: repoRoot,
-    include: [
-      'packages/telefunc/wire-protocol/backend/conformance/*.spec.ts',
-      'packages/redis/src/room/*.spec.ts',
-    ],
+    include: ['packages/telefunc/wire-protocol/backend/conformance/*.spec.ts', 'packages/redis/src/room/*.spec.ts'],
     setupFiles: ['packages/redis/src/room/register.ts'],
     // One shared Redis: run files sequentially so connection churn and key namespaces stay predictable.
     fileParallelism: false,
