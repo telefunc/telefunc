@@ -1,6 +1,8 @@
 export { derived, LiveCell }
 export type { Live, LiveSubscription }
 
+import { addTap } from './taps.js'
+
 // Internal brand shared with the wire replacer without adding detection to the public Live surface.
 const LIVE_BRAND = Symbol.for('telefunc.Live')
 
@@ -185,17 +187,5 @@ class LiveCell<T> {
       this.pendingInvalidate = false
       for (const tap of [...this.invalidateTaps]) tap()
     }
-  }
-}
-
-/** Register a tap and return an idempotent unsubscribe that removes exactly one registration. */
-function addTap<F>(taps: Array<F>, callback: F): () => void {
-  taps.push(callback)
-  let removed = false
-  return () => {
-    if (removed) return
-    removed = true
-    const index = taps.indexOf(callback)
-    if (index >= 0) taps.splice(index, 1)
   }
 }

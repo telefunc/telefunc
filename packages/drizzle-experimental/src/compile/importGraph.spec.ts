@@ -41,6 +41,27 @@ function importsBinding(file: string): boolean {
   return /(?:from\s+|import\s*\(?\s*)['"][^'"]*\/binding\/[^'"]*['"]/.test(source)
 }
 
+/** Runtime-only relative imports/re-exports. `import type` is deliberately absent: it erases from the
+ *  browser bundle, which is exactly the boundary this graph checks. */
+function valueImportsOf(file: string): string[] {
+  const source = readFileSync(file, 'utf8')
+  const imports = source.matchAll(
+    /(?:^|\n)\s*(?!import\s+type\b)(?:import(?:[^'\"]*?\sfrom\s+|\s*)|export\s+(?!type\b)[^'\"]*?\sfrom\s+)['\"](\.[^'\"]+)['\"]/g,
+  )
+  return [...imports].map((match) => resolve(dirname(file), match[1]!.replace(/\.js$/, '.ts')))
+}
+
+function valueImportClosure(entry: string): string[] {
+  const seen = new Set<string>()
+  const visit = (file: string): void => {
+    if (seen.has(file)) return
+    seen.add(file)
+    for (const imported of valueImportsOf(file)) visit(imported)
+  }
+  visit(entry)
+  return [...seen].map((file) => relative(srcDir, file).replace(/\\/g, '/')).sort()
+}
+
 describe('import-graph boundary', () => {
   it('ir/ + compile/ + graph/ + router/ import zero drizzle-orm (the ORM-agnostic engine)', () => {
     const offenders = productionFiles()
@@ -66,6 +87,16 @@ describe('import-graph boundary', () => {
       .filter((file) => /(?:from\s+|import\s*\(?\s*)['"][^'"]*\.testKit\.js['"]/.test(readFileSync(file, 'utf8')))
       .map((file) => relative(srcDir, file))
     expect(offenders).toEqual([])
+  })
+
+  it('the tanstack-query entry pulls only its browser-safe runtime graph', () => {
+    expect(valueImportClosure(resolve(srcDir, 'tanstack-query/index.ts'))).toEqual([
+      'primitive/taps.ts',
+      'primitive/wireClient.ts',
+      'primitive/wireConstants.ts',
+      'tanstack-query/index.ts',
+      'tanstack-query/live.ts',
+    ])
   })
 })
 

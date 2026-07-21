@@ -3,6 +3,7 @@ export { installLiveReviver, liveReviver }
 import { config } from 'telefunc/client'
 import type { ClientReviverContext, ReviverType, TypeContract } from 'telefunc/client'
 import type { Live, LiveSubscription } from './live.js'
+import { addTap } from './taps.js'
 import { SERIALIZER_PREFIX_LIVE } from './wireConstants.js'
 
 // THE CLIENT HALF OF THE WIRE, registered through telefunc's PUBLIC client extension seam
@@ -60,18 +61,6 @@ function createClientLive<T>(data: T, channel: RevivedChannel): ClientLiveHandle
     close() {
       return channel.close().then(() => undefined)
     },
-  }
-}
-
-/** Register a tap and return an idempotent unsubscribe that removes exactly one registration. */
-function addTap<F>(taps: Array<F>, callback: F): () => void {
-  taps.push(callback)
-  let removed = false
-  return () => {
-    if (removed) return
-    removed = true
-    const index = taps.indexOf(callback)
-    if (index >= 0) taps.splice(index, 1)
   }
 }
 
