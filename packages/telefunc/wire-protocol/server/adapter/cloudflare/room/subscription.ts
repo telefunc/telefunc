@@ -50,6 +50,8 @@ export class CloudflareLaneSubscription implements LaneSubscription {
   #settleCurrentReady!: { resolve: () => void; reject: (error: unknown) => void }
   #currentReadySettled = false
   #validation: Promise<void> | null = null
+  #operationEpoch = 0
+  readonly #inFlight = new Set<Promise<void>>()
 
   constructor(operations: CloudflareLaneSubscriptionOperations, options: CloudflareLaneSubscriptionOptions = {}) {
     this.#operations = operations
@@ -66,7 +68,7 @@ export class CloudflareLaneSubscription implements LaneSubscription {
 
   start(): void {
     if (this.#state !== 'establishing' || this.#readySettled) return
-    void this.#attemptInitial(0)
+    void this.#track(this.#attemptInitial(0))
   }
 
   state(): ReadinessState {
@@ -93,7 +95,7 @@ export class CloudflareLaneSubscription implements LaneSubscription {
   ensureCurrentReady(): Promise<void> {
     if (this.#state !== 'ready' || this.#operations.validate === undefined) return this.currentReady()
     if (this.#validation !== null) return this.#validation
-    this.#validation = this.#validateCurrentRoute().finally(() => {
+    this.#validation = this.#track(this.#validateCurrentRoute()).finally(() => {
       this.#validation = null
     })
     return this.#validation
@@ -102,29 +104,32 @@ export class CloudflareLaneSubscription implements LaneSubscription {
   async unsubscribe(): Promise<void> {
     if (this.#state === 'closed') return
     this.#cancelTimer()
-    try {
-      await this.#operations.unsubscribe()
-    } finally {
-      // Detach is local-first and terminal even when the transport cannot remove the durable route.
-      // The guarded route then becomes unreachable locally and dies by lease expiry.
-      this.#close(new Error('subscription unsubscribed'))
-    }
+    ++this.#operationEpoch
+    // Closing is synchronous and invalidates every late validation/renewal completion before teardown
+    // awaits. Wait for already-issued operations to settle, then unsubscribe the final lease epoch.
+    this.#close(new Error('subscription unsubscribed'))
+    await Promise.allSettled([...this.#inFlight])
+    // Local closure above remains terminal when this remote teardown rejects.
+    await this.#operations.unsubscribe()
   }
 
   generationDropped(): void {
     this.#cancelTimer()
+    ++this.#operationEpoch
     this.#close(new Error('subscription generation dropped'))
   }
 
   backendDisposed(): void {
     this.#cancelTimer()
+    ++this.#operationEpoch
     this.#close(new Error('subscription backend disposed'))
   }
 
   async #attemptInitial(attempt: number): Promise<void> {
     if (this.#state === 'closed') return
+    const epoch = this.#operationEpoch
     const result = await this.#establishSafely()
-    if (this.#isClosed()) return
+    if (this.#isClosed() || this.#operationEpoch !== epoch) return
     if (result.ready) {
       if (!this.#readySettled) {
         this.#readySettled = true
@@ -160,19 +165,20 @@ export class CloudflareLaneSubscription implements LaneSubscription {
   #scheduleRenewal(): void {
     if (this.#state !== 'ready') return
     this.#cancelTimer()
-    this.#cancelScheduled = this.#scheduler.schedule(ROUTE_RENEW_EVERY_MS, () => this.#renew())
+    this.#cancelScheduled = this.#scheduler.schedule(ROUTE_RENEW_EVERY_MS, () => this.#track(this.#renew()))
   }
 
   async #renew(): Promise<void> {
     this.#cancelScheduled = null
     if (this.#state !== 'ready') return
+    const epoch = this.#operationEpoch
     let outcome: { renewed: boolean; terminal: boolean; reason?: string } = { renewed: false, terminal: false }
     try {
       outcome = normalizeRouteResult(await this.#operations.renew())
     } catch {
       // Transport failure is a renewal failure and participates in the same K=2 transition.
     }
-    if (this.#state !== 'ready') return
+    if (this.#state !== 'ready' || this.#operationEpoch !== epoch) return
     if (outcome.terminal) {
       this.#cancelTimer()
       this.#close(new Error(outcome.reason ?? 'subscription generation invalidated'))
@@ -194,8 +200,9 @@ export class CloudflareLaneSubscription implements LaneSubscription {
 
   async #attemptReestablish(attempt: number): Promise<void> {
     if (this.#state !== 'lost') return
+    const epoch = this.#operationEpoch
     const result = await this.#establishSafely()
-    if (this.#state !== 'lost') return
+    if (this.#state !== 'lost' || this.#operationEpoch !== epoch) return
     if (result.ready) {
       this.#renewalFailures = 0
       this.#transition('ready')
@@ -223,7 +230,7 @@ export class CloudflareLaneSubscription implements LaneSubscription {
     const exponential = SUBSCRIPTION_RETRY_BASE_MS * 2 ** attempt
     const jittered = Math.round(exponential * (0.5 + this.#jitter()))
     const delay = Math.max(0, Math.min(SUBSCRIPTION_RETRY_MAX_MS, jittered))
-    this.#cancelScheduled = this.#scheduler.schedule(delay, task)
+    this.#cancelScheduled = this.#scheduler.schedule(delay, () => this.#track(task()))
   }
 
   #cancelTimer(): void {
@@ -265,16 +272,17 @@ export class CloudflareLaneSubscription implements LaneSubscription {
   }
 
   async #validateCurrentRoute(): Promise<void> {
+    const epoch = this.#operationEpoch
     let outcome: { renewed: boolean; terminal: boolean; reason?: string }
     try {
       outcome = normalizeRouteResult(await this.#operations.validate!())
     } catch {
       outcome = { renewed: false, terminal: false }
     }
-    if (this.#state !== 'ready') return this.currentReady()
+    if (this.#state !== 'ready' || this.#operationEpoch !== epoch) return
     if (outcome.terminal) {
       this.#close(new Error(outcome.reason ?? 'subscription generation invalidated'))
-      return this.currentReady()
+      return
     }
     if (!outcome.renewed) {
       this.#transition('lost')
@@ -301,6 +309,12 @@ export class CloudflareLaneSubscription implements LaneSubscription {
     if (this.#currentReadySettled) return
     this.#currentReadySettled = true
     this.#settleCurrentReady.reject(error)
+  }
+
+  #track(operation: Promise<void>): Promise<void> {
+    this.#inFlight.add(operation)
+    void operation.finally(() => this.#inFlight.delete(operation)).catch(() => {})
+    return operation
   }
 }
 

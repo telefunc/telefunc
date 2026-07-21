@@ -15,8 +15,8 @@ import { Fanout, type RouteTarget } from './fanout.js'
 import { assertRetainedCapacity, deleteRetained, installRetained, listRetained, readRetained } from './retained.js'
 import {
   deleteRoute,
+  listExpiredRouteInstallations,
   listRouteInstallations,
-  pruneExpiredRoutes,
   recordRouteDeliveryFailure,
   recordRouteDeliverySuccess,
   renewRoute,
@@ -90,6 +90,7 @@ export type RetainedWire = { payloadB64: string; seq: number; timestamp: number 
 export type RegisterWire =
   | { ok: true; expiresAt: number; generationToken: string }
   | { rejected: true; reason: string; terminal?: boolean }
+export type GenerationWire = { ok: true; generationToken: string } | { rejected: true; reason: string; terminal: true }
 export type DropWire = { droppedSubscribers: Array<[string, string]> } | { error: string }
 
 type SubscriberStub = {
@@ -298,6 +299,19 @@ export class TelefuncRoomDurableObject extends DurableObject {
 
   // ── routes / readiness ──
 
+  async captureRouteGeneration(inc: string): Promise<GenerationWire> {
+    let generationToken: string | null = null
+    this.ctx.storage.transactionSync(() => {
+      const head = readLiveHead(this.#sql, authorityNow())
+      if (head?.currentInc === inc && head.state === 'open') {
+        generationToken = readGenerationToken(this.#sql, inc)
+      }
+    })
+    return generationToken === null
+      ? { rejected: true, reason: `room has no open incarnation '${inc}'`, terminal: true }
+      : { ok: true, generationToken }
+  }
+
   async registerRoute(
     roomId: string,
     inc: string,
@@ -305,7 +319,7 @@ export class TelefuncRoomDurableObject extends DurableObject {
     subscriber: string,
     leaseId: string,
     bucket: string | null,
-    expectedGenerationToken: string | null = null,
+    expectedGenerationToken: string,
   ): Promise<RegisterWire> {
     // Probe the actual representative subscriber DO through the same no-op delivery RPC used by fanout.
     // Stubs are derived from names and never persisted. The open-head check and UPSERT then share one SQL
@@ -322,7 +336,7 @@ export class TelefuncRoomDurableObject extends DurableObject {
     if (observedGenerationToken === null) {
       return { rejected: true, reason: `room has no open incarnation '${inc}'`, terminal: true }
     }
-    if (expectedGenerationToken !== null && expectedGenerationToken !== observedGenerationToken) {
+    if (expectedGenerationToken !== observedGenerationToken) {
       return { rejected: true, reason: `generation '${inc}' was invalidated`, terminal: true }
     }
     try {
@@ -376,10 +390,15 @@ export class TelefuncRoomDurableObject extends DurableObject {
       result = renewRoute(this.#sql, inc, laneKey, subscriber, leaseId, now)
     })
     if (generationInvalid) return { ok: false, terminal: true }
-    return result.ok ? { ok: true, expiresAt: result.expiresAt } : { ok: false }
+    return result.ok ? { ok: true, expiresAt: result.expiresAt } : { ok: false, terminal: true }
   }
 
   async unsubscribeRoute(inc: string, laneKey: string, subscriber: string, leaseId: string): Promise<void> {
+    const installation = listRouteInstallations(this.#sql, inc).find(
+      (entry) => entry.laneKey === laneKey && entry.subscriber === subscriber && entry.leaseId === leaseId,
+    )
+    if (installation === undefined) return
+    await this.#invalidateInstallation(installation)
     this.ctx.storage.transactionSync(() => deleteRoute(this.#sql, inc, laneKey, subscriber, leaseId))
   }
 
@@ -445,48 +464,62 @@ export class TelefuncRoomDurableObject extends DurableObject {
 
   async #runSweep(now: number): Promise<number> {
     let orphanIncs: string[] = []
-    let invalidations: RouteInstallation[] = []
     this.ctx.storage.transactionSync(() => {
       this.#sql.exec('DELETE FROM cell WHERE expires_at IS NOT NULL AND expires_at <= ?', now)
       this.#sql.exec('DELETE FROM ord WHERE expires_at IS NOT NULL AND expires_at <= ?', now)
       const currentInc = readLiveHead(this.#sql, now)?.currentInc ?? null
       orphanIncs = observeAndListGraceAgedOrphans(this.#sql, currentInc, now, GEN_ORPHAN_GRACE_MS)
-      invalidations = orphanIncs.flatMap((inc) => listRouteInstallations(this.#sql, inc))
-    })
-
-    // Keep every orphan generation and route row as a durable retry source until its fallible subscriber
-    // uninstalls have completed. If this throws, a later alarm/janitor run sees the same records again.
-    await this.#invalidateInstallations(invalidations)
-
-    let prunedRoutes = 0
-    this.ctx.storage.transactionSync(() => {
-      for (const inc of orphanIncs) dropGenerationRows(this.#sql, inc)
-      prunedRoutes = pruneExpiredRoutes(this.#sql, now)
       // A lapsed tombstone is reclaimed through the delete path (this backend has no native head TTL).
       this.#sql.exec(
         "DELETE FROM head WHERE id = 1 AND state = 'closed' AND expires_at IS NOT NULL AND expires_at <= ?",
         now,
       )
     })
-    for (const inc of orphanIncs) this.#fanout.clearIncarnation(inc)
+
+    // Each orphan is an independent retry unit. One failed subscriber cannot block another orphan or
+    // unrelated expiry/tombstone hygiene; its own generation and route rows remain durable for retry.
+    const failedOrphans = new Set<string>()
+    for (const inc of orphanIncs) {
+      const installations = listRouteInstallations(this.#sql, inc)
+      const outcomes = await Promise.allSettled(installations.map((entry) => this.#invalidateInstallation(entry)))
+      if (outcomes.some((outcome) => outcome.status === 'rejected')) {
+        failedOrphans.add(inc)
+        continue
+      }
+      this.ctx.storage.transactionSync(() => dropGenerationRows(this.#sql, inc))
+      this.#fanout.clearIncarnation(inc)
+    }
+
+    let prunedRoutes = 0
+    for (const installation of listExpiredRouteInstallations(this.#sql, now)) {
+      if (failedOrphans.has(installation.inc)) continue
+      try {
+        await this.#invalidateInstallation(installation)
+      } catch {
+        // Preserve this exact route row as the next sweep's retry source.
+        continue
+      }
+      this.ctx.storage.transactionSync(() => {
+        deleteRoute(this.#sql, installation.inc, installation.laneKey, installation.subscriber, installation.leaseId)
+      })
+      prunedRoutes += 1
+    }
     return prunedRoutes
   }
 
   async #invalidateInstallations(installations: RouteInstallation[]): Promise<void> {
+    await Promise.all(installations.map((installation) => this.#invalidateInstallation(installation)))
+  }
+
+  async #invalidateInstallation(installation: RouteInstallation): Promise<void> {
     const namespace = (this.env as RoomEnv).TELEFUNC_ROOM_SUBSCRIBER
-    await Promise.all(
-      installations.map((installation) => {
-        const identity: SubscriberRouteIdentity = {
-          roomId: installation.roomId,
-          inc: installation.inc,
-          laneKey: installation.laneKey,
-          subscriber: installation.subscriber,
-        }
-        return namespace
-          .get(namespace.idFromName(installation.subscriber))
-          .uninstallRoute(identity, installation.leaseId)
-      }),
-    )
+    const identity: SubscriberRouteIdentity = {
+      roomId: installation.roomId,
+      inc: installation.inc,
+      laneKey: installation.laneKey,
+      subscriber: installation.subscriber,
+    }
+    await namespace.get(namespace.idFromName(installation.subscriber)).uninstallRoute(identity, installation.leaseId)
   }
 
   async #armAlarm(): Promise<void> {

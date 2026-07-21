@@ -62,6 +62,23 @@ export function listRouteInstallations(sql: SqlStorage, inc: string): RouteInsta
     }))
 }
 
+export function listExpiredRouteInstallations(sql: SqlStorage, now: number): RouteInstallation[] {
+  return sql
+    .exec<{ room_id: string; inc: string; lane_key: string; subscriber: string; lease_id: string }>(
+      'SELECT room_id, inc, lane_key, subscriber, lease_id FROM route WHERE expires_at <= ? OR failures >= ?',
+      now,
+      ROUTE_DELIVERY_FAILURE_LIMIT,
+    )
+    .toArray()
+    .map((row) => ({
+      roomId: row.room_id,
+      inc: row.inc,
+      laneKey: row.lane_key,
+      subscriber: row.subscriber,
+      leaseId: row.lease_id,
+    }))
+}
+
 // Renewal compares all four fields (inc, lane_key, subscriber, leaseId); a stale lease id matches nothing
 // and the renewal is lost.
 export function renewRoute(
@@ -75,12 +92,14 @@ export function renewRoute(
 ): { ok: true; expiresAt: number } | { ok: false } {
   const expiresAt = now + ttlMs
   const changed = sql.exec(
-    'UPDATE route SET expires_at = ? WHERE inc = ? AND lane_key = ? AND subscriber = ? AND lease_id = ?',
+    'UPDATE route SET expires_at = ? WHERE inc = ? AND lane_key = ? AND subscriber = ? AND lease_id = ? AND expires_at > ? AND failures < ?',
     expiresAt,
     inc,
     laneKey,
     subscriber,
     leaseId,
+    now,
+    ROUTE_DELIVERY_FAILURE_LIMIT,
   ).rowsWritten
   return changed === 1 ? { ok: true, expiresAt } : { ok: false }
 }
@@ -101,10 +120,11 @@ export function deleteRoute(sql: SqlStorage, inc: string, laneKey: string, subsc
 export function snapshotRoutes(sql: SqlStorage, inc: string, laneKey: string, now: number): RouteTarget[] {
   return sql
     .exec<{ subscriber: string; lease_id: string }>(
-      'SELECT subscriber, lease_id FROM route WHERE inc = ? AND lane_key = ? AND expires_at > ?',
+      'SELECT subscriber, lease_id FROM route WHERE inc = ? AND lane_key = ? AND expires_at > ? AND failures < ?',
       inc,
       laneKey,
       now,
+      ROUTE_DELIVERY_FAILURE_LIMIT,
     )
     .toArray()
     .map((row) => ({ subscriber: row.subscriber, leaseId: row.lease_id }))
@@ -112,7 +132,7 @@ export function snapshotRoutes(sql: SqlStorage, inc: string, laneKey: string, no
 
 // Delivery outcomes are guarded by the snapshotted lease. A late failure from a replaced lease cannot
 // increment or evict its successor. Success resets the consecutive-failure count; the third matching
-// failure removes the route before the next acceptance snapshot.
+// failure makes the row non-live but retains it as the durable exact-lease invalidation source.
 export function recordRouteDeliverySuccess(
   sql: SqlStorage,
   inc: string,
@@ -155,7 +175,13 @@ export function recordRouteDeliveryFailure(
     )
     .toArray()[0]?.failures
   if (failures === undefined || failures < limit) return { matched: true, evicted: false }
-  deleteRoute(sql, inc, laneKey, subscriber, leaseId)
+  sql.exec(
+    'UPDATE route SET expires_at = 0 WHERE inc = ? AND lane_key = ? AND subscriber = ? AND lease_id = ?',
+    inc,
+    laneKey,
+    subscriber,
+    leaseId,
+  )
   return { matched: true, evicted: true }
 }
 
@@ -164,11 +190,12 @@ export function routeExists(sql: SqlStorage, inc: string, laneKey: string, subsc
   return (
     sql
       .exec(
-        'SELECT 1 FROM route WHERE inc = ? AND lane_key = ? AND subscriber = ? AND expires_at > ? LIMIT 1',
+        'SELECT 1 FROM route WHERE inc = ? AND lane_key = ? AND subscriber = ? AND expires_at > ? AND failures < ? LIMIT 1',
         inc,
         laneKey,
         subscriber,
         now,
+        ROUTE_DELIVERY_FAILURE_LIMIT,
       )
       .toArray().length > 0
   )

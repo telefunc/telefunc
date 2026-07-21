@@ -25,6 +25,7 @@ import type {
   CellsWire,
   CommitWire,
   DropWire,
+  GenerationWire,
   HeadCxWire,
   HeadNextWire,
   HeadWire,
@@ -69,6 +70,7 @@ type RoomStub = {
   readRetained(inc: string, lane: LaneId): Promise<RetainedWire | null>
   listRetained(inc: string): Promise<LaneId[]>
   deleteRetainedLane(inc: string, lane?: LaneId): Promise<void>
+  captureRouteGeneration(inc: string): Promise<GenerationWire>
   registerRoute(
     roomId: string,
     inc: string,
@@ -76,7 +78,7 @@ type RoomStub = {
     subscriber: string,
     leaseId: string,
     bucket: string | null,
-    expectedGenerationToken?: string | null,
+    expectedGenerationToken: string,
   ): Promise<RegisterWire>
   renewRoute(
     inc: string,
@@ -581,24 +583,46 @@ class CloudflareRoomBackend implements RoomBackendSpi {
 
     let leaseId = crypto.randomUUID()
     let generationToken: string | null = null
-    const register = async (): Promise<RegisterWire> => {
-      await clockPush
-      return this.#stub(roomId).registerRoute(roomId, inc, laneKey, subscriber, leaseId, null, generationToken)
-    }
     let mux!: CloudflareLaneSubscriptionMultiplexer
     const sharedSubscription = new CloudflareLaneSubscription(
       {
         establish: async () => {
-          leaseId = crypto.randomUUID()
+          await clockPush
+          let captured: GenerationWire
+          try {
+            captured = await this.#stub(roomId).captureRouteGeneration(inc)
+          } catch (error) {
+            return {
+              ready: false,
+              retryable: generationToken !== null,
+              reason: (error as Error).message,
+            }
+          }
+          if ('rejected' in captured) {
+            return { ready: false, retryable: false, reason: captured.reason }
+          }
+          if (generationToken === null) generationToken = captured.generationToken
+          if (generationToken !== captured.generationToken) {
+            return { ready: false, retryable: false, reason: `generation '${inc}' was invalidated` }
+          }
+          const attemptLeaseId = crypto.randomUUID()
+          leaseId = attemptLeaseId
           // The subscriber isolate installs its local mux identity BEFORE any room RPC.
-          await this.#subscriberStub(subscriber).installRoute(identity, leaseId)
+          await this.#subscriberStub(subscriber).installRoute(identity, attemptLeaseId)
           if (this.#forcedEstablishmentFailures > 0) {
             this.#forcedEstablishmentFailures -= 1
             throw new Error('forced establishment transport failure')
           }
-          const result = await register()
+          const result = await this.#stub(roomId).registerRoute(
+            roomId,
+            inc,
+            laneKey,
+            subscriber,
+            attemptLeaseId,
+            null,
+            generationToken,
+          )
           if ('ok' in result) {
-            generationToken = result.generationToken
             return { ready: true }
           }
           return {
@@ -608,12 +632,20 @@ class CloudflareRoomBackend implements RoomBackendSpi {
           }
         },
         renew: async () => {
+          const renewalLeaseId = leaseId
+          const renewalGenerationToken = generationToken
           await clockPush
           if (this.#forcedRenewalFailures > 0) {
             this.#forcedRenewalFailures -= 1
             return false
           }
-          const result = await this.#stub(roomId).renewRoute(inc, laneKey, subscriber, leaseId, generationToken)
+          const result = await this.#stub(roomId).renewRoute(
+            inc,
+            laneKey,
+            subscriber,
+            renewalLeaseId,
+            renewalGenerationToken,
+          )
           return {
             renewed: result.ok,
             terminal: result.terminal,
@@ -621,8 +653,16 @@ class CloudflareRoomBackend implements RoomBackendSpi {
           }
         },
         validate: async () => {
+          const validationLeaseId = leaseId
+          const validationGenerationToken = generationToken
           await clockPush
-          const result = await this.#stub(roomId).renewRoute(inc, laneKey, subscriber, leaseId, generationToken)
+          const result = await this.#stub(roomId).renewRoute(
+            inc,
+            laneKey,
+            subscriber,
+            validationLeaseId,
+            validationGenerationToken,
+          )
           return {
             renewed: result.ok,
             terminal: result.terminal,
@@ -630,24 +670,26 @@ class CloudflareRoomBackend implements RoomBackendSpi {
           }
         },
         unsubscribe: async () => {
+          const retiringLeaseId = leaseId
           await clockPush
           let failure: unknown
           try {
-            await this.#stub(roomId).unsubscribeRoute(inc, laneKey, subscriber, leaseId)
+            await this.#stub(roomId).unsubscribeRoute(inc, laneKey, subscriber, retiringLeaseId)
           } catch (error) {
             failure = error
           }
           try {
-            await this.#subscriberStub(subscriber).uninstallRoute(identity, leaseId)
+            await this.#subscriberStub(subscriber).uninstallRoute(identity, retiringLeaseId)
           } catch (error) {
             failure ??= error
           }
           if (failure !== undefined) throw failure
         },
         closed: () => {
+          const closedLeaseId = leaseId
           mux.lifecycleClosed(new Error('shared subscription lifecycle closed'))
           void this.#subscriberStub(subscriber)
-            .uninstallRoute(identity, leaseId)
+            .uninstallRoute(identity, closedLeaseId)
             .catch(() => {})
         },
       },

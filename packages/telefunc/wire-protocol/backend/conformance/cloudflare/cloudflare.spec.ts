@@ -12,7 +12,7 @@
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { laneKey as laneKeyOf } from '../../../server/adapter/cloudflare/room/codec.js'
-import type { CommitWire } from '../../../server/adapter/cloudflare/room/do.js'
+import type { CommitWire, RegisterWire } from '../../../server/adapter/cloudflare/room/do.js'
 import { Fanout } from '../../../server/adapter/cloudflare/room/fanout.js'
 import { ROUTE_RENEW_EVERY_MS, ROUTE_TTL_MS } from '../../../server/adapter/cloudflare/room/routes.js'
 import {
@@ -71,6 +71,19 @@ function acceptedCommit(wire: CommitWire): {
   return wire
 }
 
+async function registerRoute(
+  stub: RoomStub,
+  roomId: string,
+  inc: string,
+  laneKey: string,
+  subscriber: string,
+  leaseId: string,
+): Promise<RegisterWire> {
+  const captured = await stub.captureRouteGeneration(inc)
+  if ('rejected' in captured) return captured
+  return stub.registerRoute(roomId, inc, laneKey, subscriber, leaseId, null, captured.generationToken)
+}
+
 async function waitUntil(predicate: () => Promise<boolean>, timeoutMs: number = 2_000): Promise<void> {
   const deadline = Date.now() + timeoutMs
   while (!(await predicate())) {
@@ -106,7 +119,7 @@ describe('cloudflare — CF-specific mechanics', () => {
       const lk = laneKeyOf(SEMANTIC)
       const subscriber = 'subscriber-do-missing'
 
-      const registration = await stub.registerRoute(roomId, inc, lk, subscriber, 'lease-missing', null)
+      const registration = await registerRoute(stub, roomId, inc, lk, subscriber, 'lease-missing')
       expect(registration).toEqual({ rejected: true, reason: `subscriber '${subscriber}' is not addressable` })
       expect(acceptedCommit(await stub.commitLane(roomId, inc, SEMANTIC, bytes('no-target'))).receivers).toBe(0)
     })
@@ -120,7 +133,7 @@ describe('cloudflare — CF-specific mechanics', () => {
       await holdReceiverProbes(subscriber)
 
       const beforeProbe = fx.authorityNow()
-      const pending = stub.registerRoute(roomId, inc, laneKey, subscriber, leaseId, null)
+      const pending = registerRoute(stub, roomId, inc, laneKey, subscriber, leaseId)
       await waitForReceiverProbe(subscriber)
       fx.advanceAuthority(10_000)
       await flushCloudflareAuthorityClock()
@@ -141,7 +154,7 @@ describe('cloudflare — CF-specific mechanics', () => {
       await installReceiver(roomId, inc, laneKey, subscriber, leaseId, () => {})
       await holdReceiverProbes(subscriber)
 
-      const pending = stub.registerRoute(roomId, inc, laneKey, subscriber, leaseId, null)
+      const pending = registerRoute(stub, roomId, inc, laneKey, subscriber, leaseId)
       await waitForReceiverProbe(subscriber)
       const head = await readHeadOrThrow(fx.backend, roomId)
       const { head: closing, leaseId: closeLease } = await enterClosing(fx.backend, roomId, head)
@@ -228,6 +241,49 @@ describe('cloudflare — CF-specific mechanics', () => {
       expect(sharedStates).toEqual(['closed'])
     })
 
+    it('fences last-detach against a held validation before it can install a replacement lease', async () => {
+      const validationEntered = deferred()
+      const releaseValidation = deferred()
+      let establishCalls = 0
+      let remoteLease: string | null = null
+      const unsubscribed: string[] = []
+      const shared = new CloudflareLaneSubscription({
+        establish: async () => {
+          establishCalls += 1
+          remoteLease = `lease-${establishCalls}`
+          return { ready: true }
+        },
+        renew: async () => true,
+        validate: async () => {
+          validationEntered.resolve()
+          await releaseValidation.promise
+          return false
+        },
+        unsubscribe: async () => {
+          if (remoteLease !== null) unsubscribed.push(remoteLease)
+          remoteLease = null
+        },
+      })
+      const mux = new CloudflareLaneSubscriptionMultiplexer(shared, () => {})
+      const first = mux.attach(() => {})
+      shared.start()
+      await first.ready
+
+      const late = mux.attach(() => {})
+      await validationEntered.promise
+      await first.unsubscribe()
+      const finalDetach = late.unsubscribe()
+      await flush()
+      releaseValidation.resolve()
+      await finalDetach
+
+      expect(establishCalls).toBe(1)
+      expect(unsubscribed).toEqual(['lease-1'])
+      expect(remoteLease).toBeNull()
+      expect(shared.state()).toBe('closed')
+      expect(late.state()).toBe('closed')
+    })
+
     it('re-establishment replaces the lease in one row: the acceptance snapshot has no duplicate target', async () => {
       const { roomId, inc, stub } = await openCfRoom()
       const lk = laneKeyOf(SEMANTIC)
@@ -235,11 +291,11 @@ describe('cloudflare — CF-specific mechanics', () => {
       const receiver = () => {}
       await installReceiver(roomId, inc, lk, subscriber, 'lease-A', receiver)
 
-      expect('ok' in (await stub.registerRoute(roomId, inc, lk, subscriber, 'lease-A', null))).toBe(true)
+      expect('ok' in (await registerRoute(stub, roomId, inc, lk, subscriber, 'lease-A'))).toBe(true)
       // renewal loss → re-establish with a NEW lease id: the UPSERT replaces the prior row for the same
       // (inc, lane, subscriber) rather than inserting a second one.
       await installReceiver(roomId, inc, lk, subscriber, 'lease-B', receiver)
-      expect('ok' in (await stub.registerRoute(roomId, inc, lk, subscriber, 'lease-B', null))).toBe(true)
+      expect('ok' in (await registerRoute(stub, roomId, inc, lk, subscriber, 'lease-B'))).toBe(true)
 
       const commit = acceptedCommit(await stub.commitLane(roomId, inc, SEMANTIC, bytes('K')))
       expect(commit.receivers).toBe(1)
@@ -262,10 +318,10 @@ describe('cloudflare — CF-specific mechanics', () => {
       await installReceiver(roomId, inc, lk, subscriber, 'lease-old', receiver)
 
       // establish; never advance the clock, so the old lease stays UNEXPIRED throughout
-      await stub.registerRoute(roomId, inc, lk, subscriber, 'lease-old', null)
+      await registerRoute(stub, roomId, inc, lk, subscriber, 'lease-old')
       // K consecutive renewal losses drive a re-establish with a fresh lease while the old is still live
       await installReceiver(roomId, inc, lk, subscriber, 'lease-new', receiver)
-      await stub.registerRoute(roomId, inc, lk, subscriber, 'lease-new', null)
+      await registerRoute(stub, roomId, inc, lk, subscriber, 'lease-new')
 
       const commit = acceptedCommit(await stub.commitLane(roomId, inc, SEMANTIC, bytes('once')))
       await stub.awaitDelivery(commit.deliveryToken)
@@ -312,6 +368,36 @@ describe('cloudflare — CF-specific mechanics', () => {
       await sub.unsubscribe()
     })
 
+    it('never lets a retryable tokenless establishment rebind across drop and exact incarnation reuse', async () => {
+      const { roomId, inc } = await openCfRoom()
+      const controls = cloudflareRenewalControls(fx.backend)
+      controls.forceEstablishmentFailures(1)
+      const seen: string[] = []
+      const stale = fx.backend.subscribeLane(roomId, inc, SEMANTIC, (payload) => seen.push(text(payload)))
+      expect(await settled(stale.ready)).toBe('rejected')
+      expect(stale.state()).toBe('establishing')
+
+      const head = await readHeadOrThrow(fx.backend, roomId)
+      const { head: closing, leaseId } = await enterClosing(fx.backend, roomId, head)
+      accepted(await fx.backend.commitLane(roomId, inc, CONTROL, bytes('closed'), { closingLease: leaseId }))
+      const tombstone = okHead(await finalizeClose(fx.backend, roomId, closing, leaseId))
+      await fx.backend.dropGeneration(roomId, inc)
+      okHead(
+        await fx.backend.compareExchangeHead(
+          roomId,
+          { expect: { rev: tombstone.rev } },
+          { head: { currentInc: inc, state: 'open', config: tombstone.config } },
+        ),
+      )
+
+      await controls.advance(250)
+      expect(stale.state()).toBe('closed')
+      const frame = accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, bytes('new-generation')))
+      expect(frame.receivers).toBe(0)
+      await frame.delivery
+      expect(seen).toEqual([])
+    })
+
     it('closes after five bounded re-establishment attempts following renewal loss', async () => {
       const { roomId, inc } = await openCfRoom()
       const sub = fx.backend.subscribeLane(roomId, inc, SEMANTIC, () => {})
@@ -334,9 +420,9 @@ describe('cloudflare — CF-specific mechanics', () => {
       const receiver = () => {}
       await installReceiver(roomId, inc, lk, subscriber, 'lease-old', receiver)
 
-      await stub.registerRoute(roomId, inc, lk, subscriber, 'lease-old', null)
+      await registerRoute(stub, roomId, inc, lk, subscriber, 'lease-old')
       await installReceiver(roomId, inc, lk, subscriber, 'lease-new', receiver)
-      await stub.registerRoute(roomId, inc, lk, subscriber, 'lease-new', null)
+      await registerRoute(stub, roomId, inc, lk, subscriber, 'lease-new')
 
       // a delayed unsubscribe carrying the superseded lease matches nothing (all four fields compared)
       await stub.unsubscribeRoute(inc, lk, subscriber, 'lease-old')
@@ -360,7 +446,7 @@ describe('cloudflare — CF-specific mechanics', () => {
         got.push(text(payload))
       }
       await installReceiver(roomId, inc, lk, subscriber, 'lease-1', receiver)
-      await stub.registerRoute(roomId, inc, lk, subscriber, 'lease-1', null)
+      await registerRoute(stub, roomId, inc, lk, subscriber, 'lease-1')
       await holdReceiverDeliveries(subscriber)
 
       // frame 1: accepted + retained (durable in SQL), then the subscriber isolate is EVICTED before the
@@ -394,7 +480,7 @@ describe('cloudflare — CF-specific mechanics', () => {
       const subscriber = 'subscriber-do-reused-inc'
       const seen: string[] = []
       await installReceiver(roomId, inc, laneKey, subscriber, 'lease-old', (payload) => seen.push(text(payload)))
-      await stub.registerRoute(roomId, inc, laneKey, subscriber, 'lease-old', null)
+      await registerRoute(stub, roomId, inc, laneKey, subscriber, 'lease-old')
       await holdReceiverDeliveries(subscriber)
       const oldAttempt = acceptedCommit(await stub.commitLane(roomId, inc, SEMANTIC, bytes('old-frame')))
       await waitForReceiverDelivery(subscriber)
@@ -414,7 +500,7 @@ describe('cloudflare — CF-specific mechanics', () => {
         ),
       )
       await installReceiver(roomId, inc, laneKey, subscriber, 'lease-new', (payload) => seen.push(text(payload)))
-      await stub.registerRoute(roomId, inc, laneKey, subscriber, 'lease-new', null)
+      await registerRoute(stub, roomId, inc, laneKey, subscriber, 'lease-new')
 
       await releaseReceiverDeliveries(subscriber)
       await stub.awaitDelivery(oldAttempt.deliveryToken)
@@ -422,6 +508,31 @@ describe('cloudflare — CF-specific mechanics', () => {
       await stub.awaitDelivery(fresh.deliveryToken)
       expect(seen).toEqual(['new-frame'])
       await evictReceiver(roomId, inc, laneKey, subscriber, 'lease-new')
+    })
+
+    it('fails closed when expiry prunes a route while its accepted delivery is held', async () => {
+      const { roomId, inc, stub } = await openCfRoom()
+      const laneKey = laneKeyOf(SEMANTIC)
+      const subscriber = 'subscriber-do-expired-held-delivery'
+      const leaseId = 'lease-expired-held-delivery'
+      const seen: string[] = []
+      await installReceiver(roomId, inc, laneKey, subscriber, leaseId, (payload) => seen.push(text(payload)))
+      await registerRoute(stub, roomId, inc, laneKey, subscriber, leaseId)
+      await holdReceiverDeliveries(subscriber)
+      const held = acceptedCommit(await stub.commitLane(roomId, inc, SEMANTIC, bytes('must-expire')))
+      await waitForReceiverDelivery(subscriber)
+
+      fx.advanceAuthority(ROUTE_TTL_MS)
+      await fx.backend.readHead(roomId)
+      expect(await stub.runJanitor()).toEqual({ prunedRoutes: 1 })
+      await releaseReceiverDeliveries(subscriber)
+      await stub.awaitDelivery(held.deliveryToken)
+
+      expect(seen).toEqual([])
+      const afterExpiry = acceptedCommit(await stub.commitLane(roomId, inc, SEMANTIC, bytes('after-expiry')))
+      expect(afterExpiry.receivers).toBe(0)
+      await stub.awaitDelivery(afterExpiry.deliveryToken)
+      await evictReceiver(roomId, inc, laneKey, subscriber, leaseId)
     })
   })
 
@@ -510,9 +621,9 @@ describe('cloudflare — CF-specific mechanics', () => {
       await installReceiver(second.roomId, second.inc, semantic, subscriber, 'lease-b-s', () =>
         seen.push('room-b-semantic'),
       )
-      await first.stub.registerRoute(first.roomId, first.inc, semantic, subscriber, 'lease-a-s', null)
-      await first.stub.registerRoute(first.roomId, first.inc, control, subscriber, 'lease-a-c', null)
-      await second.stub.registerRoute(second.roomId, second.inc, semantic, subscriber, 'lease-b-s', null)
+      await registerRoute(first.stub, first.roomId, first.inc, semantic, subscriber, 'lease-a-s')
+      await registerRoute(first.stub, first.roomId, first.inc, control, subscriber, 'lease-a-c')
+      await registerRoute(second.stub, second.roomId, second.inc, semantic, subscriber, 'lease-b-s')
 
       const aSemantic = acceptedCommit(
         await first.stub.commitLane(first.roomId, first.inc, SEMANTIC, bytes('a-semantic')),
@@ -549,7 +660,7 @@ describe('cloudflare — CF-specific mechanics', () => {
       expect(await settled(evicted.delivery)).toBe('resolved')
     })
 
-    it('makes a late mux attachment await re-establishment after K=3 authority eviction', async () => {
+    it('fails a late mux attachment closed when K=3 removed its exact route', async () => {
       const { roomId, inc } = await openCfRoom()
       let failuresRemaining = 3
       const firstSeen: string[] = []
@@ -567,27 +678,45 @@ describe('cloudflare — CF-specific mechanics', () => {
         expect(await settled(frame.delivery)).toBe('rejected')
       }
 
-      // Keep the first re-establishment attempt pending behind the production retry scheduler. A stale
-      // handout of the shared historical ready promise would resolve the late attachment immediately.
-      const controls = cloudflareRenewalControls(fx.backend)
-      controls.forceEstablishmentFailures(1)
       const late = fx.backend.subscribeLane(roomId, inc, SEMANTIC, (payload) => lateSeen.push(text(payload)))
-      let lateReady = false
-      void late.ready.then(() => {
-        lateReady = true
-      })
-      await waitUntil(async () => late.state() === 'lost')
-      expect(lateReady).toBe(false)
+      expect(await settled(late.ready)).toBe('rejected')
+      expect(first.state()).toBe('closed')
+      expect(late.state()).toBe('closed')
+      const absent = accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, bytes('absent')))
+      expect(absent.receivers).toBe(0)
+      await absent.delivery
 
-      await controls.advance(250)
-      await late.ready
+      // A new lifecycle may explicitly establish a fresh exact lease for the still-current generation.
+      const freshSubscription = fx.backend.subscribeLane(roomId, inc, SEMANTIC, (payload) =>
+        lateSeen.push(text(payload)),
+      )
+      await freshSubscription.ready
       const fresh = accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, bytes('fresh')))
       expect(fresh.receivers).toBe(1)
       await fresh.delivery
-      expect(firstSeen).toEqual(['fresh'])
+      expect(firstSeen).toEqual([])
       expect(lateSeen).toEqual(['fresh'])
-      await late.unsubscribe()
-      await first.unsubscribe()
+      await freshSubscription.unsubscribe()
+    })
+
+    it('lets explicit generation invalidation close a mux after K=3 eviction retained its route source', async () => {
+      const { roomId, inc } = await openCfRoom()
+      const sub = fx.backend.subscribeLane(roomId, inc, SEMANTIC, () => {
+        throw new Error('target failed')
+      })
+      await sub.ready
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        const frame = accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, bytes(`bad-${attempt}`)))
+        expect(await settled(frame.delivery)).toBe('rejected')
+      }
+
+      const head = await readHeadOrThrow(fx.backend, roomId)
+      const { head: closing, leaseId } = await enterClosing(fx.backend, roomId, head)
+      accepted(await fx.backend.commitLane(roomId, inc, CONTROL, bytes('closed'), { closingLease: leaseId }))
+      await finalizeClose(fx.backend, roomId, closing, leaseId)
+      await fx.backend.dropGeneration(roomId, inc)
+
+      expect(sub.state()).toBe('closed')
     })
 
     it('resets the consecutive counter after a successful target handoff', async () => {
@@ -621,7 +750,7 @@ describe('cloudflare — CF-specific mechanics', () => {
         throw new Error('old attempt failed')
       }
       await installReceiver(roomId, inc, laneKey, subscriber, 'lease-old', receiver)
-      await stub.registerRoute(roomId, inc, laneKey, subscriber, 'lease-old', null)
+      await registerRoute(stub, roomId, inc, laneKey, subscriber, 'lease-old')
       await holdReceiverDeliveries(subscriber)
       const oldAttempts = await Promise.all(
         [1, 2, 3].map(async (index) =>
@@ -629,7 +758,7 @@ describe('cloudflare — CF-specific mechanics', () => {
         ),
       )
       await installReceiver(roomId, inc, laneKey, subscriber, 'lease-current', receiver)
-      await stub.registerRoute(roomId, inc, laneKey, subscriber, 'lease-current', null)
+      await registerRoute(stub, roomId, inc, laneKey, subscriber, 'lease-current')
       // Re-install the snapshotted lease so the held old attempts genuinely fail at the callback; the
       // room's lease-guarded failure accounting must still leave the replacement route intact.
       await installReceiver(roomId, inc, laneKey, subscriber, 'lease-old', receiver)
@@ -674,7 +803,7 @@ describe('cloudflare — CF-specific mechanics', () => {
       const subscriber = 'subscriber-do-retryable-generation-drop'
       const leaseId = 'lease-retryable-drop'
       await installReceiver(roomId, inc, laneKey, subscriber, leaseId, () => {})
-      await stub.registerRoute(roomId, inc, laneKey, subscriber, leaseId, null)
+      await registerRoute(stub, roomId, inc, laneKey, subscriber, leaseId)
 
       const head = await readHeadOrThrow(fx.backend, roomId)
       const { head: closing, leaseId: closeLease } = await enterClosing(fx.backend, roomId, head)
@@ -690,6 +819,41 @@ describe('cloudflare — CF-specific mechanics', () => {
       expect(retried.droppedSubscribers).toEqual([[laneKey, subscriber]])
       expect(await stub.listGenerations()).not.toContain(inc)
       await evictReceiver(roomId, inc, laneKey, subscriber, leaseId)
+    })
+
+    it('isolates a failing orphan uninstall from unrelated route expiry and tombstone cleanup', async () => {
+      const roomId = nextId('cf-sweep-isolation-room')
+      const { inc: orphan, head: orphanHead } = await openRoom(fx.backend, roomId)
+      const stub = await cloudflareRoomStub(roomId)
+      const laneKey = laneKeyOf(SEMANTIC)
+      const orphanSubscriber = 'subscriber-do-failing-orphan'
+      const currentSubscriber = 'subscriber-do-unrelated-expiry'
+      await installReceiver(roomId, orphan, laneKey, orphanSubscriber, 'lease-orphan', () => {})
+      await registerRoute(stub, roomId, orphan, laneKey, orphanSubscriber, 'lease-orphan')
+
+      const { head: orphanClosing, leaseId: orphanLease } = await enterClosing(fx.backend, roomId, orphanHead)
+      accepted(await fx.backend.commitLane(roomId, orphan, CONTROL, bytes('closed'), { closingLease: orphanLease }))
+      const firstTombstone = okHead(await finalizeClose(fx.backend, roomId, orphanClosing, orphanLease))
+      const { inc: current, head: currentHead } = await openRoom(fx.backend, roomId, { prior: firstTombstone })
+      await installReceiver(roomId, current, laneKey, currentSubscriber, 'lease-current', () => {})
+      await registerRoute(stub, roomId, current, laneKey, currentSubscriber, 'lease-current')
+
+      await stub.runJanitor() // first observation of only `orphan`; `current` is still current here
+      const { head: currentClosing, leaseId: currentLease } = await enterClosing(fx.backend, roomId, currentHead)
+      accepted(await fx.backend.commitLane(roomId, current, CONTROL, bytes('closed'), { closingLease: currentLease }))
+      await finalizeClose(fx.backend, roomId, currentClosing, currentLease)
+
+      fx.advanceAuthority(ROUTE_TTL_MS)
+      await fx.backend.readHead(roomId)
+      await failReceiverUninstalls(orphanSubscriber, 1)
+      expect(await stub.runJanitor()).toEqual({ prunedRoutes: 1 })
+      expect(await fx.backend.readHead(roomId)).toBeNull()
+      expect((await stub.listGenerations()).sort()).toEqual([current, orphan].sort())
+
+      expect(await stub.runJanitor()).toEqual({ prunedRoutes: 0 })
+      expect(await stub.listGenerations()).toEqual([current])
+      await evictReceiver(roomId, orphan, laneKey, orphanSubscriber, 'lease-orphan')
+      await evictReceiver(roomId, current, laneKey, currentSubscriber, 'lease-current')
     })
 
     it('keeps an orphan for the full 60s grace, then deletes only that non-current generation', async () => {
@@ -724,7 +888,7 @@ describe('cloudflare — CF-specific mechanics', () => {
       const subscriber = 'subscriber-do-alarm-orphan'
       const seen: string[] = []
       await installReceiver(roomId, orphan, laneKey, subscriber, 'lease-orphan', (payload) => seen.push(text(payload)))
-      await stub.registerRoute(roomId, orphan, laneKey, subscriber, 'lease-orphan', null)
+      await registerRoute(stub, roomId, orphan, laneKey, subscriber, 'lease-orphan')
       await holdReceiverDeliveries(subscriber)
       const held = acceptedCommit(await stub.commitLane(roomId, orphan, SEMANTIC, bytes('must-discard')))
       await waitForReceiverDelivery(subscriber)
