@@ -3,7 +3,7 @@ export type { Reactive }
 
 import { type WriteContext, captureMutation, captureRawSql } from './writeCapture.js'
 import type { CaptureSink } from './writeChanges.js'
-import { announceCoarse, ingestLocal, ingestWrite } from './dbRuntime.js'
+import { announceCoarse, ingestWrite } from './dbRuntime.js'
 import { configureChangeRuntime } from './changeRuntime.js'
 import type { ChangeTransport } from './changeTransport.js'
 import { captureTransactions, isWriteOp } from './writeProxy.js'
@@ -89,8 +89,6 @@ function reactiveDrizzle<TDb extends ReactiveDatabase>(baseDb: TDb, options?: Re
   // Autocommit writes ingest into THIS db's graphs immediately; a transaction buffers and flushes here once.
   const ingest: CaptureSink = (changes) => ingestWrite(db, { changes })
   const autocommit = { sinkMode: 'autocommit', identityDb: db, sink: ingest } as const satisfies WriteContext
-  // A committed transaction that ran raw SQL flushes locally in one tick and announces its remote half once.
-  const localIngest: CaptureSink = (changes) => ingestLocal(db, { changes })
   return new Proxy(db, {
     get(target, prop, receiver) {
       if (prop === 'select') {
@@ -111,7 +109,7 @@ function reactiveDrizzle<TDb extends ReactiveDatabase>(baseDb: TDb, options?: Re
       if (prop === 'transaction') {
         // Writes INSIDE the transaction must capture too (a forwarded raw tx db would bypass capture) — and
         // buffer until the commit boundary, so one committed transaction is one atomic graph tick.
-        return captureTransactions(target, db, ingest, localIngest)
+        return captureTransactions(target, db)
       }
       if (isCoarseAllSurface(prop)) {
         // Raw SQL (`db.run(sql`…`)`, `db.execute(sql`…`)`, …) can mutate anything, and its touched tables are

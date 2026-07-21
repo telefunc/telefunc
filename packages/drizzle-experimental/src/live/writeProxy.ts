@@ -1,7 +1,7 @@
 export { isWriteOp, captureTransactions }
 
 import { report } from './captureReport.js'
-import { registryFor } from './dbRuntime.js'
+import { ingestLocal, ingestWrite, registryFor } from './dbRuntime.js'
 import { publishCoarseAll } from './changeRuntime.js'
 import { captureMutation, captureRawSql } from './writeCapture.js'
 import { isCoarseAllSurface } from './writeTerminals.js'
@@ -29,14 +29,12 @@ type TransactionScope = {
   /** The session capture PLANS against and keys the registry to — always the top db, never a tx handle.
    *  A tx db is not recognized as its own driver, and the graphs live on the db the reads acquired from. */
   topDb: object
-  /** Where a committed buffer flushes: the top db's graphs, or a parent tx's buffer for a savepoint. */
-  sink: CaptureSink
-  /** The SAME destination minus the remote publication. A transaction that ran raw SQL announces itself
-   *  remotely as ONE coarse-all — which reseeds every remotely-watched graph — so also publishing its batch
-   *  would make every remote watcher pay twice for one commit. The batch still flushes locally in one tick;
-   *  only the remote hop is dropped, because the coarse-all supersedes it. For a SAVEPOINT both sinks are
-   *  the parent's buffer, and the top level makes the choice once. */
-  localSink: CaptureSink
+  /** Where a committed buffer flushes, as ONE tick: the top db's graphs, or a parent tx's buffer for a
+   *  savepoint. `suppressRemote` is computed at commit — true when this commit's remote half is the single
+   *  coarse-all announcement (raw SQL ran), because also publishing the batch would make every remote
+   *  watcher pay twice for one commit. Only the remote hop is dropped; the local tick is identical. A
+   *  savepoint ignores the flag: it delivers into its parent's buffer, and the top level decides once. */
+  flush: (changes: TableChange[], suppressRemote: boolean) => void
   /** How a committed raw statement reaches other instances. At the top level it publishes; a savepoint
    *  promotes the intent into its parent instead.
    *
@@ -55,13 +53,13 @@ type TransactionScope = {
 }
 
 /** Capture every transaction opened on a reactive db. This is the whole seam the entry needs: hand it the
- *  host and the db's two sinks, and the top-level scope — including what a committed raw statement
- *  announces and which markers it owes — is constructed here rather than at the call site. */
-function captureTransactions(txHost: object, topDb: object, sink: CaptureSink, localSink: CaptureSink) {
+ *  host and the top db, and the top-level scope — where a committed buffer lands, what a committed raw
+ *  statement announces and which markers it owes — is constructed here rather than at the call site. */
+function captureTransactions(txHost: object, topDb: object) {
   return wrapTransaction(txHost, {
     topDb,
-    sink,
-    localSink,
+    flush: (changes, suppressRemote) =>
+      suppressRemote ? ingestLocal(topDb, { changes }) : ingestWrite(topDb, { changes }),
     announce: () => publishCoarseAll(topDb),
     commitCoarseMarkers: () =>
       registryFor(topDb)
@@ -108,12 +106,9 @@ function wrapTransaction(txHost: object, scope: TransactionScope) {
       // of an earlier moment: a graph registering between the raw statement and this commit would be absent
       // from them, unreachable by this local flush — and the remote coarse-all below is its own publisher's
       // echo, origin-suppressed locally — so it would NEVER hear about the committed rows.
-      if (announcePending) {
-        const merged = [...buffer, ...scope.commitCoarseMarkers()]
-        if (merged.length > 0) emitSafely(scope.localSink, merged)
-      } else if (buffer.length > 0) {
-        emitSafely(scope.sink, buffer)
-      }
+      const suppressRemote = announcePending // the coarse-all below is this commit's remote half
+      const merged = announcePending ? [...buffer, ...scope.commitCoarseMarkers()] : buffer
+      if (merged.length > 0) emitSafely((changes) => scope.flush(changes, suppressRemote), merged)
       // For a SAVEPOINT this promotes the intent into the parent's; at the top level it publishes.
       if (announcePending) {
         try {
@@ -127,15 +122,15 @@ function wrapTransaction(txHost: object, scope: TransactionScope) {
   }
 }
 
-/** A SAVEPOINT's scope: it flushes into the PARENT's buffer (both sinks are that one buffer), promotes its
- *  raw-SQL intent rather than publishing, owes no markers of its own — the top level computes those once —
- *  and stays on the ROOT's write queue, because a savepoint shares one physical connection with its parent
- *  and giving it a queue of its own lets the two interleave and destroy each other's savepoints. */
+/** A SAVEPOINT's scope: it flushes into the PARENT's buffer (the remote decision is the top level's to make
+ *  once, so the flag is ignored here), promotes its raw-SQL intent rather than publishing, owes no markers
+ *  of its own — the top level computes those once — and stays on the ROOT's write queue, because a
+ *  savepoint shares one physical connection with its parent and giving it a queue of its own lets the two
+ *  interleave and destroy each other's savepoints. */
 function savepointScope(topDb: object, parentBuffer: CaptureSink, promote: () => void, root: object): TransactionScope {
   return {
     topDb,
-    sink: parentBuffer,
-    localSink: parentBuffer,
+    flush: (changes) => parentBuffer(changes),
     announce: promote,
     commitCoarseMarkers: () => [],
     root,
