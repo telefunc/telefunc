@@ -31,17 +31,15 @@ function applyJoins(
   crossResidual: Predicate | undefined,
   dirty: DirtySink,
 ): JoinResult {
+  const plans = classifyJoins(shape)
+  if (!plans) return { kind: 'degrade' }
+
   let leftStream = streams.get(shape.from.alias)!
-  const leftAliases = new Set<string>([shape.from.alias])
   const residuals: Predicate[] = []
 
-  for (const join of shape.joins) {
+  for (const { join, equi, residual } of plans) {
     const rightStream = streams.get(join.table.alias)
     if (!rightStream) return { kind: 'degrade' }
-    const { equi, residual } = splitOn(join, leftAliases)
-    if (equi.length === 0) return { kind: 'degrade' } // no equi key → no cross product, dirty from both σ-inputs
-    const outer = join.type !== 'inner'
-    if (outer && residual) return { kind: 'degrade' } // outer + non-equi residual → residual-aware or degrade
 
     const leftKeys = equi.map((pair) => pair.left)
     const rightKeys = equi.map((pair) => pair.right)
@@ -52,7 +50,6 @@ function applyJoins(
       map(mergePair),
     )
     if (residual) residuals.push(residual)
-    leftAliases.add(join.table.alias)
   }
 
   if (crossResidual) residuals.push(crossResidual)
@@ -60,19 +57,40 @@ function applyJoins(
   return { kind: 'exact', stream }
 }
 
-/** Static check (before building a graph): can every join be an exact keyed join? False
- *  when any join is a cross join, has no equi key, or is an outer join with a non-equi ON
- *  residual (which a plain keyed-join-plus-filter would mishandle). */
+/** Static check (before building a graph): can every join be an exact keyed join? */
 function joinsExact(shape: SelectShape): boolean {
+  return classifyJoins(shape) !== undefined
+}
+
+/** One join, judged and decomposed: the equi-pairs it keys on and the non-equi ON residual left over. */
+type JoinPlan = { join: JoinShape; equi: EquiPair[]; residual?: Predicate }
+
+/** THE ONE PLACE A JOIN IS JUDGED EXACT-OR-NOT, and the reason both the static check and the builder can
+ *  be trusted to agree: they are the same walk. Encoded twice, they drifted in spelling (the static side
+ *  named `cross` explicitly, the builder let it fall out of an empty equi set) and a rule added to one
+ *  would silently not reach the other — a classifier that promises precision over a builder that degrades
+ *  is a missed invalidation, which is the one failure class here that is not a safe over-fire.
+ *
+ *  Left-deep, so each join is judged against the aliases folded in so far. `undefined` at the first join
+ *  that cannot be an exact keyed join: a cross join or any join with no equi key (no key, no keyed join —
+ *  the cross product would have to come from somewhere), or an OUTER join carrying a non-equi ON residual,
+ *  which a keyed-join-plus-filter would mishandle by dropping the null-extended rows the filter rejects. */
+function classifyJoins(shape: SelectShape): JoinPlan[] | undefined {
   const leftAliases = new Set<string>([shape.from.alias])
+  const plans: JoinPlan[] = []
   for (const join of shape.joins) {
-    if (join.type === 'cross') return false
+    // A CROSS join is rejected on its type, not left to fall out of an empty equi set. The two are the
+    // same for anything the extractor builds (drizzle's crossJoin takes no ON), but `JoinShape` permits
+    // a cross carrying one, and reading that as a join key would compile a cross product as an inner
+    // join — narrower than SQL, so a miss rather than an over-fire.
+    if (join.type === 'cross') return undefined
     const { equi, residual } = splitOn(join, leftAliases)
-    if (equi.length === 0) return false
-    if (join.type !== 'inner' && residual) return false
+    if (equi.length === 0) return undefined
+    if (join.type !== 'inner' && residual) return undefined
+    plans.push({ join, equi, residual })
     leftAliases.add(join.table.alias)
   }
-  return true
+  return plans
 }
 
 // ── Residual (non-equi ON + multi-input WHERE) ──────────────────────

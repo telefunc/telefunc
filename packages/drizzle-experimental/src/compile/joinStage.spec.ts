@@ -82,6 +82,18 @@ describe('joinStage — degradation to live coarse', () => {
     const plan = compileQuery(extractQueryShape(builder, { dialect: 'pg' }))
     expect(plan.coarse).toBe(true)
   })
+
+  it('an INNER join whose ON has NO equi conjunct at all degrades (no key to build a keyed join on)', () => {
+    // A non-cross join can still reach the empty-equi case — `innerJoin(teams, gt(...))` is a theta-join
+    // with no `=` pair. It degrades on the SAME rule a cross join does, and this is the case that reaches
+    // it past the `type === 'cross'` guard, so the classifier and the builder are both exercised here.
+    const builder = qb.select().from(users).innerJoin(teams, gt(teams.id, users.teamId))
+    const plan = compileQuery(extractQueryShape(builder, { dialect: 'pg' }))
+    expect(plan.coarse).toBe(true)
+    const graph = plan.instantiate()
+    expect(graph.apply([insUser({ id: 1, team_id: 5, name: 'a' })]).invalidated).toBe(true)
+    expect(graph.apply([insTeam({ id: 5, region: 'eu' })]).invalidated).toBe(true)
+  })
 })
 
 describe('joinStage — INNER equi-join with an exact non-equi residual', () => {

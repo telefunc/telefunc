@@ -202,14 +202,9 @@ function buildBranch(
   for (const table of subqueryInnerTables(trimmed)) if (!covered.has(table)) registerDirtyTable(registry, table)
 
   const joined = applyJoins(trimmed, streams, crossResidual, dirty)
-  if (joined.kind === 'degrade') {
-    // Tap EVERY stream built for this branch, not just the base inputs. The EXISTS inner roots were
-    // already created and registered above, so leaving them untapped strands them exactly like the
-    // set-op arms once were: fed on every change, observed by nothing. The audit catches this shape now,
-    // but the tap is what makes the degradation SOUND.
-    for (const stream of [...streams.values(), ...existsRoots]) dirty.tap(stream)
-    return undefined
-  }
+  // EVERY stream built for this branch, not just the base inputs: the EXISTS inner roots were created and
+  // registered above, so leaving them untapped strands them exactly like the set-op arms once were.
+  if (joined.kind === 'degrade') return degradeToDirty(dirty, [...streams.values(), ...existsRoots])
   const afterExists = applyExists(joined.stream, existsSpecs)
 
   // Aggregate output flows THROUGH the shared window → projection pipeline in SQL order —
@@ -263,23 +258,27 @@ function buildSetOps(
     if (stream) branches.push({ kind: op.type, stream })
     if (!stream || op.orderBy.length > 0 || op.limit !== undefined || op.offset !== undefined) degrade = true
   }
-  // A degraded MAIN must still fall through to `dirtyOnly`, not return early. Returning here left every
+  // A degraded MAIN must still fall through to the dirty tap, not return early. Returning here left every
   // successfully-built ARM untapped: its inputs were registered and fed, but nothing consumed the stream —
   // no output pipe (the caller only pipes a defined stream) and no dirty tap — so a change to an arm-only
   // table reported `invalidated: false` on a plan that was otherwise PRECISE. That is a missed
-  // invalidation, not a safe over-fire. `dirtyOnly` was already written for this case: its `main` parameter
-  // is optional and it guards with `if (main)`.
-  if (degrade || !main) return dirtyOnly(main, branches, dirty)
+  // invalidation, not a safe over-fire. Passing `main` through undefined-and-all is what covers it.
+  if (degrade || !main) return degradeToDirty(dirty, [main, ...branches.map((branch) => branch.stream)])
   const combined = applySetOps(main, branches, dirty)
   audit.link(combined ?? main, [main, ...branches.map((branch) => branch.stream)])
   return combined
 }
 
-/** A dirty-only fallback: tap the main branch and every built set-op branch so any change
- *  invalidates (a branch that degraded internally already tapped its own streams). */
-function dirtyOnly(main: IStreamBuilder<string> | undefined, branches: SetOpBranch[], dirty: DirtySink): undefined {
-  if (main) dirty.tap(main)
-  for (const branch of branches) dirty.tap(branch.stream)
+/** DEGRADE THIS BRANCH TO DIRTY-ONLY: tap every stream that was built for it, so any change reaching any
+ *  of them invalidates, and report "no exact stream" to the caller.
+ *
+ *  One function rather than three tap-everything blocks, because the rule they each implemented is one
+ *  rule and getting it wrong has one consequence: a stream that was BUILT, registered and fed but left
+ *  untapped is observed by nothing, and its table's changes report `invalidated: false` on an otherwise
+ *  precise plan. Both historical misses in this compiler were that shape. Streams may be `undefined` —
+ *  a branch that already degraded internally has no stream to tap and has tapped its own. */
+function degradeToDirty(dirty: DirtySink, streams: Iterable<IStreamBuilder<unknown> | undefined>): undefined {
+  for (const stream of streams) if (stream) dirty.tap(stream)
   return undefined
 }
 
