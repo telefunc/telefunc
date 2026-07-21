@@ -40,7 +40,8 @@ type TransactionScope = {
    *
    *  The REMOTE half only, unlike `announceCoarse` (dbRuntime) which owns both: a transaction's local
    *  coarsening cannot be its own tick, because it has to land atomically beside the captured rows this
-   *  commit is flushing — so `commitCoarseMarkers` + `localSink` carry it, and this carries the rest. */
+   *  commit is flushing — so `commitCoarseMarkers` + the remote-suppressed `flush` carry it, and this
+   *  carries the rest. */
   announce: () => void
   /** The coarse markers a committed raw statement owes THIS db's own graphs, computed AT COMMIT — the top
    *  level supplies the real thing; a savepoint supplies nothing and promotes intent, so the markers are
