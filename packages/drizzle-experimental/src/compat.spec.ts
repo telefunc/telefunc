@@ -125,7 +125,7 @@ describe('telefunc compatibility — the declared peer floor', () => {
     }
   })
 })
-describe('telefunc compatibility — the auto-load seam, driven end to end', () => {
+describe('telefunc compatibility — auto-load discovery, registration, and residual', () => {
   // A project root whose package.json depends on this package, with this package's REAL manifest bytes
   // resolvable from it — what core's scanner reads in a user's app. The fixture fakes the LAYOUT only;
   // the manifest content is byte-identical to ours, so a drifted `telefunc` field or specifier fails here.
@@ -179,7 +179,7 @@ describe('telefunc compatibility — the auto-load seam, driven end to end', () 
     })
     expect(result.type).toBe('text')
     const body = (result as { body: string }).body
-    expect(body).toContain('!TelefuncLive:') // replaced through the snapshot a post-boot request carries
+    expect(body).toContain('!TelefuncLive:') // replaced through the snapshot a post-registration request carries
     expect(body).toContain('channelId')
   })
 
