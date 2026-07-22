@@ -404,6 +404,67 @@ function directDataRecordMemberTarget(tokens: readonly LuaToken[]): { base: stri
   return { base: tokens[0].value, field: tokens[2].value }
 }
 
+type LuaExpressionAst =
+  | { kind: 'identifier'; path: readonly string[]; role: 'field-label' | 'reference' }
+  | { kind: 'group'; delimiter: '(' | '[' | '{'; children: readonly LuaExpressionAst[] }
+  | { kind: 'token'; token: LuaToken }
+
+function expressionAst(tokens: readonly LuaToken[], delimiter?: '(' | '[' | '{'): readonly LuaExpressionAst[] {
+  const nodes: LuaExpressionAst[] = []
+  let tableFieldStart = delimiter === '{'
+  for (let index = 0; index < tokens.length; index++) {
+    const token = tokens[index] as LuaToken
+    const close = OPEN.get(token.value)
+    if (close !== undefined) {
+      const end = groupClose(tokens, index, close)
+      nodes.push({
+        kind: 'group',
+        delimiter: token.value as '(' | '[' | '{',
+        children: expressionAst(tokens.slice(index + 1, end), token.value as '(' | '[' | '{'),
+      })
+      index = end
+      tableFieldStart = false
+      continue
+    }
+    if (token.kind === 'identifier') {
+      const path = [token.value]
+      let end = index + 1
+      while (tokens[end]?.value === '.' && tokens[end + 1]?.kind === 'identifier') {
+        path.push(tokens[end + 1]?.value as string)
+        end += 2
+      }
+      nodes.push({
+        kind: 'identifier',
+        path,
+        role: delimiter === '{' && tableFieldStart && tokens[end]?.value === '=' ? 'field-label' : 'reference',
+      })
+      index = end - 1
+      tableFieldStart = false
+      continue
+    }
+    nodes.push({ kind: 'token', token })
+    if (delimiter === '{' && (token.value === ',' || token.value === ';')) tableFieldStart = true
+    else if (delimiter === '{' && token.value !== '=') tableFieldStart = false
+  }
+  return nodes
+}
+
+function groupClose(tokens: readonly LuaToken[], start: number, expected: string): number {
+  const closers = [expected]
+  for (let index = start + 1; index < tokens.length; index++) {
+    const token = tokens[index] as LuaToken
+    const close = OPEN.get(token.value)
+    if (close !== undefined) closers.push(close)
+    else if (closers.at(-1) === token.value) {
+      closers.pop()
+      if (closers.length === 0) return index
+    } else if ([')', ']', '}'].includes(token.value)) {
+      throw new Error(`mismatched Lua expression delimiter '${token.value}', expected '${closers.at(-1)}'`)
+    }
+  }
+  throw new Error(`unterminated Lua expression group, expected '${expected}'`)
+}
+
 function referenceOf(tokens: readonly LuaToken[]): string | undefined {
   const expression = withoutOuterParens(tokens.filter((token) => token.kind !== 'newline'))
   if (expression.length % 2 === 0) return undefined
@@ -569,6 +630,95 @@ function assertEveryRedisKeyComesFromKeys(lua: string): void {
     }
   }
 
+  type PrivateRecordReference = {
+    fieldRead: boolean
+    value: boolean
+  }
+
+  function walkPrivateRecordReferences(
+    tokens: readonly LuaToken[],
+    aliases: ReadonlyMap<string, Provenance>,
+    exemptExactCjsonEncode: boolean,
+  ): Map<`data-record:${number}`, PrivateRecordReference> {
+    const references = new Map<`data-record:${number}`, PrivateRecordReference>()
+
+    function recordUse(identity: `data-record:${number}`, fieldRead: boolean): void {
+      const current = references.get(identity) ?? { fieldRead: false, value: false }
+      if (fieldRead) current.fieldRead = true
+      else current.value = true
+      references.set(identity, current)
+    }
+
+    function exactEncodedIdentity(
+      group: Extract<LuaExpressionAst, { kind: 'group' }>,
+    ): `data-record:${number}` | undefined {
+      if (group.children.length !== 1) return undefined
+      const argument = group.children[0]
+      if (argument?.kind !== 'identifier' || argument.role !== 'reference' || argument.path.length !== 1) {
+        return undefined
+      }
+      const source = aliases.get(argument.path[0] as string) ?? 'unknown'
+      return isDataRecord(source) ? source : undefined
+    }
+
+    function walk(nodes: readonly LuaExpressionAst[]): void {
+      for (let index = 0; index < nodes.length; index++) {
+        const node = nodes[index] as LuaExpressionAst
+        if (node.kind === 'identifier') {
+          if (node.role === 'field-label') continue
+          const next = nodes[index + 1]
+          if (
+            exemptExactCjsonEncode &&
+            node.path.join('.') === 'cjson.encode' &&
+            next?.kind === 'group' &&
+            next.delimiter === '(' &&
+            exactEncodedIdentity(next) !== undefined
+          ) {
+            index++
+            continue
+          }
+          const source = aliases.get(node.path[0] as string) ?? 'unknown'
+          if (isDataRecord(source)) recordUse(source, node.path.length > 1)
+        } else if (node.kind === 'group') walk(node.children)
+      }
+    }
+
+    walk(expressionAst(tokens.filter((token) => token.kind !== 'newline')))
+    return references
+  }
+
+  function escapingRecordIdentities(
+    tokens: readonly LuaToken[],
+    aliases: ReadonlyMap<string, Provenance>,
+    exemptExactCjsonEncode = true,
+  ): Set<`data-record:${number}`> {
+    return new Set(
+      [...walkPrivateRecordReferences(tokens, aliases, exemptExactCjsonEncode)]
+        .filter(([, reference]) => reference.value)
+        .map(([identity]) => identity),
+    )
+  }
+
+  function exactPrivateRecordValue(
+    tokens: readonly LuaToken[],
+    aliases: ReadonlyMap<string, Provenance>,
+  ): `data-record:${number}` | undefined {
+    const expression = tokens.filter((token) => token.kind !== 'newline')
+    if (expression.length !== 1 || expression[0]?.kind !== 'identifier') return undefined
+    const source = aliases.get(expression[0].value) ?? 'unknown'
+    return isDataRecord(source) ? source : undefined
+  }
+
+  function invalidateRecordIdentities(
+    aliases: Map<string, Provenance>,
+    identities: ReadonlySet<`data-record:${number}`>,
+  ): void {
+    if (identities.size === 0) return
+    for (const [name, source] of aliases) {
+      if (isDataRecord(source) && identities.has(source)) aliases.set(name, 'unknown')
+    }
+  }
+
   function statementsReferenceBinding(statements: readonly LuaStatement[], binding: string): boolean {
     for (const statement of statements) {
       if (
@@ -616,12 +766,14 @@ function assertEveryRedisKeyComesFromKeys(lua: string): void {
       if (tokens[open]?.value !== '(') continue
       const close = findCallClose(tokens, open)
       const args = splitTokens(tokens.slice(open + 1, close), ',')
+      const escapedRecords = new Set<`data-record:${number}`>()
       for (const argument of args) {
-        const argumentSource = sourceOf(argument, aliases)
-        if (isDataRecord(argumentSource) && callee !== 'cjson.encode') {
-          throw new Error(`local data record passed to non-encoding callee '${callee}'`)
-        }
+        const exactEncoding =
+          callee === 'cjson.encode' && args.length === 1 ? exactPrivateRecordValue(argument, aliases) : undefined
+        if (exactEncoding !== undefined) continue
+        for (const identity of escapingRecordIdentities(argument, aliases)) escapedRecords.add(identity)
       }
+      invalidateRecordIdentities(aliases, escapedRecords)
       for (const argument of args) visitCalls(argument, aliases, stack)
 
       if (callee === 'redis.call') {
@@ -685,12 +837,8 @@ function assertEveryRedisKeyComesFromKeys(lua: string): void {
       }
       if (tokens[0]?.value === 'return') {
         const returnedValue = tokens.slice(1)
-        const returnedSource = sourceOf(returnedValue, aliases)
-        if (isDataRecord(returnedSource)) {
-          for (const [name, source] of aliases) {
-            if (source === returnedSource) aliases.set(name, 'unknown')
-          }
-        } else assertDataOnlyExpression(returnedValue, aliases, true)
+        invalidateRecordIdentities(aliases, escapingRecordIdentities(returnedValue, aliases))
+        assertDataOnlyExpression(returnedValue, aliases, true)
       }
       visitCalls(tokens, aliases, stack)
       return []
@@ -713,16 +861,20 @@ function assertEveryRedisKeyComesFromKeys(lua: string): void {
       if (PROTECTED_CALL_BINDINGS.has(target.base) || PROTECTED_CALL_BINDINGS.has(targetReference)) {
         throw new Error(`assignment to certified callee '${targetReference}' is unsupported`)
       }
+      const values = splitTokens(tokens.slice(assignment + 1), ',')
+      const escapedRecords = new Set<`data-record:${number}`>()
+      for (const value of values) {
+        for (const identity of escapingRecordIdentities(value, aliases)) escapedRecords.add(identity)
+      }
+      invalidateRecordIdentities(aliases, escapedRecords)
+      for (const value of values) visitCalls(value, aliases, stack)
       const baseSource = aliases.get(target.base) ?? 'unknown'
       if (!isDataRecord(baseSource)) {
         throw new Error(
           `member assignment base '${target.base}' is not a proven private local data record (${baseSource})`,
         )
       }
-      for (const value of splitTokens(tokens.slice(assignment + 1), ',')) {
-        visitCalls(value, aliases, stack)
-        assertDataOnlyExpression(value, aliases)
-      }
+      for (const value of values) assertDataOnlyExpression(value, aliases)
       return []
     }
     const values = splitTokens(tokens.slice(assignment + 1), ',')
@@ -745,6 +897,11 @@ function assertEveryRedisKeyComesFromKeys(lua: string): void {
         throw new Error(`local function alias '${name}' cannot be certified`)
       }
     }
+    const escapedRecords = new Set<`data-record:${number}`>()
+    for (const value of values) {
+      for (const identity of escapingRecordIdentities(value, aliases)) escapedRecords.add(identity)
+    }
+    invalidateRecordIdentities(aliases, escapedRecords)
     for (const value of values) visitCalls(value, aliases, stack)
     const sources = values.map((value) => valueSourceOf(value, aliases))
     for (let index = 0; index < sources.length; index++) {
@@ -754,9 +911,6 @@ function assertEveryRedisKeyComesFromKeys(lua: string): void {
       if (isLocal && directDataRecordSource(value) !== undefined) {
         assertDataOnlyExpression(value, aliases)
         continue
-      }
-      for (const [alias, aliasSource] of aliases) {
-        if (aliasSource === source) aliases.set(alias, 'unknown')
       }
       sources[index] = 'unknown'
     }
@@ -792,11 +946,13 @@ function assertEveryRedisKeyComesFromKeys(lua: string): void {
             throw new Error(`local function parameter '${parameter}' shadows a certified callee`)
           }
         }
+        const capturedRecords = new Set<`data-record:${number}`>()
         for (const [name, source] of aliases) {
           if (isDataRecord(source) && statementsReferenceBinding(statement.body, name)) {
-            throw new Error(`local data record '${name}' is captured by function '${statement.name}'`)
+            capturedRecords.add(source)
           }
         }
+        invalidateRecordIdentities(aliases, capturedRecords)
         functions.set(statement.name, {
           parameters: statement.parameters,
           body: statement.body,
@@ -1100,6 +1256,19 @@ local function encodeRecord(value)
 end
 redis.call('SET', KEYS[1], encodeRecord(ARGV[2]))
 `,
+      `
+local raw = redis.call('HGET', KEYS[1], ARGV[1])
+local record = cjson.decode(raw)
+local encoded = cjson.encode(record)
+local scalar = record.expiresAt or record.token
+local container = { value = record.expiresAt }
+local function consume(value)
+  return tostring(value)
+end
+consume(record.expiresAt)
+record.expiresAt = tonumber(ARGV[2])
+redis.call('SET', KEYS[1], encoded .. scalar .. cjson.encode(container))
+`,
     ]
     for (const lua of accepted) expect(() => assertEveryRedisKeyComesFromKeys(lua)).not.toThrow()
 
@@ -1160,7 +1329,7 @@ local record = cjson.decode(raw)
       {
         name: 'captured record member',
         lua: `${decodedRecord}\nlocal function mutate()\n  record.expiresAt = ARGV[2]\nend\nmutate()`,
-        message: "local data record 'record' is captured by function 'mutate'",
+        message: "member assignment base 'record' is not a proven private local data record",
       },
       {
         name: 'unknown local member',
@@ -1229,8 +1398,73 @@ local record = cjson.decode(raw)
       },
       {
         name: 'record passed to analyzed local function',
-        lua: `${decodedRecord}\nlocal function consume(value)\n  return tostring(value)\nend\nconsume(record)`,
-        message: "local data record passed to non-encoding callee 'consume'",
+        lua: `${decodedRecord}\nlocal function consume(value)\n  return tostring(value)\nend\nconsume(record)\nrecord.expiresAt = ARGV[2]`,
+        message: "member assignment base 'record' is not a proven private local data record",
+      },
+      {
+        name: 'exact compound alias escape',
+        lua: `${decodedRecord}\nlocal alias = record or nil\nrecord.expiresAt = ARGV[2]`,
+        message: "member assignment base 'record' is not a proven private local data record",
+      },
+      {
+        name: 'exact compound call escape',
+        lua: `${decodedRecord}\nlocal function consume(value)\n  return tostring(value)\nend\nconsume(record or nil)\nrecord.expiresAt = ARGV[2]`,
+        message: "member assignment base 'record' is not a proven private local data record",
+      },
+      {
+        name: 'nested boolean alias escape',
+        lua: `${decodedRecord}\nlocal alias = false or (record and record)\nrecord.expiresAt = ARGV[2]`,
+        message: "member assignment base 'record' is not a proven private local data record",
+      },
+      {
+        name: 'concatenation escape',
+        lua: `${decodedRecord}\nlocal alias = '' .. record\nrecord.expiresAt = ARGV[2]`,
+        message: "member assignment base 'record' is not a proven private local data record",
+      },
+      {
+        name: 'table insertion escape',
+        lua: `${decodedRecord}\nlocal container = { value = record or nil }\nrecord.expiresAt = ARGV[2]`,
+        message: "unknown value 'record' is not data-only",
+      },
+      {
+        name: 'nested call escape',
+        lua: `${decodedRecord}\nlocal function consume(value)\n  return tostring(value)\nend\nconsume(false or (record and record))\nrecord.expiresAt = ARGV[2]`,
+        message: "member assignment base 'record' is not a proven private local data record",
+      },
+      {
+        name: 'compound return escape',
+        lua: `${decodedRecord}\nreturn false or record\nrecord.expiresAt = ARGV[2]`,
+        message: "member assignment base 'record' is not a proven private local data record",
+      },
+      {
+        name: 'multiple records escape together invalidates the first',
+        lua: `${decodedRecord}\nlocal other = cjson.decode(raw)\nlocal alias = record or other\nrecord.expiresAt = ARGV[2]`,
+        message: "member assignment base 'record' is not a proven private local data record",
+      },
+      {
+        name: 'multiple records escape together invalidates the second',
+        lua: `${decodedRecord}\nlocal other = cjson.decode(raw)\nlocal alias = record or other\nother.expiresAt = ARGV[2]`,
+        message: "member assignment base 'other' is not a proven private local data record",
+      },
+      {
+        name: 'wrapped cjson.encode argument escapes',
+        lua: `${decodedRecord}\nlocal encoded = cjson.encode(record or nil)\nrecord.expiresAt = ARGV[2]`,
+        message: "member assignment base 'record' is not a proven private local data record",
+      },
+      {
+        name: 'parenthesized cjson.encode argument escapes',
+        lua: `${decodedRecord}\nlocal encoded = cjson.encode((record))\nrecord.expiresAt = ARGV[2]`,
+        message: "member assignment base 'record' is not a proven private local data record",
+      },
+      {
+        name: 'branch escape joins monotonically',
+        lua: `${decodedRecord}\nif ARGV[2] ~= '' then\n  local alias = record or nil\nend\nrecord.expiresAt = ARGV[3]`,
+        message: "member assignment base 'record' is not a proven private local data record",
+      },
+      {
+        name: 'loop escape joins monotonically',
+        lua: `${decodedRecord}\nfor i = 1, 2 do\n  local alias = record or nil\nend\nrecord.expiresAt = ARGV[2]`,
+        message: "member assignment base 'record' is not a proven private local data record",
       },
       {
         name: 'returned record invalidates later writes',
