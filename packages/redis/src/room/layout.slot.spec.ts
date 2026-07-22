@@ -804,29 +804,126 @@ function assertEveryRedisKeyComesFromKeys(lua: string): void {
     else installBinding(state, name, previous, 'declare')
   }
 
-  function statementsReferenceBinding(statements: readonly LuaStatement[], binding: string): boolean {
-    for (const statement of statements) {
-      if (
-        statement.kind === 'simple' &&
-        statement.tokens.some((token) => token.kind === 'identifier' && token.value === binding)
-      ) {
-        return true
+  type LexicalDeclaration = { readonly identity: symbol }
+  type LexicalScope = Map<string, LexicalDeclaration>
+
+  function declareLexicalBinding(scope: LexicalScope, name: string): LexicalDeclaration {
+    const declaration = { identity: Symbol(name) }
+    scope.set(name, declaration)
+    return declaration
+  }
+
+  function tokensReferenceDeclaration(
+    tokens: readonly LuaToken[],
+    binding: string,
+    declaration: LexicalDeclaration,
+    scope: ReadonlyMap<string, LexicalDeclaration>,
+  ): boolean {
+    for (let index = 0; index < tokens.length; index++) {
+      const token = tokens[index]
+      if (token?.kind !== 'identifier' || token.value !== binding || LUA_KEYWORDS.has(token.value)) continue
+      const previous = tokens.slice(0, index).findLast((candidate) => candidate.kind !== 'newline')
+      const next = tokens.slice(index + 1).find((candidate) => candidate.kind !== 'newline')
+      if (previous?.value === '.') continue
+      if (next?.value === '=' && ['{', ',', ';'].includes(previous?.value ?? '')) {
+        continue
       }
-      if (statement.kind === 'function' || statement.kind === 'loop' || statement.kind === 'do') {
-        if (statementsReferenceBinding(statement.body, binding)) return true
-      } else if (statement.kind === 'if') {
-        for (const branch of statement.branches) {
-          if (
-            branch.condition.some((token) => token.kind === 'identifier' && token.value === binding) ||
-            statementsReferenceBinding(branch.body, binding)
-          ) {
-            return true
-          }
-        }
-        if (statement.elseBody !== undefined && statementsReferenceBinding(statement.elseBody, binding)) return true
-      }
+      if (scope.get(token.value) === declaration) return true
     }
     return false
+  }
+
+  function functionReferencesDeclaration(
+    statement: Extract<LuaStatement, { kind: 'function' }>,
+    binding: string,
+    declaration: LexicalDeclaration,
+    enclosingScope: ReadonlyMap<string, LexicalDeclaration>,
+  ): boolean {
+    const functionScope = new Map(enclosingScope)
+    declareLexicalBinding(functionScope, statement.name)
+    for (const parameter of statement.parameters) declareLexicalBinding(functionScope, parameter)
+    return statementsReferenceDeclaration(statement.body, binding, declaration, functionScope)
+  }
+
+  function statementsReferenceDeclaration(
+    statements: readonly LuaStatement[],
+    binding: string,
+    declaration: LexicalDeclaration,
+    scope: LexicalScope,
+  ): boolean {
+    for (const statement of statements) {
+      if (statement.kind === 'simple') {
+        const assignment = topLevelTokenIndex(statement.tokens, '=')
+        const isLocal = statement.tokens[0]?.value === 'local'
+        if (isLocal) {
+          if (assignment >= 0) {
+            if (tokensReferenceDeclaration(statement.tokens.slice(assignment + 1), binding, declaration, scope)) {
+              return true
+            }
+          }
+          const declarationEnd = assignment >= 0 ? assignment : statement.tokens.length
+          const names = splitTokens(statement.tokens.slice(1, declarationEnd), ',').map((part) =>
+            part.length === 1 && part[0]?.kind === 'identifier' ? part[0].value : undefined,
+          )
+          if (names.some((name) => name === undefined)) {
+            throw new Error('unsupported Lua local declaration')
+          }
+          for (const name of names as string[]) declareLexicalBinding(scope, name)
+          continue
+        }
+        if (tokensReferenceDeclaration(statement.tokens, binding, declaration, scope)) return true
+        continue
+      }
+
+      if (statement.kind === 'function') {
+        if (functionReferencesDeclaration(statement, binding, declaration, scope)) return true
+        declareLexicalBinding(scope, statement.name)
+        continue
+      }
+
+      if (statement.kind === 'if') {
+        for (const branch of statement.branches) {
+          if (tokensReferenceDeclaration(branch.condition, binding, declaration, scope)) return true
+          if (statementsReferenceDeclaration(branch.body, binding, declaration, new Map(scope))) return true
+        }
+        if (
+          statement.elseBody !== undefined &&
+          statementsReferenceDeclaration(statement.elseBody, binding, declaration, new Map(scope))
+        ) {
+          return true
+        }
+        continue
+      }
+
+      if (statement.kind === 'loop') {
+        const bodyScope = new Map(scope)
+        if (statement.loopKind === 'for') {
+          const bindingEnd = statement.header.findIndex((token) => token.value === '=' || token.value === 'in')
+          if (bindingEnd < 1) throw new Error('unsupported Lua for-loop binding')
+          if (tokensReferenceDeclaration(statement.header.slice(bindingEnd + 1), binding, declaration, scope)) {
+            return true
+          }
+          const iterators = splitTokens(statement.header.slice(0, bindingEnd), ',').map((part) =>
+            part.length === 1 && part[0]?.kind === 'identifier' ? part[0].value : undefined,
+          )
+          if (iterators.some((name) => name === undefined)) throw new Error('unsupported Lua for-loop binding')
+          for (const iterator of iterators as string[]) declareLexicalBinding(bodyScope, iterator)
+        } else if (tokensReferenceDeclaration(statement.header, binding, declaration, scope)) {
+          return true
+        }
+        if (statementsReferenceDeclaration(statement.body, binding, declaration, bodyScope)) return true
+        continue
+      }
+
+      if (statementsReferenceDeclaration(statement.body, binding, declaration, new Map(scope))) return true
+    }
+    return false
+  }
+
+  function functionCapturesBinding(statement: Extract<LuaStatement, { kind: 'function' }>, binding: string): boolean {
+    const declaration = { identity: Symbol(binding) }
+    const enclosingScope: LexicalScope = new Map([[binding, declaration]])
+    return functionReferencesDeclaration(statement, binding, declaration, enclosingScope)
   }
 
   function visitCalls(tokens: readonly LuaToken[], state: LuaAnalysisState, stack: readonly string[]): void {
@@ -1058,9 +1155,7 @@ function assertEveryRedisKeyComesFromKeys(lua: string): void {
           if (
             binding.kind === 'value' &&
             isDataRecord(binding.provenance) &&
-            name !== statement.name &&
-            !statement.parameters.includes(name) &&
-            statementsReferenceBinding(statement.body, name)
+            functionCapturesBinding(statement, name)
           ) {
             capturedRecords.add(binding.provenance)
           }
@@ -1829,6 +1924,177 @@ end
 record.expiresAt = ARGV[3]
 redis.call('SET', KEYS[1], cjson.encode(record))`),
     ).not.toThrow()
+  })
+
+  it('resolves record captures by lexical declaration identity', () => {
+    const decodedRecord = `
+local raw = redis.call('HGET', KEYS[1], ARGV[1])
+local record = cjson.decode(raw)`
+    const outerWrite = `
+record.expiresAt = ARGV[3]
+redis.call('SET', KEYS[1], cjson.encode(record))`
+    const accepted = [
+      {
+        name: 'fresh same-name record inside a local function',
+        lua: `${decodedRecord}
+local function encodeFresh()
+  local record = {}
+  record.expiresAt = ARGV[2]
+  return cjson.encode(record)
+end
+local encoded = encodeFresh()
+${outerWrite}`,
+      },
+      {
+        name: 'fresh same-name record inside a nested local function',
+        lua: `${decodedRecord}
+local function encodeFresh()
+  local function nested()
+    local record = {}
+    record.expiresAt = ARGV[2]
+    return cjson.encode(record)
+  end
+  return nested()
+end
+local encoded = encodeFresh()
+${outerWrite}`,
+      },
+      {
+        name: 'function parameter shadows the outer record',
+        lua: `${decodedRecord}
+local function inspect(record)
+  return tostring(record)
+end
+local scalar = inspect(ARGV[2])
+${outerWrite}`,
+      },
+      {
+        name: 'loop iterator shadows only inside the function loop body',
+        lua: `${decodedRecord}
+local function inspect()
+  for record = 1, 2 do
+    local scalar = tostring(record)
+  end
+  return 'done'
+end
+local scalar = inspect()
+${outerWrite}`,
+      },
+      {
+        name: 'same-name local function binds itself before its recursive body',
+        lua: `${decodedRecord}
+local function scope()
+  local function record(value)
+    if value == '' then return record end
+    return value
+  end
+end
+${outerWrite}`,
+      },
+      {
+        name: 'block branch and loop declarations stay in their lexical scopes',
+        lua: `${decodedRecord}
+local function shadows()
+  do
+    local record = {}
+    record.expiresAt = ARGV[2]
+  end
+  if ARGV[2] ~= '' then
+    local record = {}
+    record.expiresAt = ARGV[2]
+  else
+    local record = {}
+    record.expiresAt = ARGV[2]
+  end
+  for record = 1, 2 do
+    local scalar = tostring(record)
+  end
+end
+${outerWrite}`,
+      },
+      {
+        name: 'member field names are not identifier captures',
+        lua: `${decodedRecord}
+local function makePayload()
+  local payload = { value = ARGV[2] }
+  return tostring(payload.record)
+end
+local encoded = makePayload()
+${outerWrite}`,
+      },
+    ]
+    for (const { name, lua } of accepted) {
+      expect(() => assertEveryRedisKeyComesFromKeys(lua), name).not.toThrow()
+    }
+
+    const rejected = [
+      {
+        name: 'direct outer record capture',
+        body: 'local value = record.expiresAt',
+      },
+      {
+        name: 'use before a later same-name local declaration',
+        body: `local value = record.expiresAt
+local record = {}`,
+      },
+      {
+        name: 'local initializer resolves its own name in the outer scope',
+        body: 'local record = record or nil',
+      },
+      {
+        name: 'nested closure propagates a genuine outer capture',
+        body: `local function nested()
+  return record.expiresAt
+end`,
+      },
+      {
+        name: 'a branch-local shadow does not cover a later outer use',
+        body: `if ARGV[2] ~= '' then
+  local record = {}
+  record.expiresAt = ARGV[2]
+end
+return record.expiresAt`,
+      },
+      {
+        name: 'a block-local shadow does not cover a later outer use',
+        body: `do
+  local record = {}
+  record.expiresAt = ARGV[2]
+end
+return record.expiresAt`,
+      },
+      {
+        name: 'a loop iterator does not cover a later outer use',
+        body: `for record = 1, 2 do
+  local scalar = tostring(record)
+end
+return record.expiresAt`,
+      },
+      {
+        name: 'a for-loop initializer resolves before the iterator declaration',
+        body: `for record = tonumber(record.expiresAt), 2 do
+  local scalar = tostring(record)
+end`,
+      },
+      {
+        name: 'deeply nested closures propagate a genuine free reference',
+        body: `local function middle()
+  local function nested()
+    return record.expiresAt
+  end
+end`,
+      },
+    ]
+    for (const { name, body } of rejected) {
+      const lua = `${decodedRecord}
+local function inspect()
+${body}
+end
+${outerWrite}`
+      expect(() => assertEveryRedisKeyComesFromKeys(lua), name).toThrow(
+        "member assignment base 'record' is not a proven private local data record",
+      )
+    }
   })
 
   it('fails closed on unknown callees and unsupported call or control syntax', () => {
