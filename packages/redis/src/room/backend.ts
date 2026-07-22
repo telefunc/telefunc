@@ -110,6 +110,7 @@ class GenerationInvalidError extends Error {}
 
 type RedisRoomBackendTestHooks = {
   beforeSubscribe?: (channel: string) => void | Promise<void>
+  afterSubscribeAck?: (channel: string) => void | Promise<void>
   afterGenerationCapture?: (info: {
     roomId: string
     inc: string
@@ -709,10 +710,16 @@ export class RedisRoomBackend implements RoomBackendSpi {
         await this.#testHooks?.beforeSubscribe?.(channel)
         if (context.operationEpoch !== operationEpoch) return false
         await this.#subscriber.subscribe(channel, context.invalidationChannel)
+        // Record the remote state immediately at the ack boundary. Last detach can now uninstall this
+        // exact in-flight epoch even while post-ack generation validation is still held.
+        this.#subscribedChannels.add(channel)
+        this.#subscribedInvalidations.add(context.invalidationChannel)
+        await this.#testHooks?.afterSubscribeAck?.(channel)
         if (context.operationEpoch !== operationEpoch) return true
         const valid = await this.#validateGeneration(context, !context.initialEstablished)
         if (!valid) {
           await this.#subscriber.unsubscribe(channel)
+          this.#subscribedChannels.delete(channel)
           throw new GenerationInvalidError(`subscribeLane: generation '${context.inc}' was invalidated`)
         }
         return true
@@ -767,12 +774,14 @@ export class RedisRoomBackend implements RoomBackendSpi {
     this.#subscribedChannels.delete(channel)
     const set = this.#channelSubs.get(channel)
     if (set === undefined) return
-    this.#channelSubs.delete(channel)
-    this.#channelContexts.delete(channel)
     for (const sub of set) {
       this.#untrackSubscriptionOwner(sub)
       sub.failPermanently(reason)
     }
+    set.clear()
+    const context = this.#channelContexts.get(channel)
+    if (context !== undefined) context.operationEpoch++
+    void this.#retryEmptyChannelCleanup(channel)
   }
 
   async #detach(sub: RedisLaneSubscription, owner: string, channel: string): Promise<void> {

@@ -81,6 +81,7 @@ export type RedisBackendFixture = BackendFixture & {
   prefix: string
   setStableReadProbe(fn: StableReadProbe | null): void
   setBeforeSubscribe(fn: SubscribeProbe | null): void
+  setAfterSubscribeAck(fn: SubscribeProbe | null): void
   setAfterGenerationCapture(fn: GenerationCaptureProbe | null): void
   setBeforeDropGenerationUnregister(fn: DropGenerationProbe | null): void
   setBeforeDirectoryDeleteApply(fn: DirectoryDeleteProbe | null): void
@@ -104,6 +105,7 @@ export async function createRedisFixture(
   let clock = Date.now()
   let probe: StableReadProbe | null = null
   let beforeSubscribe: SubscribeProbe | null = null
+  let afterSubscribeAck: SubscribeProbe | null = null
   let afterGenerationCapture: GenerationCaptureProbe | null = null
   let beforeDropGenerationUnregister: DropGenerationProbe | null = null
   let beforeDirectoryDeleteApply: DirectoryDeleteProbe | null = null
@@ -118,6 +120,7 @@ export async function createRedisFixture(
     subscriptionRetryDelay: () => 0,
     testHooks: {
       beforeSubscribe: (channel) => beforeSubscribe?.(channel),
+      afterSubscribeAck: (channel) => afterSubscribeAck?.(channel),
       afterGenerationCapture: (info) => afterGenerationCapture?.(info),
       beforeDropGenerationUnregister: (info) => beforeDropGenerationUnregister?.(info),
       beforeDirectoryDeleteApply: (info) => beforeDirectoryDeleteApply?.(info),
@@ -159,6 +162,9 @@ export async function createRedisFixture(
     },
     setBeforeSubscribe: (fn) => {
       beforeSubscribe = fn
+    },
+    setAfterSubscribeAck: (fn) => {
+      afterSubscribeAck = fn
     },
     setAfterGenerationCapture: (fn) => {
       afterGenerationCapture = fn

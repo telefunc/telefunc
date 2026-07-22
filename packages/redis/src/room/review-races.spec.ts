@@ -336,7 +336,7 @@ describe.skipIf(url === undefined || url === '')('Redis independent-review race 
     const { inc } = await openRoom(fx.backend, roomId)
     const entered = deferred()
     const release = deferred()
-    fx.setBeforeSubscribe(async () => {
+    fx.setAfterSubscribeAck(async () => {
       entered.resolve()
       await release.promise
     })
@@ -344,10 +344,55 @@ describe.skipIf(url === undefined || url === '')('Redis independent-review race 
     await entered.promise
     await sub.unsubscribe()
     expect(sub.state()).toBe('closed')
+    await waitFor(
+      async () => (await fx.redis.pubsub('NUMSUB', `${fx.prefix}room:{${roomId}}:ch:${inc}:semantic`))[1] === 0,
+    )
     release.resolve()
     await flush()
     const result = accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, bytes('nobody')))
     expect(result.receivers).toBe(0)
+  })
+
+  it('terminates a disconnected lifecycle that misses invalidation before same-id reuse', async () => {
+    const roomId = nextId('room')
+    const { inc } = await openRoom(fx.backend, roomId)
+    const stale = fx.backend.subscribeLane(roomId, inc, SEMANTIC, () => {})
+    await stale.ready
+    const peer = await fx.createPeerBackend()
+    const entered = deferred()
+    const release = deferred()
+    fx.setBeforeSubscribe(async () => {
+      entered.resolve()
+      await release.promise
+    })
+    try {
+      await fx.redis.client('KILL', 'ID', String(fx.subscriberId))
+      await entered.promise
+      const head = await readHeadOrThrow(peer.backend, roomId)
+      const { head: closing, leaseId } = await enterClosing(peer.backend, roomId, head)
+      accepted(await peer.backend.commitLane(roomId, inc, CONTROL, bytes('closed'), { closingLease: leaseId }))
+      const tombstone = okHead(await finalizeClose(peer.backend, roomId, closing, leaseId))
+      await peer.backend.dropGeneration(roomId, inc)
+      okHead(
+        await peer.backend.compareExchangeHead(
+          roomId,
+          { expect: { rev: tombstone.rev } },
+          { head: { currentInc: inc, state: 'open', config: tombstone.config } },
+        ),
+      )
+
+      release.resolve()
+      await waitFor(() => stale.state() === 'closed')
+      expect(accepted(await peer.backend.commitLane(roomId, inc, SEMANTIC, bytes('no-stale'))).receivers).toBe(0)
+
+      fx.setBeforeSubscribe(null)
+      const fresh = fx.backend.subscribeLane(roomId, inc, SEMANTIC, () => {})
+      await fresh.ready
+      expect(accepted(await peer.backend.commitLane(roomId, inc, SEMANTIC, bytes('fresh'))).receivers).toBe(1)
+    } finally {
+      release.resolve()
+      await peer.dispose()
+    }
   })
 
   it('closes locally on unsubscribe transport failure and retries the retained exact channel cleanup', async () => {
