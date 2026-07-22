@@ -52,6 +52,16 @@ type LuaStatement =
   | { kind: 'loop'; loopKind: 'for' | 'while'; header: readonly LuaToken[]; body: readonly LuaStatement[] }
   | { kind: 'do'; body: readonly LuaStatement[] }
 
+type LuaFunction = {
+  parameters: readonly string[]
+  body: readonly LuaStatement[]
+}
+
+type LuaBinding = { kind: 'function'; definition: LuaFunction } | { kind: 'value'; provenance: Provenance }
+
+type LuaBindings = Map<string, LuaBinding>
+type ReadonlyLuaBindings = ReadonlyMap<string, LuaBinding>
+
 const OPEN = new Map([
   ['(', ')'],
   ['[', ']'],
@@ -284,11 +294,6 @@ class LuaStatementParser {
   }
 }
 
-type LuaFunction = {
-  parameters: readonly string[]
-  body: readonly LuaStatement[]
-}
-
 function splitTokens(tokens: readonly LuaToken[], separator: string): LuaToken[][] {
   const parts: LuaToken[][] = [[]]
   const closers: string[] = []
@@ -333,7 +338,21 @@ function withoutOuterParens(tokens: readonly LuaToken[]): readonly LuaToken[] {
   return result
 }
 
-function sourceOf(tokens: readonly LuaToken[], aliases: ReadonlyMap<string, Provenance>): Provenance {
+function valueProvenance(bindings: ReadonlyLuaBindings, name: string): Provenance | undefined {
+  const binding = bindings.get(name)
+  return binding?.kind === 'value' ? binding.provenance : binding?.kind === 'function' ? 'unknown' : undefined
+}
+
+function localFunction(bindings: ReadonlyLuaBindings, name: string): LuaFunction | undefined {
+  const binding = bindings.get(name)
+  return binding?.kind === 'function' ? binding.definition : undefined
+}
+
+function valueBinding(provenance: Provenance): LuaBinding {
+  return { kind: 'value', provenance }
+}
+
+function sourceOf(tokens: readonly LuaToken[], bindings: ReadonlyLuaBindings): Provenance {
   const expression = withoutOuterParens(tokens.filter((token) => token.kind !== 'newline'))
   const recordSource = directDataRecordSource(expression)
   if (recordSource !== undefined) return recordSource
@@ -346,7 +365,7 @@ function sourceOf(tokens: readonly LuaToken[], aliases: ReadonlyMap<string, Prov
     return 'data'
   }
   if (expression.length === 1 && expression[0]?.kind === 'identifier') {
-    return aliases.get(expression[0].value) ?? 'unknown'
+    return valueProvenance(bindings, expression[0].value) ?? 'unknown'
   }
   if (
     expression.length >= 4 &&
@@ -535,18 +554,31 @@ const PROTECTED_CALL_BINDINGS = new Set([
   'struct',
 ])
 
-function joinedAliases(outcomes: readonly ReadonlyMap<string, Provenance>[]): Map<string, Provenance> {
-  const joined = new Map<string, Provenance>()
+function sameBinding(left: LuaBinding, right: LuaBinding): boolean {
+  if (left.kind !== right.kind) return false
+  if (left.kind === 'function') return right.kind === 'function' && left.definition === right.definition
+  return right.kind === 'value' && left.provenance === right.provenance
+}
+
+function joinedBindings(outcomes: readonly ReadonlyLuaBindings[]): LuaBindings {
+  const joined: LuaBindings = new Map()
   const names = new Set(outcomes.flatMap((outcome) => [...outcome.keys()]))
   for (const name of names) {
-    const sources = new Set(outcomes.map((outcome) => outcome.get(name) ?? 'unknown'))
-    joined.set(name, sources.size === 1 ? ([...sources][0] as Provenance) : 'unknown')
+    const candidates = outcomes.map((outcome) => outcome.get(name) ?? valueBinding('unknown'))
+    const first = candidates[0] as LuaBinding
+    joined.set(name, candidates.every((candidate) => sameBinding(first, candidate)) ? first : valueBinding('unknown'))
   }
   return joined
 }
 
-function sameAliases(left: ReadonlyMap<string, Provenance>, right: ReadonlyMap<string, Provenance>): boolean {
-  return left.size === right.size && [...left].every(([name, source]) => right.get(name) === source)
+function sameBindings(left: ReadonlyLuaBindings, right: ReadonlyLuaBindings): boolean {
+  return (
+    left.size === right.size &&
+    [...left].every(([name, binding]) => {
+      const other = right.get(name)
+      return other !== undefined && sameBinding(binding, other)
+    })
+  )
 }
 
 function latticePassBound(statements: readonly LuaStatement[]): number {
@@ -561,23 +593,22 @@ function latticePassBound(statements: readonly LuaStatement[]): number {
       if (statement.elseBody !== undefined) identifiers += latticePassBound(statement.elseBody)
     }
   }
-  // Each finite alias slot can only retain its source or rise once to `unknown` under join.
+  // Each finite binding slot can only retain its value/function state or rise once to `unknown` under join.
   return identifiers + 2
 }
 
-function mergeAliases(target: Map<string, Provenance>, outcomes: readonly ReadonlyMap<string, Provenance>[]): void {
-  const joined = joinedAliases(outcomes)
+function mergeBindings(target: LuaBindings, outcomes: readonly ReadonlyLuaBindings[]): void {
+  const joined = joinedBindings(outcomes)
   target.clear()
-  for (const [name, source] of joined) target.set(name, source)
+  for (const [name, binding] of joined) target.set(name, binding)
 }
 
 function assertEveryRedisKeyComesFromKeys(lua: string): void {
-  const functions = new Map<string, LuaFunction>()
   let redisCallCount = 0
 
   function assertDataOnlyExpression(
     tokens: readonly LuaToken[],
-    aliases: ReadonlyMap<string, Provenance>,
+    bindings: ReadonlyLuaBindings,
     allowUnknown = false,
   ): void {
     for (let index = 0; index < tokens.length; index++) {
@@ -596,7 +627,8 @@ function assertEveryRedisKeyComesFromKeys(lua: string): void {
       }
       const reference = names.join('.')
       const isCall = tokens[end]?.value === '('
-      const rootSource = aliases.get(names[0] as string)
+      const rootBinding = bindings.get(names[0] as string)
+      const rootSource = valueProvenance(bindings, names[0] as string)
       if (isCall) {
         if (reference === 'cjson.encode') index = findCallClose(tokens, end)
         else index = end - 1
@@ -605,7 +637,7 @@ function assertEveryRedisKeyComesFromKeys(lua: string): void {
       if (PROTECTED_CALL_BINDINGS.has(reference) || PROTECTED_CALL_BINDINGS.has(names[0] as string)) {
         throw new Error(`protected or callable value '${reference}' is not data-only`)
       }
-      if (functions.has(reference) || functions.has(names[0] as string)) {
+      if (localFunction(bindings, reference) !== undefined || rootBinding?.kind === 'function') {
         throw new Error(`local function value '${reference}' is not data-only`)
       }
       if (isDataRecord(rootSource ?? 'unknown') && names.length === 1) {
@@ -619,11 +651,11 @@ function assertEveryRedisKeyComesFromKeys(lua: string): void {
     }
   }
 
-  function valueSourceOf(tokens: readonly LuaToken[], aliases: ReadonlyMap<string, Provenance>): Provenance {
-    const directSource = sourceOf(tokens, aliases)
+  function valueSourceOf(tokens: readonly LuaToken[], bindings: ReadonlyLuaBindings): Provenance {
+    const directSource = sourceOf(tokens, bindings)
     if (directSource !== 'unknown') return directSource
     try {
-      assertDataOnlyExpression(tokens, aliases)
+      assertDataOnlyExpression(tokens, bindings)
       return 'data'
     } catch {
       return 'unknown'
@@ -637,7 +669,7 @@ function assertEveryRedisKeyComesFromKeys(lua: string): void {
 
   function walkPrivateRecordReferences(
     tokens: readonly LuaToken[],
-    aliases: ReadonlyMap<string, Provenance>,
+    bindings: ReadonlyLuaBindings,
     exemptExactCjsonEncode: boolean,
   ): Map<`data-record:${number}`, PrivateRecordReference> {
     const references = new Map<`data-record:${number}`, PrivateRecordReference>()
@@ -657,7 +689,7 @@ function assertEveryRedisKeyComesFromKeys(lua: string): void {
       if (argument?.kind !== 'identifier' || argument.role !== 'reference' || argument.path.length !== 1) {
         return undefined
       }
-      const source = aliases.get(argument.path[0] as string) ?? 'unknown'
+      const source = valueProvenance(bindings, argument.path[0] as string) ?? 'unknown'
       return isDataRecord(source) ? source : undefined
     }
 
@@ -677,7 +709,7 @@ function assertEveryRedisKeyComesFromKeys(lua: string): void {
             index++
             continue
           }
-          const source = aliases.get(node.path[0] as string) ?? 'unknown'
+          const source = valueProvenance(bindings, node.path[0] as string) ?? 'unknown'
           if (isDataRecord(source)) recordUse(source, node.path.length > 1)
         } else if (node.kind === 'group') walk(node.children)
       }
@@ -689,11 +721,11 @@ function assertEveryRedisKeyComesFromKeys(lua: string): void {
 
   function escapingRecordIdentities(
     tokens: readonly LuaToken[],
-    aliases: ReadonlyMap<string, Provenance>,
+    bindings: ReadonlyLuaBindings,
     exemptExactCjsonEncode = true,
   ): Set<`data-record:${number}`> {
     return new Set(
-      [...walkPrivateRecordReferences(tokens, aliases, exemptExactCjsonEncode)]
+      [...walkPrivateRecordReferences(tokens, bindings, exemptExactCjsonEncode)]
         .filter(([, reference]) => reference.value)
         .map(([identity]) => identity),
     )
@@ -701,22 +733,36 @@ function assertEveryRedisKeyComesFromKeys(lua: string): void {
 
   function exactPrivateRecordValue(
     tokens: readonly LuaToken[],
-    aliases: ReadonlyMap<string, Provenance>,
+    bindings: ReadonlyLuaBindings,
   ): `data-record:${number}` | undefined {
     const expression = tokens.filter((token) => token.kind !== 'newline')
     if (expression.length !== 1 || expression[0]?.kind !== 'identifier') return undefined
-    const source = aliases.get(expression[0].value) ?? 'unknown'
+    const source = valueProvenance(bindings, expression[0].value) ?? 'unknown'
     return isDataRecord(source) ? source : undefined
   }
 
-  function invalidateRecordIdentities(
-    aliases: Map<string, Provenance>,
-    identities: ReadonlySet<`data-record:${number}`>,
-  ): void {
+  function invalidateRecordIdentities(bindings: LuaBindings, identities: ReadonlySet<`data-record:${number}`>): void {
     if (identities.size === 0) return
-    for (const [name, source] of aliases) {
-      if (isDataRecord(source) && identities.has(source)) aliases.set(name, 'unknown')
+    for (const [name, binding] of bindings) {
+      if (binding.kind === 'value' && isDataRecord(binding.provenance) && identities.has(binding.provenance)) {
+        bindings.set(name, valueBinding('unknown'))
+      }
     }
+  }
+
+  function installBinding(bindings: LuaBindings, name: string, binding: LuaBinding, mode: 'declare' | 'rebind'): void {
+    if (mode === 'rebind') {
+      const replaced = valueProvenance(bindings, name)
+      if (replaced !== undefined && isDataRecord(replaced)) {
+        invalidateRecordIdentities(bindings, new Set([replaced]))
+      }
+    }
+    bindings.set(name, binding)
+  }
+
+  function restoreBinding(bindings: LuaBindings, name: string, previous: LuaBinding | undefined): void {
+    if (previous === undefined) bindings.delete(name)
+    else installBinding(bindings, name, previous, 'declare')
   }
 
   function statementsReferenceBinding(statements: readonly LuaStatement[], binding: string): boolean {
@@ -744,7 +790,7 @@ function assertEveryRedisKeyComesFromKeys(lua: string): void {
     return false
   }
 
-  function visitCalls(tokens: readonly LuaToken[], aliases: Map<string, Provenance>, stack: readonly string[]): void {
+  function visitCalls(tokens: readonly LuaToken[], bindings: LuaBindings, stack: readonly string[]): void {
     for (let index = 0; index < tokens.length; index++) {
       if (tokens[index]?.value === '(' && [')', ']', '}'].includes(tokens[index - 1]?.value ?? '')) {
         throw new Error(`unsupported indirect Lua call near '${renderTokens(tokens.slice(Math.max(0, index - 3)))}'`)
@@ -769,12 +815,12 @@ function assertEveryRedisKeyComesFromKeys(lua: string): void {
       const escapedRecords = new Set<`data-record:${number}`>()
       for (const argument of args) {
         const exactEncoding =
-          callee === 'cjson.encode' && args.length === 1 ? exactPrivateRecordValue(argument, aliases) : undefined
+          callee === 'cjson.encode' && args.length === 1 ? exactPrivateRecordValue(argument, bindings) : undefined
         if (exactEncoding !== undefined) continue
-        for (const identity of escapingRecordIdentities(argument, aliases)) escapedRecords.add(identity)
+        for (const identity of escapingRecordIdentities(argument, bindings)) escapedRecords.add(identity)
       }
-      invalidateRecordIdentities(aliases, escapedRecords)
-      for (const argument of args) visitCalls(argument, aliases, stack)
+      invalidateRecordIdentities(bindings, escapedRecords)
+      for (const argument of args) visitCalls(argument, bindings, stack)
 
       if (callee === 'redis.call') {
         redisCallCount++
@@ -788,22 +834,33 @@ function assertEveryRedisKeyComesFromKeys(lua: string): void {
         }
         for (const keyIndex of keyIndexes) {
           const key = args[keyIndex] ?? []
-          const provenance = sourceOf(key, aliases)
+          const provenance = sourceOf(key, bindings)
           if (provenance !== 'KEYS') {
             throw new Error(`${command} key operand '${renderTokens(key)}' comes from ${provenance}`)
           }
         }
       } else {
-        const fn = functions.get(callee)
+        const fn = localFunction(bindings, callee)
         if (fn !== undefined) {
           if (stack.includes(callee)) throw new Error(`recursive Lua function '${callee}' cannot be certified`)
           // Only parameter provenance crosses a function boundary. Treating captured or global values as
           // unknown is deliberately conservative: a script must thread a Redis key through a certified call.
-          const localAliases = new Map<string, Provenance>()
-          for (let parameter = 0; parameter < fn.parameters.length; parameter++) {
-            localAliases.set(fn.parameters[parameter] as string, valueSourceOf(args[parameter] ?? [], aliases))
+          const localBindings: LuaBindings = new Map()
+          for (const [name, binding] of bindings) {
+            if (binding.kind === 'function') localBindings.set(name, binding)
           }
-          analyzeBlock(fn.body, localAliases, [...stack, callee], false, false)
+          const parameters = new Set<string>()
+          for (let parameter = 0; parameter < fn.parameters.length; parameter++) {
+            const name = fn.parameters[parameter] as string
+            installBinding(
+              localBindings,
+              name,
+              valueBinding(valueSourceOf(args[parameter] ?? [], bindings)),
+              parameters.has(name) ? 'rebind' : 'declare',
+            )
+            parameters.add(name)
+          }
+          analyzeBlock(fn.body, localBindings, [...stack, callee])
         } else if (!SAFE_NON_KEY_CALLS.has(callee)) {
           throw new Error(`unsupported Lua callee '${callee}' cannot be certified`)
         }
@@ -814,8 +871,9 @@ function assertEveryRedisKeyComesFromKeys(lua: string): void {
 
   function analyzeSimple(
     tokens: readonly LuaToken[],
-    aliases: Map<string, Provenance>,
+    bindings: LuaBindings,
     stack: readonly string[],
+    scopeLocals: ReadonlySet<string>,
   ): readonly string[] {
     if (tokens.some((token) => token.value === 'function' || token.value === '...')) {
       throw new Error('unsupported Lua expression syntax cannot be certified')
@@ -827,20 +885,22 @@ function assertEveryRedisKeyComesFromKeys(lua: string): void {
           part.length === 1 && part[0]?.kind === 'identifier' ? part[0].value : undefined,
         )
         if (names.some((name) => name === undefined)) throw new Error('unsupported Lua local declaration')
+        const declared = new Set(scopeLocals)
         for (const name of names as string[]) {
           if (PROTECTED_CALL_BINDINGS.has(name)) {
             throw new Error(`assignment to certified callee '${name}' is unsupported`)
           }
-          aliases.set(name, 'unknown')
+          installBinding(bindings, name, valueBinding('unknown'), declared.has(name) ? 'rebind' : 'declare')
+          declared.add(name)
         }
         return names as string[]
       }
       if (tokens[0]?.value === 'return') {
         const returnedValue = tokens.slice(1)
-        invalidateRecordIdentities(aliases, escapingRecordIdentities(returnedValue, aliases))
-        assertDataOnlyExpression(returnedValue, aliases, true)
+        invalidateRecordIdentities(bindings, escapingRecordIdentities(returnedValue, bindings))
+        assertDataOnlyExpression(returnedValue, bindings, true)
       }
-      visitCalls(tokens, aliases, stack)
+      visitCalls(tokens, bindings, stack)
       return []
     }
     const isLocal = tokens[0]?.value === 'local'
@@ -864,23 +924,23 @@ function assertEveryRedisKeyComesFromKeys(lua: string): void {
       const values = splitTokens(tokens.slice(assignment + 1), ',')
       const escapedRecords = new Set<`data-record:${number}`>()
       for (const value of values) {
-        for (const identity of escapingRecordIdentities(value, aliases)) escapedRecords.add(identity)
+        for (const identity of escapingRecordIdentities(value, bindings)) escapedRecords.add(identity)
       }
-      invalidateRecordIdentities(aliases, escapedRecords)
-      for (const value of values) visitCalls(value, aliases, stack)
-      const baseSource = aliases.get(target.base) ?? 'unknown'
+      invalidateRecordIdentities(bindings, escapedRecords)
+      for (const value of values) visitCalls(value, bindings, stack)
+      const baseSource = valueProvenance(bindings, target.base) ?? 'unknown'
       if (!isDataRecord(baseSource)) {
         throw new Error(
           `member assignment base '${target.base}' is not a proven private local data record (${baseSource})`,
         )
       }
-      for (const value of values) assertDataOnlyExpression(value, aliases)
+      for (const value of values) assertDataOnlyExpression(value, bindings)
       return []
     }
     const values = splitTokens(tokens.slice(assignment + 1), ',')
     for (let index = 0; index < names.length; index++) {
       const name = names[index] as string
-      if (!isLocal && !aliases.has(name)) {
+      if (!isLocal && !bindings.has(name)) {
         throw new Error(`global assignment '${name}' cannot be certified`)
       }
       if (PROTECTED_CALL_BINDINGS.has(name)) {
@@ -893,50 +953,54 @@ function assertEveryRedisKeyComesFromKeys(lua: string): void {
       if (assignedReference !== undefined && PROTECTED_CALL_BINDINGS.has(assignedReference)) {
         throw new Error(`certified callee alias '${name}' cannot reference '${assignedReference}'`)
       }
-      if (assignedReference !== undefined && functions.has(assignedReference)) {
+      if (assignedReference !== undefined && localFunction(bindings, assignedReference) !== undefined) {
         throw new Error(`local function alias '${name}' cannot be certified`)
       }
     }
     const escapedRecords = new Set<`data-record:${number}`>()
     for (const value of values) {
-      for (const identity of escapingRecordIdentities(value, aliases)) escapedRecords.add(identity)
+      for (const identity of escapingRecordIdentities(value, bindings)) escapedRecords.add(identity)
     }
-    invalidateRecordIdentities(aliases, escapedRecords)
-    for (const value of values) visitCalls(value, aliases, stack)
-    const sources = values.map((value) => valueSourceOf(value, aliases))
+    invalidateRecordIdentities(bindings, escapedRecords)
+    for (const value of values) visitCalls(value, bindings, stack)
+    const sources = values.map((value) => valueSourceOf(value, bindings))
     for (let index = 0; index < sources.length; index++) {
       const source = sources[index] as Provenance
       if (!isDataRecord(source)) continue
       const value = values[index] ?? []
       if (isLocal && directDataRecordSource(value) !== undefined) {
-        assertDataOnlyExpression(value, aliases)
+        assertDataOnlyExpression(value, bindings)
         continue
       }
       sources[index] = 'unknown'
     }
+    const declared = new Set(scopeLocals)
     for (let index = 0; index < names.length; index++) {
       const source = sources[index] ?? 'unknown'
-      aliases.set(names[index] as string, !isLocal && isDataRecord(source) ? 'unknown' : source)
+      const name = names[index] as string
+      installBinding(
+        bindings,
+        name,
+        valueBinding(!isLocal && isDataRecord(source) ? 'unknown' : source),
+        isLocal && !declared.has(name) ? 'declare' : 'rebind',
+      )
+      if (isLocal) declared.add(name)
     }
     return isLocal ? (names as string[]) : []
   }
 
   function analyzeBlock(
     statements: readonly LuaStatement[],
-    aliases: Map<string, Provenance>,
+    bindings: LuaBindings,
     stack: readonly string[],
     restoreLocals = false,
-    allowFunctionDefinitions = true,
   ): void {
-    const incoming = new Map(aliases)
+    const incoming = new Map(bindings)
     const locals = new Set<string>()
     for (const statement of statements) {
       if (statement.kind === 'simple') {
-        for (const name of analyzeSimple(statement.tokens, aliases, stack)) locals.add(name)
+        for (const name of analyzeSimple(statement.tokens, bindings, stack, locals)) locals.add(name)
       } else if (statement.kind === 'function') {
-        if (!allowFunctionDefinitions) {
-          throw new Error(`nested or conditional Lua function '${statement.name}' cannot be certified`)
-        }
         if (!statement.local) throw new Error(`global Lua function '${statement.name}' cannot be certified`)
         if (PROTECTED_CALL_BINDINGS.has(statement.name)) {
           throw new Error(`assignment to certified callee '${statement.name}' is unsupported`)
@@ -947,36 +1011,46 @@ function assertEveryRedisKeyComesFromKeys(lua: string): void {
           }
         }
         const capturedRecords = new Set<`data-record:${number}`>()
-        for (const [name, source] of aliases) {
-          if (isDataRecord(source) && statementsReferenceBinding(statement.body, name)) {
-            capturedRecords.add(source)
+        for (const [name, binding] of bindings) {
+          if (
+            binding.kind === 'value' &&
+            isDataRecord(binding.provenance) &&
+            name !== statement.name &&
+            !statement.parameters.includes(name) &&
+            statementsReferenceBinding(statement.body, name)
+          ) {
+            capturedRecords.add(binding.provenance)
           }
         }
-        invalidateRecordIdentities(aliases, capturedRecords)
-        functions.set(statement.name, {
-          parameters: statement.parameters,
-          body: statement.body,
-        })
+        invalidateRecordIdentities(bindings, capturedRecords)
+        installBinding(
+          bindings,
+          statement.name,
+          { kind: 'function', definition: { parameters: statement.parameters, body: statement.body } },
+          locals.has(statement.name) ? 'rebind' : 'declare',
+        )
+        locals.add(statement.name)
       } else if (statement.kind === 'if') {
-        const outcomes: Map<string, Provenance>[] = []
+        const outcomes: LuaBindings[] = []
         for (const branch of statement.branches) {
-          visitCalls(branch.condition, aliases, stack)
-          const branchAliases = new Map(aliases)
-          analyzeBlock(branch.body, branchAliases, stack, true, false)
-          outcomes.push(branchAliases)
+          visitCalls(branch.condition, bindings, stack)
+          const branchBindings = new Map(bindings)
+          analyzeBlock(branch.body, branchBindings, stack, true)
+          outcomes.push(branchBindings)
         }
-        if (statement.elseBody === undefined) outcomes.push(new Map(aliases))
+        if (statement.elseBody === undefined) outcomes.push(new Map(bindings))
         else {
-          const elseAliases = new Map(aliases)
-          analyzeBlock(statement.elseBody, elseAliases, stack, true, false)
-          outcomes.push(elseAliases)
+          const elseBindings = new Map(bindings)
+          analyzeBlock(statement.elseBody, elseBindings, stack, true)
+          outcomes.push(elseBindings)
         }
-        mergeAliases(aliases, outcomes)
+        mergeBindings(bindings, outcomes)
       } else if (statement.kind === 'loop') {
-        visitCalls(statement.header, aliases, stack)
-        const outsideAliases = new Map(aliases)
-        let loopEntry = new Map(aliases)
+        visitCalls(statement.header, bindings, stack)
+        const outsideBindings = new Map(bindings)
+        let loopEntry = new Map(bindings)
         const loopBindings: string[] = []
+        const declaredLoopBindings = new Set<string>()
         const bindingEnd = statement.header.findIndex((token) => token.value === '=' || token.value === 'in')
         if (statement.loopKind === 'for' && bindingEnd < 1) throw new Error('unsupported Lua for-loop binding')
         if (statement.loopKind === 'for') {
@@ -986,17 +1060,23 @@ function assertEveryRedisKeyComesFromKeys(lua: string): void {
               throw new Error(`Lua for-loop binding '${part[0].value}' shadows a certified callee`)
             }
             loopBindings.push(part[0].value)
-            loopEntry.set(part[0].value, 'unknown')
+            installBinding(
+              loopEntry,
+              part[0].value,
+              valueBinding('unknown'),
+              declaredLoopBindings.has(part[0].value) ? 'rebind' : 'declare',
+            )
+            declaredLoopBindings.add(part[0].value)
           }
         }
         let stabilized = false
-        const maxPasses = aliases.size + latticePassBound(statement.body)
+        const maxPasses = bindings.size + latticePassBound(statement.body)
         for (let pass = 0; pass < maxPasses; pass++) {
           const backEdge = new Map(loopEntry)
-          analyzeBlock(statement.body, backEdge, stack, true, false)
-          const nextEntry = joinedAliases([loopEntry, backEdge])
-          for (const name of loopBindings) nextEntry.set(name, 'unknown')
-          if (sameAliases(loopEntry, nextEntry)) {
+          analyzeBlock(statement.body, backEdge, stack, true)
+          const nextEntry = joinedBindings([loopEntry, backEdge])
+          for (const name of loopBindings) installBinding(nextEntry, name, valueBinding('unknown'), 'declare')
+          if (sameBindings(loopEntry, nextEntry)) {
             loopEntry = nextEntry
             stabilized = true
             break
@@ -1005,22 +1085,19 @@ function assertEveryRedisKeyComesFromKeys(lua: string): void {
         }
         if (!stabilized) throw new Error(`Lua loop provenance did not stabilize within ${maxPasses} passes`)
         for (const name of loopBindings) {
-          const before = outsideAliases.get(name)
-          if (before === undefined) loopEntry.delete(name)
-          else loopEntry.set(name, before)
+          const before = outsideBindings.get(name)
+          restoreBinding(loopEntry, name, before)
         }
-        mergeAliases(aliases, [outsideAliases, loopEntry])
+        mergeBindings(bindings, [outsideBindings, loopEntry])
       } else {
-        const innerAliases = new Map(aliases)
-        analyzeBlock(statement.body, innerAliases, stack, true, false)
-        mergeAliases(aliases, [innerAliases])
+        const innerBindings = new Map(bindings)
+        analyzeBlock(statement.body, innerBindings, stack, true)
+        mergeBindings(bindings, [innerBindings])
       }
     }
     if (restoreLocals) {
       for (const name of locals) {
-        const before = incoming.get(name)
-        if (before === undefined) aliases.delete(name)
-        else aliases.set(name, before)
+        restoreBinding(bindings, name, incoming.get(name))
       }
     }
   }
@@ -1497,6 +1574,117 @@ local record = cjson.decode(raw)
     }
   })
 
+  it('keeps one coherent scoped binding per Lua identifier', () => {
+    const decodedRecord = `
+local raw = redis.call('HGET', KEYS[1], ARGV[1])
+local record = cjson.decode(raw)`
+    const accepted = [
+      {
+        name: 'function parameter shadows and then reveals the outer record',
+        lua: `${decodedRecord}
+local function inspect(record)
+  return tostring(record)
+end
+inspect(ARGV[2])
+record.expiresAt = ARGV[3]
+redis.call('SET', KEYS[1], cjson.encode(record))`,
+      },
+      {
+        name: 'loop iterator shadows and then reveals the outer record',
+        lua: `${decodedRecord}
+for record = 1, 2 do
+  local scalar = record
+end
+record.expiresAt = ARGV[2]
+redis.call('SET', KEYS[1], cjson.encode(record))`,
+      },
+      {
+        name: 'nested local function shadows and then reveals the outer record',
+        lua: `${decodedRecord}
+do
+  local function record()
+    return tostring(ARGV[2])
+  end
+  local scalar = record()
+end
+record.expiresAt = ARGV[3]
+redis.call('SET', KEYS[1], cjson.encode(record))`,
+      },
+      {
+        name: 'branch-local value shadows and then reveals the outer record',
+        lua: `${decodedRecord}
+if ARGV[2] ~= '' then
+  local record = {}
+  record.expiresAt = ARGV[2]
+end
+record.expiresAt = ARGV[3]
+redis.call('SET', KEYS[1], cjson.encode(record))`,
+      },
+      {
+        name: 'nested same-name local function restores the outer function',
+        lua: `local function current(key)
+  return redis.call('GET', key)
+end
+do
+  local function current(value)
+    return tostring(value)
+  end
+  local scalar = current(ARGV[1])
+end
+current(KEYS[1])`,
+      },
+    ]
+    for (const { name, lua } of accepted) {
+      expect(() => assertEveryRedisKeyComesFromKeys(lua), name).not.toThrow()
+    }
+
+    const rejected = [
+      {
+        name: 'record is replaced by a same-name local function',
+        lua: `${decodedRecord}
+local function record()
+  return tostring(ARGV[2])
+end
+record.expiresAt = ARGV[3]
+redis.call('SET', KEYS[1], 'done')`,
+        message: "member assignment base 'record' is not a proven private local data record",
+      },
+      {
+        name: 'local function is replaced by a same-name local value',
+        lua: `local function current()
+  return tostring(ARGV[1])
+end
+local current = ARGV[1]
+current()
+redis.call('GET', KEYS[1])`,
+        message: "unsupported Lua callee 'current' cannot be certified",
+      },
+      {
+        name: 'multi-local declaration replaces a same-name function atomically',
+        lua: `local function current()
+  return tostring(ARGV[1])
+end
+local current, current = ARGV[1], ARGV[2]
+current()
+redis.call('GET', KEYS[1])`,
+        message: "unsupported Lua callee 'current' cannot be certified",
+      },
+      {
+        name: 'global function declaration remains unsupported',
+        lua: "function current() return redis.call('GET', KEYS[1]) end\ncurrent()",
+        message: "global Lua function 'current' cannot be certified",
+      },
+      {
+        name: 'function-member declaration remains unsupported',
+        lua: "function object.current() return redis.call('GET', KEYS[1]) end",
+        message: "expected Lua '('",
+      },
+    ]
+    for (const { name, lua, message } of rejected) {
+      expect(() => assertEveryRedisKeyComesFromKeys(lua), name).toThrow(message)
+    }
+  })
+
   it('fails closed on unknown callees and unsupported call or control syntax', () => {
     expect(() => assertEveryRedisKeyComesFromKeys("mystery('GET', KEYS[1])")).toThrow(
       "unsupported Lua callee 'mystery' cannot be certified",
@@ -1518,8 +1706,10 @@ local record = cjson.decode(raw)
     )
     expect(() => assertEveryRedisKeyComesFromKeys('invoke [[GET]]')).toThrow('unsupported Lua long-string syntax')
     expect(() =>
-      assertEveryRedisKeyComesFromKeys("if true then local function read() redis.call('GET', KEYS[1]) end end"),
-    ).toThrow("nested or conditional Lua function 'read' cannot be certified")
+      assertEveryRedisKeyComesFromKeys(
+        "if true then local function read(key) return redis.call('GET', key) end read(KEYS[1]) end",
+      ),
+    ).not.toThrow()
     expect(() => assertEveryRedisKeyComesFromKeys("function read() redis.call('GET', KEYS[1]) end\nread()")).toThrow(
       "global Lua function 'read' cannot be certified",
     )
