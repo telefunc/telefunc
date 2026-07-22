@@ -40,11 +40,22 @@ type ChannelLifecycle = {
   subscriptions: Set<RedisLaneSubscription>
   operationEpoch: number
   initialEstablished: boolean
+  cleanup: ChannelCleanup | null
 }
 
-type ChannelAck = {
+type ChannelAttemptIdentity = {
   connectionEpoch: number
+  operationEpoch: number
+}
+
+type ChannelAck = ChannelAttemptIdentity & {
   promise: Promise<boolean>
+}
+
+type ChannelCleanup = {
+  operationEpoch: number
+  promise: Promise<void>
+  resolve: () => void
 }
 
 function delay(ms: number): Promise<void> {
@@ -156,7 +167,7 @@ export class RedisSubscriberTransport {
 
   readonly #channels = new Map<string, ChannelLifecycle>()
   readonly #channelAcks = new Map<string, ChannelAck>()
-  readonly #subscribedChannels = new Set<string>()
+  readonly #subscribedChannels = new Map<string, ChannelAttemptIdentity>()
   readonly #subscribedInvalidations = new Set<string>()
   readonly #invalidationOwners = new Map<string, string>()
 
@@ -190,6 +201,7 @@ export class RedisSubscriberTransport {
         subscriptions: new Set(),
         operationEpoch: 0,
         initialEstablished: false,
+        cleanup: null,
       }
       this.#channels.set(binding.channel, lifecycle)
       this.#invalidationOwners.set(binding.invalidationChannel, binding.owner)
@@ -299,22 +311,37 @@ export class RedisSubscriberTransport {
   #ensureSubscribed(lifecycle: ChannelLifecycle): Promise<boolean> {
     const channel = lifecycle.binding.channel
     const existing = this.#channelAcks.get(channel)
-    if (existing !== undefined && existing.connectionEpoch === this.#connectionEpoch) return existing.promise
-    if (this.#subscribedChannels.has(channel) && this.#readyEpoch === this.#connectionEpoch) {
+    if (
+      existing !== undefined &&
+      existing.connectionEpoch === this.#connectionEpoch &&
+      existing.operationEpoch === lifecycle.operationEpoch
+    ) {
+      return existing.promise
+    }
+    const ownership = this.#subscribedChannels.get(channel)
+    if (
+      ownership?.connectionEpoch === this.#connectionEpoch &&
+      ownership.operationEpoch === lifecycle.operationEpoch &&
+      this.#readyEpoch === this.#connectionEpoch
+    ) {
       return Promise.resolve(true)
     }
-
     const operationEpoch = lifecycle.operationEpoch
     const connectionEpoch = this.#connectionEpoch
-    const record: ChannelAck = { connectionEpoch, promise: Promise.resolve(false) }
+    const record: ChannelAck = { connectionEpoch, operationEpoch, promise: Promise.resolve(false) }
     record.promise = this.#subscribeWithRetry(lifecycle, operationEpoch, connectionEpoch)
       .then(async (installed) => {
-        if (!installed || !this.#attemptIsCurrent(lifecycle, operationEpoch, connectionEpoch)) return false
+        if (!installed || !this.#attemptIsCurrent(lifecycle, operationEpoch, connectionEpoch)) {
+          this.#continueAttachedLifecycle(lifecycle, operationEpoch, connectionEpoch)
+          return false
+        }
         if (lifecycle.subscriptions.size === 0) {
-          if (this.#subscribedChannels.has(channel) && this.#subscriber.status !== 'end') {
+          const installedOwnership = this.#subscribedChannels.get(channel)
+          if (installedOwnership !== undefined && this.#subscriber.status !== 'end') {
             await this.#subscriber.unsubscribe(channel)
           }
-          this.#subscribedChannels.delete(channel)
+          if (this.#subscribedChannels.get(channel) === installedOwnership) this.#subscribedChannels.delete(channel)
+          this.#continueAttachedLifecycle(lifecycle, operationEpoch, connectionEpoch)
           return false
         }
         lifecycle.initialEstablished = true
@@ -341,6 +368,8 @@ export class RedisSubscriberTransport {
   ): Promise<boolean> {
     const { binding } = lifecycle
     let lastError: unknown = new Error(`subscribeLane: SUBSCRIBE '${binding.channel}' failed`)
+    const cleanup = lifecycle.cleanup
+    if (cleanup !== null && cleanup.operationEpoch === operationEpoch) await cleanup.promise
     for (let attempt = 1; attempt <= SUBSCRIPTION_RETRY_ATTEMPTS; attempt++) {
       if (this.#disposed) throw new Error('RedisSubscriberTransport: disposed during subscription establishment')
       if (!this.#attemptIsCurrent(lifecycle, operationEpoch, connectionEpoch)) return false
@@ -355,7 +384,8 @@ export class RedisSubscriberTransport {
         if (!this.#attemptIsCurrent(lifecycle, operationEpoch, connectionEpoch)) return false
         // Remote ownership is recorded at the acknowledgement boundary, before any held durable check,
         // so last detach can uninstall this exact current-connection attempt.
-        this.#subscribedChannels.add(binding.channel)
+        const ownership = { connectionEpoch, operationEpoch }
+        this.#subscribedChannels.set(binding.channel, ownership)
         this.#subscribedInvalidations.add(binding.invalidationChannel)
         await this.#hooks?.afterSubscribeAck?.(binding.channel)
         if (!this.#attemptIsCurrent(lifecycle, operationEpoch, connectionEpoch)) return false
@@ -364,7 +394,9 @@ export class RedisSubscriberTransport {
         if (!this.#attemptIsCurrent(lifecycle, operationEpoch, connectionEpoch)) return false
         if (!valid) {
           await this.#subscriber.unsubscribe(binding.channel)
-          this.#subscribedChannels.delete(binding.channel)
+          if (this.#subscribedChannels.get(binding.channel) === ownership) {
+            this.#subscribedChannels.delete(binding.channel)
+          }
           throw new RedisGenerationInvalidError(
             `subscribeLane: generation for channel '${binding.channel}' was invalidated`,
           )
@@ -392,6 +424,22 @@ export class RedisSubscriberTransport {
     )
   }
 
+  #continueAttachedLifecycle(
+    lifecycle: ChannelLifecycle,
+    staleOperationEpoch: number,
+    staleConnectionEpoch: number,
+  ): void {
+    if (
+      this.#disposed ||
+      this.#channels.get(lifecycle.binding.channel) !== lifecycle ||
+      lifecycle.subscriptions.size === 0 ||
+      (lifecycle.operationEpoch === staleOperationEpoch && this.#connectionEpoch === staleConnectionEpoch)
+    ) {
+      return
+    }
+    void this.#ensureSubscribed(lifecycle).catch(() => {})
+  }
+
   async #awaitConnectionReady(connectionEpoch: number): Promise<boolean> {
     while (!this.#disposed && this.#connectionEpoch === connectionEpoch && this.#readyEpoch !== connectionEpoch) {
       await new Promise<void>((resolve) => this.#connectionWaiters.add(resolve))
@@ -417,25 +465,25 @@ export class RedisSubscriberTransport {
     if (this.#channels.get(lifecycle.binding.channel) !== lifecycle) return
     lifecycle.subscriptions.delete(subscription)
     if (lifecycle.subscriptions.size !== 0) return
+    const channel = lifecycle.binding.channel
+    const ownership = this.#subscribedChannels.get(channel)
     lifecycle.operationEpoch++
-    const subscribed = this.#subscribedChannels.has(lifecycle.binding.channel)
-    if (subscribed && !this.#disposed && this.#subscriber.status !== 'end') {
-      try {
-        await this.#subscriber.unsubscribe(lifecycle.binding.channel)
-        this.#subscribedChannels.delete(lifecycle.binding.channel)
-        await this.#unsubscribeInvalidationIfLast(lifecycle)
-      } catch (err) {
-        void this.#retryEmptyChannelCleanup(lifecycle)
-        throw err
+    const cleanup = this.#beginChannelCleanup(lifecycle)
+    try {
+      if (ownership !== undefined && !this.#disposed && this.#subscriber.status !== 'end') {
+        await this.#subscriber.unsubscribe(channel)
+        if (this.#subscribedChannels.get(channel) === ownership) this.#subscribedChannels.delete(channel)
       }
+      if (lifecycle.subscriptions.size === 0) await this.#unsubscribeInvalidationIfLast(lifecycle)
+    } catch (err) {
+      void this.#retryEmptyChannelCleanup(lifecycle)
+      throw err
+    } finally {
+      this.#finishChannelCleanup(lifecycle, cleanup)
     }
-    if (!subscribed) {
-      try {
-        await this.#unsubscribeInvalidationIfLast(lifecycle)
-      } catch (err) {
-        void this.#retryEmptyChannelCleanup(lifecycle)
-        throw err
-      }
+    if (lifecycle.subscriptions.size !== 0) {
+      void this.#ensureSubscribed(lifecycle).catch(() => {})
+      return
     }
     this.#finishEmptyChannelCleanup(lifecycle)
   }
@@ -444,31 +492,69 @@ export class RedisSubscriberTransport {
     for (let attempt = 1; attempt <= SUBSCRIPTION_RETRY_ATTEMPTS; attempt++) {
       if (this.#disposed || this.#channels.get(lifecycle.binding.channel) !== lifecycle) return
       await delay(this.#retryDelay(attempt))
+      if (lifecycle.cleanup !== null) await lifecycle.cleanup.promise
       if (lifecycle.subscriptions.size !== 0) return
+      const cleanup = this.#beginChannelCleanup(lifecycle)
       try {
-        if (this.#subscribedChannels.has(lifecycle.binding.channel) && this.#subscriber.status !== 'end') {
+        const channel = lifecycle.binding.channel
+        const ownership = this.#subscribedChannels.get(channel)
+        if (ownership !== undefined && this.#subscriber.status !== 'end') {
           await this.#subscriber.unsubscribe(lifecycle.binding.channel)
-          this.#subscribedChannels.delete(lifecycle.binding.channel)
+          if (this.#subscribedChannels.get(channel) === ownership) this.#subscribedChannels.delete(channel)
+        }
+        if (lifecycle.subscriptions.size !== 0) {
+          void this.#ensureSubscribed(lifecycle).catch(() => {})
+          return
         }
         await this.#unsubscribeInvalidationIfLast(lifecycle)
+        if (lifecycle.subscriptions.size !== 0) {
+          void this.#ensureSubscribed(lifecycle).catch(() => {})
+          return
+        }
         this.#finishEmptyChannelCleanup(lifecycle)
         return
       } catch {
         // Retain this exact item and retry; other channels and generations continue independently.
+      } finally {
+        this.#finishChannelCleanup(lifecycle, cleanup)
       }
     }
   }
 
-  async #unsubscribeInvalidationIfLast(lifecycle: ChannelLifecycle): Promise<void> {
-    for (const candidate of this.#channels.values()) {
-      if (candidate !== lifecycle && candidate.binding.owner === lifecycle.binding.owner) return
+  #beginChannelCleanup(lifecycle: ChannelLifecycle): ChannelCleanup {
+    let resolve!: () => void
+    const cleanup: ChannelCleanup = {
+      operationEpoch: lifecycle.operationEpoch,
+      promise: new Promise<void>((settle) => {
+        resolve = settle
+      }),
+      resolve: () => resolve(),
     }
+    lifecycle.cleanup = cleanup
+    return cleanup
+  }
+
+  #finishChannelCleanup(lifecycle: ChannelLifecycle, cleanup: ChannelCleanup): void {
+    if (lifecycle.cleanup === cleanup) lifecycle.cleanup = null
+    cleanup.resolve()
+  }
+
+  async #unsubscribeInvalidationIfLast(lifecycle: ChannelLifecycle): Promise<void> {
+    if (this.#ownerHasAttachments(lifecycle.binding.owner)) return
     const invalidation = lifecycle.binding.invalidationChannel
     if (this.#subscribedInvalidations.has(invalidation) && this.#subscriber.status !== 'end') {
       await this.#subscriber.unsubscribe(invalidation)
     }
+    if (this.#ownerHasAttachments(lifecycle.binding.owner)) return
     this.#subscribedInvalidations.delete(invalidation)
     this.#invalidationOwners.delete(invalidation)
+  }
+
+  #ownerHasAttachments(owner: string): boolean {
+    for (const candidate of this.#channels.values()) {
+      if (candidate.binding.owner === owner && candidate.subscriptions.size !== 0) return true
+    }
+    return false
   }
 
   #finishEmptyChannelCleanup(lifecycle: ChannelLifecycle): void {

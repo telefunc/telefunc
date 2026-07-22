@@ -153,6 +153,357 @@ describe.skipIf(url === undefined || url === '')('Redis independent-review race 
     expect(latch.payloads()).toEqual(['after-race'])
   })
 
+  it('starts a current-operation SUBSCRIBE when last detach overlaps a same-connection replacement', async () => {
+    const roomId = nextId('room')
+    const { inc } = await openRoom(fx.backend, roomId)
+    const channel = `${fx.prefix}room:{${roomId}}:ch:${inc}:semantic`
+    const firstAckHeld = deferred()
+    const releaseFirstValidation = deferred()
+    const uninstallEntered = deferred()
+    const releaseUninstall = deferred()
+    let ackCount = 0
+    fx.setAfterSubscribeAck(async () => {
+      ackCount++
+      if (ackCount === 1) {
+        firstAckHeld.resolve()
+        await releaseFirstValidation.promise
+      }
+    })
+
+    const subscriber = fx.subscriber as unknown as {
+      unsubscribe: (...channels: string[]) => Promise<number>
+    }
+    const originalUnsubscribe = subscriber.unsubscribe.bind(fx.subscriber)
+    let heldExactLane = false
+    subscriber.unsubscribe = (...channels) => {
+      const pending = originalUnsubscribe(...channels)
+      if (!heldExactLane && channels.length === 1 && channels[0] === channel) {
+        heldExactLane = true
+        uninstallEntered.resolve()
+        return releaseUninstall.promise.then(() => pending)
+      }
+      return pending
+    }
+
+    const old = fx.backend.subscribeLane(roomId, inc, SEMANTIC, () => {})
+    await firstAckHeld.promise
+    const oldDetach = old.unsubscribe()
+    await uninstallEntered.promise
+
+    const latch = collector()
+    const replacement = fx.backend.subscribeLane(roomId, inc, SEMANTIC, latch.receiver)
+    releaseUninstall.resolve()
+    await oldDetach
+    subscriber.unsubscribe = originalUnsubscribe
+
+    await waitFor(() => ackCount === 2)
+    await replacement.ready
+    releaseFirstValidation.resolve()
+    expect(ackCount).toBe(2)
+    await waitFor(async () => (await fx.redis.pubsub('NUMSUB', channel))[1] === 1)
+    expect(replacement.state()).toBe('ready')
+    const result = accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, bytes('replacement')))
+    expect(result.receivers).toBe(1)
+    await result.delivery
+    await latch.waitFor(1)
+    expect(latch.payloads()).toEqual(['replacement'])
+  })
+
+  it('keeps a replacement behind cleanup when it attaches before the lane UNSUBSCRIBE is acknowledged', async () => {
+    const roomId = nextId('room')
+    const { inc } = await openRoom(fx.backend, roomId)
+    const channel = `${fx.prefix}room:{${roomId}}:ch:${inc}:semantic`
+    const firstAckHeld = deferred()
+    const releaseFirstValidation = deferred()
+    const uninstallCalled = deferred()
+    const releaseUninstall = deferred()
+    let ackCount = 0
+    fx.setAfterSubscribeAck(async () => {
+      ackCount++
+      if (ackCount === 1) {
+        firstAckHeld.resolve()
+        await releaseFirstValidation.promise
+      }
+    })
+
+    const subscriber = fx.subscriber as unknown as {
+      unsubscribe: (...channels: string[]) => Promise<number>
+    }
+    const originalUnsubscribe = subscriber.unsubscribe.bind(fx.subscriber)
+    let heldExactLane = false
+    subscriber.unsubscribe = async (...channels) => {
+      if (!heldExactLane && channels.length === 1 && channels[0] === channel) {
+        heldExactLane = true
+        uninstallCalled.resolve()
+        await releaseUninstall.promise
+      }
+      return originalUnsubscribe(...channels)
+    }
+
+    const old = fx.backend.subscribeLane(roomId, inc, SEMANTIC, () => {})
+    await firstAckHeld.promise
+    const oldDetach = old.unsubscribe()
+    await uninstallCalled.promise
+    const latch = collector()
+    const replacement = fx.backend.subscribeLane(roomId, inc, SEMANTIC, latch.receiver)
+
+    releaseFirstValidation.resolve()
+    await flush()
+    expect(replacement.state()).toBe('establishing')
+    expect(ackCount).toBe(1)
+    releaseUninstall.resolve()
+    await oldDetach
+    subscriber.unsubscribe = originalUnsubscribe
+
+    await replacement.ready
+    expect(ackCount).toBe(2)
+    await waitFor(async () => (await fx.redis.pubsub('NUMSUB', channel))[1] === 1)
+    const result = accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, bytes('before-ack')))
+    expect(result.receivers).toBe(1)
+    await result.delivery
+    await latch.waitFor(1)
+    expect(latch.payloads()).toEqual(['before-ack'])
+  })
+
+  it('starts the replacement after an acknowledged lane UNSUBSCRIBE whose caller is still held', async () => {
+    const roomId = nextId('room')
+    const { inc } = await openRoom(fx.backend, roomId)
+    const channel = `${fx.prefix}room:{${roomId}}:ch:${inc}:semantic`
+    const firstAckHeld = deferred()
+    const releaseFirstValidation = deferred()
+    const uninstallAcknowledged = deferred()
+    const releaseUninstallCaller = deferred()
+    let ackCount = 0
+    fx.setAfterSubscribeAck(async () => {
+      ackCount++
+      if (ackCount === 1) {
+        firstAckHeld.resolve()
+        await releaseFirstValidation.promise
+      }
+    })
+
+    const subscriber = fx.subscriber as unknown as {
+      unsubscribe: (...channels: string[]) => Promise<number>
+    }
+    const originalUnsubscribe = subscriber.unsubscribe.bind(fx.subscriber)
+    let heldExactLane = false
+    subscriber.unsubscribe = async (...channels) => {
+      const result = await originalUnsubscribe(...channels)
+      if (!heldExactLane && channels.length === 1 && channels[0] === channel) {
+        heldExactLane = true
+        uninstallAcknowledged.resolve()
+        await releaseUninstallCaller.promise
+      }
+      return result
+    }
+
+    const old = fx.backend.subscribeLane(roomId, inc, SEMANTIC, () => {})
+    await firstAckHeld.promise
+    const oldDetach = old.unsubscribe()
+    await uninstallAcknowledged.promise
+    const latch = collector()
+    const replacement = fx.backend.subscribeLane(roomId, inc, SEMANTIC, latch.receiver)
+
+    releaseFirstValidation.resolve()
+    await flush()
+    expect(replacement.state()).toBe('establishing')
+    releaseUninstallCaller.resolve()
+    await oldDetach
+    subscriber.unsubscribe = originalUnsubscribe
+
+    await replacement.ready
+    expect(ackCount).toBe(2)
+    await waitFor(async () => (await fx.redis.pubsub('NUMSUB', channel))[1] === 1)
+    const result = accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, bytes('after-ack')))
+    expect(result.receivers).toBe(1)
+    await result.delivery
+    await latch.waitFor(1)
+    expect(latch.payloads()).toEqual(['after-ack'])
+  })
+
+  it('multiplexes two late replacements behind one current-operation acknowledgement', async () => {
+    const roomId = nextId('room')
+    const { inc } = await openRoom(fx.backend, roomId)
+    const channel = `${fx.prefix}room:{${roomId}}:ch:${inc}:semantic`
+    const firstAckHeld = deferred()
+    const releaseFirstValidation = deferred()
+    const uninstallCalled = deferred()
+    const releaseUninstall = deferred()
+    let ackCount = 0
+    fx.setAfterSubscribeAck(async () => {
+      ackCount++
+      if (ackCount === 1) {
+        firstAckHeld.resolve()
+        await releaseFirstValidation.promise
+      }
+    })
+
+    const subscriber = fx.subscriber as unknown as {
+      unsubscribe: (...channels: string[]) => Promise<number>
+    }
+    const originalUnsubscribe = subscriber.unsubscribe.bind(fx.subscriber)
+    let heldExactLane = false
+    subscriber.unsubscribe = async (...channels) => {
+      if (!heldExactLane && channels.length === 1 && channels[0] === channel) {
+        heldExactLane = true
+        uninstallCalled.resolve()
+        await releaseUninstall.promise
+      }
+      return originalUnsubscribe(...channels)
+    }
+
+    const old = fx.backend.subscribeLane(roomId, inc, SEMANTIC, () => {})
+    await firstAckHeld.promise
+    const oldDetach = old.unsubscribe()
+    await uninstallCalled.promise
+    const firstLatch = collector()
+    const secondLatch = collector()
+    const first = fx.backend.subscribeLane(roomId, inc, SEMANTIC, firstLatch.receiver)
+    const second = fx.backend.subscribeLane(roomId, inc, SEMANTIC, secondLatch.receiver)
+
+    releaseFirstValidation.resolve()
+    releaseUninstall.resolve()
+    await oldDetach
+    subscriber.unsubscribe = originalUnsubscribe
+    await Promise.all([first.ready, second.ready])
+
+    expect(ackCount).toBe(2)
+    await waitFor(async () => (await fx.redis.pubsub('NUMSUB', channel))[1] === 1)
+    const result = accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, bytes('two-late')))
+    expect(result.receivers).toBe(1)
+    await result.delivery
+    await Promise.all([firstLatch.waitFor(1), secondLatch.waitFor(1)])
+    expect(firstLatch.payloads()).toEqual(['two-late'])
+    expect(secondLatch.payloads()).toEqual(['two-late'])
+  })
+
+  it('does not let failed old cleanup retry uninstall a successor attachment', async () => {
+    const roomId = nextId('room')
+    const { inc } = await openRoom(fx.backend, roomId)
+    const channel = `${fx.prefix}room:{${roomId}}:ch:${inc}:semantic`
+    let ackCount = 0
+    fx.setAfterSubscribeAck(() => {
+      ackCount++
+    })
+    const old = fx.backend.subscribeLane(roomId, inc, SEMANTIC, () => {})
+    await old.ready
+
+    const subscriber = fx.subscriber as unknown as {
+      unsubscribe: (...channels: string[]) => Promise<number>
+    }
+    const originalUnsubscribe = subscriber.unsubscribe.bind(fx.subscriber)
+    const cleanupCalled = deferred()
+    const releaseFailure = deferred()
+    let failedExactLane = false
+    subscriber.unsubscribe = async (...channels) => {
+      if (!failedExactLane && channels.length === 1 && channels[0] === channel) {
+        failedExactLane = true
+        cleanupCalled.resolve()
+        await releaseFailure.promise
+        throw new Error('forced old cleanup failure')
+      }
+      return originalUnsubscribe(...channels)
+    }
+
+    const oldDetach = old.unsubscribe()
+    await cleanupCalled.promise
+    const latch = collector()
+    const successor = fx.backend.subscribeLane(roomId, inc, SEMANTIC, latch.receiver)
+    releaseFailure.resolve()
+    await expect(oldDetach).rejects.toThrow('forced old cleanup failure')
+    subscriber.unsubscribe = originalUnsubscribe
+
+    await successor.ready
+    expect(ackCount).toBe(2)
+    await waitFor(async () => (await fx.redis.pubsub('NUMSUB', channel))[1] === 1)
+    const result = accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, bytes('after-failure')))
+    expect(result.receivers).toBe(1)
+    await result.delivery
+    await latch.waitFor(1)
+    expect(latch.payloads()).toEqual(['after-failure'])
+  })
+
+  it('fences detach and replacement attempts across a simultaneous subscriber connection close', async () => {
+    const roomId = nextId('room')
+    const { inc } = await openRoom(fx.backend, roomId)
+    const channel = `${fx.prefix}room:{${roomId}}:ch:${inc}:semantic`
+    let ackCount = 0
+    fx.setAfterSubscribeAck(() => {
+      ackCount++
+    })
+    const old = fx.backend.subscribeLane(roomId, inc, SEMANTIC, () => {})
+    await old.ready
+
+    const subscriber = fx.subscriber as unknown as {
+      unsubscribe: (...channels: string[]) => Promise<number>
+    }
+    const originalUnsubscribe = subscriber.unsubscribe.bind(fx.subscriber)
+    const cleanupCalled = deferred()
+    const releaseCleanup = deferred()
+    let heldExactLane = false
+    subscriber.unsubscribe = async (...channels) => {
+      if (!heldExactLane && channels.length === 1 && channels[0] === channel) {
+        heldExactLane = true
+        cleanupCalled.resolve()
+        await releaseCleanup.promise
+      }
+      return originalUnsubscribe(...channels)
+    }
+
+    const oldDetach = old.unsubscribe()
+    await cleanupCalled.promise
+    const latch = collector()
+    const replacement = fx.backend.subscribeLane(roomId, inc, SEMANTIC, latch.receiver)
+    await fx.redis.client('KILL', 'ID', String(fx.subscriberId))
+    expect(await settled(replacement.ready)).toBe('rejected')
+    await waitFor(() => replacement.state() === 'lost')
+    releaseCleanup.resolve()
+    await oldDetach
+    subscriber.unsubscribe = originalUnsubscribe
+
+    await waitFor(() => replacement.state() === 'ready')
+    expect(ackCount).toBe(2)
+    await waitFor(async () => (await fx.redis.pubsub('NUMSUB', channel))[1] === 1)
+    const result = accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, bytes('after-close')))
+    expect(result.receivers).toBe(1)
+    await result.delivery
+    await latch.waitFor(1)
+    expect(latch.payloads()).toEqual(['after-close'])
+  })
+
+  it('reuses a genuinely current operation acknowledgement without duplicate broker SUBSCRIBE or delivery', async () => {
+    const roomId = nextId('room')
+    const { inc } = await openRoom(fx.backend, roomId)
+    const channel = `${fx.prefix}room:{${roomId}}:ch:${inc}:semantic`
+    const ackHeld = deferred()
+    const releaseAck = deferred()
+    let ackCount = 0
+    fx.setAfterSubscribeAck(async () => {
+      ackCount++
+      if (ackCount === 1) {
+        ackHeld.resolve()
+        await releaseAck.promise
+      }
+    })
+
+    const firstLatch = collector()
+    const secondLatch = collector()
+    const first = fx.backend.subscribeLane(roomId, inc, SEMANTIC, firstLatch.receiver)
+    await ackHeld.promise
+    const second = fx.backend.subscribeLane(roomId, inc, SEMANTIC, secondLatch.receiver)
+    releaseAck.resolve()
+    await Promise.all([first.ready, second.ready])
+
+    expect(ackCount).toBe(1)
+    expect((await fx.redis.pubsub('NUMSUB', channel))[1]).toBe(1)
+    const result = accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, bytes('one-ack')))
+    expect(result.receivers).toBe(1)
+    await result.delivery
+    await Promise.all([firstLatch.waitFor(1), secondLatch.waitFor(1)])
+    expect(firstLatch.payloads()).toEqual(['one-ack'])
+    expect(secondLatch.payloads()).toEqual(['one-ack'])
+  })
+
   it('re-establishes every channel on the replacement shared subscriber connection', async () => {
     const roomId = nextId('room')
     const { inc } = await openRoom(fx.backend, roomId)
