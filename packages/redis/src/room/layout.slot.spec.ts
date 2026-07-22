@@ -49,13 +49,36 @@ type LuaStatement =
       branches: readonly { condition: readonly LuaToken[]; body: readonly LuaStatement[] }[]
       elseBody?: readonly LuaStatement[]
     }
-  | { kind: 'loop'; header: readonly LuaToken[]; body: readonly LuaStatement[] }
+  | { kind: 'loop'; loopKind: 'for' | 'while'; header: readonly LuaToken[]; body: readonly LuaStatement[] }
   | { kind: 'do'; body: readonly LuaStatement[] }
 
 const OPEN = new Map([
   ['(', ')'],
   ['[', ']'],
   ['{', '}'],
+])
+
+const UNSUPPORTED_STATEMENTS = new Set(['goto', 'repeat', 'until'])
+const LUA_KEYWORDS = new Set([
+  'and',
+  'break',
+  'do',
+  'else',
+  'elseif',
+  'end',
+  'false',
+  'for',
+  'function',
+  'if',
+  'in',
+  'local',
+  'nil',
+  'not',
+  'or',
+  'return',
+  'then',
+  'true',
+  'while',
 ])
 
 function lexLua(lua: string): LuaToken[] {
@@ -95,6 +118,9 @@ function lexLua(lua: string): LuaToken[] {
       while (index < lua.length && /[\d.]/.test(lua[index] as string)) index++
       tokens.push({ kind: 'number', value: lua.slice(start, index) })
     } else {
+      if ((char === '[' && lua[index + 1] === '[') || (char === ']' && lua[index + 1] === ']')) {
+        throw new Error('unsupported Lua long-string syntax')
+      }
       const pair = lua.slice(index, index + 2)
       if (['==', '~=', '<=', '>=', '..'].includes(pair)) {
         tokens.push({ kind: 'symbol', value: pair })
@@ -128,6 +154,9 @@ class LuaStatementParser {
       this.#skipSeparators()
       const token = this.#peek()
       if (token === undefined || stops.has(token.value)) break
+      if (UNSUPPORTED_STATEMENTS.has(token.value) || token.value === ':') {
+        throw new Error(`unsupported Lua control syntax '${token.value}'`)
+      }
       if (token.value === 'local' && this.#peek(1)?.value === 'function') {
         this.#index++
         statements.push(this.#parseFunction())
@@ -189,12 +218,14 @@ class LuaStatementParser {
   }
 
   #parseLoop(): LuaStatement {
+    const loopKind = this.#peek()?.value
+    if (loopKind !== 'for' && loopKind !== 'while') throw new Error(`unsupported Lua loop '${loopKind ?? ''}'`)
     this.#index++
     const header = this.#takeUntil('do')
     this.#expect('do')
     const body = this.#parseBlock(new Set(['end']))
     this.#expect('end')
-    return { kind: 'loop', header, body }
+    return { kind: 'loop', loopKind, header, body }
   }
 
   #takeUntil(value: string): LuaToken[] {
@@ -312,6 +343,20 @@ function sourceOf(tokens: readonly LuaToken[], aliases: ReadonlyMap<string, Prov
   return 'unknown'
 }
 
+function referenceOf(tokens: readonly LuaToken[]): string | undefined {
+  const expression = withoutOuterParens(tokens.filter((token) => token.kind !== 'newline'))
+  if (expression.length % 2 === 0) return undefined
+  const names: string[] = []
+  for (let index = 0; index < expression.length; index++) {
+    const token = expression[index] as LuaToken
+    if (index % 2 === 0) {
+      if (token.kind !== 'identifier') return undefined
+      names.push(token.value)
+    } else if (token.value !== '.') return undefined
+  }
+  return names.join('.')
+}
+
 function renderTokens(tokens: readonly LuaToken[]): string {
   return tokens.map((token) => (token.kind === 'string' ? `'${token.value}'` : token.value)).join(' ')
 }
@@ -344,12 +389,118 @@ const SINGLE_KEY_COMMANDS = new Set([
   'ZREM',
 ])
 
-function mergeAliases(target: Map<string, Provenance>, outcomes: readonly ReadonlyMap<string, Provenance>[]): void {
+const SAFE_NON_KEY_CALLS = new Set([
+  'cjson.decode',
+  'cjson.encode',
+  'ipairs',
+  'math.floor',
+  'redis.error_reply',
+  'string.len',
+  'string.match',
+  'struct.pack',
+  'tonumber',
+  'tostring',
+  'unpack',
+])
+
+const PROTECTED_CALL_BINDINGS = new Set([
+  ...SAFE_NON_KEY_CALLS,
+  'cjson',
+  'math',
+  'redis',
+  'redis.call',
+  'string',
+  'struct',
+])
+
+function joinedAliases(outcomes: readonly ReadonlyMap<string, Provenance>[]): Map<string, Provenance> {
+  const joined = new Map<string, Provenance>()
   const names = new Set(outcomes.flatMap((outcome) => [...outcome.keys()]))
   for (const name of names) {
     const sources = new Set(outcomes.map((outcome) => outcome.get(name) ?? 'unknown'))
-    target.set(name, sources.size === 1 ? ([...sources][0] as Provenance) : 'unknown')
+    joined.set(name, sources.size === 1 ? ([...sources][0] as Provenance) : 'unknown')
   }
+  return joined
+}
+
+function sameAliases(left: ReadonlyMap<string, Provenance>, right: ReadonlyMap<string, Provenance>): boolean {
+  return left.size === right.size && [...left].every(([name, source]) => right.get(name) === source)
+}
+
+function latticePassBound(statements: readonly LuaStatement[]): number {
+  let identifiers = 0
+  for (const statement of statements) {
+    if (statement.kind === 'simple')
+      identifiers += statement.tokens.filter((token) => token.kind === 'identifier').length
+    else if (statement.kind === 'function' || statement.kind === 'loop' || statement.kind === 'do') {
+      identifiers += latticePassBound(statement.body)
+    } else {
+      for (const branch of statement.branches) identifiers += latticePassBound(branch.body)
+      if (statement.elseBody !== undefined) identifiers += latticePassBound(statement.elseBody)
+    }
+  }
+  // Each finite alias slot can only retain its source or rise once to `unknown` under join.
+  return identifiers + 2
+}
+
+function assertNoCapturedFunctionWrites(statements: readonly LuaStatement[], bindings: Set<string>): void {
+  for (const statement of statements) {
+    if (statement.kind === 'simple') {
+      const assignment = statement.tokens.findIndex((token) => token.value === '=')
+      if (assignment < 0) {
+        if (statement.tokens[0]?.value === 'local') {
+          for (const part of splitTokens(statement.tokens.slice(1), ',')) {
+            if (part.length !== 1 || part[0]?.kind !== 'identifier')
+              throw new Error('unsupported local function declaration')
+            if (PROTECTED_CALL_BINDINGS.has(part[0].value)) {
+              throw new Error(`assignment to certified callee '${part[0].value}' is unsupported`)
+            }
+            bindings.add(part[0].value)
+          }
+        }
+        continue
+      }
+      const isLocal = statement.tokens[0]?.value === 'local'
+      const left = statement.tokens.slice(isLocal ? 1 : 0, assignment)
+      const names = splitTokens(left, ',').map((part) =>
+        part.length === 1 && part[0]?.kind === 'identifier' ? part[0].value : undefined,
+      )
+      if (names.some((name) => name === undefined)) {
+        throw new Error('member or dynamic assignment in a local function cannot be certified')
+      }
+      if (isLocal) for (const name of names as string[]) bindings.add(name)
+      else {
+        for (const name of names as string[]) {
+          if (!bindings.has(name)) throw new Error(`captured/global assignment '${name}' in local function`)
+        }
+      }
+    } else if (statement.kind === 'function') {
+      throw new Error(`nested local function '${statement.name}' cannot be certified`)
+    } else if (statement.kind === 'if') {
+      for (const branch of statement.branches) assertNoCapturedFunctionWrites(branch.body, new Set(bindings))
+      if (statement.elseBody !== undefined) assertNoCapturedFunctionWrites(statement.elseBody, new Set(bindings))
+    } else {
+      const inner = new Set(bindings)
+      if (statement.kind === 'loop' && statement.loopKind === 'for') {
+        const bindingEnd = statement.header.findIndex((token) => token.value === '=' || token.value === 'in')
+        if (bindingEnd < 1) throw new Error('unsupported Lua for-loop binding')
+        for (const part of splitTokens(statement.header.slice(0, bindingEnd), ',')) {
+          if (part.length !== 1 || part[0]?.kind !== 'identifier') throw new Error('unsupported Lua for-loop binding')
+          if (PROTECTED_CALL_BINDINGS.has(part[0].value)) {
+            throw new Error(`Lua for-loop binding '${part[0].value}' shadows a certified callee`)
+          }
+          inner.add(part[0].value)
+        }
+      }
+      assertNoCapturedFunctionWrites(statement.body, inner)
+    }
+  }
+}
+
+function mergeAliases(target: Map<string, Provenance>, outcomes: readonly ReadonlyMap<string, Provenance>[]): void {
+  const joined = joinedAliases(outcomes)
+  target.clear()
+  for (const [name, source] of joined) target.set(name, source)
 }
 
 function assertEveryRedisKeyComesFromKeys(lua: string): void {
@@ -358,7 +509,17 @@ function assertEveryRedisKeyComesFromKeys(lua: string): void {
 
   function visitCalls(tokens: readonly LuaToken[], aliases: Map<string, Provenance>, stack: readonly string[]): void {
     for (let index = 0; index < tokens.length; index++) {
+      if (tokens[index]?.value === '(' && [')', ']', '}'].includes(tokens[index - 1]?.value ?? '')) {
+        throw new Error(`unsupported indirect Lua call near '${renderTokens(tokens.slice(Math.max(0, index - 3)))}'`)
+      }
       if (tokens[index]?.kind !== 'identifier') continue
+      if (LUA_KEYWORDS.has(tokens[index]?.value as string)) continue
+      if (tokens[index - 1]?.value === ':') {
+        throw new Error(`unsupported Lua method call '${tokens[index]?.value as string}'`)
+      }
+      if (tokens[index + 1]?.kind === 'string' || tokens[index + 1]?.value === '{') {
+        throw new Error(`unsupported parenthesis-free Lua call '${tokens[index]?.value as string}'`)
+      }
       let callee = tokens[index]?.value as string
       let open = index + 1
       while (tokens[open]?.value === '.' && tokens[open + 1]?.kind === 'identifier') {
@@ -391,13 +552,16 @@ function assertEveryRedisKeyComesFromKeys(lua: string): void {
         const fn = functions.get(callee)
         if (fn !== undefined) {
           if (stack.includes(callee)) throw new Error(`recursive Lua function '${callee}' cannot be certified`)
+          assertNoCapturedFunctionWrites(fn.body, new Set(fn.parameters))
           // Only parameter provenance crosses a function boundary. Treating captured or global values as
           // unknown is deliberately conservative: a script must thread a Redis key through a certified call.
           const localAliases = new Map<string, Provenance>()
           for (let parameter = 0; parameter < fn.parameters.length; parameter++) {
             localAliases.set(fn.parameters[parameter] as string, sourceOf(args[parameter] ?? [], aliases))
           }
-          analyzeBlock(fn.body, localAliases, [...stack, callee])
+          analyzeBlock(fn.body, localAliases, [...stack, callee], false, false)
+        } else if (!SAFE_NON_KEY_CALLS.has(callee)) {
+          throw new Error(`unsupported Lua callee '${callee}' cannot be certified`)
         }
       }
       index = close
@@ -409,8 +573,24 @@ function assertEveryRedisKeyComesFromKeys(lua: string): void {
     aliases: Map<string, Provenance>,
     stack: readonly string[],
   ): readonly string[] {
+    if (tokens.some((token) => token.value === 'function' || token.value === '...')) {
+      throw new Error('unsupported Lua expression syntax cannot be certified')
+    }
     const assignment = tokens.findIndex((token) => token.value === '=')
     if (assignment < 0) {
+      if (tokens[0]?.value === 'local') {
+        const names = splitTokens(tokens.slice(1), ',').map((part) =>
+          part.length === 1 && part[0]?.kind === 'identifier' ? part[0].value : undefined,
+        )
+        if (names.some((name) => name === undefined)) throw new Error('unsupported Lua local declaration')
+        for (const name of names as string[]) {
+          if (PROTECTED_CALL_BINDINGS.has(name)) {
+            throw new Error(`assignment to certified callee '${name}' is unsupported`)
+          }
+          aliases.set(name, 'unknown')
+        }
+        return names as string[]
+      }
       visitCalls(tokens, aliases, stack)
       return []
     }
@@ -418,10 +598,23 @@ function assertEveryRedisKeyComesFromKeys(lua: string): void {
     const left = tokens.slice(isLocal ? 1 : 0, assignment)
     const names = splitTokens(left, ',').map((part) => (part.length === 1 ? part[0]?.value : undefined))
     if (names.some((name) => name === undefined)) {
+      const assignedReference = referenceOf(left)
+      if (assignedReference !== undefined && PROTECTED_CALL_BINDINGS.has(assignedReference)) {
+        throw new Error(`assignment to certified callee '${assignedReference}' is unsupported`)
+      }
       visitCalls(tokens, aliases, stack)
       return []
     }
     const values = splitTokens(tokens.slice(assignment + 1), ',')
+    for (let index = 0; index < names.length; index++) {
+      const name = names[index] as string
+      if (PROTECTED_CALL_BINDINGS.has(name)) {
+        throw new Error(`assignment to certified callee '${name}' is unsupported`)
+      }
+      if (referenceOf(values[index] ?? []) === 'redis.call') {
+        throw new Error(`redis.call alias '${name}' cannot be certified`)
+      }
+    }
     for (const value of values) visitCalls(value, aliases, stack)
     const sources = values.map((value) => sourceOf(value, aliases))
     for (let index = 0; index < names.length; index++) {
@@ -435,6 +628,7 @@ function assertEveryRedisKeyComesFromKeys(lua: string): void {
     aliases: Map<string, Provenance>,
     stack: readonly string[],
     restoreLocals = false,
+    allowFunctionDefinitions = true,
   ): void {
     const incoming = new Map(aliases)
     const locals = new Set<string>()
@@ -442,6 +636,17 @@ function assertEveryRedisKeyComesFromKeys(lua: string): void {
       if (statement.kind === 'simple') {
         for (const name of analyzeSimple(statement.tokens, aliases, stack)) locals.add(name)
       } else if (statement.kind === 'function') {
+        if (!allowFunctionDefinitions) {
+          throw new Error(`nested or conditional Lua function '${statement.name}' cannot be certified`)
+        }
+        if (PROTECTED_CALL_BINDINGS.has(statement.name)) {
+          throw new Error(`assignment to certified callee '${statement.name}' is unsupported`)
+        }
+        for (const parameter of statement.parameters) {
+          if (PROTECTED_CALL_BINDINGS.has(parameter)) {
+            throw new Error(`local function parameter '${parameter}' shadows a certified callee`)
+          }
+        }
         functions.set(statement.name, {
           parameters: statement.parameters,
           body: statement.body,
@@ -451,39 +656,57 @@ function assertEveryRedisKeyComesFromKeys(lua: string): void {
         for (const branch of statement.branches) {
           visitCalls(branch.condition, aliases, stack)
           const branchAliases = new Map(aliases)
-          analyzeBlock(branch.body, branchAliases, stack, true)
+          analyzeBlock(branch.body, branchAliases, stack, true, false)
           outcomes.push(branchAliases)
         }
         if (statement.elseBody === undefined) outcomes.push(new Map(aliases))
         else {
           const elseAliases = new Map(aliases)
-          analyzeBlock(statement.elseBody, elseAliases, stack, true)
+          analyzeBlock(statement.elseBody, elseAliases, stack, true, false)
           outcomes.push(elseAliases)
         }
         mergeAliases(aliases, outcomes)
       } else if (statement.kind === 'loop') {
         visitCalls(statement.header, aliases, stack)
-        const loopAliases = new Map(aliases)
+        const outsideAliases = new Map(aliases)
+        let loopEntry = new Map(aliases)
         const loopBindings: string[] = []
         const bindingEnd = statement.header.findIndex((token) => token.value === '=' || token.value === 'in')
-        if (bindingEnd >= 0) {
+        if (statement.loopKind === 'for' && bindingEnd < 1) throw new Error('unsupported Lua for-loop binding')
+        if (statement.loopKind === 'for') {
           for (const part of splitTokens(statement.header.slice(0, bindingEnd), ',')) {
-            if (part.length === 1 && part[0]?.kind === 'identifier') {
-              loopBindings.push(part[0].value)
-              loopAliases.set(part[0].value, 'unknown')
+            if (part.length !== 1 || part[0]?.kind !== 'identifier') throw new Error('unsupported Lua for-loop binding')
+            if (PROTECTED_CALL_BINDINGS.has(part[0].value)) {
+              throw new Error(`Lua for-loop binding '${part[0].value}' shadows a certified callee`)
             }
+            loopBindings.push(part[0].value)
+            loopEntry.set(part[0].value, 'unknown')
           }
         }
-        analyzeBlock(statement.body, loopAliases, stack, true)
-        for (const name of loopBindings) {
-          const before = aliases.get(name)
-          if (before === undefined) loopAliases.delete(name)
-          else loopAliases.set(name, before)
+        let stabilized = false
+        const maxPasses = aliases.size + latticePassBound(statement.body)
+        for (let pass = 0; pass < maxPasses; pass++) {
+          const backEdge = new Map(loopEntry)
+          analyzeBlock(statement.body, backEdge, stack, true, false)
+          const nextEntry = joinedAliases([loopEntry, backEdge])
+          for (const name of loopBindings) nextEntry.set(name, 'unknown')
+          if (sameAliases(loopEntry, nextEntry)) {
+            loopEntry = nextEntry
+            stabilized = true
+            break
+          }
+          loopEntry = nextEntry
         }
-        mergeAliases(aliases, [aliases, loopAliases])
+        if (!stabilized) throw new Error(`Lua loop provenance did not stabilize within ${maxPasses} passes`)
+        for (const name of loopBindings) {
+          const before = outsideAliases.get(name)
+          if (before === undefined) loopEntry.delete(name)
+          else loopEntry.set(name, before)
+        }
+        mergeAliases(aliases, [outsideAliases, loopEntry])
       } else {
         const innerAliases = new Map(aliases)
-        analyzeBlock(statement.body, innerAliases, stack, true)
+        analyzeBlock(statement.body, innerAliases, stack, true, false)
         mergeAliases(aliases, [innerAliases])
       }
     }
@@ -572,5 +795,157 @@ ${insertionPoint}`,
     )
     expect(maskingMutation).not.toBe(DIRECTORY_PUT_LUA)
     expect(() => assertEveryRedisKeyComesFromKeys(maskingMutation)).toThrow("GET key operand 'target' comes from ARGV")
+  })
+
+  it('joins loop entry and back-edge provenance before validating later iterations', () => {
+    const insertionPoint = "redis.call('ZADD', KEYS[1], 0, ARGV[1])"
+    const loopMutation = DIRECTORY_PUT_LUA.replace(
+      insertionPoint,
+      `local target = KEYS[2]
+for i = 1, 2 do
+  redis.call('HGET', target, ARGV[1])
+  target = ARGV[1]
+end
+${insertionPoint}`,
+    )
+    expect(loopMutation).not.toBe(DIRECTORY_PUT_LUA)
+    expect(() => assertEveryRedisKeyComesFromKeys(loopMutation)).toThrow("HGET key operand 'target' comes from unknown")
+  })
+
+  it('rejects aliases of redis.call before an indirect key access can be hidden', () => {
+    const insertionPoint = "redis.call('ZADD', KEYS[1], 0, ARGV[1])"
+    const indirectMutation = DIRECTORY_PUT_LUA.replace(
+      insertionPoint,
+      `local invoke = redis.call
+invoke('HGET', ARGV[1], ARGV[1])
+${insertionPoint}`,
+    )
+    expect(indirectMutation).not.toBe(DIRECTORY_PUT_LUA)
+    expect(() => assertEveryRedisKeyComesFromKeys(indirectMutation)).toThrow(
+      "redis.call alias 'invoke' cannot be certified",
+    )
+  })
+
+  it('covers zero-, one-, and many-iteration loop joins', () => {
+    const zeroOrMany = `
+local target = KEYS[1]
+while ARGV[2] ~= '' do
+  target = ARGV[1]
+end
+redis.call('GET', target)
+`
+    expect(() => assertEveryRedisKeyComesFromKeys(zeroOrMany)).toThrow("GET key operand 'target' comes from unknown")
+
+    const stableOneOrMany = `
+local target = KEYS[1]
+for i = 1, 1 do
+  redis.call('GET', target)
+  target = KEYS[2]
+end
+redis.call('GET', target)
+`
+    expect(() => assertEveryRedisKeyComesFromKeys(stableOneOrMany)).not.toThrow()
+
+    const unsafeMany = `
+local target = KEYS[1]
+for i = 1, 2 do
+  redis.call('GET', target)
+  target = ARGV[1]
+end
+`
+    expect(() => assertEveryRedisKeyComesFromKeys(unsafeMany)).toThrow("GET key operand 'target' comes from unknown")
+  })
+
+  it('keeps nested loop and branch locals scoped while joining outer assignments', () => {
+    const scoped = `
+local target = KEYS[1]
+for i = 1, 2 do
+  if ARGV[1] ~= '' then
+    local target = KEYS[2]
+    for j = 1, 2 do
+      redis.call('HGET', target, ARGV[1])
+    end
+  end
+end
+redis.call('GET', target)
+`
+    expect(() => assertEveryRedisKeyComesFromKeys(scoped)).not.toThrow()
+
+    const outerAssignment = `
+local target = KEYS[1]
+for i = 1, 2 do
+  if ARGV[1] ~= '' then target = ARGV[1] end
+  redis.call('GET', target)
+end
+`
+    expect(() => assertEveryRedisKeyComesFromKeys(outerAssignment)).toThrow(
+      "GET key operand 'target' comes from unknown",
+    )
+  })
+
+  it('analyzes local function parameters and rejects uncaptured key authority', () => {
+    const safeFunction = `
+local function read(key)
+  return redis.call('GET', key)
+end
+local value = tonumber(read(KEYS[1]))
+`
+    expect(() => assertEveryRedisKeyComesFromKeys(safeFunction)).not.toThrow()
+
+    const unsafeArgument = safeFunction.replace('read(KEYS[1])', 'read(ARGV[1])')
+    expect(() => assertEveryRedisKeyComesFromKeys(unsafeArgument)).toThrow("GET key operand 'key' comes from ARGV")
+
+    const unsupportedCapture = `
+local captured = KEYS[1]
+local function read()
+  return redis.call('GET', captured)
+end
+read()
+`
+    expect(() => assertEveryRedisKeyComesFromKeys(unsupportedCapture)).toThrow(
+      "GET key operand 'captured' comes from unknown",
+    )
+
+    const capturedWrite = `
+local target = KEYS[1]
+local function poison()
+  target = ARGV[1]
+end
+for i = 1, 2 do
+  redis.call('GET', target)
+  poison()
+end
+`
+    expect(() => assertEveryRedisKeyComesFromKeys(capturedWrite)).toThrow(
+      "captured/global assignment 'target' in local function",
+    )
+  })
+
+  it('fails closed on unknown callees and unsupported call or control syntax', () => {
+    expect(() => assertEveryRedisKeyComesFromKeys("mystery('GET', KEYS[1])")).toThrow(
+      "unsupported Lua callee 'mystery' cannot be certified",
+    )
+    expect(() => assertEveryRedisKeyComesFromKeys("redis.pcall('GET', KEYS[1])")).toThrow(
+      "unsupported Lua callee 'redis.pcall' cannot be certified",
+    )
+    expect(() => assertEveryRedisKeyComesFromKeys("(redis.call)('GET', KEYS[1])")).toThrow(
+      'unsupported indirect Lua call',
+    )
+    expect(() => assertEveryRedisKeyComesFromKeys("print 'GET'")).toThrow(
+      "unsupported parenthesis-free Lua call 'print'",
+    )
+    expect(() => assertEveryRedisKeyComesFromKeys("client:read('GET', KEYS[1])")).toThrow(
+      "unsupported Lua method call 'read'",
+    )
+    expect(() => assertEveryRedisKeyComesFromKeys("local redis\nredis.call('GET', KEYS[1])")).toThrow(
+      "assignment to certified callee 'redis' is unsupported",
+    )
+    expect(() => assertEveryRedisKeyComesFromKeys('invoke [[GET]]')).toThrow('unsupported Lua long-string syntax')
+    expect(() =>
+      assertEveryRedisKeyComesFromKeys("if true then local function read() redis.call('GET', KEYS[1]) end end"),
+    ).toThrow("nested or conditional Lua function 'read' cannot be certified")
+    expect(() => assertEveryRedisKeyComesFromKeys("repeat redis.call('GET', KEYS[1]) until true")).toThrow(
+      "unsupported Lua control syntax 'repeat'",
+    )
   })
 })
