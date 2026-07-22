@@ -1,0 +1,13 @@
+{
+  "compilerOptions": {
+    "customConditions": ["worker"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "noEmit": true,
+    "skipLibCheck": false,
+    "strict": true,
+    "target": "ES2019",
+    "types": []
+  },
+  "include": ["index.ts"]
+}

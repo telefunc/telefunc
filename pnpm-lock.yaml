@@ -474,6 +474,8 @@ importers:
         specifier: ^4.79.0
         version: 4.79.0(@cloudflare/workers-types@4.20260615.1)
 
+  test/backend-public-consumer: {}
+
   test/playground:
     dependencies:
       '@types/react':
