@@ -1,0 +1,516 @@
+/// <reference types="@cloudflare/workers-types" />
+
+// The Cloudflare Room facade is deliberately split at the session shard boundary. The authority proxy has
+// no callback map: callback ownership belongs to the TelefuncDurableObject instance that installed it.
+
+import { getRawContext, isAsyncMode, restoreContext, type Context } from '../../../../../node/server/context/context.js'
+import type {
+  CellMutation,
+  CommitResult,
+  CxResult,
+  HeadCx,
+  HeadNext,
+  LaneId,
+  LaneReceiver,
+  LaneSubscription,
+  RoomBackendSpi,
+  RoomHead,
+} from '../../../../backend/spi.js'
+import { ROOM_SPI_VERSION } from '../../../../backend/spi.js'
+import { base64ToBytes, bytesToBase64, laneKey as laneKeyOf } from './codec.js'
+import {
+  CloudflareLaneSubscription,
+  CloudflareLaneSubscriptionMultiplexer,
+  type SubscriptionScheduler,
+} from './subscription.js'
+import type {
+  CellsWire,
+  CommitWire,
+  DropWire,
+  GenerationWire,
+  HeadCxWire,
+  HeadNextWire,
+  HeadWire,
+  RegisterWire,
+  RetainedWire,
+} from './do.js'
+
+const DIRECTORY_DO_NAME = '__telefunc_room_directory__'
+const MAX_RETAINED_BYTES = 16 * 1024 * 1024
+const ROOM_MANAGER = Symbol('telefunc.cloudflare.room-manager')
+
+export const CLOUDFLARE_ROOM_CONTEXT_ERROR =
+  'Cloudflare Room requires await-safe context. Import "telefunc/async_hooks" and enable the Cloudflare "nodejs_als" or "nodejs_compat" compatibility flag.'
+
+export type RoomShardDeliveryRequest = {
+  roomId: string
+  inc: string
+  laneKey: string
+  subscriberDoId: string
+  leaseId: string
+  generationToken: string
+  frame: Uint8Array
+  seq: number
+  timestamp: number
+}
+
+export type RoomShardInvalidationRequest = Omit<RoomShardDeliveryRequest, 'frame' | 'seq' | 'timestamp'>
+
+export type CloudflareRoomAuthorityStub = {
+  readHead(): Promise<HeadWire | null>
+  compareExchangeHead(cx: HeadCx, next: HeadNextWire): Promise<HeadCxWire>
+  readCells(inc: string, sel: { keys: string[] } | { prefix: string }): Promise<CellsWire>
+  compareExchangeCells(
+    inc: string,
+    revision: string,
+    mutations: Array<{ key: string; set?: { bytesB64: string; ttlMs?: number } }>,
+  ): Promise<CxResult>
+  commitLane(
+    roomId: string,
+    inc: string,
+    lane: LaneId,
+    payload: Uint8Array,
+    opts?: { retain?: boolean; orderTtlMs?: number; closingLease?: string },
+  ): Promise<CommitWire>
+  awaitDelivery(token: string): Promise<void>
+  readRetained(inc: string, lane: LaneId): Promise<RetainedWire | null>
+  listRetained(inc: string): Promise<LaneId[]>
+  deleteRetainedLane(inc: string, lane?: LaneId): Promise<void>
+  captureRouteGeneration(
+    inc: string,
+    attemptId?: string | null,
+    attemptCreatedAt?: number | null,
+  ): Promise<GenerationWire>
+  releaseRouteGenerationCapture(attemptId: string): Promise<void>
+  registerRoute(
+    roomId: string,
+    inc: string,
+    laneKey: string,
+    subscriberDoId: string,
+    leaseId: string,
+    expectedGenerationToken: string,
+    captureAttemptId?: string | null,
+    captureCreatedAt?: number | null,
+  ): Promise<RegisterWire>
+  renewRoute(
+    inc: string,
+    laneKey: string,
+    subscriberDoId: string,
+    leaseId: string,
+    expectedGenerationToken?: string | null,
+    captureAttemptId?: string | null,
+    captureCreatedAt?: number | null,
+  ): Promise<{ ok: boolean; terminal?: boolean }>
+  unsubscribeRoute(inc: string, laneKey: string, subscriberDoId: string, leaseId: string): Promise<void>
+  listGenerations(): Promise<string[]>
+  dropGeneration(inc: string): Promise<DropWire>
+  directoryPut(roomId: string, incTag: string): Promise<void>
+  directoryDelete(roomId: string, incTag: string): Promise<void>
+  directoryList(
+    prefix: string,
+    cursor?: string,
+  ): Promise<{ entries: { roomId: string; incTag: string }[]; cursor?: string }>
+}
+
+export type CloudflareRoomNamespace = {
+  idFromName(name: string): unknown
+  get(id: unknown): CloudflareRoomAuthorityStub
+}
+
+export function requireCloudflareRoomNamespace(
+  env: unknown,
+  bindingName: string = 'TelefuncRoomDurableObject',
+): CloudflareRoomNamespace {
+  const binding = (env as Record<string, CloudflareRoomNamespace | undefined>)[bindingName]
+  if (binding === undefined) {
+    throw new Error(`Missing Cloudflare Room Durable Object binding "${bindingName}". Add it to your wrangler.jsonc.`)
+  }
+  return binding
+}
+
+type LocalRoute = {
+  leaseId: string
+  generationToken: string
+  callbacks: Set<LaneReceiver>
+  mux: CloudflareLaneSubscriptionMultiplexer
+}
+
+type ManagerEntry = { identity: Omit<RoomShardInvalidationRequest, 'leaseId' | 'generationToken'>; route: LocalRoute }
+
+export class CloudflareRoomSessionManager {
+  readonly #id: string
+  readonly #getRoomNamespace: () => CloudflareRoomNamespace
+  readonly #entries = new Map<string, ManagerEntry>()
+  readonly #scheduler: SubscriptionScheduler | undefined
+  readonly #now: () => number
+  readonly #authorityOverride: ((roomId: string) => CloudflareRoomAuthorityStub) | undefined
+  readonly #jitter: (() => number) | undefined
+
+  constructor(
+    sessionId: string,
+    getRoomNamespace: () => CloudflareRoomNamespace,
+    options: {
+      scheduler?: SubscriptionScheduler
+      now?: () => number
+      authority?: (roomId: string) => CloudflareRoomAuthorityStub
+      jitter?: () => number
+    } = {},
+  ) {
+    this.#id = sessionId
+    this.#getRoomNamespace = getRoomNamespace
+    this.#scheduler = options.scheduler
+    this.#now = options.now ?? Date.now
+    this.#authorityOverride = options.authority
+    this.#jitter = options.jitter
+  }
+
+  subscribeLane(roomId: string, inc: string, lane: LaneId, receiver: LaneReceiver): LaneSubscription {
+    const laneKey = laneKeyOf(lane)
+    const key = JSON.stringify([roomId, inc, laneKey])
+    const existing = this.#entries.get(key)
+    if (existing !== undefined) {
+      existing.route.callbacks.add(receiver)
+      return existing.route.mux.attach(() => existing.route.callbacks.delete(receiver))
+    }
+    const identity = { roomId, inc, laneKey, subscriberDoId: this.#id }
+    let leaseId = crypto.randomUUID()
+    const captureAttemptId = crypto.randomUUID()
+    const captureCreatedAt = this.#now()
+    let generationToken: string | null = null
+    let established = false
+    let mux!: CloudflareLaneSubscriptionMultiplexer
+    let route!: LocalRoute
+    const subscription = new CloudflareLaneSubscription(
+      {
+        establish: async () => {
+          // A re-establishment after a known ready/lost epoch replaces the one address row with a new
+          // descriptor. The route primary key remains the shard address, never the lease.
+          if (established) {
+            leaseId = crypto.randomUUID()
+            route.leaseId = leaseId
+          }
+          const authority = this.#authority(roomId)
+          const capture = await authority.captureRouteGeneration(inc, captureAttemptId, captureCreatedAt)
+          if ('rejected' in capture) return { ready: false, retryable: false, reason: capture.reason }
+          if (generationToken !== null && generationToken !== capture.generationToken) {
+            return { ready: false, retryable: false, reason: `generation '${inc}' was invalidated` }
+          }
+          generationToken = capture.generationToken
+          route.generationToken = generationToken
+          const result = await authority.registerRoute(
+            roomId,
+            inc,
+            laneKey,
+            this.#id,
+            leaseId,
+            generationToken,
+            captureAttemptId,
+            captureCreatedAt,
+          )
+          if ('ok' in result) {
+            established = true
+            return { ready: true }
+          }
+          return { ready: false, retryable: result.terminal !== true, reason: result.reason }
+        },
+        renew: async () => {
+          const result = await this.#authority(roomId).renewRoute(
+            inc,
+            laneKey,
+            this.#id,
+            leaseId,
+            generationToken,
+            captureAttemptId,
+            captureCreatedAt,
+          )
+          return {
+            renewed: result.ok,
+            terminal: result.terminal,
+            reason: result.terminal ? `generation '${inc}' was invalidated` : undefined,
+          }
+        },
+        validate: async () => {
+          const result = await this.#authority(roomId).renewRoute(
+            inc,
+            laneKey,
+            this.#id,
+            leaseId,
+            generationToken,
+            captureAttemptId,
+            captureCreatedAt,
+          )
+          return {
+            renewed: result.ok,
+            terminal: result.terminal,
+            reason: result.terminal ? `generation '${inc}' was invalidated` : undefined,
+          }
+        },
+        unsubscribe: async () => {
+          const retiringLease = leaseId
+          this.#removeExact({ ...identity, leaseId: retiringLease, generationToken: generationToken ?? '' })
+          await Promise.allSettled([
+            this.#authority(roomId).unsubscribeRoute(inc, laneKey, this.#id, retiringLease),
+            this.#authority(roomId).releaseRouteGenerationCapture(captureAttemptId),
+          ])
+        },
+        closed: () => {
+          this.#removeExact({ ...identity, leaseId, generationToken: generationToken ?? '' })
+        },
+      },
+      {
+        ...(this.#scheduler === undefined ? {} : { scheduler: this.#scheduler }),
+        ...(this.#jitter === undefined ? {} : { jitter: this.#jitter }),
+      },
+    )
+    mux = new CloudflareLaneSubscriptionMultiplexer(subscription, () => this.#entries.delete(key))
+    route = { leaseId, generationToken: generationToken ?? '', callbacks: new Set([receiver]), mux }
+    this.#entries.set(key, { identity, route })
+    const attachment = mux.attach(() => route.callbacks.delete(receiver))
+    subscription.start()
+    return attachment
+  }
+
+  async deliver(request: RoomShardDeliveryRequest): Promise<void> {
+    if (request.subscriberDoId !== this.#id)
+      throw new Error('Cloudflare Room delivery addressed the wrong session shard')
+    const entry = this.#entries.get(JSON.stringify([request.roomId, request.inc, request.laneKey]))
+    if (
+      entry === undefined ||
+      entry.route.leaseId !== request.leaseId ||
+      entry.route.generationToken !== request.generationToken
+    ) {
+      throw new Error('Cloudflare Room delivery lease is not installed')
+    }
+    await Promise.all(
+      [...entry.route.callbacks].map(async (callback) => {
+        await (callback(new Uint8Array(request.frame), {
+          seq: request.seq,
+          timestamp: request.timestamp,
+        }) as unknown as Promise<void> | void)
+      }),
+    )
+  }
+
+  invalidate(request: RoomShardInvalidationRequest): void {
+    this.#removeExact(request)
+  }
+
+  dispose(): void {
+    for (const entry of this.#entries.values()) entry.route.mux.backendDisposed()
+    this.#entries.clear()
+  }
+
+  #removeExact(request: RoomShardInvalidationRequest): void {
+    const key = JSON.stringify([request.roomId, request.inc, request.laneKey])
+    const entry = this.#entries.get(key)
+    if (
+      entry === undefined ||
+      entry.route.leaseId !== request.leaseId ||
+      entry.route.generationToken !== request.generationToken
+    )
+      return
+    entry.route.mux.lifecycleClosed(new Error('Cloudflare Room route invalidated'))
+    this.#entries.delete(key)
+  }
+
+  #authority(roomId: string): CloudflareRoomAuthorityStub {
+    if (this.#authorityOverride !== undefined) return this.#authorityOverride(roomId)
+    const namespace = this.#getRoomNamespace()
+    return namespace.get(namespace.idFromName(roomId))
+  }
+}
+
+export function withCloudflareRoomSessionManager<T>(manager: CloudflareRoomSessionManager, fn: () => T): T {
+  if (!isAsyncMode()) throw new Error(CLOUDFLARE_ROOM_CONTEXT_ERROR)
+  const raw: Context = { ...(getRawContext() ?? {}), [ROOM_MANAGER]: manager }
+  return restoreContext(raw, fn)
+}
+
+export function getCloudflareRoomSessionManager(): CloudflareRoomSessionManager {
+  if (!isAsyncMode()) throw new Error(CLOUDFLARE_ROOM_CONTEXT_ERROR)
+  const manager = getRawContext()?.[ROOM_MANAGER]
+  if (!(manager instanceof CloudflareRoomSessionManager)) throw new Error(CLOUDFLARE_ROOM_CONTEXT_ERROR)
+  return manager
+}
+
+export class CloudflareRoomBackend implements RoomBackendSpi {
+  readonly spiVersion = ROOM_SPI_VERSION
+  readonly capabilities = {
+    receivers: 'global' as const,
+    maxRetainedPayloadBytes: MAX_RETAINED_BYTES,
+    clusterSafe: false,
+    directory: true,
+  }
+  readonly #namespace: CloudflareRoomNamespace
+  readonly #manager: CloudflareRoomSessionManager
+  readonly #deliverySettlements = new Map<string, Promise<void>>()
+  readonly #stubs = new Map<string, CloudflareRoomAuthorityStub & { [Symbol.dispose]?: () => void }>()
+
+  constructor(
+    namespace: CloudflareRoomNamespace,
+    manager: CloudflareRoomSessionManager = getCloudflareRoomSessionManager(),
+  ) {
+    this.#namespace = namespace
+    this.#manager = manager
+  }
+
+  async readHead(roomId: string): Promise<{ head: RoomHead } | null> {
+    const wire = await this.#stub(roomId).readHead()
+    return wire === null ? null : { head: headFromWire(wire) }
+  }
+  async compareExchangeHead(
+    roomId: string,
+    cx: HeadCx,
+    next: HeadNext,
+  ): Promise<
+    { ok: true; head: RoomHead } | { ok: true; deleted: true } | { conflict: true; current: RoomHead | null }
+  > {
+    const wire = await this.#stub(roomId).compareExchangeHead(cx, nextToWire(next))
+    if ('error' in wire) throw new Error(wire.error)
+    if ('conflict' in wire)
+      return { conflict: true, current: wire.current === null ? null : headFromWire(wire.current) }
+    return 'deleted' in wire ? { ok: true, deleted: true } : { ok: true, head: headFromWire(wire.head) }
+  }
+  async readCells(
+    roomId: string,
+    inc: string,
+    sel: { keys: string[] } | { prefix: string },
+  ): Promise<{ revision: string; cells: Map<string, Uint8Array> } | { staleInc: true }> {
+    const wire = await this.#stub(roomId).readCells(inc, sel)
+    if ('staleInc' in wire) return wire
+    return { revision: wire.revision, cells: new Map(wire.cells.map(([key, value]) => [key, base64ToBytes(value)])) }
+  }
+  async compareExchangeCells(
+    roomId: string,
+    inc: string,
+    revision: string,
+    mutations: CellMutation[],
+  ): Promise<CxResult> {
+    return this.#stub(roomId).compareExchangeCells(
+      inc,
+      revision,
+      mutations.map((mutation) =>
+        mutation.set === undefined
+          ? { key: mutation.key }
+          : { key: mutation.key, set: { bytesB64: bytesToBase64(mutation.set.bytes), ttlMs: mutation.set.ttlMs } },
+      ),
+    )
+  }
+  async commitLane(
+    roomId: string,
+    inc: string,
+    lane: LaneId,
+    payload: Uint8Array,
+    opts?: { retain?: boolean; orderTtlMs?: number; closingLease?: string },
+  ): Promise<CommitResult> {
+    const stub = this.#stub(roomId)
+    const wire = await stub.commitLane(roomId, inc, lane, payload, opts)
+    try {
+      if ('error' in wire) throw new Error(wire.error)
+      if ('stale' in wire) return { stale: true }
+      const deliveryToken = wire.deliveryToken
+      const attempt = new Promise<void>((resolve, reject) => {
+        setTimeout(() => void stub.awaitDelivery(deliveryToken).then(resolve, reject), 0)
+      })
+      // `awaitDelivery()` is a second DO RPC so workerd may return two already ordered authority attempts
+      // to this isolate in either RPC-response order. Gate only their caller-visible settlement locally;
+      // the authority still owns attempt ordering and this chain never performs or replays a callback.
+      const key = JSON.stringify([roomId, inc, laneKeyOf(lane)])
+      const previous = this.#deliverySettlements.get(key) ?? Promise.resolve()
+      const delivery = previous.then(() => attempt)
+      const tail = delivery.then(
+        () => undefined,
+        () => undefined,
+      )
+      this.#deliverySettlements.set(key, tail)
+      void tail.then(() => {
+        if (this.#deliverySettlements.get(key) === tail) this.#deliverySettlements.delete(key)
+      })
+      void attempt.catch(() => {})
+      void delivery.catch(() => {})
+      return { accepted: true, seq: wire.seq, timestamp: wire.timestamp, receivers: wire.receivers, delivery }
+    } finally {
+      disposeRpcResult(wire)
+    }
+  }
+  async readRetained(roomId: string, inc: string, lane: LaneId) {
+    const wire = await this.#stub(roomId).readRetained(inc, lane)
+    return wire === null ? null : { payload: base64ToBytes(wire.payloadB64), seq: wire.seq, timestamp: wire.timestamp }
+  }
+  async listRetained(roomId: string, inc: string) {
+    return this.#stub(roomId).listRetained(inc)
+  }
+  async deleteRetained(roomId: string, inc: string, lane?: LaneId) {
+    await this.#stub(roomId).deleteRetainedLane(inc, lane)
+  }
+  subscribeLane(roomId: string, inc: string, lane: LaneId, receiver: LaneReceiver): LaneSubscription {
+    return this.#manager.subscribeLane(roomId, inc, lane, receiver)
+  }
+  async listGenerations(roomId: string) {
+    return this.#stub(roomId).listGenerations()
+  }
+  async dropGeneration(roomId: string, inc: string) {
+    const wire = await this.#stub(roomId).dropGeneration(inc)
+    if ('error' in wire) throw new Error(wire.error)
+    for (const key of this.#deliverySettlements.keys()) {
+      const [candidateRoomId, candidateInc] = JSON.parse(key) as [string, string, string]
+      if (candidateRoomId === roomId && candidateInc === inc) this.#deliverySettlements.delete(key)
+    }
+    for (const dropped of wire.droppedSubscribers) {
+      this.#manager.invalidate({ roomId, inc, ...dropped })
+    }
+  }
+  async directoryPut(roomId: string, incTag: string) {
+    await this.#directory().directoryPut(roomId, incTag)
+  }
+  async directoryDelete(roomId: string, incTag: string) {
+    await this.#directory().directoryDelete(roomId, incTag)
+  }
+  async directoryList(prefix: string, cursor?: string) {
+    return this.#directory().directoryList(prefix, cursor)
+  }
+  async dispose() {
+    this.#deliverySettlements.clear()
+    for (const stub of this.#stubs.values()) stub[Symbol.dispose]?.()
+    this.#stubs.clear()
+    /* Session manager owns local callbacks and is disposed with its shard. */
+  }
+  #stub(roomId: string): CloudflareRoomAuthorityStub {
+    let stub = this.#stubs.get(roomId)
+    if (stub === undefined) {
+      stub = this.#namespace.get(this.#namespace.idFromName(roomId))
+      this.#stubs.set(roomId, stub)
+    }
+    return stub
+  }
+  #directory(): CloudflareRoomAuthorityStub {
+    return this.#stub(DIRECTORY_DO_NAME)
+  }
+}
+
+function disposeRpcResult(value: unknown): void {
+  if (typeof value !== 'object' || value === null || !(Symbol.dispose in value)) return
+  const dispose = (value as { [Symbol.dispose]?: unknown })[Symbol.dispose]
+  if (typeof dispose === 'function') dispose.call(value)
+}
+
+function headFromWire(wire: HeadWire): RoomHead {
+  const head: RoomHead = {
+    rev: wire.rev,
+    currentInc: wire.currentInc,
+    state: wire.state,
+    config: base64ToBytes(wire.configB64),
+  }
+  if (wire.closeLease !== undefined) head.closeLease = wire.closeLease
+  return head
+}
+function nextToWire(next: HeadNext): HeadNextWire {
+  if ('delete' in next) return next
+  const head: Extract<HeadNextWire, { head: unknown }>['head'] = {
+    currentInc: next.head.currentInc,
+    state: next.head.state,
+    configB64: bytesToBase64(next.head.config),
+  }
+  if (next.head.closeLease !== undefined) head.closeLease = next.head.closeLease
+  return next.ttlMs === undefined ? { head } : { head, ttlMs: next.ttlMs }
+}

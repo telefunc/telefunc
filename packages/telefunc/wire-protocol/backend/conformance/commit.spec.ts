@@ -13,7 +13,6 @@ import {
   bytes,
   collector,
   CONTROL,
-  deferred,
   enterClosing,
   finalizeClose,
   inboxLane,
@@ -24,7 +23,9 @@ import {
   readHeadOrThrow,
   SEMANTIC,
   settled,
+  stallingReceiver,
   text,
+  throwingReceiver,
 } from './scenario.js'
 
 for (const harness of installedBackends) {
@@ -107,7 +108,17 @@ for (const harness of installedBackends) {
 
       it('rejects a retain that would exceed the aggregate cap across lanes', async () => {
         const half = Math.ceil(fx.backend.capabilities.maxRetainedPayloadBytes / 2) + 1
-        accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, new Uint8Array(half), { retain: true }))
+        const first = new Uint8Array(half)
+        const section = 1024 * 1024
+        for (let offset = 0, value = 1; offset < first.byteLength; offset += section, value += 1) {
+          first.fill(value, offset, Math.min(first.byteLength, offset + section))
+        }
+        accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, first, { retain: true }))
+        const retained = await fx.backend.readRetained(roomId, inc, SEMANTIC)
+        expect(retained?.payload.byteLength).toBe(first.byteLength)
+        for (let offset = 0; offset < first.byteLength; offset += section) {
+          expect(retained?.payload[offset]).toBe(first[offset])
+        }
         await expect(
           fx.backend.commitLane(roomId, inc, CONTROL, new Uint8Array(half), { retain: true }),
         ).rejects.toThrow()
@@ -135,11 +146,8 @@ for (const harness of installedBackends) {
       it('counts receivers as the targets snapshotted at acceptance, not successful deliveries', async () => {
         if (!fx.traces.perTargetFailure) return
         const good = collector()
-        let badCalls = 0
-        const bad = fx.backend.subscribeLane(roomId, inc, SEMANTIC, () => {
-          badCalls += 1
-          throw new Error('receiver blew up')
-        })
+        const badReceiver = throwingReceiver('receiver blew up')
+        const bad = fx.backend.subscribeLane(roomId, inc, SEMANTIC, badReceiver.receiver)
         const goodSub = fx.backend.subscribeLane(roomId, inc, SEMANTIC, good.receiver)
         await Promise.all([bad.ready, goodSub.ready])
 
@@ -147,22 +155,19 @@ for (const harness of installedBackends) {
         expect(await settled(result.delivery)).toBe('rejected')
         // acceptance stood: the healthy target still got the frame and the order advanced
         await good.waitFor(1)
-        expect(badCalls).toBe(1)
+        expect(badReceiver.calls()).toBe(1)
         expect(good.payloads()).toEqual(['K'])
         expect(accepted(await commit(SEMANTIC, 'next')).seq).toBe(result.seq + 1)
       })
 
       it('never retries a failed handoff and never poisons the next frame', async () => {
         if (!fx.traces.perTargetFailure) return
-        let calls = 0
-        const failing = fx.backend.subscribeLane(roomId, inc, SEMANTIC, () => {
-          calls++
-          throw new Error('receiver blew up')
-        })
+        const failingReceiver = throwingReceiver('receiver blew up')
+        const failing = fx.backend.subscribeLane(roomId, inc, SEMANTIC, failingReceiver.receiver)
         await failing.ready
 
         expect(await settled(accepted(await commit(SEMANTIC, 'one')).delivery)).toBe('rejected')
-        expect(calls).toBe(1) // exactly one attempt — at-most-once
+        expect(failingReceiver.calls()).toBe(1) // exactly one attempt — at-most-once
 
         // the lane is not poisoned: the next frame is attempted and reaches a healthy target
         await failing.unsubscribe()
@@ -171,7 +176,7 @@ for (const harness of installedBackends) {
         await healthy.ready
         await accepted(await commit(SEMANTIC, 'two')).delivery
         expect(good.payloads()).toEqual(['two'])
-        expect(calls).toBe(1)
+        expect(failingReceiver.calls()).toBe(1)
       })
 
       it('settles delivery for a frame with no subscribers', async () => {
@@ -181,18 +186,16 @@ for (const harness of installedBackends) {
       })
 
       it('does not run a receiver reentrantly inside commitLane', async () => {
-        const seen: string[] = []
-        const sub = fx.backend.subscribeLane(roomId, inc, SEMANTIC, (payload) => {
-          seen.push(text(payload))
-        })
+        const seen = collector()
+        const sub = fx.backend.subscribeLane(roomId, inc, SEMANTIC, seen.receiver)
         await sub.ready
         // The reentrancy inversion the attempt chain exists to prevent is a receiver running INSIDE the
         // commitLane call, so the call is deliberately not awaited before the assertion.
         const pending = commit(SEMANTIC, 'K')
-        expect(seen).toEqual([])
+        expect(seen.payloads()).toEqual([])
         const result = accepted(await pending)
         await result.delivery
-        expect(seen).toEqual(['K'])
+        expect(seen.payloads()).toEqual(['K'])
       })
     })
 
@@ -242,8 +245,8 @@ for (const harness of installedBackends) {
       })
 
       it('installs retained atomically with acceptance — visible before delivery settles', async () => {
-        const gate = deferred()
-        const sub = fx.backend.subscribeLane(roomId, inc, SEMANTIC, () => gate.promise as unknown as void)
+        const stalled = stallingReceiver()
+        const sub = fx.backend.subscribeLane(roomId, inc, SEMANTIC, stalled.receiver)
         await sub.ready
         const result = accepted(await commit(SEMANTIC, 'K1', { retain: true }))
         if (fx.traces.handoffAwaitsReceiver) {
@@ -251,7 +254,7 @@ for (const harness of installedBackends) {
           const seed = await fx.backend.readRetained(roomId, inc, SEMANTIC)
           expect(text(seed?.payload ?? bytes(''))).toBe('K1')
         }
-        gate.resolve()
+        await stalled.release()
         await result.delivery
       })
     })

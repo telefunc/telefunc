@@ -15,6 +15,13 @@ import type {
   RoomBackendSpi,
   RoomHead,
 } from '../spi.js'
+import {
+  conformanceReceiver,
+  pollRemoteReceiver,
+  releaseRemoteReceiver,
+  seedRemoteReceiver,
+  type ReceiverFrame,
+} from './receiver.js'
 
 // Room core's own close-lease duration, and the tombstone TTL the close ceremony installs.
 export const CLOSE_LEASE_MS = 15_000
@@ -206,7 +213,7 @@ export async function readHeadOrThrow(backend: RoomBackendSpi, roomId: string): 
 
 // ── subscriber models ──
 
-export type Frame = { payload: string; seq: number; timestamp: number }
+export type Frame = ReceiverFrame
 
 export type Collector = {
   receiver: LaneReceiver
@@ -218,12 +225,20 @@ export type Collector = {
 export function collector(): Collector {
   const frames: Frame[] = []
   let waiters: Array<() => void> = []
-  const receiver: LaneReceiver = (payload, info) => {
+  const local: LaneReceiver = (payload, info) => {
     frames.push({ payload: text(payload), seq: info.seq, timestamp: info.timestamp })
     const woken = waiters
     waiters = []
     for (const wake of woken) wake()
   }
+  const receiver = conformanceReceiver({ kind: 'collect' }, local, (observations) => {
+    for (const observation of observations) {
+      frames.push({ payload: observation.payload, seq: observation.seq, timestamp: observation.timestamp })
+    }
+    const woken = waiters
+    waiters = []
+    for (const wake of woken) wake()
+  })
   const waitFor = (count: number, timeoutMs: number = DELIVERY_BOUND_MS): Promise<void> =>
     new Promise<void>((resolve, reject) => {
       const timer = setTimeout(
@@ -233,6 +248,7 @@ export function collector(): Collector {
       const check = (): void => {
         if (frames.length < count) {
           waiters.push(check)
+          void pollRemoteReceiver(receiver).catch(reject)
           return
         }
         clearTimeout(timer)
@@ -243,14 +259,106 @@ export function collector(): Collector {
   return { receiver, frames, payloads: () => frames.map((frame) => frame.payload), waitFor }
 }
 
-// A receiver whose dispatch does not complete until `gate` settles. Only meaningful on backends whose
-// handoff attempt extends to the receiver callback (BackendTraces.handoffAwaitsReceiver).
-export function stallingReceiver(gate: Promise<unknown>, onEnter?: () => void): LaneReceiver {
-  return (): void => {
+export function noopReceiver(): LaneReceiver {
+  return collector().receiver
+}
+
+export type ControlledReceiver = {
+  receiver: LaneReceiver
+  frames: Frame[]
+  payloads(): string[]
+  entries(): number
+  waitForEntry(timeoutMs?: number): Promise<void>
+  release(): Promise<void>
+}
+
+// A transport-neutral stalled receiver. Memory/Redis execute the local closure; Cloudflare binds the
+// same command to the worker-owned session manager and exposes only release/observation controls.
+export function stallingReceiver(onEnter?: () => void): ControlledReceiver {
+  const gate = deferred()
+  const frames: Frame[] = []
+  let entries = 0
+  let waiters: Array<() => void> = []
+  const entered = (): void => {
+    entries += 1
     onEnter?.()
-    // The SPI types a receiver as `=> void`; a backend that awaits the return value is exercising its own
-    // documented trace, which is exactly what this helper is for.
-    return gate as unknown as void
+    const current = waiters
+    waiters = []
+    for (const wake of current) wake()
+  }
+  const local: LaneReceiver = (payload, info) => {
+    frames.push({ payload: text(payload), seq: info.seq, timestamp: info.timestamp })
+    entered()
+    return gate.promise as unknown as void
+  }
+  const receiver = conformanceReceiver({ kind: 'stall' }, local, (observations) => {
+    for (const observation of observations) {
+      frames.push({ payload: observation.payload, seq: observation.seq, timestamp: observation.timestamp })
+      entered()
+    }
+  })
+  return {
+    receiver,
+    frames,
+    payloads: () => frames.map((frame) => frame.payload),
+    entries: () => entries,
+    waitForEntry: (timeoutMs: number = DELIVERY_BOUND_MS) =>
+      new Promise<void>((resolve, reject) => {
+        if (entries > 0) return resolve()
+        const timer = setTimeout(() => reject(new Error(`waited ${timeoutMs}ms for stalled receiver entry`)), timeoutMs)
+        waiters.push(() => {
+          clearTimeout(timer)
+          resolve()
+        })
+        void pollRemoteReceiver(receiver).catch(reject)
+      }),
+    release: async () => {
+      if (!(await releaseRemoteReceiver(receiver))) gate.resolve()
+    },
+  }
+}
+
+export type ThrowingReceiver = { receiver: LaneReceiver; calls(): number }
+
+export function throwingReceiver(message: string, payload?: string): ThrowingReceiver {
+  let calls = 0
+  const local: LaneReceiver = (frame) => {
+    calls += 1
+    if (payload === undefined || text(frame) === payload) throw new Error(message)
+  }
+  const receiver = conformanceReceiver({ kind: 'throw', message, payload }, local, (observations) => {
+    calls += observations.length
+  })
+  return { receiver, calls: () => calls }
+}
+
+export function sequencedReceiver(
+  outcomes: Array<'collect' | 'throw'>,
+  message: string = 'receiver failed',
+): Collector {
+  const frames: Frame[] = []
+  let call = 0
+  const local: LaneReceiver = (payload, info) => {
+    frames.push({ payload: text(payload), seq: info.seq, timestamp: info.timestamp })
+    if (outcomes[call++] === 'throw') throw new Error(message)
+  }
+  const receiver = conformanceReceiver({ kind: 'sequence', outcomes, message }, local, (observations) => {
+    frames.push(...observations.map(({ payload, seq, timestamp }) => ({ payload, seq, timestamp })))
+  })
+  return {
+    receiver,
+    frames,
+    payloads: () => frames.map((frame) => frame.payload),
+    waitFor: async (count, timeoutMs = DELIVERY_BOUND_MS) => {
+      const deadline = Date.now() + timeoutMs
+      while (frames.length < count) {
+        await pollRemoteReceiver(receiver)
+        if (frames.length >= count) return
+        if (Date.now() >= deadline)
+          throw new Error(`waited ${timeoutMs}ms for ${count} frame(s), observed ${frames.length}`)
+        await new Promise<void>((resolve) => setTimeout(resolve, 0))
+      }
+    },
   }
 }
 
@@ -276,13 +384,23 @@ export function seededSubscriber(backend: RoomBackendSpi, roomId: string, inc: s
     observed.push({ ...frame, source })
   }
 
-  const sub = backend.subscribeLane(roomId, inc, lane, (payload, info) => {
+  const local: LaneReceiver = (payload, info) => {
     const frame = { payload: text(payload), seq: info.seq }
     if (seeded) emit(frame, 'live')
     else pending.push(frame) // live frames are held until the seed is applied, then deduped against it
+  }
+  const receiver = conformanceReceiver({ kind: 'seeded' }, local, (observations) => {
+    for (const frame of observations) {
+      observed.push({ payload: frame.payload, seq: frame.seq, source: frame.source ?? 'live' })
+    }
   })
+  const sub = backend.subscribeLane(roomId, inc, lane, receiver)
 
   const seed = async (): Promise<void> => {
+    if (await seedRemoteReceiver(receiver)) {
+      await pollRemoteReceiver(receiver)
+      return
+    }
     const retained = await backend.readRetained(roomId, inc, lane)
     if (retained !== null) emit({ payload: text(retained.payload), seq: retained.seq }, 'seed')
     seeded = true

@@ -14,10 +14,8 @@ import {
   bytes,
   collector,
   CONTROL,
-  deferred,
   enterClosing,
   finalizeClose,
-  flush,
   inboxLane,
   nextId,
   okHead,
@@ -26,6 +24,7 @@ import {
   SEMANTIC,
   settled,
   stallingReceiver,
+  throwingReceiver,
 } from './scenario.js'
 
 for (const harness of installedBackends) {
@@ -78,8 +77,8 @@ for (const harness of installedBackends) {
     it('keeps each lane on its own chain — a stalled lane never reorders another', async () => {
       // KILLER: sharing one chain across lanes turns this red.
       if (!fx.traces.handoffAwaitsReceiver) return
-      const gate = deferred()
-      const stalled = fx.backend.subscribeLane(roomId, inc, SEMANTIC, stallingReceiver(gate.promise))
+      const stall = stallingReceiver()
+      const stalled = fx.backend.subscribeLane(roomId, inc, SEMANTIC, stall.receiver)
       const other = collector()
       const free = fx.backend.subscribeLane(roomId, inc, CONTROL, other.receiver)
       await Promise.all([stalled.ready, free.ready])
@@ -92,28 +91,23 @@ for (const harness of installedBackends) {
       await other.waitFor(1)
       expect(other.payloads()).toEqual(['free'])
 
-      gate.resolve()
+      await stall.release()
       await blocked.delivery
     })
 
     it('starts frame N+1 only after frame N settled on the same lane', async () => {
       if (!fx.traces.handoffAwaitsReceiver) return
-      const first = deferred()
       const entries: string[] = []
-      const sub = fx.backend.subscribeLane(
-        roomId,
-        inc,
-        SEMANTIC,
-        stallingReceiver(first.promise, () => entries.push('enter')),
-      )
+      const stall = stallingReceiver(() => entries.push('enter'))
+      const sub = fx.backend.subscribeLane(roomId, inc, SEMANTIC, stall.receiver)
       await sub.ready
 
       const one = accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, bytes('one')))
       const two = accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, bytes('two')))
-      await flush()
+      await stall.waitForEntry()
       expect(entries).toEqual(['enter']) // frame two's attempt has not begun
 
-      first.resolve()
+      await stall.release()
       await Promise.all([one.delivery, two.delivery])
       expect(entries).toEqual(['enter', 'enter'])
     })
@@ -121,20 +115,19 @@ for (const harness of installedBackends) {
     it('does not let a failed frame poison the lane, and rejects only its own promise', async () => {
       // KILLER: gating the chain on the attempt itself rather than on its SETTLEMENT turns this red.
       if (!fx.traces.perTargetFailure) return
-      const seen: string[] = []
-      const sub = fx.backend.subscribeLane(roomId, inc, SEMANTIC, (payload) => {
-        const value = new TextDecoder().decode(payload)
-        seen.push(value)
-        if (value === 'bad') throw new Error('handoff failed')
-      })
-      await sub.ready
+      const seen = collector()
+      const failing = throwingReceiver('handoff failed', 'bad')
+      const badSub = fx.backend.subscribeLane(roomId, inc, SEMANTIC, failing.receiver)
+      const sub = fx.backend.subscribeLane(roomId, inc, SEMANTIC, seen.receiver)
+      await Promise.all([badSub.ready, sub.ready])
 
       const bad = accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, bytes('bad')))
       const good = accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, bytes('good')))
 
       expect(await settled(bad.delivery)).toBe('rejected')
       expect(await settled(good.delivery)).toBe('resolved')
-      expect(seen).toEqual(['bad', 'good'])
+      expect(seen.payloads()).toEqual(['bad', 'good'])
+      expect(failing.calls()).toBe(2)
     })
 
     it('interleaves independent lanes without cross-contaminating their order', async () => {
@@ -166,8 +159,8 @@ for (const harness of installedBackends) {
 
     it('starts clean chains in a new incarnation — no chain state survives a recreation', async () => {
       if (!fx.traces.handoffAwaitsReceiver) return
-      const gate = deferred()
-      const stalled = fx.backend.subscribeLane(roomId, inc, SEMANTIC, stallingReceiver(gate.promise))
+      const stall = stallingReceiver()
+      const stalled = fx.backend.subscribeLane(roomId, inc, SEMANTIC, stall.receiver)
       await stalled.ready
       const stuck = accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, bytes('stuck-in-old-gen')))
 
@@ -184,21 +177,17 @@ for (const harness of installedBackends) {
       await accepted(await fx.backend.commitLane(roomId, recreated.inc, SEMANTIC, bytes('new-gen'))).delivery
       expect(latch.payloads()).toEqual(['new-gen'])
 
-      gate.resolve()
+      await stall.release()
       await stuck.delivery
     })
 
     it("discards a dropped generation's accepted attempt before legal reuse of the same incarnation id", async () => {
       if (!fx.traces.handoffAwaitsReceiver) return
-      const gate = deferred()
-      const entered = deferred()
-      const old = fx.backend.subscribeLane(roomId, inc, SEMANTIC, async () => {
-        entered.resolve()
-        await gate.promise
-      })
+      const stall = stallingReceiver()
+      const old = fx.backend.subscribeLane(roomId, inc, SEMANTIC, stall.receiver)
       await old.ready
       const blocker = accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, bytes('blocker')))
-      await entered.promise
+      await stall.waitForEntry()
       const droppedAttempt = accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, bytes('old-frame')))
 
       const head = await readHeadOrThrow(fx.backend, roomId)
@@ -220,7 +209,7 @@ for (const harness of installedBackends) {
       await freshSub.ready
       await accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, bytes('new-frame'))).delivery
 
-      gate.resolve()
+      await stall.release()
       await Promise.all([blocker.delivery, droppedAttempt.delivery])
       expect(fresh.payloads()).toEqual(['new-frame'])
       await freshSub.unsubscribe()

@@ -7,6 +7,7 @@ const tf = new Telefunc({ scale: 5 })
 // `wrangler.jsonc`'s `main: "vike:server-entry"` re-exports everything from this file,
 // so these reach Cloudflare's binding resolver intact.
 export const TelefuncDurableObject = tf.TelefuncDurableObject
+export const TelefuncRoomDurableObject = tf.TelefuncRoomDurableObject
 export { TodoListDurableObject } from './database/todoItems'
 
 // vike's docs example uses `export default vike` directly — meaning when vike is the

@@ -76,9 +76,9 @@ export function initSchema(sql: SqlStorage): void {
       PRIMARY KEY (inc, lane_key, gen, i)
     );
     CREATE TABLE IF NOT EXISTS route (
-      room_id TEXT NOT NULL, inc TEXT NOT NULL, lane_key TEXT NOT NULL, subscriber TEXT NOT NULL,
-      lease_id TEXT NOT NULL, bucket TEXT, expires_at INTEGER NOT NULL, failures INTEGER NOT NULL DEFAULT 0,
-      PRIMARY KEY (inc, lane_key, subscriber)
+      room_id TEXT NOT NULL, inc TEXT NOT NULL, lane_key TEXT NOT NULL, subscriber_do_id TEXT NOT NULL,
+      lease_id TEXT NOT NULL, generation_token TEXT NOT NULL, expires_at INTEGER NOT NULL, failures INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (inc, lane_key, subscriber_do_id)
     );
     CREATE TABLE IF NOT EXISTS route_capture (
       attempt_id TEXT PRIMARY KEY, inc TEXT NOT NULL, token TEXT NOT NULL,

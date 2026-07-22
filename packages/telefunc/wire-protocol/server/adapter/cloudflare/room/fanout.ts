@@ -4,17 +4,18 @@
 // rejects only on its own failure. The chains live at the unique room authority and are discarded with
 // their incarnation, so no state survives recreation and no facade-local tail can reorder a shared room.
 //
-// `deliver` is the handoff seam: in production the room DO RPCs each target subscriber DO
-// (`telefuncBroadcastDeliver`). The attempt is the backend's ONE handoff — never retried or rolled back.
+// `deliver` is the handoff seam: in production the room DO RPCs each target session shard
+// (`telefuncRoomDeliver`). The attempt is the backend's ONE handoff — never retried or rolled back.
 
 export type DeliveryInfo = { roomId: string; inc: string; laneKey: string; seq: number; timestamp: number }
-export type RouteTarget = { subscriber: string; leaseId: string }
+export type RouteTarget = { subscriberDoId: string; leaseId: string; generationToken: string }
 export type DeliverFn = (target: RouteTarget, frame: Uint8Array, info: DeliveryInfo) => Promise<void>
 
 const noop = (): void => {}
 
 export class Fanout {
   readonly #deliver: DeliverFn
+  readonly #defer: (resume: () => void) => void
   // inc -> laneKey -> the lane's current chain tail. Nested so an incarnation's chains drop as a unit and
   // no key separator is needed.
   readonly #chains = new Map<string, Map<string, Promise<void>>>()
@@ -22,8 +23,9 @@ export class Fanout {
   readonly #attempts = new Map<string, Promise<void>>()
   #tokenSeq = 0
 
-  constructor(deliver: DeliverFn) {
+  constructor(deliver: DeliverFn, defer: (resume: () => void) => void = queueMicrotask) {
     this.#deliver = deliver
+    this.#defer = defer
   }
 
   // Enqueue one frame's handoff attempt onto its lane chain. Returns a token the caller resolves later
@@ -44,7 +46,9 @@ export class Fanout {
       this.#incarnationFences.set(inc, fence)
     }
     const previous = lanes.get(laneKey) ?? Promise.resolve()
-    const attempt = previous.then(() => (fence.active ? this.#fanout(acceptedTargets, acceptedFrame, info) : undefined))
+    const attempt = previous
+      .then(() => new Promise<void>((resolve) => this.#defer(resolve)))
+      .then(() => (fence.active ? this.#fanout(acceptedTargets, acceptedFrame, info) : undefined))
     // Settlement gate: the next frame starts after this one settles, success OR failure.
     lanes.set(laneKey, attempt.then(noop, noop))
     const token = `d-${++this.#tokenSeq}`

@@ -29,8 +29,20 @@ import { assertUsage } from '../utils/assert.js'
 import type { Telefunc as TelefuncNamespace } from '../node/server/context/getContext.js'
 import type { CloudflareScale, LocationBucket } from '../wire-protocol/server/adapter/cloudflare/routing.js'
 import { CHANNEL_TRANSPORT } from '../wire-protocol/constants.js'
+import {
+  CloudflareRoomSessionManager,
+  requireCloudflareRoomNamespace,
+  withCloudflareRoomSessionManager,
+  type CloudflareRoomNamespace,
+  type RoomShardDeliveryRequest,
+  type RoomShardInvalidationRequest,
+} from '../wire-protocol/server/adapter/cloudflare/room/backend.js'
+import { createTelefuncRoomDurableObjectClass } from '../wire-protocol/server/adapter/cloudflare/room/do.js'
+import { isAsyncMode } from '../node/server/context/context.js'
 
 const SHARD_TOKEN_TTL_SECONDS = 86400
+const SESSION_RESET_CLOSE_CODE = 1012
+const SESSION_RESET_CLOSE_REASON = 'Telefunc session reset; reconnect'
 
 type CloudflareOptions = {
   bindingName?: string
@@ -40,6 +52,7 @@ type CloudflareOptions = {
   scale?: CloudflareScale
   locationFallback?: DurableObjectLocationHint
   jurisdiction?: DurableObjectJurisdiction
+  roomBindingName?: string
 }
 
 type StoredShardToken = {
@@ -56,6 +69,7 @@ type ServeInput = {
 interface TelefuncServe {
   serve(input: ServeInput): Promise<Response | undefined>
   TelefuncDurableObject: new (ctx: DurableObjectState, env: Cloudflare.Env) => DurableObject
+  TelefuncRoomDurableObject: new (ctx: DurableObjectState, env: Cloudflare.Env) => DurableObject
 }
 
 interface Telefunc extends TelefuncServe {}
@@ -74,6 +88,7 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
   const locationFallback = options?.locationFallback ?? 'weur'
   assertLocationFallbackIsScaled(scale, locationFallback)
   const jurisdiction = options?.jurisdiction
+  const roomBindingName = options?.roomBindingName ?? 'TelefuncRoomDurableObject'
 
   const crosswsAdapter = crossws({
     bindingName,
@@ -93,10 +108,15 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
     return (env as Record<string, KVNamespace | undefined>)[kvBindingName]
   }
 
+  function getRoomBinding(env: Cloudflare.Env): DurableObjectNamespace {
+    return requireCloudflareRoomNamespace(env, roomBindingName) as unknown as DurableObjectNamespace
+  }
+
   const getContext = options?.context
 
   const TelefuncDurableObject = class extends DurableObject {
     private readonly authorityState: CloudflareBroadcastAuthorityState
+    private readonly roomManager: CloudflareRoomSessionManager
 
     constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
       super(ctx, env)
@@ -107,40 +127,65 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
       if (kv) broadcast.attachKV(kv)
       // The authority also owns room state and mirrors its replicated writes to the KV read replica.
       this.authorityState = new CloudflareBroadcastAuthorityState(ctx, kv)
+      this.roomManager = new CloudflareRoomSessionManager(
+        ctx.id.toString(),
+        () => getRoomBinding(this.env as Cloudflare.Env) as unknown as CloudflareRoomNamespace,
+      )
+      // A hibernated socket reconstructed into a fresh JS instance cannot retain the callbacks owned by
+      // the previous manager. Close it explicitly so the client reconnects and establishes fresh routes.
+      for (const socket of ctx.getWebSockets?.() ?? []) {
+        socket.close(SESSION_RESET_CLOSE_CODE, SESSION_RESET_CLOSE_REASON)
+      }
       crosswsAdapter.handleDurableInit(this, ctx, env)
     }
 
     async fetch(request: Request) {
-      const shard = request.headers.get(TELEFUNC_SHARD_HEADER)
-      const bucket = request.headers.get(TELEFUNC_BROADCAST_BUCKET_HEADER) as LocationBucket | null
-      if (shard && bucket) {
-        broadcast.attachIsolateInfo(shard, bucket)
-      }
-      if (request.headers.get('upgrade') === 'websocket') {
-        return crosswsAdapter.handleDurableUpgrade(this, request)
-      }
-      const context = getContext ? await getContext(request, this.env as Cloudflare.Env) : undefined
-      const httpResponse = await serveTelefunc(context ? { request, context } : { request })
-      return new Response(httpResponse.getReadableWebStream(), {
-        status: httpResponse.statusCode,
-        headers: httpResponse.headers,
+      return this.runWithRoomManager(async () => {
+        const shard = request.headers.get(TELEFUNC_SHARD_HEADER)
+        const bucket = request.headers.get(TELEFUNC_BROADCAST_BUCKET_HEADER) as LocationBucket | null
+        if (shard && bucket) {
+          broadcast.attachIsolateInfo(shard, bucket)
+        }
+        if (request.headers.get('upgrade') === 'websocket') {
+          return crosswsAdapter.handleDurableUpgrade(this, request)
+        }
+        const context = getContext ? await getContext(request, this.env as Cloudflare.Env) : undefined
+        const httpResponse = await serveTelefunc(context ? { request, context } : { request })
+        return new Response(httpResponse.getReadableWebStream(), {
+          status: httpResponse.statusCode,
+          headers: httpResponse.headers,
+        })
       })
     }
 
     webSocketMessage(ws: WebSocket, message: string | ArrayBuffer) {
-      return crosswsAdapter.handleDurableMessage(this, ws, message)
+      return this.runWithRoomManager(() => crosswsAdapter.handleDurableMessage(this, ws, message))
     }
 
     webSocketClose(ws: WebSocket, code: number, reason: string, wasClean: boolean) {
-      return crosswsAdapter.handleDurableClose(this, ws, code, reason, wasClean)
+      return this.runWithRoomManager(() => crosswsAdapter.handleDurableClose(this, ws, code, reason, wasClean))
     }
 
     telefuncBroadcastPublish(request: BroadcastPublishRequest) {
-      return broadcast.publishToSubscribers(this.authorityState, request)
+      return this.runWithRoomManager(() => broadcast.publishToSubscribers(this.authorityState, request))
     }
 
     telefuncBroadcastDeliver(request: BroadcastDeliverRequest) {
-      broadcast.deliverToLocal(request)
+      return this.runWithRoomManager(() => broadcast.deliverToLocal(request))
+    }
+
+    telefuncRoomDeliver(request: RoomShardDeliveryRequest): Promise<void> {
+      return this.runWithRoomManager(() => this.roomManager.deliver(request))
+    }
+
+    telefuncRoomInvalidate(request: RoomShardInvalidationRequest): void {
+      return this.runWithRoomManager(() => this.roomManager.invalidate(request))
+    }
+
+    private runWithRoomManager<T>(fn: () => T): T {
+      // Non-Room Cloudflare keeps its flag-free path. A Room operation calls getCloudflareRoomSessionManager
+      // from the proxy and gets the normative diagnostic if async mode was not enabled by the user.
+      return isAsyncMode() ? withCloudflareRoomSessionManager(this.roomManager, fn) : fn()
     }
 
     // Room state RPC — a room's authority DO (the one that sequences its control lane) also owns its
@@ -173,14 +218,16 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
     // Room frame commit RPC — the atomic assign-order + retain + publish behind `Room`'s timeline, run on
     // the room's partition authority DO (see `commitFrameOnAuthority`).
     telefuncRoomCommitFrame(input: RoomFrameCommit) {
-      return broadcast.commitFrameOnAuthority(this.authorityState, input)
+      return this.runWithRoomManager(() => broadcast.commitFrameOnAuthority(this.authorityState, input))
     }
 
     /** Storage alarm: reclaim expired room-state entries (DO storage has no native TTL). */
     alarm() {
-      return this.authorityState.reapExpiredRoomState()
+      return this.runWithRoomManager(() => this.authorityState.reapExpiredRoomState())
     }
   }
+
+  const TelefuncRoomDurableObject = createTelefuncRoomDurableObjectClass(bindingName)
 
   return {
     async serve({ request, env, ctx }: ServeInput): Promise<Response | undefined> {
@@ -239,5 +286,6 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
       return doResponse
     },
     TelefuncDurableObject,
+    TelefuncRoomDurableObject,
   }
 }

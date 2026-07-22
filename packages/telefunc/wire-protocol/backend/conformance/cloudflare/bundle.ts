@@ -36,7 +36,7 @@ export async function bundleWorker(): Promise<string> {
     platform: 'neutral',
     target: 'es2022',
     write: false,
-    external: ['cloudflare:workers'],
+    external: ['cloudflare:workers', 'node:async_hooks'],
     plugins: [resolveJsToTs],
     logLevel: 'silent',
   })

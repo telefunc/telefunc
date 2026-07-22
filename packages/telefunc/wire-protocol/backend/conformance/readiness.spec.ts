@@ -16,6 +16,7 @@ import {
   finalizeClose,
   flush,
   nextId,
+  noopReceiver,
   okHead,
   openRoom,
   readHeadOrThrow,
@@ -82,7 +83,7 @@ for (const harness of installedBackends) {
       })
 
       it('rejects ready for an incarnation that is not the open one (fail-closed)', async () => {
-        const sub = fx.backend.subscribeLane(roomId, 'inc-that-never-was', SEMANTIC, () => {})
+        const sub = fx.backend.subscribeLane(roomId, 'inc-that-never-was', SEMANTIC, noopReceiver())
         expect(await settled(sub.ready)).toBe('rejected')
         expect(sub.state()).toBe('closed')
       })
@@ -90,12 +91,12 @@ for (const harness of installedBackends) {
       it('rejects ready once the head has left open', async () => {
         const head = await readHeadOrThrow(fx.backend, roomId)
         const { head: closing, leaseId } = await enterClosing(fx.backend, roomId, head)
-        const whileClosing = fx.backend.subscribeLane(roomId, inc, SEMANTIC, () => {})
+        const whileClosing = fx.backend.subscribeLane(roomId, inc, SEMANTIC, noopReceiver())
         expect(await settled(whileClosing.ready)).toBe('rejected')
 
         accepted(await fx.backend.commitLane(roomId, inc, CONTROL, bytes('closed'), { closingLease: leaseId }))
         okHead(await finalizeClose(fx.backend, roomId, closing, leaseId))
-        const afterClosed = fx.backend.subscribeLane(roomId, inc, SEMANTIC, () => {})
+        const afterClosed = fx.backend.subscribeLane(roomId, inc, SEMANTIC, noopReceiver())
         expect(await settled(afterClosed.ready)).toBe('rejected')
       })
 

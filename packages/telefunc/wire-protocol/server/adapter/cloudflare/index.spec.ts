@@ -284,11 +284,24 @@ describe('cloudflare adapter entrypoint', () => {
     )
   })
 
+  it('publishes the named SQLite Room authority and carries the configured session binding into it', () => {
+    const tf = new Telefunc({ bindingName: 'CustomTelefuncSession', roomBindingName: 'CustomRoomAuthority' })
+
+    expect(tf.TelefuncRoomDurableObject.name).toBe('TelefuncRoomDurableObject')
+    expect(() => new tf.TelefuncRoomDurableObject({} as DurableObjectState, {} as Cloudflare.Env)).toThrow(
+      'Missing Cloudflare session Durable Object binding "CustomTelefuncSession" in TelefuncRoomDurableObject constructor.',
+    )
+  })
+
   it('wires the durable object runtime and delegates fetch, websocket, and broadcast methods', async () => {
     const { binding } = createBinding()
     const tf = new Telefunc({ context: vi.fn(async () => ({ userId: 'user-1' })) })
     const DurableClass = tf.TelefuncDurableObject
-    const ctx = { id: { name: 'telefunc-shard-weur-1' } } as DurableObjectState
+    const hibernatedSocket = { close: vi.fn() }
+    const ctx = {
+      id: { name: 'telefunc-shard-weur-1' },
+      getWebSockets: () => [hibernatedSocket],
+    } as unknown as DurableObjectState
     const instance = new DurableClass(ctx, {
       TelefuncDurableObject: binding,
     } as unknown as Cloudflare.Env) as InstanceType<typeof DurableClass> & {
@@ -303,6 +316,7 @@ describe('cloudflare adapter entrypoint', () => {
     expect(mocks.crosswsAdapter.handleDurableInit).toHaveBeenCalledWith(instance, ctx, {
       TelefuncDurableObject: binding,
     })
+    expect(hibernatedSocket.close).toHaveBeenCalledWith(1012, 'Telefunc session reset; reconnect')
 
     mocks.crosswsAdapter.handleDurableUpgrade.mockResolvedValue(new Response('upgrade'))
     const upgradeResponse = await instance.fetch(

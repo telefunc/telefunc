@@ -5,8 +5,8 @@
 // janitor. Storage, retained chunking, routes and fanout are the invariant modules alongside it. The
 // per-lane fanout chains live here at the single room authority, including across facade instances.
 //
-// DARK: this class is not published as a binding, not exported from any barrel, and not wired to any Room
-// call site — that is W3-C. W2c proves it passes the conformance suite in local workerd.
+// The Cloudflare entrypoint publishes a configured subclass as `TelefuncRoomDurableObject`; it is not yet
+// selected by Room policy; W5-C owns that switch. Conformance drives the same authority implementation.
 
 import { DurableObject } from 'cloudflare:workers'
 import type { CellMutation, CxResult, HeadCx, HeadNext, LaneId } from '../../../../backend/spi.js'
@@ -25,7 +25,7 @@ import {
   type RouteInstallation,
   upsertRoute,
 } from './routes.js'
-import type { SubscriberDeliveryRequest, SubscriberRouteIdentity } from './subscriber.js'
+import type { RoomShardDeliveryRequest, RoomShardInvalidationRequest } from './backend.js'
 import {
   advanceOrder,
   compareExchangeCells,
@@ -48,18 +48,6 @@ import {
   touchRouteGenerationCapture,
   type StoredHead,
 } from './storage.js'
-
-// The authority clock is injectable at the module seam the DO always reads. Production leaves the hook
-// null, so `authorityNow()` IS `Date.now()` inside the DO; the parity fixture installs a controlled clock
-// through the SAME seam so lease expiry is provable without wall-clock waits (and a skewed caller clock
-// stays distinguishable). This is the one code path the DO uses for `:now`.
-let authorityNowHook: (() => number) | null = null
-export function __setRoomAuthorityNowHook(hook: (() => number) | null): void {
-  authorityNowHook = hook
-}
-function authorityNow(): number {
-  return authorityNowHook !== null ? authorityNowHook() : Date.now()
-}
 
 // ── wire shapes (binary as base64 across the Node↔workerd RPC seam) ──
 
@@ -97,20 +85,21 @@ export type RegisterWire =
   | { ok: true; expiresAt: number; generationToken: string }
   | { rejected: true; reason: string; terminal?: boolean }
 export type GenerationWire = { ok: true; generationToken: string } | { rejected: true; reason: string; terminal: true }
-export type DropWire = { droppedSubscribers: Array<[string, string]> } | { error: string }
+export type DropWire =
+  | { droppedSubscribers: Array<{ laneKey: string; subscriberDoId: string; leaseId: string; generationToken: string }> }
+  | { error: string }
 
 type SubscriberStub = {
-  telefuncBroadcastDeliver(request: SubscriberDeliveryRequest): Promise<void>
-  uninstallRoute(identity: SubscriberRouteIdentity, leaseId: string): Promise<void>
+  telefuncRoomDeliver(request: RoomShardDeliveryRequest): Promise<void>
+  telefuncRoomInvalidate(request: RoomShardInvalidationRequest): Promise<void>
 }
 
 type SubscriberNamespace = {
-  idFromName(name: string): unknown
+  idFromString(id: string): unknown
   get(id: unknown): SubscriberStub
 }
 
 type RoomEnv = {
-  TELEFUNC_ROOM_SUBSCRIBER: SubscriberNamespace
   TELEFUNC_ROOM_ALARM_INTERVAL_MS?: string
 }
 
@@ -141,45 +130,63 @@ function nextFromWire(next: HeadNextWire): HeadNext {
 // Extends the `cloudflare:workers` DurableObject base so the Room backend seam can call its methods over
 // RPC (a plain class would only expose `fetch`). One DO per room. The room DO owns all durable state
 // (head, cells, order, retained, routes, directory), acceptance transaction, and ephemeral delivery
-// chains. Fanout dispatches to actual representative subscriber DO stubs derived from persisted names.
+// chains. Fanout dispatches to the existing session-shard DO stubs derived from persisted namespace IDs.
 export class TelefuncRoomDurableObject extends DurableObject {
   readonly #sql: SqlStorage
   readonly #fanout: Fanout
   readonly #maxRetainedBytes: number
   readonly #alarmIntervalMs: number
+  readonly #sessionNamespaceValue: SubscriberNamespace
+  readonly #authorityNow: () => number
 
-  constructor(ctx: DurableObjectState, env: unknown) {
+  constructor(
+    ctx: DurableObjectState,
+    env: unknown,
+    sessionBindingName: string = 'TelefuncDurableObject',
+    authorityNow: () => number = Date.now,
+  ) {
     super(ctx, env as never)
+    const sessionNamespace = (env as Record<string, SubscriberNamespace | undefined>)[sessionBindingName]
+    if (sessionNamespace === undefined) {
+      throw new Error(
+        `Missing Cloudflare session Durable Object binding "${sessionBindingName}" in TelefuncRoomDurableObject constructor.`,
+      )
+    }
+    this.#sessionNamespaceValue = sessionNamespace
+    this.#authorityNow = authorityNow
     this.#sql = ctx.storage.sql
     initSchema(this.#sql)
     this.#maxRetainedBytes = 16 * 1024 * 1024
     const configuredInterval = Number((env as RoomEnv).TELEFUNC_ROOM_ALARM_INTERVAL_MS)
     this.#alarmIntervalMs =
       Number.isFinite(configuredInterval) && configuredInterval > 0 ? configuredInterval : ROOM_ALARM_INTERVAL_MS
-    this.#fanout = new Fanout(async (target, frame, info) => {
-      const namespace = (this.env as RoomEnv).TELEFUNC_ROOM_SUBSCRIBER
-      const subscriber = namespace.get(namespace.idFromName(target.subscriber))
-      try {
-        await subscriber.telefuncBroadcastDeliver({
-          roomId: info.roomId,
-          inc: info.inc,
-          laneKey: info.laneKey,
-          subscriber: target.subscriber,
-          leaseId: target.leaseId,
-          frame,
-          seq: info.seq,
-          timestamp: info.timestamp,
-        })
-        this.ctx.storage.transactionSync(() => {
-          recordRouteDeliverySuccess(this.#sql, info.inc, info.laneKey, target.subscriber, target.leaseId)
-        })
-      } catch (error) {
-        this.ctx.storage.transactionSync(() => {
-          recordRouteDeliveryFailure(this.#sql, info.inc, info.laneKey, target.subscriber, target.leaseId)
-        })
-        throw error
-      }
-    })
+    this.#fanout = new Fanout(
+      async (target, frame, info) => {
+        const session = this.#sessionNamespace().get(this.#sessionNamespace().idFromString(target.subscriberDoId))
+        try {
+          await session.telefuncRoomDeliver({
+            roomId: info.roomId,
+            inc: info.inc,
+            laneKey: info.laneKey,
+            subscriberDoId: target.subscriberDoId,
+            leaseId: target.leaseId,
+            generationToken: target.generationToken,
+            frame,
+            seq: info.seq,
+            timestamp: info.timestamp,
+          })
+          this.ctx.storage.transactionSync(() => {
+            recordRouteDeliverySuccess(this.#sql, info.inc, info.laneKey, target.subscriberDoId, target.leaseId)
+          })
+        } catch (error) {
+          this.ctx.storage.transactionSync(() => {
+            recordRouteDeliveryFailure(this.#sql, info.inc, info.laneKey, target.subscriberDoId, target.leaseId)
+          })
+          throw error
+        }
+      },
+      (resume) => setTimeout(resume, 0),
+    )
     // Schedule on the runtime clock; sweep predicates use the room authority clock. The test binding only
     // shortens this cadence and never replaces the production alarm path.
     this.ctx.blockConcurrencyWhile(async () => {
@@ -190,13 +197,13 @@ export class TelefuncRoomDurableObject extends DurableObject {
   // ── head ──
 
   async readHead(): Promise<HeadWire | null> {
-    const head = readLiveHead(this.#sql, authorityNow())
+    const head = readLiveHead(this.#sql, this.#authorityNow())
     return head === null ? null : headToWire(head)
   }
 
   async compareExchangeHead(cx: HeadCx, nextWire: HeadNextWire): Promise<HeadCxWire> {
     const next = nextFromWire(nextWire)
-    const now = authorityNow()
+    const now = this.#authorityNow()
     let outcome!: ReturnType<typeof compareExchangeHead>
     // One SQL transaction: single-object serialization gives head linearizability (I1). A validation
     // throw rolls the tx back and is surfaced as a structured error the facade rethrows verbatim (the
@@ -217,7 +224,7 @@ export class TelefuncRoomDurableObject extends DurableObject {
   // ── cells ──
 
   async readCells(inc: string, sel: { keys: string[] } | { prefix: string }): Promise<CellsWire> {
-    const result = readCells(this.#sql, inc, sel, authorityNow())
+    const result = readCells(this.#sql, inc, sel, this.#authorityNow())
     if ('staleInc' in result) return { staleInc: true }
     return { revision: result.revision, cells: [...result.cells].map(([key, bytes]) => [key, bytesToBase64(bytes)]) }
   }
@@ -228,7 +235,7 @@ export class TelefuncRoomDurableObject extends DurableObject {
         ? { key: mutation.key }
         : { key: mutation.key, set: { bytes: base64ToBytes(mutation.set.bytesB64), ttlMs: mutation.set.ttlMs } },
     )
-    const now = authorityNow()
+    const now = this.#authorityNow()
     let result!: CxResult
     this.ctx.storage.transactionSync(() => {
       result = compareExchangeCells(this.#sql, inc, revision, mutations, now)
@@ -245,7 +252,7 @@ export class TelefuncRoomDurableObject extends DurableObject {
     payload: Uint8Array,
     opts?: { retain?: boolean; orderTtlMs?: number; closingLease?: string },
   ): Promise<CommitWire> {
-    const now = authorityNow()
+    const now = this.#authorityNow()
     const key = laneKeyOf(lane)
     const frame = payload instanceof Uint8Array ? payload : new Uint8Array(payload)
     let accepted: { seq: number; timestamp: number; targets: RouteTarget[] } | null = null
@@ -313,7 +320,7 @@ export class TelefuncRoomDurableObject extends DurableObject {
     let generationToken: string | null = null
     let invalidAttempt = false
     this.ctx.storage.transactionSync(() => {
-      const now = authorityNow()
+      const now = this.#authorityNow()
       if (attemptId !== null) {
         const prior = readRouteGenerationCapture(this.#sql, attemptId)
         if (prior !== null) {
@@ -397,21 +404,26 @@ export class TelefuncRoomDurableObject extends DurableObject {
     roomId: string,
     inc: string,
     laneKey: string,
-    subscriber: string,
+    subscriberDoId: string,
     leaseId: string,
-    bucket: string | null,
     expectedGenerationToken: string,
     captureAttemptId: string | null = null,
     captureCreatedAt: number | null = null,
   ): Promise<RegisterWire> {
-    // Probe the actual representative subscriber DO through the same no-op delivery RPC used by fanout.
-    // Stubs are derived from names and never persisted. The open-head check and UPSERT then share one SQL
-    // transaction after the addressability await.
-    const namespace = (this.env as RoomEnv).TELEFUNC_ROOM_SUBSCRIBER
-    const identity: SubscriberRouteIdentity = { roomId, inc, laneKey, subscriber }
+    // The shard id is canonical only inside the configured session namespace. Parse it before touching
+    // durable state; an authority never probes back into the caller during registration (self-fanout).
+    const sessionNamespace = this.#sessionNamespace()
+    if (!/^[0-9a-f]{64}$/.test(subscriberDoId)) {
+      return { rejected: true, reason: `subscriber Durable Object id '${subscriberDoId}' is invalid`, terminal: true }
+    }
+    try {
+      sessionNamespace.idFromString(subscriberDoId)
+    } catch {
+      return { rejected: true, reason: `subscriber Durable Object id '${subscriberDoId}' is invalid`, terminal: true }
+    }
     let observedGenerationToken: string | null = null
     this.ctx.storage.transactionSync(() => {
-      const head = readLiveHead(this.#sql, authorityNow())
+      const head = readLiveHead(this.#sql, this.#authorityNow())
       if (head?.currentInc === inc && head.state === 'open') {
         observedGenerationToken = readGenerationToken(this.#sql, inc)
       }
@@ -422,13 +434,6 @@ export class TelefuncRoomDurableObject extends DurableObject {
     if (expectedGenerationToken !== observedGenerationToken) {
       return { rejected: true, reason: `generation '${inc}' was invalidated`, terminal: true }
     }
-    try {
-      await namespace
-        .get(namespace.idFromName(subscriber))
-        .telefuncBroadcastDeliver({ ...identity, leaseId, probe: true })
-    } catch {
-      return { rejected: true, reason: `subscriber '${subscriber}' is not addressable` }
-    }
     const probedGenerationToken = observedGenerationToken
     let expiresAt = 0
     let registered = false
@@ -436,7 +441,7 @@ export class TelefuncRoomDurableObject extends DurableObject {
     let captureInvalid = false
     this.ctx.storage.transactionSync(() => {
       // Mint the full TTL from durable registration, never from before the awaited addressability probe.
-      const now = authorityNow()
+      const now = this.#authorityNow()
       const head = readLiveHead(this.#sql, now)
       if (head === null || head.currentInc !== inc || head.state !== 'open') return
       if (readGenerationToken(this.#sql, inc) !== probedGenerationToken) {
@@ -459,7 +464,7 @@ export class TelefuncRoomDurableObject extends DurableObject {
         captureInvalid = true
         return
       }
-      expiresAt = upsertRoute(this.#sql, roomId, inc, laneKey, subscriber, leaseId, bucket, now)
+      expiresAt = upsertRoute(this.#sql, roomId, inc, laneKey, subscriberDoId, leaseId, probedGenerationToken, now)
       registered = true
     })
     if (registered) return { ok: true, expiresAt, generationToken: probedGenerationToken }
@@ -471,13 +476,13 @@ export class TelefuncRoomDurableObject extends DurableObject {
   async renewRoute(
     inc: string,
     laneKey: string,
-    subscriber: string,
+    subscriberDoId: string,
     leaseId: string,
     expectedGenerationToken: string | null = null,
     captureAttemptId: string | null = null,
     captureCreatedAt: number | null = null,
   ): Promise<{ ok: boolean; expiresAt?: number; terminal?: boolean }> {
-    const now = authorityNow()
+    const now = this.#authorityNow()
     let result!: ReturnType<typeof renewRoute>
     let generationInvalid = false
     this.ctx.storage.transactionSync(() => {
@@ -503,7 +508,7 @@ export class TelefuncRoomDurableObject extends DurableObject {
           return
         }
       }
-      result = renewRoute(this.#sql, inc, laneKey, subscriber, leaseId, now)
+      result = renewRoute(this.#sql, inc, laneKey, subscriberDoId, leaseId, now)
       if (
         result.ok &&
         captureAttemptId !== null &&
@@ -529,13 +534,13 @@ export class TelefuncRoomDurableObject extends DurableObject {
     return result.ok ? { ok: true, expiresAt: result.expiresAt } : { ok: false }
   }
 
-  async unsubscribeRoute(inc: string, laneKey: string, subscriber: string, leaseId: string): Promise<void> {
+  async unsubscribeRoute(inc: string, laneKey: string, subscriberDoId: string, leaseId: string): Promise<void> {
     const installation = listRouteInstallations(this.#sql, inc).find(
-      (entry) => entry.laneKey === laneKey && entry.subscriber === subscriber && entry.leaseId === leaseId,
+      (entry) => entry.laneKey === laneKey && entry.subscriberDoId === subscriberDoId && entry.leaseId === leaseId,
     )
     if (installation === undefined) return
     await this.#invalidateInstallation(installation)
-    this.ctx.storage.transactionSync(() => deleteRoute(this.#sql, inc, laneKey, subscriber, leaseId))
+    this.ctx.storage.transactionSync(() => deleteRoute(this.#sql, inc, laneKey, subscriberDoId, leaseId))
   }
 
   // ── generation lifecycle ──
@@ -545,7 +550,7 @@ export class TelefuncRoomDurableObject extends DurableObject {
   }
 
   async dropGeneration(inc: string): Promise<DropWire> {
-    const now = authorityNow()
+    const now = this.#authorityNow()
     const head = readLiveHead(this.#sql, now)
     if (head?.currentInc === inc) {
       return { error: `dropGeneration: refusing to drop the current incarnation '${inc}'` }
@@ -559,10 +564,12 @@ export class TelefuncRoomDurableObject extends DurableObject {
     this.#fanout.clearIncarnation(inc)
     // Report the routes that were on the dropped generation so the facade can close their local
     // attachments (the channel no longer exists — the subscription is terminal, not merely lost).
-    const droppedSubscribers = installations.map((installation): [string, string] => [
-      installation.laneKey,
-      installation.subscriber,
-    ])
+    const droppedSubscribers = installations.map((installation) => ({
+      laneKey: installation.laneKey,
+      subscriberDoId: installation.subscriberDoId,
+      leaseId: installation.leaseId,
+      generationToken: installation.generationToken,
+    }))
     return { droppedSubscribers }
   }
 
@@ -587,15 +594,16 @@ export class TelefuncRoomDurableObject extends DurableObject {
 
   async alarm(): Promise<void> {
     try {
-      await this.#runSweep(authorityNow())
+      await this.#runSweep(this.#authorityNow())
     } finally {
       await this.#armAlarm()
     }
   }
 
-  // Test/janitor hook: run the sweep on demand (expired cells/routes/order rows + lapsed tombstone).
-  async runJanitor(): Promise<{ prunedRoutes: number }> {
-    return { prunedRoutes: await this.#runSweep(authorityNow()) }
+  // Operational maintenance RPC: the alarm uses the same sweep, while this explicit form lets an owner
+  // request immediate convergence after lifecycle work without changing any data-path semantics.
+  async telefuncRoomRunMaintenance(): Promise<{ prunedRoutes: number }> {
+    return { prunedRoutes: await this.#runSweep(this.#authorityNow()) }
   }
 
   async #runSweep(now: number): Promise<number> {
@@ -637,7 +645,13 @@ export class TelefuncRoomDurableObject extends DurableObject {
         continue
       }
       this.ctx.storage.transactionSync(() => {
-        deleteRoute(this.#sql, installation.inc, installation.laneKey, installation.subscriber, installation.leaseId)
+        deleteRoute(
+          this.#sql,
+          installation.inc,
+          installation.laneKey,
+          installation.subscriberDoId,
+          installation.leaseId,
+        )
       })
       prunedRoutes += 1
     }
@@ -649,14 +663,19 @@ export class TelefuncRoomDurableObject extends DurableObject {
   }
 
   async #invalidateInstallation(installation: RouteInstallation): Promise<void> {
-    const namespace = (this.env as RoomEnv).TELEFUNC_ROOM_SUBSCRIBER
-    const identity: SubscriberRouteIdentity = {
+    const session = this.#sessionNamespace()
+    await session.get(session.idFromString(installation.subscriberDoId)).telefuncRoomInvalidate({
       roomId: installation.roomId,
       inc: installation.inc,
       laneKey: installation.laneKey,
-      subscriber: installation.subscriber,
-    }
-    await namespace.get(namespace.idFromName(installation.subscriber)).uninstallRoute(identity, installation.leaseId)
+      subscriberDoId: installation.subscriberDoId,
+      leaseId: installation.leaseId,
+      generationToken: installation.generationToken,
+    })
+  }
+
+  #sessionNamespace(): SubscriberNamespace {
+    return this.#sessionNamespaceValue
   }
 
   async #armAlarm(): Promise<void> {
@@ -697,8 +716,15 @@ function commitPreconditionHolds(
   )
 }
 
-// Factory glue (dark; publication is W3-C). Returns the DO class so a host can register it under a
-// binding without importing the class name directly.
-export function createTelefuncRoomDurableObjectClass(): typeof TelefuncRoomDurableObject {
-  return TelefuncRoomDurableObject
+// Factory glue for the developer-facing Cloudflare entrypoint. The exact returned class name is also the
+// Wrangler binding class name, while the closure captures the configured existing session namespace.
+export function createTelefuncRoomDurableObjectClass(
+  sessionBindingName: string = 'TelefuncDurableObject',
+): typeof TelefuncRoomDurableObject {
+  const BaseTelefuncRoomDurableObject = TelefuncRoomDurableObject
+  return class TelefuncRoomDurableObject extends BaseTelefuncRoomDurableObject {
+    constructor(ctx: DurableObjectState, env: unknown) {
+      super(ctx, env, sessionBindingName)
+    }
+  }
 }

@@ -29,7 +29,7 @@ export type BackendFixture = {
   traces: BackendTraces
   // Exact authority-target counts for scenarios whose physical target granularity is backend-specific.
   // These are mappings, never lower bounds or skips: memory counts callbacks, Redis connections, and CF
-  // routed representative subscriber DOs.
+  // routed session-shard Durable Objects.
   expectedReceivers: {
     twoLocalSubscriptionsSameLane: number
     oneLocalSubscriptionAfterSiblingDetach: number
