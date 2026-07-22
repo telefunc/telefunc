@@ -40,6 +40,7 @@ const MAX_RETAINED_BYTES = 16 * 1024 * 1024
 const ROOM_MANAGER = Symbol('telefunc.cloudflare.room-manager')
 
 export const CLOUDFLARE_ROOM_CONTEXT_ERROR =
+  // spellcheck-ignore  nodejs_als is a real Cloudflare compatibility flag (AsyncLocalStorage), not a typo
   'Cloudflare Room requires await-safe context. Import "telefunc/async_hooks" and enable the Cloudflare "nodejs_als" or "nodejs_compat" compatibility flag.'
 
 export type RoomShardDeliveryRequest = {
