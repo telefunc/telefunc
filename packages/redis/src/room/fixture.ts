@@ -84,6 +84,7 @@ export type RedisBackendFixture = BackendFixture & {
   setAfterGenerationCapture(fn: GenerationCaptureProbe | null): void
   setBeforeDropGenerationUnregister(fn: DropGenerationProbe | null): void
   setBeforeDirectoryDeleteApply(fn: DirectoryDeleteProbe | null): void
+  createPeerBackend(): Promise<{ backend: RedisRoomBackend; dispose(): Promise<void> }>
 }
 
 export async function createRedisFixture(
@@ -167,6 +168,26 @@ export async function createRedisFixture(
     },
     setBeforeDirectoryDeleteApply: (fn) => {
       beforeDirectoryDeleteApply = fn
+    },
+    createPeerBackend: async () => {
+      const peerRedis = redis.duplicate({ maxRetriesPerRequest: 2 })
+      const peer = new RedisRoomBackend({
+        redis: peerRedis,
+        prefix,
+        authorityNow: opts.useRedisAuthority === true ? undefined : () => clock,
+        subscriptionRetryDelay: () => 0,
+      })
+      return {
+        backend: peer,
+        dispose: async () => {
+          await peer.dispose()
+          try {
+            await peerRedis.quit()
+          } catch {
+            peerRedis.disconnect()
+          }
+        },
+      }
     },
     dispose: async () => {
       await backend.dispose()

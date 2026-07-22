@@ -17,6 +17,7 @@ import {
   okDeleted,
   okHead,
   openRoom,
+  readHeadOrThrow,
   SEMANTIC,
   settled,
   text,
@@ -286,6 +287,48 @@ describe.skipIf(url === undefined || url === '')('Redis independent-review race 
     await freshLatch.waitFor(1)
     expect(staleLatch.payloads()).toEqual([])
     expect(freshLatch.payloads()).toEqual(['fresh-only'])
+  })
+
+  it('broadcasts generation invalidation across backend instances and removes the stale reused-id target', async () => {
+    const roomId = nextId('room')
+    const { inc } = await openRoom(fx.backend, roomId)
+    const staleLatch = collector()
+    const stale = fx.backend.subscribeLane(roomId, inc, SEMANTIC, staleLatch.receiver)
+    await stale.ready
+    const peer = await fx.createPeerBackend()
+    try {
+      const head = await readHeadOrThrow(peer.backend, roomId)
+      const { head: closing, leaseId } = await enterClosing(peer.backend, roomId, head)
+      accepted(await peer.backend.commitLane(roomId, inc, CONTROL, bytes('closed'), { closingLease: leaseId }))
+      const tombstone = okHead(await finalizeClose(peer.backend, roomId, closing, leaseId))
+      await peer.backend.dropGeneration(roomId, inc)
+      okHead(
+        await peer.backend.compareExchangeHead(
+          roomId,
+          { expect: { rev: tombstone.rev } },
+          { head: { currentInc: inc, state: 'open', config: tombstone.config } },
+        ),
+      )
+
+      await waitFor(() => stale.state() === 'closed')
+      await waitFor(
+        async () => (await fx.redis.pubsub('NUMSUB', `${fx.prefix}room:{${roomId}}:ch:${inc}:semantic`))[1] === 0,
+      )
+      const withoutFresh = accepted(await peer.backend.commitLane(roomId, inc, SEMANTIC, bytes('not-for-stale')))
+      expect(withoutFresh.receivers).toBe(0)
+      expect(staleLatch.payloads()).toEqual([])
+
+      const freshLatch = collector()
+      const fresh = fx.backend.subscribeLane(roomId, inc, SEMANTIC, freshLatch.receiver)
+      await fresh.ready
+      const withFresh = accepted(await peer.backend.commitLane(roomId, inc, SEMANTIC, bytes('fresh-peer')))
+      expect(withFresh.receivers).toBe(1)
+      await withFresh.delivery
+      await freshLatch.waitFor(1)
+      expect(freshLatch.payloads()).toEqual(['fresh-peer'])
+    } finally {
+      await peer.dispose()
+    }
   })
 
   it('fences last detach against an in-flight establishment validation', async () => {

@@ -60,6 +60,7 @@ import {
   DROP_GENERATION_FINALIZE_KEYS,
   DROP_GENERATION_FINALIZE_LUA,
   escapeGlob,
+  generationInvalidationChannel,
   generationTokensKey,
   gensKey,
   genPrefix,
@@ -330,6 +331,7 @@ type RedisChannelContext = {
   roomId: string
   inc: string
   owner: string
+  invalidationChannel: string
   attemptId: string
   createdAt: number | null
   generationToken: string | null
@@ -354,6 +356,8 @@ export class RedisRoomBackend implements RoomBackendSpi {
   // until connection loss or the final local unsubscribe.
   readonly #channelAcks = new Map<string, Promise<void>>()
   readonly #subscribedChannels = new Set<string>()
+  readonly #subscribedInvalidations = new Set<string>()
+  readonly #invalidationOwners = new Map<string, string>()
   // One refcounted local mux lifecycle per physical channel. Its generation token and operation epoch
   // fence delayed capture/SUBSCRIBE results, while the retained owner record makes failed cleanup
   // retryable until the durable generation sources can be removed last.
@@ -615,6 +619,7 @@ export class RedisRoomBackend implements RoomBackendSpi {
         roomId,
         inc,
         owner,
+        invalidationChannel: generationInvalidationChannel(this.#prefix, roomId, inc),
         attemptId: randomUUID(),
         createdAt: null,
         generationToken: null,
@@ -622,6 +627,7 @@ export class RedisRoomBackend implements RoomBackendSpi {
         initialEstablished: false,
       }
       this.#channelContexts.set(channel, context)
+      this.#invalidationOwners.set(context.invalidationChannel, owner)
     }
     let sub: RedisLaneSubscription
     sub = new RedisLaneSubscription(receiver, () => this.#detach(sub, owner, channel))
@@ -664,6 +670,7 @@ export class RedisRoomBackend implements RoomBackendSpi {
           return
         }
         this.#subscribedChannels.add(channel)
+        this.#subscribedInvalidations.add(context.invalidationChannel)
         context.initialEstablished = true
         for (const sub of set) sub.established()
       })
@@ -701,7 +708,7 @@ export class RedisRoomBackend implements RoomBackendSpi {
         }
         await this.#testHooks?.beforeSubscribe?.(channel)
         if (context.operationEpoch !== operationEpoch) return false
-        await this.#subscriber.subscribe(channel)
+        await this.#subscriber.subscribe(channel, context.invalidationChannel)
         if (context.operationEpoch !== operationEpoch) return true
         const valid = await this.#validateGeneration(context, !context.initialEstablished)
         if (!valid) {
@@ -785,9 +792,19 @@ export class RedisRoomBackend implements RoomBackendSpi {
     if (subscribed && !this.#disposed && this.#subscriber.status !== 'end') {
       try {
         await this.#subscriber.unsubscribe(channel)
+        this.#subscribedChannels.delete(channel)
+        await this.#unsubscribeInvalidationIfLast(context, channel)
       } catch (err) {
         // Keep the empty mux + exact ownership source for retry. Local detach already closed the
         // attachment, so the state machine can never claim ready without a live callback.
+        void this.#retryEmptyChannelCleanup(channel)
+        throw err
+      }
+    }
+    if (!subscribed) {
+      try {
+        await this.#unsubscribeInvalidationIfLast(context, channel)
+      } catch (err) {
         void this.#retryEmptyChannelCleanup(channel)
         throw err
       }
@@ -804,13 +821,30 @@ export class RedisRoomBackend implements RoomBackendSpi {
       try {
         if (this.#subscribedChannels.has(channel) && this.#subscriber.status !== 'end') {
           await this.#subscriber.unsubscribe(channel)
+          this.#subscribedChannels.delete(channel)
         }
+        await this.#unsubscribeInvalidationIfLast(this.#channelContexts.get(channel), channel)
         this.#finishEmptyChannelCleanup(channel)
         return
       } catch {
         // Per-attempt isolation: retain this exact item and continue; other channel cleanup is untouched.
       }
     }
+  }
+
+  async #unsubscribeInvalidationIfLast(
+    context: RedisChannelContext | undefined,
+    excludingChannel: string,
+  ): Promise<void> {
+    if (context === undefined) return
+    for (const [channel, candidate] of this.#channelContexts) {
+      if (channel !== excludingChannel && candidate.owner === context.owner) return
+    }
+    if (this.#subscribedInvalidations.has(context.invalidationChannel) && this.#subscriber.status !== 'end') {
+      await this.#subscriber.unsubscribe(context.invalidationChannel)
+    }
+    this.#subscribedInvalidations.delete(context.invalidationChannel)
+    this.#invalidationOwners.delete(context.invalidationChannel)
   }
 
   #finishEmptyChannelCleanup(channel: string): void {
@@ -829,8 +863,34 @@ export class RedisRoomBackend implements RoomBackendSpi {
     this.#subOwners.delete(sub)
   }
 
+  #generationInvalidated(owner: string, token: string): void {
+    const contexts = [...this.#channelContexts.entries()].filter(
+      ([, context]) =>
+        context.owner === owner && (context.generationToken === null || context.generationToken === token),
+    )
+    if (contexts.length === 0) return
+    const subs = this.#roomGenSubs.get(owner)
+    if (subs !== undefined) {
+      for (const sub of subs) {
+        this.#subOwners.delete(sub)
+        sub.generationDropped()
+      }
+      this.#roomGenSubs.delete(owner)
+    }
+    for (const [channel, context] of contexts) {
+      context.operationEpoch++
+      this.#channelSubs.get(channel)?.clear()
+      void this.#retryEmptyChannelCleanup(channel)
+    }
+  }
+
   readonly #onMessage = (channelBytes: Buffer, frame: Buffer): void => {
     const channel = channelBytes.toString()
+    const invalidationOwner = this.#invalidationOwners.get(channel)
+    if (invalidationOwner !== undefined) {
+      this.#generationInvalidated(invalidationOwner, frame.toString())
+      return
+    }
     const set = this.#channelSubs.get(channel)
     if (set === undefined || set.size === 0) return
     const { seq, timestamp, payload } = decodeFrameHeader(frame)
@@ -842,6 +902,7 @@ export class RedisRoomBackend implements RoomBackendSpi {
   readonly #onSubscriberClose = (): void => {
     if (this.#disposed) return
     this.#subscribedChannels.clear()
+    this.#subscribedInvalidations.clear()
     const reason = new Error('subscribeLane: Redis subscriber connection lost')
     for (const set of this.#channelSubs.values()) for (const sub of set) sub.connectionLost(reason)
   }
@@ -867,6 +928,8 @@ export class RedisRoomBackend implements RoomBackendSpi {
     this.#channelSubs.clear()
     this.#channelContexts.clear()
     this.#channelAcks.clear()
+    this.#subscribedInvalidations.clear()
+    this.#invalidationOwners.clear()
   }
 
   // ── generation lifecycle ──
@@ -887,6 +950,13 @@ export class RedisRoomBackend implements RoomBackendSpi {
     // be reused while an old local mux can still bind to its channel.
     const keys = await this.#scanKeys(`${escapeGlob(genPrefix(this.#prefix, roomId, inc))}:*`)
     if (keys.length > 0) await this.#publisher.unlink(...keys)
+    const generationToken = await this.#publisher.hget(generationTokensKey(this.#prefix, roomId), inc)
+    if (generationToken !== null) {
+      // Broker FIFO delivers this invalidation before any later publish for a legally reused generation,
+      // including to other backend instances. A disconnected instance instead fails its exact token
+      // validation before re-SUBSCRIBE.
+      await this.#publisher.publish(generationInvalidationChannel(this.#prefix, roomId, inc), generationToken)
+    }
     const owner = roomGenerationKey(roomId, inc)
     const subs = this.#roomGenSubs.get(owner)
     if (subs !== undefined) {
@@ -894,7 +964,7 @@ export class RedisRoomBackend implements RoomBackendSpi {
       // attachment first prevents a retry or late ack from making it ready in a reused incarnation.
       for (const sub of subs) sub.generationDropped()
     }
-    await this.#dropGenerationChannels(owner)
+    await this.#dropGenerationChannels(roomId, inc, owner)
     if (subs !== undefined) for (const sub of subs) this.#subOwners.delete(sub)
     this.#roomGenSubs.delete(owner)
     await this.#testHooks?.beforeDropGenerationUnregister?.({ roomId, inc })
@@ -905,7 +975,7 @@ export class RedisRoomBackend implements RoomBackendSpi {
     ])
   }
 
-  async #dropGenerationChannels(owner: string): Promise<void> {
+  async #dropGenerationChannels(roomId: string, inc: string, owner: string): Promise<void> {
     // Snapshot each exact mux independently. One failure retains only that item and does not hide the
     // others from a later retry; the caller withholds the durable gens/token finalization on any failure.
     const failures: unknown[] = []
@@ -918,7 +988,20 @@ export class RedisRoomBackend implements RoomBackendSpi {
         if (this.#subscribedChannels.has(channel) && !this.#disposed && this.#subscriber.status !== 'end') {
           await this.#subscriber.unsubscribe(channel)
         }
+        this.#subscribedChannels.delete(channel)
         this.#finishEmptyChannelCleanup(channel)
+      } catch (err) {
+        failures.push(err)
+      }
+    }
+    if (failures.length === 0) {
+      const invalidation = generationInvalidationChannel(this.#prefix, roomId, inc)
+      try {
+        if (this.#subscribedInvalidations.has(invalidation) && this.#subscriber.status !== 'end') {
+          await this.#subscriber.unsubscribe(invalidation)
+        }
+        this.#subscribedInvalidations.delete(invalidation)
+        this.#invalidationOwners.delete(invalidation)
       } catch (err) {
         failures.push(err)
       }
@@ -988,6 +1071,7 @@ export class RedisRoomBackend implements RoomBackendSpi {
       roomId,
       inc,
       owner: roomGenerationKey(roomId, inc),
+      invalidationChannel: generationInvalidationChannel(this.#prefix, roomId, inc),
       attemptId,
       createdAt,
       generationToken: null,
@@ -1008,6 +1092,8 @@ export class RedisRoomBackend implements RoomBackendSpi {
     this.#channelContexts.clear()
     this.#channelAcks.clear()
     this.#subscribedChannels.clear()
+    this.#subscribedInvalidations.clear()
+    this.#invalidationOwners.clear()
     this.#roomGenSubs.clear()
     this.#subOwners.clear()
     this.#subscriber.off('messageBuffer', this.#onMessage)

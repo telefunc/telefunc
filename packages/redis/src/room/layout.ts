@@ -86,6 +86,9 @@ export function retainedSizeKey(prefix: string, roomId: string, inc: string): st
 export function channelKey(prefix: string, roomId: string, inc: string, laneKey: string): string {
   return `${roomTag(prefix, roomId)}:ch:${inc}:${laneKey}`
 }
+export function generationInvalidationChannel(prefix: string, roomId: string, inc: string): string {
+  return `${roomTag(prefix, roomId)}:invalidate:${inc}`
+}
 // The directory's two keys share their own tag so the tag-guarded delete stays one slot under Cluster.
 export function directoryIndexKey(prefix: string): string {
   return `${prefix}room-dir:{${prefix}dir}:index`
