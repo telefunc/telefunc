@@ -11,7 +11,7 @@ type RoomBackendState =
       phase: 'disposing'
       backend: RoomBackendSpi
       promise: Promise<void>
-      invokingBackendDispose: boolean
+      invokingBackendDisposeSynchronously: boolean
       retired: WeakSet<object>
     }
 
@@ -23,6 +23,8 @@ const state = getGlobalObject<RoomBackendStore>('wire-protocol/backend/install.t
 
 const INSTALLING_ERROR = 'telefunc/backend: the Room backend is still installing; retry after installation settles'
 const DISPOSING_ERROR = 'telefunc/backend: the Room backend is still disposing and cannot be acquired or installed yet'
+const REENTRANT_DISPOSE_ERROR =
+  'telefunc/backend: backend.dispose() must not call disposeRoomBackend() during its synchronous invocation'
 
 /**
  * Installs the per-isolate Room backend once. The factory is deliberately lazy: repeated entry-module
@@ -71,15 +73,18 @@ export function getRoomBackend(): RoomBackendSpi {
 
 /**
  * Owns disposal of the canonical backend. Once this begins, acquisition is blocked until settlement.
- * A direct synchronous reentrant call from `backend.dispose()` is a resolved no-op so a backend cannot
- * await its own shutdown; all external callers share the one canonical disposal promise.
+ * Backends must not call this global seam from inside `backend.dispose()`: synchronous reentry rejects
+ * rather than reporting a false completed shutdown. After that call stack unwinds, ordinary callers
+ * share the one canonical disposal promise.
  */
 export function disposeRoomBackend(): Promise<void> {
   const current = state.current
   if (current.phase === 'empty') return Promise.resolve()
   if (current.phase === 'installing') return Promise.reject(new Error(INSTALLING_ERROR))
   if (current.phase === 'disposing') {
-    return current.invokingBackendDispose ? Promise.resolve() : current.promise
+    return current.invokingBackendDisposeSynchronously
+      ? Promise.reject(new Error(REENTRANT_DISPOSE_ERROR))
+      : current.promise
   }
 
   const { backend, retired } = current
@@ -89,7 +94,7 @@ export function disposeRoomBackend(): Promise<void> {
     phase: 'disposing',
     backend,
     promise: deferred.promise,
-    invokingBackendDispose: false,
+    invokingBackendDisposeSynchronously: false,
     retired,
   }
   state.current = disposing
@@ -99,11 +104,11 @@ export function disposeRoomBackend(): Promise<void> {
   )
 
   try {
-    disposing.invokingBackendDispose = true
+    disposing.invokingBackendDisposeSynchronously = true
     Promise.resolve(backend.dispose()).then(deferred.resolve, deferred.reject)
-    disposing.invokingBackendDispose = false
+    disposing.invokingBackendDisposeSynchronously = false
   } catch (error) {
-    disposing.invokingBackendDispose = false
+    disposing.invokingBackendDisposeSynchronously = false
     deferred.reject(error)
   }
   return deferred.promise

@@ -127,21 +127,53 @@ describe('Room backend installation', () => {
     expect(installRoomBackend(() => memoryBackend())).not.toBe(backend)
   })
 
-  test('does not recursively dispose when backend.dispose owns a synchronous shutdown callback', async () => {
+  test('rejects an uncaught direct synchronous reentrant disposal through the outer outcome', async () => {
     let calls = 0
-    let reentrantSettled = false
-    const backend = memoryBackendWithDispose(async () => {
+    const backend = memoryBackendWithDispose(() => {
       calls += 1
-      void disposeRoomBackend().then(() => {
-        reentrantSettled = true
-      })
-      await Promise.resolve()
-      expect(reentrantSettled).toBe(true)
+      return disposeRoomBackend()
     })
     installRoomBackend(() => backend)
 
-    await disposeRoomBackend()
+    await expect(disposeRoomBackend()).rejects.toThrow('backend.dispose() must not call disposeRoomBackend()')
     expect(calls).toBe(1)
+  })
+
+  test('lets caught self-reentry defer to the backend real disposal and shares ordinary callers afterward', async () => {
+    const deferred = createDeferred<void>()
+    let reentrant: Promise<void> | undefined
+    const backend = memoryBackendWithDispose(() => {
+      reentrant = disposeRoomBackend()
+      return reentrant.catch(() => deferred.promise)
+    })
+    installRoomBackend(() => backend)
+
+    const outer = disposeRoomBackend()
+    await expect(reentrant).rejects.toThrow('backend.dispose() must not call disposeRoomBackend()')
+    expect(disposeRoomBackend()).toBe(outer)
+    deferred.resolve()
+    await outer
+  })
+
+  test('rejects an unrelated synchronous shutdown callback while real disposal remains pending', async () => {
+    const deferred = createDeferred<void>()
+    let callbackPromise: Promise<void> | undefined
+    const backend = memoryBackendWithDispose(() => {
+      callbackPromise = disposeRoomBackend()
+      return deferred.promise
+    })
+    installRoomBackend(() => backend)
+
+    const outer = disposeRoomBackend()
+    try {
+      expect(callbackPromise).not.toBe(outer)
+      await expect(callbackPromise).rejects.toThrow('backend.dispose() must not call disposeRoomBackend()')
+      expect(getRoomBackend).toThrow('still disposing')
+      expect(disposeRoomBackend()).toBe(outer)
+    } finally {
+      deferred.resolve()
+      await outer
+    }
   })
 
   test('never reinstalls an instance after disposal has begun', async () => {
