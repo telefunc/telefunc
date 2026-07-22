@@ -18,6 +18,10 @@
 //                                                  can never hear a recreation — I11)
 //   gens:      tf:room:{rid}:gens           SET of incs — SADD'd by the head-CX that installs an inc,
 //                                           SREM'd by dropGeneration; the fresh-inc guard is one SISMEMBER
+//   gen-token: tf:room:{rid}:gen-tokens      HASH inc -> non-reusable generation token (the installing
+//                                           head revision), removed only with the final gens SREM
+//   captures:  tf:room:{rid}:route-captures  HASH attempt id -> bounded generation-capture record;
+//              tf:room:{rid}:route-capture-exp ZSET of authority expiry -> attempt id for lazy sweep
 //   dir index: tf:{rid-dir}<prefix>… — the directory is global, its own two co-slotted keys (backend.ts)
 //
 // AUTHORITY TIME: production derives `now_ms` from `redis.call('TIME')` (the one central clock, atomic
@@ -45,6 +49,15 @@ export function headRevKey(prefix: string, roomId: string): string {
 }
 export function gensKey(prefix: string, roomId: string): string {
   return `${roomTag(prefix, roomId)}:gens`
+}
+export function generationTokensKey(prefix: string, roomId: string): string {
+  return `${roomTag(prefix, roomId)}:gen-tokens`
+}
+export function routeCapturesKey(prefix: string, roomId: string): string {
+  return `${roomTag(prefix, roomId)}:route-captures`
+}
+export function routeCaptureExpiriesKey(prefix: string, roomId: string): string {
+  return `${roomTag(prefix, roomId)}:route-capture-exp`
 }
 export function genPrefix(prefix: string, roomId: string, inc: string): string {
   return `${roomTag(prefix, roomId)}:g:${inc}`
@@ -144,10 +157,10 @@ end
 // the fresh-inc guard, minting and the store. The guarded transitions cannot be reached through any
 // other compare form (spi.md §2 transition table), so a generic {rev} can never install/replace a lease,
 // re-lease a live 'closing' head, or reach 'closed'.
-//   KEYS: [1]=head [2]=gens [3]=headrev
+//   KEYS: [1]=head [2]=gens [3]=headrev [4]=generation-tokens
 //   ARGV: [1]=now [2]=cxJson{form,rev?,closingLease?} [3]=nextJson{kind,state?,inc?,config?,lease?,ttlMs?}
 export const HEAD_CX_LUA = `${NOW_FN}
-local head_key, gens_key, rev_key = KEYS[1], KEYS[2], KEYS[3]
+local head_key, gens_key, rev_key, generation_tokens_key = KEYS[1], KEYS[2], KEYS[3], KEYS[4]
 local now = tf_now(ARGV[1])
 local cx = cjson.decode(ARGV[2])
 local nx = cjson.decode(ARGV[3])
@@ -191,7 +204,8 @@ end
 
 -- transition-table legality (throws), validated against the head the compare matched
 local transition = from .. ' + ' .. cx.form .. ' -> ' .. nx.state
-if transition == 'absent + absent -> open' or transition == 'closed + generic -> open' then
+local installs_generation = transition == 'absent + absent -> open' or transition == 'closed + generic -> open'
+if installs_generation then
   if nx.inc ~= nil and redis.call('SISMEMBER', gens_key, nx.inc) == 1 then
     return redis.error_reply("head CX: incarnation '" .. tostring(nx.inc) .. "' still has surviving generation state")
   end
@@ -223,12 +237,110 @@ if nx.ttlMs ~= nil then stored.exp = now + nx.ttlMs end
 local encoded = cjson.encode(stored)
 redis.call('SET', head_key, encoded)
 if nx.ttlMs ~= nil then redis.call('PEXPIRE', head_key, nx.ttlMs) end
-if nx.inc ~= nil then redis.call('SADD', gens_key, nx.inc) end
+if nx.inc ~= nil then
+  redis.call('SADD', gens_key, nx.inc)
+  if installs_generation then redis.call('HSET', generation_tokens_key, nx.inc, stored.rev) end
+end
 return '{"tag":"head","head":' .. encoded .. '}'
 `
 
 export const HEAD_CX_CMD = 'tfRoomHeadCx'
-export const HEAD_CX_KEYS = 3
+export const HEAD_CX_KEYS = 4
+
+// SUBSCRIBE establishment is a network operation outside Lua. Capture therefore pins the exact,
+// authority-owned generation token before that await. The stable attempt id makes a lost first response
+// idempotent; the authority-aligned creation epoch distinguishes a genuinely fresh absent attempt from
+// a delayed retry after bounded reclamation. Expired rows are swept mechanically at the start of every
+// capture, so one abandoned attempt cannot grow unbounded while the room remains active.
+//   KEYS: [1]=head [2]=gens [3]=generation-tokens [4]=captures-hash [5]=capture-expiry-zset
+//   ARGV: [1]=now [2]=inc [3]=attempt-id [4]=created-at [5]=ttl-ms
+export const CAPTURE_GENERATION_LUA = `${NOW_FN}
+local head_key, gens_key, tokens_key = KEYS[1], KEYS[2], KEYS[3]
+local captures_key, expiries_key = KEYS[4], KEYS[5]
+local now = tf_now(ARGV[1])
+local inc, attempt_id = ARGV[2], ARGV[3]
+local created_at, ttl = tonumber(ARGV[4]), tonumber(ARGV[5])
+
+local expired = redis.call('ZRANGEBYSCORE', expiries_key, '-inf', now)
+for _, id in ipairs(expired) do redis.call('HDEL', captures_key, id) end
+if #expired > 0 then redis.call('ZREM', expiries_key, unpack(expired)) end
+
+local current_token = redis.call('HGET', tokens_key, inc)
+local head = tf_head(head_key, now)
+local generation_live = head and head.state == 'open' and head.inc == inc
+  and redis.call('SISMEMBER', gens_key, inc) == 1 and current_token ~= false
+local raw = redis.call('HGET', captures_key, attempt_id)
+if raw then
+  local prior = cjson.decode(raw)
+  if prior.inc ~= inc or prior.createdAt ~= created_at or prior.expiresAt <= now
+    or not generation_live or prior.token ~= current_token then
+    return cjson.encode({ rejected = true, terminal = true, reason = 'generation capture is invalid' })
+  end
+  prior.expiresAt = now + ttl
+  redis.call('HSET', captures_key, attempt_id, cjson.encode(prior))
+  redis.call('ZADD', expiries_key, prior.expiresAt, attempt_id)
+  return cjson.encode({ ok = true, token = prior.token })
+end
+
+if created_at == nil or created_at ~= math.floor(created_at) or created_at > now or created_at + ttl <= now then
+  return cjson.encode({ rejected = true, terminal = true, reason = 'generation capture attempt is absent or stale' })
+end
+if not generation_live then
+  return cjson.encode({ rejected = true, terminal = true, reason = 'generation is not current and open' })
+end
+local record = { inc = inc, token = current_token, createdAt = created_at, expiresAt = now + ttl }
+redis.call('HSET', captures_key, attempt_id, cjson.encode(record))
+redis.call('ZADD', expiries_key, record.expiresAt, attempt_id)
+return cjson.encode({ ok = true, token = current_token })
+`
+
+export const CAPTURE_GENERATION_CMD = 'tfRoomCaptureGeneration'
+export const CAPTURE_GENERATION_KEYS = 5
+
+// Post-SUBSCRIBE validation is exact and read-only on failure. Only a successful first establishment
+// may touch its capture pin; a stale/delayed ack can never extend abandoned lifecycle state.
+//   KEYS: same five keys as capture
+//   ARGV: [1]=now [2]=inc [3]=expected-token [4]=attempt-id-or-empty [5]=created-at-or-empty [6]=ttl-ms
+export const VALIDATE_GENERATION_LUA = `${NOW_FN}
+local head_key, gens_key, tokens_key = KEYS[1], KEYS[2], KEYS[3]
+local captures_key, expiries_key = KEYS[4], KEYS[5]
+local now = tf_now(ARGV[1])
+local inc, expected_token = ARGV[2], ARGV[3]
+local head = tf_head(head_key, now)
+local current_token = redis.call('HGET', tokens_key, inc)
+if not head or head.state ~= 'open' or head.inc ~= inc
+  or redis.call('SISMEMBER', gens_key, inc) ~= 1 or current_token ~= expected_token then
+  return cjson.encode({ ok = false, terminal = true })
+end
+if ARGV[4] ~= '' then
+  local raw = redis.call('HGET', captures_key, ARGV[4])
+  if not raw then return cjson.encode({ ok = false, terminal = true }) end
+  local capture = cjson.decode(raw)
+  local created_at = tonumber(ARGV[5])
+  if capture.inc ~= inc or capture.token ~= expected_token or capture.createdAt ~= created_at
+    or capture.expiresAt <= now then
+    return cjson.encode({ ok = false, terminal = true })
+  end
+  capture.expiresAt = now + tonumber(ARGV[6])
+  redis.call('HSET', captures_key, ARGV[4], cjson.encode(capture))
+  redis.call('ZADD', expiries_key, capture.expiresAt, ARGV[4])
+end
+return cjson.encode({ ok = true })
+`
+
+export const VALIDATE_GENERATION_CMD = 'tfRoomValidateGeneration'
+export const VALIDATE_GENERATION_KEYS = 5
+
+// The durable invalidation sources are removed atomically and LAST, after every fallible local
+// UNSUBSCRIBE cleanup succeeds. A failed cleanup therefore leaves both values available for retry.
+export const DROP_GENERATION_FINALIZE_LUA = `
+redis.call('SREM', KEYS[1], ARGV[1])
+redis.call('HDEL', KEYS[2], ARGV[1])
+return 1
+`
+
+export const DROP_GENERATION_FINALIZE_CMD = 'tfRoomDropGenerationFinalize'
+export const DROP_GENERATION_FINALIZE_KEYS = 2
 
 // CELLS CX — all mutations or none; success implies the head precondition (open + inc) held at apply
 // time; the revision is the coarse per-generation counter, allowed to over-conflict but never mislead.

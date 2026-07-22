@@ -20,12 +20,15 @@ import type {
   BackendTraces,
 } from '../../../telefunc/wire-protocol/backend/conformance/harness.js'
 import {
+  CAPTURE_GENERATION_LUA,
   CELLS_CX_LUA,
   COMMIT_LUA,
   DIRECTORY_DELETE_LUA,
   DIRECTORY_PUT_LUA,
+  DROP_GENERATION_FINALIZE_LUA,
   HEAD_CX_LUA,
   RETAINED_DELETE_LUA,
+  VALIDATE_GENERATION_LUA,
 } from './layout.js'
 import { RedisRoomBackend } from './backend.js'
 
@@ -57,6 +60,13 @@ const concurrentHeadCxBarrier = async <T>(first: () => Promise<T>, second: () =>
 
 export type StableReadProbe = (info: { roomId: string; inc: string }) => void | Promise<void>
 export type SubscribeProbe = (channel: string) => void | Promise<void>
+export type GenerationCaptureProbe = (info: {
+  roomId: string
+  inc: string
+  attemptId: string
+  createdAt: number
+  token: string
+}) => void | Promise<void>
 export type DropGenerationProbe = (info: { roomId: string; inc: string }) => void | Promise<void>
 export type DirectoryDeleteProbe = (info: { roomId: string; incTag: string }) => void | Promise<void>
 
@@ -71,6 +81,7 @@ export type RedisBackendFixture = BackendFixture & {
   prefix: string
   setStableReadProbe(fn: StableReadProbe | null): void
   setBeforeSubscribe(fn: SubscribeProbe | null): void
+  setAfterGenerationCapture(fn: GenerationCaptureProbe | null): void
   setBeforeDropGenerationUnregister(fn: DropGenerationProbe | null): void
   setBeforeDirectoryDeleteApply(fn: DirectoryDeleteProbe | null): void
 }
@@ -92,6 +103,7 @@ export async function createRedisFixture(
   let clock = Date.now()
   let probe: StableReadProbe | null = null
   let beforeSubscribe: SubscribeProbe | null = null
+  let afterGenerationCapture: GenerationCaptureProbe | null = null
   let beforeDropGenerationUnregister: DropGenerationProbe | null = null
   let beforeDirectoryDeleteApply: DirectoryDeleteProbe | null = null
 
@@ -105,6 +117,7 @@ export async function createRedisFixture(
     subscriptionRetryDelay: () => 0,
     testHooks: {
       beforeSubscribe: (channel) => beforeSubscribe?.(channel),
+      afterGenerationCapture: (info) => afterGenerationCapture?.(info),
       beforeDropGenerationUnregister: (info) => beforeDropGenerationUnregister?.(info),
       beforeDirectoryDeleteApply: (info) => beforeDirectoryDeleteApply?.(info),
     },
@@ -114,6 +127,9 @@ export async function createRedisFixture(
   // the FIFO ordering the barrier relies on.
   await Promise.all([
     redis.script('LOAD', HEAD_CX_LUA),
+    redis.script('LOAD', CAPTURE_GENERATION_LUA),
+    redis.script('LOAD', VALIDATE_GENERATION_LUA),
+    redis.script('LOAD', DROP_GENERATION_FINALIZE_LUA),
     redis.script('LOAD', CELLS_CX_LUA),
     redis.script('LOAD', COMMIT_LUA),
     redis.script('LOAD', RETAINED_DELETE_LUA),
@@ -128,6 +144,10 @@ export async function createRedisFixture(
     subscriberId,
     prefix,
     traces: REDIS_TRACES,
+    // Redis PUBLISH counts subscribed connections, not the callbacks multiplexed behind this fixture's
+    // one subscriber connection. Keep these exact: two local callbacks still form one broker target,
+    // and detaching either sibling leaves that same one connection subscribed for the survivor.
+    expectedReceivers: { twoLocalSubscriptionsSameLane: 1, oneLocalSubscriptionAfterSiblingDetach: 1 },
     authorityNow: () => clock,
     advanceAuthority: (ms) => {
       clock += ms
@@ -138,6 +158,9 @@ export async function createRedisFixture(
     },
     setBeforeSubscribe: (fn) => {
       beforeSubscribe = fn
+    },
+    setAfterGenerationCapture: (fn) => {
+      afterGenerationCapture = fn
     },
     setBeforeDropGenerationUnregister: (fn) => {
       beforeDropGenerationUnregister = fn

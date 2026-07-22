@@ -18,9 +18,12 @@ import {
   okHead,
   openRoom,
   SEMANTIC,
+  settled,
   text,
 } from '../../../telefunc/wire-protocol/backend/conformance/scenario.js'
+import { REDIS_GENERATION_CAPTURE_TTL_MS } from './backend.js'
 import { createRedisFixture, type RedisBackendFixture } from './fixture.js'
+import { generationTokensKey, routeCapturesKey } from './layout.js'
 
 const url = process.env.TELEFUNC_TEST_REAL_REDIS
 
@@ -110,6 +113,240 @@ describe.skipIf(url === undefined || url === '')('Redis independent-review race 
     expect(latch.payloads()).toEqual(['after-reconnect'])
   })
 
+  it('makes a late attachment await the current re-SUBSCRIBE ack instead of historical readiness', async () => {
+    const roomId = nextId('room')
+    const { inc } = await openRoom(fx.backend, roomId)
+    const first = fx.backend.subscribeLane(roomId, inc, SEMANTIC, () => {})
+    await first.ready
+
+    const entered = deferred()
+    const release = deferred()
+    let resubscribeCalls = 0
+    fx.setBeforeSubscribe(async () => {
+      resubscribeCalls++
+      entered.resolve()
+      await release.promise
+    })
+    await fx.redis.client('KILL', 'ID', String(fx.subscriberId))
+    await entered.promise
+
+    const late = fx.backend.subscribeLane(roomId, inc, SEMANTIC, () => {})
+    let lateReady = false
+    void late.ready.then(() => {
+      lateReady = true
+    })
+    await flush()
+    expect(first.state()).toBe('lost')
+    expect(late.state()).toBe('establishing')
+    expect(lateReady).toBe(false)
+    expect(resubscribeCalls).toBe(1)
+
+    release.resolve()
+    await late.ready
+    await waitFor(() => first.state() === 'ready')
+    expect(lateReady).toBe(true)
+    expect(resubscribeCalls).toBe(1)
+  })
+
+  it('reuses one durable attempt when the first generation-capture response is lost', async () => {
+    const roomId = nextId('room')
+    const { inc } = await openRoom(fx.backend, roomId)
+    const attempts: Array<{ id: string; createdAt: number; token: string }> = []
+    fx.setAfterGenerationCapture((info) => {
+      attempts.push({ id: info.attemptId, createdAt: info.createdAt, token: info.token })
+      if (attempts.length === 1) throw new Error('simulated lost capture response')
+    })
+
+    const sub = fx.backend.subscribeLane(roomId, inc, SEMANTIC, () => {})
+    expect(await settled(sub.ready)).toBe('rejected')
+    await waitFor(() => sub.state() === 'ready')
+    expect(attempts).toHaveLength(2)
+    expect(attempts[1]).toEqual(attempts[0])
+    expect(await fx.backend.countGenerationCapturesForTest(roomId)).toBe(1)
+  })
+
+  it('reclaims an abandoned capture, rejects its delayed retry after reuse, and admits a fresh lifecycle', async () => {
+    const roomId = nextId('room')
+    const { inc, head } = await openRoom(fx.backend, roomId)
+    const abandonedId = nextId('capture')
+    const abandonedAt = fx.authorityNow()
+    const oldToken = await fx.backend.captureGenerationAttemptForTest(roomId, inc, abandonedId, abandonedAt)
+    expect(await fx.backend.countGenerationCapturesForTest(roomId)).toBe(1)
+
+    fx.advanceAuthority(REDIS_GENERATION_CAPTURE_TTL_MS)
+    const sweepId = nextId('capture')
+    await fx.backend.captureGenerationAttemptForTest(roomId, inc, sweepId, fx.authorityNow())
+    expect(await fx.backend.countGenerationCapturesForTest(roomId)).toBe(1)
+
+    const { head: closing, leaseId } = await enterClosing(fx.backend, roomId, head)
+    accepted(await fx.backend.commitLane(roomId, inc, CONTROL, bytes('closed'), { closingLease: leaseId }))
+    const tombstone = okHead(await finalizeClose(fx.backend, roomId, closing, leaseId))
+    await fx.backend.dropGeneration(roomId, inc)
+    okHead(
+      await fx.backend.compareExchangeHead(
+        roomId,
+        { expect: { rev: tombstone.rev } },
+        { head: { currentInc: inc, state: 'open', config: tombstone.config } },
+      ),
+    )
+
+    await expect(fx.backend.captureGenerationAttemptForTest(roomId, inc, abandonedId, abandonedAt)).rejects.toThrow(
+      /absent or stale/,
+    )
+    const freshToken = await fx.backend.captureGenerationAttemptForTest(
+      roomId,
+      inc,
+      nextId('capture'),
+      fx.authorityNow(),
+    )
+    expect(freshToken).not.toBe(oldToken)
+    const fresh = fx.backend.subscribeLane(roomId, inc, SEMANTIC, () => {})
+    await fresh.ready
+    expect(fresh.state()).toBe('ready')
+  })
+
+  it('touches a capture only after successful exact SUBSCRIBE validation', async () => {
+    const roomId = nextId('room')
+    const { inc } = await openRoom(fx.backend, roomId)
+    let attemptId = ''
+    let initialExpiry = 0
+    fx.setAfterGenerationCapture(async (info) => {
+      attemptId = info.attemptId
+      const raw = await fx.redis.hget(routeCapturesKey(fx.prefix, roomId), attemptId)
+      initialExpiry = (JSON.parse(raw as string) as { expiresAt: number }).expiresAt
+    })
+    fx.setBeforeSubscribe(() => {
+      fx.advanceAuthority(1_000)
+    })
+
+    const sub = fx.backend.subscribeLane(roomId, inc, SEMANTIC, () => {})
+    await sub.ready
+    const touchedRaw = await fx.redis.hget(routeCapturesKey(fx.prefix, roomId), attemptId)
+    const touchedExpiry = (JSON.parse(touchedRaw as string) as { expiresAt: number }).expiresAt
+    expect(touchedExpiry).toBe(initialExpiry + 1_000)
+  })
+
+  it('does not let a rejected stale SUBSCRIBE validation extend its capture', async () => {
+    const roomId = nextId('room')
+    const { inc } = await openRoom(fx.backend, roomId)
+    let rejectedAttempt = ''
+    fx.setAfterGenerationCapture((info) => {
+      rejectedAttempt = info.attemptId
+    })
+    fx.setBeforeSubscribe(() => {
+      fx.advanceAuthority(REDIS_GENERATION_CAPTURE_TTL_MS)
+    })
+
+    const stale = fx.backend.subscribeLane(roomId, inc, SEMANTIC, () => {})
+    expect(await settled(stale.ready)).toBe('rejected')
+    await waitFor(() => stale.state() === 'closed')
+    expect(await fx.redis.hexists(routeCapturesKey(fx.prefix, roomId), rejectedAttempt)).toBe(1)
+
+    fx.setAfterGenerationCapture(null)
+    fx.setBeforeSubscribe(null)
+    const fresh = fx.backend.subscribeLane(roomId, inc, CONTROL, () => {})
+    await fresh.ready
+    expect(await fx.redis.hexists(routeCapturesKey(fx.prefix, roomId), rejectedAttempt)).toBe(0)
+  })
+
+  it('fences a held pre-SUBSCRIBE lifecycle across drop and legal incarnation reuse', async () => {
+    const roomId = nextId('room')
+    const { inc, head } = await openRoom(fx.backend, roomId)
+    const entered = deferred()
+    const release = deferred()
+    fx.setBeforeSubscribe(async () => {
+      entered.resolve()
+      await release.promise
+    })
+    const staleLatch = collector()
+    const stale = fx.backend.subscribeLane(roomId, inc, SEMANTIC, staleLatch.receiver)
+    await entered.promise
+
+    const { head: closing, leaseId } = await enterClosing(fx.backend, roomId, head)
+    accepted(await fx.backend.commitLane(roomId, inc, CONTROL, bytes('closed'), { closingLease: leaseId }))
+    const tombstone = okHead(await finalizeClose(fx.backend, roomId, closing, leaseId))
+    await fx.backend.dropGeneration(roomId, inc)
+    okHead(
+      await fx.backend.compareExchangeHead(
+        roomId,
+        { expect: { rev: tombstone.rev } },
+        { head: { currentInc: inc, state: 'open', config: tombstone.config } },
+      ),
+    )
+    fx.setBeforeSubscribe(null)
+    release.resolve()
+    await waitFor(() => stale.state() === 'closed')
+
+    const freshLatch = collector()
+    const fresh = fx.backend.subscribeLane(roomId, inc, SEMANTIC, freshLatch.receiver)
+    await fresh.ready
+    const result = accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, bytes('fresh-only')))
+    expect(result.receivers).toBe(1)
+    await result.delivery
+    await freshLatch.waitFor(1)
+    expect(staleLatch.payloads()).toEqual([])
+    expect(freshLatch.payloads()).toEqual(['fresh-only'])
+  })
+
+  it('fences last detach against an in-flight establishment validation', async () => {
+    const roomId = nextId('room')
+    const { inc } = await openRoom(fx.backend, roomId)
+    const entered = deferred()
+    const release = deferred()
+    fx.setBeforeSubscribe(async () => {
+      entered.resolve()
+      await release.promise
+    })
+    const sub = fx.backend.subscribeLane(roomId, inc, SEMANTIC, () => {})
+    await entered.promise
+    await sub.unsubscribe()
+    expect(sub.state()).toBe('closed')
+    release.resolve()
+    await flush()
+    const result = accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, bytes('nobody')))
+    expect(result.receivers).toBe(0)
+  })
+
+  it('closes locally on unsubscribe transport failure and retries the retained exact channel cleanup', async () => {
+    const roomId = nextId('room')
+    const { inc } = await openRoom(fx.backend, roomId)
+    const sub = fx.backend.subscribeLane(roomId, inc, SEMANTIC, () => {})
+    await sub.ready
+    const subscriber = fx.subscriber as unknown as {
+      unsubscribe: (...channels: string[]) => Promise<number>
+    }
+    const original = subscriber.unsubscribe.bind(fx.subscriber)
+    let failed = false
+    subscriber.unsubscribe = (...channels) => {
+      if (!failed) {
+        failed = true
+        return Promise.reject(new Error('forced unsubscribe transport failure'))
+      }
+      return original(...channels)
+    }
+
+    await expect(sub.unsubscribe()).rejects.toThrow('forced unsubscribe transport failure')
+    expect(sub.state()).toBe('closed')
+    await waitFor(
+      async () => (await fx.redis.pubsub('NUMSUB', `${fx.prefix}room:{${roomId}}:ch:${inc}:semantic`))[1] === 0,
+    )
+    expect(accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, bytes('after-detach'))).receivers).toBe(0)
+    subscriber.unsubscribe = original
+  })
+
+  it('isolates a throwing state observer from last-detach teardown', async () => {
+    const roomId = nextId('room')
+    const { inc } = await openRoom(fx.backend, roomId)
+    const sub = fx.backend.subscribeLane(roomId, inc, SEMANTIC, () => {})
+    await sub.ready
+    sub.onStateChange(() => {
+      throw new Error('observer failure')
+    })
+    await sub.unsubscribe()
+    expect(sub.state()).toBe('closed')
+    expect(accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, bytes('after-observer'))).receivers).toBe(0)
+  })
+
   it('keeps gens registered through physical drop, blocking same-inc recreation until the final SREM', async () => {
     const roomId = nextId('room')
     const { inc, head } = await openRoom(fx.backend, roomId)
@@ -150,6 +387,45 @@ describe.skipIf(url === undefined || url === '')('Redis independent-review race 
     )
     expect(recreated.currentInc).toBe(inc)
     expect(cellsOf(await fx.backend.readCells(roomId, inc, { prefix: '' })).cells.size).toBe(0)
+  })
+
+  it('removes durable generation sources last and isolates one failed channel uninstall', async () => {
+    const roomId = nextId('room')
+    const { inc, head } = await openRoom(fx.backend, roomId)
+    const semantic = fx.backend.subscribeLane(roomId, inc, SEMANTIC, () => {})
+    const control = fx.backend.subscribeLane(roomId, inc, CONTROL, () => {})
+    await Promise.all([semantic.ready, control.ready])
+    const { head: closing, leaseId } = await enterClosing(fx.backend, roomId, head)
+    accepted(await fx.backend.commitLane(roomId, inc, CONTROL, bytes('closed'), { closingLease: leaseId }))
+    okHead(await finalizeClose(fx.backend, roomId, closing, leaseId))
+
+    const subscriber = fx.subscriber as unknown as {
+      unsubscribe: (...channels: string[]) => Promise<number>
+    }
+    const original = subscriber.unsubscribe.bind(fx.subscriber)
+    const calls: string[] = []
+    let failedSemantic = false
+    subscriber.unsubscribe = (...channels) => {
+      calls.push(...channels)
+      if (!failedSemantic && channels.some((channel) => channel.endsWith(':semantic'))) {
+        failedSemantic = true
+        return Promise.reject(new Error('forced one-channel uninstall failure'))
+      }
+      return original(...channels)
+    }
+
+    await expect(fx.backend.dropGeneration(roomId, inc)).rejects.toThrow('forced one-channel uninstall failure')
+    expect(calls.some((channel) => channel.endsWith(':semantic'))).toBe(true)
+    expect(calls.some((channel) => channel.endsWith(':control'))).toBe(true)
+    expect(await fx.backend.listGenerations(roomId)).toContain(inc)
+    expect(await fx.redis.hget(generationTokensKey(fx.prefix, roomId), inc)).not.toBeNull()
+    expect(semantic.state()).toBe('closed')
+    expect(control.state()).toBe('closed')
+
+    subscriber.unsubscribe = original
+    await fx.backend.dropGeneration(roomId, inc)
+    expect(await fx.backend.listGenerations(roomId)).not.toContain(inc)
+    expect(await fx.redis.hget(generationTokensKey(fx.prefix, roomId), inc)).toBeNull()
   })
 
   it('enforces the aggregate retained payload cap inside concurrent COMMIT records', async () => {
@@ -294,9 +570,9 @@ describe.skipIf(url === undefined || url === '')('Redis independent-review race 
   })
 })
 
-async function waitFor(predicate: () => boolean, timeoutMs = 2_000): Promise<void> {
+async function waitFor(predicate: () => boolean | Promise<boolean>, timeoutMs = 2_000): Promise<void> {
   const deadline = Date.now() + timeoutMs
-  while (!predicate()) {
+  while (!(await predicate())) {
     if (Date.now() >= deadline) throw new Error(`condition did not settle within ${timeoutMs} ms`)
     await new Promise((resolve) => setTimeout(resolve, 5))
   }
