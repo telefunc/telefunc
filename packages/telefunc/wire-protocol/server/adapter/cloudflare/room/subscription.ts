@@ -22,7 +22,7 @@ export type EstablishResult = { ready: true } | { ready: false; retryable: boole
 export type SubscriptionRouteResult = boolean | { renewed: boolean; terminal?: boolean; reason?: string }
 
 export type CloudflareLaneSubscriptionOperations = {
-  establish(): Promise<EstablishResult>
+  establish(newOperation: boolean): Promise<EstablishResult>
   renew(): Promise<SubscriptionRouteResult>
   validate?(): Promise<SubscriptionRouteResult>
   unsubscribe(): Promise<void>
@@ -128,7 +128,7 @@ export class CloudflareLaneSubscription implements LaneSubscription {
   async #attemptInitial(attempt: number): Promise<void> {
     if (this.#state === 'closed') return
     const epoch = this.#operationEpoch
-    const result = await this.#establishSafely()
+    const result = await this.#establishSafely(attempt === 0)
     if (this.#isClosed() || this.#operationEpoch !== epoch) return
     if (result.ready) {
       if (!this.#readySettled) {
@@ -157,6 +157,7 @@ export class CloudflareLaneSubscription implements LaneSubscription {
       this.#state = 'closed'
       this.#rejectCurrentReady(new Error(result.reason))
       this.#notifyClosed()
+      await this.#cleanupFailedEstablishment()
       return
     }
     this.#scheduleRetry(attempt, () => this.#attemptInitial(attempt + 1))
@@ -201,7 +202,7 @@ export class CloudflareLaneSubscription implements LaneSubscription {
   async #attemptReestablish(attempt: number): Promise<void> {
     if (this.#state !== 'lost') return
     const epoch = this.#operationEpoch
-    const result = await this.#establishSafely()
+    const result = await this.#establishSafely(attempt === 0)
     if (this.#state !== 'lost' || this.#operationEpoch !== epoch) return
     if (result.ready) {
       this.#renewalFailures = 0
@@ -212,16 +213,25 @@ export class CloudflareLaneSubscription implements LaneSubscription {
     if (!result.retryable || attempt + 1 >= SUBSCRIPTION_RETRY_ATTEMPTS) {
       this.#transition('closed')
       this.#notifyClosed()
+      await this.#cleanupFailedEstablishment()
       return
     }
     this.#scheduleRetry(attempt, () => this.#attemptReestablish(attempt + 1))
   }
 
-  async #establishSafely(): Promise<EstablishResult> {
+  async #establishSafely(newOperation: boolean): Promise<EstablishResult> {
     try {
-      return await this.#operations.establish()
+      return await this.#operations.establish(newOperation)
     } catch (error) {
       return { ready: false, retryable: true, reason: (error as Error).message }
+    }
+  }
+
+  async #cleanupFailedEstablishment(): Promise<void> {
+    try {
+      await this.#operations.unsubscribe()
+    } catch {
+      // The local lifecycle is already terminal. Durable expiry is the backstop if exact teardown fails.
     }
   }
 

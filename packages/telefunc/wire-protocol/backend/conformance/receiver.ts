@@ -20,7 +20,7 @@ type ReceiverDescriptor = {
   id: string
   command: ReceiverCommand
   observe(observations: RemoteReceiverObservation[]): void
-  remote?: RemoteReceiverControl
+  remotes: Map<string, RemoteReceiverControl>
 }
 
 const descriptors = new WeakMap<LaneReceiver, ReceiverDescriptor>()
@@ -31,7 +31,7 @@ export function conformanceReceiver(
   local: LaneReceiver,
   observe: (observations: RemoteReceiverObservation[]) => void,
 ): LaneReceiver {
-  descriptors.set(local, { id: `receiver-${++receiverSequence}`, command, observe })
+  descriptors.set(local, { id: `receiver-${++receiverSequence}`, command, observe, remotes: new Map() })
   return local
 }
 
@@ -39,28 +39,34 @@ export function receiverDescriptor(receiver: LaneReceiver): Readonly<ReceiverDes
   return descriptors.get(receiver)
 }
 
-export function bindRemoteReceiver(receiver: LaneReceiver, control: RemoteReceiverControl): void {
+export function bindRemoteReceiver(receiver: LaneReceiver, attachmentId: string, control: RemoteReceiverControl): void {
   const descriptor = descriptors.get(receiver)
   if (descriptor === undefined) throw new Error('Cloudflare conformance requires an instrumented receiver command')
-  descriptor.remote = control
+  descriptor.remotes.set(attachmentId, control)
+}
+
+export function unbindRemoteReceiver(receiver: LaneReceiver, attachmentId: string): void {
+  descriptors.get(receiver)?.remotes.delete(attachmentId)
 }
 
 export async function pollRemoteReceiver(receiver: LaneReceiver): Promise<void> {
   const descriptor = descriptors.get(receiver)
-  if (descriptor?.remote === undefined) return
-  descriptor.observe(await descriptor.remote.poll())
+  if (descriptor === undefined) return
+  for (const remote of descriptor.remotes.values()) descriptor.observe(await remote.poll())
 }
 
 export async function releaseRemoteReceiver(receiver: LaneReceiver): Promise<boolean> {
-  const release = descriptors.get(receiver)?.remote?.release
-  if (release === undefined) return false
-  await release()
+  const remotes = [...(descriptors.get(receiver)?.remotes.values() ?? [])]
+  const releases = remotes.flatMap((remote) => (remote.release === undefined ? [] : [remote.release()]))
+  if (releases.length === 0) return false
+  await Promise.all(releases)
   return true
 }
 
 export async function seedRemoteReceiver(receiver: LaneReceiver): Promise<boolean> {
-  const seed = descriptors.get(receiver)?.remote?.seed
-  if (seed === undefined) return false
-  await seed()
+  const remotes = [...(descriptors.get(receiver)?.remotes.values() ?? [])]
+  const seeds = remotes.flatMap((remote) => (remote.seed === undefined ? [] : [remote.seed()]))
+  if (seeds.length === 0) return false
+  await Promise.all(seeds)
   return true
 }

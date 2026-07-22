@@ -131,7 +131,7 @@ export function requireCloudflareRoomNamespace(
 type LocalRoute = {
   leaseId: string
   generationToken: string
-  callbacks: Set<LaneReceiver>
+  callbacks: Map<symbol, LaneReceiver>
   mux: CloudflareLaneSubscriptionMultiplexer
 }
 
@@ -141,6 +141,7 @@ export class CloudflareRoomSessionManager {
   readonly #id: string
   readonly #getRoomNamespace: () => CloudflareRoomNamespace
   readonly #entries = new Map<string, ManagerEntry>()
+  readonly #deliverySettlements = new Map<string, Promise<void>>()
   readonly #scheduler: SubscriptionScheduler | undefined
   readonly #now: () => number
   readonly #authorityOverride: ((roomId: string) => CloudflareRoomAuthorityStub) | undefined
@@ -165,31 +166,31 @@ export class CloudflareRoomSessionManager {
   }
 
   subscribeLane(roomId: string, inc: string, lane: LaneId, receiver: LaneReceiver): LaneSubscription {
+    // Resolve the binding before installing even provisional local state. The per-isolate backend calls
+    // this method only after resolving this exact manager from raw async context.
+    const authority = this.authority(roomId)
     const laneKey = laneKeyOf(lane)
     const key = JSON.stringify([roomId, inc, laneKey])
     const existing = this.#entries.get(key)
     if (existing !== undefined) {
-      existing.route.callbacks.add(receiver)
-      return existing.route.mux.attach(() => existing.route.callbacks.delete(receiver))
+      return this.#attach(existing.route, receiver)
     }
     const identity = { roomId, inc, laneKey, subscriberDoId: this.#id }
-    let leaseId = crypto.randomUUID()
+    let leaseId = ''
     const captureAttemptId = crypto.randomUUID()
     const captureCreatedAt = this.#now()
     let generationToken: string | null = null
-    let established = false
     let mux!: CloudflareLaneSubscriptionMultiplexer
     let route!: LocalRoute
     const subscription = new CloudflareLaneSubscription(
       {
-        establish: async () => {
-          // A re-establishment after a known ready/lost epoch replaces the one address row with a new
-          // descriptor. The route primary key remains the shard address, never the lease.
-          if (established) {
+        establish: async (newOperation) => {
+          // A single establishment operation owns one stable lease through every bounded retry. Only
+          // the lifecycle state machine can begin a new operation (initial or lost->re-establish).
+          if (newOperation) {
             leaseId = crypto.randomUUID()
             route.leaseId = leaseId
           }
-          const authority = this.#authority(roomId)
           const capture = await authority.captureRouteGeneration(inc, captureAttemptId, captureCreatedAt)
           if ('rejected' in capture) return { ready: false, retryable: false, reason: capture.reason }
           if (generationToken !== null && generationToken !== capture.generationToken) {
@@ -208,13 +209,12 @@ export class CloudflareRoomSessionManager {
             captureCreatedAt,
           )
           if ('ok' in result) {
-            established = true
             return { ready: true }
           }
           return { ready: false, retryable: result.terminal !== true, reason: result.reason }
         },
         renew: async () => {
-          const result = await this.#authority(roomId).renewRoute(
+          const result = await authority.renewRoute(
             inc,
             laneKey,
             this.#id,
@@ -230,7 +230,7 @@ export class CloudflareRoomSessionManager {
           }
         },
         validate: async () => {
-          const result = await this.#authority(roomId).renewRoute(
+          const result = await authority.renewRoute(
             inc,
             laneKey,
             this.#id,
@@ -248,10 +248,17 @@ export class CloudflareRoomSessionManager {
         unsubscribe: async () => {
           const retiringLease = leaseId
           this.#removeExact({ ...identity, leaseId: retiringLease, generationToken: generationToken ?? '' })
-          await Promise.allSettled([
-            this.#authority(roomId).unsubscribeRoute(inc, laneKey, this.#id, retiringLease),
-            this.#authority(roomId).releaseRouteGenerationCapture(captureAttemptId),
+          const outcomes = await Promise.allSettled([
+            Promise.resolve().then(() => authority.unsubscribeRoute(inc, laneKey, this.#id, retiringLease)),
+            Promise.resolve().then(() => authority.releaseRouteGenerationCapture(captureAttemptId)),
           ])
+          const failures = outcomes
+            .filter((outcome): outcome is PromiseRejectedResult => outcome.status === 'rejected')
+            .map((outcome) =>
+              outcome.reason instanceof Error ? outcome.reason : new Error('unknown teardown failure'),
+            )
+          if (failures.length === 1) throw new Error(failures[0]!.message)
+          if (failures.length > 1) throw new AggregateError(failures, 'Cloudflare Room route teardown failed')
         },
         closed: () => {
           this.#removeExact({ ...identity, leaseId, generationToken: generationToken ?? '' })
@@ -263,9 +270,9 @@ export class CloudflareRoomSessionManager {
       },
     )
     mux = new CloudflareLaneSubscriptionMultiplexer(subscription, () => this.#entries.delete(key))
-    route = { leaseId, generationToken: generationToken ?? '', callbacks: new Set([receiver]), mux }
+    route = { leaseId, generationToken: generationToken ?? '', callbacks: new Map(), mux }
     this.#entries.set(key, { identity, route })
-    const attachment = mux.attach(() => route.callbacks.delete(receiver))
+    const attachment = this.#attach(route, receiver)
     subscription.start()
     return attachment
   }
@@ -282,7 +289,7 @@ export class CloudflareRoomSessionManager {
       throw new Error('Cloudflare Room delivery lease is not installed')
     }
     await Promise.all(
-      [...entry.route.callbacks].map(async (callback) => {
+      [...entry.route.callbacks.values()].map(async (callback) => {
         await (callback(new Uint8Array(request.frame), {
           seq: request.seq,
           timestamp: request.timestamp,
@@ -298,6 +305,7 @@ export class CloudflareRoomSessionManager {
   dispose(): void {
     for (const entry of this.#entries.values()) entry.route.mux.backendDisposed()
     this.#entries.clear()
+    this.#deliverySettlements.clear()
   }
 
   #removeExact(request: RoomShardInvalidationRequest): void {
@@ -313,10 +321,43 @@ export class CloudflareRoomSessionManager {
     this.#entries.delete(key)
   }
 
-  #authority(roomId: string): CloudflareRoomAuthorityStub {
+  authority(roomId: string): CloudflareRoomAuthorityStub {
     if (this.#authorityOverride !== undefined) return this.#authorityOverride(roomId)
     const namespace = this.#getRoomNamespace()
     return namespace.get(namespace.idFromName(roomId))
+  }
+
+  settleDelivery(roomId: string, inc: string, lane: LaneId, attempt: Promise<void>): Promise<void> {
+    // `awaitDelivery()` is a second DO RPC so workerd may return two already ordered authority attempts
+    // in either RPC-response order. Keep the caller-visible fence on this exact event-local manager;
+    // the stateless backend proxy never owns settlement state across session shards.
+    const key = JSON.stringify([roomId, inc, laneKeyOf(lane)])
+    const previous = this.#deliverySettlements.get(key) ?? Promise.resolve()
+    const delivery = previous.then(() => attempt)
+    const tail = delivery.then(
+      () => undefined,
+      () => undefined,
+    )
+    this.#deliverySettlements.set(key, tail)
+    void tail.then(() => {
+      if (this.#deliverySettlements.get(key) === tail) this.#deliverySettlements.delete(key)
+    })
+    void attempt.catch(() => {})
+    void delivery.catch(() => {})
+    return delivery
+  }
+
+  dropGenerationSettlements(roomId: string, inc: string): void {
+    for (const key of this.#deliverySettlements.keys()) {
+      const [candidateRoomId, candidateInc] = JSON.parse(key) as [string, string, string]
+      if (candidateRoomId === roomId && candidateInc === inc) this.#deliverySettlements.delete(key)
+    }
+  }
+
+  #attach(route: LocalRoute, receiver: LaneReceiver): LaneSubscription {
+    const attachmentId = Symbol('cloudflare-room-attachment')
+    route.callbacks.set(attachmentId, receiver)
+    return route.mux.attach(() => route.callbacks.delete(attachmentId))
   }
 }
 
@@ -341,19 +382,6 @@ export class CloudflareRoomBackend implements RoomBackendSpi {
     clusterSafe: false,
     directory: true,
   }
-  readonly #namespace: CloudflareRoomNamespace
-  readonly #manager: CloudflareRoomSessionManager
-  readonly #deliverySettlements = new Map<string, Promise<void>>()
-  readonly #stubs = new Map<string, CloudflareRoomAuthorityStub & { [Symbol.dispose]?: () => void }>()
-
-  constructor(
-    namespace: CloudflareRoomNamespace,
-    manager: CloudflareRoomSessionManager = getCloudflareRoomSessionManager(),
-  ) {
-    this.#namespace = namespace
-    this.#manager = manager
-  }
-
   async readHead(roomId: string): Promise<{ head: RoomHead } | null> {
     const wire = await this.#stub(roomId).readHead()
     return wire === null ? null : { head: headFromWire(wire) }
@@ -403,7 +431,8 @@ export class CloudflareRoomBackend implements RoomBackendSpi {
     payload: Uint8Array,
     opts?: { retain?: boolean; orderTtlMs?: number; closingLease?: string },
   ): Promise<CommitResult> {
-    const stub = this.#stub(roomId)
+    const manager = getCloudflareRoomSessionManager()
+    const stub = manager.authority(roomId)
     const wire = await stub.commitLane(roomId, inc, lane, payload, opts)
     try {
       if ('error' in wire) throw new Error(wire.error)
@@ -412,22 +441,7 @@ export class CloudflareRoomBackend implements RoomBackendSpi {
       const attempt = new Promise<void>((resolve, reject) => {
         setTimeout(() => void stub.awaitDelivery(deliveryToken).then(resolve, reject), 0)
       })
-      // `awaitDelivery()` is a second DO RPC so workerd may return two already ordered authority attempts
-      // to this isolate in either RPC-response order. Gate only their caller-visible settlement locally;
-      // the authority still owns attempt ordering and this chain never performs or replays a callback.
-      const key = JSON.stringify([roomId, inc, laneKeyOf(lane)])
-      const previous = this.#deliverySettlements.get(key) ?? Promise.resolve()
-      const delivery = previous.then(() => attempt)
-      const tail = delivery.then(
-        () => undefined,
-        () => undefined,
-      )
-      this.#deliverySettlements.set(key, tail)
-      void tail.then(() => {
-        if (this.#deliverySettlements.get(key) === tail) this.#deliverySettlements.delete(key)
-      })
-      void attempt.catch(() => {})
-      void delivery.catch(() => {})
+      const delivery = manager.settleDelivery(roomId, inc, lane, attempt)
       return { accepted: true, seq: wire.seq, timestamp: wire.timestamp, receivers: wire.receivers, delivery }
     } finally {
       disposeRpcResult(wire)
@@ -444,20 +458,18 @@ export class CloudflareRoomBackend implements RoomBackendSpi {
     await this.#stub(roomId).deleteRetainedLane(inc, lane)
   }
   subscribeLane(roomId: string, inc: string, lane: LaneId, receiver: LaneReceiver): LaneSubscription {
-    return this.#manager.subscribeLane(roomId, inc, lane, receiver)
+    return getCloudflareRoomSessionManager().subscribeLane(roomId, inc, lane, receiver)
   }
   async listGenerations(roomId: string) {
     return this.#stub(roomId).listGenerations()
   }
   async dropGeneration(roomId: string, inc: string) {
-    const wire = await this.#stub(roomId).dropGeneration(inc)
+    const manager = getCloudflareRoomSessionManager()
+    const wire = await manager.authority(roomId).dropGeneration(inc)
     if ('error' in wire) throw new Error(wire.error)
-    for (const key of this.#deliverySettlements.keys()) {
-      const [candidateRoomId, candidateInc] = JSON.parse(key) as [string, string, string]
-      if (candidateRoomId === roomId && candidateInc === inc) this.#deliverySettlements.delete(key)
-    }
+    manager.dropGenerationSettlements(roomId, inc)
     for (const dropped of wire.droppedSubscribers) {
-      this.#manager.invalidate({ roomId, inc, ...dropped })
+      manager.invalidate({ roomId, inc, ...dropped })
     }
   }
   async directoryPut(roomId: string, incTag: string) {
@@ -470,18 +482,10 @@ export class CloudflareRoomBackend implements RoomBackendSpi {
     return this.#directory().directoryList(prefix, cursor)
   }
   async dispose() {
-    this.#deliverySettlements.clear()
-    for (const stub of this.#stubs.values()) stub[Symbol.dispose]?.()
-    this.#stubs.clear()
-    /* Session manager owns local callbacks and is disposed with its shard. */
+    /* The stateless proxy owns no callbacks, authority stubs, or caller-settlement state. */
   }
   #stub(roomId: string): CloudflareRoomAuthorityStub {
-    let stub = this.#stubs.get(roomId)
-    if (stub === undefined) {
-      stub = this.#namespace.get(this.#namespace.idFromName(roomId))
-      this.#stubs.set(roomId, stub)
-    }
-    return stub
+    return getCloudflareRoomSessionManager().authority(roomId)
   }
   #directory(): CloudflareRoomAuthorityStub {
     return this.#stub(DIRECTORY_DO_NAME)

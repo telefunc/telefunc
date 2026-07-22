@@ -310,6 +310,7 @@ describe('cloudflare adapter entrypoint', () => {
       webSocketClose(ws: WebSocket, code: number, reason: string, wasClean: boolean): void
       telefuncBroadcastPublish(request: unknown): unknown
       telefuncBroadcastDeliver(request: unknown): void
+      telefuncRoomInvalidate(request: unknown): void
     }
 
     expect(mocks.transportInstances[0]?.attachBinding).toHaveBeenCalledWith(binding, 'TelefuncDurableObject')
@@ -368,5 +369,18 @@ describe('cloudflare adapter entrypoint', () => {
       serialized: '{"text":"hello"}',
       info: expect.any(Object),
     })
+
+    // Importing and using the ordinary Cloudflare adapter remains flag-free. Only the first Room entry
+    // asks for the opt-in async carrier and reports the recipe diagnostic.
+    expect(() =>
+      instance.telefuncRoomInvalidate({
+        roomId: 'room',
+        inc: 'inc',
+        laneKey: 'lane',
+        subscriberDoId: 'id',
+        leaseId: 'lease',
+        generationToken: 'generation',
+      }),
+    ).toThrow('Cloudflare Room requires await-safe context')
   })
 })

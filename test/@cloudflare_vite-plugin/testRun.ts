@@ -6,6 +6,7 @@ import { testCounter, testRunClassic } from '../../test/utils'
 
 function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
   testCloudflareBindings()
+  testRoomAsyncContextRecipe()
   testRunClassic(cmd, {
     tolerateError: (log) =>
       log.logText.includes('Detected multiple renderers concurrently rendering') ||
@@ -17,6 +18,13 @@ function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
   testTodolist()
   testChannel()
   testChat()
+}
+
+function testRoomAsyncContextRecipe() {
+  test('Cloudflare Room async-context recipe', async () => {
+    const response = await fetch(getServerUrl() + '/__telefunc-room-async-context-probe')
+    expect(response.status).toBe(204)
+  })
 }
 
 function testCloudflareBindings() {

@@ -3,6 +3,9 @@
 // file holds only serializable command handles and immutable observation caches.
 
 import { Miniflare } from 'miniflare'
+import { ClientBroadcast } from '../../../client/channel.js'
+import { CHANNEL_TRANSPORT } from '../../../constants.js'
+import { ClientRoom } from '../../../room/client.js'
 import type {
   CellMutation,
   CommitResult,
@@ -28,7 +31,7 @@ import type {
   RetainedWire,
 } from '../../../server/adapter/cloudflare/room/do.js'
 import { base64ToBytes, bytesToBase64 } from '../../../server/adapter/cloudflare/room/codec.js'
-import { bindRemoteReceiver, pollRemoteReceiver, receiverDescriptor } from '../receiver.js'
+import { bindRemoteReceiver, pollRemoteReceiver, receiverDescriptor, unbindRemoteReceiver } from '../receiver.js'
 import type { BackendFixture, BackendHarness } from '../harness.js'
 import { bundleWorker } from './bundle.js'
 import type { SessionRoomCommand, SessionRoomReply } from './commands.js'
@@ -118,7 +121,7 @@ type SessionStub = {
     command: NonNullable<ReturnType<typeof receiverDescriptor>>['command'],
   ): Promise<{ ready: true; state: ReadinessState } | { ready: false; state: ReadinessState; error: string }>
   subscriptionState(subscriptionId: string): Promise<{ state: ReadinessState; events: ReadinessState[] }>
-  unsubscribeSubscription(subscriptionId: string): Promise<void>
+  unsubscribeSubscription(subscriptionId: string): Promise<string | null>
   pollReceiver(
     subscriptionId: string,
     receiverId: string,
@@ -127,11 +130,37 @@ type SessionStub = {
   seedReceiver(subscriptionId: string, receiverId: string): Promise<void>
   forceRenewalFailures(count: number): Promise<void>
   forceEstablishmentFailures(count: number): Promise<void>
+  forcePostCommitEstablishmentFailures(count: number): Promise<void>
+  registrationLeaseHistory(): Promise<string[]>
   forceGenerationCaptureFailures(count: number): Promise<void>
   forceInvalidationFailures(count: number): Promise<void>
+  forceUnsubscribeFailures(count: number): Promise<void>
+  sharedBackendOwnershipProbe(roomId: string, inc: string, delayMs: number): Promise<string>
+  clearOwnershipProbes(): Promise<void>
+  missingBindingSubscriptionProbe(roomId: string, inc: string): Promise<string>
   resetSessionEpoch(): Promise<void>
   advanceRenewalTimers(ms: number): Promise<void>
   disposeBackend(): Promise<void>
+}
+
+type RecoverySessionStub = {
+  [Symbol.dispose]?: () => void
+  prepareRecoveryChannel(channelId: string, roomId: string, inc: string): Promise<void>
+  forceProductionRecoveryEpoch(): Promise<{
+    ownedByCurrentManager: boolean
+    before: ReadinessState | 'absent'
+    after: ReadinessState | 'absent'
+  }>
+  teardownRecoveryChannel(): Promise<void>
+  recoveryObservation(): Promise<{
+    roomId: string
+    inc: string
+    wants: number
+    readyEpochs: number
+    payloads: string[]
+    errors: string[]
+    state: ReadinessState | 'absent'
+  }>
 }
 
 type RoomNamespace = { idFromName(name: string): unknown; get(id: unknown): RoomStub }
@@ -141,7 +170,17 @@ type SessionNamespace = {
   get(id: unknown): SessionStub
 }
 
-type Shared = { mf: Miniflare; rooms: RoomNamespace; sessions: SessionNamespace }
+type Shared = {
+  mf: Miniflare
+  url: URL
+  rooms: RoomNamespace
+  sessions: SessionNamespace
+  recoveryRooms: RoomNamespace
+  recoverySessions: {
+    idFromName(name: string): unknown
+    get(id: unknown): RecoverySessionStub
+  }
+}
 let sharedPromise: Promise<Shared> | null = null
 const lowLevelRoomStubs = new Set<RoomStub>()
 
@@ -159,13 +198,21 @@ async function getShared(): Promise<Shared> {
       durableObjects: {
         ROOM: { className: 'TelefuncRoomDurableObject', useSQLite: true },
         TelefuncDurableObject: { className: 'ConformanceSessionDurableObject' },
+        RecoveryRoom: { className: 'RecoveryTelefuncRoomDurableObject', useSQLite: true },
+        RecoverySession: { className: 'RecoveryTelefuncDurableObject' },
       },
+      kvNamespaces: ['RECOVERY_KV'],
       bindings: { TELEFUNC_ROOM_ALARM_INTERVAL_MS: '500' },
     })
     return {
       mf,
+      url: await mf.ready,
       rooms: (await mf.getDurableObjectNamespace('ROOM')) as unknown as RoomNamespace,
       sessions: (await mf.getDurableObjectNamespace('TelefuncDurableObject')) as unknown as SessionNamespace,
+      recoveryRooms: (await mf.getDurableObjectNamespace('RecoveryRoom')) as unknown as RoomNamespace,
+      recoverySessions: (await mf.getDurableObjectNamespace(
+        'RecoverySession',
+      )) as unknown as Shared['recoverySessions'],
     }
   })()
   return sharedPromise
@@ -210,6 +257,123 @@ export async function cloudflareSessionId(seed: string): Promise<string> {
 export function disposeCloudflareRoomStubs(): void {
   for (const stub of lowLevelRoomStubs) stub[Symbol.dispose]?.()
   lowLevelRoomStubs.clear()
+}
+
+export async function runCloudflareSocketRecoverySchedule(wake: 'message' | 'delivery'): Promise<{
+  close: { code: number; reason: string }
+  observation: Awaited<ReturnType<RecoverySessionStub['recoveryObservation']>>
+  oldDelivery: 'not-attempted' | 'rejected'
+}> {
+  const shared = await getShared()
+  await clockPush
+  const roomId = `recovery-${wake}-${crypto.randomUUID()}`
+  const inc = crypto.randomUUID()
+  const room = shared.recoveryRooms.get(shared.recoveryRooms.idFromName(roomId))
+  const opened = await room.compareExchangeHead(
+    { expect: 'absent' },
+    { head: { currentInc: inc, state: 'open', configB64: '' } },
+  )
+  if (!('ok' in opened)) throw new Error(`failed to open recovery room: ${JSON.stringify(opened)}`)
+
+  // Ask the same production routing helper, inside workerd with the same request metadata, which shard
+  // recoveryTelefunc.serve() will select. This prevents an isolate-global ChannelMux from concealing a
+  // test that accidentally prepares one Durable Object while the real socket lands on another.
+  const sessionName = await fetch(new URL('/recovery/session-name', shared.url)).then(async (response) =>
+    response.text(),
+  )
+  const session = shared.recoverySessions.get(shared.recoverySessions.idFromName(sessionName))
+  const channelId = crypto.randomUUID()
+  await session.prepareRecoveryChannel(channelId, roomId, inc)
+
+  const NativeWebSocket = globalThis.WebSocket
+  const closes: Array<{ code: number; reason: string }> = []
+  const ObservedWebSocket = new Proxy(NativeWebSocket, {
+    construct(target, args, newTarget) {
+      const socket = Reflect.construct(target, args, newTarget) as WebSocket
+      socket.addEventListener('close', (event) => closes.push({ code: event.code, reason: event.reason }))
+      return socket
+    },
+  })
+  Object.defineProperty(globalThis, 'WebSocket', { configurable: true, writable: true, value: ObservedWebSocket })
+
+  const telefuncUrl = new URL('/_telefunc', shared.url).href
+  const broadcast = new ClientBroadcast({
+    channelId,
+    key: `room:${roomId}`,
+    transports: [CHANNEL_TRANSPORT.WS],
+    telefuncUrl,
+    connectionKey: channelId,
+  })
+  const clientRoom = new ClientRoom(broadcast, {
+    channelId,
+    roomId,
+    meta: {},
+    closed: false,
+    count: 0,
+    stamp: { at: 0, by: '' },
+  })
+  clientRoom.subscribeBinary(() => {}, { track: 'camera' })
+
+  try {
+    try {
+      await waitForRecovery(async () => (await session.recoveryObservation()).readyEpochs === 1)
+    } catch (error) {
+      throw new Error(
+        `initial Cloudflare recovery Room want did not become ready: ${JSON.stringify(await session.recoveryObservation())}`,
+        { cause: error },
+      )
+    }
+    const reset = await session.forceProductionRecoveryEpoch()
+    if (!reset.ownedByCurrentManager || reset.before !== 'ready' || reset.after !== 'closed') {
+      throw new Error(`production recovery reset missed the socket-owning Room manager: ${JSON.stringify(reset)}`)
+    }
+
+    let oldDelivery: 'not-attempted' | 'rejected' = 'not-attempted'
+    if (wake === 'delivery') {
+      const stale = await room.commitLane(roomId, inc, { kind: 'semantic' }, new TextEncoder().encode('stale'))
+      if (!('deliveryToken' in stale)) throw new Error('stale recovery commit was not accepted')
+      let rejected = false
+      try {
+        await room.awaitDelivery(stale.deliveryToken)
+      } catch {
+        rejected = true
+      }
+      if (!rejected) {
+        throw new Error(
+          `old recovery lease unexpectedly delivered: ${JSON.stringify({ reset, stale, closes, observation: await session.recoveryObservation() })}`,
+        )
+      }
+      oldDelivery = 'rejected'
+    }
+
+    await waitForRecovery(() => Promise.resolve(closes.some((entry) => entry.code === 1012)))
+    await waitForRecovery(async () => {
+      const observation = await session.recoveryObservation()
+      return observation.readyEpochs >= 2 && observation.wants >= 2 && observation.state === 'ready'
+    })
+
+    const fresh = await room.commitLane(roomId, inc, { kind: 'semantic' }, new TextEncoder().encode(`fresh-${wake}`))
+    if (!('deliveryToken' in fresh)) throw new Error('fresh recovery commit was not accepted')
+    await room.awaitDelivery(fresh.deliveryToken)
+    const observation = await session.recoveryObservation()
+    const close = closes.find((entry) => entry.code === 1012)
+    if (close === undefined) throw new Error('recovery socket did not close with 1012')
+    return { close, observation, oldDelivery }
+  } finally {
+    broadcast.abort()
+    await session.teardownRecoveryChannel()
+    Object.defineProperty(globalThis, 'WebSocket', { configurable: true, writable: true, value: NativeWebSocket })
+    session[Symbol.dispose]?.()
+    room[Symbol.dispose]?.()
+  }
+}
+
+async function waitForRecovery(predicate: () => Promise<boolean>, timeoutMs: number = 10_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (!(await predicate())) {
+    if (Date.now() >= deadline) throw new Error('Cloudflare socket recovery did not settle before timeout')
+    await new Promise<void>((resolve) => setTimeout(resolve, 50))
+  }
 }
 
 function headFromWire(wire: HeadWire): RoomHead {
@@ -348,7 +512,7 @@ class CloudflareConformanceBackend implements RoomBackendSpi {
     const id = crypto.randomUUID()
     const control: SubscriptionControl = { id, receiver, state: 'establishing', listeners: new Set() }
     this.#subscriptions.set(id, control)
-    bindRemoteReceiver(receiver, {
+    bindRemoteReceiver(receiver, id, {
       poll: () => this.#session.pollReceiver(id, descriptor.id),
       release: () => this.#session.releaseReceiver(id, descriptor.id),
       seed: () => this.#session.seedReceiver(id, descriptor.id),
@@ -371,7 +535,13 @@ class CloudflareConformanceBackend implements RoomBackendSpi {
         if (control.state === 'closed') return
         control.state = 'closed'
         for (const listener of [...control.listeners]) listener('closed')
-        await this.#session.unsubscribeSubscription(id)
+        await this.#preflight()
+        try {
+          const error = await this.#session.unsubscribeSubscription(id)
+          if (error !== null) throw new Error(error)
+        } finally {
+          unbindRemoteReceiver(receiver, id)
+        }
       },
     }
   }
@@ -421,11 +591,21 @@ class CloudflareConformanceBackend implements RoomBackendSpi {
   forceEstablishmentFailures(count: number): void {
     this.#controlPush = this.#controlPush.then(() => this.#session.forceEstablishmentFailures(count))
   }
+  forcePostCommitEstablishmentFailures(count: number): void {
+    this.#controlPush = this.#controlPush.then(() => this.#session.forcePostCommitEstablishmentFailures(count))
+  }
+  async registrationLeaseHistory(): Promise<string[]> {
+    await this.#controlPush
+    return this.#session.registrationLeaseHistory()
+  }
   forceGenerationCaptureFailures(count: number): void {
     this.#controlPush = this.#controlPush.then(() => this.#session.forceGenerationCaptureFailures(count))
   }
   forceInvalidationFailures(count: number): void {
     this.#controlPush = this.#controlPush.then(() => this.#session.forceInvalidationFailures(count))
+  }
+  forceUnsubscribeFailures(count: number): void {
+    this.#controlPush = this.#controlPush.then(() => this.#session.forceUnsubscribeFailures(count))
   }
   async resetSessionEpoch(): Promise<void> {
     await this.#preflight()
@@ -469,6 +649,18 @@ class CloudflareConformanceBackend implements RoomBackendSpi {
 
   probeContext(delayMs: number): Promise<boolean> {
     return this.#session.contextProbe(delayMs)
+  }
+
+  probeSharedBackendOwnership(roomId: string, inc: string, delayMs: number): Promise<string> {
+    return this.#session.sharedBackendOwnershipProbe(roomId, inc, delayMs)
+  }
+
+  clearOwnershipProbes(): Promise<void> {
+    return this.#session.clearOwnershipProbes()
+  }
+
+  missingBindingSubscriptionProbe(roomId: string, inc: string): Promise<string> {
+    return this.#session.missingBindingSubscriptionProbe(roomId, inc)
   }
 
   async #command<T>(command: SessionRoomCommand): Promise<T> {
@@ -519,8 +711,11 @@ class CloudflareConformanceBackend implements RoomBackendSpi {
 export function cloudflareRenewalControls(backend: RoomBackendSpi): {
   forceFailures(count: number): void
   forceEstablishmentFailures(count: number): void
+  forcePostCommitEstablishmentFailures(count: number): void
+  registrationLeaseHistory(): Promise<string[]>
   forceGenerationCaptureFailures(count: number): void
   forceInvalidationFailures(count: number): void
+  forceUnsubscribeFailures(count: number): void
   resetSessionEpoch(): Promise<void>
   advance(ms: number): Promise<void>
 } {
@@ -528,8 +723,11 @@ export function cloudflareRenewalControls(backend: RoomBackendSpi): {
   return {
     forceFailures: (count) => backend.forceRenewalFailures(count),
     forceEstablishmentFailures: (count) => backend.forceEstablishmentFailures(count),
+    forcePostCommitEstablishmentFailures: (count) => backend.forcePostCommitEstablishmentFailures(count),
+    registrationLeaseHistory: () => backend.registrationLeaseHistory(),
     forceGenerationCaptureFailures: (count) => backend.forceGenerationCaptureFailures(count),
     forceInvalidationFailures: (count) => backend.forceInvalidationFailures(count),
+    forceUnsubscribeFailures: (count) => backend.forceUnsubscribeFailures(count),
     resetSessionEpoch: () => backend.resetSessionEpoch(),
     advance: (ms) => backend.advanceRenewalTimers(ms),
   }
@@ -549,6 +747,30 @@ export async function cloudflareCommitFromSession(
 export function cloudflareContextProbe(backend: RoomBackendSpi, delayMs: number): Promise<boolean> {
   if (!(backend instanceof CloudflareConformanceBackend)) throw new Error('expected Cloudflare conformance backend')
   return backend.probeContext(delayMs)
+}
+
+export function cloudflareSharedBackendOwnershipProbe(
+  backend: RoomBackendSpi,
+  roomId: string,
+  inc: string,
+  delayMs: number,
+): Promise<string> {
+  if (!(backend instanceof CloudflareConformanceBackend)) throw new Error('expected Cloudflare conformance backend')
+  return backend.probeSharedBackendOwnership(roomId, inc, delayMs)
+}
+
+export function cloudflareClearOwnershipProbes(backend: RoomBackendSpi): Promise<void> {
+  if (!(backend instanceof CloudflareConformanceBackend)) throw new Error('expected Cloudflare conformance backend')
+  return backend.clearOwnershipProbes()
+}
+
+export function cloudflareMissingBindingSubscriptionProbe(
+  backend: RoomBackendSpi,
+  roomId: string,
+  inc: string,
+): Promise<string> {
+  if (!(backend instanceof CloudflareConformanceBackend)) throw new Error('expected Cloudflare conformance backend')
+  return backend.missingBindingSubscriptionProbe(roomId, inc)
 }
 
 export const cloudflareHarness: BackendHarness = {

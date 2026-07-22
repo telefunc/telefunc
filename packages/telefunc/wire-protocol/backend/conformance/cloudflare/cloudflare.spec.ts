@@ -36,14 +36,18 @@ import {
 } from '../scenario.js'
 import {
   cloudflareCommitFromSession,
+  cloudflareClearOwnershipProbes,
   cloudflareContextProbe,
   cloudflareHarness,
+  cloudflareMissingBindingSubscriptionProbe,
   cloudflareRenewalControls,
   cloudflareRoomStub,
   cloudflareSessionId,
+  cloudflareSharedBackendOwnershipProbe,
   disposeCloudflareRoomStubs,
   disposeSharedMiniflare,
   flushCloudflareAuthorityClock,
+  runCloudflareSocketRecoverySchedule,
   type RoomStub,
 } from './fixture.js'
 import { bundleWorker } from './bundle.js'
@@ -198,37 +202,40 @@ describe('cloudflare — production session-manager mechanics', () => {
       }
     })
 
-    it('rejects the old lease after a forced session epoch reset and admits the reconnect lifecycle', async () => {
-      const target = await opened('reset')
-      const old = collector()
-      const oldSub = fx.backend.subscribeLane(target.roomId, target.inc, SEMANTIC, old.receiver)
-      await oldSub.ready
+    it('resolves one shared backend to each event-local manager across interleaved awaits', async () => {
+      const second = await cloudflareHarness.create()
+      try {
+        const { roomId, inc } = await opened('shared-proxy')
+        const [firstId, secondId] = await Promise.all([
+          cloudflareSharedBackendOwnershipProbe(fx.backend, roomId, inc, 30),
+          cloudflareSharedBackendOwnershipProbe(second.backend, roomId, inc, 10),
+        ])
+        expect(firstId).not.toBe(secondId)
+        expect(accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, bytes('two-managers'))).receivers).toBe(2)
+      } finally {
+        await Promise.all([cloudflareClearOwnershipProbes(fx.backend), cloudflareClearOwnershipProbes(second.backend)])
+        await second.dispose()
+      }
+    })
 
-      const controls = cloudflareRenewalControls(fx.backend)
-      await controls.resetSessionEpoch()
-      expect(oldSub.state()).toBe('closed')
-      expect(await cloudflareContextProbe(fx.backend, 1)).toBe(true)
+    it('recovers an actual Room-want socket when delivery reaches the empty epoch first', async () => {
+      const result = await runCloudflareSocketRecoverySchedule('delivery')
+      expect(result.close).toEqual({ code: 1012, reason: 'Telefunc session reset; reconnect' })
+      expect(result.oldDelivery).toBe('rejected')
+      expect(result.observation.wants).toBeGreaterThanOrEqual(2)
+      expect(result.observation.readyEpochs).toBeGreaterThanOrEqual(2)
+      expect(result.observation.payloads).toEqual(['fresh-delivery'])
+      expect(result.observation.errors).toEqual([])
+    })
 
-      const stale = accepted(
-        await cloudflareCommitFromSession(
-          fx.backend,
-          target.roomId,
-          target.inc,
-          SEMANTIC,
-          bytes('old-lease-must-reject'),
-        ),
-      )
-      expect(stale.receivers).toBe(1)
-      await expect(stale.delivery).rejects.toThrow()
-
-      const fresh = collector()
-      const freshSub = fx.backend.subscribeLane(target.roomId, target.inc, SEMANTIC, fresh.receiver)
-      await freshSub.ready
-      const delivered = accepted(await fx.backend.commitLane(target.roomId, target.inc, SEMANTIC, bytes('fresh')))
-      expect(delivered.receivers).toBe(1)
-      await delivered.delivery
-      expect(old.payloads()).toEqual([])
-      expect(fresh.payloads()).toEqual(['fresh'])
+    it('recovers an actual Room-want socket when the reconnect message reaches the empty epoch first', async () => {
+      const result = await runCloudflareSocketRecoverySchedule('message')
+      expect(result.close).toEqual({ code: 1012, reason: 'Telefunc session reset; reconnect' })
+      expect(result.oldDelivery).toBe('not-attempted')
+      expect(result.observation.wants).toBeGreaterThanOrEqual(2)
+      expect(result.observation.readyEpochs).toBeGreaterThanOrEqual(2)
+      expect(result.observation.payloads).toEqual(['fresh-message'])
+      expect(result.observation.errors).toEqual([])
     })
 
     it('keeps the authority route until the final local detach', async () => {
@@ -266,13 +273,20 @@ describe('cloudflare — production session-manager mechanics', () => {
     })
 
     it('fails closed outside await-safe raw context', () => {
-      const namespace = { idFromName: () => ({}), get: () => ({}) } as never
-      expect(() => new CloudflareRoomBackend(namespace)).toThrow(CLOUDFLARE_ROOM_CONTEXT_ERROR)
+      const backend = new CloudflareRoomBackend()
+      expect(() => backend.subscribeLane('room', 'inc', SEMANTIC, () => {})).toThrow(CLOUDFLARE_ROOM_CONTEXT_ERROR)
     })
 
     it('fails early with the exact missing authority-binding diagnostic', () => {
       expect(() => requireCloudflareRoomNamespace({}, 'CustomRoomAuthority')).toThrow(
         'Missing Cloudflare Room Durable Object binding "CustomRoomAuthority". Add it to your wrangler.jsonc.',
+      )
+    })
+
+    it('rejects a production subscription before local mutation when the authority binding is missing', async () => {
+      const { roomId, inc } = await opened('missing-binding-subscribe')
+      await expect(cloudflareMissingBindingSubscriptionProbe(fx.backend, roomId, inc)).resolves.toBe(
+        'Missing Cloudflare Room Durable Object binding "ROOM". Add it to your wrangler.jsonc.',
       )
     })
 
@@ -353,6 +367,55 @@ describe('cloudflare — production session-manager mechanics', () => {
       expect(await settled(sub.ready)).toBe('rejected')
       await controls.advance(250 + 500)
       expect(sub.state()).toBe('ready')
+    })
+
+    it('reuses one fresh lease when a replacement registration commits but its acknowledgement is lost', async () => {
+      const { roomId, inc } = await opened('lost-register-ack')
+      const sub = fx.backend.subscribeLane(roomId, inc, SEMANTIC, noopReceiver())
+      await sub.ready
+      const controls = cloudflareRenewalControls(fx.backend)
+      controls.forceFailures(2)
+      controls.forcePostCommitEstablishmentFailures(1)
+      await controls.advance(ROUTE_RENEW_EVERY_MS * 2 + 250)
+      expect(sub.state()).toBe('ready')
+      const leases = await controls.registrationLeaseHistory()
+      expect(leases).toHaveLength(2)
+      expect(new Set(leases).size).toBe(1)
+    })
+
+    it('removes a committed-but-unacknowledged replacement after bounded exhaustion', async () => {
+      const target = await opened('lost-register-ack-exhaustion')
+      const sub = fx.backend.subscribeLane(target.roomId, target.inc, SEMANTIC, noopReceiver())
+      await sub.ready
+      const controls = cloudflareRenewalControls(fx.backend)
+      controls.forceFailures(2)
+      controls.forcePostCommitEstablishmentFailures(5)
+      await controls.advance(ROUTE_RENEW_EVERY_MS * 2 + 250 + 500 + 1_000 + 2_000)
+      expect(sub.state()).toBe('closed')
+      expect(new Set(await controls.registrationLeaseHistory()).size).toBe(1)
+      expect(
+        acceptedWire(await target.stub.commitLane(target.roomId, target.inc, SEMANTIC, bytes('no-ghost'))).receivers,
+      ).toBe(0)
+    })
+
+    it('closes locally, reports teardown transport failure, and expires the remote route safely', async () => {
+      const target = await opened('teardown-failure')
+      const sub = fx.backend.subscribeLane(target.roomId, target.inc, SEMANTIC, noopReceiver())
+      await sub.ready
+      const controls = cloudflareRenewalControls(fx.backend)
+      controls.forceUnsubscribeFailures(1)
+      await expect(sub.unsubscribe()).rejects.toThrow('forced unsubscribe transport failure')
+      expect(sub.state()).toBe('closed')
+      expect(
+        acceptedWire(await target.stub.commitLane(target.roomId, target.inc, SEMANTIC, bytes('still-durable')))
+          .receivers,
+      ).toBe(1)
+      fx.advanceAuthority(ROUTE_TTL_MS + 1)
+      await flushCloudflareAuthorityClock()
+      expect(await target.stub.telefuncRoomRunMaintenance()).toEqual({ prunedRoutes: 1 })
+      expect(
+        acceptedWire(await target.stub.commitLane(target.roomId, target.inc, SEMANTIC, bytes('expired'))).receivers,
+      ).toBe(0)
     })
 
     it('recovers a lost generation-capture response with the same attempt identity', async () => {

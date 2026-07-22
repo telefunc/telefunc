@@ -82,6 +82,31 @@ for (const harness of installedBackends) {
         await first.unsubscribe()
       })
 
+      it('treats repeated attachment of one receiver function as distinct subscriptions', async () => {
+        for (const detachFirst of [0, 1] as const) {
+          const scopedRoomId = `${roomId}-same-receiver-${detachFirst}`
+          const { inc: scopedInc } = await openRoom(fx.backend, scopedRoomId)
+          const receiver = collector()
+          const subscriptions = [
+            fx.backend.subscribeLane(scopedRoomId, scopedInc, SEMANTIC, receiver.receiver),
+            fx.backend.subscribeLane(scopedRoomId, scopedInc, SEMANTIC, receiver.receiver),
+          ] as const
+          await Promise.all(subscriptions.map((sub) => sub.ready))
+
+          await accepted(await fx.backend.commitLane(scopedRoomId, scopedInc, SEMANTIC, bytes('both'))).delivery
+          expect(receiver.payloads()).toEqual(['both', 'both'])
+
+          await subscriptions[detachFirst].unsubscribe()
+          await accepted(await fx.backend.commitLane(scopedRoomId, scopedInc, SEMANTIC, bytes('one'))).delivery
+          expect(receiver.payloads()).toEqual(['both', 'both', 'one'])
+
+          await subscriptions[detachFirst === 0 ? 1 : 0].unsubscribe()
+          expect(
+            accepted(await fx.backend.commitLane(scopedRoomId, scopedInc, SEMANTIC, bytes('none'))).receivers,
+          ).toBe(0)
+        }
+      })
+
       it('rejects ready for an incarnation that is not the open one (fail-closed)', async () => {
         const sub = fx.backend.subscribeLane(roomId, 'inc-that-never-was', SEMANTIC, noopReceiver())
         expect(await settled(sub.ready)).toBe('rejected')

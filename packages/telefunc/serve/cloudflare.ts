@@ -31,6 +31,8 @@ import type { CloudflareScale, LocationBucket } from '../wire-protocol/server/ad
 import { CHANNEL_TRANSPORT } from '../wire-protocol/constants.js'
 import {
   CloudflareRoomSessionManager,
+  CLOUDFLARE_ROOM_CONTEXT_ERROR,
+  getCloudflareRoomSessionManager,
   requireCloudflareRoomNamespace,
   withCloudflareRoomSessionManager,
   type CloudflareRoomNamespace,
@@ -116,7 +118,7 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
 
   const TelefuncDurableObject = class extends DurableObject {
     private readonly authorityState: CloudflareBroadcastAuthorityState
-    private readonly roomManager: CloudflareRoomSessionManager
+    private roomManager!: CloudflareRoomSessionManager
 
     constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
       super(ctx, env)
@@ -127,15 +129,7 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
       if (kv) broadcast.attachKV(kv)
       // The authority also owns room state and mirrors its replicated writes to the KV read replica.
       this.authorityState = new CloudflareBroadcastAuthorityState(ctx, kv)
-      this.roomManager = new CloudflareRoomSessionManager(
-        ctx.id.toString(),
-        () => getRoomBinding(this.env as Cloudflare.Env) as unknown as CloudflareRoomNamespace,
-      )
-      // A hibernated socket reconstructed into a fresh JS instance cannot retain the callbacks owned by
-      // the previous manager. Close it explicitly so the client reconnects and establishes fresh routes.
-      for (const socket of ctx.getWebSockets?.() ?? []) {
-        socket.close(SESSION_RESET_CLOSE_CODE, SESSION_RESET_CLOSE_REASON)
-      }
+      this.resetRoomSessionEpoch()
       crosswsAdapter.handleDurableInit(this, ctx, env)
     }
 
@@ -175,17 +169,44 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
     }
 
     telefuncRoomDeliver(request: RoomShardDeliveryRequest): Promise<void> {
-      return this.runWithRoomManager(() => this.roomManager.deliver(request))
+      return this.runWithRoomManager(() => {
+        if (getCloudflareRoomSessionManager() !== this.roomManager) throw new Error(CLOUDFLARE_ROOM_CONTEXT_ERROR)
+        return this.roomManager.deliver(request)
+      })
     }
 
     telefuncRoomInvalidate(request: RoomShardInvalidationRequest): void {
-      return this.runWithRoomManager(() => this.roomManager.invalidate(request))
+      return this.runWithRoomManager(() => {
+        if (getCloudflareRoomSessionManager() !== this.roomManager) throw new Error(CLOUDFLARE_ROOM_CONTEXT_ERROR)
+        return this.roomManager.invalidate(request)
+      })
     }
 
-    private runWithRoomManager<T>(fn: () => T): T {
+    protected runWithRoomManager<T>(fn: () => T): T {
       // Non-Room Cloudflare keeps its flag-free path. A Room operation calls getCloudflareRoomSessionManager
       // from the proxy and gets the normative diagnostic if async mode was not enabled by the user.
       return isAsyncMode() ? withCloudflareRoomSessionManager(this.roomManager, fn) : fn()
+    }
+
+    /** Production epoch transition. Construction and explicit runtime recovery execute this exact path,
+     * so a surviving socket can never remain paired with callbacks from a prior JS epoch. */
+    protected resetRoomSessionEpoch(): void {
+      this.roomManager?.dispose()
+      this.roomManager = this.createRoomManager()
+      this.closeRecoveredSockets()
+    }
+
+    private createRoomManager(): CloudflareRoomSessionManager {
+      return new CloudflareRoomSessionManager(
+        this.ctx.id.toString(),
+        () => getRoomBinding(this.env as Cloudflare.Env) as unknown as CloudflareRoomNamespace,
+      )
+    }
+
+    private closeRecoveredSockets(): void {
+      for (const socket of this.ctx.getWebSockets?.() ?? []) {
+        socket.close(SESSION_RESET_CLOSE_CODE, SESSION_RESET_CLOSE_REASON)
+      }
     }
 
     // Room state RPC — a room's authority DO (the one that sequences its control lane) also owns its

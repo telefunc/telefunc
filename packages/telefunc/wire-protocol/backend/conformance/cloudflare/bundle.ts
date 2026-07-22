@@ -36,12 +36,23 @@ export async function bundleWorker(): Promise<string> {
     platform: 'neutral',
     target: 'es2022',
     write: false,
+    banner: {
+      js: 'globalThis.FinalizationRegistry ??= class { register() {} unregister() { return true } };',
+    },
     external: ['cloudflare:workers', 'node:async_hooks'],
     plugins: [resolveJsToTs],
     logLevel: 'silent',
   })
   const output = result.outputFiles[0]
   if (output === undefined) throw new Error('bundleWorker: esbuild produced no output')
-  cached = output.text
+  // Importing the production Cloudflare session class also pulls in Vike's development loader. It has
+  // two variable `import(id)` fallbacks that workerd rejects at module-parse time even though the
+  // recovery schedule only exercises WebSocket entrypoints and can never execute them. Keep literal
+  // production imports intact; replace only those generated webpack-ignore variable fallbacks in this
+  // excluded test bundle.
+  cached = output.text.replace(
+    /return import\(\s*\/\*webpackIgnore: true\*\/\s*id\s*\);/g,
+    'return Promise.reject(new Error("dynamic development import is unavailable in conformance workerd"));',
+  )
   return cached
 }
