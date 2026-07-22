@@ -20,15 +20,9 @@ export type RedisSubscriberChannelBinding = {
   invalidationChannel: string
 }
 
-export type RedisSubscriberTransportHooks = {
-  beforeSubscribe?: (channel: string) => void | Promise<void>
-  afterSubscribeAck?: (channel: string) => void | Promise<void>
-}
-
 type RedisSubscriberTransportOptions = {
   subscriber: Redis
   retryDelay: (attempt: number) => number
-  hooks?: RedisSubscriberTransportHooks
   captureGeneration: (binding: RedisSubscriberChannelBinding) => Promise<void>
   validateGeneration: (binding: RedisSubscriberChannelBinding, includeCapture: boolean) => Promise<boolean>
   onGenerationInvalidation: (owner: string, token: string) => void
@@ -159,7 +153,6 @@ class RedisLaneSubscription implements LaneSubscription {
 export class RedisSubscriberTransport {
   readonly #subscriber: Redis
   readonly #retryDelay: (attempt: number) => number
-  readonly #hooks?: RedisSubscriberTransportHooks
   readonly #captureGeneration: (binding: RedisSubscriberChannelBinding) => Promise<void>
   readonly #validateGeneration: (binding: RedisSubscriberChannelBinding, includeCapture: boolean) => Promise<boolean>
   readonly #onGenerationInvalidation: (owner: string, token: string) => void
@@ -179,7 +172,6 @@ export class RedisSubscriberTransport {
   constructor(options: RedisSubscriberTransportOptions) {
     this.#subscriber = options.subscriber
     this.#retryDelay = options.retryDelay
-    this.#hooks = options.hooks
     this.#captureGeneration = options.captureGeneration
     this.#validateGeneration = options.validateGeneration
     this.#onGenerationInvalidation = options.onGenerationInvalidation
@@ -377,9 +369,6 @@ export class RedisSubscriberTransport {
         await this.#captureGeneration(binding)
         if (!this.#attemptIsCurrent(lifecycle, operationEpoch, connectionEpoch)) return false
         if (!(await this.#awaitConnectionReady(connectionEpoch))) return false
-        await this.#hooks?.beforeSubscribe?.(binding.channel)
-        if (!this.#attemptIsCurrent(lifecycle, operationEpoch, connectionEpoch)) return false
-
         await this.#subscriber.subscribe(binding.channel, binding.invalidationChannel)
         if (!this.#attemptIsCurrent(lifecycle, operationEpoch, connectionEpoch)) return false
         // Remote ownership is recorded at the acknowledgement boundary, before any held durable check,
@@ -387,7 +376,6 @@ export class RedisSubscriberTransport {
         const ownership = { connectionEpoch, operationEpoch }
         this.#subscribedChannels.set(binding.channel, ownership)
         this.#subscribedInvalidations.add(binding.invalidationChannel)
-        await this.#hooks?.afterSubscribeAck?.(binding.channel)
         if (!this.#attemptIsCurrent(lifecycle, operationEpoch, connectionEpoch)) return false
 
         const valid = await this.#validateGeneration(binding, !lifecycle.initialEstablished)

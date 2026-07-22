@@ -1,8 +1,6 @@
-// Final physical key layout + every Lua script for the Redis realization of RoomBackendSpi.
-//
-// DARK: this file is not exported from `@telefunc/redis`'s barrel and no Room call site reaches it. It
-// is the standalone-Redis spike proved against the shared conformance suite (convergence W2); the
-// hash-tagged one-slot Cluster proof is W4-R, so `capabilities.clusterSafe` stays false in backend.ts.
+// Final physical key layout + every Lua script for the Redis realization of RoomBackendSpi. The module
+// is package-internal but is emitted because RedisRoomBackend consumes it. Real Redis Cluster behavior
+// remains W4-R, so `capabilities.clusterSafe` stays false in backend.ts.
 //
 // Layout — every key of one room shares the `{<rid>}` hash tag, so a whole room lives in ONE Cluster
 // slot and each script can declare all the keys it touches in KEYS (spi.md §5.2):
@@ -25,10 +23,10 @@
 //   dir index: tf:{rid-dir}<prefix>… — the directory is global, its own two co-slotted keys (backend.ts)
 //
 // AUTHORITY TIME: production derives `now_ms` from `redis.call('TIME')` (the one central clock, atomic
-// inside the script — spi.md I13). Every time-sensitive script also accepts an OPTIONAL injected
-// `now_ms` ARGV: an embedding host can supply a shared authority clock while production normally uses
-// Redis TIME. A caller-local `Date.now()` is never an authority source.
-// The seam is a scalar ARGV, never a key, so it does not touch the co-slot invariant.
+// inside the script — spi.md I13). Every time-sensitive command accepts an optional `now_ms` scalar so
+// the atomic Lua protocol can be tested against a controlled authority clock; RedisRoomBackend supplies
+// an empty value in production and therefore uses Redis TIME. The scalar is never a key and cannot affect
+// the co-slot invariant. A caller-local `Date.now()` is never an authority source.
 
 import type { LaneId } from 'telefunc/backend'
 
@@ -494,6 +492,84 @@ return 1
 
 export const DIRECTORY_DELETE_CMD = 'tfRoomDirectoryDelete'
 export const DIRECTORY_DELETE_KEYS = 2
+
+// One production-owned inventory drives command registration and key assembly. Tests consume the same
+// descriptors and builders, so a new script or a changed operand cannot silently escape slot/Lua proof.
+export const REDIS_ROOM_COMMANDS = {
+  headCx: { name: HEAD_CX_CMD, lua: HEAD_CX_LUA, numberOfKeys: HEAD_CX_KEYS },
+  captureGeneration: {
+    name: CAPTURE_GENERATION_CMD,
+    lua: CAPTURE_GENERATION_LUA,
+    numberOfKeys: CAPTURE_GENERATION_KEYS,
+  },
+  validateGeneration: {
+    name: VALIDATE_GENERATION_CMD,
+    lua: VALIDATE_GENERATION_LUA,
+    numberOfKeys: VALIDATE_GENERATION_KEYS,
+  },
+  dropGenerationFinalize: {
+    name: DROP_GENERATION_FINALIZE_CMD,
+    lua: DROP_GENERATION_FINALIZE_LUA,
+    numberOfKeys: DROP_GENERATION_FINALIZE_KEYS,
+  },
+  cellsCx: { name: CELLS_CX_CMD, lua: CELLS_CX_LUA, numberOfKeys: null },
+  commit: { name: COMMIT_CMD, lua: COMMIT_LUA, numberOfKeys: COMMIT_KEYS },
+  retainedDelete: { name: RETAINED_DELETE_CMD, lua: RETAINED_DELETE_LUA, numberOfKeys: null },
+  directoryPut: { name: DIRECTORY_PUT_CMD, lua: DIRECTORY_PUT_LUA, numberOfKeys: DIRECTORY_PUT_KEYS },
+  directoryDelete: {
+    name: DIRECTORY_DELETE_CMD,
+    lua: DIRECTORY_DELETE_LUA,
+    numberOfKeys: DIRECTORY_DELETE_KEYS,
+  },
+} as const
+
+export const REDIS_ROOM_COMMAND_KEYS = {
+  headCx: (prefix: string, roomId: string) => [
+    headKey(prefix, roomId),
+    gensKey(prefix, roomId),
+    headRevKey(prefix, roomId),
+    generationTokensKey(prefix, roomId),
+  ],
+  captureGeneration: (prefix: string, roomId: string) => [
+    headKey(prefix, roomId),
+    gensKey(prefix, roomId),
+    generationTokensKey(prefix, roomId),
+    routeCapturesKey(prefix, roomId),
+    routeCaptureExpiriesKey(prefix, roomId),
+  ],
+  validateGeneration: (prefix: string, roomId: string) => [
+    headKey(prefix, roomId),
+    gensKey(prefix, roomId),
+    generationTokensKey(prefix, roomId),
+    routeCapturesKey(prefix, roomId),
+    routeCaptureExpiriesKey(prefix, roomId),
+  ],
+  dropGenerationFinalize: (prefix: string, roomId: string) => [
+    gensKey(prefix, roomId),
+    generationTokensKey(prefix, roomId),
+  ],
+  cellsCx: (prefix: string, roomId: string, inc: string, cells: readonly string[]) => [
+    headKey(prefix, roomId),
+    revKey(prefix, roomId, inc),
+    ...cells.map((key) => cellKey(prefix, roomId, inc, key)),
+  ],
+  commit: (prefix: string, roomId: string, inc: string, lane: LaneId) => {
+    const key = laneKey(lane)
+    return [
+      headKey(prefix, roomId),
+      orderKey(prefix, roomId, inc, key),
+      retainedKey(prefix, roomId, inc, key),
+      channelKey(prefix, roomId, inc, key),
+      retainedSizeKey(prefix, roomId, inc),
+    ]
+  },
+  retainedDelete: (prefix: string, roomId: string, inc: string, retainedKeys: readonly string[]) => [
+    retainedSizeKey(prefix, roomId, inc),
+    ...retainedKeys,
+  ],
+  directoryPut: (prefix: string) => [directoryIndexKey(prefix), directoryTagsKey(prefix)],
+  directoryDelete: (prefix: string) => [directoryIndexKey(prefix), directoryTagsKey(prefix)],
+} as const
 
 // The 12-byte publish/retained header, shared by the commit Lua (`struct.pack('>I4I4I4', …)`) and the
 // JS decoders. `ts` is split into two u32s to stay ms-accurate beyond ~50 days.

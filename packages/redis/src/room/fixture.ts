@@ -1,11 +1,11 @@
-// The Redis BackendFixture for the shared conformance suite (convergence W2) plus a couple of seams the
-// Redis-specific stable-read scenarios need. DARK test infrastructure: reached only by the gated live
-// lane (`vitest.room.config.ts`) and the Redis-specific spec — never by `@telefunc/redis`'s barrel.
+// The Redis BackendFixture for the shared conformance suite plus the deterministic controls used by the
+// Redis-specific race scenarios. This test-only module is reached only by the gated live lane and is
+// excluded from the package emit.
 //
 // Fixture obligations honored (from W2a's lessons):
 //   (a) the authority clock STARTS aligned with the caller clock (`Date.now()` at create) and diverges
 //       only through `advanceAuthority`. A real Redis server clock cannot be advanced, so the backend
-//       drives every time-sensitive Lua from this injected clock instead (layout.ts NOW seam); a backend
+//       command decorator supplies that clock to every time-sensitive Lua call; a backend
 //       that read a caller's `Date.now()` would still fail every I13 killer, because this clock is the
 //       shared authority, not the caller's.
 //   (b) traces are declared honestly: Redis hands frames to the broker and never observes a receiver, so
@@ -21,23 +21,14 @@ import type {
   BackendTraces,
 } from '../../../telefunc/wire-protocol/backend/conformance/harness.js'
 import {
-  CAPTURE_GENERATION_LUA,
-  CAPTURE_GENERATION_CMD,
-  CELLS_CX_LUA,
-  COMMIT_LUA,
-  DIRECTORY_DELETE_LUA,
-  DIRECTORY_PUT_LUA,
-  DROP_GENERATION_FINALIZE_LUA,
-  HEAD_CX_LUA,
-  RETAINED_DELETE_LUA,
-  VALIDATE_GENERATION_LUA,
   generationTokensKey,
   gensKey,
   headKey,
   routeCaptureExpiriesKey,
   routeCapturesKey,
+  REDIS_ROOM_COMMANDS,
 } from './layout.js'
-import { REDIS_GENERATION_CAPTURE_TTL_MS, RedisRoomBackend } from './backend.test-support.js'
+import { REDIS_GENERATION_CAPTURE_TTL_MS, RedisRoomBackend } from './backend.js'
 
 const REDIS_TRACES: BackendTraces = {
   handoffAwaitsReceiver: false,
@@ -76,6 +67,7 @@ export type GenerationCaptureProbe = (info: {
 }) => void | Promise<void>
 export type DropGenerationProbe = (info: { roomId: string; inc: string }) => void | Promise<void>
 export type DirectoryDeleteProbe = (info: { roomId: string; incTag: string }) => void | Promise<void>
+export type RedisRoomCommandCall = { name: string; args: readonly unknown[] }
 
 // The fixture the shared suite consumes, widened with the seams the Redis-specific stable-read scenarios
 // use: the raw client (to force an insert/delete out of band), the concrete backend, and a settable
@@ -92,6 +84,7 @@ export type RedisBackendFixture = BackendFixture & {
   setAfterGenerationCapture(fn: GenerationCaptureProbe | null): void
   setBeforeDropGenerationUnregister(fn: DropGenerationProbe | null): void
   setBeforeDirectoryDeleteApply(fn: DirectoryDeleteProbe | null): void
+  commandCalls(): readonly RedisRoomCommandCall[]
   captureGenerationAttemptForTest(roomId: string, inc: string, attemptId: string, createdAt: number): Promise<string>
   countGenerationCapturesForTest(roomId: string): Promise<number>
   createPeerBackend(): Promise<{ backend: RedisRoomBackend; dispose(): Promise<void> }>
@@ -118,47 +111,168 @@ export async function createRedisFixture(
   let afterGenerationCapture: GenerationCaptureProbe | null = null
   let beforeDropGenerationUnregister: DropGenerationProbe | null = null
   let beforeDirectoryDeleteApply: DirectoryDeleteProbe | null = null
-
-  const backend = new RedisRoomBackend(
-    {
-      redis,
-      prefix,
-      maxRetainedPayloadBytes: opts.maxRetainedPayloadBytes,
-    },
-    {
-      subscriber,
-      authorityNow: opts.useRedisAuthority === true ? undefined : () => clock,
-      stableReadProbe: (info) => probe?.(info),
-      subscriptionRetryDelay: () => 0,
-    },
-  )
-  const store = ((globalThis as typeof globalThis & { [key: symbol]: WeakMap<RedisRoomBackend, object> })[
-    Symbol.for('telefunc.redis.room.test-hooks')
-  ] ??= new WeakMap())
-  store.set(backend, {
-    beforeSubscribe: (channel: string) => beforeSubscribe?.(channel),
-    afterSubscribeAck: (channel: string) => afterSubscribeAck?.(channel),
-    afterGenerationCapture: (info: GenerationCaptureProbe extends (info: infer I) => unknown ? I : never) =>
-      afterGenerationCapture?.(info),
-    beforeDropGenerationUnregister: (info: DropGenerationProbe extends (info: infer I) => unknown ? I : never) =>
-      beforeDropGenerationUnregister?.(info),
-    beforeDirectoryDeleteApply: (info: DirectoryDeleteProbe extends (info: infer I) => unknown ? I : never) =>
-      beforeDirectoryDeleteApply?.(info),
+  let bypassCaptureProbe = 0
+  const acknowledgedChannels: string[] = []
+  const commandCalls: RedisRoomCommandCall[] = []
+  const restorers: Array<() => void> = []
+  const peerDisposers = new Set<() => Promise<void>>()
+  const realSetTimeout = globalThis.setTimeout
+  globalThis.setTimeout = ((handler: TimerHandler, timeout?: number, ...args: unknown[]) =>
+    realSetTimeout(
+      handler,
+      timeout !== undefined && timeout >= 100 && timeout <= 4_000 ? 0 : timeout,
+      ...args,
+    )) as typeof setTimeout
+  restorers.push(() => {
+    globalThis.setTimeout = realSetTimeout
   })
+
+  const runProbe = async (label: string, probe: () => void | Promise<void>): Promise<void> => {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const watchdog = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`Redis fixture probe '${label}' exceeded 5 seconds`)), 5_000)
+      timer.unref?.()
+    })
+    try {
+      await Promise.race([Promise.resolve().then(probe), watchdog])
+    } finally {
+      if (timer !== undefined) clearTimeout(timer)
+    }
+  }
+
+  type DynamicCommands = Record<string, (...args: unknown[]) => Promise<unknown>>
+  const wrapCommand = (
+    client: Redis,
+    name: string,
+    wrapper: (invoke: (args: unknown[]) => Promise<unknown>, args: unknown[]) => Promise<unknown>,
+  ): void => {
+    const commands = client as unknown as DynamicCommands
+    const original = commands[name]
+    if (original === undefined)
+      throw new Error(`Redis fixture: command '${name}' was not defined by the shipped backend`)
+    commands[name] = (...args) => wrapper((next) => original.apply(client, next), args)
+    restorers.push(() => {
+      commands[name] = original
+    })
+  }
+
+  const installAuthorityClock = (client: Redis): void => {
+    const now = (): string => (opts.useRedisAuthority === true ? '' : String(clock))
+    for (const [name, index] of [
+      [REDIS_ROOM_COMMANDS.headCx.name, 4],
+      [REDIS_ROOM_COMMANDS.captureGeneration.name, 5],
+      [REDIS_ROOM_COMMANDS.validateGeneration.name, 5],
+      [REDIS_ROOM_COMMANDS.commit.name, 5],
+    ] as const) {
+      wrapCommand(client, name, async (invoke, args) => {
+        args[index] = now()
+        return await invoke(args)
+      })
+    }
+    wrapCommand(client, REDIS_ROOM_COMMANDS.cellsCx.name, async (invoke, args) => {
+      args[Number(args[0]) + 1] = now()
+      return await invoke(args)
+    })
+    if (opts.useRedisAuthority !== true) {
+      const originalTime = client.time.bind(client)
+      client.time = (async () => {
+        const seconds = Math.floor(clock / 1_000)
+        const microseconds = (clock - seconds * 1_000) * 1_000
+        return [seconds, microseconds]
+      }) as typeof client.time
+      restorers.push(() => {
+        client.time = originalTime
+      })
+    }
+  }
+
+  const roomIdFromKey = (key: unknown): string => {
+    const match = String(key).match(/room:\{([^}]*)\}/)
+    return match === null ? '' : decodeURIComponent(match[1] as string)
+  }
+
+  const duplicate = redis.duplicate.bind(redis)
+  redis.duplicate = (() => subscriber) as typeof redis.duplicate
+  let backend: RedisRoomBackend
+  try {
+    backend = new RedisRoomBackend({ redis, prefix, maxRetainedPayloadBytes: opts.maxRetainedPayloadBytes })
+  } finally {
+    redis.duplicate = duplicate
+  }
+  installAuthorityClock(redis)
+  wrapCommand(redis, REDIS_ROOM_COMMANDS.validateGeneration.name, async (invoke, args) => {
+    const channel = acknowledgedChannels.shift()
+    if (channel !== undefined && afterSubscribeAck !== null) {
+      await runProbe('after subscribe acknowledgement', () => afterSubscribeAck?.(channel))
+    }
+    return await invoke(args)
+  })
+  wrapCommand(redis, REDIS_ROOM_COMMANDS.captureGeneration.name, async (invoke, args) => {
+    const reply = await invoke(args)
+    if (afterGenerationCapture !== null && bypassCaptureProbe === 0) {
+      const parsed = JSON.parse(String(reply)) as { token?: string }
+      await runProbe('after generation capture', () =>
+        afterGenerationCapture?.({
+          roomId: roomIdFromKey(args[0]),
+          inc: String(args[6]),
+          attemptId: String(args[7]),
+          createdAt: Number(args[8]),
+          token: parsed.token ?? '',
+        }),
+      )
+    }
+    return reply
+  })
+  const mgetBuffer = redis.mgetBuffer.bind(redis)
+  redis.mgetBuffer = (async (...keys: string[]) => {
+    if (probe !== null) {
+      const first = keys[0] ?? ''
+      const incMatch = first.match(/:g:([^:]+):c:/)
+      await runProbe('stable read', () => probe?.({ roomId: roomIdFromKey(first), inc: incMatch?.[1] ?? '' }))
+    }
+    return await mgetBuffer(...keys)
+  }) as typeof redis.mgetBuffer
+  restorers.push(() => {
+    redis.mgetBuffer = mgetBuffer
+  })
+  wrapCommand(redis, REDIS_ROOM_COMMANDS.directoryDelete.name, async (invoke, args) => {
+    if (beforeDirectoryDeleteApply !== null) {
+      await runProbe('before directory delete', () =>
+        beforeDirectoryDeleteApply?.({ roomId: String(args[2]), incTag: String(args[3]) }),
+      )
+    }
+    return await invoke(args)
+  })
+  wrapCommand(redis, REDIS_ROOM_COMMANDS.dropGenerationFinalize.name, async (invoke, args) => {
+    if (beforeDropGenerationUnregister !== null) {
+      await runProbe('before generation unregister', () =>
+        beforeDropGenerationUnregister?.({ roomId: roomIdFromKey(args[0]), inc: String(args[2]) }),
+      )
+    }
+    return await invoke(args)
+  })
+  const subscribe = subscriber.subscribe.bind(subscriber)
+  subscriber.subscribe = (async (...channels: string[]) => {
+    if (beforeSubscribe !== null) {
+      await runProbe('before subscribe', () => beforeSubscribe?.(channels[0] as string))
+    }
+    const result = await subscribe(...channels)
+    acknowledgedChannels.push(channels[0] as string)
+    return result
+  }) as typeof subscriber.subscribe
+  restorers.push(() => {
+    subscriber.subscribe = subscribe
+  })
+  for (const command of Object.values(REDIS_ROOM_COMMANDS)) {
+    wrapCommand(redis, command.name, async (invoke, args) => {
+      commandCalls.push({ name: command.name, args: [...args] })
+      return await invoke(args)
+    })
+  }
 
   // Pre-cache the scripts so a head-CX race never pays a one-off NOSCRIPT round-trip that could perturb
   // the FIFO ordering the barrier relies on.
-  await Promise.all([
-    redis.script('LOAD', HEAD_CX_LUA),
-    redis.script('LOAD', CAPTURE_GENERATION_LUA),
-    redis.script('LOAD', VALIDATE_GENERATION_LUA),
-    redis.script('LOAD', DROP_GENERATION_FINALIZE_LUA),
-    redis.script('LOAD', CELLS_CX_LUA),
-    redis.script('LOAD', COMMIT_LUA),
-    redis.script('LOAD', RETAINED_DELETE_LUA),
-    redis.script('LOAD', DIRECTORY_PUT_LUA),
-    redis.script('LOAD', DIRECTORY_DELETE_LUA),
-  ])
+  await Promise.all(Object.values(REDIS_ROOM_COMMANDS).map((command) => redis.script('LOAD', command.lua)))
 
   return {
     backend,
@@ -194,44 +308,64 @@ export async function createRedisFixture(
     setBeforeDirectoryDeleteApply: (fn) => {
       beforeDirectoryDeleteApply = fn
     },
+    commandCalls: () => commandCalls,
     captureGenerationAttemptForTest: async (roomId, inc, attemptId, createdAt) => {
-      const reply = (await callDefinedCommand(redis, CAPTURE_GENERATION_CMD, [
-        headKey(prefix, roomId),
-        gensKey(prefix, roomId),
-        generationTokensKey(prefix, roomId),
-        routeCapturesKey(prefix, roomId),
-        routeCaptureExpiriesKey(prefix, roomId),
-        String(clock),
-        inc,
-        attemptId,
-        String(createdAt),
-        String(REDIS_GENERATION_CAPTURE_TTL_MS),
-      ])) as string
-      const parsed = JSON.parse(reply) as { ok: true; token: string } | { rejected: true; reason: string }
-      if ('rejected' in parsed) throw new Error(`subscribeLane: ${parsed.reason}`)
-      return parsed.token
+      bypassCaptureProbe++
+      try {
+        const reply = (await callDefinedCommand(redis, REDIS_ROOM_COMMANDS.captureGeneration.name, [
+          headKey(prefix, roomId),
+          gensKey(prefix, roomId),
+          generationTokensKey(prefix, roomId),
+          routeCapturesKey(prefix, roomId),
+          routeCaptureExpiriesKey(prefix, roomId),
+          String(clock),
+          inc,
+          attemptId,
+          String(createdAt),
+          String(REDIS_GENERATION_CAPTURE_TTL_MS),
+        ])) as string
+        const parsed = JSON.parse(reply) as { ok: true; token: string } | { rejected: true; reason: string }
+        if ('rejected' in parsed) throw new Error(`subscribeLane: ${parsed.reason}`)
+        return parsed.token
+      } finally {
+        bypassCaptureProbe--
+      }
     },
     countGenerationCapturesForTest: async (roomId) => await redis.hlen(routeCapturesKey(prefix, roomId)),
     createPeerBackend: async () => {
       const peerRedis = redis.duplicate({ maxRetriesPerRequest: 2 })
-      const peer = new RedisRoomBackend(
-        { redis: peerRedis, prefix },
-        { authorityNow: opts.useRedisAuthority === true ? undefined : () => clock, subscriptionRetryDelay: () => 0 },
-      )
+      const peer = new RedisRoomBackend({ redis: peerRedis, prefix })
+      installAuthorityClock(peerRedis)
+      let disposed = false
+      const dispose = async (): Promise<void> => {
+        if (disposed) return
+        disposed = true
+        peerDisposers.delete(dispose)
+        await peer.dispose()
+        try {
+          await peerRedis.quit()
+        } catch {
+          peerRedis.disconnect()
+        }
+      }
+      peerDisposers.add(dispose)
       return {
         backend: peer,
-        dispose: async () => {
-          await peer.dispose()
-          try {
-            await peerRedis.quit()
-          } catch {
-            peerRedis.disconnect()
-          }
-        },
+        dispose,
       }
     },
     dispose: async () => {
+      probe = null
+      beforeSubscribe = null
+      afterSubscribeAck = null
+      acknowledgedChannels.length = 0
+      commandCalls.length = 0
+      afterGenerationCapture = null
+      beforeDropGenerationUnregister = null
+      beforeDirectoryDeleteApply = null
+      await Promise.allSettled([...peerDisposers].map((dispose) => dispose()))
       await backend.dispose()
+      for (const restore of restorers.reverse()) restore()
       // Best-effort reclamation of this fixture's namespace (safe under parallel workers — the prefix is
       // unshared, so this never touches another fixture's keys).
       try {

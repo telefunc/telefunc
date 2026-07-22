@@ -1,7 +1,6 @@
 {
-  "// purpose": "Type-checks the dark Room backend spike (src/room/**) WITHOUT emit. noEmit means rootDir",
-  "// purpose (2)": "is not enforced, so the cross-package relative imports of the telefunc SPI source",
-  "// purpose (3)": "type-check cleanly. Run: tsc -p packages/redis/tsconfig.room.json",
+  "// purpose": "Type-checks production and test-only Room modules together without changing package output.",
+  "// purpose (2)": "Run: tsc -p packages/redis/tsconfig.room.json",
   "extends": "./tsconfig.json",
   "compilerOptions": {
     "noEmit": true,

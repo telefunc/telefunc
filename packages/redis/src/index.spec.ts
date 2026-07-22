@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { Redis } from 'ioredis'
 import { config, DefaultBroadcastAdapter, KV_KEEP, Room } from 'telefunc'
-import { RedisTransport } from './index.js'
+import { installRedis, RedisTransport } from './index.js'
 
 // Fake `ioredis` — `defineCommand` + `duplicate()` + broadcast subscribe/dispatch. Lua
 // execution emulated in TS so we exercise the adapter's call graph without a real Redis.
@@ -184,6 +184,16 @@ function newAdapter() {
   const adapter = new DefaultBroadcastAdapter(new RedisTransport({ redis: fake as unknown as Redis }))
   return { fake, adapter }
 }
+
+describe('released installRedis surface', () => {
+  it('installs the existing Redis transport with its prefix option unchanged', async () => {
+    const fake = new FakeIoredis()
+    installRedis(fake as unknown as Redis, { prefix: 'custom:' })
+    const adapter = new DefaultBroadcastAdapter(config.broadcast.transport)
+    await adapter.set('key', 'value')
+    expect(await fake.get('custom:kv:key')).toBe('value')
+  })
+})
 
 describe('Redis adapter — atomic publish via Lua', () => {
   it('returns the monotonic per-key seq and Redis-clock timestamp assigned by the script', async () => {

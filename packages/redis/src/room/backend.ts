@@ -1,7 +1,6 @@
-// The standalone-Redis realization of RoomBackendSpi, proved against the shared conformance suite to the
-// SAME outcomes as the memory reference (convergence W2). DARK: not exported from `@telefunc/redis`'s
-// barrel and used by no Room call site — the final hash-tagged, incarnation-scoped backend is W3-R and
-// the real 3-master Cluster slot proof is W4-R, so `capabilities.clusterSafe` stays false here (D1).
+// The released Redis realization of RoomBackendSpi, proved against the shared conformance suite to the
+// same outcomes as the memory reference. The real three-master Cluster proof remains W4-R, so
+// `capabilities.clusterSafe` stays false here.
 //
 // Mechanism map (spi.md §5.2), all atomic pieces in layout.ts's Lua:
 //   head CX      one atomic record: legality (throw) · compare (conflict) · fresh-inc guard · mint · store
@@ -33,52 +32,24 @@ import { MAX_CLOSE_LEASE_MS, MIN_CLOSE_LEASE_MS, ROOM_SPI_VERSION } from 'telefu
 import {
   cellKey,
   cellKeyPrefix,
-  CAPTURE_GENERATION_CMD,
-  CAPTURE_GENERATION_KEYS,
-  CAPTURE_GENERATION_LUA,
   channelKey,
-  CELLS_CX_CMD,
-  CELLS_CX_LUA,
-  COMMIT_CMD,
-  COMMIT_KEYS,
-  COMMIT_LUA,
   decodeFrameHeader,
   DEFAULT_ROOM_PREFIX,
-  DIRECTORY_DELETE_CMD,
-  DIRECTORY_DELETE_KEYS,
-  DIRECTORY_DELETE_LUA,
   directoryIndexKey,
-  DIRECTORY_PUT_CMD,
-  DIRECTORY_PUT_KEYS,
-  DIRECTORY_PUT_LUA,
   directoryTagsKey,
-  DROP_GENERATION_FINALIZE_CMD,
-  DROP_GENERATION_FINALIZE_KEYS,
-  DROP_GENERATION_FINALIZE_LUA,
   escapeGlob,
   generationInvalidationChannel,
   generationTokensKey,
   gensKey,
   genPrefix,
-  HEAD_CX_CMD,
-  HEAD_CX_KEYS,
-  HEAD_CX_LUA,
   headKey,
-  headRevKey,
   laneKey,
-  orderKey,
   parseLaneKey,
+  REDIS_ROOM_COMMAND_KEYS,
+  REDIS_ROOM_COMMANDS,
   retainedKey,
   retainedKeyPrefix,
-  RETAINED_DELETE_CMD,
-  RETAINED_DELETE_LUA,
-  retainedSizeKey,
   revKey,
-  routeCaptureExpiriesKey,
-  routeCapturesKey,
-  VALIDATE_GENERATION_CMD,
-  VALIDATE_GENERATION_KEYS,
-  VALIDATE_GENERATION_LUA,
 } from './layout.js'
 import {
   RedisGenerationInvalidError,
@@ -108,28 +79,6 @@ export type RedisRoomBackendOptions = {
   prefix?: string
   maxRetainedPayloadBytes?: number
 }
-
-// Internal construction dependencies. They are not re-exported by the package: the public constructor
-// only needs a publisher client and optional namespace/cap. Hosts may use the same runtime seams to
-// control subscriber ownership, time, and retry scheduling.
-/* test runtime moved to backend.test-support.ts */
-type RedisRoomBackendRuntimeRemoved = never
-/*
-  // The authority clock. When supplied (conformance), every time-sensitive Lua receives this frozen,
-  // advanceable value as `now_ms` and JS-side logical filtering resolves against it too; a backend that
-  // instead consulted a caller's `Date.now()` would fail every I13 killer. When absent (production), the
-  // Lua and JS read paths fall back to Redis TIME — the central server clock. Date.now() is never an
-  // authority source.
-  authorityNow?: () => number
-  // Test seam (sanctioned by readiness-ordering §2.2's holdRegistration/holdRetainedRead hooks): a
-  // callback invoked inside the stable-read window — after the result set is enumerated, before
-  // rev_after — so a scenario can force an insert/delete/expiry between rev_before and rev_after.
-  stableReadProbe?: (info: { roomId: string; inc: string }) => void | Promise<void>
-  // A host may inject the subscriber connection; otherwise the backend creates its own duplicate.
-  subscriber?: Redis
-  subscriptionRetryDelay?: (attempt: number) => number
-}
-*/
 
 // The stored head, exactly as the Lua encodes it. `config` is opaque base64; `until`/`exp` are authority
 // timestamps; `inc`/`lease`/`exp` are present only when meaningful (keeps the cjson clean).
@@ -254,28 +203,10 @@ export class RedisRoomBackend implements RoomBackendSpi {
       clusterSafe: false,
       directory: true,
     }
-    this.#publisher.defineCommand(HEAD_CX_CMD, { numberOfKeys: HEAD_CX_KEYS, lua: HEAD_CX_LUA })
-    this.#publisher.defineCommand(CAPTURE_GENERATION_CMD, {
-      numberOfKeys: CAPTURE_GENERATION_KEYS,
-      lua: CAPTURE_GENERATION_LUA,
-    })
-    this.#publisher.defineCommand(VALIDATE_GENERATION_CMD, {
-      numberOfKeys: VALIDATE_GENERATION_KEYS,
-      lua: VALIDATE_GENERATION_LUA,
-    })
-    this.#publisher.defineCommand(DROP_GENERATION_FINALIZE_CMD, {
-      numberOfKeys: DROP_GENERATION_FINALIZE_KEYS,
-      lua: DROP_GENERATION_FINALIZE_LUA,
-    })
-    this.#publisher.defineCommand(COMMIT_CMD, { numberOfKeys: COMMIT_KEYS, lua: COMMIT_LUA })
-    // Variable key count (head, rev, then one key per mutation) — numberOfKeys is supplied per call.
-    this.#publisher.defineCommand(CELLS_CX_CMD, { lua: CELLS_CX_LUA })
-    this.#publisher.defineCommand(RETAINED_DELETE_CMD, { lua: RETAINED_DELETE_LUA })
-    this.#publisher.defineCommand(DIRECTORY_PUT_CMD, { numberOfKeys: DIRECTORY_PUT_KEYS, lua: DIRECTORY_PUT_LUA })
-    this.#publisher.defineCommand(DIRECTORY_DELETE_CMD, {
-      numberOfKeys: DIRECTORY_DELETE_KEYS,
-      lua: DIRECTORY_DELETE_LUA,
-    })
+    for (const command of Object.values(REDIS_ROOM_COMMANDS)) {
+      if (command.numberOfKeys === null) this.#publisher.defineCommand(command.name, { lua: command.lua })
+      else this.#publisher.defineCommand(command.name, { numberOfKeys: command.numberOfKeys, lua: command.lua })
+    }
     this.#transport = new RedisSubscriberTransport({
       subscriber,
       retryDelay: defaultSubscriptionRetryDelay,
@@ -309,11 +240,8 @@ export class RedisRoomBackend implements RoomBackendSpi {
   > {
     this.#assertLive()
     assertHeadNextWellFormed(next)
-    const reply = (await callDefinedCommand(this.#publisher, HEAD_CX_CMD, [
-      headKey(this.#prefix, roomId),
-      gensKey(this.#prefix, roomId),
-      headRevKey(this.#prefix, roomId),
-      generationTokensKey(this.#prefix, roomId),
+    const reply = (await callDefinedCommand(this.#publisher, REDIS_ROOM_COMMANDS.headCx.name, [
+      ...REDIS_ROOM_COMMAND_KEYS.headCx(this.#prefix, roomId),
       this.#nowArg(),
       encodeCx(cx),
       encodeNext(next),
@@ -370,10 +298,14 @@ export class RedisRoomBackend implements RoomBackendSpi {
     mutations: CellMutation[],
   ): Promise<CxResult> {
     this.#assertLive()
-    const keys: string[] = [headKey(this.#prefix, roomId), revKey(this.#prefix, roomId, inc)]
+    const keys = REDIS_ROOM_COMMAND_KEYS.cellsCx(
+      this.#prefix,
+      roomId,
+      inc,
+      mutations.map((mutation) => mutation.key),
+    )
     const argv: Array<string | Buffer> = [this.#nowArg(), inc, revision]
     for (const mutation of mutations) {
-      keys.push(cellKey(this.#prefix, roomId, inc, mutation.key))
       if (mutation.set === undefined) {
         argv.push('del', '', '')
       } else {
@@ -384,7 +316,7 @@ export class RedisRoomBackend implements RoomBackendSpi {
         )
       }
     }
-    const reply = (await callDefinedCommand(this.#publisher, CELLS_CX_CMD, [
+    const reply = (await callDefinedCommand(this.#publisher, REDIS_ROOM_COMMANDS.cellsCx.name, [
       String(keys.length),
       ...keys,
       ...argv,
@@ -402,14 +334,9 @@ export class RedisRoomBackend implements RoomBackendSpi {
     opts?: { retain?: boolean; orderTtlMs?: number; closingLease?: string },
   ): Promise<CommitResult> {
     this.#assertLive()
-    const key = laneKey(lane)
-    const channel = channelKey(this.#prefix, roomId, inc, key)
-    const reply = (await callDefinedCommand(this.#publisher, COMMIT_CMD, [
-      headKey(this.#prefix, roomId),
-      orderKey(this.#prefix, roomId, inc, key),
-      retainedKey(this.#prefix, roomId, inc, key),
-      channel,
-      retainedSizeKey(this.#prefix, roomId, inc),
+    const channel = channelKey(this.#prefix, roomId, inc, laneKey(lane))
+    const reply = (await callDefinedCommand(this.#publisher, REDIS_ROOM_COMMANDS.commit.name, [
+      ...REDIS_ROOM_COMMAND_KEYS.commit(this.#prefix, roomId, inc, lane),
       this.#nowArg(),
       inc,
       lane.kind,
@@ -460,17 +387,19 @@ export class RedisRoomBackend implements RoomBackendSpi {
 
   async deleteRetained(roomId: string, inc: string, lane?: LaneId): Promise<void> {
     this.#assertLive()
-    const size = retainedSizeKey(this.#prefix, roomId, inc)
     if (lane !== undefined) {
-      await callDefinedCommand(this.#publisher, RETAINED_DELETE_CMD, [
-        '2',
-        size,
+      const keys = REDIS_ROOM_COMMAND_KEYS.retainedDelete(this.#prefix, roomId, inc, [
         retainedKey(this.#prefix, roomId, inc, laneKey(lane)),
       ])
+      await callDefinedCommand(this.#publisher, REDIS_ROOM_COMMANDS.retainedDelete.name, [String(keys.length), ...keys])
       return
     }
     const keys = await this.#scanKeys(`${escapeGlob(retainedKeyPrefix(this.#prefix, roomId, inc))}*`)
-    await callDefinedCommand(this.#publisher, RETAINED_DELETE_CMD, [String(keys.length + 1), size, ...keys])
+    const commandKeys = REDIS_ROOM_COMMAND_KEYS.retainedDelete(this.#prefix, roomId, inc, keys)
+    await callDefinedCommand(this.#publisher, REDIS_ROOM_COMMANDS.retainedDelete.name, [
+      String(commandKeys.length),
+      ...commandKeys,
+    ])
   }
 
   // ── subscriptions ──
@@ -498,8 +427,8 @@ export class RedisRoomBackend implements RoomBackendSpi {
   async #ensureGenerationCaptured(binding: RedisGenerationBinding): Promise<void> {
     if (binding.generationToken !== null) return
     const captured = await this.#captureGeneration(binding)
-    // This seam is after the durable command and before local observation, so throwing faithfully
-    // models a lost first response. A retry reuses the exact attempt id and creation epoch.
+    // Local observation follows the awaited durable command. If its response is lost, a retry therefore
+    // reuses the exact attempt id and creation epoch instead of minting a second capture.
     binding.generationToken = captured
   }
 
@@ -513,12 +442,8 @@ export class RedisRoomBackend implements RoomBackendSpi {
 
   async #captureGeneration(context: RedisGenerationBinding): Promise<string> {
     if (context.createdAt === null) context.createdAt = await this.#authorityNowMs()
-    const reply = (await callDefinedCommand(this.#publisher, CAPTURE_GENERATION_CMD, [
-      headKey(this.#prefix, context.roomId),
-      gensKey(this.#prefix, context.roomId),
-      generationTokensKey(this.#prefix, context.roomId),
-      routeCapturesKey(this.#prefix, context.roomId),
-      routeCaptureExpiriesKey(this.#prefix, context.roomId),
+    const reply = (await callDefinedCommand(this.#publisher, REDIS_ROOM_COMMANDS.captureGeneration.name, [
+      ...REDIS_ROOM_COMMAND_KEYS.captureGeneration(this.#prefix, context.roomId),
       this.#nowArg(),
       context.inc,
       context.attemptId,
@@ -532,12 +457,8 @@ export class RedisRoomBackend implements RoomBackendSpi {
 
   async #validateGeneration(context: RedisGenerationBinding, includeCapture: boolean): Promise<boolean> {
     if (context.generationToken === null) return false
-    const reply = (await callDefinedCommand(this.#publisher, VALIDATE_GENERATION_CMD, [
-      headKey(this.#prefix, context.roomId),
-      gensKey(this.#prefix, context.roomId),
-      generationTokensKey(this.#prefix, context.roomId),
-      routeCapturesKey(this.#prefix, context.roomId),
-      routeCaptureExpiriesKey(this.#prefix, context.roomId),
+    const reply = (await callDefinedCommand(this.#publisher, REDIS_ROOM_COMMANDS.validateGeneration.name, [
+      ...REDIS_ROOM_COMMAND_KEYS.validateGeneration(this.#prefix, context.roomId),
       this.#nowArg(),
       context.inc,
       context.generationToken,
@@ -587,9 +508,8 @@ export class RedisRoomBackend implements RoomBackendSpi {
     }
     const owner = roomGenerationKey(roomId, inc)
     await this.#transport.dropGeneration(owner)
-    await callDefinedCommand(this.#publisher, DROP_GENERATION_FINALIZE_CMD, [
-      gensKey(this.#prefix, roomId),
-      generationTokensKey(this.#prefix, roomId),
+    await callDefinedCommand(this.#publisher, REDIS_ROOM_COMMANDS.dropGenerationFinalize.name, [
+      ...REDIS_ROOM_COMMAND_KEYS.dropGenerationFinalize(this.#prefix, roomId),
       inc,
     ])
   }
@@ -598,9 +518,8 @@ export class RedisRoomBackend implements RoomBackendSpi {
 
   async directoryPut(roomId: string, incTag: string): Promise<void> {
     this.#assertLive()
-    await callDefinedCommand(this.#publisher, DIRECTORY_PUT_CMD, [
-      directoryIndexKey(this.#prefix),
-      directoryTagsKey(this.#prefix),
+    await callDefinedCommand(this.#publisher, REDIS_ROOM_COMMANDS.directoryPut.name, [
+      ...REDIS_ROOM_COMMAND_KEYS.directoryPut(this.#prefix),
       roomId,
       incTag,
     ])
@@ -608,9 +527,8 @@ export class RedisRoomBackend implements RoomBackendSpi {
 
   async directoryDelete(roomId: string, incTag: string): Promise<void> {
     this.#assertLive()
-    await callDefinedCommand(this.#publisher, DIRECTORY_DELETE_CMD, [
-      directoryIndexKey(this.#prefix),
-      directoryTagsKey(this.#prefix),
+    await callDefinedCommand(this.#publisher, REDIS_ROOM_COMMANDS.directoryDelete.name, [
+      ...REDIS_ROOM_COMMAND_KEYS.directoryDelete(this.#prefix),
       roomId,
       incTag,
     ])
