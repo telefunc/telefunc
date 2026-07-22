@@ -13,8 +13,13 @@
     "lib": ["DOM", "ESNext"]
   },
   "include": ["src/**/*.ts"],
-  "// src/room": "The dark Room backend spike imports the telefunc SPI by source path (cross-package),",
+  "// src/room": "Production Room modules emit with this package; fixtures and specs do not.",
   "// src/room (2)": "so it is excluded from this emit build (it is never shipped) and type-checked",
   "// src/room (3)": "separately via tsconfig.room.json (noEmit — rootDir is not enforced there).",
-  "exclude": ["src/**/*.spec.ts", "src/room/fixture.ts", "src/room/register.ts"]
+  "exclude": [
+    "src/**/*.spec.ts",
+    "src/room/fixture.ts",
+    "src/room/register.ts",
+    "src/room/backend.test-support.ts"
+  ]
 }

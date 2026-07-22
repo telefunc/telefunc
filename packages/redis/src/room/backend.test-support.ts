@@ -15,7 +15,6 @@
 
 import { randomUUID } from 'node:crypto'
 import type { Redis } from 'ioredis'
-import { assert } from '../assert.js'
 import { callDefinedCommand } from '../callDefinedCommand.js'
 import type {
   CellMutation,
@@ -103,6 +102,20 @@ function roomGenerationKey(roomId: string, inc: string): string {
   return `${roomId.length}:${roomId}${inc}`
 }
 
+type RedisRoomBackendTestHooks = {
+  beforeSubscribe?: (channel: string) => void | Promise<void>
+  afterSubscribeAck?: (channel: string) => void | Promise<void>
+  afterGenerationCapture?: (info: {
+    roomId: string
+    inc: string
+    attemptId: string
+    createdAt: number
+    token: string
+  }) => void | Promise<void>
+  beforeDropGenerationUnregister?: (info: { roomId: string; inc: string }) => void | Promise<void>
+  beforeDirectoryDeleteApply?: (info: { roomId: string; incTag: string }) => void | Promise<void>
+}
+
 export type RedisRoomBackendOptions = {
   redis: Redis
   prefix?: string
@@ -112,9 +125,7 @@ export type RedisRoomBackendOptions = {
 // Internal construction dependencies. They are not re-exported by the package: the public constructor
 // only needs a publisher client and optional namespace/cap. Hosts may use the same runtime seams to
 // control subscriber ownership, time, and retry scheduling.
-/* test runtime moved to backend.test-support.ts */
-type RedisRoomBackendRuntimeRemoved = never
-/*
+type RedisRoomBackendRuntime = {
   // The authority clock. When supplied (conformance), every time-sensitive Lua receives this frozen,
   // advanceable value as `now_ms` and JS-side logical filtering resolves against it too; a backend that
   // instead consulted a caller's `Date.now()` would fail every I13 killer. When absent (production), the
@@ -129,7 +140,12 @@ type RedisRoomBackendRuntimeRemoved = never
   subscriber?: Redis
   subscriptionRetryDelay?: (attempt: number) => number
 }
-*/
+
+const TEST_HOOKS = Symbol.for('telefunc.redis.room.test-hooks')
+type TestHookStore = WeakMap<RedisRoomBackend, RedisRoomBackendTestHooks>
+function redisRoomBackendTestHooks(backend: RedisRoomBackend): RedisRoomBackendTestHooks | undefined {
+  return (globalThis as typeof globalThis & { [TEST_HOOKS]?: TestHookStore })[TEST_HOOKS]?.get(backend)
+}
 
 // The stored head, exactly as the Lua encodes it. `config` is opaque base64; `until`/`exp` are authority
 // timestamps; `inc`/`lease`/`exp` are present only when meaningful (keeps the cjson clean).
@@ -230,24 +246,25 @@ export class RedisRoomBackend implements RoomBackendSpi {
   readonly #publisher: Redis
   readonly #transport: RedisSubscriberTransport
   readonly #prefix: string
+  readonly #authorityNow?: () => number
+  readonly #stableReadProbe?: (info: { roomId: string; inc: string }) => void | Promise<void>
   // Durable capture/generation identity stays here. The transport receives this object only as an opaque
   // channel binding and delegates capture/validation back before it can settle readiness.
   readonly #generationBindings = new Map<string, RedisGenerationBinding>()
   #disposed = false
 
-  constructor(options: RedisRoomBackendOptions) {
-    assert(
-      options.maxRetainedPayloadBytes === undefined ||
-        (Number.isFinite(options.maxRetainedPayloadBytes) && options.maxRetainedPayloadBytes >= 0),
-      'RedisRoomBackend: maxRetainedPayloadBytes must be a finite non-negative number',
-    )
+  constructor(options: RedisRoomBackendOptions, runtime: RedisRoomBackendRuntime = {}) {
     this.#publisher = options.redis
-    const subscriber = options.redis.duplicate({
-      autoResubscribe: false,
-      retryStrategy: (attempt) =>
-        attempt <= SUBSCRIPTION_RETRY_ATTEMPTS ? defaultSubscriptionRetryDelay(attempt) : null,
-    })
+    const subscriptionRetryDelay = runtime.subscriptionRetryDelay ?? defaultSubscriptionRetryDelay
+    const subscriber =
+      runtime.subscriber ??
+      options.redis.duplicate({
+        autoResubscribe: false,
+        retryStrategy: (attempt) => (attempt <= SUBSCRIPTION_RETRY_ATTEMPTS ? subscriptionRetryDelay(attempt) : null),
+      })
     this.#prefix = options.prefix ?? DEFAULT_ROOM_PREFIX
+    this.#authorityNow = runtime.authorityNow
+    this.#stableReadProbe = runtime.stableReadProbe
     this.capabilities = {
       receivers: 'global',
       maxRetainedPayloadBytes: options.maxRetainedPayloadBytes ?? DEFAULT_MAX_RETAINED_BYTES,
@@ -278,7 +295,11 @@ export class RedisRoomBackend implements RoomBackendSpi {
     })
     this.#transport = new RedisSubscriberTransport({
       subscriber,
-      retryDelay: defaultSubscriptionRetryDelay,
+      retryDelay: subscriptionRetryDelay,
+      hooks: {
+        beforeSubscribe: (channel) => redisRoomBackendTestHooks(this)?.beforeSubscribe?.(channel),
+        afterSubscribeAck: (channel) => redisRoomBackendTestHooks(this)?.afterSubscribeAck?.(channel),
+      },
       captureGeneration: (binding) => this.#ensureGenerationCaptured(this.#requireGenerationBinding(binding)),
       validateGeneration: (binding, includeCapture) =>
         this.#validateGeneration(this.#requireGenerationBinding(binding), includeCapture),
@@ -343,6 +364,7 @@ export class RedisRoomBackend implements RoomBackendSpi {
       // Reads need only generation existence — available while 'closing' (the closer's tail needs them).
       if (head === null || (head.inc ?? null) !== inc) return { staleInc: true }
       const logicalKeys = 'keys' in sel ? sel.keys : await this.#scanCellKeys(roomId, inc, sel.prefix)
+      if (this.#stableReadProbe !== undefined) await this.#stableReadProbe({ roomId, inc })
       const physicalKeys = logicalKeys.map((key) => cellKey(this.#prefix, roomId, inc, key))
       const values = physicalKeys.length > 0 ? await this.#publisher.mgetBuffer(...physicalKeys) : []
       const revAfter = await this.#publisher.get(rKey)
@@ -500,6 +522,13 @@ export class RedisRoomBackend implements RoomBackendSpi {
     const captured = await this.#captureGeneration(binding)
     // This seam is after the durable command and before local observation, so throwing faithfully
     // models a lost first response. A retry reuses the exact attempt id and creation epoch.
+    await redisRoomBackendTestHooks(this)?.afterGenerationCapture?.({
+      roomId: binding.roomId,
+      inc: binding.inc,
+      attemptId: binding.attemptId,
+      createdAt: binding.createdAt as number,
+      token: captured,
+    })
     binding.generationToken = captured
   }
 
@@ -587,6 +616,7 @@ export class RedisRoomBackend implements RoomBackendSpi {
     }
     const owner = roomGenerationKey(roomId, inc)
     await this.#transport.dropGeneration(owner)
+    await redisRoomBackendTestHooks(this)?.beforeDropGenerationUnregister?.({ roomId, inc })
     await callDefinedCommand(this.#publisher, DROP_GENERATION_FINALIZE_CMD, [
       gensKey(this.#prefix, roomId),
       generationTokensKey(this.#prefix, roomId),
@@ -608,6 +638,7 @@ export class RedisRoomBackend implements RoomBackendSpi {
 
   async directoryDelete(roomId: string, incTag: string): Promise<void> {
     this.#assertLive()
+    await redisRoomBackendTestHooks(this)?.beforeDirectoryDeleteApply?.({ roomId, incTag })
     await callDefinedCommand(this.#publisher, DIRECTORY_DELETE_CMD, [
       directoryIndexKey(this.#prefix),
       directoryTagsKey(this.#prefix),
@@ -656,10 +687,11 @@ export class RedisRoomBackend implements RoomBackendSpi {
   }
 
   #nowArg(): string {
-    return ''
+    return this.#authorityNow !== undefined ? String(this.#authorityNow()) : ''
   }
 
   async #authorityNowMs(): Promise<number> {
+    if (this.#authorityNow !== undefined) return this.#authorityNow()
     const [seconds, microseconds] = await this.#publisher.time()
     return Number(seconds) * 1_000 + Math.floor(Number(microseconds) / 1_000)
   }

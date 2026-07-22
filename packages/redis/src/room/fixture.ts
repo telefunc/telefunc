@@ -37,7 +37,7 @@ import {
   routeCaptureExpiriesKey,
   routeCapturesKey,
 } from './layout.js'
-import { REDIS_GENERATION_CAPTURE_TTL_MS, RedisRoomBackend } from './backend.js'
+import { REDIS_GENERATION_CAPTURE_TTL_MS, RedisRoomBackend } from './backend.test-support.js'
 
 const REDIS_TRACES: BackendTraces = {
   handoffAwaitsReceiver: false,

@@ -4,6 +4,11 @@ import {
   CELLS_CX_LUA,
   channelKey,
   COMMIT_LUA,
+  DIRECTORY_DELETE_LUA,
+  DIRECTORY_PUT_LUA,
+  directoryIndexKey,
+  directoryTagsKey,
+  DROP_GENERATION_FINALIZE_LUA,
   generationInvalidationChannel,
   generationTokensKey,
   gensKey,
@@ -13,6 +18,7 @@ import {
   orderKey,
   retainedKey,
   retainedSizeKey,
+  RETAINED_DELETE_LUA,
   revKey,
   routeCaptureExpiriesKey,
   routeCapturesKey,
@@ -59,10 +65,24 @@ describe('Redis Room key-slot and Lua key declarations', () => {
     ]
     expect(new Set(keys.map(slot))).toEqual(new Set([slot(keys[0] as string)]))
     expect(keys.every((key) => key.includes('{room%7D%20with%20space}'))).toBe(true)
+    const directoryKeys = [directoryIndexKey(prefix), directoryTagsKey(prefix)]
+    expect(new Set(directoryKeys.map(slot))).toEqual(new Set([slot(directoryKeys[0] as string)]))
   })
 
   it('requires Lua key access to come from KEYS, not ARGV', () => {
-    for (const lua of [HEAD_CX_LUA, CAPTURE_GENERATION_LUA, VALIDATE_GENERATION_LUA, CELLS_CX_LUA, COMMIT_LUA]) {
+    const programs = {
+      headCx: HEAD_CX_LUA,
+      captureGeneration: CAPTURE_GENERATION_LUA,
+      validateGeneration: VALIDATE_GENERATION_LUA,
+      dropGenerationFinalize: DROP_GENERATION_FINALIZE_LUA,
+      cellsCx: CELLS_CX_LUA,
+      commit: COMMIT_LUA,
+      retainedDelete: RETAINED_DELETE_LUA,
+      directoryPut: DIRECTORY_PUT_LUA,
+      directoryDelete: DIRECTORY_DELETE_LUA,
+    }
+    expect(Object.keys(programs)).toHaveLength(9)
+    for (const lua of Object.values(programs)) {
       assertLuaKeysOnly(lua)
     }
   })
