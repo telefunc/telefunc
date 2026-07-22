@@ -25,7 +25,6 @@ import type {
   LaneId,
   LaneReceiver,
   LaneSubscription,
-  ReadinessState,
   RoomBackendSpi,
   RoomHead,
 } from '../../../telefunc/wire-protocol/backend/spi.js'
@@ -84,6 +83,11 @@ import {
   VALIDATE_GENERATION_KEYS,
   VALIDATE_GENERATION_LUA,
 } from './layout.js'
+import {
+  RedisGenerationInvalidError,
+  RedisSubscriberTransport,
+  type RedisSubscriberChannelBinding,
+} from './subscriber-transport.js'
 
 const DEFAULT_MAX_RETAINED_BYTES = 16 * 1024 * 1024
 const DIRECTORY_PAGE_SIZE = 100
@@ -101,12 +105,6 @@ function defaultSubscriptionRetryDelay(attempt: number): number {
 function roomGenerationKey(roomId: string, inc: string): string {
   return `${roomId.length}:${roomId}${inc}`
 }
-
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms))
-}
-
-class GenerationInvalidError extends Error {}
 
 type RedisRoomBackendTestHooks = {
   beforeSubscribe?: (channel: string) => void | Promise<void>
@@ -227,117 +225,12 @@ function encodeNext(next: HeadNext): string {
   return JSON.stringify(payload)
 }
 
-// One live subscription over the shared subscriber connection. The handoff to the broker does not await
-// the receiver (BackendTraces.handoffAwaitsReceiver is false for Redis), so `deliver` is synchronous.
-class RedisLaneSubscription implements LaneSubscription {
-  readonly ready: Promise<void>
-  #state: ReadinessState = 'establishing'
-  #settle!: { resolve: () => void; reject: (err: unknown) => void }
-  #readySettled = false
-  readonly #listeners = new Set<(state: ReadinessState) => void>()
-  readonly #receiver: LaneReceiver
-  #detach: () => Promise<void> | void
-
-  constructor(receiver: LaneReceiver, detach: () => Promise<void> | void) {
-    this.#receiver = receiver
-    this.#detach = detach
-    this.ready = new Promise<void>((resolve, reject) => {
-      this.#settle = { resolve, reject }
-    })
-    void this.ready.catch(() => {})
-  }
-
-  get closed(): boolean {
-    return this.#state === 'closed'
-  }
-
-  state(): ReadinessState {
-    return this.#state
-  }
-
-  onStateChange(cb: (state: ReadinessState) => void): () => void {
-    this.#listeners.add(cb)
-    return () => this.#listeners.delete(cb)
-  }
-
-  async unsubscribe(): Promise<void> {
-    if (this.closed) return
-    // Local-first is also the validation fence: once this returns to the event loop, no in-flight head
-    // check or SUBSCRIBE ack may make this attachment ready again. Remote cleanup remains fallible and
-    // retryable from the channel lifecycle's retained ownership record.
-    this.#close(new Error('subscribeLane: unsubscribed before initial establishment'))
-    await this.#detach()
-  }
-
-  established(): void {
-    if (this.closed) return
-    if (!this.#readySettled) {
-      // The first establishing -> ready edge settles the one ready promise and is deliberately NOT an
-      // onStateChange emission. A ready after any loss is a re-establishment and is emitted below.
-      this.#readySettled = true
-      this.#state = 'ready'
-      this.#settle.resolve()
-      return
-    }
-    this.#transition('ready')
-  }
-
-  connectionLost(reason: unknown): void {
-    if (this.closed || this.#state === 'lost') return
-    if (!this.#readySettled) {
-      this.#readySettled = true
-      this.#settle.reject(reason)
-    }
-    this.#transition('lost')
-  }
-
-  failPermanently(reason: unknown): void {
-    this.#close(reason)
-  }
-
-  // The generation this subscription belongs to was dropped: its channel is gone for good, so the
-  // subscription is terminal rather than merely lost.
-  generationDropped(): void {
-    this.#detach = () => {}
-    this.#close(new Error('subscribeLane: generation dropped before initial establishment'))
-  }
-
-  deliver(payload: Uint8Array, info: { seq: number; timestamp: number }): void {
-    this.#receiver(payload, info)
-  }
-
-  #transition(state: ReadinessState): void {
-    if (this.#state === state) return
-    this.#state = state
-    for (const cb of this.#listeners) {
-      try {
-        cb(state)
-      } catch {
-        // State observation is advisory; one observer cannot corrupt lifecycle teardown or its siblings.
-      }
-    }
-  }
-
-  #close(reason: unknown): void {
-    if (this.closed) return
-    if (!this.#readySettled) {
-      this.#readySettled = true
-      this.#settle.reject(reason)
-    }
-    this.#transition('closed')
-  }
-}
-
-type RedisChannelContext = {
+type RedisGenerationBinding = RedisSubscriberChannelBinding & {
   roomId: string
   inc: string
-  owner: string
-  invalidationChannel: string
   attemptId: string
   createdAt: number | null
   generationToken: string | null
-  operationEpoch: number
-  initialEstablished: boolean
 }
 
 export class RedisRoomBackend implements RoomBackendSpi {
@@ -345,38 +238,24 @@ export class RedisRoomBackend implements RoomBackendSpi {
   readonly capabilities: RoomBackendSpi['capabilities']
 
   readonly #publisher: Redis
-  readonly #subscriber: Redis
+  readonly #transport: RedisSubscriberTransport
   readonly #prefix: string
   readonly #authorityNow?: () => number
   readonly #stableReadProbe?: (info: { roomId: string; inc: string }) => void | Promise<void>
-  readonly #subscriptionRetryDelay: (attempt: number) => number
   readonly #testHooks?: RedisRoomBackendTestHooks
-  // Dispatch: a channel's live subscriptions; the broker delivers on the shared subscriber connection.
-  readonly #channelSubs = new Map<string, Set<RedisLaneSubscription>>()
-  // Every same-channel subscriber awaits one shared SUBSCRIBE ack. Successful channels stay recorded
-  // until connection loss or the final local unsubscribe.
-  readonly #channelAcks = new Map<string, Promise<void>>()
-  readonly #subscribedChannels = new Set<string>()
-  readonly #subscribedInvalidations = new Set<string>()
-  readonly #invalidationOwners = new Map<string, string>()
-  // One refcounted local mux lifecycle per physical channel. Its generation token and operation epoch
-  // fence delayed capture/SUBSCRIBE results, while the retained owner record makes failed cleanup
-  // retryable until the durable generation sources can be removed last.
-  readonly #channelContexts = new Map<string, RedisChannelContext>()
-  // Room-generation identity owns teardown. An inc string alone is not globally unique across rooms.
-  readonly #roomGenSubs = new Map<string, Set<RedisLaneSubscription>>()
-  readonly #subOwners = new Map<RedisLaneSubscription, string>()
+  // Durable capture/generation identity stays here. The transport receives this object only as an opaque
+  // channel binding and delegates capture/validation back before it can settle readiness.
+  readonly #generationBindings = new Map<string, RedisGenerationBinding>()
   #disposed = false
 
   constructor(options: RedisRoomBackendOptions) {
     this.#publisher = options.redis
-    this.#subscriptionRetryDelay = options.subscriptionRetryDelay ?? defaultSubscriptionRetryDelay
-    this.#subscriber =
+    const subscriptionRetryDelay = options.subscriptionRetryDelay ?? defaultSubscriptionRetryDelay
+    const subscriber =
       options.subscriber ??
       options.redis.duplicate({
         autoResubscribe: false,
-        retryStrategy: (attempt) =>
-          attempt <= SUBSCRIPTION_RETRY_ATTEMPTS ? this.#subscriptionRetryDelay(attempt) : null,
+        retryStrategy: (attempt) => (attempt <= SUBSCRIPTION_RETRY_ATTEMPTS ? subscriptionRetryDelay(attempt) : null),
       })
     this.#prefix = options.prefix ?? DEFAULT_ROOM_PREFIX
     this.#authorityNow = options.authorityNow
@@ -410,10 +289,23 @@ export class RedisRoomBackend implements RoomBackendSpi {
       numberOfKeys: DIRECTORY_DELETE_KEYS,
       lua: DIRECTORY_DELETE_LUA,
     })
-    this.#subscriber.on('messageBuffer', this.#onMessage)
-    this.#subscriber.on('close', this.#onSubscriberClose)
-    this.#subscriber.on('ready', this.#onSubscriberReady)
-    this.#subscriber.on('end', this.#onSubscriberEnd)
+    this.#transport = new RedisSubscriberTransport({
+      subscriber,
+      retryDelay: subscriptionRetryDelay,
+      hooks: {
+        beforeSubscribe: options.testHooks?.beforeSubscribe,
+        afterSubscribeAck: options.testHooks?.afterSubscribeAck,
+      },
+      captureGeneration: (binding) => this.#ensureGenerationCaptured(this.#requireGenerationBinding(binding)),
+      validateGeneration: (binding, includeCapture) =>
+        this.#validateGeneration(this.#requireGenerationBinding(binding), includeCapture),
+      onGenerationInvalidation: (owner, token) => this.#generationInvalidated(owner, token),
+      onChannelRemoved: (binding) => {
+        if (this.#generationBindings.get(binding.channel) === binding) {
+          this.#generationBindings.delete(binding.channel)
+        }
+      },
+    })
   }
 
   // ── head ──
@@ -559,17 +451,8 @@ export class RedisRoomBackend implements RoomBackendSpi {
       seq: parsed.seq,
       timestamp: parsed.timestamp,
       receivers: parsed.receivers,
-      delivery: this.#deliveryFlush(channel),
+      delivery: this.#transport.flush(channel),
     }
-  }
-
-  // Resolves once every pub/sub frame published before it on `channel` has been dispatched to the local
-  // receiver(s). A no-op when the channel has no local subscriber (nothing to flush). A PING transport
-  // failure rejects THIS frame's delivery; Redis still exposes no receiver-callback failure.
-  #deliveryFlush(channel: string): Promise<void> {
-    const set = this.#channelSubs.get(channel)
-    if (set === undefined || set.size === 0) return Promise.resolve()
-    return this.#subscriber.ping().then(() => {})
   }
 
   // ── retained ──
@@ -613,127 +496,47 @@ export class RedisRoomBackend implements RoomBackendSpi {
   subscribeLane(roomId: string, inc: string, lane: LaneId, receiver: LaneReceiver): LaneSubscription {
     this.#assertLive()
     const channel = channelKey(this.#prefix, roomId, inc, laneKey(lane))
-    const owner = roomGenerationKey(roomId, inc)
-    let context = this.#channelContexts.get(channel)
-    if (context === undefined) {
-      context = {
+    let binding = this.#generationBindings.get(channel)
+    if (binding === undefined) {
+      binding = {
+        channel,
         roomId,
         inc,
-        owner,
+        owner: roomGenerationKey(roomId, inc),
         invalidationChannel: generationInvalidationChannel(this.#prefix, roomId, inc),
         attemptId: randomUUID(),
         createdAt: null,
         generationToken: null,
-        operationEpoch: 0,
-        initialEstablished: false,
       }
-      this.#channelContexts.set(channel, context)
-      this.#invalidationOwners.set(context.invalidationChannel, owner)
+      this.#generationBindings.set(channel, binding)
     }
-    let sub: RedisLaneSubscription
-    sub = new RedisLaneSubscription(receiver, () => this.#detach(sub, owner, channel))
-    this.#track(this.#roomGenSubs, owner, sub)
-    this.#subOwners.set(sub, owner)
-    // Install local dispatch synchronously. This makes immediate unsubscribe lease-exact: it closes and
-    // removes the attachment before any awaited capture/validation result can authorize readiness.
-    this.#track(this.#channelSubs, channel, sub)
-    void this.#establishAttachment(sub, channel)
-    return sub
+    return this.#transport.attach(binding, receiver)
   }
 
-  async #establishAttachment(sub: RedisLaneSubscription, channel: string): Promise<void> {
-    try {
-      await this.#ensureChannelSubscribed(channel)
-      if (!sub.closed) sub.established()
-    } catch {
-      // #ensureChannelSubscribed closes every subscriber on bounded exhaustion. Connection loss before
-      // exhaustion moves this subscription to lost and a later ack emits ready via onStateChange.
+  async #ensureGenerationCaptured(binding: RedisGenerationBinding): Promise<void> {
+    if (binding.generationToken !== null) return
+    const captured = await this.#captureGeneration(binding)
+    // This seam is after the durable command and before local observation, so throwing faithfully
+    // models a lost first response. A retry reuses the exact attempt id and creation epoch.
+    await this.#testHooks?.afterGenerationCapture?.({
+      roomId: binding.roomId,
+      inc: binding.inc,
+      attemptId: binding.attemptId,
+      createdAt: binding.createdAt as number,
+      token: captured,
+    })
+    binding.generationToken = captured
+  }
+
+  #requireGenerationBinding(binding: RedisSubscriberChannelBinding): RedisGenerationBinding {
+    const current = this.#generationBindings.get(binding.channel)
+    if (current !== binding) {
+      throw new RedisGenerationInvalidError(`subscribeLane: stale channel binding '${binding.channel}'`)
     }
+    return current
   }
 
-  #ensureChannelSubscribed(channel: string): Promise<void> {
-    if (this.#subscribedChannels.has(channel)) return Promise.resolve()
-    const existing = this.#channelAcks.get(channel)
-    if (existing !== undefined) return existing
-    const context = this.#channelContexts.get(channel)
-    if (context === undefined) return Promise.reject(new Error(`subscribeLane: missing channel lifecycle '${channel}'`))
-    const operationEpoch = context.operationEpoch
-
-    let ack: Promise<void>
-    ack = this.#subscribeWithRetry(channel, context, operationEpoch)
-      .then(async (installed) => {
-        const set = this.#channelSubs.get(channel)
-        if (!installed || context.operationEpoch !== operationEpoch || set === undefined || set.size === 0) {
-          if (installed && !this.#disposed && this.#subscriber.status !== 'end') {
-            await this.#subscriber.unsubscribe(channel)
-          }
-          this.#subscribedChannels.delete(channel)
-          return
-        }
-        this.#subscribedChannels.add(channel)
-        this.#subscribedInvalidations.add(context.invalidationChannel)
-        context.initialEstablished = true
-        for (const sub of set) sub.established()
-      })
-      .catch((err: unknown) => {
-        this.#subscriptionExhausted(channel, err)
-        throw err
-      })
-      .finally(() => {
-        if (this.#channelAcks.get(channel) === ack) this.#channelAcks.delete(channel)
-      })
-    this.#channelAcks.set(channel, ack)
-    return ack
-  }
-
-  async #subscribeWithRetry(channel: string, context: RedisChannelContext, operationEpoch: number): Promise<boolean> {
-    let lastError: unknown = new Error(`subscribeLane: SUBSCRIBE '${channel}' failed`)
-    for (let attempt = 1; attempt <= SUBSCRIPTION_RETRY_ATTEMPTS; attempt++) {
-      if (this.#disposed) throw new Error('RedisRoomBackend: disposed during subscription establishment')
-      const set = this.#channelSubs.get(channel)
-      if (context.operationEpoch !== operationEpoch || set === undefined || set.size === 0) return false
-      try {
-        if (context.generationToken === null) {
-          const captured = await this.#captureGeneration(context)
-          // This seam is after the durable command and before local observation, so throwing faithfully
-          // models a lost first response. The retry reuses the exact attempt id/creation epoch.
-          await this.#testHooks?.afterGenerationCapture?.({
-            roomId: context.roomId,
-            inc: context.inc,
-            attemptId: context.attemptId,
-            createdAt: context.createdAt as number,
-            token: captured,
-          })
-          if (context.operationEpoch !== operationEpoch) return false
-          context.generationToken = captured
-        }
-        await this.#testHooks?.beforeSubscribe?.(channel)
-        if (context.operationEpoch !== operationEpoch) return false
-        await this.#subscriber.subscribe(channel, context.invalidationChannel)
-        // Record the remote state immediately at the ack boundary. Last detach can now uninstall this
-        // exact in-flight epoch even while post-ack generation validation is still held.
-        this.#subscribedChannels.add(channel)
-        this.#subscribedInvalidations.add(context.invalidationChannel)
-        await this.#testHooks?.afterSubscribeAck?.(channel)
-        if (context.operationEpoch !== operationEpoch) return true
-        const valid = await this.#validateGeneration(context, !context.initialEstablished)
-        if (!valid) {
-          await this.#subscriber.unsubscribe(channel)
-          this.#subscribedChannels.delete(channel)
-          throw new GenerationInvalidError(`subscribeLane: generation '${context.inc}' was invalidated`)
-        }
-        return true
-      } catch (err) {
-        lastError = err
-        if (err instanceof GenerationInvalidError) throw err
-        for (const sub of set) sub.connectionLost(err)
-        if (attempt < SUBSCRIPTION_RETRY_ATTEMPTS) await delay(this.#subscriptionRetryDelay(attempt))
-      }
-    }
-    throw lastError
-  }
-
-  async #captureGeneration(context: RedisChannelContext): Promise<string> {
+  async #captureGeneration(context: RedisGenerationBinding): Promise<string> {
     if (context.createdAt === null) context.createdAt = await this.#authorityNowMs()
     const reply = (await callDefinedCommand(this.#publisher, CAPTURE_GENERATION_CMD, [
       headKey(this.#prefix, context.roomId),
@@ -748,11 +551,11 @@ export class RedisRoomBackend implements RoomBackendSpi {
       String(REDIS_GENERATION_CAPTURE_TTL_MS),
     ])) as string
     const parsed = JSON.parse(reply) as { ok: true; token: string } | { rejected: true; terminal: true; reason: string }
-    if ('rejected' in parsed) throw new GenerationInvalidError(`subscribeLane: ${parsed.reason}`)
+    if ('rejected' in parsed) throw new RedisGenerationInvalidError(`subscribeLane: ${parsed.reason}`)
     return parsed.token
   }
 
-  async #validateGeneration(context: RedisChannelContext, includeCapture: boolean): Promise<boolean> {
+  async #validateGeneration(context: RedisGenerationBinding, includeCapture: boolean): Promise<boolean> {
     if (context.generationToken === null) return false
     const reply = (await callDefinedCommand(this.#publisher, VALIDATE_GENERATION_CMD, [
       headKey(this.#prefix, context.roomId),
@@ -770,175 +573,16 @@ export class RedisRoomBackend implements RoomBackendSpi {
     return (JSON.parse(reply) as { ok: boolean }).ok
   }
 
-  #subscriptionExhausted(channel: string, reason: unknown): void {
-    this.#subscribedChannels.delete(channel)
-    const set = this.#channelSubs.get(channel)
-    if (set === undefined) return
-    for (const sub of set) {
-      this.#untrackSubscriptionOwner(sub)
-      sub.failPermanently(reason)
-    }
-    set.clear()
-    const context = this.#channelContexts.get(channel)
-    if (context !== undefined) context.operationEpoch++
-    void this.#retryEmptyChannelCleanup(channel)
-  }
-
-  async #detach(sub: RedisLaneSubscription, owner: string, channel: string): Promise<void> {
-    this.#untrack(this.#roomGenSubs, owner, sub)
-    this.#subOwners.delete(sub)
-    await this.#detachChannel(sub, channel)
-  }
-
-  async #detachChannel(sub: RedisLaneSubscription, channel: string): Promise<void> {
-    const set = this.#channelSubs.get(channel)
-    if (set === undefined) return
-    set.delete(sub)
-    if (set.size !== 0) return
-    const context = this.#channelContexts.get(channel)
-    if (context !== undefined) context.operationEpoch++
-    const subscribed = this.#subscribedChannels.has(channel)
-    if (subscribed && !this.#disposed && this.#subscriber.status !== 'end') {
-      try {
-        await this.#subscriber.unsubscribe(channel)
-        this.#subscribedChannels.delete(channel)
-        await this.#unsubscribeInvalidationIfLast(context, channel)
-      } catch (err) {
-        // Keep the empty mux + exact ownership source for retry. Local detach already closed the
-        // attachment, so the state machine can never claim ready without a live callback.
-        void this.#retryEmptyChannelCleanup(channel)
-        throw err
-      }
-    }
-    if (!subscribed) {
-      try {
-        await this.#unsubscribeInvalidationIfLast(context, channel)
-      } catch (err) {
-        void this.#retryEmptyChannelCleanup(channel)
-        throw err
-      }
-    }
-    this.#finishEmptyChannelCleanup(channel)
-  }
-
-  async #retryEmptyChannelCleanup(channel: string): Promise<void> {
-    for (let attempt = 1; attempt <= SUBSCRIPTION_RETRY_ATTEMPTS; attempt++) {
-      if (this.#disposed) return
-      await delay(this.#subscriptionRetryDelay(attempt))
-      const set = this.#channelSubs.get(channel)
-      if (set === undefined || set.size !== 0) return
-      try {
-        if (this.#subscribedChannels.has(channel) && this.#subscriber.status !== 'end') {
-          await this.#subscriber.unsubscribe(channel)
-          this.#subscribedChannels.delete(channel)
-        }
-        await this.#unsubscribeInvalidationIfLast(this.#channelContexts.get(channel), channel)
-        this.#finishEmptyChannelCleanup(channel)
-        return
-      } catch {
-        // Per-attempt isolation: retain this exact item and continue; other channel cleanup is untouched.
-      }
-    }
-  }
-
-  async #unsubscribeInvalidationIfLast(
-    context: RedisChannelContext | undefined,
-    excludingChannel: string,
-  ): Promise<void> {
-    if (context === undefined) return
-    for (const [channel, candidate] of this.#channelContexts) {
-      if (channel !== excludingChannel && candidate.owner === context.owner) return
-    }
-    if (this.#subscribedInvalidations.has(context.invalidationChannel) && this.#subscriber.status !== 'end') {
-      await this.#subscriber.unsubscribe(context.invalidationChannel)
-    }
-    this.#subscribedInvalidations.delete(context.invalidationChannel)
-    this.#invalidationOwners.delete(context.invalidationChannel)
-  }
-
-  #finishEmptyChannelCleanup(channel: string): void {
-    const set = this.#channelSubs.get(channel)
-    if (set !== undefined && set.size !== 0) return
-    this.#subscribedChannels.delete(channel)
-    this.#channelSubs.delete(channel)
-    this.#channelContexts.delete(channel)
-    this.#channelAcks.delete(channel)
-  }
-
-  #untrackSubscriptionOwner(sub: RedisLaneSubscription): void {
-    const owner = this.#subOwners.get(sub)
-    if (owner === undefined) return
-    this.#untrack(this.#roomGenSubs, owner, sub)
-    this.#subOwners.delete(sub)
-  }
-
   #generationInvalidated(owner: string, token: string): void {
-    const contexts = [...this.#channelContexts.entries()].filter(
-      ([, context]) =>
-        context.owner === owner && (context.generationToken === null || context.generationToken === token),
+    const channels = new Set(
+      [...this.#generationBindings.values()]
+        .filter(
+          (binding) =>
+            binding.owner === owner && (binding.generationToken === null || binding.generationToken === token),
+        )
+        .map((binding) => binding.channel),
     )
-    if (contexts.length === 0) return
-    const subs = this.#roomGenSubs.get(owner)
-    if (subs !== undefined) {
-      for (const sub of subs) {
-        this.#subOwners.delete(sub)
-        sub.generationDropped()
-      }
-      this.#roomGenSubs.delete(owner)
-    }
-    for (const [channel, context] of contexts) {
-      context.operationEpoch++
-      this.#channelSubs.get(channel)?.clear()
-      void this.#retryEmptyChannelCleanup(channel)
-    }
-  }
-
-  readonly #onMessage = (channelBytes: Buffer, frame: Buffer): void => {
-    const channel = channelBytes.toString()
-    const invalidationOwner = this.#invalidationOwners.get(channel)
-    if (invalidationOwner !== undefined) {
-      this.#generationInvalidated(invalidationOwner, frame.toString())
-      return
-    }
-    const set = this.#channelSubs.get(channel)
-    if (set === undefined || set.size === 0) return
-    const { seq, timestamp, payload } = decodeFrameHeader(frame)
-    const info = { seq, timestamp }
-    const copy = Uint8Array.from(payload)
-    for (const sub of [...set]) if (!sub.closed) sub.deliver(copy, info)
-  }
-
-  readonly #onSubscriberClose = (): void => {
-    if (this.#disposed) return
-    this.#subscribedChannels.clear()
-    this.#subscribedInvalidations.clear()
-    const reason = new Error('subscribeLane: Redis subscriber connection lost')
-    for (const set of this.#channelSubs.values()) for (const sub of set) sub.connectionLost(reason)
-  }
-
-  readonly #onSubscriberReady = (): void => {
-    if (this.#disposed) return
-    for (const [channel, set] of this.#channelSubs) {
-      if (set.size === 0) void this.#retryEmptyChannelCleanup(channel)
-      else void this.#ensureChannelSubscribed(channel).catch(() => {})
-    }
-  }
-
-  readonly #onSubscriberEnd = (): void => {
-    if (this.#disposed) return
-    const reason = new Error('subscribeLane: Redis subscriber reconnect attempts exhausted')
-    for (const [channel, set] of this.#channelSubs) {
-      this.#subscribedChannels.delete(channel)
-      for (const sub of set) {
-        this.#untrackSubscriptionOwner(sub)
-        sub.failPermanently(reason)
-      }
-    }
-    this.#channelSubs.clear()
-    this.#channelContexts.clear()
-    this.#channelAcks.clear()
-    this.#subscribedInvalidations.clear()
-    this.#invalidationOwners.clear()
+    if (channels.size > 0) this.#transport.invalidateChannels(channels)
   }
 
   // ── generation lifecycle ──
@@ -967,55 +611,13 @@ export class RedisRoomBackend implements RoomBackendSpi {
       await this.#publisher.publish(generationInvalidationChannel(this.#prefix, roomId, inc), generationToken)
     }
     const owner = roomGenerationKey(roomId, inc)
-    const subs = this.#roomGenSubs.get(owner)
-    if (subs !== undefined) {
-      // Generation invalidation is terminal locally even if transport cleanup fails. Closing every
-      // attachment first prevents a retry or late ack from making it ready in a reused incarnation.
-      for (const sub of subs) sub.generationDropped()
-    }
-    await this.#dropGenerationChannels(roomId, inc, owner)
-    if (subs !== undefined) for (const sub of subs) this.#subOwners.delete(sub)
-    this.#roomGenSubs.delete(owner)
+    await this.#transport.dropGeneration(owner)
     await this.#testHooks?.beforeDropGenerationUnregister?.({ roomId, inc })
     await callDefinedCommand(this.#publisher, DROP_GENERATION_FINALIZE_CMD, [
       gensKey(this.#prefix, roomId),
       generationTokensKey(this.#prefix, roomId),
       inc,
     ])
-  }
-
-  async #dropGenerationChannels(roomId: string, inc: string, owner: string): Promise<void> {
-    // Snapshot each exact mux independently. One failure retains only that item and does not hide the
-    // others from a later retry; the caller withholds the durable gens/token finalization on any failure.
-    const failures: unknown[] = []
-    for (const [channel, context] of [...this.#channelContexts]) {
-      if (context.owner !== owner) continue
-      const set = this.#channelSubs.get(channel)
-      set?.clear()
-      context.operationEpoch++
-      try {
-        if (this.#subscribedChannels.has(channel) && !this.#disposed && this.#subscriber.status !== 'end') {
-          await this.#subscriber.unsubscribe(channel)
-        }
-        this.#subscribedChannels.delete(channel)
-        this.#finishEmptyChannelCleanup(channel)
-      } catch (err) {
-        failures.push(err)
-      }
-    }
-    if (failures.length === 0) {
-      const invalidation = generationInvalidationChannel(this.#prefix, roomId, inc)
-      try {
-        if (this.#subscribedInvalidations.has(invalidation) && this.#subscriber.status !== 'end') {
-          await this.#subscriber.unsubscribe(invalidation)
-        }
-        this.#subscribedInvalidations.delete(invalidation)
-        this.#invalidationOwners.delete(invalidation)
-      } catch (err) {
-        failures.push(err)
-      }
-    }
-    if (failures.length > 0) throw failures[0]
   }
 
   // ── directory (global; its own two co-slotted keys) ──
@@ -1077,6 +679,7 @@ export class RedisRoomBackend implements RoomBackendSpi {
     createdAt: number,
   ): Promise<string> {
     return this.#captureGeneration({
+      channel: `test:${roomId}:${inc}:${attemptId}`,
       roomId,
       inc,
       owner: roomGenerationKey(roomId, inc),
@@ -1084,8 +687,6 @@ export class RedisRoomBackend implements RoomBackendSpi {
       attemptId,
       createdAt,
       generationToken: null,
-      operationEpoch: 0,
-      initialEstablished: false,
     })
   }
 
@@ -1096,24 +697,8 @@ export class RedisRoomBackend implements RoomBackendSpi {
   async dispose(): Promise<void> {
     if (this.#disposed) return
     this.#disposed = true
-    for (const set of this.#channelSubs.values()) for (const sub of set) sub.generationDropped()
-    this.#channelSubs.clear()
-    this.#channelContexts.clear()
-    this.#channelAcks.clear()
-    this.#subscribedChannels.clear()
-    this.#subscribedInvalidations.clear()
-    this.#invalidationOwners.clear()
-    this.#roomGenSubs.clear()
-    this.#subOwners.clear()
-    this.#subscriber.off('messageBuffer', this.#onMessage)
-    this.#subscriber.off('close', this.#onSubscriberClose)
-    this.#subscriber.off('ready', this.#onSubscriberReady)
-    this.#subscriber.off('end', this.#onSubscriberEnd)
-    try {
-      await this.#subscriber.quit()
-    } catch {
-      this.#subscriber.disconnect()
-    }
+    await this.#transport.dispose()
+    this.#generationBindings.clear()
   }
 
   // ── internals ──
@@ -1160,19 +745,6 @@ export class RedisRoomBackend implements RoomBackendSpi {
       for (const key of page) keys.push(key)
     } while (cursor !== '0')
     return keys
-  }
-
-  #track(map: Map<string, Set<RedisLaneSubscription>>, key: string, sub: RedisLaneSubscription): void {
-    const set = map.get(key) ?? new Set<RedisLaneSubscription>()
-    set.add(sub)
-    map.set(key, set)
-  }
-
-  #untrack(map: Map<string, Set<RedisLaneSubscription>>, key: string, sub: RedisLaneSubscription): void {
-    const set = map.get(key)
-    if (set === undefined) return
-    set.delete(sub)
-    if (set.size === 0) map.delete(key)
   }
 }
 

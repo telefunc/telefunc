@@ -114,6 +114,176 @@ describe.skipIf(url === undefined || url === '')('Redis independent-review race 
     expect(latch.payloads()).toEqual(['after-reconnect'])
   })
 
+  it('requires a current-connection SUBSCRIBE ack after disconnect during held generation validation', async () => {
+    const roomId = nextId('room')
+    const { inc } = await openRoom(fx.backend, roomId)
+    const firstAckHeld = deferred()
+    const releaseFirstValidation = deferred()
+    let ackCount = 0
+    fx.setAfterSubscribeAck(async () => {
+      ackCount++
+      if (ackCount === 1) {
+        firstAckHeld.resolve()
+        await releaseFirstValidation.promise
+      }
+    })
+
+    const latch = collector()
+    const sub = fx.backend.subscribeLane(roomId, inc, SEMANTIC, latch.receiver)
+    const states: string[] = []
+    sub.onStateChange((state) => states.push(state))
+    await firstAckHeld.promise
+
+    await fx.redis.client('KILL', 'ID', String(fx.subscriberId))
+    await waitFor(() => states.includes('lost'))
+    await waitFor(() => fx.subscriber.status === 'ready')
+
+    releaseFirstValidation.resolve()
+    await waitFor(() => sub.state() === 'ready')
+    expect(ackCount).toBe(2)
+    await waitFor(
+      async () => (await fx.redis.pubsub('NUMSUB', `${fx.prefix}room:{${roomId}}:ch:${inc}:semantic`))[1] === 1,
+    )
+    expect(states.slice(0, 2)).toEqual(['lost', 'ready'])
+
+    const result = accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, bytes('after-race')))
+    expect(result.receivers).toBe(1)
+    await result.delivery
+    await latch.waitFor(1)
+    expect(latch.payloads()).toEqual(['after-race'])
+  })
+
+  it('re-establishes every channel on the replacement shared subscriber connection', async () => {
+    const roomId = nextId('room')
+    const { inc } = await openRoom(fx.backend, roomId)
+    const firstAcksHeld = deferred()
+    const releaseFirstValidations = deferred()
+    const ackCounts = new Map<string, number>()
+    const heldChannels = new Set<string>()
+    fx.setAfterSubscribeAck(async (channel) => {
+      const count = (ackCounts.get(channel) ?? 0) + 1
+      ackCounts.set(channel, count)
+      if (count === 1) {
+        heldChannels.add(channel)
+        if (heldChannels.size === 2) firstAcksHeld.resolve()
+        await releaseFirstValidations.promise
+      }
+    })
+
+    const semanticLatch = collector()
+    const controlLatch = collector()
+    const semantic = fx.backend.subscribeLane(roomId, inc, SEMANTIC, semanticLatch.receiver)
+    const control = fx.backend.subscribeLane(roomId, inc, CONTROL, controlLatch.receiver)
+    const semanticStates: string[] = []
+    const controlStates: string[] = []
+    semantic.onStateChange((state) => semanticStates.push(state))
+    control.onStateChange((state) => controlStates.push(state))
+    await firstAcksHeld.promise
+
+    await fx.redis.client('KILL', 'ID', String(fx.subscriberId))
+    await waitFor(() => semanticStates.includes('lost') && controlStates.includes('lost'))
+    await waitFor(() => fx.subscriber.status === 'ready')
+    releaseFirstValidations.resolve()
+    await waitFor(() => semantic.state() === 'ready' && control.state() === 'ready')
+
+    expect([...ackCounts.values()].sort()).toEqual([2, 2])
+    const semanticChannel = `${fx.prefix}room:{${roomId}}:ch:${inc}:semantic`
+    const controlChannel = `${fx.prefix}room:{${roomId}}:ch:${inc}:control`
+    await waitFor(async () => {
+      const counts = await fx.redis.pubsub('NUMSUB', semanticChannel, controlChannel)
+      return counts[1] === 1 && counts[3] === 1
+    })
+
+    const semanticResult = accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, bytes('semantic')))
+    const controlResult = accepted(await fx.backend.commitLane(roomId, inc, CONTROL, bytes('control')))
+    expect([semanticResult.receivers, controlResult.receivers]).toEqual([1, 1])
+    await Promise.all([semanticResult.delivery, controlResult.delivery])
+    await Promise.all([semanticLatch.waitFor(1), controlLatch.waitFor(1)])
+    expect(semanticLatch.payloads()).toEqual(['semantic'])
+    expect(controlLatch.payloads()).toEqual(['control'])
+  })
+
+  it('keeps a late sibling behind the current ack when the old attachment detaches during stale validation', async () => {
+    const roomId = nextId('room')
+    const { inc } = await openRoom(fx.backend, roomId)
+    const oldAckHeld = deferred()
+    const currentAckHeld = deferred()
+    const releaseOldValidation = deferred()
+    const releaseCurrentValidation = deferred()
+    let ackCount = 0
+    fx.setAfterSubscribeAck(async () => {
+      ackCount++
+      if (ackCount === 1) {
+        oldAckHeld.resolve()
+        await releaseOldValidation.promise
+      } else if (ackCount === 2) {
+        currentAckHeld.resolve()
+        await releaseCurrentValidation.promise
+      }
+    })
+
+    const old = fx.backend.subscribeLane(roomId, inc, SEMANTIC, () => {})
+    await oldAckHeld.promise
+    await fx.redis.client('KILL', 'ID', String(fx.subscriberId))
+    await currentAckHeld.promise
+
+    const latch = collector()
+    const late = fx.backend.subscribeLane(roomId, inc, SEMANTIC, latch.receiver)
+    await old.unsubscribe()
+    expect(old.state()).toBe('closed')
+    releaseOldValidation.resolve()
+    await flush()
+    expect(late.state()).toBe('establishing')
+
+    releaseCurrentValidation.resolve()
+    await late.ready
+    expect(ackCount).toBe(2)
+    const result = accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, bytes('late-only')))
+    expect(result.receivers).toBe(1)
+    await result.delivery
+    await latch.waitFor(1)
+    expect(latch.payloads()).toEqual(['late-only'])
+  })
+
+  it('ignores completions from two stale connections before the third connection ack validates', async () => {
+    const roomId = nextId('room')
+    const { inc } = await openRoom(fx.backend, roomId)
+    const entered = [deferred(), deferred(), deferred()]
+    const release = [deferred(), deferred(), deferred()]
+    let ackCount = 0
+    fx.setAfterSubscribeAck(async () => {
+      const index = ackCount++
+      entered[index]?.resolve()
+      await release[index]?.promise
+    })
+
+    const latch = collector()
+    const sub = fx.backend.subscribeLane(roomId, inc, SEMANTIC, latch.receiver)
+    await entered[0]?.promise
+    await fx.redis.client('KILL', 'ID', String(fx.subscriberId))
+    await entered[1]?.promise
+
+    const secondConnectionId = await onlyPubSubClientId(fx)
+    await fx.redis.client('KILL', 'ID', String(secondConnectionId))
+    await entered[2]?.promise
+    release[0]?.resolve()
+    release[1]?.resolve()
+    await flush()
+    expect(sub.state()).toBe('lost')
+
+    release[2]?.resolve()
+    await waitFor(() => sub.state() === 'ready')
+    expect(ackCount).toBe(3)
+    await waitFor(
+      async () => (await fx.redis.pubsub('NUMSUB', `${fx.prefix}room:{${roomId}}:ch:${inc}:semantic`))[1] === 1,
+    )
+    const result = accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, bytes('third-connection')))
+    expect(result.receivers).toBe(1)
+    await result.delivery
+    await latch.waitFor(1)
+    expect(latch.payloads()).toEqual(['third-connection'])
+  })
+
   it('makes a late attachment await the current re-SUBSCRIBE ack instead of historical readiness', async () => {
     const roomId = nextId('room')
     const { inc } = await openRoom(fx.backend, roomId)
@@ -657,6 +827,14 @@ describe.skipIf(url === undefined || url === '')('Redis independent-review race 
     expect(latch.payloads()).toEqual(['accepted', 'next'])
   })
 })
+
+async function onlyPubSubClientId(fx: RedisBackendFixture): Promise<number> {
+  const redis = fx.redis as unknown as { client(command: string, ...args: string[]): Promise<unknown> }
+  const list = String(await redis.client('LIST', 'TYPE', 'pubsub'))
+  const ids = [...list.matchAll(/(?:^|\n)id=(\d+)\b/g)].map((match) => Number(match[1]))
+  if (ids.length !== 1) throw new Error(`expected one Redis pub/sub client, found ${ids.length}`)
+  return ids[0] as number
+}
 
 async function waitFor(predicate: () => boolean | Promise<boolean>, timeoutMs = 2_000): Promise<void> {
   const deadline = Date.now() + timeoutMs
