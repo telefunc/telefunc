@@ -7,7 +7,7 @@
 // the delegated generation validation both completed on the CURRENT subscriber connection epoch.
 
 import type { Redis } from 'ioredis'
-import type { LaneReceiver, LaneSubscription, ReadinessState } from '../../../telefunc/wire-protocol/backend/spi.js'
+import type { LaneReceiver, LaneSubscription, ReadinessState } from 'telefunc/backend'
 import { decodeFrameHeader } from './layout.js'
 
 const SUBSCRIPTION_RETRY_ATTEMPTS = 5

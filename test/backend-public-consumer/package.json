@@ -2,6 +2,7 @@
   "private": true,
   "type": "module",
   "devDependencies": {
+    "@telefunc/redis": "workspace:*",
     "typescript": "^6.0.2"
   }
 }

@@ -684,7 +684,7 @@ describe.skipIf(url === undefined || url === '')('Redis independent-review race 
     await waitFor(() => sub.state() === 'ready')
     expect(attempts).toHaveLength(2)
     expect(attempts[1]).toEqual(attempts[0])
-    expect(await fx.backend.countGenerationCapturesForTest(roomId)).toBe(1)
+    expect(await fx.countGenerationCapturesForTest(roomId)).toBe(1)
   })
 
   it('reclaims an abandoned capture, rejects its delayed retry after reuse, and admits a fresh lifecycle', async () => {
@@ -692,13 +692,13 @@ describe.skipIf(url === undefined || url === '')('Redis independent-review race 
     const { inc, head } = await openRoom(fx.backend, roomId)
     const abandonedId = nextId('capture')
     const abandonedAt = fx.authorityNow()
-    const oldToken = await fx.backend.captureGenerationAttemptForTest(roomId, inc, abandonedId, abandonedAt)
-    expect(await fx.backend.countGenerationCapturesForTest(roomId)).toBe(1)
+    const oldToken = await fx.captureGenerationAttemptForTest(roomId, inc, abandonedId, abandonedAt)
+    expect(await fx.countGenerationCapturesForTest(roomId)).toBe(1)
 
     fx.advanceAuthority(REDIS_GENERATION_CAPTURE_TTL_MS)
     const sweepId = nextId('capture')
-    await fx.backend.captureGenerationAttemptForTest(roomId, inc, sweepId, fx.authorityNow())
-    expect(await fx.backend.countGenerationCapturesForTest(roomId)).toBe(1)
+    await fx.captureGenerationAttemptForTest(roomId, inc, sweepId, fx.authorityNow())
+    expect(await fx.countGenerationCapturesForTest(roomId)).toBe(1)
 
     const { head: closing, leaseId } = await enterClosing(fx.backend, roomId, head)
     accepted(await fx.backend.commitLane(roomId, inc, CONTROL, bytes('closed'), { closingLease: leaseId }))
@@ -712,15 +712,10 @@ describe.skipIf(url === undefined || url === '')('Redis independent-review race 
       ),
     )
 
-    await expect(fx.backend.captureGenerationAttemptForTest(roomId, inc, abandonedId, abandonedAt)).rejects.toThrow(
+    await expect(fx.captureGenerationAttemptForTest(roomId, inc, abandonedId, abandonedAt)).rejects.toThrow(
       /absent or stale/,
     )
-    const freshToken = await fx.backend.captureGenerationAttemptForTest(
-      roomId,
-      inc,
-      nextId('capture'),
-      fx.authorityNow(),
-    )
+    const freshToken = await fx.captureGenerationAttemptForTest(roomId, inc, nextId('capture'), fx.authorityNow())
     expect(freshToken).not.toBe(oldToken)
     const fresh = fx.backend.subscribeLane(roomId, inc, SEMANTIC, () => {})
     await fresh.ready

@@ -27,12 +27,8 @@ import type {
   LaneSubscription,
   RoomBackendSpi,
   RoomHead,
-} from '../../../telefunc/wire-protocol/backend/spi.js'
-import {
-  MAX_CLOSE_LEASE_MS,
-  MIN_CLOSE_LEASE_MS,
-  ROOM_SPI_VERSION,
-} from '../../../telefunc/wire-protocol/backend/spi.js'
+} from 'telefunc/backend'
+import { MAX_CLOSE_LEASE_MS, MIN_CLOSE_LEASE_MS, ROOM_SPI_VERSION } from 'telefunc/backend'
 import {
   cellKey,
   cellKeyPrefix,
@@ -124,6 +120,12 @@ export type RedisRoomBackendOptions = {
   redis: Redis
   prefix?: string
   maxRetainedPayloadBytes?: number
+}
+
+// Internal construction dependencies. They are not re-exported by the package: the public constructor
+// only needs a publisher client and optional namespace/cap. Hosts may use the same runtime seams to
+// control subscriber ownership, time, and retry scheduling.
+type RedisRoomBackendRuntime = {
   // The authority clock. When supplied (conformance), every time-sensitive Lua receives this frozen,
   // advanceable value as `now_ms` and JS-side logical filtering resolves against it too; a backend that
   // instead consulted a caller's `Date.now()` would fail every I13 killer. When absent (production), the
@@ -134,11 +136,15 @@ export type RedisRoomBackendOptions = {
   // callback invoked inside the stable-read window — after the result set is enumerated, before
   // rev_after — so a scenario can force an insert/delete/expiry between rev_before and rev_after.
   stableReadProbe?: (info: { roomId: string; inc: string }) => void | Promise<void>
-  // The fixture injects the real subscriber connection so live reconnect / PING-failure probes exercise
-  // the production state machine. Production callers omit this and the backend creates the duplicate.
+  // A host may inject the subscriber connection; otherwise the backend creates its own duplicate.
   subscriber?: Redis
   subscriptionRetryDelay?: (attempt: number) => number
-  testHooks?: RedisRoomBackendTestHooks
+}
+
+const TEST_HOOKS = Symbol.for('telefunc.redis.room.test-hooks')
+type TestHookStore = WeakMap<RedisRoomBackend, RedisRoomBackendTestHooks>
+function redisRoomBackendTestHooks(backend: RedisRoomBackend): RedisRoomBackendTestHooks | undefined {
+  return (globalThis as typeof globalThis & { [TEST_HOOKS]?: TestHookStore })[TEST_HOOKS]?.get(backend)
 }
 
 // The stored head, exactly as the Lua encodes it. `config` is opaque base64; `until`/`exp` are authority
@@ -242,25 +248,23 @@ export class RedisRoomBackend implements RoomBackendSpi {
   readonly #prefix: string
   readonly #authorityNow?: () => number
   readonly #stableReadProbe?: (info: { roomId: string; inc: string }) => void | Promise<void>
-  readonly #testHooks?: RedisRoomBackendTestHooks
   // Durable capture/generation identity stays here. The transport receives this object only as an opaque
   // channel binding and delegates capture/validation back before it can settle readiness.
   readonly #generationBindings = new Map<string, RedisGenerationBinding>()
   #disposed = false
 
-  constructor(options: RedisRoomBackendOptions) {
+  constructor(options: RedisRoomBackendOptions, runtime: RedisRoomBackendRuntime = {}) {
     this.#publisher = options.redis
-    const subscriptionRetryDelay = options.subscriptionRetryDelay ?? defaultSubscriptionRetryDelay
+    const subscriptionRetryDelay = runtime.subscriptionRetryDelay ?? defaultSubscriptionRetryDelay
     const subscriber =
-      options.subscriber ??
+      runtime.subscriber ??
       options.redis.duplicate({
         autoResubscribe: false,
         retryStrategy: (attempt) => (attempt <= SUBSCRIPTION_RETRY_ATTEMPTS ? subscriptionRetryDelay(attempt) : null),
       })
     this.#prefix = options.prefix ?? DEFAULT_ROOM_PREFIX
-    this.#authorityNow = options.authorityNow
-    this.#stableReadProbe = options.stableReadProbe
-    this.#testHooks = options.testHooks
+    this.#authorityNow = runtime.authorityNow
+    this.#stableReadProbe = runtime.stableReadProbe
     this.capabilities = {
       receivers: 'global',
       maxRetainedPayloadBytes: options.maxRetainedPayloadBytes ?? DEFAULT_MAX_RETAINED_BYTES,
@@ -293,8 +297,8 @@ export class RedisRoomBackend implements RoomBackendSpi {
       subscriber,
       retryDelay: subscriptionRetryDelay,
       hooks: {
-        beforeSubscribe: options.testHooks?.beforeSubscribe,
-        afterSubscribeAck: options.testHooks?.afterSubscribeAck,
+        beforeSubscribe: (channel) => redisRoomBackendTestHooks(this)?.beforeSubscribe?.(channel),
+        afterSubscribeAck: (channel) => redisRoomBackendTestHooks(this)?.afterSubscribeAck?.(channel),
       },
       captureGeneration: (binding) => this.#ensureGenerationCaptured(this.#requireGenerationBinding(binding)),
       validateGeneration: (binding, includeCapture) =>
@@ -518,7 +522,7 @@ export class RedisRoomBackend implements RoomBackendSpi {
     const captured = await this.#captureGeneration(binding)
     // This seam is after the durable command and before local observation, so throwing faithfully
     // models a lost first response. A retry reuses the exact attempt id and creation epoch.
-    await this.#testHooks?.afterGenerationCapture?.({
+    await redisRoomBackendTestHooks(this)?.afterGenerationCapture?.({
       roomId: binding.roomId,
       inc: binding.inc,
       attemptId: binding.attemptId,
@@ -612,7 +616,7 @@ export class RedisRoomBackend implements RoomBackendSpi {
     }
     const owner = roomGenerationKey(roomId, inc)
     await this.#transport.dropGeneration(owner)
-    await this.#testHooks?.beforeDropGenerationUnregister?.({ roomId, inc })
+    await redisRoomBackendTestHooks(this)?.beforeDropGenerationUnregister?.({ roomId, inc })
     await callDefinedCommand(this.#publisher, DROP_GENERATION_FINALIZE_CMD, [
       gensKey(this.#prefix, roomId),
       generationTokensKey(this.#prefix, roomId),
@@ -634,7 +638,7 @@ export class RedisRoomBackend implements RoomBackendSpi {
 
   async directoryDelete(roomId: string, incTag: string): Promise<void> {
     this.#assertLive()
-    await this.#testHooks?.beforeDirectoryDeleteApply?.({ roomId, incTag })
+    await redisRoomBackendTestHooks(this)?.beforeDirectoryDeleteApply?.({ roomId, incTag })
     await callDefinedCommand(this.#publisher, DIRECTORY_DELETE_CMD, [
       directoryIndexKey(this.#prefix),
       directoryTagsKey(this.#prefix),
@@ -667,31 +671,6 @@ export class RedisRoomBackend implements RoomBackendSpi {
       more = peek.length > 0 && (peek[0] as string).startsWith(prefix)
     }
     return more ? { entries, cursor: last } : { entries }
-  }
-
-  // Dark conformance primitives: these call the exact production capture command, never a fake store.
-  // They exist so the authority-time reclamation and delayed-response fence can be driven without a
-  // real 90-second wait; no package barrel exports this backend in W2.
-  async captureGenerationAttemptForTest(
-    roomId: string,
-    inc: string,
-    attemptId: string,
-    createdAt: number,
-  ): Promise<string> {
-    return this.#captureGeneration({
-      channel: `test:${roomId}:${inc}:${attemptId}`,
-      roomId,
-      inc,
-      owner: roomGenerationKey(roomId, inc),
-      invalidationChannel: generationInvalidationChannel(this.#prefix, roomId, inc),
-      attemptId,
-      createdAt,
-      generationToken: null,
-    })
-  }
-
-  async countGenerationCapturesForTest(roomId: string): Promise<number> {
-    return this.#publisher.hlen(routeCapturesKey(this.#prefix, roomId))
   }
 
   async dispose(): Promise<void> {

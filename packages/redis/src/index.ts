@@ -1,5 +1,7 @@
 export { installRedis, RedisTransport }
 export type { InstallRedisOptions, RedisBroadcastOptions }
+export { RedisRoomBackend } from './room/backend.js'
+export type { RedisRoomBackendOptions } from './room/backend.js'
 
 import type { Cluster, Redis } from 'ioredis'
 import {

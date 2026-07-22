@@ -26,12 +26,11 @@
 //
 // AUTHORITY TIME: production derives `now_ms` from `redis.call('TIME')` (the one central clock, atomic
 // inside the script — spi.md I13). Every time-sensitive script also accepts an OPTIONAL injected
-// `now_ms` ARGV: the conformance fixture drives a frozen, advanceable authority clock through it (a real
-// Redis server clock cannot be advanced), and a backend that instead read a caller's local clock still
-// fails every I13 killer because the injected value is the *shared* authority clock, never `Date.now()`.
+// `now_ms` ARGV: an embedding host can supply a shared authority clock while production normally uses
+// Redis TIME. A caller-local `Date.now()` is never an authority source.
 // The seam is a scalar ARGV, never a key, so it does not touch the co-slot invariant.
 
-import type { LaneId } from '../../../telefunc/wire-protocol/backend/spi.js'
+import type { LaneId } from 'telefunc/backend'
 
 export const DEFAULT_ROOM_PREFIX = 'tf:'
 
@@ -39,7 +38,9 @@ export const DEFAULT_ROOM_PREFIX = 'tf:'
 
 // `{<rid>}` is the Cluster hash tag; every per-room key carries it so the room is one slot.
 export function roomTag(prefix: string, roomId: string): string {
-  return `${prefix}room:{${roomId}}`
+  // A Redis hash tag ends at the first `}`. Encode caller input before placing it in braces so an
+  // arbitrary room id cannot escape the tag or split one logical room across slots.
+  return `${prefix}room:{${encodeURIComponent(roomId)}}`
 }
 export function headKey(prefix: string, roomId: string): string {
   return `${roomTag(prefix, roomId)}:head`
