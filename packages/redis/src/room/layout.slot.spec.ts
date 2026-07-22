@@ -34,7 +34,8 @@ export function redisSlot(key: string): number {
   return crc & 0x3fff
 }
 
-type Provenance = 'KEYS' | 'ARGV' | 'data' | 'unknown' | `data-record:${number}`
+type DataRecordIdentity = `data-record:${number}`
+type Provenance = 'KEYS' | 'ARGV' | 'data' | 'unknown' | DataRecordIdentity
 
 type LuaToken = {
   kind: 'identifier' | 'number' | 'string' | 'symbol' | 'newline'
@@ -61,6 +62,16 @@ type LuaBinding = { kind: 'function'; definition: LuaFunction } | { kind: 'value
 
 type LuaBindings = Map<string, LuaBinding>
 type ReadonlyLuaBindings = ReadonlyMap<string, LuaBinding>
+
+type LuaAnalysisState = {
+  bindings: LuaBindings
+  invalidatedRecords: Set<DataRecordIdentity>
+}
+
+type ReadonlyLuaAnalysisState = {
+  bindings: ReadonlyLuaBindings
+  invalidatedRecords: ReadonlySet<DataRecordIdentity>
+}
 
 const OPEN = new Map([
   ['(', ')'],
@@ -338,13 +349,17 @@ function withoutOuterParens(tokens: readonly LuaToken[]): readonly LuaToken[] {
   return result
 }
 
-function valueProvenance(bindings: ReadonlyLuaBindings, name: string): Provenance | undefined {
-  const binding = bindings.get(name)
-  return binding?.kind === 'value' ? binding.provenance : binding?.kind === 'function' ? 'unknown' : undefined
+function valueProvenance(state: ReadonlyLuaAnalysisState, name: string): Provenance | undefined {
+  const binding = state.bindings.get(name)
+  if (binding?.kind === 'function') return 'unknown'
+  if (binding?.kind !== 'value') return undefined
+  return isDataRecord(binding.provenance) && state.invalidatedRecords.has(binding.provenance)
+    ? 'unknown'
+    : binding.provenance
 }
 
-function localFunction(bindings: ReadonlyLuaBindings, name: string): LuaFunction | undefined {
-  const binding = bindings.get(name)
+function localFunction(state: ReadonlyLuaAnalysisState, name: string): LuaFunction | undefined {
+  const binding = state.bindings.get(name)
   return binding?.kind === 'function' ? binding.definition : undefined
 }
 
@@ -352,7 +367,7 @@ function valueBinding(provenance: Provenance): LuaBinding {
   return { kind: 'value', provenance }
 }
 
-function sourceOf(tokens: readonly LuaToken[], bindings: ReadonlyLuaBindings): Provenance {
+function sourceOf(tokens: readonly LuaToken[], state: ReadonlyLuaAnalysisState): Provenance {
   const expression = withoutOuterParens(tokens.filter((token) => token.kind !== 'newline'))
   const recordSource = directDataRecordSource(expression)
   if (recordSource !== undefined) return recordSource
@@ -365,7 +380,7 @@ function sourceOf(tokens: readonly LuaToken[], bindings: ReadonlyLuaBindings): P
     return 'data'
   }
   if (expression.length === 1 && expression[0]?.kind === 'identifier') {
-    return valueProvenance(bindings, expression[0].value) ?? 'unknown'
+    return valueProvenance(state, expression[0].value) ?? 'unknown'
   }
   if (
     expression.length >= 4 &&
@@ -581,6 +596,28 @@ function sameBindings(left: ReadonlyLuaBindings, right: ReadonlyLuaBindings): bo
   )
 }
 
+function cloneState(state: ReadonlyLuaAnalysisState): LuaAnalysisState {
+  return {
+    bindings: new Map(state.bindings),
+    invalidatedRecords: new Set(state.invalidatedRecords),
+  }
+}
+
+function joinedState(outcomes: readonly ReadonlyLuaAnalysisState[]): LuaAnalysisState {
+  return {
+    bindings: joinedBindings(outcomes.map((outcome) => outcome.bindings)),
+    invalidatedRecords: new Set(outcomes.flatMap((outcome) => [...outcome.invalidatedRecords])),
+  }
+}
+
+function sameState(left: ReadonlyLuaAnalysisState, right: ReadonlyLuaAnalysisState): boolean {
+  return (
+    sameBindings(left.bindings, right.bindings) &&
+    left.invalidatedRecords.size === right.invalidatedRecords.size &&
+    [...left.invalidatedRecords].every((identity) => right.invalidatedRecords.has(identity))
+  )
+}
+
 function latticePassBound(statements: readonly LuaStatement[]): number {
   let identifiers = 0
   for (const statement of statements) {
@@ -593,14 +630,16 @@ function latticePassBound(statements: readonly LuaStatement[]): number {
       if (statement.elseBody !== undefined) identifiers += latticePassBound(statement.elseBody)
     }
   }
-  // Each finite binding slot can only retain its value/function state or rise once to `unknown` under join.
+  // Each finite binding can rise once to `unknown`, and each syntactic record identity can invalidate once.
   return identifiers + 2
 }
 
-function mergeBindings(target: LuaBindings, outcomes: readonly ReadonlyLuaBindings[]): void {
-  const joined = joinedBindings(outcomes)
-  target.clear()
-  for (const [name, binding] of joined) target.set(name, binding)
+function mergeState(target: LuaAnalysisState, outcomes: readonly ReadonlyLuaAnalysisState[]): void {
+  const joined = joinedState(outcomes)
+  target.bindings.clear()
+  for (const [name, binding] of joined.bindings) target.bindings.set(name, binding)
+  target.invalidatedRecords.clear()
+  for (const identity of joined.invalidatedRecords) target.invalidatedRecords.add(identity)
 }
 
 function assertEveryRedisKeyComesFromKeys(lua: string): void {
@@ -608,7 +647,7 @@ function assertEveryRedisKeyComesFromKeys(lua: string): void {
 
   function assertDataOnlyExpression(
     tokens: readonly LuaToken[],
-    bindings: ReadonlyLuaBindings,
+    state: ReadonlyLuaAnalysisState,
     allowUnknown = false,
   ): void {
     for (let index = 0; index < tokens.length; index++) {
@@ -627,8 +666,8 @@ function assertEveryRedisKeyComesFromKeys(lua: string): void {
       }
       const reference = names.join('.')
       const isCall = tokens[end]?.value === '('
-      const rootBinding = bindings.get(names[0] as string)
-      const rootSource = valueProvenance(bindings, names[0] as string)
+      const rootBinding = state.bindings.get(names[0] as string)
+      const rootSource = valueProvenance(state, names[0] as string)
       if (isCall) {
         if (reference === 'cjson.encode') index = findCallClose(tokens, end)
         else index = end - 1
@@ -637,7 +676,7 @@ function assertEveryRedisKeyComesFromKeys(lua: string): void {
       if (PROTECTED_CALL_BINDINGS.has(reference) || PROTECTED_CALL_BINDINGS.has(names[0] as string)) {
         throw new Error(`protected or callable value '${reference}' is not data-only`)
       }
-      if (localFunction(bindings, reference) !== undefined || rootBinding?.kind === 'function') {
+      if (localFunction(state, reference) !== undefined || rootBinding?.kind === 'function') {
         throw new Error(`local function value '${reference}' is not data-only`)
       }
       if (isDataRecord(rootSource ?? 'unknown') && names.length === 1) {
@@ -651,11 +690,11 @@ function assertEveryRedisKeyComesFromKeys(lua: string): void {
     }
   }
 
-  function valueSourceOf(tokens: readonly LuaToken[], bindings: ReadonlyLuaBindings): Provenance {
-    const directSource = sourceOf(tokens, bindings)
+  function valueSourceOf(tokens: readonly LuaToken[], state: ReadonlyLuaAnalysisState): Provenance {
+    const directSource = sourceOf(tokens, state)
     if (directSource !== 'unknown') return directSource
     try {
-      assertDataOnlyExpression(tokens, bindings)
+      assertDataOnlyExpression(tokens, state)
       return 'data'
     } catch {
       return 'unknown'
@@ -669,7 +708,7 @@ function assertEveryRedisKeyComesFromKeys(lua: string): void {
 
   function walkPrivateRecordReferences(
     tokens: readonly LuaToken[],
-    bindings: ReadonlyLuaBindings,
+    state: ReadonlyLuaAnalysisState,
     exemptExactCjsonEncode: boolean,
   ): Map<`data-record:${number}`, PrivateRecordReference> {
     const references = new Map<`data-record:${number}`, PrivateRecordReference>()
@@ -689,7 +728,7 @@ function assertEveryRedisKeyComesFromKeys(lua: string): void {
       if (argument?.kind !== 'identifier' || argument.role !== 'reference' || argument.path.length !== 1) {
         return undefined
       }
-      const source = valueProvenance(bindings, argument.path[0] as string) ?? 'unknown'
+      const source = valueProvenance(state, argument.path[0] as string) ?? 'unknown'
       return isDataRecord(source) ? source : undefined
     }
 
@@ -709,7 +748,7 @@ function assertEveryRedisKeyComesFromKeys(lua: string): void {
             index++
             continue
           }
-          const source = valueProvenance(bindings, node.path[0] as string) ?? 'unknown'
+          const source = valueProvenance(state, node.path[0] as string) ?? 'unknown'
           if (isDataRecord(source)) recordUse(source, node.path.length > 1)
         } else if (node.kind === 'group') walk(node.children)
       }
@@ -721,11 +760,11 @@ function assertEveryRedisKeyComesFromKeys(lua: string): void {
 
   function escapingRecordIdentities(
     tokens: readonly LuaToken[],
-    bindings: ReadonlyLuaBindings,
+    state: ReadonlyLuaAnalysisState,
     exemptExactCjsonEncode = true,
   ): Set<`data-record:${number}`> {
     return new Set(
-      [...walkPrivateRecordReferences(tokens, bindings, exemptExactCjsonEncode)]
+      [...walkPrivateRecordReferences(tokens, state, exemptExactCjsonEncode)]
         .filter(([, reference]) => reference.value)
         .map(([identity]) => identity),
     )
@@ -733,36 +772,36 @@ function assertEveryRedisKeyComesFromKeys(lua: string): void {
 
   function exactPrivateRecordValue(
     tokens: readonly LuaToken[],
-    bindings: ReadonlyLuaBindings,
+    state: ReadonlyLuaAnalysisState,
   ): `data-record:${number}` | undefined {
     const expression = tokens.filter((token) => token.kind !== 'newline')
     if (expression.length !== 1 || expression[0]?.kind !== 'identifier') return undefined
-    const source = valueProvenance(bindings, expression[0].value) ?? 'unknown'
+    const source = valueProvenance(state, expression[0].value) ?? 'unknown'
     return isDataRecord(source) ? source : undefined
   }
 
-  function invalidateRecordIdentities(bindings: LuaBindings, identities: ReadonlySet<`data-record:${number}`>): void {
-    if (identities.size === 0) return
-    for (const [name, binding] of bindings) {
-      if (binding.kind === 'value' && isDataRecord(binding.provenance) && identities.has(binding.provenance)) {
-        bindings.set(name, valueBinding('unknown'))
-      }
-    }
+  function invalidateRecordIdentities(state: LuaAnalysisState, identities: ReadonlySet<DataRecordIdentity>): void {
+    for (const identity of identities) state.invalidatedRecords.add(identity)
   }
 
-  function installBinding(bindings: LuaBindings, name: string, binding: LuaBinding, mode: 'declare' | 'rebind'): void {
+  function installBinding(
+    state: LuaAnalysisState,
+    name: string,
+    binding: LuaBinding,
+    mode: 'declare' | 'rebind',
+  ): void {
     if (mode === 'rebind') {
-      const replaced = valueProvenance(bindings, name)
-      if (replaced !== undefined && isDataRecord(replaced)) {
-        invalidateRecordIdentities(bindings, new Set([replaced]))
+      const replaced = state.bindings.get(name)
+      if (replaced?.kind === 'value' && isDataRecord(replaced.provenance)) {
+        invalidateRecordIdentities(state, new Set([replaced.provenance]))
       }
     }
-    bindings.set(name, binding)
+    state.bindings.set(name, binding)
   }
 
-  function restoreBinding(bindings: LuaBindings, name: string, previous: LuaBinding | undefined): void {
-    if (previous === undefined) bindings.delete(name)
-    else installBinding(bindings, name, previous, 'declare')
+  function restoreBinding(state: LuaAnalysisState, name: string, previous: LuaBinding | undefined): void {
+    if (previous === undefined) state.bindings.delete(name)
+    else installBinding(state, name, previous, 'declare')
   }
 
   function statementsReferenceBinding(statements: readonly LuaStatement[], binding: string): boolean {
@@ -790,7 +829,7 @@ function assertEveryRedisKeyComesFromKeys(lua: string): void {
     return false
   }
 
-  function visitCalls(tokens: readonly LuaToken[], bindings: LuaBindings, stack: readonly string[]): void {
+  function visitCalls(tokens: readonly LuaToken[], state: LuaAnalysisState, stack: readonly string[]): void {
     for (let index = 0; index < tokens.length; index++) {
       if (tokens[index]?.value === '(' && [')', ']', '}'].includes(tokens[index - 1]?.value ?? '')) {
         throw new Error(`unsupported indirect Lua call near '${renderTokens(tokens.slice(Math.max(0, index - 3)))}'`)
@@ -815,12 +854,12 @@ function assertEveryRedisKeyComesFromKeys(lua: string): void {
       const escapedRecords = new Set<`data-record:${number}`>()
       for (const argument of args) {
         const exactEncoding =
-          callee === 'cjson.encode' && args.length === 1 ? exactPrivateRecordValue(argument, bindings) : undefined
+          callee === 'cjson.encode' && args.length === 1 ? exactPrivateRecordValue(argument, state) : undefined
         if (exactEncoding !== undefined) continue
-        for (const identity of escapingRecordIdentities(argument, bindings)) escapedRecords.add(identity)
+        for (const identity of escapingRecordIdentities(argument, state)) escapedRecords.add(identity)
       }
-      invalidateRecordIdentities(bindings, escapedRecords)
-      for (const argument of args) visitCalls(argument, bindings, stack)
+      invalidateRecordIdentities(state, escapedRecords)
+      for (const argument of args) visitCalls(argument, state, stack)
 
       if (callee === 'redis.call') {
         redisCallCount++
@@ -834,33 +873,37 @@ function assertEveryRedisKeyComesFromKeys(lua: string): void {
         }
         for (const keyIndex of keyIndexes) {
           const key = args[keyIndex] ?? []
-          const provenance = sourceOf(key, bindings)
+          const provenance = sourceOf(key, state)
           if (provenance !== 'KEYS') {
             throw new Error(`${command} key operand '${renderTokens(key)}' comes from ${provenance}`)
           }
         }
       } else {
-        const fn = localFunction(bindings, callee)
+        const fn = localFunction(state, callee)
         if (fn !== undefined) {
           if (stack.includes(callee)) throw new Error(`recursive Lua function '${callee}' cannot be certified`)
           // Only parameter provenance crosses a function boundary. Treating captured or global values as
           // unknown is deliberately conservative: a script must thread a Redis key through a certified call.
-          const localBindings: LuaBindings = new Map()
-          for (const [name, binding] of bindings) {
-            if (binding.kind === 'function') localBindings.set(name, binding)
+          const localState: LuaAnalysisState = {
+            bindings: new Map(),
+            invalidatedRecords: new Set(state.invalidatedRecords),
+          }
+          for (const [name, binding] of state.bindings) {
+            if (binding.kind === 'function') localState.bindings.set(name, binding)
           }
           const parameters = new Set<string>()
           for (let parameter = 0; parameter < fn.parameters.length; parameter++) {
             const name = fn.parameters[parameter] as string
             installBinding(
-              localBindings,
+              localState,
               name,
-              valueBinding(valueSourceOf(args[parameter] ?? [], bindings)),
+              valueBinding(valueSourceOf(args[parameter] ?? [], state)),
               parameters.has(name) ? 'rebind' : 'declare',
             )
             parameters.add(name)
           }
-          analyzeBlock(fn.body, localBindings, [...stack, callee])
+          analyzeBlock(fn.body, localState, [...stack, callee])
+          for (const identity of localState.invalidatedRecords) state.invalidatedRecords.add(identity)
         } else if (!SAFE_NON_KEY_CALLS.has(callee)) {
           throw new Error(`unsupported Lua callee '${callee}' cannot be certified`)
         }
@@ -871,7 +914,7 @@ function assertEveryRedisKeyComesFromKeys(lua: string): void {
 
   function analyzeSimple(
     tokens: readonly LuaToken[],
-    bindings: LuaBindings,
+    state: LuaAnalysisState,
     stack: readonly string[],
     scopeLocals: ReadonlySet<string>,
   ): readonly string[] {
@@ -890,17 +933,17 @@ function assertEveryRedisKeyComesFromKeys(lua: string): void {
           if (PROTECTED_CALL_BINDINGS.has(name)) {
             throw new Error(`assignment to certified callee '${name}' is unsupported`)
           }
-          installBinding(bindings, name, valueBinding('unknown'), declared.has(name) ? 'rebind' : 'declare')
+          installBinding(state, name, valueBinding('unknown'), declared.has(name) ? 'rebind' : 'declare')
           declared.add(name)
         }
         return names as string[]
       }
       if (tokens[0]?.value === 'return') {
         const returnedValue = tokens.slice(1)
-        invalidateRecordIdentities(bindings, escapingRecordIdentities(returnedValue, bindings))
-        assertDataOnlyExpression(returnedValue, bindings, true)
+        invalidateRecordIdentities(state, escapingRecordIdentities(returnedValue, state))
+        assertDataOnlyExpression(returnedValue, state, true)
       }
-      visitCalls(tokens, bindings, stack)
+      visitCalls(tokens, state, stack)
       return []
     }
     const isLocal = tokens[0]?.value === 'local'
@@ -924,23 +967,23 @@ function assertEveryRedisKeyComesFromKeys(lua: string): void {
       const values = splitTokens(tokens.slice(assignment + 1), ',')
       const escapedRecords = new Set<`data-record:${number}`>()
       for (const value of values) {
-        for (const identity of escapingRecordIdentities(value, bindings)) escapedRecords.add(identity)
+        for (const identity of escapingRecordIdentities(value, state)) escapedRecords.add(identity)
       }
-      invalidateRecordIdentities(bindings, escapedRecords)
-      for (const value of values) visitCalls(value, bindings, stack)
-      const baseSource = valueProvenance(bindings, target.base) ?? 'unknown'
+      invalidateRecordIdentities(state, escapedRecords)
+      for (const value of values) visitCalls(value, state, stack)
+      const baseSource = valueProvenance(state, target.base) ?? 'unknown'
       if (!isDataRecord(baseSource)) {
         throw new Error(
           `member assignment base '${target.base}' is not a proven private local data record (${baseSource})`,
         )
       }
-      for (const value of values) assertDataOnlyExpression(value, bindings)
+      for (const value of values) assertDataOnlyExpression(value, state)
       return []
     }
     const values = splitTokens(tokens.slice(assignment + 1), ',')
     for (let index = 0; index < names.length; index++) {
       const name = names[index] as string
-      if (!isLocal && !bindings.has(name)) {
+      if (!isLocal && !state.bindings.has(name)) {
         throw new Error(`global assignment '${name}' cannot be certified`)
       }
       if (PROTECTED_CALL_BINDINGS.has(name)) {
@@ -953,23 +996,23 @@ function assertEveryRedisKeyComesFromKeys(lua: string): void {
       if (assignedReference !== undefined && PROTECTED_CALL_BINDINGS.has(assignedReference)) {
         throw new Error(`certified callee alias '${name}' cannot reference '${assignedReference}'`)
       }
-      if (assignedReference !== undefined && localFunction(bindings, assignedReference) !== undefined) {
+      if (assignedReference !== undefined && localFunction(state, assignedReference) !== undefined) {
         throw new Error(`local function alias '${name}' cannot be certified`)
       }
     }
     const escapedRecords = new Set<`data-record:${number}`>()
     for (const value of values) {
-      for (const identity of escapingRecordIdentities(value, bindings)) escapedRecords.add(identity)
+      for (const identity of escapingRecordIdentities(value, state)) escapedRecords.add(identity)
     }
-    invalidateRecordIdentities(bindings, escapedRecords)
-    for (const value of values) visitCalls(value, bindings, stack)
-    const sources = values.map((value) => valueSourceOf(value, bindings))
+    invalidateRecordIdentities(state, escapedRecords)
+    for (const value of values) visitCalls(value, state, stack)
+    const sources = values.map((value) => valueSourceOf(value, state))
     for (let index = 0; index < sources.length; index++) {
       const source = sources[index] as Provenance
       if (!isDataRecord(source)) continue
       const value = values[index] ?? []
       if (isLocal && directDataRecordSource(value) !== undefined) {
-        assertDataOnlyExpression(value, bindings)
+        assertDataOnlyExpression(value, state)
         continue
       }
       sources[index] = 'unknown'
@@ -979,7 +1022,7 @@ function assertEveryRedisKeyComesFromKeys(lua: string): void {
       const source = sources[index] ?? 'unknown'
       const name = names[index] as string
       installBinding(
-        bindings,
+        state,
         name,
         valueBinding(!isLocal && isDataRecord(source) ? 'unknown' : source),
         isLocal && !declared.has(name) ? 'declare' : 'rebind',
@@ -991,15 +1034,15 @@ function assertEveryRedisKeyComesFromKeys(lua: string): void {
 
   function analyzeBlock(
     statements: readonly LuaStatement[],
-    bindings: LuaBindings,
+    state: LuaAnalysisState,
     stack: readonly string[],
     restoreLocals = false,
   ): void {
-    const incoming = new Map(bindings)
+    const incomingBindings = new Map(state.bindings)
     const locals = new Set<string>()
     for (const statement of statements) {
       if (statement.kind === 'simple') {
-        for (const name of analyzeSimple(statement.tokens, bindings, stack, locals)) locals.add(name)
+        for (const name of analyzeSimple(statement.tokens, state, stack, locals)) locals.add(name)
       } else if (statement.kind === 'function') {
         if (!statement.local) throw new Error(`global Lua function '${statement.name}' cannot be certified`)
         if (PROTECTED_CALL_BINDINGS.has(statement.name)) {
@@ -1010,8 +1053,8 @@ function assertEveryRedisKeyComesFromKeys(lua: string): void {
             throw new Error(`local function parameter '${parameter}' shadows a certified callee`)
           }
         }
-        const capturedRecords = new Set<`data-record:${number}`>()
-        for (const [name, binding] of bindings) {
+        const capturedRecords = new Set<DataRecordIdentity>()
+        for (const [name, binding] of state.bindings) {
           if (
             binding.kind === 'value' &&
             isDataRecord(binding.provenance) &&
@@ -1022,33 +1065,33 @@ function assertEveryRedisKeyComesFromKeys(lua: string): void {
             capturedRecords.add(binding.provenance)
           }
         }
-        invalidateRecordIdentities(bindings, capturedRecords)
+        invalidateRecordIdentities(state, capturedRecords)
         installBinding(
-          bindings,
+          state,
           statement.name,
           { kind: 'function', definition: { parameters: statement.parameters, body: statement.body } },
           locals.has(statement.name) ? 'rebind' : 'declare',
         )
         locals.add(statement.name)
       } else if (statement.kind === 'if') {
-        const outcomes: LuaBindings[] = []
+        const outcomes: LuaAnalysisState[] = []
         for (const branch of statement.branches) {
-          visitCalls(branch.condition, bindings, stack)
-          const branchBindings = new Map(bindings)
-          analyzeBlock(branch.body, branchBindings, stack, true)
-          outcomes.push(branchBindings)
+          visitCalls(branch.condition, state, stack)
+          const branchState = cloneState(state)
+          analyzeBlock(branch.body, branchState, stack, true)
+          outcomes.push(branchState)
         }
-        if (statement.elseBody === undefined) outcomes.push(new Map(bindings))
+        if (statement.elseBody === undefined) outcomes.push(cloneState(state))
         else {
-          const elseBindings = new Map(bindings)
-          analyzeBlock(statement.elseBody, elseBindings, stack, true)
-          outcomes.push(elseBindings)
+          const elseState = cloneState(state)
+          analyzeBlock(statement.elseBody, elseState, stack, true)
+          outcomes.push(elseState)
         }
-        mergeBindings(bindings, outcomes)
+        mergeState(state, outcomes)
       } else if (statement.kind === 'loop') {
-        visitCalls(statement.header, bindings, stack)
-        const outsideBindings = new Map(bindings)
-        let loopEntry = new Map(bindings)
+        visitCalls(statement.header, state, stack)
+        const outsideState = cloneState(state)
+        let loopEntry = cloneState(state)
         const loopBindings: string[] = []
         const declaredLoopBindings = new Set<string>()
         const bindingEnd = statement.header.findIndex((token) => token.value === '=' || token.value === 'in')
@@ -1070,13 +1113,13 @@ function assertEveryRedisKeyComesFromKeys(lua: string): void {
           }
         }
         let stabilized = false
-        const maxPasses = bindings.size + latticePassBound(statement.body)
+        const maxPasses = 2 * (state.bindings.size + latticePassBound(statement.body))
         for (let pass = 0; pass < maxPasses; pass++) {
-          const backEdge = new Map(loopEntry)
+          const backEdge = cloneState(loopEntry)
           analyzeBlock(statement.body, backEdge, stack, true)
-          const nextEntry = joinedBindings([loopEntry, backEdge])
+          const nextEntry = joinedState([loopEntry, backEdge])
           for (const name of loopBindings) installBinding(nextEntry, name, valueBinding('unknown'), 'declare')
-          if (sameBindings(loopEntry, nextEntry)) {
+          if (sameState(loopEntry, nextEntry)) {
             loopEntry = nextEntry
             stabilized = true
             break
@@ -1085,24 +1128,24 @@ function assertEveryRedisKeyComesFromKeys(lua: string): void {
         }
         if (!stabilized) throw new Error(`Lua loop provenance did not stabilize within ${maxPasses} passes`)
         for (const name of loopBindings) {
-          const before = outsideBindings.get(name)
+          const before = outsideState.bindings.get(name)
           restoreBinding(loopEntry, name, before)
         }
-        mergeBindings(bindings, [outsideBindings, loopEntry])
+        mergeState(state, [outsideState, loopEntry])
       } else {
-        const innerBindings = new Map(bindings)
-        analyzeBlock(statement.body, innerBindings, stack, true)
-        mergeBindings(bindings, [innerBindings])
+        const innerState = cloneState(state)
+        analyzeBlock(statement.body, innerState, stack, true)
+        mergeState(state, [innerState])
       }
     }
     if (restoreLocals) {
       for (const name of locals) {
-        restoreBinding(bindings, name, incoming.get(name))
+        restoreBinding(state, name, incomingBindings.get(name))
       }
     }
   }
 
-  analyzeBlock(new LuaStatementParser(lexLua(lua)).parse(), new Map(), [])
+  analyzeBlock(new LuaStatementParser(lexLua(lua)).parse(), { bindings: new Map(), invalidatedRecords: new Set() }, [])
   if (redisCallCount === 0) throw new Error('Lua program has no redis.call to certify')
 }
 
@@ -1683,6 +1726,109 @@ redis.call('GET', KEYS[1])`,
     for (const { name, lua, message } of rejected) {
       expect(() => assertEveryRedisKeyComesFromKeys(lua), name).toThrow(message)
     }
+  })
+
+  it('keeps record-identity invalidation monotone across lexical scope restoration', () => {
+    const decodedRecord = `
+local raw = redis.call('HGET', KEYS[1], ARGV[1])
+local record = cjson.decode(raw)
+local escaped = nil`
+    const rejected = [
+      {
+        name: 'exact block shadow escape',
+        lua: `${decodedRecord}
+do
+  local record = record or nil
+  escaped = record
+end
+record.expiresAt = ARGV[2]
+redis.call('SET', KEYS[1], cjson.encode(record))`,
+      },
+      {
+        name: 'exact one-branch shadow escape',
+        lua: `${decodedRecord}
+if ARGV[2] ~= '' then
+  local record = record or nil
+  escaped = record
+end
+record.expiresAt = ARGV[3]
+redis.call('SET', KEYS[1], cjson.encode(record))`,
+      },
+      {
+        name: 'nested-scope alias escape',
+        lua: `${decodedRecord}
+do
+  local first = record or nil
+  do
+    local second = first or nil
+    escaped = second
+  end
+end
+record.expiresAt = ARGV[2]
+redis.call('SET', KEYS[1], cjson.encode(record))`,
+      },
+      {
+        name: 'multiple same-name shadows cannot restore privacy',
+        lua: `${decodedRecord}
+do
+  local record = record or nil
+  do
+    local record = record or nil
+    escaped = record
+  end
+end
+record.expiresAt = ARGV[2]
+redis.call('SET', KEYS[1], cjson.encode(record))`,
+      },
+      {
+        name: 'early return does not roll back invalidation',
+        lua: `${decodedRecord}
+do
+  local record = record or nil
+  return record
+end
+record.expiresAt = ARGV[2]
+redis.call('SET', KEYS[1], cjson.encode(record))`,
+      },
+      {
+        name: 'loop-body escape survives zero-iteration join and scope restoration',
+        lua: `${decodedRecord}
+for i = 1, 2 do
+  local record = record or nil
+  escaped = record
+end
+record.expiresAt = ARGV[2]
+redis.call('SET', KEYS[1], cjson.encode(record))`,
+      },
+      {
+        name: 'both branch shadows invalidate the shared outer identity',
+        lua: `${decodedRecord}
+if ARGV[2] ~= '' then
+  local record = record or nil
+  escaped = record
+else
+  local record = record or nil
+  escaped = record
+end
+record.expiresAt = ARGV[3]
+redis.call('SET', KEYS[1], cjson.encode(record))`,
+      },
+    ]
+    for (const { name, lua } of rejected) {
+      expect(() => assertEveryRedisKeyComesFromKeys(lua), name).toThrow(
+        "member assignment base 'record' is not a proven private local data record",
+      )
+    }
+
+    expect(() =>
+      assertEveryRedisKeyComesFromKeys(`${decodedRecord}
+do
+  local record = {}
+  record.expiresAt = ARGV[2]
+end
+record.expiresAt = ARGV[3]
+redis.call('SET', KEYS[1], cjson.encode(record))`),
+    ).not.toThrow()
   })
 
   it('fails closed on unknown callees and unsupported call or control syntax', () => {
