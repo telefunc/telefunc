@@ -5,7 +5,7 @@
 // Redis and Cloudflare fixtures append themselves here; the scenario modules never learn a backend name.
 
 import { MemoryRoomBackend } from '../memory/backend.js'
-import type { RoomBackendSpi } from '../spi.js'
+import type { LaneId, RoomBackendSpi } from '../spi.js'
 
 export type BackendTraces = {
   // Does the backend's handoff attempt extend to the receiver callback's own completion? Memory dispatches
@@ -34,6 +34,15 @@ export type BackendFixture = {
     twoLocalSubscriptionsSameLane: number
     oneLocalSubscriptionAfterSiblingDetach: number
   }
+  // Optional exact result set for a node-local authority. Redis Cluster's one subscriber connection may
+  // live on the publishing master (1) or another master (0); both are exact PUBLISH outcomes while the
+  // global Pub/Sub fabric still delivers one frame. Global authorities retain the singleton fallback.
+  allowedReceiverCountsAtAuthority?(
+    roomId: string,
+    inc: string,
+    lane: LaneId,
+    globalFallback: number,
+  ): Promise<readonly number[]>
   // Authority time as the BACKEND sees it — never the caller's clock. Lease expiry, commit preconditions
   // and TTLs are all resolved against this, so the scenarios drive it explicitly instead of waiting.
   authorityNow(): number
@@ -44,6 +53,18 @@ export type BackendFixture = {
   // this obligation; the conformance suite fails loudly if an async backend registers without it.
   concurrentHeadCxBarrier?: <T>(first: () => Promise<T>, second: () => Promise<T>) => Promise<[T, T]>
   dispose(): Promise<void>
+}
+
+export async function allowedReceiverCounts(
+  fixture: BackendFixture,
+  roomId: string,
+  inc: string,
+  lane: LaneId,
+  globalFallback: number,
+): Promise<readonly number[]> {
+  return fixture.allowedReceiverCountsAtAuthority === undefined
+    ? [globalFallback]
+    : await fixture.allowedReceiverCountsAtAuthority(roomId, inc, lane, globalFallback)
 }
 
 export type BackendHarness = {

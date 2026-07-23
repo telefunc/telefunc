@@ -20,8 +20,8 @@ import {
   routeCapturesKey,
 } from './layout.js'
 
-// Redis Cluster's CRC16/XMODEM key-slot algorithm. Keeping it here makes the one-room-slot claim
-// executable without claiming the real Cluster behavior that remains W4-R.
+// Redis Cluster's CRC16/XMODEM key-slot algorithm. This keeps the one-room-slot structural claim
+// executable alongside the separate W4-R real-Cluster behavior certification.
 export function redisSlot(key: string): number {
   const start = key.indexOf('{')
   const end = start < 0 ? -1 : key.indexOf('}', start + 1)

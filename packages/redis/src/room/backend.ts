@@ -1,6 +1,5 @@
 // The released Redis realization of RoomBackendSpi, proved against the shared conformance suite to the
-// same outcomes as the memory reference. The real three-master Cluster proof remains W4-R, so
-// `capabilities.clusterSafe` stays false here.
+// same outcomes as the memory reference and certified on a disposable real three-master Redis Cluster.
 //
 // Mechanism map (spi.md §5.2), all atomic pieces in layout.ts's Lua:
 //   head CX      one atomic record: legality (throw) · compare (conflict) · fresh-inc guard · mint · store
@@ -12,8 +11,8 @@
 //                FIFO realizes the ordered at-most-once attempt chain; receivers = the PUBLISH count
 //   subscription SUBSCRIBE ack = establishment (fail-closed); channels keyed by (inc, lane) — I11
 
-import { randomUUID } from 'node:crypto'
-import type { Redis } from 'ioredis'
+import { createHash, randomUUID } from 'node:crypto'
+import { Cluster, type Redis } from 'ioredis'
 import { assert } from '../assert.js'
 import { callDefinedCommand } from '../callDefinedCommand.js'
 import type {
@@ -75,7 +74,7 @@ function roomGenerationKey(roomId: string, inc: string): string {
 }
 
 export type RedisRoomBackendOptions = {
-  redis: Redis
+  redis: Redis | Cluster
   prefix?: string
   maxRetainedPayloadBytes?: number
 }
@@ -176,12 +175,14 @@ export class RedisRoomBackend implements RoomBackendSpi {
   readonly spiVersion = ROOM_SPI_VERSION
   readonly capabilities: RoomBackendSpi['capabilities']
 
-  readonly #publisher: Redis
+  readonly #publisher: Redis | Cluster
   readonly #transport: RedisSubscriberTransport
   readonly #prefix: string
+  readonly #commandsReady: Promise<void>
   // Durable capture/generation identity stays here. The transport receives this object only as an opaque
   // channel binding and delegates capture/validation back before it can settle readiness.
   readonly #generationBindings = new Map<string, RedisGenerationBinding>()
+  readonly #locallyDroppingGenerations = new Set<string>()
   #disposed = false
 
   constructor(options: RedisRoomBackendOptions) {
@@ -191,22 +192,32 @@ export class RedisRoomBackend implements RoomBackendSpi {
       'RedisRoomBackend: maxRetainedPayloadBytes must be a finite non-negative number',
     )
     this.#publisher = options.redis
-    const subscriber = options.redis.duplicate({
-      autoResubscribe: false,
-      retryStrategy: (attempt) =>
-        attempt <= SUBSCRIPTION_RETRY_ATTEMPTS ? defaultSubscriptionRetryDelay(attempt) : null,
-    })
+    const subscriber =
+      options.redis instanceof Cluster
+        ? options.redis.duplicate(undefined, {
+            redisOptions: {
+              autoResubscribe: false,
+              retryStrategy: (attempt: number) =>
+                attempt <= SUBSCRIPTION_RETRY_ATTEMPTS ? defaultSubscriptionRetryDelay(attempt) : null,
+            },
+          })
+        : options.redis.duplicate({
+            autoResubscribe: false,
+            retryStrategy: (attempt) =>
+              attempt <= SUBSCRIPTION_RETRY_ATTEMPTS ? defaultSubscriptionRetryDelay(attempt) : null,
+          })
     this.#prefix = options.prefix ?? DEFAULT_ROOM_PREFIX
     this.capabilities = {
-      receivers: 'global',
+      receivers: options.redis instanceof Cluster ? 'node-local' : 'global',
       maxRetainedPayloadBytes: options.maxRetainedPayloadBytes ?? DEFAULT_MAX_RETAINED_BYTES,
-      clusterSafe: false,
+      clusterSafe: true,
       directory: true,
     }
     for (const command of Object.values(REDIS_ROOM_COMMANDS)) {
       if (command.numberOfKeys === null) this.#publisher.defineCommand(command.name, { lua: command.lua })
       else this.#publisher.defineCommand(command.name, { numberOfKeys: command.numberOfKeys, lua: command.lua })
     }
+    this.#commandsReady = prepareRedisRoomCommands(this.#publisher)
     this.#transport = new RedisSubscriberTransport({
       subscriber,
       retryDelay: defaultSubscriptionRetryDelay,
@@ -240,7 +251,7 @@ export class RedisRoomBackend implements RoomBackendSpi {
   > {
     this.#assertLive()
     assertHeadNextWellFormed(next)
-    const reply = (await callDefinedCommand(this.#publisher, REDIS_ROOM_COMMANDS.headCx.name, [
+    const reply = (await this.#call(REDIS_ROOM_COMMANDS.headCx.name, [
       ...REDIS_ROOM_COMMAND_KEYS.headCx(this.#prefix, roomId),
       this.#nowArg(),
       encodeCx(cx),
@@ -316,7 +327,7 @@ export class RedisRoomBackend implements RoomBackendSpi {
         )
       }
     }
-    const reply = (await callDefinedCommand(this.#publisher, REDIS_ROOM_COMMANDS.cellsCx.name, [
+    const reply = (await this.#call(REDIS_ROOM_COMMANDS.cellsCx.name, [
       String(keys.length),
       ...keys,
       ...argv,
@@ -335,7 +346,7 @@ export class RedisRoomBackend implements RoomBackendSpi {
   ): Promise<CommitResult> {
     this.#assertLive()
     const channel = channelKey(this.#prefix, roomId, inc, laneKey(lane))
-    const reply = (await callDefinedCommand(this.#publisher, REDIS_ROOM_COMMANDS.commit.name, [
+    const reply = (await this.#call(REDIS_ROOM_COMMANDS.commit.name, [
       ...REDIS_ROOM_COMMAND_KEYS.commit(this.#prefix, roomId, inc, lane),
       this.#nowArg(),
       inc,
@@ -391,15 +402,12 @@ export class RedisRoomBackend implements RoomBackendSpi {
       const keys = REDIS_ROOM_COMMAND_KEYS.retainedDelete(this.#prefix, roomId, inc, [
         retainedKey(this.#prefix, roomId, inc, laneKey(lane)),
       ])
-      await callDefinedCommand(this.#publisher, REDIS_ROOM_COMMANDS.retainedDelete.name, [String(keys.length), ...keys])
+      await this.#call(REDIS_ROOM_COMMANDS.retainedDelete.name, [String(keys.length), ...keys])
       return
     }
     const keys = await this.#scanKeys(`${escapeGlob(retainedKeyPrefix(this.#prefix, roomId, inc))}*`)
     const commandKeys = REDIS_ROOM_COMMAND_KEYS.retainedDelete(this.#prefix, roomId, inc, keys)
-    await callDefinedCommand(this.#publisher, REDIS_ROOM_COMMANDS.retainedDelete.name, [
-      String(commandKeys.length),
-      ...commandKeys,
-    ])
+    await this.#call(REDIS_ROOM_COMMANDS.retainedDelete.name, [String(commandKeys.length), ...commandKeys])
   }
 
   // ── subscriptions ──
@@ -442,7 +450,7 @@ export class RedisRoomBackend implements RoomBackendSpi {
 
   async #captureGeneration(context: RedisGenerationBinding): Promise<string> {
     if (context.createdAt === null) context.createdAt = await this.#authorityNowMs()
-    const reply = (await callDefinedCommand(this.#publisher, REDIS_ROOM_COMMANDS.captureGeneration.name, [
+    const reply = (await this.#call(REDIS_ROOM_COMMANDS.captureGeneration.name, [
       ...REDIS_ROOM_COMMAND_KEYS.captureGeneration(this.#prefix, context.roomId),
       this.#nowArg(),
       context.inc,
@@ -457,7 +465,7 @@ export class RedisRoomBackend implements RoomBackendSpi {
 
   async #validateGeneration(context: RedisGenerationBinding, includeCapture: boolean): Promise<boolean> {
     if (context.generationToken === null) return false
-    const reply = (await callDefinedCommand(this.#publisher, REDIS_ROOM_COMMANDS.validateGeneration.name, [
+    const reply = (await this.#call(REDIS_ROOM_COMMANDS.validateGeneration.name, [
       ...REDIS_ROOM_COMMAND_KEYS.validateGeneration(this.#prefix, context.roomId),
       this.#nowArg(),
       context.inc,
@@ -470,6 +478,7 @@ export class RedisRoomBackend implements RoomBackendSpi {
   }
 
   #generationInvalidated(owner: string, token: string): void {
+    if (this.#locallyDroppingGenerations.has(owner)) return
     const channels = new Set(
       [...this.#generationBindings.values()]
         .filter(
@@ -499,26 +508,32 @@ export class RedisRoomBackend implements RoomBackendSpi {
     // be reused while an old local mux can still bind to its channel.
     const keys = await this.#scanKeys(`${escapeGlob(genPrefix(this.#prefix, roomId, inc))}:*`)
     if (keys.length > 0) await this.#publisher.unlink(...keys)
-    const generationToken = await this.#publisher.hget(generationTokensKey(this.#prefix, roomId), inc)
-    if (generationToken !== null) {
-      // Broker FIFO delivers this invalidation before any later publish for a legally reused generation,
-      // including to other backend instances. A disconnected instance instead fails its exact token
-      // validation before re-SUBSCRIBE.
-      await this.#publisher.publish(generationInvalidationChannel(this.#prefix, roomId, inc), generationToken)
-    }
     const owner = roomGenerationKey(roomId, inc)
-    await this.#transport.dropGeneration(owner)
-    await callDefinedCommand(this.#publisher, REDIS_ROOM_COMMANDS.dropGenerationFinalize.name, [
-      ...REDIS_ROOM_COMMAND_KEYS.dropGenerationFinalize(this.#prefix, roomId),
-      inc,
-    ])
+    this.#locallyDroppingGenerations.add(owner)
+    try {
+      const generationToken = await this.#publisher.hget(generationTokensKey(this.#prefix, roomId), inc)
+      if (generationToken !== null) {
+        // Broker FIFO delivers this invalidation before any later publish for a legally reused generation,
+        // including to other backend instances. A disconnected instance instead fails its exact token
+        // validation before re-SUBSCRIBE. The initiating backend ignores its echo and performs the same
+        // exact cleanup synchronously below, so its local and broadcast teardown cannot race each other.
+        await this.#publisher.publish(generationInvalidationChannel(this.#prefix, roomId, inc), generationToken)
+      }
+      await this.#transport.dropGeneration(owner)
+      await this.#call(REDIS_ROOM_COMMANDS.dropGenerationFinalize.name, [
+        ...REDIS_ROOM_COMMAND_KEYS.dropGenerationFinalize(this.#prefix, roomId),
+        inc,
+      ])
+    } finally {
+      this.#locallyDroppingGenerations.delete(owner)
+    }
   }
 
   // ── directory (global; its own two co-slotted keys) ──
 
   async directoryPut(roomId: string, incTag: string): Promise<void> {
     this.#assertLive()
-    await callDefinedCommand(this.#publisher, REDIS_ROOM_COMMANDS.directoryPut.name, [
+    await this.#call(REDIS_ROOM_COMMANDS.directoryPut.name, [
       ...REDIS_ROOM_COMMAND_KEYS.directoryPut(this.#prefix),
       roomId,
       incTag,
@@ -527,7 +542,7 @@ export class RedisRoomBackend implements RoomBackendSpi {
 
   async directoryDelete(roomId: string, incTag: string): Promise<void> {
     this.#assertLive()
-    await callDefinedCommand(this.#publisher, REDIS_ROOM_COMMANDS.directoryDelete.name, [
+    await this.#call(REDIS_ROOM_COMMANDS.directoryDelete.name, [
       ...REDIS_ROOM_COMMAND_KEYS.directoryDelete(this.#prefix),
       roomId,
       incTag,
@@ -601,16 +616,59 @@ export class RedisRoomBackend implements RoomBackendSpi {
     return physical.map((key) => key.slice(physicalPrefix.length))
   }
 
-  async #scanKeys(pattern: string): Promise<string[]> {
-    const keys: string[] = []
-    let cursor = '0'
-    do {
-      const [next, page] = await this.#publisher.scan(cursor, 'MATCH', pattern, 'COUNT', SCAN_COUNT)
-      cursor = next
-      for (const key of page) keys.push(key)
-    } while (cursor !== '0')
-    return keys
+  async #call(command: string, keysAndArgs: ReadonlyArray<string | Uint8Array>): Promise<unknown> {
+    await this.#commandsReady
+    if (this.#publisher instanceof Cluster) {
+      const descriptor = Object.values(REDIS_ROOM_COMMANDS).find((candidate) => candidate.name === command)
+      if (descriptor === undefined) throw new Error(`RedisRoomBackend: unknown command '${command}'`)
+      const dynamic = descriptor.numberOfKeys === null
+      const numberOfKeys = dynamic ? Number(keysAndArgs[0]) : descriptor.numberOfKeys
+      if (!Number.isInteger(numberOfKeys) || numberOfKeys < 0) {
+        throw new Error(`RedisRoomBackend: invalid key count for '${command}'`)
+      }
+      const args = dynamic ? keysAndArgs.slice(1) : keysAndArgs
+      const redisArgs = args.map((arg) =>
+        typeof arg === 'string' ? arg : Buffer.from(arg.buffer, arg.byteOffset, arg.byteLength),
+      )
+      return await this.#publisher.evalsha(redisScriptSha(descriptor.lua), numberOfKeys, ...redisArgs)
+    }
+    return await callDefinedCommand(this.#publisher, command, keysAndArgs)
   }
+
+  async #scanKeys(pattern: string): Promise<string[]> {
+    const nodes = this.#publisher instanceof Cluster ? this.#publisher.nodes('master') : [this.#publisher]
+    const keys = new Set<string>()
+    for (const node of nodes) {
+      let cursor = '0'
+      do {
+        const [next, page] = await node.scan(cursor, 'MATCH', pattern, 'COUNT', SCAN_COUNT)
+        cursor = next
+        for (const key of page) keys.add(key)
+      } while (cursor !== '0')
+    }
+    return [...keys]
+  }
+}
+
+async function prepareRedisRoomCommands(redis: Redis | Cluster): Promise<void> {
+  if (!(redis instanceof Cluster)) return
+  // ASK routes the next command to an importing master. Every current master must therefore know each
+  // custom script before the first routed invocation: otherwise ioredis's NOSCRIPT fallback can lose
+  // the one-command ASKING context and bounce between ASK and MOVED.
+  await redis.cluster('INFO')
+  const masters = redis.nodes('master')
+  if (masters.length === 0) throw new Error('RedisRoomBackend: Cluster has no available masters')
+  await Promise.all(
+    masters.flatMap((master) =>
+      Object.values(REDIS_ROOM_COMMANDS).map(async (command) => {
+        await master.script('LOAD', command.lua)
+      }),
+    ),
+  )
+}
+
+function redisScriptSha(lua: string): string {
+  return createHash('sha1').update(lua).digest('hex')
 }
 
 // A stored cell is "<expiresAt|''>\n<payload bytes>"; the header is ASCII digits (or empty) with no

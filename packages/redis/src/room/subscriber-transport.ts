@@ -6,7 +6,7 @@
 // invariant is that no RedisLaneSubscription can become ready unless the channel acknowledgement and
 // the delegated generation validation both completed on the CURRENT subscriber connection epoch.
 
-import type { Redis } from 'ioredis'
+import { Cluster, type Redis } from 'ioredis'
 import type { LaneReceiver, LaneSubscription, ReadinessState } from 'telefunc/backend'
 import { decodeFrameHeader } from './layout.js'
 
@@ -21,7 +21,7 @@ export type RedisSubscriberChannelBinding = {
 }
 
 type RedisSubscriberTransportOptions = {
-  subscriber: Redis
+  subscriber: Redis | Cluster
   retryDelay: (attempt: number) => number
   captureGeneration: (binding: RedisSubscriberChannelBinding) => Promise<void>
   validateGeneration: (binding: RedisSubscriberChannelBinding, includeCapture: boolean) => Promise<boolean>
@@ -150,8 +150,80 @@ class RedisLaneSubscription implements LaneSubscription {
   }
 }
 
+type ClusterSubscriberInternals = {
+  subscriber: {
+    getInstance(): Redis | null
+  }
+}
+
+// ioredis Cluster deliberately hides its one ordinary Pub/Sub socket behind ClusterSubscriber. The
+// Cluster object forwards messages, but not that socket's `end`/`ready` lifecycle: its own status stays
+// `ready` while the hidden socket is replaced. Room readiness needs the real connection epoch, so bridge
+// those two events directly into the Room transport. They must not be emitted on Cluster itself because
+// ioredis owns `close` listeners there for whole-cluster recovery. The bridge changes no command routing
+// and is removed before the duplicate is disposed.
+function bridgeClusterSubscriberLifecycle(
+  cluster: Cluster,
+  connectionClosed: () => void,
+  connectionReady: () => void,
+): () => void {
+  const internals = cluster as unknown as ClusterSubscriberInternals
+  const originalSubscribe = cluster.subscribe.bind(cluster)
+  let current: Redis | null = null
+  let awaitingReplacement = false
+  let removed = false
+
+  const onReady = (): void => {
+    if (removed || !awaitingReplacement) return
+    awaitingReplacement = false
+    connectionReady()
+  }
+  const onEnd = (): void => {
+    if (removed) return
+    awaitingReplacement = true
+    connectionClosed()
+    // ClusterSubscriber's own `end` listener is installed before ours and selects the replacement
+    // synchronously. A microtask also covers a future ioredis version that defers that selection.
+    observeCurrent()
+    queueMicrotask(observeCurrent)
+  }
+  const observeCurrent = (): void => {
+    if (removed) return
+    const next = internals.subscriber.getInstance()
+    if (next === current) return
+    if (current !== null) {
+      current.off('end', onEnd)
+      current.off('ready', onReady)
+    }
+    current = next
+    if (current === null) return
+    current.once('end', onEnd)
+    if (awaitingReplacement) {
+      if (current.status === 'ready') onReady()
+      else current.once('ready', onReady)
+    }
+  }
+  const bridgedSubscribe = ((...args: unknown[]) => {
+    const reply = (originalSubscribe as (...values: unknown[]) => unknown)(...args)
+    observeCurrent()
+    return reply
+  }) as typeof cluster.subscribe
+  cluster.subscribe = bridgedSubscribe
+
+  return () => {
+    if (removed) return
+    removed = true
+    if (cluster.subscribe === bridgedSubscribe) cluster.subscribe = originalSubscribe as typeof cluster.subscribe
+    if (current !== null) {
+      current.off('end', onEnd)
+      current.off('ready', onReady)
+    }
+    current = null
+  }
+}
+
 export class RedisSubscriberTransport {
-  readonly #subscriber: Redis
+  readonly #subscriber: Redis | Cluster
   readonly #retryDelay: (attempt: number) => number
   readonly #captureGeneration: (binding: RedisSubscriberChannelBinding) => Promise<void>
   readonly #validateGeneration: (binding: RedisSubscriberChannelBinding, includeCapture: boolean) => Promise<boolean>
@@ -167,6 +239,7 @@ export class RedisSubscriberTransport {
   #connectionEpoch = 0
   #readyEpoch: number | null
   readonly #connectionWaiters = new Set<() => void>()
+  readonly #removeClusterLifecycleBridge: () => void
   #disposed = false
 
   constructor(options: RedisSubscriberTransportOptions) {
@@ -177,6 +250,10 @@ export class RedisSubscriberTransport {
     this.#onGenerationInvalidation = options.onGenerationInvalidation
     this.#onChannelRemoved = options.onChannelRemoved
     this.#readyEpoch = this.#subscriber.status === 'ready' ? this.#connectionEpoch : null
+    this.#removeClusterLifecycleBridge =
+      this.#subscriber instanceof Cluster
+        ? bridgeClusterSubscriberLifecycle(this.#subscriber, this.#onClose, this.#onReady)
+        : () => {}
 
     this.#subscriber.on('messageBuffer', this.#onMessage)
     this.#subscriber.on('close', this.#onClose)
@@ -223,17 +300,46 @@ export class RedisSubscriberTransport {
   }
 
   invalidateChannels(channels: ReadonlySet<string>): void {
-    const owners = new Set<string>()
     for (const channel of channels) {
       const lifecycle = this.#channels.get(channel)
       if (lifecycle === undefined) continue
-      owners.add(lifecycle.binding.owner)
       lifecycle.operationEpoch++
-      for (const subscription of lifecycle.subscriptions) subscription.generationDropped()
+      const subscriptions = [...lifecycle.subscriptions]
       lifecycle.subscriptions.clear()
-      void this.#retryEmptyChannelCleanup(lifecycle)
+      void this.#finishInvalidatedLifecycle(lifecycle, subscriptions)
     }
-    for (const owner of owners) void this.#retryOrphanInvalidationCleanup(owner)
+  }
+
+  async #finishInvalidatedLifecycle(
+    lifecycle: ChannelLifecycle,
+    subscriptions: RedisLaneSubscription[],
+  ): Promise<void> {
+    const cleanup = this.#beginChannelCleanup(lifecycle)
+    try {
+      const channel = lifecycle.binding.channel
+      const ownership = this.#subscribedChannels.get(channel)
+      if (!this.#disposed && this.#subscriber.status !== 'end') {
+        // ioredis Cluster automatically re-subscribes its hidden Pub/Sub socket before exposing the
+        // replacement connection as ready. That physical subscription may therefore exist before Room
+        // records current ownership. Unsubscribe the known invalidated channel unconditionally; a same-id
+        // successor waits on this cleanup barrier and re-establishes only after the acknowledgement.
+        await this.#subscriber.unsubscribe(channel)
+        if (ownership === undefined || this.#subscribedChannels.get(channel) === ownership) {
+          this.#subscribedChannels.delete(channel)
+        }
+      }
+      await this.#unsubscribeInvalidationIfLast(lifecycle)
+      this.#finishEmptyChannelCleanup(lifecycle)
+      void this.#retryOrphanInvalidationCleanup(lifecycle.binding.owner)
+    } catch {
+      void this.#retryEmptyChannelCleanup(lifecycle)
+    } finally {
+      this.#finishChannelCleanup(lifecycle, cleanup)
+      // Match exhausted-establishment semantics: terminal observation means the stale binding can no
+      // longer be inherited by an immediately recreated generation using the same physical channel.
+      for (const subscription of subscriptions) subscription.generationDropped()
+    }
+    if (lifecycle.subscriptions.size !== 0) void this.#ensureSubscribed(lifecycle).catch(() => {})
   }
 
   async dropGeneration(owner: string): Promise<void> {
@@ -293,6 +399,7 @@ export class RedisSubscriberTransport {
     this.#subscriber.off('close', this.#onClose)
     this.#subscriber.off('ready', this.#onReady)
     this.#subscriber.off('end', this.#onEnd)
+    this.#removeClusterLifecycleBridge()
     try {
       await this.#subscriber.quit()
     } catch {
@@ -340,9 +447,9 @@ export class RedisSubscriberTransport {
         for (const subscription of lifecycle.subscriptions) subscription.established()
         return true
       })
-      .catch((err: unknown) => {
+      .catch(async (err: unknown) => {
         if (this.#attemptIsCurrent(lifecycle, operationEpoch, connectionEpoch)) {
-          this.#subscriptionExhausted(lifecycle, err)
+          await this.#subscriptionExhausted(lifecycle, err)
         }
         throw err
       })
@@ -441,12 +548,26 @@ export class RedisSubscriberTransport {
     for (const resolve of waiters) resolve()
   }
 
-  #subscriptionExhausted(lifecycle: ChannelLifecycle, reason: unknown): void {
-    this.#subscribedChannels.delete(lifecycle.binding.channel)
-    for (const subscription of lifecycle.subscriptions) subscription.failPermanently(reason)
+  async #subscriptionExhausted(lifecycle: ChannelLifecycle, reason: unknown): Promise<void> {
+    const subscriptions = [...lifecycle.subscriptions]
     lifecycle.subscriptions.clear()
     lifecycle.operationEpoch++
-    void this.#retryEmptyChannelCleanup(lifecycle)
+    try {
+      const channel = lifecycle.binding.channel
+      const ownership = this.#subscribedChannels.get(channel)
+      if (ownership !== undefined && !this.#disposed && this.#subscriber.status !== 'end') {
+        await this.#subscriber.unsubscribe(channel)
+        if (this.#subscribedChannels.get(channel) === ownership) this.#subscribedChannels.delete(channel)
+      }
+      await this.#unsubscribeInvalidationIfLast(lifecycle)
+      this.#finishEmptyChannelCleanup(lifecycle)
+    } catch {
+      void this.#retryEmptyChannelCleanup(lifecycle)
+    } finally {
+      // `closed` is the public terminal barrier. Publish it only after successful exact cleanup has
+      // removed the old binding, so an immediate legal same-id reuse cannot inherit its stale token.
+      for (const subscription of subscriptions) subscription.failPermanently(reason)
+    }
   }
 
   async #detach(lifecycle: ChannelLifecycle, subscription: RedisLaneSubscription): Promise<void> {

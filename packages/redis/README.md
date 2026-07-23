@@ -18,6 +18,26 @@ const redis = new IORedis('redis://localhost:6379')
 installRedis(redis)
 ```
 
+## Room backend
+
+`RedisRoomBackend` accepts either an ioredis `Redis` or `Cluster` client. The Cluster realization keeps
+each room's atomic records in one hash slot, follows `MOVED` and `ASK` redirections, and discovers room
+generation data across every master. Its `receivers` capability is `node-local`: Redis reports the
+subscriber connections attached to the master executing `PUBLISH`, while Cluster Pub/Sub still delivers
+the frame to the package's shared subscriber connection on another master.
+
+```ts
+import { Cluster } from 'ioredis'
+import { RedisRoomBackend } from '@telefunc/redis'
+
+const redis = new Cluster([
+  { host: '127.0.0.1', port: 7000 },
+  { host: '127.0.0.1', port: 7001 },
+  { host: '127.0.0.1', port: 7002 },
+])
+const backend = new RedisRoomBackend({ redis })
+```
+
 That swaps Telefunc's default in-memory broadcast transport for Redis Pub/Sub. All subscribers across the cluster observe the same publish order for a given key.
 
 `Channel` is per-instance — reconnects must land on the instance holding the channel's state. Pair this package with sticky sessions at the load balancer; see [Scaling](https://telefunc.com/stream/scale).

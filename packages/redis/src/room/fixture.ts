@@ -13,7 +13,8 @@
 //       cxAppliesSynchronously=false — which OBLIGATES concurrentHeadCxBarrier (the suite throws without
 //       it) and the barrier-forced I13(c) variant in the Redis-specific spec.
 
-import { Redis } from 'ioredis'
+import { createHash } from 'node:crypto'
+import { Cluster, Redis } from 'ioredis'
 import { callDefinedCommand } from '../callDefinedCommand.js'
 import type {
   BackendFixture,
@@ -37,6 +38,28 @@ const REDIS_TRACES: BackendTraces = {
 }
 
 let fixtureSeq = 0
+
+export type RedisClusterNode = { host: string; port: number }
+type RoomRedisClient = Redis | Cluster
+
+function configuredClusterNodes(): RedisClusterNode[] | undefined {
+  const raw = process.env.TELEFUNC_TEST_REDIS_CLUSTER_NODES
+  if (raw === undefined || raw === '') return undefined
+  return parseRedisClusterNodes(raw)
+}
+
+export function parseRedisClusterNodes(raw: string): RedisClusterNode[] {
+  const nodes = raw.split(',').map((entry) => {
+    const [host, portText] = entry.trim().split(':')
+    const port = Number(portText)
+    if (host === undefined || host === '' || !Number.isInteger(port) || port <= 0 || port > 65_535) {
+      throw new Error(`Redis fixture: invalid TELEFUNC_TEST_REDIS_CLUSTER_NODES entry '${entry}'`)
+    }
+    return { host, port }
+  })
+  if (nodes.length < 3) throw new Error('Redis fixture: Cluster certification requires at least three startup nodes')
+  return nodes
+}
 
 // A namespace unique per fixture instance so parallel vitest workers sharing one Redis never collide —
 // no FLUSHDB (which would clobber a sibling worker), just an unshared prefix reclaimed on dispose.
@@ -74,9 +97,9 @@ export type RedisRoomCommandCall = { name: string; args: readonly unknown[] }
 // probe fired inside the stable-read window.
 export type RedisBackendFixture = BackendFixture & {
   backend: RedisRoomBackend
-  redis: Redis
-  subscriber: Redis
-  subscriberId: number
+  redis: RoomRedisClient
+  subscriber: RoomRedisClient
+  allowedReceiverCountsAtAuthority: NonNullable<BackendFixture['allowedReceiverCountsAtAuthority']>
   prefix: string
   setStableReadProbe(fn: StableReadProbe | null): void
   setBeforeSubscribe(fn: SubscribeProbe | null): void
@@ -87,22 +110,66 @@ export type RedisBackendFixture = BackendFixture & {
   commandCalls(): readonly RedisRoomCommandCall[]
   captureGenerationAttemptForTest(roomId: string, inc: string, attemptId: string, createdAt: number): Promise<string>
   countGenerationCapturesForTest(roomId: string): Promise<number>
+  pubSubClientIdsForTest(): Promise<number[]>
+  pubSubSubscriberCountForTest(channel: string): Promise<number>
+  killSubscriberForTest(id?: number): Promise<void>
   createPeerBackend(): Promise<{ backend: RedisRoomBackend; dispose(): Promise<void> }>
 }
 
 export async function createRedisFixture(
   url: string,
-  opts: { maxRetainedPayloadBytes?: number; useRedisAuthority?: boolean } = {},
+  opts: {
+    maxRetainedPayloadBytes?: number
+    useRedisAuthority?: boolean
+    clusterNodes?: RedisClusterNode[]
+  } = {},
 ): Promise<RedisBackendFixture> {
-  const redis = new Redis(url, { maxRetriesPerRequest: 2, lazyConnect: false })
-  const subscriber = new Redis(url, {
-    autoResubscribe: false,
-    lazyConnect: false,
-    maxRetriesPerRequest: 1,
-    retryStrategy: (attempt) => (attempt <= 5 ? 0 : null),
-  })
-  const subscriberId = Number(await subscriber.client('ID'))
+  const clusterNodes = opts.clusterNodes ?? configuredClusterNodes()
   const prefix = uniquePrefix()
+  const redis: RoomRedisClient =
+    clusterNodes === undefined
+      ? new Redis(url, { maxRetriesPerRequest: 2, lazyConnect: false })
+      : new Cluster(
+          clusterNodes.map((node) => ({ ...node })),
+          {
+            scaleReads: 'master',
+            redisOptions: {
+              connectionName: `${prefix}-publisher`,
+              maxRetriesPerRequest: 2,
+              lazyConnect: false,
+            },
+            clusterRetryStrategy: (attempt) => (attempt <= 5 ? 20 : null),
+          },
+        )
+  const subscriber: RoomRedisClient =
+    clusterNodes === undefined
+      ? new Redis(url, {
+          autoResubscribe: false,
+          lazyConnect: false,
+          maxRetriesPerRequest: 1,
+          retryStrategy: (attempt) => (attempt <= 5 ? 0 : null),
+        })
+      : new Cluster(
+          clusterNodes.map((node) => ({ ...node })),
+          {
+            scaleReads: 'master',
+            redisOptions: {
+              autoResubscribe: false,
+              connectionName: `${prefix}-subscriber`,
+              lazyConnect: false,
+              maxRetriesPerRequest: 1,
+            },
+            clusterRetryStrategy: (attempt) => (attempt <= 5 ? 20 : null),
+          },
+        )
+  if (redis instanceof Cluster) redis.on('error', () => {})
+  if (subscriber instanceof Cluster) subscriber.on('error', () => {})
+  if (redis instanceof Cluster && subscriber instanceof Cluster) {
+    // The existing fixture compresses the backend's 250ms..4s retry timers below. Let ioredis finish
+    // its own slot-cache bootstrap before that global test clock is installed, otherwise its startup
+    // watchdogs are also collapsed and every startup node is rejected spuriously.
+    await Promise.all([redis.ping(), subscriber.ping()])
+  }
   // Authority time starts ALIGNED with the caller clock and only `advanceAuthority` moves it.
   let clock = Date.now()
   let probe: StableReadProbe | null = null
@@ -142,7 +209,7 @@ export async function createRedisFixture(
 
   type DynamicCommands = Record<string, (...args: unknown[]) => Promise<unknown>>
   const wrapCommand = (
-    client: Redis,
+    client: RoomRedisClient,
     name: string,
     wrapper: (invoke: (args: unknown[]) => Promise<unknown>, args: unknown[]) => Promise<unknown>,
   ): void => {
@@ -156,7 +223,7 @@ export async function createRedisFixture(
     })
   }
 
-  const installAuthorityClock = (client: Redis): void => {
+  const installAuthorityClock = (client: RoomRedisClient): void => {
     const now = (): string => (opts.useRedisAuthority === true ? '' : String(clock))
     for (const [name, index] of [
       [REDIS_ROOM_COMMANDS.headCx.name, 4],
@@ -270,21 +337,100 @@ export async function createRedisFixture(
     })
   }
 
+  if (redis instanceof Cluster) {
+    type EvalSha = (sha: string, numberOfKeys: number, ...args: unknown[]) => Promise<unknown>
+    const evalClient = redis as unknown as { evalsha: EvalSha }
+    const originalEvalSha = evalClient.evalsha.bind(redis)
+    const commandsBySha = new Map(
+      Object.values(REDIS_ROOM_COMMANDS).map((command) => [
+        createHash('sha1').update(command.lua).digest('hex'),
+        command,
+      ]),
+    )
+    evalClient.evalsha = async (sha, numberOfKeys, ...rawArgs) => {
+      const command = commandsBySha.get(sha)
+      if (command === undefined) return await originalEvalSha(sha, numberOfKeys, ...rawArgs)
+      const dynamic = command.numberOfKeys === null
+      const args = dynamic ? [String(numberOfKeys), ...rawArgs] : rawArgs
+      commandCalls.push({ name: command.name, args: [...args] })
+
+      const now = opts.useRedisAuthority === true ? '' : String(clock)
+      if (
+        command.name === REDIS_ROOM_COMMANDS.headCx.name ||
+        command.name === REDIS_ROOM_COMMANDS.captureGeneration.name ||
+        command.name === REDIS_ROOM_COMMANDS.validateGeneration.name ||
+        command.name === REDIS_ROOM_COMMANDS.commit.name
+      ) {
+        args[command.name === REDIS_ROOM_COMMANDS.headCx.name ? 4 : 5] = now
+      } else if (command.name === REDIS_ROOM_COMMANDS.cellsCx.name) {
+        args[Number(args[0]) + 1] = now
+      }
+
+      if (command.name === REDIS_ROOM_COMMANDS.validateGeneration.name) {
+        const channel = acknowledgedChannels.shift()
+        if (channel !== undefined && afterSubscribeAck !== null) {
+          await runProbe('after subscribe acknowledgement', () => afterSubscribeAck?.(channel))
+        }
+      }
+      if (command.name === REDIS_ROOM_COMMANDS.directoryDelete.name && beforeDirectoryDeleteApply !== null) {
+        await runProbe('before directory delete', () =>
+          beforeDirectoryDeleteApply?.({ roomId: String(args[2]), incTag: String(args[3]) }),
+        )
+      }
+      if (command.name === REDIS_ROOM_COMMANDS.dropGenerationFinalize.name && beforeDropGenerationUnregister !== null) {
+        await runProbe('before generation unregister', () =>
+          beforeDropGenerationUnregister?.({ roomId: roomIdFromKey(args[0]), inc: String(args[2]) }),
+        )
+      }
+
+      const actualArgs = dynamic ? args.slice(1) : args
+      const reply = await originalEvalSha(sha, numberOfKeys, ...actualArgs)
+      if (
+        command.name === REDIS_ROOM_COMMANDS.captureGeneration.name &&
+        afterGenerationCapture !== null &&
+        bypassCaptureProbe === 0
+      ) {
+        const parsed = JSON.parse(String(reply)) as { token?: string }
+        await runProbe('after generation capture', () =>
+          afterGenerationCapture?.({
+            roomId: roomIdFromKey(args[0]),
+            inc: String(args[6]),
+            attemptId: String(args[7]),
+            createdAt: Number(args[8]),
+            token: parsed.token ?? '',
+          }),
+        )
+      }
+      return reply
+    }
+    restorers.push(() => {
+      evalClient.evalsha = originalEvalSha
+    })
+  }
+
   // Pre-cache the scripts so a head-CX race never pays a one-off NOSCRIPT round-trip that could perturb
   // the FIFO ordering the barrier relies on.
-  await Promise.all(Object.values(REDIS_ROOM_COMMANDS).map((command) => redis.script('LOAD', command.lua)))
+  const scriptClients = redis instanceof Cluster ? redis.nodes('master') : [redis]
+  await Promise.all(
+    scriptClients.flatMap((client) =>
+      Object.values(REDIS_ROOM_COMMANDS).map(async (command) => {
+        await client.script('LOAD', command.lua)
+      }),
+    ),
+  )
 
   return {
     backend,
     redis,
     subscriber,
-    subscriberId,
     prefix,
     traces: REDIS_TRACES,
     // Redis PUBLISH counts subscribed connections, not the callbacks multiplexed behind this fixture's
     // one subscriber connection. Keep these exact: two local callbacks still form one broker target,
     // and detaching either sibling leaves that same one connection subscribed for the survivor.
     expectedReceivers: { twoLocalSubscriptionsSameLane: 1, oneLocalSubscriptionAfterSiblingDetach: 1 },
+    allowedReceiverCountsAtAuthority: async (_roomId, _inc, _lane, globalFallback) =>
+      redis instanceof Cluster && globalFallback > 0 ? [0, 1] : [globalFallback],
     authorityNow: () => clock,
     advanceAuthority: (ms) => {
       clock += ms
@@ -332,9 +478,65 @@ export async function createRedisFixture(
       }
     },
     countGenerationCapturesForTest: async (roomId) => await redis.hlen(routeCapturesKey(prefix, roomId)),
+    pubSubClientIdsForTest: async () => await pubSubClientIds(redis),
+    pubSubSubscriberCountForTest: async (channel) => await pubSubSubscriberCount(redis, channel),
+    killSubscriberForTest: async (id) => {
+      const nodes = redis instanceof Cluster ? redis.nodes('master') : [redis]
+      let target: number
+      let owner: Redis
+      if (id === undefined) {
+        const current = await currentSubscriberTarget(subscriber)
+        target = current.id
+        owner = nodes.find(
+          (node) => node.options.host === current.host && Number(node.options.port) === Number(current.port),
+        ) as Redis
+        if (owner === undefined) {
+          throw new Error(`Redis fixture: subscriber owner ${current.host}:${current.port} is unavailable`)
+        }
+      } else {
+        target = id
+        const owners = await pubSubClientOwners(nodes, target)
+        if (owners.length !== 1) {
+          throw new Error(`Redis fixture: expected one owner for Pub/Sub client ${target}, found ${owners.length}`)
+        }
+        owner = owners[0] as Redis
+      }
+      const admin = owner as unknown as { client(command: string, ...args: string[]): Promise<unknown> }
+      if (Number(await admin.client('KILL', 'ID', String(target))) !== 1) {
+        throw new Error(`Redis fixture: subscriber client ${target} was not killed on its exact owner`)
+      }
+    },
     createPeerBackend: async () => {
-      const peerRedis = redis.duplicate({ maxRetriesPerRequest: 2 })
-      const peer = new RedisRoomBackend({ redis: peerRedis, prefix })
+      const peerRedis =
+        redis instanceof Cluster
+          ? redis.duplicate(undefined, { redisOptions: { maxRetriesPerRequest: 2 } })
+          : redis.duplicate({ maxRetriesPerRequest: 2 })
+      let peerSubscriber: Cluster | undefined
+      if (peerRedis instanceof Cluster) {
+        peerRedis.on('error', () => {})
+        peerSubscriber = peerRedis.duplicate(undefined, {
+          redisOptions: { autoResubscribe: false, maxRetriesPerRequest: 1 },
+        })
+        peerSubscriber.on('error', () => {})
+        // This test fixture accelerates the backend's bounded retry delays globally. A duplicate Cluster
+        // and its subscriber both start with cold slot caches, so bootstrap them under the real clock
+        // before constructing the backend; otherwise ioredis's own 1s discovery watchdog is collapsed.
+        const acceleratedSetTimeout = globalThis.setTimeout
+        globalThis.setTimeout = realSetTimeout
+        try {
+          await Promise.all([peerRedis.ping(), peerSubscriber.ping()])
+        } finally {
+          globalThis.setTimeout = acceleratedSetTimeout
+        }
+      }
+      const peerDuplicate = peerRedis.duplicate.bind(peerRedis)
+      if (peerSubscriber !== undefined) peerRedis.duplicate = (() => peerSubscriber) as typeof peerRedis.duplicate
+      let peer: RedisRoomBackend
+      try {
+        peer = new RedisRoomBackend({ redis: peerRedis, prefix })
+      } finally {
+        peerRedis.duplicate = peerDuplicate
+      }
       installAuthorityClock(peerRedis)
       let disposed = false
       const dispose = async (): Promise<void> => {
@@ -387,13 +589,89 @@ export function makeRedisHarness(url: string): BackendHarness {
   return { name: 'redis', create: () => createRedisFixture(url) }
 }
 
-async function scanPrefix(redis: Redis, prefix: string): Promise<string[]> {
-  const keys: string[] = []
-  let cursor = '0'
-  do {
-    const [next, page] = await redis.scan(cursor, 'MATCH', `${prefix}*`, 'COUNT', 500)
-    cursor = next
-    for (const key of page) keys.push(key)
-  } while (cursor !== '0')
-  return keys
+export function makeRedisClusterHarness(url: string, clusterNodes: RedisClusterNode[]): BackendHarness {
+  return { name: 'redis-cluster', create: () => createRedisFixture(url, { clusterNodes }) }
+}
+
+async function scanPrefix(redis: RoomRedisClient, prefix: string): Promise<string[]> {
+  const nodes = redis instanceof Cluster ? redis.nodes('master') : [redis]
+  const keys = new Set<string>()
+  for (const node of nodes) {
+    let cursor = '0'
+    do {
+      const [next, page] = await node.scan(cursor, 'MATCH', `${prefix}*`, 'COUNT', 500)
+      cursor = next
+      for (const key of page) keys.add(key)
+    } while (cursor !== '0')
+  }
+  return [...keys]
+}
+
+type ClusterSubscriberInternals = { subscriber: { getInstance(): Redis | null } }
+
+async function currentSubscriberTarget(
+  subscriber: RoomRedisClient,
+): Promise<{ id: number; host: string; port: number }> {
+  if (subscriber instanceof Cluster) {
+    const connection = (subscriber as unknown as ClusterSubscriberInternals).subscriber.getInstance()
+    if (connection === null) throw new Error('Redis fixture: Cluster subscriber connection is not established')
+    // Redis 6 permits only Pub/Sub commands once a socket is subscribed, so CLIENT ID on the hidden
+    // ClusterSubscriber socket is rejected. Resolve the id from the owning master's admin connection
+    // using the fixture-unique connection name instead.
+    const { host, port, connectionName } = connection.options
+    const owner = subscriber
+      .nodes('master')
+      .find((node) => node.options.host === host && Number(node.options.port) === Number(port))
+    if (owner === undefined) throw new Error(`Redis fixture: subscriber owner ${host}:${port} is unavailable`)
+    const admin = owner as unknown as { client(command: string, ...args: string[]): Promise<unknown> }
+    const list = String(await admin.client('LIST', 'TYPE', 'pubsub'))
+    const matches = list
+      .split('\n')
+      .filter((line) => line.includes(`name=${connectionName ?? ''} `))
+      .map((line) => line.match(/(?:^|\s)id=(\d+)(?:\s|$)/)?.[1])
+      .filter((id): id is string => id !== undefined)
+    if (matches.length !== 1) {
+      throw new Error(
+        `Redis fixture: expected one named Cluster subscriber on ${host}:${port}, found ${matches.length}`,
+      )
+    }
+    return { id: Number(matches[0]), host: host ?? '127.0.0.1', port: Number(port) }
+  }
+  return {
+    id: Number(await subscriber.client('ID')),
+    host: subscriber.options.host ?? '127.0.0.1',
+    port: Number(subscriber.options.port),
+  }
+}
+
+async function pubSubClientOwners(nodes: Redis[], id: number): Promise<Redis[]> {
+  const owners: Redis[] = []
+  for (const node of nodes) {
+    const admin = node as unknown as { client(command: string, ...args: string[]): Promise<unknown> }
+    const list = String(await admin.client('LIST', 'TYPE', 'pubsub'))
+    if (list.split('\n').some((line) => line.match(/(?:^|\s)id=(\d+)(?:\s|$)/)?.[1] === String(id))) {
+      owners.push(node)
+    }
+  }
+  return owners
+}
+
+async function pubSubClientIds(redis: RoomRedisClient): Promise<number[]> {
+  const nodes = redis instanceof Cluster ? redis.nodes('master') : [redis]
+  const ids: number[] = []
+  for (const node of nodes) {
+    const admin = node as unknown as { client(command: string, ...args: string[]): Promise<unknown> }
+    const list = String(await admin.client('LIST', 'TYPE', 'pubsub'))
+    for (const line of list.split('\n')) {
+      const match = line.match(/(?:^|\s)id=(\d+)(?:\s|$)/)
+      if (match !== null) ids.push(Number(match[1]))
+    }
+  }
+  return ids
+}
+
+async function pubSubSubscriberCount(redis: RoomRedisClient, channel: string): Promise<number> {
+  const nodes = redis instanceof Cluster ? redis.nodes('master') : [redis]
+  const counts = await Promise.all(nodes.map(async (node) => Number((await node.pubsub('NUMSUB', channel))[1])))
+  return counts.reduce((total, count) => total + count, 0)
 }

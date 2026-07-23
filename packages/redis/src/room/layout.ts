@@ -1,6 +1,6 @@
 // Final physical key layout + every Lua script for the Redis realization of RoomBackendSpi. The module
-// is package-internal but is emitted because RedisRoomBackend consumes it. Real Redis Cluster behavior
-// remains W4-R, so `capabilities.clusterSafe` stays false in backend.ts.
+// is package-internal but is emitted because RedisRoomBackend consumes it. Redis Cluster certification
+// is owned by the disposable three-master W4-R suite; standalone and Cluster use this one layout.
 //
 // Layout — every key of one room shares the `{<rid>}` hash tag, so a whole room lives in ONE Cluster
 // slot and each script can declare all the keys it touches in KEYS (spi.md §5.2):

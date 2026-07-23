@@ -6,7 +6,7 @@
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { ReadinessState } from '../spi.js'
-import { type BackendFixture, installedBackends } from './harness.js'
+import { allowedReceiverCounts, type BackendFixture, installedBackends } from './harness.js'
 import {
   accepted,
   bytes,
@@ -54,7 +54,7 @@ for (const harness of installedBackends) {
         expect(sub.state()).toBe('ready')
 
         const result = accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, bytes('K')))
-        expect(result.receivers).toBe(1)
+        expect(await allowedReceiverCounts(fx, roomId, inc, SEMANTIC, 1)).toContain(result.receivers)
         await result.delivery // the backend's one at-most-once handoff attempt settled
         await latch.waitFor(1) // receiver completion is not a delivery guarantee — wait for it, bounded
         expect(latch.payloads()).toEqual(['K'])
@@ -74,7 +74,15 @@ for (const harness of installedBackends) {
         expect(first.state()).toBe('ready')
 
         const result = accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, bytes('survivor')))
-        expect(result.receivers).toBe(fx.expectedReceivers.oneLocalSubscriptionAfterSiblingDetach)
+        expect(
+          await allowedReceiverCounts(
+            fx,
+            roomId,
+            inc,
+            SEMANTIC,
+            fx.expectedReceivers.oneLocalSubscriptionAfterSiblingDetach,
+          ),
+        ).toContain(result.receivers)
         await result.delivery
         await survivor.waitFor(1)
         expect(detached.payloads()).toEqual([])
@@ -171,7 +179,7 @@ for (const harness of installedBackends) {
         await flush()
 
         expect(fresh.payloads()).toEqual(['new-gen'])
-        expect(result.receivers).toBe(1) // the old subscription is not even a target
+        expect(await allowedReceiverCounts(fx, roomId, recreated.inc, SEMANTIC, 1)).toContain(result.receivers) // the old subscription is not even a target
         expect(stale.payloads()).toEqual(['old-gen']) // zero frames from the new incarnation
       })
     })

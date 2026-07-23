@@ -8,13 +8,18 @@
 // memory-only (an explicit skip report, never fake green).
 
 import { installedBackends } from '../../../telefunc/wire-protocol/backend/conformance/harness.js'
-import { makeRedisHarness } from './fixture.js'
+import { makeRedisClusterHarness, makeRedisHarness, parseRedisClusterNodes } from './fixture.js'
 
 const url = process.env.TELEFUNC_TEST_REAL_REDIS
+const clusterNodes = process.env.TELEFUNC_TEST_REDIS_CLUSTER_NODES
 
 if (url !== undefined && url !== '') {
-  if (!installedBackends.some((harness) => harness.name === 'redis')) {
-    installedBackends.push(makeRedisHarness(url))
+  const harness =
+    clusterNodes === undefined || clusterNodes === ''
+      ? makeRedisHarness(url)
+      : makeRedisClusterHarness(url, parseRedisClusterNodes(clusterNodes))
+  if (!installedBackends.some((candidate) => candidate.name === harness.name)) {
+    installedBackends.push(harness)
   }
 } else {
   console.warn(

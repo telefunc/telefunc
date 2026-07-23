@@ -37,7 +37,7 @@ describe.skipIf(url === undefined || url === '')('Redis independent-review race 
 
   afterEach(async () => {
     vi.useRealTimers()
-    await fx.dispose()
+    if (fx !== undefined) await fx.dispose()
   })
 
   it('same-channel subscribers share the in-flight SUBSCRIBE ack before either becomes ready', async () => {
@@ -73,7 +73,13 @@ describe.skipIf(url === undefined || url === '')('Redis independent-review race 
     release.resolve()
     await Promise.all([first.ready, second.ready])
     expect(calls).toBe(1)
-    expect(accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, bytes('after-ready'))).receivers).toBe(1)
+    await expectOneNodeLocalReceiver(
+      fx,
+      accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, bytes('after-ready'))).receivers,
+      roomId,
+      inc,
+      SEMANTIC,
+    )
   })
 
   it('initial SUBSCRIBE failure rejects ready, retries exactly five times, then closes', async () => {
@@ -103,8 +109,10 @@ describe.skipIf(url === undefined || url === '')('Redis independent-review race 
     const states: string[] = []
     sub.onStateChange((state) => states.push(state))
 
-    await fx.redis.client('KILL', 'ID', String(fx.subscriberId))
-    await waitFor(() => states.includes('lost') && states.includes('ready'))
+    await fx.killSubscriberForTest()
+    await waitFor(() => states.includes('lost') && states.includes('ready')).catch((error: unknown) => {
+      throw new Error(`${String(error)}; observed states=${JSON.stringify(states)}, current=${sub.state()}`)
+    })
     expect(states.slice(0, 2)).toEqual(['lost', 'ready'])
     expect(sub.state()).toBe('ready')
 
@@ -134,7 +142,7 @@ describe.skipIf(url === undefined || url === '')('Redis independent-review race 
     sub.onStateChange((state) => states.push(state))
     await firstAckHeld.promise
 
-    await fx.redis.client('KILL', 'ID', String(fx.subscriberId))
+    await fx.killSubscriberForTest()
     await waitFor(() => states.includes('lost'))
     await waitFor(() => fx.subscriber.status === 'ready')
 
@@ -142,12 +150,12 @@ describe.skipIf(url === undefined || url === '')('Redis independent-review race 
     await waitFor(() => sub.state() === 'ready')
     expect(ackCount).toBe(2)
     await waitFor(
-      async () => (await fx.redis.pubsub('NUMSUB', `${fx.prefix}room:{${roomId}}:ch:${inc}:semantic`))[1] === 1,
+      async () => (await fx.pubSubSubscriberCountForTest(`${fx.prefix}room:{${roomId}}:ch:${inc}:semantic`)) === 1,
     )
     expect(states.slice(0, 2)).toEqual(['lost', 'ready'])
 
     const result = accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, bytes('after-race')))
-    expect(result.receivers).toBe(1)
+    await expectOneNodeLocalReceiver(fx, result.receivers, roomId, inc, SEMANTIC)
     await result.delivery
     await latch.waitFor(1)
     expect(latch.payloads()).toEqual(['after-race'])
@@ -200,10 +208,10 @@ describe.skipIf(url === undefined || url === '')('Redis independent-review race 
     await replacement.ready
     releaseFirstValidation.resolve()
     expect(ackCount).toBe(2)
-    await waitFor(async () => (await fx.redis.pubsub('NUMSUB', channel))[1] === 1)
+    await waitFor(async () => (await fx.pubSubSubscriberCountForTest(channel)) === 1)
     expect(replacement.state()).toBe('ready')
     const result = accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, bytes('replacement')))
-    expect(result.receivers).toBe(1)
+    await expectOneNodeLocalReceiver(fx, result.receivers, roomId, inc, SEMANTIC)
     await result.delivery
     await latch.waitFor(1)
     expect(latch.payloads()).toEqual(['replacement'])
@@ -257,9 +265,9 @@ describe.skipIf(url === undefined || url === '')('Redis independent-review race 
 
     await replacement.ready
     expect(ackCount).toBe(2)
-    await waitFor(async () => (await fx.redis.pubsub('NUMSUB', channel))[1] === 1)
+    await waitFor(async () => (await fx.pubSubSubscriberCountForTest(channel)) === 1)
     const result = accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, bytes('before-ack')))
-    expect(result.receivers).toBe(1)
+    await expectOneNodeLocalReceiver(fx, result.receivers, roomId, inc, SEMANTIC)
     await result.delivery
     await latch.waitFor(1)
     expect(latch.payloads()).toEqual(['before-ack'])
@@ -313,9 +321,9 @@ describe.skipIf(url === undefined || url === '')('Redis independent-review race 
 
     await replacement.ready
     expect(ackCount).toBe(2)
-    await waitFor(async () => (await fx.redis.pubsub('NUMSUB', channel))[1] === 1)
+    await waitFor(async () => (await fx.pubSubSubscriberCountForTest(channel)) === 1)
     const result = accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, bytes('after-ack')))
-    expect(result.receivers).toBe(1)
+    await expectOneNodeLocalReceiver(fx, result.receivers, roomId, inc, SEMANTIC)
     await result.delivery
     await latch.waitFor(1)
     expect(latch.payloads()).toEqual(['after-ack'])
@@ -368,9 +376,9 @@ describe.skipIf(url === undefined || url === '')('Redis independent-review race 
     await Promise.all([first.ready, second.ready])
 
     expect(ackCount).toBe(2)
-    await waitFor(async () => (await fx.redis.pubsub('NUMSUB', channel))[1] === 1)
+    await waitFor(async () => (await fx.pubSubSubscriberCountForTest(channel)) === 1)
     const result = accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, bytes('two-late')))
-    expect(result.receivers).toBe(1)
+    await expectOneNodeLocalReceiver(fx, result.receivers, roomId, inc, SEMANTIC)
     await result.delivery
     await Promise.all([firstLatch.waitFor(1), secondLatch.waitFor(1)])
     expect(firstLatch.payloads()).toEqual(['two-late'])
@@ -415,9 +423,9 @@ describe.skipIf(url === undefined || url === '')('Redis independent-review race 
 
     await successor.ready
     expect(ackCount).toBe(2)
-    await waitFor(async () => (await fx.redis.pubsub('NUMSUB', channel))[1] === 1)
+    await waitFor(async () => (await fx.pubSubSubscriberCountForTest(channel)) === 1)
     const result = accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, bytes('after-failure')))
-    expect(result.receivers).toBe(1)
+    await expectOneNodeLocalReceiver(fx, result.receivers, roomId, inc, SEMANTIC)
     await result.delivery
     await latch.waitFor(1)
     expect(latch.payloads()).toEqual(['after-failure'])
@@ -454,7 +462,7 @@ describe.skipIf(url === undefined || url === '')('Redis independent-review race 
     await cleanupCalled.promise
     const latch = collector()
     const replacement = fx.backend.subscribeLane(roomId, inc, SEMANTIC, latch.receiver)
-    await fx.redis.client('KILL', 'ID', String(fx.subscriberId))
+    await fx.killSubscriberForTest()
     expect(await settled(replacement.ready)).toBe('rejected')
     await waitFor(() => replacement.state() === 'lost')
     releaseCleanup.resolve()
@@ -463,9 +471,9 @@ describe.skipIf(url === undefined || url === '')('Redis independent-review race 
 
     await waitFor(() => replacement.state() === 'ready')
     expect(ackCount).toBe(2)
-    await waitFor(async () => (await fx.redis.pubsub('NUMSUB', channel))[1] === 1)
+    await waitFor(async () => (await fx.pubSubSubscriberCountForTest(channel)) === 1)
     const result = accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, bytes('after-close')))
-    expect(result.receivers).toBe(1)
+    await expectOneNodeLocalReceiver(fx, result.receivers, roomId, inc, SEMANTIC)
     await result.delivery
     await latch.waitFor(1)
     expect(latch.payloads()).toEqual(['after-close'])
@@ -495,9 +503,9 @@ describe.skipIf(url === undefined || url === '')('Redis independent-review race 
     await Promise.all([first.ready, second.ready])
 
     expect(ackCount).toBe(1)
-    expect((await fx.redis.pubsub('NUMSUB', channel))[1]).toBe(1)
+    expect(await fx.pubSubSubscriberCountForTest(channel)).toBe(1)
     const result = accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, bytes('one-ack')))
-    expect(result.receivers).toBe(1)
+    await expectOneNodeLocalReceiver(fx, result.receivers, roomId, inc, SEMANTIC)
     await result.delivery
     await Promise.all([firstLatch.waitFor(1), secondLatch.waitFor(1)])
     expect(firstLatch.payloads()).toEqual(['one-ack'])
@@ -531,7 +539,7 @@ describe.skipIf(url === undefined || url === '')('Redis independent-review race 
     control.onStateChange((state) => controlStates.push(state))
     await firstAcksHeld.promise
 
-    await fx.redis.client('KILL', 'ID', String(fx.subscriberId))
+    await fx.killSubscriberForTest()
     await waitFor(() => semanticStates.includes('lost') && controlStates.includes('lost'))
     await waitFor(() => fx.subscriber.status === 'ready')
     releaseFirstValidations.resolve()
@@ -541,13 +549,16 @@ describe.skipIf(url === undefined || url === '')('Redis independent-review race 
     const semanticChannel = `${fx.prefix}room:{${roomId}}:ch:${inc}:semantic`
     const controlChannel = `${fx.prefix}room:{${roomId}}:ch:${inc}:control`
     await waitFor(async () => {
-      const counts = await fx.redis.pubsub('NUMSUB', semanticChannel, controlChannel)
-      return counts[1] === 1 && counts[3] === 1
+      return (
+        (await fx.pubSubSubscriberCountForTest(semanticChannel)) === 1 &&
+        (await fx.pubSubSubscriberCountForTest(controlChannel)) === 1
+      )
     })
 
     const semanticResult = accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, bytes('semantic')))
     const controlResult = accepted(await fx.backend.commitLane(roomId, inc, CONTROL, bytes('control')))
-    expect([semanticResult.receivers, controlResult.receivers]).toEqual([1, 1])
+    await expectOneNodeLocalReceiver(fx, semanticResult.receivers, roomId, inc, SEMANTIC)
+    await expectOneNodeLocalReceiver(fx, controlResult.receivers, roomId, inc, CONTROL)
     await Promise.all([semanticResult.delivery, controlResult.delivery])
     await Promise.all([semanticLatch.waitFor(1), controlLatch.waitFor(1)])
     expect(semanticLatch.payloads()).toEqual(['semantic'])
@@ -575,7 +586,7 @@ describe.skipIf(url === undefined || url === '')('Redis independent-review race 
 
     const old = fx.backend.subscribeLane(roomId, inc, SEMANTIC, () => {})
     await oldAckHeld.promise
-    await fx.redis.client('KILL', 'ID', String(fx.subscriberId))
+    await fx.killSubscriberForTest()
     await currentAckHeld.promise
 
     const latch = collector()
@@ -590,7 +601,7 @@ describe.skipIf(url === undefined || url === '')('Redis independent-review race 
     await late.ready
     expect(ackCount).toBe(2)
     const result = accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, bytes('late-only')))
-    expect(result.receivers).toBe(1)
+    await expectOneNodeLocalReceiver(fx, result.receivers, roomId, inc, SEMANTIC)
     await result.delivery
     await latch.waitFor(1)
     expect(latch.payloads()).toEqual(['late-only'])
@@ -611,11 +622,11 @@ describe.skipIf(url === undefined || url === '')('Redis independent-review race 
     const latch = collector()
     const sub = fx.backend.subscribeLane(roomId, inc, SEMANTIC, latch.receiver)
     await entered[0]?.promise
-    await fx.redis.client('KILL', 'ID', String(fx.subscriberId))
+    await fx.killSubscriberForTest()
     await entered[1]?.promise
 
     const secondConnectionId = await onlyPubSubClientId(fx)
-    await fx.redis.client('KILL', 'ID', String(secondConnectionId))
+    await fx.killSubscriberForTest(secondConnectionId)
     await entered[2]?.promise
     release[0]?.resolve()
     release[1]?.resolve()
@@ -626,10 +637,10 @@ describe.skipIf(url === undefined || url === '')('Redis independent-review race 
     await waitFor(() => sub.state() === 'ready')
     expect(ackCount).toBe(3)
     await waitFor(
-      async () => (await fx.redis.pubsub('NUMSUB', `${fx.prefix}room:{${roomId}}:ch:${inc}:semantic`))[1] === 1,
+      async () => (await fx.pubSubSubscriberCountForTest(`${fx.prefix}room:{${roomId}}:ch:${inc}:semantic`)) === 1,
     )
     const result = accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, bytes('third-connection')))
-    expect(result.receivers).toBe(1)
+    await expectOneNodeLocalReceiver(fx, result.receivers, roomId, inc, SEMANTIC)
     await result.delivery
     await latch.waitFor(1)
     expect(latch.payloads()).toEqual(['third-connection'])
@@ -649,7 +660,7 @@ describe.skipIf(url === undefined || url === '')('Redis independent-review race 
       entered.resolve()
       await release.promise
     })
-    await fx.redis.client('KILL', 'ID', String(fx.subscriberId))
+    await fx.killSubscriberForTest()
     await entered.promise
 
     const late = fx.backend.subscribeLane(roomId, inc, SEMANTIC, () => {})
@@ -798,7 +809,7 @@ describe.skipIf(url === undefined || url === '')('Redis independent-review race 
     const fresh = fx.backend.subscribeLane(roomId, inc, SEMANTIC, freshLatch.receiver)
     await fresh.ready
     const result = accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, bytes('fresh-only')))
-    expect(result.receivers).toBe(1)
+    await expectOneNodeLocalReceiver(fx, result.receivers, roomId, inc, SEMANTIC)
     await result.delivery
     await freshLatch.waitFor(1)
     expect(staleLatch.payloads()).toEqual([])
@@ -828,7 +839,7 @@ describe.skipIf(url === undefined || url === '')('Redis independent-review race 
 
       await waitFor(() => stale.state() === 'closed')
       await waitFor(
-        async () => (await fx.redis.pubsub('NUMSUB', `${fx.prefix}room:{${roomId}}:ch:${inc}:semantic`))[1] === 0,
+        async () => (await fx.pubSubSubscriberCountForTest(`${fx.prefix}room:{${roomId}}:ch:${inc}:semantic`)) === 0,
       )
       const withoutFresh = accepted(await peer.backend.commitLane(roomId, inc, SEMANTIC, bytes('not-for-stale')))
       expect(withoutFresh.receivers).toBe(0)
@@ -838,7 +849,7 @@ describe.skipIf(url === undefined || url === '')('Redis independent-review race 
       const fresh = fx.backend.subscribeLane(roomId, inc, SEMANTIC, freshLatch.receiver)
       await fresh.ready
       const withFresh = accepted(await peer.backend.commitLane(roomId, inc, SEMANTIC, bytes('fresh-peer')))
-      expect(withFresh.receivers).toBe(1)
+      await expectOneNodeLocalReceiver(fx, withFresh.receivers, roomId, inc, SEMANTIC)
       await withFresh.delivery
       await freshLatch.waitFor(1)
       expect(freshLatch.payloads()).toEqual(['fresh-peer'])
@@ -861,7 +872,7 @@ describe.skipIf(url === undefined || url === '')('Redis independent-review race 
     await sub.unsubscribe()
     expect(sub.state()).toBe('closed')
     await waitFor(
-      async () => (await fx.redis.pubsub('NUMSUB', `${fx.prefix}room:{${roomId}}:ch:${inc}:semantic`))[1] === 0,
+      async () => (await fx.pubSubSubscriberCountForTest(`${fx.prefix}room:{${roomId}}:ch:${inc}:semantic`)) === 0,
     )
     release.resolve()
     await flush()
@@ -882,7 +893,7 @@ describe.skipIf(url === undefined || url === '')('Redis independent-review race 
       await release.promise
     })
     try {
-      await fx.redis.client('KILL', 'ID', String(fx.subscriberId))
+      await fx.killSubscriberForTest()
       await entered.promise
       const head = await readHeadOrThrow(peer.backend, roomId)
       const { head: closing, leaseId } = await enterClosing(peer.backend, roomId, head)
@@ -904,7 +915,13 @@ describe.skipIf(url === undefined || url === '')('Redis independent-review race 
       fx.setBeforeSubscribe(null)
       const fresh = fx.backend.subscribeLane(roomId, inc, SEMANTIC, () => {})
       await fresh.ready
-      expect(accepted(await peer.backend.commitLane(roomId, inc, SEMANTIC, bytes('fresh'))).receivers).toBe(1)
+      await expectOneNodeLocalReceiver(
+        fx,
+        accepted(await peer.backend.commitLane(roomId, inc, SEMANTIC, bytes('fresh'))).receivers,
+        roomId,
+        inc,
+        SEMANTIC,
+      )
     } finally {
       release.resolve()
       await peer.dispose()
@@ -932,7 +949,7 @@ describe.skipIf(url === undefined || url === '')('Redis independent-review race 
     await expect(sub.unsubscribe()).rejects.toThrow('forced unsubscribe transport failure')
     expect(sub.state()).toBe('closed')
     await waitFor(
-      async () => (await fx.redis.pubsub('NUMSUB', `${fx.prefix}room:{${roomId}}:ch:${inc}:semantic`))[1] === 0,
+      async () => (await fx.pubSubSubscriberCountForTest(`${fx.prefix}room:{${roomId}}:ch:${inc}:semantic`)) === 0,
     )
     expect(accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, bytes('after-detach'))).receivers).toBe(0)
     subscriber.unsubscribe = original
@@ -1174,10 +1191,18 @@ describe.skipIf(url === undefined || url === '')('Redis independent-review race 
   })
 })
 
+async function expectOneNodeLocalReceiver(
+  fx: RedisBackendFixture,
+  actual: number,
+  roomId: string,
+  inc: string,
+  lane: Parameters<RedisBackendFixture['allowedReceiverCountsAtAuthority']>[2],
+): Promise<void> {
+  expect(await fx.allowedReceiverCountsAtAuthority(roomId, inc, lane, 1)).toContain(actual)
+}
+
 async function onlyPubSubClientId(fx: RedisBackendFixture): Promise<number> {
-  const redis = fx.redis as unknown as { client(command: string, ...args: string[]): Promise<unknown> }
-  const list = String(await redis.client('LIST', 'TYPE', 'pubsub'))
-  const ids = [...list.matchAll(/(?:^|\n)id=(\d+)\b/g)].map((match) => Number(match[1]))
+  const ids = await fx.pubSubClientIdsForTest()
   if (ids.length !== 1) throw new Error(`expected one Redis pub/sub client, found ${ids.length}`)
   return ids[0] as number
 }
