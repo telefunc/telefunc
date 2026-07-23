@@ -6,7 +6,7 @@
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { LaneId } from '../spi.js'
-import { allowedReceiverCounts, type BackendFixture, installedBackends } from './harness.js'
+import { expectedReceiverCount, type BackendFixture, installedBackends } from './harness.js'
 import {
   accepted,
   binaryLane,
@@ -136,9 +136,9 @@ for (const harness of installedBackends) {
         await Promise.all([firstSub.ready, secondSub.ready])
 
         const result = accepted(await commit(SEMANTIC, 'two-local'))
-        expect(
-          await allowedReceiverCounts(fx, roomId, inc, SEMANTIC, fx.expectedReceivers.twoLocalSubscriptionsSameLane),
-        ).toContain(result.receivers)
+        expect(result.receivers).toBe(
+          await expectedReceiverCount(fx, roomId, inc, SEMANTIC, fx.expectedReceivers.twoLocalSubscriptionsSameLane),
+        )
         await result.delivery
         await Promise.all([first.waitFor(1), second.waitFor(1)])
         expect(first.payloads()).toEqual(['two-local'])

@@ -6,8 +6,11 @@ import { gzipSync } from 'node:zlib'
 import { Cluster, Redis } from 'ioredis'
 import type { CommitAccepted, LaneId, RoomHead } from 'telefunc/backend'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { RedisRoomBackend } from './backend.js'
+import type { RedisRoomBackend as RedisRoomBackendType } from './backend.js'
 import { DIRECTORY_PUT_LUA, directoryIndexKey, headKey, roomTag } from './layout.js'
+
+const publicRuntime = await import('../../dist/index.js')
+const RedisRoomBackend = publicRuntime.RedisRoomBackend as typeof RedisRoomBackendType
 
 type NodeAddress = { host: string; port: number }
 type Master = NodeAddress & { id: string; start: number; end: number; client: Redis }
@@ -44,8 +47,8 @@ describe.skipIf(nodes === undefined)('RedisRoomBackend real three-master Cluster
   })
 
   afterAll(async () => {
-    await Promise.allSettled(masters.map((master) => master.client.quit()))
-    await cluster.quit()
+    await Promise.allSettled((masters ?? []).map((master) => master.client.quit()))
+    if (cluster !== undefined) await cluster.quit().catch(() => cluster.disconnect())
   })
 
   it('reports three real masters, full slots, cluster_state:ok, and the public capability', async () => {
@@ -58,14 +61,16 @@ describe.skipIf(nodes === undefined)('RedisRoomBackend real three-master Cluster
       expect(String(info)).toContain('cluster_known_nodes:3')
     }
 
-    const publicRuntime = await import('../../dist/index.js')
-    const backend = new publicRuntime.RedisRoomBackend({
+    const backend = new RedisRoomBackend({
       redis: cluster as unknown as Redis,
       prefix: uniquePrefix('capability'),
     })
-    expect(backend.capabilities.clusterSafe).toBe(expectedClusterSafe)
-    expect(backend.capabilities.receivers).toBe('node-local')
-    await backend.dispose()
+    try {
+      expect(backend.capabilities.clusterSafe).toBe(expectedClusterSafe)
+      expect(backend.capabilities.receivers).toBe('node-local')
+    } finally {
+      await backend.dispose()
+    }
     console.log(
       `[w4r-evidence] topology=${JSON.stringify(
         masters.map(({ id, host, port, start, end }) => ({ id, host, port, slots: [start, end] })),
@@ -96,33 +101,104 @@ describe.skipIf(nodes === undefined)('RedisRoomBackend real three-master Cluster
     const backend = new RedisRoomBackend({ redis: cluster, prefix })
     const roomId = 'ordered-room'
     const inc = 'ordered-inc'
-    await open(backend, roomId, inc)
     const callbacks: Array<{ seq: number; id: number }> = []
-    const sub = backend.subscribeLane(roomId, inc, SEMANTIC, (payload, info) => {
-      callbacks.push({ seq: info.seq, id: JSON.parse(Buffer.from(payload).toString()).id as number })
-    })
-    await sub.ready
+    let sub: ReturnType<RedisRoomBackendType['subscribeLane']> | undefined
+    try {
+      await open(backend, roomId, inc)
+      sub = backend.subscribeLane(roomId, inc, SEMANTIC, (payload, info) => {
+        callbacks.push({ seq: info.seq, id: JSON.parse(Buffer.from(payload).toString()).id as number })
+      })
+      await sub.ready
 
-    const accepted = await Promise.all(
-      Array.from({ length: 100 }, async (_, id) => {
-        const kind = id % 2 === 0 ? 'text' : 'announce'
-        const result = await backend.commitLane(roomId, inc, SEMANTIC, Buffer.from(JSON.stringify({ id, kind })))
-        if (!('accepted' in result)) throw new Error(`commit ${id} was unexpectedly stale`)
-        return { id, result }
-      }),
-    )
-    await Promise.all(accepted.map(({ result }) => result.delivery))
-    await waitFor(() => callbacks.length === 100, 10_000)
+      const accepted = await Promise.all(
+        Array.from({ length: 100 }, async (_, id) => {
+          const kind = id % 2 === 0 ? 'text' : 'announce'
+          const result = await backend.commitLane(roomId, inc, SEMANTIC, Buffer.from(JSON.stringify({ id, kind })))
+          if (!('accepted' in result)) throw new Error(`commit ${id} was unexpectedly stale`)
+          return { id, result }
+        }),
+      )
+      await Promise.all(accepted.map(({ result }) => result.delivery))
+      await waitFor(() => callbacks.length === 100, 10_000)
 
-    const bySeq = new Map(accepted.map(({ id, result }) => [result.seq, id]))
-    expect([...bySeq.keys()].sort((a, b) => a - b)).toEqual(Array.from({ length: 100 }, (_, i) => i + 1))
-    expect(callbacks.map(({ seq }) => seq)).toEqual(Array.from({ length: 100 }, (_, i) => i + 1))
-    expect(callbacks.map(({ seq, id }) => [seq, id])).toEqual(
-      Array.from({ length: 100 }, (_, i) => [i + 1, bySeq.get(i + 1)]),
-    )
-    expect(new Set(callbacks.map(({ id }) => id))).toHaveLength(100)
-    await sub.unsubscribe()
-    await backend.dispose()
+      const bySeq = new Map(accepted.map(({ id, result }) => [result.seq, id]))
+      expect([...bySeq.keys()].sort((a, b) => a - b)).toEqual(Array.from({ length: 100 }, (_, i) => i + 1))
+      expect(callbacks.map(({ seq }) => seq)).toEqual(Array.from({ length: 100 }, (_, i) => i + 1))
+      expect(callbacks.map(({ seq, id }) => [seq, id])).toEqual(
+        Array.from({ length: 100 }, (_, i) => [i + 1, bySeq.get(i + 1)]),
+      )
+      expect(new Set(callbacks.map(({ id }) => id))).toHaveLength(100)
+    } finally {
+      if (sub !== undefined) await sub.unsubscribe().catch(() => {})
+      await backend.dispose()
+    }
+  })
+
+  it('reports the exact Redis 6 node-local receiver count for same-node and cross-node owners', async () => {
+    const prefix = uniquePrefix('receivers')
+    const backend = new RedisRoomBackend({ redis: cluster, prefix })
+    const subscriberPort = [...masters].sort((left, right) => left.port - right.port)[0]?.port as number
+    const otherPort = masters.find(({ port }) => port !== subscriberPort)?.port as number
+    const cases = [
+      { label: 'same', port: subscriberPort, expected: 1 },
+      { label: 'cross', port: otherPort, expected: 0 },
+    ] as const
+    const subscriptions = []
+    try {
+      for (const scenario of cases) {
+        const roomId = await roomOnMaster(prefix, scenario.port, `receiver-${scenario.label}`)
+        const inc = `inc-${scenario.label}`
+        await open(backend, roomId, inc)
+        const received: string[] = []
+        const subscription = backend.subscribeLane(roomId, inc, SEMANTIC, (bytes) =>
+          received.push(Buffer.from(bytes).toString()),
+        )
+        subscriptions.push(subscription)
+        await subscription.ready
+        const result = accepted(await backend.commitLane(roomId, inc, SEMANTIC, Buffer.from(scenario.label)))
+        void result.delivery.catch(() => {})
+        expect(result.receivers).toBe(scenario.expected)
+        await result.delivery
+        await waitFor(() => received.length === 1, 5_000)
+        expect(received).toEqual([scenario.label])
+      }
+    } finally {
+      await Promise.allSettled(subscriptions.map((subscription) => subscription.unsubscribe()))
+      await backend.dispose()
+    }
+    console.log(`[w4r-evidence] receivers sameOwner=1 crossOwner=0 subscriberPort=${subscriberPort}`)
+  })
+
+  it('recovers scripts per call after SCRIPT FLUSH and relocation to an unprimed master', async () => {
+    const prefix = uniquePrefix('noscript')
+    const roomId = 'noscript-room'
+    const inc = 'noscript-inc'
+    const client = clusterClient(nodes as NodeAddress[])
+    const backend = new RedisRoomBackend({ redis: client, prefix })
+    let slotNumber: number | undefined
+    let source: Master | undefined
+    let target: Master | undefined
+    try {
+      await open(backend, roomId, inc)
+      accepted(await backend.commitLane(roomId, inc, SEMANTIC, Buffer.from('prime-source')))
+      slotNumber = await slot(headKey(prefix, roomId))
+      source = owner(slotNumber)
+      target = masters.find((master) => master.port !== source?.port) as Master
+      await target.client.script('FLUSH')
+      await moveSlot(slotNumber, source, target, true)
+
+      const result = accepted(await backend.commitLane(roomId, inc, SEMANTIC, Buffer.from('eval-fallback')))
+      await result.delivery
+      expect(result.seq).toBe(2)
+      expect((await backend.readHead(roomId))?.head.currentInc).toBe(inc)
+      await assertClusterOk()
+    } finally {
+      if (slotNumber !== undefined && source !== undefined && target !== undefined) {
+        await restoreSlot(slotNumber, source, target)
+      }
+      await backend.dispose()
+      await client.quit()
+    }
   })
 
   for (const mib of [3, 8, 16] as const) {
@@ -133,52 +209,55 @@ describe.skipIf(nodes === undefined)('RedisRoomBackend real three-master Cluster
       const backend = new RedisRoomBackend({ redis: client, prefix, maxRetainedPayloadBytes: size })
       const roomId = `payload-room-${mib}`
       const inc = `payload-inc-${mib}`
-      await open(backend, roomId, inc)
-      const received: Array<{ length: number; digest: string }> = []
-      const sub = backend.subscribeLane(roomId, inc, SEMANTIC, (payload) => received.push(describeBytes(payload)))
-      await sub.ready
+      let sub: ReturnType<RedisRoomBackendType['subscribeLane']> | undefined
+      let freshClient: Cluster | undefined
+      let freshBackend: RedisRoomBackendType | undefined
+      try {
+        await open(backend, roomId, inc)
+        const received: Array<{ length: number; digest: string }> = []
+        sub = backend.subscribeLane(roomId, inc, SEMANTIC, (payload) => received.push(describeBytes(payload)))
+        await sub.ready
 
-      const live = payload(mib, 'live')
-      const replacement = payload(mib, 'replacement')
-      expect(describeBytes(live)).toEqual({ length: size, digest: DIGESTS[mib].live })
-      expect(describeBytes(replacement)).toEqual({ length: size, digest: DIGESTS[mib].replacement })
-      expect(gzipSync(live).byteLength).toBeGreaterThan(size * 0.99)
+        const live = payload(mib, 'live')
+        const replacement = payload(mib, 'replacement')
+        expect(describeBytes(live)).toEqual({ length: size, digest: DIGESTS[mib].live })
+        expect(describeBytes(replacement)).toEqual({ length: size, digest: DIGESTS[mib].replacement })
+        expect(gzipSync(live).byteLength).toBeGreaterThan(size * 0.99)
 
-      const first = accepted(await backend.commitLane(roomId, inc, SEMANTIC, live, { retain: true }))
-      await first.delivery
-      await waitFor(() => received.length === 1, 30_000)
-      expect(received[0]).toEqual({ length: size, digest: DIGESTS[mib].live })
-      expect(describeRetained(await backend.readRetained(roomId, inc, SEMANTIC))).toEqual({
-        length: size,
-        digest: DIGESTS[mib].live,
-      })
+        const first = accepted(await backend.commitLane(roomId, inc, SEMANTIC, live, { retain: true }))
+        await first.delivery
+        await waitFor(() => received.length === 1, 30_000)
+        expect(received[0]).toEqual({ length: size, digest: DIGESTS[mib].live })
+        expect(describeRetained(await backend.readRetained(roomId, inc, SEMANTIC))).toEqual({
+          length: size,
+          digest: DIGESTS[mib].live,
+        })
 
-      const second = accepted(await backend.commitLane(roomId, inc, SEMANTIC, replacement, { retain: true }))
-      await second.delivery
-      await waitFor(() => received.length === 2, 30_000)
-      expect(received[1]).toEqual({ length: size, digest: DIGESTS[mib].replacement })
+        const second = accepted(await backend.commitLane(roomId, inc, SEMANTIC, replacement, { retain: true }))
+        await second.delivery
+        await waitFor(() => received.length === 2, 30_000)
+        expect(received[1]).toEqual({ length: size, digest: DIGESTS[mib].replacement })
 
-      const freshClient = clusterClient(nodes as NodeAddress[])
-      const freshBackend = new RedisRoomBackend({ redis: freshClient, prefix, maxRetainedPayloadBytes: size })
-      expect(describeRetained(await freshBackend.readRetained(roomId, inc, SEMANTIC))).toEqual({
-        length: size,
-        digest: DIGESTS[mib].replacement,
-      })
+        freshClient = clusterClient(nodes as NodeAddress[])
+        freshBackend = new RedisRoomBackend({ redis: freshClient, prefix, maxRetainedPayloadBytes: size })
+        expect(describeRetained(await freshBackend.readRetained(roomId, inc, SEMANTIC))).toEqual({
+          length: size,
+          digest: DIGESTS[mib].replacement,
+        })
 
-      await expect(
-        backend.commitLane(roomId, inc, SEMANTIC, payloadBytes(size + 1, `over-${mib}`), { retain: true }),
-      ).rejects.toThrow(/exceeds the \d+ byte cap/)
-      expect(describeRetained(await backend.readRetained(roomId, inc, SEMANTIC))).toEqual({
-        length: size,
-        digest: DIGESTS[mib].replacement,
-      })
-      expect(received).toHaveLength(2)
-
-      await freshBackend.dispose()
-      await freshClient.quit()
-      await sub.unsubscribe()
-      await backend.dispose()
-      await client.quit()
+        await expect(
+          backend.commitLane(roomId, inc, SEMANTIC, payloadBytes(size + 1, `over-${mib}`), { retain: true }),
+        ).rejects.toThrow(/exceeds the \d+ byte cap/)
+        expect(describeRetained(await backend.readRetained(roomId, inc, SEMANTIC))).toEqual({
+          length: size,
+          digest: DIGESTS[mib].replacement,
+        })
+        expect(received).toHaveLength(2)
+      } finally {
+        if (sub !== undefined) await sub.unsubscribe().catch(() => {})
+        await Promise.allSettled([freshBackend?.dispose(), backend.dispose()].filter(Boolean))
+        await Promise.allSettled([freshClient?.quit(), client.quit()].filter(Boolean))
+      }
       console.log(
         `[w4r-evidence] payload mib=${mib} bytes=${size} live=${DIGESTS[mib].live} replacement=${DIGESTS[mib].replacement}`,
       )
@@ -200,7 +279,11 @@ describe.skipIf(nodes === undefined)('RedisRoomBackend real three-master Cluster
     const staleRooms = Array.from({ length: 105 }, (_, i) => `page-${String(i).padStart(3, '0')}`)
     for (const roomId of staleRooms) await backend.directoryPut(roomId, 'stale-inc')
 
-    const listed = await listAll(backend, '')
+    const directoryPages = await listPages(backend, '')
+    expect(directoryPages.map((page) => page.entries.length)).toEqual([100, 8])
+    expect(directoryPages[0]?.cursor).toBe(directoryPages[0]?.entries.at(-1)?.roomId)
+    expect(directoryPages[1]?.cursor).toBeUndefined()
+    const listed = directoryPages.flatMap((page) => page.entries)
     for (const room of liveRooms) expect(listed).toContainEqual({ roomId: room.roomId, incTag: room.inc })
     for (const roomId of staleRooms) expect(listed).toContainEqual({ roomId, incTag: 'stale-inc' })
 
@@ -220,7 +303,7 @@ describe.skipIf(nodes === undefined)('RedisRoomBackend real three-master Cluster
     }
     await backend.dispose()
     console.log(
-      `[w4r-evidence] directory masters=${liveRooms.map(({ port }) => port).join(',')} pages=2 repaired=${staleRooms.length} singleMasterControl=${singleMasterRooms.length}/${liveRooms.length}`,
+      `[w4r-evidence] directory masters=${liveRooms.map(({ port }) => port).join(',')} pageSizes=${directoryPages.map((page) => page.entries.length).join(',')} cursors=${directoryPages.map((page) => page.cursor ?? 'end').join(',')} repaired=${staleRooms.length} singleMasterControl=${singleMasterRooms.length}/${liveRooms.length}`,
     )
   })
 
@@ -237,19 +320,23 @@ describe.skipIf(nodes === undefined)('RedisRoomBackend real three-master Cluster
 
     const noRefreshClient = clusterClient(nodes as NodeAddress[], 0)
     const noRefreshBackend = new RedisRoomBackend({ redis: noRefreshClient, prefix })
-    await noRefreshBackend.readHead(roomId)
-    await moveSlot(slotNumber, source, target, true)
+    let moved = false
+    try {
+      await noRefreshBackend.readHead(roomId)
+      await moveSlot(slotNumber, source, target, true)
+      moved = true
 
-    await expect(source.client.get(key)).rejects.toThrow(/MOVED/)
-    await expect(noRefreshBackend.readHead(roomId)).rejects.toThrow(/redirection|MOVED/i)
-    expect((await backend.readHead(roomId))?.head.currentInc).toBe(inc)
-    const committed = accepted(await backend.commitLane(roomId, inc, SEMANTIC, Buffer.from('after-moved')))
-    await committed.delivery
-    await assertClusterOk()
-
-    await noRefreshBackend.dispose()
-    await noRefreshClient.quit()
-    await backend.dispose()
+      await expect(source.client.get(key)).rejects.toThrow(/MOVED/)
+      await expect(noRefreshBackend.readHead(roomId)).rejects.toThrow(/redirection|MOVED/i)
+      expect((await backend.readHead(roomId))?.head.currentInc).toBe(inc)
+      const committed = accepted(await backend.commitLane(roomId, inc, SEMANTIC, Buffer.from('after-moved')))
+      await committed.delivery
+      await assertClusterOk()
+    } finally {
+      if (moved) await restoreSlot(slotNumber, source, target)
+      await Promise.allSettled([noRefreshBackend.dispose(), backend.dispose()])
+      await Promise.allSettled([noRefreshClient.quit()])
+    }
     console.log(
       `[w4r-evidence] MOVED slot=${slotNumber} source=${source.id}@${source.port} target=${target.id}@${target.port}`,
     )
@@ -268,36 +355,71 @@ describe.skipIf(nodes === undefined)('RedisRoomBackend real three-master Cluster
     const target = masters.find((master) => master.port !== source.port) as Master
     const noAskingClient = clusterClient(nodes as NodeAddress[], 0)
     const noAskingBackend = new RedisRoomBackend({ redis: noAskingClient, prefix })
-    await noAskingBackend.readHead(roomId)
+    let finalizedOnTarget = false
+    let keys: string[] = []
+    try {
+      await noAskingBackend.readHead(roomId)
 
-    await target.client.cluster('SETSLOT', slotNumber, 'IMPORTING', source.id)
-    await source.client.cluster('SETSLOT', slotNumber, 'MIGRATING', target.id)
-    const keys = (await source.client.cluster('GETKEYSINSLOT', slotNumber, 10_000)) as string[]
-    await migrateKeys(source, target, keys)
+      await target.client.cluster('SETSLOT', slotNumber, 'IMPORTING', source.id)
+      await source.client.cluster('SETSLOT', slotNumber, 'MIGRATING', target.id)
+      keys = (await source.client.cluster('GETKEYSINSLOT', slotNumber, 10_000)) as string[]
+      await migrateKeys(source, target, keys)
 
-    await expect(source.client.get(key)).rejects.toThrow(/ASK/)
-    await expect(target.client.get(key)).rejects.toThrow(/MOVED/)
-    await target.client.asking()
-    expect(await target.client.get(key)).not.toBeNull()
-    await expect(noAskingBackend.readHead(roomId)).rejects.toThrow(/redirection|ASK/i)
-    expect((await backend.readHead(roomId))?.head.currentInc).toBe(inc)
+      await expect(source.client.get(key)).rejects.toThrow(/ASK/)
+      await expect(target.client.get(key)).rejects.toThrow(/MOVED/)
+      await target.client.asking()
+      expect(await target.client.get(key)).not.toBeNull()
+      await expect(noAskingBackend.readHead(roomId)).rejects.toThrow(/redirection|ASK/i)
+      expect((await backend.readHead(roomId))?.head.currentInc).toBe(inc)
 
-    for (const master of masters) await master.client.cluster('SETSLOT', slotNumber, 'NODE', target.id)
-    await waitFor(async () => (await clusterInfo(target.client)).cluster_state === 'ok', 10_000)
-    // Redis intentionally returns TRYAGAIN for a multi-key script while a slot is mid-rehash if some
-    // operands don't exist yet. The single-key shipped read above is the safe ASK schedule; after slot
-    // finalization the same long-lived backend immediately resumes atomic multi-key commits.
-    const committed = accepted(await backend.commitLane(roomId, inc, SEMANTIC, Buffer.from('after-ask')))
-    await committed.delivery
-    await assertClusterOk()
-
-    await noAskingBackend.dispose()
-    await noAskingClient.quit()
-    await backend.dispose()
-    await client.quit()
+      for (const master of masters) await master.client.cluster('SETSLOT', slotNumber, 'NODE', target.id)
+      finalizedOnTarget = true
+      await waitFor(async () => (await clusterInfo(target.client)).cluster_state === 'ok', 10_000)
+      // Redis intentionally returns TRYAGAIN for a multi-key script while a slot is mid-rehash if some
+      // operands don't exist yet. The single-key shipped read above is the safe ASK schedule; after slot
+      // finalization the same long-lived backend immediately resumes atomic multi-key commits.
+      const committed = accepted(await backend.commitLane(roomId, inc, SEMANTIC, Buffer.from('after-ask')))
+      await committed.delivery
+      await assertClusterOk()
+    } finally {
+      if (!finalizedOnTarget) {
+        await restorePartialSlot(slotNumber, source, target)
+      } else await restoreSlot(slotNumber, source, target)
+      await Promise.allSettled([noAskingBackend.dispose(), backend.dispose()])
+      await Promise.allSettled([noAskingClient.quit(), client.quit()])
+    }
     console.log(
       `[w4r-evidence] ASK slot=${slotNumber} source=${source.id}@${source.port} target=${target.id}@${target.port} migratedKeys=${keys.length}`,
     )
+  })
+
+  it('restores slot state after forced failures immediately after SETSLOT and MIGRATE', async () => {
+    for (const phase of ['setslot', 'migrate'] as const) {
+      const prefix = uniquePrefix(`cleanup-${phase}`)
+      const roomId = `cleanup-${phase}-room`
+      const backend = new RedisRoomBackend({ redis: cluster, prefix })
+      await open(backend, roomId, `inc-${phase}`)
+      const slotNumber = await slot(headKey(prefix, roomId))
+      const source = owner(slotNumber)
+      const target = masters.find((master) => master.port !== source.port) as Master
+      let observed: unknown
+      try {
+        await target.client.cluster('SETSLOT', slotNumber, 'IMPORTING', source.id)
+        await source.client.cluster('SETSLOT', slotNumber, 'MIGRATING', target.id)
+        if (phase === 'migrate') {
+          const keys = (await source.client.cluster('GETKEYSINSLOT', slotNumber, 10_000)) as string[]
+          await migrateKeys(source, target, keys)
+        }
+        throw new Error(`forced-${phase}-assertion`)
+      } catch (err) {
+        observed = err
+      } finally {
+        await restorePartialSlot(slotNumber, source, target)
+        await backend.dispose()
+      }
+      expect(observed).toEqual(new Error(`forced-${phase}-assertion`))
+      await assertClusterOk()
+    }
   })
 
   it('returns every client connection to baseline after public backend disposal', async () => {
@@ -366,6 +488,31 @@ describe.skipIf(nodes === undefined)('RedisRoomBackend real three-master Cluster
     }
   }
 
+  async function restoreSlot(slotNumber: number, original: Master, current: Master): Promise<void> {
+    if (original.port === current.port) return
+    await original.client.cluster('SETSLOT', slotNumber, 'IMPORTING', current.id)
+    await current.client.cluster('SETSLOT', slotNumber, 'MIGRATING', original.id)
+    const keys = (await current.client.cluster('GETKEYSINSLOT', slotNumber, 10_000)) as string[]
+    await migrateKeys(current, original, keys)
+    for (const master of masters) await master.client.cluster('SETSLOT', slotNumber, 'NODE', original.id)
+    await assertClusterOk()
+  }
+
+  async function restorePartialSlot(slotNumber: number, original: Master, partialTarget: Master): Promise<void> {
+    const migrated = (await partialTarget.client.cluster('GETKEYSINSLOT', slotNumber, 10_000)) as string[]
+    if (migrated.length === 0) {
+      await original.client.cluster('SETSLOT', slotNumber, 'STABLE')
+      await partialTarget.client.cluster('SETSLOT', slotNumber, 'STABLE')
+      for (const master of masters) await master.client.cluster('SETSLOT', slotNumber, 'NODE', original.id)
+      await assertClusterOk()
+      return
+    }
+    // All slot keys crossed the assertion boundary. Finalize that partial move, then use the normal
+    // verified reverse migration; Redis rejects marking the original owner IMPORTING its own slot.
+    for (const master of masters) await master.client.cluster('SETSLOT', slotNumber, 'NODE', partialTarget.id)
+    await restoreSlot(slotNumber, original, partialTarget)
+  }
+
   async function assertClusterOk(): Promise<void> {
     for (const master of masters) expect((await clusterInfo(master.client)).cluster_state).toBe('ok')
   }
@@ -421,7 +568,7 @@ function uniquePrefix(label: string): string {
   return `w4r:${process.pid}:${Date.now().toString(36)}:${label}:`
 }
 
-async function open(backend: RedisRoomBackend, roomId: string, inc: string): Promise<RoomHead> {
+async function open(backend: RedisRoomBackendType, roomId: string, inc: string): Promise<RoomHead> {
   const result = await backend.compareExchangeHead(
     roomId,
     { expect: 'absent' },
@@ -433,7 +580,7 @@ async function open(backend: RedisRoomBackend, roomId: string, inc: string): Pro
   return result.head
 }
 
-function accepted(result: Awaited<ReturnType<RedisRoomBackend['commitLane']>>): CommitAccepted {
+function accepted(result: Awaited<ReturnType<RedisRoomBackendType['commitLane']>>): CommitAccepted {
   if (!('accepted' in result)) throw new Error('commit was unexpectedly stale')
   return result
 }
@@ -460,18 +607,28 @@ function describeRetained(retained: { payload: Uint8Array } | null): { length: n
   return describeBytes(retained.payload)
 }
 
-async function listAll(backend: RedisRoomBackend, prefix: string): Promise<Array<{ roomId: string; incTag: string }>> {
-  const entries: Array<{ roomId: string; incTag: string }> = []
+async function listAll(
+  backend: RedisRoomBackendType,
+  prefix: string,
+): Promise<Array<{ roomId: string; incTag: string }>> {
+  return (await listPages(backend, prefix)).flatMap((page) => page.entries)
+}
+
+async function listPages(
+  backend: RedisRoomBackendType,
+  prefix: string,
+): Promise<Array<{ entries: Array<{ roomId: string; incTag: string }>; cursor?: string }>> {
+  const pages: Array<{ entries: Array<{ roomId: string; incTag: string }>; cursor?: string }> = []
   let cursor: string | undefined
   do {
     const page = await backend.directoryList(prefix, cursor)
-    entries.push(...page.entries)
+    pages.push(page)
     cursor = page.cursor
   } while (cursor !== undefined)
-  return entries
+  return pages
 }
 
-async function closeAndDrop(backend: RedisRoomBackend, roomId: string, inc: string): Promise<void> {
+async function closeAndDrop(backend: RedisRoomBackendType, roomId: string, inc: string): Promise<void> {
   const current = await backend.readHead(roomId)
   if (current === null) throw new Error(`missing head '${roomId}'`)
   const closing = await backend.compareExchangeHead(

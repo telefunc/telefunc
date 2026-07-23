@@ -140,25 +140,28 @@ describe.skipIf(url === undefined || url === '')('Redis independent-review race 
     const sub = fx.backend.subscribeLane(roomId, inc, SEMANTIC, latch.receiver)
     const states: string[] = []
     sub.onStateChange((state) => states.push(state))
-    await firstAckHeld.promise
+    try {
+      await firstAckHeld.promise
+      await fx.killSubscriberForTest()
+      await waitFor(() => states.includes('lost'))
+      await waitFor(() => fx.subscriber.status === 'ready')
 
-    await fx.killSubscriberForTest()
-    await waitFor(() => states.includes('lost'))
-    await waitFor(() => fx.subscriber.status === 'ready')
+      releaseFirstValidation.resolve()
+      await waitFor(() => sub.state() === 'ready')
+      expect(ackCount).toBe(2)
+      await waitFor(
+        async () => (await fx.pubSubSubscriberCountForTest(`${fx.prefix}room:{${roomId}}:ch:${inc}:semantic`)) === 1,
+      )
+      expect(states.slice(0, 2)).toEqual(['lost', 'ready'])
 
-    releaseFirstValidation.resolve()
-    await waitFor(() => sub.state() === 'ready')
-    expect(ackCount).toBe(2)
-    await waitFor(
-      async () => (await fx.pubSubSubscriberCountForTest(`${fx.prefix}room:{${roomId}}:ch:${inc}:semantic`)) === 1,
-    )
-    expect(states.slice(0, 2)).toEqual(['lost', 'ready'])
-
-    const result = accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, bytes('after-race')))
-    await expectOneNodeLocalReceiver(fx, result.receivers, roomId, inc, SEMANTIC)
-    await result.delivery
-    await latch.waitFor(1)
-    expect(latch.payloads()).toEqual(['after-race'])
+      const result = accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, bytes('after-race')))
+      await expectOneNodeLocalReceiver(fx, result.receivers, roomId, inc, SEMANTIC)
+      await result.delivery
+      await latch.waitFor(1)
+      expect(latch.payloads()).toEqual(['after-race'])
+    } finally {
+      releaseFirstValidation.resolve()
+    }
   })
 
   it('starts a current-operation SUBSCRIBE when last detach overlaps a same-connection replacement', async () => {
@@ -193,28 +196,34 @@ describe.skipIf(url === undefined || url === '')('Redis independent-review race 
       return pending
     }
 
-    const old = fx.backend.subscribeLane(roomId, inc, SEMANTIC, () => {})
-    await firstAckHeld.promise
-    const oldDetach = old.unsubscribe()
-    await uninstallEntered.promise
+    try {
+      const old = fx.backend.subscribeLane(roomId, inc, SEMANTIC, () => {})
+      await firstAckHeld.promise
+      const oldDetach = old.unsubscribe()
+      await uninstallEntered.promise
 
-    const latch = collector()
-    const replacement = fx.backend.subscribeLane(roomId, inc, SEMANTIC, latch.receiver)
-    releaseUninstall.resolve()
-    await oldDetach
-    subscriber.unsubscribe = originalUnsubscribe
+      const latch = collector()
+      const replacement = fx.backend.subscribeLane(roomId, inc, SEMANTIC, latch.receiver)
+      releaseUninstall.resolve()
+      await oldDetach
+      subscriber.unsubscribe = originalUnsubscribe
 
-    await waitFor(() => ackCount === 2)
-    await replacement.ready
-    releaseFirstValidation.resolve()
-    expect(ackCount).toBe(2)
-    await waitFor(async () => (await fx.pubSubSubscriberCountForTest(channel)) === 1)
-    expect(replacement.state()).toBe('ready')
-    const result = accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, bytes('replacement')))
-    await expectOneNodeLocalReceiver(fx, result.receivers, roomId, inc, SEMANTIC)
-    await result.delivery
-    await latch.waitFor(1)
-    expect(latch.payloads()).toEqual(['replacement'])
+      await waitFor(() => ackCount === 2)
+      await replacement.ready
+      releaseFirstValidation.resolve()
+      expect(ackCount).toBe(2)
+      await waitFor(async () => (await fx.pubSubSubscriberCountForTest(channel)) === 1)
+      expect(replacement.state()).toBe('ready')
+      const result = accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, bytes('replacement')))
+      await expectOneNodeLocalReceiver(fx, result.receivers, roomId, inc, SEMANTIC)
+      await result.delivery
+      await latch.waitFor(1)
+      expect(latch.payloads()).toEqual(['replacement'])
+    } finally {
+      releaseFirstValidation.resolve()
+      releaseUninstall.resolve()
+      subscriber.unsubscribe = originalUnsubscribe
+    }
   })
 
   it('keeps a replacement behind cleanup when it attaches before the lane UNSUBSCRIBE is acknowledged', async () => {
@@ -858,6 +867,69 @@ describe.skipIf(url === undefined || url === '')('Redis independent-review race 
     }
   })
 
+  it('keeps failed invalidation cleanup fenced through retry before legal immediate same-id reuse', async () => {
+    const roomId = nextId('room')
+    const { inc } = await openRoom(fx.backend, roomId)
+    const staleLatch = collector()
+    const stale = fx.backend.subscribeLane(roomId, inc, SEMANTIC, staleLatch.receiver)
+    await stale.ready
+    const peer = await fx.createPeerBackend()
+    const retryEntered = deferred()
+    const releaseRetry = deferred()
+    const subscriber = fx.subscriber as unknown as { unsubscribe: (...channels: string[]) => Promise<number> }
+    const original = subscriber.unsubscribe.bind(fx.subscriber)
+    let laneAttempts = 0
+    subscriber.unsubscribe = async (...channels) => {
+      if (channels.some((channel) => channel.endsWith(':semantic'))) {
+        laneAttempts++
+        if (laneAttempts === 1) throw new Error('forced invalidation cleanup failure')
+        if (laneAttempts === 2) {
+          retryEntered.resolve()
+          await releaseRetry.promise
+        }
+      }
+      return await original(...channels)
+    }
+    try {
+      const head = await readHeadOrThrow(peer.backend, roomId)
+      const { head: closing, leaseId } = await enterClosing(peer.backend, roomId, head)
+      accepted(await peer.backend.commitLane(roomId, inc, CONTROL, bytes('closed'), { closingLease: leaseId }))
+      const tombstone = okHead(await finalizeClose(peer.backend, roomId, closing, leaseId))
+      await peer.backend.dropGeneration(roomId, inc)
+      okHead(
+        await peer.backend.compareExchangeHead(
+          roomId,
+          { expect: { rev: tombstone.rev } },
+          { head: { currentInc: inc, state: 'open', config: tombstone.config } },
+        ),
+      )
+      await retryEntered.promise
+
+      const freshLatch = collector()
+      const fresh = fx.backend.subscribeLane(roomId, inc, SEMANTIC, freshLatch.receiver)
+      let freshReady = false
+      void fresh.ready.then(() => {
+        freshReady = true
+      })
+      await flush()
+      expect(freshReady).toBe(false)
+      expect(stale.state()).not.toBe('closed')
+
+      releaseRetry.resolve()
+      await Promise.all([fresh.ready, waitFor(() => stale.state() === 'closed')])
+      const result = accepted(await peer.backend.commitLane(roomId, inc, SEMANTIC, bytes('fresh-after-retry')))
+      await expectOneNodeLocalReceiver(fx, result.receivers, roomId, inc, SEMANTIC)
+      await result.delivery
+      await freshLatch.waitFor(1)
+      expect(staleLatch.payloads()).toEqual([])
+      expect(freshLatch.payloads()).toEqual(['fresh-after-retry'])
+    } finally {
+      releaseRetry.resolve()
+      subscriber.unsubscribe = original
+      await peer.dispose()
+    }
+  })
+
   it('fences last detach against an in-flight establishment validation', async () => {
     const roomId = nextId('room')
     const { inc } = await openRoom(fx.backend, roomId)
@@ -1198,7 +1270,7 @@ async function expectOneNodeLocalReceiver(
   inc: string,
   lane: Parameters<RedisBackendFixture['allowedReceiverCountsAtAuthority']>[2],
 ): Promise<void> {
-  expect(await fx.allowedReceiverCountsAtAuthority(roomId, inc, lane, 1)).toContain(actual)
+  expect(actual).toBe(await fx.allowedReceiverCountsAtAuthority(roomId, inc, lane, 1))
 }
 
 async function onlyPubSubClientId(fx: RedisBackendFixture): Promise<number> {

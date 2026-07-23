@@ -22,9 +22,11 @@ import type {
   BackendTraces,
 } from '../../../telefunc/wire-protocol/backend/conformance/harness.js'
 import {
+  channelKey,
   generationTokensKey,
   gensKey,
   headKey,
+  laneKey,
   routeCaptureExpiriesKey,
   routeCapturesKey,
   REDIS_ROOM_COMMANDS,
@@ -98,7 +100,7 @@ export type RedisRoomCommandCall = { name: string; args: readonly unknown[] }
 export type RedisBackendFixture = BackendFixture & {
   backend: RedisRoomBackend
   redis: RoomRedisClient
-  subscriber: RoomRedisClient
+  subscriber: Redis
   allowedReceiverCountsAtAuthority: NonNullable<BackendFixture['allowedReceiverCountsAtAuthority']>
   prefix: string
   setStableReadProbe(fn: StableReadProbe | null): void
@@ -141,35 +143,39 @@ export async function createRedisFixture(
             clusterRetryStrategy: (attempt) => (attempt <= 5 ? 20 : null),
           },
         )
-  const subscriber: RoomRedisClient =
-    clusterNodes === undefined
-      ? new Redis(url, {
+  if (redis instanceof Cluster) redis.on('error', () => {})
+  if (redis instanceof Cluster) {
+    // The existing fixture compresses the backend's 250ms..4s retry timers below. Let ioredis finish
+    // its own slot-cache bootstrap before that global test clock is installed, otherwise its startup
+    // watchdogs are also collapsed and every startup node is rejected spuriously.
+    await redis.ping()
+  }
+  const subscriber =
+    redis instanceof Cluster
+      ? (
+          redis
+            .nodes('master')
+            .sort((left, right) =>
+              `${left.options.host ?? ''}:${left.options.port ?? ''}`.localeCompare(
+                `${right.options.host ?? ''}:${right.options.port ?? ''}`,
+              ),
+            )[0] as Redis
+        ).duplicate({
           autoResubscribe: false,
+          connectionName: `${prefix}-subscriber`,
           lazyConnect: false,
           maxRetriesPerRequest: 1,
           retryStrategy: (attempt) => (attempt <= 5 ? 0 : null),
         })
-      : new Cluster(
-          clusterNodes.map((node) => ({ ...node })),
-          {
-            scaleReads: 'master',
-            redisOptions: {
-              autoResubscribe: false,
-              connectionName: `${prefix}-subscriber`,
-              lazyConnect: false,
-              maxRetriesPerRequest: 1,
-            },
-            clusterRetryStrategy: (attempt) => (attempt <= 5 ? 20 : null),
-          },
-        )
-  if (redis instanceof Cluster) redis.on('error', () => {})
-  if (subscriber instanceof Cluster) subscriber.on('error', () => {})
-  if (redis instanceof Cluster && subscriber instanceof Cluster) {
-    // The existing fixture compresses the backend's 250ms..4s retry timers below. Let ioredis finish
-    // its own slot-cache bootstrap before that global test clock is installed, otherwise its startup
-    // watchdogs are also collapsed and every startup node is rejected spuriously.
-    await Promise.all([redis.ping(), subscriber.ping()])
-  }
+      : new Redis(url, {
+          autoResubscribe: false,
+          connectionName: `${prefix}-subscriber`,
+          lazyConnect: false,
+          maxRetriesPerRequest: 1,
+          retryStrategy: (attempt) => (attempt <= 5 ? 0 : null),
+        })
+  subscriber.on('error', () => {})
+  await subscriber.ping()
   // Authority time starts ALIGNED with the caller clock and only `advanceAuthority` moves it.
   let clock = Date.now()
   let probe: StableReadProbe | null = null
@@ -259,12 +265,19 @@ export async function createRedisFixture(
   }
 
   const duplicate = redis.duplicate.bind(redis)
-  redis.duplicate = (() => subscriber) as typeof redis.duplicate
+  const duplicatedMasters = redis instanceof Cluster ? redis.nodes('master') : []
+  const masterDuplicates = duplicatedMasters.map((master) => [master, master.duplicate.bind(master)] as const)
+  if (redis instanceof Cluster) {
+    for (const master of duplicatedMasters) master.duplicate = (() => subscriber) as typeof master.duplicate
+  } else {
+    redis.duplicate = (() => subscriber) as typeof redis.duplicate
+  }
   let backend: RedisRoomBackend
   try {
     backend = new RedisRoomBackend({ redis, prefix, maxRetainedPayloadBytes: opts.maxRetainedPayloadBytes })
   } finally {
     redis.duplicate = duplicate
+    for (const [master, original] of masterDuplicates) master.duplicate = original
   }
   installAuthorityClock(redis)
   wrapCommand(redis, REDIS_ROOM_COMMANDS.validateGeneration.name, async (invoke, args) => {
@@ -339,8 +352,11 @@ export async function createRedisFixture(
 
   if (redis instanceof Cluster) {
     type EvalSha = (sha: string, numberOfKeys: number, ...args: unknown[]) => Promise<unknown>
-    const evalClient = redis as unknown as { evalsha: EvalSha }
+    type Eval = (lua: string, numberOfKeys: number, ...args: unknown[]) => Promise<unknown>
+    const evalClient = redis as unknown as { evalsha: EvalSha; eval: Eval }
     const originalEvalSha = evalClient.evalsha.bind(redis)
+    const originalEval = evalClient.eval.bind(redis)
+    const commandsByLua = new Map(Object.values(REDIS_ROOM_COMMANDS).map((command) => [command.lua, command]))
     const commandsBySha = new Map(
       Object.values(REDIS_ROOM_COMMANDS).map((command) => [
         createHash('sha1').update(command.lua).digest('hex'),
@@ -406,6 +422,62 @@ export async function createRedisFixture(
     restorers.push(() => {
       evalClient.evalsha = originalEvalSha
     })
+    evalClient.eval = async (lua, numberOfKeys, ...rawArgs) => {
+      const command = commandsByLua.get(lua)
+      if (command === undefined) return await originalEval(lua, numberOfKeys, ...rawArgs)
+      const dynamic = command.numberOfKeys === null
+      const args = dynamic ? [String(numberOfKeys), ...rawArgs] : rawArgs
+      commandCalls.push({ name: command.name, args: [...args] })
+      const now = opts.useRedisAuthority === true ? '' : String(clock)
+      if (
+        command.name === REDIS_ROOM_COMMANDS.headCx.name ||
+        command.name === REDIS_ROOM_COMMANDS.captureGeneration.name ||
+        command.name === REDIS_ROOM_COMMANDS.validateGeneration.name ||
+        command.name === REDIS_ROOM_COMMANDS.commit.name
+      ) {
+        args[command.name === REDIS_ROOM_COMMANDS.headCx.name ? 4 : 5] = now
+      } else if (command.name === REDIS_ROOM_COMMANDS.cellsCx.name) {
+        args[Number(args[0]) + 1] = now
+      }
+      if (command.name === REDIS_ROOM_COMMANDS.validateGeneration.name) {
+        const channel = acknowledgedChannels.shift()
+        if (channel !== undefined && afterSubscribeAck !== null) {
+          await runProbe('after subscribe acknowledgement', () => afterSubscribeAck?.(channel))
+        }
+      }
+      if (command.name === REDIS_ROOM_COMMANDS.directoryDelete.name && beforeDirectoryDeleteApply !== null) {
+        await runProbe('before directory delete', () =>
+          beforeDirectoryDeleteApply?.({ roomId: String(args[2]), incTag: String(args[3]) }),
+        )
+      }
+      if (command.name === REDIS_ROOM_COMMANDS.dropGenerationFinalize.name && beforeDropGenerationUnregister !== null) {
+        await runProbe('before generation unregister', () =>
+          beforeDropGenerationUnregister?.({ roomId: roomIdFromKey(args[0]), inc: String(args[2]) }),
+        )
+      }
+      const actualArgs = dynamic ? args.slice(1) : args
+      const reply = await originalEval(lua, numberOfKeys, ...actualArgs)
+      if (
+        command.name === REDIS_ROOM_COMMANDS.captureGeneration.name &&
+        afterGenerationCapture !== null &&
+        bypassCaptureProbe === 0
+      ) {
+        const parsed = JSON.parse(String(reply)) as { token?: string }
+        await runProbe('after generation capture', () =>
+          afterGenerationCapture?.({
+            roomId: roomIdFromKey(args[0]),
+            inc: String(args[6]),
+            attemptId: String(args[7]),
+            createdAt: Number(args[8]),
+            token: parsed.token ?? '',
+          }),
+        )
+      }
+      return reply
+    }
+    restorers.push(() => {
+      evalClient.eval = originalEval
+    })
   }
 
   // Pre-cache the scripts so a head-CX race never pays a one-off NOSCRIPT round-trip that could perturb
@@ -429,8 +501,24 @@ export async function createRedisFixture(
     // one subscriber connection. Keep these exact: two local callbacks still form one broker target,
     // and detaching either sibling leaves that same one connection subscribed for the survivor.
     expectedReceivers: { twoLocalSubscriptionsSameLane: 1, oneLocalSubscriptionAfterSiblingDetach: 1 },
-    allowedReceiverCountsAtAuthority: async (_roomId, _inc, _lane, globalFallback) =>
-      redis instanceof Cluster && globalFallback > 0 ? [0, 1] : [globalFallback],
+    allowedReceiverCountsAtAuthority: async (roomId, inc, lane, globalFallback) => {
+      if (!(redis instanceof Cluster) || globalFallback === 0) return globalFallback
+      const masters = redis.nodes('master')
+      if (masters.length < 3) throw new Error('Redis fixture: receiver authority requires three live masters')
+      const key = channelKey(prefix, roomId, inc, laneKey(lane))
+      const slot = Number(await masters[0]?.cluster('KEYSLOT', key))
+      const rawSlots = (await redis.cluster('SLOTS')) as unknown as Array<
+        [number, number, [string | Buffer, number, ...unknown[]]]
+      >
+      const range = rawSlots.find(([start, end]) => slot >= start && slot <= end)
+      if (range === undefined) throw new Error(`Redis fixture: no owner for slot ${slot}`)
+      const ownerHost = Buffer.isBuffer(range[2][0]) ? range[2][0].toString() : range[2][0]
+      const ownerPort = Number(range[2][1])
+      const subscriberHost = subscriber.options.host ?? '127.0.0.1'
+      const subscriberPort = Number(subscriber.options.port)
+      const sameHost = ownerHost === subscriberHost || new Set([ownerHost, subscriberHost]).size === 1
+      return sameHost && ownerPort === subscriberPort ? globalFallback : 0
+    },
     authorityNow: () => clock,
     advanceAuthority: (ms) => {
       clock += ms
@@ -485,7 +573,7 @@ export async function createRedisFixture(
       let target: number
       let owner: Redis
       if (id === undefined) {
-        const current = await currentSubscriberTarget(subscriber)
+        const current = await currentSubscriberTarget(subscriber, redis)
         target = current.id
         owner = nodes.find(
           (node) => node.options.host === current.host && Number(node.options.port) === Number(current.port),
@@ -511,32 +599,19 @@ export async function createRedisFixture(
         redis instanceof Cluster
           ? redis.duplicate(undefined, { redisOptions: { maxRetriesPerRequest: 2 } })
           : redis.duplicate({ maxRetriesPerRequest: 2 })
-      let peerSubscriber: Cluster | undefined
       if (peerRedis instanceof Cluster) {
         peerRedis.on('error', () => {})
-        peerSubscriber = peerRedis.duplicate(undefined, {
-          redisOptions: { autoResubscribe: false, maxRetriesPerRequest: 1 },
-        })
-        peerSubscriber.on('error', () => {})
-        // This test fixture accelerates the backend's bounded retry delays globally. A duplicate Cluster
-        // and its subscriber both start with cold slot caches, so bootstrap them under the real clock
-        // before constructing the backend; otherwise ioredis's own 1s discovery watchdog is collapsed.
+        // This test fixture accelerates the backend's bounded retry delays globally. Bootstrap the cold
+        // Cluster slot cache under the real clock before the backend selects a direct subscriber master.
         const acceleratedSetTimeout = globalThis.setTimeout
         globalThis.setTimeout = realSetTimeout
         try {
-          await Promise.all([peerRedis.ping(), peerSubscriber.ping()])
+          await peerRedis.ping()
         } finally {
           globalThis.setTimeout = acceleratedSetTimeout
         }
       }
-      const peerDuplicate = peerRedis.duplicate.bind(peerRedis)
-      if (peerSubscriber !== undefined) peerRedis.duplicate = (() => peerSubscriber) as typeof peerRedis.duplicate
-      let peer: RedisRoomBackend
-      try {
-        peer = new RedisRoomBackend({ redis: peerRedis, prefix })
-      } finally {
-        peerRedis.duplicate = peerDuplicate
-      }
+      const peer = new RedisRoomBackend({ redis: peerRedis, prefix })
       installAuthorityClock(peerRedis)
       let disposed = false
       const dispose = async (): Promise<void> => {
@@ -607,41 +682,27 @@ async function scanPrefix(redis: RoomRedisClient, prefix: string): Promise<strin
   return [...keys]
 }
 
-type ClusterSubscriberInternals = { subscriber: { getInstance(): Redis | null } }
-
 async function currentSubscriberTarget(
-  subscriber: RoomRedisClient,
+  subscriber: Redis,
+  publisher: RoomRedisClient,
 ): Promise<{ id: number; host: string; port: number }> {
-  if (subscriber instanceof Cluster) {
-    const connection = (subscriber as unknown as ClusterSubscriberInternals).subscriber.getInstance()
-    if (connection === null) throw new Error('Redis fixture: Cluster subscriber connection is not established')
-    // Redis 6 permits only Pub/Sub commands once a socket is subscribed, so CLIENT ID on the hidden
-    // ClusterSubscriber socket is rejected. Resolve the id from the owning master's admin connection
-    // using the fixture-unique connection name instead.
-    const { host, port, connectionName } = connection.options
-    const owner = subscriber
-      .nodes('master')
-      .find((node) => node.options.host === host && Number(node.options.port) === Number(port))
-    if (owner === undefined) throw new Error(`Redis fixture: subscriber owner ${host}:${port} is unavailable`)
-    const admin = owner as unknown as { client(command: string, ...args: string[]): Promise<unknown> }
-    const list = String(await admin.client('LIST', 'TYPE', 'pubsub'))
-    const matches = list
-      .split('\n')
-      .filter((line) => line.includes(`name=${connectionName ?? ''} `))
-      .map((line) => line.match(/(?:^|\s)id=(\d+)(?:\s|$)/)?.[1])
-      .filter((id): id is string => id !== undefined)
-    if (matches.length !== 1) {
-      throw new Error(
-        `Redis fixture: expected one named Cluster subscriber on ${host}:${port}, found ${matches.length}`,
-      )
-    }
-    return { id: Number(matches[0]), host: host ?? '127.0.0.1', port: Number(port) }
+  // Redis 6 permits only Pub/Sub commands on a subscribed socket, so resolve the exact client id from
+  // its fixture-unique name using an ordinary admin connection to the same owner.
+  const { host, port, connectionName } = subscriber.options
+  const nodes = publisher instanceof Cluster ? publisher.nodes('master') : [publisher]
+  const owner = nodes.find((node) => node.options.host === host && Number(node.options.port) === Number(port))
+  if (owner === undefined) throw new Error(`Redis fixture: subscriber owner ${host}:${port} is unavailable`)
+  const admin = owner as unknown as { client(command: string, ...args: string[]): Promise<unknown> }
+  const list = String(await admin.client('LIST', 'TYPE', 'pubsub'))
+  const matches = list
+    .split('\n')
+    .filter((line) => line.includes(`name=${connectionName ?? ''} `))
+    .map((line) => line.match(/(?:^|\s)id=(\d+)(?:\s|$)/)?.[1])
+    .filter((id): id is string => id !== undefined)
+  if (matches.length !== 1) {
+    throw new Error(`Redis fixture: expected one named subscriber on ${host}:${port}, found ${matches.length}`)
   }
-  return {
-    id: Number(await subscriber.client('ID')),
-    host: subscriber.options.host ?? '127.0.0.1',
-    port: Number(subscriber.options.port),
-  }
+  return { id: Number(matches[0]), host: host ?? '127.0.0.1', port: Number(port) }
 }
 
 async function pubSubClientOwners(nodes: Redis[], id: number): Promise<Redis[]> {

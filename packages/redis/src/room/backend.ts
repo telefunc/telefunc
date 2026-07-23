@@ -178,7 +178,6 @@ export class RedisRoomBackend implements RoomBackendSpi {
   readonly #publisher: Redis | Cluster
   readonly #transport: RedisSubscriberTransport
   readonly #prefix: string
-  readonly #commandsReady: Promise<void>
   // Durable capture/generation identity stays here. The transport receives this object only as an opaque
   // channel binding and delegates capture/validation back before it can settle readiness.
   readonly #generationBindings = new Map<string, RedisGenerationBinding>()
@@ -192,20 +191,44 @@ export class RedisRoomBackend implements RoomBackendSpi {
       'RedisRoomBackend: maxRetainedPayloadBytes must be a finite non-negative number',
     )
     this.#publisher = options.redis
-    const subscriber =
-      options.redis instanceof Cluster
-        ? options.redis.duplicate(undefined, {
-            redisOptions: {
-              autoResubscribe: false,
-              retryStrategy: (attempt: number) =>
-                attempt <= SUBSCRIPTION_RETRY_ATTEMPTS ? defaultSubscriptionRetryDelay(attempt) : null,
-            },
-          })
-        : options.redis.duplicate({
-            autoResubscribe: false,
-            retryStrategy: (attempt) =>
-              attempt <= SUBSCRIPTION_RETRY_ATTEMPTS ? defaultSubscriptionRetryDelay(attempt) : null,
-          })
+    let clusterSubscriberSelection = 0
+    const createSubscriber = async (): Promise<Redis> => {
+      if (!(options.redis instanceof Cluster)) {
+        return options.redis.duplicate({
+          connectionName: `telefunc-room-subscriber-${randomUUID()}`,
+          autoResubscribe: false,
+          lazyConnect: false,
+          retryStrategy: (attempt) =>
+            attempt <= SUBSCRIPTION_RETRY_ATTEMPTS ? defaultSubscriptionRetryDelay(attempt) : null,
+        })
+      }
+      // Use a supported direct Redis duplicate of a live master. Unlike Cluster's hidden Pub/Sub
+      // connection, this exact client is owned by the Room transport, so SUBSCRIBE, dispatch and the
+      // delivery-fence PING necessarily share one socket. Re-evaluate topology on every replacement.
+      let topology = options.redis.nodes('master')
+      if (topology.length === 0) {
+        await options.redis.ping()
+        topology = options.redis.nodes('master')
+      }
+      const masters = topology
+        .filter((master) => master.status !== 'end')
+        .sort((left, right) =>
+          `${left.options.host ?? ''}:${left.options.port ?? ''}`.localeCompare(
+            `${right.options.host ?? ''}:${right.options.port ?? ''}`,
+          ),
+        )
+      if (masters.length === 0) throw new Error('RedisRoomBackend: Cluster has no available masters')
+      const master = masters[clusterSubscriberSelection % masters.length] as Redis
+      clusterSubscriberSelection++
+      return master.duplicate({
+        connectionName: `telefunc-room-subscriber-${randomUUID()}`,
+        autoResubscribe: false,
+        lazyConnect: false,
+        maxRetriesPerRequest: 1,
+        retryStrategy: (attempt) =>
+          attempt <= SUBSCRIPTION_RETRY_ATTEMPTS ? defaultSubscriptionRetryDelay(attempt) : null,
+      })
+    }
     this.#prefix = options.prefix ?? DEFAULT_ROOM_PREFIX
     this.capabilities = {
       receivers: options.redis instanceof Cluster ? 'node-local' : 'global',
@@ -217,9 +240,8 @@ export class RedisRoomBackend implements RoomBackendSpi {
       if (command.numberOfKeys === null) this.#publisher.defineCommand(command.name, { lua: command.lua })
       else this.#publisher.defineCommand(command.name, { numberOfKeys: command.numberOfKeys, lua: command.lua })
     }
-    this.#commandsReady = prepareRedisRoomCommands(this.#publisher)
     this.#transport = new RedisSubscriberTransport({
-      subscriber,
+      createSubscriber,
       retryDelay: defaultSubscriptionRetryDelay,
       captureGeneration: (binding) => this.#ensureGenerationCaptured(this.#requireGenerationBinding(binding)),
       validateGeneration: (binding, includeCapture) =>
@@ -366,12 +388,17 @@ export class RedisRoomBackend implements RoomBackendSpi {
     // the frame was queued to the subscriber socket during the awaited commit, so a PING round-trip on
     // that connection resolves only after ioredis has dispatched the frame to the local receiver — WITHOUT
     // awaiting the receiver's own completion, so handoffAwaitsReceiver stays false.
+    const delivery = this.#transport.flush(channel)
+    // Consumers may observe delivery later (or intentionally only use acceptance). Install an immediate
+    // rejection observer so a connection/lifecycle epoch crossing is surfaced by `delivery` without an
+    // ambient unhandledRejection in the interim.
+    void delivery.catch(() => {})
     return {
       accepted: true,
       seq: parsed.seq,
       timestamp: parsed.timestamp,
       receivers: parsed.receivers,
-      delivery: this.#transport.flush(channel),
+      delivery,
     }
   }
 
@@ -617,7 +644,6 @@ export class RedisRoomBackend implements RoomBackendSpi {
   }
 
   async #call(command: string, keysAndArgs: ReadonlyArray<string | Uint8Array>): Promise<unknown> {
-    await this.#commandsReady
     if (this.#publisher instanceof Cluster) {
       const descriptor = Object.values(REDIS_ROOM_COMMANDS).find((candidate) => candidate.name === command)
       if (descriptor === undefined) throw new Error(`RedisRoomBackend: unknown command '${command}'`)
@@ -630,7 +656,15 @@ export class RedisRoomBackend implements RoomBackendSpi {
       const redisArgs = args.map((arg) =>
         typeof arg === 'string' ? arg : Buffer.from(arg.buffer, arg.byteOffset, arg.byteLength),
       )
-      return await this.#publisher.evalsha(redisScriptSha(descriptor.lua), numberOfKeys, ...redisArgs)
+      try {
+        return await this.#publisher.eval(descriptor.lua, numberOfKeys, ...redisArgs)
+      } catch (err) {
+        // NOSCRIPT proves EVALSHA did not execute. Retrying the complete script with EVAL is therefore
+        // non-duplicating, and ioredis preserves MOVED plus ASKING-on-the-same-connection routing for the
+        // fallback command. This also covers SCRIPT FLUSH, restarted masters, and newly promoted owners.
+        if (!(err instanceof Error) || !err.message.includes('NOSCRIPT')) throw err
+        return await this.#publisher.evalsha(redisScriptSha(descriptor.lua), numberOfKeys, ...redisArgs)
+      }
     }
     return await callDefinedCommand(this.#publisher, command, keysAndArgs)
   }
@@ -648,23 +682,6 @@ export class RedisRoomBackend implements RoomBackendSpi {
     }
     return [...keys]
   }
-}
-
-async function prepareRedisRoomCommands(redis: Redis | Cluster): Promise<void> {
-  if (!(redis instanceof Cluster)) return
-  // ASK routes the next command to an importing master. Every current master must therefore know each
-  // custom script before the first routed invocation: otherwise ioredis's NOSCRIPT fallback can lose
-  // the one-command ASKING context and bounce between ASK and MOVED.
-  await redis.cluster('INFO')
-  const masters = redis.nodes('master')
-  if (masters.length === 0) throw new Error('RedisRoomBackend: Cluster has no available masters')
-  await Promise.all(
-    masters.flatMap((master) =>
-      Object.values(REDIS_ROOM_COMMANDS).map(async (command) => {
-        await master.script('LOAD', command.lua)
-      }),
-    ),
-  )
 }
 
 function redisScriptSha(lua: string): string {
