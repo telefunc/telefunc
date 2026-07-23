@@ -11,6 +11,7 @@ import { serializeTelefunctionResult } from '../node/server/runTelefunc/serializ
 import { createRequestContext } from '../node/server/context/requestContext.js'
 import { parseResponse } from './client/response/parse.js'
 import { STREAM_TRANSPORT } from './constants.js'
+import { config } from '../node/server/serverConfig.js'
 import type { AbortError } from '../shared/Abort.js'
 import type {
   ClientReviverContext,
@@ -419,41 +420,51 @@ async function roundTrip(
     clientExtensions?: ReviverType<TypeContract, ClientReviverContext>[]
   } = {},
 ) {
-  const requestContext = createRequestContext(new Request('http://localhost/_telefunc', { method: 'POST' }))
-  const result = serializeTelefunctionResult({
-    telefunctionReturn,
-    telefunctionName: 'testFn',
-    telefuncFilePath: '/pages/spec/ref-identity.telefunc.ts',
-    telefunctionAborted: false,
-    context: {},
-    requestContext,
-    abortSignal: requestContext.abortSignal,
-    streamTransport: STREAM_TRANSPORT.BINARY_INLINE,
-    useNodeStream: false,
-    serverConfig: {
-      extensionResponseTypes: opts.serverExtensions ?? [],
-      log: { shieldErrors: { dev: false, prod: false } },
-    },
-  })
-  const response =
-    result.type === 'text'
-      ? new Response(result.body)
-      : new Response(result.body as ReadableStream<Uint8Array<ArrayBuffer>>, {
-          headers: { 'content-type': 'application/octet-stream' },
-        })
-  const abortController = new AbortController()
-  const parsed = (await parseResponse(response, {
-    telefunctionName: 'testFn',
-    telefuncFilePath: '/pages/spec/ref-identity.telefunc.ts',
-    abortController,
-    channel: { transports: ['sse'] },
-    requestCloseHandlers: [],
-    extensionResponseTypes: opts.clientExtensions ?? [],
-    headers: null,
-    telefuncUrl: 'http://localhost/_telefunc',
-  })) as { ret: unknown }
-  return { ret: parsed.ret, abortController }
+  const extensionName = `ref-identity-spec-${nextExtensionId++}`
+  if (opts.serverExtensions) {
+    config.extensions.push({ name: extensionName, responseTypes: opts.serverExtensions })
+  }
+  try {
+    const requestContext = createRequestContext(new Request('http://localhost/_telefunc', { method: 'POST' }))
+    const result = serializeTelefunctionResult({
+      telefunctionReturn,
+      telefunctionName: 'testFn',
+      telefuncFilePath: '/pages/spec/ref-identity.telefunc.ts',
+      telefunctionAborted: false,
+      context: {},
+      requestContext,
+      abortSignal: requestContext.abortSignal,
+      streamTransport: STREAM_TRANSPORT.BINARY_INLINE,
+      useNodeStream: false,
+      serverConfig: {
+        log: { shieldErrors: { dev: false, prod: false } },
+      },
+    })
+    const response =
+      result.type === 'text'
+        ? new Response(result.body)
+        : new Response(result.body as ReadableStream<Uint8Array<ArrayBuffer>>, {
+            headers: { 'content-type': 'application/octet-stream' },
+          })
+    const abortController = new AbortController()
+    const parsed = (await parseResponse(response, {
+      telefunctionName: 'testFn',
+      telefuncFilePath: '/pages/spec/ref-identity.telefunc.ts',
+      abortController,
+      channel: { transports: ['sse'] },
+      requestCloseHandlers: [],
+      extensionResponseTypes: opts.clientExtensions ?? [],
+      headers: null,
+      telefuncUrl: 'http://localhost/_telefunc',
+    })) as { ret: unknown }
+    return { ret: parsed.ret, abortController }
+  } finally {
+    const index = config.extensions.findIndex((extension) => extension.name === extensionName)
+    if (index >= 0) config.extensions.splice(index, 1)
+  }
 }
+
+let nextExtensionId = 0
 
 async function collect<T>(gen: AsyncGenerator<T>): Promise<T[]> {
   const out: T[] = []
