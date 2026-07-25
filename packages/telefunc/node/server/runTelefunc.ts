@@ -315,14 +315,12 @@ async function runTelefunc_({
     if (parsed.isSseRequest) {
       return createHttpResponse(parsed.sseResponse)
     }
-    const { telefunctionKey, telefuncFilePath, telefunctionName, streamTransport, requestExtensions } = parsed
+    const { telefunctionKey, telefuncFilePath, telefunctionName } = parsed
     objectAssign(runContext, {
       telefunctionKey,
       telefuncFilePath,
       telefunctionName,
-      streamTransport,
-      requestExtensions,
-      reviveArgs: parsed.reviveArgs,
+      resolveRequest: parsed.resolveRequest,
     })
   }
 
@@ -340,10 +338,16 @@ async function runTelefunc_({
     objectAssign(runContext, { telefunction })
   }
 
-  // Revive arguments now that we know the telefunction — per-value ServerReviverContext carries the
-  // shield validators built from the telefunction's argumentShields metadata, so revivers have them
-  // at revive time and can wire inline validation symmetric to the response-side replacers.
-  objectAssign(runContext, { telefunctionArgs: runContext.reviveArgs(runContext.telefunction) })
+  // Transform and revive the preserved envelope only after the target module has registered its
+  // request types. Per-value contexts also carry the telefunction's shield validators.
+  {
+    const resolved = runContext.resolveRequest(runContext.telefunction)
+    if (resolved.isMalformedRequest) {
+      return createHttpResponse({ ...malformedRequest })
+    }
+    const { telefunctionArgs, streamTransport, requestExtensions } = resolved
+    objectAssign(runContext, { telefunctionArgs, streamTransport, requestExtensions })
+  }
 
   {
     const { isValidRequest } = applyShield(runContext)
