@@ -1,7 +1,7 @@
 export { parseHttpRequest }
 
 import type { Readable } from 'node:stream'
-import { parse, type Reviver } from '@brillout/json-serializer/parse'
+import { parseTransform, type Reviver } from '@brillout/json-serializer/parse'
 import { assertUsage, getProjectError, assert } from '../../../utils/assert.js'
 import { getTelefunctionKey } from '../../../utils/getTelefunctionKey.js'
 import { getUrlPathname } from '../../../utils/getUrlPathname.js'
@@ -18,12 +18,13 @@ import { GcRegistry } from '../../../wire-protocol/gcRegistry.js'
 import { wrapProxy } from '../../../wire-protocol/wrapProxy.js'
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
 import { isObjectOrFunction } from '../../../utils/isObjectOrFunction.js'
-import type { ReviverType, TypeContract, ServerReviverContext } from '../../../wire-protocol/types.js'
+import type { ServerReviverContext } from '../../../wire-protocol/types.js'
 import { STREAM_TRANSPORT, type StreamTransport } from '../../../wire-protocol/constants.js'
 import { handleSseChannelRequest, type SseChannelHttpResponse } from '../../../wire-protocol/server/sse.js'
 import { buildShieldValidators, getArgumentShields, type ShieldLogConfig } from '../shield.js'
 import { toPathKey } from '../../../utils/pathKey.js'
 import type { Telefunction } from '../types.js'
+import { getServerExtensionTypes } from '../serverConfig.js'
 
 // Holder-side GC tracking of revived request stubs (callback channels, streams). One shared
 // instance: it's a passive FinalizationRegistry, and its scan timer runs only while stubs are
@@ -45,19 +46,25 @@ type RunContext = {
   serverConfig: {
     telefuncUrl: string
     stream: { transport: StreamTransport }
-    extensionRequestTypes: ReviverType<TypeContract, ServerReviverContext>[]
     log: { shieldErrors: ShieldLogConfig }
   }
 }
+
+type ResolvedRequest =
+  | {
+      isMalformedRequest: false
+      telefunctionArgs: unknown[]
+      streamTransport: StreamTransport
+      requestExtensions: Record<string, Record<string, unknown>>
+    }
+  | { isMalformedRequest: true }
 
 type ParseResult =
   | {
       telefuncFilePath: string
       telefunctionName: string
       telefunctionKey: string
-      reviveArgs: (telefunction: Telefunction) => unknown[]
-      streamTransport: StreamTransport
-      requestExtensions: Record<string, Record<string, unknown>>
+      resolveRequest: (telefunction: Telefunction) => ResolvedRequest
       isSseRequest: false
       isMalformedRequest: false
     }
@@ -94,27 +101,32 @@ async function parseHttpRequest(runContext: RunContext): Promise<ParseResult> {
     receiveStream: ({ channelId }) => ChannelStreamSource.create(createChannel({ id: channelId })),
   }
 
-  // Parse the envelope; each reviver-prefixed string becomes a deferred placeholder that
-  // `reviveArgs(telefunction)` will resolve post-findTelefunction with shield-aware validators.
-  const { reviver, deferreds } = createRequestReviver(serverConfig.extensionRequestTypes)
-  const envelope = parseEnvelope(text, reviver, runContext)
+  // Routing must be known before the target telefunc module can load. Parse JSON structure only;
+  // leave serializer-encoded values untouched until that module has registered its wire types.
+  const envelope = parseEnvelope(text, runContext)
   if (envelope.isMalformedRequest) return envelope
 
   return {
-    ...envelope,
+    telefuncFilePath: envelope.telefuncFilePath,
+    telefunctionName: envelope.telefunctionName,
+    telefunctionKey: envelope.telefunctionKey,
     isSseRequest: false,
     isMalformedRequest: false,
-    reviveArgs(telefunction) {
+    resolveRequest(telefunction) {
+      const { requestTypes } = getServerExtensionTypes()
+      const { reviver, deferreds } = createRequestReviver(requestTypes)
+      const resolvedEnvelope = transformEnvelope(envelope.raw, reviver, runContext)
+      if (resolvedEnvelope.isMalformedRequest) return resolvedEnvelope
       // Shield metadata is attached by the generated code at module load. It's absent only when
       // the telefunction has no declared shields — in that case we revive without validators.
       const shields = getArgumentShields(telefunction) ?? {}
       const shieldCtx = {
-        telefunctionName: envelope.telefunctionName,
-        telefuncFilePath: envelope.telefuncFilePath,
+        telefunctionName: resolvedEnvelope.telefunctionName,
+        telefuncFilePath: resolvedEnvelope.telefuncFilePath,
         shieldErrors: runContext.serverConfig.log.shieldErrors,
       }
       resolveDeferredRevivals(
-        envelope.args,
+        resolvedEnvelope.args,
         deferreds,
         (segments) => ({
           ...baseContext,
@@ -140,7 +152,12 @@ async function parseHttpRequest(runContext: RunContext): Promise<ParseResult> {
           }
         },
       )
-      return envelope.args
+      return {
+        isMalformedRequest: false,
+        telefunctionArgs: resolvedEnvelope.args,
+        streamTransport: resolvedEnvelope.streamTransport,
+        requestExtensions: resolvedEnvelope.requestExtensions,
+      }
     },
   }
 }
@@ -184,29 +201,40 @@ type Envelope =
       telefuncFilePath: string
       telefunctionName: string
       telefunctionKey: string
+      raw: object
       args: unknown[]
       streamTransport: StreamTransport
       requestExtensions: Record<string, Record<string, unknown>>
     }
   | { isMalformedRequest: true }
 
-/** Parse the request envelope and validate its shape. Each reviver-prefixed string in `args` becomes
- *  a deferred placeholder (see `createRequestReviver`) — actual value construction is deferred until
- *  `reviveArgs(telefunction)` runs in the caller, when shield metadata is available. */
-function parseEnvelope(text: string, reviver: Reviver, runContext: RunContext): Envelope {
+/** Parse only enough of the request envelope to route it. Serializer transformation happens after
+ *  the target module loads, using the extension types registered by that module. */
+function parseEnvelope(text: string, runContext: RunContext): Envelope {
   let parsed: unknown
   try {
-    parsed = parse(text, { reviver })
+    parsed = JSON.parse(text)
   } catch (err: unknown) {
-    logParseError(
-      ["Telefunc request body couldn't be parsed.", !hasProp(err, 'message') ? null : `Parse error: ${err.message}.`]
-        .filter(Boolean)
-        .join(' '),
-      runContext,
-    )
+    logParseException(err, runContext)
     return { isMalformedRequest: true }
   }
 
+  return envelopeFrom(parsed, runContext)
+}
+
+function transformEnvelope(raw: object, reviver: Reviver, runContext: RunContext): Envelope {
+  let parsed: unknown
+  try {
+    parsed = parseTransform(raw, { reviver })
+  } catch (err: unknown) {
+    logParseException(err, runContext)
+    return { isMalformedRequest: true }
+  }
+
+  return envelopeFrom(parsed, runContext)
+}
+
+function envelopeFrom(parsed: unknown, runContext: RunContext): Envelope {
   if (!hasProp(parsed, 'file', 'string') || !hasProp(parsed, 'name', 'string') || !hasProp(parsed, 'args', 'array')) {
     logParseError('Telefunc request body has unexpected content', runContext)
     return { isMalformedRequest: true }
@@ -217,6 +245,7 @@ function parseEnvelope(text: string, reviver: Reviver, runContext: RunContext): 
     telefuncFilePath: parsed.file,
     telefunctionName: parsed.name,
     telefunctionKey: getTelefunctionKey(parsed.file, parsed.name),
+    raw: parsed,
     args: parsed.args,
     streamTransport: resolveStreamTransport(parsed, runContext.serverConfig.stream.transport),
     requestExtensions:
@@ -224,6 +253,15 @@ function parseEnvelope(text: string, reviver: Reviver, runContext: RunContext): 
         ? (parsed.extensions as Record<string, Record<string, unknown>>)
         : {},
   }
+}
+
+function logParseException(err: unknown, runContext: RunContext) {
+  logParseError(
+    ["Telefunc request body couldn't be parsed.", !hasProp(err, 'message') ? null : `Parse error: ${err.message}.`]
+      .filter(Boolean)
+      .join(' '),
+    runContext,
+  )
 }
 
 const VALID_STREAM_TRANSPORTS: StreamTransport[] = [
