@@ -1137,7 +1137,7 @@ describe.skipIf(url === undefined || url === '')('Redis independent-review race 
 
     await fx.backend.deleteRetained(roomId, inc)
     accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, new Uint8Array(100), { retain: true }))
-    // Replacement subtracts only the old payload (not its 12-byte frame header), so the total remains 100.
+    // Replacement subtracts only the old payload (not its 16-byte frame header), so the total remains 100.
     accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, new Uint8Array(100), { retain: true }))
     await expect(fx.backend.commitLane(roomId, inc, CONTROL, new Uint8Array(1), { retain: true })).rejects.toThrow(
       /retained aggregate/,

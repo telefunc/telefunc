@@ -38,6 +38,8 @@ export type MemoryRoomBackendOptions = {
   // — and so a skewed CALLER clock (Date.now) stays distinguishable from authority time.
   authorityNow?: () => number
   maxRetainedPayloadBytes?: number
+  /** @internal Ownership injection for an embedding that preserves state across facade reconstruction. */
+  state?: MemoryRoomBackendState
 }
 
 type StoredHead = {
@@ -51,7 +53,7 @@ type StoredHead = {
 
 type Expiring = { expiresAt: number | null }
 type StoredCell = Expiring & { bytes: Uint8Array }
-type OrderMark = Expiring & { seq: number; timestamp: number }
+type OrderMark = { seq: number; timestamp: number }
 type RetainedEntry = { lane: LaneId; payload: Uint8Array; seq: number; timestamp: number }
 
 type Generation = {
@@ -64,6 +66,19 @@ type Generation = {
 }
 
 type RoomRecord = { head: StoredHead | null; gens: Map<string, Generation> }
+
+/**
+ * Storage owner for the in-process reference backend. Keeping durable maps separate from the facade
+ * models backend reconstruction over preserved process state without a test-only backend method or a
+ * global registry.
+ *
+ * @internal
+ */
+export class MemoryRoomBackendState {
+  readonly rooms = new Map<string, RoomRecord>()
+  readonly directory = new Map<string, string>()
+  revSeq = 0
+}
 
 // In the fixed lane table every lane's order domain and channel correspond one to one, so a single key
 // indexes both the order watermarks and the subscription channels. Member and track are encoded so a
@@ -289,13 +304,12 @@ export class MemoryRoomBackend implements RoomBackendSpi {
   readonly capabilities: RoomBackendSpi['capabilities']
 
   readonly #now: () => number
-  readonly #rooms = new Map<string, RoomRecord>()
-  readonly #directory = new Map<string, string>()
-  #revSeq = 0
+  readonly #state: MemoryRoomBackendState
   #disposed = false
 
   constructor(options: MemoryRoomBackendOptions = {}) {
     this.#now = options.authorityNow ?? Date.now
+    this.#state = options.state ?? new MemoryRoomBackendState()
     this.capabilities = {
       receivers: 'global',
       maxRetainedPayloadBytes: options.maxRetainedPayloadBytes ?? DEFAULT_MAX_RETAINED_BYTES,
@@ -308,7 +322,7 @@ export class MemoryRoomBackend implements RoomBackendSpi {
 
   async readHead(roomId: string): Promise<{ head: RoomHead } | null> {
     this.#assertLive()
-    const head = this.#liveHead(this.#rooms.get(roomId))
+    const head = this.#liveHead(this.#state.rooms.get(roomId))
     return head === null ? null : { head: publicHead(head) }
   }
 
@@ -321,7 +335,7 @@ export class MemoryRoomBackend implements RoomBackendSpi {
   > {
     this.#assertLive()
     assertHeadNextWellFormed(next)
-    const existing = this.#rooms.get(roomId)
+    const existing = this.#state.rooms.get(roomId)
     const current = this.#liveHead(existing)
     // Operation legality precedes the compare for the delete path only; every other transition is
     // validated against the head the compare actually matched, so a genuine race still conflicts.
@@ -355,7 +369,7 @@ export class MemoryRoomBackend implements RoomBackendSpi {
   #storeHead(room: RoomRecord, next: Extract<HeadNext, { head: unknown }>): StoredHead {
     const now = this.#now()
     const stored: StoredHead = {
-      rev: `rev-${++this.#revSeq}`,
+      rev: `rev-${++this.#state.revSeq}`,
       currentInc: next.head.currentInc,
       state: next.head.state,
       config: copyBytes(next.head.config),
@@ -378,7 +392,7 @@ export class MemoryRoomBackend implements RoomBackendSpi {
     sel: { keys: string[] } | { prefix: string },
   ): Promise<{ revision: string; cells: Map<string, Uint8Array> } | { staleInc: true }> {
     this.#assertLive()
-    const room = this.#rooms.get(roomId)
+    const room = this.#state.rooms.get(roomId)
     const head = this.#liveHead(room)
     // Reads stay available while the head is closing — the closer's tail needs them; only writes require
     // an open head (CxResult 'stale-inc').
@@ -402,7 +416,7 @@ export class MemoryRoomBackend implements RoomBackendSpi {
     mutations: CellMutation[],
   ): Promise<CxResult> {
     this.#assertLive()
-    const room = this.#rooms.get(roomId)
+    const room = this.#state.rooms.get(roomId)
     const head = this.#liveHead(room)
     if (room === undefined || head === null || head.currentInc !== inc || head.state !== 'open') return 'stale-inc'
     const gen = this.#generation(room, inc)
@@ -426,10 +440,10 @@ export class MemoryRoomBackend implements RoomBackendSpi {
     inc: string,
     lane: LaneId,
     payload: Uint8Array,
-    opts?: { retain?: boolean; orderTtlMs?: number; closingLease?: string },
+    opts?: { retain?: boolean; closingLease?: string },
   ): Promise<CommitResult> {
     this.#assertLive()
-    const room = this.#rooms.get(roomId)
+    const room = this.#state.rooms.get(roomId)
     const head = this.#liveHead(room)
     if (room === undefined || head === null || !this.#commitPreconditionHolds(head, inc, lane, opts?.closingLease)) {
       return { stale: true }
@@ -439,7 +453,7 @@ export class MemoryRoomBackend implements RoomBackendSpi {
     const frame = copyBytes(payload)
     // Over-cap retain is rejected before anything is mutated, so a throw never half-accepts a commit.
     if (opts?.retain) this.#assertRetainedCapacity(gen, key, frame)
-    const mark = this.#advanceOrder(gen, key, opts?.orderTtlMs)
+    const mark = this.#advanceOrder(gen, key)
     if (opts?.retain) gen.retained.set(key, { lane, payload: frame, seq: mark.seq, timestamp: mark.timestamp })
     const targets = [...(gen.subs.get(key) ?? [])]
     const info = { seq: mark.seq, timestamp: mark.timestamp }
@@ -465,15 +479,19 @@ export class MemoryRoomBackend implements RoomBackendSpi {
           this.#now() <= head.closeLease.until
   }
 
-  #advanceOrder(gen: Generation, domain: string, ttlMs: number | undefined): OrderMark {
+  #advanceOrder(gen: Generation, domain: string): OrderMark {
     const now = this.#now()
     const previous = gen.order.get(domain)
-    const live = previous !== undefined && !isExpired(previous, now) ? previous : undefined
-    // seq is strictly increasing; the timestamp is clamped so it can never move backwards within a domain.
+    if (previous?.seq === Number.MAX_SAFE_INTEGER) {
+      throw new Error('commitLane: sequence exhausted for the ordering domain')
+    }
+    // seq is a standalone monotonic cursor; timestamp is independently clamped and cannot reset it.
     const mark: OrderMark = {
-      seq: (live?.seq ?? 0) + 1,
-      timestamp: Math.max(now, live?.timestamp ?? 0),
-      expiresAt: ttlMs === undefined ? null : now + ttlMs,
+      seq: (previous?.seq ?? 0) + 1,
+      timestamp: Math.max(now, previous?.timestamp ?? 0),
+    }
+    if (!Number.isSafeInteger(mark.seq) || mark.seq <= 0 || !Number.isSafeInteger(mark.timestamp)) {
+      throw new Error('commitLane: sequence exhausted for the ordering domain')
     }
     gen.order.set(domain, mark)
     return mark
@@ -525,20 +543,20 @@ export class MemoryRoomBackend implements RoomBackendSpi {
     lane: LaneId,
   ): Promise<{ payload: Uint8Array; seq: number; timestamp: number } | null> {
     this.#assertLive()
-    const entry = this.#rooms.get(roomId)?.gens.get(inc)?.retained.get(laneKey(lane))
+    const entry = this.#state.rooms.get(roomId)?.gens.get(inc)?.retained.get(laneKey(lane))
     if (entry === undefined) return null
     return { payload: copyBytes(entry.payload), seq: entry.seq, timestamp: entry.timestamp }
   }
 
   async listRetained(roomId: string, inc: string): Promise<LaneId[]> {
     this.#assertLive()
-    const gen = this.#rooms.get(roomId)?.gens.get(inc)
+    const gen = this.#state.rooms.get(roomId)?.gens.get(inc)
     return gen === undefined ? [] : [...gen.retained.values()].map((entry) => entry.lane)
   }
 
   async deleteRetained(roomId: string, inc: string, lane?: LaneId): Promise<void> {
     this.#assertLive()
-    const gen = this.#rooms.get(roomId)?.gens.get(inc)
+    const gen = this.#state.rooms.get(roomId)?.gens.get(inc)
     if (gen === undefined) return
     if (lane === undefined) gen.retained.clear()
     else gen.retained.delete(laneKey(lane))
@@ -548,11 +566,11 @@ export class MemoryRoomBackend implements RoomBackendSpi {
 
   subscribeLane(roomId: string, inc: string, lane: LaneId, receiver: LaneReceiver): LaneSubscription {
     this.#assertLive()
-    const room = this.#rooms.get(roomId)
+    const room = this.#state.rooms.get(roomId)
     const head = this.#liveHead(room)
     const key = laneKey(lane)
     const sub: MemoryLaneSubscription = new MemoryLaneSubscription(receiver, () => {
-      this.#rooms.get(roomId)?.gens.get(inc)?.subs.get(key)?.delete(sub)
+      this.#state.rooms.get(roomId)?.gens.get(inc)?.subs.get(key)?.delete(sub)
     })
     if (room === undefined || head === null || head.currentInc !== inc || head.state !== 'open') {
       sub.failEstablishment(`subscribeLane: room '${roomId}' has no open incarnation '${inc}'`)
@@ -571,7 +589,7 @@ export class MemoryRoomBackend implements RoomBackendSpi {
 
   async listGenerations(roomId: string): Promise<string[]> {
     this.#assertLive()
-    const room = this.#rooms.get(roomId)
+    const room = this.#state.rooms.get(roomId)
     if (room === undefined) return []
     this.#sweep(room)
     return [...room.gens.keys()]
@@ -579,7 +597,7 @@ export class MemoryRoomBackend implements RoomBackendSpi {
 
   async dropGeneration(roomId: string, inc: string): Promise<void> {
     this.#assertLive()
-    const room = this.#rooms.get(roomId)
+    const room = this.#state.rooms.get(roomId)
     if (room === undefined) return
     if (this.#liveHead(room)?.currentInc === inc) {
       throw new Error(`dropGeneration: refusing to drop the current incarnation '${inc}' of room '${roomId}'`)
@@ -595,12 +613,12 @@ export class MemoryRoomBackend implements RoomBackendSpi {
 
   async directoryPut(roomId: string, incTag: string): Promise<void> {
     this.#assertLive()
-    this.#directory.set(roomId, incTag)
+    this.#state.directory.set(roomId, incTag)
   }
 
   async directoryDelete(roomId: string, incTag: string): Promise<void> {
     this.#assertLive()
-    if (this.#directory.get(roomId) === incTag) this.#directory.delete(roomId)
+    if (this.#state.directory.get(roomId) === incTag) this.#state.directory.delete(roomId)
   }
 
   async directoryList(
@@ -608,11 +626,11 @@ export class MemoryRoomBackend implements RoomBackendSpi {
     cursor?: string,
   ): Promise<{ entries: { roomId: string; incTag: string }[]; cursor?: string }> {
     this.#assertLive()
-    const matching = [...this.#directory.keys()].filter((roomId) => roomId.startsWith(prefix)).sort()
+    const matching = [...this.#state.directory.keys()].filter((roomId) => roomId.startsWith(prefix)).sort()
     const start = cursor === undefined ? 0 : matching.findIndex((roomId) => roomId > cursor)
     if (start < 0) return { entries: [] }
     const page = matching.slice(start, start + DIRECTORY_PAGE_SIZE)
-    const entries = page.map((roomId) => ({ roomId, incTag: this.#directory.get(roomId) as string }))
+    const entries = page.map((roomId) => ({ roomId, incTag: this.#state.directory.get(roomId) as string }))
     const last = page[page.length - 1]
     const more = last !== undefined && start + page.length < matching.length
     return more ? { entries, cursor: last } : { entries }
@@ -621,13 +639,13 @@ export class MemoryRoomBackend implements RoomBackendSpi {
   async dispose(): Promise<void> {
     if (this.#disposed) return
     this.#disposed = true
-    for (const room of this.#rooms.values()) {
+    for (const room of this.#state.rooms.values()) {
       for (const gen of room.gens.values()) {
         for (const subs of gen.subs.values()) for (const sub of subs) sub.generationDropped()
       }
     }
-    this.#rooms.clear()
-    this.#directory.clear()
+    this.#state.rooms.clear()
+    this.#state.directory.clear()
   }
 
   // ── internals ──
@@ -637,10 +655,10 @@ export class MemoryRoomBackend implements RoomBackendSpi {
   }
 
   #roomFor(roomId: string): RoomRecord {
-    const existing = this.#rooms.get(roomId)
+    const existing = this.#state.rooms.get(roomId)
     if (existing !== undefined) return existing
     const room: RoomRecord = { head: null, gens: new Map() }
-    this.#rooms.set(roomId, room)
+    this.#state.rooms.set(roomId, room)
     return room
   }
 
@@ -660,14 +678,13 @@ export class MemoryRoomBackend implements RoomBackendSpi {
     return null
   }
 
-  // The reclaiming half of the TTL story, run on the janitor path. Reads already filter expired data, so
-  // this only frees memory — it is never what makes an expired datum invisible.
+  // Reclaim expiring heads and cells. Ordering marks are generation-lifetime state and deliberately
+  // have no janitor path; dropGeneration() is their cleanup boundary.
   #sweep(room: RoomRecord): void {
     const now = this.#now()
     this.#liveHead(room)
     for (const gen of room.gens.values()) {
       for (const [key, cell] of gen.cells) if (isExpired(cell, now)) gen.cells.delete(key)
-      for (const [domain, mark] of gen.order) if (isExpired(mark, now)) gen.order.delete(domain)
     }
   }
 }

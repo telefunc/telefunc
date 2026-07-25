@@ -34,7 +34,7 @@ export class TelefuncDurableObject extends TelefuncDurableObjectBase {
         leaseId: 'recipe-probe',
         generationToken: 'recipe-probe',
         frame: new ArrayBuffer(0),
-        seq: 0,
+        seq: 1,
         timestamp: 0,
       })
       return 'unexpected delivery success'

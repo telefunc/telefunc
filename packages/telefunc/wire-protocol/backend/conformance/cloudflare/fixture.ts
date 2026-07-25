@@ -53,7 +53,7 @@ export type RoomStub = {
     inc: string,
     lane: LaneId,
     payload: Uint8Array,
-    opts?: { retain?: boolean; orderTtlMs?: number; closingLease?: string },
+    opts?: { retain?: boolean; closingLease?: string },
   ): Promise<CommitWire>
   awaitDelivery(token: string): Promise<void>
   readRetained(inc: string, lane: LaneId): Promise<RetainedWire | null>
@@ -95,6 +95,8 @@ export type RoomStub = {
     cursor?: string,
   ): Promise<{ entries: { roomId: string; incTag: string }[]; cursor?: string }>
   telefuncRoomRunMaintenance(): Promise<{ prunedRoutes: number }>
+  telefuncRoomSeedOrderWatermarkForTest(inc: string, lane: LaneId, seq: number, timestamp: number): Promise<void>
+  telefuncRoomReconstructForTest(): Promise<void>
 }
 
 type SessionStub = {
@@ -474,7 +476,7 @@ class CloudflareConformanceBackend implements RoomBackendSpi {
     inc: string,
     lane: LaneId,
     payload: Uint8Array,
-    opts?: { retain?: boolean; orderTtlMs?: number; closingLease?: string },
+    opts?: { retain?: boolean; closingLease?: string },
   ): Promise<CommitResult> {
     await this.#preflight()
     const result = await this.#command<
@@ -501,6 +503,21 @@ class CloudflareConformanceBackend implements RoomBackendSpi {
   async deleteRetained(roomId: string, inc: string, lane?: LaneId) {
     await this.#preflight()
     await this.#command<null>({ kind: 'delete-retained', roomId, inc, lane })
+  }
+
+  async runOrderMaintenance(roomId: string): Promise<void> {
+    await this.#preflight()
+    await this.#command<null>({ kind: 'run-order-maintenance', roomId })
+  }
+
+  async reconstructOrderAuthority(roomId: string): Promise<void> {
+    await this.#preflight()
+    await this.#command<null>({ kind: 'reconstruct-order-authority', roomId })
+  }
+
+  async seedOrderWatermark(roomId: string, inc: string, lane: LaneId, seq: number, timestamp: number): Promise<void> {
+    await this.#preflight()
+    await this.#command<null>({ kind: 'seed-order-watermark', roomId, inc, lane, seq, timestamp })
   }
 
   subscribeLane(roomId: string, inc: string, lane: LaneId, receiver: LaneReceiver): LaneSubscription {
@@ -787,6 +804,13 @@ export const cloudflareHarness: BackendHarness = {
       expectedReceivers: { twoLocalSubscriptionsSameLane: 1, oneLocalSubscriptionAfterSiblingDetach: 1 },
       authorityNow: () => clockValue,
       advanceAuthority: (ms) => setClock(clockValue + ms),
+      orderControl: {
+        setAuthority: (now) => setClock(now),
+        runMaintenance: (roomId) => backend.runOrderMaintenance(roomId),
+        reconstructBackend: (roomId) => backend.reconstructOrderAuthority(roomId),
+        seedWatermark: (roomId, inc, lane, seq, timestamp) =>
+          backend.seedOrderWatermark(roomId, inc, lane, seq, timestamp),
+      },
       concurrentHeadCxBarrier: async <T>(first: () => Promise<T>, second: () => Promise<T>) => {
         const firstPromise = first()
         const secondPromise = second()

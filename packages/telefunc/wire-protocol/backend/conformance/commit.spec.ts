@@ -88,7 +88,9 @@ for (const harness of installedBackends) {
 
       it('is stale for a foreign incarnation and once the head is no longer open', async () => {
         // KILLER: accepting a commit without the head check turns this red.
+        const beforeForeign = accepted(await commit(SEMANTIC, 'before-foreign'))
         expect(isStale(await fx.backend.commitLane(roomId, 'inc-that-never-was', SEMANTIC, bytes('x')))).toBe(true)
+        expect(accepted(await commit(SEMANTIC, 'after-foreign')).seq).toBe(beforeForeign.seq + 1)
 
         const head = await readHeadOrThrow(fx.backend, roomId)
         const { head: closing, leaseId } = await enterClosing(fx.backend, roomId, head)

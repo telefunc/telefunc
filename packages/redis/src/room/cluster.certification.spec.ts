@@ -7,10 +7,10 @@ import { Cluster, Redis } from 'ioredis'
 import type { CommitAccepted, LaneId, RoomHead } from 'telefunc/backend'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import type { RedisRoomBackend as RedisRoomBackendType } from './backend.js'
-import { DIRECTORY_PUT_LUA, directoryIndexKey, headKey, roomTag } from './layout.js'
+import { DIRECTORY_PUT_LUA, directoryIndexKey, headKey, orderKey, roomTag } from './layout.js'
 
 const publicRuntime = await import('../../dist/index.js')
-const RedisRoomBackend = publicRuntime.RedisRoomBackend as typeof RedisRoomBackendType
+const RedisRoomBackend = publicRuntime.RedisRoomBackend as unknown as typeof RedisRoomBackendType
 
 type NodeAddress = { host: string; port: number }
 type Master = NodeAddress & { id: string; start: number; end: number; client: Redis }
@@ -130,6 +130,45 @@ describe.skipIf(nodes === undefined)('RedisRoomBackend real three-master Cluster
       expect(new Set(callbacks.map(({ id }) => id))).toHaveLength(100)
     } finally {
       if (sub !== undefined) await sub.unsubscribe().catch(() => {})
+      await backend.dispose()
+    }
+  })
+
+  it('round-trips a safe-integer Room cursor through the shipped live, retained and fresh-client paths', async () => {
+    const prefix = uniquePrefix('wide-order')
+    const subscriberPort = [...masters].sort((left, right) => left.port - right.port)[0]?.port as number
+    const roomId = await roomOnMaster(prefix, subscriberPort, 'wide-order')
+    const inc = 'wide-order-inc'
+    const backend = new RedisRoomBackend({ redis: cluster, prefix })
+    const callbacks: number[] = []
+    let freshBackend: RedisRoomBackendType | undefined
+    let sub: ReturnType<RedisRoomBackendType['subscribeLane']> | undefined
+    try {
+      await open(backend, roomId, inc)
+      sub = backend.subscribeLane(roomId, inc, SEMANTIC, (_payload, info) => callbacks.push(info.seq))
+      await sub.ready
+      await cluster.set(orderKey(prefix, roomId, inc, 'semantic'), `${0xffff_ffff}:${Date.now()}`)
+
+      const wide = await backend.commitLane(roomId, inc, SEMANTIC, Buffer.from('wide'), { retain: true })
+      if (!('accepted' in wide)) throw new Error('wide commit was unexpectedly stale')
+      await wide.delivery
+      await waitFor(() => callbacks.length === 1, 10_000)
+      expect(wide.seq).toBe(0x1_0000_0000)
+      expect(callbacks).toEqual([0x1_0000_0000])
+      expect(await backend.readRetained(roomId, inc, SEMANTIC)).toMatchObject({ seq: 0x1_0000_0000 })
+
+      freshBackend = new RedisRoomBackend({ redis: cluster, prefix })
+      expect(await freshBackend.readRetained(roomId, inc, SEMANTIC)).toMatchObject({ seq: 0x1_0000_0000 })
+
+      await cluster.set(orderKey(prefix, roomId, inc, 'semantic'), `${Number.MAX_SAFE_INTEGER}:${Date.now()}`)
+      await expect(
+        freshBackend.commitLane(roomId, inc, SEMANTIC, Buffer.from('must-not-commit'), { retain: true }),
+      ).rejects.toThrow('commitLane: sequence exhausted for the ordering domain')
+      expect(await freshBackend.readRetained(roomId, inc, SEMANTIC)).toMatchObject({ seq: 0x1_0000_0000 })
+      expect(callbacks).toEqual([0x1_0000_0000])
+    } finally {
+      if (sub !== undefined) await sub.unsubscribe().catch(() => {})
+      await freshBackend?.dispose().catch(() => {})
       await backend.dispose()
     }
   })

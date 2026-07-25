@@ -18,7 +18,7 @@ export type SessionRoomCommand =
       inc: string
       lane: LaneId
       payloadB64: string
-      options?: { retain?: boolean; orderTtlMs?: number; closingLease?: string }
+      options?: { retain?: boolean; closingLease?: string }
     }
   | { kind: 'read-retained'; roomId: string; inc: string; lane: LaneId }
   | { kind: 'list-retained'; roomId: string; inc: string }
@@ -28,5 +28,15 @@ export type SessionRoomCommand =
   | { kind: 'directory-put'; roomId: string; incTag: string }
   | { kind: 'directory-delete'; roomId: string; incTag: string }
   | { kind: 'directory-list'; prefix: string; cursor?: string }
+  | { kind: 'run-order-maintenance'; roomId: string }
+  | { kind: 'reconstruct-order-authority'; roomId: string }
+  | {
+      kind: 'seed-order-watermark'
+      roomId: string
+      inc: string
+      lane: LaneId
+      seq: number
+      timestamp: number
+    }
 
 export type SessionRoomReply = { ok: true; value: unknown } | { ok: false; error: string }

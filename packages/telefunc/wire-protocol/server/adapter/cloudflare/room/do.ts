@@ -250,7 +250,7 @@ export class TelefuncRoomDurableObject extends DurableObject {
     inc: string,
     lane: LaneId,
     payload: Uint8Array,
-    opts?: { retain?: boolean; orderTtlMs?: number; closingLease?: string },
+    opts?: { retain?: boolean; closingLease?: string },
   ): Promise<CommitWire> {
     const now = this.#authorityNow()
     const key = laneKeyOf(lane)
@@ -263,7 +263,7 @@ export class TelefuncRoomDurableObject extends DurableObject {
       this.ctx.storage.transactionSync(() => {
         if (!commitPreconditionHolds(this.#sql, inc, lane, opts?.closingLease, now)) return
         if (opts?.retain === true) assertRetainedCapacity(this.#sql, inc, key, frame.byteLength, this.#maxRetainedBytes)
-        const mark = advanceOrder(this.#sql, inc, key, now, opts?.orderTtlMs)
+        const mark = advanceOrder(this.#sql, inc, key, now)
         if (opts?.retain === true) installRetained(this.#sql, inc, lane, frame, mark)
         const targets = snapshotRoutes(this.#sql, inc, key, now)
         accepted = { seq: mark.seq, timestamp: mark.timestamp, targets }
@@ -611,7 +611,6 @@ export class TelefuncRoomDurableObject extends DurableObject {
     this.ctx.storage.transactionSync(() => {
       deleteExpiredRouteGenerationCaptures(this.#sql, now)
       this.#sql.exec('DELETE FROM cell WHERE expires_at IS NOT NULL AND expires_at <= ?', now)
-      this.#sql.exec('DELETE FROM ord WHERE expires_at IS NOT NULL AND expires_at <= ?', now)
       const currentInc = readLiveHead(this.#sql, now)?.currentInc ?? null
       orphanIncs = observeAndListGraceAgedOrphans(this.#sql, currentInc, now, GEN_ORPHAN_GRACE_MS)
       // A lapsed tombstone is reclaimed through the delete path (this backend has no native head TTL).

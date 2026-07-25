@@ -9,8 +9,8 @@
 //   headrev:   tf:room:{rid}:headrev        INCR counter — the monotonic source of every head `rev`
 //   cells:     tf:room:{rid}:g:<inc>:c:<key>   logical cell:  "<expiresAt|''>\n<bytes>"  (PX = backstop)
 //   revision:  tf:room:{rid}:g:<inc>:rev    INCR'd by every cell CX — the coarse per-generation revision
-//   order:     tf:room:{rid}:g:<inc>:o:<laneKey>   "<seq>:<ts>:<expiresAt|''>"
-//   retained:  tf:room:{rid}:g:<inc>:rt:<laneKey>  12-byte framed [seq][ts_hi][ts_lo] .. payload bytes
+//   order:     tf:room:{rid}:g:<inc>:o:<laneKey>   "<seq>:<ts>"
+//   retained:  tf:room:{rid}:g:<inc>:rt:<laneKey>  16-byte [seq_hi][seq_lo][ts_hi][ts_lo] + payload
 //   rt-size:   tf:room:{rid}:g:<inc>:rt-size       aggregate retained PAYLOAD bytes (headers excluded)
 //   channels:  tf:room:{rid}:ch:<inc>:<laneKey>    PUBLISH/SUBSCRIBE — INC-SCOPED (an old-inc SUBSCRIBE
 //                                                  can never hear a recreation — I11)
@@ -387,7 +387,7 @@ export const CELLS_CX_CMD = 'tfRoomCellsCx'
 // the narrow closing-control branch, which is what makes every other lane stale while closing (I12).
 //   KEYS: [1]=head [2]=order [3]=retained [4]=channel [5]=retained aggregate payload size
 //   ARGV: [1]=now [2]=inc [3]=laneKind [4]=closingLease('') [5]=retain('0'|'1')
-//         [6]=orderTtlMs('') [7]=payload [8]=aggregate retained payload cap
+//         [6]=payload [7]=aggregate retained payload cap
 export const COMMIT_LUA = `${NOW_FN}
 local head_key, order_key, retained_key, channel_key, retained_size_key = KEYS[1], KEYS[2], KEYS[3], KEYS[4], KEYS[5]
 local now = tf_now(ARGV[1])
@@ -403,39 +403,49 @@ if head and head.inc == ARGV[2] then
 end
 if not ok then return '{"stale":true}' end
 
--- The counter is aggregate PAYLOAD bytes. A stored frame has a fixed 12-byte order header, excluded
+-- The counter is aggregate PAYLOAD bytes. A stored frame has a fixed 16-byte order header, excluded
 -- when replacing an existing retained lane. The check precedes every acceptance mutation.
 local retained_total = nil
 if ARGV[5] == '1' then
   local current_total = tonumber(redis.call('GET', retained_size_key) or '0')
   local old_frame_bytes = redis.call('STRLEN', retained_key)
   local old_payload_bytes = 0
-  if old_frame_bytes > 12 then old_payload_bytes = old_frame_bytes - 12 end
-  retained_total = current_total - old_payload_bytes + string.len(ARGV[7])
-  if retained_total > tonumber(ARGV[8]) then
-    return redis.error_reply('commitLane: retained aggregate ' .. retained_total .. ' bytes exceeds the ' .. ARGV[8] .. ' byte cap')
+  if old_frame_bytes > 16 then old_payload_bytes = old_frame_bytes - 16 end
+  retained_total = current_total - old_payload_bytes + string.len(ARGV[6])
+  if retained_total > tonumber(ARGV[7]) then
+    return redis.error_reply('commitLane: retained aggregate ' .. retained_total .. ' bytes exceeds the ' .. ARGV[7] .. ' byte cap')
   end
 end
 
--- advance the lane's order domain: seq strictly increasing, timestamp clamped non-decreasing; a
--- logically-expired mark resets (matches the reference).
+-- Advance the live lane-domain cursor exactly once. It has no TTL: generation deletion is its cleanup
+-- boundary. Reject safe-integer exhaustion before SET/retained/PUBLISH can have any effect.
 local base_seq, base_ts = 0, 0
 local prev = redis.call('GET', order_key)
 if prev then
-  local pseq, pts, pexp = string.match(prev, '^(%d+):(%d+):(%d*)$')
-  local expired = (pexp ~= '' and tonumber(pexp) <= now)
-  if not expired then base_seq = tonumber(pseq); base_ts = tonumber(pts) end
+  local pseq, pts = string.match(prev, '^(%d+):(%d+)$')
+  if not pseq then return redis.error_reply('commitLane: invalid ordering watermark') end
+  base_seq = tonumber(pseq)
+  base_ts = tonumber(pts)
+  if not base_seq or not base_ts or base_seq < 0 or base_seq > 9007199254740991
+      or base_ts < 0 or base_ts > 9007199254740991 then
+    return redis.error_reply('commitLane: invalid ordering watermark')
+  end
+end
+if base_seq >= 9007199254740991 then
+  return redis.error_reply('commitLane: sequence exhausted for the ordering domain')
 end
 local seq = base_seq + 1
 local ts = now
 if base_ts > ts then ts = base_ts end
-local exp_str = ''
-if ARGV[6] ~= '' then exp_str = tostring(now + tonumber(ARGV[6])) end
-redis.call('SET', order_key, seq .. ':' .. ts .. ':' .. exp_str)
-if ARGV[6] ~= '' then redis.call('PEXPIRE', order_key, tonumber(ARGV[6])) end
+if seq < 1 or seq > 9007199254740991 or ts < 0 or ts > 9007199254740991 then
+  return redis.error_reply('commitLane: invalid ordering position')
+end
+redis.call('SET', order_key, seq .. ':' .. ts)
+local seq_hi = math.floor(seq / 4294967296)
+local seq_lo = seq - seq_hi * 4294967296
 local ts_hi = math.floor(ts / 4294967296)
 local ts_lo = ts - ts_hi * 4294967296
-local frame = struct.pack('>I4I4I4', seq, ts_hi, ts_lo) .. ARGV[7]
+local frame = struct.pack('>I4I4I4I4', seq_hi, seq_lo, ts_hi, ts_lo) .. ARGV[6]
 if ARGV[5] == '1' then
   redis.call('SET', retained_key, frame)
   redis.call('SET', retained_size_key, retained_total)
@@ -456,7 +466,7 @@ for i = 2, #KEYS do
   local frame_bytes = redis.call('STRLEN', KEYS[i])
   if frame_bytes > 0 then
     local payload_bytes = 0
-    if frame_bytes > 12 then payload_bytes = frame_bytes - 12 end
+    if frame_bytes > 16 then payload_bytes = frame_bytes - 16 end
     total = total - payload_bytes
     redis.call('DEL', KEYS[i])
   end
@@ -571,14 +581,18 @@ export const REDIS_ROOM_COMMAND_KEYS = {
   directoryDelete: (prefix: string) => [directoryIndexKey(prefix), directoryTagsKey(prefix)],
 } as const
 
-// The 12-byte publish/retained header, shared by the commit Lua (`struct.pack('>I4I4I4', …)`) and the
-// JS decoders. `ts` is split into two u32s to stay ms-accurate beyond ~50 days.
-export const HEADER_BYTES = 12
+// Room's additive 16-byte publish/retained header. Both safe-integer coordinates are split into
+// big-endian u32 pairs. The released generic Channel/Broadcast frame remains unchanged.
+export const HEADER_BYTES = 16
 export const U32_RANGE = 0x1_0000_0000
 
 export function decodeFrameHeader(frame: Uint8Array): { seq: number; timestamp: number; payload: Uint8Array } {
+  if (frame.byteLength < HEADER_BYTES) throw new Error('RedisRoomBackend: truncated Room frame header')
   const view = new DataView(frame.buffer, frame.byteOffset, frame.byteLength)
-  const seq = view.getUint32(0, false)
-  const timestamp = view.getUint32(4, false) * U32_RANGE + view.getUint32(8, false)
+  const seq = view.getUint32(0, false) * U32_RANGE + view.getUint32(4, false)
+  const timestamp = view.getUint32(8, false) * U32_RANGE + view.getUint32(12, false)
+  if (!Number.isSafeInteger(seq) || seq <= 0 || !Number.isSafeInteger(timestamp) || timestamp < 0) {
+    throw new Error('RedisRoomBackend: invalid Room frame ordering position')
+  }
   return { seq, timestamp, payload: frame.subarray(HEADER_BYTES) }
 }

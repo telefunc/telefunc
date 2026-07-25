@@ -44,6 +44,74 @@ for (const harness of installedBackends) {
       await fx.dispose()
     })
 
+    it('keeps one domain cursor monotonic across time changes, inactivity, maintenance and reconstruction', async () => {
+      fx.orderControl.setAuthority(1_000)
+      const first = accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, bytes('one')))
+      const second = accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, bytes('two')))
+      expect([first.timestamp, first.seq]).toEqual([1_000, 1])
+      expect([second.timestamp, second.seq]).toEqual([1_000, 2])
+
+      fx.orderControl.setAuthority(2_000)
+      const later = accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, bytes('later')))
+      expect([later.timestamp, later.seq]).toEqual([2_000, 3])
+
+      fx.orderControl.setAuthority(1_500)
+      const rollback = accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, bytes('rollback')))
+      expect([rollback.timestamp, rollback.seq]).toEqual([2_000, 4])
+
+      fx.advanceAuthority(7 * 24 * 60 * 60 * 1_000)
+      await fx.orderControl.runMaintenance(roomId)
+      const afterMaintenance = accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, bytes('after-maintenance')))
+      expect(afterMaintenance.seq).toBe(5)
+
+      await fx.orderControl.reconstructBackend(roomId)
+      const afterReconstruction = accepted(
+        await fx.backend.commitLane(roomId, inc, SEMANTIC, bytes('after-reconstruction'), { retain: true }),
+      )
+      expect(afterReconstruction.seq).toBe(6)
+      expect(await fx.backend.readRetained(roomId, inc, SEMANTIC)).toMatchObject({
+        seq: 6,
+        timestamp: afterReconstruction.timestamp,
+      })
+      expect(accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, bytes('after-replay'))).seq).toBe(7)
+    })
+
+    it('round-trips a Room position above the unsigned-32-bit boundary through live and retained paths', async () => {
+      const latch = collector()
+      const sub = fx.backend.subscribeLane(roomId, inc, SEMANTIC, latch.receiver)
+      await sub.ready
+      await fx.orderControl.seedWatermark(roomId, inc, SEMANTIC, 0xffff_ffff, fx.authorityNow())
+
+      const committed = accepted(
+        await fx.backend.commitLane(roomId, inc, SEMANTIC, bytes('wide-sequence'), { retain: true }),
+      )
+      await committed.delivery
+      await latch.waitFor(1)
+      const expected = 0x1_0000_0000
+      expect(committed.seq).toBe(expected)
+      expect(latch.frames[0]?.seq).toBe(expected)
+      expect(await fx.backend.readRetained(roomId, inc, SEMANTIC)).toMatchObject({ seq: expected })
+      await sub.unsubscribe()
+    })
+
+    it('rejects safe-integer exhaustion before retained or callback effects', async () => {
+      const latch = collector()
+      const sub = fx.backend.subscribeLane(roomId, inc, SEMANTIC, latch.receiver)
+      await sub.ready
+      await fx.orderControl.seedWatermark(roomId, inc, SEMANTIC, Number.MAX_SAFE_INTEGER, fx.authorityNow())
+
+      await expect(
+        fx.backend.commitLane(roomId, inc, SEMANTIC, bytes('must-not-commit'), { retain: true }),
+      ).rejects.toThrow('commitLane: sequence exhausted for the ordering domain')
+      expect(await fx.backend.readRetained(roomId, inc, SEMANTIC)).toBeNull()
+      expect(latch.frames).toEqual([])
+      await expect(fx.backend.commitLane(roomId, inc, SEMANTIC, bytes('still-exhausted'))).rejects.toThrow(
+        'commitLane: sequence exhausted for the ordering domain',
+      )
+      expect(latch.frames).toEqual([])
+      await sub.unsubscribe()
+    })
+
     it('delivers a lane in seq order', async () => {
       const latch = collector()
       const sub = fx.backend.subscribeLane(roomId, inc, SEMANTIC, latch.receiver)
@@ -174,7 +242,9 @@ for (const harness of installedBackends) {
       const latch = collector()
       const fresh = fx.backend.subscribeLane(roomId, recreated.inc, SEMANTIC, latch.receiver)
       await fresh.ready
-      await accepted(await fx.backend.commitLane(roomId, recreated.inc, SEMANTIC, bytes('new-gen'))).delivery
+      const recreatedCommit = accepted(await fx.backend.commitLane(roomId, recreated.inc, SEMANTIC, bytes('new-gen')))
+      expect(recreatedCommit.seq).toBe(1)
+      await recreatedCommit.delivery
       expect(latch.payloads()).toEqual(['new-gen'])
 
       await stall.release()
@@ -207,7 +277,9 @@ for (const harness of installedBackends) {
       const fresh = collector()
       const freshSub = fx.backend.subscribeLane(roomId, inc, SEMANTIC, fresh.receiver)
       await freshSub.ready
-      await accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, bytes('new-frame'))).delivery
+      const reusedCommit = accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, bytes('new-frame')))
+      expect(reusedCommit.seq).toBe(1)
+      await reusedCommit.delivery
 
       await stall.release()
       await Promise.all([blocker.delivery, droppedAttempt.delivery])

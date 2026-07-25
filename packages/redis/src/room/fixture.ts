@@ -27,6 +27,7 @@ import {
   gensKey,
   headKey,
   laneKey,
+  orderKey,
   routeCaptureExpiriesKey,
   routeCapturesKey,
   REDIS_ROOM_COMMANDS,
@@ -356,7 +357,10 @@ export async function createRedisFixture(
     const evalClient = redis as unknown as { evalsha: EvalSha; eval: Eval }
     const originalEvalSha = evalClient.evalsha.bind(redis)
     const originalEval = evalClient.eval.bind(redis)
-    const commandsByLua = new Map(Object.values(REDIS_ROOM_COMMANDS).map((command) => [command.lua, command]))
+    type RedisRoomCommand = (typeof REDIS_ROOM_COMMANDS)[keyof typeof REDIS_ROOM_COMMANDS]
+    const commandsByLua = new Map<string, RedisRoomCommand>(
+      Object.values(REDIS_ROOM_COMMANDS).map((command) => [command.lua, command]),
+    )
     const commandsBySha = new Map(
       Object.values(REDIS_ROOM_COMMANDS).map((command) => [
         createHash('sha1').update(command.lua).digest('hex'),
@@ -491,7 +495,7 @@ export async function createRedisFixture(
     ),
   )
 
-  return {
+  const fixture: RedisBackendFixture = {
     backend,
     redis,
     subscriber,
@@ -522,6 +526,21 @@ export async function createRedisFixture(
     authorityNow: () => clock,
     advanceAuthority: (ms) => {
       clock += ms
+    },
+    orderControl: {
+      setAuthority: (now) => {
+        clock = now
+      },
+      runMaintenance: async (roomId) => {
+        await fixture.backend.listGenerations(roomId)
+      },
+      reconstructBackend: async () => {
+        const peer = await fixture.createPeerBackend()
+        fixture.backend = peer.backend
+      },
+      seedWatermark: async (roomId, inc, lane, seq, timestamp) => {
+        await redis.set(orderKey(prefix, roomId, inc, laneKey(lane)), `${seq}:${timestamp}`)
+      },
     },
     concurrentHeadCxBarrier,
     setStableReadProbe: (fn) => {
@@ -658,6 +677,7 @@ export async function createRedisFixture(
       }
     },
   }
+  return fixture
 }
 
 export function makeRedisHarness(url: string): BackendHarness {

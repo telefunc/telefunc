@@ -26,7 +26,7 @@ import {
   type HeadWire,
   TelefuncRoomDurableObject as ProductionTelefuncRoomDurableObject,
 } from '../../../server/adapter/cloudflare/room/do.js'
-import { base64ToBytes, bytesToBase64 } from '../../../server/adapter/cloudflare/room/codec.js'
+import { base64ToBytes, bytesToBase64, laneKey as laneKeyOf } from '../../../server/adapter/cloudflare/room/codec.js'
 import type { SubscriptionScheduler } from '../../../server/adapter/cloudflare/room/subscription.js'
 import { resolveSessionRoutingTarget } from '../../../server/adapter/cloudflare/routing.js'
 
@@ -485,6 +485,32 @@ export class ConformanceSessionDurableObject extends DurableObject {
         return null
       case 'directory-list':
         return await this.#run(() => this.#backend.directoryList(command.prefix, command.cursor))
+      case 'run-order-maintenance': {
+        const stub = this.#namespace.get(this.#namespace.idFromName(command.roomId)) as CloudflareRoomAuthorityStub & {
+          telefuncRoomRunMaintenance(): Promise<{ prunedRoutes: number }>
+        }
+        await stub.telefuncRoomRunMaintenance()
+        return null
+      }
+      case 'reconstruct-order-authority': {
+        const stub = this.#namespace.get(this.#namespace.idFromName(command.roomId)) as CloudflareRoomAuthorityStub & {
+          telefuncRoomReconstructForTest(): Promise<void>
+        }
+        await stub.telefuncRoomReconstructForTest()
+        return null
+      }
+      case 'seed-order-watermark': {
+        const stub = this.#namespace.get(this.#namespace.idFromName(command.roomId)) as CloudflareRoomAuthorityStub & {
+          telefuncRoomSeedOrderWatermarkForTest(
+            inc: string,
+            lane: LaneId,
+            seq: number,
+            timestamp: number,
+          ): Promise<void>
+        }
+        await stub.telefuncRoomSeedOrderWatermarkForTest(command.inc, command.lane, command.seq, command.timestamp)
+        return null
+      }
     }
   }
 
@@ -624,8 +650,43 @@ export class ConformanceSessionDurableObject extends DurableObject {
 }
 
 export class TelefuncRoomDurableObject extends ProductionTelefuncRoomDurableObject {
+  readonly #testEnv: unknown
+  #reconstructed: ProductionTelefuncRoomDurableObject | null = null
+
   constructor(ctx: DurableObjectState, env: unknown) {
     super(ctx, env, 'TelefuncDurableObject', () => controlledClock)
+    this.#testEnv = env
+  }
+
+  override commitLane(
+    roomId: string,
+    inc: string,
+    lane: LaneId,
+    payload: Uint8Array,
+    opts?: { retain?: boolean; closingLease?: string },
+  ) {
+    return this.#reconstructed === null
+      ? super.commitLane(roomId, inc, lane, payload, opts)
+      : this.#reconstructed.commitLane(roomId, inc, lane, payload, opts)
+  }
+
+  telefuncRoomSeedOrderWatermarkForTest(inc: string, lane: LaneId, seq: number, timestamp: number): void {
+    this.ctx.storage.sql.exec(
+      'INSERT OR REPLACE INTO ord (inc, domain, seq, ts) VALUES (?, ?, ?, ?)',
+      inc,
+      laneKeyOf(lane),
+      seq,
+      timestamp,
+    )
+  }
+
+  telefuncRoomReconstructForTest(): void {
+    this.#reconstructed = new ProductionTelefuncRoomDurableObject(
+      this.ctx,
+      this.#testEnv,
+      'TelefuncDurableObject',
+      () => controlledClock,
+    )
   }
 }
 

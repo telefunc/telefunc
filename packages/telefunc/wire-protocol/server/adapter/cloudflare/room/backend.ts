@@ -39,6 +39,12 @@ const DIRECTORY_DO_NAME = '__telefunc_room_directory__'
 const MAX_RETAINED_BYTES = 16 * 1024 * 1024
 const ROOM_MANAGER = Symbol('telefunc.cloudflare.room-manager')
 
+function assertOrderingPosition(seq: number, timestamp: number, context: string): void {
+  if (!Number.isSafeInteger(seq) || seq <= 0 || !Number.isSafeInteger(timestamp) || timestamp < 0) {
+    throw new Error(`${context}: invalid Room ordering position`)
+  }
+}
+
 export const CLOUDFLARE_ROOM_CONTEXT_ERROR =
   // spellcheck-ignore  nodejs_als is a real Cloudflare compatibility flag (AsyncLocalStorage), not a typo
   'Cloudflare Room requires await-safe context. Import "telefunc/async_hooks" and enable the Cloudflare "nodejs_als" or "nodejs_compat" compatibility flag.'
@@ -71,7 +77,7 @@ export type CloudflareRoomAuthorityStub = {
     inc: string,
     lane: LaneId,
     payload: Uint8Array,
-    opts?: { retain?: boolean; orderTtlMs?: number; closingLease?: string },
+    opts?: { retain?: boolean; closingLease?: string },
   ): Promise<CommitWire>
   awaitDelivery(token: string): Promise<void>
   readRetained(inc: string, lane: LaneId): Promise<RetainedWire | null>
@@ -279,6 +285,7 @@ export class CloudflareRoomSessionManager {
   }
 
   async deliver(request: RoomShardDeliveryRequest): Promise<void> {
+    assertOrderingPosition(request.seq, request.timestamp, 'Cloudflare Room delivery')
     if (request.subscriberDoId !== this.#id)
       throw new Error('Cloudflare Room delivery addressed the wrong session shard')
     const entry = this.#entries.get(JSON.stringify([request.roomId, request.inc, request.laneKey]))
@@ -430,7 +437,7 @@ export class CloudflareRoomBackend implements RoomBackendSpi {
     inc: string,
     lane: LaneId,
     payload: Uint8Array,
-    opts?: { retain?: boolean; orderTtlMs?: number; closingLease?: string },
+    opts?: { retain?: boolean; closingLease?: string },
   ): Promise<CommitResult> {
     const manager = getCloudflareRoomSessionManager()
     const stub = manager.authority(roomId)
@@ -438,6 +445,7 @@ export class CloudflareRoomBackend implements RoomBackendSpi {
     try {
       if ('error' in wire) throw new Error(wire.error)
       if ('stale' in wire) return { stale: true }
+      assertOrderingPosition(wire.seq, wire.timestamp, 'CloudflareRoomBackend.commitLane')
       const deliveryToken = wire.deliveryToken
       const attempt = new Promise<void>((resolve, reject) => {
         setTimeout(() => void stub.awaitDelivery(deliveryToken).then(resolve, reject), 0)
@@ -450,7 +458,9 @@ export class CloudflareRoomBackend implements RoomBackendSpi {
   }
   async readRetained(roomId: string, inc: string, lane: LaneId) {
     const wire = await this.#stub(roomId).readRetained(inc, lane)
-    return wire === null ? null : { payload: base64ToBytes(wire.payloadB64), seq: wire.seq, timestamp: wire.timestamp }
+    if (wire === null) return null
+    assertOrderingPosition(wire.seq, wire.timestamp, 'CloudflareRoomBackend.readRetained')
+    return { payload: base64ToBytes(wire.payloadB64), seq: wire.seq, timestamp: wire.timestamp }
   }
   async listRetained(roomId: string, inc: string) {
     return this.#stub(roomId).listRetained(inc)

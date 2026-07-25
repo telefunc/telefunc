@@ -64,6 +64,12 @@ const NEWLINE = 0x0a
 const SUBSCRIPTION_RETRY_ATTEMPTS = 5
 export const REDIS_GENERATION_CAPTURE_TTL_MS = 90_000
 
+function assertOrderingPosition(seq: number, timestamp: number, context: string): void {
+  if (!Number.isSafeInteger(seq) || seq <= 0 || !Number.isSafeInteger(timestamp) || timestamp < 0) {
+    throw new Error(`${context}: invalid Room ordering position`)
+  }
+}
+
 function defaultSubscriptionRetryDelay(attempt: number): number {
   const ceiling = Math.min(4_000, 250 * 2 ** (attempt - 1))
   return Math.floor(ceiling * (0.5 + Math.random() * 0.5))
@@ -364,7 +370,7 @@ export class RedisRoomBackend implements RoomBackendSpi {
     inc: string,
     lane: LaneId,
     payload: Uint8Array,
-    opts?: { retain?: boolean; orderTtlMs?: number; closingLease?: string },
+    opts?: { retain?: boolean; closingLease?: string },
   ): Promise<CommitResult> {
     this.#assertLive()
     const channel = channelKey(this.#prefix, roomId, inc, laneKey(lane))
@@ -375,7 +381,6 @@ export class RedisRoomBackend implements RoomBackendSpi {
       lane.kind,
       opts?.closingLease ?? '',
       opts?.retain === true ? '1' : '0',
-      opts?.orderTtlMs === undefined ? '' : String(opts.orderTtlMs),
       toBuffer(payload),
       String(this.capabilities.maxRetainedPayloadBytes),
     ])) as string
@@ -383,6 +388,7 @@ export class RedisRoomBackend implements RoomBackendSpi {
       | { stale: true }
       | { accepted: true; seq: number; timestamp: number; receivers: number }
     if ('stale' in parsed) return { stale: true }
+    assertOrderingPosition(parsed.seq, parsed.timestamp, 'RedisRoomBackend.commitLane')
     // The PUBLISH inside the atomic record IS the broker handoff, and the broker's per-connection FIFO
     // is what orders the attempt (receivers = the PUBLISH count). `delivery` then flushes local dispatch:
     // the frame was queued to the subscriber socket during the awaited commit, so a PING round-trip on
@@ -413,6 +419,7 @@ export class RedisRoomBackend implements RoomBackendSpi {
     const frame = await this.#publisher.getBuffer(retainedKey(this.#prefix, roomId, inc, laneKey(lane)))
     if (frame === null) return null
     const { seq, timestamp, payload } = decodeFrameHeader(frame)
+    assertOrderingPosition(seq, timestamp, 'RedisRoomBackend.readRetained')
     return { payload: Uint8Array.from(payload), seq, timestamp }
   }
 

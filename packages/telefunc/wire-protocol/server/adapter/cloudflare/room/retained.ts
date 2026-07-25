@@ -111,6 +111,14 @@ export function readRetained(
     payload.set(bytes, offset)
     offset += bytes.byteLength
   }
+  if (
+    !Number.isSafeInteger(manifest.seq) ||
+    manifest.seq <= 0 ||
+    !Number.isSafeInteger(manifest.ts) ||
+    manifest.ts < 0
+  ) {
+    throw new Error('readRetained: invalid Room ordering position')
+  }
   return { payload, seq: manifest.seq, timestamp: manifest.ts }
 }
 

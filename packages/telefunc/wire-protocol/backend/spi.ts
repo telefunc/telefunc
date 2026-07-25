@@ -29,7 +29,7 @@ export type LaneId =
 
 // Fixed lane table (normative):
 //  lane      order domain                      channel            notes
-//  semantic  RoomOrder (clamped ts,seq)        ONE channel        text AND announce share domain AND channel
+//  semantic  RoomOrder (monotonic seq)         ONE channel        text AND announce share domain AND channel
 //  control   ControlSeq (per-room counter)     control channel    fenced; projections stay idempotent
 //  binary    LaneSeq (per member,track)        per-lane channel   separate domains preserved by constraint
 //  inbox     InboxSeq (per member)             per-inbox channel  separate domain preserved by constraint
@@ -94,8 +94,8 @@ export type CxResult = 'committed' | 'conflict' | 'stale-inc'
 
 export type CommitAccepted = {
   accepted: true
-  seq: number
-  timestamp: number // position in the lane's own order domain
+  seq: number // positive safe integer; standalone cursor within this incarnation+lane domain
+  timestamp: number // safe integer; non-decreasing authority time, independent of seq advancement
   receivers: number // targets snapshotted at acceptance
   delivery: Promise<void> // the backend's ONE at-most-once HANDOFF attempt: settles when the handoff
   // settles — memory: callback dispatch · Redis: PUBLISH reply · CF: target RPC fan-out. Receiver-callback
@@ -156,7 +156,7 @@ export type RoomBackendSpi = {
     inc: string,
     lane: LaneId,
     payload: Uint8Array,
-    opts?: { retain?: boolean; orderTtlMs?: number; closingLease?: string },
+    opts?: { retain?: boolean; closingLease?: string },
   ): Promise<CommitResult>
   // DEFAULT precondition (single backend-atomic step): head check (currentInc===inc ∧ state==='open')
   //   + advance lane's order domain + (retain ? install retained generation : nothing).
@@ -170,6 +170,10 @@ export type RoomBackendSpi = {
   //   closing→closed, every commit — including control with the old lease — ⇒ { stale }.
   // Delivery attempt: AFTER acceptance, ordered per lane, exposed via `delivery` so PRODUCT POLICY
   //   decides what the public publish promise awaits.
+  // Ordering position: one persistent cursor per existing (incarnation instance, lane) domain.
+  //   Every accepted commit advances seq by exactly one; timestamp is independently clamped to authority
+  //   time. The cursor has no live TTL and is removed only when its generation is dropped. Exhaustion at
+  //   Number.MAX_SAFE_INTEGER rejects before acceptance, retained installation, or delivery effects.
 
   // ── retained (consistent; whole payloads; chunking is BACKEND-INTERNAL) ──
   readRetained(

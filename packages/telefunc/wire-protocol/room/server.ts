@@ -268,13 +268,6 @@ const ROOM_TOMBSTONE_TTL_MS = 60_000
  *  abandoned sweep left behind (they carry the old id and TTL-reap on their own). */
 const ROOM_CLOSE_LEASE_MS = ROOM_TOMBSTONE_TTL_MS
 
-/** How long the semantic-lane order watermark lingers after the last allocation. Refreshed on every
- *  `publish()`/`announce()`, so it never lapses while a room is active; it outlives a close only long
- *  enough that a recreation within the window resumes the clock past the previous watermark. Past the
- *  window, wall time has advanced far enough that a fresh `(now, 0)` already exceeds it. Matches the
- *  tombstone window — both bound the same "a recreation resumes past the last incarnation" guarantee. */
-const ROOM_ORDER_KV_TTL_MS = ROOM_TOMBSTONE_TTL_MS
-
 /** The retained value stored per (member, track) binary lane: the base64 frame plus the publish
  *  receipt it was assigned, so a late subscriber replays it in the lane's real order (never a fresh
  *  `seq:0`/`Date.now()` stamp). */
@@ -287,19 +280,14 @@ async function registerRoomIndex(id: string): Promise<void> {
   await getRoomKV().set(roomIndexKvKey(id), '')
 }
 
-/** The clamped-clock advance: the next `(timestamp, seq)` from the previous watermark and the current
- *  wall clock. Lexicographically strictly increasing — `seq` resets to `1` when time genuinely
- *  advances, else the timestamp is clamped to the watermark and `seq` increments — so a repeated or
- *  backward clock never yields a duplicate or an out-of-order pair. `seq` is 1-based, per the
- *  `ChannelPublishInfo.seq` contract. Pure, so it's the whole contract. */
 /** Commit a semantic frame — participant text or `Room.announce()` — to the room's timeline: one
  *  atomic assign-order + optional retain + publish on `channelKey`, drawing the shared room clock at
  *  `roomOrderKey`. The adapter rides the assigned order on the transport frame (the single source of a
  *  message's place in the order — the receiver reads it there, never out of the payload) and
  *  linearizes against the room's partition, so concurrent publishers across nodes never rewind or
  *  overtake, and a crash can't advance the order with nothing published. `publish()` and `announce()`
- *  share the clock, so a room's semantic messages carry one strictly-increasing, unique order that
- *  continues past whatever watermark a previous incarnation left. Fenced on the incarnation (`inc`):
+ *  share one cursor, so a room incarnation's semantic messages carry one strictly-increasing, unique
+ *  sequence. Fenced on the incarnation (`inc`):
  *  the commit orders/retains/publishes only while the open-fence still holds this handle's id, so a
  *  publish from a closed or superseded incarnation fails before any effect (the caller throws). */
 function commitRoomFrame(
@@ -319,7 +307,6 @@ function commitRoomFrame(
       partitionKey: roomCtrlKey(id),
       fences: [{ key: roomOpenFenceKey(id), expected: inc }],
       orderKey: roomOrderKey(id),
-      orderTtlMs: ROOM_ORDER_KV_TTL_MS,
       channelKey,
       payload,
       ...(retainKey === undefined ? {} : { retainKey }),

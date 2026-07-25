@@ -4,7 +4,7 @@
 //
 // Redis and Cloudflare fixtures append themselves here; the scenario modules never learn a backend name.
 
-import { MemoryRoomBackend } from '../memory/backend.js'
+import { MemoryRoomBackend, MemoryRoomBackendState } from '../memory/backend.js'
 import type { LaneId, RoomBackendSpi } from '../spi.js'
 
 export type BackendTraces = {
@@ -46,6 +46,15 @@ export type BackendFixture = {
   // to realize I13(c)'s race on a backend whose CX application is genuinely asynchronous. W2b/W2c carry
   // this obligation; the conformance suite fails loudly if an async backend registers without it.
   concurrentHeadCxBarrier?: <T>(first: () => Promise<T>, second: () => Promise<T>) => Promise<[T, T]>
+  // Test-only, production-backed controls for the ordering boundary cases that cannot be reached by
+  // billions of public commits. Implementations manipulate the real backend's authoritative store; no
+  // production backend exposes a test method or a second public constructor.
+  orderControl: {
+    setAuthority(now: number): void
+    runMaintenance(roomId: string): Promise<void>
+    reconstructBackend(roomId: string): Promise<void>
+    seedWatermark(roomId: string, inc: string, lane: LaneId, seq: number, timestamp: number): Promise<void>
+  }
   dispose(): Promise<void>
 }
 
@@ -66,6 +75,19 @@ export type BackendHarness = {
   create(): Promise<BackendFixture>
 }
 
+function orderDomainKey(lane: LaneId): string {
+  switch (lane.kind) {
+    case 'semantic':
+      return 'semantic'
+    case 'control':
+      return 'control'
+    case 'binary':
+      return `binary:${encodeURIComponent(lane.member)}:${encodeURIComponent(lane.track)}`
+    case 'inbox':
+      return `inbox:${encodeURIComponent(lane.member)}`
+  }
+}
+
 export const memoryHarness: BackendHarness = {
   name: 'memory',
   async create(): Promise<BackendFixture> {
@@ -74,17 +96,42 @@ export const memoryHarness: BackendHarness = {
     // that wrongly consults the caller clock fail the wrong scenario (a takeover would look permanently
     // expired), which would certify the mutation gate against the wrong invariant.
     let clock = Date.now()
-    const backend = new MemoryRoomBackend({ authorityNow: () => clock })
-    return {
-      backend,
+    const state = new MemoryRoomBackendState()
+    const facades: MemoryRoomBackend[] = []
+    const createFacade = (): MemoryRoomBackend => {
+      const backend = new MemoryRoomBackend({ authorityNow: () => clock, state })
+      facades.push(backend)
+      return backend
+    }
+    const fixture: BackendFixture = {
+      backend: createFacade(),
       traces: { handoffAwaitsReceiver: true, perTargetFailure: true, cxAppliesSynchronously: true },
       expectedReceivers: { twoLocalSubscriptionsSameLane: 2, oneLocalSubscriptionAfterSiblingDetach: 1 },
       authorityNow: () => clock,
       advanceAuthority: (ms) => {
         clock += ms
       },
-      dispose: () => backend.dispose(),
+      orderControl: {
+        setAuthority: (now) => {
+          clock = now
+        },
+        runMaintenance: async (roomId) => {
+          await fixture.backend.listGenerations(roomId)
+        },
+        reconstructBackend: async () => {
+          fixture.backend = createFacade()
+        },
+        seedWatermark: async (roomId, inc, lane, seq, timestamp) => {
+          const generation = state.rooms.get(roomId)?.gens.get(inc)
+          if (generation === undefined) throw new Error('memory boundary control: generation is absent')
+          generation.order.set(orderDomainKey(lane), { seq, timestamp })
+        },
+      },
+      dispose: async () => {
+        await Promise.all(facades.map((backend) => backend.dispose()))
+      },
     }
+    return fixture
   },
 }
 

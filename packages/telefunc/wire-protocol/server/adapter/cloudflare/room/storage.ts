@@ -62,7 +62,7 @@ export function initSchema(sql: SqlStorage): void {
       PRIMARY KEY (inc, key)
     );
     CREATE TABLE IF NOT EXISTS ord (
-      inc TEXT NOT NULL, domain TEXT NOT NULL, seq INTEGER NOT NULL, ts INTEGER NOT NULL, expires_at INTEGER,
+      inc TEXT NOT NULL, domain TEXT NOT NULL, seq INTEGER NOT NULL, ts INTEGER NOT NULL,
       PRIMARY KEY (inc, domain)
     );
     CREATE TABLE IF NOT EXISTS rt_manifest (
@@ -397,32 +397,24 @@ export function compareExchangeCells(
 
 export type OrderMark = { seq: number; timestamp: number }
 
-// seq strictly increases; the timestamp is clamped so it never moves backwards within a domain. A lapsed
-// order row restarts the domain — matching the memory reference's lazy expiry.
-export function advanceOrder(
-  sql: SqlStorage,
-  inc: string,
-  domain: string,
-  now: number,
-  ttlMs: number | undefined,
-): OrderMark {
+// seq strictly increases for the lifetime of a domain instance; timestamp is clamped independently.
+export function advanceOrder(sql: SqlStorage, inc: string, domain: string, now: number): OrderMark {
   const row = sql
-    .exec<{ seq: number; ts: number; expires_at: number | null }>(
-      'SELECT seq, ts, expires_at FROM ord WHERE inc = ? AND domain = ?',
-      inc,
-      domain,
-    )
+    .exec<{ seq: number; ts: number }>('SELECT seq, ts FROM ord WHERE inc = ? AND domain = ?', inc, domain)
     .toArray()[0]
-  const live = row !== undefined && !(row.expires_at !== null && row.expires_at <= now) ? row : undefined
-  const mark: OrderMark = { seq: (live?.seq ?? 0) + 1, timestamp: Math.max(now, live?.ts ?? 0) }
-  const expiresAt = ttlMs === undefined ? null : now + ttlMs
+  if (row?.seq === Number.MAX_SAFE_INTEGER) {
+    throw new Error('commitLane: sequence exhausted for the ordering domain')
+  }
+  const mark: OrderMark = { seq: (row?.seq ?? 0) + 1, timestamp: Math.max(now, row?.ts ?? 0) }
+  if (!Number.isSafeInteger(mark.seq) || mark.seq <= 0 || !Number.isSafeInteger(mark.timestamp)) {
+    throw new Error('commitLane: invalid ordering position')
+  }
   sql.exec(
-    'INSERT OR REPLACE INTO ord (inc, domain, seq, ts, expires_at) VALUES (?, ?, ?, ?, ?)',
+    'INSERT OR REPLACE INTO ord (inc, domain, seq, ts) VALUES (?, ?, ?, ?)',
     inc,
     domain,
     mark.seq,
     mark.timestamp,
-    expiresAt,
   )
   return mark
 }

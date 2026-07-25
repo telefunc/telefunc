@@ -342,7 +342,7 @@ export async function onJoinChat(roomId) {
       await db.messages.insert({ ...message, roomId, authorId: from.identity, seq: info.seq, at: info.timestamp })
     },
   })
-  const history = await db.messages.latest(roomId, 50) // read after tailing began, ordered by (at, seq)
+  const history = await db.messages.latest(roomId, 50) // read after tailing began, ordered by seq
   return { room, history }
 }
 ```
@@ -360,7 +360,9 @@ for (const m of history) show(m)   // the past
 room.subscribe(show)               // flushes the held live tail, then stays live
 ```
 
-Order both the stored history and the live tail by the `(timestamp, seq)` pair every message carries, so they read as one timeline. `publish()` text and `Room.announce()` draw from one room-wide clock: `timestamp` orders across instants, and `seq` breaks ties within a single instant (it counts `1, 2, 3…` inside an instant and resets when `timestamp` advances, so it isn't a standalone counter; sort on the pair, not `seq` alone). Both are assigned centrally (Redis, or the Cloudflare key authority), never a per-node clock, so the order holds across nodes. Binary rides its own per-lane sequence, a separate order domain.
+Order the stored history and live tail for the current room lifecycle by `seq`. It is a standalone monotonic cursor: every accepted message in an ordering-domain instance gets the previous `seq + 1`, even when authority time advances, moves backward, or the backend is reconstructed. `timestamp` is non-decreasing authority time for display and temporal context; it doesn't reset or partition `seq`.
+
+The domains are deliberately separate. Text published with `publish()` and `Room.announce()` share the room incarnation's semantic domain; control has its own domain; every `(member, binary track)` and every recipient inbox has its own domain. A close and recreation starts new domain instances at `seq = 1`, so positions from different lifecycles or lanes aren't comparable. If your application combines several room lifecycles into one history, persist its own lifecycle or message identity alongside `seq`.
 
 The tail is a bounded, drop-oldest buffer of the most recent messages, sized for a prompt subscribe, not a second copy of history: if a client is slow to subscribe on a busy room, the oldest tail messages roll off, and the database history you loaded above stays the source of truth.
 
