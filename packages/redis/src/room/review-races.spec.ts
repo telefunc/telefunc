@@ -40,6 +40,19 @@ describe.skipIf(url === undefined || url === '')('Redis independent-review race 
     if (fx !== undefined) await fx.dispose()
   })
 
+  it('keeps the shared one-second delivery bound intact while accelerating Redis retry timers', async () => {
+    let deliveryBoundFired = false
+    const deliveryBound = setTimeout(() => {
+      deliveryBoundFired = true
+    }, 1_000)
+    try {
+      await new Promise<void>((resolve) => setTimeout(resolve, 10))
+      expect(deliveryBoundFired).toBe(false)
+    } finally {
+      clearTimeout(deliveryBound)
+    }
+  })
+
   it('same-channel subscribers share the in-flight SUBSCRIBE ack before either becomes ready', async () => {
     const roomId = nextId('room')
     const { inc } = await openRoom(fx.backend, roomId)

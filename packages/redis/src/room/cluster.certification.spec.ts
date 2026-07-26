@@ -160,12 +160,26 @@ describe.skipIf(nodes === undefined)('RedisRoomBackend real three-master Cluster
       freshBackend = new RedisRoomBackend({ redis: cluster, prefix })
       expect(await freshBackend.readRetained(roomId, inc, SEMANTIC)).toMatchObject({ seq: 0x1_0000_0000 })
 
-      await cluster.set(orderKey(prefix, roomId, inc, 'semantic'), `${Number.MAX_SAFE_INTEGER}:${Date.now()}`)
+      await cluster.set(orderKey(prefix, roomId, inc, 'semantic'), `${Number.MAX_SAFE_INTEGER - 1}:${Date.now()}`)
+      const lastLegal = await freshBackend.commitLane(roomId, inc, SEMANTIC, Buffer.from('last-legal'), {
+        retain: true,
+      })
+      if (!('accepted' in lastLegal)) throw new Error('last legal commit was unexpectedly stale')
+      await lastLegal.delivery
+      await waitFor(() => callbacks.length === 2, 10_000)
+      expect(lastLegal.seq).toBe(Number.MAX_SAFE_INTEGER)
+      expect(callbacks).toEqual([0x1_0000_0000, Number.MAX_SAFE_INTEGER])
+      expect(await freshBackend.readRetained(roomId, inc, SEMANTIC)).toMatchObject({
+        seq: Number.MAX_SAFE_INTEGER,
+      })
+
       await expect(
         freshBackend.commitLane(roomId, inc, SEMANTIC, Buffer.from('must-not-commit'), { retain: true }),
       ).rejects.toThrow('commitLane: sequence exhausted for the ordering domain')
-      expect(await freshBackend.readRetained(roomId, inc, SEMANTIC)).toMatchObject({ seq: 0x1_0000_0000 })
-      expect(callbacks).toEqual([0x1_0000_0000])
+      expect(await freshBackend.readRetained(roomId, inc, SEMANTIC)).toMatchObject({
+        seq: Number.MAX_SAFE_INTEGER,
+      })
+      expect(callbacks).toEqual([0x1_0000_0000, Number.MAX_SAFE_INTEGER])
     } finally {
       if (sub !== undefined) await sub.unsubscribe().catch(() => {})
       await freshBackend?.dispose().catch(() => {})
@@ -214,6 +228,21 @@ describe.skipIf(nodes === undefined)('RedisRoomBackend real three-master Cluster
     const inc = 'noscript-inc'
     const client = clusterClient(nodes as NodeAddress[])
     const backend = new RedisRoomBackend({ redis: client, prefix })
+    const scriptCalls: Array<'evalsha' | 'eval'> = []
+    const evalClient = client as unknown as {
+      evalsha(sha: string, numberOfKeys: number, ...args: unknown[]): Promise<unknown>
+      eval(lua: string, numberOfKeys: number, ...args: unknown[]): Promise<unknown>
+    }
+    const originalEvalSha = evalClient.evalsha.bind(client)
+    const originalEval = evalClient.eval.bind(client)
+    evalClient.evalsha = async (sha, numberOfKeys, ...args) => {
+      scriptCalls.push('evalsha')
+      return await originalEvalSha(sha, numberOfKeys, ...args)
+    }
+    evalClient.eval = async (lua, numberOfKeys, ...args) => {
+      scriptCalls.push('eval')
+      return await originalEval(lua, numberOfKeys, ...args)
+    }
     let slotNumber: number | undefined
     let source: Master | undefined
     let target: Master | undefined
@@ -225,9 +254,11 @@ describe.skipIf(nodes === undefined)('RedisRoomBackend real three-master Cluster
       target = masters.find((master) => master.port !== source?.port) as Master
       await target.client.script('FLUSH')
       await moveSlot(slotNumber, source, target, true)
+      scriptCalls.length = 0
 
       const result = accepted(await backend.commitLane(roomId, inc, SEMANTIC, Buffer.from('eval-fallback')))
       await result.delivery
+      expect(scriptCalls).toEqual(['evalsha', 'eval'])
       expect(result.seq).toBe(2)
       expect((await backend.readHead(roomId))?.head.currentInc).toBe(inc)
       await assertClusterOk()
@@ -236,6 +267,8 @@ describe.skipIf(nodes === undefined)('RedisRoomBackend real three-master Cluster
         await restoreSlot(slotNumber, source, target)
       }
       await backend.dispose()
+      evalClient.evalsha = originalEvalSha
+      evalClient.eval = originalEval
       await client.quit()
     }
   })

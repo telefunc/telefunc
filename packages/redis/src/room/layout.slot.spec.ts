@@ -551,6 +551,7 @@ const SAFE_NON_KEY_CALLS = new Set([
   'ipairs',
   'math.floor',
   'redis.error_reply',
+  'string.format',
   'string.len',
   'string.match',
   'struct.pack',

@@ -440,7 +440,12 @@ if base_ts > ts then ts = base_ts end
 if seq < 1 or seq > 9007199254740991 or ts < 0 or ts > 9007199254740991 then
   return redis.error_reply('commitLane: invalid ordering position')
 end
-redis.call('SET', order_key, seq .. ':' .. ts)
+-- Lua's implicit number-to-string conversion uses limited significant digits at the safe-integer
+-- boundary. Format both exact integers once, then use those decimal strings for durable state and the
+-- JSON receipt so the final legal commit cannot effect successfully and fail only while decoding reply.
+local seq_text = string.format('%.0f', seq)
+local ts_text = string.format('%.0f', ts)
+redis.call('SET', order_key, seq_text .. ':' .. ts_text)
 local seq_hi = math.floor(seq / 4294967296)
 local seq_lo = seq - seq_hi * 4294967296
 local ts_hi = math.floor(ts / 4294967296)
@@ -451,7 +456,7 @@ if ARGV[5] == '1' then
   redis.call('SET', retained_size_key, retained_total)
 end
 local receivers = redis.call('PUBLISH', channel_key, frame)
-return '{"accepted":true,"seq":' .. seq .. ',"timestamp":' .. ts .. ',"receivers":' .. receivers .. '}'
+return '{"accepted":true,"seq":' .. seq_text .. ',"timestamp":' .. ts_text .. ',"receivers":' .. receivers .. '}'
 `
 
 export const COMMIT_CMD = 'tfRoomCommit'

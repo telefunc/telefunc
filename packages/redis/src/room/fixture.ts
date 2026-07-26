@@ -21,6 +21,7 @@ import type {
   BackendHarness,
   BackendTraces,
 } from '../../../telefunc/wire-protocol/backend/conformance/harness.js'
+import { DELIVERY_BOUND_MS } from '../../../telefunc/wire-protocol/backend/conformance/scenario.js'
 import {
   channelKey,
   generationTokensKey,
@@ -194,7 +195,10 @@ export async function createRedisFixture(
   globalThis.setTimeout = ((handler: TimerHandler, timeout?: number, ...args: unknown[]) =>
     realSetTimeout(
       handler,
-      timeout !== undefined && timeout >= 100 && timeout <= 4_000 ? 0 : timeout,
+      // Compress only the backend's bounded retry waits. The shared conformance collector's exact
+      // delivery watchdog is also inside this numeric range; collapsing that 1s contract bound to 0
+      // made its last broker callback race a false timeout after all SUBSCRIBE readiness had settled.
+      timeout !== undefined && timeout >= 100 && timeout <= 4_000 && timeout !== DELIVERY_BOUND_MS ? 0 : timeout,
       ...args,
     )) as typeof setTimeout
   restorers.push(() => {

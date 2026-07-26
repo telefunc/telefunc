@@ -664,13 +664,13 @@ export class RedisRoomBackend implements RoomBackendSpi {
         typeof arg === 'string' ? arg : Buffer.from(arg.buffer, arg.byteOffset, arg.byteLength),
       )
       try {
-        return await this.#publisher.eval(descriptor.lua, numberOfKeys, ...redisArgs)
+        return await this.#publisher.evalsha(redisScriptSha(descriptor.lua), numberOfKeys, ...redisArgs)
       } catch (err) {
         // NOSCRIPT proves EVALSHA did not execute. Retrying the complete script with EVAL is therefore
         // non-duplicating, and ioredis preserves MOVED plus ASKING-on-the-same-connection routing for the
         // fallback command. This also covers SCRIPT FLUSH, restarted masters, and newly promoted owners.
         if (!(err instanceof Error) || !err.message.includes('NOSCRIPT')) throw err
-        return await this.#publisher.evalsha(redisScriptSha(descriptor.lua), numberOfKeys, ...redisArgs)
+        return await this.#publisher.eval(descriptor.lua, numberOfKeys, ...redisArgs)
       }
     }
     return await callDefinedCommand(this.#publisher, command, keysAndArgs)
