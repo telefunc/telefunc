@@ -3,7 +3,7 @@ import { Broadcast, ServerBroadcast } from './server-broadcast.js'
 import { ReplayBuffer } from '../replay-buffer.js'
 import { ACK_STATUS, TAG, decode } from '../shared-ws.js'
 import { IndexedPeer } from './IndexedPeer.js'
-import { getBroadcastAdapter, _resetBroadcastAdapterForTesting, DefaultBroadcastAdapter, KV_KEEP } from './broadcast.js'
+import { getBroadcastAdapter, _resetBroadcastAdapterForTesting, DefaultBroadcastAdapter } from './broadcast.js'
 import type { BroadcastTransport } from './broadcast.js'
 
 const previousBroadcastAdapter = getBroadcastAdapter()
@@ -445,29 +445,6 @@ describe('DefaultBroadcastAdapter — multi-node transport', () => {
 
     adapter.publish('room:rc-cycle', 'after-resub')
     expect(received).toEqual(['after-resub'])
-  })
-
-  // The KEEP sentinel an `update` mutator returns. A dev server loads two SSR module graphs, so the
-  // mutator (room code, one graph) and the adapter that compares its result (a cross-graph singleton,
-  // the other graph) hold different bindings of this module. A plain `Symbol` would mismatch there,
-  // the sentinel would fall through to a write, and the raw symbol would be stored — a later read then
-  // `JSON.parse`s a symbol and 500s. `Symbol.for` gives one shared identity, so the compare holds.
-  it('KV_KEEP is the well-known Symbol.for sentinel, so every module-graph copy agrees on it', () => {
-    expect(KV_KEEP).toBe(Symbol.for('telefunc.kv.keep'))
-  })
-
-  it('an update returning KV_KEEP keeps the stored value untouched (never writes the sentinel); null deletes, a string writes', async () => {
-    const adapter = new DefaultBroadcastAdapter()
-    await adapter.set('room:kv', 'v1')
-
-    await adapter.update('room:kv', () => KV_KEEP)
-    expect(await adapter.get('room:kv')).toBe('v1') // kept — not the symbol
-
-    await adapter.update('room:kv', () => 'v2')
-    expect(await adapter.get('room:kv')).toBe('v2') // written
-
-    await adapter.update('room:kv', () => null)
-    expect(await adapter.get('room:kv')).toBeNull() // deleted
   })
 })
 

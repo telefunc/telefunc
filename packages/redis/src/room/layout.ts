@@ -462,6 +462,20 @@ export const COMMIT_KEYS = 5
 export const RETAINED_DELETE_LUA = `
 local size_key = KEYS[1]
 local total = tonumber(redis.call('GET', size_key) or '0')
+local if_seq = ARGV[1]
+if if_seq ~= '' then
+  if #KEYS ~= 2 then return redis.error_reply('deleteRetained: ifSeq requires one lane') end
+  local expected = tonumber(if_seq)
+  if not expected or expected < 1 or expected > 9007199254740991 or expected ~= math.floor(expected) then
+    return redis.error_reply('deleteRetained: invalid ifSeq')
+  end
+  local frame = redis.call('GET', KEYS[2])
+  if not frame then return total end
+  if string.len(frame) < 16 then return redis.error_reply('deleteRetained: invalid retained frame') end
+  local seq_hi, seq_lo = struct.unpack('>I4I4', frame)
+  local current = seq_hi * 4294967296 + seq_lo
+  if current ~= expected then return total end
+end
 for i = 2, #KEYS do
   local frame_bytes = redis.call('STRLEN', KEYS[i])
   if frame_bytes > 0 then

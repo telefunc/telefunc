@@ -554,6 +554,7 @@ const SAFE_NON_KEY_CALLS = new Set([
   'string.len',
   'string.match',
   'struct.pack',
+  'struct.unpack',
   'tonumber',
   'tostring',
   'unpack',

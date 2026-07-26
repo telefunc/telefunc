@@ -12,13 +12,13 @@ describe('Room monotonic-domain publication contract', () => {
     expect(guide).not.toMatch(/seq` breaks ties|resets when `timestamp` advances|sort on the pair, not `seq` alone/)
   })
 
-  it('removes Room order TTLs while retaining the released generic Channel/Broadcast option', () => {
+  it('removes Room order TTLs and the unreleased legacy Broadcast Room commit seam', () => {
     const spi = utf8('packages/telefunc/wire-protocol/backend/spi.ts')
     const roomServer = utf8('packages/telefunc/wire-protocol/room/server.ts')
     const genericBroadcast = utf8('packages/telefunc/wire-protocol/server/broadcast.ts')
     expect(spi).not.toContain('orderTtlMs')
     expect(roomServer).not.toContain('orderTtlMs')
-    expect(genericBroadcast).toContain('orderTtlMs?: number')
+    expect(genericBroadcast).not.toContain('orderTtlMs')
   })
 
   it('keeps the released generic Redis frame at 12 bytes while Room uses its additive 16-byte codec', () => {

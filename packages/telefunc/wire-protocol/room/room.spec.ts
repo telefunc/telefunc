@@ -2,16 +2,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { Abort } from '../../shared/Abort.js'
-import { Broadcast } from '../server/server-broadcast.js'
-import {
-  DefaultBroadcastAdapter,
-  getBroadcastAdapter,
-  _resetBroadcastAdapterForTesting,
-  type BroadcastAdapter,
-  type BroadcastBinaryOnMessage,
-  type BroadcastOnMessage,
-  type BroadcastUnsubscribe,
-} from '../server/broadcast.js'
 import { IndexedPeer } from '../server/IndexedPeer.js'
 import { ReplayBuffer } from '../replay-buffer.js'
 import {
@@ -39,15 +29,8 @@ import type { RemoteParticipant } from './types.js'
 import {
   DEFAULT_TRACK,
   frameWithMemberId,
-  roomCtrlKey,
-  roomTextKey,
-  roomConfigKvKey,
-  roomRetainedBinaryPrefix,
-  roomOpenFenceKey,
-  roomRetainedTextKey,
-  roomMemberDataKey,
-  roomMemberTrackKey,
   roomMemberKvKey,
+  roomHiddenMemberKvPrefix,
   roomIdentityMemberKvKey,
   roomIdentityKvPrefix,
   unframeMemberId,
@@ -59,13 +42,61 @@ import {
 import { RoomState } from './state.js'
 import type { ClientBroadcast } from '../client/channel.js'
 import type { ChannelPublishInfo } from '../channel.js'
+import { disposeRoomBackend, getRoomBackend, installRoomBackend } from '../backend/install.js'
+import { MemoryRoomBackend } from '../backend/memory/backend.js'
+import type { LaneId } from '../backend/spi.js'
 
-const previousAdapter = getBroadcastAdapter()
-beforeEach(() => _resetBroadcastAdapterForTesting(new DefaultBroadcastAdapter()))
-afterEach(() => _resetBroadcastAdapterForTesting(previousAdapter))
+let roomBackend: MemoryRoomBackend
+beforeEach(async () => {
+  await disposeRoomBackend()
+  roomBackend = new MemoryRoomBackend()
+  installRoomBackend(() => roomBackend)
+})
+afterEach(async () => {
+  await settle()
+  await disposeRoomBackend()
+})
 
 /** Let fire-and-forget async chains (KV deletes, leave publishes) settle. */
 const settle = () => new Promise((resolve) => setTimeout(resolve, 0))
+const textEncoder = new TextEncoder()
+const textDecoder = new TextDecoder()
+const controlLane = { kind: 'control' } as const satisfies LaneId
+const semanticLane = { kind: 'semantic' } as const satisfies LaneId
+
+async function activeInc(roomId: string): Promise<string> {
+  const entry = await roomBackend.readHead(roomId)
+  expect(entry?.head.state).toBe('open')
+  expect(entry?.head.currentInc).not.toBeNull()
+  return entry!.head.currentInc!
+}
+
+async function commitText(roomId: string, inc: string, lane: LaneId, value: unknown): Promise<void> {
+  const committed = await roomBackend.commitLane(roomId, inc, lane, textEncoder.encode(stringify(value)))
+  expect('accepted' in committed).toBe(true)
+  if ('accepted' in committed) await committed.delivery
+}
+
+async function readCell(roomId: string, inc: string, key: string): Promise<Uint8Array | undefined> {
+  const read = await roomBackend.readCells(roomId, inc, { keys: [key] })
+  expect('staleInc' in read).toBe(false)
+  return 'cells' in read ? read.cells.get(key) : undefined
+}
+
+async function mutateCell(roomId: string, inc: string, key: string, bytes?: Uint8Array): Promise<void> {
+  const read = await roomBackend.readCells(roomId, inc, { keys: [key] })
+  expect('staleInc' in read).toBe(false)
+  if ('revision' in read) {
+    expect(
+      await roomBackend.compareExchangeCells(
+        roomId,
+        inc,
+        read.revision,
+        bytes ? [{ key, set: { bytes, ttlMs: ROOM_MEMBER_KV_TTL_MS } }] : [{ key }],
+      ),
+    ).toBe('committed')
+  }
+}
 
 // ───────────────────────────────────────────────────────────────────────────
 // Entry point & KV lifecycle — bug classes targeted: state not shared across
@@ -139,27 +170,25 @@ describe('Room entry point', () => {
     await Room.join('scan', { meta: { n: 2 } })
     await settle()
 
-    const reads = vi.spyOn(getBroadcastAdapter(), 'get')
-    const scans = vi.spyOn(getBroadcastAdapter(), 'keys')
+    const reads = vi.spyOn(roomBackend, 'readCells')
     const room = await Room.get('scan')
 
     expect(room.count).toBe(2) // exact, from the scans
-    expect(scans.mock.calls.length).toBe(2) // two prefix scans — member keys, then hidden markers to exclude
-    expect(reads.mock.calls.filter((c) => String(c[0]).includes(':m:'))).toEqual([]) // still no member reads
+    expect(reads.mock.calls.map((call) => call[2])).toEqual([
+      { prefix: roomMemberKvKey('scan', '') },
+      { prefix: roomHiddenMemberKvPrefix('scan') },
+    ])
+    expect(reads.mock.calls.some((call) => 'keys' in call[2])).toBe(false)
     expect((await room.getParticipants()).length).toBe(2) // the roster loads on first need
     reads.mockRestore()
-    scans.mockRestore()
   })
 
   it('Room.join() pays not even the count scan — a pure joiner loads no roster, ever', async () => {
     await Room.create('scan2')
-    const scans = vi.spyOn(getBroadcastAdapter(), 'keys')
-    const reads = vi.spyOn(getBroadcastAdapter(), 'get')
+    const reads = vi.spyOn(roomBackend, 'readCells')
     await Room.join('scan2', { meta: { n: 1 } })
     await settle()
-    expect(scans.mock.calls.length).toBe(0) // roster loads are need-driven; a joiner has no need
-    expect(reads.mock.calls.filter((c) => String(c[0]).includes(':m:'))).toEqual([])
-    scans.mockRestore()
+    expect(reads.mock.calls.filter((call) => 'prefix' in call[2])).toEqual([])
     reads.mockRestore()
   })
 
@@ -279,10 +308,13 @@ describe('Room entry point', () => {
     await me.setMeta({ v: 2 })
 
     // A duplicate delivery of the older event (broker redelivery, echo) arrives late.
-    await getBroadcastAdapter().publish(
-      roomCtrlKey('rev'),
-      stringify({ __r: 'p-meta', id: me.id, meta: { v: 1 }, prev: { v: 0 }, seq: 1 }),
-    )
+    await commitText('rev', (lobby as ServerRoom)._inc, controlLane, {
+      __r: 'p-meta',
+      id: me.id,
+      meta: { v: 1 },
+      prev: { v: 0 },
+      seq: 1,
+    })
 
     expect((await lobby.getParticipant(me.id))!.meta).toEqual({ v: 2 })
   })
@@ -293,10 +325,12 @@ describe('Room entry point', () => {
     await me.setMeta({ v: 1 }) // p-meta advances the meta past its join baseline
 
     // A late redelivery of the original join event (broker redelivery / echo) lands after the update.
-    await getBroadcastAdapter().publish(
-      roomCtrlKey('join-echo'),
-      stringify({ __r: 'join', id: me.id, meta: { v: 0 }, joinedAt: 1 }),
-    )
+    await commitText('join-echo', (lobby as ServerRoom)._inc, controlLane, {
+      __r: 'join',
+      id: me.id,
+      meta: { v: 0 },
+      joinedAt: 1,
+    })
     await settle()
 
     expect((await lobby.getParticipant(me.id))!.meta).toEqual({ v: 1 }) // not regressed to the join meta
@@ -681,19 +715,23 @@ describe('data pub/sub', () => {
     expect(() => me._publishFramed(frameWithMemberId(me.id, new Uint8Array([1])))).toThrow('Participant has left')
   })
 
-  it('text rides its own lane — the control key never carries data', async () => {
+  it('text and announcements share the semantic lane while control carries presence only', async () => {
     const room = await Room.create('lanes')
-    const ctrlTraffic: string[] = []
-    const textTraffic: string[] = []
-    Broadcast.subscribe<{ __r: string }>(roomCtrlKey('lanes'), (msg) => ctrlTraffic.push(msg.__r))
-    Broadcast.subscribe<{ __r: string }>(roomTextKey('lanes'), (msg) => textTraffic.push(msg.__r))
+    const committed = vi.spyOn(roomBackend, 'commitLane')
 
     const me = await room.join({ meta: { name: 'Alice' } })
     await me.publish('hello')
     await Room.announce('lanes', 'notice')
 
-    expect(ctrlTraffic).toEqual(['join', 'announce'])
-    expect(textTraffic).toEqual(['data'])
+    const traffic = committed.mock.calls.map(([, , lane, payload]) => ({
+      lane: lane.kind,
+      tag: (parse(textDecoder.decode(payload)) as { __r: string }).__r,
+    }))
+    expect(traffic).toEqual([
+      { lane: 'control', tag: 'join' },
+      { lane: 'semantic', tag: 'data' },
+      { lane: 'semantic', tag: 'announce' },
+    ])
   })
 
   it('binary rides per-publisher keys in shared mode too — upstream subscriptions are member-selective', async () => {
@@ -702,12 +740,14 @@ describe('data pub/sub', () => {
     const cam2 = await a.join({ meta: { name: 'cam2' } })
     const b = await Room.get('per-pub')
     await b.getParticipants() // materialize the lazy roster
-    const subscribed = vi.spyOn(getBroadcastAdapter(), 'subscribeBinary')
+    const subscribed = vi.spyOn(roomBackend, 'subscribeLane')
 
     const frames: number[][] = []
     ;(await b.getParticipant(cam1.id))!.subscribeBinary((data) => frames.push([...data]))
 
-    expect(subscribed.mock.calls.map((c) => c[0])).toEqual([roomMemberDataKey('per-pub', cam1.id)])
+    expect(subscribed.mock.calls.map((call) => call[2]).filter((lane) => lane.kind === 'binary')).toEqual([
+      { kind: 'binary', member: cam1.id, track: DEFAULT_TRACK },
+    ])
     await cam1.publishBinary(new Uint8Array([1]))
     await cam2.publishBinary(new Uint8Array([2]))
     expect(frames).toEqual([[1]])
@@ -722,10 +762,12 @@ describe('data pub/sub', () => {
     // Control and data travel on separate lanes, so a message can beat its sender's join —
     // the envelope's node-stamped identity makes delivery immediate and correct anyway.
     const ghost = crypto.randomUUID()
-    await getBroadcastAdapter().publish(
-      roomTextKey('race'),
-      stringify({ __r: 'data', from: ghost, fromMeta: { name: 'Zoe' }, data: 'first!' }),
-    )
+    await commitText('race', (room as ServerRoom)._inc, semanticLane, {
+      __r: 'data',
+      from: ghost,
+      fromMeta: { name: 'Zoe' },
+      data: 'first!',
+    })
 
     expect(received).toEqual([{ data: 'first!', id: ghost, meta: { name: 'Zoe' } }])
     expect(await room.getParticipant(ghost)).toBe(null) // presence stays event-driven — no ghost member
@@ -740,15 +782,14 @@ describe('data pub/sub', () => {
     await settle()
 
     // Simulate a dropped join event: the member exists in KV, but its ctrl event never arrived.
-    const adapter = getBroadcastAdapter()
-    const realPublish = adapter.publish.bind(adapter)
-    const drop = vi
-      .spyOn(adapter, 'publish')
-      .mockImplementation((key, payload) =>
-        key === roomCtrlKey('drift') && payload.includes('"join"')
-          ? { seq: 0, timestamp: 0 }
-          : realPublish(key, payload),
-      )
+    const realCommit = roomBackend.commitLane.bind(roomBackend)
+    const drop = vi.spyOn(roomBackend, 'commitLane').mockImplementation(async (roomId, inc, lane, payload, opts) => {
+      const event = lane.kind === 'control' ? (parse(textDecoder.decode(payload)) as { __r?: string }) : null
+      if (roomId === 'drift' && event?.__r === 'join') {
+        return { accepted: true, seq: 1, timestamp: Date.now(), receivers: 0, delivery: Promise.resolve() }
+      }
+      return realCommit(roomId, inc, lane, payload, opts)
+    })
     const ghostly = await a.join({ meta: { name: 'Casper' } })
     drop.mockRestore()
     expect(await observer.getParticipant(ghostly.id)).toBe(null) // the view drifted
@@ -894,12 +935,9 @@ describe('selective binary delivery', () => {
   })
 
   it('encodes room IDs so a delimiter in one ID cannot collide with or sweep another room', () => {
-    // Raw interpolation aliased roomCtrlKey('a:t') onto roomTextKey('a'), and let a `:rb:` close-sweep for
-    // room 'A' reach a room named 'A:rb:X'. IDs may legitimately contain ':' (the docs' 'team:red'), so
-    // encoding makes every ID one opaque, delimiter-free segment.
-    expect(roomCtrlKey('alpha:t')).not.toBe(roomTextKey('alpha'))
-    expect(roomConfigKvKey('A:rb:X').startsWith(roomRetainedBinaryPrefix('A'))).toBe(false)
-    expect(roomCtrlKey('team:red')).not.toBe(roomCtrlKey('team')) // the documented nested ID stays distinct
+    expect(roomMemberKvKey('alpha:m', 'x')).not.toBe(roomMemberKvKey('alpha', 'm:x'))
+    expect(roomIdentityKvPrefix('A:identity:X', 'user')).not.toContain(roomMemberKvKey('A', ''))
+    expect(roomMemberKvKey('team:red', 'x')).not.toBe(roomMemberKvKey('team', 'red:x'))
   })
 
   it('bounds the room ID length', async () => {
@@ -969,16 +1007,17 @@ describe('selective binary delivery', () => {
     const b = await Room.get('track-keys')
     b.subscribeBinary(() => {}) // all tracks — forces the upstream keys up as tracks appear
 
-    const published = vi.spyOn(getBroadcastAdapter(), 'publishBinary')
+    const published = vi.spyOn(roomBackend, 'commitLane')
     await cam.publishBinary(new Uint8Array([1]))
     await cam.publishBinary(new Uint8Array([2]), { track: 'camera' })
-    expect(published.mock.calls.map(([key]) => key)).toEqual([
-      roomMemberDataKey('track-keys', cam.id),
-      roomMemberTrackKey('track-keys', cam.id, 'camera'),
+    expect(published.mock.calls.map((call) => call[2]).filter((lane) => lane.kind === 'binary')).toEqual([
+      { kind: 'binary', member: cam.id, track: DEFAULT_TRACK },
+      { kind: 'binary', member: cam.id, track: 'camera' },
     ])
 
     // The KV record now names the track — late observers can subscribe streams they can't name.
-    const record = parse((await getBroadcastAdapter().get!(roomMemberKvKey('track-keys', cam.id)))!)
+    const stored = await readCell('track-keys', (a as ServerRoom)._inc, roomMemberKvKey('track-keys', cam.id))
+    const record = parse(textDecoder.decode(stored!))
     expect((record as RoomMemberRecord).tracks).toEqual(['camera'])
   })
 
@@ -1210,13 +1249,13 @@ describe('direct messages', () => {
   })
 
   it('the identity index is a hint: a stale marker resolves to nothing and is pruned on read', async () => {
-    const kv = getBroadcastAdapter()
     const room = await Room.create('id-heal')
     const tab1 = await room.join({ meta: { name: 'T1' }, identity: 'user-5' })
     const ghost = await room.join({ meta: { name: 'Ghost' }, identity: 'user-5' })
 
     // Simulate the ghost's record vanishing (a reap or a crash mid-leave) with its marker lingering.
-    await kv.delete(roomMemberKvKey('id-heal', ghost.id))
+    const inc = (room as ServerRoom)._inc
+    await mutateCell('id-heal', inc, roomMemberKvKey('id-heal', ghost.id))
     const got1: unknown[] = []
     const gotGhost: unknown[] = []
     tab1.listen((data) => got1.push(data))
@@ -1228,7 +1267,8 @@ describe('direct messages', () => {
     expect(got1).toEqual(['hi']) // the live membership still receives
     expect(gotGhost).toEqual([]) // the ghost has no record — filtered out, no phantom delivery
     // …and resolving pruned the ghost's stale marker, leaving only the live one.
-    expect(await kv.keys(roomIdentityKvPrefix('id-heal', 'user-5'))).toEqual([
+    const markers = await roomBackend.readCells('id-heal', inc, { prefix: roomIdentityKvPrefix('id-heal', 'user-5') })
+    expect('cells' in markers ? [...markers.cells.keys()] : []).toEqual([
       roomIdentityMemberKvKey('id-heal', 'user-5', tab1.id),
     ])
   })
@@ -1632,7 +1672,7 @@ describe('one ordered semantic lane', () => {
     expect(before(b, c)).toBe(true)
   })
 
-  it('the clock resets seq on a time advance and clamps+increments on a repeat or regress', async () => {
+  it('seq advances monotonically while timestamp independently clamps on clock regressions', async () => {
     vi.useFakeTimers({ toFake: ['Date'] })
     try {
       vi.setSystemTime(1000)
@@ -1642,18 +1682,18 @@ describe('one ordered semantic lane', () => {
         const { timestamp, seq } = await alice.publish('x')
         return { timestamp, seq }
       }
-      expect(await pair()).toEqual({ timestamp: 1000, seq: 1 }) // first: time advanced past 0 → reset to 1
+      expect(await pair()).toEqual({ timestamp: 1000, seq: 1 })
       expect(await pair()).toEqual({ timestamp: 1000, seq: 2 }) // same ms → clamp, increment
       vi.setSystemTime(2000)
-      expect(await pair()).toEqual({ timestamp: 2000, seq: 1 }) // advance → reset to 1
+      expect(await pair()).toEqual({ timestamp: 2000, seq: 3 }) // timestamp advance never resets seq
       vi.setSystemTime(1500) // wall clock jumps backward
-      expect(await pair()).toEqual({ timestamp: 2000, seq: 2 }) // clamp to the watermark, increment
+      expect(await pair()).toEqual({ timestamp: 2000, seq: 4 }) // clamp timestamp, keep advancing seq
     } finally {
       vi.useRealTimers()
     }
   })
 
-  it('a recreation resumes past the previous watermark even if the wall clock regressed', async () => {
+  it('a genuine recreation starts a fresh ordering domain', async () => {
     vi.useFakeTimers({ toFake: ['Date'] })
     try {
       vi.setSystemTime(5000)
@@ -1664,9 +1704,7 @@ describe('one ordered semantic lane', () => {
       vi.setSystemTime(3000) // the clock jumps backward before the room is recreated
       const second = await Room.create('order:recreate')
       const fresh = await (await second.join({ meta: {} })).publish('new')
-      // The watermark outlives the close, so the new incarnation clamps past it — never rewinding to
-      // the regressed wall clock, so no consumer sees a newer message stamped older than an old one.
-      expect(fresh).toMatchObject({ timestamp: 5000, seq: 2 })
+      expect(fresh).toMatchObject({ timestamp: 3000, seq: 1 })
     } finally {
       vi.useRealTimers()
     }
@@ -1683,41 +1721,17 @@ describe('one ordered semantic lane', () => {
  *  frozen, a `subscribe` registers no local delivery yet — a publish in that window reaches only already
  *  live subscribers — and its `.ready` stays pending until `flushSubscribes()` acks it. The in-memory
  *  analogue of `HybridTestAdapter`'s replica lag, for exercising the retained/live handoff. */
-class LateSubscribeAdapter extends DefaultBroadcastAdapter {
-  private frozen = false
-  private readonly acks: Array<() => void> = []
-
-  freezeSubscribes(): void {
-    this.frozen = true
-  }
-  flushSubscribes(): void {
-    this.frozen = false
-    for (const ack of this.acks.splice(0)) ack()
-  }
-
-  override subscribe(key: string, onMessage: BroadcastOnMessage): BroadcastUnsubscribe {
-    return this.frozen ? this._deferred(() => super.subscribe(key, onMessage)) : super.subscribe(key, onMessage)
-  }
-  override subscribeBinary(key: string, onMessage: BroadcastBinaryOnMessage): BroadcastUnsubscribe {
-    return this.frozen
-      ? this._deferred(() => super.subscribeBinary(key, onMessage))
-      : super.subscribeBinary(key, onMessage)
-  }
-
-  private _deferred(register: () => BroadcastUnsubscribe): BroadcastUnsubscribe {
-    let live: BroadcastUnsubscribe | null = null
-    let markReady!: () => void
-    const ready = new Promise<void>((resolve) => {
-      markReady = resolve
-    })
-    this.acks.push(() => {
-      live = register()
-      markReady()
-    })
-    const unsub: BroadcastUnsubscribe = () => live?.()
-    unsub.ready = ready
-    return unsub
-  }
+function gateNewSubscriptions(): { flush(): void; restore(): void } {
+  let release!: () => void
+  const gate = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  const realSubscribe = roomBackend.subscribeLane.bind(roomBackend)
+  const spy = vi.spyOn(roomBackend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
+    const subscription = realSubscribe(roomId, inc, lane, receiver)
+    return { ...subscription, ready: Promise.all([subscription.ready, gate]).then(() => undefined) }
+  })
+  return { flush: release, restore: () => spy.mockRestore() }
 }
 
 describe('room stub channel', () => {
@@ -2365,16 +2379,28 @@ describe('room stub channel', () => {
     expect(dataFramesOf(peer)).toEqual(['bob-pinned'])
   })
 
-  it('kicking a member drops their retained text too', async () => {
+  it("a kick's retained cleanup cannot delete a newer owner's frame racing the compare-delete", async () => {
     const owner = (await Room.create('retain-text-kick')) as ServerRoom
     const cam = await owner.join({ meta: { name: 'cam' } })
+    const replacement = await owner.join({ meta: { name: 'replacement' } })
     await cam.publish('pinned', { retain: true })
-    const adapter = getBroadcastAdapter()
-    expect(await adapter.get!(roomRetainedTextKey('retain-text-kick'))).not.toBeNull() // retained
+    expect(await roomBackend.readRetained('retain-text-kick', owner._inc, semanticLane)).not.toBeNull()
+
+    const realDelete = roomBackend.deleteRetained.bind(roomBackend)
+    let raced = false
+    const deleting = vi.spyOn(roomBackend, 'deleteRetained').mockImplementation(async (roomId, inc, lane, opts) => {
+      if (!raced && opts?.ifSeq !== undefined) {
+        raced = true
+        await replacement.publish('newer', { retain: true })
+      }
+      return realDelete(roomId, inc, lane, opts)
+    })
 
     await Room.removeParticipant('retain-text-kick', { id: cam.id })
 
-    expect(await adapter.get!(roomRetainedTextKey('retain-text-kick'))).toBeNull() // swept on kick
+    deleting.mockRestore()
+    const retained = await roomBackend.readRetained('retain-text-kick', owner._inc, semanticLane)
+    expect(parse(textDecoder.decode(retained!.payload))).toMatchObject({ from: replacement.id, data: 'newer' })
   })
 
   it('rejects a publish whose incarnation fence no longer holds — stale before any effect', async () => {
@@ -2382,38 +2408,47 @@ describe('room stub channel', () => {
     const me = await room.join({ meta: { name: 'me' } })
     await me.publish('live') // admitted while the open-fence holds this incarnation
 
-    // The room was closed (or recreated) on another node: the open-fence is gone, but this handle's
-    // in-memory view never saw the close event and still thinks the room is open. commitFrame's fence
-    // check is the authority-level guard that catches it — the publish fails before it orders/publishes.
-    await getBroadcastAdapter().delete!(roomOpenFenceKey('fence-stale'))
+    // Another node transitioned the head away from open while this handle's projection stayed stale.
+    const current = (await roomBackend.readHead('fence-stale'))!.head
+    const fenced = await roomBackend.compareExchangeHead(
+      'fence-stale',
+      { expect: { rev: current.rev } },
+      {
+        head: {
+          currentInc: current.currentInc,
+          state: 'closing',
+          config: current.config,
+          closeLease: { id: crypto.randomUUID(), durationMs: 15_000 },
+        },
+      },
+    )
+    expect('ok' in fenced).toBe(true)
 
     await expect(me.publish('stale')).rejects.toThrow(/closed/i)
   })
 
   it('an abandoned close leases the closing state — the wedged id recreates once the lease lapses', async () => {
-    const adapter = getBroadcastAdapter()
-    const realDelete = adapter.delete!
+    const realCommit = roomBackend.commitLane.bind(roomBackend)
+    let crashed = false
+    const crash = vi.spyOn(roomBackend, 'commitLane').mockImplementation(async (roomId, inc, lane, payload, opts) => {
+      const event = lane.kind === 'control' ? (parse(textDecoder.decode(payload)) as { __r?: string }) : null
+      if (!crashed && event?.__r === 'closed') {
+        crashed = true
+        throw new Error('crash mid-close')
+      }
+      return realCommit(roomId, inc, lane, payload, opts)
+    })
     try {
       vi.useFakeTimers()
       await Room.create('abandon-close')
-      // Abandon the close: it fences open→closing, then the first sweep delete throws (a crashed node).
-      let crashed = false
-      adapter.delete = (key, options) => {
-        if (!crashed) {
-          crashed = true
-          throw new Error('crash mid-close')
-        }
-        return realDelete.call(adapter, key, options)
-      }
       await expect(Room.close('abandon-close')).rejects.toThrow('crash mid-close')
-      adapter.delete = realDelete
       // Wedged: the id sits in `closing` under a live lease, so a recreate loses — no stuck id resurrection.
       await expect(Room.create('abandon-close')).rejects.toThrow(/already exists/i)
       vi.advanceTimersByTime(120_000) // well past ROOM_CLOSE_LEASE_MS
       // Lease lapsed: the stuck `closing` config reaped, so the id is recreatable rather than wedged forever.
       expect(await Room.create('abandon-close')).toBeTruthy()
     } finally {
-      adapter.delete = realDelete
+      crash.mockRestore()
       vi.useRealTimers()
     }
   })
@@ -2450,15 +2485,13 @@ describe('room stub channel', () => {
     const cam = await owner.join({ meta: { name: 'cam' } })
     await cam.publishBinary(new Uint8Array([2]), { retain: true }) // default lane
     await cam.publishBinary(new Uint8Array([9]), { track: 'screen', retain: true }) // named track
-    const adapter = getBroadcastAdapter()
-    const prefix = `telefunc:room:retain-kick:rb:${cam.id}:`
-    expect((await adapter.keys!(prefix)).length).toBe(2) // both lanes retained
+    expect(await roomBackend.listRetained('retain-kick', owner._inc, { member: cam.id })).toHaveLength(2)
 
     // A kick goes through evictMember, which has no local track state for the member — cleanup must
     // scan the member's retained keys, not rely on knowing its tracks.
     await Room.removeParticipant('retain-kick', { id: cam.id })
 
-    expect(await adapter.keys!(prefix)).toEqual([]) // swept — no retained frame left behind
+    expect(await roomBackend.listRetained('retain-kick', owner._inc, { member: cam.id })).toEqual([])
   })
 
   it('replays a retained lane once — growing the want set never resends an already-covered lane', async () => {
@@ -2531,8 +2564,11 @@ describe('room stub channel', () => {
     // The publish's own live broadcast reaches this node after the retained back-fill: pub/sub fan-out
     // lags the read-your-writes retained store. Re-inject the exact stored frame on the text key — the
     // stub must recognize it as the echo of what it just replayed and drop it, not deliver a duplicate.
-    const stored = getBroadcastAdapter().get(roomRetainedTextKey('retain-echo')) as string
-    await getBroadcastAdapter().publish(roomTextKey('retain-echo'), stored)
+    const stored = await roomBackend.readRetained('retain-echo', serverRoom._inc, semanticLane)
+    stub._relayTextLive(encodePublishText(textDecoder.decode(stored!.payload), stored!), alice.id, {
+      seq: stored!.seq,
+      timestamp: stored!.timestamp,
+    })
     await settle()
     expect(dataFramesOf(peer)).toEqual(['hello']) // still once — the echo was dropped
   })
@@ -2580,15 +2616,13 @@ describe('room stub channel', () => {
   })
 
   it('waits for the text subscription to go live before replaying retained, so a publish racing the subscribe is not lost', async () => {
-    const adapter = new LateSubscribeAdapter()
-    _resetBroadcastAdapterForTesting(adapter)
+    const gate = gateNewSubscriptions()
     const { serverRoom, stub, peer } = await createServedRoom('ready-handoff-text')
     const alice = await serverRoom.join({ meta: { name: 'Alice' } })
     await alice.publish('v1', { retain: true }) // the retained state before anyone subscribes
 
     // The client subscribes while the backend subscribe is still in flight: live frames can't reach it
     // yet, so the retained replay must not read the slot until the subscription is live.
-    adapter.freezeSubscribes()
     stub._onPeerBroadcastSubscribe(false)
     await settle()
 
@@ -2597,8 +2631,9 @@ describe('room stub channel', () => {
     await alice.publish('v2', { retain: true })
     await settle()
 
-    adapter.flushSubscribes() // the subscription goes live
+    gate.flush() // the subscription establishment is acknowledged
     await settle()
+    gate.restore()
 
     // Converged on the latest state. On the parent (no await-ready) the slot was read as 'v1' before 'v2'
     // was published and 'v2's live frame was lost in the window, leaving the client stuck at 'v1'.
@@ -2606,21 +2641,20 @@ describe('room stub channel', () => {
   })
 
   it('waits for the binary subscription to go live before replaying a retained frame, so a keyframe racing the subscribe is not lost', async () => {
-    const adapter = new LateSubscribeAdapter()
-    _resetBroadcastAdapterForTesting(adapter)
+    const gate = gateNewSubscriptions()
     const { serverRoom, stub, peer } = await createServedRoom('ready-handoff-binary')
     const cam = await serverRoom.join({ meta: { name: 'cam' } })
     await cam.publishBinary(new Uint8Array([1]), { retain: true }) // the retained keyframe before anyone subscribes
 
-    adapter.freezeSubscribes()
     stub._onPeerMessage(JSON.stringify({ __r: 'sub-binary', wants: allBinary }), 40)
     await settle()
 
     await cam.publishBinary(new Uint8Array([2]), { retain: true }) // newer keyframe inside the subscribe window
     await settle()
 
-    adapter.flushSubscribes()
+    gate.flush()
     await settle()
+    gate.restore()
 
     // Same handoff as the text lane: on the parent the client is stuck at the [1] keyframe read before [2].
     expect(binaryFramesOf(peer).map((r) => r.payload[0])).toEqual([2])
@@ -3173,11 +3207,11 @@ describe('ClientRoom', () => {
 
 describe('liveness', () => {
   async function backdate(roomId: string, memberId: string): Promise<void> {
-    const adapter = getBroadcastAdapter()
+    const inc = await activeInc(roomId)
     const key = roomMemberKvKey(roomId, memberId)
-    const record = parse((await adapter.get!(key)) as string) as RoomMemberRecord
+    const record = parse(textDecoder.decode((await readCell(roomId, inc, key))!)) as RoomMemberRecord
     const stale: RoomMemberRecord = { ...record, seenAt: Date.now() - ROOM_MEMBER_TTL_MS - 1 }
-    await adapter.set!(key, stringify(stale))
+    await mutateCell(roomId, inc, key, textEncoder.encode(stringify(stale)))
   }
 
   it('reaps members with a stale heartbeat on read, announcing the leave everywhere', async () => {
@@ -3205,14 +3239,15 @@ describe('liveness', () => {
       const a = await Room.create('abandoned')
       const me = await a.join({ meta: { name: 'Ghost' } })
       const key = roomMemberKvKey('abandoned', me.id)
-      const adapter = getBroadcastAdapter()
-      expect(await adapter.get!(key)).not.toBe(null)
+      const inc = (a as ServerRoom)._inc
+      expect(await readCell('abandoned', inc, key)).toBeDefined()
 
       // The owning node dies (no heartbeats), and no reader ever touches the room again.
       vi.setSystemTime(Date.now() + ROOM_MEMBER_KV_TTL_MS + 1)
 
-      expect(await adapter.get!(key)).toBe(null) // the store expired it on its own
-      expect(await adapter.keys!('telefunc:room:abandoned:m:')).toEqual([])
+      expect(await readCell('abandoned', inc, key)).toBeUndefined() // the store expired it on its own
+      const records = await roomBackend.readCells('abandoned', inc, { prefix: roomMemberKvKey('abandoned', '') })
+      expect('cells' in records ? [...records.cells] : []).toEqual([])
     } finally {
       vi.useRealTimers()
     }
@@ -3223,13 +3258,13 @@ describe('liveness', () => {
     try {
       const a = await Room.create('hb')
       const me = await a.join()
-      const adapter = getBroadcastAdapter()
       const key = roomMemberKvKey('hb', me.id)
-      const before = (parse((await adapter.get!(key)) as string) as RoomMemberRecord).seenAt
+      const inc = (a as ServerRoom)._inc
+      const before = (parse(textDecoder.decode((await readCell('hb', inc, key))!)) as RoomMemberRecord).seenAt
 
       await vi.advanceTimersByTimeAsync(ROOM_HEARTBEAT_INTERVAL_MS)
 
-      const after = (parse((await adapter.get!(key)) as string) as RoomMemberRecord).seenAt
+      const after = (parse(textDecoder.decode((await readCell('hb', inc, key))!)) as RoomMemberRecord).seenAt
       expect(after).toBe(before + ROOM_HEARTBEAT_INTERVAL_MS)
     } finally {
       vi.useRealTimers()
@@ -3268,7 +3303,7 @@ describe('liveness', () => {
       let left = false
       me.onLeave(() => (left = true))
 
-      await getBroadcastAdapter().delete!(roomMemberKvKey('hb-gone', me.id))
+      await mutateCell('hb-gone', (a as ServerRoom)._inc, roomMemberKvKey('hb-gone', me.id))
       await vi.advanceTimersByTimeAsync(ROOM_HEARTBEAT_INTERVAL_MS)
 
       expect(left).toBe(true)
@@ -3284,16 +3319,14 @@ describe('liveness', () => {
 // without it must fail loud and clear, not half-work.
 // ───────────────────────────────────────────────────────────────────────────
 
-describe('adapter KV requirement', () => {
-  it('rejects with a clear error when the adapter lacks KV methods', async () => {
-    const pubSubOnly: BroadcastAdapter = {
-      subscribe: () => () => {},
-      publish: () => ({ seq: 1, timestamp: 1 }),
-      subscribeBinary: () => () => {},
-      publishBinary: () => ({ seq: 1, timestamp: 1 }),
-    }
-    _resetBroadcastAdapterForTesting(pubSubOnly)
-    await expect(Room.create('kv-less')).rejects.toThrow(/KV methods required by `Room`/)
+describe('implicit memory backend', () => {
+  it('keeps Room zero-configuration while explicit backend installation remains opt-in', async () => {
+    await disposeRoomBackend()
+
+    const room = await Room.create('zero-config')
+    const participant = await room.join({ meta: { name: 'Alice' } })
+    expect(await participant.publish('hello')).toMatchObject({ seq: 1 })
+    expect(getRoomBackend()).toBeInstanceOf(MemoryRoomBackend)
   })
 })
 

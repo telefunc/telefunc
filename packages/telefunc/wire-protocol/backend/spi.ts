@@ -182,7 +182,9 @@ export type RoomBackendSpi = {
     lane: LaneId,
   ): Promise<{ payload: Uint8Array; seq: number; timestamp: number } | null>
   listRetained(roomId: string, inc: string): Promise<LaneId[]>
-  deleteRetained(roomId: string, inc: string, lane?: LaneId): Promise<void>
+  deleteRetained(roomId: string, inc: string, lane?: LaneId, opts?: { ifSeq?: number }): Promise<void>
+  // With `ifSeq`, delete only when the lane's currently installed retained generation has that exact
+  // sequence. A mismatch or missing generation is a silent no-op. The guard requires `lane`.
 
   // ── subscriptions (per lane channel; INCARNATION-SCOPED) ──
   subscribeLane(roomId: string, inc: string, lane: LaneId, receiver: LaneReceiver): LaneSubscription

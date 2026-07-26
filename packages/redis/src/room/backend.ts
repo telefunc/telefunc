@@ -430,18 +430,28 @@ export class RedisRoomBackend implements RoomBackendSpi {
     return keys.map((physical) => parseLaneKey(physical.slice(prefix.length)))
   }
 
-  async deleteRetained(roomId: string, inc: string, lane?: LaneId): Promise<void> {
+  async deleteRetained(roomId: string, inc: string, lane?: LaneId, opts?: { ifSeq?: number }): Promise<void> {
     this.#assertLive()
+    if (lane === undefined && opts?.ifSeq !== undefined) {
+      throw new Error('deleteRetained: ifSeq requires a lane')
+    }
+    if (opts?.ifSeq !== undefined && (!Number.isSafeInteger(opts.ifSeq) || opts.ifSeq <= 0)) {
+      throw new Error('deleteRetained: ifSeq must be a positive safe integer')
+    }
     if (lane !== undefined) {
       const keys = REDIS_ROOM_COMMAND_KEYS.retainedDelete(this.#prefix, roomId, inc, [
         retainedKey(this.#prefix, roomId, inc, laneKey(lane)),
       ])
-      await this.#call(REDIS_ROOM_COMMANDS.retainedDelete.name, [String(keys.length), ...keys])
+      await this.#call(REDIS_ROOM_COMMANDS.retainedDelete.name, [
+        String(keys.length),
+        ...keys,
+        opts?.ifSeq === undefined ? '' : String(opts.ifSeq),
+      ])
       return
     }
     const keys = await this.#scanKeys(`${escapeGlob(retainedKeyPrefix(this.#prefix, roomId, inc))}*`)
     const commandKeys = REDIS_ROOM_COMMAND_KEYS.retainedDelete(this.#prefix, roomId, inc, keys)
-    await this.#call(REDIS_ROOM_COMMANDS.retainedDelete.name, [String(commandKeys.length), ...commandKeys])
+    await this.#call(REDIS_ROOM_COMMANDS.retainedDelete.name, [String(commandKeys.length), ...commandKeys, ''])
   }
 
   // ── subscriptions ──

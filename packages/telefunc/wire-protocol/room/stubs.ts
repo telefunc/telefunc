@@ -20,7 +20,6 @@ import {
   RoomError,
   roomAckError,
   roomFailureError,
-  roomOrderBefore,
   hasRoomTag,
   roomCtrlKey,
   unframeMemberId,
@@ -235,7 +234,7 @@ class RoomStubChannel extends ServerBroadcast {
     }
     this._relayPublishText(wireText)
     const high = this._textHigh.get(from)
-    if (!high || roomOrderBefore(high, ord)) this._textHigh.set(from, ord)
+    if (!high || high.seq < ord.seq) this._textHigh.set(from, ord)
   }
 
   /** @internal — replay a retained text frame unless the sender's watermark already covers it (a
@@ -243,7 +242,7 @@ class RoomStubChannel extends ServerBroadcast {
    *  dropped. The MQTT-retained backfill, made causal. */
   _emitRetainedText(wireText: string, from: string, ord: RoomOrder): void {
     const high = this._textHigh.get(from)
-    if (high && !roomOrderBefore(high, ord)) return // superseded by a same-or-newer live frame
+    if (high && high.seq >= ord.seq) return // superseded by a same-or-newer live frame
     this._relayPublishText(wireText)
     this._textHigh.set(from, ord)
     this._textPendingRetained.set(from, ord)
