@@ -54,6 +54,7 @@ import {
   RedisGenerationInvalidError,
   RedisSubscriberTransport,
   type RedisSubscriberChannelBinding,
+  redisSubscriptionSchedulerFor,
 } from './subscriber-transport.js'
 
 const DEFAULT_MAX_RETAINED_BYTES = 16 * 1024 * 1024
@@ -197,6 +198,7 @@ export class RedisRoomBackend implements RoomBackendSpi {
       'RedisRoomBackend: maxRetainedPayloadBytes must be a finite non-negative number',
     )
     this.#publisher = options.redis
+    const subscriptionScheduler = redisSubscriptionSchedulerFor(options.redis)
     let clusterSubscriberSelection = 0
     const createSubscriber = async (): Promise<Redis> => {
       if (!(options.redis instanceof Cluster)) {
@@ -249,6 +251,7 @@ export class RedisRoomBackend implements RoomBackendSpi {
     this.#transport = new RedisSubscriberTransport({
       createSubscriber,
       retryDelay: defaultSubscriptionRetryDelay,
+      scheduler: subscriptionScheduler,
       captureGeneration: (binding) => this.#ensureGenerationCaptured(this.#requireGenerationBinding(binding)),
       validateGeneration: (binding, includeCapture) =>
         this.#validateGeneration(this.#requireGenerationBinding(binding), includeCapture),

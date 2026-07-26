@@ -15,6 +15,52 @@ const SUBSCRIPTION_RETRY_ATTEMPTS = 5
 
 export class RedisGenerationInvalidError extends Error {}
 
+// This is production lifecycle infrastructure, not a test clock. Conformance installs a scheduler only
+// for the exact Redis publisher it owns, so the transport's real retry/reconnect state machine runs with
+// compressed waits without changing process-global timers or unrelated contract watchdogs.
+export type RedisSubscriptionScheduler = {
+  schedule(delayMs: number, task: () => Promise<void>): () => void
+}
+
+export const realRedisSubscriptionScheduler: RedisSubscriptionScheduler = {
+  schedule(delayMs, task) {
+    const handle = setTimeout(() => void task(), delayMs)
+    return () => clearTimeout(handle)
+  },
+}
+
+type SchedulerInstallation = {
+  scheduler: RedisSubscriptionScheduler
+  previous: SchedulerInstallation | undefined
+  active: boolean
+}
+
+const installedSchedulers = new WeakMap<object, SchedulerInstallation>()
+
+// Internal deep-module seam: `@telefunc/redis` does not export it. The returned restoration barrier makes
+// nested/exact-owner installation deterministic while the backend captures its immutable scheduler.
+export function installRedisSubscriptionScheduler(owner: object, scheduler: RedisSubscriptionScheduler): () => void {
+  const installation: SchedulerInstallation = {
+    scheduler,
+    previous: installedSchedulers.get(owner),
+    active: true,
+  }
+  installedSchedulers.set(owner, installation)
+  return () => {
+    if (!installation.active) return
+    installation.active = false
+    if (installedSchedulers.get(owner) !== installation) return
+    let previous = installation.previous
+    while (previous !== undefined && !previous.active) previous = previous.previous
+    if (previous === undefined) installedSchedulers.delete(owner)
+    else installedSchedulers.set(owner, previous)
+  }
+}
+
+export function redisSubscriptionSchedulerFor(owner: object): RedisSubscriptionScheduler {
+  return installedSchedulers.get(owner)?.scheduler ?? realRedisSubscriptionScheduler
+}
+
 export type RedisSubscriberChannelBinding = {
   channel: string
   owner: string
@@ -24,6 +70,7 @@ export type RedisSubscriberChannelBinding = {
 type RedisSubscriberTransportOptions = {
   createSubscriber: () => Promise<Redis>
   retryDelay: (attempt: number) => number
+  scheduler: RedisSubscriptionScheduler
   captureGeneration: (binding: RedisSubscriberChannelBinding) => Promise<void>
   validateGeneration: (binding: RedisSubscriberChannelBinding, includeCapture: boolean) => Promise<boolean>
   onGenerationInvalidation: (owner: string, token: string) => void
@@ -39,15 +86,21 @@ type OwnedSubscriberStatus = Redis['status'] | 'connecting'
 class OwnedRedisSubscriber extends EventEmitter {
   readonly #create: () => Promise<Redis>
   readonly #retryDelay: (attempt: number) => number
+  readonly #scheduler: RedisSubscriptionScheduler
   #current: Redis | null = null
   #clientEpoch = 0
   #replacement: Promise<void> | null = null
   #disposed = false
 
-  constructor(create: () => Promise<Redis>, retryDelay: (attempt: number) => number) {
+  constructor(
+    create: () => Promise<Redis>,
+    retryDelay: (attempt: number) => number,
+    scheduler: RedisSubscriptionScheduler,
+  ) {
     super()
     this.#create = create
     this.#retryDelay = retryDelay
+    this.#scheduler = scheduler
     const replacement = this.#replace()
     void replacement.catch(() => {})
   }
@@ -128,7 +181,7 @@ class OwnedRedisSubscriber extends EventEmitter {
         return
       } catch (err) {
         lastError = err
-        if (attempt < SUBSCRIPTION_RETRY_ATTEMPTS) await delay(this.#retryDelay(attempt))
+        if (attempt < SUBSCRIPTION_RETRY_ATTEMPTS) await delay(this.#scheduler, this.#retryDelay(attempt))
       }
     }
     if (!this.#disposed) this.emit('end', lastError)
@@ -228,8 +281,10 @@ type ChannelCleanup = {
   resolve: () => void
 }
 
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms))
+function delay(scheduler: RedisSubscriptionScheduler, ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    scheduler.schedule(ms, async () => resolve())
+  })
 }
 
 class RedisLaneSubscription implements LaneSubscription {
@@ -329,6 +384,7 @@ class RedisLaneSubscription implements LaneSubscription {
 export class RedisSubscriberTransport {
   readonly #subscriber: OwnedRedisSubscriber
   readonly #retryDelay: (attempt: number) => number
+  readonly #scheduler: RedisSubscriptionScheduler
   readonly #captureGeneration: (binding: RedisSubscriberChannelBinding) => Promise<void>
   readonly #validateGeneration: (binding: RedisSubscriberChannelBinding, includeCapture: boolean) => Promise<boolean>
   readonly #onGenerationInvalidation: (owner: string, token: string) => void
@@ -348,8 +404,9 @@ export class RedisSubscriberTransport {
   #disposed = false
 
   constructor(options: RedisSubscriberTransportOptions) {
-    this.#subscriber = new OwnedRedisSubscriber(options.createSubscriber, options.retryDelay)
+    this.#subscriber = new OwnedRedisSubscriber(options.createSubscriber, options.retryDelay, options.scheduler)
     this.#retryDelay = options.retryDelay
+    this.#scheduler = options.scheduler
     this.#captureGeneration = options.captureGeneration
     this.#validateGeneration = options.validateGeneration
     this.#onGenerationInvalidation = options.onGenerationInvalidation
@@ -449,7 +506,7 @@ export class RedisSubscriberTransport {
           break
         } catch {
           if (attempt < SUBSCRIPTION_RETRY_ATTEMPTS) {
-            await delay(this.#retryDelay(attempt))
+            await delay(this.#scheduler, this.#retryDelay(attempt))
             continue
           }
           // The stale lifecycle remains installed after bounded exhaustion; it cannot be inherited as a
@@ -635,7 +692,7 @@ export class RedisSubscriberTransport {
         lastError = err
         if (err instanceof RedisGenerationInvalidError) throw err
         for (const subscription of lifecycle.subscriptions) subscription.connectionLost(err)
-        if (attempt < SUBSCRIPTION_RETRY_ATTEMPTS) await delay(this.#retryDelay(attempt))
+        if (attempt < SUBSCRIPTION_RETRY_ATTEMPTS) await delay(this.#scheduler, this.#retryDelay(attempt))
       }
     }
     throw lastError
@@ -733,7 +790,7 @@ export class RedisSubscriberTransport {
   async #retryEmptyChannelCleanup(lifecycle: ChannelLifecycle): Promise<void> {
     for (let attempt = 1; attempt <= SUBSCRIPTION_RETRY_ATTEMPTS; attempt++) {
       if (this.#disposed || this.#channels.get(lifecycle.binding.channel) !== lifecycle) return
-      await delay(this.#retryDelay(attempt))
+      await delay(this.#scheduler, this.#retryDelay(attempt))
       if (lifecycle.cleanup !== null) await lifecycle.cleanup.promise
       if (lifecycle.subscriptions.size !== 0) return
       const cleanup = this.#beginChannelCleanup(lifecycle)
@@ -812,7 +869,7 @@ export class RedisSubscriberTransport {
   async #retryOrphanInvalidationCleanup(owner: string): Promise<void> {
     for (let attempt = 1; attempt <= SUBSCRIPTION_RETRY_ATTEMPTS; attempt++) {
       if (this.#disposed) return
-      await delay(this.#retryDelay(attempt))
+      await delay(this.#scheduler, this.#retryDelay(attempt))
       if ([...this.#channels.values()].some((candidate) => candidate.binding.owner === owner)) continue
       const invalidations = [...this.#invalidationOwners.entries()]
         .filter(([, candidateOwner]) => candidateOwner === owner)

@@ -1,7 +1,13 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import type { Redis } from 'ioredis'
 import { RedisRoomBackend } from './backend.js'
 import { REDIS_ROOM_COMMANDS } from './layout.js'
+import {
+  installRedisSubscriptionScheduler,
+  realRedisSubscriptionScheduler,
+  redisSubscriptionSchedulerFor,
+  type RedisSubscriptionScheduler,
+} from './subscriber-transport.js'
 
 function redisSlot(key: string): number {
   const start = key.indexOf('{')
@@ -16,6 +22,41 @@ function redisSlot(key: string): number {
 }
 
 describe('RedisRoomBackend public construction boundary', () => {
+  it('scopes accelerated scheduling to one owner while the production default honors its real delay', async () => {
+    vi.useFakeTimers()
+    const owner = {}
+    const unrelated = {}
+    const accelerated: RedisSubscriptionScheduler = {
+      schedule(_delayMs, task) {
+        const handle = setTimeout(() => void task(), 0)
+        return () => clearTimeout(handle)
+      },
+    }
+    const restore = installRedisSubscriptionScheduler(owner, accelerated)
+    let acceleratedFired = false
+    let realFired = false
+    try {
+      redisSubscriptionSchedulerFor(owner).schedule(1_000, async () => {
+        acceleratedFired = true
+      })
+      redisSubscriptionSchedulerFor(unrelated).schedule(1_000, async () => {
+        realFired = true
+      })
+
+      await vi.advanceTimersByTimeAsync(0)
+      expect(acceleratedFired).toBe(true)
+      expect(realFired).toBe(false)
+      await vi.advanceTimersByTimeAsync(999)
+      expect(realFired).toBe(false)
+      await vi.advanceTimersByTimeAsync(1)
+      expect(realFired).toBe(true)
+    } finally {
+      restore()
+      vi.useRealTimers()
+    }
+    expect(redisSubscriptionSchedulerFor(owner)).toBe(realRedisSubscriptionScheduler)
+  })
+
   it.each([-1, Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY])(
     'rejects invalid retained capacity %p before acquiring a subscriber',
     (maxRetainedPayloadBytes) => {

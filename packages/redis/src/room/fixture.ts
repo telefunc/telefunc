@@ -21,7 +21,6 @@ import type {
   BackendHarness,
   BackendTraces,
 } from '../../../telefunc/wire-protocol/backend/conformance/harness.js'
-import { DELIVERY_BOUND_MS } from '../../../telefunc/wire-protocol/backend/conformance/scenario.js'
 import {
   channelKey,
   generationTokensKey,
@@ -34,6 +33,7 @@ import {
   REDIS_ROOM_COMMANDS,
 } from './layout.js'
 import { REDIS_GENERATION_CAPTURE_TTL_MS, RedisRoomBackend } from './backend.js'
+import { installRedisSubscriptionScheduler, type RedisSubscriptionScheduler } from './subscriber-transport.js'
 
 const REDIS_TRACES: BackendTraces = {
   handoffAwaitsReceiver: false,
@@ -42,6 +42,13 @@ const REDIS_TRACES: BackendTraces = {
 }
 
 let fixtureSeq = 0
+
+const acceleratedSubscriptionScheduler: RedisSubscriptionScheduler = {
+  schedule(_delayMs, task) {
+    const handle = setTimeout(() => void task(), 0)
+    return () => clearTimeout(handle)
+  },
+}
 
 export type RedisClusterNode = { host: string; port: number }
 type RoomRedisClient = Redis | Cluster
@@ -147,9 +154,7 @@ export async function createRedisFixture(
         )
   if (redis instanceof Cluster) redis.on('error', () => {})
   if (redis instanceof Cluster) {
-    // The existing fixture compresses the backend's 250ms..4s retry timers below. Let ioredis finish
-    // its own slot-cache bootstrap before that global test clock is installed, otherwise its startup
-    // watchdogs are also collapsed and every startup node is rejected spuriously.
+    // Resolve the complete live topology before selecting the fixture-owned direct Pub/Sub master.
     await redis.ping()
   }
   const subscriber =
@@ -191,19 +196,6 @@ export async function createRedisFixture(
   const commandCalls: RedisRoomCommandCall[] = []
   const restorers: Array<() => void> = []
   const peerDisposers = new Set<() => Promise<void>>()
-  const realSetTimeout = globalThis.setTimeout
-  globalThis.setTimeout = ((handler: TimerHandler, timeout?: number, ...args: unknown[]) =>
-    realSetTimeout(
-      handler,
-      // Compress only the backend's bounded retry waits. The shared conformance collector's exact
-      // delivery watchdog is also inside this numeric range; collapsing that 1s contract bound to 0
-      // made its last broker callback race a false timeout after all SUBSCRIBE readiness had settled.
-      timeout !== undefined && timeout >= 100 && timeout <= 4_000 && timeout !== DELIVERY_BOUND_MS ? 0 : timeout,
-      ...args,
-    )) as typeof setTimeout
-  restorers.push(() => {
-    globalThis.setTimeout = realSetTimeout
-  })
 
   const runProbe = async (label: string, probe: () => void | Promise<void>): Promise<void> => {
     let timer: ReturnType<typeof setTimeout> | undefined
@@ -278,9 +270,11 @@ export async function createRedisFixture(
     redis.duplicate = (() => subscriber) as typeof redis.duplicate
   }
   let backend: RedisRoomBackend
+  const restoreScheduler = installRedisSubscriptionScheduler(redis, acceleratedSubscriptionScheduler)
   try {
     backend = new RedisRoomBackend({ redis, prefix, maxRetainedPayloadBytes: opts.maxRetainedPayloadBytes })
   } finally {
+    restoreScheduler()
     redis.duplicate = duplicate
     for (const [master, original] of masterDuplicates) master.duplicate = original
   }
@@ -624,17 +618,15 @@ export async function createRedisFixture(
           : redis.duplicate({ maxRetriesPerRequest: 2 })
       if (peerRedis instanceof Cluster) {
         peerRedis.on('error', () => {})
-        // This test fixture accelerates the backend's bounded retry delays globally. Bootstrap the cold
-        // Cluster slot cache under the real clock before the backend selects a direct subscriber master.
-        const acceleratedSetTimeout = globalThis.setTimeout
-        globalThis.setTimeout = realSetTimeout
-        try {
-          await peerRedis.ping()
-        } finally {
-          globalThis.setTimeout = acceleratedSetTimeout
-        }
+        await peerRedis.ping()
       }
-      const peer = new RedisRoomBackend({ redis: peerRedis, prefix })
+      const restorePeerScheduler = installRedisSubscriptionScheduler(peerRedis, acceleratedSubscriptionScheduler)
+      let peer: RedisRoomBackend
+      try {
+        peer = new RedisRoomBackend({ redis: peerRedis, prefix })
+      } finally {
+        restorePeerScheduler()
+      }
       installAuthorityClock(peerRedis)
       let disposed = false
       const dispose = async (): Promise<void> => {

@@ -40,7 +40,7 @@ describe.skipIf(url === undefined || url === '')('Redis independent-review race 
     if (fx !== undefined) await fx.dispose()
   })
 
-  it('keeps the shared one-second delivery bound intact while accelerating Redis retry timers', async () => {
+  it('scopes accelerated Redis retry scheduling away from the real one-second delivery bound', async () => {
     let deliveryBoundFired = false
     const deliveryBound = setTimeout(() => {
       deliveryBoundFired = true
