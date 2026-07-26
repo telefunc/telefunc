@@ -1,4 +1,5 @@
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
+import { MemoryRoomBackend } from './memory/backend.js'
 import { ROOM_SPI_VERSION, type RoomBackendSpi } from './spi.js'
 
 export type RoomBackendFactory = () => RoomBackendSpi
@@ -6,7 +7,7 @@ export type RoomBackendFactory = () => RoomBackendSpi
 type RoomBackendState =
   | { phase: 'empty'; retired: WeakSet<object> }
   | { phase: 'installing'; retired: WeakSet<object> }
-  | { phase: 'ready'; backend: RoomBackendSpi; retired: WeakSet<object> }
+  | { phase: 'ready'; backend: RoomBackendSpi; implicit: boolean; retired: WeakSet<object> }
   | {
       phase: 'disposing'
       backend: RoomBackendSpi
@@ -32,7 +33,7 @@ const REENTRANT_DISPOSE_ERROR =
  */
 export function installRoomBackend(factory: RoomBackendFactory): RoomBackendSpi {
   const current = state.current
-  if (current.phase === 'ready') return current.backend
+  if (current.phase === 'ready' && !current.implicit) return current.backend
   if (current.phase === 'installing') throw new Error(INSTALLING_ERROR)
   if (current.phase === 'disposing') throw new Error(DISPOSING_ERROR)
   if (typeof factory !== 'function') {
@@ -49,11 +50,18 @@ export function installRoomBackend(factory: RoomBackendFactory): RoomBackendSpi 
       throw new Error('telefunc/backend: a Room backend instance cannot be reinstalled after disposal has begun')
     }
   } catch (error) {
-    state.current = { phase: 'empty', retired }
+    state.current = current.phase === 'ready' ? current : { phase: 'empty', retired }
     throw error
   }
 
-  state.current = { phase: 'ready', backend, retired }
+  if (current.phase === 'ready') {
+    retired.add(current.backend)
+    // The implicit backend is always MemoryRoomBackend. Its async method performs the complete
+    // synchronous teardown before returning its already-resolved promise, so explicit installation
+    // can replace it without introducing an asynchronous setup API.
+    void current.backend.dispose()
+  }
+  state.current = { phase: 'ready', backend, implicit: false, retired }
   return backend
 }
 
@@ -68,7 +76,11 @@ export function getRoomBackend(): RoomBackendSpi {
   if (current.phase === 'ready') return current.backend
   if (current.phase === 'installing') throw new Error(INSTALLING_ERROR)
   if (current.phase === 'disposing') throw new Error(DISPOSING_ERROR)
-  throw new Error('telefunc/backend: no Room backend is installed; call installRoomBackend(...) first')
+
+  const backend = new MemoryRoomBackend()
+  assertRoomBackend(backend)
+  state.current = { phase: 'ready', backend, implicit: true, retired: current.retired }
+  return backend
 }
 
 /**

@@ -3,32 +3,13 @@
 // declarations. `RoomState` (state.ts) applies these events; `ServerRoom`/`ClientRoom` move them.
 
 export {
-  ROOM_KEY_NAMESPACE,
   roomCtrlKey,
-  roomTextKey,
-  roomMemberDataKey,
-  roomMemberTrackKey,
-  roomDmKey,
-  roomOrderKey,
-  roomOpenFenceKey,
-  roomOrderBefore,
-  roomRetainedTextKey,
-  roomRetainedBinaryKey,
-  roomRetainedBinaryPrefix,
-  roomRetainedBinaryMemberPrefix,
-  bytesToBase64,
-  base64ToBytes,
-  roomConfigKvKey,
   roomMemberKvKey,
   roomMemberKvPrefix,
-  roomIndexKvKey,
-  roomIndexKvPrefix,
-  roomIdFromIndexKey,
   roomHiddenMemberKvKey,
   roomHiddenMemberKvPrefix,
   roomIdentityMemberKvKey,
   roomIdentityKvPrefix,
-  roomIdentityRoomKvPrefix,
   stampNewer,
   uuidToBytes,
   frameWithMemberId,
@@ -110,90 +91,14 @@ import type {
 /** Reserved pub/sub + KV namespace for rooms. Don't use it for `BroadcastChannel` keys. */
 const ROOM_KEY_NAMESPACE = 'telefunc:room:'
 
-/** Encode a room ID before interpolating it into a key. Room IDs are app-supplied and may contain the
- *  key delimiter `:` (e.g. the docs' `team:red`), so a raw ID could alias one room's keys/lanes onto
- *  another's (`roomCtrlKey('a:t') === roomTextKey('a')`) or nest under another's prefix sweep (`:rb:`,
- *  `:hidden:`, `:m:`) and get wiped by its close. Encoding makes every ID a single opaque, delimiter-free
- *  segment. Member IDs are delimiter-free UUIDs and need none; identities are already encoded (below). */
+/** Room IDs are app-supplied and may contain the key delimiter, so policy-cell keys encode them. */
 function roomKeyId(roomId: string): string {
   return encodeURIComponent(roomId)
 }
 
-/** Pub/sub key carrying a room's control lane: presence & lifecycle events plus room-authored
- *  announcements. Low-rate, subscribed by every observer — never carries participant data. */
+/** Stable channel identity used by a Room stub crossing a response. */
 function roomCtrlKey(roomId: string): string {
   return `${ROOM_KEY_NAMESPACE}${roomKeyId(roomId)}`
-}
-/** Pub/sub key carrying the room's text data in shared mode — its own lane, so holders that
- *  only observe presence never receive it. */
-function roomTextKey(roomId: string): string {
-  return `${ROOM_KEY_NAMESPACE}${roomKeyId(roomId)}:t`
-}
-/** Pub/sub key carrying one member's default-track binary — per-publisher keys make delivery
- *  member-selective at the source (a holder subscribes only the members it wants). */
-function roomMemberDataKey(roomId: string, memberId: string): string {
-  return `${ROOM_KEY_NAMESPACE}${roomKeyId(roomId)}:m:${memberId}`
-}
-/** Pub/sub key carrying one member's named binary track. Per-(member, track) keys make delivery
- *  track-selective at the source: a holder that stops watching a track drops this subscription,
- *  and the publisher's `receivers` hits 0 when nobody anywhere holds it — bytes stop flowing at
- *  every hop, not just at delivery. */
-function roomMemberTrackKey(roomId: string, memberId: string, track: string): string {
-  return `${roomMemberDataKey(roomId, memberId)}:t:${track}`
-}
-/** Pub/sub key carrying one member's private inbox — only the member's owning node subscribes. */
-function roomDmKey(roomId: string, memberId: string): string {
-  return `${ROOM_KEY_NAMESPACE}${roomKeyId(roomId)}:dm:${memberId}`
-}
-/** KV key holding the room's last `publish(data, { retain: true })` — replayed to new text subscribers. */
-function roomRetainedTextKey(roomId: string): string {
-  return `${ROOM_KEY_NAMESPACE}${roomKeyId(roomId)}:rt`
-}
-/** KV key holding the room's semantic-lane order watermark (a `RoomOrder`): the persisted, clamped
- *  `(timestamp, seq)` logical clock that `publish()` text and `Room.announce()` both draw from, so
- *  every semantic message carries one room-wide order. */
-function roomOrderKey(roomId: string): string {
-  return `${ROOM_KEY_NAMESPACE}${roomKeyId(roomId)}:o`
-}
-/** KV key holding the open room's incarnation id (`RoomConfigRecord.inc`) — the fence a `commitFrame`
- *  compares before it orders/retains/publishes. Set on create, deleted first on close, so a publish
- *  from a closed or superseded incarnation fails before any effect (the value differs, or is gone). */
-function roomOpenFenceKey(roomId: string): string {
-  return `${ROOM_KEY_NAMESPACE}${roomKeyId(roomId)}:f`
-}
-/** KV key holding the last `publishBinary(data, { retain: true })` on one (member, track) — replayed
- *  (base64-encoded, since KV values are strings) to a new subscriber before live frames. Track is
- *  `DEFAULT_TRACK` (`''`) for the unnamed lane. */
-function roomRetainedBinaryKey(roomId: string, memberId: string, track: string): string {
-  return `${roomRetainedBinaryPrefix(roomId)}${memberId}:${track}`
-}
-/** KV prefix under which all of a room's retained binary frames live (`keys()` enumerates them). */
-function roomRetainedBinaryPrefix(roomId: string): string {
-  return `${ROOM_KEY_NAMESPACE}${roomKeyId(roomId)}:rb:`
-}
-/** KV prefix under which one member's retained binary frames live — every track they retained. The
- *  member ID is a delimiter-free UUID, so the trailing `:` makes it an unambiguous per-member scan
- *  (used to drop a departed member's retained frames wherever they were stored). */
-function roomRetainedBinaryMemberPrefix(roomId: string, memberId: string): string {
-  return `${roomRetainedBinaryPrefix(roomId)}${memberId}:`
-}
-
-/** Uint8Array ⇄ base64, for stashing binary frames in string-only KV. `btoa`/`atob` are global on
- *  Node 16+ and edge runtimes; the chunked build avoids the call-stack limit on large keyframes. */
-function bytesToBase64(bytes: Uint8Array): string {
-  let binary = ''
-  for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000))
-  return btoa(binary)
-}
-function base64ToBytes(b64: string): Uint8Array {
-  const binary = atob(b64)
-  const bytes = new Uint8Array(binary.length)
-  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
-  return bytes
-}
-/** KV key of the room's config record. */
-function roomConfigKvKey(roomId: string): string {
-  return `${ROOM_KEY_NAMESPACE}${roomKeyId(roomId)}:config`
 }
 /** KV key of one member record. */
 function roomMemberKvKey(roomId: string, memberId: string): string {
@@ -203,26 +108,6 @@ function roomMemberKvKey(roomId: string, memberId: string): string {
  *  how member records are told apart from keys of other rooms whose ID shares the prefix. */
 function roomMemberKvPrefix(roomId: string): string {
   return `${ROOM_KEY_NAMESPACE}${roomKeyId(roomId)}:m:`
-}
-
-/** Reserved KV namespace for the room-existence index — a flat set of room IDs (`Room.list()`). A
- *  room's own state can live in a per-room shard (Cloudflare), but *enumerating* rooms is
- *  inherently cross-room, so the index lives in the one shared, listable store instead. Kept off
- *  `ROOM_KEY_NAMESPACE` so a room-state scan never sweeps it. */
-const ROOM_INDEX_KEY_NAMESPACE = 'telefunc:roomindex:'
-
-/** KV key registering a room's existence in the cross-room index (value is empty — the key is the
- *  record). The raw room ID is the suffix, so `Room.list({ prefix })` scans by ID prefix directly. */
-function roomIndexKvKey(roomId: string): string {
-  return `${ROOM_INDEX_KEY_NAMESPACE}${roomId}`
-}
-/** KV prefix enumerating the room index, optionally narrowed by a room-ID prefix. */
-function roomIndexKvPrefix(idPrefix: string): string {
-  return `${ROOM_INDEX_KEY_NAMESPACE}${idPrefix}`
-}
-/** The room ID a room-index key registers, or `null` if the key isn't one. */
-function roomIdFromIndexKey(key: string): string | null {
-  return key.startsWith(ROOM_INDEX_KEY_NAMESPACE) ? key.slice(ROOM_INDEX_KEY_NAMESPACE.length) : null
 }
 
 /** KV key marking one membership as off-presence (`join({ hidden })`). A tiny index — written next
@@ -254,20 +139,10 @@ function roomIdentityMemberKvKey(roomId: string, identity: string, memberId: str
 function roomIdentityKvPrefix(roomId: string, identity: string): string {
   return `${IDENTITY_KEY_NAMESPACE}${encodeURIComponent(roomId)}:${encodeURIComponent(identity)}:`
 }
-/** KV prefix enumerating every identity-index key of a room — for wholesale cleanup on close. */
-function roomIdentityRoomKvPrefix(roomId: string): string {
-  return `${IDENTITY_KEY_NAMESPACE}${encodeURIComponent(roomId)}:`
-}
-
-/** A room's lifecycle at its authority. `open` admits every operation; `closing` is the atomic
- *  fence a `Room.close()` raises before it sweeps state (so an in-flight join/mutation is rejected
- *  rather than orphaned); `closed` is the tombstone left behind — the config is kept (not deleted) to
- *  mark the id closed for the sweep window, and it carries a TTL so it can't leak. A recreation takes
- *  it over with a fresh incarnation id (the semantic order resumes past the previous watermark via the
- *  separate `:o` key). Only `open` is a live room; `Room.get`/`Room.list` treat `closing`/`closed` as absent. */
+/** Policy's serialized lifecycle view; the backend head is the atomic authority for transitions. */
 type RoomStatus = 'open' | 'closing' | 'closed'
 
-/** Stored at `roomConfigKvKey`. `at`/`by` is the last-writer-wins stamp of the latest
+/** Stored opaquely in the backend head. `at`/`by` is the last-writer-wins stamp of the latest
  *  `Room.setMeta()`/`Room.setAttributes()` (see `applyRoomUpdate`). `inc` is the room's incarnation
  *  id: a fresh random id on every (re)create, so a member record or mutation from a previous
  *  incarnation can't attach to the current one (see `RoomMemberRecord.inc`). Random, not a counter, so
@@ -287,7 +162,7 @@ function stampNewer(a: { at: number; by: string }, b: { at: number; by: string }
   return a.at > b.at || (a.at === b.at && a.by > b.by)
 }
 
-/** Stored at `roomMemberKvKey`. `seenAt` is the liveness timestamp: the owning node refreshes
+/** Stored in the incarnation's member cell. `seenAt` is the liveness timestamp: the owning node refreshes
  *  it every `ROOM_HEARTBEAT_INTERVAL_MS`; records older than `ROOM_MEMBER_TTL_MS` are reaped. */
 type RoomMemberRecord = {
   meta: ParticipantMeta
@@ -373,21 +248,9 @@ type RoomCtrlEnvelope =
   | { __r: 'want'; member: string; track: string; node: string; on: boolean }
   | { __r: 'closed' }
 
-/** A semantic message's room-wide order: a lexicographically-comparable `(timestamp, seq)` pair the
- *  room's logical clock hands out, and the record persisted at `roomOrderKey` (the last pair issued —
- *  the watermark). Strictly increasing and unique per room across `publish()` and `Room.announce()`
- *  alike — the honest meaning of a receipt's `seq`/`timestamp`. The clock only moves forward: `seq`
- *  resets to `1` when wall time advances past `timestamp`, else it clamps `timestamp` and increments
- *  `seq`, so the pair is monotonic whatever the node's clock skew. Keyed per room and kept (TTL-reaped,
- *  not swept) across a close, so a recreation resumes past the previous watermark. */
+/** A semantic message's position. Within one incarnation `seq` is the strictly increasing domain
+ *  cursor; `timestamp` is independently clamped authority time and never controls sequence reset. */
 type RoomOrder = { seq: number; timestamp: number }
-
-/** Strictly-before in the room's semantic order: lexicographic on `(timestamp, seq)`. Two distinct
- *  semantic messages never compare equal (the clock is unique per room), so `!roomOrderBefore(a, b)`
- *  with `a !== b` means `a` is at-or-after `b`. */
-function roomOrderBefore(a: RoomOrder, b: RoomOrder): boolean {
-  return a.timestamp < b.timestamp || (a.timestamp === b.timestamp && a.seq < b.seq)
-}
 
 /** One tail-entry: a held recent text message (see `ROOM_TAIL_HOLD_MAX`). */
 type TailEntry = { serialized: string; ord: RoomOrder; from: string }
@@ -406,10 +269,10 @@ function pushBoundedTail(hold: TailEntry[], entry: TailEntry): void {
   }
 }
 
-/** A participant's message. Published on the room's one text key via `commitFrame`, which assigns the
- *  room-wide order and rides it on the transport frame — so the order is NOT in this envelope; the
- *  receiver reads it off the frame (`WirePublishInfo`), the single source of a message's place in the
- *  room's semantic timeline. `fromMeta` is the sender's meta as verified by the sender's own node —
+/** A participant's message. Committed on the semantic lane, whose receipt rides the transport frame;
+ *  the order is not duplicated in this envelope. The receiver reads `WirePublishInfo`, the source of
+ *  the message's place in the room's semantic timeline. `fromMeta` is the sender's meta as verified by
+ *  the sender's own node —
  *  never client-supplied — so any receiver can surface a correct sender even before its roster view
  *  catches up (see `RoomState.applyData`). */
 type RoomDataEnvelope = {
@@ -424,7 +287,7 @@ type RoomDataEnvelope = {
 type RoomDataPublish = { __r: 'data'; from: string; data: unknown; retain?: boolean }
 
 /** A room-authored message (`Room.announce()`) — no sender, delivered to `onAnnounce()`. Committed on
- *  the same room clock as participant text (`commitFrame`), so the two share one order domain; like
+ *  the same semantic lane as participant text, so the two share one order domain; like
  *  text, its order rides the transport frame, not this envelope. */
 type RoomAnnounceEnvelope = { __r: 'announce'; data: unknown }
 
@@ -440,7 +303,7 @@ type RoomRosterEvent = { __r: 'roster'; members: MemberSnapshot[] }
  *  default `publishBinary()` lane. `count` is the approximate number of interested subscribers. */
 type RoomDemandEvent = { __r: 'demand'; member: string; track: string | null; wanted: boolean }
 
-/** A direct message, published on the target's inbox key (`roomDmKey`) — transport-level
+/** A direct message, published on the target's inbox lane — transport-level
  *  privacy: only the target's owning node subscribes, only its holder receives the relay.
  *  `to` lets a holder of several participants route the message to the right one. `ackId` is
  *  present iff the sender wants a reply (`send(…, { ack: true })`) — the recipient's node routes
@@ -455,7 +318,7 @@ type RoomDmEnvelope = {
   ackId?: string
 }
 
-/** The reply to an `{ ack: true }` DM, published back on the *sender's* inbox key (`roomDmKey`) —
+/** The reply to an `{ ack: true }` DM, published back on the *sender's* inbox lane —
  *  which the sender's own node already subscribes to. `to` is the original sender; `ackId`
  *  correlates it to the pending `send`. Carries the recipient's handler return, or its error. */
 type RoomDmAckEnvelope = { __r: 'dm-ack'; to: string; ackId: string } & DmReply
@@ -586,7 +449,7 @@ const ROOM_BUG_MESSAGE = `${STATUS_BODY_INTERNAL_SERVER_ERROR} — see server lo
 type RoomFailure = { ok: false; abort: true; abortValue: unknown } | { ok: false; err: string }
 
 /** Classify a caught error for the one place a failure can't ride a channel ack — a DM handler's
- *  outcome, relayed to the sender as published data (`DmReply`, `roomDmKey`). `report` is the
+ *  outcome, relayed to the sender as published data (`DmReply`, the sender's inbox lane). `report` is the
  *  throwing side's bug pipeline (server: `handleTelefunctionBug`; client: console), invoked only
  *  for genuine bugs. Everything that *does* ride an ack uses `roomAckError` instead. */
 function toRoomFailure(err: unknown, report: (err: unknown) => void): RoomFailure {

@@ -20,16 +20,16 @@ import {
   ROOM_TAIL_ATTACH_TIMEOUT_MS,
   ROOM_TRACKS_PER_MEMBER_MAX,
 } from '../constants.js'
-import {
-  getBroadcastAdapter,
-  KV_KEEP,
-  type BroadcastAdapter,
-  type BroadcastUnsubscribe,
-  type KvReadOptions,
-  type KvWriteOptions,
-  type RoomFrameCommitResult,
-} from '../server/broadcast.js'
-import { decodePublishText, encodePublishBinary, encodePublishText, type WirePublishInfo } from '../shared-ws.js'
+import { getRoomBackend } from '../backend/install.js'
+import type {
+  CellMutation,
+  CommitAccepted,
+  LaneId,
+  LaneSubscription,
+  RoomBackendSpi,
+  RoomHead,
+} from '../backend/spi.js'
+import { encodePublishBinary, encodePublishText, type WirePublishInfo } from '../shared-ws.js'
 import {
   RoomError,
   roomFailureError,
@@ -40,30 +40,12 @@ import {
   hasRoomTag,
   mergeAttributes,
   normalizeJoinOptions,
-  roomConfigKvKey,
-  roomDmKey,
-  roomCtrlKey,
-  roomTextKey,
-  roomMemberDataKey,
-  roomMemberTrackKey,
   roomMemberKvKey,
   roomMemberKvPrefix,
-  roomIndexKvKey,
-  roomIndexKvPrefix,
-  roomIdFromIndexKey,
   roomHiddenMemberKvKey,
   roomHiddenMemberKvPrefix,
   roomIdentityMemberKvKey,
   roomIdentityKvPrefix,
-  roomIdentityRoomKvPrefix,
-  roomOrderKey,
-  roomOpenFenceKey,
-  roomRetainedTextKey,
-  roomRetainedBinaryKey,
-  roomRetainedBinaryPrefix,
-  roomRetainedBinaryMemberPrefix,
-  bytesToBase64,
-  base64ToBytes,
   unframeMemberId,
   uuidToBytes,
   DEFAULT_TRACK,
@@ -266,95 +248,103 @@ const ROOM_TOMBSTONE_TTL_MS = 60_000
  *  `closing` config vanishes and the id is recreatable, rather than wedged forever. A normal close
  *  finalizes to the `closed` tombstone well within it; the fresh incarnation ignores any leftovers the
  *  abandoned sweep left behind (they carry the old id and TTL-reap on their own). */
-const ROOM_CLOSE_LEASE_MS = ROOM_TOMBSTONE_TTL_MS
+const ROOM_CLOSE_LEASE_MS = 15_000
+const ROOM_CX_ATTEMPTS = 16
 
 /** The retained value stored per (member, track) binary lane: the base64 frame plus the publish
  *  receipt it was assigned, so a late subscriber replays it in the lane's real order (never a fresh
  *  `seq:0`/`Date.now()` stamp). */
-type RetainedBinary = { b64: string; seq: number; timestamp: number }
+const roomTextEncoder = new TextEncoder()
+const roomTextDecoder = new TextDecoder()
+const SEMANTIC_LANE = { kind: 'semantic' } as const satisfies LaneId
+const CONTROL_LANE = { kind: 'control' } as const satisfies LaneId
 
-/** (Re)register a room in the cross-room directory index (unscoped — enumeration spans rooms, so it
- *  can't live in one room's shard; see `listRooms`). Idempotent: a `set` of the same empty marker, so
- *  it also repairs a create that wrote the authoritative config but crashed before this second write. */
-async function registerRoomIndex(id: string): Promise<void> {
-  await getRoomKV().set(roomIndexKvKey(id), '')
+function encodeRoomText(value: string): Uint8Array {
+  return roomTextEncoder.encode(value)
 }
 
-/** Commit a semantic frame — participant text or `Room.announce()` — to the room's timeline: one
- *  atomic assign-order + optional retain + publish on `channelKey`, drawing the shared room clock at
- *  `roomOrderKey`. The adapter rides the assigned order on the transport frame (the single source of a
- *  message's place in the order — the receiver reads it there, never out of the payload) and
- *  linearizes against the room's partition, so concurrent publishers across nodes never rewind or
- *  overtake, and a crash can't advance the order with nothing published. `publish()` and `announce()`
- *  share one cursor, so a room incarnation's semantic messages carry one strictly-increasing, unique
- *  sequence. Fenced on the incarnation (`inc`):
- *  the commit orders/retains/publishes only while the open-fence still holds this handle's id, so a
- *  publish from a closed or superseded incarnation fails before any effect (the caller throws). */
-function commitRoomFrame(
+function decodeRoomText(value: Uint8Array): string {
+  return roomTextDecoder.decode(value)
+}
+
+function encodeRoomConfig(config: RoomConfigRecord): Uint8Array {
+  return encodeRoomText(stringify(config))
+}
+
+function configFromHead(head: RoomHead): RoomConfigRecord {
+  const stored = parse(decodeRoomText(head.config)) as RoomConfigRecord
+  return {
+    ...stored,
+    status: head.state,
+    ...(head.currentInc === null ? {} : { inc: head.currentInc }),
+  }
+}
+
+/** (Re)register a room in the backend's cross-room directory. Idempotent, so it also repairs a create
+ *  that wrote the authoritative head but stopped before registering the incarnation. */
+async function registerRoomIndex(id: string, inc: string): Promise<void> {
+  await getRoomBackend().directoryPut(id, inc)
+}
+
+/** Commit one opaque lane payload under the incarnation fence, then await its single handoff attempt. */
+async function commitRoomLane(
   id: string,
   inc: string,
-  channelKey: string,
-  payload: string,
-  retainKey?: string,
-): Promise<RoomFrameCommitResult> {
-  const adapter = getBroadcastAdapter()
-  assertUsage(
-    typeof adapter.commitFrame === 'function',
-    "The installed broadcast adapter doesn't implement `commitFrame()`, the atomic assign-order + retain + publish `Room`'s timeline needs. Install an adapter (in-memory, `@telefunc/redis`, or Cloudflare) that provides it.",
-  )
-  return Promise.resolve(
-    adapter.commitFrame!({
-      partitionKey: roomCtrlKey(id),
-      fences: [{ key: roomOpenFenceKey(id), expected: inc }],
-      orderKey: roomOrderKey(id),
-      channelKey,
-      payload,
-      ...(retainKey === undefined ? {} : { retainKey }),
-    }),
-  )
+  lane: LaneId,
+  payload: Uint8Array,
+  opts?: { retain?: boolean; closingLease?: string },
+): Promise<CommitAccepted | null> {
+  const result = await getRoomBackend().commitLane(id, inc, lane, payload, opts)
+  if ('stale' in result) return null
+  await result.delivery
+  return result
 }
 
 /** Atomically create a room, returning the fresh room if this call won the create, or `null` if a
  *  live room already owns the id. One authority compare-and-set decides it: a fresh id (or a `closed`
  *  tombstone left by an earlier incarnation) is taken at the next generation; an `open`/`closing`
  *  record means the create lost. Race-free — exactly one of any number of concurrent callers writes. */
-async function tryCreateRoom(id: string, options: RoomOptions | undefined, kv: RoomKV): Promise<Room | null> {
+async function tryCreateRoom(id: string, options: RoomOptions | undefined): Promise<Room | null> {
   const { meta } = normalizeOptions(options)
-  let created: RoomConfigRecord | null = null
-  await kv.update(roomConfigKvKey(id), (raw) => {
-    const current = parseConfig(raw)
-    // A live room (open, or mid-close) already owns this id — lose the create.
-    if (current !== null && current.status !== 'closed') {
-      created = null
-      return KV_KEEP
-    }
-    // Fresh id, or a closed tombstone to take over: a fresh random incarnation id, so no stale handle
-    // from a previous incarnation can false-match this one (a counter could, after the tombstone TTL).
-    created = { meta, at: Date.now(), by: writerId(), inc: crypto.randomUUID(), status: 'open' }
-    return stringify(created)
-  })
-  if (created === null) return null
-  await registerRoomIndex(id)
+  const backend = getRoomBackend()
+  let current = await backend.readHead(id)
+  if (current?.head.state === 'closing') {
+    const closing = await acquireClosingLease(backend, id, current.head)
+    if (closing === null || !(await finishClose(backend, id, closing))) return null
+    current = await backend.readHead(id)
+  }
+  if (current !== null && current.head.state !== 'closed') return null
+  const created: RoomConfigRecord = {
+    meta,
+    at: Date.now(),
+    by: writerId(),
+    inc: crypto.randomUUID(),
+    status: 'open',
+  }
+  const result = await backend.compareExchangeHead(
+    id,
+    current === null ? { expect: 'absent' } : { expect: { rev: current.head.rev } },
+    { head: { currentInc: created.inc, state: 'open', config: encodeRoomConfig(created) } },
+  )
+  if ('conflict' in result) return null
+  assert('head' in result)
+  await registerRoomIndex(id, created.inc)
   const room = new ServerRoom(id, created, { members: [] }) // fresh room — the roster is known: empty
-  // Raise the open-fence — this incarnation's id, on the authority — so a `commitFrame` publish is
-  // admitted only while the room is live at this incarnation (see `commitRoomFrame`). After the config
-  // write: a crash in between leaves the room publish-closed (fail-closed), never silently unfenced.
-  await getRoomKV(id, { consistent: true }).set(roomOpenFenceKey(id), room._inc)
   return room
 }
 
 async function createRoom(id: string, options?: RoomOptions): Promise<Room> {
   assertRoomId(id)
-  const room = await tryCreateRoom(id, options, getRoomKV(id))
+  const room = await tryCreateRoom(id, options)
   if (room === null) throw new RoomError(`Room already exists: ${id}`)
   return room
 }
 
 async function getRoom(id: string, options?: RoomGetOptions): Promise<Room> {
-  const { kv, config } = await requireRoom(id)
+  const { config } = await requireRoom(id)
   // Scan-only count — no per-member reads: the roster itself loads lazily, on the first observation
   // that needs it. Hidden members are excluded via their marker index (see presenceCount).
-  const count = await presenceCount(kv, id)
+  const count = await presenceCount(id, config.inc)
   const room = new ServerRoom(id, config, { count })
   if (options?.tail === true) room._startTail()
   return room
@@ -365,10 +355,11 @@ async function getOrCreateRoom(id: string, options?: RoomOptions): Promise<Room>
   // Won the atomic create → the fresh room. Lost it (already exists) → load it and idempotently
   // repair the directory index, in case an earlier create wrote the config but crashed before the
   // separate index write left it unlistable.
-  const created = await tryCreateRoom(id, options, getRoomKV(id))
+  const created = await tryCreateRoom(id, options)
   if (created !== null) return created
   const room = await getRoom(id)
-  await registerRoomIndex(id)
+  assert(ServerRoom.isServerRoom(room))
+  await registerRoomIndex(id, room._inc)
   return room
 }
 
@@ -425,24 +416,31 @@ async function listRooms(options?: { prefix?: string }): Promise<RoomInfo[]> {
   )
   // The room enumeration is cross-room, so it reads from the unscoped (listable) store; each room's
   // config and count then read from that room's own authority.
-  const index = getRoomKV()
+  const backend = getRoomBackend()
   const rooms: RoomInfo[] = []
-  for (const key of await index.keys(roomIndexKvPrefix(options?.prefix ?? ''))) {
-    const id = roomIdFromIndexKey(key)
-    if (id === null) continue
-    const kv = getRoomKV(id)
-    const config = await readConfig(kv, id)
-    if (config === null || config.status !== 'open') continue // closed/closing — a stale index entry, skip
-    const count = await presenceCount(kv, id) // scan-only — no per-member reads, hidden excluded
-    rooms.push({ id, meta: config.meta, count, isEmpty: count === 0 })
-  }
+  let cursor: string | undefined
+  do {
+    const page = await backend.directoryList(options?.prefix ?? '', cursor)
+    cursor = page.cursor
+    for (const { roomId, incTag } of page.entries) {
+      const current = await backend.readHead(roomId)
+      if (current === null || current.head.state !== 'open' || current.head.currentInc === null) {
+        await backend.directoryDelete(roomId, incTag)
+        continue
+      }
+      const config = configFromHead(current.head)
+      if (current.head.currentInc !== incTag) await backend.directoryPut(roomId, current.head.currentInc)
+      const count = await presenceCount(roomId, config.inc)
+      rooms.push({ id: roomId, meta: config.meta, count, isEmpty: count === 0 })
+    }
+  } while (cursor !== undefined)
   return rooms
 }
 
 async function setRoomMeta(id: string, meta: RoomMeta): Promise<void> {
   assertUsage(isObject(meta), 'Room.setMeta() meta should be an object')
-  const { kv, config } = await requireRoom(id)
-  await writeRoomConfig(id, kv, config, () => meta)
+  const { config } = await requireRoom(id)
+  await writeRoomConfig(id, config, () => meta)
 }
 
 /** Merge into the room's metadata per key — provided keys replace, omitted keys keep their value,
@@ -450,11 +448,11 @@ async function setRoomMeta(id: string, meta: RoomMeta): Promise<void> {
  *  one changed field is one small write, not a whole-`meta` resend. */
 async function setRoomAttributes(id: string, attributes: RoomMeta): Promise<void> {
   assertUsage(isObject(attributes), 'Room.setAttributes() attributes should be an object')
-  const { kv, config } = await requireRoom(id)
+  const { config } = await requireRoom(id)
   // The merge is a mutator, not a value: `writeRoomConfig` runs it inside the compare-and-set against
   // the config actually present, so a concurrent room `setAttributes` merges onto the latest, not the
   // snapshot read above — no lost key on a race (mirrors `_writeMemberMeta`).
-  await writeRoomConfig(id, kv, config, (current) => mergeAttributes(current, attributes))
+  await writeRoomConfig(id, config, (current) => mergeAttributes(current, attributes))
 }
 
 /** Commit a room-config change and converge it. Both the new value (`computeMeta` — a replace for
@@ -466,84 +464,95 @@ async function setRoomAttributes(id: string, attributes: RoomMeta): Promise<void
  *  shipped — each node derives its own local pre-value when it applies the `update` (see `applyRoomUpdate`). */
 async function writeRoomConfig(
   id: string,
-  kv: RoomKV,
   config: RoomConfigRecord,
   computeMeta: (current: RoomMeta) => RoomMeta,
 ): Promise<void> {
   const by = writerId()
-  // Object property, not a `let`: the mutator runs inside `update`, and control-flow analysis
-  // wouldn't see it reassign a plain local.
-  const decision = { outcome: 'gone' as 'wrote' | 'gone' }
-  let at = 0
-  let meta!: RoomMeta
-  await kv.update(roomConfigKvKey(id), (raw) => {
-    const current = parseConfig(raw)
-    // Legality is decided against the authority: a missing/closing/closed record, or one from another
-    // incarnation, is never resurrected or mutated — the write is dropped.
-    if (current === null || current.status !== 'open' || current.inc !== config.inc) {
-      decision.outcome = 'gone'
-      return KV_KEEP
+  const backend = getRoomBackend()
+  for (let attempt = 0; attempt < ROOM_CX_ATTEMPTS; attempt++) {
+    const current = await backend.readHead(id)
+    if (current === null || current.head.state !== 'open' || current.head.currentInc !== config.inc) {
+      throw new RoomError(`Room is closed: ${id}`)
     }
-    at = Math.max(Date.now(), current.at + 1) // strictly after the config we overwrite → always the winner
-    meta = computeMeta(current.meta)
-    decision.outcome = 'wrote'
-    return stringify({ meta, at, by, inc: current.inc, status: 'open' } satisfies RoomConfigRecord)
-  })
-  if (decision.outcome === 'gone') throw new RoomError(`Room is closed: ${id}`)
-  await publishCtrl(id, { __r: 'update', meta, at, by })
+    const currentConfig = configFromHead(current.head)
+    const at = Math.max(Date.now(), currentConfig.at + 1)
+    const meta = computeMeta(currentConfig.meta)
+    const nextConfig = { meta, at, by, inc: config.inc, status: 'open' as const }
+    const result = await backend.compareExchangeHead(
+      id,
+      { expect: { rev: current.head.rev } },
+      {
+        head: { currentInc: config.inc, state: 'open', config: encodeRoomConfig(nextConfig) },
+      },
+    )
+    if ('conflict' in result) continue
+    await publishCtrl(id, config.inc, { __r: 'update', meta, at, by })
+    return
+  }
+  throw new RoomError(`Room update contention: ${id}`)
 }
 
 async function closeRoom(id: string): Promise<void> {
   assertRoomId(id)
-  const kv = getRoomKV(id)
-  const config = await resolveConfig(kv, id)
-  // Idempotent: a room already closed (or never created) is nothing to do; one already `closing` is
-  // being swept by whoever fenced it, and its lease reclaims it into recreatability if that owner died.
-  if (config === null || config.status !== 'open') return
-  // Fence first: atomically flip open→closing at this incarnation, leased so an abandoned close (a node
-  // that fences then dies before finalizing) self-reaps instead of wedging the id (see
-  // `ROOM_CLOSE_LEASE_MS`). Any in-flight join or mutation that revalidates against the authority now
-  // sees a non-open room and is rejected rather than orphaned. Losing the compare-and-set (already
-  // closing/closed, or a newer incarnation) means someone else owns the close — nothing to do.
-  let fenced = false
-  await kv.update(
-    roomConfigKvKey(id),
-    (raw) => {
-      const current = parseConfig(raw)
-      if (current === null || current.status !== 'open' || current.inc !== config.inc) return KV_KEEP
-      fenced = true
-      return stringify({ ...current, status: 'closing' })
+  const backend = getRoomBackend()
+  const current = await backend.readHead(id)
+  if (current === null || current.head.state === 'closed') return
+  const closing = await acquireClosingLease(backend, id, current.head)
+  if (closing === null) return
+  await finishClose(backend, id, closing)
+}
+
+async function acquireClosingLease(
+  backend: RoomBackendSpi,
+  roomId: string,
+  current: RoomHead,
+): Promise<RoomHead | null> {
+  if (current.currentInc === null) return null
+  const nextConfig = { ...configFromHead(current), status: 'closing' as const }
+  const closeLease = { id: crypto.randomUUID(), durationMs: ROOM_CLOSE_LEASE_MS }
+  const result = await backend.compareExchangeHead(
+    roomId,
+    current.state === 'open'
+      ? { expect: { rev: current.rev } }
+      : { expect: { rev: current.rev, closingLeaseExpired: true } },
+    {
+      head: {
+        currentInc: current.currentInc,
+        state: 'closing',
+        config: encodeRoomConfig(nextConfig),
+        closeLease,
+      },
     },
-    { ttlMs: ROOM_CLOSE_LEASE_MS },
   )
-  if (!fenced) return
-  // Drop the open-fence first, so a publish still in flight at this incarnation fails at its
-  // `commitFrame` before the sweep runs — a stale incarnation already fails, its id no longer matching.
-  await getRoomKV(id, { consistent: true }).delete(roomOpenFenceKey(id))
-  // Event so observers disconnect promptly; then sweep. The member scan reads the authority so it
-  // sees every record committed before the fence — nothing joined after it can slip past.
-  await publishCtrl(id, { __r: 'closed' })
-  for (const { key } of await listMemberKeys(kv, id, { consistent: true })) await kv.delete(key)
-  for (const key of await kv.keys(roomHiddenMemberKvPrefix(id))) await kv.delete(key)
-  for (const key of await kv.keys(roomIdentityRoomKvPrefix(id))) await kv.delete(key)
-  // Retained frames live on the authority tier, so sweep them there (see `retainedKv`).
-  const retained = retainedKv(id)
-  for (const key of await retained.keys(roomRetainedBinaryPrefix(id))) await retained.delete(key)
-  await retained.delete(roomRetainedTextKey(id))
-  await getRoomKV().delete(roomIndexKvKey(id)) // deregister from the cross-room index (unscoped)
-  // Finalize: closing→closed tombstone marking the id closed for the TTL window (a recreate takes it
-  // over with a fresh incarnation). TTL'd so a closed-and-never-recreated room can't leak;
-  // incarnation-guarded so a concurrent recreate that already reopened the room is never stamped back
-  // to closed.
-  await kv.update(
-    roomConfigKvKey(id),
-    (raw) => {
-      const current = parseConfig(raw)
-      if (current === null || current.inc !== config.inc || current.status !== 'closing') return KV_KEEP
-      return stringify({ ...current, status: 'closed' as const })
+  return 'conflict' in result || !('head' in result) ? null : result.head
+}
+
+async function finishClose(backend: RoomBackendSpi, roomId: string, closing: RoomHead): Promise<boolean> {
+  const inc = closing.currentInc
+  const lease = closing.closeLease
+  if (inc === null || lease === undefined) return false
+  const closedEvent = await commitRoomLane(
+    roomId,
+    inc,
+    CONTROL_LANE,
+    encodeRoomText(stringify({ __r: 'closed' } satisfies RoomCtrlEnvelope)),
+    { closingLease: lease.id },
+  )
+  if (closedEvent === null) return false
+
+  const config = { ...configFromHead(closing), status: 'closed' as const }
+  const finalized = await backend.compareExchangeHead(
+    roomId,
+    { expect: { rev: closing.rev, closingLease: lease.id } },
+    {
+      head: { currentInc: null, state: 'closed', config: encodeRoomConfig(config) },
+      ttlMs: ROOM_TOMBSTONE_TTL_MS,
     },
-    { ttlMs: ROOM_TOMBSTONE_TTL_MS },
   )
+  if ('conflict' in finalized) return false
+  await backend.dropGeneration(roomId, inc)
+  await backend.directoryDelete(roomId, inc)
+  return true
 }
 
 /** The `(memberId, identity)` pairs a `ParticipantRef` addresses — shared by `Room.send()` and
@@ -551,8 +560,8 @@ async function closeRoom(id: string): Promise<void> {
  *  is every membership of that identity, resolved from the identity index in O(memberships) rather than a
  *  full-roster scan (0 matches is fine — an idempotent sweep, a no-op DM). */
 async function resolveParticipantRef(
-  kv: RoomKV,
   roomId: string,
+  inc: string,
   target: ParticipantRef,
 ): Promise<{ memberId: string; identity: string | undefined }[]> {
   if ('id' in target) {
@@ -560,24 +569,24 @@ async function resolveParticipantRef(
       typeof target.id === 'string' && target.id.length > 0,
       'The participant { id } should be a non-empty string',
     )
-    const raw = await kv.get(roomMemberKvKey(roomId, target.id), { consistent: true })
+    const raw = await readCell(roomId, inc, roomMemberKvKey(roomId, target.id))
     if (raw === null) throw new RoomError(`Participant not found: ${target.id}`)
-    return [{ memberId: target.id, identity: (parse(raw) as RoomMemberRecord).identity }]
+    return [{ memberId: target.id, identity: (parse(decodeRoomText(raw)) as RoomMemberRecord).identity }]
   }
   assertUsage(
     isObject(target) && typeof target.identity === 'string' && target.identity.length > 0,
     'The participant ref should be { id } or { identity }',
   )
   const { identity } = target
-  return (await resolveIdentityMembers(kv, roomId, identity)).map((memberId) => ({ memberId, identity }))
+  return (await resolveIdentityMembers(roomId, inc, identity)).map((memberId) => ({ memberId, identity }))
 }
 
 async function removeParticipant(id: string, target: ParticipantRef & { reason?: unknown }): Promise<void> {
   const cause: LeaveCause =
     target.reason === undefined ? { type: 'removed' } : { type: 'removed', reason: target.reason }
-  const { kv } = await requireRoom(id)
-  for (const { memberId, identity } of await resolveParticipantRef(kv, id, target)) {
-    await evictMember(kv, id, memberId, identity, cause)
+  const { config } = await requireRoom(id)
+  for (const { memberId, identity } of await resolveParticipantRef(id, config.inc, target)) {
+    await evictMember(id, config.inc, memberId, identity, cause)
   }
 }
 
@@ -586,16 +595,16 @@ async function removeParticipant(id: string, target: ParticipantRef & { reason?:
  *  pass `{ identity }` to read one identity's memberships in O(memberships) via the identity index —
  *  the cheap "is this user present / what's their status" read without loading the roster. */
 async function getRoomParticipants(id: string, target?: { identity: string }): Promise<ParticipantSnapshotView[]> {
-  const { kv, config } = await requireRoom(id)
+  const { config } = await requireRoom(id)
   let members: MemberSnapshot[]
   if (target === undefined) {
-    members = await readMembers(kv, id, config.inc)
+    members = await readMembers(id, config.inc)
   } else {
     assertUsage(
       isObject(target) && typeof target.identity === 'string' && target.identity.length > 0,
       'Room.getParticipants() target should be { identity }',
     )
-    members = await readMembers(kv, id, config.inc, await resolveIdentityMembers(kv, id, target.identity))
+    members = await readMembers(id, config.inc, await resolveIdentityMembers(id, config.inc, target.identity))
   }
   return members
     .filter((m) => !m.hidden) // hidden participants aren't presence participants
@@ -604,32 +613,37 @@ async function getRoomParticipants(id: string, target?: { identity: string }): P
 
 async function announceToRoom(id: string, data: unknown): Promise<RoomSendReceipt> {
   const { config } = await requireRoom(id)
-  // One commit on the room's semantic clock, the same one `publish()` draws, so an announcement is
-  // ordered relative to participant text; the assigned order rides the control frame for every
-  // receiver. Announce shares the clock but keeps the control lane, so it reaches every observer.
-  const commit = await commitRoomFrame(
+  // One commit on the room's semantic lane, the same one `publish()` draws, so an announcement is
+  // ordered relative to participant text and reaches every observer.
+  const commit = await commitRoomLane(
     id,
     config.inc,
-    roomCtrlKey(id),
-    stringify({ __r: 'announce', data } satisfies RoomEnvelope),
+    SEMANTIC_LANE,
+    encodeRoomText(stringify({ __r: 'announce', data } satisfies RoomEnvelope)),
   )
-  if (!commit.ok) throw new RoomError(`Room is closed: ${id}`)
+  if (commit === null) throw new RoomError(`Room is closed: ${id}`)
   return { seq: commit.seq, timestamp: commit.timestamp }
 }
 
 async function sendToParticipant(id: string, target: ParticipantRef, data: unknown): Promise<void> {
-  const { kv } = await requireRoom(id)
+  const { config } = await requireRoom(id)
   // `{ id }` is one participant; `{ identity }` fans out to every membership (tabs, connections).
-  for (const { memberId } of await resolveParticipantRef(kv, id, target)) {
-    await sendServerDm(id, memberId, data)
+  for (const { memberId } of await resolveParticipantRef(id, config.inc, target)) {
+    await sendServerDm(id, config.inc, memberId, data)
   }
 }
 
 /** Publish a server-authored DM to one member's inbox. An empty `from` marks it server-authored —
  *  clients can't spoof it (their DMs are validated against members joined through their own stub). */
-async function sendServerDm(roomId: string, memberId: string, data: unknown): Promise<void> {
+async function sendServerDm(roomId: string, inc: string, memberId: string, data: unknown): Promise<void> {
   const envelope: RoomDmEnvelope = { __r: 'dm', to: memberId, from: '', fromMeta: null, data }
-  await getBroadcastAdapter().publish(roomDmKey(roomId, memberId), stringify(envelope))
+  const committed = await commitRoomLane(
+    roomId,
+    inc,
+    { kind: 'inbox', member: memberId },
+    encodeRoomText(stringify(envelope)),
+  )
+  if (committed === null) throw new RoomError(`Room is closed: ${roomId}`)
 }
 
 // ---------------------------------------------------------------------------
@@ -645,9 +659,9 @@ const SERVER_ROOM_BRAND: unique symbol = Symbol.for('telefunc.ServerRoom')
  * response (see `roomReplacer`), so the same instance can be serialized any number of times
  * and `room.id` stays the room ID (wire channel IDs must be globally unique).
  *
- * All state changes flow through the room's pub/sub key: the node causing a change applies it
- * locally and publishes it; every other observing node — and this node's own echo — applies it
- * through its adapter subscription. Application is idempotent, so the overlap is harmless.
+ * State changes flow through backend lanes: the node causing a change applies it locally and commits
+ * it; every observing node — including the committer's own echo — applies the subscribed payload.
+ * Application is idempotent, so the overlap is harmless.
  */
 class ServerRoom implements Room {
   readonly [SERVER_ROOM_BRAND] = true
@@ -678,9 +692,9 @@ class ServerRoom implements Room {
 
   private readonly _ctrlSub = new SubSlot()
   private readonly _textSub = new SubSlot()
-  /** Upstream binary subscriptions, keyed by the full adapter key — one per wanted (member, track). */
-  private readonly _binaryKeyUnsubs = new Map<string, BroadcastUnsubscribe>()
-  private readonly _dmUnsubs = new Map<string, BroadcastUnsubscribe>()
+  /** Upstream subscriptions keyed by their policy identity. */
+  private readonly _binaryKeyUnsubs = new Map<string, LaneSubscription>()
+  private readonly _dmUnsubs = new Map<string, LaneSubscription>()
   /** (member, track) pairs this instance has already announced — first publish pays the
    *  KV append + ctrl event, every further frame is a Set lookup. */
   private readonly _announcedTracks = new Map<string, Set<string>>()
@@ -703,7 +717,7 @@ class ServerRoom implements Room {
     })
     this._state._owner = this
     this._demand = new RoomDemand(
-      (event) => void publishCtrl(roomId, { __r: 'want', ...event }).catch(reportRoomError),
+      (event) => void publishCtrl(roomId, config.inc, { __r: 'want', ...event }).catch(reportRoomError),
       (id) => this._ownsMember(id),
       (member, track, wanted) => this._deliverDemand(member, track, wanted),
     )
@@ -831,7 +845,7 @@ class ServerRoom implements Room {
     track(id, joinedAt)
     this._syncSubs()
     this._state.applyJoin(id, meta, joinedAt, identity, hidden)
-    await publishCtrl(this.id, {
+    await publishCtrl(this.id, this._inc, {
       __r: 'join',
       id,
       meta,
@@ -846,15 +860,14 @@ class ServerRoom implements Room {
     return { id, joinedAt }
   }
 
-  /** KV half of a join, guarding against a concurrent `Room.close()`. */
+  /** Persist the member cells for a join, guarding against a concurrent `Room.close()`. */
   private async _createMember(
     id: string,
     meta: ParticipantMeta,
     identity: string | null,
     hidden = false,
   ): Promise<number> {
-    const kv = getRoomKV(this.id)
-    await this._assertOpen(kv)
+    await this._assertOpen()
     const joinedAt = Date.now()
     const record: RoomMemberRecord = {
       meta,
@@ -865,53 +878,52 @@ class ServerRoom implements Room {
       ...(identity === null ? {} : { identity }),
       ...(hidden ? { hidden: true } : {}),
     }
-    // Index the membership before writing its record — never after, so a reader can't miss a live
-    // member (an orphan marker is harmless; see resolveIdentityMembers). The hidden marker follows
-    // the same discipline: in place before the record, so the presence count never counts a hidden
-    // member (a stale marker is ignored — presenceCount only excludes present member ids).
-    if (identity !== null) {
-      await kv.set(roomIdentityMemberKvKey(this.id, identity, id), '', { ttlMs: ROOM_MEMBER_KV_TTL_MS })
-    }
-    if (hidden) await kv.set(roomHiddenMemberKvKey(this.id, id), '', { ttlMs: ROOM_MEMBER_KV_TTL_MS })
-    await kv.set(roomMemberKvKey(this.id, id), stringify(record), { ttlMs: ROOM_MEMBER_KV_TTL_MS })
-    // A close may have fenced the room to `closing` between the admission check and this write — the
-    // authority reflects that immediately (unlike the replica), so re-check and roll back if so. With
-    // the fence up before close's member sweep, either close's sweep catches this record or this
-    // rollback removes it: no orphan.
-    if ((await this._openConfig(kv)) === null) {
-      await kv.delete(roomMemberKvKey(this.id, id))
-      if (identity !== null) await kv.delete(roomIdentityMemberKvKey(this.id, identity, id))
-      if (hidden) await kv.delete(roomHiddenMemberKvKey(this.id, id))
-      throw new RoomError(`Room is closed: ${this.id}`)
-    }
+    const memberKey = roomMemberKvKey(this.id, id)
+    const keys = [memberKey]
+    if (identity !== null) keys.push(roomIdentityMemberKvKey(this.id, identity, id))
+    if (hidden) keys.push(roomHiddenMemberKvKey(this.id, id))
+    await mutateCells(this.id, this._inc, { keys }, () => ({
+      value: undefined,
+      mutations: keys.map((key) => ({
+        key,
+        set: {
+          bytes: key === memberKey ? encodeRoomText(stringify(record)) : new Uint8Array(),
+          ttlMs: ROOM_MEMBER_KV_TTL_MS,
+        },
+      })),
+    }))
     return joinedAt
   }
 
   /** @internal */
   async _removeMember(id: string, cause: LeaveCause): Promise<void> {
     if (this._state.closed) return // close() already removed everyone
-    const kv = getRoomKV(this.id)
     const identity = this._state.getRemote(id)?.identity ?? null
     const hidden = this._state.isHidden(id)
-    await kv.delete(roomMemberKvKey(this.id, id)) // record first — a lingering marker resolves to nothing
-    if (identity !== null) await kv.delete(roomIdentityMemberKvKey(this.id, identity, id))
-    if (hidden) await kv.delete(roomHiddenMemberKvKey(this.id, id))
+    const keys = [roomMemberKvKey(this.id, id)]
+    if (identity !== null) keys.push(roomIdentityMemberKvKey(this.id, identity, id))
+    if (hidden) keys.push(roomHiddenMemberKvKey(this.id, id))
+    await mutateCells(this.id, this._inc, { keys }, () => ({
+      value: undefined,
+      mutations: keys.map((key) => ({ key })),
+    }))
     // A leaving member's per-track streams end, so their retained frames go too — binary per
     // (member, track), and the room's one retained-text slot if this member still owns it. Room
-    // close prefix-sweeps whatever a leave races past.
+    // close drops the whole generation, including anything a leave races past.
     await this._dropRetainedBinary(id)
-    await dropRetainedTextOwnedBy(this.id, id)
+    await dropRetainedTextOwnedBy(this.id, this._inc, id)
     this._applyLeave(id, cause)
-    await publishCtrl(this.id, { __r: 'leave', id, ...leaveCauseToWire(cause) })
+    await publishCtrl(this.id, this._inc, { __r: 'leave', id, ...leaveCauseToWire(cause) })
   }
 
-  /** Delete a member's retained binary frames — every track, wherever stored. Scans the member's
-   *  retained-binary keys rather than this node's known track set, so a frame retained on another
-   *  node is still cleaned up (the set is instance-local; the keys are the source of truth).
-   *  Deleting an absent key is a no-op, so a member that retained nothing just pays one empty scan. */
+  /** Delete a member's retained binary frames — every track, wherever stored. The backend's retained
+   *  lane inventory is authoritative, so a frame retained on another node is still cleaned up.
+   *  Deleting an absent lane is a no-op, so a member that retained nothing just pays one empty scan. */
   private async _dropRetainedBinary(id: string): Promise<void> {
-    const kv = retainedKv(this.id)
-    for (const key of await kv.keys(roomRetainedBinaryMemberPrefix(this.id, id))) await kv.delete(key)
+    const backend = getRoomBackend()
+    for (const lane of await backend.listRetained(this.id, this._inc)) {
+      if (lane.kind === 'binary' && lane.member === id) await backend.deleteRetained(this.id, this._inc, lane)
+    }
   }
 
   /** @internal — full replace (`setMeta`). */
@@ -930,33 +942,27 @@ class ServerRoom implements Room {
     id: string,
     computeMeta: (current: ParticipantMeta) => ParticipantMeta,
   ): Promise<void> {
-    const kv = getRoomKV(this.id)
-    await this._assertOpen(kv)
-    // One atomic read-modify-write: `computeMeta` merges/replaces onto the record actually present,
-    // bumping the owner-issued revision. If a concurrent write lands first (a heartbeat, a racing
-    // meta change), the compare-and-set re-runs the mutator on that fresh record — so a `setAttributes`
-    // merges onto the latest meta and nothing is lost. Captured out for the convergence event.
-    let prev!: ParticipantMeta
-    let meta!: ParticipantMeta
-    let seq!: number
-    await kv.update(
-      roomMemberKvKey(this.id, id),
-      (raw) => {
-        if (raw === null) throw new RoomError(`Participant not found (left?): ${id}`)
-        const record = parse(raw) as RoomMemberRecord
-        prev = this._state.getRemote(id)?.meta ?? record.meta
-        meta = computeMeta(record.meta)
-        seq = record.metaSeq + 1
-        return stringify({ ...record, meta, metaSeq: seq, seenAt: Date.now() } satisfies RoomMemberRecord)
-      },
-      { ttlMs: ROOM_MEMBER_KV_TTL_MS },
-    )
+    await this._assertOpen()
+    const key = roomMemberKvKey(this.id, id)
+    const { prev, meta, seq } = await mutateCells(this.id, this._inc, { keys: [key] }, (cells) => {
+      const raw = cells.get(key)
+      if (raw === undefined) throw new RoomError(`Participant not found (left?): ${id}`)
+      const record = parse(decodeRoomText(raw)) as RoomMemberRecord
+      const prev = this._state.getRemote(id)?.meta ?? record.meta
+      const meta = computeMeta(record.meta)
+      const seq = record.metaSeq + 1
+      const next = { ...record, meta, metaSeq: seq, seenAt: Date.now() } satisfies RoomMemberRecord
+      return {
+        value: { prev, meta, seq },
+        mutations: [{ key, set: { bytes: encodeRoomText(stringify(next)), ttlMs: ROOM_MEMBER_KV_TTL_MS } }],
+      }
+    })
     this._state.applyParticipantMeta(id, meta, prev, seq)
-    await publishCtrl(this.id, { __r: 'p-meta', id, meta, prev, seq })
+    await publishCtrl(this.id, this._inc, { __r: 'p-meta', id, meta, prev, seq })
   }
 
   /** @internal — publish a member's text message. The sender's verified meta/identity are stamped
-   *  into the envelope here — never client-supplied. Text rides the room's one text key. `retain`
+   *  into the envelope here — never client-supplied. Text rides the room's semantic lane. `retain`
    *  stores the message as the room's one retained-text slot (MQTT-style), replayed to any later
    *  text subscriber (see `_replayRetainedText`). */
   async _publishText(from: string, data: unknown, retain = false): Promise<ChannelPublishAck> {
@@ -969,22 +975,18 @@ class ServerRoom implements Room {
       data,
     }
     // One atomic commit assigns the room-wide order, stores the retained frame (if any), and publishes
-    // — the assigned order rides the transport frame, so the retained copy, the live frame, and the
+    // — the assigned order rides the lane frame, so the retained copy, the live frame, and the
     // receipt all carry the one pair with no separate allocate, and no subscriber sees a gap between
     // the store and the publish. Text and `announce()` share this clock, so they totally order.
-    const commit = await commitRoomFrame(
-      this.id,
-      this._inc,
-      roomTextKey(this.id),
-      stringify(envelope),
-      retain ? roomRetainedTextKey(this.id) : undefined,
-    )
-    if (!commit.ok) throw new RoomError(`Room is closed: ${this.id}`)
+    const commit = await commitRoomLane(this.id, this._inc, SEMANTIC_LANE, encodeRoomText(stringify(envelope)), {
+      retain,
+    })
+    if (commit === null) throw new RoomError(`Room is closed: ${this.id}`)
     return this._finishPublish(sender, data, commit)
   }
 
   /** @internal — publish a member's binary frame (`[16-byte member ID][flags][…]`, validated at
-   *  its entry point — the unframe cannot fail). Binary rides per-publisher keys — per
+   *  its entry point — the unframe cannot fail). Binary rides per-publisher lanes — per
    *  (publisher, track) for named tracks: that's what makes delivery track-selective at the
    *  source, so `receivers: 0` on the ack truthfully means "nobody anywhere wants this track". */
   async _publishBinaryFramed(from: string, framed: Uint8Array): Promise<ChannelPublishAck> {
@@ -996,22 +998,15 @@ class ServerRoom implements Room {
     // The guard sees exactly what a subscriber would: the payload, without the wire frame.
     const sender = await this._admitPublish(from, frame.payload)
     if (frame.track !== null) await this._ensureTrackAnnounced(from, frame.track)
-    const result = await getBroadcastAdapter().publishBinary(
-      frame.track === null ? roomMemberDataKey(this.id, from) : roomMemberTrackKey(this.id, from, frame.track),
+    const result = await commitRoomLane(
+      this.id,
+      this._inc,
+      { kind: 'binary', member: from, track: frame.track ?? DEFAULT_TRACK },
       framed,
+      { retain: frame.retain },
     )
+    if (result === null) throw new RoomError(`Room is closed: ${this.id}`)
     const ack = await this._finishPublish(sender, frame.payload, result)
-    // Retained per (member, track), MQTT-style: replayed to any later subscriber of that lane (see
-    // `_replayRetainedBinary`). Stored WITH the publish receipt, so a late subscriber replays it in the
-    // lane's real order rather than a fresh stamp — which means storing after the publish that assigns
-    // the receipt (text stores before, because its `ord` is pre-allocated). No TTL: reaped by lifecycle
-    // (the publisher's leave, or room close), never by expiry, matching the retained-text slot.
-    if (frame.retain) {
-      await retainedKv(this.id).set(
-        roomRetainedBinaryKey(this.id, from, frame.track ?? DEFAULT_TRACK),
-        stringify({ b64: bytesToBase64(framed), seq: ack.seq, timestamp: ack.timestamp } satisfies RetainedBinary),
-      )
-    }
     return ack
   }
 
@@ -1030,8 +1025,7 @@ class ServerRoom implements Room {
   private async _finishPublish(
     sender: Sender,
     payload: unknown,
-    // Text carries the room-wide order its `commitFrame` assigned; binary keeps its own per-key
-    // transport seq, a separate order domain. `receivers`/`meta` come from the hop either way.
+    // Semantic and binary lanes each carry their backend-assigned domain order.
     info: { seq: number; timestamp: number; receivers?: number; meta?: Record<string, unknown> },
   ): Promise<ChannelPublishAck> {
     const ack = Object.assign(makePublishInfo(this.id, info.seq, info.timestamp), {
@@ -1049,10 +1043,10 @@ class ServerRoom implements Room {
     return ack
   }
 
-  /** First frame on a new (member, track): record the track on the member's KV record (late
-   *  observers discover it from the roster) and announce it on the control lane (live all-track
-   *  subscribers bring the key subscription up) — both strictly before the frame. Idempotent
-   *  across owner incarnations via the KV record; O(1) per further frame via `_announcedTracks`. */
+  /** First frame on a new (member, track): record the track on the member's cell (late observers
+   *  discover it from the roster) and announce it on the control lane (live all-track subscribers
+   *  bring the lane subscription up) — both strictly before the frame. Idempotent across owner
+   *  incarnations via the cell record; O(1) per further frame via `_announcedTracks`. */
   private async _ensureTrackAnnounced(from: string, track: string): Promise<void> {
     let announced = this._announcedTracks.get(from)
     if (announced?.has(track)) return
@@ -1060,33 +1054,31 @@ class ServerRoom implements Room {
       announced = new Set()
       this._announcedTracks.set(from, announced)
     }
-    const kv = getRoomKV(this.id)
     // Atomic append: record the track on the member's record unless it's already there (a previous
     // owner incarnation recorded it). The compare-and-set re-runs on a concurrent record write, so the
     // append is never clobbered. Announce on the control lane only when this call actually added it.
-    let appended = false
-    await kv.update(
-      roomMemberKvKey(this.id, from),
-      (raw) => {
-        if (raw === null) throw new RoomError(`Participant not found (left?): ${from}`)
-        const record = parse(raw) as RoomMemberRecord
-        const tracks = record.tracks ?? []
-        if (tracks.includes(track)) {
-          appended = false
-          return KV_KEEP
-        }
-        // Bound named tracks per participant: authoritative here (the record is the cross-node source
-        // of truth), so a hostile publisher can't spray distinct track names to multiply KV slots,
-        // announcements, retained frames, and subscriptions. The default lane is unnamed, never counted.
-        if (tracks.length >= ROOM_TRACKS_PER_MEMBER_MAX) {
-          throw new RoomError(`A participant may announce at most ${ROOM_TRACKS_PER_MEMBER_MAX} tracks`)
-        }
-        appended = true
-        return stringify({ ...record, tracks: [...tracks, track], seenAt: Date.now() } satisfies RoomMemberRecord)
-      },
-      { ttlMs: ROOM_MEMBER_KV_TTL_MS },
-    )
-    if (appended) await publishCtrl(this.id, { __r: 'track', id: from, track })
+    const key = roomMemberKvKey(this.id, from)
+    const appended = await mutateCells(this.id, this._inc, { keys: [key] }, (cells) => {
+      const raw = cells.get(key)
+      if (raw === undefined) throw new RoomError(`Participant not found (left?): ${from}`)
+      const record = parse(decodeRoomText(raw)) as RoomMemberRecord
+      const tracks = record.tracks ?? []
+      if (tracks.includes(track)) {
+        return { value: false, mutations: [] }
+      }
+      // Bound named tracks per participant: authoritative here (the record is the cross-node source
+      // of truth), so a hostile publisher can't spray distinct track names to multiply KV slots,
+      // announcements, retained frames, and subscriptions. The default lane is unnamed, never counted.
+      if (tracks.length >= ROOM_TRACKS_PER_MEMBER_MAX) {
+        throw new RoomError(`A participant may announce at most ${ROOM_TRACKS_PER_MEMBER_MAX} tracks`)
+      }
+      const next = { ...record, tracks: [...tracks, track], seenAt: Date.now() } satisfies RoomMemberRecord
+      return {
+        value: true,
+        mutations: [{ key, set: { bytes: encodeRoomText(stringify(next)), ttlMs: ROOM_MEMBER_KV_TTL_MS } }],
+      }
+    })
+    if (appended) await publishCtrl(this.id, this._inc, { __r: 'track', id: from, track })
     this._state.applyTrack(from, track)
     announced.add(track)
   }
@@ -1155,7 +1147,13 @@ class ServerRoom implements Room {
       data,
       ...(ackId ? { ackId } : {}),
     }
-    const receipt = await getBroadcastAdapter().publish(roomDmKey(this.id, to), stringify(envelope))
+    const receipt = await commitRoomLane(
+      this.id,
+      this._inc,
+      { kind: 'inbox', member: to },
+      encodeRoomText(stringify(envelope)),
+    )
+    if (receipt === null) throw new RoomError(`Room is closed: ${this.id}`)
     const info: RoomSendReceipt = { seq: receipt.seq, timestamp: receipt.timestamp }
     const onAfterSend = this._guards?.onAfterSend
     if (onAfterSend) await onAfterSend(sender, target, data, info)
@@ -1165,7 +1163,13 @@ class ServerRoom implements Room {
   /** @internal — publish an `{ ack: true }` reply back to the sender's inbox (`to` is the sender). */
   private async _publishDmAck(to: string, ackId: string, reply: DmReply): Promise<void> {
     const envelope: RoomDmAckEnvelope = { __r: 'dm-ack', to, ackId, ...reply }
-    await getBroadcastAdapter().publish(roomDmKey(this.id, to), stringify(envelope))
+    const committed = await commitRoomLane(
+      this.id,
+      this._inc,
+      { kind: 'inbox', member: to },
+      encodeRoomText(stringify(envelope)),
+    )
+    if (committed === null) throw new RoomError(`Room is closed: ${this.id}`)
   }
 
   /** @internal — the recipient replied: settle the matching pending `send(…, { ack: true })` with
@@ -1187,42 +1191,42 @@ class ServerRoom implements Room {
     }
   }
 
-  /** The member's live view — falling back to the authoritative KV record, since the local
-   *  view lags while unobserved (and briefly after the observe transition, until the KV
+  /** The member's live view — falling back to the authoritative backend cell, since the local
+   *  view lags while unobserved (and briefly after the observe transition, until the cell
    *  resync lands). */
   private async _resolveMember(id: string): Promise<Sender | null> {
     const remote = this._state.getRemote(id)
     if (remote) return remote
-    const raw = await getRoomKV(this.id).get(roomMemberKvKey(this.id, id), { consistent: true })
+    const raw = await readCell(this.id, this._inc, roomMemberKvKey(this.id, id))
     if (raw === null) return null
-    const record = parse(raw) as RoomMemberRecord
+    const record = parse(decodeRoomText(raw)) as RoomMemberRecord
     return { id, meta: record.meta, identity: record.identity ?? null }
   }
 
   /** The room's authoritative config iff it is `open` at this handle's incarnation — the legality
-   *  oracle for every mutation. Reads the authority (never the eventually-consistent replica), so a
-   *  close is observed immediately; `null` means closed/closing/gone or a different incarnation. */
-  private async _openConfig(kv: RoomKV): Promise<RoomConfigRecord | null> {
-    const current = parseConfig(await kv.get(roomConfigKvKey(this.id), { consistent: true }))
-    return current !== null && current.status === 'open' && current.inc === this._inc ? current : null
+   *  oracle for every mutation. A `null` result means closed/closing/gone or another incarnation. */
+  private async _openConfig(): Promise<RoomConfigRecord | null> {
+    const current = await getRoomBackend().readHead(this.id)
+    if (current === null || current.head.state !== 'open' || current.head.currentInc !== this._inc) return null
+    return configFromHead(current.head)
   }
 
-  private async _assertOpen(kv: RoomKV): Promise<void> {
-    if (this._state.closed || (await this._openConfig(kv)) === null) {
+  private async _assertOpen(): Promise<void> {
+    if (this._state.closed || (await this._openConfig()) === null) {
       throw new RoomError(`Room is closed: ${this.id}`)
     }
   }
 
-  // ── Event stream (adapter subscription callbacks) ──
+  // ── Event stream (backend lane callbacks) ──
 
-  /** The control lane: presence & lifecycle events plus announcements — relayed to every stub
+  /** The control lane: presence and lifecycle events — relayed to every stub
    *  unconditionally, since a client's live view is only correct if it sees every one. */
   private _onCtrlMessage(serialized: string, rawInfo: WirePublishInfo): void {
     let envelope: unknown
     try {
       envelope = parse(serialized)
     } catch {
-      return // junk on the reserved key
+      return // junk on the control lane
     }
     if (!hasRoomTag(envelope)) return
     const event = envelope as RoomEnvelope
@@ -1236,16 +1240,11 @@ class ServerRoom implements Room {
     // applying, since `leave` removes the member from state (see `_hidesFromClients`).
     const serverOnly = this._hidesFromClients(event)
 
-    if (event.__r === 'announce') {
-      this._state.applyAnnounce(event.data, makePublishInfo(this.id, rawInfo.seq, rawInfo.timestamp))
-    } else {
-      this._applyCtrl(event)
-    }
+    if (event.__r === 'announce') return
+    this._applyCtrl(event)
 
     if (this._stubs.size > 0 && !serverOnly) {
-      // An announcement's `commitFrame` assigned the room's semantic order onto this control frame;
-      // every other control event is presence/lifecycle, ordered by the control lane's transport seq.
-      // Either way the order rides the frame (`rawInfo`), so the relay carries it straight through.
+      // Presence/lifecycle events are ordered by the control lane; the receipt rides the frame.
       const wireText = encodePublishText(serialized, rawInfo)
       for (const stub of this._stubs) stub._relayPublishText(wireText)
     }
@@ -1266,7 +1265,7 @@ class ServerRoom implements Room {
       case 'track':
         return this._state.isHidden(event.id)
       default:
-        return false // room-level events (update/announce/closed) always reach clients
+        return false // room-level events (update/closed) always reach clients
     }
   }
 
@@ -1276,12 +1275,22 @@ class ServerRoom implements Room {
     try {
       envelope = parse(serialized)
     } catch {
-      return // junk on the reserved key
+      return // junk on the semantic lane
     }
-    if (!hasRoomTag(envelope) || envelope.__r !== 'data') return
+    if (!hasRoomTag(envelope)) return
+    if (envelope.__r === 'announce') {
+      const announce = envelope as Extract<RoomEnvelope, { __r: 'announce' }>
+      const info = makePublishInfo(this.id, rawInfo.seq, rawInfo.timestamp)
+      this._state.applyAnnounce(announce.data, info)
+      if (this._stubs.size > 0) {
+        const wireText = encodePublishText(serialized, rawInfo)
+        for (const stub of this._stubs) stub._relayPublishText(wireText)
+      }
+      return
+    }
+    if (envelope.__r !== 'data') return
     const event = envelope as RoomDataEnvelope
-    // The room-wide order rides on the transport frame (`commitFrame` assigned it there), never in the
-    // payload — so a receiver on any delivery key sees the single order the sender's clock assigned.
+    // The semantic-lane order rides on the transport frame, never in the payload.
     const info = makePublishInfo(this.id, rawInfo.seq, rawInfo.timestamp)
     this._state.applyData(
       event.from,
@@ -1315,7 +1324,7 @@ class ServerRoom implements Room {
 
   private _onBinary(framed: Uint8Array, rawInfo: WirePublishInfo): void {
     const unframed = unframeMemberId(framed)
-    if (!unframed) return // junk on the reserved key
+    if (!unframed) return // junk on the binary lane
     const info = makePublishInfo(this.id, rawInfo.seq, rawInfo.timestamp)
     this._state.applyBinary(
       unframed.from,
@@ -1345,7 +1354,7 @@ class ServerRoom implements Room {
     try {
       envelope = parse(serialized)
     } catch {
-      return // junk on the reserved key
+      return // junk on the inbox lane
     }
     if (!hasRoomTag(envelope)) return
     // A reply to one of our own `send(…, { ack: true })`s, riding our inbox back home.
@@ -1647,17 +1656,17 @@ class ServerRoom implements Room {
     // A commit stores the retained copy before it publishes, so once the subscription is live, any
     // publish that raced this subscribe is either already in the copy we read or arrives live — never
     // lost in the gap between subscribing and the read. A synchronous backend (in-memory) resolves
-    // instantly. See `SubSlot.ready` and `BroadcastUnsubscribe`.
+    // instantly. See `SubSlot.ready` and `LaneSubscription.ready`.
     await this._textSub.ready
-    const stored = await retainedKv(this.id).get(roomRetainedTextKey(this.id))
+    const stored = await getRoomBackend().readRetained(this.id, this._inc, SEMANTIC_LANE)
     if (stored === null) return
-    // The retained slot holds the framed message (order prefix + payload); decode to recover both.
-    const { text: serialized, info } = decodePublishText(stored)
+    const serialized = decodeRoomText(stored.payload)
+    const info = { seq: stored.seq, timestamp: stored.timestamp }
     const envelope = parse(serialized) as RoomDataEnvelope
     if (prevWantsText || prevMemberWants.has(envelope.from) || !stub._wantsTextFrom(envelope.from)) return
     // Replay the stored frame as-is (it already carries its real order), and let the stub drop it if a
     // same-or-newer live frame already reached it (a publish that raced this subscribe) — exactly-once.
-    stub._emitRetainedText(stored, envelope.from, info)
+    stub._emitRetainedText(encodePublishText(serialized, info), envelope.from, info)
   }
 
   /** @internal — MQTT-retained replay for the binary lanes. Called when a stub's `sub-binary` want
@@ -1670,30 +1679,30 @@ class ServerRoom implements Room {
     // subscriptions to be live before reading the retained frames, so a frame racing the subscribe rides
     // the retained copy or the live lane instead of the gap. A synchronous backend resolves instantly.
     await this._binaryReady()
-    const kv = retainedKv(this.id)
-    for (const key of await kv.keys(roomRetainedBinaryPrefix(this.id))) {
-      const stored = await kv.get(key)
+    const backend = getRoomBackend()
+    for (const lane of await backend.listRetained(this.id, this._inc)) {
+      if (lane.kind !== 'binary') continue
+      const stored = await backend.readRetained(this.id, this._inc, lane)
       if (stored === null) continue
-      const record = parse(stored) as RetainedBinary
-      const framed = base64ToBytes(record.b64)
+      const framed = stored.payload
       const frame = unframeMemberId(framed)
       if (!frame) continue
       const track = frame.track ?? DEFAULT_TRACK
       if (binaryWantsCovers(prevWants, frame.from, track) || !stub._wantsBinary(frame.from, track)) continue
       // Replay with the frame's own stored receipt (never seq:0/Date.now()); the stub drops it if a
       // same-or-newer live frame on this lane already reached it — exactly-once, in order.
-      const info: WirePublishInfo = { seq: record.seq, timestamp: record.timestamp }
+      const info: WirePublishInfo = { seq: stored.seq, timestamp: stored.timestamp }
       stub._emitRetainedBinary(encodePublishBinary(framed, info), frame.from, track, info)
     }
   }
 
-  // ── Adapter subscriptions ──
+  // ── Backend lane subscriptions ──
 
-  /** @internal — recompute which pub/sub keys this instance needs and (un)subscribe to match.
+  /** @internal — recompute which backend lanes this instance needs and (un)subscribe to match.
    *  Idempotent; called after every change that can affect the answer (listeners, members,
    *  stubs, close). */
   _syncSubs(): void {
-    const adapter = getBroadcastAdapter()
+    const backend = getRoomBackend()
     const state = this._state
     const open = !state.closed
     const observed =
@@ -1704,7 +1713,9 @@ class ServerRoom implements Room {
     // Control: one low-rate lane every observer holds — it's what keeps the live view correct.
     const becomesObserved = open && observed && !this._ctrlSub.active
     this._ctrlSub.sync(open && observed, () =>
-      adapter.subscribe(roomCtrlKey(this.id), (serialized, info) => this._onCtrlMessage(serialized, info)),
+      backend.subscribeLane(this.id, this._inc, CONTROL_LANE, (payload, info) =>
+        this._onCtrlMessage(decodeRoomText(payload), info),
+      ),
     )
 
     // Text: its own lane, brought up only for holders that actually consume messages —
@@ -1712,10 +1723,11 @@ class ServerRoom implements Room {
     // like binary: room-level listeners want it all, participant-scoped ones only their member.
     const textWants = this._aggregateTextWants()
     const wantAnyText = open && (textWants.all || textWants.members.size > 0)
+    const wantSemantic = open && (observed || wantAnyText)
     const memberIds = open ? state.listMemberIds() : []
 
     // Roster loads are need-driven: a resident roster refreshes on the observe transition
-    // (events between its KV read and this subscription were missed); a lazy one loads once
+    // (events between its cell snapshot and this subscription were missed); a lazy one loads once
     // something actually needs the member view — room-level listeners (onLeave/onEmpty
     // and live senders are only correct against it) or a member-keyed lane. A holder that only
     // joins attaches neither, so `Room.join()` never loads a roster at all —
@@ -1729,15 +1741,17 @@ class ServerRoom implements Room {
     }
     // Text: one lane per room. The node ingests it while anyone wants any of it; member-selectivity
     // is enforced at the per-stub relay (see `_onTextData`), never by narrowing the subscription.
-    this._textSub.sync(wantAnyText, () =>
-      adapter.subscribe(roomTextKey(this.id), (serialized, info) => this._onTextData(serialized, info)),
+    this._textSub.sync(wantSemantic, () =>
+      backend.subscribeLane(this.id, this._inc, SEMANTIC_LANE, (payload, info) =>
+        this._onTextData(decodeRoomText(payload), info),
+      ),
     )
 
     // Binary: per-(publisher, track) keys in every mode — subscribing want-selectively at the
     // source makes upstream delivery pay-per-want, not filter-after-receive: dropping the last
     // want for a track drops its key, and the publisher's `receivers` hits 0.
-    this._syncKeyedSubs(this._binaryKeyUnsubs, wantAnyBinary ? this._binaryKeys(binaryWants, memberIds) : [], (key) =>
-      adapter.subscribeBinary(key, (framed, info) => this._onBinary(framed, info)),
+    this._syncKeyedSubs(this._binaryKeyUnsubs, wantAnyBinary ? this._binaryLanes(binaryWants, memberIds) : [], (lane) =>
+      backend.subscribeLane(this.id, this._inc, lane, (framed, info) => this._onBinary(framed, info)),
     )
 
     // Demand (`onDemand`): gossip this node's local binary-demand transitions and push the
@@ -1746,8 +1760,11 @@ class ServerRoom implements Room {
 
     // Inbox subscriptions follow ownership, not listeners — a holder must always be
     // able to receive direct messages addressed to its members.
-    this._syncKeyedSubs(this._dmUnsubs, open ? this._ownedMemberIds() : [], (memberId) =>
-      adapter.subscribe(roomDmKey(this.id, memberId), (serialized, info) => this._onDm(serialized, info)),
+    this._syncKeyedSubs(
+      this._dmUnsubs,
+      open ? this._ownedMemberIds().map((member) => ({ key: member, value: { kind: 'inbox', member } as const })) : [],
+      (lane) =>
+        backend.subscribeLane(this.id, this._inc, lane, (payload, info) => this._onDm(decodeRoomText(payload), info)),
     )
 
     this._syncHeartbeat()
@@ -1767,23 +1784,24 @@ class ServerRoom implements Room {
     return { everyMember, members: Object.fromEntries(members) }
   }
 
-  /** The adapter keys the aggregated binary wants resolve to — the exact upstream footprint.
-   *  Per member: every-track wants take the default key plus each *known* track's key (named
-   *  tracks are discovered — see `_ensureTrackAnnounced`); exact wants take exactly their keys,
-   *  eagerly (a pub/sub key needs no existence, so named subscribers never miss a frame). */
-  private _binaryKeys(wants: BinaryWants, memberIds: string[]): string[] {
-    const keys: string[] = []
+  /** The backend lanes the aggregated binary wants resolve to — the exact upstream footprint.
+   *  Per member: every-track wants take the default lane plus each *known* track's lane (named
+   *  tracks are discovered — see `_ensureTrackAnnounced`); exact wants take exactly their lanes,
+   *  eagerly (a lane needs no prior existence, so named subscribers never miss a frame). */
+  private _binaryLanes(
+    wants: BinaryWants,
+    memberIds: string[],
+  ): Array<{ key: string; value: Extract<LaneId, { kind: 'binary' }> }> {
+    const lanes: Array<{ key: string; value: Extract<LaneId, { kind: 'binary' }> }> = []
     for (const memberId of memberIds) {
       const memberWants = wants.members[memberId]
       const eff = memberWants ? mergeTrackWants(wants.everyMember, memberWants) : wants.everyMember
       const tracks = eff.all ? [DEFAULT_TRACK, ...this._state.memberTracks(memberId)] : eff.tracks
       for (const track of tracks) {
-        keys.push(
-          track === DEFAULT_TRACK ? roomMemberDataKey(this.id, memberId) : roomMemberTrackKey(this.id, memberId, track),
-        )
+        lanes.push({ key: `${memberId}\u0000${track}`, value: { kind: 'binary', member: memberId, track } })
       }
     }
-    return keys
+    return lanes
   }
 
   /** The (member, track) pairs this instance has local binary demand for — the demand twin of
@@ -1840,21 +1858,21 @@ class ServerRoom implements Room {
     return { all: false, members }
   }
 
-  /** Reconcile a map of keyed subscriptions (member IDs, adapter keys) to the wanted set. */
-  private _syncKeyedSubs(
-    subs: Map<string, BroadcastUnsubscribe>,
-    wantedKeys: string[],
-    subscribe: (key: string) => BroadcastUnsubscribe,
+  /** Reconcile a map of keyed subscriptions (member IDs or lane keys) to the wanted set. */
+  private _syncKeyedSubs<T>(
+    subs: Map<string, LaneSubscription>,
+    wantedEntries: Array<{ key: string; value: T }>,
+    subscribe: (value: T) => LaneSubscription,
   ) {
-    const wanted = new Set(wantedKeys)
+    const wanted = new Map(wantedEntries.map(({ key, value }) => [key, value]))
     for (const [key, unsub] of [...subs]) {
       if (!wanted.has(key)) {
         subs.delete(key)
-        unsub()
+        void unsub.unsubscribe()
       }
     }
-    for (const key of wanted) {
-      if (!subs.has(key)) subs.set(key, subscribe(key))
+    for (const [key, value] of wanted) {
+      if (!subs.has(key)) subs.set(key, subscribe(value))
     }
   }
 
@@ -1863,12 +1881,12 @@ class ServerRoom implements Room {
    *  keyframe racing the subscribe isn't lost in the gap. A synchronous backend resolves instantly. */
   private _binaryReady(): Promise<void> {
     const pending: Promise<void>[] = []
-    for (const unsub of this._binaryKeyUnsubs.values()) if (unsub.ready) pending.push(unsub.ready)
+    for (const subscription of this._binaryKeyUnsubs.values()) pending.push(subscription.ready)
     return pending.length === 0 ? Promise.resolve() : Promise.all(pending).then(() => undefined)
   }
 
   /** Resolves once the local roster is authoritative: immediately while the live view holds it
-   *  (roster known and the event stream attached), else via a KV read. */
+   *  (roster known and the event stream attached), else via a backend cell read. */
   private _ensureRoster(): Promise<void> {
     if (this._state.closed || (this._state.rosterKnown && this._ctrlSub.active)) return Promise.resolve()
     return this._refreshMembers()
@@ -1878,21 +1896,21 @@ class ServerRoom implements Room {
    *  was dropped or reordered away (pub/sub is at-most-once between nodes). The message itself
    *  already delivered correctly (identity rides the envelope); this heals the *view*, so the
    *  live participant materializes and long-lived observers can't stay stale forever.
-   *  Single-flight, so a burst from the same unknown sender costs one KV read. */
+   *  Single-flight, so a burst from the same unknown sender costs one backend snapshot. */
   private _healUnknownSender(from: string): void {
     if (!this._state.rosterKnown || this._state.getRemote(from) !== null) return
     void this._refreshMembers().catch(reportRoomError)
   }
 
   /** Single-flight roster refresh. A membership event landing mid-read makes the snapshot
-   *  ambiguous (its KV write may or may not be in it) — re-read: joins/leaves write KV before
+   *  ambiguous (its cell write may or may not be in it) — re-read: joins/leaves write cells before
    *  publishing, so the next read includes the event that dirtied this one. */
   private _refreshMembers(): Promise<void> {
     this._pendingRefresh ??= (async () => {
       try {
         while (!this._state.closed) {
           const version = this._state.membershipVersion
-          const members = await readMembers(getRoomKV(this.id), this.id, this._inc)
+          const members = await readMembers(this.id, this._inc)
           if (this._state.membershipVersion !== version) continue
           const drifted = this._state.reconcile(members)
           this._syncSubs() // per-member lanes may need subscriptions for the members just learned
@@ -1937,29 +1955,40 @@ class ServerRoom implements Room {
   }
 
   private async _heartbeatTick(): Promise<void> {
-    if (this._heartbeatBusy) return // a slow KV must not pile up overlapping ticks
+    if (this._heartbeatBusy) return // a slow backend must not pile up overlapping ticks
     this._heartbeatBusy = true
     try {
       // Renew this node's binary-demand lease on every owner and sweep any crashed reporter's demand.
-      // No KV — runs first so member-KV latency never delays it (the demand TTL has slack for skips).
+      // No cell I/O — runs first so member-cell latency never delays it (the demand TTL has slack for skips).
       this._demand.heartbeat()
-      const kv = getRoomKV(this.id)
       for (const id of this._ownedMemberIds()) {
         // Bump `seenAt` with a read-modify-write, not a whole-record `set`: the update only touches
         // `seenAt` on the record actually present, so a heartbeat can never clobber a concurrent
         // meta or track write. (That clobber is why the meta/track writers used to re-assert; with
         // the heartbeat off the collision course, those loops are gone.)
-        let record: RoomMemberRecord | null = null
-        const stored = await kv.update(
-          roomMemberKvKey(this.id, id),
-          (raw) => {
-            if (raw === null) return KV_KEEP // reaped/kicked — nothing to refresh
-            record = { ...(parse(raw) as RoomMemberRecord), seenAt: Date.now() }
-            return stringify(record)
-          },
-          { ttlMs: ROOM_MEMBER_KV_TTL_MS },
-        )
-        if (stored === null) {
+        const key = roomMemberKvKey(this.id, id)
+        const record = await mutateCells(this.id, this._inc, { keys: [key] }, (cells) => {
+          const raw = cells.get(key)
+          if (raw === undefined) return { value: null, mutations: [] }
+          const record = { ...(parse(decodeRoomText(raw)) as RoomMemberRecord), seenAt: Date.now() }
+          const mutations: CellMutation[] = [
+            { key, set: { bytes: encodeRoomText(stringify(record)), ttlMs: ROOM_MEMBER_KV_TTL_MS } },
+          ]
+          if (record.identity !== undefined) {
+            mutations.push({
+              key: roomIdentityMemberKvKey(this.id, record.identity, id),
+              set: { bytes: new Uint8Array(), ttlMs: ROOM_MEMBER_KV_TTL_MS },
+            })
+          }
+          if (record.hidden) {
+            mutations.push({
+              key: roomHiddenMemberKvKey(this.id, id),
+              set: { bytes: new Uint8Array(), ttlMs: ROOM_MEMBER_KV_TTL_MS },
+            })
+          }
+          return { value: record, mutations }
+        })
+        if (record === null) {
           // Reaped or kicked while this node wasn't listening — the reaper already
           // published the leave event; only the local view needs to catch up.
           this._applyLeave(id)
@@ -1969,12 +1998,8 @@ class ServerRoom implements Room {
         // so without this a member that outlives one TTL window would keep its record (heartbeated)
         // yet lose its identity marker (breaking `removeParticipant(id, { identity })` sweeps) and,
         // if hidden, its off-presence marker (the count would drift back to counting it).
-        if (record!.identity !== undefined) {
-          await kv.set(roomIdentityMemberKvKey(this.id, record!.identity, id), '', { ttlMs: ROOM_MEMBER_KV_TTL_MS })
-        }
-        if (record!.hidden) await kv.set(roomHiddenMemberKvKey(this.id, id), '', { ttlMs: ROOM_MEMBER_KV_TTL_MS })
       }
-      await readMembers(kv, this.id, this._inc)
+      await readMembers(this.id, this._inc)
     } finally {
       this._heartbeatBusy = false
     }
@@ -2069,107 +2094,84 @@ class ServerLocalParticipant extends ParticipantBase {
 }
 
 // ---------------------------------------------------------------------------
-// KV access
+// Backend state access
 // ---------------------------------------------------------------------------
 
-/** Room state lives in the broadcast adapter's KV so every server node sees the same rooms.
- *  `setIfAbsent`/`update` are the atomic writes that keep concurrent room mutations from clobbering
- *  each other (see the room-state discipline: create, config, member meta, tracks, heartbeat). */
-type RoomKV = Required<Pick<BroadcastAdapter, 'get' | 'set' | 'delete' | 'keys' | 'setIfAbsent' | 'update'>>
+type CellSelector = { keys: string[] } | { prefix: string }
+type CellPlan<T> = { value: T; mutations: CellMutation[] }
 
-/** Consistency defaults every op of a facade carries. `Room` reads its directory state (config,
- *  roster, markers) from the eventually-consistent replica — fast, global, healed by the live event
- *  stream — and reserves `consistent: true` for the reads and writes that carry a hard guarantee (see
- *  `KvWriteOptions` and `retainedKv`). Single-tier backends (in-memory, Redis) ignore it. */
-type RoomKvDefaults = { consistent?: boolean }
+async function readCellSet(
+  roomId: string,
+  inc: string,
+  selector: CellSelector,
+): Promise<{ revision: string; cells: Map<string, Uint8Array> }> {
+  const result = await getRoomBackend().readCells(roomId, inc, selector)
+  if ('staleInc' in result) throw new RoomError(`Room is closed: ${roomId}`)
+  return result
+}
 
-function getRoomKV(roomId?: string, defaults?: RoomKvDefaults): RoomKV {
-  const adapter = getBroadcastAdapter()
-  const missing = (['get', 'set', 'delete', 'keys', 'setIfAbsent', 'update'] as const).filter(
-    (method) => !adapter[method],
-  )
-  assertUsage(
-    missing.length === 0,
-    `The installed broadcast adapter doesn't implement ${missing.map((m) => `\`${m}()\``).join(', ')} — the KV methods required by \`Room\`.`,
-  )
-  const kv = adapter as RoomKV
-  // Unscoped: a cross-room read (`Room.list`) has no single partition. On a sharded backend it lands
-  // on the shared, listable store rather than any one room's authority.
-  if (roomId === undefined) return kv
-  // Scoped: tag every op with the room's control-lane key, so a sharded backend routes all of one
-  // room's state to the single authority that already sequences that room (see `KvWriteOptions`).
-  // `defaults` (e.g. the retained facade's `consistent`) ride every op too; a per-call option wins.
-  const partitionKey = roomCtrlKey(roomId)
-  const merge = (options?: KvReadOptions & KvWriteOptions) => ({ ...defaults, ...options, partitionKey })
-  return {
-    get: (key, options) => kv.get(key, merge(options)),
-    set: (key, value, options) => kv.set(key, value, merge(options)),
-    delete: (key, options) => kv.delete(key, merge(options)),
-    keys: (prefix, options) => kv.keys(prefix, merge(options)),
-    setIfAbsent: (key, value, options) => kv.setIfAbsent(key, value, merge(options)),
-    update: (key, mutate, options) => kv.update(key, mutate, merge(options)),
+async function readCell(roomId: string, inc: string, key: string): Promise<Uint8Array | null> {
+  const { cells } = await readCellSet(roomId, inc, { keys: [key] })
+  return cells.get(key) ?? null
+}
+
+async function mutateCells<T>(
+  roomId: string,
+  inc: string,
+  selector: CellSelector,
+  plan: (cells: ReadonlyMap<string, Uint8Array>) => CellPlan<T>,
+): Promise<T> {
+  const backend = getRoomBackend()
+  for (let attempt = 0; attempt < ROOM_CX_ATTEMPTS; attempt++) {
+    const read = await backend.readCells(roomId, inc, selector)
+    if ('staleInc' in read) throw new RoomError(`Room is closed: ${roomId}`)
+    const next = plan(read.cells)
+    if (next.mutations.length === 0) return next.value
+    const result = await backend.compareExchangeCells(roomId, inc, read.revision, next.mutations)
+    if (result === 'committed') return next.value
+    if (result === 'stale-inc') throw new RoomError(`Room is closed: ${roomId}`)
+    const ceiling = Math.min(64, 2 ** attempt)
+    await new Promise((resolve) => setTimeout(resolve, Math.floor(Math.random() * ceiling) + 1))
   }
+  throw new RoomError(`Room update contention: ${roomId}`)
 }
 
-/** Retained-message store: a room's strongly-consistent authority tier, never the replica. Retained
- *  replay carries a hard guarantee — a late subscriber must observe the last retained frame of every
- *  lane it starts watching — so both the write and the replay read are `consistent` (read-your-writes
- *  across nodes); an eventually-consistent replica could hand a late subscriber a stale frame or none.
- *  Staying off the replica also keeps a hot retained lane clear of its per-key write ceiling. */
-function retainedKv(roomId: string): RoomKV {
-  return getRoomKV(roomId, { consistent: true })
-}
-
-/** Statics prologue: validate the ID and load the room's config — or throw `Room not found`. Only an
- *  `open` room resolves; a `closing`/`closed` tombstone reads as absent (its state is being or has
- *  been swept). Mutations that pass this prologue still revalidate legality against the authority. */
-async function requireRoom(id: string): Promise<{ kv: RoomKV; config: RoomConfigRecord }> {
+async function requireRoom(id: string): Promise<{ config: RoomConfigRecord }> {
   assertRoomId(id)
-  const kv = getRoomKV(id)
-  const config = await resolveConfig(kv, id)
-  if (config === null || config.status !== 'open') throw new RoomError(`Room not found: ${id}`)
-  return { kv, config }
-}
-
-function parseConfig(raw: string | null): RoomConfigRecord | null {
-  return raw === null ? null : (parse(raw) as RoomConfigRecord)
-}
-
-/** Fast replica read of a room's config. May lag a room created in another region by moments — for
- *  enumeration (`Room.list`) that lag just means the room surfaces a beat later, which enumeration
- *  tolerates. Single-room existence uses `resolveConfig` instead, so the lag never reads as absence. */
-async function readConfig(kv: RoomKV, roomId: string): Promise<RoomConfigRecord | null> {
-  return parseConfig(await kv.get(roomConfigKvKey(roomId)))
-}
-
-/** Existence read for one specific room: the fast replica, falling back to the authority on a miss so
- *  a room just created in another region (its replica not yet propagated) is never a false "not
- *  found". The fallback costs one authority read only on a replica miss — the hit path stays replica-fast. */
-async function resolveConfig(kv: RoomKV, roomId: string): Promise<RoomConfigRecord | null> {
-  return (await readConfig(kv, roomId)) ?? parseConfig(await kv.get(roomConfigKvKey(roomId), { consistent: true }))
+  const current = await getRoomBackend().readHead(id)
+  if (current === null || current.head.state !== 'open' || current.head.currentInc === null) {
+    throw new RoomError(`Room not found: ${id}`)
+  }
+  return { config: configFromHead(current.head) }
 }
 
 /** Read a room's member records, reaping members whose owning node stopped heartbeating
  *  (hard crash): their record is deleted and their leave announced to all observers. Pass `ids`
  *  to read a specific subset (e.g. one identity's memberships) instead of scanning the whole roster. */
-async function readMembers(kv: RoomKV, roomId: string, inc: string, ids?: string[]): Promise<MemberSnapshot[]> {
+async function readMembers(roomId: string, inc: string, ids?: string[]): Promise<MemberSnapshot[]> {
   // Roster reads run against the authority, not the replica: `_refreshMembers` relies on read-your-
   // writes (a join/leave writes its record before publishing the event that triggers the read), and
   // the reap below keys off `seenAt` — a replica lag could drop a live member from the roster or reap
   // a member a live heartbeat just refreshed. The reap delete stays replicated so both tiers drop it.
   const memberKeys =
-    ids === undefined
-      ? await listMemberKeys(kv, roomId, { consistent: true })
-      : ids.map((id) => ({ key: roomMemberKvKey(roomId, id), id }))
+    ids === undefined ? await listMemberKeys(roomId, inc) : ids.map((id) => ({ key: roomMemberKvKey(roomId, id), id }))
+  const { cells } = await readCellSet(roomId, inc, { keys: memberKeys.map(({ key }) => key) })
   const members: MemberSnapshot[] = []
   for (const { key, id } of memberKeys) {
-    const raw = await kv.get(key, { consistent: true })
-    if (raw === null) continue // member left concurrently
-    const record = parse(raw) as RoomMemberRecord
+    const raw = cells.get(key)
+    if (raw === undefined) continue // member left concurrently
+    const record = parse(decodeRoomText(raw)) as RoomMemberRecord
     if (record.inc !== inc) continue // a record from a previous incarnation — never in this roster
     if (Date.now() - record.seenAt > ROOM_MEMBER_TTL_MS) {
-      await kv.delete(key)
-      await publishCtrl(roomId, { __r: 'leave', id, cause: 'disconnected' })
+      const reaped = await mutateCells(roomId, inc, { keys: [key] }, (current) => {
+        const latest = current.get(key)
+        if (latest === undefined) return { value: false, mutations: [] }
+        const latestRecord = parse(decodeRoomText(latest)) as RoomMemberRecord
+        return Date.now() - latestRecord.seenAt > ROOM_MEMBER_TTL_MS
+          ? { value: true, mutations: [{ key }] }
+          : { value: false, mutations: [] }
+      })
+      if (reaped) await publishCtrl(roomId, inc, { __r: 'leave', id, cause: 'disconnected' })
       continue
     }
     members.push({
@@ -2187,14 +2189,11 @@ async function readMembers(kv: RoomKV, roomId: string, inc: string, ids?: string
 
 /** Keys of a room's member records. Member IDs are UUIDs — anything else under the prefix
  *  belongs to another room whose ID happens to start with `${roomId}:m:` (e.g. its `:config` key). */
-async function listMemberKeys(
-  kv: RoomKV,
-  roomId: string,
-  options?: KvReadOptions,
-): Promise<Array<{ key: string; id: string }>> {
+async function listMemberKeys(roomId: string, inc: string): Promise<Array<{ key: string; id: string }>> {
   const prefix = roomMemberKvPrefix(roomId)
   const memberKeys: Array<{ key: string; id: string }> = []
-  for (const key of await kv.keys(prefix, options)) {
+  const { cells } = await readCellSet(roomId, inc, { prefix })
+  for (const key of cells.keys()) {
     const id = key.slice(prefix.length)
     if (uuidToBytes(id)) memberKeys.push({ key, id })
   }
@@ -2206,10 +2205,10 @@ async function listMemberKeys(
  *  hidden members without reading a single record. Leak-robust: a stale marker whose member is
  *  already gone is ignored (only present member ids are excluded), and a member not yet marked
  *  counts as present (the safe direction). */
-async function presenceCount(kv: RoomKV, roomId: string): Promise<number> {
-  const members = await listMemberKeys(kv, roomId)
+async function presenceCount(roomId: string, inc: string): Promise<number> {
+  const members = await listMemberKeys(roomId, inc)
   if (members.length === 0) return 0
-  const hidden = await listHiddenMemberIds(kv, roomId)
+  const hidden = await listHiddenMemberIds(roomId, inc)
   if (hidden.size === 0) return members.length
   let count = 0
   for (const { id } of members) if (!hidden.has(id)) count++
@@ -2217,10 +2216,11 @@ async function presenceCount(kv: RoomKV, roomId: string): Promise<number> {
 }
 
 /** The member IDs a room currently marks off-presence (`join({ hidden })`). */
-async function listHiddenMemberIds(kv: RoomKV, roomId: string): Promise<Set<string>> {
+async function listHiddenMemberIds(roomId: string, inc: string): Promise<Set<string>> {
   const prefix = roomHiddenMemberKvPrefix(roomId)
   const ids = new Set<string>()
-  for (const key of await kv.keys(prefix)) ids.add(key.slice(prefix.length))
+  const { cells } = await readCellSet(roomId, inc, { prefix })
+  for (const key of cells.keys()) ids.add(key.slice(prefix.length))
   return ids
 }
 
@@ -2228,23 +2228,33 @@ async function listHiddenMemberIds(kv: RoomKV, roomId: string): Promise<Set<stri
 // The (room, identity)→members index is a hint: one marker key per membership (so concurrent
 // same-identity joins never clobber and each membership stays independently removable, instead of
 // every membership of an identity contending on one shared list value), written before the member
-// record and cleared after it. So it may briefly over-include but never silently under-includes;
+// record and cleared after it. So it may briefly over-include but never silently under-include;
 // resolveIdentityMembers() confirms each marker against its member record, making a stale marker
 // resolve to nothing. Only server-side statics need it, so it never touches the client wire.
 
 /** Every live member ID of an identity in a room — read O(memberships-of-identity) from the index
  *  (not O(roster)), each confirmed against its member record; a stale marker is pruned, not returned. */
-async function resolveIdentityMembers(kv: RoomKV, roomId: string, identity: string): Promise<string[]> {
+async function resolveIdentityMembers(roomId: string, inc: string, identity: string): Promise<string[]> {
   const prefix = roomIdentityKvPrefix(roomId, identity)
   const members: string[] = []
   // Authority-read the markers and their records: this resolves the targets of `removeParticipant`/
   // `Room.send` by identity, and a replica lag on a just-joined membership would drop it here (or
   // false-prune its marker). The prune delete stays replicated so both tiers drop a stale marker.
-  for (const key of await kv.keys(prefix, { consistent: true })) {
+  const markers = await readCellSet(roomId, inc, { prefix })
+  for (const key of markers.cells.keys()) {
     const memberId = key.slice(prefix.length)
-    const raw = await kv.get(roomMemberKvKey(roomId, memberId), { consistent: true })
-    if (raw !== null && (parse(raw) as RoomMemberRecord).identity === identity) members.push(memberId)
-    else await kv.delete(key) // the member left (or its join never committed) — prune the marker
+    const memberKey = roomMemberKvKey(roomId, memberId)
+    const raw = await readCell(roomId, inc, memberKey)
+    if (raw !== null && (parse(decodeRoomText(raw)) as RoomMemberRecord).identity === identity) {
+      members.push(memberId)
+      continue
+    }
+    await mutateCells(roomId, inc, { keys: [key, memberKey] }, (cells) => {
+      const current = cells.get(memberKey)
+      const stillStale =
+        current === undefined || (parse(decodeRoomText(current)) as RoomMemberRecord).identity !== identity
+      return { value: undefined, mutations: stillStale ? [{ key }] : [] }
+    })
   }
   return members
 }
@@ -2255,45 +2265,52 @@ async function resolveIdentityMembers(kv: RoomKV, roomId: string, identity: stri
  *  message doesn't outlive them — symmetric with retained binary — and a ghost's meta/identity stops
  *  replaying to every late joiner. Durable room-level state belongs on a hidden participant, which
  *  never leaves. */
-async function dropRetainedTextOwnedBy(roomId: string, memberId: string): Promise<void> {
-  await retainedKv(roomId).update(roomRetainedTextKey(roomId), (raw) =>
-    raw !== null && (parse(decodePublishText(raw).text) as RoomDataEnvelope).from === memberId ? null : KV_KEEP,
-  )
+async function dropRetainedTextOwnedBy(roomId: string, inc: string, memberId: string): Promise<void> {
+  const backend = getRoomBackend()
+  const retained = await backend.readRetained(roomId, inc, SEMANTIC_LANE)
+  if (retained === null) return
+  const envelope = parse(decodeRoomText(retained.payload)) as RoomDataEnvelope
+  if (envelope.from !== memberId) return
+  await backend.deleteRetained(roomId, inc, SEMANTIC_LANE, { ifSeq: retained.seq })
 }
 
-/** Remove one member from KV — its record, its identity marker (if any) — then announce the leave.
+/** Remove one member from backend cells — its record, identity marker (if any), and hidden marker —
+ *  then announce the leave.
  *  The admin-side counterpart to `_removeMember` (which also applies the leave to a live view). */
 async function evictMember(
-  kv: RoomKV,
   roomId: string,
+  inc: string,
   memberId: string,
   identity: string | undefined,
   cause: LeaveCause,
 ): Promise<void> {
-  await kv.delete(roomMemberKvKey(roomId, memberId))
-  if (identity !== undefined) await kv.delete(roomIdentityMemberKvKey(roomId, identity, memberId))
-  // No local state here to tell whether the member was hidden — delete the marker unconditionally
-  // (a no-op when it was a presence member).
-  await kv.delete(roomHiddenMemberKvKey(roomId, memberId))
-  // Drop the kicked member's retained frames too (a kick doesn't run `_removeMember`) — on the
-  // authority tier where retained frames live (see `retainedKv`). Binary is per (member, track);
+  const keys = [roomMemberKvKey(roomId, memberId), roomHiddenMemberKvKey(roomId, memberId)]
+  if (identity !== undefined) keys.push(roomIdentityMemberKvKey(roomId, identity, memberId))
+  await mutateCells(roomId, inc, { keys }, () => ({
+    value: undefined,
+    mutations: keys.map((key) => ({ key })),
+  }))
+  // Drop the kicked member's retained frames too (a kick doesn't run `_removeMember`). Binary is per
+  // (member, track);
   // text is the room's one slot, cleared only if this member still owns it.
-  const retained = retainedKv(roomId)
-  for (const key of await retained.keys(roomRetainedBinaryMemberPrefix(roomId, memberId))) await retained.delete(key)
-  await dropRetainedTextOwnedBy(roomId, memberId)
-  await publishCtrl(roomId, { __r: 'leave', id: memberId, ...leaveCauseToWire(cause) })
+  const backend = getRoomBackend()
+  for (const lane of await backend.listRetained(roomId, inc)) {
+    if (lane.kind === 'binary' && lane.member === memberId) await backend.deleteRetained(roomId, inc, lane)
+  }
+  await dropRetainedTextOwnedBy(roomId, inc, memberId)
+  await publishCtrl(roomId, inc, { __r: 'leave', id: memberId, ...leaveCauseToWire(cause) })
 }
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-/** One adapter subscription, reconciled to a desired on/off state. */
+/** One backend lane subscription, reconciled to a desired on/off state. */
 class SubSlot {
-  private _unsub: BroadcastUnsubscribe | null = null
+  private _subscription: LaneSubscription | null = null
 
   get active(): boolean {
-    return this._unsub !== null
+    return this._subscription !== null
   }
 
   /** Resolves once the current subscription is live at the backend — immediately when inactive or when
@@ -2301,22 +2318,23 @@ class SubSlot {
    *  value, so a publish racing the just-issued subscribe reaches the node (or rides the retained copy)
    *  instead of slipping through the gap between subscribing and the read. */
   get ready(): Promise<void> {
-    return this._unsub?.ready ?? Promise.resolve()
+    return this._subscription?.ready ?? Promise.resolve()
   }
 
-  sync(want: boolean, subscribe: () => BroadcastUnsubscribe): void {
-    if (want && !this._unsub) {
-      this._unsub = subscribe()
-    } else if (!want && this._unsub) {
-      const unsub = this._unsub
-      this._unsub = null
-      unsub()
+  sync(want: boolean, subscribe: () => LaneSubscription): void {
+    if (want && !this._subscription) {
+      this._subscription = subscribe()
+    } else if (!want && this._subscription) {
+      const subscription = this._subscription
+      this._subscription = null
+      void subscription.unsubscribe()
     }
   }
 }
 
-async function publishCtrl(roomId: string, event: RoomCtrlEnvelope): Promise<void> {
-  await getBroadcastAdapter().publish(roomCtrlKey(roomId), stringify(event))
+async function publishCtrl(roomId: string, inc: string, event: RoomCtrlEnvelope): Promise<void> {
+  const committed = await commitRoomLane(roomId, inc, CONTROL_LANE, encodeRoomText(stringify(event)))
+  if (committed === null) throw new RoomError(`Room is closed: ${roomId}`)
 }
 
 function assertRoomId(id: unknown): asserts id is string {

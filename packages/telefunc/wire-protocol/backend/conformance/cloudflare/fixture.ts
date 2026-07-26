@@ -58,7 +58,7 @@ export type RoomStub = {
   awaitDelivery(token: string): Promise<void>
   readRetained(inc: string, lane: LaneId): Promise<RetainedWire | null>
   listRetained(inc: string): Promise<LaneId[]>
-  deleteRetainedLane(inc: string, lane?: LaneId): Promise<void>
+  deleteRetainedLane(inc: string, lane?: LaneId, opts?: { ifSeq?: number }): Promise<void>
   captureRouteGeneration(
     inc: string,
     attemptId?: string | null,
@@ -500,9 +500,9 @@ class CloudflareConformanceBackend implements RoomBackendSpi {
     await this.#preflight()
     return this.#command<LaneId[]>({ kind: 'list-retained', roomId, inc })
   }
-  async deleteRetained(roomId: string, inc: string, lane?: LaneId) {
+  async deleteRetained(roomId: string, inc: string, lane?: LaneId, opts?: { ifSeq?: number }) {
     await this.#preflight()
-    await this.#command<null>({ kind: 'delete-retained', roomId, inc, lane })
+    await this.#command<null>({ kind: 'delete-retained', roomId, inc, lane, options: opts })
   }
 
   async runOrderMaintenance(roomId: string): Promise<void> {

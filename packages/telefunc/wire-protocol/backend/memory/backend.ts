@@ -308,7 +308,7 @@ export class MemoryRoomBackend implements RoomBackendSpi {
   #disposed = false
 
   constructor(options: MemoryRoomBackendOptions = {}) {
-    this.#now = options.authorityNow ?? Date.now
+    this.#now = options.authorityNow ?? (() => Date.now())
     this.#state = options.state ?? new MemoryRoomBackendState()
     this.capabilities = {
       receivers: 'global',
@@ -554,12 +554,22 @@ export class MemoryRoomBackend implements RoomBackendSpi {
     return gen === undefined ? [] : [...gen.retained.values()].map((entry) => entry.lane)
   }
 
-  async deleteRetained(roomId: string, inc: string, lane?: LaneId): Promise<void> {
+  async deleteRetained(roomId: string, inc: string, lane?: LaneId, opts?: { ifSeq?: number }): Promise<void> {
     this.#assertLive()
+    if (lane === undefined && opts?.ifSeq !== undefined) {
+      throw new Error('deleteRetained: ifSeq requires a lane')
+    }
+    if (opts?.ifSeq !== undefined && (!Number.isSafeInteger(opts.ifSeq) || opts.ifSeq <= 0)) {
+      throw new Error('deleteRetained: ifSeq must be a positive safe integer')
+    }
     const gen = this.#state.rooms.get(roomId)?.gens.get(inc)
     if (gen === undefined) return
     if (lane === undefined) gen.retained.clear()
-    else gen.retained.delete(laneKey(lane))
+    else {
+      const key = laneKey(lane)
+      const retained = gen.retained.get(key)
+      if (opts?.ifSeq === undefined || retained?.seq === opts.ifSeq) gen.retained.delete(key)
+    }
   }
 
   // ── subscriptions ──

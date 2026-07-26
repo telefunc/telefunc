@@ -135,13 +135,23 @@ export function listRetained(sql: SqlStorage, inc: string): LaneId[] {
   })
 }
 
-export function deleteRetained(sql: SqlStorage, inc: string, lane?: LaneId): void {
+export function deleteRetained(sql: SqlStorage, inc: string, lane?: LaneId, opts?: { ifSeq?: number }): void {
+  if (lane === undefined && opts?.ifSeq !== undefined) throw new Error('deleteRetained: ifSeq requires a lane')
+  if (opts?.ifSeq !== undefined && (!Number.isSafeInteger(opts.ifSeq) || opts.ifSeq <= 0)) {
+    throw new Error('deleteRetained: ifSeq must be a positive safe integer')
+  }
   if (lane === undefined) {
     sql.exec('DELETE FROM rt_manifest WHERE inc = ?', inc)
     sql.exec('DELETE FROM rt_chunk WHERE inc = ?', inc)
     return
   }
   const key = laneKey(lane)
+  if (opts?.ifSeq !== undefined) {
+    const manifest = sql
+      .exec<Pick<ManifestRow, 'seq'>>('SELECT seq FROM rt_manifest WHERE inc = ? AND lane_key = ?', inc, key)
+      .toArray()[0]
+    if (manifest === undefined || manifest.seq !== opts.ifSeq) return
+  }
   sql.exec('DELETE FROM rt_manifest WHERE inc = ? AND lane_key = ?', inc, key)
   sql.exec('DELETE FROM rt_chunk WHERE inc = ? AND lane_key = ?', inc, key)
 }

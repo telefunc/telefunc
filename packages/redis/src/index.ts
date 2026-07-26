@@ -4,17 +4,13 @@ export { RedisRoomBackend } from './room/backend.js'
 export type { RedisRoomBackendOptions } from './room/backend.js'
 
 import type { Cluster, Redis } from 'ioredis'
-import {
-  config,
-  KV_KEEP,
-  type BroadcastTransport,
-  type BroadcastUnsubscribe,
-  type KvMutate,
-  type RoomFrameCommit,
-  type RoomFrameCommitResult,
-} from 'telefunc'
+import { config, type BroadcastTransport, type BroadcastUnsubscribe } from 'telefunc'
 import { assert } from './assert.js'
 import { callDefinedCommand } from './callDefinedCommand.js'
+
+// Private legacy Room state surface, pending the separate Redis policy-switch ticket.
+const KV_KEEP: unique symbol = Symbol.for('telefunc.kv.keep')
+type KvMutate = (current: string | null) => string | null | typeof KV_KEEP
 
 /** Wires Redis-backed fan-out into the telefunc broadcast transport so
  *  `Broadcast.publish()`/`subscribe()` and `Room` state cross instances. Pair with
@@ -43,6 +39,20 @@ type RedisBroadcastOptions = {
 const DEFAULT_PREFIX = 'tf:'
 const HEADER_BYTES = 12
 const U32_RANGE = 0x1_0000_0000
+
+type RoomFrameCommit = {
+  partitionKey: string
+  fences: readonly { key: string; expected: string }[]
+  orderKey: string
+  orderTtlMs?: number
+  channelKey: string
+  payload: string
+  retainKey?: string
+}
+
+type RoomFrameCommitResult =
+  | { ok: true; seq: number; timestamp: number; receivers?: number }
+  | { ok: false; reason: 'stale-fence' }
 
 /** KEYS[1]=seq counter, KEYS[2]=broadcast channel, ARGV[1]=payload bytes; returns
  *  [seq, ts, receivers] — receivers is PUBLISH's return: how many connections got the message. */

@@ -6,24 +6,38 @@ import { CHANNEL_BUFFER_LIMIT_BYTES } from '../../../constants.js'
 import { KNOWN_BROADCAST_BUCKETS, getBucketCoordinatorShardIndices, getDeterministicKeyBucketIndex } from './routing.js'
 import { assert, assertUsage } from '../../../../utils/assert.js'
 import { utf8ByteLength } from '../../../../utils/utf8ByteLength.js'
-import { KV_KEEP } from '../../broadcast.js'
 import type {
   BroadcastBinaryOnMessage,
   BroadcastOnMessage,
   BroadcastPublishResult,
   BroadcastAdapter,
   BroadcastUnsubscribe,
-  KvMutate,
-  KvReadOptions,
-  KvWriteOptions,
-  RoomFrameCommit,
-  RoomFrameCommitResult,
 } from '../../broadcast.js'
 import { encodePublishText, type WirePublishInfo } from '../../../shared-ws.js'
 import type { CloudflareScale, LocationBucket } from './routing.js'
 
 const PRESENCE_TTL_SECONDS = 90
 const PRESENCE_REFRESH_INTERVAL_MS = 30_000
+
+// Private legacy Room state surface, pending the separate Cloudflare policy-switch ticket.
+const KV_KEEP: unique symbol = Symbol.for('telefunc.kv.keep')
+type KvMutate = (current: string | null) => string | null | typeof KV_KEEP
+type KvReadOptions = { partitionKey?: string; consistent?: boolean }
+type KvWriteOptions = { ttlMs?: number; partitionKey?: string; consistent?: boolean }
+
+type RoomFrameCommit = {
+  partitionKey: string
+  fences: readonly { key: string; expected: string }[]
+  orderKey: string
+  orderTtlMs?: number
+  channelKey: string
+  payload: string
+  retainKey?: string
+}
+
+type RoomFrameCommitResult =
+  | { ok: true; seq: number; timestamp: number; receivers?: number }
+  | { ok: false; reason: 'stale-fence' }
 /** Namespace of the room-state read replica within the Workers KV binding. Directory reads (`Room.get`,
  *  `Room.list`) and the cross-room room index are served from here — Workers KV is globally distributed,
  *  so these reads are fast from any region and enumeration is a plain KV list. The strongly-consistent

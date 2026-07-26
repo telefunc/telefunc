@@ -22,7 +22,7 @@ export type SessionRoomCommand =
     }
   | { kind: 'read-retained'; roomId: string; inc: string; lane: LaneId }
   | { kind: 'list-retained'; roomId: string; inc: string }
-  | { kind: 'delete-retained'; roomId: string; inc: string; lane?: LaneId }
+  | { kind: 'delete-retained'; roomId: string; inc: string; lane?: LaneId; options?: { ifSeq?: number } }
   | { kind: 'list-generations'; roomId: string }
   | { kind: 'drop-generation'; roomId: string; inc: string }
   | { kind: 'directory-put'; roomId: string; incTag: string }

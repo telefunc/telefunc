@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import type { Redis } from 'ioredis'
-import { config, DefaultBroadcastAdapter, KV_KEEP, Room } from 'telefunc'
+import { config, DefaultBroadcastAdapter } from 'telefunc'
 import { installRedis, RedisTransport } from './index.js'
+
+const KV_KEEP = Symbol.for('telefunc.kv.keep')
 
 // Fake `ioredis` — `defineCommand` + `duplicate()` + broadcast subscribe/dispatch. Lua
 // execution emulated in TS so we exercise the adapter's call graph without a real Redis.
@@ -181,16 +183,17 @@ function encodeFrame(seq: number, ts: number, payload: Uint8Array): Uint8Array {
 
 function newAdapter() {
   const fake = new FakeIoredis()
-  const adapter = new DefaultBroadcastAdapter(new RedisTransport({ redis: fake as unknown as Redis }))
-  return { fake, adapter }
+  const transport = new RedisTransport({ redis: fake as unknown as Redis })
+  const adapter = new DefaultBroadcastAdapter(transport)
+  return { fake, transport, adapter }
 }
 
 describe('released installRedis surface', () => {
   it('installs the existing Redis transport with its prefix option unchanged', async () => {
     const fake = new FakeIoredis()
     installRedis(fake as unknown as Redis, { prefix: 'custom:' })
-    const adapter = new DefaultBroadcastAdapter(config.broadcast.transport)
-    await adapter.set('key', 'value')
+    const transport = config.broadcast.transport as RedisTransport
+    await transport.set('key', 'value')
     expect(await fake.get('custom:kv:key')).toBe('value')
   })
 })
@@ -253,9 +256,9 @@ describe('Redis adapter — live delivery', () => {
   })
 })
 
-describe('Redis adapter — KV (backs `Room` state)', () => {
+describe('Redis transport — private legacy KV', () => {
   it('round-trips values under the transport prefix and strips it from keys()', async () => {
-    const { fake, adapter } = newAdapter()
+    const { fake, transport: adapter } = newAdapter()
 
     expect(await adapter.get('telefunc:room:lobby:config')).toBe(null)
     await adapter.set('telefunc:room:lobby:config', '{"a":1}')
@@ -274,7 +277,7 @@ describe('Redis adapter — KV (backs `Room` state)', () => {
   })
 
   it('passes the TTL through as Redis PX — native expiry backs the crash reaper', async () => {
-    const { fake, adapter } = newAdapter()
+    const { fake, transport: adapter } = newAdapter()
     await adapter.set!('telefunc:room:r:m:x', '{"seenAt":1}', { ttlMs: 180_000 })
     expect(fake.ttls.get('tf:kv:telefunc:room:r:m:x')).toBe(180_000)
     await adapter.set!('telefunc:room:r:config', '{}') // no TTL — config records persist
@@ -282,7 +285,7 @@ describe('Redis adapter — KV (backs `Room` state)', () => {
   })
 
   it('matches glob metacharacters in room IDs literally, not as patterns', async () => {
-    const { adapter } = newAdapter()
+    const { transport: adapter } = newAdapter()
 
     await adapter.set('telefunc:room:a*b:config', '{}')
     await adapter.set('telefunc:room:axb:config', '{}')
@@ -291,9 +294,9 @@ describe('Redis adapter — KV (backs `Room` state)', () => {
   })
 })
 
-describe('Redis adapter — atomic KV primitives (back race-free room state)', () => {
+describe('Redis transport — private legacy atomic KV primitives', () => {
   it('setIfAbsent writes once via SET NX — the first caller wins, the rest see it present', async () => {
-    const { fake, adapter } = newAdapter()
+    const { fake, transport: adapter } = newAdapter()
 
     expect(await adapter.setIfAbsent!('telefunc:room:x:config', 'first')).toBe(true)
     expect(await adapter.setIfAbsent!('telefunc:room:x:config', 'second')).toBe(false)
@@ -302,13 +305,13 @@ describe('Redis adapter — atomic KV primitives (back race-free room state)', (
   })
 
   it('setIfAbsent passes the TTL through as PX', async () => {
-    const { fake, adapter } = newAdapter()
+    const { fake, transport: adapter } = newAdapter()
     await adapter.setIfAbsent!('telefunc:room:x:m:1', '{}', { ttlMs: 180_000 })
     expect(fake.ttls.get('tf:kv:telefunc:room:x:m:1')).toBe(180_000)
   })
 
   it('update seeds an absent key, read-modify-writes a present one, keeps on KEEP, deletes on null', async () => {
-    const { adapter } = newAdapter()
+    const { transport: adapter } = newAdapter()
     const key = 'telefunc:room:x:m:1'
 
     expect(await adapter.update!(key, (cur) => (cur === null ? '{"n":1}' : cur))).toBe('{"n":1}')
@@ -320,7 +323,7 @@ describe('Redis adapter — atomic KV primitives (back race-free room state)', (
   })
 
   it('update retries when the key changed between its read and its write, re-running the mutator', async () => {
-    const { fake, adapter } = newAdapter()
+    const { fake, transport: adapter } = newAdapter()
     const key = 'telefunc:room:x:c'
     await adapter.set(key, '0')
 
@@ -336,29 +339,5 @@ describe('Redis adapter — atomic KV primitives (back race-free room state)', (
     expect(calls).toBe(2) // first CAS saw '0' but the store is '9' → retry
     expect(result).toBe('10') // mutator re-ran on the winner's '9'
     expect(await adapter.get(key)).toBe('10')
-  })
-})
-
-describe('Room over the Redis transport', () => {
-  // End-to-end: install the transport globally (per-isolate — safe, vitest isolates spec files)
-  // and run the full room lifecycle so KV and pub/sub delegation are exercised together.
-  it('runs the full room lifecycle — create, join, publish, kick', async () => {
-    const fake = new FakeIoredis()
-    config.broadcast.transport = new RedisTransport({ redis: fake as unknown as Redis })
-
-    const lobby = await Room.create('lobby', { meta: { topic: 'redis' } })
-    const observer = await Room.get('lobby')
-    const log: string[] = []
-    observer.onJoin((m) => log.push(`join:${m.meta.name}`))
-    observer.onLeave((m) => log.push(`leave:${m.id}`))
-    observer.subscribe((data, _info, from) => log.push(`msg:${from.meta.name}:${data}`))
-
-    const me = await lobby.join({ meta: { name: 'Alice' } })
-    await me.publish('hello')
-    await Room.removeParticipant('lobby', { id: me.id })
-
-    expect(log).toEqual([`join:Alice`, `msg:Alice:hello`, `leave:${me.id}`])
-    expect(observer.count).toBe(0)
-    expect(await Room.list()).toMatchObject([{ id: 'lobby', meta: { topic: 'redis' }, count: 0 }])
   })
 })

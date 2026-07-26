@@ -470,7 +470,7 @@ export class ConformanceSessionDurableObject extends DurableObject {
       case 'list-retained':
         return await this.#run(() => this.#backend.listRetained(command.roomId, command.inc))
       case 'delete-retained':
-        await this.#run(() => this.#backend.deleteRetained(command.roomId, command.inc, command.lane))
+        await this.#run(() => this.#backend.deleteRetained(command.roomId, command.inc, command.lane, command.options))
         return null
       case 'list-generations':
         return await this.#run(() => this.#backend.listGenerations(command.roomId))
@@ -603,7 +603,7 @@ export class ConformanceSessionDurableObject extends DurableObject {
       awaitDelivery: (token) => stub.awaitDelivery(token),
       readRetained: (inc, lane) => stub.readRetained(inc, lane),
       listRetained: (inc) => stub.listRetained(inc),
-      deleteRetainedLane: (inc, lane) => stub.deleteRetainedLane(inc, lane),
+      deleteRetainedLane: (inc, lane, opts) => stub.deleteRetainedLane(inc, lane, opts),
       captureRouteGeneration: async (...args) => {
         const result = await stub.captureRouteGeneration(...args)
         if (this.#forcedGenerationCaptureFailures > 0) {

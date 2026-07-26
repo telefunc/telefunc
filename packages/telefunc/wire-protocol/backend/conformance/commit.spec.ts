@@ -241,6 +241,19 @@ for (const harness of installedBackends) {
         expect(await fx.backend.listRetained(roomId, inc)).toEqual([])
       })
 
+      it('compare-deletes only the retained generation named by ifSeq', async () => {
+        const first = accepted(await commit(SEMANTIC, 'first', { retain: true }))
+        const second = accepted(await commit(SEMANTIC, 'second', { retain: true }))
+
+        await fx.backend.deleteRetained(roomId, inc, SEMANTIC, { ifSeq: first.seq })
+        const survived = await fx.backend.readRetained(roomId, inc, SEMANTIC)
+        expect(survived?.seq).toBe(second.seq)
+        expect(text(survived?.payload ?? bytes(''))).toBe('second')
+
+        await fx.backend.deleteRetained(roomId, inc, SEMANTIC, { ifSeq: second.seq })
+        expect(await fx.backend.readRetained(roomId, inc, SEMANTIC)).toBeNull()
+      })
+
       it('exposes retained to a reader that never subscribed', async () => {
         const result = accepted(await commit(SEMANTIC, 'K1', { retain: true }))
         const seed = await fx.backend.readRetained(roomId, inc, SEMANTIC)

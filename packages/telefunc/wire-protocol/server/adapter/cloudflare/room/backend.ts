@@ -82,7 +82,7 @@ export type CloudflareRoomAuthorityStub = {
   awaitDelivery(token: string): Promise<void>
   readRetained(inc: string, lane: LaneId): Promise<RetainedWire | null>
   listRetained(inc: string): Promise<LaneId[]>
-  deleteRetainedLane(inc: string, lane?: LaneId): Promise<void>
+  deleteRetainedLane(inc: string, lane?: LaneId, opts?: { ifSeq?: number }): Promise<void>
   captureRouteGeneration(
     inc: string,
     attemptId?: string | null,
@@ -465,8 +465,8 @@ export class CloudflareRoomBackend implements RoomBackendSpi {
   async listRetained(roomId: string, inc: string) {
     return this.#stub(roomId).listRetained(inc)
   }
-  async deleteRetained(roomId: string, inc: string, lane?: LaneId) {
-    await this.#stub(roomId).deleteRetainedLane(inc, lane)
+  async deleteRetained(roomId: string, inc: string, lane?: LaneId, opts?: { ifSeq?: number }) {
+    await this.#stub(roomId).deleteRetainedLane(inc, lane, opts)
   }
   subscribeLane(roomId: string, inc: string, lane: LaneId, receiver: LaneReceiver): LaneSubscription {
     return getCloudflareRoomSessionManager().subscribeLane(roomId, inc, lane, receiver)

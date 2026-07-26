@@ -7,8 +7,10 @@ afterEach(async () => {
 })
 
 describe('Room backend installation', () => {
-  test('fails clearly before an installation exists', () => {
-    expect(() => getRoomBackend()).toThrow('no Room backend is installed')
+  test('lazily installs one implicit memory backend', () => {
+    const backend = getRoomBackend()
+    expect(backend).toBeInstanceOf(MemoryRoomBackend)
+    expect(getRoomBackend()).toBe(backend)
   })
 
   test('makes installing explicit before a factory can reenter', () => {
@@ -41,7 +43,7 @@ describe('Room backend installation', () => {
     ;(backend as unknown as { spiVersion: number }).spiVersion = 2
 
     expect(() => installRoomBackend(() => backend)).toThrow('spiVersion 2; expected 1')
-    expect(() => getRoomBackend()).toThrow('no Room backend is installed')
+    expect(getRoomBackend()).toBeInstanceOf(MemoryRoomBackend)
   })
 
   test('rejects a backend with a missing core method', () => {
@@ -73,10 +75,12 @@ describe('Room backend installation', () => {
 
     await Promise.all([disposeRoomBackend(), disposeRoomBackend()])
     expect(dispose).toHaveBeenCalledTimes(1)
-    expect(() => getRoomBackend()).toThrow('no Room backend is installed')
+    const implicit = getRoomBackend()
+    expect(implicit).toBeInstanceOf(MemoryRoomBackend)
 
     const second = installRoomBackend(() => memoryBackend())
     expect(second).not.toBe(first)
+    expect(second).not.toBe(implicit)
   })
 
   test('blocks acquisition and installation for the full disposal barrier', async () => {
@@ -93,7 +97,7 @@ describe('Room backend installation', () => {
       deferred.resolve()
       await disposing
     }
-    expect(() => getRoomBackend()).toThrow('no Room backend is installed')
+    expect(getRoomBackend()).toBeInstanceOf(MemoryRoomBackend)
     expect(installRoomBackend(() => memoryBackend())).not.toBe(backend)
   })
 
@@ -109,7 +113,7 @@ describe('Room backend installation', () => {
     expect(second).toBe(first)
     await expect(first).rejects.toBe(failure)
     await expect(second).rejects.toBe(failure)
-    expect(() => getRoomBackend()).toThrow('no Room backend is installed')
+    expect(getRoomBackend()).toBeInstanceOf(MemoryRoomBackend)
     expect(installRoomBackend(() => memoryBackend())).not.toBe(backend)
   })
 
@@ -123,7 +127,7 @@ describe('Room backend installation', () => {
     expect(second).toBe(first)
     await expect(first).rejects.toBe(failure)
     await expect(second).rejects.toBe(failure)
-    expect(() => getRoomBackend()).toThrow('no Room backend is installed')
+    expect(getRoomBackend()).toBeInstanceOf(MemoryRoomBackend)
     expect(installRoomBackend(() => memoryBackend())).not.toBe(backend)
   })
 
