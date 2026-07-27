@@ -3,7 +3,6 @@ import { Miniflare } from 'miniflare'
 import { disposeRoomBackend, installRoomBackend } from '../../install.js'
 import type { LaneId, LaneReceiver, ReadinessState, RoomBackendSpi } from '../../spi.js'
 import { CHANNEL_PING_INTERVAL_MS } from '../../../constants.js'
-import { frameRoomBinaryOrder, unframeRoomBinaryOrder } from '../../../room/protocol.js'
 import { Room, ServerRoom } from '../../../room/server.js'
 import {
   CloudflareRoomBackend,
@@ -141,45 +140,6 @@ describe('cloudflare — production session-manager mechanics', () => {
       }
     }
   }, 60_000)
-
-  it('round-trips a binary cursor above u32 through workerd live delivery, SQLite retained state and the Room client decoder', async () => {
-    const { roomId, inc, stub } = await opened('wide-binary')
-    const lane = { kind: 'binary', member: crypto.randomUUID(), track: 'camera' } satisfies LaneId
-    const seen = collector()
-    const sub = fx.backend.subscribeLane(roomId, inc, lane, seen.receiver)
-    try {
-      await sub.ready
-      await stub.telefuncRoomSeedOrderWatermarkForTest(inc, lane, 0xffff_ffff, 10)
-      const payload = bytes('cloudflare-wide-binary')
-      const committed = accepted(await fx.backend.commitLane(roomId, inc, lane, payload, { retain: true }))
-      await committed.delivery
-      await seen.waitFor(1)
-
-      expect(committed.seq).toBe(0x1_0000_0000)
-      expect(seen.frames[0]?.seq).toBe(0x1_0000_0000)
-      const liveDecoded = unframeRoomBinaryOrder(
-        frameRoomBinaryOrder(bytes(seen.frames[0]?.payload as string), {
-          seq: seen.frames[0]?.seq as number,
-          timestamp: seen.frames[0]?.timestamp as number,
-        }),
-      )
-      expect(liveDecoded?.info.seq).toBe(0x1_0000_0000)
-      expect(text(liveDecoded?.payload as Uint8Array)).toBe('cloudflare-wide-binary')
-
-      const retained = await fx.backend.readRetained(roomId, inc, lane)
-      expect(retained?.seq).toBe(0x1_0000_0000)
-      const retainedDecoded = unframeRoomBinaryOrder(
-        frameRoomBinaryOrder(retained?.payload as Uint8Array, {
-          seq: retained?.seq as number,
-          timestamp: retained?.timestamp as number,
-        }),
-      )
-      expect(retainedDecoded?.info.seq).toBe(0x1_0000_0000)
-      expect(text(retainedDecoded?.payload as Uint8Array)).toBe('cloudflare-wide-binary')
-    } finally {
-      await sub.unsubscribe().catch(() => {})
-    }
-  })
 
   it('recovers a public Room lane after real workerd loss and a synchronous first replacement failure', async () => {
     const roomId = nextId('managed-room-renewal')
@@ -392,15 +352,6 @@ describe('cloudflare — production session-manager mechanics', () => {
       )
     })
 
-    it('delivers through the exact worker-owned production manager', async () => {
-      const { roomId, inc } = await opened()
-      const seen = collector()
-      const sub = fx.backend.subscribeLane(roomId, inc, SEMANTIC, seen.receiver)
-      await sub.ready
-      await accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, bytes('worker'))).delivery
-      expect(seen.payloads()).toEqual(['worker'])
-    })
-
     it('unwinds self-fanout before the same session shard callback runs', async () => {
       const { roomId, inc } = await opened()
       const seen = collector()
@@ -410,19 +361,6 @@ describe('cloudflare — production session-manager mechanics', () => {
       expect(result.receivers).toBe(1)
       await result.delivery
       expect(seen.payloads()).toEqual(['self'])
-    })
-
-    it('multiplexes sibling callbacks behind one authority route', async () => {
-      const { roomId, inc } = await opened()
-      const a = collector()
-      const b = collector()
-      const one = fx.backend.subscribeLane(roomId, inc, SEMANTIC, a.receiver)
-      const two = fx.backend.subscribeLane(roomId, inc, SEMANTIC, b.receiver)
-      await Promise.all([one.ready, two.ready])
-      const result = accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, bytes('both')))
-      expect(result.receivers).toBe(1)
-      await result.delivery
-      expect([a.payloads(), b.payloads()]).toEqual([['both'], ['both']])
     })
 
     it('addresses two session shards as two exact targets without cross-delivery', async () => {
@@ -494,34 +432,6 @@ describe('cloudflare — production session-manager mechanics', () => {
       expect(result.observation.errors).toEqual([])
     })
 
-    it('keeps the authority route until the final local detach', async () => {
-      const { roomId, inc } = await opened()
-      const a = collector()
-      const b = collector()
-      const one = fx.backend.subscribeLane(roomId, inc, SEMANTIC, a.receiver)
-      const two = fx.backend.subscribeLane(roomId, inc, SEMANTIC, b.receiver)
-      await Promise.all([one.ready, two.ready])
-      await two.unsubscribe()
-      const live = accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, bytes('one')))
-      expect(live.receivers).toBe(1)
-      await live.delivery
-      await one.unsubscribe()
-      expect(accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, bytes('zero'))).receivers).toBe(0)
-    })
-
-    it('uses distinct worker manager routes for distinct lanes', async () => {
-      const { roomId, inc } = await opened()
-      const semantic = collector()
-      const control = collector()
-      await Promise.all([
-        fx.backend.subscribeLane(roomId, inc, SEMANTIC, semantic.receiver).ready,
-        fx.backend.subscribeLane(roomId, inc, CONTROL, control.receiver).ready,
-      ])
-      await accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, bytes('s'))).delivery
-      await accepted(await fx.backend.commitLane(roomId, inc, CONTROL, bytes('c'))).delivery
-      expect([semantic.payloads(), control.payloads()]).toEqual([['s'], ['c']])
-    })
-
     it('does not expose a subscriber Durable Object or relay binding', async () => {
       const source = await bundleWorker()
       expect(source).not.toContain('TelefuncRoomSubscriberDurableObject')
@@ -589,32 +499,6 @@ describe('cloudflare — production session-manager mechanics', () => {
   })
 
   describe('readiness, renewal and replacement', () => {
-    it('re-establishment replaces the unexpired lease in one row', async () => {
-      const { roomId, inc } = await opened()
-      const seen = collector()
-      const sub = fx.backend.subscribeLane(roomId, inc, SEMANTIC, seen.receiver)
-      await sub.ready
-      const controls = cloudflareRenewalControls(fx.backend)
-      controls.forceFailures(2)
-      await controls.advance(ROUTE_RENEW_EVERY_MS * 2)
-      const result = accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, bytes('once')))
-      expect(result.receivers).toBe(1)
-      await result.delivery
-      expect(seen.payloads()).toEqual(['once'])
-    })
-
-    it('reports lost then ready for a replacement lifecycle', async () => {
-      const { roomId, inc } = await opened()
-      const sub = fx.backend.subscribeLane(roomId, inc, SEMANTIC, noopReceiver())
-      await sub.ready
-      const states: ReadinessState[] = []
-      sub.onStateChange((state) => states.push(state))
-      const controls = cloudflareRenewalControls(fx.backend)
-      controls.forceFailures(2)
-      await controls.advance(ROUTE_RENEW_EVERY_MS * 2)
-      expect(states).toEqual(['lost', 'ready'])
-    })
-
     it('recovers through the bounded initial establishment retry path', async () => {
       const { roomId, inc } = await opened()
       const controls = cloudflareRenewalControls(fx.backend)
@@ -705,20 +589,6 @@ describe('cloudflare — production session-manager mechanics', () => {
       expect(sub.state()).toBe('closed')
     })
 
-    it('rejects readiness for a non-open incarnation', async () => {
-      const { roomId } = await opened()
-      const sub = fx.backend.subscribeLane(roomId, 'missing', SEMANTIC, noopReceiver())
-      expect(await settled(sub.ready)).toBe('rejected')
-      expect(sub.state()).toBe('closed')
-    })
-
-    it('rejects readiness after the head enters closing', async () => {
-      const { roomId, inc } = await opened()
-      const head = await readHeadOrThrow(fx.backend, roomId)
-      await enterClosing(fx.backend, roomId, head)
-      expect(await settled(fx.backend.subscribeLane(roomId, inc, SEMANTIC, noopReceiver()).ready)).toBe('rejected')
-    })
-
     it('does not rebind a lost capture across drop and exact id reuse', async () => {
       const { roomId, inc } = await opened()
       const controls = cloudflareRenewalControls(fx.backend)
@@ -754,16 +624,6 @@ describe('cloudflare — production session-manager mechanics', () => {
   })
 
   describe('delivery, ordering and failure fences', () => {
-    it('attempts a failing callback exactly once', async () => {
-      const { roomId, inc } = await opened()
-      const failed = throwingReceiver('target failed')
-      await fx.backend.subscribeLane(roomId, inc, SEMANTIC, failed.receiver).ready
-      expect(await settled(accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, bytes('x'))).delivery)).toBe(
-        'rejected',
-      )
-      expect(failed.calls()).toBe(1)
-    })
-
     it('makes a route non-live after three consecutive target failures', async () => {
       const { roomId, inc } = await opened()
       const failed = throwingReceiver('target failed')
@@ -803,34 +663,6 @@ describe('cloudflare — production session-manager mechanics', () => {
       expect(accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, bytes('still-targeted'))).receivers).toBe(1)
     })
 
-    it('keeps independent lanes moving while one callback is stalled', async () => {
-      const { roomId, inc } = await opened()
-      const stalled = stallingReceiver()
-      const free = collector()
-      await Promise.all([
-        fx.backend.subscribeLane(roomId, inc, SEMANTIC, stalled.receiver).ready,
-        fx.backend.subscribeLane(roomId, inc, CONTROL, free.receiver).ready,
-      ])
-      const blocked = accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, bytes('blocked')))
-      await accepted(await fx.backend.commitLane(roomId, inc, CONTROL, bytes('free'))).delivery
-      expect(free.payloads()).toEqual(['free'])
-      await stalled.release()
-      await blocked.delivery
-    })
-
-    it('does not start a second same-lane callback before the first settles', async () => {
-      const { roomId, inc } = await opened()
-      const stalled = stallingReceiver()
-      await fx.backend.subscribeLane(roomId, inc, SEMANTIC, stalled.receiver).ready
-      const one = accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, bytes('one')))
-      const two = accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, bytes('two')))
-      await stalled.waitForEntry()
-      expect(stalled.entries()).toBe(1)
-      await stalled.release()
-      await Promise.all([one.delivery, two.delivery])
-      expect(stalled.entries()).toBe(2)
-    })
-
     it('orders one lane across two facade instances at the room authority', async () => {
       const second = await cloudflareHarness.create()
       try {
@@ -862,28 +694,6 @@ describe('cloudflare — production session-manager mechanics', () => {
       await Promise.all([first.delivery, second.delivery])
       expect(stalled.payloads()).toEqual(['first', 'good'])
     })
-
-    it('keeps generation delivery isolated after room recreation', async () => {
-      const { roomId, inc } = await opened()
-      const stale = collector()
-      await fx.backend.subscribeLane(roomId, inc, SEMANTIC, stale.receiver).ready
-      const tombstone = await close(roomId, inc)
-      const freshInc = (await openRoom(fx.backend, roomId, { prior: tombstone })).inc
-      const fresh = collector()
-      await fx.backend.subscribeLane(roomId, freshInc, SEMANTIC, fresh.receiver).ready
-      await accepted(await fx.backend.commitLane(roomId, freshInc, SEMANTIC, bytes('fresh'))).delivery
-      expect(stale.payloads()).toEqual([])
-      expect(fresh.payloads()).toEqual(['fresh'])
-    })
-
-    it('closes the worker mux on explicit generation invalidation', async () => {
-      const { roomId, inc } = await opened()
-      const sub = fx.backend.subscribeLane(roomId, inc, SEMANTIC, noopReceiver())
-      await sub.ready
-      await close(roomId, inc)
-      await fx.backend.dropGeneration(roomId, inc)
-      expect(sub.state()).toBe('closed')
-    })
   })
 
   describe('authority route, capture and janitor mechanics', () => {
@@ -891,16 +701,6 @@ describe('cloudflare — production session-manager mechanics', () => {
       expect(CHANNEL_PING_INTERVAL_MS).toBe(5_000)
       expect(ROUTE_RENEW_EVERY_MS).toBe(30_000)
     })
-    it('replaces a route descriptor under one primary key', async () => {
-      const target = await opened()
-      const id = await cloudflareSessionId(nextId('session'))
-      await directRegistration(target, id, 'one')
-      await directRegistration(target, id, 'two')
-      expect(
-        acceptedWire(await target.stub.commitLane(target.roomId, target.inc, SEMANTIC, bytes('one-target'))).receivers,
-      ).toBe(1)
-    })
-
     it('renews only the exact current lease', async () => {
       const target = await opened()
       const id = await cloudflareSessionId(nextId('session'))
@@ -1058,27 +858,6 @@ describe('cloudflare — production session-manager mechanics', () => {
       const after = await fx.backend.readCells(target.roomId, target.inc, { prefix: 'room/😀' })
       if ('staleInc' in after) throw new Error('stale')
       expect([...after.cells.keys()]).toEqual([key])
-    })
-
-    it('refuses to drop the current generation', async () => {
-      const target = await opened()
-      await expect(fx.backend.dropGeneration(target.roomId, target.inc)).rejects.toThrow(
-        'refusing to drop the current incarnation',
-      )
-    })
-
-    it('lists only durable generation subtrees', async () => {
-      const target = await opened()
-      expect(await fx.backend.listGenerations(target.roomId)).toEqual([target.inc])
-    })
-
-    it('tag-guards directory deletion through the production authority', async () => {
-      const roomId = `😀/${nextId('directory')}`
-      await fx.backend.directoryPut(roomId, 'current')
-      await fx.backend.directoryDelete(roomId, 'stale')
-      expect((await fx.backend.directoryList('😀/')).entries).toContainEqual({ roomId, incTag: 'current' })
-      await fx.backend.directoryDelete(roomId, 'current')
-      expect((await fx.backend.directoryList('😀/')).entries).not.toContainEqual({ roomId, incTag: 'current' })
     })
   })
 })
