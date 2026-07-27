@@ -1,13 +1,13 @@
 {
   "compilerOptions": {
-    "lib": ["ES2019"],
-    "module": "NodeNext",
-    "moduleResolution": "NodeNext",
+    "customConditions": ["browser"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
     "noEmit": true,
     "skipLibCheck": false,
     "strict": true,
     "target": "ES2019",
     "types": []
   },
-  "include": ["index.ts"]
+  "include": ["released-api-browser.ts"]
 }

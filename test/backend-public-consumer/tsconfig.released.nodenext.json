@@ -1,13 +1,12 @@
 {
   "compilerOptions": {
-    "lib": ["ES2019"],
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
     "noEmit": true,
-    "skipLibCheck": false,
+    "skipLibCheck": true,
     "strict": true,
     "target": "ES2019",
     "types": []
   },
-  "include": ["index.ts"]
+  "include": ["released-api.ts"]
 }

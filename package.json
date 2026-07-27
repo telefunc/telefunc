@@ -9,6 +9,7 @@
     "test:units": "vitest run",
     "test:e2e": "test-e2e",
     "test:types": "test-types",
+    "test:released-api": "pnpm --dir test/backend-public-consumer run test:released-api",
     "// Run `$ pnpm test:setup` before running `$ pnpm test`": "",
     "test:setup": "pnpm install && pnpm run build",
     "========= Docs": "",

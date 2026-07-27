@@ -27,8 +27,9 @@ assertIsNotBrowser()
  *  graphs — the same reason the brand checks below use it. */
 const ROOM_SELF_SUPPRESS = Symbol.for('telefunc:roomSelfSuppress')
 function roomSelfSuppressSet(context: ServerReplacerContext, room: ServerRoom): Set<string> {
-  let byRoom = context.passScope.get(ROOM_SELF_SUPPRESS) as Map<ServerRoom, Set<string>> | undefined
-  if (!byRoom) context.passScope.set(ROOM_SELF_SUPPRESS, (byRoom = new Map()))
+  const passScope = (context.passScope ??= new Map())
+  let byRoom = passScope.get(ROOM_SELF_SUPPRESS) as Map<ServerRoom, Set<string>> | undefined
+  if (!byRoom) passScope.set(ROOM_SELF_SUPPRESS, (byRoom = new Map()))
   let set = byRoom.get(room)
   if (!set) byRoom.set(room, (set = new Set()))
   return set

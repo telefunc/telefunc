@@ -28,6 +28,8 @@ import type { ClientReviverContext, ServerReplacerContext } from '../types.js'
 import type { RemoteParticipant } from './types.js'
 import {
   DEFAULT_TRACK,
+  frameRoomBinaryOrder,
+  unframeRoomBinaryOrder,
   frameWithMemberId,
   roomMemberKvKey,
   roomHiddenMemberKvPrefix,
@@ -43,13 +45,15 @@ import { RoomState } from './state.js'
 import type { ClientBroadcast } from '../client/channel.js'
 import type { ChannelPublishInfo } from '../channel.js'
 import { disposeRoomBackend, getRoomBackend, installRoomBackend } from '../backend/install.js'
-import { MemoryRoomBackend } from '../backend/memory/backend.js'
-import type { LaneId } from '../backend/spi.js'
+import { MemoryRoomBackend, MemoryRoomBackendState } from '../backend/memory/backend.js'
+import type { LaneId, LaneSubscription, ReadinessState } from '../backend/spi.js'
 
 let roomBackend: MemoryRoomBackend
+let roomBackendState: MemoryRoomBackendState
 beforeEach(async () => {
   await disposeRoomBackend()
-  roomBackend = new MemoryRoomBackend()
+  roomBackendState = new MemoryRoomBackendState()
+  roomBackend = new MemoryRoomBackend({ state: roomBackendState })
   installRoomBackend(() => roomBackend)
 })
 afterEach(async () => {
@@ -63,6 +67,19 @@ const textEncoder = new TextEncoder()
 const textDecoder = new TextDecoder()
 const controlLane = { kind: 'control' } as const satisfies LaneId
 const semanticLane = { kind: 'semantic' } as const satisfies LaneId
+
+function seedMemoryLaneOrder(roomId: string, inc: string, lane: LaneId, seq: number, timestamp: number): void {
+  type GenerationView = { order: Map<string, { seq: number; timestamp: number }> }
+  type RoomView = { gens: Map<string, GenerationView> }
+  const room = roomBackendState.rooms.get(roomId) as unknown as RoomView | undefined
+  const generation = room?.gens.get(inc)
+  expect(generation).toBeDefined()
+  let key: string
+  if (lane.kind === 'semantic' || lane.kind === 'control') key = lane.kind
+  else if (lane.kind === 'binary') key = `binary:${encodeURIComponent(lane.member)}:${encodeURIComponent(lane.track)}`
+  else key = `inbox:${encodeURIComponent(lane.member)}`
+  generation!.order.set(key, { seq, timestamp })
+}
 
 async function activeInc(roomId: string): Promise<string> {
   const entry = await roomBackend.readHead(roomId)
@@ -1722,16 +1739,115 @@ describe('one ordered semantic lane', () => {
  *  live subscribers — and its `.ready` stays pending until `flushSubscribes()` acks it. The in-memory
  *  analogue of `HybridTestAdapter`'s replica lag, for exercising the retained/live handoff. */
 function gateNewSubscriptions(): { flush(): void; restore(): void } {
-  let release!: () => void
-  const gate = new Promise<void>((resolve) => {
-    release = resolve
-  })
+  const pending: ControlledLaneSubscription[] = []
   const realSubscribe = roomBackend.subscribeLane.bind(roomBackend)
   const spy = vi.spyOn(roomBackend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
-    const subscription = realSubscribe(roomId, inc, lane, receiver)
-    return { ...subscription, ready: Promise.all([subscription.ready, gate]).then(() => undefined) }
+    const subscription = new ControlledLaneSubscription(() => realSubscribe(roomId, inc, lane, receiver))
+    pending.push(subscription)
+    return subscription
   })
-  return { flush: release, restore: () => spy.mockRestore() }
+  return {
+    flush: () => pending.splice(0).forEach((subscription) => subscription.establish()),
+    restore: () => spy.mockRestore(),
+  }
+}
+
+class ControlledLaneSubscription implements LaneSubscription {
+  readonly ready: Promise<void>
+  private _state: ReadinessState = 'establishing'
+  private readonly _listeners = new Set<(state: ReadinessState) => void>()
+  private readonly _resolveReady: () => void
+  private readonly _rejectReady: (error: Error) => void
+  private _inner: LaneSubscription | null = null
+
+  constructor(private readonly _subscribe: () => LaneSubscription) {
+    let resolveReady!: () => void
+    let rejectReady!: (error: Error) => void
+    this.ready = new Promise<void>((resolve, reject) => {
+      resolveReady = resolve
+      rejectReady = reject
+    })
+    this._resolveReady = resolveReady
+    this._rejectReady = rejectReady
+    void this.ready.catch(() => {})
+  }
+
+  state(): ReadinessState {
+    return this._state
+  }
+
+  onStateChange(callback: (state: ReadinessState) => void): () => void {
+    this._listeners.add(callback)
+    return () => this._listeners.delete(callback)
+  }
+
+  establish(): void {
+    if (this._state !== 'establishing' || this._inner) return
+    const inner = (this._inner = this._subscribe())
+    void inner.ready.then(
+      () => {
+        if (this._state !== 'establishing') return
+        this._state = 'ready'
+        this._resolveReady()
+      },
+      (error: unknown) => this.rejectInitial(error instanceof Error ? error : new Error(String(error))),
+    )
+  }
+
+  rejectInitial(error: Error): void {
+    if (this._state !== 'establishing') return
+    this._state = 'closed'
+    this._rejectReady(error)
+    this._emit()
+  }
+
+  async lose(): Promise<void> {
+    if (this._state !== 'ready') return
+    await this._inner?.unsubscribe()
+    this._inner = null
+    this._state = 'lost'
+    this._emit()
+  }
+
+  async recover(): Promise<void> {
+    if (this._state !== 'lost') return
+    const inner = (this._inner = this._subscribe())
+    await inner.ready
+    this._state = 'ready'
+    this._emit()
+  }
+
+  async closeFromBackend(): Promise<void> {
+    if (this._state === 'closed') return
+    await this._inner?.unsubscribe()
+    this._state = 'closed'
+    this._emit()
+  }
+
+  async unsubscribe(): Promise<void> {
+    if (this._state === 'closed') return
+    await this._inner?.unsubscribe()
+    this._state = 'closed'
+    this._emit()
+  }
+
+  private _emit(): void {
+    for (const listener of [...this._listeners]) listener(this._state)
+  }
+}
+
+async function expectEventually(assertion: () => void): Promise<void> {
+  let error: unknown
+  for (let attempt = 0; attempt < 20; attempt++) {
+    try {
+      assertion()
+      return
+    } catch (caught) {
+      error = caught
+      await settle()
+    }
+  }
+  throw error
 }
 
 describe('room stub channel', () => {
@@ -2043,7 +2159,7 @@ describe('room stub channel', () => {
     await wanted.publishBinary(new Uint8Array([2]))
     await unwanted.publishBinary(new Uint8Array([3]))
     expect(relayed().length).toBe(1) // only the wanted member's frame crossed the wire
-    expect(unframeMemberId(relayed()[0]!.data)!.from).toBe(wanted.id)
+    expect(unframeMemberId(unframeRoomBinaryOrder(relayed()[0]!.data)!.payload)!.from).toBe(wanted.id)
 
     // Track-selective: only 'cam' of every member — the default lane and other tracks stay put.
     subBinary({ everyMember: { all: false, tracks: ['cam'] }, members: {} }, 61)
@@ -2051,7 +2167,7 @@ describe('room stub channel', () => {
     await wanted.publishBinary(new Uint8Array([5]), { track: 'cam' })
     await unwanted.publishBinary(new Uint8Array([6]), { track: 'mic' })
     expect(relayed().length).toBe(2)
-    expect(unframeMemberId(relayed()[1]!.data)!.track).toBe('cam')
+    expect(unframeMemberId(unframeRoomBinaryOrder(relayed()[1]!.data)!.payload)!.track).toBe('cam')
 
     subBinary({ everyMember: { all: true, tracks: [] }, members: {} }, 62)
     await unwanted.publishBinary(new Uint8Array([7]))
@@ -2338,7 +2454,7 @@ describe('room stub channel', () => {
     p
       .decoded()
       .filter((f) => f.tag === TAG.PUBLISH_BINARY)
-      .map((f) => unframeMemberId(f.data)!)
+      .map((f) => unframeMemberId(unframeRoomBinaryOrder(f.data)!.payload)!)
 
   it('replays the last { retain: true } text message to a late subscriber — non-retained and superseded ones are not kept', async () => {
     const { serverRoom, stub, peer } = await createServedRoom('retain-text')
@@ -2377,6 +2493,17 @@ describe('room stub channel', () => {
     await settle()
 
     expect(dataFramesOf(peer)).toEqual(['bob-pinned'])
+  })
+
+  it('kicking a member deletes retained text that member still owns', async () => {
+    const owner = (await Room.create('retain-text-kick-direct')) as ServerRoom
+    const member = await owner.join({ meta: { name: 'owner' } })
+    await member.publish('pinned', { retain: true })
+    expect(await roomBackend.readRetained(owner.id, owner._inc, semanticLane)).not.toBeNull()
+
+    await Room.removeParticipant(owner.id, { id: member.id })
+
+    expect(await roomBackend.readRetained(owner.id, owner._inc, semanticLane)).toBeNull()
   })
 
   it("a kick's retained cleanup cannot delete a newer owner's frame racing the compare-delete", async () => {
@@ -2609,10 +2736,132 @@ describe('room stub channel', () => {
 
     const framed = frameWithMemberId(cam.id, new Uint8Array([7]))
     const info = { seq: 3, timestamp: 3000 }
-    stub._emitRetainedBinary(encodePublishBinary(framed, info), cam.id, DEFAULT_TRACK, info) // retained back-fill
-    stub._relayBinaryLive(encodePublishBinary(framed, info), cam.id, DEFAULT_TRACK, info) // its own late live echo
+    const wire = encodePublishBinary(frameRoomBinaryOrder(framed, info), info)
+    stub._emitRetainedBinary(wire, cam.id, DEFAULT_TRACK, info) // retained back-fill
+    stub._relayBinaryLive(wire, cam.id, DEFAULT_TRACK, info) // its own late live echo
 
     expect(binaryFramesOf(peer).map((r) => r.payload[0])).toEqual([7]) // delivered once — the echo dropped
+  })
+
+  it('keeps a live binary seq wider than 32 bits through server delivery and the public client wire', async () => {
+    const { serverRoom, stub, peer } = await createServedRoom('wide-binary-live')
+    const camera = await serverRoom.join({ meta: { name: 'camera' } })
+    const serverSeqs: number[] = []
+    serverRoom.subscribeBinary((_data, info) => serverSeqs.push(info.seq))
+    stub._onPeerMessage(JSON.stringify({ __r: 'sub-binary', wants: allBinary }), 50)
+    await settle()
+
+    const inc = await activeInc(serverRoom.id)
+    seedMemoryLaneOrder(
+      serverRoom.id,
+      inc,
+      { kind: 'binary', member: camera.id, track: DEFAULT_TRACK },
+      0xffff_ffff,
+      10,
+    )
+    const receipt = await camera.publishBinary(new Uint8Array([7]))
+    expect(receipt.seq).toBe(0x1_0000_0000)
+    expect(serverSeqs).toEqual([0x1_0000_0000])
+
+    const frame = peer.decoded().find((candidate) => candidate.tag === TAG.PUBLISH_BINARY)
+    const fake = createFakeStub()
+    const clientRoom = new ClientRoom(fake.stub, createSnapshot(serverRoom.id))
+    const clientSeqs: number[] = []
+    clientRoom.subscribeBinary((_data, info) => clientSeqs.push(info.seq))
+    fake.emitBinary(frame.data, { key: serverRoom.id, ...frame.info })
+
+    expect(clientSeqs).toEqual([0x1_0000_0000])
+  })
+
+  it('keeps a retained binary seq wider than 32 bits through replay and public client decode', async () => {
+    const { serverRoom, stub, peer } = await createServedRoom('wide-binary-retained')
+    const camera = await serverRoom.join({ meta: { name: 'camera' } })
+    const inc = await activeInc(serverRoom.id)
+    seedMemoryLaneOrder(
+      serverRoom.id,
+      inc,
+      { kind: 'binary', member: camera.id, track: DEFAULT_TRACK },
+      0xffff_ffff,
+      20,
+    )
+    const receipt = await camera.publishBinary(new Uint8Array([9]), { retain: true })
+    expect(receipt.seq).toBe(0x1_0000_0000)
+
+    stub._onPeerMessage(JSON.stringify({ __r: 'sub-binary', wants: allBinary }), 51)
+    await settle()
+    const frame = peer.decoded().find((candidate) => candidate.tag === TAG.PUBLISH_BINARY)
+    const fake = createFakeStub()
+    const clientRoom = new ClientRoom(fake.stub, createSnapshot(serverRoom.id))
+    const clientSeqs: number[] = []
+    clientRoom.subscribeBinary((_data, info) => clientSeqs.push(info.seq))
+    fake.emitBinary(frame.data, { key: serverRoom.id, ...frame.info })
+
+    expect(clientSeqs).toEqual([0x1_0000_0000])
+  })
+
+  it('replans a fixed lane after initial subscription failure instead of staying permanently deaf', async () => {
+    const realSubscribe = roomBackend.subscribeLane.bind(roomBackend)
+    let semanticCalls = 0
+    let failed!: ControlledLaneSubscription
+    const spy = vi.spyOn(roomBackend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
+      if (lane.kind !== 'semantic') return realSubscribe(roomId, inc, lane, receiver)
+      semanticCalls++
+      if (semanticCalls > 1) return realSubscribe(roomId, inc, lane, receiver)
+      failed = new ControlledLaneSubscription(() => realSubscribe(roomId, inc, lane, receiver))
+      return failed
+    })
+    try {
+      const room = await Room.create('subscription-initial-failure')
+      const member = await room.join({ meta: {} })
+      const received: unknown[] = []
+      room.subscribe((data) => received.push(data))
+
+      failed.rejectInitial(new Error('synthetic initial subscription failure'))
+      await expectEventually(() => expect(semanticCalls).toBe(2))
+      await member.publish('after-replan')
+
+      expect(received).toEqual(['after-replan'])
+    } finally {
+      spy.mockRestore()
+    }
+  })
+
+  it('keeps a keyed lane through lost → ready and replaces it after terminal close', async () => {
+    const realSubscribe = roomBackend.subscribeLane.bind(roomBackend)
+    let binaryCalls = 0
+    let controlled!: ControlledLaneSubscription
+    const spy = vi.spyOn(roomBackend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
+      if (lane.kind !== 'binary') return realSubscribe(roomId, inc, lane, receiver)
+      binaryCalls++
+      if (binaryCalls > 1) return realSubscribe(roomId, inc, lane, receiver)
+      controlled = new ControlledLaneSubscription(() => realSubscribe(roomId, inc, lane, receiver))
+      controlled.establish()
+      return controlled
+    })
+    try {
+      const room = await Room.create('subscription-renewal')
+      const member = await room.join({ meta: {} })
+      const received: number[] = []
+      room.subscribeBinary((data) => received.push(data[0]!))
+      await controlled.ready
+
+      await controlled.lose()
+      await member.publishBinary(new Uint8Array([7]))
+      expect(received).toEqual([])
+
+      await controlled.recover()
+      expect(binaryCalls).toBe(1) // renewal belongs to the same backend subscription
+      await member.publishBinary(new Uint8Array([8]))
+      expect(received).toEqual([8])
+
+      await controlled.closeFromBackend()
+      await expectEventually(() => expect(binaryCalls).toBe(2))
+      await member.publishBinary(new Uint8Array([9]))
+
+      expect(received).toEqual([8, 9])
+    } finally {
+      spy.mockRestore()
+    }
   })
 
   it('waits for the text subscription to go live before replaying retained, so a publish racing the subscribe is not lost', async () => {
@@ -2669,7 +2918,7 @@ describe('room stub channel', () => {
 
 type FakeStub = {
   emit: (envelope: unknown) => void
-  emitBinary: (framed: Uint8Array) => void
+  emitBinary: (framed: Uint8Array, info?: ChannelPublishInfo) => void
   close: () => void
   reconnect: () => void
   published: unknown[]
@@ -2719,7 +2968,7 @@ function createFakeStub(joinAck?: { id: string }): FakeStub {
   }
   return {
     emit: (envelope) => [...textCbs].forEach((cb) => cb(envelope, info())),
-    emitBinary: (framed) => [...binaryCbs].forEach((cb) => cb(framed, info())),
+    emitBinary: (framed, wireInfo) => [...binaryCbs].forEach((cb) => cb(framed, wireInfo ?? info())),
     close: () => [...closeCbs].forEach((cb) => cb()),
     reconnect: () => [...reconnectCbs].forEach((cb) => cb()),
     published,
@@ -2964,7 +3213,7 @@ describe('ClientRoom', () => {
 
     const sender = crypto.randomUUID()
     fake.emit({ __r: 'join', id: sender, meta: {}, joinedAt: 1 })
-    fake.emitBinary(frameWithMemberId(sender, new Uint8Array([9, 8])))
+    fake.emitBinary(frameRoomBinaryOrder(frameWithMemberId(sender, new Uint8Array([9, 8])), { seq: 1, timestamp: 1 }))
     expect(bytes).toEqual([[9, 8]])
 
     unsubscribe()
