@@ -2,6 +2,7 @@
   "scripts": {
     "dev": "rm -rf ./node_modules/.vite && vike dev",
     "build": "vike build",
+    "test:emitted-modules": "node emitted-modules.test.mjs",
     "preview": "vike build && vike preview",
     "deploy": "vike build && wrangler deploy",
     "cf-typegen": "wrangler types"
