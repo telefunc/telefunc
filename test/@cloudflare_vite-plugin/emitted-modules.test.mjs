@@ -54,6 +54,7 @@ for (const relative of files) {
 assert.deepEqual([...importedExternals].sort(), [...allowedExternalImports].sort())
 
 const wrangler = JSON.parse(await readFile(path.join(server, 'wrangler.json'), 'utf8'))
+// spellcheck-ignore
 assert(wrangler.compatibility_flags.includes('nodejs_als'), 'node:async_hooks requires the nodejs_als flag')
 assert.deepEqual(wrangler.durable_objects.bindings.map(({ name }) => name).sort(), [
   'TO_DO_LIST_DURABLE_OBJECTS',
