@@ -7,12 +7,9 @@ import {
   Channel,
   ChannelClosedError,
   ChannelOverflowError,
-  DefaultBroadcastAdapter,
   NetworkError,
   config,
   telefuncConfig,
-  type BroadcastAdapter,
-  type BroadcastTransport,
   type ChannelBase,
   type ClientChannel,
   type ReplacerType,
@@ -22,21 +19,21 @@ import {
   type StreamingReplacerType,
   type TypeContract,
 } from 'telefunc'
+import {
+  BACKEND_SPI_VERSION,
+  disposeBackend,
+  generateLuaHeadTransitionTable,
+  getBackend,
+  installBackend,
+  type BackendFactory,
+  type BackendSpi,
+  type BackendSubscription,
+  type BroadcastLane,
+  type PublishResult,
+} from 'telefunc/backend'
 import { ConnectionError, withContext } from 'telefunc/client'
 import { Telefunc as NodeTelefunc } from 'telefunc/node'
 import { installRedis, RedisTransport, type InstallRedisOptions, type RedisBroadcastOptions } from '@telefunc/redis'
-import {
-  DefaultBroadcastAdapter as InternalDefaultBroadcastAdapter,
-  _resetBroadcastAdapterForTesting,
-  getBroadcastAdapter,
-  installBroadcastAdapter,
-  type BroadcastAdapter as InternalBroadcastAdapter,
-  type BroadcastBinaryOnMessage,
-  type BroadcastOnMessage,
-  type BroadcastPublishResult,
-  type BroadcastTransport as InternalBroadcastTransport,
-  type BroadcastUnsubscribe,
-} from '../../packages/telefunc/dist/wire-protocol/server/broadcast.js'
 
 type Assert<T extends true> = T
 type Extends<Actual, Baseline> = [Actual] extends [Baseline] ? true : false
@@ -75,48 +72,38 @@ type ReleasedPublishAck = ReleasedPublishResult & { key: string }
 type CurrentPublishAck = Awaited<ReturnType<InstanceType<typeof BroadcastChannel>['publish']>>
 type _publishAckShape = Assert<Compatible<CurrentPublishAck, ReleasedPublishAck>>
 
-type ReleasedOnMessage = (serialized: string, info: { seq: number; timestamp: number }) => void
-type ReleasedBinaryOnMessage = (data: Uint8Array, info: { seq: number; timestamp: number }) => void
-type ReleasedUnsubscribe = () => void
-type ReleasedBroadcastAdapter = {
-  subscribe(key: string, onMessage: ReleasedOnMessage): ReleasedUnsubscribe
-  publish(key: string, serialized: string): ReleasedPublishResult | Promise<ReleasedPublishResult>
-  subscribeBinary(key: string, onMessage: ReleasedBinaryOnMessage): ReleasedUnsubscribe
-  publishBinary(key: string, data: Uint8Array): ReleasedPublishResult | Promise<ReleasedPublishResult>
-}
-type ReleasedBroadcastTransport = {
-  send(key: string, payload: string): ReleasedPublishResult | Promise<ReleasedPublishResult>
-  listen(key: string, onMessage: ReleasedOnMessage): ReleasedUnsubscribe
-  sendBinary(key: string, payload: Uint8Array): ReleasedPublishResult | Promise<ReleasedPublishResult>
-  listenBinary(key: string, onMessage: ReleasedBinaryOnMessage): ReleasedUnsubscribe
-}
-type _adapterShape = Assert<Compatible<BroadcastAdapter, ReleasedBroadcastAdapter>>
-type _transportShape = Assert<Compatible<BroadcastTransport, ReleasedBroadcastTransport>>
-type _internalAdapterShape = Assert<Compatible<InternalBroadcastAdapter, ReleasedBroadcastAdapter>>
-type _internalTransportShape = Assert<Compatible<InternalBroadcastTransport, ReleasedBroadcastTransport>>
-type _publishResultShape = Assert<Compatible<BroadcastPublishResult, ReleasedPublishResult>>
-type _unsubscribeShape = Assert<Compatible<BroadcastUnsubscribe, ReleasedUnsubscribe>>
-type _onMessageShape = Assert<Compatible<BroadcastOnMessage, ReleasedOnMessage>>
-type _onBinaryMessageShape = Assert<Compatible<BroadcastBinaryOnMessage, ReleasedBinaryOnMessage>>
-
-const unsubscribe: ReleasedUnsubscribe = () => {}
-const baseTransport: BroadcastTransport = {
-  send: () => ({ seq: 1, timestamp: 1 }),
-  listen: () => unsubscribe,
-  sendBinary: () => ({ seq: 1, timestamp: 1 }),
-  listenBinary: () => unsubscribe,
-}
-const baseAdapter: BroadcastAdapter = {
-  subscribe: () => unsubscribe,
-  publish: () => ({ seq: 1, timestamp: 1 }),
-  subscribeBinary: () => unsubscribe,
-  publishBinary: () => ({ seq: 1, timestamp: 1 }),
-}
-const defaultAdapter: BroadcastAdapter = new DefaultBroadcastAdapter(baseTransport)
-const internalDefaultAdapter: InternalBroadcastAdapter = new InternalDefaultBroadcastAdapter(baseTransport)
-const canonicalAdapter: InternalBroadcastAdapter = getBroadcastAdapter()
-const installedAdapter: InternalBroadcastAdapter = installBroadcastAdapter(() => internalDefaultAdapter)
-_resetBroadcastAdapterForTesting(internalDefaultAdapter)
+type _backendKeys = Assert<
+  HasKeys<
+    BackendSpi,
+    | 'spiVersion'
+    | 'capabilities'
+    | 'publish'
+    | 'subscribe'
+    | 'readHead'
+    | 'compareExchangeHead'
+    | 'readCells'
+    | 'compareExchangeCells'
+    | 'commitLane'
+    | 'readRetained'
+    | 'listRetained'
+    | 'deleteRetained'
+    | 'subscribeLane'
+    | 'listGenerations'
+    | 'dropGeneration'
+    | 'directoryPut'
+    | 'directoryDelete'
+    | 'directoryList'
+    | 'dispose'
+  >
+>
+type _subscriptionKeys = Assert<HasKeys<BackendSubscription, 'ready' | 'state' | 'onStateChange' | 'unsubscribe'>>
+type _publishResultShape = Assert<Compatible<PublishResult, ReleasedPublishResult & { receivers?: number }>>
+const backendVersion: 1 = BACKEND_SPI_VERSION
+const broadcastLane: BroadcastLane = { key: 'released', kind: 'text' }
+declare const backendFactory: BackendFactory
+declare const backend: BackendSpi
+const installedBackend: BackendSpi = installBackend(backendFactory)
+const currentBackend: BackendSpi = getBackend()
 
 type Contract = TypeContract<string, number, { token: string }>
 type ReleasedContract = { value: string; result: number; metadata: { token: string } }
@@ -188,7 +175,6 @@ function declareAbortCompatibility(replacementAbort: Replacement['abort'], strea
   void [replacementAbort, streamAbort]
 }
 
-config.broadcast.transport = baseTransport
 const sameConfig: typeof config = telefuncConfig
 const call = withContext(async () => 1, {
   signal: new AbortController().signal,
@@ -207,16 +193,19 @@ type _redisBroadcastOptionKeys = Assert<HasKeys<RedisBroadcastOptions, 'redis' |
 declare const redisClient: RedisBroadcastOptions['redis']
 const redisInstallOptions: InstallRedisOptions = { prefix: 'tf:' }
 const redisBroadcastOptions: RedisBroadcastOptions = { redis: redisClient, prefix: 'tf:' }
-const redisTransport: BroadcastTransport = new RedisTransport(redisBroadcastOptions)
+const redisTransport = new RedisTransport(redisBroadcastOptions)
 installRedis(redisClient, redisInstallOptions)
 
 void [
   Broadcast,
   Channel,
-  baseAdapter,
-  defaultAdapter,
-  canonicalAdapter,
-  installedAdapter,
+  backendVersion,
+  broadcastLane,
+  backend,
+  installedBackend,
+  currentBackend,
+  disposeBackend,
+  generateLuaHeadTransitionTable,
   sameConfig,
   call,
   node,

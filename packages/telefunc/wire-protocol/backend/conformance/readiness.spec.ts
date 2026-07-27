@@ -5,7 +5,7 @@
 // Plus both retained-overlap schedules of §2.2, driven through the SeedGate model in scenario.ts.
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import type { ReadinessState } from '../spi.js'
+import type { SubscriptionState } from '../spi.js'
 import { expectedReceiverCount, type BackendFixture, installedBackends } from './harness.js'
 import {
   accepted,
@@ -135,7 +135,7 @@ for (const harness of installedBackends) {
 
       it('reports state transitions and stops delivery on unsubscribe', async () => {
         const latch = collector()
-        const seen: ReadinessState[] = []
+        const seen: SubscriptionState[] = []
         const sub = fx.backend.subscribeLane(roomId, inc, SEMANTIC, latch.receiver)
         const off = sub.onStateChange((state) => seen.push(state))
         await sub.ready

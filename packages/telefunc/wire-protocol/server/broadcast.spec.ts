@@ -1,13 +1,18 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { Broadcast, ServerBroadcast } from './server-broadcast.js'
 import { ReplayBuffer } from '../replay-buffer.js'
 import { ACK_STATUS, TAG, decode } from '../shared-ws.js'
 import { IndexedPeer } from './IndexedPeer.js'
-import { getBroadcastAdapter, _resetBroadcastAdapterForTesting, DefaultBroadcastAdapter } from './broadcast.js'
-import type { BroadcastTransport } from './broadcast.js'
+import { disposeBackend, installBackend } from '../backend/install.js'
+import { MemoryBackend, MemoryBackendState } from '../backend/memory/backend.js'
 
-const previousBroadcastAdapter = getBroadcastAdapter()
-afterEach(() => _resetBroadcastAdapterForTesting(previousBroadcastAdapter))
+let memoryState: MemoryBackendState
+beforeEach(async () => {
+  await disposeBackend()
+  memoryState = new MemoryBackendState()
+  installBackend(() => new MemoryBackend({ state: memoryState }))
+})
+afterEach(() => disposeBackend())
 
 // ───────────────────────────────────────────────────────────────────────────
 // In-process delivery — bug classes targeted: cross-key bleed, dropped
@@ -246,6 +251,35 @@ describe('binary in-process broadcast', () => {
     expect(bin).toHaveLength(1)
     expect(Array.from(bin[0]!)).toEqual([1, 2, 3])
   })
+
+  it('preserves a sequence wider than 32 bits through the generic public wire frame', async () => {
+    const key = 'broadcast:wide-seq'
+    memoryState.broadcastOrder.set(key, { seq: 0xffff_ffff, timestamp: 10 })
+    const sender = new ServerBroadcast({ key })
+    const receiver = new ServerBroadcast({ key })
+    sender._registerChannel()
+    receiver._registerChannel()
+    receiver._onPeerBroadcastSubscribe(true)
+    const frames: Uint8Array[] = []
+    receiver._attachPeer(
+      new IndexedPeer(
+        { send: (frame) => frames.push(frame) },
+        7,
+        new ReplayBuffer(1024 * 1024, 60_000, 2 * 1024 * 1024),
+      ),
+    )
+
+    const receipt = await sender.publishBinary(new Uint8Array([7]))
+    const publish = frames
+      .map((frame) => decode(frame as Uint8Array<ArrayBuffer>))
+      .find((frame) => frame.tag === TAG.PUBLISH_BINARY)
+
+    expect(receipt.seq).toBe(0x1_0000_0000)
+    expect(publish?.tag).toBe(TAG.PUBLISH_BINARY)
+    if (publish?.tag !== TAG.PUBLISH_BINARY) throw new Error('Expected binary publish frame')
+    expect(publish.info.seq).toBe(0x1_0000_0000)
+    expect(Array.from(publish.data)).toEqual([7])
+  })
 })
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -324,132 +358,6 @@ describe('Broadcast shield validation', () => {
 })
 
 // ───────────────────────────────────────────────────────────────────────────
-// DefaultBroadcastAdapter with a custom transport — multi-node behavior. Each
-// node has its own DefaultBroadcastAdapter; the transport simulates the bus.
-// Bug classes targeted: same-node echo causing double-delivery, cross-node
-// delivery silently dropped, transport subscription leaks (no refcount).
-// ───────────────────────────────────────────────────────────────────────────
-
-describe('DefaultBroadcastAdapter — multi-node transport', () => {
-  type TextListener = (payload: string, info: { seq: number; timestamp: number }) => void
-
-  /** Synchronous-delivery bus for fast, deterministic tests. */
-  function createMockTransport(): BroadcastTransport & { _listeners: Map<string, Set<TextListener>> } {
-    const listeners = new Map<string, Set<TextListener>>()
-    const seqs = new Map<string, number>()
-    return {
-      _listeners: listeners,
-      send(key, payload) {
-        const seq = (seqs.get(key) ?? 0) + 1
-        seqs.set(key, seq)
-        const timestamp = Date.now()
-        const set = listeners.get(key)
-        if (set) for (const cb of set) cb(payload, { seq, timestamp })
-        return { seq, timestamp }
-      },
-      listen(key, onMessage) {
-        let set = listeners.get(key)
-        if (!set) {
-          set = new Set()
-          listeners.set(key, set)
-        }
-        set.add(onMessage)
-        return () => listeners.delete(key)
-      },
-      sendBinary(_key, _payload) {
-        return { seq: 0, timestamp: Date.now() }
-      },
-      listenBinary() {
-        return () => {}
-      },
-    }
-  }
-
-  it('publishes go through the transport and locally-subscribed receivers see the message', async () => {
-    const transport = createMockTransport()
-    _resetBroadcastAdapterForTesting(new DefaultBroadcastAdapter(transport))
-    const sender = new ServerBroadcast<{ text: string }>({ key: 'room:tx:basic' })
-    const receiver = new ServerBroadcast<{ text: string }>({ key: 'room:tx:basic' })
-    sender._registerChannel()
-    receiver._registerChannel()
-
-    const received: Array<{ text: string }> = []
-    receiver.subscribe((m) => received.push(m))
-
-    const receipt = await sender.publish({ text: 'hello' })
-
-    expect(received).toEqual([{ text: 'hello' }])
-    expect(receipt.seq).toBe(1)
-    expect(typeof receipt.timestamp).toBe('number')
-  })
-
-  // The classic distributed-bus footgun: the transport delivers to all subscribers
-  // INCLUDING the publisher's own node, AND the adapter delivers locally. Without
-  // dedup, every same-node publish fans out twice.
-  it('does not double-deliver when the transport echoes back to the publisher node', () => {
-    const transport = createMockTransport()
-    _resetBroadcastAdapterForTesting(new DefaultBroadcastAdapter(transport))
-    const sender = new ServerBroadcast<{ text: string }>({ key: 'room:tx:echo' })
-    const receiver = new ServerBroadcast<{ text: string }>({ key: 'room:tx:echo' })
-    sender._registerChannel()
-    receiver._registerChannel()
-
-    const received: Array<{ text: string }> = []
-    receiver.subscribe((m) => received.push(m))
-
-    sender.publish({ text: 'hello' })
-
-    expect(received).toEqual([{ text: 'hello' }])
-  })
-
-  it('cross-node: a publish from node1 reaches node2 subscribers via the shared transport', () => {
-    const transport = createMockTransport()
-    const node1 = new DefaultBroadcastAdapter(transport)
-    const node2 = new DefaultBroadcastAdapter(transport)
-
-    const received: string[] = []
-    node2.subscribe('room:cross-node', (serialized) => received.push(serialized))
-    node1.publish('room:cross-node', '{"text":"from-node1"}')
-
-    expect(received).toEqual(['{"text":"from-node1"}'])
-  })
-
-  // Refcount: multiple local subscribers must share ONE transport subscription; the
-  // upstream subscription must persist until the LAST local subscriber leaves. Otherwise
-  // either the transport is over-subscribed (leak) or unsubscribed prematurely (loss).
-  it('refcounts the transport subscription: holds while any local subscriber is attached', () => {
-    const transport = createMockTransport()
-    const adapter = new DefaultBroadcastAdapter(transport)
-
-    const u1 = adapter.subscribe('room:rc', () => {})
-    const u2 = adapter.subscribe('room:rc', () => {})
-    expect(transport._listeners.get('room:rc')?.size).toBe(1) // exactly one upstream sub for both
-
-    u1()
-    expect(transport._listeners.has('room:rc')).toBe(true) // still subscribed for u2
-
-    u2()
-    expect(transport._listeners.has('room:rc')).toBe(false) // last out → upstream released
-  })
-
-  it('refcount survives sub→unsub→sub: the second subscribe re-establishes the upstream sub', () => {
-    const transport = createMockTransport()
-    const adapter = new DefaultBroadcastAdapter(transport)
-
-    const u1 = adapter.subscribe('room:rc-cycle', () => {})
-    u1()
-    expect(transport._listeners.has('room:rc-cycle')).toBe(false)
-
-    const received: string[] = []
-    adapter.subscribe('room:rc-cycle', (s) => received.push(s))
-    expect(transport._listeners.get('room:rc-cycle')?.size).toBe(1)
-
-    adapter.publish('room:rc-cycle', 'after-resub')
-    expect(received).toEqual(['after-resub'])
-  })
-})
-
-// ───────────────────────────────────────────────────────────────────────────
 // Static bus (`Broadcast.*`) — server-only fire-and-forget broadcast. Bypasses
 // the instance-lifecycle (no register, no peer) and goes straight to the adapter.
 // Bug class: regression where the static bus starts touching instance state.
@@ -475,5 +383,13 @@ describe('Broadcast static bus (publish/subscribe)', () => {
     await Broadcast.publish('room:static-unsub', { text: 'second' })
 
     expect(received).toEqual([{ text: 'first' }])
+  })
+
+  it('shares one monotonic per-key sequence across text and binary routes', async () => {
+    const text = await Broadcast.publish('broadcast:shared-order', { text: 'one' })
+    const binary = await Broadcast.publishBinary('broadcast:shared-order', new Uint8Array([2]))
+
+    expect(text.seq).toBe(1)
+    expect(binary.seq).toBe(2)
   })
 })

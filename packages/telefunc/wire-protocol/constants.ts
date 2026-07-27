@@ -235,11 +235,6 @@ export const FC_SELF_UTIL_THRESHOLD = 0.5
 
 // ===== Rooms =====
 
-/** Maximum time one Room backend lane-establishment attempt may remain unsettled before Room core
- *  retires it and replans. This exceeds Cloudflare's complete jittered retry-backoff envelope plus
- *  one maximum-delay operation budget (pinned by the Room suite). With one initial attempt and five
- *  replacements, a continuously hung lane reaches terminal failure within 6 * 10 s = 60 s. */
-export const ROOM_SUBSCRIPTION_ESTABLISH_TIMEOUT_MS = 10_000
 /** How often a node refreshes the liveness timestamp of the room members it owns. */
 export const ROOM_HEARTBEAT_INTERVAL_MS = 30_000
 /** Age after which a member record counts as dead and is reaped. Sized for one missed

@@ -2,14 +2,7 @@ export { configUser as config }
 export { getServerConfig }
 export { enableChannelTransports }
 export { setRootFromVite }
-export type {
-  ConfigUser,
-  ConfigResolved,
-  StreamConfigUser,
-  ChannelConfigUser,
-  ChannelConfigResolved,
-  BroadcastConfigUser,
-}
+export type { ConfigUser, ConfigResolved, StreamConfigUser, ChannelConfigUser, ChannelConfigResolved }
 
 import { assertUsage } from '../../utils/assert.js'
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
@@ -26,11 +19,6 @@ import type {
 import { registerShieldType } from './shield.js'
 import { isTelefuncFilePath } from '../../utils/isTelefuncFilePath.js'
 import { toPosixPath, pathIsAbsolute, assertPosixPath } from '../../utils/path.js'
-import {
-  installBroadcastAdapter,
-  DefaultBroadcastAdapter,
-  type BroadcastTransport,
-} from '../../wire-protocol/server/broadcast.js'
 import {
   CHANNEL_BUFFER_LIMIT_BYTES,
   CHANNEL_BUFFER_LIMIT_BINARY_BYTES,
@@ -60,11 +48,6 @@ type StreamConfigUser = {
    * - `'channel'`: stream over the configured channel transport
    */
   transport?: StreamTransport
-}
-
-type BroadcastConfigUser = {
-  /** Transport for cross-node `Broadcast` delivery. */
-  transport?: BroadcastTransport
 }
 
 type ChannelConfigUser = {
@@ -211,8 +194,6 @@ type ConfigUser = {
   stream: StreamConfigUser
   /** Enabled transports and runtime settings for Telefunc channels. */
   channel: ChannelConfigUser
-  /** `Broadcast` configuration. */
-  broadcast: BroadcastConfigUser
   /** Registered server extensions. Use `config.extensions.push(ext)` to add. */
   extensions: TelefuncServerExtension[]
 }
@@ -239,7 +220,6 @@ type ConfigResolved = {
 const configState: ConfigUser = getGlobalObject('serverConfig.ts', {
   stream: {},
   channel: {},
-  broadcast: {},
   extensions: [],
 })
 
@@ -290,18 +270,6 @@ const configUser: ConfigUser = new Proxy({} as ConfigUser, {
         set(_t, subProp, val) {
           if (typeof subProp !== 'string') return true
           applyChannelConfig({ ...configState.channel, [subProp]: val })
-          return true
-        },
-      })
-    }
-    if (prop === 'broadcast') {
-      return new Proxy({} as ConfigUser['broadcast'], {
-        get(_t, subProp) {
-          return configState.broadcast[subProp as keyof ConfigUser['broadcast']]
-        },
-        set(_t, subProp, val) {
-          if (typeof subProp !== 'string') return true
-          applyBroadcastConfig({ ...configState.broadcast, [subProp]: val })
           return true
         },
       })
@@ -462,8 +430,6 @@ function applyUserConfig(prop: string | symbol, val: unknown) {
     applyStreamConfig(val)
   } else if (prop === 'channel') {
     applyChannelConfig(val)
-  } else if (prop === 'broadcast') {
-    applyBroadcastConfig(val)
   } else if (prop === 'extensions') {
     assertUsage(Array.isArray(val), 'config.extensions should be an array')
     configState.extensions = val as TelefuncServerExtension[]
@@ -516,22 +482,6 @@ function applyChannelConfig(val: unknown): void {
     }
   }
   configState.channel = next
-}
-
-function applyBroadcastConfig(val: unknown): void {
-  assertUsage(isObject(val), 'config.broadcast should be an object')
-  for (const [key, value] of Object.entries(val)) {
-    if (key === 'transport') {
-      assertUsage(
-        isObject(value) && typeof (value as any).send === 'function' && typeof (value as any).listen === 'function',
-        'config.broadcast.transport must be a BroadcastTransport with send() and listen() methods',
-      )
-      configState.broadcast.transport = value as BroadcastTransport
-      installBroadcastAdapter(() => new DefaultBroadcastAdapter(value as BroadcastTransport))
-    } else {
-      assertUsage(false, `Unknown config.broadcast.${key}`)
-    }
-  }
 }
 
 function validateStreamTransport(val: unknown, configPath: string): StreamTransport {

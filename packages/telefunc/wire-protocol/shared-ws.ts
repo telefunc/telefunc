@@ -25,6 +25,7 @@ export type {
 }
 
 import { assert } from '../utils/assert.js'
+import { decodeOrderingFrame, encodeOrderingFrame } from './ordering-frame.js'
 import type { ChannelTransports } from './constants.js'
 
 // ===== Wire protocol =====
@@ -469,25 +470,11 @@ function decodePublishText(wire: string): { text: string; info: WirePublishInfo 
   return { text: wire.slice(nl + 1), info: { seq, timestamp } }
 }
 
-// ===== Binary publish info helpers =====
-// Format: [4 bytes: seq as u32 LE][8 bytes: timestamp as f64 LE][binary data]
-
-const PUBLISH_BINARY_HEADER = 12
-
 function encodePublishBinary(data: Uint8Array, info: WirePublishInfo): Uint8Array {
-  const result = new Uint8Array(PUBLISH_BINARY_HEADER + data.byteLength)
-  const view = new DataView(result.buffer)
-  view.setUint32(0, info.seq, true)
-  view.setFloat64(4, info.timestamp, true)
-  result.set(data, PUBLISH_BINARY_HEADER)
-  return result
+  return encodeOrderingFrame(data, info)
 }
 
 function decodePublishBinary(wire: Uint8Array): { data: Uint8Array; info: WirePublishInfo } {
-  assert(wire.byteLength >= PUBLISH_BINARY_HEADER, 'PUBLISH_BINARY frame too short for info header')
-  const view = new DataView(wire.buffer, wire.byteOffset, wire.byteLength)
-  const seq = view.getUint32(0, true)
-  const timestamp = view.getFloat64(4, true)
-  assert(Number.isFinite(seq) && Number.isFinite(timestamp), 'PUBLISH_BINARY frame info must be finite numbers')
-  return { data: wire.subarray(PUBLISH_BINARY_HEADER), info: { seq, timestamp } }
+  const { payload, info } = decodeOrderingFrame(wire)
+  return { data: payload, info }
 }
