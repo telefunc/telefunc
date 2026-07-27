@@ -12,6 +12,7 @@ import {
   ROOM_MEMBER_TTL_MS,
   ROOM_ID_MAX_BYTES,
   ROOM_PENDING_ACK_DMS_MAX,
+  ROOM_SUBSCRIPTION_ESTABLISH_TIMEOUT_MS,
   ROOM_TAIL_ATTACH_TIMEOUT_MS,
   ROOM_TAIL_HOLD_BYTES_MAX,
   ROOM_TRACKS_PER_MEMBER_MAX,
@@ -47,6 +48,11 @@ import type { ChannelPublishInfo } from '../channel.js'
 import { disposeRoomBackend, getRoomBackend, installRoomBackend } from '../backend/install.js'
 import { MemoryRoomBackend, MemoryRoomBackendState } from '../backend/memory/backend.js'
 import type { LaneId, LaneSubscription, ReadinessState } from '../backend/spi.js'
+import {
+  SUBSCRIPTION_RETRY_ATTEMPTS,
+  SUBSCRIPTION_RETRY_BASE_MS,
+  SUBSCRIPTION_RETRY_MAX_MS,
+} from '../server/adapter/cloudflare/room/subscription.js'
 
 let roomBackend: MemoryRoomBackend
 let roomBackendState: MemoryRoomBackendState
@@ -1887,6 +1893,53 @@ class ControlledLaneSubscription implements LaneSubscription {
   }
 }
 
+class StalledCleanupLaneSubscription implements LaneSubscription {
+  readonly ready = Promise.resolve()
+  readonly remoteCleanup = new Promise<void>(() => {})
+  unsubscribeCalls = 0
+  private _state: ReadinessState = 'ready'
+  private readonly _listeners = new Set<(state: ReadinessState) => void>()
+
+  state(): ReadinessState {
+    return this._state
+  }
+
+  onStateChange(callback: (state: ReadinessState) => void): () => void {
+    this._listeners.add(callback)
+    return () => this._listeners.delete(callback)
+  }
+
+  unsubscribe(): Promise<void> {
+    this.unsubscribeCalls++
+    this._state = 'closed'
+    for (const listener of [...this._listeners]) listener('closed')
+    return this.remoteCleanup
+  }
+}
+
+class HungLaneSubscription implements LaneSubscription {
+  readonly ready = new Promise<void>(() => {})
+  unsubscribeCalls = 0
+  private _state: ReadinessState = 'establishing'
+  private readonly _listeners = new Set<(state: ReadinessState) => void>()
+
+  state(): ReadinessState {
+    return this._state
+  }
+
+  onStateChange(callback: (state: ReadinessState) => void): () => void {
+    this._listeners.add(callback)
+    return () => this._listeners.delete(callback)
+  }
+
+  unsubscribe(): Promise<void> {
+    this.unsubscribeCalls++
+    this._state = 'closed'
+    for (const listener of [...this._listeners]) listener('closed')
+    return Promise.resolve()
+  }
+}
+
 async function expectEventually(assertion: () => void): Promise<void> {
   let error: unknown
   for (let attempt = 0; attempt < 20; attempt++) {
@@ -1902,6 +1955,17 @@ async function expectEventually(assertion: () => void): Promise<void> {
 }
 
 describe('room stub channel', () => {
+  it('keeps the Room establishment deadline above the Cloudflare retry envelope with operation margin', () => {
+    const maximumJitter = 1.5
+    const retryBackoffEnvelope = Array.from({ length: SUBSCRIPTION_RETRY_ATTEMPTS - 1 }, (_, attempt) =>
+      Math.min(SUBSCRIPTION_RETRY_MAX_MS, Math.round(SUBSCRIPTION_RETRY_BASE_MS * 2 ** attempt * maximumJitter)),
+    ).reduce((total, delay) => total + delay, 0)
+
+    expect(ROOM_SUBSCRIPTION_ESTABLISH_TIMEOUT_MS).toBeGreaterThanOrEqual(
+      retryBackoffEnvelope + SUBSCRIPTION_RETRY_MAX_MS,
+    )
+  })
+
   function attachPeer(stub: RoomStubChannel) {
     const frames: Uint8Array[] = []
     stub._attachPeer(
@@ -3019,6 +3083,170 @@ describe('room stub channel', () => {
     }
   })
 
+  it('starts a fresh generation while the stopped subscription remote cleanup remains pending', async () => {
+    const realSubscribe = roomBackend.subscribeLane.bind(roomBackend)
+    const stalled = new StalledCleanupLaneSubscription()
+    let semanticCalls = 0
+    let unlistenSecond: (() => void) | undefined
+    const spy = vi.spyOn(roomBackend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
+      if (lane.kind !== 'semantic') return realSubscribe(roomId, inc, lane, receiver)
+      semanticCalls++
+      return semanticCalls === 1 ? stalled : realSubscribe(roomId, inc, lane, receiver)
+    })
+    try {
+      const room = (await Room.create('subscription-stalled-cleanup')) as ServerRoom
+      const unlistenFirst = room.subscribe(() => {})
+      await stalled.ready
+
+      unlistenFirst()
+      unlistenSecond = room.subscribe(() => {})
+      await settle()
+
+      expect(stalled.unsubscribeCalls).toBe(1)
+      expect(stalled.state()).toBe('closed')
+      expect(semanticCalls).toBe(2)
+
+      const replay = room._replayRetainedText(new RoomStubChannel(room), false, new Set())
+      const outcome = await Promise.race([
+        replay.then(
+          () => 'resolved' as const,
+          () => 'rejected' as const,
+        ),
+        new Promise<'pending'>((resolve) => setTimeout(() => resolve('pending'), 50)),
+      ])
+      expect(outcome).toBe('resolved')
+    } finally {
+      unlistenSecond?.()
+      spy.mockRestore()
+    }
+  })
+
+  it('retires a hung establishment attempt and replans before resolving retained replay', async () => {
+    vi.useFakeTimers()
+    const realSubscribe = roomBackend.subscribeLane.bind(roomBackend)
+    const report = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const hung = new HungLaneSubscription()
+    let semanticCalls = 0
+    let unlisten: (() => void) | undefined
+    const spy = vi.spyOn(roomBackend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
+      if (lane.kind !== 'semantic') return realSubscribe(roomId, inc, lane, receiver)
+      semanticCalls++
+      return semanticCalls === 1 ? hung : realSubscribe(roomId, inc, lane, receiver)
+    })
+    try {
+      const room = (await Room.create('subscription-establishment-hang-recovery')) as ServerRoom
+      unlisten = room.subscribe(() => {})
+      const replay = room._replayRetainedText(new RoomStubChannel(room), false, new Set())
+      const replayOutcome = replay.then(
+        () => ({ state: 'resolved' as const }),
+        (error: unknown) => ({ state: 'rejected' as const, error }),
+      )
+
+      await vi.advanceTimersByTimeAsync(ROOM_SUBSCRIPTION_ESTABLISH_TIMEOUT_MS - 1)
+      expect(semanticCalls).toBe(1)
+      await vi.advanceTimersByTimeAsync(1)
+
+      expect(semanticCalls).toBe(2)
+      expect(hung.unsubscribeCalls).toBe(1)
+      expect(report).toHaveBeenCalledTimes(1)
+      expect(String(report.mock.calls[0]?.[0])).toContain('establishment did not settle within the deadline')
+      expect(await replayOutcome).toEqual({ state: 'resolved' })
+    } finally {
+      unlisten?.()
+      spy.mockRestore()
+      report.mockRestore()
+      vi.useRealTimers()
+    }
+  })
+
+  it('replaces a subscription whose renewal stays lost beyond the establishment deadline', async () => {
+    vi.useFakeTimers()
+    const realSubscribe = roomBackend.subscribeLane.bind(roomBackend)
+    const report = vi.spyOn(console, 'error').mockImplementation(() => {})
+    let controlled!: ControlledLaneSubscription
+    let semanticCalls = 0
+    let unlisten: (() => void) | undefined
+    const spy = vi.spyOn(roomBackend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
+      if (lane.kind !== 'semantic') return realSubscribe(roomId, inc, lane, receiver)
+      semanticCalls++
+      if (semanticCalls !== 1) return realSubscribe(roomId, inc, lane, receiver)
+      controlled = new ControlledLaneSubscription(() => realSubscribe(roomId, inc, lane, receiver))
+      controlled.establish()
+      return controlled
+    })
+    try {
+      const room = (await Room.create('subscription-renewal-hang')) as ServerRoom
+      unlisten = room.subscribe(() => {})
+      await controlled.ready
+
+      await controlled.lose()
+      const replay = room._replayRetainedText(new RoomStubChannel(room), false, new Set())
+      const replayOutcome = replay.then(
+        () => ({ state: 'resolved' as const }),
+        (error: unknown) => ({ state: 'rejected' as const, error }),
+      )
+      await vi.advanceTimersByTimeAsync(ROOM_SUBSCRIPTION_ESTABLISH_TIMEOUT_MS)
+
+      expect(semanticCalls).toBe(2)
+      expect(report).toHaveBeenCalledTimes(2)
+      expect(String(report.mock.calls[0]?.[0])).toContain('subscription lost')
+      expect(String(report.mock.calls[1]?.[0])).toContain('establishment did not settle within the deadline')
+      expect(await replayOutcome).toEqual({ state: 'resolved' })
+    } finally {
+      unlisten?.()
+      spy.mockRestore()
+      report.mockRestore()
+      vi.useRealTimers()
+    }
+  })
+
+  it('rejects retained replay after the initial hung establishment and five hung replacements', async () => {
+    vi.useFakeTimers()
+    const realSubscribe = roomBackend.subscribeLane.bind(roomBackend)
+    const report = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const hung: HungLaneSubscription[] = []
+    let semanticCalls = 0
+    let unlisten: (() => void) | undefined
+    const spy = vi.spyOn(roomBackend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
+      if (lane.kind !== 'semantic') return realSubscribe(roomId, inc, lane, receiver)
+      semanticCalls++
+      const subscription = new HungLaneSubscription()
+      hung.push(subscription)
+      return subscription
+    })
+    try {
+      const room = (await Room.create('subscription-establishment-hang-exhaustion')) as ServerRoom
+      unlisten = room.subscribe(() => {})
+      const replay = room._replayRetainedText(new RoomStubChannel(room), false, new Set())
+      const replayOutcome = replay.then(
+        () => ({ state: 'resolved' as const }),
+        (error: unknown) => ({ state: 'rejected' as const, error }),
+      )
+
+      for (let attempt = 0; attempt <= 5; attempt++) {
+        await vi.advanceTimersByTimeAsync(ROOM_SUBSCRIPTION_ESTABLISH_TIMEOUT_MS)
+      }
+
+      expect(semanticCalls).toBe(6)
+      expect(hung.map((subscription) => subscription.unsubscribeCalls)).toEqual([1, 1, 1, 1, 1, 1])
+      expect(report).toHaveBeenCalledTimes(6)
+      expect(String(report.mock.calls[0]?.[0])).toContain('establishment did not settle within the deadline')
+      expect(String(report.mock.calls.at(-1)?.[0])).toContain(
+        'Room backend subscription failed after 5 replacement attempts',
+      )
+      const outcome = await replayOutcome
+      expect(outcome.state).toBe('rejected')
+      if (outcome.state !== 'rejected') throw new Error(`Expected retained replay to reject, got ${outcome.state}`)
+      expect(outcome.error).toBeInstanceOf(Error)
+      expect(String(outcome.error)).toContain('Room backend subscription failed after 5 replacement attempts')
+    } finally {
+      unlisten?.()
+      spy.mockRestore()
+      report.mockRestore()
+      vi.useRealTimers()
+    }
+  })
+
   it('waits for the text subscription to go live before replaying retained, so a publish racing the subscribe is not lost', async () => {
     const gate = gateNewSubscriptions()
     const { serverRoom, stub, peer } = await createServedRoom('ready-handoff-text')
@@ -3725,12 +3953,38 @@ describe('liveness', () => {
 
 describe('implicit memory backend', () => {
   it('keeps Room zero-configuration while explicit backend installation remains opt-in', async () => {
-    await disposeRoomBackend()
+    vi.useFakeTimers()
+    const report = vi.spyOn(console, 'error').mockImplementation(() => {})
+    let unlisten: (() => void) | undefined
+    let restoreSubscribe = () => {}
+    try {
+      await disposeRoomBackend()
 
-    const room = await Room.create('zero-config')
-    const participant = await room.join({ meta: { name: 'Alice' } })
-    expect(await participant.publish('hello')).toMatchObject({ seq: 1 })
-    expect(getRoomBackend()).toBeInstanceOf(MemoryRoomBackend)
+      const room = await Room.create('zero-config')
+      const backend = getRoomBackend()
+      expect(backend).toBeInstanceOf(MemoryRoomBackend)
+      const subscribe = vi.spyOn(backend, 'subscribeLane')
+      restoreSubscribe = () => subscribe.mockRestore()
+      const received: unknown[] = []
+      unlisten = room.subscribe((data) => received.push(data))
+      const participant = await room.join({ meta: { name: 'Alice' } })
+      expect(await participant.publish('before-deadline')).toMatchObject({ seq: 1 })
+
+      await vi.advanceTimersByTimeAsync(6 * ROOM_SUBSCRIPTION_ESTABLISH_TIMEOUT_MS + 1)
+      expect(await participant.publish('after-deadline')).toMatchObject({ seq: 2 })
+
+      expect(received).toEqual(['before-deadline', 'after-deadline'])
+      expect(subscribe.mock.calls.filter(([, , lane]) => lane.kind === 'semantic')).toHaveLength(1)
+      expect(
+        report.mock.calls.some(([error]) => String(error).includes('establishment did not settle within the deadline')),
+      ).toBe(false)
+      await participant.leave()
+    } finally {
+      unlisten?.()
+      restoreSubscribe()
+      report.mockRestore()
+      vi.useRealTimers()
+    }
   })
 })
 

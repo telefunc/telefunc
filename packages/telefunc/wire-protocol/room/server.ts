@@ -17,6 +17,7 @@ import {
   ROOM_ID_MAX_BYTES,
   ROOM_MEMBER_KV_TTL_MS,
   ROOM_MEMBER_TTL_MS,
+  ROOM_SUBSCRIPTION_ESTABLISH_TIMEOUT_MS,
   ROOM_TAIL_ATTACH_TIMEOUT_MS,
   ROOM_TRACKS_PER_MEMBER_MAX,
 } from '../constants.js'
@@ -2414,8 +2415,7 @@ class SubSlot {
   private _readiness = READY_GENERATION
   private _replanQueued = false
   private _replanAttempts = 0
-  private _cleanup = Promise.resolve()
-  private _cleanupPending = false
+  private _establishmentTimer: ReturnType<typeof setTimeout> | null = null
 
   constructor(private readonly _label: string) {}
 
@@ -2454,7 +2454,7 @@ class SubSlot {
 
   private _start(): void {
     const subscribe = this._subscribe
-    if (!this._wanted || !subscribe || this._subscription || this._cleanupPending) return
+    if (!this._wanted || !subscribe || this._subscription) return
     let subscription: LaneSubscription
     try {
       subscription = subscribe()
@@ -2463,14 +2463,22 @@ class SubSlot {
       return
     }
     this._subscription = subscription
-    this._unobserve = subscription.onStateChange((state) => this._onStateChange(subscription, state))
-    const state = subscription.state()
-    if (state === 'ready') this._becameReady(subscription)
-    else if (state === 'closed') this._closed(subscription)
-    subscription.ready.then(
-      () => this._becameReady(subscription),
-      (error: unknown) => this._failedCurrent(subscription, error),
-    )
+    // Every pending generation has a bounded settlement owner: this per-attempt watchdog owns backend
+    // establishment/renewal; a local replan microtask owns replacement; exhaustion rejects; stop resolves.
+    // Retired-subscription cleanup is deliberately never a readiness owner or gate.
+    this._armEstablishmentDeadline(subscription)
+    try {
+      this._unobserve = subscription.onStateChange((state) => this._onStateChange(subscription, state))
+      subscription.ready.then(
+        () => this._becameReady(subscription),
+        (error: unknown) => this._failedCurrent(subscription, error),
+      )
+      const state = subscription.state()
+      if (state === 'ready') this._becameReady(subscription)
+      else if (state === 'closed') this._closed(subscription)
+    } catch (error) {
+      this._failedCurrent(subscription, error)
+    }
   }
 
   private _onStateChange(subscription: LaneSubscription, state: ReadinessState): void {
@@ -2479,16 +2487,26 @@ class SubSlot {
       this._becameReady(subscription)
       return
     }
-    if (state === 'lost') {
+    if (state === 'lost' || state === 'establishing') {
       this._markUnavailable()
-      reportRoomError(new Error(`Room backend subscription lost: ${this._label}`))
+      this._armEstablishmentDeadline(subscription)
+      if (state === 'lost') reportRoomError(new Error(`Room backend subscription lost: ${this._label}`))
       return
     }
     if (state === 'closed') this._closed(subscription)
   }
 
   private _becameReady(subscription: LaneSubscription): void {
-    if (this._subscription !== subscription || subscription.state() !== 'ready') return
+    if (this._subscription !== subscription) return
+    let state: ReadinessState
+    try {
+      state = subscription.state()
+    } catch (error) {
+      this._failedCurrent(subscription, error)
+      return
+    }
+    if (state !== 'ready') return
+    this._cancelEstablishmentDeadline()
     this._replanAttempts = 0
     this._resolveReady()
   }
@@ -2502,6 +2520,7 @@ class SubSlot {
 
   private _failedCurrent(subscription: LaneSubscription, error: unknown): void {
     if (this._subscription !== subscription) return
+    this._markUnavailable()
     this._clearCurrent()
     this._failed(error)
   }
@@ -2553,20 +2572,66 @@ class SubSlot {
   }
 
   private _clearCurrent(): void {
-    this._unobserve?.()
+    this._cancelEstablishmentDeadline()
+    const unobserve = this._unobserve
     this._unobserve = null
     this._subscription = null
+    try {
+      unobserve?.()
+    } catch (error) {
+      reportRoomError(error)
+    }
+  }
+
+  private _armEstablishmentDeadline(subscription: LaneSubscription): void {
+    if (this._subscription !== subscription || this._establishmentTimer !== null) return
+    this._establishmentTimer = unrefTimer(
+      setTimeout(() => this._establishmentExpired(subscription), ROOM_SUBSCRIPTION_ESTABLISH_TIMEOUT_MS),
+    )
+  }
+
+  private _cancelEstablishmentDeadline(): void {
+    if (this._establishmentTimer === null) return
+    clearTimeout(this._establishmentTimer)
+    this._establishmentTimer = null
+  }
+
+  private _establishmentExpired(subscription: LaneSubscription): void {
+    if (this._subscription !== subscription) return
+    this._establishmentTimer = null
+    let state: ReadinessState
+    try {
+      state = subscription.state()
+    } catch {
+      state = 'establishing'
+    }
+    if (state === 'ready') {
+      this._becameReady(subscription)
+      return
+    }
+    if (state === 'closed') {
+      this._closed(subscription)
+      return
+    }
+    const failure = new Error(
+      `Room backend subscription establishment did not settle within the deadline (${this._label})`,
+    )
+    this._clearCurrent()
+    this._queueCleanup(subscription)
+    this._failed(failure)
   }
 
   private _queueCleanup(subscription: LaneSubscription): void {
-    this._cleanupPending = true
-    this._cleanup = this._cleanup
-      .then(() => subscription.unsubscribe())
-      .catch(reportRoomError)
-      .then(() => {
-        this._cleanupPending = false
-        this._start()
-      })
+    // Teardown belongs to the retired subscription. A slow remote unsubscribe neither owns nor gates
+    // readiness of a newly wanted generation, and cannot delay teardown of another retired subscription.
+    let cleanup: Promise<void>
+    try {
+      cleanup = subscription.unsubscribe()
+    } catch (error) {
+      reportRoomError(error)
+      return
+    }
+    void cleanup.catch(reportRoomError)
   }
 }
 

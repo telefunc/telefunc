@@ -105,6 +105,8 @@ export type CommitAccepted = {
 export type CommitResult = CommitAccepted | { stale: true }
 
 export type ReadinessState = 'establishing' | 'ready' | 'lost' | 'closed'
+// The SPI deliberately supplies no settlement deadline: initial establishment (`ready`) and renewal
+// after `lost` may remain pending indefinitely. Consumers that require liveness must bound both.
 export type LaneSubscription = {
   ready: Promise<void> // FIRST establishment only; rejects on initial failure (fail-closed)
   state(): ReadinessState
