@@ -5,8 +5,10 @@ import type {
   BackendReceiver,
   BackendSubscription,
   SubscriptionAttempt,
+  SubscriptionBinding,
   SubscriptionDriver,
   SubscriptionState,
+  SubscriptionAttemptState,
 } from './spi.js'
 
 /** One establishment attempt plus five bounded replacements. A continuously hung source therefore
@@ -32,29 +34,33 @@ class SubscriptionManager<Source> {
   readonly #slots = new Map<string, SubscriptionSlot<Source>>()
   readonly #driver: SubscriptionDriver<Source>
   readonly #reportError: (error: unknown) => void
-  readonly #label: (source: Source) => string
+  readonly #sourceKey: (source: Source) => string
 
   constructor(
     driver: SubscriptionDriver<Source>,
     reportError: (error: unknown) => void = console.error,
-    label: (source: Source) => string = String,
+    sourceKey: (source: Source) => string = String,
   ) {
     this.#driver = driver
     this.#reportError = reportError
-    this.#label = label
+    this.#sourceKey = sourceKey
   }
 
-  subscribe(key: string, source: Source, receiver: BackendReceiver): BackendSubscription {
+  subscribe(source: Source, receiver: BackendReceiver): BackendSubscription {
+    const binding = this.#driver.bind(source)
+    assertBinding(binding)
+    const sourceKey = this.#sourceKey(source)
+    const key = JSON.stringify([sourceKey, binding.partition])
     let slot = this.#slots.get(key)
     if (slot === undefined) {
-      slot = new SubscriptionSlot(source, this.#driver, this.#reportError, this.#label, () => this.#slots.delete(key))
+      let created!: SubscriptionSlot<Source>
+      created = new SubscriptionSlot(source, binding, this.#reportError, sourceKey, () => {
+        if (this.#slots.get(key) === created) this.#slots.delete(key)
+      })
+      slot = created
       this.#slots.set(key, slot)
     }
     return slot.attach(receiver)
-  }
-
-  receiverCount(key: string): number {
-    return this.#slots.get(key)?.receiverCount ?? 0
   }
 
   /** Terminally removes sources the backend deliberately destroyed. Unlike an upstream `closed`
@@ -76,9 +82,9 @@ class SubscriptionManager<Source> {
 
 class SubscriptionSlot<Source> {
   readonly #source: Source
-  readonly #driver: SubscriptionDriver<Source>
+  readonly #binding: SubscriptionBinding
   readonly #reportError: (error: unknown) => void
-  readonly #labelSource: (source: Source) => string
+  readonly #sourceKey: string
   readonly #onEmpty: () => void
   readonly #receivers = new Map<symbol, BackendReceiver>()
   readonly #listeners = new Set<(state: SubscriptionState) => void>()
@@ -94,20 +100,16 @@ class SubscriptionSlot<Source> {
 
   constructor(
     source: Source,
-    driver: SubscriptionDriver<Source>,
+    binding: SubscriptionBinding,
     reportError: (error: unknown) => void,
-    labelSource: (source: Source) => string,
+    sourceKey: string,
     onEmpty: () => void,
   ) {
     this.#source = source
-    this.#driver = driver
+    this.#binding = binding
     this.#reportError = reportError
-    this.#labelSource = labelSource
+    this.#sourceKey = sourceKey
     this.#onEmpty = onEmpty
-  }
-
-  get receiverCount(): number {
-    return this.#receivers.size
   }
 
   get source(): Source {
@@ -128,7 +130,13 @@ class SubscriptionSlot<Source> {
     }
     let attached = true
     const listeners = new Set<(state: SubscriptionState) => void>()
+    let previousState = this.#state
+    let awaitingInitialOutcome = previousState === 'establishing'
     const unobserve = this.observe((state) => {
+      const suppressInitialReady = awaitingInitialOutcome && previousState === 'establishing' && state === 'ready'
+      awaitingInitialOutcome = false
+      previousState = state
+      if (suppressInitialReady) return
       for (const listener of listeners) listener(state)
     })
     const slot = this
@@ -177,11 +185,14 @@ class SubscriptionSlot<Source> {
 
   #start(): void {
     if (this.#stopped || this.#receivers.size === 0 || this.#attempt !== null) return
+    if (!this.#bindingIsValid()) {
+      this.#ownershipTerminated()
+      return
+    }
     const epoch = ++this.#epoch
     let attempt: SubscriptionAttempt
     try {
-      attempt = this.#driver.open(
-        this.#source,
+      attempt = this.#binding.open(
         async (payload, info) => {
           if (epoch !== this.#epoch || this.#stopped) return
           await Promise.all(
@@ -207,13 +218,18 @@ class SubscriptionSlot<Source> {
       const state = attempt.state()
       if (state === 'ready') this.#becameReady(attempt)
       else if (state === 'closed') this.#closed(attempt)
+      else if (state === 'terminated') this.#terminated(attempt)
     } catch (error) {
       this.#failedCurrent(attempt, error)
     }
   }
 
-  #onStateChange(attempt: SubscriptionAttempt, state: SubscriptionState): void {
+  #onStateChange(attempt: SubscriptionAttempt, state: SubscriptionAttemptState): void {
     if (this.#attempt !== attempt) return
+    if (state === 'terminated') {
+      this.#terminated(attempt)
+      return
+    }
     if (state === 'ready') {
       this.#becameReady(attempt)
       return
@@ -229,7 +245,7 @@ class SubscriptionSlot<Source> {
 
   #becameReady(attempt: SubscriptionAttempt): void {
     if (this.#attempt !== attempt) return
-    let state: SubscriptionState
+    let state: SubscriptionAttemptState
     try {
       state = attempt.state()
     } catch (error) {
@@ -251,6 +267,23 @@ class SubscriptionSlot<Source> {
     this.#scheduleReplan(new Error(`Backend subscription closed: ${this.#label}`))
   }
 
+  #terminated(attempt: SubscriptionAttempt): void {
+    if (this.#attempt !== attempt) return
+    this.#ownershipTerminated(attempt)
+  }
+
+  #ownershipTerminated(attempt: SubscriptionAttempt | null = this.#attempt): void {
+    if (attempt !== null && this.#attempt !== attempt) return
+    const terminal = new Error(`Backend subscription ownership terminated: ${this.#label}`)
+    const current = this.#attempt
+    this.#stopped = true
+    this.#transition('closed')
+    this.#clearCurrent()
+    if (current !== null) void this.#cleanup(current)
+    this.#rejectReady(terminal)
+    this.#onEmpty()
+  }
+
   #failedCurrent(attempt: SubscriptionAttempt, error: unknown): void {
     if (this.#attempt !== attempt) {
       this.#reportError(error)
@@ -269,6 +302,10 @@ class SubscriptionSlot<Source> {
 
   #scheduleReplan(cause: Error): 'scheduled' | 'terminal' | 'inactive' {
     if (this.#stopped || this.#receivers.size === 0 || this.#replanQueued) return 'inactive'
+    if (!this.#bindingIsValid()) {
+      this.#ownershipTerminated()
+      return 'terminal'
+    }
     if (this.#replanAttempts >= SUBSCRIPTION_REPLAN_LIMIT) {
       const terminal = new Error(
         `Backend subscription failed after ${SUBSCRIPTION_REPLAN_LIMIT} replacement attempts (${this.#label}): ${cause.message}`,
@@ -341,7 +378,7 @@ class SubscriptionSlot<Source> {
   #establishmentExpired(attempt: SubscriptionAttempt): void {
     if (this.#attempt !== attempt) return
     this.#establishmentTimer = null
-    let state: SubscriptionState
+    let state: SubscriptionAttemptState
     try {
       state = attempt.state()
     } catch {
@@ -353,6 +390,10 @@ class SubscriptionSlot<Source> {
     }
     if (state === 'closed') {
       this.#closed(attempt)
+      return
+    }
+    if (state === 'terminated') {
+      this.#terminated(attempt)
       return
     }
     const failure = new Error(`Backend subscription establishment did not settle within the deadline (${this.#label})`)
@@ -370,7 +411,28 @@ class SubscriptionSlot<Source> {
   }
 
   get #label(): string {
-    return this.#labelSource(this.#source)
+    return this.#sourceKey
+  }
+
+  #bindingIsValid(): boolean {
+    try {
+      return this.#binding.valid() === true
+    } catch (error) {
+      this.#reportError(error)
+      return false
+    }
+  }
+}
+
+function assertBinding(binding: SubscriptionBinding): void {
+  if (
+    binding === null ||
+    typeof binding !== 'object' ||
+    typeof binding.partition !== 'string' ||
+    typeof binding.valid !== 'function' ||
+    typeof binding.open !== 'function'
+  ) {
+    throw new Error('SubscriptionDriver.bind() must return a string partition plus valid() and open() functions')
   }
 }
 
