@@ -580,6 +580,7 @@ class CloudflareConformanceBackend implements RoomBackendSpi {
           const error = await this.#session.unsubscribeSubscription(id)
           if (error !== null) throw new Error(error)
         } finally {
+          this.#subscriptions.delete(id)
           unbindRemoteReceiver(receiver, id)
         }
       },

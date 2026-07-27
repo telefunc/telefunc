@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Miniflare } from 'miniflare'
 import { disposeRoomBackend, installRoomBackend } from '../../install.js'
 import type { LaneId, LaneReceiver, ReadinessState, RoomBackendSpi } from '../../spi.js'
@@ -180,18 +180,51 @@ describe('cloudflare — production session-manager mechanics', () => {
     }
   })
 
-  it('recovers a public Room lane after a real workerd subscription reports lost then ready', async () => {
+  it('recovers a public Room lane after real workerd loss and a synchronous first replacement failure', async () => {
     const roomId = nextId('managed-room-renewal')
     const states: ReadinessState[] = []
     const observed: string[] = []
     const remoteReceivers = new Set<LaneReceiver>()
-    const roomBackend = roomCapableBackend(
+    const report = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const baseRoomBackend = roomCapableBackend(
       fx.backend,
       (id, lane, state) => {
         if (id === roomId && lane.kind === 'semantic') states.push(state)
       },
       remoteReceivers,
     )
+    let semanticCalls = 0
+    let closeQueued = false
+    let semanticSubscription: ReturnType<RoomBackendSpi['subscribeLane']> | undefined
+    const roomBackend = new Proxy(baseRoomBackend, {
+      get(target, property) {
+        if (property !== 'subscribeLane') {
+          const value = Reflect.get(target, property, target)
+          return typeof value === 'function' ? value.bind(target) : value
+        }
+        return (id: string, inc: string, lane: LaneId, receiver: LaneReceiver) => {
+          if (id === roomId && lane.kind === 'semantic') {
+            semanticCalls++
+            if (semanticCalls === 2) throw new Error('synthetic workerd replacement subscribe failure')
+          }
+          const subscription = target.subscribeLane(id, inc, lane, receiver)
+          if (id === roomId && lane.kind === 'semantic') {
+            semanticSubscription = subscription
+            if (semanticCalls === 1) {
+              subscription.onStateChange((state) => {
+                if (state === 'lost' && !closeQueued) {
+                  closeQueued = true
+                  // Preserve the real workerd lost event, then terminally end the old generation so
+                  // Room must execute its replacement-subscribe recovery branch.
+                  queueMicrotask(() => void subscription.unsubscribe().catch(() => {}))
+                }
+              })
+            }
+          }
+          return subscription
+        }
+      },
+    })
     installRoomBackend(() => roomBackend)
     try {
       const room = await Room.create(roomId)
@@ -204,12 +237,39 @@ describe('cloudflare — production session-manager mechanics', () => {
       // failures per route drive each production subscription through lost -> replacement -> ready.
       controls.forceFailures(4)
       await controls.advance(ROUTE_RENEW_EVERY_MS * 2)
-      expect(states).toEqual(['lost', 'ready'])
+      await waitUntil(async () => semanticCalls === 3 && semanticSubscription?.state() === 'ready')
+      states.push(semanticSubscription?.state() as ReadinessState)
+      expect(semanticCalls).toBe(3)
+      expect(states).toEqual(['lost', 'ready', 'closed', 'ready'])
+      expect(
+        report.mock.calls.some(([error]) => String(error).includes('synthetic workerd replacement subscribe failure')),
+      ).toBe(true)
 
       await Room.announce(roomId, 'after-recovery')
       expect(observed).toEqual(['before-loss', 'after-recovery'])
-      console.log(`[w5-integration] cloudflare-room-renewal states=${states.join(',')} delivered=${observed.length}`)
+      console.log(
+        `[w5-integration] cloudflare-room-renewal states=${states.join(',')} subscribeCalls=${semanticCalls} replacementFailures=1 delivered=${observed.length}`,
+      )
       await Room.close(roomId)
+    } finally {
+      report.mockRestore()
+      remoteReceivers.clear()
+      await disposeRoomBackend().catch(() => {})
+    }
+  })
+
+  it('closes an observed public Room on workerd without failure injection', async () => {
+    const roomId = nextId('managed-room-close-probe')
+    const remoteReceivers = new Set<LaneReceiver>()
+    const roomBackend = roomCapableBackend(fx.backend, () => {}, remoteReceivers)
+    installRoomBackend(() => roomBackend)
+    try {
+      const room = await Room.create(roomId)
+      const unlisten = room.onAnnounce(() => {})
+      await Room.announce(roomId, 'ready')
+      await Room.close(roomId)
+      expect((await fx.backend.readHead(roomId))?.head).toMatchObject({ state: 'closed', currentInc: null })
+      unlisten()
     } finally {
       remoteReceivers.clear()
       await disposeRoomBackend().catch(() => {})

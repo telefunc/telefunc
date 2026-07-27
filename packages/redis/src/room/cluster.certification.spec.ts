@@ -239,7 +239,7 @@ describe.skipIf(nodes === undefined)('RedisRoomBackend real three-master Cluster
     }
   })
 
-  it('recovers a public Room lane after the real Cluster subscriber goes lost then ready', async () => {
+  it('recovers a public Room lane after real Cluster loss and a synchronous first replacement failure', async () => {
     const first = nodes?.[0] as NodeAddress
     const fixture = await createRedisFixture(`redis://${first.host}:${first.port}`, {
       clusterNodes: nodes as NodeAddress[],
@@ -247,41 +247,110 @@ describe.skipIf(nodes === undefined)('RedisRoomBackend real three-master Cluster
     const roomId = `cluster-room-renewal-${Date.now()}`
     const states: ReadinessState[] = []
     const observed: string[] = []
+    const report = vi.spyOn(console, 'error').mockImplementation(() => {})
+    let semanticCalls = 0
+    let retiredSubscription: ReturnType<RedisRoomBackendType['subscribeLane']> | undefined
     let semanticSubscription: ReturnType<RedisRoomBackendType['subscribeLane']> | undefined
+    let controlSubscription: ReturnType<RedisRoomBackendType['subscribeLane']> | undefined
     const realSubscribe = fixture.backend.subscribeLane.bind(fixture.backend)
     const subscribeSpy = vi.spyOn(fixture.backend, 'subscribeLane').mockImplementation((id, inc, lane, receiver) => {
-      const subscription = realSubscribe(id, inc, lane, receiver)
       if (id === roomId && lane.kind === 'semantic') {
-        semanticSubscription = subscription
-        subscription.onStateChange((state) => states.push(state))
+        semanticCalls++
+        if (semanticCalls === 2) throw new Error('synthetic Cluster replacement subscribe failure')
+        const subscription = realSubscribe(id, inc, lane, receiver)
+        if (semanticCalls !== 1) {
+          semanticSubscription = subscription
+          return subscription
+        }
+        retiredSubscription = subscription
+        let closed = false
+        let closeQueued = false
+        const listeners = new Set<(state: ReadinessState) => void>()
+        const emit = (state: ReadinessState) => {
+          states.push(state)
+          for (const listener of [...listeners]) listener(state)
+        }
+        subscription.onStateChange((state) => {
+          if (closed) return
+          emit(state)
+          if (state === 'lost' && !closeQueued) {
+            closeQueued = true
+            // Let every Room listener observe the real transport loss, then terminally retire the
+            // wrapper. The underlying Redis subscription stays owned until the replacement is ready,
+            // avoiding an UNSUBSCRIBE against the killed connection epoch.
+            queueMicrotask(() => {
+              closed = true
+              emit('closed')
+            })
+          }
+        })
+        const wrapped = {
+          ready: subscription.ready,
+          state: () => (closed ? 'closed' : subscription.state()),
+          onStateChange: (listener: (state: ReadinessState) => void) => {
+            listeners.add(listener)
+            return () => listeners.delete(listener)
+          },
+          unsubscribe: async () => {
+            if (!closed) {
+              closed = true
+              emit('closed')
+            }
+            await subscription.unsubscribe()
+          },
+        } satisfies ReturnType<RedisRoomBackendType['subscribeLane']>
+        semanticSubscription = wrapped
+        return wrapped
       }
+      const subscription = realSubscribe(id, inc, lane, receiver)
+      if (id === roomId && lane.kind === 'control') controlSubscription = subscription
       return subscription
     })
     installRoomBackend(() => fixture.backend)
     try {
       const room = await Room.create(roomId)
       room.onAnnounce((data) => observed.push(String(data)))
-      await waitFor(() => semanticSubscription?.state() === 'ready', 10_000)
+      await waitFor(
+        () => semanticSubscription?.state() === 'ready' && controlSubscription?.state() === 'ready',
+        10_000,
+      )
+      states.push(semanticSubscription?.state() as ReadinessState)
       await Room.announce(roomId, 'before-loss')
       await waitFor(() => observed.length === 1, 10_000)
 
       const before = await fixture.pubSubClientIdsForTest()
       expect(before).toHaveLength(1)
       await fixture.killSubscriberForTest(before[0])
-      await waitFor(() => states.includes('lost') && states.lastIndexOf('ready') > states.lastIndexOf('lost'), 10_000)
+      await waitFor(
+        () =>
+          semanticCalls === 3 &&
+          semanticSubscription?.state() === 'ready' &&
+          retiredSubscription?.state() === 'ready' &&
+          controlSubscription?.state() === 'ready',
+        10_000,
+      )
+      await retiredSubscription?.unsubscribe()
+      expect(semanticSubscription?.state()).toBe('ready')
+      states.push(semanticSubscription?.state() as ReadinessState)
       const after = await fixture.pubSubClientIdsForTest()
       expect(after).toHaveLength(1)
       expect(after[0]).not.toBe(before[0])
 
       await Room.announce(roomId, 'after-recovery')
       await waitFor(() => observed.length === 2, 10_000)
-      expect(states).toEqual(expect.arrayContaining(['lost', 'ready']))
+      expect(semanticCalls).toBe(3)
+      expect(states).toEqual(['ready', 'lost', 'closed', 'ready'])
+      expect(
+        report.mock.calls.some(([error]) => String(error).includes('synthetic Cluster replacement subscribe failure')),
+      ).toBe(true)
       expect(observed).toEqual(['before-loss', 'after-recovery'])
       console.log(
-        `[w5-integration] redis-room-renewal subscriberBefore=${before[0]} subscriberAfter=${after[0]} states=${states.join(',')} delivered=${observed.length}`,
+        `[w5-integration] redis-room-renewal subscriberBefore=${before[0]} subscriberAfter=${after[0]} states=${states.join(',')} subscribeCalls=${semanticCalls} replacementFailures=1 delivered=${observed.length}`,
       )
+      await Room.close(roomId)
     } finally {
       subscribeSpy.mockRestore()
+      report.mockRestore()
       await disposeRoomBackend().catch(() => {})
       await fixture.dispose()
     }

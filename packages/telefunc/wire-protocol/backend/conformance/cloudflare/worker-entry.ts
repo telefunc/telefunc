@@ -243,6 +243,7 @@ export class ConformanceSessionDurableObject extends DurableObject {
     } catch (error) {
       return error instanceof Error ? error.message : String(error)
     } finally {
+      this.#subscriptions.delete(subscriptionId)
       record.receiverState.attachments -= 1
       if (record.receiverState.attachments === 0) this.#receiverStates.delete(record.receiverId)
     }
