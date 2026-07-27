@@ -97,6 +97,7 @@ export type RoomStub = {
   telefuncRoomRunMaintenance(): Promise<{ prunedRoutes: number }>
   telefuncRoomSeedOrderWatermarkForTest(inc: string, lane: LaneId, seq: number, timestamp: number): Promise<void>
   telefuncRoomReconstructForTest(): Promise<void>
+  telefuncRoomDropRetainedChunksForTest(): Promise<void>
 }
 
 type SessionStub = {

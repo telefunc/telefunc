@@ -14,11 +14,13 @@ Use <Link href="/stream">Telefunc Stream</Link> on [Cloudflare](https://cloudfla
 // worker.ts
 // Environment: server
 
+import 'telefunc/async_hooks'
 import { Telefunc } from 'telefunc/cloudflare'
 
 const telefunc = new Telefunc()
 
 export const TelefuncDurableObject = telefunc.TelefuncDurableObject
+export const TelefuncRoomDurableObject = telefunc.TelefuncRoomDurableObject
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext) {
@@ -33,16 +35,20 @@ export default {
 ```jsonc
 // wrangler.jsonc
 {
+  // spellcheck-ignore  nodejs_als is Cloudflare's AsyncLocalStorage compatibility flag
+  "compatibility_flags": ["nodejs_als"],
   "durable_objects": {
     "bindings": [
-      { "name": "TelefuncDurableObject", "class_name": "TelefuncDurableObject" }
+      { "name": "TelefuncDurableObject", "class_name": "TelefuncDurableObject" },
+      { "name": "TelefuncRoomDurableObject", "class_name": "TelefuncRoomDurableObject" }
     ]
   },
   "kv_namespaces": [
     { "binding": "TelefuncKV", "id": "your-kv-namespace-id" }
   ],
   "migrations": [
-    { "tag": "v1", "new_classes": ["TelefuncDurableObject"] }
+    { "tag": "v1", "new_classes": ["TelefuncDurableObject"] },
+    { "tag": "v2", "new_sqlite_classes": ["TelefuncRoomDurableObject"] }
   ]
 }
 ```
@@ -52,7 +58,7 @@ export default {
 > - **Durable Objects** provide stateful compute: each channel lives on a Durable Object, which holds the connection and its state.
 > - **KV** provides shared storage: it's how stateless workers find the Durable Object that holds the state, no matter which worker a request lands on.
 >
-> Both bindings are required whenever you use `telefunc/cloudflare`. If your app doesn't use `Channel` or `BroadcastChannel`, there's no state to keep — you can skip both bindings and use <Link href="/serve"><code>serve()</code></Link> instead.
+> The session Durable Object and KV bindings are required whenever you use `telefunc/cloudflare`. Rooms additionally require the SQLite `TelefuncRoomDurableObject` binding shown above. `new Telefunc()` selects that Room backend automatically; don't call `installRoomBackend()` for the standard Cloudflare setup. A missing Room binding fails with a setup diagnostic instead of falling back to per-isolate memory. If your app doesn't use `Channel`, `Broadcast`, or `Room`, there's no state to keep — you can skip these bindings and use <Link href="/serve"><code>serve()</code></Link> instead.
 >
 > See <Link href="#architecture" /> for implementation details.
 
@@ -75,10 +81,9 @@ See: <Link href="/Telefunc" />.
 
 Telefunc uses [Durable Objects](https://developers.cloudflare.com/durable-objects/) for <Link href="/channel">channel</Link> state and <Link href="/channel#broadcast">broadcast</Link> fan-out. Channel state is in-memory JavaScript (closures, callbacks, local variables), so it must live on the same Durable Object that holds the WebSocket connection.
 
-[KV](https://developers.cloudflare.com/kv/) stores three things:
+[KV](https://developers.cloudflare.com/kv/) stores two things for the generic channel and broadcast path:
 - **Session tokens** — pin a browser to the same Durable Object across requests.
 - **Broadcast presence** — tracks which Durable Objects have active subscribers for each key.
-- **Room state replica** — a globally-distributed read copy of each <Link href="/room">room</Link>'s directory (see <Link href="#room-state">Room state</Link>).
 
 ### Regions
 
@@ -110,16 +115,15 @@ On the first request, Telefunc picks a Durable Object in the nearest region, sto
 
 ### Room state
 
-<Link href="/room">Rooms</Link> add a third kind of state, split across two tiers. Each room has one **authority** Durable Object — the same one that already sequences the room's messages, provisioned near its first publisher — holding the room's source of truth and serializing its atomic writes (race-free `Room.create`, member updates, heartbeats) so concurrent writers never clobber. As it writes, the authority mirrors the room's directory (config, roster, markers) to a **Workers KV replica**.
+<Link href="/room">Rooms</Link> use a separate SQLite-backed Durable Object namespace. Each logical room has one authority object holding its head, members, ordering watermarks, retained generations, and live delivery routes. A directory object in the same namespace backs `Room.list`. Room writes and reads therefore go through the Room authority tier; they don't use the generic Broadcast authority or a Workers KV room-state mirror.
 
-Reads pick a tier by what they need:
-
-| Read | Tier | Consistency |
+| State | Storage | Consistency |
 |---|---|---|
-| `Room.get`, `Room.list` (existence, meta, member count), the room index | KV replica | Eventually consistent (KV's cross-region cache) |
-| The streamed roster, `retain`-ed message replay | Authority | Strongly consistent (read-your-writes) |
+| Room head, roster, ordering, retained messages | Per-room SQLite Durable Object | Strongly consistent |
+| `Room.list` directory projection | SQLite directory Durable Object | Repairable projection, verified against the room head |
+| Session affinity and generic Broadcast presence | Workers KV | Eventually consistent |
 
-`Room.get` and `Room.list` are fast global KV reads with no cross-region hop, and enumeration is a plain KV scan. Their eventual consistency is invisible in practice: a member's join, leave, or meta change rides the room's live event stream in real time, so the replica is only the cold-start snapshot and the room directory — the one visible effect is that a room created in one region may take a moment to surface in a `Room.list` from another. Reads that carry a hard guarantee go to the authority instead: the streamed roster (a join writes its record before the event that announces it) and retained-message replay (a late subscriber must observe the last frame).
+Retained Room payloads are chunked internally into rows of at most 1.5 MB and installed by an atomic manifest swap. The retained aggregate limit is 16 MiB per room generation; 3 MiB, 8 MiB, and 16 MiB payloads stay on this same backend path. The application still publishes and reads one payload — chunking isn't part of the Room API.
 
 
 ## Scaling

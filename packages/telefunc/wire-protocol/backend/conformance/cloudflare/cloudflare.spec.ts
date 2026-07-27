@@ -116,6 +116,37 @@ describe('cloudflare — production session-manager mechanics', () => {
     }
   }
 
+  it('round-trips the 3/8/16 MiB retained chunk matrix through local workerd', async () => {
+    for (const mib of [3, 8, 16]) {
+      const { roomId, inc } = await opened(`retained-${mib}mib`)
+      const payload = new Uint8Array(mib * 1024 * 1024)
+      for (let offset = 0, value = 1; offset < payload.byteLength; offset += 1024 * 1024, value += 1) {
+        payload.fill(value, offset, Math.min(payload.byteLength, offset + 1024 * 1024))
+      }
+
+      const committed = accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, payload, { retain: true }))
+      await committed.delivery
+      const retained = await fx.backend.readRetained(roomId, inc, SEMANTIC)
+
+      expect(retained?.payload.byteLength).toBe(payload.byteLength)
+      expect(retained?.seq).toBe(committed.seq)
+      expect(retained?.timestamp).toBe(committed.timestamp)
+      for (let offset = 0; offset < payload.byteLength; offset += 1024 * 1024) {
+        expect(retained?.payload[offset]).toBe(payload[offset])
+      }
+    }
+  }, 60_000)
+
+  it('rolls the order advance back when the retained install fails inside the acceptance transaction', async () => {
+    const { roomId, inc, stub } = await opened('retained-atomicity')
+    await stub.telefuncRoomDropRetainedChunksForTest()
+
+    await expect(fx.backend.commitLane(roomId, inc, SEMANTIC, bytes('fails'), { retain: true })).rejects.toThrow()
+    const next = accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, bytes('next')))
+
+    expect(next.seq).toBe(1)
+  })
+
   describe('topology and receiver ownership', () => {
     it('rejects a non-canonical session id before persisting a route', async () => {
       const target = await opened()
