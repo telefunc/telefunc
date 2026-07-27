@@ -7,7 +7,13 @@ export type RoomBackendFactory = () => RoomBackendSpi
 type RoomBackendState =
   | { phase: 'empty'; retired: WeakSet<object> }
   | { phase: 'installing'; retired: WeakSet<object> }
-  | { phase: 'ready'; backend: RoomBackendSpi; implicit: boolean; retired: WeakSet<object> }
+  | {
+      phase: 'ready'
+      backend: RoomBackendSpi
+      selection: 'memory' | 'default' | 'explicit'
+      defaultIdentity?: unknown
+      retired: WeakSet<object>
+    }
   | {
       phase: 'disposing'
       backend: RoomBackendSpi
@@ -33,7 +39,30 @@ const REENTRANT_DISPOSE_ERROR =
  */
 export function installRoomBackend(factory: RoomBackendFactory): RoomBackendSpi {
   const current = state.current
-  if (current.phase === 'ready' && !current.implicit) return current.backend
+  if (current.phase === 'ready' && current.selection === 'explicit') return current.backend
+  return selectRoomBackend(factory, 'explicit')
+}
+
+/**
+ * Internal integration seam for environment packages. A default outranks the lazy in-memory fallback,
+ * while an explicit install always wins regardless of call order. `identity` lets repeated wrapper
+ * evaluation remain connection-idempotent without constructing a candidate backend merely to compare it.
+ */
+export function setDefaultRoomBackend(factory: RoomBackendFactory, identity: unknown = factory): RoomBackendSpi {
+  const current = state.current
+  if (current.phase === 'ready' && current.selection === 'explicit') return current.backend
+  if (current.phase === 'ready' && current.selection === 'default' && Object.is(current.defaultIdentity, identity)) {
+    return current.backend
+  }
+  return selectRoomBackend(factory, 'default', identity)
+}
+
+function selectRoomBackend(
+  factory: RoomBackendFactory,
+  selection: 'default' | 'explicit',
+  defaultIdentity?: unknown,
+): RoomBackendSpi {
+  const current = state.current
   if (current.phase === 'installing') throw new Error(INSTALLING_ERROR)
   if (current.phase === 'disposing') throw new Error(DISPOSING_ERROR)
   if (typeof factory !== 'function') {
@@ -56,12 +85,18 @@ export function installRoomBackend(factory: RoomBackendFactory): RoomBackendSpi 
 
   if (current.phase === 'ready') {
     retired.add(current.backend)
-    // The implicit backend is always MemoryRoomBackend. Its async method performs the complete
-    // synchronous teardown before returning its already-resolved promise, so explicit installation
-    // can replace it without introducing an asynchronous setup API.
-    void current.backend.dispose()
+    // Replacement is deliberately synchronous at the ownership boundary: every bundled default marks
+    // itself retired and detaches its live callbacks before dispose() returns its completion promise.
+    // The setup API therefore stays synchronous while resource settlement continues in the background.
+    void current.backend.dispose().catch(() => {})
   }
-  state.current = { phase: 'ready', backend, implicit: false, retired }
+  state.current = {
+    phase: 'ready',
+    backend,
+    selection,
+    ...(selection === 'default' ? { defaultIdentity } : {}),
+    retired,
+  }
   return backend
 }
 
@@ -79,7 +114,7 @@ export function getRoomBackend(): RoomBackendSpi {
 
   const backend = new MemoryRoomBackend()
   assertRoomBackend(backend)
-  state.current = { phase: 'ready', backend, implicit: true, retired: current.retired }
+  state.current = { phase: 'ready', backend, selection: 'memory', retired: current.retired }
   return backend
 }
 
