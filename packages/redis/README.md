@@ -1,6 +1,6 @@
 # `@telefunc/redis`
 
-Redis-backed broadcast fan-out for Telefunc — a `publish()` on any instance reaches subscribers on every other instance.
+Redis-backed broadcast fan-out and Room state for Telefunc — one setup call makes both work across instances.
 
 ## Install
 
@@ -18,8 +18,8 @@ const redis = new IORedis('redis://localhost:6379')
 installRedis(redis)
 ```
 
-`installRedis()` configures Telefunc's broadcast transport only; it does not construct or install the
-Room backend described below.
+That one `installRedis()` call configures both the broadcast transport and the Room backend from the
+same client. An explicit `installRoomBackend()` remains available as an advanced override.
 
 ## Room backend
 
@@ -31,23 +31,32 @@ the frame to the package's shared subscriber connection on another master.
 
 ```ts
 import { Cluster } from 'ioredis'
-import { RedisRoomBackend } from '@telefunc/redis'
-import { installRoomBackend } from 'telefunc/backend'
+import { installRedis } from '@telefunc/redis'
 
 const redis = new Cluster([
   { host: '127.0.0.1', port: 7000 },
   { host: '127.0.0.1', port: 7001 },
   { host: '127.0.0.1', port: 7002 },
 ])
-installRoomBackend(() => new RedisRoomBackend({ redis }))
+installRedis(redis)
 ```
 
-The factory is Telefunc's ownership boundary: it installs the Room policy, and Telefunc disposes the
-created backend. Constructing `RedisRoomBackend` by itself is a manual instance and activates no policy.
+`installRedis()` uses the same optional `prefix` for broadcast and Room keys. Repeating it with the same
+client and prefix is idempotent for the Room connection.
 
-The separate `installRedis(redis)` call shown in Setup swaps Telefunc's default in-memory broadcast
-transport for Redis Pub/Sub. All subscribers across the cluster observe the same publish order for a
-given key.
+For custom Room backend options, explicitly install an override before or after `installRedis()`:
+
+```ts
+import { RedisRoomBackend, installRedis } from '@telefunc/redis'
+import { installRoomBackend } from 'telefunc/backend'
+
+installRedis(redis)
+installRoomBackend(() => new RedisRoomBackend({ redis, maxRetainedPayloadBytes: 8 * 1024 * 1024 }))
+```
+
+The factory is Telefunc's ownership boundary: Telefunc owns and disposes the created backend. An
+explicit backend always wins regardless of call order. Constructing `RedisRoomBackend` by itself is a
+manual instance and activates no policy.
 
 `Channel` is per-instance — reconnects must land on the instance holding the channel's state. Pair this package with sticky sessions at the load balancer; see [Scaling](https://telefunc.com/stream/scale).
 

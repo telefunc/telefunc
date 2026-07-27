@@ -1,57 +1,24 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Redis } from 'ioredis'
 import { config, DefaultBroadcastAdapter } from 'telefunc'
-import { installRedis, RedisTransport } from './index.js'
-
-const KV_KEEP = Symbol.for('telefunc.kv.keep')
+import { disposeRoomBackend, getRoomBackend, installRoomBackend } from 'telefunc/backend'
+import { installRedis, RedisRoomBackend, RedisTransport } from './index.js'
 
 // Fake `ioredis` — `defineCommand` + `duplicate()` + broadcast subscribe/dispatch. Lua
 // execution emulated in TS so we exercise the adapter's call graph without a real Redis.
 
 class FakeIoredis {
+  readonly status = 'ready'
+  readonly definedCommands: string[] = []
   /** `seqKey → counter` for the in-script `INCR`. */
   private readonly counters = new Map<string, number>()
   private readonly listeners: Array<(channel: Uint8Array, message: Uint8Array) => void> = []
-  /** Backs GET/SET/DEL/SCAN. Public so a test can simulate a concurrent writer. */
-  readonly store = new Map<string, string>()
+  lastPublishKeys: readonly [seqKey: string, channelKey: string] | undefined
   /** Mocked clock so tests can assert deterministic ts. */
   private clockMs = 1_700_000_000_000
 
   setClock(ms: number): void {
     this.clockMs = ms
-  }
-
-  async get(key: string): Promise<string | null> {
-    return this.store.get(key) ?? null
-  }
-
-  readonly ttls = new Map<string, number>()
-
-  // Emulates the option tokens the transport emits: `PX <ms>` and/or `NX`. `NX` (create-if-absent)
-  // replies `null` when the key already exists.
-  async set(key: string, value: string, ...opts: unknown[]): Promise<'OK' | null> {
-    if (opts.includes('NX') && this.store.has(key)) return null
-    const pxIndex = opts.indexOf('PX')
-    this.store.set(key, value)
-    if (pxIndex >= 0 && typeof opts[pxIndex + 1] === 'number') this.ttls.set(key, opts[pxIndex + 1] as number)
-    return 'OK'
-  }
-
-  async del(key: string): Promise<number> {
-    return this.store.delete(key) ? 1 : 0
-  }
-
-  /** Single-page SCAN honoring a literal MATCH pattern with a trailing `*` (the only shape the transport emits). */
-  async scan(
-    _cursor: string,
-    _match: 'MATCH',
-    pattern: string,
-    _count: 'COUNT',
-    _n: number,
-  ): Promise<[string, string[]]> {
-    const literalPrefix = pattern.slice(0, -1).replace(/\\([*?[\]\\])/g, '$1')
-    const keys = [...this.store.keys()].filter((key) => key.startsWith(literalPrefix))
-    return ['0', keys]
   }
 
   // `duplicate()` would normally allocate a new TCP connection; in the fake we
@@ -61,33 +28,10 @@ class FakeIoredis {
   }
 
   defineCommand(name: string, _def: { numberOfKeys: number; lua: string }): void {
-    const run =
-      name === 'tfCas'
-        ? (args: unknown[]) => this.runCasScript(args)
-        : name === 'tfCommitFrame'
-          ? (args: unknown[]) => this.runCommitFrameScript(args)
-          : (args: unknown[]) => this.runPublishScript(args)
+    this.definedCommands.push(name)
     ;(this as unknown as Record<string, (...args: unknown[]) => Promise<unknown>>)[name] = (
       ...args: unknown[]
-    ): Promise<unknown> => Promise.resolve(run(args))
-  }
-
-  /** Emulate the compare-and-set Lua: apply only if the current value matches `expected`
-   *  (`\0NIL` = absent). Returns 1 on apply, 0 on mismatch. */
-  private runCasScript(args: unknown[]): number {
-    const [key, expected, op, next, ttl] = args as [string, string, string, string, string]
-    const cur = this.store.has(key) ? this.store.get(key)! : null
-    const matched = (cur === null && expected === '\0NIL') || cur === expected
-    if (!matched) return 0
-    if (op === 'del') {
-      this.store.delete(key)
-      this.ttls.delete(key)
-    } else {
-      this.store.set(key, next)
-      if (ttl === '') this.ttls.delete(key)
-      else this.ttls.set(key, Number(ttl))
-    }
-    return 1
+    ): Promise<unknown> => Promise.resolve(this.runPublishScript(args))
   }
 
   /** Channels the (shared) subscriber connection is subscribed to — backs PUBLISH's receiver count. */
@@ -112,10 +56,21 @@ class FakeIoredis {
     return this
   }
 
+  async ping(): Promise<string> {
+    return 'PONG'
+  }
+
+  async quit(): Promise<'OK'> {
+    return 'OK'
+  }
+
+  disconnect(): void {}
+
   // ── Private: emulate the Lua publish script's effect ─────────────────
 
   private runPublishScript(args: unknown[]): [number, number, number] {
     const [seqKey, channelKey, payload] = args as [string, string, Buffer]
+    this.lastPublishKeys = [seqKey, channelKey]
     const seq = (this.counters.get(seqKey) ?? 0) + 1
     this.counters.set(seqKey, seq)
     const ts = this.clockMs
@@ -124,44 +79,6 @@ class FakeIoredis {
     for (const cb of this.listeners) cb(channelBytes, frame)
     // Like real PUBLISH: how many subscriber connections got it — the fake has one.
     return [seq, ts, this.subscribedChannels.has(channelKey) ? 1 : 0]
-  }
-
-  /** Emulate the commitFrame Lua: fence-check, advance the clamped clock at the order key, store the
-   *  framed retained text, then publish the frame. Returns [0] on a stale fence, else [1, seq, ts, receivers]. */
-  private runCommitFrameScript(args: unknown[]): [number] | [number, number, number, number] {
-    const [orderKey, channelKey, payload, retainKey, orderTtl] = args as [string, string, Buffer, string, string]
-    const nf = Number(args[5])
-    for (let i = 0; i < nf; i++) {
-      const cur = this.store.get(args[6 + i * 2] as string)
-      if (cur === undefined || cur !== (args[7 + i * 2] as string)) return [0]
-    }
-    const prev = this.store.get(orderKey)
-    const now = this.clockMs
-    let seq: number
-    let ts: number
-    if (prev === undefined) {
-      seq = 1
-      ts = now
-    } else {
-      const parts = prev.split(':')
-      const pseq = Number(parts[0])
-      const pts = Number(parts[1])
-      if (now > pts) {
-        seq = 1
-        ts = now
-      } else {
-        seq = pseq + 1
-        ts = pts
-      }
-    }
-    this.store.set(orderKey, `${seq}:${ts}`)
-    if (orderTtl === '') this.ttls.delete(orderKey)
-    else this.ttls.set(orderKey, Number(orderTtl))
-    if (retainKey !== '') this.store.set(retainKey, `${seq},${ts}\n${payload.toString('utf8')}`)
-    const frame = encodeFrame(seq, ts, payload)
-    const channelBytes = new TextEncoder().encode(channelKey)
-    for (const cb of this.listeners) cb(channelBytes, frame)
-    return [1, seq, ts, this.subscribedChannels.has(channelKey) ? 1 : 0]
   }
 }
 
@@ -189,12 +106,54 @@ function newAdapter() {
 }
 
 describe('released installRedis surface', () => {
+  afterEach(async () => {
+    await disposeRoomBackend()
+  })
+
+  it('installs the Redis Room backend from the same client', () => {
+    const fake = new FakeIoredis()
+    installRedis(fake as unknown as Redis)
+    expect(getRoomBackend()).toBeInstanceOf(RedisRoomBackend)
+    expect(fake.definedCommands).toContain('tfRoomCommit')
+  })
+
+  it('keeps repeated setup with the same client and prefix Room-connection idempotent', () => {
+    const fake = new FakeIoredis()
+    installRedis(fake as unknown as Redis, { prefix: 'custom:' })
+    const backend = getRoomBackend()
+    const roomCommandCount = fake.definedCommands.filter((name) => name === 'tfRoomCommit').length
+
+    installRedis(fake as unknown as Redis, { prefix: 'custom:' })
+    expect(getRoomBackend()).toBe(backend)
+    expect(fake.definedCommands.filter((name) => name === 'tfRoomCommit')).toHaveLength(roomCommandCount)
+  })
+
+  it('lets an explicit Room backend installed after installRedis win', () => {
+    const automaticRedis = new FakeIoredis()
+    installRedis(automaticRedis as unknown as Redis)
+    const automatic = getRoomBackend()
+    const dispose = vi.spyOn(automatic, 'dispose')
+    const explicit = new RedisRoomBackend({ redis: new FakeIoredis() as unknown as Redis })
+
+    expect(installRoomBackend(() => explicit)).toBe(explicit)
+    expect(getRoomBackend()).toBe(explicit)
+    expect(dispose).toHaveBeenCalledTimes(1)
+  })
+
+  it('never lets installRedis overwrite an earlier explicit Room backend', () => {
+    const explicit = new RedisRoomBackend({ redis: new FakeIoredis() as unknown as Redis })
+    installRoomBackend(() => explicit)
+
+    installRedis(new FakeIoredis() as unknown as Redis)
+    expect(getRoomBackend()).toBe(explicit)
+  })
+
   it('installs the existing Redis transport with its prefix option unchanged', async () => {
     const fake = new FakeIoredis()
     installRedis(fake as unknown as Redis, { prefix: 'custom:' })
     const transport = config.broadcast.transport as RedisTransport
-    await transport.set('key', 'value')
-    expect(await fake.get('custom:kv:key')).toBe('value')
+    await transport.send('key', 'value')
+    expect(fake.lastPublishKeys).toEqual(['custom:seq:{key}', 'custom:t:{key}'])
   })
 })
 
@@ -253,91 +212,5 @@ describe('Redis adapter — live delivery', () => {
     expect(Array.from(received[0]!.payload)).toEqual([0xde, 0xad, 0xbe, 0xef])
     expect(received[0]!.seq).toBe(1)
     expect(received[0]!.timestamp).toBe(1_700_000_003_000)
-  })
-})
-
-describe('Redis transport — private legacy KV', () => {
-  it('round-trips values under the transport prefix and strips it from keys()', async () => {
-    const { fake, transport: adapter } = newAdapter()
-
-    expect(await adapter.get('telefunc:room:lobby:config')).toBe(null)
-    await adapter.set('telefunc:room:lobby:config', '{"a":1}')
-    expect(await adapter.get('telefunc:room:lobby:config')).toBe('{"a":1}')
-    expect(await fake.get('tf:kv:telefunc:room:lobby:config')).toBe('{"a":1}') // namespaced in Redis
-
-    await adapter.set('telefunc:room:lobby:m:x', '{}')
-    await adapter.set('unrelated', '{}')
-    expect((await adapter.keys('telefunc:room:')).sort()).toEqual([
-      'telefunc:room:lobby:config',
-      'telefunc:room:lobby:m:x',
-    ])
-
-    await adapter.delete('telefunc:room:lobby:config')
-    expect(await adapter.get('telefunc:room:lobby:config')).toBe(null)
-  })
-
-  it('passes the TTL through as Redis PX — native expiry backs the crash reaper', async () => {
-    const { fake, transport: adapter } = newAdapter()
-    await adapter.set!('telefunc:room:r:m:x', '{"seenAt":1}', { ttlMs: 180_000 })
-    expect(fake.ttls.get('tf:kv:telefunc:room:r:m:x')).toBe(180_000)
-    await adapter.set!('telefunc:room:r:config', '{}') // no TTL — config records persist
-    expect(fake.ttls.has('tf:kv:telefunc:room:r:config')).toBe(false)
-  })
-
-  it('matches glob metacharacters in room IDs literally, not as patterns', async () => {
-    const { transport: adapter } = newAdapter()
-
-    await adapter.set('telefunc:room:a*b:config', '{}')
-    await adapter.set('telefunc:room:axb:config', '{}')
-
-    expect(await adapter.keys('telefunc:room:a*b')).toEqual(['telefunc:room:a*b:config'])
-  })
-})
-
-describe('Redis transport — private legacy atomic KV primitives', () => {
-  it('setIfAbsent writes once via SET NX — the first caller wins, the rest see it present', async () => {
-    const { fake, transport: adapter } = newAdapter()
-
-    expect(await adapter.setIfAbsent!('telefunc:room:x:config', 'first')).toBe(true)
-    expect(await adapter.setIfAbsent!('telefunc:room:x:config', 'second')).toBe(false)
-    expect(await adapter.get('telefunc:room:x:config')).toBe('first')
-    expect(await fake.get('tf:kv:telefunc:room:x:config')).toBe('first') // untouched by the loser
-  })
-
-  it('setIfAbsent passes the TTL through as PX', async () => {
-    const { fake, transport: adapter } = newAdapter()
-    await adapter.setIfAbsent!('telefunc:room:x:m:1', '{}', { ttlMs: 180_000 })
-    expect(fake.ttls.get('tf:kv:telefunc:room:x:m:1')).toBe(180_000)
-  })
-
-  it('update seeds an absent key, read-modify-writes a present one, keeps on KEEP, deletes on null', async () => {
-    const { transport: adapter } = newAdapter()
-    const key = 'telefunc:room:x:m:1'
-
-    expect(await adapter.update!(key, (cur) => (cur === null ? '{"n":1}' : cur))).toBe('{"n":1}')
-    expect(await adapter.update!(key, (cur) => JSON.stringify({ n: JSON.parse(cur!).n + 1 }))).toBe('{"n":2}')
-    expect(await adapter.update!(key, () => KV_KEEP)).toBe('{"n":2}')
-    expect(await adapter.get(key)).toBe('{"n":2}')
-    expect(await adapter.update!(key, () => null)).toBe(null)
-    expect(await adapter.get(key)).toBe(null)
-  })
-
-  it('update retries when the key changed between its read and its write, re-running the mutator', async () => {
-    const { fake, transport: adapter } = newAdapter()
-    const key = 'telefunc:room:x:c'
-    await adapter.set(key, '0')
-
-    let calls = 0
-    const result = await adapter.update!(key, (cur) => {
-      calls++
-      // On the first pass, a concurrent writer lands between this mutator's read and its CAS,
-      // so the CAS mismatches and the mutator re-runs on the fresh value.
-      if (calls === 1) fake.store.set('tf:kv:telefunc:room:x:c', '9')
-      return String(Number(cur) + 1)
-    })
-
-    expect(calls).toBe(2) // first CAS saw '0' but the store is '9' → retry
-    expect(result).toBe('10') // mutator re-ran on the winner's '9'
-    expect(await adapter.get(key)).toBe('10')
   })
 })

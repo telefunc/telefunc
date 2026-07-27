@@ -5,7 +5,7 @@ import { Hono } from 'hono'
 import vike from '@vikejs/hono'
 import IORedis from 'ioredis'
 import { installRedis } from '@telefunc/redis'
-import { config } from 'telefunc'
+import { config, Room } from 'telefunc'
 import { Telefunc } from 'telefunc/node'
 import { cleanupState, resetCleanupState, getCleanupStateSnapshot } from './cleanup-state'
 
@@ -43,6 +43,51 @@ app.get('/api/cleanup-state', async (c) => c.json(await getCleanupStateSnapshot(
 app.post('/api/cleanup-state/reset', async (c) => {
   await resetCleanupState()
   return c.json({ ok: true })
+})
+
+type CrossInstanceRoomFixture = {
+  participant: { publish(data: unknown): Promise<unknown>; leave(): Promise<void> }
+  received: unknown[]
+  unsubscribe(): void
+}
+const crossInstanceRooms = new Map<string, CrossInstanceRoomFixture>()
+
+app.post('/api/room-cross-instance/join', async (c) => {
+  const roomId = c.req.query('roomId')
+  if (!roomId) return c.json({ ok: false, reason: 'missing roomId' }, 400)
+  if (crossInstanceRooms.has(roomId)) return c.json({ ok: true, instance: INST })
+
+  const room = await Room.getOrCreate(roomId, { meta: { purpose: 'cross-instance-e2e' } })
+  const participant = await room.join({ meta: { instance: INST } })
+  const received: unknown[] = []
+  const unsubscribe = room.subscribe((data) => received.push(data))
+  crossInstanceRooms.set(roomId, { participant, received, unsubscribe })
+  return c.json({ ok: true, instance: INST })
+})
+
+app.post('/api/room-cross-instance/publish', async (c) => {
+  const roomId = c.req.query('roomId')
+  const fixture = roomId ? crossInstanceRooms.get(roomId) : undefined
+  if (!fixture) return c.json({ ok: false, reason: 'room fixture not joined on this instance' }, 404)
+  await fixture.participant.publish(await c.req.json())
+  return c.json({ ok: true, instance: INST })
+})
+
+app.get('/api/room-cross-instance/received', (c) => {
+  const roomId = c.req.query('roomId')
+  const fixture = roomId ? crossInstanceRooms.get(roomId) : undefined
+  if (!fixture) return c.json({ ok: false, reason: 'room fixture not joined on this instance' }, 404)
+  return c.json({ ok: true, instance: INST, received: fixture.received })
+})
+
+app.delete('/api/room-cross-instance/leave', async (c) => {
+  const roomId = c.req.query('roomId')
+  const fixture = roomId ? crossInstanceRooms.get(roomId) : undefined
+  if (!roomId || !fixture) return c.json({ ok: true, instance: INST })
+  crossInstanceRooms.delete(roomId)
+  fixture.unsubscribe()
+  await fixture.participant.leave()
+  return c.json({ ok: true, instance: INST })
 })
 
 // Forces server-side GC so tests can deterministically exercise GC-driven cleanup (e.g. a
