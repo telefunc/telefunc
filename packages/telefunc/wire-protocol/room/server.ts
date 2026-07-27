@@ -1883,8 +1883,8 @@ class ServerRoom implements Room {
     }
   }
 
-  /** The binary analogue of `SubSlot.ready`: resolves once every active per-(member, track) binary
-   *  subscription this node holds is live at the backend. Awaited before a retained-binary replay so a
+  /** The binary analogue of `SubSlot.ready`: settles once every wanted per-(member, track) binary
+   *  subscription is live, or rejects when one exhausts replacement. Awaited before retained replay so a
    *  keyframe racing the subscribe isn't lost in the gap. A synchronous backend resolves instantly. */
   private _binaryReady(): Promise<void> {
     const pending: Promise<void>[] = []
@@ -2315,13 +2315,37 @@ async function evictMember(
 /** One backend lane subscription, reconciled to a desired on/off state. */
 const SUBSCRIPTION_REPLAN_LIMIT = 5
 
+type ReadinessGeneration =
+  | { state: 'ready'; promise: Promise<void> }
+  | {
+      state: 'pending'
+      promise: Promise<void>
+      resolve: () => void
+      reject: (error: Error) => void
+    }
+  | { state: 'failed'; promise: Promise<void> }
+
+const READY_GENERATION: ReadinessGeneration = { state: 'ready', promise: Promise.resolve() }
+
+function createPendingReadinessGeneration(): Extract<ReadinessGeneration, { state: 'pending' }> {
+  let resolve!: () => void
+  let reject!: (error: Error) => void
+  const promise = new Promise<void>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise
+    reject = rejectPromise
+  })
+  // A slot can exhaust without a retained replay currently waiting. Preserve the rejected promise for
+  // a later waiter, while preventing that intentionally-stored rejection from becoming unhandled.
+  void promise.catch(() => {})
+  return { state: 'pending', promise, resolve, reject }
+}
+
 class SubSlot {
   private _subscription: LaneSubscription | null = null
   private _unobserve: (() => void) | null = null
   private _wanted = false
   private _subscribe: (() => LaneSubscription) | null = null
-  private _readyPromise = Promise.resolve()
-  private _resolveReady: (() => void) | null = null
+  private _readiness = READY_GENERATION
   private _replanQueued = false
   private _replanAttempts = 0
   private _cleanup = Promise.resolve()
@@ -2333,18 +2357,21 @@ class SubSlot {
     return this._subscription?.state() === 'ready'
   }
 
-  /** Resolves once the current subscription is live at the backend — immediately when inactive or when
-   *  the backend is synchronous (in-memory). A retained replay awaits this before reading the retained
-   *  value, so a publish racing the just-issued subscribe reaches the node (or rides the retained copy)
-   *  instead of slipping through the gap between subscribing and the read. */
+  /** Settles once the current subscription is live at the backend — immediately when inactive or when
+   *  the backend is synchronous (in-memory), and rejects after bounded replacement exhaustion. A retained
+   *  replay awaits this before reading the retained value, so a racing publish reaches the node (or rides
+   *  the retained copy) instead of slipping through the subscribe/read gap. */
   get ready(): Promise<void> {
-    return this._wanted ? this._readyPromise : Promise.resolve()
+    return this._wanted ? this._readiness.promise : Promise.resolve()
   }
 
   sync(want: boolean, subscribe: () => LaneSubscription): void {
     if (!want) return this.stop()
     this._subscribe = subscribe
-    if (!this._wanted) this._beginReadyWait()
+    if (!this._wanted || this._readiness.state === 'failed') {
+      this._replanAttempts = 0
+      this._beginReadyWait()
+    }
     this._wanted = true
     if (!this._subscription) this._start()
   }
@@ -2353,8 +2380,7 @@ class SubSlot {
     this._wanted = false
     this._subscribe = null
     this._replanAttempts = 0
-    this._resolveReady?.()
-    this._resolveReady = null
+    this._resolveReady()
     const subscription = this._subscription
     this._clearCurrent()
     if (subscription) this._queueCleanup(subscription)
@@ -2398,15 +2424,14 @@ class SubSlot {
   private _becameReady(subscription: LaneSubscription): void {
     if (this._subscription !== subscription || subscription.state() !== 'ready') return
     this._replanAttempts = 0
-    this._resolveReady?.()
-    this._resolveReady = null
+    this._resolveReady()
   }
 
   private _closed(subscription: LaneSubscription): void {
     if (this._subscription !== subscription) return
     this._markUnavailable()
     this._clearCurrent()
-    this._scheduleReplan()
+    this._scheduleReplan(new Error(`Room backend subscription closed: ${this._label}`))
   }
 
   private _failedCurrent(subscription: LaneSubscription, error: unknown): void {
@@ -2416,28 +2441,49 @@ class SubSlot {
   }
 
   private _failed(error: unknown): void {
-    reportRoomError(error instanceof Error ? error : new Error(String(error)))
-    this._scheduleReplan()
+    const failure = error instanceof Error ? error : new Error(String(error))
+    if (this._scheduleReplan(failure) !== 'terminal') reportRoomError(failure)
   }
 
-  private _scheduleReplan(): void {
-    if (!this._wanted || this._replanQueued || this._replanAttempts >= SUBSCRIPTION_REPLAN_LIMIT) return
+  private _scheduleReplan(cause: Error): 'scheduled' | 'terminal' | 'inactive' {
+    if (!this._wanted || this._replanQueued) return 'inactive'
+    if (this._replanAttempts >= SUBSCRIPTION_REPLAN_LIMIT) {
+      const terminal = new Error(
+        `Room backend subscription failed after ${SUBSCRIPTION_REPLAN_LIMIT} replacement attempts (${this._label}): ${cause.message}`,
+      )
+      if (this._rejectReady(terminal)) reportRoomError(terminal)
+      return 'terminal'
+    }
     this._replanAttempts++
     this._replanQueued = true
     queueMicrotask(() => {
       this._replanQueued = false
       if (this._wanted && !this._subscription) this._start()
     })
+    return 'scheduled'
   }
 
   private _beginReadyWait(): void {
-    this._readyPromise = new Promise<void>((resolve) => {
-      this._resolveReady = resolve
-    })
+    this._readiness = createPendingReadinessGeneration()
+  }
+
+  private _resolveReady(): void {
+    const generation = this._readiness
+    if (generation.state !== 'pending') return
+    generation.resolve()
+    this._readiness = { state: 'ready', promise: generation.promise }
+  }
+
+  private _rejectReady(error: Error): boolean {
+    const generation = this._readiness
+    if (generation.state !== 'pending') return false
+    generation.reject(error)
+    this._readiness = { state: 'failed', promise: generation.promise }
+    return true
   }
 
   private _markUnavailable(): void {
-    if (this._wanted && this._resolveReady === null) this._beginReadyWait()
+    if (this._wanted && this._readiness.state === 'ready') this._beginReadyWait()
   }
 
   private _clearCurrent(): void {

@@ -2922,6 +2922,64 @@ describe('room stub channel', () => {
     }
   })
 
+  it('rejects retained replay after exactly five failed replacements and renews on a later sync', async () => {
+    const realSubscribe = roomBackend.subscribeLane.bind(roomBackend)
+    const report = vi.spyOn(console, 'error').mockImplementation(() => {})
+    let controlled!: ControlledLaneSubscription
+    let replacementCalls = 0
+    let replacementsFail = true
+    const spy = vi.spyOn(roomBackend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
+      if (lane.kind !== 'binary') return realSubscribe(roomId, inc, lane, receiver)
+      if (!controlled) {
+        controlled = new ControlledLaneSubscription(() => realSubscribe(roomId, inc, lane, receiver))
+        controlled.establish()
+        return controlled
+      }
+      replacementCalls++
+      if (replacementsFail) throw new Error(`synthetic exhausted replacement ${replacementCalls}`)
+      return realSubscribe(roomId, inc, lane, receiver)
+    })
+    try {
+      const { serverRoom, stub } = await createServedRoom('subscription-replacement-exhaustion')
+      const member = await serverRoom.join({ meta: {} })
+      const previousWants = stub._binaryWants
+      stub._binaryWants = allBinary
+      serverRoom._syncSubs()
+      await controlled.ready
+
+      await controlled.closeFromBackend()
+      await expectEventually(() => expect(replacementCalls).toBe(5))
+      expect(report).toHaveBeenCalledTimes(5)
+      const terminalError = report.mock.calls.at(-1)?.[0]
+      expect(String(terminalError)).toContain('Room backend subscription failed after 5 replacement attempts')
+
+      const replay = serverRoom._replayRetainedBinary(stub, previousWants)
+      const outcome = await Promise.race([
+        replay.then(
+          () => ({ state: 'resolved' as const }),
+          (error: unknown) => ({ state: 'rejected' as const, error }),
+        ),
+        new Promise<{ state: 'pending' }>((resolve) => setTimeout(() => resolve({ state: 'pending' }), 50)),
+      ])
+      expect(outcome.state).toBe('rejected')
+      if (outcome.state !== 'rejected') throw new Error(`Expected retained replay to reject, got ${outcome.state}`)
+      expect(outcome.error).toBeInstanceOf(Error)
+      expect(String(outcome.error)).toContain('Room backend subscription failed after 5 replacement attempts')
+
+      replacementsFail = false
+      serverRoom._syncSubs()
+      await expect(serverRoom._replayRetainedBinary(stub, previousWants)).resolves.toBeUndefined()
+      expect(replacementCalls).toBe(6)
+
+      stub._binaryWants = previousWants
+      serverRoom._syncSubs()
+      await member.leave()
+    } finally {
+      spy.mockRestore()
+      report.mockRestore()
+    }
+  })
+
   it('waits for the text subscription to go live before replaying retained, so a publish racing the subscribe is not lost', async () => {
     const gate = gateNewSubscriptions()
     const { serverRoom, stub, peer } = await createServedRoom('ready-handoff-text')
