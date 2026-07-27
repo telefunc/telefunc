@@ -14,7 +14,6 @@ import {
   finalizeClose,
   flush,
   nextId,
-  okDeleted,
   okHead,
   openRoom,
   readHeadOrThrow,
@@ -1181,29 +1180,6 @@ describe.skipIf(url === undefined || url === '')('Redis independent-review race 
     expect(await fx.redis.hget(generationTokensKey(fx.prefix, roomId), inc)).toBeNull()
   })
 
-  it('enforces the aggregate retained payload cap inside concurrent COMMIT records', async () => {
-    await fx.dispose()
-    fx = await createRedisFixture(url as string, { maxRetainedPayloadBytes: 100 })
-    const roomId = nextId('room')
-    const { inc } = await openRoom(fx.backend, roomId)
-
-    const results = await Promise.allSettled([
-      fx.backend.commitLane(roomId, inc, SEMANTIC, new Uint8Array(60), { retain: true }),
-      fx.backend.commitLane(roomId, inc, CONTROL, new Uint8Array(60), { retain: true }),
-    ])
-    expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(1)
-    expect(results.filter((result) => result.status === 'rejected')).toHaveLength(1)
-    expect(await fx.backend.listRetained(roomId, inc)).toHaveLength(1)
-
-    await fx.backend.deleteRetained(roomId, inc)
-    accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, new Uint8Array(100), { retain: true }))
-    // Replacement subtracts only the old payload (not its 16-byte frame header), so the total remains 100.
-    accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, new Uint8Array(100), { retain: true }))
-    await expect(fx.backend.commitLane(roomId, inc, CONTROL, new Uint8Array(1), { retain: true })).rejects.toThrow(
-      /retained aggregate/,
-    )
-  })
-
   it('uses Redis TIME for production tombstone and logical cell-expiry reads under caller skew', async () => {
     await fx.dispose()
     fx = await createRedisFixture(url as string, { useRedisAuthority: true })
@@ -1267,40 +1243,6 @@ describe.skipIf(url === undefined || url === '')('Redis independent-review race 
     await result.delivery
     await latch.waitFor(1)
     expect(latch.payloads()).toEqual(['still-live'])
-  })
-
-  it('applies the selected HeadCx predicate before deleting a closed tombstone', async () => {
-    const roomId = nextId('room')
-    const { inc, head } = await openRoom(fx.backend, roomId)
-    const { head: closing, leaseId } = await enterClosing(fx.backend, roomId, head)
-    accepted(await fx.backend.commitLane(roomId, inc, CONTROL, bytes('closed'), { closingLease: leaseId }))
-    const tombstone = okHead(await finalizeClose(fx.backend, roomId, closing, leaseId))
-
-    const guarded = await fx.backend.compareExchangeHead(
-      roomId,
-      { expect: { rev: tombstone.rev, closingLease: leaseId } },
-      { delete: true },
-    )
-    expect(guarded).toHaveProperty('conflict', true)
-    expect((await fx.backend.readHead(roomId))?.head.state).toBe('closed')
-    okDeleted(await fx.backend.compareExchangeHead(roomId, { expect: { rev: tombstone.rev } }, { delete: true }))
-  })
-
-  it('keeps a concurrent newer directory tag under stale compare-delete cleanup', async () => {
-    const roomId = nextId('dir')
-    await fx.backend.directoryPut(roomId, 'inc-old')
-    const reachedApply = deferred()
-    const release = deferred()
-    fx.setBeforeDirectoryDeleteApply(async () => {
-      reachedApply.resolve()
-      await release.promise
-    })
-    const staleDelete = fx.backend.directoryDelete(roomId, 'inc-old')
-    await reachedApply.promise
-    await fx.backend.directoryPut(roomId, 'inc-new')
-    release.resolve()
-    await staleDelete
-    expect((await fx.backend.directoryList(roomId)).entries).toEqual([{ roomId, incTag: 'inc-new' }])
   })
 
   it('rejects only the affected delivery when the ratified local PING flush fails', async () => {

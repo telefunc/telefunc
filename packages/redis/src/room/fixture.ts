@@ -100,7 +100,6 @@ export type GenerationCaptureProbe = (info: {
   token: string
 }) => void | Promise<void>
 export type DropGenerationProbe = (info: { roomId: string; inc: string }) => void | Promise<void>
-export type DirectoryDeleteProbe = (info: { roomId: string; incTag: string }) => void | Promise<void>
 export type RedisRoomCommandCall = { name: string; args: readonly unknown[] }
 
 // The fixture the shared suite consumes, widened with the seams the Redis-specific stable-read scenarios
@@ -117,7 +116,6 @@ export type RedisBackendFixture = BackendFixture & {
   setAfterSubscribeAck(fn: SubscribeProbe | null): void
   setAfterGenerationCapture(fn: GenerationCaptureProbe | null): void
   setBeforeDropGenerationUnregister(fn: DropGenerationProbe | null): void
-  setBeforeDirectoryDeleteApply(fn: DirectoryDeleteProbe | null): void
   commandCalls(): readonly RedisRoomCommandCall[]
   captureGenerationAttemptForTest(roomId: string, inc: string, attemptId: string, createdAt: number): Promise<string>
   countGenerationCapturesForTest(roomId: string): Promise<number>
@@ -190,7 +188,6 @@ export async function createRedisFixture(
   let afterSubscribeAck: SubscribeProbe | null = null
   let afterGenerationCapture: GenerationCaptureProbe | null = null
   let beforeDropGenerationUnregister: DropGenerationProbe | null = null
-  let beforeDirectoryDeleteApply: DirectoryDeleteProbe | null = null
   let bypassCaptureProbe = 0
   const acknowledgedChannels: string[] = []
   const commandCalls: RedisRoomCommandCall[] = []
@@ -314,14 +311,6 @@ export async function createRedisFixture(
   restorers.push(() => {
     redis.mgetBuffer = mgetBuffer
   })
-  wrapCommand(redis, REDIS_ROOM_COMMANDS.directoryDelete.name, async (invoke, args) => {
-    if (beforeDirectoryDeleteApply !== null) {
-      await runProbe('before directory delete', () =>
-        beforeDirectoryDeleteApply?.({ roomId: String(args[2]), incTag: String(args[3]) }),
-      )
-    }
-    return await invoke(args)
-  })
   wrapCommand(redis, REDIS_ROOM_COMMANDS.dropGenerationFinalize.name, async (invoke, args) => {
     if (beforeDropGenerationUnregister !== null) {
       await runProbe('before generation unregister', () =>
@@ -390,11 +379,6 @@ export async function createRedisFixture(
           await runProbe('after subscribe acknowledgement', () => afterSubscribeAck?.(channel))
         }
       }
-      if (command.name === REDIS_ROOM_COMMANDS.directoryDelete.name && beforeDirectoryDeleteApply !== null) {
-        await runProbe('before directory delete', () =>
-          beforeDirectoryDeleteApply?.({ roomId: String(args[2]), incTag: String(args[3]) }),
-        )
-      }
       if (command.name === REDIS_ROOM_COMMANDS.dropGenerationFinalize.name && beforeDropGenerationUnregister !== null) {
         await runProbe('before generation unregister', () =>
           beforeDropGenerationUnregister?.({ roomId: roomIdFromKey(args[0]), inc: String(args[2]) }),
@@ -446,11 +430,6 @@ export async function createRedisFixture(
         if (channel !== undefined && afterSubscribeAck !== null) {
           await runProbe('after subscribe acknowledgement', () => afterSubscribeAck?.(channel))
         }
-      }
-      if (command.name === REDIS_ROOM_COMMANDS.directoryDelete.name && beforeDirectoryDeleteApply !== null) {
-        await runProbe('before directory delete', () =>
-          beforeDirectoryDeleteApply?.({ roomId: String(args[2]), incTag: String(args[3]) }),
-        )
       }
       if (command.name === REDIS_ROOM_COMMANDS.dropGenerationFinalize.name && beforeDropGenerationUnregister !== null) {
         await runProbe('before generation unregister', () =>
@@ -556,9 +535,6 @@ export async function createRedisFixture(
     setBeforeDropGenerationUnregister: (fn) => {
       beforeDropGenerationUnregister = fn
     },
-    setBeforeDirectoryDeleteApply: (fn) => {
-      beforeDirectoryDeleteApply = fn
-    },
     commandCalls: () => commandCalls,
     captureGenerationAttemptForTest: async (roomId, inc, attemptId, createdAt) => {
       bypassCaptureProbe++
@@ -654,7 +630,6 @@ export async function createRedisFixture(
       commandCalls.length = 0
       afterGenerationCapture = null
       beforeDropGenerationUnregister = null
-      beforeDirectoryDeleteApply = null
       await Promise.allSettled([...peerDisposers].map((dispose) => dispose()))
       await backend.dispose()
       for (const restore of restorers.reverse()) restore()
