@@ -27,6 +27,7 @@ const RedisRoomBackend = publicRuntime.RedisRoomBackend as unknown as typeof Red
 
 type NodeAddress = { host: string; port: number }
 type Master = NodeAddress & { id: string; start: number; end: number; client: Redis }
+type RoomReadinessProbe = ServerRoom & { _textSub: { ready: Promise<void> } }
 
 const rawNodes = process.env.TELEFUNC_TEST_REDIS_CLUSTER_NODES
 const expectedClusterSafe = process.env.TELEFUNC_EXPECT_CLUSTER_SAFE === 'true'
@@ -355,6 +356,125 @@ describe.skipIf(nodes === undefined)('RedisRoomBackend real three-master Cluster
       expect(observed).toEqual(['before-loss', 'after-recovery'])
       console.log(
         `[w5-integration] redis-room-renewal subscriberBefore=${before[0]} subscriberAfter=${after[0]} states=${states.join(',')} subscribeCalls=${semanticCalls} replacementFailures=1 delivered=${observed.length}`,
+      )
+      await Room.close(roomId)
+    } finally {
+      subscribeSpy.mockRestore()
+      report.mockRestore()
+      await disposeRoomBackend().catch(() => {})
+      await fixture.dispose()
+    }
+  })
+
+  it('rejects an exhausted real Cluster replacement generation and later establishes a fresh one', async () => {
+    const first = nodes?.[0] as NodeAddress
+    const fixture = await createRedisFixture(`redis://${first.host}:${first.port}`, {
+      clusterNodes: nodes as NodeAddress[],
+    })
+    const roomId = `cluster-room-exhaustion-${Date.now()}`
+    const observed: string[] = []
+    const report = vi.spyOn(console, 'error').mockImplementation(() => {})
+    let semanticCalls = 0
+    let failReplacements = true
+    let retiredSubscription: ReturnType<RedisRoomBackendType['subscribeLane']> | undefined
+    let semanticSubscription: ReturnType<RedisRoomBackendType['subscribeLane']> | undefined
+    let controlSubscription: ReturnType<RedisRoomBackendType['subscribeLane']> | undefined
+    const realSubscribe = fixture.backend.subscribeLane.bind(fixture.backend)
+    const subscribeSpy = vi.spyOn(fixture.backend, 'subscribeLane').mockImplementation((id, inc, lane, receiver) => {
+      if (id === roomId && lane.kind === 'semantic') {
+        semanticCalls++
+        if (semanticCalls > 1 && failReplacements) {
+          throw new Error(`synthetic exhausted Cluster replacement ${semanticCalls - 1}`)
+        }
+        const subscription = realSubscribe(id, inc, lane, receiver)
+        if (semanticCalls !== 1) {
+          semanticSubscription = subscription
+          return subscription
+        }
+        retiredSubscription = subscription
+        let closed = false
+        let closeQueued = false
+        const listeners = new Set<(state: ReadinessState) => void>()
+        const emit = (state: ReadinessState) => {
+          for (const listener of [...listeners]) listener(state)
+        }
+        subscription.onStateChange((state) => {
+          if (closed) return
+          emit(state)
+          if (state === 'lost' && !closeQueued) {
+            closeQueued = true
+            queueMicrotask(() => {
+              closed = true
+              emit('closed')
+            })
+          }
+        })
+        const wrapped = {
+          ready: subscription.ready,
+          state: () => (closed ? 'closed' : subscription.state()),
+          onStateChange: (listener: (state: ReadinessState) => void) => {
+            listeners.add(listener)
+            return () => listeners.delete(listener)
+          },
+          unsubscribe: async () => {
+            if (!closed) {
+              closed = true
+              emit('closed')
+            }
+            await subscription.unsubscribe()
+          },
+        } satisfies ReturnType<RedisRoomBackendType['subscribeLane']>
+        semanticSubscription = wrapped
+        return wrapped
+      }
+      const subscription = realSubscribe(id, inc, lane, receiver)
+      if (id === roomId && lane.kind === 'control') controlSubscription = subscription
+      return subscription
+    })
+    installRoomBackend(() => fixture.backend)
+    try {
+      const room = (await Room.create(roomId)) as RoomReadinessProbe
+      room.onAnnounce((data) => observed.push(String(data)))
+      await waitFor(
+        () => semanticSubscription?.state() === 'ready' && controlSubscription?.state() === 'ready',
+        10_000,
+      )
+      await Room.announce(roomId, 'before-exhaustion')
+      await waitFor(() => observed.length === 1, 10_000)
+
+      const before = await fixture.pubSubClientIdsForTest()
+      expect(before).toHaveLength(1)
+      await fixture.killSubscriberForTest(before[0])
+      await waitFor(
+        () =>
+          semanticCalls === 6 &&
+          report.mock.calls.some(([error]) =>
+            String(error).includes('Room backend subscription failed after 5 replacement attempts'),
+          ),
+        10_000,
+      )
+      const failedGeneration = room._textSub.ready
+      await expect(failedGeneration).rejects.toThrow('Room backend subscription failed after 5 replacement attempts')
+
+      failReplacements = false
+      room._syncSubs()
+      const freshGeneration = room._textSub.ready
+      expect(freshGeneration).not.toBe(failedGeneration)
+      await freshGeneration
+      await waitFor(
+        () => semanticCalls === 7 && semanticSubscription?.state() === 'ready' && controlSubscription?.state() === 'ready',
+        10_000,
+      )
+      await retiredSubscription?.unsubscribe()
+
+      const after = await fixture.pubSubClientIdsForTest()
+      expect(after).toHaveLength(1)
+      expect(after[0]).not.toBe(before[0])
+      await Room.announce(roomId, 'after-exhaustion')
+      await waitFor(() => observed.length === 2, 10_000)
+      expect(observed).toEqual(['before-exhaustion', 'after-exhaustion'])
+      console.log(
+        `[w5-integration] redis-room-exhaustion subscriberBefore=${before[0]} subscriberAfter=${after[0]} replacementAttempts=5 terminalRejected=true freshGeneration=true subscribeCalls=${semanticCalls} delivered=${observed.length}`,
       )
       await Room.close(roomId)
     } finally {

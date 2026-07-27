@@ -57,6 +57,7 @@ import {
 import { bundleWorker } from './bundle.js'
 
 type Opened = { roomId: string; inc: string; stub: RoomStub }
+type RoomReadinessProbe = ServerRoom & { _textSub: { ready: Promise<void> } }
 
 describe('cloudflare — production session-manager mechanics', () => {
   let fx: BackendFixture
@@ -249,6 +250,85 @@ describe('cloudflare — production session-manager mechanics', () => {
       expect(observed).toEqual(['before-loss', 'after-recovery'])
       console.log(
         `[w5-integration] cloudflare-room-renewal states=${states.join(',')} subscribeCalls=${semanticCalls} replacementFailures=1 delivered=${observed.length}`,
+      )
+      await Room.close(roomId)
+    } finally {
+      report.mockRestore()
+      remoteReceivers.clear()
+      await disposeRoomBackend().catch(() => {})
+    }
+  })
+
+  it('rejects an exhausted workerd replacement generation and later establishes a fresh one', async () => {
+    const roomId = nextId('managed-room-exhaustion')
+    const observed: string[] = []
+    const remoteReceivers = new Set<LaneReceiver>()
+    const report = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const baseRoomBackend = roomCapableBackend(fx.backend, () => {}, remoteReceivers)
+    let semanticCalls = 0
+    let failReplacements = true
+    let closeQueued = false
+    let semanticSubscription: ReturnType<RoomBackendSpi['subscribeLane']> | undefined
+    const roomBackend = new Proxy(baseRoomBackend, {
+      get(target, property) {
+        if (property !== 'subscribeLane') {
+          const value = Reflect.get(target, property, target)
+          return typeof value === 'function' ? value.bind(target) : value
+        }
+        return (id: string, inc: string, lane: LaneId, receiver: LaneReceiver) => {
+          if (id === roomId && lane.kind === 'semantic') {
+            semanticCalls++
+            if (semanticCalls > 1 && failReplacements) {
+              throw new Error(`synthetic exhausted workerd replacement ${semanticCalls - 1}`)
+            }
+          }
+          const subscription = target.subscribeLane(id, inc, lane, receiver)
+          if (id === roomId && lane.kind === 'semantic') {
+            semanticSubscription = subscription
+            if (semanticCalls === 1) {
+              subscription.onStateChange((state) => {
+                if (state === 'lost' && !closeQueued) {
+                  closeQueued = true
+                  queueMicrotask(() => void subscription.unsubscribe().catch(() => {}))
+                }
+              })
+            }
+          }
+          return subscription
+        }
+      },
+    })
+    installRoomBackend(() => roomBackend)
+    try {
+      const room = (await Room.create(roomId)) as RoomReadinessProbe
+      room.onAnnounce((data) => observed.push(String(data)))
+      await Room.announce(roomId, 'before-exhaustion')
+      expect(observed).toEqual(['before-exhaustion'])
+
+      const controls = cloudflareRenewalControls(fx.backend)
+      controls.forceFailures(4)
+      await controls.advance(ROUTE_RENEW_EVERY_MS * 2)
+      await waitUntil(
+        async () =>
+          semanticCalls === 6 &&
+          report.mock.calls.some(([error]) =>
+            String(error).includes('Room backend subscription failed after 5 replacement attempts'),
+          ),
+      )
+      const failedGeneration = room._textSub.ready
+      await expect(failedGeneration).rejects.toThrow('Room backend subscription failed after 5 replacement attempts')
+
+      failReplacements = false
+      room._syncSubs()
+      const freshGeneration = room._textSub.ready
+      expect(freshGeneration).not.toBe(failedGeneration)
+      await freshGeneration
+      await waitUntil(async () => semanticCalls === 7 && semanticSubscription?.state() === 'ready')
+
+      await Room.announce(roomId, 'after-exhaustion')
+      expect(observed).toEqual(['before-exhaustion', 'after-exhaustion'])
+      console.log(
+        `[w5-integration] cloudflare-room-exhaustion replacementAttempts=5 terminalRejected=true freshGeneration=true subscribeCalls=${semanticCalls} delivered=${observed.length}`,
       )
       await Room.close(roomId)
     } finally {
