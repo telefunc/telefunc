@@ -22,14 +22,21 @@ import {
 import {
   BACKEND_SPI_VERSION,
   disposeBackend,
-  generateLuaHeadTransitionTable,
   getBackend,
+  HEAD_TRANSITIONS,
   installBackend,
+  ORDERING_FRAME_LAYOUT,
+  type BackendDriver,
   type BackendFactory,
+  type BackendReceiver,
   type BackendSpi,
   type BackendSubscription,
+  type BackendSubscriptionSource,
   type BroadcastLane,
+  type LaneId,
   type PublishResult,
+  type SubscriptionAttempt,
+  type SubscriptionDriver,
 } from 'telefunc/backend'
 import { ConnectionError, withContext } from 'telefunc/client'
 import { Telefunc as NodeTelefunc } from 'telefunc/node'
@@ -97,10 +104,54 @@ type _backendKeys = Assert<
   >
 >
 type _subscriptionKeys = Assert<HasKeys<BackendSubscription, 'ready' | 'state' | 'onStateChange' | 'unsubscribe'>>
+type _attemptKeys = Assert<HasKeys<SubscriptionAttempt, 'ready' | 'state' | 'onStateChange' | 'unsubscribe'>>
+type _driverKeys = Assert<HasKeys<SubscriptionDriver<string>, 'open'>>
+type _driverOpenArguments = Assert<
+  Compatible<Parameters<SubscriptionDriver<string>['open']>, [string, BackendReceiver, () => number]>
+>
+type _backendDriverKeys = Assert<
+  HasKeys<
+    BackendDriver,
+    | 'spiVersion'
+    | 'capabilities'
+    | 'subscriptions'
+    | 'publish'
+    | 'readHead'
+    | 'compareExchangeHead'
+    | 'readCells'
+    | 'compareExchangeCells'
+    | 'commitLane'
+    | 'readRetained'
+    | 'listRetained'
+    | 'deleteRetained'
+    | 'listGenerations'
+    | 'dropGeneration'
+    | 'directoryPut'
+    | 'directoryDelete'
+    | 'directoryList'
+    | 'dispose'
+  >
+>
+type _sourceShape = Assert<
+  Compatible<
+    BackendSubscriptionSource,
+    { kind: 'broadcast'; lane: BroadcastLane } | { kind: 'durable'; roomId: string; inc: string; lane: LaneId }
+  >
+>
+type _transitionRowKeys = Assert<HasKeys<(typeof HEAD_TRANSITIONS)[number], 'from' | 'cx' | 'to' | 'constraint'>>
 type _publishResultShape = Assert<Compatible<PublishResult, ReleasedPublishResult & { receivers?: number }>>
+const orderingHeaderBytes: 16 = ORDERING_FRAME_LAYOUT.headerBytes
+const orderingWordBytes: 4 = ORDERING_FRAME_LAYOUT.wordBytes
+const orderingWordRange: 0x1_0000_0000 = ORDERING_FRAME_LAYOUT.wordRange
+const orderingEndianness: 'big' = ORDERING_FRAME_LAYOUT.endianness
+const orderingSeqHigh: 0 = ORDERING_FRAME_LAYOUT.offsets.seqHigh
+const orderingSeqLow: 4 = ORDERING_FRAME_LAYOUT.offsets.seqLow
+const orderingTimestampHigh: 8 = ORDERING_FRAME_LAYOUT.offsets.timestampHigh
+const orderingTimestampLow: 12 = ORDERING_FRAME_LAYOUT.offsets.timestampLow
 const backendVersion: 1 = BACKEND_SPI_VERSION
 const broadcastLane: BroadcastLane = { key: 'released', kind: 'text' }
 declare const backendFactory: BackendFactory
+declare const backendDriver: BackendDriver
 declare const backend: BackendSpi
 const installedBackend: BackendSpi = installBackend(backendFactory)
 const currentBackend: BackendSpi = getBackend()
@@ -202,10 +253,19 @@ void [
   backendVersion,
   broadcastLane,
   backend,
+  backendDriver,
+  orderingHeaderBytes,
+  orderingWordBytes,
+  orderingWordRange,
+  orderingEndianness,
+  orderingSeqHigh,
+  orderingSeqLow,
+  orderingTimestampHigh,
+  orderingTimestampLow,
   installedBackend,
   currentBackend,
   disposeBackend,
-  generateLuaHeadTransitionTable,
+  HEAD_TRANSITIONS,
   sameConfig,
   call,
   node,

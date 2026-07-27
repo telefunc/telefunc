@@ -63,7 +63,7 @@ export type HeadCx =
   | { expect: { rev: string; closingLeaseExpired: true } }
   // EXPIRED-CLOSE TAKEOVER (recovery): succeeds iff head.rev matches ∧ state==='closing' ∧
   // closeLease.until < authorityNow — the expiry compare runs in AUTHORITY time INSIDE the CX
-  // (memory: isolate clock · Redis: TIME inside the head-CX Lua · CF: room-DO clock in the same tx);
+  // the expiry compare runs on the backend's authoritative clock inside the same atomic operation;
   // a local caller clock is never consulted. `next` MUST be closing(SAME inc, fresh lease with a
   // DIFFERENT id) — takeover replaces only the lease, never the incarnation; the backend mints the
   // new `until` (HeadNext durationMs rule). An unexpired lease makes the CX fail like any rev
@@ -105,10 +105,9 @@ export type CommitAccepted = {
   seq: number // positive safe integer; standalone cursor within this incarnation+lane domain
   timestamp: number // safe integer; non-decreasing authority time, independent of seq advancement
   receivers: number // targets snapshotted at acceptance
-  delivery: Promise<void> // the backend's ONE at-most-once HANDOFF attempt: settles when the handoff
-  // settles — memory: callback dispatch · Redis: PUBLISH reply · CF: target RPC fan-out. Receiver-callback
-  // completion is NOT a cross-backend guarantee; per-target failure visibility is a per-backend
-  // trace/capability. NEVER retries; NEVER poisons.
+  delivery: Promise<void> // the backend's ONE at-most-once HANDOFF attempt: settles when its
+  // backend-defined handoff settles. Receiver-callback completion is NOT a cross-backend guarantee;
+  // per-target failure visibility is a per-backend trace/capability. NEVER retries; NEVER poisons.
 }
 export type CommitResult = CommitAccepted | { stale: true }
 
@@ -126,6 +125,30 @@ export type BackendSubscription = {
 
 export type BackendReceiver = (payload: Uint8Array, info: { seq: number; timestamp: number }) => void
 
+/** The neutral source description handed to a backend author's raw subscription driver. Core owns
+ * canonical keys, local fan-out, refcounting and supervision; the driver sees one establishment attempt. */
+export type BackendSubscriptionSource =
+  | { kind: 'broadcast'; lane: BroadcastLane }
+  | { kind: 'durable'; roomId: string; inc: string; lane: LaneId }
+
+/** One raw backend establishment attempt. Its readiness may remain pending indefinitely; core bounds
+ * the attempt before exposing any subscription to an SPI consumer. */
+export type SubscriptionAttempt = {
+  readonly ready: Promise<void>
+  state(): SubscriptionState
+  onStateChange(cb: (state: SubscriptionState) => void): () => void
+  unsubscribe(): Promise<void>
+}
+
+/** The only backend-specific subscription edge. An author implements acknowledgement and cleanup for
+ * one raw attempt; core supplies epochs, fan-out, readiness, bounded replacement and the watchdog. */
+export type SubscriptionDriver<Source = BackendSubscriptionSource> = {
+  open(source: Source, receiver: BackendReceiver, localReceiverCount: () => number): SubscriptionAttempt
+}
+
+/** The supervised backend contract consumed by Telefunc through `getBackend()`. Backend authors do not
+ * implement this type directly and never receive a supervised subscription. They implement
+ * `BackendDriver`; core composes its raw subscription driver into this consumer-facing SPI. */
 export type BackendSpi = {
   readonly spiVersion: typeof BACKEND_SPI_VERSION
   readonly capabilities: {
@@ -221,4 +244,10 @@ export type BackendSpi = {
   ): Promise<{ entries: { roomId: string; incTag: string }[]; cursor?: string }> // paginated, may be stale
 
   dispose(): Promise<void>
+}
+
+/** The contract a backend author implements. It is the durable/cheap storage surface plus one raw
+ * subscription driver; core turns it into `BackendSpi` at installation time. */
+export type BackendDriver = Omit<BackendSpi, 'subscribe' | 'subscribeLane'> & {
+  readonly subscriptions: SubscriptionDriver
 }

@@ -1,14 +1,16 @@
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
 import { MemoryBackend } from './memory/backend.js'
-import { BACKEND_SPI_VERSION, type BackendSpi } from './spi.js'
+import { BACKEND_SPI_VERSION, type BackendDriver, type BackendSpi } from './spi.js'
+import { superviseBackend } from './supervised-backend.js'
 
-export type BackendFactory = () => BackendSpi
+export type BackendFactory = () => BackendDriver
 
 type BackendState =
   | { phase: 'empty'; retired: WeakSet<object> }
   | { phase: 'installing'; retired: WeakSet<object> }
   | {
       phase: 'ready'
+      driver: BackendDriver
       backend: BackendSpi
       selection: 'memory' | 'default' | 'explicit'
       defaultIdentity?: unknown
@@ -16,6 +18,7 @@ type BackendState =
     }
   | {
       phase: 'disposing'
+      driver: BackendDriver
       backend: BackendSpi
       promise: Promise<void>
       invokingBackendDisposeSynchronously: boolean
@@ -71,11 +74,11 @@ function selectBackend(
 
   const retired = current.retired
   state.current = { phase: 'installing', retired }
-  let backend: BackendSpi
+  let driver: BackendDriver
   try {
-    backend = factory()
-    assertBackend(backend)
-    if (retired.has(backend)) {
+    driver = factory()
+    assertBackendDriver(driver)
+    if (retired.has(driver)) {
       throw new Error('telefunc/backend: a backend instance cannot be reinstalled after disposal has begun')
     }
   } catch (error) {
@@ -83,20 +86,22 @@ function selectBackend(
     throw error
   }
 
-  if (current.phase === 'ready' && Object.is(backend, current.backend)) {
+  if (current.phase === 'ready' && Object.is(driver, current.driver)) {
     state.current = current
     return current.backend
   }
 
   if (current.phase === 'ready') {
-    retired.add(current.backend)
+    retired.add(current.driver)
     // Replacement is deliberately synchronous at the ownership boundary: every bundled default marks
     // itself retired and detaches its live callbacks before dispose() returns its completion promise.
     // The setup API therefore stays synchronous while resource settlement continues in the background.
     void current.backend.dispose().catch(() => {})
   }
+  const backend = superviseBackend(driver, () => invokeDriverDispose(driver))
   state.current = {
     phase: 'ready',
+    driver,
     backend,
     selection,
     ...(selection === 'default' ? { defaultIdentity } : {}),
@@ -117,9 +122,12 @@ export function getBackend(): BackendSpi {
   if (current.phase === 'installing') throw new Error(INSTALLING_ERROR)
   if (current.phase === 'disposing') throw new Error(DISPOSING_ERROR)
 
-  const backend = new MemoryBackend()
-  assertBackend(backend)
-  state.current = { phase: 'ready', backend, selection: 'memory', retired: current.retired }
+  // The implicit default is deliberately composed through the exact same supervision boundary as an
+  // installed backend. Memory cannot become a second, silently divergent subscription mechanism.
+  const driver = new MemoryBackend()
+  assertBackendDriver(driver)
+  const backend = superviseBackend(driver, () => invokeDriverDispose(driver))
+  state.current = { phase: 'ready', driver, backend, selection: 'memory', retired: current.retired }
   return backend
 }
 
@@ -139,11 +147,12 @@ export function disposeBackend(): Promise<void> {
       : current.promise
   }
 
-  const { backend, retired } = current
-  retired.add(backend)
+  const { backend, driver, retired } = current
+  retired.add(driver)
   const deferred = createDeferred<void>()
   const disposing: Extract<BackendState, { phase: 'disposing' }> = {
     phase: 'disposing',
+    driver,
     backend,
     promise: deferred.promise,
     invokingBackendDisposeSynchronously: false,
@@ -170,6 +179,17 @@ function clearDisposalPhase(disposal: Extract<BackendState, { phase: 'disposing'
   if (state.current === disposal) state.current = { phase: 'empty', retired: disposal.retired }
 }
 
+function invokeDriverDispose(driver: BackendDriver): Promise<void> {
+  const current = state.current
+  const disposal = current.phase === 'disposing' && current.driver === driver ? current : undefined
+  try {
+    if (disposal !== undefined) disposal.invokingBackendDisposeSynchronously = true
+    return Promise.resolve(driver.dispose())
+  } finally {
+    if (disposal !== undefined) disposal.invokingBackendDisposeSynchronously = false
+  }
+}
+
 function createDeferred<T>(): { promise: Promise<T>; resolve(value: T): void; reject(reason: unknown): void } {
   let resolve!: (value: T) => void
   let reject!: (reason: unknown) => void
@@ -182,7 +202,6 @@ function createDeferred<T>(): { promise: Promise<T>; resolve(value: T): void; re
 
 const REQUIRED_METHODS = [
   'publish',
-  'subscribe',
   'readHead',
   'compareExchangeHead',
   'readCells',
@@ -191,7 +210,6 @@ const REQUIRED_METHODS = [
   'readRetained',
   'listRetained',
   'deleteRetained',
-  'subscribeLane',
   'listGenerations',
   'dropGeneration',
   'dispose',
@@ -199,7 +217,7 @@ const REQUIRED_METHODS = [
 
 const DIRECTORY_METHODS = ['directoryPut', 'directoryDelete', 'directoryList'] as const
 
-function assertBackend(backend: BackendSpi): void {
+function assertBackendDriver(backend: BackendDriver): void {
   if (backend === null || typeof backend !== 'object') {
     throw new Error('telefunc/backend: invalid backend; expected an object')
   }
@@ -209,6 +227,10 @@ function assertBackend(backend: BackendSpi): void {
     )
   }
   for (const method of REQUIRED_METHODS) assertMethod(backend, method)
+  if (backend.subscriptions === null || typeof backend.subscriptions !== 'object') {
+    throw new Error('telefunc/backend: invalid backend subscriptions; expected an object')
+  }
+  assertMethod(backend.subscriptions, 'open')
 
   const capabilities = backend.capabilities
   if (capabilities === null || typeof capabilities !== 'object') {
@@ -233,7 +255,7 @@ function assertBackend(backend: BackendSpi): void {
   }
 }
 
-function assertMethod(backend: BackendSpi, method: string): void {
+function assertMethod(backend: object, method: string): void {
   if (typeof (backend as unknown as Record<string, unknown>)[method] !== 'function') {
     throw new Error(`telefunc/backend: invalid backend; missing required method "${method}"`)
   }

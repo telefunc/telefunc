@@ -1,11 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import type { BackendReceiver, SubscriptionState } from './spi.js'
-import {
-  SUBSCRIPTION_ESTABLISH_TIMEOUT_MS,
-  SubscriptionManager,
-  type SubscriptionAttempt,
-  type SubscriptionDriver,
-} from './subscriptions.js'
+import type { BackendReceiver, SubscriptionAttempt, SubscriptionDriver, SubscriptionState } from './spi.js'
+import { SUBSCRIPTION_ESTABLISH_TIMEOUT_MS, SubscriptionManager } from './subscriptions.js'
 import {
   SUBSCRIPTION_RETRY_ATTEMPTS,
   SUBSCRIPTION_RETRY_BASE_MS,
@@ -297,10 +292,6 @@ class ControlledDriver implements SubscriptionDriver<string> {
     const attempt = (this.#plans.shift() ?? (() => ControlledAttempt.ready()))()
     this.opens.push({ source, receiver, localReceiverCount, attempt })
     return attempt
-  }
-
-  label(source: string): string {
-    return source
   }
 
   async deliver(openIndex: number, payload: string): Promise<void> {

@@ -5,6 +5,7 @@
 // Redis and Cloudflare fixtures append themselves here; the scenario modules never learn a backend name.
 
 import { MemoryBackend, MemoryBackendState } from '../memory/backend.js'
+import { superviseBackend } from '../supervised-backend.js'
 import type { LaneId, BackendSpi } from '../spi.js'
 
 export type BackendTraces = {
@@ -97,9 +98,9 @@ export const memoryHarness: BackendHarness = {
     // expired), which would certify the mutation gate against the wrong invariant.
     let clock = Date.now()
     const state = new MemoryBackendState()
-    const facades: MemoryBackend[] = []
-    const createFacade = (): MemoryBackend => {
-      const backend = new MemoryBackend({ authorityNow: () => clock, state })
+    const facades: BackendSpi[] = []
+    const createFacade = (): BackendSpi => {
+      const backend = superviseBackend(new MemoryBackend({ authorityNow: () => clock, state }))
       facades.push(backend)
       return backend
     }

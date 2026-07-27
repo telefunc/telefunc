@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import { decodePublishBinary, encodePublishBinary } from './shared-ws.js'
-import { ORDERING_FRAME_HEADER_BYTES, decodeOrderingFrame, encodeOrderingFrame } from './ordering-frame.js'
+import {
+  ORDERING_FRAME_HEADER_BYTES,
+  ORDERING_FRAME_LAYOUT,
+  decodeOrderingFrame,
+  encodeOrderingFrame,
+} from './ordering-frame.js'
 
 describe('shared ordering frame', () => {
   it('preserves sequence and timestamp values wider than 32 bits', () => {
@@ -14,6 +19,13 @@ describe('shared ordering frame', () => {
   })
 
   it('encodes the shared 16-byte header as four big-endian u32 words', () => {
+    expect(ORDERING_FRAME_LAYOUT).toEqual({
+      headerBytes: 16,
+      wordBytes: 4,
+      wordRange: 0x1_0000_0000,
+      endianness: 'big',
+      offsets: { seqHigh: 0, seqLow: 4, timestampHigh: 8, timestampLow: 12 },
+    })
     const frame = encodeOrderingFrame(new Uint8Array([9]), {
       seq: 0x2_0000_0003,
       timestamp: 0x4_0000_0005,

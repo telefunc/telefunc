@@ -1,10 +1,4 @@
-export {
-  HEAD_TRANSITIONS,
-  assertHeadDeleteLegal,
-  assertHeadNextWellFormed,
-  assertHeadTransition,
-  generateLuaHeadTransitionTable,
-}
+export { HEAD_TRANSITIONS, assertHeadDeleteLegal, assertHeadNextWellFormed, assertHeadTransition }
 
 import { MAX_CLOSE_LEASE_MS, MIN_CLOSE_LEASE_MS, type HeadCx, type HeadNext, type RoomHead } from './spi.js'
 
@@ -12,21 +6,21 @@ type HeadState = RoomHead['state'] | 'absent'
 type HeadCxForm = 'absent' | 'generic' | 'takeover' | 'finalize'
 type TransitionConstraint = 'fresh-inc' | 'same-inc' | 'replace-lease' | 'none'
 
-/** The one normative transition table. TypeScript interprets it directly; Redis embeds the generated
- * Lua table returned by generateLuaHeadTransitionTable(), so legal-transition policy has one source. */
-const HEAD_TRANSITIONS = [
-  { from: 'absent', cx: 'absent', to: 'open', constraint: 'fresh-inc' },
-  { from: 'closed', cx: 'generic', to: 'open', constraint: 'fresh-inc' },
-  { from: 'open', cx: 'generic', to: 'open', constraint: 'same-inc' },
-  { from: 'open', cx: 'generic', to: 'closing', constraint: 'same-inc' },
-  { from: 'closing', cx: 'takeover', to: 'closing', constraint: 'replace-lease' },
-  { from: 'closing', cx: 'finalize', to: 'closed', constraint: 'none' },
+/** The one normative transition table. TypeScript interprets it directly; backends that cannot execute
+ * TypeScript consume this exported data and own any rendering required by their runtime. */
+const HEAD_TRANSITIONS = Object.freeze([
+  Object.freeze({ from: 'absent', cx: 'absent', to: 'open', constraint: 'fresh-inc' }),
+  Object.freeze({ from: 'closed', cx: 'generic', to: 'open', constraint: 'fresh-inc' }),
+  Object.freeze({ from: 'open', cx: 'generic', to: 'open', constraint: 'same-inc' }),
+  Object.freeze({ from: 'open', cx: 'generic', to: 'closing', constraint: 'same-inc' }),
+  Object.freeze({ from: 'closing', cx: 'takeover', to: 'closing', constraint: 'replace-lease' }),
+  Object.freeze({ from: 'closing', cx: 'finalize', to: 'closed', constraint: 'none' }),
 ] as const satisfies readonly {
   from: HeadState
   cx: HeadCxForm
   to: RoomHead['state']
   constraint: TransitionConstraint
-}[]
+}[])
 
 type HeadView = Pick<RoomHead, 'currentInc' | 'state' | 'config' | 'closeLease'>
 
@@ -90,14 +84,6 @@ function assertHeadTransition(
     case 'none':
       return
   }
-}
-
-function generateLuaHeadTransitionTable(variable = 'HEAD_TRANSITIONS'): string {
-  const rows = HEAD_TRANSITIONS.map((rule) => {
-    const key = `${rule.from}|${rule.cx}|${rule.to}`
-    return `  ["${key}"] = "${rule.constraint}",`
-  })
-  return [`local ${variable} = {`, ...rows, '}'].join('\n')
 }
 
 function headCxForm(cx: HeadCx): HeadCxForm {

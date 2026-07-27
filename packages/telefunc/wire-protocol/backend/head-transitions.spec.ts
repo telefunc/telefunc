@@ -1,16 +1,11 @@
 import { describe, expect, it } from 'vitest'
-import { HEAD_TRANSITIONS, assertHeadTransition, generateLuaHeadTransitionTable } from './head-transitions.js'
+import { HEAD_TRANSITIONS, assertHeadTransition } from './head-transitions.js'
 import type { HeadCx, HeadNext, RoomHead } from './spi.js'
 
 describe('shared head-transition rules', () => {
-  it('generates every Lua lookup row from the normative data table', () => {
-    const lua = generateLuaHeadTransitionTable()
-
+  it('publishes exactly the six normative transition rows as backend-neutral data', () => {
     expect(HEAD_TRANSITIONS).toHaveLength(6)
-    for (const rule of HEAD_TRANSITIONS) {
-      expect(lua).toContain(`["${rule.from}|${rule.cx}|${rule.to}"] = "${rule.constraint}"`)
-    }
-    expect(lua.match(/\["/g)).toHaveLength(HEAD_TRANSITIONS.length)
+    expect(new Set(HEAD_TRANSITIONS.map((rule) => `${rule.from}|${rule.cx}|${rule.to}`)).size).toBe(6)
   })
 
   it.each([
