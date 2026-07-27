@@ -1290,8 +1290,7 @@ class ServerRoom implements Room {
       return
     }
     const wasClosed = this._state.closed
-    const initiatingClose =
-      event.__r === 'closed' ? findInitiatingClose(this.id, this._inc, event.closeLease) : null
+    const initiatingClose = event.__r === 'closed' ? findInitiatingClose(this.id, this._inc, event.closeLease) : null
     if (initiatingClose !== null) this._holdInitiatingClose(initiatingClose)
     // A hidden member's presence events (join/leave/meta/track) are server-only — decide before
     // applying, since `leave` removes the member from state (see `_hidesFromClients`).

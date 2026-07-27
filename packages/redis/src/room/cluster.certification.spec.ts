@@ -320,10 +320,7 @@ describe.skipIf(nodes === undefined)('RedisRoomBackend real three-master Cluster
     try {
       const room = await Room.create(roomId)
       room.onAnnounce((data) => observed.push(String(data)))
-      await waitFor(
-        () => semanticSubscription?.state() === 'ready' && controlSubscription?.state() === 'ready',
-        10_000,
-      )
+      await waitFor(() => semanticSubscription?.state() === 'ready' && controlSubscription?.state() === 'ready', 10_000)
       states.push(semanticSubscription?.state() as ReadinessState)
       await Room.announce(roomId, 'before-loss')
       await waitFor(() => observed.length === 1, 10_000)
@@ -435,10 +432,7 @@ describe.skipIf(nodes === undefined)('RedisRoomBackend real three-master Cluster
     try {
       const room = (await Room.create(roomId)) as RoomReadinessProbe
       room.onAnnounce((data) => observed.push(String(data)))
-      await waitFor(
-        () => semanticSubscription?.state() === 'ready' && controlSubscription?.state() === 'ready',
-        10_000,
-      )
+      await waitFor(() => semanticSubscription?.state() === 'ready' && controlSubscription?.state() === 'ready', 10_000)
       await Room.announce(roomId, 'before-exhaustion')
       await waitFor(() => observed.length === 1, 10_000)
 
@@ -462,7 +456,8 @@ describe.skipIf(nodes === undefined)('RedisRoomBackend real three-master Cluster
       expect(freshGeneration).not.toBe(failedGeneration)
       await freshGeneration
       await waitFor(
-        () => semanticCalls === 7 && semanticSubscription?.state() === 'ready' && controlSubscription?.state() === 'ready',
+        () =>
+          semanticCalls === 7 && semanticSubscription?.state() === 'ready' && controlSubscription?.state() === 'ready',
         10_000,
       )
       await retiredSubscription?.unsubscribe()
