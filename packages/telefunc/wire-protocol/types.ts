@@ -197,7 +197,7 @@ type ServerReplacerContext = {
    *  values (object keys are visited in insertion order, which the app controls). The room
    *  replacers use it to bind a co-returned participant's echo-suppression onto its room's stub;
    *  it is discarded when the pass ends. Keyed by a module-private symbol per concern. */
-  passScope: Map<symbol, unknown>
+  passScope?: Map<symbol, unknown>
 }
 
 /** Context for all client-side request replacers (File/Blob + Function + ReadableStream). */

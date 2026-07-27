@@ -26,6 +26,7 @@ import type {
   CommitAccepted,
   LaneId,
   LaneSubscription,
+  ReadinessState,
   RoomBackendSpi,
   RoomHead,
 } from '../backend/spi.js'
@@ -36,6 +37,7 @@ import {
   leaveCauseFromWire,
   leaveCauseToWire,
   frameWithMemberId,
+  frameRoomBinaryOrder,
   binaryFrameSender,
   hasRoomTag,
   mergeAttributes,
@@ -690,11 +692,11 @@ class ServerRoom implements Room {
   private readonly _stubs = new Set<RoomStubChannel>()
   private readonly _localParticipants = new Map<string, ServerLocalParticipant>()
 
-  private readonly _ctrlSub = new SubSlot()
-  private readonly _textSub = new SubSlot()
+  private readonly _ctrlSub = new SubSlot('control')
+  private readonly _textSub = new SubSlot('semantic')
   /** Upstream subscriptions keyed by their policy identity. */
-  private readonly _binaryKeyUnsubs = new Map<string, LaneSubscription>()
-  private readonly _dmUnsubs = new Map<string, LaneSubscription>()
+  private readonly _binaryKeyUnsubs = new Map<string, SubSlot>()
+  private readonly _dmUnsubs = new Map<string, SubSlot>()
   /** (member, track) pairs this instance has already announced — first publish pays the
    *  KV append + ctrl event, every further frame is a Set lookup. */
   private readonly _announcedTracks = new Map<string, Set<string>>()
@@ -1337,7 +1339,7 @@ class ServerRoom implements Room {
     this._healUnknownSender(unframed.from)
 
     if (this._stubs.size > 0) {
-      const wireData = encodePublishBinary(framed, rawInfo)
+      const wireData = encodePublishBinary(frameRoomBinaryOrder(framed, rawInfo), rawInfo)
       const track = unframed.track ?? DEFAULT_TRACK
       for (const stub of this._stubs) {
         if (!stub._wantsBinary(unframed.from, track)) continue
@@ -1692,7 +1694,7 @@ class ServerRoom implements Room {
       // Replay with the frame's own stored receipt (never seq:0/Date.now()); the stub drops it if a
       // same-or-newer live frame on this lane already reached it — exactly-once, in order.
       const info: WirePublishInfo = { seq: stored.seq, timestamp: stored.timestamp }
-      stub._emitRetainedBinary(encodePublishBinary(framed, info), frame.from, track, info)
+      stub._emitRetainedBinary(encodePublishBinary(frameRoomBinaryOrder(framed, info), info), frame.from, track, info)
     }
   }
 
@@ -1860,19 +1862,24 @@ class ServerRoom implements Room {
 
   /** Reconcile a map of keyed subscriptions (member IDs or lane keys) to the wanted set. */
   private _syncKeyedSubs<T>(
-    subs: Map<string, LaneSubscription>,
+    subs: Map<string, SubSlot>,
     wantedEntries: Array<{ key: string; value: T }>,
     subscribe: (value: T) => LaneSubscription,
   ) {
     const wanted = new Map(wantedEntries.map(({ key, value }) => [key, value]))
-    for (const [key, unsub] of [...subs]) {
+    for (const [key, slot] of [...subs]) {
       if (!wanted.has(key)) {
         subs.delete(key)
-        void unsub.unsubscribe()
+        slot.stop()
       }
     }
     for (const [key, value] of wanted) {
-      if (!subs.has(key)) subs.set(key, subscribe(value))
+      let slot = subs.get(key)
+      if (!slot) {
+        slot = new SubSlot(key)
+        subs.set(key, slot)
+      }
+      slot.sync(true, () => subscribe(value))
     }
   }
 
@@ -2306,11 +2313,24 @@ async function evictMember(
 // ---------------------------------------------------------------------------
 
 /** One backend lane subscription, reconciled to a desired on/off state. */
+const SUBSCRIPTION_REPLAN_LIMIT = 5
+
 class SubSlot {
   private _subscription: LaneSubscription | null = null
+  private _unobserve: (() => void) | null = null
+  private _wanted = false
+  private _subscribe: (() => LaneSubscription) | null = null
+  private _readyPromise = Promise.resolve()
+  private _resolveReady: (() => void) | null = null
+  private _replanQueued = false
+  private _replanAttempts = 0
+  private _cleanup = Promise.resolve()
+  private _cleanupPending = false
+
+  constructor(private readonly _label: string) {}
 
   get active(): boolean {
-    return this._subscription !== null
+    return this._subscription?.state() === 'ready'
   }
 
   /** Resolves once the current subscription is live at the backend — immediately when inactive or when
@@ -2318,17 +2338,123 @@ class SubSlot {
    *  value, so a publish racing the just-issued subscribe reaches the node (or rides the retained copy)
    *  instead of slipping through the gap between subscribing and the read. */
   get ready(): Promise<void> {
-    return this._subscription?.ready ?? Promise.resolve()
+    return this._wanted ? this._readyPromise : Promise.resolve()
   }
 
   sync(want: boolean, subscribe: () => LaneSubscription): void {
-    if (want && !this._subscription) {
-      this._subscription = subscribe()
-    } else if (!want && this._subscription) {
-      const subscription = this._subscription
-      this._subscription = null
-      void subscription.unsubscribe()
+    if (!want) return this.stop()
+    this._subscribe = subscribe
+    if (!this._wanted) this._beginReadyWait()
+    this._wanted = true
+    if (!this._subscription) this._start()
+  }
+
+  stop(): void {
+    this._wanted = false
+    this._subscribe = null
+    this._replanAttempts = 0
+    this._resolveReady?.()
+    this._resolveReady = null
+    const subscription = this._subscription
+    this._clearCurrent()
+    if (subscription) this._queueCleanup(subscription)
+  }
+
+  private _start(recovering = false): void {
+    const subscribe = this._subscribe
+    if (!this._wanted || !subscribe || this._subscription || this._cleanupPending) return
+    let subscription: LaneSubscription
+    try {
+      subscription = subscribe()
+    } catch (error) {
+      if (!recovering) this._failed(error)
+      return
     }
+    this._subscription = subscription
+    this._unobserve = subscription.onStateChange((state) => this._onStateChange(subscription, state))
+    const state = subscription.state()
+    if (state === 'ready') this._becameReady(subscription)
+    else if (state === 'closed') this._closed(subscription)
+    subscription.ready.then(
+      () => this._becameReady(subscription),
+      (error: unknown) => this._failedCurrent(subscription, error),
+    )
+  }
+
+  private _onStateChange(subscription: LaneSubscription, state: ReadinessState): void {
+    if (this._subscription !== subscription) return
+    if (state === 'ready') {
+      this._becameReady(subscription)
+      return
+    }
+    if (state === 'lost') {
+      this._markUnavailable()
+      reportRoomError(new Error(`Room backend subscription lost: ${this._label}`))
+      return
+    }
+    if (state === 'closed') this._closed(subscription)
+  }
+
+  private _becameReady(subscription: LaneSubscription): void {
+    if (this._subscription !== subscription || subscription.state() !== 'ready') return
+    this._replanAttempts = 0
+    this._resolveReady?.()
+    this._resolveReady = null
+  }
+
+  private _closed(subscription: LaneSubscription): void {
+    if (this._subscription !== subscription) return
+    this._markUnavailable()
+    this._clearCurrent()
+    this._scheduleReplan()
+  }
+
+  private _failedCurrent(subscription: LaneSubscription, error: unknown): void {
+    if (this._subscription !== subscription) return
+    this._clearCurrent()
+    this._failed(error)
+  }
+
+  private _failed(error: unknown): void {
+    reportRoomError(error instanceof Error ? error : new Error(String(error)))
+    this._scheduleReplan()
+  }
+
+  private _scheduleReplan(): void {
+    if (!this._wanted || this._replanQueued || this._replanAttempts >= SUBSCRIPTION_REPLAN_LIMIT) return
+    this._replanAttempts++
+    this._replanQueued = true
+    queueMicrotask(() => {
+      this._replanQueued = false
+      if (this._wanted && !this._subscription) this._start(true)
+    })
+  }
+
+  private _beginReadyWait(): void {
+    this._readyPromise = new Promise<void>((resolve) => {
+      this._resolveReady = resolve
+    })
+  }
+
+  private _markUnavailable(): void {
+    if (this._wanted && this._resolveReady === null) this._beginReadyWait()
+  }
+
+  private _clearCurrent(): void {
+    this._unobserve?.()
+    this._unobserve = null
+    this._subscription = null
+  }
+
+  private _queueCleanup(subscription: LaneSubscription): void {
+    this._cleanupPending = true
+    this._cleanup = this._cleanup
+      .then(() => subscription.unsubscribe())
+      .catch(reportRoomError)
+      .then(() => {
+        this._cleanupPending = false
+        this._start()
+      })
   }
 }
 

@@ -7,6 +7,7 @@ import type { ClientBroadcast, ClientChannel } from '../client/channel.js'
 import {
   leaveCauseFromWire,
   frameWithMemberId,
+  unframeRoomBinaryOrder,
   hasRoomTag,
   mergeAttributes,
   normalizeJoinOptions,
@@ -348,15 +349,17 @@ class ClientRoom implements Room {
     }
   }
 
-  private _onBinaryFrame(framed: Uint8Array, rawInfo: ChannelPublishInfo): void {
-    const unframed = unframeMemberId(framed)
+  private _onBinaryFrame(framed: Uint8Array, _rawInfo: ChannelPublishInfo): void {
+    const ordered = unframeRoomBinaryOrder(framed)
+    if (!ordered) return
+    const unframed = unframeMemberId(ordered.payload)
     if (!unframed) return
     this._state.applyBinary(
       unframed.from,
       unframed.payload,
       unframed.track,
       unframed.meta,
-      makePublishInfo(this.id, rawInfo.seq, rawInfo.timestamp),
+      makePublishInfo(this.id, ordered.info.seq, ordered.info.timestamp),
     )
   }
 

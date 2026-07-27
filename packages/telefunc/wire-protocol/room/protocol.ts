@@ -12,6 +12,8 @@ export {
   roomIdentityKvPrefix,
   stampNewer,
   uuidToBytes,
+  frameRoomBinaryOrder,
+  unframeRoomBinaryOrder,
   frameWithMemberId,
   unframeMemberId,
   binaryFrameSender,
@@ -524,6 +526,39 @@ const TRACK_MAX_BYTES = 64
 const META_MAX_BYTES = 4096
 const frameTextEncoder = /* @__PURE__ */ new TextEncoder()
 const frameTextDecoder = /* @__PURE__ */ new TextDecoder()
+const ROOM_BINARY_ORDER_HEADER_BYTES = 16
+const U32_RANGE = 0x1_0000_0000
+
+/** Room-only ordering envelope inside the released generic binary publish frame:
+ *  `[seq_hi][seq_lo][timestamp_hi][timestamp_lo][member frame]`, all u32 big-endian. The outer
+ *  generic Channel/Broadcast header remains 12 bytes and may carry only its released u32 cursor;
+ *  Room clients read this envelope instead. */
+function frameRoomBinaryOrder(data: Uint8Array, info: RoomOrder): Uint8Array {
+  assert(Number.isSafeInteger(info.seq) && info.seq > 0, 'Room binary seq must be a positive safe integer')
+  assert(
+    Number.isSafeInteger(info.timestamp) && info.timestamp >= 0,
+    'Room binary timestamp must be a non-negative safe integer',
+  )
+  const framed = new Uint8Array(ROOM_BINARY_ORDER_HEADER_BYTES + data.byteLength)
+  const view = new DataView(framed.buffer)
+  view.setUint32(0, Math.floor(info.seq / U32_RANGE), false)
+  view.setUint32(4, info.seq % U32_RANGE, false)
+  view.setUint32(8, Math.floor(info.timestamp / U32_RANGE), false)
+  view.setUint32(12, info.timestamp % U32_RANGE, false)
+  framed.set(data, ROOM_BINARY_ORDER_HEADER_BYTES)
+  return framed
+}
+
+/** Validate and split Room's wide ordering envelope after the generic channel decoder removed its
+ *  own header. Malformed frames are ignored at the Room boundary, like malformed member frames. */
+function unframeRoomBinaryOrder(data: Uint8Array): { payload: Uint8Array; info: RoomOrder } | null {
+  if (data.byteLength < ROOM_BINARY_ORDER_HEADER_BYTES) return null
+  const view = new DataView(data.buffer, data.byteOffset, data.byteLength)
+  const seq = view.getUint32(0, false) * U32_RANGE + view.getUint32(4, false)
+  const timestamp = view.getUint32(8, false) * U32_RANGE + view.getUint32(12, false)
+  if (!Number.isSafeInteger(seq) || seq <= 0 || !Number.isSafeInteger(timestamp) || timestamp < 0) return null
+  return { payload: data.subarray(ROOM_BINARY_ORDER_HEADER_BYTES), info: { seq, timestamp } }
+}
 
 /** Binary relay format:
  *  `[16-byte member UUID][1-byte flags][?1-byte track length + track][?2-byte meta length + meta][payload]`.

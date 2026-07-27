@@ -175,7 +175,8 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
     const info = { seq, timestamp }
     const set = subs.get(key)
     if (set) for (const onMessage of set) onMessage(data, info)
-    return { seq, timestamp, receivers: set?.size ?? 0, meta: { transport: 'in-memory' } }
+    const delivered = set?.size ?? 0
+    return { seq, timestamp, receivers: delivered, meta: { delivered, transport: 'in-memory' } }
   }
 
   // ── Shared ──
