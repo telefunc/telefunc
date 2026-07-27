@@ -58,7 +58,19 @@ beforeEach(async () => {
 })
 afterEach(async () => {
   await settle()
-  await disposeRoomBackend()
+  // Test isolation deliberately retires the backend while many Room views are still live. Their
+  // bounded terminal-subscription replans correctly report that the retired memory backend rejects
+  // new work; hide only that teardown diagnostic so every other unexpected Room error stays visible.
+  const consoleError = console.error
+  const report = vi.spyOn(console, 'error').mockImplementation((...args) => {
+    if (!String(args[0]).includes('MemoryRoomBackend: used after dispose()')) consoleError(...args)
+  })
+  try {
+    await disposeRoomBackend()
+    await settle()
+  } finally {
+    report.mockRestore()
+  }
 })
 
 /** Let fire-and-forget async chains (KV deletes, leave publishes) settle. */
@@ -2814,13 +2826,15 @@ describe('room stub channel', () => {
       const room = await Room.create('subscription-initial-failure')
       const member = await room.join({ meta: {} })
       const received: unknown[] = []
-      room.subscribe((data) => received.push(data))
+      const unlisten = room.subscribe((data) => received.push(data))
 
       failed.rejectInitial(new Error('synthetic initial subscription failure'))
       await expectEventually(() => expect(semanticCalls).toBe(2))
       await member.publish('after-replan')
 
       expect(received).toEqual(['after-replan'])
+      unlisten()
+      await member.leave()
     } finally {
       spy.mockRestore()
     }
@@ -2828,6 +2842,7 @@ describe('room stub channel', () => {
 
   it('keeps a keyed lane through lost → ready and replaces it after terminal close', async () => {
     const realSubscribe = roomBackend.subscribeLane.bind(roomBackend)
+    const report = vi.spyOn(console, 'error').mockImplementation(() => {})
     let binaryCalls = 0
     let controlled!: ControlledLaneSubscription
     const spy = vi.spyOn(roomBackend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
@@ -2842,7 +2857,7 @@ describe('room stub channel', () => {
       const room = await Room.create('subscription-renewal')
       const member = await room.join({ meta: {} })
       const received: number[] = []
-      room.subscribeBinary((data) => received.push(data[0]!))
+      const unlisten = room.subscribeBinary((data) => received.push(data[0]!))
       await controlled.ready
 
       await controlled.lose()
@@ -2851,6 +2866,7 @@ describe('room stub channel', () => {
 
       await controlled.recover()
       expect(binaryCalls).toBe(1) // renewal belongs to the same backend subscription
+      expect(report.mock.calls.some(([error]) => String(error).includes('subscription lost'))).toBe(true)
       await member.publishBinary(new Uint8Array([8]))
       expect(received).toEqual([8])
 
@@ -2859,8 +2875,50 @@ describe('room stub channel', () => {
       await member.publishBinary(new Uint8Array([9]))
 
       expect(received).toEqual([8, 9])
+      unlisten()
+      await member.leave()
     } finally {
       spy.mockRestore()
+      report.mockRestore()
+    }
+  })
+
+  it('retries when the first terminal replacement subscribe throws synchronously', async () => {
+    const realSubscribe = roomBackend.subscribeLane.bind(roomBackend)
+    const report = vi.spyOn(console, 'error').mockImplementation(() => {})
+    let binaryCalls = 0
+    let controlled!: ControlledLaneSubscription
+    const spy = vi.spyOn(roomBackend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
+      if (lane.kind !== 'binary') return realSubscribe(roomId, inc, lane, receiver)
+      binaryCalls++
+      if (binaryCalls === 1) {
+        controlled = new ControlledLaneSubscription(() => realSubscribe(roomId, inc, lane, receiver))
+        controlled.establish()
+        return controlled
+      }
+      if (binaryCalls === 2) throw new Error('synthetic replacement subscribe failure')
+      return realSubscribe(roomId, inc, lane, receiver)
+    })
+    try {
+      const room = await Room.create('subscription-replacement-throw')
+      const member = await room.join({ meta: {} })
+      const received: number[] = []
+      const unlisten = room.subscribeBinary((data) => received.push(data[0]!))
+      await controlled.ready
+
+      await controlled.closeFromBackend()
+      await expectEventually(() => expect(binaryCalls).toBe(3))
+      expect(
+        report.mock.calls.some(([error]) => String(error).includes('synthetic replacement subscribe failure')),
+      ).toBe(true)
+      await member.publishBinary(new Uint8Array([11]))
+
+      expect(received).toEqual([11])
+      unlisten()
+      await member.leave()
+    } finally {
+      spy.mockRestore()
+      report.mockRestore()
     }
   })
 
