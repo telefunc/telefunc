@@ -38,6 +38,11 @@ function getCiJobs() {
       command: 'pnpm run test:types',
       setups: [ubuntu],
     },
+    {
+      name: 'Released API',
+      command: 'pnpm run test:released-api',
+      setups: [ubuntu],
+    },
 
     // @brillout/test-e2e
     {

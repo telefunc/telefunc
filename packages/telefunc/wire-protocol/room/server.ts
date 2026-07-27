@@ -2360,14 +2360,14 @@ class SubSlot {
     if (subscription) this._queueCleanup(subscription)
   }
 
-  private _start(recovering = false): void {
+  private _start(): void {
     const subscribe = this._subscribe
     if (!this._wanted || !subscribe || this._subscription || this._cleanupPending) return
     let subscription: LaneSubscription
     try {
       subscription = subscribe()
     } catch (error) {
-      if (!recovering) this._failed(error)
+      this._failed(error)
       return
     }
     this._subscription = subscription
@@ -2426,7 +2426,7 @@ class SubSlot {
     this._replanQueued = true
     queueMicrotask(() => {
       this._replanQueued = false
-      if (this._wanted && !this._subscription) this._start(true)
+      if (this._wanted && !this._subscription) this._start()
     })
   }
 
