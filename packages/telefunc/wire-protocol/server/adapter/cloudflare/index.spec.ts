@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const mocks = vi.hoisted(() => {
   const crosswsAdapter = {
@@ -44,6 +44,8 @@ const mocks = vi.hoisted(() => {
       },
     })),
     installBroadcastAdapter: vi.fn(<T>(factory: () => T): T => factory()),
+    asyncMode: false,
+    rawContext: null as Record<symbol, unknown> | null,
     transportInstances: [] as MockCloudflareBroadcastTransport[],
     authorityInstances: [] as MockCloudflareBroadcastAuthorityState[],
     MockCloudflareBroadcastAuthorityState,
@@ -80,6 +82,28 @@ vi.mock('../../../../node/server/telefunc.js', () => ({
   serve: mocks.telefuncMock,
 }))
 
+vi.mock('../../../../node/server/context/context.js', () => ({
+  getRawContext: () => mocks.rawContext,
+  isAsyncMode: () => mocks.asyncMode,
+  restoreContext: <T>(context: Record<symbol, unknown>, fn: () => T): T => {
+    const previous = mocks.rawContext
+    mocks.rawContext = context
+    try {
+      const result = fn()
+      if (result instanceof Promise) {
+        return result.finally(() => {
+          mocks.rawContext = previous
+        }) as T
+      }
+      mocks.rawContext = previous
+      return result
+    } catch (error) {
+      mocks.rawContext = previous
+      throw error
+    }
+  },
+}))
+
 vi.mock('../../broadcast.js', () => ({
   installBroadcastAdapter: mocks.installBroadcastAdapter,
 }))
@@ -109,6 +133,9 @@ vi.mock('./routing.js', () => ({
 }))
 
 import { Telefunc } from '../../../../serve/cloudflare.js'
+import { disposeRoomBackend, getRoomBackend, installRoomBackend } from '../../../backend/install.js'
+import { MemoryRoomBackend } from '../../../backend/memory/backend.js'
+import { CloudflareRoomBackend } from './room/backend.js'
 
 function createMockKV(): KVNamespace {
   const store = new Map<string, { value: string; expirationTtl?: number }>()
@@ -163,8 +190,14 @@ beforeEach(() => {
     },
   })
   mocks.installBroadcastAdapter.mockClear()
+  mocks.asyncMode = false
+  mocks.rawContext = null
   mocks.transportInstances.length = 0
   mocks.authorityInstances.length = 0
+})
+
+afterEach(async () => {
+  await disposeRoomBackend()
 })
 
 describe('cloudflare adapter entrypoint', () => {
@@ -281,6 +314,51 @@ describe('cloudflare adapter entrypoint', () => {
 
     expect(mocks.transportInstances[0]?.options).toEqual(
       expect.objectContaining({ baseInstanceName: 'telefunc', scale: undefined }),
+    )
+  })
+
+  it('installs the Durable Object Room backend from the documented Cloudflare setup alone', () => {
+    new Telefunc()
+
+    expect(getRoomBackend()).toBeInstanceOf(CloudflareRoomBackend)
+  })
+
+  it('keeps an explicit Room backend installation as the Cloudflare policy override', () => {
+    const explicit = new MemoryRoomBackend()
+    installRoomBackend(() => explicit)
+
+    new Telefunc()
+
+    expect(getRoomBackend()).toBe(explicit)
+  })
+
+  it('keeps the same Durable Object Room backend across repeated Worker entry evaluation', () => {
+    new Telefunc()
+    const installed = getRoomBackend()
+
+    new Telefunc()
+
+    expect(getRoomBackend()).toBe(installed)
+  })
+
+  it('reports the normative Room binding diagnostic instead of using the memory backend', async () => {
+    mocks.asyncMode = true
+    const { binding } = createBinding()
+    const tf = new Telefunc()
+    const DurableClass = tf.TelefuncDurableObject
+    const instance = new DurableClass(
+      {
+        id: { toString: () => 'telefunc-room-binding-probe' },
+        getWebSockets: () => [],
+      } as unknown as DurableObjectState,
+      { TelefuncDurableObject: binding } as unknown as Cloudflare.Env,
+    ) as InstanceType<typeof DurableClass> & { fetch(request: Request): Promise<Response> }
+    mocks.telefuncMock.mockImplementationOnce(async () => {
+      await getRoomBackend().readHead('binding-probe')
+      throw new Error('Room backend unexpectedly returned without a binding')
+    })
+    await expect(instance.fetch(new Request('https://telefunc.test/_telefunc'))).rejects.toThrow(
+      'Missing Cloudflare Room Durable Object binding "TelefuncRoomDurableObject". Add it to your wrangler.jsonc.',
     )
   })
 

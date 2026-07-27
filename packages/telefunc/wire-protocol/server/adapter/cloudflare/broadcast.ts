@@ -1,6 +1,6 @@
 /// <reference types="@cloudflare/workers-types" />
 export { CloudflareBroadcastTransport, CloudflareBroadcastAuthorityState }
-export type { BroadcastDeliverRequest, BroadcastPublishRequest, TelefuncDurableObjectStub, RoomFrameCommit }
+export type { BroadcastDeliverRequest, BroadcastPublishRequest, TelefuncDurableObjectStub }
 
 import { CHANNEL_BUFFER_LIMIT_BYTES } from '../../../constants.js'
 import { KNOWN_BROADCAST_BUCKETS, getBucketCoordinatorShardIndices, getDeterministicKeyBucketIndex } from './routing.js'
@@ -13,80 +13,11 @@ import type {
   BroadcastAdapter,
   BroadcastUnsubscribe,
 } from '../../broadcast.js'
-import { encodePublishText, type WirePublishInfo } from '../../../shared-ws.js'
+import type { WirePublishInfo } from '../../../shared-ws.js'
 import type { CloudflareScale, LocationBucket } from './routing.js'
 
 const PRESENCE_TTL_SECONDS = 90
 const PRESENCE_REFRESH_INTERVAL_MS = 30_000
-
-// Private legacy Room state surface, pending the separate Cloudflare policy-switch ticket.
-const KV_KEEP: unique symbol = Symbol.for('telefunc.kv.keep')
-type KvMutate = (current: string | null) => string | null | typeof KV_KEEP
-type KvReadOptions = { partitionKey?: string; consistent?: boolean }
-type KvWriteOptions = { ttlMs?: number; partitionKey?: string; consistent?: boolean }
-
-type RoomFrameCommit = {
-  partitionKey: string
-  fences: readonly { key: string; expected: string }[]
-  orderKey: string
-  orderTtlMs?: number
-  channelKey: string
-  payload: string
-  retainKey?: string
-}
-
-type RoomFrameCommitResult =
-  | { ok: true; seq: number; timestamp: number; receivers?: number }
-  | { ok: false; reason: 'stale-fence' }
-/** Namespace of the room-state read replica within the Workers KV binding. Directory reads (`Room.get`,
- *  `Room.list`) and the cross-room room index are served from here — Workers KV is globally distributed,
- *  so these reads are fast from any region and enumeration is a plain KV list. The strongly-consistent
- *  copy lives in each room's authority Durable Object (see `CloudflareBroadcastAuthorityState`), which
- *  mirrors replicated writes through to this replica; reads that need read-your-writes (`consistent`)
- *  bypass it and hit the authority. */
-const KV_STORE_PREFIX = 'tfkv:'
-
-/** Workers KV expirations are whole seconds with a 60s floor — round up, never down, so a record never
- *  outlives its TTL by rounding yet never expires early. */
-function replicaKvTtl(ttlMs: number | undefined): { expirationTtl: number } | undefined {
-  return ttlMs === undefined ? undefined : { expirationTtl: Math.max(60, Math.ceil(ttlMs / 1000)) }
-}
-
-/** Read-replica mutators over the Workers KV namespace, shared by the transport (cross-room index) and
- *  the authority (write-through mirror of a room's replicated state) so both speak one key scheme. */
-function replicaKvPut(kv: KVNamespace, key: string, value: string, ttlMs?: number): Promise<void> {
-  return kv.put(KV_STORE_PREFIX + key, value, replicaKvTtl(ttlMs))
-}
-
-function replicaKvDelete(kv: KVNamespace, key: string): Promise<void> {
-  return kv.delete(KV_STORE_PREFIX + key)
-}
-
-function replicaKvGet(kv: KVNamespace, key: string): Promise<string | null> {
-  return kv.get(KV_STORE_PREFIX + key)
-}
-
-async function replicaKvList(kv: KVNamespace, prefix: string): Promise<string[]> {
-  const fullPrefix = KV_STORE_PREFIX + prefix
-  const keys: string[] = []
-  let cursor: string | undefined
-  do {
-    const list = await kv.list({ prefix: fullPrefix, cursor })
-    for (const entry of list.keys) keys.push(entry.name.slice(KV_STORE_PREFIX.length))
-    cursor = list.list_complete ? undefined : list.cursor
-  } while (cursor)
-  return keys
-}
-
-/** DO-storage prefix for room-state entries, isolating them from the authority's broadcast bookkeeping
- *  (`broadcast:*`) in the same Durable Object. */
-const ROOM_STATE_STORAGE_PREFIX = 'rs:'
-/** How often a room-state authority sweeps expired entries. DO storage has no native TTL, so this
- *  alarm does what Workers KV expiry did before — bounding a crashed owner's leftover member records. */
-const ROOM_STATE_REAP_INTERVAL_MS = 60_000
-
-/** One room-state entry in DO storage: the raw value and its absolute expiry (`null` = never). */
-type RoomStateEntry = { v: string; e: number | null }
 
 /** Unwrap Cloudflare DO RPC proxy into a plain object.
  *  RPC properties are lazy stubs that must be awaited to resolve their values. */
@@ -120,24 +51,10 @@ type BroadcastDeliverRequest = {
   binaryData?: Uint8Array
 }
 
-/** A stub to a Telefunc Durable Object. One class implements every RPC surface — broadcast fan-out and,
- *  for a room's authority, its room-state store — so one stub type carries both (`serve/cloudflare.ts`). */
+/** A stub to a Telefunc Durable Object carrying the generic broadcast fan-out RPC surface. */
 type TelefuncDurableObjectStub = DurableObjectStub & {
   telefuncBroadcastPublish(request: BroadcastPublishRequest): Promise<BroadcastPublishResult>
   telefuncBroadcastDeliver(request: BroadcastDeliverRequest): Promise<void>
-  telefuncRoomStateGet(key: string): Promise<string | null>
-  telefuncRoomStateKeys(prefix: string): Promise<string[]>
-  telefuncRoomStateSet(key: string, value: string, ttlMs?: number, replicate?: boolean): Promise<void>
-  telefuncRoomStateDelete(key: string, replicate?: boolean): Promise<void>
-  telefuncRoomStateSetIfAbsent(key: string, value: string, ttlMs?: number): Promise<boolean>
-  telefuncRoomStateCompareAndSet(
-    key: string,
-    expected: string | null,
-    next: string | null,
-    ttlMs?: number,
-    replicate?: boolean,
-  ): Promise<boolean>
-  telefuncRoomCommitFrame(input: RoomFrameCommit): Promise<RoomFrameCommitResult>
 }
 
 type PendingBucketPublish = {
@@ -300,19 +217,12 @@ class MemberBucketState {
 
 class CloudflareBroadcastAuthorityState {
   private readonly state: DurableObjectState
-  private readonly kv: KVNamespace | null
   private authorityPublishChain: Promise<void> = Promise.resolve()
   private readonly keySeqCache = new Map<string, number>()
   private readonly authorityBucketCache = new Map<string, LocationBucket>()
 
-  constructor(state: DurableObjectState, kv?: KVNamespace) {
+  constructor(state: DurableObjectState) {
     this.state = state
-    this.kv = kv ?? null
-  }
-
-  private requireReplicaKv(): KVNamespace {
-    assert(this.kv, 'Cloudflare KV binding is not attached — room state needs a KV namespace for its read replica.')
-    return this.kv
   }
 
   async getNextKeySeq(key: string): Promise<number> {
@@ -348,136 +258,6 @@ class CloudflareBroadcastAuthorityState {
     this.authorityBucketCache.set(key, authorityBucket)
     await this.state.storage.put(storageKey, authorityBucket)
     return authorityBucket
-  }
-
-  // --- Room state (backs `Room` on Cloudflare) ---
-  //
-  // A room's whole state lives here, in the same Durable Object that already sequences the room's
-  // control lane — one strongly-consistent authority per room, at the room's optimal location. The
-  // atomic operations run through `runInAuthorityChain`, so they linearize against each other and
-  // against the publish path. Entries carry the caller's TTL; reads drop expired ones lazily and
-  // `reapExpiredRoomState` (the alarm) sweeps the rest — standing in for the native expiry DO storage
-  // lacks.
-  //
-  // Replicated writes also mirror through to the Workers KV read replica (`replicate`), so directory
-  // reads (`Room.get`, `Room.list`) and enumeration are fast global KV reads instead of a round-trip
-  // to this region-pinned authority; the mirror rides inside the serialized write, so the replica
-  // converges in authority order. Retained state is written `replicate: false` — it is read only
-  // through the authority (`consistent`), so a replica copy would be dead weight and, on a hot lane,
-  // would breach the replica's per-key write ceiling.
-
-  private roomStateStorageKey(key: string): string {
-    return ROOM_STATE_STORAGE_PREFIX + key
-  }
-
-  private liveRoomStateValue(entry: RoomStateEntry | undefined, now: number): string | null {
-    if (!entry) return null
-    return entry.e !== null && entry.e <= now ? null : entry.v
-  }
-
-  private async putRoomState(key: string, value: string, ttlMs: number | undefined): Promise<void> {
-    await this.state.storage.put<RoomStateEntry>(this.roomStateStorageKey(key), {
-      v: value,
-      e: ttlMs === undefined ? null : Date.now() + ttlMs,
-    })
-    // A TTL entry (a member record) needs sweeping even if the room is never read again — arm the
-    // alarm once. Entries without a TTL (config, retained) don't, so they never start the sweep.
-    if (ttlMs !== undefined && (await this.state.storage.getAlarm()) === null) {
-      await this.state.storage.setAlarm(Date.now() + ROOM_STATE_REAP_INTERVAL_MS)
-    }
-  }
-
-  async roomStateGet(key: string): Promise<string | null> {
-    return this.liveRoomStateValue(
-      await this.state.storage.get<RoomStateEntry>(this.roomStateStorageKey(key)),
-      Date.now(),
-    )
-  }
-
-  async roomStateKeys(prefix: string): Promise<string[]> {
-    const entries = await this.state.storage.list<RoomStateEntry>({ prefix: this.roomStateStorageKey(prefix) })
-    const now = Date.now()
-    const keys: string[] = []
-    for (const [storageKey, entry] of entries) {
-      if (this.liveRoomStateValue(entry, now) !== null) keys.push(storageKey.slice(ROOM_STATE_STORAGE_PREFIX.length))
-    }
-    return keys
-  }
-
-  /** Store to the authority and, when `replicate`, mirror to the KV read replica in the same step. */
-  private async writeRoomState(
-    key: string,
-    value: string,
-    ttlMs: number | undefined,
-    replicate: boolean,
-  ): Promise<void> {
-    await this.putRoomState(key, value, ttlMs)
-    if (replicate) await replicaKvPut(this.requireReplicaKv(), key, value, ttlMs)
-  }
-
-  /** Delete from the authority and, when `replicate`, from the KV read replica in the same step. */
-  private async removeRoomState(key: string, replicate: boolean): Promise<void> {
-    await this.state.storage.delete(this.roomStateStorageKey(key))
-    if (replicate) await replicaKvDelete(this.requireReplicaKv(), key)
-  }
-
-  roomStateSet(key: string, value: string, ttlMs?: number, replicate = true): Promise<void> {
-    return this.writeRoomState(key, value, ttlMs, replicate)
-  }
-
-  roomStateDelete(key: string, replicate = true): Promise<void> {
-    return this.removeRoomState(key, replicate)
-  }
-
-  roomStateSetIfAbsent(key: string, value: string, ttlMs?: number): Promise<boolean> {
-    return this.runInAuthorityChain(async () => {
-      const current = this.liveRoomStateValue(
-        await this.state.storage.get<RoomStateEntry>(this.roomStateStorageKey(key)),
-        Date.now(),
-      )
-      if (current !== null) return false
-      // The create-claim is always directory state (a room's config) — replicate it.
-      await this.writeRoomState(key, value, ttlMs, true)
-      return true
-    })
-  }
-
-  roomStateCompareAndSet(
-    key: string,
-    expected: string | null,
-    next: string | null,
-    ttlMs?: number,
-    replicate = true,
-  ): Promise<boolean> {
-    return this.runInAuthorityChain(async () => {
-      const current = this.liveRoomStateValue(
-        await this.state.storage.get<RoomStateEntry>(this.roomStateStorageKey(key)),
-        Date.now(),
-      )
-      if (current !== expected) return false
-      // Directory CAS (config, member records) mirrors to the KV read replica; an authority-only lane —
-      // the `:o` order watermark, written `consistent` on every publish — passes `replicate: false` so it
-      // stays off the replica (dead weight there, and a per-key write-ceiling risk on a hot room).
-      if (next === null) await this.removeRoomState(key, replicate)
-      else await this.writeRoomState(key, next, ttlMs, replicate)
-      return true
-    })
-  }
-
-  /** Alarm handler: drop every expired room-state entry, and re-arm while un-expired TTL entries
-   *  remain so a busy room keeps getting swept and an emptied one lets the alarm lapse. */
-  async reapExpiredRoomState(): Promise<void> {
-    const entries = await this.state.storage.list<RoomStateEntry>({ prefix: ROOM_STATE_STORAGE_PREFIX })
-    const now = Date.now()
-    const expired: string[] = []
-    let hasLiveTtl = false
-    for (const [storageKey, entry] of entries) {
-      if (entry.e === null) continue
-      if (entry.e <= now) expired.push(storageKey)
-      else hasLiveTtl = true
-    }
-    if (expired.length > 0) await this.state.storage.delete(expired)
-    if (hasLiveTtl) await this.state.storage.setAlarm(Date.now() + ROOM_STATE_REAP_INTERVAL_MS)
   }
 }
 
@@ -591,87 +371,6 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
     } while (cursor)
 
     return result
-  }
-
-  // --- KV (backs `Room` state) ---
-  //
-  // A room's state has two tiers. The authority is the Durable Object that already sequences the room
-  // (routed by `partitionKey`, the control-lane key) — strongly consistent, at the room's optimal
-  // location. The replica is the globally-distributed Workers KV namespace, which the authority mirrors
-  // its replicated writes to. Reads default to the replica so directory reads (`Room.get`, `Room.list`)
-  // and enumeration are fast from any region; `consistent` reads bypass it and hit the authority for
-  // read-your-writes. The one unpartitioned key is the cross-room room index — replica-only, since it
-  // has no single home; enumeration tolerates its eventual consistency.
-
-  async get(key: string, options?: KvReadOptions): Promise<string | null> {
-    if (options?.consistent) return await this.roomStateStub(this.requirePartition(options)).telefuncRoomStateGet(key)
-    return await replicaKvGet(this.requireKV(), key)
-  }
-
-  async set(key: string, value: string, options?: KvWriteOptions): Promise<void> {
-    const partitionKey = options?.partitionKey
-    // Unpartitioned: the cross-room room index — replica-only (no authority owns it).
-    if (partitionKey === undefined) return await replicaKvPut(this.requireKV(), key, value, options?.ttlMs)
-    // Partitioned: the room's authority owns it and (unless `consistent`) mirrors it to the replica.
-    await this.roomStateStub(partitionKey).telefuncRoomStateSet(key, value, options?.ttlMs, !options?.consistent)
-  }
-
-  async delete(key: string, options?: KvReadOptions): Promise<void> {
-    const partitionKey = options?.partitionKey
-    if (partitionKey === undefined) return await replicaKvDelete(this.requireKV(), key)
-    await this.roomStateStub(partitionKey).telefuncRoomStateDelete(key, !options?.consistent)
-  }
-
-  async keys(prefix: string, options?: KvReadOptions): Promise<string[]> {
-    if (options?.consistent)
-      return await this.roomStateStub(this.requirePartition(options)).telefuncRoomStateKeys(prefix)
-    return await replicaKvList(this.requireKV(), prefix)
-  }
-
-  async setIfAbsent(key: string, value: string, options?: KvWriteOptions): Promise<boolean> {
-    const stub = this.roomStateStub(this.requirePartition(options))
-    return await stub.telefuncRoomStateSetIfAbsent(key, value, options?.ttlMs)
-  }
-
-  async update(key: string, mutate: KvMutate, options?: KvWriteOptions): Promise<string | null> {
-    const stub = this.roomStateStub(this.requirePartition(options))
-    // Optimistic compare-and-set loop against the authority: `mutate` runs on the authority's current
-    // value (read-your-writes, so the CAS is meaningful), the DO applies only if it's unchanged and
-    // mirrors the winner to the replica, and a concurrent writer re-runs `mutate` instead of losing it.
-    for (;;) {
-      const current = await stub.telefuncRoomStateGet(key)
-      const next = mutate(current)
-      if (next === KV_KEEP) return current
-      if (await stub.telefuncRoomStateCompareAndSet(key, current, next, options?.ttlMs, !options?.consistent))
-        return next
-    }
-  }
-
-  async commitFrame(input: RoomFrameCommit): Promise<RoomFrameCommitResult> {
-    // The whole commit runs in one turn on the room's partition authority DO (`commitFrameOnAuthority`);
-    // this is the client hop to it, routed by `partitionKey` like every other authority-tier op. We only
-    // materialize its lazy RPC result onto a plain object (see `unwrapRpcResult`), awaiting each field so
-    // none is dropped in transit — `ok` discriminates, so it's read first.
-    const r = (await this.roomStateStub(input.partitionKey).telefuncRoomCommitFrame(input)) as {
-      ok: boolean
-      seq?: number
-      timestamp?: number
-      receivers?: number
-    }
-    if (!(await r.ok)) return { ok: false, reason: 'stale-fence' }
-    const [seq, timestamp, receivers] = await Promise.all([r.seq, r.timestamp, r.receivers])
-    return { ok: true, seq: seq!, timestamp: timestamp!, ...(receivers === undefined ? undefined : { receivers }) }
-  }
-
-  private requirePartition(options: KvReadOptions | undefined): string {
-    assert(options?.partitionKey !== undefined, 'A Room authority-tier KV op must carry a partition key.')
-    return options.partitionKey
-  }
-
-  /** The room-state authority stub for a partition key (a room's control-lane key): the very Durable
-   *  Object that sequences that room, provisioned at its optimal location. */
-  private roomStateStub(partitionKey: string): TelefuncDurableObjectStub {
-    return this.getAuthorityStub(partitionKey, this.locationBucket ?? undefined)
   }
 
   // --- Local subscriber tracking ---
@@ -819,11 +518,9 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
     return { seq: info.seq, timestamp: info.timestamp, receivers, meta: { authorityBucket, fanoutBuckets } }
   }
 
-  /** Forward one already-ordered frame to every populated bucket coordinator, each of which delivers it
-   *  to the subscribed DOs in its bucket. The seq/timestamp ride on `info` — the single source of a
-   *  frame's place in the order — so `publishToSubscribers` (a fresh per-key seq) and
-   *  `commitFrameOnAuthority` (the committed room order) share one ordered-outbound fanout. Returns the
-   *  live receiver count and the buckets reached. */
+  /** Forward one already-ordered generic broadcast frame to every populated bucket coordinator, each
+   *  of which delivers it to the subscribed DOs in its bucket. Returns the live receiver count and the
+   *  buckets reached. */
   private async fanoutFrame(
     key: string,
     payload: { serialized?: string; binaryData?: Uint8Array },
@@ -854,59 +551,6 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
    */
   deliverToLocal(request: BroadcastDeliverRequest): void {
     this.deliverLocal(request)
-  }
-
-  /**
-   * The authority half of `commitFrame` (see `BroadcastAdapter.commitFrame`), run via RPC on the room's
-   * partition Durable Object — the one that already sequences the room's control lane. One
-   * `runInAuthorityChain` turn does the whole atomic core: it compares every fence (each `key` must still
-   * equal `expected`, else the caller's incarnation is stale and nothing else happens), advances the
-   * clamped monotonic room clock at `orderKey`, and — authority-only (`replicate: false`), like the `:o`
-   * watermark — retains the self-framed bytes at `retainKey`. Presence is snapshotted in that same turn so
-   * no later commit slips its order in ahead of this one's fanout targets. The ordered fanout then runs
-   * outside the chain (as `publishToSubscribers` does, so a slow remote hop can't stall the next commit's
-   * ordering), carrying the committed `(seq,timestamp)` on the wire — so every local and remote receiver
-   * reads this frame's real place in the room order, never a fresh per-key seq.
-   *
-   * NOTE (certification): the atomic authority turn and the presence-registration readiness
-   * (`MemberBucketState.ready`) run only on real Durable Objects, which need a workerd runtime, not the
-   * in-memory fakes the unit suite uses. Certify them in the `test/@cloudflare_vite-plugin` playground
-   * (the same real-DO harness the "Cloudflare" CI job runs): drive a `Room` across two isolates and
-   * assert a committed frame reaches a subscriber that joined mid-commit in order, and that a stale-fence
-   * commit is rejected. That harness needs the workerd dev server, so it is certified there, not here.
-   */
-  async commitFrameOnAuthority(
-    authorityState: CloudflareBroadcastAuthorityState,
-    input: RoomFrameCommit,
-  ): Promise<RoomFrameCommitResult> {
-    const committed = await authorityState.runInAuthorityChain(async () => {
-      for (const { key, expected } of input.fences) {
-        if ((await authorityState.roomStateGet(key)) !== expected) return null
-      }
-      const prevRaw = await authorityState.roomStateGet(input.orderKey)
-      const prev = prevRaw === null ? null : (JSON.parse(prevRaw) as WirePublishInfo)
-      // The clamped advance (mirrors `advanceRoomFrameOrder`): `seq` resets to 1 when wall time passes the
-      // last timestamp, else it clamps that timestamp and increments — so `(timestamp, seq)` is strictly
-      // increasing whatever this authority's clock skew.
-      const now = Date.now()
-      const prevTs = prev?.timestamp ?? 0
-      const info: WirePublishInfo =
-        now > prevTs ? { seq: 1, timestamp: now } : { seq: (prev?.seq ?? 0) + 1, timestamp: prevTs }
-      // Order + retain are authority-only — read back through `consistent`, so a replica copy is dead
-      // weight (and a per-key write-ceiling risk on a hot room).
-      await authorityState.roomStateSet(input.orderKey, JSON.stringify(info), input.orderTtlMs, false)
-      if (input.retainKey !== undefined)
-        await authorityState.roomStateSet(input.retainKey, encodePublishText(input.payload, info), undefined, false)
-      return { info, presenceByBucket: await this.listPresenceByBucket(input.channelKey) }
-    })
-    if (committed === null) return { ok: false, reason: 'stale-fence' }
-    const { receivers } = await this.fanoutFrame(
-      input.channelKey,
-      { serialized: input.payload },
-      committed.info,
-      committed.presenceByBucket,
-    )
-    return { ok: true, seq: committed.info.seq, timestamp: committed.info.timestamp, receivers }
   }
 
   // --- Private ---

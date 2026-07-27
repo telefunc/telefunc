@@ -9,6 +9,7 @@ import { getTelefuncChannelHooks } from '../wire-protocol/server/ws.js'
 import { getServerConfig, enableChannelTransports } from '../node/server/serverConfig.js'
 import { serve as serveTelefunc } from '../node/server/telefunc.js'
 import { installBroadcastAdapter } from '../wire-protocol/server/broadcast.js'
+import { setDefaultRoomBackend } from '../wire-protocol/backend/install.js'
 import {
   CloudflareBroadcastAuthorityState,
   CloudflareBroadcastTransport,
@@ -16,7 +17,6 @@ import {
 import type {
   BroadcastDeliverRequest,
   BroadcastPublishRequest,
-  RoomFrameCommit,
 } from '../wire-protocol/server/adapter/cloudflare/broadcast.js'
 import {
   TELEFUNC_BROADCAST_BUCKET_HEADER,
@@ -31,6 +31,7 @@ import type { CloudflareScale, LocationBucket } from '../wire-protocol/server/ad
 import { CHANNEL_TRANSPORT } from '../wire-protocol/constants.js'
 import {
   CloudflareRoomSessionManager,
+  CloudflareRoomBackend,
   CLOUDFLARE_ROOM_CONTEXT_ERROR,
   getCloudflareRoomSessionManager,
   requireCloudflareRoomNamespace,
@@ -100,6 +101,7 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
   // Factory runs only on first install. Bundler quirks can evaluate the user's entry twice in the same isolate;
   // we want every evaluation to share one transport instance.
   const broadcast = installBroadcastAdapter(() => new CloudflareBroadcastTransport({ baseInstanceName, scale }))
+  setDefaultRoomBackend(() => new CloudflareRoomBackend(), CloudflareRoomBackend)
 
   function getBinding(env: Cloudflare.Env): DurableObjectNamespace | undefined {
     const baseBinding = (env as Record<string, DurableObjectNamespace | undefined>)[bindingName]
@@ -127,8 +129,7 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
       broadcast.attachBinding(binding, bindingName)
       const kv = getKVBinding(env)
       if (kv) broadcast.attachKV(kv)
-      // The authority also owns room state and mirrors its replicated writes to the KV read replica.
-      this.authorityState = new CloudflareBroadcastAuthorityState(ctx, kv)
+      this.authorityState = new CloudflareBroadcastAuthorityState(ctx)
       this.resetRoomSessionEpoch()
       crosswsAdapter.handleDurableInit(this, ctx, env)
     }
@@ -207,44 +208,6 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
       for (const socket of this.ctx.getWebSockets?.() ?? []) {
         socket.close(SESSION_RESET_CLOSE_CODE, SESSION_RESET_CLOSE_REASON)
       }
-    }
-
-    // Room state RPC — a room's authority DO (the one that sequences its control lane) also owns its
-    // strongly-consistent KV state. See `CloudflareBroadcastAuthorityState`'s room-state methods.
-    telefuncRoomStateGet(key: string) {
-      return this.authorityState.roomStateGet(key)
-    }
-    telefuncRoomStateKeys(prefix: string) {
-      return this.authorityState.roomStateKeys(prefix)
-    }
-    telefuncRoomStateSet(key: string, value: string, ttlMs?: number, replicate?: boolean) {
-      return this.authorityState.roomStateSet(key, value, ttlMs, replicate)
-    }
-    telefuncRoomStateDelete(key: string, replicate?: boolean) {
-      return this.authorityState.roomStateDelete(key, replicate)
-    }
-    telefuncRoomStateSetIfAbsent(key: string, value: string, ttlMs?: number) {
-      return this.authorityState.roomStateSetIfAbsent(key, value, ttlMs)
-    }
-    telefuncRoomStateCompareAndSet(
-      key: string,
-      expected: string | null,
-      next: string | null,
-      ttlMs?: number,
-      replicate?: boolean,
-    ) {
-      return this.authorityState.roomStateCompareAndSet(key, expected, next, ttlMs, replicate)
-    }
-
-    // Room frame commit RPC — the atomic assign-order + retain + publish behind `Room`'s timeline, run on
-    // the room's partition authority DO (see `commitFrameOnAuthority`).
-    telefuncRoomCommitFrame(input: RoomFrameCommit) {
-      return this.runWithRoomManager(() => broadcast.commitFrameOnAuthority(this.authorityState, input))
-    }
-
-    /** Storage alarm: reclaim expired room-state entries (DO storage has no native TTL). */
-    alarm() {
-      return this.runWithRoomManager(() => this.authorityState.reapExpiredRoomState())
     }
   }
 

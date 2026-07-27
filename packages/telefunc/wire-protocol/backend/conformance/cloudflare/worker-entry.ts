@@ -680,6 +680,10 @@ export class TelefuncRoomDurableObject extends ProductionTelefuncRoomDurableObje
     )
   }
 
+  telefuncRoomDropRetainedChunksForTest(): void {
+    this.ctx.storage.sql.exec('DROP TABLE rt_chunk')
+  }
+
   telefuncRoomReconstructForTest(): void {
     this.#reconstructed = new ProductionTelefuncRoomDurableObject(
       this.ctx,
