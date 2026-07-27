@@ -83,6 +83,11 @@ function selectRoomBackend(
     throw error
   }
 
+  if (current.phase === 'ready' && Object.is(backend, current.backend)) {
+    state.current = current
+    return current.backend
+  }
+
   if (current.phase === 'ready') {
     retired.add(current.backend)
     // Replacement is deliberately synchronous at the ownership boundary: every bundled default marks
