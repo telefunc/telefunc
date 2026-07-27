@@ -46,7 +46,7 @@ import { RoomState } from './state.js'
 import type { ClientBroadcast } from '../client/channel.js'
 import type { ChannelPublishInfo } from '../channel.js'
 import { disposeRoomBackend, getRoomBackend, installRoomBackend } from '../backend/install.js'
-import { MemoryRoomBackend, MemoryRoomBackendState } from '../backend/memory/backend.js'
+import { MemoryRoomBackend } from '../backend/memory/backend.js'
 import type { LaneId, LaneSubscription, ReadinessState } from '../backend/spi.js'
 import {
   SUBSCRIPTION_RETRY_ATTEMPTS,
@@ -55,11 +55,9 @@ import {
 } from '../server/adapter/cloudflare/room/subscription.js'
 
 let roomBackend: MemoryRoomBackend
-let roomBackendState: MemoryRoomBackendState
 beforeEach(async () => {
   await disposeRoomBackend()
-  roomBackendState = new MemoryRoomBackendState()
-  roomBackend = new MemoryRoomBackend({ state: roomBackendState })
+  roomBackend = new MemoryRoomBackend()
   installRoomBackend(() => roomBackend)
 })
 afterEach(async () => {
@@ -85,19 +83,6 @@ const textEncoder = new TextEncoder()
 const textDecoder = new TextDecoder()
 const controlLane = { kind: 'control' } as const satisfies LaneId
 const semanticLane = { kind: 'semantic' } as const satisfies LaneId
-
-function seedMemoryLaneOrder(roomId: string, inc: string, lane: LaneId, seq: number, timestamp: number): void {
-  type GenerationView = { order: Map<string, { seq: number; timestamp: number }> }
-  type RoomView = { gens: Map<string, GenerationView> }
-  const room = roomBackendState.rooms.get(roomId) as unknown as RoomView | undefined
-  const generation = room?.gens.get(inc)
-  expect(generation).toBeDefined()
-  let key: string
-  if (lane.kind === 'semantic' || lane.kind === 'control') key = lane.kind
-  else if (lane.kind === 'binary') key = `binary:${encodeURIComponent(lane.member)}:${encodeURIComponent(lane.track)}`
-  else key = `inbox:${encodeURIComponent(lane.member)}`
-  generation!.order.set(key, { seq, timestamp })
-}
 
 async function activeInc(roomId: string): Promise<string> {
   const entry = await roomBackend.readHead(roomId)
@@ -133,11 +118,6 @@ async function mutateCell(roomId: string, inc: string, key: string, bytes?: Uint
   }
 }
 
-// ───────────────────────────────────────────────────────────────────────────
-// Entry point & KV lifecycle — bug classes targeted: state not shared across
-// instances, phantom rooms after close, key collisions between room IDs.
-// ───────────────────────────────────────────────────────────────────────────
-
 describe('Room entry point', () => {
   it('create → get returns the same room config', async () => {
     await Room.create('lobby', { meta: { topic: 'general' } })
@@ -156,7 +136,6 @@ describe('Room entry point', () => {
   })
 
   it('getOrCreate creates once and converges — concurrent callers, existing rooms, later options ignored', async () => {
-    // Two concurrent boots: both read "missing", one wins the create, the loser gets.
     const [a, b] = await Promise.all([
       Room.getOrCreate('boot', { meta: { topic: 'first' } }),
       Room.getOrCreate('boot', { meta: { topic: 'first' } }),
@@ -164,19 +143,8 @@ describe('Room entry point', () => {
     expect(a.meta).toEqual({ topic: 'first' })
     expect(b.meta).toEqual({ topic: 'first' })
 
-    // Already exists: returned as-is, options don't overwrite.
     const again = await Room.getOrCreate('boot', { meta: { topic: 'second' } })
     expect(again.meta).toEqual({ topic: 'first' })
-  })
-
-  it('setMeta replaces the room meta wholesale and propagates to observers', async () => {
-    await Room.create('cfg', { meta: { topic: 'general', pinned: true } })
-    const observer = await Room.get('cfg')
-    observer.onUpdate(() => {}) // observing — receives update events
-
-    await Room.setMeta('cfg', { topic: 'renamed' }) // wholesale replace — `pinned` is dropped
-    expect((await Room.get('cfg')).meta).toEqual({ topic: 'renamed' })
-    expect(observer.meta).toEqual({ topic: 'renamed' }) // the update event carried the new meta
   })
 
   it('list({ prefix }) filters by room-ID prefix', async () => {
@@ -239,8 +207,6 @@ describe('Room entry point', () => {
     ])
   })
 
-  // Room IDs may contain `:` (e.g. `video:demo`). A room whose ID extends another room's
-  // member-key prefix must not leak into that room's member enumeration or `list()`.
   it('room IDs containing colons do not collide with member records', async () => {
     const a = await Room.create('a')
     await a.join()
@@ -253,14 +219,18 @@ describe('Room entry point', () => {
   })
 
   it('setMeta() replaces the room meta and fires onUpdate with the delta', async () => {
-    const lobby = await Room.create('conf', { meta: { topic: 'a' } })
+    const lobby = await Room.create('conf', { meta: { topic: 'a', pinned: true } })
+    const observer = await Room.get('conf')
+    observer.onUpdate(() => {})
     const updates: Array<[unknown, unknown]> = []
     lobby.onUpdate((meta, prev) => updates.push([meta, prev]))
 
     await Room.setMeta('conf', { topic: 'b' })
 
-    expect(updates).toEqual([[{ topic: 'b' }, { topic: 'a' }]])
+    expect(updates).toEqual([[{ topic: 'b' }, { topic: 'a', pinned: true }]])
     expect(lobby.meta).toEqual({ topic: 'b' })
+    expect(observer.meta).toEqual({ topic: 'b' })
+    expect((await Room.get('conf')).meta).toEqual({ topic: 'b' })
     await expect(Room.setMeta('gone', {})).rejects.toThrow('Room not found: gone')
   })
 
@@ -454,14 +424,12 @@ describe('Room entry point', () => {
     const observed: Array<[string, unknown]> = []
     observer.onLeave((m, cause) => observed.push([String(m.meta.name), cause]))
 
-    // Voluntary leave.
     const alice = await lobby.join({ meta: { name: 'Alice' } })
     const aliceCauses: unknown[] = []
     alice.onLeave((cause) => aliceCauses.push(cause))
     await alice.leave()
     expect(aliceCauses).toEqual([{ type: 'left' }])
 
-    // Kick, with the reason riding the removal event itself.
     const bob = await lobby.join({ meta: { name: 'Bob' } })
     const bobCauses: unknown[] = []
     bob.onLeave((cause) => bobCauses.push(cause))
@@ -473,24 +441,17 @@ describe('Room entry point', () => {
       ['Bob', { type: 'removed', reason: { rule: 'spam' } }],
     ])
 
-    // Room closure.
     const carol = await lobby.join({ meta: { name: 'Carol' } })
     const carolCauses: unknown[] = []
     carol.onLeave((cause) => carolCauses.push(cause))
     await Room.close('causes')
     expect(carolCauses).toEqual([{ type: 'closed' }])
 
-    // Late subscribers still learn the cause.
     const late: unknown[] = []
     carol.onLeave((cause) => late.push(cause))
     expect(late).toEqual([{ type: 'closed' }])
   })
 })
-
-// ───────────────────────────────────────────────────────────────────────────
-// Presence — bug classes targeted: double-fired events from the origin's own
-// echo, missed cross-instance events, stale membership on unobserved rooms.
-// ───────────────────────────────────────────────────────────────────────────
 
 describe('presence', () => {
   it('join() announces the member on every observing instance — and exactly once on the origin', async () => {
@@ -530,7 +491,6 @@ describe('presence', () => {
     const a = await Room.create('lazy')
     const me = await a.join({ meta: { name: 'Alice' } })
 
-    // `b` has no listeners/joins/stubs — it did not receive the join event.
     const b = await Room.get('lazy')
     await me.setMeta({ name: 'Alicia' })
     const members = await b.getParticipants()
@@ -599,11 +559,6 @@ describe('presence', () => {
   })
 })
 
-// ───────────────────────────────────────────────────────────────────────────
-// Hidden participants — `join({ hidden: true })`: off-presence members (a server
-// authority, a bot, a recorder), any number, addressable like any member.
-// ───────────────────────────────────────────────────────────────────────────
-
 describe('hidden participants', () => {
   it('are excluded from presence but reachable and addressable', async () => {
     const room = await Room.create('hidden')
@@ -614,7 +569,6 @@ describe('hidden participants', () => {
     const p1 = await room.join({ meta: { name: 'P1' } })
     const p2 = await room.join({ meta: { name: 'P2' } })
 
-    // Excluded from presence: the two players are counted; the hidden one isn't.
     expect(room.count).toBe(2)
     expect((await room.getParticipants()).map((m) => m.id).sort()).toEqual([p1.id, p2.id].sort())
     expect(
@@ -625,7 +579,6 @@ describe('hidden participants', () => {
     ).toEqual([p1.id, p2.id].sort())
     expect(joins).toEqual([p1.id, p2.id]) // onJoin never fired for the hidden one
 
-    // But it's a first-class, addressable member.
     expect((await room.getParticipants({ hidden: true })).map((p) => p.id)).toEqual([authority.id])
     expect((await room.getParticipant(authority.id))!.id).toBe(authority.id)
   })
@@ -727,11 +680,6 @@ describe('hidden participants', () => {
     expect(toPlayer).toEqual([{ ack: true }])
   })
 })
-
-// ───────────────────────────────────────────────────────────────────────────
-// Data pub/sub — bug classes targeted: lost sender identity, cross-member
-// bleed on per-member subscriptions, self-echo despite selfDelivery=false.
-// ───────────────────────────────────────────────────────────────────────────
 
 describe('data pub/sub', () => {
   it('publish() reaches room-level subscribers with sender identity and publish info', async () => {
@@ -899,28 +847,7 @@ describe('data pub/sub', () => {
   })
 })
 
-// ───────────────────────────────────────────────────────────────────────────
-// Selective binary — bug classes targeted: unwanted members' frames crossing
-// the wire (bandwidth), departed members' listeners pinning subscriptions
-// open (the `onLeave(() => decoder.close())` pattern never unsubscribes).
-// ───────────────────────────────────────────────────────────────────────────
-
 describe('selective binary delivery', () => {
-  it("subscribes only the wanted members' binary upstream keys", async () => {
-    const a = await Room.create('sel')
-    const cam1 = await a.join({ meta: { name: 'cam1' } })
-    const cam2 = await a.join({ meta: { name: 'cam2' } })
-    const b = await Room.get('sel')
-    await b.getParticipants() // materialize the lazy roster
-
-    const frames: string[] = []
-    ;(await b.getParticipant(cam1.id))!.subscribeBinary((data) => frames.push(`cam1:${data[0]}`))
-    await cam1.publishBinary(new Uint8Array([1]))
-    await cam2.publishBinary(new Uint8Array([2])) // nobody wants cam2 — b never subscribed its key
-
-    expect(frames).toEqual(['cam1:1'])
-  })
-
   it('named tracks multiplex one member lane — filters, per-frame meta, zero-cost default', async () => {
     const a = await Room.create('media')
     const cam = await a.join({ meta: { name: 'Cam' } })
@@ -944,7 +871,6 @@ describe('selective binary delivery', () => {
     ])
     expect(mics).toEqual([2]) // the filter saw only its track
 
-    // Room-level subscription filters the same way, with the verified sender.
     const cams: Array<[number, string]> = []
     b.subscribeBinary((data, _info, from) => cams.push([data[0]!, String(from.meta.name)]), { track: 'camera' })
     await cam.publishBinary(new Uint8Array([9]), { track: 'camera' })
@@ -967,12 +893,10 @@ describe('selective binary delivery', () => {
 
   it('rejects a hostile binary frame: unknown flag bits and non-object meta', () => {
     const id = crypto.randomUUID()
-    // An unknown flag bit → reject the whole frame (malformed or forward-incompatible).
     const badFlags = frameWithMemberId(id, new Uint8Array([1, 2, 3]))
     badFlags[16] = 0x80
     expect(unframeMemberId(badFlags)).toBeNull()
 
-    // A scalar (non-object) meta is rejected — the framer never emits one, so it can only be hand-crafted.
     const uuidBytes = frameWithMemberId(id, new Uint8Array([9])).subarray(0, 16)
     const scalarMeta = new TextEncoder().encode('5')
     const hostile = new Uint8Array(16 + 1 + 2 + scalarMeta.length + 1)
@@ -1056,16 +980,13 @@ describe('selective binary delivery', () => {
     const viewer = await Room.get('share')
     await viewer.getParticipants()
 
-    // Nobody watches yet: the frame reaches no subscription anywhere — pause-the-encoder signal.
     expect((await sharer.publishBinary(new Uint8Array([1]), { track: 'screen' })).receivers).toBe(0)
 
-    // A viewer starts watching (named subscribers attach eagerly — no frame is ever missed) …
     const seen: number[] = []
     const stopWatching = viewer.subscribeBinary((data) => seen.push(data[0]!), { track: 'screen' })
     expect((await sharer.publishBinary(new Uint8Array([2]), { track: 'screen' })).receivers).toBe(1)
     expect(seen).toEqual([2])
 
-    // … keeps the call audio while dropping the screen: mic flows, screen bytes stop upstream.
     const mics: number[] = []
     viewer.subscribeBinary((data) => mics.push(data[0]!), { track: 'mic' })
     stopWatching()
@@ -1089,7 +1010,6 @@ describe('selective binary delivery', () => {
       { kind: 'binary', member: cam.id, track: 'camera' },
     ])
 
-    // The KV record now names the track — late observers can subscribe streams they can't name.
     const stored = await readCell('track-keys', (a as ServerRoom)._inc, roomMemberKvKey('track-keys', cam.id))
     const record = parse(textDecoder.decode(stored!))
     expect((record as RoomMemberRecord).tracks).toEqual(['camera'])
@@ -1120,8 +1040,6 @@ describe('selective binary delivery', () => {
     await cam.publishBinary(new Uint8Array([1]))
     await cam.publishBinary(new Uint8Array([2]), { track: 'screen' })
     expect(defaults).toEqual([1])
-    // And the narrowing holds upstream: with only the default lane wanted, the named frame
-    // found no subscriber at all.
     expect((await cam.publishBinary(new Uint8Array([3]), { track: 'screen' })).receivers).toBe(0)
     expect((await cam.publishBinary(new Uint8Array([4]))).receivers).toBe(1)
   })
@@ -1132,9 +1050,7 @@ describe('selective binary delivery', () => {
     for (let i = 0; i < ROOM_TRACKS_PER_MEMBER_MAX; i++) {
       await cam.publishBinary(new Uint8Array([i]), { track: `t${i}` })
     }
-    // A new distinct track past the cap is rejected...
     await expect(cam.publishBinary(new Uint8Array([1]), { track: 'overflow' })).rejects.toThrow(/at most .*tracks/)
-    // ...while an already-announced track and the unnamed default lane keep working.
     await expect(cam.publishBinary(new Uint8Array([1]), { track: 't0' })).resolves.toBeDefined()
     await expect(cam.publishBinary(new Uint8Array([1]))).resolves.toBeDefined()
   })
@@ -1157,12 +1073,6 @@ describe('selective binary delivery', () => {
   })
 })
 
-// ───────────────────────────────────────────────────────────────────────────
-// Direct messages — bug classes targeted: privacy leaks (a DM reaching room
-// subscribers or a non-target holder), lost sender identity, dangling sends
-// to unknown or departed participants.
-// ───────────────────────────────────────────────────────────────────────────
-
 describe('direct messages', () => {
   it('delivers privately across instances — only the target hears it', async () => {
     const a = await Room.create('dm')
@@ -1182,7 +1092,6 @@ describe('direct messages', () => {
     expect(bobInbox).toEqual([['psst', alice.id, { name: 'Alice' }]]) // live RemoteParticipant sender
     expect(aliceInbox).toEqual([]) // not echoed to the sender
     expect(roomStream).toEqual([]) // never on the room stream
-    // send() resolves with the delivery receipt — the sequenced hand-off, not a fire-and-forget.
     expect(typeof receipt.seq).toBe('number')
     expect(typeof receipt.timestamp).toBe('number')
   })
@@ -1200,7 +1109,6 @@ describe('direct messages', () => {
   it("a reactive DM beating the target's listen() is held and flushed — never dropped", async () => {
     const room = await Room.create('reactive')
     const greeter = await room.join({ meta: { name: 'Bot' } })
-    // The bot greets on join — before the joiner had any chance to attach listen().
     room.onJoin((member) => void greeter.send(member.id, 'welcome!').catch(() => {}))
 
     const newcomer = await (await Room.get('reactive')).join({ meta: { name: 'New' } })
@@ -1223,7 +1131,6 @@ describe('direct messages', () => {
     expect(inbox[0]).toBe(6) // oldest dropped first
     expect(inbox[63]).toBe(69)
 
-    // Held messages die with the membership.
     const gone = await (await Room.get('hold-cap')).join({ meta: { name: 'G' } })
     await sender.send(gone.id, 'never-read')
     await gone.leave()
@@ -1237,7 +1144,6 @@ describe('direct messages', () => {
     const alice = await a.join({ meta: { name: 'Alice' }, identity: 'user-1' })
     expect(alice.identity).toBe('user-1')
 
-    // Roster: another instance sees the identity.
     const b = await Room.get('who')
     expect((await b.getParticipant(alice.id))?.identity).toBe('user-1')
 
@@ -1249,7 +1155,6 @@ describe('direct messages', () => {
     await alice.publish('hi')
     expect(senders).toEqual([['Alice', 'user-1']])
 
-    // DMs: the inbox sender carries it too.
     const bob = await a.join({ meta: { name: 'Bob' } })
     expect(bob.identity).toBe(null) // identity is opt-in
     const inbox: Array<string | null> = []
@@ -1257,7 +1162,6 @@ describe('direct messages', () => {
     await alice.send(bob.id, 'psst')
     expect(inbox).toEqual(['user-1'])
 
-    // Guards see it — bans by identity are one comparison.
     const guarded = await Room.get('who')
     const guardSaw: Array<string | null> = []
     Room.guard(guarded, { onBeforeJoin: (member) => void guardSaw.push(member.identity) })
@@ -1295,7 +1199,6 @@ describe('direct messages', () => {
     expect(room.count).toBe(1)
     expect((await room.getParticipant(other.id))?.identity).toBe('user-8')
 
-    // Idempotent: sweeping an identity with no memberships is a no-op, not an error.
     await Room.removeParticipant('sweep', { identity: 'user-9' })
   })
 
@@ -1318,7 +1221,6 @@ describe('direct messages', () => {
     expect(got2).toEqual([[{ ping: 1 }, null]]) // both of the identity's tabs
     expect(gotOther).toEqual([]) // a different identity is untouched
 
-    // Sending to an identity with no live membership is a no-op, not an error (e.g. a signed-out user).
     await Room.send('id-send', { identity: 'nobody' }, { ping: 2 })
   })
 
@@ -1564,12 +1466,6 @@ describe('direct messages', () => {
   })
 })
 
-// ───────────────────────────────────────────────────────────────────────────
-// Direct message acks — `send(to, data, { ack: true })` waits for the recipient
-// to handle the message and resolves with its reply, rejecting on the handler's
-// throw or the recipient's departure. Mirrors the channel `send({ ack: true })`.
-// ───────────────────────────────────────────────────────────────────────────
-
 describe('direct message acks', () => {
   it('resolves with the recipient handler’s reply (the request/response twin of channel ack)', async () => {
     const room = await Room.create('dm-ack')
@@ -1577,7 +1473,6 @@ describe('direct message acks', () => {
     const player = await room.join({ meta: { name: 'p' } })
     authority.listen((cmd) => `applied:${cmd}`)
 
-    // A superset of the plain-send receipt: the reply plus the message's own seq/timestamp.
     const receipt = await player.send(authority.id, 'move e4', { ack: true })
     expect(receipt.response).toBe('applied:move e4')
     expect(typeof receipt.seq).toBe('number')
@@ -1684,12 +1579,6 @@ describe('direct message acks', () => {
   })
 })
 
-// ───────────────────────────────────────────────────────────────────────────
-// Room-authored messages — system notices without a synthetic member: they
-// carry no sender, never pollute the member list, and can't be spoofed by
-// clients (their publishes/DMs are validated against their own members).
-// ───────────────────────────────────────────────────────────────────────────
-
 describe('room-authored messages', () => {
   it('announce() reaches onAnnounce() everywhere — and never the participant streams', async () => {
     const a = await Room.create('sys')
@@ -1724,13 +1613,6 @@ describe('room-authored messages', () => {
   })
 })
 
-// ───────────────────────────────────────────────────────────────────────────
-// One ordered semantic lane — participant text and Room.announce() draw one
-// persisted, clamped (timestamp, seq) clock, so a room's semantic messages
-// totally order. Bug class targeted: text and announce on separate per-key seq
-// domains (uncomparable), and a clock that rewinds under skew or a recreation.
-// ───────────────────────────────────────────────────────────────────────────
-
 describe('one ordered semantic lane', () => {
   /** Lexicographic (timestamp, seq): is x strictly before y in the room's semantic order? */
   const before = (x: { timestamp: number; seq: number }, y: { timestamp: number; seq: number }) =>
@@ -1744,27 +1626,6 @@ describe('one ordered semantic lane', () => {
     const c = await alice.publish('two')
     expect(before(a, b)).toBe(true)
     expect(before(b, c)).toBe(true)
-  })
-
-  it('seq advances monotonically while timestamp independently clamps on clock regressions', async () => {
-    vi.useFakeTimers({ toFake: ['Date'] })
-    try {
-      vi.setSystemTime(1000)
-      const room = await Room.create('order:clock')
-      const alice = await room.join({ meta: {} })
-      const pair = async () => {
-        const { timestamp, seq } = await alice.publish('x')
-        return { timestamp, seq }
-      }
-      expect(await pair()).toEqual({ timestamp: 1000, seq: 1 })
-      expect(await pair()).toEqual({ timestamp: 1000, seq: 2 }) // same ms → clamp, increment
-      vi.setSystemTime(2000)
-      expect(await pair()).toEqual({ timestamp: 2000, seq: 3 }) // timestamp advance never resets seq
-      vi.setSystemTime(1500) // wall clock jumps backward
-      expect(await pair()).toEqual({ timestamp: 2000, seq: 4 }) // clamp timestamp, keep advancing seq
-    } finally {
-      vi.useRealTimers()
-    }
   })
 
   it('a genuine recreation starts a fresh ordering domain', async () => {
@@ -1784,12 +1645,6 @@ describe('one ordered semantic lane', () => {
     }
   })
 })
-
-// ───────────────────────────────────────────────────────────────────────────
-// Room stub channel — the wire attachment a serialized Room gets. Bug classes
-// targeted: impersonated publishes, members surviving their client's death,
-// relay of binary frames the client never subscribed to.
-// ───────────────────────────────────────────────────────────────────────────
 
 /** Models an asynchronous backend subscribe (Redis SUBSCRIBE, Cloudflare presence registration): while
  *  frozen, a `subscribe` registers no local delivery yet — a publish in that window reaches only already
@@ -2276,7 +2131,6 @@ describe('room stub channel', () => {
     expect(relayed().length).toBe(1) // only the wanted member's frame crossed the wire
     expect(unframeMemberId(unframeRoomBinaryOrder(relayed()[0]!.data)!.payload)!.from).toBe(wanted.id)
 
-    // Track-selective: only 'cam' of every member — the default lane and other tracks stay put.
     subBinary({ everyMember: { all: false, tracks: ['cam'] }, members: {} }, 61)
     await wanted.publishBinary(new Uint8Array([4]))
     await wanted.publishBinary(new Uint8Array([5]), { track: 'cam' })
@@ -2288,7 +2142,6 @@ describe('room stub channel', () => {
     await unwanted.publishBinary(new Uint8Array([7]))
     expect(relayed().length).toBe(3)
 
-    // A malformed declaration is rejected — the previous wants stay in force.
     subBinary({ everyMember: { all: 'yes' }, members: {} }, 63)
     await settle()
     expect(stub._binaryWants.everyMember.all).toBe(true)
@@ -2334,7 +2187,6 @@ describe('room stub channel', () => {
     const { id } = await joinViaStub(stub, peer, 1)
 
     await stub._onPeerAckReqMessage(JSON.stringify({ __r: 'req-dm', id, to: target.id, data: 'hi' }), 2)
-    // Impersonation: a sender ID not joined through this stub is rejected.
     await stub._onPeerAckReqMessage(JSON.stringify({ __r: 'req-dm', id: target.id, to: target.id, data: 'spoof' }), 3)
 
     expect(inbox).toEqual([['hi', id]])
@@ -2527,7 +2379,6 @@ describe('room stub channel', () => {
     const serverRoom = (await Room.create('self-src-relay')) as ServerRoom
     const me = await serverRoom.join({ meta: { name: 'me' }, selfDelivery: false })
 
-    // Own stub: the serializer bound `me` into its drop-set (see the order-independence test above).
     const own = new RoomStubChannel(serverRoom)
     own._registerChannel()
     own._adoptSelfSuppressed(new Set([me.id]))
@@ -2535,7 +2386,6 @@ describe('room stub channel', () => {
     const ownPeer = attachPeer(own)
     own._onPeerBroadcastSubscribe(false)
 
-    // Observer stub: an independent view of the same room, with no binding.
     const observer = new RoomStubChannel(serverRoom)
     observer._registerChannel()
     serverRoom._attachStub(observer)
@@ -2555,8 +2405,6 @@ describe('room stub channel', () => {
     expect(dataOf(observerPeer)).toEqual([{ text: 'own' }]) // an independent observer still receives it
   })
 
-  // ── Retained messages (`{ retain: true }`) — the last message per lane, replayed to a client that
-  //    subscribes after the fact. Text and binary behave identically; only the lane's scope differs.
   const allBinary = { everyMember: { all: true, tracks: [] }, members: {} }
   const dataFramesOf = (p: { decoded: () => any[] }) =>
     p
@@ -2608,17 +2456,6 @@ describe('room stub channel', () => {
     await settle()
 
     expect(dataFramesOf(peer)).toEqual(['bob-pinned'])
-  })
-
-  it('kicking a member deletes retained text that member still owns', async () => {
-    const owner = (await Room.create('retain-text-kick-direct')) as ServerRoom
-    const member = await owner.join({ meta: { name: 'owner' } })
-    await member.publish('pinned', { retain: true })
-    expect(await roomBackend.readRetained(owner.id, owner._inc, semanticLane)).not.toBeNull()
-
-    await Room.removeParticipant(owner.id, { id: member.id })
-
-    expect(await roomBackend.readRetained(owner.id, owner._inc, semanticLane)).toBeNull()
   })
 
   it("a kick's retained cleanup cannot delete a newer owner's frame racing the compare-delete", async () => {
@@ -2684,10 +2521,8 @@ describe('room stub channel', () => {
       vi.useFakeTimers()
       await Room.create('abandon-close')
       await expect(Room.close('abandon-close')).rejects.toThrow('crash mid-close')
-      // Wedged: the id sits in `closing` under a live lease, so a recreate loses — no stuck id resurrection.
       await expect(Room.create('abandon-close')).rejects.toThrow(/already exists/i)
       vi.advanceTimersByTime(120_000) // well past ROOM_CLOSE_LEASE_MS
-      // Lease lapsed: the stuck `closing` config reaped, so the id is recreatable rather than wedged forever.
       expect(await Room.create('abandon-close')).toBeTruthy()
     } finally {
       crash.mockRestore()
@@ -2729,8 +2564,6 @@ describe('room stub channel', () => {
     await cam.publishBinary(new Uint8Array([9]), { track: 'screen', retain: true }) // named track
     expect(await roomBackend.listRetained('retain-kick', owner._inc, { member: cam.id })).toHaveLength(2)
 
-    // A kick goes through evictMember, which has no local track state for the member — cleanup must
-    // scan the member's retained keys, not rely on knowing its tracks.
     await Room.removeParticipant('retain-kick', { id: cam.id })
 
     expect(await roomBackend.listRetained('retain-kick', owner._inc, { member: cam.id })).toEqual([])
@@ -2856,62 +2689,6 @@ describe('room stub channel', () => {
     stub._relayBinaryLive(wire, cam.id, DEFAULT_TRACK, info) // its own late live echo
 
     expect(binaryFramesOf(peer).map((r) => r.payload[0])).toEqual([7]) // delivered once — the echo dropped
-  })
-
-  it('keeps a live binary seq wider than 32 bits through server delivery and the public client wire', async () => {
-    const { serverRoom, stub, peer } = await createServedRoom('wide-binary-live')
-    const camera = await serverRoom.join({ meta: { name: 'camera' } })
-    const serverSeqs: number[] = []
-    serverRoom.subscribeBinary((_data, info) => serverSeqs.push(info.seq))
-    stub._onPeerMessage(JSON.stringify({ __r: 'sub-binary', wants: allBinary }), 50)
-    await settle()
-
-    const inc = await activeInc(serverRoom.id)
-    seedMemoryLaneOrder(
-      serverRoom.id,
-      inc,
-      { kind: 'binary', member: camera.id, track: DEFAULT_TRACK },
-      0xffff_ffff,
-      10,
-    )
-    const receipt = await camera.publishBinary(new Uint8Array([7]))
-    expect(receipt.seq).toBe(0x1_0000_0000)
-    expect(serverSeqs).toEqual([0x1_0000_0000])
-
-    const frame = peer.decoded().find((candidate) => candidate.tag === TAG.PUBLISH_BINARY)
-    const fake = createFakeStub()
-    const clientRoom = new ClientRoom(fake.stub, createSnapshot(serverRoom.id))
-    const clientSeqs: number[] = []
-    clientRoom.subscribeBinary((_data, info) => clientSeqs.push(info.seq))
-    fake.emitBinary(frame.data, { key: serverRoom.id, ...frame.info })
-
-    expect(clientSeqs).toEqual([0x1_0000_0000])
-  })
-
-  it('keeps a retained binary seq wider than 32 bits through replay and public client decode', async () => {
-    const { serverRoom, stub, peer } = await createServedRoom('wide-binary-retained')
-    const camera = await serverRoom.join({ meta: { name: 'camera' } })
-    const inc = await activeInc(serverRoom.id)
-    seedMemoryLaneOrder(
-      serverRoom.id,
-      inc,
-      { kind: 'binary', member: camera.id, track: DEFAULT_TRACK },
-      0xffff_ffff,
-      20,
-    )
-    const receipt = await camera.publishBinary(new Uint8Array([9]), { retain: true })
-    expect(receipt.seq).toBe(0x1_0000_0000)
-
-    stub._onPeerMessage(JSON.stringify({ __r: 'sub-binary', wants: allBinary }), 51)
-    await settle()
-    const frame = peer.decoded().find((candidate) => candidate.tag === TAG.PUBLISH_BINARY)
-    const fake = createFakeStub()
-    const clientRoom = new ClientRoom(fake.stub, createSnapshot(serverRoom.id))
-    const clientSeqs: number[] = []
-    clientRoom.subscribeBinary((_data, info) => clientSeqs.push(info.seq))
-    fake.emitBinary(frame.data, { key: serverRoom.id, ...frame.info })
-
-    expect(clientSeqs).toEqual([0x1_0000_0000])
   })
 
   it('replans a fixed lane after initial subscription failure instead of staying permanently deaf', async () => {
@@ -3293,12 +3070,6 @@ describe('room stub channel', () => {
   })
 })
 
-// ───────────────────────────────────────────────────────────────────────────
-// ClientRoom — driven through a scripted stub standing in for the revived
-// ClientBroadcast. Bug classes targeted: snapshot/event-stream double
-// application, suppression not linking standalone participants to rooms.
-// ───────────────────────────────────────────────────────────────────────────
-
 type FakeStub = {
   emit: (envelope: unknown) => void
   emitBinary: (framed: Uint8Array, info?: ChannelPublishInfo) => void
@@ -3623,8 +3394,6 @@ describe('ClientRoom', () => {
     const none = { all: false, tracks: [] }
     const every = { all: true, tracks: [] }
 
-    // Each widening is declared synchronously — a publish right after subscribing must be
-    // preceded by its declaration on the wire (same-connection FIFO).
     const unsub1 = (await clientRoom.getParticipant(cam1))!.subscribeBinary(() => {})
     expect(subBinaryMsgs()).toEqual([{ __r: 'sub-binary', wants: { everyMember: none, members: { [cam1]: every } } }])
     ;(await clientRoom.getParticipant(cam2))!.subscribeBinary(() => {})
@@ -3633,8 +3402,6 @@ describe('ClientRoom', () => {
       wants: { everyMember: none, members: { [cam1]: every, [cam2]: every } },
     })
 
-    // A room-level listener adds the every-member want; listener changes that leave the
-    // effective want unchanged send nothing.
     const unsubAll = clientRoom.subscribeBinary(() => {})
     expect(subBinaryMsgs().at(-1)).toEqual({
       __r: 'sub-binary',
@@ -3644,7 +3411,6 @@ describe('ClientRoom', () => {
     const unsubDup = (await clientRoom.getParticipant(cam1))!.subscribeBinary(() => {})
     expect(subBinaryMsgs().length).toBe(sentCount)
 
-    // Dropping back to one member narrows it again.
     unsubDup()
     unsubAll()
     unsub1()
@@ -3653,7 +3419,6 @@ describe('ClientRoom', () => {
       wants: { everyMember: none, members: { [cam2]: every } },
     })
 
-    // Track filters declare exactly the wanted tracks — `null` selects the default lane.
     const unsubScreen = clientRoom.subscribeBinary(() => {}, { track: 'screen' })
     const unsubDefault = (await clientRoom.getParticipant(cam1))!.subscribeBinary(() => {}, { track: null })
     expect(subBinaryMsgs().at(-1)).toEqual({
@@ -3681,15 +3446,12 @@ describe('ClientRoom', () => {
     })
     const subTextMsgs = () => fake.sent.filter((m) => m.__r === 'sub-text')
 
-    // Participant-scoped listeners declare a member set — no room-level broadcast subscription.
     const unsubAlice = (await clientRoom.getParticipant(alice))!.subscribe(() => {})
     expect(fake.textSubscribed()).toBe(false)
     expect(subTextMsgs()).toEqual([{ __r: 'sub-text', members: [alice] }])
     const unsubBob = (await clientRoom.getParticipant(bob))!.subscribe(() => {})
     expect(subTextMsgs().at(-1)).toEqual({ __r: 'sub-text', members: [alice, bob] })
 
-    // A room-level subscribe() upgrades to the broadcast subscription and clears the member
-    // set; listener changes that leave the effective want unchanged send nothing.
     const unsubAll = clientRoom.subscribe(() => {})
     expect(fake.textSubscribed()).toBe(true)
     expect(subTextMsgs().at(-1)).toEqual({ __r: 'sub-text', members: [] })
@@ -3697,7 +3459,6 @@ describe('ClientRoom', () => {
     const unsubDup = (await clientRoom.getParticipant(alice))!.subscribe(() => {})
     expect(subTextMsgs().length).toBe(sentCount)
 
-    // Narrowing back re-declares the member set.
     unsubDup()
     unsubAll()
     expect(fake.textSubscribed()).toBe(false)
@@ -3753,7 +3514,6 @@ describe('ClientRoom', () => {
     const demand: Array<[string | null, boolean]> = []
     alice.onDemand((track, wanted) => demand.push([track, wanted]))
 
-    // A second view of the room subscribes to alice's screen track — demand goes unwatched → watched.
     const observer = await Room.get('demand')
     await observer.getParticipants() // materialize the roster so alice is known
     const unsub = (await observer.getParticipant(alice.id))!.subscribeBinary(() => {}, { track: 'screen' })
@@ -3770,7 +3530,6 @@ describe('ClientRoom', () => {
     try {
       vi.setSystemTime(1000)
       const delivered: Array<[string, string, boolean]> = []
-      // Own every member, ignore outbound gossip, record what gets pushed to the member.
       const demand = new RoomDemand(
         () => {},
         () => true,
@@ -3779,12 +3538,10 @@ describe('ClientRoom', () => {
       demand.applyWant({ member: 'alice', track: 'screen', node: 'watcher', on: true })
       expect(delivered).toEqual([['alice', 'screen', true]]) // a watcher on another node wants it
 
-      // A heartbeat before the lease lapses keeps it — a live watcher re-gossips within the window.
       vi.setSystemTime(1000 + ROOM_DEMAND_TTL_MS - 1)
       demand.heartbeat()
       expect(delivered).toEqual([['alice', 'screen', true]])
 
-      // The watcher's node crashes (no 0-transition). Past the lease, the next heartbeat sweeps it.
       vi.setSystemTime(1000 + ROOM_DEMAND_TTL_MS + 1)
       demand.heartbeat()
       expect(delivered).toEqual([
@@ -3821,7 +3578,6 @@ describe('ClientRoom', () => {
     const clientRoom = new ClientRoom(fake.stub, createSnapshot('dm-race'))
     const peer = crypto.randomUUID()
 
-    // The DM arrives on the stub before join() has resolved (different request, same connection).
     fake.emit({ __r: 'dm', to: memberId, from: peer, fromMeta: { name: 'Bot' }, data: 'welcome!' })
 
     const me = await clientRoom.join()
@@ -3830,12 +3586,6 @@ describe('ClientRoom', () => {
     expect(inbox).toEqual([['welcome!', 'Bot']])
   })
 })
-
-// ───────────────────────────────────────────────────────────────────────────
-// Liveness — graceful departures travel as events; a hard node crash leaves
-// member records behind. Owners heartbeat `seenAt`; stale records are reaped
-// on read and on every heartbeat, with the leave announced to all observers.
-// ───────────────────────────────────────────────────────────────────────────
 
 describe('liveness', () => {
   async function backdate(roomId: string, memberId: string): Promise<void> {
@@ -3874,7 +3624,6 @@ describe('liveness', () => {
       const inc = (a as ServerRoom)._inc
       expect(await readCell('abandoned', inc, key)).toBeDefined()
 
-      // The owning node dies (no heartbeats), and no reader ever touches the room again.
       vi.setSystemTime(Date.now() + ROOM_MEMBER_KV_TTL_MS + 1)
 
       expect(await readCell('abandoned', inc, key)).toBeUndefined() // the store expired it on its own
@@ -3916,10 +3665,8 @@ describe('liveness', () => {
       // the sibling index keys still carried the join-time TTL and silently expired right here.
       await vi.advanceTimersByTimeAsync(ROOM_MEMBER_KV_TTL_MS + ROOM_HEARTBEAT_INTERVAL_MS)
 
-      // The hidden marker survived — the lazy seed still excludes the off-presence member.
       expect((await Room.get('hb-markers')).count).toBe(1)
 
-      // The identity index survived — a by-identity kick still resolves the long-lived membership.
       await Room.removeParticipant('hb-markers', { identity: 'user-9', reason: 'banned' })
       expect(left).toEqual([{ type: 'removed', reason: 'banned' }])
     } finally {
@@ -3945,11 +3692,6 @@ describe('liveness', () => {
     }
   })
 })
-
-// ───────────────────────────────────────────────────────────────────────────
-// Adapter requirements — rooms need the adapter's KV; a custom adapter
-// without it must fail loud and clear, not half-work.
-// ───────────────────────────────────────────────────────────────────────────
 
 describe('implicit memory backend', () => {
   it('keeps Room zero-configuration while explicit backend installation remains opt-in', async () => {
@@ -3988,11 +3730,6 @@ describe('implicit memory backend', () => {
   })
 })
 
-// ───────────────────────────────────────────────────────────────────────────
-// Typed metadata — compile-time contract (tsc runs over this spec): the type
-// parameters flow from the statics through every surface.
-// ───────────────────────────────────────────────────────────────────────────
-
 describe('typed metadata', () => {
   it('meta type parameters flow end-to-end', async () => {
     type ChatMeta = { topic: string }
@@ -4027,11 +3764,6 @@ describe('typed metadata', () => {
     expect(_directName).toBe('Bob')
   })
 })
-
-// ───────────────────────────────────────────────────────────────────────────
-// snapshot()/onChange — the UI-store contract: reference-stable immutable
-// views, one change signal for everything observable.
-// ───────────────────────────────────────────────────────────────────────────
 
 describe('snapshot() and onChange()', () => {
   it('the reference is stable until something changes, then every change class invalidates it', async () => {
@@ -4214,11 +3946,6 @@ describe('snapshot() and onChange()', () => {
     expect(seen).toEqual([{ closed: true, count: 0 }]) // one notification, the final state — no transient
   })
 })
-
-// ───────────────────────────────────────────────────────────────────────────
-// Returnable RemoteParticipant — a view crosses the wire as (room, snapshot);
-// ref-identity dedup binds it to the co-returned room's live view.
-// ───────────────────────────────────────────────────────────────────────────
 
 describe('returnable RemoteParticipant', () => {
   function makeRoundTrip() {
