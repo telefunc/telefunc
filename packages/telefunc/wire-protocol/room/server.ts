@@ -253,6 +253,48 @@ const ROOM_TOMBSTONE_TTL_MS = 60_000
 const ROOM_CLOSE_LEASE_MS = 15_000
 const ROOM_CX_ATTEMPTS = 16
 
+type InitiatingClose = {
+  roomId: string
+  inc: string
+  leaseId: string
+  settled: Promise<void>
+  settle(): void
+}
+
+/** Close ceremonies initiated by this process. The lease carried by the terminal frame makes the
+ * distinction explicit: only the initiating ceremony delays its local teardown; another node's close
+ * has no entry here and every remote observer retires immediately. */
+const initiatingCloses = new Map<string, InitiatingClose>()
+
+function beginInitiatingClose(roomId: string, inc: string, leaseId: string): InitiatingClose {
+  let resolve!: () => void
+  const settled = new Promise<void>((done) => {
+    resolve = done
+  })
+  let finished = false
+  const close: InitiatingClose = {
+    roomId,
+    inc,
+    leaseId,
+    settled,
+    settle() {
+      if (finished) return
+      finished = true
+      if (initiatingCloses.get(leaseId) === close) initiatingCloses.delete(leaseId)
+      resolve()
+    },
+  }
+  assert(!initiatingCloses.has(leaseId))
+  initiatingCloses.set(leaseId, close)
+  return close
+}
+
+function findInitiatingClose(roomId: string, inc: string, leaseId: string | undefined): InitiatingClose | null {
+  if (leaseId === undefined) return null
+  const close = initiatingCloses.get(leaseId)
+  return close?.roomId === roomId && close.inc === inc ? close : null
+}
+
 /** The retained value stored per (member, track) binary lane: the base64 frame plus the publish
  *  receipt it was assigned, so a late subscriber replays it in the lane's real order (never a fresh
  *  `seq:0`/`Date.now()` stamp). */
@@ -533,28 +575,34 @@ async function finishClose(backend: RoomBackendSpi, roomId: string, closing: Roo
   const inc = closing.currentInc
   const lease = closing.closeLease
   if (inc === null || lease === undefined) return false
-  const closedEvent = await commitRoomLane(
-    roomId,
-    inc,
-    CONTROL_LANE,
-    encodeRoomText(stringify({ __r: 'closed' } satisfies RoomCtrlEnvelope)),
-    { closingLease: lease.id },
-  )
-  if (closedEvent === null) return false
+  const localClose = beginInitiatingClose(roomId, inc, lease.id)
+  try {
+    const closedEvent = await commitRoomLane(
+      roomId,
+      inc,
+      CONTROL_LANE,
+      encodeRoomText(stringify({ __r: 'closed', closeLease: lease.id } satisfies RoomCtrlEnvelope)),
+      { closingLease: lease.id },
+    )
+    localClose.settle()
+    if (closedEvent === null) return false
 
-  const config = { ...configFromHead(closing), status: 'closed' as const }
-  const finalized = await backend.compareExchangeHead(
-    roomId,
-    { expect: { rev: closing.rev, closingLease: lease.id } },
-    {
-      head: { currentInc: null, state: 'closed', config: encodeRoomConfig(config) },
-      ttlMs: ROOM_TOMBSTONE_TTL_MS,
-    },
-  )
-  if ('conflict' in finalized) return false
-  await backend.dropGeneration(roomId, inc)
-  await backend.directoryDelete(roomId, inc)
-  return true
+    const config = { ...configFromHead(closing), status: 'closed' as const }
+    const finalized = await backend.compareExchangeHead(
+      roomId,
+      { expect: { rev: closing.rev, closingLease: lease.id } },
+      {
+        head: { currentInc: null, state: 'closed', config: encodeRoomConfig(config) },
+        ttlMs: ROOM_TOMBSTONE_TTL_MS,
+      },
+    )
+    if ('conflict' in finalized) return false
+    await backend.dropGeneration(roomId, inc)
+    await backend.directoryDelete(roomId, inc)
+    return true
+  } finally {
+    localClose.settle()
+  }
 }
 
 /** The `(memberId, identity)` pairs a `ParticipantRef` addresses — shared by `Room.send()` and
@@ -697,6 +745,10 @@ class ServerRoom implements Room {
   /** Upstream subscriptions keyed by their policy identity. */
   private readonly _binaryKeyUnsubs = new Map<string, SubSlot>()
   private readonly _dmUnsubs = new Map<string, SubSlot>()
+  /** Exact locally initiated close ceremonies whose terminal event this instance has observed. While
+   *  non-empty, `_syncSubs()` keeps the lanes needed by that operation alive. Remote closes never enter
+   *  this set and continue through immediate teardown. */
+  private readonly _initiatingCloseHolds = new Set<InitiatingClose>()
   /** (member, track) pairs this instance has already announced — first publish pays the
    *  KV append + ctrl event, every further frame is a Set lookup. */
   private readonly _announcedTracks = new Map<string, Set<string>>()
@@ -1238,6 +1290,9 @@ class ServerRoom implements Room {
       return
     }
     const wasClosed = this._state.closed
+    const initiatingClose =
+      event.__r === 'closed' ? findInitiatingClose(this.id, this._inc, event.closeLease) : null
+    if (initiatingClose !== null) this._holdInitiatingClose(initiatingClose)
     // A hidden member's presence events (join/leave/meta/track) are server-only — decide before
     // applying, since `leave` removes the member from state (see `_hidesFromClients`).
     const serverOnly = this._hidesFromClients(event)
@@ -1251,7 +1306,7 @@ class ServerRoom implements Room {
       for (const stub of this._stubs) stub._relayPublishText(wireText)
     }
 
-    if (this._state.closed && !wasClosed) this._teardown()
+    if (this._state.closed && !wasClosed && initiatingClose === null) this._teardown()
   }
 
   /** Whether a control event concerns a hidden (server-only) member and so must not be relayed to
@@ -1447,6 +1502,18 @@ class ServerRoom implements Room {
     this._localParticipants.clear()
     for (const stub of this._stubs) void stub.close().catch(() => {})
     this._syncSubs()
+  }
+
+  /** Keep this initiating node's lanes alive until its exact terminal frame's delivery fence settles.
+   *  The state transition and `onClose` still happen at frame delivery; only teardown is
+   *  deferred. A remotely observed close has no matching local ceremony and never enters here. */
+  private _holdInitiatingClose(close: InitiatingClose): void {
+    if (this._initiatingCloseHolds.has(close)) return
+    this._initiatingCloseHolds.add(close)
+    void close.settled.then(() => {
+      if (!this._initiatingCloseHolds.delete(close)) return
+      this._teardown()
+    })
   }
 
   /** A member's own messages are suppressed for this holder when its participant opted out. */
@@ -1706,7 +1773,7 @@ class ServerRoom implements Room {
   _syncSubs(): void {
     const backend = getRoomBackend()
     const state = this._state
-    const open = !state.closed
+    const open = !state.closed || this._initiatingCloseHolds.size > 0
     const observed =
       this._stubs.size > 0 ||
       this._localParticipants.size > 0 ||

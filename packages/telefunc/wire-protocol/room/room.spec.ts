@@ -367,6 +367,7 @@ describe('Room entry point', () => {
 
   it('close() fires onClose on observers, removes the room, and fails later joins', async () => {
     const lobby = await Room.create('closing')
+    const firstInc = (lobby as ServerRoom)._inc
     const me = await lobby.join()
     let closed = false
     let meLeft = false
@@ -379,10 +380,48 @@ describe('Room entry point', () => {
     expect(meLeft).toBe(true)
     expect(lobby.isClosed).toBe(true)
     expect(lobby.count).toBe(0)
+    expect((await roomBackend.readHead('closing'))?.head).toMatchObject({ state: 'closed', currentInc: null })
+    expect(await roomBackend.listGenerations('closing')).toEqual([])
+    expect((await roomBackend.directoryList('closing')).entries).toEqual([])
     await expect(Room.get('closing')).rejects.toThrow('Room not found')
     await expect(lobby.join()).rejects.toThrow('Room is closed')
     await expect(Room.close('closing')).resolves.toBeUndefined() // idempotent: re-closing a closed room is a no-op
     expect(await Room.list()).toEqual([])
+    const recreated = await Room.create('closing')
+    expect((recreated as ServerRoom)._inc).not.toBe(firstInc)
+    await Room.close('closing')
+  })
+
+  it('tears down a remotely observed close immediately instead of inheriting the initiator hold', async () => {
+    const unsubscribed: string[] = []
+    const realSubscribe = roomBackend.subscribeLane.bind(roomBackend)
+    const subscribe = vi.spyOn(roomBackend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
+      const subscription = realSubscribe(roomId, inc, lane, receiver)
+      return {
+        ready: subscription.ready,
+        state: () => subscription.state(),
+        onStateChange: (callback) => subscription.onStateChange(callback),
+        unsubscribe: async () => {
+          unsubscribed.push(lane.kind)
+          await subscription.unsubscribe()
+        },
+      }
+    })
+    try {
+      const observer = await Room.create('remote-close-teardown')
+      const inc = (observer as ServerRoom)._inc
+      observer.onAnnounce(() => {})
+
+      // No local `Room.close()` ceremony exists for this lease: model the terminal frame arriving from
+      // another node. Its observer must retire both fixed lanes without waiting on an initiator hold.
+      await commitText('remote-close-teardown', inc, controlLane, { __r: 'closed', closeLease: 'remote-lease' })
+      await settle()
+
+      expect(observer.isClosed).toBe(true)
+      expect(unsubscribed.sort()).toEqual(['control', 'semantic'])
+    } finally {
+      subscribe.mockRestore()
+    }
   })
 
   it('removeParticipant() kicks: the member leaves everywhere, its LocalParticipant fires onLeave', async () => {

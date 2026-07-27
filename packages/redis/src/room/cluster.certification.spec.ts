@@ -8,10 +8,19 @@ import type { CommitAccepted, LaneId, ReadinessState, RoomHead } from 'telefunc/
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { disposeRoomBackend, installRoomBackend } from '../../../telefunc/wire-protocol/backend/install.js'
 import { frameRoomBinaryOrder, unframeRoomBinaryOrder } from '../../../telefunc/wire-protocol/room/protocol.js'
-import { Room } from '../../../telefunc/wire-protocol/room/server.js'
+import { Room, ServerRoom } from '../../../telefunc/wire-protocol/room/server.js'
 import type { RedisRoomBackend as RedisRoomBackendType } from './backend.js'
 import { createRedisFixture } from './fixture.js'
-import { DIRECTORY_PUT_LUA, directoryIndexKey, headKey, laneKey, orderKey, roomTag } from './layout.js'
+import {
+  DIRECTORY_PUT_LUA,
+  directoryIndexKey,
+  generationTokensKey,
+  gensKey,
+  headKey,
+  laneKey,
+  orderKey,
+  roomTag,
+} from './layout.js'
 
 const publicRuntime = await import('../../dist/index.js')
 const RedisRoomBackend = publicRuntime.RedisRoomBackend as unknown as typeof RedisRoomBackendType
@@ -353,6 +362,40 @@ describe.skipIf(nodes === undefined)('RedisRoomBackend real three-master Cluster
       report.mockRestore()
       await disposeRoomBackend().catch(() => {})
       await fixture.dispose()
+    }
+  })
+
+  it('completes an ordinary observed public Room close through shipped Redis authority and permits recreation', async () => {
+    const prefix = uniquePrefix('public-close')
+    const backend = new RedisRoomBackend({ redis: cluster, prefix })
+    const roomId = `cluster-room-close-${Date.now()}`
+    let localCloseEvents = 0
+    installRoomBackend(() => backend)
+    try {
+      const room = await Room.create(roomId)
+      const firstInc = (room as ServerRoom)._inc
+      room.onAnnounce(() => {})
+      room.onClose(() => localCloseEvents++)
+      await Room.announce(roomId, 'ready')
+
+      await Room.close(roomId)
+
+      expect(localCloseEvents).toBe(1)
+      expect((await backend.readHead(roomId))?.head).toMatchObject({ state: 'closed', currentInc: null })
+      expect(await backend.listGenerations(roomId)).toEqual([])
+      expect(Number(await cluster.sismember(gensKey(prefix, roomId), firstInc))).toBe(0)
+      expect(await cluster.hget(generationTokensKey(prefix, roomId), firstInc)).toBeNull()
+      expect((await backend.directoryList(roomId)).entries).toEqual([])
+
+      const recreated = await Room.create(roomId)
+      const secondInc = (recreated as ServerRoom)._inc
+      expect(secondInc).not.toBe(firstInc)
+      console.log(
+        `[w5-integration] redis-room-close authority=closed generationDropped=true directoryEntries=0 recreated=true localCloseEvents=${localCloseEvents}`,
+      )
+      await Room.close(roomId)
+    } finally {
+      await disposeRoomBackend().catch(() => {})
     }
   })
 

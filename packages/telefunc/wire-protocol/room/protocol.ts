@@ -248,7 +248,10 @@ type RoomCtrlEnvelope =
   // aggregates these across nodes into a global demand count — node-to-node only, never relayed
   // to clients. `track` is `DEFAULT_TRACK` for the plain `publishBinary()` lane.
   | { __r: 'want'; member: string; track: string; node: string; on: boolean }
-  | { __r: 'closed' }
+  // The authority lease identifies the exact close ceremony. A server that initiated this lease uses
+  // it to keep its own event-stream lanes alive until that event's delivery fence settles; remote observers
+  // have no matching local ceremony and still tear down immediately. Optional accepts older frames.
+  | { __r: 'closed'; closeLease?: string }
 
 /** A semantic message's position. Within one incarnation `seq` is the strictly increasing domain
  *  cursor; `timestamp` is independently clamped authority time and never controls sequence reset. */

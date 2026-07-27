@@ -135,6 +135,53 @@ describe.skipIf(url === undefined || url === '')('Redis independent-review race 
     expect(latch.payloads()).toEqual(['after-reconnect'])
   })
 
+  it('rejects a held PING from the previous subscriber connection epoch instead of crediting stale delivery', async () => {
+    const roomId = nextId('room')
+    const { inc } = await openRoom(fx.backend, roomId)
+    const latch = collector()
+    const sub = fx.backend.subscribeLane(roomId, inc, SEMANTIC, latch.receiver)
+    await sub.ready
+    const states: string[] = []
+    sub.onStateChange((state) => states.push(state))
+
+    const subscriber = fx.subscriber as unknown as { ping(): Promise<unknown> }
+    const originalPing = subscriber.ping.bind(fx.subscriber)
+    const oldPongHeld = deferred()
+    const releaseOldPong = deferred()
+    let holdOnce = true
+    subscriber.ping = async () => {
+      const pong = await originalPing()
+      if (holdOnce) {
+        holdOnce = false
+        oldPongHeld.resolve()
+        await releaseOldPong.promise
+      }
+      return pong
+    }
+
+    try {
+      const committed = accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, bytes('old-epoch')))
+      const deliveryOutcome = committed.delivery.then(
+        () => null,
+        (error: unknown) => error,
+      )
+      await oldPongHeld.promise
+      await latch.waitFor(1)
+
+      await fx.killSubscriberForTest()
+      await waitFor(() => states.includes('lost') && states.includes('ready'))
+      releaseOldPong.resolve()
+
+      const error = await deliveryOutcome
+      expect(error).toBeInstanceOf(Error)
+      expect(String(error)).toMatch(/crossed a connection epoch|crossed a lifecycle epoch/)
+      expect(latch.payloads()).toEqual(['old-epoch'])
+    } finally {
+      releaseOldPong.resolve()
+      subscriber.ping = originalPing
+    }
+  })
+
   it('requires a current-connection SUBSCRIBE ack after disconnect during held generation validation', async () => {
     const roomId = nextId('room')
     const { inc } = await openRoom(fx.backend, roomId)

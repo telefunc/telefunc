@@ -4,7 +4,7 @@ import { disposeRoomBackend, installRoomBackend } from '../../install.js'
 import type { LaneId, LaneReceiver, ReadinessState, RoomBackendSpi } from '../../spi.js'
 import { CHANNEL_PING_INTERVAL_MS } from '../../../constants.js'
 import { frameRoomBinaryOrder, unframeRoomBinaryOrder } from '../../../room/protocol.js'
-import { Room } from '../../../room/server.js'
+import { Room, ServerRoom } from '../../../room/server.js'
 import {
   CloudflareRoomBackend,
   CLOUDFLARE_ROOM_CONTEXT_ERROR,
@@ -265,10 +265,16 @@ describe('cloudflare — production session-manager mechanics', () => {
     installRoomBackend(() => roomBackend)
     try {
       const room = await Room.create(roomId)
+      const firstInc = (room as ServerRoom)._inc
       const unlisten = room.onAnnounce(() => {})
       await Room.announce(roomId, 'ready')
       await Room.close(roomId)
       expect((await fx.backend.readHead(roomId))?.head).toMatchObject({ state: 'closed', currentInc: null })
+      expect(await fx.backend.listGenerations(roomId)).toEqual([])
+      expect((await fx.backend.directoryList(roomId)).entries).toEqual([])
+      const recreated = await Room.create(roomId)
+      expect((recreated as ServerRoom)._inc).not.toBe(firstInc)
+      await Room.close(roomId)
       unlisten()
     } finally {
       remoteReceivers.clear()
