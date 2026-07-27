@@ -14,9 +14,9 @@
 
 import {
   BACKEND_SPI_VERSION,
+  type BackendDriver,
   type BackendReceiver,
-  type BackendSpi,
-  type BackendSubscription,
+  type BackendSubscriptionSource,
   type BroadcastLane,
   type CellMutation,
   type CommitResult,
@@ -26,10 +26,12 @@ import {
   type LaneId,
   type PublishResult,
   type RoomHead,
+  type SubscriptionAttempt,
+  type SubscriptionDriver,
   type SubscriptionState,
 } from '../spi.js'
 import { assertHeadDeleteLegal, assertHeadNextWellFormed, assertHeadTransition } from '../head-transitions.js'
-import { SubscriptionManager, type SubscriptionAttempt, type SubscriptionDriver } from '../subscriptions.js'
+import { broadcastRouteKey, laneKey } from '../subscription-source.js'
 
 const DEFAULT_MAX_RETAINED_BYTES = 16 * 1024 * 1024
 const DIRECTORY_PAGE_SIZE = 100
@@ -82,35 +84,6 @@ export class MemoryBackendState {
   readonly broadcastOrder = new Map<string, OrderMark>()
   readonly broadcastSubs = new Map<string, Set<MemorySubscriptionAttempt>>()
   revSeq = 0
-}
-
-// In the fixed lane table every lane's order domain and channel correspond one to one, so a single key
-// indexes both the order watermarks and the subscription channels. Member and track are encoded so a
-// member named `a:b` can never collide with another lane.
-function laneKey(lane: LaneId): string {
-  switch (lane.kind) {
-    case 'semantic':
-      return 'semantic'
-    case 'control':
-      return 'control'
-    case 'binary':
-      return `binary:${encodeURIComponent(lane.member)}:${encodeURIComponent(lane.track)}`
-    case 'inbox':
-      return `inbox:${encodeURIComponent(lane.member)}`
-  }
-}
-
-function broadcastRouteKey(lane: BroadcastLane): string {
-  return `${lane.kind}:${encodeURIComponent(lane.key)}`
-}
-
-type MemorySource =
-  | { kind: 'broadcast'; lane: BroadcastLane }
-  | { kind: 'durable'; roomId: string; inc: string; lane: LaneId }
-
-function sourceKey(source: MemorySource): string {
-  if (source.kind === 'broadcast') return `broadcast:${broadcastRouteKey(source.lane)}`
-  return `durable:${encodeURIComponent(source.roomId)}:${encodeURIComponent(source.inc)}:${laneKey(source.lane)}`
 }
 
 function copyBytes(bytes: Uint8Array): Uint8Array {
@@ -208,23 +181,21 @@ class MemorySubscriptionAttempt implements SubscriptionAttempt {
   }
 }
 
-export class MemoryBackend implements BackendSpi {
+export class MemoryBackend implements BackendDriver {
   readonly spiVersion = BACKEND_SPI_VERSION
-  readonly capabilities: BackendSpi['capabilities']
+  readonly capabilities: BackendDriver['capabilities']
+  readonly subscriptions: SubscriptionDriver
 
   readonly #now: () => number
   readonly #state: MemoryBackendState
-  readonly #subscriptions: SubscriptionManager<MemorySource>
   #disposed = false
 
   constructor(options: MemoryBackendOptions = {}) {
     this.#now = options.authorityNow ?? (() => Date.now())
     this.#state = options.state ?? new MemoryBackendState()
-    const driver: SubscriptionDriver<MemorySource> = {
+    this.subscriptions = {
       open: (source, receiver, localReceiverCount) => this.#openSubscription(source, receiver, localReceiverCount),
-      label: (source) => sourceKey(source),
     }
-    this.#subscriptions = new SubscriptionManager(driver)
     this.capabilities = {
       receivers: 'global',
       maxRetainedPayloadBytes: options.maxRetainedPayloadBytes ?? DEFAULT_MAX_RETAINED_BYTES,
@@ -254,12 +225,6 @@ export class MemoryBackend implements BackendSpi {
     for (const target of targets) void target.deliver(copyBytes(frame), mark).catch(console.error)
     const delivered = sumReceiverCounts(targets)
     return { ...mark, receivers: delivered, meta: { delivered, transport: 'in-memory' } }
-  }
-
-  subscribe(lane: BroadcastLane, receiver: BackendReceiver): BackendSubscription {
-    this.#assertLive()
-    const source: MemorySource = { kind: 'broadcast', lane }
-    return this.#subscriptions.subscribe(sourceKey(source), source, receiver)
   }
 
   // ── head ──
@@ -518,14 +483,8 @@ export class MemoryBackend implements BackendSpi {
 
   // ── subscriptions ──
 
-  subscribeLane(roomId: string, inc: string, lane: LaneId, receiver: BackendReceiver): BackendSubscription {
-    this.#assertLive()
-    const source: MemorySource = { kind: 'durable', roomId, inc, lane }
-    return this.#subscriptions.subscribe(sourceKey(source), source, receiver)
-  }
-
   #openSubscription(
-    source: MemorySource,
+    source: BackendSubscriptionSource,
     receiver: BackendReceiver,
     localReceiverCount: () => number,
   ): MemorySubscriptionAttempt {
@@ -582,9 +541,6 @@ export class MemoryBackend implements BackendSpi {
     }
     const gen = room.gens.get(inc)
     if (gen === undefined) return // already dropped — the janitor is resumable
-    this.#subscriptions.terminate(
-      (source) => source.kind === 'durable' && source.roomId === roomId && source.inc === inc,
-    )
     room.gens.delete(inc)
     this.#sweep(room)
   }
@@ -619,7 +575,6 @@ export class MemoryBackend implements BackendSpi {
   async dispose(): Promise<void> {
     if (this.#disposed) return
     this.#disposed = true
-    await this.#subscriptions.dispose()
     this.#state.rooms.clear()
     this.#state.directory.clear()
     this.#state.broadcastOrder.clear()

@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import { disposeBackend, getBackend, installBackend, setDefaultBackend } from './install.js'
 import { MemoryBackend } from './memory/backend.js'
-import type { BackendSpi } from './spi.js'
+import type { BackendDriver } from './spi.js'
 
 afterEach(async () => {
   await disposeBackend()
@@ -10,35 +10,36 @@ afterEach(async () => {
 describe('Room backend installation', () => {
   test('lazily installs one implicit memory backend', () => {
     const backend = getBackend()
-    expect(backend).toBeInstanceOf(MemoryBackend)
+    expect(backend).not.toBeInstanceOf(MemoryBackend)
     expect(getBackend()).toBe(backend)
   })
 
   test('replaces implicit memory with a default and disposes the fallback once', () => {
     const implicit = getBackend()
     const dispose = vi.spyOn(implicit, 'dispose')
-    const backend = memoryBackend()
+    const driver = memoryBackend()
 
-    expect(setDefaultBackend(() => backend)).toBe(backend)
+    const backend = setDefaultBackend(() => driver)
     expect(getBackend()).toBe(backend)
     expect(dispose).toHaveBeenCalledTimes(1)
   })
 
-  test('lets an explicit install replace and dispose a default', () => {
-    const backend = memoryBackend()
-    const dispose = vi.spyOn(backend, 'dispose')
-    const explicit = memoryBackend()
-    setDefaultBackend(() => backend)
+  test('lets an explicit install replace and dispose a default', async () => {
+    const driver = memoryBackend()
+    const dispose = vi.spyOn(driver, 'dispose')
+    const explicitDriver = memoryBackend()
+    setDefaultBackend(() => driver)
 
-    expect(installBackend(() => explicit)).toBe(explicit)
+    const explicit = installBackend(() => explicitDriver)
     expect(getBackend()).toBe(explicit)
+    await settle()
     expect(dispose).toHaveBeenCalledTimes(1)
   })
 
   test('never lets a later default overwrite an explicit install', () => {
-    const explicit = memoryBackend()
+    const explicitDriver = memoryBackend()
     const factory = vi.fn(() => memoryBackend())
-    installBackend(() => explicit)
+    const explicit = installBackend(() => explicitDriver)
 
     expect(setDefaultBackend(factory)).toBe(explicit)
     expect(getBackend()).toBe(explicit)
@@ -47,25 +48,27 @@ describe('Room backend installation', () => {
 
   test('keeps an equivalent default connection-idempotent', () => {
     const identity = {}
-    const backend = memoryBackend()
-    const dispose = vi.spyOn(backend, 'dispose')
+    const driver = memoryBackend()
+    const dispose = vi.spyOn(driver, 'dispose')
     const replacement = vi.fn(() => memoryBackend())
 
-    expect(setDefaultBackend(() => backend, identity)).toBe(backend)
+    const backend = setDefaultBackend(() => driver, identity)
     expect(setDefaultBackend(replacement, identity)).toBe(backend)
     expect(replacement).not.toHaveBeenCalled()
     expect(dispose).not.toHaveBeenCalled()
   })
 
   test('uses last-default-wins for different identities and disposes each retired default once', async () => {
-    const first = memoryBackend()
-    const firstDispose = vi.spyOn(first, 'dispose')
-    const second = memoryBackend()
-    const secondDispose = vi.spyOn(second, 'dispose')
+    const firstDriver = memoryBackend()
+    const firstDispose = vi.spyOn(firstDriver, 'dispose')
+    const secondDriver = memoryBackend()
+    const secondDispose = vi.spyOn(secondDriver, 'dispose')
 
-    expect(setDefaultBackend(() => first, {})).toBe(first)
-    expect(setDefaultBackend(() => second, {})).toBe(second)
+    const first = setDefaultBackend(() => firstDriver, {})
+    const second = setDefaultBackend(() => secondDriver, {})
+    expect(first).not.toBe(second)
     expect(getBackend()).toBe(second)
+    await settle()
     expect(firstDispose).toHaveBeenCalledTimes(1)
     expect(secondDispose).not.toHaveBeenCalled()
 
@@ -74,30 +77,33 @@ describe('Room backend installation', () => {
     expect(secondDispose).toHaveBeenCalledTimes(1)
   })
 
-  test('does not self-dispose when a default factory returns the implicit memory instance', async () => {
-    const backend = getBackend()
-    const dispose = vi.spyOn(backend, 'dispose')
+  test('does not self-dispose when a replacement factory returns the installed raw driver', async () => {
+    const driver = memoryBackend()
+    const dispose = vi.spyOn(driver, 'dispose')
+    const backend = setDefaultBackend(() => driver, {})
 
-    expect(setDefaultBackend(() => backend)).toBe(backend)
+    const replacement = setDefaultBackend(() => driver, {})
+    await settle()
+    await expect(backend.readHead('same-driver')).resolves.toBe(null)
+    expect(replacement).toBe(backend)
     expect(dispose).not.toHaveBeenCalled()
-    await expect(backend.readHead('same-implicit')).resolves.toBe(null)
   })
 
   test('does not self-dispose when an explicit factory returns the installed default instance', async () => {
-    const backend = memoryBackend()
-    const dispose = vi.spyOn(backend, 'dispose')
-    setDefaultBackend(() => backend)
+    const driver = memoryBackend()
+    const dispose = vi.spyOn(driver, 'dispose')
+    const backend = setDefaultBackend(() => driver)
 
-    expect(installBackend(() => backend)).toBe(backend)
+    expect(installBackend(() => driver)).toBe(backend)
     expect(dispose).not.toHaveBeenCalled()
     await expect(backend.readHead('same-default')).resolves.toBe(null)
   })
 
   test('keeps an explicit instance live when installation is repeated', async () => {
-    const backend = memoryBackend()
-    const dispose = vi.spyOn(backend, 'dispose')
-    const repeatedFactory = vi.fn(() => backend)
-    installBackend(() => backend)
+    const driver = memoryBackend()
+    const dispose = vi.spyOn(driver, 'dispose')
+    const repeatedFactory = vi.fn(() => driver)
+    const backend = installBackend(() => driver)
 
     expect(installBackend(repeatedFactory)).toBe(backend)
     expect(repeatedFactory).not.toHaveBeenCalled()
@@ -107,15 +113,13 @@ describe('Room backend installation', () => {
 
   test('makes installing explicit before a factory can reenter', () => {
     const nestedFactory = vi.fn(() => memoryBackend())
-    const backend = memoryBackend()
+    const driver = memoryBackend()
 
-    expect(
-      installBackend(() => {
-        expect(() => getBackend()).toThrow('still installing')
-        expect(() => installBackend(nestedFactory)).toThrow('still installing')
-        return backend
-      }),
-    ).toBe(backend)
+    const backend = installBackend(() => {
+      expect(() => getBackend()).toThrow('still installing')
+      expect(() => installBackend(nestedFactory)).toThrow('still installing')
+      return driver
+    })
     expect(nestedFactory).not.toHaveBeenCalled()
     expect(getBackend()).toBe(backend)
   })
@@ -127,7 +131,7 @@ describe('Room backend installation', () => {
         throw failure
       }),
     ).toThrow(failure)
-    expect(installBackend(() => memoryBackend())).toBeInstanceOf(MemoryBackend)
+    expect(installBackend(() => memoryBackend())).not.toBeInstanceOf(MemoryBackend)
   })
 
   test('rejects a mismatched SPI version before committing the installation', () => {
@@ -135,7 +139,7 @@ describe('Room backend installation', () => {
     ;(backend as unknown as { spiVersion: number }).spiVersion = 2
 
     expect(() => installBackend(() => backend)).toThrow('spiVersion 2; expected 1')
-    expect(getBackend()).toBeInstanceOf(MemoryBackend)
+    expect(getBackend()).not.toBeInstanceOf(MemoryBackend)
   })
 
   test('rejects a backend with a missing core method', () => {
@@ -143,6 +147,13 @@ describe('Room backend installation', () => {
     ;(backend as unknown as Record<string, unknown>).commitLane = undefined
 
     expect(() => installBackend(() => backend)).toThrow('missing required method "commitLane"')
+  })
+
+  test('rejects a driver without the raw subscription edge', () => {
+    const backend = memoryBackend()
+    ;(backend.subscriptions as unknown as Record<string, unknown>).open = undefined
+
+    expect(() => installBackend(() => backend)).toThrow('missing required method "open"')
   })
 
   test('rejects unusable receiver and directory capability declarations', () => {
@@ -156,11 +167,11 @@ describe('Room backend installation', () => {
   })
 
   test('latches the first validated factory and disposes it once before a fresh installation', async () => {
-    const first = memoryBackend()
-    const dispose = vi.spyOn(first, 'dispose')
+    const firstDriver = memoryBackend()
+    const dispose = vi.spyOn(firstDriver, 'dispose')
     const secondFactory = vi.fn(() => memoryBackend())
 
-    expect(installBackend(() => first)).toBe(first)
+    const first = installBackend(() => firstDriver)
     expect(installBackend(secondFactory)).toBe(first)
     expect(secondFactory).not.toHaveBeenCalled()
     expect(getBackend()).toBe(first)
@@ -168,17 +179,32 @@ describe('Room backend installation', () => {
     await Promise.all([disposeBackend(), disposeBackend()])
     expect(dispose).toHaveBeenCalledTimes(1)
     const implicit = getBackend()
-    expect(implicit).toBeInstanceOf(MemoryBackend)
+    expect(implicit).not.toBeInstanceOf(MemoryBackend)
 
     const second = installBackend(() => memoryBackend())
     expect(second).not.toBe(first)
     expect(second).not.toBe(implicit)
   })
 
+  test('terminates supervised generation sources only after the durable drop succeeds', async () => {
+    const backend = installBackend(() => memoryBackend())
+    const created = await backend.compareExchangeHead(
+      'drop-order',
+      { expect: 'absent' },
+      { head: { state: 'open', currentInc: 'inc-1', config: new Uint8Array() } },
+    )
+    expect(created).toMatchObject({ ok: true })
+    const subscription = backend.subscribeLane('drop-order', 'inc-1', { kind: 'semantic' }, () => {})
+    await subscription.ready
+
+    await expect(backend.dropGeneration('drop-order', 'inc-1')).rejects.toThrow('refusing to drop the current')
+    expect(subscription.state()).toBe('ready')
+  })
+
   test('blocks acquisition and installation for the full disposal barrier', async () => {
     const deferred = createDeferred<void>()
-    const backend = memoryBackendWithDispose(() => deferred.promise)
-    installBackend(() => backend)
+    const driver = memoryBackendWithDispose(() => deferred.promise)
+    const backend = installBackend(() => driver)
 
     const disposing = disposeBackend()
     try {
@@ -189,47 +215,47 @@ describe('Room backend installation', () => {
       deferred.resolve()
       await disposing
     }
-    expect(getBackend()).toBeInstanceOf(MemoryBackend)
+    expect(getBackend()).not.toBeInstanceOf(MemoryBackend)
     expect(installBackend(() => memoryBackend())).not.toBe(backend)
   })
 
   test('normalizes synchronous disposal throws and permits a different backend afterward', async () => {
     const failure = new Error('dispose synchronously failed')
-    const backend = memoryBackendWithDispose(() => {
+    const driver = memoryBackendWithDispose(() => {
       throw failure
     })
-    installBackend(() => backend)
+    const backend = installBackend(() => driver)
 
     const first = disposeBackend()
     const second = disposeBackend()
     expect(second).toBe(first)
     await expect(first).rejects.toBe(failure)
     await expect(second).rejects.toBe(failure)
-    expect(getBackend()).toBeInstanceOf(MemoryBackend)
+    expect(getBackend()).not.toBeInstanceOf(MemoryBackend)
     expect(installBackend(() => memoryBackend())).not.toBe(backend)
   })
 
   test('clears a rejected asynchronous disposal before retrying', async () => {
     const failure = new Error('dispose asynchronously failed')
-    const backend = memoryBackendWithDispose(() => Promise.reject(failure))
-    installBackend(() => backend)
+    const driver = memoryBackendWithDispose(() => Promise.reject(failure))
+    const backend = installBackend(() => driver)
 
     const first = disposeBackend()
     const second = disposeBackend()
     expect(second).toBe(first)
     await expect(first).rejects.toBe(failure)
     await expect(second).rejects.toBe(failure)
-    expect(getBackend()).toBeInstanceOf(MemoryBackend)
+    expect(getBackend()).not.toBeInstanceOf(MemoryBackend)
     expect(installBackend(() => memoryBackend())).not.toBe(backend)
   })
 
   test('rejects an uncaught direct synchronous reentrant disposal through the outer outcome', async () => {
     let calls = 0
-    const backend = memoryBackendWithDispose(() => {
+    const driver = memoryBackendWithDispose(() => {
       calls += 1
       return disposeBackend()
     })
-    installBackend(() => backend)
+    installBackend(() => driver)
 
     await expect(disposeBackend()).rejects.toThrow('backend.dispose() must not call disposeBackend()')
     expect(calls).toBe(1)
@@ -238,13 +264,14 @@ describe('Room backend installation', () => {
   test('lets caught self-reentry defer to the backend real disposal and shares ordinary callers afterward', async () => {
     const deferred = createDeferred<void>()
     let reentrant: Promise<void> | undefined
-    const backend = memoryBackendWithDispose(() => {
+    const driver = memoryBackendWithDispose(() => {
       reentrant = disposeBackend()
       return reentrant.catch(() => deferred.promise)
     })
-    installBackend(() => backend)
+    installBackend(() => driver)
 
     const outer = disposeBackend()
+    await settle()
     await expect(reentrant).rejects.toThrow('backend.dispose() must not call disposeBackend()')
     expect(disposeBackend()).toBe(outer)
     deferred.resolve()
@@ -254,14 +281,15 @@ describe('Room backend installation', () => {
   test('rejects an unrelated synchronous shutdown callback while real disposal remains pending', async () => {
     const deferred = createDeferred<void>()
     let callbackPromise: Promise<void> | undefined
-    const backend = memoryBackendWithDispose(() => {
+    const driver = memoryBackendWithDispose(() => {
       callbackPromise = disposeBackend()
       return deferred.promise
     })
-    installBackend(() => backend)
+    installBackend(() => driver)
 
     const outer = disposeBackend()
     try {
+      await settle()
       expect(callbackPromise).not.toBe(outer)
       await expect(callbackPromise).rejects.toThrow('backend.dispose() must not call disposeBackend()')
       expect(getBackend).toThrow('still disposing')
@@ -274,30 +302,29 @@ describe('Room backend installation', () => {
 
   test('never reinstalls an instance after disposal has begun', async () => {
     const deferred = createDeferred<void>()
-    const backend = memoryBackendWithDispose(() => deferred.promise)
-    installBackend(() => backend)
+    const driver = memoryBackendWithDispose(() => deferred.promise)
+    installBackend(() => driver)
 
     const disposing = disposeBackend()
     deferred.resolve()
     await disposing
-    expect(() => installBackend(() => backend)).toThrow('cannot be reinstalled')
-    expect(installBackend(() => memoryBackend())).not.toBe(backend)
+    expect(() => installBackend(() => driver)).toThrow('cannot be reinstalled')
   })
 
   test('defines disposal while empty and disposal during installation', async () => {
     await expect(disposeBackend()).resolves.toBeUndefined()
 
-    const backend = memoryBackend()
+    const driver = memoryBackend()
     let disposing: Promise<void> | undefined
     installBackend(() => {
       disposing = disposeBackend()
-      return backend
+      return driver
     })
     await expect(disposing).rejects.toThrow('still installing')
   })
 })
 
-function memoryBackend(): BackendSpi {
+function memoryBackend(): BackendDriver {
   const backend = new MemoryBackend()
   return new Proxy(backend, {
     get(target, property) {
@@ -307,7 +334,7 @@ function memoryBackend(): BackendSpi {
   })
 }
 
-function memoryBackendWithDispose(dispose: () => void | Promise<void>): BackendSpi {
+function memoryBackendWithDispose(dispose: () => void | Promise<void>): BackendDriver {
   const backend = memoryBackend()
   ;(backend as unknown as Record<string, unknown>).dispose = dispose
   return backend
@@ -319,4 +346,8 @@ function createDeferred<T>(): { promise: Promise<T>; resolve(value: T): void } {
     resolve = resolvePromise
   })
   return { promise, resolve }
+}
+
+async function settle(): Promise<void> {
+  for (let turn = 0; turn < 4; turn++) await Promise.resolve()
 }

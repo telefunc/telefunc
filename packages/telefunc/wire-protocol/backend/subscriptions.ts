@@ -1,27 +1,18 @@
 export { SUBSCRIPTION_ESTABLISH_TIMEOUT_MS, SUBSCRIPTION_REPLAN_LIMIT, SubscriptionManager }
-export type { SubscriptionAttempt, SubscriptionDriver }
 
 import { unrefTimer } from '../../utils/unrefTimer.js'
-import type { BackendReceiver, BackendSubscription, SubscriptionState } from './spi.js'
+import type {
+  BackendReceiver,
+  BackendSubscription,
+  SubscriptionAttempt,
+  SubscriptionDriver,
+  SubscriptionState,
+} from './spi.js'
 
 /** One establishment attempt plus five bounded replacements. A continuously hung source therefore
  * reaches terminal failure in at most 6 × 10 seconds. */
 const SUBSCRIPTION_ESTABLISH_TIMEOUT_MS = 10_000
 const SUBSCRIPTION_REPLAN_LIMIT = 5
-
-/** The deliberately small backend-specific edge. `ready` is the acknowledgement for this one
- * establishment attempt; it may remain pending forever, so SubscriptionManager always bounds it. */
-type SubscriptionAttempt = {
-  readonly ready: Promise<void>
-  state(): SubscriptionState
-  onStateChange(cb: (state: SubscriptionState) => void): () => void
-  unsubscribe(): Promise<void>
-}
-
-type SubscriptionDriver<Source> = {
-  open(source: Source, receiver: BackendReceiver, localReceiverCount: () => number): SubscriptionAttempt
-  label(source: Source): string
-}
 
 type ReadinessGeneration =
   | { state: 'ready'; promise: Promise<void> }
@@ -41,16 +32,22 @@ class SubscriptionManager<Source> {
   readonly #slots = new Map<string, SubscriptionSlot<Source>>()
   readonly #driver: SubscriptionDriver<Source>
   readonly #reportError: (error: unknown) => void
+  readonly #label: (source: Source) => string
 
-  constructor(driver: SubscriptionDriver<Source>, reportError: (error: unknown) => void = console.error) {
+  constructor(
+    driver: SubscriptionDriver<Source>,
+    reportError: (error: unknown) => void = console.error,
+    label: (source: Source) => string = String,
+  ) {
     this.#driver = driver
     this.#reportError = reportError
+    this.#label = label
   }
 
   subscribe(key: string, source: Source, receiver: BackendReceiver): BackendSubscription {
     let slot = this.#slots.get(key)
     if (slot === undefined) {
-      slot = new SubscriptionSlot(source, this.#driver, this.#reportError, () => this.#slots.delete(key))
+      slot = new SubscriptionSlot(source, this.#driver, this.#reportError, this.#label, () => this.#slots.delete(key))
       this.#slots.set(key, slot)
     }
     return slot.attach(receiver)
@@ -81,6 +78,7 @@ class SubscriptionSlot<Source> {
   readonly #source: Source
   readonly #driver: SubscriptionDriver<Source>
   readonly #reportError: (error: unknown) => void
+  readonly #labelSource: (source: Source) => string
   readonly #onEmpty: () => void
   readonly #receivers = new Map<symbol, BackendReceiver>()
   readonly #listeners = new Set<(state: SubscriptionState) => void>()
@@ -98,11 +96,13 @@ class SubscriptionSlot<Source> {
     source: Source,
     driver: SubscriptionDriver<Source>,
     reportError: (error: unknown) => void,
+    labelSource: (source: Source) => string,
     onEmpty: () => void,
   ) {
     this.#source = source
     this.#driver = driver
     this.#reportError = reportError
+    this.#labelSource = labelSource
     this.#onEmpty = onEmpty
   }
 
@@ -370,7 +370,7 @@ class SubscriptionSlot<Source> {
   }
 
   get #label(): string {
-    return this.#driver.label(this.#source)
+    return this.#labelSource(this.#source)
   }
 }
 

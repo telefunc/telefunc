@@ -45,7 +45,7 @@ import type { ClientBroadcast } from '../client/channel.js'
 import type { ChannelPublishInfo } from '../channel.js'
 import { disposeBackend, getBackend, installBackend } from '../backend/install.js'
 import { MemoryBackend, MemoryBackendState } from '../backend/memory/backend.js'
-import type { LaneId, BackendSubscription, SubscriptionState } from '../backend/spi.js'
+import type { LaneId, SubscriptionAttempt, SubscriptionState } from '../backend/spi.js'
 
 let roomBackend: MemoryBackend
 let roomBackendState: MemoryBackendState
@@ -393,15 +393,15 @@ describe('Room entry point', () => {
 
   it('tears down a remotely observed close immediately instead of inheriting the initiator hold', async () => {
     const unsubscribed: string[] = []
-    const realSubscribe = roomBackend.subscribeLane.bind(roomBackend)
-    const subscribe = vi.spyOn(roomBackend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
-      const subscription = realSubscribe(roomId, inc, lane, receiver)
+    const realOpen = roomBackend.subscriptions.open.bind(roomBackend.subscriptions)
+    const subscribe = vi.spyOn(roomBackend.subscriptions, 'open').mockImplementation((source, receiver, count) => {
+      const subscription = realOpen(source, receiver, count)
       return {
         ready: subscription.ready,
         state: () => subscription.state(),
         onStateChange: (callback) => subscription.onStateChange(callback),
         unsubscribe: async () => {
-          unsubscribed.push(lane.kind)
+          if (source.kind === 'durable') unsubscribed.push(source.lane.kind)
           await subscription.unsubscribe()
         },
       }
@@ -807,14 +807,17 @@ describe('data pub/sub', () => {
     const cam2 = await a.join({ meta: { name: 'cam2' } })
     const b = await Room.get('per-pub')
     await b.getParticipants() // materialize the lazy roster
-    const subscribed = vi.spyOn(roomBackend, 'subscribeLane')
+    const subscribed = vi.spyOn(roomBackend.subscriptions, 'open')
 
     const frames: number[][] = []
     ;(await b.getParticipant(cam1.id))!.subscribeBinary((data) => frames.push([...data]))
 
-    expect(subscribed.mock.calls.map((call) => call[2]).filter((lane) => lane.kind === 'binary')).toEqual([
-      { kind: 'binary', member: cam1.id, track: DEFAULT_TRACK },
-    ])
+    expect(
+      subscribed.mock.calls
+        .map(([source]) => source)
+        .filter((source) => source.kind === 'durable' && source.lane.kind === 'binary')
+        .map((source) => (source.kind === 'durable' ? source.lane : null)),
+    ).toEqual([{ kind: 'binary', member: cam1.id, track: DEFAULT_TRACK }])
     await cam1.publishBinary(new Uint8Array([1]))
     await cam2.publishBinary(new Uint8Array([2]))
     expect(frames).toEqual([[1]])
@@ -1790,9 +1793,9 @@ describe('one ordered semantic lane', () => {
  *  analogue of `HybridTestAdapter`'s replica lag, for exercising the retained/live handoff. */
 function gateNewSubscriptions(): { flush(): void; restore(): void } {
   const pending: ControlledBackendSubscription[] = []
-  const realSubscribe = roomBackend.subscribeLane.bind(roomBackend)
-  const spy = vi.spyOn(roomBackend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
-    const subscription = new ControlledBackendSubscription(() => realSubscribe(roomId, inc, lane, receiver))
+  const realOpen = roomBackend.subscriptions.open.bind(roomBackend.subscriptions)
+  const spy = vi.spyOn(roomBackend.subscriptions, 'open').mockImplementation((source, receiver, count) => {
+    const subscription = new ControlledBackendSubscription(() => realOpen(source, receiver, count))
     pending.push(subscription)
     return subscription
   })
@@ -1802,13 +1805,13 @@ function gateNewSubscriptions(): { flush(): void; restore(): void } {
   }
 }
 
-class ControlledBackendSubscription implements BackendSubscription {
+class ControlledBackendSubscription implements SubscriptionAttempt {
   readonly ready: Promise<void>
   private _state: SubscriptionState = 'establishing'
   private readonly _resolveReady: () => void
-  private _inner: BackendSubscription | null = null
+  private _inner: SubscriptionAttempt | null = null
 
-  constructor(private readonly _subscribe: () => BackendSubscription) {
+  constructor(private readonly _subscribe: () => SubscriptionAttempt) {
     let resolveReady!: () => void
     this.ready = new Promise<void>((resolve) => {
       resolveReady = resolve
@@ -3507,7 +3510,7 @@ describe('implicit memory backend', () => {
 
       const room = await Room.create('zero-config')
       const backend = getBackend()
-      expect(backend).toBeInstanceOf(MemoryBackend)
+      expect(backend).not.toBeInstanceOf(MemoryBackend)
       const subscribe = vi.spyOn(backend, 'subscribeLane')
       restoreSubscribe = () => subscribe.mockRestore()
       const received: unknown[] = []

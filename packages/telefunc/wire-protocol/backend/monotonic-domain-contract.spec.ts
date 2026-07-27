@@ -24,8 +24,8 @@ describe('monotonic ordering and one-mechanism publication contract', () => {
     const codec = utf8('packages/telefunc/wire-protocol/ordering-frame.ts')
     const sharedWire = utf8('packages/telefunc/wire-protocol/shared-ws.ts')
     const roomProtocol = utf8('packages/telefunc/wire-protocol/room/protocol.ts')
-    expect(codec).toContain('const ORDERING_FRAME_HEADER_BYTES = 16')
-    expect(codec).toContain('view.setUint32(0, Math.floor(info.seq / U32_RANGE), false)')
+    expect(codec).toContain('const ORDERING_FRAME_LAYOUT = Object.freeze')
+    expect(codec).toContain('view.setUint32(offsets.seqHigh')
     expect(sharedWire).toContain("from './ordering-frame.js'")
     expect(sharedWire).not.toContain('setUint32')
     expect(roomProtocol).not.toMatch(/frameRoomBinaryOrder|unframeRoomBinaryOrder/)
@@ -33,13 +33,15 @@ describe('monotonic ordering and one-mechanism publication contract', () => {
 
   it('keeps subscription lifecycle and local fan-out in the shared manager', () => {
     const manager = utf8('packages/telefunc/wire-protocol/backend/subscriptions.ts')
+    const memory = utf8('packages/telefunc/wire-protocol/backend/memory/backend.ts')
     const room = utf8('packages/telefunc/wire-protocol/room/server.ts')
     const broadcast = utf8('packages/telefunc/wire-protocol/server/server-broadcast.ts')
     expect(manager).toContain('class SubscriptionManager')
     expect(manager).toContain('SUBSCRIPTION_ESTABLISH_TIMEOUT_MS = 10_000')
     expect(manager).toContain('readonly #receivers = new Map<symbol, BackendReceiver>()')
-    for (const policy of [room, broadcast]) {
+    for (const policy of [memory, room, broadcast]) {
       expect(policy).not.toMatch(/ReadinessGeneration|#replanAttempts|#establishmentTimer/)
+      expect(policy).not.toContain('SubscriptionManager')
     }
   })
 })
