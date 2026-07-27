@@ -1,7 +1,10 @@
 import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { Miniflare } from 'miniflare'
-import type { LaneId, ReadinessState } from '../../spi.js'
+import { disposeRoomBackend, installRoomBackend } from '../../install.js'
+import type { LaneId, LaneReceiver, ReadinessState, RoomBackendSpi } from '../../spi.js'
 import { CHANNEL_PING_INTERVAL_MS } from '../../../constants.js'
+import { frameRoomBinaryOrder, unframeRoomBinaryOrder } from '../../../room/protocol.js'
+import { Room } from '../../../room/server.js'
 import {
   CloudflareRoomBackend,
   CLOUDFLARE_ROOM_CONTEXT_ERROR,
@@ -15,6 +18,7 @@ import {
 } from '../../../server/adapter/cloudflare/room/routes.js'
 import { GEN_ORPHAN_GRACE_MS } from '../../../server/adapter/cloudflare/room/storage.js'
 import type { BackendFixture } from '../harness.js'
+import { conformanceReceiver } from '../receiver.js'
 import {
   accepted,
   bytes,
@@ -136,6 +140,81 @@ describe('cloudflare — production session-manager mechanics', () => {
       }
     }
   }, 60_000)
+
+  it('round-trips a binary cursor above u32 through workerd live delivery, SQLite retained state and the Room client decoder', async () => {
+    const { roomId, inc, stub } = await opened('wide-binary')
+    const lane = { kind: 'binary', member: crypto.randomUUID(), track: 'camera' } satisfies LaneId
+    const seen = collector()
+    const sub = fx.backend.subscribeLane(roomId, inc, lane, seen.receiver)
+    try {
+      await sub.ready
+      await stub.telefuncRoomSeedOrderWatermarkForTest(inc, lane, 0xffff_ffff, 10)
+      const payload = bytes('cloudflare-wide-binary')
+      const committed = accepted(await fx.backend.commitLane(roomId, inc, lane, payload, { retain: true }))
+      await committed.delivery
+      await seen.waitFor(1)
+
+      expect(committed.seq).toBe(0x1_0000_0000)
+      expect(seen.frames[0]?.seq).toBe(0x1_0000_0000)
+      const liveDecoded = unframeRoomBinaryOrder(
+        frameRoomBinaryOrder(bytes(seen.frames[0]?.payload as string), {
+          seq: seen.frames[0]?.seq as number,
+          timestamp: seen.frames[0]?.timestamp as number,
+        }),
+      )
+      expect(liveDecoded?.info.seq).toBe(0x1_0000_0000)
+      expect(text(liveDecoded?.payload as Uint8Array)).toBe('cloudflare-wide-binary')
+
+      const retained = await fx.backend.readRetained(roomId, inc, lane)
+      expect(retained?.seq).toBe(0x1_0000_0000)
+      const retainedDecoded = unframeRoomBinaryOrder(
+        frameRoomBinaryOrder(retained?.payload as Uint8Array, {
+          seq: retained?.seq as number,
+          timestamp: retained?.timestamp as number,
+        }),
+      )
+      expect(retainedDecoded?.info.seq).toBe(0x1_0000_0000)
+      expect(text(retainedDecoded?.payload as Uint8Array)).toBe('cloudflare-wide-binary')
+    } finally {
+      await sub.unsubscribe().catch(() => {})
+    }
+  })
+
+  it('recovers a public Room lane after a real workerd subscription reports lost then ready', async () => {
+    const roomId = nextId('managed-room-renewal')
+    const states: ReadinessState[] = []
+    const observed: string[] = []
+    const remoteReceivers = new Set<LaneReceiver>()
+    const roomBackend = roomCapableBackend(
+      fx.backend,
+      (id, lane, state) => {
+        if (id === roomId && lane.kind === 'semantic') states.push(state)
+      },
+      remoteReceivers,
+    )
+    installRoomBackend(() => roomBackend)
+    try {
+      const room = await Room.create(roomId)
+      room.onAnnounce((data) => observed.push(String(data)))
+      await Room.announce(roomId, 'before-loss')
+      expect(observed).toEqual(['before-loss'])
+
+      const controls = cloudflareRenewalControls(fx.backend)
+      // Room owns a fixed control lane and the semantic lane under test. Two consecutive renewal
+      // failures per route drive each production subscription through lost -> replacement -> ready.
+      controls.forceFailures(4)
+      await controls.advance(ROUTE_RENEW_EVERY_MS * 2)
+      expect(states).toEqual(['lost', 'ready'])
+
+      await Room.announce(roomId, 'after-recovery')
+      expect(observed).toEqual(['before-loss', 'after-recovery'])
+      console.log(`[w5-integration] cloudflare-room-renewal states=${states.join(',')} delivered=${observed.length}`)
+      await Room.close(roomId)
+    } finally {
+      remoteReceivers.clear()
+      await disposeRoomBackend().catch(() => {})
+    }
+  })
 
   it('rolls the order advance back when the retained install fails inside the acceptance transaction', async () => {
     const { roomId, inc, stub } = await opened('retained-atomicity')
@@ -857,6 +936,38 @@ describe('cloudflare — production session-manager mechanics', () => {
     })
   })
 })
+
+function roomCapableBackend(
+  backend: RoomBackendSpi,
+  observeState: (roomId: string, lane: LaneId, state: ReadinessState) => void,
+  ownedReceivers: Set<LaneReceiver>,
+): RoomBackendSpi {
+  return new Proxy(backend, {
+    get(target, property) {
+      if (property === 'subscribeLane') {
+        return (roomId: string, inc: string, lane: LaneId, receiver: LaneReceiver) => {
+          // The workerd conformance transport accepts only serializable receiver commands. Adapt the
+          // production Room receiver to that command without changing the backend or Room lifecycle:
+          // remote observations are replayed through the exact receiver Room installed.
+          const remoteReceiver = conformanceReceiver({ kind: 'collect' }, receiver, (observations) => {
+            for (const observation of observations) {
+              void receiver(bytes(observation.payload), {
+                seq: observation.seq,
+                timestamp: observation.timestamp,
+              })
+            }
+          })
+          ownedReceivers.add(remoteReceiver)
+          const subscription = target.subscribeLane(roomId, inc, lane, remoteReceiver)
+          subscription.onStateChange((state) => observeState(roomId, lane, state))
+          return subscription
+        }
+      }
+      const value = Reflect.get(target, property, target)
+      return typeof value === 'function' ? value.bind(target) : value
+    },
+  })
+}
 
 function acceptedWire(wire: Awaited<ReturnType<RoomStub['commitLane']>>) {
   if (!('accepted' in wire)) throw new Error(`expected accepted wire, got ${JSON.stringify(wire)}`)

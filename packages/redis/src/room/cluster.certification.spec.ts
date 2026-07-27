@@ -1,13 +1,17 @@
 // Real Redis Cluster certification for the exact shipped public backend. The W4-R launcher owns the
 // three masters, data directories, ports, watchdog, and cleanup. No fake/mocked redirection is accepted.
 
-import { createCipheriv, createHash } from 'node:crypto'
+import { createCipheriv, createHash, randomUUID } from 'node:crypto'
 import { gzipSync } from 'node:zlib'
 import { Cluster, Redis } from 'ioredis'
-import type { CommitAccepted, LaneId, RoomHead } from 'telefunc/backend'
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import type { CommitAccepted, LaneId, ReadinessState, RoomHead } from 'telefunc/backend'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
+import { disposeRoomBackend, installRoomBackend } from '../../../telefunc/wire-protocol/backend/install.js'
+import { frameRoomBinaryOrder, unframeRoomBinaryOrder } from '../../../telefunc/wire-protocol/room/protocol.js'
+import { Room } from '../../../telefunc/wire-protocol/room/server.js'
 import type { RedisRoomBackend as RedisRoomBackendType } from './backend.js'
-import { DIRECTORY_PUT_LUA, directoryIndexKey, headKey, orderKey, roomTag } from './layout.js'
+import { createRedisFixture } from './fixture.js'
+import { DIRECTORY_PUT_LUA, directoryIndexKey, headKey, laneKey, orderKey, roomTag } from './layout.js'
 
 const publicRuntime = await import('../../dist/index.js')
 const RedisRoomBackend = publicRuntime.RedisRoomBackend as unknown as typeof RedisRoomBackendType
@@ -184,6 +188,102 @@ describe.skipIf(nodes === undefined)('RedisRoomBackend real three-master Cluster
       if (sub !== undefined) await sub.unsubscribe().catch(() => {})
       await freshBackend?.dispose().catch(() => {})
       await backend.dispose()
+    }
+  })
+
+  it('round-trips a binary cursor above u32 through real Cluster live/retained paths and the Room client decoder', async () => {
+    const prefix = uniquePrefix('wide-binary')
+    const subscriberPort = [...masters].sort((left, right) => left.port - right.port)[0]?.port as number
+    const roomId = await roomOnMaster(prefix, subscriberPort, 'wide-binary')
+    const inc = 'wide-binary-inc'
+    const member = randomUUID()
+    const lane = { kind: 'binary', member, track: 'camera' } satisfies LaneId
+    const backend = new RedisRoomBackend({ redis: cluster, prefix })
+    const live: Array<{ payload: Uint8Array; seq: number; timestamp: number }> = []
+    let sub: ReturnType<RedisRoomBackendType['subscribeLane']> | undefined
+    try {
+      await open(backend, roomId, inc)
+      sub = backend.subscribeLane(roomId, inc, lane, (payload, info) => live.push({ payload, ...info }))
+      await sub.ready
+      await cluster.set(orderKey(prefix, roomId, inc, laneKey(lane)), `${0xffff_ffff}:${Date.now()}`)
+
+      const payload = new TextEncoder().encode('redis-wide-binary')
+      const committed = accepted(await backend.commitLane(roomId, inc, lane, payload, { retain: true }))
+      await committed.delivery
+      await waitFor(() => live.length === 1, 10_000)
+      expect(committed.seq).toBe(0x1_0000_0000)
+      expect(live[0]?.seq).toBe(0x1_0000_0000)
+
+      const liveDecoded = unframeRoomBinaryOrder(
+        frameRoomBinaryOrder(live[0]?.payload as Uint8Array, {
+          seq: live[0]?.seq as number,
+          timestamp: live[0]?.timestamp as number,
+        }),
+      )
+      expect(liveDecoded?.info.seq).toBe(0x1_0000_0000)
+      expect(liveDecoded?.payload).toEqual(payload)
+
+      const retained = await backend.readRetained(roomId, inc, lane)
+      expect(retained?.seq).toBe(0x1_0000_0000)
+      const retainedDecoded = unframeRoomBinaryOrder(
+        frameRoomBinaryOrder(retained?.payload as Uint8Array, {
+          seq: retained?.seq as number,
+          timestamp: retained?.timestamp as number,
+        }),
+      )
+      expect(retainedDecoded?.info.seq).toBe(0x1_0000_0000)
+      expect(retainedDecoded?.payload).toEqual(payload)
+    } finally {
+      if (sub !== undefined) await sub.unsubscribe().catch(() => {})
+      await backend.dispose()
+    }
+  })
+
+  it('recovers a public Room lane after the real Cluster subscriber goes lost then ready', async () => {
+    const first = nodes?.[0] as NodeAddress
+    const fixture = await createRedisFixture(`redis://${first.host}:${first.port}`, {
+      clusterNodes: nodes as NodeAddress[],
+    })
+    const roomId = `cluster-room-renewal-${Date.now()}`
+    const states: ReadinessState[] = []
+    const observed: string[] = []
+    let semanticSubscription: ReturnType<RedisRoomBackendType['subscribeLane']> | undefined
+    const realSubscribe = fixture.backend.subscribeLane.bind(fixture.backend)
+    const subscribeSpy = vi.spyOn(fixture.backend, 'subscribeLane').mockImplementation((id, inc, lane, receiver) => {
+      const subscription = realSubscribe(id, inc, lane, receiver)
+      if (id === roomId && lane.kind === 'semantic') {
+        semanticSubscription = subscription
+        subscription.onStateChange((state) => states.push(state))
+      }
+      return subscription
+    })
+    installRoomBackend(() => fixture.backend)
+    try {
+      const room = await Room.create(roomId)
+      room.onAnnounce((data) => observed.push(String(data)))
+      await waitFor(() => semanticSubscription?.state() === 'ready', 10_000)
+      await Room.announce(roomId, 'before-loss')
+      await waitFor(() => observed.length === 1, 10_000)
+
+      const before = await fixture.pubSubClientIdsForTest()
+      expect(before).toHaveLength(1)
+      await fixture.killSubscriberForTest(before[0])
+      await waitFor(() => states.includes('lost') && states.lastIndexOf('ready') > states.lastIndexOf('lost'), 10_000)
+      const after = await fixture.pubSubClientIdsForTest()
+      expect(after).toHaveLength(1)
+      expect(after[0]).not.toBe(before[0])
+
+      await Room.announce(roomId, 'after-recovery')
+      await waitFor(() => observed.length === 2, 10_000)
+      expect(states).toEqual(expect.arrayContaining(['lost', 'ready']))
+      expect(observed).toEqual(['before-loss', 'after-recovery'])
+      console.log(
+        `[w5-integration] redis-room-renewal subscriberBefore=${before[0]} subscriberAfter=${after[0]} states=${states.join(',')} delivered=${observed.length}`,
+      )
+    } finally {
+      subscribeSpy.mockRestore()
+      await disposeRoomBackend().catch(() => {})
+      await fixture.dispose()
     }
   })
 

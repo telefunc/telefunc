@@ -25,6 +25,20 @@ const resolveJsToTs: Plugin = {
   },
 }
 
+const stubServerProductionEntry: Plugin = {
+  name: 'stub-server-production-entry',
+  setup(builder) {
+    builder.onResolve({ filter: /^@brillout\/vite-plugin-server-entry\/runtime$/ }, () => ({
+      path: 'server-production-entry-runtime',
+      namespace: 'telefunc-conformance',
+    }))
+    builder.onLoad({ filter: /.*/, namespace: 'telefunc-conformance' }, () => ({
+      contents: 'export async function importServerProductionEntry() { return false }',
+      loader: 'js',
+    }))
+  },
+}
+
 let cached: string | null = null
 
 export async function bundleWorker(): Promise<string> {
@@ -34,13 +48,14 @@ export async function bundleWorker(): Promise<string> {
     bundle: true,
     format: 'esm',
     platform: 'neutral',
+    conditions: ['workerd', 'worker'],
     target: 'es2022',
     write: false,
     banner: {
       js: 'globalThis.FinalizationRegistry ??= class { register() {} unregister() { return true } };',
     },
-    external: ['cloudflare:workers', 'node:async_hooks'],
-    plugins: [resolveJsToTs],
+    external: ['cloudflare:workers', 'node:*'],
+    plugins: [stubServerProductionEntry, resolveJsToTs],
     logLevel: 'silent',
   })
   const output = result.outputFiles[0]

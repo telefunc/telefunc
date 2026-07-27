@@ -193,9 +193,10 @@ let clockPush: Promise<void> = Promise.resolve()
 async function getShared(): Promise<Shared> {
   if (sharedPromise !== null) return sharedPromise
   sharedPromise = (async () => {
+    const script = await bundleWorker()
     const mf = new Miniflare({
       modules: true,
-      script: await bundleWorker(),
+      script,
       compatibilityDate: '2025-01-01',
       compatibilityFlags: ['nodejs_compat'],
       durableObjects: {
@@ -207,9 +208,15 @@ async function getShared(): Promise<Shared> {
       kvNamespaces: ['RECOVERY_KV'],
       bindings: { TELEFUNC_ROOM_ALARM_INTERVAL_MS: '500' },
     })
+    const url = await mf.ready
+    const readiness = await mf.dispatchFetch('http://telefunc-room/clock/get')
+    if (!readiness.ok || (await readiness.text()) !== String(clockValue)) {
+      await mf.dispose()
+      throw new Error('Cloudflare conformance worker failed its readiness probe')
+    }
     return {
       mf,
-      url: await mf.ready,
+      url,
       rooms: (await mf.getDurableObjectNamespace('ROOM')) as unknown as RoomNamespace,
       sessions: (await mf.getDurableObjectNamespace('TelefuncDurableObject')) as unknown as SessionNamespace,
       recoveryRooms: (await mf.getDurableObjectNamespace('RecoveryRoom')) as unknown as RoomNamespace,
@@ -239,7 +246,7 @@ export async function disposeSharedMiniflare(): Promise<void> {
   disposeCloudflareRoomStubs()
   if (pending === null) return
   try {
-    await (await pending).mf.dispose()
+    await bounded((await pending).mf.dispose(), 'Cloudflare conformance Miniflare disposal')
   } catch {
     // already disposed
   }
@@ -407,6 +414,18 @@ function parseRoomReply<T>(serialized: string): T {
   return reply.value as T
 }
 
+async function bounded<T>(promise: Promise<T>, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const watchdog = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} exceeded 5 seconds`)), 5_000)
+  })
+  try {
+    return await Promise.race([promise, watchdog])
+  } finally {
+    if (timer !== undefined) clearTimeout(timer)
+  }
+}
+
 type SubscriptionControl = {
   id: string
   receiver: LaneReceiver
@@ -434,7 +453,10 @@ class CloudflareConformanceBackend implements RoomBackendSpi {
 
   async #preflight(): Promise<void> {
     if (this.#disposed) throw new Error('CloudflareRoomBackend: used after dispose()')
-    await Promise.all([clockPush, this.#controlPush])
+    await bounded(
+      Promise.all([clockPush, this.#controlPush]).then(() => undefined),
+      'Cloudflare conformance preflight',
+    )
   }
 
   async readHead(roomId: string) {
@@ -597,7 +619,11 @@ class CloudflareConformanceBackend implements RoomBackendSpi {
   async dispose(): Promise<void> {
     if (this.#disposed) return
     this.#disposed = true
-    await this.#session.disposeBackend()
+    await bounded(
+      Promise.allSettled([...this.#deliverySettlements.values()]).then(() => undefined),
+      'Cloudflare conformance delivery drain',
+    )
+    await bounded(this.#session.disposeBackend(), 'Cloudflare conformance backend disposal')
     this.#session[Symbol.dispose]?.()
     this.#subscriptions.clear()
     this.#deliverySettlements.clear()
@@ -682,7 +708,13 @@ class CloudflareConformanceBackend implements RoomBackendSpi {
   }
 
   async #command<T>(command: SessionRoomCommand): Promise<T> {
-    return parseRoomReply<T>(await this.#session.roomCommand(JSON.stringify(command)))
+    const result = parseRoomReply<T>(
+      await bounded(
+        this.#session.roomCommand(JSON.stringify(command)),
+        `Cloudflare conformance command '${command.kind}'`,
+      ),
+    )
+    return result
   }
 
   async #awaitDelivery(token: string): Promise<void> {
@@ -796,7 +828,7 @@ export const cloudflareHarness: BackendHarness = {
   async create(): Promise<BackendFixture> {
     const shared = await getShared()
     setClock(Date.now())
-    await clockPush
+    await bounded(clockPush, 'Cloudflare conformance initial clock push')
     const id = shared.sessions.idFromName(`conformance:${crypto.randomUUID()}`)
     const backend = new CloudflareConformanceBackend(shared.sessions.get(id))
     return {
