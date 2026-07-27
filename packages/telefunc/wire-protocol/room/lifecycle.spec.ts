@@ -1,18 +1,18 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { disposeRoomBackend, installRoomBackend } from '../backend/install.js'
-import { MemoryRoomBackend } from '../backend/memory/backend.js'
+import { disposeBackend, installBackend } from '../backend/install.js'
+import { MemoryBackend } from '../backend/memory/backend.js'
 import { Room } from './server.js'
 
-let backend: MemoryRoomBackend
+let backend: MemoryBackend
 
 beforeEach(async () => {
-  await disposeRoomBackend()
-  backend = new MemoryRoomBackend()
-  installRoomBackend(() => backend)
+  await disposeBackend()
+  backend = new MemoryBackend()
+  installBackend(() => backend)
 })
 
 afterEach(async () => {
-  await disposeRoomBackend()
+  await disposeBackend()
 })
 
 async function currentHead(id: string) {

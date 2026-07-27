@@ -4,8 +4,8 @@
 //
 // Redis and Cloudflare fixtures append themselves here; the scenario modules never learn a backend name.
 
-import { MemoryRoomBackend, MemoryRoomBackendState } from '../memory/backend.js'
-import type { LaneId, RoomBackendSpi } from '../spi.js'
+import { MemoryBackend, MemoryBackendState } from '../memory/backend.js'
+import type { LaneId, BackendSpi } from '../spi.js'
 
 export type BackendTraces = {
   // Does the backend's handoff attempt extend to the receiver callback's own completion? Memory dispatches
@@ -25,7 +25,7 @@ export type BackendTraces = {
 }
 
 export type BackendFixture = {
-  backend: RoomBackendSpi
+  backend: BackendSpi
   traces: BackendTraces
   // Exact authority-target counts for scenarios whose physical target granularity is backend-specific.
   // These are mappings, never lower bounds or skips: memory counts callbacks, Redis connections, and CF
@@ -96,10 +96,10 @@ export const memoryHarness: BackendHarness = {
     // that wrongly consults the caller clock fail the wrong scenario (a takeover would look permanently
     // expired), which would certify the mutation gate against the wrong invariant.
     let clock = Date.now()
-    const state = new MemoryRoomBackendState()
-    const facades: MemoryRoomBackend[] = []
-    const createFacade = (): MemoryRoomBackend => {
-      const backend = new MemoryRoomBackend({ authorityNow: () => clock, state })
+    const state = new MemoryBackendState()
+    const facades: MemoryBackend[] = []
+    const createFacade = (): MemoryBackend => {
+      const backend = new MemoryBackend({ authorityNow: () => clock, state })
       facades.push(backend)
       return backend
     }

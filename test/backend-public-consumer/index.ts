@@ -1,12 +1,11 @@
 import {
+  BACKEND_SPI_VERSION,
   MAX_CLOSE_LEASE_MS,
   MIN_CLOSE_LEASE_MS,
-  ROOM_SPI_VERSION,
+  type BackendFactory,
+  type BackendSpi,
   type LaneId,
-  type RoomBackendFactory,
-  type RoomBackendSpi,
 } from 'telefunc/backend'
-import type { BroadcastTransport } from 'telefunc'
 import {
   installRedis,
   type InstallRedisOptions,
@@ -18,18 +17,18 @@ import {
 // @ts-expect-error fixtures are test-only and no Redis deep modules are package exports
 import type { RedisBackendFixture } from '@telefunc/redis/room/fixture'
 
-const _version: typeof ROOM_SPI_VERSION = ROOM_SPI_VERSION
+const _version: typeof BACKEND_SPI_VERSION = BACKEND_SPI_VERSION
 const _bounds: readonly [typeof MIN_CLOSE_LEASE_MS, typeof MAX_CLOSE_LEASE_MS] = [
   MIN_CLOSE_LEASE_MS,
   MAX_CLOSE_LEASE_MS,
 ]
 const _lane: LaneId = { kind: 'semantic' }
-declare const _factory: RoomBackendFactory
-declare const _backend: RoomBackendSpi
+declare const _factory: BackendFactory
+declare const _backend: BackendSpi
 declare const _redisOptions: RedisRoomBackendOptions
-const _redisBackend: RoomBackendSpi = new RedisRoomBackend(_redisOptions)
+const _redisBackend: BackendSpi = new RedisRoomBackend(_redisOptions)
 declare const _redisBroadcastOptions: RedisBroadcastOptions
-const _redisTransport: BroadcastTransport = new RedisTransport(_redisBroadcastOptions)
+const _redisTransport = new RedisTransport(_redisBroadcastOptions)
 const _installRedisOptions: InstallRedisOptions = { prefix: 'consumer:' }
 const _installRedis: (redis: RedisBroadcastOptions['redis'], options?: InstallRedisOptions) => void = installRedis
 // @ts-expect-error the released constructor has no test-hook/runtime dependency argument

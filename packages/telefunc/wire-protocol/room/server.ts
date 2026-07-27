@@ -17,20 +17,11 @@ import {
   ROOM_ID_MAX_BYTES,
   ROOM_MEMBER_KV_TTL_MS,
   ROOM_MEMBER_TTL_MS,
-  ROOM_SUBSCRIPTION_ESTABLISH_TIMEOUT_MS,
   ROOM_TAIL_ATTACH_TIMEOUT_MS,
   ROOM_TRACKS_PER_MEMBER_MAX,
 } from '../constants.js'
-import { getRoomBackend } from '../backend/install.js'
-import type {
-  CellMutation,
-  CommitAccepted,
-  LaneId,
-  LaneSubscription,
-  ReadinessState,
-  RoomBackendSpi,
-  RoomHead,
-} from '../backend/spi.js'
+import { getBackend } from '../backend/install.js'
+import type { CellMutation, CommitAccepted, LaneId, BackendSubscription, BackendSpi, RoomHead } from '../backend/spi.js'
 import { encodePublishBinary, encodePublishText, type WirePublishInfo } from '../shared-ws.js'
 import {
   RoomError,
@@ -38,7 +29,6 @@ import {
   leaveCauseFromWire,
   leaveCauseToWire,
   frameWithMemberId,
-  frameRoomBinaryOrder,
   binaryFrameSender,
   hasRoomTag,
   mergeAttributes,
@@ -328,7 +318,7 @@ function configFromHead(head: RoomHead): RoomConfigRecord {
 /** (Re)register a room in the backend's cross-room directory. Idempotent, so it also repairs a create
  *  that wrote the authoritative head but stopped before registering the incarnation. */
 async function registerRoomIndex(id: string, inc: string): Promise<void> {
-  await getRoomBackend().directoryPut(id, inc)
+  await getBackend().directoryPut(id, inc)
 }
 
 /** Commit one opaque lane payload under the incarnation fence, then await its single handoff attempt. */
@@ -339,7 +329,7 @@ async function commitRoomLane(
   payload: Uint8Array,
   opts?: { retain?: boolean; closingLease?: string },
 ): Promise<CommitAccepted | null> {
-  const result = await getRoomBackend().commitLane(id, inc, lane, payload, opts)
+  const result = await getBackend().commitLane(id, inc, lane, payload, opts)
   if ('stale' in result) return null
   await result.delivery
   return result
@@ -351,7 +341,7 @@ async function commitRoomLane(
  *  record means the create lost. Race-free — exactly one of any number of concurrent callers writes. */
 async function tryCreateRoom(id: string, options: RoomOptions | undefined): Promise<Room | null> {
   const { meta } = normalizeOptions(options)
-  const backend = getRoomBackend()
+  const backend = getBackend()
   let current = await backend.readHead(id)
   if (current?.head.state === 'closing') {
     const closing = await acquireClosingLease(backend, id, current.head)
@@ -461,7 +451,7 @@ async function listRooms(options?: { prefix?: string }): Promise<RoomInfo[]> {
   )
   // The room enumeration is cross-room, so it reads from the unscoped (listable) store; each room's
   // config and count then read from that room's own authority.
-  const backend = getRoomBackend()
+  const backend = getBackend()
   const rooms: RoomInfo[] = []
   let cursor: string | undefined
   do {
@@ -513,7 +503,7 @@ async function writeRoomConfig(
   computeMeta: (current: RoomMeta) => RoomMeta,
 ): Promise<void> {
   const by = writerId()
-  const backend = getRoomBackend()
+  const backend = getBackend()
   for (let attempt = 0; attempt < ROOM_CX_ATTEMPTS; attempt++) {
     const current = await backend.readHead(id)
     if (current === null || current.head.state !== 'open' || current.head.currentInc !== config.inc) {
@@ -539,7 +529,7 @@ async function writeRoomConfig(
 
 async function closeRoom(id: string): Promise<void> {
   assertRoomId(id)
-  const backend = getRoomBackend()
+  const backend = getBackend()
   const current = await backend.readHead(id)
   if (current === null || current.head.state === 'closed') return
   const closing = await acquireClosingLease(backend, id, current.head)
@@ -547,11 +537,7 @@ async function closeRoom(id: string): Promise<void> {
   await finishClose(backend, id, closing)
 }
 
-async function acquireClosingLease(
-  backend: RoomBackendSpi,
-  roomId: string,
-  current: RoomHead,
-): Promise<RoomHead | null> {
+async function acquireClosingLease(backend: BackendSpi, roomId: string, current: RoomHead): Promise<RoomHead | null> {
   if (current.currentInc === null) return null
   const nextConfig = { ...configFromHead(current), status: 'closing' as const }
   const closeLease = { id: crypto.randomUUID(), durationMs: ROOM_CLOSE_LEASE_MS }
@@ -572,7 +558,7 @@ async function acquireClosingLease(
   return 'conflict' in result || !('head' in result) ? null : result.head
 }
 
-async function finishClose(backend: RoomBackendSpi, roomId: string, closing: RoomHead): Promise<boolean> {
+async function finishClose(backend: BackendSpi, roomId: string, closing: RoomHead): Promise<boolean> {
   const inc = closing.currentInc
   const lease = closing.closeLease
   if (inc === null || lease === undefined) return false
@@ -741,8 +727,8 @@ class ServerRoom implements Room {
   private readonly _stubs = new Set<RoomStubChannel>()
   private readonly _localParticipants = new Map<string, ServerLocalParticipant>()
 
-  private readonly _ctrlSub = new SubSlot('control')
-  private readonly _textSub = new SubSlot('semantic')
+  private readonly _ctrlSub = new SubSlot()
+  private readonly _textSub = new SubSlot()
   /** Upstream subscriptions keyed by their policy identity. */
   private readonly _binaryKeyUnsubs = new Map<string, SubSlot>()
   private readonly _dmUnsubs = new Map<string, SubSlot>()
@@ -975,7 +961,7 @@ class ServerRoom implements Room {
    *  lane inventory is authoritative, so a frame retained on another node is still cleaned up.
    *  Deleting an absent lane is a no-op, so a member that retained nothing just pays one empty scan. */
   private async _dropRetainedBinary(id: string): Promise<void> {
-    const backend = getRoomBackend()
+    const backend = getBackend()
     for (const lane of await backend.listRetained(this.id, this._inc)) {
       if (lane.kind === 'binary' && lane.member === id) await backend.deleteRetained(this.id, this._inc, lane)
     }
@@ -1261,7 +1247,7 @@ class ServerRoom implements Room {
   /** The room's authoritative config iff it is `open` at this handle's incarnation — the legality
    *  oracle for every mutation. A `null` result means closed/closing/gone or another incarnation. */
   private async _openConfig(): Promise<RoomConfigRecord | null> {
-    const current = await getRoomBackend().readHead(this.id)
+    const current = await getBackend().readHead(this.id)
     if (current === null || current.head.state !== 'open' || current.head.currentInc !== this._inc) return null
     return configFromHead(current.head)
   }
@@ -1394,7 +1380,7 @@ class ServerRoom implements Room {
     this._healUnknownSender(unframed.from)
 
     if (this._stubs.size > 0) {
-      const wireData = encodePublishBinary(frameRoomBinaryOrder(framed, rawInfo), rawInfo)
+      const wireData = encodePublishBinary(framed, rawInfo)
       const track = unframed.track ?? DEFAULT_TRACK
       for (const stub of this._stubs) {
         if (!stub._wantsBinary(unframed.from, track)) continue
@@ -1725,9 +1711,9 @@ class ServerRoom implements Room {
     // A commit stores the retained copy before it publishes, so once the subscription is live, any
     // publish that raced this subscribe is either already in the copy we read or arrives live — never
     // lost in the gap between subscribing and the read. A synchronous backend (in-memory) resolves
-    // instantly. See `SubSlot.ready` and `LaneSubscription.ready`.
+    // instantly. See `SubSlot.ready` and `BackendSubscription.ready`.
     await this._textSub.ready
-    const stored = await getRoomBackend().readRetained(this.id, this._inc, SEMANTIC_LANE)
+    const stored = await getBackend().readRetained(this.id, this._inc, SEMANTIC_LANE)
     if (stored === null) return
     const serialized = decodeRoomText(stored.payload)
     const info = { seq: stored.seq, timestamp: stored.timestamp }
@@ -1748,7 +1734,7 @@ class ServerRoom implements Room {
     // subscriptions to be live before reading the retained frames, so a frame racing the subscribe rides
     // the retained copy or the live lane instead of the gap. A synchronous backend resolves instantly.
     await this._binaryReady()
-    const backend = getRoomBackend()
+    const backend = getBackend()
     for (const lane of await backend.listRetained(this.id, this._inc)) {
       if (lane.kind !== 'binary') continue
       const stored = await backend.readRetained(this.id, this._inc, lane)
@@ -1761,7 +1747,7 @@ class ServerRoom implements Room {
       // Replay with the frame's own stored receipt (never seq:0/Date.now()); the stub drops it if a
       // same-or-newer live frame on this lane already reached it — exactly-once, in order.
       const info: WirePublishInfo = { seq: stored.seq, timestamp: stored.timestamp }
-      stub._emitRetainedBinary(encodePublishBinary(frameRoomBinaryOrder(framed, info), info), frame.from, track, info)
+      stub._emitRetainedBinary(encodePublishBinary(framed, info), frame.from, track, info)
     }
   }
 
@@ -1771,7 +1757,7 @@ class ServerRoom implements Room {
    *  Idempotent; called after every change that can affect the answer (listeners, members,
    *  stubs, close). */
   _syncSubs(): void {
-    const backend = getRoomBackend()
+    const backend = getBackend()
     const state = this._state
     const open = !state.closed || this._initiatingCloseHolds.size > 0
     const observed =
@@ -1931,7 +1917,7 @@ class ServerRoom implements Room {
   private _syncKeyedSubs<T>(
     subs: Map<string, SubSlot>,
     wantedEntries: Array<{ key: string; value: T }>,
-    subscribe: (value: T) => LaneSubscription,
+    subscribe: (value: T) => BackendSubscription,
   ) {
     const wanted = new Map(wantedEntries.map(({ key, value }) => [key, value]))
     for (const [key, slot] of [...subs]) {
@@ -1943,7 +1929,7 @@ class ServerRoom implements Room {
     for (const [key, value] of wanted) {
       let slot = subs.get(key)
       if (!slot) {
-        slot = new SubSlot(key)
+        slot = new SubSlot()
         subs.set(key, slot)
       }
       slot.sync(true, () => subscribe(value))
@@ -2179,7 +2165,7 @@ async function readCellSet(
   inc: string,
   selector: CellSelector,
 ): Promise<{ revision: string; cells: Map<string, Uint8Array> }> {
-  const result = await getRoomBackend().readCells(roomId, inc, selector)
+  const result = await getBackend().readCells(roomId, inc, selector)
   if ('staleInc' in result) throw new RoomError(`Room is closed: ${roomId}`)
   return result
 }
@@ -2195,7 +2181,7 @@ async function mutateCells<T>(
   selector: CellSelector,
   plan: (cells: ReadonlyMap<string, Uint8Array>) => CellPlan<T>,
 ): Promise<T> {
-  const backend = getRoomBackend()
+  const backend = getBackend()
   for (let attempt = 0; attempt < ROOM_CX_ATTEMPTS; attempt++) {
     const read = await backend.readCells(roomId, inc, selector)
     if ('staleInc' in read) throw new RoomError(`Room is closed: ${roomId}`)
@@ -2212,7 +2198,7 @@ async function mutateCells<T>(
 
 async function requireRoom(id: string): Promise<{ config: RoomConfigRecord }> {
   assertRoomId(id)
-  const current = await getRoomBackend().readHead(id)
+  const current = await getBackend().readHead(id)
   if (current === null || current.head.state !== 'open' || current.head.currentInc === null) {
     throw new RoomError(`Room not found: ${id}`)
   }
@@ -2340,7 +2326,7 @@ async function resolveIdentityMembers(roomId: string, inc: string, identity: str
  *  replaying to every late joiner. Durable room-level state belongs on a hidden participant, which
  *  never leaves. */
 async function dropRetainedTextOwnedBy(roomId: string, inc: string, memberId: string): Promise<void> {
-  const backend = getRoomBackend()
+  const backend = getBackend()
   const retained = await backend.readRetained(roomId, inc, SEMANTIC_LANE)
   if (retained === null) return
   const envelope = parse(decodeRoomText(retained.payload)) as RoomDataEnvelope
@@ -2367,7 +2353,7 @@ async function evictMember(
   // Drop the kicked member's retained frames too (a kick doesn't run `_removeMember`). Binary is per
   // (member, track);
   // text is the room's one slot, cleared only if this member still owns it.
-  const backend = getRoomBackend()
+  const backend = getBackend()
   for (const lane of await backend.listRetained(roomId, inc)) {
     if (lane.kind === 'binary' && lane.member === memberId) await backend.deleteRetained(roomId, inc, lane)
   }
@@ -2379,48 +2365,12 @@ async function evictMember(
 // Helpers
 // ---------------------------------------------------------------------------
 
-/** One backend lane subscription, reconciled to a desired on/off state. */
-const SUBSCRIPTION_REPLAN_LIMIT = 5
-
-type ReadinessGeneration =
-  | { state: 'ready'; promise: Promise<void> }
-  | {
-      state: 'pending'
-      promise: Promise<void>
-      resolve: () => void
-      reject: (error: Error) => void
-    }
-  | { state: 'failed'; promise: Promise<void> }
-
-const READY_GENERATION: ReadinessGeneration = { state: 'ready', promise: Promise.resolve() }
-
-function createPendingReadinessGeneration(): Extract<ReadinessGeneration, { state: 'pending' }> {
-  let resolve!: () => void
-  let reject!: (error: Error) => void
-  const promise = new Promise<void>((resolvePromise, rejectPromise) => {
-    resolve = resolvePromise
-    reject = rejectPromise
-  })
-  // A slot can exhaust without a retained replay currently waiting. Preserve the rejected promise for
-  // a later waiter, while preventing that intentionally-stored rejection from becoming unhandled.
-  void promise.catch(() => {})
-  return { state: 'pending', promise, resolve, reject }
-}
-
+/** Room policy only reconciles demand. The backend owns subscription lifecycle and fan-out. */
 class SubSlot {
-  private _subscription: LaneSubscription | null = null
-  private _unobserve: (() => void) | null = null
-  private _wanted = false
-  private _subscribe: (() => LaneSubscription) | null = null
-  private _readiness = READY_GENERATION
-  private _replanQueued = false
-  private _replanAttempts = 0
-  private _establishmentTimer: ReturnType<typeof setTimeout> | null = null
-
-  constructor(private readonly _label: string) {}
+  private _subscription: BackendSubscription | null = null
 
   get active(): boolean {
-    return this._subscription?.state() === 'ready'
+    return this._subscription !== null && this._subscription.state() !== 'closed'
   }
 
   /** Settles once the current subscription is live at the backend — immediately when inactive or when
@@ -2428,210 +2378,21 @@ class SubSlot {
    *  replay awaits this before reading the retained value, so a racing publish reaches the node (or rides
    *  the retained copy) instead of slipping through the subscribe/read gap. */
   get ready(): Promise<void> {
-    return this._wanted ? this._readiness.promise : Promise.resolve()
+    return this._subscription?.ready ?? Promise.resolve()
   }
 
-  sync(want: boolean, subscribe: () => LaneSubscription): void {
+  sync(want: boolean, subscribe: () => BackendSubscription): void {
     if (!want) return this.stop()
-    this._subscribe = subscribe
-    if (!this._wanted || this._readiness.state === 'failed') {
-      this._replanAttempts = 0
-      this._beginReadyWait()
-    }
-    this._wanted = true
-    if (!this._subscription) this._start()
+    if (this._subscription !== null && this._subscription.state() !== 'closed') return
+    const previous = this._subscription
+    this._subscription = subscribe()
+    if (previous) void previous.unsubscribe().catch(reportRoomError)
   }
 
   stop(): void {
-    this._wanted = false
-    this._subscribe = null
-    this._replanAttempts = 0
-    this._resolveReady()
     const subscription = this._subscription
-    this._clearCurrent()
-    if (subscription) this._queueCleanup(subscription)
-  }
-
-  private _start(): void {
-    const subscribe = this._subscribe
-    if (!this._wanted || !subscribe || this._subscription) return
-    let subscription: LaneSubscription
-    try {
-      subscription = subscribe()
-    } catch (error) {
-      this._failed(error)
-      return
-    }
-    this._subscription = subscription
-    // Every pending generation has a bounded settlement owner: this per-attempt watchdog owns backend
-    // establishment/renewal; a local replan microtask owns replacement; exhaustion rejects; stop resolves.
-    // Retired-subscription cleanup is deliberately never a readiness owner or gate.
-    this._armEstablishmentDeadline(subscription)
-    try {
-      this._unobserve = subscription.onStateChange((state) => this._onStateChange(subscription, state))
-      subscription.ready.then(
-        () => this._becameReady(subscription),
-        (error: unknown) => this._failedCurrent(subscription, error),
-      )
-      const state = subscription.state()
-      if (state === 'ready') this._becameReady(subscription)
-      else if (state === 'closed') this._closed(subscription)
-    } catch (error) {
-      this._failedCurrent(subscription, error)
-    }
-  }
-
-  private _onStateChange(subscription: LaneSubscription, state: ReadinessState): void {
-    if (this._subscription !== subscription) return
-    if (state === 'ready') {
-      this._becameReady(subscription)
-      return
-    }
-    if (state === 'lost' || state === 'establishing') {
-      this._markUnavailable()
-      this._armEstablishmentDeadline(subscription)
-      if (state === 'lost') reportRoomError(new Error(`Room backend subscription lost: ${this._label}`))
-      return
-    }
-    if (state === 'closed') this._closed(subscription)
-  }
-
-  private _becameReady(subscription: LaneSubscription): void {
-    if (this._subscription !== subscription) return
-    let state: ReadinessState
-    try {
-      state = subscription.state()
-    } catch (error) {
-      this._failedCurrent(subscription, error)
-      return
-    }
-    if (state !== 'ready') return
-    this._cancelEstablishmentDeadline()
-    this._replanAttempts = 0
-    this._resolveReady()
-  }
-
-  private _closed(subscription: LaneSubscription): void {
-    if (this._subscription !== subscription) return
-    this._markUnavailable()
-    this._clearCurrent()
-    this._scheduleReplan(new Error(`Room backend subscription closed: ${this._label}`))
-  }
-
-  private _failedCurrent(subscription: LaneSubscription, error: unknown): void {
-    if (this._subscription !== subscription) return
-    this._markUnavailable()
-    this._clearCurrent()
-    this._failed(error)
-  }
-
-  private _failed(error: unknown): void {
-    const failure = error instanceof Error ? error : new Error(String(error))
-    if (this._scheduleReplan(failure) !== 'terminal') reportRoomError(failure)
-  }
-
-  private _scheduleReplan(cause: Error): 'scheduled' | 'terminal' | 'inactive' {
-    if (!this._wanted || this._replanQueued) return 'inactive'
-    if (this._replanAttempts >= SUBSCRIPTION_REPLAN_LIMIT) {
-      const terminal = new Error(
-        `Room backend subscription failed after ${SUBSCRIPTION_REPLAN_LIMIT} replacement attempts (${this._label}): ${cause.message}`,
-      )
-      if (this._rejectReady(terminal)) reportRoomError(terminal)
-      return 'terminal'
-    }
-    this._replanAttempts++
-    this._replanQueued = true
-    queueMicrotask(() => {
-      this._replanQueued = false
-      if (this._wanted && !this._subscription) this._start()
-    })
-    return 'scheduled'
-  }
-
-  private _beginReadyWait(): void {
-    this._readiness = createPendingReadinessGeneration()
-  }
-
-  private _resolveReady(): void {
-    const generation = this._readiness
-    if (generation.state !== 'pending') return
-    generation.resolve()
-    this._readiness = { state: 'ready', promise: generation.promise }
-  }
-
-  private _rejectReady(error: Error): boolean {
-    const generation = this._readiness
-    if (generation.state !== 'pending') return false
-    generation.reject(error)
-    this._readiness = { state: 'failed', promise: generation.promise }
-    return true
-  }
-
-  private _markUnavailable(): void {
-    if (this._wanted && this._readiness.state === 'ready') this._beginReadyWait()
-  }
-
-  private _clearCurrent(): void {
-    this._cancelEstablishmentDeadline()
-    const unobserve = this._unobserve
-    this._unobserve = null
     this._subscription = null
-    try {
-      unobserve?.()
-    } catch (error) {
-      reportRoomError(error)
-    }
-  }
-
-  private _armEstablishmentDeadline(subscription: LaneSubscription): void {
-    if (this._subscription !== subscription || this._establishmentTimer !== null) return
-    this._establishmentTimer = unrefTimer(
-      setTimeout(() => this._establishmentExpired(subscription), ROOM_SUBSCRIPTION_ESTABLISH_TIMEOUT_MS),
-    )
-  }
-
-  private _cancelEstablishmentDeadline(): void {
-    if (this._establishmentTimer === null) return
-    clearTimeout(this._establishmentTimer)
-    this._establishmentTimer = null
-  }
-
-  private _establishmentExpired(subscription: LaneSubscription): void {
-    if (this._subscription !== subscription) return
-    this._establishmentTimer = null
-    let state: ReadinessState
-    try {
-      state = subscription.state()
-    } catch {
-      state = 'establishing'
-    }
-    if (state === 'ready') {
-      this._becameReady(subscription)
-      return
-    }
-    if (state === 'closed') {
-      this._closed(subscription)
-      return
-    }
-    const failure = new Error(
-      `Room backend subscription establishment did not settle within the deadline (${this._label})`,
-    )
-    this._clearCurrent()
-    this._queueCleanup(subscription)
-    this._failed(failure)
-  }
-
-  private _queueCleanup(subscription: LaneSubscription): void {
-    // Teardown belongs to the retired subscription. A slow remote unsubscribe neither owns nor gates
-    // readiness of a newly wanted generation, and cannot delay teardown of another retired subscription.
-    let cleanup: Promise<void>
-    try {
-      cleanup = subscription.unsubscribe()
-    } catch (error) {
-      reportRoomError(error)
-      return
-    }
-    void cleanup.catch(reportRoomError)
+    if (subscription) void subscription.unsubscribe().catch(reportRoomError)
   }
 }
 

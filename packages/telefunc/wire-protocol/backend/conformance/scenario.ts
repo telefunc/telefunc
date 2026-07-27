@@ -10,9 +10,9 @@ import type {
   CommitResult,
   HeadCx,
   LaneId,
-  LaneReceiver,
-  LaneSubscription,
-  RoomBackendSpi,
+  BackendReceiver,
+  BackendSubscription,
+  BackendSpi,
   RoomHead,
 } from '../spi.js'
 import {
@@ -67,7 +67,7 @@ export const settled = (promise: Promise<unknown>): Promise<'resolved' | 'reject
 
 // ── result narrowing ──
 
-export type HeadCxResult = Awaited<ReturnType<RoomBackendSpi['compareExchangeHead']>>
+export type HeadCxResult = Awaited<ReturnType<BackendSpi['compareExchangeHead']>>
 
 export function okHead(result: HeadCxResult): RoomHead {
   if ('conflict' in result) throw new Error(`expected a head CX success, got a conflict on ${describe(result.current)}`)
@@ -85,7 +85,7 @@ export function conflicted(result: HeadCxResult): RoomHead | null {
   return result.current
 }
 
-export type CellsRead = Awaited<ReturnType<RoomBackendSpi['readCells']>>
+export type CellsRead = Awaited<ReturnType<BackendSpi['readCells']>>
 
 export function cellsOf(result: CellsRead): { revision: string; cells: Map<string, Uint8Array> } {
   if ('staleInc' in result) throw new Error('expected a cell read, got { staleInc: true }')
@@ -112,7 +112,7 @@ function describe(head: RoomHead | null): string {
 // ── ceremony steps (spi.md §4) ──
 
 export async function openRoom(
-  backend: RoomBackendSpi,
+  backend: BackendSpi,
   roomId: string,
   opts: { prior?: RoomHead | null; config?: Uint8Array } = {},
 ): Promise<{ inc: string; head: RoomHead }> {
@@ -130,7 +130,7 @@ export async function openRoom(
 // open → closing. The lease id is the caller's; the DEADLINE is the backend's, so the stored head is the
 // only place the closer can learn it.
 export async function enterClosing(
-  backend: RoomBackendSpi,
+  backend: BackendSpi,
   roomId: string,
   head: RoomHead,
   opts: { leaseId?: string; durationMs?: number } = {},
@@ -155,7 +155,7 @@ export async function enterClosing(
 
 // The recovery CX: succeeds only on an expired lease, replaces only the lease.
 export async function takeoverClose(
-  backend: RoomBackendSpi,
+  backend: BackendSpi,
   roomId: string,
   head: RoomHead,
   opts: { leaseId?: string; durationMs?: number } = {},
@@ -179,7 +179,7 @@ export async function takeoverClose(
 // closing → closed(currentInc: null). Lease-guarded by contract; the generic {rev} form is forbidden here
 // and `finalizeUnguarded` below exists purely so the scenarios can prove that refusal.
 export function finalizeClose(
-  backend: RoomBackendSpi,
+  backend: BackendSpi,
   roomId: string,
   head: RoomHead,
   leaseId: string,
@@ -193,7 +193,7 @@ export function finalizeClose(
 }
 
 export function finalizeUnguarded(
-  backend: RoomBackendSpi,
+  backend: BackendSpi,
   roomId: string,
   head: RoomHead,
   ttlMs: number = TOMBSTONE_TTL_MS,
@@ -205,7 +205,7 @@ export function finalizeUnguarded(
   )
 }
 
-export async function readHeadOrThrow(backend: RoomBackendSpi, roomId: string): Promise<RoomHead> {
+export async function readHeadOrThrow(backend: BackendSpi, roomId: string): Promise<RoomHead> {
   const result = await backend.readHead(roomId)
   if (result === null) throw new Error(`expected room '${roomId}' to have a head`)
   return result.head
@@ -216,7 +216,7 @@ export async function readHeadOrThrow(backend: RoomBackendSpi, roomId: string): 
 export type Frame = ReceiverFrame
 
 export type Collector = {
-  receiver: LaneReceiver
+  receiver: BackendReceiver
   frames: Frame[]
   payloads(): string[]
   waitFor(count: number, timeoutMs?: number): Promise<void>
@@ -225,7 +225,7 @@ export type Collector = {
 export function collector(): Collector {
   const frames: Frame[] = []
   let waiters: Array<() => void> = []
-  const local: LaneReceiver = (payload, info) => {
+  const local: BackendReceiver = (payload, info) => {
     frames.push({ payload: text(payload), seq: info.seq, timestamp: info.timestamp })
     const woken = waiters
     waiters = []
@@ -259,12 +259,12 @@ export function collector(): Collector {
   return { receiver, frames, payloads: () => frames.map((frame) => frame.payload), waitFor }
 }
 
-export function noopReceiver(): LaneReceiver {
+export function noopReceiver(): BackendReceiver {
   return collector().receiver
 }
 
 export type ControlledReceiver = {
-  receiver: LaneReceiver
+  receiver: BackendReceiver
   frames: Frame[]
   payloads(): string[]
   entries(): number
@@ -286,7 +286,7 @@ export function stallingReceiver(onEnter?: () => void): ControlledReceiver {
     waiters = []
     for (const wake of current) wake()
   }
-  const local: LaneReceiver = (payload, info) => {
+  const local: BackendReceiver = (payload, info) => {
     frames.push({ payload: text(payload), seq: info.seq, timestamp: info.timestamp })
     entered()
     return gate.promise as unknown as void
@@ -318,11 +318,11 @@ export function stallingReceiver(onEnter?: () => void): ControlledReceiver {
   }
 }
 
-export type ThrowingReceiver = { receiver: LaneReceiver; calls(): number }
+export type ThrowingReceiver = { receiver: BackendReceiver; calls(): number }
 
 export function throwingReceiver(message: string, payload?: string): ThrowingReceiver {
   let calls = 0
-  const local: LaneReceiver = (frame) => {
+  const local: BackendReceiver = (frame) => {
     calls += 1
     if (payload === undefined || text(frame) === payload) throw new Error(message)
   }
@@ -338,7 +338,7 @@ export function sequencedReceiver(
 ): Collector {
   const frames: Frame[] = []
   let call = 0
-  const local: LaneReceiver = (payload, info) => {
+  const local: BackendReceiver = (payload, info) => {
     frames.push({ payload: text(payload), seq: info.seq, timestamp: info.timestamp })
     if (outcomes[call++] === 'throw') throw new Error(message)
   }
@@ -366,13 +366,13 @@ export function sequencedReceiver(
 // deduped against a single watermark in the lane's own order domain — the SeedGate contract, modelled
 // here so the suite proves the BACKEND supplies the primitives that make exactly-once reachable.
 export type SeededSubscriber = {
-  sub: LaneSubscription
+  sub: BackendSubscription
   observed: Array<{ payload: string; seq: number; source: 'seed' | 'live' }>
   seed(): Promise<void>
   close(): Promise<void>
 }
 
-export function seededSubscriber(backend: RoomBackendSpi, roomId: string, inc: string, lane: LaneId): SeededSubscriber {
+export function seededSubscriber(backend: BackendSpi, roomId: string, inc: string, lane: LaneId): SeededSubscriber {
   const observed: SeededSubscriber['observed'] = []
   const pending: Array<{ payload: string; seq: number }> = []
   let watermark = 0
@@ -384,7 +384,7 @@ export function seededSubscriber(backend: RoomBackendSpi, roomId: string, inc: s
     observed.push({ ...frame, source })
   }
 
-  const local: LaneReceiver = (payload, info) => {
+  const local: BackendReceiver = (payload, info) => {
     const frame = { payload: text(payload), seq: info.seq }
     if (seeded) emit(frame, 'live')
     else pending.push(frame) // live frames are held until the seed is applied, then deduped against it
