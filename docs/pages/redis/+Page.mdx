@@ -25,7 +25,7 @@ const redis = new IORedis('redis://localhost:6379')
 installRedis(redis)
 ```
 
-That swaps the default in-memory broadcast transport for one backed by Redis Pub/Sub. All subscribers across the cluster observe the same publish order for a given key.
+That single call installs both the Redis broadcast transport and the Redis Room backend from the same client. Broadcast subscribers across the cluster observe the same publish order for a given key, while Room state and events are shared across instances automatically.
 
 ### Sharing an existing client
 
@@ -41,7 +41,7 @@ const redis = new IORedis(process.env.REDIS_URL, { tls: {} })
 installRedis(redis)
 ```
 
-Internally, Telefunc calls `duplicate()` on the client to open a dedicated subscriber connection — your instance is never mutated or disconnected. You can continue to use it alongside Telefunc without interference.
+Internally, Telefunc calls `duplicate()` on the client for its dedicated subscriber connections — your instance is never disconnected. You can continue to use it alongside Telefunc without interference.
 
 ## Channels
 
