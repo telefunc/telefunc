@@ -79,6 +79,37 @@ describe('Room backend installation', () => {
     expect(secondDispose).toHaveBeenCalledTimes(1)
   })
 
+  test('does not self-dispose when a default factory returns the implicit memory instance', async () => {
+    const backend = getRoomBackend()
+    const dispose = vi.spyOn(backend, 'dispose')
+
+    expect(setDefaultRoomBackend(() => backend)).toBe(backend)
+    expect(dispose).not.toHaveBeenCalled()
+    await expect(backend.readHead('same-implicit')).resolves.toBe(null)
+  })
+
+  test('does not self-dispose when an explicit factory returns the installed default instance', async () => {
+    const backend = memoryBackend()
+    const dispose = vi.spyOn(backend, 'dispose')
+    setDefaultRoomBackend(() => backend)
+
+    expect(installRoomBackend(() => backend)).toBe(backend)
+    expect(dispose).not.toHaveBeenCalled()
+    await expect(backend.readHead('same-default')).resolves.toBe(null)
+  })
+
+  test('keeps an explicit instance live when installation is repeated', async () => {
+    const backend = memoryBackend()
+    const dispose = vi.spyOn(backend, 'dispose')
+    const repeatedFactory = vi.fn(() => backend)
+    installRoomBackend(() => backend)
+
+    expect(installRoomBackend(repeatedFactory)).toBe(backend)
+    expect(repeatedFactory).not.toHaveBeenCalled()
+    expect(dispose).not.toHaveBeenCalled()
+    await expect(backend.readHead('same-explicit')).resolves.toBe(null)
+  })
+
   test('makes installing explicit before a factory can reenter', () => {
     const nestedFactory = vi.fn(() => memoryBackend())
     const backend = memoryBackend()
