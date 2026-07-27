@@ -1,5 +1,11 @@
 import { afterEach, describe, expect, test, vi } from 'vitest'
-import { disposeRoomBackend, getRoomBackend, installRoomBackend, type RoomBackendSpi } from './install.js'
+import {
+  disposeRoomBackend,
+  getRoomBackend,
+  installRoomBackend,
+  setDefaultRoomBackend,
+  type RoomBackendSpi,
+} from './install.js'
 import { MemoryRoomBackend } from './memory/backend.js'
 
 afterEach(async () => {
@@ -11,6 +17,66 @@ describe('Room backend installation', () => {
     const backend = getRoomBackend()
     expect(backend).toBeInstanceOf(MemoryRoomBackend)
     expect(getRoomBackend()).toBe(backend)
+  })
+
+  test('replaces implicit memory with a default and disposes the fallback once', () => {
+    const implicit = getRoomBackend()
+    const dispose = vi.spyOn(implicit, 'dispose')
+    const backend = memoryBackend()
+
+    expect(setDefaultRoomBackend(() => backend)).toBe(backend)
+    expect(getRoomBackend()).toBe(backend)
+    expect(dispose).toHaveBeenCalledTimes(1)
+  })
+
+  test('lets an explicit install replace and dispose a default', () => {
+    const backend = memoryBackend()
+    const dispose = vi.spyOn(backend, 'dispose')
+    const explicit = memoryBackend()
+    setDefaultRoomBackend(() => backend)
+
+    expect(installRoomBackend(() => explicit)).toBe(explicit)
+    expect(getRoomBackend()).toBe(explicit)
+    expect(dispose).toHaveBeenCalledTimes(1)
+  })
+
+  test('never lets a later default overwrite an explicit install', () => {
+    const explicit = memoryBackend()
+    const factory = vi.fn(() => memoryBackend())
+    installRoomBackend(() => explicit)
+
+    expect(setDefaultRoomBackend(factory)).toBe(explicit)
+    expect(getRoomBackend()).toBe(explicit)
+    expect(factory).not.toHaveBeenCalled()
+  })
+
+  test('keeps an equivalent default connection-idempotent', () => {
+    const identity = {}
+    const backend = memoryBackend()
+    const dispose = vi.spyOn(backend, 'dispose')
+    const replacement = vi.fn(() => memoryBackend())
+
+    expect(setDefaultRoomBackend(() => backend, identity)).toBe(backend)
+    expect(setDefaultRoomBackend(replacement, identity)).toBe(backend)
+    expect(replacement).not.toHaveBeenCalled()
+    expect(dispose).not.toHaveBeenCalled()
+  })
+
+  test('uses last-default-wins for different identities and disposes each retired default once', async () => {
+    const first = memoryBackend()
+    const firstDispose = vi.spyOn(first, 'dispose')
+    const second = memoryBackend()
+    const secondDispose = vi.spyOn(second, 'dispose')
+
+    expect(setDefaultRoomBackend(() => first, {})).toBe(first)
+    expect(setDefaultRoomBackend(() => second, {})).toBe(second)
+    expect(getRoomBackend()).toBe(second)
+    expect(firstDispose).toHaveBeenCalledTimes(1)
+    expect(secondDispose).not.toHaveBeenCalled()
+
+    await Promise.all([disposeRoomBackend(), disposeRoomBackend()])
+    expect(firstDispose).toHaveBeenCalledTimes(1)
+    expect(secondDispose).toHaveBeenCalledTimes(1)
   })
 
   test('makes installing explicit before a factory can reenter', () => {
