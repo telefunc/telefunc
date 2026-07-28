@@ -84,6 +84,49 @@ describe('Room public behavior', () => {
     expect(await recreated.getParticipants()).toEqual([])
   })
 
+  it('tears down a close observed by a separate Room runtime that cannot inherit the initiator hold', async () => {
+    const authority = await Room.create('remote-close-teardown')
+    authority.onAnnounce(() => {})
+    await settle()
+
+    // A fresh module graph has its own initiating-close registry and backend installation, like another
+    // server process. It shares only the raw authority driver, so this observer receives the real close
+    // emitted by Room.close() without being able to see the initiator's in-memory hold.
+    vi.resetModules()
+    const remoteInstall = await import('../backend/install.js')
+    const remoteServer = await import('./server.js')
+    const remoteBackend = remoteInstall.installBackend(() => driver)
+    const unsubscribed: string[] = []
+    const subscribeLane = remoteBackend.subscribeLane.bind(remoteBackend)
+    const subscribe = vi.spyOn(remoteBackend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
+      const subscription = subscribeLane(roomId, inc, lane, receiver)
+      return {
+        ready: subscription.ready,
+        state: () => subscription.state(),
+        onStateChange: (callback) => subscription.onStateChange(callback),
+        unsubscribe: async () => {
+          unsubscribed.push(lane.kind)
+          await subscription.unsubscribe()
+        },
+      }
+    })
+    try {
+      expect(remoteServer.Room).not.toBe(Room)
+      const observer = await remoteServer.Room.get('remote-close-teardown')
+      observer.onAnnounce(() => {})
+      await settle()
+
+      await Room.close('remote-close-teardown')
+      await settle()
+
+      expect(observer.isClosed).toBe(true)
+      expect(unsubscribed.sort()).toEqual(['control', 'semantic'])
+    } finally {
+      subscribe.mockRestore()
+      await remoteInstall.disposeBackend()
+    }
+  })
+
   it('propagates presence/meta while hidden members stay addressable and admin removal carries its cause', async () => {
     const authority = await Room.create('presence')
     const observer = await Room.get('presence')

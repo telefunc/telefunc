@@ -336,6 +336,80 @@ describe.skipIf(CLUSTER_NODES === undefined)('Redis real three-master Cluster ce
     }
   })
 
+  it('rejects a held PONG from the previous subscriber connection instead of crediting stale delivery', async () => {
+    const topology = cluster.nodes('master').sort(compareRedisNodes)
+    const originals = topology.map((node) => [node, node.duplicate.bind(node)] as const)
+    const subscribers: Redis[] = []
+    for (const [node, original] of originals) {
+      node.duplicate = ((options?: unknown) => {
+        const client = original(options as never)
+        subscribers.push(client)
+        return client
+      }) as typeof node.duplicate
+    }
+
+    const baseline = new Set((await pubSubClients()).map(({ id }) => id))
+    const backend = redisBackend(cluster, uniquePrefix('stale-pong'))
+    const roomId = 'stale-pong-room'
+    const inc = 'stale-pong-inc'
+    const states: SubscriptionState[] = []
+    const observed: string[] = []
+    const oldPongHeld = deferred<void>()
+    const releaseOldPong = deferred<void>()
+    let sub: ReturnType<BackendSpi['subscribeLane']> | undefined
+    let restorePing: (() => void) | undefined
+    try {
+      await open(backend, roomId, inc)
+      sub = backend.subscribeLane(roomId, inc, SEMANTIC_LANE, (payload) =>
+        observed.push(Buffer.from(payload).toString()),
+      )
+      sub.onStateChange((state) => states.push(state))
+      await sub.ready
+
+      const subscriber = subscribers[0]
+      if (subscriber === undefined) throw new Error('owned Redis subscriber was not observed')
+      const ping = subscriber.ping.bind(subscriber)
+      let holdOnce = true
+      subscriber.ping = (async () => {
+        const pong = await ping()
+        if (holdOnce) {
+          holdOnce = false
+          oldPongHeld.resolve()
+          await releaseOldPong.promise
+        }
+        return pong
+      }) as typeof subscriber.ping
+      restorePing = () => {
+        subscriber.ping = ping
+      }
+
+      const committed = accepted(await backend.commitLane(roomId, inc, SEMANTIC_LANE, Buffer.from('old-epoch')))
+      const deliveryOutcome = committed.delivery.then(
+        () => null,
+        (error: unknown) => error,
+      )
+      await oldPongHeld.promise
+      await waitFor(() => observed.length === 1)
+
+      const [first] = await waitForValue(async () => (await pubSubClients()).filter(({ id }) => !baseline.has(id)))
+      if (first === undefined) throw new Error('initial Redis subscriber connection was not observed')
+      await first.owner.client.call('CLIENT', 'KILL', 'ID', String(first.id))
+      await waitFor(() => states.includes('lost') && sub?.state() === 'ready')
+      releaseOldPong.resolve()
+
+      const error = await deliveryOutcome
+      expect(error).toBeInstanceOf(Error)
+      expect(String(error)).toMatch(/PING crossed source/)
+      expect(observed).toEqual(['old-epoch'])
+    } finally {
+      releaseOldPong.resolve()
+      restorePing?.()
+      for (const [node, original] of originals) node.duplicate = original as typeof node.duplicate
+      await sub?.unsubscribe().catch(() => {})
+      await backend.dispose()
+    }
+  })
+
   it('reports exact node-local receiver counts while still delivering cross-node', async () => {
     const prefix = uniquePrefix('receivers')
     const backend = redisBackend(cluster, prefix)
@@ -679,4 +753,14 @@ async function waitForValue<T>(read: () => Promise<T[]>, timeoutMs = 10_000): Pr
     return value.length > 0
   }, timeoutMs)
   return value
+}
+
+function deferred<T>() {
+  let resolve!: (value?: T) => void
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise as (value?: T) => void
+    reject = rejectPromise
+  })
+  return { promise, resolve, reject }
 }
