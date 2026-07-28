@@ -234,8 +234,8 @@ export class TelefuncRoomDurableObject extends DurableObject {
     const now = this._authorityNow()
     let outcome!: ReturnType<typeof compareExchangeHead>
     // One SQL transaction: single-object serialization gives head linearizability (I1). A validation
-    // throw rolls the tx back and is surfaced as a structured error the facade rethrows verbatim (the
-    // conformance suite matches on the message), never as a conflict.
+    // throw rolls the tx back and is surfaced as a structured error the facade rethrows verbatim so
+    // callers can identify the failure by its stable message, never as a conflict.
     try {
       this.ctx.storage.transactionSync(() => {
         outcome = compareExchangeHead(this._sql, cx, next, now, () => crypto.randomUUID())

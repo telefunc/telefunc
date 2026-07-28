@@ -38,7 +38,7 @@ const DIRECTORY_PAGE_SIZE = 100
 
 export type MemoryBackendOptions = {
   // The authority clock. Defaults to the isolate clock, which is what authority time means in a single
-  // isolate; conformance injects a controlled clock so lease expiry is provable without wall-clock waits
+  // isolate; tests inject a controlled clock so lease expiry is provable without wall-clock waits
   // — and so a skewed CALLER clock (Date.now) stays distinguishable from authority time.
   authorityNow?: () => number
   maxRetainedPayloadBytes?: number

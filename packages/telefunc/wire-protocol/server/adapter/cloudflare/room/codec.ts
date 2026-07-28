@@ -1,5 +1,5 @@
-// Pure, runtime-agnostic helpers shared by the Durable Object body and (for the parity fixture) the
-// Node-side facade. Nothing here touches `cloudflare:workers`, SQL, or Node — so the exact same lane
+// Pure, runtime-agnostic helpers shared by the Durable Object body and Node-side facade.
+// Nothing here touches `cloudflare:workers`, SQL, or Node, so the exact same lane
 // encoding and byte marshalling run on both sides of the RPC seam.
 
 import type { LaneId } from '../../../../backend/spi.js'
@@ -20,8 +20,8 @@ export function laneKey(lane: LaneId): string {
   }
 }
 
-// Retained listing must hand back the exact LaneId objects the caller passed (the conformance suite
-// compares them by deep equality), so the manifest row carries the lane's structural fields verbatim
+// Retained listing must hand back the exact LaneId objects the caller passed.
+// The manifest row therefore carries the lane's structural fields verbatim
 // rather than trying to reverse the encoded key.
 export type LaneParts = { kind: LaneId['kind']; member: string | null; track: string | null }
 

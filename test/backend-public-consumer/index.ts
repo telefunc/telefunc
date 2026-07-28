@@ -15,9 +15,6 @@ import {
   type RedisRoomBackendOptions,
   RedisTransport,
 } from '@telefunc/redis'
-// @ts-expect-error fixtures are test-only and no Redis deep modules are package exports
-import type { RedisBackendFixture } from '@telefunc/redis/room/fixture'
-
 const _version: typeof BACKEND_SPI_VERSION = BACKEND_SPI_VERSION
 const _bounds: readonly [typeof MIN_CLOSE_LEASE_MS, typeof MAX_CLOSE_LEASE_MS] = [
   MIN_CLOSE_LEASE_MS,
@@ -47,4 +44,3 @@ void [
   _installRedis,
   _noRuntimeHooks,
 ]
-void (null as unknown as RedisBackendFixture)

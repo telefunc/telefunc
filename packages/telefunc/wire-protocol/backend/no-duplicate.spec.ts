@@ -6,7 +6,7 @@ import { describe, expect, it } from 'vitest'
 const root = fileURLToPath(new URL('../../../../', import.meta.url))
 const production = ['packages/telefunc', 'packages/redis']
   .flatMap((dir) => sourceFiles(join(root, dir)))
-  .filter((file) => !/\.(?:spec|test)\.ts$/.test(file) && !file.includes('/backend/conformance/'))
+  .filter((file) => !/\.(?:spec|test)\.ts$/.test(file))
 
 describe('one backend mechanism', () => {
   it('keeps one public seam and one supervised subscription owner', () => {

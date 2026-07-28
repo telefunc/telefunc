@@ -1,5 +1,4 @@
-// The released Redis BackendDriver, proved against the shared conformance suite to the
-// same outcomes as the memory reference and certified on a disposable real three-master Redis Cluster.
+// The released Redis BackendDriver for standalone Redis and Redis Cluster deployments.
 //
 // Mechanism map (spi.md §5.2), all atomic pieces in layout.ts's Lua:
 //   head CX      one atomic record: legality (throw) · compare (conflict) · fresh-inc guard · mint · store

@@ -20,5 +20,5 @@
     "serve/**/*",
     "wire-protocol/**/*"
   ],
-  "exclude": ["**/*.spec.ts", "wire-protocol/backend/conformance/**"]
+  "exclude": ["**/*.spec.ts"]
 }
