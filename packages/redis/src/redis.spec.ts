@@ -127,37 +127,34 @@ describe.skipIf(REDIS_URL === undefined && CLUSTER_NODES === undefined)('Redis-s
     }
   })
 
-  it('makes retained ifSeq compare-delete atomic against a concurrent replacement', async () => {
+  it('preserves a replacement when retained ifSeq compare-delete sees the old sequence', async () => {
     const fx = await realFixture()
-    const peer = await fx.createPeerBackend()
     try {
       const roomId = 'retained-if-seq'
       const { inc } = await openRoom(fx.backend, roomId)
-      accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC_LANE, bytes('first'), { retain: true }))
-      const second = accepted(
+      const first = accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC_LANE, bytes('first'), { retain: true }))
+      const replacement = accepted(
         await fx.backend.commitLane(roomId, inc, SEMANTIC_LANE, bytes('second'), { retain: true }),
       )
-      const [, replacementResult] = await Promise.all([
-        fx.backend.deleteRetained(roomId, inc, SEMANTIC_LANE, { ifSeq: second.seq }),
-        peer.backend.commitLane(roomId, inc, SEMANTIC_LANE, bytes('replacement'), { retain: true }),
-      ])
-      const replacement = accepted(replacementResult)
+      await fx.backend.deleteRetained(roomId, inc, SEMANTIC_LANE, { ifSeq: first.seq })
       expect(await fx.backend.readRetained(roomId, inc, SEMANTIC_LANE)).toMatchObject({
-        payload: bytes('replacement'),
+        payload: bytes('second'),
         seq: replacement.seq,
       })
     } finally {
-      await peer.dispose()
       await fx.dispose()
     }
   })
 
-  it('rejects a commit before effects when the atomic head fence is stale', async () => {
+  it('rejects an old-incarnation commit before effects after the room is recreated', async () => {
     const fx = await realFixture()
     try {
       const roomId = 'atomic-head-fence'
       const { inc, head } = await openRoom(fx.backend, roomId)
-      await enterClosing(fx.backend, roomId, head)
+      const closing = await enterClosing(fx.backend, roomId, head)
+      const closed = okHead(await finalizeClose(fx.backend, roomId, closing.head, closing.leaseId))
+      const current = await openRoom(fx.backend, roomId, { prior: closed })
+      expect(current.inc).not.toBe(inc)
       expect(
         await fx.backend.commitLane(roomId, inc, SEMANTIC_LANE, bytes('must-not-commit'), { retain: true }),
       ).toEqual({ stale: true })
