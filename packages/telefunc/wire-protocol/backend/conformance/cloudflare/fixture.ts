@@ -143,6 +143,7 @@ type SessionStub = {
   sharedBackendOwnershipProbe(roomId: string, inc: string, delayMs: number): Promise<string>
   clearOwnershipProbes(): Promise<void>
   missingBindingSubscriptionProbe(roomId: string, inc: string): Promise<string>
+  ambientCommitCaptureProbe(roomId: string, inc: string): Promise<string>
   resetSessionEpoch(): Promise<void>
   advanceRenewalTimers(ms: number): Promise<void>
   disposeBackend(): Promise<void>
@@ -713,6 +714,10 @@ class CloudflareConformanceBackend implements BackendSpi {
     return this.#session.missingBindingSubscriptionProbe(roomId, inc)
   }
 
+  ambientCommitCaptureProbe(roomId: string, inc: string): Promise<string> {
+    return this.#session.ambientCommitCaptureProbe(roomId, inc)
+  }
+
   async #command<T>(command: SessionRoomCommand): Promise<T> {
     const result = parseRoomReply<T>(
       await bounded(
@@ -827,6 +832,11 @@ export function cloudflareMissingBindingSubscriptionProbe(
 ): Promise<string> {
   if (!(backend instanceof CloudflareConformanceBackend)) throw new Error('expected Cloudflare conformance backend')
   return backend.missingBindingSubscriptionProbe(roomId, inc)
+}
+
+export function cloudflareAmbientCommitCaptureProbe(backend: BackendSpi, roomId: string, inc: string): Promise<string> {
+  if (!(backend instanceof CloudflareConformanceBackend)) throw new Error('expected Cloudflare conformance backend')
+  return backend.ambientCommitCaptureProbe(roomId, inc)
 }
 
 export const cloudflareHarness: BackendHarness = {

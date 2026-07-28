@@ -4,6 +4,7 @@
 
 import { DurableObject } from 'cloudflare:workers'
 import '../../../../node/server/async_hooks.js'
+import { getRawContext } from '../../../../node/server/context/context.js'
 import { Telefunc } from '../../../../serve/cloudflare.js'
 import type { BackendSubscription, CellMutation, HeadNext, LaneId, RoomHead, SubscriptionState } from '../../spi.js'
 import { superviseBackend } from '../../supervised-backend.js'
@@ -364,6 +365,51 @@ export class ConformanceSessionDurableObject extends DurableObject {
     await withCloudflareRoomSessionManager(probeManager, () => sub.unsubscribe())
     probeManager.dispose()
     return failure
+  }
+
+  async ambientCommitCaptureProbe(roomId: string, inc: string): Promise<string> {
+    const realAuthority = this.#namespace.get(this.#namespace.idFromName(roomId))
+    const wrongManager = new (class extends CloudflareRoomSessionManager {
+      override settleDelivery(_roomId: string, _inc: string, _lane: LaneId, _attempt: Promise<void>): Promise<void> {
+        return Promise.reject(new Error('commitLane re-read the ambient manager after its authority await'))
+      }
+    })(`${this.ctx.id.toString()}:wrong`, () => this.#namespace)
+    let capturedManager!: CloudflareRoomSessionManager
+    const authority = {
+      commitLane: async (
+        targetRoomId: string,
+        targetInc: string,
+        lane: LaneId,
+        payload: Uint8Array,
+        options?: { retain?: boolean; closingLease?: string },
+      ) => {
+        const wire = await realAuthority.commitLane(targetRoomId, targetInc, lane, payload, options)
+        const raw = getRawContext()
+        const managerKey =
+          raw === null ? undefined : Object.getOwnPropertySymbols(raw).find((key) => raw[key] === capturedManager)
+        if (raw === null || managerKey === undefined)
+          throw new Error('ambient capture probe did not find its manager context')
+        raw[managerKey] = wrongManager
+        return wire
+      },
+      awaitDelivery: (token: string) => realAuthority.awaitDelivery(token),
+    } as CloudflareRoomAuthorityStub
+    capturedManager = new CloudflareRoomSessionManager(`${this.ctx.id.toString()}:captured`, () => this.#namespace, {
+      authority: () => authority,
+    })
+    try {
+      const result = await withCloudflareRoomSessionManager(capturedManager, () =>
+        this.#driver.commitLane(roomId, inc, { kind: 'semantic' }, new TextEncoder().encode('captured-manager')),
+      )
+      if ('stale' in result) return 'stale'
+      await result.delivery
+      return 'captured'
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error)
+    } finally {
+      capturedManager.dispose()
+      wrongManager.dispose()
+    }
   }
 
   async resetSessionEpoch(): Promise<void> {

@@ -35,6 +35,7 @@ import {
   throwingReceiver,
 } from '../scenario.js'
 import {
+  cloudflareAmbientCommitCaptureProbe,
   cloudflareCommitFromSession,
   cloudflareClearOwnershipProbes,
   cloudflareContextProbe,
@@ -225,6 +226,11 @@ describe('cloudflare — production session-manager mechanics', () => {
         await Promise.all([cloudflareClearOwnershipProbes(fx.backend), cloudflareClearOwnershipProbes(second.backend)])
         await second.dispose()
       }
+    })
+
+    it('settles a commit on its captured manager after ambient context changes across the authority await', async () => {
+      const { roomId, inc } = await opened('captured-commit-manager')
+      await expect(cloudflareAmbientCommitCaptureProbe(fx.backend, roomId, inc)).resolves.toBe('captured')
     })
 
     it('recovers an actual Room-want socket when delivery reaches the empty epoch first', async () => {
@@ -437,6 +443,25 @@ describe('cloudflare — production session-manager mechanics', () => {
   })
 
   describe('delivery, ordering and failure fences', () => {
+    it('continues the same ordering-domain sequence after authority time advances', async () => {
+      const { roomId, inc } = await opened('time-advance-order')
+      const first = accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, bytes('before-time-advance')))
+      fx.advanceAuthority(1)
+      const second = accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, bytes('after-time-advance')))
+
+      expect(second.timestamp).toBe(first.timestamp + 1)
+      expect(second.seq).toBe(first.seq + 1)
+    })
+
+    it('rejects Room SQLite sequence exhaustion at MAX_SAFE before producing MAX_SAFE+1', async () => {
+      const { roomId, inc } = await opened('room-sqlite-sequence-exhaustion')
+      await fx.orderControl.seedWatermark(roomId, inc, SEMANTIC, Number.MAX_SAFE_INTEGER, fx.authorityNow())
+
+      await expect(fx.backend.commitLane(roomId, inc, SEMANTIC, bytes('overflow'))).rejects.toThrow(
+        'commitLane: sequence exhausted for the ordering domain',
+      )
+    })
+
     it('evicts and re-establishes a route after three consecutive target failures', async () => {
       const { roomId, inc } = await opened()
       const failed = throwingReceiver('target failed')
