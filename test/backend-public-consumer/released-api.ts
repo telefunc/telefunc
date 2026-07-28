@@ -36,6 +36,8 @@ import {
   type LaneId,
   type PublishResult,
   type SubscriptionAttempt,
+  type SubscriptionAttemptState,
+  type SubscriptionBinding,
   type SubscriptionDriver,
 } from 'telefunc/backend'
 import { ConnectionError, withContext } from 'telefunc/client'
@@ -105,10 +107,18 @@ type _backendKeys = Assert<
 >
 type _subscriptionKeys = Assert<HasKeys<BackendSubscription, 'ready' | 'state' | 'onStateChange' | 'unsubscribe'>>
 type _attemptKeys = Assert<HasKeys<SubscriptionAttempt, 'ready' | 'state' | 'onStateChange' | 'unsubscribe'>>
-type _driverKeys = Assert<HasKeys<SubscriptionDriver<string>, 'open'>>
-type _driverOpenArguments = Assert<
-  Compatible<Parameters<SubscriptionDriver<string>['open']>, [string, BackendReceiver, () => number]>
+type _attemptStateShape = Assert<
+  Compatible<SubscriptionAttemptState, 'establishing' | 'ready' | 'lost' | 'closed' | 'terminated'>
 >
+type _bindingKeys = Assert<HasKeys<SubscriptionBinding, 'partition' | 'valid' | 'open'>>
+type _bindingPartition = Assert<Compatible<SubscriptionBinding['partition'], string>>
+type _bindingValid = Assert<Compatible<ReturnType<SubscriptionBinding['valid']>, boolean>>
+type _bindingOpenArguments = Assert<
+  Compatible<Parameters<SubscriptionBinding['open']>, [BackendReceiver, () => number]>
+>
+type _driverKeys = Assert<HasKeys<SubscriptionDriver<string>, 'bind'>>
+type _driverBindArguments = Assert<Compatible<Parameters<SubscriptionDriver<string>['bind']>, [string]>>
+type _driverBindResult = Assert<Compatible<ReturnType<SubscriptionDriver<string>['bind']>, SubscriptionBinding>>
 type _backendDriverKeys = Assert<
   HasKeys<
     BackendDriver,

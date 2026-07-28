@@ -2,6 +2,7 @@ export { superviseBackend }
 
 import { subscriptionSourceKey } from './subscription-source.js'
 import { SubscriptionManager } from './subscriptions.js'
+import { assertHeadNextWellFormed } from './head-transitions.js'
 import type { BackendDriver, BackendSpi, BackendSubscriptionSource, HeadCx, HeadNext } from './spi.js'
 
 /**
@@ -22,11 +23,14 @@ function superviseBackend(
     publish: (lane, payload) => driver.publish(lane, payload),
     subscribe: (lane, receiver) => {
       const source: BackendSubscriptionSource = { kind: 'broadcast', lane }
-      return subscriptions.subscribe(subscriptionSourceKey(source), source, receiver)
+      return subscriptions.subscribe(source, receiver)
     },
 
     readHead: (roomId) => driver.readHead(roomId),
-    compareExchangeHead: (roomId: string, cx: HeadCx, next: HeadNext) => driver.compareExchangeHead(roomId, cx, next),
+    compareExchangeHead: async (roomId: string, cx: HeadCx, next: HeadNext) => {
+      assertHeadNextWellFormed(next)
+      return driver.compareExchangeHead(roomId, cx, next)
+    },
 
     readCells: (roomId, inc, sel) => driver.readCells(roomId, inc, sel),
     compareExchangeCells: (roomId, inc, revision, mutations) =>
@@ -40,7 +44,7 @@ function superviseBackend(
 
     subscribeLane: (roomId, inc, lane, receiver) => {
       const source: BackendSubscriptionSource = { kind: 'durable', roomId, inc, lane }
-      return subscriptions.subscribe(subscriptionSourceKey(source), source, receiver)
+      return subscriptions.subscribe(source, receiver)
     },
 
     listGenerations: (roomId) => driver.listGenerations(roomId),

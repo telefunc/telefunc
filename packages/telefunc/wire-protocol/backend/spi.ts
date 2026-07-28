@@ -112,6 +112,8 @@ export type CommitAccepted = {
 export type CommitResult = CommitAccepted | { stale: true }
 
 export type SubscriptionState = 'establishing' | 'ready' | 'lost' | 'closed'
+/** Raw-only ownership terminal. Core maps this to public `closed`; consumers never receive it. */
+export type SubscriptionAttemptState = SubscriptionState | 'terminated'
 // A raw backend establishment attempt has no settlement deadline; the shared subscription manager
 // bounds every attempt before exposing this supervised subscription at the SPI.
 export type BackendSubscription = {
@@ -135,15 +137,26 @@ export type BackendSubscriptionSource =
  * the attempt before exposing any subscription to an SPI consumer. */
 export type SubscriptionAttempt = {
   readonly ready: Promise<void>
-  state(): SubscriptionState
-  onStateChange(cb: (state: SubscriptionState) => void): () => void
+  state(): SubscriptionAttemptState
+  onStateChange(cb: (state: SubscriptionAttemptState) => void): () => void
   unsubscribe(): Promise<void>
 }
 
-/** The only backend-specific subscription edge. An author implements acknowledgement and cleanup for
- * one raw attempt; core supplies epochs, fan-out, readiness, bounded replacement and the watchdog. */
+/** A source binding captured synchronously while the caller's local ownership context is live. Core
+ * compares `partition` by string value only, as an opaque local slot discriminator, and retains
+ * `open` for ambient-free replacement attempts. Binding performs no remote installation. `valid`
+ * must be a synchronous, side-effect-free, non-throwing read of local ownership. */
+export type SubscriptionBinding = {
+  readonly partition: string
+  valid(): boolean
+  open(receiver: BackendReceiver, localReceiverCount: () => number): SubscriptionAttempt
+}
+
+/** The only backend-specific subscription edge. An author captures local ownership once, then
+ * implements acknowledgement and cleanup for one raw attempt; core supplies source identity, epochs,
+ * fan-out, readiness, bounded replacement and the watchdog. */
 export type SubscriptionDriver<Source = BackendSubscriptionSource> = {
-  open(source: Source, receiver: BackendReceiver, localReceiverCount: () => number): SubscriptionAttempt
+  bind(source: Source): SubscriptionBinding
 }
 
 /** The supervised backend contract consumed by Telefunc through `getBackend()`. Backend authors do not

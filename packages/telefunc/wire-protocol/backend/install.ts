@@ -230,7 +230,7 @@ function assertBackendDriver(backend: BackendDriver): void {
   if (backend.subscriptions === null || typeof backend.subscriptions !== 'object') {
     throw new Error('telefunc/backend: invalid backend subscriptions; expected an object')
   }
-  assertMethod(backend.subscriptions, 'open')
+  assertMethod(backend.subscriptions, 'bind')
 
   const capabilities = backend.capabilities
   if (capabilities === null || typeof capabilities !== 'object') {

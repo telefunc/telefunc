@@ -27,10 +27,10 @@ import {
   type PublishResult,
   type RoomHead,
   type SubscriptionAttempt,
+  type SubscriptionAttemptState,
   type SubscriptionDriver,
-  type SubscriptionState,
 } from '../spi.js'
-import { assertHeadDeleteLegal, assertHeadNextWellFormed, assertHeadTransition } from '../head-transitions.js'
+import { assertHeadDeleteLegal, assertHeadTransition } from '../head-transitions.js'
 import { broadcastRouteKey, laneKey } from '../subscription-source.js'
 
 const DEFAULT_MAX_RETAINED_BYTES = 16 * 1024 * 1024
@@ -115,9 +115,9 @@ function publicHead(head: StoredHead): RoomHead {
 
 class MemorySubscriptionAttempt implements SubscriptionAttempt {
   readonly ready: Promise<void>
-  #state: SubscriptionState = 'establishing'
+  #state: SubscriptionAttemptState = 'establishing'
   #settle!: { resolve: () => void; reject: (err: unknown) => void }
-  readonly #listeners = new Set<(state: SubscriptionState) => void>()
+  readonly #listeners = new Set<(state: SubscriptionAttemptState) => void>()
   readonly #receiver: BackendReceiver
   readonly #localReceiverCount: () => number
   #detach: () => void
@@ -138,11 +138,11 @@ class MemorySubscriptionAttempt implements SubscriptionAttempt {
     return this.#state === 'closed'
   }
 
-  state(): SubscriptionState {
+  state(): SubscriptionAttemptState {
     return this.#state
   }
 
-  onStateChange(cb: (state: SubscriptionState) => void): () => void {
+  onStateChange(cb: (state: SubscriptionAttemptState) => void): () => void {
     this.#listeners.add(cb)
     return () => this.#listeners.delete(cb)
   }
@@ -174,7 +174,7 @@ class MemorySubscriptionAttempt implements SubscriptionAttempt {
     return this.closed ? 0 : this.#localReceiverCount()
   }
 
-  #transition(state: SubscriptionState): void {
+  #transition(state: SubscriptionAttemptState): void {
     if (this.#state === state) return
     this.#state = state
     for (const cb of this.#listeners) cb(state)
@@ -194,7 +194,11 @@ export class MemoryBackend implements BackendDriver {
     this.#now = options.authorityNow ?? (() => Date.now())
     this.#state = options.state ?? new MemoryBackendState()
     this.subscriptions = {
-      open: (source, receiver, localReceiverCount) => this.#openSubscription(source, receiver, localReceiverCount),
+      bind: (source) => ({
+        partition: '',
+        valid: () => true,
+        open: (receiver, localReceiverCount) => this.#openSubscription(source, receiver, localReceiverCount),
+      }),
     }
     this.capabilities = {
       receivers: 'global',
@@ -243,7 +247,6 @@ export class MemoryBackend implements BackendDriver {
     { ok: true; head: RoomHead } | { ok: true; deleted: true } | { conflict: true; current: RoomHead | null }
   > {
     this.#assertLive()
-    assertHeadNextWellFormed(next)
     const existing = this.#state.rooms.get(roomId)
     const current = this.#liveHead(existing)
     // Operation legality precedes the compare for the delete path only; every other transition is
