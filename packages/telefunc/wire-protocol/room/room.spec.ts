@@ -344,9 +344,16 @@ describe('memory Backend SPI contract', () => {
       { expect: { rev: closing.head.rev, closingLease: closing.head.closeLease.id } },
       { head: { state: 'closed', currentInc: null, config: closing.head.config }, ttlMs: 60_000 },
     )
-    expect(closed).toMatchObject({ ok: true, head: { state: 'closed', currentInc: null } })
+    if (!('ok' in closed) || !('head' in closed)) throw new Error('head finalize failed')
+    const reopened = await backend.compareExchangeHead(
+      'spi',
+      { expect: { rev: closed.head.rev } },
+      { head: { state: 'open', currentInc: 'inc-2', config: closed.head.config } },
+    )
+    expect(reopened).toMatchObject({ ok: true, head: { state: 'open', currentInc: 'inc-2' } })
+    expect(await backend.commitLane('spi', 'inc-1', semanticLane, encoder.encode('stale'))).toEqual({ stale: true })
     await backend.dropGeneration('spi', 'inc-1')
-    expect(await backend.listGenerations('spi')).toEqual([])
+    expect(await backend.listGenerations('spi')).toEqual(['inc-2'])
     expect(subscription.state()).toBe('closed')
 
     await backend.directoryPut('spi', 'inc-1')
@@ -355,6 +362,49 @@ describe('memory Backend SPI contract', () => {
     expect((await backend.directoryList('s')).entries).toHaveLength(1)
     await backend.directoryDelete('spi', 'inc-1')
     expect((await backend.directoryList('s')).entries).toEqual([])
+  })
+
+  it('advances order before delivery and preserves it across time and driver reconstruction', async () => {
+    await disposeBackend()
+    let now = 1
+    driver = new MemoryBackend({ state: memoryState, authorityNow: () => now })
+    setDefaultBackend(() => driver)
+    const backend = getBackend()
+    const created = await backend.compareExchangeHead(
+      'order-survivor',
+      { expect: 'absent' },
+      { head: { state: 'open', currentInc: 'inc-1', config: encoder.encode('config') } },
+    )
+    if (!('ok' in created) || !('head' in created)) throw new Error('head create failed')
+
+    let nestedMark: { seq: number; timestamp: number } | undefined
+    const subscription = backend.subscribeLane('order-survivor', 'inc-1', semanticLane, async (payload) => {
+      if (decoder.decode(payload) !== 'outer') return
+      now = 2
+      const nested = await backend.commitLane('order-survivor', 'inc-1', semanticLane, encoder.encode('inner'))
+      if (!('accepted' in nested)) throw new Error('nested lane commit fenced unexpectedly')
+      nestedMark = { seq: nested.seq, timestamp: nested.timestamp }
+    })
+    await subscription.ready
+    const outer = await backend.commitLane('order-survivor', 'inc-1', semanticLane, encoder.encode('outer'))
+    if (!('accepted' in outer)) throw new Error('outer lane commit fenced unexpectedly')
+    await outer.delivery
+    expect([{ seq: outer.seq, timestamp: outer.timestamp }, nestedMark]).toEqual([
+      { seq: 1, timestamp: 1 },
+      { seq: 2, timestamp: 2 },
+    ])
+    await subscription.unsubscribe()
+
+    now = 3
+    const reconstructedDriver = new MemoryBackend({ state: memoryState, authorityNow: () => now })
+    const reconstructed = await reconstructedDriver.commitLane(
+      'order-survivor',
+      'inc-1',
+      semanticLane,
+      encoder.encode('reconstructed'),
+    )
+    expect(reconstructed).toMatchObject({ accepted: true, seq: 3, timestamp: 3 })
+    await reconstructedDriver.dispose()
   })
 
   it('interprets every legal head transition from the one exported data table', () => {
