@@ -54,23 +54,15 @@ describe('one backend mechanism', () => {
 
     const values = redis.flatMap((file) => importedValues(file, 'telefunc/backend'))
     expect([...new Set(values)].sort()).toEqual(['HEAD_TRANSITIONS', 'ORDERING_FRAME_LAYOUT'])
-    expect(text('packages/redis/src/index.ts')).toMatch(
-      /import \{ setDefaultBackend \} from 'telefunc\/__internal'/,
-    )
+    expect(text('packages/redis/src/index.ts')).toMatch(/import \{ setDefaultBackend \} from 'telefunc\/__internal'/)
 
     const core = production.filter((file) => file.startsWith('packages/telefunc/'))
-    expect(
-      hits(/\b(?:ioredis|redis\.error_reply|generateLuaHeadTransitionTable)\b/, core),
-    ).toEqual([])
+    expect(hits(/\b(?:ioredis|redis\.error_reply|generateLuaHeadTransitionTable)\b/, core)).toEqual([])
   })
 
   it('keeps one wide ordering codec and one head-transition rule set', () => {
-    expect(filesWith(/\bfunction encodeOrderingFrame\b/)).toEqual([
-      'packages/telefunc/wire-protocol/ordering-frame.ts',
-    ])
-    expect(filesWith(/\bfunction decodeOrderingFrame\b/)).toEqual([
-      'packages/telefunc/wire-protocol/ordering-frame.ts',
-    ])
+    expect(filesWith(/\bfunction encodeOrderingFrame\b/)).toEqual(['packages/telefunc/wire-protocol/ordering-frame.ts'])
+    expect(filesWith(/\bfunction decodeOrderingFrame\b/)).toEqual(['packages/telefunc/wire-protocol/ordering-frame.ts'])
     expect(filesWith(/\bconst HEAD_TRANSITIONS\s*=/)).toEqual([
       'packages/telefunc/wire-protocol/backend/head-transitions.ts',
     ])
@@ -107,9 +99,9 @@ function text(file: string): string {
 
 function hits(pattern: RegExp, files = production): { file: string; match: string }[] {
   return files.flatMap((file) =>
-    [...text(file).matchAll(new RegExp(pattern, pattern.flags.includes('g') ? pattern.flags : `${pattern.flags}g`))].map(
-      (match) => ({ file, match: match[0] }),
-    ),
+    [
+      ...text(file).matchAll(new RegExp(pattern, pattern.flags.includes('g') ? pattern.flags : `${pattern.flags}g`)),
+    ].map((match) => ({ file, match: match[0] })),
   )
 }
 
