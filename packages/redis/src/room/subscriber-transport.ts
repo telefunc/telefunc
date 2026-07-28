@@ -147,10 +147,12 @@ class RedisSubscriptionAttempt implements SubscriptionAttempt {
   }
 
   async flush(): Promise<void> {
-    if (this._state !== 'ready' || this._localReceiverCount() === 0) return
+    if (this._localReceiverCount() === 0) return
+    await this.ready
+    if (this._localReceiverCount() === 0) return
     const subscriber = this._subscriber
     const source = redisSubscriptionChannel(this._prefix, this._source)
-    if (subscriber === null || subscriber.status !== 'ready') {
+    if (this._state !== 'ready' || subscriber === null || subscriber.status !== 'ready') {
       throw new Error(`Redis subscriber PING cannot fence unavailable source '${source}'`)
     }
     await subscriber.ping()

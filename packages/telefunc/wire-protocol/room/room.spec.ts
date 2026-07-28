@@ -56,6 +56,44 @@ afterEach(async () => {
 })
 
 describe('Room public behavior', () => {
+  it('does not complete a join until its semantic subscription is ready', async () => {
+    const room = (await Room.create('join-readiness')) as ServerRoom
+    const backend = getBackend()
+    const subscribeLane = backend.subscribeLane.bind(backend)
+    const semanticReady = deferred<void>()
+    const semanticStarted = deferred<void>()
+    let semanticState: SubscriptionState = 'establishing'
+    const subscribe = vi.spyOn(backend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
+      const subscription = subscribeLane(roomId, inc, lane, receiver)
+      if (lane.kind !== 'semantic') return subscription
+      semanticStarted.resolve()
+      return {
+        ready: semanticReady.promise,
+        state: () => semanticState,
+        onStateChange: (callback) => subscription.onStateChange(callback),
+        unsubscribe: () => subscription.unsubscribe(),
+      }
+    })
+    try {
+      let settled = false
+      const joining = room.join().then((participant) => {
+        settled = true
+        return participant
+      })
+      await semanticStarted.promise
+      await settleMicrotasks()
+      expect(settled).toBe(false)
+
+      semanticState = 'ready'
+      semanticReady.resolve()
+      await expect(joining).resolves.toMatchObject({ id: expect.any(String) })
+      expect(settled).toBe(true)
+    } finally {
+      semanticReady.resolve()
+      subscribe.mockRestore()
+    }
+  })
+
   it('creates, lists, updates, closes fully, and recreates a genuinely fresh domain', async () => {
     const room = (await Room.create('lifecycle', { meta: { topic: 'one' } })) as ServerRoom
     const firstInc = room._inc

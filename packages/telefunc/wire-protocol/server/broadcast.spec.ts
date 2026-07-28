@@ -1,10 +1,11 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Broadcast, ServerBroadcast } from './server-broadcast.js'
 import { ReplayBuffer } from '../replay-buffer.js'
 import { ACK_STATUS, TAG, decode } from '../shared-ws.js'
 import { IndexedPeer } from './IndexedPeer.js'
-import { disposeBackend, installBackend } from '../backend/install.js'
+import { disposeBackend, getBackend, installBackend } from '../backend/install.js'
 import { MemoryBackend, MemoryBackendState } from '../backend/memory/backend.js'
+import type { BackendSubscription, SubscriptionState } from '../backend/spi.js'
 
 let memoryState: MemoryBackendState
 beforeEach(async () => {
@@ -219,6 +220,47 @@ describe('keyed in-process broadcast', () => {
 // ───────────────────────────────────────────────────────────────────────────
 
 describe('binary in-process broadcast', () => {
+  it('waits for an establishing binary subscription before publishing on that lane', async () => {
+    const backend = getBackend()
+    let resolveReady!: () => void
+    const ready = new Promise<void>((resolve) => {
+      resolveReady = resolve
+    })
+    let state: SubscriptionState = 'establishing'
+    const subscription: BackendSubscription = {
+      ready,
+      state: () => state,
+      onStateChange: () => () => {},
+      unsubscribe: async () => {
+        state = 'closed'
+        resolveReady()
+      },
+    }
+    const subscribe = vi.spyOn(backend, 'subscribe').mockReturnValue(subscription)
+    const publish = vi.spyOn(backend, 'publish').mockReturnValue({
+      seq: 1,
+      timestamp: 1,
+      receivers: 1,
+    })
+    try {
+      const broadcast = new ServerBroadcast({ key: 'room:bin-ready' })
+      broadcast._registerChannel()
+      broadcast._onPeerBroadcastSubscribe(true)
+
+      const pending = broadcast.publishBinary(new Uint8Array([1, 2, 3]))
+      await Promise.resolve()
+      expect(publish).not.toHaveBeenCalled()
+
+      state = 'ready'
+      resolveReady()
+      await expect(pending).resolves.toMatchObject({ seq: 1, timestamp: 1, receivers: 1 })
+      expect(publish).toHaveBeenCalledOnce()
+    } finally {
+      subscribe.mockRestore()
+      publish.mockRestore()
+    }
+  })
+
   it('round-trips binary publishes preserving high-bit bytes', () => {
     const sender = new ServerBroadcast({ key: 'room:bin' })
     const receiver = new ServerBroadcast({ key: 'room:bin' })

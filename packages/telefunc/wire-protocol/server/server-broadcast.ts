@@ -236,24 +236,32 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
 
   private _publishBroadcast(serialized: string): ChannelPublishAck | Promise<ChannelPublishAck> {
     assert(this._backend)
+    const backend = this._backend
     const toAck = (r: PublishResult): ChannelPublishAck =>
       Object.assign(makePublishInfo(this.key, r.seq, r.timestamp), {
         meta: r.meta,
         ...(r.receivers === undefined ? {} : { receivers: r.receivers }),
       })
-    const result = this._backend.publish({ key: this.key, kind: 'text' }, textEncoder.encode(serialized))
+    const publish = () => backend.publish({ key: this.key, kind: 'text' }, textEncoder.encode(serialized))
+    const subscription = this._unsubBroadcast
+    if (subscription !== null && subscription.state() !== 'ready') return subscription.ready.then(publish).then(toAck)
+    const result = publish()
     if (isPromise(result)) return result.then(toAck)
     return toAck(result)
   }
 
   private _publishBinaryBroadcast(data: Uint8Array): ChannelPublishAck | Promise<ChannelPublishAck> {
     assert(this._backend)
+    const backend = this._backend
     const toAck = (r: PublishResult): ChannelPublishAck =>
       Object.assign(makePublishInfo(this.key, r.seq, r.timestamp), {
         meta: r.meta,
         ...(r.receivers === undefined ? {} : { receivers: r.receivers }),
       })
-    const result = this._backend.publish({ key: this.key, kind: 'binary' }, data)
+    const publish = () => backend.publish({ key: this.key, kind: 'binary' }, data)
+    const subscription = this._unsubBinaryBroadcast
+    if (subscription !== null && subscription.state() !== 'ready') return subscription.ready.then(publish).then(toAck)
+    const result = publish()
     if (isPromise(result)) return result.then(toAck)
     return toAck(result)
   }

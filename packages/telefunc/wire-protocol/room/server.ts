@@ -885,6 +885,10 @@ class ServerRoom implements Room {
     const joinedAt = await this._createMember(id, meta, identity, hidden)
     track(id, joinedAt)
     this._syncSubs()
+    // A local member makes this holder a semantic observer. Do not expose the joined participant until
+    // that subscription is live: another process may publish as soon as join() returns, and Redis pub/sub
+    // cannot replay a frame sent through an establishing subscription.
+    await this._textSub.ready
     this._state.applyJoin(id, meta, joinedAt, identity, hidden)
     await publishCtrl(this.id, this._inc, {
       __r: 'join',
