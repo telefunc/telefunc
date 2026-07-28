@@ -11,8 +11,9 @@ import type {
   SubscriptionAttemptState,
 } from './spi.js'
 
-/** One establishment attempt plus five bounded replacements. A continuously hung source therefore
- * reaches terminal failure in at most 6 × 10 seconds. */
+/** Raw establishment has no backend-owned time bound. Core gives the initial attempt and five
+ * replacements equal shares of the one-minute Room lane terminal policy: 6 × 10 seconds. An
+ * acknowledgement beyond one share is classified as hung and consumes a replacement attempt. */
 const SUBSCRIPTION_ESTABLISH_TIMEOUT_MS = 10_000
 const SUBSCRIPTION_REPLAN_LIMIT = 5
 

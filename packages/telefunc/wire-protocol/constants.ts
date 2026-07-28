@@ -286,6 +286,10 @@ export const ROOM_DEMAND_TTL_MS = ROOM_HEARTBEAT_INTERVAL_MS * 3
  *  correlation an ack DM leaves on the recipient's stub: past this the sender has already given up, so
  *  the correlation can no longer settle anyone and is dropped. */
 export const ROOM_DM_ACK_TIMEOUT_MS = 60_000
+/** Product-policy horizon for a Room lane that cannot establish. Raw backends deliberately have no
+ * establishment latency SLA; one minute permits six equal attempts through transient stalls without
+ * leaving a Room operation pending indefinitely. */
+export const ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS = 60_000
 /** Max in-flight ack-DM correlations one client stub holds awaiting the client's `dm-reply`. A client
  *  relayed ack DMs it never answers is capped here (drop-oldest) rather than accumulating correlations
  *  for the stub's lifetime; a dropped correlation simply lets its sender time out (`ROOM_DM_ACK_TIMEOUT_MS`). */
