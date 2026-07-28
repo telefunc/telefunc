@@ -1,4 +1,4 @@
-// The memory reference realization of RoomBackendSpi — the executable specification the Redis and
+// The memory reference realization of BackendSpi — the executable specification the Redis and
 // Cloudflare backends are proved against. Single isolate, so every operation is synchronous over Maps
 // and the isolate clock IS authority time; the only asynchrony is the delivery attempt, which is
 // deliberately queued through a per-lane chain so a receiver can never run reentrantly inside
@@ -13,33 +13,37 @@
 //   TTL              lazy expiry on read + a sweep on the janitor path
 
 import {
+  BACKEND_SPI_VERSION,
+  type BackendDriver,
+  type BackendReceiver,
+  type BackendSubscriptionSource,
+  type BroadcastLane,
   type CellMutation,
   type CommitResult,
   type CxResult,
   type HeadCx,
   type HeadNext,
   type LaneId,
-  type LaneReceiver,
-  type LaneSubscription,
-  MAX_CLOSE_LEASE_MS,
-  MIN_CLOSE_LEASE_MS,
-  type ReadinessState,
-  ROOM_SPI_VERSION,
-  type RoomBackendSpi,
+  type PublishResult,
   type RoomHead,
+  type SubscriptionAttempt,
+  type SubscriptionAttemptState,
+  type SubscriptionDriver,
 } from '../spi.js'
+import { assertHeadDeleteLegal, assertHeadTransition } from '../head-transitions.js'
+import { broadcastRouteKey, laneKey } from '../subscription-source.js'
 
 const DEFAULT_MAX_RETAINED_BYTES = 16 * 1024 * 1024
 const DIRECTORY_PAGE_SIZE = 100
 
-export type MemoryRoomBackendOptions = {
+export type MemoryBackendOptions = {
   // The authority clock. Defaults to the isolate clock, which is what authority time means in a single
   // isolate; conformance injects a controlled clock so lease expiry is provable without wall-clock waits
   // — and so a skewed CALLER clock (Date.now) stays distinguishable from authority time.
   authorityNow?: () => number
   maxRetainedPayloadBytes?: number
   /** @internal Ownership injection for an embedding that preserves state across facade reconstruction. */
-  state?: MemoryRoomBackendState
+  state?: MemoryBackendState
 }
 
 type StoredHead = {
@@ -61,7 +65,7 @@ type Generation = {
   cells: Map<string, StoredCell>
   order: Map<string, OrderMark>
   retained: Map<string, RetainedEntry>
-  subs: Map<string, Set<MemoryLaneSubscription>>
+  subs: Map<string, Set<MemorySubscriptionAttempt>>
   chains: Map<string, Promise<void>>
 }
 
@@ -74,38 +78,24 @@ type RoomRecord = { head: StoredHead | null; gens: Map<string, Generation> }
  *
  * @internal
  */
-export class MemoryRoomBackendState {
+export class MemoryBackendState {
   readonly rooms = new Map<string, RoomRecord>()
   readonly directory = new Map<string, string>()
+  readonly broadcastOrder = new Map<string, OrderMark>()
+  readonly broadcastSubs = new Map<string, Set<MemorySubscriptionAttempt>>()
   revSeq = 0
-}
-
-// In the fixed lane table every lane's order domain and channel correspond one to one, so a single key
-// indexes both the order watermarks and the subscription channels. Member and track are encoded so a
-// member named `a:b` can never collide with another lane.
-function laneKey(lane: LaneId): string {
-  switch (lane.kind) {
-    case 'semantic':
-      return 'semantic'
-    case 'control':
-      return 'control'
-    case 'binary':
-      return `binary:${encodeURIComponent(lane.member)}:${encodeURIComponent(lane.track)}`
-    case 'inbox':
-      return `inbox:${encodeURIComponent(lane.member)}`
-  }
 }
 
 function copyBytes(bytes: Uint8Array): Uint8Array {
   return new Uint8Array(bytes)
 }
 
-function isExpired(entry: Expiring, now: number): boolean {
-  return entry.expiresAt !== null && entry.expiresAt <= now
+function sumReceiverCounts(targets: MemorySubscriptionAttempt[]): number {
+  return targets.reduce((total, target) => total + target.receiverCount(), 0)
 }
 
-function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
-  return a.byteLength === b.byteLength && a.every((byte, index) => byte === b[index])
+function isExpired(entry: Expiring, now: number): boolean {
+  return entry.expiresAt !== null && entry.expiresAt <= now
 }
 
 function newGeneration(): Generation {
@@ -123,123 +113,18 @@ function publicHead(head: StoredHead): RoomHead {
   return view
 }
 
-// Shape rules that hold regardless of what is stored: the lease is present iff the head is closing, its
-// duration is finite and bounded, a tombstone is the only head that carries a TTL, and only a tombstone
-// has a null incarnation.
-function assertHeadNextWellFormed(next: HeadNext): void {
-  if ('delete' in next) return
-  const { head, ttlMs } = next
-  if (head.state === 'closing') {
-    if (head.closeLease === undefined) throw new Error('head CX: a head entering closing must carry a close lease')
-    const { durationMs } = head.closeLease
-    if (!(durationMs >= MIN_CLOSE_LEASE_MS && durationMs <= MAX_CLOSE_LEASE_MS)) {
-      throw new Error(
-        `head CX: close lease durationMs ${durationMs} outside [${MIN_CLOSE_LEASE_MS}, ${MAX_CLOSE_LEASE_MS}]`,
-      )
-    }
-  } else if (head.closeLease !== undefined) {
-    throw new Error(`head CX: a '${head.state}' head must not carry a close lease`)
-  }
-  if (ttlMs !== undefined && head.state !== 'closed') {
-    throw new Error(`head CX: ttlMs is only valid for a 'closed' tombstone, got '${head.state}'`)
-  }
-  if (head.state === 'closed' && head.currentInc !== null) {
-    throw new Error('head CX: a closed tombstone must clear currentInc to null')
-  }
-  if (head.state !== 'closed' && head.currentInc === null) {
-    throw new Error(`head CX: a '${head.state}' head must name an incarnation`)
-  }
-}
-
-type HeadCxForm = 'absent' | 'generic' | 'takeover' | 'finalize'
-
-function headCxForm(cx: HeadCx): HeadCxForm {
-  if (cx.expect === 'absent') return 'absent'
-  if ('closingLeaseExpired' in cx.expect) return 'takeover'
-  if ('closingLease' in cx.expect) return 'finalize'
-  return 'generic'
-}
-
-// The tombstone-expiry delete is the one operation whose legality is decided BEFORE any compare, so
-// misuse throws even where the compare would have conflicted (spi.md §2 transition table).
-function assertDeleteLegal(next: HeadNext, current: StoredHead | null): void {
-  if (!('delete' in next)) return
-  if (current?.state !== 'closed') {
-    throw new Error(`head CX: {delete} is legal only against a 'closed' tombstone, not '${current?.state ?? 'absent'}'`)
-  }
-}
-
-// The NORMATIVE head-transition table of spi.md §2, exhaustive by the triple (current state, HeadCx
-// form, next state). Anything off the table is a programming error and THROWS — it is never encoded as
-// a conflict. This is what makes the I13 guards unreachable through any other compare form: a generic
-// {rev} can never install or replace a close lease, never re-lease a 'closing' head pre-expiry, and
-// never reach 'closed'.
-function assertTransitionAllowed(
-  cx: HeadCx,
-  next: Extract<HeadNext, { head: unknown }>,
-  current: StoredHead | null,
-  generations: ReadonlyMap<string, Generation> | undefined,
-): void {
-  const from = current === null ? 'absent' : current.state
-  const transition = `${from} + ${headCxForm(cx)} -> ${next.head.state}`
-  switch (transition) {
-    case 'absent + absent -> open':
-    case 'closed + generic -> open':
-      assertFreshIncarnation(next.head.currentInc, generations)
-      return
-    case 'open + generic -> open':
-    case 'open + generic -> closing':
-      // A generic CX can never swap the incarnation — on a config/LWW edit or on the close that fences
-      // this very generation.
-      if (next.head.currentInc !== current?.currentInc) {
-        throw new Error(`head CX: ${transition} must keep the same incarnation`)
-      }
-      return
-    case 'closing + takeover -> closing':
-      assertReplacesOnlyTheLease(next.head, current as StoredHead)
-      return
-    case 'closing + finalize -> closed':
-      return
-    default:
-      throw new Error(`head CX: '${transition}' is not a legal head transition`)
-  }
-}
-
-// FRESH-INC on create/recreate: the incarnation a room is (re)created on must have NO surviving
-// generation state, checked against the very storage listGenerations reads. Room core mints fresh uuids
-// anyway; this makes stale-generation resurrection — an old inc's cells silently becoming the "new"
-// room's state — unrepresentable even under caller error. A fully-dropped id is harmless by
-// construction, because no state survives to expose.
-function assertFreshIncarnation(inc: string | null, generations: ReadonlyMap<string, Generation> | undefined): void {
-  if (inc !== null && generations?.has(inc) === true) {
-    throw new Error(
-      `head CX: incarnation '${inc}' still has surviving generation state — creating a room on it would resurrect it`,
-    )
-  }
-}
-
-function assertReplacesOnlyTheLease(next: Extract<HeadNext, { head: unknown }>['head'], current: StoredHead): void {
-  if (next.currentInc !== current.currentInc) {
-    throw new Error('head CX: an expired-close takeover must keep the same incarnation')
-  }
-  if (!bytesEqual(next.config, current.config)) {
-    throw new Error('head CX: an expired-close takeover must not change the config — it replaces only the lease')
-  }
-  if (next.closeLease?.id === current.closeLease?.id) {
-    throw new Error('head CX: an expired-close takeover must mint a different lease id')
-  }
-}
-
-class MemoryLaneSubscription implements LaneSubscription {
+class MemorySubscriptionAttempt implements SubscriptionAttempt {
   readonly ready: Promise<void>
-  #state: ReadinessState = 'establishing'
+  #state: SubscriptionAttemptState = 'establishing'
   #settle!: { resolve: () => void; reject: (err: unknown) => void }
-  readonly #listeners = new Set<(state: ReadinessState) => void>()
-  readonly #receiver: LaneReceiver
+  readonly #listeners = new Set<(state: SubscriptionAttemptState) => void>()
+  readonly #receiver: BackendReceiver
+  readonly #localReceiverCount: () => number
   #detach: () => void
 
-  constructor(receiver: LaneReceiver, detach: () => void) {
+  constructor(receiver: BackendReceiver, localReceiverCount: () => number, detach: () => void) {
     this.#receiver = receiver
+    this.#localReceiverCount = localReceiverCount
     this.#detach = detach
     this.ready = new Promise<void>((resolve, reject) => {
       this.#settle = { resolve, reject }
@@ -253,11 +138,11 @@ class MemoryLaneSubscription implements LaneSubscription {
     return this.#state === 'closed'
   }
 
-  state(): ReadinessState {
+  state(): SubscriptionAttemptState {
     return this.#state
   }
 
-  onStateChange(cb: (state: ReadinessState) => void): () => void {
+  onStateChange(cb: (state: SubscriptionAttemptState) => void): () => void {
     this.#listeners.add(cb)
     return () => this.#listeners.delete(cb)
   }
@@ -278,13 +163,6 @@ class MemoryLaneSubscription implements LaneSubscription {
     this.#settle.reject(new Error(reason))
   }
 
-  // The generation this subscription belongs to was dropped: its channel no longer exists and can never
-  // come back, so the subscription is terminal rather than merely lost.
-  generationDropped(): void {
-    this.#detach = () => {}
-    this.#transition('closed')
-  }
-
   async deliver(payload: Uint8Array, info: { seq: number; timestamp: number }): Promise<void> {
     // A receiver is typed `=> void`, so its completion is never a cross-backend guarantee. In memory the
     // handoff attempt IS the dispatch call, so a receiver that returns a thenable extends that attempt —
@@ -292,30 +170,65 @@ class MemoryLaneSubscription implements LaneSubscription {
     await (this.#receiver(payload, info) as unknown)
   }
 
-  #transition(state: ReadinessState): void {
+  receiverCount(): number {
+    return this.closed ? 0 : this.#localReceiverCount()
+  }
+
+  #transition(state: SubscriptionAttemptState): void {
     if (this.#state === state) return
     this.#state = state
     for (const cb of this.#listeners) cb(state)
   }
 }
 
-export class MemoryRoomBackend implements RoomBackendSpi {
-  readonly spiVersion = ROOM_SPI_VERSION
-  readonly capabilities: RoomBackendSpi['capabilities']
+export class MemoryBackend implements BackendDriver {
+  readonly spiVersion = BACKEND_SPI_VERSION
+  readonly capabilities: BackendDriver['capabilities']
+  readonly subscriptions: SubscriptionDriver
 
   readonly #now: () => number
-  readonly #state: MemoryRoomBackendState
+  readonly #state: MemoryBackendState
   #disposed = false
 
-  constructor(options: MemoryRoomBackendOptions = {}) {
+  constructor(options: MemoryBackendOptions = {}) {
     this.#now = options.authorityNow ?? (() => Date.now())
-    this.#state = options.state ?? new MemoryRoomBackendState()
+    this.#state = options.state ?? new MemoryBackendState()
+    this.subscriptions = {
+      bind: (source) => ({
+        partition: '',
+        valid: () => true,
+        open: (receiver, localReceiverCount) => this.#openSubscription(source, receiver, localReceiverCount),
+      }),
+    }
     this.capabilities = {
       receivers: 'global',
       maxRetainedPayloadBytes: options.maxRetainedPayloadBytes ?? DEFAULT_MAX_RETAINED_BYTES,
       clusterSafe: false,
       directory: true,
     }
+  }
+
+  // ── cheap Broadcast ──
+
+  publish(lane: BroadcastLane, payload: Uint8Array): PublishResult {
+    this.#assertLive()
+    const previous = this.#state.broadcastOrder.get(lane.key)
+    if (previous?.seq === Number.MAX_SAFE_INTEGER) {
+      throw new Error('publish: sequence exhausted for the ordering domain')
+    }
+    const mark = {
+      seq: (previous?.seq ?? 0) + 1,
+      timestamp: Math.max(this.#now(), previous?.timestamp ?? 0),
+    }
+    if (!Number.isSafeInteger(mark.seq) || !Number.isSafeInteger(mark.timestamp)) {
+      throw new Error('publish: sequence exhausted for the ordering domain')
+    }
+    this.#state.broadcastOrder.set(lane.key, mark)
+    const targets = [...(this.#state.broadcastSubs.get(broadcastRouteKey(lane)) ?? [])]
+    const frame = copyBytes(payload)
+    for (const target of targets) void target.deliver(copyBytes(frame), mark).catch(console.error)
+    const delivered = sumReceiverCounts(targets)
+    return { ...mark, receivers: delivered, meta: { delivered, transport: 'in-memory' } }
   }
 
   // ── head ──
@@ -334,12 +247,11 @@ export class MemoryRoomBackend implements RoomBackendSpi {
     { ok: true; head: RoomHead } | { ok: true; deleted: true } | { conflict: true; current: RoomHead | null }
   > {
     this.#assertLive()
-    assertHeadNextWellFormed(next)
     const existing = this.#state.rooms.get(roomId)
     const current = this.#liveHead(existing)
     // Operation legality precedes the compare for the delete path only; every other transition is
     // validated against the head the compare actually matched, so a genuine race still conflicts.
-    assertDeleteLegal(next, current)
+    assertHeadDeleteLegal(next, current)
     if (!this.#headCxMatches(cx, current)) {
       return { conflict: true, current: current === null ? null : publicHead(current) }
     }
@@ -349,7 +261,7 @@ export class MemoryRoomBackend implements RoomBackendSpi {
       room.head = null
       return { ok: true, deleted: true }
     }
-    assertTransitionAllowed(cx, next, current, existing?.gens)
+    assertHeadTransition(cx, next, current, (inc) => existing?.gens.has(inc) === true)
     return { ok: true, head: publicHead(this.#storeHead(room, next)) }
   }
 
@@ -461,7 +373,7 @@ export class MemoryRoomBackend implements RoomBackendSpi {
       accepted: true,
       seq: mark.seq,
       timestamp: mark.timestamp,
-      receivers: targets.length,
+      receivers: sumReceiverCounts(targets),
       delivery: this.#enqueueAttempt(gen, key, targets, frame, info),
     }
   }
@@ -512,7 +424,7 @@ export class MemoryRoomBackend implements RoomBackendSpi {
   #enqueueAttempt(
     gen: Generation,
     key: string,
-    targets: MemoryLaneSubscription[],
+    targets: MemorySubscriptionAttempt[],
     frame: Uint8Array,
     info: { seq: number; timestamp: number },
   ): Promise<void> {
@@ -574,12 +486,30 @@ export class MemoryRoomBackend implements RoomBackendSpi {
 
   // ── subscriptions ──
 
-  subscribeLane(roomId: string, inc: string, lane: LaneId, receiver: LaneReceiver): LaneSubscription {
-    this.#assertLive()
+  #openSubscription(
+    source: BackendSubscriptionSource,
+    receiver: BackendReceiver,
+    localReceiverCount: () => number,
+  ): MemorySubscriptionAttempt {
+    if (source.kind === 'broadcast') {
+      const key = broadcastRouteKey(source.lane)
+      let sub!: MemorySubscriptionAttempt
+      sub = new MemorySubscriptionAttempt(receiver, localReceiverCount, () => {
+        this.#state.broadcastSubs.get(key)?.delete(sub)
+      })
+      const subs = this.#state.broadcastSubs.get(key) ?? new Set<MemorySubscriptionAttempt>()
+      subs.add(sub)
+      this.#state.broadcastSubs.set(key, subs)
+      sub.establish()
+      return sub
+    }
+
+    const { roomId, inc, lane } = source
     const room = this.#state.rooms.get(roomId)
     const head = this.#liveHead(room)
     const key = laneKey(lane)
-    const sub: MemoryLaneSubscription = new MemoryLaneSubscription(receiver, () => {
+    let sub!: MemorySubscriptionAttempt
+    sub = new MemorySubscriptionAttempt(receiver, localReceiverCount, () => {
       this.#state.rooms.get(roomId)?.gens.get(inc)?.subs.get(key)?.delete(sub)
     })
     if (room === undefined || head === null || head.currentInc !== inc || head.state !== 'open') {
@@ -588,7 +518,7 @@ export class MemoryRoomBackend implements RoomBackendSpi {
     }
     // Registration is durable before `ready` resolves: a commit accepted after this point must see it.
     const gen = this.#generation(room, inc)
-    const subs = gen.subs.get(key) ?? new Set<MemoryLaneSubscription>()
+    const subs = gen.subs.get(key) ?? new Set<MemorySubscriptionAttempt>()
     subs.add(sub)
     gen.subs.set(key, subs)
     sub.establish()
@@ -614,7 +544,6 @@ export class MemoryRoomBackend implements RoomBackendSpi {
     }
     const gen = room.gens.get(inc)
     if (gen === undefined) return // already dropped — the janitor is resumable
-    for (const subs of gen.subs.values()) for (const sub of subs) sub.generationDropped()
     room.gens.delete(inc)
     this.#sweep(room)
   }
@@ -649,19 +578,16 @@ export class MemoryRoomBackend implements RoomBackendSpi {
   async dispose(): Promise<void> {
     if (this.#disposed) return
     this.#disposed = true
-    for (const room of this.#state.rooms.values()) {
-      for (const gen of room.gens.values()) {
-        for (const subs of gen.subs.values()) for (const sub of subs) sub.generationDropped()
-      }
-    }
     this.#state.rooms.clear()
     this.#state.directory.clear()
+    this.#state.broadcastOrder.clear()
+    this.#state.broadcastSubs.clear()
   }
 
   // ── internals ──
 
   #assertLive(): void {
-    if (this.#disposed) throw new Error('MemoryRoomBackend: used after dispose()')
+    if (this.#disposed) throw new Error('MemoryBackend: used after dispose()')
   }
 
   #roomFor(roomId: string): RoomRecord {

@@ -1,6 +1,5 @@
-// The Room backend seam. Dark: not exported from any barrel and not used by any Room call site yet —
-// the three-backend parity proof (memory reference, Redis standalone, Cloudflare local) is what
-// graduates these types from draft to release candidate.
+// Telefunc's one backend seam. Generic Broadcast uses the cheap publish/subscribe verbs; Room uses
+// the fenced/durable verbs as well. Both share the same codec, subscription lifecycle and fan-out.
 //
 // Physical model, verbatim for every backend:
 //
@@ -16,9 +15,18 @@
 // record, so a config-without-fence zombie is unrepresentable and every other operation's
 // `expectedInc` check resolves against `head.currentInc` + `state`. Nothing but the head is unscoped.
 
-export const ROOM_SPI_VERSION = 1 as const // identifies Room's FIRST released contract. SPI maturity
-// (draft → candidate after the parity proof → published) is a
-// process label, never a wire value — no older Room SPI exists.
+export const BACKEND_SPI_VERSION = 1 as const
+
+/** A cheap Broadcast route. Text and binary use separate delivery routes but share `key`'s ordering
+ * domain, preserving Broadcast's single per-key sequence across both payload kinds. */
+export type BroadcastLane = { key: string; kind: 'text' | 'binary' }
+
+export type PublishResult = {
+  seq: number
+  timestamp: number
+  receivers?: number
+  meta?: Record<string, unknown>
+}
 
 // ── Lanes: every lane names its order domain and its channel ──
 export type LaneId =
@@ -55,7 +63,7 @@ export type HeadCx =
   | { expect: { rev: string; closingLeaseExpired: true } }
   // EXPIRED-CLOSE TAKEOVER (recovery): succeeds iff head.rev matches ∧ state==='closing' ∧
   // closeLease.until < authorityNow — the expiry compare runs in AUTHORITY time INSIDE the CX
-  // (memory: isolate clock · Redis: TIME inside the head-CX Lua · CF: room-DO clock in the same tx);
+  // the expiry compare runs on the backend's authoritative clock inside the same atomic operation;
   // a local caller clock is never consulted. `next` MUST be closing(SAME inc, fresh lease with a
   // DIFFERENT id) — takeover replaces only the lease, never the incarnation; the backend mints the
   // new `until` (HeadNext durationMs rule). An unexpired lease makes the CX fail like any rev
@@ -97,33 +105,75 @@ export type CommitAccepted = {
   seq: number // positive safe integer; standalone cursor within this incarnation+lane domain
   timestamp: number // safe integer; non-decreasing authority time, independent of seq advancement
   receivers: number // targets snapshotted at acceptance
-  delivery: Promise<void> // the backend's ONE at-most-once HANDOFF attempt: settles when the handoff
-  // settles — memory: callback dispatch · Redis: PUBLISH reply · CF: target RPC fan-out. Receiver-callback
-  // completion is NOT a cross-backend guarantee; per-target failure visibility is a per-backend
-  // trace/capability. NEVER retries; NEVER poisons.
+  delivery: Promise<void> // the backend's ONE at-most-once HANDOFF attempt: settles when its
+  // backend-defined handoff settles. Receiver-callback completion is NOT a cross-backend guarantee;
+  // per-target failure visibility is a per-backend trace/capability. NEVER retries; NEVER poisons.
 }
 export type CommitResult = CommitAccepted | { stale: true }
 
-export type ReadinessState = 'establishing' | 'ready' | 'lost' | 'closed'
-// The SPI deliberately supplies no settlement deadline: initial establishment (`ready`) and renewal
-// after `lost` may remain pending indefinitely. Consumers that require liveness must bound both.
-export type LaneSubscription = {
-  ready: Promise<void> // FIRST establishment only; rejects on initial failure (fail-closed)
-  state(): ReadinessState
-  onStateChange(cb: (s: ReadinessState) => void): () => void // renewal loss / re-establishment
+export type SubscriptionState = 'establishing' | 'ready' | 'lost' | 'closed'
+/** Raw-only ownership terminal. Core maps this to public `closed`; consumers never receive it. */
+export type SubscriptionAttemptState = SubscriptionState | 'terminated'
+// A raw backend establishment attempt has no settlement deadline; the shared subscription manager
+// bounds every attempt before exposing this supervised subscription at the SPI.
+export type BackendSubscription = {
+  /** The current readiness generation. It changes after a ready subscription is lost and rejects
+   * after bounded replacement exhaustion; callers must read it at the point they need readiness. */
+  readonly ready: Promise<void>
+  state(): SubscriptionState
+  onStateChange(cb: (s: SubscriptionState) => void): () => void
   unsubscribe(): Promise<void>
 }
 
-export type LaneReceiver = (payload: Uint8Array, info: { seq: number; timestamp: number }) => void
+export type BackendReceiver = (payload: Uint8Array, info: { seq: number; timestamp: number }) => void
 
-export type RoomBackendSpi = {
-  readonly spiVersion: typeof ROOM_SPI_VERSION
+/** The neutral source description handed to a backend author's raw subscription driver. Core owns
+ * canonical keys, local fan-out, refcounting and supervision; the driver sees one establishment attempt. */
+export type BackendSubscriptionSource =
+  | { kind: 'broadcast'; lane: BroadcastLane }
+  | { kind: 'durable'; roomId: string; inc: string; lane: LaneId }
+
+/** One raw backend establishment attempt. Its readiness may remain pending indefinitely; core bounds
+ * the attempt before exposing any subscription to an SPI consumer. */
+export type SubscriptionAttempt = {
+  readonly ready: Promise<void>
+  state(): SubscriptionAttemptState
+  onStateChange(cb: (state: SubscriptionAttemptState) => void): () => void
+  unsubscribe(): Promise<void>
+}
+
+/** A source binding captured synchronously while the caller's local ownership context is live. Core
+ * compares `partition` by string value only, as an opaque local slot discriminator, and retains
+ * `open` for ambient-free replacement attempts. Binding performs no remote installation. `valid`
+ * must be a synchronous, side-effect-free, non-throwing read of local ownership. */
+export type SubscriptionBinding = {
+  readonly partition: string
+  valid(): boolean
+  open(receiver: BackendReceiver, localReceiverCount: () => number): SubscriptionAttempt
+}
+
+/** The only backend-specific subscription edge. An author captures local ownership once, then
+ * implements acknowledgement and cleanup for one raw attempt; core supplies source identity, epochs,
+ * fan-out, readiness, bounded replacement and the watchdog. */
+export type SubscriptionDriver<Source = BackendSubscriptionSource> = {
+  bind(source: Source): SubscriptionBinding
+}
+
+/** The supervised backend contract consumed by Telefunc through `getBackend()`. Backend authors do not
+ * implement this type directly and never receive a supervised subscription. They implement
+ * `BackendDriver`; core composes its raw subscription driver into this consumer-facing SPI. */
+export type BackendSpi = {
+  readonly spiVersion: typeof BACKEND_SPI_VERSION
   readonly capabilities: {
     receivers: 'global' | 'node-local' | 'none'
     maxRetainedPayloadBytes: number // aggregate cap; commit with larger retain REJECTS (throws)
     clusterSafe: boolean
     directory: boolean // directory verbs present iff true
   }
+
+  // ── cheap Broadcast ──
+  publish(lane: BroadcastLane, payload: Uint8Array): PublishResult | Promise<PublishResult>
+  subscribe(lane: BroadcastLane, receiver: BackendReceiver): BackendSubscription
 
   // ── head ──
   readHead(roomId: string): Promise<{ head: RoomHead } | null> // always consistent
@@ -189,7 +239,7 @@ export type RoomBackendSpi = {
   // sequence. A mismatch or missing generation is a silent no-op. The guard requires `lane`.
 
   // ── subscriptions (per lane channel; INCARNATION-SCOPED) ──
-  subscribeLane(roomId: string, inc: string, lane: LaneId, receiver: LaneReceiver): LaneSubscription
+  subscribeLane(roomId: string, inc: string, lane: LaneId, receiver: BackendReceiver): BackendSubscription
   // Establishment performs an open-head check (head.currentInc === inc ∧ state === 'open'); a mismatch
   // rejects `ready`. Channels/routes are keyed by (inc, lane): a surviving subscription from a previous
   // incarnation can never receive a recreated room's frames (I11).
@@ -207,4 +257,10 @@ export type RoomBackendSpi = {
   ): Promise<{ entries: { roomId: string; incTag: string }[]; cursor?: string }> // paginated, may be stale
 
   dispose(): Promise<void>
+}
+
+/** The contract a backend author implements. It is the durable/cheap storage surface plus one raw
+ * subscription driver; core turns it into `BackendSpi` at installation time. */
+export type BackendDriver = Omit<BackendSpi, 'subscribe' | 'subscribeLane'> & {
+  readonly subscriptions: SubscriptionDriver
 }

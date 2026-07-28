@@ -53,12 +53,6 @@ export type {
 export { ChannelClosedError, ChannelOverflowError } from '../../wire-protocol/channel-errors.js'
 export { NetworkError } from '../../shared/NetworkError.js'
 export type { ChannelBase, ClientChannel } from '../../wire-protocol/channel.js'
-export { DefaultBroadcastAdapter } from '../../wire-protocol/server/broadcast.js'
-export type {
-  BroadcastAdapter,
-  BroadcastTransport,
-  BroadcastUnsubscribe,
-} from '../../wire-protocol/server/broadcast.js'
 export type { TelefuncServerExtension } from './extensions.js'
 export type {
   TypeContract,
