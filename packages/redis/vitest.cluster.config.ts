@@ -29,7 +29,7 @@ if (parsedNodes.length < 3) throw new Error('Redis Cluster certification require
 export default defineConfig({
   test: {
     root: repoRoot,
-    include: ['packages/telefunc/wire-protocol/backend/conformance/*.spec.ts', 'packages/redis/src/room/*.spec.ts'],
+    include: ['packages/telefunc/wire-protocol/backend/conformance/*.spec.ts', 'packages/redis/src/redis.spec.ts'],
     setupFiles: ['packages/redis/src/room/register.ts'],
     fileParallelism: false,
     testTimeout: 180_000,

@@ -6,6 +6,6 @@
     "noEmit": true,
     "declaration": false
   },
-  "include": ["src/room/**/*.ts"],
+  "include": ["src/**/*.ts"],
   "exclude": []
 }

@@ -19,7 +19,7 @@ installRedis(redis)
 ```
 
 That one `installRedis()` call configures both the broadcast transport and the Room backend from the
-same client. An explicit `installRoomBackend()` remains available as an advanced override.
+same client. An explicit `installBackend()` remains available as an advanced override.
 
 ## Room backend
 
@@ -48,10 +48,10 @@ For custom Room backend options, explicitly install an override before or after 
 
 ```ts
 import { RedisRoomBackend, installRedis } from '@telefunc/redis'
-import { installRoomBackend } from 'telefunc/backend'
+import { installBackend } from 'telefunc/backend'
 
 installRedis(redis)
-installRoomBackend(() => new RedisRoomBackend({ redis, maxRetainedPayloadBytes: 8 * 1024 * 1024 }))
+installBackend(() => new RedisRoomBackend({ redis, maxRetainedPayloadBytes: 8 * 1024 * 1024 }))
 ```
 
 The factory is Telefunc's ownership boundary: Telefunc owns and disposes the created backend. An

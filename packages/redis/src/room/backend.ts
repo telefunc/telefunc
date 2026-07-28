@@ -16,24 +16,23 @@ import { Cluster, type Redis } from 'ioredis'
 import { assert } from '../assert.js'
 import { callDefinedCommand } from '../callDefinedCommand.js'
 import type {
+  BackendDriver,
+  BackendSubscriptionSource,
+  BroadcastLane,
   CellMutation,
   CommitResult,
   CxResult,
   HeadCx,
   HeadNext,
   LaneId,
-  LaneReceiver,
-  LaneSubscription,
-  RoomBackendSpi,
+  PublishResult,
   RoomHead,
 } from 'telefunc/backend'
-import { MAX_CLOSE_LEASE_MS, MIN_CLOSE_LEASE_MS, ROOM_SPI_VERSION } from 'telefunc/backend'
 import {
   cellKey,
   cellKeyPrefix,
-  channelKey,
-  decodeFrameHeader,
   DEFAULT_ROOM_PREFIX,
+  decodeRedisOrderingFrame,
   directoryIndexKey,
   directoryTagsKey,
   escapeGlob,
@@ -46,23 +45,18 @@ import {
   parseLaneKey,
   REDIS_ROOM_COMMAND_KEYS,
   REDIS_ROOM_COMMANDS,
+  REDIS_ORDERING_FRAME_LUA,
   retainedKey,
   retainedKeyPrefix,
   revKey,
 } from './layout.js'
-import {
-  RedisGenerationInvalidError,
-  RedisSubscriberTransport,
-  type RedisSubscriberChannelBinding,
-  redisSubscriptionSchedulerFor,
-} from './subscriber-transport.js'
+import { RedisSubscriptionDriver, type RedisGenerationAttempt } from './subscriber-transport.js'
 
 const DEFAULT_MAX_RETAINED_BYTES = 16 * 1024 * 1024
 const DIRECTORY_PAGE_SIZE = 100
 const STABLE_READ_ATTEMPTS = 8
 const SCAN_COUNT = 250
 const NEWLINE = 0x0a
-const SUBSCRIPTION_RETRY_ATTEMPTS = 5
 export const REDIS_GENERATION_CAPTURE_TTL_MS = 90_000
 
 function assertOrderingPosition(seq: number, timestamp: number, context: string): void {
@@ -71,19 +65,40 @@ function assertOrderingPosition(seq: number, timestamp: number, context: string)
   }
 }
 
-function defaultSubscriptionRetryDelay(attempt: number): number {
-  const ceiling = Math.min(4_000, 250 * 2 ** (attempt - 1))
-  return Math.floor(ceiling * (0.5 + Math.random() * 0.5))
-}
-
-function roomGenerationKey(roomId: string, inc: string): string {
-  return `${roomId.length}:${roomId}${inc}`
-}
-
 export type RedisRoomBackendOptions = {
   redis: Redis | Cluster
   prefix?: string
   maxRetainedPayloadBytes?: number
+}
+
+const PUBLISH_CMD = 'tfPublish'
+const PUBLISH_LUA = `${REDIS_ORDERING_FRAME_LUA}
+local previous = redis.call('GET', KEYS[1])
+if previous and tonumber(previous) >= 9007199254740991 then
+  return redis.error_reply('publish: sequence exhausted for the ordering domain')
+end
+local seq = redis.call('INCR', KEYS[1])
+local t = redis.call('TIME')
+local ts = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
+if seq < 1 or seq > 9007199254740991 or ts < 0 or ts > 9007199254740991 then
+  return redis.error_reply('publish: invalid ordering position')
+end
+local frame = tf_ordering_frame(seq, ts, ARGV[1])
+local receivers = redis.call('PUBLISH', KEYS[2], frame)
+return {seq, ts, receivers}
+`.trim()
+
+function broadcastChannel(prefix: string, lane: BroadcastLane): string {
+  const kind = lane.kind === 'text' ? 't' : 'b'
+  return `${prefix}${kind}:{${lane.key}}`
+}
+
+function broadcastSequenceKey(prefix: string, key: string): string {
+  return `${prefix}seq:{${key}}`
+}
+
+function durableSource(roomId: string, inc: string, lane: LaneId): BackendSubscriptionSource {
+  return { kind: 'durable', roomId, inc, lane }
 }
 
 // The stored head, exactly as the Lua encodes it. `config` is opaque base64; `until`/`exp` are authority
@@ -123,34 +138,6 @@ function toPublicHead(stored: StoredHead): RoomHead {
   return head
 }
 
-// The next-head SHAPE rules that hold regardless of the current head (spi.md §2): the lease is present
-// iff closing and finite/bounded, a tombstone is the only head with a TTL, and only a tombstone has a
-// null incarnation. Validated in JS and thrown before the atomic record runs.
-function assertHeadNextWellFormed(next: HeadNext): void {
-  if ('delete' in next) return
-  const { head, ttlMs } = next
-  if (head.state === 'closing') {
-    if (head.closeLease === undefined) throw new Error('head CX: a head entering closing must carry a close lease')
-    const { durationMs } = head.closeLease
-    if (!(durationMs >= MIN_CLOSE_LEASE_MS && durationMs <= MAX_CLOSE_LEASE_MS)) {
-      throw new Error(
-        `head CX: close lease durationMs ${durationMs} outside [${MIN_CLOSE_LEASE_MS}, ${MAX_CLOSE_LEASE_MS}]`,
-      )
-    }
-  } else if (head.closeLease !== undefined) {
-    throw new Error(`head CX: a '${head.state}' head must not carry a close lease`)
-  }
-  if (ttlMs !== undefined && head.state !== 'closed') {
-    throw new Error(`head CX: ttlMs is only valid for a 'closed' tombstone, got '${head.state}'`)
-  }
-  if (head.state === 'closed' && head.currentInc !== null) {
-    throw new Error('head CX: a closed tombstone must clear currentInc to null')
-  }
-  if (head.state !== 'closed' && head.currentInc === null) {
-    throw new Error(`head CX: a '${head.state}' head must name an incarnation`)
-  }
-}
-
 function encodeCx(cx: HeadCx): string {
   if (cx.expect === 'absent') return JSON.stringify({ form: 'absent' })
   const expect = cx.expect
@@ -170,25 +157,13 @@ function encodeNext(next: HeadNext): string {
   return JSON.stringify(payload)
 }
 
-type RedisGenerationBinding = RedisSubscriberChannelBinding & {
-  roomId: string
-  inc: string
-  attemptId: string
-  createdAt: number | null
-  generationToken: string | null
-}
-
-export class RedisRoomBackend implements RoomBackendSpi {
-  readonly spiVersion = ROOM_SPI_VERSION
-  readonly capabilities: RoomBackendSpi['capabilities']
+export class RedisRoomBackend implements BackendDriver {
+  readonly spiVersion = 1 as const
+  readonly capabilities: BackendDriver['capabilities']
+  readonly subscriptions: RedisSubscriptionDriver
 
   readonly #publisher: Redis | Cluster
-  readonly #transport: RedisSubscriberTransport
   readonly #prefix: string
-  // Durable capture/generation identity stays here. The transport receives this object only as an opaque
-  // channel binding and delegates capture/validation back before it can settle readiness.
-  readonly #generationBindings = new Map<string, RedisGenerationBinding>()
-  readonly #locallyDroppingGenerations = new Set<string>()
   #disposed = false
 
   constructor(options: RedisRoomBackendOptions) {
@@ -198,16 +173,15 @@ export class RedisRoomBackend implements RoomBackendSpi {
       'RedisRoomBackend: maxRetainedPayloadBytes must be a finite non-negative number',
     )
     this.#publisher = options.redis
-    const subscriptionScheduler = redisSubscriptionSchedulerFor(options.redis)
     let clusterSubscriberSelection = 0
     const createSubscriber = async (): Promise<Redis> => {
       if (!(options.redis instanceof Cluster)) {
         return options.redis.duplicate({
-          connectionName: `telefunc-room-subscriber-${randomUUID()}`,
+          connectionName: `telefunc-subscriber-${randomUUID()}`,
           autoResubscribe: false,
-          lazyConnect: false,
-          retryStrategy: (attempt) =>
-            attempt <= SUBSCRIPTION_RETRY_ATTEMPTS ? defaultSubscriptionRetryDelay(attempt) : null,
+          lazyConnect: true,
+          maxRetriesPerRequest: 1,
+          retryStrategy: () => null,
         })
       }
       // Use a supported direct Redis duplicate of a live master. Unlike Cluster's hidden Pub/Sub
@@ -229,12 +203,11 @@ export class RedisRoomBackend implements RoomBackendSpi {
       const master = masters[clusterSubscriberSelection % masters.length] as Redis
       clusterSubscriberSelection++
       return master.duplicate({
-        connectionName: `telefunc-room-subscriber-${randomUUID()}`,
+        connectionName: `telefunc-subscriber-${randomUUID()}`,
         autoResubscribe: false,
-        lazyConnect: false,
+        lazyConnect: true,
         maxRetriesPerRequest: 1,
-        retryStrategy: (attempt) =>
-          attempt <= SUBSCRIPTION_RETRY_ATTEMPTS ? defaultSubscriptionRetryDelay(attempt) : null,
+        retryStrategy: () => null,
       })
     }
     this.#prefix = options.prefix ?? DEFAULT_ROOM_PREFIX
@@ -244,27 +217,37 @@ export class RedisRoomBackend implements RoomBackendSpi {
       clusterSafe: true,
       directory: true,
     }
+    this.#publisher.defineCommand(PUBLISH_CMD, { numberOfKeys: 2, lua: PUBLISH_LUA })
     for (const command of Object.values(REDIS_ROOM_COMMANDS)) {
       if (command.numberOfKeys === null) this.#publisher.defineCommand(command.name, { lua: command.lua })
       else this.#publisher.defineCommand(command.name, { numberOfKeys: command.numberOfKeys, lua: command.lua })
     }
-    this.#transport = new RedisSubscriberTransport({
+    this.subscriptions = new RedisSubscriptionDriver({
+      prefix: this.#prefix,
       createSubscriber,
-      retryDelay: defaultSubscriptionRetryDelay,
-      scheduler: subscriptionScheduler,
-      captureGeneration: (binding) => this.#ensureGenerationCaptured(this.#requireGenerationBinding(binding)),
-      validateGeneration: (binding, includeCapture) =>
-        this.#validateGeneration(this.#requireGenerationBinding(binding), includeCapture),
-      onGenerationInvalidation: (owner, token) => this.#generationInvalidated(owner, token),
-      onChannelRemoved: (binding) => {
-        if (this.#generationBindings.get(binding.channel) === binding) {
-          this.#generationBindings.delete(binding.channel)
-        }
-      },
+      captureGeneration: (source, attempt) => this.#captureGeneration(source, attempt),
+      validateGeneration: (source, attempt) => this.#validateGeneration(source, attempt),
     })
   }
 
   // ── head ──
+
+  async publish(lane: BroadcastLane, payload: Uint8Array): Promise<PublishResult> {
+    this.#assertLive()
+    const reply = await callDefinedCommand(this.#publisher, PUBLISH_CMD, [
+      broadcastSequenceKey(this.#prefix, lane.key),
+      broadcastChannel(this.#prefix, lane),
+      toBuffer(payload),
+    ])
+    assert(Array.isArray(reply) && reply.length === 3, 'Publish script returned an unexpected shape')
+    const [seq, timestamp, receivers] = reply
+    assert(
+      typeof seq === 'number' && typeof timestamp === 'number' && typeof receivers === 'number',
+      'Publish script returned non-numeric seq/ts/receivers',
+    )
+    assertOrderingPosition(seq, timestamp, 'RedisRoomBackend.publish')
+    return { seq, timestamp, receivers }
+  }
 
   async readHead(roomId: string): Promise<{ head: RoomHead } | null> {
     this.#assertLive()
@@ -281,7 +264,6 @@ export class RedisRoomBackend implements RoomBackendSpi {
     { ok: true; head: RoomHead } | { ok: true; deleted: true } | { conflict: true; current: RoomHead | null }
   > {
     this.#assertLive()
-    assertHeadNextWellFormed(next)
     const reply = (await this.#call(REDIS_ROOM_COMMANDS.headCx.name, [
       ...REDIS_ROOM_COMMAND_KEYS.headCx(this.#prefix, roomId),
       this.#nowArg(),
@@ -376,7 +358,7 @@ export class RedisRoomBackend implements RoomBackendSpi {
     opts?: { retain?: boolean; closingLease?: string },
   ): Promise<CommitResult> {
     this.#assertLive()
-    const channel = channelKey(this.#prefix, roomId, inc, laneKey(lane))
+    const source = durableSource(roomId, inc, lane)
     const reply = (await this.#call(REDIS_ROOM_COMMANDS.commit.name, [
       ...REDIS_ROOM_COMMAND_KEYS.commit(this.#prefix, roomId, inc, lane),
       this.#nowArg(),
@@ -397,7 +379,7 @@ export class RedisRoomBackend implements RoomBackendSpi {
     // the frame was queued to the subscriber socket during the awaited commit, so a PING round-trip on
     // that connection resolves only after ioredis has dispatched the frame to the local receiver — WITHOUT
     // awaiting the receiver's own completion, so handoffAwaitsReceiver stays false.
-    const delivery = this.#transport.flush(channel)
+    const delivery = this.subscriptions.flush(source)
     // Consumers may observe delivery later (or intentionally only use acceptance). Install an immediate
     // rejection observer so a connection/lifecycle epoch crossing is surfaced by `delivery` without an
     // ambient unhandledRejection in the interim.
@@ -421,7 +403,10 @@ export class RedisRoomBackend implements RoomBackendSpi {
     this.#assertLive()
     const frame = await this.#publisher.getBuffer(retainedKey(this.#prefix, roomId, inc, laneKey(lane)))
     if (frame === null) return null
-    const { seq, timestamp, payload } = decodeFrameHeader(frame)
+    const {
+      payload,
+      info: { seq, timestamp },
+    } = decodeRedisOrderingFrame(frame)
     assertOrderingPosition(seq, timestamp, 'RedisRoomBackend.readRetained')
     return { payload: Uint8Array.from(payload), seq, timestamp }
   }
@@ -459,82 +444,39 @@ export class RedisRoomBackend implements RoomBackendSpi {
 
   // ── subscriptions ──
 
-  subscribeLane(roomId: string, inc: string, lane: LaneId, receiver: LaneReceiver): LaneSubscription {
-    this.#assertLive()
-    const channel = channelKey(this.#prefix, roomId, inc, laneKey(lane))
-    let binding = this.#generationBindings.get(channel)
-    if (binding === undefined) {
-      binding = {
-        channel,
-        roomId,
-        inc,
-        owner: roomGenerationKey(roomId, inc),
-        invalidationChannel: generationInvalidationChannel(this.#prefix, roomId, inc),
-        attemptId: randomUUID(),
-        createdAt: null,
-        generationToken: null,
-      }
-      this.#generationBindings.set(channel, binding)
-    }
-    return this.#transport.attach(binding, receiver)
-  }
-
-  async #ensureGenerationCaptured(binding: RedisGenerationBinding): Promise<void> {
-    if (binding.generationToken !== null) return
-    const captured = await this.#captureGeneration(binding)
-    // Local observation follows the awaited durable command. If its response is lost, a retry therefore
-    // reuses the exact attempt id and creation epoch instead of minting a second capture.
-    binding.generationToken = captured
-  }
-
-  #requireGenerationBinding(binding: RedisSubscriberChannelBinding): RedisGenerationBinding {
-    const current = this.#generationBindings.get(binding.channel)
-    if (current !== binding) {
-      throw new RedisGenerationInvalidError(`subscribeLane: stale channel binding '${binding.channel}'`)
-    }
-    return current
-  }
-
-  async #captureGeneration(context: RedisGenerationBinding): Promise<string> {
-    if (context.createdAt === null) context.createdAt = await this.#authorityNowMs()
+  async #captureGeneration(
+    source: Extract<BackendSubscriptionSource, { kind: 'durable' }>,
+    attempt: RedisGenerationAttempt,
+  ): Promise<void> {
+    if (attempt.createdAt === null) attempt.createdAt = await this.#authorityNowMs()
     const reply = (await this.#call(REDIS_ROOM_COMMANDS.captureGeneration.name, [
-      ...REDIS_ROOM_COMMAND_KEYS.captureGeneration(this.#prefix, context.roomId),
+      ...REDIS_ROOM_COMMAND_KEYS.captureGeneration(this.#prefix, source.roomId),
       this.#nowArg(),
-      context.inc,
-      context.attemptId,
-      String(context.createdAt),
+      source.inc,
+      attempt.attemptId,
+      String(attempt.createdAt),
       String(REDIS_GENERATION_CAPTURE_TTL_MS),
     ])) as string
     const parsed = JSON.parse(reply) as { ok: true; token: string } | { rejected: true; terminal: true; reason: string }
-    if ('rejected' in parsed) throw new RedisGenerationInvalidError(`subscribeLane: ${parsed.reason}`)
-    return parsed.token
+    if ('rejected' in parsed) throw new Error(`subscribeLane: ${parsed.reason}`)
+    attempt.generationToken = parsed.token
   }
 
-  async #validateGeneration(context: RedisGenerationBinding, includeCapture: boolean): Promise<boolean> {
-    if (context.generationToken === null) return false
+  async #validateGeneration(
+    source: Extract<BackendSubscriptionSource, { kind: 'durable' }>,
+    attempt: RedisGenerationAttempt,
+  ): Promise<boolean> {
+    if (attempt.generationToken === null) return false
     const reply = (await this.#call(REDIS_ROOM_COMMANDS.validateGeneration.name, [
-      ...REDIS_ROOM_COMMAND_KEYS.validateGeneration(this.#prefix, context.roomId),
+      ...REDIS_ROOM_COMMAND_KEYS.validateGeneration(this.#prefix, source.roomId),
       this.#nowArg(),
-      context.inc,
-      context.generationToken,
-      includeCapture ? context.attemptId : '',
-      includeCapture ? String(context.createdAt) : '',
+      source.inc,
+      attempt.generationToken,
+      attempt.attemptId,
+      String(attempt.createdAt),
       String(REDIS_GENERATION_CAPTURE_TTL_MS),
     ])) as string
     return (JSON.parse(reply) as { ok: boolean }).ok
-  }
-
-  #generationInvalidated(owner: string, token: string): void {
-    if (this.#locallyDroppingGenerations.has(owner)) return
-    const channels = new Set(
-      [...this.#generationBindings.values()]
-        .filter(
-          (binding) =>
-            binding.owner === owner && (binding.generationToken === null || binding.generationToken === token),
-        )
-        .map((binding) => binding.channel),
-    )
-    if (channels.size > 0) this.#transport.invalidateChannels(channels)
   }
 
   // ── generation lifecycle ──
@@ -550,30 +492,18 @@ export class RedisRoomBackend implements RoomBackendSpi {
     if ((head?.inc ?? null) === inc) {
       throw new Error(`dropGeneration: refusing to drop the current incarnation '${inc}' of room '${roomId}'`)
     }
-    // Physical data cleanup and fallible transport teardown happen while BOTH durable identity sources
-    // remain present. A crash or failed UNSUBSCRIBE is therefore resumable and cannot let the incarnation
-    // be reused while an old local mux can still bind to its channel.
     const keys = await this.#scanKeys(`${escapeGlob(genPrefix(this.#prefix, roomId, inc))}:*`)
     if (keys.length > 0) await this.#publisher.unlink(...keys)
-    const owner = roomGenerationKey(roomId, inc)
-    this.#locallyDroppingGenerations.add(owner)
-    try {
-      const generationToken = await this.#publisher.hget(generationTokensKey(this.#prefix, roomId), inc)
-      if (generationToken !== null) {
-        // Broker FIFO delivers this invalidation before any later publish for a legally reused generation,
-        // including to other backend instances. A disconnected instance instead fails its exact token
-        // validation before re-SUBSCRIBE. The initiating backend ignores its echo and performs the same
-        // exact cleanup synchronously below, so its local and broadcast teardown cannot race each other.
-        await this.#publisher.publish(generationInvalidationChannel(this.#prefix, roomId, inc), generationToken)
-      }
-      await this.#transport.dropGeneration(owner)
-      await this.#call(REDIS_ROOM_COMMANDS.dropGenerationFinalize.name, [
-        ...REDIS_ROOM_COMMAND_KEYS.dropGenerationFinalize(this.#prefix, roomId),
-        inc,
-      ])
-    } finally {
-      this.#locallyDroppingGenerations.delete(owner)
+    const generationToken = await this.#publisher.hget(generationTokensKey(this.#prefix, roomId), inc)
+    if (generationToken !== null) {
+      // Disconnected peers reject this token during their next capture/validation; connected peers close
+      // the raw attempt and let the shared manager perform its ordinary bounded replacement policy.
+      await this.#publisher.publish(generationInvalidationChannel(this.#prefix, roomId, inc), generationToken)
     }
+    await this.#call(REDIS_ROOM_COMMANDS.dropGenerationFinalize.name, [
+      ...REDIS_ROOM_COMMAND_KEYS.dropGenerationFinalize(this.#prefix, roomId),
+      inc,
+    ])
   }
 
   // ── directory (global; its own two co-slotted keys) ──
@@ -625,8 +555,6 @@ export class RedisRoomBackend implements RoomBackendSpi {
   async dispose(): Promise<void> {
     if (this.#disposed) return
     this.#disposed = true
-    await this.#transport.dispose()
-    this.#generationBindings.clear()
   }
 
   // ── internals ──
@@ -682,11 +610,19 @@ export class RedisRoomBackend implements RoomBackendSpi {
         // NOSCRIPT proves EVALSHA did not execute. Retrying the complete script with EVAL is therefore
         // non-duplicating, and ioredis preserves MOVED plus ASKING-on-the-same-connection routing for the
         // fallback command. This also covers SCRIPT FLUSH, restarted masters, and newly promoted owners.
-        if (!(err instanceof Error) || !err.message.includes('NOSCRIPT')) throw err
-        return await this.#publisher.eval(descriptor.lua, numberOfKeys, ...redisArgs)
+        if (!(err instanceof Error) || !err.message.includes('NOSCRIPT')) throw normalizeRedisError(err)
+        try {
+          return await this.#publisher.eval(descriptor.lua, numberOfKeys, ...redisArgs)
+        } catch (fallbackError) {
+          throw normalizeRedisError(fallbackError)
+        }
       }
     }
-    return await callDefinedCommand(this.#publisher, command, keysAndArgs)
+    try {
+      return await callDefinedCommand(this.#publisher, command, keysAndArgs)
+    } catch (error) {
+      throw normalizeRedisError(error)
+    }
   }
 
   async #scanKeys(pattern: string): Promise<string[]> {
@@ -706,6 +642,10 @@ export class RedisRoomBackend implements RoomBackendSpi {
 
 function redisScriptSha(lua: string): string {
   return createHash('sha1').update(lua).digest('hex')
+}
+
+function normalizeRedisError(error: unknown): Error {
+  return error instanceof Error ? new Error(error.message) : new Error(String(error))
 }
 
 // A stored cell is "<expiresAt|''>\n<payload bytes>"; the header is ASCII digits (or empty) with no

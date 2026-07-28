@@ -28,7 +28,7 @@
 // an empty value in production and therefore uses Redis TIME. The scalar is never a key and cannot affect
 // the co-slot invariant. A caller-local `Date.now()` is never an authority source.
 
-import type { LaneId } from 'telefunc/backend'
+import { HEAD_TRANSITIONS, ORDERING_FRAME_LAYOUT, type LaneId } from 'telefunc/backend'
 
 export const DEFAULT_ROOM_PREFIX = 'tf:'
 
@@ -155,6 +155,57 @@ local function tf_head(key, now)
 end
 `
 
+// Redis renders the frozen, backend-neutral ordering layout into its own runtime language. Both generic
+// Broadcast and durable Room embed this exact function; the decoder below interprets the same data.
+const orderingFrameFormat = [
+  ORDERING_FRAME_LAYOUT.endianness === 'big' ? '>' : '<',
+  ...Object.values(ORDERING_FRAME_LAYOUT.offsets)
+    .sort((left, right) => left - right)
+    .map(() => `I${ORDERING_FRAME_LAYOUT.wordBytes}`),
+].join('')
+export const REDIS_ORDERING_FRAME_LUA = `
+local function tf_ordering_frame(seq, ts, payload)
+  local seq_hi = math.floor(seq / ${ORDERING_FRAME_LAYOUT.wordRange})
+  local seq_lo = seq - seq_hi * ${ORDERING_FRAME_LAYOUT.wordRange}
+  local ts_hi = math.floor(ts / ${ORDERING_FRAME_LAYOUT.wordRange})
+  local ts_lo = ts - ts_hi * ${ORDERING_FRAME_LAYOUT.wordRange}
+  return struct.pack('${orderingFrameFormat}', seq_hi, seq_lo, ts_hi, ts_lo) .. payload
+end
+`
+
+export function decodeRedisOrderingFrame(frame: Uint8Array): {
+  payload: Uint8Array
+  info: { seq: number; timestamp: number }
+} {
+  if (frame.byteLength < ORDERING_FRAME_LAYOUT.headerBytes) {
+    throw new Error(`Redis ordering frame is shorter than its ${ORDERING_FRAME_LAYOUT.headerBytes}-byte header`)
+  }
+  const view = new DataView(frame.buffer, frame.byteOffset, frame.byteLength)
+  const littleEndian = String(ORDERING_FRAME_LAYOUT.endianness) === 'little'
+  const { offsets, wordRange } = ORDERING_FRAME_LAYOUT
+  const info = {
+    seq: view.getUint32(offsets.seqHigh, littleEndian) * wordRange + view.getUint32(offsets.seqLow, littleEndian),
+    timestamp:
+      view.getUint32(offsets.timestampHigh, littleEndian) * wordRange +
+      view.getUint32(offsets.timestampLow, littleEndian),
+  }
+  if (!Number.isSafeInteger(info.seq) || info.seq <= 0) {
+    throw new Error('Redis ordering frame has an invalid sequence')
+  }
+  if (!Number.isSafeInteger(info.timestamp) || info.timestamp < 0) {
+    throw new Error('Redis ordering frame has an invalid timestamp')
+  }
+  return { payload: frame.subarray(ORDERING_FRAME_LAYOUT.headerBytes), info }
+}
+
+function renderLuaHeadTransitionTable(variable = 'HEAD_TRANSITIONS'): string {
+  const rows = HEAD_TRANSITIONS.map((rule) => {
+    const key = `${rule.from}|${rule.cx}|${rule.to}`
+    return `  ["${key}"] = "${rule.constraint}",`
+  })
+  return [`local ${variable} = {`, ...rows, '}'].join('\n')
+}
+
 // HEAD CX — the single lifecycle primitive. One atomic record does legality (throw), compare (conflict),
 // the fresh-inc guard, minting and the store. The guarded transitions cannot be reached through any
 // other compare form (spi.md §2 transition table), so a generic {rev} can never install/replace a lease,
@@ -162,6 +213,7 @@ end
 //   KEYS: [1]=head [2]=gens [3]=headrev [4]=generation-tokens
 //   ARGV: [1]=now [2]=cxJson{form,rev?,closingLease?} [3]=nextJson{kind,state?,inc?,config?,lease?,ttlMs?}
 export const HEAD_CX_LUA = `${NOW_FN}
+${renderLuaHeadTransitionTable()}
 local head_key, gens_key, rev_key, generation_tokens_key = KEYS[1], KEYS[2], KEYS[3], KEYS[4]
 local now = tf_now(ARGV[1])
 local cx = cjson.decode(ARGV[2])
@@ -204,31 +256,33 @@ if nx.kind == 'delete' then
   return '{"tag":"deleted"}'
 end
 
--- transition-table legality (throws), validated against the head the compare matched
+-- Interpret the generated transition table against the head the compare matched.
 local transition = from .. ' + ' .. cx.form .. ' -> ' .. nx.state
-local installs_generation = transition == 'absent + absent -> open' or transition == 'closed + generic -> open'
-if installs_generation then
+local constraint = HEAD_TRANSITIONS[from .. '|' .. cx.form .. '|' .. nx.state]
+if not constraint then
+  return redis.error_reply("head CX: '" .. transition .. "' is not a legal head transition")
+end
+local installs_generation = constraint == 'fresh-inc'
+if constraint == 'fresh-inc' then
   if nx.inc ~= nil and redis.call('SISMEMBER', gens_key, nx.inc) == 1 then
-    return redis.error_reply("head CX: incarnation '" .. tostring(nx.inc) .. "' still has surviving generation state")
+    return redis.error_reply("head CX: incarnation '" .. tostring(nx.inc) ..
+      "' still has surviving generation state — creating a room on it would resurrect it")
   end
-elseif transition == 'open + generic -> open' or transition == 'open + generic -> closing' then
+elseif constraint == 'same-inc' then
   if nx.inc ~= cur.inc then
     return redis.error_reply('head CX: ' .. transition .. ' must keep the same incarnation')
   end
-elseif transition == 'closing + takeover -> closing' then
+elseif constraint == 'replace-lease' then
   if nx.inc ~= cur.inc then
     return redis.error_reply('head CX: an expired-close takeover must keep the same incarnation')
   end
   if nx.config ~= cur.config then
-    return redis.error_reply('head CX: an expired-close takeover must not change the config')
+    return redis.error_reply(
+      'head CX: an expired-close takeover must not change the config — it replaces only the lease')
   end
   if nx.lease.id == cur.lease.id then
     return redis.error_reply('head CX: an expired-close takeover must mint a different lease id')
   end
-elseif transition == 'closing + finalize -> closed' then
-  -- ok
-else
-  return redis.error_reply("head CX: '" .. transition .. "' is not a legal head transition")
 end
 
 -- apply: mint the lease deadline from authority time inside this same atomic record, store, register gen
@@ -389,6 +443,7 @@ export const CELLS_CX_CMD = 'tfRoomCellsCx'
 //   ARGV: [1]=now [2]=inc [3]=laneKind [4]=closingLease('') [5]=retain('0'|'1')
 //         [6]=payload [7]=aggregate retained payload cap
 export const COMMIT_LUA = `${NOW_FN}
+${REDIS_ORDERING_FRAME_LUA}
 local head_key, order_key, retained_key, channel_key, retained_size_key = KEYS[1], KEYS[2], KEYS[3], KEYS[4], KEYS[5]
 local now = tf_now(ARGV[1])
 local head = tf_head(head_key, now)
@@ -446,11 +501,7 @@ end
 local seq_text = string.format('%.0f', seq)
 local ts_text = string.format('%.0f', ts)
 redis.call('SET', order_key, seq_text .. ':' .. ts_text)
-local seq_hi = math.floor(seq / 4294967296)
-local seq_lo = seq - seq_hi * 4294967296
-local ts_hi = math.floor(ts / 4294967296)
-local ts_lo = ts - ts_hi * 4294967296
-local frame = struct.pack('>I4I4I4I4', seq_hi, seq_lo, ts_hi, ts_lo) .. ARGV[6]
+local frame = tf_ordering_frame(seq, ts, ARGV[6])
 if ARGV[5] == '1' then
   redis.call('SET', retained_key, frame)
   redis.call('SET', retained_size_key, retained_total)
@@ -599,19 +650,3 @@ export const REDIS_ROOM_COMMAND_KEYS = {
   directoryPut: (prefix: string) => [directoryIndexKey(prefix), directoryTagsKey(prefix)],
   directoryDelete: (prefix: string) => [directoryIndexKey(prefix), directoryTagsKey(prefix)],
 } as const
-
-// Room's additive 16-byte publish/retained header. Both safe-integer coordinates are split into
-// big-endian u32 pairs. The released generic Channel/Broadcast frame remains unchanged.
-export const HEADER_BYTES = 16
-export const U32_RANGE = 0x1_0000_0000
-
-export function decodeFrameHeader(frame: Uint8Array): { seq: number; timestamp: number; payload: Uint8Array } {
-  if (frame.byteLength < HEADER_BYTES) throw new Error('RedisRoomBackend: truncated Room frame header')
-  const view = new DataView(frame.buffer, frame.byteOffset, frame.byteLength)
-  const seq = view.getUint32(0, false) * U32_RANGE + view.getUint32(4, false)
-  const timestamp = view.getUint32(8, false) * U32_RANGE + view.getUint32(12, false)
-  if (!Number.isSafeInteger(seq) || seq <= 0 || !Number.isSafeInteger(timestamp) || timestamp < 0) {
-    throw new Error('RedisRoomBackend: invalid Room frame ordering position')
-  }
-  return { seq, timestamp, payload: frame.subarray(HEADER_BYTES) }
-}
