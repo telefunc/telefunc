@@ -179,9 +179,37 @@ export class TelefuncRoomDurableObject extends DurableObject {
             recordRouteDeliverySuccess(this.#sql, info.inc, info.laneKey, target.subscriberDoId, target.leaseId)
           })
         } catch (error) {
+          let evicted = false
           this.ctx.storage.transactionSync(() => {
-            recordRouteDeliveryFailure(this.#sql, info.inc, info.laneKey, target.subscriberDoId, target.leaseId)
+            evicted = recordRouteDeliveryFailure(
+              this.#sql,
+              info.inc,
+              info.laneKey,
+              target.subscriberDoId,
+              target.leaseId,
+            ).evicted
           })
+          // Core cannot infer an authority-side K=3 eviction from a later local attachment: it already
+          // owns the ready slot. Tell the exact live attempt now; its ordinary `closed` state lets the
+          // shared supervisor replan, while the retained route row remains the janitor's retry source
+          // if this best-effort invalidation RPC is lost.
+          if (evicted) {
+            try {
+              await session.telefuncRoomInvalidate({
+                roomId: info.roomId,
+                inc: info.inc,
+                laneKey: info.laneKey,
+                subscriberDoId: target.subscriberDoId,
+                leaseId: target.leaseId,
+                generationToken: target.generationToken,
+              })
+            } catch (invalidationError) {
+              throw new AggregateError(
+                [error, invalidationError],
+                'Cloudflare Room delivery and exact-route invalidation both failed',
+              )
+            }
+          }
           throw error
         }
       },

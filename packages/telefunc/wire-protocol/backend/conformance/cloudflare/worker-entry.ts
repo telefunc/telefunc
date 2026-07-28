@@ -5,7 +5,8 @@
 import { DurableObject } from 'cloudflare:workers'
 import '../../../../node/server/async_hooks.js'
 import { Telefunc } from '../../../../serve/cloudflare.js'
-import type { CellMutation, HeadNext, LaneId, LaneSubscription, ReadinessState, RoomHead } from '../../spi.js'
+import type { BackendSubscription, CellMutation, HeadNext, LaneId, RoomHead, SubscriptionState } from '../../spi.js'
+import { superviseBackend } from '../../supervised-backend.js'
 import { ServerChannel } from '../../../server/channel.js'
 import { getChannelMux } from '../../../server/mux.js'
 import type { ReceiverCommand, RemoteReceiverObservation } from '../receiver.js'
@@ -31,7 +32,8 @@ import type { SubscriptionScheduler } from '../../../server/adapter/cloudflare/r
 import { resolveSessionRoutingTarget } from '../../../server/adapter/cloudflare/routing.js'
 
 let controlledClock = 0
-const sharedCloudflareRoomBackend = new CloudflareRoomBackend()
+const sharedCloudflareRoomDriver = new CloudflareRoomBackend()
+const sharedCloudflareRoomBackend = superviseBackend(sharedCloudflareRoomDriver)
 const recoveryTelefunc = new Telefunc({
   bindingName: 'RecoverySession',
   kvBindingName: 'RECOVERY_KV',
@@ -80,12 +82,12 @@ type ReceiverState = {
 }
 
 type SubscriptionRecord = {
-  sub: LaneSubscription
+  sub: BackendSubscription
   receiverId: string
   roomId: string
   inc: string
   lane: LaneId
-  events: ReadinessState[]
+  events: SubscriptionState[]
   receiverState: ReceiverState
 }
 
@@ -130,6 +132,7 @@ class ManualScheduler implements SubscriptionScheduler {
 export class ConformanceSessionDurableObject extends DurableObject {
   readonly #scheduler = new ManualScheduler()
   #manager: CloudflareRoomSessionManager
+  readonly #driver = sharedCloudflareRoomDriver
   readonly #backend = sharedCloudflareRoomBackend
   readonly #namespace: CloudflareRoomNamespace
   readonly #subscriptions = new Map<string, SubscriptionRecord>()
@@ -142,7 +145,7 @@ export class ConformanceSessionDurableObject extends DurableObject {
   #forcedInvalidationFailures = 0
   #forcedUnsubscribeFailures = 0
   readonly #registrationLeaseHistory: string[] = []
-  readonly #probeSubscriptions = new Set<LaneSubscription>()
+  readonly #probeSubscriptions = new Set<BackendSubscription>()
   #managerDispatchDepth = 0
 
   constructor(ctx: DurableObjectState, env: SessionEnv) {
@@ -201,7 +204,7 @@ export class ConformanceSessionDurableObject extends DurableObject {
     inc: string,
     lane: LaneId,
     command: ReceiverCommand,
-  ): Promise<{ ready: true; state: ReadinessState } | { ready: false; state: ReadinessState; error: string }> {
+  ): Promise<{ ready: true; state: SubscriptionState } | { ready: false; state: SubscriptionState; error: string }> {
     if (this.#subscriptions.has(subscriptionId)) throw new Error(`duplicate subscription '${subscriptionId}'`)
     let receiverState = this.#receiverStates.get(receiverId)
     if (receiverState !== undefined && JSON.stringify(receiverState.command) !== JSON.stringify(command)) {
@@ -211,7 +214,7 @@ export class ConformanceSessionDurableObject extends DurableObject {
     receiverState.attachments += 1
     this.#receiverStates.set(receiverId, receiverState)
     const record = {
-      sub: undefined as unknown as LaneSubscription,
+      sub: undefined as unknown as BackendSubscription,
       receiverId,
       roomId,
       inc,
@@ -224,13 +227,19 @@ export class ConformanceSessionDurableObject extends DurableObject {
     this.#subscriptions.set(subscriptionId, record)
     try {
       await record.sub.ready
-      return { ready: true, state: record.sub.state() }
+      const state = record.sub.state()
+      // The Node control-plane mirror cannot observe a listener before createSubscription returns.
+      // Do not replay establishment transitions that happened before that observation boundary.
+      record.events.length = 0
+      return { ready: true, state }
     } catch (error) {
-      return { ready: false, state: record.sub.state(), error: (error as Error).message }
+      const state = record.sub.state()
+      record.events.length = 0
+      return { ready: false, state, error: (error as Error).message }
     }
   }
 
-  subscriptionState(subscriptionId: string): { state: ReadinessState; events: ReadinessState[] } {
+  subscriptionState(subscriptionId: string): { state: SubscriptionState; events: SubscriptionState[] } {
     const record = this.#record(subscriptionId)
     return { state: record.sub.state(), events: record.events.splice(0) }
   }
@@ -333,19 +342,23 @@ export class ConformanceSessionDurableObject extends DurableObject {
     const probeManager = new CloudflareRoomSessionManager(
       this.ctx.id.toString(),
       () => (bindingEnabled ? this.#namespace : requireCloudflareRoomNamespace({}, 'ROOM')),
-      { scheduler: this.#scheduler, now: () => controlledClock, jitter: () => 0.5 },
+      { scheduler: this.#scheduler, now: () => controlledClock },
     )
+    const source = { kind: 'durable', roomId, inc, lane: { kind: 'semantic' } } as const
+    const bind = () => this.#driver.subscriptions.bind(source)
     let failure = ''
     try {
-      withCloudflareRoomSessionManager(probeManager, () =>
-        this.#backend.subscribeLane(roomId, inc, { kind: 'semantic' }, () => {}),
+      withCloudflareRoomSessionManager(probeManager, bind).open(
+        () => {},
+        () => 1,
       )
     } catch (error) {
       failure = error instanceof Error ? error.message : String(error)
     }
     bindingEnabled = true
-    const sub = withCloudflareRoomSessionManager(probeManager, () =>
-      this.#backend.subscribeLane(roomId, inc, { kind: 'semantic' }, () => {}),
+    const sub = withCloudflareRoomSessionManager(probeManager, bind).open(
+      () => {},
+      () => 1,
     )
     await sub.ready
     await withCloudflareRoomSessionManager(probeManager, () => sub.unsubscribe())
@@ -401,7 +414,6 @@ export class ConformanceSessionDurableObject extends DurableObject {
     return new CloudflareRoomSessionManager(this.ctx.id.toString(), () => this.#namespace, {
       scheduler: this.#scheduler,
       now: () => controlledClock,
-      jitter: () => 0.5,
       authority: (roomId) => this.#controlledAuthority(roomId),
     })
   }
@@ -702,7 +714,7 @@ type RecoveryState = {
   readyEpochs: number
   payloads: string[]
   errors: string[]
-  sub: LaneSubscription | null
+  sub: BackendSubscription | null
 }
 
 export class RecoveryTelefuncDurableObject extends recoveryTelefunc.TelefuncDurableObject {
@@ -737,8 +749,8 @@ export class RecoveryTelefuncDurableObject extends recoveryTelefunc.TelefuncDura
 
   forceProductionRecoveryEpoch(): {
     ownedByCurrentManager: boolean
-    before: ReadinessState | 'absent'
-    after: ReadinessState | 'absent'
+    before: SubscriptionState | 'absent'
+    after: SubscriptionState | 'absent'
   } {
     const before = this.#recovery?.sub?.state() ?? 'absent'
     const current = this.runWithRoomManager(() => getCloudflareRoomSessionManager())
@@ -750,7 +762,7 @@ export class RecoveryTelefuncDurableObject extends recoveryTelefunc.TelefuncDura
     }
   }
 
-  recoveryObservation(): Omit<RecoveryState, 'sub'> & { state: ReadinessState | 'absent' } {
+  recoveryObservation(): Omit<RecoveryState, 'sub'> & { state: SubscriptionState | 'absent' } {
     const recovery = this.#recovery
     if (recovery === null) throw new Error('recovery channel is not prepared')
     return {

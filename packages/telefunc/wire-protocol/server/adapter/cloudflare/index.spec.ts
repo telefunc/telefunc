@@ -24,6 +24,7 @@ const mocks = vi.hoisted(() => {
     readonly attachIsolateInfo = vi.fn()
     readonly publishToSubscribers = vi.fn()
     readonly deliverToLocal = vi.fn()
+    readonly dispose = vi.fn(async () => {})
 
     constructor(options: unknown) {
       this.options = options
@@ -43,7 +44,6 @@ const mocks = vi.hoisted(() => {
         return new ReadableStream()
       },
     })),
-    installBroadcastAdapter: vi.fn(<T>(factory: () => T): T => factory()),
     asyncMode: false,
     rawContext: null as Record<symbol, unknown> | null,
     transportInstances: [] as MockCloudflareBroadcastTransport[],
@@ -104,10 +104,6 @@ vi.mock('../../../../node/server/context/context.js', () => ({
   },
 }))
 
-vi.mock('../../broadcast.js', () => ({
-  installBroadcastAdapter: mocks.installBroadcastAdapter,
-}))
-
 vi.mock('./broadcast.js', () => ({
   CloudflareBroadcastAuthorityState: mocks.MockCloudflareBroadcastAuthorityState,
   CloudflareBroadcastTransport: mocks.MockCloudflareBroadcastTransport,
@@ -133,9 +129,8 @@ vi.mock('./routing.js', () => ({
 }))
 
 import { Telefunc } from '../../../../serve/cloudflare.js'
-import { disposeRoomBackend, getRoomBackend, installRoomBackend } from '../../../backend/install.js'
-import { MemoryRoomBackend } from '../../../backend/memory/backend.js'
-import { CloudflareRoomBackend } from './room/backend.js'
+import { disposeBackend, getBackend, installBackend } from '../../../backend/install.js'
+import { MemoryBackend } from '../../../backend/memory/backend.js'
 
 function createMockKV(): KVNamespace {
   const store = new Map<string, { value: string; expirationTtl?: number }>()
@@ -189,7 +184,6 @@ beforeEach(() => {
       return new ReadableStream()
     },
   })
-  mocks.installBroadcastAdapter.mockClear()
   mocks.asyncMode = false
   mocks.rawContext = null
   mocks.transportInstances.length = 0
@@ -197,7 +191,7 @@ beforeEach(() => {
 })
 
 afterEach(async () => {
-  await disposeRoomBackend()
+  await disposeBackend()
 })
 
 describe('cloudflare adapter entrypoint', () => {
@@ -215,7 +209,6 @@ describe('cloudflare adapter entrypoint', () => {
     })
 
     expect(mocks.enableChannelTransports).toHaveBeenCalled()
-    expect(mocks.installBroadcastAdapter).toHaveBeenCalledWith(expect.any(Function))
     expect(mocks.transportInstances).toHaveLength(1)
     expect(get).toHaveBeenCalledWith(expect.objectContaining({ name: 'telefunc-shard-weur-1' }), {
       locationHint: 'weur',
@@ -317,28 +310,39 @@ describe('cloudflare adapter entrypoint', () => {
     )
   })
 
-  it('installs the Durable Object Room backend from the documented Cloudflare setup alone', () => {
+  it('installs the Durable Object Room backend from the documented Cloudflare setup alone', async () => {
     new Telefunc()
 
-    expect(getRoomBackend()).toBeInstanceOf(CloudflareRoomBackend)
+    await expect(getBackend().readHead('cloudflare-default-probe')).rejects.toThrow(
+      'Cloudflare Room requires await-safe context',
+    )
   })
 
   it('keeps an explicit Room backend installation as the Cloudflare policy override', () => {
-    const explicit = new MemoryRoomBackend()
-    installRoomBackend(() => explicit)
+    const explicit = new MemoryBackend()
+    const selected = installBackend(() => explicit)
 
     new Telefunc()
 
-    expect(getRoomBackend()).toBe(explicit)
+    expect(getBackend()).toBe(selected)
+  })
+
+  it('lets an explicit Room backend override an already-installed Cloudflare default', () => {
+    new Telefunc()
+    const explicit = new MemoryBackend()
+    const selected = installBackend(() => explicit)
+
+    expect(getBackend()).toBe(selected)
   })
 
   it('keeps the same Durable Object Room backend across repeated Worker entry evaluation', () => {
     new Telefunc()
-    const installed = getRoomBackend()
+    const installed = getBackend()
 
     new Telefunc()
 
-    expect(getRoomBackend()).toBe(installed)
+    expect(getBackend()).toBe(installed)
+    expect(mocks.transportInstances).toHaveLength(1)
   })
 
   it('reports the normative Room binding diagnostic instead of using the memory backend', async () => {
@@ -354,7 +358,7 @@ describe('cloudflare adapter entrypoint', () => {
       { TelefuncDurableObject: binding } as unknown as Cloudflare.Env,
     ) as InstanceType<typeof DurableClass> & { fetch(request: Request): Promise<Response> }
     mocks.telefuncMock.mockImplementationOnce(async () => {
-      await getRoomBackend().readHead('binding-probe')
+      await getBackend().readHead('binding-probe')
       throw new Error('Room backend unexpectedly returned without a binding')
     })
     await expect(instance.fetch(new Request('https://telefunc.test/_telefunc'))).rejects.toThrow(

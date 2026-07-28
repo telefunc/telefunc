@@ -13,11 +13,13 @@ import type {
   HeadCx,
   HeadNext,
   LaneId,
-  LaneReceiver,
-  LaneSubscription,
-  ReadinessState,
-  RoomBackendSpi,
+  BackendReceiver,
+  BackendSubscription,
+  BroadcastLane,
+  SubscriptionState,
+  BackendSpi,
   RoomHead,
+  PublishResult,
 } from '../../spi.js'
 import type {
   CellsWire,
@@ -122,8 +124,8 @@ type SessionStub = {
     inc: string,
     lane: LaneId,
     command: NonNullable<ReturnType<typeof receiverDescriptor>>['command'],
-  ): Promise<{ ready: true; state: ReadinessState } | { ready: false; state: ReadinessState; error: string }>
-  subscriptionState(subscriptionId: string): Promise<{ state: ReadinessState; events: ReadinessState[] }>
+  ): Promise<{ ready: true; state: SubscriptionState } | { ready: false; state: SubscriptionState; error: string }>
+  subscriptionState(subscriptionId: string): Promise<{ state: SubscriptionState; events: SubscriptionState[] }>
   unsubscribeSubscription(subscriptionId: string): Promise<string | null>
   pollReceiver(
     subscriptionId: string,
@@ -151,8 +153,8 @@ type RecoverySessionStub = {
   prepareRecoveryChannel(channelId: string, roomId: string, inc: string): Promise<void>
   forceProductionRecoveryEpoch(): Promise<{
     ownedByCurrentManager: boolean
-    before: ReadinessState | 'absent'
-    after: ReadinessState | 'absent'
+    before: SubscriptionState | 'absent'
+    after: SubscriptionState | 'absent'
   }>
   teardownRecoveryChannel(): Promise<void>
   recoveryObservation(): Promise<{
@@ -162,7 +164,7 @@ type RecoverySessionStub = {
     readyEpochs: number
     payloads: string[]
     errors: string[]
-    state: ReadinessState | 'absent'
+    state: SubscriptionState | 'absent'
   }>
 }
 
@@ -272,7 +274,7 @@ export function disposeCloudflareRoomStubs(): void {
 export async function runCloudflareSocketRecoverySchedule(wake: 'message' | 'delivery'): Promise<{
   close: { code: number; reason: string }
   observation: Awaited<ReturnType<RecoverySessionStub['recoveryObservation']>>
-  oldDelivery: 'not-attempted' | 'rejected'
+  oldDelivery: 'not-attempted' | 'empty'
 }> {
   const shared = await getShared()
   await clockPush
@@ -338,22 +340,17 @@ export async function runCloudflareSocketRecoverySchedule(wake: 'message' | 'del
       throw new Error(`production recovery reset missed the socket-owning Room manager: ${JSON.stringify(reset)}`)
     }
 
-    let oldDelivery: 'not-attempted' | 'rejected' = 'not-attempted'
+    let oldDelivery: 'not-attempted' | 'empty' = 'not-attempted'
     if (wake === 'delivery') {
       const stale = await room.commitLane(roomId, inc, { kind: 'semantic' }, new TextEncoder().encode('stale'))
       if (!('deliveryToken' in stale)) throw new Error('stale recovery commit was not accepted')
-      let rejected = false
-      try {
-        await room.awaitDelivery(stale.deliveryToken)
-      } catch {
-        rejected = true
-      }
-      if (!rejected) {
+      await room.awaitDelivery(stale.deliveryToken)
+      if (stale.receivers !== 0) {
         throw new Error(
-          `old recovery lease unexpectedly delivered: ${JSON.stringify({ reset, stale, closes, observation: await session.recoveryObservation() })}`,
+          `old recovery lease remained targetable: ${JSON.stringify({ reset, stale, closes, observation: await session.recoveryObservation() })}`,
         )
       }
-      oldDelivery = 'rejected'
+      oldDelivery = 'empty'
     }
 
     await waitForRecovery(() => Promise.resolve(closes.some((entry) => entry.code === 1012)))
@@ -428,12 +425,12 @@ async function bounded<T>(promise: Promise<T>, label: string): Promise<T> {
 
 type SubscriptionControl = {
   id: string
-  receiver: LaneReceiver
-  state: ReadinessState
-  listeners: Set<(state: ReadinessState) => void>
+  receiver: BackendReceiver
+  state: SubscriptionState
+  listeners: Set<(state: SubscriptionState) => void>
 }
 
-class CloudflareConformanceBackend implements RoomBackendSpi {
+class CloudflareConformanceBackend implements BackendSpi {
   readonly spiVersion = 1 as const
   readonly capabilities = {
     receivers: 'global' as const,
@@ -457,6 +454,14 @@ class CloudflareConformanceBackend implements RoomBackendSpi {
       Promise.all([clockPush, this.#controlPush]).then(() => undefined),
       'Cloudflare conformance preflight',
     )
+  }
+
+  publish(_lane: BroadcastLane, _payload: Uint8Array): PublishResult {
+    throw new Error('Cloudflare conformance Room facade does not expose generic Broadcast')
+  }
+
+  subscribe(_lane: BroadcastLane, _receiver: BackendReceiver): BackendSubscription {
+    throw new Error('Cloudflare conformance Room facade does not expose generic Broadcast')
   }
 
   async readHead(roomId: string) {
@@ -543,7 +548,7 @@ class CloudflareConformanceBackend implements RoomBackendSpi {
     await this.#command<null>({ kind: 'seed-order-watermark', roomId, inc, lane, seq, timestamp })
   }
 
-  subscribeLane(roomId: string, inc: string, lane: LaneId, receiver: LaneReceiver): LaneSubscription {
+  subscribeLane(roomId: string, inc: string, lane: LaneId, receiver: BackendReceiver): BackendSubscription {
     if (this.#disposed) throw new Error('CloudflareRoomBackend: used after dispose()')
     const descriptor = receiverDescriptor(receiver)
     if (descriptor === undefined) {
@@ -759,7 +764,7 @@ class CloudflareConformanceBackend implements RoomBackendSpi {
   }
 }
 
-export function cloudflareRenewalControls(backend: RoomBackendSpi): {
+export function cloudflareRenewalControls(backend: BackendSpi): {
   forceFailures(count: number): void
   forceEstablishmentFailures(count: number): void
   forcePostCommitEstablishmentFailures(count: number): void
@@ -785,7 +790,7 @@ export function cloudflareRenewalControls(backend: RoomBackendSpi): {
 }
 
 export async function cloudflareCommitFromSession(
-  backend: RoomBackendSpi,
+  backend: BackendSpi,
   roomId: string,
   inc: string,
   lane: LaneId,
@@ -795,13 +800,13 @@ export async function cloudflareCommitFromSession(
   return backend.commitFromSession(roomId, inc, lane, payload)
 }
 
-export function cloudflareContextProbe(backend: RoomBackendSpi, delayMs: number): Promise<boolean> {
+export function cloudflareContextProbe(backend: BackendSpi, delayMs: number): Promise<boolean> {
   if (!(backend instanceof CloudflareConformanceBackend)) throw new Error('expected Cloudflare conformance backend')
   return backend.probeContext(delayMs)
 }
 
 export function cloudflareSharedBackendOwnershipProbe(
-  backend: RoomBackendSpi,
+  backend: BackendSpi,
   roomId: string,
   inc: string,
   delayMs: number,
@@ -810,13 +815,13 @@ export function cloudflareSharedBackendOwnershipProbe(
   return backend.probeSharedBackendOwnership(roomId, inc, delayMs)
 }
 
-export function cloudflareClearOwnershipProbes(backend: RoomBackendSpi): Promise<void> {
+export function cloudflareClearOwnershipProbes(backend: BackendSpi): Promise<void> {
   if (!(backend instanceof CloudflareConformanceBackend)) throw new Error('expected Cloudflare conformance backend')
   return backend.clearOwnershipProbes()
 }
 
 export function cloudflareMissingBindingSubscriptionProbe(
-  backend: RoomBackendSpi,
+  backend: BackendSpi,
   roomId: string,
   inc: string,
 ): Promise<string> {

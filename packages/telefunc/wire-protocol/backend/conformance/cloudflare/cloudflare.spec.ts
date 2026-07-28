@@ -1,9 +1,7 @@
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Miniflare } from 'miniflare'
-import { disposeRoomBackend, installRoomBackend } from '../../install.js'
-import type { LaneId, LaneReceiver, ReadinessState, RoomBackendSpi } from '../../spi.js'
+import type { LaneId, BackendReceiver, SubscriptionState, BackendSpi } from '../../spi.js'
 import { CHANNEL_PING_INTERVAL_MS } from '../../../constants.js'
-import { Room, ServerRoom } from '../../../room/server.js'
 import {
   CloudflareRoomBackend,
   CLOUDFLARE_ROOM_CONTEXT_ERROR,
@@ -17,7 +15,6 @@ import {
 } from '../../../server/adapter/cloudflare/room/routes.js'
 import { GEN_ORPHAN_GRACE_MS } from '../../../server/adapter/cloudflare/room/storage.js'
 import type { BackendFixture } from '../harness.js'
-import { conformanceReceiver } from '../receiver.js'
 import {
   accepted,
   bytes,
@@ -56,7 +53,6 @@ import {
 import { bundleWorker } from './bundle.js'
 
 type Opened = { roomId: string; inc: string; stub: RoomStub }
-type RoomReadinessProbe = ServerRoom & { _textSub: { ready: Promise<void> } }
 
 describe('cloudflare — production session-manager mechanics', () => {
   let fx: BackendFixture
@@ -140,187 +136,6 @@ describe('cloudflare — production session-manager mechanics', () => {
       }
     }
   }, 60_000)
-
-  it('recovers a public Room lane after real workerd loss and a synchronous first replacement failure', async () => {
-    const roomId = nextId('managed-room-renewal')
-    const states: ReadinessState[] = []
-    const observed: string[] = []
-    const remoteReceivers = new Set<LaneReceiver>()
-    const report = vi.spyOn(console, 'error').mockImplementation(() => {})
-    const baseRoomBackend = roomCapableBackend(
-      fx.backend,
-      (id, lane, state) => {
-        if (id === roomId && lane.kind === 'semantic') states.push(state)
-      },
-      remoteReceivers,
-    )
-    let semanticCalls = 0
-    let closeQueued = false
-    let semanticSubscription: ReturnType<RoomBackendSpi['subscribeLane']> | undefined
-    const roomBackend = new Proxy(baseRoomBackend, {
-      get(target, property) {
-        if (property !== 'subscribeLane') {
-          const value = Reflect.get(target, property, target)
-          return typeof value === 'function' ? value.bind(target) : value
-        }
-        return (id: string, inc: string, lane: LaneId, receiver: LaneReceiver) => {
-          if (id === roomId && lane.kind === 'semantic') {
-            semanticCalls++
-            if (semanticCalls === 2) throw new Error('synthetic workerd replacement subscribe failure')
-          }
-          const subscription = target.subscribeLane(id, inc, lane, receiver)
-          if (id === roomId && lane.kind === 'semantic') {
-            semanticSubscription = subscription
-            if (semanticCalls === 1) {
-              subscription.onStateChange((state) => {
-                if (state === 'lost' && !closeQueued) {
-                  closeQueued = true
-                  // Preserve the real workerd lost event, then terminally end the old generation so
-                  // Room must execute its replacement-subscribe recovery branch.
-                  queueMicrotask(() => void subscription.unsubscribe().catch(() => {}))
-                }
-              })
-            }
-          }
-          return subscription
-        }
-      },
-    })
-    installRoomBackend(() => roomBackend)
-    try {
-      const room = await Room.create(roomId)
-      room.onAnnounce((data) => observed.push(String(data)))
-      await Room.announce(roomId, 'before-loss')
-      expect(observed).toEqual(['before-loss'])
-
-      const controls = cloudflareRenewalControls(fx.backend)
-      // Room owns a fixed control lane and the semantic lane under test. Two consecutive renewal
-      // failures per route drive each production subscription through lost -> replacement -> ready.
-      controls.forceFailures(4)
-      await controls.advance(ROUTE_RENEW_EVERY_MS * 2)
-      await waitUntil(async () => semanticCalls === 3 && semanticSubscription?.state() === 'ready')
-      states.push(semanticSubscription?.state() as ReadinessState)
-      expect(semanticCalls).toBe(3)
-      expect(states).toEqual(['lost', 'ready', 'closed', 'ready'])
-      expect(
-        report.mock.calls.some(([error]) => String(error).includes('synthetic workerd replacement subscribe failure')),
-      ).toBe(true)
-
-      await Room.announce(roomId, 'after-recovery')
-      expect(observed).toEqual(['before-loss', 'after-recovery'])
-      console.log(
-        `[w5-integration] cloudflare-room-renewal states=${states.join(',')} subscribeCalls=${semanticCalls} replacementFailures=1 delivered=${observed.length}`,
-      )
-      await Room.close(roomId)
-    } finally {
-      report.mockRestore()
-      remoteReceivers.clear()
-      await disposeRoomBackend().catch(() => {})
-    }
-  })
-
-  it('rejects an exhausted workerd replacement generation and later establishes a fresh one', async () => {
-    const roomId = nextId('managed-room-exhaustion')
-    const observed: string[] = []
-    const remoteReceivers = new Set<LaneReceiver>()
-    const report = vi.spyOn(console, 'error').mockImplementation(() => {})
-    const baseRoomBackend = roomCapableBackend(fx.backend, () => {}, remoteReceivers)
-    let semanticCalls = 0
-    let failReplacements = true
-    let closeQueued = false
-    let semanticSubscription: ReturnType<RoomBackendSpi['subscribeLane']> | undefined
-    const roomBackend = new Proxy(baseRoomBackend, {
-      get(target, property) {
-        if (property !== 'subscribeLane') {
-          const value = Reflect.get(target, property, target)
-          return typeof value === 'function' ? value.bind(target) : value
-        }
-        return (id: string, inc: string, lane: LaneId, receiver: LaneReceiver) => {
-          if (id === roomId && lane.kind === 'semantic') {
-            semanticCalls++
-            if (semanticCalls > 1 && failReplacements) {
-              throw new Error(`synthetic exhausted workerd replacement ${semanticCalls - 1}`)
-            }
-          }
-          const subscription = target.subscribeLane(id, inc, lane, receiver)
-          if (id === roomId && lane.kind === 'semantic') {
-            semanticSubscription = subscription
-            if (semanticCalls === 1) {
-              subscription.onStateChange((state) => {
-                if (state === 'lost' && !closeQueued) {
-                  closeQueued = true
-                  queueMicrotask(() => void subscription.unsubscribe().catch(() => {}))
-                }
-              })
-            }
-          }
-          return subscription
-        }
-      },
-    })
-    installRoomBackend(() => roomBackend)
-    try {
-      const room = (await Room.create(roomId)) as RoomReadinessProbe
-      room.onAnnounce((data) => observed.push(String(data)))
-      await Room.announce(roomId, 'before-exhaustion')
-      expect(observed).toEqual(['before-exhaustion'])
-
-      const controls = cloudflareRenewalControls(fx.backend)
-      controls.forceFailures(4)
-      await controls.advance(ROUTE_RENEW_EVERY_MS * 2)
-      await waitUntil(
-        async () =>
-          semanticCalls === 6 &&
-          report.mock.calls.some(([error]) =>
-            String(error).includes('Room backend subscription failed after 5 replacement attempts'),
-          ),
-      )
-      const failedGeneration = room._textSub.ready
-      await expect(failedGeneration).rejects.toThrow('Room backend subscription failed after 5 replacement attempts')
-
-      failReplacements = false
-      room._syncSubs()
-      const freshGeneration = room._textSub.ready
-      expect(freshGeneration).not.toBe(failedGeneration)
-      await freshGeneration
-      await waitUntil(async () => semanticCalls === 7 && semanticSubscription?.state() === 'ready')
-
-      await Room.announce(roomId, 'after-exhaustion')
-      expect(observed).toEqual(['before-exhaustion', 'after-exhaustion'])
-      console.log(
-        `[w5-integration] cloudflare-room-exhaustion replacementAttempts=5 terminalRejected=true freshGeneration=true subscribeCalls=${semanticCalls} delivered=${observed.length}`,
-      )
-      await Room.close(roomId)
-    } finally {
-      report.mockRestore()
-      remoteReceivers.clear()
-      await disposeRoomBackend().catch(() => {})
-    }
-  })
-
-  it('closes an observed public Room on workerd without failure injection', async () => {
-    const roomId = nextId('managed-room-close-probe')
-    const remoteReceivers = new Set<LaneReceiver>()
-    const roomBackend = roomCapableBackend(fx.backend, () => {}, remoteReceivers)
-    installRoomBackend(() => roomBackend)
-    try {
-      const room = await Room.create(roomId)
-      const firstInc = (room as ServerRoom)._inc
-      const unlisten = room.onAnnounce(() => {})
-      await Room.announce(roomId, 'ready')
-      await Room.close(roomId)
-      expect((await fx.backend.readHead(roomId))?.head).toMatchObject({ state: 'closed', currentInc: null })
-      expect(await fx.backend.listGenerations(roomId)).toEqual([])
-      expect((await fx.backend.directoryList(roomId)).entries).toEqual([])
-      const recreated = await Room.create(roomId)
-      expect((recreated as ServerRoom)._inc).not.toBe(firstInc)
-      await Room.close(roomId)
-      unlisten()
-    } finally {
-      remoteReceivers.clear()
-      await disposeRoomBackend().catch(() => {})
-    }
-  })
 
   it('rolls the order advance back when the retained install fails inside the acceptance transaction', async () => {
     const { roomId, inc, stub } = await opened('retained-atomicity')
@@ -415,7 +230,7 @@ describe('cloudflare — production session-manager mechanics', () => {
     it('recovers an actual Room-want socket when delivery reaches the empty epoch first', async () => {
       const result = await runCloudflareSocketRecoverySchedule('delivery')
       expect(result.close).toEqual({ code: 1012, reason: 'Telefunc session reset; reconnect' })
-      expect(result.oldDelivery).toBe('rejected')
+      expect(result.oldDelivery).toBe('empty')
       expect(result.observation.wants).toBeGreaterThanOrEqual(2)
       expect(result.observation.readyEpochs).toBeGreaterThanOrEqual(2)
       expect(result.observation.payloads).toEqual(['fresh-delivery'])
@@ -440,7 +255,9 @@ describe('cloudflare — production session-manager mechanics', () => {
 
     it('fails closed outside await-safe raw context', () => {
       const backend = new CloudflareRoomBackend()
-      expect(() => backend.subscribeLane('room', 'inc', SEMANTIC, () => {})).toThrow(CLOUDFLARE_ROOM_CONTEXT_ERROR)
+      expect(() => backend.subscriptions.bind({ kind: 'durable', roomId: 'room', inc: 'inc', lane: SEMANTIC })).toThrow(
+        CLOUDFLARE_ROOM_CONTEXT_ERROR,
+      )
     })
 
     it('fails early with the exact missing authority-binding diagnostic', () => {
@@ -499,17 +316,16 @@ describe('cloudflare — production session-manager mechanics', () => {
   })
 
   describe('readiness, renewal and replacement', () => {
-    it('recovers through the bounded initial establishment retry path', async () => {
+    it('recovers initial establishment failures through supervised replacement attempts', async () => {
       const { roomId, inc } = await opened()
       const controls = cloudflareRenewalControls(fx.backend)
       controls.forceEstablishmentFailures(2)
       const sub = fx.backend.subscribeLane(roomId, inc, SEMANTIC, noopReceiver())
-      expect(await settled(sub.ready)).toBe('rejected')
-      await controls.advance(250 + 500)
+      expect(await settled(sub.ready)).toBe('resolved')
       expect(sub.state()).toBe('ready')
     })
 
-    it('reuses one fresh lease when a replacement registration commits but its acknowledgement is lost', async () => {
+    it('retires an unacknowledged registration before installing a fresh replacement lease', async () => {
       const { roomId, inc } = await opened('lost-register-ack')
       const sub = fx.backend.subscribeLane(roomId, inc, SEMANTIC, noopReceiver())
       await sub.ready
@@ -520,7 +336,7 @@ describe('cloudflare — production session-manager mechanics', () => {
       expect(sub.state()).toBe('ready')
       const leases = await controls.registrationLeaseHistory()
       expect(leases).toHaveLength(2)
-      expect(new Set(leases).size).toBe(1)
+      expect(new Set(leases).size).toBe(2)
     })
 
     it('removes a committed-but-unacknowledged replacement after bounded exhaustion', async () => {
@@ -532,19 +348,19 @@ describe('cloudflare — production session-manager mechanics', () => {
       controls.forcePostCommitEstablishmentFailures(5)
       await controls.advance(ROUTE_RENEW_EVERY_MS * 2 + 250 + 500 + 1_000 + 2_000)
       expect(sub.state()).toBe('closed')
-      expect(new Set(await controls.registrationLeaseHistory()).size).toBe(1)
+      expect(new Set(await controls.registrationLeaseHistory()).size).toBe(5)
       expect(
         acceptedWire(await target.stub.commitLane(target.roomId, target.inc, SEMANTIC, bytes('no-ghost'))).receivers,
       ).toBe(0)
     })
 
-    it('closes locally, reports teardown transport failure, and expires the remote route safely', async () => {
+    it('closes locally and leaves durable expiry as the backstop when exact teardown fails', async () => {
       const target = await opened('teardown-failure')
       const sub = fx.backend.subscribeLane(target.roomId, target.inc, SEMANTIC, noopReceiver())
       await sub.ready
       const controls = cloudflareRenewalControls(fx.backend)
       controls.forceUnsubscribeFailures(1)
-      await expect(sub.unsubscribe()).rejects.toThrow('forced unsubscribe transport failure')
+      await expect(sub.unsubscribe()).resolves.toBeUndefined()
       expect(sub.state()).toBe('closed')
       expect(
         acceptedWire(await target.stub.commitLane(target.roomId, target.inc, SEMANTIC, bytes('still-durable')))
@@ -558,23 +374,21 @@ describe('cloudflare — production session-manager mechanics', () => {
       ).toBe(0)
     })
 
-    it('recovers a lost generation-capture response with the same attempt identity', async () => {
+    it('recovers lost generation-capture responses through supervised replacement attempts', async () => {
       const { roomId, inc } = await opened()
       const controls = cloudflareRenewalControls(fx.backend)
       controls.forceGenerationCaptureFailures(2)
       const sub = fx.backend.subscribeLane(roomId, inc, SEMANTIC, noopReceiver())
-      expect(await settled(sub.ready)).toBe('rejected')
-      await controls.advance(250 + 500)
+      expect(await settled(sub.ready)).toBe('resolved')
       expect(sub.state()).toBe('ready')
     })
 
-    it('closes after five bounded initial capture failures', async () => {
+    it('closes after the initial attempt and five bounded capture replacements fail', async () => {
       const { roomId, inc } = await opened()
       const controls = cloudflareRenewalControls(fx.backend)
-      controls.forceGenerationCaptureFailures(5)
+      controls.forceGenerationCaptureFailures(6)
       const sub = fx.backend.subscribeLane(roomId, inc, SEMANTIC, noopReceiver())
       expect(await settled(sub.ready)).toBe('rejected')
-      await controls.advance(250 + 500 + 1_000 + 2_000)
       expect(sub.state()).toBe('closed')
     })
 
@@ -592,7 +406,7 @@ describe('cloudflare — production session-manager mechanics', () => {
     it('does not rebind a lost capture across drop and exact id reuse', async () => {
       const { roomId, inc } = await opened()
       const controls = cloudflareRenewalControls(fx.backend)
-      controls.forceGenerationCaptureFailures(1)
+      controls.forceGenerationCaptureFailures(6)
       const stale = fx.backend.subscribeLane(roomId, inc, SEMANTIC, noopReceiver())
       expect(await settled(stale.ready)).toBe('rejected')
       const tombstone = await close(roomId, inc)
@@ -606,7 +420,6 @@ describe('cloudflare — production session-manager mechanics', () => {
           },
         ),
       )
-      await controls.advance(250)
       expect(stale.state()).toBe('closed')
       expect(accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, bytes('new'))).receivers).toBe(0)
     })
@@ -624,31 +437,24 @@ describe('cloudflare — production session-manager mechanics', () => {
   })
 
   describe('delivery, ordering and failure fences', () => {
-    it('makes a route non-live after three consecutive target failures', async () => {
+    it('evicts and re-establishes a route after three consecutive target failures', async () => {
       const { roomId, inc } = await opened()
       const failed = throwingReceiver('target failed')
+      const controls = cloudflareRenewalControls(fx.backend)
       await fx.backend.subscribeLane(roomId, inc, SEMANTIC, failed.receiver).ready
-      for (let n = 0; n < 3; n++)
+      const [initialLease] = await controls.registrationLeaseHistory()
+      for (let n = 0; n < 2; n++)
         expect(
           await settled(accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, bytes(String(n)))).delivery),
         ).toBe('rejected')
-      expect(accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, bytes('gone'))).receivers).toBe(0)
-    })
-
-    it('re-establishes after a late attachment observes K=3 eviction', async () => {
-      const { roomId, inc } = await opened()
-      const failed = throwingReceiver('target failed')
-      const first = fx.backend.subscribeLane(roomId, inc, SEMANTIC, failed.receiver)
-      await first.ready
-      for (let n = 0; n < 3; n++)
-        await settled(accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, bytes(String(n)))).delivery)
-      const late = collector()
-      const lateSub = fx.backend.subscribeLane(roomId, inc, SEMANTIC, late.receiver)
-      await lateSub.ready
-      const recovered = accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, bytes('recovered')))
-      expect(recovered.receivers).toBe(1)
-      expect(await settled(recovered.delivery)).toBe('rejected')
-      expect(late.payloads()).toEqual(['recovered'])
+      expect(await controls.registrationLeaseHistory()).toEqual([initialLease])
+      expect(await settled(accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, bytes('evict'))).delivery)).toBe(
+        'rejected',
+      )
+      const [, replacementLease] = await controls.registrationLeaseHistory()
+      expect(replacementLease).toBeDefined()
+      expect(replacementLease).not.toBe(initialLease)
+      expect(accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, bytes('recovered'))).receivers).toBe(1)
     })
 
     it('resets the consecutive failure counter after success', async () => {
@@ -815,7 +621,11 @@ describe('cloudflare — production session-manager mechanics', () => {
       expect(await target.stub.telefuncRoomRunMaintenance()).toEqual({ prunedRoutes: 0 })
       expect(await target.stub.telefuncRoomRunMaintenance()).toEqual({ prunedRoutes: 1 })
       await controls.advance(0)
-      expect(sub.state()).toBe('closed')
+      expect(sub.state()).toBe('ready')
+      const recovered = accepted(await fx.backend.commitLane(target.roomId, target.inc, SEMANTIC, bytes('recovered')))
+      expect(recovered.receivers).toBe(1)
+      await recovered.delivery
+      expect(receiver.payloads()).toEqual(['recovered'])
     })
 
     it('keeps an orphan for its grace period then drops it', async () => {
@@ -861,38 +671,6 @@ describe('cloudflare — production session-manager mechanics', () => {
     })
   })
 })
-
-function roomCapableBackend(
-  backend: RoomBackendSpi,
-  observeState: (roomId: string, lane: LaneId, state: ReadinessState) => void,
-  ownedReceivers: Set<LaneReceiver>,
-): RoomBackendSpi {
-  return new Proxy(backend, {
-    get(target, property) {
-      if (property === 'subscribeLane') {
-        return (roomId: string, inc: string, lane: LaneId, receiver: LaneReceiver) => {
-          // The workerd conformance transport accepts only serializable receiver commands. Adapt the
-          // production Room receiver to that command without changing the backend or Room lifecycle:
-          // remote observations are replayed through the exact receiver Room installed.
-          const remoteReceiver = conformanceReceiver({ kind: 'collect' }, receiver, (observations) => {
-            for (const observation of observations) {
-              void receiver(bytes(observation.payload), {
-                seq: observation.seq,
-                timestamp: observation.timestamp,
-              })
-            }
-          })
-          ownedReceivers.add(remoteReceiver)
-          const subscription = target.subscribeLane(roomId, inc, lane, remoteReceiver)
-          subscription.onStateChange((state) => observeState(roomId, lane, state))
-          return subscription
-        }
-      }
-      const value = Reflect.get(target, property, target)
-      return typeof value === 'function' ? value.bind(target) : value
-    },
-  })
-}
 
 function acceptedWire(wire: Awaited<ReturnType<RoomStub['commitLane']>>) {
   if (!('accepted' in wire)) throw new Error(`expected accepted wire, got ${JSON.stringify(wire)}`)

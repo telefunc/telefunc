@@ -4,16 +4,15 @@
 // linearizability, all-or-nothing cell batches, and atomic order advance. Time is always the room DO's
 // own authority clock, passed in as `now`.
 
-import type { CellMutation, CxResult, HeadCx, HeadNext } from '../../../../backend/spi.js'
+import type { CellMutation, CxResult, HeadCx, HeadNext, RoomHead } from '../../../../backend/spi.js'
 import {
-  assertDeleteLegal,
+  assertHeadDeleteLegal,
   assertHeadNextWellFormed,
-  assertTransitionAllowed,
-  type HeadSnapshot,
-  type HeadWriteNext,
-} from './transitions.js'
+  assertHeadTransition,
+} from '../../../../backend/head-transitions.js'
 
-export type StoredHead = HeadSnapshot & { rev: string; expiresAt: number | null }
+type HeadWriteNext = Extract<HeadNext, { head: unknown }>
+export type StoredHead = RoomHead & { expiresAt: number | null }
 
 export type RouteGenerationCapture = {
   inc: string
@@ -265,13 +264,13 @@ export function compareExchangeHead(
   const current = readLiveHead(sql, now)
   // Operation legality precedes the compare for the delete path only; every other transition is validated
   // against the head the compare actually matched, so a genuine race still conflicts.
-  assertDeleteLegal(next, current)
+  assertHeadDeleteLegal(next, current)
   if (!headCxMatches(sql, cx, current, now)) return { conflict: true, current }
   if ('delete' in next) {
     sql.exec('DELETE FROM head WHERE id = 1')
     return { ok: true, deleted: true }
   }
-  assertTransitionAllowed(cx, next as HeadWriteNext, current, (inc) => hasGeneration(sql, inc))
+  assertHeadTransition(cx, next as HeadWriteNext, current, (inc) => hasGeneration(sql, inc))
   return { ok: true, head: storeHead(sql, next as HeadWriteNext, now, mintRev) }
 }
 

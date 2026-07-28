@@ -8,8 +8,7 @@ import crossws from 'crossws/adapters/cloudflare'
 import { getTelefuncChannelHooks } from '../wire-protocol/server/ws.js'
 import { getServerConfig, enableChannelTransports } from '../node/server/serverConfig.js'
 import { serve as serveTelefunc } from '../node/server/telefunc.js'
-import { installBroadcastAdapter } from '../wire-protocol/server/broadcast.js'
-import { setDefaultRoomBackend } from '../wire-protocol/backend/install.js'
+import { setDefaultBackend } from '../wire-protocol/backend/install.js'
 import {
   CloudflareBroadcastAuthorityState,
   CloudflareBroadcastTransport,
@@ -42,10 +41,14 @@ import {
 } from '../wire-protocol/server/adapter/cloudflare/room/backend.js'
 import { createTelefuncRoomDurableObjectClass } from '../wire-protocol/server/adapter/cloudflare/room/do.js'
 import { isAsyncMode } from '../node/server/context/context.js'
+import { getGlobalObject } from '../utils/getGlobalObject.js'
 
 const SHARD_TOKEN_TTL_SECONDS = 86400
 const SESSION_RESET_CLOSE_CODE = 1012
 const SESSION_RESET_CLOSE_REASON = 'Telefunc session reset; reconnect'
+const cloudflareBackendSlot = getGlobalObject<{
+  current?: { identity: string; backend: CloudflareRoomBackend }
+}>('serve/cloudflare.backend.ts', () => ({}))
 
 type CloudflareOptions = {
   bindingName?: string
@@ -98,10 +101,21 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
     instanceName: baseInstanceName,
     hooks: getTelefuncChannelHooks(),
   })
-  // Factory runs only on first install. Bundler quirks can evaluate the user's entry twice in the same isolate;
-  // we want every evaluation to share one transport instance.
-  const broadcast = installBroadcastAdapter(() => new CloudflareBroadcastTransport({ baseInstanceName, scale }))
-  setDefaultRoomBackend(() => new CloudflareRoomBackend(), CloudflareRoomBackend)
+  // Repeated entry-module evaluation shares the same raw driver and transport. The stable configuration
+  // identity lets the default installer avoid constructing a candidate while an explicit backend remains
+  // authoritative in either call order.
+  const backendIdentity = cloudflareBackendIdentity(baseInstanceName, scale)
+  let cloudflareBackend = cloudflareBackendSlot.current?.backend
+  if (
+    cloudflareBackendSlot.current?.identity !== backendIdentity ||
+    cloudflareBackend === undefined ||
+    cloudflareBackend.disposed
+  ) {
+    cloudflareBackend = new CloudflareRoomBackend(new CloudflareBroadcastTransport({ baseInstanceName, scale }))
+    cloudflareBackendSlot.current = { identity: backendIdentity, backend: cloudflareBackend }
+  }
+  setDefaultBackend(() => cloudflareBackend, backendIdentity)
+  const broadcast = cloudflareBackend.broadcast
 
   function getBinding(env: Cloudflare.Env): DurableObjectNamespace | undefined {
     const baseBinding = (env as Record<string, DurableObjectNamespace | undefined>)[bindingName]
@@ -272,4 +286,12 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
     TelefuncDurableObject,
     TelefuncRoomDurableObject,
   }
+}
+
+function cloudflareBackendIdentity(baseInstanceName: string, scale: CloudflareScale | undefined): string {
+  const normalizedScale =
+    typeof scale === 'object' && scale !== null
+      ? Object.entries(scale).sort(([left], [right]) => left.localeCompare(right))
+      : (scale ?? null)
+  return JSON.stringify([baseInstanceName, normalizedScale])
 }

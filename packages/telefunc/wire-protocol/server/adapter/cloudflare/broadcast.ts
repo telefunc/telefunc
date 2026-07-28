@@ -4,24 +4,27 @@ export type { BroadcastDeliverRequest, BroadcastPublishRequest, TelefuncDurableO
 
 import { CHANNEL_BUFFER_LIMIT_BYTES } from '../../../constants.js'
 import { KNOWN_BROADCAST_BUCKETS, getBucketCoordinatorShardIndices, getDeterministicKeyBucketIndex } from './routing.js'
-import { assert, assertUsage } from '../../../../utils/assert.js'
+import { assert } from '../../../../utils/assert.js'
 import { utf8ByteLength } from '../../../../utils/utf8ByteLength.js'
 import type {
-  BroadcastBinaryOnMessage,
-  BroadcastOnMessage,
-  BroadcastPublishResult,
-  BroadcastAdapter,
-  BroadcastUnsubscribe,
-} from '../../broadcast.js'
-import type { WirePublishInfo } from '../../../shared-ws.js'
+  BackendReceiver,
+  BroadcastLane,
+  PublishResult,
+  SubscriptionAttempt,
+  SubscriptionState,
+} from '../../../backend/spi.js'
+import { ORDERING_FRAME_LAYOUT } from '../../../ordering-frame.js'
 import type { CloudflareScale, LocationBucket } from './routing.js'
 
 const PRESENCE_TTL_SECONDS = 90
 const PRESENCE_REFRESH_INTERVAL_MS = 30_000
+const textEncoder = new TextEncoder()
+const textDecoder = new TextDecoder()
+type OrderingInfo = { seq: number; timestamp: number }
 
 /** Unwrap Cloudflare DO RPC proxy into a plain object.
  *  RPC properties are lazy stubs that must be awaited to resolve their values. */
-async function unwrapRpcResult(rpc: Promise<BroadcastPublishResult>): Promise<BroadcastPublishResult> {
+async function unwrapRpcResult(rpc: Promise<PublishResult>): Promise<PublishResult> {
   const r = await rpc
   // `receivers` (the authority's live subscriber count) rides back like `meta` — without this it
   // was dropped, blinding `publishBinary().receivers` / `onDemand` on Cloudflare.
@@ -39,31 +42,30 @@ type BroadcastPublishRequest = {
   locationBucket: LocationBucket
   forwarded?: boolean
   doNames?: string[]
-  info?: WirePublishInfo
+  info?: OrderingInfo
   serialized?: string
   binaryData?: Uint8Array
 }
 
 type BroadcastDeliverRequest = {
   key: string
-  info: WirePublishInfo
-  serialized?: string
-  binaryData?: Uint8Array
+  kind: BroadcastLane['kind']
+  frame: Uint8Array
 }
 
 /** A stub to a Telefunc Durable Object carrying the generic broadcast fan-out RPC surface. */
 type TelefuncDurableObjectStub = DurableObjectStub & {
-  telefuncBroadcastPublish(request: BroadcastPublishRequest): Promise<BroadcastPublishResult>
+  telefuncBroadcastPublish(request: BroadcastPublishRequest): Promise<PublishResult>
   telefuncBroadcastDeliver(request: BroadcastDeliverRequest): Promise<void>
 }
 
 type PendingBucketPublish = {
-  resolve: (ack: BroadcastPublishResult) => void
+  resolve: (ack: PublishResult) => void
   reject: (err: Error) => void
 }
 
 type BufferedPublish = {
-  send: () => Promise<BroadcastPublishResult>
+  send: () => Promise<PublishResult>
   bytes: number
   pending: PendingBucketPublish
 }
@@ -157,11 +159,9 @@ class MemberBucketState {
   setupInFlight = true
   teardownRequested = false
   refreshTimer: ReturnType<typeof setInterval> | null = null
-  /** Resolves once presence is first registered in KV — the point a cross-region publisher's
-   *  `listPresenceByBucket` can see this subscriber, so a retained replay awaiting it (see
-   *  `BroadcastUnsubscribe.ready`) reads the retained copy only after live frames can reach here. */
+  /** Raw route acknowledgement: resolves only after KV presence is actually registered. */
   readonly ready: Promise<void>
-  private markReady!: () => void
+  private settleReady!: { resolve: () => void; reject: (error: unknown) => void }
   private readonly authority: TelefuncDurableObjectStub
   private readonly key: string
   private readonly locationBucket: LocationBucket
@@ -171,18 +171,23 @@ class MemberBucketState {
     this.locationBucket = locationBucket
     this.authority = authority
     this.pendingPublishes = new CloudflareBucketPublishBuffer(CHANNEL_BUFFER_LIMIT_BYTES)
-    this.ready = new Promise((resolve) => {
-      this.markReady = resolve
+    this.ready = new Promise((resolve, reject) => {
+      this.settleReady = { resolve, reject }
     })
+    void this.ready.catch(() => {})
   }
 
   /** Called by the transport once presence registration settles (success or failure). Idempotent —
    *  resolving an already-resolved promise is a no-op — so a presence refresh never re-arms it. */
-  markPresenceRegistered(): void {
-    this.markReady()
+  acknowledgePresence(): void {
+    this.settleReady.resolve()
   }
 
-  publish(serialized: string): Promise<BroadcastPublishResult> {
+  rejectPresence(error: unknown): void {
+    this.settleReady.reject(error)
+  }
+
+  publish(serialized: string): Promise<PublishResult> {
     return unwrapRpcResult(
       this.authority.telefuncBroadcastPublish({
         key: this.key,
@@ -192,7 +197,7 @@ class MemberBucketState {
     )
   }
 
-  publishBinary(data: Uint8Array): Promise<BroadcastPublishResult> {
+  publishBinary(data: Uint8Array): Promise<PublishResult> {
     return unwrapRpcResult(
       this.authority.telefuncBroadcastPublish({
         key: this.key,
@@ -215,6 +220,57 @@ class MemberBucketState {
 // and authority bucket persistence. One per DO instance, passed to publishToSubscribers.
 // ---------------------------------------------------------------------------
 
+class CloudflareBroadcastSubscriptionAttempt implements SubscriptionAttempt {
+  readonly ready: Promise<void>
+  readonly #receiver: BackendReceiver
+  readonly #detach: () => Promise<void>
+  readonly #listeners = new Set<(state: SubscriptionState) => void>()
+  #state: SubscriptionState = 'establishing'
+  #unsubscribed = false
+
+  constructor(member: MemberBucketState, receiver: BackendReceiver, detach: () => Promise<void>) {
+    this.#receiver = receiver
+    this.#detach = detach
+    this.ready = member.ready.then(
+      () => {
+        if (this.#state !== 'closed') this.#transition('ready')
+      },
+      (error) => {
+        this.#transition('closed')
+        throw error
+      },
+    )
+    void this.ready.catch(() => {})
+  }
+
+  state(): SubscriptionState {
+    return this.#state
+  }
+
+  onStateChange(cb: (state: SubscriptionState) => void): () => void {
+    this.#listeners.add(cb)
+    return () => this.#listeners.delete(cb)
+  }
+
+  async deliver(payload: Uint8Array, info: OrderingInfo): Promise<void> {
+    if (this.#state !== 'ready') return
+    await (this.#receiver(payload, info) as unknown)
+  }
+
+  async unsubscribe(): Promise<void> {
+    if (this.#unsubscribed) return
+    this.#unsubscribed = true
+    this.#transition('closed')
+    await this.#detach()
+  }
+
+  #transition(state: SubscriptionState): void {
+    if (this.#state === state) return
+    this.#state = state
+    for (const listener of [...this.#listeners]) listener(state)
+  }
+}
+
 class CloudflareBroadcastAuthorityState {
   private readonly state: DurableObjectState
   private authorityPublishChain: Promise<void> = Promise.resolve()
@@ -228,6 +284,10 @@ class CloudflareBroadcastAuthorityState {
   async getNextKeySeq(key: string): Promise<number> {
     const cachedSeq = this.keySeqCache.get(key)
     const currentSeq = cachedSeq ?? (await this.state.storage.get<number>(`broadcast:${key}:sequence`)) ?? 0
+    assert(
+      Number.isSafeInteger(currentSeq) && currentSeq >= 0 && currentSeq < Number.MAX_SAFE_INTEGER,
+      'Cloudflare Broadcast sequence exhausted for the ordering domain',
+    )
     const nextSeq = currentSeq + 1
     this.keySeqCache.set(key, nextSeq)
     await this.state.storage.put(`broadcast:${key}:sequence`, nextSeq)
@@ -273,7 +333,7 @@ class CloudflareBroadcastAuthorityState {
 //   - representativeDOName: the first shard DO name, used for RPC delivery
 // ---------------------------------------------------------------------------
 
-class CloudflareBroadcastTransport implements BroadcastAdapter {
+class CloudflareBroadcastTransport {
   private readonly baseInstanceName: string
   private readonly scale: CloudflareScale | undefined
   private bindingName: string | null = null
@@ -282,8 +342,8 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
   private locationBucket: LocationBucket | null = null
   private representativeDOName: string | null = null
   private readonly memberStates = new Map<string, MemberBucketState>()
-  private readonly textSubs = new Map<string, Set<BroadcastOnMessage>>()
-  private readonly binarySubs = new Map<string, Set<BroadcastBinaryOnMessage>>()
+  private readonly textSubs = new Map<string, CloudflareBroadcastSubscriptionAttempt>()
+  private readonly binarySubs = new Map<string, CloudflareBroadcastSubscriptionAttempt>()
 
   constructor({ baseInstanceName, scale }: { baseInstanceName: string; scale?: CloudflareScale }) {
     this.baseInstanceName = baseInstanceName
@@ -376,75 +436,21 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
   // --- Local subscriber tracking ---
 
   private hasLocalCallbacks(key: string): boolean {
-    const text = this.textSubs.get(key)
-    if (text && text.size > 0) return true
-    const binary = this.binarySubs.get(key)
-    return binary !== undefined && binary.size > 0
+    return this.textSubs.has(key) || this.binarySubs.has(key)
   }
 
-  private deliverLocal({ key, serialized, binaryData, info }: BroadcastDeliverRequest): void {
-    if (serialized !== undefined) {
-      const subs = this.textSubs.get(key)
-      if (subs) for (const cb of subs) cb(serialized, info)
-    }
-    if (binaryData !== undefined) {
-      const subs = this.binarySubs.get(key)
-      if (subs) for (const cb of subs) cb(binaryData, info)
-    }
+  publish(lane: BroadcastLane, payload: Uint8Array): Promise<PublishResult> {
+    return lane.kind === 'text'
+      ? this.publishText(lane.key, textDecoder.decode(payload))
+      : this.publishBinary(lane.key, payload)
   }
 
-  // --- BroadcastAdapter interface ---
-
-  subscribe(key: string, onMessage: BroadcastOnMessage): BroadcastUnsubscribe {
-    const locationBucket = this.requireLocationBucket()
-    let subs = this.textSubs.get(key)
-    if (!subs) {
-      subs = new Set()
-      this.textSubs.set(key, subs)
-    }
-    subs.add(onMessage)
-    this.ensurePresence(key, locationBucket)
-    const unsub: BroadcastUnsubscribe = () => {
-      const s = this.textSubs.get(key)
-      if (s) {
-        s.delete(onMessage)
-        if (s.size === 0) this.textSubs.delete(key)
-      }
-      this.teardownPresenceIfEmpty(key)
-    }
-    // Every subscriber to a key shares the one presence registration, so it shares that registration's
-    // readiness (see `BroadcastUnsubscribe.ready` and `MemberBucketState.ready`).
-    unsub.ready = this.memberStates.get(key)?.ready
-    return unsub
-  }
-
-  subscribeBinary(key: string, onMessage: BroadcastBinaryOnMessage): BroadcastUnsubscribe {
-    const locationBucket = this.requireLocationBucket()
-    let subs = this.binarySubs.get(key)
-    if (!subs) {
-      subs = new Set()
-      this.binarySubs.set(key, subs)
-    }
-    subs.add(onMessage)
-    this.ensurePresence(key, locationBucket)
-    const unsub: BroadcastUnsubscribe = () => {
-      const s = this.binarySubs.get(key)
-      if (s) {
-        s.delete(onMessage)
-        if (s.size === 0) this.binarySubs.delete(key)
-      }
-      this.teardownPresenceIfEmpty(key)
-    }
-    unsub.ready = this.memberStates.get(key)?.ready
-    return unsub
-  }
-
-  publish(key: string, serialized: string): Promise<BroadcastPublishResult> {
+  private publishText(key: string, serialized: string): Promise<PublishResult> {
     const memberState = this.memberStates.get(key)
 
     if (memberState) {
       if (memberState.setupInFlight || memberState.pendingPublishes.flushing) {
-        return new Promise<BroadcastPublishResult>((resolve, reject) => {
+        return new Promise<PublishResult>((resolve, reject) => {
           memberState.pendingPublishes.push({
             send: () => memberState.publish(serialized),
             bytes: utf8ByteLength(serialized),
@@ -460,12 +466,12 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
     return unwrapRpcResult(authority.telefuncBroadcastPublish({ key, locationBucket, serialized }))
   }
 
-  publishBinary(key: string, data: Uint8Array): Promise<BroadcastPublishResult> {
+  private publishBinary(key: string, data: Uint8Array): Promise<PublishResult> {
     const memberState = this.memberStates.get(key)
 
     if (memberState) {
       if (memberState.setupInFlight || memberState.pendingPublishes.flushing) {
-        return new Promise<BroadcastPublishResult>((resolve, reject) => {
+        return new Promise<PublishResult>((resolve, reject) => {
           memberState.pendingPublishes.push({
             send: () => memberState.publishBinary(data),
             bytes: data.byteLength,
@@ -490,17 +496,19 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
   async publishToSubscribers(
     authorityState: CloudflareBroadcastAuthorityState,
     request: BroadcastPublishRequest,
-  ): Promise<BroadcastPublishResult> {
+  ): Promise<PublishResult> {
     const { key, locationBucket, serialized, binaryData, forwarded = false } = request
 
     if (forwarded) {
       assert(request.info, 'Forwarded publish must include info')
       const info = request.info
       const doNames = request.doNames ?? []
+      const kind = serialized === undefined ? 'binary' : 'text'
+      const payload = serialized === undefined ? binaryData : textEncoder.encode(serialized)
+      assert(payload !== undefined, 'Forwarded publish must include a payload')
+      const frame = encodeCloudflareOrderingFrame(payload, info)
       await Promise.all(
-        doNames.map((doName) =>
-          this.getBoundStub(doName).telefuncBroadcastDeliver({ key, serialized, binaryData, info }),
-        ),
+        doNames.map((doName) => this.getBoundStub(doName).telefuncBroadcastDeliver({ key, kind, frame })),
       )
       return { seq: info.seq, timestamp: info.timestamp }
     }
@@ -514,19 +522,6 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
     const info = { seq, timestamp: Date.now() }
     // `receivers` counts subscribed DOs (presence entries) — the same want-driven zero
     // semantics as the other transports: 0 ⟺ no subscriber anywhere.
-    const { receivers, fanoutBuckets } = await this.fanoutFrame(key, { serialized, binaryData }, info, presenceByBucket)
-    return { seq: info.seq, timestamp: info.timestamp, receivers, meta: { authorityBucket, fanoutBuckets } }
-  }
-
-  /** Forward one already-ordered generic broadcast frame to every populated bucket coordinator, each
-   *  of which delivers it to the subscribed DOs in its bucket. Returns the live receiver count and the
-   *  buckets reached. */
-  private async fanoutFrame(
-    key: string,
-    payload: { serialized?: string; binaryData?: Uint8Array },
-    info: WirePublishInfo,
-    presenceByBucket: Map<LocationBucket, string[]>,
-  ): Promise<{ receivers: number; fanoutBuckets: LocationBucket[] }> {
     const fanoutBuckets = Array.from(presenceByBucket.keys())
     let receivers = 0
     for (const doNames of presenceByBucket.values()) receivers += doNames.length
@@ -534,8 +529,8 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
       fanoutBuckets.map((activeBucket) =>
         this.getBucketCoordinatorStub(key, activeBucket).telefuncBroadcastPublish({
           key,
-          serialized: payload.serialized,
-          binaryData: payload.binaryData,
+          serialized,
+          binaryData,
           forwarded: true,
           locationBucket: activeBucket,
           doNames: presenceByBucket.get(activeBucket)!,
@@ -543,26 +538,43 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
         }),
       ),
     )
-    return { receivers, fanoutBuckets }
+    return { seq: info.seq, timestamp: info.timestamp, receivers, meta: { authorityBucket, fanoutBuckets } }
   }
 
   /**
    * Delivers a publish to local subscribers. Called via RPC on the representative DO for this isolate.
    */
-  deliverToLocal(request: BroadcastDeliverRequest): void {
-    this.deliverLocal(request)
+  async deliverToLocal(request: BroadcastDeliverRequest): Promise<void> {
+    const { payload, info } = decodeCloudflareOrderingFrame(request.frame)
+    const attempt = (request.kind === 'text' ? this.textSubs : this.binarySubs).get(request.key)
+    await attempt?.deliver(payload, info)
   }
 
   // --- Private ---
 
-  private ensurePresence(key: string, locationBucket: LocationBucket): void {
-    if (this.memberStates.has(key)) return
-    const memberState = new MemberBucketState(key, locationBucket, this.getAuthorityStub(key, locationBucket))
-    this.memberStates.set(key, memberState)
-    void this.initializePresence(key, memberState)
+  openSubscription(lane: BroadcastLane, receiver: BackendReceiver): CloudflareBroadcastSubscriptionAttempt {
+    const locationBucket = this.requireLocationBucket()
+    const member = this.ensurePresence(lane.key, locationBucket)
+    const routes = lane.kind === 'text' ? this.textSubs : this.binarySubs
+    let attempt!: CloudflareBroadcastSubscriptionAttempt
+    attempt = new CloudflareBroadcastSubscriptionAttempt(member, receiver, async () => {
+      if (routes.get(lane.key) === attempt) routes.delete(lane.key)
+      await this.teardownPresenceIfEmpty(lane.key)
+    })
+    routes.set(lane.key, attempt)
+    return attempt
   }
 
-  private teardownPresenceIfEmpty(key: string): void {
+  private ensurePresence(key: string, locationBucket: LocationBucket): MemberBucketState {
+    const existing = this.memberStates.get(key)
+    if (existing !== undefined) return existing
+    const memberState = new MemberBucketState(key, locationBucket, this.getAuthorityStub(key, locationBucket))
+    this.memberStates.set(key, memberState)
+    void this.initializePresence(key, memberState).catch(() => {})
+    return memberState
+  }
+
+  private async teardownPresenceIfEmpty(key: string): Promise<void> {
     if (this.hasLocalCallbacks(key)) return
     const memberState = this.memberStates.get(key)
     if (!memberState) return
@@ -574,23 +586,24 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
 
     memberState.stopRefresh()
     this.memberStates.delete(key)
-    void this.deletePresence(key)
+    await this.deletePresence(key)
   }
 
   private async initializePresence(key: string, memberState: MemberBucketState): Promise<void> {
     try {
       await this.putPresence(key)
-    } finally {
       memberState.setupInFlight = false
-      // Release any retained replay waiting on this subscription's readiness. Readiness is marked on
-      // failure too: if the put threw, the error propagates from here — the refresh timer is never
-      // installed, the pending publishes are never flushed, and nothing re-attempts this initial
-      // registration, so the subscription is live locally with no presence entry behind it.
-      memberState.markPresenceRegistered()
+      memberState.acknowledgePresence()
+    } catch (error) {
+      memberState.setupInFlight = false
+      memberState.pendingPublishes.clear()
+      memberState.rejectPresence(error)
+      if (this.memberStates.get(key) === memberState) this.memberStates.delete(key)
+      throw error
     }
 
     memberState.refreshTimer = setInterval(() => {
-      void this.putPresence(key)
+      void this.putPresence(key).catch(console.error)
     }, PRESENCE_REFRESH_INTERVAL_MS)
 
     await memberState.pendingPublishes.flush()
@@ -598,8 +611,24 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
     if (memberState.teardownRequested) {
       memberState.stopRefresh()
       await this.deletePresence(key)
-      this.memberStates.delete(key)
+      if (this.memberStates.get(key) === memberState) this.memberStates.delete(key)
     }
+  }
+
+  async dispose(): Promise<void> {
+    const attempts = [...this.textSubs.values(), ...this.binarySubs.values()]
+    await Promise.allSettled(attempts.map((attempt) => attempt.unsubscribe()))
+    const states = [...this.memberStates.entries()]
+    this.memberStates.clear()
+    this.textSubs.clear()
+    this.binarySubs.clear()
+    await Promise.allSettled(
+      states.map(async ([key, state]) => {
+        state.stopRefresh()
+        state.pendingPublishes.clear()
+        await this.deletePresence(key)
+      }),
+    )
   }
 
   private getBucketCoordinatorStub(key: string, locationBucket: LocationBucket): TelefuncDurableObjectStub {
@@ -622,4 +651,46 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
       locationHint ? { locationHint } : undefined,
     ) as TelefuncDurableObjectStub
   }
+}
+
+/** Cloudflare renders the frozen backend contract in Workers-compatible DataView operations. */
+function encodeCloudflareOrderingFrame(payload: Uint8Array, info: OrderingInfo): Uint8Array {
+  assertOrderingInfo(info)
+  const { headerBytes, offsets, wordRange, endianness } = ORDERING_FRAME_LAYOUT
+  const littleEndian = endiannessIsLittle(endianness)
+  const frame = new Uint8Array(headerBytes + payload.byteLength)
+  const view = new DataView(frame.buffer)
+  view.setUint32(offsets.seqHigh, Math.floor(info.seq / wordRange), littleEndian)
+  view.setUint32(offsets.seqLow, info.seq % wordRange, littleEndian)
+  view.setUint32(offsets.timestampHigh, Math.floor(info.timestamp / wordRange), littleEndian)
+  view.setUint32(offsets.timestampLow, info.timestamp % wordRange, littleEndian)
+  frame.set(payload, headerBytes)
+  return frame
+}
+
+function decodeCloudflareOrderingFrame(frame: Uint8Array): { payload: Uint8Array; info: OrderingInfo } {
+  const { headerBytes, offsets, wordRange, endianness } = ORDERING_FRAME_LAYOUT
+  const littleEndian = endiannessIsLittle(endianness)
+  assert(frame.byteLength >= headerBytes, `Cloudflare ordering frame is shorter than its ${headerBytes}-byte header`)
+  const view = new DataView(frame.buffer, frame.byteOffset, frame.byteLength)
+  const info = {
+    seq: view.getUint32(offsets.seqHigh, littleEndian) * wordRange + view.getUint32(offsets.seqLow, littleEndian),
+    timestamp:
+      view.getUint32(offsets.timestampHigh, littleEndian) * wordRange +
+      view.getUint32(offsets.timestampLow, littleEndian),
+  }
+  assertOrderingInfo(info)
+  return { payload: frame.subarray(headerBytes), info }
+}
+
+function endiannessIsLittle(endianness: string): boolean {
+  return endianness === 'little'
+}
+
+function assertOrderingInfo(info: OrderingInfo): void {
+  assert(Number.isSafeInteger(info.seq) && info.seq > 0, 'Cloudflare ordering seq must be a positive safe integer')
+  assert(
+    Number.isSafeInteger(info.timestamp) && info.timestamp >= 0,
+    'Cloudflare ordering timestamp must be a non-negative safe integer',
+  )
 }
