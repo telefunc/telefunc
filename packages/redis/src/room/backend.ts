@@ -1,4 +1,4 @@
-// The released Redis realization of RoomBackendSpi, proved against the shared conformance suite to the
+// The released Redis BackendDriver, proved against the shared conformance suite to the
 // same outcomes as the memory reference and certified on a disposable real three-master Redis Cluster.
 //
 // Mechanism map (spi.md §5.2), all atomic pieces in layout.ts's Lua:

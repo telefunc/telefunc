@@ -1,4 +1,4 @@
-// Final physical key layout + every Lua script for the Redis realization of RoomBackendSpi. The module
+// Final physical key layout + every Lua script for the Redis BackendDriver. The module
 // is package-internal but is emitted because RedisRoomBackend consumes it. Redis Cluster certification
 // is owned by the disposable three-master W4-R suite; standalone and Cluster use this one layout.
 //
