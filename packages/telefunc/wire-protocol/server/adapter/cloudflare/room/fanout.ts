@@ -14,68 +14,68 @@ export type DeliverFn = (target: RouteTarget, frame: Uint8Array, info: DeliveryI
 const noop = (): void => {}
 
 export class Fanout {
-  readonly #deliver: DeliverFn
-  readonly #defer: (resume: () => void) => void
+  private readonly _deliver: DeliverFn
+  private readonly _defer: (resume: () => void) => void
   // inc -> laneKey -> the lane's current chain tail. Nested so an incarnation's chains drop as a unit and
   // no key separator is needed.
-  readonly #chains = new Map<string, Map<string, Promise<void>>>()
-  readonly #incarnationFences = new Map<string, { active: boolean }>()
-  readonly #attempts = new Map<string, Promise<void>>()
-  #tokenSeq = 0
+  private readonly _chains = new Map<string, Map<string, Promise<void>>>()
+  private readonly _incarnationFences = new Map<string, { active: boolean }>()
+  private readonly _attempts = new Map<string, Promise<void>>()
+  private _tokenSeq = 0
 
   constructor(deliver: DeliverFn, defer: (resume: () => void) => void = queueMicrotask) {
-    this.#deliver = deliver
-    this.#defer = defer
+    this._deliver = deliver
+    this._defer = defer
   }
 
   // Enqueue one frame's handoff attempt onto its lane chain. Returns a token the caller resolves later
   // via `await`, so acceptance can return before the attempt runs (no reentrant delivery inside commit).
   enqueue(inc: string, laneKey: string, targets: RouteTarget[], frame: Uint8Array, info: DeliveryInfo): string {
-    let lanes = this.#chains.get(inc)
+    let lanes = this._chains.get(inc)
     if (lanes === undefined) {
       lanes = new Map<string, Promise<void>>()
-      this.#chains.set(inc, lanes)
+      this._chains.set(inc, lanes)
     }
     // Acceptance owns immutable delivery inputs. A caller may reuse or mutate its buffer as soon as
     // commit returns; no deferred attempt can observe those later writes.
     const acceptedFrame = new Uint8Array(frame)
     const acceptedTargets = targets.map((target) => ({ ...target }))
-    let fence = this.#incarnationFences.get(inc)
+    let fence = this._incarnationFences.get(inc)
     if (fence === undefined) {
       fence = { active: true }
-      this.#incarnationFences.set(inc, fence)
+      this._incarnationFences.set(inc, fence)
     }
     const previous = lanes.get(laneKey) ?? Promise.resolve()
     const attempt = previous
-      .then(() => new Promise<void>((resolve) => this.#defer(resolve)))
-      .then(() => (fence.active ? this.#fanout(acceptedTargets, acceptedFrame, info) : undefined))
+      .then(() => new Promise<void>((resolve) => this._defer(resolve)))
+      .then(() => (fence.active ? this._fanout(acceptedTargets, acceptedFrame, info) : undefined))
     // Settlement gate: the next frame starts after this one settles, success OR failure.
     lanes.set(laneKey, attempt.then(noop, noop))
-    const token = `d-${++this.#tokenSeq}`
-    this.#attempts.set(token, attempt)
+    const token = `d-${++this._tokenSeq}`
+    this._attempts.set(token, attempt)
     return token
   }
 
   // The caller's `delivery` promise: rejects only on this frame's own handoff failure.
   async await(token: string): Promise<void> {
-    const attempt = this.#attempts.get(token)
+    const attempt = this._attempts.get(token)
     if (attempt === undefined) return
     try {
       await attempt
     } finally {
-      this.#attempts.delete(token)
+      this._attempts.delete(token)
     }
   }
 
   // Incarnation-scoped teardown: a dropped/closed generation's chains never continue into a recreation.
   clearIncarnation(inc: string): void {
-    const fence = this.#incarnationFences.get(inc)
+    const fence = this._incarnationFences.get(inc)
     if (fence !== undefined) fence.active = false
-    this.#incarnationFences.delete(inc)
-    this.#chains.delete(inc)
+    this._incarnationFences.delete(inc)
+    this._chains.delete(inc)
   }
 
-  async #fanout(targets: RouteTarget[], frame: Uint8Array, info: DeliveryInfo): Promise<void> {
-    await Promise.all(targets.map((target) => this.#deliver(target, frame, info)))
+  private async _fanout(targets: RouteTarget[], frame: Uint8Array, info: DeliveryInfo): Promise<void> {
+    await Promise.all(targets.map((target) => this._deliver(target, frame, info)))
   }
 }

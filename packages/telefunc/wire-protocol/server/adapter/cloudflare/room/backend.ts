@@ -146,15 +146,15 @@ type ManagerEntry = {
 }
 
 export class CloudflareRoomSessionManager {
-  readonly #id: string
-  readonly #subscriptionPartition = crypto.randomUUID()
-  readonly #getRoomNamespace: () => CloudflareRoomNamespace
-  readonly #entries = new Map<string, ManagerEntry>()
-  readonly #deliverySettlements = new Map<string, Promise<void>>()
-  readonly #scheduler: SubscriptionScheduler | undefined
-  readonly #now: () => number
-  readonly #authorityOverride: ((roomId: string) => CloudflareRoomAuthorityStub) | undefined
-  #disposed = false
+  private readonly _id: string
+  private readonly _subscriptionPartition = crypto.randomUUID()
+  private readonly _getRoomNamespace: () => CloudflareRoomNamespace
+  private readonly _entries = new Map<string, ManagerEntry>()
+  private readonly _deliverySettlements = new Map<string, Promise<void>>()
+  private readonly _scheduler: SubscriptionScheduler | undefined
+  private readonly _now: () => number
+  private readonly _authorityOverride: ((roomId: string) => CloudflareRoomAuthorityStub) | undefined
+  private _disposed = false
 
   constructor(
     sessionId: string,
@@ -165,11 +165,11 @@ export class CloudflareRoomSessionManager {
       authority?: (roomId: string) => CloudflareRoomAuthorityStub
     } = {},
   ) {
-    this.#id = sessionId
-    this.#getRoomNamespace = getRoomNamespace
-    this.#scheduler = options.scheduler
-    this.#now = options.now ?? Date.now
-    this.#authorityOverride = options.authority
+    this._id = sessionId
+    this._getRoomNamespace = getRoomNamespace
+    this._scheduler = options.scheduler
+    this._now = options.now ?? Date.now
+    this._authorityOverride = options.authority
   }
 
   openSubscription(
@@ -178,7 +178,7 @@ export class CloudflareRoomSessionManager {
     lane: LaneId,
     receiver: BackendReceiver,
   ): CloudflareRoomSubscriptionAttempt {
-    if (this.#disposed) throw new Error('Cloudflare Room session manager is disposed')
+    if (this._disposed) throw new Error('Cloudflare Room session manager is disposed')
     // Resolve the binding before installing even provisional local state. The per-isolate backend calls
     // this method only after resolving this exact manager from raw async context.
     const authority = this.authority(roomId)
@@ -187,17 +187,17 @@ export class CloudflareRoomSessionManager {
       roomId,
       inc,
       laneKey,
-      subscriberDoId: this.#id,
+      subscriberDoId: this._id,
       authority,
     }
-    return this.#openSubscription(source, receiver)
+    return this._openSubscription(source, receiver)
   }
 
   async deliver(request: RoomShardDeliveryRequest): Promise<void> {
     assertOrderingPosition(request.seq, request.timestamp, 'Cloudflare Room delivery')
-    if (request.subscriberDoId !== this.#id)
+    if (request.subscriberDoId !== this._id)
       throw new Error('Cloudflare Room delivery addressed the wrong session shard')
-    const entry = this.#entries.get(JSON.stringify([request.roomId, request.inc, request.laneKey]))
+    const entry = this._entries.get(JSON.stringify([request.roomId, request.inc, request.laneKey]))
     if (entry === undefined || !entry.attempt.matches(request)) {
       throw new Error('Cloudflare Room delivery lease is not installed')
     }
@@ -205,29 +205,29 @@ export class CloudflareRoomSessionManager {
   }
 
   invalidate(request: RoomShardInvalidationRequest): void {
-    const entry = this.#entries.get(JSON.stringify([request.roomId, request.inc, request.laneKey]))
+    const entry = this._entries.get(JSON.stringify([request.roomId, request.inc, request.laneKey]))
     if (entry?.attempt.matches(request)) entry.attempt.invalidate()
   }
 
   dispose(): void {
-    if (this.#disposed) return
-    this.#disposed = true
-    for (const entry of this.#entries.values()) entry.attempt.terminate()
-    this.#entries.clear()
-    this.#deliverySettlements.clear()
+    if (this._disposed) return
+    this._disposed = true
+    for (const entry of this._entries.values()) entry.attempt.terminate()
+    this._entries.clear()
+    this._deliverySettlements.clear()
   }
 
   get subscriptionPartition(): string {
-    return this.#subscriptionPartition
+    return this._subscriptionPartition
   }
 
   valid(): boolean {
-    return !this.#disposed
+    return !this._disposed
   }
 
   authority(roomId: string): CloudflareRoomAuthorityStub {
-    if (this.#authorityOverride !== undefined) return this.#authorityOverride(roomId)
-    const namespace = this.#getRoomNamespace()
+    if (this._authorityOverride !== undefined) return this._authorityOverride(roomId)
+    const namespace = this._getRoomNamespace()
     return namespace.get(namespace.idFromName(roomId))
   }
 
@@ -236,15 +236,15 @@ export class CloudflareRoomSessionManager {
     // in either RPC-response order. Keep the caller-visible fence on this exact event-local manager;
     // the stateless backend proxy never owns settlement state across session shards.
     const key = JSON.stringify([roomId, inc, laneKeyOf(lane)])
-    const previous = this.#deliverySettlements.get(key) ?? Promise.resolve()
+    const previous = this._deliverySettlements.get(key) ?? Promise.resolve()
     const delivery = previous.then(() => attempt)
     const tail = delivery.then(
       () => undefined,
       () => undefined,
     )
-    this.#deliverySettlements.set(key, tail)
+    this._deliverySettlements.set(key, tail)
     void tail.then(() => {
-      if (this.#deliverySettlements.get(key) === tail) this.#deliverySettlements.delete(key)
+      if (this._deliverySettlements.get(key) === tail) this._deliverySettlements.delete(key)
     })
     void attempt.catch(() => {})
     void delivery.catch(() => {})
@@ -252,26 +252,26 @@ export class CloudflareRoomSessionManager {
   }
 
   dropGenerationSettlements(roomId: string, inc: string): void {
-    for (const key of this.#deliverySettlements.keys()) {
+    for (const key of this._deliverySettlements.keys()) {
       const [candidateRoomId, candidateInc] = JSON.parse(key) as [string, string, string]
-      if (candidateRoomId === roomId && candidateInc === inc) this.#deliverySettlements.delete(key)
+      if (candidateRoomId === roomId && candidateInc === inc) this._deliverySettlements.delete(key)
     }
   }
 
-  #openSubscription(
+  private _openSubscription(
     source: CloudflareRoomSubscriptionSource,
     receiver: BackendReceiver,
   ): CloudflareRoomSubscriptionAttempt {
     const key = JSON.stringify([source.roomId, source.inc, source.laneKey])
     let attempt!: CloudflareRoomSubscriptionAttempt
     attempt = new CloudflareRoomSubscriptionAttempt(source, receiver, {
-      ...(this.#scheduler === undefined ? {} : { scheduler: this.#scheduler }),
-      now: this.#now,
+      ...(this._scheduler === undefined ? {} : { scheduler: this._scheduler }),
+      now: this._now,
       onClosed: () => {
-        if (this.#entries.get(key)?.attempt === attempt) this.#entries.delete(key)
+        if (this._entries.get(key)?.attempt === attempt) this._entries.delete(key)
       },
     })
-    this.#entries.set(key, { source, attempt })
+    this._entries.set(key, { source, attempt })
     attempt.start()
     return attempt
   }
@@ -300,12 +300,12 @@ export class CloudflareRoomBackend implements BackendDriver {
   }
   readonly broadcast: CloudflareBroadcastTransport
   readonly subscriptions: SubscriptionDriver
-  #disposed = false
+  private _disposed = false
 
   constructor(broadcast = new CloudflareBroadcastTransport({ baseInstanceName: 'telefunc' })) {
     this.broadcast = broadcast
     this.subscriptions = {
-      bind: (source) => this.#bindSubscription(source),
+      bind: (source) => this._bindSubscription(source),
     }
   }
 
@@ -314,7 +314,7 @@ export class CloudflareRoomBackend implements BackendDriver {
   }
 
   async readHead(roomId: string): Promise<{ head: RoomHead } | null> {
-    const wire = await this.#stub(roomId).readHead()
+    const wire = await this._stub(roomId).readHead()
     return wire === null ? null : { head: headFromWire(wire) }
   }
   async compareExchangeHead(
@@ -324,7 +324,7 @@ export class CloudflareRoomBackend implements BackendDriver {
   ): Promise<
     { ok: true; head: RoomHead } | { ok: true; deleted: true } | { conflict: true; current: RoomHead | null }
   > {
-    const wire = await this.#stub(roomId).compareExchangeHead(cx, nextToWire(next))
+    const wire = await this._stub(roomId).compareExchangeHead(cx, nextToWire(next))
     if ('error' in wire) throw new Error(wire.error)
     if ('conflict' in wire)
       return { conflict: true, current: wire.current === null ? null : headFromWire(wire.current) }
@@ -335,7 +335,7 @@ export class CloudflareRoomBackend implements BackendDriver {
     inc: string,
     sel: { keys: string[] } | { prefix: string },
   ): Promise<{ revision: string; cells: Map<string, Uint8Array> } | { staleInc: true }> {
-    const wire = await this.#stub(roomId).readCells(inc, sel)
+    const wire = await this._stub(roomId).readCells(inc, sel)
     if ('staleInc' in wire) return wire
     return { revision: wire.revision, cells: new Map(wire.cells.map(([key, value]) => [key, base64ToBytes(value)])) }
   }
@@ -345,7 +345,7 @@ export class CloudflareRoomBackend implements BackendDriver {
     revision: string,
     mutations: CellMutation[],
   ): Promise<CxResult> {
-    return this.#stub(roomId).compareExchangeCells(
+    return this._stub(roomId).compareExchangeCells(
       inc,
       revision,
       mutations.map((mutation) =>
@@ -380,19 +380,19 @@ export class CloudflareRoomBackend implements BackendDriver {
     }
   }
   async readRetained(roomId: string, inc: string, lane: LaneId) {
-    const wire = await this.#stub(roomId).readRetained(inc, lane)
+    const wire = await this._stub(roomId).readRetained(inc, lane)
     if (wire === null) return null
     assertOrderingPosition(wire.seq, wire.timestamp, 'CloudflareRoomBackend.readRetained')
     return { payload: base64ToBytes(wire.payloadB64), seq: wire.seq, timestamp: wire.timestamp }
   }
   async listRetained(roomId: string, inc: string) {
-    return this.#stub(roomId).listRetained(inc)
+    return this._stub(roomId).listRetained(inc)
   }
   async deleteRetained(roomId: string, inc: string, lane?: LaneId, opts?: { ifSeq?: number }) {
-    await this.#stub(roomId).deleteRetainedLane(inc, lane, opts)
+    await this._stub(roomId).deleteRetainedLane(inc, lane, opts)
   }
   async listGenerations(roomId: string) {
-    return this.#stub(roomId).listGenerations()
+    return this._stub(roomId).listGenerations()
   }
   async dropGeneration(roomId: string, inc: string) {
     const manager = getCloudflareRoomSessionManager()
@@ -404,27 +404,27 @@ export class CloudflareRoomBackend implements BackendDriver {
     }
   }
   async directoryPut(roomId: string, incTag: string) {
-    await this.#directory().directoryPut(roomId, incTag)
+    await this._directory().directoryPut(roomId, incTag)
   }
   async directoryDelete(roomId: string, incTag: string) {
-    await this.#directory().directoryDelete(roomId, incTag)
+    await this._directory().directoryDelete(roomId, incTag)
   }
   async directoryList(prefix: string, cursor?: string) {
-    return this.#directory().directoryList(prefix, cursor)
+    return this._directory().directoryList(prefix, cursor)
   }
   async dispose() {
-    if (this.#disposed) return
-    this.#disposed = true
+    if (this._disposed) return
+    this._disposed = true
     await this.broadcast.dispose()
   }
   get disposed(): boolean {
-    return this.#disposed
+    return this._disposed
   }
-  #bindSubscription(source: BackendSubscriptionSource): SubscriptionBinding {
+  private _bindSubscription(source: BackendSubscriptionSource): SubscriptionBinding {
     if (source.kind === 'broadcast') {
       return {
         partition: '',
-        valid: () => !this.#disposed,
+        valid: () => !this._disposed,
         open: (receiver) => this.broadcast.openSubscription(source.lane, receiver),
       }
     }
@@ -435,11 +435,11 @@ export class CloudflareRoomBackend implements BackendDriver {
       open: (receiver) => manager.openSubscription(source.roomId, source.inc, source.lane, receiver),
     }
   }
-  #stub(roomId: string): CloudflareRoomAuthorityStub {
+  private _stub(roomId: string): CloudflareRoomAuthorityStub {
     return getCloudflareRoomSessionManager().authority(roomId)
   }
-  #directory(): CloudflareRoomAuthorityStub {
-    return this.#stub(DIRECTORY_DO_NAME)
+  private _directory(): CloudflareRoomAuthorityStub {
+    return this._stub(DIRECTORY_DO_NAME)
   }
 }
 

@@ -439,20 +439,20 @@ class CloudflareConformanceBackend implements BackendSpi {
     clusterSafe: false,
     directory: true,
   }
-  readonly #session: SessionStub
-  readonly #subscriptions = new Map<string, SubscriptionControl>()
-  readonly #deliverySettlements = new Map<string, Promise<void>>()
-  #disposed = false
-  #controlPush: Promise<void> = Promise.resolve()
+  private readonly _session: SessionStub
+  private readonly _subscriptions = new Map<string, SubscriptionControl>()
+  private readonly _deliverySettlements = new Map<string, Promise<void>>()
+  private _disposed = false
+  private _controlPush: Promise<void> = Promise.resolve()
 
   constructor(session: SessionStub) {
-    this.#session = session
+    this._session = session
   }
 
-  async #preflight(): Promise<void> {
-    if (this.#disposed) throw new Error('CloudflareRoomBackend: used after dispose()')
+  private async _preflight(): Promise<void> {
+    if (this._disposed) throw new Error('CloudflareRoomBackend: used after dispose()')
     await bounded(
-      Promise.all([clockPush, this.#controlPush]).then(() => undefined),
+      Promise.all([clockPush, this._controlPush]).then(() => undefined),
       'Cloudflare conformance preflight',
     )
   }
@@ -466,13 +466,13 @@ class CloudflareConformanceBackend implements BackendSpi {
   }
 
   async readHead(roomId: string) {
-    await this.#preflight()
-    const wire = await this.#command<{ head: HeadWire } | null>({ kind: 'read-head', roomId })
+    await this._preflight()
+    const wire = await this._command<{ head: HeadWire } | null>({ kind: 'read-head', roomId })
     return wire === null ? null : { head: headFromWire(wire.head) }
   }
   async compareExchangeHead(roomId: string, cx: HeadCx, next: HeadNext) {
-    await this.#preflight()
-    const wire = await this.#command<HeadCxWire>({ kind: 'compare-exchange-head', roomId, cx, next: nextToWire(next) })
+    await this._preflight()
+    const wire = await this._command<HeadCxWire>({ kind: 'compare-exchange-head', roomId, cx, next: nextToWire(next) })
     if ('conflict' in wire)
       return { conflict: true as const, current: wire.current === null ? null : headFromWire(wire.current) }
     return 'deleted' in wire
@@ -480,14 +480,14 @@ class CloudflareConformanceBackend implements BackendSpi {
       : { ok: true as const, head: headFromWire(wire.head) }
   }
   async readCells(roomId: string, inc: string, sel: { keys: string[] } | { prefix: string }) {
-    await this.#preflight()
-    const wire = await this.#command<CellsWire>({ kind: 'read-cells', roomId, inc, selection: sel })
+    await this._preflight()
+    const wire = await this._command<CellsWire>({ kind: 'read-cells', roomId, inc, selection: sel })
     if ('staleInc' in wire) return wire
     return { revision: wire.revision, cells: new Map(wire.cells.map(([key, value]) => [key, base64ToBytes(value)])) }
   }
   async compareExchangeCells(roomId: string, inc: string, revision: string, mutations: CellMutation[]) {
-    await this.#preflight()
-    return this.#command<CxResult>({
+    await this._preflight()
+    return this._command<CxResult>({
       kind: 'compare-exchange-cells',
       roomId,
       inc,
@@ -507,64 +507,64 @@ class CloudflareConformanceBackend implements BackendSpi {
     payload: Uint8Array,
     opts?: { retain?: boolean; closingLease?: string },
   ): Promise<CommitResult> {
-    await this.#preflight()
-    const result = await this.#command<
+    await this._preflight()
+    const result = await this._command<
       { accepted: true; seq: number; timestamp: number; receivers: number; deliveryToken: string } | { stale: true }
     >({ kind: 'commit-lane', roomId, inc, lane, payloadB64: bytesToBase64(payload), options: opts })
     if ('stale' in result) return result
-    const delivery = this.#orderedDelivery(roomId, inc, lane, result.deliveryToken, async () => {
-      await this.#pollReceivers()
-      await this.#refreshStates()
+    const delivery = this._orderedDelivery(roomId, inc, lane, result.deliveryToken, async () => {
+      await this._pollReceivers()
+      await this._refreshStates()
     })
     void delivery.catch(() => {})
     return { accepted: true, seq: result.seq, timestamp: result.timestamp, receivers: result.receivers, delivery }
   }
 
   async readRetained(roomId: string, inc: string, lane: LaneId) {
-    await this.#preflight()
-    const wire = await this.#command<RetainedWire | null>({ kind: 'read-retained', roomId, inc, lane })
+    await this._preflight()
+    const wire = await this._command<RetainedWire | null>({ kind: 'read-retained', roomId, inc, lane })
     return wire === null ? null : { payload: base64ToBytes(wire.payloadB64), seq: wire.seq, timestamp: wire.timestamp }
   }
   async listRetained(roomId: string, inc: string) {
-    await this.#preflight()
-    return this.#command<LaneId[]>({ kind: 'list-retained', roomId, inc })
+    await this._preflight()
+    return this._command<LaneId[]>({ kind: 'list-retained', roomId, inc })
   }
   async deleteRetained(roomId: string, inc: string, lane?: LaneId, opts?: { ifSeq?: number }) {
-    await this.#preflight()
-    await this.#command<null>({ kind: 'delete-retained', roomId, inc, lane, options: opts })
+    await this._preflight()
+    await this._command<null>({ kind: 'delete-retained', roomId, inc, lane, options: opts })
   }
 
   async runOrderMaintenance(roomId: string): Promise<void> {
-    await this.#preflight()
-    await this.#command<null>({ kind: 'run-order-maintenance', roomId })
+    await this._preflight()
+    await this._command<null>({ kind: 'run-order-maintenance', roomId })
   }
 
   async reconstructOrderAuthority(roomId: string): Promise<void> {
-    await this.#preflight()
-    await this.#command<null>({ kind: 'reconstruct-order-authority', roomId })
+    await this._preflight()
+    await this._command<null>({ kind: 'reconstruct-order-authority', roomId })
   }
 
   async seedOrderWatermark(roomId: string, inc: string, lane: LaneId, seq: number, timestamp: number): Promise<void> {
-    await this.#preflight()
-    await this.#command<null>({ kind: 'seed-order-watermark', roomId, inc, lane, seq, timestamp })
+    await this._preflight()
+    await this._command<null>({ kind: 'seed-order-watermark', roomId, inc, lane, seq, timestamp })
   }
 
   subscribeLane(roomId: string, inc: string, lane: LaneId, receiver: BackendReceiver): BackendSubscription {
-    if (this.#disposed) throw new Error('CloudflareRoomBackend: used after dispose()')
+    if (this._disposed) throw new Error('CloudflareRoomBackend: used after dispose()')
     const descriptor = receiverDescriptor(receiver)
     if (descriptor === undefined) {
       throw new Error('Cloudflare conformance forbids Node receiver callbacks; use a receiver command')
     }
     const id = crypto.randomUUID()
     const control: SubscriptionControl = { id, receiver, state: 'establishing', listeners: new Set() }
-    this.#subscriptions.set(id, control)
+    this._subscriptions.set(id, control)
     bindRemoteReceiver(receiver, id, {
-      poll: () => this.#session.pollReceiver(id, descriptor.id),
-      release: () => this.#session.releaseReceiver(id, descriptor.id),
-      seed: () => this.#session.seedReceiver(id, descriptor.id),
+      poll: () => this._session.pollReceiver(id, descriptor.id),
+      release: () => this._session.releaseReceiver(id, descriptor.id),
+      seed: () => this._session.seedReceiver(id, descriptor.id),
     })
-    const ready = this.#preflight()
-      .then(() => this.#session.createSubscription(id, descriptor.id, roomId, inc, lane, descriptor.command))
+    const ready = this._preflight()
+      .then(() => this._session.createSubscription(id, descriptor.id, roomId, inc, lane, descriptor.command))
       .then((result) => {
         control.state = result.state
         if (!result.ready) throw new Error(result.error)
@@ -581,12 +581,12 @@ class CloudflareConformanceBackend implements BackendSpi {
         if (control.state === 'closed') return
         control.state = 'closed'
         for (const listener of [...control.listeners]) listener('closed')
-        await this.#preflight()
+        await this._preflight()
         try {
-          const error = await this.#session.unsubscribeSubscription(id)
+          const error = await this._session.unsubscribeSubscription(id)
           if (error !== null) throw new Error(error)
         } finally {
-          this.#subscriptions.delete(id)
+          this._subscriptions.delete(id)
           unbindRemoteReceiver(receiver, id)
         }
       },
@@ -594,29 +594,29 @@ class CloudflareConformanceBackend implements BackendSpi {
   }
 
   async listGenerations(roomId: string) {
-    await this.#preflight()
-    return this.#command<string[]>({ kind: 'list-generations', roomId })
+    await this._preflight()
+    return this._command<string[]>({ kind: 'list-generations', roomId })
   }
   async dropGeneration(roomId: string, inc: string) {
-    await this.#preflight()
-    await this.#command<null>({ kind: 'drop-generation', roomId, inc })
-    for (const key of this.#deliverySettlements.keys()) {
+    await this._preflight()
+    await this._command<null>({ kind: 'drop-generation', roomId, inc })
+    for (const key of this._deliverySettlements.keys()) {
       const [candidateRoomId, candidateInc] = JSON.parse(key) as [string, string, string]
-      if (candidateRoomId === roomId && candidateInc === inc) this.#deliverySettlements.delete(key)
+      if (candidateRoomId === roomId && candidateInc === inc) this._deliverySettlements.delete(key)
     }
-    await this.#refreshStates()
+    await this._refreshStates()
   }
   async directoryPut(roomId: string, incTag: string) {
-    await this.#preflight()
-    await this.#command<null>({ kind: 'directory-put', roomId, incTag })
+    await this._preflight()
+    await this._command<null>({ kind: 'directory-put', roomId, incTag })
   }
   async directoryDelete(roomId: string, incTag: string) {
-    await this.#preflight()
-    await this.#command<null>({ kind: 'directory-delete', roomId, incTag })
+    await this._preflight()
+    await this._command<null>({ kind: 'directory-delete', roomId, incTag })
   }
   async directoryList(prefix: string, cursor?: string) {
-    await this.#preflight()
-    return this.#command<{ entries: { roomId: string; incTag: string }[]; cursor?: string }>({
+    await this._preflight()
+    return this._command<{ entries: { roomId: string; incTag: string }[]; cursor?: string }>({
       kind: 'directory-list',
       prefix,
       cursor,
@@ -624,122 +624,122 @@ class CloudflareConformanceBackend implements BackendSpi {
   }
 
   async dispose(): Promise<void> {
-    if (this.#disposed) return
-    this.#disposed = true
+    if (this._disposed) return
+    this._disposed = true
     await bounded(
-      Promise.allSettled([...this.#deliverySettlements.values()]).then(() => undefined),
+      Promise.allSettled([...this._deliverySettlements.values()]).then(() => undefined),
       'Cloudflare conformance delivery drain',
     )
-    await bounded(this.#session.disposeBackend(), 'Cloudflare conformance backend disposal')
-    this.#session[Symbol.dispose]?.()
-    this.#subscriptions.clear()
-    this.#deliverySettlements.clear()
+    await bounded(this._session.disposeBackend(), 'Cloudflare conformance backend disposal')
+    this._session[Symbol.dispose]?.()
+    this._subscriptions.clear()
+    this._deliverySettlements.clear()
   }
 
   forceRenewalFailures(count: number): void {
-    this.#controlPush = this.#controlPush.then(() => this.#session.forceRenewalFailures(count))
+    this._controlPush = this._controlPush.then(() => this._session.forceRenewalFailures(count))
   }
   forceEstablishmentFailures(count: number): void {
-    this.#controlPush = this.#controlPush.then(() => this.#session.forceEstablishmentFailures(count))
+    this._controlPush = this._controlPush.then(() => this._session.forceEstablishmentFailures(count))
   }
   forcePostCommitEstablishmentFailures(count: number): void {
-    this.#controlPush = this.#controlPush.then(() => this.#session.forcePostCommitEstablishmentFailures(count))
+    this._controlPush = this._controlPush.then(() => this._session.forcePostCommitEstablishmentFailures(count))
   }
   async registrationLeaseHistory(): Promise<string[]> {
-    await this.#controlPush
-    return this.#session.registrationLeaseHistory()
+    await this._controlPush
+    return this._session.registrationLeaseHistory()
   }
   forceGenerationCaptureFailures(count: number): void {
-    this.#controlPush = this.#controlPush.then(() => this.#session.forceGenerationCaptureFailures(count))
+    this._controlPush = this._controlPush.then(() => this._session.forceGenerationCaptureFailures(count))
   }
   forceInvalidationFailures(count: number): void {
-    this.#controlPush = this.#controlPush.then(() => this.#session.forceInvalidationFailures(count))
+    this._controlPush = this._controlPush.then(() => this._session.forceInvalidationFailures(count))
   }
   forceUnsubscribeFailures(count: number): void {
-    this.#controlPush = this.#controlPush.then(() => this.#session.forceUnsubscribeFailures(count))
+    this._controlPush = this._controlPush.then(() => this._session.forceUnsubscribeFailures(count))
   }
   async resetSessionEpoch(): Promise<void> {
-    await this.#preflight()
-    await this.#session.resetSessionEpoch()
-    for (const control of this.#subscriptions.values()) {
+    await this._preflight()
+    await this._session.resetSessionEpoch()
+    for (const control of this._subscriptions.values()) {
       control.state = 'closed'
       for (const listener of [...control.listeners]) listener('closed')
     }
-    this.#subscriptions.clear()
-    this.#deliverySettlements.clear()
+    this._subscriptions.clear()
+    this._deliverySettlements.clear()
   }
   async advanceRenewalTimers(ms: number): Promise<void> {
-    await this.#controlPush
-    await this.#session.advanceRenewalTimers(ms)
-    await this.#refreshStates()
+    await this._controlPush
+    await this._session.advanceRenewalTimers(ms)
+    await this._refreshStates()
   }
 
-  async #pollReceivers(): Promise<void> {
-    await Promise.all([...this.#subscriptions.values()].map((entry) => pollRemoteReceiver(entry.receiver)))
+  private async _pollReceivers(): Promise<void> {
+    await Promise.all([...this._subscriptions.values()].map((entry) => pollRemoteReceiver(entry.receiver)))
   }
 
-  async #refreshStates(): Promise<void> {
-    for (const control of this.#subscriptions.values()) {
-      const update = await this.#session.subscriptionState(control.id)
+  private async _refreshStates(): Promise<void> {
+    for (const control of this._subscriptions.values()) {
+      const update = await this._session.subscriptionState(control.id)
       control.state = update.state
       for (const event of update.events) for (const listener of [...control.listeners]) listener(event)
     }
   }
 
   async commitFromSession(roomId: string, inc: string, lane: LaneId, payload: Uint8Array): Promise<CommitResult> {
-    await this.#preflight()
-    const result = await this.#session.commitLaneB64(roomId, inc, lane, bytesToBase64(payload))
+    await this._preflight()
+    const result = await this._session.commitLaneB64(roomId, inc, lane, bytesToBase64(payload))
     if ('stale' in result) return result
-    const delivery = this.#orderedDelivery(roomId, inc, lane, result.deliveryToken, async () => {
-      await this.#pollReceivers()
-      await this.#refreshStates()
+    const delivery = this._orderedDelivery(roomId, inc, lane, result.deliveryToken, async () => {
+      await this._pollReceivers()
+      await this._refreshStates()
     })
     void delivery.catch(() => {})
     return { accepted: true, seq: result.seq, timestamp: result.timestamp, receivers: result.receivers, delivery }
   }
 
   probeContext(delayMs: number): Promise<boolean> {
-    return this.#session.contextProbe(delayMs)
+    return this._session.contextProbe(delayMs)
   }
 
   probeSharedBackendOwnership(roomId: string, inc: string, delayMs: number): Promise<string> {
-    return this.#session.sharedBackendOwnershipProbe(roomId, inc, delayMs)
+    return this._session.sharedBackendOwnershipProbe(roomId, inc, delayMs)
   }
 
   clearOwnershipProbes(): Promise<void> {
-    return this.#session.clearOwnershipProbes()
+    return this._session.clearOwnershipProbes()
   }
 
   missingBindingSubscriptionProbe(roomId: string, inc: string): Promise<string> {
-    return this.#session.missingBindingSubscriptionProbe(roomId, inc)
+    return this._session.missingBindingSubscriptionProbe(roomId, inc)
   }
 
   ambientCommitCaptureProbe(roomId: string, inc: string): Promise<string> {
-    return this.#session.ambientCommitCaptureProbe(roomId, inc)
+    return this._session.ambientCommitCaptureProbe(roomId, inc)
   }
 
-  async #command<T>(command: SessionRoomCommand): Promise<T> {
+  private async _command<T>(command: SessionRoomCommand): Promise<T> {
     const result = parseRoomReply<T>(
       await bounded(
-        this.#session.roomCommand(JSON.stringify(command)),
+        this._session.roomCommand(JSON.stringify(command)),
         `Cloudflare conformance command '${command.kind}'`,
       ),
     )
     return result
   }
 
-  async #awaitDelivery(token: string): Promise<void> {
+  private async _awaitDelivery(token: string): Promise<void> {
     for (;;) {
       // Yield outside workerd before every observation so a burst of Node-side status queries cannot
       // starve the worker-owned delivery callback that changes the status.
       await new Promise<void>((resolve) => setTimeout(resolve, 50))
-      const status = await this.#session.deliveryStatus(token)
+      const status = await this._session.deliveryStatus(token)
       if (status.state === 'resolved') return
       if (status.state === 'rejected') throw new Error(status.error)
     }
   }
 
-  #orderedDelivery(
+  private _orderedDelivery(
     roomId: string,
     inc: string,
     lane: LaneId,
@@ -747,9 +747,9 @@ class CloudflareConformanceBackend implements BackendSpi {
     observe: () => Promise<void>,
   ): Promise<void> {
     const key = JSON.stringify([roomId, inc, lane])
-    const attempt = this.#awaitDelivery(token)
+    const attempt = this._awaitDelivery(token)
     void attempt.catch(() => {})
-    const previous = this.#deliverySettlements.get(key) ?? Promise.resolve()
+    const previous = this._deliverySettlements.get(key) ?? Promise.resolve()
     const delivery = previous.then(async () => {
       try {
         await attempt
@@ -761,9 +761,9 @@ class CloudflareConformanceBackend implements BackendSpi {
       () => undefined,
       () => undefined,
     )
-    this.#deliverySettlements.set(key, tail)
+    this._deliverySettlements.set(key, tail)
     void tail.then(() => {
-      if (this.#deliverySettlements.get(key) === tail) this.#deliverySettlements.delete(key)
+      if (this._deliverySettlements.get(key) === tail) this._deliverySettlements.delete(key)
     })
     return delivery
   }

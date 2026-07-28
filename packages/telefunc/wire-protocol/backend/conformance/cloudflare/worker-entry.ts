@@ -95,21 +95,21 @@ type SubscriptionRecord = {
 type DeliveryStatus = { state: 'pending' } | { state: 'resolved' } | { state: 'rejected'; error: string }
 
 class ManualScheduler implements SubscriptionScheduler {
-  #now = 0
-  #sequence = 0
-  readonly #tasks = new Map<number, { at: number; task: () => Promise<void> }>()
+  private _now = 0
+  private _sequence = 0
+  private readonly _tasks = new Map<number, { at: number; task: () => Promise<void> }>()
 
   schedule(delayMs: number, task: () => Promise<void>): () => void {
-    const id = ++this.#sequence
-    this.#tasks.set(id, { at: this.#now + delayMs, task })
-    return () => this.#tasks.delete(id)
+    const id = ++this._sequence
+    this._tasks.set(id, { at: this._now + delayMs, task })
+    return () => this._tasks.delete(id)
   }
 
   async advance(ms: number): Promise<void> {
-    const target = this.#now + ms
+    const target = this._now + ms
     for (;;) {
       let next: { id: number; at: number; task: () => Promise<void> } | undefined
-      for (const [id, entry] of this.#tasks) {
+      for (const [id, entry] of this._tasks) {
         if (
           entry.at <= target &&
           (next === undefined || entry.at < next.at || (entry.at === next.at && id < next.id))
@@ -118,49 +118,49 @@ class ManualScheduler implements SubscriptionScheduler {
         }
       }
       if (next === undefined) break
-      this.#tasks.delete(next.id)
-      this.#now = next.at
+      this._tasks.delete(next.id)
+      this._now = next.at
       await next.task()
     }
-    this.#now = target
+    this._now = target
   }
 
   clear(): void {
-    this.#tasks.clear()
+    this._tasks.clear()
   }
 }
 
 export class ConformanceSessionDurableObject extends DurableObject {
-  readonly #scheduler = new ManualScheduler()
-  #manager: CloudflareRoomSessionManager
-  readonly #driver = sharedCloudflareRoomDriver
-  readonly #backend = sharedCloudflareRoomBackend
-  readonly #namespace: CloudflareRoomNamespace
-  readonly #subscriptions = new Map<string, SubscriptionRecord>()
-  readonly #receiverStates = new Map<string, ReceiverState>()
-  readonly #deliveries = new Map<string, DeliveryStatus>()
-  #forcedRenewalFailures = 0
-  #forcedEstablishmentFailures = 0
-  #forcedPostCommitEstablishmentFailures = 0
-  #forcedGenerationCaptureFailures = 0
-  #forcedInvalidationFailures = 0
-  #forcedUnsubscribeFailures = 0
-  readonly #registrationLeaseHistory: string[] = []
-  readonly #probeSubscriptions = new Set<BackendSubscription>()
-  #managerDispatchDepth = 0
+  private readonly _scheduler = new ManualScheduler()
+  private _manager: CloudflareRoomSessionManager
+  private readonly _driver = sharedCloudflareRoomDriver
+  private readonly _backend = sharedCloudflareRoomBackend
+  private readonly _namespace: CloudflareRoomNamespace
+  private readonly _subscriptions = new Map<string, SubscriptionRecord>()
+  private readonly _receiverStates = new Map<string, ReceiverState>()
+  private readonly _deliveries = new Map<string, DeliveryStatus>()
+  private _forcedRenewalFailures = 0
+  private _forcedEstablishmentFailures = 0
+  private _forcedPostCommitEstablishmentFailures = 0
+  private _forcedGenerationCaptureFailures = 0
+  private _forcedInvalidationFailures = 0
+  private _forcedUnsubscribeFailures = 0
+  private readonly _registrationLeaseHistory: string[] = []
+  private readonly _probeSubscriptions = new Set<BackendSubscription>()
+  private _managerDispatchDepth = 0
 
   constructor(ctx: DurableObjectState, env: SessionEnv) {
     super(ctx, env as never)
     const namespace = env.ROOM
-    this.#namespace = namespace
-    this.#manager = this.#createManager()
+    this._namespace = namespace
+    this._manager = this._createManager()
   }
 
   async roomCommand(serialized: string): Promise<string> {
     let reply: SessionRoomReply
     try {
       const command = JSON.parse(serialized) as SessionRoomCommand
-      reply = { ok: true, value: await this.#executeRoomCommand(command) }
+      reply = { ok: true, value: await this._executeRoomCommand(command) }
     } catch (error) {
       reply = { ok: false, error: error instanceof Error ? error.message : String(error) }
     }
@@ -170,11 +170,11 @@ export class ConformanceSessionDurableObject extends DurableObject {
   async commitLaneB64(roomId: string, inc: string, lane: LaneId, payloadB64: string) {
     const binary = atob(payloadB64)
     const payload = Uint8Array.from(binary, (character) => character.charCodeAt(0))
-    const stub = this.#namespace.get(this.#namespace.idFromName(roomId))
+    const stub = this._namespace.get(this._namespace.idFromName(roomId))
     const result = await stub.commitLane(roomId, inc, lane, payload)
     if ('error' in result) throw new Error(result.error)
     if ('stale' in result) return result
-    const deliveryToken = this.#trackDelivery(stub.awaitDelivery(result.deliveryToken))
+    const deliveryToken = this._trackDelivery(stub.awaitDelivery(result.deliveryToken))
     return {
       accepted: true as const,
       seq: result.seq,
@@ -185,16 +185,16 @@ export class ConformanceSessionDurableObject extends DurableObject {
   }
 
   deliveryStatus(token: string): DeliveryStatus {
-    const status = this.#deliveries.get(token)
+    const status = this._deliveries.get(token)
     if (status === undefined) throw new Error(`unknown session delivery '${token}'`)
-    if (status.state !== 'pending') this.#deliveries.delete(token)
+    if (status.state !== 'pending') this._deliveries.delete(token)
     return status
   }
 
   contextProbe(delayMs: number): Promise<boolean> {
-    return this.#run(async () => {
+    return this._run(async () => {
       await new Promise<void>((resolve) => setTimeout(resolve, delayMs))
-      return getCloudflareRoomSessionManager() === this.#manager
+      return getCloudflareRoomSessionManager() === this._manager
     })
   }
 
@@ -206,14 +206,14 @@ export class ConformanceSessionDurableObject extends DurableObject {
     lane: LaneId,
     command: ReceiverCommand,
   ): Promise<{ ready: true; state: SubscriptionState } | { ready: false; state: SubscriptionState; error: string }> {
-    if (this.#subscriptions.has(subscriptionId)) throw new Error(`duplicate subscription '${subscriptionId}'`)
-    let receiverState = this.#receiverStates.get(receiverId)
+    if (this._subscriptions.has(subscriptionId)) throw new Error(`duplicate subscription '${subscriptionId}'`)
+    let receiverState = this._receiverStates.get(receiverId)
     if (receiverState !== undefined && JSON.stringify(receiverState.command) !== JSON.stringify(command)) {
       throw new Error(`receiver '${receiverId}' changed command while attached`)
     }
-    if (receiverState === undefined) receiverState = this.#createReceiverState(command)
+    if (receiverState === undefined) receiverState = this._createReceiverState(command)
     receiverState.attachments += 1
-    this.#receiverStates.set(receiverId, receiverState)
+    this._receiverStates.set(receiverId, receiverState)
     const record = {
       sub: undefined as unknown as BackendSubscription,
       receiverId,
@@ -223,9 +223,9 @@ export class ConformanceSessionDurableObject extends DurableObject {
       events: [],
       receiverState,
     } satisfies SubscriptionRecord
-    record.sub = this.#run(() => this.#backend.subscribeLane(roomId, inc, lane, receiverState.receiver))
+    record.sub = this._run(() => this._backend.subscribeLane(roomId, inc, lane, receiverState.receiver))
     record.sub.onStateChange((state) => record.events.push(state))
-    this.#subscriptions.set(subscriptionId, record)
+    this._subscriptions.set(subscriptionId, record)
     try {
       await record.sub.ready
       const state = record.sub.state()
@@ -241,31 +241,31 @@ export class ConformanceSessionDurableObject extends DurableObject {
   }
 
   subscriptionState(subscriptionId: string): { state: SubscriptionState; events: SubscriptionState[] } {
-    const record = this.#record(subscriptionId)
+    const record = this._record(subscriptionId)
     return { state: record.sub.state(), events: record.events.splice(0) }
   }
 
   async unsubscribeSubscription(subscriptionId: string): Promise<string | null> {
-    const record = this.#record(subscriptionId)
+    const record = this._record(subscriptionId)
     try {
-      await this.#run(() => record.sub.unsubscribe())
+      await this._run(() => record.sub.unsubscribe())
       return null
     } catch (error) {
       return error instanceof Error ? error.message : String(error)
     } finally {
-      this.#subscriptions.delete(subscriptionId)
+      this._subscriptions.delete(subscriptionId)
       record.receiverState.attachments -= 1
-      if (record.receiverState.attachments === 0) this.#receiverStates.delete(record.receiverId)
+      if (record.receiverState.attachments === 0) this._receiverStates.delete(record.receiverId)
     }
   }
 
   pollReceiver(subscriptionId: string, receiverId: string): RemoteReceiverObservation[] {
-    const record = this.#recordExact(subscriptionId, receiverId)
+    const record = this._recordExact(subscriptionId, receiverId)
     return record.receiverState.observations.splice(0)
   }
 
   releaseReceiver(subscriptionId: string, receiverId: string): void {
-    const record = this.#recordExact(subscriptionId, receiverId)
+    const record = this._recordExact(subscriptionId, receiverId)
     const state = record.receiverState
     if (state.command.kind !== 'stall') throw new Error('receiver is not stalled')
     if (state.released) return
@@ -274,12 +274,12 @@ export class ConformanceSessionDurableObject extends DurableObject {
   }
 
   async seedReceiver(subscriptionId: string, receiverId: string): Promise<void> {
-    const record = this.#recordExact(subscriptionId, receiverId)
+    const record = this._recordExact(subscriptionId, receiverId)
     const state = record.receiverState
     if (state.command.kind !== 'seeded') throw new Error('receiver is not a seed gate')
-    const retained = await this.#run(() => this.#backend.readRetained(record.roomId, record.inc, record.lane))
+    const retained = await this._run(() => this._backend.readRetained(record.roomId, record.inc, record.lane))
     if (retained !== null) {
-      this.#emitSeeded(
+      this._emitSeeded(
         state,
         {
           payload: new TextDecoder().decode(retained.payload),
@@ -290,63 +290,63 @@ export class ConformanceSessionDurableObject extends DurableObject {
       )
     }
     state.seeded = true
-    for (const pending of state.pending.splice(0)) this.#emitSeeded(state, pending, 'live')
+    for (const pending of state.pending.splice(0)) this._emitSeeded(state, pending, 'live')
   }
 
   forceRenewalFailures(count: number): void {
-    this.#forcedRenewalFailures = count
+    this._forcedRenewalFailures = count
   }
 
   forceEstablishmentFailures(count: number): void {
-    this.#forcedEstablishmentFailures = count
+    this._forcedEstablishmentFailures = count
   }
 
   forcePostCommitEstablishmentFailures(count: number): void {
-    this.#registrationLeaseHistory.length = 0
-    this.#forcedPostCommitEstablishmentFailures = count
+    this._registrationLeaseHistory.length = 0
+    this._forcedPostCommitEstablishmentFailures = count
   }
 
   registrationLeaseHistory(): string[] {
-    return [...this.#registrationLeaseHistory]
+    return [...this._registrationLeaseHistory]
   }
 
   forceGenerationCaptureFailures(count: number): void {
-    this.#forcedGenerationCaptureFailures = count
+    this._forcedGenerationCaptureFailures = count
   }
 
   forceInvalidationFailures(count: number): void {
-    this.#forcedInvalidationFailures = count
+    this._forcedInvalidationFailures = count
   }
 
   forceUnsubscribeFailures(count: number): void {
-    this.#forcedUnsubscribeFailures = count
+    this._forcedUnsubscribeFailures = count
   }
 
   async sharedBackendOwnershipProbe(roomId: string, inc: string, delayMs: number): Promise<string> {
-    return this.#run(async () => {
+    return this._run(async () => {
       await new Promise<void>((resolve) => setTimeout(resolve, delayMs))
-      const sub = this.#backend.subscribeLane(roomId, inc, { kind: 'semantic' }, () => {})
-      this.#probeSubscriptions.add(sub)
+      const sub = this._backend.subscribeLane(roomId, inc, { kind: 'semantic' }, () => {})
+      this._probeSubscriptions.add(sub)
       await sub.ready
       return this.ctx.id.toString()
     })
   }
 
   async clearOwnershipProbes(): Promise<void> {
-    const probes = [...this.#probeSubscriptions]
-    this.#probeSubscriptions.clear()
-    await Promise.all(probes.map((sub) => this.#run(() => sub.unsubscribe())))
+    const probes = [...this._probeSubscriptions]
+    this._probeSubscriptions.clear()
+    await Promise.all(probes.map((sub) => this._run(() => sub.unsubscribe())))
   }
 
   async missingBindingSubscriptionProbe(roomId: string, inc: string): Promise<string> {
     let bindingEnabled = false
     const probeManager = new CloudflareRoomSessionManager(
       this.ctx.id.toString(),
-      () => (bindingEnabled ? this.#namespace : requireCloudflareRoomNamespace({}, 'ROOM')),
-      { scheduler: this.#scheduler, now: () => controlledClock },
+      () => (bindingEnabled ? this._namespace : requireCloudflareRoomNamespace({}, 'ROOM')),
+      { scheduler: this._scheduler, now: () => controlledClock },
     )
     const source = { kind: 'durable', roomId, inc, lane: { kind: 'semantic' } } as const
-    const bind = () => this.#driver.subscriptions.bind(source)
+    const bind = () => this._driver.subscriptions.bind(source)
     let failure = ''
     try {
       withCloudflareRoomSessionManager(probeManager, bind).open(
@@ -368,12 +368,12 @@ export class ConformanceSessionDurableObject extends DurableObject {
   }
 
   async ambientCommitCaptureProbe(roomId: string, inc: string): Promise<string> {
-    const realAuthority = this.#namespace.get(this.#namespace.idFromName(roomId))
+    const realAuthority = this._namespace.get(this._namespace.idFromName(roomId))
     const wrongManager = new (class extends CloudflareRoomSessionManager {
       override settleDelivery(_roomId: string, _inc: string, _lane: LaneId, _attempt: Promise<void>): Promise<void> {
         return Promise.reject(new Error('commitLane re-read the ambient manager after its authority await'))
       }
-    })(`${this.ctx.id.toString()}:wrong`, () => this.#namespace)
+    })(`${this.ctx.id.toString()}:wrong`, () => this._namespace)
     let capturedManager!: CloudflareRoomSessionManager
     const authority = {
       commitLane: async (
@@ -394,12 +394,12 @@ export class ConformanceSessionDurableObject extends DurableObject {
       },
       awaitDelivery: (token: string) => realAuthority.awaitDelivery(token),
     } as CloudflareRoomAuthorityStub
-    capturedManager = new CloudflareRoomSessionManager(`${this.ctx.id.toString()}:captured`, () => this.#namespace, {
+    capturedManager = new CloudflareRoomSessionManager(`${this.ctx.id.toString()}:captured`, () => this._namespace, {
       authority: () => authority,
     })
     try {
       const result = await withCloudflareRoomSessionManager(capturedManager, () =>
-        this.#driver.commitLane(roomId, inc, { kind: 'semantic' }, new TextEncoder().encode('captured-manager')),
+        this._driver.commitLane(roomId, inc, { kind: 'semantic' }, new TextEncoder().encode('captured-manager')),
       )
       if ('stale' in result) return 'stale'
       await result.delivery
@@ -413,66 +413,66 @@ export class ConformanceSessionDurableObject extends DurableObject {
   }
 
   async resetSessionEpoch(): Promise<void> {
-    this.#manager.dispose()
-    this.#scheduler.clear()
-    this.#subscriptions.clear()
-    this.#receiverStates.clear()
-    this.#deliveries.clear()
-    this.#forcedRenewalFailures = 0
-    this.#forcedEstablishmentFailures = 0
-    this.#forcedPostCommitEstablishmentFailures = 0
-    this.#forcedGenerationCaptureFailures = 0
-    this.#forcedInvalidationFailures = 0
-    this.#forcedUnsubscribeFailures = 0
-    this.#registrationLeaseHistory.length = 0
-    this.#manager = this.#createManager()
+    this._manager.dispose()
+    this._scheduler.clear()
+    this._subscriptions.clear()
+    this._receiverStates.clear()
+    this._deliveries.clear()
+    this._forcedRenewalFailures = 0
+    this._forcedEstablishmentFailures = 0
+    this._forcedPostCommitEstablishmentFailures = 0
+    this._forcedGenerationCaptureFailures = 0
+    this._forcedInvalidationFailures = 0
+    this._forcedUnsubscribeFailures = 0
+    this._registrationLeaseHistory.length = 0
+    this._manager = this._createManager()
   }
 
   async advanceRenewalTimers(ms: number): Promise<void> {
-    await this.#run(() => this.#scheduler.advance(ms))
+    await this._run(() => this._scheduler.advance(ms))
   }
 
   async disposeBackend(): Promise<void> {
-    this.#manager.dispose()
-    this.#scheduler.clear()
-    this.#receiverStates.clear()
-    this.#probeSubscriptions.clear()
+    this._manager.dispose()
+    this._scheduler.clear()
+    this._receiverStates.clear()
+    this._probeSubscriptions.clear()
   }
 
   async telefuncRoomDeliver(request: RoomShardDeliveryRequest): Promise<void> {
-    this.#managerDispatchDepth += 1
+    this._managerDispatchDepth += 1
     try {
-      await this.#run(() => this.#manager.deliver(request))
+      await this._run(() => this._manager.deliver(request))
     } finally {
-      this.#managerDispatchDepth -= 1
+      this._managerDispatchDepth -= 1
     }
   }
 
   telefuncRoomInvalidate(request: RoomShardInvalidationRequest): void {
-    if (this.#forcedInvalidationFailures > 0) {
-      this.#forcedInvalidationFailures -= 1
+    if (this._forcedInvalidationFailures > 0) {
+      this._forcedInvalidationFailures -= 1
       throw new Error('forced session invalidation failure')
     }
-    this.#run(() => this.#manager.invalidate(request))
+    this._run(() => this._manager.invalidate(request))
   }
 
-  #createManager(): CloudflareRoomSessionManager {
-    return new CloudflareRoomSessionManager(this.ctx.id.toString(), () => this.#namespace, {
-      scheduler: this.#scheduler,
+  private _createManager(): CloudflareRoomSessionManager {
+    return new CloudflareRoomSessionManager(this.ctx.id.toString(), () => this._namespace, {
+      scheduler: this._scheduler,
       now: () => controlledClock,
-      authority: (roomId) => this.#controlledAuthority(roomId),
+      authority: (roomId) => this._controlledAuthority(roomId),
     })
   }
 
-  async #executeRoomCommand(command: SessionRoomCommand): Promise<unknown> {
+  private async _executeRoomCommand(command: SessionRoomCommand): Promise<unknown> {
     switch (command.kind) {
       case 'read-head': {
-        const result = await this.#run(() => this.#backend.readHead(command.roomId))
+        const result = await this._run(() => this._backend.readHead(command.roomId))
         return result === null ? null : { head: headToWire(result.head) }
       }
       case 'compare-exchange-head': {
-        const result = await this.#run(() =>
-          this.#backend.compareExchangeHead(command.roomId, command.cx, nextFromWire(command.next)),
+        const result = await this._run(() =>
+          this._backend.compareExchangeHead(command.roomId, command.cx, nextFromWire(command.next)),
         )
         if ('conflict' in result) {
           return { conflict: true, current: result.current === null ? null : headToWire(result.current) }
@@ -480,7 +480,7 @@ export class ConformanceSessionDurableObject extends DurableObject {
         return 'deleted' in result ? { ok: true, deleted: true } : { ok: true, head: headToWire(result.head) }
       }
       case 'read-cells': {
-        const result = await this.#run(() => this.#backend.readCells(command.roomId, command.inc, command.selection))
+        const result = await this._run(() => this._backend.readCells(command.roomId, command.inc, command.selection))
         if ('staleInc' in result) return result
         return {
           revision: result.revision,
@@ -496,13 +496,13 @@ export class ConformanceSessionDurableObject extends DurableObject {
                 set: { bytes: base64ToBytes(mutation.set.bytesB64), ttlMs: mutation.set.ttlMs },
               },
         )
-        return await this.#run(() =>
-          this.#backend.compareExchangeCells(command.roomId, command.inc, command.revision, mutations),
+        return await this._run(() =>
+          this._backend.compareExchangeCells(command.roomId, command.inc, command.revision, mutations),
         )
       }
       case 'commit-lane': {
-        const result = await this.#run(() =>
-          this.#backend.commitLane(
+        const result = await this._run(() =>
+          this._backend.commitLane(
             command.roomId,
             command.inc,
             command.lane,
@@ -511,7 +511,7 @@ export class ConformanceSessionDurableObject extends DurableObject {
           ),
         )
         if ('stale' in result) return result
-        const deliveryToken = this.#trackDelivery(result.delivery)
+        const deliveryToken = this._trackDelivery(result.delivery)
         return {
           accepted: true,
           seq: result.seq,
@@ -521,45 +521,45 @@ export class ConformanceSessionDurableObject extends DurableObject {
         }
       }
       case 'read-retained': {
-        const result = await this.#run(() => this.#backend.readRetained(command.roomId, command.inc, command.lane))
+        const result = await this._run(() => this._backend.readRetained(command.roomId, command.inc, command.lane))
         return result === null
           ? null
           : { payloadB64: bytesToBase64(result.payload), seq: result.seq, timestamp: result.timestamp }
       }
       case 'list-retained':
-        return await this.#run(() => this.#backend.listRetained(command.roomId, command.inc))
+        return await this._run(() => this._backend.listRetained(command.roomId, command.inc))
       case 'delete-retained':
-        await this.#run(() => this.#backend.deleteRetained(command.roomId, command.inc, command.lane, command.options))
+        await this._run(() => this._backend.deleteRetained(command.roomId, command.inc, command.lane, command.options))
         return null
       case 'list-generations':
-        return await this.#run(() => this.#backend.listGenerations(command.roomId))
+        return await this._run(() => this._backend.listGenerations(command.roomId))
       case 'drop-generation':
-        await this.#run(() => this.#backend.dropGeneration(command.roomId, command.inc))
+        await this._run(() => this._backend.dropGeneration(command.roomId, command.inc))
         return null
       case 'directory-put':
-        await this.#run(() => this.#backend.directoryPut(command.roomId, command.incTag))
+        await this._run(() => this._backend.directoryPut(command.roomId, command.incTag))
         return null
       case 'directory-delete':
-        await this.#run(() => this.#backend.directoryDelete(command.roomId, command.incTag))
+        await this._run(() => this._backend.directoryDelete(command.roomId, command.incTag))
         return null
       case 'directory-list':
-        return await this.#run(() => this.#backend.directoryList(command.prefix, command.cursor))
+        return await this._run(() => this._backend.directoryList(command.prefix, command.cursor))
       case 'run-order-maintenance': {
-        const stub = this.#namespace.get(this.#namespace.idFromName(command.roomId)) as CloudflareRoomAuthorityStub & {
+        const stub = this._namespace.get(this._namespace.idFromName(command.roomId)) as CloudflareRoomAuthorityStub & {
           telefuncRoomRunMaintenance(): Promise<{ prunedRoutes: number }>
         }
         await stub.telefuncRoomRunMaintenance()
         return null
       }
       case 'reconstruct-order-authority': {
-        const stub = this.#namespace.get(this.#namespace.idFromName(command.roomId)) as CloudflareRoomAuthorityStub & {
+        const stub = this._namespace.get(this._namespace.idFromName(command.roomId)) as CloudflareRoomAuthorityStub & {
           telefuncRoomReconstructForTest(): Promise<void>
         }
         await stub.telefuncRoomReconstructForTest()
         return null
       }
       case 'seed-order-watermark': {
-        const stub = this.#namespace.get(this.#namespace.idFromName(command.roomId)) as CloudflareRoomAuthorityStub & {
+        const stub = this._namespace.get(this._namespace.idFromName(command.roomId)) as CloudflareRoomAuthorityStub & {
           telefuncRoomSeedOrderWatermarkForTest(
             inc: string,
             lane: LaneId,
@@ -573,17 +573,17 @@ export class ConformanceSessionDurableObject extends DurableObject {
     }
   }
 
-  #run<T>(operation: () => T): T {
-    return withCloudflareRoomSessionManager(this.#manager, operation)
+  private _run<T>(operation: () => T): T {
+    return withCloudflareRoomSessionManager(this._manager, operation)
   }
 
-  #trackDelivery(delivery: Promise<void>): string {
+  private _trackDelivery(delivery: Promise<void>): string {
     const token = crypto.randomUUID()
-    this.#deliveries.set(token, { state: 'pending' })
+    this._deliveries.set(token, { state: 'pending' })
     const observation = delivery.then(
-      () => this.#deliveries.set(token, { state: 'resolved' }),
+      () => this._deliveries.set(token, { state: 'resolved' }),
       (error) =>
-        this.#deliveries.set(token, {
+        this._deliveries.set(token, {
           state: 'rejected',
           error: error instanceof Error ? error.message : String(error),
         }),
@@ -592,25 +592,25 @@ export class ConformanceSessionDurableObject extends DurableObject {
     return token
   }
 
-  #record(subscriptionId: string): SubscriptionRecord {
-    const record = this.#subscriptions.get(subscriptionId)
+  private _record(subscriptionId: string): SubscriptionRecord {
+    const record = this._subscriptions.get(subscriptionId)
     if (record === undefined) throw new Error(`unknown subscription '${subscriptionId}'`)
     return record
   }
 
-  #recordExact(subscriptionId: string, receiverId: string): SubscriptionRecord {
-    const record = this.#record(subscriptionId)
+  private _recordExact(subscriptionId: string, receiverId: string): SubscriptionRecord {
+    const record = this._record(subscriptionId)
     if (record.receiverId !== receiverId) throw new Error('stale receiver handle')
     return record
   }
 
-  #emitSeeded(state: ReceiverState, frame: RemoteReceiverObservation, source: 'seed' | 'live'): void {
+  private _emitSeeded(state: ReceiverState, frame: RemoteReceiverObservation, source: 'seed' | 'live'): void {
     if (frame.seq <= state.watermark) return
     state.watermark = frame.seq
     state.observations.push({ ...frame, source })
   }
 
-  #createReceiverState(command: ReceiverCommand): ReceiverState {
+  private _createReceiverState(command: ReceiverCommand): ReceiverState {
     let releaseGate!: () => void
     const gate = new Promise<void>((resolve) => {
       releaseGate = resolve
@@ -629,12 +629,12 @@ export class ConformanceSessionDurableObject extends DurableObject {
       receiver: undefined as unknown as ReceiverState['receiver'],
     } satisfies ReceiverState
     state.receiver = async (payload, info) => {
-      if (this.#managerDispatchDepth < 1) {
+      if (this._managerDispatchDepth < 1) {
         throw new Error('Cloudflare conformance receiver bypassed the production session manager')
       }
       const observation = { payload: new TextDecoder().decode(payload), seq: info.seq, timestamp: info.timestamp }
       if (command.kind === 'seeded') {
-        if (state.seeded) this.#emitSeeded(state, observation, 'live')
+        if (state.seeded) this._emitSeeded(state, observation, 'live')
         else state.pending.push(observation)
         return
       }
@@ -650,8 +650,8 @@ export class ConformanceSessionDurableObject extends DurableObject {
     return state
   }
 
-  #controlledAuthority(roomId: string): CloudflareRoomAuthorityStub {
-    const stub = this.#namespace.get(this.#namespace.idFromName(roomId))
+  private _controlledAuthority(roomId: string): CloudflareRoomAuthorityStub {
+    const stub = this._namespace.get(this._namespace.idFromName(roomId))
     return {
       readHead: () => stub.readHead(),
       compareExchangeHead: (cx, next) => stub.compareExchangeHead(cx, next),
@@ -665,36 +665,36 @@ export class ConformanceSessionDurableObject extends DurableObject {
       deleteRetainedLane: (inc, lane, opts) => stub.deleteRetainedLane(inc, lane, opts),
       captureRouteGeneration: async (...args) => {
         const result = await stub.captureRouteGeneration(...args)
-        if (this.#forcedGenerationCaptureFailures > 0) {
-          this.#forcedGenerationCaptureFailures -= 1
+        if (this._forcedGenerationCaptureFailures > 0) {
+          this._forcedGenerationCaptureFailures -= 1
           throw new Error('forced generation-capture transport failure')
         }
         return result
       },
       releaseRouteGenerationCapture: (attemptId) => stub.releaseRouteGenerationCapture(attemptId),
       registerRoute: async (...args) => {
-        this.#registrationLeaseHistory.push(args[4])
-        if (this.#forcedEstablishmentFailures > 0) {
-          this.#forcedEstablishmentFailures -= 1
+        this._registrationLeaseHistory.push(args[4])
+        if (this._forcedEstablishmentFailures > 0) {
+          this._forcedEstablishmentFailures -= 1
           throw new Error('forced establishment transport failure')
         }
         const result = await stub.registerRoute(...args)
-        if (this.#forcedPostCommitEstablishmentFailures > 0) {
-          this.#forcedPostCommitEstablishmentFailures -= 1
+        if (this._forcedPostCommitEstablishmentFailures > 0) {
+          this._forcedPostCommitEstablishmentFailures -= 1
           throw new Error('forced post-commit establishment acknowledgement loss')
         }
         return result
       },
       renewRoute: (...args) => {
-        if (this.#forcedRenewalFailures > 0) {
-          this.#forcedRenewalFailures -= 1
+        if (this._forcedRenewalFailures > 0) {
+          this._forcedRenewalFailures -= 1
           return Promise.resolve({ ok: false })
         }
         return stub.renewRoute(...args)
       },
       unsubscribeRoute: (inc, laneKey, subscriberDoId, leaseId) => {
-        if (this.#forcedUnsubscribeFailures > 0) {
-          this.#forcedUnsubscribeFailures -= 1
+        if (this._forcedUnsubscribeFailures > 0) {
+          this._forcedUnsubscribeFailures -= 1
           return Promise.reject(new Error('forced unsubscribe transport failure'))
         }
         return stub.unsubscribeRoute(inc, laneKey, subscriberDoId, leaseId)
@@ -709,12 +709,12 @@ export class ConformanceSessionDurableObject extends DurableObject {
 }
 
 export class TelefuncRoomDurableObject extends ProductionTelefuncRoomDurableObject {
-  readonly #testEnv: unknown
-  #reconstructed: ProductionTelefuncRoomDurableObject | null = null
+  private readonly _testEnv: unknown
+  private _reconstructed: ProductionTelefuncRoomDurableObject | null = null
 
   constructor(ctx: DurableObjectState, env: unknown) {
     super(ctx, env, 'TelefuncDurableObject', () => controlledClock)
-    this.#testEnv = env
+    this._testEnv = env
   }
 
   override commitLane(
@@ -724,9 +724,9 @@ export class TelefuncRoomDurableObject extends ProductionTelefuncRoomDurableObje
     payload: Uint8Array,
     opts?: { retain?: boolean; closingLease?: string },
   ) {
-    return this.#reconstructed === null
+    return this._reconstructed === null
       ? super.commitLane(roomId, inc, lane, payload, opts)
-      : this.#reconstructed.commitLane(roomId, inc, lane, payload, opts)
+      : this._reconstructed.commitLane(roomId, inc, lane, payload, opts)
   }
 
   telefuncRoomSeedOrderWatermarkForTest(inc: string, lane: LaneId, seq: number, timestamp: number): void {
@@ -744,9 +744,9 @@ export class TelefuncRoomDurableObject extends ProductionTelefuncRoomDurableObje
   }
 
   telefuncRoomReconstructForTest(): void {
-    this.#reconstructed = new ProductionTelefuncRoomDurableObject(
+    this._reconstructed = new ProductionTelefuncRoomDurableObject(
       this.ctx,
-      this.#testEnv,
+      this._testEnv,
       'TelefuncDurableObject',
       () => controlledClock,
     )
@@ -764,22 +764,22 @@ type RecoveryState = {
 }
 
 export class RecoveryTelefuncDurableObject extends recoveryTelefunc.TelefuncDurableObject {
-  #recovery: RecoveryState | null = null
-  #subscribingManager: CloudflareRoomSessionManager | null = null
-  #recoveryChannelId: string | null = null
+  private _recovery: RecoveryState | null = null
+  private _subscribingManager: CloudflareRoomSessionManager | null = null
+  private _recoveryChannelId: string | null = null
 
   prepareRecoveryChannel(channelId: string, roomId: string, inc: string): void {
-    if (this.#recovery !== null) throw new Error('recovery channel already prepared')
+    if (this._recovery !== null) throw new Error('recovery channel already prepared')
     const state: RecoveryState = { roomId, inc, wants: 0, readyEpochs: 0, payloads: [], errors: [], sub: null }
-    this.#recovery = state
-    this.#recoveryChannelId = channelId
+    this._recovery = state
+    this._recoveryChannelId = channelId
     const channel = new ServerChannel<unknown, unknown>({ id: channelId })
     channel.listen(async (request) => {
       if (!isBinaryWant(request)) return
       state.wants += 1
       if (state.sub?.state() === 'ready' || state.sub?.state() === 'establishing') return
       try {
-        this.#subscribingManager = getCloudflareRoomSessionManager()
+        this._subscribingManager = getCloudflareRoomSessionManager()
         const sub = sharedCloudflareRoomBackend.subscribeLane(roomId, inc, { kind: 'semantic' }, (payload) => {
           state.payloads.push(new TextDecoder().decode(payload))
         })
@@ -798,18 +798,18 @@ export class RecoveryTelefuncDurableObject extends recoveryTelefunc.TelefuncDura
     before: SubscriptionState | 'absent'
     after: SubscriptionState | 'absent'
   } {
-    const before = this.#recovery?.sub?.state() ?? 'absent'
+    const before = this._recovery?.sub?.state() ?? 'absent'
     const current = this.runWithRoomManager(() => getCloudflareRoomSessionManager())
     ;(this as unknown as { resetRoomSessionEpoch(): void }).resetRoomSessionEpoch()
     return {
-      ownedByCurrentManager: current === this.#subscribingManager,
+      ownedByCurrentManager: current === this._subscribingManager,
       before,
-      after: this.#recovery?.sub?.state() ?? 'absent',
+      after: this._recovery?.sub?.state() ?? 'absent',
     }
   }
 
   recoveryObservation(): Omit<RecoveryState, 'sub'> & { state: SubscriptionState | 'absent' } {
-    const recovery = this.#recovery
+    const recovery = this._recovery
     if (recovery === null) throw new Error('recovery channel is not prepared')
     return {
       roomId: recovery.roomId,
@@ -823,11 +823,11 @@ export class RecoveryTelefuncDurableObject extends recoveryTelefunc.TelefuncDura
   }
 
   async teardownRecoveryChannel(): Promise<void> {
-    const channelId = this.#recoveryChannelId
-    const sub = this.#recovery?.sub
-    this.#recovery = null
-    this.#recoveryChannelId = null
-    this.#subscribingManager = null
+    const channelId = this._recoveryChannelId
+    const sub = this._recovery?.sub
+    this._recovery = null
+    this._recoveryChannelId = null
+    this._subscribingManager = null
     if (channelId !== null) getChannelMux().unregisterChannel(channelId)
     await sub?.unsubscribe()
   }

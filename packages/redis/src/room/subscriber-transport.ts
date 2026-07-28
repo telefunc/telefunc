@@ -30,56 +30,56 @@ type RedisSubscriptionDriverOptions = {
  * replacement epochs, bounded replanning and watchdogs live in core's supervised backend.
  */
 export class RedisSubscriptionDriver implements SubscriptionDriver {
-  readonly #prefix: string
-  readonly #createSubscriber: () => Promise<Redis>
-  readonly #captureGeneration: RedisSubscriptionDriverOptions['captureGeneration']
-  readonly #validateGeneration: RedisSubscriptionDriverOptions['validateGeneration']
-  readonly #attempts = new Map<string, Set<RedisSubscriptionAttempt>>()
+  private readonly _prefix: string
+  private readonly _createSubscriber: () => Promise<Redis>
+  private readonly _captureGeneration: RedisSubscriptionDriverOptions['captureGeneration']
+  private readonly _validateGeneration: RedisSubscriptionDriverOptions['validateGeneration']
+  private readonly _attempts = new Map<string, Set<RedisSubscriptionAttempt>>()
 
   constructor(options: RedisSubscriptionDriverOptions) {
-    this.#prefix = options.prefix
-    this.#createSubscriber = options.createSubscriber
-    this.#captureGeneration = options.captureGeneration
-    this.#validateGeneration = options.validateGeneration
+    this._prefix = options.prefix
+    this._createSubscriber = options.createSubscriber
+    this._captureGeneration = options.captureGeneration
+    this._validateGeneration = options.validateGeneration
   }
 
   bind(source: BackendSubscriptionSource): SubscriptionBinding {
     return {
       partition: '',
       valid: () => true,
-      open: (receiver, localReceiverCount) => this.#open(source, receiver, localReceiverCount),
+      open: (receiver, localReceiverCount) => this._open(source, receiver, localReceiverCount),
     }
   }
 
-  #open(
+  private _open(
     source: BackendSubscriptionSource,
     receiver: BackendReceiver,
     localReceiverCount: () => number,
   ): SubscriptionAttempt {
-    const key = redisSubscriptionChannel(this.#prefix, source)
+    const key = redisSubscriptionChannel(this._prefix, source)
     let attempt!: RedisSubscriptionAttempt
     attempt = new RedisSubscriptionAttempt({
-      prefix: this.#prefix,
+      prefix: this._prefix,
       source,
       receiver,
       localReceiverCount,
-      createSubscriber: this.#createSubscriber,
-      captureGeneration: this.#captureGeneration,
-      validateGeneration: this.#validateGeneration,
+      createSubscriber: this._createSubscriber,
+      captureGeneration: this._captureGeneration,
+      validateGeneration: this._validateGeneration,
       onDisposed: () => {
-        const attempts = this.#attempts.get(key)
+        const attempts = this._attempts.get(key)
         attempts?.delete(attempt)
-        if (attempts?.size === 0) this.#attempts.delete(key)
+        if (attempts?.size === 0) this._attempts.delete(key)
       },
     })
-    const attempts = this.#attempts.get(key) ?? new Set<RedisSubscriptionAttempt>()
+    const attempts = this._attempts.get(key) ?? new Set<RedisSubscriptionAttempt>()
     attempts.add(attempt)
-    this.#attempts.set(key, attempts)
+    this._attempts.set(key, attempts)
     return attempt
   }
 
   async flush(source: BackendSubscriptionSource): Promise<void> {
-    const attempts = [...(this.#attempts.get(redisSubscriptionChannel(this.#prefix, source)) ?? [])]
+    const attempts = [...(this._attempts.get(redisSubscriptionChannel(this._prefix, source)) ?? [])]
     await Promise.all(attempts.map((attempt) => attempt.flush()))
   }
 }
@@ -93,185 +93,185 @@ type RedisSubscriptionAttemptOptions = RedisSubscriptionDriverOptions & {
 
 class RedisSubscriptionAttempt implements SubscriptionAttempt {
   readonly ready: Promise<void>
-  readonly #prefix: string
-  readonly #source: BackendSubscriptionSource
-  readonly #receiver: BackendReceiver
-  readonly #localReceiverCount: () => number
-  readonly #createSubscriber: () => Promise<Redis>
-  readonly #captureGeneration: RedisSubscriptionDriverOptions['captureGeneration']
-  readonly #validateGeneration: RedisSubscriptionDriverOptions['validateGeneration']
-  readonly #onDisposed: () => void
-  readonly #listeners = new Set<(state: SubscriptionAttemptState) => void>()
-  readonly #generation: RedisGenerationAttempt = {
+  private readonly _prefix: string
+  private readonly _source: BackendSubscriptionSource
+  private readonly _receiver: BackendReceiver
+  private readonly _localReceiverCount: () => number
+  private readonly _createSubscriber: () => Promise<Redis>
+  private readonly _captureGeneration: RedisSubscriptionDriverOptions['captureGeneration']
+  private readonly _validateGeneration: RedisSubscriptionDriverOptions['validateGeneration']
+  private readonly _onDisposed: () => void
+  private readonly _listeners = new Set<(state: SubscriptionAttemptState) => void>()
+  private readonly _generation: RedisGenerationAttempt = {
     attemptId: randomUUID(),
     createdAt: null,
     generationToken: null,
   }
-  #settle!: { resolve: () => void; reject: (error: unknown) => void }
-  #state: SubscriptionAttemptState = 'establishing'
-  #subscriber: Redis | null = null
-  #subscribed = false
-  #readySettled = false
-  #cleanup: Promise<void> | null = null
-  #lastError: unknown = new Error('Redis subscriber connection closed')
+  private _settle!: { resolve: () => void; reject: (error: unknown) => void }
+  private _state: SubscriptionAttemptState = 'establishing'
+  private _subscriber: Redis | null = null
+  private _subscribed = false
+  private _readySettled = false
+  private _cleanup: Promise<void> | null = null
+  private _lastError: unknown = new Error('Redis subscriber connection closed')
 
   constructor(options: RedisSubscriptionAttemptOptions) {
-    this.#prefix = options.prefix
-    this.#source = options.source
-    this.#receiver = options.receiver
-    this.#localReceiverCount = options.localReceiverCount
-    this.#createSubscriber = options.createSubscriber
-    this.#captureGeneration = options.captureGeneration
-    this.#validateGeneration = options.validateGeneration
-    this.#onDisposed = options.onDisposed
+    this._prefix = options.prefix
+    this._source = options.source
+    this._receiver = options.receiver
+    this._localReceiverCount = options.localReceiverCount
+    this._createSubscriber = options.createSubscriber
+    this._captureGeneration = options.captureGeneration
+    this._validateGeneration = options.validateGeneration
+    this._onDisposed = options.onDisposed
     this.ready = new Promise<void>((resolve, reject) => {
-      this.#settle = { resolve, reject }
+      this._settle = { resolve, reject }
     })
     void this.ready.catch(() => {})
-    void this.#establish()
+    void this._establish()
   }
 
   state(): SubscriptionAttemptState {
-    return this.#state
+    return this._state
   }
 
   onStateChange(listener: (state: SubscriptionAttemptState) => void): () => void {
-    this.#listeners.add(listener)
-    return () => this.#listeners.delete(listener)
+    this._listeners.add(listener)
+    return () => this._listeners.delete(listener)
   }
 
   unsubscribe(): Promise<void> {
-    if (this.#cleanup !== null) return this.#cleanup
-    this.#cleanup = this.#dispose()
-    return this.#cleanup
+    if (this._cleanup !== null) return this._cleanup
+    this._cleanup = this._dispose()
+    return this._cleanup
   }
 
   async flush(): Promise<void> {
-    if (this.#state !== 'ready' || this.#localReceiverCount() === 0) return
-    const subscriber = this.#subscriber
-    const source = redisSubscriptionChannel(this.#prefix, this.#source)
+    if (this._state !== 'ready' || this._localReceiverCount() === 0) return
+    const subscriber = this._subscriber
+    const source = redisSubscriptionChannel(this._prefix, this._source)
     if (subscriber === null || subscriber.status !== 'ready') {
       throw new Error(`Redis subscriber PING cannot fence unavailable source '${source}'`)
     }
     await subscriber.ping()
-    if (this.#state !== 'ready' || this.#subscriber !== subscriber) {
+    if (this._state !== 'ready' || this._subscriber !== subscriber) {
       throw new Error(`Redis subscriber PING crossed source '${source}'`)
     }
   }
 
-  async #establish(): Promise<void> {
+  private async _establish(): Promise<void> {
     try {
-      if (this.#source.kind === 'durable') {
-        await this.#captureGeneration(this.#source, this.#generation)
-        if (this.#state === 'closed') return
+      if (this._source.kind === 'durable') {
+        await this._captureGeneration(this._source, this._generation)
+        if (this._state === 'closed') return
       }
-      const subscriber = await this.#createSubscriber()
-      if (this.#state === 'closed') {
+      const subscriber = await this._createSubscriber()
+      if (this._state === 'closed') {
         subscriber.disconnect()
         return
       }
-      this.#subscriber = subscriber
-      subscriber.on('messageBuffer', this.#onMessage)
-      subscriber.on('close', this.#onClose)
-      subscriber.on('end', this.#onEnd)
-      subscriber.on('error', this.#onError)
+      this._subscriber = subscriber
+      subscriber.on('messageBuffer', this._onMessage)
+      subscriber.on('close', this._onClose)
+      subscriber.on('end', this._onEnd)
+      subscriber.on('error', this._onError)
 
-      const channels = redisSubscriptionChannels(this.#prefix, this.#source)
+      const channels = redisSubscriptionChannels(this._prefix, this._source)
       // Raw readiness settles only after the real Redis acknowledgement. Core, not this driver, owns
       // the deadline, retries, readiness generations and attempt epochs.
       await subscriber.subscribe(...channels)
-      this.#subscribed = true
-      if (this.#isClosed() || this.#subscriber !== subscriber) return
+      this._subscribed = true
+      if (this._isClosed() || this._subscriber !== subscriber) return
 
-      if (this.#source.kind === 'durable' && !(await this.#validateGeneration(this.#source, this.#generation))) {
-        throw new Error(`subscribeLane: generation '${this.#source.roomId}/${this.#source.inc}' was invalidated`)
+      if (this._source.kind === 'durable' && !(await this._validateGeneration(this._source, this._generation))) {
+        throw new Error(`subscribeLane: generation '${this._source.roomId}/${this._source.inc}' was invalidated`)
       }
-      if (this.#isClosed() || this.#subscriber !== subscriber) return
-      this.#readySettled = true
-      this.#settle.resolve()
-      this.#transition('ready')
+      if (this._isClosed() || this._subscriber !== subscriber) return
+      this._readySettled = true
+      this._settle.resolve()
+      this._transition('ready')
     } catch (error) {
-      if (this.#state === 'closed') return
-      this.#lastError = error
-      this.#rejectReady(error)
-      this.#transition('closed')
+      if (this._state === 'closed') return
+      this._lastError = error
+      this._rejectReady(error)
+      this._transition('closed')
     }
   }
 
-  async #dispose(): Promise<void> {
-    this.#transition('closed')
-    this.#rejectReady(
-      new Error(`Redis subscription '${redisSubscriptionChannel(this.#prefix, this.#source)}' was closed`),
+  private async _dispose(): Promise<void> {
+    this._transition('closed')
+    this._rejectReady(
+      new Error(`Redis subscription '${redisSubscriptionChannel(this._prefix, this._source)}' was closed`),
     )
-    const subscriber = this.#subscriber
-    this.#subscriber = null
+    const subscriber = this._subscriber
+    this._subscriber = null
     if (subscriber !== null) {
-      subscriber.off('messageBuffer', this.#onMessage)
-      subscriber.off('close', this.#onClose)
-      subscriber.off('end', this.#onEnd)
-      subscriber.off('error', this.#onError)
+      subscriber.off('messageBuffer', this._onMessage)
+      subscriber.off('close', this._onClose)
+      subscriber.off('end', this._onEnd)
+      subscriber.off('error', this._onError)
       try {
-        if (this.#subscribed && subscriber.status === 'ready') {
-          await subscriber.unsubscribe(...redisSubscriptionChannels(this.#prefix, this.#source))
+        if (this._subscribed && subscriber.status === 'ready') {
+          await subscriber.unsubscribe(...redisSubscriptionChannels(this._prefix, this._source))
         }
         await subscriber.quit()
       } catch {
         subscriber.disconnect()
       }
     }
-    this.#onDisposed()
+    this._onDisposed()
   }
 
-  readonly #onMessage = (channelBytes: Buffer, frame: Buffer): void => {
+  private readonly _onMessage = (channelBytes: Buffer, frame: Buffer): void => {
     const channel = channelBytes.toString()
-    if (this.#source.kind === 'durable' && channel === redisInvalidationChannel(this.#prefix, this.#source)) {
-      if (this.#generation.generationToken === null || frame.toString() === this.#generation.generationToken) {
-        this.#transition('closed')
+    if (this._source.kind === 'durable' && channel === redisInvalidationChannel(this._prefix, this._source)) {
+      if (this._generation.generationToken === null || frame.toString() === this._generation.generationToken) {
+        this._transition('closed')
       }
       return
     }
-    if (channel !== redisSubscriptionChannel(this.#prefix, this.#source) || this.#state !== 'ready') return
+    if (channel !== redisSubscriptionChannel(this._prefix, this._source) || this._state !== 'ready') return
     const { payload, info } = decodeRedisOrderingFrame(frame)
     try {
-      const result = this.#receiver(Uint8Array.from(payload), info) as unknown
+      const result = this._receiver(Uint8Array.from(payload), info) as unknown
       if (result instanceof Promise) void result.catch((error: unknown) => console.error(error))
     } catch (error) {
       console.error(error)
     }
   }
 
-  readonly #onClose = (): void => {
-    this.#connectionClosed()
+  private readonly _onClose = (): void => {
+    this._connectionClosed()
   }
 
-  readonly #onEnd = (): void => {
-    this.#connectionClosed()
+  private readonly _onEnd = (): void => {
+    this._connectionClosed()
   }
 
-  readonly #onError = (error: unknown): void => {
-    this.#lastError = error
+  private readonly _onError = (error: unknown): void => {
+    this._lastError = error
   }
 
-  #connectionClosed(): void {
-    if (this.#state === 'closed') return
-    this.#rejectReady(this.#lastError)
-    this.#transition('closed')
+  private _connectionClosed(): void {
+    if (this._state === 'closed') return
+    this._rejectReady(this._lastError)
+    this._transition('closed')
   }
 
-  #isClosed(): boolean {
-    return this.#state === 'closed'
+  private _isClosed(): boolean {
+    return this._state === 'closed'
   }
 
-  #rejectReady(error: unknown): void {
-    if (this.#readySettled) return
-    this.#readySettled = true
-    this.#settle.reject(error)
+  private _rejectReady(error: unknown): void {
+    if (this._readySettled) return
+    this._readySettled = true
+    this._settle.reject(error)
   }
 
-  #transition(state: SubscriptionAttemptState): void {
-    if (this.#state === state) return
-    this.#state = state
-    for (const listener of [...this.#listeners]) listener(state)
+  private _transition(state: SubscriptionAttemptState): void {
+    if (this._state === state) return
+    this._state = state
+    for (const listener of [...this._listeners]) listener(state)
   }
 }
 

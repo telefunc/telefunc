@@ -32,34 +32,34 @@ type ReadinessGeneration =
  * rejection, fail-closed readiness, bounded replacement and a per-attempt liveness watchdog.
  */
 class SubscriptionManager<Source> {
-  readonly #slots = new Map<string, SubscriptionSlot<Source>>()
-  readonly #driver: SubscriptionDriver<Source>
-  readonly #reportError: (error: unknown) => void
-  readonly #sourceKey: (source: Source) => string
+  private readonly _slots = new Map<string, SubscriptionSlot<Source>>()
+  private readonly _driver: SubscriptionDriver<Source>
+  private readonly _reportError: (error: unknown) => void
+  private readonly _sourceKey: (source: Source) => string
 
   constructor(
     driver: SubscriptionDriver<Source>,
     reportError: (error: unknown) => void = console.error,
     sourceKey: (source: Source) => string = String,
   ) {
-    this.#driver = driver
-    this.#reportError = reportError
-    this.#sourceKey = sourceKey
+    this._driver = driver
+    this._reportError = reportError
+    this._sourceKey = sourceKey
   }
 
   subscribe(source: Source, receiver: BackendReceiver): BackendSubscription {
-    const binding = this.#driver.bind(source)
+    const binding = this._driver.bind(source)
     assertBinding(binding)
-    const sourceKey = this.#sourceKey(source)
+    const sourceKey = this._sourceKey(source)
     const key = JSON.stringify([sourceKey, binding.partition])
-    let slot = this.#slots.get(key)
+    let slot = this._slots.get(key)
     if (slot === undefined) {
       let created!: SubscriptionSlot<Source>
-      created = new SubscriptionSlot(source, binding, this.#reportError, sourceKey, () => {
-        if (this.#slots.get(key) === created) this.#slots.delete(key)
+      created = new SubscriptionSlot(source, binding, this._reportError, sourceKey, () => {
+        if (this._slots.get(key) === created) this._slots.delete(key)
       })
       slot = created
-      this.#slots.set(key, slot)
+      this._slots.set(key, slot)
     }
     return slot.attach(receiver)
   }
@@ -67,37 +67,37 @@ class SubscriptionManager<Source> {
   /** Terminally removes sources the backend deliberately destroyed. Unlike an upstream `closed`
    * event, this is not recoverable and must not start a replacement attempt. */
   terminate(predicate: (source: Source) => boolean): void {
-    for (const [key, slot] of this.#slots) {
+    for (const [key, slot] of this._slots) {
       if (!predicate(slot.source)) continue
-      this.#slots.delete(key)
+      this._slots.delete(key)
       void slot.stop()
     }
   }
 
   dispose(): Promise<void> {
-    const cleanups = [...this.#slots.values()].map((slot) => slot.stop())
-    this.#slots.clear()
+    const cleanups = [...this._slots.values()].map((slot) => slot.stop())
+    this._slots.clear()
     return Promise.allSettled(cleanups).then(() => {})
   }
 }
 
 class SubscriptionSlot<Source> {
-  readonly #source: Source
-  readonly #binding: SubscriptionBinding
-  readonly #reportError: (error: unknown) => void
-  readonly #sourceKey: string
-  readonly #onEmpty: () => void
-  readonly #receivers = new Map<symbol, BackendReceiver>()
-  readonly #listeners = new Set<(state: SubscriptionState) => void>()
-  #attempt: SubscriptionAttempt | null = null
-  #unobserve: (() => void) | null = null
-  #readiness: ReadinessGeneration = createPendingReadinessGeneration()
-  #state: SubscriptionState = 'establishing'
-  #epoch = 0
-  #replanQueued = false
-  #replanAttempts = 0
-  #establishmentTimer: ReturnType<typeof setTimeout> | null = null
-  #stopped = false
+  private readonly _source: Source
+  private readonly _binding: SubscriptionBinding
+  private readonly _reportError: (error: unknown) => void
+  private readonly _sourceKey: string
+  private readonly _onEmpty: () => void
+  private readonly _receivers = new Map<symbol, BackendReceiver>()
+  private readonly _listeners = new Set<(state: SubscriptionState) => void>()
+  private _attempt: SubscriptionAttempt | null = null
+  private _unobserve: (() => void) | null = null
+  private _readiness: ReadinessGeneration = createPendingReadinessGeneration()
+  private _state: SubscriptionState = 'establishing'
+  private _epoch = 0
+  private _replanQueued = false
+  private _replanAttempts = 0
+  private _establishmentTimer: ReturnType<typeof setTimeout> | null = null
+  private _stopped = false
 
   constructor(
     source: Source,
@@ -106,32 +106,32 @@ class SubscriptionSlot<Source> {
     sourceKey: string,
     onEmpty: () => void,
   ) {
-    this.#source = source
-    this.#binding = binding
-    this.#reportError = reportError
-    this.#sourceKey = sourceKey
-    this.#onEmpty = onEmpty
+    this._source = source
+    this._binding = binding
+    this._reportError = reportError
+    this._sourceKey = sourceKey
+    this._onEmpty = onEmpty
   }
 
   get source(): Source {
-    return this.#source
+    return this._source
   }
 
   attach(receiver: BackendReceiver): BackendSubscription {
-    if (this.#stopped) throw new Error('SubscriptionManager: cannot attach to a stopped source')
+    if (this._stopped) throw new Error('SubscriptionManager: cannot attach to a stopped source')
     const attachment = Symbol()
-    this.#receivers.set(attachment, receiver)
-    if (this.#attempt === null && !this.#replanQueued) {
-      if (this.#readiness.state === 'failed') {
-        this.#readiness = createPendingReadinessGeneration()
-        this.#replanAttempts = 0
-        this.#transition('establishing')
+    this._receivers.set(attachment, receiver)
+    if (this._attempt === null && !this._replanQueued) {
+      if (this._readiness.state === 'failed') {
+        this._readiness = createPendingReadinessGeneration()
+        this._replanAttempts = 0
+        this._transition('establishing')
       }
-      this.#start()
+      this._start()
     }
     let attached = true
     const listeners = new Set<(state: SubscriptionState) => void>()
-    let previousState = this.#state
+    let previousState = this._state
     let awaitingInitialOutcome = previousState === 'establishing'
     const unobserve = this.observe((state) => {
       const suppressInitialReady = awaitingInitialOutcome && previousState === 'establishing' && state === 'ready'
@@ -143,9 +143,9 @@ class SubscriptionSlot<Source> {
     const slot = this
     return {
       get ready() {
-        return attached ? slot.#readiness.promise : Promise.resolve()
+        return attached ? slot._readiness.promise : Promise.resolve()
       },
-      state: () => (attached ? this.#state : 'closed'),
+      state: () => (attached ? this._state : 'closed'),
       onStateChange: (listener) => {
         if (!attached) {
           listener('closed')
@@ -160,9 +160,9 @@ class SubscriptionSlot<Source> {
         for (const listener of listeners) listener('closed')
         listeners.clear()
         unobserve()
-        this.#receivers.delete(attachment)
-        if (this.#receivers.size === 0) {
-          this.#onEmpty()
+        this._receivers.delete(attachment)
+        if (this._receivers.size === 0) {
+          this._onEmpty()
           await this.stop()
         }
       },
@@ -170,215 +170,215 @@ class SubscriptionSlot<Source> {
   }
 
   observe(listener: (state: SubscriptionState) => void): () => void {
-    this.#listeners.add(listener)
-    return () => this.#listeners.delete(listener)
+    this._listeners.add(listener)
+    return () => this._listeners.delete(listener)
   }
 
   async stop(): Promise<void> {
-    if (this.#stopped) return
-    this.#stopped = true
-    this.#resolveReady()
-    this.#transition('closed')
-    const attempt = this.#attempt
-    this.#clearCurrent()
-    if (attempt !== null) await this.#cleanup(attempt)
+    if (this._stopped) return
+    this._stopped = true
+    this._resolveReady()
+    this._transition('closed')
+    const attempt = this._attempt
+    this._clearCurrent()
+    if (attempt !== null) await this._cleanup(attempt)
   }
 
-  #start(): void {
-    if (this.#stopped || this.#receivers.size === 0 || this.#attempt !== null) return
-    if (!this.#bindingIsValid()) {
-      this.#ownershipTerminated()
+  private _start(): void {
+    if (this._stopped || this._receivers.size === 0 || this._attempt !== null) return
+    if (!this._bindingIsValid()) {
+      this._ownershipTerminated()
       return
     }
-    const epoch = ++this.#epoch
+    const epoch = ++this._epoch
     let attempt: SubscriptionAttempt
     try {
-      attempt = this.#binding.open(
+      attempt = this._binding.open(
         async (payload, info) => {
-          if (epoch !== this.#epoch || this.#stopped) return
+          if (epoch !== this._epoch || this._stopped) return
           await Promise.all(
-            [...this.#receivers.values()].map(async (receiver) => {
+            [...this._receivers.values()].map(async (receiver) => {
               await (receiver(payload, info) as unknown)
             }),
           )
         },
-        () => this.#receivers.size,
+        () => this._receivers.size,
       )
     } catch (error) {
-      this.#failed(error)
+      this._failed(error)
       return
     }
-    this.#attempt = attempt
-    this.#armEstablishmentDeadline(attempt)
+    this._attempt = attempt
+    this._armEstablishmentDeadline(attempt)
     try {
-      this.#unobserve = attempt.onStateChange((state) => this.#onStateChange(attempt, state))
+      this._unobserve = attempt.onStateChange((state) => this._onStateChange(attempt, state))
       attempt.ready.then(
-        () => this.#becameReady(attempt),
-        (error: unknown) => this.#failedCurrent(attempt, error),
+        () => this._becameReady(attempt),
+        (error: unknown) => this._failedCurrent(attempt, error),
       )
       const state = attempt.state()
-      if (state === 'ready') this.#becameReady(attempt)
-      else if (state === 'closed') this.#closed(attempt)
-      else if (state === 'terminated') this.#terminated(attempt)
+      if (state === 'ready') this._becameReady(attempt)
+      else if (state === 'closed') this._closed(attempt)
+      else if (state === 'terminated') this._terminated(attempt)
     } catch (error) {
-      this.#failedCurrent(attempt, error)
+      this._failedCurrent(attempt, error)
     }
   }
 
-  #onStateChange(attempt: SubscriptionAttempt, state: SubscriptionAttemptState): void {
-    if (this.#attempt !== attempt) return
+  private _onStateChange(attempt: SubscriptionAttempt, state: SubscriptionAttemptState): void {
+    if (this._attempt !== attempt) return
     if (state === 'terminated') {
-      this.#terminated(attempt)
+      this._terminated(attempt)
       return
     }
     if (state === 'ready') {
-      this.#becameReady(attempt)
+      this._becameReady(attempt)
       return
     }
     if (state === 'lost' || state === 'establishing') {
-      this.#markUnavailable(state)
-      this.#armEstablishmentDeadline(attempt)
-      if (state === 'lost') this.#reportError(new Error(`Backend subscription lost: ${this.#label}`))
+      this._markUnavailable(state)
+      this._armEstablishmentDeadline(attempt)
+      if (state === 'lost') this._reportError(new Error(`Backend subscription lost: ${this._label}`))
       return
     }
-    this.#closed(attempt)
+    this._closed(attempt)
   }
 
-  #becameReady(attempt: SubscriptionAttempt): void {
-    if (this.#attempt !== attempt) return
+  private _becameReady(attempt: SubscriptionAttempt): void {
+    if (this._attempt !== attempt) return
     let state: SubscriptionAttemptState
     try {
       state = attempt.state()
     } catch (error) {
-      this.#failedCurrent(attempt, error)
+      this._failedCurrent(attempt, error)
       return
     }
     if (state !== 'ready') return
-    this.#cancelEstablishmentDeadline()
-    this.#replanAttempts = 0
-    this.#resolveReady()
-    this.#transition('ready')
+    this._cancelEstablishmentDeadline()
+    this._replanAttempts = 0
+    this._resolveReady()
+    this._transition('ready')
   }
 
-  #closed(attempt: SubscriptionAttempt): void {
-    if (this.#attempt !== attempt) return
-    this.#markUnavailable('lost')
-    this.#clearCurrent()
-    void this.#cleanup(attempt)
-    this.#scheduleReplan(new Error(`Backend subscription closed: ${this.#label}`))
+  private _closed(attempt: SubscriptionAttempt): void {
+    if (this._attempt !== attempt) return
+    this._markUnavailable('lost')
+    this._clearCurrent()
+    void this._cleanup(attempt)
+    this._scheduleReplan(new Error(`Backend subscription closed: ${this._label}`))
   }
 
-  #terminated(attempt: SubscriptionAttempt): void {
-    if (this.#attempt !== attempt) return
-    this.#ownershipTerminated(attempt)
+  private _terminated(attempt: SubscriptionAttempt): void {
+    if (this._attempt !== attempt) return
+    this._ownershipTerminated(attempt)
   }
 
-  #ownershipTerminated(attempt: SubscriptionAttempt | null = this.#attempt): void {
-    if (attempt !== null && this.#attempt !== attempt) return
-    const terminal = new Error(`Backend subscription ownership terminated: ${this.#label}`)
-    const current = this.#attempt
-    this.#stopped = true
-    this.#transition('closed')
-    this.#clearCurrent()
-    if (current !== null) void this.#cleanup(current)
-    this.#rejectReady(terminal)
-    this.#onEmpty()
+  private _ownershipTerminated(attempt: SubscriptionAttempt | null = this._attempt): void {
+    if (attempt !== null && this._attempt !== attempt) return
+    const terminal = new Error(`Backend subscription ownership terminated: ${this._label}`)
+    const current = this._attempt
+    this._stopped = true
+    this._transition('closed')
+    this._clearCurrent()
+    if (current !== null) void this._cleanup(current)
+    this._rejectReady(terminal)
+    this._onEmpty()
   }
 
-  #failedCurrent(attempt: SubscriptionAttempt, error: unknown): void {
-    if (this.#attempt !== attempt) {
-      this.#reportError(error)
+  private _failedCurrent(attempt: SubscriptionAttempt, error: unknown): void {
+    if (this._attempt !== attempt) {
+      this._reportError(error)
       return
     }
-    this.#markUnavailable('lost')
-    this.#clearCurrent()
-    void this.#cleanup(attempt)
-    this.#failed(error)
+    this._markUnavailable('lost')
+    this._clearCurrent()
+    void this._cleanup(attempt)
+    this._failed(error)
   }
 
-  #failed(error: unknown): void {
+  private _failed(error: unknown): void {
     const failure = error instanceof Error ? error : new Error(String(error))
-    if (this.#scheduleReplan(failure) !== 'terminal') this.#reportError(failure)
+    if (this._scheduleReplan(failure) !== 'terminal') this._reportError(failure)
   }
 
-  #scheduleReplan(cause: Error): 'scheduled' | 'terminal' | 'inactive' {
-    if (this.#stopped || this.#receivers.size === 0 || this.#replanQueued) return 'inactive'
-    if (!this.#bindingIsValid()) {
-      this.#ownershipTerminated()
+  private _scheduleReplan(cause: Error): 'scheduled' | 'terminal' | 'inactive' {
+    if (this._stopped || this._receivers.size === 0 || this._replanQueued) return 'inactive'
+    if (!this._bindingIsValid()) {
+      this._ownershipTerminated()
       return 'terminal'
     }
-    if (this.#replanAttempts >= SUBSCRIPTION_REPLAN_LIMIT) {
+    if (this._replanAttempts >= SUBSCRIPTION_REPLAN_LIMIT) {
       const terminal = new Error(
-        `Backend subscription failed after ${SUBSCRIPTION_REPLAN_LIMIT} replacement attempts (${this.#label}): ${cause.message}`,
+        `Backend subscription failed after ${SUBSCRIPTION_REPLAN_LIMIT} replacement attempts (${this._label}): ${cause.message}`,
       )
-      this.#transition('closed')
-      if (this.#rejectReady(terminal)) this.#reportError(terminal)
+      this._transition('closed')
+      if (this._rejectReady(terminal)) this._reportError(terminal)
       return 'terminal'
     }
-    this.#replanAttempts++
-    this.#replanQueued = true
+    this._replanAttempts++
+    this._replanQueued = true
     queueMicrotask(() => {
-      this.#replanQueued = false
-      if (!this.#stopped && this.#attempt === null) this.#start()
+      this._replanQueued = false
+      if (!this._stopped && this._attempt === null) this._start()
     })
     return 'scheduled'
   }
 
-  #markUnavailable(state: 'establishing' | 'lost'): void {
-    if (this.#readiness.state === 'ready') this.#readiness = createPendingReadinessGeneration()
-    this.#transition(state)
+  private _markUnavailable(state: 'establishing' | 'lost'): void {
+    if (this._readiness.state === 'ready') this._readiness = createPendingReadinessGeneration()
+    this._transition(state)
   }
 
-  #resolveReady(): void {
-    const generation = this.#readiness
+  private _resolveReady(): void {
+    const generation = this._readiness
     if (generation.state !== 'pending') return
     generation.resolve()
-    this.#readiness = { state: 'ready', promise: generation.promise }
+    this._readiness = { state: 'ready', promise: generation.promise }
   }
 
-  #rejectReady(error: Error): boolean {
-    const generation = this.#readiness
+  private _rejectReady(error: Error): boolean {
+    const generation = this._readiness
     if (generation.state !== 'pending') return false
     generation.reject(error)
-    this.#readiness = { state: 'failed', promise: generation.promise }
+    this._readiness = { state: 'failed', promise: generation.promise }
     return true
   }
 
-  #transition(state: SubscriptionState): void {
-    if (this.#state === state) return
-    this.#state = state
-    for (const listener of [...this.#listeners]) listener(state)
+  private _transition(state: SubscriptionState): void {
+    if (this._state === state) return
+    this._state = state
+    for (const listener of [...this._listeners]) listener(state)
   }
 
-  #clearCurrent(): void {
-    this.#epoch++
-    this.#cancelEstablishmentDeadline()
-    const unobserve = this.#unobserve
-    this.#unobserve = null
-    this.#attempt = null
+  private _clearCurrent(): void {
+    this._epoch++
+    this._cancelEstablishmentDeadline()
+    const unobserve = this._unobserve
+    this._unobserve = null
+    this._attempt = null
     try {
       unobserve?.()
     } catch (error) {
-      this.#reportError(error)
+      this._reportError(error)
     }
   }
 
-  #armEstablishmentDeadline(attempt: SubscriptionAttempt): void {
-    if (this.#attempt !== attempt || this.#establishmentTimer !== null) return
-    this.#establishmentTimer = unrefTimer(
-      setTimeout(() => this.#establishmentExpired(attempt), SUBSCRIPTION_ESTABLISH_TIMEOUT_MS),
+  private _armEstablishmentDeadline(attempt: SubscriptionAttempt): void {
+    if (this._attempt !== attempt || this._establishmentTimer !== null) return
+    this._establishmentTimer = unrefTimer(
+      setTimeout(() => this._establishmentExpired(attempt), SUBSCRIPTION_ESTABLISH_TIMEOUT_MS),
     )
   }
 
-  #cancelEstablishmentDeadline(): void {
-    if (this.#establishmentTimer === null) return
-    clearTimeout(this.#establishmentTimer)
-    this.#establishmentTimer = null
+  private _cancelEstablishmentDeadline(): void {
+    if (this._establishmentTimer === null) return
+    clearTimeout(this._establishmentTimer)
+    this._establishmentTimer = null
   }
 
-  #establishmentExpired(attempt: SubscriptionAttempt): void {
-    if (this.#attempt !== attempt) return
-    this.#establishmentTimer = null
+  private _establishmentExpired(attempt: SubscriptionAttempt): void {
+    if (this._attempt !== attempt) return
+    this._establishmentTimer = null
     let state: SubscriptionAttemptState
     try {
       state = attempt.state()
@@ -386,40 +386,40 @@ class SubscriptionSlot<Source> {
       state = 'establishing'
     }
     if (state === 'ready') {
-      this.#becameReady(attempt)
+      this._becameReady(attempt)
       return
     }
     if (state === 'closed') {
-      this.#closed(attempt)
+      this._closed(attempt)
       return
     }
     if (state === 'terminated') {
-      this.#terminated(attempt)
+      this._terminated(attempt)
       return
     }
-    const failure = new Error(`Backend subscription establishment did not settle within the deadline (${this.#label})`)
-    this.#clearCurrent()
-    void this.#cleanup(attempt)
-    this.#failed(failure)
+    const failure = new Error(`Backend subscription establishment did not settle within the deadline (${this._label})`)
+    this._clearCurrent()
+    void this._cleanup(attempt)
+    this._failed(failure)
   }
 
-  async #cleanup(attempt: SubscriptionAttempt): Promise<void> {
+  private async _cleanup(attempt: SubscriptionAttempt): Promise<void> {
     try {
       await attempt.unsubscribe()
     } catch (error) {
-      this.#reportError(error)
+      this._reportError(error)
     }
   }
 
-  get #label(): string {
-    return this.#sourceKey
+  private get _label(): string {
+    return this._sourceKey
   }
 
-  #bindingIsValid(): boolean {
+  private _bindingIsValid(): boolean {
     try {
-      return this.#binding.valid() === true
+      return this._binding.valid() === true
     } catch (error) {
-      this.#reportError(error)
+      this._reportError(error)
       return false
     }
   }

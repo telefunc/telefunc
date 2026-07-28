@@ -856,13 +856,13 @@ type OpenRecord = {
 
 class ControlledDriver implements SubscriptionDriver<string> {
   readonly opens: OpenRecord[] = []
-  readonly #plans: Array<() => ControlledAttempt> = []
+  private readonly _plans: Array<() => ControlledAttempt> = []
   partition = ''
   bindingValid = true
   openCalls = 0
 
   plan(plan: () => ControlledAttempt): void {
-    this.#plans.push(plan)
+    this._plans.push(plan)
   }
 
   bind(_source: string) {
@@ -872,7 +872,7 @@ class ControlledDriver implements SubscriptionDriver<string> {
       valid: () => this.bindingValid,
       open: (receiver: BackendReceiver, localReceiverCount: () => number): SubscriptionAttempt => {
         this.openCalls++
-        const attempt = (this.#plans.shift() ?? (() => ControlledAttempt.ready()))()
+        const attempt = (this._plans.shift() ?? (() => ControlledAttempt.ready()))()
         this.opens.push({ receiver, localReceiverCount, attempt })
         return attempt
       },
@@ -886,15 +886,15 @@ class ControlledDriver implements SubscriptionDriver<string> {
 
 class ControlledAttempt implements SubscriptionAttempt {
   readonly ready: Promise<void>
-  readonly #readiness = deferred<void>()
-  readonly #listeners = new Set<(state: SubscriptionAttemptState) => void>()
-  readonly #cleanup: Promise<void>
-  #state: SubscriptionAttemptState = 'establishing'
+  private readonly _readiness = deferred<void>()
+  private readonly _listeners = new Set<(state: SubscriptionAttemptState) => void>()
+  private readonly _cleanup: Promise<void>
+  private _state: SubscriptionAttemptState = 'establishing'
   unsubscribeCalls = 0
 
   constructor(cleanup: Promise<void> = Promise.resolve()) {
-    this.ready = this.#readiness.promise
-    this.#cleanup = cleanup
+    this.ready = this._readiness.promise
+    this._cleanup = cleanup
     void this.ready.catch(() => {})
   }
 
@@ -905,36 +905,36 @@ class ControlledAttempt implements SubscriptionAttempt {
   }
 
   state(): SubscriptionAttemptState {
-    return this.#state
+    return this._state
   }
 
   onStateChange(listener: (state: SubscriptionAttemptState) => void): () => void {
-    this.#listeners.add(listener)
-    return () => this.#listeners.delete(listener)
+    this._listeners.add(listener)
+    return () => this._listeners.delete(listener)
   }
 
   async unsubscribe(): Promise<void> {
     this.unsubscribeCalls++
-    this.#transition('closed')
-    await this.#cleanup
+    this._transition('closed')
+    await this._cleanup
   }
 
   establish(): void {
-    this.#transition('ready')
-    this.#readiness.resolve()
+    this._transition('ready')
+    this._readiness.resolve()
   }
 
   close(): void {
-    this.#transition('closed')
+    this._transition('closed')
   }
 
   terminate(): void {
-    this.#transition('terminated')
+    this._transition('terminated')
   }
 
-  #transition(state: SubscriptionAttemptState): void {
-    this.#state = state
-    for (const listener of this.#listeners) listener(state)
+  private _transition(state: SubscriptionAttemptState): void {
+    this._state = state
+    for (const listener of this._listeners) listener(state)
   }
 }
 

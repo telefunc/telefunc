@@ -222,21 +222,21 @@ class MemberBucketState {
 
 class CloudflareBroadcastSubscriptionAttempt implements SubscriptionAttempt {
   readonly ready: Promise<void>
-  readonly #receiver: BackendReceiver
-  readonly #detach: () => Promise<void>
-  readonly #listeners = new Set<(state: SubscriptionState) => void>()
-  #state: SubscriptionState = 'establishing'
-  #unsubscribed = false
+  private readonly _receiver: BackendReceiver
+  private readonly _detach: () => Promise<void>
+  private readonly _listeners = new Set<(state: SubscriptionState) => void>()
+  private _state: SubscriptionState = 'establishing'
+  private _unsubscribed = false
 
   constructor(member: MemberBucketState, receiver: BackendReceiver, detach: () => Promise<void>) {
-    this.#receiver = receiver
-    this.#detach = detach
+    this._receiver = receiver
+    this._detach = detach
     this.ready = member.ready.then(
       () => {
-        if (this.#state !== 'closed') this.#transition('ready')
+        if (this._state !== 'closed') this._transition('ready')
       },
       (error) => {
-        this.#transition('closed')
+        this._transition('closed')
         throw error
       },
     )
@@ -244,30 +244,30 @@ class CloudflareBroadcastSubscriptionAttempt implements SubscriptionAttempt {
   }
 
   state(): SubscriptionState {
-    return this.#state
+    return this._state
   }
 
   onStateChange(cb: (state: SubscriptionState) => void): () => void {
-    this.#listeners.add(cb)
-    return () => this.#listeners.delete(cb)
+    this._listeners.add(cb)
+    return () => this._listeners.delete(cb)
   }
 
   async deliver(payload: Uint8Array, info: OrderingInfo): Promise<void> {
-    if (this.#state !== 'ready') return
-    await (this.#receiver(payload, info) as unknown)
+    if (this._state !== 'ready') return
+    await (this._receiver(payload, info) as unknown)
   }
 
   async unsubscribe(): Promise<void> {
-    if (this.#unsubscribed) return
-    this.#unsubscribed = true
-    this.#transition('closed')
-    await this.#detach()
+    if (this._unsubscribed) return
+    this._unsubscribed = true
+    this._transition('closed')
+    await this._detach()
   }
 
-  #transition(state: SubscriptionState): void {
-    if (this.#state === state) return
-    this.#state = state
-    for (const listener of [...this.#listeners]) listener(state)
+  private _transition(state: SubscriptionState): void {
+    if (this._state === state) return
+    this._state = state
+    for (const listener of [...this._listeners]) listener(state)
   }
 }
 
