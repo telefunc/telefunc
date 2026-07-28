@@ -299,15 +299,17 @@ describe('Redis real three-master Cluster CI certification', () => {
   it('reports exact node-local receiver counts while still delivering cross-node', async () => {
     const prefix = uniquePrefix('receivers')
     const backend = redisBackend(cluster, prefix)
-    const selectedPorts = [...masters].sort((left, right) => left.port - right.port).map(({ port }) => port)
+    // RedisRoomBackend sorts master endpoints before round-robin subscriber selection. Mirror that
+    // order, but identify masters by Cluster node ID: Compose nodes all listen on port 6379.
+    const subscriberOrder = [...masters].sort(compareMasterEndpoints)
     const cases = [
-      { label: 'same', roomPort: selectedPorts[0] as number, expected: 1 },
-      { label: 'cross', roomPort: selectedPorts[2] as number, expected: 0 },
+      { label: 'same', roomMasterId: (subscriberOrder[0] as Master).id, expected: 1 },
+      { label: 'cross', roomMasterId: (subscriberOrder[2] as Master).id, expected: 0 },
     ]
     const subscriptions: Array<ReturnType<BackendSpi['subscribeLane']>> = []
     try {
       for (const scenario of cases) {
-        const roomId = await roomOnMaster(prefix, scenario.roomPort, scenario.label)
+        const roomId = await roomOnMaster(prefix, scenario.roomMasterId, scenario.label)
         const inc = `${scenario.label}-inc`
         await open(backend, roomId, inc)
         const observed: string[] = []
@@ -354,7 +356,7 @@ describe('Redis real three-master Cluster CI certification', () => {
       accepted(await backend.commitLane(roomId, inc, SEMANTIC_LANE, Buffer.from('prime')))
       const slotNumber = await slot(headKey(prefix, roomId))
       const source = owner(slotNumber)
-      const target = masters.find(({ port }) => port !== source.port) as Master
+      const target = otherMaster(source)
       moved = { slot: slotNumber, source, target }
       await target.client.script('FLUSH')
       await moveSlot(slotNumber, source, target, true)
@@ -383,7 +385,7 @@ describe('Redis real three-master Cluster CI certification', () => {
       await control.readHead(roomId)
       const slotNumber = await slot(headKey(prefix, roomId))
       const source = owner(slotNumber)
-      const target = masters.find(({ port }) => port !== source.port) as Master
+      const target = otherMaster(source)
       moved = { slot: slotNumber, source, target }
       await moveSlot(slotNumber, source, target, true)
       await expect(source.client.get(headKey(prefix, roomId))).rejects.toThrow(/MOVED/)
@@ -409,7 +411,7 @@ describe('Redis real three-master Cluster CI certification', () => {
       await control.readHead(roomId)
       const slotNumber = await slot(headKey(prefix, roomId))
       const source = owner(slotNumber)
-      const target = masters.find(({ port }) => port !== source.port) as Master
+      const target = otherMaster(source)
       migration = { slot: slotNumber, source, target, finalized: false }
       await target.client.cluster('SETSLOT', slotNumber, 'IMPORTING', source.id)
       await source.client.cluster('SETSLOT', slotNumber, 'MIGRATING', target.id)
@@ -435,25 +437,31 @@ describe('Redis real three-master Cluster CI certification', () => {
     return match
   }
 
+  function otherMaster(source: Master): Master {
+    const target = masters.find(({ id }) => id !== source.id)
+    if (target === undefined) throw new Error(`no relocation target exists for Cluster node '${source.id}'`)
+    return target
+  }
+
   async function slot(key: string): Promise<number> {
     return Number(await masters[0]?.client.cluster('KEYSLOT', key))
   }
 
   async function keyOnDifferentMaster(key: string, prefix: string): Promise<string> {
-    const firstPort = owner(await slot(key)).port
+    const firstMasterId = owner(await slot(key)).id
     for (let index = 0; index < 50_000; index++) {
       const candidate = headKey(prefix, `cross-${index}`)
-      if (owner(await slot(candidate)).port !== firstPort) return candidate
+      if (owner(await slot(candidate)).id !== firstMasterId) return candidate
     }
     throw new Error('failed to find a key on another master')
   }
 
-  async function roomOnMaster(prefix: string, port: number, label: string): Promise<string> {
+  async function roomOnMaster(prefix: string, masterId: string, label: string): Promise<string> {
     for (let index = 0; index < 50_000; index++) {
       const roomId = `${label}-${index}`
-      if (owner(await slot(headKey(prefix, roomId))).port === port) return roomId
+      if (owner(await slot(headKey(prefix, roomId))).id === masterId) return roomId
     }
-    throw new Error(`failed to find a room on master ${port}`)
+    throw new Error(`failed to find a room on master '${masterId}'`)
   }
 
   async function pubSubClients(): Promise<Array<{ id: number; owner: Master }>> {
@@ -487,7 +495,7 @@ describe('Redis real three-master Cluster CI certification', () => {
   }
 
   async function restoreSlot(slotNumber: number, original: Master, current: Master): Promise<void> {
-    if (original.port === current.port) return
+    if (original.id === current.id) return
     await original.client.cluster('SETSLOT', slotNumber, 'IMPORTING', current.id)
     await current.client.cluster('SETSLOT', slotNumber, 'MIGRATING', original.id)
     const keys = (await current.client.cluster('GETKEYSINSLOT', slotNumber, 10_000)) as string[]
@@ -591,6 +599,10 @@ function compareRedisNodes(left: Redis, right: Redis): number {
   return `${left.options.host ?? ''}:${left.options.port ?? ''}`.localeCompare(
     `${right.options.host ?? ''}:${right.options.port ?? ''}`,
   )
+}
+
+function compareMasterEndpoints(left: RedisClusterNode, right: RedisClusterNode): number {
+  return `${left.host}:${left.port}`.localeCompare(`${right.host}:${right.port}`)
 }
 
 function redisSlot(key: string): number {
