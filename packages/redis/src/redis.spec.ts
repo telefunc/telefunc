@@ -180,7 +180,7 @@ describe.skipIf(CLUSTER_NODES === undefined)('Redis real three-master Cluster ce
     if (cluster !== undefined) await cluster.quit().catch(() => cluster.disconnect())
   })
 
-  it('covers all slots and every shipped command with actual co-slotted KEYS', async () => {
+  it('covers all slots and every shipped command with complete co-slotted KEYS declarations', async () => {
     expect(masters).toHaveLength(3)
     expect(masters.reduce((total, master) => total + master.end - master.start + 1, 0)).toBe(16_384)
     for (const master of masters) expect((await clusterInfo(master.client)).cluster_state).toBe('ok')
@@ -212,6 +212,12 @@ describe.skipIf(CLUSTER_NODES === undefined)('Redis real three-master Cluster ce
       await fx.backend.dropGeneration(roomId, inc)
 
       for (const descriptor of Object.values(REDIS_ROOM_COMMANDS)) {
+        if (descriptor.numberOfKeys !== null) {
+          const referenced = [...descriptor.lua.matchAll(/\bKEYS\[(\d+)\]/g)].map((match) => Number(match[1]))
+          expect(new Set(referenced), `${descriptor.name}: Lua KEYS references`).toEqual(
+            new Set(Array.from({ length: descriptor.numberOfKeys }, (_, index) => index + 1)),
+          )
+        }
         const calls = fx.commandCalls().filter(({ name }) => name === descriptor.name)
         expect(calls.length, descriptor.name).toBeGreaterThan(0)
         for (const call of calls) {
