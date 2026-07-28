@@ -108,15 +108,15 @@ describe.skipIf(REDIS_URL === undefined && CLUSTER_NODES === undefined)('Redis-s
     const fx = await realFixture()
     try {
       const roomId = 'monotonic-no-reset'
-      fx.orderControl?.setAuthority(10_000)
+      fx.orderControl.setAuthority(10_000)
       const { inc } = await openRoom(fx.backend, roomId)
       const marks: Array<{ seq: number; timestamp: number }> = []
       marks.push(accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC_LANE, bytes('one'))))
-      fx.orderControl?.setAuthority(20_000)
+      fx.orderControl.setAuthority(20_000)
       marks.push(accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC_LANE, bytes('two'))))
       fx.advanceAuthority(30 * 24 * 60 * 60 * 1_000)
       marks.push(accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC_LANE, bytes('three'))))
-      await fx.orderControl?.reconstructBackend(roomId)
+      await fx.orderControl.reconstructBackend()
       marks.push(accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC_LANE, bytes('four'))))
       expect(marks.map(({ seq }) => seq)).toEqual([1, 2, 3, 4])
       expect(marks.map(({ timestamp }) => timestamp)).toEqual(
@@ -148,6 +148,21 @@ describe.skipIf(REDIS_URL === undefined && CLUSTER_NODES === undefined)('Redis-s
       })
     } finally {
       await peer.dispose()
+      await fx.dispose()
+    }
+  })
+
+  it('rejects a commit before effects when the atomic head fence is stale', async () => {
+    const fx = await realFixture()
+    try {
+      const roomId = 'atomic-head-fence'
+      const { inc, head } = await openRoom(fx.backend, roomId)
+      await enterClosing(fx.backend, roomId, head)
+      expect(
+        await fx.backend.commitLane(roomId, inc, SEMANTIC_LANE, bytes('must-not-commit'), { retain: true }),
+      ).toEqual({ stale: true })
+      expect(await fx.backend.readRetained(roomId, inc, SEMANTIC_LANE)).toBeNull()
+    } finally {
       await fx.dispose()
     }
   })

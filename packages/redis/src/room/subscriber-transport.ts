@@ -4,8 +4,9 @@ import type {
   BackendReceiver,
   BackendSubscriptionSource,
   SubscriptionAttempt,
+  SubscriptionAttemptState,
+  SubscriptionBinding,
   SubscriptionDriver,
-  SubscriptionState,
 } from 'telefunc/backend'
 import { channelKey, decodeRedisOrderingFrame, generationInvalidationChannel, laneKey } from './layout.js'
 
@@ -42,7 +43,15 @@ export class RedisSubscriptionDriver implements SubscriptionDriver {
     this.#validateGeneration = options.validateGeneration
   }
 
-  open(
+  bind(source: BackendSubscriptionSource): SubscriptionBinding {
+    return {
+      partition: '',
+      valid: () => true,
+      open: (receiver, localReceiverCount) => this.#open(source, receiver, localReceiverCount),
+    }
+  }
+
+  #open(
     source: BackendSubscriptionSource,
     receiver: BackendReceiver,
     localReceiverCount: () => number,
@@ -92,14 +101,14 @@ class RedisSubscriptionAttempt implements SubscriptionAttempt {
   readonly #captureGeneration: RedisSubscriptionDriverOptions['captureGeneration']
   readonly #validateGeneration: RedisSubscriptionDriverOptions['validateGeneration']
   readonly #onDisposed: () => void
-  readonly #listeners = new Set<(state: SubscriptionState) => void>()
+  readonly #listeners = new Set<(state: SubscriptionAttemptState) => void>()
   readonly #generation: RedisGenerationAttempt = {
     attemptId: randomUUID(),
     createdAt: null,
     generationToken: null,
   }
   #settle!: { resolve: () => void; reject: (error: unknown) => void }
-  #state: SubscriptionState = 'establishing'
+  #state: SubscriptionAttemptState = 'establishing'
   #subscriber: Redis | null = null
   #subscribed = false
   #readySettled = false
@@ -122,11 +131,11 @@ class RedisSubscriptionAttempt implements SubscriptionAttempt {
     void this.#establish()
   }
 
-  state(): SubscriptionState {
+  state(): SubscriptionAttemptState {
     return this.#state
   }
 
-  onStateChange(listener: (state: SubscriptionState) => void): () => void {
+  onStateChange(listener: (state: SubscriptionAttemptState) => void): () => void {
     this.#listeners.add(listener)
     return () => this.#listeners.delete(listener)
   }
@@ -259,7 +268,7 @@ class RedisSubscriptionAttempt implements SubscriptionAttempt {
     this.#settle.reject(error)
   }
 
-  #transition(state: SubscriptionState): void {
+  #transition(state: SubscriptionAttemptState): void {
     if (this.#state === state) return
     this.#state = state
     for (const listener of [...this.#listeners]) listener(state)

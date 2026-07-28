@@ -1,35 +1,12 @@
-// The Redis BackendFixture for the shared conformance suite plus the deterministic controls used by the
-// Redis-specific race scenarios. This test-only module is reached only by the gated live lane and is
-// excluded from the package emit.
-//
-// Fixture obligations honored (from W2a's lessons):
-//   (a) the authority clock STARTS aligned with the caller clock (`Date.now()` at create) and diverges
-//       only through `advanceAuthority`. A real Redis server clock cannot be advanced, so the backend
-//       command decorator supplies that clock to every time-sensitive Lua call; a backend
-//       that read a caller's `Date.now()` would still fail every I13 killer, because this clock is the
-//       shared authority, not the caller's.
-//   (b) traces are declared honestly: Redis hands frames to the broker and never observes a receiver, so
-//       handoffAwaitsReceiver=false and perTargetFailure=false; a head CX is a network round-trip, so
-//       cxAppliesSynchronously=false — which OBLIGATES concurrentHeadCxBarrier (the suite throws without
-//       it) and the barrier-forced I13(c) variant in the Redis-specific spec.
+// Test-only real-Redis fixture for the compact Redis realization/certification spec. Its controlled
+// authority clock starts aligned with Date.now() and moves only when a named Redis scenario requests it.
 
 import { createHash } from 'node:crypto'
 import { Cluster, Redis } from 'ioredis'
-import type {
-  BackendFixture,
-  BackendHarness,
-  BackendTraces,
-} from '../../../telefunc/wire-protocol/backend/conformance/harness.js'
 import type { BackendSpi } from '../../../telefunc/wire-protocol/backend/spi.js'
 import { superviseBackend } from '../../../telefunc/wire-protocol/backend/supervised-backend.js'
-import { channelKey, laneKey, orderKey, REDIS_ROOM_COMMANDS } from './layout.js'
+import { REDIS_ROOM_COMMANDS } from './layout.js'
 import { RedisRoomBackend } from './backend.js'
-
-const REDIS_TRACES: BackendTraces = {
-  handoffAwaitsReceiver: false,
-  perTargetFailure: false,
-  cxAppliesSynchronously: false,
-}
 
 let fixtureSeq = 0
 
@@ -62,40 +39,23 @@ function uniquePrefix(): string {
   return `tfc:${pid}:${Date.now().toString(36)}:${++fixtureSeq}:`
 }
 
-// Realizes the two serial linearizations I13(c) needs on a backend whose CX application is asynchronous.
-// The two head CXs are issued (queued on the single publisher connection) before either is awaited; the
-// connection's FIFO command queue is what "releases them in the given order" — Redis then executes each
-// script atomically in that order (spi.md I13 race-realization note). `first` executes fully before
-// `second` observes the head, so asserting each order realizes that linearization.
-const concurrentHeadCxBarrier = async <T>(first: () => Promise<T>, second: () => Promise<T>): Promise<[T, T]> => {
-  const p1 = first()
-  const p2 = second()
-  return Promise.all([p1, p2]) as Promise<[T, T]>
-}
-
-export type StableReadProbe = (info: { roomId: string; inc: string }) => void | Promise<void>
 export type RedisRoomCommandCall = { name: string; args: readonly unknown[] }
 
-// The fixture the shared suite consumes, widened with the seams the Redis-specific stable-read scenarios
-// use: the raw client (to force an insert/delete out of band), the concrete backend, and a settable
-// probe fired inside the stable-read window.
-export type RedisBackendFixture = BackendFixture & {
+export type RedisBackendFixture = {
   backend: BackendSpi
-  redis: RoomRedisClient
-  allowedReceiverCountsAtAuthority: NonNullable<BackendFixture['allowedReceiverCountsAtAuthority']>
-  prefix: string
-  setStableReadProbe(fn: StableReadProbe | null): void
+  advanceAuthority(ms: number): void
+  orderControl: {
+    setAuthority(now: number): void
+    reconstructBackend(): Promise<void>
+  }
   commandCalls(): readonly RedisRoomCommandCall[]
   createPeerBackend(): Promise<{ backend: BackendSpi; dispose(): Promise<void> }>
+  dispose(): Promise<void>
 }
 
 export async function createRedisFixture(
   url: string,
-  opts: {
-    maxRetainedPayloadBytes?: number
-    useRedisAuthority?: boolean
-    clusterNodes?: RedisClusterNode[]
-  } = {},
+  opts: { clusterNodes?: RedisClusterNode[] } = {},
 ): Promise<RedisBackendFixture> {
   const clusterNodes = opts.clusterNodes ?? configuredClusterNodes()
   const prefix = uniquePrefix()
@@ -121,23 +81,9 @@ export async function createRedisFixture(
   }
   // Authority time starts ALIGNED with the caller clock and only `advanceAuthority` moves it.
   let clock = Date.now()
-  let probe: StableReadProbe | null = null
   const commandCalls: RedisRoomCommandCall[] = []
   const restorers: Array<() => void> = []
   const peerDisposers = new Set<() => Promise<void>>()
-
-  const runProbe = async (label: string, probe: () => void | Promise<void>): Promise<void> => {
-    let timer: ReturnType<typeof setTimeout> | undefined
-    const watchdog = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => reject(new Error(`Redis fixture probe '${label}' exceeded 5 seconds`)), 5_000)
-      timer.unref?.()
-    })
-    try {
-      await Promise.race([Promise.resolve().then(probe), watchdog])
-    } finally {
-      if (timer !== undefined) clearTimeout(timer)
-    }
-  }
 
   type DynamicCommands = Record<string, (...args: unknown[]) => Promise<unknown>>
   const wrapCommand = (
@@ -156,7 +102,7 @@ export async function createRedisFixture(
   }
 
   const installAuthorityClock = (client: RoomRedisClient): void => {
-    const now = (): string => (opts.useRedisAuthority === true ? '' : String(clock))
+    const now = (): string => String(clock)
     for (const [name, index] of [
       [REDIS_ROOM_COMMANDS.headCx.name, 4],
       [REDIS_ROOM_COMMANDS.captureGeneration.name, 5],
@@ -172,40 +118,19 @@ export async function createRedisFixture(
       args[Number(args[0]) + 1] = now()
       return await invoke(args)
     })
-    if (opts.useRedisAuthority !== true) {
-      const originalTime = client.time.bind(client)
-      client.time = (async () => {
-        const seconds = Math.floor(clock / 1_000)
-        const microseconds = (clock - seconds * 1_000) * 1_000
-        return [seconds, microseconds]
-      }) as typeof client.time
-      restorers.push(() => {
-        client.time = originalTime
-      })
-    }
+    const originalTime = client.time.bind(client)
+    client.time = (async () => {
+      const seconds = Math.floor(clock / 1_000)
+      const microseconds = (clock - seconds * 1_000) * 1_000
+      return [seconds, microseconds]
+    }) as typeof client.time
+    restorers.push(() => {
+      client.time = originalTime
+    })
   }
 
-  const roomIdFromKey = (key: unknown): string => {
-    const match = String(key).match(/room:\{([^}]*)\}/)
-    return match === null ? '' : decodeURIComponent(match[1] as string)
-  }
-
-  const backend = superviseBackend(
-    new RedisRoomBackend({ redis, prefix, maxRetainedPayloadBytes: opts.maxRetainedPayloadBytes }),
-  )
+  const backend = superviseBackend(new RedisRoomBackend({ redis, prefix }))
   installAuthorityClock(redis)
-  const mgetBuffer = redis.mgetBuffer.bind(redis)
-  redis.mgetBuffer = (async (...keys: string[]) => {
-    if (probe !== null) {
-      const first = keys[0] ?? ''
-      const incMatch = first.match(/:g:([^:]+):c:/)
-      await runProbe('stable read', () => probe?.({ roomId: roomIdFromKey(first), inc: incMatch?.[1] ?? '' }))
-    }
-    return await mgetBuffer(...keys)
-  }) as typeof redis.mgetBuffer
-  restorers.push(() => {
-    redis.mgetBuffer = mgetBuffer
-  })
   for (const command of Object.values(REDIS_ROOM_COMMANDS)) {
     wrapCommand(redis, command.name, async (invoke, args) => {
       commandCalls.push({ name: command.name, args: [...args] })
@@ -236,7 +161,7 @@ export async function createRedisFixture(
       const args = dynamic ? [String(numberOfKeys), ...rawArgs] : rawArgs
       commandCalls.push({ name: command.name, args: [...args] })
 
-      const now = opts.useRedisAuthority === true ? '' : String(clock)
+      const now = String(clock)
       if (
         command.name === REDIS_ROOM_COMMANDS.headCx.name ||
         command.name === REDIS_ROOM_COMMANDS.captureGeneration.name ||
@@ -260,7 +185,7 @@ export async function createRedisFixture(
       const dynamic = command.numberOfKeys === null
       const args = dynamic ? [String(numberOfKeys), ...rawArgs] : rawArgs
       commandCalls.push({ name: command.name, args: [...args] })
-      const now = opts.useRedisAuthority === true ? '' : String(clock)
+      const now = String(clock)
       if (
         command.name === REDIS_ROOM_COMMANDS.headCx.name ||
         command.name === REDIS_ROOM_COMMANDS.captureGeneration.name ||
@@ -292,32 +217,6 @@ export async function createRedisFixture(
 
   const fixture: RedisBackendFixture = {
     backend,
-    redis,
-    prefix,
-    traces: REDIS_TRACES,
-    // The shared manager multiplexes same-source callbacks behind one raw Redis attempt.
-    expectedReceivers: { twoLocalSubscriptionsSameLane: 1, oneLocalSubscriptionAfterSiblingDetach: 1 },
-    allowedReceiverCountsAtAuthority: async (roomId, inc, lane, globalFallback) => {
-      if (!(redis instanceof Cluster) || globalFallback === 0) return globalFallback
-      const masters = redis.nodes('master')
-      if (masters.length < 3) throw new Error('Redis fixture: receiver authority requires three live masters')
-      const key = channelKey(prefix, roomId, inc, laneKey(lane))
-      const slot = Number(await masters[0]?.cluster('KEYSLOT', key))
-      const rawSlots = (await redis.cluster('SLOTS')) as unknown as Array<
-        [number, number, [string | Buffer, number, ...unknown[]]]
-      >
-      const range = rawSlots.find(([start, end]) => slot >= start && slot <= end)
-      if (range === undefined) throw new Error(`Redis fixture: no owner for slot ${slot}`)
-      const ownerHost = Buffer.isBuffer(range[2][0]) ? range[2][0].toString() : range[2][0]
-      const ownerPort = Number(range[2][1])
-      const owner = masters.find(
-        (master) => (master.options.host ?? '127.0.0.1') === ownerHost && Number(master.options.port) === ownerPort,
-      )
-      if (owner === undefined) throw new Error(`Redis fixture: slot owner ${ownerHost}:${ownerPort} is unavailable`)
-      const count = (await owner.pubsub('NUMSUB', key)) as [string, number]
-      return Number(count[1])
-    },
-    authorityNow: () => clock,
     advanceAuthority: (ms) => {
       clock += ms
     },
@@ -325,20 +224,10 @@ export async function createRedisFixture(
       setAuthority: (now) => {
         clock = now
       },
-      runMaintenance: async (roomId) => {
-        await fixture.backend.listGenerations(roomId)
-      },
       reconstructBackend: async () => {
         const peer = await fixture.createPeerBackend()
         fixture.backend = peer.backend
       },
-      seedWatermark: async (roomId, inc, lane, seq, timestamp) => {
-        await redis.set(orderKey(prefix, roomId, inc, laneKey(lane)), `${seq}:${timestamp}`)
-      },
-    },
-    concurrentHeadCxBarrier,
-    setStableReadProbe: (fn) => {
-      probe = fn
     },
     commandCalls: () => commandCalls,
     createPeerBackend: async () => {
@@ -371,7 +260,6 @@ export async function createRedisFixture(
       }
     },
     dispose: async () => {
-      probe = null
       commandCalls.length = 0
       await Promise.allSettled([...peerDisposers].map((dispose) => dispose()))
       await backend.dispose()
@@ -392,14 +280,6 @@ export async function createRedisFixture(
     },
   }
   return fixture
-}
-
-export function makeRedisHarness(url: string): BackendHarness {
-  return { name: 'redis', create: () => createRedisFixture(url) }
-}
-
-export function makeRedisClusterHarness(url: string, clusterNodes: RedisClusterNode[]): BackendHarness {
-  return { name: 'redis-cluster', create: () => createRedisFixture(url, { clusterNodes }) }
 }
 
 async function scanPrefix(redis: RoomRedisClient, prefix: string): Promise<string[]> {
