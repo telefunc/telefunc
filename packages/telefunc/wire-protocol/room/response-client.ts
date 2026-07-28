@@ -6,15 +6,15 @@ import type {
   RoomContract,
   RoomParticipantContract,
   RoomRemoteContract,
-} from '../../types.js'
+} from '../types.js'
 import {
   SERIALIZER_PREFIX_ROOM,
   SERIALIZER_PREFIX_ROOM_PARTICIPANT,
   SERIALIZER_PREFIX_ROOM_REMOTE,
-} from '../../constants.js'
-import { ClientRoom, ClientStandaloneParticipant } from '../../room/client.js'
-import { roomCtrlKey } from '../../room/protocol.js'
-import { assert } from '../../../utils/assert.js'
+} from '../constants.js'
+import { ClientRoom, ClientStandaloneParticipant } from './client.js'
+import { roomCtrlKey } from './protocol.js'
+import { assert } from '../../utils/assert.js'
 
 const roomReviver: ReviverType<RoomContract, ClientReviverContext> = {
   prefix: SERIALIZER_PREFIX_ROOM,

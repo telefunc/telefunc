@@ -6,16 +6,16 @@ import type {
   RoomParticipantContract,
   RoomRemoteContract,
   ServerReplacerContext,
-} from '../../types.js'
+} from '../types.js'
 import {
   SERIALIZER_PREFIX_ROOM,
   SERIALIZER_PREFIX_ROOM_PARTICIPANT,
   SERIALIZER_PREFIX_ROOM_REMOTE,
-} from '../../constants.js'
-import { ServerLocalParticipant, ServerRoom } from '../../room/server.js'
-import { bindParticipantStubChannel, RoomStubChannel } from '../../room/stubs.js'
-import { remoteBacking } from '../../room/state.js'
-import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
+} from '../constants.js'
+import { ServerLocalParticipant, ServerRoom } from './server.js'
+import { bindParticipantStubChannel, RoomStubChannel } from './stubs.js'
+import { remoteBacking } from './state.js'
+import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
 assertIsNotBrowser()
 
 /** Per-response echo-suppression rendezvous (`selfDelivery: false`). Both a room and a co-returned
