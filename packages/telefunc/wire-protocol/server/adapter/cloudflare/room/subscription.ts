@@ -22,8 +22,6 @@ export type CloudflareRoomSubscriptionSource = {
 }
 
 export type CloudflareRoomSubscriptionOptions = {
-  scheduler?: SubscriptionScheduler
-  now?: () => number
   onClosed(): void
 }
 
@@ -55,8 +53,8 @@ export class CloudflareRoomSubscriptionAttempt implements SubscriptionAttempt {
   ) {
     this._source = source
     this._receiver = receiver
-    this._scheduler = options.scheduler ?? realSubscriptionScheduler
-    this._createdAt = (options.now ?? Date.now)()
+    this._scheduler = realSubscriptionScheduler
+    this._createdAt = Date.now()
     this._onClosed = options.onClosed
     this.ready = new Promise<void>((resolve, reject) => {
       this._settleReady = { resolve, reject }

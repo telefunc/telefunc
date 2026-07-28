@@ -23,11 +23,7 @@ import type {
 import { BACKEND_SPI_VERSION } from '../../../../backend/spi.js'
 import { CloudflareBroadcastTransport } from '../broadcast.js'
 import { base64ToBytes, bytesToBase64, laneKey as laneKeyOf } from './codec.js'
-import {
-  CloudflareRoomSubscriptionAttempt,
-  type CloudflareRoomSubscriptionSource,
-  type SubscriptionScheduler,
-} from './subscription.js'
+import { CloudflareRoomSubscriptionAttempt, type CloudflareRoomSubscriptionSource } from './subscription.js'
 import type {
   CellsWire,
   CommitWire,
@@ -151,25 +147,11 @@ export class CloudflareRoomSessionManager {
   private readonly _getRoomNamespace: () => CloudflareRoomNamespace
   private readonly _entries = new Map<string, ManagerEntry>()
   private readonly _deliverySettlements = new Map<string, Promise<void>>()
-  private readonly _scheduler: SubscriptionScheduler | undefined
-  private readonly _now: () => number
-  private readonly _authorityOverride: ((roomId: string) => CloudflareRoomAuthorityStub) | undefined
   private _disposed = false
 
-  constructor(
-    sessionId: string,
-    getRoomNamespace: () => CloudflareRoomNamespace,
-    options: {
-      scheduler?: SubscriptionScheduler
-      now?: () => number
-      authority?: (roomId: string) => CloudflareRoomAuthorityStub
-    } = {},
-  ) {
+  constructor(sessionId: string, getRoomNamespace: () => CloudflareRoomNamespace) {
     this._id = sessionId
     this._getRoomNamespace = getRoomNamespace
-    this._scheduler = options.scheduler
-    this._now = options.now ?? Date.now
-    this._authorityOverride = options.authority
   }
 
   openSubscription(
@@ -226,7 +208,6 @@ export class CloudflareRoomSessionManager {
   }
 
   authority(roomId: string): CloudflareRoomAuthorityStub {
-    if (this._authorityOverride !== undefined) return this._authorityOverride(roomId)
     const namespace = this._getRoomNamespace()
     return namespace.get(namespace.idFromName(roomId))
   }
@@ -265,8 +246,6 @@ export class CloudflareRoomSessionManager {
     const key = JSON.stringify([source.roomId, source.inc, source.laneKey])
     let attempt!: CloudflareRoomSubscriptionAttempt
     attempt = new CloudflareRoomSubscriptionAttempt(source, receiver, {
-      ...(this._scheduler === undefined ? {} : { scheduler: this._scheduler }),
-      now: this._now,
       onClosed: () => {
         if (this._entries.get(key)?.attempt === attempt) this._entries.delete(key)
       },
