@@ -21,7 +21,7 @@ import { testRefIdentity } from './pages/ref-identity/e2e-test'
 ;(globalThis as { process?: { env: Record<string, string | undefined> } }).process!.env.NODE_TLS_REJECT_UNAUTHORIZED =
   '0'
 
-function setupDockerRun(): boolean {
+function setupDockerRun(command = 'pnpm test:docker'): boolean {
   // Skip locally when Docker is unavailable. On CI a missing Docker should fail loudly,
   // not silently shrink coverage.
   if (!isCI() && !isDockerAvailable()) {
@@ -29,7 +29,7 @@ function setupDockerRun(): boolean {
     return false
   }
 
-  run('pnpm test:docker', {
+  run(command, {
     serverUrl: 'https://localhost:8443',
     serverIsReadyMessage: 'serving initial configuration',
     tolerateExitCode: [130],

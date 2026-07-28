@@ -1,0 +1,93 @@
+services:
+  redis: &redis-cluster-node
+    image: redis:7-alpine
+    command:
+      - redis-server
+      - --cluster-enabled
+      - 'yes'
+      - --cluster-config-file
+      - nodes.conf
+      - --cluster-node-timeout
+      - '5000'
+      - --appendonly
+      - 'no'
+      - --save
+      - ''
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli cluster info | grep -q '^cluster_state:ok'"]
+      interval: 1s
+      timeout: 2s
+      retries: 60
+      start_period: 2s
+
+  redis-b:
+    <<: *redis-cluster-node
+
+  redis-c:
+    <<: *redis-cluster-node
+
+  redis-cluster-init:
+    image: redis:7-alpine
+    depends_on:
+      redis:
+        condition: service_started
+      redis-b:
+        condition: service_started
+      redis-c:
+        condition: service_started
+    command:
+      - sh
+      - -ec
+      - |
+        for host in redis redis-b redis-c; do
+          until redis-cli -h "$$host" ping >/dev/null 2>&1; do sleep 1; done
+        done
+        redis-cli --cluster create redis:6379 redis-b:6379 redis-c:6379 \
+          --cluster-replicas 0 --cluster-yes
+        for host in redis redis-b redis-c; do
+          until redis-cli -h "$$host" cluster info | grep -q '^cluster_state:ok'; do sleep 1; done
+        done
+
+  redis-cluster-certification:
+    image: node:24-bookworm-slim
+    working_dir: /repo
+    command:
+      - node
+      - node_modules/vitest/vitest.mjs
+      - run
+      - --config
+      - packages/redis/test/cluster-ci/vitest.config.ts
+      - --reporter=verbose
+    volumes:
+      - ../..:/repo
+    environment:
+      REDIS_CLUSTER_NODES: redis:6379,redis-b:6379,redis-c:6379
+    depends_on:
+      redis:
+        condition: service_healthy
+      redis-b:
+        condition: service_healthy
+      redis-c:
+        condition: service_healthy
+
+  playground-a: &cluster-playground
+    environment:
+      REDIS_CLUSTER_NODES: redis:6379,redis-b:6379,redis-c:6379
+    depends_on:
+      redis-cluster-certification:
+        condition: service_completed_successfully
+
+  playground-b:
+    <<: *cluster-playground
+
+  playground-c:
+    <<: *cluster-playground
+
+  playground-d:
+    <<: *cluster-playground
+
+  playground-e:
+    <<: *cluster-playground
+
+  playground-f:
+    <<: *cluster-playground

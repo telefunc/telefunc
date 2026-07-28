@@ -3,9 +3,9 @@ import * as path from 'node:path'
 import type { IncomingMessage, Server as HttpServer, ServerResponse } from 'node:http'
 import { Hono } from 'hono'
 import vike from '@vikejs/hono'
-import IORedis from 'ioredis'
+import IORedis, { Cluster } from 'ioredis'
 import { installRedis } from '@telefunc/redis'
-import { config, Room } from 'telefunc'
+import { BroadcastChannel, config, Room } from 'telefunc'
 import { Telefunc } from 'telefunc/node'
 import { cleanupState, resetCleanupState, getCleanupStateSnapshot } from './cleanup-state'
 
@@ -14,9 +14,21 @@ config.shield = true
 
 const INST = process.env.INSTANCE_ID ?? '?'
 
-if (process.env.REDIS_URL) {
+if (process.env.REDIS_CLUSTER_NODES) {
+  const nodes = process.env.REDIS_CLUSTER_NODES.split(',').map((entry) => {
+    const separator = entry.lastIndexOf(':')
+    const host = entry.slice(0, separator)
+    const port = Number(entry.slice(separator + 1))
+    if (!host || !Number.isInteger(port) || port <= 0 || port > 65_535) {
+      throw new Error(`Invalid REDIS_CLUSTER_NODES entry: ${entry}`)
+    }
+    return { host, port }
+  })
+  installRedis(new Cluster(nodes))
+  console.log(`[INST=${INST}] Redis Cluster backend installed (${nodes.length} seeds)`)
+} else if (process.env.REDIS_URL) {
   installRedis(new IORedis(process.env.REDIS_URL))
-  console.log(`[INST=${INST}] Redis broadcast transport installed`)
+  console.log(`[INST=${INST}] Redis backend installed`)
 }
 
 // Translate Ctrl-C / docker-stop into a clean `process.exit(0)`. Without this, Node's
@@ -51,6 +63,12 @@ type CrossInstanceRoomFixture = {
   unsubscribe(): void
 }
 const crossInstanceRooms = new Map<string, CrossInstanceRoomFixture>()
+type CrossInstanceBroadcastFixture = {
+  channel: BroadcastChannel<unknown>
+  received: unknown[]
+  unsubscribe(): void
+}
+const crossInstanceBroadcasts = new Map<string, CrossInstanceBroadcastFixture>()
 
 app.post('/api/room-cross-instance/join', async (c) => {
   const roomId = c.req.query('roomId')
@@ -87,6 +105,56 @@ app.delete('/api/room-cross-instance/leave', async (c) => {
   crossInstanceRooms.delete(roomId)
   fixture.unsubscribe()
   await fixture.participant.leave()
+  return c.json({ ok: true, instance: INST })
+})
+
+app.post('/api/broadcast-cross-instance/subscribe', async (c) => {
+  const key = c.req.query('key')
+  if (!key) return c.json({ ok: false, reason: 'missing key' }, 400)
+  if (crossInstanceBroadcasts.has(key)) return c.json({ ok: true, instance: INST })
+
+  const channel = new BroadcastChannel<unknown>({ key })
+  const received: unknown[] = []
+  const unsubscribe = channel.subscribe((data) => received.push(data))
+  const readiness = { __clusterReadiness: crypto.randomUUID() }
+  await channel.publish(readiness)
+  await waitUntil(() =>
+    received.some(
+      (data) =>
+        typeof data === 'object' &&
+        data !== null &&
+        '__clusterReadiness' in data &&
+        data.__clusterReadiness === readiness.__clusterReadiness,
+    ),
+  )
+  received.length = 0
+  crossInstanceBroadcasts.set(key, { channel, received, unsubscribe })
+  return c.json({ ok: true, instance: INST })
+})
+
+app.post('/api/broadcast-cross-instance/publish', async (c) => {
+  const key = c.req.query('key')
+  if (!key) return c.json({ ok: false, reason: 'missing key' }, 400)
+  const channel = new BroadcastChannel<unknown>({ key })
+  const receipt = await channel.publish(await c.req.json())
+  await channel.close()
+  return c.json({ ok: true, instance: INST, seq: receipt.seq })
+})
+
+app.get('/api/broadcast-cross-instance/received', (c) => {
+  const key = c.req.query('key')
+  const fixture = key ? crossInstanceBroadcasts.get(key) : undefined
+  if (!fixture) return c.json({ ok: false, reason: 'broadcast fixture not subscribed on this instance' }, 404)
+  return c.json({ ok: true, instance: INST, received: fixture.received })
+})
+
+app.delete('/api/broadcast-cross-instance/unsubscribe', async (c) => {
+  const key = c.req.query('key')
+  const fixture = key ? crossInstanceBroadcasts.get(key) : undefined
+  if (!key || !fixture) return c.json({ ok: true, instance: INST })
+  crossInstanceBroadcasts.delete(key)
+  fixture.unsubscribe()
+  await fixture.channel.close()
   return c.json({ ok: true, instance: INST })
 })
 
@@ -177,4 +245,12 @@ export default {
       if (httpServer) tf.installWebSocket(httpServer)
     },
   },
+}
+
+async function waitUntil(predicate: () => boolean, timeoutMs = 10_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error(`condition did not settle within ${timeoutMs} ms`)
+    await new Promise((resolve) => setTimeout(resolve, 20))
+  }
 }
