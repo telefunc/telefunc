@@ -1,5 +1,14 @@
 import { Cluster, Redis } from 'ioredis'
-import type { BackendSpi, CommitAccepted, LaneId, RoomHead, SubscriptionState } from 'telefunc/backend'
+import { BroadcastChannel, Room } from 'telefunc'
+import type {
+  BackendSpi,
+  BackendSubscriptionSource,
+  BroadcastLane,
+  CommitAccepted,
+  LaneId,
+  RoomHead,
+  SubscriptionState,
+} from 'telefunc/backend'
 import { disposeBackend, getBackend, installBackend } from 'telefunc/backend'
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import {
@@ -12,6 +21,10 @@ import {
   SEMANTIC,
 } from '../../telefunc/wire-protocol/backend/conformance/scenario.js'
 import { superviseBackend } from '../../telefunc/wire-protocol/backend/supervised-backend.js'
+import {
+  SUBSCRIPTION_ESTABLISH_TIMEOUT_MS,
+  SUBSCRIPTION_REPLAN_LIMIT,
+} from '../../telefunc/wire-protocol/backend/subscriptions.js'
 import { installRedis, RedisRoomBackend } from './index.js'
 import { createRedisFixture, parseRedisClusterNodes, type RedisClusterNode } from './room/fixture.js'
 import { DIRECTORY_PUT_LUA, directoryIndexKey, headKey, laneKey, orderKey, REDIS_ROOM_COMMANDS } from './room/layout.js'
@@ -47,6 +60,87 @@ describe('Redis public installation', () => {
 })
 
 describe.skipIf(REDIS_URL === undefined && CLUSTER_NODES === undefined)('Redis-specific realization', () => {
+  it('bounds a flush waiting on a connected-but-silent Redis subscription', async () => {
+    const [publisher, unused] = await realClients()
+    await closeClients(unused)
+    const silent = silenceRedisSubscriptions(publisher)
+    const report = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const raw = new RedisRoomBackend({ redis: publisher, prefix: uniquePrefix('hung-flush') })
+    const backend = superviseBackend(raw)
+    const lane = { key: 'hung-flush', kind: 'binary' } as const satisfies BroadcastLane
+    const source = { kind: 'broadcast', lane } as const satisfies BackendSubscriptionSource
+    vi.useFakeTimers()
+    const subscription = backend.subscribe(lane, () => {})
+    try {
+      const outcome = rejectionOf(raw.subscriptions.flush(source))
+      await silent.firstConnected
+      await vi.advanceTimersByTimeAsync(SUBSCRIPTION_ESTABLISH_TIMEOUT_MS)
+
+      expect((await outcome).message).toMatch(/Redis subscription .* was closed/)
+    } finally {
+      vi.useRealTimers()
+      await subscription.unsubscribe()
+      await backend.dispose()
+      silent.restore()
+      silent.disconnectSubscribers()
+      await closeClients(publisher)
+      await settleEventLoop()
+      report.mockRestore()
+    }
+  })
+
+  it('bounds Room.join across connected-but-silent Redis replacement attempts', async () => {
+    const [publisher, unused] = await realClients()
+    await closeClients(unused)
+    const silent = silenceRedisSubscriptions(publisher)
+    const report = vi.spyOn(console, 'error').mockImplementation(() => {})
+    installBackend(() => new RedisRoomBackend({ redis: publisher, prefix: uniquePrefix('hung-join') }))
+    const room = await Room.create('hung-join')
+    vi.useFakeTimers()
+    try {
+      const outcome = rejectionOf(room.join())
+      await silent.firstConnected
+      await expireSubscriptionHorizon()
+
+      expect((await outcome).message).toContain(`failed after ${SUBSCRIPTION_REPLAN_LIMIT} replacement attempts`)
+    } finally {
+      vi.useRealTimers()
+      await disposeBackend()
+      silent.restore()
+      silent.disconnectSubscribers()
+      await closeClients(publisher)
+      await settleEventLoop()
+      report.mockRestore()
+    }
+  })
+
+  it('bounds Broadcast publish across connected-but-silent Redis replacement attempts', async () => {
+    const [publisher, unused] = await realClients()
+    await closeClients(unused)
+    const silent = silenceRedisSubscriptions(publisher)
+    const report = vi.spyOn(console, 'error').mockImplementation(() => {})
+    installBackend(() => new RedisRoomBackend({ redis: publisher, prefix: uniquePrefix('hung-broadcast') }))
+    const broadcast = new BroadcastChannel({ key: 'hung-broadcast' })
+    vi.useFakeTimers()
+    const unsubscribe = broadcast.subscribeBinary(() => {})
+    try {
+      const outcome = rejectionOf(broadcast.publishBinary(new Uint8Array([1, 2, 3])))
+      await silent.firstConnected
+      await expireSubscriptionHorizon()
+
+      expect((await outcome).message).toContain(`failed after ${SUBSCRIPTION_REPLAN_LIMIT} replacement attempts`)
+    } finally {
+      vi.useRealTimers()
+      unsubscribe()
+      await disposeBackend()
+      silent.restore()
+      silent.disconnectSubscribers()
+      await closeClients(publisher)
+      await settleEventLoop()
+      report.mockRestore()
+    }
+  })
+
   it('activates cross-instance durable Room delivery through installRedis alone', async () => {
     const prefix = uniquePrefix('install-cross-instance')
     const [installedClient, peerClient] = await realClients()
@@ -766,4 +860,55 @@ function deferred<T>() {
     reject = rejectPromise
   })
   return { promise, resolve, reject }
+}
+
+function silenceRedisSubscriptions(redis: Redis | Cluster): {
+  firstConnected: Promise<void>
+  restore(): void
+  disconnectSubscribers(): void
+} {
+  const sources = redis instanceof Cluster ? redis.nodes('master') : [redis]
+  const originals = sources.map((source) => [source, source.duplicate.bind(source)] as const)
+  const firstConnected = deferred<void>()
+  const subscribers: Redis[] = []
+  for (const [source, duplicate] of originals) {
+    source.duplicate = ((options?: unknown) => {
+      const subscriber = duplicate(options as never)
+      subscribers.push(subscriber)
+      subscriber.subscribe = (async () => {
+        if (subscriber.status === 'wait') await subscriber.connect()
+        firstConnected.resolve()
+        return await new Promise<number>(() => {})
+      }) as typeof subscriber.subscribe
+      return subscriber
+    }) as typeof source.duplicate
+  }
+  return {
+    firstConnected: firstConnected.promise,
+    restore: () => {
+      for (const [source, duplicate] of originals) source.duplicate = duplicate as typeof source.duplicate
+    },
+    disconnectSubscribers: () => {
+      for (const subscriber of subscribers) subscriber.disconnect()
+    },
+  }
+}
+
+async function expireSubscriptionHorizon(): Promise<void> {
+  for (let attempt = 0; attempt <= SUBSCRIPTION_REPLAN_LIMIT; attempt++) {
+    await vi.advanceTimersByTimeAsync(SUBSCRIPTION_ESTABLISH_TIMEOUT_MS)
+  }
+}
+
+function rejectionOf<T>(promise: Promise<T>): Promise<Error> {
+  return promise.then(
+    () => {
+      throw new Error('Expected promise to reject')
+    },
+    (error: unknown) => (error instanceof Error ? error : new Error(String(error))),
+  )
+}
+
+async function settleEventLoop(): Promise<void> {
+  for (let turn = 0; turn < 4; turn++) await new Promise<void>((resolve) => setImmediate(resolve))
 }
