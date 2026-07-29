@@ -3,7 +3,11 @@ import { parse } from '@brillout/json-serializer/parse'
 import { IndexedPeer } from '../server/IndexedPeer.js'
 import { ReplayBuffer } from '../replay-buffer.js'
 import { TAG, decode } from '../shared-ws.js'
-import { ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS } from '../constants.js'
+import {
+  ROOM_HEARTBEAT_INTERVAL_MS,
+  ROOM_MEMBER_KV_TTL_MS,
+  ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS,
+} from '../constants.js'
 import { DEFAULT_TRACK, type RoomSnapshotMetadata } from './protocol.js'
 import { ClientRoom } from './client.js'
 import { Room, ServerRoom } from './server.js'
@@ -20,6 +24,7 @@ import {
 } from '../backend/subscriptions.js'
 import type {
   BackendReceiver,
+  BackendSubscription,
   BackendSubscriptionSource,
   LaneId,
   SubscriptionAttempt,
@@ -94,6 +99,131 @@ describe('Room public behavior', () => {
     }
   })
 
+  it('does not let a removed member publish or receive a DM when its leave frame is lost', async () => {
+    const backend = getBackend()
+    const subscribeLane = backend.subscribeLane.bind(backend)
+    const subscribe = vi.spyOn(backend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
+      if (lane.kind !== 'control') return subscribeLane(roomId, inc, lane, receiver)
+      return subscribeLane(roomId, inc, lane, (payload, info) => {
+        const envelope = parse(decoder.decode(payload)) as { __r?: string }
+        if (envelope.__r === 'leave') return
+        receiver(payload, info)
+      })
+    })
+    try {
+      const room = await Room.create('removed-authority-fence')
+      const removed = await room.join({ meta: { name: 'removed' }, identity: 'removed-user' })
+      const sender = await room.join({ meta: { name: 'sender' } })
+      const inbox: unknown[] = []
+      removed.listen((data) => inbox.push(data))
+
+      await Room.removeParticipant(room.id, { id: removed.id, reason: 'moderated' })
+      const publish = await removed.publish('forbidden').then(
+        () => 'accepted',
+        () => 'rejected',
+      )
+      const send = await sender.send(removed.id, 'after-removal').then(
+        () => 'accepted',
+        () => 'rejected',
+      )
+
+      expect({ publish, send, inbox }).toEqual({ publish: 'rejected', send: 'rejected', inbox: [] })
+    } finally {
+      subscribe.mockRestore()
+    }
+  })
+
+  it('does not complete a join until its member inbox subscription is ready', async () => {
+    const room = await Room.create('join-inbox-readiness')
+    const sender = await room.join()
+    const observer = await Room.get(room.id)
+    let immediateDm: Promise<unknown> | undefined
+    observer.onJoin((member) => {
+      immediateDm = sender.send(member.id, 'immediate')
+    })
+
+    const backend = getBackend()
+    const subscribeLane = backend.subscribeLane.bind(backend)
+    const inboxStarted = deferred<void>()
+    let releaseInbox!: () => Promise<void>
+    const subscribe = vi.spyOn(backend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
+      if (lane.kind !== 'inbox') return subscribeLane(roomId, inc, lane, receiver)
+      let inner: BackendSubscription | null = null
+      let state: SubscriptionState = 'establishing'
+      const readiness = deferred<void>()
+      const listeners = new Set<(next: SubscriptionState) => void>()
+      inboxStarted.resolve()
+      releaseInbox = async () => {
+        inner = subscribeLane(roomId, inc, lane, receiver)
+        await inner.ready
+        state = 'ready'
+        readiness.resolve()
+        for (const listener of listeners) listener(state)
+      }
+      return {
+        ready: readiness.promise,
+        state: () => state,
+        onStateChange: (listener) => {
+          listeners.add(listener)
+          return () => listeners.delete(listener)
+        },
+        unsubscribe: async () => {
+          state = 'closed'
+          readiness.resolve()
+          for (const listener of listeners) listener(state)
+          listeners.clear()
+          await inner?.unsubscribe()
+        },
+      }
+    })
+    try {
+      let joinSettled = false
+      const joining = room.join().then((participant) => {
+        joinSettled = true
+        return participant
+      })
+      await inboxStarted.promise
+      await settleMicrotasks()
+      // Without the readiness fence the join and reactive DM have already settled here, so the
+      // accepted DM is deliberately allowed to finish before the delayed inbox is installed.
+      if (joinSettled) await immediateDm
+      await releaseInbox()
+
+      const joined = await joining
+      const inbox: unknown[] = []
+      joined.listen((data) => inbox.push(data))
+      await immediateDm
+      expect(inbox).toEqual(['immediate'])
+    } finally {
+      subscribe.mockRestore()
+    }
+  })
+
+  it('rolls back a durable member when post-create join readiness rejects', async () => {
+    vi.useFakeTimers()
+    const room = await Room.create('join-readiness-rollback')
+    const backend = getBackend()
+    const subscribeLane = backend.subscribeLane.bind(backend)
+    const failure = Promise.reject(new Error('semantic readiness failed'))
+    void failure.catch(() => {})
+    const subscribe = vi.spyOn(backend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
+      if (lane.kind !== 'semantic') return subscribeLane(roomId, inc, lane, receiver)
+      return {
+        ready: failure,
+        state: () => 'closed',
+        onStateChange: () => () => {},
+        unsubscribe: async () => {},
+      }
+    })
+    try {
+      await expect(room.join()).rejects.toThrow('semantic readiness failed')
+      await vi.advanceTimersByTimeAsync(ROOM_MEMBER_KV_TTL_MS + ROOM_HEARTBEAT_INTERVAL_MS)
+      expect(await Room.getParticipants(room.id)).toEqual([])
+    } finally {
+      subscribe.mockRestore()
+    }
+  })
+
   it('creates, lists, updates, closes fully, and recreates a genuinely fresh domain', async () => {
     const room = (await Room.create('lifecycle', { meta: { topic: 'one' } })) as ServerRoom
     const firstInc = room._inc
@@ -159,6 +289,79 @@ describe('Room public behavior', () => {
 
       expect(observer.isClosed).toBe(true)
       expect(unsubscribed.sort()).toEqual(['control', 'semantic'])
+    } finally {
+      subscribe.mockRestore()
+      await remoteInstall.disposeBackend()
+    }
+  })
+
+  it('replaces a still-demanded Room subscription after its supervised source closes terminally', async () => {
+    const authority = await Room.create('terminal-subscription-recovery')
+    const publisher = await authority.join()
+    const observer = await Room.get(authority.id)
+    const backend = getBackend()
+    const subscribeLane = backend.subscribeLane.bind(backend)
+    let terminal: ReturnType<typeof terminalSubscription> | undefined
+    const subscribe = vi.spyOn(backend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
+      if (lane.kind !== 'semantic' || terminal !== undefined) return subscribeLane(roomId, inc, lane, receiver)
+      terminal = terminalSubscription()
+      return terminal.subscription
+    })
+    try {
+      const received: unknown[] = []
+      observer.subscribe((data) => received.push(data))
+      await terminal?.subscription.ready
+      // Let the observe-transition roster refresh finish before the terminal event; otherwise its
+      // unrelated trailing `_syncSubs()` would accidentally replace the closed slot.
+      await settle()
+      await terminal?.close()
+      await settle()
+
+      await publisher.publish('after-recovery')
+      expect(received).toEqual(['after-recovery'])
+    } finally {
+      subscribe.mockRestore()
+    }
+  })
+
+  it('reconciles a zombie Room when terminal control state follows a lost closed frame', async () => {
+    const authority = await Room.create('terminal-control-reconcile')
+    await authority.join()
+
+    vi.resetModules()
+    const remoteInstall = await import('../backend/install.js')
+    const remoteServer = await import('./server.js')
+    const remoteBackend = remoteInstall.installBackend(() => driver)
+    const subscribeLane = remoteBackend.subscribeLane.bind(remoteBackend)
+    let terminal: ReturnType<typeof terminalSubscription> | undefined
+    const subscribe = vi.spyOn(remoteBackend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
+      const filtered =
+        lane.kind === 'control'
+          ? (payload: Uint8Array, info: { seq: number; timestamp: number }) => {
+              const envelope = parse(decoder.decode(payload)) as { __r?: string }
+              if (envelope.__r !== 'closed') receiver(payload, info)
+            }
+          : receiver
+      const subscription = subscribeLane(roomId, inc, lane, filtered)
+      if (lane.kind !== 'control' || terminal !== undefined) return subscription
+      terminal = terminalSubscription(subscription)
+      return terminal.subscription
+    })
+    try {
+      const observer = await remoteServer.Room.get(authority.id)
+      let closes = 0
+      observer.onClose(() => closes++)
+      await terminal?.subscription.ready
+
+      await Room.close(authority.id)
+      await terminal?.close()
+      await settle()
+
+      expect({ closed: observer.isClosed, count: observer.count, closes }).toEqual({
+        closed: true,
+        count: 0,
+        closes: 1,
+      })
     } finally {
       subscribe.mockRestore()
       await remoteInstall.disposeBackend()
@@ -388,7 +591,10 @@ describe('memory Backend SPI contract', () => {
       received.push(decoder.decode(payload)),
     )
     await subscription.ready
-    const commit = await backend.commitLane('spi', 'inc-1', semanticLane, encoder.encode('one'), { retain: true })
+    const commit = await backend.commitLane('spi', 'inc-1', semanticLane, encoder.encode('one'), {
+      retain: true,
+      requiredCellKeys: ['member'],
+    })
     if (!('accepted' in commit)) throw new Error('lane commit fenced unexpectedly')
     await commit.delivery
     expect({ seq: commit.seq, receivers: commit.receivers, received }).toEqual({
@@ -397,6 +603,16 @@ describe('memory Backend SPI contract', () => {
       received: ['one'],
     })
     expect(decoder.decode((await backend.readRetained('spi', 'inc-1', semanticLane))!.payload)).toBe('one')
+    const currentCells = await backend.readCells('spi', 'inc-1', { keys: ['member'] })
+    if ('staleInc' in currentCells) throw new Error('cell fence generation vanished')
+    expect(await backend.compareExchangeCells('spi', 'inc-1', currentCells.revision, [{ key: 'member' }])).toBe(
+      'committed',
+    )
+    expect(
+      await backend.commitLane('spi', 'inc-1', semanticLane, encoder.encode('fenced'), {
+        requiredCellKeys: ['member'],
+      }),
+    ).toEqual({ stale: true })
 
     await expect(backend.dropGeneration('spi', 'inc-1')).rejects.toThrow('refusing to drop the current')
     expect(subscription.state()).toBe('ready')
@@ -974,6 +1190,32 @@ class ControlledAttempt implements SubscriptionAttempt {
     this._state = state
     for (const listener of this._listeners) listener(state)
   }
+}
+
+function terminalSubscription(inner?: BackendSubscription): {
+  subscription: BackendSubscription
+  close(): Promise<void>
+} {
+  let state = inner?.state() ?? 'ready'
+  const listeners = new Set<(next: SubscriptionState) => void>()
+  let closed = false
+  const subscription: BackendSubscription = {
+    ready: inner?.ready ?? Promise.resolve(),
+    state: () => state,
+    onStateChange: (listener) => {
+      listeners.add(listener)
+      return () => listeners.delete(listener)
+    },
+    unsubscribe: async () => {
+      if (closed) return
+      closed = true
+      state = 'closed'
+      for (const listener of listeners) listener(state)
+      listeners.clear()
+      await inner?.unsubscribe()
+    },
+  }
+  return { subscription, close: subscription.unsubscribe }
 }
 
 function deferred<T>() {

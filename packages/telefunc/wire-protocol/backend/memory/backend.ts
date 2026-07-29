@@ -352,7 +352,7 @@ export class MemoryBackend implements BackendDriver {
     inc: string,
     lane: LaneId,
     payload: Uint8Array,
-    opts?: { retain?: boolean; closingLease?: string },
+    opts?: { retain?: boolean; closingLease?: string; requiredCellKeys?: string[] },
   ): Promise<CommitResult> {
     this._assertLive()
     const room = this._state.rooms.get(roomId)
@@ -361,6 +361,15 @@ export class MemoryBackend implements BackendDriver {
       return { stale: true }
     }
     const gen = this._generation(room, inc)
+    const now = this._now()
+    if (
+      opts?.requiredCellKeys?.some((key) => {
+        const cell = gen.cells.get(key)
+        return cell === undefined || isExpired(cell, now)
+      })
+    ) {
+      return { stale: true }
+    }
     const key = laneKey(lane)
     const frame = copyBytes(payload)
     // Over-cap retain is rejected before anything is mutated, so a throw never half-accepts a commit.

@@ -354,12 +354,14 @@ export class RedisRoomBackend implements BackendDriver {
     inc: string,
     lane: LaneId,
     payload: Uint8Array,
-    opts?: { retain?: boolean; closingLease?: string },
+    opts?: { retain?: boolean; closingLease?: string; requiredCellKeys?: string[] },
   ): Promise<CommitResult> {
     this._assertLive()
     const source = durableSource(roomId, inc, lane)
+    const keys = REDIS_ROOM_COMMAND_KEYS.commit(this._prefix, roomId, inc, lane, opts?.requiredCellKeys)
     const reply = (await this._call(REDIS_ROOM_COMMANDS.commit.name, [
-      ...REDIS_ROOM_COMMAND_KEYS.commit(this._prefix, roomId, inc, lane),
+      String(keys.length),
+      ...keys,
       this._nowArg(),
       inc,
       lane.kind,

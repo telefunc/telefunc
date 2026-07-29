@@ -208,10 +208,13 @@ export type BackendSpi = {
     inc: string,
     lane: LaneId,
     payload: Uint8Array,
-    opts?: { retain?: boolean; closingLease?: string },
+    opts?: { retain?: boolean; closingLease?: string; requiredCellKeys?: string[] },
   ): Promise<CommitResult>
   // DEFAULT precondition (single backend-atomic step): head check (currentInc===inc ∧ state==='open')
-  //   + advance lane's order domain + (retain ? install retained generation : nothing).
+  //   + every `requiredCellKeys` cell exists and is unexpired + advance lane's order domain
+  //   + (retain ? install retained generation : nothing). A missing required cell returns { stale }.
+  //   Correctness requirement: a driver MUST honor `requiredCellKeys`; ignoring it accepts writes from
+  //   removed members even though the option is syntactically optional for commits that need no cell fence.
   // CLOSING-CONTROL precondition (narrow; the ONLY exception): `closingLease` is honored iff
   //   lane.kind==='control' ∧ head.state==='closing' ∧ head.currentInc===inc ∧
   //   head.closeLease.id===closingLease ∧ now ≤ head.closeLease.until (AUTHORITY time — an expired lease
