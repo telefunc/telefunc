@@ -48,7 +48,10 @@ export class Fanout {
     const previous = lanes.get(laneKey) ?? Promise.resolve()
     const attempt = previous
       .then(() => new Promise<void>((resolve) => this._defer(resolve)))
-      .then(() => (fence.active ? this._fanout(acceptedTargets, acceptedFrame, info) : undefined))
+      .then(() => {
+        if (!fence.active) throw new Error('Cloudflare Room delivery cancelled before handoff')
+        return this._fanout(acceptedTargets, acceptedFrame, info)
+      })
     // Settlement gate: the next frame starts after this one settles, success OR failure.
     lanes.set(laneKey, attempt.then(noop, noop))
     const token = `d-${++this._tokenSeq}`
@@ -59,7 +62,7 @@ export class Fanout {
   // The caller's `delivery` promise: rejects only on this frame's own handoff failure.
   async await(token: string): Promise<void> {
     const attempt = this._attempts.get(token)
-    if (attempt === undefined) return
+    if (attempt === undefined) throw new Error('Cloudflare Room delivery has an unknown delivery token')
     try {
       await attempt
     } finally {
