@@ -78,7 +78,7 @@ export type CloudflareRoomAuthorityStub = {
     inc: string,
     lane: LaneId,
     payload: Uint8Array,
-    opts?: { retain?: boolean; closingLease?: string },
+    opts?: { retain?: boolean; closingLease?: string; requiredCellKeys?: string[] },
   ): Promise<CommitWire>
   awaitDelivery(token: string): Promise<void>
   readRetained(inc: string, lane: LaneId): Promise<RetainedWire | null>
@@ -339,7 +339,7 @@ export class CloudflareRoomBackend implements BackendDriver {
     inc: string,
     lane: LaneId,
     payload: Uint8Array,
-    opts?: { retain?: boolean; closingLease?: string },
+    opts?: { retain?: boolean; closingLease?: string; requiredCellKeys?: string[] },
   ): Promise<CommitResult> {
     const manager = getCloudflareRoomSessionManager()
     const stub = manager.authority(roomId)

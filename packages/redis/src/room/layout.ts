@@ -439,6 +439,7 @@ export const CELLS_CX_CMD = 'tfRoomCellsCx'
 // validation, order advance, optional retained install, then PUBLISH. Supplying a closing lease selects
 // the narrow closing-control branch, which is what makes every other lane stale while closing (I12).
 //   KEYS: [1]=head [2]=order [3]=retained [4]=channel [5]=retained aggregate payload size
+//         [6..]=required live cells
 //   ARGV: [1]=now [2]=inc [3]=laneKind [4]=closingLease('') [5]=retain('0'|'1')
 //         [6]=payload [7]=aggregate retained payload cap
 export const COMMIT_LUA = `${NOW_FN}
@@ -456,6 +457,15 @@ if head and head.inc == ARGV[2] then
   end
 end
 if not ok then return '{"stale":true}' end
+for i = 6, #KEYS do
+  local raw = redis.call('GET', KEYS[i])
+  if not raw then return '{"stale":true}' end
+  local newline = string.find(raw, '\\n', 1, true)
+  if newline then
+    local expires_at = string.sub(raw, 1, newline - 1)
+    if expires_at ~= '' and tonumber(expires_at) <= now then return '{"stale":true}' end
+  end
+end
 
 -- The counter is aggregate PAYLOAD bytes. A stored frame has a fixed 16-byte order header, excluded
 -- when replacing an existing retained lane. The check precedes every acceptance mutation.
@@ -510,7 +520,6 @@ return '{"accepted":true,"seq":' .. seq_text .. ',"timestamp":' .. ts_text .. ',
 `
 
 export const COMMIT_CMD = 'tfRoomCommit'
-export const COMMIT_KEYS = 5
 
 // Retained deletion updates the aggregate payload counter in the same atomic record as payload removal.
 // KEYS[1] is the counter; KEYS[2..] are the selected retained lane keys.
@@ -592,7 +601,7 @@ export const REDIS_ROOM_COMMANDS = {
     numberOfKeys: DROP_GENERATION_FINALIZE_KEYS,
   },
   cellsCx: { name: CELLS_CX_CMD, lua: CELLS_CX_LUA, numberOfKeys: null },
-  commit: { name: COMMIT_CMD, lua: COMMIT_LUA, numberOfKeys: COMMIT_KEYS },
+  commit: { name: COMMIT_CMD, lua: COMMIT_LUA, numberOfKeys: null },
   retainedDelete: { name: RETAINED_DELETE_CMD, lua: RETAINED_DELETE_LUA, numberOfKeys: null },
   directoryPut: { name: DIRECTORY_PUT_CMD, lua: DIRECTORY_PUT_LUA, numberOfKeys: DIRECTORY_PUT_KEYS },
   directoryDelete: {
@@ -632,7 +641,7 @@ export const REDIS_ROOM_COMMAND_KEYS = {
     revKey(prefix, roomId, inc),
     ...cells.map((key) => cellKey(prefix, roomId, inc, key)),
   ],
-  commit: (prefix: string, roomId: string, inc: string, lane: LaneId) => {
+  commit: (prefix: string, roomId: string, inc: string, lane: LaneId, requiredCellKeys: readonly string[] = []) => {
     const key = laneKey(lane)
     return [
       headKey(prefix, roomId),
@@ -640,6 +649,7 @@ export const REDIS_ROOM_COMMAND_KEYS = {
       retainedKey(prefix, roomId, inc, key),
       channelKey(prefix, roomId, inc, key),
       retainedSizeKey(prefix, roomId, inc),
+      ...requiredCellKeys.map((required) => cellKey(prefix, roomId, inc, required)),
     ]
   },
   retainedDelete: (prefix: string, roomId: string, inc: string, retainedKeys: readonly string[]) => [

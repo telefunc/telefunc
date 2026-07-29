@@ -278,7 +278,7 @@ export class TelefuncRoomDurableObject extends DurableObject {
     inc: string,
     lane: LaneId,
     payload: Uint8Array,
-    opts?: { retain?: boolean; closingLease?: string },
+    opts?: { retain?: boolean; closingLease?: string; requiredCellKeys?: string[] },
   ): Promise<CommitWire> {
     const now = this._authorityNow()
     const key = laneKeyOf(lane)
@@ -290,6 +290,10 @@ export class TelefuncRoomDurableObject extends DurableObject {
     try {
       this.ctx.storage.transactionSync(() => {
         if (!commitPreconditionHolds(this._sql, inc, lane, opts?.closingLease, now)) return
+        if (opts?.requiredCellKeys !== undefined) {
+          const required = readCells(this._sql, inc, { keys: opts.requiredCellKeys }, now)
+          if ('staleInc' in required || opts.requiredCellKeys.some((cell) => !required.cells.has(cell))) return
+        }
         if (opts?.retain === true) assertRetainedCapacity(this._sql, inc, key, frame.byteLength, this._maxRetainedBytes)
         const mark = advanceOrder(this._sql, inc, key, now)
         if (opts?.retain === true) installRetained(this._sql, inc, lane, frame, mark)

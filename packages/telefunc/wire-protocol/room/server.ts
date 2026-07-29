@@ -327,7 +327,7 @@ async function commitRoomLane(
   inc: string,
   lane: LaneId,
   payload: Uint8Array,
-  opts?: { retain?: boolean; closingLease?: string },
+  opts?: { retain?: boolean; closingLease?: string; requiredCellKeys?: string[] },
 ): Promise<CommitAccepted | null> {
   const result = await getBackend().commitLane(id, inc, lane, payload, opts)
   if ('stale' in result) return null
@@ -679,6 +679,7 @@ async function sendServerDm(roomId: string, inc: string, memberId: string, data:
     inc,
     { kind: 'inbox', member: memberId },
     encodeRoomText(stringify(envelope)),
+    { requiredCellKeys: [roomMemberKvKey(roomId, memberId)] },
   )
   if (committed === null) throw new RoomError(`Room is closed: ${roomId}`)
 }
@@ -727,8 +728,8 @@ class ServerRoom implements Room {
   private readonly _stubs = new Set<RoomStubChannel>()
   private readonly _localParticipants = new Map<string, ServerLocalParticipant>()
 
-  private readonly _ctrlSub = new SubSlot()
-  private readonly _textSub = new SubSlot()
+  private readonly _ctrlSub = new SubSlot((slot) => this._onTerminalSubscription(slot))
+  private readonly _textSub = new SubSlot((slot) => this._onTerminalSubscription(slot))
   /** Upstream subscriptions keyed by their policy identity. */
   private readonly _binaryKeyUnsubs = new Map<string, SubSlot>()
   private readonly _dmUnsubs = new Map<string, SubSlot>()
@@ -885,19 +886,34 @@ class ServerRoom implements Room {
     const joinedAt = await this._createMember(id, meta, identity, hidden)
     track(id, joinedAt)
     this._syncSubs()
-    // A local member makes this holder a semantic observer. Do not expose the joined participant until
-    // that subscription is live: another process may publish as soon as join() returns, and Redis pub/sub
-    // cannot replay a frame sent through an establishing subscription.
-    await this._textSub.ready
-    this._state.applyJoin(id, meta, joinedAt, identity, hidden)
-    await publishCtrl(this.id, this._inc, {
-      __r: 'join',
-      id,
-      meta,
-      joinedAt,
-      ...(identity === null ? {} : { identity }),
-      ...(hidden ? { hidden: true } : {}),
-    })
+    try {
+      // A local member makes this holder a semantic observer and owns one inbox. Do not announce or
+      // expose it until both subscriptions are live: a remote process may publish or react to the join
+      // immediately, and pub/sub cannot replay a frame sent through an establishing subscription.
+      const inbox = this._dmUnsubs.get(id)
+      assert(inbox)
+      await Promise.all([this._textSub.ready, inbox.ready])
+      this._state.applyJoin(id, meta, joinedAt, identity, hidden)
+      await publishCtrl(this.id, this._inc, {
+        __r: 'join',
+        id,
+        meta,
+        joinedAt,
+        ...(identity === null ? {} : { identity }),
+        ...(hidden ? { hidden: true } : {}),
+      })
+    } catch (error) {
+      // The durable create precedes subscription readiness. A failed pre-announcement join owns no
+      // externally usable participant, so retire both its authority cells and its local heartbeat.
+      try {
+        await evictMember(this.id, this._inc, id, identity ?? undefined, { type: 'left' })
+      } catch (rollbackError) {
+        reportRoomError(rollbackError)
+      } finally {
+        this._applyLeave(id, { type: 'left' })
+      }
+      throw error
+    }
     if (hidden) return { id, joinedAt } // announced above; a hidden participant has no post-join hook
     // Post-commit: the member exists and its join is announced — the place for side effects.
     const onAfterJoin = this._guards?.onAfterJoin
@@ -1025,8 +1041,9 @@ class ServerRoom implements Room {
     // the store and the publish. Text and `announce()` share this clock, so they totally order.
     const commit = await commitRoomLane(this.id, this._inc, SEMANTIC_LANE, encodeRoomText(stringify(envelope)), {
       retain,
+      requiredCellKeys: [roomMemberKvKey(this.id, from)],
     })
-    if (commit === null) throw new RoomError(`Room is closed: ${this.id}`)
+    if (commit === null) return await this._throwStaleMembers(from)
     return this._finishPublish(sender, data, commit)
   }
 
@@ -1048,9 +1065,9 @@ class ServerRoom implements Room {
       this._inc,
       { kind: 'binary', member: from, track: frame.track ?? DEFAULT_TRACK },
       framed,
-      { retain: frame.retain },
+      { retain: frame.retain, requiredCellKeys: [roomMemberKvKey(this.id, from)] },
     )
-    if (result === null) throw new RoomError(`Room is closed: ${this.id}`)
+    if (result === null) return await this._throwStaleMembers(from)
     const ack = await this._finishPublish(sender, frame.payload, result)
     return ack
   }
@@ -1197,8 +1214,9 @@ class ServerRoom implements Room {
       this._inc,
       { kind: 'inbox', member: to },
       encodeRoomText(stringify(envelope)),
+      { requiredCellKeys: [roomMemberKvKey(this.id, from), roomMemberKvKey(this.id, to)] },
     )
-    if (receipt === null) throw new RoomError(`Room is closed: ${this.id}`)
+    if (receipt === null) return await this._throwStaleMembers(from, to)
     const info: RoomSendReceipt = { seq: receipt.seq, timestamp: receipt.timestamp }
     const onAfterSend = this._guards?.onAfterSend
     if (onAfterSend) await onAfterSend(sender, target, data, info)
@@ -1213,6 +1231,7 @@ class ServerRoom implements Room {
       this._inc,
       { kind: 'inbox', member: to },
       encodeRoomText(stringify(envelope)),
+      { requiredCellKeys: [roomMemberKvKey(this.id, to)] },
     )
     if (committed === null) throw new RoomError(`Room is closed: ${this.id}`)
   }
@@ -1260,6 +1279,18 @@ class ServerRoom implements Room {
     if (this._state.closed || (await this._openConfig()) === null) {
       throw new RoomError(`Room is closed: ${this.id}`)
     }
+  }
+
+  /** Decode a failed atomic member fence into the caller-facing operational reason. The commit has
+   *  already rejected without advancing order or delivering, so these reads are diagnostic only. */
+  private async _throwStaleMembers(...ids: string[]): Promise<never> {
+    await this._assertOpen()
+    for (const id of ids) {
+      if ((await readCell(this.id, this._inc, roomMemberKvKey(this.id, id))) === null) {
+        throw new RoomError(`Participant not found (left?): ${id}`)
+      }
+    }
+    throw new RoomError(`Room is closed: ${this.id}`)
   }
 
   // ── Event stream (backend lane callbacks) ──
@@ -1492,6 +1523,41 @@ class ServerRoom implements Room {
     this._localParticipants.clear()
     for (const stub of this._stubs) void stub.close().catch(() => {})
     this._syncSubs()
+  }
+
+  /** A source that was once ready exhausted its bounded replacements. Give that source one fresh,
+   *  bounded readiness horizon: backend recovery reattaches it without new demand, while a closed
+   *  generation or failed recovery settles the local handle instead of leaving it observably open but
+   *  deaf. Each terminal event owns its settlement, so concurrent sources cannot hide one another. */
+  private _onTerminalSubscription(slot: SubSlot): void {
+    void (async () => {
+      let authorityOpen: boolean | null = null
+      try {
+        const current = await getBackend().readHead(this.id)
+        authorityOpen = current !== null && current.head.state === 'open' && current.head.currentInc === this._inc
+      } catch (error) {
+        // A subscription outage may also make the authority read unavailable. Recovery below remains
+        // useful and bounded, so this diagnostic must not turn a transient read failure into deafness.
+        reportRoomError(error)
+      }
+      if (authorityOpen === false) {
+        this._settleTerminalSubscription()
+        return
+      }
+      this._syncSubs()
+      try {
+        await slot.ready
+      } catch (error) {
+        reportRoomError(error)
+        this._settleTerminalSubscription()
+      }
+    })().catch(reportRoomError)
+  }
+
+  private _settleTerminalSubscription(): void {
+    if (this._state.closed) return
+    this._state.applyClosed()
+    this._teardown()
   }
 
   /** Keep this initiating node's lanes alive until its exact terminal frame's delivery fence settles.
@@ -1933,7 +1999,7 @@ class ServerRoom implements Room {
     for (const [key, value] of wanted) {
       let slot = subs.get(key)
       if (!slot) {
-        slot = new SubSlot()
+        slot = new SubSlot((terminal) => this._onTerminalSubscription(terminal))
         subs.set(key, slot)
       }
       slot.sync(true, () => subscribe(value))
@@ -2372,6 +2438,12 @@ async function evictMember(
 /** Room policy only reconciles demand. The backend owns subscription lifecycle and fan-out. */
 class SubSlot {
   private _subscription: BackendSubscription | null = null
+  private _unobserve: (() => void) | null = null
+  private readonly _onTerminal: (slot: SubSlot) => void
+
+  constructor(onTerminal: (slot: SubSlot) => void) {
+    this._onTerminal = onTerminal
+  }
 
   get active(): boolean {
     return this._subscription !== null && this._subscription.state() !== 'closed'
@@ -2389,13 +2461,29 @@ class SubSlot {
     if (!want) return this.stop()
     if (this._subscription !== null && this._subscription.state() !== 'closed') return
     const previous = this._subscription
-    this._subscription = subscribe()
+    this._unobserve?.()
+    const subscription = subscribe()
+    this._subscription = subscription
+    let wasReady = subscription.state() === 'ready'
+    void subscription.ready.then(
+      () => {
+        if (this._subscription === subscription && subscription.state() === 'ready') wasReady = true
+      },
+      () => {},
+    )
+    this._unobserve = subscription.onStateChange((state) => {
+      if (this._subscription !== subscription) return
+      if (state === 'ready') wasReady = true
+      else if (state === 'closed' && wasReady) this._onTerminal(this)
+    })
     if (previous) void previous.unsubscribe().catch(reportRoomError)
   }
 
   stop(): void {
     const subscription = this._subscription
     this._subscription = null
+    this._unobserve?.()
+    this._unobserve = null
     if (subscription) void subscription.unsubscribe().catch(reportRoomError)
   }
 }

@@ -73,7 +73,22 @@ describe('Redis real three-master Cluster CI certification', () => {
       ).toBe('committed')
       subscription = backend.subscribeLane(roomId, inc, SEMANTIC_LANE, () => {})
       await subscription.ready
-      await accepted(await backend.commitLane(roomId, inc, SEMANTIC_LANE, bytes('payload'), { retain: true })).delivery
+      await accepted(
+        await backend.commitLane(roomId, inc, SEMANTIC_LANE, bytes('payload'), {
+          retain: true,
+          requiredCellKeys: ['cell} escape'],
+        }),
+      ).delivery
+      const currentCells = await backend.readCells(roomId, inc, { keys: ['cell} escape'] })
+      if ('staleInc' in currentCells) throw new Error('cell fence generation vanished')
+      expect(await backend.compareExchangeCells(roomId, inc, currentCells.revision, [{ key: 'cell} escape' }])).toBe(
+        'committed',
+      )
+      expect(
+        await backend.commitLane(roomId, inc, SEMANTIC_LANE, bytes('fenced'), {
+          requiredCellKeys: ['cell} escape'],
+        }),
+      ).toEqual({ stale: true })
       await backend.deleteRetained(roomId, inc, SEMANTIC_LANE)
       await backend.directoryPut(roomId, inc)
       await backend.directoryDelete(roomId, inc)
