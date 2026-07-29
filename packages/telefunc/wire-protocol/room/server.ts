@@ -1612,17 +1612,6 @@ class ServerRoom implements Room {
       this._tailHold.length = 0
       this._tail = false
     }
-    // The snapshot carries only scalars; the roster streams once the peer is attached (never
-    // buffered — a byte-capped pre-peer buffer must not be able to evict it). Everything
-    // relayed before it is already reflected in it; later events apply incrementally.
-    stub.onOpen(() => {
-      void this._ensureRoster()
-        .then(() => {
-          if (this._stubs.has(stub) && !this._state.closed)
-            stub._relayRoster(this._state.snapshotMembers().filter((m) => !m.hidden))
-        })
-        .catch(reportRoomError)
-    })
     stub.onClose(() => {
       this._stubs.delete(stub)
       stub._endTail() // clear any pending tail hold/timer so a closed stub leaves nothing behind
@@ -1645,6 +1634,21 @@ class ServerRoom implements Room {
     if (!hasRoomTag(msg)) return undefined
     const req = msg as RoomStubRequest
     switch (req.__r) {
+      case 'req-roster':
+        // Do not await in the channel's receive chain: a healthy slow roster read must not
+        // serialize unrelated join/publish frames behind it. The sequenced request and sequenced
+        // response replay independently across reconnect; failure gets its own settling event.
+        void this._ensureRoster().then(
+          () => {
+            if (this._stubs.has(stub) && !this._state.closed)
+              stub._relayRoster(this._state.snapshotMembers().filter((member) => !member.hidden))
+          },
+          (error) => {
+            reportRoomError(error)
+            if (this._stubs.has(stub) && !this._state.closed) stub._relayRosterError()
+          },
+        )
+        return
       case 'req-join': {
         const meta = isObject(req.meta) ? req.meta : {}
         // Identity is trusted and therefore server-assigned — a client join never carries one.

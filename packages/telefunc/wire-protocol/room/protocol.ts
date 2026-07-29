@@ -296,10 +296,11 @@ type RoomAnnounceEnvelope = { __r: 'announce'; data: unknown }
 
 type RoomEnvelope = RoomCtrlEnvelope | RoomDataEnvelope | RoomAnnounceEnvelope
 
-/** The authoritative roster, pushed once per stub after its peer attaches — never published on
- *  the adapter. Position-in-stream consistency: every event relayed before it is already
- *  reflected in it; later events apply incrementally on top. */
-type RoomRosterEvent = { __r: 'roster'; members: MemberSnapshot[] }
+/** The authoritative roster response, requested once by the client over the replayable stub.
+ *  Position-in-stream consistency: every event relayed before a successful roster is already
+ *  reflected in it; later events apply incrementally on top. Failure is explicit so client
+ *  roster getters cannot wait forever after a backend read rejects. */
+type RoomRosterEvent = { __r: 'roster'; members: MemberSnapshot[] } | { __r: 'roster-error' }
 
 /** Global demand for one of a member's own published tracks, pushed to that member's stub
  *  (`onDemand`) whenever the owning node's aggregate count changes. `track` is `null` for the
@@ -339,6 +340,7 @@ const DM_PARTICIPANT_LEFT: DmReply = { ok: false, err: 'Participant left the roo
  *  `sub-text` declares member-scoped text wants — the room-level (all) text want rides the
  *  standard broadcast-subscription ctrl instead, keeping its synchronous-declaration fence. */
 type RoomStubRequest =
+  | { __r: 'req-roster' }
   | { __r: 'req-join'; meta: ParticipantMeta; selfDelivery: boolean }
   | { __r: 'req-leave'; id: string }
   | { __r: 'req-set-meta'; id: string; meta: ParticipantMeta }

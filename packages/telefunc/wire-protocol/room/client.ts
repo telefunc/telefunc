@@ -13,6 +13,7 @@ import {
   unframeMemberId,
   type BinaryWants,
   type MemberWants,
+  type MemberSnapshot,
   type ParticipantStubMetadata,
   type ParticipantStubNotice,
   type ParticipantStubRequest,
@@ -70,8 +71,12 @@ class ClientRoom implements Room {
    *  join round-trip) — held bounded (count-capped, drop-oldest), flushed on registration. */
   private _pendingDms: Array<InboxMessage & { to: string }> | null = null
   private _rosterArrived!: () => void
-  /** Settled by the first streamed roster (or wire death) — gates `getParticipants()`. */
-  private readonly _rosterReady = new Promise<void>((resolve) => (this._rosterArrived = resolve))
+  private _rosterFailed!: (error: unknown) => void
+  /** Settled by the replayable initial roster response (or wire death) — gates `getParticipants()`. */
+  private readonly _rosterReady = new Promise<void>((resolve, reject) => {
+    this._rosterArrived = resolve
+    this._rosterFailed = reject
+  })
 
   constructor(stub: ClientBroadcast, snapshot: RoomSnapshotMetadata) {
     this._stub = stub
@@ -95,13 +100,21 @@ class ClientRoom implements Room {
     // as the `closed` ctrl event before the stub shuts down, so it takes the 'closed' path.)
     stub.onClose(() => this._applyClosed('disconnected'))
     // Reconnect first reconciles the existing holder and releases bounded sequenced replay. This is
-    // the final keyed-declaration layer: if a declaration was emitted but no longer replayable before the
-    // holder applied it, forget what we assumed it knew and re-sync the current full wants. It does
-    // not repair separate unsequenced room-wide `BROADCAST_SUB` loss.
+    // the final declaration layer: forget keyed wants we assumed the holder knew, and explicitly
+    // reconcile the unsequenced room-wide text control from current intent.
     stub._onReconnect(() => {
       this._declaredWants.clear()
-      this._syncWants()
+      this._syncWants(true)
     })
+    // Unlike the former one-shot server push, this request and its response both ride the channel's
+    // bounded reconnect replay. The request is fire-and-forget so a healthy slow backend roster read
+    // doesn't serialize unrelated client frames behind it; the server answers with roster/roster-error.
+    if (!snapshot.closed) {
+      void this._stub.send({ __r: 'req-roster' }, { ack: false }).catch((error) => this._rosterFailed(error))
+    }
+    // A backend rejection can arrive before the application asks for the roster. Mark it handled
+    // here while preserving the original rejection for each later getter.
+    void this._rosterReady.catch(() => {})
   }
 
   // ── Room API ──
@@ -277,9 +290,10 @@ class ClientRoom implements Room {
         // before it is reflected in it, later events apply incrementally on top. The client's
         // roster carries only presence members, so reconcile must not reap directly-granted hidden
         // handles (they aren't roster-managed) — see `RoomState.reconcile`.
-        this._state.reconcile(event.members, true)
-        this._syncWants() // per-member binary wants may reference the members just learned
-        this._rosterArrived()
+        this._applyRoster(event.members)
+        return
+      case 'roster-error':
+        this._rosterFailed(new Error('Failed to load room participants'))
         return
       case 'data':
         // Tail mode holds server-side (see `RoomStubChannel._tailPending`): text reaches this client
@@ -360,6 +374,12 @@ class ClientRoom implements Room {
     )
   }
 
+  private _applyRoster(members: MemberSnapshot[]): void {
+    this._state.reconcile(members, true)
+    this._syncWants() // per-member binary wants may reference the members just learned
+    this._rosterArrived()
+  }
+
   private _applyClosed(causeType: 'closed' | 'disconnected'): void {
     if (this._state.closed) return
     this._pendingDms = null
@@ -375,10 +395,10 @@ class ClientRoom implements Room {
    *  want rides the standard broadcast subscription — declared synchronously, like
    *  `subscribe()`, so same-connection FIFO guarantees a publish right after subscribing gets
    *  its own frame back; everything else is a keyed `_declareWant`. */
-  private _syncWants(): void {
+  private _syncWants(reconcileText = false): void {
     const state = this._state
     const text: MemberWants = state.closed ? { all: false, members: [] } : state.textWants()
-    this._stub._setWireTextSubscribed(text.all)
+    this._stub._setWireTextSubscribed(text.all, reconcileText)
     if (state.closed) return // stub is dead — nothing to declare
 
     // A room-level text subscription supersedes the member set — clear it server-side.

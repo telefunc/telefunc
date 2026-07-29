@@ -25,6 +25,7 @@ const roomScenarios = {
   selfServer: { selector: '#test-room-self-server' },
   reconfig: { selector: '#test-room-reconfig' },
   identity: { selector: '#test-room-identity' },
+  gcParticipant: { selector: '#test-room-gc-participant' },
 } as const satisfies Record<string, RoomScenario>
 
 type RoomScenarioId = keyof typeof roomScenarios
