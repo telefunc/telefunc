@@ -65,6 +65,11 @@ function getCiJobs() {
       setups: setupModern,
     },
     {
+      name: 'Cloudflare Room',
+      command: 'pnpm exec vitest run --config vitest.cloudflare-room.config.ts',
+      setups: setupModern,
+    },
+    {
       name: 'Next.js',
       setups,
     },
