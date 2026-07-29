@@ -386,5 +386,25 @@ function testRoom() {
     })
   })
 
+  testRoomScenario('gcParticipant', 'room: a live participant keeps its Room proxy alive', async () => {
+    await navigate(`${getServerUrl()}/room`)
+    await page.click(roomScenario('gcParticipant').selector)
+    await autoRetry(async () => {
+      expect((await getResult<{ phase: string }>('#room-result')).phase).toBe('ready')
+    })
+
+    // This is a client-side proxy, so force Chromium's heap rather than the playground server's
+    // `/api/gc`. The WeakRef makes collection observable without depending on finalizer timing.
+    for (let cycle = 0; cycle < 3; cycle++) await page.requestGC()
+    await page.click('#test-room-gc-participant-publish')
+
+    await autoRetry(async () => {
+      const r = await getResult<{ phase: string; roomAlive: boolean; published: boolean }>('#room-result')
+      expect(r.phase).toBe('published')
+      expect(r.roomAlive).toBe(true)
+      expect(r.published).toBe(true)
+    })
+  })
+
   assertRoomScenarioExecutions(executedScenarios)
 }

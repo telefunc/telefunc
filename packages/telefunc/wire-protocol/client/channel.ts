@@ -664,9 +664,11 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
     }
   }
 
-  /** @internal — declare/withdraw interest in the peer's text publish stream (deduplicated). */
-  _setWireTextSubscribed(on: boolean): void {
-    if (on === this._wireTextSubscribed || this._isClosed) return
+  /** @internal — declare/withdraw interest in the peer's text publish stream. Normally
+   *  deduplicated; `reconcile` re-emits the current full declaration after reconnect because
+   *  this unsequenced control frame may have died with the previous transport. */
+  _setWireTextSubscribed(on: boolean, reconcile = false): void {
+    if ((!reconcile && on === this._wireTextSubscribed) || this._isClosed) return
     this._wireTextSubscribed = on
     if (on) this._connection.sendBroadcastSubscribe(this, false)
     else this._connection.sendBroadcastUnsubscribe(this, false)

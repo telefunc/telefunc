@@ -1,6 +1,7 @@
 export { wrapProxy }
 
 import { isObjectOrFunction } from '../utils/isObjectOrFunction.js'
+import { isPromise } from '../utils/isPromise.js'
 
 /** Keeps the wrapper reachable as long as any object derived from it (e.g. a
  *  ReadableStreamReader obtained via `stream.getReader()`, a Promise chain, a
@@ -61,7 +62,14 @@ function wrapProxy<T extends object>(target: T): T {
   return wrapper
 }
 
-/** Pin `wrapper` to live as long as `derived` does (via WeakMap). */
+/** Pin `wrapper` to live as long as `derived` does (via WeakMap). A promise also transfers
+ *  the tether to its fulfilled object: callers commonly retain only `await wrapper.method()`. */
 function tether(derived: unknown, wrapper: unknown): void {
-  if (isObjectOrFunction(derived)) keepWrapperAlive.set(derived, wrapper)
+  if (!isObjectOrFunction(derived)) return
+  keepWrapperAlive.set(derived, wrapper)
+  if (isPromise(derived)) {
+    void Promise.resolve(derived)
+      .then((value) => tether(value, wrapper))
+      .catch(() => {})
+  }
 }

@@ -206,6 +206,12 @@ class RoomStubChannel extends ServerBroadcast {
     this._relayPublishText(encodePublishText(stringify(event), { seq: 0, timestamp: Date.now() }))
   }
 
+  /** @internal — explicitly settle a client's failed initial roster read. */
+  _relayRosterError(): void {
+    const event: RoomRosterEvent = { __r: 'roster-error' }
+    this._relayPublishText(encodePublishText(stringify(event), { seq: 0, timestamp: Date.now() }))
+  }
+
   /** @internal — push a demand update for one of this client's members (see `onDemand`). */
   _relayDemand(event: RoomDemandEvent): void {
     this._relayPublishText(encodePublishText(stringify(event), { seq: 0, timestamp: Date.now() }))

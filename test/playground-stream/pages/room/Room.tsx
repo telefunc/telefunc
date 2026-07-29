@@ -34,6 +34,15 @@ async function pollUntil(render: () => { done: boolean } | Promise<{ done: boole
   }
 }
 
+let gcParticipant: { publish(data: unknown): Promise<unknown> } | null = null
+let gcRoomRef: WeakRef<object> | null = null
+
+async function retainOnlyJoinedParticipant(roomId: string): Promise<void> {
+  const room = await onGetRoom(roomId)
+  gcRoomRef = new WeakRef(room)
+  gcParticipant = await room.join({ meta: { name: 'GC survivor' } })
+}
+
 function Room() {
   const [result, setResult] = useState<string>('')
   const [hydrated, setHydrated] = useState(false)
@@ -758,6 +767,34 @@ function Room() {
         }}
       >
         Remove by identity
+      </button>
+
+      <h2>Participant keeps its Room alive</h2>
+
+      <button
+        id={roomScenario('gcParticipant').selector.slice(1)}
+        onClick={async () => {
+          setResult('')
+          const roomId = `e2e-gc-participant:${crypto.randomUUID()}`
+          await onCreateRoom(roomId)
+          await retainOnlyJoinedParticipant(roomId)
+          setResult(JSON.stringify({ phase: 'ready' }))
+        }}
+      >
+        Join and retain only the participant
+      </button>
+      <button
+        id="test-room-gc-participant-publish"
+        onClick={async () => {
+          const roomAlive = gcRoomRef?.deref() !== undefined
+          const published = await gcParticipant!.publish('after-gc').then(
+            () => true,
+            () => false,
+          )
+          setResult(JSON.stringify({ phase: 'published', roomAlive, published }))
+        }}
+      >
+        Publish from retained participant
       </button>
     </div>
   )

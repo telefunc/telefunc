@@ -8,7 +8,7 @@ import { DEFAULT_TRACK, type RoomSnapshotMetadata } from './protocol.js'
 import { ClientRoom } from './client.js'
 import { Room, ServerRoom } from './server.js'
 import { RoomStubChannel } from './stubs.js'
-import type { ClientBroadcast } from '../client/channel.js'
+import { ClientBroadcast } from '../client/channel.js'
 import type { ChannelPublishInfo } from '../channel.js'
 import { disposeBackend, getBackend, installBackend, setDefaultBackend } from '../backend/install.js'
 import { HEAD_TRANSITIONS, assertHeadTransition } from '../backend/head-transitions.js'
@@ -361,6 +361,86 @@ describe('Room public behavior', () => {
     await room.join({ meta: { name: 'Alice' } })
     expect(room.snapshot()).not.toBe(first)
     expect(changes).toBe(1)
+  })
+})
+
+describe('client Room lifecycle', () => {
+  it('redeclares a room-wide text subscription after reconnect even when the local latch already matches', () => {
+    const wireDeclarations: boolean[] = []
+    let reconnect = () => {}
+    const stub = {
+      _wireTextSubscribed: false,
+      _isClosed: false,
+      _connection: {
+        sendBroadcastSubscribe: () => wireDeclarations.push(true),
+        sendBroadcastUnsubscribe: () => wireDeclarations.push(false),
+      },
+      _subscribeLocal: () => () => {},
+      _subscribeBinaryLocal: () => () => {},
+      _setWireTextSubscribed: ClientBroadcast.prototype._setWireTextSubscribed,
+      send: async (request: { __r?: string }) => (request.__r === 'req-roster' ? [] : undefined),
+      publish: async () => ({ key: 'fake', seq: 1, timestamp: 1 }),
+      publishBinary: async () => ({ key: 'fake', seq: 1, timestamp: 1 }),
+      onClose: () => {},
+      _onReconnect: (callback: () => void) => {
+        reconnect = callback
+      },
+    } as unknown as ClientBroadcast
+    const client = new ClientRoom(stub, snapshot('reconnect-text'))
+
+    client.subscribe(() => {})
+    expect(wireDeclarations).toEqual([true])
+
+    // Model the transport dying after the client emitted BROADCAST_SUB but before the server
+    // applied it: the client latch is true, while the peer's authoritative state is still false.
+    reconnect()
+
+    expect(wireDeclarations).toEqual([true, true])
+  })
+
+  it('rejects roster getters when the initial backend roster read fails', async () => {
+    let deliver: (event: unknown, info: ChannelPublishInfo) => void = () => {}
+    const send = vi.fn(async () => undefined)
+    const stub = {
+      _subscribeLocal: (callback: (event: unknown, info: ChannelPublishInfo) => void) => {
+        deliver = callback
+        return () => {}
+      },
+      _subscribeBinaryLocal: () => () => {},
+      _setWireTextSubscribed: () => {},
+      send,
+      publish: async () => ({ key: 'fake', seq: 1, timestamp: 1 }),
+      publishBinary: async () => ({ key: 'fake', seq: 1, timestamp: 1 }),
+      onClose: () => {},
+      _onReconnect: () => {},
+    } as unknown as ClientBroadcast
+    const client = new ClientRoom(stub, snapshot('roster-failure'))
+    const participants = client.getParticipants()
+    deliver({ __r: 'roster-error' }, { key: 'roster-failure', seq: 1, timestamp: 1 })
+
+    await expect(participants).rejects.toThrow('Failed to load room participants')
+    expect(send).toHaveBeenCalledWith({ __r: 'req-roster' }, { ack: false })
+  })
+
+  it('turns a server roster read rejection into an explicit client-settling event', async () => {
+    const room = (await Room.create('roster-error-event')) as ServerRoom
+    const { stub } = serve(room)
+    const failure = new Error('backend roster read failed')
+    const ensureRoster = vi
+      .spyOn(room as unknown as { _ensureRoster(): Promise<void> }, '_ensureRoster')
+      .mockRejectedValue(failure)
+    const relayError = vi.spyOn(stub, '_relayRosterError')
+    const report = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      await room._handleStubRequest(stub, { __r: 'req-roster' })
+      await settleMicrotasks()
+
+      expect(ensureRoster).toHaveBeenCalledOnce()
+      expect(relayError).toHaveBeenCalledOnce()
+    } finally {
+      report.mockRestore()
+      ensureRoster.mockRestore()
+    }
   })
 })
 
@@ -863,7 +943,7 @@ function createFakeStub(): {
       return () => binary.splice(binary.indexOf(callback), 1)
     },
     _setWireTextSubscribed: () => {},
-    send: async () => undefined,
+    send: async (request: { __r?: string }) => (request.__r === 'req-roster' ? [] : undefined),
     publish: async () => ({ key: 'fake', seq: 1, timestamp: 1 }),
     publishBinary: async () => ({ key: 'fake', seq: 1, timestamp: 1 }),
     onClose: () => {},
