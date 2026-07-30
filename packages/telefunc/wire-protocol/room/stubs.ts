@@ -11,7 +11,8 @@ import { ServerChannel } from '../server/channel.js'
 import type { ShieldValidator } from '../../node/server/shield.js'
 import { ServerBroadcast } from '../server/server-broadcast.js'
 import { encodePublishText, type WirePublishInfo } from '../shared-ws.js'
-import { reportRoomError, type ServerLocalParticipant, type ServerRoom } from './server.js'
+import { type ServerLocalParticipant, type ServerRoom } from './server.js'
+import { reportRoomError } from './server/lanes.js'
 import type { ParticipantMeta, RoomSendReceipt } from './types.js'
 import {
   binaryWantsCovers,

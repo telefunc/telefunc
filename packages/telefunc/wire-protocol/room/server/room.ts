@@ -1,4 +1,4 @@
-export { ServerRoom, ServerLocalParticipant, reportRoomError }
+export { ServerRoom, ServerLocalParticipant }
 
 import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
