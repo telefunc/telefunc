@@ -177,15 +177,20 @@ async function resolveIdentityMembers(roomId: string, inc: string, identity: str
     stale.push(entry)
   }
   if (stale.length > 0) {
-    await mutateCells(roomId, inc, { keys: stale.flatMap(({ markerKey, memberKey }) => [markerKey, memberKey]) }, (cells) => ({
-      value: undefined,
-      mutations: stale.flatMap(({ markerKey, memberKey }) => {
-        const current = cells.get(memberKey)
-        return current === undefined || (parse(decodeRoomText(current)) as RoomMemberRecord).identity !== identity
-          ? [{ key: markerKey }]
-          : []
+    await mutateCells(
+      roomId,
+      inc,
+      { keys: stale.flatMap(({ markerKey, memberKey }) => [markerKey, memberKey]) },
+      (cells) => ({
+        value: undefined,
+        mutations: stale.flatMap(({ markerKey, memberKey }) => {
+          const current = cells.get(memberKey)
+          return current === undefined || (parse(decodeRoomText(current)) as RoomMemberRecord).identity !== identity
+            ? [{ key: markerKey }]
+            : []
+        }),
       }),
-    }))
+    )
   }
   return members
 }
