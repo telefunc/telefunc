@@ -33,14 +33,16 @@ import {
 import { assert } from '../../utils/assert.js'
 import { makeAbortError, makeBugError } from '../../client/remoteTelefunctionCall/errors.js'
 import { ShieldValidationError } from '../../shared/ShieldValidationError.js'
+import { NetworkError } from '../../shared/NetworkError.js'
 import { ClientConnection } from './connection.js'
 import { appendSessionParam, getSessionToken } from './session-registry.js'
 import { CHANNEL_CLOSE_TIMEOUT_MS, type ChannelTransports } from '../constants.js'
 import { FlowControl } from '../flow-control/flow-control.js'
 import type { MuxChannel, MuxConnection } from './connection.js'
-import { ChannelClosedError } from '../channel-errors.js'
+import { ChannelClosedError, ChannelOverflowError } from '../channel-errors.js'
 import { isPromise } from '../../utils/isPromise.js'
 import { hasProp } from '../../utils/hasProp.js'
+import { classifyTelefuncError } from '../error-classification.js'
 
 const CLIENT_BROADCAST_BRAND = Symbol.for('telefunc.ClientBroadcast')
 
@@ -684,10 +686,7 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
         })
       }),
     )
-    // The caller owns the returned promise — a guard rejection is its control flow, not an
-    // error to log. This no-op branch only keeps a fire-and-forget publish from surfacing as
-    // an unhandled rejection.
-    ret.catch(() => {})
+    ret.catch(reportUnexpectedPublishError)
     return ret
   }
 
@@ -714,10 +713,7 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
         })
       }),
     )
-    // The caller owns the returned promise — a guard rejection is its control flow, not an
-    // error to log. This no-op branch only keeps a fire-and-forget publish from surfacing as
-    // an unhandled rejection.
-    ret.catch(() => {})
+    ret.catch(reportUnexpectedPublishError)
     return ret
   }
 
@@ -773,6 +769,14 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
 
 function reportChannelError(err: unknown): void {
   console.error('[telefunc:channel-error]', err instanceof Error ? err : new Error(String(err)))
+}
+
+function reportUnexpectedPublishError(err: unknown): void {
+  if (classifyTelefuncError(err, isExpectedChannelFailure).kind === 'bug') reportChannelError(err)
+}
+
+function isExpectedChannelFailure(err: unknown): err is ChannelClosedError | ChannelOverflowError | NetworkError {
+  return err instanceof ChannelClosedError || err instanceof ChannelOverflowError || err instanceof NetworkError
 }
 
 function normalizeCloseTimeout(timeout: number | undefined): number {

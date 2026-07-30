@@ -2,6 +2,10 @@ import { afterEach, describe, expect, test, vi } from 'vitest'
 
 import { CHANNEL_RECONNECT_INITIAL_DELAY_MS, CHANNEL_TRANSPORT, RECONCILE_TIMEOUT_MS } from '../constants.js'
 import { ClientConnection } from './connection.js'
+import { ClientBroadcast } from './channel.js'
+import { ACK_STATUS, type AckResultStatus } from '../shared-ws.js'
+
+afterEach(() => vi.restoreAllMocks())
 
 /** Minimal `MuxChannel` — registering one is enough to make the connection open a wire. */
 function createChannel(id = crypto.randomUUID()) {
@@ -27,6 +31,45 @@ function createStalledTransport() {
   }) as unknown as typeof fetch
   return { fetchImpl, getSseDownstreamOpens: () => sseDownstreamOpens }
 }
+
+function publishThatSettlesWith(status: AckResultStatus, binary: boolean) {
+  const broadcast = Object.assign(Object.create(ClientBroadcast.prototype), {
+    _isClosed: false,
+    _pendingAcks: new Map(),
+    _inflightAcks: 0,
+    _closeWaiters: [],
+    _connection: {
+      sendPublishAckReq: (_channel: unknown, _data: unknown, register: (seq: number) => void) => register(1),
+      sendPublishBinaryAckReq: (_channel: unknown, _data: unknown, register: (seq: number) => void) => register(1),
+    },
+  }) as ClientBroadcast
+  const publishing = binary ? broadcast.publishBinary(new Uint8Array([1])) : broadcast.publish('message')
+  ;(
+    broadcast as unknown as {
+      _onPeerAckRes(seq: number, text: string, status: AckResultStatus): void
+    }
+  )._onPeerAckRes(1, status === ACK_STATUS.ABORT ? JSON.stringify('expected') : 'unexpected publish bug', status)
+  return publishing
+}
+
+describe.each([
+  ['text', false],
+  ['binary', true],
+] as const)('ClientBroadcast %s publish errors', (_name, binary) => {
+  test('reports a plain Error through the client bug pipeline', async () => {
+    const report = vi.spyOn(console, 'error').mockImplementation(() => {})
+    await expect(publishThatSettlesWith(ACK_STATUS.ERROR, binary)).rejects.toThrow('unexpected publish bug')
+    expect(report).toHaveBeenCalledOnce()
+    expect(report.mock.calls[0]?.[0]).toBe('[telefunc:channel-error]')
+    expect(report.mock.calls[0]?.[1]).toMatchObject({ message: 'unexpected publish bug' })
+  })
+
+  test('keeps an expected Abort quiet', async () => {
+    const report = vi.spyOn(console, 'error').mockImplementation(() => {})
+    await expect(publishThatSettlesWith(ACK_STATUS.ABORT, binary)).rejects.toMatchObject({ abortValue: 'expected' })
+    expect(report).not.toHaveBeenCalled()
+  })
+})
 
 describe('SSE reconcile watchdog', () => {
   afterEach(() => {

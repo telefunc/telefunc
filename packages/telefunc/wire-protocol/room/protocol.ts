@@ -68,13 +68,13 @@ import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { assert, assertUsage } from '../../utils/assert.js'
 import { isObject } from '../../utils/isObject.js'
-import { isAbort, createAbortError } from '../../shared/Abort.js'
-import { isShieldValidationError } from '../../shared/ShieldValidationError.js'
+import { createAbortError } from '../../shared/Abort.js'
 import { STATUS_BODY_INTERNAL_SERVER_ERROR } from '../../shared/constants.js'
 import { ROOM_TAIL_HOLD_MAX, ROOM_TAIL_HOLD_BYTES_MAX } from '../constants.js'
 import { ACK_STATUS } from '../shared-ws.js'
 import type { AckResultStatus } from '../shared-ws.js'
 import type { ChannelPublishInfo } from '../channel.js'
+import { classifyTelefuncError } from '../error-classification.js'
 import type {
   BinaryPublishOptions,
   JoinOptions,
@@ -458,8 +458,9 @@ type RoomFailure = { ok: false; abort: true; abortValue: unknown } | { ok: false
  *  throwing side's bug pipeline (server: `handleTelefunctionBug`; client: console), invoked only
  *  for genuine bugs. Everything that *does* ride an ack uses `roomAckError` instead. */
 function toRoomFailure(err: unknown, report: (err: unknown) => void): RoomFailure {
-  if (isAbort(err)) return { ok: false, abort: true, abortValue: err.abortValue }
-  if (isRoomError(err)) return { ok: false, err: err.message }
+  const classified = classifyTelefuncError(err, isRoomError)
+  if (classified.kind === 'abort') return { ok: false, abort: true, abortValue: classified.error.abortValue }
+  if (classified.kind === 'expected') return { ok: false, err: classified.error.message }
   report(err)
   return { ok: false, err: ROOM_BUG_MESSAGE }
 }
@@ -482,9 +483,10 @@ function roomFailureError(res: RoomFailure): Error {
  *  error from the status, so no `{ ok: false }` envelope is needed — the awaiting request promise
  *  simply rejects. */
 function roomAckError(err: unknown, report: (err: unknown) => void): { text: string; status: AckResultStatus } {
-  if (isAbort(err)) return { text: stringify(err.abortValue), status: ACK_STATUS.ABORT }
-  if (isRoomError(err)) return { text: err.message, status: ACK_STATUS.ERROR }
-  if (isShieldValidationError(err)) return { text: err.message, status: ACK_STATUS.SHIELD_ERROR }
+  const classified = classifyTelefuncError(err, isRoomError)
+  if (classified.kind === 'abort') return { text: stringify(classified.error.abortValue), status: ACK_STATUS.ABORT }
+  if (classified.kind === 'expected') return { text: classified.error.message, status: ACK_STATUS.ERROR }
+  if (classified.kind === 'shield') return { text: classified.error.message, status: ACK_STATUS.SHIELD_ERROR }
   report(err)
   return { text: ROOM_BUG_MESSAGE, status: ACK_STATUS.ERROR }
 }
