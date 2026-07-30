@@ -40,10 +40,15 @@ test('open, join, commit, deliver, close, cancellation, and authority restart se
     cancellationDeliveries: [1],
     fanoutOrdering: {
       firstSettlementBeforeRelease: 'pending',
+      firstSettlementAfterRelease: 'rejected',
+      secondSettlement: 'delivery probe rejected',
       fastDeliveriesBeforeRelease: [1],
       slowDeliveriesBeforeRelease: [1],
     },
-    evictionInvalidations: ['recoverable'],
+    evictionInvalidations: {
+      settlements: ['delivery probe rejected', 'delivery probe rejected', 'delivery probe rejected'],
+      invalidations: ['recoverable'],
+    },
     unknown: 'Cloudflare Room delivery has an unknown delivery token',
   })
 })

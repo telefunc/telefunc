@@ -272,22 +272,28 @@ async function failedDeliveryEviction(
   sessionId: DurableObjectId,
   session: Session,
   suffix: string,
-): Promise<Array<'recoverable' | 'terminal'>> {
+): Promise<{
+  settlements: string[]
+  invalidations: Array<'recoverable' | 'terminal'>
+}> {
   const roomId = `evict-${suffix}`
   const inc = `evict-inc-${suffix}`
   const authority = roomAuthority(env, roomId)
   const opened = await openAndJoin(authority, sessionId, roomId, inc, `evict-lease-${suffix}`)
   await session.prepareDelivery(roomId, false, true)
+  const settlements: string[] = []
   for (let attempt = 1; attempt <= 3; attempt += 1) {
     const commit = accepted(
       await authority.commitLane(roomId, inc, { kind: 'semantic' }, new Uint8Array([attempt])),
       `failed delivery ${attempt}`,
     )
-    await rejectionOf(authority.awaitDelivery(commit.deliveryToken), 2_000, `failed delivery ${attempt}`)
+    settlements.push(
+      await rejectionOf(authority.awaitDelivery(commit.deliveryToken), 2_000, `failed delivery ${attempt}`),
+    )
   }
   const invalidations = (await session.deliveryState(roomId)).invalidations
   await closeAndDrop(authority, inc, opened, `evict-close-${suffix}`)
-  return invalidations
+  return { settlements, invalidations }
 }
 
 async function rejectedFanoutOrdering(
@@ -297,6 +303,8 @@ async function rejectedFanoutOrdering(
   suffix: string,
 ): Promise<{
   firstSettlementBeforeRelease: 'pending' | 'rejected'
+  firstSettlementAfterRelease: 'rejected' | 'fulfilled'
+  secondSettlement: string
   fastDeliveriesBeforeRelease: number[]
   slowDeliveriesBeforeRelease: number[]
 }> {
@@ -330,10 +338,16 @@ async function rejectedFanoutOrdering(
   const fastDeliveriesBeforeRelease = (await fastSession.deliveryState(roomId)).delivered
   const slowDeliveriesBeforeRelease = (await slowSession.deliveryState(roomId)).delivered
   await slowSession.releaseDelivery(roomId)
-  await firstSettlement
-  await rejectionOf(authority.awaitDelivery(second.deliveryToken), 2_000, 'fanout second')
+  const firstSettlementAfterRelease = await within(firstSettlement, 2_000, 'fanout first settlement')
+  const secondSettlement = await rejectionOf(authority.awaitDelivery(second.deliveryToken), 2_000, 'fanout second')
   await closeAndDrop(authority, inc, opened, `fanout-close-${suffix}`)
-  return { firstSettlementBeforeRelease, fastDeliveriesBeforeRelease, slowDeliveriesBeforeRelease }
+  return {
+    firstSettlementBeforeRelease,
+    firstSettlementAfterRelease,
+    secondSettlement,
+    fastDeliveriesBeforeRelease,
+    slowDeliveriesBeforeRelease,
+  }
 }
 
 async function authorityRestart(env: Env, suffix: string): Promise<string> {
