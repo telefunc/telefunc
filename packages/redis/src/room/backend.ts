@@ -1,14 +1,10 @@
 // The released Redis BackendDriver for standalone Redis and Redis Cluster deployments.
 //
-// Mechanism map (spi.md §5.2), all atomic pieces in layout.ts's Lua:
-//   head CX      one atomic record: legality (throw) · compare (conflict) · fresh-inc guard · mint · store
-//   cells CX     head+inc+open precondition, coarse per-generation revision (INCR'd), all-or-none
-//   commit       one boolean precondition (default open / closing-control), order advance, retain, PUBLISH
-//   cells read   the stable-read algorithm: rev_before → SCAN/MGET → rev_after, 8-attempt bound, logical
-//                expiresAt filtering, PX as a physical backstop only
-//   delivery     PUBLISH is the broker handoff (settles inside acceptance); the broker's per-connection
-//                FIFO realizes the ordered at-most-once attempt chain; receivers = the PUBLISH count
-//   subscription SUBSCRIBE ack = establishment (fail-closed); channels keyed by (inc, lane) — I11
+// Mechanism map (spi.md §5.2), with atomic pieces in layout.ts's Lua:
+//   head/cells CX  validate ownership, compare, and mutate one room slot
+//   cells read     revision → manifest/MGET → keyed head/revision/time fence, bounded to 8 attempts
+//   commit         validate, advance order, retain, and publish data plus its in-band delivery fence
+//   subscription   SUBSCRIBE ack establishes; generation invalidation terminates; late sequence drops
 
 import { randomUUID } from 'node:crypto'
 import { Cluster, type Redis } from 'ioredis'
@@ -28,13 +24,14 @@ import type {
   RoomHead,
 } from 'telefunc/backend'
 import {
+  broadcastChannel,
+  broadcastSequenceKey,
   cellKey,
   cellKeyPrefix,
   DEFAULT_ROOM_PREFIX,
   decodeRedisOrderingFrame,
   directoryIndexKey,
   directoryTagsKey,
-  generationInvalidationChannel,
   generationKeysKey,
   generationTokensKey,
   gensKey,
@@ -53,6 +50,7 @@ import { RedisSubscriptionDriver } from './subscriber-transport.js'
 
 const DIRECTORY_PAGE_SIZE = 100
 const STABLE_READ_ATTEMPTS = 8
+const DROP_RETRY_MS = 20
 const NEWLINE = 0x0a
 
 function assertOrderingPosition(seq: number, timestamp: number, context: string): void {
@@ -83,19 +81,6 @@ local receivers = redis.call('PUBLISH', KEYS[2], frame)
 return {seq, ts, receivers}
 `.trim()
 
-function broadcastChannel(prefix: string, lane: BroadcastLane): string {
-  const kind = lane.kind === 'text' ? 't' : 'b'
-  return `${prefix}${kind}:{${lane.key}}`
-}
-
-function broadcastSequenceKey(prefix: string, key: string): string {
-  return `${prefix}seq:{${key}}`
-}
-
-function durableSource(roomId: string, inc: string, lane: LaneId): BackendSubscriptionSource {
-  return { kind: 'durable', roomId, inc, lane }
-}
-
 // The stored head, exactly as the Lua encodes it. `config` is opaque base64; `until`/`exp` are authority
 // timestamps; `inc`/`lease`/`exp` are present only when meaningful (keeps the cjson clean).
 type StoredHead = {
@@ -111,7 +96,8 @@ type HeadCxReply =
   | { tag: 'head'; head: StoredHead }
   | { tag: 'deleted' }
   | { tag: 'conflict'; current: StoredHead | null }
-type DropGenerationBeginReply = { exists: false } | { exists: true; token: string }
+type DropGenerationBeginReply = { exists: false } | { busy: true } | { exists: true; token: string }
+type ReadCellsFenceReply = { stale: true } | { revision: string; now: number }
 
 function toBase64(bytes: Uint8Array): string {
   return Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString('base64')
@@ -163,6 +149,9 @@ export class RedisRoomBackend implements BackendDriver {
   #disposed = false
 
   constructor(options: RedisRoomBackendOptions) {
+    if (options.redis instanceof Cluster && options.redis.options.scaleReads !== 'master') {
+      throw new Error("RedisRoomBackend: ioredis Cluster scaleReads must be 'master' for consistent Room reads")
+    }
     this.#publisher = options.redis
     let clusterSubscriberSelection = 0
     const createSubscriber = async (): Promise<Redis> => {
@@ -241,9 +230,12 @@ export class RedisRoomBackend implements BackendDriver {
 
   async readHead(roomId: string): Promise<{ head: RoomHead } | null> {
     this.#assertLive()
-    const raw = await this.#publisher.get(headKey(this.#prefix, roomId))
-    const stored = this.#liveHead(raw, await this.#authorityNowMs())
-    return stored === null ? null : { head: toPublicHead(stored) }
+    const reply = JSON.parse(
+      (await this.#call(REDIS_ROOM_COMMANDS.readHead.name, [
+        ...REDIS_ROOM_COMMAND_KEYS.readHead(this.#prefix, roomId),
+      ])) as string,
+    ) as { head: StoredHead | null }
+    return reply.head === null ? null : { head: toPublicHead(reply.head) }
   }
 
   async compareExchangeHead(
@@ -287,17 +279,21 @@ export class RedisRoomBackend implements BackendDriver {
       const logicalKeys = 'keys' in sel ? sel.keys : await this.#scanCellKeys(roomId, inc, sel.prefix)
       const physicalKeys = logicalKeys.map((key) => cellKey(this.#prefix, roomId, inc, key))
       const values = physicalKeys.length > 0 ? await this.#publisher.mgetBuffer(...physicalKeys) : []
-      const revAfter = await this.#publisher.get(rKey)
       const before = revBefore ?? '0'
-      const after = revAfter ?? '0'
-      if (before !== after) continue
-      const now = await this.#authorityNowMs()
+      const fence = JSON.parse(
+        (await this.#call(REDIS_ROOM_COMMANDS.readCellsFence.name, [
+          ...REDIS_ROOM_COMMAND_KEYS.readCellsFence(this.#prefix, roomId, inc),
+          inc,
+        ])) as string,
+      ) as ReadCellsFenceReply
+      if ('stale' in fence) return { staleInc: true }
+      if (before !== fence.revision) continue
       const cells = new Map<string, Uint8Array>()
       for (let i = 0; i < logicalKeys.length; i++) {
         const value = values[i]
         if (value === null || value === undefined) continue
         const parsed = parseCellValue(value)
-        if (parsed.expiresAt !== null && parsed.expiresAt <= now) continue
+        if (parsed.expiresAt !== null && parsed.expiresAt <= fence.now) continue
         cells.set(logicalKeys[i] as string, parsed.payload)
       }
       return { revision: before, cells }
@@ -348,7 +344,7 @@ export class RedisRoomBackend implements BackendDriver {
     opts?: { retain?: boolean; closingLease?: string; requiredCellKeys?: string[] },
   ): Promise<CommitResult> {
     this.#assertLive()
-    const source = durableSource(roomId, inc, lane)
+    const source = { kind: 'durable' as const, roomId, inc, lane }
     const keys = REDIS_ROOM_COMMAND_KEYS.commit(this.#prefix, roomId, inc, lane, opts?.requiredCellKeys)
     const flush = this.subscriptions.prepareFlush(source)
     let reply: string
@@ -405,7 +401,6 @@ export class RedisRoomBackend implements BackendDriver {
       payload,
       info: { seq, timestamp },
     } = decodeRedisOrderingFrame(frame)
-    assertOrderingPosition(seq, timestamp, 'RedisRoomBackend.readRetained')
     return { payload: Uint8Array.from(payload), seq, timestamp }
   }
 
@@ -424,21 +419,18 @@ export class RedisRoomBackend implements BackendDriver {
     if (opts?.ifSeq !== undefined && (!Number.isSafeInteger(opts.ifSeq) || opts.ifSeq <= 0)) {
       throw new Error('deleteRetained: ifSeq must be a positive safe integer')
     }
-    if (lane !== undefined) {
-      const keys = REDIS_ROOM_COMMAND_KEYS.retainedDelete(this.#prefix, roomId, inc, [
-        retainedKey(this.#prefix, roomId, inc, laneKey(lane)),
-      ])
-      await this.#call(REDIS_ROOM_COMMANDS.retainedDelete.name, [
-        String(keys.length),
-        ...keys,
-        opts?.ifSeq === undefined ? '' : String(opts.ifSeq),
-      ])
-      return
-    }
-    const prefix = retainedKeyPrefix(this.#prefix, roomId, inc)
-    const keys = (await this.#generationKeys(roomId, inc)).filter((key) => key.startsWith(prefix))
-    const commandKeys = REDIS_ROOM_COMMAND_KEYS.retainedDelete(this.#prefix, roomId, inc, keys)
-    await this.#call(REDIS_ROOM_COMMANDS.retainedDelete.name, [String(commandKeys.length), ...commandKeys, ''])
+    const retainedKeys =
+      lane === undefined
+        ? (await this.#generationKeys(roomId, inc)).filter((key) =>
+            key.startsWith(retainedKeyPrefix(this.#prefix, roomId, inc)),
+          )
+        : [retainedKey(this.#prefix, roomId, inc, laneKey(lane))]
+    const keys = REDIS_ROOM_COMMAND_KEYS.retainedDelete(this.#prefix, roomId, inc, retainedKeys)
+    await this.#call(REDIS_ROOM_COMMANDS.retainedDelete.name, [
+      String(keys.length),
+      ...keys,
+      opts?.ifSeq === undefined ? '' : String(opts.ifSeq),
+    ])
   }
 
   // ── subscriptions ──
@@ -470,27 +462,35 @@ export class RedisRoomBackend implements BackendDriver {
 
   async dropGeneration(roomId: string, inc: string): Promise<void> {
     this.#assertLive()
-    const begin = JSON.parse(
-      (await this.#call(REDIS_ROOM_COMMANDS.dropGenerationBegin.name, [
-        ...REDIS_ROOM_COMMAND_KEYS.dropGenerationBegin(this.#prefix, roomId),
-        '',
-        inc,
-      ])) as string,
-    ) as DropGenerationBeginReply
-    if (!begin.exists) return
-    const manifest = generationKeysKey(this.#prefix, roomId, inc)
-    const keys = await this.#publisher.smembers(manifest)
-    if (keys.length > 0) await this.#publisher.unlink(...keys)
-    await this.#publisher.unlink(manifest)
-    // Disconnected peers reject this token during post-SUBSCRIBE validation; connected peers terminate
-    // immediately because a dropped generation is definitive, not recoverable route loss.
-    await this.#publisher.publish(generationInvalidationChannel(this.#prefix, roomId, inc), begin.token)
-    await this.#call(REDIS_ROOM_COMMANDS.dropGenerationFinalize.name, [
-      ...REDIS_ROOM_COMMAND_KEYS.dropGenerationFinalize(this.#prefix, roomId, inc),
-      '',
-      inc,
-      begin.token,
-    ])
+    const owner = randomUUID()
+    for (;;) {
+      const begin = JSON.parse(
+        (await this.#call(REDIS_ROOM_COMMANDS.dropGenerationBegin.name, [
+          ...REDIS_ROOM_COMMAND_KEYS.dropGenerationBegin(this.#prefix, roomId),
+          '',
+          inc,
+          owner,
+        ])) as string,
+      ) as DropGenerationBeginReply
+      if ('exists' in begin && !begin.exists) return
+      if ('busy' in begin) {
+        await new Promise((resolve) => setTimeout(resolve, DROP_RETRY_MS))
+        continue
+      }
+      const keys = await this.#publisher.smembers(generationKeysKey(this.#prefix, roomId, inc))
+      const finalizeKeys = REDIS_ROOM_COMMAND_KEYS.dropGenerationFinalize(this.#prefix, roomId, inc, keys)
+      if (
+        (await this.#call(REDIS_ROOM_COMMANDS.dropGenerationFinalize.name, [
+          String(finalizeKeys.length),
+          ...finalizeKeys,
+          inc,
+          begin.token,
+          owner,
+        ])) === 1
+      ) {
+        return
+      }
+    }
   }
 
   // ── directory (global; its own two co-slotted keys) ──
@@ -553,22 +553,8 @@ export class RedisRoomBackend implements BackendDriver {
     if (this.#disposed) throw new Error('RedisRoomBackend: used after dispose()')
   }
 
-  async #authorityNowMs(): Promise<number> {
-    const [seconds, microseconds] = await this.#publisher.time()
-    return Number(seconds) * 1_000 + Math.floor(Number(microseconds) / 1_000)
-  }
-
   #parseHead(raw: string | null): StoredHead | null {
     return raw === null ? null : (JSON.parse(raw) as StoredHead)
-  }
-
-  // Decode a stored head, treating a logically-expired tombstone as absent (a lapsed tombstone reopens
-  // the absence epoch — I1). A pure read never deletes; the head-CX/commit Lua reclaim the PX backstop.
-  #liveHead(raw: string | null, authorityNow: number): StoredHead | null {
-    const stored = this.#parseHead(raw)
-    if (stored === null) return null
-    if (stored.exp !== undefined && stored.exp <= authorityNow) return null
-    return stored
   }
 
   async #scanCellKeys(roomId: string, inc: string, prefix: string): Promise<string[]> {
@@ -581,17 +567,9 @@ export class RedisRoomBackend implements BackendDriver {
     return this.#publisher.smembers(generationKeysKey(this.#prefix, roomId, inc))
   }
 
-  async #call(command: string, keysAndArgs: ReadonlyArray<string | Uint8Array>): Promise<unknown> {
-    try {
-      return await callDefinedCommand(this.#publisher, command, keysAndArgs)
-    } catch (error) {
-      throw normalizeRedisError(error)
-    }
+  #call(command: string, keysAndArgs: ReadonlyArray<string | Uint8Array>): Promise<unknown> {
+    return callDefinedCommand(this.#publisher, command, keysAndArgs)
   }
-}
-
-function normalizeRedisError(error: unknown): Error {
-  return error instanceof Error ? new Error(error.message) : new Error(String(error))
 }
 
 // A stored cell is "<expiresAt|''>\n<payload bytes>"; the header is ASCII digits (or empty) with no

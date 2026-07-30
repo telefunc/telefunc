@@ -9,6 +9,7 @@ import type {
   SubscriptionDriver,
 } from 'telefunc/backend'
 import {
+  broadcastChannel,
   channelKey,
   decodeRedisOrderingFrame,
   generationInvalidationChannel,
@@ -121,6 +122,7 @@ class RedisSubscriptionAttempt implements SubscriptionAttempt {
   private _readySettled = false
   private _cleanup: Promise<void> | null = null
   private _lastError: unknown = new Error('Redis subscriber connection closed')
+  private _lastSequence = 0
   private readonly _flushes = new Map<string, { resolve(): void; reject(error: unknown): void }>()
 
   constructor(options: RedisSubscriptionAttemptOptions) {
@@ -190,8 +192,8 @@ class RedisSubscriptionAttempt implements SubscriptionAttempt {
       }
       this._subscriber = subscriber
       subscriber.on('messageBuffer', this._onMessage)
-      subscriber.on('close', this._onClose)
-      subscriber.on('end', this._onEnd)
+      subscriber.on('close', this._onConnectionClosed)
+      subscriber.on('end', this._onConnectionClosed)
       subscriber.on('error', this._onError)
 
       const channels = redisSubscriptionChannels(this._prefix, this._source)
@@ -233,8 +235,8 @@ class RedisSubscriptionAttempt implements SubscriptionAttempt {
     this._subscriber = null
     if (subscriber !== null) {
       subscriber.off('messageBuffer', this._onMessage)
-      subscriber.off('close', this._onClose)
-      subscriber.off('end', this._onEnd)
+      subscriber.off('close', this._onConnectionClosed)
+      subscriber.off('end', this._onConnectionClosed)
       subscriber.off('error', this._onError)
       try {
         if (this._subscribed && subscriber.status === 'ready') {
@@ -267,6 +269,11 @@ class RedisSubscriptionAttempt implements SubscriptionAttempt {
       return
     }
     const { payload, info } = decodeRedisOrderingFrame(frame)
+    // Redis Cluster can forward publications from the old and new slot owners over independent bus
+    // paths during resharding. Preserve ordered at-most-once delivery by dropping a late frame; gaps
+    // remain loss, never replay.
+    if (info.seq <= this._lastSequence) return
+    this._lastSequence = info.seq
     try {
       const result = this._receiver(Uint8Array.from(payload), info) as unknown
       if (result instanceof Promise) void result.catch((error: unknown) => console.error(error))
@@ -275,11 +282,7 @@ class RedisSubscriptionAttempt implements SubscriptionAttempt {
     }
   }
 
-  private readonly _onClose = (): void => {
-    this._connectionClosed()
-  }
-
-  private readonly _onEnd = (): void => {
+  private readonly _onConnectionClosed = (): void => {
     this._connectionClosed()
   }
 
@@ -337,8 +340,7 @@ function redisSubscriptionChannels(prefix: string, source: BackendSubscriptionSo
 
 function redisSubscriptionChannel(prefix: string, source: BackendSubscriptionSource): string {
   if (source.kind === 'broadcast') {
-    const route = source.lane.kind === 'text' ? 't' : 'b'
-    return `${prefix}${route}:{${source.lane.key}}`
+    return broadcastChannel(prefix, source.lane)
   }
   return channelKey(prefix, source.roomId, source.inc, laneKey(source.lane))
 }

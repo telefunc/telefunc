@@ -83,12 +83,7 @@ class RedisTransport {
   ): () => void {
     const subscription = this.#backend.subscribe(lane, onMessage)
     void subscription.ready.catch(() => {})
-    let active = true
-    return () => {
-      if (!active) return
-      active = false
-      void subscription.unsubscribe()
-    }
+    return () => void subscription.unsubscribe()
   }
 }
 

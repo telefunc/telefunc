@@ -7,7 +7,6 @@ export default defineConfig({
   test: {
     root: repoRoot,
     include: ['packages/redis/test/cluster-ci/certification.ts'],
-    fileParallelism: false,
     testTimeout: 180_000,
     hookTimeout: 60_000,
   },
