@@ -536,6 +536,14 @@ describe('Room public behavior', () => {
     await expect(acknowledging).resolves.toMatchObject({ response: 'handled:ack-before-bind' })
   })
 
+  it('keeps every live ack correlation instead of silently dropping the oldest', async () => {
+    const stub = register(await Room.create('ack-correlations'))
+    for (let index = 0; index <= 1_024; index++) {
+      stub._recordAckDm(`ack-${index}`, `sender-${index}`, 'recipient')
+    }
+    expect(stub._takeAckDm('ack-0', 'recipient')).toBe('sender-0')
+  })
+
   it('applies before guards and after hooks around authoritative joins, publishes, and sends', async () => {
     await Room.create('guarded')
     const room = await Room.get('guarded')

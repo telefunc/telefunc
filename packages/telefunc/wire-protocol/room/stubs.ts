@@ -4,7 +4,7 @@ import { stringify } from '@brillout/json-serializer/stringify'
 import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
 import { assertUsage } from '../../utils/assert.js'
 import { isObject } from '../../utils/isObject.js'
-import { ROOM_DM_ACK_TIMEOUT_MS, ROOM_PENDING_ACK_DMS_MAX, ROOM_TAIL_ATTACH_TIMEOUT_MS } from '../constants.js'
+import { ROOM_DM_ACK_TIMEOUT_MS, ROOM_TAIL_ATTACH_TIMEOUT_MS } from '../constants.js'
 import type { ChannelPublishAck } from '../channel.js'
 import type { ServerChannel } from '../server/channel.js'
 import type { ShieldValidator } from '../../node/server/shield.js'
@@ -52,35 +52,20 @@ class RoomStubChannel extends ServerBroadcast {
   private readonly _room: ServerRoom
   /** @internal — members the remote client joined through this stub (membership & lifecycle). */
   readonly _stubMembers = new Set<string>()
-  /** ack DMs relayed to this client, keyed by `ackId`, awaiting its `dm-reply`. Each records the original
-   *  `sender` (where the reply routes home) and the `recipient` — the held member that must be the one
-   *  replying — plus an `expiresAt` past which the sender has already timed out. Only an `ackId` recorded
-   *  here is honored, and only by its recipient: a forged or misattributed reply routes nowhere. Bounded
-   *  and swept (see `_recordAckDm`/`_takeAckDm`) so a client that never answers can't grow it without end;
-   *  dropped with the stub in any case. Insertion order tracks the (constant-offset) deadline order. */
+  /** Live ack-DM correlations, stored in their constant-offset deadline order. */
   private readonly _pendingAckDms = new Map<string, { sender: string; recipient: string; expiresAt: number }>()
 
-  /** @internal — record a relayed ack DM's correlation. Sweeps entries whose deadline has passed (the
-   *  sender already gave up) and drops the oldest past the cap, so a client that withholds `dm-reply`
-   *  bounds the map instead of accumulating a correlation per unanswered ack DM. */
+  /** @internal — record a relayed ack DM and sweep correlations whose sender already timed out. */
   _recordAckDm(ackId: string, sender: string, recipient: string): void {
     const now = Date.now()
     for (const [id, entry] of this._pendingAckDms) {
       if (entry.expiresAt > now) break // constant offset ⇒ insertion order is deadline order; the rest are younger
       this._pendingAckDms.delete(id)
     }
-    while (this._pendingAckDms.size >= ROOM_PENDING_ACK_DMS_MAX) {
-      const oldest = this._pendingAckDms.keys().next().value
-      if (oldest === undefined) break
-      this._pendingAckDms.delete(oldest)
-    }
     this._pendingAckDms.set(ackId, { sender, recipient, expiresAt: now + ROOM_DM_ACK_TIMEOUT_MS })
   }
 
-  /** @internal — consume a relayed ack DM's correlation on the client's `dm-reply`, returning the sender
-   *  the reply routes to — but only when `replier` is the recipient we relayed to and the entry is still
-   *  live. Returns undefined (routing nowhere) for a forged `ackId`, a wrong replier, or a stale entry. A
-   *  wrong replier leaves the entry intact so the real recipient can still answer; a stale one is dropped. */
+  /** @internal — consume a live correlation only for the recipient it was relayed to. */
   _takeAckDm(ackId: string, replier: unknown): string | undefined {
     const entry = this._pendingAckDms.get(ackId)
     if (!entry) return undefined
