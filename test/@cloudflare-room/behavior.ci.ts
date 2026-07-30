@@ -93,6 +93,11 @@ test('public Room lifecycle and authority settlement controls execute on Cloudfl
       waitForRegistration: 'registration hold probe was not prepared',
       releaseRegistration: 'registration hold probe was not prepared',
     },
+    nativeRpc: {
+      headConfig: [0x11, 0x22, 0x33],
+      cell: [0x44, 0x55],
+      validationError: "head CX: {delete} is legal only against a 'closed' tombstone, not 'open'",
+    },
   })
 })
 

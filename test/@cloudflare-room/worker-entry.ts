@@ -5,8 +5,8 @@ import '../../packages/telefunc/node/server/async_hooks.js'
 import { setDefaultBackend } from '../../packages/telefunc/wire-protocol/backend/install.js'
 import { Room } from '../../packages/telefunc/wire-protocol/room/server.js'
 import type {
-  HeadCx,
   LaneId,
+  RoomHead,
   SubscriptionAttempt,
   SubscriptionAttemptState,
 } from '../../packages/telefunc/wire-protocol/backend/spi.js'
@@ -14,13 +14,14 @@ import {
   CloudflareRoomBackend,
   CloudflareRoomSessionManager,
   withCloudflareRoomSessionManager,
+  type CloudflareRoomAuthorityStub,
   type CloudflareRoomNamespace,
 } from '../../packages/telefunc/wire-protocol/server/adapter/cloudflare/room/backend.js'
 import {
   TelefuncRoomDurableObject as ProductionRoomDurableObject,
   createTelefuncRoomDurableObjectClass,
-  type HeadNextWire,
-  type HeadWire,
+  type CommitWire,
+  type HeadCxResult,
 } from '../../packages/telefunc/wire-protocol/server/adapter/cloudflare/room/do.js'
 
 const publicRoomBackend = new CloudflareRoomBackend()
@@ -210,12 +211,18 @@ export class TelefuncRoomDurableObject extends ProductionRoomDurableObject {
     this.#probeEnv = env
   }
 
-  override commitLane(roomId: string, inc: string, lane: LaneId, payload: Uint8Array): Promise<CommitResult> {
-    if (this.#reconstructed !== null) return this.#reconstructed.commitLane(roomId, inc, lane, payload)
+  override commitLane(
+    roomId: string,
+    inc: string,
+    lane: LaneId,
+    payload: Uint8Array,
+    opts?: { retain?: boolean; closingLease?: string; requiredCellKeys?: string[] },
+  ): Promise<CommitWire> {
+    if (this.#reconstructed !== null) return this.#reconstructed.commitLane(roomId, inc, lane, payload, opts)
     const probe = this.#responseReordering
-    if (probe === undefined) return super.commitLane(roomId, inc, lane, payload)
+    if (probe === undefined) return super.commitLane(roomId, inc, lane, payload, opts)
     return (async () => {
-      const result = await super.commitLane(roomId, inc, lane, payload)
+      const result = await super.commitLane(roomId, inc, lane, payload, opts)
       if ('accepted' in result) {
         if (payload[0] === 1) {
           probe.firstCommit.resolve()
@@ -299,37 +306,20 @@ export class TelefuncRoomDurableObject extends ProductionRoomDurableObject {
   }
 }
 
-type HeadResult =
-  | { ok: true; head: HeadWire }
-  | { ok: true; deleted: true }
-  | { conflict: true; current: HeadWire | null }
-  | { error: string }
-type CommitResult =
-  | { accepted: true; seq: number; timestamp: number; receivers: number; deliveryToken: string }
-  | { stale: true }
-  | { error: string }
-type Authority = {
-  readHead(): Promise<HeadWire | null>
-  compareExchangeHead(cx: HeadCx, next: HeadNextWire): Promise<HeadResult>
-  registerRoute(
-    roomId: string,
-    inc: string,
-    laneKey: string,
-    subscriberDoId: string,
-    leaseId: string,
-  ): Promise<{ ok: true; generationToken: string } | { rejected: true; reason: string }>
-  commitLane(
-    roomId: string,
-    inc: string,
-    lane: LaneId,
-    payload: Uint8Array,
-    opts?: { retain?: boolean; closingLease?: string; requiredCellKeys?: string[] },
-  ): Promise<CommitResult>
-  awaitDelivery(token: string): Promise<void>
-  readRetained(inc: string, lane: LaneId): Promise<unknown>
-  unsubscribeRoute(inc: string, laneKey: string, subscriberDoId: string, leaseId: string): Promise<void>
-  dropGeneration(inc: string): Promise<{ ok: true } | { error: string }>
-  listGenerations(): Promise<string[]>
+type Authority = Pick<
+  CloudflareRoomAuthorityStub,
+  | 'readHead'
+  | 'readCells'
+  | 'compareExchangeHead'
+  | 'compareExchangeCells'
+  | 'registerRoute'
+  | 'commitLane'
+  | 'awaitDelivery'
+  | 'readRetained'
+  | 'unsubscribeRoute'
+  | 'dropGeneration'
+  | 'listGenerations'
+> & {
   telefuncRoomReconstructForTest(): Promise<void>
   telefuncRoomPrepareResponseReorderingForTest(): Promise<void>
   telefuncRoomWaitForFirstCommitForTest(): Promise<void>
@@ -390,6 +380,7 @@ export default {
       const restartSettlement = await authorityRestart(env, suffix)
       const alarmPolicy = await alarmScheduling(env, sessionId, suffix)
       const controlPreconditions = await unpreparedControlFailures(env, suffix)
+      const nativeRpc = await nativeRpcRoundTrip(env, suffix)
       return Response.json({
         publicLifecycle,
         facadeSettlementOrdering,
@@ -403,6 +394,7 @@ export default {
         restartSettlement,
         alarmPolicy,
         controlPreconditions,
+        nativeRpc,
       })
     } catch (error) {
       return Response.json({ error: error instanceof Error ? error.message : String(error) }, { status: 500 })
@@ -736,23 +728,54 @@ async function largeRetainedReplay(env: Env, suffix: string) {
   }
 }
 
+async function nativeRpcRoundTrip(env: Env, suffix: string) {
+  const authority = roomAuthority(env, `native-rpc-${suffix}`)
+  const inc = `native-rpc-inc-${suffix}`
+  const config = new Uint8Array([0x11, 0x22, 0x33])
+  const opened = expectHead(
+    await authority.compareExchangeHead(
+      { expect: 'absent' },
+      { head: { currentInc: inc, state: 'open', config } },
+    ),
+    'native RPC open',
+  )
+  const initialCells = await authority.readCells(inc, { keys: ['native'] })
+  if ('staleInc' in initialCells) throw new Error('native RPC cell read was stale')
+  const cellResult = await authority.compareExchangeCells(inc, initialCells.revision, [
+    { key: 'native', set: { bytes: new Uint8Array([0x44, 0x55]) } },
+  ])
+  if (cellResult !== 'committed') throw new Error(`native RPC cell write returned ${cellResult}`)
+  const storedCells = await authority.readCells(inc, { keys: ['native'] })
+  if ('staleInc' in storedCells) throw new Error('native RPC cell reread was stale')
+  const stored = storedCells.cells.get('native')
+  return {
+    headConfig: [...opened.config],
+    cell: stored === undefined ? null : [...stored],
+    validationError: await rejectionOf(
+      authority.compareExchangeHead({ expect: 'absent' }, { delete: true }),
+      2_000,
+      'native RPC validation error',
+    ),
+  }
+}
+
 async function openAndJoin(
   authority: Authority,
   sessionId: DurableObjectId,
   roomId: string,
   inc: string,
   leaseId: string,
-): Promise<HeadWire> {
+): Promise<RoomHead> {
   const opened = await openHead(authority, inc, 'open')
   await join(authority, sessionId, roomId, inc, leaseId)
   return opened
 }
 
-async function openHead(authority: Authority, inc: string, operation: string): Promise<HeadWire> {
+async function openHead(authority: Authority, inc: string, operation: string): Promise<RoomHead> {
   return expectHead(
     await authority.compareExchangeHead(
       { expect: 'absent' },
-      { head: { currentInc: inc, state: 'open', configB64: 'e30=' } },
+      { head: { currentInc: inc, state: 'open', config: new TextEncoder().encode('{}') } },
     ),
     operation,
   )
@@ -769,7 +792,7 @@ async function join(
   if (!('ok' in registration)) throw new Error(`route registration failed: ${registration.reason}`)
 }
 
-async function closeAndDrop(authority: Authority, inc: string, opened: HeadWire, leaseId: string): Promise<void> {
+async function closeAndDrop(authority: Authority, inc: string, opened: RoomHead, leaseId: string): Promise<void> {
   const closing = expectHead(
     await authority.compareExchangeHead(
       { expect: { rev: opened.rev } },
@@ -777,7 +800,7 @@ async function closeAndDrop(authority: Authority, inc: string, opened: HeadWire,
         head: {
           currentInc: inc,
           state: 'closing',
-          configB64: opened.configB64,
+          config: opened.config,
           closeLease: { id: leaseId, durationMs: 60_000 },
         },
       },
@@ -787,27 +810,24 @@ async function closeAndDrop(authority: Authority, inc: string, opened: HeadWire,
   expectHead(
     await authority.compareExchangeHead(
       { expect: { rev: closing.rev, closingLease: leaseId } },
-      { head: { currentInc: null, state: 'closed', configB64: closing.configB64 }, ttlMs: 60_000 },
+      { head: { currentInc: null, state: 'closed', config: closing.config }, ttlMs: 60_000 },
     ),
     'finalize close',
   )
-  const dropped = await authority.dropGeneration(inc)
-  if ('error' in dropped) throw new Error(dropped.error)
+  await authority.dropGeneration(inc)
 }
 
 function roomAuthority(env: Env, roomId: string): Authority {
   return env.ROOM.get(env.ROOM.idFromName(roomId)) as unknown as Authority
 }
 
-function expectHead(result: HeadResult, operation: string): HeadWire {
-  if ('error' in result) throw new Error(`${operation} failed: ${result.error}`)
+function expectHead(result: HeadCxResult, operation: string): RoomHead {
   if ('conflict' in result) throw new Error(`${operation} conflicted`)
   if (!('head' in result)) throw new Error(`${operation} returned no head`)
   return result.head
 }
 
-function accepted(result: CommitResult, operation: string): Extract<CommitResult, { accepted: true }> {
-  if ('error' in result) throw new Error(`${operation} commit failed: ${result.error}`)
+function accepted(result: CommitWire, operation: string): Extract<CommitWire, { accepted: true }> {
   if ('stale' in result) throw new Error(`${operation} commit was stale`)
   return result
 }
@@ -832,7 +852,7 @@ async function within<T>(promise: Promise<T>, horizonMs: number, label: string):
   }
 }
 
-async function rejectionOf(promise: Promise<void>, horizonMs: number, label: string): Promise<string> {
+async function rejectionOf(promise: Promise<unknown>, horizonMs: number, label: string): Promise<string> {
   try {
     await within(promise, horizonMs, label)
     return 'resolved'
