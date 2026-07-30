@@ -1,18 +1,11 @@
 export { broadcastRouteKey, laneKey, subscriptionSourceKey }
 
-import type { BackendSubscriptionSource, BroadcastLane, LaneId } from './spi.js'
+import { LANE_KEY_LAYOUT, type BackendSubscriptionSource, type BroadcastLane, type LaneId } from './spi.js'
 
 function laneKey(lane: LaneId): string {
-  switch (lane.kind) {
-    case 'semantic':
-      return 'semantic'
-    case 'control':
-      return 'control'
-    case 'binary':
-      return `binary:${encodeURIComponent(lane.member)}:${encodeURIComponent(lane.track)}`
-    case 'inbox':
-      return `inbox:${encodeURIComponent(lane.member)}`
-  }
+  const values = lane as LaneId & Record<'member' | 'track', string>
+  const fields = LANE_KEY_LAYOUT.fields[lane.kind]
+  return [lane.kind, ...fields.map((field) => encodeURIComponent(values[field]))].join(LANE_KEY_LAYOUT.separator)
 }
 
 function broadcastRouteKey(lane: BroadcastLane): string {

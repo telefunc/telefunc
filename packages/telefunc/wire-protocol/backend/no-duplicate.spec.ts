@@ -1,6 +1,6 @@
 /**
  * This gate proves only canonical production wiring: the backend supervisor imports and constructs
- * the exported SubscriptionManager; Redis and Cloudflare lane consumers import/re-export laneKey
+ * the exported SubscriptionManager; lane consumers share one frozen lane-key layout
  * through the designated modules; Cloudflare Broadcast imports the canonical ordering codecs while
  * Redis imports the canonical ordering layout for its dialect; and Redis' public Telefunc imports stay
  * within the reviewed set below.
@@ -33,10 +33,8 @@ describe('canonical backend wiring', () => {
   })
 
   it('wires lane consumers to the canonical lane key', () => {
-    expect(
-      valuesFrom('packages/telefunc/backend.ts', './wire-protocol/backend/subscription-source.js', 'export'),
-    ).toContain('laneKey')
-    expect(valuesFrom('packages/redis/src/room/layout.ts', 'telefunc/backend', 'import')).toContain('laneKey')
+    expect(exportsOf('packages/telefunc/wire-protocol/backend/spi.ts')).toContain('LANE_KEY_LAYOUT')
+    expect(valuesFrom('packages/redis/src/room/layout.ts', 'telefunc/backend', 'import')).toContain('LANE_KEY_LAYOUT')
     expect(
       valuesFrom(
         'packages/telefunc/wire-protocol/server/adapter/cloudflare/room/codec.ts',
@@ -63,7 +61,7 @@ describe('canonical backend wiring', () => {
     const redisValues = files
       .filter((file) => file.startsWith('packages/redis/'))
       .flatMap((file) => valuesFrom(file, 'telefunc/backend', 'import'))
-    expect([...new Set(redisValues)].sort()).toEqual(['HEAD_TRANSITIONS', 'ORDERING_FRAME_LAYOUT', 'laneKey'])
+    expect([...new Set(redisValues)].sort()).toEqual(['HEAD_TRANSITIONS', 'LANE_KEY_LAYOUT', 'ORDERING_FRAME_LAYOUT'])
     expect(valuesFrom('packages/redis/src/index.ts', 'telefunc/__internal', 'import')).toContain('setDefaultBackend')
   })
 })
