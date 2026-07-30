@@ -3,7 +3,7 @@ export type { MuxChannel, MuxConnection }
 
 import { parse } from '@brillout/json-serializer/parse'
 import { makeAbortError, makeBugError } from '../../client/remoteTelefunctionCall/errors.js'
-import { assert, assertUsage } from '../../utils/assert.js'
+import { assert } from '../../utils/assert.js'
 import { ChannelClosedError } from '../channel-errors.js'
 import { NetworkError } from '../../shared/NetworkError.js'
 import { base64urlToUint8Array } from '../base64url.js'
@@ -11,7 +11,6 @@ import {
   CHANNEL_CLIENT_REPLAY_BUFFER_BYTES,
   CHANNEL_CLIENT_REPLAY_BUFFER_BINARY_BYTES,
   CHANNEL_IDLE_TIMEOUT_MS,
-  CHANNEL_MESSAGE_LIMIT_BYTES,
   CHANNEL_PING_INTERVAL_MS,
   CHANNEL_RECONNECT_INITIAL_DELAY_MS,
   CHANNEL_RECONNECT_MAX_DELAY_MS,
@@ -291,7 +290,6 @@ class ClientConnection implements MuxConnection {
   private pingIntervalMs = CHANNEL_PING_INTERVAL_MS
   private clientReplayBufferBytes = CHANNEL_CLIENT_REPLAY_BUFFER_BYTES
   private clientReplayBufferBinaryBytes = CHANNEL_CLIENT_REPLAY_BUFFER_BINARY_BYTES
-  private messageLimitBytes = CHANNEL_MESSAGE_LIMIT_BYTES
   private constructor(telefuncUrl: string, options: ClientConnectionOptions, cacheKey: string) {
     this.cacheKey = cacheKey
     this.telefuncUrl = telefuncUrl
@@ -454,22 +452,12 @@ class ClientConnection implements MuxConnection {
     this.startTtlIfIdle()
   }
 
-  /** Client-side mirror of the server's inbound per-message cap — fail the caller with a
-   *  clear error instead of letting the server kill the connection. */
-  private assertWithinMessageLimit(frame: Uint8Array): void {
-    assertUsage(
-      frame.byteLength <= this.messageLimitBytes,
-      `Message of ${frame.byteLength} bytes exceeds the server's ${this.messageLimitBytes}-byte per-message limit (config.channel.messageLimit). Send large payloads as a File, Blob, or ReadableStream instead — streams move as bounded chunks and aren't subject to the cap.`,
-    )
-  }
-
   send(channel: MuxChannel, data: string): number {
     const ix = this.channelIndex.get(channel)
     if (ix === undefined) return 0
     const replay = this.replayBuffers.get(ix)!
     const seq = replay.nextSeq()
     const frame = encode.text(ix, data, seq)
-    this.assertWithinMessageLimit(frame)
     if (!this.canSendImmediately()) {
       this.sendBuffer.push({ frame, channelIx: ix, seq })
     } else {
@@ -510,7 +498,6 @@ class ClientConnection implements MuxConnection {
     const replay = this.replayBuffers.get(ix)!
     const seq = replay.nextSeq()
     const frame = buildFrame(ix, seq)
-    this.assertWithinMessageLimit(frame) // before onQueued — no pending ack may be registered
     onQueued(seq)
     if (!this.canSendImmediately()) {
       this.sendBuffer.push({ frame, channelIx: ix, seq })
@@ -526,7 +513,6 @@ class ClientConnection implements MuxConnection {
     const replay = this.replayBuffers.get(ix)!
     const seq = replay.nextSeq()
     const frame = encode.binary(ix, data, seq)
-    this.assertWithinMessageLimit(frame)
     if (!this.canSendImmediately()) {
       this.sendBuffer.push({ frame, channelIx: ix, seq })
       return
@@ -540,18 +526,7 @@ class ClientConnection implements MuxConnection {
     if (ix === undefined) return
     const replay = this.replayBuffers.get(ix)!
     const seq = replay.nextSeq()
-    let frame = encode.ackRes(ix, seq, ackedSeq, result, status)
-    // An oversized ack response (a listen callback returned a huge value) can't just throw —
-    // the peer's ack would dangle. Degrade to an ERROR ack so its await rejects with the cause.
-    if (frame.byteLength > this.messageLimitBytes) {
-      frame = encode.ackRes(
-        ix,
-        seq,
-        ackedSeq,
-        'Ack response exceeds the per-message limit (config.channel.messageLimit)',
-        ACK_STATUS.ERROR,
-      )
-    }
+    const frame = encode.ackRes(ix, seq, ackedSeq, result, status)
     if (!this.canSendImmediately()) {
       this.sendBuffer.push({ frame, channelIx: ix, seq })
       return
@@ -1093,8 +1068,6 @@ class ClientConnection implements MuxConnection {
     if (ctrl.idleTimeout) this.idleTimeoutMs = ctrl.idleTimeout
     if (ctrl.clientReplayBuffer) this.clientReplayBufferBytes = ctrl.clientReplayBuffer
     if (ctrl.clientReplayBufferBinary) this.clientReplayBufferBinaryBytes = ctrl.clientReplayBufferBinary
-    if (ctrl.messageLimit) this.messageLimitBytes = ctrl.messageLimit
-
     const serverMap = new Map<number, number>()
     for (const channel of ctrl.open) serverMap.set(channel.ix, channel.lastSeq)
     const reconcileIxes = this.reconcileIxes

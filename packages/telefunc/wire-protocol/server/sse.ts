@@ -72,7 +72,7 @@ class SseConnectionTransport {
     // adapters get `request.body` (no `readable`) and want a `ReadableStream` back.
     const useNodeStream = readable !== undefined
     try {
-      const reader = new StreamReader(source, this.mux.messageLimit)
+      const reader = new StreamReader(source)
       const metadata = parseSseRequestMetadata(await reader.readMetadata())
       if (metadata.streamResponse) return await this.handleStreamResponsePost(metadata.connId, reader, useNodeStream)
       if (metadata.streamRequest) return await this.handleStreamRequestPost(metadata.connId, reader)
