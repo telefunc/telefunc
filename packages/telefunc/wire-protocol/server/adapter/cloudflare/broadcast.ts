@@ -2,10 +2,8 @@
 export { CloudflareBroadcastTransport, CloudflareBroadcastAuthorityState }
 export type { BroadcastDeliverRequest, BroadcastPublishRequest, TelefuncDurableObjectStub }
 
-import { CHANNEL_BUFFER_LIMIT_BYTES } from '../../../constants.js'
 import { KNOWN_BROADCAST_BUCKETS, getBucketCoordinatorShardIndices, getDeterministicKeyBucketIndex } from './routing.js'
 import { assert } from '../../../../utils/assert.js'
-import { utf8ByteLength } from '../../../../utils/utf8ByteLength.js'
 import type {
   BackendReceiver,
   BroadcastLane,
@@ -56,103 +54,7 @@ type TelefuncDurableObjectStub = DurableObjectStub & {
   telefuncBroadcastDeliver(request: BroadcastDeliverRequest): Promise<void>
 }
 
-type PendingBucketPublish = {
-  resolve: (ack: PublishResult) => void
-  reject: (err: Error) => void
-}
-
-type BufferedPublish = {
-  send: () => Promise<PublishResult>
-  bytes: number
-  pending: PendingBucketPublish
-}
-
-/**
- * Hard-capped ring buffer for bucket publishes that arrive before the source bucket setup finishes.
- * This bounds cold-path memory while preserving a contiguous FIFO suffix of pending publishes.
- * Payload-agnostic — each entry carries its own send function (works for both text and binary).
- */
-class CloudflareBucketPublishBuffer {
-  private entries: BufferedPublish[] = []
-  private head = 0
-  private totalBytes = 0
-  private readonly maxBytes: number
-  #flushing = false
-
-  constructor(maxBytes: number) {
-    assert(maxBytes > 0, 'Cloudflare bucket publish buffer size must be > 0.')
-    this.maxBytes = maxBytes
-  }
-
-  push(entry: BufferedPublish): void {
-    if (entry.bytes > this.maxBytes) {
-      entry.pending.reject(
-        new Error('Keyed publish exceeded the Cloudflare bucket buffer limit during cold-path setup'),
-      )
-      this.clear()
-      return
-    }
-
-    this.entries.push(entry)
-    this.totalBytes += entry.bytes
-    this.evict()
-  }
-
-  get flushing(): boolean {
-    return this.#flushing
-  }
-
-  async flush(): Promise<void> {
-    if (this.#flushing) return
-    this.#flushing = true
-    try {
-      while (this.head < this.entries.length) {
-        const entry = this.entries[this.head]!
-        try {
-          const ack = await entry.send()
-          entry.pending.resolve(ack)
-        } catch (err) {
-          entry.pending.reject(err instanceof Error ? err : new Error(String(err)))
-        }
-        this.totalBytes -= entry.bytes
-        this.head++
-      }
-      this.compact()
-    } finally {
-      this.#flushing = false
-    }
-  }
-
-  clear(): void {
-    for (let i = this.head; i < this.entries.length; i++) {
-      this.entries[i]!.pending.reject(new Error('Keyed publish was dropped from the Cloudflare bucket buffer'))
-    }
-    this.entries.length = 0
-    this.head = 0
-    this.totalBytes = 0
-  }
-
-  private evict(): void {
-    while (this.totalBytes > this.maxBytes && this.head < this.entries.length) {
-      this.entries[this.head]!.pending.reject(
-        new Error('Keyed publish was evicted from the Cloudflare bucket buffer before bucket setup completed'),
-      )
-      this.totalBytes -= this.entries[this.head]!.bytes
-      this.head++
-    }
-    this.compact()
-  }
-
-  private compact(): void {
-    if (this.head === 0) return
-    if (this.head < this.entries.length - this.head) return
-    this.entries = this.entries.slice(this.head)
-    this.head = 0
-  }
-}
-
 class MemberBucketState {
-  readonly pendingPublishes: CloudflareBucketPublishBuffer
   setupInFlight = true
   teardownRequested = false
   refreshTimer: ReturnType<typeof setInterval> | null = null
@@ -166,7 +68,6 @@ class MemberBucketState {
     this.key = key
     this.locationBucket = locationBucket
     this.authority = authority
-    this.pendingPublishes = new CloudflareBucketPublishBuffer(CHANNEL_BUFFER_LIMIT_BYTES)
     this.ready = new Promise((resolve, reject) => {
       this.settleReady = { resolve, reject }
     })
@@ -438,18 +339,7 @@ class CloudflareBroadcastTransport {
   private publishText(key: string, serialized: string): Promise<PublishResult> {
     const memberState = this.memberStates.get(laneKey({ key, kind: 'text' }))
 
-    if (memberState) {
-      if (memberState.setupInFlight || memberState.pendingPublishes.flushing) {
-        return new Promise<PublishResult>((resolve, reject) => {
-          memberState.pendingPublishes.push({
-            send: () => memberState.publish(serialized),
-            bytes: utf8ByteLength(serialized),
-            pending: { resolve, reject },
-          })
-        })
-      }
-      return memberState.publish(serialized)
-    }
+    if (memberState) return memberState.publish(serialized)
 
     const locationBucket = this.requireLocationBucket()
     const authority = this.getAuthorityStub(key, locationBucket)
@@ -459,18 +349,7 @@ class CloudflareBroadcastTransport {
   private publishBinary(key: string, data: Uint8Array): Promise<PublishResult> {
     const memberState = this.memberStates.get(laneKey({ key, kind: 'binary' }))
 
-    if (memberState) {
-      if (memberState.setupInFlight || memberState.pendingPublishes.flushing) {
-        return new Promise<PublishResult>((resolve, reject) => {
-          memberState.pendingPublishes.push({
-            send: () => memberState.publishBinary(data),
-            bytes: data.byteLength,
-            pending: { resolve, reject },
-          })
-        })
-      }
-      return memberState.publishBinary(data)
-    }
+    if (memberState) return memberState.publishBinary(data)
 
     const locationBucket = this.requireLocationBucket()
     const authority = this.getAuthorityStub(key, locationBucket)
@@ -568,7 +447,7 @@ class CloudflareBroadcastTransport {
     const memberState = this.memberStates.get(key)
     if (!memberState) return
 
-    if (memberState.setupInFlight || memberState.pendingPublishes.flushing) {
+    if (memberState.setupInFlight) {
       memberState.teardownRequested = true
       return
     }
@@ -585,7 +464,6 @@ class CloudflareBroadcastTransport {
       memberState.acknowledgePresence()
     } catch (error) {
       memberState.setupInFlight = false
-      memberState.pendingPublishes.clear()
       memberState.rejectPresence(error)
       if (this.memberStates.get(key) === memberState) this.memberStates.delete(key)
       throw error
@@ -594,8 +472,6 @@ class CloudflareBroadcastTransport {
     memberState.refreshTimer = setInterval(() => {
       void this.putPresence(key).catch(console.error)
     }, PRESENCE_REFRESH_INTERVAL_MS)
-
-    await memberState.pendingPublishes.flush()
 
     if (memberState.teardownRequested) {
       memberState.stopRefresh()
@@ -614,7 +490,6 @@ class CloudflareBroadcastTransport {
     await Promise.allSettled(
       states.map(async ([key, state]) => {
         state.stopRefresh()
-        state.pendingPublishes.clear()
         await this.deletePresence(key)
       }),
     )
