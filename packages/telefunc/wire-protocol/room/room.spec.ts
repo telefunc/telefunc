@@ -1,7 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { parse } from '@brillout/json-serializer/parse'
 import { IndexedPeer } from '../server/IndexedPeer.js'
-import { ReplayBuffer } from '../replay-buffer.js'
 import { TAG, decode } from '../shared-ws.js'
 import {
   ROOM_HEARTBEAT_INTERVAL_MS,
@@ -662,7 +661,7 @@ describe('client Room lifecycle', () => {
       _subscribeLocal: () => () => {},
       _subscribeBinaryLocal: () => () => {},
       _setWireTextSubscribed: ClientBroadcast.prototype._setWireTextSubscribed,
-      send: async (request: { __r?: string }) => (request.__r === 'req-roster' ? [] : undefined),
+      send: async () => undefined,
       publish: async () => ({ key: 'fake', seq: 1, timestamp: 1 }),
       publishBinary: async () => ({ key: 'fake', seq: 1, timestamp: 1 }),
       onClose: () => {},
@@ -684,7 +683,6 @@ describe('client Room lifecycle', () => {
 
   it('rejects roster getters when the initial backend roster read fails', async () => {
     let deliver: (event: unknown, info: ChannelPublishInfo) => void = () => {}
-    const send = vi.fn(async () => undefined)
     const stub = {
       _subscribeLocal: (callback: (event: unknown, info: ChannelPublishInfo) => void) => {
         deliver = callback
@@ -692,7 +690,7 @@ describe('client Room lifecycle', () => {
       },
       _subscribeBinaryLocal: () => () => {},
       _setWireTextSubscribed: () => {},
-      send,
+      send: async () => undefined,
       publish: async () => ({ key: 'fake', seq: 1, timestamp: 1 }),
       publishBinary: async () => ({ key: 'fake', seq: 1, timestamp: 1 }),
       onClose: () => {},
@@ -703,12 +701,11 @@ describe('client Room lifecycle', () => {
     deliver({ __r: 'roster-error' }, { key: 'roster-failure', seq: 1, timestamp: 1 })
 
     await expect(participants).rejects.toThrow('Failed to load room participants')
-    expect(send).toHaveBeenCalledWith({ __r: 'req-roster' }, { ack: false })
   })
 
   it('turns a server roster read rejection into an explicit client-settling event', async () => {
     const room = (await Room.create('roster-error-event')) as ServerRoom
-    const { stub } = serve(room)
+    const stub = register(room)
     const failure = new Error('backend roster read failed')
     const ensureRoster = vi
       .spyOn(room as unknown as { _ensureRoster(): Promise<void> }, '_ensureRoster')
@@ -716,7 +713,7 @@ describe('client Room lifecycle', () => {
     const relayError = vi.spyOn(stub, '_relayRosterError')
     const report = vi.spyOn(console, 'error').mockImplementation(() => {})
     try {
-      await room._handleStubRequest(stub, { __r: 'req-roster' })
+      attachPeer(stub)
       await settleMicrotasks()
 
       expect(ensureRoster).toHaveBeenCalledOnce()
@@ -725,6 +722,22 @@ describe('client Room lifecycle', () => {
       report.mockRestore()
       ensureRoster.mockRestore()
     }
+  })
+
+  it('replays a committed server-pushed roster after reconnect without rerunning onOpen', async () => {
+    const room = (await Room.create('roster-replay')) as ServerRoom
+    const stub = register(room)
+    const ensureRoster = vi.spyOn(room as unknown as { _ensureRoster(): Promise<void> }, '_ensureRoster')
+    attachPeer(stub)
+    await settleMicrotasks()
+
+    stub._onPeerDisconnect(1_000)
+    const [frame] = attachPeer(stub, 0).decoded()
+    if (frame?.tag !== TAG.PUBLISH) throw new Error('expected replayed roster publish')
+    expect(parse(frame.text)).toMatchObject({ __r: 'roster', members: [] })
+
+    await settleMicrotasks()
+    expect(ensureRoster).toHaveBeenCalledOnce()
   })
 })
 
@@ -1198,18 +1211,34 @@ describe('shared subscription supervision', () => {
 
 type Peer = ReturnType<typeof attachPeer>
 
-function attachPeer(stub: RoomStubChannel) {
+function attachPeer(stub: RoomStubChannel, lastSeq?: number) {
   const frames: Uint8Array[] = []
+  const replay = stub._replayBuffer!
+  if (lastSeq !== undefined) frames.push(...replay.getAfter(lastSeq))
   stub._attachPeer(
-    new IndexedPeer({ send: (frame) => frames.push(frame) }, 7, new ReplayBuffer(1024 * 1024, 60_000, 1024 * 1024)),
+    new IndexedPeer(
+      {
+        send: (frame, onCommit) => {
+          frames.push(frame)
+          onCommit?.()
+        },
+      },
+      7,
+      replay,
+    ),
   )
   return { decoded: () => frames.map((frame) => decode(frame as Uint8Array<ArrayBuffer>)) }
 }
 
-function serve(room: ServerRoom): { stub: RoomStubChannel; peer: Peer } {
+function register(room: ServerRoom): RoomStubChannel {
   const stub = new RoomStubChannel(room)
   stub._registerChannel()
   room._attachStub(stub)
+  return stub
+}
+
+function serve(room: ServerRoom): { stub: RoomStubChannel; peer: Peer } {
+  const stub = register(room)
   return { stub, peer: attachPeer(stub) }
 }
 
@@ -1263,7 +1292,7 @@ function createFakeStub(): {
       return () => binary.splice(binary.indexOf(callback), 1)
     },
     _setWireTextSubscribed: () => {},
-    send: async (request: { __r?: string }) => (request.__r === 'req-roster' ? [] : undefined),
+    send: async () => undefined,
     publish: async () => ({ key: 'fake', seq: 1, timestamp: 1 }),
     publishBinary: async () => ({ key: 'fake', seq: 1, timestamp: 1 }),
     onClose: () => {},

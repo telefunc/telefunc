@@ -296,7 +296,7 @@ type RoomAnnounceEnvelope = { __r: 'announce'; data: unknown }
 
 type RoomEnvelope = RoomCtrlEnvelope | RoomDataEnvelope | RoomAnnounceEnvelope
 
-/** The authoritative roster response, requested once by the client over the replayable stub.
+/** The authoritative roster response, pushed once when the replayable stub first opens.
  *  Position-in-stream consistency: every event relayed before a successful roster is already
  *  reflected in it; later events apply incrementally on top. Failure is explicit so client
  *  roster getters cannot wait forever after a backend read rejects. */
@@ -340,7 +340,6 @@ const DM_PARTICIPANT_LEFT: DmReply = { ok: false, err: 'Participant left the roo
  *  `sub-text` declares member-scoped text wants — the room-level (all) text want rides the
  *  standard broadcast-subscription ctrl instead, keeping its synchronous-declaration fence. */
 type RoomStubRequest =
-  | { __r: 'req-roster' }
   | { __r: 'req-join'; meta: ParticipantMeta; selfDelivery: boolean }
   | { __r: 'req-leave'; id: string }
   | { __r: 'req-set-meta'; id: string; meta: ParticipantMeta }

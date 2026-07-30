@@ -1603,6 +1603,20 @@ class ServerRoom implements Room {
       this._tailHold.length = 0
       this._tail = false
     }
+    // The snapshot carries only scalars; push the roster once the peer is attached. Committed
+    // publish frames enter the stub's ReplayBuffer, so reconnect recovers this without rerunning
+    // onOpen. Failure is an explicit replayable event so client roster getters always settle.
+    stub.onOpen(() => {
+      void this._ensureRoster()
+        .then(() => {
+          if (this._stubs.has(stub) && !this._state.closed)
+            stub._relayRoster(this._state.snapshotMembers().filter((member) => !member.hidden))
+        })
+        .catch((error) => {
+          reportRoomError(error)
+          if (this._stubs.has(stub) && !this._state.closed) stub._relayRosterError()
+        })
+    })
     stub.onClose(() => {
       this._stubs.delete(stub)
       stub._endTail() // clear any pending tail hold/timer so a closed stub leaves nothing behind
@@ -1625,21 +1639,6 @@ class ServerRoom implements Room {
     if (!hasRoomTag(msg)) return undefined
     const req = msg as RoomStubRequest
     switch (req.__r) {
-      case 'req-roster':
-        // Do not await in the channel's receive chain: a healthy slow roster read must not
-        // serialize unrelated join/publish frames behind it. The sequenced request and sequenced
-        // response replay independently across reconnect; failure gets its own settling event.
-        void this._ensureRoster().then(
-          () => {
-            if (this._stubs.has(stub) && !this._state.closed)
-              stub._relayRoster(this._state.snapshotMembers().filter((member) => !member.hidden))
-          },
-          (error) => {
-            reportRoomError(error)
-            if (this._stubs.has(stub) && !this._state.closed) stub._relayRosterError()
-          },
-        )
-        return
       case 'req-join': {
         const meta = isObject(req.meta) ? req.meta : {}
         // Identity is trusted and therefore server-assigned — a client join never carries one.

@@ -106,12 +106,6 @@ class ClientRoom implements Room {
       this._declaredWants.clear()
       this._syncWants(true)
     })
-    // Unlike the former one-shot server push, this request and its response both ride the channel's
-    // bounded reconnect replay. The request is fire-and-forget so a healthy slow backend roster read
-    // doesn't serialize unrelated client frames behind it; the server answers with roster/roster-error.
-    if (!snapshot.closed) {
-      void this._stub.send({ __r: 'req-roster' }, { ack: false }).catch((error) => this._rosterFailed(error))
-    }
     // A backend rejection can arrive before the application asks for the roster. Mark it handled
     // here while preserving the original rejection for each later getter.
     void this._rosterReady.catch(() => {})
