@@ -16,20 +16,15 @@ export type {
   AfterPublishHook,
   AfterSendHook,
   AfterJoinHook,
-  RoomPublishReceipt,
   RoomSendReceipt,
   RoomAckReceipt,
-  RoomJoinReceipt,
   LeaveCause,
   ParticipantRef,
   BinaryFrameInfo,
   BinaryPublishOptions,
   RoomSnapshotView,
   ParticipantSnapshotView,
-  RoomListener,
   RoomBinaryListener,
-  ParticipantListener,
-  ParticipantBinaryListener,
 }
 
 import type { ChannelPublishAck, ChannelPublishInfo } from '../channel.js'
@@ -88,12 +83,6 @@ type PublishGuard<P extends ParticipantMeta = ParticipantMeta> = (
  *  the error, before any membership state is written). */
 type JoinGuard<P extends ParticipantMeta = ParticipantMeta> = (member: Sender<P>) => void | Promise<void>
 
-/** The receipt for a committed room-wide message, passed to `onAfterPublish`. `seq` is the lane's
- *  strict counter and `timestamp` the backend authority clock — together they order that lane's
- *  messages. `receivers` counts backend delivery routes at acceptance; absent when the backend
- *  cannot prove a global result. */
-type RoomPublishReceipt = { seq: number; timestamp: number; receivers?: number }
-
 /** The receipt for a delivered private message, passed to `onAfterSend`. */
 type RoomSendReceipt = { seq: number; timestamp: number }
 
@@ -101,10 +90,6 @@ type RoomSendReceipt = { seq: number; timestamp: number }
  *  `seq`/`timestamp` (the message's sequencing on the recipient's inbox), plus `response`, the value
  *  the recipient's `listen` handler returned. */
 type RoomAckReceipt = RoomSendReceipt & { response: unknown }
-
-/** The receipt for a committed join, passed to `onAfterJoin`. `joinedAt` is the server-stamped
- *  join time. */
-type RoomJoinReceipt = { joinedAt: number }
 
 /** Runs after a room-wide message is sequenced and delivered (`Room.guard(room, { onAfterPublish })`):
  *  the same `from`/`data` as `onBeforePublish`, plus the `info` receipt — so you can persist the
@@ -114,7 +99,7 @@ type RoomJoinReceipt = { joinedAt: number }
 type AfterPublishHook<P extends ParticipantMeta = ParticipantMeta> = (
   from: Sender<P>,
   data: unknown,
-  info: RoomPublishReceipt,
+  info: { seq: number; timestamp: number; receivers?: number },
 ) => void | Promise<void>
 
 /** Runs after a private message is delivered (`Room.guard(room, { onAfterSend })`): the same
@@ -132,7 +117,7 @@ type AfterSendHook<P extends ParticipantMeta = ParticipantMeta> = (
  *  audit). Awaited; throwing rejects the caller but does not undo the join. */
 type AfterJoinHook<P extends ParticipantMeta = ParticipantMeta> = (
   member: Sender<P>,
-  info: RoomJoinReceipt,
+  info: { joinedAt: number },
 ) => void | Promise<void>
 
 /** Why a participant is gone. `reason` is set by `Room.removeParticipant(id, { id, reason })`
@@ -254,21 +239,11 @@ type BinaryPublishOptions = {
   retain?: boolean
 }
 
-/** Receives all participant messages, with the verified sender (see `Sender`). `Pub` is the room's
- *  published-message type — `unknown` unless the room declares one (`Room<Meta, PMeta, Pub>`). */
-type RoomListener<P extends ParticipantMeta = ParticipantMeta, Pub = unknown> = (
-  data: Pub,
-  info: ChannelPublishInfo,
-  from: Sender<P>,
-) => unknown
 type RoomBinaryListener<P extends ParticipantMeta = ParticipantMeta> = (
   data: Uint8Array,
   info: ChannelPublishInfo & BinaryFrameInfo,
   from: Sender<P>,
 ) => unknown
-/** Receives a single participant's messages. */
-type ParticipantListener<Pub = unknown> = (data: Pub, info: ChannelPublishInfo) => unknown
-type ParticipantBinaryListener = (data: Uint8Array, info: ChannelPublishInfo & BinaryFrameInfo) => unknown
 
 /**
  * A multi-party room with presence, membership, and events. One type, same on server and
@@ -294,8 +269,8 @@ type Room<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = Participant
    *  member view on first need; once the view is loaded it resolves from it without I/O. */
   getParticipant(id: string): Promise<RemoteParticipant<P, Pub> | null>
 
-  /** Receive all participant messages. Returns an unsubscribe function. */
-  subscribe(callback: RoomListener<P, Pub>): () => void
+  /** Receive all participant messages, with the verified sender. Returns an unsubscribe function. */
+  subscribe(callback: (data: Pub, info: ChannelPublishInfo, from: Sender<P>) => unknown): () => void
   /** Receive all members' binary frames — or one track's: `{ track: 'screen' }` for a named
    *  track, `{ track: null }` for the default lane only. Selection is enforced at the source:
    *  unwanted tracks aren't delivered, relayed, or even subscribed upstream — dropping a
@@ -400,11 +375,14 @@ type RemoteParticipant<P extends ParticipantMeta = ParticipantMeta, Pub = unknow
   readonly joinedAt: number
 
   /** Receive only this member's messages. Returns an unsubscribe function. */
-  subscribe(callback: ParticipantListener<Pub>): () => void
+  subscribe(callback: (data: Pub, info: ChannelPublishInfo) => unknown): () => void
   /** Receive only this member's binary frames — or one track's: `{ track: 'screen' }` for a
    *  named track, `{ track: null }` for the default lane only (source-selective, like the
    *  room-level `subscribeBinary`). */
-  subscribeBinary(callback: ParticipantBinaryListener, options?: { track?: string | null }): () => void
+  subscribeBinary(
+    callback: (data: Uint8Array, info: ChannelPublishInfo & BinaryFrameInfo) => unknown,
+    options?: { track?: string | null },
+  ): () => void
 
   /** This member's metadata changed. */
   onUpdate(callback: (meta: P, prev: P) => void): () => void
