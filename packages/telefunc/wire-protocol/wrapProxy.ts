@@ -1,4 +1,4 @@
-export { wrapProxy, adoptSubordinate }
+export { wrapProxy }
 
 import { isObjectOrFunction } from '../utils/isObjectOrFunction.js'
 import { isPromise } from '../utils/isPromise.js'

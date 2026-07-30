@@ -145,7 +145,7 @@ type StreamSource = {
 
 /** Context for all client-side response revivers (streaming + placeholder). */
 type ClientReviverContext = {
-  /** Gives a derived value its owner's GC and explicit-close lifetime. */
+  /** Gives a derived value its owner's explicit-close lifetime without changing its identity. */
   adoptSubordinate(child: object, trackedOwner: object): void
   createChannel<ClientToServer = unknown, ServerToClient = unknown>(opts: {
     channelId: string

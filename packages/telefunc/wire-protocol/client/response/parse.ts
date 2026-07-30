@@ -16,7 +16,7 @@ import { SSEStreamReader } from './SSEStreamReader.js'
 import { ClientChannel, ClientBroadcast } from '../channel.js'
 import { RoomClientBroadcast } from '../../room/client.js'
 import type { RoomClientReviverContext } from '../../room/response-client.js'
-import { adoptSubordinate, wrapProxy } from '../../wrapProxy.js'
+import { wrapProxy } from '../../wrapProxy.js'
 import { GcRegistry } from '../../gcRegistry.js'
 import { ChannelStreamSource } from '../../ChannelStreamSource.js'
 import { createReadableChunkStream } from '../../createReadableChunkStream.js'
@@ -111,7 +111,6 @@ async function reviveResponse(
     adoptSubordinate(child, trackedOwner) {
       const close = closeHandlers.get(trackedOwner)
       assert(close)
-      adoptSubordinate(child, trackedOwner)
       closeHandlers.set(child, close)
       adopted.add(child)
     },
