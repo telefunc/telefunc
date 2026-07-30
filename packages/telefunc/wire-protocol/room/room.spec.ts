@@ -687,8 +687,10 @@ describe('Room public behavior', () => {
 
   it('applies before guards and after hooks around authoritative joins, publishes, and sends', async () => {
     await Room.create('guarded')
-    const room = await Room.get('guarded')
+    const room = (await Room.get('guarded')) as ServerRoom
     const after: string[] = []
+    const published: unknown[] = []
+    room.subscribe((data) => published.push(data))
     Room.guard(room, {
       onBeforeJoin: (member) => {
         if (member.meta.name === 'blocked') throw new Error('no entry')
@@ -705,16 +707,21 @@ describe('Room public behavior', () => {
     })
 
     await expect(room.join({ meta: { name: 'blocked' } })).rejects.toThrow('no entry')
+    expect(room.count).toBe(0)
+    expect(await room.getParticipants()).toEqual([])
     const alice = await room.join({ meta: { name: 'Alice' } })
     const bob = await room.join({ meta: { name: 'Bob' } })
     const inbox: unknown[] = []
     bob.listen((data) => inbox.push(data))
-    await expect(alice.publish('blocked')).rejects.toThrow('no publish')
+    await expect(alice.publish('blocked', { retain: true })).rejects.toThrow('no publish')
+    expect(published).toEqual([])
+    expect(await driver.readRetained(room.id, room._inc, semanticLane)).toBeNull()
     await alice.publish('ok')
     await expect(alice.send(bob.id, 'blocked')).rejects.toThrow('no send')
     await alice.send(bob.id, 'ok')
 
     expect(inbox).toEqual(['ok'])
+    expect(published).toEqual(['ok'])
     expect(after).toEqual(['join:Alice', 'join:Bob', 'publish:ok', 'send:ok'])
   })
 
