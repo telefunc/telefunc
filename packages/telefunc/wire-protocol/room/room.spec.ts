@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { parse } from '@brillout/json-serializer/parse'
+import { stringify } from '@brillout/json-serializer/stringify'
 import { IndexedPeer } from '../server/IndexedPeer.js'
 import { ACK_STATUS, TAG, decode } from '../shared-ws.js'
 import { waitForTelefunctionCallBarriers } from '../client/call-barrier.js'
@@ -7,6 +8,7 @@ import { ShieldValidationError, isShieldValidationError } from '../../shared/Shi
 import {
   ROOM_DM_ACK_TIMEOUT_MS,
   ROOM_HEARTBEAT_INTERVAL_MS,
+  ROOM_MEMBER_TTL_MS,
   ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS,
   ROOM_TAIL_ATTACH_TIMEOUT_MS,
 } from '../constants.js'
@@ -16,13 +18,14 @@ import {
   frameWithMemberId,
   isRoomError,
   roomAckError,
+  roomMemberKvKey,
   sanitizeBinaryWants,
   unframeMemberId,
   type RoomSnapshotMetadata,
 } from './protocol.js'
 import { ClientRoom, RoomClientBroadcast } from './client.js'
 import { Room, ServerRoom } from './server.js'
-import { SubSlot, configFromHead, encodeRoomConfig } from './server/lanes.js'
+import { SubSlot, configFromHead, decodeRoomText, encodeRoomConfig } from './server/lanes.js'
 import { RoomStubChannel } from './stubs.js'
 import { RoomDemand } from './demand.js'
 import type { ChannelPublishInfo } from '../channel.js'
@@ -504,6 +507,47 @@ describe('Room public behavior', () => {
     slot.stop()
   })
 
+  it('makes roster readers join an authoritative refresh already in flight', async () => {
+    const authority = (await Room.create('roster-refresh-owner')) as ServerRoom
+    await authority.join()
+    const observer = (await Room.get(authority.id)) as ServerRoom
+    observer.onJoin(() => {})
+    await observer.getParticipants()
+    await vi.waitFor(() => expect((observer as unknown as { _ctrlSub: SubSlot })._ctrlSub.established).toBe(true))
+    expect(observer._state.rosterKnown).toBe(true)
+
+    const readCells = driver.readCells.bind(driver)
+    const started = deferred<void>()
+    const release = deferred<void>()
+    let held = false
+    const read = vi.spyOn(driver, 'readCells').mockImplementation(async (roomId, inc, selector) => {
+      if (!held && 'prefix' in selector && selector.prefix.endsWith(':m:')) {
+        held = true
+        started.resolve()
+        await release.promise
+      }
+      return readCells(roomId, inc, selector)
+    })
+    const refresh = (
+      observer as unknown as {
+        _refreshMembers(): Promise<void>
+      }
+    )._refreshMembers()
+    await started.promise
+    expect((observer as unknown as { _ctrlSub: SubSlot })._ctrlSub.established).toBe(true)
+    const participants = observer.getParticipants()
+    const status = await Promise.race([
+      participants.then(() => 'settled' as const),
+      new Promise<'pending'>((resolve) => setTimeout(() => resolve('pending'), 0)),
+    ])
+    expect(status).toBe('pending')
+
+    release.resolve()
+    await refresh
+    expect((await participants).map(({ id }) => id)).toHaveLength(1)
+    read.mockRestore()
+  })
+
   it('heartbeats pure control observers without owned members or binary demand', async () => {
     vi.useFakeTimers()
     const observer = (await Room.get((await Room.create('observer-heartbeat')).id)) as ServerRoom
@@ -528,6 +572,21 @@ describe('Room public behavior', () => {
     expect(compare).toHaveBeenCalledOnce()
   })
 
+  it('reconciles authority even when member renewal fails first', async () => {
+    const room = (await Room.create('heartbeat-renewal-failure')) as ServerRoom
+    await room.join()
+    const readCells = vi.spyOn(driver, 'readCells').mockRejectedValue(new Error('renewal failed'))
+    const readHead = vi.spyOn(driver, 'readHead').mockResolvedValue(null)
+
+    await expect((room as unknown as { _heartbeatTick(): Promise<void> })._heartbeatTick()).rejects.toThrow(
+      'renewal failed',
+    )
+
+    expect(room.isClosed).toBe(true)
+    readCells.mockRestore()
+    readHead.mockRestore()
+  })
+
   it('replaces a subscription that is already closed on initial establishment', async () => {
     const closed = terminalSubscription()
     await closed.close()
@@ -539,6 +598,28 @@ describe('Room public behavior', () => {
 
     expect(terminal).toHaveBeenCalledOnce()
     expect(terminal.mock.calls[0]?.[0]).toBe(slot)
+    slot.stop()
+  })
+
+  it('rejects only an exhausted internal readiness generation and recovers holder readiness later', async () => {
+    const slot = new SubSlot(
+      () => {},
+      () => {},
+    )
+    slot.sync(true, () => rejectedSubscription('first generation failed'))
+    const holderReady = slot.ready
+    const exhaustedGeneration = slot.generationReady
+    const exhausted = new RoomError('generation exhausted')
+
+    slot.markLost(exhausted)
+
+    await expect(exhaustedGeneration).rejects.toBe(exhausted)
+    expect(await Promise.race([holderReady.then(() => 'ready'), Promise.resolve('pending')])).toBe('pending')
+
+    slot.sync(true, () => terminalSubscription().subscription)
+    await expect(holderReady).resolves.toBeUndefined()
+    await expect(slot.generationReady).resolves.toBeUndefined()
+    expect(slot).toMatchObject({ wanted: true, lost: false, active: true })
     slot.stop()
   })
 
@@ -592,6 +673,80 @@ describe('Room public behavior', () => {
     }
   })
 
+  it('settles an in-flight join when its inbox recovery horizon exhausts', async () => {
+    vi.useFakeTimers()
+    const room = (await Room.create('join-recovery-exhaustion')) as ServerRoom
+    const backend = getBackend()
+    const subscribeLane = backend.subscribeLane.bind(backend)
+    const inboxStarted = deferred<void>()
+    const subscribe = vi.spyOn(backend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
+      if (lane.kind !== 'inbox') return subscribeLane(roomId, inc, lane, receiver)
+      inboxStarted.resolve()
+      return rejectedSubscription('persistent inbox subscription failure')
+    })
+    const report = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const pending = Symbol('pending')
+    let outcome: unknown = pending
+    void room.join().then(
+      (participant) => {
+        outcome = participant
+      },
+      (error: unknown) => {
+        outcome = error
+      },
+    )
+    try {
+      await inboxStarted.promise
+      await vi.advanceTimersByTimeAsync(ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS + 100)
+
+      expect(outcome).toBeInstanceOf(RoomError)
+      expect(room.isClosed).toBe(false)
+      expect(room.count).toBe(0)
+    } finally {
+      subscribe.mockRestore()
+      report.mockRestore()
+    }
+  })
+
+  it('settles retained replay when its semantic recovery horizon exhausts', async () => {
+    vi.useFakeTimers()
+    const authority = (await Room.create('replay-recovery-exhaustion')) as ServerRoom
+    const publisher = await authority.join()
+    await publisher.publish('retained', { retain: true })
+    const observer = (await Room.get(authority.id)) as ServerRoom
+    const { stub } = serve(observer)
+    const backend = getBackend()
+    const subscribeLane = backend.subscribeLane.bind(backend)
+    const semanticStarted = deferred<void>()
+    const subscribe = vi.spyOn(backend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
+      if (lane.kind !== 'semantic') return subscribeLane(roomId, inc, lane, receiver)
+      semanticStarted.resolve()
+      return rejectedSubscription('persistent semantic subscription failure')
+    })
+    const report = vi.spyOn(console, 'error').mockImplementation(() => {})
+    stub._onPeerBroadcastSubscribe(false)
+    const pending = Symbol('pending')
+    let outcome: unknown = pending
+    void observer._replayRetainedText(stub, false, new Set()).then(
+      () => {
+        outcome = undefined
+      },
+      (error: unknown) => {
+        outcome = error
+      },
+    )
+    try {
+      await semanticStarted.promise
+      await vi.advanceTimersByTimeAsync(ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS + 100)
+
+      expect(outcome).toBeInstanceOf(RoomError)
+      expect(observer.isClosed).toBe(false)
+    } finally {
+      subscribe.mockRestore()
+      report.mockRestore()
+    }
+  })
+
   it('propagates presence/meta while hidden members stay addressable and admin removal carries its cause', async () => {
     const authority = await Room.create('presence')
     const observer = await Room.get('presence')
@@ -618,6 +773,38 @@ describe('Room public behavior', () => {
     expect((await observer.getParticipants({ hidden: true })).map((member) => member.id)).toEqual([hidden.id])
   })
 
+  it('keeps local and verified sender metadata at the newest accepted sequence', async () => {
+    const room = (await Room.create('participant-meta-order')) as ServerRoom
+    const participant = await room.join()
+    const observer = await Room.get(room.id)
+    const senderMeta: unknown[] = []
+    observer.subscribe((_data, _info, from) => senderMeta.push(from.meta))
+    const commitLane = driver.commitLane.bind(driver)
+    const firstCommit = deferred<void>()
+    const releaseFirst = deferred<void>()
+    const commit = vi.spyOn(driver, 'commitLane').mockImplementation(async (roomId, inc, lane, payload, options) => {
+      if (lane.kind === 'control') {
+        const event = parse(decodeRoomText(payload)) as { __r?: string; seq?: number }
+        if (event.__r === 'p-meta' && event.seq === 1) {
+          firstCommit.resolve()
+          await releaseFirst.promise
+        }
+      }
+      return commitLane(roomId, inc, lane, payload, options)
+    })
+
+    const first = participant.setMeta({ version: 1 })
+    await firstCommit.promise
+    await participant.setMeta({ version: 2 })
+    releaseFirst.resolve()
+    await first
+
+    expect(participant.meta).toEqual({ version: 2 })
+    await participant.publish('metadata-check')
+    expect(senderMeta).toEqual([{ version: 2 }])
+    commit.mockRestore()
+  })
+
   it('resolves multiple identity members with one batched record read', async () => {
     const room = await Room.create('identity-batch')
     const first = await room.join({ identity: 'shared' })
@@ -628,6 +815,57 @@ describe('Room public behavior', () => {
 
     expect(members.map(({ id }) => id)).toEqual([first.id, second.id])
     expect(reads).toHaveBeenCalledTimes(3)
+  })
+
+  it('keeps a member whose heartbeat wins the expired-record reap race', async () => {
+    const room = (await Room.create('reap-heartbeat-race')) as ServerRoom
+    const member = await room.join()
+    const memberKey = roomMemberKvKey(room.id, member.id)
+    const compareExchange = driver.compareExchangeCells.bind(driver)
+    const initial = await driver.readCells(room.id, room._inc, { keys: [memberKey] })
+    expect('staleInc' in initial).toBe(false)
+    if ('staleInc' in initial) throw new Error('unexpected stale generation')
+    const initialRaw = initial.cells.get(memberKey)
+    expect(initialRaw).toBeDefined()
+    const initialRecord = parse(decoder.decode(initialRaw!)) as Record<string, unknown>
+    await expect(
+      compareExchange(room.id, room._inc, initial.revision, [
+        {
+          key: memberKey,
+          set: {
+            bytes: encoder.encode(stringify({ ...initialRecord, seenAt: Date.now() - ROOM_MEMBER_TTL_MS - 1 })),
+          },
+        },
+      ]),
+    ).resolves.toBe('committed')
+
+    let raced = false
+    const compare = vi
+      .spyOn(driver, 'compareExchangeCells')
+      .mockImplementation(async (roomId, inc, revision, mutations) => {
+        if (!raced && mutations.some(({ key, set }) => key === memberKey && set === undefined)) {
+          raced = true
+          const fresh = await driver.readCells(roomId, inc, { keys: [memberKey] })
+          expect('staleInc' in fresh).toBe(false)
+          if ('staleInc' in fresh) throw new Error('unexpected stale generation')
+          const raw = fresh.cells.get(memberKey)
+          expect(raw).toBeDefined()
+          const record = parse(decoder.decode(raw!)) as Record<string, unknown>
+          await expect(
+            compareExchange(roomId, inc, fresh.revision, [
+              {
+                key: memberKey,
+                set: { bytes: encoder.encode(stringify({ ...record, seenAt: Date.now() })) },
+              },
+            ]),
+          ).resolves.toBe('committed')
+        }
+        return compareExchange(roomId, inc, revision, mutations)
+      })
+
+    expect((await Room.getParticipants(room.id)).map(({ id }) => id)).toEqual([member.id])
+    expect(raced).toBe(true)
+    compare.mockRestore()
   })
 
   it('keeps text self-delivery local and binary subscriptions selective across named tracks', async () => {

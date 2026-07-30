@@ -129,6 +129,9 @@ class ServerRoom implements Room {
   /** @internal */ readonly _state: RoomState
   private readonly _stubs = new Set<RoomStubChannel>()
   private readonly _localParticipants = new Map<string, ServerLocalParticipant>()
+  /** Members registered with their holder so their inbox can establish, but not yet durable. They
+   *  own inbox routes; heartbeat must not renew/reap them until the member cell commits. */
+  private readonly _pendingAdmissions = new Set<string>()
 
   private readonly _ctrlSub = new SubSlot(
     (slot, error) => this._onTerminalSubscription(slot, error),
@@ -286,15 +289,17 @@ class ServerRoom implements Room {
     // Admission policy runs first, on the definitive member ID — a rejected join writes nothing.
     const onBeforeJoin = this._guards?.onBeforeJoin
     if (!hidden && onBeforeJoin) await onBeforeJoin({ id, meta, identity })
+    this._pendingAdmissions.add(id)
     track(id)
     this._syncSubs()
     let created = false
     try {
       const inbox = this._dmUnsubs.get(id)
       assert(inbox)
-      await Promise.all([this._textSub.ready, inbox.ready])
+      await withinRoomHorizon(inbox.ready, ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS)
       await this._createMember(id, meta, identity, joinedAt, hidden)
       created = true
+      this._pendingAdmissions.delete(id)
       this._state.applyJoin(id, meta, joinedAt, identity, hidden)
       await publishCtrl(this.id, this._inc, {
         __r: 'join',
@@ -305,6 +310,7 @@ class ServerRoom implements Room {
         ...(hidden ? { hidden: true } : {}),
       })
     } catch (error) {
+      this._pendingAdmissions.delete(id)
       if (created) {
         try {
           await evictMember(this.id, this._inc, id, identity ?? undefined, { type: 'left' })
@@ -400,6 +406,7 @@ class ServerRoom implements Room {
       }
     })
     this._state.applyParticipantMeta(id, meta, seq)
+    this._syncLocalMemberMeta(id)
     await publishCtrl(this.id, this._inc, { __r: 'p-meta', id, meta, seq })
   }
 
@@ -512,10 +519,11 @@ class ServerRoom implements Room {
   /** The verified sender as this node knows it — own participants first (freshest), then the
    *  view. The one place sender identity is assembled; guards and envelopes both consume it. */
   private _memberSender(from: string): Sender {
+    const remote = this._state.getRemote(from)
+    if (remote) return { id: from, meta: remote.meta, identity: remote.identity }
     const local = this._localParticipants.get(from)
     if (local) return { id: from, meta: local.meta, identity: local.identity }
-    const remote = this._state.getRemote(from)
-    return { id: from, meta: remote?.meta ?? {}, identity: remote?.identity ?? null }
+    return { id: from, meta: {}, identity: null }
   }
 
   /** @internal — send a private message: published on the target's inbox key, which only
@@ -848,8 +856,7 @@ class ServerRoom implements Room {
         return
       case 'p-meta': {
         this._state.applyParticipantMeta(event.id, event.meta, event.seq)
-        const local = this._localParticipants.get(event.id)
-        if (local) local._meta = event.meta
+        this._syncLocalMemberMeta(event.id)
         return
       }
       case 'update':
@@ -878,6 +885,13 @@ class ServerRoom implements Room {
     }
     this._demand.forgetMember(id)
     this._syncSubs()
+  }
+
+  /** Mirror only the sequence-accepted projection into the local facade. */
+  private _syncLocalMemberMeta(id: string): void {
+    const local = this._localParticipants.get(id)
+    const accepted = this._state.getRemote(id)
+    if (local && accepted) local._meta = accepted.meta
   }
 
   /** The room closed — runs once, after the `closed` event has been applied and relayed. */
@@ -924,8 +938,9 @@ class ServerRoom implements Room {
         }
       }
       if (slot.wanted) {
-        reportRoomError(new RoomError(`Room subscription recovery exhausted: ${this.id}`))
-        slot.markLost()
+        const exhausted = new RoomError(`Room subscription recovery exhausted: ${this.id}`)
+        reportRoomError(exhausted)
+        slot.markLost(exhausted)
       }
     })()
       .catch(reportRoomError)
@@ -1165,7 +1180,7 @@ class ServerRoom implements Room {
     // publish that raced this subscribe is either already in the copy we read or arrives live — never
     // lost in the gap between subscribing and the read. A synchronous backend (in-memory) resolves
     // instantly. See `SubSlot.ready` and `BackendSubscription.ready`.
-    await this._textSub.ready
+    await withinRoomHorizon(this._textSub.ready, ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS)
     const stored = await getBackend().readRetained(this.id, this._inc, SEMANTIC_LANE)
     if (stored === null) return
     const serialized = decodeRoomText(stored.payload)
@@ -1404,12 +1419,15 @@ class ServerRoom implements Room {
   private _binaryReady(): Promise<void> {
     const pending: Promise<void>[] = []
     for (const subscription of this._binaryKeyUnsubs.values()) pending.push(subscription.ready)
-    return pending.length === 0 ? Promise.resolve() : Promise.all(pending).then(() => undefined)
+    return pending.length === 0
+      ? Promise.resolve()
+      : withinRoomHorizon(Promise.all(pending), ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS).then(() => undefined)
   }
 
   /** Resolves once the local roster is authoritative: immediately while the live view holds it
    *  (roster known and the event stream attached), else via a backend cell read. */
   private _ensureRoster(): Promise<void> {
+    if (this._pendingRefresh !== null) return this._pendingRefresh
     if (this._state.closed || (this._state.rosterKnown && this._ctrlSub.established)) return Promise.resolve()
     return this._refreshMembers()
   }
@@ -1479,28 +1497,32 @@ class ServerRoom implements Room {
     if (this._heartbeatBusy) return // a slow backend must not pile up overlapping ticks
     this._heartbeatBusy = true
     try {
-      // Renew this node's binary-demand lease on every owner and sweep any crashed reporter's demand.
-      // No cell I/O — runs first so member-cell latency never delays it (the demand TTL has slack for skips).
-      this._demand.heartbeat()
-      const ids = this._ownedMemberIds()
-      if (ids.length > 0) {
-        const keys = ids.map((id) => roomMemberKvKey(this.id, id))
-        const present = await mutateCells(this.id, this._inc, { keys }, (cells) => {
-          const present = new Set<string>()
-          const mutations: CellMutation[] = []
-          const seenAt = Date.now()
-          for (let index = 0; index < ids.length; index++) {
-            const raw = cells.get(keys[index]!)
-            if (raw === undefined) continue
-            present.add(ids[index]!)
-            const record = { ...(parse(decodeRoomText(raw)) as RoomMemberRecord), seenAt }
-            mutations.push({ key: keys[index]!, set: { bytes: encodeRoomText(stringify(record)) } })
-          }
-          return { value: present, mutations }
-        })
-        for (const id of ids) if (!present.has(id)) this._applyLeave(id)
+      try {
+        // Renew this node's binary-demand lease on every owner and sweep any crashed reporter's demand.
+        // No cell I/O — runs first so member-cell latency never delays it (the demand TTL has slack for skips).
+        this._demand.heartbeat()
+        const ids = this._ownedMemberIds().filter((id) => !this._pendingAdmissions.has(id))
+        if (ids.length > 0) {
+          const keys = ids.map((id) => roomMemberKvKey(this.id, id))
+          const present = await mutateCells(this.id, this._inc, { keys }, (cells) => {
+            const present = new Set<string>()
+            const mutations: CellMutation[] = []
+            const seenAt = Date.now()
+            for (let index = 0; index < ids.length; index++) {
+              const raw = cells.get(keys[index]!)
+              if (raw === undefined) continue
+              present.add(ids[index]!)
+              const record = { ...(parse(decodeRoomText(raw)) as RoomMemberRecord), seenAt }
+              mutations.push({ key: keys[index]!, set: { bytes: encodeRoomText(stringify(record)) } })
+            }
+            return { value: present, mutations }
+          })
+          for (const id of ids) if (!present.has(id)) this._applyLeave(id)
+        }
+      } finally {
+        // Authority diagnosis owns convergence after a missed close. Renewal failure cannot bypass it.
+        await this._reconcileAuthority()
       }
-      await this._reconcileAuthority()
     } finally {
       this._heartbeatBusy = false
     }
@@ -1566,13 +1588,11 @@ class ServerLocalParticipant extends ParticipantBase {
   async setMeta(meta: ParticipantMeta): Promise<void> {
     this._assertActive()
     await this._room._setMemberMeta(this.id, meta)
-    this._meta = meta
   }
 
   async setAttributes(attrs: ParticipantMeta): Promise<void> {
     this._assertActive()
     await this._room._mergeMemberMeta(this.id, attrs)
-    this._meta = mergeAttributes(this._meta, attrs)
   }
 
   async leave(): Promise<void> {

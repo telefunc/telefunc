@@ -102,31 +102,41 @@ async function readMembers(roomId: string, inc: string, ids?: string[]): Promise
     if (Date.now() - record.seenAt > ROOM_MEMBER_TTL_MS) {
       const siblingKeys = [key, roomHiddenMemberKvKey(roomId, id)]
       if (record.identity !== undefined) siblingKeys.push(roomIdentityMemberKvKey(roomId, record.identity, id))
-      const reaped = await mutateCells(roomId, inc, { keys: siblingKeys }, (current) => {
+      const reap = await mutateCells(roomId, inc, { keys: siblingKeys }, (current) => {
         const latest = current.get(key)
-        if (latest === undefined) return { value: false, mutations: [] }
+        if (latest === undefined) return { value: { kind: 'missing' } as const, mutations: [] }
         const latestRecord = parse(decodeRoomText(latest)) as RoomMemberRecord
+        if (latestRecord.inc !== inc) return { value: { kind: 'missing' } as const, mutations: [] }
         return Date.now() - latestRecord.seenAt > ROOM_MEMBER_TTL_MS
-          ? { value: true, mutations: siblingKeys.map((siblingKey) => ({ key: siblingKey })) }
-          : { value: false, mutations: [] }
+          ? {
+              value: { kind: 'reaped' } as const,
+              mutations: siblingKeys.map((siblingKey) => ({ key: siblingKey })),
+            }
+          : { value: { kind: 'live', record: latestRecord } as const, mutations: [] }
       })
-      if (reaped) {
+      if (reap.kind === 'reaped') {
         await dropRetainedOwnedBy(roomId, inc, id)
         await publishCtrl(roomId, inc, { __r: 'leave', id, cause: 'disconnected' })
+      } else if (reap.kind === 'live') {
+        members.push(memberSnapshot(id, reap.record))
       }
       continue
     }
-    members.push({
-      id,
-      meta: record.meta,
-      joinedAt: record.joinedAt,
-      metaSeq: record.metaSeq,
-      identity: record.identity ?? null,
-      ...(record.tracks === undefined ? {} : { tracks: record.tracks }),
-      ...(record.hidden ? { hidden: true } : {}),
-    })
+    members.push(memberSnapshot(id, record))
   }
   return members
+}
+
+function memberSnapshot(id: string, record: RoomMemberRecord): MemberSnapshot {
+  return {
+    id,
+    meta: record.meta,
+    joinedAt: record.joinedAt,
+    metaSeq: record.metaSeq,
+    identity: record.identity ?? null,
+    ...(record.tracks === undefined ? {} : { tracks: record.tracks }),
+    ...(record.hidden ? { hidden: true } : {}),
+  }
 }
 
 async function listMemberKeys(roomId: string, inc: string): Promise<Array<{ key: string; id: string }>> {
