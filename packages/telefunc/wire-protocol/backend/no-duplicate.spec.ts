@@ -77,9 +77,7 @@ describe('one backend mechanism', () => {
     expect(calledMethods('packages/telefunc/wire-protocol/server/server-broadcast.ts')).not.toEqual(
       expect.arrayContaining(['commitLane', 'subscribeLane']),
     )
-    const roomImplementations = files.filter((file) =>
-      file.startsWith('packages/telefunc/wire-protocol/room/server/'),
-    )
+    const roomImplementations = files.filter((file) => file.startsWith('packages/telefunc/wire-protocol/room/server/'))
     expect(calledMethods(...roomImplementations)).toEqual(expect.arrayContaining(['commitLane', 'subscribeLane']))
   })
 })
