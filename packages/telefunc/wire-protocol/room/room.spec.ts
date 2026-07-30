@@ -273,15 +273,21 @@ describe('Room public behavior', () => {
       },
     )
     expect(leased).toMatchObject({ ok: true, head: { state: 'closing' } })
+    if (!('head' in leased)) throw new Error('expected an active close lease')
 
     let settled = false
     const closing = Room.close(room.id).then(() => {
       settled = true
     })
-    await Promise.resolve()
+    await vi.advanceTimersByTimeAsync(900)
     expect(settled).toBe(false)
+    expect((await driver.readHead(room.id))?.head).toMatchObject({
+      currentInc: room._inc,
+      state: 'closing',
+      closeLease: { id: leased.head.closeLease?.id },
+    })
 
-    await vi.advanceTimersByTimeAsync(1_100)
+    await vi.advanceTimersByTimeAsync(200)
     await closing
     expect((await driver.readHead(room.id))?.head).toMatchObject({ state: 'closed', currentInc: null })
   })
