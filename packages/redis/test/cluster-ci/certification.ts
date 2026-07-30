@@ -1,8 +1,15 @@
 import { createHash } from 'node:crypto'
 import { Cluster, Redis } from 'ioredis'
-import type { BackendSpi, CommitAccepted, LaneId, RoomHead, SubscriptionState } from 'telefunc/backend'
-import { superviseBackend } from '../../../telefunc/wire-protocol/backend/supervised-backend.js'
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
+import {
+  disposeBackend,
+  installBackend,
+  type BackendSpi,
+  type CommitAccepted,
+  type LaneId,
+  type RoomHead,
+  type SubscriptionState,
+} from 'telefunc/backend'
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import { RedisRoomBackend } from '../../src/index.js'
 import {
   DIRECTORY_PUT_LUA,
@@ -48,6 +55,10 @@ describe('Redis real three-master Cluster CI certification', () => {
   afterAll(async () => {
     await Promise.allSettled((masters ?? []).map(({ client }) => client.quit()))
     if (cluster !== undefined) await cluster.quit().catch(() => cluster.disconnect())
+  })
+
+  afterEach(async () => {
+    await disposeBackend()
   })
 
   it('covers shipped command KEYS and leaves zero capture residue after a full close', async () => {
@@ -157,7 +168,7 @@ describe('Redis real three-master Cluster CI certification', () => {
     const roomId = 'max-safe-room'
     const inc = 'max-safe-inc'
     const backend = redisBackend(cluster, prefix)
-    const fresh = redisBackend(cluster, prefix)
+    const fresh = new RedisRoomBackend({ redis: cluster, prefix })
     const observed: number[] = []
     let subscription: ReturnType<BackendSpi['subscribeLane']> | undefined
     try {
@@ -209,7 +220,7 @@ describe('Redis real three-master Cluster CI certification', () => {
     }
 
     const report = vi.spyOn(console, 'error').mockImplementation(() => {})
-    const baseline = new Set((await pubSubClients()).map(({ id }) => id))
+    const baseline = new Set((await pubSubClients()).map(clientIdentity))
     const backend = redisBackend(cluster, uniquePrefix('replacement'))
     const states: SubscriptionState[] = []
     const observed: string[] = []
@@ -221,7 +232,9 @@ describe('Redis real three-master Cluster CI certification', () => {
       )
       subscription.onStateChange((state) => states.push(state))
       await subscription.ready
-      const [first] = await waitForValue(async () => (await pubSubClients()).filter(({ id }) => !baseline.has(id)))
+      const [first] = await waitForValue(async () =>
+        (await pubSubClients()).filter((client) => !baseline.has(clientIdentity(client))),
+      )
       if (first === undefined) throw new Error('initial Redis subscriber was not observed')
       failNext = true
       await first.owner.client.call('CLIENT', 'KILL', 'ID', String(first.id))
@@ -582,7 +595,7 @@ async function readMasters(nodes: RedisClusterNode[]): Promise<Master[]> {
 }
 
 function redisBackend(redis: Redis | Cluster, prefix: string): BackendSpi {
-  return superviseBackend(new RedisRoomBackend({ redis, prefix }))
+  return installBackend(() => new RedisRoomBackend({ redis, prefix }))
 }
 
 async function open(backend: BackendSpi, roomId: string, inc: string): Promise<RoomHead> {
