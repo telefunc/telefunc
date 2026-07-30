@@ -964,6 +964,31 @@ describe('Room public behavior', () => {
     expect(backend).not.toBeInstanceOf(MemoryBackend)
     const member = await room.join()
     expect(await member.publish('works')).toMatchObject({ seq: 1 })
+
+    const lane = { key: 'zero-config-supervision', kind: 'text' } as const
+    const received: string[] = []
+    const firstReceived = deferred<void>()
+    let secondReceived = deferred<void>()
+    const first = backend.subscribe(lane, (payload) => {
+      received.push(`first:${decoder.decode(payload)}`)
+      firstReceived.resolve()
+    })
+    const second = backend.subscribe(lane, (payload) => {
+      received.push(`second:${decoder.decode(payload)}`)
+      secondReceived.resolve()
+    })
+    await Promise.all([first.ready, second.ready])
+    await backend.publish(lane, encoder.encode('one'))
+    await Promise.all([firstReceived.promise, secondReceived.promise])
+    expect(received).toEqual(['first:one', 'second:one'])
+
+    await first.unsubscribe()
+    secondReceived = deferred<void>()
+    await backend.publish(lane, encoder.encode('two'))
+    await secondReceived.promise
+    expect(received).toEqual(['first:one', 'second:one', 'second:two'])
+    expect(second.state()).toBe('ready')
+    await second.unsubscribe()
   })
 
   it('keeps snapshot references stable until a real state change', async () => {
