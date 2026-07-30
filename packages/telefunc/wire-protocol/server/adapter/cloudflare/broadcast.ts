@@ -79,7 +79,7 @@ class CloudflareBucketPublishBuffer {
   private head = 0
   private totalBytes = 0
   private readonly maxBytes: number
-  private _flushing = false
+  #flushing = false
 
   constructor(maxBytes: number) {
     assert(maxBytes > 0, 'Cloudflare bucket publish buffer size must be > 0.')
@@ -101,12 +101,12 @@ class CloudflareBucketPublishBuffer {
   }
 
   get flushing(): boolean {
-    return this._flushing
+    return this.#flushing
   }
 
   async flush(): Promise<void> {
-    if (this._flushing) return
-    this._flushing = true
+    if (this.#flushing) return
+    this.#flushing = true
     try {
       while (this.head < this.entries.length) {
         const entry = this.entries[this.head]!
@@ -121,7 +121,7 @@ class CloudflareBucketPublishBuffer {
       }
       this.compact()
     } finally {
-      this._flushing = false
+      this.#flushing = false
     }
   }
 
@@ -221,21 +221,21 @@ class MemberBucketState {
 
 class CloudflareBroadcastSubscriptionAttempt implements SubscriptionAttempt {
   readonly ready: Promise<void>
-  private readonly _receiver: BackendReceiver
-  private readonly _detach: () => Promise<void>
-  private readonly _listeners = new Set<(state: SubscriptionState) => void>()
-  private _state: SubscriptionState = 'establishing'
-  private _unsubscribed = false
+  readonly #receiver: BackendReceiver
+  readonly #detach: () => Promise<void>
+  readonly #listeners = new Set<(state: SubscriptionState) => void>()
+  #state: SubscriptionState = 'establishing'
+  #unsubscribed = false
 
   constructor(member: MemberBucketState, receiver: BackendReceiver, detach: () => Promise<void>) {
-    this._receiver = receiver
-    this._detach = detach
+    this.#receiver = receiver
+    this.#detach = detach
     this.ready = member.ready.then(
       () => {
-        if (this._state !== 'closed') this._transition('ready')
+        if (this.#state !== 'closed') this.#transition('ready')
       },
       (error) => {
-        this._transition('closed')
+        this.#transition('closed')
         throw error
       },
     )
@@ -243,30 +243,30 @@ class CloudflareBroadcastSubscriptionAttempt implements SubscriptionAttempt {
   }
 
   state(): SubscriptionState {
-    return this._state
+    return this.#state
   }
 
   onStateChange(cb: (state: SubscriptionState) => void): () => void {
-    this._listeners.add(cb)
-    return () => this._listeners.delete(cb)
+    this.#listeners.add(cb)
+    return () => this.#listeners.delete(cb)
   }
 
   async deliver(payload: Uint8Array, info: OrderingInfo): Promise<void> {
-    if (this._state !== 'ready') return
-    await (this._receiver(payload, info) as unknown)
+    if (this.#state !== 'ready') return
+    await (this.#receiver(payload, info) as unknown)
   }
 
   async unsubscribe(): Promise<void> {
-    if (this._unsubscribed) return
-    this._unsubscribed = true
-    this._transition('closed')
-    await this._detach()
+    if (this.#unsubscribed) return
+    this.#unsubscribed = true
+    this.#transition('closed')
+    await this.#detach()
   }
 
-  private _transition(state: SubscriptionState): void {
-    if (this._state === state) return
-    this._state = state
-    for (const listener of [...this._listeners]) listener(state)
+  #transition(state: SubscriptionState): void {
+    if (this.#state === state) return
+    this.#state = state
+    for (const listener of [...this.#listeners]) listener(state)
   }
 }
 

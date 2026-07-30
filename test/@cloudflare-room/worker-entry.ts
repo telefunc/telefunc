@@ -28,30 +28,30 @@ type DeliveryState = {
 }
 
 export class SessionDurableObject extends DurableObject {
-  private readonly _deliveries = new Map<string, DeliveryState>()
+  readonly #deliveries = new Map<string, DeliveryState>()
 
   prepareDelivery(roomId: string, blockFirst: boolean): void {
     let release!: () => void
     const gate = new Promise<void>((resolve) => {
       release = resolve
     })
-    this._deliveries.set(roomId, { blockFirst, started: false, delivered: [], gate, release })
+    this.#deliveries.set(roomId, { blockFirst, started: false, delivered: [], gate, release })
   }
 
   deliveryState(roomId: string): { started: boolean; delivered: number[] } {
-    const state = this._deliveries.get(roomId)
+    const state = this.#deliveries.get(roomId)
     if (state === undefined) throw new Error('delivery probe was not prepared')
     return { started: state.started, delivered: [...state.delivered] }
   }
 
   releaseDelivery(roomId: string): void {
-    const state = this._deliveries.get(roomId)
+    const state = this.#deliveries.get(roomId)
     if (state === undefined) throw new Error('delivery probe was not prepared')
     state.release()
   }
 
   async telefuncRoomDeliver(request: DeliveryRequest): Promise<void> {
-    const state = this._deliveries.get(request.roomId)
+    const state = this.#deliveries.get(request.roomId)
     if (state === undefined) throw new Error('delivery reached an unprepared session')
     state.delivered.push(request.seq)
     if (state.blockFirst && request.seq === 1) {
@@ -64,20 +64,20 @@ export class SessionDurableObject extends DurableObject {
 }
 
 export class TelefuncRoomDurableObject extends ProductionRoomDurableObject {
-  private readonly _probeEnv: unknown
-  private _reconstructed: ProductionRoomDurableObject | null = null
+  readonly #probeEnv: unknown
+  #reconstructed: ProductionRoomDurableObject | null = null
 
   constructor(ctx: DurableObjectState, env: unknown) {
     super(ctx, env)
-    this._probeEnv = env
+    this.#probeEnv = env
   }
 
   override awaitDelivery(token: string): Promise<void> {
-    return this._reconstructed === null ? super.awaitDelivery(token) : this._reconstructed.awaitDelivery(token)
+    return this.#reconstructed === null ? super.awaitDelivery(token) : this.#reconstructed.awaitDelivery(token)
   }
 
   telefuncRoomReconstructForTest(): void {
-    this._reconstructed = new ProductionRoomDurableObject(this.ctx, this._probeEnv)
+    this.#reconstructed = new ProductionRoomDurableObject(this.ctx, this.#probeEnv)
   }
 }
 
