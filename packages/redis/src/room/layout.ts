@@ -1,5 +1,4 @@
-// Final physical key layout + every Lua script for the Redis BackendDriver. The module is
-// package-internal but is emitted because RedisRoomBackend consumes it; standalone and Cluster use this one layout.
+// Physical key layout and Lua scripts shared by standalone and Cluster RedisRoomBackend.
 //
 // Layout — every key of one room shares the `{<rid>}` hash tag, so a whole room lives in ONE Cluster
 // slot and each script can declare all the keys it touches in KEYS (spi.md §5.2):
@@ -20,18 +19,26 @@
 //   gen-drop:  tf:room:{rid}:gen-drops       HASH inc -> exclusive cleanup owner + lease
 //   dir index: tf:{rid-dir}<prefix>… — the directory is global, its own two co-slotted keys (backend.ts)
 //
-// AUTHORITY TIME: production derives `now_ms` from `redis.call('TIME')` (the one central clock, atomic
-// inside the script — spi.md I13). Every time-sensitive command accepts an optional `now_ms` scalar so
-// the atomic Lua protocol can be tested against a controlled authority clock; RedisRoomBackend supplies
-// an empty value in production and therefore uses Redis TIME. The scalar is never a key and cannot affect
-// the co-slot invariant. A caller-local `Date.now()` is never an authority source.
+// Each time-sensitive command samples Redis TIME on the room-slot owner (spi.md I13). Tests may inject
+// `now_ms`; production passes empty and never uses caller-local Date.now().
 
-import { HEAD_TRANSITIONS, ORDERING_FRAME_LAYOUT, laneKey, type LaneId } from 'telefunc/backend'
+import { HEAD_TRANSITIONS, ORDERING_FRAME_LAYOUT, laneKey, type BroadcastLane, type LaneId } from 'telefunc/backend'
 export { laneKey }
 
 export const DEFAULT_ROOM_PREFIX = 'tf:'
 export const REDIS_DELIVERY_FENCE_BYTE = 0xff
 export const REDIS_SAFE_INTEGER_MAX = Number.MAX_SAFE_INTEGER
+
+function broadcastTag(key: string): string {
+  return key === '' ? '{_}:empty' : `{${key}}`
+}
+export function broadcastSequenceKey(prefix: string, key: string): string {
+  return `${prefix}seq:${broadcastTag(key)}`
+}
+export function broadcastChannel(prefix: string, lane: BroadcastLane): string {
+  const kind = lane.kind === 'text' ? 't' : 'b'
+  return `${prefix}${kind}:${broadcastTag(lane.key)}`
+}
 
 // ── key naming ────────────────────────────────────────────────────────────
 

@@ -1,14 +1,10 @@
 // The released Redis BackendDriver for standalone Redis and Redis Cluster deployments.
 //
-// Mechanism map (spi.md §5.2), all atomic pieces in layout.ts's Lua:
-//   head CX      one atomic record: legality (throw) · compare (conflict) · fresh-inc guard · mint · store
-//   cells CX     head+inc+open precondition, coarse per-generation revision (INCR'd), all-or-none
-//   commit       one boolean precondition (default open / closing-control), order advance, retain, PUBLISH
-//   cells read   the stable-read algorithm: rev_before → SCAN/MGET → rev_after, 8-attempt bound, logical
-//                expiresAt filtering, PX as a physical backstop only
-//   delivery     PUBLISH is the broker handoff (settles inside acceptance); the broker's per-connection
-//                FIFO realizes the ordered at-most-once attempt chain; receivers = the PUBLISH count
-//   subscription SUBSCRIBE ack = establishment (fail-closed); channels keyed by (inc, lane) — I11
+// Mechanism map (spi.md §5.2), with atomic pieces in layout.ts's Lua:
+//   head/cells CX  validate ownership, compare, and mutate one room slot
+//   cells read     revision → manifest/MGET → keyed head/revision/time fence, bounded to 8 attempts
+//   commit         validate, advance order, retain, and publish data plus its in-band delivery fence
+//   subscription   SUBSCRIBE ack establishes; generation invalidation terminates; late sequence drops
 
 import { randomUUID } from 'node:crypto'
 import { Cluster, type Redis } from 'ioredis'
@@ -28,6 +24,8 @@ import type {
   RoomHead,
 } from 'telefunc/backend'
 import {
+  broadcastChannel,
+  broadcastSequenceKey,
   cellKey,
   cellKeyPrefix,
   DEFAULT_ROOM_PREFIX,
@@ -82,23 +80,6 @@ local frame = tf_ordering_frame(seq, ts, ARGV[1])
 local receivers = redis.call('PUBLISH', KEYS[2], frame)
 return {seq, ts, receivers}
 `.trim()
-
-function broadcastChannel(prefix: string, lane: BroadcastLane): string {
-  const kind = lane.kind === 'text' ? 't' : 'b'
-  return `${prefix}${kind}:${broadcastTag(lane.key)}`
-}
-
-function broadcastSequenceKey(prefix: string, key: string): string {
-  return `${prefix}seq:${broadcastTag(key)}`
-}
-
-function broadcastTag(key: string): string {
-  return key === '' ? '{_}:empty' : `{${key}}`
-}
-
-function durableSource(roomId: string, inc: string, lane: LaneId): BackendSubscriptionSource {
-  return { kind: 'durable', roomId, inc, lane }
-}
 
 // The stored head, exactly as the Lua encodes it. `config` is opaque base64; `until`/`exp` are authority
 // timestamps; `inc`/`lease`/`exp` are present only when meaningful (keeps the cjson clean).
@@ -363,7 +344,7 @@ export class RedisRoomBackend implements BackendDriver {
     opts?: { retain?: boolean; closingLease?: string; requiredCellKeys?: string[] },
   ): Promise<CommitResult> {
     this.#assertLive()
-    const source = durableSource(roomId, inc, lane)
+    const source = { kind: 'durable' as const, roomId, inc, lane }
     const keys = REDIS_ROOM_COMMAND_KEYS.commit(this.#prefix, roomId, inc, lane, opts?.requiredCellKeys)
     const flush = this.subscriptions.prepareFlush(source)
     let reply: string
@@ -420,7 +401,6 @@ export class RedisRoomBackend implements BackendDriver {
       payload,
       info: { seq, timestamp },
     } = decodeRedisOrderingFrame(frame)
-    assertOrderingPosition(seq, timestamp, 'RedisRoomBackend.readRetained')
     return { payload: Uint8Array.from(payload), seq, timestamp }
   }
 
@@ -439,21 +419,18 @@ export class RedisRoomBackend implements BackendDriver {
     if (opts?.ifSeq !== undefined && (!Number.isSafeInteger(opts.ifSeq) || opts.ifSeq <= 0)) {
       throw new Error('deleteRetained: ifSeq must be a positive safe integer')
     }
-    if (lane !== undefined) {
-      const keys = REDIS_ROOM_COMMAND_KEYS.retainedDelete(this.#prefix, roomId, inc, [
-        retainedKey(this.#prefix, roomId, inc, laneKey(lane)),
-      ])
-      await this.#call(REDIS_ROOM_COMMANDS.retainedDelete.name, [
-        String(keys.length),
-        ...keys,
-        opts?.ifSeq === undefined ? '' : String(opts.ifSeq),
-      ])
-      return
-    }
-    const prefix = retainedKeyPrefix(this.#prefix, roomId, inc)
-    const keys = (await this.#generationKeys(roomId, inc)).filter((key) => key.startsWith(prefix))
-    const commandKeys = REDIS_ROOM_COMMAND_KEYS.retainedDelete(this.#prefix, roomId, inc, keys)
-    await this.#call(REDIS_ROOM_COMMANDS.retainedDelete.name, [String(commandKeys.length), ...commandKeys, ''])
+    const retainedKeys =
+      lane === undefined
+        ? (await this.#generationKeys(roomId, inc)).filter((key) =>
+            key.startsWith(retainedKeyPrefix(this.#prefix, roomId, inc)),
+          )
+        : [retainedKey(this.#prefix, roomId, inc, laneKey(lane))]
+    const keys = REDIS_ROOM_COMMAND_KEYS.retainedDelete(this.#prefix, roomId, inc, retainedKeys)
+    await this.#call(REDIS_ROOM_COMMANDS.retainedDelete.name, [
+      String(keys.length),
+      ...keys,
+      opts?.ifSeq === undefined ? '' : String(opts.ifSeq),
+    ])
   }
 
   // ── subscriptions ──
@@ -590,17 +567,9 @@ export class RedisRoomBackend implements BackendDriver {
     return this.#publisher.smembers(generationKeysKey(this.#prefix, roomId, inc))
   }
 
-  async #call(command: string, keysAndArgs: ReadonlyArray<string | Uint8Array>): Promise<unknown> {
-    try {
-      return await callDefinedCommand(this.#publisher, command, keysAndArgs)
-    } catch (error) {
-      throw normalizeRedisError(error)
-    }
+  #call(command: string, keysAndArgs: ReadonlyArray<string | Uint8Array>): Promise<unknown> {
+    return callDefinedCommand(this.#publisher, command, keysAndArgs)
   }
-}
-
-function normalizeRedisError(error: unknown): Error {
-  return error instanceof Error ? new Error(error.message) : new Error(String(error))
 }
 
 // A stored cell is "<expiresAt|''>\n<payload bytes>"; the header is ASCII digits (or empty) with no
