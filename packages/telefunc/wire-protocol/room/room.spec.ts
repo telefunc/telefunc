@@ -227,6 +227,36 @@ describe('Room public behavior', () => {
     }
   })
 
+  it('keeps a server participant active so a transient durable-leave failure can be retried', async () => {
+    const room = await Room.create('retry-local-leave')
+    const member = await room.join()
+    const failure = new Error('transient member delete failure')
+    vi.spyOn(driver, 'compareExchangeCells').mockRejectedValueOnce(failure)
+
+    await expect(member.leave()).rejects.toBe(failure)
+    await expect(member.publish('still-present')).resolves.toMatchObject({ seq: 1 })
+    await expect(member.leave()).resolves.toBeUndefined()
+    expect(await Room.getParticipants(room.id)).toEqual([])
+  })
+
+  it('retains room-stub ownership so a transient durable-leave failure can be retried', async () => {
+    const room = (await Room.create('retry-stub-leave')) as ServerRoom
+    const stub = register(room)
+    const joined = (await room._handleStubRequest(stub, {
+      __r: 'req-join',
+      meta: {},
+      selfDelivery: true,
+    })) as { id: string }
+    const request = { __r: 'req-leave' as const, id: joined.id }
+    const failure = new Error('transient member delete failure')
+    vi.spyOn(driver, 'compareExchangeCells').mockRejectedValueOnce(failure)
+
+    await expect(room._handleStubRequest(stub, request)).rejects.toBe(failure)
+    expect(stub._stubMembers.has(joined.id)).toBe(true)
+    await expect(room._handleStubRequest(stub, request)).resolves.toBeUndefined()
+    expect(await Room.getParticipants(room.id)).toEqual([])
+  })
+
   it('creates, lists, updates, closes fully, and recreates a genuinely fresh domain', async () => {
     const room = (await Room.create('lifecycle', { meta: { topic: 'one' } })) as ServerRoom
     const firstInc = room._inc
@@ -627,6 +657,25 @@ describe('client Room lifecycle', () => {
     expect(isRoomError(error)).toBe(true)
     expect(isShieldValidationError(error)).toBe(true)
     expect(roomAckError(error, vi.fn())).toEqual({ text: 'overlap', status: ACK_STATUS.ERROR })
+  })
+
+  it('keeps a client participant active so a rejected leave request can be retried', async () => {
+    let leaveAttempts = 0
+    const fake = createFakeStub({
+      send: async (message) => {
+        const request = message as { __r?: string }
+        if (request.__r === 'req-join') return { id: crypto.randomUUID(), joinedAt: Date.now() }
+        if (request.__r === 'req-leave' && leaveAttempts++ === 0) throw new Error('transient leave rejection')
+        return undefined
+      },
+    })
+    const client = new ClientRoom(fake.stub, snapshot('retry-client-leave'))
+    const member = await client.join()
+
+    await expect(member.leave()).rejects.toThrow('transient leave rejection')
+    await expect(member.publish('still-active')).resolves.toMatchObject({ seq: 1 })
+    await expect(member.leave()).resolves.toBeUndefined()
+    expect(leaveAttempts).toBe(2)
   })
 
   it('redeclares a room-wide text subscription after reconnect even when the local latch already matches', () => {
@@ -1261,7 +1310,9 @@ async function wideBinaryScenario(id: string, retain: boolean, byte: number) {
   return { receipt: receipt.seq, server: serverSeqs[0] ?? null, client: clientSeqs[0] }
 }
 
-function createFakeStub(): {
+function createFakeStub(options?: {
+  send?: (message: unknown) => Promise<unknown>
+}): {
   stub: ClientBroadcast
   emitBinary(data: Uint8Array, info: ChannelPublishInfo): void
 } {
@@ -1273,7 +1324,7 @@ function createFakeStub(): {
       return () => binary.splice(binary.indexOf(callback), 1)
     },
     _setWireTextSubscribed: () => {},
-    send: async () => undefined,
+    send: options?.send ?? (async () => undefined),
     publish: async () => ({ key: 'fake', seq: 1, timestamp: 1 }),
     publishBinary: async () => ({ key: 'fake', seq: 1, timestamp: 1 }),
     onClose: () => {},

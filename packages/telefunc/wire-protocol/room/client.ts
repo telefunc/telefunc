@@ -525,14 +525,9 @@ class ClientRoomParticipant extends ClientParticipantBase {
 
   async leave(): Promise<void> {
     if (this._left) return
-    this._left = true
-    try {
-      await this._room._request({ __r: 'req-leave', id: this.id })
-    } finally {
-      // Local cleanup even when the wire is gone — the server reaps the member on stub death.
-      this._room._dropParticipant(this.id)
-      this._onLeft({ type: 'left' })
-    }
+    await this._room._request({ __r: 'req-leave', id: this.id })
+    this._room._dropParticipant(this.id)
+    this._onLeft({ type: 'left' })
   }
 }
 
@@ -600,14 +595,9 @@ class ClientStandaloneParticipant extends ClientParticipantBase {
 
   async leave(): Promise<void> {
     if (this._left) return
-    this._left = true
-    try {
-      await this._request({ __r: 'req-leave' })
-    } finally {
-      // Local cleanup even when the wire is gone — the server reaps the member on stub death.
-      this._onLeft({ type: 'left' })
-      void this._channel.close().catch(() => {})
-    }
+    await this._request({ __r: 'req-leave' })
+    this._onLeft({ type: 'left' })
+    void this._channel.close().catch(() => {})
   }
 
   private _request(req: ParticipantStubRequest): Promise<unknown> {

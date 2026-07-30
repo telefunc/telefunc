@@ -1650,8 +1650,8 @@ class ServerRoom implements Room {
       }
       case 'req-leave':
         this._assertStubMember(stub, req.id)
-        stub._stubMembers.delete(req.id)
         await this._removeMember(req.id, { type: 'left' })
+        stub._stubMembers.delete(req.id)
         return undefined
       case 'req-set-meta':
         this._assertStubMember(stub, req.id)
@@ -2212,7 +2212,6 @@ class ServerLocalParticipant extends ParticipantBase {
 
   async leave(): Promise<void> {
     if (this._left) return
-    this._left = true
     await this._room._removeMember(this.id, { type: 'left' })
     this._onLeft({ type: 'left' }) // fires even when the room wasn't observing (no echo applied)
   }
