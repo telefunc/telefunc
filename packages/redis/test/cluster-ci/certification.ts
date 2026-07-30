@@ -227,6 +227,29 @@ describe('Redis real three-master Cluster CI certification', () => {
     }
   })
 
+  it('rejects invalid cell TTLs before any mutation takes effect', async () => {
+    const backend = redisBackend(cluster, uniquePrefix('cell-preflight'))
+    const roomId = 'cell-preflight-room'
+    const inc = 'cell-preflight-inc'
+    try {
+      await open(backend, roomId, inc)
+      const before = await backend.readCells(roomId, inc, { keys: [] })
+      if ('staleInc' in before) throw new Error('opened generation was stale')
+      await expect(
+        backend.compareExchangeCells(roomId, inc, before.revision, [
+          { key: 'first', set: { bytes: bytes('written') } },
+          { key: 'invalid', set: { bytes: bytes('rejected'), ttlMs: 0 } },
+        ]),
+      ).rejects.toThrow(/expire|ttl/i)
+      const after = await backend.readCells(roomId, inc, { keys: ['first', 'invalid'] })
+      if ('staleInc' in after) throw new Error('opened generation was stale')
+      expect(after.revision).toBe(before.revision)
+      expect(after.cells.size).toBe(0)
+    } finally {
+      await backend.dispose()
+    }
+  })
+
   it('exposes terminal attempts so consumer replacement can fail once, recover, and deliver', async () => {
     const topology = cluster.nodes('master').sort(compareRedisNodes)
     const originals = topology.map((node) => [node, node.duplicate.bind(node)] as const)
