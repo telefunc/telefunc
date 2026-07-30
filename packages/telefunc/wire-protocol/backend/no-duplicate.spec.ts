@@ -18,9 +18,7 @@ describe('one backend mechanism', () => {
       'packages/redis/src/room/subscriber-transport.ts::RedisSubscriptionDriver._attempts',
       'packages/telefunc/wire-protocol/backend/memory/backend.ts::Generation.subs',
       'packages/telefunc/wire-protocol/backend/memory/backend.ts::MemoryBackendState.broadcastSubs',
-      expect.stringMatching(
-        /^packages\/telefunc\/wire-protocol\/room\/server(?:\/room)?\.ts::ServerRoom\._announcedTracks$/,
-      ),
+      'packages/telefunc/wire-protocol/room/server/room.ts::ServerRoom._announcedTracks',
       'packages/telefunc/wire-protocol/server/mux.ts::ChannelMux.pendingRegisterWaiters',
       'packages/telefunc/wire-protocol/server/sse.ts::SseConnectionTransport.pendingConnections',
     ])
@@ -79,10 +77,8 @@ describe('one backend mechanism', () => {
     expect(calledMethods('packages/telefunc/wire-protocol/server/server-broadcast.ts')).not.toEqual(
       expect.arrayContaining(['commitLane', 'subscribeLane']),
     )
-    const roomImplementations = files.filter(
-      (file) =>
-        file === 'packages/telefunc/wire-protocol/room/server.ts' ||
-        file.startsWith('packages/telefunc/wire-protocol/room/server/'),
+    const roomImplementations = files.filter((file) =>
+      file.startsWith('packages/telefunc/wire-protocol/room/server/'),
     )
     expect(calledMethods(...roomImplementations)).toEqual(expect.arrayContaining(['commitLane', 'subscribeLane']))
   })
