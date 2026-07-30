@@ -1,11 +1,10 @@
 {
   "compilerOptions": {
-    "module": "Node16",
-    "moduleResolution": "Node16",
     "noEmit": true,
     "skipLibCheck": true,
     "strict": true,
-    "target": "ES2019"
+    "target": "ES2019",
+    "types": []
   },
-  "include": ["index.ts"]
+  "include": ["released-api.ts"]
 }

@@ -33,6 +33,8 @@ import {
   getBackend,
   HEAD_TRANSITIONS,
   installBackend,
+  MAX_CLOSE_LEASE_MS,
+  MIN_CLOSE_LEASE_MS,
   ORDERING_FRAME_LAYOUT,
   type BackendDriver,
   type BackendFactory,
@@ -50,7 +52,14 @@ import {
 } from 'telefunc/backend'
 import { ConnectionError, withContext } from 'telefunc/client'
 import { Telefunc as NodeTelefunc } from 'telefunc/node'
-import { installRedis, RedisTransport, type InstallRedisOptions, type RedisBroadcastOptions } from '@telefunc/redis'
+import {
+  installRedis,
+  RedisRoomBackend,
+  RedisTransport,
+  type InstallRedisOptions,
+  type RedisBroadcastOptions,
+  type RedisRoomBackendOptions,
+} from '@telefunc/redis'
 
 type Assert<T extends true> = T
 type Extends<Actual, Baseline> = [Actual] extends [Baseline] ? true : false
@@ -167,6 +176,10 @@ const orderingSeqLow: 4 = ORDERING_FRAME_LAYOUT.offsets.seqLow
 const orderingTimestampHigh: 8 = ORDERING_FRAME_LAYOUT.offsets.timestampHigh
 const orderingTimestampLow: 12 = ORDERING_FRAME_LAYOUT.offsets.timestampLow
 const backendVersion: 1 = BACKEND_SPI_VERSION
+const closeLeaseBounds: readonly [typeof MIN_CLOSE_LEASE_MS, typeof MAX_CLOSE_LEASE_MS] = [
+  MIN_CLOSE_LEASE_MS,
+  MAX_CLOSE_LEASE_MS,
+]
 const broadcastLane: BroadcastLane = { key: 'released', kind: 'text' }
 declare const backendFactory: BackendFactory
 declare const backendDriver: BackendDriver
@@ -263,12 +276,17 @@ declare const redisClient: RedisBroadcastOptions['redis']
 const redisInstallOptions: InstallRedisOptions = { prefix: 'tf:' }
 const redisBroadcastOptions: RedisBroadcastOptions = { redis: redisClient, prefix: 'tf:' }
 const redisTransport = new RedisTransport(redisBroadcastOptions)
+declare const redisRoomBackendOptions: RedisRoomBackendOptions
+const redisRoomBackend: BackendDriver = new RedisRoomBackend(redisRoomBackendOptions)
+// @ts-expect-error the released constructor has no test-hook/runtime dependency argument
+const noRuntimeHooks = new RedisRoomBackend(redisRoomBackendOptions, { authorityNow: () => 0 })
 installRedis(redisClient, redisInstallOptions)
 
 void [
   Broadcast,
   Channel,
   backendVersion,
+  closeLeaseBounds,
   broadcastLane,
   backend,
   backendDriver,
@@ -288,6 +306,8 @@ void [
   call,
   node,
   redisTransport,
+  redisRoomBackend,
+  noRuntimeHooks,
   pinServerContextMembers,
   ChannelClosedError,
   ChannelOverflowError,
