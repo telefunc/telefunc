@@ -465,7 +465,7 @@ Rooms work across multiple server nodes out of the box with <Link href="/redis">
 - **Deterministic convergence.** Metadata and config updates land in the same final state on every node, whatever order they arrive in.
 - **Backend-native reads.** `Room.get` and `Room.list` use the installed Room backend's authority and directory surfaces. On <Link href="/stream/cloudflare#room-state">Cloudflare</Link>, both are SQLite Durable Object state; room heads and retained replay are strongly consistent, while the directory is a repairable projection verified against each room head.
 
-- **Bounded by design.** A participant may announce up to 32 named binary tracks (the unnamed lane is always free), and the `{ tail }` backfill is limited to 256 messages / 1 MiB / 60 seconds. Membership itself is uncapped; use atomic application-level admission for a hard limit (see <Link href="#switching-rooms-capacity">Capacity</Link>).
+- **Bounded tail.** The `{ tail }` backfill is limited to 256 messages / 1 MiB / 60 seconds. Membership itself is uncapped; use atomic application-level admission for a hard limit (see <Link href="#switching-rooms-capacity">Capacity</Link>).
 
 
 ## Reference

@@ -252,12 +252,6 @@ export const ROOM_TAIL_HOLD_BYTES_MAX = 1024 * 1024
  *  ingestion released: pre-attach, waiting to be serialized into a response; post-attach, waiting for
  *  the client's first subscribe. Generous — the contract is a prompt subscribe, this only bounds misuse. */
 export const ROOM_TAIL_ATTACH_TIMEOUT_MS = 60_000
-/** Max named binary tracks one participant can announce. Generous for real media (mic, camera,
- *  screen, a few data lanes), fatal for a hostile publisher spraying distinct track names — each
- *  named track costs a roster entry, a KV record slot, a control announcement, a retained slot, and
- *  an upstream key for every all-track subscriber. The unnamed default lane never counts against it. */
-export const ROOM_TRACKS_PER_MEMBER_MAX = 32
-
 /** Lease on a remote instance's binary-track demand (`onDemand`). Each instance re-gossips its live
  *  demand every heartbeat, so a live watcher's lease is renewed well within this; a reporter that
  *  crashed without sending its 0-transition has its demand swept once the lease lapses, so a member's

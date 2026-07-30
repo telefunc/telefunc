@@ -15,7 +15,6 @@ import {
   ROOM_HEARTBEAT_INTERVAL_MS,
   ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS,
   ROOM_TAIL_ATTACH_TIMEOUT_MS,
-  ROOM_TRACKS_PER_MEMBER_MAX,
 } from '../../constants.js'
 import { getBackend } from '../../backend/install.js'
 import type { LaneId, BackendSubscription } from '../../backend/spi.js'
@@ -532,12 +531,6 @@ class ServerRoom implements Room {
       const tracks = record.tracks ?? []
       if (tracks.includes(track)) {
         return { value: false, mutations: [] }
-      }
-      // Bound named tracks per participant: authoritative here (the record is the cross-node source
-      // of truth), so a hostile publisher can't spray distinct track names to multiply KV slots,
-      // announcements, retained frames, and subscriptions. The default lane is unnamed, never counted.
-      if (tracks.length >= ROOM_TRACKS_PER_MEMBER_MAX) {
-        throw new RoomError(`A participant may announce at most ${ROOM_TRACKS_PER_MEMBER_MAX} tracks`)
       }
       const next = { ...record, tracks: [...tracks, track], seenAt: Date.now() } satisfies RoomMemberRecord
       return {
