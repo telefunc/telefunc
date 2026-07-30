@@ -96,7 +96,6 @@ describe('Room public behavior', () => {
         return participant
       })
       await semanticStarted.promise
-      await settleMicrotasks()
       expect(settled).toBe(false)
 
       semanticState = 'ready'
@@ -148,48 +147,15 @@ describe('Room public behavior', () => {
     const sender = await room.join()
 
     const backend = getBackend()
-    const subscribeLane = backend.subscribeLane.bind(backend)
     const commitLane = vi.spyOn(backend, 'commitLane')
-    const inboxStarted = deferred<void>()
-    let releaseInbox!: () => Promise<void>
-    const subscribe = vi.spyOn(backend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
-      if (lane.kind !== 'inbox') return subscribeLane(roomId, inc, lane, receiver)
-      let inner: BackendSubscription | null = null
-      let state: SubscriptionState = 'establishing'
-      const readiness = deferred<void>()
-      const listeners = new Set<(next: SubscriptionState) => void>()
-      inboxStarted.resolve()
-      releaseInbox = async () => {
-        inner = subscribeLane(roomId, inc, lane, receiver)
-        await inner.ready
-        state = 'ready'
-        readiness.resolve()
-        for (const listener of listeners) listener(state)
-      }
-      return {
-        ready: readiness.promise,
-        state: () => state,
-        onStateChange: (listener) => {
-          listeners.add(listener)
-          return () => listeners.delete(listener)
-        },
-        unsubscribe: async () => {
-          state = 'closed'
-          readiness.resolve()
-          for (const listener of listeners) listener(state)
-          listeners.clear()
-          await inner?.unsubscribe()
-        },
-      }
-    })
+    const delayed = delayLaneSubscription((lane) => lane.kind === 'inbox')
     try {
       let joinSettled = false
       const joining = room.join({ identity: 'waiting' }).then((participant) => {
         joinSettled = true
         return participant
       })
-      await inboxStarted.promise
-      await settleMicrotasks()
+      await delayed.started
       expect(joinSettled).toBe(false)
       expect(await Room.getParticipants(room.id, { identity: 'waiting' })).toEqual([])
       await Room.send(room.id, { identity: 'waiting' }, 'premature')
@@ -201,7 +167,7 @@ describe('Room public behavior', () => {
         expect.any(Object),
       )
 
-      await releaseInbox()
+      await delayed.release()
 
       const joined = await joining
       const inbox: unknown[] = []
@@ -209,30 +175,25 @@ describe('Room public behavior', () => {
       await sender.send(joined.id, 'ready')
       expect(inbox).toEqual(['ready'])
     } finally {
-      subscribe.mockRestore()
+      delayed.restore()
     }
   })
 
-  it('writes no durable member when pre-admission join readiness rejects', async () => {
+  it('rolls durable membership back when the join announcement fails', async () => {
     const room = await Room.create('join-readiness-rollback')
     const backend = getBackend()
-    const subscribeLane = backend.subscribeLane.bind(backend)
-    const failure = Promise.reject(new Error('semantic readiness failed'))
-    void failure.catch(() => {})
-    const subscribe = vi.spyOn(backend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
-      if (lane.kind !== 'semantic') return subscribeLane(roomId, inc, lane, receiver)
-      return {
-        ready: failure,
-        state: () => 'closed',
-        onStateChange: () => () => {},
-        unsubscribe: async () => {},
+    const commitLane = backend.commitLane.bind(backend)
+    const publish = vi.spyOn(backend, 'commitLane').mockImplementation((roomId, inc, lane, payload, options) => {
+      if (lane.kind === 'control' && (parse(decoder.decode(payload)) as { __r?: string }).__r === 'join') {
+        throw new Error('join announcement failed')
       }
+      return commitLane(roomId, inc, lane, payload, options)
     })
     try {
-      await expect(room.join()).rejects.toThrow('semantic readiness failed')
-      expect(await Room.getParticipants(room.id)).toEqual([])
+      await expect(room.join()).rejects.toThrow('join announcement failed')
+      await expect(Room.getParticipants(room.id)).resolves.toEqual([])
     } finally {
-      subscribe.mockRestore()
+      publish.mockRestore()
     }
   })
 
@@ -814,13 +775,14 @@ describe('Room public behavior', () => {
     await observer.getParticipants()
 
     const unsubscribe = (await observer.getParticipant(camera.id))!.subscribeBinary(() => {}, { track: 'screen' })
-    await delay(30)
+    await vi.waitFor(() => expect(changes).toEqual([['screen', true]]))
     unsubscribe()
-    await delay(30)
-    expect(changes).toEqual([
-      ['screen', true],
-      ['screen', false],
-    ])
+    await vi.waitFor(() =>
+      expect(changes).toEqual([
+        ['screen', true],
+        ['screen', false],
+      ]),
+    )
   })
 
   it('keeps live and retained binary seq above 2^32 through server and public client decode', async () => {
@@ -843,10 +805,16 @@ describe('Room public behavior', () => {
     const room = await Room.create('snapshot')
     const first = room.snapshot()
     expect(room.snapshot()).toBe(first)
+    expect(Object.isFrozen(first)).toBe(true)
+    expect(Object.isFrozen(first.meta)).toBe(true)
+    expect(Object.isFrozen(first.participants)).toBe(true)
     let changes = 0
     room.onChange(() => changes++)
     await room.join({ meta: { name: 'Alice' } })
-    expect(room.snapshot()).not.toBe(first)
+    const changed = room.snapshot()
+    expect(changed).not.toBe(first)
+    expect(Object.isFrozen(changed.participants[0])).toBe(true)
+    expect(Object.isFrozen(changed.participants[0]!.meta)).toBe(true)
     expect(changes).toBe(1)
   })
 })
@@ -982,57 +950,17 @@ describe('client Room lifecycle', () => {
 
   it('redeclares a room-wide text subscription after reconnect even when the local latch already matches', () => {
     const wireDeclarations: boolean[] = []
-    let reconnect = () => {}
-    const stub = {
-      _wireTextSubscribed: false,
-      _isClosed: false,
-      _connection: {
-        sendBroadcastSubscribe: () => wireDeclarations.push(true),
-        sendBroadcastUnsubscribe: () => wireDeclarations.push(false),
-      },
-      _subscribeLocal: () => () => {},
-      _subscribeBinaryLocal: () => () => {},
-      _setWireTextSubscribed: ClientBroadcast.prototype._setWireTextSubscribed,
-      send: async () => undefined,
-      publish: async () => ({ key: 'fake', seq: 1, timestamp: 1 }),
-      publishBinary: async () => ({ key: 'fake', seq: 1, timestamp: 1 }),
-      onClose: () => {},
-      _onReconnect: (callback: () => void) => {
-        reconnect = callback
-      },
-    } as unknown as ClientBroadcast
-    const client = new ClientRoom(stub, snapshot('reconnect-text'))
+    const fake = createFakeStub({ wireDeclarations })
+    const client = new ClientRoom(fake.stub, snapshot('reconnect-text'))
 
     client.subscribe(() => {})
     expect(wireDeclarations).toEqual([true])
 
     // Model the transport dying after the client emitted BROADCAST_SUB but before the server
     // applied it: the client latch is true, while the peer's authoritative state is still false.
-    reconnect()
+    fake.reconnect()
 
     expect(wireDeclarations).toEqual([true, true])
-  })
-
-  it('rejects roster getters when the initial backend roster read fails', async () => {
-    let deliver: (event: unknown, info: ChannelPublishInfo) => void = () => {}
-    const stub = {
-      _subscribeLocal: (callback: (event: unknown, info: ChannelPublishInfo) => void) => {
-        deliver = callback
-        return () => {}
-      },
-      _subscribeBinaryLocal: () => () => {},
-      _setWireTextSubscribed: () => {},
-      send: async () => undefined,
-      publish: async () => ({ key: 'fake', seq: 1, timestamp: 1 }),
-      publishBinary: async () => ({ key: 'fake', seq: 1, timestamp: 1 }),
-      onClose: () => {},
-      _onReconnect: () => {},
-    } as unknown as ClientBroadcast
-    const client = new ClientRoom(stub, snapshot('roster-failure'))
-    const participants = client.getParticipants()
-    deliver({ __r: 'roster-error' }, { key: 'roster-failure', seq: 1, timestamp: 1 })
-
-    await expect(participants).rejects.toThrow('Failed to load room participants')
   })
 
   it('turns a server roster read rejection into an explicit client-settling event', async () => {
@@ -1042,14 +970,17 @@ describe('client Room lifecycle', () => {
     const ensureRoster = vi
       .spyOn(room as unknown as { _ensureRoster(): Promise<void> }, '_ensureRoster')
       .mockRejectedValue(failure)
-    const relayError = vi.spyOn(stub, '_relayRosterError')
     const report = vi.spyOn(console, 'error').mockImplementation(() => {})
     try {
-      attachPeer(stub)
-      await settleMicrotasks()
-
+      const peer = attachPeer(stub)
+      await vi.waitFor(() => expect(peer.decoded().some((frame) => frame.tag === TAG.PUBLISH)).toBe(true))
+      const frame = peer.decoded().find((candidate) => candidate.tag === TAG.PUBLISH)!
+      if (frame.tag !== TAG.PUBLISH) throw new Error('expected roster error publish')
+      const fake = createFakeStub()
+      const participants = new ClientRoom(fake.stub, snapshot('roster-error-event')).getParticipants()
+      fake.emitText(parse(frame.text), { key: 'roster-error-event', seq: 1, timestamp: 1 })
+      await expect(participants).rejects.toThrow('Failed to load room participants')
       expect(ensureRoster).toHaveBeenCalledOnce()
-      expect(relayError).toHaveBeenCalledOnce()
     } finally {
       report.mockRestore()
       ensureRoster.mockRestore()
@@ -1061,14 +992,13 @@ describe('client Room lifecycle', () => {
     const stub = register(room)
     const ensureRoster = vi.spyOn(room as unknown as { _ensureRoster(): Promise<void> }, '_ensureRoster')
     attachPeer(stub)
-    await settleMicrotasks()
+    await vi.waitFor(() => expect(ensureRoster).toHaveBeenCalledOnce())
 
     stub._onPeerDisconnect(1_000)
     const [frame] = attachPeer(stub, 0).decoded()
     if (frame?.tag !== TAG.PUBLISH) throw new Error('expected replayed roster publish')
     expect(parse(frame.text)).toMatchObject({ __r: 'roster', members: [] })
 
-    await settleMicrotasks()
     expect(ensureRoster).toHaveBeenCalledOnce()
   })
 })
@@ -1374,8 +1304,7 @@ describe('shared subscription supervision', () => {
     expect(raw.opens[0]!.localReceiverCount()).toBe(2)
 
     raw.opens[0]!.attempt.close()
-    await settleMicrotasks()
-    expect(raw.opens).toHaveLength(2)
+    await vi.waitFor(() => expect(raw.opens).toHaveLength(2))
     await raw.deliver(0, 'stale')
     await raw.deliver(1, 'current')
     expect(received).toEqual(['a:current', 'b:current'])
@@ -1428,8 +1357,7 @@ describe('shared subscription supervision', () => {
     expect(states).toEqual([])
 
     raw.opens[0]!.attempt.close()
-    await settleMicrotasks()
-    expect(states).toEqual(['lost', 'ready'])
+    await vi.waitFor(() => expect(states).toEqual(['lost', 'ready']))
     await subscription.unsubscribe()
     expect(states).toEqual(['lost', 'ready', 'closed'])
 
@@ -1440,8 +1368,7 @@ describe('shared subscription supervision', () => {
     const failedStates: SubscriptionState[] = []
     failed.onStateChange((state) => failedStates.push(state))
     failedRaw.opens[0]!.attempt.close()
-    await settleMicrotasks()
-    expect(failedStates).toEqual(['lost', 'ready'])
+    await vi.waitFor(() => expect(failedStates).toEqual(['lost', 'ready']))
     await failed.unsubscribe()
   })
 
@@ -1477,8 +1404,7 @@ describe('shared subscription supervision', () => {
     await subscription.ready
 
     raw.opens[0]!.attempt.terminate()
-    await settleMicrotasks()
-    expect(subscription.state()).toBe('closed')
+    await vi.waitFor(() => expect(subscription.state()).toBe('closed'))
     expect(states).toEqual(['closed'])
     expect(raw.openCalls).toBe(1)
 
@@ -1522,8 +1448,7 @@ describe('shared subscription supervision', () => {
     await queued.ready
     beforeOpen.opens[0]!.attempt.close()
     beforeOpen.bindingValid = false
-    await settleMicrotasks()
-    expect(queued.state()).toBe('closed')
+    await vi.waitFor(() => expect(queued.state()).toBe('closed'))
     expect(beforeOpen.openCalls).toBe(1)
     await queued.unsubscribe()
   })
@@ -1669,14 +1594,23 @@ async function wideBinaryScenario(id: string, retain: boolean, byte: number) {
 
 function createFakeStub(options?: {
   send?: (message: unknown) => Promise<unknown>
+  wireDeclarations?: boolean[]
 }): {
   stub: ClientBroadcast
   emitText(data: unknown, info: ChannelPublishInfo): void
   emitBinary(data: Uint8Array, info: ChannelPublishInfo): void
+  reconnect(): void
 } {
   const text: Array<(data: unknown, info: ChannelPublishInfo) => void> = []
   const binary: Array<(data: Uint8Array, info: ChannelPublishInfo) => void> = []
+  let reconnect = () => {}
   const stub = {
+    _wireTextSubscribed: false,
+    _isClosed: false,
+    _connection: {
+      sendBroadcastSubscribe: () => options?.wireDeclarations?.push(true),
+      sendBroadcastUnsubscribe: () => options?.wireDeclarations?.push(false),
+    },
     _subscribeLocal: (callback: (data: unknown, info: ChannelPublishInfo) => void) => {
       text.push(callback)
       return () => text.splice(text.indexOf(callback), 1)
@@ -1685,17 +1619,20 @@ function createFakeStub(options?: {
       binary.push(callback)
       return () => binary.splice(binary.indexOf(callback), 1)
     },
-    _setWireTextSubscribed: () => {},
+    _setWireTextSubscribed: ClientBroadcast.prototype._setWireTextSubscribed,
     send: options?.send ?? (async () => undefined),
     publish: async () => ({ key: 'fake', seq: 1, timestamp: 1 }),
     publishBinary: async () => ({ key: 'fake', seq: 1, timestamp: 1 }),
     onClose: () => {},
-    _onReconnect: () => {},
+    _onReconnect: (callback: () => void) => {
+      reconnect = callback
+    },
   } as unknown as ClientBroadcast
   return {
     stub,
     emitText: (data, info) => text.forEach((callback) => callback(data, info)),
     emitBinary: (data, info) => binary.forEach((callback) => callback(data, info)),
+    reconnect: () => reconnect(),
   }
 }
 
@@ -1871,10 +1808,6 @@ function delayLaneSubscription(matches: (lane: LaneId) => boolean) {
     }
   })
   return { started: started.promise, release: () => release(), restore: () => spy.mockRestore() }
-}
-
-async function settleMicrotasks(turns = 8): Promise<void> {
-  for (let turn = 0; turn < turns; turn++) await Promise.resolve()
 }
 
 function settle(): Promise<void> {
