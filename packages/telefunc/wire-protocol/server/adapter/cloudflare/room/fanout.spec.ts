@@ -1,11 +1,17 @@
 import { expect, test } from 'vitest'
-import { Fanout } from './fanout.js'
+import {
+  dispatchRoomShardFanout,
+  Fanout,
+  ROOM_FANOUT_WIDTH,
+  type RoomShardFanoutNamespace,
+  type RoomShardFanoutRequest,
+} from './fanout.js'
 
 test('rejects a queued delivery cancelled by incarnation cleanup before handoff', async () => {
   const firstStarted = deferred<void>()
   const releaseFirst = deferred<void>()
   const delivered: number[] = []
-  const fanout = new Fanout(async (_target, _frame, info) => {
+  const fanout = new Fanout(async (_targets, _frame, info) => {
     delivered.push(info.seq)
     if (info.seq === 1) {
       firstStarted.resolve()
@@ -45,7 +51,8 @@ test('keeps the lane gated until every target attempt settles after one rejects'
   const slowStarted = deferred<void>()
   const releaseSlow = deferred<void>()
   let nextStarted = false
-  const fanout = new Fanout(async (target, _frame, info) => {
+  const fanout = new Fanout(async (targets, _frame, info) => {
+    const target = targets[0]!
     if (info.seq === 2) {
       nextStarted = true
       return
@@ -84,9 +91,9 @@ test('keeps the lane gated until every target attempt settles after one rejects'
 test('does not issue a flat authority subrequest for every target above the Workers free-tier cap', async () => {
   let authorityDispatches = 0
   const delivered = new Set<string>()
-  const fanout = new Fanout(async (target) => {
+  const fanout = new Fanout(async (targets) => {
     authorityDispatches += 1
-    delivered.add(target.subscriberDoId)
+    for (const target of targets) delivered.add(target.subscriberDoId)
   })
   const targets = Array.from({ length: 1_001 }, (_, index) => ({
     subscriberDoId: `subscriber-${index}`,
@@ -104,6 +111,61 @@ test('does not issue a flat authority subrequest for every target above the Work
   await fanout.await(token)
   expect(delivered.size).toBe(targets.length)
   expect(authorityDispatches).toBeLessThan(1_000)
+})
+
+test('keeps every recursive coordinator invocation within the configured fanout width', async () => {
+  const targets = Array.from({ length: ROOM_FANOUT_WIDTH ** 2 + 1 }, (_, index) => ({
+    subscriberDoId: `subscriber-${index}`,
+    leaseId: `lease-${index}`,
+    generationToken: 'generation',
+  }))
+  const invocationSubrequests: number[] = []
+  const delivered = new Set<string>()
+
+  const runInvocation = async (request: RoomShardFanoutRequest, currentCoordinator?: string) => {
+    let subrequests = 0
+    const namespace: RoomShardFanoutNamespace = {
+      idFromString: (id) => ({ kind: 'target' as const, id }),
+      idFromName: (name) => ({ kind: 'coordinator' as const, name }),
+      get(id) {
+        const address = id as { kind: 'target'; id: string } | { kind: 'coordinator'; name: string }
+        return {
+          async telefuncRoomDeliver(delivery) {
+            subrequests += 1
+            delivered.add(delivery.subscriberDoId)
+          },
+          async telefuncRoomInvalidate() {
+            subrequests += 1
+          },
+          async telefuncRoomFanout(child) {
+            subrequests += 1
+            if (address.kind !== 'coordinator') throw new Error('fanout targeted a subscriber')
+            if (address.name === currentCoordinator) throw new Error('fanout coordinator called itself')
+            return runInvocation(child, address.name)
+          },
+        }
+      },
+    }
+    const outcomes = await dispatchRoomShardFanout(namespace, request)
+    invocationSubrequests.push(subrequests)
+    return outcomes
+  }
+
+  const outcomes = await runInvocation({
+    operation: 'deliver',
+    roomId: 'room',
+    inc: 'inc',
+    laneKey: 'semantic',
+    targets,
+    frame: new Uint8Array([1]),
+    seq: 1,
+    timestamp: 1,
+    path: 'root',
+  })
+
+  expect(outcomes).toHaveLength(targets.length)
+  expect(delivered.size).toBe(targets.length)
+  expect(Math.max(...invocationSubrequests)).toBeLessThanOrEqual(ROOM_FANOUT_WIDTH)
 })
 
 function deferred<T>() {

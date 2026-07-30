@@ -23,6 +23,12 @@ import {
   type CommitWire,
   type HeadCxResult,
 } from '../../packages/telefunc/wire-protocol/server/adapter/cloudflare/room/do.js'
+import {
+  dispatchRoomShardFanout,
+  ROOM_FANOUT_WIDTH,
+  type RoomShardFanoutNamespace,
+  type RoomShardFanoutRequest,
+} from '../../packages/telefunc/wire-protocol/server/adapter/cloudflare/room/fanout.js'
 
 const publicRoomBackend = new CloudflareRoomBackend()
 setDefaultBackend(() => publicRoomBackend, 'cloudflare-room-ci-public')
@@ -79,6 +85,10 @@ export class PublicRoomSessionDurableObject extends DurableObject {
       () => this.#manager,
       () => this.#manager.invalidate(request),
     )
+  }
+
+  telefuncRoomFanout(request: RoomShardFanoutRequest) {
+    return dispatchRoomShardFanout((this.env as Env).PUBLIC_SESSION as unknown as RoomShardFanoutNamespace, request)
   }
 }
 
@@ -190,6 +200,13 @@ export class SessionDurableObject extends DurableObject {
     if (state === undefined) throw new Error('invalidation reached an unprepared session')
     state.invalidations.push(request.terminal === true ? 'terminal' : 'recoverable')
     this.#manager.invalidate(request)
+  }
+
+  telefuncRoomFanout(request: RoomShardFanoutRequest) {
+    return dispatchRoomShardFanout(
+      (this.env as Env).TelefuncDurableObject as unknown as RoomShardFanoutNamespace,
+      request,
+    )
   }
 }
 
@@ -376,6 +393,7 @@ export default {
       const preAckRecoverableDrop = await preAckRecoverableRouteDrop(env, session, suffix)
       const cancellation = await cancelledDelivery(env, sessionId, session, suffix)
       const fanoutOrdering = await rejectedFanoutOrdering(env, sessionId, session, suffix)
+      const coordinatorFanout = await coordinatorFanoutSmoke(env, sessionId, session, suffix)
       const evictionInvalidations = await failedDeliveryEviction(env, sessionId, session, suffix)
       const restartSettlement = await authorityRestart(env, suffix)
       const alarmPolicy = await alarmScheduling(env, sessionId, suffix)
@@ -390,6 +408,7 @@ export default {
         preAckRecoverableDrop,
         ...cancellation,
         fanoutOrdering,
+        coordinatorFanout,
         evictionInvalidations,
         restartSettlement,
         alarmPolicy,
@@ -420,6 +439,34 @@ async function successfulLifecycle(env: Env, sessionId: DurableObjectId, session
     closed: (await authority.readHead())?.state === 'closed',
     generations: await authority.listGenerations(),
     invalidations: (await session.deliveryState(roomId)).invalidations,
+  }
+}
+
+async function coordinatorFanoutSmoke(env: Env, sessionId: DurableObjectId, session: Session, suffix: string) {
+  const roomId = `coordinator-fanout-${suffix}`
+  await session.prepareDelivery(roomId, false)
+  const targets = Array.from({ length: ROOM_FANOUT_WIDTH + 1 }, (_, index) => ({
+    subscriberDoId: sessionId.toString(),
+    leaseId: `coordinator-lease-${index}`,
+    generationToken: 'coordinator-generation',
+  }))
+  const outcomes = await dispatchRoomShardFanout(env.TelefuncDurableObject as unknown as RoomShardFanoutNamespace, {
+    operation: 'deliver',
+    roomId,
+    inc: 'coordinator-inc',
+    laneKey: 'semantic',
+    targets,
+    frame: new Uint8Array([1]),
+    seq: 1,
+    timestamp: 1,
+    path: 'workerd',
+  })
+  if (outcomes.some((outcome) => outcome.error !== undefined)) {
+    throw new Error('coordinator fanout did not settle every leaf successfully')
+  }
+  return {
+    outcomes: outcomes.length,
+    deliveries: (await session.deliveryState(roomId)).delivered.length,
   }
 }
 
@@ -733,10 +780,7 @@ async function nativeRpcRoundTrip(env: Env, suffix: string) {
   const inc = `native-rpc-inc-${suffix}`
   const config = new Uint8Array([0x11, 0x22, 0x33])
   const opened = expectHead(
-    await authority.compareExchangeHead(
-      { expect: 'absent' },
-      { head: { currentInc: inc, state: 'open', config } },
-    ),
+    await authority.compareExchangeHead({ expect: 'absent' }, { head: { currentInc: inc, state: 'open', config } }),
     'native RPC open',
   )
   const initialCells = await authority.readCells(inc, { keys: ['native'] })

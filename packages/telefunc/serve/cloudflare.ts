@@ -40,6 +40,11 @@ import {
   type RoomShardInvalidationRequest,
 } from '../wire-protocol/server/adapter/cloudflare/room/backend.js'
 import { createTelefuncRoomDurableObjectClass } from '../wire-protocol/server/adapter/cloudflare/room/do.js'
+import {
+  dispatchRoomShardFanout,
+  type RoomShardFanoutNamespace,
+  type RoomShardFanoutRequest,
+} from '../wire-protocol/server/adapter/cloudflare/room/fanout.js'
 import { isAsyncMode } from '../node/server/context/context.js'
 import { getGlobalObject } from '../utils/getGlobalObject.js'
 import { isTelefuncRequest } from './shared.js'
@@ -197,6 +202,12 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
         if (roomManager !== this.roomManager) throw new Error(CLOUDFLARE_ROOM_CONTEXT_ERROR)
         return roomManager.invalidate(request)
       })
+    }
+
+    telefuncRoomFanout(request: RoomShardFanoutRequest) {
+      const binding = getBinding(this.env)
+      assertUsage(binding, `Missing Cloudflare Durable Object binding "${bindingName}" during Room fanout.`)
+      return dispatchRoomShardFanout(binding as unknown as RoomShardFanoutNamespace, request)
     }
 
     protected runWithRoomManager<T>(fn: () => T): T {

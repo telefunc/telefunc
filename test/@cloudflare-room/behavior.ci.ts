@@ -73,6 +73,10 @@ test('public Room lifecycle and authority settlement controls execute on Cloudfl
       fastDeliveriesBeforeRelease: [1],
       slowDeliveriesBeforeRelease: [1],
     },
+    coordinatorFanout: {
+      outcomes: 65,
+      deliveries: 65,
+    },
     evictionInvalidations: {
       settlements: ['delivery probe rejected', 'delivery probe rejected', 'delivery probe rejected'],
       invalidations: ['recoverable'],

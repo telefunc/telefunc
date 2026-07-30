@@ -11,7 +11,14 @@
 import { DurableObject } from 'cloudflare:workers'
 import type { CellMutation, CxResult, HeadCx, HeadNext, LaneId, RoomHead } from '../../../../backend/spi.js'
 import { laneKey as laneKeyOf } from './codec.js'
-import { Fanout } from './fanout.js'
+import {
+  dispatchRoomShardFanout,
+  dispatchRoomShardFanoutViaCoordinator,
+  Fanout,
+  type RoomShardFanoutNamespace,
+  type RoomShardFanoutOutcome,
+  type RoomShardFanoutRequest,
+} from './fanout.js'
 import { deleteRetained, installRetained, listRetained, readRetained } from './retained.js'
 import {
   deleteRoute,
@@ -25,7 +32,6 @@ import {
   type RouteTarget,
   upsertRoute,
 } from './routes.js'
-import type { RoomShardDeliveryRequest, RoomShardInvalidationRequest } from './backend.js'
 import {
   advanceOrder,
   compareExchangeCells,
@@ -57,16 +63,6 @@ export type RegisterWire =
   | { ok: true; generationToken: string }
   | { rejected: true; reason: string; terminal?: boolean }
 
-type SubscriberStub = {
-  telefuncRoomDeliver(request: RoomShardDeliveryRequest): Promise<void>
-  telefuncRoomInvalidate(request: RoomShardInvalidationRequest): Promise<void>
-}
-
-type SubscriberNamespace = {
-  idFromString(id: string): unknown
-  get(id: unknown): SubscriberStub
-}
-
 const ROOM_MAINTENANCE_RETRY_MS = 30_000
 
 function headForRpc(head: StoredHead): RoomHead {
@@ -87,11 +83,11 @@ function headForRpc(head: StoredHead): RoomHead {
 export class TelefuncRoomDurableObject extends DurableObject {
   readonly #sql: SqlStorage
   readonly #fanout: Fanout
-  readonly #sessionNamespaceValue: SubscriberNamespace
+  readonly #sessionNamespaceValue: RoomShardFanoutNamespace
 
   constructor(ctx: DurableObjectState, env: unknown, sessionBindingName: string = 'TelefuncDurableObject') {
     super(ctx, env as never)
-    const sessionNamespace = (env as Record<string, SubscriberNamespace | undefined>)[sessionBindingName]
+    const sessionNamespace = (env as Record<string, RoomShardFanoutNamespace | undefined>)[sessionBindingName]
     if (sessionNamespace === undefined) {
       throw new Error(
         `Missing Cloudflare session Durable Object binding "${sessionBindingName}" in TelefuncRoomDurableObject constructor.`,
@@ -101,61 +97,23 @@ export class TelefuncRoomDurableObject extends DurableObject {
     this.#sql = ctx.storage.sql
     initSchema(this.#sql)
     this.#fanout = new Fanout(
-      async (target, frame, info) => {
-        const session = this.#sessionNamespaceValue.get(this.#sessionNamespaceValue.idFromString(target.subscriberDoId))
-        try {
-          await session.telefuncRoomDeliver({
-            roomId: info.roomId,
-            inc: info.inc,
-            laneKey: info.laneKey,
-            subscriberDoId: target.subscriberDoId,
-            leaseId: target.leaseId,
-            generationToken: target.generationToken,
-            frame,
-            seq: info.seq,
-            timestamp: info.timestamp,
-          })
-          this.ctx.storage.transactionSync(() => {
-            recordRouteDeliverySuccess(this.#sql, info.inc, info.laneKey, target.subscriberDoId, target.leaseId)
-          })
-        } catch (error) {
-          let evicted = false
-          this.ctx.storage.transactionSync(() => {
-            evicted = recordRouteDeliveryFailure(
-              this.#sql,
-              info.inc,
-              info.laneKey,
-              target.subscriberDoId,
-              target.leaseId,
-            )
-          })
-          if (evicted) await this.#scheduleMaintenanceIfNeeded()
-          // Core cannot infer an authority-side K=3 eviction from a later local attachment: it already
-          // owns the ready slot. Tell the exact live attempt now; its ordinary `closed` state lets Room
-          // apply its recovery policy, while the retained route row remains the janitor's retry source
-          // if this best-effort invalidation RPC is lost.
-          if (evicted) {
-            try {
-              const recoverySession = this.#sessionNamespaceValue.get(
-                this.#sessionNamespaceValue.idFromString(target.subscriberDoId),
-              )
-              await recoverySession.telefuncRoomInvalidate({
-                roomId: info.roomId,
-                inc: info.inc,
-                laneKey: info.laneKey,
-                subscriberDoId: target.subscriberDoId,
-                leaseId: target.leaseId,
-                generationToken: target.generationToken,
-              })
-            } catch (invalidationError) {
-              throw new AggregateError(
-                [error, invalidationError],
-                'Cloudflare Room delivery and exact-route invalidation both failed',
-              )
-            }
-          }
-          throw error
+      async (targets, frame, info, coordinatorIndex) => {
+        const request: RoomShardFanoutRequest = {
+          operation: 'deliver',
+          roomId: info.roomId,
+          inc: info.inc,
+          laneKey: info.laneKey,
+          targets,
+          frame,
+          seq: info.seq,
+          timestamp: info.timestamp,
+          path: String(coordinatorIndex ?? 0),
         }
+        const outcomes =
+          coordinatorIndex === undefined
+            ? await dispatchRoomShardFanout(this.#sessionNamespaceValue, request)
+            : await dispatchRoomShardFanoutViaCoordinator(this.#sessionNamespaceValue, request)
+        await this.#settleDeliveryOutcomes(outcomes, info, coordinatorIndex)
       },
       (resume) => setTimeout(resume, 0),
     )
@@ -437,6 +395,60 @@ export class TelefuncRoomDurableObject extends DurableObject {
       generationToken: installation.generationToken,
       ...(terminal ? { terminal: true as const } : {}),
     })
+  }
+
+  async #settleDeliveryOutcomes(
+    outcomes: RoomShardFanoutOutcome[],
+    info: { roomId: string; inc: string; laneKey: string; seq: number; timestamp: number },
+    coordinatorIndex?: number,
+  ): Promise<void> {
+    const deliveryFailures: Error[] = []
+    const evicted: RouteTarget[] = []
+    this.ctx.storage.transactionSync(() => {
+      for (const outcome of outcomes) {
+        const target = outcome.target
+        if (outcome.error === undefined) {
+          recordRouteDeliverySuccess(this.#sql, info.inc, info.laneKey, target.subscriberDoId, target.leaseId)
+          continue
+        }
+        deliveryFailures.push(new Error(outcome.error))
+        if (recordRouteDeliveryFailure(this.#sql, info.inc, info.laneKey, target.subscriberDoId, target.leaseId)) {
+          evicted.push(target)
+        }
+      }
+    })
+    if (evicted.length > 0) await this.#scheduleMaintenanceIfNeeded()
+
+    const invalidationFailures: Error[] = []
+    if (evicted.length > 0) {
+      // K=3 recovery remains exact-lease scoped. A coordinator bucket that delivered the frame also
+      // carries its invalidations, keeping the authority's own service-subrequest count bounded.
+      const request: RoomShardFanoutRequest = {
+        operation: 'invalidate',
+        roomId: info.roomId,
+        inc: info.inc,
+        laneKey: info.laneKey,
+        targets: evicted,
+        path: `${coordinatorIndex ?? 0}.invalidate`,
+      }
+      const invalidations =
+        coordinatorIndex === undefined
+          ? await dispatchRoomShardFanout(this.#sessionNamespaceValue, request)
+          : await dispatchRoomShardFanoutViaCoordinator(this.#sessionNamespaceValue, request)
+      for (const outcome of invalidations) {
+        if (outcome.error !== undefined) invalidationFailures.push(new Error(outcome.error))
+      }
+    }
+
+    if (deliveryFailures.length === 1 && invalidationFailures.length === 0) throw deliveryFailures[0]
+    if (deliveryFailures.length === 1 && invalidationFailures.length === 1) {
+      throw new AggregateError(
+        [deliveryFailures[0], invalidationFailures[0]],
+        'Cloudflare Room delivery and exact-route invalidation both failed',
+      )
+    }
+    const failures = [...deliveryFailures, ...invalidationFailures]
+    if (failures.length > 0) throw new AggregateError(failures, 'Cloudflare Room fanout failed')
   }
 
   async #scheduleMaintenanceIfNeeded(): Promise<void> {

@@ -8,9 +8,55 @@
 // (`telefuncRoomDeliver`). The attempt is the backend's ONE handoff — never retried or rolled back.
 
 import type { RouteTarget } from './routes.js'
+import { getDeterministicKeyBucketIndex } from '../routing.js'
+import type { RoomShardDeliveryRequest, RoomShardInvalidationRequest } from './backend.js'
 
 type DeliveryInfo = { roomId: string; inc: string; laneKey: string; seq: number; timestamp: number }
-type DeliverFn = (target: RouteTarget, frame: Uint8Array, info: DeliveryInfo) => Promise<void>
+type DeliverFn = (
+  targets: RouteTarget[],
+  frame: Uint8Array,
+  info: DeliveryInfo,
+  coordinatorIndex?: number,
+) => Promise<void>
+
+export const ROOM_FANOUT_WIDTH = 64
+const ROOM_FANOUT_COORDINATOR_POOL_SIZE = 256
+
+export type RoomShardFanoutRequest =
+  | {
+      operation: 'deliver'
+      roomId: string
+      inc: string
+      laneKey: string
+      targets: RouteTarget[]
+      frame: Uint8Array
+      seq: number
+      timestamp: number
+      path: string
+    }
+  | {
+      operation: 'invalidate'
+      roomId: string
+      inc: string
+      laneKey: string
+      targets: RouteTarget[]
+      terminal?: true
+      path: string
+    }
+
+export type RoomShardFanoutOutcome = { target: RouteTarget; error?: string }
+
+type RoomShardFanoutStub = {
+  telefuncRoomDeliver(request: RoomShardDeliveryRequest): Promise<void>
+  telefuncRoomInvalidate(request: RoomShardInvalidationRequest): Promise<void>
+  telefuncRoomFanout(request: RoomShardFanoutRequest): Promise<RoomShardFanoutOutcome[]>
+}
+
+export type RoomShardFanoutNamespace = {
+  idFromString(id: string): unknown
+  idFromName(name: string): unknown
+  get(id: unknown): RoomShardFanoutStub
+}
 
 const noop = (): void => {}
 
@@ -81,7 +127,11 @@ export class Fanout {
   }
 
   async #fanout(targets: RouteTarget[], frame: Uint8Array, info: DeliveryInfo): Promise<void> {
-    const outcomes = await Promise.allSettled(targets.map((target) => this.#deliver(target, frame, info)))
+    const attempts =
+      targets.length <= ROOM_FANOUT_WIDTH
+        ? targets.map((target) => this.#deliver([target], frame, info))
+        : groupsOfAtMost(targets, ROOM_FANOUT_WIDTH).map((group, index) => this.#deliver(group, frame, info, index))
+    const outcomes = await Promise.allSettled(attempts)
     const failures = outcomes.filter((outcome): outcome is PromiseRejectedResult => outcome.status === 'rejected')
     if (failures.length === 1) throw failures[0]!.reason
     if (failures.length > 1) {
@@ -91,4 +141,84 @@ export class Fanout {
       )
     }
   }
+}
+
+export async function dispatchRoomShardFanout(
+  namespace: RoomShardFanoutNamespace,
+  request: RoomShardFanoutRequest,
+): Promise<RoomShardFanoutOutcome[]> {
+  if (request.targets.length <= ROOM_FANOUT_WIDTH) {
+    const outcomes = await Promise.allSettled(
+      request.targets.map((target) => {
+        const stub = namespace.get(namespace.idFromString(target.subscriberDoId))
+        return request.operation === 'deliver'
+          ? stub.telefuncRoomDeliver({
+              roomId: request.roomId,
+              inc: request.inc,
+              laneKey: request.laneKey,
+              subscriberDoId: target.subscriberDoId,
+              leaseId: target.leaseId,
+              generationToken: target.generationToken,
+              frame: request.frame,
+              seq: request.seq,
+              timestamp: request.timestamp,
+            })
+          : stub.telefuncRoomInvalidate({
+              roomId: request.roomId,
+              inc: request.inc,
+              laneKey: request.laneKey,
+              subscriberDoId: target.subscriberDoId,
+              leaseId: target.leaseId,
+              generationToken: target.generationToken,
+              ...(request.terminal === true ? { terminal: true as const } : {}),
+            })
+      }),
+    )
+    return outcomes.map((outcome, index) =>
+      outcome.status === 'fulfilled'
+        ? { target: request.targets[index]! }
+        : { target: request.targets[index]!, error: errorMessage(outcome.reason) },
+    )
+  }
+
+  const groups = groupsOfAtMost(request.targets, ROOM_FANOUT_WIDTH)
+  const nested = await Promise.all(
+    groups.map((targets, index) => {
+      const path = `${request.path}.${index}`
+      return dispatchRoomShardFanoutViaCoordinator(namespace, { ...request, targets, path })
+    }),
+  )
+  return nested.flat()
+}
+
+export async function dispatchRoomShardFanoutViaCoordinator(
+  namespace: RoomShardFanoutNamespace,
+  request: RoomShardFanoutRequest,
+): Promise<RoomShardFanoutOutcome[]> {
+  const nameIndex = getDeterministicKeyBucketIndex(
+    JSON.stringify([request.roomId, request.inc, request.laneKey, request.operation, request.path]),
+    ROOM_FANOUT_COORDINATOR_POOL_SIZE,
+  )
+  // Separate each level's pool so a coordinator can never RPC into itself and deadlock while
+  // recursively awaiting a child. Coordinators at the same level may share a stateless pool object.
+  const depth = request.path.split('.').length
+  const coordinator = namespace.get(namespace.idFromName(`__telefunc_room_fanout__:${depth}:${nameIndex}`))
+  try {
+    return await coordinator.telefuncRoomFanout(request)
+  } catch (error) {
+    return request.targets.map((target) => ({ target, error: errorMessage(error) }))
+  }
+}
+
+function groupsOfAtMost<T>(values: T[], maxGroups: number): T[][] {
+  const groupSize = Math.ceil(values.length / maxGroups)
+  const groups: T[][] = []
+  for (let offset = 0; offset < values.length; offset += groupSize) {
+    groups.push(values.slice(offset, offset + groupSize))
+  }
+  return groups
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
 }
