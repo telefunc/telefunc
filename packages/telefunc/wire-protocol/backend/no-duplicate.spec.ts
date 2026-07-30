@@ -1,13 +1,5 @@
-/**
- * This gate proves only canonical production wiring: the backend supervisor imports and constructs
- * the exported SubscriptionManager; Redis and Cloudflare lane consumers import/re-export laneKey
- * through the designated modules; Cloudflare Broadcast imports the canonical ordering codecs while
- * Redis imports the canonical ordering layout for its dialect; and Redis' public Telefunc imports stay
- * within the reviewed set below.
- *
- * It does not prove that no semantically equivalent, unused, renamed, or differently spelled
- * implementation exists. Such a codebase-wide uniqueness claim is not statically enforceable here.
- */
+/** Proves the reviewed production wiring uses the canonical subscription, lane-key, and ordering
+ * owners. It does not claim that static analysis can exclude every unused semantic duplicate. */
 import { readdirSync } from 'node:fs'
 import { extname, join, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -25,7 +17,7 @@ describe('canonical backend wiring', () => {
   it('wires the supervisor to the exported subscription owner', () => {
     expect(exportsOf('packages/telefunc/wire-protocol/backend/subscriptions.ts')).toContain('SubscriptionManager')
     expect(
-      valuesFrom('packages/telefunc/wire-protocol/backend/supervised-backend.ts', './subscriptions.js', 'import'),
+      importsFrom('packages/telefunc/wire-protocol/backend/supervised-backend.ts', './subscriptions.js'),
     ).toContain('SubscriptionManager')
     expect(
       constructedBy('packages/telefunc/wire-protocol/backend/supervised-backend.ts', 'SubscriptionManager'),
@@ -33,38 +25,34 @@ describe('canonical backend wiring', () => {
   })
 
   it('wires lane consumers to the canonical lane key', () => {
+    expect(reexportsFrom('packages/telefunc/backend.ts', './wire-protocol/backend/subscription-source.js')).toContain(
+      'laneKey',
+    )
+    expect(importsFrom('packages/redis/src/room/layout.ts', 'telefunc/backend')).toContain('laneKey')
     expect(
-      valuesFrom('packages/telefunc/backend.ts', './wire-protocol/backend/subscription-source.js', 'export'),
-    ).toContain('laneKey')
-    expect(valuesFrom('packages/redis/src/room/layout.ts', 'telefunc/backend', 'import')).toContain('laneKey')
-    expect(
-      valuesFrom(
+      reexportsFrom(
         'packages/telefunc/wire-protocol/server/adapter/cloudflare/room/codec.ts',
         '../../../../backend/subscription-source.js',
-        'export',
       ),
     ).toContain('laneKey')
   })
 
   it('wires ordering consumers to the canonical frame contract', () => {
     expect(
-      valuesFrom(
+      importsFrom(
         'packages/telefunc/wire-protocol/server/adapter/cloudflare/broadcast.ts',
         '../../../ordering-frame.js',
-        'import',
       ),
     ).toEqual(['decodeOrderingFrame', 'encodeOrderingFrame'])
-    expect(valuesFrom('packages/redis/src/room/layout.ts', 'telefunc/backend', 'import')).toContain(
-      'ORDERING_FRAME_LAYOUT',
-    )
+    expect(importsFrom('packages/redis/src/room/layout.ts', 'telefunc/backend')).toContain('ORDERING_FRAME_LAYOUT')
   })
 
   it('keeps Redis public Telefunc imports within the reviewed canonical surface', () => {
     const redisValues = files
       .filter((file) => file.startsWith('packages/redis/'))
-      .flatMap((file) => valuesFrom(file, 'telefunc/backend', 'import'))
+      .flatMap((file) => importsFrom(file, 'telefunc/backend'))
     expect([...new Set(redisValues)].sort()).toEqual(['HEAD_TRANSITIONS', 'ORDERING_FRAME_LAYOUT', 'laneKey'])
-    expect(valuesFrom('packages/redis/src/index.ts', 'telefunc/__internal', 'import')).toContain('setDefaultBackend')
+    expect(importsFrom('packages/redis/src/index.ts', 'telefunc/__internal')).toContain('setDefaultBackend')
   })
 })
 
@@ -111,14 +99,15 @@ function callableOwner(node: Node): string {
   return callable.getFirstAncestorByKind(SyntaxKind.VariableDeclaration)?.getName() ?? '<anonymous>'
 }
 
-function valuesFrom(file: string, module: string, kind: 'import' | 'export'): string[] {
-  if (kind === 'export') {
-    return source(file)
-      .getExportDeclarations()
-      .filter((declaration) => declaration.getModuleSpecifierValue() === module)
-      .flatMap((declaration) => declaration.getNamedExports().map((value) => value.getName()))
-      .sort()
-  }
+function reexportsFrom(file: string, module: string): string[] {
+  return source(file)
+    .getExportDeclarations()
+    .filter((declaration) => declaration.getModuleSpecifierValue() === module)
+    .flatMap((declaration) => declaration.getNamedExports().map((value) => value.getName()))
+    .sort()
+}
+
+function importsFrom(file: string, module: string): string[] {
   return source(file)
     .getImportDeclarations()
     .filter(

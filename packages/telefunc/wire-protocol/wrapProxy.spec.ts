@@ -7,13 +7,10 @@ it('keeps ignored wrapped-method rejections visible to the runtime', () => {
     stdin: {
       contents: `
         import { wrapProxy } from './packages/telefunc/wire-protocol/wrapProxy.ts'
-        const events = []
-        process.on('unhandledRejection', (reason) => events.push(reason.message))
-        wrapProxy({ fail: () => Promise.reject(new Error('wrapped rejection')) }).fail()
+        const events = []; process.on('unhandledRejection', (reason) => events.push(reason.message)); wrapProxy({ fail: () => Promise.reject(new Error('wrapped rejection')) }).fail()
         setTimeout(() => process.stdout.write(JSON.stringify(events)), 0)
       `,
       resolveDir: process.cwd(),
-      sourcefile: 'wrap-proxy-unhandled-entry.ts',
     },
     bundle: true,
     format: 'esm',

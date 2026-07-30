@@ -17,25 +17,22 @@ beforeEach(async () => {
 })
 afterEach(() => disposeBackend())
 
-function pendingSubscription(): {
-  subscription: SubscriptionAttempt
-  ready(): void
-  lost(): void
-  close(): void
-} {
+function pendingSubscription() {
   let resolveReady!: () => void
-  let ready: Promise<void>
-  const resetReady = () => {
-    ready = new Promise<void>((resolve) => {
+  const resetReady = () =>
+    new Promise<void>((resolve) => {
       resolveReady = resolve
     })
-  }
-  resetReady()
+  let ready = resetReady()
   let state: SubscriptionAttemptState = 'establishing'
   const listeners = new Set<(state: SubscriptionAttemptState) => void>()
   const transition = (next: SubscriptionAttemptState) => {
     state = next
     for (const listener of listeners) listener(next)
+  }
+  const settle = (next: SubscriptionAttemptState) => {
+    resolveReady()
+    transition(next)
   }
   return {
     subscription: {
@@ -47,17 +44,11 @@ function pendingSubscription(): {
         listeners.add(listener)
         return () => listeners.delete(listener)
       },
-      unsubscribe: async () => {
-        resolveReady()
-        transition('closed')
-      },
-    },
-    ready() {
-      resolveReady()
-      transition('ready')
-    },
+      unsubscribe: async () => settle('closed'),
+    } satisfies SubscriptionAttempt,
+    ready: () => settle('ready'),
     lost() {
-      resetReady()
+      ready = resetReady()
       transition('lost')
     },
     close() {

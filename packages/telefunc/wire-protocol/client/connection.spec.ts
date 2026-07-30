@@ -33,22 +33,20 @@ function createStalledTransport() {
 }
 
 function publishThatSettlesWith(status: AckResultStatus, binary: boolean) {
+  const send = (_channel: unknown, _data: unknown, register: (seq: number) => void) => register(1)
   const broadcast = Object.assign(Object.create(ClientBroadcast.prototype), {
     _isClosed: false,
     _pendingAcks: new Map(),
     _inflightAcks: 0,
     _closeWaiters: [],
-    _connection: {
-      sendPublishAckReq: (_channel: unknown, _data: unknown, register: (seq: number) => void) => register(1),
-      sendPublishBinaryAckReq: (_channel: unknown, _data: unknown, register: (seq: number) => void) => register(1),
-    },
-  }) as ClientBroadcast
+    _connection: { sendPublishAckReq: send, sendPublishBinaryAckReq: send },
+  }) as ClientBroadcast & { _onPeerAckRes(seq: number, text: string, status: AckResultStatus): void }
   const publishing = binary ? broadcast.publishBinary(new Uint8Array([1])) : broadcast.publish('message')
-  ;(
-    broadcast as unknown as {
-      _onPeerAckRes(seq: number, text: string, status: AckResultStatus): void
-    }
-  )._onPeerAckRes(1, status === ACK_STATUS.ABORT ? JSON.stringify('expected') : 'unexpected publish bug', status)
+  broadcast._onPeerAckRes(
+    1,
+    status === ACK_STATUS.ABORT ? JSON.stringify('expected') : 'unexpected publish bug',
+    status,
+  )
   return publishing
 }
 
