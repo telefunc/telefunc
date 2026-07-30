@@ -4,6 +4,7 @@ import { IndexedPeer } from '../server/IndexedPeer.js'
 import { ACK_STATUS, TAG, decode } from '../shared-ws.js'
 import { ShieldValidationError, isShieldValidationError } from '../../shared/ShieldValidationError.js'
 import {
+  ROOM_DM_ACK_TIMEOUT_MS,
   ROOM_HEARTBEAT_INTERVAL_MS,
   ROOM_MEMBER_KV_TTL_MS,
   ROOM_MEMBER_TTL_MS,
@@ -384,7 +385,7 @@ describe('Room public behavior', () => {
       }
     })
     try {
-      room.onAnnounce(() => {})
+      room.onJoin(() => {})
       await settle()
       const refresh = vi.spyOn(room as unknown as { _refreshMembers(): Promise<void> }, '_refreshMembers')
       transition('lost')
@@ -393,8 +394,8 @@ describe('Room public behavior', () => {
       const onControl = (
         room as unknown as { _onCtrlMessage(message: string, info: { seq: number; timestamp: number }): void }
       )._onCtrlMessage.bind(room)
-      onControl('{"__r":"announce","data":"first"}', { seq: 1, timestamp: 1 })
-      onControl('{"__r":"announce","data":"gap"}', { seq: 3, timestamp: 3 })
+      onControl('{"__r":"update","meta":{},"at":1,"by":"a"}', { seq: 1, timestamp: 1 })
+      onControl('{"__r":"update","meta":{},"at":2,"by":"a"}', { seq: 3, timestamp: 3 })
       await vi.waitFor(() => expect(refresh).toHaveBeenCalledTimes(2))
     } finally {
       subscribe.mockRestore()
@@ -416,7 +417,7 @@ describe('Room public behavior', () => {
     const heartbeat = vi
       .spyOn(observer as unknown as { _heartbeatTick(): Promise<void> }, '_heartbeatTick')
       .mockResolvedValue()
-    observer.onAnnounce(() => {})
+    observer.onJoin(() => {})
 
     await vi.advanceTimersByTimeAsync(ROOM_HEARTBEAT_INTERVAL_MS)
 
@@ -489,47 +490,75 @@ describe('Room public behavior', () => {
     }
   })
 
-  it('rejects the final bounded readiness and closes after Room exhausts recovery', async () => {
-    const observer = await Room.get((await Room.create('room-replan-exhaustion')).id)
+  it('keeps exhausted recovery internal and replans the lost lane without closing the Room', async () => {
+    const room = (await Room.create('room-replan-exhaustion')) as ServerRoom
     const backend = getBackend()
     const subscribeLane = backend.subscribeLane.bind(backend)
     const terminal = terminalSubscription()
-    let semanticSubscriptions = 0
+    let exhaustedMember: string | undefined
     let recoveryAttempts = 0
-    let finalReadiness = deferred<void>().promise
-    let readinessOutcome: { status: 'pending' } | { status: 'resolved' } | { status: 'rejected'; diagnostic: string } =
-      { status: 'pending' }
+    let allowRecovery = false
     const subscribe = vi.spyOn(backend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
-      if (lane.kind !== 'semantic') return subscribeLane(roomId, inc, lane, receiver)
-      semanticSubscriptions++
-      if (semanticSubscriptions === 1) return terminal.subscription
+      if (lane.kind !== 'inbox') return subscribeLane(roomId, inc, lane, receiver)
+      if (exhaustedMember === undefined) {
+        exhaustedMember = lane.member
+        return terminal.subscription
+      }
+      if (lane.member !== exhaustedMember) return subscribeLane(roomId, inc, lane, receiver)
       recoveryAttempts++
-      const subscription = rejectedSubscription('Backend subscription closed: room-replan-exhaustion')
-      finalReadiness = subscription.ready
-      return subscription
+      return allowRecovery
+        ? subscribeLane(roomId, inc, lane, receiver)
+        : rejectedSubscription('Backend subscription closed: room-replan-exhaustion')
     })
     const report = vi.spyOn(console, 'error').mockImplementation(() => {})
     try {
-      observer.subscribe(() => {})
+      const sender = await room.join()
+      const recipient = await room.join()
+      recipient.listen(() => 'acknowledged')
+      expect(exhaustedMember).toBe(sender.id)
       await terminal.close()
 
       await vi.waitFor(() => expect(recoveryAttempts).toBe(6))
-      void finalReadiness.then(
+      const slot = (
+        room as unknown as {
+          _dmUnsubs: Map<string, { active: boolean; lost: boolean; ready: Promise<void> }>
+        }
+      )._dmUnsubs.get(sender.id)!
+      await vi.waitFor(() => expect(slot.lost).toBe(true))
+      const diagnostics = report.mock.calls.flat().map(String).join('\n')
+      expect(diagnostics).toContain('Backend subscription closed: room-replan-exhaustion')
+      expect(diagnostics).toContain('Room subscription recovery exhausted')
+      let readinessOutcome: 'pending' | 'resolved' | 'rejected' = 'pending'
+      void slot.ready.then(
         () => {
-          readinessOutcome = { status: 'resolved' }
+          readinessOutcome = 'resolved'
         },
-        (error: unknown) => {
-          readinessOutcome = { status: 'rejected', diagnostic: String(error) }
+        () => {
+          readinessOutcome = 'rejected'
         },
       )
       await Promise.resolve()
+      expect(readinessOutcome).toBe('pending')
+      expect(room.isClosed).toBe(false)
+      expect((await backend.readHead(room.id))?.head.state).toBe('open')
 
-      expect(readinessOutcome).toEqual({
-        status: 'rejected',
-        diagnostic: expect.stringContaining('Backend subscription closed: room-replan-exhaustion'),
-      })
-      await vi.waitFor(() => expect(observer.isClosed).toBe(true))
+      vi.useFakeTimers()
+      const sending = sender.send(recipient, 'ping', { ack: true }).catch((error: unknown) => error)
+      await vi.advanceTimersByTimeAsync(ROOM_DM_ACK_TIMEOUT_MS)
+      const publicError = await sending
+      expect(isRoomError(publicError)).toBe(true)
+      expect(String(publicError)).toContain('timed out')
+      expect(String(publicError)).not.toContain('subscription')
+      vi.useRealTimers()
+
+      allowRecovery = true
+      const syncSubs = room as unknown as { _syncSubs(): void }
+      syncSubs._syncSubs()
+      await vi.waitFor(() => expect(recoveryAttempts).toBe(7))
+      await vi.waitFor(() => expect(slot).toMatchObject({ active: true, lost: false }))
+      await expect(sender.publish('still-open')).resolves.toMatchObject({ seq: expect.any(Number) })
     } finally {
+      vi.useRealTimers()
       subscribe.mockRestore()
       report.mockRestore()
     }
@@ -702,22 +731,36 @@ describe('Room public behavior', () => {
     expect(after).toEqual(['join:Alice', 'join:Bob', 'publish:ok', 'send:ok'])
   })
 
-  it('delivers announcements to pure observers in the control order, independently of text order', async () => {
-    const room = await Room.create('announce-control-order')
-    const firstMember = await room.join()
-    await room.join()
+  it('orders participant text and room announcements in one semantic domain', async () => {
+    const room = await Room.create('announce-semantic-order')
+    const member = await room.join()
     const observer = await Room.get(room.id)
     const observed: Array<[unknown, number]> = []
     observer.onAnnounce((data, info) => observed.push([data, info.seq]))
     await settle()
 
-    const first = await firstMember.publish('one')
+    const first = await member.publish('one')
     const second = await Room.announce(room.id, 'notice')
-    const third = await firstMember.publish('two')
+    const third = await member.publish('two')
 
-    expect([first.seq, third.seq]).toEqual([1, 2])
-    expect(second.seq).toBe(3) // two joins precede it on the control lane
-    expect(observed).toEqual([['notice', 3]])
+    expect([first.seq, second.seq, third.seq]).toEqual([1, 2, 3])
+    expect(first.timestamp).toBeLessThanOrEqual(second.timestamp)
+    expect(second.timestamp).toBeLessThanOrEqual(third.timestamp)
+    expect(observed).toEqual([['notice', 2]])
+  })
+
+  it('relays semantic announcements only to stubs that declared announce demand', async () => {
+    const room = (await Room.create('announce-want-gate')) as ServerRoom
+    const wanted = serve(room)
+    const silent = serve(room)
+    wanted.stub._onPeerMessage(JSON.stringify({ __r: 'sub-text', members: [], announce: true }), 1)
+    await settle()
+
+    await Room.announce(room.id, 'wanted')
+    await settle()
+
+    expect(announceFrames(wanted.peer)).toEqual(['wanted'])
+    expect(announceFrames(silent.peer)).toEqual([])
   })
 
   it("retained owner cleanup is compare-delete, so a newer owner's racing frame survives", async () => {
@@ -1030,6 +1073,25 @@ describe('client Room lifecycle', () => {
       __r: 'sub-binary',
       wants: { everyMember: { all: false, tracks: [DEFAULT_TRACK] }, members: {} },
     })
+  })
+
+  it('declares and retires client announce demand on the semantic lane', () => {
+    const sent: unknown[] = []
+    const fake = createFakeStub({
+      send: async (message) => {
+        sent.push(message)
+        return undefined
+      },
+    })
+    const client = new ClientRoom(fake.stub, snapshot('announce-declaration'))
+
+    const stop = client.onAnnounce(() => {})
+    stop()
+
+    expect(sent.filter((message: any) => message.__r === 'sub-text')).toEqual([
+      { __r: 'sub-text', members: [], announce: true },
+      { __r: 'sub-text', members: [], announce: false },
+    ])
   })
 
   it('redeclares a room-wide text subscription after reconnect even when the local latch already matches', () => {
@@ -1585,6 +1647,15 @@ function dataFrames(peer: Peer): unknown[] {
     .filter((frame) => frame.tag === TAG.PUBLISH)
     .map((frame) => JSON.parse(frame.text) as { __r: string; data?: unknown })
     .filter((frame) => frame.__r === 'data')
+    .map((frame) => frame.data)
+}
+
+function announceFrames(peer: Peer): unknown[] {
+  return peer
+    .decoded()
+    .filter((frame) => frame.tag === TAG.PUBLISH)
+    .map((frame) => JSON.parse(frame.text) as { __r: string; data?: unknown })
+    .filter((frame) => frame.__r === 'announce')
     .map((frame) => frame.data)
 }
 

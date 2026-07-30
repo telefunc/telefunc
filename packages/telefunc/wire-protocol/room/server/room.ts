@@ -137,11 +137,11 @@ class ServerRoom implements Room {
   private readonly _localParticipants = new Map<string, ServerLocalParticipant>()
 
   private readonly _ctrlSub = new SubSlot(
-    (slot) => this._onTerminalSubscription(slot),
+    (slot, error) => this._onTerminalSubscription(slot, error),
     () => void this._reconcileAuthority().catch(reportRoomError),
   )
   private readonly _textSub = new SubSlot(
-    (slot) => this._onTerminalSubscription(slot),
+    (slot, error) => this._onTerminalSubscription(slot, error),
     () => void this._reconcileAuthority().catch(reportRoomError),
   )
   /** Upstream subscriptions keyed by their policy identity. */
@@ -711,7 +711,7 @@ class ServerRoom implements Room {
     }
     if (!hasRoomTag(envelope)) return
     const event = envelope as RoomEnvelope
-    if (event.__r === 'data') return // data never travels on the control key
+    if (event.__r === 'data' || event.__r === 'announce') return // semantic messages never travel here
     const previousSeq = this._controlSeq
     if (rawInfo.seq <= previousSeq) return
     this._controlSeq = rawInfo.seq
@@ -727,11 +727,7 @@ class ServerRoom implements Room {
     // applying, since `leave` removes the member from state (see `_hidesFromClients`).
     const serverOnly = this._hidesFromClients(event)
 
-    if (event.__r === 'announce') {
-      this._state.applyAnnounce(event.data, makePublishInfo(this.id, rawInfo.seq, rawInfo.timestamp))
-    } else {
-      this._applyCtrl(event)
-    }
+    this._applyCtrl(event)
 
     if (this._stubs.size > 0 && !serverOnly) {
       // Presence/lifecycle events are ordered by the control lane; the receipt rides the frame.
@@ -768,6 +764,18 @@ class ServerRoom implements Room {
       return // junk on the semantic lane
     }
     if (!hasRoomTag(envelope)) return
+    if (envelope.__r === 'announce') {
+      const announce = envelope as Extract<RoomEnvelope, { __r: 'announce' }>
+      const info = makePublishInfo(this.id, rawInfo.seq, rawInfo.timestamp)
+      this._state.applyAnnounce(announce.data, info)
+      if (this._stubs.size > 0) {
+        const wireText = encodePublishText(serialized, rawInfo)
+        for (const stub of this._stubs) {
+          if (stub._wantsAnnounce) stub._relayTextLive(wireText, '', rawInfo)
+        }
+      }
+      return
+    }
     if (envelope.__r !== 'data') return
     const event = envelope as RoomDataEnvelope
     // The semantic-lane order rides on the transport frame, never in the payload.
@@ -929,7 +937,8 @@ class ServerRoom implements Room {
   }
 
   /** Recover a still-wanted terminal lane inside Room's one policy horizon. */
-  private _onTerminalSubscription(slot: SubSlot): void {
+  private _onTerminalSubscription(slot: SubSlot, failure?: unknown): void {
+    if (failure !== undefined) reportRoomError(failure)
     if (this._recoveringSubscriptions.has(slot)) return
     this._recoveringSubscriptions.add(slot)
     void (async () => {
@@ -948,14 +957,17 @@ class ServerRoom implements Room {
         }
         slot.retry()
         try {
-          await withinRoomHorizon(slot.ready, Math.min(attemptMs, deadline - Date.now()))
+          await withinRoomHorizon(slot.attemptReady, Math.min(attemptMs, deadline - Date.now()))
           await this._reconcileAuthority()
           return
         } catch (error) {
           reportRoomError(error)
         }
       }
-      if (slot.wanted) this._settleTerminalSubscription()
+      if (slot.wanted) {
+        reportRoomError(new RoomError(`Room subscription recovery exhausted: ${this.id}`))
+        slot.markLost()
+      }
     })()
       .catch(reportRoomError)
       .finally(() => this._recoveringSubscriptions.delete(slot))
@@ -1118,10 +1130,11 @@ class ServerRoom implements Room {
         return undefined
       }
       case 'sub-text': {
-        // Member-scoped text wants — the room-level (all) want rides the broadcast-sub ctrl.
+        // Member-scoped text and announce wants — room-level text rides the broadcast-sub ctrl.
         const members = Array.isArray(req.members) ? req.members.filter((m) => typeof m === 'string') : []
         const prev = stub._textMemberWants
         stub._textMemberWants = new Set(members)
+        stub._wantsAnnounce = req.announce === true
         stub._flushTail() // this selector newly covers held tail — flush it before live/retained relay
         this._syncSubs()
         void this._replayRetainedText(stub, stub._wantsText, prev).catch(reportRoomError)
@@ -1261,7 +1274,9 @@ class ServerRoom implements Room {
     // like binary: room-level listeners want it all, participant-scoped ones only their member.
     const textWants = this._aggregateTextWants()
     const wantAnyText = open && (textWants.all || textWants.members.size > 0)
-    const wantSemantic = open && (observed || wantAnyText)
+    const wantAnnounce = state.wantsAnnounce || [...this._stubs].some((stub) => stub._wantsAnnounce)
+    const ownsMembers = this._localParticipants.size > 0 || [...this._stubs].some((stub) => stub._stubMembers.size > 0)
+    const wantSemantic = open && (ownsMembers || wantAnyText || wantAnnounce)
     const memberIds = open ? state.listMemberIds() : []
 
     // Roster loads are need-driven: a resident roster refreshes on the observe transition
@@ -1422,7 +1437,7 @@ class ServerRoom implements Room {
       let slot = subs.get(key)
       if (!slot) {
         slot = new SubSlot(
-          (terminal) => this._onTerminalSubscription(terminal),
+          (terminal, error) => this._onTerminalSubscription(terminal, error),
           () => void this._reconcileAuthority().catch(reportRoomError),
         )
         subs.set(key, slot)
@@ -1432,8 +1447,8 @@ class ServerRoom implements Room {
   }
 
   /** The binary analogue of `SubSlot.ready`: settles once every wanted per-(member, track) binary
-   *  subscription is live, or rejects when one exhausts replacement. Awaited before retained replay so a
-   *  keyframe racing the subscribe isn't lost in the gap. A synchronous backend resolves instantly. */
+   *  subscription is live and remains pending while a lane is internally lost. Awaited before retained
+   *  replay so a keyframe racing the subscribe isn't lost in the gap. */
   private _binaryReady(): Promise<void> {
     const pending: Promise<void>[] = []
     for (const subscription of this._binaryKeyUnsubs.values()) pending.push(subscription.ready)

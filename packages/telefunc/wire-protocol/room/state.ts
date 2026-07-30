@@ -189,6 +189,10 @@ class RoomState {
   get dataListenerCount(): number {
     return this._dataListenerCount
   }
+  /** Whether this holder consumes room-authored messages on the semantic lane. */
+  get wantsAnnounce(): boolean {
+    return this._announceCbs.length > 0
+  }
   /** Listeners needing the binary data stream. */
   get binaryListenerCount(): number {
     return this._binaryListenerCount

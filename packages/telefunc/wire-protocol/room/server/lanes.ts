@@ -64,9 +64,12 @@ class SubSlot {
   private _subscription: BackendSubscription | null = null
   private _subscribe: (() => BackendSubscription) | null = null
   private _unobserve: (() => void) | null = null
+  private _lost = false
+  private _readyPromise = Promise.resolve()
+  private _resolveReady: (() => void) | null = null
 
   constructor(
-    private readonly _onTerminal: (slot: SubSlot) => void,
+    private readonly _onTerminal: (slot: SubSlot, error?: unknown) => void,
     private readonly _onRecovered: () => void,
   ) {}
 
@@ -78,7 +81,17 @@ class SubSlot {
     return this._subscribe !== null
   }
 
+  get lost(): boolean {
+    return this._lost
+  }
+
+  /** Holder-facing readiness survives raw attempt failures; Room's policy owns replacement. */
   get ready(): Promise<void> {
+    return this._readyPromise
+  }
+
+  /** The current raw generation, used only by Room's bounded recovery policy. */
+  get attemptReady(): Promise<void> {
     return this._subscription?.ready ?? Promise.resolve()
   }
 
@@ -91,28 +104,60 @@ class SubSlot {
 
   retry(): void {
     if (this._subscribe === null) return
+    this._ensurePendingReady()
     const previous = this._subscription
     this._unobserve?.()
     const subscription = this._subscribe()
     this._subscription = subscription
+    this._lost = false
     let wasReady = subscription.state() === 'ready'
+    if (wasReady) this._settleReady()
     let lostAfterReady = false
     void subscription.ready.then(
       () => {
-        if (this._subscription === subscription && subscription.state() === 'ready') wasReady = true
+        if (this._subscription === subscription && subscription.state() === 'ready') {
+          wasReady = true
+          this._lost = false
+          this._settleReady()
+        }
       },
-      () => {},
+      (error: unknown) => {
+        if (this._subscription !== subscription) return
+        this._lost = true
+        this._ensurePendingReady()
+        this._onTerminal(this, error)
+      },
     )
     this._unobserve = subscription.onStateChange((state) => {
       if (this._subscription !== subscription) return
-      if (state === 'lost' && wasReady) lostAfterReady = true
-      else if (state === 'ready') {
+      if (state === 'lost') {
+        if (wasReady) lostAfterReady = true
+        this._lost = true
+        this._ensurePendingReady()
+      } else if (state === 'ready') {
         if (lostAfterReady) this._onRecovered()
         wasReady = true
         lostAfterReady = false
-      } else if (state === 'closed' && wasReady) this._onTerminal(this)
+        this._lost = false
+        this._settleReady()
+      } else if (state === 'closed') {
+        this._lost = true
+        this._ensurePendingReady()
+        this._onTerminal(this)
+      }
     })
     if (previous) void previous.unsubscribe().catch(reportRoomError)
+  }
+
+  /** Exhausted policy keeps demand but drops the dead raw attempt until the next planning pass. */
+  markLost(): void {
+    const subscription = this._subscription
+    this._subscription = null
+    this._unobserve?.()
+    this._unobserve = null
+    this._lost = true
+    this._ensurePendingReady()
+    if (subscription) void subscription.unsubscribe().catch(reportRoomError)
   }
 
   stop(): void {
@@ -121,7 +166,22 @@ class SubSlot {
     this._subscribe = null
     this._unobserve?.()
     this._unobserve = null
+    this._lost = false
+    this._settleReady()
+    this._readyPromise = Promise.resolve()
     if (subscription) void subscription.unsubscribe().catch(reportRoomError)
+  }
+
+  private _ensurePendingReady(): void {
+    if (this._resolveReady !== null) return
+    this._readyPromise = new Promise<void>((resolve) => {
+      this._resolveReady = resolve
+    })
+  }
+
+  private _settleReady(): void {
+    this._resolveReady?.()
+    this._resolveReady = null
   }
 }
 
