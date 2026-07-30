@@ -822,6 +822,29 @@ describe('Room public behavior', () => {
     expect((await observer.getParticipants({ hidden: true })).map((member) => member.id)).toEqual([hidden.id])
   })
 
+  it('excludes an expired unobserved member from static get and list presence', async () => {
+    const room = (await Room.create('expired-static-presence')) as ServerRoom
+    const member = await room.join()
+    const memberKey = roomMemberKvKey(room.id, member.id)
+    const read = await driver.readCells(room.id, room._inc, { keys: [memberKey] })
+    expect('staleInc' in read).toBe(false)
+    if ('staleInc' in read) throw new Error('unexpected stale generation')
+    const record = parse(decoder.decode(read.cells.get(memberKey)!))
+    await expect(
+      driver.compareExchangeCells(room.id, room._inc, read.revision, [
+        {
+          key: memberKey,
+          set: { bytes: encoder.encode(stringify({ ...record, seenAt: Date.now() - ROOM_MEMBER_TTL_MS - 1 })) },
+        },
+      ]),
+    ).resolves.toBe('committed')
+
+    const loaded = await Room.get(room.id)
+    expect(loaded.count).toBe(0)
+    expect(loaded.isEmpty).toBe(true)
+    expect((await Room.list()).find(({ id }) => id === room.id)).toMatchObject({ count: 0, isEmpty: true })
+  })
+
   it('keeps local and verified sender metadata at the newest accepted sequence', async () => {
     const room = (await Room.create('participant-meta-order')) as ServerRoom
     const participant = await room.join()

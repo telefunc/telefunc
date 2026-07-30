@@ -6,8 +6,6 @@ export {
   roomCtrlKey,
   roomMemberKvKey,
   roomMemberKvPrefix,
-  roomHiddenMemberKvKey,
-  roomHiddenMemberKvPrefix,
   roomMemberCleanupKvKey,
   roomMemberCleanupKvPrefix,
   roomIdentityMemberKvKey,
@@ -113,17 +111,6 @@ function roomMemberKvKey(roomId: string, memberId: string): string {
  *  how member records are told apart from keys of other rooms whose ID shares the prefix. */
 function roomMemberKvPrefix(roomId: string): string {
   return `${ROOM_KEY_NAMESPACE}${roomKeyId(roomId)}:m:`
-}
-
-/** KV key marking one membership as off-presence (`join({ hidden })`). A tiny index — written next
- *  to the member record, off the `:m:` member-record prefix so a member scan never sweeps it — that
- *  lets the lazy count (`Room.get`/`Room.list`) exclude hidden members without reading any record. */
-function roomHiddenMemberKvKey(roomId: string, memberId: string): string {
-  return `${ROOM_KEY_NAMESPACE}${roomKeyId(roomId)}:hidden:${memberId}`
-}
-/** KV prefix enumerating a room's off-presence markers. */
-function roomHiddenMemberKvPrefix(roomId: string): string {
-  return `${ROOM_KEY_NAMESPACE}${roomKeyId(roomId)}:hidden:`
 }
 
 /** Durable work left by membership eviction. The marker is committed in the same cell transaction

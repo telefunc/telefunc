@@ -19,8 +19,6 @@ import { ROOM_MEMBER_TTL_MS } from '../../constants.js'
 import {
   RoomError,
   leaveCauseToWire,
-  roomHiddenMemberKvKey,
-  roomHiddenMemberKvPrefix,
   roomIdentityKvPrefix,
   roomIdentityMemberKvKey,
   roomMemberCleanupKvKey,
@@ -106,7 +104,7 @@ async function readMembers(roomId: string, inc: string, ids?: string[]): Promise
     if (record.inc !== inc) continue
     if (Date.now() - record.seenAt > ROOM_MEMBER_TTL_MS) {
       const cleanupKey = roomMemberCleanupKvKey(roomId, id)
-      const siblingKeys = [key, roomHiddenMemberKvKey(roomId, id)]
+      const siblingKeys = [key]
       if (record.identity !== undefined) siblingKeys.push(roomIdentityMemberKvKey(roomId, record.identity, id))
       const cleanup: PendingMemberCleanup = { cause: { cause: 'disconnected' } }
       const reap = await mutateCells(roomId, inc, { keys: [...siblingKeys, cleanupKey] }, (current) => {
@@ -162,21 +160,7 @@ async function listMemberKeys(roomId: string, inc: string): Promise<Array<{ key:
 }
 
 async function presenceCount(roomId: string, inc: string): Promise<number> {
-  const members = await listMemberKeys(roomId, inc)
-  if (members.length === 0) return 0
-  const hidden = await listHiddenMemberIds(roomId, inc)
-  if (hidden.size === 0) return members.length
-  let count = 0
-  for (const { id } of members) if (!hidden.has(id)) count++
-  return count
-}
-
-async function listHiddenMemberIds(roomId: string, inc: string): Promise<Set<string>> {
-  const prefix = roomHiddenMemberKvPrefix(roomId)
-  const ids = new Set<string>()
-  const { cells } = await readCellSet(roomId, inc, { prefix })
-  for (const key of cells.keys()) ids.add(key.slice(prefix.length))
-  return ids
+  return (await readMembers(roomId, inc)).filter((member) => !member.hidden).length
 }
 
 async function resolveIdentityMembers(roomId: string, inc: string, identity: string): Promise<string[]> {
@@ -242,7 +226,7 @@ async function evictMember(
 ): Promise<void> {
   const memberKey = roomMemberKvKey(roomId, memberId)
   const cleanupKey = roomMemberCleanupKvKey(roomId, memberId)
-  const keys = [memberKey, roomHiddenMemberKvKey(roomId, memberId)]
+  const keys = [memberKey]
   if (identity !== undefined) keys.push(roomIdentityMemberKvKey(roomId, identity, memberId))
   const hasCleanup = await mutateCells(roomId, inc, { keys: [...keys, cleanupKey] }, (cells) => {
     const pending = cells.has(cleanupKey)

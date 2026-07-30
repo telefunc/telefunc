@@ -30,7 +30,6 @@ import {
   mergeAttributes,
   normalizeJoinOptions,
   roomMemberKvKey,
-  roomHiddenMemberKvKey,
   roomIdentityMemberKvKey,
   unframeMemberId,
   DEFAULT_TRACK,
@@ -347,7 +346,6 @@ class ServerRoom implements Room {
     const memberKey = roomMemberKvKey(this.id, id)
     const keys = [memberKey]
     if (identity !== null) keys.push(roomIdentityMemberKvKey(this.id, identity, id))
-    if (hidden) keys.push(roomHiddenMemberKvKey(this.id, id))
     await mutateCells(this.id, this._inc, { keys }, () => ({
       value: undefined,
       mutations: keys.map((key) => ({
