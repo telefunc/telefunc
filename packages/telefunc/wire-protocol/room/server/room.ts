@@ -1123,7 +1123,7 @@ class ServerRoom implements Room {
         return undefined
       }
       case 'sub-text': {
-        // Member-scoped text and announce wants — room-level text rides the broadcast-sub ctrl.
+        // Member-scoped text and announcement wants arrive in the client's sub-text declaration.
         const members = Array.isArray(req.members) ? req.members.filter((m) => typeof m === 'string') : []
         const prev = stub._textMemberWants
         stub._textMemberWants = new Set(members)
@@ -1262,9 +1262,9 @@ class ServerRoom implements Room {
       ),
     )
 
-    // Text: every observed room instance ingests the one semantic lane. Wants are member-selective
-    // only at the per-stub relay: presence-only observers don't receive the room's chatter over
-    // their client connection, but their node still pays the shared ingestion cost.
+    // Text and announcements share one semantic lane. A node opens it while it owns a participant
+    // or a holder declares text/announcement demand, then filters delivery at the per-stub relay.
+    // A presence-only observer opens only the control lane.
     const textWants = this._aggregateTextWants()
     const wantAnyText = open && (textWants.all || textWants.members.size > 0)
     const wantAnnounce = state.wantsAnnounce || [...this._stubs].some((stub) => stub._wantsAnnounce)
@@ -1285,8 +1285,8 @@ class ServerRoom implements Room {
     if ((becomesObserved && state.rosterKnown) || (open && !state.rosterKnown && needsRoster)) {
       void this._refreshMembers().catch(reportRoomError)
     }
-    // Text: one lane per room. An observed instance ingests it whether or not a stub currently wants
-    // text; member-selectivity is enforced at the per-stub relay (see `_onTextData`), never by
+    // Semantic data: one lane per room. Once wanted, the node ingests the complete lane; text and
+    // announcement selectivity is enforced at the per-stub relay (see `_onTextData`), never by
     // narrowing the backend subscription.
     this._textSub.sync(wantSemantic, () =>
       backend.subscribeLane(this.id, this._inc, SEMANTIC_LANE, (payload, info) =>
