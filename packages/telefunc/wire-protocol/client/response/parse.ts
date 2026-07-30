@@ -16,7 +16,7 @@ import { SSEStreamReader } from './SSEStreamReader.js'
 import { ClientChannel, ClientBroadcast } from '../channel.js'
 import { RoomClientBroadcast } from '../../room/client.js'
 import type { RoomClientReviverContext } from '../../room/response-client.js'
-import { wrapProxy } from '../../wrapProxy.js'
+import { adoptSubordinate, wrapProxy } from '../../wrapProxy.js'
 import { GcRegistry } from '../../gcRegistry.js'
 import { ChannelStreamSource } from '../../ChannelStreamSource.js'
 import { createReadableChunkStream } from '../../createReadableChunkStream.js'
@@ -95,6 +95,7 @@ async function reviveResponse(
 ): Promise<unknown> {
   const { extensionResponseTypes } = callContext
   const closeHandlers = new WeakMap<object, () => void>()
+  const adopted = new WeakSet<object>()
 
   const throwStreamError = (errorPayload: Record<string, unknown>): never => {
     if (errorPayload.type === STREAMING_ERROR_TYPE.ABORT && 'abortValue' in errorPayload) {
@@ -107,6 +108,13 @@ async function reviveResponse(
   const telefuncUrl = callContext.telefuncUrl
   const promises: Promise<unknown>[] = []
   const context: RoomClientReviverContext = {
+    adoptSubordinate(child, trackedOwner) {
+      const close = closeHandlers.get(trackedOwner)
+      assert(close)
+      adoptSubordinate(child, trackedOwner)
+      closeHandlers.set(child, close)
+      adopted.add(child)
+    },
     waitFor(promise) {
       // Suppress unhandled-rejection noise if `parse()` throws before `Promise.all(promises)`.
       promise.catch(() => {})
@@ -166,10 +174,9 @@ async function reviveResponse(
 
   const reviver = createStreamingReviver(
     context,
-    function onRevived(revived, trackLifetime) {
-      // Room subordinate values live and die with their parent: no GC wrapper (it would break
-      // `===` with the parent's own views), and no separate close/abort registration.
-      if (!trackLifetime) return
+    function onRevived(revived) {
+      // An adopted value keeps exact identity and shares its tracked owner's lifecycle.
+      if (isObjectOrFunction(revived.value) && adopted.has(revived.value)) return
       {
         const { value, close } = revived
         assert(isObjectOrFunction(value))

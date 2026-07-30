@@ -1,4 +1,4 @@
-export { roomReviver, roomParticipantReviver, roomRemoteReviver, isRoomSubordinateReviver }
+export { roomReviver, roomParticipantReviver, roomRemoteReviver }
 export type { RoomClientReviverContext }
 
 import type {
@@ -59,23 +59,20 @@ const roomParticipantReviver: ReviverType<RoomParticipantContract, ClientReviver
 }
 
 /** The metadata's `room` was revived first by the recursive parser — bind the view to that live
- *  `ClientRoom` so `room.getParticipant(m.id) === m`. The registry recognizes this Room-owned
- *  reviver as subordinate and leaves its lifecycle with the room. */
+ *  `ClientRoom` so `room.getParticipant(m.id) === m`, then adopt its lifecycle. */
 const roomRemoteReviver: ReviverType<RoomRemoteContract, ClientReviverContext> = {
   prefix: SERIALIZER_PREFIX_ROOM_REMOTE,
-  revive(metadata) {
+  revive(metadata, context) {
     // A remote is only ever serialized alongside its room, so the recursive parser has already
     // revived `metadata.room` into its `ClientRoom` — assert that invariant instead of blind-casting.
     assert(metadata.room instanceof ClientRoom)
     const room = metadata.room
+    const remote = room._reviveRemote(metadata)
+    context.adoptSubordinate(remote, room)
     return {
-      value: room._reviveRemote(metadata),
+      value: remote,
       close() {},
       abort() {},
     }
   },
-}
-
-function isRoomSubordinateReviver(reviver: ReviverType): boolean {
-  return reviver === roomRemoteReviver
 }

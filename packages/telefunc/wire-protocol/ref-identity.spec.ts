@@ -73,6 +73,7 @@ function createClientHarness(extensionTypes: ReviverType<TypeContract, ClientRev
   const lifecycles: { value: unknown; close: () => Promise<void> | void; abort: (abortError: AbortError) => void }[] =
     []
   const context: ClientReviverContext = {
+    adoptSubordinate() {},
     createChannel(opts) {
       mintedChannels.push(opts)
       return { kind: 'client-channel', ...opts, close: async () => {}, abort: () => {} } as never

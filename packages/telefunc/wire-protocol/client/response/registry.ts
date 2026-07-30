@@ -8,12 +8,7 @@ import { blobReviver } from './blob.js'
 import { fileDownloadReviver } from './fileDownload.js'
 import { blobDownloadReviver } from './blobDownload.js'
 import { promiseReviver } from './promise.js'
-import {
-  isRoomSubordinateReviver,
-  roomReviver,
-  roomParticipantReviver,
-  roomRemoteReviver,
-} from '../../room/response-client.js'
+import { roomReviver, roomParticipantReviver, roomRemoteReviver } from '../../room/response-client.js'
 import { broadcastReviver } from './broadcast.js'
 import { channelReviver } from './channel.js'
 import { functionReviver } from './function.js'
@@ -46,14 +41,11 @@ const clientTypes = [
  *  already-revived object, and server-side `===` holds on the client too. */
 function createStreamingReviver(
   context: ClientReviverContext,
-  onRevived: (
-    revived: {
-      value: unknown
-      close: () => Promise<void> | void
-      abort: (abortError: AbortError) => void
-    },
-    trackLifetime: boolean,
-  ) => void,
+  onRevived: (revived: {
+    value: unknown
+    close: () => Promise<void> | void
+    abort: (abortError: AbortError) => void
+  }) => void,
   extensionTypes: ReviverType<TypeContract, ClientReviverContext>[],
 ) {
   const allTypes = [...clientTypes, ...extensionTypes]
@@ -65,7 +57,7 @@ function createStreamingReviver(
         const metadata = parser(value.slice(type.prefix.length))
         assert(isObject(metadata))
         const revived = type.revive(metadata as never, context)
-        onRevived(revived, !isRoomSubordinateReviver(type))
+        onRevived(revived)
         // After onRevived — it wraps `revived.value` (GC proxy), and duplicates must
         // resolve to the exact object the first occurrence handed out.
         revivedByWireString.set(value, revived.value)
