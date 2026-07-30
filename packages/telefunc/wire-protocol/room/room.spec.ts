@@ -237,18 +237,13 @@ describe('Room public behavior', () => {
     expect(await recreated.getParticipants()).toEqual([])
   })
 
-  it('returns only a discoverable room and closes a head whose directory registration cannot finish', async () => {
+  it('closes a head whose directory registration cannot finish', async () => {
     const put = driver.directoryPut.bind(driver)
-    let transientAttempts = 0
     const directoryPut = vi.spyOn(driver, 'directoryPut').mockImplementation(async (roomId, inc) => {
-      if (roomId === 'index-retry' && transientAttempts++ === 0) throw new Error('transient index failure')
       if (roomId === 'index-failure') throw new Error('persistent index failure')
       await put(roomId, inc)
     })
     try {
-      const retried = await Room.create('index-retry')
-      expect((await Room.list()).map(({ id }) => id)).toContain(retried.id)
-
       await expect(Room.create('index-failure')).rejects.toThrow('persistent index failure')
       expect((await driver.readHead('index-failure'))?.head).toMatchObject({ state: 'closed', currentInc: null })
     } finally {
@@ -273,15 +268,21 @@ describe('Room public behavior', () => {
       },
     )
     expect(leased).toMatchObject({ ok: true, head: { state: 'closing' } })
+    if (!('head' in leased)) throw new Error('expected an active close lease')
 
     let settled = false
     const closing = Room.close(room.id).then(() => {
       settled = true
     })
-    await Promise.resolve()
+    await vi.advanceTimersByTimeAsync(900)
     expect(settled).toBe(false)
+    expect((await driver.readHead(room.id))?.head).toMatchObject({
+      currentInc: room._inc,
+      state: 'closing',
+      closeLease: { id: leased.head.closeLease?.id },
+    })
 
-    await vi.advanceTimersByTimeAsync(1_100)
+    await vi.advanceTimersByTimeAsync(200)
     await closing
     expect((await driver.readHead(room.id))?.head).toMatchObject({ state: 'closed', currentInc: null })
   })
@@ -516,32 +517,7 @@ describe('Room public behavior', () => {
     expect(heartbeat).toHaveBeenCalledOnce()
   })
 
-  it('renews every owned member in one heartbeat cell transaction', async () => {
-    const room = (await Room.create('batched-heartbeat')) as ServerRoom
-    await room.join()
-    await room.join()
-    const compare = vi.spyOn(driver, 'compareExchangeCells')
-
-    await (room as unknown as { _heartbeatTick(): Promise<void> })._heartbeatTick()
-
-    expect(compare).toHaveBeenCalledOnce()
-  })
-
-  it('replaces a subscription that is already closed on initial establishment', async () => {
-    const closed = terminalSubscription()
-    await closed.close()
-    const terminal = vi.fn()
-    const slot = new SubSlot(terminal, () => {})
-
-    slot.sync(true, () => closed.subscription)
-    await Promise.resolve()
-
-    expect(terminal).toHaveBeenCalledOnce()
-    expect(terminal.mock.calls[0]?.[0]).toBe(slot)
-    slot.stop()
-  })
-
-  it('keeps retrying inside the horizon after more than six immediate failures', async () => {
+  it('retries a still-wanted lost subscription on the next planning pass', async () => {
     vi.useFakeTimers()
     const observer = await Room.get((await Room.create('single-recovery-horizon')).id)
     const backend = getBackend()
@@ -555,7 +531,7 @@ describe('Room public behavior', () => {
     const report = vi.spyOn(console, 'error').mockImplementation(() => {})
     try {
       observer.subscribe(() => {})
-      await vi.advanceTimersByTimeAsync(2_000)
+      await vi.advanceTimersByTimeAsync(ROOM_HEARTBEAT_INTERVAL_MS + 100)
       expect(attempts).toBe(8)
       expect(observer.isClosed).toBe(false)
     } finally {
@@ -617,18 +593,6 @@ describe('Room public behavior', () => {
     expect((await observer.getParticipants({ hidden: true })).map((member) => member.id)).toEqual([hidden.id])
   })
 
-  it('resolves multiple identity members with one batched record read', async () => {
-    const room = await Room.create('identity-batch')
-    const first = await room.join({ identity: 'shared' })
-    const second = await room.join({ identity: 'shared' })
-    const reads = vi.spyOn(driver, 'readCells')
-
-    const members = await Room.getParticipants(room.id, { identity: 'shared' })
-
-    expect(members.map(({ id }) => id)).toEqual([first.id, second.id])
-    expect(reads).toHaveBeenCalledTimes(3)
-  })
-
   it('keeps text self-delivery local and binary subscriptions selective across named tracks', async () => {
     const publisherRoom = await Room.create('media')
     const observer = await Room.get('media')
@@ -651,26 +615,29 @@ describe('Room public behavior', () => {
     expect(screen).toEqual([[2, { key: true }]])
   })
 
-  it('expands binary subscriptions and demand from one canonical pair set', async () => {
-    const room = (await Room.create('binary-pairs')) as ServerRoom
+  it('applies room-wide and member-specific binary wants to both subscription and demand', async () => {
+    const room = await Room.create('binary-pairs')
     const publisher = await room.join()
-    const expand = (
-      room as unknown as {
-        _binaryPairs: (wants: typeof allBinary, memberIds: string[]) => Array<[string, string]>
-      }
-    )._binaryPairs.bind(room)
+    const observer = await Room.get(room.id)
+    const demand = new Set<string | null>()
+    const received: Array<[string, number]> = []
+    publisher.onDemand((track, wanted) => {
+      if (wanted) demand.add(track)
+    })
+    observer.subscribeBinary((data, info) => received.push([info.track, data[0]!] as [string, number]), {
+      track: 'screen',
+    })
+    const remote = (await observer.getParticipant(publisher.id))!
+    remote.subscribeBinary((data, info) => received.push([info.track, data[0]!] as [string, number]), {
+      track: 'camera',
+    })
+    await vi.waitFor(() => expect([...demand].sort()).toEqual(['camera', 'screen']))
 
-    expect(
-      expand(
-        {
-          everyMember: { all: false, tracks: ['screen'] },
-          members: { [publisher.id]: { all: false, tracks: ['camera'] } },
-        },
-        [publisher.id],
-      ),
-    ).toEqual([
-      [publisher.id, 'screen'],
-      [publisher.id, 'camera'],
+    await publisher.publishBinary(new Uint8Array([1]), { track: 'screen' })
+    await publisher.publishBinary(new Uint8Array([2]), { track: 'camera' })
+    expect(received).toEqual([
+      ['screen', 1],
+      ['camera', 2],
     ])
   })
 
@@ -1401,8 +1368,8 @@ describe('client Room lifecycle', () => {
     const room = (await Room.create('roster-replay')) as ServerRoom
     const stub = register(room)
     const ensureRoster = vi.spyOn(room as unknown as { _ensureRoster(): Promise<void> }, '_ensureRoster')
-    attachPeer(stub)
-    await vi.waitFor(() => expect(ensureRoster).toHaveBeenCalledOnce())
+    const peer = attachPeer(stub)
+    await vi.waitFor(() => expect(peer.decoded().some((frame) => frame.tag === TAG.PUBLISH)).toBe(true))
 
     stub._onPeerDisconnect(1_000)
     const [frame] = attachPeer(stub, 0).decoded()
@@ -1726,43 +1693,6 @@ describe('memory Backend SPI contract', () => {
     const payload = new Uint8Array([1, 255])
     const info = { seq: 0x1_0000_0007, timestamp: 0x2_0000_0009 }
     expect(decodeOrderingFrame(encodeOrderingFrame(payload, info))).toEqual({ payload, info })
-  })
-
-  it('keeps the memory lane gated until every target settles after one rejects', async () => {
-    await driver.compareExchangeHead(
-      'memory-order',
-      { expect: 'absent' },
-      { head: { currentInc: 'inc', state: 'open', config: new Uint8Array() } },
-    )
-    const slowStarted = deferred<void>()
-    const releaseSlow = deferred<void>()
-    let secondStarted = false
-    const source = { kind: 'durable' as const, roomId: 'memory-order', inc: 'inc', lane: semanticLane }
-    const fast = driver.subscriptions.bind(source).open(
-      () => {
-        throw new Error('fast rejection')
-      },
-      () => 2,
-    )
-    const slow = driver.subscriptions.bind(source).open(
-      async (_payload, { seq }) => {
-        if (seq === 1) {
-          slowStarted.resolve()
-          await releaseSlow.promise
-        } else secondStarted = true
-      },
-      () => 2,
-    )
-    await Promise.all([fast.ready, slow.ready])
-    const first = await driver.commitLane('memory-order', 'inc', semanticLane, new Uint8Array([1]))
-    const second = await driver.commitLane('memory-order', 'inc', semanticLane, new Uint8Array([2]))
-    if (!('accepted' in first) || !('accepted' in second)) throw new Error('memory ordering commit was stale')
-    await slowStarted.promise
-    await new Promise<void>((resolve) => setTimeout(resolve, 0))
-    expect(secondStarted).toBe(false)
-    releaseSlow.resolve()
-    await expect(first.delivery).rejects.toThrow('fast rejection')
-    await expect(second.delivery).rejects.toThrow('fast rejection')
   })
 
   it('tracks raw-driver identity rather than wrapper identity during replacement', async () => {

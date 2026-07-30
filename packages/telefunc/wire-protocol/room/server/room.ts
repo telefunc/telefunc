@@ -9,14 +9,14 @@ import { assert, assertUsage } from '../../../utils/assert.js'
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 import { isObject } from '../../../utils/isObject.js'
 import { unrefTimer } from '../../../utils/unrefTimer.js'
-import { makePublishInfo, type ChannelPublishAck, type ChannelPublishInfo } from '../../channel.js'
+import { makePublishInfo, type ChannelPublishAck } from '../../channel.js'
 import {
   ROOM_DM_ACK_TIMEOUT_MS,
   ROOM_HEARTBEAT_INTERVAL_MS,
   ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS,
 } from '../../constants.js'
 import { getBackend } from '../../backend/install.js'
-import type { LaneId, BackendSubscription, CellMutation } from '../../backend/spi.js'
+import type { LaneId, BackendSubscription } from '../../backend/spi.js'
 import { encodePublishBinary, encodePublishText, type WirePublishInfo } from '../../shared-ws.js'
 import {
   RoomError,
@@ -55,7 +55,7 @@ import {
   type RoomMemberRecord,
   type RoomStubRequest,
 } from '../protocol.js'
-import { RoomState } from '../state.js'
+import { RoomState, RoomStateView } from '../state.js'
 import { RoomDemand } from '../demand.js'
 import { ParticipantBase, type InboxMessage } from '../participant.js'
 import type { RoomStubChannel } from '../stubs.js'
@@ -73,7 +73,6 @@ import {
 } from './lanes.js'
 import { dropRetainedOwnedBy, evictMember, mutateCells, readCell, readMembers } from './membership.js'
 import type {
-  BinaryFrameInfo,
   BinaryPublishOptions,
   JoinOptions,
   LeaveCause,
@@ -81,7 +80,6 @@ import type {
   ParticipantMeta,
   PublishOptions,
   RemoteParticipant,
-  RoomMeta,
   RoomSendReceipt,
   RoomAckReceipt,
   RoomSnapshotView,
@@ -90,6 +88,7 @@ import type {
 import type { Room, RoomGuards } from './statics.js'
 assertIsNotBrowser()
 
+const ROOM_SUBSCRIPTION_REPLAN_LIMIT = 5
 const SERVER_ROOM_BRAND: unique symbol = Symbol.for('telefunc.ServerRoom')
 
 /**
@@ -103,7 +102,7 @@ const SERVER_ROOM_BRAND: unique symbol = Symbol.for('telefunc.ServerRoom')
  * it; every observing node — including the committer's own echo — applies the subscribed payload.
  * Application is idempotent, so the overlap is harmless.
  */
-class ServerRoom implements Room {
+class ServerRoom extends RoomStateView implements Room {
   readonly [SERVER_ROOM_BRAND] = true
   /** Phantom: the publish shield rides the type only (see `RoomShield`), never a runtime field. */
   declare readonly [TELEFUNC_SHIELDS]: { data: unknown }
@@ -152,6 +151,7 @@ class ServerRoom implements Room {
   private _controlSeq = 0
 
   constructor(roomId: string, config: RoomConfigRecord, seed: { members: MemberSnapshot[] } | { count: number }) {
+    super()
     this._inc = config.inc
     this._state = new RoomState({
       roomId,
@@ -182,22 +182,6 @@ class ServerRoom implements Room {
     this._guards = guards
   }
 
-  get id(): string {
-    return this._state.roomId
-  }
-  get meta(): RoomMeta {
-    return this._state.meta
-  }
-  get count(): number {
-    return this._state.count
-  }
-  get isEmpty(): boolean {
-    return this._state.count === 0
-  }
-  get isClosed(): boolean {
-    return this._state.closed
-  }
-
   async join(options?: JoinOptions): Promise<LocalParticipant> {
     const { meta, selfDelivery } = normalizeJoinOptions(options)
     const identity = normalizeIdentity(options)
@@ -224,43 +208,6 @@ class ServerRoom implements Room {
     await this._ensureRoster()
     return this._state.getRemote(id)
   }
-
-  subscribe(callback: (data: unknown, info: ChannelPublishInfo, from: Sender) => unknown): () => void {
-    return this._state.subscribe(callback)
-  }
-  subscribeBinary(
-    callback: (data: Uint8Array, info: ChannelPublishInfo & BinaryFrameInfo, from: Sender) => unknown,
-    options?: { track?: string },
-  ): () => void {
-    return this._state.subscribeBinary(callback, options)
-  }
-  onJoin(callback: (member: RemoteParticipant) => void): () => void {
-    return this._state.onJoin(callback)
-  }
-  onLeave(callback: (member: RemoteParticipant, cause?: LeaveCause) => void): () => void {
-    return this._state.onLeave(callback)
-  }
-  onParticipantUpdate(
-    callback: (member: RemoteParticipant, meta: ParticipantMeta, prev: ParticipantMeta) => void,
-  ): () => void {
-    return this._state.onParticipantUpdate(callback)
-  }
-  onUpdate(callback: (meta: RoomMeta, prev: RoomMeta) => void): () => void {
-    return this._state.onUpdate(callback)
-  }
-  onEmpty(callback: () => void): () => void {
-    return this._state.onEmpty(callback)
-  }
-  onClose(callback: () => void): () => void {
-    return this._state.onClose(callback)
-  }
-  onAnnounce(callback: (data: unknown, info: ChannelPublishInfo) => void): () => void {
-    return this._state.onAnnounce(callback)
-  }
-
-  // Arrow-valued, not prototype methods: the documented `useSyncExternalStore(room.onChange, room.snapshot)`
-  // passes both detached (React calls them with no receiver), so they must stay bound to survive it.
-  onChange = (callback: () => void): (() => void) => this._state.onChange(callback)
 
   snapshot = (): RoomSnapshotView => {
     // Snapshot consumers want the member view — load it (need-driven, single-flight); the
@@ -895,7 +842,8 @@ class ServerRoom implements Room {
     this._recoveringSubscriptions.add(slot)
     void (async () => {
       const deadline = Date.now() + ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS
-      while (slot.wanted && Date.now() < deadline) {
+      const attemptMs = ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS / (ROOM_SUBSCRIPTION_REPLAN_LIMIT + 1)
+      for (let attempt = 0; attempt <= ROOM_SUBSCRIPTION_REPLAN_LIMIT && slot.wanted; attempt++) {
         try {
           const current = await withinRoomHorizon(getBackend().readHead(this.id), deadline - Date.now())
           if (current === null || current.head.state !== 'open' || current.head.currentInc !== this._inc) {
@@ -908,17 +856,11 @@ class ServerRoom implements Room {
         }
         slot.retry()
         try {
-          await withinRoomHorizon(slot.attemptReady, Math.min(1_000, deadline - Date.now()))
+          await withinRoomHorizon(slot.attemptReady, Math.min(attemptMs, deadline - Date.now()))
           await this._reconcileAuthority()
           return
         } catch (error) {
           reportRoomError(error)
-        }
-        const remaining = deadline - Date.now()
-        if (remaining > 0) {
-          await new Promise<void>((resolve) => {
-            unrefTimer(setTimeout(resolve, Math.min(100, remaining)))
-          })
         }
       }
       if (slot.wanted) {
@@ -1471,23 +1413,18 @@ class ServerRoom implements Room {
       // Renew this node's binary-demand lease on every owner and sweep any crashed reporter's demand.
       // No cell I/O — runs first so member-cell latency never delays it (the demand TTL has slack for skips).
       this._demand.heartbeat()
-      const ids = this._ownedMemberIds()
-      if (ids.length > 0) {
-        const keys = ids.map((id) => roomMemberKvKey(this.id, id))
-        const present = await mutateCells(this.id, this._inc, { keys }, (cells) => {
-          const present = new Set<string>()
-          const mutations: CellMutation[] = []
-          const seenAt = Date.now()
-          for (let index = 0; index < ids.length; index++) {
-            const raw = cells.get(keys[index]!)
-            if (raw === undefined) continue
-            present.add(ids[index]!)
-            const record = { ...(parse(decodeRoomText(raw)) as RoomMemberRecord), seenAt }
-            mutations.push({ key: keys[index]!, set: { bytes: encodeRoomText(stringify(record)) } })
+      for (const id of this._ownedMemberIds()) {
+        const key = roomMemberKvKey(this.id, id)
+        const present = await mutateCells(this.id, this._inc, { keys: [key] }, (cells) => {
+          const raw = cells.get(key)
+          if (raw === undefined) return { value: false, mutations: [] }
+          const record = { ...(parse(decodeRoomText(raw)) as RoomMemberRecord), seenAt: Date.now() }
+          return {
+            value: true,
+            mutations: [{ key, set: { bytes: encodeRoomText(stringify(record)) } }],
           }
-          return { value: present, mutations }
         })
-        for (const id of ids) if (!present.has(id)) this._applyLeave(id)
+        if (!present) this._applyLeave(id)
       }
       await this._reconcileAuthority()
     } finally {

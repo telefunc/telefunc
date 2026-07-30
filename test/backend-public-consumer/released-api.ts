@@ -96,29 +96,24 @@ type ReleasedPublishAck = ReleasedPublishResult & { key: string }
 type CurrentPublishAck = Awaited<ReturnType<InstanceType<typeof BroadcastChannel>['publish']>>
 type _publishAckShape = Assert<Compatible<CurrentPublishAck, ReleasedPublishAck>>
 
-type _backendKeys = Assert<
-  HasKeys<
-    BackendSpi,
-    | 'spiVersion'
-    | 'publish'
-    | 'subscribe'
-    | 'readHead'
-    | 'compareExchangeHead'
-    | 'readCells'
-    | 'compareExchangeCells'
-    | 'commitLane'
-    | 'readRetained'
-    | 'listRetained'
-    | 'deleteRetained'
-    | 'subscribeLane'
-    | 'listGenerations'
-    | 'dropGeneration'
-    | 'directoryPut'
-    | 'directoryDelete'
-    | 'directoryList'
-    | 'dispose'
-  >
->
+type ReleasedBackendKeys =
+  | 'spiVersion'
+  | 'publish'
+  | 'readHead'
+  | 'compareExchangeHead'
+  | 'readCells'
+  | 'compareExchangeCells'
+  | 'commitLane'
+  | 'readRetained'
+  | 'listRetained'
+  | 'deleteRetained'
+  | 'listGenerations'
+  | 'dropGeneration'
+  | 'directoryPut'
+  | 'directoryDelete'
+  | 'directoryList'
+  | 'dispose'
+type _backendKeys = Assert<HasKeys<BackendSpi, ReleasedBackendKeys | 'subscribe' | 'subscribeLane'>>
 type _subscriptionKeys = Assert<HasKeys<BackendSubscription, 'ready' | 'state' | 'onStateChange' | 'unsubscribe'>>
 type _attemptKeys = Assert<HasKeys<SubscriptionAttempt, 'ready' | 'state' | 'onStateChange' | 'unsubscribe'>>
 type _attemptStateShape = Assert<
@@ -133,28 +128,7 @@ type _bindingOpenArguments = Assert<
 type _driverKeys = Assert<HasKeys<SubscriptionDriver<string>, 'bind'>>
 type _driverBindArguments = Assert<Compatible<Parameters<SubscriptionDriver<string>['bind']>, [string]>>
 type _driverBindResult = Assert<Compatible<ReturnType<SubscriptionDriver<string>['bind']>, SubscriptionBinding>>
-type _backendDriverKeys = Assert<
-  HasKeys<
-    BackendDriver,
-    | 'spiVersion'
-    | 'subscriptions'
-    | 'publish'
-    | 'readHead'
-    | 'compareExchangeHead'
-    | 'readCells'
-    | 'compareExchangeCells'
-    | 'commitLane'
-    | 'readRetained'
-    | 'listRetained'
-    | 'deleteRetained'
-    | 'listGenerations'
-    | 'dropGeneration'
-    | 'directoryPut'
-    | 'directoryDelete'
-    | 'directoryList'
-    | 'dispose'
-  >
->
+type _backendDriverKeys = Assert<HasKeys<BackendDriver, ReleasedBackendKeys | 'subscriptions'>>
 type _sourceShape = Assert<
   Compatible<
     BackendSubscriptionSource,
@@ -290,38 +264,12 @@ const redisRoomBackend: BackendDriver = new RedisRoomBackend(redisRoomBackendOpt
 const noRuntimeHooks = new RedisRoomBackend(redisRoomBackendOptions, { authorityNow: () => 0 })
 installRedis(redisClient, redisInstallOptions)
 
-void [
-  Broadcast,
-  Channel,
-  backendVersion,
-  broadcastLane,
-  backend,
-  backendDriver,
-  orderingHeaderBytes,
-  orderingWordBytes,
-  orderingWordRange,
-  orderingEndianness,
-  orderingSeqHigh,
-  orderingSeqLow,
-  orderingTimestampHigh,
-  orderingTimestampLow,
-  installedBackend,
-  currentBackend,
-  disposeBackend,
-  HEAD_TRANSITIONS,
-  sameConfig,
-  call,
-  node,
-  redisTransport,
-  redisTextSend,
-  redisBinarySend,
-  stopRedisText,
-  stopRedisBinary,
-  redisRoomBackend,
-  noRuntimeHooks,
-  pinServerContextMembers,
-  ChannelClosedError,
-  ChannelOverflowError,
-  ConnectionError,
-  NetworkError,
-]
+void [Broadcast, Channel, backendVersion, broadcastLane]
+void [backend, backendDriver, orderingHeaderBytes, orderingWordBytes]
+void [orderingWordRange, orderingEndianness, orderingSeqHigh, orderingSeqLow]
+void [orderingTimestampHigh, orderingTimestampLow, installedBackend, currentBackend]
+void [disposeBackend, HEAD_TRANSITIONS, sameConfig, call]
+void [node, redisTransport, redisTextSend, redisBinarySend]
+void [stopRedisText, stopRedisBinary, redisRoomBackend, noRuntimeHooks]
+void [pinServerContextMembers, ChannelClosedError, ChannelOverflowError, ConnectionError]
+void NetworkError

@@ -553,14 +553,3 @@ Read-only: `id`, `meta`, `identity`, `joinedAt`. Cleanup in `onLeave` is enough;
 ### Senders
 
 Every message callback receives its verified sender as `from`: `{ id, meta, identity }`, stamped by the server, impossible to spoof. When your room view already knows the sender, `from` is their live `RemoteParticipant`. Otherwise (say, a message that arrived just before its sender's join) it's a plain object with the same fields. Either way you read `from.id` and `from.meta` without special-casing. `from === null` only for room-authored messages.
-
-
-## Gotchas
-
-- **Authorizing on `meta`.** `from.meta.role` is client-set and spoofable. Gate on `identity` against a server-side map. See <Link href="#identity-vs-meta">Identity vs meta</Link>.
-- **Guards on the wrong instance.** `Room.guard()` covers only the instance you called it on. Attach it in the telefunction that returns the room to clients, not on a throwaway `Room.get()`. See <Link href="#moderation">Moderation</Link>.
-- **Expecting `send()` to be reliable.** Plain `send()` and `publish()` are at-most-once. For a delivery guarantee or a reply, use `send(…, { ack: true })`; to survive a full disconnect, persist and redeliver by `identity`.
-- **Correlating people by participant id.** `id` is per-membership (new every tab and reconnect). Use `identity` to recognize the same human.
-- **Reading `getParticipants()` expecting hidden participants.** Presence reads exclude off-presence participants; pass `{ hidden: true }` to see them, and only server-side.
-- **Publishing after `leave()`.** Throws `Participant has left the room`. Switching rooms is `leave()` then `join()`.
-- **Treating binary as production video.** The transport is reliable and ordered, not congestion-controlled. Pair rooms with a WebRTC SFU for large-scale media.

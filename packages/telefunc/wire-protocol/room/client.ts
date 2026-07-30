@@ -35,10 +35,9 @@ import {
   type RoomSnapshotMetadata,
   type RoomStubRequest,
 } from './protocol.js'
-import { RoomState } from './state.js'
+import { RoomState, RoomStateView } from './state.js'
 import { ParticipantBase, type InboxMessage } from './participant.js'
 import type {
-  BinaryFrameInfo,
   BinaryPublishOptions,
   JoinOptions,
   LeaveCause,
@@ -47,7 +46,6 @@ import type {
   PublishOptions,
   RemoteParticipant,
   Room,
-  RoomMeta,
   RoomSendReceipt,
   RoomSnapshotView,
   Sender,
@@ -55,6 +53,7 @@ import type {
 
 /** One awaiter of a conflated publish — resolved with the winning send's receipt (see `_drainCoalesce`). */
 type CoalesceWaiter = { resolve: (ack: ChannelPublishAck) => void; reject: (err: unknown) => void }
+type ParticipantMutationRequest = Extract<ParticipantStubRequest, { __r: 'req-dm' | 'req-set-meta' | 'req-set-attrs' }>
 
 /**
  * Room's broadcast stub owns two concerns a generic Broadcast doesn't have: local delivery is
@@ -149,11 +148,11 @@ class RoomClientBroadcast<T = unknown> extends ClientBroadcast<T> {
  * messages, requests (join/leave/set-meta) ride its channel messages. Membership starts from
  * the serialized snapshot; the relayed event stream keeps it fresh from there.
  */
-class ClientRoom implements Room {
+class ClientRoom extends RoomStateView implements Room {
   /** Phantom: the publish shield rides the type only (see `RoomShield`), never a runtime field. */
   declare readonly [TELEFUNC_SHIELDS]: { data: unknown }
   private readonly _stub: RoomClientBroadcast
-  private readonly _state: RoomState
+  protected readonly _state: RoomState
   private readonly _localParticipants = new Map<string, ClientRoomParticipant>()
   private _announcedDemand = false
   /** DMs relayed before their participant's join ack resolved (a reactive send racing the
@@ -168,6 +167,7 @@ class ClientRoom implements Room {
   })
 
   constructor(stub: RoomClientBroadcast, snapshot: RoomSnapshotMetadata) {
+    super()
     this._stub = stub
     this._state = new RoomState({
       roomId: snapshot.roomId,
@@ -196,22 +196,6 @@ class ClientRoom implements Room {
   }
 
   // ── Room API ──
-
-  get id(): string {
-    return this._state.roomId
-  }
-  get meta(): RoomMeta {
-    return this._state.meta
-  }
-  get count(): number {
-    return this._state.count
-  }
-  get isEmpty(): boolean {
-    return this._state.count === 0
-  }
-  get isClosed(): boolean {
-    return this._state.closed
-  }
 
   async join(options?: JoinOptions): Promise<LocalParticipant> {
     assertUsage(
@@ -289,44 +273,6 @@ class ClientRoom implements Room {
   }): RemoteParticipant {
     return this._state.ensureRemoteFromSnapshot(snap)
   }
-
-  subscribe(callback: (data: unknown, info: ChannelPublishInfo, from: Sender) => unknown): () => void {
-    return this._state.subscribe(callback)
-  }
-  subscribeBinary(
-    callback: (data: Uint8Array, info: ChannelPublishInfo & BinaryFrameInfo, from: Sender) => unknown,
-    options?: { track?: string | null },
-  ): () => void {
-    return this._state.subscribeBinary(callback, options)
-  }
-  onJoin(callback: (member: RemoteParticipant) => void): () => void {
-    return this._state.onJoin(callback)
-  }
-  onLeave(callback: (member: RemoteParticipant, cause?: LeaveCause) => void): () => void {
-    return this._state.onLeave(callback)
-  }
-  onParticipantUpdate(
-    callback: (member: RemoteParticipant, meta: ParticipantMeta, prev: ParticipantMeta) => void,
-  ): () => void {
-    return this._state.onParticipantUpdate(callback)
-  }
-  onUpdate(callback: (meta: RoomMeta, prev: RoomMeta) => void): () => void {
-    return this._state.onUpdate(callback)
-  }
-  onEmpty(callback: () => void): () => void {
-    return this._state.onEmpty(callback)
-  }
-  onClose(callback: () => void): () => void {
-    return this._state.onClose(callback)
-  }
-  onAnnounce(callback: (data: unknown, info: ChannelPublishInfo) => void): () => void {
-    return this._state.onAnnounce(callback)
-  }
-
-  // Arrow-valued, not prototype methods: the documented `useSyncExternalStore(room.onChange, room.snapshot)`
-  // passes both detached, so React calls them with no receiver. Bound properties survive that; a plain method
-  // would deref `this === undefined` and throw on the first render (see the twin on `ServerRoom`).
-  onChange = (callback: () => void): (() => void) => this._state.onChange(callback)
 
   // The roster streams in right behind the response — its arrival is an onChange.
   snapshot = (): RoomSnapshotView => this._state.snapshot()
@@ -510,7 +456,13 @@ abstract class ClientParticipantBase extends ParticipantBase {
     { sending: boolean; pending: { data: unknown; retain?: boolean; waiters: CoalesceWaiter[] } | null }
   >()
 
-  constructor(id: string, meta: ParticipantMeta, selfDelivery: boolean, identity: string | null) {
+  constructor(
+    id: string,
+    meta: ParticipantMeta,
+    selfDelivery: boolean,
+    identity: string | null,
+    private readonly _requestParticipant: (request: ParticipantMutationRequest) => Promise<unknown>,
+  ) {
     super(id, meta, selfDelivery, identity)
   }
 
@@ -530,6 +482,30 @@ abstract class ClientParticipantBase extends ParticipantBase {
       slot.pending = { data, retain: options?.retain, waiters: [...(slot.pending?.waiters ?? []), { resolve, reject }] }
       this._drainCoalesce(key)
     })
+  }
+
+  // Implementation of the overloaded `LocalParticipant.send`; the interface supplies precise returns.
+  async send(to: string | Sender, data: unknown, options?: { ack?: boolean }): Promise<any> {
+    this._assertActive()
+    const toId = typeof to === 'string' ? to : to.id
+    return await this._requestParticipant({
+      __r: 'req-dm',
+      to: toId,
+      data,
+      ...(options?.ack ? { ack: true } : {}),
+    })
+  }
+
+  async setMeta(meta: ParticipantMeta): Promise<void> {
+    this._assertActive()
+    await this._requestParticipant({ __r: 'req-set-meta', meta })
+    this._meta = meta
+  }
+
+  async setAttributes(attrs: ParticipantMeta): Promise<void> {
+    this._assertActive()
+    await this._requestParticipant({ __r: 'req-set-attrs', attrs })
+    this._meta = mergeAttributes(this._meta, attrs)
   }
 
   private _drainCoalesce(key: string): void {
@@ -561,7 +537,7 @@ class ClientRoomParticipant extends ClientParticipantBase {
 
   constructor(clientRoom: ClientRoom, id: string, meta: ParticipantMeta, selfDelivery: boolean) {
     // Client-side joins carry no identity — it's server-assigned (see JoinOptions.identity).
-    super(id, meta, selfDelivery, null)
+    super(id, meta, selfDelivery, null, (request) => clientRoom._request({ ...request, id } as RoomStubRequest))
     this._room = clientRoom
   }
 
@@ -579,33 +555,6 @@ class ClientRoomParticipant extends ClientParticipantBase {
     return await this._room._publishBinaryFramed(frameWithMemberId(this.id, data, options))
   }
 
-  // Impl of the overloaded `LocalParticipant.send`; callers get precise result types via the interface.
-  // A rejected send rejects the request natively via the channel ack (guard/recipient `Abort` or an
-  // operational `RoomError`) — no envelope to unwrap.
-  async send(to: string | Sender, data: unknown, options?: { ack?: boolean }): Promise<any> {
-    this._assertActive()
-    const toId = typeof to === 'string' ? to : to.id
-    return await this._room._request({
-      __r: 'req-dm',
-      id: this.id,
-      to: toId,
-      data,
-      ...(options?.ack ? { ack: true } : {}),
-    })
-  }
-
-  async setMeta(meta: ParticipantMeta): Promise<void> {
-    this._assertActive()
-    await this._room._request({ __r: 'req-set-meta', id: this.id, meta })
-    this._meta = meta
-  }
-
-  async setAttributes(attrs: ParticipantMeta): Promise<void> {
-    this._assertActive()
-    await this._room._request({ __r: 'req-set-attrs', id: this.id, attrs })
-    this._meta = mergeAttributes(this._meta, attrs)
-  }
-
   async leave(): Promise<void> {
     if (this._left) return
     await this._room._request({ __r: 'req-leave', id: this.id })
@@ -619,7 +568,9 @@ class ClientStandaloneParticipant extends ClientParticipantBase {
   private readonly _channel: ClientChannel
 
   constructor(channel: ClientChannel, metadata: ParticipantStubMetadata) {
-    super(metadata.id, metadata.meta, metadata.selfDelivery, metadata.identity ?? null)
+    super(metadata.id, metadata.meta, metadata.selfDelivery, metadata.identity ?? null, (request) =>
+      channel.send(request, { ack: true }),
+    )
     this._channel = channel
 
     channel.listen((notice: unknown) => {
@@ -653,27 +604,6 @@ class ClientStandaloneParticipant extends ClientParticipantBase {
     return (await this._channel.sendBinary(frameWithMemberId(this.id, data, options), {
       ack: true,
     })) as ChannelPublishAck
-  }
-
-  // Impl of the overloaded `LocalParticipant.send`; callers get precise result types via the interface.
-  // A rejected send (guard `Abort`, recipient's `Abort`, or an operational `RoomError`) rejects the
-  // request natively via the channel ack — no envelope to unwrap.
-  async send(to: string | Sender, data: unknown, options?: { ack?: boolean }): Promise<any> {
-    this._assertActive()
-    const toId = typeof to === 'string' ? to : to.id
-    return await this._request({ __r: 'req-dm', to: toId, data, ...(options?.ack ? { ack: true } : {}) })
-  }
-
-  async setMeta(meta: ParticipantMeta): Promise<void> {
-    this._assertActive()
-    await this._request({ __r: 'req-set-meta', meta })
-    this._meta = meta
-  }
-
-  async setAttributes(attrs: ParticipantMeta): Promise<void> {
-    this._assertActive()
-    await this._request({ __r: 'req-set-attrs', attrs })
-    this._meta = mergeAttributes(this._meta, attrs)
   }
 
   async leave(): Promise<void> {

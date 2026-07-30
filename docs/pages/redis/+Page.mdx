@@ -25,7 +25,7 @@ const redis = new IORedis('redis://localhost:6379')
 installRedis(redis)
 ```
 
-That single call installs the Redis backend for both Broadcast and Room from the same client. Broadcast subscribers across the cluster observe the same publish order for a given key, while Room state and events are shared across instances automatically.
+That single call installs the Redis backend for both Broadcast and Room from the same client. In steady state, Broadcast subscribers across the cluster observe the publish order for a given key; frames in flight during a Redis Cluster slot-owner change may be lost, consistent with Broadcast's at-most-once delivery. Room state and events are shared across instances automatically.
 
 ### Sharing an existing client
 

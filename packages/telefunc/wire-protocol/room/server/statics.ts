@@ -133,15 +133,7 @@ function writerId(): string {
 }
 
 async function registerRoomIndex(id: string, inc: string): Promise<void> {
-  let failure: unknown
-  for (let attempt = 0; attempt < ROOM_CX_ATTEMPTS; attempt++) {
-    try {
-      return await getBackend().directoryPut(id, inc)
-    } catch (error) {
-      failure = error
-    }
-  }
-  throw failure
+  await getBackend().directoryPut(id, inc)
 }
 
 async function tryCreateRoom(id: string, options: RoomOptions | undefined): Promise<Room | null> {
