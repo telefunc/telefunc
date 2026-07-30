@@ -101,6 +101,8 @@ class RoomStubChannel extends ServerBroadcast {
   _wantsText = false
   /** @internal — which members' text the client wants without a room-level subscription (`sub-text`). */
   _textMemberWants: Set<string> = new Set()
+  /** @internal — whether the client wants room-authored messages on the shared semantic lane. */
+  _wantsAnnounce = false
 
   /** @internal — tail mode (`Room.get(id, { tail: true })`): the room's recent text, held on this stub
    *  (bounded, drop-oldest) from the moment it attaches until the client's first text want declares the

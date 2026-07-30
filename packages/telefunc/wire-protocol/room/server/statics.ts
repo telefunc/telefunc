@@ -49,6 +49,7 @@ import {
 } from './membership.js'
 import {
   CONTROL_LANE,
+  SEMANTIC_LANE,
   commitRoomLane,
   configFromHead,
   decodeRoomText,
@@ -411,7 +412,7 @@ async function announceToRoom(id: string, data: unknown): Promise<RoomSendReceip
   const commit = await commitRoomLane(
     id,
     config.inc,
-    CONTROL_LANE,
+    SEMANTIC_LANE,
     encodeRoomText(stringify({ __r: 'announce', data } satisfies RoomEnvelope)),
   )
   if (commit === null) throw new RoomError(`Room is closed: ${id}`)
