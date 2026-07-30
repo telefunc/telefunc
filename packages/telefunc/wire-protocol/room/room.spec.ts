@@ -58,7 +58,6 @@ afterEach(async () => {
   const report = vi.spyOn(console, 'error').mockImplementation(() => {})
   try {
     await disposeBackend()
-    await settle()
   } finally {
     report.mockRestore()
   }
@@ -252,7 +251,6 @@ describe('Room public behavior', () => {
   it('tears down a close observed by a separate Room runtime that cannot inherit the initiator hold', async () => {
     const authority = await Room.create('remote-close-teardown')
     authority.onAnnounce(() => {})
-    await settle()
 
     // A fresh module graph has its own initiating-close registry and backend installation, like another
     // server process. It shares only the raw authority driver, so this observer receives the real close
@@ -262,15 +260,23 @@ describe('Room public behavior', () => {
     const remoteServer = await import('./server.js')
     const remoteBackend = remoteInstall.installBackend(() => driver)
     const unsubscribed: string[] = []
+    const observedLanes = new Set<string>()
+    const observationReady = deferred<void>()
+    const observationStopped = deferred<void>()
     const subscribeLane = remoteBackend.subscribeLane.bind(remoteBackend)
     const subscribe = vi.spyOn(remoteBackend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
       const subscription = subscribeLane(roomId, inc, lane, receiver)
+      void subscription.ready.then(() => {
+        observedLanes.add(lane.kind)
+        if (observedLanes.has('control') && observedLanes.has('semantic')) observationReady.resolve()
+      })
       return {
         ready: subscription.ready,
         state: () => subscription.state(),
         onStateChange: (callback) => subscription.onStateChange(callback),
         unsubscribe: async () => {
           unsubscribed.push(lane.kind)
+          if (unsubscribed.includes('control') && unsubscribed.includes('semantic')) observationStopped.resolve()
           await subscription.unsubscribe()
         },
       }
@@ -279,10 +285,12 @@ describe('Room public behavior', () => {
       expect(remoteServer.Room).not.toBe(Room)
       const observer = await remoteServer.Room.get('remote-close-teardown')
       observer.onAnnounce(() => {})
-      await settle()
+      const closed = deferred<void>()
+      observer.onClose(() => closed.resolve())
+      await observationReady.promise
 
       await Room.close('remote-close-teardown')
-      await settle()
+      await Promise.all([closed.promise, observationStopped.promise])
 
       expect(observer.isClosed).toBe(true)
       expect(unsubscribed.sort()).toEqual(['control', 'semantic'])
@@ -299,20 +307,27 @@ describe('Room public behavior', () => {
     const backend = getBackend()
     const subscribeLane = backend.subscribeLane.bind(backend)
     let terminal: ReturnType<typeof terminalSubscription> | undefined
+    const replacementReady = deferred<void>()
     const subscribe = vi.spyOn(backend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
-      if (lane.kind !== 'semantic' || terminal !== undefined) return subscribeLane(roomId, inc, lane, receiver)
-      terminal = terminalSubscription()
-      return terminal.subscription
+      if (lane.kind !== 'semantic') return subscribeLane(roomId, inc, lane, receiver)
+      if (terminal === undefined) {
+        terminal = terminalSubscription()
+        return terminal.subscription
+      }
+      const replacement = subscribeLane(roomId, inc, lane, receiver)
+      void replacement.ready.then(() => replacementReady.resolve())
+      return replacement
     })
     try {
       const received: unknown[] = []
       observer.subscribe((data) => received.push(data))
-      await terminal?.subscription.ready
+      if (!terminal) throw new Error('semantic subscription did not start')
+      await terminal.subscription.ready
       // Let the observe-transition roster refresh finish before the terminal event; otherwise its
       // unrelated trailing `_syncSubs()` would accidentally replace the closed slot.
-      await settle()
-      await terminal?.close()
-      await settle()
+      await observer.getParticipants()
+      await terminal.close()
+      await replacementReady.promise
 
       await publisher.publish('after-recovery')
       expect(received).toEqual(['after-recovery'])
@@ -347,12 +362,17 @@ describe('Room public behavior', () => {
     try {
       const observer = await remoteServer.Room.get(authority.id)
       let closes = 0
-      observer.onClose(() => closes++)
-      await terminal?.subscription.ready
+      const closed = deferred<void>()
+      observer.onClose(() => {
+        closes++
+        closed.resolve()
+      })
+      if (!terminal) throw new Error('control subscription did not start')
+      await terminal.subscription.ready
 
       await Room.close(authority.id)
-      await terminal?.close()
-      await settle()
+      await terminal.close()
+      await closed.promise
 
       expect({ closed: observer.isClosed, count: observer.count, closes }).toEqual({
         closed: true,
@@ -607,10 +627,12 @@ describe('Room public behavior', () => {
     const frames: number[] = []
     let demandStarted = false
     let publishing: Promise<unknown> | undefined
+    const demandReady = deferred<void>()
     publisher.onDemand((track, wanted) => {
       if (track === 'screen' && wanted) {
         demandStarted = true
         publishing = publisher.publishBinary(new Uint8Array([8]), { track: 'screen' })
+        demandReady.resolve()
       }
     })
     const delayed = delayLaneSubscription(
@@ -622,10 +644,9 @@ describe('Room public behavior', () => {
         track: 'screen',
       })
       await delayed.started
-      await settle()
       expect(demandStarted).toBe(false)
       await delayed.release()
-      await settle()
+      await demandReady.promise
       expect(demandStarted).toBe(true)
       await publishing
       expect(frames).toEqual([8])
@@ -753,8 +774,17 @@ describe('Room public behavior', () => {
     await room.join()
     const observer = await Room.get(room.id)
     const observed: Array<[unknown, number]> = []
+    const backend = getBackend()
+    const subscribeLane = backend.subscribeLane.bind(backend)
+    const controlReady = deferred<void>()
+    const subscribe = vi.spyOn(backend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
+      const subscription = subscribeLane(roomId, inc, lane, receiver)
+      if (lane.kind === 'control') void subscription.ready.then(() => controlReady.resolve())
+      return subscription
+    })
     observer.onAnnounce((data, info) => observed.push([data, info.seq]))
-    await settle()
+    await controlReady.promise
+    subscribe.mockRestore()
 
     const first = await firstMember.publish('one')
     const second = await Room.announce(room.id, 'notice')
@@ -837,7 +867,6 @@ describe('Room public behavior', () => {
         wants: { everyMember: { all: true, tracks: [] }, members: {} },
       })
       await rosterStarted.promise
-      await settle()
       expect(listRetained).not.toHaveBeenCalled()
 
       releaseRoster.resolve()
@@ -926,7 +955,7 @@ describe('Room public behavior', () => {
     await member.publish('held')
     expect(dataFrames(peer)).toEqual([])
     stub._onPeerBroadcastSubscribe(false)
-    await settle()
+    await vi.waitFor(() => expect(dataFrames(peer)).toEqual(['early', 'held']))
     await member.publish('live')
     expect(dataFrames(peer)).toEqual(['early', 'held', 'live'])
   })
@@ -1472,7 +1501,6 @@ describe('memory Backend SPI contract', () => {
     const dispose = vi.spyOn(raw, 'dispose')
     const first = setDefaultBackend(() => raw, {})
     const second = setDefaultBackend(() => raw, {})
-    await settle()
     await expect(first.readHead('same-driver')).resolves.toBe(null)
     expect(second).toBe(first)
     expect(dispose).not.toHaveBeenCalled()
@@ -1495,7 +1523,6 @@ describe('shared subscription supervision', () => {
     expect(raw.opens[0]!.localReceiverCount()).toBe(2)
 
     raw.opens[0]!.attempt.close()
-    await settleMicrotasks()
     expect(first.state()).toBe('closed')
     expect(second.state()).toBe('closed')
     expect(raw.opens).toHaveLength(1)
@@ -1533,11 +1560,9 @@ describe('shared subscription supervision', () => {
     let disposeSettled = false
     const unsubscribing = first.unsubscribe().then(() => (unsubscribeSettled = true))
     const disposing = manager.dispose().then(() => (disposeSettled = true))
-    await settleMicrotasks()
     expect({ unsubscribeSettled, disposeSettled }).toEqual({ unsubscribeSettled: false, disposeSettled: false })
     liveCleanup.resolve()
     await unsubscribing
-    await settleMicrotasks()
     expect({ unsubscribeSettled, disposeSettled }).toEqual({ unsubscribeSettled: true, disposeSettled: false })
     terminalCleanup.resolve()
     await disposing
@@ -1564,7 +1589,6 @@ describe('shared subscription supervision', () => {
     expect(raw.openCalls).toBe(1)
 
     raw.opens[0]!.attempt.close()
-    await settleMicrotasks()
     expect(states).toEqual(['lost', 'ready', 'lost', 'closed'])
     expect(raw.openCalls).toBe(1)
     await subscription.unsubscribe()
@@ -1705,10 +1729,16 @@ async function wideBinaryScenario(id: string, retain: boolean, byte: number) {
     seq: 0xffff_ffff,
     timestamp: 10,
   })
-  if (!retain) stub._onPeerMessage(JSON.stringify({ __r: 'sub-binary', wants: allBinary }), 1)
+  if (!retain) {
+    await serverRoom._handleStubRequest(stub, { __r: 'sub-binary', wants: allBinary })
+    await (serverRoom as unknown as { _binaryReady(): Promise<void> })._binaryReady()
+  }
   const receipt = await camera.publishBinary(new Uint8Array([byte]), retain ? { retain: true } : undefined)
-  if (retain) stub._onPeerMessage(JSON.stringify({ __r: 'sub-binary', wants: allBinary }), 2)
-  await settle()
+  if (retain) {
+    await serverRoom._handleStubRequest(stub, { __r: 'sub-binary', wants: allBinary })
+    await (serverRoom as unknown as { _binaryReady(): Promise<void> })._binaryReady()
+  }
+  await vi.waitFor(() => expect(peer.decoded().some((candidate) => candidate.tag === TAG.PUBLISH_BINARY)).toBe(true))
 
   const frame = peer
     .decoded()
@@ -1964,16 +1994,4 @@ function delayLaneSubscription(matches: (lane: LaneId) => boolean) {
     }
   })
   return { started: started.promise, release: () => release(), restore: () => spy.mockRestore() }
-}
-
-async function settleMicrotasks(turns = 8): Promise<void> {
-  for (let turn = 0; turn < turns; turn++) await Promise.resolve()
-}
-
-function settle(): Promise<void> {
-  return delay(0)
-}
-
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms))
 }
