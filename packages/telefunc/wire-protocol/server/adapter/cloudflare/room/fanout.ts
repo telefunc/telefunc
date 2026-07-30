@@ -79,6 +79,14 @@ export class Fanout {
   }
 
   private async _fanout(targets: RouteTarget[], frame: Uint8Array, info: DeliveryInfo): Promise<void> {
-    await Promise.all(targets.map((target) => this._deliver(target, frame, info)))
+    const outcomes = await Promise.allSettled(targets.map((target) => this._deliver(target, frame, info)))
+    const failures = outcomes.filter((outcome): outcome is PromiseRejectedResult => outcome.status === 'rejected')
+    if (failures.length === 1) throw failures[0]!.reason
+    if (failures.length > 1) {
+      throw new AggregateError(
+        failures.map((failure) => failure.reason),
+        'Cloudflare Room fanout failed',
+      )
+    }
   }
 }

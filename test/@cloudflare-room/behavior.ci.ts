@@ -38,6 +38,11 @@ test('open, join, commit, deliver, close, cancellation, and authority restart se
     },
     cancelled: 'Cloudflare Room delivery cancelled before handoff',
     cancellationDeliveries: [1],
+    fanoutOrdering: {
+      firstSettlementBeforeRelease: 'pending',
+      fastDeliveriesBeforeRelease: [1],
+      slowDeliveriesBeforeRelease: [1],
+    },
     evictionInvalidations: ['recoverable'],
     unknown: 'Cloudflare Room delivery has an unknown delivery token',
   })

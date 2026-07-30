@@ -185,9 +185,17 @@ export default {
       const lifecycle = await successfulLifecycle(env, sessionId, session, suffix)
       const terminalDrop = await terminalGenerationDrop(env, session, suffix)
       const cancellation = await cancelledDelivery(env, sessionId, session, suffix)
+      const fanoutOrdering = await rejectedFanoutOrdering(env, sessionId, session, suffix)
       const evictionInvalidations = await failedDeliveryEviction(env, sessionId, session, suffix)
       const unknown = await authorityRestart(env, suffix)
-      return Response.json({ lifecycle, terminalDrop, ...cancellation, evictionInvalidations, unknown })
+      return Response.json({
+        lifecycle,
+        terminalDrop,
+        ...cancellation,
+        fanoutOrdering,
+        evictionInvalidations,
+        unknown,
+      })
     } catch (error) {
       return Response.json({ error: error instanceof Error ? error.message : String(error) }, { status: 500 })
     }
@@ -286,6 +294,52 @@ async function failedDeliveryEviction(
   return invalidations
 }
 
+async function rejectedFanoutOrdering(
+  env: Env,
+  fastSessionId: DurableObjectId,
+  fastSession: Session,
+  suffix: string,
+): Promise<{
+  firstSettlementBeforeRelease: 'pending' | 'rejected'
+  fastDeliveriesBeforeRelease: number[]
+  slowDeliveriesBeforeRelease: number[]
+}> {
+  const roomId = `fanout-${suffix}`
+  const inc = `fanout-inc-${suffix}`
+  const authority = roomAuthority(env, roomId)
+  const opened = await openAndJoin(authority, fastSessionId, roomId, inc, `fanout-fast-${suffix}`)
+  const slowSessionId = env.TelefuncDurableObject.idFromName(`slow-session-${suffix}`)
+  const slowSession = env.TelefuncDurableObject.get(slowSessionId) as unknown as Session
+  await fastSession.prepareDelivery(roomId, false, true)
+  await slowSession.prepareDelivery(roomId, true)
+  await join(authority, slowSessionId, roomId, inc, `fanout-slow-${suffix}`)
+  const first = accepted(
+    await authority.commitLane(roomId, inc, { kind: 'semantic' }, new Uint8Array([1])),
+    'fanout first',
+  )
+  const second = accepted(
+    await authority.commitLane(roomId, inc, { kind: 'semantic' }, new Uint8Array([2])),
+    'fanout second',
+  )
+  const firstSettlement = authority.awaitDelivery(first.deliveryToken).then(
+    () => 'fulfilled' as const,
+    () => 'rejected' as const,
+  )
+  await waitUntil(async () => (await slowSession.deliveryState(roomId)).started, 2_000)
+  const firstSettlementBeforeRelease = await Promise.race([
+    firstSettlement,
+    new Promise<'pending'>((resolve) => setTimeout(() => resolve('pending'), 100)),
+  ])
+  if (firstSettlementBeforeRelease === 'fulfilled') throw new Error('failed fanout unexpectedly fulfilled')
+  const fastDeliveriesBeforeRelease = (await fastSession.deliveryState(roomId)).delivered
+  const slowDeliveriesBeforeRelease = (await slowSession.deliveryState(roomId)).delivered
+  await slowSession.releaseDelivery(roomId)
+  await firstSettlement
+  await rejectionOf(authority.awaitDelivery(second.deliveryToken), 2_000, 'fanout second')
+  await closeAndDrop(authority, inc, opened, `fanout-close-${suffix}`)
+  return { firstSettlementBeforeRelease, fastDeliveriesBeforeRelease, slowDeliveriesBeforeRelease }
+}
+
 async function authorityRestart(env: Env, suffix: string): Promise<string> {
   const roomId = `restart-${suffix}`
   const inc = `restart-inc-${suffix}`
@@ -316,6 +370,17 @@ async function openAndJoin(
     ),
     'open',
   )
+  await join(authority, sessionId, roomId, inc, leaseId)
+  return opened
+}
+
+async function join(
+  authority: Authority,
+  sessionId: DurableObjectId,
+  roomId: string,
+  inc: string,
+  leaseId: string,
+): Promise<void> {
   const capture = await authority.captureRouteGeneration(inc)
   if (!('ok' in capture)) throw new Error(`generation capture failed: ${capture.reason}`)
   const registration = await authority.registerRoute(
@@ -327,7 +392,6 @@ async function openAndJoin(
     capture.generationToken,
   )
   if (!('ok' in registration)) throw new Error(`route registration failed: ${registration.reason}`)
-  return opened
 }
 
 async function closeAndDrop(authority: Authority, inc: string, opened: HeadWire, leaseId: string): Promise<void> {
