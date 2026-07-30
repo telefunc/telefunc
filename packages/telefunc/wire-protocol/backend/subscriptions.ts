@@ -26,6 +26,7 @@ type ReadinessGeneration =
  */
 class SubscriptionManager<Source> {
   private readonly _slots = new Map<string, SubscriptionSlot<Source>>()
+  private readonly _cleanups = new Set<Promise<void>>()
   private readonly _driver: SubscriptionDriver<Source>
   private readonly _reportError: (error: unknown) => void
   private readonly _sourceKey: (source: Source) => string
@@ -48,9 +49,16 @@ class SubscriptionManager<Source> {
     let slot = this._slots.get(key)
     if (slot === undefined) {
       let created!: SubscriptionSlot<Source>
-      created = new SubscriptionSlot(source, binding, this._reportError, sourceKey, () => {
-        if (this._slots.get(key) === created) this._slots.delete(key)
-      })
+      created = new SubscriptionSlot(
+        source,
+        binding,
+        this._reportError,
+        sourceKey,
+        (attempt) => this._cleanup(attempt),
+        () => {
+          if (this._slots.get(key) === created) this._slots.delete(key)
+        },
+      )
       slot = created
       this._slots.set(key, slot)
     }
@@ -65,10 +73,20 @@ class SubscriptionManager<Source> {
     }
   }
 
-  dispose(): Promise<void> {
+  async dispose(): Promise<void> {
     const cleanups = [...this._slots.values()].map((slot) => slot.stop())
     this._slots.clear()
-    return Promise.allSettled(cleanups).then(() => {})
+    await Promise.allSettled(cleanups)
+    await Promise.allSettled([...this._cleanups])
+  }
+
+  private _cleanup(attempt: SubscriptionAttempt): Promise<void> {
+    const cleanup = Promise.resolve()
+      .then(() => attempt.unsubscribe())
+      .catch((error) => this._reportError(error))
+    this._cleanups.add(cleanup)
+    void cleanup.finally(() => this._cleanups.delete(cleanup))
+    return cleanup
   }
 }
 
@@ -77,6 +95,7 @@ class SubscriptionSlot<Source> {
   private readonly _binding: SubscriptionBinding
   private readonly _reportError: (error: unknown) => void
   private readonly _sourceKey: string
+  private readonly _cleanup: (attempt: SubscriptionAttempt) => Promise<void>
   private readonly _onEmpty: () => void
   private readonly _receivers = new Map<symbol, BackendReceiver>()
   private readonly _listeners = new Set<(state: SubscriptionState) => void>()
@@ -92,12 +111,14 @@ class SubscriptionSlot<Source> {
     binding: SubscriptionBinding,
     reportError: (error: unknown) => void,
     sourceKey: string,
+    cleanup: (attempt: SubscriptionAttempt) => Promise<void>,
     onEmpty: () => void,
   ) {
     this._source = source
     this._binding = binding
     this._reportError = reportError
     this._sourceKey = sourceKey
+    this._cleanup = cleanup
     this._onEmpty = onEmpty
   }
 
@@ -293,14 +314,6 @@ class SubscriptionSlot<Source> {
     this._attempt = null
     try {
       unobserve?.()
-    } catch (error) {
-      this._reportError(error)
-    }
-  }
-
-  private async _cleanup(attempt: SubscriptionAttempt): Promise<void> {
-    try {
-      await attempt.unsubscribe()
     } catch (error) {
       this._reportError(error)
     }

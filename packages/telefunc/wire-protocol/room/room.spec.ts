@@ -977,14 +977,18 @@ describe('shared subscription supervision', () => {
   })
 
   it('does not convert pending raw cleanup into successful settlement', async () => {
-    const cleanup = deferred<void>()
+    const liveCleanup = deferred<void>()
+    const terminalCleanup = deferred<void>()
     const raw = new ControlledDriver()
-    raw.plan(() => ControlledAttempt.ready(cleanup.promise))
-    raw.plan(() => ControlledAttempt.ready(cleanup.promise))
+    raw.plan(() => ControlledAttempt.ready(liveCleanup.promise))
+    raw.plan(() => ControlledAttempt.ready(liveCleanup.promise))
+    raw.plan(() => ControlledAttempt.ready(terminalCleanup.promise))
     const manager = new SubscriptionManager(raw)
     const first = manager.subscribe('unsubscribe', () => {})
     const second = manager.subscribe('dispose', () => {})
-    await Promise.all([first.ready, second.ready])
+    const terminal = manager.subscribe('already-terminal', () => {})
+    await Promise.all([first.ready, second.ready, terminal.ready])
+    raw.opens[2]!.attempt.close()
 
     let unsubscribeSettled = false
     let disposeSettled = false
@@ -992,8 +996,12 @@ describe('shared subscription supervision', () => {
     const disposing = manager.dispose().then(() => (disposeSettled = true))
     await settleMicrotasks()
     expect({ unsubscribeSettled, disposeSettled }).toEqual({ unsubscribeSettled: false, disposeSettled: false })
-    cleanup.resolve()
-    await Promise.all([unsubscribing, disposing])
+    liveCleanup.resolve()
+    await unsubscribing
+    await settleMicrotasks()
+    expect({ unsubscribeSettled, disposeSettled }).toEqual({ unsubscribeSettled: true, disposeSettled: false })
+    terminalCleanup.resolve()
+    await disposing
     expect({ unsubscribeSettled, disposeSettled }).toEqual({ unsubscribeSettled: true, disposeSettled: true })
   })
 
