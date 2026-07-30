@@ -34,7 +34,6 @@ import {
   decodeRedisOrderingFrame,
   directoryIndexKey,
   directoryTagsKey,
-  generationInvalidationChannel,
   generationKeysKey,
   generationTokensKey,
   gensKey,
@@ -53,6 +52,7 @@ import { RedisSubscriptionDriver } from './subscriber-transport.js'
 
 const DIRECTORY_PAGE_SIZE = 100
 const STABLE_READ_ATTEMPTS = 8
+const DROP_RETRY_MS = 20
 const NEWLINE = 0x0a
 
 function assertOrderingPosition(seq: number, timestamp: number, context: string): void {
@@ -85,11 +85,15 @@ return {seq, ts, receivers}
 
 function broadcastChannel(prefix: string, lane: BroadcastLane): string {
   const kind = lane.kind === 'text' ? 't' : 'b'
-  return `${prefix}${kind}:{${lane.key}}`
+  return `${prefix}${kind}:${broadcastTag(lane.key)}`
 }
 
 function broadcastSequenceKey(prefix: string, key: string): string {
-  return `${prefix}seq:{${key}}`
+  return `${prefix}seq:${broadcastTag(key)}`
+}
+
+function broadcastTag(key: string): string {
+  return key === '' ? '{_}:empty' : `{${key}}`
 }
 
 function durableSource(roomId: string, inc: string, lane: LaneId): BackendSubscriptionSource {
@@ -111,7 +115,8 @@ type HeadCxReply =
   | { tag: 'head'; head: StoredHead }
   | { tag: 'deleted' }
   | { tag: 'conflict'; current: StoredHead | null }
-type DropGenerationBeginReply = { exists: false } | { exists: true; token: string }
+type DropGenerationBeginReply = { exists: false } | { busy: true } | { exists: true; token: string }
+type ReadCellsFenceReply = { stale: true } | { revision: string; now: number }
 
 function toBase64(bytes: Uint8Array): string {
   return Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString('base64')
@@ -163,6 +168,9 @@ export class RedisRoomBackend implements BackendDriver {
   #disposed = false
 
   constructor(options: RedisRoomBackendOptions) {
+    if (options.redis instanceof Cluster && options.redis.options.scaleReads !== 'master') {
+      throw new Error("RedisRoomBackend: ioredis Cluster scaleReads must be 'master' for consistent Room reads")
+    }
     this.#publisher = options.redis
     let clusterSubscriberSelection = 0
     const createSubscriber = async (): Promise<Redis> => {
@@ -241,9 +249,12 @@ export class RedisRoomBackend implements BackendDriver {
 
   async readHead(roomId: string): Promise<{ head: RoomHead } | null> {
     this.#assertLive()
-    const raw = await this.#publisher.get(headKey(this.#prefix, roomId))
-    const stored = this.#liveHead(raw, await this.#authorityNowMs())
-    return stored === null ? null : { head: toPublicHead(stored) }
+    const reply = JSON.parse(
+      (await this.#call(REDIS_ROOM_COMMANDS.readHead.name, [
+        ...REDIS_ROOM_COMMAND_KEYS.readHead(this.#prefix, roomId),
+      ])) as string,
+    ) as { head: StoredHead | null }
+    return reply.head === null ? null : { head: toPublicHead(reply.head) }
   }
 
   async compareExchangeHead(
@@ -287,17 +298,21 @@ export class RedisRoomBackend implements BackendDriver {
       const logicalKeys = 'keys' in sel ? sel.keys : await this.#scanCellKeys(roomId, inc, sel.prefix)
       const physicalKeys = logicalKeys.map((key) => cellKey(this.#prefix, roomId, inc, key))
       const values = physicalKeys.length > 0 ? await this.#publisher.mgetBuffer(...physicalKeys) : []
-      const revAfter = await this.#publisher.get(rKey)
       const before = revBefore ?? '0'
-      const after = revAfter ?? '0'
-      if (before !== after) continue
-      const now = await this.#authorityNowMs()
+      const fence = JSON.parse(
+        (await this.#call(REDIS_ROOM_COMMANDS.readCellsFence.name, [
+          ...REDIS_ROOM_COMMAND_KEYS.readCellsFence(this.#prefix, roomId, inc),
+          inc,
+        ])) as string,
+      ) as ReadCellsFenceReply
+      if ('stale' in fence) return { staleInc: true }
+      if (before !== fence.revision) continue
       const cells = new Map<string, Uint8Array>()
       for (let i = 0; i < logicalKeys.length; i++) {
         const value = values[i]
         if (value === null || value === undefined) continue
         const parsed = parseCellValue(value)
-        if (parsed.expiresAt !== null && parsed.expiresAt <= now) continue
+        if (parsed.expiresAt !== null && parsed.expiresAt <= fence.now) continue
         cells.set(logicalKeys[i] as string, parsed.payload)
       }
       return { revision: before, cells }
@@ -470,27 +485,35 @@ export class RedisRoomBackend implements BackendDriver {
 
   async dropGeneration(roomId: string, inc: string): Promise<void> {
     this.#assertLive()
-    const begin = JSON.parse(
-      (await this.#call(REDIS_ROOM_COMMANDS.dropGenerationBegin.name, [
-        ...REDIS_ROOM_COMMAND_KEYS.dropGenerationBegin(this.#prefix, roomId),
-        '',
-        inc,
-      ])) as string,
-    ) as DropGenerationBeginReply
-    if (!begin.exists) return
-    const manifest = generationKeysKey(this.#prefix, roomId, inc)
-    const keys = await this.#publisher.smembers(manifest)
-    if (keys.length > 0) await this.#publisher.unlink(...keys)
-    await this.#publisher.unlink(manifest)
-    // Disconnected peers reject this token during post-SUBSCRIBE validation; connected peers terminate
-    // immediately because a dropped generation is definitive, not recoverable route loss.
-    await this.#publisher.publish(generationInvalidationChannel(this.#prefix, roomId, inc), begin.token)
-    await this.#call(REDIS_ROOM_COMMANDS.dropGenerationFinalize.name, [
-      ...REDIS_ROOM_COMMAND_KEYS.dropGenerationFinalize(this.#prefix, roomId, inc),
-      '',
-      inc,
-      begin.token,
-    ])
+    const owner = randomUUID()
+    for (;;) {
+      const begin = JSON.parse(
+        (await this.#call(REDIS_ROOM_COMMANDS.dropGenerationBegin.name, [
+          ...REDIS_ROOM_COMMAND_KEYS.dropGenerationBegin(this.#prefix, roomId),
+          '',
+          inc,
+          owner,
+        ])) as string,
+      ) as DropGenerationBeginReply
+      if ('exists' in begin && !begin.exists) return
+      if ('busy' in begin) {
+        await new Promise((resolve) => setTimeout(resolve, DROP_RETRY_MS))
+        continue
+      }
+      const keys = await this.#publisher.smembers(generationKeysKey(this.#prefix, roomId, inc))
+      const finalizeKeys = REDIS_ROOM_COMMAND_KEYS.dropGenerationFinalize(this.#prefix, roomId, inc, keys)
+      if (
+        (await this.#call(REDIS_ROOM_COMMANDS.dropGenerationFinalize.name, [
+          String(finalizeKeys.length),
+          ...finalizeKeys,
+          inc,
+          begin.token,
+          owner,
+        ])) === 1
+      ) {
+        return
+      }
+    }
   }
 
   // ── directory (global; its own two co-slotted keys) ──
@@ -553,22 +576,8 @@ export class RedisRoomBackend implements BackendDriver {
     if (this.#disposed) throw new Error('RedisRoomBackend: used after dispose()')
   }
 
-  async #authorityNowMs(): Promise<number> {
-    const [seconds, microseconds] = await this.#publisher.time()
-    return Number(seconds) * 1_000 + Math.floor(Number(microseconds) / 1_000)
-  }
-
   #parseHead(raw: string | null): StoredHead | null {
     return raw === null ? null : (JSON.parse(raw) as StoredHead)
-  }
-
-  // Decode a stored head, treating a logically-expired tombstone as absent (a lapsed tombstone reopens
-  // the absence epoch — I1). A pure read never deletes; the head-CX/commit Lua reclaim the PX backstop.
-  #liveHead(raw: string | null, authorityNow: number): StoredHead | null {
-    const stored = this.#parseHead(raw)
-    if (stored === null) return null
-    if (stored.exp !== undefined && stored.exp <= authorityNow) return null
-    return stored
   }
 
   async #scanCellKeys(roomId: string, inc: string, prefix: string): Promise<string[]> {

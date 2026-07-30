@@ -121,6 +121,7 @@ class RedisSubscriptionAttempt implements SubscriptionAttempt {
   private _readySettled = false
   private _cleanup: Promise<void> | null = null
   private _lastError: unknown = new Error('Redis subscriber connection closed')
+  private _lastSequence = 0
   private readonly _flushes = new Map<string, { resolve(): void; reject(error: unknown): void }>()
 
   constructor(options: RedisSubscriptionAttemptOptions) {
@@ -267,6 +268,11 @@ class RedisSubscriptionAttempt implements SubscriptionAttempt {
       return
     }
     const { payload, info } = decodeRedisOrderingFrame(frame)
+    // Redis Cluster can forward publications from the old and new slot owners over independent bus
+    // paths during resharding. Preserve ordered at-most-once delivery by dropping a late frame; gaps
+    // remain loss, never replay.
+    if (info.seq <= this._lastSequence) return
+    this._lastSequence = info.seq
     try {
       const result = this._receiver(Uint8Array.from(payload), info) as unknown
       if (result instanceof Promise) void result.catch((error: unknown) => console.error(error))
@@ -338,9 +344,13 @@ function redisSubscriptionChannels(prefix: string, source: BackendSubscriptionSo
 function redisSubscriptionChannel(prefix: string, source: BackendSubscriptionSource): string {
   if (source.kind === 'broadcast') {
     const route = source.lane.kind === 'text' ? 't' : 'b'
-    return `${prefix}${route}:{${source.lane.key}}`
+    return `${prefix}${route}:${broadcastTag(source.lane.key)}`
   }
   return channelKey(prefix, source.roomId, source.inc, laneKey(source.lane))
+}
+
+function broadcastTag(key: string): string {
+  return key === '' ? '{_}:empty' : `{${key}}`
 }
 
 function redisInvalidationChannel(prefix: string, source: RedisDurableSource): string {

@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs'
 import { Cluster, Redis } from 'ioredis'
 import type { BackendSpi, CommitAccepted, LaneId, RoomHead, SubscriptionState } from 'telefunc/backend'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
@@ -51,6 +52,17 @@ describe('Redis real three-master Cluster CI certification', () => {
   })
 
   it('covers shipped command KEYS and terminates live and in-flight attempts when their generation drops', async () => {
+    const manifest = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')) as {
+      peerDependencies: { telefunc: string }
+    }
+    expect(manifest.peerDependencies.telefunc).toBe('>=0.2.23')
+    const scaleReads = cluster.options.scaleReads
+    try {
+      cluster.options.scaleReads = 'slave'
+      expect(() => new RedisRoomBackend({ redis: cluster, prefix: 'rejected:' })).toThrow(/scaleReads.*master/i)
+    } finally {
+      cluster.options.scaleReads = scaleReads
+    }
     expect(masters).toHaveLength(3)
     expect(masters.flatMap(({ ranges }) => ranges).reduce((total, [start, end]) => total + end - start + 1, 0)).toBe(
       16_384,
@@ -60,6 +72,7 @@ describe('Redis real three-master Cluster CI certification', () => {
 
     const prefix = uniquePrefix('runtime-slots')
     const client = clusterClient(CLUSTER_NODES)
+    const time = client.time.bind(client)
     await client.ping()
     const duplicateMethods = client.nodes('master').map((node) => [node, node.duplicate.bind(node)] as const)
     let subscriberOpens = 0
@@ -92,7 +105,12 @@ describe('Redis real three-master Cluster CI certification', () => {
     let subscription: ReturnType<BackendSpi['subscribeLane']> | undefined
     try {
       const head = await open(backend, roomId, inc)
+      client.time = (async () => {
+        throw new Error('control: keyless TIME escaped the room slot')
+      }) as typeof client.time
+      expect((await authority.readHead(roomId))?.head.currentInc).toBe(inc)
       const cells = await backend.readCells(roomId, inc, { keys: [] })
+      client.time = time as typeof client.time
       if ('staleInc' in cells) throw new Error('fresh generation was unexpectedly stale')
       expect(
         await backend.compareExchangeCells(roomId, inc, cells.revision, [
@@ -189,6 +207,7 @@ describe('Redis real three-master Cluster CI certification', () => {
         }
       }
     } finally {
+      client.time = time as typeof client.time
       releaseSubscribe.resolve()
       for (const [node, duplicate] of duplicateMethods) node.duplicate = duplicate as typeof node.duplicate
       await subscription?.unsubscribe().catch(() => {})
@@ -309,19 +328,44 @@ describe('Redis real three-master Cluster CI certification', () => {
     }
   })
 
-  it('does not finalize a generation installed after an absent drop snapshot', async () => {
+  it('does not drop a generation installed after an absent or overlapping snapshot', async () => {
     const prefix = uniquePrefix('drop-absent-race')
     const roomId = 'drop-absent-race-room'
     const inc = 'drop-absent-race-inc'
     const client = clusterClient(CLUSTER_NODES)
     await client.ping()
     const backend = new RedisRoomBackend({ redis: client, prefix })
+    const secondDropper = new RedisRoomBackend({ redis: client, prefix })
     const authority = new RedisRoomBackend({ redis: client, prefix })
     const snapshotRead = deferred()
     const releaseDrop = deferred()
+    const inventoryRead = deferred()
+    const releaseInventory = deferred()
     const commands = client as unknown as Record<string, ((...args: unknown[]) => Promise<unknown>) | undefined>
     const begin = commands.tfRoomDropGenerationBegin
     const smembers = client.smembers.bind(client)
+    let inventoryHeld = false
+    let firstDrop: Promise<void> | undefined
+    let secondDrop: Promise<void> | undefined
+    const writeCell = async (value: string): Promise<void> => {
+      const read = await authority.readCells(roomId, inc, { keys: [] })
+      if ('staleInc' in read) throw new Error('installed generation was stale')
+      expect(
+        await authority.compareExchangeCells(roomId, inc, read.revision, [
+          { key: 'survivor', set: { bytes: bytes(value) } },
+        ]),
+      ).toBe('committed')
+    }
+    const reinstall = async (): Promise<void> => {
+      const tombstone = await authority.readHead(roomId)
+      if (tombstone !== null) {
+        expect(
+          await authority.compareExchangeHead(roomId, { expect: { rev: tombstone.head.rev } }, { delete: true }),
+        ).toEqual({ ok: true, deleted: true })
+      }
+      await open(authority, roomId, inc)
+      await writeCell('new')
+    }
     if (begin === undefined) {
       client.smembers = (async (key: string) => {
         const result = await smembers(key)
@@ -348,11 +392,42 @@ describe('Redis real three-master Cluster CI certification', () => {
       await dropping
       expect((await authority.readHead(roomId))?.head.currentInc).toBe(inc)
       expect(await authority.listGenerations(roomId)).toContain(inc)
+
+      if (begin !== undefined) commands.tfRoomDropGenerationBegin = begin
+      await writeCell('old')
+      const active = await authority.readHead(roomId)
+      if (active === null) throw new Error('installed generation lost its head')
+      await close(authority, roomId, active.head)
+      client.smembers = (async (key: string) => {
+        if (key === `${genPrefix(prefix, roomId, inc)}:keys` && !inventoryHeld) {
+          inventoryHeld = true
+          inventoryRead.resolve()
+          await releaseInventory.promise
+        }
+        return await smembers(key)
+      }) as typeof client.smembers
+      firstDrop = backend.dropGeneration(roomId, inc)
+      await inventoryRead.promise
+      secondDrop = secondDropper.dropGeneration(roomId, inc)
+      if (await settlesWithin(secondDrop, 100)) {
+        await reinstall()
+        releaseInventory.resolve()
+        await firstDrop
+      } else {
+        releaseInventory.resolve()
+        await Promise.all([firstDrop, secondDrop])
+        await reinstall()
+      }
+      const reinstalled = await authority.readCells(roomId, inc, { keys: ['survivor'] })
+      if ('staleInc' in reinstalled) throw new Error('reinstalled generation became stale')
+      expect(Buffer.from(reinstalled.cells.get('survivor') ?? []).toString()).toBe('new')
     } finally {
       releaseDrop.resolve()
+      releaseInventory.resolve()
+      await Promise.allSettled([firstDrop, secondDrop].filter((drop): drop is Promise<void> => drop !== undefined))
       client.smembers = smembers as typeof client.smembers
       if (begin !== undefined) commands.tfRoomDropGenerationBegin = begin
-      await Promise.allSettled([backend.dispose(), authority.dispose(), client.quit()])
+      await Promise.allSettled([backend.dispose(), secondDropper.dispose(), authority.dispose(), client.quit()])
     }
   })
 
@@ -445,7 +520,6 @@ describe('Redis real three-master Cluster CI certification', () => {
     const backend = redisBackend(cluster, prefix)
     const states: SubscriptionState[] = []
     const observed: string[] = []
-    const dispatchHeld = deferred()
     const held: Array<[Buffer, Buffer]> = []
     let subscription: ReturnType<BackendSpi['subscribeLane']> | undefined
     let replacement: ReturnType<BackendSpi['subscribeLane']> | undefined
@@ -466,8 +540,36 @@ describe('Redis real three-master Cluster CI certification', () => {
       if (dispatch === undefined) throw new Error('owned Redis subscriber dispatch listener was not observed')
       const holdDispatch = (channel: Buffer, frame: Buffer): void => {
         held.push([channel, frame])
-        dispatchHeld.resolve()
       }
+      subscriber.off('messageBuffer', dispatch)
+      subscriber.on('messageBuffer', holdDispatch)
+      restoreDispatch = () => {
+        subscriber.off('messageBuffer', holdDispatch)
+        subscriber.on('messageBuffer', dispatch)
+      }
+
+      const lateFirst = accepted(
+        await backend.commitLane('held-dispatch-room', 'held-dispatch-inc', SEMANTIC_LANE, Buffer.from('late-first')),
+      )
+      const lateSecond = accepted(
+        await backend.commitLane('held-dispatch-room', 'held-dispatch-inc', SEMANTIC_LANE, Buffer.from('late-second')),
+      )
+      await waitFor(() => held.length === 4)
+      restoreDispatch()
+      restoreDispatch = undefined
+      for (const [channel, frame] of held
+        .filter(([, frame]) => frame[0] !== REDIS_DELIVERY_FENCE_BYTE)
+        .sort(
+          (left, right) => decodeRedisOrderingFrame(right[1]).info.seq - decodeRedisOrderingFrame(left[1]).info.seq,
+        )) {
+        dispatch(channel, frame)
+      }
+      for (const [channel, frame] of held.filter(([, frame]) => frame[0] === REDIS_DELIVERY_FENCE_BYTE)) {
+        dispatch(channel, frame)
+      }
+      await Promise.all([lateFirst.delivery, lateSecond.delivery])
+      expect(observed).toEqual(['late-second'])
+      held.length = 0
       subscriber.off('messageBuffer', dispatch)
       subscriber.on('messageBuffer', holdDispatch)
       restoreDispatch = () => {
@@ -482,7 +584,6 @@ describe('Redis real three-master Cluster CI certification', () => {
         () => null,
         (error: unknown) => error,
       )
-      await dispatchHeld.promise
       await waitFor(() => held.length === 2)
       const expectedChannel = channelKey(prefix, 'held-dispatch-room', 'held-dispatch-inc', laneKey(SEMANTIC_LANE))
       expect(held.map(([channel]) => channel.toString())).toEqual([expectedChannel, expectedChannel])
@@ -507,7 +608,7 @@ describe('Redis real three-master Cluster CI certification', () => {
       const error = await deliveryOutcome
       expect(error).toBeInstanceOf(Error)
       expect(String(error)).toMatch(/delivery fence|connection closed/i)
-      expect(observed).toEqual([])
+      expect(observed).toEqual(['late-second'])
     } finally {
       restoreDispatch?.()
       for (const [node, original] of originals) node.duplicate = original as typeof node.duplicate
@@ -550,6 +651,21 @@ describe('Redis real three-master Cluster CI certification', () => {
         expect(observed).toEqual([scenario.label])
         expect(result.receivers).toBeUndefined()
       }
+
+      const emptyObserved: string[] = []
+      const text = backend.subscribe({ key: '', kind: 'text' }, (payload, info) =>
+        emptyObserved.push(`text:${info.seq}:${Buffer.from(payload).toString()}`),
+      )
+      const binary = backend.subscribe({ key: '', kind: 'binary' }, (payload, info) =>
+        emptyObserved.push(`binary:${info.seq}:${Buffer.from(payload).toString()}`),
+      )
+      subscriptions.push(text, binary)
+      await Promise.all([text.ready, binary.ready])
+      const first = await backend.publish({ key: '', kind: 'text' }, bytes('one'))
+      const second = await backend.publish({ key: '', kind: 'binary' }, bytes('two'))
+      await waitFor(() => emptyObserved.length === 2)
+      expect([first.seq, second.seq]).toEqual([1, 2])
+      expect(emptyObserved).toEqual(['text:1:one', 'binary:2:two'])
     } finally {
       await Promise.allSettled(subscriptions.map((subscription) => subscription.unsubscribe()))
       await backend.dispose()
