@@ -242,6 +242,10 @@ export const ROOM_TAIL_HOLD_MAX = 256
  *  Measured as serialized-string length — a tight proxy for encoded/heap bytes. A single entry larger
  *  than the whole budget is dropped, never held; the tail is best-effort. */
 export const ROOM_TAIL_HOLD_BYTES_MAX = 1024 * 1024
+/** Lifetime of both halves of a fetched room's tail lease: first from
+ *  `Room.get(id, { tail: true })` until a stub attaches, then from attach until the
+ *  client declares its first text demand. Each half is independently bounded. */
+export const ROOM_TAIL_ATTACH_TIMEOUT_MS = 60_000
 /** Lease on a remote instance's binary-track demand (`onDemand`). Each instance re-gossips its live
  *  demand every heartbeat, so a live watcher's lease is renewed well within this; a reporter that
  *  crashed without sending its 0-transition has its demand swept once the lease lapses, so a member's

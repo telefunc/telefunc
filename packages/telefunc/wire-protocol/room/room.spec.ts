@@ -8,6 +8,7 @@ import {
   ROOM_DM_ACK_TIMEOUT_MS,
   ROOM_HEARTBEAT_INTERVAL_MS,
   ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS,
+  ROOM_TAIL_ATTACH_TIMEOUT_MS,
 } from '../constants.js'
 import {
   DEFAULT_TRACK,
@@ -1092,22 +1093,49 @@ describe('Room public behavior', () => {
   })
 
   it('tail mode holds pre-attach text and flushes it in order on first client demand', async () => {
-    vi.useFakeTimers()
     await Room.create('tail')
     const source = await Room.get('tail')
     const member = await source.join()
     const tail = (await Room.get('tail', { tail: true })) as ServerRoom
     await member.publish('early')
-    await vi.advanceTimersByTimeAsync(60_001)
 
     const { stub, peer } = serve(tail)
     await member.publish('held')
-    await vi.advanceTimersByTimeAsync(60_001)
     expect(dataFrames(peer)).toEqual([])
     stub._onPeerBroadcastSubscribe(false)
     await vi.waitFor(() => expect(dataFrames(peer)).toEqual(['early', 'held']))
     await member.publish('live')
     expect(dataFrames(peer)).toEqual(['early', 'held', 'live'])
+  })
+
+  it('releases a tail that is not attached within its 60 second lease', async () => {
+    vi.useFakeTimers()
+    await Room.create('tail-pre-attach-expiry')
+    const source = await Room.get('tail-pre-attach-expiry')
+    const member = await source.join()
+    const tail = (await Room.get('tail-pre-attach-expiry', { tail: true })) as ServerRoom
+    await member.publish('expired')
+
+    await vi.advanceTimersByTimeAsync(ROOM_TAIL_ATTACH_TIMEOUT_MS + 1)
+    const { stub, peer } = serve(tail)
+    stub._onPeerBroadcastSubscribe(false)
+
+    expect(dataFrames(peer)).toEqual([])
+  })
+
+  it('releases an attached tail when first text demand misses its 60 second lease', async () => {
+    vi.useFakeTimers()
+    await Room.create('tail-post-attach-expiry')
+    const source = await Room.get('tail-post-attach-expiry')
+    const member = await source.join()
+    const tail = (await Room.get('tail-post-attach-expiry', { tail: true })) as ServerRoom
+    await member.publish('expired')
+    const { stub, peer } = serve(tail)
+
+    await vi.advanceTimersByTimeAsync(ROOM_TAIL_ATTACH_TIMEOUT_MS + 1)
+    stub._onPeerBroadcastSubscribe(false)
+
+    expect(dataFrames(peer)).toEqual([])
   })
 
   it('onDemand reports named-track demand turning on and off', async () => {

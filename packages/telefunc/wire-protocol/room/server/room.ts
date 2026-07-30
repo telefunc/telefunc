@@ -14,6 +14,7 @@ import {
   ROOM_DM_ACK_TIMEOUT_MS,
   ROOM_HEARTBEAT_INTERVAL_MS,
   ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS,
+  ROOM_TAIL_ATTACH_TIMEOUT_MS,
 } from '../../constants.js'
 import { getBackend } from '../../backend/install.js'
 import type { LaneId, BackendSubscription, CellMutation } from '../../backend/spi.js'
@@ -120,6 +121,7 @@ class ServerRoom implements Room {
    *  `_attachStub`). Bounded drop-oldest, so a fetched-with-tail room that is never serialized (misuse)
    *  can't grow it without limit. */
   private readonly _tailHold: Array<{ serialized: string; ord: RoomOrder; from: string }> = []
+  private _tailTimer: ReturnType<typeof setTimeout> | null = null
   /** In-flight `send(…, { ack: true })`s awaiting the recipient's reply, keyed by `ackId`. `to` is
    *  the recipient, so a leave/close can fail the ones it strands. Empty at steady state. */
   private readonly _pendingDmAcks = new Map<string, { to: string; settle: (reply: DmReply) => void }>()
@@ -959,12 +961,17 @@ class ServerRoom implements Room {
   _startTail(): void {
     this._tail = true
     this._syncSubs() // bring up text ingestion before any stub exists
+    this._tailTimer = unrefTimer(setTimeout(() => this._teardownTail(), ROOM_TAIL_ATTACH_TIMEOUT_MS))
   }
 
   private _teardownTail(): void {
     if (!this._tail) return // already handed off to a stub
     this._tail = false
     this._tailHold.length = 0
+    if (this._tailTimer !== null) {
+      clearTimeout(this._tailTimer)
+      this._tailTimer = null
+    }
     this._syncSubs() // drop the text ingestion nothing is consuming
   }
 
@@ -976,7 +983,11 @@ class ServerRoom implements Room {
     // (see `_flushTail`). Nothing crosses the wire before the client asks for it, and the client needs
     // no buffer of its own. `_syncSubs()` below keeps text ingestion up while the hold is pending.
     if (this._tail) {
-      stub._beginTail(this._tailHold.slice())
+      if (this._tailTimer !== null) {
+        clearTimeout(this._tailTimer)
+        this._tailTimer = null
+      }
+      stub._beginTail(this._tailHold.slice(), () => this._syncSubs())
       this._tailHold.length = 0
       this._tail = false
     }
