@@ -12,7 +12,7 @@ import { DurableObject } from 'cloudflare:workers'
 import type { CellMutation, CxResult, HeadCx, HeadNext, LaneId } from '../../../../backend/spi.js'
 import { base64ToBytes, bytesToBase64, laneKey as laneKeyOf } from './codec.js'
 import { Fanout, type RouteTarget } from './fanout.js'
-import { assertRetainedCapacity, deleteRetained, installRetained, listRetained, readRetained } from './retained.js'
+import { deleteRetained, installRetained, listRetained, readRetained } from './retained.js'
 import {
   deleteRoute,
   listExpiredRouteInstallations,
@@ -268,7 +268,6 @@ export class TelefuncRoomDurableObject extends DurableObject {
           const required = readCells(this.#sql, inc, { keys: opts.requiredCellKeys }, now)
           if ('staleInc' in required || opts.requiredCellKeys.some((cell) => !required.cells.has(cell))) return
         }
-        if (opts?.retain === true) assertRetainedCapacity(this.#sql, inc, key, frame.byteLength)
         const mark = advanceOrder(this.#sql, inc, key, now)
         if (opts?.retain === true) installRetained(this.#sql, inc, lane, frame, mark)
         const targets = snapshotRoutes(this.#sql, inc, key, now)

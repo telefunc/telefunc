@@ -23,7 +23,6 @@ import type {
 import { BACKEND_SPI_VERSION } from '../../../../backend/spi.js'
 import { CloudflareBroadcastTransport } from '../broadcast.js'
 import { base64ToBytes, bytesToBase64, laneKey as laneKeyOf } from './codec.js'
-import { MAX_RETAINED_BYTES } from './retained.js'
 import { CloudflareRoomSubscriptionAttempt, type CloudflareRoomSubscriptionSource } from './subscription.js'
 import type {
   CellsWire,
@@ -265,7 +264,6 @@ export class CloudflareRoomBackend implements BackendDriver {
   readonly spiVersion = BACKEND_SPI_VERSION
   readonly capabilities = {
     receivers: 'global' as const,
-    maxRetainedPayloadBytes: MAX_RETAINED_BYTES,
   }
   readonly broadcast: CloudflareBroadcastTransport
   readonly subscriptions: SubscriptionDriver

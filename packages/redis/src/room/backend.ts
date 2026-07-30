@@ -52,7 +52,6 @@ import {
 } from './layout.js'
 import { RedisSubscriptionDriver } from './subscriber-transport.js'
 
-const DEFAULT_MAX_RETAINED_BYTES = 16 * 1024 * 1024
 const DIRECTORY_PAGE_SIZE = 100
 const STABLE_READ_ATTEMPTS = 8
 const NEWLINE = 0x0a
@@ -66,7 +65,6 @@ function assertOrderingPosition(seq: number, timestamp: number, context: string)
 export type RedisRoomBackendOptions = {
   redis: Redis | Cluster
   prefix?: string
-  maxRetainedPayloadBytes?: number
 }
 
 const PUBLISH_CMD = 'tfPublish'
@@ -165,11 +163,6 @@ export class RedisRoomBackend implements BackendDriver {
   #disposed = false
 
   constructor(options: RedisRoomBackendOptions) {
-    assert(
-      options.maxRetainedPayloadBytes === undefined ||
-        (Number.isFinite(options.maxRetainedPayloadBytes) && options.maxRetainedPayloadBytes >= 0),
-      'RedisRoomBackend: maxRetainedPayloadBytes must be a finite non-negative number',
-    )
     this.#publisher = options.redis
     let clusterSubscriberSelection = 0
     const createSubscriber = async (): Promise<Redis> => {
@@ -211,7 +204,6 @@ export class RedisRoomBackend implements BackendDriver {
     this.#prefix = options.prefix ?? DEFAULT_ROOM_PREFIX
     this.capabilities = {
       receivers: options.redis instanceof Cluster ? 'none' : 'global',
-      maxRetainedPayloadBytes: options.maxRetainedPayloadBytes ?? DEFAULT_MAX_RETAINED_BYTES,
     }
     this.#publisher.defineCommand(PUBLISH_CMD, { numberOfKeys: 2, lua: PUBLISH_LUA })
     for (const command of Object.values(REDIS_ROOM_COMMANDS)) {
@@ -372,7 +364,6 @@ export class RedisRoomBackend implements BackendDriver {
         opts?.closingLease ?? '',
         opts?.retain === true ? '1' : '0',
         toBuffer(payload),
-        String(this.capabilities.maxRetainedPayloadBytes),
         flush.token,
       ])) as string
     } catch (error) {

@@ -202,7 +202,6 @@ export class MemoryBackend implements BackendDriver {
     }
     this.capabilities = {
       receivers: 'global',
-      maxRetainedPayloadBytes: Number.POSITIVE_INFINITY,
     }
   }
 
