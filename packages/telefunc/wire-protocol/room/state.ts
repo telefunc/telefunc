@@ -48,7 +48,8 @@ type MemberEntry = {
   /** An off-presence participant — a member for routing/discovery, excluded from every presence
    *  read (`count`, `snapshot`, `onJoin`/`onLeave`/`onEmpty`). Any number per room. */
   hidden: boolean
-  remoteRef: WeakRef<RemoteParticipant> | null
+  /** Structural view keeps the WeakRef implementation detail out of the public declaration. */
+  remoteRef: { deref(): RemoteParticipant | undefined } | null
   left: boolean
   leaveCause?: LeaveCause
   dataCbs: Array<(data: unknown, info: ChannelPublishInfo) => unknown>
