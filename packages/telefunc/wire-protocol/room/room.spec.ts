@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { parse } from '@brillout/json-serializer/parse'
 import { IndexedPeer } from '../server/IndexedPeer.js'
 import { ACK_STATUS, TAG, decode } from '../shared-ws.js'
-import { waitForTelefunctionCallBarriers } from '../client/call-barrier.js'
+import { addTelefunctionCallBarrier, waitForTelefunctionCallBarriers } from '../client/call-barrier.js'
 import { ShieldValidationError, isShieldValidationError } from '../../shared/ShieldValidationError.js'
 import {
   ROOM_DM_ACK_TIMEOUT_MS,
@@ -1344,7 +1344,7 @@ describe('client Room lifecycle', () => {
     const client = new ClientRoom(fake.stub, snapshot('announce-demand-fence'))
 
     client.onAnnounce(() => {})
-    const fence = waitForTelefunctionCallBarriers()
+    const fence = waitForTelefunctionCallBarriers({ telefuncUrl: '/_telefunc' })
 
     expect(fence).not.toBeNull()
     let ready = false
@@ -2137,6 +2137,8 @@ function createFakeStub(options?: {
       return () => binary.splice(binary.indexOf(callback), 1)
     },
     _setWireTextSubscribed: RoomClientBroadcast.prototype._setWireTextSubscribed,
+    _addTelefunctionCallBarrier: (promise: Promise<unknown>) =>
+      addTelefunctionCallBarrier({ telefuncUrl: '/_telefunc' }, promise),
     send: options?.send ?? (async () => undefined),
     publish: async () => ({ key: 'fake', seq: 1, timestamp: 1 }),
     publishBinary: async () => ({ key: 'fake', seq: 1, timestamp: 1 }),

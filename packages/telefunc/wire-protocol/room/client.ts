@@ -12,7 +12,7 @@ import {
 } from '../channel.js'
 import { ClientBroadcast } from '../client/channel.js'
 import type { ClientChannel } from '../client/channel.js'
-import { addTelefunctionCallBarrier } from '../client/call-barrier.js'
+import { addTelefunctionCallBarrier, type TelefunctionCallBarrierScope } from '../client/call-barrier.js'
 import type { WirePublishInfo } from '../shared-ws.js'
 import { parse } from '@brillout/json-serializer/parse'
 import {
@@ -62,11 +62,21 @@ type CoalesceWaiter = { resolve: (ack: ChannelPublishAck) => void; reject: (err:
  * Keeping the behavior in this subclass prevents Room policy from leaking into ClientBroadcast.
  */
 class RoomClientBroadcast<T = unknown> extends ClientBroadcast<T> {
+  private readonly _callBarrierScope: TelefunctionCallBarrierScope
   private readonly _roomListeners: Array<BroadcastListener<T>> = []
   private readonly _roomBinaryListeners: BroadcastBinaryListener[] = []
   private readonly _roomReconnectCallbacks: Array<() => void> = []
   private _roomWireTextSubscribed = false
   private _roomDidOpen = false
+
+  constructor(options: ConstructorParameters<typeof ClientBroadcast>[0]) {
+    super(options)
+    this._callBarrierScope = { telefuncUrl: options.telefuncUrl, connectionKey: options.connectionKey }
+  }
+
+  _addTelefunctionCallBarrier(promise: Promise<unknown>): void {
+    addTelefunctionCallBarrier(this._callBarrierScope, promise)
+  }
 
   _subscribeLocal(callback: BroadcastListener<T>): () => void {
     this._roomListeners.push(callback)
@@ -488,7 +498,7 @@ class ClientRoom implements Room {
     const declaration = { __r: 'sub-text', members: text.all ? [] : text.members, announce } as const
     const fence = reconcileText || announce !== this._announcedDemand
     this._announcedDemand = announce
-    if (fence) addTelefunctionCallBarrier(this._stub.send(declaration, { ack: true }))
+    if (fence) this._stub._addTelefunctionCallBarrier(this._stub.send(declaration, { ack: true }))
     else void this._stub.send(declaration, { ack: false }).catch(() => {})
     const binary = state.binaryWants()
     void this._stub.send({ __r: 'sub-binary', wants: binary }, { ack: false }).catch(() => {})
