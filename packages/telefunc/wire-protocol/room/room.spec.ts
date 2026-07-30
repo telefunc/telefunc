@@ -4,6 +4,7 @@ import { IndexedPeer } from '../server/IndexedPeer.js'
 import { ACK_STATUS, TAG, decode } from '../shared-ws.js'
 import { ShieldValidationError, isShieldValidationError } from '../../shared/ShieldValidationError.js'
 import {
+  ROOM_DM_ACK_TIMEOUT_MS,
   ROOM_HEARTBEAT_INTERVAL_MS,
   ROOM_MEMBER_KV_TTL_MS,
   ROOM_MEMBER_TTL_MS,
@@ -489,47 +490,75 @@ describe('Room public behavior', () => {
     }
   })
 
-  it('rejects the final bounded readiness and closes after Room exhausts recovery', async () => {
-    const observer = await Room.get((await Room.create('room-replan-exhaustion')).id)
+  it('keeps exhausted recovery internal and replans the lost lane without closing the Room', async () => {
+    const room = (await Room.create('room-replan-exhaustion')) as ServerRoom
     const backend = getBackend()
     const subscribeLane = backend.subscribeLane.bind(backend)
     const terminal = terminalSubscription()
-    let semanticSubscriptions = 0
+    let exhaustedMember: string | undefined
     let recoveryAttempts = 0
-    let finalReadiness = deferred<void>().promise
-    let readinessOutcome: { status: 'pending' } | { status: 'resolved' } | { status: 'rejected'; diagnostic: string } =
-      { status: 'pending' }
+    let allowRecovery = false
     const subscribe = vi.spyOn(backend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
-      if (lane.kind !== 'semantic') return subscribeLane(roomId, inc, lane, receiver)
-      semanticSubscriptions++
-      if (semanticSubscriptions === 1) return terminal.subscription
+      if (lane.kind !== 'inbox') return subscribeLane(roomId, inc, lane, receiver)
+      if (exhaustedMember === undefined) {
+        exhaustedMember = lane.member
+        return terminal.subscription
+      }
+      if (lane.member !== exhaustedMember) return subscribeLane(roomId, inc, lane, receiver)
       recoveryAttempts++
-      const subscription = rejectedSubscription('Backend subscription closed: room-replan-exhaustion')
-      finalReadiness = subscription.ready
-      return subscription
+      return allowRecovery
+        ? subscribeLane(roomId, inc, lane, receiver)
+        : rejectedSubscription('Backend subscription closed: room-replan-exhaustion')
     })
     const report = vi.spyOn(console, 'error').mockImplementation(() => {})
     try {
-      observer.subscribe(() => {})
+      const sender = await room.join()
+      const recipient = await room.join()
+      recipient.listen(() => 'acknowledged')
+      expect(exhaustedMember).toBe(sender.id)
       await terminal.close()
 
       await vi.waitFor(() => expect(recoveryAttempts).toBe(6))
-      void finalReadiness.then(
+      const slot = (
+        room as unknown as {
+          _dmUnsubs: Map<string, { active: boolean; lost: boolean; ready: Promise<void> }>
+        }
+      )._dmUnsubs.get(sender.id)!
+      await vi.waitFor(() => expect(slot.lost).toBe(true))
+      const diagnostics = report.mock.calls.flat().map(String).join('\n')
+      expect(diagnostics).toContain('Backend subscription closed: room-replan-exhaustion')
+      expect(diagnostics).toContain('Room subscription recovery exhausted')
+      let readinessOutcome: 'pending' | 'resolved' | 'rejected' = 'pending'
+      void slot.ready.then(
         () => {
-          readinessOutcome = { status: 'resolved' }
+          readinessOutcome = 'resolved'
         },
-        (error: unknown) => {
-          readinessOutcome = { status: 'rejected', diagnostic: String(error) }
+        () => {
+          readinessOutcome = 'rejected'
         },
       )
       await Promise.resolve()
+      expect(readinessOutcome).toBe('pending')
+      expect(room.isClosed).toBe(false)
+      expect((await backend.readHead(room.id))?.head.state).toBe('open')
 
-      expect(readinessOutcome).toEqual({
-        status: 'rejected',
-        diagnostic: expect.stringContaining('Backend subscription closed: room-replan-exhaustion'),
-      })
-      await vi.waitFor(() => expect(observer.isClosed).toBe(true))
+      vi.useFakeTimers()
+      const sending = sender.send(recipient, 'ping', { ack: true }).catch((error: unknown) => error)
+      await vi.advanceTimersByTimeAsync(ROOM_DM_ACK_TIMEOUT_MS)
+      const publicError = await sending
+      expect(isRoomError(publicError)).toBe(true)
+      expect(String(publicError)).toContain('timed out')
+      expect(String(publicError)).not.toContain('subscription')
+      vi.useRealTimers()
+
+      allowRecovery = true
+      const syncSubs = room as unknown as { _syncSubs(): void }
+      syncSubs._syncSubs()
+      await vi.waitFor(() => expect(recoveryAttempts).toBe(7))
+      await vi.waitFor(() => expect(slot).toMatchObject({ active: true, lost: false }))
+      await expect(sender.publish('still-open')).resolves.toMatchObject({ seq: expect.any(Number) })
     } finally {
+      vi.useRealTimers()
       subscribe.mockRestore()
       report.mockRestore()
     }

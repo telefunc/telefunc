@@ -137,11 +137,11 @@ class ServerRoom implements Room {
   private readonly _localParticipants = new Map<string, ServerLocalParticipant>()
 
   private readonly _ctrlSub = new SubSlot(
-    (slot) => this._onTerminalSubscription(slot),
+    (slot, error) => this._onTerminalSubscription(slot, error),
     () => void this._reconcileAuthority().catch(reportRoomError),
   )
   private readonly _textSub = new SubSlot(
-    (slot) => this._onTerminalSubscription(slot),
+    (slot, error) => this._onTerminalSubscription(slot, error),
     () => void this._reconcileAuthority().catch(reportRoomError),
   )
   /** Upstream subscriptions keyed by their policy identity. */
@@ -937,7 +937,8 @@ class ServerRoom implements Room {
   }
 
   /** Recover a still-wanted terminal lane inside Room's one policy horizon. */
-  private _onTerminalSubscription(slot: SubSlot): void {
+  private _onTerminalSubscription(slot: SubSlot, failure?: unknown): void {
+    if (failure !== undefined) reportRoomError(failure)
     if (this._recoveringSubscriptions.has(slot)) return
     this._recoveringSubscriptions.add(slot)
     void (async () => {
@@ -956,14 +957,17 @@ class ServerRoom implements Room {
         }
         slot.retry()
         try {
-          await withinRoomHorizon(slot.ready, Math.min(attemptMs, deadline - Date.now()))
+          await withinRoomHorizon(slot.attemptReady, Math.min(attemptMs, deadline - Date.now()))
           await this._reconcileAuthority()
           return
         } catch (error) {
           reportRoomError(error)
         }
       }
-      if (slot.wanted) this._settleTerminalSubscription()
+      if (slot.wanted) {
+        reportRoomError(new RoomError(`Room subscription recovery exhausted: ${this.id}`))
+        slot.markLost()
+      }
     })()
       .catch(reportRoomError)
       .finally(() => this._recoveringSubscriptions.delete(slot))
@@ -1433,7 +1437,7 @@ class ServerRoom implements Room {
       let slot = subs.get(key)
       if (!slot) {
         slot = new SubSlot(
-          (terminal) => this._onTerminalSubscription(terminal),
+          (terminal, error) => this._onTerminalSubscription(terminal, error),
           () => void this._reconcileAuthority().catch(reportRoomError),
         )
         subs.set(key, slot)
@@ -1443,8 +1447,8 @@ class ServerRoom implements Room {
   }
 
   /** The binary analogue of `SubSlot.ready`: settles once every wanted per-(member, track) binary
-   *  subscription is live, or rejects when one exhausts replacement. Awaited before retained replay so a
-   *  keyframe racing the subscribe isn't lost in the gap. A synchronous backend resolves instantly. */
+   *  subscription is live and remains pending while a lane is internally lost. Awaited before retained
+   *  replay so a keyframe racing the subscribe isn't lost in the gap. */
   private _binaryReady(): Promise<void> {
     const pending: Promise<void>[] = []
     for (const subscription of this._binaryKeyUnsubs.values()) pending.push(subscription.ready)
