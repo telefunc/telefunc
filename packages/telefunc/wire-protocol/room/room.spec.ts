@@ -2,13 +2,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { parse } from '@brillout/json-serializer/parse'
 import { IndexedPeer } from '../server/IndexedPeer.js'
 import { ACK_STATUS, TAG, decode } from '../shared-ws.js'
-import { waitForTelefunctionCallBarriers } from '../client/call-barrier.js'
+import { addTelefunctionCallBarrier, waitForTelefunctionCallBarriers } from '../client/call-barrier.js'
 import { ShieldValidationError, isShieldValidationError } from '../../shared/ShieldValidationError.js'
 import {
   ROOM_DM_ACK_TIMEOUT_MS,
   ROOM_HEARTBEAT_INTERVAL_MS,
   ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS,
-} from '../constants.js'
+} from './constants.js'
 import {
   DEFAULT_TRACK,
   RoomError,
@@ -1311,7 +1311,7 @@ describe('client Room lifecycle', () => {
     const client = new ClientRoom(fake.stub, snapshot('announce-demand-fence'))
 
     client.onAnnounce(() => {})
-    const fence = waitForTelefunctionCallBarriers()
+    const fence = waitForTelefunctionCallBarriers({ telefuncUrl: '/_telefunc' })
 
     expect(fence).not.toBeNull()
     let ready = false
@@ -1735,10 +1735,11 @@ describe('shared subscription supervision', () => {
     await raw.deliver(1, 'current')
     expect(received).toEqual(['c:current'])
 
-    await Promise.all([first.unsubscribe(), second.unsubscribe()])
+    const retiring = Promise.all([first.unsubscribe(), second.unsubscribe()])
+    firstCleanup.resolve()
+    await retiring
     const stopping = replacement.unsubscribe()
     secondCleanup.resolve()
-    firstCleanup.resolve()
     await stopping
   })
 
@@ -1757,16 +1758,93 @@ describe('shared subscription supervision', () => {
     raw.opens[2]!.attempt.close()
 
     let unsubscribeSettled = false
+    let terminalUnsubscribeSettled = false
     let disposeSettled = false
     const unsubscribing = first.unsubscribe().then(() => (unsubscribeSettled = true))
+    const terminalUnsubscribing = terminal.unsubscribe().then(() => (terminalUnsubscribeSettled = true))
     const disposing = manager.dispose().then(() => (disposeSettled = true))
-    expect({ unsubscribeSettled, disposeSettled }).toEqual({ unsubscribeSettled: false, disposeSettled: false })
+    expect({ unsubscribeSettled, terminalUnsubscribeSettled, disposeSettled }).toEqual({
+      unsubscribeSettled: false,
+      terminalUnsubscribeSettled: false,
+      disposeSettled: false,
+    })
     liveCleanup.resolve()
     await unsubscribing
-    expect({ unsubscribeSettled, disposeSettled }).toEqual({ unsubscribeSettled: true, disposeSettled: false })
+    expect({ unsubscribeSettled, terminalUnsubscribeSettled, disposeSettled }).toEqual({
+      unsubscribeSettled: true,
+      terminalUnsubscribeSettled: false,
+      disposeSettled: false,
+    })
     terminalCleanup.resolve()
-    await disposing
-    expect({ unsubscribeSettled, disposeSettled }).toEqual({ unsubscribeSettled: true, disposeSettled: true })
+    await Promise.all([terminalUnsubscribing, disposing])
+    expect({ unsubscribeSettled, terminalUnsubscribeSettled, disposeSettled }).toEqual({
+      unsubscribeSettled: true,
+      terminalUnsubscribeSettled: true,
+      disposeSettled: true,
+    })
+  })
+
+  it('isolates throwing state listeners from siblings and last-detach cleanup', async () => {
+    const cleanup = deferred<void>()
+    const raw = new ControlledDriver()
+    raw.plan(() => ControlledAttempt.ready(cleanup.promise))
+    const reports: unknown[] = []
+    const subscription = new SubscriptionManager(raw, (error) => reports.push(error)).subscribe('listeners', () => {})
+    await subscription.ready
+    let siblingCalls = 0
+    subscription.onStateChange(() => {
+      throw new Error('listener exploded')
+    })
+    subscription.onStateChange(() => siblingCalls++)
+
+    let settled = false
+    const stopping = subscription.unsubscribe().then(
+      () => {
+        settled = true
+        return 'resolved'
+      },
+      () => 'rejected',
+    )
+    await Promise.resolve()
+    expect(siblingCalls).toBe(1)
+    expect(raw.opens[0]!.attempt.unsubscribeCalls).toBe(1)
+    expect(settled).toBe(false)
+    cleanup.resolve()
+    await expect(stopping).resolves.toBe('resolved')
+    expect(reports).toHaveLength(1)
+  })
+
+  it('releases an observer returned after synchronous terminal registration', async () => {
+    let rawListeners = 0
+    let unobserveCalls = 0
+    let unsubscribeCalls = 0
+    const attempt: SubscriptionAttempt = {
+      ready: new Promise<void>(() => {}),
+      state: () => 'closed',
+      onStateChange: (listener) => {
+        rawListeners++
+        listener('closed')
+        return () => {
+          rawListeners--
+          unobserveCalls++
+        }
+      },
+      unsubscribe: async () => {
+        unsubscribeCalls++
+      },
+    }
+    const raw: SubscriptionDriver<string> = {
+      bind: () => ({
+        partition: '',
+        valid: () => true,
+        open: () => attempt,
+      }),
+    }
+    const subscription = new SubscriptionManager(raw).subscribe('sync-terminal', () => {})
+    await expect(subscription.ready).rejects.toThrow('Backend subscription closed')
+    await vi.waitFor(() => expect(unsubscribeCalls).toBe(1))
+    expect({ rawListeners, unobserveCalls }).toEqual({ rawListeners: 0, unobserveCalls: 1 })
+    await subscription.unsubscribe()
   })
 
   it('normalizes initial readiness and surfaces raw recovery or terminal failure', async () => {
@@ -1989,6 +2067,8 @@ function createFakeStub(options?: {
       return () => binary.splice(binary.indexOf(callback), 1)
     },
     _setWireTextSubscribed: RoomClientBroadcast.prototype._setWireTextSubscribed,
+    _addTelefunctionCallBarrier: (promise: Promise<unknown>) =>
+      addTelefunctionCallBarrier({ telefuncUrl: '/_telefunc' }, promise),
     send: options?.send ?? (async () => undefined),
     publish: async () => ({ key: 'fake', seq: 1, timestamp: 1 }),
     publishBinary: async () => ({ key: 'fake', seq: 1, timestamp: 1 }),
@@ -2054,6 +2134,7 @@ class ControlledDriver implements SubscriptionDriver<string> {
 
 class ControlledAttempt implements SubscriptionAttempt {
   readonly ready: Promise<void>
+  unsubscribeCalls = 0
   readonly #readiness = deferred<void>()
   readonly #listeners = new Set<(state: SubscriptionAttemptState) => void>()
   readonly #cleanup: Promise<void>
@@ -2081,6 +2162,7 @@ class ControlledAttempt implements SubscriptionAttempt {
   }
 
   async unsubscribe(): Promise<void> {
+    this.unsubscribeCalls++
     this.#transition('closed')
     await this.#cleanup
   }

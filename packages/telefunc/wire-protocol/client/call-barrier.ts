@@ -1,19 +1,35 @@
 export { addTelefunctionCallBarrier, waitForTelefunctionCallBarriers }
+export type { TelefunctionCallBarrierScope }
 
-const pending = new Set<Promise<void>>()
+type TelefunctionCallBarrierScope = { telefuncUrl: string; connectionKey?: string }
 
-/** Preserve client causality when an HTTP telefunction call follows a control sent on a channel:
- * the call waits until the server has accepted that earlier control. */
-function addTelefunctionCallBarrier(promise: Promise<unknown>): void {
-  const settled = promise.then(
-    () => undefined,
-    () => undefined,
-  )
-  pending.add(settled)
-  void settled.finally(() => pending.delete(settled))
+const pendingByScope = new Map<string, Set<Promise<void>>>()
+
+/** Preserve causality only between controls and HTTP calls sharing one client connection scope. */
+function addTelefunctionCallBarrier(scope: TelefunctionCallBarrierScope, promise: Promise<unknown>): void {
+  const key = scopeKey(scope)
+  let pending = pendingByScope.get(key)
+  if (pending === undefined) {
+    pending = new Set()
+    pendingByScope.set(key, pending)
+  }
+  const barrier = promise.then(() => undefined)
+  // Mark the stored branch observed while retaining its rejection for a dependent Promise.all().
+  void barrier.catch(() => {})
+  pending.add(barrier)
+  const remove = () => {
+    pending!.delete(barrier)
+    if (pending!.size === 0) pendingByScope.delete(key)
+  }
+  void barrier.then(remove, remove)
 }
 
-function waitForTelefunctionCallBarriers(): Promise<void> | null {
-  if (pending.size === 0) return null
+function waitForTelefunctionCallBarriers(scope: TelefunctionCallBarrierScope): Promise<void> | null {
+  const pending = pendingByScope.get(scopeKey(scope))
+  if (pending === undefined || pending.size === 0) return null
   return Promise.all([...pending]).then(() => undefined)
+}
+
+function scopeKey({ telefuncUrl, connectionKey }: TelefunctionCallBarrierScope): string {
+  return JSON.stringify([telefuncUrl, connectionKey ?? null])
 }

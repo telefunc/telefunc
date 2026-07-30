@@ -14,7 +14,7 @@ import {
   ROOM_DM_ACK_TIMEOUT_MS,
   ROOM_HEARTBEAT_INTERVAL_MS,
   ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS,
-} from '../../constants.js'
+} from '../constants.js'
 import { getBackend } from '../../backend/install.js'
 import type { LaneId, BackendSubscription } from '../../backend/spi.js'
 import { encodePublishBinary, encodePublishText, type WirePublishInfo } from '../../shared-ws.js'

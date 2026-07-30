@@ -19,7 +19,8 @@ function superviseBackend(
   return {
     spiVersion: driver.spiVersion,
 
-    publish: (lane, payload) => driver.publish(lane, payload),
+    publish: (lane, payload) =>
+      subscriptions.publish({ kind: 'broadcast', lane }, payload, (ownedPayload) => driver.publish(lane, ownedPayload)),
     subscribe: (lane, receiver) => {
       const source: BackendSubscriptionSource = { kind: 'broadcast', lane }
       return subscriptions.subscribe(source, receiver)

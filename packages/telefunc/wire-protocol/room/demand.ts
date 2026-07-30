@@ -1,7 +1,7 @@
 export { RoomDemand }
 export type { WantGossip }
 
-import { ROOM_DEMAND_TTL_MS } from '../constants.js'
+import { ROOM_DEMAND_TTL_MS } from './constants.js'
 
 /** A demand-gossip event on the room's control lane — node-to-node only, never relayed to clients. */
 type WantGossip = { member: string; track: string; node: string; on: boolean }

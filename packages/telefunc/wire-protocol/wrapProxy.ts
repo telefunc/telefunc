@@ -68,8 +68,8 @@ function adoptSubordinate(derived: unknown, wrapper: unknown): void {
   if (!isObjectOrFunction(derived)) return
   keepWrapperAlive.set(derived, wrapper)
   if (isPromise(derived)) {
-    void Promise.resolve(derived)
-      .then((value) => adoptSubordinate(value, wrapper))
-      .catch(() => {})
+    // Keep the fulfillment tether without handling rejection: the derived chain then preserves the
+    // runtime's unhandled-rejection signal when an application ignores a rejected method promise.
+    void Promise.resolve(derived).then((value) => adoptSubordinate(value, wrapper))
   }
 }

@@ -5,7 +5,9 @@ import { ACK_STATUS, TAG, decode } from '../shared-ws.js'
 import { IndexedPeer } from './IndexedPeer.js'
 import { disposeBackend, getBackend, installBackend } from '../backend/install.js'
 import { MemoryBackend, MemoryBackendState } from '../backend/memory/backend.js'
-import type { BackendSubscription, SubscriptionState } from '../backend/spi.js'
+import type { SubscriptionAttempt, SubscriptionAttemptState } from '../backend/spi.js'
+import { ChannelClosedError, ChannelOverflowError } from '../channel-errors.js'
+import { CHANNEL_BUFFER_LIMIT_BYTES } from '../constants.js'
 
 let memoryState: MemoryBackendState
 beforeEach(async () => {
@@ -16,7 +18,7 @@ beforeEach(async () => {
 afterEach(() => disposeBackend())
 
 function pendingSubscription(): {
-  subscription: BackendSubscription
+  subscription: SubscriptionAttempt
   ready(): void
   lost(): void
   close(): void
@@ -29,9 +31,9 @@ function pendingSubscription(): {
     })
   }
   resetReady()
-  let state: SubscriptionState = 'establishing'
-  const listeners = new Set<(state: SubscriptionState) => void>()
-  const transition = (next: SubscriptionState) => {
+  let state: SubscriptionAttemptState = 'establishing'
+  const listeners = new Set<(state: SubscriptionAttemptState) => void>()
+  const transition = (next: SubscriptionAttemptState) => {
     state = next
     for (const listener of listeners) listener(next)
   }
@@ -64,6 +66,17 @@ function pendingSubscription(): {
       transition('closed')
     },
   }
+}
+
+async function installPendingSubscriptionBackend(result: { seq: number; timestamp: number; receivers?: number }) {
+  await disposeBackend()
+  const controlled = pendingSubscription()
+  const driver = new MemoryBackend({ state: memoryState })
+  const bind = driver.subscriptions.bind.bind(driver.subscriptions)
+  driver.subscriptions.bind = (source) => ({ ...bind(source), open: () => controlled.subscription })
+  const publish = vi.spyOn(driver, 'publish').mockReturnValue(result)
+  installBackend(() => driver)
+  return { controlled, publish }
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -243,10 +256,7 @@ describe('keyed in-process broadcast', () => {
   })
 
   it('waits for a sibling subscription to be ready before publishing', async () => {
-    const backend = getBackend()
-    const controlled = pendingSubscription()
-    const subscribe = vi.spyOn(backend, 'subscribe').mockReturnValue(controlled.subscription)
-    const publish = vi.spyOn(backend, 'publish').mockReturnValue({ seq: 1, timestamp: 1 })
+    const { controlled, publish } = await installPendingSubscriptionBackend({ seq: 1, timestamp: 1 })
     const sender = new ServerBroadcast({ key: 'broadcast:sibling-ready' })
     const receiver = new ServerBroadcast({ key: 'broadcast:sibling-ready' })
     try {
@@ -265,7 +275,6 @@ describe('keyed in-process broadcast', () => {
     } finally {
       sender.abort()
       receiver.abort()
-      subscribe.mockRestore()
       publish.mockRestore()
     }
   })
@@ -300,10 +309,7 @@ describe('keyed in-process broadcast', () => {
 
 describe('binary in-process broadcast', () => {
   it('waits for an establishing binary subscription before publishing on that lane', async () => {
-    const backend = getBackend()
-    const pending = pendingSubscription()
-    const subscribe = vi.spyOn(backend, 'subscribe').mockReturnValue(pending.subscription)
-    const publish = vi.spyOn(backend, 'publish').mockReturnValue({
+    const { controlled: pending, publish } = await installPendingSubscriptionBackend({
       seq: 1,
       timestamp: 1,
       receivers: 1,
@@ -321,7 +327,27 @@ describe('binary in-process broadcast', () => {
       await expect(publishing).resolves.toMatchObject({ seq: 1, timestamp: 1, receivers: 1 })
       expect(publish).toHaveBeenCalledOnce()
     } finally {
-      subscribe.mockRestore()
+      publish.mockRestore()
+    }
+  })
+
+  it('caps payload bytes held while a subscription is establishing', async () => {
+    const { controlled: pending, publish } = await installPendingSubscriptionBackend({ seq: 1, timestamp: 1 })
+    const receiver = new ServerBroadcast({ key: 'broadcast:bounded-ready' })
+    const sender = new ServerBroadcast({ key: 'broadcast:bounded-ready' })
+    receiver.subscribeBinary(() => {})
+    const payload = new Uint8Array(CHANNEL_BUFFER_LIMIT_BYTES)
+    payload[0] = 7
+    const first = sender.publishBinary(payload)
+    payload[0] = 9
+    const overflow = sender.publishBinary(new Uint8Array(1))
+
+    try {
+      await expect(overflow).rejects.toBeInstanceOf(ChannelOverflowError)
+    } finally {
+      pending.ready()
+      await Promise.allSettled([first, overflow])
+      expect(publish.mock.calls[0]?.[1][0]).toBe(7)
       publish.mockRestore()
     }
   })
@@ -413,6 +439,33 @@ describe('Broadcast disallows channel methods', () => {
 // the runtime check lives in _dispatchPublishAckReq.
 // ───────────────────────────────────────────────────────────────────────────
 
+describe('Broadcast lifecycle and route ownership', () => {
+  it('keeps a local route after peer unsubscribe and releases it with the final local listener', async () => {
+    const key = 'broadcast:mixed-owners'
+    const broadcast = new ServerBroadcast<string>({ key })
+    const received: string[] = []
+    const unsubscribe = broadcast.subscribe((message) => received.push(message))
+    broadcast._onPeerBroadcastSubscribe(false)
+    broadcast._onPeerBroadcastUnsubscribe(false)
+
+    expect((await Broadcast.publish(key, 'kept')).receivers).toBe(1)
+    expect(received).toEqual(['kept'])
+    unsubscribe()
+    expect((await Broadcast.publish(key, 'released')).receivers).toBe(0)
+  })
+
+  it.each([
+    ['publish', (broadcast: ServerBroadcast) => broadcast.publish(null)],
+    ['publishBinary', (broadcast: ServerBroadcast) => broadcast.publishBinary(new Uint8Array())],
+    ['subscribe', (broadcast: ServerBroadcast) => broadcast.subscribe(() => {})],
+    ['subscribeBinary', (broadcast: ServerBroadcast) => broadcast.subscribeBinary(() => {})],
+  ])('%s() throws after abort', (_name, operation) => {
+    const broadcast = new ServerBroadcast({ key: 'broadcast:closed' })
+    broadcast.abort()
+    expect(() => operation(broadcast)).toThrow(ChannelClosedError)
+  })
+})
+
 describe('Broadcast shield validation', () => {
   it('rejects client publishes that fail the data shield with a SHIELD_ERROR ack', () => {
     const broadcast = new ServerBroadcast<{ text: string }>({ key: 'room:shield' })
@@ -471,11 +524,23 @@ describe('Broadcast shield validation', () => {
 // ───────────────────────────────────────────────────────────────────────────
 
 describe('Broadcast static bus (publish/subscribe)', () => {
+  it('releases a queued publish when its establishing subscriber terminates', async () => {
+    const { controlled, publish } = await installPendingSubscriptionBackend({ seq: 1, timestamp: 1 })
+    const unsubscribe = Broadcast.subscribe('broadcast:terminal-ready', () => {})
+    try {
+      const publishing = Broadcast.publish('broadcast:terminal-ready', 'after-terminal')
+      controlled.close()
+
+      await expect(publishing).resolves.toMatchObject({ seq: 1 })
+      expect(publish).toHaveBeenCalledOnce()
+    } finally {
+      unsubscribe()
+      publish.mockRestore()
+    }
+  })
+
   it('waits for a static subscription to be ready before publishing', async () => {
-    const backend = getBackend()
-    const pending = pendingSubscription()
-    const subscribe = vi.spyOn(backend, 'subscribe').mockReturnValue(pending.subscription)
-    const publish = vi.spyOn(backend, 'publish').mockReturnValue({ seq: 1, timestamp: 1 })
+    const { controlled: pending, publish } = await installPendingSubscriptionBackend({ seq: 1, timestamp: 1 })
     const unsubscribe = Broadcast.subscribe('broadcast:static-ready', () => {})
     try {
       const publishing = Broadcast.publish('broadcast:static-ready', 'after-ready')
@@ -490,7 +555,6 @@ describe('Broadcast static bus (publish/subscribe)', () => {
       expect(publish).toHaveBeenCalledTimes(2)
     } finally {
       unsubscribe()
-      subscribe.mockRestore()
       publish.mockRestore()
     }
   })

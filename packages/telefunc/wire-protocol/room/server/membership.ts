@@ -14,7 +14,7 @@ import { parse } from '@brillout/json-serializer/parse'
 import { assertUsage } from '../../../utils/assert.js'
 import { getBackend } from '../../backend/install.js'
 import type { CellMutation } from '../../backend/spi.js'
-import { ROOM_MEMBER_TTL_MS } from '../../constants.js'
+import { ROOM_MEMBER_TTL_MS } from '../constants.js'
 import {
   RoomError,
   leaveCauseToWire,
@@ -33,6 +33,7 @@ import {
 import type { LeaveCause } from '../types.js'
 import { SEMANTIC_LANE, configFromHead, decodeRoomText, publishCtrl } from './lanes.js'
 
+// Room owns conflict recovery: 16 attempts with 1→64 ms jitter, then a contention RoomError.
 const ROOM_CX_ATTEMPTS = 16
 type CellSelector = { keys: string[] } | { prefix: string }
 type CellPlan<T> = { value: T; mutations: CellMutation[] }
