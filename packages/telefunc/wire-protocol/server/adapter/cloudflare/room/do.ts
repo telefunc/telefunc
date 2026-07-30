@@ -168,7 +168,10 @@ export class TelefuncRoomDurableObject extends DurableObject {
           // if this best-effort invalidation RPC is lost.
           if (evicted) {
             try {
-              await session.telefuncRoomInvalidate({
+              const recoverySession = this.#sessionNamespaceValue.get(
+                this.#sessionNamespaceValue.idFromString(target.subscriberDoId),
+              )
+              await recoverySession.telefuncRoomInvalidate({
                 roomId: info.roomId,
                 inc: info.inc,
                 laneKey: info.laneKey,
