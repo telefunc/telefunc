@@ -130,7 +130,6 @@ export class CloudflareRoomSessionManager {
   readonly #subscriptionPartition = crypto.randomUUID()
   readonly #getRoomNamespace: () => CloudflareRoomNamespace
   readonly #entries = new Map<string, CloudflareRoomSubscriptionAttempt>()
-  readonly #deliverySettlements = new Map<string, Promise<void>>()
   #disposed = false
 
   constructor(sessionId: string, getRoomNamespace: () => CloudflareRoomNamespace) {
@@ -183,7 +182,6 @@ export class CloudflareRoomSessionManager {
     this.#disposed = true
     for (const attempt of this.#entries.values()) attempt.terminate()
     this.#entries.clear()
-    this.#deliverySettlements.clear()
   }
 
   get subscriptionPartition(): string {
@@ -197,33 +195,6 @@ export class CloudflareRoomSessionManager {
   authority(roomId: string): CloudflareRoomAuthorityStub {
     const namespace = this.#getRoomNamespace()
     return namespace.get(namespace.idFromName(roomId))
-  }
-
-  settleDelivery(roomId: string, inc: string, lane: LaneId, attempt: Promise<void>): Promise<void> {
-    // `awaitDelivery()` is a second DO RPC so workerd may return two already ordered authority attempts
-    // in either RPC-response order. Keep the caller-visible fence on this exact event-local manager;
-    // the stateless backend proxy never owns settlement state across session shards.
-    const key = JSON.stringify([roomId, inc, laneKeyOf(lane)])
-    const previous = this.#deliverySettlements.get(key) ?? Promise.resolve()
-    const delivery = previous.then(() => attempt)
-    const tail = delivery.then(
-      () => undefined,
-      () => undefined,
-    )
-    this.#deliverySettlements.set(key, tail)
-    void tail.then(() => {
-      if (this.#deliverySettlements.get(key) === tail) this.#deliverySettlements.delete(key)
-    })
-    void attempt.catch(() => {})
-    void delivery.catch(() => {})
-    return delivery
-  }
-
-  dropGenerationSettlements(roomId: string, inc: string): void {
-    for (const key of this.#deliverySettlements.keys()) {
-      const [candidateRoomId, candidateInc] = JSON.parse(key) as [string, string, string]
-      if (candidateRoomId === roomId && candidateInc === inc) this.#deliverySettlements.delete(key)
-    }
   }
 
   #openSubscription(
@@ -333,10 +304,9 @@ export class CloudflareRoomBackend implements BackendDriver {
     if ('stale' in wire) return { stale: true }
     assertOrderingPosition(wire.seq, wire.timestamp, 'CloudflareRoomBackend.commitLane')
     const deliveryToken = wire.deliveryToken
-    const attempt = new Promise<void>((resolve, reject) => {
+    const delivery = new Promise<void>((resolve, reject) => {
       setTimeout(() => void stub.awaitDelivery(deliveryToken).then(resolve, reject), 0)
     })
-    const delivery = manager.settleDelivery(roomId, inc, lane, attempt)
     return { accepted: true, seq: wire.seq, timestamp: wire.timestamp, receivers: wire.receivers, delivery }
   }
   async readRetained(roomId: string, inc: string, lane: LaneId) {
