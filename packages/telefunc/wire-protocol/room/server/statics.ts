@@ -300,10 +300,13 @@ async function writeRoomConfig(
 async function closeRoom(id: string): Promise<void> {
   assertRoomId(id)
   const backend = getBackend()
-  const current = await backend.readHead(id)
-  if (current === null || current.head.state === 'closed') return
-  const closing = await acquireClosingLease(backend, id, current.head)
-  if (closing !== null) await finishClose(backend, id, closing)
+  for (;;) {
+    const current = await backend.readHead(id)
+    if (current === null || current.head.state === 'closed') return
+    const closing = await acquireClosingLease(backend, id, current.head)
+    if (closing !== null && (await finishClose(backend, id, closing))) return
+    await new Promise((resolve) => setTimeout(resolve, 100))
+  }
 }
 
 async function acquireClosingLease(backend: BackendSpi, roomId: string, current: RoomHead): Promise<RoomHead | null> {

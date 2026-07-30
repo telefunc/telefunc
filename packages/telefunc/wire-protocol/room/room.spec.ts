@@ -21,6 +21,7 @@ import {
 } from './protocol.js'
 import { ClientRoom, RoomClientBroadcast } from './client.js'
 import { Room, ServerRoom } from './server.js'
+import { configFromHead, encodeRoomConfig } from './server/lanes.js'
 import { RoomStubChannel } from './stubs.js'
 import { RoomDemand } from './demand.js'
 import type { ChannelPublishInfo } from '../channel.js'
@@ -247,6 +248,36 @@ describe('Room public behavior', () => {
     const recreated = (await Room.create('lifecycle')) as ServerRoom
     expect(recreated._inc).not.toBe(firstInc)
     expect(await recreated.getParticipants()).toEqual([])
+  })
+
+  it('waits for an active close lease and takes over until the head is closed', async () => {
+    vi.useFakeTimers()
+    const room = (await Room.create('concurrent-close')) as ServerRoom
+    const current = (await driver.readHead(room.id))!.head
+    const leased = await driver.compareExchangeHead(
+      room.id,
+      { expect: { rev: current.rev } },
+      {
+        head: {
+          currentInc: current.currentInc,
+          state: 'closing',
+          config: encodeRoomConfig({ ...configFromHead(current), status: 'closing' }),
+          closeLease: { id: 'stalled-closer', durationMs: 1_000 },
+        },
+      },
+    )
+    expect(leased).toMatchObject({ ok: true, head: { state: 'closing' } })
+
+    let settled = false
+    const closing = Room.close(room.id).then(() => {
+      settled = true
+    })
+    await Promise.resolve()
+    expect(settled).toBe(false)
+
+    await vi.advanceTimersByTimeAsync(1_100)
+    await closing
+    expect((await driver.readHead(room.id))?.head).toMatchObject({ state: 'closed', currentInc: null })
   })
 
   it('tears down a close observed by a separate Room runtime that cannot inherit the initiator hold', async () => {
