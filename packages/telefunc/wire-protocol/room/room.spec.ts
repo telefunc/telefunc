@@ -5,10 +5,9 @@ import { ACK_STATUS, TAG, decode } from '../shared-ws.js'
 import { ShieldValidationError, isShieldValidationError } from '../../shared/ShieldValidationError.js'
 import { ROOM_HEARTBEAT_INTERVAL_MS, ROOM_MEMBER_KV_TTL_MS, ROOM_MEMBER_TTL_MS } from '../constants.js'
 import { DEFAULT_TRACK, isRoomError, roomAckError, type RoomSnapshotMetadata } from './protocol.js'
-import { ClientRoom } from './client.js'
+import { ClientRoom, RoomClientBroadcast } from './client.js'
 import { Room, ServerRoom } from './server.js'
 import { RoomStubChannel } from './stubs.js'
-import { ClientBroadcast } from '../client/channel.js'
 import type { ChannelPublishInfo } from '../channel.js'
 import { disposeBackend, getBackend, installBackend, setDefaultBackend } from '../backend/install.js'
 import { HEAD_TRANSITIONS, assertHeadTransition } from '../backend/head-transitions.js'
@@ -645,7 +644,7 @@ describe('client Room lifecycle', () => {
       },
       _subscribeLocal: () => () => {},
       _subscribeBinaryLocal: () => () => {},
-      _setWireTextSubscribed: ClientBroadcast.prototype._setWireTextSubscribed,
+      _setWireTextSubscribed: RoomClientBroadcast.prototype._setWireTextSubscribed,
       send: async () => undefined,
       publish: async () => ({ key: 'fake', seq: 1, timestamp: 1 }),
       publishBinary: async () => ({ key: 'fake', seq: 1, timestamp: 1 }),
@@ -653,7 +652,7 @@ describe('client Room lifecycle', () => {
       _onReconnect: (callback: () => void) => {
         reconnect = callback
       },
-    } as unknown as ClientBroadcast
+    } as unknown as RoomClientBroadcast
     const client = new ClientRoom(stub, snapshot('reconnect-text'))
 
     client.subscribe(() => {})
@@ -680,7 +679,7 @@ describe('client Room lifecycle', () => {
       publishBinary: async () => ({ key: 'fake', seq: 1, timestamp: 1 }),
       onClose: () => {},
       _onReconnect: () => {},
-    } as unknown as ClientBroadcast
+    } as unknown as RoomClientBroadcast
     const client = new ClientRoom(stub, snapshot('roster-failure'))
     const participants = client.getParticipants()
     deliver({ __r: 'roster-error' }, { key: 'roster-failure', seq: 1, timestamp: 1 })
@@ -1203,7 +1202,7 @@ async function wideBinaryScenario(id: string, retain: boolean, byte: number) {
 }
 
 function createFakeStub(): {
-  stub: ClientBroadcast
+  stub: RoomClientBroadcast
   emitBinary(data: Uint8Array, info: ChannelPublishInfo): void
 } {
   const binary: Array<(data: Uint8Array, info: ChannelPublishInfo) => void> = []
@@ -1219,7 +1218,7 @@ function createFakeStub(): {
     publishBinary: async () => ({ key: 'fake', seq: 1, timestamp: 1 }),
     onClose: () => {},
     _onReconnect: () => {},
-  } as unknown as ClientBroadcast
+  } as unknown as RoomClientBroadcast
   return {
     stub,
     emitBinary: (data, info) => binary.forEach((callback) => callback(data, info)),
@@ -1245,13 +1244,13 @@ type OpenRecord = {
 
 class ControlledDriver implements SubscriptionDriver<string> {
   readonly opens: OpenRecord[] = []
-  private readonly _plans: Array<() => ControlledAttempt> = []
+  readonly #plans: Array<() => ControlledAttempt> = []
   partition = ''
   bindingValid = true
   openCalls = 0
 
   plan(plan: () => ControlledAttempt): void {
-    this._plans.push(plan)
+    this.#plans.push(plan)
   }
 
   bind(_source: string) {
@@ -1261,7 +1260,7 @@ class ControlledDriver implements SubscriptionDriver<string> {
       valid: () => this.bindingValid,
       open: (receiver: BackendReceiver, localReceiverCount: () => number): SubscriptionAttempt => {
         this.openCalls++
-        const attempt = (this._plans.shift() ?? (() => ControlledAttempt.ready()))()
+        const attempt = (this.#plans.shift() ?? (() => ControlledAttempt.ready()))()
         this.opens.push({ receiver, localReceiverCount, attempt })
         return attempt
       },
@@ -1275,15 +1274,15 @@ class ControlledDriver implements SubscriptionDriver<string> {
 
 class ControlledAttempt implements SubscriptionAttempt {
   readonly ready: Promise<void>
-  private readonly _readiness = deferred<void>()
-  private readonly _listeners = new Set<(state: SubscriptionAttemptState) => void>()
-  private readonly _cleanup: Promise<void>
-  private _state: SubscriptionAttemptState = 'establishing'
+  readonly #readiness = deferred<void>()
+  readonly #listeners = new Set<(state: SubscriptionAttemptState) => void>()
+  readonly #cleanup: Promise<void>
+  #state: SubscriptionAttemptState = 'establishing'
   unsubscribeCalls = 0
 
   constructor(cleanup: Promise<void> = Promise.resolve()) {
-    this.ready = this._readiness.promise
-    this._cleanup = cleanup
+    this.ready = this.#readiness.promise
+    this.#cleanup = cleanup
     void this.ready.catch(() => {})
   }
 
@@ -1294,23 +1293,23 @@ class ControlledAttempt implements SubscriptionAttempt {
   }
 
   state(): SubscriptionAttemptState {
-    return this._state
+    return this.#state
   }
 
   onStateChange(listener: (state: SubscriptionAttemptState) => void): () => void {
-    this._listeners.add(listener)
-    return () => this._listeners.delete(listener)
+    this.#listeners.add(listener)
+    return () => this.#listeners.delete(listener)
   }
 
   async unsubscribe(): Promise<void> {
     this.unsubscribeCalls++
-    this._transition('closed')
-    await this._cleanup
+    this.#transition('closed')
+    await this.#cleanup
   }
 
   establish(): void {
-    this._transition('ready')
-    this._readiness.resolve()
+    this.#transition('ready')
+    this.#readiness.resolve()
   }
 
   lose(): void {
@@ -1318,16 +1317,16 @@ class ControlledAttempt implements SubscriptionAttempt {
   }
 
   close(): void {
-    this._transition('closed')
+    this.#transition('closed')
   }
 
   terminate(): void {
-    this._transition('terminated')
+    this.#transition('terminated')
   }
 
-  private _transition(state: SubscriptionAttemptState): void {
-    this._state = state
-    for (const listener of this._listeners) listener(state)
+  #transition(state: SubscriptionAttemptState): void {
+    this.#state = state
+    for (const listener of this.#listeners) listener(state)
   }
 }
 

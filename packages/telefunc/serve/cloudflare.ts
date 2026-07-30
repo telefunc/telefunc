@@ -134,7 +134,7 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
 
   const TelefuncDurableObject = class extends DurableObject {
     private readonly authorityState: CloudflareBroadcastAuthorityState
-    private roomManager!: CloudflareRoomSessionManager
+    private roomManager: CloudflareRoomSessionManager | null = null
 
     constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
       super(ctx, env)
@@ -144,7 +144,6 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
       const kv = getKVBinding(env)
       if (kv) broadcast.attachKV(kv)
       this.authorityState = new CloudflareBroadcastAuthorityState(ctx)
-      this.resetRoomSessionEpoch()
       crosswsAdapter.handleDurableInit(this, ctx, env)
     }
 
@@ -176,39 +175,40 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
     }
 
     telefuncBroadcastPublish(request: BroadcastPublishRequest) {
-      return this.runWithRoomManager(() => broadcast.publishToSubscribers(this.authorityState, request))
+      return broadcast.publishToSubscribers(this.authorityState, request)
     }
 
     telefuncBroadcastDeliver(request: BroadcastDeliverRequest) {
-      return this.runWithRoomManager(() => broadcast.deliverToLocal(request))
+      return broadcast.deliverToLocal(request)
     }
 
     telefuncRoomDeliver(request: RoomShardDeliveryRequest): Promise<void> {
       return this.runWithRoomManager(() => {
-        if (getCloudflareRoomSessionManager() !== this.roomManager) throw new Error(CLOUDFLARE_ROOM_CONTEXT_ERROR)
-        return this.roomManager.deliver(request)
+        const roomManager = getCloudflareRoomSessionManager()
+        if (roomManager !== this.roomManager) throw new Error(CLOUDFLARE_ROOM_CONTEXT_ERROR)
+        return roomManager.deliver(request)
       })
     }
 
     telefuncRoomInvalidate(request: RoomShardInvalidationRequest): void {
       return this.runWithRoomManager(() => {
-        if (getCloudflareRoomSessionManager() !== this.roomManager) throw new Error(CLOUDFLARE_ROOM_CONTEXT_ERROR)
-        return this.roomManager.invalidate(request)
+        const roomManager = getCloudflareRoomSessionManager()
+        if (roomManager !== this.roomManager) throw new Error(CLOUDFLARE_ROOM_CONTEXT_ERROR)
+        return roomManager.invalidate(request)
       })
     }
 
     protected runWithRoomManager<T>(fn: () => T): T {
-      // Non-Room Cloudflare keeps its flag-free path. A Room operation calls getCloudflareRoomSessionManager
-      // from the proxy and gets the normative diagnostic if async mode was not enabled by the user.
-      return isAsyncMode() ? withCloudflareRoomSessionManager(this.roomManager, fn) : fn()
+      // The provider is lazy: ordinary fetch/socket work carries no Room state and does not reset
+      // hibernated sockets. The first backend call that actually needs Room materializes the epoch.
+      return isAsyncMode() ? withCloudflareRoomSessionManager(() => this.activateRoomManager(), fn) : fn()
     }
 
-    /** Production epoch transition. Construction and explicit runtime recovery execute this exact path,
-     * so a surviving socket can never remain paired with callbacks from a prior JS epoch. */
-    protected resetRoomSessionEpoch(): void {
-      this.roomManager?.dispose()
+    private activateRoomManager(): CloudflareRoomSessionManager {
+      if (this.roomManager) return this.roomManager
       this.roomManager = this.createRoomManager()
       this.closeRecoveredSockets()
+      return this.roomManager
     }
 
     private createRoomManager(): CloudflareRoomSessionManager {

@@ -13,23 +13,25 @@ import {
   SERIALIZER_PREFIX_ROOM_REMOTE,
 } from '../constants.js'
 import { ServerLocalParticipant, ServerRoom } from './server.js'
-import { bindParticipantStubChannel, RoomStubChannel } from './stubs.js'
+import { bindParticipantStubChannel, RoomParticipantStubChannel, RoomStubChannel } from './stubs.js'
 import { remoteBacking } from './state.js'
 import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
 assertIsNotBrowser()
 
-/** Per-response echo-suppression rendezvous (`selfDelivery: false`). Both a room and a co-returned
- *  self-suppressing participant are serialized into the same response, in arbitrary key order — so
- *  the drop-set of member ids lives in `context.passScope`, one shared `Set` per room instance. The
- *  participant adds its id; the room's stub adopts the very same set by reference. Order-independent
- *  by object identity, scoped to this one response, discarded when the pass ends. `Symbol.for` (not
- *  `Symbol`) so the two replacers rendezvous even when a dev server loads them from two SSR module
- *  graphs — the same reason the brand checks below use it. */
-const ROOM_SELF_SUPPRESS = Symbol.for('telefunc:roomSelfSuppress')
+/** Per-response echo-suppression rendezvous (`selfDelivery: false`). The response's stable
+ *  `registerChannel` closure is the pass identity; a global-symbol WeakMap lets Room replacers
+ *  rendezvous across duplicate SSR module graphs without adding Room scratch state to the public
+ *  serializer context. Entries disappear with the response closure. */
+const ROOM_SELF_SUPPRESS = Symbol.for('telefunc:roomSelfSuppressPasses')
+type RoomSelfSuppressPasses = WeakMap<ServerReplacerContext['registerChannel'], Map<ServerRoom, Set<string>>>
+const globalWithRoomPasses = globalThis as typeof globalThis & {
+  [ROOM_SELF_SUPPRESS]?: RoomSelfSuppressPasses
+}
+const roomSelfSuppressPasses = (globalWithRoomPasses[ROOM_SELF_SUPPRESS] ??= new WeakMap())
+
 function roomSelfSuppressSet(context: ServerReplacerContext, room: ServerRoom): Set<string> {
-  const passScope = (context.passScope ??= new Map())
-  let byRoom = passScope.get(ROOM_SELF_SUPPRESS) as Map<ServerRoom, Set<string>> | undefined
-  if (!byRoom) passScope.set(ROOM_SELF_SUPPRESS, (byRoom = new Map()))
+  let byRoom = roomSelfSuppressPasses.get(context.registerChannel)
+  if (!byRoom) roomSelfSuppressPasses.set(context.registerChannel, (byRoom = new Map()))
   let set = byRoom.get(room)
   if (!set) byRoom.set(room, (set = new Set()))
   return set
@@ -119,7 +121,8 @@ const roomParticipantReplacer: ReplacerType<RoomParticipantContract, ServerRepla
     return ServerLocalParticipant.isServerLocalParticipant(value)
   },
   replace(participant, context) {
-    const channel = context.createChannel()
+    const channel = new RoomParticipantStubChannel()
+    context.registerChannel(channel)
     // Same publish shield as the room stub, for a standalone participant that publishes through its own
     // channel (`req-publish`) rather than the room stub. The `data` verifier auto-generated from the
     // participant value's declared message type (see `RoomShield`) is handed straight to the binding,

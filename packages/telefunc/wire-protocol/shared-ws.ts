@@ -147,8 +147,6 @@ type ReconciledPayload = {
   pingInterval: number
   clientReplayBuffer: number
   clientReplayBufferBinary: number
-  /** Inbound per-message cap the server enforces — the client fails oversized sends locally. */
-  messageLimit: number
   sseFlushThrottle: number
   ssePostIdleFlushDelay: number
   transports: ChannelTransports

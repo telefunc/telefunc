@@ -36,7 +36,7 @@ type InboxMessage = {
  *  unconditionally-delivered lane (addressed — there are no wants to gate it on), so it's the
  *  only lane with a client-side attach window to bridge; every room lane is want-gated at the
  *  server and has nothing to hold. Message size is bounded upstream by the wire-protocol
- *  `messageLimit`, which bounds the hold's memory too. */
+ *  room tail's own count and byte budgets, which bound the hold's memory too. */
 const PENDING_INBOX_MAX_COUNT = 64
 
 abstract class ParticipantBase implements LocalParticipant {

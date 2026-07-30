@@ -161,9 +161,9 @@ export class RedisRoomBackend implements BackendDriver {
   readonly capabilities: BackendDriver['capabilities']
   readonly subscriptions: RedisSubscriptionDriver
 
-  private readonly _publisher: Redis | Cluster
-  private readonly _prefix: string
-  private _disposed = false
+  readonly #publisher: Redis | Cluster
+  readonly #prefix: string
+  #disposed = false
 
   constructor(options: RedisRoomBackendOptions) {
     assert(
@@ -171,7 +171,7 @@ export class RedisRoomBackend implements BackendDriver {
         (Number.isFinite(options.maxRetainedPayloadBytes) && options.maxRetainedPayloadBytes >= 0),
       'RedisRoomBackend: maxRetainedPayloadBytes must be a finite non-negative number',
     )
-    this._publisher = options.redis
+    this.#publisher = options.redis
     let clusterSubscriberSelection = 0
     const createSubscriber = async (): Promise<Redis> => {
       if (!(options.redis instanceof Cluster)) {
@@ -209,31 +209,31 @@ export class RedisRoomBackend implements BackendDriver {
         retryStrategy: () => null,
       })
     }
-    this._prefix = options.prefix ?? DEFAULT_ROOM_PREFIX
+    this.#prefix = options.prefix ?? DEFAULT_ROOM_PREFIX
     this.capabilities = {
       receivers: options.redis instanceof Cluster ? 'none' : 'global',
       maxRetainedPayloadBytes: options.maxRetainedPayloadBytes ?? DEFAULT_MAX_RETAINED_BYTES,
     }
-    this._publisher.defineCommand(PUBLISH_CMD, { numberOfKeys: 2, lua: PUBLISH_LUA })
+    this.#publisher.defineCommand(PUBLISH_CMD, { numberOfKeys: 2, lua: PUBLISH_LUA })
     for (const command of Object.values(REDIS_ROOM_COMMANDS)) {
-      if (command.numberOfKeys === null) this._publisher.defineCommand(command.name, { lua: command.lua })
-      else this._publisher.defineCommand(command.name, { numberOfKeys: command.numberOfKeys, lua: command.lua })
+      if (command.numberOfKeys === null) this.#publisher.defineCommand(command.name, { lua: command.lua })
+      else this.#publisher.defineCommand(command.name, { numberOfKeys: command.numberOfKeys, lua: command.lua })
     }
     this.subscriptions = new RedisSubscriptionDriver({
-      prefix: this._prefix,
+      prefix: this.#prefix,
       createSubscriber,
-      captureGeneration: (source, attempt) => this._captureGeneration(source, attempt),
-      validateGeneration: (source, attempt) => this._validateGeneration(source, attempt),
+      captureGeneration: (source, attempt) => this.#captureGeneration(source, attempt),
+      validateGeneration: (source, attempt) => this.#validateGeneration(source, attempt),
     })
   }
 
   // ── head ──
 
   async publish(lane: BroadcastLane, payload: Uint8Array): Promise<PublishResult> {
-    this._assertLive()
-    const reply = await callDefinedCommand(this._publisher, PUBLISH_CMD, [
-      broadcastSequenceKey(this._prefix, lane.key),
-      broadcastChannel(this._prefix, lane),
+    this.#assertLive()
+    const reply = await callDefinedCommand(this.#publisher, PUBLISH_CMD, [
+      broadcastSequenceKey(this.#prefix, lane.key),
+      broadcastChannel(this.#prefix, lane),
       toBuffer(payload),
     ])
     assert(Array.isArray(reply) && reply.length === 3, 'Publish script returned an unexpected shape')
@@ -251,9 +251,9 @@ export class RedisRoomBackend implements BackendDriver {
   }
 
   async readHead(roomId: string): Promise<{ head: RoomHead } | null> {
-    this._assertLive()
-    const raw = await this._publisher.get(headKey(this._prefix, roomId))
-    const stored = this._liveHead(raw, await this._authorityNowMs())
+    this.#assertLive()
+    const raw = await this.#publisher.get(headKey(this.#prefix, roomId))
+    const stored = this.#liveHead(raw, await this.#authorityNowMs())
     return stored === null ? null : { head: toPublicHead(stored) }
   }
 
@@ -264,10 +264,10 @@ export class RedisRoomBackend implements BackendDriver {
   ): Promise<
     { ok: true; head: RoomHead } | { ok: true; deleted: true } | { conflict: true; current: RoomHead | null }
   > {
-    this._assertLive()
-    const reply = (await this._call(REDIS_ROOM_COMMANDS.headCx.name, [
-      ...REDIS_ROOM_COMMAND_KEYS.headCx(this._prefix, roomId),
-      this._nowArg(),
+    this.#assertLive()
+    const reply = (await this.#call(REDIS_ROOM_COMMANDS.headCx.name, [
+      ...REDIS_ROOM_COMMAND_KEYS.headCx(this.#prefix, roomId),
+      this.#nowArg(),
       encodeCx(cx),
       encodeNext(next),
     ])) as string
@@ -284,25 +284,25 @@ export class RedisRoomBackend implements BackendDriver {
     inc: string,
     sel: { keys: string[] } | { prefix: string },
   ): Promise<{ revision: string; cells: Map<string, Uint8Array> } | { staleInc: true }> {
-    this._assertLive()
-    const hKey = headKey(this._prefix, roomId)
-    const rKey = revKey(this._prefix, roomId, inc)
+    this.#assertLive()
+    const hKey = headKey(this.#prefix, roomId)
+    const rKey = revKey(this.#prefix, roomId, inc)
     // Stable read: fence the enumerated set against the per-generation revision. A concurrent deliberate
     // mutation bumps rev between rev_before and rev_after, so an inconsistent snapshot is retried; a
     // silent PX expiry does NOT bump rev and is hidden by the logical expiresAt filter instead.
     for (let attempt = 0; attempt < STABLE_READ_ATTEMPTS; attempt++) {
-      const [headRaw, revBefore] = await this._publisher.mget(hKey, rKey)
-      const head = this._parseHead(headRaw ?? null)
+      const [headRaw, revBefore] = await this.#publisher.mget(hKey, rKey)
+      const head = this.#parseHead(headRaw ?? null)
       // Reads need only generation existence — available while 'closing' (the closer's tail needs them).
       if (head === null || (head.inc ?? null) !== inc) return { staleInc: true }
-      const logicalKeys = 'keys' in sel ? sel.keys : await this._scanCellKeys(roomId, inc, sel.prefix)
-      const physicalKeys = logicalKeys.map((key) => cellKey(this._prefix, roomId, inc, key))
-      const values = physicalKeys.length > 0 ? await this._publisher.mgetBuffer(...physicalKeys) : []
-      const revAfter = await this._publisher.get(rKey)
+      const logicalKeys = 'keys' in sel ? sel.keys : await this.#scanCellKeys(roomId, inc, sel.prefix)
+      const physicalKeys = logicalKeys.map((key) => cellKey(this.#prefix, roomId, inc, key))
+      const values = physicalKeys.length > 0 ? await this.#publisher.mgetBuffer(...physicalKeys) : []
+      const revAfter = await this.#publisher.get(rKey)
       const before = revBefore ?? '0'
       const after = revAfter ?? '0'
       if (before !== after) continue
-      const now = await this._authorityNowMs()
+      const now = await this.#authorityNowMs()
       const cells = new Map<string, Uint8Array>()
       for (let i = 0; i < logicalKeys.length; i++) {
         const value = values[i]
@@ -322,14 +322,14 @@ export class RedisRoomBackend implements BackendDriver {
     revision: string,
     mutations: CellMutation[],
   ): Promise<CxResult> {
-    this._assertLive()
+    this.#assertLive()
     const keys = REDIS_ROOM_COMMAND_KEYS.cellsCx(
-      this._prefix,
+      this.#prefix,
       roomId,
       inc,
       mutations.map((mutation) => mutation.key),
     )
-    const argv: Array<string | Buffer> = [this._nowArg(), inc, revision]
+    const argv: Array<string | Buffer> = [this.#nowArg(), inc, revision]
     for (const mutation of mutations) {
       if (mutation.set === undefined) {
         argv.push('del', '', '')
@@ -341,7 +341,7 @@ export class RedisRoomBackend implements BackendDriver {
         )
       }
     }
-    const reply = (await this._call(REDIS_ROOM_COMMANDS.cellsCx.name, [
+    const reply = (await this.#call(REDIS_ROOM_COMMANDS.cellsCx.name, [
       String(keys.length),
       ...keys,
       ...argv,
@@ -358,13 +358,13 @@ export class RedisRoomBackend implements BackendDriver {
     payload: Uint8Array,
     opts?: { retain?: boolean; closingLease?: string; requiredCellKeys?: string[] },
   ): Promise<CommitResult> {
-    this._assertLive()
+    this.#assertLive()
     const source = durableSource(roomId, inc, lane)
-    const keys = REDIS_ROOM_COMMAND_KEYS.commit(this._prefix, roomId, inc, lane, opts?.requiredCellKeys)
-    const reply = (await this._call(REDIS_ROOM_COMMANDS.commit.name, [
+    const keys = REDIS_ROOM_COMMAND_KEYS.commit(this.#prefix, roomId, inc, lane, opts?.requiredCellKeys)
+    const reply = (await this.#call(REDIS_ROOM_COMMANDS.commit.name, [
       String(keys.length),
       ...keys,
-      this._nowArg(),
+      this.#nowArg(),
       inc,
       lane.kind,
       opts?.closingLease ?? '',
@@ -403,8 +403,8 @@ export class RedisRoomBackend implements BackendDriver {
     inc: string,
     lane: LaneId,
   ): Promise<{ payload: Uint8Array; seq: number; timestamp: number } | null> {
-    this._assertLive()
-    const frame = await this._publisher.getBuffer(retainedKey(this._prefix, roomId, inc, laneKey(lane)))
+    this.#assertLive()
+    const frame = await this.#publisher.getBuffer(retainedKey(this.#prefix, roomId, inc, laneKey(lane)))
     if (frame === null) return null
     const {
       payload,
@@ -415,14 +415,14 @@ export class RedisRoomBackend implements BackendDriver {
   }
 
   async listRetained(roomId: string, inc: string): Promise<LaneId[]> {
-    this._assertLive()
-    const prefix = retainedKeyPrefix(this._prefix, roomId, inc)
-    const keys = await this._scanKeys(`${escapeGlob(prefix)}*`)
+    this.#assertLive()
+    const prefix = retainedKeyPrefix(this.#prefix, roomId, inc)
+    const keys = await this.#scanKeys(`${escapeGlob(prefix)}*`)
     return keys.map((physical) => parseLaneKey(physical.slice(prefix.length)))
   }
 
   async deleteRetained(roomId: string, inc: string, lane?: LaneId, opts?: { ifSeq?: number }): Promise<void> {
-    this._assertLive()
+    this.#assertLive()
     if (lane === undefined && opts?.ifSeq !== undefined) {
       throw new Error('deleteRetained: ifSeq requires a lane')
     }
@@ -430,31 +430,31 @@ export class RedisRoomBackend implements BackendDriver {
       throw new Error('deleteRetained: ifSeq must be a positive safe integer')
     }
     if (lane !== undefined) {
-      const keys = REDIS_ROOM_COMMAND_KEYS.retainedDelete(this._prefix, roomId, inc, [
-        retainedKey(this._prefix, roomId, inc, laneKey(lane)),
+      const keys = REDIS_ROOM_COMMAND_KEYS.retainedDelete(this.#prefix, roomId, inc, [
+        retainedKey(this.#prefix, roomId, inc, laneKey(lane)),
       ])
-      await this._call(REDIS_ROOM_COMMANDS.retainedDelete.name, [
+      await this.#call(REDIS_ROOM_COMMANDS.retainedDelete.name, [
         String(keys.length),
         ...keys,
         opts?.ifSeq === undefined ? '' : String(opts.ifSeq),
       ])
       return
     }
-    const keys = await this._scanKeys(`${escapeGlob(retainedKeyPrefix(this._prefix, roomId, inc))}*`)
-    const commandKeys = REDIS_ROOM_COMMAND_KEYS.retainedDelete(this._prefix, roomId, inc, keys)
-    await this._call(REDIS_ROOM_COMMANDS.retainedDelete.name, [String(commandKeys.length), ...commandKeys, ''])
+    const keys = await this.#scanKeys(`${escapeGlob(retainedKeyPrefix(this.#prefix, roomId, inc))}*`)
+    const commandKeys = REDIS_ROOM_COMMAND_KEYS.retainedDelete(this.#prefix, roomId, inc, keys)
+    await this.#call(REDIS_ROOM_COMMANDS.retainedDelete.name, [String(commandKeys.length), ...commandKeys, ''])
   }
 
   // ── subscriptions ──
 
-  private async _captureGeneration(
+  async #captureGeneration(
     source: Extract<BackendSubscriptionSource, { kind: 'durable' }>,
     attempt: RedisGenerationAttempt,
   ): Promise<void> {
-    if (attempt.createdAt === null) attempt.createdAt = await this._authorityNowMs()
-    const reply = (await this._call(REDIS_ROOM_COMMANDS.captureGeneration.name, [
-      ...REDIS_ROOM_COMMAND_KEYS.captureGeneration(this._prefix, source.roomId, source.inc),
-      this._nowArg(),
+    if (attempt.createdAt === null) attempt.createdAt = await this.#authorityNowMs()
+    const reply = (await this.#call(REDIS_ROOM_COMMANDS.captureGeneration.name, [
+      ...REDIS_ROOM_COMMAND_KEYS.captureGeneration(this.#prefix, source.roomId, source.inc),
+      this.#nowArg(),
       source.inc,
       attempt.attemptId,
       String(attempt.createdAt),
@@ -465,14 +465,14 @@ export class RedisRoomBackend implements BackendDriver {
     attempt.generationToken = parsed.token
   }
 
-  private async _validateGeneration(
+  async #validateGeneration(
     source: Extract<BackendSubscriptionSource, { kind: 'durable' }>,
     attempt: RedisGenerationAttempt,
   ): Promise<boolean> {
     if (attempt.generationToken === null) return false
-    const reply = (await this._call(REDIS_ROOM_COMMANDS.validateGeneration.name, [
-      ...REDIS_ROOM_COMMAND_KEYS.validateGeneration(this._prefix, source.roomId, source.inc),
-      this._nowArg(),
+    const reply = (await this.#call(REDIS_ROOM_COMMANDS.validateGeneration.name, [
+      ...REDIS_ROOM_COMMAND_KEYS.validateGeneration(this.#prefix, source.roomId, source.inc),
+      this.#nowArg(),
       source.inc,
       attempt.generationToken,
       attempt.attemptId,
@@ -485,26 +485,26 @@ export class RedisRoomBackend implements BackendDriver {
   // ── generation lifecycle ──
 
   async listGenerations(roomId: string): Promise<string[]> {
-    this._assertLive()
-    return this._publisher.smembers(gensKey(this._prefix, roomId))
+    this.#assertLive()
+    return this.#publisher.smembers(gensKey(this.#prefix, roomId))
   }
 
   async dropGeneration(roomId: string, inc: string): Promise<void> {
-    this._assertLive()
-    const head = this._parseHead(await this._publisher.get(headKey(this._prefix, roomId)))
+    this.#assertLive()
+    const head = this.#parseHead(await this.#publisher.get(headKey(this.#prefix, roomId)))
     if ((head?.inc ?? null) === inc) {
       throw new Error(`dropGeneration: refusing to drop the current incarnation '${inc}' of room '${roomId}'`)
     }
-    const keys = await this._scanKeys(`${escapeGlob(genPrefix(this._prefix, roomId, inc))}:*`)
-    if (keys.length > 0) await this._publisher.unlink(...keys)
-    const generationToken = await this._publisher.hget(generationTokensKey(this._prefix, roomId), inc)
+    const keys = await this.#scanKeys(`${escapeGlob(genPrefix(this.#prefix, roomId, inc))}:*`)
+    if (keys.length > 0) await this.#publisher.unlink(...keys)
+    const generationToken = await this.#publisher.hget(generationTokensKey(this.#prefix, roomId), inc)
     if (generationToken !== null) {
       // Disconnected peers reject this token during their next capture/validation; connected peers close
       // the raw attempt so the owning consumer can apply its recovery policy.
-      await this._publisher.publish(generationInvalidationChannel(this._prefix, roomId, inc), generationToken)
+      await this.#publisher.publish(generationInvalidationChannel(this.#prefix, roomId, inc), generationToken)
     }
-    await this._call(REDIS_ROOM_COMMANDS.dropGenerationFinalize.name, [
-      ...REDIS_ROOM_COMMAND_KEYS.dropGenerationFinalize(this._prefix, roomId),
+    await this.#call(REDIS_ROOM_COMMANDS.dropGenerationFinalize.name, [
+      ...REDIS_ROOM_COMMAND_KEYS.dropGenerationFinalize(this.#prefix, roomId),
       inc,
     ])
   }
@@ -512,18 +512,18 @@ export class RedisRoomBackend implements BackendDriver {
   // ── directory (global; its own two co-slotted keys) ──
 
   async directoryPut(roomId: string, incTag: string): Promise<void> {
-    this._assertLive()
-    await this._call(REDIS_ROOM_COMMANDS.directoryPut.name, [
-      ...REDIS_ROOM_COMMAND_KEYS.directoryPut(this._prefix),
+    this.#assertLive()
+    await this.#call(REDIS_ROOM_COMMANDS.directoryPut.name, [
+      ...REDIS_ROOM_COMMAND_KEYS.directoryPut(this.#prefix),
       roomId,
       incTag,
     ])
   }
 
   async directoryDelete(roomId: string, incTag: string): Promise<void> {
-    this._assertLive()
-    await this._call(REDIS_ROOM_COMMANDS.directoryDelete.name, [
-      ...REDIS_ROOM_COMMAND_KEYS.directoryDelete(this._prefix),
+    this.#assertLive()
+    await this.#call(REDIS_ROOM_COMMANDS.directoryDelete.name, [
+      ...REDIS_ROOM_COMMAND_KEYS.directoryDelete(this.#prefix),
       roomId,
       incTag,
     ])
@@ -533,10 +533,10 @@ export class RedisRoomBackend implements BackendDriver {
     prefix: string,
     cursor?: string,
   ): Promise<{ entries: { roomId: string; incTag: string }[]; cursor?: string }> {
-    this._assertLive()
-    const index = directoryIndexKey(this._prefix)
+    this.#assertLive()
+    const index = directoryIndexKey(this.#prefix)
     const min = cursor === undefined ? `[${prefix}` : `(${cursor}`
-    const page = await this._publisher.zrangebylex(index, min, '+', 'LIMIT', 0, DIRECTORY_PAGE_SIZE)
+    const page = await this.#publisher.zrangebylex(index, min, '+', 'LIMIT', 0, DIRECTORY_PAGE_SIZE)
     // Prefix-matching members are contiguous from `min`; the first non-match ends the prefix range.
     const matching: string[] = []
     for (const member of page) {
@@ -544,58 +544,58 @@ export class RedisRoomBackend implements BackendDriver {
       else break
     }
     if (matching.length === 0) return { entries: [] }
-    const tags = await this._publisher.hmget(directoryTagsKey(this._prefix), ...matching)
+    const tags = await this.#publisher.hmget(directoryTagsKey(this.#prefix), ...matching)
     const entries = matching.map((roomId, i) => ({ roomId, incTag: tags[i] as string }))
     const last = matching[matching.length - 1] as string
     let more = false
     if (matching.length === DIRECTORY_PAGE_SIZE && page.length === DIRECTORY_PAGE_SIZE) {
-      const peek = await this._publisher.zrangebylex(index, `(${last}`, '+', 'LIMIT', 0, 1)
+      const peek = await this.#publisher.zrangebylex(index, `(${last}`, '+', 'LIMIT', 0, 1)
       more = peek.length > 0 && (peek[0] as string).startsWith(prefix)
     }
     return more ? { entries, cursor: last } : { entries }
   }
 
   async dispose(): Promise<void> {
-    if (this._disposed) return
-    this._disposed = true
+    if (this.#disposed) return
+    this.#disposed = true
   }
 
   // ── internals ──
 
-  private _assertLive(): void {
-    if (this._disposed) throw new Error('RedisRoomBackend: used after dispose()')
+  #assertLive(): void {
+    if (this.#disposed) throw new Error('RedisRoomBackend: used after dispose()')
   }
 
-  private _nowArg(): string {
+  #nowArg(): string {
     return ''
   }
 
-  private async _authorityNowMs(): Promise<number> {
-    const [seconds, microseconds] = await this._publisher.time()
+  async #authorityNowMs(): Promise<number> {
+    const [seconds, microseconds] = await this.#publisher.time()
     return Number(seconds) * 1_000 + Math.floor(Number(microseconds) / 1_000)
   }
 
-  private _parseHead(raw: string | null): StoredHead | null {
+  #parseHead(raw: string | null): StoredHead | null {
     return raw === null ? null : (JSON.parse(raw) as StoredHead)
   }
 
   // Decode a stored head, treating a logically-expired tombstone as absent (a lapsed tombstone reopens
   // the absence epoch — I1). A pure read never deletes; the head-CX/commit Lua reclaim the PX backstop.
-  private _liveHead(raw: string | null, authorityNow: number): StoredHead | null {
-    const stored = this._parseHead(raw)
+  #liveHead(raw: string | null, authorityNow: number): StoredHead | null {
+    const stored = this.#parseHead(raw)
     if (stored === null) return null
     if (stored.exp !== undefined && stored.exp <= authorityNow) return null
     return stored
   }
 
-  private async _scanCellKeys(roomId: string, inc: string, prefix: string): Promise<string[]> {
-    const physicalPrefix = cellKeyPrefix(this._prefix, roomId, inc)
-    const physical = await this._scanKeys(`${escapeGlob(physicalPrefix + prefix)}*`)
+  async #scanCellKeys(roomId: string, inc: string, prefix: string): Promise<string[]> {
+    const physicalPrefix = cellKeyPrefix(this.#prefix, roomId, inc)
+    const physical = await this.#scanKeys(`${escapeGlob(physicalPrefix + prefix)}*`)
     return physical.map((key) => key.slice(physicalPrefix.length))
   }
 
-  private async _call(command: string, keysAndArgs: ReadonlyArray<string | Uint8Array>): Promise<unknown> {
-    if (this._publisher instanceof Cluster) {
+  async #call(command: string, keysAndArgs: ReadonlyArray<string | Uint8Array>): Promise<unknown> {
+    if (this.#publisher instanceof Cluster) {
       const descriptor = Object.values(REDIS_ROOM_COMMANDS).find((candidate) => candidate.name === command)
       if (descriptor === undefined) throw new Error(`RedisRoomBackend: unknown command '${command}'`)
       const dynamic = descriptor.numberOfKeys === null
@@ -608,28 +608,28 @@ export class RedisRoomBackend implements BackendDriver {
         typeof arg === 'string' ? arg : Buffer.from(arg.buffer, arg.byteOffset, arg.byteLength),
       )
       try {
-        return await this._publisher.evalsha(redisScriptSha(descriptor.lua), numberOfKeys, ...redisArgs)
+        return await this.#publisher.evalsha(redisScriptSha(descriptor.lua), numberOfKeys, ...redisArgs)
       } catch (err) {
         // NOSCRIPT proves EVALSHA did not execute. Retrying the complete script with EVAL is therefore
         // non-duplicating, and ioredis preserves MOVED plus ASKING-on-the-same-connection routing for the
         // fallback command. This also covers SCRIPT FLUSH, restarted masters, and newly promoted owners.
         if (!(err instanceof Error) || !err.message.includes('NOSCRIPT')) throw normalizeRedisError(err)
         try {
-          return await this._publisher.eval(descriptor.lua, numberOfKeys, ...redisArgs)
+          return await this.#publisher.eval(descriptor.lua, numberOfKeys, ...redisArgs)
         } catch (fallbackError) {
           throw normalizeRedisError(fallbackError)
         }
       }
     }
     try {
-      return await callDefinedCommand(this._publisher, command, keysAndArgs)
+      return await callDefinedCommand(this.#publisher, command, keysAndArgs)
     } catch (error) {
       throw normalizeRedisError(error)
     }
   }
 
-  private async _scanKeys(pattern: string): Promise<string[]> {
-    const nodes = this._publisher instanceof Cluster ? this._publisher.nodes('master') : [this._publisher]
+  async #scanKeys(pattern: string): Promise<string[]> {
+    const nodes = this.#publisher instanceof Cluster ? this.#publisher.nodes('master') : [this.#publisher]
     const keys = new Set<string>()
     for (const node of nodes) {
       let cursor = '0'

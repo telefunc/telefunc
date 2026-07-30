@@ -115,19 +115,19 @@ function publicHead(head: StoredHead): RoomHead {
 
 class MemorySubscriptionAttempt implements SubscriptionAttempt {
   readonly ready: Promise<void>
-  private _state: SubscriptionAttemptState = 'establishing'
-  private _settle!: { resolve: () => void; reject: (err: unknown) => void }
-  private readonly _listeners = new Set<(state: SubscriptionAttemptState) => void>()
-  private readonly _receiver: BackendReceiver
-  private readonly _localReceiverCount: () => number
-  private _detach: () => void
+  #state: SubscriptionAttemptState = 'establishing'
+  #settle!: { resolve: () => void; reject: (err: unknown) => void }
+  readonly #listeners = new Set<(state: SubscriptionAttemptState) => void>()
+  readonly #receiver: BackendReceiver
+  readonly #localReceiverCount: () => number
+  #detach: () => void
 
   constructor(receiver: BackendReceiver, localReceiverCount: () => number, detach: () => void) {
-    this._receiver = receiver
-    this._localReceiverCount = localReceiverCount
-    this._detach = detach
+    this.#receiver = receiver
+    this.#localReceiverCount = localReceiverCount
+    this.#detach = detach
     this.ready = new Promise<void>((resolve, reject) => {
-      this._settle = { resolve, reject }
+      this.#settle = { resolve, reject }
     })
     // A fail-closed establishment rejects `ready` whether or not the caller is awaiting it yet; the
     // handler below only marks the rejection observed, it does not swallow it for the caller.
@@ -135,49 +135,49 @@ class MemorySubscriptionAttempt implements SubscriptionAttempt {
   }
 
   get closed(): boolean {
-    return this._state === 'closed'
+    return this.#state === 'closed'
   }
 
   state(): SubscriptionAttemptState {
-    return this._state
+    return this.#state
   }
 
   onStateChange(cb: (state: SubscriptionAttemptState) => void): () => void {
-    this._listeners.add(cb)
-    return () => this._listeners.delete(cb)
+    this.#listeners.add(cb)
+    return () => this.#listeners.delete(cb)
   }
 
   async unsubscribe(): Promise<void> {
     if (this.closed) return
-    this._detach()
-    this._transition('closed')
+    this.#detach()
+    this.#transition('closed')
   }
 
   establish(): void {
-    this._transition('ready')
-    this._settle.resolve()
+    this.#transition('ready')
+    this.#settle.resolve()
   }
 
   failEstablishment(reason: string): void {
-    this._transition('closed')
-    this._settle.reject(new Error(reason))
+    this.#transition('closed')
+    this.#settle.reject(new Error(reason))
   }
 
   async deliver(payload: Uint8Array, info: { seq: number; timestamp: number }): Promise<void> {
     // A receiver is typed `=> void`, so its completion is never a cross-backend guarantee. In memory the
     // handoff attempt IS the dispatch call, so a receiver that returns a thenable extends that attempt —
     // this is the trace that makes the ordered-chain algorithm observable here.
-    await (this._receiver(payload, info) as unknown)
+    await (this.#receiver(payload, info) as unknown)
   }
 
   receiverCount(): number {
-    return this.closed ? 0 : this._localReceiverCount()
+    return this.closed ? 0 : this.#localReceiverCount()
   }
 
-  private _transition(state: SubscriptionAttemptState): void {
-    if (this._state === state) return
-    this._state = state
-    for (const cb of this._listeners) cb(state)
+  #transition(state: SubscriptionAttemptState): void {
+    if (this.#state === state) return
+    this.#state = state
+    for (const cb of this.#listeners) cb(state)
   }
 }
 
@@ -186,18 +186,18 @@ export class MemoryBackend implements BackendDriver {
   readonly capabilities: BackendDriver['capabilities']
   readonly subscriptions: SubscriptionDriver
 
-  private readonly _now: () => number
-  private readonly _state: MemoryBackendState
-  private _disposed = false
+  readonly #now: () => number
+  readonly #state: MemoryBackendState
+  #disposed = false
 
   constructor(options: MemoryBackendOptions = {}) {
-    this._now = options.authorityNow ?? (() => Date.now())
-    this._state = options.state ?? new MemoryBackendState()
+    this.#now = options.authorityNow ?? (() => Date.now())
+    this.#state = options.state ?? new MemoryBackendState()
     this.subscriptions = {
       bind: (source) => ({
         partition: '',
         valid: () => true,
-        open: (receiver, localReceiverCount) => this._openSubscription(source, receiver, localReceiverCount),
+        open: (receiver, localReceiverCount) => this.#openSubscription(source, receiver, localReceiverCount),
       }),
     }
     this.capabilities = {
@@ -209,20 +209,20 @@ export class MemoryBackend implements BackendDriver {
   // ── cheap Broadcast ──
 
   publish(lane: BroadcastLane, payload: Uint8Array): PublishResult {
-    this._assertLive()
-    const previous = this._state.broadcastOrder.get(lane.key)
+    this.#assertLive()
+    const previous = this.#state.broadcastOrder.get(lane.key)
     if (previous?.seq === Number.MAX_SAFE_INTEGER) {
       throw new Error('publish: sequence exhausted for the ordering domain')
     }
     const mark = {
       seq: (previous?.seq ?? 0) + 1,
-      timestamp: Math.max(this._now(), previous?.timestamp ?? 0),
+      timestamp: Math.max(this.#now(), previous?.timestamp ?? 0),
     }
     if (!Number.isSafeInteger(mark.seq) || !Number.isSafeInteger(mark.timestamp)) {
       throw new Error('publish: sequence exhausted for the ordering domain')
     }
-    this._state.broadcastOrder.set(lane.key, mark)
-    const targets = [...(this._state.broadcastSubs.get(broadcastRouteKey(lane)) ?? [])]
+    this.#state.broadcastOrder.set(lane.key, mark)
+    const targets = [...(this.#state.broadcastSubs.get(broadcastRouteKey(lane)) ?? [])]
     const frame = copyBytes(payload)
     for (const target of targets) void target.deliver(copyBytes(frame), mark).catch(console.error)
     const delivered = sumReceiverCounts(targets)
@@ -232,8 +232,8 @@ export class MemoryBackend implements BackendDriver {
   // ── head ──
 
   async readHead(roomId: string): Promise<{ head: RoomHead } | null> {
-    this._assertLive()
-    const head = this._liveHead(this._state.rooms.get(roomId))
+    this.#assertLive()
+    const head = this.#liveHead(this.#state.rooms.get(roomId))
     return head === null ? null : { head: publicHead(head) }
   }
 
@@ -244,31 +244,31 @@ export class MemoryBackend implements BackendDriver {
   ): Promise<
     { ok: true; head: RoomHead } | { ok: true; deleted: true } | { conflict: true; current: RoomHead | null }
   > {
-    this._assertLive()
-    const existing = this._state.rooms.get(roomId)
-    const current = this._liveHead(existing)
+    this.#assertLive()
+    const existing = this.#state.rooms.get(roomId)
+    const current = this.#liveHead(existing)
     // Operation legality precedes the compare for the delete path only; every other transition is
     // validated against the head the compare actually matched, so a genuine race still conflicts.
     assertHeadDeleteLegal(next, current)
-    if (!this._headCxMatches(cx, current)) {
+    if (!this.#headCxMatches(cx, current)) {
       return { conflict: true, current: current === null ? null : publicHead(current) }
     }
     // Only a CX that actually applies materializes a room record.
-    const room = this._roomFor(roomId)
+    const room = this.#roomFor(roomId)
     if ('delete' in next) {
       room.head = null
       return { ok: true, deleted: true }
     }
     assertHeadTransition(cx, next, current, (inc) => existing?.gens.has(inc) === true)
-    return { ok: true, head: publicHead(this._storeHead(room, next)) }
+    return { ok: true, head: publicHead(this.#storeHead(room, next)) }
   }
 
-  private _headCxMatches(cx: HeadCx, current: StoredHead | null): boolean {
+  #headCxMatches(cx: HeadCx, current: StoredHead | null): boolean {
     if (cx.expect === 'absent') return current === null
     if (current === null || current.rev !== cx.expect.rev) return false
     const expect = cx.expect
     if ('closingLeaseExpired' in expect) {
-      return current.state === 'closing' && current.closeLease !== undefined && current.closeLease.until < this._now()
+      return current.state === 'closing' && current.closeLease !== undefined && current.closeLease.until < this.#now()
     }
     if ('closingLease' in expect) {
       return current.state === 'closing' && current.closeLease?.id === expect.closingLease
@@ -276,10 +276,10 @@ export class MemoryBackend implements BackendDriver {
     return true
   }
 
-  private _storeHead(room: RoomRecord, next: Extract<HeadNext, { head: unknown }>): StoredHead {
-    const now = this._now()
+  #storeHead(room: RoomRecord, next: Extract<HeadNext, { head: unknown }>): StoredHead {
+    const now = this.#now()
     const stored: StoredHead = {
-      rev: `rev-${++this._state.revSeq}`,
+      rev: `rev-${++this.#state.revSeq}`,
       currentInc: next.head.currentInc,
       state: next.head.state,
       config: copyBytes(next.head.config),
@@ -290,7 +290,7 @@ export class MemoryBackend implements BackendDriver {
       stored.closeLease = { id: next.head.closeLease.id, until: now + next.head.closeLease.durationMs }
     }
     room.head = stored
-    if (stored.currentInc !== null) this._generation(room, stored.currentInc)
+    if (stored.currentInc !== null) this.#generation(room, stored.currentInc)
     return stored
   }
 
@@ -301,14 +301,14 @@ export class MemoryBackend implements BackendDriver {
     inc: string,
     sel: { keys: string[] } | { prefix: string },
   ): Promise<{ revision: string; cells: Map<string, Uint8Array> } | { staleInc: true }> {
-    this._assertLive()
-    const room = this._state.rooms.get(roomId)
-    const head = this._liveHead(room)
+    this.#assertLive()
+    const room = this.#state.rooms.get(roomId)
+    const head = this.#liveHead(room)
     // Reads stay available while the head is closing — the closer's tail needs them; only writes require
     // an open head (CxResult 'stale-inc').
     if (room === undefined || head === null || head.currentInc !== inc) return { staleInc: true }
-    const gen = this._generation(room, inc)
-    const now = this._now()
+    const gen = this.#generation(room, inc)
+    const now = this.#now()
     const keys = 'keys' in sel ? sel.keys : [...gen.cells.keys()].filter((key) => key.startsWith(sel.prefix))
     const cells = new Map<string, Uint8Array>()
     for (const key of keys) {
@@ -325,13 +325,13 @@ export class MemoryBackend implements BackendDriver {
     revision: string,
     mutations: CellMutation[],
   ): Promise<CxResult> {
-    this._assertLive()
-    const room = this._state.rooms.get(roomId)
-    const head = this._liveHead(room)
+    this.#assertLive()
+    const room = this.#state.rooms.get(roomId)
+    const head = this.#liveHead(room)
     if (room === undefined || head === null || head.currentInc !== inc || head.state !== 'open') return 'stale-inc'
-    const gen = this._generation(room, inc)
+    const gen = this.#generation(room, inc)
     if (String(gen.revision) !== revision) return 'conflict'
-    const now = this._now()
+    const now = this.#now()
     for (const mutation of mutations) {
       if (mutation.set === undefined) gen.cells.delete(mutation.key)
       else {
@@ -352,14 +352,14 @@ export class MemoryBackend implements BackendDriver {
     payload: Uint8Array,
     opts?: { retain?: boolean; closingLease?: string; requiredCellKeys?: string[] },
   ): Promise<CommitResult> {
-    this._assertLive()
-    const room = this._state.rooms.get(roomId)
-    const head = this._liveHead(room)
-    if (room === undefined || head === null || !this._commitPreconditionHolds(head, inc, lane, opts?.closingLease)) {
+    this.#assertLive()
+    const room = this.#state.rooms.get(roomId)
+    const head = this.#liveHead(room)
+    if (room === undefined || head === null || !this.#commitPreconditionHolds(head, inc, lane, opts?.closingLease)) {
       return { stale: true }
     }
-    const gen = this._generation(room, inc)
-    const now = this._now()
+    const gen = this.#generation(room, inc)
+    const now = this.#now()
     if (
       opts?.requiredCellKeys?.some((key) => {
         const cell = gen.cells.get(key)
@@ -370,7 +370,7 @@ export class MemoryBackend implements BackendDriver {
     }
     const key = laneKey(lane)
     const frame = copyBytes(payload)
-    const mark = this._advanceOrder(gen, key)
+    const mark = this.#advanceOrder(gen, key)
     if (opts?.retain) {
       gen.retained.set(key, {
         lane: Object.freeze(copyLane(lane)),
@@ -386,18 +386,13 @@ export class MemoryBackend implements BackendDriver {
       seq: mark.seq,
       timestamp: mark.timestamp,
       receivers: sumReceiverCounts(targets),
-      delivery: this._enqueueAttempt(gen, key, targets, frame, info),
+      delivery: this.#enqueueAttempt(gen, key, targets, frame, info),
     }
   }
 
   // The whole commit precondition: one boolean, two branches. Supplying a closing lease selects the
   // narrow closing-control branch outright, which is what makes every other lane stale while closing.
-  private _commitPreconditionHolds(
-    head: StoredHead,
-    inc: string,
-    lane: LaneId,
-    closingLease: string | undefined,
-  ): boolean {
+  #commitPreconditionHolds(head: StoredHead, inc: string, lane: LaneId, closingLease: string | undefined): boolean {
     if (head.currentInc !== inc) return false
     return closingLease === undefined
       ? head.state === 'open'
@@ -405,11 +400,11 @@ export class MemoryBackend implements BackendDriver {
           head.state === 'closing' &&
           head.closeLease !== undefined &&
           head.closeLease.id === closingLease &&
-          this._now() <= head.closeLease.until
+          this.#now() <= head.closeLease.until
   }
 
-  private _advanceOrder(gen: Generation, domain: string): OrderMark {
-    const now = this._now()
+  #advanceOrder(gen: Generation, domain: string): OrderMark {
+    const now = this.#now()
     const previous = gen.order.get(domain)
     if (previous?.seq === Number.MAX_SAFE_INTEGER) {
       throw new Error('commitLane: sequence exhausted for the ordering domain')
@@ -429,7 +424,7 @@ export class MemoryBackend implements BackendDriver {
   // The ordered at-most-once chain, per (incarnation, lane). The chain is gated on SETTLEMENT — success
   // or failure — so a failed frame never poisons the lane, and the returned promise rejects only on its
   // own failure.
-  private _enqueueAttempt(
+  #enqueueAttempt(
     gen: Generation,
     key: string,
     targets: MemorySubscriptionAttempt[],
@@ -462,27 +457,27 @@ export class MemoryBackend implements BackendDriver {
     inc: string,
     lane: LaneId,
   ): Promise<{ payload: Uint8Array; seq: number; timestamp: number } | null> {
-    this._assertLive()
-    const entry = this._state.rooms.get(roomId)?.gens.get(inc)?.retained.get(laneKey(lane))
+    this.#assertLive()
+    const entry = this.#state.rooms.get(roomId)?.gens.get(inc)?.retained.get(laneKey(lane))
     if (entry === undefined) return null
     return { payload: copyBytes(entry.payload), seq: entry.seq, timestamp: entry.timestamp }
   }
 
   async listRetained(roomId: string, inc: string): Promise<LaneId[]> {
-    this._assertLive()
-    const gen = this._state.rooms.get(roomId)?.gens.get(inc)
+    this.#assertLive()
+    const gen = this.#state.rooms.get(roomId)?.gens.get(inc)
     return gen === undefined ? [] : [...gen.retained.values()].map((entry) => copyLane(entry.lane))
   }
 
   async deleteRetained(roomId: string, inc: string, lane?: LaneId, opts?: { ifSeq?: number }): Promise<void> {
-    this._assertLive()
+    this.#assertLive()
     if (lane === undefined && opts?.ifSeq !== undefined) {
       throw new Error('deleteRetained: ifSeq requires a lane')
     }
     if (opts?.ifSeq !== undefined && (!Number.isSafeInteger(opts.ifSeq) || opts.ifSeq <= 0)) {
       throw new Error('deleteRetained: ifSeq must be a positive safe integer')
     }
-    const gen = this._state.rooms.get(roomId)?.gens.get(inc)
+    const gen = this.#state.rooms.get(roomId)?.gens.get(inc)
     if (gen === undefined) return
     if (lane === undefined) gen.retained.clear()
     else {
@@ -494,7 +489,7 @@ export class MemoryBackend implements BackendDriver {
 
   // ── subscriptions ──
 
-  private _openSubscription(
+  #openSubscription(
     source: BackendSubscriptionSource,
     receiver: BackendReceiver,
     localReceiverCount: () => number,
@@ -503,29 +498,29 @@ export class MemoryBackend implements BackendDriver {
       const key = broadcastRouteKey(source.lane)
       let sub!: MemorySubscriptionAttempt
       sub = new MemorySubscriptionAttempt(receiver, localReceiverCount, () => {
-        this._state.broadcastSubs.get(key)?.delete(sub)
+        this.#state.broadcastSubs.get(key)?.delete(sub)
       })
-      const subs = this._state.broadcastSubs.get(key) ?? new Set<MemorySubscriptionAttempt>()
+      const subs = this.#state.broadcastSubs.get(key) ?? new Set<MemorySubscriptionAttempt>()
       subs.add(sub)
-      this._state.broadcastSubs.set(key, subs)
+      this.#state.broadcastSubs.set(key, subs)
       sub.establish()
       return sub
     }
 
     const { roomId, inc, lane } = source
-    const room = this._state.rooms.get(roomId)
-    const head = this._liveHead(room)
+    const room = this.#state.rooms.get(roomId)
+    const head = this.#liveHead(room)
     const key = laneKey(lane)
     let sub!: MemorySubscriptionAttempt
     sub = new MemorySubscriptionAttempt(receiver, localReceiverCount, () => {
-      this._state.rooms.get(roomId)?.gens.get(inc)?.subs.get(key)?.delete(sub)
+      this.#state.rooms.get(roomId)?.gens.get(inc)?.subs.get(key)?.delete(sub)
     })
     if (room === undefined || head === null || head.currentInc !== inc || head.state !== 'open') {
       sub.failEstablishment(`subscribeLane: room '${roomId}' has no open incarnation '${inc}'`)
       return sub
     }
     // Registration is durable before `ready` resolves: a commit accepted after this point must see it.
-    const gen = this._generation(room, inc)
+    const gen = this.#generation(room, inc)
     const subs = gen.subs.get(key) ?? new Set<MemorySubscriptionAttempt>()
     subs.add(sub)
     gen.subs.set(key, subs)
@@ -536,44 +531,44 @@ export class MemoryBackend implements BackendDriver {
   // ── generation lifecycle ──
 
   async listGenerations(roomId: string): Promise<string[]> {
-    this._assertLive()
-    const room = this._state.rooms.get(roomId)
+    this.#assertLive()
+    const room = this.#state.rooms.get(roomId)
     if (room === undefined) return []
-    this._sweep(room)
+    this.#sweep(room)
     return [...room.gens.keys()]
   }
 
   async dropGeneration(roomId: string, inc: string): Promise<void> {
-    this._assertLive()
-    const room = this._state.rooms.get(roomId)
+    this.#assertLive()
+    const room = this.#state.rooms.get(roomId)
     if (room === undefined) return
-    if (this._liveHead(room)?.currentInc === inc) {
+    if (this.#liveHead(room)?.currentInc === inc) {
       throw new Error(`dropGeneration: refusing to drop the current incarnation '${inc}' of room '${roomId}'`)
     }
     const gen = room.gens.get(inc)
     if (gen === undefined) return // already dropped — the janitor is resumable
     room.gens.delete(inc)
-    this._sweep(room)
+    this.#sweep(room)
   }
 
   // ── directory ──
 
   async directoryPut(roomId: string, incTag: string): Promise<void> {
-    this._assertLive()
-    this._state.directory.set(roomId, incTag)
+    this.#assertLive()
+    this.#state.directory.set(roomId, incTag)
   }
 
   async directoryDelete(roomId: string, incTag: string): Promise<void> {
-    this._assertLive()
-    if (this._state.directory.get(roomId) === incTag) this._state.directory.delete(roomId)
+    this.#assertLive()
+    if (this.#state.directory.get(roomId) === incTag) this.#state.directory.delete(roomId)
   }
 
   async directoryList(
     prefix: string,
     cursor?: string,
   ): Promise<{ entries: { roomId: string; incTag: string }[]; cursor?: string }> {
-    this._assertLive()
-    const entries = [...this._state.directory]
+    this.#assertLive()
+    const entries = [...this.#state.directory]
       .filter(([roomId]) => roomId.startsWith(prefix) && (cursor === undefined || roomId > cursor))
       .sort(([left], [right]) => left.localeCompare(right))
       .map(([roomId, incTag]) => ({ roomId, incTag }))
@@ -581,29 +576,29 @@ export class MemoryBackend implements BackendDriver {
   }
 
   async dispose(): Promise<void> {
-    if (this._disposed) return
-    this._disposed = true
-    this._state.rooms.clear()
-    this._state.directory.clear()
-    this._state.broadcastOrder.clear()
-    this._state.broadcastSubs.clear()
+    if (this.#disposed) return
+    this.#disposed = true
+    this.#state.rooms.clear()
+    this.#state.directory.clear()
+    this.#state.broadcastOrder.clear()
+    this.#state.broadcastSubs.clear()
   }
 
   // ── internals ──
 
-  private _assertLive(): void {
-    if (this._disposed) throw new Error('MemoryBackend: used after dispose()')
+  #assertLive(): void {
+    if (this.#disposed) throw new Error('MemoryBackend: used after dispose()')
   }
 
-  private _roomFor(roomId: string): RoomRecord {
-    const existing = this._state.rooms.get(roomId)
+  #roomFor(roomId: string): RoomRecord {
+    const existing = this.#state.rooms.get(roomId)
     if (existing !== undefined) return existing
     const room: RoomRecord = { head: null, gens: new Map() }
-    this._state.rooms.set(roomId, room)
+    this.#state.rooms.set(roomId, room)
     return room
   }
 
-  private _generation(room: RoomRecord, inc: string): Generation {
+  #generation(room: RoomRecord, inc: string): Generation {
     const existing = room.gens.get(inc)
     if (existing !== undefined) return existing
     const gen = newGeneration()
@@ -612,18 +607,18 @@ export class MemoryBackend implements BackendDriver {
   }
 
   // Lazy TTL: a lapsed tombstone reads as absent, which is what reopens an absence epoch (I1).
-  private _liveHead(room: RoomRecord | undefined): StoredHead | null {
+  #liveHead(room: RoomRecord | undefined): StoredHead | null {
     if (room === undefined || room.head === null) return null
-    if (!isExpired(room.head, this._now())) return room.head
+    if (!isExpired(room.head, this.#now())) return room.head
     room.head = null
     return null
   }
 
   // Reclaim expiring heads and cells. Ordering marks are generation-lifetime state and deliberately
   // have no janitor path; dropGeneration() is their cleanup boundary.
-  private _sweep(room: RoomRecord): void {
-    const now = this._now()
-    this._liveHead(room)
+  #sweep(room: RoomRecord): void {
+    const now = this.#now()
+    this.#liveHead(room)
     for (const gen of room.gens.values()) {
       for (const [key, cell] of gen.cells) if (isExpired(cell, now)) gen.cells.delete(key)
     }

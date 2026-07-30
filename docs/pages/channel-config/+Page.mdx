@@ -25,9 +25,6 @@ config.channel = {
   serverReplayBufferBinary: 2_097_152,  // Server replay buffer for binary frames (bytes)
   clientReplayBufferBinary: 2_097_152,  // Client replay buffer for binary frames (bytes)
   bufferLimitBinary: 2_097_152,         // Per-peer buffer for binary messages (bytes)
-
-  // Abuse protection
-  messageLimit: 16_777_216,             // Max size of one inbound client message (bytes)
 }
 ```
 
@@ -37,9 +34,6 @@ config.channel = {
 > - Slow/flaky clients dropping with `NetworkError` (`isChannel: true`) → raise `reconnectTimeout` (how long the server holds a channel open while a client is gone).
 > - `ChannelOverflowError` while a peer is briefly offline → raise `bufferLimit`/`bufferLimitBinary`, or apply backpressure by `await`-ing your `send()`s.
 > - Want reconnects to replay more history → raise the replay buffers; lower them to cap memory.
-> - Want a tighter bound on what a client may send in one message (e.g. chat apps) → lower `messageLimit`.
-
-`messageLimit` is the hostile-input bound: a client that declares a gigabyte message is rejected on that declared size — before its body is ever buffered — and its connection is terminated. Honest clients never get that far: the limit is advertised to them, and an oversized `send()`/`publish()` fails locally with a clear error. Large payloads belong on streams (`File`, `Blob`, `ReadableStream`), which move as bounded chunks and aren't subject to the cap.
 
 <ConfigWhereServer />
 

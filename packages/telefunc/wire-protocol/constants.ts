@@ -131,16 +131,6 @@ export const CHANNEL_CLIENT_REPLAY_BUFFER_BINARY_BYTES = 2 * 1024 * 1024
 export const CHANNEL_BUFFER_LIMIT_BYTES = 512 * 1024
 /** Maximum bytes buffered per channel for binary messages sent before a peer connects. */
 export const CHANNEL_BUFFER_LIMIT_BINARY_BYTES = 2 * 1024 * 1024
-/**
- * Maximum size of a single inbound client→server message (any wire frame: channel sends,
- * publishes, DMs, telefunction envelopes). A hostile client declaring a gigabyte message is
- * cut off at this bound — SSE rejects the declared length before buffering the body, WS
- * terminates the connection — while honest clients get a clear client-side error first.
- * Large payloads belong on streams (`File`/`Blob`/`ReadableStream`), which move as bounded
- * transport chunks and are not subject to this per-message cap.
- */
-export const CHANNEL_MESSAGE_LIMIT_BYTES = 16 * 1024 * 1024
-
 /** How long a channel waits for a peer to connect after the server→client
  *  HTTP response carrying `channel.client` has been serialized. */
 export const CHANNEL_CONNECT_TTL_MS = 5_000

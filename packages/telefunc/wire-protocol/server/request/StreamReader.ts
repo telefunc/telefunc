@@ -33,10 +33,8 @@ class StreamReader {
   private nextFileIndex = 0
   private queue: Promise<void> = Promise.resolve()
   private disconnected = false
-  private maxFrameBytes: number
 
-  constructor(source: ReadableStream<Uint8Array> | Readable, maxFrameBytes = Infinity) {
-    this.maxFrameBytes = maxFrameBytes
+  constructor(source: ReadableStream<Uint8Array> | Readable) {
     // Both shapes expose `Symbol.asyncIterator` directly: Web `ReadableStream` does
     // since Node 18 / Bun / Deno, and Node `Readable` does natively. The latter
     // bypasses Node's webstreams `dequeueValue` overhead, which is why we accept
@@ -48,52 +46,14 @@ class StreamReader {
   /** Read the metadata: [u32 big-endian length][UTF-8 bytes]. */
   async readMetadata() {
     const length = await this.readU32()
-    this.assertDeclaredLength(length)
     return new TextDecoder().decode(await this.readExact(length))
-  }
-
-  /** Read the whole body as UTF-8 text, rejecting once more than `maxFrameBytes` have arrived. For an
-   *  un-framed body (a plain text RPC envelope, which carries no length prefix) the bound is enforced as
-   *  bytes accumulate — the text twin of `assertDeclaredLength`, so a text request is capped like a binary one. */
-  async readAllText(): Promise<string> {
-    const chunks: Uint8Array<ArrayBuffer>[] = []
-    let total = 0
-    if (this.buffer.length > 0) {
-      chunks.push(this.buffer)
-      total = this.buffer.length
-      this.buffer = EMPTY
-    }
-    for (;;) {
-      const chunk = await this.pullChunk()
-      if (chunk === null) break
-      total += chunk.length
-      if (total > this.maxFrameBytes)
-        throw new Error(`Request body exceeds the per-message limit of ${this.maxFrameBytes} bytes`)
-      chunks.push(chunk)
-    }
-    if (chunks.length === 1) return new TextDecoder().decode(chunks[0])
-    const all = new Uint8Array(total)
-    let offset = 0
-    for (const chunk of chunks) {
-      all.set(chunk, offset)
-      offset += chunk.length
-    }
-    return new TextDecoder().decode(all)
   }
 
   /** Read one length-prefixed chunk, or null if the stream is cleanly exhausted. */
   async readLengthPrefixedBytesOrNull() {
     const lengthBytes = await this.readExactOrNull(4)
     if (!lengthBytes) return null
-    const length = decodeU32(lengthBytes)
-    this.assertDeclaredLength(length)
-    return this.readExact(length)
-  }
-
-  /** The hostile-input bound: reject a declared frame length over `maxFrameBytes` before a
-   *  single body byte is buffered — a declared gigabyte costs 4 bytes, not a gigabyte. */
-  private assertDeclaredLength(length: number): void {
-    if (length > this.maxFrameBytes) throw new Error(`Frame of ${length} bytes exceeds the per-message limit`)
+    return this.readExact(decodeU32(lengthBytes))
   }
 
   /** Ensure no trailing bytes remain. */

@@ -399,7 +399,7 @@ describe('cloudflare adapter entrypoint', () => {
     expect(mocks.crosswsAdapter.handleDurableInit).toHaveBeenCalledWith(instance, ctx, {
       TelefuncDurableObject: binding,
     })
-    expect(hibernatedSocket.close).toHaveBeenCalledWith(1012, 'Telefunc session reset; reconnect')
+    expect(hibernatedSocket.close).not.toHaveBeenCalled()
 
     mocks.crosswsAdapter.handleDurableUpgrade.mockResolvedValue(new Response('upgrade'))
     const upgradeResponse = await instance.fetch(
@@ -451,6 +451,7 @@ describe('cloudflare adapter entrypoint', () => {
       serialized: '{"text":"hello"}',
       info: expect.any(Object),
     })
+    expect(hibernatedSocket.close).not.toHaveBeenCalled()
 
     // Importing and using the ordinary Cloudflare adapter remains flag-free. Only the first Room entry
     // asks for the opt-in async carrier and reports the recipe diagnostic.
@@ -464,5 +465,17 @@ describe('cloudflare adapter entrypoint', () => {
         generationToken: 'generation',
       }),
     ).toThrow('Cloudflare Room requires await-safe context')
+    expect(hibernatedSocket.close).not.toHaveBeenCalled()
+
+    mocks.asyncMode = true
+    instance.telefuncRoomInvalidate({
+      roomId: 'room',
+      inc: 'inc',
+      laneKey: 'lane',
+      subscriberDoId: 'id',
+      leaseId: 'lease',
+      generationToken: 'generation',
+    })
+    expect(hibernatedSocket.close).toHaveBeenCalledWith(1012, 'Telefunc session reset; reconnect')
   })
 })

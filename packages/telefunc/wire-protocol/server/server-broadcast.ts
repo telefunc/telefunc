@@ -13,7 +13,7 @@ import type { TELEFUNC_SHIELDS } from '../../node/shared/transformer/generateShi
 import { makePublishInfo } from '../channel.js'
 import { ServerChannel } from './channel.js'
 import { getBackend } from '../backend/install.js'
-import type { BackendSpi, BackendSubscription, PublishResult } from '../backend/spi.js'
+import type { BackendSpi, BackendSubscription, BroadcastLane, PublishResult } from '../backend/spi.js'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { parse } from '@brillout/json-serializer/parse'
 import { assert, assertUsage } from '../../utils/assert.js'
@@ -29,6 +29,56 @@ const SERVER_BROADCAST_BRAND: unique symbol = Symbol.for('ServerBroadcast')
 const textEncoder = new TextEncoder()
 const textDecoder = new TextDecoder()
 type BroadcastUnsubscribe = () => void
+type TrackedSubscription = {
+  subscription: BackendSubscription
+  removed: Promise<void>
+  markRemoved: () => void
+}
+
+const subscriptionsByBackend = new WeakMap<BackendSpi, Map<string, Set<TrackedSubscription>>>()
+
+function laneKey(lane: BroadcastLane): string {
+  return `${lane.kind}\0${lane.key}`
+}
+
+function trackSubscription(backend: BackendSpi, lane: BroadcastLane, subscription: BackendSubscription): () => void {
+  let byLane = subscriptionsByBackend.get(backend)
+  if (!byLane) subscriptionsByBackend.set(backend, (byLane = new Map()))
+  const key = laneKey(lane)
+  let subscriptions = byLane.get(key)
+  if (!subscriptions) byLane.set(key, (subscriptions = new Set()))
+  let markRemoved!: () => void
+  const tracked: TrackedSubscription = {
+    subscription,
+    removed: new Promise<void>((resolve) => {
+      markRemoved = resolve
+    }),
+    markRemoved: () => markRemoved(),
+  }
+  subscriptions.add(tracked)
+  let active = true
+  return () => {
+    if (!active) return
+    active = false
+    tracked.markRemoved()
+    subscriptions.delete(tracked)
+    if (subscriptions.size === 0) byLane.delete(key)
+  }
+}
+
+function publishWhenSubscriptionsReady<T>(
+  backend: BackendSpi,
+  lane: BroadcastLane,
+  publish: () => T | Promise<T>,
+): T | Promise<T> {
+  const subscriptions = subscriptionsByBackend.get(backend)?.get(laneKey(lane))
+  if (!subscriptions) return publish()
+  const pending = [...subscriptions]
+    .filter(({ subscription }) => subscription.state() !== 'ready')
+    .map(({ subscription, removed }) => Promise.race([subscription.ready, removed]))
+  if (pending.length === 0) return publish()
+  return Promise.all(pending).then(publish)
+}
 
 class ServerBroadcast<T = unknown> extends ServerChannel {
   readonly [SERVER_BROADCAST_BRAND] = true
@@ -46,6 +96,8 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
   private _backend: BackendSpi | null = null
   private _unsubBroadcast: BackendSubscription | null = null
   private _unsubBinaryBroadcast: BackendSubscription | null = null
+  private _untrackBroadcast: (() => void) | null = null
+  private _untrackBinaryBroadcast: (() => void) | null = null
   private _peerSubscribedText = false
   private _peerSubscribedBinary = false
 
@@ -194,20 +246,16 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
   _onPeerBroadcastUnsubscribe(binary: boolean): void {
     if (binary) {
       this._peerSubscribedBinary = false
-      if (this._unsubBinaryBroadcast) void this._unsubBinaryBroadcast.unsubscribe()
-      this._unsubBinaryBroadcast = null
+      this._clearBinarySubscription()
     } else {
       this._peerSubscribedText = false
-      if (this._unsubBroadcast) void this._unsubBroadcast.unsubscribe()
-      this._unsubBroadcast = null
+      this._clearTextSubscription()
     }
   }
 
   protected override _shutdown(err?: Error): void {
-    if (this._unsubBroadcast) void this._unsubBroadcast.unsubscribe()
-    this._unsubBroadcast = null
-    if (this._unsubBinaryBroadcast) void this._unsubBinaryBroadcast.unsubscribe()
-    this._unsubBinaryBroadcast = null
+    this._clearTextSubscription()
+    this._clearBinarySubscription()
     super._shutdown(err)
   }
 
@@ -221,17 +269,35 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
   private _subscribeBroadcast(): void {
     if (this._unsubBroadcast) return
     assert(this._backend)
-    this._unsubBroadcast = this._backend.subscribe({ key: this.key, kind: 'text' }, (payload, rawInfo) =>
+    const lane = { key: this.key, kind: 'text' } as const
+    this._unsubBroadcast = this._backend.subscribe(lane, (payload, rawInfo) =>
       this._deliverBroadcastMessage(textDecoder.decode(payload), rawInfo),
     )
+    this._untrackBroadcast = trackSubscription(this._backend, lane, this._unsubBroadcast)
   }
 
   private _subscribeBinaryBroadcast(): void {
     if (this._unsubBinaryBroadcast) return
     assert(this._backend)
-    this._unsubBinaryBroadcast = this._backend.subscribe({ key: this.key, kind: 'binary' }, (data, rawInfo) =>
+    const lane = { key: this.key, kind: 'binary' } as const
+    this._unsubBinaryBroadcast = this._backend.subscribe(lane, (data, rawInfo) =>
       this._deliverBroadcastBinaryMessage(data, rawInfo),
     )
+    this._untrackBinaryBroadcast = trackSubscription(this._backend, lane, this._unsubBinaryBroadcast)
+  }
+
+  private _clearTextSubscription(): void {
+    this._untrackBroadcast?.()
+    this._untrackBroadcast = null
+    if (this._unsubBroadcast) void this._unsubBroadcast.unsubscribe()
+    this._unsubBroadcast = null
+  }
+
+  private _clearBinarySubscription(): void {
+    this._untrackBinaryBroadcast?.()
+    this._untrackBinaryBroadcast = null
+    if (this._unsubBinaryBroadcast) void this._unsubBinaryBroadcast.unsubscribe()
+    this._unsubBinaryBroadcast = null
   }
 
   private _publishBroadcast(serialized: string): ChannelPublishAck | Promise<ChannelPublishAck> {
@@ -242,10 +308,10 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
         meta: r.meta,
         ...(r.receivers === undefined ? {} : { receivers: r.receivers }),
       })
-    const publish = () => backend.publish({ key: this.key, kind: 'text' }, textEncoder.encode(serialized))
-    const subscription = this._unsubBroadcast
-    if (subscription !== null && subscription.state() !== 'ready') return subscription.ready.then(publish).then(toAck)
-    const result = publish()
+    const lane = { key: this.key, kind: 'text' } as const
+    const result = publishWhenSubscriptionsReady(backend, lane, () =>
+      backend.publish(lane, textEncoder.encode(serialized)),
+    )
     if (isPromise(result)) return result.then(toAck)
     return toAck(result)
   }
@@ -258,10 +324,8 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
         meta: r.meta,
         ...(r.receivers === undefined ? {} : { receivers: r.receivers }),
       })
-    const publish = () => backend.publish({ key: this.key, kind: 'binary' }, data)
-    const subscription = this._unsubBinaryBroadcast
-    if (subscription !== null && subscription.state() !== 'ready') return subscription.ready.then(publish).then(toAck)
-    const result = publish()
+    const lane = { key: this.key, kind: 'binary' } as const
+    const result = publishWhenSubscriptionsReady(backend, lane, () => backend.publish(lane, data))
     if (isPromise(result)) return result.then(toAck)
     return toAck(result)
   }
@@ -329,25 +393,37 @@ const Broadcast = {
   publish<U = unknown>(key: string, data: ChannelData<U>): PublishResult | Promise<PublishResult> {
     const backend = getBackend()
     const serialized = stringify(data)
-    return backend.publish({ key, kind: 'text' }, textEncoder.encode(serialized))
+    const lane = { key, kind: 'text' } as const
+    return publishWhenSubscriptionsReady(backend, lane, () => backend.publish(lane, textEncoder.encode(serialized)))
   },
   subscribe<U = unknown>(key: string, callback: BroadcastListener<U>): BroadcastUnsubscribe {
     const backend = getBackend()
-    const subscription = backend.subscribe({ key, kind: 'text' }, (payload, info) => {
+    const lane = { key, kind: 'text' } as const
+    const subscription = backend.subscribe(lane, (payload, info) => {
       const data = parse(textDecoder.decode(payload)) as ChannelData<U>
       callback(data, { key, seq: info.seq, timestamp: info.timestamp })
     })
-    return () => void subscription.unsubscribe()
+    const untrack = trackSubscription(backend, lane, subscription)
+    return () => {
+      untrack()
+      void subscription.unsubscribe()
+    }
   },
   publishBinary(key: string, data: Uint8Array): PublishResult | Promise<PublishResult> {
     const backend = getBackend()
-    return backend.publish({ key, kind: 'binary' }, data)
+    const lane = { key, kind: 'binary' } as const
+    return publishWhenSubscriptionsReady(backend, lane, () => backend.publish(lane, data))
   },
   subscribeBinary(key: string, callback: BroadcastBinaryListener): BroadcastUnsubscribe {
     const backend = getBackend()
-    const subscription = backend.subscribe({ key, kind: 'binary' }, (data, info) => {
+    const lane = { key, kind: 'binary' } as const
+    const subscription = backend.subscribe(lane, (data, info) => {
       callback(data, { key, seq: info.seq, timestamp: info.timestamp })
     })
-    return () => void subscription.unsubscribe()
+    const untrack = trackSubscription(backend, lane, subscription)
+    return () => {
+      untrack()
+      void subscription.unsubscribe()
+    }
   },
 }

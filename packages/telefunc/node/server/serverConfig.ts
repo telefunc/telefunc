@@ -22,7 +22,6 @@ import { toPosixPath, pathIsAbsolute, assertPosixPath } from '../../utils/path.j
 import {
   CHANNEL_BUFFER_LIMIT_BYTES,
   CHANNEL_BUFFER_LIMIT_BINARY_BYTES,
-  CHANNEL_MESSAGE_LIMIT_BYTES,
   CHANNEL_CLIENT_REPLAY_BUFFER_BYTES,
   CHANNEL_CLIENT_REPLAY_BUFFER_BINARY_BYTES,
   CHANNEL_CONNECT_TTL_MS,
@@ -104,15 +103,6 @@ type ChannelConfigUser = {
   /** Maximum number of bytes buffered per channel for binary messages while no client peer is attached. */
   bufferLimitBinary?: number
   /**
-   * Maximum size, in bytes, of a single inbound client→server message (channel sends,
-   * publishes, direct messages). Oversized messages are rejected without being buffered
-   * and the offending connection is terminated. The limit is advertised to the client,
-   * which fails oversized sends locally with a clear error. Large payloads should be
-   * streamed (`File`, `Blob`, `ReadableStream`) — streams move as bounded transport
-   * chunks and aren't subject to this cap.
-   */
-  messageLimit?: number
-  /**
    * When using SSE channels, upstream client-to-server frames are batched for at
    * most this many milliseconds before Telefunc sends a POST.
    *
@@ -142,7 +132,6 @@ type ChannelConfigResolved = {
   connectTtl: number
   bufferLimit: number
   bufferLimitBinary: number
-  messageLimit: number
   sseFlushThrottle: number
   ssePostIdleFlushDelay: number
 }
@@ -336,7 +325,6 @@ function getServerConfig(): ConfigResolved {
       connectTtl: configState.channel.connectTtl ?? CHANNEL_CONNECT_TTL_MS,
       bufferLimit: configState.channel.bufferLimit ?? CHANNEL_BUFFER_LIMIT_BYTES,
       bufferLimitBinary: configState.channel.bufferLimitBinary ?? CHANNEL_BUFFER_LIMIT_BINARY_BYTES,
-      messageLimit: configState.channel.messageLimit ?? CHANNEL_MESSAGE_LIMIT_BYTES,
       sseFlushThrottle: configState.channel.sseFlushThrottle ?? SSE_FLUSH_THROTTLE_MS,
       ssePostIdleFlushDelay: configState.channel.ssePostIdleFlushDelay ?? SSE_POST_IDLE_FLUSH_DELAY_MS,
     },
@@ -470,7 +458,6 @@ function applyChannelConfig(val: unknown): void {
       case 'connectTtl':
       case 'bufferLimit':
       case 'bufferLimitBinary':
-      case 'messageLimit':
       case 'sseFlushThrottle':
       case 'ssePostIdleFlushDelay':
         assertUsage(typeof value === 'number', `\`${configPath}\` should be a number`)
