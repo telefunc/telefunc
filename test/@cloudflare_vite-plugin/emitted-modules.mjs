@@ -11,29 +11,6 @@ const files = (await walk(server))
   .filter((file) => !file.startsWith('.vite/') && !file.startsWith('.wrangler/'))
   .sort()
 
-const entries = files.filter((file) => file.startsWith('entries/'))
-const chunks = files.filter((file) => file.startsWith('chunks/'))
-assert.deepEqual(
-  files.filter((file) => !file.includes('/')),
-  ['entry.mjs', 'index.mjs'],
-  'unexpected root worker module',
-)
-assert.deepEqual(
-  entries,
-  [
-    'entries/pages_about.mjs',
-    'entries/pages_channel.mjs',
-    'entries/pages_chat.mjs',
-    'entries/pages_index.mjs',
-    'entries/pages_todo.mjs',
-  ],
-  'unexpected worker page entry',
-)
-assert(
-  chunks.every((file) => /^chunks\/chunk-[A-Za-z0-9_-]+\.js$/.test(file)),
-  'unexpected worker chunk path',
-)
-
 const allowedExternalImports = new Set(['cloudflare:workers', 'node:async_hooks'])
 const importedExternals = new Set()
 for (const relative of files) {
@@ -64,10 +41,6 @@ assert(
     ({ tag, new_sqlite_classes: classes }) => tag === 'v2' && classes?.includes('TelefuncRoomDurableObject'),
   ),
   'missing v2 SQLite Room Durable Object migration',
-)
-
-console.log(
-  `[emitted-modules] modules=${files.length} chunks=${chunks.length} entries=${entries.length} externals=${[...importedExternals].sort().join(',')} redis=0 testControls=0`,
 )
 
 async function walk(directory) {

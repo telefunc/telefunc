@@ -351,8 +351,6 @@ export async function onJoinChat(roomId) {
 }
 ```
 
-`{ tail: true }` captures the room's recent live messages the moment the telefunction returns the room, holding them server-side until the client's first `subscribe()`, then flushing them to it in order, ahead of the live stream. So a prompt subscribe won't miss a message published between the history read and going live, and where history and the live tail overlap, your render skips ids it has already shown:
-
 ```js
 // Chat.js (client)
 const { room, history } = await onJoinChat('lobby')
