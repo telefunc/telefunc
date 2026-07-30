@@ -4,10 +4,7 @@ import { IndexedPeer } from '../server/IndexedPeer.js'
 import { ACK_STATUS, TAG, decode } from '../shared-ws.js'
 import { waitForTelefunctionCallBarriers } from '../client/call-barrier.js'
 import { ShieldValidationError, isShieldValidationError } from '../../shared/ShieldValidationError.js'
-import {
-  ROOM_HEARTBEAT_INTERVAL_MS,
-  ROOM_MEMBER_KV_TTL_MS,
-} from '../constants.js'
+import { ROOM_HEARTBEAT_INTERVAL_MS, ROOM_MEMBER_KV_TTL_MS } from '../constants.js'
 import {
   DEFAULT_TRACK,
   frameWithMemberId,
@@ -619,6 +616,29 @@ describe('Room public behavior', () => {
     await quiet.publishBinary(new Uint8Array([1]))
     await quiet.publishBinary(new Uint8Array([2]), { track: 'screen', meta: { key: true } })
     expect(screen).toEqual([[2, { key: true }]])
+  })
+
+  it('expands binary subscriptions and demand from one canonical pair set', async () => {
+    const room = (await Room.create('binary-pairs')) as ServerRoom
+    const publisher = await room.join()
+    const expand = (
+      room as unknown as {
+        _binaryPairs: (wants: typeof allBinary, memberIds: string[]) => Array<[string, string]>
+      }
+    )._binaryPairs.bind(room)
+
+    expect(
+      expand(
+        {
+          everyMember: { all: false, tracks: ['screen'] },
+          members: { [publisher.id]: { all: false, tracks: ['camera'] } },
+        },
+        [publisher.id],
+      ),
+    ).toEqual([
+      [publisher.id, 'screen'],
+      [publisher.id, 'camera'],
+    ])
   })
 
   it('announces binary demand only after the demanded route is ready', async () => {

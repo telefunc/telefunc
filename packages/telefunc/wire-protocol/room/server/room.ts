@@ -1252,19 +1252,19 @@ class ServerRoom implements Room {
     // Binary: per-(publisher, track) keys in every mode — subscribing want-selectively at the
     // source makes upstream delivery pay-per-want, not filter-after-receive: dropping the last
     // want for a track drops its key, and the publisher's `receivers` hits 0.
-    this._syncKeyedSubs(this._binaryKeyUnsubs, wantAnyBinary ? this._binaryLanes(binaryWants, memberIds) : [], (lane) =>
+    const binaryPairs = open ? this._binaryPairs(binaryWants, memberIds) : []
+    this._syncKeyedSubs(this._binaryKeyUnsubs, wantAnyBinary ? this._binaryLanes(binaryPairs) : [], (lane) =>
       backend.subscribeLane(this.id, this._inc, lane, (framed, info) => this._onBinary(framed, info)),
     )
 
     // Demand (`onDemand`): gossip this node's local binary-demand transitions and push the
     // aggregated global count to any of our own members whose demand changed.
-    const demandPairs = open ? this._localDemandPairs(binaryWants, memberIds) : []
-    if (demandPairs.length === 0) this._demand.sync([])
+    if (binaryPairs.length === 0) this._demand.sync([])
     else {
       void this._binaryReady()
         .then(() => {
           const currentWants = this._aggregateBinaryWants()
-          this._demand.sync(this._state.closed ? [] : this._localDemandPairs(currentWants, this._state.listMemberIds()))
+          this._demand.sync(this._state.closed ? [] : this._binaryPairs(currentWants, this._state.listMemberIds()))
         })
         .catch(reportRoomError)
     }
@@ -1295,29 +1295,21 @@ class ServerRoom implements Room {
     return { everyMember, members: Object.fromEntries(members) }
   }
 
-  /** The backend lanes the aggregated binary wants resolve to — the exact upstream footprint.
+  /** The backend lanes the aggregated binary pairs resolve to — the exact upstream footprint.
    *  Per member: every-track wants take the default lane plus each *known* track's lane (named
    *  tracks are discovered — see `_ensureTrackAnnounced`); exact wants take exactly their lanes,
    *  eagerly (a lane needs no prior existence, so named subscribers never miss a frame). */
   private _binaryLanes(
-    wants: BinaryWants,
-    memberIds: string[],
+    pairs: Array<[string, string]>,
   ): Array<{ key: string; value: Extract<LaneId, { kind: 'binary' }> }> {
-    const lanes: Array<{ key: string; value: Extract<LaneId, { kind: 'binary' }> }> = []
-    for (const memberId of new Set([...memberIds, ...Object.keys(wants.members)])) {
-      const memberWants = wants.members[memberId]
-      const eff = memberWants ? mergeTrackWants(wants.everyMember, memberWants) : wants.everyMember
-      const tracks = eff.all ? [DEFAULT_TRACK, ...this._state.memberTracks(memberId)] : eff.tracks
-      for (const track of tracks) {
-        lanes.push({ key: `${memberId}\u0000${track}`, value: { kind: 'binary', member: memberId, track } })
-      }
-    }
-    return lanes
+    return pairs.map(([member, track]) => ({
+      key: `${member}\u0000${track}`,
+      value: { kind: 'binary', member, track },
+    }))
   }
 
-  /** The (member, track) pairs this instance has local binary demand for — the demand twin of
-   *  `_binaryKeys`, kept in member/track terms so it can be gossiped and aggregated. */
-  private _localDemandPairs(wants: BinaryWants, memberIds: string[]): Array<[string, string]> {
+  /** The canonical (member, track) expansion shared by lane subscriptions and local demand. */
+  private _binaryPairs(wants: BinaryWants, memberIds: string[]): Array<[string, string]> {
     const pairs: Array<[string, string]> = []
     for (const memberId of new Set([...memberIds, ...Object.keys(wants.members)])) {
       const memberWants = wants.members[memberId]
