@@ -540,12 +540,6 @@ describe('Redis real three-master Cluster CI certification', () => {
     return match
   }
 
-  function otherMaster(source: Master): Master {
-    const target = masters.find(({ id }) => id !== source.id)
-    if (target === undefined) throw new Error(`no relocation target exists for Cluster node '${source.id}'`)
-    return target
-  }
-
   function masterForNode(node: Redis): Master {
     const match = masters.find(({ host, port }) => host === node.options.host && port === node.options.port)
     if (match === undefined) throw new Error(`Cluster node '${node.options.host}:${node.options.port}' has no master`)
@@ -613,28 +607,14 @@ describe('Redis real three-master Cluster CI certification', () => {
     await assertClusterOk()
   }
 
-  async function restorePartialSlot(slotNumber: number, original: Master, partial: Master): Promise<void> {
-    const migrated = (await partial.client.cluster('GETKEYSINSLOT', slotNumber, 10_000)) as string[]
-    if (migrated.length === 0) {
-      await original.client.cluster('SETSLOT', slotNumber, 'STABLE')
-      await partial.client.cluster('SETSLOT', slotNumber, 'STABLE')
-      for (const master of masters) await master.client.cluster('SETSLOT', slotNumber, 'NODE', original.id)
-      await assertClusterOk()
-      return
-    }
-    for (const master of masters) await master.client.cluster('SETSLOT', slotNumber, 'NODE', partial.id)
-    await restoreSlot(slotNumber, original, partial)
-  }
-
   async function assertClusterOk(): Promise<void> {
     for (const master of masters) expect((await clusterInfo(master.client)).cluster_state).toBe('ok')
   }
 })
 
-function clusterClient(nodes: RedisClusterNode[], maxRedirections = 16): Cluster {
+function clusterClient(nodes: RedisClusterNode[]): Cluster {
   const client = new Cluster(nodes, {
     scaleReads: 'master',
-    maxRedirections,
     slotsRefreshTimeout: 2_000,
     redisOptions: { maxRetriesPerRequest: 2 },
     clusterRetryStrategy: (attempt) => (attempt <= 5 ? 20 : null),
