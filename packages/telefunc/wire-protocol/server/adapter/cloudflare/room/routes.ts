@@ -1,9 +1,6 @@
 /// <reference types="@cloudflare/workers-types" />
-// The readiness invariant (I7) and the CF handshake of readiness-ordering.md §2.3. One row per
-// (inc, lane_key, subscriber); the CURRENT leaseId is a VALUE, so re-establishment after a renewal loss
-// atomically REPLACES the prior lease in one UPSERT and can never coexist with an unexpired old row —
-// that is what makes the renewal-loss-before-expiry path exactly-once (no duplicate delivery). Routes are
-// inc-scoped, so a surviving old-inc subscription can never be a target of a recreated room (I11).
+// One exact-lease row per (incarnation, lane, subscriber). Re-establishment atomically replaces the
+// prior lease, and incarnation scoping fences recreated rooms from surviving old subscriptions.
 
 const ROUTE_TTL_MS = 90_000
 export const ROUTE_RENEW_EVERY_MS = ROUTE_TTL_MS / 3
@@ -19,8 +16,7 @@ export type RouteInstallation = {
   generationToken: string
 }
 
-// Establishment: the open-head check happens in the DO (it holds the head); this UPSERT replaces any
-// prior lease for the same (inc, lane, subscriber) in a single statement.
+// The DO checks the open head; this UPSERT atomically replaces the prior exact lease.
 export function upsertRoute(
   sql: SqlStorage,
   roomId: string,
@@ -63,8 +59,7 @@ export function listExpiredRouteInstallations(sql: SqlStorage, now: number): Rou
     .toArray()
 }
 
-// Renewal compares all four fields (inc, lane_key, subscriber, leaseId); a stale lease id matches nothing
-// and the renewal is lost.
+// Renewal matches the exact incarnation, lane, subscriber, and lease.
 export function renewRoute(
   sql: SqlStorage,
   inc: string,
@@ -87,8 +82,7 @@ export function renewRoute(
   return changed === 1
 }
 
-// Unsubscribe deletes only when all four match, so a stale renewal or a racing old lease can't resurrect
-// a removed route.
+// Exact-lease deletion prevents a racing old lease from removing its successor.
 export function deleteRoute(
   sql: SqlStorage,
   inc: string,
@@ -123,9 +117,8 @@ export function snapshotRoutes(sql: SqlStorage, inc: string, laneKey: string, no
     }))
 }
 
-// Delivery outcomes are guarded by the snapshotted lease. A late failure from a replaced lease cannot
-// increment or evict its successor. Success resets the consecutive-failure count; the third matching
-// failure makes the row non-live but retains it as the durable exact-lease invalidation source.
+// Outcomes are exact-lease guarded. Success resets failures; the third failure makes the row non-live
+// while retaining it as the durable invalidation source.
 export function recordRouteDeliverySuccess(
   sql: SqlStorage,
   inc: string,

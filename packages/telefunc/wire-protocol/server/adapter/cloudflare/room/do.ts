@@ -1,12 +1,6 @@
 /// <reference types="@cloudflare/workers-types" />
-// The class shell of the Cloudflare Room backend: `TelefuncRoomDurableObject` (one DO per room). It owns
-// the RPC surface the Room backend seam calls, the room DO's own authority clock (used for lease minting,
-// commit preconditions and TTLs — never a caller clock), acceptance-time route snapshots, and the alarm
-// janitor. Storage, retained chunking, routes and fanout are the invariant modules alongside it. The
-// per-lane fanout chains live here at the single room authority, including across facade instances.
-//
-// The Cloudflare entrypoint publishes a configured subclass as `TelefuncRoomDurableObject`; public Room
-// traffic and the conformance lane drive this same authority implementation.
+// One Durable Object per room owns authority time, durable state, acceptance snapshots, fanout chains,
+// and maintenance. The public Cloudflare entrypoint and conformance lane use this implementation.
 
 import { DurableObject } from 'cloudflare:workers'
 import type { CellMutation, CxResult, HeadCx, HeadNext, LaneId, RoomHead } from '../../../../backend/spi.js'
@@ -66,20 +60,15 @@ export type RegisterWire =
 const ROOM_MAINTENANCE_RETRY_MS = 30_000
 
 function headForRpc(head: StoredHead): RoomHead {
-  const result: RoomHead = {
+  return {
     rev: head.rev,
     currentInc: head.currentInc,
     state: head.state,
     config: head.config,
+    ...(head.closeLease === undefined ? {} : { closeLease: { ...head.closeLease } }),
   }
-  if (head.closeLease !== undefined) result.closeLease = { ...head.closeLease }
-  return result
 }
 
-// Extends the `cloudflare:workers` DurableObject base so the Room backend seam can call its methods over
-// RPC (a plain class would only expose `fetch`). One DO per room. The room DO owns all durable state
-// (head, cells, order, retained, routes, directory), acceptance transaction, and ephemeral delivery
-// chains. Fanout dispatches to the existing session-shard DO stubs derived from persisted namespace IDs.
 export class TelefuncRoomDurableObject extends DurableObject {
   readonly #sql: SqlStorage
   readonly #fanout: Fanout
@@ -100,19 +89,12 @@ export class TelefuncRoomDurableObject extends DurableObject {
       async (targets, frame, info, coordinatorIndex) => {
         const request: RoomShardFanoutRequest = {
           operation: 'deliver',
-          roomId: info.roomId,
-          inc: info.inc,
-          laneKey: info.laneKey,
+          ...info,
           targets,
           frame,
-          seq: info.seq,
-          timestamp: info.timestamp,
           path: String(coordinatorIndex ?? 0),
         }
-        const outcomes =
-          coordinatorIndex === undefined
-            ? await dispatchRoomShardFanout(this.#sessionNamespaceValue, request)
-            : await dispatchRoomShardFanoutViaCoordinator(this.#sessionNamespaceValue, request)
+        const outcomes = await this.#dispatchFanout(request, coordinatorIndex)
         await this.#settleDeliveryOutcomes(outcomes, info, coordinatorIndex)
       },
       (resume) => setTimeout(resume, 0),
@@ -122,8 +104,6 @@ export class TelefuncRoomDurableObject extends DurableObject {
     })
   }
 
-  // ── head ──
-
   async readHead(): Promise<RoomHead | null> {
     const head = readLiveHead(this.#sql, Date.now())
     return head === null ? null : headForRpc(head)
@@ -132,8 +112,7 @@ export class TelefuncRoomDurableObject extends DurableObject {
   async compareExchangeHead(cx: HeadCx, next: HeadNext): Promise<HeadCxResult> {
     const now = Date.now()
     let outcome!: ReturnType<typeof compareExchangeHead>
-    // One SQL transaction: single-object serialization gives head linearizability (I1). A validation
-    // throw rolls the transaction back and crosses the RPC boundary as a normal rejection.
+    // Single-object serialization is linearizable; validation throws roll back and reject the RPC.
     this.ctx.storage.transactionSync(() => {
       outcome = compareExchangeHead(this.#sql, cx, next, now, () => crypto.randomUUID())
     })
@@ -143,8 +122,6 @@ export class TelefuncRoomDurableObject extends DurableObject {
     if ('deleted' in outcome) return { ok: true, deleted: true }
     return { ok: true, head: headForRpc(outcome.head) }
   }
-
-  // ── cells ──
 
   async readCells(inc: string, sel: { keys: string[] } | { prefix: string }): Promise<CellsResult> {
     return readCells(this.#sql, inc, sel, Date.now())
@@ -160,8 +137,6 @@ export class TelefuncRoomDurableObject extends DurableObject {
     return result
   }
 
-  // ── commit ──
-
   async commitLane(
     roomId: string,
     inc: string,
@@ -173,8 +148,7 @@ export class TelefuncRoomDurableObject extends DurableObject {
     const key = laneKeyOf(lane)
     const frame = payload instanceof Uint8Array ? payload : new Uint8Array(payload)
     let accepted: { seq: number; timestamp: number; targets: RouteTarget[] } | null = null
-    // The acceptance transaction encodes the SAME precondition branch as Redis/memory. Zero-row match ⇒
-    // stale. A storage or validation failure rejects the RPC and rolls back the transaction.
+    // This is the Redis/memory precondition: zero matches are stale; failures reject and roll back.
     this.ctx.storage.transactionSync(() => {
       if (!commitPreconditionHolds(this.#sql, inc, lane, opts?.closingLease, now)) return
       if (opts?.requiredCellKeys !== undefined) {
@@ -187,28 +161,20 @@ export class TelefuncRoomDurableObject extends DurableObject {
       accepted = { seq: mark.seq, timestamp: mark.timestamp, targets }
     })
     if (accepted === null) return { stale: true }
-    const settled: { seq: number; timestamp: number; targets: RouteTarget[] } = accepted
-    const deliveryToken = this.#fanout.enqueue(inc, key, settled.targets, frame, {
+    const { seq, timestamp, targets } = accepted as { seq: number; timestamp: number; targets: RouteTarget[] }
+    const deliveryToken = this.#fanout.enqueue(inc, key, targets, frame, {
       roomId,
       inc,
       laneKey: key,
-      seq: settled.seq,
-      timestamp: settled.timestamp,
+      seq,
+      timestamp,
     })
-    return {
-      accepted: true,
-      seq: settled.seq,
-      timestamp: settled.timestamp,
-      receivers: settled.targets.length,
-      deliveryToken,
-    }
+    return { accepted: true, seq, timestamp, receivers: targets.length, deliveryToken }
   }
 
   async awaitDelivery(token: string): Promise<void> {
     await this.#fanout.await(token)
   }
-
-  // ── retained ──
 
   async readRetained(inc: string, lane: LaneId): Promise<RetainedResult | null> {
     return readRetained(this.#sql, inc, lane)
@@ -221,8 +187,6 @@ export class TelefuncRoomDurableObject extends DurableObject {
   async deleteRetainedLane(inc: string, lane?: LaneId, opts?: { ifSeq?: number }): Promise<void> {
     this.ctx.storage.transactionSync(() => deleteRetained(this.#sql, inc, lane, opts))
   }
-
-  // ── routes / readiness ──
 
   async registerRoute(
     roomId: string,
@@ -275,8 +239,7 @@ export class TelefuncRoomDurableObject extends DurableObject {
     })
     await this.#scheduleMaintenanceIfNeeded()
     if (generationInvalid) return { ok: false, terminal: true }
-    // A missing/non-live exact route inside the SAME generation is recoverable: the subscription
-    // lifecycle enters lost and establishes a fresh lease. Only generation identity loss is terminal.
+    // Missing exact routes recover with a fresh lease; only generation identity loss is terminal.
     return { ok: renewed }
   }
 
@@ -284,8 +247,6 @@ export class TelefuncRoomDurableObject extends DurableObject {
     this.ctx.storage.transactionSync(() => deleteRoute(this.#sql, inc, laneKey, subscriberDoId, leaseId))
     await this.#scheduleMaintenanceIfNeeded()
   }
-
-  // ── generation lifecycle ──
 
   async listGenerations(): Promise<string[]> {
     return listGenerations(this.#sql)
@@ -298,16 +259,13 @@ export class TelefuncRoomDurableObject extends DurableObject {
       throw new Error(`dropGeneration: refusing to drop the current incarnation '${inc}'`)
     }
     const installations = listRouteInstallations(this.#sql, inc)
-    // Subscriber uninstalls are fallible. Keep their durable route rows and generation entry intact
-    // until every exact-lease uninstall succeeds, so a retry can replay the same invalidations after a
-    // transport failure or crash. This is the generation analogue of data-first / gens-entry-last.
+    // Keep routes and generation durable until every fallible exact-lease uninstall succeeds, allowing
+    // retries after transport failure or crash.
     await Promise.all(installations.map((installation) => this.#invalidateInstallation(installation, true)))
     this.ctx.storage.transactionSync(() => dropGenerationRows(this.#sql, inc))
     this.#fanout.clearIncarnation(inc)
     await this.#scheduleMaintenanceIfNeeded()
   }
-
-  // ── directory (this DO, addressed as a singleton, is the best-effort projection store) ──
 
   async directoryPut(roomId: string, incTag: string): Promise<void> {
     this.ctx.storage.transactionSync(() => directoryPut(this.#sql, roomId, incTag))
@@ -323,8 +281,6 @@ export class TelefuncRoomDurableObject extends DurableObject {
   ): Promise<{ entries: { roomId: string; incTag: string }[]; cursor?: string }> {
     return directoryList(this.#sql, prefix, cursor)
   }
-
-  // ── alarm janitor ──
 
   async alarm(): Promise<void> {
     try {
@@ -347,8 +303,7 @@ export class TelefuncRoomDurableObject extends DurableObject {
       )
     })
 
-    // Each orphan is an independent retry unit. One failed subscriber cannot block another orphan or
-    // unrelated expiry/tombstone hygiene; its own generation and route rows remain durable for retry.
+    // Each orphan retries independently; failures retain only that generation's durable rows.
     const failedOrphans = new Set<string>()
     for (const inc of orphanIncs) {
       const installations = listRouteInstallations(this.#sql, inc)
@@ -387,14 +342,15 @@ export class TelefuncRoomDurableObject extends DurableObject {
   async #invalidateInstallation(installation: RouteInstallation, terminal: boolean = false): Promise<void> {
     const session = this.#sessionNamespaceValue
     await session.get(session.idFromString(installation.subscriberDoId)).telefuncRoomInvalidate({
-      roomId: installation.roomId,
-      inc: installation.inc,
-      laneKey: installation.laneKey,
-      subscriberDoId: installation.subscriberDoId,
-      leaseId: installation.leaseId,
-      generationToken: installation.generationToken,
+      ...installation,
       ...(terminal ? { terminal: true as const } : {}),
     })
+  }
+
+  #dispatchFanout(request: RoomShardFanoutRequest, coordinatorIndex?: number): Promise<RoomShardFanoutOutcome[]> {
+    return coordinatorIndex === undefined
+      ? dispatchRoomShardFanout(this.#sessionNamespaceValue, request)
+      : dispatchRoomShardFanoutViaCoordinator(this.#sessionNamespaceValue, request)
   }
 
   async #settleDeliveryOutcomes(
@@ -421,8 +377,7 @@ export class TelefuncRoomDurableObject extends DurableObject {
 
     const invalidationFailures: Error[] = []
     if (evicted.length > 0) {
-      // K=3 recovery remains exact-lease scoped. A coordinator bucket that delivered the frame also
-      // carries its invalidations, keeping the authority's own service-subrequest count bounded.
+      // K=3 invalidation stays exact-lease scoped and uses the delivery coordinator bucket.
       const request: RoomShardFanoutRequest = {
         operation: 'invalidate',
         roomId: info.roomId,
@@ -431,24 +386,21 @@ export class TelefuncRoomDurableObject extends DurableObject {
         targets: evicted,
         path: `${coordinatorIndex ?? 0}.invalidate`,
       }
-      const invalidations =
-        coordinatorIndex === undefined
-          ? await dispatchRoomShardFanout(this.#sessionNamespaceValue, request)
-          : await dispatchRoomShardFanoutViaCoordinator(this.#sessionNamespaceValue, request)
+      const invalidations = await this.#dispatchFanout(request, coordinatorIndex)
       for (const outcome of invalidations) {
         if (outcome.error !== undefined) invalidationFailures.push(new Error(outcome.error))
       }
     }
 
     if (deliveryFailures.length === 1 && invalidationFailures.length === 0) throw deliveryFailures[0]
-    if (deliveryFailures.length === 1 && invalidationFailures.length === 1) {
-      throw new AggregateError(
-        [deliveryFailures[0], invalidationFailures[0]],
-        'Cloudflare Room delivery and exact-route invalidation both failed',
-      )
-    }
     const failures = [...deliveryFailures, ...invalidationFailures]
-    if (failures.length > 0) throw new AggregateError(failures, 'Cloudflare Room fanout failed')
+    if (failures.length > 0) {
+      const message =
+        deliveryFailures.length === 1 && invalidationFailures.length === 1
+          ? 'Cloudflare Room delivery and exact-route invalidation both failed'
+          : 'Cloudflare Room fanout failed'
+      throw new AggregateError(failures, message)
+    }
   }
 
   async #scheduleMaintenanceIfNeeded(): Promise<void> {
@@ -484,9 +436,8 @@ function nextMaintenanceDeadline(sql: SqlStorage, now: number): number | null {
   return deadlines.length === 0 ? null : Math.min(...deadlines)
 }
 
-// The commit precondition: one boolean, two branches. Supplying a closing lease selects the narrow
-// closing-control branch outright, which is what makes every other lane stale while closing. `now` is
-// authority time, so an expired lease is stale even with the correct id.
+// A closing lease selects only the closing-control branch; all other lanes are stale while closing.
+// Authority time also makes an expired matching lease stale.
 function commitPreconditionHolds(
   sql: SqlStorage,
   inc: string,
@@ -498,14 +449,10 @@ function commitPreconditionHolds(
   return (
     sql
       .exec(
-        `SELECT 1 FROM head
-         WHERE id = 1 AND inc = ?
-           AND (
-             (? = 0 AND state = 'open')
-             OR
-             (? = 1 AND ? = 'control' AND state = 'closing'
-               AND lease_id = ? AND lease_until IS NOT NULL AND ? <= lease_until)
-           )`,
+        `SELECT 1 FROM head WHERE id = 1 AND inc = ? AND (
+          (? = 0 AND state = 'open') OR
+          (? = 1 AND ? = 'control' AND state = 'closing' AND lease_id = ? AND lease_until IS NOT NULL AND ? <= lease_until)
+        )`,
         inc,
         hasClosingLease,
         hasClosingLease,
@@ -517,8 +464,7 @@ function commitPreconditionHolds(
   )
 }
 
-// Factory glue for the developer-facing Cloudflare entrypoint. The exact returned class name is also the
-// Wrangler binding class name, while the closure captures the configured existing session namespace.
+// The named class is the Wrangler binding; its closure captures the configured session namespace.
 export function createTelefuncRoomDurableObjectClass(
   sessionBindingName: string = 'TelefuncDurableObject',
 ): typeof TelefuncRoomDurableObject {

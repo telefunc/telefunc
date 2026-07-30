@@ -107,9 +107,7 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
     instanceName: baseInstanceName,
     hooks: getTelefuncChannelHooks(),
   })
-  // Repeated entry-module evaluation shares the same raw driver and transport. The stable configuration
-  // identity lets the default installer avoid constructing a candidate while an explicit backend remains
-  // authoritative in either call order.
+  // Stable configuration shares the raw driver without displacing an explicit backend in either call order.
   const backendIdentity = cloudflareBackendIdentity(baseInstanceName, scale)
   let cloudflareBackend = cloudflareBackendSlot.current?.backend
   if (
@@ -211,8 +209,7 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
     }
 
     protected runWithRoomManager<T>(fn: () => T): T {
-      // The provider is lazy: ordinary fetch/socket work carries no Room state and does not reset
-      // hibernated sockets. The first backend call that actually needs Room materializes the epoch.
+      // The first real Room call materializes the epoch; ordinary fetch/socket work stays Room-free.
       return isAsyncMode() ? withCloudflareRoomSessionManager(() => this.activateRoomManager(), fn) : fn()
     }
 

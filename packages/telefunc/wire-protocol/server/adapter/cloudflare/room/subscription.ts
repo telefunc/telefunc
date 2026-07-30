@@ -77,51 +77,45 @@ export class CloudflareRoomSubscriptionAttempt implements SubscriptionAttempt {
   }
 
   invalidate(): void {
-    this.#close()
+    this.#finish('closed')
   }
 
   terminate(): void {
     if (this.#unsubscribed) return
     this.#unsubscribed = true
-    this.#terminate()
+    this.#finish('terminated')
     void this.#teardown().catch(console.error)
   }
 
   async unsubscribe(): Promise<void> {
     if (this.#unsubscribed) return
     this.#unsubscribed = true
-    this.#resolveReady()
-    this.#close()
+    this.#settleReadiness()
+    this.#finish('closed')
     await this.#teardown()
   }
 
   async #establish(): Promise<void> {
     try {
-      const registered = await this.#source.authority.registerRoute(
-        this.#source.roomId,
-        this.#source.inc,
-        this.#source.laneKey,
-        this.#source.subscriberDoId,
-        this.#leaseId,
-      )
+      const registered = await this.#source.authority.registerRoute(this.#source.roomId, ...this.#route())
       if (this.#isClosed()) return
       if (!('ok' in registered)) {
         const error = new Error(registered.reason)
         if (registered.terminal === true) {
-          this.#rejectReady(error)
-          this.#terminate()
+          this.#settleReadiness(error)
+          this.#finish('terminated')
           return
         }
         throw error
       }
       this.#generationToken = registered.generationToken
       this.#transition('ready')
-      this.#resolveReady()
+      this.#settleReadiness()
       this.#scheduleRenewal()
     } catch (error) {
       if (this.#isClosed()) return
-      this.#rejectReady(error)
-      this.#close()
+      this.#settleReadiness(error)
+      this.#finish('closed')
     }
   }
 
@@ -136,51 +130,35 @@ export class CloudflareRoomSubscriptionAttempt implements SubscriptionAttempt {
     this.#cancelRenewal = null
     if (this.#state !== 'ready') return
     try {
-      const renewed = await this.#source.authority.renewRoute(
-        this.#source.inc,
-        this.#source.laneKey,
-        this.#source.subscriberDoId,
-        this.#leaseId,
-        this.#generationToken,
-      )
+      const renewed = await this.#source.authority.renewRoute(...this.#route(), this.#generationToken)
       if (this.#state !== 'ready') return
       if (!renewed.ok) {
         if (renewed.terminal === true) this.terminate()
-        else this.#close()
+        else this.#finish('closed')
         return
       }
       this.#scheduleRenewal()
     } catch {
-      this.#close()
+      this.#finish('closed')
     }
   }
 
   async #teardown(): Promise<void> {
-    await this.#source.authority.unsubscribeRoute(
-      this.#source.inc,
-      this.#source.laneKey,
-      this.#source.subscriberDoId,
-      this.#leaseId,
-    )
+    await this.#source.authority.unsubscribeRoute(...this.#route())
   }
 
-  #close(): void {
-    if (this.#isClosed()) return
-    this.#cancelRenewal?.()
-    this.#cancelRenewal = null
-    if (!this.#readySettled) this.#rejectReady(new Error('Cloudflare Room subscription closed before acknowledgement'))
-    this.#transition('closed')
-    this.#onClosed()
+  #route(): readonly [string, string, string, string] {
+    return [this.#source.inc, this.#source.laneKey, this.#source.subscriberDoId, this.#leaseId]
   }
 
-  #terminate(): void {
+  #finish(state: 'closed' | 'terminated'): void {
     if (this.#isClosed()) return
     this.#cancelRenewal?.()
     this.#cancelRenewal = null
     if (!this.#readySettled) {
-      this.#rejectReady(new Error('Cloudflare Room subscription terminated before acknowledgement'))
+      this.#settleReadiness(new Error(`Cloudflare Room subscription ${state} before acknowledgement`))
     }
-    this.#transition('terminated')
+    this.#transition(state)
     this.#onClosed()
   }
 
@@ -188,16 +166,11 @@ export class CloudflareRoomSubscriptionAttempt implements SubscriptionAttempt {
     return this.#state === 'closed' || this.#state === 'terminated'
   }
 
-  #resolveReady(): void {
+  #settleReadiness(error?: unknown): void {
     if (this.#readySettled) return
     this.#readySettled = true
-    this.#settleReady.resolve()
-  }
-
-  #rejectReady(error: unknown): void {
-    if (this.#readySettled) return
-    this.#readySettled = true
-    this.#settleReady.reject(error)
+    if (error === undefined) this.#settleReady.resolve()
+    else this.#settleReady.reject(error)
   }
 
   #transition(state: SubscriptionAttemptState): void {

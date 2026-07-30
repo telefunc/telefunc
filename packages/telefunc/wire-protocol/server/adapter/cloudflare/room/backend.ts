@@ -1,7 +1,6 @@
 /// <reference types="@cloudflare/workers-types" />
 
-// The Cloudflare Room facade is deliberately split at the session shard boundary. The authority proxy has
-// no callback map: callback ownership belongs to the TelefuncDurableObject instance that installed it.
+// The authority proxy has no callback map; callback ownership stays on the installing session shard.
 
 import { getRawContext, isAsyncMode, restoreContext, type Context } from '../../../../../node/server/context/context.js'
 import type {
@@ -11,7 +10,6 @@ import type {
   BroadcastLane,
   CellMutation,
   CommitResult,
-  CxResult,
   HeadCx,
   HeadNext,
   LaneId,
@@ -23,8 +21,9 @@ import type {
 import { BACKEND_SPI_VERSION } from '../../../../backend/spi.js'
 import { CloudflareBroadcastTransport } from '../broadcast.js'
 import { laneKey as laneKeyOf } from './codec.js'
-import { CloudflareRoomSubscriptionAttempt, type CloudflareRoomSubscriptionSource } from './subscription.js'
-import type { CellsResult, CommitWire, HeadCxResult, RegisterWire, RetainedResult } from './do.js'
+import { CloudflareRoomSubscriptionAttempt } from './subscription.js'
+import type { TelefuncRoomDurableObject } from './do.js'
+import type { RouteInstallation } from './routes.js'
 
 const DIRECTORY_DO_NAME = '__telefunc_room_directory__'
 const ROOM_MANAGER = Symbol('telefunc.cloudflare.room-manager')
@@ -39,13 +38,7 @@ export const CLOUDFLARE_ROOM_CONTEXT_ERROR =
   // spellcheck-ignore  nodejs_als is a real Cloudflare compatibility flag (AsyncLocalStorage), not a typo
   'Cloudflare Room requires await-safe context. Import "telefunc/async_hooks" and enable the Cloudflare "nodejs_als" or "nodejs_compat" compatibility flag.'
 
-export type RoomShardDeliveryRequest = {
-  roomId: string
-  inc: string
-  laneKey: string
-  subscriberDoId: string
-  leaseId: string
-  generationToken: string
+export type RoomShardDeliveryRequest = RouteInstallation & {
   frame: Uint8Array
   seq: number
   timestamp: number
@@ -55,46 +48,7 @@ export type RoomShardInvalidationRequest = Omit<RoomShardDeliveryRequest, 'frame
   terminal?: true
 }
 
-export type CloudflareRoomAuthorityStub = {
-  readHead(): Promise<RoomHead | null>
-  compareExchangeHead(cx: HeadCx, next: HeadNext): Promise<HeadCxResult>
-  readCells(inc: string, sel: { keys: string[] } | { prefix: string }): Promise<CellsResult>
-  compareExchangeCells(inc: string, revision: string, mutations: CellMutation[]): Promise<CxResult>
-  commitLane(
-    roomId: string,
-    inc: string,
-    lane: LaneId,
-    payload: Uint8Array,
-    opts?: { retain?: boolean; closingLease?: string; requiredCellKeys?: string[] },
-  ): Promise<CommitWire>
-  awaitDelivery(token: string): Promise<void>
-  readRetained(inc: string, lane: LaneId): Promise<RetainedResult | null>
-  listRetained(inc: string): Promise<LaneId[]>
-  deleteRetainedLane(inc: string, lane?: LaneId, opts?: { ifSeq?: number }): Promise<void>
-  registerRoute(
-    roomId: string,
-    inc: string,
-    laneKey: string,
-    subscriberDoId: string,
-    leaseId: string,
-  ): Promise<RegisterWire>
-  renewRoute(
-    inc: string,
-    laneKey: string,
-    subscriberDoId: string,
-    leaseId: string,
-    expectedGenerationToken: string,
-  ): Promise<{ ok: boolean; terminal?: boolean }>
-  unsubscribeRoute(inc: string, laneKey: string, subscriberDoId: string, leaseId: string): Promise<void>
-  listGenerations(): Promise<string[]>
-  dropGeneration(inc: string): Promise<void>
-  directoryPut(roomId: string, incTag: string): Promise<void>
-  directoryDelete(roomId: string, incTag: string): Promise<void>
-  directoryList(
-    prefix: string,
-    cursor?: string,
-  ): Promise<{ entries: { roomId: string; incTag: string }[]; cursor?: string }>
-}
+export type CloudflareRoomAuthorityStub = Omit<TelefuncRoomDurableObject, 'alarm'>
 
 export type CloudflareRoomNamespace = {
   idFromName(name: string): unknown
@@ -131,18 +85,26 @@ export class CloudflareRoomSessionManager {
     receiver: BackendReceiver,
   ): CloudflareRoomSubscriptionAttempt {
     if (this.#disposed) throw new Error('Cloudflare Room session manager is disposed')
-    // Resolve the binding before installing even provisional local state. The per-isolate backend calls
-    // this method only after resolving this exact manager from raw async context.
+    // Resolve the binding before installing provisional local state.
     const authority = this.authority(roomId)
     const laneKey = laneKeyOf(lane)
-    const source: CloudflareRoomSubscriptionSource = {
+    const source = {
       roomId,
       inc,
       laneKey,
       subscriberDoId: this.#id,
       authority,
     }
-    return this.#openSubscription(source, receiver)
+    const key = JSON.stringify([roomId, inc, laneKey])
+    let attempt!: CloudflareRoomSubscriptionAttempt
+    attempt = new CloudflareRoomSubscriptionAttempt(source, receiver, {
+      onClosed: () => {
+        if (this.#entries.get(key) === attempt) this.#entries.delete(key)
+      },
+    })
+    this.#entries.set(key, attempt)
+    attempt.start()
+    return attempt
   }
 
   async deliver(request: RoomShardDeliveryRequest): Promise<void> {
@@ -182,22 +144,6 @@ export class CloudflareRoomSessionManager {
   authority(roomId: string): CloudflareRoomAuthorityStub {
     const namespace = this.#getRoomNamespace()
     return namespace.get(namespace.idFromName(roomId))
-  }
-
-  #openSubscription(
-    source: CloudflareRoomSubscriptionSource,
-    receiver: BackendReceiver,
-  ): CloudflareRoomSubscriptionAttempt {
-    const key = JSON.stringify([source.roomId, source.inc, source.laneKey])
-    let attempt!: CloudflareRoomSubscriptionAttempt
-    attempt = new CloudflareRoomSubscriptionAttempt(source, receiver, {
-      onClosed: () => {
-        if (this.#entries.get(key) === attempt) this.#entries.delete(key)
-      },
-    })
-    this.#entries.set(key, attempt)
-    attempt.start()
-    return attempt
   }
 }
 
@@ -239,28 +185,13 @@ export class CloudflareRoomBackend implements BackendDriver {
     const head = await this.#stub(roomId).readHead()
     return head === null ? null : { head }
   }
-  async compareExchangeHead(
-    roomId: string,
-    cx: HeadCx,
-    next: HeadNext,
-  ): Promise<
-    { ok: true; head: RoomHead } | { ok: true; deleted: true } | { conflict: true; current: RoomHead | null }
-  > {
+  async compareExchangeHead(roomId: string, cx: HeadCx, next: HeadNext) {
     return this.#stub(roomId).compareExchangeHead(cx, next)
   }
-  async readCells(
-    roomId: string,
-    inc: string,
-    sel: { keys: string[] } | { prefix: string },
-  ): Promise<{ revision: string; cells: Map<string, Uint8Array> } | { staleInc: true }> {
+  async readCells(roomId: string, inc: string, sel: { keys: string[] } | { prefix: string }) {
     return this.#stub(roomId).readCells(inc, sel)
   }
-  async compareExchangeCells(
-    roomId: string,
-    inc: string,
-    revision: string,
-    mutations: CellMutation[],
-  ): Promise<CxResult> {
+  async compareExchangeCells(roomId: string, inc: string, revision: string, mutations: CellMutation[]) {
     return this.#stub(roomId).compareExchangeCells(inc, revision, mutations)
   }
   async commitLane(

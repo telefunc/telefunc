@@ -1,8 +1,6 @@
 /// <reference types="@cloudflare/workers-types" />
-// The atomicity invariant (I1/I3/I4): SQL schema + head CX + cell CX + order rows. Every mutating verb
-// here runs inside the room DO's single `transactionSync`, so a single-object serialization gives head
-// linearizability, all-or-nothing cell batches, and atomic order advance. Time is always the room DO's
-// own authority clock, passed in as `now`.
+// Mutations run inside the room DO's `transactionSync`, giving linearizable head CX, atomic cell batches
+// and order advance. `now` is always authority time.
 
 import type { CellMutation, CxResult, HeadCx, HeadNext, RoomHead } from '../../../../backend/spi.js'
 import {
@@ -34,39 +32,26 @@ function toBytes(value: ArrayBuffer | Uint8Array): Uint8Array {
   return value instanceof Uint8Array ? value : new Uint8Array(value)
 }
 
+function rowExists(sql: SqlStorage, query: string, ...bindings: Array<string | number>): boolean {
+  return sql.exec(query, ...bindings).toArray().length === 1
+}
+
 export function initSchema(sql: SqlStorage): void {
-  // One DO per room, so nothing is keyed by roomId — the DO IS the room. `head` is a single row (id=1)
-  // or absent. `gen` is the generation registry (listGenerations + the fresh-inc guard) and also carries
-  // each generation's monotonic cell revision.
+  // The DO is the room: `head` is one row or absent; `gen` guards fresh incarnations and cell revisions.
   sql.exec(`
-    CREATE TABLE IF NOT EXISTS head (
-      id INTEGER PRIMARY KEY CHECK (id = 1),
-      rev TEXT NOT NULL, inc TEXT, state TEXT NOT NULL, config BLOB NOT NULL,
-      lease_id TEXT, lease_until INTEGER, expires_at INTEGER
-    );
+    CREATE TABLE IF NOT EXISTS head
+      (id INTEGER PRIMARY KEY CHECK (id = 1), rev TEXT NOT NULL, inc TEXT, state TEXT NOT NULL, config BLOB NOT NULL, lease_id TEXT, lease_until INTEGER, expires_at INTEGER);
     CREATE TABLE IF NOT EXISTS gen (inc TEXT PRIMARY KEY, token TEXT NOT NULL, revision INTEGER NOT NULL);
-    CREATE TABLE IF NOT EXISTS cell (
-      inc TEXT NOT NULL, key TEXT NOT NULL, bytes BLOB NOT NULL, expires_at INTEGER,
-      PRIMARY KEY (inc, key)
-    );
-    CREATE TABLE IF NOT EXISTS ord (
-      inc TEXT NOT NULL, domain TEXT NOT NULL, seq INTEGER NOT NULL, ts INTEGER NOT NULL,
-      PRIMARY KEY (inc, domain)
-    );
-    CREATE TABLE IF NOT EXISTS rt_manifest (
-      inc TEXT NOT NULL, lane_key TEXT NOT NULL, size INTEGER NOT NULL, seq INTEGER NOT NULL, ts INTEGER NOT NULL,
-      lane_kind TEXT NOT NULL, lane_member TEXT, lane_track TEXT,
-      PRIMARY KEY (inc, lane_key)
-    );
-    CREATE TABLE IF NOT EXISTS rt_chunk (
-      inc TEXT NOT NULL, lane_key TEXT NOT NULL, i INTEGER NOT NULL, bytes BLOB NOT NULL,
-      PRIMARY KEY (inc, lane_key, i)
-    );
-    CREATE TABLE IF NOT EXISTS route (
-      room_id TEXT NOT NULL, inc TEXT NOT NULL, lane_key TEXT NOT NULL, subscriber_do_id TEXT NOT NULL,
-      lease_id TEXT NOT NULL, generation_token TEXT NOT NULL, expires_at INTEGER NOT NULL, failures INTEGER NOT NULL DEFAULT 0,
-      PRIMARY KEY (inc, lane_key, subscriber_do_id)
-    );
+    CREATE TABLE IF NOT EXISTS cell
+      (inc TEXT NOT NULL, key TEXT NOT NULL, bytes BLOB NOT NULL, expires_at INTEGER, PRIMARY KEY (inc, key));
+    CREATE TABLE IF NOT EXISTS ord
+      (inc TEXT NOT NULL, domain TEXT NOT NULL, seq INTEGER NOT NULL, ts INTEGER NOT NULL, PRIMARY KEY (inc, domain));
+    CREATE TABLE IF NOT EXISTS rt_manifest
+      (inc TEXT NOT NULL, lane_key TEXT NOT NULL, size INTEGER NOT NULL, seq INTEGER NOT NULL, ts INTEGER NOT NULL, lane_kind TEXT NOT NULL, lane_member TEXT, lane_track TEXT, PRIMARY KEY (inc, lane_key));
+    CREATE TABLE IF NOT EXISTS rt_chunk
+      (inc TEXT NOT NULL, lane_key TEXT NOT NULL, i INTEGER NOT NULL, bytes BLOB NOT NULL, PRIMARY KEY (inc, lane_key, i));
+    CREATE TABLE IF NOT EXISTS route
+      (room_id TEXT NOT NULL, inc TEXT NOT NULL, lane_key TEXT NOT NULL, subscriber_do_id TEXT NOT NULL, lease_id TEXT NOT NULL, generation_token TEXT NOT NULL, expires_at INTEGER NOT NULL, failures INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (inc, lane_key, subscriber_do_id));
     CREATE TABLE IF NOT EXISTS directory (room_id TEXT PRIMARY KEY, inc_tag TEXT NOT NULL);
   `)
 }
@@ -104,8 +89,7 @@ export function directoryList(
   return more ? { entries, cursor: last.room_id } : { entries }
 }
 
-// The live head: a lapsed tombstone reads as absent (which reopens the absence epoch, I1). Reads never
-// consult a caller clock — `now` is authority time.
+// A lapsed tombstone reads absent; `now` is authority time.
 export function readLiveHead(sql: SqlStorage, now: number): StoredHead | null {
   const rows = sql.exec<HeadRow>('SELECT * FROM head WHERE id = 1').toArray()
   const row = rows[0]
@@ -126,9 +110,7 @@ export function hasGeneration(sql: SqlStorage, inc: string): boolean {
   return sql.exec('SELECT 1 FROM gen WHERE inc = ? LIMIT 1', inc).toArray().length > 0
 }
 
-// Non-reusable authority identity for one registered generation. The incarnation string is reusable
-// only after `dropGenerationRows()` removes this row; every route carries the token minted by the next
-// legal installation so stale work cannot authorize a lease in a later reuse of the same inc string.
+// A generation token prevents stale work from authorizing a lease after an incarnation string is reused.
 export function readGenerationToken(sql: SqlStorage, inc: string): string | null {
   return sql.exec<{ token: string }>('SELECT token FROM gen WHERE inc = ?', inc).toArray()[0]?.token ?? null
 }
@@ -145,32 +127,25 @@ function headCxMatches(sql: SqlStorage, cx: HeadCx, current: StoredHead | null, 
   if (current === null) return false
   const expect = cx.expect
   if ('closingLeaseExpired' in expect) {
-    return (
-      sql
-        .exec(
-          "SELECT 1 FROM head WHERE id = 1 AND rev = ? AND state = 'closing' AND lease_until IS NOT NULL AND lease_until < ?",
-          expect.rev,
-          now,
-        )
-        .toArray().length === 1
+    return rowExists(
+      sql,
+      "SELECT 1 FROM head WHERE id = 1 AND rev = ? AND state = 'closing' AND lease_until IS NOT NULL AND lease_until < ?",
+      expect.rev,
+      now,
     )
   }
   if ('closingLease' in expect) {
-    return (
-      sql
-        .exec(
-          "SELECT 1 FROM head WHERE id = 1 AND rev = ? AND state = 'closing' AND lease_id = ?",
-          expect.rev,
-          expect.closingLease,
-        )
-        .toArray().length === 1
+    return rowExists(
+      sql,
+      "SELECT 1 FROM head WHERE id = 1 AND rev = ? AND state = 'closing' AND lease_id = ?",
+      expect.rev,
+      expect.closingLease,
     )
   }
-  return sql.exec('SELECT 1 FROM head WHERE id = 1 AND rev = ?', expect.rev).toArray().length === 1
+  return rowExists(sql, 'SELECT 1 FROM head WHERE id = 1 AND rev = ?', expect.rev)
 }
 
-// Head CX — the whole compare-and-store, meant to be called INSIDE `transactionSync`. Validation throws
-// (programming error, never a conflict); a lost race returns a conflict with the current head.
+// Called inside `transactionSync`; invalid transitions throw, while lost races return the current head.
 export function compareExchangeHead(
   sql: SqlStorage,
   cx: HeadCx,
@@ -180,8 +155,7 @@ export function compareExchangeHead(
 ): HeadCxOutcome {
   assertHeadNextWellFormed(next)
   const current = readLiveHead(sql, now)
-  // Operation legality precedes the compare for the delete path only; every other transition is validated
-  // against the head the compare actually matched, so a genuine race still conflicts.
+  // Delete legality precedes comparison; other transitions validate the head that actually matched.
   assertHeadDeleteLegal(next, current)
   if (!headCxMatches(sql, cx, current, now)) return { conflict: true, current }
   if ('delete' in next) {
@@ -209,8 +183,7 @@ function storeHead(sql: SqlStorage, next: HeadWriteNext, now: number, mintRev: (
     leaseUntil,
     expiresAt,
   )
-  // A generation exists from the moment its inc is installed (registered inside this same CX) — that is
-  // what makes the fresh-inc guard deterministic. Empty until written; never re-zeroed on re-store.
+  // Registering the generation inside this CX makes the fresh-inc guard deterministic.
   if (next.head.currentInc !== null) {
     sql.exec('INSERT OR IGNORE INTO gen (inc, token, revision) VALUES (?, ?, 0)', next.head.currentInc, rev)
   }
@@ -229,8 +202,7 @@ function storeHead(sql: SqlStorage, next: HeadWriteNext, now: number, mintRev: (
 
 type CellsRead = { revision: string; cells: Map<string, Uint8Array> } | { staleInc: true }
 
-// Reads require only generation existence (staleInc iff head absent or currentInc ≠ inc); they stay
-// available while 'closing' because the closer's tail needs them.
+// Reads stay available while closing; staleInc means the head is absent or names another incarnation.
 export function readCells(
   sql: SqlStorage,
   inc: string,
@@ -275,8 +247,7 @@ function readRevision(sql: SqlStorage, inc: string): number {
   return row?.revision ?? 0
 }
 
-// Cell CX — all-or-nothing under the read-set revision, inside `transactionSync`. Writes additionally
-// require an OPEN head (unlike reads).
+// Cell writes are all-or-nothing under the read-set revision and require an open head.
 export function compareExchangeCells(
   sql: SqlStorage,
   inc: string,
@@ -331,13 +302,9 @@ export function advanceOrder(sql: SqlStorage, inc: string, domain: string, now: 
   return mark
 }
 
-// Drop every trace of one generation (cells, order, retained, routes, registry row). Refuses the current
-// incarnation is enforced by the caller (the DO), which holds the live head.
+// Drops every generation row; the DO separately refuses its live incarnation.
 export function dropGenerationRows(sql: SqlStorage, inc: string): void {
-  sql.exec('DELETE FROM cell WHERE inc = ?', inc)
-  sql.exec('DELETE FROM ord WHERE inc = ?', inc)
-  sql.exec('DELETE FROM rt_manifest WHERE inc = ?', inc)
-  sql.exec('DELETE FROM rt_chunk WHERE inc = ?', inc)
-  sql.exec('DELETE FROM route WHERE inc = ?', inc)
-  sql.exec('DELETE FROM gen WHERE inc = ?', inc)
+  for (const table of ['cell', 'ord', 'rt_manifest', 'rt_chunk', 'route', 'gen']) {
+    sql.exec(`DELETE FROM ${table} WHERE inc = ?`, inc)
+  }
 }

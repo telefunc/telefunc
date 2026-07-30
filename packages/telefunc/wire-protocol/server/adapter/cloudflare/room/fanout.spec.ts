@@ -7,6 +7,15 @@ import {
   type RoomShardFanoutRequest,
 } from './fanout.js'
 
+const target = (subscriberDoId: string, leaseId = subscriberDoId) => ({
+  subscriberDoId,
+  leaseId,
+  generationToken: 'generation',
+})
+const deliveryInfo = (seq = 1) => ({ roomId: 'room', inc: 'inc', laneKey: 'semantic', seq, timestamp: 1 })
+const targets = (count: number) =>
+  Array.from({ length: count }, (_, index) => target(`subscriber-${index}`, `lease-${index}`))
+
 test('rejects a queued delivery cancelled by incarnation cleanup before handoff', async () => {
   const firstStarted = deferred<void>()
   const releaseFirst = deferred<void>()
@@ -18,10 +27,9 @@ test('rejects a queued delivery cancelled by incarnation cleanup before handoff'
       await releaseFirst.promise
     }
   })
-  const target = { subscriberDoId: 'subscriber', leaseId: 'lease', generationToken: 'generation' }
-  const info = { roomId: 'room', inc: 'inc', laneKey: 'semantic', seq: 1, timestamp: 1 }
-  const first = fanout.enqueue('inc', 'semantic', [target], new Uint8Array([1]), info)
-  const second = fanout.enqueue('inc', 'semantic', [target], new Uint8Array([2]), { ...info, seq: 2 })
+  const route = target('subscriber', 'lease')
+  const first = fanout.enqueue('inc', 'semantic', [route], new Uint8Array([1]), deliveryInfo())
+  const second = fanout.enqueue('inc', 'semantic', [route], new Uint8Array([2]), deliveryInfo(2))
 
   await firstStarted.promise
   fanout.clearIncarnation('inc')
@@ -33,15 +41,11 @@ test('rejects a queued delivery cancelled by incarnation cleanup before handoff'
 })
 
 test('does not alias an old delivery token to a reconstructed authority attempt', async () => {
-  const target = { subscriberDoId: 'subscriber', leaseId: 'lease', generationToken: 'generation' }
-  const info = { roomId: 'room', inc: 'inc', laneKey: 'semantic', seq: 1, timestamp: 1 }
+  const route = target('subscriber', 'lease')
   const priorAuthority = new Fanout(async () => {})
-  const oldToken = priorAuthority.enqueue('inc', 'semantic', [target], new Uint8Array([1]), info)
+  const oldToken = priorAuthority.enqueue('inc', 'semantic', [route], new Uint8Array([1]), deliveryInfo())
   const reconstructedAuthority = new Fanout(async () => {})
-  const newToken = reconstructedAuthority.enqueue('inc', 'semantic', [target], new Uint8Array([2]), {
-    ...info,
-    seq: 2,
-  })
+  const newToken = reconstructedAuthority.enqueue('inc', 'semantic', [route], new Uint8Array([2]), deliveryInfo(2))
 
   await expect(reconstructedAuthority.await(oldToken)).rejects.toThrow('unknown delivery token')
   await expect(reconstructedAuthority.await(newToken)).resolves.toBeUndefined()
@@ -61,24 +65,8 @@ test('keeps the lane gated until every target attempt settles after one rejects'
     slowStarted.resolve()
     await releaseSlow.promise
   })
-  const info = { roomId: 'room', inc: 'inc', laneKey: 'semantic', seq: 1, timestamp: 1 }
-  const first = fanout.enqueue(
-    'inc',
-    'semantic',
-    [
-      { subscriberDoId: 'fast', leaseId: 'fast', generationToken: 'generation' },
-      { subscriberDoId: 'slow', leaseId: 'slow', generationToken: 'generation' },
-    ],
-    new Uint8Array([1]),
-    info,
-  )
-  const second = fanout.enqueue(
-    'inc',
-    'semantic',
-    [{ subscriberDoId: 'slow', leaseId: 'slow', generationToken: 'generation' }],
-    new Uint8Array([2]),
-    { ...info, seq: 2 },
-  )
+  const first = fanout.enqueue('inc', 'semantic', [target('fast'), target('slow')], new Uint8Array([1]), deliveryInfo())
+  const second = fanout.enqueue('inc', 'semantic', [target('slow')], new Uint8Array([2]), deliveryInfo(2))
 
   await slowStarted.promise
   await new Promise<void>((resolve) => setTimeout(resolve, 0))
@@ -95,30 +83,16 @@ test('does not issue a flat authority subrequest for every target above the Work
     authorityDispatches += 1
     for (const target of targets) delivered.add(target.subscriberDoId)
   })
-  const targets = Array.from({ length: 1_001 }, (_, index) => ({
-    subscriberDoId: `subscriber-${index}`,
-    leaseId: `lease-${index}`,
-    generationToken: 'generation',
-  }))
-  const token = fanout.enqueue('inc', 'semantic', targets, new Uint8Array([1]), {
-    roomId: 'room',
-    inc: 'inc',
-    laneKey: 'semantic',
-    seq: 1,
-    timestamp: 1,
-  })
+  const routes = targets(1_001)
+  const token = fanout.enqueue('inc', 'semantic', routes, new Uint8Array([1]), deliveryInfo())
 
   await fanout.await(token)
-  expect(delivered.size).toBe(targets.length)
+  expect(delivered.size).toBe(routes.length)
   expect(authorityDispatches).toBeLessThan(1_000)
 })
 
 test('keeps every recursive coordinator invocation within the configured fanout width', async () => {
-  const targets = Array.from({ length: ROOM_FANOUT_WIDTH ** 2 + 1 }, (_, index) => ({
-    subscriberDoId: `subscriber-${index}`,
-    leaseId: `lease-${index}`,
-    generationToken: 'generation',
-  }))
+  const routes = targets(ROOM_FANOUT_WIDTH ** 2 + 1)
   const invocationSubrequests: number[] = []
   const delivered = new Set<string>()
 
@@ -156,15 +130,15 @@ test('keeps every recursive coordinator invocation within the configured fanout 
     roomId: 'room',
     inc: 'inc',
     laneKey: 'semantic',
-    targets,
+    targets: routes,
     frame: new Uint8Array([1]),
     seq: 1,
     timestamp: 1,
     path: 'root',
   })
 
-  expect(outcomes).toHaveLength(targets.length)
-  expect(delivered.size).toBe(targets.length)
+  expect(outcomes).toHaveLength(routes.length)
+  expect(delivered.size).toBe(routes.length)
   expect(Math.max(...invocationSubrequests)).toBeLessThanOrEqual(ROOM_FANOUT_WIDTH)
 })
 
