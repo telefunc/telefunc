@@ -1,7 +1,6 @@
 import {
   BACKEND_SPI_VERSION,
-  MAX_CLOSE_LEASE_MS,
-  MIN_CLOSE_LEASE_MS,
+  laneKey,
   type BackendDriver,
   type BackendFactory,
   type BackendSpi,
@@ -16,11 +15,8 @@ import {
   RedisTransport,
 } from '@telefunc/redis'
 const _version: typeof BACKEND_SPI_VERSION = BACKEND_SPI_VERSION
-const _bounds: readonly [typeof MIN_CLOSE_LEASE_MS, typeof MAX_CLOSE_LEASE_MS] = [
-  MIN_CLOSE_LEASE_MS,
-  MAX_CLOSE_LEASE_MS,
-]
 const _lane: LaneId = { kind: 'semantic' }
+const _laneKey = laneKey(_lane)
 declare const _factory: BackendFactory
 declare const _backend: BackendSpi
 declare const _redisOptions: RedisRoomBackendOptions
@@ -34,8 +30,8 @@ const _noRuntimeHooks = new RedisRoomBackend(_redisOptions, { authorityNow: () =
 
 void [
   _version,
-  _bounds,
   _lane,
+  _laneKey,
   _factory,
   _backend,
   _redisBackend,
