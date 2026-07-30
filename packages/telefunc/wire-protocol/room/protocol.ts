@@ -221,10 +221,8 @@ type RoomSnapshotMetadata = {
 /** Serializer metadata of a `LocalParticipant` crossing the wire. */
 type ParticipantStubMetadata = {
   channelId: string
-  roomId: string
   id: string
   meta: ParticipantMeta
-  joinedAt: number
   selfDelivery: boolean
   identity: string | null
 }

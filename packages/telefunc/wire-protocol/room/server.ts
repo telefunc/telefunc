@@ -751,8 +751,8 @@ class ServerRoom implements Room {
     await this._admitMember(
       meta,
       identity,
-      (id, joinedAt) => {
-        participant = new ServerLocalParticipant(this, id, meta, joinedAt, selfDelivery, identity)
+      (id) => {
+        participant = new ServerLocalParticipant(this, id, meta, selfDelivery, identity)
         this._localParticipants.set(id, participant)
       },
       hidden,
@@ -819,7 +819,7 @@ class ServerRoom implements Room {
   private async _admitMember(
     meta: ParticipantMeta,
     identity: string | null,
-    track: (id: string, joinedAt: number) => void,
+    track: (id: string) => void,
     hidden = false,
   ): Promise<{ id: string; joinedAt: number }> {
     await this._assertOpen()
@@ -832,7 +832,7 @@ class ServerRoom implements Room {
     // Admission policy runs first, on the definitive member ID — a rejected join writes nothing.
     const onBeforeJoin = this._guards?.onBeforeJoin
     if (!hidden && onBeforeJoin) await onBeforeJoin({ id, meta, identity })
-    track(id, joinedAt)
+    track(id)
     this._syncSubs()
     let created = false
     try {
@@ -2062,18 +2062,15 @@ const SERVER_PARTICIPANT_BRAND: unique symbol = Symbol.for('telefunc.ServerRoomP
 class ServerLocalParticipant extends ParticipantBase {
   readonly [SERVER_PARTICIPANT_BRAND] = true
   /** @internal */ readonly _room: ServerRoom
-  /** @internal */ readonly _joinedAt: number
   constructor(
     serverRoom: ServerRoom,
     id: string,
     meta: ParticipantMeta,
-    joinedAt: number,
     selfDelivery: boolean,
     identity: string | null,
   ) {
     super(id, meta, selfDelivery, identity)
     this._room = serverRoom
-    this._joinedAt = joinedAt
   }
 
   static isServerLocalParticipant(value: unknown): value is ServerLocalParticipant {
