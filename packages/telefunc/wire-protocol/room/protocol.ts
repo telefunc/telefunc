@@ -521,10 +521,9 @@ const FRAME_FLAG_TRACK = 0b0000_0010
 const FRAME_FLAG_RETAIN = 0b0000_0100
 /** The only bits the framer defines. Any other bit set is a malformed or forward-incompatible frame. */
 const FRAME_FLAGS_KNOWN = FRAME_FLAG_META | FRAME_FLAG_TRACK | FRAME_FLAG_RETAIN
-/** Track names stay tiny — they ride every frame. */
-const TRACK_MAX_BYTES = 64
-/** Per-frame meta stays small — it rides every frame that carries it. */
-const META_MAX_BYTES = 4096
+/** Structural maxima of the one-byte track-length and two-byte metadata-length fields. */
+const TRACK_LENGTH_FIELD_MAX = 0xff
+const META_LENGTH_FIELD_MAX = 0xffff
 const frameTextEncoder = /* @__PURE__ */ new TextEncoder()
 const frameTextDecoder = /* @__PURE__ */ new TextDecoder('utf-8', { fatal: true })
 /** Binary relay format:
@@ -539,7 +538,10 @@ function frameWithMemberId(memberId: string, payload: Uint8Array, opts?: BinaryP
   if (opts?.track !== undefined) {
     assertUsage(typeof opts.track === 'string' && opts.track.length > 0, 'track should be a non-empty string')
     trackBytes = frameTextEncoder.encode(opts.track)
-    assertUsage(trackBytes.byteLength <= TRACK_MAX_BYTES, `track should be at most ${TRACK_MAX_BYTES} bytes`)
+    assertUsage(
+      trackBytes.byteLength <= TRACK_LENGTH_FIELD_MAX,
+      `track should be at most ${TRACK_LENGTH_FIELD_MAX} bytes`,
+    )
     flags |= FRAME_FLAG_TRACK
   }
   let metaBytes: Uint8Array | null = null
@@ -547,8 +549,8 @@ function frameWithMemberId(memberId: string, payload: Uint8Array, opts?: BinaryP
     assertUsage(isRecord(opts.meta), 'publishBinary() meta should be an object')
     metaBytes = frameTextEncoder.encode(stringify(opts.meta))
     assertUsage(
-      metaBytes.byteLength <= META_MAX_BYTES,
-      `publishBinary() meta should be at most ${META_MAX_BYTES} bytes once serialized`,
+      metaBytes.byteLength <= META_LENGTH_FIELD_MAX,
+      `publishBinary() meta should be at most ${META_LENGTH_FIELD_MAX} bytes once serialized`,
     )
     flags |= FRAME_FLAG_META
   }
@@ -578,9 +580,8 @@ function frameWithMemberId(memberId: string, payload: Uint8Array, opts?: BinaryP
 
 /** Split a binary relay frame into sender, track, per-frame meta, and payload. The one validating
  *  seam for an untrusted frame (a hand-crafted publish need not have gone through `frameWithMemberId`):
- *  `null` on truncation, an over-long track or meta (past the same bounds the framer enforces), an
- *  empty named track (`''` is the default lane), or meta that isn't valid serialized JSON. A `null`
- *  return means "reject this frame" — callers never see a half-parsed one. */
+ *  `null` on truncation, an empty named track (`''` is the default lane), or metadata that isn't valid
+ *  serialized JSON. A `null` return means "reject this frame" — callers never see a half-parsed one. */
 function unframeMemberId(data: Uint8Array): {
   from: string
   payload: Uint8Array
@@ -599,7 +600,7 @@ function unframeMemberId(data: Uint8Array): {
     if (data.byteLength < offset + 1) return null
     const trackLength = data[offset]!
     offset += 1
-    if (trackLength === 0 || trackLength > TRACK_MAX_BYTES || data.byteLength < offset + trackLength) return null
+    if (trackLength === 0 || data.byteLength < offset + trackLength) return null
     try {
       track = frameTextDecoder.decode(data.subarray(offset, offset + trackLength))
     } catch {
@@ -611,7 +612,7 @@ function unframeMemberId(data: Uint8Array): {
     if (data.byteLength < offset + 2) return null
     const metaLength = (data[offset]! << 8) | data[offset + 1]!
     offset += 2
-    if (metaLength > META_MAX_BYTES || data.byteLength < offset + metaLength) return null
+    if (data.byteLength < offset + metaLength) return null
     try {
       const parsedMeta: unknown = parse(frameTextDecoder.decode(data.subarray(offset, offset + metaLength)))
       if (!isRecord(parsedMeta)) return null // meta must be a record — scalars/arrays are rejected
@@ -692,10 +693,10 @@ function sanitizeBinaryWants(wants: unknown): BinaryWants | null {
 function sanitizeTrackWants(wants: unknown): TrackWants | null {
   if (!isRecord(wants) || typeof wants.all !== 'boolean' || !Array.isArray(wants.tracks)) return null
   // Bound by UTF-8 bytes, the same unit the frame path uses (`frameWithMemberId`) — a `.length` char
-  // count would admit a want no real ≤64-byte track can ever match.
+  // count could admit a want that doesn't fit the frame's one-byte track-length field.
   if (
     !wants.tracks.every(
-      (track) => typeof track === 'string' && frameTextEncoder.encode(track).byteLength <= TRACK_MAX_BYTES,
+      (track) => typeof track === 'string' && frameTextEncoder.encode(track).byteLength <= TRACK_LENGTH_FIELD_MAX,
     )
   )
     return null

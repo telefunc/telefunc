@@ -167,9 +167,9 @@ type PublishOptions = {
 
 /** Publish-side binary options. */
 type BinaryPublishOptions = {
-  /** Named substream (≤ 64 bytes) — subscribers can filter by it. Default: the default track. */
+  /** Named substream (≤ 255 UTF-8 bytes) — subscribers can filter by it. Default: the default track. */
   track?: string
-  /** Per-frame metadata surfaced as `info.meta` (≤ 4 KB serialized). */
+  /** Per-frame metadata surfaced as `info.meta` (≤ 65,535 bytes serialized). */
   meta?: Record<string, unknown>
   /** Keep this as the track's last-write-wins retained frame. */
   retain?: boolean
