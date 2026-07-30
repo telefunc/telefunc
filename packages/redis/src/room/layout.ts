@@ -302,16 +302,44 @@ return 1
 export const VALIDATE_GENERATION_CMD = 'tfRoomValidateGeneration'
 export const VALIDATE_GENERATION_KEYS = 3
 
-// The durable invalidation sources are removed atomically and LAST, after every fallible local
-// UNSUBSCRIBE cleanup succeeds. A failed cleanup therefore leaves both values available for retry.
-export const DROP_GENERATION_FINALIZE_LUA = `
-redis.call('SREM', KEYS[1], ARGV[1])
-redis.call('HDEL', KEYS[2], ARGV[1])
+// Begin snapshots existence and the immutable generation token while the gens membership still blocks
+// reuse. An absent generation is a completed no-op; the current incarnation is never droppable.
+export const DROP_GENERATION_BEGIN_LUA = `${NOW_FN}
+local now, inc = tf_now(ARGV[1]), ARGV[2]
+local head = tf_head(KEYS[1], now)
+if head and head.inc == inc then
+  return redis.error_reply("dropGeneration: refusing to drop the current incarnation '" .. inc .. "'")
+end
+if redis.call('SISMEMBER', KEYS[2], inc) == 0 then return '{"exists":false}' end
+local token = redis.call('HGET', KEYS[3], inc)
+if not token then return redis.error_reply('dropGeneration: generation token is missing') end
+return '{"exists":true,"token":' .. cjson.encode(token) .. '}'
+`
+
+export const DROP_GENERATION_BEGIN_CMD = 'tfRoomDropGenerationBegin'
+export const DROP_GENERATION_BEGIN_KEYS = 3
+
+// Finalize only the generation captured by begin, after its manifest and members are gone.
+export const DROP_GENERATION_FINALIZE_LUA = `${NOW_FN}
+local now, inc, expected_token = tf_now(ARGV[1]), ARGV[2], ARGV[3]
+local head = tf_head(KEYS[1], now)
+if head and head.inc == inc then
+  return redis.error_reply("dropGeneration: incarnation '" .. inc .. "' became current during deletion")
+end
+if redis.call('SISMEMBER', KEYS[2], inc) == 0 then return 0 end
+if redis.call('HGET', KEYS[3], inc) ~= expected_token then
+  return redis.error_reply('dropGeneration: generation changed during deletion')
+end
+if redis.call('EXISTS', KEYS[4]) == 1 then
+  return redis.error_reply('dropGeneration: generation inventory is not empty')
+end
+redis.call('SREM', KEYS[2], inc)
+redis.call('HDEL', KEYS[3], inc)
 return 1
 `
 
 export const DROP_GENERATION_FINALIZE_CMD = 'tfRoomDropGenerationFinalize'
-export const DROP_GENERATION_FINALIZE_KEYS = 2
+export const DROP_GENERATION_FINALIZE_KEYS = 4
 
 // CELLS CX — all mutations or none; success implies the head precondition (open + inc) held at apply
 // time; the revision is the coarse per-generation counter, allowed to over-conflict but never mislead.
@@ -500,6 +528,11 @@ export const REDIS_ROOM_COMMANDS = {
     lua: VALIDATE_GENERATION_LUA,
     numberOfKeys: VALIDATE_GENERATION_KEYS,
   },
+  dropGenerationBegin: {
+    name: DROP_GENERATION_BEGIN_CMD,
+    lua: DROP_GENERATION_BEGIN_LUA,
+    numberOfKeys: DROP_GENERATION_BEGIN_KEYS,
+  },
   dropGenerationFinalize: {
     name: DROP_GENERATION_FINALIZE_CMD,
     lua: DROP_GENERATION_FINALIZE_LUA,
@@ -528,9 +561,16 @@ export const REDIS_ROOM_COMMAND_KEYS = {
     gensKey(prefix, roomId),
     generationTokensKey(prefix, roomId),
   ],
-  dropGenerationFinalize: (prefix: string, roomId: string) => [
+  dropGenerationBegin: (prefix: string, roomId: string) => [
+    headKey(prefix, roomId),
     gensKey(prefix, roomId),
     generationTokensKey(prefix, roomId),
+  ],
+  dropGenerationFinalize: (prefix: string, roomId: string, inc: string) => [
+    headKey(prefix, roomId),
+    gensKey(prefix, roomId),
+    generationTokensKey(prefix, roomId),
+    generationKeysKey(prefix, roomId, inc),
   ],
   cellsCx: (prefix: string, roomId: string, inc: string, cells: readonly string[]) => [
     headKey(prefix, roomId),

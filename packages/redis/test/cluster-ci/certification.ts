@@ -293,6 +293,53 @@ describe('Redis real three-master Cluster CI certification', () => {
     }
   })
 
+  it('does not finalize a generation installed after an absent drop snapshot', async () => {
+    const prefix = uniquePrefix('drop-absent-race')
+    const roomId = 'drop-absent-race-room'
+    const inc = 'drop-absent-race-inc'
+    const client = clusterClient(CLUSTER_NODES)
+    await client.ping()
+    const backend = new RedisRoomBackend({ redis: client, prefix })
+    const authority = new RedisRoomBackend({ redis: client, prefix })
+    const snapshotRead = deferred()
+    const releaseDrop = deferred()
+    const commands = client as unknown as Record<string, ((...args: unknown[]) => Promise<unknown>) | undefined>
+    const begin = commands.tfRoomDropGenerationBegin
+    const smembers = client.smembers.bind(client)
+    if (begin === undefined) {
+      client.smembers = (async (key: string) => {
+        const result = await smembers(key)
+        if (key === `${genPrefix(prefix, roomId, inc)}:keys`) {
+          snapshotRead.resolve()
+          await releaseDrop.promise
+        }
+        return result
+      }) as typeof client.smembers
+    } else {
+      const bound = begin.bind(client)
+      commands.tfRoomDropGenerationBegin = async (...args) => {
+        const result = await bound(...args)
+        snapshotRead.resolve()
+        await releaseDrop.promise
+        return result
+      }
+    }
+    try {
+      const dropping = backend.dropGeneration(roomId, inc)
+      await snapshotRead.promise
+      await open(authority, roomId, inc)
+      releaseDrop.resolve()
+      await dropping
+      expect((await authority.readHead(roomId))?.head.currentInc).toBe(inc)
+      expect(await authority.listGenerations(roomId)).toContain(inc)
+    } finally {
+      releaseDrop.resolve()
+      client.smembers = smembers as typeof client.smembers
+      if (begin !== undefined) commands.tfRoomDropGenerationBegin = begin
+      await Promise.allSettled([backend.dispose(), authority.dispose(), client.quit()])
+    }
+  })
+
   it('exposes terminal attempts so consumer replacement can fail once, recover, and deliver', async () => {
     const topology = cluster.nodes('master').sort(compareRedisNodes)
     const originals = topology.map((node) => [node, node.duplicate.bind(node)] as const)
