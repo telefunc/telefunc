@@ -14,8 +14,6 @@ import {
 type HeadWriteNext = Extract<HeadNext, { head: unknown }>
 export type StoredHead = RoomHead & { expiresAt: number | null }
 
-export const GEN_ORPHAN_GRACE_MS = 60_000
-
 type HeadCxOutcome =
   | { ok: true; head: StoredHead }
   | { ok: true; deleted: true }
@@ -46,9 +44,7 @@ export function initSchema(sql: SqlStorage): void {
       rev TEXT NOT NULL, inc TEXT, state TEXT NOT NULL, config BLOB NOT NULL,
       lease_id TEXT, lease_until INTEGER, expires_at INTEGER
     );
-    CREATE TABLE IF NOT EXISTS gen (
-      inc TEXT PRIMARY KEY, token TEXT NOT NULL, revision INTEGER NOT NULL, orphan_since INTEGER
-    );
+    CREATE TABLE IF NOT EXISTS gen (inc TEXT PRIMARY KEY, token TEXT NOT NULL, revision INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS cell (
       inc TEXT NOT NULL, key TEXT NOT NULL, bytes BLOB NOT NULL, expires_at INTEGER,
       PRIMARY KEY (inc, key)
@@ -217,12 +213,7 @@ function storeHead(sql: SqlStorage, next: HeadWriteNext, now: number, mintRev: (
   // A generation exists from the moment its inc is installed (registered inside this same CX) — that is
   // what makes the fresh-inc guard deterministic. Empty until written; never re-zeroed on re-store.
   if (next.head.currentInc !== null) {
-    sql.exec(
-      'INSERT OR IGNORE INTO gen (inc, token, revision, orphan_since) VALUES (?, ?, 0, NULL)',
-      next.head.currentInc,
-      rev,
-    )
-    sql.exec('UPDATE gen SET orphan_since = NULL WHERE inc = ?', next.head.currentInc)
+    sql.exec('INSERT OR IGNORE INTO gen (inc, token, revision) VALUES (?, ?, 0)', next.head.currentInc, rev)
   }
   const stored: StoredHead = {
     rev,
@@ -350,33 +341,4 @@ export function dropGenerationRows(sql: SqlStorage, inc: string): void {
   sql.exec('DELETE FROM rt_chunk WHERE inc = ?', inc)
   sql.exec('DELETE FROM route WHERE inc = ?', inc)
   sql.exec('DELETE FROM gen WHERE inc = ?', inc)
-}
-
-// Orphan age is observation-based: the close path does not write cleanup metadata. A mechanical sweep
-// first stamps every non-current generation it sees, then returns only entries whose full grace window
-// has elapsed. The caller deletes those entries with dropGenerationRows(), preserving physical scoping.
-export function observeAndListGraceAgedOrphans(
-  sql: SqlStorage,
-  currentInc: string | null,
-  now: number,
-  graceMs: number,
-): string[] {
-  if (currentInc !== null) {
-    sql.exec('UPDATE gen SET orphan_since = NULL WHERE inc = ?', currentInc)
-    sql.exec('UPDATE gen SET orphan_since = ? WHERE inc != ? AND orphan_since IS NULL', now, currentInc)
-    return sql
-      .exec<{ inc: string }>(
-        'SELECT inc FROM gen WHERE inc != ? AND orphan_since IS NOT NULL AND orphan_since + ? <= ?',
-        currentInc,
-        graceMs,
-        now,
-      )
-      .toArray()
-      .map((row) => row.inc)
-  }
-  sql.exec('UPDATE gen SET orphan_since = ? WHERE orphan_since IS NULL', now)
-  return sql
-    .exec<{ inc: string }>('SELECT inc FROM gen WHERE orphan_since IS NOT NULL AND orphan_since + ? <= ?', graceMs, now)
-    .toArray()
-    .map((row) => row.inc)
 }

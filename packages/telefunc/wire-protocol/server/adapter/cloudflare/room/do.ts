@@ -33,10 +33,8 @@ import {
   directoryList,
   directoryPut,
   dropGenerationRows,
-  GEN_ORPHAN_GRACE_MS,
   initSchema,
   listGenerations,
-  observeAndListGraceAgedOrphans,
   readCells,
   readGenerationToken,
   readLiveHead,
@@ -440,7 +438,7 @@ export class TelefuncRoomDurableObject extends DurableObject {
     this.ctx.storage.transactionSync(() => {
       this.#sql.exec('DELETE FROM cell WHERE expires_at IS NOT NULL AND expires_at <= ?', now)
       const currentInc = readLiveHead(this.#sql, now)?.currentInc ?? null
-      orphanIncs = observeAndListGraceAgedOrphans(this.#sql, currentInc, now, GEN_ORPHAN_GRACE_MS)
+      orphanIncs = listGenerations(this.#sql).filter((inc) => inc !== currentInc)
       // A lapsed tombstone is reclaimed through the delete path (this backend has no native head TTL).
       this.#sql.exec(
         "DELETE FROM head WHERE id = 1 AND state = 'closed' AND expires_at IS NOT NULL AND expires_at <= ?",
