@@ -66,8 +66,8 @@ abstract class ParticipantBase implements LocalParticipant {
     this._pendingInbox = null
     if (!held) return
     for (const { msg, ackResolve } of held) {
-      const reply = forwarder(msg)
-      if (ackResolve) void Promise.resolve(reply ?? { ok: true, result: undefined }).then(ackResolve)
+      const reply: DmReply | Promise<DmReply> = forwarder(msg) ?? { ok: true, result: undefined }
+      if (ackResolve) void Promise.resolve(reply).then(ackResolve)
     }
   }
 
