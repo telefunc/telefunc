@@ -269,6 +269,23 @@ declare const redisClient: RedisBroadcastOptions['redis']
 const redisInstallOptions: InstallRedisOptions = { prefix: 'tf:' }
 const redisBroadcastOptions: RedisBroadcastOptions = { redis: redisClient, prefix: 'tf:' }
 const redisTransport = new RedisTransport(redisBroadcastOptions)
+type ReleasedRedisTransport = {
+  send(key: string, payload: string): Promise<{ seq: number; timestamp: number }>
+  sendBinary(key: string, payload: Uint8Array): Promise<{ seq: number; timestamp: number }>
+  listen(key: string, onMessage: (payload: string, info: { seq: number; timestamp: number }) => void): () => void
+  listenBinary(
+    key: string,
+    onMessage: (payload: Uint8Array, info: { seq: number; timestamp: number }) => void,
+  ): () => void
+}
+type _redisTransportShape = Assert<Extends<InstanceType<typeof RedisTransport>, ReleasedRedisTransport>>
+const redisTextSend: Promise<{ seq: number; timestamp: number }> = redisTransport.send('released', 'payload')
+const redisBinarySend: Promise<{ seq: number; timestamp: number }> = redisTransport.sendBinary(
+  'released',
+  new Uint8Array(),
+)
+const stopRedisText = redisTransport.listen('released', (_payload, info) => void info.seq)
+const stopRedisBinary = redisTransport.listenBinary('released', (_payload, info) => void info.timestamp)
 declare const redisRoomBackendOptions: RedisRoomBackendOptions
 const redisRoomBackend: BackendDriver = new RedisRoomBackend(redisRoomBackendOptions)
 // @ts-expect-error the released constructor has no test-hook/runtime dependency argument
@@ -298,6 +315,10 @@ void [
   call,
   node,
   redisTransport,
+  redisTextSend,
+  redisBinarySend,
+  stopRedisText,
+  stopRedisBinary,
   redisRoomBackend,
   noRuntimeHooks,
   pinServerContextMembers,
