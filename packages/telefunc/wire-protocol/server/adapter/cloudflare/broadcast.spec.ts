@@ -283,17 +283,24 @@ describe('cloudflare broadcast routing', () => {
   it('writes KV presence on subscribe and reads it during publish fanout', async () => {
     const transport = new CloudflareBroadcastTransport({ baseInstanceName: 'telefunc', scale: 1 })
     const kv = createMockKV()
+    const authority = createAuthorityState()
 
-    transport.attachBinding(createBasicBinding(), 'TelefuncDurableObject')
+    const binding = createBasicBinding({
+      onPublish: (_, request) => transport.publishToSubscribers(authority, request),
+    })
+    transport.attachBinding(binding, 'TelefuncDurableObject')
     transport.attachKV(kv)
     transport.attachIsolateInfo('telefunc-shard-weur-0', 'weur')
 
     const subscription = transport.openSubscription({ key: 'room:test', kind: 'text' }, () => {})
     await subscription.ready
 
-    // KV should have a presence record with the representative DO name as value
-    const value = await kv.get(`tfps:${encodeURIComponent('room:test')}:weur:telefunc-shard-weur-0`)
+    const value = await kv.get('tfps:text%3Aroom%3Atest:weur:telefunc-shard-weur-0')
     expect(value).toBe('telefunc-shard-weur-0')
+
+    const binary = await transport.publish({ key: 'room:test', kind: 'binary' }, new Uint8Array([1]))
+    const text = await transport.publish({ key: 'room:test', kind: 'text' }, new TextEncoder().encode('"text"'))
+    expect([binary.receivers, text.receivers]).toEqual([0, 1])
 
     await subscription.unsubscribe()
   })
@@ -305,11 +312,10 @@ describe('cloudflare broadcast routing', () => {
 
     await authorityState.getOrInitAuthorityBucket('room:first-touch', 'weur')
 
-    // Set up KV presence for two buckets
-    await kv.put(`tfps:${encodeURIComponent('room:first-touch')}:weur:telefunc-shard-weur-0`, 'telefunc-shard-weur-0', {
+    await kv.put('tfps:text%3Aroom%3Afirst-touch:weur:telefunc-shard-weur-0', 'telefunc-shard-weur-0', {
       expirationTtl: 90,
     })
-    await kv.put(`tfps:${encodeURIComponent('room:first-touch')}:apac:telefunc-shard-apac-0`, 'telefunc-shard-apac-0', {
+    await kv.put('tfps:text%3Aroom%3Afirst-touch:apac:telefunc-shard-apac-0', 'telefunc-shard-apac-0', {
       expirationTtl: 90,
     })
 
@@ -510,14 +516,13 @@ describe('cloudflare broadcast routing', () => {
     )
     transport.attachKV(kv)
 
-    // Set up KV presence for three buckets
-    await kv.put(`tfps:${encodeURIComponent('room:test')}:weur:telefunc-shard-weur-0`, 'telefunc-shard-weur-0', {
+    await kv.put('tfps:text%3Aroom%3Atest:weur:telefunc-shard-weur-0', 'telefunc-shard-weur-0', {
       expirationTtl: 90,
     })
-    await kv.put(`tfps:${encodeURIComponent('room:test')}:apac:telefunc-shard-apac-0`, 'telefunc-shard-apac-0', {
+    await kv.put('tfps:text%3Aroom%3Atest:apac:telefunc-shard-apac-0', 'telefunc-shard-apac-0', {
       expirationTtl: 90,
     })
-    await kv.put(`tfps:${encodeURIComponent('room:test')}:eeur:telefunc-shard-eeur-0`, 'telefunc-shard-eeur-0', {
+    await kv.put('tfps:text%3Aroom%3Atest:eeur:telefunc-shard-eeur-0', 'telefunc-shard-eeur-0', {
       expirationTtl: 90,
     })
 
@@ -655,11 +660,10 @@ describe('cloudflare broadcast routing', () => {
     )
     transport.attachKV(kv)
 
-    // Set up KV presence for two buckets
-    await kv.put(`tfps:${encodeURIComponent('room:test')}:weur:telefunc-shard-weur-0`, 'telefunc-shard-weur-0', {
+    await kv.put('tfps:text%3Aroom%3Atest:weur:telefunc-shard-weur-0', 'telefunc-shard-weur-0', {
       expirationTtl: 90,
     })
-    await kv.put(`tfps:${encodeURIComponent('room:test')}:apac:telefunc-shard-apac-0`, 'telefunc-shard-apac-0', {
+    await kv.put('tfps:text%3Aroom%3Atest:apac:telefunc-shard-apac-0', 'telefunc-shard-apac-0', {
       expirationTtl: 90,
     })
 
@@ -702,11 +706,11 @@ describe('cloudflare broadcast routing', () => {
     const subscription = transport.openSubscription({ key: 'room:test', kind: 'text' }, () => {})
     await subscription.ready
 
-    const presenceKey = `tfps:${encodeURIComponent('room:test')}:weur:telefunc-shard-weur-0`
-    expect(await kv.get(presenceKey)).toBe('telefunc-shard-weur-0')
+    const key = 'tfps:text%3Aroom%3Atest:weur:telefunc-shard-weur-0'
+    expect(await kv.get(key)).toBe('telefunc-shard-weur-0')
 
     await subscription.unsubscribe()
 
-    expect(await kv.get(presenceKey)).toBeNull()
+    expect(await kv.get(key)).toBeNull()
   })
 })
