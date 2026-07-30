@@ -49,14 +49,13 @@ import {
   retainedKeyPrefix,
   revKey,
 } from './layout.js'
-import { RedisSubscriptionDriver, type RedisGenerationAttempt } from './subscriber-transport.js'
+import { RedisSubscriptionDriver } from './subscriber-transport.js'
 
 const DEFAULT_MAX_RETAINED_BYTES = 16 * 1024 * 1024
 const DIRECTORY_PAGE_SIZE = 100
 const STABLE_READ_ATTEMPTS = 8
 const SCAN_COUNT = 250
 const NEWLINE = 0x0a
-export const REDIS_GENERATION_CAPTURE_TTL_MS = 90_000
 
 function assertOrderingPosition(seq: number, timestamp: number, context: string): void {
   if (!Number.isSafeInteger(seq) || seq <= 0 || !Number.isSafeInteger(timestamp) || timestamp < 0) {
@@ -224,8 +223,8 @@ export class RedisRoomBackend implements BackendDriver {
     this.subscriptions = new RedisSubscriptionDriver({
       prefix: this._prefix,
       createSubscriber,
-      captureGeneration: (source, attempt) => this._captureGeneration(source, attempt),
-      validateGeneration: (source, attempt) => this._validateGeneration(source, attempt),
+      captureGeneration: (source) => this._captureGeneration(source),
+      validateGeneration: (source, token) => this._validateGeneration(source, token),
     })
   }
 
@@ -456,39 +455,22 @@ export class RedisRoomBackend implements BackendDriver {
 
   // ── subscriptions ──
 
-  private async _captureGeneration(
-    source: Extract<BackendSubscriptionSource, { kind: 'durable' }>,
-    attempt: RedisGenerationAttempt,
-  ): Promise<void> {
-    if (attempt.createdAt === null) attempt.createdAt = await this._authorityNowMs()
-    const reply = (await this._call(REDIS_ROOM_COMMANDS.captureGeneration.name, [
-      ...REDIS_ROOM_COMMAND_KEYS.captureGeneration(this._prefix, source.roomId, source.inc),
-      this._nowArg(),
-      source.inc,
-      attempt.attemptId,
-      String(attempt.createdAt),
-      String(REDIS_GENERATION_CAPTURE_TTL_MS),
-    ])) as string
-    const parsed = JSON.parse(reply) as { ok: true; token: string } | { rejected: true; terminal: true; reason: string }
-    if ('rejected' in parsed) throw new Error(`subscribeLane: ${parsed.reason}`)
-    attempt.generationToken = parsed.token
+  private _captureGeneration(source: Extract<BackendSubscriptionSource, { kind: 'durable' }>): Promise<string | null> {
+    return this._publisher.hget(generationTokensKey(this._prefix, source.roomId), source.inc)
   }
 
   private async _validateGeneration(
     source: Extract<BackendSubscriptionSource, { kind: 'durable' }>,
-    attempt: RedisGenerationAttempt,
+    token: string,
   ): Promise<boolean> {
-    if (attempt.generationToken === null) return false
-    const reply = (await this._call(REDIS_ROOM_COMMANDS.validateGeneration.name, [
-      ...REDIS_ROOM_COMMAND_KEYS.validateGeneration(this._prefix, source.roomId, source.inc),
-      this._nowArg(),
-      source.inc,
-      attempt.generationToken,
-      attempt.attemptId,
-      String(attempt.createdAt),
-      String(REDIS_GENERATION_CAPTURE_TTL_MS),
-    ])) as string
-    return (JSON.parse(reply) as { ok: boolean }).ok
+    return (
+      (await this._call(REDIS_ROOM_COMMANDS.validateGeneration.name, [
+        ...REDIS_ROOM_COMMAND_KEYS.validateGeneration(this._prefix, source.roomId),
+        this._nowArg(),
+        source.inc,
+        token,
+      ])) === 1
+    )
   }
 
   // ── generation lifecycle ──
@@ -508,8 +490,8 @@ export class RedisRoomBackend implements BackendDriver {
     if (keys.length > 0) await this._publisher.unlink(...keys)
     const generationToken = await this._publisher.hget(generationTokensKey(this._prefix, roomId), inc)
     if (generationToken !== null) {
-      // Disconnected peers reject this token during their next capture/validation; connected peers close
-      // the raw attempt and let the shared manager perform its ordinary bounded replacement policy.
+      // Disconnected peers reject this token during post-SUBSCRIBE validation; connected peers terminate
+      // immediately because a dropped generation is definitive, not recoverable route loss.
       await this._publisher.publish(generationInvalidationChannel(this._prefix, roomId, inc), generationToken)
     }
     await this._call(REDIS_ROOM_COMMANDS.dropGenerationFinalize.name, [

@@ -18,8 +18,6 @@ import {
   laneKey,
   orderKey,
   REDIS_ROOM_COMMANDS,
-  routeCaptureExpiriesKey,
-  routeCapturesKey,
 } from '../../src/room/layout.js'
 
 type RedisClusterNode = { host: string; port: number }
@@ -61,15 +59,38 @@ describe('Redis real three-master Cluster CI certification', () => {
     await disposeBackend()
   })
 
-  it('covers shipped command KEYS and leaves zero capture residue after a full close', async () => {
+  it('covers shipped command KEYS and terminates live and in-flight attempts when their generation drops', async () => {
     expect(masters).toHaveLength(3)
     expect(masters.reduce((total, master) => total + master.end - master.start + 1, 0)).toBe(16_384)
     for (const master of masters) expect((await clusterInfo(master.client)).cluster_state).toBe('ok')
 
     const prefix = uniquePrefix('runtime-slots')
     const client = clusterClient(CLUSTER_NODES)
+    await client.ping()
+    const duplicateMethods = client.nodes('master').map((node) => [node, node.duplicate.bind(node)] as const)
+    let subscriberOpens = 0
+    let holdNextSubscribe = false
+    const subscribeEntered = deferred()
+    const releaseSubscribe = deferred()
+    for (const [node, duplicate] of duplicateMethods) {
+      node.duplicate = ((options?: unknown) => {
+        subscriberOpens++
+        const subscriber = duplicate(options as never)
+        if (holdNextSubscribe) {
+          holdNextSubscribe = false
+          const subscribe = subscriber.subscribe.bind(subscriber)
+          subscriber.subscribe = (async (...channels: string[]) => {
+            subscribeEntered.resolve()
+            await releaseSubscribe.promise
+            return await subscribe(...channels)
+          }) as typeof subscriber.subscribe
+        }
+        return subscriber
+      }) as typeof node.duplicate
+    }
     const observation = observeCommands(client)
     const backend = redisBackend(client, prefix)
+    const authority = new RedisRoomBackend({ redis: client, prefix })
     const genericCalls = observation.wrapDefinedCommand('tfPublish')
     const roomId = 'runtime-slot} proof'
     const inc = 'runtime-slot-inc'
@@ -117,17 +138,28 @@ describe('Redis real three-master Cluster CI certification', () => {
       await backend.directoryPut(roomId, inc)
       await backend.directoryDelete(roomId, inc)
       await backend.publish({ key: 'generic} escape', kind: 'binary' }, bytes('generic'))
+      const closed = await close(authority, roomId, head)
+      expect(closed.state).toBe('closed')
+      await authority.dropGeneration(roomId, inc)
+      await waitFor(() => subscription?.state() === 'closed')
+      expect(subscriberOpens).toBe(1)
       await subscription.unsubscribe()
       subscription = undefined
-      const closed = await close(backend, roomId, head)
-      expect(closed.state).toBe('closed')
-      await backend.dropGeneration(roomId, inc)
-      expect(
-        await Promise.all([
-          client.exists(routeCapturesKey(prefix, roomId, inc)),
-          client.exists(routeCaptureExpiriesKey(prefix, roomId, inc)),
-        ]),
-      ).toEqual([0, 0])
+
+      const delayedRoom = 'runtime-delayed-subscribe'
+      const delayedInc = 'runtime-delayed-inc'
+      const delayedHead = await open(backend, delayedRoom, delayedInc)
+      holdNextSubscribe = true
+      subscription = backend.subscribeLane(delayedRoom, delayedInc, SEMANTIC_LANE, () => {})
+      void subscription.ready.catch(() => {})
+      await subscribeEntered.promise
+      await close(authority, delayedRoom, delayedHead)
+      await authority.dropGeneration(delayedRoom, delayedInc)
+      releaseSubscribe.resolve()
+      await waitFor(() => subscription?.state() === 'closed')
+      expect(subscriberOpens).toBe(2)
+      await subscription.unsubscribe()
+      subscription = undefined
 
       const expectedNames = new Set(['tfPublish', ...Object.values(REDIS_ROOM_COMMANDS).map(({ name }) => name)])
       expect(new Set(observation.definitions.map(({ name }) => name))).toEqual(expectedNames)
@@ -155,9 +187,11 @@ describe('Redis real three-master Cluster CI certification', () => {
         }
       }
     } finally {
+      releaseSubscribe.resolve()
+      for (const [node, duplicate] of duplicateMethods) node.duplicate = duplicate as typeof node.duplicate
       await subscription?.unsubscribe().catch(() => {})
       observation.restore()
-      await backend.dispose()
+      await Promise.all([backend.dispose(), authority.dispose()])
       await client.quit().catch(() => client.disconnect())
     }
   })
@@ -609,7 +643,7 @@ function redisBackend(redis: Redis | Cluster, prefix: string): BackendSpi {
   return installBackend(() => new RedisRoomBackend({ redis, prefix }))
 }
 
-async function open(backend: BackendSpi, roomId: string, inc: string): Promise<RoomHead> {
+async function open(backend: Pick<BackendSpi, 'compareExchangeHead'>, roomId: string, inc: string): Promise<RoomHead> {
   const result = await backend.compareExchangeHead(
     roomId,
     { expect: 'absent' },
@@ -619,7 +653,11 @@ async function open(backend: BackendSpi, roomId: string, inc: string): Promise<R
   return result.head
 }
 
-async function close(backend: BackendSpi, roomId: string, head: RoomHead): Promise<RoomHead> {
+async function close(
+  backend: Pick<BackendSpi, 'compareExchangeHead'>,
+  roomId: string,
+  head: RoomHead,
+): Promise<RoomHead> {
   const leaseId = `lease-${Date.now().toString(36)}`
   const closing = await backend.compareExchangeHead(
     roomId,

@@ -16,19 +16,13 @@ import {
   REDIS_DELIVERY_FENCE_BYTE,
 } from './layout.js'
 
-export type RedisGenerationAttempt = {
-  attemptId: string
-  createdAt: number | null
-  generationToken: string | null
-}
-
 type RedisDurableSource = Extract<BackendSubscriptionSource, { kind: 'durable' }>
 
 type RedisSubscriptionDriverOptions = {
   prefix: string
   createSubscriber: () => Promise<Redis>
-  captureGeneration: (source: RedisDurableSource, attempt: RedisGenerationAttempt) => Promise<void>
-  validateGeneration: (source: RedisDurableSource, attempt: RedisGenerationAttempt) => Promise<boolean>
+  captureGeneration: (source: RedisDurableSource) => Promise<string | null>
+  validateGeneration: (source: RedisDurableSource, token: string) => Promise<boolean>
 }
 
 /**
@@ -119,11 +113,7 @@ class RedisSubscriptionAttempt implements SubscriptionAttempt {
   private readonly _validateGeneration: RedisSubscriptionDriverOptions['validateGeneration']
   private readonly _onDisposed: () => void
   private readonly _listeners = new Set<(state: SubscriptionAttemptState) => void>()
-  private readonly _generation: RedisGenerationAttempt = {
-    attemptId: randomUUID(),
-    createdAt: null,
-    generationToken: null,
-  }
+  private _generationToken: string | null = null
   private _settle!: { resolve: () => void; reject: (error: unknown) => void }
   private _state: SubscriptionAttemptState = 'establishing'
   private _subscriber: Redis | null = null
@@ -186,11 +176,15 @@ class RedisSubscriptionAttempt implements SubscriptionAttempt {
   private async _establish(): Promise<void> {
     try {
       if (this._source.kind === 'durable') {
-        await this._captureGeneration(this._source, this._generation)
-        if (this._state === 'closed') return
+        this._generationToken = await this._captureGeneration(this._source)
+        if (this._generationToken === null) {
+          this._terminate(new Error(`subscribeLane: generation '${this._source.roomId}/${this._source.inc}' is absent`))
+          return
+        }
+        if (this._isStopped()) return
       }
       const subscriber = await this._createSubscriber()
-      if (this._state === 'closed') {
+      if (this._isStopped()) {
         subscriber.disconnect()
         return
       }
@@ -205,17 +199,22 @@ class RedisSubscriptionAttempt implements SubscriptionAttempt {
       // the deadline, retries, readiness generations and attempt epochs.
       await subscriber.subscribe(...channels)
       this._subscribed = true
-      if (this._isClosed() || this._subscriber !== subscriber) return
+      if (this._isStopped() || this._subscriber !== subscriber) return
 
-      if (this._source.kind === 'durable' && !(await this._validateGeneration(this._source, this._generation))) {
-        throw new Error(`subscribeLane: generation '${this._source.roomId}/${this._source.inc}' was invalidated`)
+      if (
+        this._source.kind === 'durable' &&
+        (this._generationToken === null || !(await this._validateGeneration(this._source, this._generationToken)))
+      ) {
+        this._terminate(
+          new Error(`subscribeLane: generation '${this._source.roomId}/${this._source.inc}' was invalidated`),
+        )
+        return
       }
-      if (this._isClosed() || this._subscriber !== subscriber) return
-      this._readySettled = true
-      this._settle.resolve()
+      if (this._isStopped() || this._subscriber !== subscriber) return
+      this._resolveReady()
       this._transition('ready')
     } catch (error) {
-      if (this._state === 'closed') return
+      if (this._isStopped()) return
       this._lastError = error
       this._rejectReady(error)
       this._transition('closed')
@@ -224,10 +223,12 @@ class RedisSubscriptionAttempt implements SubscriptionAttempt {
 
   private async _dispose(): Promise<void> {
     this._rejectFlushes(new Error('Redis delivery fence was closed'))
-    this._transition('closed')
-    this._rejectReady(
-      new Error(`Redis subscription '${redisSubscriptionChannel(this._prefix, this._source)}' was closed`),
-    )
+    if (this._state !== 'terminated') {
+      this._transition('closed')
+      this._rejectReady(
+        new Error(`Redis subscription '${redisSubscriptionChannel(this._prefix, this._source)}' was closed`),
+      )
+    }
     const subscriber = this._subscriber
     this._subscriber = null
     if (subscriber !== null) {
@@ -250,9 +251,8 @@ class RedisSubscriptionAttempt implements SubscriptionAttempt {
   private readonly _onMessage = (channelBytes: Buffer, frame: Buffer): void => {
     const channel = channelBytes.toString()
     if (this._source.kind === 'durable' && channel === redisInvalidationChannel(this._prefix, this._source)) {
-      if (this._generation.generationToken === null || frame.toString() === this._generation.generationToken) {
-        this._rejectFlushes(new Error('Redis delivery fence crossed generation invalidation'))
-        this._transition('closed')
+      if (this._generationToken === null || frame.toString() === this._generationToken) {
+        this._terminate(new Error('Redis generation subscription was invalidated'))
       }
       return
     }
@@ -288,7 +288,7 @@ class RedisSubscriptionAttempt implements SubscriptionAttempt {
   }
 
   private _connectionClosed(): void {
-    if (this._state === 'closed') return
+    if (this._isStopped()) return
     this._rejectReady(this._lastError)
     this._rejectFlushes(this._lastError)
     this._transition('closed')
@@ -299,8 +299,22 @@ class RedisSubscriptionAttempt implements SubscriptionAttempt {
     this._flushes.clear()
   }
 
-  private _isClosed(): boolean {
-    return this._state === 'closed'
+  private _isStopped(): boolean {
+    return this._state === 'closed' || this._state === 'terminated'
+  }
+
+  private _terminate(error: unknown): void {
+    if (this._isStopped()) return
+    this._lastError = error
+    this._resolveReady()
+    this._rejectFlushes(error)
+    this._transition('terminated')
+  }
+
+  private _resolveReady(): void {
+    if (this._readySettled) return
+    this._readySettled = true
+    this._settle.resolve()
   }
 
   private _rejectReady(error: unknown): void {
