@@ -109,12 +109,6 @@ export function parseLaneKey(key: string): LaneId {
   throw new Error(`parseLaneKey: unrecognized lane key '${key}'`)
 }
 
-// SCAN's MATCH is a glob; a physical key built from a caller-supplied room id / cell key must match
-// literally, so escape the glob metacharacters.
-export function escapeGlob(pattern: string): string {
-  return pattern.replace(/[*?[\]\\^]/g, '\\$&')
-}
-
 // ── Lua ─────────────────────────────────────────────────────────────────
 
 // Shared preamble: authority time, either the injected frozen clock (conformance) or the central

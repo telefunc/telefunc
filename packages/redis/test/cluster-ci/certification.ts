@@ -626,10 +626,6 @@ describe('Redis real three-master Cluster CI certification', () => {
     const keys = (await current.client.cluster('GETKEYSINSLOT', slotNumber, 10_000)) as string[]
     await migrateKeys(current, original, keys)
     for (const master of masters) await master.client.cluster('SETSLOT', slotNumber, 'NODE', original.id)
-    await assertClusterOk()
-  }
-
-  async function assertClusterOk(): Promise<void> {
     for (const master of masters) expect((await clusterInfo(master.client)).cluster_state).toBe('ok')
   }
 })
