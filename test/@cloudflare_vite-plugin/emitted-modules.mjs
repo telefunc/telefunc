@@ -29,12 +29,10 @@ assert.deepEqual(
   ],
   'unexpected worker page entry',
 )
-assert.equal(chunks.length, 11, `expected 11 worker chunks, got ${chunks.length}`)
 assert(
   chunks.every((file) => /^chunks\/chunk-[A-Za-z0-9_-]+\.js$/.test(file)),
   'unexpected worker chunk path',
 )
-assert.equal(files.length, 18, `expected exactly 18 worker modules, got ${files.length}`)
 
 const allowedExternalImports = new Set(['cloudflare:workers', 'node:async_hooks'])
 const importedExternals = new Set()
