@@ -6,6 +6,7 @@ import {
   DIRECTORY_PUT_LUA,
   directoryIndexKey,
   headKey,
+  genPrefix,
   laneKey,
   orderKey,
   REDIS_ROOM_COMMANDS,
@@ -250,6 +251,48 @@ describe('Redis real three-master Cluster CI certification', () => {
     }
   })
 
+  it('keeps generation inventory complete across a scan-window reshard', async () => {
+    const prefix = uniquePrefix('reshard-inventory')
+    const client = clusterClient(CLUSTER_NODES)
+    await client.ping()
+    const backend = redisBackend(client, prefix)
+    const scanNodes = client.nodes('master')
+    const targetNode = scanNodes[0] as Redis
+    const sourceNode = scanNodes[1] as Redis
+    const target = masterForNode(targetNode)
+    const source = masterForNode(sourceNode)
+    const roomId = await roomOnMaster(prefix, source.id, 'reshard-inventory')
+    const inc = 'reshard-inventory-inc'
+    const slotNumber = await slot(headKey(prefix, roomId))
+    const scan = sourceNode.scan.bind(sourceNode)
+    const smembers = client.smembers.bind(client)
+    let relocated = false
+    const relocate = async (): Promise<void> => {
+      if (relocated) return
+      relocated = true
+      await moveSlot(slotNumber, source, target, true)
+    }
+    sourceNode.scan = (async (...args: unknown[]) => {
+      await relocate()
+      return await (scan as (...scanArgs: unknown[]) => Promise<[string, string[]]>)(...args)
+    }) as unknown as typeof sourceNode.scan
+    client.smembers = (async (key: string) => {
+      if (key === `${genPrefix(prefix, roomId, inc)}:keys`) await relocate()
+      return await smembers(key)
+    }) as typeof client.smembers
+    try {
+      await open(backend, roomId, inc)
+      accepted(await backend.commitLane(roomId, inc, SEMANTIC_LANE, bytes('retained'), { retain: true }))
+      expect(await backend.listRetained(roomId, inc)).toEqual([SEMANTIC_LANE])
+      expect(relocated).toBe(true)
+    } finally {
+      sourceNode.scan = scan as typeof sourceNode.scan
+      client.smembers = smembers as typeof client.smembers
+      if (relocated) await restoreSlot(slotNumber, source, target)
+      await Promise.allSettled([backend.dispose(), client.quit()])
+    }
+  })
+
   it('exposes terminal attempts so consumer replacement can fail once, recover, and deliver', async () => {
     const topology = cluster.nodes('master').sort(compareRedisNodes)
     const originals = topology.map((node) => [node, node.duplicate.bind(node)] as const)
@@ -454,6 +497,12 @@ describe('Redis real three-master Cluster CI certification', () => {
     const target = masters.find(({ id }) => id !== source.id)
     if (target === undefined) throw new Error(`no relocation target exists for Cluster node '${source.id}'`)
     return target
+  }
+
+  function masterForNode(node: Redis): Master {
+    const match = masters.find(({ host, port }) => host === node.options.host && port === node.options.port)
+    if (match === undefined) throw new Error(`Cluster node '${node.options.host}:${node.options.port}' has no master`)
+    return match
   }
 
   async function slot(key: string): Promise<number> {

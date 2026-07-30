@@ -10,6 +10,7 @@
 //   revision:  tf:room:{rid}:g:<inc>:rev    INCR'd by every cell CX — the coarse per-generation revision
 //   order:     tf:room:{rid}:g:<inc>:o:<laneKey>   "<seq>:<ts>"
 //   retained:  tf:room:{rid}:g:<inc>:rt:<laneKey>  16-byte [seq_hi][seq_lo][ts_hi][ts_lo] + payload
+//   gen keys:  tf:room:{rid}:g:<inc>:keys   SET of generation-owned physical keys
 //   channels:  tf:room:{rid}:ch:<inc>:<laneKey>    PUBLISH/SUBSCRIBE — INC-SCOPED (an old-inc SUBSCRIBE
 //                                                  can never hear a recreation — I11)
 //   gens:      tf:room:{rid}:gens           SET of incs — SADD'd by the head-CX that installs an inc,
@@ -53,6 +54,9 @@ export function generationTokensKey(prefix: string, roomId: string): string {
 }
 export function genPrefix(prefix: string, roomId: string, inc: string): string {
   return `${roomTag(prefix, roomId)}:g:${inc}`
+}
+export function generationKeysKey(prefix: string, roomId: string, inc: string): string {
+  return `${genPrefix(prefix, roomId, inc)}:keys`
 }
 export function revKey(prefix: string, roomId: string, inc: string): string {
   return `${genPrefix(prefix, roomId, inc)}:rev`
@@ -311,17 +315,17 @@ export const DROP_GENERATION_FINALIZE_KEYS = 2
 
 // CELLS CX — all mutations or none; success implies the head precondition (open + inc) held at apply
 // time; the revision is the coarse per-generation counter, allowed to over-conflict but never mislead.
-//   KEYS: [1]=head [2]=rev [3..]=cell keys (one per mutation, in order)
+//   KEYS: [1]=head [2]=rev [3]=generation-keys [4..]=cell keys (one per mutation, in order)
 //   ARGV: [1]=now [2]=inc [3]=expectedRev, then per mutation: op('set'|'del'), ttlMs(''|number), value
 export const CELLS_CX_LUA = `${NOW_FN}
-local head_key, rev_key = KEYS[1], KEYS[2]
+local head_key, rev_key, generation_keys_key = KEYS[1], KEYS[2], KEYS[3]
 local now = tf_now(ARGV[1])
 local head = tf_head(head_key, now)
 if (not head) or head.inc ~= ARGV[2] or head.state ~= 'open' then return 'stale-inc' end
 local cur = redis.call('GET', rev_key)
 if not cur then cur = '0' end
 if cur ~= ARGV[3] then return 'conflict' end
-local n = #KEYS - 2
+local n = #KEYS - 3
 if #ARGV ~= 3 + n * 3 then return redis.error_reply('cells CX: invalid operand count') end
 for i = 1, n do
   local base = 3 + (i - 1) * 3
@@ -335,11 +339,12 @@ for i = 1, n do
   end
 end
 for i = 1, n do
-  local key = KEYS[2 + i]
+  local key = KEYS[3 + i]
   local base = 3 + (i - 1) * 3
   local op = ARGV[base + 1]
   if op == 'del' then
     redis.call('DEL', key)
+    redis.call('SREM', generation_keys_key, key)
   else
     local ttl = ARGV[base + 2]
     local val = ARGV[base + 3]
@@ -351,9 +356,11 @@ for i = 1, n do
     else
       redis.call('SET', key, stored, 'PX', tonumber(ttl))
     end
+    redis.call('SADD', generation_keys_key, key)
   end
 end
 redis.call('INCR', rev_key)
+redis.call('SADD', generation_keys_key, rev_key)
 return 'committed'
 `
 
@@ -362,12 +369,13 @@ export const CELLS_CX_CMD = 'tfRoomCellsCx'
 // COMMIT — atomic acceptance: head precondition (one boolean, two branches), order advance, optional
 // retained install, then PUBLISH. Supplying a closing lease selects the narrow closing-control branch,
 // which is what makes every other lane stale while closing (I12).
-//   KEYS: [1]=head [2]=order [3]=retained [4]=channel [5..]=required live cells
+//   KEYS: [1]=head [2]=order [3]=retained [4]=channel [5]=generation-keys [6..]=required live cells
 //   ARGV: [1]=now [2]=inc [3]=laneKind [4]=closingLease('') [5]=retain('0'|'1')
 //         [6]=payload [7]=local delivery-fence token or ''
 export const COMMIT_LUA = `${NOW_FN}
 ${REDIS_ORDERING_FRAME_LUA}
-local head_key, order_key, retained_key, channel_key = KEYS[1], KEYS[2], KEYS[3], KEYS[4]
+local head_key, order_key, retained_key, channel_key, generation_keys_key =
+  KEYS[1], KEYS[2], KEYS[3], KEYS[4], KEYS[5]
 local now = tf_now(ARGV[1])
 local head = tf_head(head_key, now)
 local ok = false
@@ -380,7 +388,7 @@ if head and head.inc == ARGV[2] then
   end
 end
 if not ok then return '{"stale":true}' end
-for i = 5, #KEYS do
+for i = 6, #KEYS do
   local raw = redis.call('GET', KEYS[i])
   if not raw then return '{"stale":true}' end
   local newline = string.find(raw, '\\n', 1, true)
@@ -419,9 +427,11 @@ end
 local seq_text = string.format('%.0f', seq)
 local ts_text = string.format('%.0f', ts)
 redis.call('SET', order_key, seq_text .. ':' .. ts_text)
+redis.call('SADD', generation_keys_key, order_key)
 local frame = tf_ordering_frame(seq, ts, ARGV[6])
 if ARGV[5] == '1' then
   redis.call('SET', retained_key, frame)
+  redis.call('SADD', generation_keys_key, retained_key)
 end
 local receivers = redis.call('PUBLISH', channel_key, frame)
 -- A Cluster forwards both publications from this slot owner over the same ordered bus link. The
@@ -436,12 +446,12 @@ export const COMMIT_CMD = 'tfRoomCommit'
 export const RETAINED_DELETE_LUA = `
 local if_seq = ARGV[1]
 if if_seq ~= '' then
-  if #KEYS ~= 1 then return redis.error_reply('deleteRetained: ifSeq requires one lane') end
+  if #KEYS ~= 2 then return redis.error_reply('deleteRetained: ifSeq requires one lane') end
   local expected = tonumber(if_seq)
   if not expected or expected < 1 or expected > ${REDIS_SAFE_INTEGER_MAX} or expected ~= math.floor(expected) then
     return redis.error_reply('deleteRetained: invalid ifSeq')
   end
-  local frame = redis.call('GET', KEYS[1])
+  local frame = redis.call('GET', KEYS[2])
   if not frame then return 0 end
   if string.len(frame) < ${ORDERING_FRAME_LAYOUT.headerBytes} then
     return redis.error_reply('deleteRetained: invalid retained frame')
@@ -451,7 +461,10 @@ if if_seq ~= '' then
   if current ~= expected then return 0 end
 end
 local deleted = 0
-for i = 1, #KEYS do deleted = deleted + redis.call('DEL', KEYS[i]) end
+for i = 2, #KEYS do
+  deleted = deleted + redis.call('DEL', KEYS[i])
+  redis.call('SREM', KEYS[1], KEYS[i])
+end
 return deleted
 `
 
@@ -522,6 +535,7 @@ export const REDIS_ROOM_COMMAND_KEYS = {
   cellsCx: (prefix: string, roomId: string, inc: string, cells: readonly string[]) => [
     headKey(prefix, roomId),
     revKey(prefix, roomId, inc),
+    generationKeysKey(prefix, roomId, inc),
     ...cells.map((key) => cellKey(prefix, roomId, inc, key)),
   ],
   commit: (prefix: string, roomId: string, inc: string, lane: LaneId, requiredCellKeys: readonly string[] = []) => {
@@ -531,10 +545,12 @@ export const REDIS_ROOM_COMMAND_KEYS = {
       orderKey(prefix, roomId, inc, key),
       retainedKey(prefix, roomId, inc, key),
       channelKey(prefix, roomId, inc, key),
+      generationKeysKey(prefix, roomId, inc),
       ...requiredCellKeys.map((required) => cellKey(prefix, roomId, inc, required)),
     ]
   },
-  retainedDelete: (_prefix: string, _roomId: string, _inc: string, retainedKeys: readonly string[]) => [
+  retainedDelete: (prefix: string, roomId: string, inc: string, retainedKeys: readonly string[]) => [
+    generationKeysKey(prefix, roomId, inc),
     ...retainedKeys,
   ],
   directoryPut: (prefix: string) => [directoryIndexKey(prefix), directoryTagsKey(prefix)],
