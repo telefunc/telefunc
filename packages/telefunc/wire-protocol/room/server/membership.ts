@@ -1,0 +1,223 @@
+export {
+  assertRoomId,
+  dropRetainedOwnedBy,
+  evictMember,
+  mutateCells,
+  presenceCount,
+  readCell,
+  readMembers,
+  requireRoom,
+  resolveIdentityMembers,
+}
+
+import { parse } from '@brillout/json-serializer/parse'
+import { assertUsage } from '../../../utils/assert.js'
+import { getBackend } from '../../backend/install.js'
+import type { CellMutation } from '../../backend/spi.js'
+import { ROOM_ID_MAX_BYTES, ROOM_MEMBER_TTL_MS } from '../../constants.js'
+import {
+  RoomError,
+  leaveCauseToWire,
+  roomHiddenMemberKvKey,
+  roomHiddenMemberKvPrefix,
+  roomIdentityKvPrefix,
+  roomIdentityMemberKvKey,
+  roomMemberKvKey,
+  roomMemberKvPrefix,
+  uuidToBytes,
+  type MemberSnapshot,
+  type RoomConfigRecord,
+  type RoomDataEnvelope,
+  type RoomMemberRecord,
+} from '../protocol.js'
+import type { LeaveCause } from '../types.js'
+import { SEMANTIC_LANE, configFromHead, decodeRoomText, publishCtrl } from './lanes.js'
+
+const ROOM_CX_ATTEMPTS = 16
+type CellSelector = { keys: string[] } | { prefix: string }
+type CellPlan<T> = { value: T; mutations: CellMutation[] }
+
+async function readCellSet(
+  roomId: string,
+  inc: string,
+  selector: CellSelector,
+): Promise<{ revision: string; cells: Map<string, Uint8Array> }> {
+  const result = await getBackend().readCells(roomId, inc, selector)
+  if ('staleInc' in result) throw new RoomError(`Room is closed: ${roomId}`)
+  return result
+}
+
+async function readCell(roomId: string, inc: string, key: string): Promise<Uint8Array | null> {
+  const { cells } = await readCellSet(roomId, inc, { keys: [key] })
+  return cells.get(key) ?? null
+}
+
+async function mutateCells<T>(
+  roomId: string,
+  inc: string,
+  selector: CellSelector,
+  plan: (cells: ReadonlyMap<string, Uint8Array>) => CellPlan<T>,
+): Promise<T> {
+  const backend = getBackend()
+  for (let attempt = 0; attempt < ROOM_CX_ATTEMPTS; attempt++) {
+    const read = await backend.readCells(roomId, inc, selector)
+    if ('staleInc' in read) throw new RoomError(`Room is closed: ${roomId}`)
+    const next = plan(read.cells)
+    if (next.mutations.length === 0) return next.value
+    const result = await backend.compareExchangeCells(roomId, inc, read.revision, next.mutations)
+    if (result === 'committed') return next.value
+    if (result === 'stale-inc') throw new RoomError(`Room is closed: ${roomId}`)
+    const ceiling = Math.min(64, 2 ** attempt)
+    await new Promise((resolve) => setTimeout(resolve, Math.floor(Math.random() * ceiling) + 1))
+  }
+  throw new RoomError(`Room update contention: ${roomId}`)
+}
+
+async function requireRoom(id: string): Promise<{ config: RoomConfigRecord }> {
+  assertRoomId(id)
+  const current = await getBackend().readHead(id)
+  if (current === null || current.head.state !== 'open' || current.head.currentInc === null) {
+    throw new RoomError(`Room not found: ${id}`)
+  }
+  return { config: configFromHead(current.head) }
+}
+
+/** Read a room's member records, reaping members whose owning node stopped heartbeating
+ *  (hard crash): their record is deleted and their leave announced to all observers. Pass `ids`
+ *  to read a specific subset (e.g. one identity's memberships) instead of scanning the whole roster. */
+async function readMembers(roomId: string, inc: string, ids?: string[]): Promise<MemberSnapshot[]> {
+  // Roster reads run against the authority, not the replica: `_refreshMembers` relies on read-your-
+  // writes (a join/leave writes its record before publishing the event that triggers the read), and
+  // the reap below keys off `seenAt` — a replica lag could drop a live member from the roster or reap
+  // a member a live heartbeat just refreshed. The reap delete stays replicated so both tiers drop it.
+  const memberKeys =
+    ids === undefined ? await listMemberKeys(roomId, inc) : ids.map((id) => ({ key: roomMemberKvKey(roomId, id), id }))
+  const { cells } = await readCellSet(roomId, inc, { keys: memberKeys.map(({ key }) => key) })
+  const members: MemberSnapshot[] = []
+  for (const { key, id } of memberKeys) {
+    const raw = cells.get(key)
+    if (raw === undefined) continue
+    const record = parse(decodeRoomText(raw)) as RoomMemberRecord
+    if (record.inc !== inc) continue
+    if (Date.now() - record.seenAt > ROOM_MEMBER_TTL_MS) {
+      const siblingKeys = [key, roomHiddenMemberKvKey(roomId, id)]
+      if (record.identity !== undefined) siblingKeys.push(roomIdentityMemberKvKey(roomId, record.identity, id))
+      const reaped = await mutateCells(roomId, inc, { keys: siblingKeys }, (current) => {
+        const latest = current.get(key)
+        if (latest === undefined) return { value: false, mutations: [] }
+        const latestRecord = parse(decodeRoomText(latest)) as RoomMemberRecord
+        return Date.now() - latestRecord.seenAt > ROOM_MEMBER_TTL_MS
+          ? { value: true, mutations: siblingKeys.map((siblingKey) => ({ key: siblingKey })) }
+          : { value: false, mutations: [] }
+      })
+      if (reaped) {
+        await dropRetainedOwnedBy(roomId, inc, id)
+        await publishCtrl(roomId, inc, { __r: 'leave', id, cause: 'disconnected' })
+      }
+      continue
+    }
+    members.push({
+      id,
+      meta: record.meta,
+      joinedAt: record.joinedAt,
+      metaSeq: record.metaSeq,
+      identity: record.identity ?? null,
+      ...(record.tracks === undefined ? {} : { tracks: record.tracks }),
+      ...(record.hidden ? { hidden: true } : {}),
+    })
+  }
+  return members
+}
+
+async function listMemberKeys(roomId: string, inc: string): Promise<Array<{ key: string; id: string }>> {
+  const prefix = roomMemberKvPrefix(roomId)
+  const memberKeys: Array<{ key: string; id: string }> = []
+  const { cells } = await readCellSet(roomId, inc, { prefix })
+  for (const key of cells.keys()) {
+    const id = key.slice(prefix.length)
+    if (uuidToBytes(id)) memberKeys.push({ key, id })
+  }
+  return memberKeys
+}
+
+async function presenceCount(roomId: string, inc: string): Promise<number> {
+  const members = await listMemberKeys(roomId, inc)
+  if (members.length === 0) return 0
+  const hidden = await listHiddenMemberIds(roomId, inc)
+  if (hidden.size === 0) return members.length
+  let count = 0
+  for (const { id } of members) if (!hidden.has(id)) count++
+  return count
+}
+
+async function listHiddenMemberIds(roomId: string, inc: string): Promise<Set<string>> {
+  const prefix = roomHiddenMemberKvPrefix(roomId)
+  const ids = new Set<string>()
+  const { cells } = await readCellSet(roomId, inc, { prefix })
+  for (const key of cells.keys()) ids.add(key.slice(prefix.length))
+  return ids
+}
+
+async function resolveIdentityMembers(roomId: string, inc: string, identity: string): Promise<string[]> {
+  const prefix = roomIdentityKvPrefix(roomId, identity)
+  const members: string[] = []
+  const markers = await readCellSet(roomId, inc, { prefix })
+  for (const key of markers.cells.keys()) {
+    const memberId = key.slice(prefix.length)
+    const memberKey = roomMemberKvKey(roomId, memberId)
+    const raw = await readCell(roomId, inc, memberKey)
+    if (raw !== null && (parse(decodeRoomText(raw)) as RoomMemberRecord).identity === identity) {
+      members.push(memberId)
+      continue
+    }
+    await mutateCells(roomId, inc, { keys: [key, memberKey] }, (cells) => {
+      const current = cells.get(memberKey)
+      const stillStale =
+        current === undefined || (parse(decodeRoomText(current)) as RoomMemberRecord).identity !== identity
+      return { value: undefined, mutations: stillStale ? [{ key }] : [] }
+    })
+  }
+  return members
+}
+
+async function dropRetainedTextOwnedBy(roomId: string, inc: string, memberId: string): Promise<void> {
+  const backend = getBackend()
+  const retained = await backend.readRetained(roomId, inc, SEMANTIC_LANE)
+  if (retained === null) return
+  const envelope = parse(decodeRoomText(retained.payload)) as RoomDataEnvelope
+  if (envelope.from !== memberId) return
+  await backend.deleteRetained(roomId, inc, SEMANTIC_LANE, { ifSeq: retained.seq })
+}
+
+async function dropRetainedOwnedBy(roomId: string, inc: string, memberId: string): Promise<void> {
+  const backend = getBackend()
+  for (const lane of await backend.listRetained(roomId, inc)) {
+    if (lane.kind === 'binary' && lane.member === memberId) await backend.deleteRetained(roomId, inc, lane)
+  }
+  await dropRetainedTextOwnedBy(roomId, inc, memberId)
+}
+
+async function evictMember(
+  roomId: string,
+  inc: string,
+  memberId: string,
+  identity: string | undefined,
+  cause: LeaveCause,
+): Promise<void> {
+  const keys = [roomMemberKvKey(roomId, memberId), roomHiddenMemberKvKey(roomId, memberId)]
+  if (identity !== undefined) keys.push(roomIdentityMemberKvKey(roomId, identity, memberId))
+  await mutateCells(roomId, inc, { keys }, () => ({
+    value: undefined,
+    mutations: keys.map((key) => ({ key })),
+  }))
+  await dropRetainedOwnedBy(roomId, inc, memberId)
+  await publishCtrl(roomId, inc, { __r: 'leave', id: memberId, ...leaveCauseToWire(cause) })
+}
+
+function assertRoomId(id: unknown): asserts id is string {
+  assertUsage(typeof id === 'string' && id.length > 0, 'The room ID should be a non-empty string')
+  assertUsage(
+    new TextEncoder().encode(id).length <= ROOM_ID_MAX_BYTES,
+    `The room ID should be at most ${ROOM_ID_MAX_BYTES} bytes`,
+  )
+}
