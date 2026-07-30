@@ -1,10 +1,12 @@
-import { describe, expect, test } from 'vitest'
+import { describe, expect, test, vi } from 'vitest'
 
 import { CHANNEL_MESSAGE_LIMIT_BYTES, CHANNEL_TRANSPORT } from './constants.js'
 import { ClientConnection } from './client/connection.js'
 import { ChannelMux, type ServerTransport } from './server/mux.js'
 import { StreamReader } from './server/request/StreamReader.js'
 import { encodeU32 } from './frame.js'
+import { config } from '../node/server/serverConfig.js'
+import { runTelefunc } from '../node/server/runTelefunc.js'
 
 // The inbound per-message cap (`config.channel.messageLimit`), enforced at every ingress:
 // the mux terminates oversized WS frames, StreamReader rejects oversized declared lengths
@@ -12,6 +14,26 @@ import { encodeU32 } from './frame.js'
 // sends locally with a usage error instead of letting the server kill its connection.
 
 describe('messageLimit', () => {
+  test('ordinary telefunction requests report the limit and its config key', async () => {
+    config.channel = { messageLimit: 64 }
+    const report = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const request = new Request('http://localhost/_telefunc', {
+        method: 'POST',
+        body: JSON.stringify({ file: '/x.telefunc.ts', name: 'onCall', args: ['x'.repeat(64)] }),
+      })
+      const response = await runTelefunc({ request })
+
+      expect(response.statusCode).toBe(400)
+      expect(response.body).toBe(
+        'Telefunc request body is too large: it exceeds the 64-byte limit set by `config.channel.messageLimit`. Send large payloads as a File, Blob, or ReadableStream, or raise that limit.',
+      )
+    } finally {
+      report.mockRestore()
+      config.channel = {}
+    }
+  })
+
   test('the mux terminates a connection that ships an oversized frame', async () => {
     const mux = new ChannelMux()
     let terminated = false
