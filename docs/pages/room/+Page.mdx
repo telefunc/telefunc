@@ -368,7 +368,7 @@ Order the stored history and live tail for the current room lifecycle by `seq`. 
 
 The domains are deliberately separate. Participant text published with `publish()` uses the room incarnation's semantic domain. Presence, lifecycle events, and `Room.announce()` use the control domain. Every `(member, binary track)` and every recipient inbox has its own domain. A close and recreation starts new domain instances at `seq = 1`, so positions from different lifecycles or lanes aren't comparable. If your application combines several room lifecycles into one history, persist its own lifecycle or message identity alongside `seq`.
 
-The tail is a bounded, drop-oldest buffer of the most recent messages, sized for a prompt subscribe, not a second copy of history: if a client is slow to subscribe on a busy room, the oldest tail messages roll off, and the database history you loaded above stays the source of truth.
+The tail is a bounded, drop-oldest buffer of the most recent messages, sized for a prompt subscribe, not a second copy of history. It holds at most 256 messages and 1 MiB of serialized text; a single message larger than that budget isn't held. If the room isn't attached or the client doesn't make its first text subscription within 60 seconds, the pending tail is released. On a busy or slow path the database history you loaded above therefore stays the source of truth.
 
 ### Switching rooms & capacity
 
@@ -465,7 +465,7 @@ Rooms work across multiple server nodes out of the box with <Link href="/redis">
 - **Deterministic convergence.** Metadata and config updates land in the same final state on every node, whatever order they arrive in.
 - **Backend-native reads.** `Room.get` and `Room.list` use the installed Room backend's authority and directory surfaces. On <Link href="/stream/cloudflare#room-state">Cloudflare</Link>, both are SQLite Durable Object state; room heads and retained replay are strongly consistent, while the directory is a repairable projection verified against each room head.
 
-- **Bounded by design.** A participant may announce up to 32 named binary tracks (the unnamed lane is always free), and the `{ tail }` backfill is a bounded, drop-oldest buffer of recent messages. Membership itself is uncapped: you enforce that in the telefunction against `count` (see <Link href="#switching-rooms-capacity">Capacity</Link>).
+- **Bounded by design.** A participant may announce up to 32 named binary tracks (the unnamed lane is always free), and the `{ tail }` backfill is limited to 256 messages / 1 MiB / 60 seconds. Membership itself is uncapped; use atomic application-level admission for a hard limit (see <Link href="#switching-rooms-capacity">Capacity</Link>).
 
 
 ## Reference
