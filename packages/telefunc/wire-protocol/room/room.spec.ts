@@ -290,6 +290,55 @@ describe('Room public behavior', () => {
     expect((await driver.readHead(room.id))?.head).toMatchObject({ state: 'closed', currentInc: null })
   })
 
+  it('retries generation cleanup after the head was durably finalized', async () => {
+    const room = (await Room.create('finalized-cleanup-retry')) as ServerRoom
+    const inc = room._inc
+    await room.join()
+    const dropping = vi
+      .spyOn(driver, 'dropGeneration')
+      .mockRejectedValueOnce(new Error('transient generation cleanup failure'))
+
+    await expect(Room.close(room.id)).rejects.toThrow('transient generation cleanup failure')
+    expect((await driver.readHead(room.id))?.head).toMatchObject({ state: 'closed', currentInc: null })
+    expect(await driver.listGenerations(room.id)).toEqual([inc])
+
+    await expect(Room.close(room.id)).resolves.toBeUndefined()
+    expect(await driver.listGenerations(room.id)).toEqual([])
+    expect((await driver.directoryList(room.id)).entries).toEqual([])
+    dropping.mockRestore()
+  })
+
+  it('waits out an active close lease in getOrCreate instead of reporting not-found', async () => {
+    vi.useFakeTimers()
+    const room = (await Room.create('get-or-create-closing')) as ServerRoom
+    const firstInc = room._inc
+    const current = (await driver.readHead(room.id))!.head
+    await driver.compareExchangeHead(
+      room.id,
+      { expect: { rev: current.rev } },
+      {
+        head: {
+          currentInc: current.currentInc,
+          state: 'closing',
+          config: encodeRoomConfig({ ...configFromHead(current), status: 'closing' }),
+          closeLease: { id: 'active-get-or-create-close', durationMs: 1_000 },
+        },
+      },
+    )
+
+    let settled = false
+    const resolving = Room.getOrCreate(room.id).finally(() => {
+      settled = true
+    })
+    await Promise.resolve()
+    expect(settled).toBe(false)
+
+    await vi.advanceTimersByTimeAsync(1_100)
+    const recreated = (await resolving) as ServerRoom
+    expect(recreated._inc).not.toBe(firstInc)
+    expect(recreated.isClosed).toBe(false)
+  })
+
   it('tears down a close observed by a separate Room runtime that cannot inherit the initiator hold', async () => {
     const authority = await Room.create('remote-close-teardown')
     authority.onAnnounce(() => {})
