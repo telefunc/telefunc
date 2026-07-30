@@ -9,9 +9,16 @@
 // traffic and the conformance lane drive this same authority implementation.
 
 import { DurableObject } from 'cloudflare:workers'
-import type { CellMutation, CxResult, HeadCx, HeadNext, LaneId } from '../../../../backend/spi.js'
-import { base64ToBytes, bytesToBase64, laneKey as laneKeyOf } from './codec.js'
-import { Fanout } from './fanout.js'
+import type { CellMutation, CxResult, HeadCx, HeadNext, LaneId, RoomHead } from '../../../../backend/spi.js'
+import { laneKey as laneKeyOf } from './codec.js'
+import {
+  dispatchRoomShardFanout,
+  dispatchRoomShardFanoutViaCoordinator,
+  Fanout,
+  type RoomShardFanoutNamespace,
+  type RoomShardFanoutOutcome,
+  type RoomShardFanoutRequest,
+} from './fanout.js'
 import { deleteRetained, installRetained, listRetained, readRetained } from './retained.js'
 import {
   deleteRoute,
@@ -25,7 +32,6 @@ import {
   type RouteTarget,
   upsertRoute,
 } from './routes.js'
-import type { RoomShardDeliveryRequest, RoomShardInvalidationRequest } from './backend.js'
 import {
   advanceOrder,
   compareExchangeCells,
@@ -42,75 +48,32 @@ import {
   type StoredHead,
 } from './storage.js'
 
-// ── wire shapes (binary as base64 across the Node↔workerd RPC seam) ──
+// RPC preserves the SPI's structured-cloneable maps, typed arrays, and records directly.
 
-export type HeadWire = {
-  rev: string
-  currentInc: string | null
-  state: 'open' | 'closing' | 'closed'
-  configB64: string
-  closeLease?: { id: string; until: number }
-}
-export type HeadNextWire =
-  | {
-      head: {
-        currentInc: string | null
-        state: 'open' | 'closing' | 'closed'
-        configB64: string
-        closeLease?: { id: string; durationMs: number }
-      }
-      ttlMs?: number
-    }
-  | { delete: true }
-export type HeadCxWire =
-  | { ok: true; head: HeadWire }
+export type HeadCxResult =
+  | { ok: true; head: RoomHead }
   | { ok: true; deleted: true }
-  | { conflict: true; current: HeadWire | null }
-  | { error: string }
-export type CellsWire = { revision: string; cells: Array<[string, string]> } | { staleInc: true }
-export type CellMutationWire = { key: string; set?: { bytesB64: string; ttlMs?: number } }
+  | { conflict: true; current: RoomHead | null }
+export type CellsResult = { revision: string; cells: Map<string, Uint8Array> } | { staleInc: true }
 export type CommitWire =
   | { accepted: true; seq: number; timestamp: number; receivers: number; deliveryToken: string }
   | { stale: true }
-  | { error: string }
-export type RetainedWire = { payloadB64: string; seq: number; timestamp: number }
+export type RetainedResult = { payload: Uint8Array; seq: number; timestamp: number }
 export type RegisterWire =
   | { ok: true; generationToken: string }
   | { rejected: true; reason: string; terminal?: boolean }
-export type DropWire = { ok: true } | { error: string }
 
-type SubscriberStub = {
-  telefuncRoomDeliver(request: RoomShardDeliveryRequest): Promise<void>
-  telefuncRoomInvalidate(request: RoomShardInvalidationRequest): Promise<void>
-}
+const ROOM_MAINTENANCE_RETRY_MS = 30_000
 
-type SubscriberNamespace = {
-  idFromString(id: string): unknown
-  get(id: unknown): SubscriberStub
-}
-
-const ROOM_ALARM_INTERVAL_MS = 30_000
-
-function headToWire(head: StoredHead): HeadWire {
-  const wire: HeadWire = {
+function headForRpc(head: StoredHead): RoomHead {
+  const result: RoomHead = {
     rev: head.rev,
     currentInc: head.currentInc,
     state: head.state,
-    configB64: bytesToBase64(head.config),
+    config: head.config,
   }
-  if (head.closeLease !== undefined) wire.closeLease = { ...head.closeLease }
-  return wire
-}
-
-function nextFromWire(next: HeadNextWire): HeadNext {
-  if ('delete' in next) return { delete: true }
-  const head: Extract<HeadNext, { head: unknown }>['head'] = {
-    currentInc: next.head.currentInc,
-    state: next.head.state,
-    config: base64ToBytes(next.head.configB64),
-  }
-  if (next.head.closeLease !== undefined) head.closeLease = { ...next.head.closeLease }
-  return next.ttlMs === undefined ? { head } : { head, ttlMs: next.ttlMs }
+  if (head.closeLease !== undefined) result.closeLease = { ...head.closeLease }
+  return result
 }
 
 // Extends the `cloudflare:workers` DurableObject base so the Room backend seam can call its methods over
@@ -120,11 +83,11 @@ function nextFromWire(next: HeadNextWire): HeadNext {
 export class TelefuncRoomDurableObject extends DurableObject {
   readonly #sql: SqlStorage
   readonly #fanout: Fanout
-  readonly #sessionNamespaceValue: SubscriberNamespace
+  readonly #sessionNamespaceValue: RoomShardFanoutNamespace
 
   constructor(ctx: DurableObjectState, env: unknown, sessionBindingName: string = 'TelefuncDurableObject') {
     super(ctx, env as never)
-    const sessionNamespace = (env as Record<string, SubscriberNamespace | undefined>)[sessionBindingName]
+    const sessionNamespace = (env as Record<string, RoomShardFanoutNamespace | undefined>)[sessionBindingName]
     if (sessionNamespace === undefined) {
       throw new Error(
         `Missing Cloudflare session Durable Object binding "${sessionBindingName}" in TelefuncRoomDurableObject constructor.`,
@@ -134,114 +97,66 @@ export class TelefuncRoomDurableObject extends DurableObject {
     this.#sql = ctx.storage.sql
     initSchema(this.#sql)
     this.#fanout = new Fanout(
-      async (target, frame, info) => {
-        const session = this.#sessionNamespaceValue.get(this.#sessionNamespaceValue.idFromString(target.subscriberDoId))
-        try {
-          await session.telefuncRoomDeliver({
-            roomId: info.roomId,
-            inc: info.inc,
-            laneKey: info.laneKey,
-            subscriberDoId: target.subscriberDoId,
-            leaseId: target.leaseId,
-            generationToken: target.generationToken,
-            frame,
-            seq: info.seq,
-            timestamp: info.timestamp,
-          })
-          this.ctx.storage.transactionSync(() => {
-            recordRouteDeliverySuccess(this.#sql, info.inc, info.laneKey, target.subscriberDoId, target.leaseId)
-          })
-        } catch (error) {
-          let evicted = false
-          this.ctx.storage.transactionSync(() => {
-            evicted = recordRouteDeliveryFailure(
-              this.#sql,
-              info.inc,
-              info.laneKey,
-              target.subscriberDoId,
-              target.leaseId,
-            )
-          })
-          // Core cannot infer an authority-side K=3 eviction from a later local attachment: it already
-          // owns the ready slot. Tell the exact live attempt now; its ordinary `closed` state lets Room
-          // apply its recovery policy, while the retained route row remains the janitor's retry source
-          // if this best-effort invalidation RPC is lost.
-          if (evicted) {
-            try {
-              const recoverySession = this.#sessionNamespaceValue.get(
-                this.#sessionNamespaceValue.idFromString(target.subscriberDoId),
-              )
-              await recoverySession.telefuncRoomInvalidate({
-                roomId: info.roomId,
-                inc: info.inc,
-                laneKey: info.laneKey,
-                subscriberDoId: target.subscriberDoId,
-                leaseId: target.leaseId,
-                generationToken: target.generationToken,
-              })
-            } catch (invalidationError) {
-              throw new AggregateError(
-                [error, invalidationError],
-                'Cloudflare Room delivery and exact-route invalidation both failed',
-              )
-            }
-          }
-          throw error
+      async (targets, frame, info, coordinatorIndex) => {
+        const request: RoomShardFanoutRequest = {
+          operation: 'deliver',
+          roomId: info.roomId,
+          inc: info.inc,
+          laneKey: info.laneKey,
+          targets,
+          frame,
+          seq: info.seq,
+          timestamp: info.timestamp,
+          path: String(coordinatorIndex ?? 0),
         }
+        const outcomes =
+          coordinatorIndex === undefined
+            ? await dispatchRoomShardFanout(this.#sessionNamespaceValue, request)
+            : await dispatchRoomShardFanoutViaCoordinator(this.#sessionNamespaceValue, request)
+        await this.#settleDeliveryOutcomes(outcomes, info, coordinatorIndex)
       },
       (resume) => setTimeout(resume, 0),
     )
     this.ctx.blockConcurrencyWhile(async () => {
-      if ((await this.ctx.storage.getAlarm()) === null) await this.#armAlarm()
+      await this.#scheduleMaintenanceIfNeeded()
     })
   }
 
   // ── head ──
 
-  async readHead(): Promise<HeadWire | null> {
+  async readHead(): Promise<RoomHead | null> {
     const head = readLiveHead(this.#sql, Date.now())
-    return head === null ? null : headToWire(head)
+    return head === null ? null : headForRpc(head)
   }
 
-  async compareExchangeHead(cx: HeadCx, nextWire: HeadNextWire): Promise<HeadCxWire> {
-    const next = nextFromWire(nextWire)
+  async compareExchangeHead(cx: HeadCx, next: HeadNext): Promise<HeadCxResult> {
     const now = Date.now()
     let outcome!: ReturnType<typeof compareExchangeHead>
     // One SQL transaction: single-object serialization gives head linearizability (I1). A validation
-    // throw rolls the tx back and is surfaced as a structured error the facade rethrows verbatim so
-    // callers can identify the failure by its stable message, never as a conflict.
-    try {
-      this.ctx.storage.transactionSync(() => {
-        outcome = compareExchangeHead(this.#sql, cx, next, now, () => crypto.randomUUID())
-      })
-    } catch (error) {
-      return { error: (error as Error).message }
-    }
+    // throw rolls the transaction back and crosses the RPC boundary as a normal rejection.
+    this.ctx.storage.transactionSync(() => {
+      outcome = compareExchangeHead(this.#sql, cx, next, now, () => crypto.randomUUID())
+    })
+    await this.#scheduleMaintenanceIfNeeded()
     if ('conflict' in outcome)
-      return { conflict: true, current: outcome.current === null ? null : headToWire(outcome.current) }
+      return { conflict: true, current: outcome.current === null ? null : headForRpc(outcome.current) }
     if ('deleted' in outcome) return { ok: true, deleted: true }
-    return { ok: true, head: headToWire(outcome.head) }
+    return { ok: true, head: headForRpc(outcome.head) }
   }
 
   // ── cells ──
 
-  async readCells(inc: string, sel: { keys: string[] } | { prefix: string }): Promise<CellsWire> {
-    const result = readCells(this.#sql, inc, sel, Date.now())
-    if ('staleInc' in result) return { staleInc: true }
-    return { revision: result.revision, cells: [...result.cells].map(([key, bytes]) => [key, bytesToBase64(bytes)]) }
+  async readCells(inc: string, sel: { keys: string[] } | { prefix: string }): Promise<CellsResult> {
+    return readCells(this.#sql, inc, sel, Date.now())
   }
 
-  async compareExchangeCells(inc: string, revision: string, mutationsWire: CellMutationWire[]): Promise<CxResult> {
-    const mutations: CellMutation[] = mutationsWire.map((mutation) =>
-      mutation.set === undefined
-        ? { key: mutation.key }
-        : { key: mutation.key, set: { bytes: base64ToBytes(mutation.set.bytesB64), ttlMs: mutation.set.ttlMs } },
-    )
+  async compareExchangeCells(inc: string, revision: string, mutations: CellMutation[]): Promise<CxResult> {
     const now = Date.now()
     let result!: CxResult
     this.ctx.storage.transactionSync(() => {
       result = compareExchangeCells(this.#sql, inc, revision, mutations, now)
     })
+    if (result === 'committed') await this.#scheduleMaintenanceIfNeeded()
     return result
   }
 
@@ -259,23 +174,18 @@ export class TelefuncRoomDurableObject extends DurableObject {
     const frame = payload instanceof Uint8Array ? payload : new Uint8Array(payload)
     let accepted: { seq: number; timestamp: number; targets: RouteTarget[] } | null = null
     // The acceptance transaction encodes the SAME precondition branch as Redis/memory. Zero-row match ⇒
-    // stale. Over-cap retain throws BEFORE the order advances (the tx rolls back), surfaced as a
-    // structured error the facade rethrows.
-    try {
-      this.ctx.storage.transactionSync(() => {
-        if (!commitPreconditionHolds(this.#sql, inc, lane, opts?.closingLease, now)) return
-        if (opts?.requiredCellKeys !== undefined) {
-          const required = readCells(this.#sql, inc, { keys: opts.requiredCellKeys }, now)
-          if ('staleInc' in required || opts.requiredCellKeys.some((cell) => !required.cells.has(cell))) return
-        }
-        const mark = advanceOrder(this.#sql, inc, key, now)
-        if (opts?.retain === true) installRetained(this.#sql, inc, lane, frame, mark)
-        const targets = snapshotRoutes(this.#sql, inc, key, now)
-        accepted = { seq: mark.seq, timestamp: mark.timestamp, targets }
-      })
-    } catch (error) {
-      return { error: (error as Error).message }
-    }
+    // stale. A storage or validation failure rejects the RPC and rolls back the transaction.
+    this.ctx.storage.transactionSync(() => {
+      if (!commitPreconditionHolds(this.#sql, inc, lane, opts?.closingLease, now)) return
+      if (opts?.requiredCellKeys !== undefined) {
+        const required = readCells(this.#sql, inc, { keys: opts.requiredCellKeys }, now)
+        if ('staleInc' in required || opts.requiredCellKeys.some((cell) => !required.cells.has(cell))) return
+      }
+      const mark = advanceOrder(this.#sql, inc, key, now)
+      if (opts?.retain === true) installRetained(this.#sql, inc, lane, frame, mark)
+      const targets = snapshotRoutes(this.#sql, inc, key, now)
+      accepted = { seq: mark.seq, timestamp: mark.timestamp, targets }
+    })
     if (accepted === null) return { stale: true }
     const settled: { seq: number; timestamp: number; targets: RouteTarget[] } = accepted
     const deliveryToken = this.#fanout.enqueue(inc, key, settled.targets, frame, {
@@ -300,11 +210,8 @@ export class TelefuncRoomDurableObject extends DurableObject {
 
   // ── retained ──
 
-  async readRetained(inc: string, lane: LaneId): Promise<RetainedWire | null> {
-    const entry = readRetained(this.#sql, inc, lane)
-    return entry === null
-      ? null
-      : { payloadB64: bytesToBase64(entry.payload), seq: entry.seq, timestamp: entry.timestamp }
+  async readRetained(inc: string, lane: LaneId): Promise<RetainedResult | null> {
+    return readRetained(this.#sql, inc, lane)
   }
 
   async listRetained(inc: string): Promise<LaneId[]> {
@@ -344,6 +251,7 @@ export class TelefuncRoomDurableObject extends DurableObject {
       upsertRoute(this.#sql, roomId, inc, laneKey, subscriberDoId, leaseId, generationToken, now)
       result = { ok: true, generationToken }
     })
+    if ('ok' in result) await this.#scheduleMaintenanceIfNeeded()
     return result
   }
 
@@ -365,6 +273,7 @@ export class TelefuncRoomDurableObject extends DurableObject {
       }
       renewed = renewRoute(this.#sql, inc, laneKey, subscriberDoId, leaseId, now)
     })
+    await this.#scheduleMaintenanceIfNeeded()
     if (generationInvalid) return { ok: false, terminal: true }
     // A missing/non-live exact route inside the SAME generation is recoverable: the subscription
     // lifecycle enters lost and establishes a fresh lease. Only generation identity loss is terminal.
@@ -373,6 +282,7 @@ export class TelefuncRoomDurableObject extends DurableObject {
 
   async unsubscribeRoute(inc: string, laneKey: string, subscriberDoId: string, leaseId: string): Promise<void> {
     this.ctx.storage.transactionSync(() => deleteRoute(this.#sql, inc, laneKey, subscriberDoId, leaseId))
+    await this.#scheduleMaintenanceIfNeeded()
   }
 
   // ── generation lifecycle ──
@@ -381,11 +291,11 @@ export class TelefuncRoomDurableObject extends DurableObject {
     return listGenerations(this.#sql)
   }
 
-  async dropGeneration(inc: string): Promise<DropWire> {
+  async dropGeneration(inc: string): Promise<void> {
     const now = Date.now()
     const head = readLiveHead(this.#sql, now)
     if (head?.currentInc === inc) {
-      return { error: `dropGeneration: refusing to drop the current incarnation '${inc}'` }
+      throw new Error(`dropGeneration: refusing to drop the current incarnation '${inc}'`)
     }
     const installations = listRouteInstallations(this.#sql, inc)
     // Subscriber uninstalls are fallible. Keep their durable route rows and generation entry intact
@@ -394,7 +304,7 @@ export class TelefuncRoomDurableObject extends DurableObject {
     await Promise.all(installations.map((installation) => this.#invalidateInstallation(installation, true)))
     this.ctx.storage.transactionSync(() => dropGenerationRows(this.#sql, inc))
     this.#fanout.clearIncarnation(inc)
-    return { ok: true }
+    await this.#scheduleMaintenanceIfNeeded()
   }
 
   // ── directory (this DO, addressed as a singleton, is the best-effort projection store) ──
@@ -420,7 +330,7 @@ export class TelefuncRoomDurableObject extends DurableObject {
     try {
       await this.#runSweep(Date.now())
     } finally {
-      await this.#armAlarm()
+      await this.#scheduleMaintenanceIfNeeded()
     }
   }
 
@@ -487,9 +397,91 @@ export class TelefuncRoomDurableObject extends DurableObject {
     })
   }
 
-  async #armAlarm(): Promise<void> {
-    await this.ctx.storage.setAlarm(Date.now() + ROOM_ALARM_INTERVAL_MS)
+  async #settleDeliveryOutcomes(
+    outcomes: RoomShardFanoutOutcome[],
+    info: { roomId: string; inc: string; laneKey: string; seq: number; timestamp: number },
+    coordinatorIndex?: number,
+  ): Promise<void> {
+    const deliveryFailures: Error[] = []
+    const evicted: RouteTarget[] = []
+    this.ctx.storage.transactionSync(() => {
+      for (const outcome of outcomes) {
+        const target = outcome.target
+        if (outcome.error === undefined) {
+          recordRouteDeliverySuccess(this.#sql, info.inc, info.laneKey, target.subscriberDoId, target.leaseId)
+          continue
+        }
+        deliveryFailures.push(new Error(outcome.error))
+        if (recordRouteDeliveryFailure(this.#sql, info.inc, info.laneKey, target.subscriberDoId, target.leaseId)) {
+          evicted.push(target)
+        }
+      }
+    })
+    if (evicted.length > 0) await this.#scheduleMaintenanceIfNeeded()
+
+    const invalidationFailures: Error[] = []
+    if (evicted.length > 0) {
+      // K=3 recovery remains exact-lease scoped. A coordinator bucket that delivered the frame also
+      // carries its invalidations, keeping the authority's own service-subrequest count bounded.
+      const request: RoomShardFanoutRequest = {
+        operation: 'invalidate',
+        roomId: info.roomId,
+        inc: info.inc,
+        laneKey: info.laneKey,
+        targets: evicted,
+        path: `${coordinatorIndex ?? 0}.invalidate`,
+      }
+      const invalidations =
+        coordinatorIndex === undefined
+          ? await dispatchRoomShardFanout(this.#sessionNamespaceValue, request)
+          : await dispatchRoomShardFanoutViaCoordinator(this.#sessionNamespaceValue, request)
+      for (const outcome of invalidations) {
+        if (outcome.error !== undefined) invalidationFailures.push(new Error(outcome.error))
+      }
+    }
+
+    if (deliveryFailures.length === 1 && invalidationFailures.length === 0) throw deliveryFailures[0]
+    if (deliveryFailures.length === 1 && invalidationFailures.length === 1) {
+      throw new AggregateError(
+        [deliveryFailures[0], invalidationFailures[0]],
+        'Cloudflare Room delivery and exact-route invalidation both failed',
+      )
+    }
+    const failures = [...deliveryFailures, ...invalidationFailures]
+    if (failures.length > 0) throw new AggregateError(failures, 'Cloudflare Room fanout failed')
   }
+
+  async #scheduleMaintenanceIfNeeded(): Promise<void> {
+    const now = Date.now()
+    const deadline = nextMaintenanceDeadline(this.#sql, now)
+    const currentAlarm = await this.ctx.storage.getAlarm()
+    if (deadline === null) {
+      if (currentAlarm !== null) await this.ctx.storage.deleteAlarm()
+      return
+    }
+    const nextAlarm = deadline <= now ? now + ROOM_MAINTENANCE_RETRY_MS : deadline
+    if (currentAlarm === nextAlarm) return
+    // Never postpone an already-scheduled retry for work that is due now.
+    if (deadline <= now && currentAlarm !== null && currentAlarm <= nextAlarm) return
+    await this.ctx.storage.setAlarm(nextAlarm)
+  }
+}
+
+function nextMaintenanceDeadline(sql: SqlStorage, now: number): number | null {
+  const deadlines = [
+    sql.exec<{ deadline: number | null }>('SELECT MIN(expires_at) AS deadline FROM head').toArray()[0]?.deadline,
+    sql
+      .exec<{ deadline: number | null }>('SELECT MIN(expires_at) AS deadline FROM cell WHERE expires_at IS NOT NULL')
+      .toArray()[0]?.deadline,
+    sql.exec<{ deadline: number | null }>('SELECT MIN(expires_at) AS deadline FROM route').toArray()[0]?.deadline,
+  ].filter((deadline): deadline is number => deadline !== null && deadline !== undefined)
+  const currentInc = readLiveHead(sql, now)?.currentInc ?? null
+  const hasOrphan =
+    currentInc === null
+      ? sql.exec('SELECT 1 FROM gen LIMIT 1').toArray().length > 0
+      : sql.exec('SELECT 1 FROM gen WHERE inc <> ? LIMIT 1', currentInc).toArray().length > 0
+  if (hasOrphan) deadlines.push(now)
+  return deadlines.length === 0 ? null : Math.min(...deadlines)
 }
 
 // The commit precondition: one boolean, two branches. Supplying a closing lease selects the narrow

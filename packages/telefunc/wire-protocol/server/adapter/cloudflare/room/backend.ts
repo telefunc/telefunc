@@ -22,18 +22,9 @@ import type {
 } from '../../../../backend/spi.js'
 import { BACKEND_SPI_VERSION } from '../../../../backend/spi.js'
 import { CloudflareBroadcastTransport } from '../broadcast.js'
-import { base64ToBytes, bytesToBase64, laneKey as laneKeyOf } from './codec.js'
+import { laneKey as laneKeyOf } from './codec.js'
 import { CloudflareRoomSubscriptionAttempt, type CloudflareRoomSubscriptionSource } from './subscription.js'
-import type {
-  CellsWire,
-  CommitWire,
-  DropWire,
-  HeadCxWire,
-  HeadNextWire,
-  HeadWire,
-  RegisterWire,
-  RetainedWire,
-} from './do.js'
+import type { CellsResult, CommitWire, HeadCxResult, RegisterWire, RetainedResult } from './do.js'
 
 const DIRECTORY_DO_NAME = '__telefunc_room_directory__'
 const ROOM_MANAGER = Symbol('telefunc.cloudflare.room-manager')
@@ -65,14 +56,10 @@ export type RoomShardInvalidationRequest = Omit<RoomShardDeliveryRequest, 'frame
 }
 
 export type CloudflareRoomAuthorityStub = {
-  readHead(): Promise<HeadWire | null>
-  compareExchangeHead(cx: HeadCx, next: HeadNextWire): Promise<HeadCxWire>
-  readCells(inc: string, sel: { keys: string[] } | { prefix: string }): Promise<CellsWire>
-  compareExchangeCells(
-    inc: string,
-    revision: string,
-    mutations: Array<{ key: string; set?: { bytesB64: string; ttlMs?: number } }>,
-  ): Promise<CxResult>
+  readHead(): Promise<RoomHead | null>
+  compareExchangeHead(cx: HeadCx, next: HeadNext): Promise<HeadCxResult>
+  readCells(inc: string, sel: { keys: string[] } | { prefix: string }): Promise<CellsResult>
+  compareExchangeCells(inc: string, revision: string, mutations: CellMutation[]): Promise<CxResult>
   commitLane(
     roomId: string,
     inc: string,
@@ -81,7 +68,7 @@ export type CloudflareRoomAuthorityStub = {
     opts?: { retain?: boolean; closingLease?: string; requiredCellKeys?: string[] },
   ): Promise<CommitWire>
   awaitDelivery(token: string): Promise<void>
-  readRetained(inc: string, lane: LaneId): Promise<RetainedWire | null>
+  readRetained(inc: string, lane: LaneId): Promise<RetainedResult | null>
   listRetained(inc: string): Promise<LaneId[]>
   deleteRetainedLane(inc: string, lane?: LaneId, opts?: { ifSeq?: number }): Promise<void>
   registerRoute(
@@ -100,7 +87,7 @@ export type CloudflareRoomAuthorityStub = {
   ): Promise<{ ok: boolean; terminal?: boolean }>
   unsubscribeRoute(inc: string, laneKey: string, subscriberDoId: string, leaseId: string): Promise<void>
   listGenerations(): Promise<string[]>
-  dropGeneration(inc: string): Promise<DropWire>
+  dropGeneration(inc: string): Promise<void>
   directoryPut(roomId: string, incTag: string): Promise<void>
   directoryDelete(roomId: string, incTag: string): Promise<void>
   directoryList(
@@ -171,7 +158,7 @@ export class CloudflareRoomSessionManager {
 
   invalidate(request: RoomShardInvalidationRequest): void {
     const entry = this.#entries.get(JSON.stringify([request.roomId, request.inc, request.laneKey]))
-    if (entry?.matches(request, request.terminal === true)) {
+    if (entry?.matches(request)) {
       if (request.terminal === true) entry.terminate()
       else entry.invalidate()
     }
@@ -249,8 +236,8 @@ export class CloudflareRoomBackend implements BackendDriver {
   }
 
   async readHead(roomId: string): Promise<{ head: RoomHead } | null> {
-    const wire = await this.#stub(roomId).readHead()
-    return wire === null ? null : { head: headFromWire(wire) }
+    const head = await this.#stub(roomId).readHead()
+    return head === null ? null : { head }
   }
   async compareExchangeHead(
     roomId: string,
@@ -259,20 +246,14 @@ export class CloudflareRoomBackend implements BackendDriver {
   ): Promise<
     { ok: true; head: RoomHead } | { ok: true; deleted: true } | { conflict: true; current: RoomHead | null }
   > {
-    const wire = await this.#stub(roomId).compareExchangeHead(cx, nextToWire(next))
-    if ('error' in wire) throw new Error(wire.error)
-    if ('conflict' in wire)
-      return { conflict: true, current: wire.current === null ? null : headFromWire(wire.current) }
-    return 'deleted' in wire ? { ok: true, deleted: true } : { ok: true, head: headFromWire(wire.head) }
+    return this.#stub(roomId).compareExchangeHead(cx, next)
   }
   async readCells(
     roomId: string,
     inc: string,
     sel: { keys: string[] } | { prefix: string },
   ): Promise<{ revision: string; cells: Map<string, Uint8Array> } | { staleInc: true }> {
-    const wire = await this.#stub(roomId).readCells(inc, sel)
-    if ('staleInc' in wire) return wire
-    return { revision: wire.revision, cells: new Map(wire.cells.map(([key, value]) => [key, base64ToBytes(value)])) }
+    return this.#stub(roomId).readCells(inc, sel)
   }
   async compareExchangeCells(
     roomId: string,
@@ -280,15 +261,7 @@ export class CloudflareRoomBackend implements BackendDriver {
     revision: string,
     mutations: CellMutation[],
   ): Promise<CxResult> {
-    return this.#stub(roomId).compareExchangeCells(
-      inc,
-      revision,
-      mutations.map((mutation) =>
-        mutation.set === undefined
-          ? { key: mutation.key }
-          : { key: mutation.key, set: { bytesB64: bytesToBase64(mutation.set.bytes), ttlMs: mutation.set.ttlMs } },
-      ),
-    )
+    return this.#stub(roomId).compareExchangeCells(inc, revision, mutations)
   }
   async commitLane(
     roomId: string,
@@ -300,20 +273,17 @@ export class CloudflareRoomBackend implements BackendDriver {
     const manager = getCloudflareRoomSessionManager()
     const stub = manager.authority(roomId)
     const wire = await stub.commitLane(roomId, inc, lane, payload, opts)
-    if ('error' in wire) throw new Error(wire.error)
     if ('stale' in wire) return { stale: true }
     assertOrderingPosition(wire.seq, wire.timestamp, 'CloudflareRoomBackend.commitLane')
     const deliveryToken = wire.deliveryToken
-    const delivery = new Promise<void>((resolve, reject) => {
-      setTimeout(() => void stub.awaitDelivery(deliveryToken).then(resolve, reject), 0)
-    })
+    const delivery = stub.awaitDelivery(deliveryToken)
     return { accepted: true, seq: wire.seq, timestamp: wire.timestamp, receivers: wire.receivers, delivery }
   }
   async readRetained(roomId: string, inc: string, lane: LaneId) {
     const wire = await this.#stub(roomId).readRetained(inc, lane)
     if (wire === null) return null
     assertOrderingPosition(wire.seq, wire.timestamp, 'CloudflareRoomBackend.readRetained')
-    return { payload: base64ToBytes(wire.payloadB64), seq: wire.seq, timestamp: wire.timestamp }
+    return wire
   }
   async listRetained(roomId: string, inc: string) {
     return this.#stub(roomId).listRetained(inc)
@@ -325,8 +295,7 @@ export class CloudflareRoomBackend implements BackendDriver {
     return this.#stub(roomId).listGenerations()
   }
   async dropGeneration(roomId: string, inc: string) {
-    const wire = await this.#stub(roomId).dropGeneration(inc)
-    if ('error' in wire) throw new Error(wire.error)
+    await this.#stub(roomId).dropGeneration(inc)
   }
   async directoryPut(roomId: string, incTag: string) {
     await this.#directory().directoryPut(roomId, incTag)
@@ -366,25 +335,4 @@ export class CloudflareRoomBackend implements BackendDriver {
   #directory(): CloudflareRoomAuthorityStub {
     return this.#stub(DIRECTORY_DO_NAME)
   }
-}
-
-function headFromWire(wire: HeadWire): RoomHead {
-  const head: RoomHead = {
-    rev: wire.rev,
-    currentInc: wire.currentInc,
-    state: wire.state,
-    config: base64ToBytes(wire.configB64),
-  }
-  if (wire.closeLease !== undefined) head.closeLease = wire.closeLease
-  return head
-}
-function nextToWire(next: HeadNext): HeadNextWire {
-  if ('delete' in next) return next
-  const head: Extract<HeadNextWire, { head: unknown }>['head'] = {
-    currentInc: next.head.currentInc,
-    state: next.head.state,
-    configB64: bytesToBase64(next.head.config),
-  }
-  if (next.head.closeLease !== undefined) head.closeLease = next.head.closeLease
-  return next.ttlMs === undefined ? { head } : { head, ttlMs: next.ttlMs }
 }

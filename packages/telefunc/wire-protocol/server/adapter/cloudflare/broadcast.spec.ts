@@ -713,4 +713,39 @@ describe('cloudflare broadcast routing', () => {
 
     expect(await kv.get(key)).toBeNull()
   })
+
+  it('surfaces presence refresh loss and recovery through subscription state', async () => {
+    vi.useFakeTimers()
+    const transport = new CloudflareBroadcastTransport({ baseInstanceName: 'telefunc', scale: 1 })
+    const kv = createMockKV()
+    const originalPut = kv.put.bind(kv)
+    let putCalls = 0
+    kv.put = (async (key: string, value: string, options?: Parameters<KVNamespace['put']>[2]) => {
+      putCalls += 1
+      if (putCalls === 2) throw new Error('presence refresh rejected')
+      return originalPut(key, value, options)
+    }) as KVNamespace['put']
+    transport.attachBinding(createBasicBinding(), 'TelefuncDurableObject')
+    transport.attachKV(kv)
+    transport.attachIsolateInfo('telefunc-shard-weur-0', 'weur')
+
+    const subscription = transport.openSubscription({ key: 'room:refresh', kind: 'text' }, () => {})
+    await subscription.ready
+    const states: string[] = []
+    const stopObserving = subscription.onStateChange((state) => states.push(state))
+
+    try {
+      await vi.advanceTimersByTimeAsync(30_000)
+      expect(subscription.state()).toBe('lost')
+      expect(states).toEqual(['lost'])
+
+      await vi.advanceTimersByTimeAsync(30_000)
+      expect(subscription.state()).toBe('ready')
+      expect(states).toEqual(['lost', 'ready'])
+    } finally {
+      stopObserving()
+      await subscription.unsubscribe()
+      vi.useRealTimers()
+    }
+  })
 })
