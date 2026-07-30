@@ -17,6 +17,10 @@ import { testPublish } from './pages/publish/e2e-test'
 import { testRoom } from './pages/room/e2e-test'
 import { testRefIdentity } from './pages/ref-identity/e2e-test'
 
+// Room traffic uses the channel transport, independently of the streaming transport. Keep one
+// preview variant for each distinct channel topology: SSE, SSE-to-WebSocket upgrade, and direct WS.
+const roomCoverageVariants = new Set(['binary-inline:["sse"]', 'binary-inline:["sse","ws"]', 'channel:["ws"]'])
+
 function testRun(cmd: 'pnpm dev' | 'pnpm preview') {
   run(cmd, {
     // `pnpm preview` runs srvx (prints `Listening on:`); `pnpm dev` is `vike dev` on vite
@@ -88,7 +92,8 @@ function testRun(cmd: 'pnpm dev' | 'pnpm preview') {
 
   testPublish()
 
-  if (!isDev) testRoom()
+  const roomCoverageVariant = `${process.env.PUBLIC_ENV__STREAM_TRANSPORT}:${process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS}`
+  if (!isDev && roomCoverageVariants.has(roomCoverageVariant)) testRoom()
 
   testRefIdentity()
 }
