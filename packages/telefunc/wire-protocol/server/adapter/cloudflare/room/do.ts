@@ -190,8 +190,8 @@ export class TelefuncRoomDurableObject extends DurableObject {
             ).evicted
           })
           // Core cannot infer an authority-side K=3 eviction from a later local attachment: it already
-          // owns the ready slot. Tell the exact live attempt now; its ordinary `closed` state lets the
-          // shared supervisor replan, while the retained route row remains the janitor's retry source
+          // owns the ready slot. Tell the exact live attempt now; its ordinary `closed` state lets Room
+          // apply its recovery policy, while the retained route row remains the janitor's retry source
           // if this best-effort invalidation RPC is lost.
           if (evicted) {
             try {
