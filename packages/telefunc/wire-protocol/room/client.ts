@@ -27,8 +27,8 @@ import {
 import { RoomState } from './state.js'
 import { ParticipantBase, type InboxMessage } from './participant.js'
 import type {
+  BinaryFrameInfo,
   BinaryPublishOptions,
-  RoomBinaryListener,
   JoinOptions,
   LeaveCause,
   LocalParticipant,
@@ -199,7 +199,10 @@ class ClientRoom implements Room {
   subscribe(callback: (data: unknown, info: ChannelPublishInfo, from: Sender) => unknown): () => void {
     return this._state.subscribe(callback)
   }
-  subscribeBinary(callback: RoomBinaryListener, options?: { track?: string | null }): () => void {
+  subscribeBinary(
+    callback: (data: Uint8Array, info: ChannelPublishInfo & BinaryFrameInfo, from: Sender) => unknown,
+    options?: { track?: string | null },
+  ): () => void {
     return this._state.subscribeBinary(callback, options)
   }
   onJoin(callback: (member: RemoteParticipant) => void): () => void {

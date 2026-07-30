@@ -68,8 +68,8 @@ import { RoomDemand } from './demand.js'
 import { ParticipantBase, type InboxMessage } from './participant.js'
 import type { RoomStubChannel } from './stubs.js'
 import type {
+  BinaryFrameInfo,
   BinaryPublishOptions,
-  RoomBinaryListener,
   JoinOptions,
   LeaveCause,
   LocalParticipant,
@@ -773,7 +773,10 @@ class ServerRoom implements Room {
   subscribe(callback: (data: unknown, info: ChannelPublishInfo, from: Sender) => unknown): () => void {
     return this._state.subscribe(callback)
   }
-  subscribeBinary(callback: RoomBinaryListener, options?: { track?: string }): () => void {
+  subscribeBinary(
+    callback: (data: Uint8Array, info: ChannelPublishInfo & BinaryFrameInfo, from: Sender) => unknown,
+    options?: { track?: string },
+  ): () => void {
     return this._state.subscribeBinary(callback, options)
   }
   onJoin(callback: (member: RemoteParticipant) => void): () => void {
