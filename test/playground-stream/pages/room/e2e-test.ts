@@ -326,7 +326,7 @@ function testRoom() {
 
   testRoomScenario(
     'selfServer',
-    'room: a co-returned server-side selfDelivery:false member is suppressed at the source, while a client join on the same stub is delivered',
+    'room: a co-returned server-side selfDelivery:false member sees no own publish, while a client join on the same room view is delivered',
     async () => {
       await navigate(`${getServerUrl()}/room`)
       await page.click(roomScenario('selfServer').selector)
