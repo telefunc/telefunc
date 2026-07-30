@@ -90,10 +90,8 @@ async function requireRoom(id: string): Promise<{ config: RoomConfigRecord }> {
  *  to read a specific subset (e.g. one identity's memberships) instead of scanning the whole roster. */
 async function readMembers(roomId: string, inc: string, ids?: string[]): Promise<MemberSnapshot[]> {
   if (ids === undefined) await completePendingMemberCleanups(roomId, inc)
-  // Roster reads run against the authority, not the replica: `_refreshMembers` relies on read-your-
-  // writes (a join/leave writes its record before publishing the event that triggers the read), and
-  // the reap below keys off `seenAt` — a replica lag could drop a live member from the roster or reap
-  // a member a live heartbeat just refreshed. The reap delete stays replicated so both tiers drop it.
+  // Roster reads run against the authority, not the replica: `_refreshMembers` relies on read-your- writes (a join/leave writes its record before publishing the event that triggers the read), and the
+  // reap below keys off `seenAt` — a replica lag could drop a live member from the roster or reap a member a live heartbeat just refreshed. The reap delete stays replicated so both tiers drop it.
   const memberKeys =
     ids === undefined ? await listMemberKeys(roomId, inc) : ids.map((id) => ({ key: roomMemberKvKey(roomId, id), id }))
   const { cells } = await readCellSet(roomId, inc, { keys: memberKeys.map(({ key }) => key) })

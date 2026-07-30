@@ -115,8 +115,7 @@ type RoomGetOptions = {
 type JoinOptions<P extends ParticipantMeta = ParticipantMeta> = {
   /** Your participant metadata (e.g. name, score), visible to all observers. Default: `{}`. */
   meta?: P
-  /** Whether the messages you publish are delivered back to the room object on your side
-   *  (default: `true`). Turn off e.g. for video, where you don't want your own frames back. */
+  /** Whether the messages you publish are delivered back to the room object on your side (default: `true`). Turn off e.g. for video, where you don't want your own frames back. */
   selfDelivery?: boolean
   /** Trusted app identity, immutable for this membership. Server-only. */
   identity?: string
@@ -253,8 +252,7 @@ type LocalParticipant<P extends ParticipantMeta = ParticipantMeta, Pub = unknown
   setAttributes(attributes: Partial<P>): Promise<void>
 
   leave(): Promise<void>
-  /** You left. `cause.type` says how — `'left'` (you), `'removed'` (kicked, with the kick's
-   *  `reason`), `'closed'` (the room), `'disconnected'` (the connection died). */
+  /** You left. `cause.type` says how — `'left'` (you), `'removed'` (kicked, with the kick's `reason`), `'closed'` (the room), `'disconnected'` (the connection died). */
   onLeave(callback: (cause: LeaveCause) => void): () => void
 } & RoomShield<Pub>
 
