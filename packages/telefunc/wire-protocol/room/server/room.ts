@@ -1228,14 +1228,13 @@ class ServerRoom implements Room {
       ),
     )
 
-    // Text and announcements share one semantic lane. A node opens it while it owns a participant
-    // or a holder declares text/announcement demand, then filters delivery at the per-stub relay.
+    // Text and announcements share one semantic lane. A holder opens it on text/announcement demand,
+    // then filters delivery at the per-stub relay.
     // A presence-only observer opens only the control lane.
     const textWants = this._aggregateTextWants()
     const wantAnyText = open && (textWants.all || textWants.members.size > 0)
     const wantAnnounce = state.wantsAnnounce || [...this._stubs].some((stub) => stub._wantsAnnounce)
-    const ownsMembers = this._localParticipants.size > 0 || [...this._stubs].some((stub) => stub._stubMembers.size > 0)
-    const wantSemantic = open && (ownsMembers || wantAnyText || wantAnnounce)
+    const wantSemantic = open && (wantAnyText || wantAnnounce)
     const memberIds = open ? state.listMemberIds() : []
 
     // Roster loads are need-driven: a resident roster refreshes on the observe transition

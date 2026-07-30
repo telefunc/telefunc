@@ -64,39 +64,25 @@ afterEach(async () => {
 })
 
 describe('Room public behavior', () => {
-  it('does not complete a join until its semantic subscription is ready', async () => {
-    const room = (await Room.create('join-readiness')) as ServerRoom
+  it('opens semantic ingestion only when a semantic listener wants delivery', async () => {
+    const room = (await Room.create('semantic-demand')) as ServerRoom
     const backend = getBackend()
     const subscribeLane = backend.subscribeLane.bind(backend)
-    const semanticReady = deferred<void>()
-    const semanticStarted = deferred<void>()
-    let semanticState: SubscriptionState = 'establishing'
+    let semanticSubscriptions = 0
     const subscribe = vi.spyOn(backend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
-      const subscription = subscribeLane(roomId, inc, lane, receiver)
-      if (lane.kind !== 'semantic') return subscription
-      semanticStarted.resolve()
-      return {
-        ready: semanticReady.promise,
-        state: () => semanticState,
-        onStateChange: (callback) => subscription.onStateChange(callback),
-        unsubscribe: () => subscription.unsubscribe(),
-      }
+      if (lane.kind === 'semantic') semanticSubscriptions++
+      return subscribeLane(roomId, inc, lane, receiver)
     })
     try {
-      let settled = false
-      const joining = room.join().then((participant) => {
-        settled = true
-        return participant
-      })
-      await semanticStarted.promise
-      expect(settled).toBe(false)
+      const member = await room.join()
+      expect(semanticSubscriptions).toBe(0)
 
-      semanticState = 'ready'
-      semanticReady.resolve()
-      await expect(joining).resolves.toMatchObject({ id: expect.any(String) })
-      expect(settled).toBe(true)
+      const received: unknown[] = []
+      room.subscribe((data) => received.push(data))
+      await vi.waitFor(() => expect(semanticSubscriptions).toBe(1))
+      await member.publish('wanted')
+      expect(received).toEqual(['wanted'])
     } finally {
-      semanticReady.resolve()
       subscribe.mockRestore()
     }
   })
