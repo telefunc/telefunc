@@ -538,7 +538,7 @@ describe('Room public behavior', () => {
     ])
   })
 
-  it('replaces a subscription that is already closed on initial establishment', async () => {
+  it('reports an initially closed source to the terminal owner', async () => {
     const closed = terminalSubscription()
     await closed.close()
     const terminal = vi.fn()
