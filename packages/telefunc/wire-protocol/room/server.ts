@@ -183,7 +183,7 @@ type RoomStatic = {
    *  so "why" never races the removal. */
   removeParticipant(id: string, target: ParticipantRef & { reason?: unknown }): Promise<void>
   /** Publish a room-authored message — no sender, delivered to `onAnnounce()` (e.g. system notices).
-   *  Returns the message's room-wide order (`{ seq, timestamp }`), the same clock `publish()` stamps. */
+   *  Returns its control-lane order (`{ seq, timestamp }`), ordered with presence and lifecycle. */
   announce(id: string, data: unknown): Promise<RoomSendReceipt>
   /** Send a server-authored private message — arrives on `listen()` with `from: null`. Target one
    *  participant by `{ id }` (throws when unknown), or every membership of an app identity at once
@@ -650,12 +650,12 @@ async function getRoomParticipants(id: string, target?: { identity: string }): P
 
 async function announceToRoom(id: string, data: unknown): Promise<RoomSendReceipt> {
   const { config } = await requireRoom(id)
-  // One commit on the room's semantic lane, the same one `publish()` draws, so an announcement is
-  // ordered relative to participant text and reaches every observer.
+  // Announcements ride the always-on control lane: every observer receives them even when it has no
+  // text demand. Their receipt is ordered with presence/lifecycle events, independently of text.
   const commit = await commitRoomLane(
     id,
     config.inc,
-    SEMANTIC_LANE,
+    CONTROL_LANE,
     encodeRoomText(stringify({ __r: 'announce', data } satisfies RoomEnvelope)),
   )
   if (commit === null) throw new RoomError(`Room is closed: ${id}`)
@@ -1028,7 +1028,7 @@ class ServerRoom implements Room {
     // One atomic commit assigns the room-wide order, stores the retained frame (if any), and publishes
     // — the assigned order rides the lane frame, so the retained copy, the live frame, and the
     // receipt all carry the one pair with no separate allocate, and no subscriber sees a gap between
-    // the store and the publish. Text and `announce()` share this clock, so they totally order.
+    // the store and the publish.
     const commit = await commitRoomLane(this.id, this._inc, SEMANTIC_LANE, encodeRoomText(stringify(envelope)), {
       retain,
       requiredCellKeys: [roomMemberKvKey(this.id, from)],
@@ -1309,8 +1309,11 @@ class ServerRoom implements Room {
     // applying, since `leave` removes the member from state (see `_hidesFromClients`).
     const serverOnly = this._hidesFromClients(event)
 
-    if (event.__r === 'announce') return
-    this._applyCtrl(event)
+    if (event.__r === 'announce') {
+      this._state.applyAnnounce(event.data, makePublishInfo(this.id, rawInfo.seq, rawInfo.timestamp))
+    } else {
+      this._applyCtrl(event)
+    }
 
     if (this._stubs.size > 0 && !serverOnly) {
       // Presence/lifecycle events are ordered by the control lane; the receipt rides the frame.
@@ -1347,16 +1350,6 @@ class ServerRoom implements Room {
       return // junk on the semantic lane
     }
     if (!hasRoomTag(envelope)) return
-    if (envelope.__r === 'announce') {
-      const announce = envelope as Extract<RoomEnvelope, { __r: 'announce' }>
-      const info = makePublishInfo(this.id, rawInfo.seq, rawInfo.timestamp)
-      this._state.applyAnnounce(announce.data, info)
-      if (this._stubs.size > 0) {
-        const wireText = encodePublishText(serialized, rawInfo)
-        for (const stub of this._stubs) stub._relayPublishText(wireText)
-      }
-      return
-    }
     if (envelope.__r !== 'data') return
     const event = envelope as RoomDataEnvelope
     // The semantic-lane order rides on the transport frame, never in the payload.

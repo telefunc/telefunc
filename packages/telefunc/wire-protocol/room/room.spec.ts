@@ -540,15 +540,22 @@ describe('Room public behavior', () => {
     expect(after).toEqual(['join:Alice', 'join:Bob', 'publish:ok', 'send:ok'])
   })
 
-  it('orders participant text and room announcements in one monotonic semantic domain', async () => {
-    const room = await Room.create('semantic-order')
-    const member = await room.join()
-    const first = await member.publish('one')
-    const second = await Room.announce('semantic-order', 'notice')
-    const third = await member.publish('two')
-    expect([first.seq, second.seq, third.seq]).toEqual([1, 2, 3])
-    expect(first.timestamp).toBeLessThanOrEqual(second.timestamp)
-    expect(second.timestamp).toBeLessThanOrEqual(third.timestamp)
+  it('delivers announcements to pure observers in the control order, independently of text order', async () => {
+    const room = await Room.create('announce-control-order')
+    const firstMember = await room.join()
+    await room.join()
+    const observer = await Room.get(room.id)
+    const observed: Array<[unknown, number]> = []
+    observer.onAnnounce((data, info) => observed.push([data, info.seq]))
+    await settle()
+
+    const first = await firstMember.publish('one')
+    const second = await Room.announce(room.id, 'notice')
+    const third = await firstMember.publish('two')
+
+    expect([first.seq, third.seq]).toEqual([1, 2])
+    expect(second.seq).toBe(3) // two joins precede it on the control lane
+    expect(observed).toEqual([['notice', 3]])
   })
 
   it("retained owner cleanup is compare-delete, so a newer owner's racing frame survives", async () => {
