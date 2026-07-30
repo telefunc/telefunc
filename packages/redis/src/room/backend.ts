@@ -155,34 +155,28 @@ export class RedisRoomBackend implements BackendDriver {
     this.#publisher = options.redis
     let clusterSubscriberSelection = 0
     const createSubscriber = async (): Promise<Redis> => {
-      if (!(options.redis instanceof Cluster)) {
-        return options.redis.duplicate({
-          connectionName: `telefunc-subscriber-${randomUUID()}`,
-          autoResubscribe: false,
-          lazyConnect: true,
-          maxRetriesPerRequest: 1,
-          retryStrategy: () => null,
-        })
-      }
-      // Use a supported direct Redis duplicate of a live master. Unlike Cluster's hidden Pub/Sub
-      // connection, this exact client is owned by the Room transport, so SUBSCRIBE, dispatch and the
-      // delivery-fence PING necessarily share one socket. Re-evaluate topology on every replacement.
-      let topology = options.redis.nodes('master')
-      if (topology.length === 0) {
-        await options.redis.ping()
-        topology = options.redis.nodes('master')
-      }
-      const masters = topology
-        .filter((master) => master.status !== 'end')
-        .sort((left, right) =>
-          `${left.options.host ?? ''}:${left.options.port ?? ''}`.localeCompare(
-            `${right.options.host ?? ''}:${right.options.port ?? ''}`,
-          ),
-        )
-      if (masters.length === 0) throw new Error('RedisRoomBackend: Cluster has no available masters')
-      const master = masters[clusterSubscriberSelection % masters.length] as Redis
-      clusterSubscriberSelection++
-      return master.duplicate({
+      let source: Redis
+      if (options.redis instanceof Cluster) {
+        // Use a supported direct Redis duplicate of a live master. Unlike Cluster's hidden Pub/Sub
+        // connection, this exact client is owned by the Room transport, so SUBSCRIBE, dispatch and the
+        // delivery-fence PING necessarily share one socket. Re-evaluate topology on every replacement.
+        let topology = options.redis.nodes('master')
+        if (topology.length === 0) {
+          await options.redis.ping()
+          topology = options.redis.nodes('master')
+        }
+        const masters = topology
+          .filter((master) => master.status !== 'end')
+          .sort((left, right) =>
+            `${left.options.host ?? ''}:${left.options.port ?? ''}`.localeCompare(
+              `${right.options.host ?? ''}:${right.options.port ?? ''}`,
+            ),
+          )
+        if (masters.length === 0) throw new Error('RedisRoomBackend: Cluster has no available masters')
+        source = masters[clusterSubscriberSelection % masters.length] as Redis
+        clusterSubscriberSelection++
+      } else source = options.redis
+      return source.duplicate({
         connectionName: `telefunc-subscriber-${randomUUID()}`,
         autoResubscribe: false,
         lazyConnect: true,
