@@ -1937,6 +1937,36 @@ describe('client Room lifecycle', () => {
     expect(demand).toEqual([['screen', true]])
   })
 
+  it('keeps every acknowledged DM that arrives while a client join ack is pending', async () => {
+    const id = crypto.randomUUID()
+    const from = crypto.randomUUID()
+    const ack = deferred<{ id: string; joinedAt: number }>()
+    const replies: Array<{ ackId: string }> = []
+    const fake = createFakeStub({
+      send: async (message) => {
+        const request = message as { __r?: string; ackId?: string }
+        if (request.__r === 'req-join') return await ack.promise
+        if (request.__r === 'dm-reply' && request.ackId) replies.push({ ackId: request.ackId })
+        return undefined
+      },
+    })
+    const client = new ClientRoom(fake.stub, snapshot('pre-ack-dm'))
+    const joining = client.join()
+    await Promise.resolve()
+    for (let index = 0; index < 65; index++) {
+      fake.emitText(
+        { __r: 'dm', to: id, from, fromMeta: {}, data: index, ackId: `ack-${index}` },
+        { key: client.id, seq: index + 1, timestamp: index + 1 },
+      )
+    }
+    ack.resolve({ id, joinedAt: 1 })
+
+    const participant = await joining
+    participant.listen((data) => data)
+    await vi.waitFor(() => expect(replies).toHaveLength(65))
+    expect(replies.map(({ ackId }) => ackId)).toEqual(Array.from({ length: 65 }, (_, index) => `ack-${index}`))
+  })
+
   it("derives participant-update prev from the receiver's own applied state", async () => {
     const fake = createFakeStub()
     const client = new ClientRoom(fake.stub, snapshot('receiver-local-prev'))
