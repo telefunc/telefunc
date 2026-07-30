@@ -82,15 +82,10 @@ export type HeadNext =
       ttlMs?: number // ttlMs only for state:'closed' tombstones
     }
   // Any head entering 'closing' (open→closing AND expired-close takeover) carries a fresh lease id plus
-  // a FINITE durationMs — never an absolute deadline. Bounds are normative: MIN_CLOSE_LEASE_MS ≤
-  // durationMs ≤ MAX_CLOSE_LEASE_MS (out of bounds ⇒ throw). The backend stores
+  // a finite positive durationMs — never an absolute deadline. The backend stores
   // until = authorityNow + durationMs inside the SAME atomic CX and returns the stored head, so the
   // installed lease is always fresh in backend authority time regardless of caller skew (I13).
   | { delete: true } // tombstone expiry path (backends with no native TTL)
-
-// Normative close-lease duration bounds for every HeadNext installing 'closing'.
-export const MIN_CLOSE_LEASE_MS = 1_000
-export const MAX_CLOSE_LEASE_MS = 60_000
 
 export type CellMutation = { key: string; set?: { bytes: Uint8Array; ttlMs?: number } }
 // set absent ⇒ delete. ttl per cell (member records etc.)

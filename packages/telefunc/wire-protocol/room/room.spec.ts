@@ -913,20 +913,22 @@ describe('memory Backend SPI contract', () => {
     if (!('ok' in opened) || !('head' in opened)) throw new Error('head create failed')
     const delegated = vi.spyOn(driver, 'compareExchangeHead')
 
-    await expect(
-      backend.compareExchangeHead(
-        'head-shape',
-        { expect: { rev: opened.head.rev } },
-        {
-          head: {
-            state: 'closing',
-            currentInc: 'inc-1',
-            config: opened.head.config,
-            closeLease: { id: 'lease-1', durationMs: 999 },
+    for (const durationMs of [0, Number.POSITIVE_INFINITY]) {
+      await expect(
+        backend.compareExchangeHead(
+          'head-shape',
+          { expect: { rev: opened.head.rev } },
+          {
+            head: {
+              state: 'closing',
+              currentInc: 'inc-1',
+              config: opened.head.config,
+              closeLease: { id: 'lease-1', durationMs },
+            },
           },
-        },
-      ),
-    ).rejects.toThrow('close lease durationMs 999 outside [1000, 60000]')
+        ),
+      ).rejects.toThrow(`close lease durationMs ${durationMs} must be finite and positive`)
+    }
     expect(delegated).not.toHaveBeenCalled()
   })
 
