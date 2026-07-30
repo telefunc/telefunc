@@ -5,7 +5,6 @@ import '../../packages/telefunc/node/server/async_hooks.js'
 import { setDefaultBackend } from '../../packages/telefunc/wire-protocol/backend/install.js'
 import { Room } from '../../packages/telefunc/wire-protocol/room/server.js'
 import type {
-  HeadCx,
   LaneId,
   SubscriptionAttempt,
   SubscriptionAttemptState,
@@ -14,12 +13,16 @@ import {
   CloudflareRoomBackend,
   CloudflareRoomSessionManager,
   withCloudflareRoomSessionManager,
+  type CloudflareRoomAuthorityStub,
   type CloudflareRoomNamespace,
+  type RoomShardDeliveryRequest,
+  type RoomShardInvalidationRequest,
 } from '../../packages/telefunc/wire-protocol/server/adapter/cloudflare/room/backend.js'
 import {
   TelefuncRoomDurableObject as ProductionRoomDurableObject,
   createTelefuncRoomDurableObjectClass,
-  type HeadNextWire,
+  type CommitWire,
+  type HeadCxWire,
   type HeadWire,
 } from '../../packages/telefunc/wire-protocol/server/adapter/cloudflare/room/do.js'
 
@@ -66,14 +69,14 @@ export class PublicRoomSessionDurableObject extends DurableObject {
     )
   }
 
-  telefuncRoomDeliver(request: DeliveryRequest): Promise<void> {
+  telefuncRoomDeliver(request: RoomShardDeliveryRequest): Promise<void> {
     return withCloudflareRoomSessionManager(
       () => this.#manager,
       () => this.#manager.deliver(request),
     )
   }
 
-  telefuncRoomInvalidate(request: InvalidationRequest): void {
+  telefuncRoomInvalidate(request: RoomShardInvalidationRequest): void {
     return withCloudflareRoomSessionManager(
       () => this.#manager,
       () => this.#manager.invalidate(request),
@@ -83,18 +86,6 @@ export class PublicRoomSessionDurableObject extends DurableObject {
 
 export class PublicRoomDurableObject extends PublicRoomDurableObjectBase {}
 
-type DeliveryRequest = {
-  roomId: string
-  inc: string
-  laneKey: string
-  subscriberDoId: string
-  leaseId: string
-  generationToken: string
-  frame: Uint8Array
-  seq: number
-  timestamp: number
-}
-type InvalidationRequest = Omit<DeliveryRequest, 'frame' | 'seq' | 'timestamp'> & { terminal?: true }
 type DeliveryState = {
   blockFirst: boolean
   fail: boolean
@@ -162,7 +153,7 @@ export class SessionDurableObject extends DurableObject {
     return attempt.state()
   }
 
-  async telefuncRoomDeliver(request: DeliveryRequest): Promise<void> {
+  async telefuncRoomDeliver(request: RoomShardDeliveryRequest): Promise<void> {
     const state = this.#deliveries.get(request.roomId)
     if (state === undefined) throw new Error('delivery reached an unprepared session')
     state.delivered.push(request.seq)
@@ -173,7 +164,7 @@ export class SessionDurableObject extends DurableObject {
     if (state.fail) throw new Error('delivery probe rejected')
   }
 
-  telefuncRoomInvalidate(request: InvalidationRequest): void {
+  telefuncRoomInvalidate(request: RoomShardInvalidationRequest): void {
     const state = this.#deliveries.get(request.roomId)
     if (state === undefined) throw new Error('invalidation reached an unprepared session')
     state.invalidations.push(request.terminal === true ? 'terminal' : 'recoverable')
@@ -199,7 +190,7 @@ export class TelefuncRoomDurableObject extends ProductionRoomDurableObject {
     this.#probeEnv = env
   }
 
-  override commitLane(roomId: string, inc: string, lane: LaneId, payload: Uint8Array): Promise<CommitResult> {
+  override commitLane(roomId: string, inc: string, lane: LaneId, payload: Uint8Array): Promise<CommitWire> {
     const probe = this.#responseReordering
     if (probe === undefined) return super.commitLane(roomId, inc, lane, payload)
     return (async () => {
@@ -273,29 +264,9 @@ export class TelefuncRoomDurableObject extends ProductionRoomDurableObject {
   }
 }
 
-type HeadResult =
-  | { ok: true; head: HeadWire }
-  | { ok: true; deleted: true }
-  | { conflict: true; current: HeadWire | null }
-  | { error: string }
-type CommitResult =
-  | { accepted: true; seq: number; timestamp: number; receivers: number; deliveryToken: string }
-  | { stale: true }
-  | { error: string }
-type Authority = {
-  readHead(): Promise<HeadWire | null>
-  compareExchangeHead(cx: HeadCx, next: HeadNextWire): Promise<HeadResult>
-  registerRoute(
-    roomId: string,
-    inc: string,
-    laneKey: string,
-    subscriberDoId: string,
-    leaseId: string,
-  ): Promise<{ ok: true; generationToken: string } | { rejected: true; reason: string }>
-  commitLane(roomId: string, inc: string, lane: LaneId, payload: Uint8Array): Promise<CommitResult>
-  awaitDelivery(token: string): Promise<void>
-  dropGeneration(inc: string): Promise<{ ok: true } | { error: string }>
-  listGenerations(): Promise<string[]>
+type HeadResult = HeadCxWire
+type CommitResult = CommitWire
+type Authority = CloudflareRoomAuthorityStub & {
   telefuncRoomReconstructForTest(): Promise<void>
   telefuncRoomPrepareResponseReorderingForTest(): Promise<void>
   telefuncRoomWaitForFirstCommitForTest(): Promise<void>
@@ -314,15 +285,7 @@ type Session = {
   openSubscription(roomId: string, inc: string, waitForReady?: boolean): Promise<void>
   subscriptionState(roomId: string): Promise<SubscriptionAttemptState>
 }
-type PublicSession = {
-  publicRoomLifecycle(roomId: string): Promise<{
-    created: boolean
-    joined: boolean
-    publishedAndSubscribed: unknown[]
-    receivedFromPublisher: boolean
-    closed: boolean
-  }>
-}
+type PublicSession = Pick<PublicRoomSessionDurableObject, 'publicRoomLifecycle'>
 type Env = {
   ROOM: DurableObjectNamespace
   TelefuncDurableObject: DurableObjectNamespace
