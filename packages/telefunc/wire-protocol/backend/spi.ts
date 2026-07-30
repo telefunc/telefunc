@@ -166,7 +166,7 @@ export type BackendSpi = {
   readonly spiVersion: typeof BACKEND_SPI_VERSION
   readonly capabilities: {
     receivers: 'global' | 'node-local' | 'none'
-    maxRetainedPayloadBytes: number // aggregate cap; commit with larger retain REJECTS (throws)
+    maxRetainedPayloadBytes: number // aggregate cap (Infinity means unbounded); larger retain REJECTS
   }
 
   // ── cheap Broadcast ──

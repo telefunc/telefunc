@@ -33,15 +33,11 @@ import {
 import { assertHeadDeleteLegal, assertHeadTransition } from '../head-transitions.js'
 import { broadcastRouteKey, laneKey } from '../subscription-source.js'
 
-const DEFAULT_MAX_RETAINED_BYTES = 16 * 1024 * 1024
-const DIRECTORY_PAGE_SIZE = 100
-
 export type MemoryBackendOptions = {
   // The authority clock. Defaults to the isolate clock, which is what authority time means in a single
   // isolate; tests inject a controlled clock so lease expiry is provable without wall-clock waits
   // — and so a skewed CALLER clock (Date.now) stays distinguishable from authority time.
   authorityNow?: () => number
-  maxRetainedPayloadBytes?: number
   /** @internal Ownership injection for an embedding that preserves state across facade reconstruction. */
   state?: MemoryBackendState
 }
@@ -206,7 +202,7 @@ export class MemoryBackend implements BackendDriver {
     }
     this.capabilities = {
       receivers: 'global',
-      maxRetainedPayloadBytes: options.maxRetainedPayloadBytes ?? DEFAULT_MAX_RETAINED_BYTES,
+      maxRetainedPayloadBytes: Number.POSITIVE_INFINITY,
     }
   }
 
@@ -374,8 +370,6 @@ export class MemoryBackend implements BackendDriver {
     }
     const key = laneKey(lane)
     const frame = copyBytes(payload)
-    // Over-cap retain is rejected before anything is mutated, so a throw never half-accepts a commit.
-    if (opts?.retain) this._assertRetainedCapacity(gen, key, frame)
     const mark = this._advanceOrder(gen, key)
     if (opts?.retain) {
       gen.retained.set(key, {
@@ -430,15 +424,6 @@ export class MemoryBackend implements BackendDriver {
     }
     gen.order.set(domain, mark)
     return mark
-  }
-
-  private _assertRetainedCapacity(gen: Generation, key: string, frame: Uint8Array): void {
-    let total = frame.byteLength
-    for (const [laneKeyOfEntry, entry] of gen.retained) {
-      if (laneKeyOfEntry !== key) total += entry.payload.byteLength
-    }
-    const cap = this.capabilities.maxRetainedPayloadBytes
-    if (total > cap) throw new Error(`commitLane: retained aggregate ${total} bytes exceeds the ${cap} byte cap`)
   }
 
   // The ordered at-most-once chain, per (incarnation, lane). The chain is gated on SETTLEMENT — success
@@ -588,14 +573,11 @@ export class MemoryBackend implements BackendDriver {
     cursor?: string,
   ): Promise<{ entries: { roomId: string; incTag: string }[]; cursor?: string }> {
     this._assertLive()
-    const matching = [...this._state.directory.keys()].filter((roomId) => roomId.startsWith(prefix)).sort()
-    const start = cursor === undefined ? 0 : matching.findIndex((roomId) => roomId > cursor)
-    if (start < 0) return { entries: [] }
-    const page = matching.slice(start, start + DIRECTORY_PAGE_SIZE)
-    const entries = page.map((roomId) => ({ roomId, incTag: this._state.directory.get(roomId) as string }))
-    const last = page[page.length - 1]
-    const more = last !== undefined && start + page.length < matching.length
-    return more ? { entries, cursor: last } : { entries }
+    const entries = [...this._state.directory]
+      .filter(([roomId]) => roomId.startsWith(prefix) && (cursor === undefined || roomId > cursor))
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([roomId, incTag]) => ({ roomId, incTag }))
+    return { entries }
   }
 
   async dispose(): Promise<void> {

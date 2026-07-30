@@ -180,10 +180,12 @@ function assertBackendDriver(backend: BackendDriver): void {
   ) {
     throw new Error('telefunc/backend: backend capabilities.receivers must be "global", "node-local", or "none"')
   }
-  if (!Number.isFinite(capabilities.maxRetainedPayloadBytes) || capabilities.maxRetainedPayloadBytes < 0) {
-    throw new Error(
-      'telefunc/backend: backend capabilities.maxRetainedPayloadBytes must be a finite non-negative number',
-    )
+  if (
+    typeof capabilities.maxRetainedPayloadBytes !== 'number' ||
+    Number.isNaN(capabilities.maxRetainedPayloadBytes) ||
+    capabilities.maxRetainedPayloadBytes < 0
+  ) {
+    throw new Error('telefunc/backend: backend capabilities.maxRetainedPayloadBytes must be a non-negative number')
   }
 }
 
