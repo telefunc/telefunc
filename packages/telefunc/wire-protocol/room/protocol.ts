@@ -334,8 +334,8 @@ const DM_PARTICIPANT_LEFT: DmReply = { ok: false, err: 'Participant left the roo
 
 /** Client→server requests on a `Room` stub channel. `id` identifies the sending participant.
  *  `sub-binary` declares the client's binary wants (full replace, see `BinaryWants`);
- *  `sub-text` declares member-scoped text wants — the room-level (all) text want rides the
- *  standard broadcast-subscription ctrl instead, keeping its synchronous-declaration fence. */
+ *  `sub-text` declares member-scoped text and announcement wants — the room-level (all) text want
+ *  rides the standard broadcast-subscription ctrl instead, keeping its synchronous-declaration fence. */
 type RoomStubRequest =
   | { __r: 'req-join'; meta: ParticipantMeta; selfDelivery: boolean }
   | { __r: 'req-leave'; id: string }
@@ -345,7 +345,7 @@ type RoomStubRequest =
   // A client-held member's reply to an `{ ack: true }` DM it received — routed back to the sender.
   | ({ __r: 'dm-reply'; id: string; ackId: string } & DmReply)
   | { __r: 'sub-binary'; wants: BinaryWants }
-  | { __r: 'sub-text'; members: string[] }
+  | { __r: 'sub-text'; members: string[]; announce: boolean }
 
 /** Client→server requests on a standalone `LocalParticipant` stub channel. (An ack DM this
  *  participant receives replies through the channel's own ack, so there is no `dm-reply` here —
