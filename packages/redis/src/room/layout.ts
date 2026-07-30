@@ -28,6 +28,7 @@
 // the co-slot invariant. A caller-local `Date.now()` is never an authority source.
 
 import { HEAD_TRANSITIONS, ORDERING_FRAME_LAYOUT, laneKey, type LaneId } from 'telefunc/backend'
+export { laneKey }
 
 export const DEFAULT_ROOM_PREFIX = 'tf:'
 
