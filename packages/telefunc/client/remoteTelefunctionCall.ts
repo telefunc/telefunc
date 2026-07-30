@@ -9,6 +9,7 @@ import { objectAssign } from '../utils/objectAssign.js'
 import { setAbortController } from './abort.js'
 import { getPendingContext } from './withContext.js'
 import { addAsyncGeneratorInterface } from './remoteTelefunctionCall/async-generator-interface.js'
+import { waitForTelefunctionCallBarriers } from '../wire-protocol/client/call-barrier.js'
 
 function remoteTelefunctionCall(
   telefuncFilePath: string,
@@ -74,7 +75,10 @@ function remoteTelefunctionCall(
   const { httpRequestBody, requestCloseHandlers } = serializeTelefunctionArguments(callContext)
   objectAssign(callContext, { httpRequestBody, requestCloseHandlers })
 
-  const telefunctionReturnPromise = makeHttpRequest(callContext)
+  const barrier = waitForTelefunctionCallBarriers()
+  const telefunctionReturnPromise = barrier
+    ? barrier.then(() => makeHttpRequest(callContext))
+    : makeHttpRequest(callContext)
 
   setAbortController(telefunctionReturnPromise, abortController)
   addAsyncGeneratorInterface(telefunctionReturnPromise, abortController)

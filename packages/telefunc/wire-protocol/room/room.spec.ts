@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { parse } from '@brillout/json-serializer/parse'
 import { IndexedPeer } from '../server/IndexedPeer.js'
 import { ACK_STATUS, TAG, decode } from '../shared-ws.js'
+import { waitForTelefunctionCallBarriers } from '../client/call-barrier.js'
 import { ShieldValidationError, isShieldValidationError } from '../../shared/ShieldValidationError.js'
 import {
   ROOM_DM_ACK_TIMEOUT_MS,
@@ -1233,6 +1234,31 @@ describe('client Room lifecycle', () => {
     ])
   })
 
+  it('fences a causally subsequent telefunction call until announce demand is accepted', async () => {
+    const accepted = deferred<void>()
+    const fake = createFakeStub({
+      send: async (_message, options) => {
+        if (options?.ack) await accepted.promise
+        return undefined
+      },
+    })
+    const client = new ClientRoom(fake.stub, snapshot('announce-demand-fence'))
+
+    client.onAnnounce(() => {})
+    const fence = waitForTelefunctionCallBarriers()
+
+    expect(fence).not.toBeNull()
+    let ready = false
+    void fence!.then(() => {
+      ready = true
+    })
+    await Promise.resolve()
+    expect(ready).toBe(false)
+    accepted.resolve()
+    await fence
+    expect(ready).toBe(true)
+  })
+
   it('redeclares a room-wide text subscription after reconnect even when the local latch already matches', () => {
     const wireDeclarations: boolean[] = []
     const fake = createFakeStub({ wireDeclarations })
@@ -1844,7 +1870,7 @@ async function wideBinaryScenario(id: string, retain: boolean, byte: number) {
 }
 
 function createFakeStub(options?: {
-  send?: (message: unknown) => Promise<unknown>
+  send?: (message: unknown, options?: { ack?: boolean }) => Promise<unknown>
   wireDeclarations?: boolean[]
 }): {
   stub: RoomClientBroadcast

@@ -12,6 +12,7 @@ import {
 } from '../channel.js'
 import { ClientBroadcast } from '../client/channel.js'
 import type { ClientChannel } from '../client/channel.js'
+import { addTelefunctionCallBarrier } from '../client/call-barrier.js'
 import type { WirePublishInfo } from '../shared-ws.js'
 import { parse } from '@brillout/json-serializer/parse'
 import {
@@ -154,6 +155,7 @@ class ClientRoom implements Room {
   private readonly _stub: RoomClientBroadcast
   private readonly _state: RoomState
   private readonly _localParticipants = new Map<string, ClientRoomParticipant>()
+  private _announcedDemand = false
   /** DMs relayed before their participant's join ack resolved (a reactive send racing the
    *  join round-trip) — held bounded (count-capped, drop-oldest), flushed on registration. */
   private _pendingDms: Array<InboxMessage & { to: string }> | null = null
@@ -482,9 +484,12 @@ class ClientRoom implements Room {
     if (state.closed) return // stub is dead — nothing to declare
 
     // A room-level text subscription supersedes the member set — clear it server-side.
-    void this._stub
-      .send({ __r: 'sub-text', members: text.all ? [] : text.members, announce: state.wantsAnnounce }, { ack: false })
-      .catch(() => {})
+    const announce = state.wantsAnnounce
+    const declaration = { __r: 'sub-text', members: text.all ? [] : text.members, announce } as const
+    const fence = reconcileText || announce !== this._announcedDemand
+    this._announcedDemand = announce
+    if (fence) addTelefunctionCallBarrier(this._stub.send(declaration, { ack: true }))
+    else void this._stub.send(declaration, { ack: false }).catch(() => {})
     const binary = state.binaryWants()
     void this._stub.send({ __r: 'sub-binary', wants: binary }, { ack: false }).catch(() => {})
   }
