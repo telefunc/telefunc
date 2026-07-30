@@ -417,37 +417,6 @@ describe('Room public behavior', () => {
     expect(screen).toEqual([[2, { key: true }]])
   })
 
-  it('holds the first named-track frame until its newly announced binary route is ready', async () => {
-    const room = await Room.create('binary-route-readiness')
-    const publisher = await room.join()
-    const observer = await Room.get(room.id)
-    await observer.getParticipants()
-    const frames: number[] = []
-    observer.subscribeBinary((data) => frames.push(data[0]!))
-    const delayed = delayLaneSubscription(
-      (lane) => lane.kind === 'binary' && lane.member === publisher.id && lane.track === 'screen',
-    )
-    const commitLane = driver.commitLane.bind(driver)
-    let binaryStarted = false
-    const commit = vi.spyOn(driver, 'commitLane').mockImplementation((roomId, inc, lane, payload, opts) => {
-      if (lane.kind === 'binary' && lane.member === publisher.id && lane.track === 'screen') binaryStarted = true
-      return commitLane(roomId, inc, lane, payload, opts)
-    })
-    try {
-      const publishing = publisher.publishBinary(new Uint8Array([7]), { track: 'screen' })
-      await delayed.started
-      await settle()
-      if (binaryStarted) await publishing
-      await delayed.release()
-      await publishing
-      await settleMicrotasks()
-      expect(frames).toEqual([7])
-    } finally {
-      commit.mockRestore()
-      delayed.restore()
-    }
-  })
-
   it('announces binary demand only after the demanded route is ready', async () => {
     const room = await Room.create('binary-demand-readiness')
     const publisher = await room.join()

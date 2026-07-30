@@ -1287,7 +1287,7 @@ class ServerRoom implements Room {
 
   /** The control lane: presence and lifecycle events — relayed to every stub
    *  unconditionally, since a client's live view is only correct if it sees every one. */
-  private async _onCtrlMessage(serialized: string, rawInfo: WirePublishInfo): Promise<void> {
+  private _onCtrlMessage(serialized: string, rawInfo: WirePublishInfo): void {
     let envelope: unknown
     try {
       envelope = parse(serialized)
@@ -1309,7 +1309,7 @@ class ServerRoom implements Room {
     const serverOnly = this._hidesFromClients(event)
 
     if (event.__r === 'announce') return
-    await this._applyCtrl(event)
+    this._applyCtrl(event)
 
     if (this._stubs.size > 0 && !serverOnly) {
       // Presence/lifecycle events are ordered by the control lane; the receipt rides the frame.
@@ -1460,7 +1460,7 @@ class ServerRoom implements Room {
     }
   }
 
-  private async _applyCtrl(event: RoomCtrlEnvelope): Promise<void> {
+  private _applyCtrl(event: RoomCtrlEnvelope): void {
     switch (event.__r) {
       case 'join':
         this._state.applyJoin(event.id, event.meta, event.joinedAt, event.identity ?? null, event.hidden)
@@ -1469,7 +1469,6 @@ class ServerRoom implements Room {
       case 'track':
         this._state.applyTrack(event.id, event.track)
         this._syncSubs() // all-track subscribers need the new (member, track) key
-        await this._binaryReady()
         return
       case 'leave':
         this._applyLeave(event.id, leaveCauseFromWire(event))
