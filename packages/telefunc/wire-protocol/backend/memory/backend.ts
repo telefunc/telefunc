@@ -102,6 +102,28 @@ function newGeneration(): Generation {
   return { revision: 0, cells: new Map(), order: new Map(), retained: new Map(), subs: new Map(), chains: new Map() }
 }
 
+function advanceOrder(
+  order: Map<string, OrderMark>,
+  domain: string,
+  now: number,
+  operation: 'publish' | 'commitLane',
+): OrderMark {
+  const previous = order.get(domain)
+  if (previous?.seq === Number.MAX_SAFE_INTEGER) {
+    throw new Error(`${operation}: sequence exhausted for the ordering domain`)
+  }
+  // seq is a standalone monotonic cursor; timestamp is independently clamped and cannot reset it.
+  const mark: OrderMark = {
+    seq: (previous?.seq ?? 0) + 1,
+    timestamp: Math.max(now, previous?.timestamp ?? 0),
+  }
+  if (!Number.isSafeInteger(mark.seq) || mark.seq <= 0 || !Number.isSafeInteger(mark.timestamp)) {
+    throw new Error(`${operation}: sequence exhausted for the ordering domain`)
+  }
+  order.set(domain, mark)
+  return mark
+}
+
 function publicHead(head: StoredHead): RoomHead {
   const view: RoomHead = {
     rev: head.rev,
@@ -205,18 +227,7 @@ export class MemoryBackend implements BackendDriver {
 
   publish(lane: BroadcastLane, payload: Uint8Array): PublishResult {
     this.#assertLive()
-    const previous = this.#state.broadcastOrder.get(lane.key)
-    if (previous?.seq === Number.MAX_SAFE_INTEGER) {
-      throw new Error('publish: sequence exhausted for the ordering domain')
-    }
-    const mark = {
-      seq: (previous?.seq ?? 0) + 1,
-      timestamp: Math.max(this.#now(), previous?.timestamp ?? 0),
-    }
-    if (!Number.isSafeInteger(mark.seq) || !Number.isSafeInteger(mark.timestamp)) {
-      throw new Error('publish: sequence exhausted for the ordering domain')
-    }
-    this.#state.broadcastOrder.set(lane.key, mark)
+    const mark = advanceOrder(this.#state.broadcastOrder, lane.key, this.#now(), 'publish')
     const targets = [...(this.#state.broadcastSubs.get(broadcastRouteKey(lane)) ?? [])]
     const frame = copyBytes(payload)
     for (const target of targets) void target.deliver(copyBytes(frame), mark).catch(console.error)
@@ -365,7 +376,7 @@ export class MemoryBackend implements BackendDriver {
     }
     const key = laneKey(lane)
     const frame = copyBytes(payload)
-    const mark = this.#advanceOrder(gen, key)
+    const mark = advanceOrder(gen.order, key, this.#now(), 'commitLane')
     if (opts?.retain) {
       gen.retained.set(key, {
         lane: Object.freeze(copyLane(lane)),
@@ -396,24 +407,6 @@ export class MemoryBackend implements BackendDriver {
           head.closeLease !== undefined &&
           head.closeLease.id === closingLease &&
           this.#now() <= head.closeLease.until
-  }
-
-  #advanceOrder(gen: Generation, domain: string): OrderMark {
-    const now = this.#now()
-    const previous = gen.order.get(domain)
-    if (previous?.seq === Number.MAX_SAFE_INTEGER) {
-      throw new Error('commitLane: sequence exhausted for the ordering domain')
-    }
-    // seq is a standalone monotonic cursor; timestamp is independently clamped and cannot reset it.
-    const mark: OrderMark = {
-      seq: (previous?.seq ?? 0) + 1,
-      timestamp: Math.max(now, previous?.timestamp ?? 0),
-    }
-    if (!Number.isSafeInteger(mark.seq) || mark.seq <= 0 || !Number.isSafeInteger(mark.timestamp)) {
-      throw new Error('commitLane: sequence exhausted for the ordering domain')
-    }
-    gen.order.set(domain, mark)
-    return mark
   }
 
   // The ordered at-most-once chain, per (incarnation, lane). The chain is gated on SETTLEMENT — success
