@@ -161,6 +161,8 @@ class MemberBucketState {
   private readonly authority: TelefuncDurableObjectStub
   private readonly key: string
   private readonly locationBucket: LocationBucket
+  readonly #presenceListeners = new Set<(state: 'ready' | 'lost') => void>()
+  #presenceState: 'establishing' | 'ready' | 'lost' = 'establishing'
 
   constructor(key: string, locationBucket: LocationBucket, authority: TelefuncDurableObjectStub) {
     this.key = key
@@ -174,11 +176,25 @@ class MemberBucketState {
   }
 
   acknowledgePresence(): void {
+    const recovered = this.#presenceState === 'lost'
+    this.#presenceState = 'ready'
     this.settleReady.resolve()
+    if (recovered) this.#notifyPresenceState('ready')
   }
 
   rejectPresence(error: unknown): void {
     this.settleReady.reject(error)
+  }
+
+  losePresence(): void {
+    if (this.#presenceState !== 'ready') return
+    this.#presenceState = 'lost'
+    this.#notifyPresenceState('lost')
+  }
+
+  onPresenceStateChange(cb: (state: 'ready' | 'lost') => void): () => void {
+    this.#presenceListeners.add(cb)
+    return () => this.#presenceListeners.delete(cb)
   }
 
   publish(serialized: string): Promise<PublishResult> {
@@ -207,6 +223,10 @@ class MemberBucketState {
       this.refreshTimer = null
     }
   }
+
+  #notifyPresenceState(state: 'ready' | 'lost'): void {
+    for (const listener of [...this.#presenceListeners]) listener(state)
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -219,17 +239,22 @@ class CloudflareBroadcastSubscriptionAttempt implements SubscriptionAttempt {
   readonly #receiver: BackendReceiver
   readonly #detach: () => Promise<void>
   readonly #listeners = new Set<(state: SubscriptionState) => void>()
+  readonly #stopPresenceObservation: () => void
   #state: SubscriptionState = 'establishing'
   #unsubscribed = false
 
   constructor(member: MemberBucketState, receiver: BackendReceiver, detach: () => Promise<void>) {
     this.#receiver = receiver
     this.#detach = detach
+    this.#stopPresenceObservation = member.onPresenceStateChange((state) => {
+      if (!this.#unsubscribed && this.#state !== 'closed') this.#transition(state)
+    })
     this.ready = member.ready.then(
       () => {
         if (this.#state !== 'closed') this.#transition('ready')
       },
       (error) => {
+        this.#stopPresenceObservation()
         this.#transition('closed')
         throw error
       },
@@ -254,6 +279,7 @@ class CloudflareBroadcastSubscriptionAttempt implements SubscriptionAttempt {
   async unsubscribe(): Promise<void> {
     if (this.#unsubscribed) return
     this.#unsubscribed = true
+    this.#stopPresenceObservation()
     this.#transition('closed')
     await this.#detach()
   }
@@ -592,7 +618,10 @@ class CloudflareBroadcastTransport {
     }
 
     memberState.refreshTimer = setInterval(() => {
-      void this.putPresence(key).catch(console.error)
+      void this.putPresence(key).then(
+        () => memberState.acknowledgePresence(),
+        () => memberState.losePresence(),
+      )
     }, PRESENCE_REFRESH_INTERVAL_MS)
 
     await memberState.pendingPublishes.flush()
