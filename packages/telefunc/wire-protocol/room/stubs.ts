@@ -36,20 +36,12 @@ import {
 } from './protocol.js'
 assertIsNotBrowser()
 
-// The wire adapters of the room domain: how a `Room` and a `LocalParticipant` cross a
-// response. Room-wide authority (membership, admission, validation, ordering) stays in
-// `ServerRoom`; each stub owns one holder's view of that room — the client's declared wants
-// and the per-holder buffering, watermarks and correlations that deliver the room to that
-// one peer.
+// The wire adapters of the room domain: how a `Room` and a `LocalParticipant` cross a response. Room-wide authority (membership, admission, validation, ordering) stays in `ServerRoom`; each stub owns
+// one holder's view of that room — the client's declared wants and the per-holder buffering, watermarks and correlations that deliver the room to that one peer.
 
-/**
- * The channel registered with a response when a `Room` crosses the wire.
- * - server→client: room events & data relayed as PUBLISH frames (pre-peer buffered,
- *   replayed on reconnect). Control always flows; text is gated by the client's broadcast
- *   subscription (all) or its member-selective `sub-text` set; binary is member-selective
- *   (`sub-binary`).
- * - client→server: join/leave/set-meta as ack-bearing channel messages; publishes as
- *   PUBLISH(_BINARY)_ACK_REQ frames, validated against the members joined through this stub.
+/** The channel registered with a response when a `Room` crosses the wire. - server→client: room events & data relayed as PUBLISH frames (pre-peer buffered, replayed on reconnect). Control always
+ * flows; text is gated by the client's broadcast subscription (all) or its member-selective `sub-text` set; binary is member-selective (`sub-binary`). - client→server: join/leave/set-meta as
+ * ack-bearing channel messages; publishes as PUBLISH(_BINARY)_ACK_REQ frames, validated against the members joined through this stub.
  */
 class RoomStubChannel extends ServerBroadcast {
   private readonly _room: ServerRoom
@@ -80,21 +72,19 @@ class RoomStubChannel extends ServerBroadcast {
     this._pendingAckDms.delete(ackId)
     return entry.sender
   }
-  /** @internal — members whose own echo this client's room view must not receive (`selfDelivery`
-   *  off). The one relay-gate input, fed by both ways a member arises: a client `req-join` adds
-   *  here directly, and a co-returned server-side participant is bound here at serialization time
-   *  (`roomReplacer` adopts the pass's drop-set by reference, so `{room, me}` and `{me, room}`
-   *  converge on the same set). A suppressed frame is never written to this client's wire. */
+  /** @internal — members whose own echo this client's room view must not receive (`selfDelivery` off). The one relay-gate input, fed by both ways a member arises: a client `req-join` adds here
+   * directly, and a co-returned server-side participant is bound here at serialization time (`roomReplacer` adopts the pass's drop-set by reference, so `{room, me}` and `{me, room}` converge on the
+   * same set). A suppressed frame is never written to this client's wire.
+   */
   _selfSuppressed = new Set<string>()
   /** @internal — adopt the serialization pass's drop-set for this room (see `roomReplacer`). */
   _adoptSelfSuppressed(set: Set<string>): void {
     this._selfSuppressed = set
   }
-  /** @internal — the publish shield auto-generated from the room's declared message type (`Pub`),
-   *  installed by `roomReplacer` at serialization time and consulted at the publish ingress
-   *  (`ServerRoom._publishFromStub` → `_shieldPublishData`). Undefined when `Pub` is `unknown`. Kept off
-   *  `_validators` on purpose: that map drives the base channel's request-envelope validation, which a
-   *  room stub must not shield (it multiplexes join/leave/dm through the same `_dispatchAckReq` path). */
+  /** @internal — the publish shield auto-generated from the room's declared message type (`Pub`), installed by `roomReplacer` at serialization time and consulted at the publish ingress
+   * (`ServerRoom._publishFromStub` → `_shieldPublishData`). Undefined when `Pub` is `unknown`. Kept off `_validators` on purpose: that map drives the base channel's request-envelope validation, which
+   * a room stub must not shield (it multiplexes join/leave/dm through the same `_dispatchAckReq` path).
+   */
   _publishShield?: ShieldValidator
   /** @internal — the client's declared binary wants, per member and track (`sub-binary`). */
   _binaryWants: BinaryWants = { everyMember: emptyTrackWants(), members: {} }
@@ -105,20 +95,17 @@ class RoomStubChannel extends ServerBroadcast {
   /** @internal — whether the client wants room-authored messages on the shared semantic lane. */
   _wantsAnnounce = false
 
-  /** @internal — tail mode (`Room.get(id, { tail: true })`): the room's recent text, held on this stub
-   *  (bounded, drop-oldest) from the moment it attaches until the client's first text want declares the
-   *  selector, then flushed once, in order, ahead of the live stream (see `_flushTail`). `null` outside
-   *  tail mode or once flushed. Held server-side, so the client buffers nothing and the flush is
-   *  member-selective rather than a fire-hose of everything. */
+  /** @internal — tail mode (`Room.get(id, { tail: true })`): the room's recent text, held on this stub (bounded, drop-oldest) from the moment it attaches until the client's first text want declares
+   * the selector, then flushed once, in order, ahead of the live stream (see `_flushTail`). `null` outside tail mode or once flushed. Held server-side, so the client buffers nothing and the flush is
+   * member-selective rather than a fire-hose of everything.
+   */
   _tailPending: Array<{ serialized: string; ord: RoomOrder; from: string }> | null = null
   private _tailTimer: ReturnType<typeof setTimeout> | null = null
 
-  /** @internal — retained replay is exactly-once and in-order against a racing live publish. Text's
-   *  watermark is room-global, matching the semantic lane; `_textPendingRetained` is a retained order
-   *  just emitted that is still awaiting its own live echo. A retained frame is
-   *  skipped when the watermark already covers it (a same-or-newer live frame won the race); the live
-   *  echo of an emitted retained is dropped (the retained won). Binary is the twin, per (member,
-   *  track) lane — its own order domain (the per-key transport seq). Pruned on leave (`_forgetMember`). */
+  /** @internal — retained replay is exactly-once and in-order against a racing live publish. Text's watermark is room-global, matching the semantic lane; `_textPendingRetained` is a retained order
+   * just emitted that is still awaiting its own live echo. A retained frame is skipped when the watermark already covers it (a same-or-newer live frame won the race); the live echo of an emitted
+   * retained is dropped (the retained won). Binary is the twin, per (member, track) lane — its own order domain (the per-key transport seq). Pruned on leave (`_forgetMember`).
+   */
   private _textHigh: RoomOrder | null = null
   private _textPendingRetained: RoomOrder | null = null
   // Binary lanes keyed `${member}\0${track}` — one flat map, so a member leaving prunes by prefix.
@@ -176,8 +163,7 @@ class RoomStubChannel extends ServerBroadcast {
   }
 
   private _ackPublish(publishing: Promise<ChannelPublishAck>, seq: number): Promise<void> {
-    // A publish rides its own ack frame (not the request dispatch), so it maps the room error onto
-    // the channel's native status here — the same `roomAckError` classification every stub request uses.
+    // A publish rides its own ack frame (not the request dispatch), so it maps the room error onto the channel's native status here — the same `roomAckError` classification every stub request uses.
     return this._trackAck(
       publishing.then(
         (ack) => this._sendAckRes(seq, stringify(ack)),
@@ -189,20 +175,16 @@ class RoomStubChannel extends ServerBroadcast {
     )
   }
 
-  // The standard broadcast-subscription ctrl is the text-lane gate: control events always flow
-  // (a client's live view is only correct if it sees every one), text data flows only while the
-  // client holds a subscription — presence-only holders never receive the room's chatter. The
-  // binary flavor is ignored: binary wants ride the richer member-selective `sub-binary`.
+  // The standard broadcast-subscription ctrl is the text-lane gate: control events always flow (a client's live view is only correct if it sees every one), text data flows only while the client holds
+  // a subscription — presence-only holders never receive the room's chatter. The binary flavor is ignored: binary wants ride the richer member-selective `sub-binary`.
   override _onPeerBroadcastSubscribe(binary: boolean): void {
     if (binary) return
     const prevWantsText = this._wantsText
     this._wantsText = true
-    // Tail mode: this room-level want covers the whole held tail — flush it before the retained
-    // back-fill, so the flush advances the causal watermark and the retained replay dedupes against it.
+    // Tail mode: this room-level want covers the whole held tail — flush it before the retained back-fill, so the flush advances the causal watermark and the retained replay dedupes against it.
     this._flushTail()
     this._room._syncSubs()
-    // MQTT-retained delivery: back-fill the last `publish(…, { retain: true })` now that this
-    // client wants the text lane (see `_replayRetainedText` for the newly-covered semantics).
+    // MQTT-retained delivery: back-fill the last `publish(…, { retain: true })` now that this client wants the text lane (see `_replayRetainedText` for the newly-covered semantics).
     void this._room._replayRetainedText(this, prevWantsText, this._textMemberWants).catch(reportRoomError)
   }
   override _onPeerBroadcastUnsubscribe(binary: boolean): void {
@@ -264,8 +246,7 @@ class RoomStubChannel extends ServerBroadcast {
     this._textPendingRetained = ord
   }
 
-  /** @internal — the binary twin of `_relayTextLive`, per (member, track) lane; order is the per-key
-   *  transport seq (binary's own domain). */
+  /** @internal — the binary twin of `_relayTextLive`, per (member, track) lane; order is the per-key transport seq (binary's own domain). */
   _relayBinaryLive(wireData: Uint8Array, from: string, track: string, info: WirePublishInfo): void {
     const lane = `${from}\0${track}`
     if (this._binaryPendingRetained.get(lane)?.seq === info.seq) {
@@ -286,16 +267,14 @@ class RoomStubChannel extends ServerBroadcast {
     this._binaryPendingRetained.set(lane, info)
   }
 
-  /** @internal — a member left: drop its retained-replay bookkeeping so the maps stay bounded by the
-   *  live roster, not the room's lifetime churn. */
+  /** @internal — a member left: drop its retained-replay bookkeeping so the maps stay bounded by the live roster, not the room's lifetime churn. */
   _forgetMember(from: string): void {
     const prefix = `${from}\0`
     for (const lane of [this._binaryHigh, this._binaryPendingRetained])
       for (const key of lane.keys()) if (key.startsWith(prefix)) lane.delete(key)
   }
 
-  /** @internal — begin holding the bounded tail, seeded from the room's pre-attach hold. The client
-   *  gets a fresh lease after attach; expiry drops the hold and lets the room release ingestion. */
+  /** @internal — begin holding the bounded tail, seeded from the room's pre-attach hold. The client gets a fresh lease after attach; expiry drops the hold and lets the room release ingestion. */
   _beginTail(seed: Array<{ serialized: string; ord: RoomOrder; from: string }>, onExpire: () => void): void {
     this._tailPending = seed
     this._tailTimer = unrefTimer(
@@ -307,18 +286,16 @@ class RoomStubChannel extends ServerBroadcast {
     )
   }
 
-  /** @internal — append a live message to the pending tail, bounded drop-oldest (the freshest tail is
-   *  what a late subscriber wants). Called only while `_tailPending` is non-null. */
+  /** @internal — append a live message to the pending tail, bounded drop-oldest (the freshest tail is what a late subscriber wants). Called only while `_tailPending` is non-null. */
   _holdTail(serialized: string, ord: RoomOrder, from: string): void {
     const hold = this._tailPending
     if (!hold) return
     pushBoundedTail(hold, { serialized, ord, from })
   }
 
-  /** @internal — the client's first text want declares the selector: flush the held tail it now
-   *  covers, in order, through the live relay — so it advances the causal watermark and a retained
-   *  replay racing the same subscribe dedupes against it (see `_relayTextLive`/`_emitRetainedText`).
-   *  One-shot; a no-op if no tail is pending or the want still selects nothing (an empty `sub-text`). */
+  /** @internal — the client's first text want declares the selector: flush the held tail it now covers, in order, through the live relay — so it advances the causal watermark and a retained replay
+   * racing the same subscribe dedupes against it (see `_relayTextLive`/`_emitRetainedText`). One-shot; a no-op if no tail is pending or the want still selects nothing (an empty `sub-text`).
+   */
   _flushTail(): void {
     const hold = this._tailPending
     if (!hold) return
@@ -341,10 +318,8 @@ class RoomStubChannel extends ServerBroadcast {
   }
 }
 
-/**
- * Wire a fresh channel to a `ServerLocalParticipant` for serialization (see
- * `roomParticipantReplacer`). The client sends publish/set-meta/leave requests;
- * the server pushes metadata updates and the leave notice.
+/** Wire a fresh channel to a `ServerLocalParticipant` for serialization (see `roomParticipantReplacer`). The client sends publish/set-meta/leave requests; the server pushes metadata updates and the
+ * leave notice.
  */
 class RoomParticipantStubChannel extends ServerChannel<unknown, unknown> {
   private _requestHandler: ((message: unknown) => Promise<unknown>) | null = null
@@ -373,10 +348,8 @@ function bindParticipantStubChannel(
   participant: ServerLocalParticipant,
   publishShield?: ShieldValidator,
 ): void {
-  // A LocalParticipant is a single member's live seat: it forwards its inbox to exactly one holder
-  // (`_setForwarder`) and its holder's close ends the membership (`onClose → leave`). Binding a second
-  // client would silently overwrite the first's forwarder and let either close drop the shared seat.
-  // A member belongs to one holder: return a fresh `join()` per client, or a read-only view.
+  // A LocalParticipant is a single member's live seat: it forwards its inbox to exactly one holder (`_setForwarder`) and its holder's close ends the membership (`onClose → leave`). Binding a second
+  // client would silently overwrite the first's forwarder and let either close drop the shared seat. A member belongs to one holder: return a fresh `join()` per client, or a read-only view.
   assertUsage(
     !participant._isBound,
     'This LocalParticipant is already bound to a client and cannot be handed to another. A LocalParticipant is a single member: give each client its own join(), or share a getParticipants() view (which is read-only) instead.',
@@ -413,16 +386,14 @@ function bindParticipantStubChannel(
     return await participant._publishFramed(framed)
   })
 
-  // Keep the client-side `participant.meta` fresh. Serializing a participant that already left
-  // is possible (leave raced the response) — then there's no remote view left to observe.
+  // Keep the client-side `participant.meta` fresh. Serializing a participant that already left is possible (leave raced the response) — then there's no remote view left to observe.
   const remote = participant._room._state.getRemote(participant.id)
   const unlistenMeta = remote?.onUpdate(
     (meta: ParticipantMeta) => void channel.send({ __r: 'p-meta', meta }).catch(() => {}),
   )
 
-  // The participant's holder is the client — forward inbox deliveries to it. An ack DM rides the
-  // channel's own ack: the client's `listen` reply comes back as the channel ack, which becomes
-  // the DM reply routed to the sender (see server `_onDm`).
+  // The participant's holder is the client — forward inbox deliveries to it. An ack DM rides the channel's own ack: the client's `listen` reply comes back as the channel ack, which becomes the DM
+  // reply routed to the sender (see server `_onDm`).
   participant._setForwarder((msg) => {
     const notice = {
       __r: 'dm' as const,
@@ -438,8 +409,7 @@ function bindParticipantStubChannel(
     }
     return channel.send(notice, { ack: true }).then(
       (reply) => reply as DmReply,
-      // The channel ack only rejects on transport failure (a handler throw comes back encoded in
-      // the resolved `DmReply`), so a rejection means the holder's stub died — it has left.
+      // The channel ack only rejects on transport failure (a handler throw comes back encoded in the resolved `DmReply`), so a rejection means the holder's stub died — it has left.
       () => DM_PARTICIPANT_LEFT,
     )
   })

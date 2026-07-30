@@ -60,10 +60,8 @@ type PendingJoinEvent =
   | { kind: 'dm'; message: InboxMessage }
   | { kind: 'leave'; cause: LeaveCause }
 
-/**
- * Room's broadcast stub owns two concerns a generic Broadcast doesn't have: local delivery is
- * always installed while wire text demand is selective, and reconnect must re-declare that demand.
- * Keeping the behavior in this subclass prevents Room policy from leaking into ClientBroadcast.
+/** Room's broadcast stub owns two concerns a generic Broadcast doesn't have: local delivery is always installed while wire text demand is selective, and reconnect must re-declare that demand. Keeping
+ * the behavior in this subclass prevents Room policy from leaking into ClientBroadcast.
  */
 class RoomClientBroadcast<T = unknown> extends ClientBroadcast<T> {
   private readonly _callBarrierScope: TelefunctionCallBarrierScope
@@ -152,9 +150,7 @@ class RoomClientBroadcast<T = unknown> extends ClientBroadcast<T> {
   }
 }
 
-// ---------------------------------------------------------------------------
 // ClientRoom
-// ---------------------------------------------------------------------------
 
 /**
  * Client-side `Room`, revived from a serialized `ServerRoom`.
@@ -201,17 +197,14 @@ class ClientRoom extends RoomStateView implements Room {
       this._rosterArrived()
     }
 
-    // Delivery handlers are local-only — what the server relays is driven by the declared
-    // wants: control always arrives, text while subscribed, binary per `sub-binary`.
+    // Delivery handlers are local-only — what the server relays is driven by the declared wants: control always arrives, text while subscribed, binary per `sub-binary`.
     stub._subscribeLocal((envelope, info) => this._onEnvelope(envelope, info))
     stub._subscribeBinaryLocal((framed, info) => this._onBinaryFrame(framed, info))
-    // Wire death — the network gave up or the stub was GC'd. (A server `Room.close()` arrives
-    // as the `closed` ctrl event before the stub shuts down, so it takes the 'closed' path.)
+    // Wire death — the network gave up or the stub was GC'd. (A server `Room.close()` arrives as the `closed` ctrl event before the stub shuts down, so it takes the 'closed' path.)
     stub.onClose(() => this._applyClosed('disconnected'))
     // Reconnect reconciles the existing holder and redeclares current intent.
     stub._onReconnect(() => this._syncWants(true))
-    // A backend rejection can arrive before the application asks for the roster. Mark it handled
-    // here while preserving the original rejection for each later getter.
+    // A backend rejection can arrive before the application asks for the roster. Mark it handled here while preserving the original rejection for each later getter.
     void this._rosterReady.catch(() => {})
   }
 
@@ -229,8 +222,7 @@ class ClientRoom extends RoomStateView implements Room {
     const { meta, selfDelivery } = normalizeJoinOptions(options)
     this._inFlightJoins++
     try {
-      // A rejected join (guard `Abort`, or a `RoomError` like a closed room) rejects this request
-      // natively via the channel ack — no envelope to unwrap.
+      // A rejected join (guard `Abort`, or a `RoomError` like a closed room) rejects this request natively via the channel ack — no envelope to unwrap.
       const { id, joinedAt } = (await this._request({ __r: 'req-join', meta, selfDelivery })) as {
         id: string
         joinedAt: number
@@ -284,10 +276,9 @@ class ClientRoom extends RoomStateView implements Room {
     return true
   }
 
-  /** Deliver a DM to a locally-held member. A plain DM just fires its listeners; an ack DM
-   *  (`send(…, { ack: true })`) routes the handler's reply back up the stub as a `dm-reply`, which
-   *  the server turns into the sender's `dm-ack` — so a client recipient replies just like a
-   *  server-side one. */
+  /** Deliver a DM to a locally-held member. A plain DM just fires its listeners; an ack DM (`send(…, { ack: true })`) routes the handler's reply back up the stub as a `dm-reply`, which the server
+   * turns into the sender's `dm-ack` — so a client recipient replies just like a server-side one.
+   */
   private _deliverDm(participant: ClientRoomParticipant, msg: InboxMessage): void {
     if (msg.ackId === undefined) {
       participant._deliverMessage(msg)
@@ -316,14 +307,12 @@ class ClientRoom extends RoomStateView implements Room {
 
   // ── Requests & publishes (used by ClientRoomParticipant) ──
 
-  /** @internal — an ack-bearing stub request. Resolves with the handler's raw return, or rejects
-   *  natively (the channel rebuilds an `AbortError`/`Error` from the ack status) — no envelope. */
+  /** @internal — an ack-bearing stub request. Resolves with the handler's raw return, or rejects natively (the channel rebuilds an `AbortError`/`Error` from the ack status) — no envelope. */
   _request(req: RoomStubRequest): Promise<unknown> {
     return this._stub.send(req, { ack: true })
   }
 
-  /** @internal — the envelope sent upward is a claim: the server validates `from` against this
-   *  stub's members and stamps the verified `fromMeta` itself before anything reaches the room. */
+  /** @internal — the envelope sent upward is a claim: the server validates `from` against this stub's members and stamps the verified `fromMeta` itself before anything reaches the room. */
   async _publishText(from: string, data: unknown, retain?: boolean): Promise<ChannelPublishAck> {
     return await this._stub.publish({
       __r: 'data',
@@ -351,18 +340,15 @@ class ClientRoom extends RoomStateView implements Room {
     const event = envelope as RoomEnvelope | RoomDmEnvelope | RoomRosterEvent | RoomDemandEvent
     switch (event.__r) {
       case 'roster':
-        // The authoritative member list, positioned in the relay stream: everything relayed
-        // before it is reflected in it, later events apply incrementally on top. The client's
-        // roster carries only presence members, so reconcile must not reap directly-granted hidden
-        // handles (they aren't roster-managed) — see `RoomState.reconcile`.
+        // The authoritative member list, positioned in the relay stream: everything relayed before it is reflected in it, later events apply incrementally on top. The client's roster carries only
+        // presence members, so reconcile must not reap directly-granted hidden handles (they aren't roster-managed) — see `RoomState.reconcile`.
         this._applyRoster(event.members)
         return
       case 'roster-error':
         this._rosterFailed(new Error('Failed to load room participants'))
         return
       case 'data':
-        // Tail mode holds server-side (see `RoomStubChannel._tailPending`): text reaches this client
-        // only once it subscribes, already selected and ordered, so nothing is buffered here.
+        // Tail mode holds server-side (see `RoomStubChannel._tailPending`): text reaches this client only once it subscribes, already selected and ordered, so nothing is buffered here.
         this._state.applyData(
           event.from,
           event.fromMeta,
@@ -472,10 +458,9 @@ class ClientRoom extends RoomStateView implements Room {
     return participant
   }
 
-  /** Declare this holder's wants to the server. The room-level text
-   *  want rides the standard broadcast subscription — declared synchronously, like
-   *  `subscribe()`, so same-connection FIFO guarantees a publish right after subscribing gets
-   *  its own frame back. */
+  /** Declare this holder's wants to the server. The room-level text want rides the standard broadcast subscription — declared synchronously, like `subscribe()`, so same-connection FIFO guarantees a
+   * publish right after subscribing gets its own frame back.
+   */
   private _syncWants(reconcileText = false): void {
     const state = this._state
     const text: MemberWants = state.closed ? { all: false, members: [] } : state.textWants()
@@ -494,16 +479,13 @@ class ClientRoom extends RoomStateView implements Room {
   }
 }
 
-// ---------------------------------------------------------------------------
 // Local participants
-// ---------------------------------------------------------------------------
 
 /** Client-side half of both `LocalParticipant` flavors. `selfDelivery` needs nothing here: the
  *  server never relays a self-suppressed member's echo to this client's room stub (see server
  *  `_onTextData`), so the flag is carried purely as a public read-only property. */
 abstract class ClientParticipantBase extends ParticipantBase {
-  /** Per-key conflation state for `publish(data, { coalesce })` — at most one in-flight send per
-   *  key; while it's in flight the newest value waits in `pending` and supersedes any earlier one. */
+  /** Per-key conflation state for `publish(data, { coalesce })` — at most one in-flight send per key; while it's in flight the newest value waits in `pending` and supersedes any earlier one. */
   private readonly _coalescers = new Map<
     string,
     { sending: boolean; pending: { data: unknown; retain?: boolean; waiters: CoalesceWaiter[] } | null }
@@ -671,9 +653,7 @@ class ClientStandaloneParticipant extends ClientParticipantBase {
   }
 }
 
-// ---------------------------------------------------------------------------
 // Helpers
-// ---------------------------------------------------------------------------
 
 /** A standalone participant's `left` notice carries the server-side cause verbatim. */
 function standaloneLeftCause(msg: { cause?: 'removed' | 'disconnected' | 'closed'; reason?: unknown }): LeaveCause {

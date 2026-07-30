@@ -91,8 +91,7 @@ class SubSlot {
     return this._readyPromise
   }
 
-  /** Internal recovery generation. Unlike holder readiness, exhaustion rejects this generation so
-   *  internal planners can abandon it; a later retry creates a fresh one. */
+  /** Internal recovery generation. Unlike holder readiness, exhaustion rejects this generation so internal planners can abandon it; a later retry creates a fresh one. */
   get generationReady(): Promise<void> {
     return this._generationPromise
   }
@@ -161,8 +160,7 @@ class SubSlot {
     if (previous) void previous.unsubscribe().catch(reportRoomError)
   }
 
-  /** Exhausted policy keeps demand and holder readiness pending, but rejects this internal
-   *  generation and drops the dead raw attempt until the next planning pass. */
+  /** Exhausted policy keeps demand and holder readiness pending, but rejects this internal generation and drops the dead raw attempt until the next planning pass. */
   markLost(error: unknown): void {
     const subscription = this._subscription
     this._subscription = null
@@ -199,8 +197,7 @@ class SubSlot {
       this._resolveGeneration = resolve
       this._rejectGeneration = reject
     })
-    // A generation can exhaust without an active internal waiter. Keep that deliberate rejection
-    // from becoming an unhandled rejection while preserving it for callers that captured the promise.
+    // A generation can exhaust without an active internal waiter. Keep that deliberate rejection from becoming an unhandled rejection while preserving it for callers that captured the promise.
     void this._generationPromise.catch(() => {})
   }
 
