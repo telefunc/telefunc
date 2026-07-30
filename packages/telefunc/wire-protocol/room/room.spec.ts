@@ -4,9 +4,14 @@ import { IndexedPeer } from '../server/IndexedPeer.js'
 import { ACK_STATUS, TAG, decode } from '../shared-ws.js'
 import { waitForTelefunctionCallBarriers } from '../client/call-barrier.js'
 import { ShieldValidationError, isShieldValidationError } from '../../shared/ShieldValidationError.js'
-import { ROOM_HEARTBEAT_INTERVAL_MS } from '../constants.js'
+import {
+  ROOM_DM_ACK_TIMEOUT_MS,
+  ROOM_HEARTBEAT_INTERVAL_MS,
+  ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS,
+} from '../constants.js'
 import {
   DEFAULT_TRACK,
+  RoomError,
   frameWithMemberId,
   isRoomError,
   roomAckError,
@@ -559,6 +564,33 @@ describe('Room public behavior', () => {
     }
   })
 
+  it('keeps an authoritative open Room open after subscription recovery exhausts', async () => {
+    vi.useFakeTimers()
+    const observer = (await Room.get((await Room.create('open-recovery-exhaustion')).id)) as ServerRoom
+    const backend = getBackend()
+    const subscribeLane = backend.subscribeLane.bind(backend)
+    const subscribe = vi.spyOn(backend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
+      return lane.kind === 'semantic'
+        ? rejectedSubscription('persistent subscription failure')
+        : subscribeLane(roomId, inc, lane, receiver)
+    })
+    const report = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const onClose = vi.fn()
+    observer.onClose(onClose)
+    try {
+      observer.subscribe(() => {})
+      await vi.advanceTimersByTimeAsync(ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS + 100)
+      const textSlot = (observer as unknown as { _textSub: SubSlot })._textSub
+
+      expect((await backend.readHead(observer.id))?.head.state).toBe('open')
+      expect({ closed: observer.isClosed, onClose: onClose.mock.calls.length }).toEqual({ closed: false, onClose: 0 })
+      expect(textSlot).toMatchObject({ wanted: true, lost: true, active: false })
+    } finally {
+      subscribe.mockRestore()
+      report.mockRestore()
+    }
+  })
+
   it('propagates presence/meta while hidden members stay addressable and admin removal carries its cause', async () => {
     const authority = await Room.create('presence')
     const observer = await Room.get('presence')
@@ -699,6 +731,24 @@ describe('Room public behavior', () => {
     player.listen((data, from) => fromRoom.push([data, from]))
     await Room.send('dm', { id: player.id }, { notice: true })
     expect(fromRoom).toEqual([[{ notice: true }, null]])
+  })
+
+  it('surfaces an ack timeout as the operational RoomError at the public send boundary', async () => {
+    const room = await Room.create('dm-timeout-error-class')
+    const sender = await room.join()
+    const recipient = await room.join()
+    vi.useFakeTimers()
+
+    const sending = sender.send(recipient, 'unhandled', { ack: true }).catch((error: unknown) => error)
+    await vi.advanceTimersByTimeAsync(ROOM_DM_ACK_TIMEOUT_MS)
+    const publicError = await sending
+
+    expect(publicError).toBeInstanceOf(RoomError)
+    expect(isRoomError(publicError)).toBe(true)
+    expect(publicError).toMatchObject({
+      name: 'RoomError',
+      message: expect.stringContaining('timed out'),
+    })
   })
 
   it('reports a participant-left race on a room-authored send without calling the room closed', async () => {
