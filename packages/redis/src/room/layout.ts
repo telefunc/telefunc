@@ -29,6 +29,7 @@ import { HEAD_TRANSITIONS, ORDERING_FRAME_LAYOUT, type LaneId } from 'telefunc/b
 
 export const DEFAULT_ROOM_PREFIX = 'tf:'
 export const REDIS_DELIVERY_FENCE_BYTE = 0xff
+export const REDIS_SAFE_INTEGER_MAX = Number.MAX_SAFE_INTEGER
 
 // ── key naming ────────────────────────────────────────────────────────────
 
@@ -403,7 +404,9 @@ if ARGV[5] == '1' then
   local current_total = tonumber(redis.call('GET', retained_size_key) or '0')
   local old_frame_bytes = redis.call('STRLEN', retained_key)
   local old_payload_bytes = 0
-  if old_frame_bytes > 16 then old_payload_bytes = old_frame_bytes - 16 end
+  if old_frame_bytes > ${ORDERING_FRAME_LAYOUT.headerBytes} then
+    old_payload_bytes = old_frame_bytes - ${ORDERING_FRAME_LAYOUT.headerBytes}
+  end
   retained_total = current_total - old_payload_bytes + string.len(ARGV[6])
   if retained_total > tonumber(ARGV[7]) then
     return redis.error_reply('commitLane: retained aggregate ' .. retained_total .. ' bytes exceeds the ' .. ARGV[7] .. ' byte cap')
@@ -419,18 +422,18 @@ if prev then
   if not pseq then return redis.error_reply('commitLane: invalid ordering watermark') end
   base_seq = tonumber(pseq)
   base_ts = tonumber(pts)
-  if not base_seq or not base_ts or base_seq < 0 or base_seq > 9007199254740991
-      or base_ts < 0 or base_ts > 9007199254740991 then
+  if not base_seq or not base_ts or base_seq < 0 or base_seq > ${REDIS_SAFE_INTEGER_MAX}
+      or base_ts < 0 or base_ts > ${REDIS_SAFE_INTEGER_MAX} then
     return redis.error_reply('commitLane: invalid ordering watermark')
   end
 end
-if base_seq >= 9007199254740991 then
+if base_seq >= ${REDIS_SAFE_INTEGER_MAX} then
   return redis.error_reply('commitLane: sequence exhausted for the ordering domain')
 end
 local seq = base_seq + 1
 local ts = now
 if base_ts > ts then ts = base_ts end
-if seq < 1 or seq > 9007199254740991 or ts < 0 or ts > 9007199254740991 then
+if seq < 1 or seq > ${REDIS_SAFE_INTEGER_MAX} or ts < 0 or ts > ${REDIS_SAFE_INTEGER_MAX} then
   return redis.error_reply('commitLane: invalid ordering position')
 end
 -- Lua's implicit number-to-string conversion uses limited significant digits at the safe-integer
@@ -462,12 +465,14 @@ local if_seq = ARGV[1]
 if if_seq ~= '' then
   if #KEYS ~= 2 then return redis.error_reply('deleteRetained: ifSeq requires one lane') end
   local expected = tonumber(if_seq)
-  if not expected or expected < 1 or expected > 9007199254740991 or expected ~= math.floor(expected) then
+  if not expected or expected < 1 or expected > ${REDIS_SAFE_INTEGER_MAX} or expected ~= math.floor(expected) then
     return redis.error_reply('deleteRetained: invalid ifSeq')
   end
   local frame = redis.call('GET', KEYS[2])
   if not frame then return total end
-  if string.len(frame) < 16 then return redis.error_reply('deleteRetained: invalid retained frame') end
+  if string.len(frame) < ${ORDERING_FRAME_LAYOUT.headerBytes} then
+    return redis.error_reply('deleteRetained: invalid retained frame')
+  end
   local seq_hi, seq_lo = struct.unpack('>I4I4', frame)
   local current = seq_hi * 4294967296 + seq_lo
   if current ~= expected then return total end
@@ -476,7 +481,9 @@ for i = 2, #KEYS do
   local frame_bytes = redis.call('STRLEN', KEYS[i])
   if frame_bytes > 0 then
     local payload_bytes = 0
-    if frame_bytes > 16 then payload_bytes = frame_bytes - 16 end
+    if frame_bytes > ${ORDERING_FRAME_LAYOUT.headerBytes} then
+      payload_bytes = frame_bytes - ${ORDERING_FRAME_LAYOUT.headerBytes}
+    end
     total = total - payload_bytes
     redis.call('DEL', KEYS[i])
   end

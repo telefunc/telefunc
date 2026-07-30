@@ -45,6 +45,7 @@ import {
   REDIS_ROOM_COMMAND_KEYS,
   REDIS_ROOM_COMMANDS,
   REDIS_ORDERING_FRAME_LUA,
+  REDIS_SAFE_INTEGER_MAX,
   retainedKey,
   retainedKeyPrefix,
   revKey,
@@ -54,7 +55,6 @@ import { RedisSubscriptionDriver } from './subscriber-transport.js'
 const DEFAULT_MAX_RETAINED_BYTES = 16 * 1024 * 1024
 const DIRECTORY_PAGE_SIZE = 100
 const STABLE_READ_ATTEMPTS = 8
-const SCAN_COUNT = 250
 const NEWLINE = 0x0a
 
 function assertOrderingPosition(seq: number, timestamp: number, context: string): void {
@@ -72,13 +72,13 @@ export type RedisRoomBackendOptions = {
 const PUBLISH_CMD = 'tfPublish'
 const PUBLISH_LUA = `${REDIS_ORDERING_FRAME_LUA}
 local previous = redis.call('GET', KEYS[1])
-if previous and tonumber(previous) >= 9007199254740991 then
+if previous and tonumber(previous) >= ${REDIS_SAFE_INTEGER_MAX} then
   return redis.error_reply('publish: sequence exhausted for the ordering domain')
 end
 local seq = redis.call('INCR', KEYS[1])
 local t = redis.call('TIME')
 local ts = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
-if seq < 1 or seq > 9007199254740991 or ts < 0 or ts > 9007199254740991 then
+if seq < 1 or seq > ${REDIS_SAFE_INTEGER_MAX} or ts < 0 or ts > ${REDIS_SAFE_INTEGER_MAX} then
   return redis.error_reply('publish: invalid ordering position')
 end
 local frame = tf_ordering_frame(seq, ts, ARGV[1])
@@ -268,7 +268,7 @@ export class RedisRoomBackend implements BackendDriver {
     this._assertLive()
     const reply = (await this._call(REDIS_ROOM_COMMANDS.headCx.name, [
       ...REDIS_ROOM_COMMAND_KEYS.headCx(this._prefix, roomId),
-      this._nowArg(),
+      '',
       encodeCx(cx),
       encodeNext(next),
     ])) as string
@@ -330,7 +330,7 @@ export class RedisRoomBackend implements BackendDriver {
       inc,
       mutations.map((mutation) => mutation.key),
     )
-    const argv: Array<string | Buffer> = [this._nowArg(), inc, revision]
+    const argv: Array<string | Buffer> = ['', inc, revision]
     for (const mutation of mutations) {
       if (mutation.set === undefined) {
         argv.push('del', '', '')
@@ -368,7 +368,7 @@ export class RedisRoomBackend implements BackendDriver {
       reply = (await this._call(REDIS_ROOM_COMMANDS.commit.name, [
         String(keys.length),
         ...keys,
-        this._nowArg(),
+        '',
         inc,
         lane.kind,
         opts?.closingLease ?? '',
@@ -466,7 +466,7 @@ export class RedisRoomBackend implements BackendDriver {
     return (
       (await this._call(REDIS_ROOM_COMMANDS.validateGeneration.name, [
         ...REDIS_ROOM_COMMAND_KEYS.validateGeneration(this._prefix, source.roomId),
-        this._nowArg(),
+        '',
         source.inc,
         token,
       ])) === 1
@@ -560,10 +560,6 @@ export class RedisRoomBackend implements BackendDriver {
     if (this._disposed) throw new Error('RedisRoomBackend: used after dispose()')
   }
 
-  private _nowArg(): string {
-    return ''
-  }
-
   private async _authorityNowMs(): Promise<number> {
     const [seconds, microseconds] = await this._publisher.time()
     return Number(seconds) * 1_000 + Math.floor(Number(microseconds) / 1_000)
@@ -602,7 +598,7 @@ export class RedisRoomBackend implements BackendDriver {
     for (const node of nodes) {
       let cursor = '0'
       do {
-        const [next, page] = await node.scan(cursor, 'MATCH', pattern, 'COUNT', SCAN_COUNT)
+        const [next, page] = await node.scan(cursor, 'MATCH', pattern)
         cursor = next
         for (const key of page) keys.add(key)
       } while (cursor !== '0')
