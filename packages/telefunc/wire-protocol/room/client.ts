@@ -153,9 +153,10 @@ class ClientRoom implements Room {
   }
 
   async getParticipants(options?: { hidden?: boolean }): Promise<RemoteParticipant[]> {
+    assertUsage(!options?.hidden, 'Hidden participants can only be enumerated on the server')
     if (!this._state.rosterKnown) await this._rosterReady
     // kept fresh by the event stream from there on
-    return options?.hidden ? this._state.listHidden() : this._state.listRemotes()
+    return this._state.listRemotes()
   }
 
   async getParticipant(id: string): Promise<RemoteParticipant | null> {

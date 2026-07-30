@@ -288,7 +288,8 @@ type Room<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = Participant
 
   /** The room's participants. Pass `{ hidden: true }` for the off-presence participants instead —
    *  a server authority, a bot, a recorder (see `JoinOptions.hidden`); addressable (`me.send(p.id,
-   *  …)`) and readable (`p.subscribeBinary(…)`) like any member, just not counted as present. */
+   *  …)`) and readable (`p.subscribeBinary(…)`) like any member, just not counted as present.
+   *  Hidden enumeration is server-only because the browser roster intentionally omits it. */
   getParticipants(options?: { hidden?: boolean }): Promise<RemoteParticipant<P, Pub>[]>
   /** One participant, or `null` if they're not a member. Like `getParticipants()`, loads the
    *  member view on first need; once the view is loaded it resolves from it without I/O. */

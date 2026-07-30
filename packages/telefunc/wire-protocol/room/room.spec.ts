@@ -772,6 +772,27 @@ describe('client Room lifecycle', () => {
     })
   })
 
+  it('rejects hidden-roster enumeration in clients instead of returning a partial direct-handle list', async () => {
+    const fake = createFakeStub()
+    const client = new ClientRoom(fake.stub, snapshot('client-hidden-roster'))
+    fake.emitText(
+      { __r: 'roster', members: [] },
+      { key: 'client-hidden-roster', seq: 1, timestamp: 1 },
+    )
+    client._reviveRemote({
+      id: crypto.randomUUID(),
+      meta: { role: 'moderator' },
+      joinedAt: 1,
+      metaSeq: 0,
+      identity: null,
+      hidden: true,
+    })
+
+    await expect(client.getParticipants({ hidden: true })).rejects.toThrow(
+      'Hidden participants can only be enumerated on the server',
+    )
+  })
+
   it('redeclares a room-wide text subscription after reconnect even when the local latch already matches', () => {
     const wireDeclarations: boolean[] = []
     let reconnect = () => {}
