@@ -18,11 +18,10 @@ import {
   unframeMemberId,
   type RoomSnapshotMetadata,
 } from './protocol.js'
-import { ClientRoom } from './client.js'
+import { ClientRoom, RoomClientBroadcast } from './client.js'
 import { Room, ServerRoom } from './server.js'
 import { RoomStubChannel } from './stubs.js'
 import { RoomDemand } from './demand.js'
-import { ClientBroadcast } from '../client/channel.js'
 import type { ChannelPublishInfo } from '../channel.js'
 import { disposeBackend, getBackend, installBackend, setDefaultBackend } from '../backend/install.js'
 import { HEAD_TRANSITIONS, assertHeadTransition } from '../backend/head-transitions.js'
@@ -1547,7 +1546,7 @@ function createFakeStub(options?: {
   send?: (message: unknown) => Promise<unknown>
   wireDeclarations?: boolean[]
 }): {
-  stub: ClientBroadcast
+  stub: RoomClientBroadcast
   emitText(data: unknown, info: ChannelPublishInfo): void
   emitBinary(data: Uint8Array, info: ChannelPublishInfo): void
   reconnect(): void
@@ -1570,7 +1569,7 @@ function createFakeStub(options?: {
       binary.push(callback)
       return () => binary.splice(binary.indexOf(callback), 1)
     },
-    _setWireTextSubscribed: ClientBroadcast.prototype._setWireTextSubscribed,
+    _setWireTextSubscribed: RoomClientBroadcast.prototype._setWireTextSubscribed,
     send: options?.send ?? (async () => undefined),
     publish: async () => ({ key: 'fake', seq: 1, timestamp: 1 }),
     publishBinary: async () => ({ key: 'fake', seq: 1, timestamp: 1 }),
@@ -1578,7 +1577,7 @@ function createFakeStub(options?: {
     _onReconnect: (callback: () => void) => {
       reconnect = callback
     },
-  } as unknown as ClientBroadcast
+  } as unknown as RoomClientBroadcast
   return {
     stub,
     emitText: (data, info) => text.forEach((callback) => callback(data, info)),
@@ -1675,7 +1674,7 @@ class ControlledAttempt implements SubscriptionAttempt {
   }
 
   lose(): void {
-    this._transition('lost')
+    this.#transition('lost')
   }
 
   close(): void {
@@ -1763,6 +1762,10 @@ function delayLaneSubscription(matches: (lane: LaneId) => boolean) {
     }
   })
   return { started: started.promise, release: () => release(), restore: () => spy.mockRestore() }
+}
+
+async function settleMicrotasks(turns = 8): Promise<void> {
+  for (let turn = 0; turn < turns; turn++) await Promise.resolve()
 }
 
 function settle(): Promise<void> {
