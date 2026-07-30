@@ -45,7 +45,7 @@ export class SessionDurableObject extends DurableObject {
   private readonly _manager: CloudflareRoomSessionManager
 
   constructor(ctx: DurableObjectState, env: unknown) {
-    super(ctx, env)
+    super(ctx, env as Env)
     this._manager = new CloudflareRoomSessionManager(
       ctx.id.toString(),
       () => (env as { ROOM: CloudflareRoomNamespace }).ROOM,
@@ -145,17 +145,13 @@ type CommitResult =
 type Authority = {
   readHead(): Promise<HeadWire | null>
   compareExchangeHead(cx: HeadCx, next: HeadNextWire): Promise<HeadResult>
-  captureRouteGeneration(
-    inc: string,
-  ): Promise<{ ok: true; generationToken: string } | { rejected: true; reason: string }>
   registerRoute(
     roomId: string,
     inc: string,
     laneKey: string,
     subscriberDoId: string,
     leaseId: string,
-    generationToken: string,
-  ): Promise<{ ok: true } | { rejected: true; reason: string }>
+  ): Promise<{ ok: true; generationToken: string } | { rejected: true; reason: string }>
   commitLane(roomId: string, inc: string, lane: LaneId, payload: Uint8Array): Promise<CommitResult>
   awaitDelivery(token: string): Promise<void>
   dropGeneration(inc: string): Promise<{ droppedSubscribers: unknown[] } | { error: string }>
@@ -381,16 +377,7 @@ async function join(
   inc: string,
   leaseId: string,
 ): Promise<void> {
-  const capture = await authority.captureRouteGeneration(inc)
-  if (!('ok' in capture)) throw new Error(`generation capture failed: ${capture.reason}`)
-  const registration = await authority.registerRoute(
-    roomId,
-    inc,
-    'semantic',
-    sessionId.toString(),
-    leaseId,
-    capture.generationToken,
-  )
+  const registration = await authority.registerRoute(roomId, inc, 'semantic', sessionId.toString(), leaseId)
   if (!('ok' in registration)) throw new Error(`route registration failed: ${registration.reason}`)
 }
 

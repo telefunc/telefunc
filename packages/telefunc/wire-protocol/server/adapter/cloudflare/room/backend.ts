@@ -23,12 +23,12 @@ import type {
 import { BACKEND_SPI_VERSION } from '../../../../backend/spi.js'
 import { CloudflareBroadcastTransport } from '../broadcast.js'
 import { base64ToBytes, bytesToBase64, laneKey as laneKeyOf } from './codec.js'
+import { MAX_RETAINED_BYTES } from './retained.js'
 import { CloudflareRoomSubscriptionAttempt, type CloudflareRoomSubscriptionSource } from './subscription.js'
 import type {
   CellsWire,
   CommitWire,
   DropWire,
-  GenerationWire,
   HeadCxWire,
   HeadNextWire,
   HeadWire,
@@ -37,7 +37,6 @@ import type {
 } from './do.js'
 
 const DIRECTORY_DO_NAME = '__telefunc_room_directory__'
-const MAX_RETAINED_BYTES = 16 * 1024 * 1024
 const ROOM_MANAGER = Symbol('telefunc.cloudflare.room-manager')
 
 function assertOrderingPosition(seq: number, timestamp: number, context: string): void {
@@ -86,30 +85,19 @@ export type CloudflareRoomAuthorityStub = {
   readRetained(inc: string, lane: LaneId): Promise<RetainedWire | null>
   listRetained(inc: string): Promise<LaneId[]>
   deleteRetainedLane(inc: string, lane?: LaneId, opts?: { ifSeq?: number }): Promise<void>
-  captureRouteGeneration(
-    inc: string,
-    attemptId?: string | null,
-    attemptCreatedAt?: number | null,
-  ): Promise<GenerationWire>
-  releaseRouteGenerationCapture(attemptId: string): Promise<void>
   registerRoute(
     roomId: string,
     inc: string,
     laneKey: string,
     subscriberDoId: string,
     leaseId: string,
-    expectedGenerationToken: string,
-    captureAttemptId?: string | null,
-    captureCreatedAt?: number | null,
   ): Promise<RegisterWire>
   renewRoute(
     inc: string,
     laneKey: string,
     subscriberDoId: string,
     leaseId: string,
-    expectedGenerationToken?: string | null,
-    captureAttemptId?: string | null,
-    captureCreatedAt?: number | null,
+    expectedGenerationToken: string,
   ): Promise<{ ok: boolean; terminal?: boolean }>
   unsubscribeRoute(inc: string, laneKey: string, subscriberDoId: string, leaseId: string): Promise<void>
   listGenerations(): Promise<string[]>
@@ -138,16 +126,11 @@ export function requireCloudflareRoomNamespace(
   return binding
 }
 
-type ManagerEntry = {
-  source: CloudflareRoomSubscriptionSource
-  attempt: CloudflareRoomSubscriptionAttempt
-}
-
 export class CloudflareRoomSessionManager {
   private readonly _id: string
   private readonly _subscriptionPartition = crypto.randomUUID()
   private readonly _getRoomNamespace: () => CloudflareRoomNamespace
-  private readonly _entries = new Map<string, ManagerEntry>()
+  private readonly _entries = new Map<string, CloudflareRoomSubscriptionAttempt>()
   private readonly _deliverySettlements = new Map<string, Promise<void>>()
   private _disposed = false
 
@@ -182,24 +165,24 @@ export class CloudflareRoomSessionManager {
     if (request.subscriberDoId !== this._id)
       throw new Error('Cloudflare Room delivery addressed the wrong session shard')
     const entry = this._entries.get(JSON.stringify([request.roomId, request.inc, request.laneKey]))
-    if (entry === undefined || !entry.attempt.matches(request)) {
+    if (entry === undefined || !entry.matches(request)) {
       throw new Error('Cloudflare Room delivery lease is not installed')
     }
-    await entry.attempt.deliver(request.frame, request.seq, request.timestamp)
+    await entry.deliver(request.frame, request.seq, request.timestamp)
   }
 
   invalidate(request: RoomShardInvalidationRequest): void {
     const entry = this._entries.get(JSON.stringify([request.roomId, request.inc, request.laneKey]))
-    if (entry?.attempt.matches(request)) {
-      if (request.terminal === true) entry.attempt.terminate()
-      else entry.attempt.invalidate()
+    if (entry?.matches(request)) {
+      if (request.terminal === true) entry.terminate()
+      else entry.invalidate()
     }
   }
 
   dispose(): void {
     if (this._disposed) return
     this._disposed = true
-    for (const entry of this._entries.values()) entry.attempt.terminate()
+    for (const attempt of this._entries.values()) attempt.terminate()
     this._entries.clear()
     this._deliverySettlements.clear()
   }
@@ -252,10 +235,10 @@ export class CloudflareRoomSessionManager {
     let attempt!: CloudflareRoomSubscriptionAttempt
     attempt = new CloudflareRoomSubscriptionAttempt(source, receiver, {
       onClosed: () => {
-        if (this._entries.get(key)?.attempt === attempt) this._entries.delete(key)
+        if (this._entries.get(key) === attempt) this._entries.delete(key)
       },
     })
-    this._entries.set(key, { source, attempt })
+    this._entries.set(key, attempt)
     attempt.start()
     return attempt
   }

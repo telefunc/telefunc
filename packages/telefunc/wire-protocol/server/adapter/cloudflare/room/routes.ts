@@ -5,13 +5,9 @@
 // that is what makes the renewal-loss-before-expiry path exactly-once (no duplicate delivery). Routes are
 // inc-scoped, so a surviving old-inc subscription can never be a target of a recreated room (I11).
 
-export const ROUTE_TTL_MS = 90_000
+const ROUTE_TTL_MS = 90_000
 export const ROUTE_RENEW_EVERY_MS = ROUTE_TTL_MS / 3
-export const ROUTE_DELIVERY_FAILURE_LIMIT = 3
-// A capture pin is refreshed by every successful establishment/renewal and shares the route lease's
-// authority-bounded lifetime. That comfortably contains the five-attempt initial retry schedule, while
-// a crashed lifecycle with no route activity becomes mechanically reclaimable.
-export const ROUTE_CAPTURE_TTL_MS = ROUTE_TTL_MS
+const ROUTE_DELIVERY_FAILURE_LIMIT = 3
 
 export type RouteTarget = { subscriberDoId: string; leaseId: string; generationToken: string }
 export type RouteInstallation = {
@@ -34,9 +30,8 @@ export function upsertRoute(
   leaseId: string,
   generationToken: string,
   now: number,
-  ttlMs: number = ROUTE_TTL_MS,
 ): number {
-  const expiresAt = now + ttlMs
+  const expiresAt = now + ROUTE_TTL_MS
   sql.exec(
     'INSERT OR REPLACE INTO route (room_id, inc, lane_key, subscriber_do_id, lease_id, generation_token, expires_at, failures) VALUES (?, ?, ?, ?, ?, ?, ?, 0)',
     roomId,
@@ -105,9 +100,8 @@ export function renewRoute(
   subscriberDoId: string,
   leaseId: string,
   now: number,
-  ttlMs: number = ROUTE_TTL_MS,
 ): { ok: true; expiresAt: number } | { ok: false } {
-  const expiresAt = now + ttlMs
+  const expiresAt = now + ROUTE_TTL_MS
   const changed = sql.exec(
     'UPDATE route SET expires_at = ? WHERE inc = ? AND lane_key = ? AND subscriber_do_id = ? AND lease_id = ? AND expires_at > ? AND failures < ?',
     expiresAt,
@@ -182,7 +176,6 @@ export function recordRouteDeliveryFailure(
   laneKey: string,
   subscriberDoId: string,
   leaseId: string,
-  limit: number = ROUTE_DELIVERY_FAILURE_LIMIT,
 ): { matched: boolean; evicted: boolean } {
   const changed = sql.exec(
     'UPDATE route SET failures = failures + 1 WHERE inc = ? AND lane_key = ? AND subscriber_do_id = ? AND lease_id = ?',
@@ -201,7 +194,9 @@ export function recordRouteDeliveryFailure(
       leaseId,
     )
     .toArray()[0]?.failures
-  if (failures === undefined || failures < limit) return { matched: true, evicted: false }
+  if (failures === undefined || failures < ROUTE_DELIVERY_FAILURE_LIMIT) {
+    return { matched: true, evicted: false }
+  }
   sql.exec(
     'UPDATE route SET expires_at = 0 WHERE inc = ? AND lane_key = ? AND subscriber_do_id = ? AND lease_id = ?',
     inc,
@@ -210,31 +205,4 @@ export function recordRouteDeliveryFailure(
     leaseId,
   )
   return { matched: true, evicted: true }
-}
-
-// A single route's current lease id, for the addressability/expiry checks the DO runs.
-export function routeExists(
-  sql: SqlStorage,
-  inc: string,
-  laneKey: string,
-  subscriberDoId: string,
-  now: number,
-): boolean {
-  return (
-    sql
-      .exec(
-        'SELECT 1 FROM route WHERE inc = ? AND lane_key = ? AND subscriber_do_id = ? AND expires_at > ? AND failures < ? LIMIT 1',
-        inc,
-        laneKey,
-        subscriberDoId,
-        now,
-        ROUTE_DELIVERY_FAILURE_LIMIT,
-      )
-      .toArray().length > 0
-  )
-}
-
-// Alarm hygiene: drop every lapsed route row.
-export function pruneExpiredRoutes(sql: SqlStorage, now: number): number {
-  return sql.exec('DELETE FROM route WHERE expires_at <= ?', now).rowsWritten
 }
