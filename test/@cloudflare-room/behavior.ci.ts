@@ -30,9 +30,15 @@ test('open, join, commit, deliver, close, cancellation, and authority restart se
       delivered: [1],
       closed: true,
       generations: [],
+      invalidations: ['terminal'],
+    },
+    terminalDrop: {
+      state: 'terminated',
+      invalidations: ['terminal'],
     },
     cancelled: 'Cloudflare Room delivery cancelled before handoff',
     cancellationDeliveries: [1],
+    evictionInvalidations: ['recoverable'],
     unknown: 'Cloudflare Room delivery has an unknown delivery token',
   })
 })

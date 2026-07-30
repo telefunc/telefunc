@@ -128,7 +128,11 @@ export class CloudflareRoomSubscriptionAttempt implements SubscriptionAttempt {
         this._createdAt,
       )
       if (this._isClosed()) return
-      if ('rejected' in capture) throw new Error(capture.reason)
+      if ('rejected' in capture) {
+        this._rejectReady(new Error(capture.reason))
+        this._terminate()
+        return
+      }
       this._generationToken = capture.generationToken
       const registered = await this._source.authority.registerRoute(
         this._source.roomId,
@@ -141,7 +145,15 @@ export class CloudflareRoomSubscriptionAttempt implements SubscriptionAttempt {
         this._createdAt,
       )
       if (this._isClosed()) return
-      if (!('ok' in registered)) throw new Error(registered.reason)
+      if (!('ok' in registered)) {
+        const error = new Error(registered.reason)
+        if (registered.terminal === true) {
+          this._rejectReady(error)
+          this._terminate()
+          return
+        }
+        throw error
+      }
       this._transition('ready')
       this._resolveReady()
       this._scheduleRenewal()
@@ -173,7 +185,8 @@ export class CloudflareRoomSubscriptionAttempt implements SubscriptionAttempt {
       )
       if (this._state !== 'ready') return
       if (!renewed.ok) {
-        this._close()
+        if (renewed.terminal === true) this.terminate()
+        else this._close()
         return
       }
       this._scheduleRenewal()

@@ -591,7 +591,7 @@ export class TelefuncRoomDurableObject extends DurableObject {
     // Subscriber uninstalls are fallible. Keep their durable route rows and generation entry intact
     // until every exact-lease uninstall succeeds, so a retry can replay the same invalidations after a
     // transport failure or crash. This is the generation analogue of data-first / gens-entry-last.
-    await this._invalidateInstallations(installations)
+    await this._invalidateInstallations(installations, true)
     this.ctx.storage.transactionSync(() => dropGenerationRows(this._sql, inc))
     this._fanout.clearIncarnation(inc)
     // Report the routes that were on the dropped generation so the facade can close their local
@@ -657,7 +657,7 @@ export class TelefuncRoomDurableObject extends DurableObject {
     const failedOrphans = new Set<string>()
     for (const inc of orphanIncs) {
       const installations = listRouteInstallations(this._sql, inc)
-      const outcomes = await Promise.allSettled(installations.map((entry) => this._invalidateInstallation(entry)))
+      const outcomes = await Promise.allSettled(installations.map((entry) => this._invalidateInstallation(entry, true)))
       if (outcomes.some((outcome) => outcome.status === 'rejected')) {
         failedOrphans.add(inc)
         continue
@@ -689,11 +689,11 @@ export class TelefuncRoomDurableObject extends DurableObject {
     return prunedRoutes
   }
 
-  private async _invalidateInstallations(installations: RouteInstallation[]): Promise<void> {
-    await Promise.all(installations.map((installation) => this._invalidateInstallation(installation)))
+  private async _invalidateInstallations(installations: RouteInstallation[], terminal: boolean): Promise<void> {
+    await Promise.all(installations.map((installation) => this._invalidateInstallation(installation, terminal)))
   }
 
-  private async _invalidateInstallation(installation: RouteInstallation): Promise<void> {
+  private async _invalidateInstallation(installation: RouteInstallation, terminal: boolean = false): Promise<void> {
     const session = this._sessionNamespace()
     await session.get(session.idFromString(installation.subscriberDoId)).telefuncRoomInvalidate({
       roomId: installation.roomId,
@@ -702,6 +702,7 @@ export class TelefuncRoomDurableObject extends DurableObject {
       subscriberDoId: installation.subscriberDoId,
       leaseId: installation.leaseId,
       generationToken: installation.generationToken,
+      ...(terminal ? { terminal: true as const } : {}),
     })
   }
 

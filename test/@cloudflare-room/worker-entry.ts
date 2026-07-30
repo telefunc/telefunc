@@ -1,7 +1,16 @@
 /// <reference types="@cloudflare/workers-types" />
 
 import { DurableObject } from 'cloudflare:workers'
-import type { HeadCx, LaneId } from '../../packages/telefunc/wire-protocol/backend/spi.js'
+import type {
+  HeadCx,
+  LaneId,
+  SubscriptionAttempt,
+  SubscriptionAttemptState,
+} from '../../packages/telefunc/wire-protocol/backend/spi.js'
+import {
+  CloudflareRoomSessionManager,
+  type CloudflareRoomNamespace,
+} from '../../packages/telefunc/wire-protocol/server/adapter/cloudflare/room/backend.js'
 import {
   TelefuncRoomDurableObject as ProductionRoomDurableObject,
   type HeadNextWire,
@@ -19,35 +28,72 @@ type DeliveryRequest = {
   seq: number
   timestamp: number
 }
+type InvalidationRequest = Omit<DeliveryRequest, 'frame' | 'seq' | 'timestamp'> & { terminal?: true }
 type DeliveryState = {
   blockFirst: boolean
+  fail: boolean
   started: boolean
   delivered: number[]
+  invalidations: Array<'recoverable' | 'terminal'>
   gate: Promise<void>
   release: () => void
 }
 
 export class SessionDurableObject extends DurableObject {
   private readonly _deliveries = new Map<string, DeliveryState>()
+  private readonly _attempts = new Map<string, SubscriptionAttempt>()
+  private readonly _manager: CloudflareRoomSessionManager
 
-  prepareDelivery(roomId: string, blockFirst: boolean): void {
+  constructor(ctx: DurableObjectState, env: unknown) {
+    super(ctx, env)
+    this._manager = new CloudflareRoomSessionManager(
+      ctx.id.toString(),
+      () => (env as { ROOM: CloudflareRoomNamespace }).ROOM,
+    )
+  }
+
+  prepareDelivery(roomId: string, blockFirst: boolean, fail: boolean = false): void {
     let release!: () => void
     const gate = new Promise<void>((resolve) => {
       release = resolve
     })
-    this._deliveries.set(roomId, { blockFirst, started: false, delivered: [], gate, release })
+    this._deliveries.set(roomId, {
+      blockFirst,
+      fail,
+      started: false,
+      delivered: [],
+      invalidations: [],
+      gate,
+      release,
+    })
   }
 
-  deliveryState(roomId: string): { started: boolean; delivered: number[] } {
+  deliveryState(roomId: string): {
+    started: boolean
+    delivered: number[]
+    invalidations: Array<'recoverable' | 'terminal'>
+  } {
     const state = this._deliveries.get(roomId)
     if (state === undefined) throw new Error('delivery probe was not prepared')
-    return { started: state.started, delivered: [...state.delivered] }
+    return { started: state.started, delivered: [...state.delivered], invalidations: [...state.invalidations] }
   }
 
   releaseDelivery(roomId: string): void {
     const state = this._deliveries.get(roomId)
     if (state === undefined) throw new Error('delivery probe was not prepared')
     state.release()
+  }
+
+  async openSubscription(roomId: string, inc: string): Promise<void> {
+    const attempt = this._manager.openSubscription(roomId, inc, { kind: 'semantic' }, () => {})
+    this._attempts.set(roomId, attempt)
+    await attempt.ready
+  }
+
+  subscriptionState(roomId: string): SubscriptionAttemptState {
+    const attempt = this._attempts.get(roomId)
+    if (attempt === undefined) throw new Error('subscription probe was not prepared')
+    return attempt.state()
   }
 
   async telefuncRoomDeliver(request: DeliveryRequest): Promise<void> {
@@ -58,9 +104,15 @@ export class SessionDurableObject extends DurableObject {
       state.started = true
       await state.gate
     }
+    if (state.fail) throw new Error('delivery probe rejected')
   }
 
-  telefuncRoomInvalidate(): void {}
+  telefuncRoomInvalidate(request: InvalidationRequest): void {
+    const state = this._deliveries.get(request.roomId)
+    if (state === undefined) throw new Error('invalidation reached an unprepared session')
+    state.invalidations.push(request.terminal === true ? 'terminal' : 'recoverable')
+    this._manager.invalidate(request)
+  }
 }
 
 export class TelefuncRoomDurableObject extends ProductionRoomDurableObject {
@@ -111,9 +163,13 @@ type Authority = {
   telefuncRoomReconstructForTest(): Promise<void>
 }
 type Session = {
-  prepareDelivery(roomId: string, blockFirst: boolean): Promise<void>
-  deliveryState(roomId: string): Promise<{ started: boolean; delivered: number[] }>
+  prepareDelivery(roomId: string, blockFirst: boolean, fail?: boolean): Promise<void>
+  deliveryState(
+    roomId: string,
+  ): Promise<{ started: boolean; delivered: number[]; invalidations: Array<'recoverable' | 'terminal'> }>
   releaseDelivery(roomId: string): Promise<void>
+  openSubscription(roomId: string, inc: string): Promise<void>
+  subscriptionState(roomId: string): Promise<SubscriptionAttemptState>
 }
 type Env = {
   ROOM: DurableObjectNamespace
@@ -127,9 +183,11 @@ export default {
       const sessionId = env.TelefuncDurableObject.idFromName(`session-${suffix}`)
       const session = env.TelefuncDurableObject.get(sessionId) as unknown as Session
       const lifecycle = await successfulLifecycle(env, sessionId, session, suffix)
+      const terminalDrop = await terminalGenerationDrop(env, session, suffix)
       const cancellation = await cancelledDelivery(env, sessionId, session, suffix)
+      const evictionInvalidations = await failedDeliveryEviction(env, sessionId, session, suffix)
       const unknown = await authorityRestart(env, suffix)
-      return Response.json({ lifecycle, ...cancellation, unknown })
+      return Response.json({ lifecycle, terminalDrop, ...cancellation, evictionInvalidations, unknown })
     } catch (error) {
       return Response.json({ error: error instanceof Error ? error.message : String(error) }, { status: 500 })
     }
@@ -153,6 +211,31 @@ async function successfulLifecycle(env: Env, sessionId: DurableObjectId, session
     delivered: (await session.deliveryState(roomId)).delivered,
     closed: (await authority.readHead())?.state === 'closed',
     generations: await authority.listGenerations(),
+    invalidations: (await session.deliveryState(roomId)).invalidations,
+  }
+}
+
+async function terminalGenerationDrop(
+  env: Env,
+  session: Session,
+  suffix: string,
+): Promise<{ state: SubscriptionAttemptState; invalidations: Array<'recoverable' | 'terminal'> }> {
+  const roomId = `terminal-${suffix}`
+  const inc = `terminal-inc-${suffix}`
+  const authority = roomAuthority(env, roomId)
+  const opened = expectHead(
+    await authority.compareExchangeHead(
+      { expect: 'absent' },
+      { head: { currentInc: inc, state: 'open', configB64: 'e30=' } },
+    ),
+    'terminal open',
+  )
+  await session.prepareDelivery(roomId, false)
+  await session.openSubscription(roomId, inc)
+  await closeAndDrop(authority, inc, opened, `terminal-close-${suffix}`)
+  return {
+    state: await session.subscriptionState(roomId),
+    invalidations: (await session.deliveryState(roomId)).invalidations,
   }
 }
 
@@ -178,6 +261,29 @@ async function cancelledDelivery(env: Env, sessionId: DurableObjectId, session: 
     cancelled: await rejectionOf(authority.awaitDelivery(second.deliveryToken), 2_000, 'cancelled delivery settlement'),
     cancellationDeliveries: (await session.deliveryState(roomId)).delivered,
   }
+}
+
+async function failedDeliveryEviction(
+  env: Env,
+  sessionId: DurableObjectId,
+  session: Session,
+  suffix: string,
+): Promise<Array<'recoverable' | 'terminal'>> {
+  const roomId = `evict-${suffix}`
+  const inc = `evict-inc-${suffix}`
+  const authority = roomAuthority(env, roomId)
+  const opened = await openAndJoin(authority, sessionId, roomId, inc, `evict-lease-${suffix}`)
+  await session.prepareDelivery(roomId, false, true)
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    const commit = accepted(
+      await authority.commitLane(roomId, inc, { kind: 'semantic' }, new Uint8Array([attempt])),
+      `failed delivery ${attempt}`,
+    )
+    await rejectionOf(authority.awaitDelivery(commit.deliveryToken), 2_000, `failed delivery ${attempt}`)
+  }
+  const invalidations = (await session.deliveryState(roomId)).invalidations
+  await closeAndDrop(authority, inc, opened, `evict-close-${suffix}`)
+  return invalidations
 }
 
 async function authorityRestart(env: Env, suffix: string): Promise<string> {

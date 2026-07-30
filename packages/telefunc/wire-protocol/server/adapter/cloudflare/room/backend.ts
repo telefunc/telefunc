@@ -62,7 +62,9 @@ export type RoomShardDeliveryRequest = {
   timestamp: number
 }
 
-export type RoomShardInvalidationRequest = Omit<RoomShardDeliveryRequest, 'frame' | 'seq' | 'timestamp'>
+export type RoomShardInvalidationRequest = Omit<RoomShardDeliveryRequest, 'frame' | 'seq' | 'timestamp'> & {
+  terminal?: true
+}
 
 export type CloudflareRoomAuthorityStub = {
   readHead(): Promise<HeadWire | null>
@@ -188,7 +190,10 @@ export class CloudflareRoomSessionManager {
 
   invalidate(request: RoomShardInvalidationRequest): void {
     const entry = this._entries.get(JSON.stringify([request.roomId, request.inc, request.laneKey]))
-    if (entry?.attempt.matches(request)) entry.attempt.invalidate()
+    if (entry?.attempt.matches(request)) {
+      if (request.terminal === true) entry.attempt.terminate()
+      else entry.attempt.invalidate()
+    }
   }
 
   dispose(): void {
@@ -379,7 +384,7 @@ export class CloudflareRoomBackend implements BackendDriver {
     if ('error' in wire) throw new Error(wire.error)
     manager.dropGenerationSettlements(roomId, inc)
     for (const dropped of wire.droppedSubscribers) {
-      manager.invalidate({ roomId, inc, ...dropped })
+      manager.invalidate({ roomId, inc, ...dropped, terminal: true })
     }
   }
   async directoryPut(roomId: string, incTag: string) {
