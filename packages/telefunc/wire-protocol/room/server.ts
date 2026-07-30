@@ -1785,6 +1785,9 @@ class ServerRoom implements Room {
    *  frame is self-describing, so the sender/track come from the frame itself, not the key. */
   async _replayRetainedBinary(stub: RoomStubChannel, prevWants: BinaryWants): Promise<void> {
     if (!wantsAnyBinary(stub._binaryWants)) return
+    const roomWide = stub._binaryWants.everyMember
+    if (roomWide.all || roomWide.tracks.length > 0) await this._ensureRoster()
+    this._syncSubs()
     // Same handoff as the text lane (see `_replayRetainedText`): wait for the per-(member, track)
     // subscriptions to be live before reading the retained frames, so a frame racing the subscribe rides
     // the retained copy or the live lane instead of the gap. A synchronous backend resolves instantly.
@@ -1912,7 +1915,7 @@ class ServerRoom implements Room {
     memberIds: string[],
   ): Array<{ key: string; value: Extract<LaneId, { kind: 'binary' }> }> {
     const lanes: Array<{ key: string; value: Extract<LaneId, { kind: 'binary' }> }> = []
-    for (const memberId of memberIds) {
+    for (const memberId of new Set([...memberIds, ...Object.keys(wants.members)])) {
       const memberWants = wants.members[memberId]
       const eff = memberWants ? mergeTrackWants(wants.everyMember, memberWants) : wants.everyMember
       const tracks = eff.all ? [DEFAULT_TRACK, ...this._state.memberTracks(memberId)] : eff.tracks
@@ -1927,7 +1930,7 @@ class ServerRoom implements Room {
    *  `_binaryKeys`, kept in member/track terms so it can be gossiped and aggregated. */
   private _localDemandPairs(wants: BinaryWants, memberIds: string[]): Array<[string, string]> {
     const pairs: Array<[string, string]> = []
-    for (const memberId of memberIds) {
+    for (const memberId of new Set([...memberIds, ...Object.keys(wants.members)])) {
       const memberWants = wants.members[memberId]
       const eff = memberWants ? mergeTrackWants(wants.everyMember, memberWants) : wants.everyMember
       const tracks = eff.all ? [DEFAULT_TRACK, ...this._state.memberTracks(memberId)] : eff.tracks

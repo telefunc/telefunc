@@ -620,6 +620,57 @@ describe('Room public behavior', () => {
     expect(relay.mock.calls.map(([wire]) => wire)).toEqual(['newer-live'])
   })
 
+  it('waits for roster-derived binary routes before reading retained frames', async () => {
+    const authority = await Room.create('retained-binary-roster-fence')
+    const publisher = await authority.join()
+    await publisher.publishBinary(new Uint8Array([1]), { track: 'screen', retain: true })
+    const observer = (await Room.get(authority.id)) as ServerRoom
+    const stub = register(observer)
+    const readCells = driver.readCells.bind(driver)
+    const rosterStarted = deferred<void>()
+    const releaseRoster = deferred<void>()
+    const reading = vi.spyOn(driver, 'readCells').mockImplementation(async (roomId, inc, selector) => {
+      if (roomId === authority.id && 'prefix' in selector) {
+        rosterStarted.resolve()
+        await releaseRoster.promise
+      }
+      return readCells(roomId, inc, selector)
+    })
+    const listRetained = vi.spyOn(driver, 'listRetained')
+    try {
+      await observer._handleStubRequest(stub, {
+        __r: 'sub-binary',
+        wants: { everyMember: { all: true, tracks: [] }, members: {} },
+      })
+      await rosterStarted.promise
+      await settle()
+      expect(listRetained).not.toHaveBeenCalled()
+
+      releaseRoster.resolve()
+      await vi.waitFor(() => expect(listRetained).toHaveBeenCalled())
+    } finally {
+      releaseRoster.resolve()
+      reading.mockRestore()
+    }
+  })
+
+  it('builds exact member binary routes before the roster is known', async () => {
+    const room = (await Room.create('exact-binary-without-roster')) as ServerRoom
+    const member = crypto.randomUUID()
+    const lanes = (
+      room as unknown as {
+        _binaryLanes(
+          wants: typeof allBinary,
+          members: string[],
+        ): Array<{ value: LaneId }>
+      }
+    )._binaryLanes(
+      { everyMember: { all: false, tracks: [] }, members: { [member]: { all: false, tracks: ['screen'] } } },
+      [],
+    )
+    expect(lanes.map(({ value }) => value)).toEqual([{ kind: 'binary', member, track: 'screen' }])
+  })
+
   it('drops retained text and binary when a crashed publisher is reaped', async () => {
     vi.useFakeTimers()
     vi.setSystemTime(1_000_000)
