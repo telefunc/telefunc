@@ -231,12 +231,6 @@ export const ROOM_HEARTBEAT_INTERVAL_MS = 30_000
  *  heartbeat plus eventually-consistent KV backends (Workers KV propagates within ~60s).
  *  Graceful departures (leave, disconnect, close) are immediate — this is crash recovery. */
 export const ROOM_MEMBER_TTL_MS = 120_000
-/** Native KV expiry on member records — the backstop that bounds a crashed node's leftovers
- *  even when no reader or heartbeat ever touches the room again. Sized past the reap threshold
- *  (plus heartbeat slack) so the event-driven fast path always wins when anything is alive,
- *  and comfortably above Workers KV's 60s minimum expiration. */
-export const ROOM_MEMBER_KV_TTL_MS = ROOM_MEMBER_TTL_MS + 2 * ROOM_HEARTBEAT_INTERVAL_MS
-
 /** Max text messages held for a `Room.get({ tail })` client that hasn't subscribed yet — bounded on
  *  the room until a stub attaches, then on that stub until the client's first text subscribe. Drop-
  *  oldest under BOTH this count cap and a total-size cap (`ROOM_TAIL_HOLD_BYTES_MAX`): the count bound
@@ -270,11 +264,6 @@ export const ROOM_DM_ACK_TIMEOUT_MS = 60_000
  * establishment latency SLA; one minute permits six equal attempts through transient stalls without
  * leaving a Room operation pending indefinitely. */
 export const ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS = 60_000
-/** Max in-flight ack-DM correlations one client stub holds awaiting the client's `dm-reply`. A client
- *  relayed ack DMs it never answers is capped here (drop-oldest) rather than accumulating correlations
- *  for the stub's lifetime; a dropped correlation simply lets its sender time out (`ROOM_DM_ACK_TIMEOUT_MS`). */
-export const ROOM_PENDING_ACK_DMS_MAX = 1024
-
 // ===== Session routing =====
 
 /** User-facing header for sticky session routing (opaque token). */
