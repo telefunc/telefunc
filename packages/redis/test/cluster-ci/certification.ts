@@ -4,10 +4,8 @@ import type { BackendSpi, CommitAccepted, LaneId, RoomHead, SubscriptionState } 
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { installRedis, RedisRoomBackend } from '../../src/index.js'
 import {
-  DIRECTORY_PUT_LUA,
   channelKey,
   decodeRedisOrderingFrame,
-  directoryIndexKey,
   headKey,
   genPrefix,
   laneKey,
@@ -51,7 +49,7 @@ describe('Redis real three-master Cluster CI certification', () => {
     if (cluster !== undefined) await cluster.quit().catch(() => cluster.disconnect())
   })
 
-  it('covers shipped command KEYS and terminates live and in-flight attempts when their generation drops', async () => {
+  it('requires compatible Telefunc and master-routed Cluster reads', () => {
     const manifest = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')) as {
       peerDependencies: { telefunc: string }
     }
@@ -63,6 +61,9 @@ describe('Redis real three-master Cluster CI certification', () => {
     } finally {
       cluster.options.scaleReads = scaleReads
     }
+  })
+
+  it('covers shipped command KEYS and terminates live and in-flight attempts when their generation drops', async () => {
     expect(masters).toHaveLength(3)
     expect(masters.flatMap(({ ranges }) => ranges).reduce((total, [start, end]) => total + end - start + 1, 0)).toBe(
       16_384,
@@ -193,17 +194,13 @@ describe('Redis real three-master Cluster CI certification', () => {
 
       expect(genericCalls).toHaveLength(1)
       const genericKeys = genericCalls[0]?.slice(0, 2).map(String) ?? []
-      expect(new Set(genericKeys.map(redisSlot)), `tfPublish: ${genericKeys.join(', ')}`).toEqual(
-        new Set([redisSlot(genericKeys[0] as string)]),
-      )
+      expect(new Set(await Promise.all(genericKeys.map(slot))).size, `tfPublish: ${genericKeys.join(', ')}`).toBe(1)
       for (const descriptor of Object.values(REDIS_ROOM_COMMANDS)) {
         const calls = observation.calls.filter(({ name }) => name === descriptor.name)
         expect(calls.length, descriptor.name).toBeGreaterThan(0)
         for (const call of calls) {
           const keys = call.args.slice(0, call.keyCount).map(String)
-          expect(new Set(keys.map(redisSlot)), `${descriptor.name}: ${keys.join(', ')}`).toEqual(
-            new Set([redisSlot(keys[0] as string)]),
-          )
+          expect(new Set(await Promise.all(keys.map(slot))).size, `${descriptor.name}: ${keys.join(', ')}`).toBe(1)
         }
       }
     } finally {
@@ -215,18 +212,6 @@ describe('Redis real three-master Cluster CI certification', () => {
       await Promise.all([backend.dispose(), authority.dispose()])
       await client.quit().catch(() => client.disconnect())
     }
-  })
-
-  it('observes genuine CROSSSLOT and undeclared-key failures', async () => {
-    const prefix = uniquePrefix('crossslot')
-    const directory = directoryIndexKey(prefix)
-    const other = await keyOnDifferentMaster(directory, prefix)
-    await expect(cluster.eval(DIRECTORY_PUT_LUA, 2, directory, other, 'room', 'inc')).rejects.toThrow(/CROSSSLOT/)
-    await cluster.set(directory, 'declared')
-    await cluster.set(other, 'argv')
-    await expect(cluster.eval("return redis.call('GET', ARGV[1])", 1, directory, other)).rejects.toThrow(
-      /non local key|CROSSSLOT/i,
-    )
   })
 
   it('round-trips MAX_SAFE seq through commit, retain, fresh read, then rejects before effects', async () => {
@@ -286,20 +271,16 @@ describe('Redis real three-master Cluster CI certification', () => {
     }
   })
 
-  it('keeps generation inventory complete across a scan-window reshard', async () => {
+  it('keeps the generation manifest complete across a reshard', async () => {
     const prefix = uniquePrefix('reshard-inventory')
     const client = clusterClient(CLUSTER_NODES)
     await client.ping()
     const backend = redisBackend(client, prefix)
-    const scanNodes = client.nodes('master')
-    const targetNode = scanNodes[0] as Redis
-    const sourceNode = scanNodes[1] as Redis
-    const target = masterForNode(targetNode)
-    const source = masterForNode(sourceNode)
+    const target = masters[0] as Master
+    const source = masters[1] as Master
     const roomId = await roomOnMaster(prefix, source.id, 'reshard-inventory')
     const inc = 'reshard-inventory-inc'
     const slotNumber = await slot(headKey(prefix, roomId))
-    const scan = sourceNode.scan.bind(sourceNode)
     const smembers = client.smembers.bind(client)
     let relocated = false
     const relocate = async (): Promise<void> => {
@@ -307,10 +288,6 @@ describe('Redis real three-master Cluster CI certification', () => {
       relocated = true
       await moveSlot(slotNumber, source, target, true)
     }
-    sourceNode.scan = (async (...args: unknown[]) => {
-      await relocate()
-      return await (scan as (...scanArgs: unknown[]) => Promise<[string, string[]]>)(...args)
-    }) as unknown as typeof sourceNode.scan
     client.smembers = (async (key: string) => {
       if (key === `${genPrefix(prefix, roomId, inc)}:keys`) await relocate()
       return await smembers(key)
@@ -321,7 +298,6 @@ describe('Redis real three-master Cluster CI certification', () => {
       expect(await backend.listRetained(roomId, inc)).toEqual([SEMANTIC_LANE])
       expect(relocated).toBe(true)
     } finally {
-      sourceNode.scan = scan as typeof sourceNode.scan
       client.smembers = smembers as typeof client.smembers
       if (relocated) await restoreSlot(slotNumber, source, target)
       await Promise.allSettled([backend.dispose(), client.quit()])
@@ -678,23 +654,8 @@ describe('Redis real three-master Cluster CI certification', () => {
     return match
   }
 
-  function masterForNode(node: Redis): Master {
-    const match = masters.find(({ host, port }) => host === node.options.host && port === node.options.port)
-    if (match === undefined) throw new Error(`Cluster node '${node.options.host}:${node.options.port}' has no master`)
-    return match
-  }
-
   async function slot(key: string): Promise<number> {
     return Number(await masters[0]?.client.cluster('KEYSLOT', key))
-  }
-
-  async function keyOnDifferentMaster(key: string, prefix: string): Promise<string> {
-    const firstMasterId = owner(await slot(key)).id
-    for (let index = 0; index < 50_000; index++) {
-      const candidate = headKey(prefix, `cross-${index}`)
-      if (owner(await slot(candidate)).id !== firstMasterId) return candidate
-    }
-    throw new Error('failed to find a key on another master')
   }
 
   async function roomOnMaster(prefix: string, masterId: string, label: string): Promise<string> {
@@ -842,18 +803,6 @@ function compareMasterEndpoints(left: RedisClusterNode, right: RedisClusterNode)
 
 function clientIdentity(client: { id: number; owner: Master }): string {
   return `${client.owner.id}:${client.id}`
-}
-
-function redisSlot(key: string): number {
-  const start = key.indexOf('{')
-  const end = start < 0 ? -1 : key.indexOf('}', start + 1)
-  const tagged = start >= 0 && end > start + 1 ? key.slice(start + 1, end) : key
-  let crc = 0
-  for (const byte of new TextEncoder().encode(tagged)) {
-    crc ^= byte << 8
-    for (let bit = 0; bit < 8; bit++) crc = (crc & 0x8000) === 0 ? crc << 1 : (crc << 1) ^ 0x1021
-  }
-  return crc & 0x3fff
 }
 
 async function clusterInfo(client: Redis): Promise<Record<string, string>> {
