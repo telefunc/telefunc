@@ -46,48 +46,21 @@ export function upsertRoute(
 
 export function listRouteInstallations(sql: SqlStorage, inc: string): RouteInstallation[] {
   return sql
-    .exec<{
-      room_id: string
-      inc: string
-      lane_key: string
-      subscriber_do_id: string
-      lease_id: string
-      generation_token: string
-    }>('SELECT room_id, inc, lane_key, subscriber_do_id, lease_id, generation_token FROM route WHERE inc = ?', inc)
+    .exec<RouteInstallation>(
+      'SELECT room_id AS roomId, inc, lane_key AS laneKey, subscriber_do_id AS subscriberDoId, lease_id AS leaseId, generation_token AS generationToken FROM route WHERE inc = ?',
+      inc,
+    )
     .toArray()
-    .map((row) => ({
-      roomId: row.room_id,
-      inc: row.inc,
-      laneKey: row.lane_key,
-      subscriberDoId: row.subscriber_do_id,
-      leaseId: row.lease_id,
-      generationToken: row.generation_token,
-    }))
 }
 
 export function listExpiredRouteInstallations(sql: SqlStorage, now: number): RouteInstallation[] {
   return sql
-    .exec<{
-      room_id: string
-      inc: string
-      lane_key: string
-      subscriber_do_id: string
-      lease_id: string
-      generation_token: string
-    }>(
-      'SELECT room_id, inc, lane_key, subscriber_do_id, lease_id, generation_token FROM route WHERE expires_at <= ? OR failures >= ?',
+    .exec<RouteInstallation>(
+      'SELECT room_id AS roomId, inc, lane_key AS laneKey, subscriber_do_id AS subscriberDoId, lease_id AS leaseId, generation_token AS generationToken FROM route WHERE expires_at <= ? OR failures >= ?',
       now,
       ROUTE_DELIVERY_FAILURE_LIMIT,
     )
     .toArray()
-    .map((row) => ({
-      roomId: row.room_id,
-      inc: row.inc,
-      laneKey: row.lane_key,
-      subscriberDoId: row.subscriber_do_id,
-      leaseId: row.lease_id,
-      generationToken: row.generation_token,
-    }))
 }
 
 // Renewal compares all four fields (inc, lane_key, subscriber, leaseId); a stale lease id matches nothing
@@ -185,13 +158,9 @@ export function recordRouteDeliveryFailure(
   ).rowsWritten
   if (changed !== 1) return false
   const failures = sql
-    .exec<{ failures: number }>(
-      'SELECT failures FROM route WHERE inc = ? AND lane_key = ? AND subscriber_do_id = ? AND lease_id = ?',
-      inc,
-      laneKey,
-      subscriberDoId,
-      leaseId,
-    )
+    .exec<{
+      failures: number
+    }>('SELECT failures FROM route WHERE inc = ? AND lane_key = ? AND subscriber_do_id = ? AND lease_id = ?', inc, laneKey, subscriberDoId, leaseId)
     .toArray()[0]?.failures
   if (failures === undefined || failures < ROUTE_DELIVERY_FAILURE_LIMIT) {
     return false
