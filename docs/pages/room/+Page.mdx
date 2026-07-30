@@ -452,7 +452,7 @@ For **team chat with subgroups**, give each team, breakout, or private thread it
 
 Rooms work across multiple server nodes out of the box with <Link href="/redis">`@telefunc/redis`</Link> and the <Link href="/stream/cloudflare">Cloudflare</Link> integration.
 
-- **Pay for what you consume.** Presence-only observers never receive the room's messages; text and binary flow only from the members you subscribe to, and only while someone wants them.
+- **Selective delivery.** Presence-only observers never receive the room's messages over their client connection. A node with any live holder of the room nevertheless keeps the shared semantic backend lane active and filters text at each stub's relay. Binary is source-selective instead: each `(member, track)` backend subscription exists only while someone on that node wants it.
 - **Crash-safe presence.** A clean `leave()` shows up everywhere at once. A crash can't: the node holding each connection refreshes its members every 30s, any member that stops being refreshed is removed and its departure announced, with the store's own key-expiry as a final backstop, so a crashed node leaves no ghosts.
 - **Tuning presence latency.** A silently-dropped connection is held for <Link href="/channel-config">`config.channel.reconnectTimeout`</Link> before its members leave, so a brief blip does not flap presence. Lower it for snappier away-detection, raise it to ride out flaky mobile networks.
 - **Deterministic convergence.** Metadata and config updates land in the same final state on every node, whatever order they arrive in.

@@ -1256,9 +1256,9 @@ class ServerRoom implements Room {
       ),
     )
 
-    // Text: its own lane, brought up only for holders that actually consume messages —
-    // presence-only observers never receive the room's chatter. Wants are member-selective,
-    // like binary: room-level listeners want it all, participant-scoped ones only their member.
+    // Text: every observed room instance ingests the one semantic lane. Wants are member-selective
+    // only at the per-stub relay: presence-only observers don't receive the room's chatter over
+    // their client connection, but their node still pays the shared ingestion cost.
     const textWants = this._aggregateTextWants()
     const wantAnyText = open && (textWants.all || textWants.members.size > 0)
     const wantSemantic = open && (observed || wantAnyText)
@@ -1277,8 +1277,9 @@ class ServerRoom implements Room {
     if ((becomesObserved && state.rosterKnown) || (open && !state.rosterKnown && needsRoster)) {
       void this._refreshMembers().catch(reportRoomError)
     }
-    // Text: one lane per room. The node ingests it while anyone wants any of it; member-selectivity
-    // is enforced at the per-stub relay (see `_onTextData`), never by narrowing the subscription.
+    // Text: one lane per room. An observed instance ingests it whether or not a stub currently wants
+    // text; member-selectivity is enforced at the per-stub relay (see `_onTextData`), never by
+    // narrowing the backend subscription.
     this._textSub.sync(wantSemantic, () =>
       backend.subscribeLane(this.id, this._inc, SEMANTIC_LANE, (payload, info) =>
         this._onTextData(decodeRoomText(payload), info),
