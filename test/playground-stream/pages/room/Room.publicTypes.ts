@@ -37,20 +37,14 @@ export type __RoomServerSurface = [
   Server.AfterPublishHook,
   Server.AfterSendHook,
   Server.AfterJoinHook,
-  Server.RoomPublishReceipt,
   Server.RoomSendReceipt,
   Server.RoomAckReceipt,
-  Server.RoomJoinReceipt,
   Server.LeaveCause,
   Server.ParticipantRef,
   Server.BinaryFrameInfo,
   Server.BinaryPublishOptions,
   Server.RoomSnapshotView,
   Server.ParticipantSnapshotView,
-  Server.RoomListener,
-  Server.RoomBinaryListener,
-  Server.ParticipantListener,
-  Server.ParticipantBinaryListener,
 ]
 
 export type __RoomClientSurface = [
@@ -70,8 +64,4 @@ export type __RoomClientSurface = [
   Client.BinaryPublishOptions,
   Client.RoomSnapshotView,
   Client.ParticipantSnapshotView,
-  Client.RoomListener,
-  Client.RoomBinaryListener,
-  Client.ParticipantListener,
-  Client.ParticipantBinaryListener,
 ]

@@ -28,10 +28,6 @@ export type {
   BinaryPublishOptions,
   RoomSnapshotView,
   ParticipantSnapshotView,
-  RoomListener,
-  RoomBinaryListener,
-  ParticipantListener,
-  ParticipantBinaryListener,
 } from '../wire-protocol/room/types.js'
 
 export type { TelefuncClientExtension } from './extensions.js'
