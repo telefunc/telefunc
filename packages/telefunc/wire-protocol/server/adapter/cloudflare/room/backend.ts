@@ -244,7 +244,10 @@ export class CloudflareRoomSessionManager {
   }
 }
 
-export function withCloudflareRoomSessionManager<T>(manager: CloudflareRoomSessionManager, fn: () => T): T {
+export function withCloudflareRoomSessionManager<T>(
+  manager: CloudflareRoomSessionManager | (() => CloudflareRoomSessionManager),
+  fn: () => T,
+): T {
   if (!isAsyncMode()) throw new Error(CLOUDFLARE_ROOM_CONTEXT_ERROR)
   const raw: Context = { ...(getRawContext() ?? {}), [ROOM_MANAGER]: manager }
   return restoreContext(raw, fn)
@@ -252,7 +255,8 @@ export function withCloudflareRoomSessionManager<T>(manager: CloudflareRoomSessi
 
 export function getCloudflareRoomSessionManager(): CloudflareRoomSessionManager {
   if (!isAsyncMode()) throw new Error(CLOUDFLARE_ROOM_CONTEXT_ERROR)
-  const manager = getRawContext()?.[ROOM_MANAGER]
+  const managerOrFactory = getRawContext()?.[ROOM_MANAGER]
+  const manager = typeof managerOrFactory === 'function' ? managerOrFactory() : managerOrFactory
   if (!(manager instanceof CloudflareRoomSessionManager)) throw new Error(CLOUDFLARE_ROOM_CONTEXT_ERROR)
   return manager
 }
