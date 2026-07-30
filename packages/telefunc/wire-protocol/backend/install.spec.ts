@@ -23,20 +23,16 @@ describe('backend installation lifecycle', () => {
     const disposal = disposeBackend()
     let settled = false
     void disposal.then(
-      () => {
-        settled = true
-      },
-      () => {
-        settled = true
-      },
+      () => (settled = true),
+      () => (settled = true),
     )
 
     await Promise.resolve()
     expect(settled).toBe(false)
     rejectOld(failure)
     await expect(disposal).rejects.toBe(failure)
-    await vi.waitFor(() => {
-      expect(report).toHaveBeenCalledWith('telefunc/backend: replaced backend disposal failed', failure)
-    })
+    await vi.waitFor(() =>
+      expect(report).toHaveBeenCalledWith('telefunc/backend: replaced backend disposal failed', failure),
+    )
   })
 })

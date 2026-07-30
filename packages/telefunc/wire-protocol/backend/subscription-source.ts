@@ -3,23 +3,14 @@ export { broadcastRouteKey, laneKey, subscriptionSourceKey }
 import type { BackendSubscriptionSource, BroadcastLane, LaneId } from './spi.js'
 
 function laneKey(lane: LaneId): string {
-  switch (lane.kind) {
-    case 'semantic':
-      return 'semantic'
-    case 'control':
-      return 'control'
-    case 'binary':
-      return `binary:${encodeURIComponent(lane.member)}:${encodeURIComponent(lane.track)}`
-    case 'inbox':
-      return `inbox:${encodeURIComponent(lane.member)}`
-  }
+  if (lane.kind === 'semantic' || lane.kind === 'control') return lane.kind
+  if (lane.kind === 'inbox') return `inbox:${encodeURIComponent(lane.member)}`
+  return `binary:${encodeURIComponent(lane.member)}:${encodeURIComponent(lane.track)}`
 }
 
-function broadcastRouteKey(lane: BroadcastLane): string {
-  return `${lane.kind}:${encodeURIComponent(lane.key)}`
-}
+const broadcastRouteKey = (lane: BroadcastLane) => `${lane.kind}:${encodeURIComponent(lane.key)}`
 
-function subscriptionSourceKey(source: BackendSubscriptionSource): string {
-  if (source.kind === 'broadcast') return `broadcast:${broadcastRouteKey(source.lane)}`
-  return `durable:${encodeURIComponent(source.roomId)}:${encodeURIComponent(source.inc)}:${laneKey(source.lane)}`
-}
+const subscriptionSourceKey = (source: BackendSubscriptionSource) =>
+  source.kind === 'broadcast'
+    ? `broadcast:${broadcastRouteKey(source.lane)}`
+    : `durable:${encodeURIComponent(source.roomId)}:${encodeURIComponent(source.inc)}:${laneKey(source.lane)}`

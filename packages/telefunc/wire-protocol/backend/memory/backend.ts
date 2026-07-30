@@ -1,16 +1,7 @@
-// The memory reference realization of BackendSpi — the executable specification the Redis and
-// Cloudflare backends are proved against. Single isolate, so every operation is synchronous over Maps
-// and the isolate clock IS authority time; the only asynchrony is the delivery attempt, which is
-// deliberately queued through a per-lane chain so a receiver can never run reentrantly inside
-// commitLane.
-//
-// Mechanism map (spi.md §5.1):
-//   head CX          one compare branch per HeadCx form, all resolved on the authority clock
-//   lease minting    every CX installing 'closing' stores until = authorityNow + durationMs
-//   cells            per-generation revision counter, bumped by any deliberate cell write
-//   commit           ONE boolean precondition with two branches (default open / closing-control)
-//   delivery         per-(inc, lane) promise chain, settlement-gated, never poisoned
-//   TTL              lazy expiry on read + a sweep on the janitor path
+// Executable reference driver for Redis/Cloudflare parity. Map operations are synchronous and the
+// isolate clock is authority time; only delivery is async, settlement-chained per lane to prevent
+// reentrancy. Head CX mints leases, cells use generation revisions, commit has open/closing-control
+// branches, and TTL expiry is lazy plus janitor-swept.
 
 import {
   BACKEND_SPI_VERSION,
@@ -34,24 +25,14 @@ import { assertHeadDeleteLegal, assertHeadTransition } from '../head-transitions
 import { broadcastRouteKey, laneKey } from '../subscription-source.js'
 
 export type MemoryBackendOptions = {
-  // The authority clock. Defaults to the isolate clock, which is what authority time means in a single
-  // isolate; tests inject a controlled clock so lease expiry is provable without wall-clock waits
-  // — and so a skewed CALLER clock (Date.now) stays distinguishable from authority time.
+  // Tests inject authority time to prove expiry independently of caller clock skew.
   authorityNow?: () => number
   /** @internal Ownership injection for an embedding that preserves state across facade reconstruction. */
   state?: MemoryBackendState
 }
 
-type StoredHead = {
-  rev: string
-  currentInc: string | null
-  state: 'open' | 'closing' | 'closed'
-  config: Uint8Array
-  closeLease?: { id: string; until: number }
-  expiresAt: number | null
-}
-
 type Expiring = { expiresAt: number | null }
+type StoredHead = RoomHead & Expiring
 type StoredCell = Expiring & { bytes: Uint8Array }
 type OrderMark = { seq: number; timestamp: number }
 type RetainedEntry = { lane: LaneId; payload: Uint8Array; seq: number; timestamp: number }
@@ -66,14 +47,9 @@ type Generation = {
 }
 
 type RoomRecord = { head: StoredHead | null; gens: Map<string, Generation> }
+const noop = () => {}
 
-/**
- * Storage owner for the in-process reference backend. Keeping durable maps separate from the facade
- * models backend reconstruction over preserved process state without a test-only backend method or a
- * global registry.
- *
- * @internal
- */
+/** Durable in-process storage owner, separable from a reconstructed facade. @internal */
 export class MemoryBackendState {
   readonly rooms = new Map<string, RoomRecord>()
   readonly directory = new Map<string, string>()
@@ -82,21 +58,11 @@ export class MemoryBackendState {
   revSeq = 0
 }
 
-function copyBytes(bytes: Uint8Array): Uint8Array {
-  return new Uint8Array(bytes)
-}
-
-function copyLane(lane: LaneId): LaneId {
-  return { ...lane }
-}
-
-function sumReceiverCounts(targets: MemorySubscriptionAttempt[]): number {
-  return targets.reduce((total, target) => total + target.receiverCount(), 0)
-}
-
-function isExpired(entry: Expiring, now: number): boolean {
-  return entry.expiresAt !== null && entry.expiresAt <= now
-}
+const copyBytes = (bytes: Uint8Array): Uint8Array => new Uint8Array(bytes)
+const copyLane = (lane: LaneId): LaneId => ({ ...lane })
+const sumReceiverCounts = (targets: MemorySubscriptionAttempt[]): number =>
+  targets.reduce((total, target) => total + target.receiverCount(), 0)
+const isExpired = (entry: Expiring, now: number): boolean => entry.expiresAt !== null && entry.expiresAt <= now
 
 function newGeneration(): Generation {
   return { revision: 0, cells: new Map(), order: new Map(), retained: new Map(), subs: new Map(), chains: new Map() }
@@ -109,9 +75,6 @@ function advanceOrder(
   operation: 'publish' | 'commitLane',
 ): OrderMark {
   const previous = order.get(domain)
-  if (previous?.seq === Number.MAX_SAFE_INTEGER) {
-    throw new Error(`${operation}: sequence exhausted for the ordering domain`)
-  }
   // seq is a standalone monotonic cursor; timestamp is independently clamped and cannot reset it.
   const mark: OrderMark = {
     seq: (previous?.seq ?? 0) + 1,
@@ -125,14 +88,12 @@ function advanceOrder(
 }
 
 function publicHead(head: StoredHead): RoomHead {
-  const view: RoomHead = {
-    rev: head.rev,
-    currentInc: head.currentInc,
-    state: head.state,
+  const { expiresAt: _, closeLease, ...view } = head
+  return {
+    ...view,
     config: copyBytes(head.config),
+    ...(closeLease === undefined ? {} : { closeLease: { ...closeLease } }),
   }
-  if (head.closeLease !== undefined) view.closeLease = { ...head.closeLease }
-  return view
 }
 
 class MemorySubscriptionAttempt implements SubscriptionAttempt {
@@ -142,18 +103,17 @@ class MemorySubscriptionAttempt implements SubscriptionAttempt {
   readonly #listeners = new Set<(state: SubscriptionAttemptState) => void>()
   readonly #receiver: BackendReceiver
   readonly #localReceiverCount: () => number
-  #detach: () => void
+  readonly #targets?: Set<MemorySubscriptionAttempt>
 
-  constructor(receiver: BackendReceiver, localReceiverCount: () => number, detach: () => void) {
+  constructor(receiver: BackendReceiver, localReceiverCount: () => number, targets?: Set<MemorySubscriptionAttempt>) {
     this.#receiver = receiver
     this.#localReceiverCount = localReceiverCount
-    this.#detach = detach
+    this.#targets = targets
     this.ready = new Promise<void>((resolve, reject) => {
       this.#settle = { resolve, reject }
     })
-    // A fail-closed establishment rejects `ready` whether or not the caller is awaiting it yet; the
-    // handler below only marks the rejection observed, it does not swallow it for the caller.
-    void this.ready.catch(() => {})
+    // Observe fail-closed rejection without swallowing it from callers.
+    void this.ready.catch(noop)
   }
 
   get closed(): boolean {
@@ -171,7 +131,7 @@ class MemorySubscriptionAttempt implements SubscriptionAttempt {
 
   async unsubscribe(): Promise<void> {
     if (this.closed) return
-    this.#detach()
+    this.#targets?.delete(this)
     this.#transition('closed')
   }
 
@@ -186,9 +146,8 @@ class MemorySubscriptionAttempt implements SubscriptionAttempt {
   }
 
   async deliver(payload: Uint8Array, info: { seq: number; timestamp: number }): Promise<void> {
-    // A receiver is typed `=> void`, so its completion is never a cross-backend guarantee. In memory the
-    // handoff attempt IS the dispatch call, so a receiver that returns a thenable extends that attempt —
-    // this is the trace that makes the ordered-chain algorithm observable here.
+    // Memory handoff is the dispatch call, so a returned thenable observably extends this attempt even
+    // though callback completion is not a cross-backend guarantee.
     await (this.#receiver(payload, info) as unknown)
   }
 
@@ -253,8 +212,7 @@ export class MemoryBackend implements BackendDriver {
     this.#assertLive()
     const existing = this.#state.rooms.get(roomId)
     const current = this.#liveHead(existing)
-    // Operation legality precedes the compare for the delete path only; every other transition is
-    // validated against the head the compare actually matched, so a genuine race still conflicts.
+    // Only delete legality precedes compare; other transitions validate the matched head.
     assertHeadDeleteLegal(next, current)
     if (!this.#headCxMatches(cx, current)) {
       return { conflict: true, current: current === null ? null : publicHead(current) }
@@ -310,8 +268,7 @@ export class MemoryBackend implements BackendDriver {
     this.#assertLive()
     const room = this.#state.rooms.get(roomId)
     const head = this.#liveHead(room)
-    // Reads stay available while the head is closing — the closer's tail needs them; only writes require
-    // an open head (CxResult 'stale-inc').
+    // Closing tails may read; only writes require an open head.
     if (room === undefined || head === null || head.currentInc !== inc) return { staleInc: true }
     const gen = this.#generation(room, inc)
     const now = this.#now()
@@ -381,23 +338,20 @@ export class MemoryBackend implements BackendDriver {
       gen.retained.set(key, {
         lane: Object.freeze(copyLane(lane)),
         payload: frame,
-        seq: mark.seq,
-        timestamp: mark.timestamp,
+        ...mark,
       })
     }
     const targets = [...(gen.subs.get(key) ?? [])]
     const info = { seq: mark.seq, timestamp: mark.timestamp }
     return {
       accepted: true,
-      seq: mark.seq,
-      timestamp: mark.timestamp,
+      ...mark,
       receivers: sumReceiverCounts(targets),
       delivery: this.#enqueueAttempt(gen, key, targets, frame, info),
     }
   }
 
-  // The whole commit precondition: one boolean, two branches. Supplying a closing lease selects the
-  // narrow closing-control branch outright, which is what makes every other lane stale while closing.
+  // Supplying a lease selects the narrow closing-control branch; all other closing lanes are stale.
   #commitPreconditionHolds(head: StoredHead, inc: string, lane: LaneId, closingLease: string | undefined): boolean {
     if (head.currentInc !== inc) return false
     return closingLease === undefined
@@ -409,9 +363,7 @@ export class MemoryBackend implements BackendDriver {
           this.#now() <= head.closeLease.until
   }
 
-  // The ordered at-most-once chain, per (incarnation, lane). The chain is gated on SETTLEMENT — success
-  // or failure — so a failed frame never poisons the lane, and the returned promise rejects only on its
-  // own failure.
+  // Per-(inc,lane) at-most-once chain: settlement gates the next attempt without poisoning it.
   #enqueueAttempt(
     gen: Generation,
     key: string,
@@ -420,21 +372,12 @@ export class MemoryBackend implements BackendDriver {
     info: { seq: number; timestamp: number },
   ): Promise<void> {
     const previous = gen.chains.get(key) ?? Promise.resolve()
-    const attempt = previous.then(async () => {
-      await Promise.all(
-        targets.map(async (target) => {
-          if (target.closed) return
-          await target.deliver(copyBytes(frame), { ...info })
-        }),
-      )
-    })
-    gen.chains.set(
-      key,
-      attempt.then(
-        () => {},
-        () => {},
-      ),
+    const attempt = previous.then(() =>
+      Promise.all(
+        targets.map((target) => (target.closed ? undefined : target.deliver(copyBytes(frame), { ...info }))),
+      ).then(noop),
     )
+    gen.chains.set(key, attempt.then(noop, noop))
     return attempt
   }
 
@@ -484,13 +427,9 @@ export class MemoryBackend implements BackendDriver {
   ): MemorySubscriptionAttempt {
     if (source.kind === 'broadcast') {
       const key = broadcastRouteKey(source.lane)
-      let sub!: MemorySubscriptionAttempt
-      sub = new MemorySubscriptionAttempt(receiver, localReceiverCount, () => {
-        this.#state.broadcastSubs.get(key)?.delete(sub)
-      })
-      const subs = this.#state.broadcastSubs.get(key) ?? new Set<MemorySubscriptionAttempt>()
+      const subs = getOrCreate(this.#state.broadcastSubs, key, () => new Set())
+      const sub = new MemorySubscriptionAttempt(receiver, localReceiverCount, subs)
       subs.add(sub)
-      this.#state.broadcastSubs.set(key, subs)
       sub.establish()
       return sub
     }
@@ -499,19 +438,16 @@ export class MemoryBackend implements BackendDriver {
     const room = this.#state.rooms.get(roomId)
     const head = this.#liveHead(room)
     const key = laneKey(lane)
-    let sub!: MemorySubscriptionAttempt
-    sub = new MemorySubscriptionAttempt(receiver, localReceiverCount, () => {
-      this.#state.rooms.get(roomId)?.gens.get(inc)?.subs.get(key)?.delete(sub)
-    })
     if (room === undefined || head === null || head.currentInc !== inc || head.state !== 'open') {
+      const sub = new MemorySubscriptionAttempt(receiver, localReceiverCount)
       sub.failEstablishment(`subscribeLane: room '${roomId}' has no open incarnation '${inc}'`)
       return sub
     }
     // Registration is durable before `ready` resolves: a commit accepted after this point must see it.
     const gen = this.#generation(room, inc)
-    const subs = gen.subs.get(key) ?? new Set<MemorySubscriptionAttempt>()
+    const subs = getOrCreate(gen.subs, key, () => new Set())
+    const sub = new MemorySubscriptionAttempt(receiver, localReceiverCount, subs)
     subs.add(sub)
-    gen.subs.set(key, subs)
     sub.establish()
     return sub
   }
@@ -579,19 +515,11 @@ export class MemoryBackend implements BackendDriver {
   }
 
   #roomFor(roomId: string): RoomRecord {
-    const existing = this.#state.rooms.get(roomId)
-    if (existing !== undefined) return existing
-    const room: RoomRecord = { head: null, gens: new Map() }
-    this.#state.rooms.set(roomId, room)
-    return room
+    return getOrCreate(this.#state.rooms, roomId, () => ({ head: null, gens: new Map() }))
   }
 
   #generation(room: RoomRecord, inc: string): Generation {
-    const existing = room.gens.get(inc)
-    if (existing !== undefined) return existing
-    const gen = newGeneration()
-    room.gens.set(inc, gen)
-    return gen
+    return getOrCreate(room.gens, inc, newGeneration)
   }
 
   // Lazy TTL: a lapsed tombstone reads as absent, which is what reopens an absence epoch (I1).
@@ -602,8 +530,7 @@ export class MemoryBackend implements BackendDriver {
     return null
   }
 
-  // Reclaim expiring heads and cells. Ordering marks are generation-lifetime state and deliberately
-  // have no janitor path; dropGeneration() is their cleanup boundary.
+  // Sweep expiring heads/cells; only generation drop removes ordering marks.
   #sweep(room: RoomRecord): void {
     const now = this.#now()
     this.#liveHead(room)
@@ -611,4 +538,10 @@ export class MemoryBackend implements BackendDriver {
       for (const [key, cell] of gen.cells) if (isExpired(cell, now)) gen.cells.delete(key)
     }
   }
+}
+
+function getOrCreate<Key, Value>(map: Map<Key, Value>, key: Key, create: () => Value): Value {
+  let value = map.get(key)
+  if (value === undefined) map.set(key, (value = create()))
+  return value
 }

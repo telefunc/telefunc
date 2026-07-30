@@ -29,6 +29,8 @@ const SERVER_BROADCAST_BRAND: unique symbol = Symbol.for('ServerBroadcast')
 const textEncoder = new TextEncoder()
 const textDecoder = new TextDecoder()
 type BroadcastUnsubscribe = () => void
+type BroadcastKind = 'text' | 'binary'
+const BROADCAST_KINDS = ['text', 'binary'] as const
 
 class ServerBroadcast<T = unknown> extends ServerChannel {
   readonly [SERVER_BROADCAST_BRAND] = true
@@ -44,10 +46,8 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
   private _broadcastListeners: Array<BroadcastListener<T>> = []
   private _broadcastBinaryListeners: Array<BroadcastBinaryListener> = []
   private _backend: BackendSpi | null = null
-  private _unsubBroadcast: BackendSubscription | null = null
-  private _unsubBinaryBroadcast: BackendSubscription | null = null
-  private _peerSubscribedText = false
-  private _peerSubscribedBinary = false
+  private readonly _subscriptions: Record<BroadcastKind, BackendSubscription | null> = { text: null, binary: null }
+  private readonly _peerSubscriptions: Record<BroadcastKind, boolean> = { text: false, binary: false }
 
   constructor(opts: { key: string }) {
     super()
@@ -75,52 +75,25 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
   publish(data: ChannelData<T>): Promise<ChannelPublishAck> {
     this._ensureBroadcast()
     if (!this._backend) throw new ChannelClosedError()
-    const serialized = stringify(data)
-    const ret = this._trackAck(Promise.resolve(this._publishBroadcast(serialized)))
+    const ret = this._trackAck(Promise.resolve(this._publish('text', textEncoder.encode(stringify(data)))))
     ret.catch(() => {})
     return ret
   }
 
   subscribe(callback: BroadcastListener<T>): () => void {
-    this._ensureBroadcast()
-    this._broadcastListeners.push(callback)
-    try {
-      this._reconcileTextSubscription()
-    } catch (error) {
-      this._broadcastListeners.pop()
-      throw error
-    }
-    return () => {
-      const index = this._broadcastListeners.indexOf(callback)
-      if (index < 0) return
-      this._broadcastListeners.splice(index, 1)
-      this._reconcileTextSubscription()
-    }
+    return this._subscribe('text', this._broadcastListeners, callback)
   }
 
   publishBinary(data: Uint8Array): Promise<ChannelPublishAck> {
     this._ensureBroadcast()
     if (!this._backend) throw new ChannelClosedError()
-    const ret = this._trackAck(Promise.resolve(this._publishBinaryBroadcast(data)))
+    const ret = this._trackAck(Promise.resolve(this._publish('binary', data)))
     ret.catch(() => {})
     return ret
   }
 
   subscribeBinary(callback: BroadcastBinaryListener): () => void {
-    this._ensureBroadcast()
-    this._broadcastBinaryListeners.push(callback)
-    try {
-      this._reconcileBinarySubscription()
-    } catch (error) {
-      this._broadcastBinaryListeners.pop()
-      throw error
-    }
-    return () => {
-      const index = this._broadcastBinaryListeners.indexOf(callback)
-      if (index < 0) return
-      this._broadcastBinaryListeners.splice(index, 1)
-      this._reconcileBinarySubscription()
-    }
+    return this._subscribe('binary', this._broadcastBinaryListeners, callback)
   }
 
   // --- Transport callbacks ---
@@ -167,7 +140,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
         if (this._handleCallbackError(err)) return
       }
     }
-    if (!this._peerSubscribedText) return
+    if (!this._peerSubscriptions.text) return
     const wireText = encodePublishText(serialized, rawInfo)
     if (this._peer) {
       this._peer.sendPublish(wireText)
@@ -185,7 +158,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
         if (this._handleCallbackError(err)) return
       }
     }
-    if (!this._peerSubscribedBinary) return
+    if (!this._peerSubscriptions.binary) return
     const wireData = encodePublishBinary(data, rawInfo)
     if (this._peer) {
       this._peer.sendPublishBinary(wireData)
@@ -196,30 +169,22 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
 
   _onPeerBroadcastSubscribe(binary: boolean): void {
     this._ensureBroadcast()
-    if (binary) {
-      this._peerSubscribedBinary = true
-      this._reconcileBinarySubscription()
-    } else {
-      this._peerSubscribedText = true
-      this._reconcileTextSubscription()
-    }
+    const kind = binary ? 'binary' : 'text'
+    this._peerSubscriptions[kind] = true
+    this._reconcileSubscription(kind)
   }
 
   _onPeerBroadcastUnsubscribe(binary: boolean): void {
-    if (binary) {
-      this._peerSubscribedBinary = false
-      this._reconcileBinarySubscription()
-    } else {
-      this._peerSubscribedText = false
-      this._reconcileTextSubscription()
-    }
+    const kind = binary ? 'binary' : 'text'
+    this._peerSubscriptions[kind] = false
+    this._reconcileSubscription(kind)
   }
 
   protected override _shutdown(err?: Error): void {
-    this._peerSubscribedText = false
-    this._peerSubscribedBinary = false
-    this._clearTextSubscription()
-    this._clearBinarySubscription()
+    for (const kind of BROADCAST_KINDS) {
+      this._peerSubscriptions[kind] = false
+      this._clearSubscription(kind)
+    }
     super._shutdown(err)
   }
 
@@ -231,68 +196,51 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
     this._backend = getBackend()
   }
 
-  private _reconcileTextSubscription(): void {
-    const needed = !this._isClosed && (this._peerSubscribedText || this._broadcastListeners.length > 0)
-    if (!needed) {
-      this._clearTextSubscription()
+  private _subscribe<Listener>(kind: BroadcastKind, listeners: Listener[], callback: Listener): BroadcastUnsubscribe {
+    this._ensureBroadcast()
+    listeners.push(callback)
+    try {
+      this._reconcileSubscription(kind)
+    } catch (error) {
+      listeners.pop()
+      throw error
+    }
+    return () => {
+      const index = listeners.indexOf(callback)
+      if (index < 0) return
+      listeners.splice(index, 1)
+      this._reconcileSubscription(kind)
+    }
+  }
+
+  private _reconcileSubscription(kind: BroadcastKind): void {
+    const listenerCount = kind === 'text' ? this._broadcastListeners.length : this._broadcastBinaryListeners.length
+    if (this._isClosed || (!this._peerSubscriptions[kind] && listenerCount === 0)) {
+      this._clearSubscription(kind)
       return
     }
-    if (this._unsubBroadcast !== null) return
+    if (this._subscriptions[kind] !== null) return
     assert(this._backend)
-    const lane = { key: this.key, kind: 'text' } as const
-    this._unsubBroadcast = this._backend.subscribe(lane, (payload, rawInfo) =>
-      this._deliverBroadcastMessage(textDecoder.decode(payload), rawInfo),
-    )
+    this._subscriptions[kind] = this._backend.subscribe({ key: this.key, kind }, (payload, rawInfo) => {
+      if (kind === 'text') this._deliverBroadcastMessage(textDecoder.decode(payload), rawInfo)
+      else this._deliverBroadcastBinaryMessage(payload, rawInfo)
+    })
   }
 
-  private _reconcileBinarySubscription(): void {
-    const needed = !this._isClosed && (this._peerSubscribedBinary || this._broadcastBinaryListeners.length > 0)
-    if (!needed) {
-      this._clearBinarySubscription()
-      return
-    }
-    if (this._unsubBinaryBroadcast !== null) return
+  private _clearSubscription(kind: BroadcastKind): void {
+    const subscription = this._subscriptions[kind]
+    if (subscription) void subscription.unsubscribe()
+    this._subscriptions[kind] = null
+  }
+
+  private _publish(kind: BroadcastKind, payload: Uint8Array): ChannelPublishAck | Promise<ChannelPublishAck> {
     assert(this._backend)
-    const lane = { key: this.key, kind: 'binary' } as const
-    this._unsubBinaryBroadcast = this._backend.subscribe(lane, (data, rawInfo) =>
-      this._deliverBroadcastBinaryMessage(data, rawInfo),
-    )
-  }
-
-  private _clearTextSubscription(): void {
-    if (this._unsubBroadcast) void this._unsubBroadcast.unsubscribe()
-    this._unsubBroadcast = null
-  }
-
-  private _clearBinarySubscription(): void {
-    if (this._unsubBinaryBroadcast) void this._unsubBinaryBroadcast.unsubscribe()
-    this._unsubBinaryBroadcast = null
-  }
-
-  private _publishBroadcast(serialized: string): ChannelPublishAck | Promise<ChannelPublishAck> {
-    assert(this._backend)
-    const backend = this._backend
     const toAck = (r: PublishResult): ChannelPublishAck =>
       Object.assign(makePublishInfo(this.key, r.seq, r.timestamp), {
         meta: r.meta,
         ...(r.receivers === undefined ? {} : { receivers: r.receivers }),
       })
-    const lane = { key: this.key, kind: 'text' } as const
-    const result = backend.publish(lane, textEncoder.encode(serialized))
-    if (isPromise(result)) return result.then(toAck)
-    return toAck(result)
-  }
-
-  private _publishBinaryBroadcast(data: Uint8Array): ChannelPublishAck | Promise<ChannelPublishAck> {
-    assert(this._backend)
-    const backend = this._backend
-    const toAck = (r: PublishResult): ChannelPublishAck =>
-      Object.assign(makePublishInfo(this.key, r.seq, r.timestamp), {
-        meta: r.meta,
-        ...(r.receivers === undefined ? {} : { receivers: r.receivers }),
-      })
-    const lane = { key: this.key, kind: 'binary' } as const
-    const result = backend.publish(lane, data)
+    const result = this._backend.publish({ key: this.key, kind }, payload)
     if (isPromise(result)) return result.then(toAck)
     return toAck(result)
   }
@@ -311,7 +259,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
           return
         }
       }
-      const result = await this._publishBroadcast(serialized)
+      const result = await this._publish('text', textEncoder.encode(serialized))
       this._sendAckRes(seq, stringify(result))
     } catch (err) {
       if (this._handleCallbackError(err)) return
@@ -322,7 +270,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
   private async _dispatchPublishBinaryAckReq(data: Uint8Array, seq: number): Promise<void> {
     try {
       this._ensureBroadcast()
-      const result = await this._publishBinaryBroadcast(data)
+      const result = await this._publish('binary', data)
       this._sendAckRes(seq, stringify(result))
     } catch (err) {
       if (this._handleCallbackError(err)) return
