@@ -3,11 +3,26 @@ import { parse } from '@brillout/json-serializer/parse'
 import { IndexedPeer } from '../server/IndexedPeer.js'
 import { ACK_STATUS, TAG, decode } from '../shared-ws.js'
 import { ShieldValidationError, isShieldValidationError } from '../../shared/ShieldValidationError.js'
-import { ROOM_HEARTBEAT_INTERVAL_MS, ROOM_MEMBER_KV_TTL_MS, ROOM_MEMBER_TTL_MS } from '../constants.js'
-import { DEFAULT_TRACK, isRoomError, roomAckError, type RoomSnapshotMetadata } from './protocol.js'
-import { ClientRoom, RoomClientBroadcast } from './client.js'
+import {
+  ROOM_HEARTBEAT_INTERVAL_MS,
+  ROOM_MEMBER_KV_TTL_MS,
+  ROOM_MEMBER_TTL_MS,
+  ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS,
+} from '../constants.js'
+import {
+  DEFAULT_TRACK,
+  frameWithMemberId,
+  isRoomError,
+  roomAckError,
+  sanitizeBinaryWants,
+  unframeMemberId,
+  type RoomSnapshotMetadata,
+} from './protocol.js'
+import { ClientRoom } from './client.js'
 import { Room, ServerRoom } from './server.js'
 import { RoomStubChannel } from './stubs.js'
+import { RoomDemand } from './demand.js'
+import { ClientBroadcast } from '../client/channel.js'
 import type { ChannelPublishInfo } from '../channel.js'
 import { disposeBackend, getBackend, installBackend, setDefaultBackend } from '../backend/install.js'
 import { HEAD_TRANSITIONS, assertHeadTransition } from '../backend/head-transitions.js'
@@ -76,7 +91,6 @@ describe('Room public behavior', () => {
         return participant
       })
       await semanticStarted.promise
-      await settleMicrotasks()
       expect(settled).toBe(false)
 
       semanticState = 'ready'
@@ -123,95 +137,89 @@ describe('Room public behavior', () => {
     }
   })
 
-  it('does not complete a join until its member inbox subscription is ready', async () => {
+  it('keeps a joining identity undiscoverable until its member inbox subscription is ready', async () => {
     const room = await Room.create('join-inbox-readiness')
     const sender = await room.join()
-    const observer = await Room.get(room.id)
-    let immediateDm: Promise<unknown> | undefined
-    observer.onJoin((member) => {
-      immediateDm = sender.send(member.id, 'immediate')
-    })
 
     const backend = getBackend()
-    const subscribeLane = backend.subscribeLane.bind(backend)
-    const inboxStarted = deferred<void>()
-    let releaseInbox!: () => Promise<void>
-    const subscribe = vi.spyOn(backend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
-      if (lane.kind !== 'inbox') return subscribeLane(roomId, inc, lane, receiver)
-      let inner: BackendSubscription | null = null
-      let state: SubscriptionState = 'establishing'
-      const readiness = deferred<void>()
-      const listeners = new Set<(next: SubscriptionState) => void>()
-      inboxStarted.resolve()
-      releaseInbox = async () => {
-        inner = subscribeLane(roomId, inc, lane, receiver)
-        await inner.ready
-        state = 'ready'
-        readiness.resolve()
-        for (const listener of listeners) listener(state)
-      }
-      return {
-        ready: readiness.promise,
-        state: () => state,
-        onStateChange: (listener) => {
-          listeners.add(listener)
-          return () => listeners.delete(listener)
-        },
-        unsubscribe: async () => {
-          state = 'closed'
-          readiness.resolve()
-          for (const listener of listeners) listener(state)
-          listeners.clear()
-          await inner?.unsubscribe()
-        },
-      }
-    })
+    const commitLane = vi.spyOn(backend, 'commitLane')
+    const delayed = delayLaneSubscription((lane) => lane.kind === 'inbox')
     try {
       let joinSettled = false
-      const joining = room.join().then((participant) => {
+      const joining = room.join({ identity: 'waiting' }).then((participant) => {
         joinSettled = true
         return participant
       })
-      await inboxStarted.promise
-      await settleMicrotasks()
-      // Without the readiness fence the join and reactive DM have already settled here, so the
-      // accepted DM is deliberately allowed to finish before the delayed inbox is installed.
-      if (joinSettled) await immediateDm
-      await releaseInbox()
+      await delayed.started
+      expect(joinSettled).toBe(false)
+      expect(await Room.getParticipants(room.id, { identity: 'waiting' })).toEqual([])
+      await Room.send(room.id, { identity: 'waiting' }, 'premature')
+      expect(commitLane).not.toHaveBeenCalledWith(
+        room.id,
+        expect.any(String),
+        expect.objectContaining({ kind: 'inbox' }),
+        expect.any(Uint8Array),
+        expect.any(Object),
+      )
+
+      await delayed.release()
 
       const joined = await joining
       const inbox: unknown[] = []
       joined.listen((data) => inbox.push(data))
-      await immediateDm
-      expect(inbox).toEqual(['immediate'])
+      await sender.send(joined.id, 'ready')
+      expect(inbox).toEqual(['ready'])
     } finally {
-      subscribe.mockRestore()
+      delayed.restore()
     }
   })
 
-  it('rolls back a durable member when post-create join readiness rejects', async () => {
-    vi.useFakeTimers()
+  it('rolls durable membership back when the join announcement fails', async () => {
     const room = await Room.create('join-readiness-rollback')
     const backend = getBackend()
-    const subscribeLane = backend.subscribeLane.bind(backend)
-    const failure = Promise.reject(new Error('semantic readiness failed'))
-    void failure.catch(() => {})
-    const subscribe = vi.spyOn(backend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
-      if (lane.kind !== 'semantic') return subscribeLane(roomId, inc, lane, receiver)
-      return {
-        ready: failure,
-        state: () => 'closed',
-        onStateChange: () => () => {},
-        unsubscribe: async () => {},
+    const commitLane = backend.commitLane.bind(backend)
+    const publish = vi.spyOn(backend, 'commitLane').mockImplementation((roomId, inc, lane, payload, options) => {
+      if (lane.kind === 'control' && (parse(decoder.decode(payload)) as { __r?: string }).__r === 'join') {
+        throw new Error('join announcement failed')
       }
+      return commitLane(roomId, inc, lane, payload, options)
     })
     try {
-      await expect(room.join()).rejects.toThrow('semantic readiness failed')
-      await vi.advanceTimersByTimeAsync(ROOM_MEMBER_KV_TTL_MS + ROOM_HEARTBEAT_INTERVAL_MS)
-      expect(await Room.getParticipants(room.id)).toEqual([])
+      await expect(room.join()).rejects.toThrow('join announcement failed')
+      await expect(Room.getParticipants(room.id)).resolves.toEqual([])
     } finally {
-      subscribe.mockRestore()
+      publish.mockRestore()
     }
+  })
+
+  it('keeps a server participant active so a transient durable-leave failure can be retried', async () => {
+    const room = await Room.create('retry-local-leave')
+    const member = await room.join()
+    const failure = new Error('transient member delete failure')
+    vi.spyOn(driver, 'compareExchangeCells').mockRejectedValueOnce(failure)
+
+    await expect(member.leave()).rejects.toBe(failure)
+    await expect(member.publish('still-present')).resolves.toMatchObject({ seq: 1 })
+    await expect(member.leave()).resolves.toBeUndefined()
+    expect(await Room.getParticipants(room.id)).toEqual([])
+  })
+
+  it('retains room-stub ownership so a transient durable-leave failure can be retried', async () => {
+    const room = (await Room.create('retry-stub-leave')) as ServerRoom
+    const stub = register(room)
+    const joined = (await room._handleStubRequest(stub, {
+      __r: 'req-join',
+      meta: {},
+      selfDelivery: true,
+    })) as { id: string }
+    const request = { __r: 'req-leave' as const, id: joined.id }
+    const failure = new Error('transient member delete failure')
+    vi.spyOn(driver, 'compareExchangeCells').mockRejectedValueOnce(failure)
+
+    await expect(room._handleStubRequest(stub, request)).rejects.toBe(failure)
+    expect(stub._stubMembers.has(joined.id)).toBe(true)
+    await expect(room._handleStubRequest(stub, request)).resolves.toBeUndefined()
+    expect(await Room.getParticipants(room.id)).toEqual([])
   })
 
   it('creates, lists, updates, closes fully, and recreates a genuinely fresh domain', async () => {
@@ -358,6 +366,101 @@ describe('Room public behavior', () => {
     }
   })
 
+  it('reconciles authority after a control gap or same-attempt recovery', async () => {
+    const room = (await Room.create('control-reconcile')) as ServerRoom
+    const backend = getBackend()
+    const subscribeLane = backend.subscribeLane.bind(backend)
+    let transition!: (state: SubscriptionState) => void
+    const subscribe = vi.spyOn(backend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
+      const inner = subscribeLane(roomId, inc, lane, receiver)
+      if (lane.kind !== 'control') return inner
+      return {
+        ready: inner.ready,
+        state: () => inner.state(),
+        onStateChange: (listener) => {
+          transition = listener
+          return inner.onStateChange(listener)
+        },
+        unsubscribe: () => inner.unsubscribe(),
+      }
+    })
+    try {
+      room.onAnnounce(() => {})
+      await settle()
+      const refresh = vi.spyOn(room as unknown as { _refreshMembers(): Promise<void> }, '_refreshMembers')
+      transition('lost')
+      transition('ready')
+      await vi.waitFor(() => expect(refresh).toHaveBeenCalledTimes(1))
+      const onControl = (
+        room as unknown as { _onCtrlMessage(message: string, info: { seq: number; timestamp: number }): void }
+      )._onCtrlMessage.bind(room)
+      onControl('{"__r":"announce","data":"first"}', { seq: 1, timestamp: 1 })
+      onControl('{"__r":"announce","data":"gap"}', { seq: 3, timestamp: 3 })
+      await vi.waitFor(() => expect(refresh).toHaveBeenCalledTimes(2))
+    } finally {
+      subscribe.mockRestore()
+    }
+  })
+
+  it('uses the heartbeat roster snapshot to repair observer drift', async () => {
+    const observer = (await Room.create('heartbeat-reconcile')) as ServerRoom
+    const reconcile = vi.spyOn(observer._state, 'reconcile')
+
+    await (observer as unknown as { _heartbeatTick(): Promise<void> })._heartbeatTick()
+
+    expect(reconcile).toHaveBeenCalled()
+  })
+
+  it('heartbeats pure control observers without owned members or binary demand', async () => {
+    vi.useFakeTimers()
+    const observer = (await Room.get((await Room.create('observer-heartbeat')).id)) as ServerRoom
+    const heartbeat = vi
+      .spyOn(observer as unknown as { _heartbeatTick(): Promise<void> }, '_heartbeatTick')
+      .mockResolvedValue()
+    observer.onAnnounce(() => {})
+
+    await vi.advanceTimersByTimeAsync(ROOM_HEARTBEAT_INTERVAL_MS)
+
+    expect(heartbeat).toHaveBeenCalledOnce()
+  })
+
+  it('replans a terminal Room lane when its first replacement never becomes ready', async () => {
+    vi.useFakeTimers()
+    const authority = await Room.create('room-owned-subscription-horizon')
+    const publisher = await authority.join()
+    const observer = await Room.get(authority.id)
+    const backend = getBackend()
+    const subscribeLane = backend.subscribeLane.bind(backend)
+    const terminal = terminalSubscription()
+    const never = deferred<void>()
+    let semanticAttempt = 0
+    const subscribe = vi.spyOn(backend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
+      if (lane.kind !== 'semantic') return subscribeLane(roomId, inc, lane, receiver)
+      semanticAttempt++
+      if (semanticAttempt === 1) return terminal.subscription
+      if (semanticAttempt === 2)
+        return {
+          ready: never.promise,
+          state: () => 'establishing',
+          onStateChange: () => () => {},
+          unsubscribe: async () => {},
+        }
+      return subscribeLane(roomId, inc, lane, receiver)
+    })
+    const report = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const received: unknown[] = []
+    observer.subscribe((data) => received.push(data))
+    await terminal.close()
+
+    await vi.advanceTimersByTimeAsync(ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS / 6)
+    await publisher.publish('recovered')
+
+    expect(received).toEqual(['recovered'])
+    expect(report).toHaveBeenCalled()
+    subscribe.mockRestore()
+    report.mockRestore()
+  })
+
   it('propagates presence/meta while hidden members stay addressable and admin removal carries its cause', async () => {
     const authority = await Room.create('presence')
     const observer = await Room.get('presence')
@@ -464,6 +567,34 @@ describe('Room public behavior', () => {
     expect(fromRoom).toEqual([[{ notice: true }, null]])
   })
 
+  it('drains DMs that arrived before a participant was bound to its client forwarder', async () => {
+    const room = await Room.create('pre-bind-inbox')
+    const target = await room.join()
+    const sender = await room.join()
+    await sender.send(target.id, 'plain-before-bind')
+    const acknowledging = sender.send(target.id, 'ack-before-bind', { ack: true })
+    await settle()
+
+    const forwarded: unknown[] = []
+    ;(target as unknown as { _setForwarder(forwarder: (message: { data: unknown }) => unknown): void })._setForwarder(
+      (message) => {
+        forwarded.push(message.data)
+        return Promise.resolve({ ok: true, result: `handled:${String(message.data)}` })
+      },
+    )
+
+    expect(forwarded).toEqual(['plain-before-bind', 'ack-before-bind'])
+    await expect(acknowledging).resolves.toMatchObject({ response: 'handled:ack-before-bind' })
+  })
+
+  it('keeps every live ack correlation instead of silently dropping the oldest', async () => {
+    const stub = register(await Room.create('ack-correlations'))
+    for (let index = 0; index <= 1_024; index++) {
+      stub._recordAckDm(`ack-${index}`, `sender-${index}`, 'recipient')
+    }
+    expect(stub._takeAckDm('ack-0', 'recipient')).toBe('sender-0')
+  })
+
   it('applies before guards and after hooks around authoritative joins, publishes, and sends', async () => {
     await Room.create('guarded')
     const room = await Room.get('guarded')
@@ -497,15 +628,22 @@ describe('Room public behavior', () => {
     expect(after).toEqual(['join:Alice', 'join:Bob', 'publish:ok', 'send:ok'])
   })
 
-  it('orders participant text and room announcements in one monotonic semantic domain', async () => {
-    const room = await Room.create('semantic-order')
-    const member = await room.join()
-    const first = await member.publish('one')
-    const second = await Room.announce('semantic-order', 'notice')
-    const third = await member.publish('two')
-    expect([first.seq, second.seq, third.seq]).toEqual([1, 2, 3])
-    expect(first.timestamp).toBeLessThanOrEqual(second.timestamp)
-    expect(second.timestamp).toBeLessThanOrEqual(third.timestamp)
+  it('delivers announcements to pure observers in the control order, independently of text order', async () => {
+    const room = await Room.create('announce-control-order')
+    const firstMember = await room.join()
+    await room.join()
+    const observer = await Room.get(room.id)
+    const observed: Array<[unknown, number]> = []
+    observer.onAnnounce((data, info) => observed.push([data, info.seq]))
+    await settle()
+
+    const first = await firstMember.publish('one')
+    const second = await Room.announce(room.id, 'notice')
+    const third = await firstMember.publish('two')
+
+    expect([first.seq, third.seq]).toEqual([1, 2])
+    expect(second.seq).toBe(3) // two joins precede it on the control lane
+    expect(observed).toEqual([['notice', 3]])
   })
 
   it("retained owner cleanup is compare-delete, so a newer owner's racing frame survives", async () => {
@@ -546,18 +684,83 @@ describe('Room public behavior', () => {
     ])
   })
 
+  it('does not replay older retained text after a newer global semantic frame', async () => {
+    const room = (await Room.create('global-retained-watermark')) as ServerRoom
+    const stub = register(room)
+    const relay = vi.spyOn(stub, '_relayPublishText').mockImplementation(() => {})
+
+    stub._relayTextLive('newer-live', 'sender-b', { seq: 2, timestamp: 2 })
+    stub._emitRetainedText('older-retained', 'sender-a', { seq: 1, timestamp: 1 })
+
+    expect(relay.mock.calls.map(([wire]) => wire)).toEqual(['newer-live'])
+  })
+
+  it('waits for roster-derived binary routes before reading retained frames', async () => {
+    const authority = await Room.create('retained-binary-roster-fence')
+    const publisher = await authority.join()
+    await publisher.publishBinary(new Uint8Array([1]), { track: 'screen', retain: true })
+    const observer = (await Room.get(authority.id)) as ServerRoom
+    const stub = register(observer)
+    const readCells = driver.readCells.bind(driver)
+    const rosterStarted = deferred<void>()
+    const releaseRoster = deferred<void>()
+    const reading = vi.spyOn(driver, 'readCells').mockImplementation(async (roomId, inc, selector) => {
+      if (roomId === authority.id && 'prefix' in selector) {
+        rosterStarted.resolve()
+        await releaseRoster.promise
+      }
+      return readCells(roomId, inc, selector)
+    })
+    const listRetained = vi.spyOn(driver, 'listRetained')
+    try {
+      await observer._handleStubRequest(stub, {
+        __r: 'sub-binary',
+        wants: { everyMember: { all: true, tracks: [] }, members: {} },
+      })
+      await rosterStarted.promise
+      await settle()
+      expect(listRetained).not.toHaveBeenCalled()
+
+      releaseRoster.resolve()
+      await vi.waitFor(() => expect(listRetained).toHaveBeenCalled())
+    } finally {
+      releaseRoster.resolve()
+      reading.mockRestore()
+    }
+  })
+
+  it('builds exact member binary routes before the roster is known', async () => {
+    const room = (await Room.create('exact-binary-without-roster')) as ServerRoom
+    const member = crypto.randomUUID()
+    const lanes = (
+      room as unknown as {
+        _binaryLanes(wants: typeof allBinary, members: string[]): Array<{ value: LaneId }>
+      }
+    )._binaryLanes(
+      { everyMember: { all: false, tracks: [] }, members: { [member]: { all: false, tracks: ['screen'] } } },
+      [],
+    )
+    expect(lanes.map(({ value }) => value)).toEqual([{ kind: 'binary', member, track: 'screen' }])
+  })
+
   it('drops retained text and binary when a crashed publisher is reaped', async () => {
     vi.useFakeTimers()
     vi.setSystemTime(1_000_000)
     const room = (await Room.create('reaped-retained')) as ServerRoom
-    const publisher = await room.join()
+    const publisher = await room.join({ identity: 'expired-owner' })
+    const leaves: string[] = []
+    room.onLeave((member) => leaves.push(member.id))
     await publisher.publish('text', { retain: true })
     await publisher.publishBinary(new Uint8Array([1]), { track: 'screen', retain: true })
     expect(await driver.listRetained(room.id, room._inc)).toHaveLength(2)
 
-    vi.setSystemTime(1_000_000 + ROOM_MEMBER_TTL_MS + 1)
+    // Cross the backend's former native expiry. If the cell disappears before the seenAt reaper
+    // claims it, there is no record left to identify the owner, clear its indexes, or publish leave.
+    vi.setSystemTime(1_000_000 + ROOM_MEMBER_KV_TTL_MS + 1)
     expect(await Room.getParticipants(room.id)).toEqual([])
     expect(await driver.listRetained(room.id, room._inc)).toEqual([])
+    expect(leaves).toEqual([publisher.id])
+    await expect(Room.removeParticipant(room.id, { identity: 'expired-owner' })).resolves.toBeUndefined()
   })
 
   it('tail mode holds pre-attach text and flushes it in order on first client demand', async () => {
@@ -585,13 +788,14 @@ describe('Room public behavior', () => {
     await observer.getParticipants()
 
     const unsubscribe = (await observer.getParticipant(camera.id))!.subscribeBinary(() => {}, { track: 'screen' })
-    await delay(30)
+    await vi.waitFor(() => expect(changes).toEqual([['screen', true]]))
     unsubscribe()
-    await delay(30)
-    expect(changes).toEqual([
-      ['screen', true],
-      ['screen', false],
-    ])
+    await vi.waitFor(() =>
+      expect(changes).toEqual([
+        ['screen', true],
+        ['screen', false],
+      ]),
+    )
   })
 
   it('keeps live and retained binary seq above 2^32 through server and public client decode', async () => {
@@ -614,10 +818,16 @@ describe('Room public behavior', () => {
     const room = await Room.create('snapshot')
     const first = room.snapshot()
     expect(room.snapshot()).toBe(first)
+    expect(Object.isFrozen(first)).toBe(true)
+    expect(Object.isFrozen(first.meta)).toBe(true)
+    expect(Object.isFrozen(first.participants)).toBe(true)
     let changes = 0
     room.onChange(() => changes++)
     await room.join({ meta: { name: 'Alice' } })
-    expect(room.snapshot()).not.toBe(first)
+    const changed = room.snapshot()
+    expect(changed).not.toBe(first)
+    expect(Object.isFrozen(changed.participants[0])).toBe(true)
+    expect(Object.isFrozen(changed.participants[0]!.meta)).toBe(true)
     expect(changes).toBe(1)
   })
 })
@@ -632,59 +842,135 @@ describe('client Room lifecycle', () => {
     expect(roomAckError(error, vi.fn())).toEqual({ text: 'overlap', status: ACK_STATUS.ERROR })
   })
 
+  it('keeps a client participant active so a rejected leave request can be retried', async () => {
+    let leaveAttempts = 0
+    const fake = createFakeStub({
+      send: async (message) => {
+        const request = message as { __r?: string }
+        if (request.__r === 'req-join') return { id: crypto.randomUUID(), joinedAt: Date.now() }
+        if (request.__r === 'req-leave' && leaveAttempts++ === 0) throw new Error('transient leave rejection')
+        return undefined
+      },
+    })
+    const client = new ClientRoom(fake.stub, snapshot('retry-client-leave'))
+    const member = await client.join()
+
+    await expect(member.leave()).rejects.toThrow('transient leave rejection')
+    await expect(member.publish('still-active')).resolves.toMatchObject({ seq: 1 })
+    await expect(member.leave()).resolves.toBeUndefined()
+    expect(leaveAttempts).toBe(2)
+  })
+
+  it("derives participant-update prev from the receiver's own applied state", async () => {
+    const fake = createFakeStub()
+    const client = new ClientRoom(fake.stub, snapshot('receiver-local-prev'))
+    const memberId = crypto.randomUUID()
+    fake.emitText(
+      {
+        __r: 'roster',
+        members: [{ id: memberId, meta: { step: 0 }, joinedAt: 1, metaSeq: 0 }],
+      },
+      { key: 'receiver-local-prev', seq: 1, timestamp: 1 },
+    )
+    const member = await client.getParticipant(memberId)
+    const updates: Array<[unknown, unknown]> = []
+    member!.onUpdate((meta, prev) => updates.push([meta, prev]))
+
+    // This receiver skipped the writer's step:1 revision. Its callback must report the value it
+    // actually transitioned away from, not the writer-local value carried by the old wire shape.
+    fake.emitText(
+      { __r: 'p-meta', id: memberId, meta: { step: 2 }, prev: { step: 1 }, seq: 2 },
+      { key: 'receiver-local-prev', seq: 2, timestamp: 2 },
+    )
+    expect(updates).toEqual([[{ step: 2 }, { step: 0 }]])
+  })
+
+  it('makes the closed-and-empty state visible before participant leave callbacks run', async () => {
+    const fake = createFakeStub()
+    const client = new ClientRoom(fake.stub, snapshot('atomic-close-state'))
+    const memberId = crypto.randomUUID()
+    fake.emitText(
+      {
+        __r: 'roster',
+        members: [{ id: memberId, meta: {}, joinedAt: 1, metaSeq: 0 }],
+      },
+      { key: 'atomic-close-state', seq: 1, timestamp: 1 },
+    )
+    const member = await client.getParticipant(memberId)
+    const before = client.snapshot()
+    let observed: unknown
+    member!.onLeave(() => {
+      const snap = client.snapshot()
+      observed = {
+        closed: client.isClosed,
+        count: client.count,
+        snapshotChanged: snap !== before,
+        snapshotClosed: snap.isClosed,
+        snapshotCount: snap.count,
+        participants: snap.participants.length,
+      }
+    })
+
+    fake.emitText({ __r: 'closed' }, { key: 'atomic-close-state', seq: 2, timestamp: 2 })
+    expect(observed).toEqual({
+      closed: true,
+      count: 0,
+      snapshotChanged: true,
+      snapshotClosed: true,
+      snapshotCount: 0,
+      participants: 0,
+    })
+  })
+
+  it('rejects hidden-roster enumeration in clients instead of returning a partial direct-handle list', async () => {
+    const fake = createFakeStub()
+    const client = new ClientRoom(fake.stub, snapshot('client-hidden-roster'))
+    fake.emitText({ __r: 'roster', members: [] }, { key: 'client-hidden-roster', seq: 1, timestamp: 1 })
+    client._reviveRemote({
+      id: crypto.randomUUID(),
+      meta: { role: 'moderator' },
+      joinedAt: 1,
+      metaSeq: 0,
+      identity: null,
+      hidden: true,
+    })
+
+    await expect(client.getParticipants({ hidden: true })).rejects.toThrow(
+      'Hidden participants can only be enumerated on the server',
+    )
+  })
+
+  it('declares a room-level default binary track without an earlier all-track listener', () => {
+    const sent: unknown[] = []
+    const fake = createFakeStub({
+      send: async (message) => {
+        sent.push(message)
+        return undefined
+      },
+    })
+    const client = new ClientRoom(fake.stub, snapshot('default-track-declaration'))
+
+    client.subscribeBinary(() => {}, { track: null })
+
+    expect(sent).toContainEqual({
+      __r: 'sub-binary',
+      wants: { everyMember: { all: false, tracks: [DEFAULT_TRACK] }, members: {} },
+    })
+  })
+
   it('redeclares a room-wide text subscription after reconnect even when the local latch already matches', () => {
     const wireDeclarations: boolean[] = []
-    let reconnect = () => {}
-    const stub = {
-      _wireTextSubscribed: false,
-      _isClosed: false,
-      _connection: {
-        sendBroadcastSubscribe: () => wireDeclarations.push(true),
-        sendBroadcastUnsubscribe: () => wireDeclarations.push(false),
-      },
-      _subscribeLocal: () => () => {},
-      _subscribeBinaryLocal: () => () => {},
-      _setWireTextSubscribed: RoomClientBroadcast.prototype._setWireTextSubscribed,
-      send: async () => undefined,
-      publish: async () => ({ key: 'fake', seq: 1, timestamp: 1 }),
-      publishBinary: async () => ({ key: 'fake', seq: 1, timestamp: 1 }),
-      onClose: () => {},
-      _onReconnect: (callback: () => void) => {
-        reconnect = callback
-      },
-    } as unknown as RoomClientBroadcast
-    const client = new ClientRoom(stub, snapshot('reconnect-text'))
+    const fake = createFakeStub({ wireDeclarations })
+    const client = new ClientRoom(fake.stub, snapshot('reconnect-text'))
 
     client.subscribe(() => {})
     expect(wireDeclarations).toEqual([true])
 
     // Model the transport dying after the client emitted BROADCAST_SUB but before the server
     // applied it: the client latch is true, while the peer's authoritative state is still false.
-    reconnect()
+    fake.reconnect()
 
     expect(wireDeclarations).toEqual([true, true])
-  })
-
-  it('rejects roster getters when the initial backend roster read fails', async () => {
-    let deliver: (event: unknown, info: ChannelPublishInfo) => void = () => {}
-    const stub = {
-      _subscribeLocal: (callback: (event: unknown, info: ChannelPublishInfo) => void) => {
-        deliver = callback
-        return () => {}
-      },
-      _subscribeBinaryLocal: () => () => {},
-      _setWireTextSubscribed: () => {},
-      send: async () => undefined,
-      publish: async () => ({ key: 'fake', seq: 1, timestamp: 1 }),
-      publishBinary: async () => ({ key: 'fake', seq: 1, timestamp: 1 }),
-      onClose: () => {},
-      _onReconnect: () => {},
-    } as unknown as RoomClientBroadcast
-    const client = new ClientRoom(stub, snapshot('roster-failure'))
-    const participants = client.getParticipants()
-    deliver({ __r: 'roster-error' }, { key: 'roster-failure', seq: 1, timestamp: 1 })
-
-    await expect(participants).rejects.toThrow('Failed to load room participants')
   })
 
   it('turns a server roster read rejection into an explicit client-settling event', async () => {
@@ -694,14 +980,17 @@ describe('client Room lifecycle', () => {
     const ensureRoster = vi
       .spyOn(room as unknown as { _ensureRoster(): Promise<void> }, '_ensureRoster')
       .mockRejectedValue(failure)
-    const relayError = vi.spyOn(stub, '_relayRosterError')
     const report = vi.spyOn(console, 'error').mockImplementation(() => {})
     try {
-      attachPeer(stub)
-      await settleMicrotasks()
-
+      const peer = attachPeer(stub)
+      await vi.waitFor(() => expect(peer.decoded().some((frame) => frame.tag === TAG.PUBLISH)).toBe(true))
+      const frame = peer.decoded().find((candidate) => candidate.tag === TAG.PUBLISH)!
+      if (frame.tag !== TAG.PUBLISH) throw new Error('expected roster error publish')
+      const fake = createFakeStub()
+      const participants = new ClientRoom(fake.stub, snapshot('roster-error-event')).getParticipants()
+      fake.emitText(parse(frame.text), { key: 'roster-error-event', seq: 1, timestamp: 1 })
+      await expect(participants).rejects.toThrow('Failed to load room participants')
       expect(ensureRoster).toHaveBeenCalledOnce()
-      expect(relayError).toHaveBeenCalledOnce()
     } finally {
       report.mockRestore()
       ensureRoster.mockRestore()
@@ -713,15 +1002,69 @@ describe('client Room lifecycle', () => {
     const stub = register(room)
     const ensureRoster = vi.spyOn(room as unknown as { _ensureRoster(): Promise<void> }, '_ensureRoster')
     attachPeer(stub)
-    await settleMicrotasks()
+    await vi.waitFor(() => expect(ensureRoster).toHaveBeenCalledOnce())
 
     stub._onPeerDisconnect(1_000)
     const [frame] = attachPeer(stub, 0).decoded()
     if (frame?.tag !== TAG.PUBLISH) throw new Error('expected replayed roster publish')
     expect(parse(frame.text)).toMatchObject({ __r: 'roster', members: [] })
 
-    await settleMicrotasks()
     expect(ensureRoster).toHaveBeenCalledOnce()
+  })
+})
+
+describe('room demand lifecycle', () => {
+  it('retires pushed demand when a member departs so a later owner gets a fresh transition', () => {
+    let owns = true
+    const delivered: Array<[string, string, boolean]> = []
+    const demand = new RoomDemand(
+      () => {},
+      () => owns,
+      (member, track, wanted) => delivered.push([member, track, wanted]),
+    )
+    demand.applyWant({ member: 'member', track: 'screen', node: 'remote-a', on: true })
+    owns = false
+    demand.forgetMember('member')
+    owns = true
+    demand.applyWant({ member: 'member', track: 'screen', node: 'remote-b', on: true })
+
+    expect(delivered).toEqual([
+      ['member', 'screen', true],
+      ['member', 'screen', true],
+    ])
+  })
+})
+
+describe('room binary protocol validation', () => {
+  it('rejects array metadata and malformed UTF-8 instead of normalizing them', () => {
+    const memberId = crypto.randomUUID()
+    expect(() =>
+      frameWithMemberId(memberId, new Uint8Array(), {
+        meta: [] as unknown as Record<string, unknown>,
+      }),
+    ).toThrow('meta should be an object')
+
+    const arrayMeta = frameWithMemberId(memberId, new Uint8Array(), { meta: {} })
+    arrayMeta[19] = '['.charCodeAt(0)
+    arrayMeta[20] = ']'.charCodeAt(0)
+    expect(unframeMemberId(arrayMeta)).toBeNull()
+
+    const malformedTrack = frameWithMemberId(memberId, new Uint8Array(), { track: 'x' })
+    malformedTrack[18] = 0xff
+    expect(unframeMemberId(malformedTrack)).toBeNull()
+  })
+
+  it('accepts legal binary declarations regardless of undocumented aggregate counts', () => {
+    const members = Object.fromEntries(
+      Array.from({ length: 4097 }, (_, index) => [`member-${index}`, { all: false, tracks: [] }]),
+    )
+    expect(sanitizeBinaryWants({ everyMember: { all: false, tracks: [] }, members })).not.toBeNull()
+    expect(
+      sanitizeBinaryWants({
+        everyMember: { all: false, tracks: Array.from({ length: 65 }, (_, index) => `track-${index}`) },
+        members: {},
+      }),
+    ).not.toBeNull()
   })
 })
 
@@ -1093,8 +1436,7 @@ describe('shared subscription supervision', () => {
     await subscription.ready
 
     raw.opens[0]!.attempt.terminate()
-    await settleMicrotasks()
-    expect(subscription.state()).toBe('closed')
+    await vi.waitFor(() => expect(subscription.state()).toBe('closed'))
     expect(states).toEqual(['closed'])
     expect(raw.openCalls).toBe(1)
 
@@ -1201,27 +1543,47 @@ async function wideBinaryScenario(id: string, retain: boolean, byte: number) {
   return { receipt: receipt.seq, server: serverSeqs[0] ?? null, client: clientSeqs[0] }
 }
 
-function createFakeStub(): {
-  stub: RoomClientBroadcast
+function createFakeStub(options?: {
+  send?: (message: unknown) => Promise<unknown>
+  wireDeclarations?: boolean[]
+}): {
+  stub: ClientBroadcast
+  emitText(data: unknown, info: ChannelPublishInfo): void
   emitBinary(data: Uint8Array, info: ChannelPublishInfo): void
+  reconnect(): void
 } {
+  const text: Array<(data: unknown, info: ChannelPublishInfo) => void> = []
   const binary: Array<(data: Uint8Array, info: ChannelPublishInfo) => void> = []
+  let reconnect = () => {}
   const stub = {
-    _subscribeLocal: () => () => {},
+    _wireTextSubscribed: false,
+    _isClosed: false,
+    _connection: {
+      sendBroadcastSubscribe: () => options?.wireDeclarations?.push(true),
+      sendBroadcastUnsubscribe: () => options?.wireDeclarations?.push(false),
+    },
+    _subscribeLocal: (callback: (data: unknown, info: ChannelPublishInfo) => void) => {
+      text.push(callback)
+      return () => text.splice(text.indexOf(callback), 1)
+    },
     _subscribeBinaryLocal: (callback: (data: Uint8Array, info: ChannelPublishInfo) => void) => {
       binary.push(callback)
       return () => binary.splice(binary.indexOf(callback), 1)
     },
-    _setWireTextSubscribed: () => {},
-    send: async () => undefined,
+    _setWireTextSubscribed: ClientBroadcast.prototype._setWireTextSubscribed,
+    send: options?.send ?? (async () => undefined),
     publish: async () => ({ key: 'fake', seq: 1, timestamp: 1 }),
     publishBinary: async () => ({ key: 'fake', seq: 1, timestamp: 1 }),
     onClose: () => {},
-    _onReconnect: () => {},
-  } as unknown as RoomClientBroadcast
+    _onReconnect: (callback: () => void) => {
+      reconnect = callback
+    },
+  } as unknown as ClientBroadcast
   return {
     stub,
+    emitText: (data, info) => text.forEach((callback) => callback(data, info)),
     emitBinary: (data, info) => binary.forEach((callback) => callback(data, info)),
+    reconnect: () => reconnect(),
   }
 }
 
@@ -1401,10 +1763,6 @@ function delayLaneSubscription(matches: (lane: LaneId) => boolean) {
     }
   })
   return { started: started.promise, release: () => release(), restore: () => spy.mockRestore() }
-}
-
-async function settleMicrotasks(turns = 8): Promise<void> {
-  for (let turn = 0; turn < turns; turn++) await Promise.resolve()
 }
 
 function settle(): Promise<void> {

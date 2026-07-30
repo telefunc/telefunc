@@ -21,7 +21,6 @@ import {
   mergeAttributes,
   normalizeJoinOptions,
   unframeMemberId,
-  type BinaryWants,
   type MemberWants,
   type MemberSnapshot,
   type ParticipantStubMetadata,
@@ -38,8 +37,8 @@ import {
 import { RoomState } from './state.js'
 import { ParticipantBase, type InboxMessage } from './participant.js'
 import type {
+  BinaryFrameInfo,
   BinaryPublishOptions,
-  RoomBinaryListener,
   JoinOptions,
   LeaveCause,
   LocalParticipant,
@@ -155,10 +154,6 @@ class ClientRoom implements Room {
   private readonly _stub: RoomClientBroadcast
   private readonly _state: RoomState
   private readonly _localParticipants = new Map<string, ClientRoomParticipant>()
-  /** Wants already declared to the server, by lane. Every lane's declaration is a full
-   *  replace, re-sent only when its canonical encoding changes — `''` encodes "nothing
-   *  wanted" on every lane, which is also the nothing-declared-yet initial state. */
-  private readonly _declaredWants = new Map<string, string>()
   /** DMs relayed before their participant's join ack resolved (a reactive send racing the
    *  join round-trip) — held bounded (count-capped, drop-oldest), flushed on registration. */
   private _pendingDms: Array<InboxMessage & { to: string }> | null = null
@@ -191,13 +186,8 @@ class ClientRoom implements Room {
     // Wire death — the network gave up or the stub was GC'd. (A server `Room.close()` arrives
     // as the `closed` ctrl event before the stub shuts down, so it takes the 'closed' path.)
     stub.onClose(() => this._applyClosed('disconnected'))
-    // Reconnect first reconciles the existing holder and releases bounded sequenced replay. This is
-    // the final declaration layer: forget keyed wants we assumed the holder knew, and explicitly
-    // reconcile the unsequenced room-wide text control from current intent.
-    stub._onReconnect(() => {
-      this._declaredWants.clear()
-      this._syncWants(true)
-    })
+    // Reconnect reconciles the existing holder and redeclares current intent.
+    stub._onReconnect(() => this._syncWants(true))
     // A backend rejection can arrive before the application asks for the roster. Mark it handled
     // here while preserving the original rejection for each later getter.
     void this._rosterReady.catch(() => {})
@@ -245,9 +235,10 @@ class ClientRoom implements Room {
   }
 
   async getParticipants(options?: { hidden?: boolean }): Promise<RemoteParticipant[]> {
+    assertUsage(!options?.hidden, 'Hidden participants can only be enumerated on the server')
     if (!this._state.rosterKnown) await this._rosterReady
     // kept fresh by the event stream from there on
-    return options?.hidden ? this._state.listHidden() : this._state.listRemotes()
+    return this._state.listRemotes()
   }
 
   async getParticipant(id: string): Promise<RemoteParticipant | null> {
@@ -300,7 +291,10 @@ class ClientRoom implements Room {
   subscribe(callback: (data: unknown, info: ChannelPublishInfo, from: Sender) => unknown): () => void {
     return this._state.subscribe(callback)
   }
-  subscribeBinary(callback: RoomBinaryListener, options?: { track?: string | null }): () => void {
+  subscribeBinary(
+    callback: (data: Uint8Array, info: ChannelPublishInfo & BinaryFrameInfo, from: Sender) => unknown,
+    options?: { track?: string | null },
+  ): () => void {
     return this._state.subscribeBinary(callback, options)
   }
   onJoin(callback: (member: RemoteParticipant) => void): () => void {
@@ -406,7 +400,7 @@ class ClientRoom implements Room {
         return
       }
       case 'p-meta': {
-        this._state.applyParticipantMeta(event.id, event.meta, event.prev, event.seq)
+        this._state.applyParticipantMeta(event.id, event.meta, event.seq)
         const local = this._localParticipants.get(event.id)
         if (local) local._meta = event.meta
         return
@@ -477,10 +471,10 @@ class ClientRoom implements Room {
     this._localParticipants.clear()
   }
 
-  /** Declare this holder's wants to the server, one declaration per lane. The room-level text
+  /** Declare this holder's wants to the server. The room-level text
    *  want rides the standard broadcast subscription — declared synchronously, like
    *  `subscribe()`, so same-connection FIFO guarantees a publish right after subscribing gets
-   *  its own frame back; everything else is a keyed `_declareWant`. */
+   *  its own frame back. */
   private _syncWants(reconcileText = false): void {
     const state = this._state
     const text: MemberWants = state.closed ? { all: false, members: [] } : state.textWants()
@@ -488,19 +482,9 @@ class ClientRoom implements Room {
     if (state.closed) return // stub is dead — nothing to declare
 
     // A room-level text subscription supersedes the member set — clear it server-side.
-    this._declareWant('text', text.all ? '' : [...text.members].sort().join(','), {
-      __r: 'sub-text',
-      members: text.all ? [] : text.members,
-    })
+    void this._stub.send({ __r: 'sub-text', members: text.all ? [] : text.members }, { ack: false }).catch(() => {})
     const binary = state.binaryWants()
-    this._declareWant('binary', encodeBinaryWants(binary), { __r: 'sub-binary', wants: binary })
-  }
-
-  /** Send one lane's declaration iff its canonical encoding changed since last declared. */
-  private _declareWant(lane: string, encoded: string, request: RoomStubRequest): void {
-    if ((this._declaredWants.get(lane) ?? '') === encoded) return
-    this._declaredWants.set(lane, encoded)
-    void this._stub.send(request, { ack: false }).catch(() => {})
+    void this._stub.send({ __r: 'sub-binary', wants: binary }, { ack: false }).catch(() => {})
   }
 }
 
@@ -617,14 +601,9 @@ class ClientRoomParticipant extends ClientParticipantBase {
 
   async leave(): Promise<void> {
     if (this._left) return
-    this._left = true
-    try {
-      await this._room._request({ __r: 'req-leave', id: this.id })
-    } finally {
-      // Local cleanup even when the wire is gone — the server reaps the member on stub death.
-      this._room._dropParticipant(this.id)
-      this._onLeft({ type: 'left' })
-    }
+    await this._room._request({ __r: 'req-leave', id: this.id })
+    this._room._dropParticipant(this.id)
+    this._onLeft({ type: 'left' })
   }
 }
 
@@ -692,14 +671,9 @@ class ClientStandaloneParticipant extends ClientParticipantBase {
 
   async leave(): Promise<void> {
     if (this._left) return
-    this._left = true
-    try {
-      await this._request({ __r: 'req-leave' })
-    } finally {
-      // Local cleanup even when the wire is gone — the server reaps the member on stub death.
-      this._onLeft({ type: 'left' })
-      void this._channel.close().catch(() => {})
-    }
+    await this._request({ __r: 'req-leave' })
+    this._onLeft({ type: 'left' })
+    void this._channel.close().catch(() => {})
   }
 
   private _request(req: ParticipantStubRequest): Promise<unknown> {
@@ -715,16 +689,6 @@ class ClientStandaloneParticipant extends ClientParticipantBase {
 function standaloneLeftCause(msg: { cause?: 'removed' | 'disconnected' | 'closed'; reason?: unknown }): LeaveCause {
   const type = msg.cause ?? 'left'
   return msg.reason === undefined ? { type } : { type, reason: msg.reason }
-}
-
-/** Canonical (order-independent) form of a binary want — the dedupe key for `sub-binary`.
- *  The empty want encodes to `''`, matching the nothing-sent-yet initial state. */
-function encodeBinaryWants(wants: BinaryWants): string {
-  const encodeTracks = (w: { all: boolean; tracks: string[] }) => (w.all ? '*' : [...w.tracks].sort().join(','))
-  const members = Object.entries(wants.members)
-    .map(([id, w]) => `${id}=${encodeTracks(w)}`)
-    .sort()
-  return [encodeTracks(wants.everyMember), ...members].join(';')
 }
 
 function reportRoomError(err: unknown): void {

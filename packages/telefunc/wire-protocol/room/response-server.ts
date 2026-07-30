@@ -135,10 +135,8 @@ const roomParticipantReplacer: ReplacerType<RoomParticipantContract, ServerRepla
     return {
       metadata: {
         channelId: channel.id,
-        roomId: participant._room.id,
         id: participant.id,
         meta: participant.meta,
-        joinedAt: participant._joinedAt,
         selfDelivery: participant.selfDelivery,
         identity: participant.identity,
       },
