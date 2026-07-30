@@ -513,6 +513,17 @@ describe('Room public behavior', () => {
     expect(heartbeat).toHaveBeenCalledOnce()
   })
 
+  it('renews every owned member in one heartbeat cell transaction', async () => {
+    const room = (await Room.create('batched-heartbeat')) as ServerRoom
+    await room.join()
+    await room.join()
+    const compare = vi.spyOn(driver, 'compareExchangeCells')
+
+    await (room as unknown as { _heartbeatTick(): Promise<void> })._heartbeatTick()
+
+    expect(compare).toHaveBeenCalledOnce()
+  })
+
   it('replaces a subscription that is already closed on initial establishment', async () => {
     const closed = terminalSubscription()
     await closed.close()
