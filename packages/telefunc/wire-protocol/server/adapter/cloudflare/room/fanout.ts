@@ -22,7 +22,6 @@ export class Fanout {
   readonly #chains = new Map<string, Map<string, Promise<void>>>()
   readonly #incarnationFences = new Map<string, { active: boolean }>()
   readonly #attempts = new Map<string, Promise<void>>()
-  #tokenSeq = 0
 
   constructor(deliver: DeliverFn, defer: (resume: () => void) => void = queueMicrotask) {
     this.#deliver = deliver
@@ -55,7 +54,9 @@ export class Fanout {
       })
     // Settlement gate: the next frame starts after this one settles, success OR failure.
     lanes.set(laneKey, attempt.then(noop, noop))
-    const token = `d-${++this.#tokenSeq}`
+    // The token crosses authority reconstruction: a process-local sequence can alias a newer
+    // instance's attempt and settle/delete the wrong caller's delivery.
+    const token = crypto.randomUUID()
     this.#attempts.set(token, attempt)
     return token
   }

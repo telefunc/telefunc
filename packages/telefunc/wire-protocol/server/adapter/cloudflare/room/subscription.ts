@@ -60,15 +60,14 @@ export class CloudflareRoomSubscriptionAttempt implements SubscriptionAttempt {
     return () => this.#listeners.delete(cb)
   }
 
-  matches(request: RoomShardInvalidationRequest, terminalWhileEstablishing: boolean = false): boolean {
+  matches(request: RoomShardInvalidationRequest): boolean {
     return (
       request.roomId === this.#source.roomId &&
       request.inc === this.#source.inc &&
       request.laneKey === this.#source.laneKey &&
       request.subscriberDoId === this.#source.subscriberDoId &&
       request.leaseId === this.#leaseId &&
-      (request.generationToken === this.#generationToken ||
-        (terminalWhileEstablishing && this.#state === 'establishing'))
+      (request.generationToken === this.#generationToken || this.#state === 'establishing')
     )
   }
 
@@ -84,7 +83,6 @@ export class CloudflareRoomSubscriptionAttempt implements SubscriptionAttempt {
   terminate(): void {
     if (this.#unsubscribed) return
     this.#unsubscribed = true
-    this.#resolveReady()
     this.#terminate()
     void this.#teardown().catch(console.error)
   }
@@ -179,6 +177,9 @@ export class CloudflareRoomSubscriptionAttempt implements SubscriptionAttempt {
     if (this.#isClosed()) return
     this.#cancelRenewal?.()
     this.#cancelRenewal = null
+    if (!this.#readySettled) {
+      this.#rejectReady(new Error('Cloudflare Room subscription terminated before acknowledgement'))
+    }
     this.#transition('terminated')
     this.#onClosed()
   }

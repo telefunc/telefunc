@@ -261,15 +261,21 @@ export class TelefuncRoomDurableObject extends ProductionRoomDurableObject {
   }
 
   async telefuncRoomWaitForFirstCommitForTest(): Promise<void> {
-    await this.#responseReordering?.firstCommit.promise
+    const probe = this.#responseReordering
+    if (probe === undefined) throw new Error('response reordering probe was not prepared')
+    await probe.firstCommit.promise
   }
 
   telefuncRoomReleaseFirstCommitForTest(): void {
-    this.#responseReordering?.firstResponse.resolve()
+    const probe = this.#responseReordering
+    if (probe === undefined) throw new Error('response reordering probe was not prepared')
+    probe.firstResponse.resolve()
   }
 
   telefuncRoomReleaseSecondDeliveryForTest(): void {
-    this.#responseReordering?.secondDelivery.resolve()
+    const probe = this.#responseReordering
+    if (probe === undefined) throw new Error('response reordering probe was not prepared')
+    probe.secondDelivery.resolve()
   }
 
   telefuncRoomPrepareRegistrationHoldForTest(): void {
@@ -277,11 +283,15 @@ export class TelefuncRoomDurableObject extends ProductionRoomDurableObject {
   }
 
   async telefuncRoomWaitForRegistrationForTest(): Promise<void> {
-    await this.#registrationHold?.installed.promise
+    const hold = this.#registrationHold
+    if (hold === undefined) throw new Error('registration hold probe was not prepared')
+    await hold.installed.promise
   }
 
   telefuncRoomReleaseRegistrationForTest(): void {
-    this.#registrationHold?.release.resolve()
+    const hold = this.#registrationHold
+    if (hold === undefined) throw new Error('registration hold probe was not prepared')
+    hold.release.resolve()
   }
 
   telefuncRoomAlarmForTest(): Promise<number | null> {
