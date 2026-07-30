@@ -36,6 +36,16 @@ async function pollUntil(render: () => { done: boolean } | Promise<{ done: boole
   }
 }
 
+async function getParticipantWhenJoined(room: Awaited<ReturnType<typeof onGetRoom>>, id: string) {
+  let participant = await room.getParticipant(id)
+  for (let i = 0; i < 50 && !participant; i++) {
+    await new Promise((r) => setTimeout(r, 200))
+    participant = await room.getParticipant(id)
+  }
+  if (!participant) throw new Error(`Participant did not join within the test horizon: ${id}`)
+  return participant
+}
+
 let gcParticipant: { publish(data: unknown): Promise<unknown> } | null = null
 let gcRoomRef: WeakRef<object> | null = null
 
@@ -157,11 +167,7 @@ function Room() {
           await me.publish({ text: 'from-bob' })
           await me.setMeta({ name: 'Bobby' })
           // Live handle (meta stays fresh); retry — the join event may still be in flight.
-          let remoteMe = await observer.getParticipant(me.id)
-          for (let i = 0; i < 50 && !remoteMe; i++) {
-            await new Promise((r) => setTimeout(r, 200))
-            remoteMe = await observer.getParticipant(me.id)
-          }
+          const remoteMe = await getParticipantWhenJoined(observer, me.id)
 
           // Direct message: a room-joined participant whispers to the standalone one.
           // Privacy: it must reach Bob's inbox and never the room stream.
@@ -447,11 +453,7 @@ function Room() {
           await onCreateRoom(roomId)
           const lobby = await onGetRoom(roomId)
           const me = await lobby.join({ meta: { name: 'Zoe', score: 1 } })
-          let remote = await lobby.getParticipant(me.id)
-          for (let i = 0; i < 50 && !remote; i++) {
-            await new Promise((r) => setTimeout(r, 200))
-            remote = await lobby.getParticipant(me.id)
-          }
+          const remote = await getParticipantWhenJoined(lobby, me.id)
 
           await me.setAttributes({ score: 2 }) // merge — name is untouched
           await me.setAttributes({ title: 'lead' }) // add a key
@@ -595,15 +597,11 @@ function Room() {
           const y = await room.join({ meta: { name: 'Y' } })
 
           const observer = await onGetRoom(roomId)
-          let remoteX = await observer.getParticipant(x.id)
-          for (let i = 0; i < 50 && !remoteX; i++) {
-            await new Promise((r) => setTimeout(r, 200))
-            remoteX = await observer.getParticipant(x.id)
-          }
+          const remoteX = await getParticipantWhenJoined(observer, x.id)
           const xText: string[] = []
           const xBin: number[] = []
-          remoteX!.subscribe((data) => xText.push(data as string))
-          remoteX!.subscribeBinary((data) => xBin.push(data[0]!), { track: null })
+          remoteX.subscribe((data) => xText.push(data as string))
+          remoteX.subscribeBinary((data) => xBin.push(data[0]!), { track: null })
           // Room-level control: proves Y's traffic really was delivered, so xText's absence means something.
           const all: string[] = []
           observer.subscribe((data) => all.push(data as string))
