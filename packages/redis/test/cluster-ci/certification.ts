@@ -1,15 +1,7 @@
 import { Cluster, Redis } from 'ioredis'
-import {
-  disposeBackend,
-  installBackend,
-  type BackendSpi,
-  type CommitAccepted,
-  type LaneId,
-  type RoomHead,
-  type SubscriptionState,
-} from 'telefunc/backend'
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
-import { RedisRoomBackend } from '../../src/index.js'
+import type { BackendSpi, CommitAccepted, LaneId, RoomHead, SubscriptionState } from 'telefunc/backend'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
+import { installRedis, RedisRoomBackend } from '../../src/index.js'
 import {
   DIRECTORY_PUT_LUA,
   directoryIndexKey,
@@ -52,10 +44,6 @@ describe('Redis real three-master Cluster CI certification', () => {
   afterAll(async () => {
     await Promise.allSettled((masters ?? []).map(({ client }) => client.quit()))
     if (cluster !== undefined) await cluster.quit().catch(() => cluster.disconnect())
-  })
-
-  afterEach(async () => {
-    await disposeBackend()
   })
 
   it('covers shipped command KEYS and terminates live and in-flight attempts when their generation drops', async () => {
@@ -621,7 +609,7 @@ async function readMasters(nodes: RedisClusterNode[]): Promise<Master[]> {
 }
 
 function redisBackend(redis: Redis | Cluster, prefix: string): BackendSpi {
-  return installBackend(() => new RedisRoomBackend({ redis, prefix }))
+  return installRedis(redis, { prefix })
 }
 
 async function open(backend: Pick<BackendSpi, 'compareExchangeHead'>, roomId: string, inc: string): Promise<RoomHead> {

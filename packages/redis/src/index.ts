@@ -7,8 +7,8 @@ import { setDefaultBackend } from 'telefunc/__internal'
 import { RedisRoomBackend, type RedisRoomBackendOptions } from './room/backend.js'
 
 /** Installs Redis as Telefunc's complete backend: generic Broadcast plus durable Room state. */
-function installRedis(redis: Redis | Cluster, options: InstallRedisOptions = {}): void {
-  setDefaultBackend(
+function installRedis(redis: Redis | Cluster, options: InstallRedisOptions = {}) {
+  return setDefaultBackend(
     () => new RedisRoomBackend({ redis, prefix: options.prefix }),
     redisBackendDefaultIdentity(redis, options.prefix),
   )
