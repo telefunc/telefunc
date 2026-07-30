@@ -27,14 +27,7 @@ import {
 import { roomScenario, type RoomScenarioId } from './Room.scenarios'
 import { close } from 'telefunc/client'
 
-/** Render every poll so the e2e autoRetry sees fresh data on each iteration (see Publish.tsx).
- *  `render` may be async — some scenarios read server-side state (e.g. an audit log) each tick. */
-async function pollUntil(render: () => { done: boolean } | Promise<{ done: boolean }>) {
-  for (let poll = 0; poll < 50; poll++) {
-    if ((await render()).done) break
-    await new Promise((r) => setTimeout(r, 200))
-  }
-}
+type PollResult = { done: boolean; result?: unknown }
 
 async function getParticipantWhenJoined(room: Awaited<ReturnType<typeof onGetRoom>>, id: string) {
   let participant = await room.getParticipant(id)
@@ -44,6 +37,17 @@ async function getParticipantWhenJoined(room: Awaited<ReturnType<typeof onGetRoo
   }
   if (!participant) throw new Error(`Participant did not join within the test horizon: ${id}`)
   return participant
+}
+
+async function createRoomId(label: string): Promise<string> {
+  const roomId = `e2e-${label}:${crypto.randomUUID()}`
+  await onCreateRoom(roomId)
+  return roomId
+}
+
+async function createRoom(label: string) {
+  const roomId = await createRoomId(label)
+  return [roomId, await onGetRoom(roomId)] as const
 }
 
 let gcParticipant: { publish(data: unknown): Promise<unknown> } | null = null
@@ -59,6 +63,15 @@ function Room() {
   const [result, setResult] = useState<string>('')
   const [hydrated, setHydrated] = useState(false)
   useEffect(() => setHydrated(true), [])
+  /** Render every poll so e2e autoRetry sees fresh data; some reads are asynchronous. */
+  const pollUntil = async (render: () => PollResult | Promise<PollResult>) => {
+    for (let poll = 0; poll < 50; poll++) {
+      const { done, result } = await render()
+      if (result !== undefined) setResult(JSON.stringify(result))
+      if (done) break
+      await new Promise((resolve) => setTimeout(resolve, 200))
+    }
+  }
 
   const scenario = (id: RoomScenarioId, heading: string | null, label: string, run: () => Promise<void>) => (
     <>
@@ -80,9 +93,7 @@ function Room() {
       <pre id="room-result">{result}</pre>
 
       {scenario('chat', 'Presence & Chat', 'Join, publish, setMeta, leave', async () => {
-        const roomId = `e2e-chat:${crypto.randomUUID()}`
-        await onCreateRoom(roomId)
-        const lobby = await onGetRoom(roomId)
+        const [roomId, lobby] = await createRoom('chat')
 
         const events: string[] = []
         lobby.onJoin((m) => events.push(`join:${m.meta.name}`))
@@ -117,16 +128,15 @@ function Room() {
             snapshotStable: lobby.snapshot() === lobby.snapshot(),
             changes,
           }
-          setResult(JSON.stringify(state))
           return {
+            result: state,
             done: events.length >= 2 && received.length >= 1 && updates.length >= 1 && changes >= 1,
           }
         })
       })}
 
       {scenario('retain', 'Retained Replay', 'Retained replay to a late subscriber', async () => {
-        const roomId = `e2e-retain:${crypto.randomUUID()}`
-        await onCreateRoom(roomId)
+        const roomId = await createRoomId('retain')
 
         // A publisher pins a retained message; a subscriber that arrives *after* the publish must
         // still receive it (MQTT-style). The retained slot is read only once the subscription is
@@ -141,16 +151,11 @@ function Room() {
         const received: string[] = []
         late.subscribe((data) => received.push((data as { text: string }).text))
 
-        await pollUntil(() => {
-          setResult(JSON.stringify({ received }))
-          return { done: received.length >= 1 }
-        })
+        await pollUntil(() => ({ result: { received }, done: received.length >= 1 }))
       })}
 
       {scenario('participant', 'Server-Joined Participant', 'Server-side join + publish', async () => {
-        const roomId = `e2e-participant:${crypto.randomUUID()}`
-        await onCreateRoom(roomId)
-        const observer = await onGetRoom(roomId)
+        const [roomId, observer] = await createRoom('participant')
         const received: Array<{ text: unknown; from: unknown }> = []
         observer.subscribe((data, _info, from) => {
           received.push({ text: (data as { text: string }).text, from: from.meta.name })
@@ -180,8 +185,8 @@ function Room() {
             remoteIdentity: remoteMe?.identity ?? null,
             dms,
           }
-          setResult(JSON.stringify(state))
           return {
+            result: state,
             done:
               received.length >= 1 &&
               state.remoteMetaName === 'Bobby' &&
@@ -192,9 +197,7 @@ function Room() {
       })}
 
       {scenario('binary', 'Binary', 'Publish 3 binary frames', async () => {
-        const roomId = `e2e-binary:${crypto.randomUUID()}`
-        await onCreateRoom(roomId)
-        const videoRoom = await onGetRoom(roomId)
+        const [roomId, videoRoom] = await createRoom('binary')
         const me = await videoRoom.join({ meta: { name: 'Cam' } })
 
         const frames: Array<{
@@ -227,8 +230,8 @@ function Room() {
         const camAck = await me.publishBinary(new Uint8Array(32).fill(9), { track: 'camera', meta: { key: true } })
 
         await pollUntil(() => {
-          setResult(JSON.stringify({ frames, cameraOnly, defaultOnly, camReceivers: camAck.receivers }))
           return {
+            result: { frames, cameraOnly, defaultOnly, camReceivers: camAck.receivers },
             done:
               frames.length >= 4 &&
               cameraOnly.length >= 1 &&
@@ -240,8 +243,7 @@ function Room() {
       })}
 
       {scenario('guard', 'Guards', 'Guarded publish & send', async () => {
-        const roomId = `e2e-guard:${crypto.randomUUID()}`
-        await onCreateRoom(roomId)
+        const roomId = await createRoomId('guard')
         const room = await onGetGuardedRoom(roomId)
 
         const received: unknown[] = []
@@ -268,10 +270,10 @@ function Room() {
         await me.publish('fine')
         await me.send(peer.id, 'psst')
 
-        await pollUntil(() => {
-          setResult(JSON.stringify({ joinError, publishError, sendError, received, inbox }))
-          return { done: received.length >= 1 && inbox.length >= 1 }
-        })
+        await pollUntil(() => ({
+          result: { joinError, publishError, sendError, received, inbox },
+          done: received.length >= 1 && inbox.length >= 1,
+        }))
       })}
 
       {scenario('shield', null, 'Shielded publish', async () => {
@@ -294,16 +296,11 @@ function Room() {
           (err: Error) => err.name,
         )
 
-        await pollUntil(() => {
-          setResult(JSON.stringify({ okAck, badError, received }))
-          return { done: received.length >= 1 }
-        })
+        await pollUntil(() => ({ result: { okAck, badError, received }, done: received.length >= 1 }))
       })}
 
       {scenario('member', 'Returnable member view', 'Return room + member view', async () => {
-        const roomId = `e2e-member:${crypto.randomUUID()}`
-        await onCreateRoom(roomId)
-        const lobby = await onGetRoom(roomId)
+        const [roomId, lobby] = await createRoom('member')
         const me = await lobby.join({ meta: { name: 'Viewed' } })
 
         // A telefunction returns { room, member } — ref-identity binds the view to the room.
@@ -330,9 +327,7 @@ function Room() {
         'Admin (announce, system send, kick & close)',
         'Announce, system send, kick, close',
         async () => {
-          const roomId = `e2e-admin:${crypto.randomUUID()}`
-          await onCreateRoom(roomId)
-          const lobby = await onGetRoom(roomId)
+          const [roomId, lobby] = await createRoom('admin')
           const me = await lobby.join({ meta: { name: 'Eve' } })
 
           // Room-authored messages: a broadcast to everyone, and a whisper (fromId === '').
@@ -352,10 +347,10 @@ function Room() {
 
           await onAnnounce(roomId, 'maintenance')
           await onSystemSend(roomId, me.id, 'welcome')
-          await pollUntil(() => {
-            setResult(JSON.stringify({ announcements, system }))
-            return { done: announcements.length >= 1 && system.length >= 1 }
-          })
+          await pollUntil(() => ({
+            result: { announcements, system },
+            done: announcements.length >= 1 && system.length >= 1,
+          }))
 
           await onKick(roomId, me.id)
           await onCloseRoom(roomId)
@@ -369,16 +364,13 @@ function Room() {
               isClosed: lobby.isClosed,
               count: lobby.count,
             }
-            setResult(JSON.stringify(state))
-            return { done: kicked && closed && lobby.isClosed }
+            return { result: state, done: kicked && closed && lobby.isClosed }
           })
         },
       )}
 
       {scenario('conflate', 'Coalesce (conflation)', 'Coalesced burst', async () => {
-        const roomId = `e2e-conflate:${crypto.randomUUID()}`
-        await onCreateRoom(roomId)
-        const lobby = await onGetRoom(roomId)
+        const [roomId, lobby] = await createRoom('conflate')
         const received: number[] = []
         lobby.subscribe((data) => received.push((data as { n: number }).n))
         const me = await lobby.join({ meta: { name: 'Cursor' } })
@@ -387,16 +379,14 @@ function Room() {
         // pending, so only the first and the latest reach the room — deterministically [1, 5].
         const acks = await Promise.all([1, 2, 3, 4, 5].map((n) => me.publish({ n }, { coalesce: 'cursor' })))
 
-        await pollUntil(() => {
-          setResult(JSON.stringify({ received, acked: acks.length, allSeqs: acks.every((a) => a.seq > 0) }))
-          return { done: received.includes(5) && received.length >= 2 }
-        })
+        await pollUntil(() => ({
+          result: { received, acked: acks.length, allSeqs: acks.every((ack) => ack.seq > 0) },
+          done: received.includes(5) && received.length >= 2,
+        }))
       })}
 
       {scenario('attributes', 'setAttributes (partial merge)', 'Merge & delete attributes', async () => {
-        const roomId = `e2e-attr:${crypto.randomUUID()}`
-        await onCreateRoom(roomId)
-        const lobby = await onGetRoom(roomId)
+        const [roomId, lobby] = await createRoom('attr')
         const me = await lobby.join({ meta: { name: 'Zoe', score: 1 } })
         const remote = await getParticipantWhenJoined(lobby, me.id)
 
@@ -407,23 +397,21 @@ function Room() {
         await pollUntil(() => {
           const meta = (remote?.meta ?? {}) as { name?: string; score?: number; title?: string }
           const localMeta = me.meta as { name?: string; score?: number; title?: string }
-          setResult(
-            JSON.stringify({
+          return {
+            result: {
               name: meta.name ?? null,
               title: meta.title ?? null,
               hasScore: 'score' in meta,
               localName: localMeta.name ?? null,
               localHasScore: 'score' in localMeta,
-            }),
-          )
-          return { done: meta.name === 'Zoe' && meta.title === 'lead' && !('score' in meta) }
+            },
+            done: meta.name === 'Zoe' && meta.title === 'lead' && !('score' in meta),
+          }
         })
       })}
 
       {scenario('demand', 'onDemand (track demand)', 'Track demand up & down', async () => {
-        const roomId = `e2e-demand:${crypto.randomUUID()}`
-        await onCreateRoom(roomId)
-        const pubRoom = await onGetRoom(roomId)
+        const [roomId, pubRoom] = await createRoom('demand')
         const pub = await pubRoom.join({ meta: { name: 'Pub' } })
         const cam: boolean[] = []
         pub.onDemand((track, wanted) => {
@@ -435,21 +423,16 @@ function Room() {
         // A separate observer wants the track — demand rises; releasing it — demand falls.
         const viewer = await onGetRoom(roomId)
         const unsub = viewer.subscribeBinary(() => {}, { track: 'camera' })
-        await pollUntil(() => {
-          setResult(JSON.stringify({ cam }))
-          return { done: cam.includes(true) }
-        })
+        await pollUntil(() => ({ result: { cam }, done: cam.includes(true) }))
         unsub()
-        await pollUntil(() => {
-          setResult(JSON.stringify({ cam }))
-          return { done: cam.includes(true) && cam[cam.length - 1] === false }
-        })
+        await pollUntil(() => ({
+          result: { cam },
+          done: cam.includes(true) && cam[cam.length - 1] === false,
+        }))
       })}
 
       {scenario('tail', 'Tail (single-call history)', 'Tail holds pre-subscribe messages', async () => {
-        const roomId = `e2e-tail:${crypto.randomUUID()}`
-        await onCreateRoom(roomId)
-        const owner = await onGetRoom(roomId)
+        const [roomId, owner] = await createRoom('tail')
         const me = await owner.join({ meta: { name: 'Src' } })
 
         // Tail handle: relay starts at serialize time, buffered on the client until subscribe().
@@ -460,15 +443,11 @@ function Room() {
         const received: string[] = []
         tailed.subscribe((data) => received.push((data as { t: string }).t))
 
-        await pollUntil(() => {
-          setResult(JSON.stringify({ received }))
-          return { done: received.includes('between') }
-        })
+        await pollUntil(() => ({ result: { received }, done: received.includes('between') }))
       })}
 
       {scenario('hooks', 'After-hooks (persistence receipts)', 'After-join/publish/send receipts', async () => {
-        const roomId = `e2e-hooks:${crypto.randomUUID()}`
-        await onCreateRoom(roomId)
+        const roomId = await createRoomId('hooks')
         const room = await onGetAuditRoom(roomId)
         const a = await room.join({ meta: { name: 'A' } })
         const b = await room.join({ meta: { name: 'B' } })
@@ -487,8 +466,8 @@ function Room() {
           const joinA = auditLog.find((e) => e.kind === 'join' && e.name === 'A')
           const publish = auditLog.find((e) => e.kind === 'publish')
           const send = auditLog.find((e) => e.kind === 'send')
-          setResult(
-            JSON.stringify({
+          return {
+            result: {
               joins: auditLog
                 .filter((e) => e.kind === 'join')
                 .map((e) => e.name)
@@ -496,16 +475,14 @@ function Room() {
               joinHasTs: typeof joinA?.joinedAt === 'number',
               publish: publish ? { name: publish.name, data: publish.data, seqOk: (publish.seq ?? 0) > 0 } : null,
               send: send ? { name: send.name, to: send.to, seqOk: (send.seq ?? 0) > 0 } : null,
-            }),
-          )
-          return { done: !!joinA && !!publish && !!send }
+            },
+            done: !!joinA && !!publish && !!send,
+          }
         })
       })}
 
       {scenario('member-sub', 'Member-selective receive', 'Follow one member', async () => {
-        const roomId = `e2e-membersub:${crypto.randomUUID()}`
-        await onCreateRoom(roomId)
-        const room = await onGetRoom(roomId)
+        const [roomId, room] = await createRoom('membersub')
         const x = await room.join({ meta: { name: 'X' } })
         const y = await room.join({ meta: { name: 'Y' } })
 
@@ -524,16 +501,14 @@ function Room() {
         await x.publishBinary(new Uint8Array([7]))
         await y.publishBinary(new Uint8Array([8]))
 
-        await pollUntil(() => {
-          setResult(JSON.stringify({ xText, xBin, all: [...all].sort() }))
-          return { done: all.includes('x1') && all.includes('y1') && xBin.includes(7) }
-        })
+        await pollUntil(() => ({
+          result: { xText, xBin, all: [...all].sort() },
+          done: all.includes('x1') && all.includes('y1') && xBin.includes(7),
+        }))
       })}
 
       {scenario('dm-hold', 'DM pre-listen hold', 'Send before listen', async () => {
-        const roomId = `e2e-dmhold:${crypto.randomUUID()}`
-        await onCreateRoom(roomId)
-        const observer = await onGetRoom(roomId)
+        const [roomId, observer] = await createRoom('dmhold')
         const bob = await onJoinAsServer(roomId, 'Bob')
         const ally = await observer.join({ meta: { name: 'Ally' } })
 
@@ -542,15 +517,11 @@ function Room() {
         const held: string[] = []
         bob.listen((data) => held.push(data as string))
 
-        await pollUntil(() => {
-          setResult(JSON.stringify({ held }))
-          return { done: held.includes('early') }
-        })
+        await pollUntil(() => ({ result: { held }, done: held.includes('early') }))
       })}
 
       {scenario('self', 'selfDelivery: false', 'Own frames suppressed', async () => {
-        const roomId = `e2e-self:${crypto.randomUUID()}`
-        await onCreateRoom(roomId)
+        const roomId = await createRoomId('self')
         // The "others receive it" observer is a genuinely different room consumer, so its receipt
         // distinguishes self-delivery suppression from a publish that disappeared altogether.
         await onWatchRoom(roomId)
@@ -563,9 +534,8 @@ function Room() {
 
         await pollUntil(async () => {
           const theirs = (await onGetWatched(roomId)) as string[]
-          setResult(JSON.stringify({ mine, theirs, selfDelivery: me.selfDelivery }))
           // `theirs` arriving proves the publish propagated — so `mine` staying empty is meaningful.
-          return { done: theirs.includes('hi') }
+          return { result: { mine, theirs, selfDelivery: me.selfDelivery }, done: theirs.includes('hi') }
         })
       })}
 
@@ -574,8 +544,7 @@ function Room() {
         'selfDelivery: false (server co-return + client join on one stub)',
         'Co-return suppressed, client join delivered',
         async () => {
-          const roomId = `e2e-self-server:${crypto.randomUUID()}`
-          await onCreateRoom(roomId)
+          const roomId = await createRoomId('self-server')
           await onWatchRoom(roomId) // a different (server-side) client — receives everything
 
           // `me`: server-side join with selfDelivery:false, co-returned with its room. Its own
@@ -592,9 +561,11 @@ function Room() {
 
           await pollUntil(async () => {
             const theirs = (await onGetWatched(roomId)) as string[]
-            setResult(JSON.stringify({ mine, theirs, selfDelivery: me.selfDelivery }))
             // Gate on the client seeing notMe's frame (published last) and the watcher seeing me's.
-            return { done: mine.includes('from-notme') && theirs.includes('from-me') }
+            return {
+              result: { mine, theirs, selfDelivery: me.selfDelivery },
+              done: mine.includes('from-notme') && theirs.includes('from-me'),
+            }
           })
         },
       )}
@@ -614,23 +585,21 @@ function Room() {
         const listed = await onListRooms(base)
 
         await pollUntil(() => {
-          setResult(
-            JSON.stringify({
+          return {
+            result: {
               updates,
               topic: (room.meta as { topic?: string }).topic ?? null,
               listed,
               sameId: same.id === roomId,
               sameCount: same.count,
-            }),
-          )
-          return { done: updates.includes('updated') }
+            },
+            done: updates.includes('updated'),
+          }
         })
       })}
 
       {scenario('identity', 'Kick by identity, onEmpty', 'Remove by identity', async () => {
-        const roomId = `e2e-identity:${crypto.randomUUID()}`
-        await onCreateRoom(roomId)
-        const observer = await onGetRoom(roomId)
+        const [roomId, observer] = await createRoom('identity')
         let empty = false
         observer.onEmpty(() => {
           empty = true
@@ -645,10 +614,10 @@ function Room() {
         await pollUntil(() => ({ done: observer.count >= 1 }))
 
         await onKickByIdentity(roomId, 'user:Multi')
-        await pollUntil(() => {
-          setResult(JSON.stringify({ cause, count: observer.count, empty }))
-          return { done: cause !== null && observer.count === 0 }
-        })
+        await pollUntil(() => ({
+          result: { cause, count: observer.count, empty },
+          done: cause !== null && observer.count === 0,
+        }))
       })}
 
       {scenario(
@@ -656,8 +625,7 @@ function Room() {
         'Participant keeps its Room alive',
         'Join and retain only the participant',
         async () => {
-          const roomId = `e2e-gc-participant:${crypto.randomUUID()}`
-          await onCreateRoom(roomId)
+          const roomId = await createRoomId('gc-participant')
           await retainOnlyJoinedParticipant(roomId)
           setResult(JSON.stringify({ phase: 'ready' }))
         },

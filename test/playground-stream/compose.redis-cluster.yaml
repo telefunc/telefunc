@@ -20,11 +20,8 @@ services:
       retries: 60
       start_period: 2s
 
-  redis-b:
-    <<: *redis-cluster-node
-
-  redis-c:
-    <<: *redis-cluster-node
+  redis-b: { <<: *redis-cluster-node }
+  redis-c: { <<: *redis-cluster-node }
 
   redis-cluster-init:
     image: redis:7-alpine
@@ -77,17 +74,8 @@ services:
       redis-cluster-certification:
         condition: service_completed_successfully
 
-  playground-b:
-    <<: *cluster-playground
-
-  playground-c:
-    <<: *cluster-playground
-
-  playground-d:
-    <<: *cluster-playground
-
-  playground-e:
-    <<: *cluster-playground
-
-  playground-f:
-    <<: *cluster-playground
+  playground-b: { <<: *cluster-playground }
+  playground-c: { <<: *cluster-playground }
+  playground-d: { <<: *cluster-playground }
+  playground-e: { <<: *cluster-playground }
+  playground-f: { <<: *cluster-playground }

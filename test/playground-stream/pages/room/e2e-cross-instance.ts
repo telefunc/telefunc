@@ -7,36 +7,27 @@ function testRedisRoomCrossInstance() {
     const roomId = `redis-cross-instance-${Date.now()}-${Math.random().toString(36).slice(2)}`
     const message = { kind: 'from-a', nonce: Math.random().toString(36).slice(2) }
     try {
-      await autoRetry(
-        async () => {
-          expect(await request('a', '/api/room-cross-instance/join', roomId, 'POST')).to.deep.equal({
-            ok: true,
-            instance: 'A',
-          })
-        },
-        { timeout: 30_000 },
-      )
-      await autoRetry(
-        async () => {
-          expect(await request('b', '/api/room-cross-instance/join', roomId, 'POST')).to.deep.equal({
-            ok: true,
-            instance: 'B',
-          })
-        },
-        { timeout: 30_000 },
-      )
+      await retry(30_000, async () => {
+        expect(await request('a', '/api/room-cross-instance/join', roomId, 'POST')).to.deep.equal({
+          ok: true,
+          instance: 'A',
+        })
+      })
+      await retry(30_000, async () => {
+        expect(await request('b', '/api/room-cross-instance/join', roomId, 'POST')).to.deep.equal({
+          ok: true,
+          instance: 'B',
+        })
+      })
       expect(await request('a', '/api/room-cross-instance/publish', roomId, 'POST', message)).to.deep.equal({
         ok: true,
         instance: 'A',
       })
 
-      await autoRetry(
-        async () => {
-          const observed = await request('b', '/api/room-cross-instance/received', roomId)
-          expect(observed).to.deep.equal({ ok: true, instance: 'B', received: [message] })
-        },
-        { timeout: 10_000 },
-      )
+      await retry(10_000, async () => {
+        const observed = await request('b', '/api/room-cross-instance/received', roomId)
+        expect(observed).to.deep.equal({ ok: true, instance: 'B', received: [message] })
+      })
     } finally {
       await Promise.allSettled([
         request('a', '/api/room-cross-instance/leave', roomId, 'DELETE'),
@@ -51,15 +42,12 @@ function testRedisBroadcastCrossInstance() {
     const key = `redis-cluster-broadcast-${Date.now()}-${Math.random().toString(36).slice(2)}`
     const message = { kind: 'generic-from-a', nonce: Math.random().toString(36).slice(2) }
     try {
-      await autoRetry(
-        async () => {
-          expect(await broadcastRequest('b', '/api/broadcast-cross-instance/subscribe', key, 'POST')).to.deep.equal({
-            ok: true,
-            instance: 'B',
-          })
-        },
-        { timeout: 30_000 },
-      )
+      await retry(30_000, async () => {
+        expect(await broadcastRequest('b', '/api/broadcast-cross-instance/subscribe', key, 'POST')).to.deep.equal({
+          ok: true,
+          instance: 'B',
+        })
+      })
       expect(
         await broadcastRequest('a', '/api/broadcast-cross-instance/publish', key, 'POST', message),
       ).to.deep.include({
@@ -67,17 +55,18 @@ function testRedisBroadcastCrossInstance() {
         instance: 'A',
       })
 
-      await autoRetry(
-        async () => {
-          const observed = await broadcastRequest('b', '/api/broadcast-cross-instance/received', key)
-          expect(observed).to.deep.equal({ ok: true, instance: 'B', received: [message] })
-        },
-        { timeout: 10_000 },
-      )
+      await retry(10_000, async () => {
+        const observed = await broadcastRequest('b', '/api/broadcast-cross-instance/received', key)
+        expect(observed).to.deep.equal({ ok: true, instance: 'B', received: [message] })
+      })
     } finally {
       await broadcastRequest('b', '/api/broadcast-cross-instance/unsubscribe', key, 'DELETE').catch(() => {})
     }
   })
+}
+
+function retry(timeout: number, assertion: () => Promise<void>): Promise<void> {
+  return autoRetry(assertion, { timeout })
 }
 
 async function request(
