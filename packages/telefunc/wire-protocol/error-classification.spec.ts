@@ -6,7 +6,11 @@ const brands = Object.fromEntries(
   ['Abort', 'RoomError', 'ShieldValidationError'].map((name) => [name, Symbol.for(`telefunc.${name}`)]),
 ) as Record<string, symbol>
 const branded = (...names: string[]) =>
-  Object.assign(new Error('branded'), Object.fromEntries(names.map((name) => [brands[name], true])))
+  Object.assign(
+    new Error('branded'),
+    Object.fromEntries(names.map((name) => [brands[name], true])),
+    names.includes('Abort') ? { abortValue: undefined } : {},
+  )
 
 it.each([
   [['Abort', 'RoomError'], 'abort'],

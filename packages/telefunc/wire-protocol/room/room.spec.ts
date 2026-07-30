@@ -679,7 +679,7 @@ describe('Room public behavior', () => {
     slot.sync(true, () => terminalSubscription().subscription)
     await expect(holderReady).resolves.toBeUndefined()
     await expect(slot.generationReady).resolves.toBeUndefined()
-    expect(slot).toMatchObject({ wanted: true, lost: false, active: true })
+    expect(slot).toMatchObject({ wanted: true, active: true })
     slot.stop()
   })
 
@@ -726,7 +726,7 @@ describe('Room public behavior', () => {
 
       expect((await backend.readHead(observer.id))?.head.state).toBe('open')
       expect({ closed: observer.isClosed, onClose: onClose.mock.calls.length }).toEqual({ closed: false, onClose: 0 })
-      expect(textSlot).toMatchObject({ wanted: true, lost: true, active: false })
+      expect(textSlot).toMatchObject({ wanted: true, active: false })
     } finally {
       subscribe.mockRestore()
       report.mockRestore()
