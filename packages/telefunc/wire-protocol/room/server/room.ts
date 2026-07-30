@@ -91,9 +91,6 @@ import type {
 import type { Room, RoomGuards } from './statics.js'
 assertIsNotBrowser()
 const ROOM_SUBSCRIPTION_REPLAN_LIMIT = 5
-// ---------------------------------------------------------------------------
-// ServerRoom
-// ---------------------------------------------------------------------------
 
 const SERVER_ROOM_BRAND: unique symbol = Symbol.for('telefunc.ServerRoom')
 
@@ -189,8 +186,6 @@ class ServerRoom implements Room {
     this._guards = guards
   }
 
-  // ── Room API ──
-
   get id(): string {
     return this._state.roomId
   }
@@ -278,8 +273,6 @@ class ServerRoom implements Room {
     return this._state.snapshot()
   }
 
-  // ── Membership operations (shared by local participants and stub requests) ──
-
   /** Join choreography shared by local `join()` and stub `req-join`. `track` registers the
    *  holder first — the member must count as owned before `_syncSubs()` brings up its inbox
    *  subscription and heartbeat, and before its join is announced. */
@@ -292,10 +285,6 @@ class ServerRoom implements Room {
     await this._assertOpen()
     const id = crypto.randomUUID()
     const joinedAt = Date.now()
-    // A hidden participant is not a party seeking admission — it's a server/bot/recorder — so it
-    // bypasses the admission ceremony: no `onBeforeJoin` policy and no `onAfterJoin` side effects. But
-    // its join IS announced on the control lane (flagged), so observers already connected learn of it
-    // live — the presence callbacks (`onJoin`/`count`) stay suppressed via the flag in `applyJoin`.
     // Admission policy runs first, on the definitive member ID — a rejected join writes nothing.
     const onBeforeJoin = this._guards?.onBeforeJoin
     if (!hidden && onBeforeJoin) await onBeforeJoin({ id, meta, identity })
@@ -303,9 +292,6 @@ class ServerRoom implements Room {
     this._syncSubs()
     let created = false
     try {
-      // Bring both receive paths up before writing any discoverable member or identity cell. Once the
-      // record exists, an identity-addressed DM is legal and can commit immediately; making the inbox
-      // ready first closes that otherwise-unrecoverable subscribe/write gap.
       const inbox = this._dmUnsubs.get(id)
       assert(inbox)
       await Promise.all([this._textSub.ready, inbox.ready])
@@ -332,7 +318,6 @@ class ServerRoom implements Room {
       throw error
     }
     if (hidden) return { id, joinedAt } // announced above; a hidden participant has no post-join hook
-    // Post-commit: the member exists and its join is announced — the place for side effects.
     const onAfterJoin = this._guards?.onAfterJoin
     if (onAfterJoin) await onAfterJoin({ id, meta, identity }, { joinedAt })
     return { id, joinedAt }
@@ -346,7 +331,6 @@ class ServerRoom implements Room {
     joinedAt: number,
     hidden = false,
   ): Promise<void> {
-    await this._assertOpen()
     const record: RoomMemberRecord = {
       meta,
       joinedAt,
@@ -383,9 +367,6 @@ class ServerRoom implements Room {
       value: undefined,
       mutations: keys.map((key) => ({ key })),
     }))
-    // A leaving member's per-track streams end, so their retained frames go too — binary per
-    // (member, track), and the room's one retained-text slot if this member still owns it. Room
-    // close drops the whole generation, including anything a leave races past.
     await dropRetainedOwnedBy(this.id, this._inc, id)
     this._applyLeave(id, cause)
     await publishCtrl(this.id, this._inc, { __r: 'leave', id, ...leaveCauseToWire(cause) })
@@ -407,7 +388,6 @@ class ServerRoom implements Room {
     id: string,
     computeMeta: (current: ParticipantMeta) => ParticipantMeta,
   ): Promise<void> {
-    await this._assertOpen()
     const key = roomMemberKvKey(this.id, id)
     const { meta, seq } = await mutateCells(this.id, this._inc, { keys: [key] }, (cells) => {
       const raw = cells.get(key)
@@ -438,10 +418,6 @@ class ServerRoom implements Room {
       ...(sender.identity === null ? {} : { fromIdentity: sender.identity }),
       data,
     }
-    // One atomic commit assigns the room-wide order, stores the retained frame (if any), and publishes
-    // — the assigned order rides the lane frame, so the retained copy, the live frame, and the
-    // receipt all carry the one pair with no separate allocate, and no subscriber sees a gap between
-    // the store and the publish.
     const commit = await commitRoomLane(this.id, this._inc, SEMANTIC_LANE, encodeRoomText(stringify(envelope)), {
       retain,
       requiredCellKeys: [roomMemberKvKey(this.id, from)],
@@ -456,12 +432,8 @@ class ServerRoom implements Room {
    *  source. When the backend can count globally, `receivers: 0` truthfully means "nobody anywhere
    *  wants this track"; backends that cannot know omit `receivers`. */
   async _publishBinaryFramed(from: string, framed: Uint8Array): Promise<ChannelPublishAck> {
-    // The single validating unframe of the publish path: a locally-built frame always parses; a
-    // hand-crafted one that doesn't (truncated, over-long track/meta, malformed meta JSON) is rejected
-    // here, cleanly, rather than crashing the relay or corrupting a lane.
     const frame = unframeMemberId(framed)
     if (!frame) throw new RoomError('Malformed binary frame')
-    // The guard sees exactly what a subscriber would: the payload, without the wire frame.
     const sender = await this._admitPublish(from, frame.payload)
     if (frame.track !== null) await this._ensureTrackAnnounced(from, frame.track)
     const result = await commitRoomLane(
@@ -491,7 +463,6 @@ class ServerRoom implements Room {
   private async _finishPublish(
     sender: Sender,
     payload: unknown,
-    // Semantic and binary lanes each carry their backend-assigned domain order.
     info: { seq: number; timestamp: number; receivers?: number; meta?: Record<string, unknown> },
   ): Promise<ChannelPublishAck> {
     const ack = Object.assign(makePublishInfo(this.id, info.seq, info.timestamp), {
@@ -520,9 +491,6 @@ class ServerRoom implements Room {
       announced = new Set()
       this._announcedTracks.set(from, announced)
     }
-    // Atomic append: record the track on the member's record unless it's already there (a previous
-    // owner incarnation recorded it). The compare-and-set re-runs on a concurrent record write, so the
-    // append is never clobbered. Announce on the control lane only when this call actually added it.
     const key = roomMemberKvKey(this.id, from)
     const appended = await mutateCells(this.id, this._inc, { keys: [key] }, (cells) => {
       const raw = cells.get(key)
@@ -691,8 +659,6 @@ class ServerRoom implements Room {
     throw new RoomError(`Room is closed: ${this.id}`)
   }
 
-  // ── Event stream (backend lane callbacks) ──
-
   /** The control lane: presence and lifecycle events — relayed to every stub
    *  unconditionally, since a client's live view is only correct if it sees every one. */
   private _onCtrlMessage(serialized: string, rawInfo: WirePublishInfo): void {
@@ -716,14 +682,11 @@ class ServerRoom implements Room {
       return
     }
     const wasClosed = this._state.closed
-    // A hidden member's presence events (join/leave/meta/track) are server-only — decide before
-    // applying, since `leave` removes the member from state (see `_hidesFromClients`).
     const serverOnly = this._hidesFromClients(event)
 
     this._applyCtrl(event)
 
     if (this._stubs.size > 0 && !serverOnly) {
-      // Presence/lifecycle events are ordered by the control lane; the receipt rides the frame.
       const wireText = encodePublishText(serialized, rawInfo)
       for (const stub of this._stubs) stub._relayPublishText(wireText)
     }
@@ -771,7 +734,6 @@ class ServerRoom implements Room {
     }
     if (envelope.__r !== 'data') return
     const event = envelope as RoomDataEnvelope
-    // The semantic-lane order rides on the transport frame, never in the payload.
     const info = makePublishInfo(this.id, rawInfo.seq, rawInfo.timestamp)
     this._state.applyData(
       event.from,
