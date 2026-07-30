@@ -662,26 +662,29 @@ describe('Room public behavior', () => {
     expect(screen).toEqual([[2, { key: true }]])
   })
 
-  it('expands binary subscriptions and demand from one canonical pair set', async () => {
-    const room = (await Room.create('binary-pairs')) as ServerRoom
+  it('applies room-wide and member-specific binary wants to both subscription and demand', async () => {
+    const room = await Room.create('binary-pairs')
     const publisher = await room.join()
-    const expand = (
-      room as unknown as {
-        _binaryPairs: (wants: typeof allBinary, memberIds: string[]) => Array<[string, string]>
-      }
-    )._binaryPairs.bind(room)
+    const observer = await Room.get(room.id)
+    const demand = new Set<string | null>()
+    const received: Array<[string, number]> = []
+    publisher.onDemand((track, wanted) => {
+      if (wanted) demand.add(track)
+    })
+    observer.subscribeBinary((data, info) => received.push([info.track, data[0]!] as [string, number]), {
+      track: 'screen',
+    })
+    const remote = (await observer.getParticipant(publisher.id))!
+    remote.subscribeBinary((data, info) => received.push([info.track, data[0]!] as [string, number]), {
+      track: 'camera',
+    })
+    await vi.waitFor(() => expect([...demand].sort()).toEqual(['camera', 'screen']))
 
-    expect(
-      expand(
-        {
-          everyMember: { all: false, tracks: ['screen'] },
-          members: { [publisher.id]: { all: false, tracks: ['camera'] } },
-        },
-        [publisher.id],
-      ),
-    ).toEqual([
-      [publisher.id, 'screen'],
-      [publisher.id, 'camera'],
+    await publisher.publishBinary(new Uint8Array([1]), { track: 'screen' })
+    await publisher.publishBinary(new Uint8Array([2]), { track: 'camera' })
+    expect(received).toEqual([
+      ['screen', 1],
+      ['camera', 2],
     ])
   })
 
