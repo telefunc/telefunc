@@ -451,7 +451,17 @@ async function sendServerDm(roomId: string, inc: string, memberId: string, data:
     encodeRoomText(stringify(envelope)),
     { requiredCellKeys: [roomMemberKvKey(roomId, memberId)] },
   )
-  if (committed === null) throw new RoomError(`Room is closed: ${roomId}`)
+  if (committed === null) {
+    const current = await getBackend().readHead(roomId)
+    if (
+      current?.head.state === 'open' &&
+      current.head.currentInc === inc &&
+      (await readCell(roomId, inc, roomMemberKvKey(roomId, memberId))) === null
+    ) {
+      throw new RoomError(`Participant not found (left?): ${memberId}`)
+    }
+    throw new RoomError(`Room is closed: ${roomId}`)
+  }
 }
 
 function normalizeOptions(options: RoomOptions | undefined): { meta: RoomMeta } {

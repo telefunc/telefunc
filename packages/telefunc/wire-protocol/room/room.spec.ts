@@ -671,6 +671,28 @@ describe('Room public behavior', () => {
     expect(fromRoom).toEqual([[{ notice: true }, null]])
   })
 
+  it('reports a participant-left race on a room-authored send without calling the room closed', async () => {
+    const room = await Room.create('server-send-race')
+    const target = await room.join()
+    const commitLane = driver.commitLane.bind(driver)
+    let raced = false
+    const commit = vi.spyOn(driver, 'commitLane').mockImplementation(async (roomId, inc, lane, payload, options) => {
+      if (!raced && lane.kind === 'inbox') {
+        raced = true
+        await Room.removeParticipant(room.id, { id: target.id })
+      }
+      return commitLane(roomId, inc, lane, payload, options)
+    })
+    try {
+      await expect(Room.send(room.id, { id: target.id }, 'late')).rejects.toThrow(
+        `Participant not found (left?): ${target.id}`,
+      )
+      expect((await driver.readHead(room.id))?.head.state).toBe('open')
+    } finally {
+      commit.mockRestore()
+    }
+  })
+
   it('drains DMs that arrived before a participant was bound to its client forwarder', async () => {
     const room = await Room.create('pre-bind-inbox')
     const target = await room.join()
