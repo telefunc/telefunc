@@ -187,8 +187,7 @@ export type BackendSpi = {
   // `revision` covers exactly the returned read set. A backend MAY use one per-generation monotonic
   // revision (coarser ⇒ more spurious conflicts, never wrong results).
   compareExchangeCells(roomId: string, inc: string, revision: string, mutations: CellMutation[]): Promise<CxResult>
-  // Retry on 'conflict' is OWNED BY ROOM CORE: bounded 16 attempts, backoff 1→64 ms jittered, then
-  // RoomError('contention'). Backends NEVER loop.
+  // Backends report conflicts without retrying; retry policy belongs to the consumer.
 
   // ── lane commit: ATOMIC ACCEPTANCE, separate delivery attempt ──
   commitLane(

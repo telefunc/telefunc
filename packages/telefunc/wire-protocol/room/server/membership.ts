@@ -33,6 +33,7 @@ import {
 import type { LeaveCause } from '../types.js'
 import { SEMANTIC_LANE, configFromHead, decodeRoomText, publishCtrl } from './lanes.js'
 
+// Room owns conflict recovery: 16 attempts with 1→64 ms jitter, then a contention RoomError.
 const ROOM_CX_ATTEMPTS = 16
 type CellSelector = { keys: string[] } | { prefix: string }
 type CellPlan<T> = { value: T; mutations: CellMutation[] }

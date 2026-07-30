@@ -105,6 +105,7 @@ class SubscriptionSlot<Source> {
   private _state: SubscriptionState = 'establishing'
   private _epoch = 0
   private _stopped = false
+  private _stopPromise: Promise<void> | null = null
 
   constructor(
     source: Source,
@@ -140,7 +141,7 @@ class SubscriptionSlot<Source> {
       awaitingInitialOutcome = false
       previousState = state
       if (suppressInitialReady) return
-      for (const listener of listeners) listener(state)
+      this._notify(listeners, state)
     })
     const slot = this
     return {
@@ -150,7 +151,7 @@ class SubscriptionSlot<Source> {
       state: () => (attached ? this._state : 'closed'),
       onStateChange: (listener) => {
         if (!attached) {
-          listener('closed')
+          this._notify([listener], 'closed')
           return () => {}
         }
         listeners.add(listener)
@@ -159,9 +160,7 @@ class SubscriptionSlot<Source> {
       unsubscribe: async () => {
         if (!attached) return
         attached = false
-        if (this._state !== 'closed') {
-          for (const listener of listeners) listener('closed')
-        }
+        if (this._state !== 'closed') this._notify(listeners, 'closed')
         listeners.clear()
         unobserve()
         this._receivers.delete(attachment)
@@ -178,14 +177,15 @@ class SubscriptionSlot<Source> {
     return () => this._listeners.delete(listener)
   }
 
-  async stop(): Promise<void> {
-    if (this._stopped) return
+  stop(): Promise<void> {
+    if (this._stopPromise !== null) return this._stopPromise
+    const attempt = this._attempt
     this._stopped = true
+    this._stopPromise = attempt === null ? Promise.resolve() : this._cleanup(attempt)
     this._resolveReady()
     this._transition('closed')
-    const attempt = this._attempt
     this._clearCurrent()
-    if (attempt !== null) await this._cleanup(attempt)
+    return this._stopPromise
   }
 
   private _start(): void {
@@ -214,7 +214,9 @@ class SubscriptionSlot<Source> {
     }
     this._attempt = attempt
     try {
-      this._unobserve = attempt.onStateChange((state) => this._onStateChange(attempt, state))
+      const unobserve = attempt.onStateChange((state) => this._onStateChange(attempt, state))
+      if (this._attempt === attempt) this._unobserve = unobserve
+      else this._releaseObserver(unobserve)
       attempt.ready.then(
         () => this._becameReady(attempt),
         (error: unknown) => this._failedCurrent(attempt, error),
@@ -275,9 +277,9 @@ class SubscriptionSlot<Source> {
     const failure = error instanceof Error ? error : new Error(String(error))
     const current = this._attempt
     this._stopped = true
+    this._stopPromise ??= current === null ? Promise.resolve() : this._cleanup(current)
     this._transition('closed')
     this._clearCurrent()
-    if (current !== null) void this._cleanup(current)
     this._rejectReady(failure)
     this._onEmpty()
   }
@@ -304,7 +306,7 @@ class SubscriptionSlot<Source> {
   private _transition(state: SubscriptionState): void {
     if (this._state === state) return
     this._state = state
-    for (const listener of [...this._listeners]) listener(state)
+    this._notify(this._listeners, state)
   }
 
   private _clearCurrent(): void {
@@ -312,10 +314,24 @@ class SubscriptionSlot<Source> {
     const unobserve = this._unobserve
     this._unobserve = null
     this._attempt = null
+    if (unobserve !== null) this._releaseObserver(unobserve)
+  }
+
+  private _releaseObserver(unobserve: () => void): void {
     try {
-      unobserve?.()
+      unobserve()
     } catch (error) {
       this._reportError(error)
+    }
+  }
+
+  private _notify(listeners: Iterable<(state: SubscriptionState) => void>, state: SubscriptionState): void {
+    for (const listener of [...listeners]) {
+      try {
+        listener(state)
+      } catch (error) {
+        this._reportError(error)
+      }
     }
   }
 
