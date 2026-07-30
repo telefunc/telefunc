@@ -67,7 +67,7 @@ type SubscriberNamespace = {
   get(id: unknown): SubscriberStub
 }
 
-const ROOM_ALARM_INTERVAL_MS = 30_000
+const ROOM_MAINTENANCE_RETRY_MS = 30_000
 
 function headForRpc(head: StoredHead): RoomHead {
   const result: RoomHead = {
@@ -129,6 +129,7 @@ export class TelefuncRoomDurableObject extends DurableObject {
               target.leaseId,
             )
           })
+          if (evicted) await this.#scheduleMaintenanceIfNeeded()
           // Core cannot infer an authority-side K=3 eviction from a later local attachment: it already
           // owns the ready slot. Tell the exact live attempt now; its ordinary `closed` state lets Room
           // apply its recovery policy, while the retained route row remains the janitor's retry source
@@ -159,7 +160,7 @@ export class TelefuncRoomDurableObject extends DurableObject {
       (resume) => setTimeout(resume, 0),
     )
     this.ctx.blockConcurrencyWhile(async () => {
-      if ((await this.ctx.storage.getAlarm()) === null) await this.#armAlarm()
+      await this.#scheduleMaintenanceIfNeeded()
     })
   }
 
@@ -178,6 +179,7 @@ export class TelefuncRoomDurableObject extends DurableObject {
     this.ctx.storage.transactionSync(() => {
       outcome = compareExchangeHead(this.#sql, cx, next, now, () => crypto.randomUUID())
     })
+    await this.#scheduleMaintenanceIfNeeded()
     if ('conflict' in outcome)
       return { conflict: true, current: outcome.current === null ? null : headForRpc(outcome.current) }
     if ('deleted' in outcome) return { ok: true, deleted: true }
@@ -196,6 +198,7 @@ export class TelefuncRoomDurableObject extends DurableObject {
     this.ctx.storage.transactionSync(() => {
       result = compareExchangeCells(this.#sql, inc, revision, mutations, now)
     })
+    if (result === 'committed') await this.#scheduleMaintenanceIfNeeded()
     return result
   }
 
@@ -290,6 +293,7 @@ export class TelefuncRoomDurableObject extends DurableObject {
       upsertRoute(this.#sql, roomId, inc, laneKey, subscriberDoId, leaseId, generationToken, now)
       result = { ok: true, generationToken }
     })
+    if ('ok' in result) await this.#scheduleMaintenanceIfNeeded()
     return result
   }
 
@@ -311,6 +315,7 @@ export class TelefuncRoomDurableObject extends DurableObject {
       }
       renewed = renewRoute(this.#sql, inc, laneKey, subscriberDoId, leaseId, now)
     })
+    await this.#scheduleMaintenanceIfNeeded()
     if (generationInvalid) return { ok: false, terminal: true }
     // A missing/non-live exact route inside the SAME generation is recoverable: the subscription
     // lifecycle enters lost and establishes a fresh lease. Only generation identity loss is terminal.
@@ -319,6 +324,7 @@ export class TelefuncRoomDurableObject extends DurableObject {
 
   async unsubscribeRoute(inc: string, laneKey: string, subscriberDoId: string, leaseId: string): Promise<void> {
     this.ctx.storage.transactionSync(() => deleteRoute(this.#sql, inc, laneKey, subscriberDoId, leaseId))
+    await this.#scheduleMaintenanceIfNeeded()
   }
 
   // ── generation lifecycle ──
@@ -340,6 +346,7 @@ export class TelefuncRoomDurableObject extends DurableObject {
     await Promise.all(installations.map((installation) => this.#invalidateInstallation(installation, true)))
     this.ctx.storage.transactionSync(() => dropGenerationRows(this.#sql, inc))
     this.#fanout.clearIncarnation(inc)
+    await this.#scheduleMaintenanceIfNeeded()
   }
 
   // ── directory (this DO, addressed as a singleton, is the best-effort projection store) ──
@@ -365,7 +372,7 @@ export class TelefuncRoomDurableObject extends DurableObject {
     try {
       await this.#runSweep(Date.now())
     } finally {
-      await this.#armAlarm()
+      await this.#scheduleMaintenanceIfNeeded()
     }
   }
 
@@ -432,9 +439,37 @@ export class TelefuncRoomDurableObject extends DurableObject {
     })
   }
 
-  async #armAlarm(): Promise<void> {
-    await this.ctx.storage.setAlarm(Date.now() + ROOM_ALARM_INTERVAL_MS)
+  async #scheduleMaintenanceIfNeeded(): Promise<void> {
+    const now = Date.now()
+    const deadline = nextMaintenanceDeadline(this.#sql, now)
+    const currentAlarm = await this.ctx.storage.getAlarm()
+    if (deadline === null) {
+      if (currentAlarm !== null) await this.ctx.storage.deleteAlarm()
+      return
+    }
+    const nextAlarm = deadline <= now ? now + ROOM_MAINTENANCE_RETRY_MS : deadline
+    if (currentAlarm === nextAlarm) return
+    // Never postpone an already-scheduled retry for work that is due now.
+    if (deadline <= now && currentAlarm !== null && currentAlarm <= nextAlarm) return
+    await this.ctx.storage.setAlarm(nextAlarm)
   }
+}
+
+function nextMaintenanceDeadline(sql: SqlStorage, now: number): number | null {
+  const deadlines = [
+    sql.exec<{ deadline: number | null }>('SELECT MIN(expires_at) AS deadline FROM head').toArray()[0]?.deadline,
+    sql
+      .exec<{ deadline: number | null }>('SELECT MIN(expires_at) AS deadline FROM cell WHERE expires_at IS NOT NULL')
+      .toArray()[0]?.deadline,
+    sql.exec<{ deadline: number | null }>('SELECT MIN(expires_at) AS deadline FROM route').toArray()[0]?.deadline,
+  ].filter((deadline): deadline is number => deadline !== null && deadline !== undefined)
+  const currentInc = readLiveHead(sql, now)?.currentInc ?? null
+  const hasOrphan =
+    currentInc === null
+      ? sql.exec('SELECT 1 FROM gen LIMIT 1').toArray().length > 0
+      : sql.exec('SELECT 1 FROM gen WHERE inc <> ? LIMIT 1', currentInc).toArray().length > 0
+  if (hasOrphan) deadlines.push(now)
+  return deadlines.length === 0 ? null : Math.min(...deadlines)
 }
 
 // The commit precondition: one boolean, two branches. Supplying a closing lease selects the narrow
