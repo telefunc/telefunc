@@ -440,32 +440,6 @@ For multi-party use cases where *who is connected* matters — chat, game lobbie
 
 > Built on top of channels: a `Room` adds presence, participant metadata, private messages, and admin controls.
 
-```ts
-// Lobby.telefunc.ts
-// Environment: server
-
-import { Room } from 'telefunc'
-
-export async function onGetLobby() {
-  return await Room.getOrCreate('lobby')
-}
-```
-
-```ts
-// Lobby.tsx
-// Environment: client
-
-import { onGetLobby } from './Lobby.telefunc'
-
-const lobby = await onGetLobby()
-lobby.onJoin((member) => console.log(`${member.meta.name} joined`))
-lobby.subscribe((data, info, from) => showMessage(from.meta.name, data))
-
-const me = await lobby.join({ meta: { name: 'Alice' } })
-await me.publish({ text: 'hello' })
-```
-
-
 ## Cleanup
 
 **Environment**: server.
