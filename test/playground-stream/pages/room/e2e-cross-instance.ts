@@ -83,13 +83,14 @@ function testRedisBroadcastCrossInstance() {
 async function request(
   instance: 'a' | 'b',
   pathname: string,
-  roomId: string,
+  resourceId: string,
   method: 'GET' | 'POST' | 'DELETE' = 'GET',
   body?: unknown,
+  queryName: 'roomId' | 'key' = 'roomId',
 ): Promise<Record<string, unknown>> {
   const url = new URL(pathname, getServerUrl())
   url.searchParams.set('bench_instance', instance)
-  url.searchParams.set('roomId', roomId)
+  url.searchParams.set(queryName, resourceId)
   const response = await fetch(url, {
     method,
     headers: body === undefined ? undefined : { 'content-type': 'application/json' },
@@ -107,15 +108,5 @@ async function broadcastRequest(
   method: 'GET' | 'POST' | 'DELETE' = 'GET',
   body?: unknown,
 ): Promise<Record<string, unknown>> {
-  const url = new URL(pathname, getServerUrl())
-  url.searchParams.set('bench_instance', instance)
-  url.searchParams.set('key', key)
-  const response = await fetch(url, {
-    method,
-    headers: body === undefined ? undefined : { 'content-type': 'application/json' },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  })
-  const payload = (await response.json()) as Record<string, unknown>
-  if (!response.ok) throw new Error(`${method} ${pathname} failed (${response.status}): ${JSON.stringify(payload)}`)
-  return payload
+  return request(instance, pathname, key, method, body, 'key')
 }

@@ -9,7 +9,7 @@
     "preview:cluster:prof": "vike build && docker compose down --remove-orphans && exec docker compose -f compose.yaml -f compose.prof.yaml up 2>&1",
     "preview:cluster:down": "docker compose down --remove-orphans",
     "test:docker": "vike build && docker compose down --remove-orphans && docker compose up --force-recreate 2>&1; code=$?; if [ \"$code\" = \"130\" ] || [ \"$code\" = \"143\" ]; then exit 0; fi; exit $code",
-    "test:docker:redis-cluster": "vike build && docker compose -f compose.yaml -f compose.redis-cluster.yaml down --remove-orphans && docker compose -f compose.yaml -f compose.redis-cluster.yaml up --force-recreate 2>&1; code=$?; if [ \"$code\" = \"130\" ] || [ \"$code\" = \"143\" ]; then exit 0; fi; exit $code"
+    "test:docker:redis-cluster": "COMPOSE_FILE=compose.yaml:compose.redis-cluster.yaml pnpm run test:docker"
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.2.1",

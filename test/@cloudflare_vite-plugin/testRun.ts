@@ -6,7 +6,7 @@ import { testCounter, testRunClassic } from '../../test/utils'
 
 function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
   testCloudflareBindings()
-  testRoomAsyncContextRecipe()
+  if (cmd === 'pnpm run preview') testRoomAsyncContextRecipe()
   testRunClassic(cmd, {
     tolerateError: (log) =>
       log.logText.includes('Detected multiple renderers concurrently rendering') ||

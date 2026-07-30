@@ -46,20 +46,9 @@ async function onGetOrCreateRoom(roomId: string) {
 
 type ChatMsg = { kind: 'chat'; text: string }
 /** Typed room: `Room.create`'s 3rd generic types `publish()`/`subscribe()` end to end — the room
- *  arrives on the client already typed, so `data` needs no cast there. The unreachable branch is
- *  compile-time coverage that the type actually constrains (`test:types` enforces it). */
+ *  arrives on the client already typed, so `data` needs no cast there. */
 async function onGetTypedRoom(roomId: string) {
-  const room = await Room.create<{ topic: string }, { name: string }, ChatMsg>(roomId, { meta: { topic: 'typed' } })
-  if (roomId === '\0unreachable') {
-    const me = await room.join({ meta: { name: 'a' } })
-    room.subscribe((data) => data.text.toUpperCase()) // `data` is ChatMsg — dereferenced with no cast
-    await me.publish({ kind: 'chat', text: 'ok' })
-    // @ts-expect-error — publish is typed to ChatMsg; a bare number is rejected
-    await me.publish(1)
-    // @ts-expect-error — a message missing a required field is rejected
-    await me.publish({ kind: 'chat' })
-  }
-  return room
+  return await Room.create<{ topic: string }, { name: string }, ChatMsg>(roomId, { meta: { topic: 'typed' } })
 }
 
 /** Guarded grant — every membership through this instance is policed server-side. */

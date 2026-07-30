@@ -1,19 +1,8 @@
-import { existsSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { build, type Plugin } from 'esbuild'
+import { build } from 'esbuild'
 
 const here = dirname(fileURLToPath(import.meta.url))
-
-const resolveJsToTs: Plugin = {
-  name: 'js-to-ts',
-  setup(builder) {
-    builder.onResolve({ filter: /\.js$/ }, (args) => {
-      const tsPath = resolve(args.resolveDir, args.path).replace(/\.js$/, '.ts')
-      return existsSync(tsPath) ? { path: tsPath } : null
-    })
-  },
-}
 
 export async function bundleWorker(): Promise<string> {
   const result = await build({
@@ -25,7 +14,6 @@ export async function bundleWorker(): Promise<string> {
     target: 'es2022',
     write: false,
     external: ['cloudflare:workers'],
-    plugins: [resolveJsToTs],
     logLevel: 'silent',
   })
   const output = result.outputFiles[0]

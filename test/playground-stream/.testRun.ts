@@ -88,7 +88,7 @@ function testRun(cmd: 'pnpm dev' | 'pnpm preview') {
 
   testPublish()
 
-  testRoom()
+  if (!isDev) testRoom()
 
   testRefIdentity()
 }

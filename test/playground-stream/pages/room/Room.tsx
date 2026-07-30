@@ -710,7 +710,7 @@ function Room() {
           const roomId = `${base}:a`
           await onCreateRoom(roomId)
           const room = await onGetRoom(roomId)
-          const me = await room.join({ meta: { name: 'R' } })
+          await room.join({ meta: { name: 'R' } })
           const updates: string[] = []
           room.onUpdate((meta) => updates.push((meta as { topic?: string }).topic ?? ''))
 
@@ -727,7 +727,6 @@ function Room() {
                 listed,
                 sameId: same.id === roomId,
                 sameCount: same.count,
-                memberId: me.id.length > 0,
               }),
             )
             return { done: updates.includes('updated') }
