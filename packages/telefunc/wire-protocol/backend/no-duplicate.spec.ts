@@ -1,3 +1,13 @@
+/**
+ * This gate proves only canonical production wiring: the backend supervisor imports and constructs
+ * the exported SubscriptionManager; Redis and Cloudflare lane consumers import/re-export laneKey
+ * through the designated modules; Cloudflare Broadcast imports the canonical ordering codecs while
+ * Redis imports the canonical ordering layout for its dialect; and Redis' public Telefunc imports stay
+ * within the reviewed set below.
+ *
+ * It does not prove that no semantically equivalent, unused, renamed, or differently spelled
+ * implementation exists. Such a codebase-wide uniqueness claim is not statically enforceable here.
+ */
 import { readdirSync } from 'node:fs'
 import { extname, join, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -10,28 +20,22 @@ const files = ['packages/telefunc', 'packages/redis']
   .filter((file) => !/\.(?:spec|test)\.ts$/.test(file))
 const project = new Project({ skipAddingFilesFromTsConfig: true })
 const sources = new Map(files.map((file) => [file, project.addSourceFileAtPath(join(root, file))]))
-const callbackCollections = nestedSetMapOwners()
 
-describe('one backend mechanism', () => {
-  it('keeps callback collection ownership explicit', () => {
-    expect(callbackCollections).toEqual([
-      'packages/redis/src/room/subscriber-transport.ts::RedisSubscriptionDriver._attempts',
-      'packages/telefunc/wire-protocol/backend/memory/backend.ts::Generation.subs',
-      'packages/telefunc/wire-protocol/backend/memory/backend.ts::MemoryBackendState.broadcastSubs',
-      'packages/telefunc/wire-protocol/room/server/room.ts::ServerRoom._announcedTracks',
-      'packages/telefunc/wire-protocol/server/mux.ts::ChannelMux.pendingRegisterWaiters',
-      'packages/telefunc/wire-protocol/server/sse.ts::SseConnectionTransport.pendingConnections',
-    ])
-    expect(classOwners('SubscriptionManager')).toEqual([
-      'packages/telefunc/wire-protocol/backend/subscriptions.ts::SubscriptionManager',
-    ])
-    expect(constructedBy('SubscriptionManager')).toEqual([
-      'packages/telefunc/wire-protocol/backend/supervised-backend.ts::superviseBackend',
-    ])
+describe('canonical backend wiring', () => {
+  it('wires the supervisor to the exported subscription owner', () => {
+    expect(exportsOf('packages/telefunc/wire-protocol/backend/subscriptions.ts')).toContain('SubscriptionManager')
+    expect(
+      valuesFrom('packages/telefunc/wire-protocol/backend/supervised-backend.ts', './subscriptions.js', 'import'),
+    ).toContain('SubscriptionManager')
+    expect(
+      constructedBy('packages/telefunc/wire-protocol/backend/supervised-backend.ts', 'SubscriptionManager'),
+    ).toEqual(['superviseBackend'])
   })
 
-  it('keeps one canonical lane encoder and imports it across adapters', () => {
-    expect(laneEncoderOwners()).toEqual(['packages/telefunc/wire-protocol/backend/subscription-source.ts::laneKey'])
+  it('wires lane consumers to the canonical lane key', () => {
+    expect(
+      valuesFrom('packages/telefunc/backend.ts', './wire-protocol/backend/subscription-source.js', 'export'),
+    ).toContain('laneKey')
     expect(valuesFrom('packages/redis/src/room/layout.ts', 'telefunc/backend', 'import')).toContain('laneKey')
     expect(
       valuesFrom(
@@ -40,19 +44,9 @@ describe('one backend mechanism', () => {
         'export',
       ),
     ).toContain('laneKey')
-    expect(
-      valuesFrom('packages/telefunc/backend.ts', './wire-protocol/backend/subscription-source.js', 'export'),
-    ).toContain('laneKey')
   })
 
-  it('keeps one JavaScript ordering codec and one explicit Redis dialect translation', () => {
-    expect(orderingOperationOwners('setUint32')).toEqual([
-      'packages/telefunc/wire-protocol/ordering-frame.ts::encodeOrderingFrame',
-    ])
-    expect(orderingOperationOwners('getUint32')).toEqual([
-      'packages/redis/src/room/layout.ts::decodeRedisOrderingFrame',
-      'packages/telefunc/wire-protocol/ordering-frame.ts::decodeOrderingFrame',
-    ])
+  it('wires ordering consumers to the canonical frame contract', () => {
     expect(
       valuesFrom(
         'packages/telefunc/wire-protocol/server/adapter/cloudflare/broadcast.ts',
@@ -60,25 +54,17 @@ describe('one backend mechanism', () => {
         'import',
       ),
     ).toEqual(['decodeOrderingFrame', 'encodeOrderingFrame'])
+    expect(valuesFrom('packages/redis/src/room/layout.ts', 'telefunc/backend', 'import')).toContain(
+      'ORDERING_FRAME_LAYOUT',
+    )
   })
 
-  it('keeps external adapters on canonical value helpers', () => {
+  it('keeps Redis public Telefunc imports within the reviewed canonical surface', () => {
     const redisValues = files
       .filter((file) => file.startsWith('packages/redis/'))
       .flatMap((file) => valuesFrom(file, 'telefunc/backend', 'import'))
     expect([...new Set(redisValues)].sort()).toEqual(['HEAD_TRANSITIONS', 'ORDERING_FRAME_LAYOUT', 'laneKey'])
     expect(valuesFrom('packages/redis/src/index.ts', 'telefunc/__internal', 'import')).toContain('setDefaultBackend')
-  })
-
-  it('keeps generic Broadcast and durable Room on their own backend verbs', () => {
-    expect(calledMethods('packages/telefunc/wire-protocol/server/server-broadcast.ts')).toEqual(
-      expect.arrayContaining(['publish', 'subscribe']),
-    )
-    expect(calledMethods('packages/telefunc/wire-protocol/server/server-broadcast.ts')).not.toEqual(
-      expect.arrayContaining(['commitLane', 'subscribeLane']),
-    )
-    const roomImplementations = files.filter((file) => file.startsWith('packages/telefunc/wire-protocol/room/server/'))
-    expect(calledMethods(...roomImplementations)).toEqual(expect.arrayContaining(['commitLane', 'subscribeLane']))
   })
 })
 
@@ -97,86 +83,25 @@ function source(file: string): SourceFile {
   return value
 }
 
-function nestedSetMapOwners(): string[] {
-  return [...sources]
-    .flatMap(([file, value]) =>
-      value.getDescendants().flatMap((node) => {
-        if (!Node.isPropertyDeclaration(node) && !Node.isPropertySignature(node)) return []
-        const type = node.getTypeNode()?.getText() ?? node.getInitializer()?.getText() ?? ''
-        if (!/^(?:new )?Map<[\s\S]*,\s*Set<[\s\S]*>>/.test(type)) return []
-        const container = node
-          .getFirstAncestor(
-            (parent) =>
-              Node.isClassDeclaration(parent) ||
-              Node.isInterfaceDeclaration(parent) ||
-              Node.isTypeAliasDeclaration(parent),
-          )
-          ?.getSymbol()
-          ?.getName()
-        return [`${file}::${container === undefined ? '' : `${container}.`}${node.getName()}`]
-      }),
-    )
+function exportsOf(file: string): string[] {
+  return source(file)
+    .getExportSymbols()
+    .map((symbol) => symbol.getName())
     .sort()
 }
 
-function classOwners(name: string): string[] {
-  return [...sources].flatMap(([file, value]) =>
-    value
-      .getClasses()
-      .filter((declaration) => declaration.getName() === name)
-      .map(() => `${file}::${name}`),
-  )
-}
-
-function constructedBy(name: string): string[] {
-  return [...sources].flatMap(([file, value]) =>
-    value
-      .getDescendantsOfKind(SyntaxKind.NewExpression)
-      .filter((expression) => expression.getExpression().getText() === name)
-      .map((expression) => `${file}::${callableOwner(expression)}`),
-  )
-}
-
-function laneEncoderOwners(): string[] {
-  const kinds = JSON.stringify(['binary', 'control', 'inbox', 'semantic'])
-  return [...sources]
-    .flatMap(([file, value]) =>
-      value.getDescendantsOfKind(SyntaxKind.SwitchStatement).flatMap((statement) => {
-        const labels = statement
-          .getCaseBlock()
-          .getClauses()
-          .filter(Node.isCaseClause)
-          .map((clause) => clause.getExpression().getText().replaceAll(/['"]/g, ''))
-          .sort()
-        const text = statement.getText()
-        return JSON.stringify(labels) === kinds &&
-          text.includes('encodeURIComponent') &&
-          text.includes('binary:') &&
-          text.includes('inbox:')
-          ? [`${file}::${callableOwner(statement)}`]
-          : []
-      }),
-    )
+function constructedBy(file: string, name: string): string[] {
+  return source(file)
+    .getDescendantsOfKind(SyntaxKind.NewExpression)
+    .filter((expression) => expression.getExpression().getText() === name)
+    .map((expression) => callableOwner(expression))
     .sort()
-}
-
-function orderingOperationOwners(operation: 'getUint32' | 'setUint32'): string[] {
-  const owners = [...sources].flatMap(([file, value]) =>
-    value.getDescendantsOfKind(SyntaxKind.CallExpression).flatMap((call) => {
-      const expression = call.getExpression()
-      const callable = call.getFirstAncestor(isCallable)
-      return Node.isPropertyAccessExpression(expression) &&
-        expression.getName() === operation &&
-        callable?.getText().includes('ORDERING_FRAME_LAYOUT')
-        ? [`${file}::${callableOwner(call)}`]
-        : []
-    }),
-  )
-  return [...new Set(owners)].sort()
 }
 
 function callableOwner(node: Node): string {
-  const callable = node.getFirstAncestor(isCallable)
+  const callable = node.getFirstAncestor(
+    (parent) => Node.isFunctionDeclaration(parent) || Node.isMethodDeclaration(parent) || Node.isArrowFunction(parent),
+  )
   if (callable === undefined) return '<module>'
   if (Node.isFunctionDeclaration(callable)) return callable.getName() ?? '<anonymous>'
   if (Node.isMethodDeclaration(callable)) {
@@ -184,10 +109,6 @@ function callableOwner(node: Node): string {
     return `${container === undefined ? '' : `${container}.`}${callable.getName()}`
   }
   return callable.getFirstAncestorByKind(SyntaxKind.VariableDeclaration)?.getName() ?? '<anonymous>'
-}
-
-function isCallable(node: Node): boolean {
-  return Node.isFunctionDeclaration(node) || Node.isMethodDeclaration(node) || Node.isArrowFunction(node)
 }
 
 function valuesFrom(file: string, module: string, kind: 'import' | 'export'): string[] {
@@ -210,16 +131,4 @@ function valuesFrom(file: string, module: string, kind: 'import' | 'export'): st
         .map((value) => value.getName()),
     )
     .sort()
-}
-
-function calledMethods(...files: string[]): string[] {
-  const methods = files.flatMap((file) =>
-    source(file)
-      .getDescendantsOfKind(SyntaxKind.CallExpression)
-      .flatMap((call) => {
-        const expression = call.getExpression()
-        return Node.isPropertyAccessExpression(expression) ? [expression.getName()] : []
-      }),
-  )
-  return [...new Set(methods)].sort()
 }

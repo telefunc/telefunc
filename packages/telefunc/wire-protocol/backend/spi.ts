@@ -158,9 +158,6 @@ export type SubscriptionDriver<Source = BackendSubscriptionSource> = {
  * `BackendDriver`; core composes its raw subscription driver into this consumer-facing SPI. */
 export type BackendSpi = {
   readonly spiVersion: typeof BACKEND_SPI_VERSION
-  readonly capabilities: {
-    receivers: 'global' | 'node-local' | 'none'
-  }
 
   // ── cheap Broadcast ──
   publish(lane: BroadcastLane, payload: Uint8Array): PublishResult | Promise<PublishResult>

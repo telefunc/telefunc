@@ -262,9 +262,6 @@ export function getCloudflareRoomSessionManager(): CloudflareRoomSessionManager 
 
 export class CloudflareRoomBackend implements BackendDriver {
   readonly spiVersion = BACKEND_SPI_VERSION
-  readonly capabilities = {
-    receivers: 'global' as const,
-  }
   readonly broadcast: CloudflareBroadcastTransport
   readonly subscriptions: SubscriptionDriver
   #disposed = false

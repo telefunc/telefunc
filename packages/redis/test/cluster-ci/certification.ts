@@ -84,7 +84,6 @@ describe('Redis real three-master Cluster CI certification', () => {
     const inc = 'runtime-slot-inc'
     let subscription: ReturnType<BackendSpi['subscribeLane']> | undefined
     try {
-      expect(backend.capabilities).toMatchObject({ receivers: 'none' })
       const head = await open(backend, roomId, inc)
       const cells = await backend.readCells(roomId, inc, { keys: [] })
       if ('staleInc' in cells) throw new Error('fresh generation was unexpectedly stale')
@@ -125,7 +124,8 @@ describe('Redis real three-master Cluster CI certification', () => {
       }
       await backend.directoryPut(roomId, inc)
       await backend.directoryDelete(roomId, inc)
-      await backend.publish({ key: 'generic} escape', kind: 'binary' }, bytes('generic'))
+      const genericPublish = await backend.publish({ key: 'generic} escape', kind: 'binary' }, bytes('generic'))
+      expect(genericPublish.receivers).toBeUndefined()
       const closed = await close(authority, roomId, head)
       expect(closed.state).toBe('closed')
       await authority.dropGeneration(roomId, inc)
