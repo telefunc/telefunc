@@ -42,6 +42,7 @@ import {
 import { createTelefuncRoomDurableObjectClass } from '../wire-protocol/server/adapter/cloudflare/room/do.js'
 import { isAsyncMode } from '../node/server/context/context.js'
 import { getGlobalObject } from '../utils/getGlobalObject.js'
+import { isTelefuncRequest } from './shared.js'
 
 const SHARD_TOKEN_TTL_SECONDS = 86400
 const SESSION_RESET_CLOSE_CODE = 1012
@@ -229,8 +230,8 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
 
   return {
     async serve({ request, env, ctx }: ServeInput): Promise<Response | undefined> {
+      if (!isTelefuncRequest(request)) return undefined
       const config = getServerConfig()
-      if (!new URL(request.url).pathname.startsWith(config.telefuncUrl)) return undefined
 
       const binding = getBinding(env)
       assertUsage(binding, `Missing Cloudflare Durable Object binding "${bindingName}". Add it to your wrangler.jsonc.`)

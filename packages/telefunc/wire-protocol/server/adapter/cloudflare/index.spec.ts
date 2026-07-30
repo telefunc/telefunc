@@ -252,13 +252,15 @@ describe('cloudflare adapter entrypoint', () => {
   it('returns undefined for non-telefunc traffic', async () => {
     const tf = new Telefunc()
 
-    await expect(
-      tf.serve({
-        request: new Request('https://telefunc.test/other'),
-        env: {} as Cloudflare.Env,
-        ctx: {} as ExecutionContext,
-      }),
-    ).resolves.toBeUndefined()
+    for (const path of ['/other', '/_telefunc-other']) {
+      await expect(
+        tf.serve({
+          request: new Request(`https://telefunc.test${path}`),
+          env: {} as Cloudflare.Env,
+          ctx: {} as ExecutionContext,
+        }),
+      ).resolves.toBeUndefined()
+    }
   })
 
   it('asserts when binding is missing for telefunc traffic', async () => {
