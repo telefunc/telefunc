@@ -319,7 +319,7 @@ class ServerRoom implements Room {
     }
     if (hidden) return { id, joinedAt } // announced above; a hidden participant has no post-join hook
     const onAfterJoin = this._guards?.onAfterJoin
-    if (onAfterJoin) await onAfterJoin({ id, meta, identity }, { joinedAt })
+    if (onAfterJoin) await runAfterHook(() => onAfterJoin({ id, meta, identity }, { joinedAt }))
     return { id, joinedAt }
   }
 
@@ -457,9 +457,7 @@ class ServerRoom implements Room {
     return sender
   }
 
-  /** Shared publish epilogue: the receipt (with `receivers`) plus the `onAfterPublish` hook, which
-   *  sees the same `payload` the guard did and the authoritative `seq`/`timestamp` — the place to
-   *  persist for history. Awaited, so a throw rejects the publisher (the message is already out). */
+  /** Shared publish epilogue: the receipt (with `receivers`) plus the `onAfterPublish` hook. */
   private async _finishPublish(
     sender: Sender,
     payload: unknown,
@@ -471,11 +469,13 @@ class ServerRoom implements Room {
     })
     const onAfterPublish = this._guards?.onAfterPublish
     if (onAfterPublish) {
-      await onAfterPublish(sender, payload, {
-        seq: ack.seq,
-        timestamp: ack.timestamp,
-        ...(ack.receivers === undefined ? {} : { receivers: ack.receivers }),
-      })
+      await runAfterHook(() =>
+        onAfterPublish(sender, payload, {
+          seq: ack.seq,
+          timestamp: ack.timestamp,
+          ...(ack.receivers === undefined ? {} : { receivers: ack.receivers }),
+        }),
+      )
     }
     return ack
   }
@@ -585,7 +585,7 @@ class ServerRoom implements Room {
     if (receipt === null) return await this._throwStaleMembers(from, to)
     const info: RoomSendReceipt = { seq: receipt.seq, timestamp: receipt.timestamp }
     const onAfterSend = this._guards?.onAfterSend
-    if (onAfterSend) await onAfterSend(sender, target, data, info)
+    if (onAfterSend) await runAfterHook(() => onAfterSend(sender, target, data, info))
     return info
   }
 
@@ -1601,6 +1601,14 @@ class ServerLocalParticipant extends ParticipantBase {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+async function runAfterHook(hook: () => unknown): Promise<void> {
+  try {
+    await hook()
+  } catch (error) {
+    reportRoomError(error)
+  }
+}
 
 /** Identity is trusted — validate the server-side join option. */
 function normalizeIdentity(options: JoinOptions | undefined): string | null {

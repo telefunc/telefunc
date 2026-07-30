@@ -797,6 +797,36 @@ describe('Room public behavior', () => {
     expect(after).toEqual(['join:Alice', 'join:Bob', 'publish:ok', 'send:ok'])
   })
 
+  it('preserves committed join, publish, and send results when after hooks reject', async () => {
+    const room = (await Room.create('after-hook-failure')) as ServerRoom
+    const report = vi.spyOn(console, 'error').mockImplementation(() => {})
+    Room.guard(room, {
+      onAfterJoin: async () => {
+        throw new Error('after join failed')
+      },
+      onAfterPublish: async () => {
+        throw new Error('after publish failed')
+      },
+      onAfterSend: async () => {
+        throw new Error('after send failed')
+      },
+    })
+    try {
+      const alice = await room.join()
+      const bob = await room.join()
+      const inbox: unknown[] = []
+      bob.listen((data) => inbox.push(data))
+
+      await expect(alice.publish('published')).resolves.toMatchObject({ seq: expect.any(Number) })
+      await expect(alice.send(bob.id, 'sent')).resolves.toMatchObject({ seq: expect.any(Number) })
+      expect((await room.getParticipants()).map(({ id }) => id)).toEqual([alice.id, bob.id])
+      expect(inbox).toEqual(['sent'])
+      expect(report).toHaveBeenCalledTimes(4)
+    } finally {
+      report.mockRestore()
+    }
+  })
+
   it('orders participant text and room announcements in one semantic domain', async () => {
     const room = await Room.create('announce-semantic-order')
     const member = await room.join()
