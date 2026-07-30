@@ -100,7 +100,6 @@ type _backendKeys = Assert<
   HasKeys<
     BackendSpi,
     | 'spiVersion'
-    | 'capabilities'
     | 'publish'
     | 'subscribe'
     | 'readHead'
@@ -138,7 +137,6 @@ type _backendDriverKeys = Assert<
   HasKeys<
     BackendDriver,
     | 'spiVersion'
-    | 'capabilities'
     | 'subscriptions'
     | 'publish'
     | 'readHead'

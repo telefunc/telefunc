@@ -183,7 +183,6 @@ class MemorySubscriptionAttempt implements SubscriptionAttempt {
 
 export class MemoryBackend implements BackendDriver {
   readonly spiVersion = BACKEND_SPI_VERSION
-  readonly capabilities: BackendDriver['capabilities']
   readonly subscriptions: SubscriptionDriver
 
   readonly #now: () => number
@@ -199,10 +198,6 @@ export class MemoryBackend implements BackendDriver {
         valid: () => true,
         open: (receiver, localReceiverCount) => this.#openSubscription(source, receiver, localReceiverCount),
       }),
-    }
-    this.capabilities = {
-      receivers: 'global',
-      maxRetainedPayloadBytes: Number.POSITIVE_INFINITY,
     }
   }
 

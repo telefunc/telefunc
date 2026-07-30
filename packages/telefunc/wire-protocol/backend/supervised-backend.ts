@@ -18,7 +18,6 @@ function superviseBackend(
 
   return {
     spiVersion: driver.spiVersion,
-    capabilities: driver.capabilities,
 
     publish: (lane, payload) => driver.publish(lane, payload),
     subscribe: (lane, receiver) => {

@@ -168,25 +168,6 @@ function assertBackendDriver(backend: BackendDriver): void {
     throw new Error('telefunc/backend: invalid backend subscriptions; expected an object')
   }
   assertMethod(backend.subscriptions, 'bind')
-
-  const capabilities = backend.capabilities
-  if (capabilities === null || typeof capabilities !== 'object') {
-    throw new Error('telefunc/backend: invalid backend capabilities; expected an object')
-  }
-  if (
-    capabilities.receivers !== 'global' &&
-    capabilities.receivers !== 'node-local' &&
-    capabilities.receivers !== 'none'
-  ) {
-    throw new Error('telefunc/backend: backend capabilities.receivers must be "global", "node-local", or "none"')
-  }
-  if (
-    typeof capabilities.maxRetainedPayloadBytes !== 'number' ||
-    Number.isNaN(capabilities.maxRetainedPayloadBytes) ||
-    capabilities.maxRetainedPayloadBytes < 0
-  ) {
-    throw new Error('telefunc/backend: backend capabilities.maxRetainedPayloadBytes must be a non-negative number')
-  }
 }
 
 function assertMethod(backend: object, method: string): void {

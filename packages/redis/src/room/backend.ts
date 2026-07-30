@@ -157,11 +157,12 @@ function encodeNext(next: HeadNext): string {
 
 export class RedisRoomBackend implements BackendDriver {
   readonly spiVersion = 1 as const
-  readonly capabilities: BackendDriver['capabilities']
   readonly subscriptions: RedisSubscriptionDriver
 
   readonly #publisher: Redis | Cluster
   readonly #prefix: string
+  readonly #receivers: 'global' | 'none'
+  readonly #maxRetainedPayloadBytes: number
   #disposed = false
 
   constructor(options: RedisRoomBackendOptions) {
@@ -209,10 +210,8 @@ export class RedisRoomBackend implements BackendDriver {
       })
     }
     this.#prefix = options.prefix ?? DEFAULT_ROOM_PREFIX
-    this.capabilities = {
-      receivers: options.redis instanceof Cluster ? 'none' : 'global',
-      maxRetainedPayloadBytes: options.maxRetainedPayloadBytes ?? DEFAULT_MAX_RETAINED_BYTES,
-    }
+    this.#receivers = options.redis instanceof Cluster ? 'none' : 'global'
+    this.#maxRetainedPayloadBytes = options.maxRetainedPayloadBytes ?? DEFAULT_MAX_RETAINED_BYTES
     this.#publisher.defineCommand(PUBLISH_CMD, { numberOfKeys: 2, lua: PUBLISH_LUA })
     for (const command of Object.values(REDIS_ROOM_COMMANDS)) {
       if (command.numberOfKeys === null) this.#publisher.defineCommand(command.name, { lua: command.lua })
@@ -245,7 +244,7 @@ export class RedisRoomBackend implements BackendDriver {
     return {
       seq,
       timestamp,
-      ...(this.capabilities.receivers === 'none' ? {} : { receivers }),
+      ...(this.#receivers === 'none' ? {} : { receivers }),
     }
   }
 
@@ -372,7 +371,7 @@ export class RedisRoomBackend implements BackendDriver {
         opts?.closingLease ?? '',
         opts?.retain === true ? '1' : '0',
         toBuffer(payload),
-        String(this.capabilities.maxRetainedPayloadBytes),
+        String(this.#maxRetainedPayloadBytes),
         flush.token,
       ])) as string
     } catch (error) {
@@ -397,7 +396,7 @@ export class RedisRoomBackend implements BackendDriver {
       accepted: true,
       seq: parsed.seq,
       timestamp: parsed.timestamp,
-      ...(this.capabilities.receivers === 'none' ? {} : { receivers: parsed.receivers }),
+      ...(this.#receivers === 'none' ? {} : { receivers: parsed.receivers }),
       delivery,
     }
   }
