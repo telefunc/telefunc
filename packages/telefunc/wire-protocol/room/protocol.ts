@@ -236,7 +236,7 @@ type ParticipantStubMetadata = {
 type RoomCtrlEnvelope =
   | { __r: 'join'; id: string; meta: ParticipantMeta; joinedAt: number; identity?: string; hidden?: boolean }
   | { __r: 'leave'; id: string; cause?: 'removed' | 'disconnected'; reason?: unknown }
-  | { __r: 'p-meta'; id: string; meta: ParticipantMeta; prev: ParticipantMeta; seq: number }
+  | { __r: 'p-meta'; id: string; meta: ParticipantMeta; seq: number }
   | { __r: 'update'; meta: RoomMeta; at: number; by: string }
   // A member's first publish on a new named track — announced before the frame, so live
   // all-track subscribers bring up the track-key subscription (idempotent, like join).

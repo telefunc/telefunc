@@ -417,9 +417,10 @@ class RoomState {
 
   /** Applies only revisions newer than the entry's — the origin's echo (same seq) and events
    *  arriving behind a fresher reconcile are absorbed. */
-  applyParticipantMeta(id: string, meta: ParticipantMeta, prev: ParticipantMeta, seq: number): void {
+  applyParticipantMeta(id: string, meta: ParticipantMeta, seq: number): void {
     const entry = this._members.get(id)
     if (!entry || seq <= entry.metaSeq) return
+    const prev = entry.meta
     entry.metaSeq = seq
     entry.meta = meta
     this._bumpState()
@@ -588,7 +589,7 @@ class RoomState {
           drifted = true
         } else {
           if (member.metaSeq > entry.metaSeq) {
-            this.applyParticipantMeta(member.id, member.meta, entry.meta, member.metaSeq)
+            this.applyParticipantMeta(member.id, member.meta, member.metaSeq)
             drifted = true
           }
           entry.joinedAt = member.joinedAt

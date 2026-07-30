@@ -993,21 +993,20 @@ class ServerRoom implements Room {
   ): Promise<void> {
     await this._assertOpen()
     const key = roomMemberKvKey(this.id, id)
-    const { prev, meta, seq } = await mutateCells(this.id, this._inc, { keys: [key] }, (cells) => {
+    const { meta, seq } = await mutateCells(this.id, this._inc, { keys: [key] }, (cells) => {
       const raw = cells.get(key)
       if (raw === undefined) throw new RoomError(`Participant not found (left?): ${id}`)
       const record = parse(decodeRoomText(raw)) as RoomMemberRecord
-      const prev = this._state.getRemote(id)?.meta ?? record.meta
       const meta = computeMeta(record.meta)
       const seq = record.metaSeq + 1
       const next = { ...record, meta, metaSeq: seq, seenAt: Date.now() } satisfies RoomMemberRecord
       return {
-        value: { prev, meta, seq },
+        value: { meta, seq },
         mutations: [{ key, set: { bytes: encodeRoomText(stringify(next)) } }],
       }
     })
-    this._state.applyParticipantMeta(id, meta, prev, seq)
-    await publishCtrl(this.id, this._inc, { __r: 'p-meta', id, meta, prev, seq })
+    this._state.applyParticipantMeta(id, meta, seq)
+    await publishCtrl(this.id, this._inc, { __r: 'p-meta', id, meta, seq })
   }
 
   /** @internal — publish a member's text message. The sender's verified meta/identity are stamped
@@ -1466,7 +1465,7 @@ class ServerRoom implements Room {
         this._applyLeave(event.id, leaveCauseFromWire(event))
         return
       case 'p-meta': {
-        this._state.applyParticipantMeta(event.id, event.meta, event.prev, event.seq)
+        this._state.applyParticipantMeta(event.id, event.meta, event.seq)
         const local = this._localParticipants.get(event.id)
         if (local) local._meta = event.meta
         return

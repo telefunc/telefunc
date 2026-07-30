@@ -314,7 +314,7 @@ class ClientRoom implements Room {
         return
       }
       case 'p-meta': {
-        this._state.applyParticipantMeta(event.id, event.meta, event.prev, event.seq)
+        this._state.applyParticipantMeta(event.id, event.meta, event.seq)
         const local = this._localParticipants.get(event.id)
         if (local) local._meta = event.meta
         return

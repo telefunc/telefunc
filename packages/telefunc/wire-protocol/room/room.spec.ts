@@ -691,6 +691,30 @@ describe('client Room lifecycle', () => {
     expect(leaveAttempts).toBe(2)
   })
 
+  it("derives participant-update prev from the receiver's own applied state", async () => {
+    const fake = createFakeStub()
+    const client = new ClientRoom(fake.stub, snapshot('receiver-local-prev'))
+    const memberId = crypto.randomUUID()
+    fake.emitText(
+      {
+        __r: 'roster',
+        members: [{ id: memberId, meta: { step: 0 }, joinedAt: 1, metaSeq: 0 }],
+      },
+      { key: 'receiver-local-prev', seq: 1, timestamp: 1 },
+    )
+    const member = await client.getParticipant(memberId)
+    const updates: Array<[unknown, unknown]> = []
+    member!.onUpdate((meta, prev) => updates.push([meta, prev]))
+
+    // This receiver skipped the writer's step:1 revision. Its callback must report the value it
+    // actually transitioned away from, not the writer-local value carried by the old wire shape.
+    fake.emitText(
+      { __r: 'p-meta', id: memberId, meta: { step: 2 }, prev: { step: 1 }, seq: 2 },
+      { key: 'receiver-local-prev', seq: 2, timestamp: 2 },
+    )
+    expect(updates).toEqual([[{ step: 2 }, { step: 0 }]])
+  })
+
   it('redeclares a room-wide text subscription after reconnect even when the local latch already matches', () => {
     const wireDeclarations: boolean[] = []
     let reconnect = () => {}
@@ -1327,11 +1351,16 @@ function createFakeStub(options?: {
   send?: (message: unknown) => Promise<unknown>
 }): {
   stub: ClientBroadcast
+  emitText(data: unknown, info: ChannelPublishInfo): void
   emitBinary(data: Uint8Array, info: ChannelPublishInfo): void
 } {
+  const text: Array<(data: unknown, info: ChannelPublishInfo) => void> = []
   const binary: Array<(data: Uint8Array, info: ChannelPublishInfo) => void> = []
   const stub = {
-    _subscribeLocal: () => () => {},
+    _subscribeLocal: (callback: (data: unknown, info: ChannelPublishInfo) => void) => {
+      text.push(callback)
+      return () => text.splice(text.indexOf(callback), 1)
+    },
     _subscribeBinaryLocal: (callback: (data: Uint8Array, info: ChannelPublishInfo) => void) => {
       binary.push(callback)
       return () => binary.splice(binary.indexOf(callback), 1)
@@ -1345,6 +1374,7 @@ function createFakeStub(options?: {
   } as unknown as ClientBroadcast
   return {
     stub,
+    emitText: (data, info) => text.forEach((callback) => callback(data, info)),
     emitBinary: (data, info) => binary.forEach((callback) => callback(data, info)),
   }
 }
