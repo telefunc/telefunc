@@ -1,27 +1,40 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { parse } from '@brillout/json-serializer/parse'
+import { stringify } from '@brillout/json-serializer/stringify'
 import { IndexedPeer } from '../server/IndexedPeer.js'
 import { ACK_STATUS, TAG, decode } from '../shared-ws.js'
 import { addTelefunctionCallBarrier, waitForTelefunctionCallBarriers } from '../client/call-barrier.js'
 import { ShieldValidationError, isShieldValidationError } from '../../shared/ShieldValidationError.js'
+import { Abort, isAbort } from '../../shared/Abort.js'
 import {
   ROOM_DM_ACK_TIMEOUT_MS,
   ROOM_HEARTBEAT_INTERVAL_MS,
+  ROOM_MEMBER_TTL_MS,
   ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS,
+  ROOM_TAIL_ATTACH_TIMEOUT_MS,
+  ROOM_TAIL_HOLD_BYTES_MAX,
+  ROOM_TAIL_HOLD_MAX,
 } from './constants.js'
 import {
   DEFAULT_TRACK,
   RoomError,
   frameWithMemberId,
   isRoomError,
+  mergeAttributes,
+  normalizeJoinOptions,
+  pushBoundedTail,
   roomAckError,
+  roomCtrlKey,
+  roomIdentityKvPrefix,
+  roomMemberKvKey,
   sanitizeBinaryWants,
   unframeMemberId,
   type RoomSnapshotMetadata,
 } from './protocol.js'
 import { ClientRoom, RoomClientBroadcast } from './client.js'
+import { RoomState, remoteBacking } from './state.js'
 import { Room, ServerRoom } from './server.js'
-import { SubSlot, configFromHead, encodeRoomConfig } from './server/lanes.js'
+import { SubSlot, configFromHead, decodeRoomText, encodeRoomConfig } from './server/lanes.js'
 import { RoomStubChannel } from './stubs.js'
 import { RoomDemand } from './demand.js'
 import type { ChannelPublishInfo } from '../channel.js'
@@ -39,6 +52,8 @@ import type {
   SubscriptionState,
 } from '../backend/spi.js'
 import { ORDERING_FRAME_LAYOUT, decodeOrderingFrame, encodeOrderingFrame } from '../ordering-frame.js'
+import { GcRegistry } from '../gcRegistry.js'
+import { wrapProxy } from '../wrapProxy.js'
 
 const encoder = new TextEncoder()
 const decoder = new TextDecoder()
@@ -287,6 +302,55 @@ describe('Room public behavior', () => {
     expect((await driver.readHead(room.id))?.head).toMatchObject({ state: 'closed', currentInc: null })
   })
 
+  it('retries generation cleanup after the head was durably finalized', async () => {
+    const room = (await Room.create('finalized-cleanup-retry')) as ServerRoom
+    const inc = room._inc
+    await room.join()
+    const dropping = vi
+      .spyOn(driver, 'dropGeneration')
+      .mockRejectedValueOnce(new Error('transient generation cleanup failure'))
+
+    await expect(Room.close(room.id)).rejects.toThrow('transient generation cleanup failure')
+    expect((await driver.readHead(room.id))?.head).toMatchObject({ state: 'closed', currentInc: null })
+    expect(await driver.listGenerations(room.id)).toEqual([inc])
+
+    await expect(Room.close(room.id)).resolves.toBeUndefined()
+    expect(await driver.listGenerations(room.id)).toEqual([])
+    expect((await driver.directoryList(room.id)).entries).toEqual([])
+    dropping.mockRestore()
+  })
+
+  it('waits out an active close lease in getOrCreate instead of reporting not-found', async () => {
+    vi.useFakeTimers()
+    const room = (await Room.create('get-or-create-closing')) as ServerRoom
+    const firstInc = room._inc
+    const current = (await driver.readHead(room.id))!.head
+    await driver.compareExchangeHead(
+      room.id,
+      { expect: { rev: current.rev } },
+      {
+        head: {
+          currentInc: current.currentInc,
+          state: 'closing',
+          config: encodeRoomConfig({ ...configFromHead(current), status: 'closing' }),
+          closeLease: { id: 'active-get-or-create-close', durationMs: 1_000 },
+        },
+      },
+    )
+
+    let settled = false
+    const resolving = Room.getOrCreate(room.id).finally(() => {
+      settled = true
+    })
+    await Promise.resolve()
+    expect(settled).toBe(false)
+
+    await vi.advanceTimersByTimeAsync(1_100)
+    const recreated = (await resolving) as ServerRoom
+    expect(recreated._inc).not.toBe(firstInc)
+    expect(recreated.isClosed).toBe(false)
+  })
+
   it('tears down a close observed by a separate Room runtime that cannot inherit the initiator hold', async () => {
     const authority = await Room.create('remote-close-teardown')
     authority.onAnnounce(() => {})
@@ -504,6 +568,47 @@ describe('Room public behavior', () => {
     slot.stop()
   })
 
+  it('makes roster readers join an authoritative refresh already in flight', async () => {
+    const authority = (await Room.create('roster-refresh-owner')) as ServerRoom
+    await authority.join()
+    const observer = (await Room.get(authority.id)) as ServerRoom
+    observer.onJoin(() => {})
+    await observer.getParticipants()
+    await vi.waitFor(() => expect((observer as unknown as { _ctrlSub: SubSlot })._ctrlSub.established).toBe(true))
+    expect(observer._state.rosterKnown).toBe(true)
+
+    const readCells = driver.readCells.bind(driver)
+    const started = deferred<void>()
+    const release = deferred<void>()
+    let held = false
+    const read = vi.spyOn(driver, 'readCells').mockImplementation(async (roomId, inc, selector) => {
+      if (!held && 'prefix' in selector && selector.prefix.endsWith(':m:')) {
+        held = true
+        started.resolve()
+        await release.promise
+      }
+      return readCells(roomId, inc, selector)
+    })
+    const refresh = (
+      observer as unknown as {
+        _refreshMembers(): Promise<void>
+      }
+    )._refreshMembers()
+    await started.promise
+    expect((observer as unknown as { _ctrlSub: SubSlot })._ctrlSub.established).toBe(true)
+    const participants = observer.getParticipants()
+    const status = await Promise.race([
+      participants.then(() => 'settled' as const),
+      new Promise<'pending'>((resolve) => setTimeout(() => resolve('pending'), 0)),
+    ])
+    expect(status).toBe('pending')
+
+    release.resolve()
+    await refresh
+    expect((await participants).map(({ id }) => id)).toHaveLength(1)
+    read.mockRestore()
+  })
+
   it('heartbeats pure control observers without owned members or binary demand', async () => {
     vi.useFakeTimers()
     const observer = (await Room.get((await Room.create('observer-heartbeat')).id)) as ServerRoom
@@ -515,6 +620,57 @@ describe('Room public behavior', () => {
     await vi.advanceTimersByTimeAsync(ROOM_HEARTBEAT_INTERVAL_MS)
 
     expect(heartbeat).toHaveBeenCalledOnce()
+  })
+
+  it('reconciles authority even when member renewal fails first', async () => {
+    const room = (await Room.create('heartbeat-renewal-failure')) as ServerRoom
+    await room.join()
+    const readCells = vi.spyOn(driver, 'readCells').mockRejectedValue(new Error('renewal failed'))
+    const readHead = vi.spyOn(driver, 'readHead').mockResolvedValue(null)
+
+    await expect((room as unknown as { _heartbeatTick(): Promise<void> })._heartbeatTick()).rejects.toThrow(
+      'renewal failed',
+    )
+
+    expect(room.isClosed).toBe(true)
+    readCells.mockRestore()
+    readHead.mockRestore()
+  })
+
+  it('replaces a subscription that is already closed on initial establishment', async () => {
+    const closed = terminalSubscription()
+    await closed.close()
+    const terminal = vi.fn()
+    const slot = new SubSlot(terminal, () => {})
+
+    slot.sync(true, () => closed.subscription)
+    await Promise.resolve()
+
+    expect(terminal).toHaveBeenCalledOnce()
+    expect(terminal.mock.calls[0]?.[0]).toBe(slot)
+    slot.stop()
+  })
+
+  it('rejects only an exhausted internal readiness generation and recovers holder readiness later', async () => {
+    const slot = new SubSlot(
+      () => {},
+      () => {},
+    )
+    slot.sync(true, () => rejectedSubscription('first generation failed'))
+    const holderReady = slot.ready
+    const exhaustedGeneration = slot.generationReady
+    const exhausted = new RoomError('generation exhausted')
+
+    slot.markLost(exhausted)
+
+    await expect(exhaustedGeneration).rejects.toBe(exhausted)
+    expect(await Promise.race([holderReady.then(() => 'ready'), Promise.resolve('pending')])).toBe('pending')
+
+    slot.sync(true, () => terminalSubscription().subscription)
+    await expect(holderReady).resolves.toBeUndefined()
+    await expect(slot.generationReady).resolves.toBeUndefined()
+    expect(slot).toMatchObject({ wanted: true, active: true })
+    slot.stop()
   })
 
   it('retries a still-wanted lost subscription on the next planning pass', async () => {
@@ -560,7 +716,81 @@ describe('Room public behavior', () => {
 
       expect((await backend.readHead(observer.id))?.head.state).toBe('open')
       expect({ closed: observer.isClosed, onClose: onClose.mock.calls.length }).toEqual({ closed: false, onClose: 0 })
-      expect(textSlot).toMatchObject({ wanted: true, lost: true, active: false })
+      expect(textSlot).toMatchObject({ wanted: true, active: false })
+    } finally {
+      subscribe.mockRestore()
+      report.mockRestore()
+    }
+  })
+
+  it('settles an in-flight join when its inbox recovery horizon exhausts', async () => {
+    vi.useFakeTimers()
+    const room = (await Room.create('join-recovery-exhaustion')) as ServerRoom
+    const backend = getBackend()
+    const subscribeLane = backend.subscribeLane.bind(backend)
+    const inboxStarted = deferred<void>()
+    const subscribe = vi.spyOn(backend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
+      if (lane.kind !== 'inbox') return subscribeLane(roomId, inc, lane, receiver)
+      inboxStarted.resolve()
+      return rejectedSubscription('persistent inbox subscription failure')
+    })
+    const report = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const pending = Symbol('pending')
+    let outcome: unknown = pending
+    void room.join().then(
+      (participant) => {
+        outcome = participant
+      },
+      (error: unknown) => {
+        outcome = error
+      },
+    )
+    try {
+      await inboxStarted.promise
+      await vi.advanceTimersByTimeAsync(ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS + 100)
+
+      expect(outcome).toBeInstanceOf(RoomError)
+      expect(room.isClosed).toBe(false)
+      expect(room.count).toBe(0)
+    } finally {
+      subscribe.mockRestore()
+      report.mockRestore()
+    }
+  })
+
+  it('settles retained replay when its semantic recovery horizon exhausts', async () => {
+    vi.useFakeTimers()
+    const authority = (await Room.create('replay-recovery-exhaustion')) as ServerRoom
+    const publisher = await authority.join()
+    await publisher.publish('retained', { retain: true })
+    const observer = (await Room.get(authority.id)) as ServerRoom
+    const { stub } = serve(observer)
+    const backend = getBackend()
+    const subscribeLane = backend.subscribeLane.bind(backend)
+    const semanticStarted = deferred<void>()
+    const subscribe = vi.spyOn(backend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
+      if (lane.kind !== 'semantic') return subscribeLane(roomId, inc, lane, receiver)
+      semanticStarted.resolve()
+      return rejectedSubscription('persistent semantic subscription failure')
+    })
+    const report = vi.spyOn(console, 'error').mockImplementation(() => {})
+    stub._onPeerBroadcastSubscribe(false)
+    const pending = Symbol('pending')
+    let outcome: unknown = pending
+    void observer._replayRetainedText(stub, false, new Set()).then(
+      () => {
+        outcome = undefined
+      },
+      (error: unknown) => {
+        outcome = error
+      },
+    )
+    try {
+      await semanticStarted.promise
+      await vi.advanceTimersByTimeAsync(ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS + 100)
+
+      expect(outcome).toBeInstanceOf(RoomError)
+      expect(observer.isClosed).toBe(false)
     } finally {
       subscribe.mockRestore()
       report.mockRestore()
@@ -591,6 +821,112 @@ describe('Room public behavior', () => {
     expect(observer.count).toBe(0)
     expect(events.at(-1)).toBe('leave:Alicia')
     expect((await observer.getParticipants({ hidden: true })).map((member) => member.id)).toEqual([hidden.id])
+  })
+
+  it('excludes an expired unobserved member from static get and list presence', async () => {
+    const room = (await Room.create('expired-static-presence')) as ServerRoom
+    const member = await room.join()
+    const memberKey = roomMemberKvKey(room.id, member.id)
+    const read = await driver.readCells(room.id, room._inc, { keys: [memberKey] })
+    expect('staleInc' in read).toBe(false)
+    if ('staleInc' in read) throw new Error('unexpected stale generation')
+    const record = parse(decoder.decode(read.cells.get(memberKey)!))
+    await expect(
+      driver.compareExchangeCells(room.id, room._inc, read.revision, [
+        {
+          key: memberKey,
+          set: { bytes: encoder.encode(stringify({ ...record, seenAt: Date.now() - ROOM_MEMBER_TTL_MS - 1 })) },
+        },
+      ]),
+    ).resolves.toBe('committed')
+
+    const loaded = await Room.get(room.id)
+    expect(loaded.count).toBe(0)
+    expect(loaded.isEmpty).toBe(true)
+    expect((await Room.list()).find(({ id }) => id === room.id)).toMatchObject({ count: 0, isEmpty: true })
+  })
+
+  it('keeps local and verified sender metadata at the newest accepted sequence', async () => {
+    const room = (await Room.create('participant-meta-order')) as ServerRoom
+    const participant = await room.join()
+    const observer = await Room.get(room.id)
+    const senderMeta: unknown[] = []
+    observer.subscribe((_data, _info, from) => senderMeta.push(from.meta))
+    const commitLane = driver.commitLane.bind(driver)
+    const firstCommit = deferred<void>()
+    const releaseFirst = deferred<void>()
+    const commit = vi.spyOn(driver, 'commitLane').mockImplementation(async (roomId, inc, lane, payload, options) => {
+      if (lane.kind === 'control') {
+        const event = parse(decodeRoomText(payload)) as { __r?: string; seq?: number }
+        if (event.__r === 'p-meta' && event.seq === 1) {
+          firstCommit.resolve()
+          await releaseFirst.promise
+        }
+      }
+      return commitLane(roomId, inc, lane, payload, options)
+    })
+
+    const first = participant.setMeta({ version: 1 })
+    await firstCommit.promise
+    await participant.setMeta({ version: 2 })
+    releaseFirst.resolve()
+    await first
+
+    expect(participant.meta).toEqual({ version: 2 })
+    await participant.publish('metadata-check')
+    expect(senderMeta).toEqual([{ version: 2 }])
+    commit.mockRestore()
+  })
+
+  it('keeps a member whose heartbeat wins the expired-record reap race', async () => {
+    const room = (await Room.create('reap-heartbeat-race')) as ServerRoom
+    const member = await room.join()
+    const memberKey = roomMemberKvKey(room.id, member.id)
+    const compareExchange = driver.compareExchangeCells.bind(driver)
+    const initial = await driver.readCells(room.id, room._inc, { keys: [memberKey] })
+    expect('staleInc' in initial).toBe(false)
+    if ('staleInc' in initial) throw new Error('unexpected stale generation')
+    const initialRaw = initial.cells.get(memberKey)
+    expect(initialRaw).toBeDefined()
+    const initialRecord = parse(decoder.decode(initialRaw!)) as Record<string, unknown>
+    await expect(
+      compareExchange(room.id, room._inc, initial.revision, [
+        {
+          key: memberKey,
+          set: {
+            bytes: encoder.encode(stringify({ ...initialRecord, seenAt: Date.now() - ROOM_MEMBER_TTL_MS - 1 })),
+          },
+        },
+      ]),
+    ).resolves.toBe('committed')
+
+    let raced = false
+    const compare = vi
+      .spyOn(driver, 'compareExchangeCells')
+      .mockImplementation(async (roomId, inc, revision, mutations) => {
+        if (!raced && mutations.some(({ key, set }) => key === memberKey && set === undefined)) {
+          raced = true
+          const fresh = await driver.readCells(roomId, inc, { keys: [memberKey] })
+          expect('staleInc' in fresh).toBe(false)
+          if ('staleInc' in fresh) throw new Error('unexpected stale generation')
+          const raw = fresh.cells.get(memberKey)
+          expect(raw).toBeDefined()
+          const record = parse(decoder.decode(raw!)) as Record<string, unknown>
+          await expect(
+            compareExchange(roomId, inc, fresh.revision, [
+              {
+                key: memberKey,
+                set: { bytes: encoder.encode(stringify({ ...record, seenAt: Date.now() })) },
+              },
+            ]),
+          ).resolves.toBe('committed')
+        }
+        return compareExchange(roomId, inc, revision, mutations)
+      })
+
+    expect((await Room.getParticipants(room.id)).map(({ id }) => id)).toEqual([member.id])
+    expect(raced).toBe(true)
+    compare.mockRestore()
   })
 
   it('keeps text self-delivery local and binary subscriptions selective across named tracks', async () => {
@@ -931,6 +1267,44 @@ describe('Room public behavior', () => {
     expect(parse(decoder.decode(retained!.payload))).toMatchObject({ from: replacement.id, data: 'new' })
   })
 
+  it('retries retained cleanup after member deletion from durable eviction work', async () => {
+    const room = (await Room.create('retained-cleanup-retry')) as ServerRoom
+    const member = await room.join()
+    await member.publish('text', { retain: true })
+    await member.publishBinary(new Uint8Array([1]), { track: 'screen', retain: true })
+    const deletion = vi
+      .spyOn(driver, 'deleteRetained')
+      .mockRejectedValueOnce(new Error('transient retained cleanup failure'))
+
+    await expect(member.leave()).rejects.toThrow('transient retained cleanup failure')
+    deletion.mockRestore()
+    expect(await driver.listRetained(room.id, room._inc)).toHaveLength(2)
+
+    await expect(Room.getParticipants(room.id)).resolves.toEqual([])
+    expect(await driver.listRetained(room.id, room._inc)).toEqual([])
+  })
+
+  it('reaps legacy orphan-owned retained text instead of replaying it', async () => {
+    const authority = (await Room.create('orphan-retained-replay')) as ServerRoom
+    const member = await authority.join()
+    await member.publish('orphan', { retain: true })
+    const memberKey = roomMemberKvKey(authority.id, member.id)
+    const cells = await driver.readCells(authority.id, authority._inc, { keys: [memberKey] })
+    expect('staleInc' in cells).toBe(false)
+    if ('staleInc' in cells) throw new Error('unexpected stale generation')
+    await expect(
+      driver.compareExchangeCells(authority.id, authority._inc, cells.revision, [{ key: memberKey }]),
+    ).resolves.toBe('committed')
+
+    const observer = (await Room.get(authority.id)) as ServerRoom
+    const { stub, peer } = serve(observer)
+    stub._wantsText = true
+    await observer._replayRetainedText(stub, false, new Set())
+
+    expect(dataFrames(peer)).toEqual([])
+    await expect(driver.readRetained(authority.id, authority._inc, semanticLane)).resolves.toBeNull()
+  })
+
   it('does not retain or expose mutable lane aliases', async () => {
     const room = (await Room.create('retained-lane-alias')) as ServerRoom
     const lane = { kind: 'binary', member: 'member', track: 'original' } as LaneId
@@ -1059,22 +1433,49 @@ describe('Room public behavior', () => {
   })
 
   it('tail mode holds pre-attach text and flushes it in order on first client demand', async () => {
-    vi.useFakeTimers()
     await Room.create('tail')
     const source = await Room.get('tail')
     const member = await source.join()
     const tail = (await Room.get('tail', { tail: true })) as ServerRoom
     await member.publish('early')
-    await vi.advanceTimersByTimeAsync(60_001)
 
     const { stub, peer } = serve(tail)
     await member.publish('held')
-    await vi.advanceTimersByTimeAsync(60_001)
     expect(dataFrames(peer)).toEqual([])
     stub._onPeerBroadcastSubscribe(false)
     await vi.waitFor(() => expect(dataFrames(peer)).toEqual(['early', 'held']))
     await member.publish('live')
     expect(dataFrames(peer)).toEqual(['early', 'held', 'live'])
+  })
+
+  it('releases a tail that is not attached within its 60 second lease', async () => {
+    vi.useFakeTimers()
+    await Room.create('tail-pre-attach-expiry')
+    const source = await Room.get('tail-pre-attach-expiry')
+    const member = await source.join()
+    const tail = (await Room.get('tail-pre-attach-expiry', { tail: true })) as ServerRoom
+    await member.publish('expired')
+
+    await vi.advanceTimersByTimeAsync(ROOM_TAIL_ATTACH_TIMEOUT_MS + 1)
+    const { stub, peer } = serve(tail)
+    stub._onPeerBroadcastSubscribe(false)
+
+    expect(dataFrames(peer)).toEqual([])
+  })
+
+  it('releases an attached tail when first text demand misses its 60 second lease', async () => {
+    vi.useFakeTimers()
+    await Room.create('tail-post-attach-expiry')
+    const source = await Room.get('tail-post-attach-expiry')
+    const member = await source.join()
+    const tail = (await Room.get('tail-post-attach-expiry', { tail: true })) as ServerRoom
+    await member.publish('expired')
+    const { stub, peer } = serve(tail)
+
+    await vi.advanceTimersByTimeAsync(ROOM_TAIL_ATTACH_TIMEOUT_MS + 1)
+    stub._onPeerBroadcastSubscribe(false)
+
+    expect(dataFrames(peer)).toEqual([])
   })
 
   it('onDemand reports named-track demand turning on and off', async () => {
@@ -1094,6 +1495,51 @@ describe('Room public behavior', () => {
         ['screen', false],
       ]),
     )
+  })
+
+  it('replays already-true demand when the publisher attaches its handler', async () => {
+    const authority = await Room.create('late-demand-handler')
+    const observer = await Room.get(authority.id)
+    observer.subscribeBinary(() => {})
+
+    const publisher = await authority.join()
+    const changes: Array<[string | null, boolean]> = []
+    publisher.onDemand((track, wanted) => changes.push([track, wanted]))
+
+    expect(changes).toEqual([[null, true]])
+  })
+
+  it('uses the inbox hold only before the first listener attaches', async () => {
+    const room = await Room.create('one-shot-inbox-hold')
+    const member = await room.join()
+    const internal = member as unknown as {
+      _deliverMessage(message: {
+        from: string
+        fromMeta: Record<string, unknown> | null
+        fromIdentity: string | null
+        data: unknown
+      }): void
+      _deliverMessageAck(message: {
+        from: string
+        fromMeta: Record<string, unknown> | null
+        fromIdentity: string | null
+        data: unknown
+      }): Promise<unknown>
+    }
+    const received: unknown[] = []
+    const unlisten = member.listen((data) => received.push(data))
+    unlisten()
+
+    internal._deliverMessage({ from: '', fromMeta: null, fromIdentity: null, data: 'stale' })
+    let reply: unknown
+    void internal
+      ._deliverMessageAck({ from: '', fromMeta: null, fromIdentity: null, data: 'ack' })
+      .then((value) => (reply = value))
+    await Promise.resolve()
+    member.listen((data) => received.push(data))
+
+    expect(received).toEqual([])
+    expect(reply).toMatchObject({ ok: false })
   })
 
   it('keeps live and retained binary seq above 2^32 through server and public client decode', async () => {
@@ -1165,6 +1611,244 @@ describe('client Room lifecycle', () => {
     expect(roomAckError(error, vi.fn())).toEqual({ text: 'overlap', status: ACK_STATUS.ERROR })
   })
 
+  it('classifies only own, real, non-hostile error brands', () => {
+    const roomError = new RoomError('room')
+    const abortError = Abort('abort')
+    const shieldError = new ShieldValidationError('shield')
+    const roomBrand = Object.getOwnPropertySymbols(roomError)[0]!
+    const abortBrand = Object.getOwnPropertySymbols(abortError).find(
+      (symbol) => (abortError as unknown as Record<symbol, unknown>)[symbol] === true,
+    )!
+    const shieldBrand = Object.getOwnPropertySymbols(shieldError)[0]!
+
+    expect(isRoomError(Object.create(roomError))).toBe(false)
+    expect(isAbort(Object.create(abortError))).toBe(false)
+    expect(isShieldValidationError(Object.create(shieldError))).toBe(false)
+    expect(isRoomError({ [roomBrand]: true, name: 'RoomError', message: 'forged' })).toBe(false)
+    expect(isAbort({ [abortBrand]: true, name: 'Abort', message: 'forged', abortValue: null })).toBe(false)
+    expect(isShieldValidationError({ [shieldBrand]: true, name: 'ShieldValidationError', message: 'forged' })).toBe(
+      false,
+    )
+
+    const hostile = new Proxy(
+      {},
+      {
+        has() {
+          throw new Error('hostile brand probe')
+        },
+        getOwnPropertyDescriptor() {
+          throw new Error('hostile brand descriptor')
+        },
+      },
+    )
+    const report = vi.fn()
+    expect(() => isRoomError(hostile)).not.toThrow()
+    expect(roomAckError(hostile, report)).toEqual({
+      text: 'Internal Server Error — see server logs',
+      status: ACK_STATUS.ERROR,
+    })
+    expect(report).toHaveBeenCalledOnce()
+  })
+
+  it('keeps remote serializer backing unforgeable and exact-keyed', async () => {
+    const room = await Room.create('remote-backing')
+    const joined = await room.join()
+    const remote = await room.getParticipant(joined.id)
+    expect(remoteBacking(remote)).not.toBeNull()
+    expect(remoteBacking(Object.create(remote!))).toBeNull()
+    expect(Object.getOwnPropertySymbols(remote!)).toEqual([])
+    const hostile = new Proxy(
+      {},
+      {
+        has() {
+          throw new Error('hostile remote probe')
+        },
+      },
+    )
+    expect(() => remoteBacking(hostile)).not.toThrow()
+    expect(remoteBacking(hostile)).toBeNull()
+  })
+
+  describe.skipIf(typeof globalThis.gc !== 'function')('Room-derived handle ownership (real GC)', () => {
+    it('keeps the Room wrapper alive through a participant extracted from a roster array', async () => {
+      const memberId = crypto.randomUUID()
+      const fake = createFakeStub()
+      const target = new ClientRoom(fake.stub, snapshot('gc-list-owner'))
+      const registry = new GcRegistry(5)
+      let closed = 0
+      const retained = await retainOnlyListedRemote(target, fake, registry, () => closed++, memberId)
+
+      await forceRoomGc()
+
+      expect(retained.room.deref()).not.toBeUndefined()
+      expect(retained.member.id).toBe(memberId)
+      expect(closed).toBe(0)
+    })
+
+    it('keeps the Room wrapper alive through a joined participant', async () => {
+      const memberId = crypto.randomUUID()
+      const fake = createFakeStub({
+        send: async (message: any) => (message.__r === 'req-join' ? { id: memberId, joinedAt: 1 } : undefined),
+      })
+      const target = new ClientRoom(fake.stub, snapshot('gc-join-owner'))
+      const registry = new GcRegistry(5)
+      let closed = 0
+      const retained = await retainOnlyJoinedParticipant(target, registry, () => closed++)
+
+      await forceRoomGc()
+
+      expect(retained.room.deref()).not.toBeUndefined()
+      expect(retained.member.id).toBe(memberId)
+      expect(closed).toBe(0)
+    })
+
+    it('keeps the Room wrapper alive through a callback-delivered participant', async () => {
+      const memberId = crypto.randomUUID()
+      const fake = createFakeStub()
+      const target = new ClientRoom(fake.stub, snapshot('gc-callback-owner'))
+      const registry = new GcRegistry(5)
+      let closed = 0
+      const retained = await retainOnlyCallbackRemote(target, fake, registry, () => closed++, memberId)
+
+      await forceRoomGc()
+
+      expect(retained.room.deref()).not.toBeUndefined()
+      expect(retained.member.id).toBe(memberId)
+      expect(closed).toBe(0)
+    })
+
+    it('releases the Room wrapper from a departed participant handle', async () => {
+      const memberId = crypto.randomUUID()
+      const fake = createFakeStub({
+        send: async (message: any) => (message.__r === 'req-join' ? { id: memberId, joinedAt: 1 } : undefined),
+      })
+      const target = new ClientRoom(fake.stub, snapshot('gc-departed-owner'))
+      const registry = new GcRegistry(5)
+      let closed = 0
+      const retained = await retainOnlyDepartedParticipant(target, fake, registry, () => closed++, memberId)
+
+      await forceRoomGc()
+
+      expect(retained.member.id).toBe(memberId)
+      expect(retained.room.deref()).toBeUndefined()
+      expect(closed).toBe(1)
+    })
+
+    it('releases the Room wrapper after every application handle is dropped', async () => {
+      const memberId = crypto.randomUUID()
+      const fake = createFakeStub({
+        send: async (message: any) => (message.__r === 'req-join' ? { id: memberId, joinedAt: 1 } : undefined),
+      })
+      const target = new ClientRoom(fake.stub, snapshot('gc-drop-owner'))
+      const registry = new GcRegistry(5)
+      let closed = 0
+      const room = await dropJoinedRoomHandles(target, registry, () => closed++)
+
+      await forceRoomGc()
+
+      expect(room.deref()).toBeUndefined()
+      expect(closed).toBe(1)
+    })
+  })
+
+  it('does not emit onEmpty from a partial pre-roster member map', () => {
+    const fake = createFakeStub()
+    const client = new ClientRoom(fake.stub, { ...snapshot('pre-roster-empty'), count: 2 })
+    const memberId = crypto.randomUUID()
+    let empty = 0
+    client.onEmpty(() => empty++)
+
+    fake.emitText({ __r: 'join', id: memberId, meta: {}, joinedAt: 1 }, { key: client.id, seq: 1, timestamp: 1 })
+    fake.emitText({ __r: 'leave', id: memberId }, { key: client.id, seq: 2, timestamp: 2 })
+
+    expect(client.count).toBe(2)
+    expect(empty).toBe(0)
+  })
+
+  it('dirties the roster epoch for unknown member-record events', () => {
+    const state = new RoomState({
+      roomId: 'unknown-member-epoch',
+      meta: {},
+      seed: { members: [] },
+      updateStamp: { at: 0, by: '' },
+      onListenersChanged: () => {},
+      onCallbackError: () => {},
+    })
+    const id = crypto.randomUUID()
+
+    state.applyTrack(id, 'screen')
+    state.applyParticipantMeta(id, { step: 1 }, 1)
+    state.applyLeave(id)
+
+    expect(state.membershipVersion).toBe(3)
+  })
+
+  it('reports rejected async RoomState callbacks without awaiting delivery', async () => {
+    const memberId = crypto.randomUUID()
+    const errors: unknown[] = []
+    const state = new RoomState({
+      roomId: 'async-state-callbacks',
+      meta: {},
+      seed: { members: [{ id: memberId, meta: {}, joinedAt: 1, metaSeq: 0 }] },
+      updateStamp: { at: 0, by: '' },
+      onListenersChanged: () => {},
+      onCallbackError: (error) => errors.push(error),
+    })
+    const remote = state.getRemote(memberId)!
+    const failures = Array.from({ length: 5 }, (_, index) => new Error(`async state callback ${index}`))
+    const rejected = failures.map((failure) => {
+      const promise = Promise.reject(failure)
+      void promise.catch(() => {})
+      return promise
+    })
+    state.subscribe(() => rejected[0])
+    remote.subscribe(() => rejected[1])
+    state.subscribeBinary(() => rejected[2])
+    remote.subscribeBinary(() => rejected[3])
+    state.onClose(() => rejected[4])
+
+    state.applyData(memberId, {}, null, 'text', { key: state.roomId, seq: 1, timestamp: 1 })
+    state.applyBinary(memberId, new Uint8Array(), null, null, { key: state.roomId, seq: 1, timestamp: 1 })
+    state.applyClosed()
+    await Promise.resolve()
+
+    expect(errors).toEqual(failures)
+  })
+
+  it('reports rejected async participant inbox, demand, and leave callbacks', async () => {
+    const room = await Room.create('async-participant-callbacks')
+    const participant = await room.join()
+    const errors: unknown[] = []
+    const internal = participant as unknown as {
+      _reportError(error: unknown): void
+      _deliverMessage(message: {
+        from: string
+        fromMeta: Record<string, unknown> | null
+        fromIdentity: string | null
+        data: unknown
+      }): void
+      _onDemand(track: string | null, wanted: boolean): void
+      _onLeft(cause: { type: 'left' }): void
+    }
+    internal._reportError = (error) => errors.push(error)
+    const failures = Array.from({ length: 3 }, (_, index) => new Error(`async participant callback ${index}`))
+    const rejected = failures.map((failure) => {
+      const promise = Promise.reject(failure)
+      void promise.catch(() => {})
+      return promise
+    })
+    participant.listen(() => rejected[0])
+    participant.onDemand(() => rejected[1])
+    participant.onLeave(() => rejected[2])
+
+    internal._deliverMessage({ from: '', fromMeta: null, fromIdentity: null, data: 'text' })
+    internal._onDemand(null, true)
+    internal._onLeft({ type: 'left' })
+    await Promise.resolve()
+
+    expect(errors).toEqual(failures)
+  })
+
   it('keeps a client participant active so a rejected leave request can be retried', async () => {
     let leaveAttempts = 0
     const fake = createFakeStub({
@@ -1182,6 +1866,86 @@ describe('client Room lifecycle', () => {
     await expect(member.publish('still-active')).resolves.toMatchObject({ seq: 1 })
     await expect(member.leave()).resolves.toBeUndefined()
     expect(leaveAttempts).toBe(2)
+  })
+
+  it.each(['leave', 'closed'] as const)('settles a client join across a pre-ack %s event', async (event) => {
+    const id = crypto.randomUUID()
+    const ack = deferred<{ id: string; joinedAt: number }>()
+    const fake = createFakeStub({
+      send: async (message) => {
+        if ((message as { __r?: string }).__r === 'req-join') return await ack.promise
+        return undefined
+      },
+    })
+    const client = new ClientRoom(fake.stub, snapshot(`pre-ack-${event}`))
+    const joining = client.join()
+    await Promise.resolve()
+    if (event === 'leave') {
+      fake.emitText({ __r: 'leave', id }, { key: client.id, seq: 1, timestamp: 1 })
+    } else {
+      fake.emitText({ __r: 'closed' }, { key: client.id, seq: 1, timestamp: 1 })
+    }
+    ack.resolve({ id, joinedAt: 1 })
+
+    const participant = await joining
+    await expect(participant.publish('zombie-check')).rejects.toThrow(/left/i)
+    const causes: unknown[] = []
+    participant.onLeave((cause) => causes.push(cause))
+    expect(causes).toEqual([{ type: event === 'leave' ? 'left' : 'closed' }])
+  })
+
+  it('replays demand that arrives while a client join ack is pending', async () => {
+    const id = crypto.randomUUID()
+    const ack = deferred<{ id: string; joinedAt: number }>()
+    const fake = createFakeStub({
+      send: async (message) => {
+        if ((message as { __r?: string }).__r === 'req-join') return await ack.promise
+        return undefined
+      },
+    })
+    const client = new ClientRoom(fake.stub, snapshot('pre-ack-demand'))
+    const joining = client.join()
+    await Promise.resolve()
+    fake.emitText(
+      { __r: 'demand', member: id, track: 'screen', wanted: true },
+      { key: client.id, seq: 1, timestamp: 1 },
+    )
+    ack.resolve({ id, joinedAt: 1 })
+
+    const participant = await joining
+    const demand: unknown[] = []
+    participant.onDemand((track, wanted) => demand.push([track, wanted]))
+    expect(demand).toEqual([['screen', true]])
+  })
+
+  it('keeps every acknowledged DM that arrives while a client join ack is pending', async () => {
+    const id = crypto.randomUUID()
+    const from = crypto.randomUUID()
+    const ack = deferred<{ id: string; joinedAt: number }>()
+    const replies: Array<{ ackId: string }> = []
+    const fake = createFakeStub({
+      send: async (message) => {
+        const request = message as { __r?: string; ackId?: string }
+        if (request.__r === 'req-join') return await ack.promise
+        if (request.__r === 'dm-reply' && request.ackId) replies.push({ ackId: request.ackId })
+        return undefined
+      },
+    })
+    const client = new ClientRoom(fake.stub, snapshot('pre-ack-dm'))
+    const joining = client.join()
+    await Promise.resolve()
+    for (let index = 0; index < 65; index++) {
+      fake.emitText(
+        { __r: 'dm', to: id, from, fromMeta: {}, data: index, ackId: `ack-${index}` },
+        { key: client.id, seq: index + 1, timestamp: index + 1 },
+      )
+    }
+    ack.resolve({ id, joinedAt: 1 })
+
+    const participant = await joining
+    participant.listen((data) => data)
+    await vi.waitFor(() => expect(replies).toHaveLength(65))
+    expect(replies.map(({ ackId }) => ackId)).toEqual(Array.from({ length: 65 }, (_, index) => `ack-${index}`))
   })
 
   it("derives participant-update prev from the receiver's own applied state", async () => {
@@ -1403,6 +2167,54 @@ describe('room demand lifecycle', () => {
 })
 
 describe('room binary protocol validation', () => {
+  it('rejects malformed key components as usage errors', () => {
+    expect(() => roomCtrlKey('\ud800')).toThrow('well-formed')
+    expect(() => roomIdentityKvPrefix('room', '\udc00')).toThrow('well-formed')
+  })
+
+  it('rejects non-boolean self-delivery options', () => {
+    expect(() => normalizeJoinOptions({ selfDelivery: 'false' } as never)).toThrow('boolean')
+    expect(() => normalizeJoinOptions({ selfDelivery: 0 } as never)).toThrow('boolean')
+  })
+
+  it('rejects invalid binary subscription option containers', () => {
+    const state = new RoomState({
+      roomId: 'strict-options',
+      meta: {},
+      seed: { members: [] },
+      updateStamp: { at: 0, by: '' },
+      onListenersChanged: () => {},
+      onCallbackError: () => {},
+    })
+    for (const options of [null, [], 'screen']) {
+      expect(() => state.subscribeBinary(() => {}, options as never)).toThrow('object')
+    }
+  })
+
+  it('bounds tails by count and serialized code units at every cap edge', () => {
+    const entry = (serialized: string, seq = 0) => ({
+      serialized,
+      ord: { seq, timestamp: 0 },
+      from: '',
+    })
+    const byCount: ReturnType<typeof entry>[] = []
+    for (let seq = 0; seq <= ROOM_TAIL_HOLD_MAX; seq++) pushBoundedTail(byCount, entry('x', seq))
+    expect(byCount).toHaveLength(ROOM_TAIL_HOLD_MAX)
+    expect(byCount[0]!.ord.seq).toBe(1)
+
+    const bySize: ReturnType<typeof entry>[] = []
+    const halfPlusOne = 'x'.repeat(ROOM_TAIL_HOLD_BYTES_MAX / 2 + 1)
+    pushBoundedTail(bySize, entry(halfPlusOne, 1))
+    pushBoundedTail(bySize, entry(halfPlusOne, 2))
+    expect(bySize.map(({ ord }) => ord.seq)).toEqual([2])
+    pushBoundedTail(bySize, entry('x'.repeat(ROOM_TAIL_HOLD_BYTES_MAX + 1), 3))
+    expect(bySize.map(({ ord }) => ord.seq)).toEqual([2])
+
+    const nonAscii: ReturnType<typeof entry>[] = []
+    pushBoundedTail(nonAscii, entry('💥'.repeat(ROOM_TAIL_HOLD_BYTES_MAX / 2)))
+    expect(nonAscii).toHaveLength(1)
+  })
+
   it.each([
     [
       'member UUIDs',
@@ -1426,7 +2238,36 @@ describe('room binary protocol validation', () => {
       const key = String.fromCharCode(...frame)
       expect(seen.has(key)).toBe(false)
       seen.add(key)
+      if (_name === 'single-unit tracks') expect(unframeMemberId(frame)?.track).toBe(input)
     }
+  })
+
+  it('preserves __proto__ as data and builds prototype-safe binary wants', () => {
+    const attrs = Object.create(null) as Record<string, unknown>
+    Object.defineProperty(attrs, '__proto__', { value: { safe: true }, enumerable: true, configurable: true })
+    const merged = mergeAttributes({}, attrs)
+    expect(Object.getPrototypeOf(merged)).toBe(Object.prototype)
+    expect(Object.hasOwn(merged, '__proto__')).toBe(true)
+    expect(merged.__proto__).toEqual({ safe: true })
+    Object.defineProperty(attrs, '__proto__', { value: undefined, enumerable: true, configurable: true })
+    expect(Object.hasOwn(mergeAttributes(merged, attrs), '__proto__')).toBe(false)
+
+    const memberId = crypto.randomUUID()
+    const sanitized = sanitizeBinaryWants({
+      everyMember: { all: false, tracks: [] },
+      members: { [memberId]: { all: false, tracks: ['screen'] } },
+    })
+    expect(sanitized).not.toBeNull()
+    expect(Object.getPrototypeOf(sanitized!.members)).toBeNull()
+    const hostileMembers = Object.create(null) as Record<string, unknown>
+    hostileMembers.__proto__ = { all: true, tracks: [] }
+    expect(sanitizeBinaryWants({ everyMember: { all: false, tracks: [] }, members: hostileMembers })).toBeNull()
+    expect(
+      sanitizeBinaryWants({
+        everyMember: { all: false, tracks: [] },
+        members: { 'not-a-member-id': { all: false, tracks: [] } },
+      }),
+    ).toBeNull()
   })
 
   it('rejects array metadata and malformed UTF-8 instead of normalizing them', () => {
@@ -1462,7 +2303,10 @@ describe('room binary protocol validation', () => {
 
   it('accepts legal binary declarations regardless of undocumented aggregate counts', () => {
     const members = Object.fromEntries(
-      Array.from({ length: 4097 }, (_, index) => [`member-${index}`, { all: false, tracks: [] }]),
+      Array.from({ length: 4097 }, (_, index) => [
+        `${index.toString(16).padStart(8, '0')}-0000-0000-0000-000000000000`,
+        { all: false, tracks: [] },
+      ]),
     )
     expect(sanitizeBinaryWants({ everyMember: { all: false, tracks: [] }, members })).not.toBeNull()
     expect(
@@ -2094,6 +2938,78 @@ function snapshot(roomId: string): RoomSnapshotMetadata {
     count: 0,
     stamp: { at: 0, by: '' },
   }
+}
+
+async function forceRoomGc(): Promise<void> {
+  for (let cycle = 0; cycle < 8; cycle++) {
+    ;(globalThis as { gc(): void }).gc()
+    await new Promise((resolve) => setTimeout(resolve, 20))
+  }
+}
+
+async function retainOnlyListedRemote(
+  target: ClientRoom,
+  fake: ReturnType<typeof createFakeStub>,
+  registry: GcRegistry,
+  onClose: () => void,
+  memberId: string,
+) {
+  const room = wrapProxy(target)
+  registry.register(room, onClose)
+  fake.emitText(
+    {
+      __r: 'roster',
+      members: [{ id: memberId, meta: {}, joinedAt: 1, metaSeq: 0, identity: null }],
+    },
+    { key: target.id, seq: 1, timestamp: 1 },
+  )
+  const [member] = await room.getParticipants()
+  return { member: member!, room: new WeakRef(room) }
+}
+
+async function retainOnlyJoinedParticipant(target: ClientRoom, registry: GcRegistry, onClose: () => void) {
+  const room = wrapProxy(target)
+  registry.register(room, onClose)
+  return { member: await room.join(), room: new WeakRef(room) }
+}
+
+async function retainOnlyCallbackRemote(
+  target: ClientRoom,
+  fake: ReturnType<typeof createFakeStub>,
+  registry: GcRegistry,
+  onClose: () => void,
+  memberId: string,
+) {
+  const room = wrapProxy(target)
+  registry.register(room, onClose)
+  let member: ReturnType<ClientRoom['getParticipant']> extends Promise<infer T> ? NonNullable<T> : never
+  const stop = room.onJoin((joined) => {
+    member = joined
+  })
+  fake.emitText({ __r: 'join', id: memberId, meta: {}, joinedAt: 1 }, { key: target.id, seq: 1, timestamp: 1 })
+  stop()
+  return { member: member!, room: new WeakRef(room) }
+}
+
+async function retainOnlyDepartedParticipant(
+  target: ClientRoom,
+  fake: ReturnType<typeof createFakeStub>,
+  registry: GcRegistry,
+  onClose: () => void,
+  memberId: string,
+) {
+  const room = wrapProxy(target)
+  registry.register(room, onClose)
+  const member = await room.join()
+  fake.emitText({ __r: 'leave', id: memberId }, { key: target.id, seq: 1, timestamp: 1 })
+  return { member, room: new WeakRef(room) }
+}
+
+async function dropJoinedRoomHandles(target: ClientRoom, registry: GcRegistry, onClose: () => void) {
+  const room = wrapProxy(target)
+  registry.register(room, onClose)
+  await room.join()
+  return new WeakRef(room)
 }
 
 type OpenRecord = {

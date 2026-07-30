@@ -5,7 +5,8 @@ import { parse } from '@brillout/json-serializer/parse'
 import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
 import { assertUsage } from '../../utils/assert.js'
 import { isObject } from '../../utils/isObject.js'
-import { ROOM_DM_ACK_TIMEOUT_MS } from './constants.js'
+import { unrefTimer } from '../../utils/unrefTimer.js'
+import { ROOM_DM_ACK_TIMEOUT_MS, ROOM_TAIL_ATTACH_TIMEOUT_MS } from './constants.js'
 import type { ChannelPublishAck } from '../channel.js'
 import { ServerChannel } from '../server/channel.js'
 import type { ShieldValidator } from '../../node/server/shield.js'
@@ -110,6 +111,7 @@ class RoomStubChannel extends ServerBroadcast {
    *  tail mode or once flushed. Held server-side, so the client buffers nothing and the flush is
    *  member-selective rather than a fire-hose of everything. */
   _tailPending: Array<{ serialized: string; ord: RoomOrder; from: string }> | null = null
+  private _tailTimer: ReturnType<typeof setTimeout> | null = null
 
   /** @internal — retained replay is exactly-once and in-order against a racing live publish. Text's
    *  watermark is room-global, matching the semantic lane; `_textPendingRetained` is a retained order
@@ -292,9 +294,17 @@ class RoomStubChannel extends ServerBroadcast {
       for (const key of lane.keys()) if (key.startsWith(prefix)) lane.delete(key)
   }
 
-  /** @internal — begin holding the bounded tail, seeded from the room's pre-attach hold. */
-  _beginTail(seed: Array<{ serialized: string; ord: RoomOrder; from: string }>): void {
+  /** @internal — begin holding the bounded tail, seeded from the room's pre-attach hold. The client
+   *  gets a fresh lease after attach; expiry drops the hold and lets the room release ingestion. */
+  _beginTail(seed: Array<{ serialized: string; ord: RoomOrder; from: string }>, onExpire: () => void): void {
     this._tailPending = seed
+    this._tailTimer = unrefTimer(
+      setTimeout(() => {
+        this._tailPending = null
+        this._tailTimer = null
+        onExpire()
+      }, ROOM_TAIL_ATTACH_TIMEOUT_MS),
+    )
   }
 
   /** @internal — append a live message to the pending tail, bounded drop-oldest (the freshest tail is
@@ -324,6 +334,10 @@ class RoomStubChannel extends ServerBroadcast {
   /** @internal — drop the pending tail without flushing when the stub closes. */
   _endTail(): void {
     this._tailPending = null
+    if (this._tailTimer !== null) {
+      clearTimeout(this._tailTimer)
+      this._tailTimer = null
+    }
   }
 }
 

@@ -1,7 +1,9 @@
 export { RoomState, RoomStateView, remoteBacking }
 
 import { assertUsage } from '../../utils/assert.js'
+import { isPromise } from '../../utils/isPromise.js'
 import type { ChannelPublishInfo } from '../channel.js'
+import { adoptSubordinateOf, releaseSubordinate } from '../wrapProxy.js'
 import {
   DEFAULT_TRACK,
   emptyTrackWants,
@@ -46,7 +48,9 @@ type MemberEntry = {
   /** An off-presence participant — a member for routing/discovery, excluded from every presence
    *  read (`count`, `snapshot`, `onJoin`/`onLeave`/`onEmpty`). Any number per room. */
   hidden: boolean
-  remote: RemoteParticipant
+  remoteRef: WeakRef<RemoteParticipant> | null
+  left: boolean
+  leaveCause?: LeaveCause
   dataCbs: Array<(data: unknown, info: ChannelPublishInfo) => unknown>
   binaryCbs: Array<{
     cb: (data: Uint8Array, info: ChannelPublishInfo & BinaryFrameInfo) => unknown
@@ -72,17 +76,19 @@ type RoomStateOptions = {
   onCallbackError: (err: unknown) => void
 }
 
-/** Stamped (non-enumerably) on every `RemoteParticipant` a `RoomState` mints — the backing
- *  that lets the serializer turn a view object back into (room, member) without a registry. */
-const ROOM_REMOTE_BRAND: unique symbol = Symbol.for('telefunc.RoomRemoteParticipant')
+/** Exact-keyed backing lets the serializer recover (room, member) without exposing a public brand. */
+const ROOM_REMOTE_BACKINGS: unique symbol = Symbol.for('telefunc.RoomRemoteParticipantBackings')
 
 type RemoteBacking = { state: RoomState; entry: MemberEntry }
 
+const remoteBackingGlobal = globalThis as typeof globalThis & {
+  [ROOM_REMOTE_BACKINGS]?: WeakMap<object, RemoteBacking>
+}
+const remoteBackings = (remoteBackingGlobal[ROOM_REMOTE_BACKINGS] ??= new WeakMap())
+
 /** The `RoomState` backing of a minted `RemoteParticipant` — `null` for anything else. */
 function remoteBacking(value: unknown): RemoteBacking | null {
-  return typeof value === 'object' && value !== null && ROOM_REMOTE_BRAND in value
-    ? ((value as Record<typeof ROOM_REMOTE_BRAND, RemoteBacking>)[ROOM_REMOTE_BRAND] as RemoteBacking)
-    : null
+  return typeof value === 'object' && value !== null ? (remoteBackings.get(value) ?? null) : null
 }
 
 /** The side-neutral public view over a `RoomState`; client/server keep their own I/O and lifecycle. */
@@ -226,7 +232,7 @@ class RoomState {
    *  recorder. Members for routing and discovery, excluded from every presence read; read here via
    *  `getParticipants({ hidden: true })`. Any number per room. */
   listHidden(): RemoteParticipant[] {
-    return [...this._members.values()].filter((entry) => entry.hidden).map((entry) => entry.remote)
+    return [...this._members.values()].filter((entry) => entry.hidden).map((entry) => this._remote(entry))
   }
   private _hiddenCount(): number {
     let n = 0
@@ -289,11 +295,12 @@ class RoomState {
   }
 
   getRemote(id: string): RemoteParticipant | null {
-    return this._members.get(id)?.remote ?? null
+    const entry = this._members.get(id)
+    return entry ? this._remote(entry) : null
   }
 
   listRemotes(): RemoteParticipant[] {
-    return [...this._members.values()].filter((entry) => !entry.hidden).map((entry) => entry.remote)
+    return [...this._members.values()].filter((entry) => !entry.hidden).map((entry) => this._remote(entry))
   }
 
   /** Member IDs currently known — drives the per-member binary key subscriptions. */
@@ -319,8 +326,8 @@ class RoomState {
    *  reconciles it like any other pre-roster knowledge. */
   ensureRemoteFromSnapshot(snap: MemberSnapshot): RemoteParticipant {
     const existing = this._members.get(snap.id)
-    if (existing) return existing.remote
-    const remote = this._createEntry(snap).remote
+    if (existing) return this._remote(existing)
+    const remote = this._remote(this._createEntry(snap))
     this._bumpState()
     return remote
   }
@@ -365,7 +372,12 @@ class RoomState {
    *  and the owner's local apply all land here). Unknown members are absorbed like any other
    *  pre-roster event. */
   applyTrack(id: string, track: string): void {
-    this._members.get(id)?.tracks.add(track)
+    const entry = this._members.get(id)
+    if (!entry) {
+      this.membershipVersion++
+      return
+    }
+    entry.tracks.add(track)
   }
 
   /** Immutable view of the whole room — cached by state version, so the reference is stable
@@ -451,12 +463,18 @@ class RoomState {
     }
     this._seedCount++ // pre-reconcile, `count` tracks the seed adjusted by applied events
     this._bumpMembership()
-    this._fireAll(this._joinCbs, entry.remote)
+    this._fireAll(this._joinCbs, this._remote(entry))
   }
 
   applyLeave(id: string, cause?: LeaveCause): void {
     const entry = this._members.get(id)
-    if (!entry) return // unknown here: absorbed (pre-reconcile misses correct at reconcile)
+    if (!entry) {
+      this.membershipVersion++
+      return
+    }
+    entry.left = true
+    entry.leaveCause = cause
+    const remote = this._remote(entry)
     this._members.delete(id)
     // A hidden participant leaving is invisible to presence — no count change, no room-level `onLeave`, and it's
     // never the "last participant" that empties the room. Its own leave handler and listener release
@@ -464,30 +482,28 @@ class RoomState {
     if (!entry.hidden) this._seedCount = Math.max(0, this._seedCount - 1)
     this._bumpMembership()
     this._fireAll(entry.leaveCbs, cause)
-    if (!entry.hidden) this._fireAll(this._leaveCbs, entry.remote, cause)
+    if (!entry.hidden) this._fireAll(this._leaveCbs, remote, cause)
     this._releaseEntryListeners(entry)
+    releaseSubordinate(remote)
     if (entry.hidden) return
-    if (!this._hasParticipants()) this._fireAll(this._emptyCbs)
-  }
-
-  /** A non-hidden member is present — the presence notion of "not empty" (`onEmpty` fires when the
-   *  last of these leaves, even though hidden participants linger). */
-  private _hasParticipants(): boolean {
-    for (const entry of this._members.values()) if (!entry.hidden) return true
-    return false
+    if (this.count === 0) this._fireAll(this._emptyCbs)
   }
 
   /** Applies only revisions newer than the entry's — the origin's echo (same seq) and events
    *  arriving behind a fresher reconcile are absorbed. */
   applyParticipantMeta(id: string, meta: ParticipantMeta, seq: number): void {
     const entry = this._members.get(id)
-    if (!entry || seq <= entry.metaSeq) return
+    if (!entry) {
+      this.membershipVersion++
+      return
+    }
+    if (seq <= entry.metaSeq) return
     const prev = entry.meta
     entry.metaSeq = seq
     entry.meta = meta
     this._bumpState()
     this._fireAll(entry.updateCbs, meta, prev)
-    this._fireAll(this._participantUpdateCbs, entry.remote, meta, prev)
+    this._fireAll(this._participantUpdateCbs, this._remote(entry), meta, prev)
   }
 
   /** Last-writer-wins by `(at, by)`: concurrent `Room.setMeta()`s converge to the same winner on
@@ -520,8 +536,12 @@ class RoomState {
       this._bumpMembership()
       // State and snapshot are already closed-and-empty when cleanup callbacks run.
       for (const entry of departed) {
+        entry.left = true
+        entry.leaveCause = cause
         this._fireAll(entry.leaveCbs, cause)
         this._releaseEntryListeners(entry)
+        const remote = entry.remoteRef?.deref()
+        if (remote) releaseSubordinate(remote)
       }
     })
     this._fireAll(this._closeCbs)
@@ -548,7 +568,12 @@ class RoomState {
   ): void {
     if (suppress) return
     const entry = this._members.get(from)
-    this._fireAll(this._roomDataCbs, data, info, entry?.remote ?? { id: from, meta: fromMeta, identity: fromIdentity })
+    this._fireAll(
+      this._roomDataCbs,
+      data,
+      info,
+      entry ? this._remote(entry) : { id: from, meta: fromMeta, identity: fromIdentity },
+    )
     if (entry) this._fireAll(entry.dataCbs, data, info)
   }
 
@@ -568,7 +593,7 @@ class RoomState {
     if (suppress) return
     const frameInfo: ChannelPublishInfo & BinaryFrameInfo = { ...info, track, meta }
     const entry = this._members.get(from)
-    const sender = entry?.remote ?? { id: from, meta: {}, identity: null }
+    const sender = entry ? this._remote(entry) : { id: from, meta: {}, identity: null }
     this._fireTrackFiltered(this._roomBinaryCbs, track, (cb) => cb(payload, frameInfo, sender))
     if (entry) this._fireTrackFiltered(entry.binaryCbs, track, (cb) => cb(payload, frameInfo))
   }
@@ -581,11 +606,7 @@ class RoomState {
   ): void {
     for (const { cb, track: want } of [...cbs]) {
       if (want !== undefined && want !== track) continue
-      try {
-        invoke(cb)
-      } catch (err) {
-        this._onCallbackError(err)
-      }
+      this._invoke(invoke, cb)
     }
   }
 
@@ -689,8 +710,23 @@ class RoomState {
       metaSeq: entrySeed.metaSeq,
       tracks: new Set(entrySeed.tracks),
       hidden: entrySeed.hidden === true,
-      remote: {
-        id,
+      remoteRef: null,
+      left: false,
+      dataCbs: [],
+      binaryCbs: [],
+      updateCbs: [],
+      leaveCbs: [],
+    }
+    this._members.set(id, entry)
+    return entry
+  }
+
+  /** Preserve public handle identity while userland holds it, without making live state its owner. */
+  private _remote(entry: MemberEntry): RemoteParticipant {
+    let remote = entry.remoteRef?.deref()
+    if (!remote) {
+      remote = {
+        id: entry.id,
         get meta() {
           return entry.meta
         },
@@ -704,17 +740,17 @@ class RoomState {
         subscribeBinary: (cb, opts) =>
           this._register(entry.binaryCbs, { cb, track: normalizeTrackFilter(opts) }, 'binary'),
         onUpdate: (cb) => this._register(entry.updateCbs, cb, 'event'),
-        onLeave: (cb: (cause?: LeaveCause) => void) => this._register(entry.leaveCbs, cb, 'event'),
-      },
-      dataCbs: [],
-      binaryCbs: [],
-      updateCbs: [],
-      leaveCbs: [],
+        onLeave: (cb: (cause?: LeaveCause) => void) => {
+          if (!entry.left) return this._register(entry.leaveCbs, cb, 'event')
+          this._invoke(cb, entry.leaveCause)
+          return () => {}
+        },
+      }
+      entry.remoteRef = new WeakRef(remote)
+      remoteBackings.set(remote, { state: this, entry })
     }
-    // Non-enumerable: never serialized as data, invisible to user iteration.
-    Object.defineProperty(entry.remote, ROOM_REMOTE_BRAND, { value: { state: this, entry } satisfies RemoteBacking })
-    this._members.set(id, entry)
-    return entry
+    if (typeof this._owner === 'object' && this._owner !== null) adoptSubordinateOf(this._owner, remote)
+    return remote
   }
 
   private _register<T>(list: T[], cb: T, kind: ListenerKind): () => void {
@@ -751,12 +787,15 @@ class RoomState {
   }
 
   private _fireAll<Args extends unknown[]>(cbs: Array<(...args: Args) => unknown>, ...args: Args): void {
-    for (const cb of [...cbs]) {
-      try {
-        cb(...args)
-      } catch (err) {
-        this._onCallbackError(err)
-      }
+    for (const cb of [...cbs]) this._invoke(cb, ...args)
+  }
+
+  private _invoke<Args extends unknown[]>(cb: (...args: Args) => unknown, ...args: Args): void {
+    try {
+      const result = cb(...args)
+      if (isPromise(result)) void Promise.resolve(result).catch((err) => this._onCallbackError(err))
+    } catch (err) {
+      this._onCallbackError(err)
     }
   }
 }
@@ -764,6 +803,10 @@ class RoomState {
 /** Validate a `subscribeBinary` track option: `undefined` = every track, `null` = the default
  *  lane, a non-empty name = that track. */
 function normalizeTrackFilter(opts: { track?: string | null } | undefined): TrackFilter {
+  assertUsage(
+    opts === undefined || (typeof opts === 'object' && opts !== null && !Array.isArray(opts)),
+    'subscribeBinary() options should be an object',
+  )
   const track = opts?.track
   if (track === undefined || track === null) return track
   assertUsage(isRoomTrack(track) && track.length > 0, 'subscribeBinary() track should be a valid non-empty string')

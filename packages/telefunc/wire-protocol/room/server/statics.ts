@@ -136,29 +136,33 @@ async function registerRoomIndex(id: string, inc: string): Promise<void> {
   await getBackend().directoryPut(id, inc)
 }
 
-async function tryCreateRoom(id: string, options: RoomOptions | undefined): Promise<Room | null> {
+type TryCreateRoomResult = { kind: 'created'; room: Room } | { kind: 'exists' } | { kind: 'closing' }
+
+async function tryCreateRoom(id: string, options: RoomOptions | undefined): Promise<TryCreateRoomResult> {
   const { meta } = normalizeOptions(options)
   const backend = getBackend()
   let current = await backend.readHead(id)
   if (current?.head.state === 'closing') {
     const closing = await acquireClosingLease(backend, id, current.head)
-    if (closing === null || !(await finishClose(backend, id, closing))) return null
+    if (closing === null || !(await finishClose(backend, id, closing))) return { kind: 'closing' }
     current = await backend.readHead(id)
   }
-  if (current !== null && current.head.state !== 'closed') return null
+  if (current?.head.state === 'closed') await cleanupFinalizedGeneration(backend, id, current.head)
+  if (current !== null && current.head.state !== 'closed') return { kind: 'exists' }
   const created: RoomConfigRecord = {
     meta,
     at: Date.now(),
     by: writerId(),
     inc: crypto.randomUUID(),
-    status: 'open',
   }
   const result = await backend.compareExchangeHead(
     id,
     current === null ? { expect: 'absent' } : { expect: { rev: current.head.rev } },
     { head: { currentInc: created.inc, state: 'open', config: encodeRoomConfig(created) } },
   )
-  if ('conflict' in result) return null
+  if ('conflict' in result) {
+    return result.current?.state === 'closing' ? { kind: 'closing' } : { kind: 'exists' }
+  }
   assert('head' in result)
   try {
     await registerRoomIndex(id, created.inc)
@@ -166,14 +170,14 @@ async function tryCreateRoom(id: string, options: RoomOptions | undefined): Prom
     await closeRoom(id)
     throw error
   }
-  return new ServerRoom(id, created, { members: [] })
+  return { kind: 'created', room: new ServerRoom(id, created, { members: [] }) }
 }
 
 async function createRoom(id: string, options?: RoomOptions): Promise<Room> {
   assertRoomId(id)
-  const room = await tryCreateRoom(id, options)
-  if (room === null) throw new RoomError(`Room already exists: ${id}`)
-  return room
+  const result = await tryCreateRoom(id, options)
+  if (result.kind !== 'created') throw new RoomError(`Room already exists: ${id}`)
+  return result.room
 }
 
 async function getRoom(id: string, options?: RoomGetOptions): Promise<Room> {
@@ -185,12 +189,24 @@ async function getRoom(id: string, options?: RoomGetOptions): Promise<Room> {
 
 async function getOrCreateRoom(id: string, options?: RoomOptions): Promise<Room> {
   assertRoomId(id)
-  const created = await tryCreateRoom(id, options)
-  if (created !== null) return created
-  const room = await getRoom(id)
-  assert(ServerRoom.isServerRoom(room))
-  await registerRoomIndex(id, room._inc)
-  return room
+  const deadline = Date.now() + ROOM_CLOSE_LEASE_MS * 2
+  for (;;) {
+    const result = await tryCreateRoom(id, options)
+    if (result.kind === 'created') return result.room
+    if (result.kind === 'exists') {
+      try {
+        const room = await getRoom(id)
+        assert(ServerRoom.isServerRoom(room))
+        await registerRoomIndex(id, room._inc)
+        return room
+      } catch (error) {
+        const current = await getBackend().readHead(id)
+        if (current?.head.state === 'open') throw error
+      }
+    }
+    if (Date.now() >= deadline) throw new RoomError(`Room lifecycle contention: ${id}`)
+    await new Promise((resolve) => setTimeout(resolve, 100))
+  }
 }
 
 const ROOM_GUARD_KEYS = [
@@ -289,7 +305,7 @@ async function writeRoomConfig(
     const currentConfig = configFromHead(current.head)
     const at = Math.max(Date.now(), currentConfig.at + 1)
     const meta = computeMeta(currentConfig.meta)
-    const nextConfig = { meta, at, by, inc: config.inc, status: 'open' as const }
+    const nextConfig = { meta, at, by, inc: config.inc }
     const result = await backend.compareExchangeHead(
       id,
       { expect: { rev: current.head.rev } },
@@ -307,7 +323,11 @@ async function closeRoom(id: string): Promise<void> {
   const backend = getBackend()
   for (;;) {
     const current = await backend.readHead(id)
-    if (current === null || current.head.state === 'closed') return
+    if (current === null) return
+    if (current.head.state === 'closed') {
+      await cleanupFinalizedGeneration(backend, id, current.head)
+      return
+    }
     const closing = await acquireClosingLease(backend, id, current.head)
     if (closing !== null && (await finishClose(backend, id, closing))) return
     await new Promise((resolve) => setTimeout(resolve, 100))
@@ -347,7 +367,7 @@ async function finishClose(backend: BackendSpi, roomId: string, closing: RoomHea
     { closingLease: lease.id },
   )
   if (closedEvent === null) return false
-  const config = { ...configFromHead(closing), status: 'closed' as const }
+  const config = configFromHead(closing)
   const finalized = await backend.compareExchangeHead(
     roomId,
     { expect: { rev: closing.rev, closingLease: lease.id } },
@@ -357,9 +377,15 @@ async function finishClose(backend: BackendSpi, roomId: string, closing: RoomHea
     },
   )
   if ('conflict' in finalized) return false
+  assert('head' in finalized)
+  await cleanupFinalizedGeneration(backend, roomId, finalized.head)
+  return true
+}
+
+async function cleanupFinalizedGeneration(backend: BackendSpi, roomId: string, closed: RoomHead): Promise<void> {
+  const inc = configFromHead(closed).inc
   await backend.dropGeneration(roomId, inc)
   await backend.directoryDelete(roomId, inc)
-  return true
 }
 
 async function resolveParticipantRef(

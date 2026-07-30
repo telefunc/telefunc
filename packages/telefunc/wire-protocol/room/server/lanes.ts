@@ -42,7 +42,6 @@ function configFromHead(head: RoomHead): RoomConfigRecord {
   const stored = parse(decodeRoomText(head.config)) as RoomConfigRecord
   return {
     ...stored,
-    status: head.state,
     ...(head.currentInc === null ? {} : { inc: head.currentInc }),
   }
 }
@@ -64,9 +63,11 @@ class SubSlot {
   private _subscription: BackendSubscription | null = null
   private _subscribe: (() => BackendSubscription) | null = null
   private _unobserve: (() => void) | null = null
-  private _lost = false
   private _readyPromise = Promise.resolve()
   private _resolveReady: (() => void) | null = null
+  private _generationPromise = Promise.resolve()
+  private _resolveGeneration: (() => void) | null = null
+  private _rejectGeneration: ((error: unknown) => void) | null = null
 
   constructor(
     private readonly _onTerminal: (slot: SubSlot, error?: unknown) => void,
@@ -85,13 +86,15 @@ class SubSlot {
     return this._subscribe !== null
   }
 
-  get lost(): boolean {
-    return this._lost
-  }
-
   /** Holder-facing readiness survives raw attempt failures; Room's policy owns replacement. */
   get ready(): Promise<void> {
     return this._readyPromise
+  }
+
+  /** Internal recovery generation. Unlike holder readiness, exhaustion rejects this generation so
+   *  internal planners can abandon it; a later retry creates a fresh one. */
+  get generationReady(): Promise<void> {
+    return this._generationPromise
   }
 
   /** The current raw generation, used only by Room's bounded recovery policy. */
@@ -109,11 +112,17 @@ class SubSlot {
   retry(): void {
     if (this._subscribe === null) return
     this._ensurePendingReady()
+    this._ensurePendingGeneration()
     const previous = this._subscription
     this._unobserve?.()
     const subscription = this._subscribe()
     this._subscription = subscription
-    this._lost = false
+    let terminalNotified = false
+    const notifyTerminal = (error?: unknown) => {
+      if (terminalNotified) return
+      terminalNotified = true
+      this._onTerminal(this, error)
+    }
     let wasReady = subscription.state() === 'ready'
     if (wasReady) this._settleReady()
     let lostAfterReady = false
@@ -121,46 +130,47 @@ class SubSlot {
       () => {
         if (this._subscription === subscription && subscription.state() === 'ready') {
           wasReady = true
-          this._lost = false
           this._settleReady()
         }
       },
       (error: unknown) => {
         if (this._subscription !== subscription) return
-        this._lost = true
         this._ensurePendingReady()
-        this._onTerminal(this, error)
+        this._ensurePendingGeneration()
+        notifyTerminal(error)
       },
     )
     this._unobserve = subscription.onStateChange((state) => {
       if (this._subscription !== subscription) return
       if (state === 'lost') {
         if (wasReady) lostAfterReady = true
-        this._lost = true
         this._ensurePendingReady()
+        this._ensurePendingGeneration()
       } else if (state === 'ready') {
         if (lostAfterReady) this._onRecovered()
         wasReady = true
         lostAfterReady = false
-        this._lost = false
         this._settleReady()
       } else if (state === 'closed') {
-        this._lost = true
         this._ensurePendingReady()
-        this._onTerminal(this)
+        this._ensurePendingGeneration()
+        notifyTerminal()
       }
     })
+    if (subscription.state() === 'closed') notifyTerminal()
     if (previous) void previous.unsubscribe().catch(reportRoomError)
   }
 
-  /** Exhausted policy keeps demand but drops the dead raw attempt until the next planning pass. */
-  markLost(): void {
+  /** Exhausted policy keeps demand and holder readiness pending, but rejects this internal
+   *  generation and drops the dead raw attempt until the next planning pass. */
+  markLost(error: unknown): void {
     const subscription = this._subscription
     this._subscription = null
     this._unobserve?.()
     this._unobserve = null
-    this._lost = true
-    this._ensurePendingReady()
+    this._rejectGeneration?.(error)
+    this._resolveGeneration = null
+    this._rejectGeneration = null
     if (subscription) void subscription.unsubscribe().catch(reportRoomError)
   }
 
@@ -170,9 +180,9 @@ class SubSlot {
     this._subscribe = null
     this._unobserve?.()
     this._unobserve = null
-    this._lost = false
     this._settleReady()
     this._readyPromise = Promise.resolve()
+    this._generationPromise = Promise.resolve()
     if (subscription) void subscription.unsubscribe().catch(reportRoomError)
   }
 
@@ -183,9 +193,23 @@ class SubSlot {
     })
   }
 
+  private _ensurePendingGeneration(): void {
+    if (this._resolveGeneration !== null) return
+    this._generationPromise = new Promise<void>((resolve, reject) => {
+      this._resolveGeneration = resolve
+      this._rejectGeneration = reject
+    })
+    // A generation can exhaust without an active internal waiter. Keep that deliberate rejection
+    // from becoming an unhandled rejection while preserving it for callers that captured the promise.
+    void this._generationPromise.catch(() => {})
+  }
+
   private _settleReady(): void {
     this._resolveReady?.()
     this._resolveReady = null
+    this._resolveGeneration?.()
+    this._resolveGeneration = null
+    this._rejectGeneration = null
   }
 }
 

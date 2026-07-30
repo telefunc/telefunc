@@ -16,6 +16,7 @@ import { addTelefunctionCallBarrier, type TelefunctionCallBarrierScope } from '.
 import type { WirePublishInfo } from '../shared-ws.js'
 import { parse } from '@brillout/json-serializer/parse'
 import {
+  DM_PARTICIPANT_LEFT,
   leaveCauseFromWire,
   frameWithMemberId,
   hasRoomTag,
@@ -54,6 +55,10 @@ import type {
 /** One awaiter of a conflated publish — resolved with the winning send's receipt (see `_drainCoalesce`). */
 type CoalesceWaiter = { resolve: (ack: ChannelPublishAck) => void; reject: (err: unknown) => void }
 type ParticipantMutationRequest = Extract<ParticipantStubRequest, { __r: 'req-dm' | 'req-set-meta' | 'req-set-attrs' }>
+type PendingJoinEvent =
+  | { kind: 'demand'; track: string | null; wanted: boolean }
+  | { kind: 'dm'; message: InboxMessage }
+  | { kind: 'leave'; cause: LeaveCause }
 
 /**
  * Room's broadcast stub owns two concerns a generic Broadcast doesn't have: local delivery is
@@ -163,11 +168,13 @@ class ClientRoom extends RoomStateView implements Room {
   declare readonly [TELEFUNC_SHIELDS]: { data: unknown }
   private readonly _stub: RoomClientBroadcast
   protected readonly _state: RoomState
-  private readonly _localParticipants = new Map<string, ClientRoomParticipant>()
+  /** Routing never owns public handles: a live handle owns this Room, not the reverse. */
+  private readonly _localParticipants = new Map<string, WeakRef<ClientRoomParticipant>>()
   private _announcedDemand = false
-  /** DMs relayed before their participant's join ack resolved (a reactive send racing the
-   *  join round-trip) — held bounded (count-capped, drop-oldest), flushed on registration. */
-  private _pendingDms: Array<InboxMessage & { to: string }> | null = null
+  /** Member-targeted events that beat an in-flight join ack, keyed once their wire ID is known. */
+  private _inFlightJoins = 0
+  private readonly _pendingJoinEvents = new Map<string, PendingJoinEvent[]>()
+  private _closedCause: LeaveCause | null = null
   private _rosterArrived!: () => void
   private _rosterFailed!: (error: unknown) => void
   /** Settled by the replayable initial roster response (or wire death) — gates `getParticipants()`. */
@@ -189,7 +196,10 @@ class ClientRoom extends RoomStateView implements Room {
       onCallbackError: reportRoomError,
     })
     this._state._owner = this
-    if (snapshot.closed) this._rosterArrived()
+    if (snapshot.closed) {
+      this._closedCause = { type: 'closed' }
+      this._rosterArrived()
+    }
 
     // Delivery handlers are local-only — what the server relays is driven by the declared
     // wants: control always arrives, text while subscribed, binary per `sub-binary`.
@@ -217,17 +227,36 @@ class ClientRoom extends RoomStateView implements Room {
       'join() options.hidden is server-side only: a hidden participant is created by the granting telefunction (server-side join({ hidden: true })), not by a client.',
     )
     const { meta, selfDelivery } = normalizeJoinOptions(options)
-    // A rejected join (guard `Abort`, or a `RoomError` like a closed room) rejects this request
-    // natively via the channel ack — no envelope to unwrap.
-    const { id, joinedAt } = (await this._request({ __r: 'req-join', meta, selfDelivery })) as {
-      id: string
-      joinedAt: number
+    this._inFlightJoins++
+    try {
+      // A rejected join (guard `Abort`, or a `RoomError` like a closed room) rejects this request
+      // natively via the channel ack — no envelope to unwrap.
+      const { id, joinedAt } = (await this._request({ __r: 'req-join', meta, selfDelivery })) as {
+        id: string
+        joinedAt: number
+      }
+      const participant = new ClientRoomParticipant(this, id, meta, selfDelivery)
+      if (this._closedCause) {
+        participant._onLeft(this._closedCause)
+        return participant
+      }
+      this._localParticipants.set(id, new WeakRef(participant))
+      this._state.applyJoin(id, meta, joinedAt)
+      for (const event of this._pendingJoinEvents.get(id) ?? []) {
+        if (event.kind === 'demand') participant._onDemand(event.track, event.wanted)
+        else if (event.kind === 'dm') this._deliverDm(participant, event.message)
+        else {
+          this._state.applyLeave(id, event.cause)
+          this._localParticipants.delete(id)
+          participant._onLeft(event.cause)
+        }
+      }
+      this._pendingJoinEvents.delete(id)
+      return participant
+    } finally {
+      this._inFlightJoins--
+      if (this._inFlightJoins === 0) this._pendingJoinEvents.clear()
     }
-    const participant = new ClientRoomParticipant(this, id, meta, selfDelivery)
-    this._localParticipants.set(id, participant)
-    this._state.applyJoin(id, meta, joinedAt) // the relayed event is absorbed
-    this._flushPendingDms(id, participant)
-    return participant
   }
 
   async getParticipants(options?: { hidden?: boolean }): Promise<RemoteParticipant[]> {
@@ -247,14 +276,12 @@ class ClientRoom extends RoomStateView implements Room {
     return this._state.getRemote(id)
   }
 
-  /** DMs held for this participant while its join ack was in flight — deliver in order. */
-  private _flushPendingDms(id: string, participant: ClientRoomParticipant): void {
-    if (!this._pendingDms) return
-    const held = this._pendingDms.filter((msg) => msg.to === id)
-    if (held.length === 0) return
-    const rest = this._pendingDms.filter((msg) => msg.to !== id)
-    this._pendingDms = rest.length > 0 ? rest : null
-    for (const msg of held) this._deliverDm(participant, msg)
+  private _holdPendingJoinEvent(id: string, event: PendingJoinEvent): boolean {
+    if (this._inFlightJoins === 0) return false
+    const events = this._pendingJoinEvents.get(id) ?? []
+    if (events.length === 0) this._pendingJoinEvents.set(id, events)
+    events.push(event)
+    return true
   }
 
   /** Deliver a DM to a locally-held member. A plain DM just fires its listeners; an ack DM
@@ -350,16 +377,16 @@ class ClientRoom extends RoomStateView implements Room {
       case 'leave': {
         const cause = leaveCauseFromWire(event)
         this._state.applyLeave(event.id, cause)
-        const local = this._localParticipants.get(event.id)
+        const local = this._localParticipant(event.id)
         if (local) {
           this._localParticipants.delete(event.id)
           local._onLeft(cause) // kicked (with the kick's reason), or left through another handle
-        }
+        } else this._holdPendingJoinEvent(event.id, { kind: 'leave', cause })
         return
       }
       case 'p-meta': {
         this._state.applyParticipantMeta(event.id, event.meta, event.seq)
-        const local = this._localParticipants.get(event.id)
+        const local = this._localParticipant(event.id)
         if (local) local._meta = event.meta
         return
       }
@@ -374,7 +401,16 @@ class ClientRoom extends RoomStateView implements Room {
         return
       case 'demand':
         // Whether anyone wants one of our own members' tracks flipped (onDemand).
-        this._localParticipants.get(event.member)?._onDemand(event.track, event.wanted)
+        {
+          const local = this._localParticipant(event.member)
+          if (local) local._onDemand(event.track, event.wanted)
+          else
+            this._holdPendingJoinEvent(event.member, {
+              kind: 'demand',
+              track: event.track,
+              wanted: event.wanted,
+            })
+        }
         return
       case 'dm': {
         // Relayed from this member's private inbox — only its own stub ever receives it.
@@ -385,16 +421,16 @@ class ClientRoom extends RoomStateView implements Room {
           data: event.data,
           ...(event.ackId ? { ackId: event.ackId } : {}),
         }
-        const local = this._localParticipants.get(event.to)
+        const local = this._localParticipant(event.to)
         if (local) {
           this._deliverDm(local, msg)
           return
         }
-        // The DM beat its target's join ack (same connection, different request) — hold it.
-        if (this._state.closed) return
-        const pending = (this._pendingDms ??= [])
-        pending.push({ ...msg, to: event.to })
-        if (pending.length > 64) pending.shift()
+        if (this._holdPendingJoinEvent(event.to, { kind: 'dm', message: msg })) return
+        if (event.ackId)
+          void this._stub
+            .send({ __r: 'dm-reply', id: event.to, ackId: event.ackId, ...DM_PARTICIPANT_LEFT }, { ack: false })
+            .catch(() => {})
         return
       }
     }
@@ -420,13 +456,20 @@ class ClientRoom extends RoomStateView implements Room {
 
   private _applyClosed(causeType: 'closed' | 'disconnected'): void {
     if (this._state.closed) return
-    this._pendingDms = null
     const cause: LeaveCause = { type: causeType }
+    this._closedCause = cause
+    this._pendingJoinEvents.clear()
     this._state.applyClosed(cause)
     this._rosterArrived() // unblock any getParticipants() waiting on a wire that just died
     // After onClose, like on the server: the room-level signal fires before per-handle cleanup.
-    for (const local of this._localParticipants.values()) local._onLeft(cause)
+    for (const ref of this._localParticipants.values()) ref.deref()?._onLeft(cause)
     this._localParticipants.clear()
+  }
+
+  private _localParticipant(id: string): ClientRoomParticipant | null {
+    const participant = this._localParticipants.get(id)?.deref() ?? null
+    if (!participant) this._localParticipants.delete(id)
+    return participant
   }
 
   /** Declare this holder's wants to the server. The room-level text

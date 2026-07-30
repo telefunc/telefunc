@@ -1,7 +1,7 @@
 export { Abort, AbortError, isAbort, createAbortError }
 
 import { assertUsage } from '../utils/assert.js'
-import { isObject } from '../utils/isObject.js'
+import { isBrandedError } from '../utils/isBrandedError.js'
 
 const abortBrand = Symbol.for('telefunc.Abort')
 const DEFAULT_ABORT_MESSAGE = 'Aborted'
@@ -46,7 +46,13 @@ function createAbortError(abortValue?: unknown, message?: string): AbortError {
 }
 
 function isAbort(thing: unknown): thing is AbortError {
-  return thing instanceof AbortError || (isObject(thing) && abortBrand in thing && thing[abortBrand] === true)
+  if (!isBrandedError(thing, abortBrand)) return false
+  try {
+    const value = Object.getOwnPropertyDescriptor(thing, 'abortValue')
+    return value !== undefined && 'value' in value
+  } catch {
+    return false
+  }
 }
 
 function getAbortMessage(abortValue: unknown): string {
