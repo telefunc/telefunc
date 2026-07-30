@@ -10,14 +10,13 @@ import type * as Server from 'telefunc'
 import type * as Client from 'telefunc/client'
 
 type Assert<T extends true> = T
+type MutuallyAssignable<Left, Right> = [Left] extends [Right] ? ([Right] extends [Left] ? true : false) : false
 type ChatMsg = { kind: 'chat'; text: string }
 type TypedRoom = Server.Room<{ topic: string }, { name: string }, ChatMsg>
 type TypedPublishData = Parameters<Server.LocalParticipant<{ name: string }, ChatMsg>['publish']>[0]
 type TypedSubscribeData = Parameters<Parameters<TypedRoom['subscribe']>[0]>[0]
-type _TypedSubscribe = Assert<TypedSubscribeData extends ChatMsg ? true : false>
-type _TypedPublish = Assert<ChatMsg extends TypedPublishData ? true : false>
-type _RejectNumber = Assert<number extends TypedPublishData ? false : true>
-type _RequireText = Assert<{ kind: 'chat' } extends TypedPublishData ? false : true>
+type _TypedSubscribe = Assert<MutuallyAssignable<TypedSubscribeData, ChatMsg>>
+type _TypedPublish = Assert<MutuallyAssignable<TypedPublishData, ChatMsg>>
 
 export type __RoomServerSurface = [
   Server.Room,
