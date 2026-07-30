@@ -485,6 +485,9 @@ importers:
       '@telefunc/redis':
         specifier: workspace:*
         version: link:../../packages/redis
+      telefunc:
+        specifier: link:../../packages/telefunc
+        version: link:../../packages/telefunc
       typescript:
         specifier: ^6.0.2
         version: 6.0.2

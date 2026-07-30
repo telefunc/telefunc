@@ -14,7 +14,7 @@ import { parse } from '@brillout/json-serializer/parse'
 import { assertUsage } from '../../../utils/assert.js'
 import { getBackend } from '../../backend/install.js'
 import type { CellMutation } from '../../backend/spi.js'
-import { ROOM_ID_MAX_BYTES, ROOM_MEMBER_TTL_MS } from '../../constants.js'
+import { ROOM_MEMBER_TTL_MS } from '../../constants.js'
 import {
   RoomError,
   leaveCauseToWire,
@@ -216,8 +216,4 @@ async function evictMember(
 
 function assertRoomId(id: unknown): asserts id is string {
   assertUsage(typeof id === 'string' && id.length > 0, 'The room ID should be a non-empty string')
-  assertUsage(
-    new TextEncoder().encode(id).length <= ROOM_ID_MAX_BYTES,
-    `The room ID should be at most ${ROOM_ID_MAX_BYTES} bytes`,
-  )
 }

@@ -248,10 +248,6 @@ export const ROOM_TAIL_HOLD_MAX = 256
  *  Measured as serialized-string length — a tight proxy for encoded/heap bytes. A single entry larger
  *  than the whole budget is dropped, never held; the tail is best-effort. */
 export const ROOM_TAIL_HOLD_BYTES_MAX = 1024 * 1024
-/** Max room-ID length in UTF-8 bytes. Room IDs are app-supplied and interpolated (URL-encoded) into
- *  KV and pub/sub keys, so this keeps the worst-case encoded key within backend key limits (Workers KV
- *  caps keys at 512 bytes) and bounds an otherwise-unbounded-ID resource vector. */
-export const ROOM_ID_MAX_BYTES = 128
 /** How long a `Room.get({ tail })` hold lingers without progress before it's dropped and its text
  *  ingestion released: pre-attach, waiting to be serialized into a response; post-attach, waiting for
  *  the client's first subscribe. Generous — the contract is a prompt subscribe, this only bounds misuse. */
@@ -276,10 +272,6 @@ export const ROOM_DEMAND_TTL_MS = ROOM_HEARTBEAT_INTERVAL_MS * 3
  *  correlation an ack DM leaves on the recipient's stub: past this the sender has already given up, so
  *  the correlation can no longer settle anyone and is dropped. */
 export const ROOM_DM_ACK_TIMEOUT_MS = 60_000
-/** Product-policy horizon for a Room lane that cannot establish. Raw backends deliberately have no
- * establishment latency SLA; one minute permits six equal attempts through transient stalls without
- * leaving a Room operation pending indefinitely. */
-export const ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS = 60_000
 /** Max in-flight ack-DM correlations one client stub holds awaiting the client's `dm-reply`. A client
  *  relayed ack DMs it never answers is capped here (drop-oldest) rather than accumulating correlations
  *  for the stub's lifetime; a dropped correlation simply lets its sender time out (`ROOM_DM_ACK_TIMEOUT_MS`). */

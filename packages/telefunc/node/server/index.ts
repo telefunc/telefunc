@@ -35,20 +35,14 @@ export type {
   AfterPublishHook,
   AfterSendHook,
   AfterJoinHook,
-  RoomPublishReceipt,
   RoomSendReceipt,
   RoomAckReceipt,
-  RoomJoinReceipt,
   LeaveCause,
   ParticipantRef,
   BinaryFrameInfo,
   BinaryPublishOptions,
   RoomSnapshotView,
   ParticipantSnapshotView,
-  RoomListener,
-  RoomBinaryListener,
-  ParticipantListener,
-  ParticipantBinaryListener,
 } from '../../wire-protocol/room/types.js'
 export { ChannelClosedError, ChannelOverflowError } from '../../wire-protocol/channel-errors.js'
 export { NetworkError } from '../../shared/NetworkError.js'

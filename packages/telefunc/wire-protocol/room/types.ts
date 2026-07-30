@@ -24,6 +24,7 @@ export type {
   BinaryPublishOptions,
   RoomSnapshotView,
   ParticipantSnapshotView,
+  RoomBinaryListener,
 }
 
 import type { ChannelPublishAck, ChannelPublishInfo } from '../channel.js'
@@ -174,6 +175,12 @@ type BinaryPublishOptions = {
   retain?: boolean
 }
 
+type RoomBinaryListener<P extends ParticipantMeta = ParticipantMeta> = (
+  data: Uint8Array,
+  info: ChannelPublishInfo & BinaryFrameInfo,
+  from: Sender<P>,
+) => unknown
+
 /** A returnable multi-party room with presence, membership, and events. */
 type Room<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = ParticipantMeta, Pub = unknown> = {
   /** The ID the room was created with. */
@@ -194,10 +201,7 @@ type Room<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = Participant
   /** Receive all participant messages. Returns an unsubscribe function. */
   subscribe(callback: (data: Pub, info: ChannelPublishInfo, from: Sender<P>) => unknown): () => void
   /** Receive all members' binary frames, optionally filtered to one track at the source. */
-  subscribeBinary(
-    callback: (data: Uint8Array, info: ChannelPublishInfo & BinaryFrameInfo, from: Sender<P>) => unknown,
-    options?: { track?: string | null },
-  ): () => void
+  subscribeBinary(callback: RoomBinaryListener<P>, options?: { track?: string | null }): () => void
 
   /** A participant joined. */
   onJoin(callback: (member: RemoteParticipant<P, Pub>) => void): () => void

@@ -2,10 +2,11 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test:released-api": "tsc -p tsconfig.json && tsc -p tsconfig.nodenext.json && tsc -p tsconfig.bundler.json && tsc -p tsconfig.released.node16.json && tsc -p tsconfig.released.nodenext.json && tsc -p tsconfig.released.bundler.json && tsc -p tsconfig.browser.json && tsc -p tsconfig.platforms.json"
+    "test:released-api": "tsc -p tsconfig.json --module Node16 --moduleResolution Node16 && tsc -p tsconfig.json --module NodeNext --moduleResolution NodeNext && tsc -p tsconfig.json --module ESNext --moduleResolution Bundler --customConditions worker && tsc -p tsconfig.browser.json && tsc -p tsconfig.platforms.json"
   },
   "devDependencies": {
     "@telefunc/redis": "workspace:*",
+    "telefunc": "workspace:*",
     "typescript": "^6.0.2"
   }
 }

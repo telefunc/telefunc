@@ -16,7 +16,7 @@ import { Abort, getContext } from 'telefunc'
 export async function getTodoList() {
   const { user } = getContext()
   if (!user) {
-    // ❌ Wrong usae
+    // ❌ Wrong usage
     throw new Error()
     // ✅ Correct usage
     throw Abort()
@@ -28,7 +28,7 @@ export async function getTodoList() {
 
 It's expected that the user might not be logged in — using `throw Abort()` tells Telefunc that the error is **expected**.
 
-> Telefunc interprets `throw new Error()` as **unexpected**. Telefunc interprets any error that isn't `throw Abort()` as a bug in your backend code.
+> At the telefunction boundary, Telefunc interprets an error your application throws as **unexpected** unless it is `Abort()`. Framework APIs can also reject with their own documented operational errors; Rooms are one example below.
 
 Therefore:
  - Use **`throw Abort()`** for **wrong public usage** of your telefunction.
@@ -40,6 +40,12 @@ Because:
 - `throw Abort('some error message')` => Telefunc sends `some error message` to the client
 - `throw new Error('some error message')` => Telefunc doesn't send  `some error message` to the client.
   > To prevent leaking sensitive information, Telefunc never forwards unexpected server errors to the client.
+
+### Room operational errors
+
+<Link href="/room">Room</Link> operations can fail because the room closed, a participant left, or a target isn't a member. These are expected framework conditions, not bugs in your backend code: Telefunc preserves their safe message and doesn't trigger <Link href="/onBug"><code>onBug()</code></Link>.
+
+Telefunc calls this internal category `RoomError`, but the class isn't exported. A direct server-side Room call rejects with an error whose `name` is `'RoomError'`; after it crosses the Room channel, the client receives an ordinary `Error` carrying the same safe `message`. Don't use `instanceof RoomError`. If your own policy needs a stable code or value, reject from a Room guard with `Abort({ code: ... })` instead.
 
 
 ## Example

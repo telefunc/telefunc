@@ -78,20 +78,16 @@ function testRoom() {
     await autoRetry(async () => {
       const result = await getResult<ChatResult>('#room-result')
 
-      // Presence: own join and leave announced, count tracked live.
       expect(result.events).deep.equal(['join:Alice', 'leave:Alice'])
       expect(result.countAfterJoin).toBe(1)
       expect(result.count).toBe(0)
 
-      // Data: received with sender identity; the receipt is keyed to the room ID.
       expect(result.received).deep.equal([{ text: 'hello', from: 'Alice' }])
       expect(result.ack.key).match(/^e2e-chat:/)
       expect(result.ack.seq).greaterThan(0)
 
-      // Metadata: the remote view saw the score change (undefined -> 42).
       expect(result.updates).deep.equal([[42, null]])
 
-      // snapshot()/onChange: reference-stable until change; every change signaled.
       expect(result.snapshotChanged).toBe(true)
       expect(result.snapshotStable).toBe(true)
       expect(result.changes).greaterThan(0)
@@ -126,13 +122,10 @@ function testRoom() {
 
         expect(result.received).deep.equal([{ text: 'from-bob', from: 'Bob' }]) // the DM never hit the room stream
         expect(result.count).toBe(2) // Bob + Ally
-        // Identity: stamped at the server-side join, visible locally and on the remote view.
         expect(result.localIdentity).toBe('user:Bob')
         expect(result.remoteIdentity).toBe('user:Bob')
-        // setMeta propagated both to the room's remote view and back to the participant stub.
         expect(result.remoteMetaName).toBe('Bobby')
         expect(result.localMetaName).toBe('Bobby')
-        // The DM reached the standalone participant's inbox, with sender identity.
         expect(result.dms).deep.equal([{ data: 'psst', fromAlly: true }])
       })
     },
@@ -145,17 +138,14 @@ function testRoom() {
     await autoRetry(async () => {
       const result = await getResult<BinaryResult>('#room-result')
 
-      // 3 default-track frames + 1 named camera keyframe — all attributed to the publisher.
       expect(result.frames.length).toBe(4)
       expect(result.frames.map((f) => f.size)).deep.equal([64, 64, 64, 32])
       expect(result.frames.map((f) => f.firstByte)).deep.equal([1, 2, 3, 9])
       for (const frame of result.frames) expect(frame.fromSelf).toBe(true)
       expect(result.frames.map((f) => f.track)).deep.equal([null, null, null, 'camera'])
       expect(result.frames.map((f) => f.meta)).deep.equal([null, null, null, { key: true }])
-      // Track-filtered subscriptions saw only their stream — `{ track: null }` is the default lane.
       expect(result.cameraOnly).deep.equal([9])
       expect(result.defaultOnly).deep.equal([1, 2, 3])
-      // The publish ack reports the track's live subscription count (the pause-at-0 signal).
       expect(result.camReceivers).greaterThanOrEqual(1)
     })
   })
@@ -179,11 +169,9 @@ function testRoom() {
     await autoRetry(async () => {
       const result = await getResult<GuardResult>('#room-result')
 
-      // The rejection carries the guard's error back through the wire ack.
       expect(result.joinError).toBe('blocked join of Banned')
       expect(result.publishError).toBe('blocked publish from Mallory')
       expect(result.sendError).toBe('blocked send from Mallory')
-      // Guarded-out messages never delivered; allowed ones flow.
       expect(result.received).deep.equal(['fine'])
       expect(result.inbox).deep.equal(['psst'])
     })
