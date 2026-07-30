@@ -73,6 +73,7 @@ beforeEach(async () => {
 
 afterEach(async () => {
   vi.useRealTimers()
+  vi.restoreAllMocks()
   const report = vi.spyOn(console, 'error').mockImplementation(() => {})
   try {
     await disposeBackend()
@@ -87,28 +88,24 @@ describe('Room public behavior', () => {
     const backend = getBackend()
     const subscribeLane = backend.subscribeLane.bind(backend)
     let semanticSubscriptions = 0
-    const subscribe = vi.spyOn(backend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
+    vi.spyOn(backend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
       if (lane.kind === 'semantic') semanticSubscriptions++
       return subscribeLane(roomId, inc, lane, receiver)
     })
-    try {
-      const member = await room.join()
-      expect(semanticSubscriptions).toBe(0)
+    const member = await room.join()
+    expect(semanticSubscriptions).toBe(0)
 
-      const received: unknown[] = []
-      room.subscribe((data) => received.push(data))
-      await vi.waitFor(() => expect(semanticSubscriptions).toBe(1))
-      await member.publish('wanted')
-      expect(received).toEqual(['wanted'])
-    } finally {
-      subscribe.mockRestore()
-    }
+    const received: unknown[] = []
+    room.subscribe((data) => received.push(data))
+    await vi.waitFor(() => expect(semanticSubscriptions).toBe(1))
+    await member.publish('wanted')
+    expect(received).toEqual(['wanted'])
   })
 
   it('does not let a removed member publish or receive a DM when its leave frame is lost', async () => {
     const backend = getBackend()
     const subscribeLane = backend.subscribeLane.bind(backend)
-    const subscribe = vi.spyOn(backend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
+    vi.spyOn(backend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
       if (lane.kind !== 'control') return subscribeLane(roomId, inc, lane, receiver)
       return subscribeLane(roomId, inc, lane, (payload, info) => {
         const envelope = parse(decoder.decode(payload)) as { __r?: string }
@@ -116,27 +113,23 @@ describe('Room public behavior', () => {
         receiver(payload, info)
       })
     })
-    try {
-      const room = await Room.create('removed-authority-fence')
-      const removed = await room.join({ meta: { name: 'removed' }, identity: 'removed-user' })
-      const sender = await room.join({ meta: { name: 'sender' } })
-      const inbox: unknown[] = []
-      removed.listen((data) => inbox.push(data))
+    const room = await Room.create('removed-authority-fence')
+    const removed = await room.join({ meta: { name: 'removed' }, identity: 'removed-user' })
+    const sender = await room.join({ meta: { name: 'sender' } })
+    const inbox: unknown[] = []
+    removed.listen((data) => inbox.push(data))
 
-      await Room.removeParticipant(room.id, { id: removed.id, reason: 'moderated' })
-      const publish = await removed.publish('forbidden').then(
-        () => 'accepted',
-        () => 'rejected',
-      )
-      const send = await sender.send(removed.id, 'after-removal').then(
-        () => 'accepted',
-        () => 'rejected',
-      )
+    await Room.removeParticipant(room.id, { id: removed.id, reason: 'moderated' })
+    const publish = await removed.publish('forbidden').then(
+      () => 'accepted',
+      () => 'rejected',
+    )
+    const send = await sender.send(removed.id, 'after-removal').then(
+      () => 'accepted',
+      () => 'rejected',
+    )
 
-      expect({ publish, send, inbox }).toEqual({ publish: 'rejected', send: 'rejected', inbox: [] })
-    } finally {
-      subscribe.mockRestore()
-    }
+    expect({ publish, send, inbox }).toEqual({ publish: 'rejected', send: 'rejected', inbox: [] })
   })
 
   it('keeps a joining identity undiscoverable until its member inbox subscription is ready', async () => {
@@ -146,52 +139,44 @@ describe('Room public behavior', () => {
     const backend = getBackend()
     const commitLane = vi.spyOn(backend, 'commitLane')
     const delayed = delayLaneSubscription((lane) => lane.kind === 'inbox')
-    try {
-      let joinSettled = false
-      const joining = room.join({ identity: 'waiting' }).then((participant) => {
-        joinSettled = true
-        return participant
-      })
-      await delayed.started
-      expect(joinSettled).toBe(false)
-      expect(await Room.getParticipants(room.id, { identity: 'waiting' })).toEqual([])
-      await Room.send(room.id, { identity: 'waiting' }, 'premature')
-      expect(commitLane).not.toHaveBeenCalledWith(
-        room.id,
-        expect.any(String),
-        expect.objectContaining({ kind: 'inbox' }),
-        expect.any(Uint8Array),
-        expect.any(Object),
-      )
+    let joinSettled = false
+    const joining = room.join({ identity: 'waiting' }).then((participant) => {
+      joinSettled = true
+      return participant
+    })
+    await delayed.started
+    expect(joinSettled).toBe(false)
+    expect(await Room.getParticipants(room.id, { identity: 'waiting' })).toEqual([])
+    await Room.send(room.id, { identity: 'waiting' }, 'premature')
+    expect(commitLane).not.toHaveBeenCalledWith(
+      room.id,
+      expect.any(String),
+      expect.objectContaining({ kind: 'inbox' }),
+      expect.any(Uint8Array),
+      expect.any(Object),
+    )
 
-      await delayed.release()
+    await delayed.release()
 
-      const joined = await joining
-      const inbox: unknown[] = []
-      joined.listen((data) => inbox.push(data))
-      await sender.send(joined.id, 'ready')
-      expect(inbox).toEqual(['ready'])
-    } finally {
-      delayed.restore()
-    }
+    const joined = await joining
+    const inbox: unknown[] = []
+    joined.listen((data) => inbox.push(data))
+    await sender.send(joined.id, 'ready')
+    expect(inbox).toEqual(['ready'])
   })
 
   it('rolls durable membership back when the join announcement fails', async () => {
     const room = await Room.create('join-readiness-rollback')
     const backend = getBackend()
     const commitLane = backend.commitLane.bind(backend)
-    const publish = vi.spyOn(backend, 'commitLane').mockImplementation((roomId, inc, lane, payload, options) => {
+    vi.spyOn(backend, 'commitLane').mockImplementation((roomId, inc, lane, payload, options) => {
       if (lane.kind === 'control' && (parse(decoder.decode(payload)) as { __r?: string }).__r === 'join') {
         throw new Error('join announcement failed')
       }
       return commitLane(roomId, inc, lane, payload, options)
     })
-    try {
-      await expect(room.join()).rejects.toThrow('join announcement failed')
-      await expect(Room.getParticipants(room.id)).resolves.toEqual([])
-    } finally {
-      publish.mockRestore()
-    }
+    await expect(room.join()).rejects.toThrow('join announcement failed')
+    await expect(Room.getParticipants(room.id)).resolves.toEqual([])
   })
 
   it('keeps a server participant active so a transient durable-leave failure can be retried', async () => {
@@ -254,16 +239,12 @@ describe('Room public behavior', () => {
 
   it('closes a head whose directory registration cannot finish', async () => {
     const put = driver.directoryPut.bind(driver)
-    const directoryPut = vi.spyOn(driver, 'directoryPut').mockImplementation(async (roomId, inc) => {
+    vi.spyOn(driver, 'directoryPut').mockImplementation(async (roomId, inc) => {
       if (roomId === 'index-failure') throw new Error('persistent index failure')
       await put(roomId, inc)
     })
-    try {
-      await expect(Room.create('index-failure')).rejects.toThrow('persistent index failure')
-      expect((await driver.readHead('index-failure'))?.head).toMatchObject({ state: 'closed', currentInc: null })
-    } finally {
-      directoryPut.mockRestore()
-    }
+    await expect(Room.create('index-failure')).rejects.toThrow('persistent index failure')
+    expect((await driver.readHead('index-failure'))?.head).toMatchObject({ state: 'closed', currentInc: null })
   })
 
   it('waits for an active close lease and takes over until the head is closed', async () => {
@@ -306,9 +287,7 @@ describe('Room public behavior', () => {
     const room = (await Room.create('finalized-cleanup-retry')) as ServerRoom
     const inc = room._inc
     await room.join()
-    const dropping = vi
-      .spyOn(driver, 'dropGeneration')
-      .mockRejectedValueOnce(new Error('transient generation cleanup failure'))
+    vi.spyOn(driver, 'dropGeneration').mockRejectedValueOnce(new Error('transient generation cleanup failure'))
 
     await expect(Room.close(room.id)).rejects.toThrow('transient generation cleanup failure')
     expect((await driver.readHead(room.id))?.head).toMatchObject({ state: 'closed', currentInc: null })
@@ -317,7 +296,6 @@ describe('Room public behavior', () => {
     await expect(Room.close(room.id)).resolves.toBeUndefined()
     expect(await driver.listGenerations(room.id)).toEqual([])
     expect((await driver.directoryList(room.id)).entries).toEqual([])
-    dropping.mockRestore()
   })
 
   it('waits out an active close lease in getOrCreate instead of reporting not-found', async () => {
@@ -367,7 +345,7 @@ describe('Room public behavior', () => {
     const observationReady = deferred<void>()
     const observationStopped = deferred<void>()
     const subscribeLane = remoteBackend.subscribeLane.bind(remoteBackend)
-    const subscribe = vi.spyOn(remoteBackend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
+    vi.spyOn(remoteBackend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
       const subscription = subscribeLane(roomId, inc, lane, receiver)
       void subscription.ready.then(() => {
         observedLanes.add(lane.kind)
@@ -398,7 +376,6 @@ describe('Room public behavior', () => {
       expect(observer.isClosed).toBe(true)
       expect(unsubscribed.sort()).toEqual(['control', 'semantic'])
     } finally {
-      subscribe.mockRestore()
       await remoteInstall.disposeBackend()
     }
   })
@@ -411,7 +388,7 @@ describe('Room public behavior', () => {
     const subscribeLane = backend.subscribeLane.bind(backend)
     let terminal: ReturnType<typeof terminalSubscription> | undefined
     const replacementReady = deferred<void>()
-    const subscribe = vi.spyOn(backend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
+    vi.spyOn(backend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
       if (lane.kind !== 'semantic') return subscribeLane(roomId, inc, lane, receiver)
       if (terminal === undefined) {
         terminal = terminalSubscription()
@@ -421,22 +398,18 @@ describe('Room public behavior', () => {
       void replacement.ready.then(() => replacementReady.resolve())
       return replacement
     })
-    try {
-      const received: unknown[] = []
-      observer.subscribe((data) => received.push(data))
-      if (!terminal) throw new Error('semantic subscription did not start')
-      await terminal.subscription.ready
-      // Let the observe-transition roster refresh finish before the terminal event; otherwise its
-      // unrelated trailing `_syncSubs()` would accidentally replace the closed slot.
-      await observer.getParticipants()
-      await terminal.close()
-      await replacementReady.promise
+    const received: unknown[] = []
+    observer.subscribe((data) => received.push(data))
+    if (!terminal) throw new Error('semantic subscription did not start')
+    await terminal.subscription.ready
+    // Let the observe-transition roster refresh finish before the terminal event; otherwise its
+    // unrelated trailing `_syncSubs()` would accidentally replace the closed slot.
+    await observer.getParticipants()
+    await terminal.close()
+    await replacementReady.promise
 
-      await publisher.publish('after-recovery')
-      expect(received).toEqual(['after-recovery'])
-    } finally {
-      subscribe.mockRestore()
-    }
+    await publisher.publish('after-recovery')
+    expect(received).toEqual(['after-recovery'])
   })
 
   it('reconciles a zombie Room when terminal control state follows a lost closed frame', async () => {
@@ -449,7 +422,7 @@ describe('Room public behavior', () => {
     const remoteBackend = remoteInstall.installBackend(() => driver)
     const subscribeLane = remoteBackend.subscribeLane.bind(remoteBackend)
     let terminal: ReturnType<typeof terminalSubscription> | undefined
-    const subscribe = vi.spyOn(remoteBackend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
+    vi.spyOn(remoteBackend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
       const filtered =
         lane.kind === 'control'
           ? (payload: Uint8Array, info: { seq: number; timestamp: number }) => {
@@ -483,7 +456,6 @@ describe('Room public behavior', () => {
         closes: 1,
       })
     } finally {
-      subscribe.mockRestore()
       await remoteInstall.disposeBackend()
     }
   })
@@ -494,7 +466,7 @@ describe('Room public behavior', () => {
     const subscribeLane = backend.subscribeLane.bind(backend)
     const controlSubscribed = deferred<void>()
     let transition!: (state: SubscriptionState) => void
-    const subscribe = vi.spyOn(backend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
+    vi.spyOn(backend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
       const inner = subscribeLane(roomId, inc, lane, receiver)
       if (lane.kind !== 'control') return inner
       return {
@@ -508,31 +480,27 @@ describe('Room public behavior', () => {
         unsubscribe: () => inner.unsubscribe(),
       }
     })
-    try {
-      room.onAnnounce(() => {})
-      await controlSubscribed.promise
-      const member = await room.join()
-      await room.getParticipants()
-      room._state.applyLeave(member.id)
-      expect(room.count).toBe(0)
+    room.onAnnounce(() => {})
+    await controlSubscribed.promise
+    const member = await room.join()
+    await room.getParticipants()
+    room._state.applyLeave(member.id)
+    expect(room.count).toBe(0)
 
-      transition('lost')
-      transition('ready')
-      await vi.waitFor(() => expect(room.count).toBe(1))
-      expect((await room.getParticipants()).map(({ id }) => id)).toEqual([member.id])
+    transition('lost')
+    transition('ready')
+    await vi.waitFor(() => expect(room.count).toBe(1))
+    expect((await room.getParticipants()).map(({ id }) => id)).toEqual([member.id])
 
-      room._state.applyLeave(member.id)
-      expect(room.count).toBe(0)
-      const onControl = (
-        room as unknown as { _onCtrlMessage(message: string, info: { seq: number; timestamp: number }): void }
-      )._onCtrlMessage.bind(room)
-      onControl('{"__r":"update","meta":{},"at":1,"by":"a"}', { seq: 1, timestamp: 1 })
-      onControl('{"__r":"update","meta":{},"at":2,"by":"a"}', { seq: 3, timestamp: 3 })
-      await vi.waitFor(() => expect(room.count).toBe(1))
-      expect((await room.getParticipants()).map(({ id }) => id)).toEqual([member.id])
-    } finally {
-      subscribe.mockRestore()
-    }
+    room._state.applyLeave(member.id)
+    expect(room.count).toBe(0)
+    const onControl = (
+      room as unknown as { _onCtrlMessage(message: string, info: { seq: number; timestamp: number }): void }
+    )._onCtrlMessage.bind(room)
+    onControl('{"__r":"update","meta":{},"at":1,"by":"a"}', { seq: 1, timestamp: 1 })
+    onControl('{"__r":"update","meta":{},"at":2,"by":"a"}', { seq: 3, timestamp: 3 })
+    await vi.waitFor(() => expect(room.count).toBe(1))
+    expect((await room.getParticipants()).map(({ id }) => id)).toEqual([member.id])
   })
 
   it('uses the heartbeat roster snapshot to repair observer drift', async () => {
@@ -581,7 +549,7 @@ describe('Room public behavior', () => {
     const started = deferred<void>()
     const release = deferred<void>()
     let held = false
-    const read = vi.spyOn(driver, 'readCells').mockImplementation(async (roomId, inc, selector) => {
+    vi.spyOn(driver, 'readCells').mockImplementation(async (roomId, inc, selector) => {
       if (!held && 'prefix' in selector && selector.prefix.endsWith(':m:')) {
         held = true
         started.resolve()
@@ -606,7 +574,6 @@ describe('Room public behavior', () => {
     release.resolve()
     await refresh
     expect((await participants).map(({ id }) => id)).toHaveLength(1)
-    read.mockRestore()
   })
 
   it('heartbeats pure control observers without owned members or binary demand', async () => {
@@ -625,16 +592,14 @@ describe('Room public behavior', () => {
   it('reconciles authority even when member renewal fails first', async () => {
     const room = (await Room.create('heartbeat-renewal-failure')) as ServerRoom
     await room.join()
-    const readCells = vi.spyOn(driver, 'readCells').mockRejectedValue(new Error('renewal failed'))
-    const readHead = vi.spyOn(driver, 'readHead').mockResolvedValue(null)
+    vi.spyOn(driver, 'readCells').mockRejectedValue(new Error('renewal failed'))
+    vi.spyOn(driver, 'readHead').mockResolvedValue(null)
 
     await expect((room as unknown as { _heartbeatTick(): Promise<void> })._heartbeatTick()).rejects.toThrow(
       'renewal failed',
     )
 
     expect(room.isClosed).toBe(true)
-    readCells.mockRestore()
-    readHead.mockRestore()
   })
 
   it('replaces a subscription that is already closed on initial establishment', async () => {
@@ -679,21 +644,16 @@ describe('Room public behavior', () => {
     const backend = getBackend()
     const subscribeLane = backend.subscribeLane.bind(backend)
     let attempts = 0
-    const subscribe = vi.spyOn(backend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
+    vi.spyOn(backend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
       if (lane.kind !== 'semantic') return subscribeLane(roomId, inc, lane, receiver)
       attempts++
       return attempts < 8 ? rejectedSubscription(`attempt ${attempts}`) : subscribeLane(roomId, inc, lane, receiver)
     })
-    const report = vi.spyOn(console, 'error').mockImplementation(() => {})
-    try {
-      observer.subscribe(() => {})
-      await vi.advanceTimersByTimeAsync(ROOM_HEARTBEAT_INTERVAL_MS + 100)
-      expect(attempts).toBe(8)
-      expect(observer.isClosed).toBe(false)
-    } finally {
-      subscribe.mockRestore()
-      report.mockRestore()
-    }
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    observer.subscribe(() => {})
+    await vi.advanceTimersByTimeAsync(ROOM_HEARTBEAT_INTERVAL_MS + 100)
+    expect(attempts).toBe(8)
+    expect(observer.isClosed).toBe(false)
   })
 
   it('keeps an authoritative open Room open after subscription recovery exhausts', async () => {
@@ -701,26 +661,21 @@ describe('Room public behavior', () => {
     const observer = (await Room.get((await Room.create('open-recovery-exhaustion')).id)) as ServerRoom
     const backend = getBackend()
     const subscribeLane = backend.subscribeLane.bind(backend)
-    const subscribe = vi.spyOn(backend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
+    vi.spyOn(backend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
       return lane.kind === 'semantic'
         ? rejectedSubscription('persistent subscription failure')
         : subscribeLane(roomId, inc, lane, receiver)
     })
-    const report = vi.spyOn(console, 'error').mockImplementation(() => {})
+    vi.spyOn(console, 'error').mockImplementation(() => {})
     const onClose = vi.fn()
     observer.onClose(onClose)
-    try {
-      observer.subscribe(() => {})
-      await vi.advanceTimersByTimeAsync(ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS + 100)
-      const textSlot = (observer as unknown as { _textSub: SubSlot })._textSub
+    observer.subscribe(() => {})
+    await vi.advanceTimersByTimeAsync(ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS + 100)
+    const textSlot = (observer as unknown as { _textSub: SubSlot })._textSub
 
-      expect((await backend.readHead(observer.id))?.head.state).toBe('open')
-      expect({ closed: observer.isClosed, onClose: onClose.mock.calls.length }).toEqual({ closed: false, onClose: 0 })
-      expect(textSlot).toMatchObject({ wanted: true, active: false })
-    } finally {
-      subscribe.mockRestore()
-      report.mockRestore()
-    }
+    expect((await backend.readHead(observer.id))?.head.state).toBe('open')
+    expect({ closed: observer.isClosed, onClose: onClose.mock.calls.length }).toEqual({ closed: false, onClose: 0 })
+    expect(textSlot).toMatchObject({ wanted: true, active: false })
   })
 
   it('settles an in-flight join when its inbox recovery horizon exhausts', async () => {
@@ -729,12 +684,12 @@ describe('Room public behavior', () => {
     const backend = getBackend()
     const subscribeLane = backend.subscribeLane.bind(backend)
     const inboxStarted = deferred<void>()
-    const subscribe = vi.spyOn(backend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
+    vi.spyOn(backend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
       if (lane.kind !== 'inbox') return subscribeLane(roomId, inc, lane, receiver)
       inboxStarted.resolve()
       return rejectedSubscription('persistent inbox subscription failure')
     })
-    const report = vi.spyOn(console, 'error').mockImplementation(() => {})
+    vi.spyOn(console, 'error').mockImplementation(() => {})
     const pending = Symbol('pending')
     let outcome: unknown = pending
     void room.join().then(
@@ -745,17 +700,12 @@ describe('Room public behavior', () => {
         outcome = error
       },
     )
-    try {
-      await inboxStarted.promise
-      await vi.advanceTimersByTimeAsync(ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS + 100)
+    await inboxStarted.promise
+    await vi.advanceTimersByTimeAsync(ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS + 100)
 
-      expect(outcome).toBeInstanceOf(RoomError)
-      expect(room.isClosed).toBe(false)
-      expect(room.count).toBe(0)
-    } finally {
-      subscribe.mockRestore()
-      report.mockRestore()
-    }
+    expect(outcome).toBeInstanceOf(RoomError)
+    expect(room.isClosed).toBe(false)
+    expect(room.count).toBe(0)
   })
 
   it('settles retained replay when its semantic recovery horizon exhausts', async () => {
@@ -768,12 +718,12 @@ describe('Room public behavior', () => {
     const backend = getBackend()
     const subscribeLane = backend.subscribeLane.bind(backend)
     const semanticStarted = deferred<void>()
-    const subscribe = vi.spyOn(backend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
+    vi.spyOn(backend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
       if (lane.kind !== 'semantic') return subscribeLane(roomId, inc, lane, receiver)
       semanticStarted.resolve()
       return rejectedSubscription('persistent semantic subscription failure')
     })
-    const report = vi.spyOn(console, 'error').mockImplementation(() => {})
+    vi.spyOn(console, 'error').mockImplementation(() => {})
     stub._onPeerBroadcastSubscribe(false)
     const pending = Symbol('pending')
     let outcome: unknown = pending
@@ -785,16 +735,11 @@ describe('Room public behavior', () => {
         outcome = error
       },
     )
-    try {
-      await semanticStarted.promise
-      await vi.advanceTimersByTimeAsync(ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS + 100)
+    await semanticStarted.promise
+    await vi.advanceTimersByTimeAsync(ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS + 100)
 
-      expect(outcome).toBeInstanceOf(RoomError)
-      expect(observer.isClosed).toBe(false)
-    } finally {
-      subscribe.mockRestore()
-      report.mockRestore()
-    }
+    expect(outcome).toBeInstanceOf(RoomError)
+    expect(observer.isClosed).toBe(false)
   })
 
   it('propagates presence/meta while hidden members stay addressable and admin removal carries its cause', async () => {
@@ -855,7 +800,7 @@ describe('Room public behavior', () => {
     const commitLane = driver.commitLane.bind(driver)
     const firstCommit = deferred<void>()
     const releaseFirst = deferred<void>()
-    const commit = vi.spyOn(driver, 'commitLane').mockImplementation(async (roomId, inc, lane, payload, options) => {
+    vi.spyOn(driver, 'commitLane').mockImplementation(async (roomId, inc, lane, payload, options) => {
       if (lane.kind === 'control') {
         const event = parse(decodeRoomText(payload)) as { __r?: string; seq?: number }
         if (event.__r === 'p-meta' && event.seq === 1) {
@@ -875,7 +820,6 @@ describe('Room public behavior', () => {
     expect(participant.meta).toEqual({ version: 2 })
     await participant.publish('metadata-check')
     expect(senderMeta).toEqual([{ version: 2 }])
-    commit.mockRestore()
   })
 
   it('keeps a member whose heartbeat wins the expired-record reap race', async () => {
@@ -901,32 +845,29 @@ describe('Room public behavior', () => {
     ).resolves.toBe('committed')
 
     let raced = false
-    const compare = vi
-      .spyOn(driver, 'compareExchangeCells')
-      .mockImplementation(async (roomId, inc, revision, mutations) => {
-        if (!raced && mutations.some(({ key, set }) => key === memberKey && set === undefined)) {
-          raced = true
-          const fresh = await driver.readCells(roomId, inc, { keys: [memberKey] })
-          expect('staleInc' in fresh).toBe(false)
-          if ('staleInc' in fresh) throw new Error('unexpected stale generation')
-          const raw = fresh.cells.get(memberKey)
-          expect(raw).toBeDefined()
-          const record = parse(decoder.decode(raw!)) as Record<string, unknown>
-          await expect(
-            compareExchange(roomId, inc, fresh.revision, [
-              {
-                key: memberKey,
-                set: { bytes: encoder.encode(stringify({ ...record, seenAt: Date.now() })) },
-              },
-            ]),
-          ).resolves.toBe('committed')
-        }
-        return compareExchange(roomId, inc, revision, mutations)
-      })
+    vi.spyOn(driver, 'compareExchangeCells').mockImplementation(async (roomId, inc, revision, mutations) => {
+      if (!raced && mutations.some(({ key, set }) => key === memberKey && set === undefined)) {
+        raced = true
+        const fresh = await driver.readCells(roomId, inc, { keys: [memberKey] })
+        expect('staleInc' in fresh).toBe(false)
+        if ('staleInc' in fresh) throw new Error('unexpected stale generation')
+        const raw = fresh.cells.get(memberKey)
+        expect(raw).toBeDefined()
+        const record = parse(decoder.decode(raw!)) as Record<string, unknown>
+        await expect(
+          compareExchange(roomId, inc, fresh.revision, [
+            {
+              key: memberKey,
+              set: { bytes: encoder.encode(stringify({ ...record, seenAt: Date.now() })) },
+            },
+          ]),
+        ).resolves.toBe('committed')
+      }
+      return compareExchange(roomId, inc, revision, mutations)
+    })
 
     expect((await Room.getParticipants(room.id)).map(({ id }) => id)).toEqual([member.id])
     expect(raced).toBe(true)
-    compare.mockRestore()
   })
 
   it('keeps text self-delivery local and binary subscriptions selective across named tracks', async () => {
@@ -996,21 +937,17 @@ describe('Room public behavior', () => {
     const delayed = delayLaneSubscription(
       (lane) => lane.kind === 'binary' && lane.member === publisher.id && lane.track === 'screen',
     )
-    try {
-      const remote = (await observer.getParticipant(publisher.id))!
-      remote.subscribeBinary((data) => frames.push(data[0]!), {
-        track: 'screen',
-      })
-      await delayed.started
-      expect(demandStarted).toBe(false)
-      await delayed.release()
-      await demandReady.promise
-      expect(demandStarted).toBe(true)
-      await publishing
-      expect(frames).toEqual([8])
-    } finally {
-      delayed.restore()
-    }
+    const remote = (await observer.getParticipant(publisher.id))!
+    remote.subscribeBinary((data) => frames.push(data[0]!), {
+      track: 'screen',
+    })
+    await delayed.started
+    expect(demandStarted).toBe(false)
+    await delayed.release()
+    await demandReady.promise
+    expect(demandStarted).toBe(true)
+    await publishing
+    expect(frames).toEqual([8])
   })
 
   it('keeps DMs private, supports acknowledgements, and preserves room-authored sends', async () => {
@@ -1059,21 +996,17 @@ describe('Room public behavior', () => {
     const target = await room.join()
     const commitLane = driver.commitLane.bind(driver)
     let raced = false
-    const commit = vi.spyOn(driver, 'commitLane').mockImplementation(async (roomId, inc, lane, payload, options) => {
+    vi.spyOn(driver, 'commitLane').mockImplementation(async (roomId, inc, lane, payload, options) => {
       if (!raced && lane.kind === 'inbox') {
         raced = true
         await Room.removeParticipant(room.id, { id: target.id })
       }
       return commitLane(roomId, inc, lane, payload, options)
     })
-    try {
-      await expect(Room.send(room.id, { id: target.id }, 'late')).rejects.toThrow(
-        `Participant not found (left?): ${target.id}`,
-      )
-      expect((await driver.readHead(room.id))?.head.state).toBe('open')
-    } finally {
-      commit.mockRestore()
-    }
+    await expect(Room.send(room.id, { id: target.id }, 'late')).rejects.toThrow(
+      `Participant not found (left?): ${target.id}`,
+    )
+    expect((await driver.readHead(room.id))?.head.state).toBe('open')
   })
 
   it('drains DMs that arrived before a participant was bound to its client forwarder', async () => {
@@ -1090,32 +1023,27 @@ describe('Room public behavior', () => {
     const ackArrived = deferred<void>()
     const deliverMessage = internal._deliverMessage.bind(target)
     const deliverMessageAck = internal._deliverMessageAck.bind(target)
-    const plainDelivery = vi.spyOn(internal, '_deliverMessage').mockImplementation((message) => {
+    vi.spyOn(internal, '_deliverMessage').mockImplementation((message) => {
       plainArrived.resolve()
       deliverMessage(message)
     })
-    const ackDelivery = vi.spyOn(internal, '_deliverMessageAck').mockImplementation((message) => {
+    vi.spyOn(internal, '_deliverMessageAck').mockImplementation((message) => {
       ackArrived.resolve()
       return deliverMessageAck(message)
     })
-    try {
-      await sender.send(target.id, 'plain-before-bind')
-      const acknowledging = sender.send(target.id, 'ack-before-bind', { ack: true })
-      await Promise.all([plainArrived.promise, ackArrived.promise])
-      expect(internal._isBound).toBe(false)
+    await sender.send(target.id, 'plain-before-bind')
+    const acknowledging = sender.send(target.id, 'ack-before-bind', { ack: true })
+    await Promise.all([plainArrived.promise, ackArrived.promise])
+    expect(internal._isBound).toBe(false)
 
-      const forwarded: unknown[] = []
-      internal._setForwarder((message) => {
-        forwarded.push(message.data)
-        return Promise.resolve({ ok: true, result: `handled:${String(message.data)}` })
-      })
+    const forwarded: unknown[] = []
+    internal._setForwarder((message) => {
+      forwarded.push(message.data)
+      return Promise.resolve({ ok: true, result: `handled:${String(message.data)}` })
+    })
 
-      expect(forwarded).toEqual(['plain-before-bind', 'ack-before-bind'])
-      await expect(acknowledging).resolves.toMatchObject({ response: 'handled:ack-before-bind' })
-    } finally {
-      plainDelivery.mockRestore()
-      ackDelivery.mockRestore()
-    }
+    expect(forwarded).toEqual(['plain-before-bind', 'ack-before-bind'])
+    await expect(acknowledging).resolves.toMatchObject({ response: 'handled:ack-before-bind' })
   })
 
   it('keeps every live ack correlation instead of silently dropping the oldest', async () => {
@@ -1180,20 +1108,16 @@ describe('Room public behavior', () => {
         throw new Error('after send failed')
       },
     })
-    try {
-      const alice = await room.join()
-      const bob = await room.join()
-      const inbox: unknown[] = []
-      bob.listen((data) => inbox.push(data))
+    const alice = await room.join()
+    const bob = await room.join()
+    const inbox: unknown[] = []
+    bob.listen((data) => inbox.push(data))
 
-      await expect(alice.publish('published')).resolves.toMatchObject({ seq: expect.any(Number) })
-      await expect(alice.send(bob.id, 'sent')).resolves.toMatchObject({ seq: expect.any(Number) })
-      expect((await room.getParticipants()).map(({ id }) => id)).toEqual([alice.id, bob.id])
-      expect(inbox).toEqual(['sent'])
-      expect(report).toHaveBeenCalledTimes(4)
-    } finally {
-      report.mockRestore()
-    }
+    await expect(alice.publish('published')).resolves.toMatchObject({ seq: expect.any(Number) })
+    await expect(alice.send(bob.id, 'sent')).resolves.toMatchObject({ seq: expect.any(Number) })
+    expect((await room.getParticipants()).map(({ id }) => id)).toEqual([alice.id, bob.id])
+    expect(inbox).toEqual(['sent'])
+    expect(report).toHaveBeenCalledTimes(4)
   })
 
   it('orders participant text and room announcements in one semantic domain', async () => {
@@ -1204,14 +1128,13 @@ describe('Room public behavior', () => {
     const backend = getBackend()
     const subscribeLane = backend.subscribeLane.bind(backend)
     const controlReady = deferred<void>()
-    const subscribe = vi.spyOn(backend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
+    vi.spyOn(backend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
       const subscription = subscribeLane(roomId, inc, lane, receiver)
       if (lane.kind === 'control') void subscription.ready.then(() => controlReady.resolve())
       return subscription
     })
     observer.onAnnounce((data, info) => observed.push([data, info.seq]))
     await controlReady.promise
-    subscribe.mockRestore()
 
     const first = await member.publish('one')
     const second = await Room.announce(room.id, 'notice')
@@ -1228,7 +1151,7 @@ describe('Room public behavior', () => {
     const backend = getBackend()
     const subscribeLane = backend.subscribeLane.bind(backend)
     const semanticReady = deferred<void>()
-    const subscribe = vi.spyOn(backend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
+    vi.spyOn(backend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
       const subscription = subscribeLane(roomId, inc, lane, receiver)
       if (lane.kind === 'semantic') void subscription.ready.then(() => semanticReady.resolve())
       return subscription
@@ -1237,7 +1160,6 @@ describe('Room public behavior', () => {
     const silent = serve(room)
     wanted.stub._onPeerMessage(JSON.stringify({ __r: 'sub-text', members: [], announce: true }), 1)
     await semanticReady.promise
-    subscribe.mockRestore()
 
     await Room.announce(room.id, 'wanted')
 
@@ -1253,7 +1175,7 @@ describe('Room public behavior', () => {
 
     const realDelete = driver.deleteRetained.bind(driver)
     let raced = false
-    const deleting = vi.spyOn(driver, 'deleteRetained').mockImplementation(async (roomId, inc, lane, opts) => {
+    vi.spyOn(driver, 'deleteRetained').mockImplementation(async (roomId, inc, lane, opts) => {
       if (!raced && opts?.ifSeq !== undefined) {
         raced = true
         await replacement.publish('new', { retain: true })
@@ -1261,7 +1183,6 @@ describe('Room public behavior', () => {
       return realDelete(roomId, inc, lane, opts)
     })
     await Room.removeParticipant(room.id, { id: departing.id })
-    deleting.mockRestore()
 
     const retained = await driver.readRetained(room.id, room._inc, semanticLane)
     expect(parse(decoder.decode(retained!.payload))).toMatchObject({ from: replacement.id, data: 'new' })
@@ -1272,12 +1193,9 @@ describe('Room public behavior', () => {
     const member = await room.join()
     await member.publish('text', { retain: true })
     await member.publishBinary(new Uint8Array([1]), { track: 'screen', retain: true })
-    const deletion = vi
-      .spyOn(driver, 'deleteRetained')
-      .mockRejectedValueOnce(new Error('transient retained cleanup failure'))
+    vi.spyOn(driver, 'deleteRetained').mockRejectedValueOnce(new Error('transient retained cleanup failure'))
 
     await expect(member.leave()).rejects.toThrow('transient retained cleanup failure')
-    deletion.mockRestore()
     expect(await driver.listRetained(room.id, room._inc)).toHaveLength(2)
 
     await expect(Room.getParticipants(room.id)).resolves.toEqual([])
@@ -1341,7 +1259,7 @@ describe('Room public behavior', () => {
     const readCells = driver.readCells.bind(driver)
     const rosterStarted = deferred<void>()
     const releaseRoster = deferred<void>()
-    const reading = vi.spyOn(driver, 'readCells').mockImplementation(async (roomId, inc, selector) => {
+    vi.spyOn(driver, 'readCells').mockImplementation(async (roomId, inc, selector) => {
       if (roomId === authority.id && 'prefix' in selector) {
         rosterStarted.resolve()
         await releaseRoster.promise
@@ -1361,7 +1279,6 @@ describe('Room public behavior', () => {
       await vi.waitFor(() => expect(listRetained).toHaveBeenCalled())
     } finally {
       releaseRoster.resolve()
-      reading.mockRestore()
     }
   })
 
@@ -1373,7 +1290,7 @@ describe('Room public behavior', () => {
     const readCells = driver.readCells.bind(driver)
     const rosterStarted = deferred<void>()
     const releaseRoster = deferred<void>()
-    const reading = vi.spyOn(driver, 'readCells').mockImplementation(async (roomId, inc, selector) => {
+    vi.spyOn(driver, 'readCells').mockImplementation(async (roomId, inc, selector) => {
       if (roomId === authority.id && 'prefix' in selector) {
         rosterStarted.resolve()
         await releaseRoster.promise
@@ -1408,7 +1325,6 @@ describe('Room public behavior', () => {
     } finally {
       releaseRoster.resolve()
       await observer.getParticipants()
-      reading.mockRestore()
     }
   })
 
@@ -2111,21 +2027,16 @@ describe('client Room lifecycle', () => {
     const ensureRoster = vi
       .spyOn(room as unknown as { _ensureRoster(): Promise<void> }, '_ensureRoster')
       .mockRejectedValue(failure)
-    const report = vi.spyOn(console, 'error').mockImplementation(() => {})
-    try {
-      const peer = attachPeer(stub)
-      await vi.waitFor(() => expect(peer.decoded().some((frame) => frame.tag === TAG.PUBLISH)).toBe(true))
-      const frame = peer.decoded().find((candidate) => candidate.tag === TAG.PUBLISH)!
-      if (frame.tag !== TAG.PUBLISH) throw new Error('expected roster error publish')
-      const fake = createFakeStub()
-      const participants = new ClientRoom(fake.stub, snapshot('roster-error-event')).getParticipants()
-      fake.emitText(parse(frame.text), { key: 'roster-error-event', seq: 1, timestamp: 1 })
-      await expect(participants).rejects.toThrow('Failed to load room participants')
-      expect(ensureRoster).toHaveBeenCalledOnce()
-    } finally {
-      report.mockRestore()
-      ensureRoster.mockRestore()
-    }
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const peer = attachPeer(stub)
+    await vi.waitFor(() => expect(peer.decoded().some((frame) => frame.tag === TAG.PUBLISH)).toBe(true))
+    const frame = peer.decoded().find((candidate) => candidate.tag === TAG.PUBLISH)!
+    if (frame.tag !== TAG.PUBLISH) throw new Error('expected roster error publish')
+    const fake = createFakeStub()
+    const participants = new ClientRoom(fake.stub, snapshot('roster-error-event')).getParticipants()
+    fake.emitText(parse(frame.text), { key: 'roster-error-event', seq: 1, timestamp: 1 })
+    await expect(participants).rejects.toThrow('Failed to load room participants')
+    expect(ensureRoster).toHaveBeenCalledOnce()
   })
 
   it('replays a committed server-pushed roster after reconnect without rerunning onOpen', async () => {
@@ -3156,7 +3067,7 @@ function delayLaneSubscription(matches: (lane: LaneId) => boolean) {
   const subscribeLane = backend.subscribeLane.bind(backend)
   const started = deferred<void>()
   let release!: () => Promise<void>
-  const spy = vi.spyOn(backend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
+  vi.spyOn(backend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
     if (!matches(lane)) return subscribeLane(roomId, inc, lane, receiver)
     let inner: BackendSubscription | null = null
     let state: SubscriptionState = 'establishing'
@@ -3185,5 +3096,5 @@ function delayLaneSubscription(matches: (lane: LaneId) => boolean) {
       },
     }
   })
-  return { started: started.promise, release: () => release(), restore: () => spy.mockRestore() }
+  return { started: started.promise, release: () => release() }
 }
