@@ -15,6 +15,32 @@ beforeEach(async () => {
 })
 afterEach(() => disposeBackend())
 
+function pendingSubscription(): {
+  subscription: BackendSubscription
+  ready(): void
+} {
+  let resolveReady!: () => void
+  const ready = new Promise<void>((resolve) => {
+    resolveReady = resolve
+  })
+  let state: SubscriptionState = 'establishing'
+  return {
+    subscription: {
+      ready,
+      state: () => state,
+      onStateChange: () => () => {},
+      unsubscribe: async () => {
+        state = 'closed'
+        resolveReady()
+      },
+    },
+    ready() {
+      state = 'ready'
+      resolveReady()
+    },
+  }
+}
+
 // ───────────────────────────────────────────────────────────────────────────
 // In-process delivery — bug classes targeted: cross-key bleed, dropped
 // subscribers, delivery reordering, self-echo loss, late-register and
@@ -191,6 +217,30 @@ describe('keyed in-process broadcast', () => {
     expect(received).toEqual([{ text: 'hello' }])
   })
 
+  it('waits for a sibling subscription to be ready before publishing', async () => {
+    const backend = getBackend()
+    const controlled = pendingSubscription()
+    const subscribe = vi.spyOn(backend, 'subscribe').mockReturnValue(controlled.subscription)
+    const publish = vi.spyOn(backend, 'publish').mockReturnValue({ seq: 1, timestamp: 1 })
+    const sender = new ServerBroadcast({ key: 'broadcast:sibling-ready' })
+    const receiver = new ServerBroadcast({ key: 'broadcast:sibling-ready' })
+    try {
+      receiver.subscribe(() => {})
+      const publishing = sender.publish('after-ready')
+      await Promise.resolve()
+      expect(publish).not.toHaveBeenCalled()
+
+      controlled.ready()
+      await publishing
+      expect(publish).toHaveBeenCalledOnce()
+    } finally {
+      sender.abort()
+      receiver.abort()
+      subscribe.mockRestore()
+      publish.mockRestore()
+    }
+  })
+
   it('publish receipts are key-scoped and seq increments monotonically per key', async () => {
     const k1 = 'room:receipts:A'
     const k2 = 'room:receipts:B'
@@ -222,21 +272,8 @@ describe('keyed in-process broadcast', () => {
 describe('binary in-process broadcast', () => {
   it('waits for an establishing binary subscription before publishing on that lane', async () => {
     const backend = getBackend()
-    let resolveReady!: () => void
-    const ready = new Promise<void>((resolve) => {
-      resolveReady = resolve
-    })
-    let state: SubscriptionState = 'establishing'
-    const subscription: BackendSubscription = {
-      ready,
-      state: () => state,
-      onStateChange: () => () => {},
-      unsubscribe: async () => {
-        state = 'closed'
-        resolveReady()
-      },
-    }
-    const subscribe = vi.spyOn(backend, 'subscribe').mockReturnValue(subscription)
+    const pending = pendingSubscription()
+    const subscribe = vi.spyOn(backend, 'subscribe').mockReturnValue(pending.subscription)
     const publish = vi.spyOn(backend, 'publish').mockReturnValue({
       seq: 1,
       timestamp: 1,
@@ -247,13 +284,12 @@ describe('binary in-process broadcast', () => {
       broadcast._registerChannel()
       broadcast._onPeerBroadcastSubscribe(true)
 
-      const pending = broadcast.publishBinary(new Uint8Array([1, 2, 3]))
+      const publishing = broadcast.publishBinary(new Uint8Array([1, 2, 3]))
       await Promise.resolve()
       expect(publish).not.toHaveBeenCalled()
 
-      state = 'ready'
-      resolveReady()
-      await expect(pending).resolves.toMatchObject({ seq: 1, timestamp: 1, receivers: 1 })
+      pending.ready()
+      await expect(publishing).resolves.toMatchObject({ seq: 1, timestamp: 1, receivers: 1 })
       expect(publish).toHaveBeenCalledOnce()
     } finally {
       subscribe.mockRestore()
@@ -406,6 +442,27 @@ describe('Broadcast shield validation', () => {
 // ───────────────────────────────────────────────────────────────────────────
 
 describe('Broadcast static bus (publish/subscribe)', () => {
+  it('waits for a static subscription to be ready before publishing', async () => {
+    const backend = getBackend()
+    const pending = pendingSubscription()
+    const subscribe = vi.spyOn(backend, 'subscribe').mockReturnValue(pending.subscription)
+    const publish = vi.spyOn(backend, 'publish').mockReturnValue({ seq: 1, timestamp: 1 })
+    const unsubscribe = Broadcast.subscribe('broadcast:static-ready', () => {})
+    try {
+      const publishing = Broadcast.publish('broadcast:static-ready', 'after-ready')
+      await Promise.resolve()
+      expect(publish).not.toHaveBeenCalled()
+
+      pending.ready()
+      await publishing
+      expect(publish).toHaveBeenCalledOnce()
+    } finally {
+      unsubscribe()
+      subscribe.mockRestore()
+      publish.mockRestore()
+    }
+  })
+
   it('static publish + static subscribe deliver without any instance', async () => {
     const received: Array<{ text: string }> = []
     const unsubscribe = Broadcast.subscribe<{ text: string }>('room:static', (msg) => received.push(msg))
