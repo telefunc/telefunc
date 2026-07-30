@@ -50,12 +50,7 @@ import {
 } from 'telefunc/backend'
 import { ConnectionError, withContext } from 'telefunc/client'
 import { Telefunc as NodeTelefunc } from 'telefunc/node'
-import {
-  installRedis,
-  RedisRoomBackend,
-  type InstallRedisOptions,
-  type RedisRoomBackendOptions,
-} from '@telefunc/redis'
+import { installRedis, RedisRoomBackend, type InstallRedisOptions, type RedisRoomBackendOptions } from '@telefunc/redis'
 
 type Assert<T extends true> = T
 type Extends<Actual, Baseline> = [Actual] extends [Baseline] ? true : false
