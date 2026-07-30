@@ -264,7 +264,7 @@ info.timestamp  // server timestamp (Unix epoch ms)
 
 `seq` is monotonic per `key`, which is useful for ordering and gap detection. `publish()` resolves to `info` once the message is accepted.
 
-In-memory, standalone Redis, and Cloudflare report `receivers` because they can count globally; `0` truthfully means nobody anywhere is subscribed. Redis Cluster omits it because `PUBLISH` reports only a node-local count. It counts transport subscriptions, not the end viewers each peer may serve.
+In-memory and standalone Redis report an authoritative `receivers` count; `0` means no transport subscription was reachable when the publish was accepted. Cloudflare also reports `receivers`, but its cross-region presence registry is eventually consistent: the count can temporarily lag joins or leaves, so `0` isn't proof that nobody is subscribed. Redis Cluster omits the field because `PUBLISH` reports only a node-local count. The field always counts transport subscriptions, not the end viewers each peer may serve.
 
 > By default, broadcast is in-memory — messages only reach subscribers on the same server. This works out-of-the-box for single-server deployments.
 >

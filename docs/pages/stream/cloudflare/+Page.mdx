@@ -123,7 +123,7 @@ On the first request, Telefunc picks a Durable Object in the nearest region, sto
 | `Room.list` directory projection | SQLite directory Durable Object | Repairable projection, verified against the room head |
 | Session affinity and generic Broadcast presence | Workers KV | Eventually consistent |
 
-Retained Room data is chunked internally into rows of at most 1.5 MB and installed by an atomic manifest swap. The retained aggregate limit is 16 MiB per room generation, measured after Telefunc's Room framing; it is not a guaranteed 16 MiB application-payload size. The application still publishes and reads one payload — chunking isn't part of the Room API.
+Retained Room data is chunked internally into rows of at most 1.5 MB and installed by an atomic manifest swap. The application still publishes and reads one payload — chunking isn't part of the Room API.
 
 
 ## Scaling

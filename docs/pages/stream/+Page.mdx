@@ -447,7 +447,7 @@ For multi-party use cases where *who is connected* matters — chat, game lobbie
 import { Room } from 'telefunc'
 
 export async function onGetLobby() {
-  return await Room.get('lobby')
+  return await Room.getOrCreate('lobby')
 }
 ```
 

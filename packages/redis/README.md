@@ -44,20 +44,6 @@ installRedis(redis)
 `installRedis()` uses the same optional `prefix` for broadcast and Room keys. Repeating it with the same
 client and prefix is idempotent for the Room connection.
 
-For custom Room backend options, explicitly install an override before or after `installRedis()`:
-
-```ts
-import { RedisRoomBackend, installRedis } from '@telefunc/redis'
-import { installBackend } from 'telefunc/backend'
-
-installRedis(redis)
-installBackend(() => new RedisRoomBackend({ redis, maxRetainedPayloadBytes: 8 * 1024 * 1024 }))
-```
-
-The factory is Telefunc's ownership boundary: Telefunc owns and disposes the created backend. An
-explicit backend always wins regardless of call order. Constructing `RedisRoomBackend` by itself is a
-manual instance and activates no policy.
-
 `Channel` is per-instance — reconnects must land on the instance holding the channel's state. Pair this package with sticky sessions at the load balancer; see [Scaling](https://telefunc.com/stream/scale).
 
 ### Sharing an existing client

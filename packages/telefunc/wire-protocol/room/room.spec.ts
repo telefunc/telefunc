@@ -1190,6 +1190,19 @@ describe('room binary protocol validation', () => {
     expect(unframeMemberId(malformedTrack)).toBeNull()
   })
 
+  it('uses the full wire length fields instead of smaller policy caps', () => {
+    const memberId = crypto.randomUUID()
+    const track = 't'.repeat(255)
+    const meta = { note: 'm'.repeat(5000) }
+    const framed = frameWithMemberId(memberId, new Uint8Array([1]), { track, meta })
+
+    expect(unframeMemberId(framed)).toMatchObject({ track, meta, payload: new Uint8Array([1]) })
+    expect(() => frameWithMemberId(memberId, new Uint8Array(), { track: 't'.repeat(256) })).toThrow('255 bytes')
+    expect(() => frameWithMemberId(memberId, new Uint8Array(), { meta: { note: 'm'.repeat(70_000) } })).toThrow(
+      '65535 bytes',
+    )
+  })
+
   it('accepts legal binary declarations regardless of undocumented aggregate counts', () => {
     const members = Object.fromEntries(
       Array.from({ length: 4097 }, (_, index) => [`member-${index}`, { all: false, tracks: [] }]),

@@ -1,13 +1,11 @@
 /// <reference types="@cloudflare/workers-types" />
 // The retained-generation invariant (I6), with chunking kept entirely backend-internal. A retained
-// payload is split into rows ≤1.5 MB (workerd's row cap is 2 MB). The aggregate cap (16 MiB) is checked
-// BEFORE anything is mutated so an over-cap retain throws without advancing the order domain.
+// payload is split into rows ≤1.5 MB (workerd's row cap is 2 MB).
 
 import type { LaneId } from '../../../../backend/spi.js'
 import { laneKey, type LaneParts, laneToParts, partsToLane } from './codec.js'
 import type { OrderMark } from './storage.js'
 
-export const MAX_RETAINED_BYTES = 16 * 1024 * 1024
 const MAX_RETAINED_CHUNK_BYTES = 1_500_000
 
 type ManifestRow = {
@@ -22,22 +20,6 @@ type ManifestRow = {
 
 function toBytes(value: ArrayBuffer | Uint8Array): Uint8Array {
   return value instanceof Uint8Array ? value : new Uint8Array(value)
-}
-
-// The aggregate is per generation across its OTHER retained lanes plus this new payload, so replacing one
-// lane's retained never counts twice.
-export function assertRetainedCapacity(sql: SqlStorage, inc: string, key: string, size: number): void {
-  const row = sql
-    .exec<{ total: number }>(
-      'SELECT COALESCE(SUM(size), 0) AS total FROM rt_manifest WHERE inc = ? AND lane_key != ?',
-      inc,
-      key,
-    )
-    .toArray()[0]
-  const total = (row?.total ?? 0) + size
-  if (total > MAX_RETAINED_BYTES) {
-    throw new Error(`commitLane: retained aggregate ${total} bytes exceeds the ${MAX_RETAINED_BYTES} byte cap`)
-  }
 }
 
 // Install retained state inside the acceptance `transactionSync`; partial chunk replacement rolls back.

@@ -10,7 +10,6 @@
 //   revision:  tf:room:{rid}:g:<inc>:rev    INCR'd by every cell CX — the coarse per-generation revision
 //   order:     tf:room:{rid}:g:<inc>:o:<laneKey>   "<seq>:<ts>"
 //   retained:  tf:room:{rid}:g:<inc>:rt:<laneKey>  16-byte [seq_hi][seq_lo][ts_hi][ts_lo] + payload
-//   rt-size:   tf:room:{rid}:g:<inc>:rt-size       aggregate retained PAYLOAD bytes (headers excluded)
 //   channels:  tf:room:{rid}:ch:<inc>:<laneKey>    PUBLISH/SUBSCRIBE — INC-SCOPED (an old-inc SUBSCRIBE
 //                                                  can never hear a recreation — I11)
 //   gens:      tf:room:{rid}:gens           SET of incs — SADD'd by the head-CX that installs an inc,
@@ -72,9 +71,6 @@ export function retainedKeyPrefix(prefix: string, roomId: string, inc: string): 
 }
 export function retainedKey(prefix: string, roomId: string, inc: string, laneKey: string): string {
   return `${retainedKeyPrefix(prefix, roomId, inc)}${laneKey}`
-}
-export function retainedSizeKey(prefix: string, roomId: string, inc: string): string {
-  return `${genPrefix(prefix, roomId, inc)}:rt-size`
 }
 export function channelKey(prefix: string, roomId: string, inc: string, laneKey: string): string {
   return `${roomTag(prefix, roomId)}:ch:${inc}:${laneKey}`
@@ -351,16 +347,15 @@ return 'committed'
 
 export const CELLS_CX_CMD = 'tfRoomCellsCx'
 
-// COMMIT — atomic acceptance: head precondition (one boolean, two branches), retained aggregate-cap
-// validation, order advance, optional retained install, then PUBLISH. Supplying a closing lease selects
-// the narrow closing-control branch, which is what makes every other lane stale while closing (I12).
-//   KEYS: [1]=head [2]=order [3]=retained [4]=channel [5]=retained aggregate payload size
-//         [6..]=required live cells
+// COMMIT — atomic acceptance: head precondition (one boolean, two branches), order advance, optional
+// retained install, then PUBLISH. Supplying a closing lease selects the narrow closing-control branch,
+// which is what makes every other lane stale while closing (I12).
+//   KEYS: [1]=head [2]=order [3]=retained [4]=channel [5..]=required live cells
 //   ARGV: [1]=now [2]=inc [3]=laneKind [4]=closingLease('') [5]=retain('0'|'1')
-//         [6]=payload [7]=aggregate retained payload cap [8]=local delivery-fence token or ''
+//         [6]=payload [7]=local delivery-fence token or ''
 export const COMMIT_LUA = `${NOW_FN}
 ${REDIS_ORDERING_FRAME_LUA}
-local head_key, order_key, retained_key, channel_key, retained_size_key = KEYS[1], KEYS[2], KEYS[3], KEYS[4], KEYS[5]
+local head_key, order_key, retained_key, channel_key = KEYS[1], KEYS[2], KEYS[3], KEYS[4]
 local now = tf_now(ARGV[1])
 local head = tf_head(head_key, now)
 local ok = false
@@ -373,29 +368,13 @@ if head and head.inc == ARGV[2] then
   end
 end
 if not ok then return '{"stale":true}' end
-for i = 6, #KEYS do
+for i = 5, #KEYS do
   local raw = redis.call('GET', KEYS[i])
   if not raw then return '{"stale":true}' end
   local newline = string.find(raw, '\\n', 1, true)
   if newline then
     local expires_at = string.sub(raw, 1, newline - 1)
     if expires_at ~= '' and tonumber(expires_at) <= now then return '{"stale":true}' end
-  end
-end
-
--- The counter is aggregate PAYLOAD bytes. A stored frame has a fixed 16-byte order header, excluded
--- when replacing an existing retained lane. The check precedes every acceptance mutation.
-local retained_total = nil
-if ARGV[5] == '1' then
-  local current_total = tonumber(redis.call('GET', retained_size_key) or '0')
-  local old_frame_bytes = redis.call('STRLEN', retained_key)
-  local old_payload_bytes = 0
-  if old_frame_bytes > ${ORDERING_FRAME_LAYOUT.headerBytes} then
-    old_payload_bytes = old_frame_bytes - ${ORDERING_FRAME_LAYOUT.headerBytes}
-  end
-  retained_total = current_total - old_payload_bytes + string.len(ARGV[6])
-  if retained_total > tonumber(ARGV[7]) then
-    return redis.error_reply('commitLane: retained aggregate ' .. retained_total .. ' bytes exceeds the ' .. ARGV[7] .. ' byte cap')
   end
 end
 
@@ -431,56 +410,37 @@ redis.call('SET', order_key, seq_text .. ':' .. ts_text)
 local frame = tf_ordering_frame(seq, ts, ARGV[6])
 if ARGV[5] == '1' then
   redis.call('SET', retained_key, frame)
-  redis.call('SET', retained_size_key, retained_total)
 end
 local receivers = redis.call('PUBLISH', channel_key, frame)
 -- A Cluster forwards both publications from this slot owner over the same ordered bus link. The
 -- impossible ordering-frame prefix makes the second publication an internal local-dispatch fence.
-if ARGV[8] ~= '' then redis.call('PUBLISH', channel_key, string.char(${REDIS_DELIVERY_FENCE_BYTE}) .. ARGV[8]) end
+if ARGV[7] ~= '' then redis.call('PUBLISH', channel_key, string.char(${REDIS_DELIVERY_FENCE_BYTE}) .. ARGV[7]) end
 return '{"accepted":true,"seq":' .. seq_text .. ',"timestamp":' .. ts_text .. ',"receivers":' .. receivers .. '}'
 `
 
 export const COMMIT_CMD = 'tfRoomCommit'
 
-// Retained deletion updates the aggregate payload counter in the same atomic record as payload removal.
-// KEYS[1] is the counter; KEYS[2..] are the selected retained lane keys.
+// Retained deletion optionally fences one lane by its current sequence.
 export const RETAINED_DELETE_LUA = `
-local size_key = KEYS[1]
-local total = tonumber(redis.call('GET', size_key) or '0')
 local if_seq = ARGV[1]
 if if_seq ~= '' then
-  if #KEYS ~= 2 then return redis.error_reply('deleteRetained: ifSeq requires one lane') end
+  if #KEYS ~= 1 then return redis.error_reply('deleteRetained: ifSeq requires one lane') end
   local expected = tonumber(if_seq)
   if not expected or expected < 1 or expected > ${REDIS_SAFE_INTEGER_MAX} or expected ~= math.floor(expected) then
     return redis.error_reply('deleteRetained: invalid ifSeq')
   end
-  local frame = redis.call('GET', KEYS[2])
-  if not frame then return total end
+  local frame = redis.call('GET', KEYS[1])
+  if not frame then return 0 end
   if string.len(frame) < ${ORDERING_FRAME_LAYOUT.headerBytes} then
     return redis.error_reply('deleteRetained: invalid retained frame')
   end
   local seq_hi, seq_lo = struct.unpack('>I4I4', frame)
   local current = seq_hi * 4294967296 + seq_lo
-  if current ~= expected then return total end
+  if current ~= expected then return 0 end
 end
-for i = 2, #KEYS do
-  local frame_bytes = redis.call('STRLEN', KEYS[i])
-  if frame_bytes > 0 then
-    local payload_bytes = 0
-    if frame_bytes > ${ORDERING_FRAME_LAYOUT.headerBytes} then
-      payload_bytes = frame_bytes - ${ORDERING_FRAME_LAYOUT.headerBytes}
-    end
-    total = total - payload_bytes
-    redis.call('DEL', KEYS[i])
-  end
-end
-if total <= 0 then
-  redis.call('DEL', size_key)
-  total = 0
-else
-  redis.call('SET', size_key, total)
-end
-return total
+local deleted = 0
+for i = 1, #KEYS do deleted = deleted + redis.call('DEL', KEYS[i]) end
+return deleted
 `
 
 export const RETAINED_DELETE_CMD = 'tfRoomRetainedDelete'
@@ -559,12 +519,10 @@ export const REDIS_ROOM_COMMAND_KEYS = {
       orderKey(prefix, roomId, inc, key),
       retainedKey(prefix, roomId, inc, key),
       channelKey(prefix, roomId, inc, key),
-      retainedSizeKey(prefix, roomId, inc),
       ...requiredCellKeys.map((required) => cellKey(prefix, roomId, inc, required)),
     ]
   },
-  retainedDelete: (prefix: string, roomId: string, inc: string, retainedKeys: readonly string[]) => [
-    retainedSizeKey(prefix, roomId, inc),
+  retainedDelete: (_prefix: string, _roomId: string, _inc: string, retainedKeys: readonly string[]) => [
     ...retainedKeys,
   ],
   directoryPut: (prefix: string) => [directoryIndexKey(prefix), directoryTagsKey(prefix)],

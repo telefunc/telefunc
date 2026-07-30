@@ -15,7 +15,6 @@ import {
   ROOM_HEARTBEAT_INTERVAL_MS,
   ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS,
   ROOM_TAIL_ATTACH_TIMEOUT_MS,
-  ROOM_TRACKS_PER_MEMBER_MAX,
 } from '../../constants.js'
 import { getBackend } from '../../backend/install.js'
 import type { LaneId, BackendSubscription } from '../../backend/spi.js'
@@ -532,12 +531,6 @@ class ServerRoom implements Room {
       const tracks = record.tracks ?? []
       if (tracks.includes(track)) {
         return { value: false, mutations: [] }
-      }
-      // Bound named tracks per participant: authoritative here (the record is the cross-node source
-      // of truth), so a hostile publisher can't spray distinct track names to multiply KV slots,
-      // announcements, retained frames, and subscriptions. The default lane is unnamed, never counted.
-      if (tracks.length >= ROOM_TRACKS_PER_MEMBER_MAX) {
-        throw new RoomError(`A participant may announce at most ${ROOM_TRACKS_PER_MEMBER_MAX} tracks`)
       }
       const next = { ...record, tracks: [...tracks, track], seenAt: Date.now() } satisfies RoomMemberRecord
       return {
@@ -1269,9 +1262,9 @@ class ServerRoom implements Room {
       ),
     )
 
-    // Text: its own lane, brought up only for holders that actually consume messages —
-    // presence-only observers never receive the room's chatter. Wants are member-selective,
-    // like binary: room-level listeners want it all, participant-scoped ones only their member.
+    // Text and announcements share one semantic lane. A node opens it while it owns a participant
+    // or a holder declares text/announcement demand, then filters delivery at the per-stub relay.
+    // A presence-only observer opens only the control lane.
     const textWants = this._aggregateTextWants()
     const wantAnyText = open && (textWants.all || textWants.members.size > 0)
     const wantAnnounce = state.wantsAnnounce || [...this._stubs].some((stub) => stub._wantsAnnounce)
@@ -1292,8 +1285,9 @@ class ServerRoom implements Room {
     if ((becomesObserved && state.rosterKnown) || (open && !state.rosterKnown && needsRoster)) {
       void this._refreshMembers().catch(reportRoomError)
     }
-    // Text: one lane per room. The node ingests it while anyone wants any of it; member-selectivity
-    // is enforced at the per-stub relay (see `_onTextData`), never by narrowing the subscription.
+    // Semantic data: one lane per room. Once wanted, the node ingests the complete lane; text and
+    // announcement selectivity is enforced at the per-stub relay (see `_onTextData`), never by
+    // narrowing the backend subscription.
     this._textSub.sync(wantSemantic, () =>
       backend.subscribeLane(this.id, this._inc, SEMANTIC_LANE, (payload, info) =>
         this._onTextData(decodeRoomText(payload), info),

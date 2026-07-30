@@ -80,7 +80,7 @@ const backend: BackendDriver = new MyBackend()
 installBackend(() => backend)
 ```
 
-`BackendDriver` owns storage, ordering, delivery attempts, and one raw subscription driver. Telefunc wraps that raw subscription edge with local fan-out, reference counting, and retry supervision. `BackendSpi` is the resulting supervised interface consumed by Telefunc core; backend authors don't implement it directly. Telefunc owns and disposes the driver returned by the factory.
+`BackendDriver` owns storage, ordering, delivery attempts, and one raw subscription driver. Telefunc wraps that raw subscription edge with local fan-out, reference counting, readiness generations, ownership checks, stale-attempt rejection, and cleanup. It doesn't retry a failed raw attempt: recovery policy belongs to the Room or other consumer that needs it. `BackendSpi` is the resulting supervised interface consumed by Telefunc core; backend authors don't implement it directly. Telefunc owns and disposes the driver returned by the factory.
 
 > On Cloudflare Workers, Telefunc installs its Durable Object backend automatically. See <Link href="/stream/cloudflare" />.
 
