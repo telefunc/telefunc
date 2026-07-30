@@ -472,9 +472,7 @@ function decodePublishText(wire: string): { text: string; info: WirePublishInfo 
 // sequence uses a tagged prefix whose timestamp bytes are NaN to every v0 reader, making skew fail
 // at its existing validation seam instead of silently shifting four payload bytes.
 const PUBLISH_BINARY_V0_HEADER = 12
-const PUBLISH_BINARY_V1_PREFIX = new Uint8Array([
-  0x54, 0x46, 0x42, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf8, 0x7f,
-])
+const PUBLISH_BINARY_V1_PREFIX = new Uint8Array([0x54, 0x46, 0x42, 1, 0, 0, 0, 0, 0, 0, 0xf8, 0x7f])
 
 function encodePublishBinary(data: Uint8Array, info: WirePublishInfo): Uint8Array {
   assertPublishInfo(info)
@@ -496,11 +494,7 @@ function encodePublishBinary(data: Uint8Array, info: WirePublishInfo): Uint8Arra
 function decodePublishBinary(wire: Uint8Array): { data: Uint8Array; info: WirePublishInfo } {
   assert(wire.byteLength >= PUBLISH_BINARY_V0_HEADER, 'PUBLISH_BINARY frame too short for info header')
   const view = new DataView(wire.buffer, wire.byteOffset, wire.byteLength)
-  const versioned =
-    wire[0] === PUBLISH_BINARY_V1_PREFIX[0] &&
-    wire[1] === PUBLISH_BINARY_V1_PREFIX[1] &&
-    wire[2] === PUBLISH_BINARY_V1_PREFIX[2] &&
-    Number.isNaN(view.getFloat64(4, true))
+  const versioned = view.getUint16(0, true) === 0x4654 && wire[2] === 0x42 && Number.isNaN(view.getFloat64(4, true))
   if (versioned) {
     assert(wire[3] === 1, `Unsupported PUBLISH_BINARY wire version ${wire[3]}`)
     const { payload, info } = decodeOrderingFrame(wire.subarray(PUBLISH_BINARY_V1_PREFIX.byteLength))

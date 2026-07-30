@@ -17,34 +17,23 @@ type BackendState =
     }
   | { phase: 'disposing'; promise: Promise<void> }
 
-type BackendStore = {
-  current: BackendState
-  retiredDisposals?: Set<Promise<void>>
-}
+type BackendStore = { current: BackendState; retiredDisposals?: Set<Promise<void>> }
 
-const state = getGlobalObject<BackendStore>('wire-protocol/backend/install.ts', () => ({
-  current: { phase: 'empty' },
-}))
+const state = getGlobalObject<BackendStore>('wire-protocol/backend/install.ts', () => ({ current: { phase: 'empty' } }))
 const retiredDisposals = (state.retiredDisposals ??= new Set())
 
 const INSTALLING_ERROR = 'telefunc/backend: the backend is still installing; retry after installation settles'
 const DISPOSING_ERROR = 'telefunc/backend: the backend is still disposing and cannot be acquired or installed yet'
 
-/**
- * Installs the per-isolate backend once. The factory is deliberately lazy: repeated entry-module
- * evaluation (such as HMR) returns the canonical backend without opening another backend connection.
- */
+/** Lazily installs one backend per isolate; repeated entry evaluation reuses the canonical instance. */
 export function installBackend(factory: BackendFactory): BackendSpi {
   const current = state.current
   if (current.phase === 'ready' && current.selection === 'explicit') return current.backend
   return selectBackend(factory, 'explicit')
 }
 
-/**
- * Internal integration seam for environment packages. A default outranks the lazy in-memory fallback,
- * while an explicit install always wins regardless of call order. `identity` lets repeated wrapper
- * evaluation remain connection-idempotent without constructing a candidate backend merely to compare it.
- */
+/** Installs an environment default above memory but below explicit selection. `identity` deduplicates
+ * repeated wrapper evaluation without constructing a candidate. */
 export function setDefaultBackend(factory: BackendFactory, identity: unknown = factory): BackendSpi {
   const current = state.current
   if (current.phase === 'ready' && current.selection === 'explicit') return current.backend
@@ -56,15 +45,13 @@ export function setDefaultBackend(factory: BackendFactory, identity: unknown = f
 
 function selectBackend(
   factory: BackendFactory,
-  selection: 'default' | 'explicit',
+  selection: 'memory' | 'default' | 'explicit',
   defaultIdentity?: unknown,
 ): BackendSpi {
   const current = state.current
   if (current.phase === 'installing') throw new Error(INSTALLING_ERROR)
   if (current.phase === 'disposing') throw new Error(DISPOSING_ERROR)
-  if (typeof factory !== 'function') {
-    throw new Error('telefunc/backend: installBackend() requires a backend factory')
-  }
+  if (typeof factory !== 'function') throw new Error('telefunc/backend: installBackend() requires a backend factory')
 
   state.current = { phase: 'installing' }
   let driver: BackendDriver
@@ -81,9 +68,7 @@ function selectBackend(
     return current.backend
   }
 
-  if (current.phase === 'ready') {
-    retireBackend(current.backend)
-  }
+  if (current.phase === 'ready') retireBackend(current.backend)
   const backend = superviseBackend(driver)
   state.current = {
     phase: 'ready',
@@ -95,31 +80,14 @@ function selectBackend(
   return backend
 }
 
-/**
- * Returns the backend for the current installation generation.
- *
- * Callers must not retain or use this reference across `disposeBackend()`. Disposal is a barrier:
- * W5 must acquire a fresh reference through this seam after it settles.
- */
+/** Returns the current generation. Callers must reacquire after the disposal barrier settles. */
 export function getBackend(): BackendSpi {
   const current = state.current
   if (current.phase === 'ready') return current.backend
-  if (current.phase === 'installing') throw new Error(INSTALLING_ERROR)
-  if (current.phase === 'disposing') throw new Error(DISPOSING_ERROR)
-
-  // The implicit default is deliberately composed through the exact same supervision boundary as an
-  // installed backend. Memory cannot become a second, silently divergent subscription mechanism.
-  const driver = new MemoryBackend()
-  assertBackendDriver(driver)
-  const backend = superviseBackend(driver)
-  state.current = { phase: 'ready', driver, backend, selection: 'memory' }
-  return backend
+  return selectBackend(() => new MemoryBackend(), 'memory')
 }
 
-/**
- * Owns disposal of the canonical backend. Once this begins, acquisition is blocked until settlement
- * and ordinary callers share the one canonical disposal promise.
- */
+/** Disposes the canonical backend behind one shared promise, blocking acquisition until settlement. */
 export function disposeBackend(): Promise<void> {
   const current = state.current
   if (current.phase === 'empty' && retiredDisposals.size === 0) return Promise.resolve()
@@ -131,16 +99,13 @@ export function disposeBackend(): Promise<void> {
   const promise = settleDisposals(disposals)
   const disposing: Extract<BackendState, { phase: 'disposing' }> = { phase: 'disposing', promise }
   state.current = disposing
-  promise.then(
-    () => clearDisposalPhase(disposing),
-    () => clearDisposalPhase(disposing),
-  )
+  const clear = () => clearDisposalPhase(disposing)
+  void promise.then(clear, clear)
   return promise
 }
 
 function retireBackend(backend: BackendSpi): void {
-  // Installation is synchronous, so replacement and old-resource cleanup can briefly overlap. Keep
-  // that cleanup observable and make the next explicit disposal a barrier over it.
+  // Replacement cleanup may overlap but remains observable through the next disposal barrier.
   const disposal = Promise.resolve().then(() => backend.dispose())
   retiredDisposals.add(disposal)
   void disposal.then(
@@ -153,8 +118,9 @@ function retireBackend(backend: BackendSpi): void {
 }
 
 async function settleDisposals(disposals: Promise<void>[]): Promise<void> {
-  const settled = await Promise.allSettled(disposals)
-  const errors = settled.flatMap((result) => (result.status === 'rejected' ? [result.reason] : []))
+  const errors = (await Promise.allSettled(disposals)).flatMap((result) =>
+    result.status === 'rejected' ? [result.reason] : [],
+  )
   if (errors.length === 1) throw errors[0]
   if (errors.length > 1) throw new AggregateError(errors, 'telefunc/backend: multiple backend disposals failed')
 }

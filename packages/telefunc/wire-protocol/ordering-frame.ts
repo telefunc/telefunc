@@ -10,12 +10,7 @@ const ORDERING_FRAME_LAYOUT = Object.freeze({
   wordBytes: 4,
   wordRange: 0x1_0000_0000,
   endianness: 'big',
-  offsets: Object.freeze({
-    seqHigh: 0,
-    seqLow: 4,
-    timestampHigh: 8,
-    timestampLow: 12,
-  }),
+  offsets: Object.freeze({ seqHigh: 0, seqLow: 4, timestampHigh: 8, timestampLow: 12 }),
 } as const)
 const ORDERING_FRAME_HEADER_BYTES = ORDERING_FRAME_LAYOUT.headerBytes
 
@@ -37,9 +32,10 @@ function decodeOrderingFrame(frame: Uint8Array): { payload: Uint8Array; info: Or
   assert(frame.byteLength >= ORDERING_FRAME_HEADER_BYTES, 'Ordering frame is shorter than its 16-byte header')
   const view = new DataView(frame.buffer, frame.byteOffset, frame.byteLength)
   const { offsets, wordRange } = ORDERING_FRAME_LAYOUT
+  const read = (high: number, low: number) => view.getUint32(high, false) * wordRange + view.getUint32(low, false)
   const info = {
-    seq: view.getUint32(offsets.seqHigh, false) * wordRange + view.getUint32(offsets.seqLow, false),
-    timestamp: view.getUint32(offsets.timestampHigh, false) * wordRange + view.getUint32(offsets.timestampLow, false),
+    seq: read(offsets.seqHigh, offsets.seqLow),
+    timestamp: read(offsets.timestampHigh, offsets.timestampLow),
   }
   assertOrderingInfo(info)
   return { payload: frame.subarray(ORDERING_FRAME_HEADER_BYTES), info }

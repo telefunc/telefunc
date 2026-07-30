@@ -12,15 +12,8 @@ import type {
 import { CHANNEL_BUFFER_LIMIT_BYTES } from '../constants.js'
 import { ChannelOverflowError } from '../channel-errors.js'
 
-type ReadinessGeneration =
-  | { state: 'ready'; promise: Promise<void> }
-  | {
-      state: 'pending'
-      promise: Promise<void>
-      resolve: () => void
-      reject: (error: Error) => void
-    }
-  | { state: 'failed'; promise: Promise<void> }
+type ReadinessGeneration = ReturnType<typeof createReadinessGeneration>
+type StateListener = (state: SubscriptionState) => void
 
 type PendingPublish = {
   payload: Uint8Array
@@ -32,32 +25,22 @@ type PendingPublish = {
 type PendingPublishState = {
   entries: PendingPublish[]
   bytes: number
-  flushing: boolean
 }
 
 const PENDING_PUBLISH_LIMIT = 1024
 
-/**
- * The single L2/L3 mechanism: one upstream attempt per source, local fan-out/refcount, stale-attempt
- * rejection, ownership checks, and readiness signalling. Consumers own retry budgets and deadlines.
- */
+/** One upstream attempt per source with local fan-out/refcount, ownership/readiness checks, and
+ * stale-attempt rejection. Consumers own retry budgets and deadlines. */
 class SubscriptionManager<Source> {
   private readonly _slots = new Map<string, SubscriptionSlot<Source>>()
   private readonly _cleanups = new Set<Promise<void>>()
-  private readonly _driver: SubscriptionDriver<Source>
-  private readonly _reportError: (error: unknown) => void
-  private readonly _sourceKey: (source: Source) => string
   private readonly _pendingPublishes = new Map<string, PendingPublishState>()
 
   constructor(
-    driver: SubscriptionDriver<Source>,
-    reportError: (error: unknown) => void = console.error,
-    sourceKey: (source: Source) => string = String,
-  ) {
-    this._driver = driver
-    this._reportError = reportError
-    this._sourceKey = sourceKey
-  }
+    private readonly _driver: SubscriptionDriver<Source>,
+    private readonly _reportError: (error: unknown) => void = console.error,
+    private readonly _sourceKey: (source: Source) => string = String,
+  ) {}
 
   subscribe(source: Source, receiver: BackendReceiver): BackendSubscription {
     const binding = this._driver.bind(source)
@@ -66,19 +49,17 @@ class SubscriptionManager<Source> {
     const key = JSON.stringify([sourceKey, binding.partition])
     let slot = this._slots.get(key)
     if (slot === undefined) {
-      let created!: SubscriptionSlot<Source>
-      created = new SubscriptionSlot(
+      slot = new SubscriptionSlot(
         source,
         binding,
         this._reportError,
         sourceKey,
         (attempt) => this._cleanup(attempt),
         () => {
-          created.markRemoved()
-          if (this._slots.get(key) === created) this._slots.delete(key)
+          slot!.markRemoved()
+          if (this._slots.get(key) === slot) this._slots.delete(key)
         },
       )
-      slot = created
       this._slots.set(key, slot)
     }
     return slot.attach(receiver)
@@ -94,7 +75,8 @@ class SubscriptionManager<Source> {
     if (state === undefined && this._readinessWaits(sourceKey).length === 0) return publish(payload)
 
     const ownedPayload = payload.slice()
-    state ??= { entries: [], bytes: 0, flushing: false }
+    const startFlushing = state === undefined
+    state ??= { entries: [], bytes: 0 }
     if (
       state.entries.length >= PENDING_PUBLISH_LIMIT ||
       state.bytes + ownedPayload.byteLength > CHANNEL_BUFFER_LIMIT_BYTES
@@ -111,10 +93,7 @@ class SubscriptionManager<Source> {
         reject,
       })
     })
-    if (!state.flushing) {
-      state.flushing = true
-      void this._flushPublishes(sourceKey, state)
-    }
+    if (startFlushing) void this._flushPublishes(sourceKey, state)
     return result
   }
 
@@ -129,8 +108,7 @@ class SubscriptionManager<Source> {
   async dispose(): Promise<void> {
     const cleanups = [...this._slots.values()].map((slot) => slot.stop())
     this._slots.clear()
-    await Promise.allSettled(cleanups)
-    await Promise.allSettled([...this._cleanups])
+    await Promise.allSettled([...cleanups, ...this._cleanups])
   }
 
   private _cleanup(attempt: SubscriptionAttempt): Promise<void> {
@@ -160,12 +138,7 @@ class SubscriptionManager<Source> {
       for (const entry of state.entries.splice(0)) entry.reject(error)
       state.bytes = 0
     } finally {
-      state.flushing = false
-      if (state.entries.length === 0) this._pendingPublishes.delete(sourceKey)
-      else {
-        state.flushing = true
-        void this._flushPublishes(sourceKey, state)
-      }
+      this._pendingPublishes.delete(sourceKey)
     }
   }
 
@@ -185,75 +158,50 @@ class SubscriptionManager<Source> {
 }
 
 class SubscriptionSlot<Source> {
-  private readonly _source: Source
-  private readonly _binding: SubscriptionBinding
-  private readonly _reportError: (error: unknown) => void
-  private readonly _sourceKey: string
-  private readonly _cleanup: (attempt: SubscriptionAttempt) => Promise<void>
-  private readonly _onEmpty: () => void
   private readonly _receivers = new Map<symbol, BackendReceiver>()
-  private readonly _listeners = new Set<(state: SubscriptionState) => void>()
+  private readonly _listeners = new Set<StateListener>()
   private _attempt: SubscriptionAttempt | null = null
   private _unobserve: (() => void) | null = null
-  private _readiness: ReadinessGeneration = createPendingReadinessGeneration()
+  private _readiness: ReadinessGeneration = createReadinessGeneration()
   private _state: SubscriptionState = 'establishing'
-  private _epoch = 0
-  private _stopped = false
   private _stopPromise: Promise<void> | null = null
-  private _removedResolve!: () => void
-  private readonly _removed = new Promise<void>((resolve) => {
-    this._removedResolve = resolve
-  })
+  private readonly _removed = createReadinessGeneration()
 
   constructor(
-    source: Source,
-    binding: SubscriptionBinding,
-    reportError: (error: unknown) => void,
-    sourceKey: string,
-    cleanup: (attempt: SubscriptionAttempt) => Promise<void>,
-    onEmpty: () => void,
-  ) {
-    this._source = source
-    this._binding = binding
-    this._reportError = reportError
-    this._sourceKey = sourceKey
-    this._cleanup = cleanup
-    this._onEmpty = onEmpty
-  }
-
-  get source(): Source {
-    return this._source
-  }
-
-  get sourceKey(): string {
-    return this._sourceKey
-  }
+    readonly source: Source,
+    private readonly _binding: SubscriptionBinding,
+    private readonly _reportError: (error: unknown) => void,
+    readonly sourceKey: string,
+    private readonly _cleanup: (attempt: SubscriptionAttempt) => Promise<void>,
+    private readonly _onEmpty: () => void,
+  ) {}
 
   markRemoved(): void {
-    this._removedResolve()
+    this._removed.resolve()
   }
 
   waitForReadyOrRemoved(): Promise<void> | null {
-    if (this._stopped || this._state === 'ready') return null
-    return Promise.race([this._readiness.promise, this._removed])
+    if (this._stopPromise !== null || this._state === 'ready') return null
+    return Promise.race([this._readiness.promise, this._removed.promise])
   }
 
   attach(receiver: BackendReceiver): BackendSubscription {
-    if (this._stopped) throw new Error('SubscriptionManager: cannot attach to a stopped source')
+    if (this._stopPromise !== null) throw new Error('SubscriptionManager: cannot attach to a stopped source')
     const attachment = Symbol()
     this._receivers.set(attachment, receiver)
     if (this._attempt === null) this._start()
     let attached = true
-    const listeners = new Set<(state: SubscriptionState) => void>()
-    let previousState = this._state
-    let awaitingInitialOutcome = previousState === 'establishing'
-    const unobserve = this.observe((state) => {
-      const suppressInitialReady = awaitingInitialOutcome && previousState === 'establishing' && state === 'ready'
-      awaitingInitialOutcome = false
-      previousState = state
-      if (suppressInitialReady) return
+    const listeners = new Set<StateListener>()
+    let suppressInitialReady = this._state === 'establishing'
+    const observer: StateListener = (state) => {
+      if (suppressInitialReady) {
+        suppressInitialReady = false
+        if (state === 'ready') return
+      }
       this._notify(listeners, state)
-    })
+    }
+    this._listeners.add(observer)
+    const unobserve = () => this._listeners.delete(observer)
     const slot = this
     return {
       get ready() {
@@ -283,34 +231,27 @@ class SubscriptionSlot<Source> {
     }
   }
 
-  observe(listener: (state: SubscriptionState) => void): () => void {
-    this._listeners.add(listener)
-    return () => this._listeners.delete(listener)
-  }
-
   stop(): Promise<void> {
     if (this._stopPromise !== null) return this._stopPromise
     const attempt = this._attempt
-    this._stopped = true
     this._stopPromise = attempt === null ? Promise.resolve() : this._cleanup(attempt)
-    this._resolveReady()
+    this._readiness.resolve()
     this._transition('closed')
     this._clearCurrent()
     return this._stopPromise
   }
 
   private _start(): void {
-    if (this._stopped || this._receivers.size === 0 || this._attempt !== null) return
-    if (!this._bindingIsValid()) {
+    if (this._stopPromise !== null || this._receivers.size === 0 || this._attempt !== null) return
+    if (!this._safely(() => this._binding.valid() === true, false)) {
       this._ownershipTerminated()
       return
     }
-    const epoch = ++this._epoch
     let attempt: SubscriptionAttempt
     try {
       attempt = this._binding.open(
         async (payload, info) => {
-          if (epoch !== this._epoch || this._stopped) return
+          if (this._stopPromise !== null) return
           await Promise.all(
             [...this._receivers.values()].map(async (receiver) => {
               await (receiver(payload, info) as unknown)
@@ -327,32 +268,30 @@ class SubscriptionSlot<Source> {
     try {
       const unobserve = attempt.onStateChange((state) => this._onStateChange(attempt, state))
       if (this._attempt === attempt) this._unobserve = unobserve
-      else this._releaseObserver(unobserve)
+      else this._safely(unobserve, undefined)
       attempt.ready.then(
         () => this._becameReady(attempt),
-        (error: unknown) => this._failedCurrent(attempt, error),
+        (error: unknown) => this._failCurrent(attempt, error),
       )
       const state = attempt.state()
       if (state === 'ready') this._becameReady(attempt)
-      else if (state === 'closed') this._closed(attempt)
+      else if (state === 'closed')
+        this._failCurrent(attempt, new Error(`Backend subscription closed: ${this.sourceKey}`))
       else if (state === 'terminated') this._ownershipTerminated(attempt)
     } catch (error) {
-      this._failedCurrent(attempt, error)
+      this._failCurrent(attempt, error)
     }
   }
 
   private _onStateChange(attempt: SubscriptionAttempt, state: SubscriptionAttemptState): void {
     if (this._attempt !== attempt) return
-    if (state === 'terminated') {
-      this._ownershipTerminated(attempt)
-    } else if (state === 'ready') {
-      this._becameReady(attempt)
-    } else if (state === 'lost' || state === 'establishing') {
-      this._markUnavailable(state)
-      if (state === 'lost') this._reportError(new Error(`Backend subscription lost: ${this._sourceKey}`))
-    } else {
-      this._closed(attempt)
+    if (state === 'terminated') return this._ownershipTerminated(attempt)
+    if (state === 'ready') return this._becameReady(attempt)
+    if (state === 'closed') {
+      return this._failCurrent(attempt, new Error(`Backend subscription closed: ${this.sourceKey}`))
     }
+    this._markUnavailable(state)
+    if (state === 'lost') this._reportError(new Error(`Backend subscription lost: ${this.sourceKey}`))
   }
 
   private _becameReady(attempt: SubscriptionAttempt): void {
@@ -360,24 +299,18 @@ class SubscriptionSlot<Source> {
     try {
       if (attempt.state() !== 'ready') return
     } catch (error) {
-      this._failedCurrent(attempt, error)
+      this._failCurrent(attempt, error)
       return
     }
-    this._resolveReady()
+    this._readiness.resolve()
     this._transition('ready')
   }
 
-  private _closed(attempt: SubscriptionAttempt): void {
-    if (this._attempt !== attempt) return
-    this._markUnavailable('lost')
-    this._terminal(new Error(`Backend subscription closed: ${this._sourceKey}`), attempt)
-  }
-
   private _ownershipTerminated(attempt: SubscriptionAttempt | null = this._attempt): void {
-    this._terminal(new Error(`Backend subscription ownership terminated: ${this._sourceKey}`), attempt)
+    this._terminal(new Error(`Backend subscription ownership terminated: ${this.sourceKey}`), attempt)
   }
 
-  private _failedCurrent(attempt: SubscriptionAttempt, error: unknown): void {
+  private _failCurrent(attempt: SubscriptionAttempt, error: unknown): void {
     if (this._attempt !== attempt) return
     this._markUnavailable('lost')
     this._terminal(error, attempt)
@@ -386,32 +319,16 @@ class SubscriptionSlot<Source> {
   private _terminal(error: unknown, attempt: SubscriptionAttempt | null = this._attempt): void {
     if (attempt !== null && this._attempt !== attempt) return
     const failure = error instanceof Error ? error : new Error(String(error))
-    const current = this._attempt
-    this._stopped = true
-    this._stopPromise ??= current === null ? Promise.resolve() : this._cleanup(current)
+    this._stopPromise ??= this._attempt === null ? Promise.resolve() : this._cleanup(this._attempt)
     this._transition('closed')
     this._clearCurrent()
     this._onEmpty()
-    this._rejectReady(failure)
+    this._readiness.reject(failure)
   }
 
   private _markUnavailable(state: 'establishing' | 'lost'): void {
-    if (this._readiness.state === 'ready') this._readiness = createPendingReadinessGeneration()
+    if (this._state === 'ready') this._readiness = createReadinessGeneration()
     this._transition(state)
-  }
-
-  private _resolveReady(): void {
-    const generation = this._readiness
-    if (generation.state !== 'pending') return
-    generation.resolve()
-    this._readiness = { state: 'ready', promise: generation.promise }
-  }
-
-  private _rejectReady(error: Error): void {
-    const generation = this._readiness
-    if (generation.state !== 'pending') return
-    generation.reject(error)
-    this._readiness = { state: 'failed', promise: generation.promise }
   }
 
   private _transition(state: SubscriptionState): void {
@@ -421,22 +338,22 @@ class SubscriptionSlot<Source> {
   }
 
   private _clearCurrent(): void {
-    this._epoch++
     const unobserve = this._unobserve
     this._unobserve = null
     this._attempt = null
-    if (unobserve !== null) this._releaseObserver(unobserve)
+    if (unobserve !== null) this._safely(unobserve, undefined)
   }
 
-  private _releaseObserver(unobserve: () => void): void {
+  private _safely<Value>(operation: () => Value, fallback: Value): Value {
     try {
-      unobserve()
+      return operation()
     } catch (error) {
       this._reportError(error)
+      return fallback
     }
   }
 
-  private _notify(listeners: Iterable<(state: SubscriptionState) => void>, state: SubscriptionState): void {
+  private _notify(listeners: Iterable<StateListener>, state: SubscriptionState): void {
     for (const listener of [...listeners]) {
       try {
         listener(state)
@@ -445,30 +362,20 @@ class SubscriptionSlot<Source> {
       }
     }
   }
-
-  private _bindingIsValid(): boolean {
-    try {
-      return this._binding.valid() === true
-    } catch (error) {
-      this._reportError(error)
-      return false
-    }
-  }
 }
 
 function assertBinding(binding: SubscriptionBinding): void {
-  if (
+  const invalid =
     binding === null ||
     typeof binding !== 'object' ||
     typeof binding.partition !== 'string' ||
     typeof binding.valid !== 'function' ||
     typeof binding.open !== 'function'
-  ) {
+  if (invalid)
     throw new Error('SubscriptionDriver.bind() must return a string partition plus valid() and open() functions')
-  }
 }
 
-function createPendingReadinessGeneration(): Extract<ReadinessGeneration, { state: 'pending' }> {
+function createReadinessGeneration() {
   let resolve!: () => void
   let reject!: (error: Error) => void
   const promise = new Promise<void>((resolvePromise, rejectPromise) => {
@@ -476,5 +383,5 @@ function createPendingReadinessGeneration(): Extract<ReadinessGeneration, { stat
     reject = rejectPromise
   })
   void promise.catch(() => {})
-  return { state: 'pending', promise, resolve, reject }
+  return { promise, resolve, reject }
 }

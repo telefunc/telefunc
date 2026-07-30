@@ -3,12 +3,9 @@ export { superviseBackend }
 import { subscriptionSourceKey } from './subscription-source.js'
 import { SubscriptionManager } from './subscriptions.js'
 import { assertHeadNextWellFormed } from './head-transitions.js'
-import type { BackendDriver, BackendSpi, BackendSubscriptionSource, HeadCx, HeadNext } from './spi.js'
+import type { BackendDriver, BackendSpi, HeadCx, HeadNext } from './spi.js'
 
-/**
- * Composes the backend-author contract into the consumer SPI. This is the only owner of subscription
- * supervision; the zero-configuration memory driver and every installed driver take this same path.
- */
+/** The sole raw-driver-to-consumer composition path and owner of subscription supervision. */
 function superviseBackend(
   driver: BackendDriver,
   disposeDriver: () => Promise<void> = () => driver.dispose(),
@@ -21,10 +18,7 @@ function superviseBackend(
 
     publish: (lane, payload) =>
       subscriptions.publish({ kind: 'broadcast', lane }, payload, (ownedPayload) => driver.publish(lane, ownedPayload)),
-    subscribe: (lane, receiver) => {
-      const source: BackendSubscriptionSource = { kind: 'broadcast', lane }
-      return subscriptions.subscribe(source, receiver)
-    },
+    subscribe: (lane, receiver) => subscriptions.subscribe({ kind: 'broadcast', lane }, receiver),
 
     readHead: (roomId) => driver.readHead(roomId),
     compareExchangeHead: async (roomId: string, cx: HeadCx, next: HeadNext) => {
@@ -42,10 +36,8 @@ function superviseBackend(
     listRetained: (roomId, inc) => driver.listRetained(roomId, inc),
     deleteRetained: (roomId, inc, lane, opts) => driver.deleteRetained(roomId, inc, lane, opts),
 
-    subscribeLane: (roomId, inc, lane, receiver) => {
-      const source: BackendSubscriptionSource = { kind: 'durable', roomId, inc, lane }
-      return subscriptions.subscribe(source, receiver)
-    },
+    subscribeLane: (roomId, inc, lane, receiver) =>
+      subscriptions.subscribe({ kind: 'durable', roomId, inc, lane }, receiver),
 
     listGenerations: (roomId) => driver.listGenerations(roomId),
     dropGeneration: async (roomId, inc) => {
@@ -59,12 +51,7 @@ function superviseBackend(
     directoryDelete: (roomId, incTag) => driver.directoryDelete(roomId, incTag),
     directoryList: (prefix, cursor) => driver.directoryList(prefix, cursor),
 
-    dispose: () => {
-      if (disposal !== undefined) return disposal
-      // Raw attempts are detached while their driver is live. Only after that settlement may the
-      // backend author close the transport/storage resources those attempts use for cleanup.
-      disposal = subscriptions.dispose().then(disposeDriver)
-      return disposal
-    },
+    // Detach raw attempts before closing the resources their cleanup uses.
+    dispose: () => (disposal ??= subscriptions.dispose().then(disposeDriver)),
   }
 }
