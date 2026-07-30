@@ -4,12 +4,7 @@ import { IndexedPeer } from '../server/IndexedPeer.js'
 import { ACK_STATUS, TAG, decode } from '../shared-ws.js'
 import { waitForTelefunctionCallBarriers } from '../client/call-barrier.js'
 import { ShieldValidationError, isShieldValidationError } from '../../shared/ShieldValidationError.js'
-import {
-  ROOM_DM_ACK_TIMEOUT_MS,
-  ROOM_HEARTBEAT_INTERVAL_MS,
-  ROOM_MEMBER_KV_TTL_MS,
-  ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS,
-} from '../constants.js'
+import { ROOM_HEARTBEAT_INTERVAL_MS, ROOM_MEMBER_KV_TTL_MS } from '../constants.js'
 import {
   DEFAULT_TRACK,
   frameWithMemberId,
@@ -21,6 +16,7 @@ import {
 } from './protocol.js'
 import { ClientRoom, RoomClientBroadcast } from './client.js'
 import { Room, ServerRoom } from './server.js'
+import { SubSlot, configFromHead, encodeRoomConfig } from './server/lanes.js'
 import { RoomStubChannel } from './stubs.js'
 import { RoomDemand } from './demand.js'
 import type { ChannelPublishInfo } from '../channel.js'
@@ -65,39 +61,25 @@ afterEach(async () => {
 })
 
 describe('Room public behavior', () => {
-  it('does not complete a join until its semantic subscription is ready', async () => {
-    const room = (await Room.create('join-readiness')) as ServerRoom
+  it('opens semantic ingestion only when a semantic listener wants delivery', async () => {
+    const room = (await Room.create('semantic-demand')) as ServerRoom
     const backend = getBackend()
     const subscribeLane = backend.subscribeLane.bind(backend)
-    const semanticReady = deferred<void>()
-    const semanticStarted = deferred<void>()
-    let semanticState: SubscriptionState = 'establishing'
+    let semanticSubscriptions = 0
     const subscribe = vi.spyOn(backend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
-      const subscription = subscribeLane(roomId, inc, lane, receiver)
-      if (lane.kind !== 'semantic') return subscription
-      semanticStarted.resolve()
-      return {
-        ready: semanticReady.promise,
-        state: () => semanticState,
-        onStateChange: (callback) => subscription.onStateChange(callback),
-        unsubscribe: () => subscription.unsubscribe(),
-      }
+      if (lane.kind === 'semantic') semanticSubscriptions++
+      return subscribeLane(roomId, inc, lane, receiver)
     })
     try {
-      let settled = false
-      const joining = room.join().then((participant) => {
-        settled = true
-        return participant
-      })
-      await semanticStarted.promise
-      expect(settled).toBe(false)
+      const member = await room.join()
+      expect(semanticSubscriptions).toBe(0)
 
-      semanticState = 'ready'
-      semanticReady.resolve()
-      await expect(joining).resolves.toMatchObject({ id: expect.any(String) })
-      expect(settled).toBe(true)
+      const received: unknown[] = []
+      room.subscribe((data) => received.push(data))
+      await vi.waitFor(() => expect(semanticSubscriptions).toBe(1))
+      await member.publish('wanted')
+      expect(received).toEqual(['wanted'])
     } finally {
-      semanticReady.resolve()
       subscribe.mockRestore()
     }
   })
@@ -247,6 +229,55 @@ describe('Room public behavior', () => {
     const recreated = (await Room.create('lifecycle')) as ServerRoom
     expect(recreated._inc).not.toBe(firstInc)
     expect(await recreated.getParticipants()).toEqual([])
+  })
+
+  it('returns only a discoverable room and closes a head whose directory registration cannot finish', async () => {
+    const put = driver.directoryPut.bind(driver)
+    let transientAttempts = 0
+    const directoryPut = vi.spyOn(driver, 'directoryPut').mockImplementation(async (roomId, inc) => {
+      if (roomId === 'index-retry' && transientAttempts++ === 0) throw new Error('transient index failure')
+      if (roomId === 'index-failure') throw new Error('persistent index failure')
+      await put(roomId, inc)
+    })
+    try {
+      const retried = await Room.create('index-retry')
+      expect((await Room.list()).map(({ id }) => id)).toContain(retried.id)
+
+      await expect(Room.create('index-failure')).rejects.toThrow('persistent index failure')
+      expect((await driver.readHead('index-failure'))?.head).toMatchObject({ state: 'closed', currentInc: null })
+    } finally {
+      directoryPut.mockRestore()
+    }
+  })
+
+  it('waits for an active close lease and takes over until the head is closed', async () => {
+    vi.useFakeTimers()
+    const room = (await Room.create('concurrent-close')) as ServerRoom
+    const current = (await driver.readHead(room.id))!.head
+    const leased = await driver.compareExchangeHead(
+      room.id,
+      { expect: { rev: current.rev } },
+      {
+        head: {
+          currentInc: current.currentInc,
+          state: 'closing',
+          config: encodeRoomConfig({ ...configFromHead(current), status: 'closing' }),
+          closeLease: { id: 'stalled-closer', durationMs: 1_000 },
+        },
+      },
+    )
+    expect(leased).toMatchObject({ ok: true, head: { state: 'closing' } })
+
+    let settled = false
+    const closing = Room.close(room.id).then(() => {
+      settled = true
+    })
+    await Promise.resolve()
+    expect(settled).toBe(false)
+
+    await vi.advanceTimersByTimeAsync(1_100)
+    await closing
+    expect((await driver.readHead(room.id))?.head).toMatchObject({ state: 'closed', currentInc: null })
   })
 
   it('tears down a close observed by a separate Room runtime that cannot inherit the initiator hold', async () => {
@@ -447,6 +478,25 @@ describe('Room public behavior', () => {
     expect((await observer.getParticipants()).map(({ id }) => id)).toEqual([member.id])
   })
 
+  it('reads authority while the control subscription is establishing', async () => {
+    const authority = await Room.create('establishing-roster')
+    const observer = (await Room.get(authority.id)) as ServerRoom
+    expect(await observer.getParticipants()).toEqual([])
+    const readiness = deferred<void>()
+    const slot = (observer as unknown as { _ctrlSub: SubSlot })._ctrlSub
+    slot.sync(true, () => ({
+      ready: readiness.promise,
+      state: () => 'establishing',
+      onStateChange: () => () => {},
+      unsubscribe: async () => {},
+    }))
+    const member = await authority.join()
+
+    expect((await observer.getParticipants()).map(({ id }) => id)).toEqual([member.id])
+    readiness.resolve()
+    slot.stop()
+  })
+
   it('heartbeats pure control observers without owned members or binary demand', async () => {
     vi.useFakeTimers()
     const observer = (await Room.get((await Room.create('observer-heartbeat')).id)) as ServerRoom
@@ -460,141 +510,49 @@ describe('Room public behavior', () => {
     expect(heartbeat).toHaveBeenCalledOnce()
   })
 
-  it('replans a terminal Room lane when its first replacement never becomes ready', async () => {
-    vi.useFakeTimers()
-    const authority = await Room.create('room-owned-subscription-horizon')
-    const publisher = await authority.join()
-    const observer = await Room.get(authority.id)
-    const backend = getBackend()
-    const subscribeLane = backend.subscribeLane.bind(backend)
-    const terminal = terminalSubscription()
-    const never = deferred<void>()
-    let semanticAttempt = 0
-    const subscribe = vi.spyOn(backend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
-      if (lane.kind !== 'semantic') return subscribeLane(roomId, inc, lane, receiver)
-      semanticAttempt++
-      if (semanticAttempt === 1) return terminal.subscription
-      if (semanticAttempt === 2)
-        return {
-          ready: never.promise,
-          state: () => 'establishing',
-          onStateChange: () => () => {},
-          unsubscribe: async () => {},
-        }
-      return subscribeLane(roomId, inc, lane, receiver)
-    })
-    const report = vi.spyOn(console, 'error').mockImplementation(() => {})
-    const received: unknown[] = []
-    observer.subscribe((data) => received.push(data))
-    await terminal.close()
+  it('renews every owned member in one heartbeat cell transaction', async () => {
+    const room = (await Room.create('batched-heartbeat')) as ServerRoom
+    await room.join()
+    await room.join()
+    const compare = vi.spyOn(driver, 'compareExchangeCells')
 
-    await vi.advanceTimersByTimeAsync(ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS / 6)
-    await publisher.publish('recovered')
+    await (room as unknown as { _heartbeatTick(): Promise<void> })._heartbeatTick()
 
-    expect(received).toEqual(['recovered'])
-    expect(report).toHaveBeenCalled()
-    subscribe.mockRestore()
-    report.mockRestore()
+    expect(compare).toHaveBeenCalledOnce()
   })
 
-  it('uses exactly one recovery attempt plus five Room-owned replans', async () => {
+  it('replaces a subscription that is already closed on initial establishment', async () => {
+    const closed = terminalSubscription()
+    await closed.close()
+    const terminal = vi.fn()
+    const slot = new SubSlot(terminal, () => {})
+
+    slot.sync(true, () => closed.subscription)
+    await Promise.resolve()
+
+    expect(terminal).toHaveBeenCalledOnce()
+    expect(terminal.mock.calls[0]?.[0]).toBe(slot)
+    slot.stop()
+  })
+
+  it('keeps retrying inside the horizon after more than six immediate failures', async () => {
     vi.useFakeTimers()
-    const observer = await Room.get((await Room.create('room-replan-budget')).id)
+    const observer = await Room.get((await Room.create('single-recovery-horizon')).id)
     const backend = getBackend()
     const subscribeLane = backend.subscribeLane.bind(backend)
-    const terminal = terminalSubscription()
-    let semanticSubscriptions = 0
-    let recoveryAttempts = 0
+    let attempts = 0
     const subscribe = vi.spyOn(backend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
       if (lane.kind !== 'semantic') return subscribeLane(roomId, inc, lane, receiver)
-      semanticSubscriptions++
-      if (semanticSubscriptions === 1) return terminal.subscription
-      recoveryAttempts++
-      return pendingSubscription()
+      attempts++
+      return attempts < 8 ? rejectedSubscription(`attempt ${attempts}`) : subscribeLane(roomId, inc, lane, receiver)
     })
     const report = vi.spyOn(console, 'error').mockImplementation(() => {})
     try {
       observer.subscribe(() => {})
-      await terminal.close()
-
-      await vi.advanceTimersByTimeAsync(ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS)
-
-      expect(recoveryAttempts).toBe(6)
+      await vi.advanceTimersByTimeAsync(2_000)
+      expect(attempts).toBe(8)
+      expect(observer.isClosed).toBe(false)
     } finally {
-      subscribe.mockRestore()
-      report.mockRestore()
-    }
-  })
-
-  it('keeps exhausted recovery internal and replans the lost lane without closing the Room', async () => {
-    const room = (await Room.create('room-replan-exhaustion')) as ServerRoom
-    const backend = getBackend()
-    const subscribeLane = backend.subscribeLane.bind(backend)
-    const terminal = terminalSubscription()
-    let exhaustedMember: string | undefined
-    let recoveryAttempts = 0
-    let allowRecovery = false
-    const subscribe = vi.spyOn(backend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
-      if (lane.kind !== 'inbox') return subscribeLane(roomId, inc, lane, receiver)
-      if (exhaustedMember === undefined) {
-        exhaustedMember = lane.member
-        return terminal.subscription
-      }
-      if (lane.member !== exhaustedMember) return subscribeLane(roomId, inc, lane, receiver)
-      recoveryAttempts++
-      return allowRecovery
-        ? subscribeLane(roomId, inc, lane, receiver)
-        : rejectedSubscription('Backend subscription closed: room-replan-exhaustion')
-    })
-    const report = vi.spyOn(console, 'error').mockImplementation(() => {})
-    try {
-      const sender = await room.join()
-      const recipient = await room.join()
-      recipient.listen(() => 'acknowledged')
-      expect(exhaustedMember).toBe(sender.id)
-      await terminal.close()
-
-      await vi.waitFor(() => expect(recoveryAttempts).toBe(6))
-      const slot = (
-        room as unknown as {
-          _dmUnsubs: Map<string, { active: boolean; lost: boolean; ready: Promise<void> }>
-        }
-      )._dmUnsubs.get(sender.id)!
-      await vi.waitFor(() => expect(slot.lost).toBe(true))
-      const diagnostics = report.mock.calls.flat().map(String).join('\n')
-      expect(diagnostics).toContain('Backend subscription closed: room-replan-exhaustion')
-      expect(diagnostics).toContain('Room subscription recovery exhausted')
-      let readinessOutcome: 'pending' | 'resolved' | 'rejected' = 'pending'
-      void slot.ready.then(
-        () => {
-          readinessOutcome = 'resolved'
-        },
-        () => {
-          readinessOutcome = 'rejected'
-        },
-      )
-      await Promise.resolve()
-      expect(readinessOutcome).toBe('pending')
-      expect(room.isClosed).toBe(false)
-      expect((await backend.readHead(room.id))?.head.state).toBe('open')
-
-      vi.useFakeTimers()
-      const sending = sender.send(recipient, 'ping', { ack: true }).catch((error: unknown) => error)
-      await vi.advanceTimersByTimeAsync(ROOM_DM_ACK_TIMEOUT_MS)
-      const publicError = await sending
-      expect(isRoomError(publicError)).toBe(true)
-      expect(String(publicError)).toContain('timed out')
-      expect(String(publicError)).not.toContain('subscription')
-      vi.useRealTimers()
-
-      allowRecovery = true
-      const syncSubs = room as unknown as { _syncSubs(): void }
-      syncSubs._syncSubs()
-      await vi.waitFor(() => expect(recoveryAttempts).toBe(7))
-      await vi.waitFor(() => expect(slot).toMatchObject({ active: true, lost: false }))
-      await expect(sender.publish('still-open')).resolves.toMatchObject({ seq: expect.any(Number) })
-    } finally {
-      vi.useRealTimers()
       subscribe.mockRestore()
       report.mockRestore()
     }
@@ -626,6 +584,18 @@ describe('Room public behavior', () => {
     expect((await observer.getParticipants({ hidden: true })).map((member) => member.id)).toEqual([hidden.id])
   })
 
+  it('resolves multiple identity members with one batched record read', async () => {
+    const room = await Room.create('identity-batch')
+    const first = await room.join({ identity: 'shared' })
+    const second = await room.join({ identity: 'shared' })
+    const reads = vi.spyOn(driver, 'readCells')
+
+    const members = await Room.getParticipants(room.id, { identity: 'shared' })
+
+    expect(members.map(({ id }) => id)).toEqual([first.id, second.id])
+    expect(reads).toHaveBeenCalledTimes(3)
+  })
+
   it('keeps text self-delivery local and binary subscriptions selective across named tracks', async () => {
     const publisherRoom = await Room.create('media')
     const observer = await Room.get('media')
@@ -646,6 +616,29 @@ describe('Room public behavior', () => {
     await quiet.publishBinary(new Uint8Array([1]))
     await quiet.publishBinary(new Uint8Array([2]), { track: 'screen', meta: { key: true } })
     expect(screen).toEqual([[2, { key: true }]])
+  })
+
+  it('expands binary subscriptions and demand from one canonical pair set', async () => {
+    const room = (await Room.create('binary-pairs')) as ServerRoom
+    const publisher = await room.join()
+    const expand = (
+      room as unknown as {
+        _binaryPairs: (wants: typeof allBinary, memberIds: string[]) => Array<[string, string]>
+      }
+    )._binaryPairs.bind(room)
+
+    expect(
+      expand(
+        {
+          everyMember: { all: false, tracks: ['screen'] },
+          members: { [publisher.id]: { all: false, tracks: ['camera'] } },
+        },
+        [publisher.id],
+      ),
+    ).toEqual([
+      [publisher.id, 'screen'],
+      [publisher.id, 'camera'],
+    ])
   })
 
   it('announces binary demand only after the demanded route is ready', async () => {
@@ -705,6 +698,28 @@ describe('Room public behavior', () => {
     player.listen((data, from) => fromRoom.push([data, from]))
     await Room.send('dm', { id: player.id }, { notice: true })
     expect(fromRoom).toEqual([[{ notice: true }, null]])
+  })
+
+  it('reports a participant-left race on a room-authored send without calling the room closed', async () => {
+    const room = await Room.create('server-send-race')
+    const target = await room.join()
+    const commitLane = driver.commitLane.bind(driver)
+    let raced = false
+    const commit = vi.spyOn(driver, 'commitLane').mockImplementation(async (roomId, inc, lane, payload, options) => {
+      if (!raced && lane.kind === 'inbox') {
+        raced = true
+        await Room.removeParticipant(room.id, { id: target.id })
+      }
+      return commitLane(roomId, inc, lane, payload, options)
+    })
+    try {
+      await expect(Room.send(room.id, { id: target.id }, 'late')).rejects.toThrow(
+        `Participant not found (left?): ${target.id}`,
+      )
+      expect((await driver.readHead(room.id))?.head.state).toBe('open')
+    } finally {
+      commit.mockRestore()
+    }
   })
 
   it('drains DMs that arrived before a participant was bound to its client forwarder', async () => {
@@ -795,6 +810,36 @@ describe('Room public behavior', () => {
     expect(inbox).toEqual(['ok'])
     expect(published).toEqual(['ok'])
     expect(after).toEqual(['join:Alice', 'join:Bob', 'publish:ok', 'send:ok'])
+  })
+
+  it('preserves committed join, publish, and send results when after hooks reject', async () => {
+    const room = (await Room.create('after-hook-failure')) as ServerRoom
+    const report = vi.spyOn(console, 'error').mockImplementation(() => {})
+    Room.guard(room, {
+      onAfterJoin: async () => {
+        throw new Error('after join failed')
+      },
+      onAfterPublish: async () => {
+        throw new Error('after publish failed')
+      },
+      onAfterSend: async () => {
+        throw new Error('after send failed')
+      },
+    })
+    try {
+      const alice = await room.join()
+      const bob = await room.join()
+      const inbox: unknown[] = []
+      bob.listen((data) => inbox.push(data))
+
+      await expect(alice.publish('published')).resolves.toMatchObject({ seq: expect.any(Number) })
+      await expect(alice.send(bob.id, 'sent')).resolves.toMatchObject({ seq: expect.any(Number) })
+      expect((await room.getParticipants()).map(({ id }) => id)).toEqual([alice.id, bob.id])
+      expect(inbox).toEqual(['sent'])
+      expect(report).toHaveBeenCalledTimes(4)
+    } finally {
+      report.mockRestore()
+    }
   })
 
   it('orders participant text and room announcements in one semantic domain', async () => {
@@ -996,14 +1041,17 @@ describe('Room public behavior', () => {
   })
 
   it('tail mode holds pre-attach text and flushes it in order on first client demand', async () => {
+    vi.useFakeTimers()
     await Room.create('tail')
     const source = await Room.get('tail')
     const member = await source.join()
     const tail = (await Room.get('tail', { tail: true })) as ServerRoom
     await member.publish('early')
+    await vi.advanceTimersByTimeAsync(60_001)
 
     const { stub, peer } = serve(tail)
     await member.publish('held')
+    await vi.advanceTimersByTimeAsync(60_001)
     expect(dataFrames(peer)).toEqual([])
     stub._onPeerBroadcastSubscribe(false)
     await vi.waitFor(() => expect(dataFrames(peer)).toEqual(['early', 'held']))
@@ -2040,17 +2088,6 @@ function terminalSubscription(inner?: BackendSubscription): {
     },
   }
   return { subscription, close: subscription.unsubscribe }
-}
-
-function pendingSubscription(): BackendSubscription {
-  const readiness = deferred<void>()
-  void readiness.promise.catch(() => {})
-  return {
-    ready: readiness.promise,
-    state: () => 'establishing',
-    onStateChange: () => () => {},
-    unsubscribe: async () => {},
-  }
 }
 
 function rejectedSubscription(diagnostic: string): BackendSubscription {

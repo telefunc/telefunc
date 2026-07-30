@@ -77,6 +77,10 @@ class SubSlot {
     return this._subscription !== null && this._subscription.state() !== 'closed'
   }
 
+  get established(): boolean {
+    return this._subscription?.state() === 'ready'
+  }
+
   get wanted(): boolean {
     return this._subscribe !== null
   }
@@ -110,6 +114,12 @@ class SubSlot {
     const subscription = this._subscribe()
     this._subscription = subscription
     this._lost = false
+    let terminalNotified = false
+    const notifyTerminal = (error?: unknown) => {
+      if (terminalNotified) return
+      terminalNotified = true
+      this._onTerminal(this, error)
+    }
     let wasReady = subscription.state() === 'ready'
     if (wasReady) this._settleReady()
     let lostAfterReady = false
@@ -125,7 +135,7 @@ class SubSlot {
         if (this._subscription !== subscription) return
         this._lost = true
         this._ensurePendingReady()
-        this._onTerminal(this, error)
+        notifyTerminal(error)
       },
     )
     this._unobserve = subscription.onStateChange((state) => {
@@ -143,9 +153,10 @@ class SubSlot {
       } else if (state === 'closed') {
         this._lost = true
         this._ensurePendingReady()
-        this._onTerminal(this)
+        notifyTerminal()
       }
     })
+    if (subscription.state() === 'closed') notifyTerminal()
     if (previous) void previous.unsubscribe().catch(reportRoomError)
   }
 

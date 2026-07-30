@@ -133,7 +133,15 @@ function writerId(): string {
 }
 
 async function registerRoomIndex(id: string, inc: string): Promise<void> {
-  await getBackend().directoryPut(id, inc)
+  let failure: unknown
+  for (let attempt = 0; attempt < ROOM_CX_ATTEMPTS; attempt++) {
+    try {
+      return await getBackend().directoryPut(id, inc)
+    } catch (error) {
+      failure = error
+    }
+  }
+  throw failure
 }
 
 async function tryCreateRoom(id: string, options: RoomOptions | undefined): Promise<Room | null> {
@@ -160,7 +168,12 @@ async function tryCreateRoom(id: string, options: RoomOptions | undefined): Prom
   )
   if ('conflict' in result) return null
   assert('head' in result)
-  await registerRoomIndex(id, created.inc)
+  try {
+    await registerRoomIndex(id, created.inc)
+  } catch (error) {
+    await closeRoom(id)
+    throw error
+  }
   return new ServerRoom(id, created, { members: [] })
 }
 
@@ -300,10 +313,13 @@ async function writeRoomConfig(
 async function closeRoom(id: string): Promise<void> {
   assertRoomId(id)
   const backend = getBackend()
-  const current = await backend.readHead(id)
-  if (current === null || current.head.state === 'closed') return
-  const closing = await acquireClosingLease(backend, id, current.head)
-  if (closing !== null) await finishClose(backend, id, closing)
+  for (;;) {
+    const current = await backend.readHead(id)
+    if (current === null || current.head.state === 'closed') return
+    const closing = await acquireClosingLease(backend, id, current.head)
+    if (closing !== null && (await finishClose(backend, id, closing))) return
+    await new Promise((resolve) => setTimeout(resolve, 100))
+  }
 }
 
 async function acquireClosingLease(backend: BackendSpi, roomId: string, current: RoomHead): Promise<RoomHead | null> {
@@ -435,7 +451,17 @@ async function sendServerDm(roomId: string, inc: string, memberId: string, data:
     encodeRoomText(stringify(envelope)),
     { requiredCellKeys: [roomMemberKvKey(roomId, memberId)] },
   )
-  if (committed === null) throw new RoomError(`Room is closed: ${roomId}`)
+  if (committed === null) {
+    const current = await getBackend().readHead(roomId)
+    if (
+      current?.head.state === 'open' &&
+      current.head.currentInc === inc &&
+      (await readCell(roomId, inc, roomMemberKvKey(roomId, memberId))) === null
+    ) {
+      throw new RoomError(`Participant not found (left?): ${memberId}`)
+    }
+    throw new RoomError(`Room is closed: ${roomId}`)
+  }
 }
 
 function normalizeOptions(options: RoomOptions | undefined): { meta: RoomMeta } {
