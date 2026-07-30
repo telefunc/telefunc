@@ -819,18 +819,51 @@ describe('Room public behavior', () => {
     }
   })
 
-  it('builds exact member binary routes before the roster is known', async () => {
-    const room = (await Room.create('exact-binary-without-roster')) as ServerRoom
-    const member = crypto.randomUUID()
-    const lanes = (
-      room as unknown as {
-        _binaryLanes(wants: typeof allBinary, members: string[]): Array<{ value: LaneId }>
+  it('delivers exact-member binary frames before the roster is known', async () => {
+    const authority = await Room.create('exact-binary-without-roster')
+    const publisher = await authority.join()
+    const observer = (await Room.get(authority.id)) as ServerRoom
+    const stub = register(observer)
+    const readCells = driver.readCells.bind(driver)
+    const rosterStarted = deferred<void>()
+    const releaseRoster = deferred<void>()
+    const reading = vi.spyOn(driver, 'readCells').mockImplementation(async (roomId, inc, selector) => {
+      if (roomId === authority.id && 'prefix' in selector) {
+        rosterStarted.resolve()
+        await releaseRoster.promise
       }
-    )._binaryLanes(
-      { everyMember: { all: false, tracks: [] }, members: { [member]: { all: false, tracks: ['screen'] } } },
-      [],
-    )
-    expect(lanes.map(({ value }) => value)).toEqual([{ kind: 'binary', member, track: 'screen' }])
+      return readCells(roomId, inc, selector)
+    })
+    expect(observer._state.rosterKnown).toBe(false)
+
+    try {
+      await observer._handleStubRequest(stub, {
+        __r: 'sub-binary',
+        wants: {
+          everyMember: { all: false, tracks: [] },
+          members: { [publisher.id]: { all: false, tracks: ['screen'] } },
+        },
+      })
+      await rosterStarted.promise
+      await (observer as unknown as { _binaryReady(): Promise<void> })._binaryReady()
+      expect(observer._state.rosterKnown).toBe(false)
+
+      await publisher.publishBinary(new Uint8Array([7]), { track: 'screen' })
+      expect(observer._state.rosterKnown).toBe(false)
+      const frame = attachPeer(stub)
+        .decoded()
+        .find((candidate) => candidate.tag === TAG.PUBLISH_BINARY)
+      if (frame?.tag !== TAG.PUBLISH_BINARY) throw new Error('expected exact-member binary publish')
+      expect(unframeMemberId(frame.data)).toMatchObject({
+        from: publisher.id,
+        track: 'screen',
+        payload: new Uint8Array([7]),
+      })
+    } finally {
+      releaseRoster.resolve()
+      await observer.getParticipants()
+      reading.mockRestore()
+    }
   })
 
   it('drops retained text and binary when a crashed publisher is reaped', async () => {
