@@ -99,6 +99,13 @@ class RoomDemand {
     return this._localDemand.size > 0 || this._remoteDemand.size > 0
   }
 
+  /** Drop owner-side state for every track of a departed member. */
+  forgetMember(member: string): void {
+    const prefix = member + DEMAND_SEP
+    for (const key of this._remoteDemand.keys()) if (key.startsWith(prefix)) this._remoteDemand.delete(key)
+    for (const key of this._pushedWanted) if (key.startsWith(prefix)) this._pushedWanted.delete(key)
+  }
+
   private _transition(member: string, track: string, on: boolean): void {
     this._publishWant({ member, track, node: this._instanceId, on })
     if (this._ownsMember(member)) this._recompute(member, track)

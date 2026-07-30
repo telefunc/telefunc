@@ -1494,6 +1494,7 @@ class ServerRoom implements Room {
       stub._selfSuppressed.delete(id)
       stub._forgetMember(id) // drop the departed member's retained-replay watermarks (bounded state)
     }
+    this._demand.forgetMember(id)
     this._syncSubs()
   }
 

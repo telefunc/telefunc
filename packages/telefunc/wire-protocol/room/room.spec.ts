@@ -13,6 +13,7 @@ import { DEFAULT_TRACK, isRoomError, roomAckError, type RoomSnapshotMetadata } f
 import { ClientRoom } from './client.js'
 import { Room, ServerRoom } from './server.js'
 import { RoomStubChannel } from './stubs.js'
+import { RoomDemand } from './demand.js'
 import { ClientBroadcast } from '../client/channel.js'
 import type { ChannelPublishInfo } from '../channel.js'
 import { disposeBackend, getBackend, installBackend, setDefaultBackend } from '../backend/install.js'
@@ -883,6 +884,28 @@ describe('client Room lifecycle', () => {
 
     await settleMicrotasks()
     expect(ensureRoster).toHaveBeenCalledOnce()
+  })
+})
+
+describe('room demand lifecycle', () => {
+  it('retires pushed demand when a member departs so a later owner gets a fresh transition', () => {
+    let owns = true
+    const delivered: Array<[string, string, boolean]> = []
+    const demand = new RoomDemand(
+      () => {},
+      () => owns,
+      (member, track, wanted) => delivered.push([member, track, wanted]),
+    )
+    demand.applyWant({ member: 'member', track: 'screen', node: 'remote-a', on: true })
+    owns = false
+    demand.forgetMember('member')
+    owns = true
+    demand.applyWant({ member: 'member', track: 'screen', node: 'remote-b', on: true })
+
+    expect(delivered).toEqual([
+      ['member', 'screen', true],
+      ['member', 'screen', true],
+    ])
   })
 })
 
