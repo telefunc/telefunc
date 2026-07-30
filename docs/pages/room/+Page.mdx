@@ -487,7 +487,7 @@ The server-side entry point. Clients get a room when a telefunction returns it.
 | `Room.close(id)` | `void` | - |
 | `Room.removeParticipant(id, target)` | `void` | Unknown participant `{ id }` |
 | `Room.announce(id, data)` | `RoomSendReceipt` | If the room doesn't exist |
-| `Room.send(id, target, data)` | `void` | If the room or participant doesn't exist |
+| `Room.send(id, target, data)` | `void` | If the room doesn't exist; unknown participant `{ id }` |
 | `Room.getParticipants(id, target?)` | `ParticipantSnapshotView[]` | If the room doesn't exist |
 
 ```ts
@@ -500,7 +500,7 @@ type RoomOptions = {
 - `Room.close(id)` is idempotent: a missing or already closed room is already at the requested state.
 - `Room.announce(id, data)` returns `{ seq, timestamp }` from the control lane.
 - `Room.setMeta(id, meta)` replaces the room's metadata wholesale; `Room.setAttributes(id, attributes)` merges per key (a key set to `undefined` is removed). Both propagate to observers.
-- `Room.removeParticipant(id, target)` and `Room.send(id, target, data)` take one participant ref for `target`: `{ id }` for a single membership (throws when unknown), or `{ identity }` for every membership of an identity at once (an idempotent sweep or fan-out). `removeParticipant` carries its `reason` in that object: `{ id, reason? }` or `{ identity, reason? }`.
+- `Room.removeParticipant(id, target)` and `Room.send(id, target, data)` take one participant ref for `target`: `{ id }` for a single membership (throws when unknown), or `{ identity }` for every membership of an identity at once. An absent `{ identity }` matches nobody and is a successful no-op, which makes the sweep or fan-out idempotent. `removeParticipant` carries its `reason` in that object: `{ id, reason? }` or `{ identity, reason? }`.
 - `Room.getParticipants(id, target?)` is a server-side point-in-time read (no live view, no subscription). Omit `target` for the whole roster; pass `{ identity }` to read one user's memberships, the cheap "is this user online" check that doesn't load the roster. `[]` for an absent identity.
 - Typed generics: `Room.get<ChatMeta, MemberMeta, ChatMsg>(id)` types `room.meta`, `join`/`setMeta`, and `from.meta` (the first two generics) and `publish`/`subscribe` (the third, the message type); `Room.list<ChatMeta>()` types each `RoomInfo.meta`. The metadata generics are unchecked assertions you supply; the message type is different, it is enforced at runtime (see <Link href="#validating-messages">Validating messages</Link>).
 
