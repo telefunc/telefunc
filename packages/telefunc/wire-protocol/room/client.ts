@@ -159,7 +159,8 @@ class ClientRoom implements Room {
   declare readonly [TELEFUNC_SHIELDS]: { data: unknown }
   private readonly _stub: RoomClientBroadcast
   private readonly _state: RoomState
-  private readonly _localParticipants = new Map<string, ClientRoomParticipant>()
+  /** Routing never owns public handles: a live handle owns this Room, not the reverse. */
+  private readonly _localParticipants = new Map<string, WeakRef<ClientRoomParticipant>>()
   private _announcedDemand = false
   /** Member-targeted events that beat an in-flight join ack, keyed once their wire ID is known. */
   private _inFlightJoins = 0
@@ -245,7 +246,7 @@ class ClientRoom implements Room {
         participant._onLeft(this._closedCause)
         return participant
       }
-      this._localParticipants.set(id, participant)
+      this._localParticipants.set(id, new WeakRef(participant))
       this._state.applyJoin(id, meta, joinedAt)
       for (const event of this._pendingJoinEvents.get(id) ?? []) {
         if (event.kind === 'demand') participant._onDemand(event.track, event.wanted)
@@ -420,7 +421,7 @@ class ClientRoom implements Room {
       case 'leave': {
         const cause = leaveCauseFromWire(event)
         this._state.applyLeave(event.id, cause)
-        const local = this._localParticipants.get(event.id)
+        const local = this._localParticipant(event.id)
         if (local) {
           this._localParticipants.delete(event.id)
           local._onLeft(cause) // kicked (with the kick's reason), or left through another handle
@@ -429,7 +430,7 @@ class ClientRoom implements Room {
       }
       case 'p-meta': {
         this._state.applyParticipantMeta(event.id, event.meta, event.seq)
-        const local = this._localParticipants.get(event.id)
+        const local = this._localParticipant(event.id)
         if (local) local._meta = event.meta
         return
       }
@@ -445,7 +446,7 @@ class ClientRoom implements Room {
       case 'demand':
         // Whether anyone wants one of our own members' tracks flipped (onDemand).
         {
-          const local = this._localParticipants.get(event.member)
+          const local = this._localParticipant(event.member)
           if (local) local._onDemand(event.track, event.wanted)
           else
             this._holdPendingJoinEvent(event.member, {
@@ -464,7 +465,7 @@ class ClientRoom implements Room {
           data: event.data,
           ...(event.ackId ? { ackId: event.ackId } : {}),
         }
-        const local = this._localParticipants.get(event.to)
+        const local = this._localParticipant(event.to)
         if (local) {
           this._deliverDm(local, msg)
           return
@@ -505,8 +506,14 @@ class ClientRoom implements Room {
     this._state.applyClosed(cause)
     this._rosterArrived() // unblock any getParticipants() waiting on a wire that just died
     // After onClose, like on the server: the room-level signal fires before per-handle cleanup.
-    for (const local of this._localParticipants.values()) local._onLeft(cause)
+    for (const ref of this._localParticipants.values()) ref.deref()?._onLeft(cause)
     this._localParticipants.clear()
+  }
+
+  private _localParticipant(id: string): ClientRoomParticipant | null {
+    const participant = this._localParticipants.get(id)?.deref() ?? null
+    if (!participant) this._localParticipants.delete(id)
+    return participant
   }
 
   /** Declare this holder's wants to the server. The room-level text

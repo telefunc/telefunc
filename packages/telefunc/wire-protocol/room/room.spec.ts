@@ -52,6 +52,8 @@ import type {
   SubscriptionState,
 } from '../backend/spi.js'
 import { ORDERING_FRAME_LAYOUT, decodeOrderingFrame, encodeOrderingFrame } from '../ordering-frame.js'
+import { GcRegistry } from '../gcRegistry.js'
+import { wrapProxy } from '../wrapProxy.js'
 
 const encoder = new TextEncoder()
 const decoder = new TextDecoder()
@@ -1686,6 +1688,88 @@ describe('client Room lifecycle', () => {
     expect(remoteBacking(hostile)).toBeNull()
   })
 
+  describe.skipIf(typeof globalThis.gc !== 'function')('Room-derived handle ownership (real GC)', () => {
+    it('keeps the Room wrapper alive through a participant extracted from a roster array', async () => {
+      const memberId = crypto.randomUUID()
+      const fake = createFakeStub()
+      const target = new ClientRoom(fake.stub, snapshot('gc-list-owner'))
+      const registry = new GcRegistry(5)
+      let closed = 0
+      const retained = await retainOnlyListedRemote(target, fake, registry, () => closed++, memberId)
+
+      await forceRoomGc()
+
+      expect(retained.room.deref()).not.toBeUndefined()
+      expect(retained.member.id).toBe(memberId)
+      expect(closed).toBe(0)
+    })
+
+    it('keeps the Room wrapper alive through a joined participant', async () => {
+      const memberId = crypto.randomUUID()
+      const fake = createFakeStub({
+        send: async (message: any) => (message.__r === 'req-join' ? { id: memberId, joinedAt: 1 } : undefined),
+      })
+      const target = new ClientRoom(fake.stub, snapshot('gc-join-owner'))
+      const registry = new GcRegistry(5)
+      let closed = 0
+      const retained = await retainOnlyJoinedParticipant(target, registry, () => closed++)
+
+      await forceRoomGc()
+
+      expect(retained.room.deref()).not.toBeUndefined()
+      expect(retained.member.id).toBe(memberId)
+      expect(closed).toBe(0)
+    })
+
+    it('keeps the Room wrapper alive through a callback-delivered participant', async () => {
+      const memberId = crypto.randomUUID()
+      const fake = createFakeStub()
+      const target = new ClientRoom(fake.stub, snapshot('gc-callback-owner'))
+      const registry = new GcRegistry(5)
+      let closed = 0
+      const retained = await retainOnlyCallbackRemote(target, fake, registry, () => closed++, memberId)
+
+      await forceRoomGc()
+
+      expect(retained.room.deref()).not.toBeUndefined()
+      expect(retained.member.id).toBe(memberId)
+      expect(closed).toBe(0)
+    })
+
+    it('releases the Room wrapper from a departed participant handle', async () => {
+      const memberId = crypto.randomUUID()
+      const fake = createFakeStub({
+        send: async (message: any) => (message.__r === 'req-join' ? { id: memberId, joinedAt: 1 } : undefined),
+      })
+      const target = new ClientRoom(fake.stub, snapshot('gc-departed-owner'))
+      const registry = new GcRegistry(5)
+      let closed = 0
+      const retained = await retainOnlyDepartedParticipant(target, fake, registry, () => closed++, memberId)
+
+      await forceRoomGc()
+
+      expect(retained.member.id).toBe(memberId)
+      expect(retained.room.deref()).toBeUndefined()
+      expect(closed).toBe(1)
+    })
+
+    it('releases the Room wrapper after every application handle is dropped', async () => {
+      const memberId = crypto.randomUUID()
+      const fake = createFakeStub({
+        send: async (message: any) => (message.__r === 'req-join' ? { id: memberId, joinedAt: 1 } : undefined),
+      })
+      const target = new ClientRoom(fake.stub, snapshot('gc-drop-owner'))
+      const registry = new GcRegistry(5)
+      let closed = 0
+      const room = await dropJoinedRoomHandles(target, registry, () => closed++)
+
+      await forceRoomGc()
+
+      expect(room.deref()).toBeUndefined()
+      expect(closed).toBe(1)
+    })
+  })
+
   it('does not emit onEmpty from a partial pre-roster member map', () => {
     const fake = createFakeStub()
     const client = new ClientRoom(fake.stub, { ...snapshot('pre-roster-empty'), count: 2 })
@@ -2800,6 +2884,78 @@ function snapshot(roomId: string): RoomSnapshotMetadata {
     count: 0,
     stamp: { at: 0, by: '' },
   }
+}
+
+async function forceRoomGc(): Promise<void> {
+  for (let cycle = 0; cycle < 8; cycle++) {
+    ;(globalThis as { gc(): void }).gc()
+    await new Promise((resolve) => setTimeout(resolve, 20))
+  }
+}
+
+async function retainOnlyListedRemote(
+  target: ClientRoom,
+  fake: ReturnType<typeof createFakeStub>,
+  registry: GcRegistry,
+  onClose: () => void,
+  memberId: string,
+) {
+  const room = wrapProxy(target)
+  registry.register(room, onClose)
+  fake.emitText(
+    {
+      __r: 'roster',
+      members: [{ id: memberId, meta: {}, joinedAt: 1, metaSeq: 0, identity: null }],
+    },
+    { key: target.id, seq: 1, timestamp: 1 },
+  )
+  const [member] = await room.getParticipants()
+  return { member: member!, room: new WeakRef(room) }
+}
+
+async function retainOnlyJoinedParticipant(target: ClientRoom, registry: GcRegistry, onClose: () => void) {
+  const room = wrapProxy(target)
+  registry.register(room, onClose)
+  return { member: await room.join(), room: new WeakRef(room) }
+}
+
+async function retainOnlyCallbackRemote(
+  target: ClientRoom,
+  fake: ReturnType<typeof createFakeStub>,
+  registry: GcRegistry,
+  onClose: () => void,
+  memberId: string,
+) {
+  const room = wrapProxy(target)
+  registry.register(room, onClose)
+  let member: ReturnType<ClientRoom['getParticipant']> extends Promise<infer T> ? NonNullable<T> : never
+  const stop = room.onJoin((joined) => {
+    member = joined
+  })
+  fake.emitText({ __r: 'join', id: memberId, meta: {}, joinedAt: 1 }, { key: target.id, seq: 1, timestamp: 1 })
+  stop()
+  return { member: member!, room: new WeakRef(room) }
+}
+
+async function retainOnlyDepartedParticipant(
+  target: ClientRoom,
+  fake: ReturnType<typeof createFakeStub>,
+  registry: GcRegistry,
+  onClose: () => void,
+  memberId: string,
+) {
+  const room = wrapProxy(target)
+  registry.register(room, onClose)
+  const member = await room.join()
+  fake.emitText({ __r: 'leave', id: memberId }, { key: target.id, seq: 1, timestamp: 1 })
+  return { member, room: new WeakRef(room) }
+}
+
+async function dropJoinedRoomHandles(target: ClientRoom, registry: GcRegistry, onClose: () => void) {
+  const room = wrapProxy(target)
+  registry.register(room, onClose)
+  await room.join()
+  return new WeakRef(room)
 }
 
 type OpenRecord = {
