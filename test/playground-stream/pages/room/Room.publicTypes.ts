@@ -6,8 +6,11 @@ import type * as Client from 'telefunc/client'
 type Assert<T extends true> = T
 type AssertAll<T extends readonly true[]> = T
 type IsAny<T> = 0 extends 1 & T ? true : false
-type Exactly<Left, Right> =
-  IsAny<Left | Right> extends true ? false : [Left, Right] extends [Right, Left] ? true : false
+type Exactly<Left, Right> = IsAny<Left | Right> extends true
+  ? false
+  : [Left, Right] extends [Right, Left]
+    ? true
+    : false
 
 type RoomMeta = { topic: string }
 type MemberMeta = { name: string }

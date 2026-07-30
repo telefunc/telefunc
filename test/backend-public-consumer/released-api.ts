@@ -264,14 +264,12 @@ const redisRoomBackend: BackendDriver = new RedisRoomBackend(redisRoomBackendOpt
 const noRuntimeHooks = new RedisRoomBackend(redisRoomBackendOptions, { authorityNow: () => 0 })
 installRedis(redisClient, redisInstallOptions)
 
-void [
-  Broadcast, Channel, backendVersion, broadcastLane,
-  backend, backendDriver, orderingHeaderBytes, orderingWordBytes,
-  orderingWordRange, orderingEndianness, orderingSeqHigh, orderingSeqLow,
-  orderingTimestampHigh, orderingTimestampLow, installedBackend, currentBackend,
-  disposeBackend, HEAD_TRANSITIONS, sameConfig, call,
-  node, redisTransport, redisTextSend, redisBinarySend,
-  stopRedisText, stopRedisBinary, redisRoomBackend, noRuntimeHooks,
-  pinServerContextMembers, ChannelClosedError, ChannelOverflowError, ConnectionError,
-  NetworkError,
-]
+void [Broadcast, Channel, backendVersion, broadcastLane]
+void [backend, backendDriver, orderingHeaderBytes, orderingWordBytes]
+void [orderingWordRange, orderingEndianness, orderingSeqHigh, orderingSeqLow]
+void [orderingTimestampHigh, orderingTimestampLow, installedBackend, currentBackend]
+void [disposeBackend, HEAD_TRANSITIONS, sameConfig, call]
+void [node, redisTransport, redisTextSend, redisBinarySend]
+void [stopRedisText, stopRedisBinary, redisRoomBackend, noRuntimeHooks]
+void [pinServerContextMembers, ChannelClosedError, ChannelOverflowError, ConnectionError]
+void NetworkError

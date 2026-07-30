@@ -160,7 +160,13 @@ export function recordRouteDeliveryFailure(
   const failures = sql
     .exec<{
       failures: number
-    }>('SELECT failures FROM route WHERE inc = ? AND lane_key = ? AND subscriber_do_id = ? AND lease_id = ?', inc, laneKey, subscriberDoId, leaseId)
+    }>(
+      'SELECT failures FROM route WHERE inc = ? AND lane_key = ? AND subscriber_do_id = ? AND lease_id = ?',
+      inc,
+      laneKey,
+      subscriberDoId,
+      leaseId,
+    )
     .toArray()[0]?.failures
   if (failures === undefined || failures < ROUTE_DELIVERY_FAILURE_LIMIT) {
     return false
