@@ -390,9 +390,7 @@ class ClientRoom implements Room {
     if (state.closed) return // stub is dead — nothing to declare
 
     // A room-level text subscription supersedes the member set — clear it server-side.
-    void this._stub
-      .send({ __r: 'sub-text', members: text.all ? [] : text.members }, { ack: false })
-      .catch(() => {})
+    void this._stub.send({ __r: 'sub-text', members: text.all ? [] : text.members }, { ack: false }).catch(() => {})
     const binary = state.binaryWants()
     void this._stub.send({ __r: 'sub-binary', wants: binary }, { ack: false }).catch(() => {})
   }

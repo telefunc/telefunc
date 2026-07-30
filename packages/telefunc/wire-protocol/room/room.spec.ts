@@ -444,7 +444,12 @@ describe('Room public behavior', () => {
       semanticAttempt++
       if (semanticAttempt === 1) return terminal.subscription
       if (semanticAttempt === 2)
-        return { ready: never.promise, state: () => 'establishing', onStateChange: () => () => {}, unsubscribe: async () => {} }
+        return {
+          ready: never.promise,
+          state: () => 'establishing',
+          onStateChange: () => () => {},
+          unsubscribe: async () => {},
+        }
       return subscribeLane(roomId, inc, lane, receiver)
     })
     const report = vi.spyOn(console, 'error').mockImplementation(() => {})
@@ -578,8 +583,8 @@ describe('Room public behavior', () => {
     const forwarded: unknown[] = []
     ;(target as unknown as { _setForwarder(forwarder: (message: { data: unknown }) => unknown): void })._setForwarder(
       (message) => {
-      forwarded.push(message.data)
-      return Promise.resolve({ ok: true, result: `handled:${String(message.data)}` })
+        forwarded.push(message.data)
+        return Promise.resolve({ ok: true, result: `handled:${String(message.data)}` })
       },
     )
 
@@ -718,10 +723,7 @@ describe('Room public behavior', () => {
     const member = crypto.randomUUID()
     const lanes = (
       room as unknown as {
-        _binaryLanes(
-          wants: typeof allBinary,
-          members: string[],
-        ): Array<{ value: LaneId }>
+        _binaryLanes(wants: typeof allBinary, members: string[]): Array<{ value: LaneId }>
       }
     )._binaryLanes(
       { everyMember: { all: false, tracks: [] }, members: { [member]: { all: false, tracks: ['screen'] } } },
@@ -912,10 +914,7 @@ describe('client Room lifecycle', () => {
   it('rejects hidden-roster enumeration in clients instead of returning a partial direct-handle list', async () => {
     const fake = createFakeStub()
     const client = new ClientRoom(fake.stub, snapshot('client-hidden-roster'))
-    fake.emitText(
-      { __r: 'roster', members: [] },
-      { key: 'client-hidden-roster', seq: 1, timestamp: 1 },
-    )
+    fake.emitText({ __r: 'roster', members: [] }, { key: 'client-hidden-roster', seq: 1, timestamp: 1 })
     client._reviveRemote({
       id: crypto.randomUUID(),
       meta: { role: 'moderator' },
