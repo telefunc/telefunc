@@ -1398,6 +1398,8 @@ describe('memory Backend SPI contract', () => {
   })
 
   it('publishes one immutable wide ordering layout and codec', () => {
+    expect(Object.isFrozen(ORDERING_FRAME_LAYOUT)).toBe(true)
+    expect(Object.isFrozen(ORDERING_FRAME_LAYOUT.offsets)).toBe(true)
     expect(ORDERING_FRAME_LAYOUT).toEqual({
       headerBytes: 16,
       wordBytes: 4,
