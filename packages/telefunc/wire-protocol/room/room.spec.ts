@@ -7,7 +7,6 @@ import {
   ROOM_DM_ACK_TIMEOUT_MS,
   ROOM_HEARTBEAT_INTERVAL_MS,
   ROOM_MEMBER_KV_TTL_MS,
-  ROOM_MEMBER_TTL_MS,
   ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS,
 } from '../constants.js'
 import {
@@ -59,7 +58,6 @@ afterEach(async () => {
   const report = vi.spyOn(console, 'error').mockImplementation(() => {})
   try {
     await disposeBackend()
-    await settle()
   } finally {
     report.mockRestore()
   }
@@ -253,7 +251,6 @@ describe('Room public behavior', () => {
   it('tears down a close observed by a separate Room runtime that cannot inherit the initiator hold', async () => {
     const authority = await Room.create('remote-close-teardown')
     authority.onAnnounce(() => {})
-    await settle()
 
     // A fresh module graph has its own initiating-close registry and backend installation, like another
     // server process. It shares only the raw authority driver, so this observer receives the real close
@@ -263,15 +260,23 @@ describe('Room public behavior', () => {
     const remoteServer = await import('./server.js')
     const remoteBackend = remoteInstall.installBackend(() => driver)
     const unsubscribed: string[] = []
+    const observedLanes = new Set<string>()
+    const observationReady = deferred<void>()
+    const observationStopped = deferred<void>()
     const subscribeLane = remoteBackend.subscribeLane.bind(remoteBackend)
     const subscribe = vi.spyOn(remoteBackend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
       const subscription = subscribeLane(roomId, inc, lane, receiver)
+      void subscription.ready.then(() => {
+        observedLanes.add(lane.kind)
+        if (observedLanes.has('control') && observedLanes.has('semantic')) observationReady.resolve()
+      })
       return {
         ready: subscription.ready,
         state: () => subscription.state(),
         onStateChange: (callback) => subscription.onStateChange(callback),
         unsubscribe: async () => {
           unsubscribed.push(lane.kind)
+          if (unsubscribed.includes('control') && unsubscribed.includes('semantic')) observationStopped.resolve()
           await subscription.unsubscribe()
         },
       }
@@ -280,10 +285,12 @@ describe('Room public behavior', () => {
       expect(remoteServer.Room).not.toBe(Room)
       const observer = await remoteServer.Room.get('remote-close-teardown')
       observer.onAnnounce(() => {})
-      await settle()
+      const closed = deferred<void>()
+      observer.onClose(() => closed.resolve())
+      await observationReady.promise
 
       await Room.close('remote-close-teardown')
-      await settle()
+      await Promise.all([closed.promise, observationStopped.promise])
 
       expect(observer.isClosed).toBe(true)
       expect(unsubscribed.sort()).toEqual(['control', 'semantic'])
@@ -300,20 +307,27 @@ describe('Room public behavior', () => {
     const backend = getBackend()
     const subscribeLane = backend.subscribeLane.bind(backend)
     let terminal: ReturnType<typeof terminalSubscription> | undefined
+    const replacementReady = deferred<void>()
     const subscribe = vi.spyOn(backend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
-      if (lane.kind !== 'semantic' || terminal !== undefined) return subscribeLane(roomId, inc, lane, receiver)
-      terminal = terminalSubscription()
-      return terminal.subscription
+      if (lane.kind !== 'semantic') return subscribeLane(roomId, inc, lane, receiver)
+      if (terminal === undefined) {
+        terminal = terminalSubscription()
+        return terminal.subscription
+      }
+      const replacement = subscribeLane(roomId, inc, lane, receiver)
+      void replacement.ready.then(() => replacementReady.resolve())
+      return replacement
     })
     try {
       const received: unknown[] = []
       observer.subscribe((data) => received.push(data))
-      await terminal?.subscription.ready
+      if (!terminal) throw new Error('semantic subscription did not start')
+      await terminal.subscription.ready
       // Let the observe-transition roster refresh finish before the terminal event; otherwise its
       // unrelated trailing `_syncSubs()` would accidentally replace the closed slot.
-      await settle()
-      await terminal?.close()
-      await settle()
+      await observer.getParticipants()
+      await terminal.close()
+      await replacementReady.promise
 
       await publisher.publish('after-recovery')
       expect(received).toEqual(['after-recovery'])
@@ -348,12 +362,17 @@ describe('Room public behavior', () => {
     try {
       const observer = await remoteServer.Room.get(authority.id)
       let closes = 0
-      observer.onClose(() => closes++)
-      await terminal?.subscription.ready
+      const closed = deferred<void>()
+      observer.onClose(() => {
+        closes++
+        closed.resolve()
+      })
+      if (!terminal) throw new Error('control subscription did not start')
+      await terminal.subscription.ready
 
       await Room.close(authority.id)
-      await terminal?.close()
-      await settle()
+      await terminal.close()
+      await closed.promise
 
       expect({ closed: observer.isClosed, count: observer.count, closes }).toEqual({
         closed: true,
@@ -370,6 +389,7 @@ describe('Room public behavior', () => {
     const room = (await Room.create('control-reconcile')) as ServerRoom
     const backend = getBackend()
     const subscribeLane = backend.subscribeLane.bind(backend)
+    const controlSubscribed = deferred<void>()
     let transition!: (state: SubscriptionState) => void
     const subscribe = vi.spyOn(backend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
       const inner = subscribeLane(roomId, inc, lane, receiver)
@@ -379,36 +399,51 @@ describe('Room public behavior', () => {
         state: () => inner.state(),
         onStateChange: (listener) => {
           transition = listener
+          controlSubscribed.resolve()
           return inner.onStateChange(listener)
         },
         unsubscribe: () => inner.unsubscribe(),
       }
     })
     try {
-      room.onJoin(() => {})
-      await settle()
-      const refresh = vi.spyOn(room as unknown as { _refreshMembers(): Promise<void> }, '_refreshMembers')
+      room.onAnnounce(() => {})
+      await controlSubscribed.promise
+      const member = await room.join()
+      await room.getParticipants()
+      room._state.applyLeave(member.id)
+      expect(room.count).toBe(0)
+
       transition('lost')
       transition('ready')
-      await vi.waitFor(() => expect(refresh).toHaveBeenCalledTimes(1))
+      await vi.waitFor(() => expect(room.count).toBe(1))
+      expect((await room.getParticipants()).map(({ id }) => id)).toEqual([member.id])
+
+      room._state.applyLeave(member.id)
+      expect(room.count).toBe(0)
       const onControl = (
         room as unknown as { _onCtrlMessage(message: string, info: { seq: number; timestamp: number }): void }
       )._onCtrlMessage.bind(room)
-      onControl('{"__r":"update","meta":{},"at":1,"by":"a"}', { seq: 1, timestamp: 1 })
-      onControl('{"__r":"update","meta":{},"at":2,"by":"a"}', { seq: 3, timestamp: 3 })
-      await vi.waitFor(() => expect(refresh).toHaveBeenCalledTimes(2))
+      onControl('{"__r":"announce","data":"first"}', { seq: 1, timestamp: 1 })
+      onControl('{"__r":"announce","data":"gap"}', { seq: 3, timestamp: 3 })
+      await vi.waitFor(() => expect(room.count).toBe(1))
+      expect((await room.getParticipants()).map(({ id }) => id)).toEqual([member.id])
     } finally {
       subscribe.mockRestore()
     }
   })
 
   it('uses the heartbeat roster snapshot to repair observer drift', async () => {
-    const observer = (await Room.create('heartbeat-reconcile')) as ServerRoom
-    const reconcile = vi.spyOn(observer._state, 'reconcile')
+    const authority = await Room.create('heartbeat-reconcile')
+    const member = await authority.join()
+    const observer = (await Room.get(authority.id)) as ServerRoom
+    await observer.getParticipants()
+    observer._state.applyLeave(member.id)
+    expect(observer.count).toBe(0)
 
     await (observer as unknown as { _heartbeatTick(): Promise<void> })._heartbeatTick()
 
-    expect(reconcile).toHaveBeenCalled()
+    expect(observer.count).toBe(1)
+    expect((await observer.getParticipants()).map(({ id }) => id)).toEqual([member.id])
   })
 
   it('heartbeats pure control observers without owned members or binary demand', async () => {
@@ -620,10 +655,12 @@ describe('Room public behavior', () => {
     const frames: number[] = []
     let demandStarted = false
     let publishing: Promise<unknown> | undefined
+    const demandReady = deferred<void>()
     publisher.onDemand((track, wanted) => {
       if (track === 'screen' && wanted) {
         demandStarted = true
         publishing = publisher.publishBinary(new Uint8Array([8]), { track: 'screen' })
+        demandReady.resolve()
       }
     })
     const delayed = delayLaneSubscription(
@@ -635,10 +672,9 @@ describe('Room public behavior', () => {
         track: 'screen',
       })
       await delayed.started
-      await settle()
       expect(demandStarted).toBe(false)
       await delayed.release()
-      await settle()
+      await demandReady.promise
       expect(demandStarted).toBe(true)
       await publishing
       expect(frames).toEqual([8])
@@ -674,20 +710,42 @@ describe('Room public behavior', () => {
     const room = await Room.create('pre-bind-inbox')
     const target = await room.join()
     const sender = await room.join()
-    await sender.send(target.id, 'plain-before-bind')
-    const acknowledging = sender.send(target.id, 'ack-before-bind', { ack: true })
-    await settle()
+    const internal = target as unknown as {
+      readonly _isBound: boolean
+      _deliverMessage(message: { data: unknown }): void
+      _deliverMessageAck(message: { data: unknown }): Promise<unknown>
+      _setForwarder(forwarder: (message: { data: unknown }) => unknown): void
+    }
+    const plainArrived = deferred<void>()
+    const ackArrived = deferred<void>()
+    const deliverMessage = internal._deliverMessage.bind(target)
+    const deliverMessageAck = internal._deliverMessageAck.bind(target)
+    const plainDelivery = vi.spyOn(internal, '_deliverMessage').mockImplementation((message) => {
+      plainArrived.resolve()
+      deliverMessage(message)
+    })
+    const ackDelivery = vi.spyOn(internal, '_deliverMessageAck').mockImplementation((message) => {
+      ackArrived.resolve()
+      return deliverMessageAck(message)
+    })
+    try {
+      await sender.send(target.id, 'plain-before-bind')
+      const acknowledging = sender.send(target.id, 'ack-before-bind', { ack: true })
+      await Promise.all([plainArrived.promise, ackArrived.promise])
+      expect(internal._isBound).toBe(false)
 
-    const forwarded: unknown[] = []
-    ;(target as unknown as { _setForwarder(forwarder: (message: { data: unknown }) => unknown): void })._setForwarder(
-      (message) => {
+      const forwarded: unknown[] = []
+      internal._setForwarder((message) => {
         forwarded.push(message.data)
         return Promise.resolve({ ok: true, result: `handled:${String(message.data)}` })
-      },
-    )
+      })
 
-    expect(forwarded).toEqual(['plain-before-bind', 'ack-before-bind'])
-    await expect(acknowledging).resolves.toMatchObject({ response: 'handled:ack-before-bind' })
+      expect(forwarded).toEqual(['plain-before-bind', 'ack-before-bind'])
+      await expect(acknowledging).resolves.toMatchObject({ response: 'handled:ack-before-bind' })
+    } finally {
+      plainDelivery.mockRestore()
+      ackDelivery.mockRestore()
+    }
   })
 
   it('keeps every live ack correlation instead of silently dropping the oldest', async () => {
@@ -700,8 +758,10 @@ describe('Room public behavior', () => {
 
   it('applies before guards and after hooks around authoritative joins, publishes, and sends', async () => {
     await Room.create('guarded')
-    const room = await Room.get('guarded')
+    const room = (await Room.get('guarded')) as ServerRoom
     const after: string[] = []
+    const published: unknown[] = []
+    room.subscribe((data) => published.push(data))
     Room.guard(room, {
       onBeforeJoin: (member) => {
         if (member.meta.name === 'blocked') throw new Error('no entry')
@@ -718,16 +778,21 @@ describe('Room public behavior', () => {
     })
 
     await expect(room.join({ meta: { name: 'blocked' } })).rejects.toThrow('no entry')
+    expect(room.count).toBe(0)
+    expect(await room.getParticipants()).toEqual([])
     const alice = await room.join({ meta: { name: 'Alice' } })
     const bob = await room.join({ meta: { name: 'Bob' } })
     const inbox: unknown[] = []
     bob.listen((data) => inbox.push(data))
-    await expect(alice.publish('blocked')).rejects.toThrow('no publish')
+    await expect(alice.publish('blocked', { retain: true })).rejects.toThrow('no publish')
+    expect(published).toEqual([])
+    expect(await driver.readRetained(room.id, room._inc, semanticLane)).toBeNull()
     await alice.publish('ok')
     await expect(alice.send(bob.id, 'blocked')).rejects.toThrow('no send')
     await alice.send(bob.id, 'ok')
 
     expect(inbox).toEqual(['ok'])
+    expect(published).toEqual(['ok'])
     expect(after).toEqual(['join:Alice', 'join:Bob', 'publish:ok', 'send:ok'])
   })
 
@@ -736,8 +801,17 @@ describe('Room public behavior', () => {
     const member = await room.join()
     const observer = await Room.get(room.id)
     const observed: Array<[unknown, number]> = []
+    const backend = getBackend()
+    const subscribeLane = backend.subscribeLane.bind(backend)
+    const controlReady = deferred<void>()
+    const subscribe = vi.spyOn(backend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
+      const subscription = subscribeLane(roomId, inc, lane, receiver)
+      if (lane.kind === 'control') void subscription.ready.then(() => controlReady.resolve())
+      return subscription
+    })
     observer.onAnnounce((data, info) => observed.push([data, info.seq]))
-    await settle()
+    await controlReady.promise
+    subscribe.mockRestore()
 
     const first = await member.publish('one')
     const second = await Room.announce(room.id, 'notice')
@@ -835,7 +909,6 @@ describe('Room public behavior', () => {
         wants: { everyMember: { all: true, tracks: [] }, members: {} },
       })
       await rosterStarted.promise
-      await settle()
       expect(listRetained).not.toHaveBeenCalled()
 
       releaseRoster.resolve()
@@ -846,18 +919,51 @@ describe('Room public behavior', () => {
     }
   })
 
-  it('builds exact member binary routes before the roster is known', async () => {
-    const room = (await Room.create('exact-binary-without-roster')) as ServerRoom
-    const member = crypto.randomUUID()
-    const lanes = (
-      room as unknown as {
-        _binaryLanes(wants: typeof allBinary, members: string[]): Array<{ value: LaneId }>
+  it('delivers exact-member binary frames before the roster is known', async () => {
+    const authority = await Room.create('exact-binary-without-roster')
+    const publisher = await authority.join()
+    const observer = (await Room.get(authority.id)) as ServerRoom
+    const stub = register(observer)
+    const readCells = driver.readCells.bind(driver)
+    const rosterStarted = deferred<void>()
+    const releaseRoster = deferred<void>()
+    const reading = vi.spyOn(driver, 'readCells').mockImplementation(async (roomId, inc, selector) => {
+      if (roomId === authority.id && 'prefix' in selector) {
+        rosterStarted.resolve()
+        await releaseRoster.promise
       }
-    )._binaryLanes(
-      { everyMember: { all: false, tracks: [] }, members: { [member]: { all: false, tracks: ['screen'] } } },
-      [],
-    )
-    expect(lanes.map(({ value }) => value)).toEqual([{ kind: 'binary', member, track: 'screen' }])
+      return readCells(roomId, inc, selector)
+    })
+    expect(observer._state.rosterKnown).toBe(false)
+
+    try {
+      await observer._handleStubRequest(stub, {
+        __r: 'sub-binary',
+        wants: {
+          everyMember: { all: false, tracks: [] },
+          members: { [publisher.id]: { all: false, tracks: ['screen'] } },
+        },
+      })
+      await rosterStarted.promise
+      await (observer as unknown as { _binaryReady(): Promise<void> })._binaryReady()
+      expect(observer._state.rosterKnown).toBe(false)
+
+      await publisher.publishBinary(new Uint8Array([7]), { track: 'screen' })
+      expect(observer._state.rosterKnown).toBe(false)
+      const frame = attachPeer(stub)
+        .decoded()
+        .find((candidate) => candidate.tag === TAG.PUBLISH_BINARY)
+      if (frame?.tag !== TAG.PUBLISH_BINARY) throw new Error('expected exact-member binary publish')
+      expect(unframeMemberId(frame.data)).toMatchObject({
+        from: publisher.id,
+        track: 'screen',
+        payload: new Uint8Array([7]),
+      })
+    } finally {
+      releaseRoster.resolve()
+      await observer.getParticipants()
+      reading.mockRestore()
+    }
   })
 
   it('drops retained text and binary when a crashed publisher is reaped', async () => {
@@ -891,7 +997,7 @@ describe('Room public behavior', () => {
     await member.publish('held')
     expect(dataFrames(peer)).toEqual([])
     stub._onPeerBroadcastSubscribe(false)
-    await settle()
+    await vi.waitFor(() => expect(dataFrames(peer)).toEqual(['early', 'held']))
     await member.publish('live')
     expect(dataFrames(peer)).toEqual(['early', 'held', 'live'])
   })
@@ -929,6 +1035,31 @@ describe('Room public behavior', () => {
     expect(backend).not.toBeInstanceOf(MemoryBackend)
     const member = await room.join()
     expect(await member.publish('works')).toMatchObject({ seq: 1 })
+
+    const lane = { key: 'zero-config-supervision', kind: 'text' } as const
+    const received: string[] = []
+    const firstReceived = deferred<void>()
+    let secondReceived = deferred<void>()
+    const first = backend.subscribe(lane, (payload) => {
+      received.push(`first:${decoder.decode(payload)}`)
+      firstReceived.resolve()
+    })
+    const second = backend.subscribe(lane, (payload) => {
+      received.push(`second:${decoder.decode(payload)}`)
+      secondReceived.resolve()
+    })
+    await Promise.all([first.ready, second.ready])
+    await backend.publish(lane, encoder.encode('one'))
+    await Promise.all([firstReceived.promise, secondReceived.promise])
+    expect(received).toEqual(['first:one', 'second:one'])
+
+    await first.unsubscribe()
+    secondReceived = deferred<void>()
+    await backend.publish(lane, encoder.encode('two'))
+    await secondReceived.promise
+    expect(received).toEqual(['first:one', 'second:one', 'second:two'])
+    expect(second.state()).toBe('ready')
+    await second.unsubscribe()
   })
 
   it('keeps snapshot references stable until a real state change', async () => {
@@ -1424,6 +1555,8 @@ describe('memory Backend SPI contract', () => {
   })
 
   it('publishes one immutable wide ordering layout and codec', () => {
+    expect(Object.isFrozen(ORDERING_FRAME_LAYOUT)).toBe(true)
+    expect(Object.isFrozen(ORDERING_FRAME_LAYOUT.offsets)).toBe(true)
     expect(ORDERING_FRAME_LAYOUT).toEqual({
       headerBytes: 16,
       wordBytes: 4,
@@ -1442,7 +1575,6 @@ describe('memory Backend SPI contract', () => {
     const dispose = vi.spyOn(raw, 'dispose')
     const first = setDefaultBackend(() => raw, {})
     const second = setDefaultBackend(() => raw, {})
-    await settle()
     await expect(first.readHead('same-driver')).resolves.toBe(null)
     expect(second).toBe(first)
     expect(dispose).not.toHaveBeenCalled()
@@ -1465,7 +1597,6 @@ describe('shared subscription supervision', () => {
     expect(raw.opens[0]!.localReceiverCount()).toBe(2)
 
     raw.opens[0]!.attempt.close()
-    await settleMicrotasks()
     expect(first.state()).toBe('closed')
     expect(second.state()).toBe('closed')
     expect(raw.opens).toHaveLength(1)
@@ -1503,11 +1634,9 @@ describe('shared subscription supervision', () => {
     let disposeSettled = false
     const unsubscribing = first.unsubscribe().then(() => (unsubscribeSettled = true))
     const disposing = manager.dispose().then(() => (disposeSettled = true))
-    await settleMicrotasks()
     expect({ unsubscribeSettled, disposeSettled }).toEqual({ unsubscribeSettled: false, disposeSettled: false })
     liveCleanup.resolve()
     await unsubscribing
-    await settleMicrotasks()
     expect({ unsubscribeSettled, disposeSettled }).toEqual({ unsubscribeSettled: true, disposeSettled: false })
     terminalCleanup.resolve()
     await disposing
@@ -1534,7 +1663,6 @@ describe('shared subscription supervision', () => {
     expect(raw.openCalls).toBe(1)
 
     raw.opens[0]!.attempt.close()
-    await settleMicrotasks()
     expect(states).toEqual(['lost', 'ready', 'lost', 'closed'])
     expect(raw.openCalls).toBe(1)
     await subscription.unsubscribe()
@@ -1684,10 +1812,16 @@ async function wideBinaryScenario(id: string, retain: boolean, byte: number) {
     seq: 0xffff_ffff,
     timestamp: 10,
   })
-  if (!retain) stub._onPeerMessage(JSON.stringify({ __r: 'sub-binary', wants: allBinary }), 1)
+  if (!retain) {
+    await serverRoom._handleStubRequest(stub, { __r: 'sub-binary', wants: allBinary })
+    await (serverRoom as unknown as { _binaryReady(): Promise<void> })._binaryReady()
+  }
   const receipt = await camera.publishBinary(new Uint8Array([byte]), retain ? { retain: true } : undefined)
-  if (retain) stub._onPeerMessage(JSON.stringify({ __r: 'sub-binary', wants: allBinary }), 2)
-  await settle()
+  if (retain) {
+    await serverRoom._handleStubRequest(stub, { __r: 'sub-binary', wants: allBinary })
+    await (serverRoom as unknown as { _binaryReady(): Promise<void> })._binaryReady()
+  }
+  await vi.waitFor(() => expect(peer.decoded().some((candidate) => candidate.tag === TAG.PUBLISH_BINARY)).toBe(true))
 
   const frame = peer
     .decoded()
@@ -1798,7 +1932,6 @@ class ControlledAttempt implements SubscriptionAttempt {
   readonly #listeners = new Set<(state: SubscriptionAttemptState) => void>()
   readonly #cleanup: Promise<void>
   #state: SubscriptionAttemptState = 'establishing'
-  unsubscribeCalls = 0
 
   constructor(cleanup: Promise<void> = Promise.resolve()) {
     this.ready = this.#readiness.promise
@@ -1822,7 +1955,6 @@ class ControlledAttempt implements SubscriptionAttempt {
   }
 
   async unsubscribe(): Promise<void> {
-    this.unsubscribeCalls++
     this.#transition('closed')
     await this.#cleanup
   }
@@ -1900,12 +2032,10 @@ function rejectedSubscription(diagnostic: string): BackendSubscription {
 
 function deferred<T>() {
   let resolve!: (value?: T) => void
-  let reject!: (reason?: unknown) => void
-  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+  const promise = new Promise<T>((resolvePromise) => {
     resolve = resolvePromise as (value?: T) => void
-    reject = rejectPromise
   })
-  return { promise, resolve, reject }
+  return { promise, resolve }
 }
 
 function delayLaneSubscription(matches: (lane: LaneId) => boolean) {
@@ -1943,16 +2073,4 @@ function delayLaneSubscription(matches: (lane: LaneId) => boolean) {
     }
   })
   return { started: started.promise, release: () => release(), restore: () => spy.mockRestore() }
-}
-
-async function settleMicrotasks(turns = 8): Promise<void> {
-  for (let turn = 0; turn < turns; turn++) await Promise.resolve()
-}
-
-function settle(): Promise<void> {
-  return delay(0)
-}
-
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms))
 }
