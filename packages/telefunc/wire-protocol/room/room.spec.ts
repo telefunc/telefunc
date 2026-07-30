@@ -9,7 +9,15 @@ import {
   ROOM_MEMBER_TTL_MS,
   ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS,
 } from '../constants.js'
-import { DEFAULT_TRACK, isRoomError, roomAckError, type RoomSnapshotMetadata } from './protocol.js'
+import {
+  DEFAULT_TRACK,
+  frameWithMemberId,
+  isRoomError,
+  roomAckError,
+  sanitizeBinaryWants,
+  unframeMemberId,
+  type RoomSnapshotMetadata,
+} from './protocol.js'
 import { ClientRoom } from './client.js'
 import { Room, ServerRoom } from './server.js'
 import { RoomStubChannel } from './stubs.js'
@@ -906,6 +914,39 @@ describe('room demand lifecycle', () => {
       ['member', 'screen', true],
       ['member', 'screen', true],
     ])
+  })
+})
+
+describe('room binary protocol validation', () => {
+  it('rejects array metadata and malformed UTF-8 instead of normalizing them', () => {
+    const memberId = crypto.randomUUID()
+    expect(() =>
+      frameWithMemberId(memberId, new Uint8Array(), {
+        meta: [] as unknown as Record<string, unknown>,
+      }),
+    ).toThrow('meta should be an object')
+
+    const arrayMeta = frameWithMemberId(memberId, new Uint8Array(), { meta: {} })
+    arrayMeta[19] = '['.charCodeAt(0)
+    arrayMeta[20] = ']'.charCodeAt(0)
+    expect(unframeMemberId(arrayMeta)).toBeNull()
+
+    const malformedTrack = frameWithMemberId(memberId, new Uint8Array(), { track: 'x' })
+    malformedTrack[18] = 0xff
+    expect(unframeMemberId(malformedTrack)).toBeNull()
+  })
+
+  it('accepts legal binary declarations regardless of undocumented aggregate counts', () => {
+    const members = Object.fromEntries(
+      Array.from({ length: 4097 }, (_, index) => [`member-${index}`, { all: false, tracks: [] }]),
+    )
+    expect(sanitizeBinaryWants({ everyMember: { all: false, tracks: [] }, members })).not.toBeNull()
+    expect(
+      sanitizeBinaryWants({
+        everyMember: { all: false, tracks: Array.from({ length: 65 }, (_, index) => `track-${index}`) },
+        members: {},
+      }),
+    ).not.toBeNull()
   })
 })
 

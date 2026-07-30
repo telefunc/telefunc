@@ -28,8 +28,6 @@ export {
   leaveCauseFromWire,
   leaveCauseToWire,
   DEFAULT_TRACK,
-  SUB_BINARY_MEMBERS_MAX,
-  SUB_BINARY_TRACKS_MAX,
   emptyTrackWants,
   mergeTrackWants,
   wantsTrack,
@@ -83,6 +81,10 @@ import type {
   RoomMeta,
   RoomSendReceipt,
 } from './types.js'
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return isObject(value) && !Array.isArray(value)
+}
 
 // ---------------------------------------------------------------------------
 // Keys & records
@@ -390,7 +392,7 @@ function leaveCauseToWire(cause: LeaveCause): { cause?: 'removed' | 'disconnecte
 
 /** All room messages are tagged with `__r` — envelopes, requests, and notices alike. */
 function hasRoomTag(value: unknown): value is { __r: string } {
-  return isObject(value) && typeof value.__r === 'string'
+  return isRecord(value) && typeof value.__r === 'string'
 }
 
 /** Merge `attrs` into `meta` per key, returning a new object — the `setAttributes()` semantics.
@@ -406,9 +408,9 @@ function mergeAttributes(meta: ParticipantMeta, attrs: ParticipantMeta): Partici
 
 /** Validates `join(options)` and resolves the participant `meta` + `selfDelivery`. */
 function normalizeJoinOptions(options: JoinOptions | undefined): { meta: ParticipantMeta; selfDelivery: boolean } {
-  assertUsage(options === undefined || isObject(options), 'join() options should be an object')
+  assertUsage(options === undefined || isRecord(options), 'join() options should be an object')
   const meta = options?.meta ?? {}
-  assertUsage(isObject(meta), 'join() options.meta should be an object')
+  assertUsage(isRecord(meta), 'join() options.meta should be an object')
   return { meta, selfDelivery: options?.selfDelivery !== false }
 }
 
@@ -529,7 +531,7 @@ const TRACK_MAX_BYTES = 64
 /** Per-frame meta stays small — it rides every frame that carries it. */
 const META_MAX_BYTES = 4096
 const frameTextEncoder = /* @__PURE__ */ new TextEncoder()
-const frameTextDecoder = /* @__PURE__ */ new TextDecoder()
+const frameTextDecoder = /* @__PURE__ */ new TextDecoder('utf-8', { fatal: true })
 /** Binary relay format:
  *  `[16-byte member UUID][1-byte flags][?1-byte track length + track][?2-byte meta length + meta][payload]`.
  *  A plain publish costs one flag byte; named tracks (mic/camera/screen on one member lane) and optional
@@ -547,7 +549,7 @@ function frameWithMemberId(memberId: string, payload: Uint8Array, opts?: BinaryP
   }
   let metaBytes: Uint8Array | null = null
   if (opts?.meta !== undefined) {
-    assertUsage(isObject(opts.meta), 'publishBinary() meta should be an object')
+    assertUsage(isRecord(opts.meta), 'publishBinary() meta should be an object')
     metaBytes = frameTextEncoder.encode(stringify(opts.meta))
     assertUsage(
       metaBytes.byteLength <= META_MAX_BYTES,
@@ -603,7 +605,11 @@ function unframeMemberId(data: Uint8Array): {
     const trackLength = data[offset]!
     offset += 1
     if (trackLength === 0 || trackLength > TRACK_MAX_BYTES || data.byteLength < offset + trackLength) return null
-    track = frameTextDecoder.decode(data.subarray(offset, offset + trackLength))
+    try {
+      track = frameTextDecoder.decode(data.subarray(offset, offset + trackLength))
+    } catch {
+      return null
+    }
     offset += trackLength
   }
   if (flags & FRAME_FLAG_META) {
@@ -613,7 +619,7 @@ function unframeMemberId(data: Uint8Array): {
     if (metaLength > META_MAX_BYTES || data.byteLength < offset + metaLength) return null
     try {
       const parsedMeta: unknown = parse(frameTextDecoder.decode(data.subarray(offset, offset + metaLength)))
-      if (!isObject(parsedMeta)) return null // meta must be an object — a scalar/array hand-crafted frame is rejected
+      if (!isRecord(parsedMeta)) return null // meta must be a record — scalars/arrays are rejected
       meta = parsedMeta
     } catch {
       return null // malformed meta JSON on a hand-crafted frame — reject the whole frame, don't throw
@@ -647,11 +653,6 @@ type TrackWants = { all: boolean; tracks: string[] }
  *  three gates: the client's declaration, the server's upstream key set, and the per-stub relay. */
 type BinaryWants = { everyMember: TrackWants; members: Record<string, TrackWants> }
 
-/** Abuse bounds on a client's `sub-binary` declaration — generous for real apps (a media app
- *  uses a handful of tracks), fatal for hostile blowups (tracks multiply upstream keys). */
-const SUB_BINARY_MEMBERS_MAX = 4096
-const SUB_BINARY_TRACKS_MAX = 64
-
 function emptyTrackWants(): TrackWants {
   return { all: false, tracks: [] }
 }
@@ -678,15 +679,13 @@ function wantsAnyBinary(wants: BinaryWants): boolean {
   return wants.everyMember.all || wants.everyMember.tracks.length > 0 || Object.keys(wants.members).length > 0
 }
 
-/** Validate a client-declared `sub-binary` want (untrusted input) — bounded and well-formed,
- *  or `null` to reject the declaration. */
+/** Validate a client-declared `sub-binary` want (untrusted input), or return `null`. */
 function sanitizeBinaryWants(wants: unknown): BinaryWants | null {
-  if (!isObject(wants)) return null
+  if (!isRecord(wants)) return null
   const everyMember = sanitizeTrackWants(wants.everyMember)
-  if (!everyMember || !isObject(wants.members)) return null
+  if (!everyMember || !isRecord(wants.members)) return null
   const members: Record<string, TrackWants> = {}
   const entries = Object.entries(wants.members)
-  if (entries.length > SUB_BINARY_MEMBERS_MAX) return null
   for (const [memberId, trackWants] of entries) {
     const sanitized = sanitizeTrackWants(trackWants)
     if (!sanitized) return null
@@ -696,8 +695,7 @@ function sanitizeBinaryWants(wants: unknown): BinaryWants | null {
 }
 
 function sanitizeTrackWants(wants: unknown): TrackWants | null {
-  if (!isObject(wants) || typeof wants.all !== 'boolean' || !Array.isArray(wants.tracks)) return null
-  if (wants.tracks.length > SUB_BINARY_TRACKS_MAX) return null
+  if (!isRecord(wants) || typeof wants.all !== 'boolean' || !Array.isArray(wants.tracks)) return null
   // Bound by UTF-8 bytes, the same unit the frame path uses (`frameWithMemberId`) — a `.length` char
   // count would admit a want no real ≤64-byte track can ever match.
   if (
