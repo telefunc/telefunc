@@ -1368,8 +1368,8 @@ describe('client Room lifecycle', () => {
     const room = (await Room.create('roster-replay')) as ServerRoom
     const stub = register(room)
     const ensureRoster = vi.spyOn(room as unknown as { _ensureRoster(): Promise<void> }, '_ensureRoster')
-    attachPeer(stub)
-    await vi.waitFor(() => expect(ensureRoster).toHaveBeenCalledOnce())
+    const peer = attachPeer(stub)
+    await vi.waitFor(() => expect(peer.decoded().some((frame) => frame.tag === TAG.PUBLISH)).toBe(true))
 
     stub._onPeerDisconnect(1_000)
     const [frame] = attachPeer(stub, 0).decoded()
