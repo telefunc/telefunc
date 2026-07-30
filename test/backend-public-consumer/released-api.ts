@@ -19,6 +19,14 @@ import {
   type StreamingReplacerType,
   type TypeContract,
 } from 'telefunc'
+// PR #436 deliberately removed the legacy broadcast adapter boundary. Keep one negative assertion
+// per symbol so restoring any part of that boundary is an explicit compatibility decision.
+// @ts-expect-error intentionally removed in PR #436
+import { DefaultBroadcastAdapter } from 'telefunc'
+// @ts-expect-error intentionally removed in PR #436
+import type { BroadcastAdapter } from 'telefunc'
+// @ts-expect-error intentionally removed in PR #436
+import type { BroadcastTransport } from 'telefunc'
 import {
   BACKEND_SPI_VERSION,
   disposeBackend,

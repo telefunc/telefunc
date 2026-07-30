@@ -11,7 +11,14 @@ type HasKeys<Actual, Keys extends PropertyKey> = Exclude<Keys, keyof Actual> ext
 type _cloudflareOptionKeys = Assert<
   HasKeys<
     CloudflareOptions,
-    'bindingName' | 'kvBindingName' | 'instanceName' | 'context' | 'scale' | 'locationFallback' | 'jurisdiction'
+    | 'bindingName'
+    | 'kvBindingName'
+    | 'instanceName'
+    | 'context'
+    | 'scale'
+    | 'locationFallback'
+    | 'jurisdiction'
+    | 'roomBindingName'
   >
 >
 type ReleasedCloudflareOptions = {
@@ -22,6 +29,7 @@ type ReleasedCloudflareOptions = {
   scale?: number | Partial<Record<DurableObjectLocationHint, number>>
   locationFallback?: DurableObjectLocationHint
   jurisdiction?: DurableObjectJurisdiction
+  roomBindingName?: string
 }
 type _cloudflareOptionShape = Assert<Extends<CloudflareOptions, ReleasedCloudflareOptions>>
 
@@ -34,6 +42,7 @@ const _cloudflareOptions: CloudflareOptions = {
   scale: 1,
   locationFallback: 'weur',
   jurisdiction: 'eu',
+  roomBindingName: 'TelefuncRoomDurableObject',
 }
 
 const cloudflare = new CloudflareTelefunc(_cloudflareOptions)
@@ -44,6 +53,7 @@ const deno = new DenoTelefunc()
 void [
   cloudflare.serve,
   cloudflare.TelefuncDurableObject,
+  cloudflare.TelefuncRoomDurableObject,
   node.installWebSocket,
   node.serve,
   bun.websocket,
