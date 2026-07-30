@@ -6,6 +6,7 @@ import { TAG, decode } from '../shared-ws.js'
 import {
   ROOM_HEARTBEAT_INTERVAL_MS,
   ROOM_MEMBER_KV_TTL_MS,
+  ROOM_MEMBER_TTL_MS,
   ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS,
 } from '../constants.js'
 import { DEFAULT_TRACK, type RoomSnapshotMetadata } from './protocol.js'
@@ -416,6 +417,72 @@ describe('Room public behavior', () => {
     expect(screen).toEqual([[2, { key: true }]])
   })
 
+  it('holds the first named-track frame until its newly announced binary route is ready', async () => {
+    const room = await Room.create('binary-route-readiness')
+    const publisher = await room.join()
+    const observer = await Room.get(room.id)
+    await observer.getParticipants()
+    const frames: number[] = []
+    observer.subscribeBinary((data) => frames.push(data[0]!))
+    const delayed = delayLaneSubscription(
+      (lane) => lane.kind === 'binary' && lane.member === publisher.id && lane.track === 'screen',
+    )
+    const commitLane = driver.commitLane.bind(driver)
+    let binaryStarted = false
+    const commit = vi.spyOn(driver, 'commitLane').mockImplementation((roomId, inc, lane, payload, opts) => {
+      if (lane.kind === 'binary' && lane.member === publisher.id && lane.track === 'screen') binaryStarted = true
+      return commitLane(roomId, inc, lane, payload, opts)
+    })
+    try {
+      const publishing = publisher.publishBinary(new Uint8Array([7]), { track: 'screen' })
+      await delayed.started
+      await settle()
+      if (binaryStarted) await publishing
+      await delayed.release()
+      await publishing
+      await settleMicrotasks()
+      expect(frames).toEqual([7])
+    } finally {
+      commit.mockRestore()
+      delayed.restore()
+    }
+  })
+
+  it('announces binary demand only after the demanded route is ready', async () => {
+    const room = await Room.create('binary-demand-readiness')
+    const publisher = await room.join()
+    const observer = await Room.get(room.id)
+    await observer.getParticipants()
+    const frames: number[] = []
+    let demandStarted = false
+    let publishing: Promise<unknown> | undefined
+    publisher.onDemand((track, wanted) => {
+      if (track === 'screen' && wanted) {
+        demandStarted = true
+        publishing = publisher.publishBinary(new Uint8Array([8]), { track: 'screen' })
+      }
+    })
+    const delayed = delayLaneSubscription(
+      (lane) => lane.kind === 'binary' && lane.member === publisher.id && lane.track === 'screen',
+    )
+    try {
+      const remote = (await observer.getParticipant(publisher.id))!
+      remote.subscribeBinary((data) => frames.push(data[0]!), {
+        track: 'screen',
+      })
+      await delayed.started
+      await settle()
+      expect(demandStarted).toBe(false)
+      await delayed.release()
+      await settle()
+      expect(demandStarted).toBe(true)
+      await publishing
+      expect(frames).toEqual([8])
+    } finally {
+      delayed.restore()
+    }
+  })
+
   it('keeps DMs private, supports acknowledgements, and preserves room-authored sends', async () => {
     const room = await Room.create('dm')
     const bot = await room.join({ meta: { role: 'bot' }, hidden: true })
@@ -503,6 +570,20 @@ describe('Room public behavior', () => {
 
     const retained = await driver.readRetained(room.id, room._inc, semanticLane)
     expect(parse(decoder.decode(retained!.payload))).toMatchObject({ from: replacement.id, data: 'new' })
+  })
+
+  it('drops retained text and binary when a crashed publisher is reaped', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(1_000_000)
+    const room = (await Room.create('reaped-retained')) as ServerRoom
+    const publisher = await room.join()
+    await publisher.publish('text', { retain: true })
+    await publisher.publishBinary(new Uint8Array([1]), { track: 'screen', retain: true })
+    expect(await driver.listRetained(room.id, room._inc)).toHaveLength(2)
+
+    vi.setSystemTime(1_000_000 + ROOM_MEMBER_TTL_MS + 1)
+    expect(await Room.getParticipants(room.id)).toEqual([])
+    expect(await driver.listRetained(room.id, room._inc)).toEqual([])
   })
 
   it('tail mode holds pre-attach text and flushes it in order on first client demand', async () => {
@@ -910,6 +991,29 @@ describe('shared subscription supervision', () => {
     await replacement.unsubscribe()
   })
 
+  it('bounds last-unsubscribe and manager-dispose settlement when raw cleanup hangs', async () => {
+    vi.useFakeTimers()
+    const cleanup = deferred<void>()
+    const raw = new ControlledDriver()
+    raw.plan(() => ControlledAttempt.ready(cleanup.promise))
+    raw.plan(() => ControlledAttempt.ready(cleanup.promise))
+    const report = vi.fn()
+    const manager = new SubscriptionManager(raw, report)
+    const first = manager.subscribe('unsubscribe', () => {})
+    const second = manager.subscribe('dispose', () => {})
+    await Promise.all([first.ready, second.ready])
+
+    let unsubscribeSettled = false
+    let disposeSettled = false
+    const unsubscribing = first.unsubscribe().then(() => (unsubscribeSettled = true))
+    const disposing = manager.dispose().then(() => (disposeSettled = true))
+    await vi.advanceTimersByTimeAsync(SUBSCRIPTION_ESTABLISH_TIMEOUT_MS)
+    expect({ unsubscribeSettled, disposeSettled }).toEqual({ unsubscribeSettled: true, disposeSettled: true })
+    expect(report).toHaveBeenCalledTimes(2)
+    await Promise.all([unsubscribing, disposing])
+    cleanup.resolve()
+  })
+
   it('normalizes initial readiness events while preserving failure and recovery transitions', async () => {
     const raw = new ControlledDriver()
     raw.plan(() => new ControlledAttempt())
@@ -1306,6 +1410,43 @@ function deferred<T>() {
     reject = rejectPromise
   })
   return { promise, resolve, reject }
+}
+
+function delayLaneSubscription(matches: (lane: LaneId) => boolean) {
+  const backend = getBackend()
+  const subscribeLane = backend.subscribeLane.bind(backend)
+  const started = deferred<void>()
+  let release!: () => Promise<void>
+  const spy = vi.spyOn(backend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
+    if (!matches(lane)) return subscribeLane(roomId, inc, lane, receiver)
+    let inner: BackendSubscription | null = null
+    let state: SubscriptionState = 'establishing'
+    const readiness = deferred<void>()
+    const listeners = new Set<(next: SubscriptionState) => void>()
+    started.resolve()
+    release = async () => {
+      inner = subscribeLane(roomId, inc, lane, receiver)
+      await inner.ready
+      state = 'ready'
+      readiness.resolve()
+      for (const listener of listeners) listener(state)
+    }
+    return {
+      ready: readiness.promise,
+      state: () => state,
+      onStateChange: (listener) => {
+        listeners.add(listener)
+        return () => listeners.delete(listener)
+      },
+      unsubscribe: async () => {
+        state = 'closed'
+        readiness.resolve()
+        for (const listener of listeners) listener(state)
+        await inner?.unsubscribe()
+      },
+    }
+  })
+  return { started: started.promise, release: () => release(), restore: () => spy.mockRestore() }
 }
 
 async function settleMicrotasks(turns = 8): Promise<void> {
