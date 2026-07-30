@@ -1,4 +1,4 @@
-export { StreamReader, RequestBodyLimitError }
+export { StreamReader }
 
 import type { Readable } from 'node:stream'
 import { assert, assertUsage, assertWarning } from '../../../utils/assert.js'
@@ -7,12 +7,6 @@ import { decodeU32 } from '../../frame.js'
 /** Shared sentinel — avoids zero-length subarray views that pin large ArrayBuffers. */
 const EMPTY = new Uint8Array(0)
 const DISCONNECT_MSG = 'Client disconnected during file upload'
-
-class RequestBodyLimitError extends Error {
-  constructor(readonly limit: number) {
-    super(`Request body exceeds the per-message limit of ${limit} bytes`)
-  }
-}
 
 /**
  * Pull-based byte-counting stream reader for the binary frame protocol.
@@ -73,7 +67,8 @@ class StreamReader {
       const chunk = await this.pullChunk()
       if (chunk === null) break
       total += chunk.length
-      if (total > this.maxFrameBytes) throw new RequestBodyLimitError(this.maxFrameBytes)
+      if (total > this.maxFrameBytes)
+        throw new Error(`Request body exceeds the per-message limit of ${this.maxFrameBytes} bytes`)
       chunks.push(chunk)
     }
     if (chunks.length === 1) return new TextDecoder().decode(chunks[0])
@@ -98,7 +93,7 @@ class StreamReader {
   /** The hostile-input bound: reject a declared frame length over `maxFrameBytes` before a
    *  single body byte is buffered — a declared gigabyte costs 4 bytes, not a gigabyte. */
   private assertDeclaredLength(length: number): void {
-    if (length > this.maxFrameBytes) throw new RequestBodyLimitError(this.maxFrameBytes)
+    if (length > this.maxFrameBytes) throw new Error(`Frame of ${length} bytes exceeds the per-message limit`)
   }
 
   /** Ensure no trailing bytes remain. */
