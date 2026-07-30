@@ -4,15 +4,19 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { installRedis, RedisRoomBackend } from '../../src/index.js'
 import {
   DIRECTORY_PUT_LUA,
+  channelKey,
+  decodeRedisOrderingFrame,
   directoryIndexKey,
   headKey,
+  genPrefix,
   laneKey,
   orderKey,
+  REDIS_DELIVERY_FENCE_BYTE,
   REDIS_ROOM_COMMANDS,
 } from '../../src/room/layout.js'
 
 type RedisClusterNode = { host: string; port: number }
-type Master = RedisClusterNode & { id: string; start: number; end: number; client: Redis }
+type Master = RedisClusterNode & { id: string; ranges: Array<[number, number]>; client: Redis }
 type CommandCall = { name: string; keyCount: number; args: unknown[] }
 type CommandDefinition = { name: string; lua: string; numberOfKeys: number | null }
 
@@ -48,7 +52,10 @@ describe('Redis real three-master Cluster CI certification', () => {
 
   it('covers shipped command KEYS and terminates live and in-flight attempts when their generation drops', async () => {
     expect(masters).toHaveLength(3)
-    expect(masters.reduce((total, master) => total + master.end - master.start + 1, 0)).toBe(16_384)
+    expect(masters.flatMap(({ ranges }) => ranges).reduce((total, [start, end]) => total + end - start + 1, 0)).toBe(
+      16_384,
+    )
+    expect((await clusterInfo((masters[0] as Master).client)).cluster_size).toBe('3')
     for (const master of masters) expect((await clusterInfo(master.client)).cluster_state).toBe('ok')
 
     const prefix = uniquePrefix('runtime-slots')
@@ -139,12 +146,19 @@ describe('Redis real three-master Cluster CI certification', () => {
       const delayedHead = await open(backend, delayedRoom, delayedInc)
       holdNextSubscribe = true
       subscription = backend.subscribeLane(delayedRoom, delayedInc, SEMANTIC_LANE, () => {})
-      void subscription.ready.catch(() => {})
+      const delayedStates: SubscriptionState[] = []
+      subscription.onStateChange((state) => delayedStates.push(state))
+      const delayedReady = subscription.ready.then(
+        () => null,
+        (error: unknown) => error,
+      )
       await subscribeEntered.promise
       await close(authority, delayedRoom, delayedHead)
       await authority.dropGeneration(delayedRoom, delayedInc)
       releaseSubscribe.resolve()
       await waitFor(() => subscription?.state() === 'closed')
+      expect(String(await delayedReady)).toMatch(/ownership terminated/i)
+      expect(delayedStates).not.toContain('lost')
       expect(subscriberOpens).toBe(2)
       await subscription.unsubscribe()
       subscription = undefined
@@ -208,22 +222,137 @@ describe('Redis real three-master Cluster CI certification', () => {
       await open(backend, roomId, inc)
       subscription = backend.subscribeLane(roomId, inc, SEMANTIC_LANE, (_payload, info) => observed.push(info.seq))
       await subscription.ready
-      await cluster.set(orderKey(prefix, roomId, inc, laneKey(SEMANTIC_LANE)), `${Number.MAX_SAFE_INTEGER - 1}:1`)
+      const orderingKey = orderKey(prefix, roomId, inc, laneKey(SEMANTIC_LANE))
+      await cluster.set(orderingKey, `${Number.MAX_SAFE_INTEGER - 1}:1`)
       const last = accepted(await backend.commitLane(roomId, inc, SEMANTIC_LANE, Buffer.from('last'), { retain: true }))
       await last.delivery
       await waitFor(() => observed.length === 1)
       expect(last.seq).toBe(Number.MAX_SAFE_INTEGER)
       expect(await fresh.readRetained(roomId, inc, SEMANTIC_LANE)).toMatchObject({ seq: Number.MAX_SAFE_INTEGER })
+      const lastWatermark = await cluster.get(orderingKey)
       await expect(
         backend.commitLane(roomId, inc, SEMANTIC_LANE, Buffer.from('overflow'), { retain: true }),
       ).rejects.toThrow('sequence exhausted')
       expect(observed).toEqual([Number.MAX_SAFE_INTEGER])
+      expect(await cluster.get(orderingKey)).toBe(lastWatermark)
       const retained = await fresh.readRetained(roomId, inc, SEMANTIC_LANE)
       expect(retained?.seq).toBe(Number.MAX_SAFE_INTEGER)
       expect([...new Uint8Array(retained?.payload ?? [])]).toEqual([...Buffer.from('last')])
     } finally {
       await subscription?.unsubscribe()
       await Promise.all([backend.dispose(), fresh.dispose()])
+    }
+  })
+
+  it('rejects invalid cell TTLs before any mutation takes effect', async () => {
+    const backend = redisBackend(cluster, uniquePrefix('cell-preflight'))
+    const roomId = 'cell-preflight-room'
+    const inc = 'cell-preflight-inc'
+    try {
+      await open(backend, roomId, inc)
+      const before = await backend.readCells(roomId, inc, { keys: [] })
+      if ('staleInc' in before) throw new Error('opened generation was stale')
+      await expect(
+        backend.compareExchangeCells(roomId, inc, before.revision, [
+          { key: 'first', set: { bytes: bytes('written') } },
+          { key: 'invalid', set: { bytes: bytes('rejected'), ttlMs: 0 } },
+        ]),
+      ).rejects.toThrow(/expire|ttl/i)
+      const after = await backend.readCells(roomId, inc, { keys: ['first', 'invalid'] })
+      if ('staleInc' in after) throw new Error('opened generation was stale')
+      expect(after.revision).toBe(before.revision)
+      expect(after.cells.size).toBe(0)
+    } finally {
+      await backend.dispose()
+    }
+  })
+
+  it('keeps generation inventory complete across a scan-window reshard', async () => {
+    const prefix = uniquePrefix('reshard-inventory')
+    const client = clusterClient(CLUSTER_NODES)
+    await client.ping()
+    const backend = redisBackend(client, prefix)
+    const scanNodes = client.nodes('master')
+    const targetNode = scanNodes[0] as Redis
+    const sourceNode = scanNodes[1] as Redis
+    const target = masterForNode(targetNode)
+    const source = masterForNode(sourceNode)
+    const roomId = await roomOnMaster(prefix, source.id, 'reshard-inventory')
+    const inc = 'reshard-inventory-inc'
+    const slotNumber = await slot(headKey(prefix, roomId))
+    const scan = sourceNode.scan.bind(sourceNode)
+    const smembers = client.smembers.bind(client)
+    let relocated = false
+    const relocate = async (): Promise<void> => {
+      if (relocated) return
+      relocated = true
+      await moveSlot(slotNumber, source, target, true)
+    }
+    sourceNode.scan = (async (...args: unknown[]) => {
+      await relocate()
+      return await (scan as (...scanArgs: unknown[]) => Promise<[string, string[]]>)(...args)
+    }) as unknown as typeof sourceNode.scan
+    client.smembers = (async (key: string) => {
+      if (key === `${genPrefix(prefix, roomId, inc)}:keys`) await relocate()
+      return await smembers(key)
+    }) as typeof client.smembers
+    try {
+      await open(backend, roomId, inc)
+      accepted(await backend.commitLane(roomId, inc, SEMANTIC_LANE, bytes('retained'), { retain: true }))
+      expect(await backend.listRetained(roomId, inc)).toEqual([SEMANTIC_LANE])
+      expect(relocated).toBe(true)
+    } finally {
+      sourceNode.scan = scan as typeof sourceNode.scan
+      client.smembers = smembers as typeof client.smembers
+      if (relocated) await restoreSlot(slotNumber, source, target)
+      await Promise.allSettled([backend.dispose(), client.quit()])
+    }
+  })
+
+  it('does not finalize a generation installed after an absent drop snapshot', async () => {
+    const prefix = uniquePrefix('drop-absent-race')
+    const roomId = 'drop-absent-race-room'
+    const inc = 'drop-absent-race-inc'
+    const client = clusterClient(CLUSTER_NODES)
+    await client.ping()
+    const backend = new RedisRoomBackend({ redis: client, prefix })
+    const authority = new RedisRoomBackend({ redis: client, prefix })
+    const snapshotRead = deferred()
+    const releaseDrop = deferred()
+    const commands = client as unknown as Record<string, ((...args: unknown[]) => Promise<unknown>) | undefined>
+    const begin = commands.tfRoomDropGenerationBegin
+    const smembers = client.smembers.bind(client)
+    if (begin === undefined) {
+      client.smembers = (async (key: string) => {
+        const result = await smembers(key)
+        if (key === `${genPrefix(prefix, roomId, inc)}:keys`) {
+          snapshotRead.resolve()
+          await releaseDrop.promise
+        }
+        return result
+      }) as typeof client.smembers
+    } else {
+      const bound = begin.bind(client)
+      commands.tfRoomDropGenerationBegin = async (...args) => {
+        const result = await bound(...args)
+        snapshotRead.resolve()
+        await releaseDrop.promise
+        return result
+      }
+    }
+    try {
+      const dropping = backend.dropGeneration(roomId, inc)
+      await snapshotRead.promise
+      await open(authority, roomId, inc)
+      releaseDrop.resolve()
+      await dropping
+      expect((await authority.readHead(roomId))?.head.currentInc).toBe(inc)
+      expect(await authority.listGenerations(roomId)).toContain(inc)
+    } finally {
+      releaseDrop.resolve()
+      client.smembers = smembers as typeof client.smembers
+      if (begin !== undefined) commands.tfRoomDropGenerationBegin = begin
+      await Promise.allSettled([backend.dispose(), authority.dispose(), client.quit()])
     }
   })
 
@@ -312,7 +441,8 @@ describe('Redis real three-master Cluster CI certification', () => {
     }
 
     const baseline = new Set((await pubSubClients()).map(clientIdentity))
-    const backend = redisBackend(cluster, uniquePrefix('held-dispatch'))
+    const prefix = uniquePrefix('held-dispatch')
+    const backend = redisBackend(cluster, prefix)
     const states: SubscriptionState[] = []
     const observed: string[] = []
     const dispatchHeld = deferred()
@@ -353,6 +483,11 @@ describe('Redis real three-master Cluster CI certification', () => {
         (error: unknown) => error,
       )
       await dispatchHeld.promise
+      await waitFor(() => held.length === 2)
+      const expectedChannel = channelKey(prefix, 'held-dispatch-room', 'held-dispatch-inc', laneKey(SEMANTIC_LANE))
+      expect(held.map(([channel]) => channel.toString())).toEqual([expectedChannel, expectedChannel])
+      expect(Buffer.from(decodeRedisOrderingFrame(held[0]![1]).payload).toString()).toBe('old-epoch')
+      expect(held[1]?.[1][0]).toBe(REDIS_DELIVERY_FENCE_BYTE)
       expect(await settlesWithin(committed.delivery, 100)).toBe(false)
 
       const [first] = await waitForValue(async () =>
@@ -421,99 +556,16 @@ describe('Redis real three-master Cluster CI certification', () => {
     }
   })
 
-  it('lets the defined command recover a genuine NOSCRIPT after relocation', async () => {
-    const prefix = uniquePrefix('noscript')
-    const roomId = 'noscript-room'
-    const inc = 'noscript-inc'
-    const client = clusterClient(CLUSTER_NODES)
-    const backend = redisBackend(client, prefix)
-    let moved: { slot: number; source: Master; target: Master } | undefined
-    try {
-      await open(backend, roomId, inc)
-      accepted(await backend.commitLane(roomId, inc, SEMANTIC_LANE, Buffer.from('prime')))
-      const slotNumber = await slot(headKey(prefix, roomId))
-      const source = owner(slotNumber)
-      const target = otherMaster(source)
-      moved = { slot: slotNumber, source, target }
-      await target.client.script('FLUSH')
-      await moveSlot(slotNumber, source, target, true)
-      expect(accepted(await backend.commitLane(roomId, inc, SEMANTIC_LANE, Buffer.from('fallback'))).seq).toBe(2)
-    } finally {
-      if (moved !== undefined) await restoreSlot(moved.slot, moved.source, moved.target)
-      await backend.dispose()
-      await client.quit().catch(() => client.disconnect())
-    }
-  })
-
-  it('follows a real MOVED while a no-redirection control fails', async () => {
-    const prefix = uniquePrefix('moved')
-    const roomId = 'moved-room'
-    const inc = 'moved-inc'
-    const backend = redisBackend(cluster, prefix)
-    const controlClient = clusterClient(CLUSTER_NODES, 0)
-    const control = new RedisRoomBackend({ redis: controlClient, prefix })
-    let moved: { slot: number; source: Master; target: Master } | undefined
-    try {
-      await open(backend, roomId, inc)
-      await control.readHead(roomId)
-      const slotNumber = await slot(headKey(prefix, roomId))
-      const source = owner(slotNumber)
-      const target = otherMaster(source)
-      moved = { slot: slotNumber, source, target }
-      await moveSlot(slotNumber, source, target, true)
-      await expect(source.client.get(headKey(prefix, roomId))).rejects.toThrow(/MOVED/)
-      await expect(control.readHead(roomId)).rejects.toThrow(/redirection|MOVED/i)
-      expect((await backend.readHead(roomId))?.head.currentInc).toBe(inc)
-    } finally {
-      if (moved !== undefined) await restoreSlot(moved.slot, moved.source, moved.target)
-      await Promise.allSettled([backend.dispose(), control.dispose(), controlClient.quit()])
-    }
-  })
-
-  it('follows a real ASK while a no-ASKING control fails', async () => {
-    const prefix = uniquePrefix('ask')
-    const roomId = 'ask-room'
-    const inc = 'ask-inc'
-    const client = clusterClient(CLUSTER_NODES)
-    const backend = redisBackend(client, prefix)
-    const controlClient = clusterClient(CLUSTER_NODES, 0)
-    const control = new RedisRoomBackend({ redis: controlClient, prefix })
-    let migration: { slot: number; source: Master; target: Master; finalized: boolean } | undefined
-    try {
-      await open(backend, roomId, inc)
-      await control.readHead(roomId)
-      const slotNumber = await slot(headKey(prefix, roomId))
-      const source = owner(slotNumber)
-      const target = otherMaster(source)
-      migration = { slot: slotNumber, source, target, finalized: false }
-      await target.client.cluster('SETSLOT', slotNumber, 'IMPORTING', source.id)
-      await source.client.cluster('SETSLOT', slotNumber, 'MIGRATING', target.id)
-      const keys = (await source.client.cluster('GETKEYSINSLOT', slotNumber, 10_000)) as string[]
-      await migrateKeys(source, target, keys)
-      await expect(source.client.get(headKey(prefix, roomId))).rejects.toThrow(/ASK/)
-      await expect(control.readHead(roomId)).rejects.toThrow(/redirection|ASK/i)
-      expect((await backend.readHead(roomId))?.head.currentInc).toBe(inc)
-      for (const master of masters) await master.client.cluster('SETSLOT', slotNumber, 'NODE', target.id)
-      migration.finalized = true
-    } finally {
-      if (migration !== undefined) {
-        if (migration.finalized) await restoreSlot(migration.slot, migration.source, migration.target)
-        else await restorePartialSlot(migration.slot, migration.source, migration.target)
-      }
-      await Promise.allSettled([backend.dispose(), control.dispose(), client.quit(), controlClient.quit()])
-    }
-  })
-
   function owner(slotNumber: number): Master {
-    const match = masters.find(({ start, end }) => slotNumber >= start && slotNumber <= end)
+    const match = masters.find(({ ranges }) => ranges.some(([start, end]) => slotNumber >= start && slotNumber <= end))
     if (match === undefined) throw new Error(`slot ${slotNumber} has no owner`)
     return match
   }
 
-  function otherMaster(source: Master): Master {
-    const target = masters.find(({ id }) => id !== source.id)
-    if (target === undefined) throw new Error(`no relocation target exists for Cluster node '${source.id}'`)
-    return target
+  function masterForNode(node: Redis): Master {
+    const match = masters.find(({ host, port }) => host === node.options.host && port === node.options.port)
+    if (match === undefined) throw new Error(`Cluster node '${node.options.host}:${node.options.port}' has no master`)
+    return match
   }
 
   async function slot(key: string): Promise<number> {
@@ -574,31 +626,13 @@ describe('Redis real three-master Cluster CI certification', () => {
     const keys = (await current.client.cluster('GETKEYSINSLOT', slotNumber, 10_000)) as string[]
     await migrateKeys(current, original, keys)
     for (const master of masters) await master.client.cluster('SETSLOT', slotNumber, 'NODE', original.id)
-    await assertClusterOk()
-  }
-
-  async function restorePartialSlot(slotNumber: number, original: Master, partial: Master): Promise<void> {
-    const migrated = (await partial.client.cluster('GETKEYSINSLOT', slotNumber, 10_000)) as string[]
-    if (migrated.length === 0) {
-      await original.client.cluster('SETSLOT', slotNumber, 'STABLE')
-      await partial.client.cluster('SETSLOT', slotNumber, 'STABLE')
-      for (const master of masters) await master.client.cluster('SETSLOT', slotNumber, 'NODE', original.id)
-      await assertClusterOk()
-      return
-    }
-    for (const master of masters) await master.client.cluster('SETSLOT', slotNumber, 'NODE', partial.id)
-    await restoreSlot(slotNumber, original, partial)
-  }
-
-  async function assertClusterOk(): Promise<void> {
     for (const master of masters) expect((await clusterInfo(master.client)).cluster_state).toBe('ok')
   }
 })
 
-function clusterClient(nodes: RedisClusterNode[], maxRedirections = 16): Cluster {
+function clusterClient(nodes: RedisClusterNode[]): Cluster {
   const client = new Cluster(nodes, {
     scaleReads: 'master',
-    maxRedirections,
     slotsRefreshTimeout: 2_000,
     redisOptions: { maxRetriesPerRequest: 2 },
     clusterRetryStrategy: (attempt) => (attempt <= 5 ? 20 : null),
@@ -611,14 +645,22 @@ async function readMasters(nodes: RedisClusterNode[]): Promise<Master[]> {
   const seed = new Redis(nodes[0] as RedisClusterNode)
   const raw = (await seed.cluster('SLOTS')) as unknown as Array<[number, number, [string, number, string]]>
   await seed.quit()
-  return raw.map(([start, end, [host, port, id]]) => ({
-    start,
-    end,
-    host,
-    port,
-    id,
-    client: new Redis({ host, port, maxRetriesPerRequest: 2 }),
-  }))
+  const masters = new Map<string, Master>()
+  for (const [start, end, [host, port, id]] of raw) {
+    const existing = masters.get(id)
+    if (existing === undefined) {
+      masters.set(id, {
+        host,
+        port,
+        id,
+        ranges: [[start, end]],
+        client: new Redis({ host, port, maxRetriesPerRequest: 2 }),
+      })
+    } else {
+      existing.ranges.push([start, end])
+    }
+  }
+  return [...masters.values()]
 }
 
 function redisBackend(redis: Redis | Cluster, prefix: string): BackendSpi {

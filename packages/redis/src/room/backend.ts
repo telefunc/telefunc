@@ -34,11 +34,10 @@ import {
   decodeRedisOrderingFrame,
   directoryIndexKey,
   directoryTagsKey,
-  escapeGlob,
   generationInvalidationChannel,
+  generationKeysKey,
   generationTokensKey,
   gensKey,
-  genPrefix,
   headKey,
   laneKey,
   parseLaneKey,
@@ -112,6 +111,7 @@ type HeadCxReply =
   | { tag: 'head'; head: StoredHead }
   | { tag: 'deleted' }
   | { tag: 'conflict'; current: StoredHead | null }
+type DropGenerationBeginReply = { exists: false } | { exists: true; token: string }
 
 function toBase64(bytes: Uint8Array): string {
   return Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString('base64')
@@ -412,7 +412,7 @@ export class RedisRoomBackend implements BackendDriver {
   async listRetained(roomId: string, inc: string): Promise<LaneId[]> {
     this.#assertLive()
     const prefix = retainedKeyPrefix(this.#prefix, roomId, inc)
-    const keys = await this.#scanKeys(`${escapeGlob(prefix)}*`)
+    const keys = (await this.#generationKeys(roomId, inc)).filter((key) => key.startsWith(prefix))
     return keys.map((physical) => parseLaneKey(physical.slice(prefix.length)))
   }
 
@@ -435,7 +435,8 @@ export class RedisRoomBackend implements BackendDriver {
       ])
       return
     }
-    const keys = await this.#scanKeys(`${escapeGlob(retainedKeyPrefix(this.#prefix, roomId, inc))}*`)
+    const prefix = retainedKeyPrefix(this.#prefix, roomId, inc)
+    const keys = (await this.#generationKeys(roomId, inc)).filter((key) => key.startsWith(prefix))
     const commandKeys = REDIS_ROOM_COMMAND_KEYS.retainedDelete(this.#prefix, roomId, inc, keys)
     await this.#call(REDIS_ROOM_COMMANDS.retainedDelete.name, [String(commandKeys.length), ...commandKeys, ''])
   }
@@ -469,21 +470,26 @@ export class RedisRoomBackend implements BackendDriver {
 
   async dropGeneration(roomId: string, inc: string): Promise<void> {
     this.#assertLive()
-    const head = this.#parseHead(await this.#publisher.get(headKey(this.#prefix, roomId)))
-    if ((head?.inc ?? null) === inc) {
-      throw new Error(`dropGeneration: refusing to drop the current incarnation '${inc}' of room '${roomId}'`)
-    }
-    const keys = await this.#scanKeys(`${escapeGlob(genPrefix(this.#prefix, roomId, inc))}:*`)
+    const begin = JSON.parse(
+      (await this.#call(REDIS_ROOM_COMMANDS.dropGenerationBegin.name, [
+        ...REDIS_ROOM_COMMAND_KEYS.dropGenerationBegin(this.#prefix, roomId),
+        '',
+        inc,
+      ])) as string,
+    ) as DropGenerationBeginReply
+    if (!begin.exists) return
+    const manifest = generationKeysKey(this.#prefix, roomId, inc)
+    const keys = await this.#publisher.smembers(manifest)
     if (keys.length > 0) await this.#publisher.unlink(...keys)
-    const generationToken = await this.#publisher.hget(generationTokensKey(this.#prefix, roomId), inc)
-    if (generationToken !== null) {
-      // Disconnected peers reject this token during post-SUBSCRIBE validation; connected peers terminate
-      // immediately because a dropped generation is definitive, not recoverable route loss.
-      await this.#publisher.publish(generationInvalidationChannel(this.#prefix, roomId, inc), generationToken)
-    }
+    await this.#publisher.unlink(manifest)
+    // Disconnected peers reject this token during post-SUBSCRIBE validation; connected peers terminate
+    // immediately because a dropped generation is definitive, not recoverable route loss.
+    await this.#publisher.publish(generationInvalidationChannel(this.#prefix, roomId, inc), begin.token)
     await this.#call(REDIS_ROOM_COMMANDS.dropGenerationFinalize.name, [
-      ...REDIS_ROOM_COMMAND_KEYS.dropGenerationFinalize(this.#prefix, roomId),
+      ...REDIS_ROOM_COMMAND_KEYS.dropGenerationFinalize(this.#prefix, roomId, inc),
+      '',
       inc,
+      begin.token,
     ])
   }
 
@@ -567,8 +573,12 @@ export class RedisRoomBackend implements BackendDriver {
 
   async #scanCellKeys(roomId: string, inc: string, prefix: string): Promise<string[]> {
     const physicalPrefix = cellKeyPrefix(this.#prefix, roomId, inc)
-    const physical = await this.#scanKeys(`${escapeGlob(physicalPrefix + prefix)}*`)
+    const physical = (await this.#generationKeys(roomId, inc)).filter((key) => key.startsWith(physicalPrefix + prefix))
     return physical.map((key) => key.slice(physicalPrefix.length))
+  }
+
+  #generationKeys(roomId: string, inc: string): Promise<string[]> {
+    return this.#publisher.smembers(generationKeysKey(this.#prefix, roomId, inc))
   }
 
   async #call(command: string, keysAndArgs: ReadonlyArray<string | Uint8Array>): Promise<unknown> {
@@ -577,20 +587,6 @@ export class RedisRoomBackend implements BackendDriver {
     } catch (error) {
       throw normalizeRedisError(error)
     }
-  }
-
-  async #scanKeys(pattern: string): Promise<string[]> {
-    const nodes = this.#publisher instanceof Cluster ? this.#publisher.nodes('master') : [this.#publisher]
-    const keys = new Set<string>()
-    for (const node of nodes) {
-      let cursor = '0'
-      do {
-        const [next, page] = await node.scan(cursor, 'MATCH', pattern)
-        cursor = next
-        for (const key of page) keys.add(key)
-      } while (cursor !== '0')
-    }
-    return [...keys]
   }
 }
 
