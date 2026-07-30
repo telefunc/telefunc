@@ -36,10 +36,6 @@ export function partsToLane(parts: LaneParts): LaneId {
   }
 }
 
-export function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
-  return a.byteLength === b.byteLength && a.every((byte, index) => byte === b[index])
-}
-
 // Binary crosses the Node↔workerd RPC boundary as base64: a raw typed array survives Node→DO as an
 // argument but a BLOB read back from SQLite does not round-trip cleanly as a DO→Node return value, so
 // every binary the DO hands back is encoded and the facade decodes it. Kept dependency-free (no Buffer)

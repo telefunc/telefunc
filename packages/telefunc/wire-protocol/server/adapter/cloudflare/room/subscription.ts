@@ -2,17 +2,6 @@ import type { BackendReceiver, SubscriptionAttempt, SubscriptionAttemptState } f
 import { ROUTE_RENEW_EVERY_MS } from './routes.js'
 import type { CloudflareRoomAuthorityStub, RoomShardInvalidationRequest } from './backend.js'
 
-export type SubscriptionScheduler = {
-  schedule(delayMs: number, task: () => Promise<void>): () => void
-}
-
-export const realSubscriptionScheduler: SubscriptionScheduler = {
-  schedule(delayMs, task) {
-    const handle = setTimeout(() => void task(), delayMs)
-    return () => clearTimeout(handle)
-  },
-}
-
 export type CloudflareRoomSubscriptionSource = {
   roomId: string
   inc: string
@@ -21,7 +10,7 @@ export type CloudflareRoomSubscriptionSource = {
   authority: CloudflareRoomAuthorityStub
 }
 
-export type CloudflareRoomSubscriptionOptions = {
+type CloudflareRoomSubscriptionOptions = {
   onClosed(): void
 }
 
@@ -31,10 +20,7 @@ export class CloudflareRoomSubscriptionAttempt implements SubscriptionAttempt {
   readonly ready: Promise<void>
   readonly #source: CloudflareRoomSubscriptionSource
   readonly #receiver: BackendReceiver
-  readonly #scheduler: SubscriptionScheduler
   readonly #onClosed: () => void
-  readonly #attemptId = crypto.randomUUID()
-  readonly #createdAt: number
   readonly #leaseId = crypto.randomUUID()
   readonly #listeners = new Set<(state: SubscriptionAttemptState) => void>()
   #state: SubscriptionAttemptState = 'establishing'
@@ -53,8 +39,6 @@ export class CloudflareRoomSubscriptionAttempt implements SubscriptionAttempt {
   ) {
     this.#source = source
     this.#receiver = receiver
-    this.#scheduler = realSubscriptionScheduler
-    this.#createdAt = Date.now()
     this.#onClosed = options.onClosed
     this.ready = new Promise<void>((resolve, reject) => {
       this.#settleReady = { resolve, reject }
@@ -122,26 +106,24 @@ export class CloudflareRoomSubscriptionAttempt implements SubscriptionAttempt {
 
   async #establish(): Promise<void> {
     try {
-      const capture = await this.#source.authority.captureRouteGeneration(
-        this.#source.inc,
-        this.#attemptId,
-        this.#createdAt,
-      )
-      if (this.#isClosed()) return
-      if ('rejected' in capture) throw new Error(capture.reason)
-      this.#generationToken = capture.generationToken
       const registered = await this.#source.authority.registerRoute(
         this.#source.roomId,
         this.#source.inc,
         this.#source.laneKey,
         this.#source.subscriberDoId,
         this.#leaseId,
-        this.#generationToken,
-        this.#attemptId,
-        this.#createdAt,
       )
       if (this.#isClosed()) return
-      if (!('ok' in registered)) throw new Error(registered.reason)
+      if (!('ok' in registered)) {
+        const error = new Error(registered.reason)
+        if (registered.terminal === true) {
+          this.#rejectReady(error)
+          this.#terminate()
+          return
+        }
+        throw error
+      }
+      this.#generationToken = registered.generationToken
       this.#transition('ready')
       this.#resolveReady()
       this.#scheduleRenewal()
@@ -155,7 +137,8 @@ export class CloudflareRoomSubscriptionAttempt implements SubscriptionAttempt {
   #scheduleRenewal(): void {
     if (this.#state !== 'ready') return
     this.#cancelRenewal?.()
-    this.#cancelRenewal = this.#scheduler.schedule(ROUTE_RENEW_EVERY_MS, () => this.#renew())
+    const handle = setTimeout(() => void this.#renew(), ROUTE_RENEW_EVERY_MS)
+    this.#cancelRenewal = () => clearTimeout(handle)
   }
 
   async #renew(): Promise<void> {
@@ -168,12 +151,11 @@ export class CloudflareRoomSubscriptionAttempt implements SubscriptionAttempt {
         this.#source.subscriberDoId,
         this.#leaseId,
         this.#generationToken,
-        this.#attemptId,
-        this.#createdAt,
       )
       if (this.#state !== 'ready') return
       if (!renewed.ok) {
-        this.#close()
+        if (renewed.terminal === true) this.terminate()
+        else this.#close()
         return
       }
       this.#scheduleRenewal()
@@ -183,22 +165,12 @@ export class CloudflareRoomSubscriptionAttempt implements SubscriptionAttempt {
   }
 
   async #teardown(): Promise<void> {
-    const outcomes = await Promise.allSettled([
-      Promise.resolve().then(() =>
-        this.#source.authority.unsubscribeRoute(
-          this.#source.inc,
-          this.#source.laneKey,
-          this.#source.subscriberDoId,
-          this.#leaseId,
-        ),
-      ),
-      Promise.resolve().then(() => this.#source.authority.releaseRouteGenerationCapture(this.#attemptId)),
-    ])
-    const failures = outcomes
-      .filter((outcome): outcome is PromiseRejectedResult => outcome.status === 'rejected')
-      .map((outcome) => (outcome.reason instanceof Error ? outcome.reason : new Error('unknown teardown failure')))
-    if (failures.length === 1) throw new Error(failures[0]!.message)
-    if (failures.length > 1) throw new AggregateError(failures, 'Cloudflare Room route teardown failed')
+    await this.#source.authority.unsubscribeRoute(
+      this.#source.inc,
+      this.#source.laneKey,
+      this.#source.subscriberDoId,
+      this.#leaseId,
+    )
   }
 
   async #settleTeardown(needsLateTeardown: boolean): Promise<void> {

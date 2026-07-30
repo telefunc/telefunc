@@ -23,12 +23,12 @@ import type {
 import { BACKEND_SPI_VERSION } from '../../../../backend/spi.js'
 import { CloudflareBroadcastTransport } from '../broadcast.js'
 import { base64ToBytes, bytesToBase64, laneKey as laneKeyOf } from './codec.js'
+import { MAX_RETAINED_BYTES } from './retained.js'
 import { CloudflareRoomSubscriptionAttempt, type CloudflareRoomSubscriptionSource } from './subscription.js'
 import type {
   CellsWire,
   CommitWire,
   DropWire,
-  GenerationWire,
   HeadCxWire,
   HeadNextWire,
   HeadWire,
@@ -37,7 +37,6 @@ import type {
 } from './do.js'
 
 const DIRECTORY_DO_NAME = '__telefunc_room_directory__'
-const MAX_RETAINED_BYTES = 16 * 1024 * 1024
 const ROOM_MANAGER = Symbol('telefunc.cloudflare.room-manager')
 
 function assertOrderingPosition(seq: number, timestamp: number, context: string): void {
@@ -62,7 +61,9 @@ export type RoomShardDeliveryRequest = {
   timestamp: number
 }
 
-export type RoomShardInvalidationRequest = Omit<RoomShardDeliveryRequest, 'frame' | 'seq' | 'timestamp'>
+export type RoomShardInvalidationRequest = Omit<RoomShardDeliveryRequest, 'frame' | 'seq' | 'timestamp'> & {
+  terminal?: true
+}
 
 export type CloudflareRoomAuthorityStub = {
   readHead(): Promise<HeadWire | null>
@@ -84,30 +85,19 @@ export type CloudflareRoomAuthorityStub = {
   readRetained(inc: string, lane: LaneId): Promise<RetainedWire | null>
   listRetained(inc: string): Promise<LaneId[]>
   deleteRetainedLane(inc: string, lane?: LaneId, opts?: { ifSeq?: number }): Promise<void>
-  captureRouteGeneration(
-    inc: string,
-    attemptId?: string | null,
-    attemptCreatedAt?: number | null,
-  ): Promise<GenerationWire>
-  releaseRouteGenerationCapture(attemptId: string): Promise<void>
   registerRoute(
     roomId: string,
     inc: string,
     laneKey: string,
     subscriberDoId: string,
     leaseId: string,
-    expectedGenerationToken: string,
-    captureAttemptId?: string | null,
-    captureCreatedAt?: number | null,
   ): Promise<RegisterWire>
   renewRoute(
     inc: string,
     laneKey: string,
     subscriberDoId: string,
     leaseId: string,
-    expectedGenerationToken?: string | null,
-    captureAttemptId?: string | null,
-    captureCreatedAt?: number | null,
+    expectedGenerationToken: string,
   ): Promise<{ ok: boolean; terminal?: boolean }>
   unsubscribeRoute(inc: string, laneKey: string, subscriberDoId: string, leaseId: string): Promise<void>
   listGenerations(): Promise<string[]>
@@ -136,16 +126,11 @@ export function requireCloudflareRoomNamespace(
   return binding
 }
 
-type ManagerEntry = {
-  source: CloudflareRoomSubscriptionSource
-  attempt: CloudflareRoomSubscriptionAttempt
-}
-
 export class CloudflareRoomSessionManager {
   readonly #id: string
   readonly #subscriptionPartition = crypto.randomUUID()
   readonly #getRoomNamespace: () => CloudflareRoomNamespace
-  readonly #entries = new Map<string, ManagerEntry>()
+  readonly #entries = new Map<string, CloudflareRoomSubscriptionAttempt>()
   readonly #deliverySettlements = new Map<string, Promise<void>>()
   #disposed = false
 
@@ -180,21 +165,24 @@ export class CloudflareRoomSessionManager {
     if (request.subscriberDoId !== this.#id)
       throw new Error('Cloudflare Room delivery addressed the wrong session shard')
     const entry = this.#entries.get(JSON.stringify([request.roomId, request.inc, request.laneKey]))
-    if (entry === undefined || !entry.attempt.matches(request)) {
+    if (entry === undefined || !entry.matches(request)) {
       throw new Error('Cloudflare Room delivery lease is not installed')
     }
-    await entry.attempt.deliver(request.frame, request.seq, request.timestamp)
+    await entry.deliver(request.frame, request.seq, request.timestamp)
   }
 
   invalidate(request: RoomShardInvalidationRequest): void {
     const entry = this.#entries.get(JSON.stringify([request.roomId, request.inc, request.laneKey]))
-    if (entry?.attempt.matches(request)) entry.attempt.invalidate()
+    if (entry?.matches(request)) {
+      if (request.terminal === true) entry.terminate()
+      else entry.invalidate()
+    }
   }
 
   dispose(): void {
     if (this.#disposed) return
     this.#disposed = true
-    for (const entry of this.#entries.values()) entry.attempt.terminate()
+    for (const attempt of this.#entries.values()) attempt.terminate()
     this.#entries.clear()
     this.#deliverySettlements.clear()
   }
@@ -247,19 +235,16 @@ export class CloudflareRoomSessionManager {
     let attempt!: CloudflareRoomSubscriptionAttempt
     attempt = new CloudflareRoomSubscriptionAttempt(source, receiver, {
       onClosed: () => {
-        if (this.#entries.get(key)?.attempt === attempt) this.#entries.delete(key)
+        if (this.#entries.get(key) === attempt) this.#entries.delete(key)
       },
     })
-    this.#entries.set(key, { source, attempt })
+    this.#entries.set(key, attempt)
     attempt.start()
     return attempt
   }
 }
 
-export function withCloudflareRoomSessionManager<T>(
-  manager: CloudflareRoomSessionManager | (() => CloudflareRoomSessionManager),
-  fn: () => T,
-): T {
+export function withCloudflareRoomSessionManager<T>(manager: CloudflareRoomSessionManager, fn: () => T): T {
   if (!isAsyncMode()) throw new Error(CLOUDFLARE_ROOM_CONTEXT_ERROR)
   const raw: Context = { ...(getRawContext() ?? {}), [ROOM_MANAGER]: manager }
   return restoreContext(raw, fn)
@@ -267,8 +252,7 @@ export function withCloudflareRoomSessionManager<T>(
 
 export function getCloudflareRoomSessionManager(): CloudflareRoomSessionManager {
   if (!isAsyncMode()) throw new Error(CLOUDFLARE_ROOM_CONTEXT_ERROR)
-  const managerOrFactory = getRawContext()?.[ROOM_MANAGER]
-  const manager = typeof managerOrFactory === 'function' ? managerOrFactory() : managerOrFactory
+  const manager = getRawContext()?.[ROOM_MANAGER]
   if (!(manager instanceof CloudflareRoomSessionManager)) throw new Error(CLOUDFLARE_ROOM_CONTEXT_ERROR)
   return manager
 }
@@ -381,7 +365,7 @@ export class CloudflareRoomBackend implements BackendDriver {
     if ('error' in wire) throw new Error(wire.error)
     manager.dropGenerationSettlements(roomId, inc)
     for (const dropped of wire.droppedSubscribers) {
-      manager.invalidate({ roomId, inc, ...dropped })
+      manager.invalidate({ roomId, inc, ...dropped, terminal: true })
     }
   }
   async directoryPut(roomId: string, incTag: string) {

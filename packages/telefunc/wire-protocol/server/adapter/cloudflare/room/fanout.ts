@@ -7,9 +7,9 @@
 // `deliver` is the handoff seam: in production the room DO RPCs each target session shard
 // (`telefuncRoomDeliver`). The attempt is the backend's ONE handoff — never retried or rolled back.
 
-export type DeliveryInfo = { roomId: string; inc: string; laneKey: string; seq: number; timestamp: number }
+type DeliveryInfo = { roomId: string; inc: string; laneKey: string; seq: number; timestamp: number }
 export type RouteTarget = { subscriberDoId: string; leaseId: string; generationToken: string }
-export type DeliverFn = (target: RouteTarget, frame: Uint8Array, info: DeliveryInfo) => Promise<void>
+type DeliverFn = (target: RouteTarget, frame: Uint8Array, info: DeliveryInfo) => Promise<void>
 
 const noop = (): void => {}
 
@@ -79,6 +79,14 @@ export class Fanout {
   }
 
   async #fanout(targets: RouteTarget[], frame: Uint8Array, info: DeliveryInfo): Promise<void> {
-    await Promise.all(targets.map((target) => this.#deliver(target, frame, info)))
+    const outcomes = await Promise.allSettled(targets.map((target) => this.#deliver(target, frame, info)))
+    const failures = outcomes.filter((outcome): outcome is PromiseRejectedResult => outcome.status === 'rejected')
+    if (failures.length === 1) throw failures[0]!.reason
+    if (failures.length > 1) {
+      throw new AggregateError(
+        failures.map((failure) => failure.reason),
+        'Cloudflare Room fanout failed',
+      )
+    }
   }
 }

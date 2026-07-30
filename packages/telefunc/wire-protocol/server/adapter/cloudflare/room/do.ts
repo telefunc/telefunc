@@ -20,7 +20,6 @@ import {
   recordRouteDeliveryFailure,
   recordRouteDeliverySuccess,
   renewRoute,
-  ROUTE_CAPTURE_TTL_MS,
   snapshotRoutes,
   type RouteInstallation,
   upsertRoute,
@@ -30,8 +29,6 @@ import {
   advanceOrder,
   compareExchangeCells,
   compareExchangeHead,
-  countRouteGenerationCaptures,
-  deleteExpiredRouteGenerationCaptures,
   directoryDelete,
   directoryList,
   directoryPut,
@@ -43,9 +40,6 @@ import {
   readCells,
   readGenerationToken,
   readLiveHead,
-  readRouteGenerationCapture,
-  insertRouteGenerationCapture,
-  touchRouteGenerationCapture,
   type StoredHead,
 } from './storage.js'
 
@@ -84,7 +78,6 @@ export type RetainedWire = { payloadB64: string; seq: number; timestamp: number 
 export type RegisterWire =
   | { ok: true; expiresAt: number; generationToken: string }
   | { rejected: true; reason: string; terminal?: boolean }
-export type GenerationWire = { ok: true; generationToken: string } | { rejected: true; reason: string; terminal: true }
 export type DropWire =
   | { droppedSubscribers: Array<{ laneKey: string; subscriberDoId: string; leaseId: string; generationToken: string }> }
   | { error: string }
@@ -99,11 +92,7 @@ type SubscriberNamespace = {
   get(id: unknown): SubscriberStub
 }
 
-type RoomEnv = {
-  TELEFUNC_ROOM_ALARM_INTERVAL_MS?: string
-}
-
-export const ROOM_ALARM_INTERVAL_MS = 30_000
+const ROOM_ALARM_INTERVAL_MS = 30_000
 
 function headToWire(head: StoredHead): HeadWire {
   const wire: HeadWire = {
@@ -134,17 +123,9 @@ function nextFromWire(next: HeadNextWire): HeadNext {
 export class TelefuncRoomDurableObject extends DurableObject {
   readonly #sql: SqlStorage
   readonly #fanout: Fanout
-  readonly #maxRetainedBytes: number
-  readonly #alarmIntervalMs: number
   readonly #sessionNamespaceValue: SubscriberNamespace
-  readonly #authorityNow: () => number
 
-  constructor(
-    ctx: DurableObjectState,
-    env: unknown,
-    sessionBindingName: string = 'TelefuncDurableObject',
-    authorityNow: () => number = Date.now,
-  ) {
+  constructor(ctx: DurableObjectState, env: unknown, sessionBindingName: string = 'TelefuncDurableObject') {
     super(ctx, env as never)
     const sessionNamespace = (env as Record<string, SubscriberNamespace | undefined>)[sessionBindingName]
     if (sessionNamespace === undefined) {
@@ -153,16 +134,11 @@ export class TelefuncRoomDurableObject extends DurableObject {
       )
     }
     this.#sessionNamespaceValue = sessionNamespace
-    this.#authorityNow = authorityNow
     this.#sql = ctx.storage.sql
     initSchema(this.#sql)
-    this.#maxRetainedBytes = 16 * 1024 * 1024
-    const configuredInterval = Number((env as RoomEnv).TELEFUNC_ROOM_ALARM_INTERVAL_MS)
-    this.#alarmIntervalMs =
-      Number.isFinite(configuredInterval) && configuredInterval > 0 ? configuredInterval : ROOM_ALARM_INTERVAL_MS
     this.#fanout = new Fanout(
       async (target, frame, info) => {
-        const session = this.#sessionNamespace().get(this.#sessionNamespace().idFromString(target.subscriberDoId))
+        const session = this.#sessionNamespaceValue.get(this.#sessionNamespaceValue.idFromString(target.subscriberDoId))
         try {
           await session.telefuncRoomDeliver({
             roomId: info.roomId,
@@ -215,8 +191,6 @@ export class TelefuncRoomDurableObject extends DurableObject {
       },
       (resume) => setTimeout(resume, 0),
     )
-    // Schedule on the runtime clock; sweep predicates use the room authority clock. The test binding only
-    // shortens this cadence and never replaces the production alarm path.
     this.ctx.blockConcurrencyWhile(async () => {
       if ((await this.ctx.storage.getAlarm()) === null) await this.#armAlarm()
     })
@@ -225,13 +199,13 @@ export class TelefuncRoomDurableObject extends DurableObject {
   // ── head ──
 
   async readHead(): Promise<HeadWire | null> {
-    const head = readLiveHead(this.#sql, this.#authorityNow())
+    const head = readLiveHead(this.#sql, Date.now())
     return head === null ? null : headToWire(head)
   }
 
   async compareExchangeHead(cx: HeadCx, nextWire: HeadNextWire): Promise<HeadCxWire> {
     const next = nextFromWire(nextWire)
-    const now = this.#authorityNow()
+    const now = Date.now()
     let outcome!: ReturnType<typeof compareExchangeHead>
     // One SQL transaction: single-object serialization gives head linearizability (I1). A validation
     // throw rolls the tx back and is surfaced as a structured error the facade rethrows verbatim so
@@ -252,7 +226,7 @@ export class TelefuncRoomDurableObject extends DurableObject {
   // ── cells ──
 
   async readCells(inc: string, sel: { keys: string[] } | { prefix: string }): Promise<CellsWire> {
-    const result = readCells(this.#sql, inc, sel, this.#authorityNow())
+    const result = readCells(this.#sql, inc, sel, Date.now())
     if ('staleInc' in result) return { staleInc: true }
     return { revision: result.revision, cells: [...result.cells].map(([key, bytes]) => [key, bytesToBase64(bytes)]) }
   }
@@ -263,7 +237,7 @@ export class TelefuncRoomDurableObject extends DurableObject {
         ? { key: mutation.key }
         : { key: mutation.key, set: { bytes: base64ToBytes(mutation.set.bytesB64), ttlMs: mutation.set.ttlMs } },
     )
-    const now = this.#authorityNow()
+    const now = Date.now()
     let result!: CxResult
     this.ctx.storage.transactionSync(() => {
       result = compareExchangeCells(this.#sql, inc, revision, mutations, now)
@@ -280,7 +254,7 @@ export class TelefuncRoomDurableObject extends DurableObject {
     payload: Uint8Array,
     opts?: { retain?: boolean; closingLease?: string; requiredCellKeys?: string[] },
   ): Promise<CommitWire> {
-    const now = this.#authorityNow()
+    const now = Date.now()
     const key = laneKeyOf(lane)
     const frame = payload instanceof Uint8Array ? payload : new Uint8Array(payload)
     let accepted: { seq: number; timestamp: number; targets: RouteTarget[] } | null = null
@@ -294,7 +268,7 @@ export class TelefuncRoomDurableObject extends DurableObject {
           const required = readCells(this.#sql, inc, { keys: opts.requiredCellKeys }, now)
           if ('staleInc' in required || opts.requiredCellKeys.some((cell) => !required.cells.has(cell))) return
         }
-        if (opts?.retain === true) assertRetainedCapacity(this.#sql, inc, key, frame.byteLength, this.#maxRetainedBytes)
+        if (opts?.retain === true) assertRetainedCapacity(this.#sql, inc, key, frame.byteLength)
         const mark = advanceOrder(this.#sql, inc, key, now)
         if (opts?.retain === true) installRetained(this.#sql, inc, lane, frame, mark)
         const targets = snapshotRoutes(this.#sql, inc, key, now)
@@ -344,107 +318,14 @@ export class TelefuncRoomDurableObject extends DurableObject {
 
   // ── routes / readiness ──
 
-  async captureRouteGeneration(
-    inc: string,
-    attemptId: string | null = null,
-    attemptCreatedAt: number | null = null,
-  ): Promise<GenerationWire> {
-    let generationToken: string | null = null
-    let invalidAttempt = false
-    this.ctx.storage.transactionSync(() => {
-      const now = this.#authorityNow()
-      if (attemptId !== null) {
-        const prior = readRouteGenerationCapture(this.#sql, attemptId)
-        if (prior !== null) {
-          if (
-            attemptCreatedAt !== null &&
-            prior.inc === inc &&
-            prior.createdAt === attemptCreatedAt &&
-            touchRouteGenerationCapture(
-              this.#sql,
-              attemptId,
-              inc,
-              prior.token,
-              attemptCreatedAt,
-              now,
-              ROUTE_CAPTURE_TTL_MS,
-            )
-          ) {
-            generationToken = prior.token
-          } else {
-            invalidAttempt = true
-          }
-          return
-        }
-        // This is the critical absent-row distinction. A genuinely fresh internal attempt carries an
-        // authority-aligned creation epoch inside the bounded capture window. Once its durable row has
-        // expired and been swept, the same old epoch can never be reinterpreted as a new first capture.
-        if (
-          attemptCreatedAt === null ||
-          !Number.isSafeInteger(attemptCreatedAt) ||
-          attemptCreatedAt > now ||
-          attemptCreatedAt + ROUTE_CAPTURE_TTL_MS <= now
-        ) {
-          invalidAttempt = true
-          return
-        }
-      }
-      const head = readLiveHead(this.#sql, now)
-      if (head?.currentInc === inc && head.state === 'open') {
-        generationToken = readGenerationToken(this.#sql, inc)
-        if (generationToken !== null && attemptId !== null) {
-          insertRouteGenerationCapture(
-            this.#sql,
-            attemptId,
-            inc,
-            generationToken,
-            attemptCreatedAt!,
-            now + ROUTE_CAPTURE_TTL_MS,
-          )
-          const pinned = readRouteGenerationCapture(this.#sql, attemptId)
-          if (
-            pinned === null ||
-            pinned.inc !== inc ||
-            pinned.token !== generationToken ||
-            pinned.createdAt !== attemptCreatedAt
-          ) {
-            generationToken = null
-            invalidAttempt = true
-          }
-        }
-      }
-    })
-    if (invalidAttempt) {
-      return { rejected: true, reason: 'generation capture attempt is absent, expired, or invalid', terminal: true }
-    }
-    return generationToken === null
-      ? { rejected: true, reason: `room has no open incarnation '${inc}'`, terminal: true }
-      : { ok: true, generationToken }
-  }
-
-  async releaseRouteGenerationCapture(attemptId: string): Promise<void> {
-    this.ctx.storage.transactionSync(() => {
-      this.#sql.exec('DELETE FROM route_capture WHERE attempt_id = ?', attemptId)
-    })
-  }
-
-  async countRouteGenerationCaptures(): Promise<number> {
-    return countRouteGenerationCaptures(this.#sql)
-  }
-
   async registerRoute(
     roomId: string,
     inc: string,
     laneKey: string,
     subscriberDoId: string,
     leaseId: string,
-    expectedGenerationToken: string,
-    captureAttemptId: string | null = null,
-    captureCreatedAt: number | null = null,
   ): Promise<RegisterWire> {
-    // The shard id is canonical only inside the configured session namespace. Parse it before touching
-    // durable state; an authority never probes back into the caller during registration (self-fanout).
-    const sessionNamespace = this.#sessionNamespace()
+    const sessionNamespace = this.#sessionNamespaceValue
     if (!/^[0-9a-f]{64}$/.test(subscriberDoId)) {
       return { rejected: true, reason: `subscriber Durable Object id '${subscriberDoId}' is invalid`, terminal: true }
     }
@@ -453,56 +334,21 @@ export class TelefuncRoomDurableObject extends DurableObject {
     } catch {
       return { rejected: true, reason: `subscriber Durable Object id '${subscriberDoId}' is invalid`, terminal: true }
     }
-    let observedGenerationToken: string | null = null
-    this.ctx.storage.transactionSync(() => {
-      const head = readLiveHead(this.#sql, this.#authorityNow())
-      if (head?.currentInc === inc && head.state === 'open') {
-        observedGenerationToken = readGenerationToken(this.#sql, inc)
-      }
-    })
-    if (observedGenerationToken === null) {
-      return { rejected: true, reason: `room has no open incarnation '${inc}'`, terminal: true }
+    let result: RegisterWire = {
+      rejected: true,
+      reason: `room has no open incarnation '${inc}'`,
+      terminal: true,
     }
-    if (expectedGenerationToken !== observedGenerationToken) {
-      return { rejected: true, reason: `generation '${inc}' was invalidated`, terminal: true }
-    }
-    const probedGenerationToken = observedGenerationToken
-    let expiresAt = 0
-    let registered = false
-    let generationChanged = false
-    let captureInvalid = false
     this.ctx.storage.transactionSync(() => {
-      // Mint the full TTL from durable registration, never from before the awaited addressability probe.
-      const now = this.#authorityNow()
+      const now = Date.now()
       const head = readLiveHead(this.#sql, now)
       if (head === null || head.currentInc !== inc || head.state !== 'open') return
-      if (readGenerationToken(this.#sql, inc) !== probedGenerationToken) {
-        generationChanged = true
-        return
-      }
-      if (
-        captureAttemptId !== null &&
-        (captureCreatedAt === null ||
-          !touchRouteGenerationCapture(
-            this.#sql,
-            captureAttemptId,
-            inc,
-            probedGenerationToken,
-            captureCreatedAt,
-            now,
-            ROUTE_CAPTURE_TTL_MS,
-          ))
-      ) {
-        captureInvalid = true
-        return
-      }
-      expiresAt = upsertRoute(this.#sql, roomId, inc, laneKey, subscriberDoId, leaseId, probedGenerationToken, now)
-      registered = true
+      const generationToken = readGenerationToken(this.#sql, inc)
+      if (generationToken === null) return
+      const expiresAt = upsertRoute(this.#sql, roomId, inc, laneKey, subscriberDoId, leaseId, generationToken, now)
+      result = { ok: true, expiresAt, generationToken }
     })
-    if (registered) return { ok: true, expiresAt, generationToken: probedGenerationToken }
-    return generationChanged || captureInvalid
-      ? { rejected: true, reason: `generation '${inc}' was invalidated`, terminal: true }
-      : { rejected: true, reason: `room has no open incarnation '${inc}'`, terminal: true }
+    return result
   }
 
   async renewRoute(
@@ -510,55 +356,18 @@ export class TelefuncRoomDurableObject extends DurableObject {
     laneKey: string,
     subscriberDoId: string,
     leaseId: string,
-    expectedGenerationToken: string | null = null,
-    captureAttemptId: string | null = null,
-    captureCreatedAt: number | null = null,
+    expectedGenerationToken: string,
   ): Promise<{ ok: boolean; expiresAt?: number; terminal?: boolean }> {
-    const now = this.#authorityNow()
+    const now = Date.now()
     let result!: ReturnType<typeof renewRoute>
     let generationInvalid = false
     this.ctx.storage.transactionSync(() => {
       const currentGenerationToken = readGenerationToken(this.#sql, inc)
-      if (
-        currentGenerationToken === null ||
-        (expectedGenerationToken !== null && currentGenerationToken !== expectedGenerationToken)
-      ) {
+      if (currentGenerationToken === null || currentGenerationToken !== expectedGenerationToken) {
         generationInvalid = true
         return
       }
-      if (captureAttemptId !== null) {
-        const capture = readRouteGenerationCapture(this.#sql, captureAttemptId)
-        if (
-          captureCreatedAt === null ||
-          capture === null ||
-          capture.inc !== inc ||
-          capture.token !== currentGenerationToken ||
-          capture.createdAt !== captureCreatedAt ||
-          capture.expiresAt <= now
-        ) {
-          generationInvalid = true
-          return
-        }
-      }
       result = renewRoute(this.#sql, inc, laneKey, subscriberDoId, leaseId, now)
-      if (
-        result.ok &&
-        captureAttemptId !== null &&
-        !touchRouteGenerationCapture(
-          this.#sql,
-          captureAttemptId,
-          inc,
-          currentGenerationToken,
-          captureCreatedAt!,
-          now,
-          ROUTE_CAPTURE_TTL_MS,
-        )
-      ) {
-        // The read-only capture validation and exact route renewal share this synchronous transaction;
-        // an exact capture cannot disappear between them. Throwing rolls back the route renewal if that
-        // invariant is ever violated instead of committing a live route without its generation fence.
-        throw new Error('route capture changed during exact renewal')
-      }
     })
     if (generationInvalid) return { ok: false, terminal: true }
     // A missing/non-live exact route inside the SAME generation is recoverable: the subscription
@@ -567,11 +376,6 @@ export class TelefuncRoomDurableObject extends DurableObject {
   }
 
   async unsubscribeRoute(inc: string, laneKey: string, subscriberDoId: string, leaseId: string): Promise<void> {
-    const installation = listRouteInstallations(this.#sql, inc).find(
-      (entry) => entry.laneKey === laneKey && entry.subscriberDoId === subscriberDoId && entry.leaseId === leaseId,
-    )
-    if (installation === undefined) return
-    await this.#invalidateInstallation(installation)
     this.ctx.storage.transactionSync(() => deleteRoute(this.#sql, inc, laneKey, subscriberDoId, leaseId))
   }
 
@@ -582,7 +386,7 @@ export class TelefuncRoomDurableObject extends DurableObject {
   }
 
   async dropGeneration(inc: string): Promise<DropWire> {
-    const now = this.#authorityNow()
+    const now = Date.now()
     const head = readLiveHead(this.#sql, now)
     if (head?.currentInc === inc) {
       return { error: `dropGeneration: refusing to drop the current incarnation '${inc}'` }
@@ -591,7 +395,7 @@ export class TelefuncRoomDurableObject extends DurableObject {
     // Subscriber uninstalls are fallible. Keep their durable route rows and generation entry intact
     // until every exact-lease uninstall succeeds, so a retry can replay the same invalidations after a
     // transport failure or crash. This is the generation analogue of data-first / gens-entry-last.
-    await this.#invalidateInstallations(installations)
+    await Promise.all(installations.map((installation) => this.#invalidateInstallation(installation, true)))
     this.ctx.storage.transactionSync(() => dropGenerationRows(this.#sql, inc))
     this.#fanout.clearIncarnation(inc)
     // Report the routes that were on the dropped generation so the facade can close their local
@@ -626,22 +430,15 @@ export class TelefuncRoomDurableObject extends DurableObject {
 
   async alarm(): Promise<void> {
     try {
-      await this.#runSweep(this.#authorityNow())
+      await this.#runSweep(Date.now())
     } finally {
       await this.#armAlarm()
     }
   }
 
-  // Operational maintenance RPC: the alarm uses the same sweep, while this explicit form lets an owner
-  // request immediate convergence after lifecycle work without changing any data-path semantics.
-  async telefuncRoomRunMaintenance(): Promise<{ prunedRoutes: number }> {
-    return { prunedRoutes: await this.#runSweep(this.#authorityNow()) }
-  }
-
   async #runSweep(now: number): Promise<number> {
     let orphanIncs: string[] = []
     this.ctx.storage.transactionSync(() => {
-      deleteExpiredRouteGenerationCaptures(this.#sql, now)
       this.#sql.exec('DELETE FROM cell WHERE expires_at IS NOT NULL AND expires_at <= ?', now)
       const currentInc = readLiveHead(this.#sql, now)?.currentInc ?? null
       orphanIncs = observeAndListGraceAgedOrphans(this.#sql, currentInc, now, GEN_ORPHAN_GRACE_MS)
@@ -657,7 +454,7 @@ export class TelefuncRoomDurableObject extends DurableObject {
     const failedOrphans = new Set<string>()
     for (const inc of orphanIncs) {
       const installations = listRouteInstallations(this.#sql, inc)
-      const outcomes = await Promise.allSettled(installations.map((entry) => this.#invalidateInstallation(entry)))
+      const outcomes = await Promise.allSettled(installations.map((entry) => this.#invalidateInstallation(entry, true)))
       if (outcomes.some((outcome) => outcome.status === 'rejected')) {
         failedOrphans.add(inc)
         continue
@@ -689,12 +486,8 @@ export class TelefuncRoomDurableObject extends DurableObject {
     return prunedRoutes
   }
 
-  async #invalidateInstallations(installations: RouteInstallation[]): Promise<void> {
-    await Promise.all(installations.map((installation) => this.#invalidateInstallation(installation)))
-  }
-
-  async #invalidateInstallation(installation: RouteInstallation): Promise<void> {
-    const session = this.#sessionNamespace()
+  async #invalidateInstallation(installation: RouteInstallation, terminal: boolean = false): Promise<void> {
+    const session = this.#sessionNamespaceValue
     await session.get(session.idFromString(installation.subscriberDoId)).telefuncRoomInvalidate({
       roomId: installation.roomId,
       inc: installation.inc,
@@ -702,15 +495,12 @@ export class TelefuncRoomDurableObject extends DurableObject {
       subscriberDoId: installation.subscriberDoId,
       leaseId: installation.leaseId,
       generationToken: installation.generationToken,
+      ...(terminal ? { terminal: true as const } : {}),
     })
   }
 
-  #sessionNamespace(): SubscriberNamespace {
-    return this.#sessionNamespaceValue
-  }
-
   async #armAlarm(): Promise<void> {
-    await this.ctx.storage.setAlarm(Date.now() + this.#alarmIntervalMs)
+    await this.ctx.storage.setAlarm(Date.now() + ROOM_ALARM_INTERVAL_MS)
   }
 }
 

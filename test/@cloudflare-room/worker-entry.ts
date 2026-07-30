@@ -1,7 +1,16 @@
 /// <reference types="@cloudflare/workers-types" />
 
 import { DurableObject } from 'cloudflare:workers'
-import type { HeadCx, LaneId } from '../../packages/telefunc/wire-protocol/backend/spi.js'
+import type {
+  HeadCx,
+  LaneId,
+  SubscriptionAttempt,
+  SubscriptionAttemptState,
+} from '../../packages/telefunc/wire-protocol/backend/spi.js'
+import {
+  CloudflareRoomSessionManager,
+  type CloudflareRoomNamespace,
+} from '../../packages/telefunc/wire-protocol/server/adapter/cloudflare/room/backend.js'
 import {
   TelefuncRoomDurableObject as ProductionRoomDurableObject,
   type HeadNextWire,
@@ -19,35 +28,72 @@ type DeliveryRequest = {
   seq: number
   timestamp: number
 }
+type InvalidationRequest = Omit<DeliveryRequest, 'frame' | 'seq' | 'timestamp'> & { terminal?: true }
 type DeliveryState = {
   blockFirst: boolean
+  fail: boolean
   started: boolean
   delivered: number[]
+  invalidations: Array<'recoverable' | 'terminal'>
   gate: Promise<void>
   release: () => void
 }
 
 export class SessionDurableObject extends DurableObject {
   readonly #deliveries = new Map<string, DeliveryState>()
+  readonly #attempts = new Map<string, SubscriptionAttempt>()
+  readonly #manager: CloudflareRoomSessionManager
 
-  prepareDelivery(roomId: string, blockFirst: boolean): void {
+  constructor(ctx: DurableObjectState, env: unknown) {
+    super(ctx, env as Env)
+    this.#manager = new CloudflareRoomSessionManager(
+      ctx.id.toString(),
+      () => (env as { ROOM: CloudflareRoomNamespace }).ROOM,
+    )
+  }
+
+  prepareDelivery(roomId: string, blockFirst: boolean, fail: boolean = false): void {
     let release!: () => void
     const gate = new Promise<void>((resolve) => {
       release = resolve
     })
-    this.#deliveries.set(roomId, { blockFirst, started: false, delivered: [], gate, release })
+    this.#deliveries.set(roomId, {
+      blockFirst,
+      fail,
+      started: false,
+      delivered: [],
+      invalidations: [],
+      gate,
+      release,
+    })
   }
 
-  deliveryState(roomId: string): { started: boolean; delivered: number[] } {
+  deliveryState(roomId: string): {
+    started: boolean
+    delivered: number[]
+    invalidations: Array<'recoverable' | 'terminal'>
+  } {
     const state = this.#deliveries.get(roomId)
     if (state === undefined) throw new Error('delivery probe was not prepared')
-    return { started: state.started, delivered: [...state.delivered] }
+    return { started: state.started, delivered: [...state.delivered], invalidations: [...state.invalidations] }
   }
 
   releaseDelivery(roomId: string): void {
     const state = this.#deliveries.get(roomId)
     if (state === undefined) throw new Error('delivery probe was not prepared')
     state.release()
+  }
+
+  async openSubscription(roomId: string, inc: string): Promise<void> {
+    const attempt = this.#manager.openSubscription(roomId, inc, { kind: 'semantic' }, () => {})
+    this.#attempts.set(roomId, attempt)
+    await attempt.ready
+  }
+
+  subscriptionState(roomId: string): SubscriptionAttemptState {
+    const attempt = this.#attempts.get(roomId)
+    if (attempt === undefined) throw new Error('subscription probe was not prepared')
+    return attempt.state()
   }
 
   async telefuncRoomDeliver(request: DeliveryRequest): Promise<void> {
@@ -58,9 +104,15 @@ export class SessionDurableObject extends DurableObject {
       state.started = true
       await state.gate
     }
+    if (state.fail) throw new Error('delivery probe rejected')
   }
 
-  telefuncRoomInvalidate(): void {}
+  telefuncRoomInvalidate(request: InvalidationRequest): void {
+    const state = this.#deliveries.get(request.roomId)
+    if (state === undefined) throw new Error('invalidation reached an unprepared session')
+    state.invalidations.push(request.terminal === true ? 'terminal' : 'recoverable')
+    this.#manager.invalidate(request)
+  }
 }
 
 export class TelefuncRoomDurableObject extends ProductionRoomDurableObject {
@@ -93,17 +145,13 @@ type CommitResult =
 type Authority = {
   readHead(): Promise<HeadWire | null>
   compareExchangeHead(cx: HeadCx, next: HeadNextWire): Promise<HeadResult>
-  captureRouteGeneration(
-    inc: string,
-  ): Promise<{ ok: true; generationToken: string } | { rejected: true; reason: string }>
   registerRoute(
     roomId: string,
     inc: string,
     laneKey: string,
     subscriberDoId: string,
     leaseId: string,
-    generationToken: string,
-  ): Promise<{ ok: true } | { rejected: true; reason: string }>
+  ): Promise<{ ok: true; generationToken: string } | { rejected: true; reason: string }>
   commitLane(roomId: string, inc: string, lane: LaneId, payload: Uint8Array): Promise<CommitResult>
   awaitDelivery(token: string): Promise<void>
   dropGeneration(inc: string): Promise<{ droppedSubscribers: unknown[] } | { error: string }>
@@ -111,9 +159,13 @@ type Authority = {
   telefuncRoomReconstructForTest(): Promise<void>
 }
 type Session = {
-  prepareDelivery(roomId: string, blockFirst: boolean): Promise<void>
-  deliveryState(roomId: string): Promise<{ started: boolean; delivered: number[] }>
+  prepareDelivery(roomId: string, blockFirst: boolean, fail?: boolean): Promise<void>
+  deliveryState(
+    roomId: string,
+  ): Promise<{ started: boolean; delivered: number[]; invalidations: Array<'recoverable' | 'terminal'> }>
   releaseDelivery(roomId: string): Promise<void>
+  openSubscription(roomId: string, inc: string): Promise<void>
+  subscriptionState(roomId: string): Promise<SubscriptionAttemptState>
 }
 type Env = {
   ROOM: DurableObjectNamespace
@@ -127,9 +179,19 @@ export default {
       const sessionId = env.TelefuncDurableObject.idFromName(`session-${suffix}`)
       const session = env.TelefuncDurableObject.get(sessionId) as unknown as Session
       const lifecycle = await successfulLifecycle(env, sessionId, session, suffix)
+      const terminalDrop = await terminalGenerationDrop(env, session, suffix)
       const cancellation = await cancelledDelivery(env, sessionId, session, suffix)
+      const fanoutOrdering = await rejectedFanoutOrdering(env, sessionId, session, suffix)
+      const evictionInvalidations = await failedDeliveryEviction(env, sessionId, session, suffix)
       const unknown = await authorityRestart(env, suffix)
-      return Response.json({ lifecycle, ...cancellation, unknown })
+      return Response.json({
+        lifecycle,
+        terminalDrop,
+        ...cancellation,
+        fanoutOrdering,
+        evictionInvalidations,
+        unknown,
+      })
     } catch (error) {
       return Response.json({ error: error instanceof Error ? error.message : String(error) }, { status: 500 })
     }
@@ -153,6 +215,31 @@ async function successfulLifecycle(env: Env, sessionId: DurableObjectId, session
     delivered: (await session.deliveryState(roomId)).delivered,
     closed: (await authority.readHead())?.state === 'closed',
     generations: await authority.listGenerations(),
+    invalidations: (await session.deliveryState(roomId)).invalidations,
+  }
+}
+
+async function terminalGenerationDrop(
+  env: Env,
+  session: Session,
+  suffix: string,
+): Promise<{ state: SubscriptionAttemptState; invalidations: Array<'recoverable' | 'terminal'> }> {
+  const roomId = `terminal-${suffix}`
+  const inc = `terminal-inc-${suffix}`
+  const authority = roomAuthority(env, roomId)
+  const opened = expectHead(
+    await authority.compareExchangeHead(
+      { expect: 'absent' },
+      { head: { currentInc: inc, state: 'open', configB64: 'e30=' } },
+    ),
+    'terminal open',
+  )
+  await session.prepareDelivery(roomId, false)
+  await session.openSubscription(roomId, inc)
+  await closeAndDrop(authority, inc, opened, `terminal-close-${suffix}`)
+  return {
+    state: await session.subscriptionState(roomId),
+    invalidations: (await session.deliveryState(roomId)).invalidations,
   }
 }
 
@@ -178,6 +265,75 @@ async function cancelledDelivery(env: Env, sessionId: DurableObjectId, session: 
     cancelled: await rejectionOf(authority.awaitDelivery(second.deliveryToken), 2_000, 'cancelled delivery settlement'),
     cancellationDeliveries: (await session.deliveryState(roomId)).delivered,
   }
+}
+
+async function failedDeliveryEviction(
+  env: Env,
+  sessionId: DurableObjectId,
+  session: Session,
+  suffix: string,
+): Promise<Array<'recoverable' | 'terminal'>> {
+  const roomId = `evict-${suffix}`
+  const inc = `evict-inc-${suffix}`
+  const authority = roomAuthority(env, roomId)
+  const opened = await openAndJoin(authority, sessionId, roomId, inc, `evict-lease-${suffix}`)
+  await session.prepareDelivery(roomId, false, true)
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    const commit = accepted(
+      await authority.commitLane(roomId, inc, { kind: 'semantic' }, new Uint8Array([attempt])),
+      `failed delivery ${attempt}`,
+    )
+    await rejectionOf(authority.awaitDelivery(commit.deliveryToken), 2_000, `failed delivery ${attempt}`)
+  }
+  const invalidations = (await session.deliveryState(roomId)).invalidations
+  await closeAndDrop(authority, inc, opened, `evict-close-${suffix}`)
+  return invalidations
+}
+
+async function rejectedFanoutOrdering(
+  env: Env,
+  fastSessionId: DurableObjectId,
+  fastSession: Session,
+  suffix: string,
+): Promise<{
+  firstSettlementBeforeRelease: 'pending' | 'rejected'
+  fastDeliveriesBeforeRelease: number[]
+  slowDeliveriesBeforeRelease: number[]
+}> {
+  const roomId = `fanout-${suffix}`
+  const inc = `fanout-inc-${suffix}`
+  const authority = roomAuthority(env, roomId)
+  const opened = await openAndJoin(authority, fastSessionId, roomId, inc, `fanout-fast-${suffix}`)
+  const slowSessionId = env.TelefuncDurableObject.idFromName(`slow-session-${suffix}`)
+  const slowSession = env.TelefuncDurableObject.get(slowSessionId) as unknown as Session
+  await fastSession.prepareDelivery(roomId, false, true)
+  await slowSession.prepareDelivery(roomId, true)
+  await join(authority, slowSessionId, roomId, inc, `fanout-slow-${suffix}`)
+  const first = accepted(
+    await authority.commitLane(roomId, inc, { kind: 'semantic' }, new Uint8Array([1])),
+    'fanout first',
+  )
+  const second = accepted(
+    await authority.commitLane(roomId, inc, { kind: 'semantic' }, new Uint8Array([2])),
+    'fanout second',
+  )
+  const firstSettlement = authority.awaitDelivery(first.deliveryToken).then(
+    () => 'fulfilled' as const,
+    () => 'rejected' as const,
+  )
+  await waitUntil(async () => (await slowSession.deliveryState(roomId)).started, 2_000)
+  const firstSettlementBeforeRelease = await Promise.race([
+    firstSettlement,
+    new Promise<'pending'>((resolve) => setTimeout(() => resolve('pending'), 100)),
+  ])
+  if (firstSettlementBeforeRelease === 'fulfilled') throw new Error('failed fanout unexpectedly fulfilled')
+  const fastDeliveriesBeforeRelease = (await fastSession.deliveryState(roomId)).delivered
+  const slowDeliveriesBeforeRelease = (await slowSession.deliveryState(roomId)).delivered
+  await slowSession.releaseDelivery(roomId)
+  await firstSettlement
+  await rejectionOf(authority.awaitDelivery(second.deliveryToken), 2_000, 'fanout second')
+  await closeAndDrop(authority, inc, opened, `fanout-close-${suffix}`)
+  return { firstSettlementBeforeRelease, fastDeliveriesBeforeRelease, slowDeliveriesBeforeRelease }
 }
 
 async function authorityRestart(env: Env, suffix: string): Promise<string> {
@@ -210,18 +366,19 @@ async function openAndJoin(
     ),
     'open',
   )
-  const capture = await authority.captureRouteGeneration(inc)
-  if (!('ok' in capture)) throw new Error(`generation capture failed: ${capture.reason}`)
-  const registration = await authority.registerRoute(
-    roomId,
-    inc,
-    'semantic',
-    sessionId.toString(),
-    leaseId,
-    capture.generationToken,
-  )
-  if (!('ok' in registration)) throw new Error(`route registration failed: ${registration.reason}`)
+  await join(authority, sessionId, roomId, inc, leaseId)
   return opened
+}
+
+async function join(
+  authority: Authority,
+  sessionId: DurableObjectId,
+  roomId: string,
+  inc: string,
+  leaseId: string,
+): Promise<void> {
+  const registration = await authority.registerRoute(roomId, inc, 'semantic', sessionId.toString(), leaseId)
+  if (!('ok' in registration)) throw new Error(`route registration failed: ${registration.reason}`)
 }
 
 async function closeAndDrop(authority: Authority, inc: string, opened: HeadWire, leaseId: string): Promise<void> {

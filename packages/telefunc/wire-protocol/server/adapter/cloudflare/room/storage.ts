@@ -14,16 +14,9 @@ import {
 type HeadWriteNext = Extract<HeadNext, { head: unknown }>
 export type StoredHead = RoomHead & { expiresAt: number | null }
 
-export type RouteGenerationCapture = {
-  inc: string
-  token: string
-  createdAt: number
-  expiresAt: number
-}
-
 export const GEN_ORPHAN_GRACE_MS = 60_000
 
-export type HeadCxOutcome =
+type HeadCxOutcome =
   | { ok: true; head: StoredHead }
   | { ok: true; deleted: true }
   | { conflict: true; current: StoredHead | null }
@@ -65,95 +58,26 @@ export function initSchema(sql: SqlStorage): void {
       PRIMARY KEY (inc, domain)
     );
     CREATE TABLE IF NOT EXISTS rt_manifest (
-      inc TEXT NOT NULL, lane_key TEXT NOT NULL, gen INTEGER NOT NULL, size INTEGER NOT NULL,
-      chunks INTEGER NOT NULL, seq INTEGER NOT NULL, ts INTEGER NOT NULL,
+      inc TEXT NOT NULL, lane_key TEXT NOT NULL, size INTEGER NOT NULL, seq INTEGER NOT NULL, ts INTEGER NOT NULL,
       lane_kind TEXT NOT NULL, lane_member TEXT, lane_track TEXT,
       PRIMARY KEY (inc, lane_key)
     );
     CREATE TABLE IF NOT EXISTS rt_chunk (
-      inc TEXT NOT NULL, lane_key TEXT NOT NULL, gen INTEGER NOT NULL, i INTEGER NOT NULL, bytes BLOB NOT NULL,
-      PRIMARY KEY (inc, lane_key, gen, i)
+      inc TEXT NOT NULL, lane_key TEXT NOT NULL, i INTEGER NOT NULL, bytes BLOB NOT NULL,
+      PRIMARY KEY (inc, lane_key, i)
     );
     CREATE TABLE IF NOT EXISTS route (
       room_id TEXT NOT NULL, inc TEXT NOT NULL, lane_key TEXT NOT NULL, subscriber_do_id TEXT NOT NULL,
       lease_id TEXT NOT NULL, generation_token TEXT NOT NULL, expires_at INTEGER NOT NULL, failures INTEGER NOT NULL DEFAULT 0,
       PRIMARY KEY (inc, lane_key, subscriber_do_id)
     );
-    CREATE TABLE IF NOT EXISTS route_capture (
-      attempt_id TEXT PRIMARY KEY, inc TEXT NOT NULL, token TEXT NOT NULL,
-      created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL
-    );
     CREATE TABLE IF NOT EXISTS directory (room_id TEXT PRIMARY KEY, inc_tag TEXT NOT NULL);
   `)
 }
 
-// Durable idempotency for generation-capture response loss. `created_at` is supplied by the internal
-// lifecycle and checked against the room authority clock before insertion; `expires_at` is minted and
-// touched only by the authority. An absent attempt whose creation epoch is outside the bounded capture
-// window therefore fails closed instead of silently pinning a legally reused generation.
-export function readRouteGenerationCapture(sql: SqlStorage, attemptId: string): RouteGenerationCapture | null {
-  const row = sql
-    .exec<{ inc: string; token: string; created_at: number; expires_at: number }>(
-      'SELECT inc, token, created_at, expires_at FROM route_capture WHERE attempt_id = ?',
-      attemptId,
-    )
-    .toArray()[0]
-  return row === undefined
-    ? null
-    : { inc: row.inc, token: row.token, createdAt: row.created_at, expiresAt: row.expires_at }
-}
-
-export function insertRouteGenerationCapture(
-  sql: SqlStorage,
-  attemptId: string,
-  inc: string,
-  token: string,
-  createdAt: number,
-  expiresAt: number,
-): void {
-  sql.exec(
-    'INSERT OR IGNORE INTO route_capture (attempt_id, inc, token, created_at, expires_at) VALUES (?, ?, ?, ?, ?)',
-    attemptId,
-    inc,
-    token,
-    createdAt,
-    expiresAt,
-  )
-}
-
-export function touchRouteGenerationCapture(
-  sql: SqlStorage,
-  attemptId: string,
-  inc: string,
-  token: string,
-  createdAt: number,
-  now: number,
-  ttlMs: number,
-): boolean {
-  return (
-    sql.exec(
-      'UPDATE route_capture SET expires_at = ? WHERE attempt_id = ? AND inc = ? AND token = ? AND created_at = ? AND expires_at > ?',
-      now + ttlMs,
-      attemptId,
-      inc,
-      token,
-      createdAt,
-      now,
-    ).rowsWritten === 1
-  )
-}
-
-export function deleteExpiredRouteGenerationCaptures(sql: SqlStorage, now: number): number {
-  return sql.exec('DELETE FROM route_capture WHERE expires_at <= ?', now).rowsWritten
-}
-
-export function countRouteGenerationCaptures(sql: SqlStorage): number {
-  return sql.exec<{ count: number }>('SELECT COUNT(*) AS count FROM route_capture').toArray()[0]?.count ?? 0
-}
-
 // ── directory (best-effort projection; hosted on a singleton DO — one row per roomId, tag-guarded) ──
 
-export const DIRECTORY_PAGE_SIZE = 100
+const DIRECTORY_PAGE_SIZE = 100
 
 export function directoryPut(sql: SqlStorage, roomId: string, incTag: string): void {
   sql.exec('INSERT OR REPLACE INTO directory (room_id, inc_tag) VALUES (?, ?)', roomId, incTag)
@@ -169,19 +93,18 @@ export function directoryList(
   prefix: string,
   cursor?: string,
 ): { entries: { roomId: string; incTag: string }[]; cursor?: string } {
-  const matching = sql
-    .exec<{ room_id: string; inc_tag: string }>(
-      'SELECT room_id, inc_tag FROM directory WHERE substr(room_id, 1, length(?)) = ? ORDER BY room_id',
-      prefix,
-      prefix,
-    )
-    .toArray()
-  const start = cursor === undefined ? 0 : matching.findIndex((row) => row.room_id > cursor)
-  if (start < 0) return { entries: [] }
-  const page = matching.slice(start, start + DIRECTORY_PAGE_SIZE)
+  const query =
+    cursor === undefined
+      ? 'SELECT room_id, inc_tag FROM directory WHERE substr(room_id, 1, length(?)) = ? ORDER BY room_id LIMIT ?'
+      : 'SELECT room_id, inc_tag FROM directory WHERE substr(room_id, 1, length(?)) = ? AND room_id > ? ORDER BY room_id LIMIT ?'
+  const matching =
+    cursor === undefined
+      ? sql.exec<{ room_id: string; inc_tag: string }>(query, prefix, prefix, DIRECTORY_PAGE_SIZE + 1).toArray()
+      : sql.exec<{ room_id: string; inc_tag: string }>(query, prefix, prefix, cursor, DIRECTORY_PAGE_SIZE + 1).toArray()
+  const page = matching.slice(0, DIRECTORY_PAGE_SIZE)
   const entries = page.map((row) => ({ roomId: row.room_id, incTag: row.inc_tag }))
   const last = page[page.length - 1]
-  const more = last !== undefined && start + page.length < matching.length
+  const more = last !== undefined && matching.length > DIRECTORY_PAGE_SIZE
   return more ? { entries, cursor: last.room_id } : { entries }
 }
 
@@ -314,7 +237,7 @@ function storeHead(sql: SqlStorage, next: HeadWriteNext, now: number, mintRev: (
 
 // ── generation cells ──
 
-export type CellsRead = { revision: string; cells: Map<string, Uint8Array> } | { staleInc: true }
+type CellsRead = { revision: string; cells: Map<string, Uint8Array> } | { staleInc: true }
 
 // Reads require only generation existence (staleInc iff head absent or currentInc ≠ inc); they stay
 // available while 'closing' because the closer's tail needs them.
