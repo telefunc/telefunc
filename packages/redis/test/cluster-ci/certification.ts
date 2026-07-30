@@ -104,6 +104,17 @@ describe('Redis real three-master Cluster CI certification', () => {
       ).toEqual({ stale: true })
       await backend.deleteRetained(roomId, inc, SEMANTIC_LANE)
       await backend.directoryPut(roomId, inc)
+      const hmget = client.hmget.bind(client)
+      client.hmget = (async (key: string, ...fields: string[]) => {
+        await client.hdel(key, ...fields)
+        return await hmget(key, ...fields)
+      }) as typeof client.hmget
+      try {
+        expect(await backend.directoryList(roomId)).toEqual({ entries: [] })
+      } finally {
+        client.hmget = hmget as typeof client.hmget
+      }
+      await backend.directoryPut(roomId, inc)
       await backend.directoryDelete(roomId, inc)
       await backend.publish({ key: 'generic} escape', kind: 'binary' }, bytes('generic'))
       await subscription.unsubscribe()

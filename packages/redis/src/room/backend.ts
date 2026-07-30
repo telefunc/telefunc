@@ -554,7 +554,10 @@ export class RedisRoomBackend implements BackendDriver {
     }
     if (matching.length === 0) return { entries: [] }
     const tags = await this._publisher.hmget(directoryTagsKey(this._prefix), ...matching)
-    const entries = matching.map((roomId, i) => ({ roomId, incTag: tags[i] as string }))
+    const entries = matching.flatMap((roomId, i) => {
+      const incTag = tags[i]
+      return incTag === null || incTag === undefined ? [] : [{ roomId, incTag }]
+    })
     const last = matching[matching.length - 1] as string
     let more = false
     if (matching.length === DIRECTORY_PAGE_SIZE && page.length === DIRECTORY_PAGE_SIZE) {
