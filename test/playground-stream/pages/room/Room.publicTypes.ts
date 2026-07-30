@@ -42,22 +42,7 @@ type _ServerSurface = AssertAll<
 >
 
 type _ClientSurface = AssertAll<
-  [
-    Exactly<ClientRoom['meta'], RoomMeta>,
-    Exactly<NonNullable<Parameters<ClientRoom['join']>[0]>, Client.JoinOptions<MemberMeta>>,
-    Exactly<ClientLocal, Client.LocalParticipant<MemberMeta, ChatMsg>>,
-    Exactly<ClientLocal['meta'], MemberMeta>,
-    Exactly<Parameters<ClientLocal['publish']>[0], ChatMsg>,
-    Exactly<ClientRemote, Client.RemoteParticipant<MemberMeta, ChatMsg>>,
-    Exactly<ClientRemote['meta'], MemberMeta>,
-    Exactly<Parameters<Parameters<ClientRemote['subscribe']>[0]>[0], ChatMsg>,
-    Exactly<Parameters<Parameters<ClientRoom['subscribe']>[0]>[0], ChatMsg>,
-    Exactly<Parameters<Parameters<ClientRoom['subscribe']>[0]>[2], Client.Sender<MemberMeta>>,
-    Exactly<Parameters<Parameters<ClientRoom['onUpdate']>[0]>[0], RoomMeta>,
-    Exactly<Parameters<Parameters<ClientRoom['onParticipantUpdate']>[0]>[1], MemberMeta>,
-    Exactly<ReturnType<ClientRoom['snapshot']>, Client.RoomSnapshotView<RoomMeta, MemberMeta>>,
-    Exactly<ReturnType<ClientRoom['snapshot']>['participants'][number]['meta'], MemberMeta>,
-  ]
+  [Exactly<ClientRoom, ServerRoom>, Exactly<ClientLocal, ServerLocal>, Exactly<ClientRemote, ServerRemote>]
 >
 
 // Permanent false controls for the three escapes exercised against the public projections above.

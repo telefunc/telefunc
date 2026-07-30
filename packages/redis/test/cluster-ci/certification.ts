@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { Cluster, Redis } from 'ioredis'
 import type { BackendSpi, CommitAccepted, LaneId, RoomHead, SubscriptionState } from 'telefunc/backend'
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
+import { afterAll, afterEach, beforeAll, describe, expect, it, onTestFinished, vi } from 'vitest'
 import { installRedis, RedisRoomBackend } from '../../src/index.js'
 import {
   channelKey,
@@ -18,6 +18,9 @@ type RedisClusterNode = { host: string; port: number }
 type Master = RedisClusterNode & { id: string; ranges: Array<[number, number]>; client: Redis }
 type CommandCall = { name: string; keyCount: number; args: unknown[] }
 type CommandDefinition = { name: string; lua: string; numberOfKeys: number | null }
+type CommandOptions = { lua: string; numberOfKeys?: number }
+type Subscription = ReturnType<BackendSpi['subscribeLane']>
+type LaneReceiver = Parameters<BackendSpi['subscribeLane']>[3]
 
 const rawNodes = process.env.REDIS_CLUSTER_NODES
 if (!rawNodes) throw new Error('Redis Cluster CI certification requires REDIS_CLUSTER_NODES')
@@ -43,6 +46,8 @@ describe('Redis real three-master Cluster CI certification', () => {
     await cluster.ping()
     masters = await readMasters(CLUSTER_NODES)
   })
+
+  afterEach(() => vi.restoreAllMocks())
 
   afterAll(async () => {
     await Promise.allSettled((masters ?? []).map(({ client }) => client.quit()))
@@ -72,210 +77,172 @@ describe('Redis real three-master Cluster CI certification', () => {
     for (const master of masters) expect((await clusterInfo(master.client)).cluster_state).toBe('ok')
 
     const prefix = uniquePrefix('runtime-slots')
-    const client = clusterClient(CLUSTER_NODES)
-    const time = client.time.bind(client)
+    const client = ownCluster()
     await client.ping()
-    const duplicateMethods = client.nodes('master').map((node) => [node, node.duplicate.bind(node)] as const)
     let subscriberOpens = 0
     let holdNextSubscribe = false
     const subscribeEntered = deferred()
     const releaseSubscribe = deferred()
-    for (const [node, duplicate] of duplicateMethods) {
-      node.duplicate = ((options?: unknown) => {
-        subscriberOpens++
-        const subscriber = duplicate(options as never)
-        if (holdNextSubscribe) {
-          holdNextSubscribe = false
-          const subscribe = subscriber.subscribe.bind(subscriber)
-          subscriber.subscribe = (async (...channels: string[]) => {
-            subscribeEntered.resolve()
-            await releaseSubscribe.promise
-            return await subscribe(...channels)
-          }) as typeof subscriber.subscribe
-        }
-        return subscriber
-      }) as typeof node.duplicate
-    }
+    interceptSubscribers(client, (subscriber) => {
+      subscriberOpens++
+      if (!holdNextSubscribe) return
+      holdNextSubscribe = false
+      const subscribe = subscriber.subscribe.bind(subscriber)
+      subscriber.subscribe = (async (...channels: string[]) => {
+        subscribeEntered.resolve()
+        await releaseSubscribe.promise
+        return await subscribe(...channels)
+      }) as typeof subscriber.subscribe
+    })
     const observation = observeCommands(client)
-    const backend = redisBackend(client, prefix)
-    const authority = new RedisRoomBackend({ redis: client, prefix })
+    const backend = ownBackend(client, prefix)
+    const authority = ownRoomBackend(client, prefix)
     const genericCalls = observation.wrapDefinedCommand('tfPublish')
     for (const { name } of Object.values(REDIS_ROOM_COMMANDS)) observation.wrapDefinedCommand(name)
     const roomId = 'runtime-slot} proof'
     const inc = 'runtime-slot-inc'
-    let subscription: ReturnType<BackendSpi['subscribeLane']> | undefined
-    try {
-      const head = await open(backend, roomId, inc)
-      client.time = (async () => {
-        throw new Error('control: keyless TIME escaped the room slot')
-      }) as typeof client.time
-      expect((await authority.readHead(roomId))?.head.currentInc).toBe(inc)
-      const cells = await backend.readCells(roomId, inc, { keys: [] })
-      client.time = time as typeof client.time
-      if ('staleInc' in cells) throw new Error('fresh generation was unexpectedly stale')
-      expect(
-        await backend.compareExchangeCells(roomId, inc, cells.revision, [
-          { key: 'cell} escape', set: { bytes: bytes('value') } },
-        ]),
-      ).toBe('committed')
-      subscription = backend.subscribeLane(roomId, inc, SEMANTIC_LANE, () => {})
-      await subscription.ready
-      await accepted(
-        await backend.commitLane(roomId, inc, SEMANTIC_LANE, bytes('payload'), {
-          retain: true,
-          requiredCellKeys: ['cell} escape'],
-        }),
-      ).delivery
-      const currentCells = await backend.readCells(roomId, inc, { keys: ['cell} escape'] })
-      if ('staleInc' in currentCells) throw new Error('cell fence generation vanished')
-      expect(await backend.compareExchangeCells(roomId, inc, currentCells.revision, [{ key: 'cell} escape' }])).toBe(
-        'committed',
+    const head = await open(backend, roomId, inc)
+    const time = vi.spyOn(client, 'time').mockImplementation(async () => {
+      throw new Error('control: keyless TIME escaped the room slot')
+    })
+    expect((await authority.readHead(roomId))?.head.currentInc).toBe(inc)
+    const cells = await backend.readCells(roomId, inc, { keys: [] })
+    time.mockRestore()
+    if ('staleInc' in cells) throw new Error('fresh generation was unexpectedly stale')
+    expect(
+      await backend.compareExchangeCells(roomId, inc, cells.revision, [
+        { key: 'cell} escape', set: { bytes: bytes('value') } },
+      ]),
+    ).toBe('committed')
+    const firstSubscription = subscribe(backend, roomId, inc, () => {})
+    await firstSubscription.ready
+    await accepted(
+      await backend.commitLane(roomId, inc, SEMANTIC_LANE, bytes('payload'), {
+        retain: true,
+        requiredCellKeys: ['cell} escape'],
+      }),
+    ).delivery
+    const currentCells = await backend.readCells(roomId, inc, { keys: ['cell} escape'] })
+    if ('staleInc' in currentCells) throw new Error('cell fence generation vanished')
+    expect(await backend.compareExchangeCells(roomId, inc, currentCells.revision, [{ key: 'cell} escape' }])).toBe(
+      'committed',
+    )
+    expect(
+      await backend.commitLane(roomId, inc, SEMANTIC_LANE, bytes('fenced'), {
+        requiredCellKeys: ['cell} escape'],
+      }),
+    ).toEqual({ stale: true })
+    await backend.deleteRetained(roomId, inc, SEMANTIC_LANE)
+    await backend.directoryPut(roomId, inc)
+    const hmget = client.hmget.bind(client)
+    const hmgetMock = vi.spyOn(client, 'hmget').mockImplementation((async (key: string, ...fields: string[]) => {
+      await client.hdel(key, ...fields)
+      return await hmget(key, ...fields)
+    }) as never)
+    expect(await backend.directoryList(roomId)).toEqual({ entries: [] })
+    hmgetMock.mockRestore()
+    await backend.directoryPut(roomId, inc)
+    await backend.directoryDelete(roomId, inc)
+    const genericPublish = await backend.publish({ key: 'generic} escape', kind: 'binary' }, bytes('generic'))
+    expect(genericPublish.receivers).toBeUndefined()
+    const closed = await close(authority, roomId, head)
+    expect(closed.state).toBe('closed')
+    await authority.dropGeneration(roomId, inc)
+    await waitFor(() => firstSubscription.state() === 'closed')
+    expect(subscriberOpens).toBe(1)
+    await firstSubscription.unsubscribe()
+
+    const delayedRoom = 'runtime-delayed-subscribe'
+    const delayedInc = 'runtime-delayed-inc'
+    const delayedHead = await open(backend, delayedRoom, delayedInc)
+    holdNextSubscribe = true
+    const delayedSubscription = subscribe(backend, delayedRoom, delayedInc, () => {})
+    onTestFinished(releaseSubscribe.resolve)
+    const delayedStates: SubscriptionState[] = []
+    delayedSubscription.onStateChange((state) => delayedStates.push(state))
+    const delayedReady = delayedSubscription.ready.catch((error: unknown) => error)
+    await subscribeEntered.promise
+    await close(authority, delayedRoom, delayedHead)
+    await authority.dropGeneration(delayedRoom, delayedInc)
+    releaseSubscribe.resolve()
+    await waitFor(() => delayedSubscription.state() === 'closed')
+    expect(String(await delayedReady)).toMatch(/ownership terminated/i)
+    expect(delayedStates).not.toContain('lost')
+    expect(subscriberOpens).toBe(2)
+    await delayedSubscription.unsubscribe()
+
+    const expectedNames = new Set(['tfPublish', ...Object.values(REDIS_ROOM_COMMANDS).map(({ name }) => name)])
+    expect(new Set(observation.definitions.map(({ name }) => name))).toEqual(expectedNames)
+    for (const definition of observation.definitions) {
+      if (definition.numberOfKeys === null) continue
+      const referenced = [...definition.lua.matchAll(/\bKEYS\[(\d+)\]/g)].map((match) => Number(match[1]))
+      expect(new Set(referenced), `${definition.name}: Lua KEYS references`).toEqual(
+        new Set(Array.from({ length: definition.numberOfKeys }, (_, index) => index + 1)),
       )
-      expect(
-        await backend.commitLane(roomId, inc, SEMANTIC_LANE, bytes('fenced'), {
-          requiredCellKeys: ['cell} escape'],
-        }),
-      ).toEqual({ stale: true })
-      await backend.deleteRetained(roomId, inc, SEMANTIC_LANE)
-      await backend.directoryPut(roomId, inc)
-      const hmget = client.hmget.bind(client)
-      client.hmget = (async (key: string, ...fields: string[]) => {
-        await client.hdel(key, ...fields)
-        return await hmget(key, ...fields)
-      }) as typeof client.hmget
-      try {
-        expect(await backend.directoryList(roomId)).toEqual({ entries: [] })
-      } finally {
-        client.hmget = hmget as typeof client.hmget
-      }
-      await backend.directoryPut(roomId, inc)
-      await backend.directoryDelete(roomId, inc)
-      const genericPublish = await backend.publish({ key: 'generic} escape', kind: 'binary' }, bytes('generic'))
-      expect(genericPublish.receivers).toBeUndefined()
-      const closed = await close(authority, roomId, head)
-      expect(closed.state).toBe('closed')
-      await authority.dropGeneration(roomId, inc)
-      await waitFor(() => subscription?.state() === 'closed')
-      expect(subscriberOpens).toBe(1)
-      await subscription.unsubscribe()
-      subscription = undefined
+    }
 
-      const delayedRoom = 'runtime-delayed-subscribe'
-      const delayedInc = 'runtime-delayed-inc'
-      const delayedHead = await open(backend, delayedRoom, delayedInc)
-      holdNextSubscribe = true
-      subscription = backend.subscribeLane(delayedRoom, delayedInc, SEMANTIC_LANE, () => {})
-      const delayedStates: SubscriptionState[] = []
-      subscription.onStateChange((state) => delayedStates.push(state))
-      const delayedReady = subscription.ready.then(
-        () => null,
-        (error: unknown) => error,
-      )
-      await subscribeEntered.promise
-      await close(authority, delayedRoom, delayedHead)
-      await authority.dropGeneration(delayedRoom, delayedInc)
-      releaseSubscribe.resolve()
-      await waitFor(() => subscription?.state() === 'closed')
-      expect(String(await delayedReady)).toMatch(/ownership terminated/i)
-      expect(delayedStates).not.toContain('lost')
-      expect(subscriberOpens).toBe(2)
-      await subscription.unsubscribe()
-      subscription = undefined
-
-      const expectedNames = new Set(['tfPublish', ...Object.values(REDIS_ROOM_COMMANDS).map(({ name }) => name)])
-      expect(new Set(observation.definitions.map(({ name }) => name))).toEqual(expectedNames)
-      for (const definition of observation.definitions) {
-        if (definition.numberOfKeys === null) continue
-        const referenced = [...definition.lua.matchAll(/\bKEYS\[(\d+)\]/g)].map((match) => Number(match[1]))
-        expect(new Set(referenced), `${definition.name}: Lua KEYS references`).toEqual(
-          new Set(Array.from({ length: definition.numberOfKeys }, (_, index) => index + 1)),
-        )
+    expect(genericCalls).toHaveLength(1)
+    const genericKeys = genericCalls[0]?.slice(0, 2).map(String) ?? []
+    expect(new Set(await Promise.all(genericKeys.map(slot))).size, `tfPublish: ${genericKeys.join(', ')}`).toBe(1)
+    for (const descriptor of Object.values(REDIS_ROOM_COMMANDS)) {
+      const calls = observation.calls.filter(({ name }) => name === descriptor.name)
+      expect(calls.length, descriptor.name).toBeGreaterThan(0)
+      for (const call of calls) {
+        const keys = call.args.slice(0, call.keyCount).map(String)
+        expect(new Set(await Promise.all(keys.map(slot))).size, `${descriptor.name}: ${keys.join(', ')}`).toBe(1)
       }
-
-      expect(genericCalls).toHaveLength(1)
-      const genericKeys = genericCalls[0]?.slice(0, 2).map(String) ?? []
-      expect(new Set(await Promise.all(genericKeys.map(slot))).size, `tfPublish: ${genericKeys.join(', ')}`).toBe(1)
-      for (const descriptor of Object.values(REDIS_ROOM_COMMANDS)) {
-        const calls = observation.calls.filter(({ name }) => name === descriptor.name)
-        expect(calls.length, descriptor.name).toBeGreaterThan(0)
-        for (const call of calls) {
-          const keys = call.args.slice(0, call.keyCount).map(String)
-          expect(new Set(await Promise.all(keys.map(slot))).size, `${descriptor.name}: ${keys.join(', ')}`).toBe(1)
-        }
-      }
-    } finally {
-      client.time = time as typeof client.time
-      releaseSubscribe.resolve()
-      for (const [node, duplicate] of duplicateMethods) node.duplicate = duplicate as typeof node.duplicate
-      await subscription?.unsubscribe().catch(() => {})
-      observation.restore()
-      await Promise.all([backend.dispose(), authority.dispose()])
-      await client.quit().catch(() => client.disconnect())
     }
   })
 
   it('round-trips MAX_SAFE seq through commit, retain, fresh read, then rejects before effects', async () => {
-    const prefix = uniquePrefix('max-safe')
-    const roomId = 'max-safe-room'
-    const inc = 'max-safe-inc'
-    const backend = redisBackend(cluster, prefix)
-    const fresh = new RedisRoomBackend({ redis: cluster, prefix })
+    const { prefix, roomId, inc } = room('max-safe')
+    const backend = ownBackend(cluster, prefix)
+    const fresh = ownRoomBackend(cluster, prefix)
     const observed: number[] = []
-    let subscription: ReturnType<BackendSpi['subscribeLane']> | undefined
-    try {
-      await open(backend, roomId, inc)
-      subscription = backend.subscribeLane(roomId, inc, SEMANTIC_LANE, (_payload, info) => observed.push(info.seq))
-      await subscription.ready
-      const orderingKey = orderKey(prefix, roomId, inc, laneKey(SEMANTIC_LANE))
-      await cluster.set(orderingKey, `${Number.MAX_SAFE_INTEGER - 1}:1`)
-      const last = accepted(await backend.commitLane(roomId, inc, SEMANTIC_LANE, Buffer.from('last'), { retain: true }))
-      await last.delivery
-      await waitFor(() => observed.length === 1)
-      expect(last.seq).toBe(Number.MAX_SAFE_INTEGER)
-      expect(await fresh.readRetained(roomId, inc, SEMANTIC_LANE)).toMatchObject({ seq: Number.MAX_SAFE_INTEGER })
-      const lastWatermark = await cluster.get(orderingKey)
-      await expect(
-        backend.commitLane(roomId, inc, SEMANTIC_LANE, Buffer.from('overflow'), { retain: true }),
-      ).rejects.toThrow('sequence exhausted')
-      expect(observed).toEqual([Number.MAX_SAFE_INTEGER])
-      expect(await cluster.get(orderingKey)).toBe(lastWatermark)
-      const retained = await fresh.readRetained(roomId, inc, SEMANTIC_LANE)
-      expect(retained?.seq).toBe(Number.MAX_SAFE_INTEGER)
-      expect([...new Uint8Array(retained?.payload ?? [])]).toEqual([...Buffer.from('last')])
-    } finally {
-      await subscription?.unsubscribe()
-      await Promise.all([backend.dispose(), fresh.dispose()])
-    }
+    await open(backend, roomId, inc)
+    const subscription = subscribe(backend, roomId, inc, (_payload, info) => observed.push(info.seq))
+    await subscription.ready
+    const orderingKey = orderKey(prefix, roomId, inc, laneKey(SEMANTIC_LANE))
+    await cluster.set(orderingKey, `${Number.MAX_SAFE_INTEGER - 1}:1`)
+    const last = accepted(await backend.commitLane(roomId, inc, SEMANTIC_LANE, Buffer.from('last'), { retain: true }))
+    await last.delivery
+    await waitFor(() => observed.length === 1)
+    expect(last.seq).toBe(Number.MAX_SAFE_INTEGER)
+    expect(await fresh.readRetained(roomId, inc, SEMANTIC_LANE)).toMatchObject({ seq: Number.MAX_SAFE_INTEGER })
+    const lastWatermark = await cluster.get(orderingKey)
+    await expect(
+      backend.commitLane(roomId, inc, SEMANTIC_LANE, Buffer.from('overflow'), { retain: true }),
+    ).rejects.toThrow('sequence exhausted')
+    expect(observed).toEqual([Number.MAX_SAFE_INTEGER])
+    expect(await cluster.get(orderingKey)).toBe(lastWatermark)
+    const retained = await fresh.readRetained(roomId, inc, SEMANTIC_LANE)
+    expect(retained?.seq).toBe(Number.MAX_SAFE_INTEGER)
+    expect([...new Uint8Array(retained?.payload ?? [])]).toEqual([...Buffer.from('last')])
   })
 
   it('rejects invalid cell TTLs before any mutation takes effect', async () => {
-    const backend = redisBackend(cluster, uniquePrefix('cell-preflight'))
-    const roomId = 'cell-preflight-room'
-    const inc = 'cell-preflight-inc'
-    try {
-      await open(backend, roomId, inc)
-      const before = await backend.readCells(roomId, inc, { keys: [] })
-      if ('staleInc' in before) throw new Error('opened generation was stale')
-      await expect(
-        backend.compareExchangeCells(roomId, inc, before.revision, [
-          { key: 'first', set: { bytes: bytes('written') } },
-          { key: 'invalid', set: { bytes: bytes('rejected'), ttlMs: 0 } },
-        ]),
-      ).rejects.toThrow(/expire|ttl/i)
-      const after = await backend.readCells(roomId, inc, { keys: ['first', 'invalid'] })
-      if ('staleInc' in after) throw new Error('opened generation was stale')
-      expect(after.revision).toBe(before.revision)
-      expect(after.cells.size).toBe(0)
-    } finally {
-      await backend.dispose()
-    }
+    const { prefix, roomId, inc } = room('cell-preflight')
+    const backend = ownBackend(cluster, prefix)
+    await open(backend, roomId, inc)
+    const before = await backend.readCells(roomId, inc, { keys: [] })
+    if ('staleInc' in before) throw new Error('opened generation was stale')
+    await expect(
+      backend.compareExchangeCells(roomId, inc, before.revision, [
+        { key: 'first', set: { bytes: bytes('written') } },
+        { key: 'invalid', set: { bytes: bytes('rejected'), ttlMs: 0 } },
+      ]),
+    ).rejects.toThrow(/expire|ttl/i)
+    const after = await backend.readCells(roomId, inc, { keys: ['first', 'invalid'] })
+    if ('staleInc' in after) throw new Error('opened generation was stale')
+    expect(after.revision).toBe(before.revision)
+    expect(after.cells.size).toBe(0)
   })
 
   it('keeps the generation manifest complete across a reshard', async () => {
     const prefix = uniquePrefix('reshard-inventory')
-    const client = clusterClient(CLUSTER_NODES)
+    const client = ownCluster()
     await client.ping()
-    const backend = redisBackend(client, prefix)
+    const backend = ownBackend(client, prefix)
     const target = masters[0] as Master
     const source = masters[1] as Master
     const roomId = await roomOnMaster(prefix, source.id, 'reshard-inventory')
@@ -286,33 +253,29 @@ describe('Redis real three-master Cluster CI certification', () => {
     const relocate = async (): Promise<void> => {
       if (relocated) return
       relocated = true
-      await moveSlot(slotNumber, source, target, true)
+      await moveSlot(slotNumber, source, target)
     }
-    client.smembers = (async (key: string) => {
+    vi.spyOn(client, 'smembers').mockImplementation((async (key: string) => {
       if (key === `${genPrefix(prefix, roomId, inc)}:keys`) await relocate()
       return await smembers(key)
-    }) as typeof client.smembers
+    }) as never)
     try {
       await open(backend, roomId, inc)
       accepted(await backend.commitLane(roomId, inc, SEMANTIC_LANE, bytes('retained'), { retain: true }))
       expect(await backend.listRetained(roomId, inc)).toEqual([SEMANTIC_LANE])
       expect(relocated).toBe(true)
     } finally {
-      client.smembers = smembers as typeof client.smembers
       if (relocated) await restoreSlot(slotNumber, source, target)
-      await Promise.allSettled([backend.dispose(), client.quit()])
     }
   })
 
   it('does not drop a generation installed after an absent or overlapping snapshot', async () => {
-    const prefix = uniquePrefix('drop-absent-race')
-    const roomId = 'drop-absent-race-room'
-    const inc = 'drop-absent-race-inc'
-    const client = clusterClient(CLUSTER_NODES)
+    const { prefix, roomId, inc } = room('drop-absent-race')
+    const client = ownCluster()
     await client.ping()
-    const backend = new RedisRoomBackend({ redis: client, prefix })
-    const secondDropper = new RedisRoomBackend({ redis: client, prefix })
-    const authority = new RedisRoomBackend({ redis: client, prefix })
+    const backend = ownRoomBackend(client, prefix)
+    const secondDropper = ownRoomBackend(client, prefix)
+    const authority = ownRoomBackend(client, prefix)
     const snapshotRead = deferred()
     const releaseDrop = deferred()
     const inventoryRead = deferred()
@@ -343,14 +306,14 @@ describe('Redis real three-master Cluster CI certification', () => {
       await writeCell('new')
     }
     if (begin === undefined) {
-      client.smembers = (async (key: string) => {
+      vi.spyOn(client, 'smembers').mockImplementation((async (key: string) => {
         const result = await smembers(key)
         if (key === `${genPrefix(prefix, roomId, inc)}:keys`) {
           snapshotRead.resolve()
           await releaseDrop.promise
         }
         return result
-      }) as typeof client.smembers
+      }) as never)
     } else {
       const bound = begin.bind(client)
       commands.tfRoomDropGenerationBegin = async (...args) => {
@@ -374,14 +337,14 @@ describe('Redis real three-master Cluster CI certification', () => {
       const active = await authority.readHead(roomId)
       if (active === null) throw new Error('installed generation lost its head')
       await close(authority, roomId, active.head)
-      client.smembers = (async (key: string) => {
+      vi.spyOn(client, 'smembers').mockImplementation((async (key: string) => {
         if (key === `${genPrefix(prefix, roomId, inc)}:keys` && !inventoryHeld) {
           inventoryHeld = true
           inventoryRead.resolve()
           await releaseInventory.promise
         }
         return await smembers(key)
-      }) as typeof client.smembers
+      }) as never)
       firstDrop = backend.dropGeneration(roomId, inc)
       await inventoryRead.promise
       secondDrop = secondDropper.dropGeneration(roomId, inc)
@@ -401,252 +364,228 @@ describe('Redis real three-master Cluster CI certification', () => {
       releaseDrop.resolve()
       releaseInventory.resolve()
       await Promise.allSettled([firstDrop, secondDrop].filter((drop): drop is Promise<void> => drop !== undefined))
-      client.smembers = smembers as typeof client.smembers
       if (begin !== undefined) commands.tfRoomDropGenerationBegin = begin
-      await Promise.allSettled([backend.dispose(), secondDropper.dispose(), authority.dispose(), client.quit()])
     }
   })
 
   it('exposes terminal attempts so consumer replacement can fail once, recover, and deliver', async () => {
-    const topology = cluster.nodes('master').sort(compareRedisNodes)
-    const originals = topology.map((node) => [node, node.duplicate.bind(node)] as const)
+    const { prefix, roomId, inc } = room('replacement')
     let failNext = false
     let injectedFailure = false
     let opens = 0
-    for (const [node, original] of originals) {
-      node.duplicate = ((options?: unknown) => {
-        const client = original(options as never)
-        opens++
-        if (failNext) {
-          failNext = false
-          const subscribe = client.subscribe.bind(client)
-          let failed = false
-          client.subscribe = (async (...channels: string[]) => {
-            if (!failed) {
-              failed = true
-              injectedFailure = true
-              throw new Error('synthetic first replacement failure')
-            }
-            return await subscribe(...channels)
-          }) as typeof client.subscribe
+    interceptSubscribers(cluster, (client) => {
+      opens++
+      if (!failNext) return
+      failNext = false
+      const subscribe = client.subscribe.bind(client)
+      let failed = false
+      client.subscribe = (async (...channels: string[]) => {
+        if (!failed) {
+          failed = true
+          injectedFailure = true
+          throw new Error('synthetic first replacement failure')
         }
-        return client
-      }) as typeof node.duplicate
-    }
+        return await subscribe(...channels)
+      }) as typeof client.subscribe
+    })
 
     const baseline = new Set((await pubSubClients()).map(clientIdentity))
-    const backend = redisBackend(cluster, uniquePrefix('replacement'))
+    const backend = ownBackend(cluster, prefix)
     const states: SubscriptionState[] = []
     const observed: string[] = []
-    const subscriptions: Array<ReturnType<BackendSpi['subscribeLane']>> = []
-    try {
-      await open(backend, 'replacement-room', 'replacement-inc')
-      const receiver = (payload: Uint8Array) => observed.push(Buffer.from(payload).toString())
-      const subscription = backend.subscribeLane('replacement-room', 'replacement-inc', SEMANTIC_LANE, receiver)
-      subscriptions.push(subscription)
-      subscription.onStateChange((state) => states.push(state))
-      await subscription.ready
-      const [first] = await waitForValue(async () =>
-        (await pubSubClients()).filter((client) => !baseline.has(clientIdentity(client))),
-      )
-      if (first === undefined) throw new Error('initial Redis subscriber was not observed')
-      failNext = true
-      await first.owner.client.call('CLIENT', 'KILL', 'ID', String(first.id))
-      await waitFor(() => states.includes('lost') && subscription.state() === 'closed')
+    await open(backend, roomId, inc)
+    const receiver = (payload: Uint8Array) => observed.push(Buffer.from(payload).toString())
+    const subscription = subscribe(backend, roomId, inc, receiver)
+    subscription.onStateChange((state) => states.push(state))
+    await subscription.ready
+    const first = await waitForValue(async () =>
+      (await pubSubClients()).filter((client) => !baseline.has(clientIdentity(client))),
+    )
+    failNext = true
+    await first.owner.client.call('CLIENT', 'KILL', 'ID', String(first.id))
+    await waitFor(() => states.includes('lost') && subscription.state() === 'closed')
 
-      const failed = backend.subscribeLane('replacement-room', 'replacement-inc', SEMANTIC_LANE, receiver)
-      subscriptions.push(failed)
-      await expect(failed.ready).rejects.toThrow('Backend subscription closed')
-      expect(injectedFailure).toBe(true)
-      expect(failed.state()).toBe('closed')
+    const failed = subscribe(backend, roomId, inc, receiver)
+    await expect(failed.ready).rejects.toThrow('Backend subscription closed')
+    expect(injectedFailure).toBe(true)
+    expect(failed.state()).toBe('closed')
 
-      const recovered = backend.subscribeLane('replacement-room', 'replacement-inc', SEMANTIC_LANE, receiver)
-      subscriptions.push(recovered)
-      await recovered.ready
-      expect(recovered.state()).toBe('ready')
-      expect(opens).toBeGreaterThanOrEqual(3)
-      const committed = accepted(
-        await backend.commitLane('replacement-room', 'replacement-inc', SEMANTIC_LANE, Buffer.from('recovered')),
-      )
-      await committed.delivery
-      await waitFor(() => observed.length === 1)
-      expect(states).toContain('lost')
-      expect(observed).toEqual(['recovered'])
-    } finally {
-      for (const [node, original] of originals) node.duplicate = original as typeof node.duplicate
-      await Promise.allSettled(subscriptions.map((subscription) => subscription.unsubscribe()))
-      await backend.dispose()
-    }
+    const recovered = subscribe(backend, roomId, inc, receiver)
+    await recovered.ready
+    expect(recovered.state()).toBe('ready')
+    expect(opens).toBeGreaterThanOrEqual(3)
+    const committed = accepted(await backend.commitLane(roomId, inc, SEMANTIC_LANE, bytes('recovered')))
+    await committed.delivery
+    await waitFor(() => observed.length === 1)
+    expect(states).toContain('lost')
+    expect(observed).toEqual(['recovered'])
   })
 
   it('does not settle before subscriber dispatch or credit a held dispatch from a closed epoch', async () => {
-    const topology = cluster.nodes('master').sort(compareRedisNodes)
-    const originals = topology.map((node) => [node, node.duplicate.bind(node)] as const)
+    const { prefix, roomId, inc } = room('held-dispatch')
     const subscribers: Redis[] = []
-    for (const [node, original] of originals) {
-      node.duplicate = ((options?: unknown) => {
-        const client = original(options as never)
-        subscribers.push(client)
-        return client
-      }) as typeof node.duplicate
-    }
+    interceptSubscribers(cluster, (client) => {
+      subscribers.push(client)
+      return client
+    })
 
     const baseline = new Set((await pubSubClients()).map(clientIdentity))
-    const prefix = uniquePrefix('held-dispatch')
-    const backend = redisBackend(cluster, prefix)
+    const backend = ownBackend(cluster, prefix)
     const states: SubscriptionState[] = []
     const observed: string[] = []
+    const receiver = (payload: Uint8Array) => observed.push(Buffer.from(payload).toString())
     const held: Array<[Buffer, Buffer]> = []
-    let subscription: ReturnType<BackendSpi['subscribeLane']> | undefined
-    let replacement: ReturnType<BackendSpi['subscribeLane']> | undefined
-    let restoreDispatch: (() => void) | undefined
-    try {
-      await open(backend, 'held-dispatch-room', 'held-dispatch-inc')
-      subscription = backend.subscribeLane('held-dispatch-room', 'held-dispatch-inc', SEMANTIC_LANE, (payload) =>
-        observed.push(Buffer.from(payload).toString()),
-      )
-      subscription.onStateChange((state) => states.push(state))
-      await subscription.ready
+    let holding = false
+    await open(backend, roomId, inc)
+    const subscription = subscribe(backend, roomId, inc, receiver)
+    subscription.onStateChange((state) => states.push(state))
+    await subscription.ready
 
-      const subscriber = subscribers[0]
-      if (subscriber === undefined) throw new Error('owned Redis subscriber was not observed')
-      const dispatch = subscriber.listeners('messageBuffer')[0] as
-        | ((channel: Buffer, frame: Buffer) => void)
-        | undefined
-      if (dispatch === undefined) throw new Error('owned Redis subscriber dispatch listener was not observed')
-      const holdDispatch = (channel: Buffer, frame: Buffer): void => {
-        held.push([channel, frame])
-      }
-      subscriber.off('messageBuffer', dispatch)
-      subscriber.on('messageBuffer', holdDispatch)
-      restoreDispatch = () => {
-        subscriber.off('messageBuffer', holdDispatch)
-        subscriber.on('messageBuffer', dispatch)
-      }
-
-      const lateFirst = accepted(
-        await backend.commitLane('held-dispatch-room', 'held-dispatch-inc', SEMANTIC_LANE, Buffer.from('late-first')),
-      )
-      const lateSecond = accepted(
-        await backend.commitLane('held-dispatch-room', 'held-dispatch-inc', SEMANTIC_LANE, Buffer.from('late-second')),
-      )
-      await waitFor(() => held.length === 4)
-      restoreDispatch()
-      restoreDispatch = undefined
-      for (const [channel, frame] of held
-        .filter(([, frame]) => frame[0] !== REDIS_DELIVERY_FENCE_BYTE)
-        .sort(
-          (left, right) => decodeRedisOrderingFrame(right[1]).info.seq - decodeRedisOrderingFrame(left[1]).info.seq,
-        )) {
-        dispatch(channel, frame)
-      }
-      for (const [channel, frame] of held.filter(([, frame]) => frame[0] === REDIS_DELIVERY_FENCE_BYTE)) {
-        dispatch(channel, frame)
-      }
-      await Promise.all([lateFirst.delivery, lateSecond.delivery])
-      expect(observed).toEqual(['late-second'])
-      held.length = 0
-      subscriber.off('messageBuffer', dispatch)
-      subscriber.on('messageBuffer', holdDispatch)
-      restoreDispatch = () => {
-        subscriber.off('messageBuffer', holdDispatch)
-        subscriber.on('messageBuffer', dispatch)
-      }
-
-      const committed = accepted(
-        await backend.commitLane('held-dispatch-room', 'held-dispatch-inc', SEMANTIC_LANE, Buffer.from('old-epoch')),
-      )
-      const deliveryOutcome = committed.delivery.then(
-        () => null,
-        (error: unknown) => error,
-      )
-      await waitFor(() => held.length === 2)
-      const expectedChannel = channelKey(prefix, 'held-dispatch-room', 'held-dispatch-inc', laneKey(SEMANTIC_LANE))
-      expect(held.map(([channel]) => channel.toString())).toEqual([expectedChannel, expectedChannel])
-      expect(Buffer.from(decodeRedisOrderingFrame(held[0]![1]).payload).toString()).toBe('old-epoch')
-      expect(held[1]?.[1][0]).toBe(REDIS_DELIVERY_FENCE_BYTE)
-      expect(await settlesWithin(committed.delivery, 100)).toBe(false)
-
-      const [first] = await waitForValue(async () =>
-        (await pubSubClients()).filter((client) => !baseline.has(clientIdentity(client))),
-      )
-      if (first === undefined) throw new Error('initial Redis subscriber connection was not observed')
-      await first.owner.client.call('CLIENT', 'KILL', 'ID', String(first.id))
-      await waitFor(() => states.includes('lost') && subscription?.state() === 'closed')
-      replacement = backend.subscribeLane('held-dispatch-room', 'held-dispatch-inc', SEMANTIC_LANE, (payload) =>
-        observed.push(Buffer.from(payload).toString()),
-      )
-      await replacement.ready
-      restoreDispatch()
-      restoreDispatch = undefined
-      for (const [channel, frame] of held) dispatch(channel, frame)
-
-      const error = await deliveryOutcome
-      expect(error).toBeInstanceOf(Error)
-      expect(String(error)).toMatch(/delivery fence|connection closed/i)
-      expect(observed).toEqual(['late-second'])
-    } finally {
-      restoreDispatch?.()
-      for (const [node, original] of originals) node.duplicate = original as typeof node.duplicate
-      await Promise.allSettled([subscription?.unsubscribe(), replacement?.unsubscribe()])
-      await backend.dispose()
+    const subscriber = subscribers[0]
+    if (subscriber === undefined) throw new Error('owned Redis subscriber was not observed')
+    const dispatch = subscriber.listeners('messageBuffer')[0] as ((channel: Buffer, frame: Buffer) => void) | undefined
+    if (dispatch === undefined) throw new Error('owned Redis subscriber dispatch listener was not observed')
+    const holdDispatch = (channel: Buffer, frame: Buffer): void => {
+      held.push([channel, frame])
     }
+    const setHolding = (next: boolean): void => {
+      if (holding === next) return
+      subscriber.off('messageBuffer', next ? dispatch : holdDispatch)
+      subscriber.on('messageBuffer', next ? holdDispatch : dispatch)
+      holding = next
+    }
+    onTestFinished(() => setHolding(false))
+    setHolding(true)
+
+    const lateFirst = accepted(await backend.commitLane(roomId, inc, SEMANTIC_LANE, bytes('late-first')))
+    const lateSecond = accepted(await backend.commitLane(roomId, inc, SEMANTIC_LANE, bytes('late-second')))
+    await waitFor(() => held.length === 4)
+    setHolding(false)
+    for (const [channel, frame] of held
+      .filter(([, frame]) => frame[0] !== REDIS_DELIVERY_FENCE_BYTE)
+      .sort(
+        (left, right) => decodeRedisOrderingFrame(right[1]).info.seq - decodeRedisOrderingFrame(left[1]).info.seq,
+      )) {
+      dispatch(channel, frame)
+    }
+    for (const [channel, frame] of held.filter(([, frame]) => frame[0] === REDIS_DELIVERY_FENCE_BYTE)) {
+      dispatch(channel, frame)
+    }
+    await Promise.all([lateFirst.delivery, lateSecond.delivery])
+    expect(observed).toEqual(['late-second'])
+    held.length = 0
+    setHolding(true)
+
+    const committed = accepted(await backend.commitLane(roomId, inc, SEMANTIC_LANE, bytes('old-epoch')))
+    const deliveryOutcome = committed.delivery.catch((error: unknown) => error)
+    await waitFor(() => held.length === 2)
+    const expectedChannel = channelKey(prefix, roomId, inc, laneKey(SEMANTIC_LANE))
+    expect(held.map(([channel]) => channel.toString())).toEqual([expectedChannel, expectedChannel])
+    expect(Buffer.from(decodeRedisOrderingFrame(held[0]![1]).payload).toString()).toBe('old-epoch')
+    expect(held[1]?.[1][0]).toBe(REDIS_DELIVERY_FENCE_BYTE)
+    expect(await settlesWithin(committed.delivery, 100)).toBe(false)
+
+    const first = await waitForValue(async () =>
+      (await pubSubClients()).filter((client) => !baseline.has(clientIdentity(client))),
+    )
+    await first.owner.client.call('CLIENT', 'KILL', 'ID', String(first.id))
+    await waitFor(() => states.includes('lost') && subscription.state() === 'closed')
+    const replacement = subscribe(backend, roomId, inc, receiver)
+    await replacement.ready
+    setHolding(false)
+    for (const [channel, frame] of held) dispatch(channel, frame)
+
+    const error = await deliveryOutcome
+    expect(error).toBeInstanceOf(Error)
+    expect(String(error)).toMatch(/delivery fence|connection closed/i)
+    expect(observed).toEqual(['late-second'])
   })
 
   it('omits globally unknowable receiver counts while still delivering cross-node', async () => {
     const prefix = uniquePrefix('receivers')
-    const backend = redisBackend(cluster, prefix)
+    const backend = ownBackend(cluster, prefix)
     // RedisRoomBackend sorts master endpoints before round-robin subscriber selection. Mirror that
     // order, but identify masters by Cluster node ID: Compose nodes all listen on port 6379.
-    const subscriberOrder = [...masters].sort(compareMasterEndpoints)
+    const subscriberOrder = [...masters].sort((left, right) =>
+      `${left.host}:${left.port}`.localeCompare(`${right.host}:${right.port}`),
+    )
     const cases = [
       { label: 'cross', roomMasterId: (subscriberOrder[2] as Master).id, same: false },
       { label: 'same', roomMasterId: (subscriberOrder[1] as Master).id, same: true },
     ]
     const knownClients = new Set((await pubSubClients()).map(clientIdentity))
-    const subscriptions: Array<ReturnType<BackendSpi['subscribeLane']>> = []
-    try {
-      for (const scenario of cases) {
-        const roomId = await roomOnMaster(prefix, scenario.roomMasterId, scenario.label)
-        const inc = `${scenario.label}-inc`
-        await open(backend, roomId, inc)
-        const observed: string[] = []
-        const subscription = backend.subscribeLane(roomId, inc, SEMANTIC_LANE, (payload) =>
-          observed.push(Buffer.from(payload).toString()),
-        )
-        subscriptions.push(subscription)
-        await subscription.ready
-        const [subscriber] = await waitForValue(async () =>
-          (await pubSubClients()).filter((client) => !knownClients.has(clientIdentity(client))),
-        )
-        if (subscriber === undefined) throw new Error(`${scenario.label} subscriber was not observed`)
-        expect(subscriber.owner.id === scenario.roomMasterId).toBe(scenario.same)
-        knownClients.add(clientIdentity(subscriber))
-        const result = accepted(await backend.commitLane(roomId, inc, SEMANTIC_LANE, Buffer.from(scenario.label)))
-        await result.delivery
-        expect(observed).toEqual([scenario.label])
-        expect(result.receivers).toBeUndefined()
-      }
-
-      const emptyObserved: string[] = []
-      const text = backend.subscribe({ key: '', kind: 'text' }, (payload, info) =>
-        emptyObserved.push(`text:${info.seq}:${Buffer.from(payload).toString()}`),
+    for (const scenario of cases) {
+      const roomId = await roomOnMaster(prefix, scenario.roomMasterId, scenario.label)
+      const inc = `${scenario.label}-inc`
+      await open(backend, roomId, inc)
+      const observed: string[] = []
+      const subscription = subscribe(backend, roomId, inc, (payload) => observed.push(Buffer.from(payload).toString()))
+      await subscription.ready
+      const subscriber = await waitForValue(async () =>
+        (await pubSubClients()).filter((client) => !knownClients.has(clientIdentity(client))),
       )
-      const binary = backend.subscribe({ key: '', kind: 'binary' }, (payload, info) =>
-        emptyObserved.push(`binary:${info.seq}:${Buffer.from(payload).toString()}`),
-      )
-      subscriptions.push(text, binary)
-      await Promise.all([text.ready, binary.ready])
-      const first = await backend.publish({ key: '', kind: 'text' }, bytes('one'))
-      const second = await backend.publish({ key: '', kind: 'binary' }, bytes('two'))
-      await waitFor(() => emptyObserved.length === 2)
-      expect([first.seq, second.seq]).toEqual([1, 2])
-      expect(emptyObserved).toEqual(['text:1:one', 'binary:2:two'])
-    } finally {
-      await Promise.allSettled(subscriptions.map((subscription) => subscription.unsubscribe()))
-      await backend.dispose()
+      expect(subscriber.owner.id === scenario.roomMasterId).toBe(scenario.same)
+      knownClients.add(clientIdentity(subscriber))
+      const result = accepted(await backend.commitLane(roomId, inc, SEMANTIC_LANE, Buffer.from(scenario.label)))
+      await result.delivery
+      expect(observed).toEqual([scenario.label])
+      expect(result.receivers).toBeUndefined()
     }
+
+    const emptyObserved: string[] = []
+    const text = ownSubscription(
+      backend.subscribe({ key: '', kind: 'text' }, (payload, info) =>
+        emptyObserved.push(`text:${info.seq}:${Buffer.from(payload).toString()}`),
+      ),
+    )
+    const binary = ownSubscription(
+      backend.subscribe({ key: '', kind: 'binary' }, (payload, info) =>
+        emptyObserved.push(`binary:${info.seq}:${Buffer.from(payload).toString()}`),
+      ),
+    )
+    await Promise.all([text.ready, binary.ready])
+    const first = await backend.publish({ key: '', kind: 'text' }, bytes('one'))
+    const second = await backend.publish({ key: '', kind: 'binary' }, bytes('two'))
+    await waitFor(() => emptyObserved.length === 2)
+    expect([first.seq, second.seq]).toEqual([1, 2])
+    expect(emptyObserved).toEqual(['text:1:one', 'binary:2:two'])
   })
+
+  function own<T>(value: T, dispose: (value: T) => unknown): T {
+    onTestFinished(async () => void (await dispose(value)))
+    return value
+  }
+
+  const ownBackend = (redis: Redis | Cluster, prefix: string): BackendSpi =>
+    own(installRedis(redis, { prefix }), (backend) => backend.dispose())
+
+  function ownRoomBackend(redis: Redis | Cluster, prefix: string): RedisRoomBackend {
+    return own(new RedisRoomBackend({ redis, prefix }), (backend) => backend.dispose())
+  }
+
+  const ownCluster = (): Cluster =>
+    own(clusterClient(CLUSTER_NODES), (client) => client.quit().catch(() => client.disconnect()))
+
+  function ownSubscription<T extends { unsubscribe(): Promise<void> }>(subscription: T): T {
+    return own(subscription, (current) => current.unsubscribe())
+  }
+
+  const room = (label: string) => ({ prefix: uniquePrefix(label), roomId: `${label}-room`, inc: `${label}-inc` })
+
+  function subscribe(backend: BackendSpi, roomId: string, inc: string, receiver: LaneReceiver): Subscription {
+    return ownSubscription(backend.subscribeLane(roomId, inc, SEMANTIC_LANE, receiver))
+  }
+
+  function interceptSubscribers(redis: Cluster, onOpen: (subscriber: Redis) => void): void {
+    for (const node of redis.nodes('master')) {
+      const duplicate = node.duplicate.bind(node)
+      vi.spyOn(node, 'duplicate').mockImplementation((options) => {
+        const subscriber = duplicate(options)
+        onOpen(subscriber)
+        return subscriber
+      })
+    }
+  }
 
   function owner(slotNumber: number): Master {
     const match = masters.find(({ ranges }) => ranges.some(([start, end]) => slotNumber >= start && slotNumber <= end))
@@ -679,30 +618,23 @@ describe('Redis real three-master Cluster CI certification', () => {
     return clients
   }
 
-  async function moveSlot(slotNumber: number, source: Master, target: Master, finalize: boolean): Promise<void> {
+  async function moveSlot(slotNumber: number, source: Master, target: Master): Promise<void> {
     await target.client.cluster('SETSLOT', slotNumber, 'IMPORTING', source.id)
     await source.client.cluster('SETSLOT', slotNumber, 'MIGRATING', target.id)
     const keys = (await source.client.cluster('GETKEYSINSLOT', slotNumber, 10_000)) as string[]
     await migrateKeys(source, target, keys)
-    if (finalize) for (const master of masters) await master.client.cluster('SETSLOT', slotNumber, 'NODE', target.id)
+    for (const master of masters) await master.client.cluster('SETSLOT', slotNumber, 'NODE', target.id)
   }
 
   async function migrateKeys(source: Master, target: Master, keys: string[]): Promise<void> {
     for (let index = 0; index < keys.length; index += 50) {
       const batch = keys.slice(index, index + 50)
-      if (batch.length > 0) {
-        await source.client.call('MIGRATE', target.host, String(target.port), '', '0', '30000', 'KEYS', ...batch)
-      }
+      await source.client.call('MIGRATE', target.host, String(target.port), '', '0', '30000', 'KEYS', ...batch)
     }
   }
 
   async function restoreSlot(slotNumber: number, original: Master, current: Master): Promise<void> {
-    if (original.id === current.id) return
-    await original.client.cluster('SETSLOT', slotNumber, 'IMPORTING', current.id)
-    await current.client.cluster('SETSLOT', slotNumber, 'MIGRATING', original.id)
-    const keys = (await current.client.cluster('GETKEYSINSLOT', slotNumber, 10_000)) as string[]
-    await migrateKeys(current, original, keys)
-    for (const master of masters) await master.client.cluster('SETSLOT', slotNumber, 'NODE', original.id)
+    await moveSlot(slotNumber, current, original)
     for (const master of masters) expect((await clusterInfo(master.client)).cluster_state).toBe('ok')
   }
 })
@@ -738,10 +670,6 @@ async function readMasters(nodes: RedisClusterNode[]): Promise<Master[]> {
     }
   }
   return [...masters.values()]
-}
-
-function redisBackend(redis: Redis | Cluster, prefix: string): BackendSpi {
-  return installRedis(redis, { prefix })
 }
 
 async function open(backend: Pick<BackendSpi, 'compareExchangeHead'>, roomId: string, inc: string): Promise<RoomHead> {
@@ -787,23 +715,9 @@ function accepted(result: Awaited<ReturnType<BackendSpi['commitLane']>>): Commit
   return result
 }
 
-function uniquePrefix(label: string): string {
-  return `redis-cluster-ci:${process.pid}:${Date.now().toString(36)}:${label}:`
-}
+const uniquePrefix = (label: string): string => `redis-cluster-ci:${process.pid}:${Date.now().toString(36)}:${label}:`
 
-function compareRedisNodes(left: Redis, right: Redis): number {
-  return `${left.options.host ?? ''}:${left.options.port ?? ''}`.localeCompare(
-    `${right.options.host ?? ''}:${right.options.port ?? ''}`,
-  )
-}
-
-function compareMasterEndpoints(left: RedisClusterNode, right: RedisClusterNode): number {
-  return `${left.host}:${left.port}`.localeCompare(`${right.host}:${right.port}`)
-}
-
-function clientIdentity(client: { id: number; owner: Master }): string {
-  return `${client.owner.id}:${client.id}`
-}
+const clientIdentity = (client: { id: number; owner: Master }): string => `${client.owner.id}:${client.id}`
 
 async function clusterInfo(client: Redis): Promise<Record<string, string>> {
   return Object.fromEntries(
@@ -822,19 +736,19 @@ async function waitFor(predicate: () => boolean | Promise<boolean>, timeoutMs = 
   }
 }
 
-async function waitForValue<T>(read: () => Promise<T[]>, timeoutMs = 10_000): Promise<T[]> {
-  let value: T[] = []
+async function waitForValue<T>(read: () => Promise<T[]>, timeoutMs = 10_000): Promise<T> {
+  let value: T | undefined
   await waitFor(async () => {
-    value = await read()
-    return value.length > 0
+    value = (await read())[0]
+    return value !== undefined
   }, timeoutMs)
-  return value
+  return value as T
 }
 
 function deferred(): { promise: Promise<void>; resolve(): void } {
   let resolve!: () => void
-  const promise = new Promise<void>((resolvePromise) => {
-    resolve = resolvePromise
+  const promise = new Promise<void>((done) => {
+    resolve = done
   })
   return { promise, resolve }
 }
@@ -849,27 +763,20 @@ async function settlesWithin(promise: Promise<unknown>, timeoutMs: number): Prom
   ])
 }
 
-function bytes(value: string): Uint8Array {
-  return new TextEncoder().encode(value)
-}
+const bytes = (value: string): Uint8Array => new TextEncoder().encode(value)
 
 function observeCommands(client: Cluster): {
   definitions: CommandDefinition[]
   calls: CommandCall[]
   wrapDefinedCommand(name: string): unknown[][]
-  restore(): void
 } {
   const definitions: CommandDefinition[] = []
   const calls: CommandCall[] = []
-  const restores: Array<() => void> = []
   const defineCommand = client.defineCommand.bind(client)
-  client.defineCommand = ((name: string, options: { lua: string; numberOfKeys?: number }) => {
+  vi.spyOn(client, 'defineCommand').mockImplementation(((name: string, options: CommandOptions) => {
     definitions.push({ name, lua: options.lua, numberOfKeys: options.numberOfKeys ?? null })
     defineCommand(name, options)
-  }) as typeof client.defineCommand
-  restores.push(() => {
-    client.defineCommand = defineCommand as typeof client.defineCommand
-  })
+  }) as never)
 
   return {
     definitions,
@@ -880,7 +787,7 @@ function observeCommands(client: Cluster): {
       if (command === undefined) throw new Error(`defined command '${name}' was not installed`)
       const bound = command.bind(client)
       const observed: unknown[][] = []
-      target[name] = async (...args) => {
+      vi.spyOn(target, name).mockImplementation(async (...args) => {
         observed.push(args)
         const definition = [...definitions].reverse().find((candidate) => candidate.name === name)
         if (definition !== undefined) {
@@ -892,14 +799,8 @@ function observeCommands(client: Cluster): {
           })
         }
         return await bound(...args)
-      }
-      restores.push(() => {
-        target[name] = command
       })
       return observed
-    },
-    restore() {
-      for (const restore of restores.reverse()) restore()
     },
   }
 }

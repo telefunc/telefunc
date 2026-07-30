@@ -535,38 +535,26 @@ return 1
 
 // One production-owned inventory drives command registration and key assembly. Tests consume the same
 // descriptors and builders, so a new script or a changed operand cannot silently escape slot/Lua proof.
+function command<const Name extends string, const Keys extends number | null>(
+  name: Name,
+  lua: string,
+  numberOfKeys: Keys,
+) {
+  return { name, lua, numberOfKeys }
+}
+
 export const REDIS_ROOM_COMMANDS = {
-  headCx: { name: 'tfRoomHeadCx', lua: HEAD_CX_LUA, numberOfKeys: 4 },
-  readHead: { name: 'tfRoomReadHead', lua: READ_HEAD_LUA, numberOfKeys: 1 },
-  readCellsFence: {
-    name: 'tfRoomReadCellsFence',
-    lua: READ_CELLS_FENCE_LUA,
-    numberOfKeys: 2,
-  },
-  validateGeneration: {
-    name: 'tfRoomValidateGeneration',
-    lua: VALIDATE_GENERATION_LUA,
-    numberOfKeys: 3,
-  },
-  dropGenerationBegin: {
-    name: 'tfRoomDropGenerationBegin',
-    lua: DROP_GENERATION_BEGIN_LUA,
-    numberOfKeys: 4,
-  },
-  dropGenerationFinalize: {
-    name: 'tfRoomDropGenerationFinalize',
-    lua: DROP_GENERATION_FINALIZE_LUA,
-    numberOfKeys: null,
-  },
-  cellsCx: { name: 'tfRoomCellsCx', lua: CELLS_CX_LUA, numberOfKeys: null },
-  commit: { name: 'tfRoomCommit', lua: COMMIT_LUA, numberOfKeys: null },
-  retainedDelete: { name: 'tfRoomRetainedDelete', lua: RETAINED_DELETE_LUA, numberOfKeys: null },
-  directoryPut: { name: 'tfRoomDirectoryPut', lua: DIRECTORY_PUT_LUA, numberOfKeys: 2 },
-  directoryDelete: {
-    name: 'tfRoomDirectoryDelete',
-    lua: DIRECTORY_DELETE_LUA,
-    numberOfKeys: 2,
-  },
+  headCx: command('tfRoomHeadCx', HEAD_CX_LUA, 4),
+  readHead: command('tfRoomReadHead', READ_HEAD_LUA, 1),
+  readCellsFence: command('tfRoomReadCellsFence', READ_CELLS_FENCE_LUA, 2),
+  validateGeneration: command('tfRoomValidateGeneration', VALIDATE_GENERATION_LUA, 3),
+  dropGenerationBegin: command('tfRoomDropGenerationBegin', DROP_GENERATION_BEGIN_LUA, 4),
+  dropGenerationFinalize: command('tfRoomDropGenerationFinalize', DROP_GENERATION_FINALIZE_LUA, null),
+  cellsCx: command('tfRoomCellsCx', CELLS_CX_LUA, null),
+  commit: command('tfRoomCommit', COMMIT_LUA, null),
+  retainedDelete: command('tfRoomRetainedDelete', RETAINED_DELETE_LUA, null),
+  directoryPut: command('tfRoomDirectoryPut', DIRECTORY_PUT_LUA, 2),
+  directoryDelete: command('tfRoomDirectoryDelete', DIRECTORY_DELETE_LUA, 2),
 } as const
 
 export const REDIS_ROOM_COMMAND_KEYS = {
