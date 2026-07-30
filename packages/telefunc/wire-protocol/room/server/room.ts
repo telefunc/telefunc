@@ -14,7 +14,6 @@ import {
   ROOM_DM_ACK_TIMEOUT_MS,
   ROOM_HEARTBEAT_INTERVAL_MS,
   ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS,
-  ROOM_TAIL_ATTACH_TIMEOUT_MS,
 } from '../../constants.js'
 import { getBackend } from '../../backend/install.js'
 import type { LaneId, BackendSubscription } from '../../backend/spi.js'
@@ -115,14 +114,12 @@ class ServerRoom implements Room {
   readonly _inc: string
   /** @internal — tail mode (`Room.get(id, { tail: true })`): this node ingests and holds the room's
    *  text from the moment of `Room.get`, so a history read done before the room is serialized misses
-   *  no live message. Cleared when a stub attaches (the hold moves onto the stub, which keeps it until
-   *  the client's first `subscribe()`) or when the safety timer tears an unserialized tail down. */
+   *  no live message. Cleared when a stub attaches or the room closes. */
   _tail = false
   /** Text held between `Room.get({ tail })` and the stub attaching; handed to the stub on attach (see
    *  `_attachStub`). Bounded drop-oldest, so a fetched-with-tail room that is never serialized (misuse)
    *  can't grow it without limit. */
   private readonly _tailHold: Array<{ serialized: string; ord: RoomOrder; from: string }> = []
-  private _tailTimer: ReturnType<typeof setTimeout> | null = null
   /** In-flight `send(…, { ack: true })`s awaiting the recipient's reply, keyed by `ackId`. `to` is
    *  the recipient, so a leave/close can fail the ones it strands. Empty at steady state. */
   private readonly _pendingDmAcks = new Map<string, { to: string; settle: (reply: DmReply) => void }>()
@@ -884,6 +881,7 @@ class ServerRoom implements Room {
   /** The room closed — runs once, after the `closed` event has been applied and relayed. */
   private _teardown(): void {
     this._rejectDmAcks('Room is closed') // no recipient will reply now
+    this._teardownTail()
     for (const local of this._localParticipants.values()) local._onLeft({ type: 'closed' })
     this._localParticipants.clear()
     for (const stub of this._stubs) void stub.close().catch(() => {})
@@ -957,20 +955,16 @@ class ServerRoom implements Room {
 
   // ── Client stubs ──
 
-  /** @internal — begin tail relay (`Room.get({ tail: true })`): ingest and hold the room's text from
-   *  now, so a history read done before this room is serialized misses no live message. A safety timer
-   *  tears the ingestion down if the room is fetched-with-tail but never serialized. */
+  /** @internal — begin tail relay (`Room.get({ tail: true })`): ingest and hold from now. */
   _startTail(): void {
     this._tail = true
     this._syncSubs() // bring up text ingestion before any stub exists
-    this._tailTimer = setTimeout(() => this._teardownTail(), ROOM_TAIL_ATTACH_TIMEOUT_MS)
   }
 
   private _teardownTail(): void {
     if (!this._tail) return // already handed off to a stub
     this._tail = false
     this._tailHold.length = 0
-    this._tailTimer = null
     this._syncSubs() // drop the text ingestion nothing is consuming
   }
 
@@ -982,11 +976,7 @@ class ServerRoom implements Room {
     // (see `_flushTail`). Nothing crosses the wire before the client asks for it, and the client needs
     // no buffer of its own. `_syncSubs()` below keeps text ingestion up while the hold is pending.
     if (this._tail) {
-      if (this._tailTimer !== null) {
-        clearTimeout(this._tailTimer)
-        this._tailTimer = null
-      }
-      stub._beginTail(this._tailHold.slice(), () => this._syncSubs())
+      stub._beginTail(this._tailHold.slice())
       this._tailHold.length = 0
       this._tail = false
     }

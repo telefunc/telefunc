@@ -998,14 +998,17 @@ describe('Room public behavior', () => {
   })
 
   it('tail mode holds pre-attach text and flushes it in order on first client demand', async () => {
+    vi.useFakeTimers()
     await Room.create('tail')
     const source = await Room.get('tail')
     const member = await source.join()
     const tail = (await Room.get('tail', { tail: true })) as ServerRoom
     await member.publish('early')
+    await vi.advanceTimersByTimeAsync(60_001)
 
     const { stub, peer } = serve(tail)
     await member.publish('held')
+    await vi.advanceTimersByTimeAsync(60_001)
     expect(dataFrames(peer)).toEqual([])
     stub._onPeerBroadcastSubscribe(false)
     await vi.waitFor(() => expect(dataFrames(peer)).toEqual(['early', 'held']))
