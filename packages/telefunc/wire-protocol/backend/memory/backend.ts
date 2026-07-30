@@ -90,6 +90,10 @@ function copyBytes(bytes: Uint8Array): Uint8Array {
   return new Uint8Array(bytes)
 }
 
+function copyLane(lane: LaneId): LaneId {
+  return { ...lane }
+}
+
 function sumReceiverCounts(targets: MemorySubscriptionAttempt[]): number {
   return targets.reduce((total, target) => total + target.receiverCount(), 0)
 }
@@ -375,7 +379,14 @@ export class MemoryBackend implements BackendDriver {
     // Over-cap retain is rejected before anything is mutated, so a throw never half-accepts a commit.
     if (opts?.retain) this._assertRetainedCapacity(gen, key, frame)
     const mark = this._advanceOrder(gen, key)
-    if (opts?.retain) gen.retained.set(key, { lane, payload: frame, seq: mark.seq, timestamp: mark.timestamp })
+    if (opts?.retain) {
+      gen.retained.set(key, {
+        lane: Object.freeze(copyLane(lane)),
+        payload: frame,
+        seq: mark.seq,
+        timestamp: mark.timestamp,
+      })
+    }
     const targets = [...(gen.subs.get(key) ?? [])]
     const info = { seq: mark.seq, timestamp: mark.timestamp }
     return {
@@ -477,7 +488,7 @@ export class MemoryBackend implements BackendDriver {
   async listRetained(roomId: string, inc: string): Promise<LaneId[]> {
     this._assertLive()
     const gen = this._state.rooms.get(roomId)?.gens.get(inc)
-    return gen === undefined ? [] : [...gen.retained.values()].map((entry) => entry.lane)
+    return gen === undefined ? [] : [...gen.retained.values()].map((entry) => copyLane(entry.lane))
   }
 
   async deleteRetained(roomId: string, inc: string, lane?: LaneId, opts?: { ifSeq?: number }): Promise<void> {

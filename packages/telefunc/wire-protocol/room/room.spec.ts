@@ -531,6 +531,22 @@ describe('Room public behavior', () => {
     expect(parse(decoder.decode(retained!.payload))).toMatchObject({ from: replacement.id, data: 'new' })
   })
 
+  it('does not retain or expose mutable lane aliases', async () => {
+    const room = (await Room.create('retained-lane-alias')) as ServerRoom
+    const lane = { kind: 'binary', member: 'member', track: 'original' } as LaneId
+    await driver.commitLane(room.id, room._inc, lane, new Uint8Array([1]), { retain: true })
+    if (lane.kind !== 'binary') throw new Error('expected binary lane')
+    lane.track = 'mutated-ingress'
+    const listed = await driver.listRetained(room.id, room._inc)
+    expect(listed).toEqual([{ kind: 'binary', member: 'member', track: 'original' }])
+    const returned = listed[0]
+    if (returned?.kind !== 'binary') throw new Error('expected retained binary lane')
+    returned.track = 'mutated-egress'
+    await expect(driver.listRetained(room.id, room._inc)).resolves.toEqual([
+      { kind: 'binary', member: 'member', track: 'original' },
+    ])
+  })
+
   it('drops retained text and binary when a crashed publisher is reaped', async () => {
     vi.useFakeTimers()
     vi.setSystemTime(1_000_000)
