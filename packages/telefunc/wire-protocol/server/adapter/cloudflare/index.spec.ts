@@ -457,27 +457,19 @@ describe('cloudflare adapter entrypoint', () => {
 
     // Importing and using the ordinary Cloudflare adapter remains flag-free. Only the first Room entry
     // asks for the opt-in async carrier and reports the recipe diagnostic.
-    expect(() =>
-      instance.telefuncRoomInvalidate({
-        roomId: 'room',
-        inc: 'inc',
-        laneKey: 'lane',
-        subscriberDoId: 'id',
-        leaseId: 'lease',
-        generationToken: 'generation',
-      }),
-    ).toThrow('Cloudflare Room requires await-safe context')
-    expect(hibernatedSocket.close).not.toHaveBeenCalled()
-
-    mocks.asyncMode = true
-    instance.telefuncRoomInvalidate({
+    const invalidation = {
       roomId: 'room',
       inc: 'inc',
       laneKey: 'lane',
       subscriberDoId: 'id',
       leaseId: 'lease',
       generationToken: 'generation',
-    })
+    }
+    expect(() => instance.telefuncRoomInvalidate(invalidation)).toThrow('Cloudflare Room requires await-safe context')
+    expect(hibernatedSocket.close).not.toHaveBeenCalled()
+
+    mocks.asyncMode = true
+    instance.telefuncRoomInvalidate(invalidation)
     expect(hibernatedSocket.close).toHaveBeenCalledWith(1012, 'Telefunc session reset; reconnect')
   })
 })

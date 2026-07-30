@@ -2,14 +2,10 @@
 
 import type { LaneId } from '../../../../backend/spi.js'
 
-// One key indexes a lane's order domain, its retained slot, its route rows and its delivery chain — the
-// fixed lane table maps each lane's order domain and channel one to one. Member and track are encoded so
-// a member named `a:b` can never collide with another lane.
+// One collision-safe key indexes a lane's order, retained slot, routes, and delivery chain.
 export { laneKey } from '../../../../backend/subscription-source.js'
 
-// Retained listing must hand back the exact LaneId objects the caller passed.
-// The manifest row therefore carries the lane's structural fields verbatim
-// rather than trying to reverse the encoded key.
+// Retained manifests preserve structural fields instead of reversing the encoded key.
 export type LaneParts = { kind: LaneId['kind']; member: string | null; track: string | null }
 
 export function laneToParts(lane: LaneId): LaneParts {

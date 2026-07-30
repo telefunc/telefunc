@@ -1,6 +1,5 @@
 /// <reference types="@cloudflare/workers-types" />
-// The retained-generation invariant (I6), with chunking kept entirely backend-internal. A retained
-// payload is split into rows ≤1.5 MB (workerd's row cap is 2 MB).
+// Retained payloads are internally chunked to 1.5 MB rows below workerd's 2 MB cap.
 
 import type { LaneId } from '../../../../backend/spi.js'
 import { laneKey, type LaneParts, laneToParts, partsToLane } from './codec.js'
