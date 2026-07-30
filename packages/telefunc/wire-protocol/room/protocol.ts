@@ -8,6 +8,8 @@ export {
   roomMemberKvPrefix,
   roomHiddenMemberKvKey,
   roomHiddenMemberKvPrefix,
+  roomMemberCleanupKvKey,
+  roomMemberCleanupKvPrefix,
   roomIdentityMemberKvKey,
   roomIdentityKvPrefix,
   stampNewer,
@@ -122,6 +124,15 @@ function roomHiddenMemberKvKey(roomId: string, memberId: string): string {
 /** KV prefix enumerating a room's off-presence markers. */
 function roomHiddenMemberKvPrefix(roomId: string): string {
   return `${ROOM_KEY_NAMESPACE}${roomKeyId(roomId)}:hidden:`
+}
+
+/** Durable work left by membership eviction. The marker is committed in the same cell transaction
+ *  that removes the member, then cleared only after retained data and the semantic leave are done. */
+function roomMemberCleanupKvKey(roomId: string, memberId: string): string {
+  return `${ROOM_KEY_NAMESPACE}${roomKeyId(roomId)}:cleanup:${memberId}`
+}
+function roomMemberCleanupKvPrefix(roomId: string): string {
+  return `${ROOM_KEY_NAMESPACE}${roomKeyId(roomId)}:cleanup:`
 }
 
 /** Reserved KV namespace for the identity→membership index — kept separate from

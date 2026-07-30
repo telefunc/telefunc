@@ -1203,6 +1203,44 @@ describe('Room public behavior', () => {
     expect(parse(decoder.decode(retained!.payload))).toMatchObject({ from: replacement.id, data: 'new' })
   })
 
+  it('retries retained cleanup after member deletion from durable eviction work', async () => {
+    const room = (await Room.create('retained-cleanup-retry')) as ServerRoom
+    const member = await room.join()
+    await member.publish('text', { retain: true })
+    await member.publishBinary(new Uint8Array([1]), { track: 'screen', retain: true })
+    const deletion = vi
+      .spyOn(driver, 'deleteRetained')
+      .mockRejectedValueOnce(new Error('transient retained cleanup failure'))
+
+    await expect(member.leave()).rejects.toThrow('transient retained cleanup failure')
+    deletion.mockRestore()
+    expect(await driver.listRetained(room.id, room._inc)).toHaveLength(2)
+
+    await expect(Room.getParticipants(room.id)).resolves.toEqual([])
+    expect(await driver.listRetained(room.id, room._inc)).toEqual([])
+  })
+
+  it('reaps legacy orphan-owned retained text instead of replaying it', async () => {
+    const authority = (await Room.create('orphan-retained-replay')) as ServerRoom
+    const member = await authority.join()
+    await member.publish('orphan', { retain: true })
+    const memberKey = roomMemberKvKey(authority.id, member.id)
+    const cells = await driver.readCells(authority.id, authority._inc, { keys: [memberKey] })
+    expect('staleInc' in cells).toBe(false)
+    if ('staleInc' in cells) throw new Error('unexpected stale generation')
+    await expect(
+      driver.compareExchangeCells(authority.id, authority._inc, cells.revision, [{ key: memberKey }]),
+    ).resolves.toBe('committed')
+
+    const observer = (await Room.get(authority.id)) as ServerRoom
+    const { stub, peer } = serve(observer)
+    stub._wantsText = true
+    await observer._replayRetainedText(stub, false, new Set())
+
+    expect(dataFrames(peer)).toEqual([])
+    await expect(driver.readRetained(authority.id, authority._inc, semanticLane)).resolves.toBeNull()
+  })
+
   it('does not retain or expose mutable lane aliases', async () => {
     const room = (await Room.create('retained-lane-alias')) as ServerRoom
     const lane = { kind: 'binary', member: 'member', track: 'original' } as LaneId

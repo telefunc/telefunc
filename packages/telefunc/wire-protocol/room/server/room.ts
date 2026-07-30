@@ -72,7 +72,7 @@ import {
   reportRoomError,
   withinRoomHorizon,
 } from './lanes.js'
-import { dropRetainedOwnedBy, evictMember, mutateCells, readCell, readMembers } from './membership.js'
+import { evictMember, mutateCells, readCell, readMembers } from './membership.js'
 import type {
   BinaryFrameInfo,
   BinaryPublishOptions,
@@ -363,17 +363,8 @@ class ServerRoom implements Room {
   async _removeMember(id: string, cause: LeaveCause): Promise<void> {
     if (this._state.closed) return // close() already removed everyone
     const identity = this._state.getRemote(id)?.identity ?? null
-    const hidden = this._state.isHidden(id)
-    const keys = [roomMemberKvKey(this.id, id)]
-    if (identity !== null) keys.push(roomIdentityMemberKvKey(this.id, identity, id))
-    if (hidden) keys.push(roomHiddenMemberKvKey(this.id, id))
-    await mutateCells(this.id, this._inc, { keys }, () => ({
-      value: undefined,
-      mutations: keys.map((key) => ({ key })),
-    }))
-    await dropRetainedOwnedBy(this.id, this._inc, id)
+    await evictMember(this.id, this._inc, id, identity ?? undefined, cause)
     this._applyLeave(id, cause)
-    await publishCtrl(this.id, this._inc, { __r: 'leave', id, ...leaveCauseToWire(cause) })
   }
 
   /** @internal — full replace (`setMeta`). */
@@ -1186,6 +1177,10 @@ class ServerRoom implements Room {
     const serialized = decodeRoomText(stored.payload)
     const info = { seq: stored.seq, timestamp: stored.timestamp }
     const envelope = parse(serialized) as RoomDataEnvelope
+    if ((await readMembers(this.id, this._inc, [envelope.from])).length === 0) {
+      await getBackend().deleteRetained(this.id, this._inc, SEMANTIC_LANE, { ifSeq: stored.seq })
+      return
+    }
     if (prevWantsText || prevMemberWants.has(envelope.from) || !stub._wantsTextFrom(envelope.from)) return
     // Replay the stored frame as-is (it already carries its real order), and let the stub drop it if a
     // same-or-newer live frame already reached it (a publish that raced this subscribe) — exactly-once.
@@ -1206,10 +1201,19 @@ class ServerRoom implements Room {
     // the retained copy or the live lane instead of the gap. A synchronous backend resolves instantly.
     await this._binaryReady()
     const backend = getBackend()
-    for (const lane of await backend.listRetained(this.id, this._inc)) {
-      if (lane.kind !== 'binary') continue
+    const lanes = (await backend.listRetained(this.id, this._inc)).filter(
+      (lane): lane is Extract<LaneId, { kind: 'binary' }> => lane.kind === 'binary',
+    )
+    const owners = new Set(
+      (await readMembers(this.id, this._inc, [...new Set(lanes.map((lane) => lane.member))])).map(({ id }) => id),
+    )
+    for (const lane of lanes) {
       const stored = await backend.readRetained(this.id, this._inc, lane)
       if (stored === null) continue
+      if (!owners.has(lane.member)) {
+        await backend.deleteRetained(this.id, this._inc, lane, { ifSeq: stored.seq })
+        continue
+      }
       const framed = stored.payload
       const frame = unframeMemberId(framed)
       if (!frame) continue

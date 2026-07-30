@@ -11,6 +11,7 @@ export {
 }
 
 import { parse } from '@brillout/json-serializer/parse'
+import { stringify } from '@brillout/json-serializer/stringify'
 import { assertUsage } from '../../../utils/assert.js'
 import { getBackend } from '../../backend/install.js'
 import type { CellMutation } from '../../backend/spi.js'
@@ -22,6 +23,8 @@ import {
   roomHiddenMemberKvPrefix,
   roomIdentityKvPrefix,
   roomIdentityMemberKvKey,
+  roomMemberCleanupKvKey,
+  roomMemberCleanupKvPrefix,
   roomMemberKvKey,
   roomMemberKvPrefix,
   uuidToBytes,
@@ -31,11 +34,12 @@ import {
   type RoomMemberRecord,
 } from '../protocol.js'
 import type { LeaveCause } from '../types.js'
-import { SEMANTIC_LANE, configFromHead, decodeRoomText, publishCtrl } from './lanes.js'
+import { SEMANTIC_LANE, configFromHead, decodeRoomText, encodeRoomText, publishCtrl } from './lanes.js'
 
 const ROOM_CX_ATTEMPTS = 16
 type CellSelector = { keys: string[] } | { prefix: string }
 type CellPlan<T> = { value: T; mutations: CellMutation[] }
+type PendingMemberCleanup = { cause: ReturnType<typeof leaveCauseToWire> }
 
 async function readCellSet(
   roomId: string,
@@ -86,6 +90,7 @@ async function requireRoom(id: string): Promise<{ config: RoomConfigRecord }> {
  *  (hard crash): their record is deleted and their leave announced to all observers. Pass `ids`
  *  to read a specific subset (e.g. one identity's memberships) instead of scanning the whole roster. */
 async function readMembers(roomId: string, inc: string, ids?: string[]): Promise<MemberSnapshot[]> {
+  if (ids === undefined) await completePendingMemberCleanups(roomId, inc)
   // Roster reads run against the authority, not the replica: `_refreshMembers` relies on read-your-
   // writes (a join/leave writes its record before publishing the event that triggers the read), and
   // the reap below keys off `seenAt` — a replica lag could drop a live member from the roster or reap
@@ -100,9 +105,11 @@ async function readMembers(roomId: string, inc: string, ids?: string[]): Promise
     const record = parse(decodeRoomText(raw)) as RoomMemberRecord
     if (record.inc !== inc) continue
     if (Date.now() - record.seenAt > ROOM_MEMBER_TTL_MS) {
+      const cleanupKey = roomMemberCleanupKvKey(roomId, id)
       const siblingKeys = [key, roomHiddenMemberKvKey(roomId, id)]
       if (record.identity !== undefined) siblingKeys.push(roomIdentityMemberKvKey(roomId, record.identity, id))
-      const reap = await mutateCells(roomId, inc, { keys: siblingKeys }, (current) => {
+      const cleanup: PendingMemberCleanup = { cause: { cause: 'disconnected' } }
+      const reap = await mutateCells(roomId, inc, { keys: [...siblingKeys, cleanupKey] }, (current) => {
         const latest = current.get(key)
         if (latest === undefined) return { value: { kind: 'missing' } as const, mutations: [] }
         const latestRecord = parse(decodeRoomText(latest)) as RoomMemberRecord
@@ -110,13 +117,17 @@ async function readMembers(roomId: string, inc: string, ids?: string[]): Promise
         return Date.now() - latestRecord.seenAt > ROOM_MEMBER_TTL_MS
           ? {
               value: { kind: 'reaped' } as const,
-              mutations: siblingKeys.map((siblingKey) => ({ key: siblingKey })),
+              mutations: [
+                ...siblingKeys.map((siblingKey) => ({ key: siblingKey })),
+                ...(current.has(cleanupKey)
+                  ? []
+                  : [{ key: cleanupKey, set: { bytes: encodeRoomText(stringify(cleanup)) } }]),
+              ],
             }
           : { value: { kind: 'live', record: latestRecord } as const, mutations: [] }
       })
       if (reap.kind === 'reaped') {
-        await dropRetainedOwnedBy(roomId, inc, id)
-        await publishCtrl(roomId, inc, { __r: 'leave', id, cause: 'disconnected' })
+        await finishPendingMemberCleanup(roomId, inc, id)
       } else if (reap.kind === 'live') {
         members.push(memberSnapshot(id, reap.record))
       }
@@ -229,14 +240,45 @@ async function evictMember(
   identity: string | undefined,
   cause: LeaveCause,
 ): Promise<void> {
-  const keys = [roomMemberKvKey(roomId, memberId), roomHiddenMemberKvKey(roomId, memberId)]
+  const memberKey = roomMemberKvKey(roomId, memberId)
+  const cleanupKey = roomMemberCleanupKvKey(roomId, memberId)
+  const keys = [memberKey, roomHiddenMemberKvKey(roomId, memberId)]
   if (identity !== undefined) keys.push(roomIdentityMemberKvKey(roomId, identity, memberId))
-  await mutateCells(roomId, inc, { keys }, () => ({
-    value: undefined,
-    mutations: keys.map((key) => ({ key })),
-  }))
+  const hasCleanup = await mutateCells(roomId, inc, { keys: [...keys, cleanupKey] }, (cells) => {
+    const pending = cells.has(cleanupKey)
+    if (!cells.has(memberKey) && !pending) return { value: false, mutations: [] }
+    const cleanup: PendingMemberCleanup = { cause: leaveCauseToWire(cause) }
+    return {
+      value: true,
+      mutations: [
+        ...keys.map((key) => ({ key })),
+        ...(pending ? [] : [{ key: cleanupKey, set: { bytes: encodeRoomText(stringify(cleanup)) } }]),
+      ],
+    }
+  })
+  if (hasCleanup) await finishPendingMemberCleanup(roomId, inc, memberId)
+}
+
+async function completePendingMemberCleanups(roomId: string, inc: string): Promise<void> {
+  const prefix = roomMemberCleanupKvPrefix(roomId)
+  const { cells } = await readCellSet(roomId, inc, { prefix })
+  for (const key of cells.keys()) {
+    const memberId = key.slice(prefix.length)
+    if (uuidToBytes(memberId)) await finishPendingMemberCleanup(roomId, inc, memberId)
+  }
+}
+
+async function finishPendingMemberCleanup(roomId: string, inc: string, memberId: string): Promise<void> {
+  const key = roomMemberCleanupKvKey(roomId, memberId)
+  const raw = await readCell(roomId, inc, key)
+  if (raw === null) return
+  const cleanup = parse(decodeRoomText(raw)) as PendingMemberCleanup
   await dropRetainedOwnedBy(roomId, inc, memberId)
-  await publishCtrl(roomId, inc, { __r: 'leave', id: memberId, ...leaveCauseToWire(cause) })
+  await publishCtrl(roomId, inc, { __r: 'leave', id: memberId, ...cleanup.cause })
+  await mutateCells(roomId, inc, { keys: [key] }, (cells) => ({
+    value: undefined,
+    mutations: cells.has(key) ? [{ key }] : [],
+  }))
 }
 
 function assertRoomId(id: unknown): asserts id is string {
