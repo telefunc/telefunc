@@ -584,14 +584,20 @@ describe('Room public behavior', () => {
     vi.useFakeTimers()
     vi.setSystemTime(1_000_000)
     const room = (await Room.create('reaped-retained')) as ServerRoom
-    const publisher = await room.join()
+    const publisher = await room.join({ identity: 'expired-owner' })
+    const leaves: string[] = []
+    room.onLeave((member) => leaves.push(member.id))
     await publisher.publish('text', { retain: true })
     await publisher.publishBinary(new Uint8Array([1]), { track: 'screen', retain: true })
     expect(await driver.listRetained(room.id, room._inc)).toHaveLength(2)
 
-    vi.setSystemTime(1_000_000 + ROOM_MEMBER_TTL_MS + 1)
+    // Cross the backend's former native expiry. If the cell disappears before the seenAt reaper
+    // claims it, there is no record left to identify the owner, clear its indexes, or publish leave.
+    vi.setSystemTime(1_000_000 + ROOM_MEMBER_KV_TTL_MS + 1)
     expect(await Room.getParticipants(room.id)).toEqual([])
     expect(await driver.listRetained(room.id, room._inc)).toEqual([])
+    expect(leaves).toEqual([publisher.id])
+    await expect(Room.removeParticipant(room.id, { identity: 'expired-owner' })).resolves.toBeUndefined()
   })
 
   it('tail mode holds pre-attach text and flushes it in order on first client demand', async () => {

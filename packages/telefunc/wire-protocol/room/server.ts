@@ -15,7 +15,6 @@ import {
   ROOM_DM_ACK_TIMEOUT_MS,
   ROOM_HEARTBEAT_INTERVAL_MS,
   ROOM_ID_MAX_BYTES,
-  ROOM_MEMBER_KV_TTL_MS,
   ROOM_MEMBER_TTL_MS,
   ROOM_TAIL_ATTACH_TIMEOUT_MS,
   ROOM_TRACKS_PER_MEMBER_MAX,
@@ -951,7 +950,6 @@ class ServerRoom implements Room {
         key,
         set: {
           bytes: key === memberKey ? encodeRoomText(stringify(record)) : new Uint8Array(),
-          ttlMs: ROOM_MEMBER_KV_TTL_MS,
         },
       })),
     }))
@@ -1005,7 +1003,7 @@ class ServerRoom implements Room {
       const next = { ...record, meta, metaSeq: seq, seenAt: Date.now() } satisfies RoomMemberRecord
       return {
         value: { prev, meta, seq },
-        mutations: [{ key, set: { bytes: encodeRoomText(stringify(next)), ttlMs: ROOM_MEMBER_KV_TTL_MS } }],
+        mutations: [{ key, set: { bytes: encodeRoomText(stringify(next)) } }],
       }
     })
     this._state.applyParticipantMeta(id, meta, prev, seq)
@@ -1128,7 +1126,7 @@ class ServerRoom implements Room {
       const next = { ...record, tracks: [...tracks, track], seenAt: Date.now() } satisfies RoomMemberRecord
       return {
         value: true,
-        mutations: [{ key, set: { bytes: encodeRoomText(stringify(next)), ttlMs: ROOM_MEMBER_KV_TTL_MS } }],
+        mutations: [{ key, set: { bytes: encodeRoomText(stringify(next)) } }],
       }
     })
     if (appended) await publishCtrl(this.id, this._inc, { __r: 'track', id: from, track })
@@ -2097,22 +2095,10 @@ class ServerRoom implements Room {
           const raw = cells.get(key)
           if (raw === undefined) return { value: null, mutations: [] }
           const record = { ...(parse(decodeRoomText(raw)) as RoomMemberRecord), seenAt: Date.now() }
-          const mutations: CellMutation[] = [
-            { key, set: { bytes: encodeRoomText(stringify(record)), ttlMs: ROOM_MEMBER_KV_TTL_MS } },
-          ]
-          if (record.identity !== undefined) {
-            mutations.push({
-              key: roomIdentityMemberKvKey(this.id, record.identity, id),
-              set: { bytes: new Uint8Array(), ttlMs: ROOM_MEMBER_KV_TTL_MS },
-            })
+          return {
+            value: record,
+            mutations: [{ key, set: { bytes: encodeRoomText(stringify(record)) } }],
           }
-          if (record.hidden) {
-            mutations.push({
-              key: roomHiddenMemberKvKey(this.id, id),
-              set: { bytes: new Uint8Array(), ttlMs: ROOM_MEMBER_KV_TTL_MS },
-            })
-          }
-          return { value: record, mutations }
         })
         if (record === null) {
           // Reaped or kicked while this node wasn't listening — the reaper already
@@ -2120,10 +2106,6 @@ class ServerRoom implements Room {
           this._applyLeave(id)
           continue
         }
-        // Refresh the member's sibling index keys on the same cadence — they carry the record's TTL,
-        // so without this a member that outlives one TTL window would keep its record (heartbeated)
-        // yet lose its identity marker (breaking `removeParticipant(id, { identity })` sweeps) and,
-        // if hidden, its off-presence marker (the count would drift back to counting it).
       }
       await readMembers(this.id, this._inc)
     } finally {
@@ -2288,12 +2270,14 @@ async function readMembers(roomId: string, inc: string, ids?: string[]): Promise
     const record = parse(decodeRoomText(raw)) as RoomMemberRecord
     if (record.inc !== inc) continue // a record from a previous incarnation — never in this roster
     if (Date.now() - record.seenAt > ROOM_MEMBER_TTL_MS) {
-      const reaped = await mutateCells(roomId, inc, { keys: [key] }, (current) => {
+      const siblingKeys = [key, roomHiddenMemberKvKey(roomId, id)]
+      if (record.identity !== undefined) siblingKeys.push(roomIdentityMemberKvKey(roomId, record.identity, id))
+      const reaped = await mutateCells(roomId, inc, { keys: siblingKeys }, (current) => {
         const latest = current.get(key)
         if (latest === undefined) return { value: false, mutations: [] }
         const latestRecord = parse(decodeRoomText(latest)) as RoomMemberRecord
         return Date.now() - latestRecord.seenAt > ROOM_MEMBER_TTL_MS
-          ? { value: true, mutations: [{ key }] }
+          ? { value: true, mutations: siblingKeys.map((siblingKey) => ({ key: siblingKey })) }
           : { value: false, mutations: [] }
       })
       if (reaped) {
