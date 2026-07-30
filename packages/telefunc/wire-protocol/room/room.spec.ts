@@ -460,6 +460,81 @@ describe('Room public behavior', () => {
     report.mockRestore()
   })
 
+  it('uses exactly one recovery attempt plus five Room-owned replans', async () => {
+    vi.useFakeTimers()
+    const observer = await Room.get((await Room.create('room-replan-budget')).id)
+    const backend = getBackend()
+    const subscribeLane = backend.subscribeLane.bind(backend)
+    const terminal = terminalSubscription()
+    let semanticSubscriptions = 0
+    let recoveryAttempts = 0
+    const subscribe = vi.spyOn(backend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
+      if (lane.kind !== 'semantic') return subscribeLane(roomId, inc, lane, receiver)
+      semanticSubscriptions++
+      if (semanticSubscriptions === 1) return terminal.subscription
+      recoveryAttempts++
+      return pendingSubscription()
+    })
+    const report = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      observer.subscribe(() => {})
+      await terminal.close()
+
+      await vi.advanceTimersByTimeAsync(ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS)
+
+      expect(recoveryAttempts).toBe(6)
+    } finally {
+      subscribe.mockRestore()
+      report.mockRestore()
+    }
+  })
+
+  it('rejects the final bounded readiness and closes after Room exhausts recovery', async () => {
+    const observer = await Room.get((await Room.create('room-replan-exhaustion')).id)
+    const backend = getBackend()
+    const subscribeLane = backend.subscribeLane.bind(backend)
+    const terminal = terminalSubscription()
+    let semanticSubscriptions = 0
+    let recoveryAttempts = 0
+    let finalReadiness = deferred<void>().promise
+    let readinessOutcome: { status: 'pending' } | { status: 'resolved' } | { status: 'rejected'; diagnostic: string } =
+      { status: 'pending' }
+    const subscribe = vi.spyOn(backend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
+      if (lane.kind !== 'semantic') return subscribeLane(roomId, inc, lane, receiver)
+      semanticSubscriptions++
+      if (semanticSubscriptions === 1) return terminal.subscription
+      recoveryAttempts++
+      const subscription = rejectedSubscription('Backend subscription closed: room-replan-exhaustion')
+      finalReadiness = subscription.ready
+      return subscription
+    })
+    const report = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      observer.subscribe(() => {})
+      await terminal.close()
+
+      await vi.waitFor(() => expect(recoveryAttempts).toBe(6))
+      void finalReadiness.then(
+        () => {
+          readinessOutcome = { status: 'resolved' }
+        },
+        (error: unknown) => {
+          readinessOutcome = { status: 'rejected', diagnostic: String(error) }
+        },
+      )
+      await Promise.resolve()
+
+      expect(readinessOutcome).toEqual({
+        status: 'rejected',
+        diagnostic: expect.stringContaining('Backend subscription closed: room-replan-exhaustion'),
+      })
+      await vi.waitFor(() => expect(observer.isClosed).toBe(true))
+    } finally {
+      subscribe.mockRestore()
+      report.mockRestore()
+    }
+  })
+
   it('propagates presence/meta while hidden members stay addressable and admin removal carries its cause', async () => {
     const authority = await Room.create('presence')
     const observer = await Room.get('presence')
@@ -1715,6 +1790,28 @@ function terminalSubscription(inner?: BackendSubscription): {
     },
   }
   return { subscription, close: subscription.unsubscribe }
+}
+
+function pendingSubscription(): BackendSubscription {
+  const readiness = deferred<void>()
+  void readiness.promise.catch(() => {})
+  return {
+    ready: readiness.promise,
+    state: () => 'establishing',
+    onStateChange: () => () => {},
+    unsubscribe: async () => {},
+  }
+}
+
+function rejectedSubscription(diagnostic: string): BackendSubscription {
+  const ready = Promise.reject(new Error(diagnostic))
+  void ready.catch(() => {})
+  return {
+    ready,
+    state: () => 'establishing',
+    onStateChange: () => () => {},
+    unsubscribe: async () => {},
+  }
 }
 
 function deferred<T>() {
