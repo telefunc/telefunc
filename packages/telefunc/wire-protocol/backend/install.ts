@@ -17,11 +17,15 @@ type BackendState =
     }
   | { phase: 'disposing'; promise: Promise<void> }
 
-type BackendStore = { current: BackendState }
+type BackendStore = {
+  current: BackendState
+  retiredDisposals?: Set<Promise<void>>
+}
 
 const state = getGlobalObject<BackendStore>('wire-protocol/backend/install.ts', () => ({
   current: { phase: 'empty' },
 }))
+const retiredDisposals = (state.retiredDisposals ??= new Set())
 
 const INSTALLING_ERROR = 'telefunc/backend: the backend is still installing; retry after installation settles'
 const DISPOSING_ERROR = 'telefunc/backend: the backend is still disposing and cannot be acquired or installed yet'
@@ -78,7 +82,7 @@ function selectBackend(
   }
 
   if (current.phase === 'ready') {
-    void current.backend.dispose().catch(() => {})
+    retireBackend(current.backend)
   }
   const backend = superviseBackend(driver)
   state.current = {
@@ -118,11 +122,13 @@ export function getBackend(): BackendSpi {
  */
 export function disposeBackend(): Promise<void> {
   const current = state.current
-  if (current.phase === 'empty') return Promise.resolve()
+  if (current.phase === 'empty' && retiredDisposals.size === 0) return Promise.resolve()
   if (current.phase === 'installing') return Promise.reject(new Error(INSTALLING_ERROR))
   if (current.phase === 'disposing') return current.promise
 
-  const promise = Promise.resolve().then(() => current.backend.dispose())
+  const disposals = [...retiredDisposals]
+  if (current.phase === 'ready') disposals.push(Promise.resolve().then(() => current.backend.dispose()))
+  const promise = settleDisposals(disposals)
   const disposing: Extract<BackendState, { phase: 'disposing' }> = { phase: 'disposing', promise }
   state.current = disposing
   promise.then(
@@ -130,6 +136,27 @@ export function disposeBackend(): Promise<void> {
     () => clearDisposalPhase(disposing),
   )
   return promise
+}
+
+function retireBackend(backend: BackendSpi): void {
+  // Installation is synchronous, so replacement and old-resource cleanup can briefly overlap. Keep
+  // that cleanup observable and make the next explicit disposal a barrier over it.
+  const disposal = Promise.resolve().then(() => backend.dispose())
+  retiredDisposals.add(disposal)
+  void disposal.then(
+    () => retiredDisposals.delete(disposal),
+    (error) => {
+      retiredDisposals.delete(disposal)
+      console.error('telefunc/backend: replaced backend disposal failed', error)
+    },
+  )
+}
+
+async function settleDisposals(disposals: Promise<void>[]): Promise<void> {
+  const settled = await Promise.allSettled(disposals)
+  const errors = settled.flatMap((result) => (result.status === 'rejected' ? [result.reason] : []))
+  if (errors.length === 1) throw errors[0]
+  if (errors.length > 1) throw new AggregateError(errors, 'telefunc/backend: multiple backend disposals failed')
 }
 
 function clearDisposalPhase(disposal: Extract<BackendState, { phase: 'disposing' }>): void {
