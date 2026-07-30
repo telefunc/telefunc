@@ -27,7 +27,7 @@ type RedisSubscriptionDriverOptions = {
 
 /**
  * Redis's only backend-specific subscription edge. General fan-out, refcounts, readiness generations,
- * replacement epochs, bounded replanning and watchdogs live in core's supervised backend.
+ * attempt epochs, ownership checks, and terminal signalling live in core's supervised backend.
  */
 export class RedisSubscriptionDriver implements SubscriptionDriver {
   private readonly _prefix: string

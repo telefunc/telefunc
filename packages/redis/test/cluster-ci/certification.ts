@@ -64,7 +64,7 @@ describe('Redis real three-master Cluster CI certification', () => {
     const inc = 'runtime-slot-inc'
     let subscription: ReturnType<BackendSpi['subscribeLane']> | undefined
     try {
-      expect(backend.capabilities).toMatchObject({ clusterSafe: true, receivers: 'none' })
+      expect(backend.capabilities).toMatchObject({ receivers: 'none' })
       const head = await open(backend, roomId, inc)
       const cells = await backend.readCells(roomId, inc, { keys: [] })
       if ('staleInc' in cells) throw new Error('fresh generation was unexpectedly stale')

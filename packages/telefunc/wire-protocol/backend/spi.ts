@@ -9,7 +9,7 @@
 //     gen(roomId, inc) / cell/<key>       opaque policy cells (member records, markers, policy state)
 //                      / order/<domain>   order watermarks (see the lane table)
 //                      / retained/<laneKey>  retained generations (backend-internal chunking)
-//   DIRECTORY (optional capability): roomId -> incTag   eventually consistent, tag-guarded, repairable
+//   DIRECTORY: roomId -> incTag   eventually consistent, tag-guarded, repairable
 //
 // Head CAS is the single lifecycle primitive: create, fence, and state transition are one atomic
 // record, so a config-without-fence zombie is unrepresentable and every other operation's
@@ -82,15 +82,10 @@ export type HeadNext =
       ttlMs?: number // ttlMs only for state:'closed' tombstones
     }
   // Any head entering 'closing' (open→closing AND expired-close takeover) carries a fresh lease id plus
-  // a FINITE durationMs — never an absolute deadline. Bounds are normative: MIN_CLOSE_LEASE_MS ≤
-  // durationMs ≤ MAX_CLOSE_LEASE_MS (out of bounds ⇒ throw). The backend stores
+  // a finite positive durationMs — never an absolute deadline. The backend stores
   // until = authorityNow + durationMs inside the SAME atomic CX and returns the stored head, so the
   // installed lease is always fresh in backend authority time regardless of caller skew (I13).
   | { delete: true } // tombstone expiry path (backends with no native TTL)
-
-// Normative close-lease duration bounds for every HeadNext installing 'closing'.
-export const MIN_CLOSE_LEASE_MS = 1_000
-export const MAX_CLOSE_LEASE_MS = 60_000
 
 export type CellMutation = { key: string; set?: { bytes: Uint8Array; ttlMs?: number } }
 // set absent ⇒ delete. ttl per cell (member records etc.)
@@ -114,11 +109,11 @@ export type CommitResult = CommitAccepted | { stale: true }
 export type SubscriptionState = 'establishing' | 'ready' | 'lost' | 'closed'
 /** Raw-only ownership terminal. Core maps this to public `closed`; consumers never receive it. */
 export type SubscriptionAttemptState = SubscriptionState | 'terminated'
-// A raw backend establishment attempt has no settlement deadline; the shared subscription manager
-// bounds every attempt before exposing this supervised subscription at the SPI.
+// A raw backend establishment attempt has no settlement deadline; the consumer that requires a
+// recovery SLA owns it outside this neutral boundary.
 export type BackendSubscription = {
   /** The current readiness generation. It changes after a ready subscription is lost and rejects
-   * after bounded replacement exhaustion; callers must read it at the point they need readiness. */
+   * when that raw attempt fails terminally; callers must read it at the point they need readiness. */
   readonly ready: Promise<void>
   state(): SubscriptionState
   onStateChange(cb: (s: SubscriptionState) => void): () => void
@@ -133,8 +128,7 @@ export type BackendSubscriptionSource =
   | { kind: 'broadcast'; lane: BroadcastLane }
   | { kind: 'durable'; roomId: string; inc: string; lane: LaneId }
 
-/** One raw backend establishment attempt. Its readiness may remain pending indefinitely; core bounds
- * the attempt before exposing any subscription to an SPI consumer. */
+/** One raw backend establishment attempt. Its readiness may remain pending indefinitely. */
 export type SubscriptionAttempt = {
   readonly ready: Promise<void>
   state(): SubscriptionAttemptState
@@ -144,7 +138,7 @@ export type SubscriptionAttempt = {
 
 /** A source binding captured synchronously while the caller's local ownership context is live. Core
  * compares `partition` by string value only, as an opaque local slot discriminator, and retains
- * `open` for ambient-free replacement attempts. Binding performs no remote installation. `valid`
+ * `open` for an ambient-free raw attempt. Binding performs no remote installation. `valid`
  * must be a synchronous, side-effect-free, non-throwing read of local ownership. */
 export type SubscriptionBinding = {
   readonly partition: string
@@ -154,7 +148,7 @@ export type SubscriptionBinding = {
 
 /** The only backend-specific subscription edge. An author captures local ownership once, then
  * implements acknowledgement and cleanup for one raw attempt; core supplies source identity, epochs,
- * fan-out, readiness, bounded replacement and the watchdog. */
+ * fan-out, ownership checks, and readiness signalling. */
 export type SubscriptionDriver<Source = BackendSubscriptionSource> = {
   bind(source: Source): SubscriptionBinding
 }
@@ -166,9 +160,7 @@ export type BackendSpi = {
   readonly spiVersion: typeof BACKEND_SPI_VERSION
   readonly capabilities: {
     receivers: 'global' | 'node-local' | 'none'
-    maxRetainedPayloadBytes: number // aggregate cap; commit with larger retain REJECTS (throws)
-    clusterSafe: boolean
-    directory: boolean // directory verbs present iff true
+    maxRetainedPayloadBytes: number // aggregate cap (Infinity means unbounded); larger retain REJECTS
   }
 
   // ── cheap Broadcast ──
@@ -251,7 +243,7 @@ export type BackendSpi = {
   listGenerations(roomId: string): Promise<string[]> // incs with any surviving state
   dropGeneration(roomId: string, inc: string): Promise<void> // MUST refuse head.currentInc === inc
 
-  // ── directory (iff capabilities.directory) ──
+  // ── directory ──
   directoryPut(roomId: string, incTag: string): Promise<void>
   directoryDelete(roomId: string, incTag: string): Promise<void> // deletes iff stored tag matches
   directoryList(

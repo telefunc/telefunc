@@ -1,6 +1,6 @@
 export { HEAD_TRANSITIONS, assertHeadDeleteLegal, assertHeadNextWellFormed, assertHeadTransition }
 
-import { MAX_CLOSE_LEASE_MS, MIN_CLOSE_LEASE_MS, type HeadCx, type HeadNext, type RoomHead } from './spi.js'
+import type { HeadCx, HeadNext, RoomHead } from './spi.js'
 
 type HeadState = RoomHead['state'] | 'absent'
 type HeadCxForm = 'absent' | 'generic' | 'takeover' | 'finalize'
@@ -30,10 +30,8 @@ function assertHeadNextWellFormed(next: HeadNext): void {
   if (head.state === 'closing') {
     if (head.closeLease === undefined) throw new Error('head CX: a head entering closing must carry a close lease')
     const { durationMs } = head.closeLease
-    if (!(durationMs >= MIN_CLOSE_LEASE_MS && durationMs <= MAX_CLOSE_LEASE_MS)) {
-      throw new Error(
-        `head CX: close lease durationMs ${durationMs} outside [${MIN_CLOSE_LEASE_MS}, ${MAX_CLOSE_LEASE_MS}]`,
-      )
+    if (!Number.isFinite(durationMs) || durationMs <= 0) {
+      throw new Error(`head CX: close lease durationMs ${durationMs} must be finite and positive`)
     }
   } else if (head.closeLease !== undefined) {
     throw new Error(`head CX: a '${head.state}' head must not carry a close lease`)

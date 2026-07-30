@@ -213,8 +213,6 @@ export class RedisRoomBackend implements BackendDriver {
     this.capabilities = {
       receivers: options.redis instanceof Cluster ? 'none' : 'global',
       maxRetainedPayloadBytes: options.maxRetainedPayloadBytes ?? DEFAULT_MAX_RETAINED_BYTES,
-      clusterSafe: true,
-      directory: true,
     }
     this._publisher.defineCommand(PUBLISH_CMD, { numberOfKeys: 2, lua: PUBLISH_LUA })
     for (const command of Object.values(REDIS_ROOM_COMMANDS)) {
@@ -502,7 +500,7 @@ export class RedisRoomBackend implements BackendDriver {
     const generationToken = await this._publisher.hget(generationTokensKey(this._prefix, roomId), inc)
     if (generationToken !== null) {
       // Disconnected peers reject this token during their next capture/validation; connected peers close
-      // the raw attempt and let the shared manager perform its ordinary bounded replacement policy.
+      // the raw attempt so the owning consumer can apply its recovery policy.
       await this._publisher.publish(generationInvalidationChannel(this._prefix, roomId, inc), generationToken)
     }
     await this._call(REDIS_ROOM_COMMANDS.dropGenerationFinalize.name, [

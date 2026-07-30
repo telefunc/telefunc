@@ -13,14 +13,13 @@ import type {
   SubscriptionAttempt,
   SubscriptionState,
 } from '../../../backend/spi.js'
-import { ORDERING_FRAME_LAYOUT } from '../../../ordering-frame.js'
+import { decodeOrderingFrame, encodeOrderingFrame, type OrderingInfo } from '../../../ordering-frame.js'
 import type { CloudflareScale, LocationBucket } from './routing.js'
 
 const PRESENCE_TTL_SECONDS = 90
 const PRESENCE_REFRESH_INTERVAL_MS = 30_000
 const textEncoder = new TextEncoder()
 const textDecoder = new TextDecoder()
-type OrderingInfo = { seq: number; timestamp: number }
 
 /** Unwrap Cloudflare DO RPC proxy into a plain object.
  *  RPC properties are lazy stubs that must be awaited to resolve their values. */
@@ -506,7 +505,7 @@ class CloudflareBroadcastTransport {
       const kind = serialized === undefined ? 'binary' : 'text'
       const payload = serialized === undefined ? binaryData : textEncoder.encode(serialized)
       assert(payload !== undefined, 'Forwarded publish must include a payload')
-      const frame = encodeCloudflareOrderingFrame(payload, info)
+      const frame = encodeOrderingFrame(payload, info)
       await Promise.all(
         doNames.map((doName) => this.getBoundStub(doName).telefuncBroadcastDeliver({ key, kind, frame })),
       )
@@ -545,7 +544,7 @@ class CloudflareBroadcastTransport {
    * Delivers a publish to local subscribers. Called via RPC on the representative DO for this isolate.
    */
   async deliverToLocal(request: BroadcastDeliverRequest): Promise<void> {
-    const { payload, info } = decodeCloudflareOrderingFrame(request.frame)
+    const { payload, info } = decodeOrderingFrame(request.frame)
     const attempt = (request.kind === 'text' ? this.textSubs : this.binarySubs).get(request.key)
     await attempt?.deliver(payload, info)
   }
@@ -651,46 +650,4 @@ class CloudflareBroadcastTransport {
       locationHint ? { locationHint } : undefined,
     ) as TelefuncDurableObjectStub
   }
-}
-
-/** Cloudflare renders the frozen backend contract in Workers-compatible DataView operations. */
-function encodeCloudflareOrderingFrame(payload: Uint8Array, info: OrderingInfo): Uint8Array {
-  assertOrderingInfo(info)
-  const { headerBytes, offsets, wordRange, endianness } = ORDERING_FRAME_LAYOUT
-  const littleEndian = endiannessIsLittle(endianness)
-  const frame = new Uint8Array(headerBytes + payload.byteLength)
-  const view = new DataView(frame.buffer)
-  view.setUint32(offsets.seqHigh, Math.floor(info.seq / wordRange), littleEndian)
-  view.setUint32(offsets.seqLow, info.seq % wordRange, littleEndian)
-  view.setUint32(offsets.timestampHigh, Math.floor(info.timestamp / wordRange), littleEndian)
-  view.setUint32(offsets.timestampLow, info.timestamp % wordRange, littleEndian)
-  frame.set(payload, headerBytes)
-  return frame
-}
-
-function decodeCloudflareOrderingFrame(frame: Uint8Array): { payload: Uint8Array; info: OrderingInfo } {
-  const { headerBytes, offsets, wordRange, endianness } = ORDERING_FRAME_LAYOUT
-  const littleEndian = endiannessIsLittle(endianness)
-  assert(frame.byteLength >= headerBytes, `Cloudflare ordering frame is shorter than its ${headerBytes}-byte header`)
-  const view = new DataView(frame.buffer, frame.byteOffset, frame.byteLength)
-  const info = {
-    seq: view.getUint32(offsets.seqHigh, littleEndian) * wordRange + view.getUint32(offsets.seqLow, littleEndian),
-    timestamp:
-      view.getUint32(offsets.timestampHigh, littleEndian) * wordRange +
-      view.getUint32(offsets.timestampLow, littleEndian),
-  }
-  assertOrderingInfo(info)
-  return { payload: frame.subarray(headerBytes), info }
-}
-
-function endiannessIsLittle(endianness: string): boolean {
-  return endianness === 'little'
-}
-
-function assertOrderingInfo(info: OrderingInfo): void {
-  assert(Number.isSafeInteger(info.seq) && info.seq > 0, 'Cloudflare ordering seq must be a positive safe integer')
-  assert(
-    Number.isSafeInteger(info.timestamp) && info.timestamp >= 0,
-    'Cloudflare ordering timestamp must be a non-negative safe integer',
-  )
 }

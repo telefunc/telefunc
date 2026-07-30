@@ -3,12 +3,7 @@ import { parse } from '@brillout/json-serializer/parse'
 import { IndexedPeer } from '../server/IndexedPeer.js'
 import { ACK_STATUS, TAG, decode } from '../shared-ws.js'
 import { ShieldValidationError, isShieldValidationError } from '../../shared/ShieldValidationError.js'
-import {
-  ROOM_HEARTBEAT_INTERVAL_MS,
-  ROOM_MEMBER_KV_TTL_MS,
-  ROOM_MEMBER_TTL_MS,
-  ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS,
-} from '../constants.js'
+import { ROOM_HEARTBEAT_INTERVAL_MS, ROOM_MEMBER_KV_TTL_MS, ROOM_MEMBER_TTL_MS } from '../constants.js'
 import { DEFAULT_TRACK, isRoomError, roomAckError, type RoomSnapshotMetadata } from './protocol.js'
 import { ClientRoom } from './client.js'
 import { Room, ServerRoom } from './server.js'
@@ -18,15 +13,10 @@ import type { ChannelPublishInfo } from '../channel.js'
 import { disposeBackend, getBackend, installBackend, setDefaultBackend } from '../backend/install.js'
 import { HEAD_TRANSITIONS, assertHeadTransition } from '../backend/head-transitions.js'
 import { MemoryBackend, MemoryBackendState } from '../backend/memory/backend.js'
-import {
-  SUBSCRIPTION_ESTABLISH_TIMEOUT_MS,
-  SUBSCRIPTION_REPLAN_LIMIT,
-  SubscriptionManager,
-} from '../backend/subscriptions.js'
+import { SubscriptionManager } from '../backend/subscriptions.js'
 import type {
   BackendReceiver,
   BackendSubscription,
-  BackendSubscriptionSource,
   LaneId,
   SubscriptionAttempt,
   SubscriptionAttemptState,
@@ -541,6 +531,22 @@ describe('Room public behavior', () => {
     expect(parse(decoder.decode(retained!.payload))).toMatchObject({ from: replacement.id, data: 'new' })
   })
 
+  it('does not retain or expose mutable lane aliases', async () => {
+    const room = (await Room.create('retained-lane-alias')) as ServerRoom
+    const lane = { kind: 'binary', member: 'member', track: 'original' } as LaneId
+    await driver.commitLane(room.id, room._inc, lane, new Uint8Array([1]), { retain: true })
+    if (lane.kind !== 'binary') throw new Error('expected binary lane')
+    lane.track = 'mutated-ingress'
+    const listed = await driver.listRetained(room.id, room._inc)
+    expect(listed).toEqual([{ kind: 'binary', member: 'member', track: 'original' }])
+    const returned = listed[0]
+    if (returned?.kind !== 'binary') throw new Error('expected retained binary lane')
+    returned.track = 'mutated-egress'
+    await expect(driver.listRetained(room.id, room._inc)).resolves.toEqual([
+      { kind: 'binary', member: 'member', track: 'original' },
+    ])
+  })
+
   it('drops retained text and binary when a crashed publisher is reaped', async () => {
     vi.useFakeTimers()
     vi.setSystemTime(1_000_000)
@@ -907,20 +913,22 @@ describe('memory Backend SPI contract', () => {
     if (!('ok' in opened) || !('head' in opened)) throw new Error('head create failed')
     const delegated = vi.spyOn(driver, 'compareExchangeHead')
 
-    await expect(
-      backend.compareExchangeHead(
-        'head-shape',
-        { expect: { rev: opened.head.rev } },
-        {
-          head: {
-            state: 'closing',
-            currentInc: 'inc-1',
-            config: opened.head.config,
-            closeLease: { id: 'lease-1', durationMs: 999 },
+    for (const durationMs of [0, Number.POSITIVE_INFINITY]) {
+      await expect(
+        backend.compareExchangeHead(
+          'head-shape',
+          { expect: { rev: opened.head.rev } },
+          {
+            head: {
+              state: 'closing',
+              currentInc: 'inc-1',
+              config: opened.head.config,
+              closeLease: { id: 'lease-1', durationMs },
+            },
           },
-        },
-      ),
-    ).rejects.toThrow('close lease durationMs 999 outside [1000, 60000]')
+        ),
+      ).rejects.toThrow(`close lease durationMs ${durationMs} must be finite and positive`)
+    }
     expect(delegated).not.toHaveBeenCalled()
   })
 
@@ -951,13 +959,13 @@ describe('memory Backend SPI contract', () => {
 })
 
 describe('shared subscription supervision', () => {
-  it('owns fan-out, refcount, epochs, replacement, and cleanup-decoupled resubscription once', async () => {
+  it('owns fan-out, refcount, epochs, and raw terminal signalling once', async () => {
     const firstCleanup = deferred<void>()
     const secondCleanup = deferred<void>()
     const raw = new ControlledDriver()
     raw.plan(() => ControlledAttempt.ready(firstCleanup.promise))
     raw.plan(() => ControlledAttempt.ready(secondCleanup.promise))
-    const manager = new SubscriptionManager(raw)
+    const manager = new SubscriptionManager(raw, vi.fn())
     const received: string[] = []
     const first = manager.subscribe('source', (payload) => received.push(`a:${decoder.decode(payload)}`))
     const second = manager.subscribe('source', (payload) => received.push(`b:${decoder.decode(payload)}`))
@@ -967,50 +975,58 @@ describe('shared subscription supervision', () => {
 
     raw.opens[0]!.attempt.close()
     await settleMicrotasks()
-    expect(raw.opens).toHaveLength(2)
+    expect(first.state()).toBe('closed')
+    expect(second.state()).toBe('closed')
+    expect(raw.opens).toHaveLength(1)
     await raw.deliver(0, 'stale')
-    await raw.deliver(1, 'current')
-    expect(received).toEqual(['a:current', 'b:current'])
+    expect(received).toEqual([])
 
-    await first.unsubscribe()
-    const stopping = second.unsubscribe()
-    const replacement = manager.subscribe('source', () => {})
+    const replacement = manager.subscribe('source', (payload) => received.push(`c:${decoder.decode(payload)}`))
     await replacement.ready
-    expect(raw.opens).toHaveLength(3)
+    expect(raw.opens).toHaveLength(2)
+    await raw.deliver(1, 'current')
+    expect(received).toEqual(['c:current'])
+
+    await Promise.all([first.unsubscribe(), second.unsubscribe()])
+    const stopping = replacement.unsubscribe()
     secondCleanup.resolve()
     firstCleanup.resolve()
     await stopping
-    await replacement.unsubscribe()
   })
 
-  it('bounds last-unsubscribe and manager-dispose settlement when raw cleanup hangs', async () => {
-    vi.useFakeTimers()
-    const cleanup = deferred<void>()
+  it('does not convert pending raw cleanup into successful settlement', async () => {
+    const liveCleanup = deferred<void>()
+    const terminalCleanup = deferred<void>()
     const raw = new ControlledDriver()
-    raw.plan(() => ControlledAttempt.ready(cleanup.promise))
-    raw.plan(() => ControlledAttempt.ready(cleanup.promise))
-    const report = vi.fn()
-    const manager = new SubscriptionManager(raw, report)
+    raw.plan(() => ControlledAttempt.ready(liveCleanup.promise))
+    raw.plan(() => ControlledAttempt.ready(liveCleanup.promise))
+    raw.plan(() => ControlledAttempt.ready(terminalCleanup.promise))
+    const manager = new SubscriptionManager(raw)
     const first = manager.subscribe('unsubscribe', () => {})
     const second = manager.subscribe('dispose', () => {})
-    await Promise.all([first.ready, second.ready])
+    const terminal = manager.subscribe('already-terminal', () => {})
+    await Promise.all([first.ready, second.ready, terminal.ready])
+    raw.opens[2]!.attempt.close()
 
     let unsubscribeSettled = false
     let disposeSettled = false
     const unsubscribing = first.unsubscribe().then(() => (unsubscribeSettled = true))
     const disposing = manager.dispose().then(() => (disposeSettled = true))
-    await vi.advanceTimersByTimeAsync(SUBSCRIPTION_ESTABLISH_TIMEOUT_MS)
+    await settleMicrotasks()
+    expect({ unsubscribeSettled, disposeSettled }).toEqual({ unsubscribeSettled: false, disposeSettled: false })
+    liveCleanup.resolve()
+    await unsubscribing
+    await settleMicrotasks()
+    expect({ unsubscribeSettled, disposeSettled }).toEqual({ unsubscribeSettled: true, disposeSettled: false })
+    terminalCleanup.resolve()
+    await disposing
     expect({ unsubscribeSettled, disposeSettled }).toEqual({ unsubscribeSettled: true, disposeSettled: true })
-    expect(report).toHaveBeenCalledTimes(2)
-    await Promise.all([unsubscribing, disposing])
-    cleanup.resolve()
   })
 
-  it('normalizes initial readiness events while preserving failure and recovery transitions', async () => {
+  it('normalizes initial readiness and surfaces raw recovery or terminal failure', async () => {
     const raw = new ControlledDriver()
     raw.plan(() => new ControlledAttempt())
-    raw.plan(() => ControlledAttempt.ready())
-    const manager = new SubscriptionManager(raw)
+    const manager = new SubscriptionManager(raw, vi.fn())
     const subscription = manager.subscribe('async-ready', () => {})
     const states: SubscriptionState[] = []
     subscription.onStateChange((state) => states.push(state))
@@ -1019,21 +1035,30 @@ describe('shared subscription supervision', () => {
     await subscription.ready
     expect(states).toEqual([])
 
+    raw.opens[0]!.attempt.lose()
+    const recovered = subscription.ready
+    raw.opens[0]!.attempt.establish()
+    await recovered
+    expect(states).toEqual(['lost', 'ready'])
+    expect(raw.openCalls).toBe(1)
+
     raw.opens[0]!.attempt.close()
     await settleMicrotasks()
-    expect(states).toEqual(['lost', 'ready'])
+    expect(states).toEqual(['lost', 'ready', 'lost', 'closed'])
+    expect(raw.openCalls).toBe(1)
     await subscription.unsubscribe()
-    expect(states).toEqual(['lost', 'ready', 'closed'])
+    expect(states).toEqual(['lost', 'ready', 'lost', 'closed'])
 
     const failedRaw = new ControlledDriver()
     failedRaw.plan(() => new ControlledAttempt())
-    failedRaw.plan(() => ControlledAttempt.ready())
     const failed = new SubscriptionManager(failedRaw).subscribe('initial-failure', () => {})
     const failedStates: SubscriptionState[] = []
     failed.onStateChange((state) => failedStates.push(state))
+    const failedReadiness = failed.ready
     failedRaw.opens[0]!.attempt.close()
-    await settleMicrotasks()
-    expect(failedStates).toEqual(['lost', 'ready'])
+    await expect(failedReadiness).rejects.toThrow('Backend subscription closed')
+    expect(failedStates).toEqual(['lost', 'closed'])
+    expect(failedRaw.openCalls).toBe(1)
     await failed.unsubscribe()
   })
 
@@ -1094,97 +1119,15 @@ describe('shared subscription supervision', () => {
     await pending.unsubscribe()
   })
 
-  it('checks binding validity before scheduling and immediately before a queued open', async () => {
-    const beforeSchedule = new ControlledDriver()
-    beforeSchedule.plan(() => {
-      beforeSchedule.bindingValid = false
-      throw new Error('manager disposed during open')
-    })
-    const terminal = new SubscriptionManager(beforeSchedule).subscribe('before-schedule', () => {})
+  it('checks binding ownership before opening a raw attempt', async () => {
+    const raw = new ControlledDriver()
+    raw.bindingValid = false
+    const terminal = new SubscriptionManager(raw).subscribe('invalid-owner', () => {})
     const terminalReadiness = terminal.ready
     expect(terminal.state()).toBe('closed')
-    expect(beforeSchedule.openCalls).toBe(1)
+    expect(raw.openCalls).toBe(0)
     await expect(terminalReadiness).rejects.toThrow('ownership terminated')
     await terminal.unsubscribe()
-
-    const beforeOpen = new ControlledDriver()
-    beforeOpen.plan(() => ControlledAttempt.ready())
-    beforeOpen.plan(() => ControlledAttempt.ready())
-    const queued = new SubscriptionManager(beforeOpen).subscribe('before-open', () => {})
-    await queued.ready
-    beforeOpen.opens[0]!.attempt.close()
-    beforeOpen.bindingValid = false
-    await settleMicrotasks()
-    expect(queued.state()).toBe('closed')
-    expect(beforeOpen.openCalls).toBe(1)
-    await queued.unsubscribe()
-  })
-
-  it('bounds a hung establishment, replans, and terminally rejects after the exact replacement budget', async () => {
-    vi.useFakeTimers()
-    const raw = new ControlledDriver()
-    for (let attempt = 0; attempt <= SUBSCRIPTION_REPLAN_LIMIT; attempt++) {
-      raw.plan(() => new ControlledAttempt())
-    }
-    const report = vi.fn()
-    const manager = new SubscriptionManager(raw, report)
-    const subscription = manager.subscribe('hung', () => {})
-    const readiness = subscription.ready
-
-    for (let attempt = 0; attempt <= SUBSCRIPTION_REPLAN_LIMIT; attempt++) {
-      await vi.advanceTimersByTimeAsync(SUBSCRIPTION_ESTABLISH_TIMEOUT_MS)
-    }
-    expect(raw.openCalls).toBe(1 + SUBSCRIPTION_REPLAN_LIMIT)
-    expect(raw.opens.every(({ attempt }) => attempt.unsubscribeCalls === 1)).toBe(true)
-    expect(report).toHaveBeenCalledTimes(1 + SUBSCRIPTION_REPLAN_LIMIT)
-    await expect(readiness).rejects.toThrow(`failed after ${SUBSCRIPTION_REPLAN_LIMIT} replacement attempts`)
-  })
-
-  it('spends one replacement attempt on a transient deadline and then recovers', async () => {
-    vi.useFakeTimers()
-    const raw = new ControlledDriver()
-    raw.plan(() => new ControlledAttempt())
-    raw.plan(() => ControlledAttempt.ready())
-    const report = vi.fn()
-    const manager = new SubscriptionManager(raw, report)
-    const subscription = manager.subscribe('transient', () => {})
-
-    await vi.advanceTimersByTimeAsync(SUBSCRIPTION_ESTABLISH_TIMEOUT_MS)
-    await expect(subscription.ready).resolves.toBeUndefined()
-    expect(raw.openCalls).toBe(2)
-    expect(report).toHaveBeenCalledTimes(1)
-    expect(String(report.mock.calls[0]![0])).toContain('establishment did not settle within the deadline')
-  })
-
-  it('allocates the Room lane terminal horizon evenly across the bounded attempt budget', () => {
-    const totalAttempts = 1 + SUBSCRIPTION_REPLAN_LIMIT
-    expect(SUBSCRIPTION_ESTABLISH_TIMEOUT_MS * totalAttempts).toBe(ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS)
-  })
-
-  it('never fires the watchdog for the synchronous zero-config memory driver', async () => {
-    vi.useFakeTimers()
-    await disposeBackend()
-    const raw = new MemoryBackend()
-    const opened: BackendSubscriptionSource[] = []
-    const bind = raw.subscriptions.bind.bind(raw.subscriptions)
-    vi.spyOn(raw.subscriptions, 'bind').mockImplementation((source) => {
-      const binding = bind(source)
-      return {
-        partition: binding.partition,
-        valid: binding.valid,
-        open: (receiver, localReceiverCount) => {
-          opened.push(source)
-          return binding.open(receiver, localReceiverCount)
-        },
-      }
-    })
-    setDefaultBackend(() => raw)
-    const room = await Room.create('sync-memory')
-    room.subscribe(() => {})
-    await vi.advanceTimersByTimeAsync((1 + SUBSCRIPTION_REPLAN_LIMIT) * SUBSCRIPTION_ESTABLISH_TIMEOUT_MS + 1)
-    const semanticOpens = opened.filter((source) => source.kind === 'durable' && source.lane.kind === 'semantic')
-    expect(semanticOpens).toHaveLength(1)
-    expect(await (await room.join()).publish('live')).toMatchObject({ seq: 1 })
   })
 })
 
@@ -1368,6 +1311,10 @@ class ControlledAttempt implements SubscriptionAttempt {
   establish(): void {
     this._transition('ready')
     this._readiness.resolve()
+  }
+
+  lose(): void {
+    this._transition('lost')
   }
 
   close(): void {

@@ -6,35 +6,25 @@ import { superviseBackend } from './supervised-backend.js'
 export type BackendFactory = () => BackendDriver
 
 type BackendState =
-  | { phase: 'empty'; retired: WeakSet<object> }
-  | { phase: 'installing'; retired: WeakSet<object> }
+  | { phase: 'empty' }
+  | { phase: 'installing' }
   | {
       phase: 'ready'
       driver: BackendDriver
       backend: BackendSpi
       selection: 'memory' | 'default' | 'explicit'
       defaultIdentity?: unknown
-      retired: WeakSet<object>
     }
-  | {
-      phase: 'disposing'
-      driver: BackendDriver
-      backend: BackendSpi
-      promise: Promise<void>
-      invokingBackendDisposeSynchronously: boolean
-      retired: WeakSet<object>
-    }
+  | { phase: 'disposing'; promise: Promise<void> }
 
 type BackendStore = { current: BackendState }
 
 const state = getGlobalObject<BackendStore>('wire-protocol/backend/install.ts', () => ({
-  current: { phase: 'empty', retired: new WeakSet<object>() },
+  current: { phase: 'empty' },
 }))
 
 const INSTALLING_ERROR = 'telefunc/backend: the backend is still installing; retry after installation settles'
 const DISPOSING_ERROR = 'telefunc/backend: the backend is still disposing and cannot be acquired or installed yet'
-const REENTRANT_DISPOSE_ERROR =
-  'telefunc/backend: backend.dispose() must not call disposeBackend() during its synchronous invocation'
 
 /**
  * Installs the per-isolate backend once. The factory is deliberately lazy: repeated entry-module
@@ -72,17 +62,13 @@ function selectBackend(
     throw new Error('telefunc/backend: installBackend() requires a backend factory')
   }
 
-  const retired = current.retired
-  state.current = { phase: 'installing', retired }
+  state.current = { phase: 'installing' }
   let driver: BackendDriver
   try {
     driver = factory()
     assertBackendDriver(driver)
-    if (retired.has(driver)) {
-      throw new Error('telefunc/backend: a backend instance cannot be reinstalled after disposal has begun')
-    }
   } catch (error) {
-    state.current = current.phase === 'ready' ? current : { phase: 'empty', retired }
+    state.current = current.phase === 'ready' ? current : { phase: 'empty' }
     throw error
   }
 
@@ -92,20 +78,15 @@ function selectBackend(
   }
 
   if (current.phase === 'ready') {
-    retired.add(current.driver)
-    // Replacement is deliberately synchronous at the ownership boundary: every bundled default marks
-    // itself retired and detaches its live callbacks before dispose() returns its completion promise.
-    // The setup API therefore stays synchronous while resource settlement continues in the background.
     void current.backend.dispose().catch(() => {})
   }
-  const backend = superviseBackend(driver, () => invokeDriverDispose(driver))
+  const backend = superviseBackend(driver)
   state.current = {
     phase: 'ready',
     driver,
     backend,
     selection,
     ...(selection === 'default' ? { defaultIdentity } : {}),
-    retired,
   }
   return backend
 }
@@ -126,78 +107,33 @@ export function getBackend(): BackendSpi {
   // installed backend. Memory cannot become a second, silently divergent subscription mechanism.
   const driver = new MemoryBackend()
   assertBackendDriver(driver)
-  const backend = superviseBackend(driver, () => invokeDriverDispose(driver))
-  state.current = { phase: 'ready', driver, backend, selection: 'memory', retired: current.retired }
+  const backend = superviseBackend(driver)
+  state.current = { phase: 'ready', driver, backend, selection: 'memory' }
   return backend
 }
 
 /**
- * Owns disposal of the canonical backend. Once this begins, acquisition is blocked until settlement.
- * Backends must not call this global seam from inside `backend.dispose()`: synchronous reentry rejects
- * rather than reporting a false completed shutdown. After that call stack unwinds, ordinary callers
- * share the one canonical disposal promise.
+ * Owns disposal of the canonical backend. Once this begins, acquisition is blocked until settlement
+ * and ordinary callers share the one canonical disposal promise.
  */
 export function disposeBackend(): Promise<void> {
   const current = state.current
   if (current.phase === 'empty') return Promise.resolve()
   if (current.phase === 'installing') return Promise.reject(new Error(INSTALLING_ERROR))
-  if (current.phase === 'disposing') {
-    return current.invokingBackendDisposeSynchronously
-      ? Promise.reject(new Error(REENTRANT_DISPOSE_ERROR))
-      : current.promise
-  }
+  if (current.phase === 'disposing') return current.promise
 
-  const { backend, driver, retired } = current
-  retired.add(driver)
-  const deferred = createDeferred<void>()
-  const disposing: Extract<BackendState, { phase: 'disposing' }> = {
-    phase: 'disposing',
-    driver,
-    backend,
-    promise: deferred.promise,
-    invokingBackendDisposeSynchronously: false,
-    retired,
-  }
+  const promise = Promise.resolve().then(() => current.backend.dispose())
+  const disposing: Extract<BackendState, { phase: 'disposing' }> = { phase: 'disposing', promise }
   state.current = disposing
-  deferred.promise.then(
+  promise.then(
     () => clearDisposalPhase(disposing),
     () => clearDisposalPhase(disposing),
   )
-
-  try {
-    disposing.invokingBackendDisposeSynchronously = true
-    Promise.resolve(backend.dispose()).then(deferred.resolve, deferred.reject)
-    disposing.invokingBackendDisposeSynchronously = false
-  } catch (error) {
-    disposing.invokingBackendDisposeSynchronously = false
-    deferred.reject(error)
-  }
-  return deferred.promise
+  return promise
 }
 
 function clearDisposalPhase(disposal: Extract<BackendState, { phase: 'disposing' }>): void {
-  if (state.current === disposal) state.current = { phase: 'empty', retired: disposal.retired }
-}
-
-function invokeDriverDispose(driver: BackendDriver): Promise<void> {
-  const current = state.current
-  const disposal = current.phase === 'disposing' && current.driver === driver ? current : undefined
-  try {
-    if (disposal !== undefined) disposal.invokingBackendDisposeSynchronously = true
-    return Promise.resolve(driver.dispose())
-  } finally {
-    if (disposal !== undefined) disposal.invokingBackendDisposeSynchronously = false
-  }
-}
-
-function createDeferred<T>(): { promise: Promise<T>; resolve(value: T): void; reject(reason: unknown): void } {
-  let resolve!: (value: T) => void
-  let reject!: (reason: unknown) => void
-  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
-    resolve = resolvePromise
-    reject = rejectPromise
-  })
-  return { promise, resolve, reject }
+  if (state.current === disposal) state.current = { phase: 'empty' }
 }
 
 const REQUIRED_METHODS = [
@@ -212,10 +148,11 @@ const REQUIRED_METHODS = [
   'deleteRetained',
   'listGenerations',
   'dropGeneration',
+  'directoryPut',
+  'directoryDelete',
+  'directoryList',
   'dispose',
 ] as const
-
-const DIRECTORY_METHODS = ['directoryPut', 'directoryDelete', 'directoryList'] as const
 
 function assertBackendDriver(backend: BackendDriver): void {
   if (backend === null || typeof backend !== 'object') {
@@ -243,19 +180,12 @@ function assertBackendDriver(backend: BackendDriver): void {
   ) {
     throw new Error('telefunc/backend: backend capabilities.receivers must be "global", "node-local", or "none"')
   }
-  if (!Number.isFinite(capabilities.maxRetainedPayloadBytes) || capabilities.maxRetainedPayloadBytes < 0) {
-    throw new Error(
-      'telefunc/backend: backend capabilities.maxRetainedPayloadBytes must be a finite non-negative number',
-    )
-  }
-  if (typeof capabilities.clusterSafe !== 'boolean') {
-    throw new Error('telefunc/backend: backend capabilities.clusterSafe must be a boolean')
-  }
-  if (typeof capabilities.directory !== 'boolean') {
-    throw new Error('telefunc/backend: backend capabilities.directory must be a boolean')
-  }
-  if (capabilities.directory) {
-    for (const method of DIRECTORY_METHODS) assertMethod(backend, method)
+  if (
+    typeof capabilities.maxRetainedPayloadBytes !== 'number' ||
+    Number.isNaN(capabilities.maxRetainedPayloadBytes) ||
+    capabilities.maxRetainedPayloadBytes < 0
+  ) {
+    throw new Error('telefunc/backend: backend capabilities.maxRetainedPayloadBytes must be a non-negative number')
   }
 }
 

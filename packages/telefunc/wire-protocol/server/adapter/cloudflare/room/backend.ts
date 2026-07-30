@@ -274,8 +274,6 @@ export class CloudflareRoomBackend implements BackendDriver {
   readonly capabilities = {
     receivers: 'global' as const,
     maxRetainedPayloadBytes: MAX_RETAINED_BYTES,
-    clusterSafe: false,
-    directory: true,
   }
   readonly broadcast: CloudflareBroadcastTransport
   readonly subscriptions: SubscriptionDriver
