@@ -35,10 +35,9 @@ import {
   type RoomSnapshotMetadata,
   type RoomStubRequest,
 } from './protocol.js'
-import { RoomState } from './state.js'
+import { RoomState, RoomStateView } from './state.js'
 import { ParticipantBase, type InboxMessage } from './participant.js'
 import type {
-  BinaryFrameInfo,
   BinaryPublishOptions,
   JoinOptions,
   LeaveCause,
@@ -47,7 +46,6 @@ import type {
   PublishOptions,
   RemoteParticipant,
   Room,
-  RoomMeta,
   RoomSendReceipt,
   RoomSnapshotView,
   Sender,
@@ -149,11 +147,11 @@ class RoomClientBroadcast<T = unknown> extends ClientBroadcast<T> {
  * messages, requests (join/leave/set-meta) ride its channel messages. Membership starts from
  * the serialized snapshot; the relayed event stream keeps it fresh from there.
  */
-class ClientRoom implements Room {
+class ClientRoom extends RoomStateView implements Room {
   /** Phantom: the publish shield rides the type only (see `RoomShield`), never a runtime field. */
   declare readonly [TELEFUNC_SHIELDS]: { data: unknown }
   private readonly _stub: RoomClientBroadcast
-  private readonly _state: RoomState
+  protected readonly _state: RoomState
   private readonly _localParticipants = new Map<string, ClientRoomParticipant>()
   private _announcedDemand = false
   /** DMs relayed before their participant's join ack resolved (a reactive send racing the
@@ -168,6 +166,7 @@ class ClientRoom implements Room {
   })
 
   constructor(stub: RoomClientBroadcast, snapshot: RoomSnapshotMetadata) {
+    super()
     this._stub = stub
     this._state = new RoomState({
       roomId: snapshot.roomId,
@@ -196,22 +195,6 @@ class ClientRoom implements Room {
   }
 
   // ── Room API ──
-
-  get id(): string {
-    return this._state.roomId
-  }
-  get meta(): RoomMeta {
-    return this._state.meta
-  }
-  get count(): number {
-    return this._state.count
-  }
-  get isEmpty(): boolean {
-    return this._state.count === 0
-  }
-  get isClosed(): boolean {
-    return this._state.closed
-  }
 
   async join(options?: JoinOptions): Promise<LocalParticipant> {
     assertUsage(
@@ -289,44 +272,6 @@ class ClientRoom implements Room {
   }): RemoteParticipant {
     return this._state.ensureRemoteFromSnapshot(snap)
   }
-
-  subscribe(callback: (data: unknown, info: ChannelPublishInfo, from: Sender) => unknown): () => void {
-    return this._state.subscribe(callback)
-  }
-  subscribeBinary(
-    callback: (data: Uint8Array, info: ChannelPublishInfo & BinaryFrameInfo, from: Sender) => unknown,
-    options?: { track?: string | null },
-  ): () => void {
-    return this._state.subscribeBinary(callback, options)
-  }
-  onJoin(callback: (member: RemoteParticipant) => void): () => void {
-    return this._state.onJoin(callback)
-  }
-  onLeave(callback: (member: RemoteParticipant, cause?: LeaveCause) => void): () => void {
-    return this._state.onLeave(callback)
-  }
-  onParticipantUpdate(
-    callback: (member: RemoteParticipant, meta: ParticipantMeta, prev: ParticipantMeta) => void,
-  ): () => void {
-    return this._state.onParticipantUpdate(callback)
-  }
-  onUpdate(callback: (meta: RoomMeta, prev: RoomMeta) => void): () => void {
-    return this._state.onUpdate(callback)
-  }
-  onEmpty(callback: () => void): () => void {
-    return this._state.onEmpty(callback)
-  }
-  onClose(callback: () => void): () => void {
-    return this._state.onClose(callback)
-  }
-  onAnnounce(callback: (data: unknown, info: ChannelPublishInfo) => void): () => void {
-    return this._state.onAnnounce(callback)
-  }
-
-  // Arrow-valued, not prototype methods: the documented `useSyncExternalStore(room.onChange, room.snapshot)`
-  // passes both detached, so React calls them with no receiver. Bound properties survive that; a plain method
-  // would deref `this === undefined` and throw on the first render (see the twin on `ServerRoom`).
-  onChange = (callback: () => void): (() => void) => this._state.onChange(callback)
 
   // The roster streams in right behind the response — its arrival is an onChange.
   snapshot = (): RoomSnapshotView => this._state.snapshot()

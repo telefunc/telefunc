@@ -1,4 +1,4 @@
-export { RoomState, remoteBacking }
+export { RoomState, RoomStateView, remoteBacking }
 
 import { assertUsage } from '../../utils/assert.js'
 import type { ChannelPublishInfo } from '../channel.js'
@@ -83,6 +83,63 @@ function remoteBacking(value: unknown): RemoteBacking | null {
   return typeof value === 'object' && value !== null && ROOM_REMOTE_BRAND in value
     ? ((value as Record<typeof ROOM_REMOTE_BRAND, RemoteBacking>)[ROOM_REMOTE_BRAND] as RemoteBacking)
     : null
+}
+
+/** The side-neutral public view over a `RoomState`; client/server keep their own I/O and lifecycle. */
+abstract class RoomStateView {
+  protected abstract readonly _state: RoomState
+
+  get id(): string {
+    return this._state.roomId
+  }
+  get meta(): RoomMeta {
+    return this._state.meta
+  }
+  get count(): number {
+    return this._state.count
+  }
+  get isEmpty(): boolean {
+    return this._state.count === 0
+  }
+  get isClosed(): boolean {
+    return this._state.closed
+  }
+
+  subscribe(callback: (data: unknown, info: ChannelPublishInfo, from: Sender) => unknown): () => void {
+    return this._state.subscribe(callback)
+  }
+  subscribeBinary(
+    callback: (data: Uint8Array, info: ChannelPublishInfo & BinaryFrameInfo, from: Sender) => unknown,
+    options?: { track?: string | null },
+  ): () => void {
+    return this._state.subscribeBinary(callback, options)
+  }
+  onJoin(callback: (member: RemoteParticipant) => void): () => void {
+    return this._state.onJoin(callback)
+  }
+  onLeave(callback: (member: RemoteParticipant, cause?: LeaveCause) => void): () => void {
+    return this._state.onLeave(callback)
+  }
+  onParticipantUpdate(
+    callback: (member: RemoteParticipant, meta: ParticipantMeta, prev: ParticipantMeta) => void,
+  ): () => void {
+    return this._state.onParticipantUpdate(callback)
+  }
+  onUpdate(callback: (meta: RoomMeta, prev: RoomMeta) => void): () => void {
+    return this._state.onUpdate(callback)
+  }
+  onEmpty(callback: () => void): () => void {
+    return this._state.onEmpty(callback)
+  }
+  onClose(callback: () => void): () => void {
+    return this._state.onClose(callback)
+  }
+  onAnnounce(callback: (data: unknown, info: ChannelPublishInfo) => void): () => void {
+    return this._state.onAnnounce(callback)
+  }
+
+  // Detached use is documented for React's `useSyncExternalStore(room.onChange, room.snapshot)`.
+  onChange = (callback: () => void): (() => void) => this._state.onChange(callback)
 }
 
 /**

@@ -9,7 +9,7 @@ import { assert, assertUsage } from '../../../utils/assert.js'
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 import { isObject } from '../../../utils/isObject.js'
 import { unrefTimer } from '../../../utils/unrefTimer.js'
-import { makePublishInfo, type ChannelPublishAck, type ChannelPublishInfo } from '../../channel.js'
+import { makePublishInfo, type ChannelPublishAck } from '../../channel.js'
 import {
   ROOM_DM_ACK_TIMEOUT_MS,
   ROOM_HEARTBEAT_INTERVAL_MS,
@@ -55,7 +55,7 @@ import {
   type RoomMemberRecord,
   type RoomStubRequest,
 } from '../protocol.js'
-import { RoomState } from '../state.js'
+import { RoomState, RoomStateView } from '../state.js'
 import { RoomDemand } from '../demand.js'
 import { ParticipantBase, type InboxMessage } from '../participant.js'
 import type { RoomStubChannel } from '../stubs.js'
@@ -73,7 +73,6 @@ import {
 } from './lanes.js'
 import { dropRetainedOwnedBy, evictMember, mutateCells, readCell, readMembers } from './membership.js'
 import type {
-  BinaryFrameInfo,
   BinaryPublishOptions,
   JoinOptions,
   LeaveCause,
@@ -81,7 +80,6 @@ import type {
   ParticipantMeta,
   PublishOptions,
   RemoteParticipant,
-  RoomMeta,
   RoomSendReceipt,
   RoomAckReceipt,
   RoomSnapshotView,
@@ -104,7 +102,7 @@ const SERVER_ROOM_BRAND: unique symbol = Symbol.for('telefunc.ServerRoom')
  * it; every observing node — including the committer's own echo — applies the subscribed payload.
  * Application is idempotent, so the overlap is harmless.
  */
-class ServerRoom implements Room {
+class ServerRoom extends RoomStateView implements Room {
   readonly [SERVER_ROOM_BRAND] = true
   /** Phantom: the publish shield rides the type only (see `RoomShield`), never a runtime field. */
   declare readonly [TELEFUNC_SHIELDS]: { data: unknown }
@@ -153,6 +151,7 @@ class ServerRoom implements Room {
   private _controlSeq = 0
 
   constructor(roomId: string, config: RoomConfigRecord, seed: { members: MemberSnapshot[] } | { count: number }) {
+    super()
     this._inc = config.inc
     this._state = new RoomState({
       roomId,
@@ -183,22 +182,6 @@ class ServerRoom implements Room {
     this._guards = guards
   }
 
-  get id(): string {
-    return this._state.roomId
-  }
-  get meta(): RoomMeta {
-    return this._state.meta
-  }
-  get count(): number {
-    return this._state.count
-  }
-  get isEmpty(): boolean {
-    return this._state.count === 0
-  }
-  get isClosed(): boolean {
-    return this._state.closed
-  }
-
   async join(options?: JoinOptions): Promise<LocalParticipant> {
     const { meta, selfDelivery } = normalizeJoinOptions(options)
     const identity = normalizeIdentity(options)
@@ -225,43 +208,6 @@ class ServerRoom implements Room {
     await this._ensureRoster()
     return this._state.getRemote(id)
   }
-
-  subscribe(callback: (data: unknown, info: ChannelPublishInfo, from: Sender) => unknown): () => void {
-    return this._state.subscribe(callback)
-  }
-  subscribeBinary(
-    callback: (data: Uint8Array, info: ChannelPublishInfo & BinaryFrameInfo, from: Sender) => unknown,
-    options?: { track?: string },
-  ): () => void {
-    return this._state.subscribeBinary(callback, options)
-  }
-  onJoin(callback: (member: RemoteParticipant) => void): () => void {
-    return this._state.onJoin(callback)
-  }
-  onLeave(callback: (member: RemoteParticipant, cause?: LeaveCause) => void): () => void {
-    return this._state.onLeave(callback)
-  }
-  onParticipantUpdate(
-    callback: (member: RemoteParticipant, meta: ParticipantMeta, prev: ParticipantMeta) => void,
-  ): () => void {
-    return this._state.onParticipantUpdate(callback)
-  }
-  onUpdate(callback: (meta: RoomMeta, prev: RoomMeta) => void): () => void {
-    return this._state.onUpdate(callback)
-  }
-  onEmpty(callback: () => void): () => void {
-    return this._state.onEmpty(callback)
-  }
-  onClose(callback: () => void): () => void {
-    return this._state.onClose(callback)
-  }
-  onAnnounce(callback: (data: unknown, info: ChannelPublishInfo) => void): () => void {
-    return this._state.onAnnounce(callback)
-  }
-
-  // Arrow-valued, not prototype methods: the documented `useSyncExternalStore(room.onChange, room.snapshot)`
-  // passes both detached (React calls them with no receiver), so they must stay bound to survive it.
-  onChange = (callback: () => void): (() => void) => this._state.onChange(callback)
 
   snapshot = (): RoomSnapshotView => {
     // Snapshot consumers want the member view — load it (need-driven, single-flight); the
