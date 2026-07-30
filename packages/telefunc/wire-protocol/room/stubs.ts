@@ -123,14 +123,14 @@ class RoomStubChannel extends ServerBroadcast {
   _tailPending: Array<{ serialized: string; ord: RoomOrder; from: string }> | null = null
   private _tailTimer: ReturnType<typeof setTimeout> | null = null
 
-  /** @internal — retained replay is exactly-once and in-order against a racing live publish. Per text
-   *  sender, `_textHigh` is the highest order this stub has been handed, and `_textPendingRetained` is
-   *  a retained order just emitted that is still awaiting its own live echo. A retained frame is
+  /** @internal — retained replay is exactly-once and in-order against a racing live publish. Text's
+   *  watermark is room-global, matching the semantic lane; `_textPendingRetained` is a retained order
+   *  just emitted that is still awaiting its own live echo. A retained frame is
    *  skipped when the watermark already covers it (a same-or-newer live frame won the race); the live
    *  echo of an emitted retained is dropped (the retained won). Binary is the twin, per (member,
    *  track) lane — its own order domain (the per-key transport seq). Pruned on leave (`_forgetMember`). */
-  private readonly _textHigh = new Map<string, RoomOrder>()
-  private readonly _textPendingRetained = new Map<string, RoomOrder>()
+  private _textHigh: RoomOrder | null = null
+  private _textPendingRetained: RoomOrder | null = null
   // Binary lanes keyed `${member}\0${track}` — one flat map, so a member leaving prunes by prefix.
   private readonly _binaryHigh = new Map<string, WirePublishInfo>()
   private readonly _binaryPendingRetained = new Map<string, WirePublishInfo>()
@@ -232,26 +232,25 @@ class RoomStubChannel extends ServerBroadcast {
   /** @internal — relay a live text frame, advancing the sender's watermark and dropping the live echo
    *  of a retained frame this stub was just handed, so a subscribe-then-publish race delivers the
    *  message exactly once. */
-  _relayTextLive(wireText: string, from: string, ord: RoomOrder): void {
-    const pending = this._textPendingRetained.get(from)
+  _relayTextLive(wireText: string, _from: string, ord: RoomOrder): void {
+    const pending = this._textPendingRetained
     if (pending && pending.seq === ord.seq && pending.timestamp === ord.timestamp) {
-      this._textPendingRetained.delete(from) // this live frame is the echo of the retained we emitted
+      this._textPendingRetained = null // this live frame is the echo of the retained we emitted
       return
     }
     this._relayPublishText(wireText)
-    const high = this._textHigh.get(from)
-    if (!high || high.seq < ord.seq) this._textHigh.set(from, ord)
+    if (!this._textHigh || this._textHigh.seq < ord.seq) this._textHigh = ord
   }
 
   /** @internal — replay a retained text frame unless the sender's watermark already covers it (a
    *  same-or-newer live frame reached this stub first), then record it so its own live echo is
    *  dropped. The MQTT-retained backfill, made causal. */
-  _emitRetainedText(wireText: string, from: string, ord: RoomOrder): void {
-    const high = this._textHigh.get(from)
+  _emitRetainedText(wireText: string, _from: string, ord: RoomOrder): void {
+    const high = this._textHigh
     if (high && high.seq >= ord.seq) return // superseded by a same-or-newer live frame
     this._relayPublishText(wireText)
-    this._textHigh.set(from, ord)
-    this._textPendingRetained.set(from, ord)
+    this._textHigh = ord
+    this._textPendingRetained = ord
   }
 
   /** @internal — the binary twin of `_relayTextLive`, per (member, track) lane; order is the per-key
@@ -279,8 +278,6 @@ class RoomStubChannel extends ServerBroadcast {
   /** @internal — a member left: drop its retained-replay bookkeeping so the maps stay bounded by the
    *  live roster, not the room's lifetime churn. */
   _forgetMember(from: string): void {
-    this._textHigh.delete(from)
-    this._textPendingRetained.delete(from)
     const prefix = `${from}\0`
     for (const lane of [this._binaryHigh, this._binaryPendingRetained])
       for (const key of lane.keys()) if (key.startsWith(prefix)) lane.delete(key)

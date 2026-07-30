@@ -609,6 +609,17 @@ describe('Room public behavior', () => {
     expect(parse(decoder.decode(retained!.payload))).toMatchObject({ from: replacement.id, data: 'new' })
   })
 
+  it('does not replay older retained text after a newer global semantic frame', async () => {
+    const room = (await Room.create('global-retained-watermark')) as ServerRoom
+    const stub = register(room)
+    const relay = vi.spyOn(stub, '_relayPublishText').mockImplementation(() => {})
+
+    stub._relayTextLive('newer-live', 'sender-b', { seq: 2, timestamp: 2 })
+    stub._emitRetainedText('older-retained', 'sender-a', { seq: 1, timestamp: 1 })
+
+    expect(relay.mock.calls.map(([wire]) => wire)).toEqual(['newer-live'])
+  })
+
   it('drops retained text and binary when a crashed publisher is reaped', async () => {
     vi.useFakeTimers()
     vi.setSystemTime(1_000_000)
