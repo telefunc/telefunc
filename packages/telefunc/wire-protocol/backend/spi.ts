@@ -30,15 +30,15 @@ export type PublishResult = {
 
 // ── Lanes: every lane names its order domain and its channel ──
 export type LaneId =
-  | { kind: 'semantic' } // participant text + Room.announce
-  | { kind: 'control' } // presence/lifecycle events
+  | { kind: 'semantic' } // participant text
+  | { kind: 'control' } // presence/lifecycle events + Room.announce
   | { kind: 'binary'; member: string; track: string }
   | { kind: 'inbox'; member: string } // DMs + ack replies — stale DMs are fenced too
 
 // Fixed lane table (normative):
 //  lane      order domain                      channel            notes
-//  semantic  RoomOrder (monotonic seq)         ONE channel        text AND announce share domain AND channel
-//  control   ControlSeq (per-room counter)     control channel    fenced; projections stay idempotent
+//  semantic  RoomOrder (monotonic seq)         ONE channel        participant text
+//  control   ControlSeq (per-room counter)     control channel    presence/lifecycle/announce; always observed
 //  binary    LaneSeq (per member,track)        per-lane channel   separate domains preserved by constraint
 //  inbox     InboxSeq (per member)             per-inbox channel  separate domain preserved by constraint
 

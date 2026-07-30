@@ -605,14 +605,14 @@ export async function* onSearch(query: string) {
 
 ## Scaling
 
-You can scale Telefunc horizontally (multiple server instances across multiple processes, containers, or machines) by adding sticky sessions and a cross-instance broadcast transport.
+You can scale Telefunc horizontally (multiple server instances across multiple processes, containers, or machines) by adding sticky sessions and a cross-instance backend.
 
 See: <Link href="/stream/scale" />.
 
 
 ## Cloudflare
 
-On Cloudflare Workers, Telefunc routes channels through Durable Objects and fans out broadcasts across regions automatically — so neither a sticky load balancer nor a broadcast transport is needed.
+On Cloudflare Workers, Telefunc routes channels through Durable Objects and fans out broadcasts across regions automatically — so neither a sticky load balancer nor a separately installed backend is needed.
 
 See: <Link href="/stream/cloudflare" />.
 

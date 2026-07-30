@@ -224,6 +224,8 @@ export async function onJoinChat(roomId) {
 
 Each `onBefore*` runs before the operation commits, and rejects the caller — on the client too — following Telefunc's usual <Link href="/error-handling">error contract</Link>: `throw Abort(value)` rejects with an `Abort` carrying `value` (the caller inspects `err.abortValue` / `err instanceof Abort`), the way to surface a reason a client can act on; any other throw is treated as a bug — the caller gets a generic error and the real one is logged server-side. Each `onAfter*` (`onAfterJoin`, `onAfterSend`, `onAfterPublish`) runs once it commits, with the receipt (`{ seq, timestamp }`): the place to persist a message in its server-assigned order (see <Link href="#history-live-tail">History</Link>).
 
+Room operations have one additional failure category: an operational rejection such as “room closed,” “participant not found,” or “participant left.” Telefunc calls these `RoomError` internally. They aren't reported as bugs, and their safe message reaches the caller. A direct server-side call has `err.name === 'RoomError'`; after the error crosses the Room channel, the client receives an ordinary `Error` with the same message. `RoomError` isn't exported, so don't import it or use `instanceof`. Use `Abort({ code: ... })` in a guard when your application needs a stable, machine-readable expected outcome.
+
 <Warning>Guards ride the specific instance you called `Room.guard()` on. Retrieve the same room twice and you have two instances; a guard on one does not apply to the other. Attach guards in the telefunction that hands the room to clients, so every membership a client opens rides that returned instance. A plain server-side `Room.get()` elsewhere is unguarded by design, like `Room.announce()`: it is your own trusted code.</Warning>
 
 **Kick a participant**, with a reason that arrives with the removal:
@@ -241,17 +243,19 @@ me.onLeave((cause) => {
 
 `cause.type` is one of `'left'`, `'removed'`, `'closed'`, `'disconnected'`.
 
-**System notices** come from the room itself, so receivers can't confuse them with a member message. `Room.announce()` fans out to every observer on the always-on control lane, even ones who never subscribed to chat:
+**System notices** come from the room itself, so receivers can't confuse them with a member message. `Room.announce()` fans out on the always-on control lane to every live Room observer — including an observer that only registered `onAnnounce()` and never called `subscribe()`:
 
 ```js
 // Server
-await Room.announce('lobby', { type: 'maintenance', in: '5min' }) // to everyone
+const notice = await Room.announce('lobby', { type: 'maintenance', in: '5min' }) // to everyone
 await Room.send('lobby', { id: winnerId }, { badge: 'first-blood' }) // to one participant
 
 // Client
 room.onAnnounce((data) => showBanner(data))
 me.listen((data, from) => (from === null ? showSystemNotice(data) : showDm(from.meta.name, data)))
 ```
+
+The receipt is `{ seq, timestamp }` in the control lane's order, alongside presence and lifecycle events. Participant text published with `publish()` has a separate semantic order, so don't compare an announcement's `seq` with a publish receipt.
 
 ### Server-side authority
 
@@ -313,7 +317,7 @@ me.onDemand((track, wanted) => {
 })
 ```
 
-In-memory, standalone Redis, and Cloudflare report `receivers` because they can count globally; `0` means nobody anywhere. Redis Cluster omits it because a node-local count cannot prove global absence. Use `onDemand` to pause and resume portably.
+In-memory, standalone Redis, and Cloudflare report `receivers` because they can prove global absence; `0` means nobody anywhere. A positive value counts backend delivery routes, not end viewers. Redis Cluster omits the field because a node-local count cannot prove global absence. Use `onDemand` to pause and resume portably.
 
 Across nodes, `onDemand`'s `wanted` is aggregated by gossip on the control lane, so it converges rather than updating instantly: a viewer on another node takes a beat to reflect. That's exactly what an encoder pause/resume wants (a signal, not a hard gate). It's a boolean, not a count, on purpose: a node reports only whether it has any watcher, so the room learns whether a track is wanted, never how many want it. Treat `wanted === false` as "resume when it flips true," not a real-time interlock.
 
@@ -362,7 +366,7 @@ room.subscribe(show)               // flushes the held live tail, then stays liv
 
 Order the stored history and live tail for the current room lifecycle by `seq`. It is a standalone monotonic cursor: every accepted message in an ordering-domain instance gets the previous `seq + 1`, even when authority time advances, moves backward, or the backend is reconstructed. `timestamp` is non-decreasing authority time for display and temporal context; it doesn't reset or partition `seq`.
 
-The domains are deliberately separate. Text published with `publish()` and `Room.announce()` share the room incarnation's semantic domain; control has its own domain; every `(member, binary track)` and every recipient inbox has its own domain. A close and recreation starts new domain instances at `seq = 1`, so positions from different lifecycles or lanes aren't comparable. If your application combines several room lifecycles into one history, persist its own lifecycle or message identity alongside `seq`.
+The domains are deliberately separate. Participant text published with `publish()` uses the room incarnation's semantic domain. Presence, lifecycle events, and `Room.announce()` use the control domain. Every `(member, binary track)` and every recipient inbox has its own domain. A close and recreation starts new domain instances at `seq = 1`, so positions from different lifecycles or lanes aren't comparable. If your application combines several room lifecycles into one history, persist its own lifecycle or message identity alongside `seq`.
 
 The tail is a bounded, drop-oldest buffer of the most recent messages, sized for a prompt subscribe, not a second copy of history: if a client is slow to subscribe on a busy room, the oldest tail messages roll off, and the database history you loaded above stays the source of truth.
 
@@ -473,9 +477,9 @@ The server-side entry point. Clients get a room when a telefunction returns it.
 | `Room.list({ prefix? }?)` | `RoomInfo[]` | - |
 | `Room.setMeta(id, meta)` | `void` | If the room doesn't exist |
 | `Room.setAttributes(id, attributes)` | `void` | If the room doesn't exist |
-| `Room.close(id)` | `void` | If the room doesn't exist |
+| `Room.close(id)` | `void` | - |
 | `Room.removeParticipant(id, target)` | `void` | Unknown participant `{ id }` |
-| `Room.announce(id, data)` | `void` | If the room doesn't exist |
+| `Room.announce(id, data)` | `RoomSendReceipt` | If the room doesn't exist |
 | `Room.send(id, target, data)` | `void` | If the room or participant doesn't exist |
 | `Room.getParticipants(id, target?)` | `ParticipantSnapshotView[]` | If the room doesn't exist |
 
@@ -486,6 +490,8 @@ type RoomOptions = {
 ```
 
 - `Room.get(id, { tail: true })` starts relaying live messages as soon as the room is returned to a client (see <Link href="#history-live-tail">History</Link>).
+- `Room.close(id)` is idempotent: a missing or already closed room is already at the requested state.
+- `Room.announce(id, data)` returns `{ seq, timestamp }` from the control lane.
 - `Room.setMeta(id, meta)` replaces the room's metadata wholesale; `Room.setAttributes(id, attributes)` merges per key (a key set to `undefined` is removed). Both propagate to observers.
 - `Room.removeParticipant(id, target)` and `Room.send(id, target, data)` take one participant ref for `target`: `{ id }` for a single membership (throws when unknown), or `{ identity }` for every membership of an identity at once (an idempotent sweep or fan-out). `removeParticipant` carries its `reason` in that object: `{ id, reason? }` or `{ identity, reason? }`.
 - `Room.getParticipants(id, target?)` is a server-side point-in-time read (no live view, no subscription). Omit `target` for the whole roster; pass `{ identity }` to read one user's memberships, the cheap "is this user online" check that doesn't load the roster. `[]` for an absent identity.
@@ -502,7 +508,7 @@ type RoomOptions = {
 | `onJoin(cb)` / `onLeave(cb)` | A participant joined / left: `(member)` / `(member, cause?)`. |
 | `onParticipantUpdate(cb)` | Any member's metadata changed: `(member, meta, prev)`. |
 | `onUpdate(cb)` | The room's own metadata changed: `(meta, prev)`. |
-| `onAnnounce(cb)` | A room-authored announcement arrived. |
+| `onAnnounce(cb)` | A room-authored announcement arrived on the always-on control lane. |
 | `onEmpty(cb)` / `onClose(cb)` | The last participant left / the room closed. |
 | `onChange(cb)` / `snapshot()` | One change signal plus immutable view: the `useSyncExternalStore` pair. |
 
@@ -515,7 +521,7 @@ Your own handle, from `join()`. Room-wide messages arrive on the room and each `
 | Method | Description |
 |---|---|
 | `publish(data, { coalesce?, retain? }?)` | Publish to the whole room. `coalesce` conflates a same-key burst; `retain` keeps it as the room's last message for late subscribers. |
-| `publishBinary(data, { track?, meta?, retain? }?)` | Publish raw binary. `retain` keeps the last frame per track for late subscribers. When present, `receivers` is the global live subscription count (`0` = nobody anywhere); Redis Cluster omits it. |
+| `publishBinary(data, { track?, meta?, retain? }?)` | Publish raw binary. `retain` keeps the last frame per track for late subscribers. When present, `receivers` counts backend delivery routes; `0` proves nobody anywhere, while Redis Cluster omits the field. |
 | `send(to, data)` | Private message to one participant (or their id). Resolves with the receipt `{ seq, timestamp }` (best-effort). |
 | `send(to, data, { ack: true })` | Confirmed send: waits for the recipient's `listen` handler and resolves with `{ response, seq, timestamp }`, rejecting if the recipient leaves — or with the handler's `Abort` (a plain throw is hidden as a bug). |
 | `listen(cb)` | Receive private messages: `(data, from)`, `from` is `null` for room-authored. Return a value to reply to a `send(…, { ack: true })` sender; `throw Abort(value)` to reject them with it. |

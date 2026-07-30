@@ -88,10 +88,10 @@ type PublishGuard<P extends ParticipantMeta = ParticipantMeta> = (
  *  the error, before any membership state is written). */
 type JoinGuard<P extends ParticipantMeta = ParticipantMeta> = (member: Sender<P>) => void | Promise<void>
 
-/** The receipt for a committed room-wide message, passed to `onAfterPublish`. `seq` is the key's
- *  strict per-key counter and `timestamp` the central server clock (Redis `TIME`, or the Cloudflare
- *  key authority) — together they order the room's messages. `receivers` is the live subscriber
- *  count at publish time (absent when the transport can't count). */
+/** The receipt for a committed room-wide message, passed to `onAfterPublish`. `seq` is the lane's
+ *  strict counter and `timestamp` the backend authority clock — together they order that lane's
+ *  messages. `receivers` counts backend delivery routes at acceptance; absent when the backend
+ *  cannot prove a global result. */
 type RoomPublishReceipt = { seq: number; timestamp: number; receivers?: number }
 
 /** The receipt for a delivered private message, passed to `onAfterSend`. */
@@ -345,8 +345,8 @@ type LocalParticipant<P extends ParticipantMeta = ParticipantMeta, Pub = unknown
    *  `{ coalesce: key }` to conflate high-frequency updates — see `PublishOptions`. */
   publish(data: Pub, options?: PublishOptions): Promise<ChannelPublishAck>
   /** Publish binary to the whole room — optionally on a named track and/or with per-frame `meta`.
-   *  When present, `receivers` is the global live subscription count: `0` means nobody anywhere.
-   *  Backends that cannot count globally omit it; use `onDemand` to pause and resume portably. */
+   *  When present, `receivers` counts backend delivery routes; `0` proves nobody anywhere.
+   *  Backends that cannot prove global absence omit it; use `onDemand` to pause and resume portably. */
   publishBinary(data: Uint8Array, options?: BinaryPublishOptions): Promise<ChannelPublishAck>
 
   /** Send a private message to one participant (or their ID) — nobody else receives it. Resolves
