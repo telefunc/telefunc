@@ -876,6 +876,7 @@ class ServerRoom implements Room {
     hidden = false,
   ): Promise<{ id: string; joinedAt: number }> {
     const id = crypto.randomUUID()
+    const joinedAt = Date.now()
     // A hidden participant is not a party seeking admission — it's a server/bot/recorder — so it
     // bypasses the admission ceremony: no `onBeforeJoin` policy and no `onAfterJoin` side effects. But
     // its join IS announced on the control lane (flagged), so observers already connected learn of it
@@ -883,16 +884,18 @@ class ServerRoom implements Room {
     // Admission policy runs first, on the definitive member ID — a rejected join writes nothing.
     const onBeforeJoin = this._guards?.onBeforeJoin
     if (!hidden && onBeforeJoin) await onBeforeJoin({ id, meta, identity })
-    const joinedAt = await this._createMember(id, meta, identity, hidden)
     track(id, joinedAt)
     this._syncSubs()
+    let created = false
     try {
-      // A local member makes this holder a semantic observer and owns one inbox. Do not announce or
-      // expose it until both subscriptions are live: a remote process may publish or react to the join
-      // immediately, and pub/sub cannot replay a frame sent through an establishing subscription.
+      // Bring both receive paths up before writing any discoverable member or identity cell. Once the
+      // record exists, an identity-addressed DM is legal and can commit immediately; making the inbox
+      // ready first closes that otherwise-unrecoverable subscribe/write gap.
       const inbox = this._dmUnsubs.get(id)
       assert(inbox)
       await Promise.all([this._textSub.ready, inbox.ready])
+      await this._createMember(id, meta, identity, joinedAt, hidden)
+      created = true
       this._state.applyJoin(id, meta, joinedAt, identity, hidden)
       await publishCtrl(this.id, this._inc, {
         __r: 'join',
@@ -903,15 +906,14 @@ class ServerRoom implements Room {
         ...(hidden ? { hidden: true } : {}),
       })
     } catch (error) {
-      // The durable create precedes subscription readiness. A failed pre-announcement join owns no
-      // externally usable participant, so retire both its authority cells and its local heartbeat.
-      try {
-        await evictMember(this.id, this._inc, id, identity ?? undefined, { type: 'left' })
-      } catch (rollbackError) {
-        reportRoomError(rollbackError)
-      } finally {
-        this._applyLeave(id, { type: 'left' })
+      if (created) {
+        try {
+          await evictMember(this.id, this._inc, id, identity ?? undefined, { type: 'left' })
+        } catch (rollbackError) {
+          reportRoomError(rollbackError)
+        }
       }
+      this._applyLeave(id, { type: 'left' })
       throw error
     }
     if (hidden) return { id, joinedAt } // announced above; a hidden participant has no post-join hook
@@ -926,10 +928,10 @@ class ServerRoom implements Room {
     id: string,
     meta: ParticipantMeta,
     identity: string | null,
+    joinedAt: number,
     hidden = false,
-  ): Promise<number> {
+  ): Promise<void> {
     await this._assertOpen()
-    const joinedAt = Date.now()
     const record: RoomMemberRecord = {
       meta,
       joinedAt,
@@ -953,7 +955,6 @@ class ServerRoom implements Room {
         },
       })),
     }))
-    return joinedAt
   }
 
   /** @internal */

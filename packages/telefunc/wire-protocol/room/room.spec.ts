@@ -134,17 +134,13 @@ describe('Room public behavior', () => {
     }
   })
 
-  it('does not complete a join until its member inbox subscription is ready', async () => {
+  it('keeps a joining identity undiscoverable until its member inbox subscription is ready', async () => {
     const room = await Room.create('join-inbox-readiness')
     const sender = await room.join()
-    const observer = await Room.get(room.id)
-    let immediateDm: Promise<unknown> | undefined
-    observer.onJoin((member) => {
-      immediateDm = sender.send(member.id, 'immediate')
-    })
 
     const backend = getBackend()
     const subscribeLane = backend.subscribeLane.bind(backend)
+    const commitLane = vi.spyOn(backend, 'commitLane')
     const inboxStarted = deferred<void>()
     let releaseInbox!: () => Promise<void>
     const subscribe = vi.spyOn(backend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
@@ -179,29 +175,36 @@ describe('Room public behavior', () => {
     })
     try {
       let joinSettled = false
-      const joining = room.join().then((participant) => {
+      const joining = room.join({ identity: 'waiting' }).then((participant) => {
         joinSettled = true
         return participant
       })
       await inboxStarted.promise
       await settleMicrotasks()
-      // Without the readiness fence the join and reactive DM have already settled here, so the
-      // accepted DM is deliberately allowed to finish before the delayed inbox is installed.
-      if (joinSettled) await immediateDm
+      expect(joinSettled).toBe(false)
+      expect(await Room.getParticipants(room.id, { identity: 'waiting' })).toEqual([])
+      await Room.send(room.id, { identity: 'waiting' }, 'premature')
+      expect(commitLane).not.toHaveBeenCalledWith(
+        room.id,
+        expect.any(String),
+        expect.objectContaining({ kind: 'inbox' }),
+        expect.any(Uint8Array),
+        expect.any(Object),
+      )
+
       await releaseInbox()
 
       const joined = await joining
       const inbox: unknown[] = []
       joined.listen((data) => inbox.push(data))
-      await immediateDm
-      expect(inbox).toEqual(['immediate'])
+      await sender.send(joined.id, 'ready')
+      expect(inbox).toEqual(['ready'])
     } finally {
       subscribe.mockRestore()
     }
   })
 
-  it('rolls back a durable member when post-create join readiness rejects', async () => {
-    vi.useFakeTimers()
+  it('writes no durable member when pre-admission join readiness rejects', async () => {
     const room = await Room.create('join-readiness-rollback')
     const backend = getBackend()
     const subscribeLane = backend.subscribeLane.bind(backend)
@@ -218,7 +221,6 @@ describe('Room public behavior', () => {
     })
     try {
       await expect(room.join()).rejects.toThrow('semantic readiness failed')
-      await vi.advanceTimersByTimeAsync(ROOM_MEMBER_KV_TTL_MS + ROOM_HEARTBEAT_INTERVAL_MS)
       expect(await Room.getParticipants(room.id)).toEqual([])
     } finally {
       subscribe.mockRestore()
