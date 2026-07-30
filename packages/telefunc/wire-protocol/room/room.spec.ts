@@ -6,7 +6,6 @@ import { ShieldValidationError, isShieldValidationError } from '../../shared/Shi
 import {
   ROOM_HEARTBEAT_INTERVAL_MS,
   ROOM_MEMBER_KV_TTL_MS,
-  ROOM_MEMBER_TTL_MS,
   ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS,
 } from '../constants.js'
 import {
@@ -1849,7 +1848,6 @@ class ControlledAttempt implements SubscriptionAttempt {
   readonly #listeners = new Set<(state: SubscriptionAttemptState) => void>()
   readonly #cleanup: Promise<void>
   #state: SubscriptionAttemptState = 'establishing'
-  unsubscribeCalls = 0
 
   constructor(cleanup: Promise<void> = Promise.resolve()) {
     this.ready = this.#readiness.promise
@@ -1873,7 +1871,6 @@ class ControlledAttempt implements SubscriptionAttempt {
   }
 
   async unsubscribe(): Promise<void> {
-    this.unsubscribeCalls++
     this.#transition('closed')
     await this.#cleanup
   }
@@ -1951,12 +1948,10 @@ function rejectedSubscription(diagnostic: string): BackendSubscription {
 
 function deferred<T>() {
   let resolve!: (value?: T) => void
-  let reject!: (reason?: unknown) => void
-  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+  const promise = new Promise<T>((resolvePromise) => {
     resolve = resolvePromise as (value?: T) => void
-    reject = rejectPromise
   })
-  return { promise, resolve, reject }
+  return { promise, resolve }
 }
 
 function delayLaneSubscription(matches: (lane: LaneId) => boolean) {
