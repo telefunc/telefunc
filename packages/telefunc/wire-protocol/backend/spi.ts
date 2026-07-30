@@ -167,8 +167,6 @@ export type BackendSpi = {
   readonly capabilities: {
     receivers: 'global' | 'node-local' | 'none'
     maxRetainedPayloadBytes: number // aggregate cap; commit with larger retain REJECTS (throws)
-    clusterSafe: boolean
-    directory: boolean // directory verbs present iff true
   }
 
   // ── cheap Broadcast ──
@@ -251,7 +249,7 @@ export type BackendSpi = {
   listGenerations(roomId: string): Promise<string[]> // incs with any surviving state
   dropGeneration(roomId: string, inc: string): Promise<void> // MUST refuse head.currentInc === inc
 
-  // ── directory (iff capabilities.directory) ──
+  // ── directory ──
   directoryPut(roomId: string, incTag: string): Promise<void>
   directoryDelete(roomId: string, incTag: string): Promise<void> // deletes iff stored tag matches
   directoryList(

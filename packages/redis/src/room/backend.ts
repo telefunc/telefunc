@@ -213,8 +213,6 @@ export class RedisRoomBackend implements BackendDriver {
     this.capabilities = {
       receivers: options.redis instanceof Cluster ? 'none' : 'global',
       maxRetainedPayloadBytes: options.maxRetainedPayloadBytes ?? DEFAULT_MAX_RETAINED_BYTES,
-      clusterSafe: true,
-      directory: true,
     }
     this._publisher.defineCommand(PUBLISH_CMD, { numberOfKeys: 2, lua: PUBLISH_LUA })
     for (const command of Object.values(REDIS_ROOM_COMMANDS)) {

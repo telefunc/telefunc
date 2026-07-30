@@ -207,8 +207,6 @@ export class MemoryBackend implements BackendDriver {
     this.capabilities = {
       receivers: 'global',
       maxRetainedPayloadBytes: options.maxRetainedPayloadBytes ?? DEFAULT_MAX_RETAINED_BYTES,
-      clusterSafe: false,
-      directory: true,
     }
   }
 

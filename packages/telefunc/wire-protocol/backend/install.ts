@@ -212,10 +212,11 @@ const REQUIRED_METHODS = [
   'deleteRetained',
   'listGenerations',
   'dropGeneration',
+  'directoryPut',
+  'directoryDelete',
+  'directoryList',
   'dispose',
 ] as const
-
-const DIRECTORY_METHODS = ['directoryPut', 'directoryDelete', 'directoryList'] as const
 
 function assertBackendDriver(backend: BackendDriver): void {
   if (backend === null || typeof backend !== 'object') {
@@ -247,15 +248,6 @@ function assertBackendDriver(backend: BackendDriver): void {
     throw new Error(
       'telefunc/backend: backend capabilities.maxRetainedPayloadBytes must be a finite non-negative number',
     )
-  }
-  if (typeof capabilities.clusterSafe !== 'boolean') {
-    throw new Error('telefunc/backend: backend capabilities.clusterSafe must be a boolean')
-  }
-  if (typeof capabilities.directory !== 'boolean') {
-    throw new Error('telefunc/backend: backend capabilities.directory must be a boolean')
-  }
-  if (capabilities.directory) {
-    for (const method of DIRECTORY_METHODS) assertMethod(backend, method)
   }
 }
 
