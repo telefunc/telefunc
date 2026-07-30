@@ -127,9 +127,8 @@ export function hasGeneration(sql: SqlStorage, inc: string): boolean {
 }
 
 // Non-reusable authority identity for one registered generation. The incarnation string is reusable
-// only after `dropGenerationRows()` removes this row; the next legal installation receives a fresh
-// token from the head CX revision. Async route probes carry this token across their await so an answer
-// obtained for an old generation can never authorize a lease in a later reuse of the same inc string.
+// only after `dropGenerationRows()` removes this row; every route carries the token minted by the next
+// legal installation so stale work cannot authorize a lease in a later reuse of the same inc string.
 export function readGenerationToken(sql: SqlStorage, inc: string): string | null {
   return sql.exec<{ token: string }>('SELECT token FROM gen WHERE inc = ?', inc).toArray()[0]?.token ?? null
 }

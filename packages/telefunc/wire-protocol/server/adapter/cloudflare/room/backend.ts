@@ -329,19 +329,15 @@ export class CloudflareRoomBackend implements BackendDriver {
     const manager = getCloudflareRoomSessionManager()
     const stub = manager.authority(roomId)
     const wire = await stub.commitLane(roomId, inc, lane, payload, opts)
-    try {
-      if ('error' in wire) throw new Error(wire.error)
-      if ('stale' in wire) return { stale: true }
-      assertOrderingPosition(wire.seq, wire.timestamp, 'CloudflareRoomBackend.commitLane')
-      const deliveryToken = wire.deliveryToken
-      const attempt = new Promise<void>((resolve, reject) => {
-        setTimeout(() => void stub.awaitDelivery(deliveryToken).then(resolve, reject), 0)
-      })
-      const delivery = manager.settleDelivery(roomId, inc, lane, attempt)
-      return { accepted: true, seq: wire.seq, timestamp: wire.timestamp, receivers: wire.receivers, delivery }
-    } finally {
-      disposeRpcResult(wire)
-    }
+    if ('error' in wire) throw new Error(wire.error)
+    if ('stale' in wire) return { stale: true }
+    assertOrderingPosition(wire.seq, wire.timestamp, 'CloudflareRoomBackend.commitLane')
+    const deliveryToken = wire.deliveryToken
+    const attempt = new Promise<void>((resolve, reject) => {
+      setTimeout(() => void stub.awaitDelivery(deliveryToken).then(resolve, reject), 0)
+    })
+    const delivery = manager.settleDelivery(roomId, inc, lane, attempt)
+    return { accepted: true, seq: wire.seq, timestamp: wire.timestamp, receivers: wire.receivers, delivery }
   }
   async readRetained(roomId: string, inc: string, lane: LaneId) {
     const wire = await this.#stub(roomId).readRetained(inc, lane)
@@ -359,13 +355,8 @@ export class CloudflareRoomBackend implements BackendDriver {
     return this.#stub(roomId).listGenerations()
   }
   async dropGeneration(roomId: string, inc: string) {
-    const manager = getCloudflareRoomSessionManager()
-    const wire = await manager.authority(roomId).dropGeneration(inc)
+    const wire = await this.#stub(roomId).dropGeneration(inc)
     if ('error' in wire) throw new Error(wire.error)
-    manager.dropGenerationSettlements(roomId, inc)
-    for (const dropped of wire.droppedSubscribers) {
-      manager.invalidate({ roomId, inc, ...dropped, terminal: true })
-    }
   }
   async directoryPut(roomId: string, incTag: string) {
     await this.#directory().directoryPut(roomId, incTag)
@@ -405,12 +396,6 @@ export class CloudflareRoomBackend implements BackendDriver {
   #directory(): CloudflareRoomAuthorityStub {
     return this.#stub(DIRECTORY_DO_NAME)
   }
-}
-
-function disposeRpcResult(value: unknown): void {
-  if (typeof value !== 'object' || value === null || !(Symbol.dispose in value)) return
-  const dispose = (value as { [Symbol.dispose]?: unknown })[Symbol.dispose]
-  if (typeof dispose === 'function') dispose.call(value)
 }
 
 function headFromWire(wire: HeadWire): RoomHead {

@@ -15,7 +15,7 @@ type CloudflareRoomSubscriptionOptions = {
 }
 
 /** Cloudflare's raw driver edge. It acknowledges only after the authority has durably registered the
- * exact route. Retry, replacement, readiness generations and local fan-out all live in SubscriptionManager. */
+ * exact route. Room owns retry/replacement policy; shared subscription code owns readiness and local fan-out. */
 export class CloudflareRoomSubscriptionAttempt implements SubscriptionAttempt {
   readonly ready: Promise<void>
   readonly #source: CloudflareRoomSubscriptionSource

@@ -220,7 +220,7 @@ type Authority = {
   ): Promise<{ ok: true; generationToken: string } | { rejected: true; reason: string }>
   commitLane(roomId: string, inc: string, lane: LaneId, payload: Uint8Array): Promise<CommitResult>
   awaitDelivery(token: string): Promise<void>
-  dropGeneration(inc: string): Promise<{ droppedSubscribers: unknown[] } | { error: string }>
+  dropGeneration(inc: string): Promise<{ ok: true } | { error: string }>
   listGenerations(): Promise<string[]>
   telefuncRoomReconstructForTest(): Promise<void>
 }

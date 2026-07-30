@@ -7,8 +7,9 @@
 // `deliver` is the handoff seam: in production the room DO RPCs each target session shard
 // (`telefuncRoomDeliver`). The attempt is the backend's ONE handoff — never retried or rolled back.
 
+import type { RouteTarget } from './routes.js'
+
 type DeliveryInfo = { roomId: string; inc: string; laneKey: string; seq: number; timestamp: number }
-export type RouteTarget = { subscriberDoId: string; leaseId: string; generationToken: string }
 type DeliverFn = (target: RouteTarget, frame: Uint8Array, info: DeliveryInfo) => Promise<void>
 
 const noop = (): void => {}
