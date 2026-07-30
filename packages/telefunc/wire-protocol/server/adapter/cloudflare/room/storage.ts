@@ -169,19 +169,18 @@ export function directoryList(
   prefix: string,
   cursor?: string,
 ): { entries: { roomId: string; incTag: string }[]; cursor?: string } {
-  const matching = sql
-    .exec<{ room_id: string; inc_tag: string }>(
-      'SELECT room_id, inc_tag FROM directory WHERE substr(room_id, 1, length(?)) = ? ORDER BY room_id',
-      prefix,
-      prefix,
-    )
-    .toArray()
-  const start = cursor === undefined ? 0 : matching.findIndex((row) => row.room_id > cursor)
-  if (start < 0) return { entries: [] }
-  const page = matching.slice(start, start + DIRECTORY_PAGE_SIZE)
+  const query =
+    cursor === undefined
+      ? 'SELECT room_id, inc_tag FROM directory WHERE substr(room_id, 1, length(?)) = ? ORDER BY room_id LIMIT ?'
+      : 'SELECT room_id, inc_tag FROM directory WHERE substr(room_id, 1, length(?)) = ? AND room_id > ? ORDER BY room_id LIMIT ?'
+  const matching =
+    cursor === undefined
+      ? sql.exec<{ room_id: string; inc_tag: string }>(query, prefix, prefix, DIRECTORY_PAGE_SIZE + 1).toArray()
+      : sql.exec<{ room_id: string; inc_tag: string }>(query, prefix, prefix, cursor, DIRECTORY_PAGE_SIZE + 1).toArray()
+  const page = matching.slice(0, DIRECTORY_PAGE_SIZE)
   const entries = page.map((row) => ({ roomId: row.room_id, incTag: row.inc_tag }))
   const last = page[page.length - 1]
-  const more = last !== undefined && start + page.length < matching.length
+  const more = last !== undefined && matching.length > DIRECTORY_PAGE_SIZE
   return more ? { entries, cursor: last.room_id } : { entries }
 }
 
