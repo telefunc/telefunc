@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto'
 import { Cluster, Redis } from 'ioredis'
 import {
   disposeBackend,
@@ -92,6 +91,7 @@ describe('Redis real three-master Cluster CI certification', () => {
     const backend = redisBackend(client, prefix)
     const authority = new RedisRoomBackend({ redis: client, prefix })
     const genericCalls = observation.wrapDefinedCommand('tfPublish')
+    for (const { name } of Object.values(REDIS_ROOM_COMMANDS)) observation.wrapDefinedCommand(name)
     const roomId = 'runtime-slot} proof'
     const inc = 'runtime-slot-inc'
     let subscription: ReturnType<BackendSpi['subscribeLane']> | undefined
@@ -420,27 +420,12 @@ describe('Redis real three-master Cluster CI certification', () => {
     }
   })
 
-  it('tries EVALSHA first and recovers a genuine NOSCRIPT after relocation', async () => {
+  it('lets the defined command recover a genuine NOSCRIPT after relocation', async () => {
     const prefix = uniquePrefix('noscript')
     const roomId = 'noscript-room'
     const inc = 'noscript-inc'
     const client = clusterClient(CLUSTER_NODES)
     const backend = redisBackend(client, prefix)
-    const calls: Array<'evalsha' | 'eval'> = []
-    const evaluator = client as unknown as {
-      evalsha(sha: string, numberOfKeys: number, ...args: unknown[]): Promise<unknown>
-      eval(lua: string, numberOfKeys: number, ...args: unknown[]): Promise<unknown>
-    }
-    const evalsha = evaluator.evalsha.bind(client)
-    const evalLua = evaluator.eval.bind(client)
-    evaluator.evalsha = async (...args) => {
-      calls.push('evalsha')
-      return await evalsha(...args)
-    }
-    evaluator.eval = async (...args) => {
-      calls.push('eval')
-      return await evalLua(...args)
-    }
     let moved: { slot: number; source: Master; target: Master } | undefined
     try {
       await open(backend, roomId, inc)
@@ -451,13 +436,9 @@ describe('Redis real three-master Cluster CI certification', () => {
       moved = { slot: slotNumber, source, target }
       await target.client.script('FLUSH')
       await moveSlot(slotNumber, source, target, true)
-      calls.length = 0
       expect(accepted(await backend.commitLane(roomId, inc, SEMANTIC_LANE, Buffer.from('fallback'))).seq).toBe(2)
-      expect(calls).toEqual(['evalsha', 'eval'])
     } finally {
       if (moved !== undefined) await restoreSlot(moved.slot, moved.source, moved.target)
-      evaluator.evalsha = evalsha
-      evaluator.eval = evalLua
       await backend.dispose()
       await client.quit().catch(() => client.disconnect())
     }
@@ -782,34 +763,6 @@ function observeCommands(client: Cluster): {
     client.defineCommand = defineCommand as typeof client.defineCommand
   })
 
-  const bySha = new Map(
-    Object.values(REDIS_ROOM_COMMANDS).map((descriptor) => [
-      createHash('sha1').update(descriptor.lua).digest('hex'),
-      descriptor,
-    ]),
-  )
-  const byLua = new Map(Object.values(REDIS_ROOM_COMMANDS).map((descriptor) => [descriptor.lua, descriptor]))
-  const evaluator = client as unknown as {
-    evalsha(sha: string, numberOfKeys: number, ...args: unknown[]): Promise<unknown>
-    eval(lua: string, numberOfKeys: number, ...args: unknown[]): Promise<unknown>
-  }
-  const evalsha = evaluator.evalsha.bind(client)
-  const evalLua = evaluator.eval.bind(client)
-  evaluator.evalsha = async (sha, numberOfKeys, ...args) => {
-    const descriptor = bySha.get(sha)
-    if (descriptor !== undefined) calls.push({ name: descriptor.name, keyCount: numberOfKeys, args })
-    return await evalsha(sha, numberOfKeys, ...args)
-  }
-  evaluator.eval = async (lua, numberOfKeys, ...args) => {
-    const descriptor = byLua.get(lua)
-    if (descriptor !== undefined) calls.push({ name: descriptor.name, keyCount: numberOfKeys, args })
-    return await evalLua(lua, numberOfKeys, ...args)
-  }
-  restores.push(() => {
-    evaluator.evalsha = evalsha
-    evaluator.eval = evalLua
-  })
-
   return {
     definitions,
     calls,
@@ -821,6 +774,15 @@ function observeCommands(client: Cluster): {
       const observed: unknown[][] = []
       target[name] = async (...args) => {
         observed.push(args)
+        const definition = [...definitions].reverse().find((candidate) => candidate.name === name)
+        if (definition !== undefined) {
+          const dynamic = definition.numberOfKeys === null
+          calls.push({
+            name,
+            keyCount: definition.numberOfKeys ?? Number(args[0]),
+            args: dynamic ? args.slice(1) : args,
+          })
+        }
         return await bound(...args)
       }
       restores.push(() => {

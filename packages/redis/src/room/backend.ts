@@ -10,7 +10,7 @@
 //                FIFO realizes the ordered at-most-once attempt chain; receivers = the PUBLISH count
 //   subscription SUBSCRIBE ack = establishment (fail-closed); channels keyed by (inc, lane) — I11
 
-import { createHash, randomUUID } from 'node:crypto'
+import { randomUUID } from 'node:crypto'
 import { Cluster, type Redis } from 'ioredis'
 import { assert } from '../assert.js'
 import { callDefinedCommand } from '../callDefinedCommand.js'
@@ -589,32 +589,6 @@ export class RedisRoomBackend implements BackendDriver {
   }
 
   private async _call(command: string, keysAndArgs: ReadonlyArray<string | Uint8Array>): Promise<unknown> {
-    if (this._publisher instanceof Cluster) {
-      const descriptor = Object.values(REDIS_ROOM_COMMANDS).find((candidate) => candidate.name === command)
-      if (descriptor === undefined) throw new Error(`RedisRoomBackend: unknown command '${command}'`)
-      const dynamic = descriptor.numberOfKeys === null
-      const numberOfKeys = dynamic ? Number(keysAndArgs[0]) : descriptor.numberOfKeys
-      if (!Number.isInteger(numberOfKeys) || numberOfKeys < 0) {
-        throw new Error(`RedisRoomBackend: invalid key count for '${command}'`)
-      }
-      const args = dynamic ? keysAndArgs.slice(1) : keysAndArgs
-      const redisArgs = args.map((arg) =>
-        typeof arg === 'string' ? arg : Buffer.from(arg.buffer, arg.byteOffset, arg.byteLength),
-      )
-      try {
-        return await this._publisher.evalsha(redisScriptSha(descriptor.lua), numberOfKeys, ...redisArgs)
-      } catch (err) {
-        // NOSCRIPT proves EVALSHA did not execute. Retrying the complete script with EVAL is therefore
-        // non-duplicating, and ioredis preserves MOVED plus ASKING-on-the-same-connection routing for the
-        // fallback command. This also covers SCRIPT FLUSH, restarted masters, and newly promoted owners.
-        if (!(err instanceof Error) || !err.message.includes('NOSCRIPT')) throw normalizeRedisError(err)
-        try {
-          return await this._publisher.eval(descriptor.lua, numberOfKeys, ...redisArgs)
-        } catch (fallbackError) {
-          throw normalizeRedisError(fallbackError)
-        }
-      }
-    }
     try {
       return await callDefinedCommand(this._publisher, command, keysAndArgs)
     } catch (error) {
@@ -635,10 +609,6 @@ export class RedisRoomBackend implements BackendDriver {
     }
     return [...keys]
   }
-}
-
-function redisScriptSha(lua: string): string {
-  return createHash('sha1').update(lua).digest('hex')
 }
 
 function normalizeRedisError(error: unknown): Error {
