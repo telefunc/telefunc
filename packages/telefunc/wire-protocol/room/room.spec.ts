@@ -369,6 +369,7 @@ describe('Room public behavior', () => {
     const room = (await Room.create('control-reconcile')) as ServerRoom
     const backend = getBackend()
     const subscribeLane = backend.subscribeLane.bind(backend)
+    const controlSubscribed = deferred<void>()
     let transition!: (state: SubscriptionState) => void
     const subscribe = vi.spyOn(backend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
       const inner = subscribeLane(roomId, inc, lane, receiver)
@@ -378,6 +379,7 @@ describe('Room public behavior', () => {
         state: () => inner.state(),
         onStateChange: (listener) => {
           transition = listener
+          controlSubscribed.resolve()
           return inner.onStateChange(listener)
         },
         unsubscribe: () => inner.unsubscribe(),
@@ -385,29 +387,43 @@ describe('Room public behavior', () => {
     })
     try {
       room.onAnnounce(() => {})
-      await settle()
-      const refresh = vi.spyOn(room as unknown as { _refreshMembers(): Promise<void> }, '_refreshMembers')
+      await controlSubscribed.promise
+      const member = await room.join()
+      await room.getParticipants()
+      room._state.applyLeave(member.id)
+      expect(room.count).toBe(0)
+
       transition('lost')
       transition('ready')
-      await vi.waitFor(() => expect(refresh).toHaveBeenCalledTimes(1))
+      await vi.waitFor(() => expect(room.count).toBe(1))
+      expect((await room.getParticipants()).map(({ id }) => id)).toEqual([member.id])
+
+      room._state.applyLeave(member.id)
+      expect(room.count).toBe(0)
       const onControl = (
         room as unknown as { _onCtrlMessage(message: string, info: { seq: number; timestamp: number }): void }
       )._onCtrlMessage.bind(room)
       onControl('{"__r":"announce","data":"first"}', { seq: 1, timestamp: 1 })
       onControl('{"__r":"announce","data":"gap"}', { seq: 3, timestamp: 3 })
-      await vi.waitFor(() => expect(refresh).toHaveBeenCalledTimes(2))
+      await vi.waitFor(() => expect(room.count).toBe(1))
+      expect((await room.getParticipants()).map(({ id }) => id)).toEqual([member.id])
     } finally {
       subscribe.mockRestore()
     }
   })
 
   it('uses the heartbeat roster snapshot to repair observer drift', async () => {
-    const observer = (await Room.create('heartbeat-reconcile')) as ServerRoom
-    const reconcile = vi.spyOn(observer._state, 'reconcile')
+    const authority = await Room.create('heartbeat-reconcile')
+    const member = await authority.join()
+    const observer = (await Room.get(authority.id)) as ServerRoom
+    await observer.getParticipants()
+    observer._state.applyLeave(member.id)
+    expect(observer.count).toBe(0)
 
     await (observer as unknown as { _heartbeatTick(): Promise<void> })._heartbeatTick()
 
-    expect(reconcile).toHaveBeenCalled()
+    expect(observer.count).toBe(1)
+    expect((await observer.getParticipants()).map(({ id }) => id)).toEqual([member.id])
   })
 
   it('heartbeats pure control observers without owned members or binary demand', async () => {
