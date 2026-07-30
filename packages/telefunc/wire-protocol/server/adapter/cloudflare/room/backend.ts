@@ -24,13 +24,7 @@ import { BACKEND_SPI_VERSION } from '../../../../backend/spi.js'
 import { CloudflareBroadcastTransport } from '../broadcast.js'
 import { laneKey as laneKeyOf } from './codec.js'
 import { CloudflareRoomSubscriptionAttempt, type CloudflareRoomSubscriptionSource } from './subscription.js'
-import type {
-  CellsResult,
-  CommitWire,
-  HeadCxResult,
-  RegisterWire,
-  RetainedResult,
-} from './do.js'
+import type { CellsResult, CommitWire, HeadCxResult, RegisterWire, RetainedResult } from './do.js'
 
 const DIRECTORY_DO_NAME = '__telefunc_room_directory__'
 const ROOM_MANAGER = Symbol('telefunc.cloudflare.room-manager')
