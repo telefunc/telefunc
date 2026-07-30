@@ -245,7 +245,7 @@ describe('Redis real three-master Cluster CI certification', () => {
     }
   })
 
-  it('rejects a held PONG from the previous subscriber connection instead of crediting stale delivery', async () => {
+  it('does not settle before subscriber dispatch or credit a held dispatch from a closed epoch', async () => {
     const topology = cluster.nodes('master').sort(compareRedisNodes)
     const originals = topology.map((node) => [node, node.duplicate.bind(node)] as const)
     const subscribers: Redis[] = []
@@ -257,17 +257,17 @@ describe('Redis real three-master Cluster CI certification', () => {
       }) as typeof node.duplicate
     }
 
-    const baseline = new Set((await pubSubClients()).map(({ id }) => id))
-    const backend = redisBackend(cluster, uniquePrefix('stale-pong'))
+    const baseline = new Set((await pubSubClients()).map(clientIdentity))
+    const backend = redisBackend(cluster, uniquePrefix('held-dispatch'))
     const states: SubscriptionState[] = []
     const observed: string[] = []
-    const oldPongHeld = deferred()
-    const releaseOldPong = deferred()
+    const dispatchHeld = deferred()
+    const held: Array<[Buffer, Buffer]> = []
     let subscription: ReturnType<BackendSpi['subscribeLane']> | undefined
-    let restorePing: (() => void) | undefined
+    let restoreDispatch: (() => void) | undefined
     try {
-      await open(backend, 'stale-pong-room', 'stale-pong-inc')
-      subscription = backend.subscribeLane('stale-pong-room', 'stale-pong-inc', SEMANTIC_LANE, (payload) =>
+      await open(backend, 'held-dispatch-room', 'held-dispatch-inc')
+      subscription = backend.subscribeLane('held-dispatch-room', 'held-dispatch-inc', SEMANTIC_LANE, (payload) =>
         observed.push(Buffer.from(payload).toString()),
       )
       subscription.onStateChange((state) => states.push(state))
@@ -275,44 +275,47 @@ describe('Redis real three-master Cluster CI certification', () => {
 
       const subscriber = subscribers[0]
       if (subscriber === undefined) throw new Error('owned Redis subscriber was not observed')
-      const ping = subscriber.ping.bind(subscriber)
-      let holdOnce = true
-      subscriber.ping = (async () => {
-        const pong = await ping()
-        if (holdOnce) {
-          holdOnce = false
-          oldPongHeld.resolve()
-          await releaseOldPong.promise
-        }
-        return pong
-      }) as typeof subscriber.ping
-      restorePing = () => {
-        subscriber.ping = ping
+      const dispatch = subscriber.listeners('messageBuffer')[0] as
+        | ((channel: Buffer, frame: Buffer) => void)
+        | undefined
+      if (dispatch === undefined) throw new Error('owned Redis subscriber dispatch listener was not observed')
+      const holdDispatch = (channel: Buffer, frame: Buffer): void => {
+        held.push([channel, frame])
+        dispatchHeld.resolve()
+      }
+      subscriber.off('messageBuffer', dispatch)
+      subscriber.on('messageBuffer', holdDispatch)
+      restoreDispatch = () => {
+        subscriber.off('messageBuffer', holdDispatch)
+        subscriber.on('messageBuffer', dispatch)
       }
 
       const committed = accepted(
-        await backend.commitLane('stale-pong-room', 'stale-pong-inc', SEMANTIC_LANE, Buffer.from('old-epoch')),
+        await backend.commitLane('held-dispatch-room', 'held-dispatch-inc', SEMANTIC_LANE, Buffer.from('old-epoch')),
       )
       const deliveryOutcome = committed.delivery.then(
         () => null,
         (error: unknown) => error,
       )
-      await oldPongHeld.promise
-      await waitFor(() => observed.length === 1)
+      await dispatchHeld.promise
+      expect(await settlesWithin(committed.delivery, 100)).toBe(false)
 
-      const [first] = await waitForValue(async () => (await pubSubClients()).filter(({ id }) => !baseline.has(id)))
+      const [first] = await waitForValue(async () =>
+        (await pubSubClients()).filter((client) => !baseline.has(clientIdentity(client))),
+      )
       if (first === undefined) throw new Error('initial Redis subscriber connection was not observed')
       await first.owner.client.call('CLIENT', 'KILL', 'ID', String(first.id))
       await waitFor(() => states.includes('lost') && subscription?.state() === 'ready')
-      releaseOldPong.resolve()
+      restoreDispatch()
+      restoreDispatch = undefined
+      for (const [channel, frame] of held) dispatch(channel, frame)
 
       const error = await deliveryOutcome
       expect(error).toBeInstanceOf(Error)
-      expect(String(error)).toMatch(/PING crossed source/)
-      expect(observed).toEqual(['old-epoch'])
+      expect(String(error)).toMatch(/delivery fence|connection closed/i)
+      expect(observed).toEqual([])
     } finally {
-      releaseOldPong.resolve()
-      restorePing?.()
+      restoreDispatch?.()
       for (const [node, original] of originals) node.duplicate = original as typeof node.duplicate
       await subscription?.unsubscribe().catch(() => {})
       await backend.dispose()
@@ -326,9 +329,10 @@ describe('Redis real three-master Cluster CI certification', () => {
     // order, but identify masters by Cluster node ID: Compose nodes all listen on port 6379.
     const subscriberOrder = [...masters].sort(compareMasterEndpoints)
     const cases = [
-      { label: 'cross', roomMasterId: (subscriberOrder[2] as Master).id },
-      { label: 'same', roomMasterId: (subscriberOrder[0] as Master).id },
+      { label: 'cross', roomMasterId: (subscriberOrder[2] as Master).id, same: false },
+      { label: 'same', roomMasterId: (subscriberOrder[1] as Master).id, same: true },
     ]
+    const knownClients = new Set((await pubSubClients()).map(clientIdentity))
     const subscriptions: Array<ReturnType<BackendSpi['subscribeLane']>> = []
     try {
       for (const scenario of cases) {
@@ -341,9 +345,15 @@ describe('Redis real three-master Cluster CI certification', () => {
         )
         subscriptions.push(subscription)
         await subscription.ready
+        const [subscriber] = await waitForValue(async () =>
+          (await pubSubClients()).filter((client) => !knownClients.has(clientIdentity(client))),
+        )
+        if (subscriber === undefined) throw new Error(`${scenario.label} subscriber was not observed`)
+        expect(subscriber.owner.id === scenario.roomMasterId).toBe(scenario.same)
+        knownClients.add(clientIdentity(subscriber))
         const result = accepted(await backend.commitLane(roomId, inc, SEMANTIC_LANE, Buffer.from(scenario.label)))
         await result.delivery
-        await waitFor(() => observed.length === 1)
+        expect(observed).toEqual([scenario.label])
         expect(result.receivers).toBeUndefined()
       }
     } finally {
@@ -628,6 +638,10 @@ function compareMasterEndpoints(left: RedisClusterNode, right: RedisClusterNode)
   return `${left.host}:${left.port}`.localeCompare(`${right.host}:${right.port}`)
 }
 
+function clientIdentity(client: { id: number; owner: Master }): string {
+  return `${client.owner.id}:${client.id}`
+}
+
 function redisSlot(key: string): number {
   const start = key.indexOf('{')
   const end = start < 0 ? -1 : key.indexOf('}', start + 1)
@@ -672,6 +686,16 @@ function deferred(): { promise: Promise<void>; resolve(): void } {
     resolve = resolvePromise
   })
   return { promise, resolve }
+}
+
+async function settlesWithin(promise: Promise<unknown>, timeoutMs: number): Promise<boolean> {
+  return await Promise.race([
+    promise.then(
+      () => true,
+      () => true,
+    ),
+    new Promise<false>((resolve) => setTimeout(() => resolve(false), timeoutMs)),
+  ])
 }
 
 function bytes(value: string): Uint8Array {

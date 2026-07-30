@@ -30,6 +30,7 @@
 import { HEAD_TRANSITIONS, ORDERING_FRAME_LAYOUT, type LaneId } from 'telefunc/backend'
 
 export const DEFAULT_ROOM_PREFIX = 'tf:'
+export const REDIS_DELIVERY_FENCE_BYTE = 0xff
 
 // ── key naming ────────────────────────────────────────────────────────────
 
@@ -441,7 +442,7 @@ export const CELLS_CX_CMD = 'tfRoomCellsCx'
 //   KEYS: [1]=head [2]=order [3]=retained [4]=channel [5]=retained aggregate payload size
 //         [6..]=required live cells
 //   ARGV: [1]=now [2]=inc [3]=laneKind [4]=closingLease('') [5]=retain('0'|'1')
-//         [6]=payload [7]=aggregate retained payload cap
+//         [6]=payload [7]=aggregate retained payload cap [8]=local delivery-fence token or ''
 export const COMMIT_LUA = `${NOW_FN}
 ${REDIS_ORDERING_FRAME_LUA}
 local head_key, order_key, retained_key, channel_key, retained_size_key = KEYS[1], KEYS[2], KEYS[3], KEYS[4], KEYS[5]
@@ -516,6 +517,9 @@ if ARGV[5] == '1' then
   redis.call('SET', retained_size_key, retained_total)
 end
 local receivers = redis.call('PUBLISH', channel_key, frame)
+-- A Cluster forwards both publications from this slot owner over the same ordered bus link. The
+-- impossible ordering-frame prefix makes the second publication an internal local-dispatch fence.
+if ARGV[8] ~= '' then redis.call('PUBLISH', channel_key, string.char(${REDIS_DELIVERY_FENCE_BYTE}) .. ARGV[8]) end
 return '{"accepted":true,"seq":' .. seq_text .. ',"timestamp":' .. ts_text .. ',"receivers":' .. receivers .. '}'
 `
 

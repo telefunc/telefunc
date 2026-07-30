@@ -363,28 +363,35 @@ export class RedisRoomBackend implements BackendDriver {
     this._assertLive()
     const source = durableSource(roomId, inc, lane)
     const keys = REDIS_ROOM_COMMAND_KEYS.commit(this._prefix, roomId, inc, lane, opts?.requiredCellKeys)
-    const reply = (await this._call(REDIS_ROOM_COMMANDS.commit.name, [
-      String(keys.length),
-      ...keys,
-      this._nowArg(),
-      inc,
-      lane.kind,
-      opts?.closingLease ?? '',
-      opts?.retain === true ? '1' : '0',
-      toBuffer(payload),
-      String(this.capabilities.maxRetainedPayloadBytes),
-    ])) as string
+    const flush = this.subscriptions.prepareFlush(source)
+    let reply: string
+    try {
+      reply = (await this._call(REDIS_ROOM_COMMANDS.commit.name, [
+        String(keys.length),
+        ...keys,
+        this._nowArg(),
+        inc,
+        lane.kind,
+        opts?.closingLease ?? '',
+        opts?.retain === true ? '1' : '0',
+        toBuffer(payload),
+        String(this.capabilities.maxRetainedPayloadBytes),
+        flush.token,
+      ])) as string
+    } catch (error) {
+      flush.cancel()
+      throw error
+    }
     const parsed = JSON.parse(reply) as
       | { stale: true }
       | { accepted: true; seq: number; timestamp: number; receivers: number }
-    if ('stale' in parsed) return { stale: true }
+    if ('stale' in parsed) {
+      flush.cancel()
+      return { stale: true }
+    }
     assertOrderingPosition(parsed.seq, parsed.timestamp, 'RedisRoomBackend.commitLane')
-    // The PUBLISH inside the atomic record IS the broker handoff, and the broker's per-connection FIFO
-    // is what orders the attempt (receivers = the PUBLISH count). `delivery` then flushes local dispatch:
-    // the frame was queued to the subscriber socket during the awaited commit, so a PING round-trip on
-    // that connection resolves only after ioredis has dispatched the frame to the local receiver — WITHOUT
-    // awaiting the receiver's own completion, so handoffAwaitsReceiver stays false.
-    const delivery = this.subscriptions.flush(source)
+    // Data and fence leave the same slot owner in order, so observing the fence proves local dispatch.
+    const delivery = flush.delivery
     // Consumers may observe delivery later (or intentionally only use acceptance). Install an immediate
     // rejection observer so a connection/lifecycle epoch crossing is surfaced by `delivery` without an
     // ambient unhandledRejection in the interim.
