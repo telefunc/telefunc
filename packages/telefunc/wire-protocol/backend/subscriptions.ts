@@ -404,10 +404,24 @@ class SubscriptionSlot<Source> {
   }
 
   private async _cleanup(attempt: SubscriptionAttempt): Promise<void> {
+    let timer!: ReturnType<typeof setTimeout>
+    const cleanup = Promise.resolve()
+      .then(() => attempt.unsubscribe())
+      .catch((error) => this._reportError(error))
+    const deadline = new Promise<void>((resolve) => {
+      timer = unrefTimer(
+        setTimeout(() => {
+          this._reportError(
+            new Error(`Backend subscription cleanup did not settle within the deadline (${this._label})`),
+          )
+          resolve()
+        }, SUBSCRIPTION_ESTABLISH_TIMEOUT_MS),
+      )
+    })
     try {
-      await attempt.unsubscribe()
-    } catch (error) {
-      this._reportError(error)
+      await Promise.race([cleanup, deadline])
+    } finally {
+      clearTimeout(timer)
     }
   }
 

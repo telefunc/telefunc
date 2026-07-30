@@ -971,20 +971,9 @@ class ServerRoom implements Room {
     // A leaving member's per-track streams end, so their retained frames go too — binary per
     // (member, track), and the room's one retained-text slot if this member still owns it. Room
     // close drops the whole generation, including anything a leave races past.
-    await this._dropRetainedBinary(id)
-    await dropRetainedTextOwnedBy(this.id, this._inc, id)
+    await dropRetainedOwnedBy(this.id, this._inc, id)
     this._applyLeave(id, cause)
     await publishCtrl(this.id, this._inc, { __r: 'leave', id, ...leaveCauseToWire(cause) })
-  }
-
-  /** Delete a member's retained binary frames — every track, wherever stored. The backend's retained
-   *  lane inventory is authoritative, so a frame retained on another node is still cleaned up.
-   *  Deleting an absent lane is a no-op, so a member that retained nothing just pays one empty scan. */
-  private async _dropRetainedBinary(id: string): Promise<void> {
-    const backend = getBackend()
-    for (const lane of await backend.listRetained(this.id, this._inc)) {
-      if (lane.kind === 'binary' && lane.member === id) await backend.deleteRetained(this.id, this._inc, lane)
-    }
   }
 
   /** @internal — full replace (`setMeta`). */
@@ -1297,7 +1286,7 @@ class ServerRoom implements Room {
 
   /** The control lane: presence and lifecycle events — relayed to every stub
    *  unconditionally, since a client's live view is only correct if it sees every one. */
-  private _onCtrlMessage(serialized: string, rawInfo: WirePublishInfo): void {
+  private async _onCtrlMessage(serialized: string, rawInfo: WirePublishInfo): Promise<void> {
     let envelope: unknown
     try {
       envelope = parse(serialized)
@@ -1319,7 +1308,7 @@ class ServerRoom implements Room {
     const serverOnly = this._hidesFromClients(event)
 
     if (event.__r === 'announce') return
-    this._applyCtrl(event)
+    await this._applyCtrl(event)
 
     if (this._stubs.size > 0 && !serverOnly) {
       // Presence/lifecycle events are ordered by the control lane; the receipt rides the frame.
@@ -1470,7 +1459,7 @@ class ServerRoom implements Room {
     }
   }
 
-  private _applyCtrl(event: RoomCtrlEnvelope): void {
+  private async _applyCtrl(event: RoomCtrlEnvelope): Promise<void> {
     switch (event.__r) {
       case 'join':
         this._state.applyJoin(event.id, event.meta, event.joinedAt, event.identity ?? null, event.hidden)
@@ -1479,6 +1468,7 @@ class ServerRoom implements Room {
       case 'track':
         this._state.applyTrack(event.id, event.track)
         this._syncSubs() // all-track subscribers need the new (member, track) key
+        await this._binaryReady()
         return
       case 'leave':
         this._applyLeave(event.id, leaveCauseFromWire(event))
@@ -1885,7 +1875,16 @@ class ServerRoom implements Room {
 
     // Demand (`onDemand`): gossip this node's local binary-demand transitions and push the
     // aggregated global count to any of our own members whose demand changed.
-    this._demand.sync(open ? this._localDemandPairs(binaryWants, memberIds) : [])
+    const demandPairs = open ? this._localDemandPairs(binaryWants, memberIds) : []
+    if (demandPairs.length === 0) this._demand.sync([])
+    else {
+      void this._binaryReady()
+        .then(() => {
+          const currentWants = this._aggregateBinaryWants()
+          this._demand.sync(this._state.closed ? [] : this._localDemandPairs(currentWants, this._state.listMemberIds()))
+        })
+        .catch(reportRoomError)
+    }
 
     // Inbox subscriptions follow ownership, not listeners — a holder must always be
     // able to receive direct messages addressed to its members.
@@ -2305,7 +2304,10 @@ async function readMembers(roomId: string, inc: string, ids?: string[]): Promise
           ? { value: true, mutations: [{ key }] }
           : { value: false, mutations: [] }
       })
-      if (reaped) await publishCtrl(roomId, inc, { __r: 'leave', id, cause: 'disconnected' })
+      if (reaped) {
+        await dropRetainedOwnedBy(roomId, inc, id)
+        await publishCtrl(roomId, inc, { __r: 'leave', id, cause: 'disconnected' })
+      }
       continue
     }
     members.push({
@@ -2408,6 +2410,16 @@ async function dropRetainedTextOwnedBy(roomId: string, inc: string, memberId: st
   await backend.deleteRetained(roomId, inc, SEMANTIC_LANE, { ifSeq: retained.seq })
 }
 
+/** A departed member owns no durable replay: binary has one slot per track, text one compare-deleted
+ * room slot. The retained inventory is authoritative across nodes, including crash reaping. */
+async function dropRetainedOwnedBy(roomId: string, inc: string, memberId: string): Promise<void> {
+  const backend = getBackend()
+  for (const lane of await backend.listRetained(roomId, inc)) {
+    if (lane.kind === 'binary' && lane.member === memberId) await backend.deleteRetained(roomId, inc, lane)
+  }
+  await dropRetainedTextOwnedBy(roomId, inc, memberId)
+}
+
 /** Remove one member from backend cells — its record, identity marker (if any), and hidden marker —
  *  then announce the leave.
  *  The admin-side counterpart to `_removeMember` (which also applies the leave to a live view). */
@@ -2427,11 +2439,7 @@ async function evictMember(
   // Drop the kicked member's retained frames too (a kick doesn't run `_removeMember`). Binary is per
   // (member, track);
   // text is the room's one slot, cleared only if this member still owns it.
-  const backend = getBackend()
-  for (const lane of await backend.listRetained(roomId, inc)) {
-    if (lane.kind === 'binary' && lane.member === memberId) await backend.deleteRetained(roomId, inc, lane)
-  }
-  await dropRetainedTextOwnedBy(roomId, inc, memberId)
+  await dropRetainedOwnedBy(roomId, inc, memberId)
   await publishCtrl(roomId, inc, { __r: 'leave', id: memberId, ...leaveCauseToWire(cause) })
 }
 
