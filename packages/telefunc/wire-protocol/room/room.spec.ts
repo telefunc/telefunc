@@ -802,6 +802,24 @@ describe('client Room lifecycle', () => {
     )
   })
 
+  it('declares a room-level default binary track without an earlier all-track listener', () => {
+    const sent: unknown[] = []
+    const fake = createFakeStub({
+      send: async (message) => {
+        sent.push(message)
+        return undefined
+      },
+    })
+    const client = new ClientRoom(fake.stub, snapshot('default-track-declaration'))
+
+    client.subscribeBinary(() => {}, { track: null })
+
+    expect(sent).toContainEqual({
+      __r: 'sub-binary',
+      wants: { everyMember: { all: false, tracks: [DEFAULT_TRACK] }, members: {} },
+    })
+  })
+
   it('redeclares a room-wide text subscription after reconnect even when the local latch already matches', () => {
     const wireDeclarations: boolean[] = []
     let reconnect = () => {}
