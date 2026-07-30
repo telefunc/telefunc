@@ -17,7 +17,7 @@ function classifyTelefuncError(
   isExpected: (error: unknown) => error is Error,
 ): TelefuncErrorClassification {
   if (isAbort(error)) return { kind: 'abort', error }
-  if (isShieldValidationError(error)) return { kind: 'shield', error }
   if (isExpected(error)) return { kind: 'expected', error }
+  if (isShieldValidationError(error)) return { kind: 'shield', error }
   return { kind: 'bug', error }
 }

@@ -1,14 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { parse } from '@brillout/json-serializer/parse'
 import { IndexedPeer } from '../server/IndexedPeer.js'
-import { TAG, decode } from '../shared-ws.js'
+import { ACK_STATUS, TAG, decode } from '../shared-ws.js'
+import { ShieldValidationError, isShieldValidationError } from '../../shared/ShieldValidationError.js'
 import {
   ROOM_HEARTBEAT_INTERVAL_MS,
   ROOM_MEMBER_KV_TTL_MS,
   ROOM_MEMBER_TTL_MS,
   ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS,
 } from '../constants.js'
-import { DEFAULT_TRACK, type RoomSnapshotMetadata } from './protocol.js'
+import { DEFAULT_TRACK, isRoomError, roomAckError, type RoomSnapshotMetadata } from './protocol.js'
 import { ClientRoom } from './client.js'
 import { Room, ServerRoom } from './server.js'
 import { RoomStubChannel } from './stubs.js'
@@ -648,6 +649,15 @@ describe('Room public behavior', () => {
 })
 
 describe('client Room lifecycle', () => {
+  it('keeps RoomError precedence when an error also matches ShieldValidationError', () => {
+    const error = Object.assign(new ShieldValidationError('overlap'), {
+      [Symbol.for('telefunc.RoomError')]: true,
+    })
+    expect(isRoomError(error)).toBe(true)
+    expect(isShieldValidationError(error)).toBe(true)
+    expect(roomAckError(error, vi.fn())).toEqual({ text: 'overlap', status: ACK_STATUS.ERROR })
+  })
+
   it('redeclares a room-wide text subscription after reconnect even when the local latch already matches', () => {
     const wireDeclarations: boolean[] = []
     let reconnect = () => {}

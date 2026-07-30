@@ -69,6 +69,14 @@ describe.each([
     await expect(publishThatSettlesWith(ACK_STATUS.ABORT, binary)).rejects.toMatchObject({ abortValue: 'expected' })
     expect(report).not.toHaveBeenCalled()
   })
+
+  test('keeps a shield validation failure quiet', async () => {
+    const report = vi.spyOn(console, 'error').mockImplementation(() => {})
+    await expect(publishThatSettlesWith(ACK_STATUS.SHIELD_ERROR, binary)).rejects.toMatchObject({
+      name: 'ShieldValidationError',
+    })
+    expect(report).not.toHaveBeenCalled()
+  })
 })
 
 describe('SSE reconcile watchdog', () => {
