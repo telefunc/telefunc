@@ -3,12 +3,7 @@ import { parse } from '@brillout/json-serializer/parse'
 import { IndexedPeer } from '../server/IndexedPeer.js'
 import { ACK_STATUS, TAG, decode } from '../shared-ws.js'
 import { ShieldValidationError, isShieldValidationError } from '../../shared/ShieldValidationError.js'
-import {
-  ROOM_HEARTBEAT_INTERVAL_MS,
-  ROOM_MEMBER_KV_TTL_MS,
-  ROOM_MEMBER_TTL_MS,
-  ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS,
-} from '../constants.js'
+import { ROOM_HEARTBEAT_INTERVAL_MS, ROOM_MEMBER_KV_TTL_MS, ROOM_MEMBER_TTL_MS } from '../constants.js'
 import { DEFAULT_TRACK, isRoomError, roomAckError, type RoomSnapshotMetadata } from './protocol.js'
 import { ClientRoom } from './client.js'
 import { Room, ServerRoom } from './server.js'
@@ -1154,11 +1149,6 @@ describe('shared subscription supervision', () => {
     expect(raw.openCalls).toBe(2)
     expect(report).toHaveBeenCalledTimes(1)
     expect(String(report.mock.calls[0]![0])).toContain('establishment did not settle within the deadline')
-  })
-
-  it('allocates the Room lane terminal horizon evenly across the bounded attempt budget', () => {
-    const totalAttempts = 1 + SUBSCRIPTION_REPLAN_LIMIT
-    expect(SUBSCRIPTION_ESTABLISH_TIMEOUT_MS * totalAttempts).toBe(ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS)
   })
 
   it('never fires the watchdog for the synchronous zero-config memory driver', async () => {

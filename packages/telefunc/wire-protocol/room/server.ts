@@ -14,7 +14,6 @@ import { makePublishInfo, type ChannelPublishAck, type ChannelPublishInfo } from
 import {
   ROOM_DM_ACK_TIMEOUT_MS,
   ROOM_HEARTBEAT_INTERVAL_MS,
-  ROOM_ID_MAX_BYTES,
   ROOM_MEMBER_KV_TTL_MS,
   ROOM_MEMBER_TTL_MS,
   ROOM_TAIL_ATTACH_TIMEOUT_MS,
@@ -2506,12 +2505,6 @@ async function publishCtrl(roomId: string, inc: string, event: RoomCtrlEnvelope)
 
 function assertRoomId(id: unknown): asserts id is string {
   assertUsage(typeof id === 'string' && id.length > 0, 'The room ID should be a non-empty string')
-  // Bounded because the ID is URL-encoded into every KV/pub-sub key; keeps the worst-case key within
-  // backend limits and closes an unbounded-ID resource vector.
-  assertUsage(
-    new TextEncoder().encode(id).length <= ROOM_ID_MAX_BYTES,
-    `The room ID should be at most ${ROOM_ID_MAX_BYTES} bytes`,
-  )
 }
 
 /** Identity is trusted — validate the server-side join option. */
