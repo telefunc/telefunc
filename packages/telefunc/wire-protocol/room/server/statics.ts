@@ -133,7 +133,15 @@ function writerId(): string {
 }
 
 async function registerRoomIndex(id: string, inc: string): Promise<void> {
-  await getBackend().directoryPut(id, inc)
+  let failure: unknown
+  for (let attempt = 0; attempt < ROOM_CX_ATTEMPTS; attempt++) {
+    try {
+      return await getBackend().directoryPut(id, inc)
+    } catch (error) {
+      failure = error
+    }
+  }
+  throw failure
 }
 
 async function tryCreateRoom(id: string, options: RoomOptions | undefined): Promise<Room | null> {
@@ -160,7 +168,12 @@ async function tryCreateRoom(id: string, options: RoomOptions | undefined): Prom
   )
   if ('conflict' in result) return null
   assert('head' in result)
-  await registerRoomIndex(id, created.inc)
+  try {
+    await registerRoomIndex(id, created.inc)
+  } catch (error) {
+    await closeRoom(id)
+    throw error
+  }
   return new ServerRoom(id, created, { members: [] })
 }
 

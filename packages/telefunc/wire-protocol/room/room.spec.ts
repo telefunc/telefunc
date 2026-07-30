@@ -250,6 +250,25 @@ describe('Room public behavior', () => {
     expect(await recreated.getParticipants()).toEqual([])
   })
 
+  it('returns only a discoverable room and closes a head whose directory registration cannot finish', async () => {
+    const put = driver.directoryPut.bind(driver)
+    let transientAttempts = 0
+    const directoryPut = vi.spyOn(driver, 'directoryPut').mockImplementation(async (roomId, inc) => {
+      if (roomId === 'index-retry' && transientAttempts++ === 0) throw new Error('transient index failure')
+      if (roomId === 'index-failure') throw new Error('persistent index failure')
+      await put(roomId, inc)
+    })
+    try {
+      const retried = await Room.create('index-retry')
+      expect((await Room.list()).map(({ id }) => id)).toContain(retried.id)
+
+      await expect(Room.create('index-failure')).rejects.toThrow('persistent index failure')
+      expect((await driver.readHead('index-failure'))?.head).toMatchObject({ state: 'closed', currentInc: null })
+    } finally {
+      directoryPut.mockRestore()
+    }
+  })
+
   it('waits for an active close lease and takes over until the head is closed', async () => {
     vi.useFakeTimers()
     const room = (await Room.create('concurrent-close')) as ServerRoom
