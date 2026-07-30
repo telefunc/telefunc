@@ -517,7 +517,7 @@ describe('Room public behavior', () => {
     expect(heartbeat).toHaveBeenCalledOnce()
   })
 
-  it('keeps retrying inside the horizon after more than six immediate failures', async () => {
+  it('retries a still-wanted lost subscription on the next planning pass', async () => {
     vi.useFakeTimers()
     const observer = await Room.get((await Room.create('single-recovery-horizon')).id)
     const backend = getBackend()
@@ -531,7 +531,7 @@ describe('Room public behavior', () => {
     const report = vi.spyOn(console, 'error').mockImplementation(() => {})
     try {
       observer.subscribe(() => {})
-      await vi.advanceTimersByTimeAsync(2_000)
+      await vi.advanceTimersByTimeAsync(ROOM_HEARTBEAT_INTERVAL_MS + 100)
       expect(attempts).toBe(8)
       expect(observer.isClosed).toBe(false)
     } finally {
