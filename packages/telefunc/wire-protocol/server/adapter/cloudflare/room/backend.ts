@@ -171,7 +171,7 @@ export class CloudflareRoomSessionManager {
 
   invalidate(request: RoomShardInvalidationRequest): void {
     const entry = this.#entries.get(JSON.stringify([request.roomId, request.inc, request.laneKey]))
-    if (entry?.matches(request)) {
+    if (entry?.matches(request, request.terminal === true)) {
       if (request.terminal === true) entry.terminate()
       else entry.invalidate()
     }

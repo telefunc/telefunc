@@ -60,14 +60,15 @@ export class CloudflareRoomSubscriptionAttempt implements SubscriptionAttempt {
     return () => this.#listeners.delete(cb)
   }
 
-  matches(request: RoomShardInvalidationRequest): boolean {
+  matches(request: RoomShardInvalidationRequest, terminalWhileEstablishing: boolean = false): boolean {
     return (
       request.roomId === this.#source.roomId &&
       request.inc === this.#source.inc &&
       request.laneKey === this.#source.laneKey &&
       request.subscriberDoId === this.#source.subscriberDoId &&
       request.leaseId === this.#leaseId &&
-      request.generationToken === this.#generationToken
+      (request.generationToken === this.#generationToken ||
+        (terminalWhileEstablishing && this.#state === 'establishing'))
     )
   }
 

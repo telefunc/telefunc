@@ -51,6 +51,11 @@ test('public Room lifecycle and authority settlement controls execute on Cloudfl
       state: 'terminated',
       invalidations: ['terminal'],
     },
+    preAckTerminalDrop: {
+      state: 'terminated',
+      invalidations: ['terminal'],
+      generations: [],
+    },
     cancelled: 'Cloudflare Room delivery cancelled before handoff',
     cancellationDeliveries: [1],
     fanoutOrdering: {

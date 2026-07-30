@@ -150,10 +150,10 @@ export class SessionDurableObject extends DurableObject {
     state.release()
   }
 
-  async openSubscription(roomId: string, inc: string): Promise<void> {
+  async openSubscription(roomId: string, inc: string, waitForReady: boolean = true): Promise<void> {
     const attempt = this.#manager.openSubscription(roomId, inc, { kind: 'semantic' }, () => {})
     this.#attempts.set(roomId, attempt)
-    await attempt.ready
+    if (waitForReady) await attempt.ready
   }
 
   subscriptionState(roomId: string): SubscriptionAttemptState {
@@ -192,6 +192,7 @@ export class TelefuncRoomDurableObject extends ProductionRoomDurableObject {
         secondToken?: string
       }
     | undefined
+  #registrationHold: { installed: ReturnType<typeof deferred>; release: ReturnType<typeof deferred> } | undefined
 
   constructor(ctx: DurableObjectState, env: unknown) {
     super(ctx, env)
@@ -211,6 +212,18 @@ export class TelefuncRoomDurableObject extends ProductionRoomDurableObject {
       }
       return result
     })()
+  }
+
+  override registerRoute(roomId: string, inc: string, laneKey: string, subscriberDoId: string, leaseId: string) {
+    const hold = this.#registrationHold
+    if (hold === undefined) return super.registerRoute(roomId, inc, laneKey, subscriberDoId, leaseId)
+    return super.registerRoute(roomId, inc, laneKey, subscriberDoId, leaseId).then(async (result) => {
+      if ('ok' in result) {
+        hold.installed.resolve()
+        await hold.release.promise
+      }
+      return result
+    })
   }
 
   override awaitDelivery(token: string): Promise<void> {
@@ -246,6 +259,18 @@ export class TelefuncRoomDurableObject extends ProductionRoomDurableObject {
   telefuncRoomReleaseSecondDeliveryForTest(): void {
     this.#responseReordering?.secondDelivery.resolve()
   }
+
+  telefuncRoomPrepareRegistrationHoldForTest(): void {
+    this.#registrationHold = { installed: deferred(), release: deferred() }
+  }
+
+  async telefuncRoomWaitForRegistrationForTest(): Promise<void> {
+    await this.#registrationHold?.installed.promise
+  }
+
+  telefuncRoomReleaseRegistrationForTest(): void {
+    this.#registrationHold?.release.resolve()
+  }
 }
 
 type HeadResult =
@@ -276,6 +301,9 @@ type Authority = {
   telefuncRoomWaitForFirstCommitForTest(): Promise<void>
   telefuncRoomReleaseFirstCommitForTest(): Promise<void>
   telefuncRoomReleaseSecondDeliveryForTest(): Promise<void>
+  telefuncRoomPrepareRegistrationHoldForTest(): Promise<void>
+  telefuncRoomWaitForRegistrationForTest(): Promise<void>
+  telefuncRoomReleaseRegistrationForTest(): Promise<void>
 }
 type Session = {
   prepareDelivery(roomId: string, blockFirst: boolean, fail?: boolean): Promise<void>
@@ -283,7 +311,7 @@ type Session = {
     roomId: string,
   ): Promise<{ started: boolean; delivered: number[]; invalidations: Array<'recoverable' | 'terminal'> }>
   releaseDelivery(roomId: string): Promise<void>
-  openSubscription(roomId: string, inc: string): Promise<void>
+  openSubscription(roomId: string, inc: string, waitForReady?: boolean): Promise<void>
   subscriptionState(roomId: string): Promise<SubscriptionAttemptState>
 }
 type PublicSession = {
@@ -315,6 +343,7 @@ export default {
       const session = env.TelefuncDurableObject.get(sessionId) as unknown as Session
       const lifecycle = await successfulLifecycle(env, sessionId, session, suffix)
       const terminalDrop = await terminalGenerationDrop(env, session, suffix)
+      const preAckTerminalDrop = await preAckTerminalGenerationDrop(env, session, suffix)
       const cancellation = await cancelledDelivery(env, sessionId, session, suffix)
       const fanoutOrdering = await rejectedFanoutOrdering(env, sessionId, session, suffix)
       const evictionInvalidations = await failedDeliveryEviction(env, sessionId, session, suffix)
@@ -324,6 +353,7 @@ export default {
         facadeSettlementOrdering,
         lifecycle,
         terminalDrop,
+        preAckTerminalDrop,
         ...cancellation,
         fanoutOrdering,
         evictionInvalidations,
@@ -414,6 +444,31 @@ async function terminalGenerationDrop(
   return {
     state: await session.subscriptionState(roomId),
     invalidations: (await session.deliveryState(roomId)).invalidations,
+  }
+}
+
+async function preAckTerminalGenerationDrop(env: Env, session: Session, suffix: string) {
+  const roomId = `pre-ack-terminal-${suffix}`
+  const inc = `pre-ack-terminal-inc-${suffix}`
+  const authority = roomAuthority(env, roomId)
+  const opened = expectHead(
+    await authority.compareExchangeHead(
+      { expect: 'absent' },
+      { head: { currentInc: inc, state: 'open', configB64: 'e30=' } },
+    ),
+    'pre-ack terminal open',
+  )
+  await session.prepareDelivery(roomId, false)
+  await authority.telefuncRoomPrepareRegistrationHoldForTest()
+  await session.openSubscription(roomId, inc, false)
+  await within(authority.telefuncRoomWaitForRegistrationForTest(), 2_000, 'held route registration')
+  await closeAndDrop(authority, inc, opened, `pre-ack-terminal-close-${suffix}`)
+  await authority.telefuncRoomReleaseRegistrationForTest()
+  await waitUntil(async () => (await session.subscriptionState(roomId)) !== 'establishing', 2_000)
+  return {
+    state: await session.subscriptionState(roomId),
+    invalidations: (await session.deliveryState(roomId)).invalidations,
+    generations: await authority.listGenerations(),
   }
 }
 
