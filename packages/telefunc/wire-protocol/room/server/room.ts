@@ -1418,7 +1418,7 @@ class ServerRoom implements Room {
   /** Resolves once the local roster is authoritative: immediately while the live view holds it
    *  (roster known and the event stream attached), else via a backend cell read. */
   private _ensureRoster(): Promise<void> {
-    if (this._state.closed || (this._state.rosterKnown && this._ctrlSub.active)) return Promise.resolve()
+    if (this._state.closed || (this._state.rosterKnown && this._ctrlSub.established)) return Promise.resolve()
     return this._refreshMembers()
   }
 

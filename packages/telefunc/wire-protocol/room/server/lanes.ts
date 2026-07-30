@@ -77,6 +77,10 @@ class SubSlot {
     return this._subscription !== null && this._subscription.state() !== 'closed'
   }
 
+  get established(): boolean {
+    return this._subscription?.state() === 'ready'
+  }
+
   get wanted(): boolean {
     return this._subscribe !== null
   }

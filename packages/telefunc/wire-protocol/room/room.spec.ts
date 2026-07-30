@@ -495,6 +495,25 @@ describe('Room public behavior', () => {
     expect((await observer.getParticipants()).map(({ id }) => id)).toEqual([member.id])
   })
 
+  it('reads authority while the control subscription is establishing', async () => {
+    const authority = await Room.create('establishing-roster')
+    const observer = (await Room.get(authority.id)) as ServerRoom
+    expect(await observer.getParticipants()).toEqual([])
+    const readiness = deferred<void>()
+    const slot = (observer as unknown as { _ctrlSub: SubSlot })._ctrlSub
+    slot.sync(true, () => ({
+      ready: readiness.promise,
+      state: () => 'establishing',
+      onStateChange: () => () => {},
+      unsubscribe: async () => {},
+    }))
+    const member = await authority.join()
+
+    expect((await observer.getParticipants()).map(({ id }) => id)).toEqual([member.id])
+    readiness.resolve()
+    slot.stop()
+  })
+
   it('heartbeats pure control observers without owned members or binary demand', async () => {
     vi.useFakeTimers()
     const observer = (await Room.get((await Room.create('observer-heartbeat')).id)) as ServerRoom
