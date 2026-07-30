@@ -331,7 +331,6 @@ const headings = [
       'Recipes',
       'Production',
       'Reference',
-      'Gotchas',
     ],
   },
   {
