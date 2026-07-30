@@ -13,7 +13,7 @@ export async function bundleWorker(): Promise<string> {
     conditions: ['workerd', 'worker'],
     target: 'es2022',
     write: false,
-    external: ['cloudflare:workers'],
+    external: ['cloudflare:workers', 'node:async_hooks'],
     logLevel: 'silent',
   })
   const output = result.outputFiles[0]
