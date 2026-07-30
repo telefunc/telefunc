@@ -284,9 +284,6 @@ end
 return '{"tag":"head","head":' .. encoded .. '}'
 `
 
-export const HEAD_CX_CMD = 'tfRoomHeadCx'
-export const HEAD_CX_KEYS = 4
-
 // A head read and the clock used to interpret its logical tombstone are one slot-owner operation.
 //   KEYS: [1]=head
 export const READ_HEAD_LUA = `${NOW_FN}
@@ -295,9 +292,6 @@ local head = tf_head(KEYS[1], now)
 if not head then return '{"head":null}' end
 return '{"head":' .. cjson.encode(head) .. '}'
 `
-
-export const READ_HEAD_CMD = 'tfRoomReadHead'
-export const READ_HEAD_KEYS = 1
 
 // Finish a stable cell read on the same room-slot master: recheck both incarnation and revision while
 // sampling the clock that filters logical cell expiry.
@@ -311,9 +305,6 @@ local revision = redis.call('GET', KEYS[2])
 if not revision then revision = '0' end
 return '{"revision":' .. cjson.encode(revision) .. ',"now":' .. string.format('%.0f', now) .. '}'
 `
-
-export const READ_CELLS_FENCE_CMD = 'tfRoomReadCellsFence'
-export const READ_CELLS_FENCE_KEYS = 2
 
 // SUBSCRIBE establishment snapshots the generation token before its network await. This atomic
 // post-ack check rejects a token whose generation closed or was dropped during that await.
@@ -331,9 +322,6 @@ if not head or head.state ~= 'open' or head.inc ~= inc
 end
 return 1
 `
-
-export const VALIDATE_GENERATION_CMD = 'tfRoomValidateGeneration'
-export const VALIDATE_GENERATION_KEYS = 3
 
 // Begin snapshots the immutable generation token and claims one cleanup lease while gens membership
 // blocks reuse. A second drop waits for that owner; an abandoned owner can be replaced after the lease.
@@ -361,9 +349,6 @@ redis.call('HSET', KEYS[4], inc, cjson.encode({ id = owner, ['until'] = now + 30
 return '{"exists":true,"token":' .. cjson.encode(token) .. '}'
 `
 
-export const DROP_GENERATION_BEGIN_CMD = 'tfRoomDropGenerationBegin'
-export const DROP_GENERATION_BEGIN_KEYS = 4
-
 // Finalize only while the begin token and exclusive owner still match. Every physical member is a
 // declared key; deletion, keyed invalidation, and retirement are one atomic room-slot operation.
 //   KEYS: [1]=gens [2]=generation-tokens [3]=generation-drops [4]=invalidation-channel
@@ -383,8 +368,6 @@ redis.call('HDEL', KEYS[2], inc)
 redis.call('HDEL', KEYS[3], inc)
 return 1
 `
-
-export const DROP_GENERATION_FINALIZE_CMD = 'tfRoomDropGenerationFinalize'
 
 // CELLS CX — all mutations or none; success implies the head precondition (open + inc) held at apply
 // time; the revision is the coarse per-generation counter, allowed to over-conflict but never mislead.
@@ -436,8 +419,6 @@ redis.call('INCR', rev_key)
 redis.call('SADD', generation_keys_key, rev_key)
 return 'committed'
 `
-
-export const CELLS_CX_CMD = 'tfRoomCellsCx'
 
 // COMMIT — atomic acceptance: head precondition (one boolean, two branches), order advance, optional
 // retained install, then PUBLISH. Supplying a closing lease selects the narrow closing-control branch,
@@ -513,8 +494,6 @@ if ARGV[7] ~= '' then redis.call('PUBLISH', channel_key, string.char(${REDIS_DEL
 return '{"accepted":true,"seq":' .. seq_text .. ',"timestamp":' .. ts_text .. ',"receivers":' .. receivers .. '}'
 `
 
-export const COMMIT_CMD = 'tfRoomCommit'
-
 // Retained deletion optionally fences one lane by its current sequence.
 export const RETAINED_DELETE_LUA = `
 local if_seq = ARGV[1]
@@ -541,8 +520,6 @@ end
 return deleted
 `
 
-export const RETAINED_DELETE_CMD = 'tfRoomRetainedDelete'
-
 // Directory records use two co-slotted global keys. Put and compare-delete are each one atomic record,
 // so stale cleanup cannot erase (or de-index) a concurrent newer tag.
 export const DIRECTORY_PUT_LUA = `
@@ -551,9 +528,6 @@ redis.call('HSET', KEYS[2], ARGV[1], ARGV[2])
 return 1
 `
 
-export const DIRECTORY_PUT_CMD = 'tfRoomDirectoryPut'
-export const DIRECTORY_PUT_KEYS = 2
-
 export const DIRECTORY_DELETE_LUA = `
 if redis.call('HGET', KEYS[2], ARGV[1]) ~= ARGV[2] then return 0 end
 redis.call('HDEL', KEYS[2], ARGV[1])
@@ -561,42 +535,39 @@ redis.call('ZREM', KEYS[1], ARGV[1])
 return 1
 `
 
-export const DIRECTORY_DELETE_CMD = 'tfRoomDirectoryDelete'
-export const DIRECTORY_DELETE_KEYS = 2
-
 // One production-owned inventory drives command registration and key assembly. Tests consume the same
 // descriptors and builders, so a new script or a changed operand cannot silently escape slot/Lua proof.
 export const REDIS_ROOM_COMMANDS = {
-  headCx: { name: HEAD_CX_CMD, lua: HEAD_CX_LUA, numberOfKeys: HEAD_CX_KEYS },
-  readHead: { name: READ_HEAD_CMD, lua: READ_HEAD_LUA, numberOfKeys: READ_HEAD_KEYS },
+  headCx: { name: 'tfRoomHeadCx', lua: HEAD_CX_LUA, numberOfKeys: 4 },
+  readHead: { name: 'tfRoomReadHead', lua: READ_HEAD_LUA, numberOfKeys: 1 },
   readCellsFence: {
-    name: READ_CELLS_FENCE_CMD,
+    name: 'tfRoomReadCellsFence',
     lua: READ_CELLS_FENCE_LUA,
-    numberOfKeys: READ_CELLS_FENCE_KEYS,
+    numberOfKeys: 2,
   },
   validateGeneration: {
-    name: VALIDATE_GENERATION_CMD,
+    name: 'tfRoomValidateGeneration',
     lua: VALIDATE_GENERATION_LUA,
-    numberOfKeys: VALIDATE_GENERATION_KEYS,
+    numberOfKeys: 3,
   },
   dropGenerationBegin: {
-    name: DROP_GENERATION_BEGIN_CMD,
+    name: 'tfRoomDropGenerationBegin',
     lua: DROP_GENERATION_BEGIN_LUA,
-    numberOfKeys: DROP_GENERATION_BEGIN_KEYS,
+    numberOfKeys: 4,
   },
   dropGenerationFinalize: {
-    name: DROP_GENERATION_FINALIZE_CMD,
+    name: 'tfRoomDropGenerationFinalize',
     lua: DROP_GENERATION_FINALIZE_LUA,
     numberOfKeys: null,
   },
-  cellsCx: { name: CELLS_CX_CMD, lua: CELLS_CX_LUA, numberOfKeys: null },
-  commit: { name: COMMIT_CMD, lua: COMMIT_LUA, numberOfKeys: null },
-  retainedDelete: { name: RETAINED_DELETE_CMD, lua: RETAINED_DELETE_LUA, numberOfKeys: null },
-  directoryPut: { name: DIRECTORY_PUT_CMD, lua: DIRECTORY_PUT_LUA, numberOfKeys: DIRECTORY_PUT_KEYS },
+  cellsCx: { name: 'tfRoomCellsCx', lua: CELLS_CX_LUA, numberOfKeys: null },
+  commit: { name: 'tfRoomCommit', lua: COMMIT_LUA, numberOfKeys: null },
+  retainedDelete: { name: 'tfRoomRetainedDelete', lua: RETAINED_DELETE_LUA, numberOfKeys: null },
+  directoryPut: { name: 'tfRoomDirectoryPut', lua: DIRECTORY_PUT_LUA, numberOfKeys: 2 },
   directoryDelete: {
-    name: DIRECTORY_DELETE_CMD,
+    name: 'tfRoomDirectoryDelete',
     lua: DIRECTORY_DELETE_LUA,
-    numberOfKeys: DIRECTORY_DELETE_KEYS,
+    numberOfKeys: 2,
   },
 } as const
 
