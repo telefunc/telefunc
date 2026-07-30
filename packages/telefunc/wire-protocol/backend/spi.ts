@@ -42,16 +42,6 @@ export type LaneId =
 //  binary    LaneSeq (per member,track)        per-lane channel   separate domains preserved by constraint
 //  inbox     InboxSeq (per member)             per-inbox channel  separate domain preserved by constraint
 
-export const LANE_KEY_LAYOUT = Object.freeze({
-  separator: ':',
-  fields: Object.freeze({
-    semantic: Object.freeze([] as const),
-    control: Object.freeze([] as const),
-    binary: Object.freeze(['member', 'track'] as const),
-    inbox: Object.freeze(['member'] as const),
-  }),
-})
-
 export type RoomHead = {
   rev: string // opaque head revision; changes on every successful head CX
   currentInc: string | null // null on a 'closed' tombstone — closing→closed CLEARS it, which is

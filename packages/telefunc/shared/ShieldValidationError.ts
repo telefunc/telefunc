@@ -1,5 +1,7 @@
 export { ShieldValidationError, isShieldValidationError }
 
+import { isObject } from '../utils/isObject.js'
+
 const shieldValidationErrorBrand = Symbol.for('telefunc.ShieldValidationError')
 
 class ShieldValidationError extends Error {
@@ -16,9 +18,6 @@ class ShieldValidationError extends Error {
 function isShieldValidationError(thing: unknown): thing is ShieldValidationError {
   return (
     thing instanceof ShieldValidationError ||
-    (typeof thing === 'object' &&
-      thing !== null &&
-      shieldValidationErrorBrand in thing &&
-      thing[shieldValidationErrorBrand] === true)
+    (isObject(thing) && shieldValidationErrorBrand in thing && thing[shieldValidationErrorBrand] === true)
   )
 }

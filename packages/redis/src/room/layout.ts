@@ -25,13 +25,8 @@
 // an empty value in production and therefore uses Redis TIME. The scalar is never a key and cannot affect
 // the co-slot invariant. A caller-local `Date.now()` is never an authority source.
 
-import { HEAD_TRANSITIONS, LANE_KEY_LAYOUT, ORDERING_FRAME_LAYOUT, type LaneId } from 'telefunc/backend'
-
-export function laneKey(lane: LaneId): string {
-  const values = lane as LaneId & Record<'member' | 'track', string>
-  const fields = LANE_KEY_LAYOUT.fields[lane.kind]
-  return [lane.kind, ...fields.map((field) => encodeURIComponent(values[field]))].join(LANE_KEY_LAYOUT.separator)
-}
+import { HEAD_TRANSITIONS, ORDERING_FRAME_LAYOUT, laneKey, type LaneId } from 'telefunc/backend'
+export { laneKey }
 
 export const DEFAULT_ROOM_PREFIX = 'tf:'
 export const REDIS_DELIVERY_FENCE_BYTE = 0xff

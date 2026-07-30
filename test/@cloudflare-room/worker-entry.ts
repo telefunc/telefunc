@@ -390,13 +390,7 @@ async function facadeResponseOrdering(env: Env, suffix: string) {
   const roomId = `facade-order-${suffix}`
   const inc = `facade-order-inc-${suffix}`
   const authority = roomAuthority(env, roomId)
-  const opened = expectHead(
-    await authority.compareExchangeHead(
-      { expect: 'absent' },
-      { head: { currentInc: inc, state: 'open', configB64: 'e30=' } },
-    ),
-    'facade ordering open',
-  )
+  const opened = await openHead(authority, inc, 'facade ordering open')
   const manager = new CloudflareRoomSessionManager('0'.repeat(64), () => env.ROOM as unknown as CloudflareRoomNamespace)
   const result = await withCloudflareRoomSessionManager(manager, async () => {
     await authority.telefuncRoomPrepareResponseReorderingForTest()
@@ -431,13 +425,7 @@ async function terminalGenerationDrop(
   const roomId = `terminal-${suffix}`
   const inc = `terminal-inc-${suffix}`
   const authority = roomAuthority(env, roomId)
-  const opened = expectHead(
-    await authority.compareExchangeHead(
-      { expect: 'absent' },
-      { head: { currentInc: inc, state: 'open', configB64: 'e30=' } },
-    ),
-    'terminal open',
-  )
+  const opened = await openHead(authority, inc, 'terminal open')
   await session.prepareDelivery(roomId, false)
   await session.openSubscription(roomId, inc)
   await closeAndDrop(authority, inc, opened, `terminal-close-${suffix}`)
@@ -451,13 +439,7 @@ async function preAckTerminalGenerationDrop(env: Env, session: Session, suffix: 
   const roomId = `pre-ack-terminal-${suffix}`
   const inc = `pre-ack-terminal-inc-${suffix}`
   const authority = roomAuthority(env, roomId)
-  const opened = expectHead(
-    await authority.compareExchangeHead(
-      { expect: 'absent' },
-      { head: { currentInc: inc, state: 'open', configB64: 'e30=' } },
-    ),
-    'pre-ack terminal open',
-  )
+  const opened = await openHead(authority, inc, 'pre-ack terminal open')
   await session.prepareDelivery(roomId, false)
   await authority.telefuncRoomPrepareRegistrationHoldForTest()
   await session.openSubscription(roomId, inc, false)
@@ -583,13 +565,7 @@ async function authorityRestart(env: Env, suffix: string): Promise<string> {
   const roomId = `restart-${suffix}`
   const inc = `restart-inc-${suffix}`
   const authority = roomAuthority(env, roomId)
-  expectHead(
-    await authority.compareExchangeHead(
-      { expect: 'absent' },
-      { head: { currentInc: inc, state: 'open', configB64: 'e30=' } },
-    ),
-    'restart open',
-  )
+  await openHead(authority, inc, 'restart open')
   const commit = accepted(await authority.commitLane(roomId, inc, { kind: 'semantic' }, new Uint8Array([1])), 'restart')
   await authority.telefuncRoomReconstructForTest()
   return rejectionOf(authority.awaitDelivery(commit.deliveryToken), 2_000, 'unknown-token settlement')
@@ -602,15 +578,19 @@ async function openAndJoin(
   inc: string,
   leaseId: string,
 ): Promise<HeadWire> {
-  const opened = expectHead(
+  const opened = await openHead(authority, inc, 'open')
+  await join(authority, sessionId, roomId, inc, leaseId)
+  return opened
+}
+
+async function openHead(authority: Authority, inc: string, operation: string): Promise<HeadWire> {
+  return expectHead(
     await authority.compareExchangeHead(
       { expect: 'absent' },
       { head: { currentInc: inc, state: 'open', configB64: 'e30=' } },
     ),
-    'open',
+    operation,
   )
-  await join(authority, sessionId, roomId, inc, leaseId)
-  return opened
 }
 
 async function join(

@@ -95,7 +95,6 @@ async function reviveResponse(
 ): Promise<unknown> {
   const { extensionResponseTypes } = callContext
   const closeHandlers = new WeakMap<object, () => void>()
-  const adopted = new WeakSet<object>()
 
   const throwStreamError = (errorPayload: Record<string, unknown>): never => {
     if (errorPayload.type === STREAMING_ERROR_TYPE.ABORT && 'abortValue' in errorPayload) {
@@ -112,7 +111,6 @@ async function reviveResponse(
       const close = closeHandlers.get(trackedOwner)
       assert(close)
       closeHandlers.set(child, close)
-      adopted.add(child)
     },
     waitFor(promise) {
       // Suppress unhandled-rejection noise if `parse()` throws before `Promise.all(promises)`.
@@ -175,7 +173,7 @@ async function reviveResponse(
     context,
     function onRevived(revived) {
       // An adopted value keeps exact identity and shares its tracked owner's lifecycle.
-      if (isObjectOrFunction(revived.value) && adopted.has(revived.value)) return
+      if (isObjectOrFunction(revived.value) && closeHandlers.has(revived.value)) return
       {
         const { value, close } = revived
         assert(isObjectOrFunction(value))

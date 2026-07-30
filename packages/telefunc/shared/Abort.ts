@@ -1,6 +1,7 @@
 export { Abort, AbortError, isAbort, createAbortError }
 
 import { assertUsage } from '../utils/assert.js'
+import { isObject } from '../utils/isObject.js'
 
 const abortBrand = Symbol.for('telefunc.Abort')
 const DEFAULT_ABORT_MESSAGE = 'Aborted'
@@ -45,10 +46,7 @@ function createAbortError(abortValue?: unknown, message?: string): AbortError {
 }
 
 function isAbort(thing: unknown): thing is AbortError {
-  return (
-    thing instanceof AbortError ||
-    (typeof thing === 'object' && thing !== null && abortBrand in thing && thing[abortBrand] === true)
-  )
+  return thing instanceof AbortError || (isObject(thing) && abortBrand in thing && thing[abortBrand] === true)
 }
 
 function getAbortMessage(abortValue: unknown): string {

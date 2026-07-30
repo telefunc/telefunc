@@ -434,7 +434,7 @@ class RoomError extends Error {
 }
 
 function isRoomError(thing: unknown): thing is RoomError {
-  return typeof thing === 'object' && thing !== null && roomErrorBrand in thing && thing[roomErrorBrand] === true
+  return isObject(thing) && roomErrorBrand in thing && thing[roomErrorBrand] === true
 }
 
 /** The generic error a bug becomes on the caller — identical to telefunc's top-level bug message,

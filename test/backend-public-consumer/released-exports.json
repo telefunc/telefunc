@@ -83,7 +83,6 @@
     "HEAD_TRANSITIONS",
     "HeadCx",
     "HeadNext",
-    "LANE_KEY_LAYOUT",
     "LaneId",
     "ORDERING_FRAME_LAYOUT",
     "PublishResult",
@@ -95,7 +94,8 @@
     "SubscriptionState",
     "disposeBackend",
     "getBackend",
-    "installBackend"
+    "installBackend",
+    "laneKey"
   ],
   "telefunc/client": [
     "Abort",
