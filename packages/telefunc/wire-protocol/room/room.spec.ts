@@ -661,20 +661,42 @@ describe('Room public behavior', () => {
     const room = await Room.create('pre-bind-inbox')
     const target = await room.join()
     const sender = await room.join()
-    await sender.send(target.id, 'plain-before-bind')
-    const acknowledging = sender.send(target.id, 'ack-before-bind', { ack: true })
-    await settle()
+    const internal = target as unknown as {
+      readonly _isBound: boolean
+      _deliverMessage(message: { data: unknown }): void
+      _deliverMessageAck(message: { data: unknown }): Promise<unknown>
+      _setForwarder(forwarder: (message: { data: unknown }) => unknown): void
+    }
+    const plainArrived = deferred<void>()
+    const ackArrived = deferred<void>()
+    const deliverMessage = internal._deliverMessage.bind(target)
+    const deliverMessageAck = internal._deliverMessageAck.bind(target)
+    const plainDelivery = vi.spyOn(internal, '_deliverMessage').mockImplementation((message) => {
+      plainArrived.resolve()
+      deliverMessage(message)
+    })
+    const ackDelivery = vi.spyOn(internal, '_deliverMessageAck').mockImplementation((message) => {
+      ackArrived.resolve()
+      return deliverMessageAck(message)
+    })
+    try {
+      await sender.send(target.id, 'plain-before-bind')
+      const acknowledging = sender.send(target.id, 'ack-before-bind', { ack: true })
+      await Promise.all([plainArrived.promise, ackArrived.promise])
+      expect(internal._isBound).toBe(false)
 
-    const forwarded: unknown[] = []
-    ;(target as unknown as { _setForwarder(forwarder: (message: { data: unknown }) => unknown): void })._setForwarder(
-      (message) => {
+      const forwarded: unknown[] = []
+      internal._setForwarder((message) => {
         forwarded.push(message.data)
         return Promise.resolve({ ok: true, result: `handled:${String(message.data)}` })
-      },
-    )
+      })
 
-    expect(forwarded).toEqual(['plain-before-bind', 'ack-before-bind'])
-    await expect(acknowledging).resolves.toMatchObject({ response: 'handled:ack-before-bind' })
+      expect(forwarded).toEqual(['plain-before-bind', 'ack-before-bind'])
+      await expect(acknowledging).resolves.toMatchObject({ response: 'handled:ack-before-bind' })
+    } finally {
+      plainDelivery.mockRestore()
+      ackDelivery.mockRestore()
+    }
   })
 
   it('keeps every live ack correlation instead of silently dropping the oldest', async () => {
