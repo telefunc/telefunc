@@ -410,6 +410,96 @@ describe('Room public behavior', () => {
     }
   })
 
+  it('reconciles authority after a control gap or same-attempt recovery', async () => {
+    const room = (await Room.create('control-reconcile')) as ServerRoom
+    const backend = getBackend()
+    const subscribeLane = backend.subscribeLane.bind(backend)
+    let transition!: (state: SubscriptionState) => void
+    const subscribe = vi.spyOn(backend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
+      const inner = subscribeLane(roomId, inc, lane, receiver)
+      if (lane.kind !== 'control') return inner
+      return {
+        ready: inner.ready,
+        state: () => inner.state(),
+        onStateChange: (listener) => {
+          transition = listener
+          return inner.onStateChange(listener)
+        },
+        unsubscribe: () => inner.unsubscribe(),
+      }
+    })
+    try {
+      room.onAnnounce(() => {})
+      await settle()
+      const refresh = vi.spyOn(room as unknown as { _refreshMembers(): Promise<void> }, '_refreshMembers')
+      transition('lost')
+      transition('ready')
+      await vi.waitFor(() => expect(refresh).toHaveBeenCalledTimes(1))
+      const onControl = (
+        room as unknown as { _onCtrlMessage(message: string, info: { seq: number; timestamp: number }): void }
+      )._onCtrlMessage.bind(room)
+      onControl('{"__r":"announce","data":"first"}', { seq: 1, timestamp: 1 })
+      onControl('{"__r":"announce","data":"gap"}', { seq: 3, timestamp: 3 })
+      await vi.waitFor(() => expect(refresh).toHaveBeenCalledTimes(2))
+    } finally {
+      subscribe.mockRestore()
+    }
+  })
+
+  it('uses the heartbeat roster snapshot to repair observer drift', async () => {
+    const observer = (await Room.create('heartbeat-reconcile')) as ServerRoom
+    const reconcile = vi.spyOn(observer._state, 'reconcile')
+
+    await (observer as unknown as { _heartbeatTick(): Promise<void> })._heartbeatTick()
+
+    expect(reconcile).toHaveBeenCalled()
+  })
+
+  it('heartbeats pure control observers without owned members or binary demand', async () => {
+    vi.useFakeTimers()
+    const observer = (await Room.get((await Room.create('observer-heartbeat')).id)) as ServerRoom
+    const heartbeat = vi
+      .spyOn(observer as unknown as { _heartbeatTick(): Promise<void> }, '_heartbeatTick')
+      .mockResolvedValue()
+    observer.onAnnounce(() => {})
+
+    await vi.advanceTimersByTimeAsync(ROOM_HEARTBEAT_INTERVAL_MS)
+
+    expect(heartbeat).toHaveBeenCalledOnce()
+  })
+
+  it('replans a terminal Room lane when its first replacement never becomes ready', async () => {
+    vi.useFakeTimers()
+    const authority = await Room.create('room-owned-subscription-horizon')
+    const publisher = await authority.join()
+    const observer = await Room.get(authority.id)
+    const backend = getBackend()
+    const subscribeLane = backend.subscribeLane.bind(backend)
+    const terminal = terminalSubscription()
+    const never = deferred<void>()
+    let semanticAttempt = 0
+    const subscribe = vi.spyOn(backend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
+      if (lane.kind !== 'semantic') return subscribeLane(roomId, inc, lane, receiver)
+      semanticAttempt++
+      if (semanticAttempt === 1) return terminal.subscription
+      if (semanticAttempt === 2)
+        return { ready: never.promise, state: () => 'establishing', onStateChange: () => () => {}, unsubscribe: async () => {} }
+      return subscribeLane(roomId, inc, lane, receiver)
+    })
+    const report = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const received: unknown[] = []
+    observer.subscribe((data) => received.push(data))
+    await terminal.close()
+
+    await vi.advanceTimersByTimeAsync(ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS / 6)
+    await publisher.publish('recovered')
+
+    expect(received).toEqual(['recovered'])
+    expect(report).toHaveBeenCalled()
+    subscribe.mockRestore()
+    report.mockRestore()
+  })
+
   it('propagates presence/meta while hidden members stay addressable and admin removal carries its cause', async () => {
     const authority = await Room.create('presence')
     const observer = await Room.get('presence')

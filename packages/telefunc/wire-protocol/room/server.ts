@@ -16,6 +16,7 @@ import {
   ROOM_HEARTBEAT_INTERVAL_MS,
   ROOM_ID_MAX_BYTES,
   ROOM_MEMBER_TTL_MS,
+  ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS,
   ROOM_TAIL_ATTACH_TIMEOUT_MS,
   ROOM_TRACKS_PER_MEMBER_MAX,
 } from '../constants.js'
@@ -242,6 +243,7 @@ const ROOM_TOMBSTONE_TTL_MS = 60_000
  *  abandoned sweep left behind (they carry the old id and TTL-reap on their own). */
 const ROOM_CLOSE_LEASE_MS = 15_000
 const ROOM_CX_ATTEMPTS = 16
+const ROOM_SUBSCRIPTION_REPLAN_LIMIT = 5
 
 /** The retained value stored per (member, track) binary lane: the base64 frame plus the publish
  *  receipt it was assigned, so a late subscriber replays it in the lane's real order (never a fresh
@@ -679,8 +681,14 @@ class ServerRoom implements Room {
   private readonly _stubs = new Set<RoomStubChannel>()
   private readonly _localParticipants = new Map<string, ServerLocalParticipant>()
 
-  private readonly _ctrlSub = new SubSlot((slot) => this._onTerminalSubscription(slot))
-  private readonly _textSub = new SubSlot((slot) => this._onTerminalSubscription(slot))
+  private readonly _ctrlSub = new SubSlot(
+    (slot) => this._onTerminalSubscription(slot),
+    () => void this._reconcileAuthority().catch(reportRoomError),
+  )
+  private readonly _textSub = new SubSlot(
+    (slot) => this._onTerminalSubscription(slot),
+    () => void this._reconcileAuthority().catch(reportRoomError),
+  )
   /** Upstream subscriptions keyed by their policy identity. */
   private readonly _binaryKeyUnsubs = new Map<string, SubSlot>()
   private readonly _dmUnsubs = new Map<string, SubSlot>()
@@ -693,6 +701,8 @@ class ServerRoom implements Room {
   private _heartbeatTimer: ReturnType<typeof setInterval> | null = null
   private _heartbeatBusy = false
   private _pendingRefresh: Promise<void> | null = null
+  private readonly _recoveringSubscriptions = new Set<SubSlot>()
+  private _controlSeq = 0
 
   constructor(roomId: string, config: RoomConfigRecord, seed: { members: MemberSnapshot[] } | { count: number }) {
     this._inc = config.inc
@@ -1247,6 +1257,12 @@ class ServerRoom implements Room {
     if (!hasRoomTag(envelope)) return
     const event = envelope as RoomEnvelope
     if (event.__r === 'data') return // data never travels on the control key
+    const previousSeq = this._controlSeq
+    if (rawInfo.seq <= previousSeq) return
+    this._controlSeq = rawInfo.seq
+    if (previousSeq !== 0 && rawInfo.seq !== previousSeq + 1) {
+      void this._reconcileAuthority().catch(reportRoomError)
+    }
     if (event.__r === 'want') {
       this._demand.applyWant(event) // demand gossip — node-to-node only, never relayed to clients
       return
@@ -1457,39 +1473,55 @@ class ServerRoom implements Room {
     this._syncSubs()
   }
 
-  /** A source that was once ready exhausted its bounded replacements. Give that source one fresh,
-   *  bounded readiness horizon: backend recovery reattaches it without new demand, while a closed
-   *  generation or failed recovery settles the local handle instead of leaving it observably open but
-   *  deaf. Each terminal event owns its settlement, so concurrent sources cannot hide one another. */
+  /** Recover a still-wanted terminal lane inside Room's one policy horizon. */
   private _onTerminalSubscription(slot: SubSlot): void {
+    if (this._recoveringSubscriptions.has(slot)) return
+    this._recoveringSubscriptions.add(slot)
     void (async () => {
-      let authorityOpen: boolean | null = null
-      try {
-        const current = await getBackend().readHead(this.id)
-        authorityOpen = current !== null && current.head.state === 'open' && current.head.currentInc === this._inc
-      } catch (error) {
-        // A subscription outage may also make the authority read unavailable. Recovery below remains
-        // useful and bounded, so this diagnostic must not turn a transient read failure into deafness.
-        reportRoomError(error)
+      const deadline = Date.now() + ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS
+      const attemptMs = ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS / (ROOM_SUBSCRIPTION_REPLAN_LIMIT + 1)
+      for (let attempt = 0; attempt <= ROOM_SUBSCRIPTION_REPLAN_LIMIT && slot.wanted; attempt++) {
+        try {
+          const current = await withinRoomHorizon(getBackend().readHead(this.id), deadline - Date.now())
+          if (current === null || current.head.state !== 'open' || current.head.currentInc !== this._inc) {
+            this._settleTerminalSubscription()
+            return
+          }
+        } catch (error) {
+          reportRoomError(error)
+          if (Date.now() >= deadline) break
+        }
+        slot.retry()
+        try {
+          await withinRoomHorizon(slot.ready, Math.min(attemptMs, deadline - Date.now()))
+          await this._reconcileAuthority()
+          return
+        } catch (error) {
+          reportRoomError(error)
+        }
       }
-      if (authorityOpen === false) {
-        this._settleTerminalSubscription()
-        return
-      }
-      this._syncSubs()
-      try {
-        await slot.ready
-      } catch (error) {
-        reportRoomError(error)
-        this._settleTerminalSubscription()
-      }
-    })().catch(reportRoomError)
+      if (slot.wanted) this._settleTerminalSubscription()
+    })()
+      .catch(reportRoomError)
+      .finally(() => this._recoveringSubscriptions.delete(slot))
   }
 
   private _settleTerminalSubscription(): void {
     if (this._state.closed) return
     this._state.applyClosed()
     this._teardown()
+  }
+
+  private async _reconcileAuthority(): Promise<void> {
+    if (this._state.closed) return
+    const current = await getBackend().readHead(this.id)
+    if (current === null || current.head.state !== 'open' || current.head.currentInc !== this._inc) {
+      this._settleTerminalSubscription()
+      return
+    }
+    const config = configFromHead(current.head)
+    this._state.applyRoomUpdate(config.meta, config.at, config.by)
+    await this._refreshMembers()
   }
 
   /** A member's own messages are suppressed for this holder when its participant opted out. */
@@ -1934,7 +1966,10 @@ class ServerRoom implements Room {
     for (const [key, value] of wanted) {
       let slot = subs.get(key)
       if (!slot) {
-        slot = new SubSlot((terminal) => this._onTerminalSubscription(terminal))
+        slot = new SubSlot(
+          (terminal) => this._onTerminalSubscription(terminal),
+          () => void this._reconcileAuthority().catch(reportRoomError),
+        )
         subs.set(key, slot)
       }
       slot.sync(true, () => subscribe(value))
@@ -2006,9 +2041,8 @@ class ServerRoom implements Room {
   }
 
   private _syncHeartbeat(): void {
-    // Also runs for a pure observer (binary demand but no owned members), so its demand lease keeps
-    // being renewed — otherwise a live watcher on such a node would be swept as if it had crashed.
-    const want = !this._state.closed && (this._ownedMemberIds().length > 0 || this._demand.isActive())
+    const want =
+      !this._state.closed && (this._ctrlSub.active || this._ownedMemberIds().length > 0 || this._demand.isActive())
     if (want && !this._heartbeatTimer) {
       this._heartbeatTimer = unrefTimer(
         setInterval(() => void this._heartbeatTick().catch(reportRoomError), ROOM_HEARTBEAT_INTERVAL_MS),
@@ -2048,7 +2082,7 @@ class ServerRoom implements Room {
           continue
         }
       }
-      await readMembers(this.id, this._inc)
+      await this._reconcileAuthority()
     } finally {
       this._heartbeatBusy = false
     }
@@ -2364,15 +2398,22 @@ async function evictMember(
 /** Room policy only reconciles demand. The backend owns subscription lifecycle and fan-out. */
 class SubSlot {
   private _subscription: BackendSubscription | null = null
+  private _subscribe: (() => BackendSubscription) | null = null
   private _unobserve: (() => void) | null = null
   private readonly _onTerminal: (slot: SubSlot) => void
+  private readonly _onRecovered: () => void
 
-  constructor(onTerminal: (slot: SubSlot) => void) {
+  constructor(onTerminal: (slot: SubSlot) => void, onRecovered: () => void) {
     this._onTerminal = onTerminal
+    this._onRecovered = onRecovered
   }
 
   get active(): boolean {
     return this._subscription !== null && this._subscription.state() !== 'closed'
+  }
+
+  get wanted(): boolean {
+    return this._subscribe !== null
   }
 
   /** Settles once the current subscription is live at the backend — immediately when inactive or when
@@ -2385,12 +2426,19 @@ class SubSlot {
 
   sync(want: boolean, subscribe: () => BackendSubscription): void {
     if (!want) return this.stop()
+    this._subscribe = subscribe
     if (this._subscription !== null && this._subscription.state() !== 'closed') return
+    this.retry()
+  }
+
+  retry(): void {
+    if (this._subscribe === null) return
     const previous = this._subscription
     this._unobserve?.()
-    const subscription = subscribe()
+    const subscription = this._subscribe()
     this._subscription = subscription
     let wasReady = subscription.state() === 'ready'
+    let lostAfterReady = false
     void subscription.ready.then(
       () => {
         if (this._subscription === subscription && subscription.state() === 'ready') wasReady = true
@@ -2399,8 +2447,12 @@ class SubSlot {
     )
     this._unobserve = subscription.onStateChange((state) => {
       if (this._subscription !== subscription) return
-      if (state === 'ready') wasReady = true
-      else if (state === 'closed' && wasReady) this._onTerminal(this)
+      if (state === 'lost' && wasReady) lostAfterReady = true
+      else if (state === 'ready') {
+        if (lostAfterReady) this._onRecovered()
+        wasReady = true
+        lostAfterReady = false
+      } else if (state === 'closed' && wasReady) this._onTerminal(this)
     })
     if (previous) void previous.unsubscribe().catch(reportRoomError)
   }
@@ -2408,10 +2460,22 @@ class SubSlot {
   stop(): void {
     const subscription = this._subscription
     this._subscription = null
+    this._subscribe = null
     this._unobserve?.()
     this._unobserve = null
     if (subscription) void subscription.unsubscribe().catch(reportRoomError)
   }
+}
+
+function withinRoomHorizon<T>(promise: Promise<T>, ms: number): Promise<T> {
+  if (ms <= 0) return Promise.reject(new RoomError('Room subscription recovery horizon expired'))
+  let timer!: ReturnType<typeof setTimeout>
+  const timeout = new Promise<never>((_, reject) => {
+    timer = unrefTimer(
+      setTimeout(() => reject(new RoomError('Room subscription recovery horizon expired')), ms),
+    )
+  })
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer))
 }
 
 async function publishCtrl(roomId: string, inc: string, event: RoomCtrlEnvelope): Promise<void> {
