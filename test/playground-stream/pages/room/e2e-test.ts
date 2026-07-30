@@ -244,7 +244,7 @@ function testRoom() {
   })
 
   testRoomScenario<{ xText: string[]; xBin: number[]; all: string[] }>(
-    'memberSub',
+    'member-sub',
     'room: a per-member subscription receives only that member',
     (r) => {
       expect(r.all).deep.equal(['x1', 'y1']) // both delivered room-wide (so absence below is meaningful)
@@ -254,7 +254,7 @@ function testRoom() {
   )
 
   testRoomScenario<{ held: string[] }>(
-    'dmHold',
+    'dm-hold',
     'room: a DM sent before listen() is held and flushed on attach',
     (r) => {
       expect(r.held).deep.equal(['early'])
@@ -272,7 +272,7 @@ function testRoom() {
   )
 
   testRoomScenario<{ mine: string[]; theirs: string[]; selfDelivery: boolean }>(
-    'selfServer',
+    'self-server',
     'room: a co-returned server-side selfDelivery:false member sees no own publish, while a client join on the same room view is delivered',
     (r) => {
       expect(r.selfDelivery).toBe(false)
@@ -306,7 +306,7 @@ function testRoom() {
   )
 
   testRoomScenario<{ phase: string }>(
-    'gcParticipant',
+    'gc-participant',
     'room: a live participant keeps its Room proxy alive',
     (r) => {
       expect(r.phase).toBe('ready')

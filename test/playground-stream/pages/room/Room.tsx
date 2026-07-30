@@ -585,7 +585,7 @@ function Room() {
       <h2>Member-selective receive</h2>
 
       <button
-        id={roomScenario('memberSub').selector.slice(1)}
+        id={roomScenario('member-sub').selector.slice(1)}
         onClick={async () => {
           setResult('')
           const roomId = `e2e-membersub:${crypto.randomUUID()}`
@@ -625,7 +625,7 @@ function Room() {
       <h2>DM pre-listen hold</h2>
 
       <button
-        id={roomScenario('dmHold').selector.slice(1)}
+        id={roomScenario('dm-hold').selector.slice(1)}
         onClick={async () => {
           setResult('')
           const roomId = `e2e-dmhold:${crypto.randomUUID()}`
@@ -680,7 +680,7 @@ function Room() {
       <h2>selfDelivery: false (server co-return + client join on one stub)</h2>
 
       <button
-        id={roomScenario('selfServer').selector.slice(1)}
+        id={roomScenario('self-server').selector.slice(1)}
         onClick={async () => {
           setResult('')
           const roomId = `e2e-self-server:${crypto.randomUUID()}`
@@ -781,7 +781,7 @@ function Room() {
       <h2>Participant keeps its Room alive</h2>
 
       <button
-        id={roomScenario('gcParticipant').selector.slice(1)}
+        id={roomScenario('gc-participant').selector.slice(1)}
         onClick={async () => {
           setResult('')
           const roomId = `e2e-gc-participant:${crypto.randomUUID()}`
