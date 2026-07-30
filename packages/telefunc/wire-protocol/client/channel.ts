@@ -61,7 +61,6 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   private _listeners: Array<ChannelListener<ServerToClient>> = []
   private _binaryListeners: Array<ChannelBinaryListener> = []
   private _openCallbacks: Array<() => void> = []
-  private _reconnectCallbacks: Array<() => void> = []
   private _closeCallbacks: Array<ChannelCloseCallback> = []
   private _closeError: Error | undefined
   protected _isClosed = false
@@ -245,14 +244,6 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     this._openCallbacks.push(callback)
   }
 
-  /** @internal — fires each time the transport re-opens for an already-open channel, after reconnect
-   *  has reconciled that existing channel and released its bounded sequenced replay, never on first
-   *  open. Consumers use it as the final keyed-declaration layer for state emitted but no longer
-   *  replayable; it does not repair separate unsequenced control loss such as room-wide `BROADCAST_SUB`. */
-  _onReconnect(callback: () => void): void {
-    this._reconnectCallbacks.push(callback)
-  }
-
   close(opts?: ChannelCloseOptions): Promise<ChannelCloseResult> {
     if (this._closePromise) return this._closePromise
     if (this._didTerminate) return Promise.resolve(this._didReceiveCloseAck ? 0 : 1)
@@ -281,12 +272,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     if (this._isClosed) return
     this._flow.reset()
     if (batched) this._flow.useBatchTransportInitial()
-    // `_onTransportOpen` runs on the first open and again each time a reconnect reconciles this
-    // channel back (see `Connection.applyReconciled`). `_fireOpen` no-ops the second time; the
-    // re-open is what `_onReconnect` consumers care about, so fire it only when already open.
-    const reopened = this._didFireOpen
     this._fireOpen()
-    if (reopened) this._fireReconnect()
   }
 
   _onTransportMessage(data: string, bytes: number): void {
@@ -462,16 +448,6 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
 
   // ── Private ──
 
-  private _fireReconnect(): void {
-    for (const cb of this._reconnectCallbacks) {
-      try {
-        cb()
-      } catch (err) {
-        if (this._handleCallbackError(err)) return
-      }
-    }
-  }
-
   private _fireOpen(): void {
     if (this._didFireOpen) return
     this._didFireOpen = true
@@ -635,45 +611,9 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   readonly [CLIENT_BROADCAST_BRAND] = true
   private _broadcastListeners: Array<BroadcastListener<T>> = []
   private _broadcastBinaryListeners: Array<BroadcastBinaryListener> = []
-  private _wireTextSubscribed = false
 
   static isClientBroadcast(value: unknown): value is ClientBroadcast {
     return hasProp(value, CLIENT_BROADCAST_BRAND)
-  }
-
-  // ── Composition seam (@internal) ──
-  //
-  // `Room` composes over a broadcast stub: it registers its delivery handlers locally and
-  // drives the wire subscription itself, because what arrives on the stub is two lanes —
-  // control events every holder needs (relayed unconditionally by the server) and the text
-  // data stream (relayed only while subscribed, standard broadcast semantics).
-
-  /** @internal — deliver text publishes locally without signaling the server. */
-  _subscribeLocal(callback: BroadcastListener<T>): () => void {
-    this._broadcastListeners.push(callback)
-    return () => {
-      const index = this._broadcastListeners.indexOf(callback)
-      if (index >= 0) this._broadcastListeners.splice(index, 1)
-    }
-  }
-
-  /** @internal — deliver binary publishes locally without signaling the server. */
-  _subscribeBinaryLocal(callback: BroadcastBinaryListener): () => void {
-    this._broadcastBinaryListeners.push(callback)
-    return () => {
-      const index = this._broadcastBinaryListeners.indexOf(callback)
-      if (index >= 0) this._broadcastBinaryListeners.splice(index, 1)
-    }
-  }
-
-  /** @internal — declare/withdraw interest in the peer's text publish stream. Normally
-   *  deduplicated; `reconcile` re-emits the current full declaration after reconnect because
-   *  this unsequenced control frame may have died with the previous transport. */
-  _setWireTextSubscribed(on: boolean, reconcile = false): void {
-    if ((!reconcile && on === this._wireTextSubscribed) || this._isClosed) return
-    this._wireTextSubscribed = on
-    if (on) this._connection.sendBroadcastSubscribe(this, false)
-    else this._connection.sendBroadcastUnsubscribe(this, false)
   }
 
   publish(data: ChannelData<T>): Promise<ChannelPublishAck> {

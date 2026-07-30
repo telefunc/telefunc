@@ -1,9 +1,19 @@
-export { ClientRoom, ClientRoomParticipant, ClientStandaloneParticipant }
+export { ClientRoom, ClientRoomParticipant, ClientStandaloneParticipant, RoomClientBroadcast }
 
 import { assertUsage } from '../../utils/assert.js'
 import type { TELEFUNC_SHIELDS } from '../../node/shared/transformer/generateShield/shield-key.js'
-import { makePublishInfo, type ChannelPublishAck, type ChannelPublishInfo } from '../channel.js'
-import type { ClientBroadcast, ClientChannel } from '../client/channel.js'
+import {
+  makePublishInfo,
+  type BroadcastBinaryListener,
+  type BroadcastListener,
+  type ChannelData,
+  type ChannelPublishAck,
+  type ChannelPublishInfo,
+} from '../channel.js'
+import { ClientBroadcast } from '../client/channel.js'
+import type { ClientChannel } from '../client/channel.js'
+import type { WirePublishInfo } from '../shared-ws.js'
+import { parse } from '@brillout/json-serializer/parse'
 import {
   leaveCauseFromWire,
   frameWithMemberId,
@@ -46,6 +56,88 @@ import type {
 /** One awaiter of a conflated publish — resolved with the winning send's receipt (see `_drainCoalesce`). */
 type CoalesceWaiter = { resolve: (ack: ChannelPublishAck) => void; reject: (err: unknown) => void }
 
+/**
+ * Room's broadcast stub owns two concerns a generic Broadcast doesn't have: local delivery is
+ * always installed while wire text demand is selective, and reconnect must re-declare that demand.
+ * Keeping the behavior in this subclass prevents Room policy from leaking into ClientBroadcast.
+ */
+class RoomClientBroadcast<T = unknown> extends ClientBroadcast<T> {
+  private readonly _roomListeners: Array<BroadcastListener<T>> = []
+  private readonly _roomBinaryListeners: BroadcastBinaryListener[] = []
+  private readonly _roomReconnectCallbacks: Array<() => void> = []
+  private _roomWireTextSubscribed = false
+  private _roomDidOpen = false
+
+  _subscribeLocal(callback: BroadcastListener<T>): () => void {
+    this._roomListeners.push(callback)
+    return () => {
+      const index = this._roomListeners.indexOf(callback)
+      if (index >= 0) this._roomListeners.splice(index, 1)
+    }
+  }
+
+  _subscribeBinaryLocal(callback: BroadcastBinaryListener): () => void {
+    this._roomBinaryListeners.push(callback)
+    return () => {
+      const index = this._roomBinaryListeners.indexOf(callback)
+      if (index >= 0) this._roomBinaryListeners.splice(index, 1)
+    }
+  }
+
+  _setWireTextSubscribed(on: boolean, reconcile = false): void {
+    if ((!reconcile && on === this._roomWireTextSubscribed) || this._isClosed) return
+    this._roomWireTextSubscribed = on
+    if (on) this._connection.sendBroadcastSubscribe(this, false)
+    else this._connection.sendBroadcastUnsubscribe(this, false)
+  }
+
+  _onReconnect(callback: () => void): void {
+    this._roomReconnectCallbacks.push(callback)
+  }
+
+  override _onTransportOpen(batched: boolean): void {
+    const reopened = this._roomDidOpen
+    super._onTransportOpen(batched)
+    if (this._isClosed) return
+    if (!reopened) {
+      this._roomDidOpen = true
+      return
+    }
+    for (const callback of this._roomReconnectCallbacks) {
+      try {
+        callback()
+      } catch (error) {
+        if (this._handleCallbackError(error)) return
+      }
+    }
+  }
+
+  override _onTransportPublish(data: string, wireInfo: WirePublishInfo): void {
+    super._onTransportPublish(data, wireInfo)
+    const parsed = parse(data) as ChannelData<T>
+    const info = makePublishInfo(this.key!, wireInfo.seq, wireInfo.timestamp)
+    for (const callback of this._roomListeners) {
+      try {
+        callback(parsed, info)
+      } catch (error) {
+        if (this._handleCallbackError(error)) return
+      }
+    }
+  }
+
+  override _onTransportPublishBinary(data: Uint8Array, wireInfo: WirePublishInfo): void {
+    super._onTransportPublishBinary(data, wireInfo)
+    const info = makePublishInfo(this.key!, wireInfo.seq, wireInfo.timestamp)
+    for (const callback of this._roomBinaryListeners) {
+      try {
+        callback(data, info)
+      } catch (error) {
+        if (this._handleCallbackError(error)) return
+      }
+    }
+  }
+}
+
 // ---------------------------------------------------------------------------
 // ClientRoom
 // ---------------------------------------------------------------------------
@@ -53,14 +145,14 @@ type CoalesceWaiter = { resolve: (ack: ChannelPublishAck) => void; reject: (err:
 /**
  * Client-side `Room`, revived from a serialized `ServerRoom`.
  *
- * Composes over a plain `ClientBroadcast` stub: room events & data arrive as its broadcast
+ * Composes over a Room-owned broadcast stub: room events & data arrive as its broadcast
  * messages, requests (join/leave/set-meta) ride its channel messages. Membership starts from
  * the serialized snapshot; the relayed event stream keeps it fresh from there.
  */
 class ClientRoom implements Room {
   /** Phantom: the publish shield rides the type only (see `RoomShield`), never a runtime field. */
   declare readonly [TELEFUNC_SHIELDS]: { data: unknown }
-  private readonly _stub: ClientBroadcast
+  private readonly _stub: RoomClientBroadcast
   private readonly _state: RoomState
   private readonly _localParticipants = new Map<string, ClientRoomParticipant>()
   /** Wants already declared to the server, by lane. Every lane's declaration is a full
@@ -78,7 +170,7 @@ class ClientRoom implements Room {
     this._rosterFailed = reject
   })
 
-  constructor(stub: ClientBroadcast, snapshot: RoomSnapshotMetadata) {
+  constructor(stub: RoomClientBroadcast, snapshot: RoomSnapshotMetadata) {
     this._stub = stub
     this._state = new RoomState({
       roomId: snapshot.roomId,

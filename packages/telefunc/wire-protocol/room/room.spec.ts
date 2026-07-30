@@ -10,10 +10,9 @@ import {
   ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS,
 } from '../constants.js'
 import { DEFAULT_TRACK, isRoomError, roomAckError, type RoomSnapshotMetadata } from './protocol.js'
-import { ClientRoom } from './client.js'
+import { ClientRoom, RoomClientBroadcast } from './client.js'
 import { Room, ServerRoom } from './server.js'
 import { RoomStubChannel } from './stubs.js'
-import { ClientBroadcast } from '../client/channel.js'
 import type { ChannelPublishInfo } from '../channel.js'
 import { disposeBackend, getBackend, installBackend, setDefaultBackend } from '../backend/install.js'
 import { HEAD_TRANSITIONS, assertHeadTransition } from '../backend/head-transitions.js'
@@ -639,7 +638,7 @@ describe('client Room lifecycle', () => {
       },
       _subscribeLocal: () => () => {},
       _subscribeBinaryLocal: () => () => {},
-      _setWireTextSubscribed: ClientBroadcast.prototype._setWireTextSubscribed,
+      _setWireTextSubscribed: RoomClientBroadcast.prototype._setWireTextSubscribed,
       send: async () => undefined,
       publish: async () => ({ key: 'fake', seq: 1, timestamp: 1 }),
       publishBinary: async () => ({ key: 'fake', seq: 1, timestamp: 1 }),
@@ -647,7 +646,7 @@ describe('client Room lifecycle', () => {
       _onReconnect: (callback: () => void) => {
         reconnect = callback
       },
-    } as unknown as ClientBroadcast
+    } as unknown as RoomClientBroadcast
     const client = new ClientRoom(stub, snapshot('reconnect-text'))
 
     client.subscribe(() => {})
@@ -674,7 +673,7 @@ describe('client Room lifecycle', () => {
       publishBinary: async () => ({ key: 'fake', seq: 1, timestamp: 1 }),
       onClose: () => {},
       _onReconnect: () => {},
-    } as unknown as ClientBroadcast
+    } as unknown as RoomClientBroadcast
     const client = new ClientRoom(stub, snapshot('roster-failure'))
     const participants = client.getParticipants()
     deliver({ __r: 'roster-error' }, { key: 'roster-failure', seq: 1, timestamp: 1 })
@@ -1260,7 +1259,7 @@ async function wideBinaryScenario(id: string, retain: boolean, byte: number) {
 }
 
 function createFakeStub(): {
-  stub: ClientBroadcast
+  stub: RoomClientBroadcast
   emitBinary(data: Uint8Array, info: ChannelPublishInfo): void
 } {
   const binary: Array<(data: Uint8Array, info: ChannelPublishInfo) => void> = []
@@ -1276,7 +1275,7 @@ function createFakeStub(): {
     publishBinary: async () => ({ key: 'fake', seq: 1, timestamp: 1 }),
     onClose: () => {},
     _onReconnect: () => {},
-  } as unknown as ClientBroadcast
+  } as unknown as RoomClientBroadcast
   return {
     stub,
     emitBinary: (data, info) => binary.forEach((callback) => callback(data, info)),

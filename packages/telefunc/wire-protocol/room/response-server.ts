@@ -13,7 +13,7 @@ import {
   SERIALIZER_PREFIX_ROOM_REMOTE,
 } from '../constants.js'
 import { ServerLocalParticipant, ServerRoom } from './server.js'
-import { bindParticipantStubChannel, RoomStubChannel } from './stubs.js'
+import { bindParticipantStubChannel, RoomParticipantStubChannel, RoomStubChannel } from './stubs.js'
 import { remoteBacking } from './state.js'
 import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
 assertIsNotBrowser()
@@ -119,7 +119,8 @@ const roomParticipantReplacer: ReplacerType<RoomParticipantContract, ServerRepla
     return ServerLocalParticipant.isServerLocalParticipant(value)
   },
   replace(participant, context) {
-    const channel = context.createChannel()
+    const channel = new RoomParticipantStubChannel()
+    context.registerChannel(channel)
     // Same publish shield as the room stub, for a standalone participant that publishes through its own
     // channel (`req-publish`) rather than the room stub. The `data` verifier auto-generated from the
     // participant value's declared message type (see `RoomShield`) is handed straight to the binding,
