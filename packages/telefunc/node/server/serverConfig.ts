@@ -104,10 +104,10 @@ type ChannelConfigUser = {
   /** Maximum number of bytes buffered per channel for binary messages while no client peer is attached. */
   bufferLimitBinary?: number
   /**
-   * Maximum size, in bytes, of a single inbound client→server message (channel sends,
-   * publishes, direct messages). Oversized messages are rejected without being buffered
-   * and the offending connection is terminated. The limit is advertised to the client,
-   * which fails oversized sends locally with a clear error. Large payloads should be
+   * Maximum size, in bytes, of an ordinary telefunction JSON envelope or a single inbound
+   * client→server channel message (sends, publishes, direct messages). Oversized messages
+   * are rejected without being buffered. The limit is advertised to channel clients,
+   * which fail oversized sends locally with a clear error. Large payloads should be
    * streamed (`File`, `Blob`, `ReadableStream`) — streams move as bounded transport
    * chunks and aren't subject to this cap.
    */

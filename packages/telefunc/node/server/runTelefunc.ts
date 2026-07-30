@@ -312,6 +312,12 @@ async function runTelefunc_({
     if (parsed.isMalformedRequest) {
       return createHttpResponse({ ...malformedRequest })
     }
+    if ('isBodyTooLarge' in parsed) {
+      return createHttpResponse({
+        ...malformedRequest,
+        body: `Telefunc request body is too large: it exceeds the ${parsed.limit}-byte limit set by \`config.channel.messageLimit\`. Send large payloads as a File, Blob, or ReadableStream, or raise that limit.`,
+      })
+    }
     if (parsed.isSseRequest) {
       return createHttpResponse(parsed.sseResponse)
     }

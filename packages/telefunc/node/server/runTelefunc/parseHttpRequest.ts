@@ -8,7 +8,7 @@ import { getUrlPathname } from '../../../utils/getUrlPathname.js'
 import { hasProp } from '../../../utils/hasProp.js'
 import { isProduction } from '../../../utils/isProduction.js'
 import { createRequestReviver, resolveDeferredRevivals } from '../../../wire-protocol/server/request/registry.js'
-import { StreamReader } from '../../../wire-protocol/server/request/StreamReader.js'
+import { RequestBodyLimitError, StreamReader } from '../../../wire-protocol/server/request/StreamReader.js'
 import { REQUEST_KIND, getRequestKind } from '../../../wire-protocol/request-kind.js'
 import type { RequestContext } from '../context/requestContext.js'
 import { ServerChannel } from '../../../wire-protocol/server/channel.js'
@@ -63,6 +63,7 @@ type ParseResult =
       isMalformedRequest: false
     }
   | { isMalformedRequest: false; isSseRequest: true; sseResponse: SseChannelHttpResponse }
+  | { isMalformedRequest: false; isBodyTooLarge: true; limit: number }
   | { isMalformedRequest: true }
 
 async function parseHttpRequest(runContext: RunContext): Promise<ParseResult> {
@@ -93,6 +94,8 @@ async function parseHttpRequest(runContext: RunContext): Promise<ParseResult> {
   try {
     body = await readBody(request, readable, requestKind, serverConfig.channel.messageLimit)
   } catch (err) {
+    if (err instanceof RequestBodyLimitError)
+      return { isMalformedRequest: false, isBodyTooLarge: true, limit: err.limit }
     logParseError(String(err), runContext)
     return { isMalformedRequest: true }
   }
