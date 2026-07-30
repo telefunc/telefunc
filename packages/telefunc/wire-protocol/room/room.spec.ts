@@ -15,7 +15,6 @@ import {
   frameWithMemberId,
   isRoomError,
   roomAckError,
-  roomMemberKvKey,
   sanitizeBinaryWants,
   unframeMemberId,
   type RoomSnapshotMetadata,
@@ -521,21 +520,6 @@ describe('Room public behavior', () => {
     await vi.advanceTimersByTimeAsync(ROOM_HEARTBEAT_INTERVAL_MS)
 
     expect(heartbeat).toHaveBeenCalledOnce()
-  })
-
-  it('renews every owned member in one heartbeat cell transaction', async () => {
-    const room = (await Room.create('batched-heartbeat')) as ServerRoom
-    const first = await room.join()
-    const second = await room.join()
-    const compare = vi.spyOn(driver, 'compareExchangeCells')
-
-    await (room as unknown as { _heartbeatTick(): Promise<void> })._heartbeatTick()
-
-    expect(compare).toHaveBeenCalledOnce()
-    expect(compare.mock.calls[0]?.[3].map(({ key, set }) => ({ key, set: set !== undefined }))).toEqual([
-      { key: roomMemberKvKey(room.id, first.id), set: true },
-      { key: roomMemberKvKey(room.id, second.id), set: true },
-    ])
   })
 
   it('reports an initially closed source to the terminal owner', async () => {

@@ -16,7 +16,7 @@ import {
   ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS,
 } from '../../constants.js'
 import { getBackend } from '../../backend/install.js'
-import type { LaneId, BackendSubscription, CellMutation } from '../../backend/spi.js'
+import type { LaneId, BackendSubscription } from '../../backend/spi.js'
 import { encodePublishBinary, encodePublishText, type WirePublishInfo } from '../../shared-ws.js'
 import {
   RoomError,
@@ -1471,23 +1471,18 @@ class ServerRoom implements Room {
       // Renew this node's binary-demand lease on every owner and sweep any crashed reporter's demand.
       // No cell I/O — runs first so member-cell latency never delays it (the demand TTL has slack for skips).
       this._demand.heartbeat()
-      const ids = this._ownedMemberIds()
-      if (ids.length > 0) {
-        const keys = ids.map((id) => roomMemberKvKey(this.id, id))
-        const present = await mutateCells(this.id, this._inc, { keys }, (cells) => {
-          const present = new Set<string>()
-          const mutations: CellMutation[] = []
-          const seenAt = Date.now()
-          for (let index = 0; index < ids.length; index++) {
-            const raw = cells.get(keys[index]!)
-            if (raw === undefined) continue
-            present.add(ids[index]!)
-            const record = { ...(parse(decodeRoomText(raw)) as RoomMemberRecord), seenAt }
-            mutations.push({ key: keys[index]!, set: { bytes: encodeRoomText(stringify(record)) } })
+      for (const id of this._ownedMemberIds()) {
+        const key = roomMemberKvKey(this.id, id)
+        const present = await mutateCells(this.id, this._inc, { keys: [key] }, (cells) => {
+          const raw = cells.get(key)
+          if (raw === undefined) return { value: false, mutations: [] }
+          const record = { ...(parse(decodeRoomText(raw)) as RoomMemberRecord), seenAt: Date.now() }
+          return {
+            value: true,
+            mutations: [{ key, set: { bytes: encodeRoomText(stringify(record)) } }],
           }
-          return { value: present, mutations }
         })
-        for (const id of ids) if (!present.has(id)) this._applyLeave(id)
+        if (!present) this._applyLeave(id)
       }
       await this._reconcileAuthority()
     } finally {
