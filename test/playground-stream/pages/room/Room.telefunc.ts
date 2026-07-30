@@ -103,9 +103,8 @@ async function onJoinAsServer(roomId: string, name: string) {
 }
 
 /** Server-side join with `selfDelivery: false`, returning `{ room, me }` together — the co-return
- *  case. On the client `me` is a standalone participant, `room` its live view; the server binds
- *  `me`'s echo-suppression onto that room's stub at serialization, so `me`'s own publishes never
- *  come back to `room` — no client-side drop, no wasted network. */
+ *  case. On the client `me` is a standalone participant and `room` is its live view; observable
+ *  delivery must exclude `me`'s own publishes while preserving publishes by another member. */
 async function onJoinRoomAsServerSelf(roomId: string, name: string) {
   const room = await Room.get(roomId)
   const me = await room.join({ meta: { name }, selfDelivery: false })

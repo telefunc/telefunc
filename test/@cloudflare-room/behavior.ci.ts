@@ -2,7 +2,7 @@ import { afterAll, beforeAll, expect, test } from 'vitest'
 import { Miniflare } from 'miniflare'
 import { bundleWorker } from './bundle.js'
 
-let miniflare: Miniflare
+let miniflare: Miniflare | undefined
 
 beforeAll(async () => {
   miniflare = new Miniflare({
@@ -13,18 +13,27 @@ beforeAll(async () => {
     durableObjects: {
       ROOM: { className: 'TelefuncRoomDurableObject', useSQLite: true },
       TelefuncDurableObject: { className: 'SessionDurableObject' },
+      PUBLIC_ROOM: { className: 'PublicRoomDurableObject', useSQLite: true },
+      PUBLIC_SESSION: { className: 'PublicRoomSessionDurableObject' },
     },
   })
 })
 
 afterAll(async () => {
-  await miniflare.dispose()
+  await miniflare?.dispose()
 })
 
-test('open, join, commit, deliver, close, cancellation, and authority restart settle honestly', async () => {
-  const response = await miniflare.dispatchFetch('https://room.test/probe')
+test('public Room lifecycle and authority settlement controls execute on Cloudflare Durable Objects', async () => {
+  const response = await miniflare!.dispatchFetch('https://room.test/probe')
   expect(response.status).toBe(200)
   expect(await response.json()).toEqual({
+    publicLifecycle: {
+      created: true,
+      joined: true,
+      publishedAndSubscribed: [{ kind: 'public-path' }],
+      receivedFromPublisher: true,
+      closed: true,
+    },
     lifecycle: {
       receivers: 1,
       delivered: [1],
@@ -40,10 +49,15 @@ test('open, join, commit, deliver, close, cancellation, and authority restart se
     cancellationDeliveries: [1],
     fanoutOrdering: {
       firstSettlementBeforeRelease: 'pending',
+      firstSettlementAfterRelease: 'rejected',
+      secondSettlement: 'delivery probe rejected',
       fastDeliveriesBeforeRelease: [1],
       slowDeliveriesBeforeRelease: [1],
     },
-    evictionInvalidations: ['recoverable'],
+    evictionInvalidations: {
+      settlements: ['delivery probe rejected', 'delivery probe rejected', 'delivery probe rejected'],
+      invalidations: ['recoverable'],
+    },
     unknown: 'Cloudflare Room delivery has an unknown delivery token',
   })
 })

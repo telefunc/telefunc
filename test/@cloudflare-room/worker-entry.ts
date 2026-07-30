@@ -1,6 +1,9 @@
 /// <reference types="@cloudflare/workers-types" />
 
 import { DurableObject } from 'cloudflare:workers'
+import '../../packages/telefunc/node/server/async_hooks.js'
+import { setDefaultBackend } from '../../packages/telefunc/wire-protocol/backend/install.js'
+import { Room } from '../../packages/telefunc/wire-protocol/room/server.js'
 import type {
   HeadCx,
   LaneId,
@@ -8,14 +11,77 @@ import type {
   SubscriptionAttemptState,
 } from '../../packages/telefunc/wire-protocol/backend/spi.js'
 import {
+  CloudflareRoomBackend,
   CloudflareRoomSessionManager,
+  withCloudflareRoomSessionManager,
   type CloudflareRoomNamespace,
 } from '../../packages/telefunc/wire-protocol/server/adapter/cloudflare/room/backend.js'
 import {
   TelefuncRoomDurableObject as ProductionRoomDurableObject,
+  createTelefuncRoomDurableObjectClass,
   type HeadNextWire,
   type HeadWire,
 } from '../../packages/telefunc/wire-protocol/server/adapter/cloudflare/room/do.js'
+
+const publicRoomBackend = new CloudflareRoomBackend()
+setDefaultBackend(() => publicRoomBackend, 'cloudflare-room-ci-public')
+const PublicRoomDurableObjectBase = createTelefuncRoomDurableObjectClass('PUBLIC_SESSION')
+
+export class PublicRoomSessionDurableObject extends DurableObject {
+  readonly #manager: CloudflareRoomSessionManager
+
+  constructor(ctx: DurableObjectState, env: unknown) {
+    super(ctx, env as Env)
+    this.#manager = new CloudflareRoomSessionManager(
+      ctx.id.toString(),
+      () => (env as { PUBLIC_ROOM: CloudflareRoomNamespace }).PUBLIC_ROOM,
+    )
+  }
+
+  publicRoomLifecycle(roomId: string) {
+    return withCloudflareRoomSessionManager(
+      () => this.#manager,
+      async () => {
+        const room = await Room.create(roomId, { meta: { purpose: 'cloudflare-room-ci' } })
+        const received: unknown[] = []
+        let receivedFromPublisher = false
+        let publisherId = ''
+        room.subscribe((data, _info, from) => {
+          received.push(data)
+          receivedFromPublisher = from.id === publisherId
+        })
+        const participant = await room.join({ meta: { name: 'public-path' } })
+        publisherId = participant.id
+        await participant.publish({ kind: 'public-path' })
+        const joined = room.count === 1
+        await Room.close(roomId)
+        return {
+          created: room.id === roomId,
+          joined,
+          publishedAndSubscribed: received,
+          receivedFromPublisher,
+          closed: room.isClosed,
+        }
+      },
+    )
+  }
+
+  telefuncRoomDeliver(request: DeliveryRequest): Promise<void> {
+    return withCloudflareRoomSessionManager(
+      () => this.#manager,
+      () => this.#manager.deliver(request),
+    )
+  }
+
+  telefuncRoomInvalidate(request: InvalidationRequest): void {
+    return withCloudflareRoomSessionManager(
+      () => this.#manager,
+      () => this.#manager.invalidate(request),
+    )
+  }
+}
+
+export class PublicRoomDurableObject extends PublicRoomDurableObjectBase {}
 
 type DeliveryRequest = {
   roomId: string
@@ -167,15 +233,29 @@ type Session = {
   openSubscription(roomId: string, inc: string): Promise<void>
   subscriptionState(roomId: string): Promise<SubscriptionAttemptState>
 }
+type PublicSession = {
+  publicRoomLifecycle(roomId: string): Promise<{
+    created: boolean
+    joined: boolean
+    publishedAndSubscribed: unknown[]
+    receivedFromPublisher: boolean
+    closed: boolean
+  }>
+}
 type Env = {
   ROOM: DurableObjectNamespace
   TelefuncDurableObject: DurableObjectNamespace
+  PUBLIC_SESSION: DurableObjectNamespace
 }
 
 export default {
   async fetch(_request: Request, env: Env): Promise<Response> {
     try {
       const suffix = crypto.randomUUID()
+      const publicSession = env.PUBLIC_SESSION.get(
+        env.PUBLIC_SESSION.idFromName(`public-session-${suffix}`),
+      ) as unknown as PublicSession
+      const publicLifecycle = await publicSession.publicRoomLifecycle(`public-room-${suffix}`)
       const sessionId = env.TelefuncDurableObject.idFromName(`session-${suffix}`)
       const session = env.TelefuncDurableObject.get(sessionId) as unknown as Session
       const lifecycle = await successfulLifecycle(env, sessionId, session, suffix)
@@ -185,6 +265,7 @@ export default {
       const evictionInvalidations = await failedDeliveryEviction(env, sessionId, session, suffix)
       const unknown = await authorityRestart(env, suffix)
       return Response.json({
+        publicLifecycle,
         lifecycle,
         terminalDrop,
         ...cancellation,
@@ -272,22 +353,28 @@ async function failedDeliveryEviction(
   sessionId: DurableObjectId,
   session: Session,
   suffix: string,
-): Promise<Array<'recoverable' | 'terminal'>> {
+): Promise<{
+  settlements: string[]
+  invalidations: Array<'recoverable' | 'terminal'>
+}> {
   const roomId = `evict-${suffix}`
   const inc = `evict-inc-${suffix}`
   const authority = roomAuthority(env, roomId)
   const opened = await openAndJoin(authority, sessionId, roomId, inc, `evict-lease-${suffix}`)
   await session.prepareDelivery(roomId, false, true)
+  const settlements: string[] = []
   for (let attempt = 1; attempt <= 3; attempt += 1) {
     const commit = accepted(
       await authority.commitLane(roomId, inc, { kind: 'semantic' }, new Uint8Array([attempt])),
       `failed delivery ${attempt}`,
     )
-    await rejectionOf(authority.awaitDelivery(commit.deliveryToken), 2_000, `failed delivery ${attempt}`)
+    settlements.push(
+      await rejectionOf(authority.awaitDelivery(commit.deliveryToken), 2_000, `failed delivery ${attempt}`),
+    )
   }
   const invalidations = (await session.deliveryState(roomId)).invalidations
   await closeAndDrop(authority, inc, opened, `evict-close-${suffix}`)
-  return invalidations
+  return { settlements, invalidations }
 }
 
 async function rejectedFanoutOrdering(
@@ -297,6 +384,8 @@ async function rejectedFanoutOrdering(
   suffix: string,
 ): Promise<{
   firstSettlementBeforeRelease: 'pending' | 'rejected'
+  firstSettlementAfterRelease: 'rejected' | 'fulfilled'
+  secondSettlement: string
   fastDeliveriesBeforeRelease: number[]
   slowDeliveriesBeforeRelease: number[]
 }> {
@@ -330,10 +419,16 @@ async function rejectedFanoutOrdering(
   const fastDeliveriesBeforeRelease = (await fastSession.deliveryState(roomId)).delivered
   const slowDeliveriesBeforeRelease = (await slowSession.deliveryState(roomId)).delivered
   await slowSession.releaseDelivery(roomId)
-  await firstSettlement
-  await rejectionOf(authority.awaitDelivery(second.deliveryToken), 2_000, 'fanout second')
+  const firstSettlementAfterRelease = await within(firstSettlement, 2_000, 'fanout first settlement')
+  const secondSettlement = await rejectionOf(authority.awaitDelivery(second.deliveryToken), 2_000, 'fanout second')
   await closeAndDrop(authority, inc, opened, `fanout-close-${suffix}`)
-  return { firstSettlementBeforeRelease, fastDeliveriesBeforeRelease, slowDeliveriesBeforeRelease }
+  return {
+    firstSettlementBeforeRelease,
+    firstSettlementAfterRelease,
+    secondSettlement,
+    fastDeliveriesBeforeRelease,
+    slowDeliveriesBeforeRelease,
+  }
 }
 
 async function authorityRestart(env: Env, suffix: string): Promise<string> {

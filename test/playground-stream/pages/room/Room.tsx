@@ -116,8 +116,8 @@ function Room() {
 
           // A publisher pins a retained message; a subscriber that arrives *after* the publish must
           // still receive it (MQTT-style). The retained slot is read only once the subscription is
-          // live at the backend — the readiness handoff — so an async transport (Redis) can't drop
-          // it in the gap between subscribing and the read. Keep the publisher's view referenced so
+          // live at the backend — the readiness handoff — so the subscriber can't miss it in the
+          // gap between subscribing and the read. Keep the publisher's view referenced so
           // its membership (and thus the owned retained slot) survives until the late subscriber reads.
           const pubView = await onGetRoom(roomId)
           const author = await pubView.join({ meta: { name: 'Author' } })
@@ -646,8 +646,8 @@ function Room() {
           setResult('')
           const roomId = `e2e-self:${crypto.randomUUID()}`
           await onCreateRoom(roomId)
-          // The "others receive it" observer is a server-side subscriber — a genuinely different
-          // client with its own stub. Suppression is per-stub at the source, so it isn't affected.
+          // The "others receive it" observer is a genuinely different room consumer, so its receipt
+          // distinguishes self-delivery suppression from a publish that disappeared altogether.
           await onWatchRoom(roomId)
           const room = await onGetRoom(roomId)
           const me = await room.join({ meta: { name: 'Solo' }, selfDelivery: false })
@@ -677,15 +677,15 @@ function Room() {
           await onCreateRoom(roomId)
           await onWatchRoom(roomId) // a different (server-side) client — receives everything
 
-          // `me`: server-side join with selfDelivery:false, co-returned with its room. Its own echo
-          // must be dropped at the source for this client's `room` view (never crosses the wire).
+          // `me`: server-side join with selfDelivery:false, co-returned with its room. Its own
+          // publish must be absent from the room view's observable deliveries.
           const { room, me } = await onJoinRoomAsServerSelf(roomId, 'Solo')
           const mine: string[] = []
           room.subscribe((data) => mine.push(data as string))
           await me.publish('from-me')
 
           // `notMe`: a client-side join (selfDelivery on) on the SAME room stub — its publishes DO
-          // come back to `mine`. Proves both source gates coexist on one subscription, keyed by sender.
+          // come back to `mine`. Proves the two self-delivery behaviours coexist on one room view.
           const notMe = await room.join({ meta: { name: 'NotMe' } })
           await notMe.publish('from-notme')
 

@@ -9,5 +9,5 @@
     "skipLibCheck": true,
     "strict": true
   },
-  "include": ["*.ts"]
+  "include": ["*.ts", "../../packages/telefunc/wire-protocol/uint8array.d.ts"]
 }

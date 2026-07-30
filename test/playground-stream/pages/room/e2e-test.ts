@@ -104,7 +104,7 @@ function testRoom() {
       await autoRetry(async () => {
         const r = await getResult<{ received: string[] }>('#room-result')
         // The late subscriber gets the pinned message via the retained slot — read only after its
-        // subscription is live, so an async transport (the docker run uses real Redis) can't drop it.
+        // subscription is live, so the subscribe/read handoff cannot drop it.
         expect(r.received).deep.equal(['pinned'])
       })
     },
@@ -326,7 +326,7 @@ function testRoom() {
 
   testRoomScenario(
     'selfServer',
-    'room: a co-returned server-side selfDelivery:false member is suppressed at the source, while a client join on the same stub is delivered',
+    'room: a co-returned server-side selfDelivery:false member sees no own publish, while a client join on the same room view is delivered',
     async () => {
       await navigate(`${getServerUrl()}/room`)
       await page.click(roomScenario('selfServer').selector)
