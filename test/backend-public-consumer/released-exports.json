@@ -155,8 +155,10 @@
   "telefunc/cloudflare": ["CloudflareOptions", "Telefunc"],
   "@telefunc/redis": [
     "InstallRedisOptions",
+    "RedisBroadcastOptions",
     "RedisRoomBackend",
     "RedisRoomBackendOptions",
+    "RedisTransport",
     "installRedis"
   ]
 }
