@@ -5,25 +5,34 @@ import { IndexedPeer } from '../server/IndexedPeer.js'
 import { ACK_STATUS, TAG, decode } from '../shared-ws.js'
 import { waitForTelefunctionCallBarriers } from '../client/call-barrier.js'
 import { ShieldValidationError, isShieldValidationError } from '../../shared/ShieldValidationError.js'
+import { Abort, isAbort } from '../../shared/Abort.js'
 import {
   ROOM_DM_ACK_TIMEOUT_MS,
   ROOM_HEARTBEAT_INTERVAL_MS,
   ROOM_MEMBER_TTL_MS,
   ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS,
   ROOM_TAIL_ATTACH_TIMEOUT_MS,
+  ROOM_TAIL_HOLD_BYTES_MAX,
+  ROOM_TAIL_HOLD_MAX,
 } from '../constants.js'
 import {
   DEFAULT_TRACK,
   RoomError,
   frameWithMemberId,
   isRoomError,
+  mergeAttributes,
+  normalizeJoinOptions,
+  pushBoundedTail,
   roomAckError,
+  roomCtrlKey,
+  roomIdentityKvPrefix,
   roomMemberKvKey,
   sanitizeBinaryWants,
   unframeMemberId,
   type RoomSnapshotMetadata,
 } from './protocol.js'
 import { ClientRoom, RoomClientBroadcast } from './client.js'
+import { RoomState, remoteBacking } from './state.js'
 import { Room, ServerRoom } from './server.js'
 import { SubSlot, configFromHead, decodeRoomText, encodeRoomConfig } from './server/lanes.js'
 import { RoomStubChannel } from './stubs.js'
@@ -1505,6 +1514,51 @@ describe('Room public behavior', () => {
     )
   })
 
+  it('replays already-true demand when the publisher attaches its handler', async () => {
+    const authority = await Room.create('late-demand-handler')
+    const observer = await Room.get(authority.id)
+    observer.subscribeBinary(() => {})
+
+    const publisher = await authority.join()
+    const changes: Array<[string | null, boolean]> = []
+    publisher.onDemand((track, wanted) => changes.push([track, wanted]))
+
+    expect(changes).toEqual([[null, true]])
+  })
+
+  it('uses the inbox hold only before the first listener attaches', async () => {
+    const room = await Room.create('one-shot-inbox-hold')
+    const member = await room.join()
+    const internal = member as unknown as {
+      _deliverMessage(message: {
+        from: string
+        fromMeta: Record<string, unknown> | null
+        fromIdentity: string | null
+        data: unknown
+      }): void
+      _deliverMessageAck(message: {
+        from: string
+        fromMeta: Record<string, unknown> | null
+        fromIdentity: string | null
+        data: unknown
+      }): Promise<unknown>
+    }
+    const received: unknown[] = []
+    const unlisten = member.listen((data) => received.push(data))
+    unlisten()
+
+    internal._deliverMessage({ from: '', fromMeta: null, fromIdentity: null, data: 'stale' })
+    let reply: unknown
+    void internal
+      ._deliverMessageAck({ from: '', fromMeta: null, fromIdentity: null, data: 'ack' })
+      .then((value) => (reply = value))
+    await Promise.resolve()
+    member.listen((data) => received.push(data))
+
+    expect(received).toEqual([])
+    expect(reply).toMatchObject({ ok: false })
+  })
+
   it('keeps live and retained binary seq above 2^32 through server and public client decode', async () => {
     const live = await wideBinaryScenario('wide-live', false, 7)
     const retained = await wideBinaryScenario('wide-retained', true, 9)
@@ -1574,6 +1628,162 @@ describe('client Room lifecycle', () => {
     expect(roomAckError(error, vi.fn())).toEqual({ text: 'overlap', status: ACK_STATUS.ERROR })
   })
 
+  it('classifies only own, real, non-hostile error brands', () => {
+    const roomError = new RoomError('room')
+    const abortError = Abort('abort')
+    const shieldError = new ShieldValidationError('shield')
+    const roomBrand = Object.getOwnPropertySymbols(roomError)[0]!
+    const abortBrand = Object.getOwnPropertySymbols(abortError).find(
+      (symbol) => (abortError as unknown as Record<symbol, unknown>)[symbol] === true,
+    )!
+    const shieldBrand = Object.getOwnPropertySymbols(shieldError)[0]!
+
+    expect(isRoomError(Object.create(roomError))).toBe(false)
+    expect(isAbort(Object.create(abortError))).toBe(false)
+    expect(isShieldValidationError(Object.create(shieldError))).toBe(false)
+    expect(isRoomError({ [roomBrand]: true, name: 'RoomError', message: 'forged' })).toBe(false)
+    expect(isAbort({ [abortBrand]: true, name: 'Abort', message: 'forged', abortValue: null })).toBe(false)
+    expect(isShieldValidationError({ [shieldBrand]: true, name: 'ShieldValidationError', message: 'forged' })).toBe(
+      false,
+    )
+
+    const hostile = new Proxy(
+      {},
+      {
+        has() {
+          throw new Error('hostile brand probe')
+        },
+        getOwnPropertyDescriptor() {
+          throw new Error('hostile brand descriptor')
+        },
+      },
+    )
+    const report = vi.fn()
+    expect(() => isRoomError(hostile)).not.toThrow()
+    expect(roomAckError(hostile, report)).toEqual({
+      text: 'Internal Server Error — see server logs',
+      status: ACK_STATUS.ERROR,
+    })
+    expect(report).toHaveBeenCalledOnce()
+  })
+
+  it('keeps remote serializer backing unforgeable and exact-keyed', async () => {
+    const room = await Room.create('remote-backing')
+    const joined = await room.join()
+    const remote = await room.getParticipant(joined.id)
+    expect(remoteBacking(remote)).not.toBeNull()
+    expect(remoteBacking(Object.create(remote!))).toBeNull()
+    expect(Object.getOwnPropertySymbols(remote!)).toEqual([])
+    const hostile = new Proxy(
+      {},
+      {
+        has() {
+          throw new Error('hostile remote probe')
+        },
+      },
+    )
+    expect(() => remoteBacking(hostile)).not.toThrow()
+    expect(remoteBacking(hostile)).toBeNull()
+  })
+
+  it('does not emit onEmpty from a partial pre-roster member map', () => {
+    const fake = createFakeStub()
+    const client = new ClientRoom(fake.stub, { ...snapshot('pre-roster-empty'), count: 2 })
+    const memberId = crypto.randomUUID()
+    let empty = 0
+    client.onEmpty(() => empty++)
+
+    fake.emitText({ __r: 'join', id: memberId, meta: {}, joinedAt: 1 }, { key: client.id, seq: 1, timestamp: 1 })
+    fake.emitText({ __r: 'leave', id: memberId }, { key: client.id, seq: 2, timestamp: 2 })
+
+    expect(client.count).toBe(2)
+    expect(empty).toBe(0)
+  })
+
+  it('dirties the roster epoch for unknown member-record events', () => {
+    const state = new RoomState({
+      roomId: 'unknown-member-epoch',
+      meta: {},
+      seed: { members: [] },
+      updateStamp: { at: 0, by: '' },
+      onListenersChanged: () => {},
+      onCallbackError: () => {},
+    })
+    const id = crypto.randomUUID()
+
+    state.applyTrack(id, 'screen')
+    state.applyParticipantMeta(id, { step: 1 }, 1)
+    state.applyLeave(id)
+
+    expect(state.membershipVersion).toBe(3)
+  })
+
+  it('reports rejected async RoomState callbacks without awaiting delivery', async () => {
+    const memberId = crypto.randomUUID()
+    const errors: unknown[] = []
+    const state = new RoomState({
+      roomId: 'async-state-callbacks',
+      meta: {},
+      seed: { members: [{ id: memberId, meta: {}, joinedAt: 1, metaSeq: 0 }] },
+      updateStamp: { at: 0, by: '' },
+      onListenersChanged: () => {},
+      onCallbackError: (error) => errors.push(error),
+    })
+    const remote = state.getRemote(memberId)!
+    const failures = Array.from({ length: 5 }, (_, index) => new Error(`async state callback ${index}`))
+    const rejected = failures.map((failure) => {
+      const promise = Promise.reject(failure)
+      void promise.catch(() => {})
+      return promise
+    })
+    state.subscribe(() => rejected[0])
+    remote.subscribe(() => rejected[1])
+    state.subscribeBinary(() => rejected[2])
+    remote.subscribeBinary(() => rejected[3])
+    state.onClose(() => rejected[4])
+
+    state.applyData(memberId, {}, null, 'text', { key: state.roomId, seq: 1, timestamp: 1 })
+    state.applyBinary(memberId, new Uint8Array(), null, null, { key: state.roomId, seq: 1, timestamp: 1 })
+    state.applyClosed()
+    await Promise.resolve()
+
+    expect(errors).toEqual(failures)
+  })
+
+  it('reports rejected async participant inbox, demand, and leave callbacks', async () => {
+    const room = await Room.create('async-participant-callbacks')
+    const participant = await room.join()
+    const errors: unknown[] = []
+    const internal = participant as unknown as {
+      _reportError(error: unknown): void
+      _deliverMessage(message: {
+        from: string
+        fromMeta: Record<string, unknown> | null
+        fromIdentity: string | null
+        data: unknown
+      }): void
+      _onDemand(track: string | null, wanted: boolean): void
+      _onLeft(cause: { type: 'left' }): void
+    }
+    internal._reportError = (error) => errors.push(error)
+    const failures = Array.from({ length: 3 }, (_, index) => new Error(`async participant callback ${index}`))
+    const rejected = failures.map((failure) => {
+      const promise = Promise.reject(failure)
+      void promise.catch(() => {})
+      return promise
+    })
+    participant.listen(() => rejected[0])
+    participant.onDemand(() => rejected[1])
+    participant.onLeave(() => rejected[2])
+
+    internal._deliverMessage({ from: '', fromMeta: null, fromIdentity: null, data: 'text' })
+    internal._onDemand(null, true)
+    internal._onLeft({ type: 'left' })
+    await Promise.resolve()
+
+    expect(errors).toEqual(failures)
+  })
+
   it('keeps a client participant active so a rejected leave request can be retried', async () => {
     let leaveAttempts = 0
     const fake = createFakeStub({
@@ -1591,6 +1801,56 @@ describe('client Room lifecycle', () => {
     await expect(member.publish('still-active')).resolves.toMatchObject({ seq: 1 })
     await expect(member.leave()).resolves.toBeUndefined()
     expect(leaveAttempts).toBe(2)
+  })
+
+  it.each(['leave', 'closed'] as const)('settles a client join across a pre-ack %s event', async (event) => {
+    const id = crypto.randomUUID()
+    const ack = deferred<{ id: string; joinedAt: number }>()
+    const fake = createFakeStub({
+      send: async (message) => {
+        if ((message as { __r?: string }).__r === 'req-join') return await ack.promise
+        return undefined
+      },
+    })
+    const client = new ClientRoom(fake.stub, snapshot(`pre-ack-${event}`))
+    const joining = client.join()
+    await Promise.resolve()
+    if (event === 'leave') {
+      fake.emitText({ __r: 'leave', id }, { key: client.id, seq: 1, timestamp: 1 })
+    } else {
+      fake.emitText({ __r: 'closed' }, { key: client.id, seq: 1, timestamp: 1 })
+    }
+    ack.resolve({ id, joinedAt: 1 })
+
+    const participant = await joining
+    await expect(participant.publish('zombie-check')).rejects.toThrow(/left/i)
+    const causes: unknown[] = []
+    participant.onLeave((cause) => causes.push(cause))
+    expect(causes).toEqual([{ type: event === 'leave' ? 'left' : 'closed' }])
+  })
+
+  it('replays demand that arrives while a client join ack is pending', async () => {
+    const id = crypto.randomUUID()
+    const ack = deferred<{ id: string; joinedAt: number }>()
+    const fake = createFakeStub({
+      send: async (message) => {
+        if ((message as { __r?: string }).__r === 'req-join') return await ack.promise
+        return undefined
+      },
+    })
+    const client = new ClientRoom(fake.stub, snapshot('pre-ack-demand'))
+    const joining = client.join()
+    await Promise.resolve()
+    fake.emitText(
+      { __r: 'demand', member: id, track: 'screen', wanted: true },
+      { key: client.id, seq: 1, timestamp: 1 },
+    )
+    ack.resolve({ id, joinedAt: 1 })
+
+    const participant = await joining
+    const demand: unknown[] = []
+    participant.onDemand((track, wanted) => demand.push([track, wanted]))
+    expect(demand).toEqual([['screen', true]])
   })
 
   it("derives participant-update prev from the receiver's own applied state", async () => {
@@ -1812,6 +2072,54 @@ describe('room demand lifecycle', () => {
 })
 
 describe('room binary protocol validation', () => {
+  it('rejects malformed key components as usage errors', () => {
+    expect(() => roomCtrlKey('\ud800')).toThrow('well-formed')
+    expect(() => roomIdentityKvPrefix('room', '\udc00')).toThrow('well-formed')
+  })
+
+  it('rejects non-boolean self-delivery options', () => {
+    expect(() => normalizeJoinOptions({ selfDelivery: 'false' } as never)).toThrow('boolean')
+    expect(() => normalizeJoinOptions({ selfDelivery: 0 } as never)).toThrow('boolean')
+  })
+
+  it('rejects invalid binary subscription option containers', () => {
+    const state = new RoomState({
+      roomId: 'strict-options',
+      meta: {},
+      seed: { members: [] },
+      updateStamp: { at: 0, by: '' },
+      onListenersChanged: () => {},
+      onCallbackError: () => {},
+    })
+    for (const options of [null, [], 'screen']) {
+      expect(() => state.subscribeBinary(() => {}, options as never)).toThrow('object')
+    }
+  })
+
+  it('bounds tails by count and serialized code units at every cap edge', () => {
+    const entry = (serialized: string, seq = 0) => ({
+      serialized,
+      ord: { seq, timestamp: 0 },
+      from: '',
+    })
+    const byCount: ReturnType<typeof entry>[] = []
+    for (let seq = 0; seq <= ROOM_TAIL_HOLD_MAX; seq++) pushBoundedTail(byCount, entry('x', seq))
+    expect(byCount).toHaveLength(ROOM_TAIL_HOLD_MAX)
+    expect(byCount[0]!.ord.seq).toBe(1)
+
+    const bySize: ReturnType<typeof entry>[] = []
+    const halfPlusOne = 'x'.repeat(ROOM_TAIL_HOLD_BYTES_MAX / 2 + 1)
+    pushBoundedTail(bySize, entry(halfPlusOne, 1))
+    pushBoundedTail(bySize, entry(halfPlusOne, 2))
+    expect(bySize.map(({ ord }) => ord.seq)).toEqual([2])
+    pushBoundedTail(bySize, entry('x'.repeat(ROOM_TAIL_HOLD_BYTES_MAX + 1), 3))
+    expect(bySize.map(({ ord }) => ord.seq)).toEqual([2])
+
+    const nonAscii: ReturnType<typeof entry>[] = []
+    pushBoundedTail(nonAscii, entry('💥'.repeat(ROOM_TAIL_HOLD_BYTES_MAX / 2)))
+    expect(nonAscii).toHaveLength(1)
+  })
+
   it.each([
     [
       'member UUIDs',
@@ -1835,7 +2143,36 @@ describe('room binary protocol validation', () => {
       const key = String.fromCharCode(...frame)
       expect(seen.has(key)).toBe(false)
       seen.add(key)
+      if (_name === 'single-unit tracks') expect(unframeMemberId(frame)?.track).toBe(input)
     }
+  })
+
+  it('preserves __proto__ as data and builds prototype-safe binary wants', () => {
+    const attrs = Object.create(null) as Record<string, unknown>
+    Object.defineProperty(attrs, '__proto__', { value: { safe: true }, enumerable: true, configurable: true })
+    const merged = mergeAttributes({}, attrs)
+    expect(Object.getPrototypeOf(merged)).toBe(Object.prototype)
+    expect(Object.hasOwn(merged, '__proto__')).toBe(true)
+    expect(merged.__proto__).toEqual({ safe: true })
+    Object.defineProperty(attrs, '__proto__', { value: undefined, enumerable: true, configurable: true })
+    expect(Object.hasOwn(mergeAttributes(merged, attrs), '__proto__')).toBe(false)
+
+    const memberId = crypto.randomUUID()
+    const sanitized = sanitizeBinaryWants({
+      everyMember: { all: false, tracks: [] },
+      members: { [memberId]: { all: false, tracks: ['screen'] } },
+    })
+    expect(sanitized).not.toBeNull()
+    expect(Object.getPrototypeOf(sanitized!.members)).toBeNull()
+    const hostileMembers = Object.create(null) as Record<string, unknown>
+    hostileMembers.__proto__ = { all: true, tracks: [] }
+    expect(sanitizeBinaryWants({ everyMember: { all: false, tracks: [] }, members: hostileMembers })).toBeNull()
+    expect(
+      sanitizeBinaryWants({
+        everyMember: { all: false, tracks: [] },
+        members: { 'not-a-member-id': { all: false, tracks: [] } },
+      }),
+    ).toBeNull()
   })
 
   it('rejects array metadata and malformed UTF-8 instead of normalizing them', () => {
@@ -1871,7 +2208,10 @@ describe('room binary protocol validation', () => {
 
   it('accepts legal binary declarations regardless of undocumented aggregate counts', () => {
     const members = Object.fromEntries(
-      Array.from({ length: 4097 }, (_, index) => [`member-${index}`, { all: false, tracks: [] }]),
+      Array.from({ length: 4097 }, (_, index) => [
+        `${index.toString(16).padStart(8, '0')}-0000-0000-0000-000000000000`,
+        { all: false, tracks: [] },
+      ]),
     )
     expect(sanitizeBinaryWants({ everyMember: { all: false, tracks: [] }, members })).not.toBeNull()
     expect(

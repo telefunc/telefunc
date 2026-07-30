@@ -66,6 +66,7 @@ export type {
 import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { assert, assertUsage } from '../../utils/assert.js'
+import { isBrandedError } from '../../utils/isBrandedError.js'
 import { isObject } from '../../utils/isObject.js'
 import { createAbortError } from '../../shared/Abort.js'
 import { STATUS_BODY_INTERNAL_SERVER_ERROR } from '../../shared/constants.js'
@@ -94,32 +95,33 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 /** Reserved pub/sub + KV namespace for rooms. Don't use it for `BroadcastChannel` keys. */
 const ROOM_KEY_NAMESPACE = 'telefunc:room:'
 
-/** Room IDs are app-supplied and may contain the key delimiter, so policy-cell keys encode them. */
-function roomKeyId(roomId: string): string {
-  return encodeURIComponent(roomId)
+/** App-supplied components may contain delimiters; malformed UTF-16 fails as usage. */
+function roomKeyComponent(value: string): string {
+  assertUsage(value.isWellFormed(), 'Room key components should be well-formed strings')
+  return encodeURIComponent(value)
 }
 
 /** Stable channel identity used by a Room stub crossing a response. */
 function roomCtrlKey(roomId: string): string {
-  return `${ROOM_KEY_NAMESPACE}${roomKeyId(roomId)}`
+  return `${ROOM_KEY_NAMESPACE}${roomKeyComponent(roomId)}`
 }
 /** KV key of one member record. */
 function roomMemberKvKey(roomId: string, memberId: string): string {
-  return `${ROOM_KEY_NAMESPACE}${roomKeyId(roomId)}:m:${memberId}`
+  return `${ROOM_KEY_NAMESPACE}${roomKeyComponent(roomId)}:m:${memberId}`
 }
 /** KV prefix under which all of a room's member records live. Member IDs are UUIDs, which is
  *  how member records are told apart from keys of other rooms whose ID shares the prefix. */
 function roomMemberKvPrefix(roomId: string): string {
-  return `${ROOM_KEY_NAMESPACE}${roomKeyId(roomId)}:m:`
+  return `${ROOM_KEY_NAMESPACE}${roomKeyComponent(roomId)}:m:`
 }
 
 /** Durable work left by membership eviction. The marker is committed in the same cell transaction
  *  that removes the member, then cleared only after retained data and the semantic leave are done. */
 function roomMemberCleanupKvKey(roomId: string, memberId: string): string {
-  return `${ROOM_KEY_NAMESPACE}${roomKeyId(roomId)}:cleanup:${memberId}`
+  return `${ROOM_KEY_NAMESPACE}${roomKeyComponent(roomId)}:cleanup:${memberId}`
 }
 function roomMemberCleanupKvPrefix(roomId: string): string {
-  return `${ROOM_KEY_NAMESPACE}${roomKeyId(roomId)}:cleanup:`
+  return `${ROOM_KEY_NAMESPACE}${roomKeyComponent(roomId)}:cleanup:`
 }
 
 /** Reserved KV namespace for the identity→membership index — kept separate from
@@ -134,11 +136,11 @@ const IDENTITY_KEY_NAMESPACE = 'telefunc:identity:'
  *  member ID against its record (identity match), which makes phantoms impossible. Room and identity
  *  are encoded so a `:` in either can't collide across pairs; the member ID is a delimiter-free UUID. */
 function roomIdentityMemberKvKey(roomId: string, identity: string, memberId: string): string {
-  return `${IDENTITY_KEY_NAMESPACE}${encodeURIComponent(roomId)}:${encodeURIComponent(identity)}:${memberId}`
+  return `${IDENTITY_KEY_NAMESPACE}${roomKeyComponent(roomId)}:${roomKeyComponent(identity)}:${memberId}`
 }
 /** KV prefix enumerating every membership of one identity in one room (`keys()` → member IDs). */
 function roomIdentityKvPrefix(roomId: string, identity: string): string {
-  return `${IDENTITY_KEY_NAMESPACE}${encodeURIComponent(roomId)}:${encodeURIComponent(identity)}:`
+  return `${IDENTITY_KEY_NAMESPACE}${roomKeyComponent(roomId)}:${roomKeyComponent(identity)}:`
 }
 /** Policy's serialized lifecycle view; the backend head is the atomic authority for transitions. */
 type RoomStatus = 'open' | 'closing' | 'closed'
@@ -242,7 +244,7 @@ type RoomCtrlEnvelope =
   | { __r: 'track'; id: string; track: string }
   // Track-demand gossip (`onDemand`): a node announces that its local demand for one member's
   // (member, track) stream turned on/off, tagged with its instance id. The member's owning node
-  // aggregates these across nodes into a global demand count — node-to-node only, never relayed
+  // aggregates these across nodes into one wanted transition — node-to-node only, never relayed
   // to clients. `track` is `DEFAULT_TRACK` for the plain `publishBinary()` lane.
   | { __r: 'want'; member: string; track: string; node: string; on: boolean }
   | { __r: 'closed' }
@@ -298,9 +300,7 @@ type RoomEnvelope = RoomCtrlEnvelope | RoomDataEnvelope | RoomAnnounceEnvelope
  *  roster getters cannot wait forever after a backend read rejects. */
 type RoomRosterEvent = { __r: 'roster'; members: MemberSnapshot[] } | { __r: 'roster-error' }
 
-/** Global demand for one of a member's own published tracks, pushed to that member's stub
- *  (`onDemand`) whenever the owning node's aggregate count changes. `track` is `null` for the
- *  default `publishBinary()` lane. `count` is the approximate number of interested subscribers. */
+/** Global demand for one of a member's own published tracks, pushed on aggregate state changes. */
 type RoomDemandEvent = { __r: 'demand'; member: string; track: string | null; wanted: boolean }
 
 /** A direct message, published on the target's inbox lane — transport-level
@@ -395,7 +395,7 @@ function mergeAttributes(meta: ParticipantMeta, attrs: ParticipantMeta): Partici
   const next: ParticipantMeta = { ...meta }
   for (const [key, value] of Object.entries(attrs)) {
     if (value === undefined) delete next[key]
-    else next[key] = value
+    else Object.defineProperty(next, key, { value, enumerable: true, configurable: true, writable: true })
   }
   return next
 }
@@ -405,6 +405,10 @@ function normalizeJoinOptions(options: JoinOptions | undefined): { meta: Partici
   assertUsage(options === undefined || isRecord(options), 'join() options should be an object')
   const meta = options?.meta ?? {}
   assertUsage(isRecord(meta), 'join() options.meta should be an object')
+  assertUsage(
+    options?.selfDelivery === undefined || typeof options.selfDelivery === 'boolean',
+    'join() options.selfDelivery should be a boolean',
+  )
   return { meta, selfDelivery: options?.selfDelivery !== false }
 }
 
@@ -432,7 +436,7 @@ class RoomError extends Error {
 }
 
 function isRoomError(thing: unknown): thing is RoomError {
-  return isObject(thing) && roomErrorBrand in thing && thing[roomErrorBrand] === true
+  return isBrandedError(thing, roomErrorBrand)
 }
 
 /** The generic error a bug becomes on the caller — identical to telefunc's top-level bug message,
@@ -524,7 +528,7 @@ const FRAME_FLAGS_KNOWN = FRAME_FLAG_META | FRAME_FLAG_TRACK | FRAME_FLAG_RETAIN
 const TRACK_LENGTH_FIELD_MAX = 0xff
 const META_LENGTH_FIELD_MAX = 0xffff
 const frameTextEncoder = /* @__PURE__ */ new TextEncoder()
-const frameTextDecoder = /* @__PURE__ */ new TextDecoder('utf-8', { fatal: true })
+const frameTextDecoder = /* @__PURE__ */ new TextDecoder('utf-8', { fatal: true, ignoreBOM: true })
 /** Binary relay format:
  *  `[16-byte member UUID][1-byte flags][?1-byte track length + track][?2-byte meta length + meta][payload]`.
  *  A plain publish costs one flag byte; named tracks (mic/camera/screen on one member lane) and optional
@@ -678,9 +682,10 @@ function sanitizeBinaryWants(wants: unknown): BinaryWants | null {
   if (!isRecord(wants)) return null
   const everyMember = sanitizeTrackWants(wants.everyMember)
   if (!everyMember || !isRecord(wants.members)) return null
-  const members: Record<string, TrackWants> = {}
+  const members: Record<string, TrackWants> = Object.create(null)
   const entries = Object.entries(wants.members)
   for (const [memberId, trackWants] of entries) {
+    if (uuidToBytes(memberId) === null) return null
     const sanitized = sanitizeTrackWants(trackWants)
     if (!sanitized) return null
     members[memberId] = sanitized

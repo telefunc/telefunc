@@ -3,6 +3,7 @@ export type { InboxMessage }
 
 import type { ChannelPublishAck } from '../channel.js'
 import type { TELEFUNC_SHIELDS } from '../../node/shared/transformer/generateShield/shield-key.js'
+import { isPromise } from '../../utils/isPromise.js'
 import { RoomError, toRoomFailure, DM_PARTICIPANT_LEFT, type DmReply } from './protocol.js'
 import type {
   BinaryPublishOptions,
@@ -37,6 +38,7 @@ type InboxMessage = {
  *  only lane with a client-side attach window to bridge; every room lane is want-gated at the
  *  server and has nothing to hold. */
 const PENDING_INBOX_MAX_COUNT = 64
+const DM_NO_INBOX_LISTENER: DmReply = { ok: false, err: 'No participant inbox listener is attached' }
 
 abstract class ParticipantBase implements LocalParticipant {
   /** Phantom: the publish shield rides the type only (see `RoomShield`), never a runtime field. */
@@ -47,9 +49,11 @@ abstract class ParticipantBase implements LocalParticipant {
   /** @internal */ _meta: ParticipantMeta
   protected _left = false
   private _leftCause: LeaveCause | null = null
-  private _leaveCbs: Array<(cause: LeaveCause) => void> = []
+  private _leaveCbs: Array<(cause: LeaveCause) => unknown> = []
   private readonly _messageCbs: Array<(data: unknown, from: Sender | null) => unknown> = []
-  private readonly _demandCbs: Array<(track: string | null, wanted: boolean) => void> = []
+  private readonly _demandCbs: Array<(track: string | null, wanted: boolean) => unknown> = []
+  private readonly _wantedTracks = new Set<string | null>()
+  private _inboxAttached = false
   /** DMs delivered before the first `listen()` — held bounded, flushed on attach, then never
    *  allocated again (`null` = flushed or empty; zero steady-state cost). An entry carries an
    *  `ackResolve` when the sender awaits a reply — resolved when the hold flushes (or on leave). */
@@ -61,6 +65,7 @@ abstract class ParticipantBase implements LocalParticipant {
   /** @internal — route this participant's inbox to a remote holder instead of local listeners. */
   _setForwarder(forwarder: (msg: InboxMessage) => Promise<DmReply> | void): void {
     this._forwarder = forwarder
+    this._inboxAttached = true
     const held = this._pendingInbox
     this._pendingInbox = null
     if (!held) return
@@ -100,6 +105,7 @@ abstract class ParticipantBase implements LocalParticipant {
 
   listen(callback: (data: unknown, from: Sender | null) => unknown): () => void {
     this._messageCbs.push(callback)
+    this._inboxAttached = true
     if (this._pendingInbox) {
       const held = this._pendingInbox
       this._pendingInbox = null
@@ -123,7 +129,7 @@ abstract class ParticipantBase implements LocalParticipant {
       return
     }
     if (this._messageCbs.length === 0) {
-      if (this._left) return // a departed participant will never flush: drop
+      if (this._left || this._inboxAttached) return
       this._hold(msg)
       return
     }
@@ -138,6 +144,7 @@ abstract class ParticipantBase implements LocalParticipant {
     if (this._forwarder) return Promise.resolve(this._forwarder(msg) ?? { ok: true, result: undefined })
     if (this._messageCbs.length === 0) {
       if (this._left) return Promise.resolve(DM_PARTICIPANT_LEFT)
+      if (this._inboxAttached) return Promise.resolve(DM_NO_INBOX_LISTENER)
       return new Promise<DmReply>((resolve) => this._hold(msg, resolve))
     }
     return this._fireInboxAck(msg)
@@ -163,11 +170,7 @@ abstract class ParticipantBase implements LocalParticipant {
   private _fireInbox(msg: InboxMessage): void {
     const sender = this._senderOf(msg)
     for (const cb of [...this._messageCbs]) {
-      try {
-        cb(msg.data, sender)
-      } catch (err) {
-        this._reportError(err)
-      }
+      this._invoke(cb, msg.data, sender)
     }
   }
 
@@ -195,6 +198,7 @@ abstract class ParticipantBase implements LocalParticipant {
 
   onDemand(callback: (track: string | null, wanted: boolean) => void): () => void {
     this._demandCbs.push(callback)
+    for (const track of this._wantedTracks) this._invoke(callback, track, true)
     return () => {
       const i = this._demandCbs.indexOf(callback)
       if (i >= 0) this._demandCbs.splice(i, 1)
@@ -204,13 +208,9 @@ abstract class ParticipantBase implements LocalParticipant {
   /** @internal — whether any node wants one of this member's tracks flipped (see the room's demand
    *  aggregation). `track` is `null` for the default `publishBinary()` lane. */
   _onDemand(track: string | null, wanted: boolean): void {
-    for (const cb of [...this._demandCbs]) {
-      try {
-        cb(track, wanted)
-      } catch (err) {
-        this._reportError(err)
-      }
-    }
+    if (wanted) this._wantedTracks.add(track)
+    else this._wantedTracks.delete(track)
+    for (const cb of [...this._demandCbs]) this._invoke(cb, track, wanted)
   }
 
   onLeave(callback: (cause: LeaveCause) => void): () => void {
@@ -238,15 +238,19 @@ abstract class ParticipantBase implements LocalParticipant {
     const cbs = this._leaveCbs
     this._leaveCbs = []
     for (const cb of cbs) this._invoke(cb, cause)
+    this._messageCbs.length = 0
+    this._demandCbs.length = 0
+    this._wantedTracks.clear()
   }
 
   protected _assertActive(): void {
     if (this._left) throw new RoomError('Participant has left the room')
   }
 
-  private _invoke(cb: (cause: LeaveCause) => void, cause: LeaveCause): void {
+  private _invoke<Args extends unknown[]>(cb: (...args: Args) => unknown, ...args: Args): void {
     try {
-      cb(cause)
+      const result = cb(...args)
+      if (isPromise(result)) void Promise.resolve(result).catch((err) => this._reportError(err))
     } catch (err) {
       this._reportError(err)
     }
