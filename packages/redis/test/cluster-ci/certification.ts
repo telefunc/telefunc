@@ -227,10 +227,11 @@ describe('Redis real three-master Cluster CI certification', () => {
     }
   })
 
-  it('recovers lost -> failing first replacement -> successful second -> delivery', async () => {
+  it('exposes terminal attempts so consumer replacement can fail once, recover, and deliver', async () => {
     const topology = cluster.nodes('master').sort(compareRedisNodes)
     const originals = topology.map((node) => [node, node.duplicate.bind(node)] as const)
     let failNext = false
+    let injectedFailure = false
     let opens = 0
     for (const [node, original] of originals) {
       node.duplicate = ((options?: unknown) => {
@@ -243,6 +244,7 @@ describe('Redis real three-master Cluster CI certification', () => {
           client.subscribe = (async (...channels: string[]) => {
             if (!failed) {
               failed = true
+              injectedFailure = true
               throw new Error('synthetic first replacement failure')
             }
             return await subscribe(...channels)
@@ -252,17 +254,16 @@ describe('Redis real three-master Cluster CI certification', () => {
       }) as typeof node.duplicate
     }
 
-    const report = vi.spyOn(console, 'error').mockImplementation(() => {})
     const baseline = new Set((await pubSubClients()).map(clientIdentity))
     const backend = redisBackend(cluster, uniquePrefix('replacement'))
     const states: SubscriptionState[] = []
     const observed: string[] = []
-    let subscription: ReturnType<BackendSpi['subscribeLane']> | undefined
+    const subscriptions: Array<ReturnType<BackendSpi['subscribeLane']>> = []
     try {
       await open(backend, 'replacement-room', 'replacement-inc')
-      subscription = backend.subscribeLane('replacement-room', 'replacement-inc', SEMANTIC_LANE, (payload) =>
-        observed.push(Buffer.from(payload).toString()),
-      )
+      const receiver = (payload: Uint8Array) => observed.push(Buffer.from(payload).toString())
+      const subscription = backend.subscribeLane('replacement-room', 'replacement-inc', SEMANTIC_LANE, receiver)
+      subscriptions.push(subscription)
       subscription.onStateChange((state) => states.push(state))
       await subscription.ready
       const [first] = await waitForValue(async () =>
@@ -271,22 +272,29 @@ describe('Redis real three-master Cluster CI certification', () => {
       if (first === undefined) throw new Error('initial Redis subscriber was not observed')
       failNext = true
       await first.owner.client.call('CLIENT', 'KILL', 'ID', String(first.id))
-      await waitFor(() => states.includes('lost') && subscription?.state() === 'ready' && opens >= 3, 15_000)
+      await waitFor(() => states.includes('lost') && subscription.state() === 'closed')
+
+      const failed = backend.subscribeLane('replacement-room', 'replacement-inc', SEMANTIC_LANE, receiver)
+      subscriptions.push(failed)
+      await expect(failed.ready).rejects.toThrow('Backend subscription closed')
+      expect(injectedFailure).toBe(true)
+      expect(failed.state()).toBe('closed')
+
+      const recovered = backend.subscribeLane('replacement-room', 'replacement-inc', SEMANTIC_LANE, receiver)
+      subscriptions.push(recovered)
+      await recovered.ready
+      expect(recovered.state()).toBe('ready')
+      expect(opens).toBeGreaterThanOrEqual(3)
       const committed = accepted(
         await backend.commitLane('replacement-room', 'replacement-inc', SEMANTIC_LANE, Buffer.from('recovered')),
       )
       await committed.delivery
       await waitFor(() => observed.length === 1)
       expect(states).toContain('lost')
-      expect(states.at(-1)).toBe('ready')
       expect(observed).toEqual(['recovered'])
-      expect(report.mock.calls.some(([error]) => String(error).includes('synthetic first replacement failure'))).toBe(
-        true,
-      )
     } finally {
       for (const [node, original] of originals) node.duplicate = original as typeof node.duplicate
-      report.mockRestore()
-      await subscription?.unsubscribe().catch(() => {})
+      await Promise.allSettled(subscriptions.map((subscription) => subscription.unsubscribe()))
       await backend.dispose()
     }
   })
@@ -310,6 +318,7 @@ describe('Redis real three-master Cluster CI certification', () => {
     const dispatchHeld = deferred()
     const held: Array<[Buffer, Buffer]> = []
     let subscription: ReturnType<BackendSpi['subscribeLane']> | undefined
+    let replacement: ReturnType<BackendSpi['subscribeLane']> | undefined
     let restoreDispatch: (() => void) | undefined
     try {
       await open(backend, 'held-dispatch-room', 'held-dispatch-inc')
@@ -351,7 +360,11 @@ describe('Redis real three-master Cluster CI certification', () => {
       )
       if (first === undefined) throw new Error('initial Redis subscriber connection was not observed')
       await first.owner.client.call('CLIENT', 'KILL', 'ID', String(first.id))
-      await waitFor(() => states.includes('lost') && subscription?.state() === 'ready')
+      await waitFor(() => states.includes('lost') && subscription?.state() === 'closed')
+      replacement = backend.subscribeLane('held-dispatch-room', 'held-dispatch-inc', SEMANTIC_LANE, (payload) =>
+        observed.push(Buffer.from(payload).toString()),
+      )
+      await replacement.ready
       restoreDispatch()
       restoreDispatch = undefined
       for (const [channel, frame] of held) dispatch(channel, frame)
@@ -363,7 +376,7 @@ describe('Redis real three-master Cluster CI certification', () => {
     } finally {
       restoreDispatch?.()
       for (const [node, original] of originals) node.duplicate = original as typeof node.duplicate
-      await subscription?.unsubscribe().catch(() => {})
+      await Promise.allSettled([subscription?.unsubscribe(), replacement?.unsubscribe()])
       await backend.dispose()
     }
   })
