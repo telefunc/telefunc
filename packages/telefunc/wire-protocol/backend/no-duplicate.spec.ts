@@ -18,7 +18,9 @@ describe('one backend mechanism', () => {
       'packages/redis/src/room/subscriber-transport.ts::RedisSubscriptionDriver._attempts',
       'packages/telefunc/wire-protocol/backend/memory/backend.ts::Generation.subs',
       'packages/telefunc/wire-protocol/backend/memory/backend.ts::MemoryBackendState.broadcastSubs',
-      'packages/telefunc/wire-protocol/room/server.ts::ServerRoom._announcedTracks',
+      expect.stringMatching(
+        /^packages\/telefunc\/wire-protocol\/room\/server(?:\/room)?\.ts::ServerRoom\._announcedTracks$/,
+      ),
       'packages/telefunc/wire-protocol/server/mux.ts::ChannelMux.pendingRegisterWaiters',
       'packages/telefunc/wire-protocol/server/sse.ts::SseConnectionTransport.pendingConnections',
     ])
@@ -77,9 +79,12 @@ describe('one backend mechanism', () => {
     expect(calledMethods('packages/telefunc/wire-protocol/server/server-broadcast.ts')).not.toEqual(
       expect.arrayContaining(['commitLane', 'subscribeLane']),
     )
-    expect(calledMethods('packages/telefunc/wire-protocol/room/server.ts')).toEqual(
-      expect.arrayContaining(['commitLane', 'subscribeLane']),
+    const roomImplementations = files.filter(
+      (file) =>
+        file === 'packages/telefunc/wire-protocol/room/server.ts' ||
+        file.startsWith('packages/telefunc/wire-protocol/room/server/'),
     )
+    expect(calledMethods(...roomImplementations)).toEqual(expect.arrayContaining(['commitLane', 'subscribeLane']))
   })
 })
 
@@ -213,12 +218,14 @@ function valuesFrom(file: string, module: string, kind: 'import' | 'export'): st
     .sort()
 }
 
-function calledMethods(file: string): string[] {
-  const methods = source(file)
-    .getDescendantsOfKind(SyntaxKind.CallExpression)
-    .flatMap((call) => {
-      const expression = call.getExpression()
-      return Node.isPropertyAccessExpression(expression) ? [expression.getName()] : []
-    })
+function calledMethods(...files: string[]): string[] {
+  const methods = files.flatMap((file) =>
+    source(file)
+      .getDescendantsOfKind(SyntaxKind.CallExpression)
+      .flatMap((call) => {
+        const expression = call.getExpression()
+        return Node.isPropertyAccessExpression(expression) ? [expression.getName()] : []
+      }),
+  )
   return [...new Set(methods)].sort()
 }
