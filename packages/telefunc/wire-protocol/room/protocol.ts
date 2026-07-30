@@ -142,9 +142,6 @@ function roomIdentityMemberKvKey(roomId: string, identity: string, memberId: str
 function roomIdentityKvPrefix(roomId: string, identity: string): string {
   return `${IDENTITY_KEY_NAMESPACE}${roomKeyComponent(roomId)}:${roomKeyComponent(identity)}:`
 }
-/** Policy's serialized lifecycle view; the backend head is the atomic authority for transitions. */
-type RoomStatus = 'open' | 'closing' | 'closed'
-
 /** Stored opaquely in the backend head. `at`/`by` is the last-writer-wins stamp of the latest
  *  `Room.setMeta()`/`Room.setAttributes()` (see `applyRoomUpdate`). `inc` is the room's incarnation
  *  id: a fresh random id on every (re)create, so a member record or mutation from a previous
@@ -157,7 +154,6 @@ type RoomConfigRecord = {
   at: number
   by: string
   inc: string
-  status: RoomStatus
 }
 
 /** Later timestamp wins; equal timestamps break deterministically by writer ID. */
@@ -171,10 +167,6 @@ type RoomMemberRecord = {
   meta: ParticipantMeta
   joinedAt: number
   seenAt: number
-  /** The room incarnation (`RoomConfigRecord.inc`) this membership belongs to. A record left behind
-   *  by a crashed node from a previous incarnation carries the old id, so a reader binding to the
-   *  current incarnation ignores it — a stale member never attaches to a recreated room. */
-  inc: string
   /** Monotonic meta revision, issued by the member's single owner — orders `p-meta` events. */
   metaSeq: number
   /** App identity stamped at (server-side) join — absent: none. Immutable per member. */
@@ -401,7 +393,12 @@ function mergeAttributes(meta: ParticipantMeta, attrs: ParticipantMeta): Partici
 }
 
 /** Validates `join(options)` and resolves the participant `meta` + `selfDelivery`. */
-function normalizeJoinOptions(options: JoinOptions | undefined): { meta: ParticipantMeta; selfDelivery: boolean } {
+function normalizeJoinOptions(options: JoinOptions | undefined): {
+  meta: ParticipantMeta
+  selfDelivery: boolean
+  identity: string | null
+  hidden: boolean
+} {
   assertUsage(options === undefined || isRecord(options), 'join() options should be an object')
   const meta = options?.meta ?? {}
   assertUsage(isRecord(meta), 'join() options.meta should be an object')
@@ -409,7 +406,20 @@ function normalizeJoinOptions(options: JoinOptions | undefined): { meta: Partici
     options?.selfDelivery === undefined || typeof options.selfDelivery === 'boolean',
     'join() options.selfDelivery should be a boolean',
   )
-  return { meta, selfDelivery: options?.selfDelivery !== false }
+  assertUsage(
+    options?.identity === undefined || (typeof options.identity === 'string' && options.identity.length > 0),
+    'join() options.identity should be a non-empty string',
+  )
+  assertUsage(
+    options?.hidden === undefined || typeof options.hidden === 'boolean',
+    'join() options.hidden should be a boolean',
+  )
+  return {
+    meta,
+    selfDelivery: options?.selfDelivery !== false,
+    identity: options?.identity ?? null,
+    hidden: options?.hidden ?? false,
+  }
 }
 
 // ---------------------------------------------------------------------------

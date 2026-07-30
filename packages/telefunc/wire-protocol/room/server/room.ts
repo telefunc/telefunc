@@ -203,9 +203,7 @@ class ServerRoom implements Room {
   }
 
   async join(options?: JoinOptions): Promise<LocalParticipant> {
-    const { meta, selfDelivery } = normalizeJoinOptions(options)
-    const identity = normalizeIdentity(options)
-    const hidden = normalizeHidden(options)
+    const { meta, selfDelivery, identity, hidden } = normalizeJoinOptions(options)
     let participant!: ServerLocalParticipant
     await this._admitMember(
       meta,
@@ -338,7 +336,6 @@ class ServerRoom implements Room {
       meta,
       joinedAt,
       seenAt: joinedAt,
-      inc: this._inc,
       metaSeq: 0,
       ...(identity === null ? {} : { identity }),
       ...(hidden ? { hidden: true } : {}),
@@ -515,13 +512,6 @@ class ServerRoom implements Room {
     return { id: from, meta: {}, identity: null }
   }
 
-  /** @internal — send a private message: published on the target's inbox key, which only
-   *  the target's owning node subscribes to (see `_onDm`). The sender's verified meta rides
-   *  the envelope so every receiver can surface a rich sender. */
-  async _sendDm(from: string, to: string, data: unknown): Promise<RoomSendReceipt> {
-    return this._publishDm(from, to, data)
-  }
-
   /** @internal — `send(…, { ack: true })`: publish the DM tagged with an `ackId`, then wait for the
    *  recipient's node to route the handler's reply back on our own inbox (`_onDm` → `_resolveDmAck`).
    *  Returns the send receipt plus the recipient's `DmReply` — a success value, or a failure the
@@ -554,7 +544,7 @@ class ServerRoom implements Room {
 
   /** Shared DM publish: validate the target, run the send guards, stamp the verified sender, and
    *  publish on the target's inbox key. `ackId` rides the envelope when a reply is awaited. */
-  private async _publishDm(from: string, to: string, data: unknown, ackId?: string): Promise<RoomSendReceipt> {
+  async _publishDm(from: string, to: string, data: unknown, ackId?: string): Promise<RoomSendReceipt> {
     if (this._state.closed) throw new RoomError(`Room is closed: ${this.id}`)
     const target = await this._resolveMember(to)
     if (!target) throw new RoomError(`Participant not found: ${to}`)
@@ -1055,7 +1045,7 @@ class ServerRoom implements Room {
         return undefined
       case 'req-dm': {
         this._assertStubMember(stub, req.id)
-        if (!req.ack) return await this._sendDm(req.id, req.to, req.data)
+        if (!req.ack) return await this._publishDm(req.id, req.to, req.data)
         const { receipt, reply } = await this._sendDmAck(req.id, req.to, req.data)
         // The recipient's failure rides home too — throw it so the ack encoder emits the native
         // ABORT/ERROR (a re-catch here would reclassify a carried Abort/RoomError as an opaque bug).
@@ -1580,7 +1570,7 @@ class ServerLocalParticipant extends ParticipantBase {
   async send(to: string | Sender, data: unknown, options?: { ack?: boolean }): Promise<any> {
     this._assertActive()
     const toId = typeof to === 'string' ? to : to.id
-    if (!options?.ack) return this._room._sendDm(this.id, toId, data)
+    if (!options?.ack) return this._room._publishDm(this.id, toId, data)
     const { receipt, reply } = await this._room._sendDmAck(this.id, toId, data)
     if (!reply.ok) throw roomFailureError(reply)
     // Superset of the plain-send receipt: the outbound DM's sequencing plus the recipient's reply.
@@ -1600,7 +1590,6 @@ class ServerLocalParticipant extends ParticipantBase {
   async leave(): Promise<void> {
     if (this._left) return
     await this._room._removeMember(this.id, { type: 'left' })
-    this._onLeft({ type: 'left' }) // fires even when the room wasn't observing (no echo applied)
   }
 
   protected override _resolveSender(id: string): Sender | null {
@@ -1622,22 +1611,4 @@ async function runAfterHook(hook: () => unknown): Promise<void> {
   } catch (error) {
     reportRoomError(error)
   }
-}
-
-/** Identity is trusted — validate the server-side join option. */
-function normalizeIdentity(options: JoinOptions | undefined): string | null {
-  if (options?.identity === undefined) return null
-  assertUsage(
-    typeof options.identity === 'string' && options.identity.length > 0,
-    'join() options.identity should be a non-empty string',
-  )
-  return options.identity
-}
-
-/** Server-side only, like `identity`: a client `join()` never reads this option, so it can't hide
- *  itself from the room. */
-function normalizeHidden(options: JoinOptions | undefined): boolean {
-  if (options?.hidden === undefined) return false
-  assertUsage(typeof options.hidden === 'boolean', 'join() options.hidden should be a boolean')
-  return options.hidden
 }

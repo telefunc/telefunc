@@ -162,7 +162,6 @@ async function tryCreateRoom(id: string, options: RoomOptions | undefined): Prom
     at: Date.now(),
     by: writerId(),
     inc: crypto.randomUUID(),
-    status: 'open',
   }
   const result = await backend.compareExchangeHead(
     id,
@@ -314,7 +313,7 @@ async function writeRoomConfig(
     const currentConfig = configFromHead(current.head)
     const at = Math.max(Date.now(), currentConfig.at + 1)
     const meta = computeMeta(currentConfig.meta)
-    const nextConfig = { meta, at, by, inc: config.inc, status: 'open' as const }
+    const nextConfig = { meta, at, by, inc: config.inc }
     const result = await backend.compareExchangeHead(
       id,
       { expect: { rev: current.head.rev } },
@@ -376,7 +375,7 @@ async function finishClose(backend: BackendSpi, roomId: string, closing: RoomHea
     { closingLease: lease.id },
   )
   if (closedEvent === null) return false
-  const config = { ...configFromHead(closing), status: 'closed' as const }
+  const config = configFromHead(closing)
   const finalized = await backend.compareExchangeHead(
     roomId,
     { expect: { rev: closing.rev, closingLease: lease.id } },

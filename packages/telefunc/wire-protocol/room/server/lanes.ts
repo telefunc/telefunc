@@ -42,7 +42,6 @@ function configFromHead(head: RoomHead): RoomConfigRecord {
   const stored = parse(decodeRoomText(head.config)) as RoomConfigRecord
   return {
     ...stored,
-    status: head.state,
     ...(head.currentInc === null ? {} : { inc: head.currentInc }),
   }
 }
@@ -64,7 +63,6 @@ class SubSlot {
   private _subscription: BackendSubscription | null = null
   private _subscribe: (() => BackendSubscription) | null = null
   private _unobserve: (() => void) | null = null
-  private _lost = false
   private _readyPromise = Promise.resolve()
   private _resolveReady: (() => void) | null = null
   private _generationPromise = Promise.resolve()
@@ -86,10 +84,6 @@ class SubSlot {
 
   get wanted(): boolean {
     return this._subscribe !== null
-  }
-
-  get lost(): boolean {
-    return this._lost
   }
 
   /** Holder-facing readiness survives raw attempt failures; Room's policy owns replacement. */
@@ -123,7 +117,6 @@ class SubSlot {
     this._unobserve?.()
     const subscription = this._subscribe()
     this._subscription = subscription
-    this._lost = false
     let terminalNotified = false
     const notifyTerminal = (error?: unknown) => {
       if (terminalNotified) return
@@ -137,13 +130,11 @@ class SubSlot {
       () => {
         if (this._subscription === subscription && subscription.state() === 'ready') {
           wasReady = true
-          this._lost = false
           this._settleReady()
         }
       },
       (error: unknown) => {
         if (this._subscription !== subscription) return
-        this._lost = true
         this._ensurePendingReady()
         this._ensurePendingGeneration()
         notifyTerminal(error)
@@ -153,17 +144,14 @@ class SubSlot {
       if (this._subscription !== subscription) return
       if (state === 'lost') {
         if (wasReady) lostAfterReady = true
-        this._lost = true
         this._ensurePendingReady()
         this._ensurePendingGeneration()
       } else if (state === 'ready') {
         if (lostAfterReady) this._onRecovered()
         wasReady = true
         lostAfterReady = false
-        this._lost = false
         this._settleReady()
       } else if (state === 'closed') {
-        this._lost = true
         this._ensurePendingReady()
         this._ensurePendingGeneration()
         notifyTerminal()
@@ -180,7 +168,6 @@ class SubSlot {
     this._subscription = null
     this._unobserve?.()
     this._unobserve = null
-    this._lost = true
     this._rejectGeneration?.(error)
     this._resolveGeneration = null
     this._rejectGeneration = null
@@ -193,7 +180,6 @@ class SubSlot {
     this._subscribe = null
     this._unobserve?.()
     this._unobserve = null
-    this._lost = false
     this._settleReady()
     this._readyPromise = Promise.resolve()
     this._generationPromise = Promise.resolve()

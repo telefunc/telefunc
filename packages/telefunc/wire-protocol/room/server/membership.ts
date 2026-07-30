@@ -101,7 +101,6 @@ async function readMembers(roomId: string, inc: string, ids?: string[]): Promise
     const raw = cells.get(key)
     if (raw === undefined) continue
     const record = parse(decodeRoomText(raw)) as RoomMemberRecord
-    if (record.inc !== inc) continue
     if (Date.now() - record.seenAt > ROOM_MEMBER_TTL_MS) {
       const cleanupKey = roomMemberCleanupKvKey(roomId, id)
       const siblingKeys = [key]
@@ -113,7 +112,6 @@ async function readMembers(roomId: string, inc: string, ids?: string[]): Promise
         const latest = current.get(key)
         if (latest === undefined) return { value: { kind: 'missing' } as const, mutations: [] }
         const latestRecord = parse(decodeRoomText(latest)) as RoomMemberRecord
-        if (latestRecord.inc !== inc) return { value: { kind: 'missing' } as const, mutations: [] }
         return Date.now() - latestRecord.seenAt > ROOM_MEMBER_TTL_MS
           ? {
               value: { kind: 'reaped' } as const,
