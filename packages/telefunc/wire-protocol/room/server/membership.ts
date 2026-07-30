@@ -162,20 +162,30 @@ async function resolveIdentityMembers(roomId: string, inc: string, identity: str
   const prefix = roomIdentityKvPrefix(roomId, identity)
   const members: string[] = []
   const markers = await readCellSet(roomId, inc, { prefix })
-  for (const key of markers.cells.keys()) {
-    const memberId = key.slice(prefix.length)
-    const memberKey = roomMemberKvKey(roomId, memberId)
-    const raw = await readCell(roomId, inc, memberKey)
-    if (raw !== null && (parse(decodeRoomText(raw)) as RoomMemberRecord).identity === identity) {
-      members.push(memberId)
+  const indexed = [...markers.cells.keys()].map((markerKey) => {
+    const memberId = markerKey.slice(prefix.length)
+    return { markerKey, memberId, memberKey: roomMemberKvKey(roomId, memberId) }
+  })
+  const records = await readCellSet(roomId, inc, { keys: indexed.map(({ memberKey }) => memberKey) })
+  const stale: typeof indexed = []
+  for (const entry of indexed) {
+    const raw = records.cells.get(entry.memberKey)
+    if (raw !== undefined && (parse(decodeRoomText(raw)) as RoomMemberRecord).identity === identity) {
+      members.push(entry.memberId)
       continue
     }
-    await mutateCells(roomId, inc, { keys: [key, memberKey] }, (cells) => {
-      const current = cells.get(memberKey)
-      const stillStale =
-        current === undefined || (parse(decodeRoomText(current)) as RoomMemberRecord).identity !== identity
-      return { value: undefined, mutations: stillStale ? [{ key }] : [] }
-    })
+    stale.push(entry)
+  }
+  if (stale.length > 0) {
+    await mutateCells(roomId, inc, { keys: stale.flatMap(({ markerKey, memberKey }) => [markerKey, memberKey]) }, (cells) => ({
+      value: undefined,
+      mutations: stale.flatMap(({ markerKey, memberKey }) => {
+        const current = cells.get(memberKey)
+        return current === undefined || (parse(decodeRoomText(current)) as RoomMemberRecord).identity !== identity
+          ? [{ key: markerKey }]
+          : []
+      }),
+    }))
   }
   return members
 }

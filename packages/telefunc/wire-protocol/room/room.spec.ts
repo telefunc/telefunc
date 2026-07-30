@@ -587,6 +587,18 @@ describe('Room public behavior', () => {
     expect((await observer.getParticipants({ hidden: true })).map((member) => member.id)).toEqual([hidden.id])
   })
 
+  it('resolves multiple identity members with one batched record read', async () => {
+    const room = await Room.create('identity-batch')
+    const first = await room.join({ identity: 'shared' })
+    const second = await room.join({ identity: 'shared' })
+    const reads = vi.spyOn(driver, 'readCells')
+
+    const members = await Room.getParticipants(room.id, { identity: 'shared' })
+
+    expect(members.map(({ id }) => id)).toEqual([first.id, second.id])
+    expect(reads).toHaveBeenCalledTimes(3)
+  })
+
   it('keeps text self-delivery local and binary subscriptions selective across named tracks', async () => {
     const publisherRoom = await Room.create('media')
     const observer = await Room.get('media')
