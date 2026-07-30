@@ -30,7 +30,7 @@ export function upsertRoute(
   leaseId: string,
   generationToken: string,
   now: number,
-): number {
+): void {
   const expiresAt = now + ROUTE_TTL_MS
   sql.exec(
     'INSERT OR REPLACE INTO route (room_id, inc, lane_key, subscriber_do_id, lease_id, generation_token, expires_at, failures) VALUES (?, ?, ?, ?, ?, ?, ?, 0)',
@@ -42,7 +42,6 @@ export function upsertRoute(
     generationToken,
     expiresAt,
   )
-  return expiresAt
 }
 
 export function listRouteInstallations(sql: SqlStorage, inc: string): RouteInstallation[] {
@@ -100,7 +99,7 @@ export function renewRoute(
   subscriberDoId: string,
   leaseId: string,
   now: number,
-): { ok: true; expiresAt: number } | { ok: false } {
+): boolean {
   const expiresAt = now + ROUTE_TTL_MS
   const changed = sql.exec(
     'UPDATE route SET expires_at = ? WHERE inc = ? AND lane_key = ? AND subscriber_do_id = ? AND lease_id = ? AND expires_at > ? AND failures < ?',
@@ -112,7 +111,7 @@ export function renewRoute(
     now,
     ROUTE_DELIVERY_FAILURE_LIMIT,
   ).rowsWritten
-  return changed === 1 ? { ok: true, expiresAt } : { ok: false }
+  return changed === 1
 }
 
 // Unsubscribe deletes only when all four match, so a stale renewal or a racing old lease can't resurrect
@@ -176,7 +175,7 @@ export function recordRouteDeliveryFailure(
   laneKey: string,
   subscriberDoId: string,
   leaseId: string,
-): { matched: boolean; evicted: boolean } {
+): boolean {
   const changed = sql.exec(
     'UPDATE route SET failures = failures + 1 WHERE inc = ? AND lane_key = ? AND subscriber_do_id = ? AND lease_id = ?',
     inc,
@@ -184,7 +183,7 @@ export function recordRouteDeliveryFailure(
     subscriberDoId,
     leaseId,
   ).rowsWritten
-  if (changed !== 1) return { matched: false, evicted: false }
+  if (changed !== 1) return false
   const failures = sql
     .exec<{ failures: number }>(
       'SELECT failures FROM route WHERE inc = ? AND lane_key = ? AND subscriber_do_id = ? AND lease_id = ?',
@@ -195,7 +194,7 @@ export function recordRouteDeliveryFailure(
     )
     .toArray()[0]?.failures
   if (failures === undefined || failures < ROUTE_DELIVERY_FAILURE_LIMIT) {
-    return { matched: true, evicted: false }
+    return false
   }
   sql.exec(
     'UPDATE route SET expires_at = 0 WHERE inc = ? AND lane_key = ? AND subscriber_do_id = ? AND lease_id = ?',
@@ -204,5 +203,5 @@ export function recordRouteDeliveryFailure(
     subscriberDoId,
     leaseId,
   )
-  return { matched: true, evicted: true }
+  return true
 }

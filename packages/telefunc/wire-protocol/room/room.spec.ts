@@ -1651,6 +1651,43 @@ describe('memory Backend SPI contract', () => {
     expect(decodeOrderingFrame(encodeOrderingFrame(payload, info))).toEqual({ payload, info })
   })
 
+  it('keeps the memory lane gated until every target settles after one rejects', async () => {
+    await driver.compareExchangeHead(
+      'memory-order',
+      { expect: 'absent' },
+      { head: { currentInc: 'inc', state: 'open', config: new Uint8Array() } },
+    )
+    const slowStarted = deferred<void>()
+    const releaseSlow = deferred<void>()
+    let secondStarted = false
+    const source = { kind: 'durable' as const, roomId: 'memory-order', inc: 'inc', lane: semanticLane }
+    const fast = driver.subscriptions.bind(source).open(
+      () => {
+        throw new Error('fast rejection')
+      },
+      () => 2,
+    )
+    const slow = driver.subscriptions.bind(source).open(
+      async (_payload, { seq }) => {
+        if (seq === 1) {
+          slowStarted.resolve()
+          await releaseSlow.promise
+        } else secondStarted = true
+      },
+      () => 2,
+    )
+    await Promise.all([fast.ready, slow.ready])
+    const first = await driver.commitLane('memory-order', 'inc', semanticLane, new Uint8Array([1]))
+    const second = await driver.commitLane('memory-order', 'inc', semanticLane, new Uint8Array([2]))
+    if (!('accepted' in first) || !('accepted' in second)) throw new Error('memory ordering commit was stale')
+    await slowStarted.promise
+    await new Promise<void>((resolve) => setTimeout(resolve, 0))
+    expect(secondStarted).toBe(false)
+    releaseSlow.resolve()
+    await expect(first.delivery).rejects.toThrow('fast rejection')
+    await expect(second.delivery).rejects.toThrow('fast rejection')
+  })
+
   it('tracks raw-driver identity rather than wrapper identity during replacement', async () => {
     await disposeBackend()
     const raw = new MemoryBackend()

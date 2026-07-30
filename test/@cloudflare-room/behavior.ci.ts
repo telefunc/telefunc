@@ -25,14 +25,20 @@ afterAll(async () => {
 
 test('public Room lifecycle and authority settlement controls execute on Cloudflare Durable Objects', async () => {
   const response = await miniflare!.dispatchFetch('https://room.test/probe')
-  expect(response.status).toBe(200)
-  expect(await response.json()).toEqual({
+  const result = await response.json()
+  expect(response.status, JSON.stringify(result)).toBe(200)
+  expect(result).toEqual({
     publicLifecycle: {
       created: true,
       joined: true,
       publishedAndSubscribed: [{ kind: 'public-path' }],
       receivedFromPublisher: true,
       closed: true,
+    },
+    facadeSettlementOrdering: {
+      firstSeq: 1,
+      secondSeq: 2,
+      firstBeforeSecond: 'settled',
     },
     lifecycle: {
       receivers: 1,
@@ -44,6 +50,11 @@ test('public Room lifecycle and authority settlement controls execute on Cloudfl
     terminalDrop: {
       state: 'terminated',
       invalidations: ['terminal'],
+    },
+    preAckTerminalDrop: {
+      state: 'terminated',
+      invalidations: ['terminal'],
+      generations: [],
     },
     cancelled: 'Cloudflare Room delivery cancelled before handoff',
     cancellationDeliveries: [1],

@@ -421,12 +421,14 @@ export class MemoryBackend implements BackendDriver {
   ): Promise<void> {
     const previous = gen.chains.get(key) ?? Promise.resolve()
     const attempt = previous.then(async () => {
-      await Promise.all(
+      const outcomes = await Promise.allSettled(
         targets.map(async (target) => {
           if (target.closed) return
           await target.deliver(copyBytes(frame), { ...info })
         }),
       )
+      const failure = outcomes.find((outcome): outcome is PromiseRejectedResult => outcome.status === 'rejected')
+      if (failure !== undefined) throw failure.reason
     })
     gen.chains.set(
       key,

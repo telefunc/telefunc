@@ -5,13 +5,13 @@
 // janitor. Storage, retained chunking, routes and fanout are the invariant modules alongside it. The
 // per-lane fanout chains live here at the single room authority, including across facade instances.
 //
-// The Cloudflare entrypoint publishes a configured subclass as `TelefuncRoomDurableObject`; it is not yet
-// selected by Room policy; W5-C owns that switch. Conformance drives the same authority implementation.
+// The Cloudflare entrypoint publishes a configured subclass as `TelefuncRoomDurableObject`; public Room
+// traffic and the conformance lane drive this same authority implementation.
 
 import { DurableObject } from 'cloudflare:workers'
 import type { CellMutation, CxResult, HeadCx, HeadNext, LaneId } from '../../../../backend/spi.js'
 import { base64ToBytes, bytesToBase64, laneKey as laneKeyOf } from './codec.js'
-import { Fanout, type RouteTarget } from './fanout.js'
+import { Fanout } from './fanout.js'
 import { deleteRetained, installRetained, listRetained, readRetained } from './retained.js'
 import {
   deleteRoute,
@@ -22,6 +22,7 @@ import {
   renewRoute,
   snapshotRoutes,
   type RouteInstallation,
+  type RouteTarget,
   upsertRoute,
 } from './routes.js'
 import type { RoomShardDeliveryRequest, RoomShardInvalidationRequest } from './backend.js'
@@ -33,10 +34,8 @@ import {
   directoryList,
   directoryPut,
   dropGenerationRows,
-  GEN_ORPHAN_GRACE_MS,
   initSchema,
   listGenerations,
-  observeAndListGraceAgedOrphans,
   readCells,
   readGenerationToken,
   readLiveHead,
@@ -76,11 +75,9 @@ export type CommitWire =
   | { error: string }
 export type RetainedWire = { payloadB64: string; seq: number; timestamp: number }
 export type RegisterWire =
-  | { ok: true; expiresAt: number; generationToken: string }
+  | { ok: true; generationToken: string }
   | { rejected: true; reason: string; terminal?: boolean }
-export type DropWire =
-  | { droppedSubscribers: Array<{ laneKey: string; subscriberDoId: string; leaseId: string; generationToken: string }> }
-  | { error: string }
+export type DropWire = { ok: true } | { error: string }
 
 type SubscriberStub = {
   telefuncRoomDeliver(request: RoomShardDeliveryRequest): Promise<void>
@@ -163,7 +160,7 @@ export class TelefuncRoomDurableObject extends DurableObject {
               info.laneKey,
               target.subscriberDoId,
               target.leaseId,
-            ).evicted
+            )
           })
           // Core cannot infer an authority-side K=3 eviction from a later local attachment: it already
           // owns the ready slot. Tell the exact live attempt now; its ordinary `closed` state lets Room
@@ -171,7 +168,10 @@ export class TelefuncRoomDurableObject extends DurableObject {
           // if this best-effort invalidation RPC is lost.
           if (evicted) {
             try {
-              await session.telefuncRoomInvalidate({
+              const recoverySession = this.#sessionNamespaceValue.get(
+                this.#sessionNamespaceValue.idFromString(target.subscriberDoId),
+              )
+              await recoverySession.telefuncRoomInvalidate({
                 roomId: info.roomId,
                 inc: info.inc,
                 laneKey: info.laneKey,
@@ -325,9 +325,6 @@ export class TelefuncRoomDurableObject extends DurableObject {
     leaseId: string,
   ): Promise<RegisterWire> {
     const sessionNamespace = this.#sessionNamespaceValue
-    if (!/^[0-9a-f]{64}$/.test(subscriberDoId)) {
-      return { rejected: true, reason: `subscriber Durable Object id '${subscriberDoId}' is invalid`, terminal: true }
-    }
     try {
       sessionNamespace.idFromString(subscriberDoId)
     } catch {
@@ -344,8 +341,8 @@ export class TelefuncRoomDurableObject extends DurableObject {
       if (head === null || head.currentInc !== inc || head.state !== 'open') return
       const generationToken = readGenerationToken(this.#sql, inc)
       if (generationToken === null) return
-      const expiresAt = upsertRoute(this.#sql, roomId, inc, laneKey, subscriberDoId, leaseId, generationToken, now)
-      result = { ok: true, expiresAt, generationToken }
+      upsertRoute(this.#sql, roomId, inc, laneKey, subscriberDoId, leaseId, generationToken, now)
+      result = { ok: true, generationToken }
     })
     return result
   }
@@ -356,9 +353,9 @@ export class TelefuncRoomDurableObject extends DurableObject {
     subscriberDoId: string,
     leaseId: string,
     expectedGenerationToken: string,
-  ): Promise<{ ok: boolean; expiresAt?: number; terminal?: boolean }> {
+  ): Promise<{ ok: boolean; terminal?: boolean }> {
     const now = Date.now()
-    let result!: ReturnType<typeof renewRoute>
+    let renewed = false
     let generationInvalid = false
     this.ctx.storage.transactionSync(() => {
       const currentGenerationToken = readGenerationToken(this.#sql, inc)
@@ -366,12 +363,12 @@ export class TelefuncRoomDurableObject extends DurableObject {
         generationInvalid = true
         return
       }
-      result = renewRoute(this.#sql, inc, laneKey, subscriberDoId, leaseId, now)
+      renewed = renewRoute(this.#sql, inc, laneKey, subscriberDoId, leaseId, now)
     })
     if (generationInvalid) return { ok: false, terminal: true }
     // A missing/non-live exact route inside the SAME generation is recoverable: the subscription
     // lifecycle enters lost and establishes a fresh lease. Only generation identity loss is terminal.
-    return result.ok ? { ok: true, expiresAt: result.expiresAt } : { ok: false }
+    return { ok: renewed }
   }
 
   async unsubscribeRoute(inc: string, laneKey: string, subscriberDoId: string, leaseId: string): Promise<void> {
@@ -397,15 +394,7 @@ export class TelefuncRoomDurableObject extends DurableObject {
     await Promise.all(installations.map((installation) => this.#invalidateInstallation(installation, true)))
     this.ctx.storage.transactionSync(() => dropGenerationRows(this.#sql, inc))
     this.#fanout.clearIncarnation(inc)
-    // Report the routes that were on the dropped generation so the facade can close their local
-    // attachments (the channel no longer exists — the subscription is terminal, not merely lost).
-    const droppedSubscribers = installations.map((installation) => ({
-      laneKey: installation.laneKey,
-      subscriberDoId: installation.subscriberDoId,
-      leaseId: installation.leaseId,
-      generationToken: installation.generationToken,
-    }))
-    return { droppedSubscribers }
+    return { ok: true }
   }
 
   // ── directory (this DO, addressed as a singleton, is the best-effort projection store) ──
@@ -440,7 +429,7 @@ export class TelefuncRoomDurableObject extends DurableObject {
     this.ctx.storage.transactionSync(() => {
       this.#sql.exec('DELETE FROM cell WHERE expires_at IS NOT NULL AND expires_at <= ?', now)
       const currentInc = readLiveHead(this.#sql, now)?.currentInc ?? null
-      orphanIncs = observeAndListGraceAgedOrphans(this.#sql, currentInc, now, GEN_ORPHAN_GRACE_MS)
+      orphanIncs = listGenerations(this.#sql).filter((inc) => inc !== currentInc)
       // A lapsed tombstone is reclaimed through the delete path (this backend has no native head TTL).
       this.#sql.exec(
         "DELETE FROM head WHERE id = 1 AND state = 'closed' AND expires_at IS NOT NULL AND expires_at <= ?",

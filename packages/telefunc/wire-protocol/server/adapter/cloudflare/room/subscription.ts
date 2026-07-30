@@ -15,7 +15,7 @@ type CloudflareRoomSubscriptionOptions = {
 }
 
 /** Cloudflare's raw driver edge. It acknowledges only after the authority has durably registered the
- * exact route. Retry, replacement, readiness generations and local fan-out all live in SubscriptionManager. */
+ * exact route. Room owns retry/replacement policy; shared subscription code owns readiness and local fan-out. */
 export class CloudflareRoomSubscriptionAttempt implements SubscriptionAttempt {
   readonly ready: Promise<void>
   readonly #source: CloudflareRoomSubscriptionSource
@@ -28,8 +28,7 @@ export class CloudflareRoomSubscriptionAttempt implements SubscriptionAttempt {
   #settleReady!: { resolve: () => void; reject: (error: unknown) => void }
   #readySettled = false
   #cancelRenewal: (() => void) | null = null
-  #establishment: Promise<void> | null = null
-  #establishmentSettled = false
+  #started = false
   #unsubscribed = false
 
   constructor(
@@ -47,14 +46,9 @@ export class CloudflareRoomSubscriptionAttempt implements SubscriptionAttempt {
   }
 
   start(): void {
-    if (this.#establishment !== null || this.#isClosed()) return
-    const establishment = this.#establish()
-    this.#establishment = establishment
-    void establishment
-      .finally(() => {
-        this.#establishmentSettled = true
-      })
-      .catch(() => {})
+    if (this.#started || this.#isClosed()) return
+    this.#started = true
+    void this.#establish()
   }
 
   state(): SubscriptionAttemptState {
@@ -66,14 +60,15 @@ export class CloudflareRoomSubscriptionAttempt implements SubscriptionAttempt {
     return () => this.#listeners.delete(cb)
   }
 
-  matches(request: RoomShardInvalidationRequest): boolean {
+  matches(request: RoomShardInvalidationRequest, terminalWhileEstablishing: boolean = false): boolean {
     return (
       request.roomId === this.#source.roomId &&
       request.inc === this.#source.inc &&
       request.laneKey === this.#source.laneKey &&
       request.subscriberDoId === this.#source.subscriberDoId &&
       request.leaseId === this.#leaseId &&
-      request.generationToken === this.#generationToken
+      (request.generationToken === this.#generationToken ||
+        (terminalWhileEstablishing && this.#state === 'establishing'))
     )
   }
 
@@ -89,19 +84,17 @@ export class CloudflareRoomSubscriptionAttempt implements SubscriptionAttempt {
   terminate(): void {
     if (this.#unsubscribed) return
     this.#unsubscribed = true
-    const needsLateTeardown = !this.#establishmentSettled
     this.#resolveReady()
     this.#terminate()
-    void this.#settleTeardown(needsLateTeardown).catch(console.error)
+    void this.#teardown().catch(console.error)
   }
 
   async unsubscribe(): Promise<void> {
     if (this.#unsubscribed) return
     this.#unsubscribed = true
-    const needsLateTeardown = !this.#establishmentSettled
     this.#resolveReady()
     this.#close()
-    await this.#settleTeardown(needsLateTeardown)
+    await this.#teardown()
   }
 
   async #establish(): Promise<void> {
@@ -171,14 +164,6 @@ export class CloudflareRoomSubscriptionAttempt implements SubscriptionAttempt {
       this.#source.subscriberDoId,
       this.#leaseId,
     )
-  }
-
-  async #settleTeardown(needsLateTeardown: boolean): Promise<void> {
-    const teardown = this.#teardown()
-    if (needsLateTeardown && this.#establishment !== null) {
-      void this.#establishment.finally(() => this.#teardown()).catch((error) => console.error(error))
-    }
-    await teardown
   }
 
   #close(): void {

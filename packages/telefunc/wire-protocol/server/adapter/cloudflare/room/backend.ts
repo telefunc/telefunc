@@ -130,7 +130,6 @@ export class CloudflareRoomSessionManager {
   readonly #subscriptionPartition = crypto.randomUUID()
   readonly #getRoomNamespace: () => CloudflareRoomNamespace
   readonly #entries = new Map<string, CloudflareRoomSubscriptionAttempt>()
-  readonly #deliverySettlements = new Map<string, Promise<void>>()
   #disposed = false
 
   constructor(sessionId: string, getRoomNamespace: () => CloudflareRoomNamespace) {
@@ -172,7 +171,7 @@ export class CloudflareRoomSessionManager {
 
   invalidate(request: RoomShardInvalidationRequest): void {
     const entry = this.#entries.get(JSON.stringify([request.roomId, request.inc, request.laneKey]))
-    if (entry?.matches(request)) {
+    if (entry?.matches(request, request.terminal === true)) {
       if (request.terminal === true) entry.terminate()
       else entry.invalidate()
     }
@@ -183,7 +182,6 @@ export class CloudflareRoomSessionManager {
     this.#disposed = true
     for (const attempt of this.#entries.values()) attempt.terminate()
     this.#entries.clear()
-    this.#deliverySettlements.clear()
   }
 
   get subscriptionPartition(): string {
@@ -197,33 +195,6 @@ export class CloudflareRoomSessionManager {
   authority(roomId: string): CloudflareRoomAuthorityStub {
     const namespace = this.#getRoomNamespace()
     return namespace.get(namespace.idFromName(roomId))
-  }
-
-  settleDelivery(roomId: string, inc: string, lane: LaneId, attempt: Promise<void>): Promise<void> {
-    // `awaitDelivery()` is a second DO RPC so workerd may return two already ordered authority attempts
-    // in either RPC-response order. Keep the caller-visible fence on this exact event-local manager;
-    // the stateless backend proxy never owns settlement state across session shards.
-    const key = JSON.stringify([roomId, inc, laneKeyOf(lane)])
-    const previous = this.#deliverySettlements.get(key) ?? Promise.resolve()
-    const delivery = previous.then(() => attempt)
-    const tail = delivery.then(
-      () => undefined,
-      () => undefined,
-    )
-    this.#deliverySettlements.set(key, tail)
-    void tail.then(() => {
-      if (this.#deliverySettlements.get(key) === tail) this.#deliverySettlements.delete(key)
-    })
-    void attempt.catch(() => {})
-    void delivery.catch(() => {})
-    return delivery
-  }
-
-  dropGenerationSettlements(roomId: string, inc: string): void {
-    for (const key of this.#deliverySettlements.keys()) {
-      const [candidateRoomId, candidateInc] = JSON.parse(key) as [string, string, string]
-      if (candidateRoomId === roomId && candidateInc === inc) this.#deliverySettlements.delete(key)
-    }
   }
 
   #openSubscription(
@@ -329,19 +300,14 @@ export class CloudflareRoomBackend implements BackendDriver {
     const manager = getCloudflareRoomSessionManager()
     const stub = manager.authority(roomId)
     const wire = await stub.commitLane(roomId, inc, lane, payload, opts)
-    try {
-      if ('error' in wire) throw new Error(wire.error)
-      if ('stale' in wire) return { stale: true }
-      assertOrderingPosition(wire.seq, wire.timestamp, 'CloudflareRoomBackend.commitLane')
-      const deliveryToken = wire.deliveryToken
-      const attempt = new Promise<void>((resolve, reject) => {
-        setTimeout(() => void stub.awaitDelivery(deliveryToken).then(resolve, reject), 0)
-      })
-      const delivery = manager.settleDelivery(roomId, inc, lane, attempt)
-      return { accepted: true, seq: wire.seq, timestamp: wire.timestamp, receivers: wire.receivers, delivery }
-    } finally {
-      disposeRpcResult(wire)
-    }
+    if ('error' in wire) throw new Error(wire.error)
+    if ('stale' in wire) return { stale: true }
+    assertOrderingPosition(wire.seq, wire.timestamp, 'CloudflareRoomBackend.commitLane')
+    const deliveryToken = wire.deliveryToken
+    const delivery = new Promise<void>((resolve, reject) => {
+      setTimeout(() => void stub.awaitDelivery(deliveryToken).then(resolve, reject), 0)
+    })
+    return { accepted: true, seq: wire.seq, timestamp: wire.timestamp, receivers: wire.receivers, delivery }
   }
   async readRetained(roomId: string, inc: string, lane: LaneId) {
     const wire = await this.#stub(roomId).readRetained(inc, lane)
@@ -359,13 +325,8 @@ export class CloudflareRoomBackend implements BackendDriver {
     return this.#stub(roomId).listGenerations()
   }
   async dropGeneration(roomId: string, inc: string) {
-    const manager = getCloudflareRoomSessionManager()
-    const wire = await manager.authority(roomId).dropGeneration(inc)
+    const wire = await this.#stub(roomId).dropGeneration(inc)
     if ('error' in wire) throw new Error(wire.error)
-    manager.dropGenerationSettlements(roomId, inc)
-    for (const dropped of wire.droppedSubscribers) {
-      manager.invalidate({ roomId, inc, ...dropped, terminal: true })
-    }
   }
   async directoryPut(roomId: string, incTag: string) {
     await this.#directory().directoryPut(roomId, incTag)
@@ -405,12 +366,6 @@ export class CloudflareRoomBackend implements BackendDriver {
   #directory(): CloudflareRoomAuthorityStub {
     return this.#stub(DIRECTORY_DO_NAME)
   }
-}
-
-function disposeRpcResult(value: unknown): void {
-  if (typeof value !== 'object' || value === null || !(Symbol.dispose in value)) return
-  const dispose = (value as { [Symbol.dispose]?: unknown })[Symbol.dispose]
-  if (typeof dispose === 'function') dispose.call(value)
 }
 
 function headFromWire(wire: HeadWire): RoomHead {
