@@ -104,7 +104,7 @@ function testRoom() {
       await autoRetry(async () => {
         const r = await getResult<{ received: string[] }>('#room-result')
         // The late subscriber gets the pinned message via the retained slot — read only after its
-        // subscription is live, so an async transport (the docker run uses real Redis) can't drop it.
+        // subscription is live, so the subscribe/read handoff cannot drop it.
         expect(r.received).deep.equal(['pinned'])
       })
     },

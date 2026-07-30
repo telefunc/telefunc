@@ -116,8 +116,8 @@ function Room() {
 
           // A publisher pins a retained message; a subscriber that arrives *after* the publish must
           // still receive it (MQTT-style). The retained slot is read only once the subscription is
-          // live at the backend — the readiness handoff — so an async transport (Redis) can't drop
-          // it in the gap between subscribing and the read. Keep the publisher's view referenced so
+          // live at the backend — the readiness handoff — so the subscriber can't miss it in the
+          // gap between subscribing and the read. Keep the publisher's view referenced so
           // its membership (and thus the owned retained slot) survives until the late subscriber reads.
           const pubView = await onGetRoom(roomId)
           const author = await pubView.join({ meta: { name: 'Author' } })
