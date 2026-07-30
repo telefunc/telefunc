@@ -45,7 +45,10 @@ function createAbortError(abortValue?: unknown, message?: string): AbortError {
 }
 
 function isAbort(thing: unknown): thing is AbortError {
-  return thing instanceof AbortError || (typeof thing === 'object' && thing !== null && abortBrand in thing)
+  return (
+    thing instanceof AbortError ||
+    (typeof thing === 'object' && thing !== null && abortBrand in thing && thing[abortBrand] === true)
+  )
 }
 
 function getAbortMessage(abortValue: unknown): string {
