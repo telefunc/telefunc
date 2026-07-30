@@ -62,6 +62,13 @@ abstract class ParticipantBase implements LocalParticipant {
   /** @internal — route this participant's inbox to a remote holder instead of local listeners. */
   _setForwarder(forwarder: (msg: InboxMessage) => Promise<DmReply> | void): void {
     this._forwarder = forwarder
+    const held = this._pendingInbox
+    this._pendingInbox = null
+    if (!held) return
+    for (const { msg, ackResolve } of held) {
+      const reply = forwarder(msg)
+      if (ackResolve) void Promise.resolve(reply ?? { ok: true, result: undefined }).then(ackResolve)
+    }
   }
 
   /** @internal — already bound to a client holder (serialized once, via `bindParticipantStubChannel`)? */

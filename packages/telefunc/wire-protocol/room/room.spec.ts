@@ -507,6 +507,26 @@ describe('Room public behavior', () => {
     expect(fromRoom).toEqual([[{ notice: true }, null]])
   })
 
+  it('drains DMs that arrived before a participant was bound to its client forwarder', async () => {
+    const room = await Room.create('pre-bind-inbox')
+    const target = await room.join()
+    const sender = await room.join()
+    await sender.send(target.id, 'plain-before-bind')
+    const acknowledging = sender.send(target.id, 'ack-before-bind', { ack: true })
+    await settle()
+
+    const forwarded: unknown[] = []
+    ;(target as unknown as { _setForwarder(forwarder: (message: { data: unknown }) => unknown): void })._setForwarder(
+      (message) => {
+      forwarded.push(message.data)
+      return Promise.resolve({ ok: true, result: `handled:${String(message.data)}` })
+      },
+    )
+
+    expect(forwarded).toEqual(['plain-before-bind', 'ack-before-bind'])
+    await expect(acknowledging).resolves.toMatchObject({ response: 'handled:ack-before-bind' })
+  })
+
   it('applies before guards and after hooks around authoritative joins, publishes, and sends', async () => {
     await Room.create('guarded')
     const room = await Room.get('guarded')
