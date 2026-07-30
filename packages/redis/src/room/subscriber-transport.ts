@@ -8,21 +8,21 @@ import type {
   SubscriptionBinding,
   SubscriptionDriver,
 } from 'telefunc/backend'
-import { channelKey, decodeRedisOrderingFrame, generationInvalidationChannel, laneKey } from './layout.js'
-
-export type RedisGenerationAttempt = {
-  attemptId: string
-  createdAt: number | null
-  generationToken: string | null
-}
+import {
+  channelKey,
+  decodeRedisOrderingFrame,
+  generationInvalidationChannel,
+  laneKey,
+  REDIS_DELIVERY_FENCE_BYTE,
+} from './layout.js'
 
 type RedisDurableSource = Extract<BackendSubscriptionSource, { kind: 'durable' }>
 
 type RedisSubscriptionDriverOptions = {
   prefix: string
   createSubscriber: () => Promise<Redis>
-  captureGeneration: (source: RedisDurableSource, attempt: RedisGenerationAttempt) => Promise<void>
-  validateGeneration: (source: RedisDurableSource, attempt: RedisGenerationAttempt) => Promise<boolean>
+  captureGeneration: (source: RedisDurableSource) => Promise<string | null>
+  validateGeneration: (source: RedisDurableSource, token: string) => Promise<boolean>
 }
 
 /**
@@ -78,9 +78,20 @@ export class RedisSubscriptionDriver implements SubscriptionDriver {
     return attempt
   }
 
-  async flush(source: BackendSubscriptionSource): Promise<void> {
+  prepareFlush(source: BackendSubscriptionSource): { token: string; delivery: Promise<void>; cancel(): void } {
+    const token = randomUUID()
     const attempts = [...(this._attempts.get(redisSubscriptionChannel(this._prefix, source)) ?? [])]
-    await Promise.all(attempts.map((attempt) => attempt.flush()))
+    const armed = attempts.flatMap((attempt) => {
+      const delivery = attempt.prepareFlush(token)
+      return delivery === null ? [] : [delivery]
+    })
+    return {
+      token: armed.length === 0 ? '' : token,
+      delivery: Promise.all(armed).then(() => {}),
+      cancel: () => {
+        for (const attempt of attempts) attempt.cancelFlush(token)
+      },
+    }
   }
 }
 
@@ -102,11 +113,7 @@ class RedisSubscriptionAttempt implements SubscriptionAttempt {
   private readonly _validateGeneration: RedisSubscriptionDriverOptions['validateGeneration']
   private readonly _onDisposed: () => void
   private readonly _listeners = new Set<(state: SubscriptionAttemptState) => void>()
-  private readonly _generation: RedisGenerationAttempt = {
-    attemptId: randomUUID(),
-    createdAt: null,
-    generationToken: null,
-  }
+  private _generationToken: string | null = null
   private _settle!: { resolve: () => void; reject: (error: unknown) => void }
   private _state: SubscriptionAttemptState = 'establishing'
   private _subscriber: Redis | null = null
@@ -114,6 +121,7 @@ class RedisSubscriptionAttempt implements SubscriptionAttempt {
   private _readySettled = false
   private _cleanup: Promise<void> | null = null
   private _lastError: unknown = new Error('Redis subscriber connection closed')
+  private readonly _flushes = new Map<string, { resolve(): void; reject(error: unknown): void }>()
 
   constructor(options: RedisSubscriptionAttemptOptions) {
     this._prefix = options.prefix
@@ -146,29 +154,37 @@ class RedisSubscriptionAttempt implements SubscriptionAttempt {
     return this._cleanup
   }
 
-  async flush(): Promise<void> {
-    if (this._localReceiverCount() === 0) return
-    await this.ready
-    if (this._localReceiverCount() === 0) return
+  prepareFlush(token: string): Promise<void> | null {
     const subscriber = this._subscriber
-    const source = redisSubscriptionChannel(this._prefix, this._source)
-    if (this._state !== 'ready' || subscriber === null || subscriber.status !== 'ready') {
-      throw new Error(`Redis subscriber PING cannot fence unavailable source '${source}'`)
-    }
-    await subscriber.ping()
-    if (this._state !== 'ready' || this._subscriber !== subscriber) {
-      throw new Error(`Redis subscriber PING crossed source '${source}'`)
-    }
+    if (
+      this._localReceiverCount() === 0 ||
+      this._state !== 'ready' ||
+      subscriber === null ||
+      subscriber.status !== 'ready'
+    )
+      return null
+    return new Promise<void>((resolve, reject) => this._flushes.set(token, { resolve, reject }))
+  }
+
+  cancelFlush(token: string): void {
+    const flush = this._flushes.get(token)
+    if (flush === undefined) return
+    this._flushes.delete(token)
+    flush.resolve()
   }
 
   private async _establish(): Promise<void> {
     try {
       if (this._source.kind === 'durable') {
-        await this._captureGeneration(this._source, this._generation)
-        if (this._state === 'closed') return
+        this._generationToken = await this._captureGeneration(this._source)
+        if (this._generationToken === null) {
+          this._terminate(new Error(`subscribeLane: generation '${this._source.roomId}/${this._source.inc}' is absent`))
+          return
+        }
+        if (this._isStopped()) return
       }
       const subscriber = await this._createSubscriber()
-      if (this._state === 'closed') {
+      if (this._isStopped()) {
         subscriber.disconnect()
         return
       }
@@ -183,17 +199,22 @@ class RedisSubscriptionAttempt implements SubscriptionAttempt {
       // the deadline, retries, readiness generations and attempt epochs.
       await subscriber.subscribe(...channels)
       this._subscribed = true
-      if (this._isClosed() || this._subscriber !== subscriber) return
+      if (this._isStopped() || this._subscriber !== subscriber) return
 
-      if (this._source.kind === 'durable' && !(await this._validateGeneration(this._source, this._generation))) {
-        throw new Error(`subscribeLane: generation '${this._source.roomId}/${this._source.inc}' was invalidated`)
+      if (
+        this._source.kind === 'durable' &&
+        (this._generationToken === null || !(await this._validateGeneration(this._source, this._generationToken)))
+      ) {
+        this._terminate(
+          new Error(`subscribeLane: generation '${this._source.roomId}/${this._source.inc}' was invalidated`),
+        )
+        return
       }
-      if (this._isClosed() || this._subscriber !== subscriber) return
-      this._readySettled = true
-      this._settle.resolve()
+      if (this._isStopped() || this._subscriber !== subscriber) return
+      this._resolveReady()
       this._transition('ready')
     } catch (error) {
-      if (this._state === 'closed') return
+      if (this._isStopped()) return
       this._lastError = error
       this._rejectReady(error)
       this._transition('closed')
@@ -201,10 +222,13 @@ class RedisSubscriptionAttempt implements SubscriptionAttempt {
   }
 
   private async _dispose(): Promise<void> {
-    this._transition('closed')
-    this._rejectReady(
-      new Error(`Redis subscription '${redisSubscriptionChannel(this._prefix, this._source)}' was closed`),
-    )
+    this._rejectFlushes(new Error('Redis delivery fence was closed'))
+    if (this._state !== 'terminated') {
+      this._transition('closed')
+      this._rejectReady(
+        new Error(`Redis subscription '${redisSubscriptionChannel(this._prefix, this._source)}' was closed`),
+      )
+    }
     const subscriber = this._subscriber
     this._subscriber = null
     if (subscriber !== null) {
@@ -227,12 +251,21 @@ class RedisSubscriptionAttempt implements SubscriptionAttempt {
   private readonly _onMessage = (channelBytes: Buffer, frame: Buffer): void => {
     const channel = channelBytes.toString()
     if (this._source.kind === 'durable' && channel === redisInvalidationChannel(this._prefix, this._source)) {
-      if (this._generation.generationToken === null || frame.toString() === this._generation.generationToken) {
-        this._transition('closed')
+      if (this._generationToken === null || frame.toString() === this._generationToken) {
+        this._terminate(new Error('Redis generation subscription was invalidated'))
       }
       return
     }
     if (channel !== redisSubscriptionChannel(this._prefix, this._source) || this._state !== 'ready') return
+    if (frame[0] === REDIS_DELIVERY_FENCE_BYTE) {
+      const token = frame.subarray(1).toString()
+      const flush = this._flushes.get(token)
+      if (flush !== undefined) {
+        this._flushes.delete(token)
+        flush.resolve()
+      }
+      return
+    }
     const { payload, info } = decodeRedisOrderingFrame(frame)
     try {
       const result = this._receiver(Uint8Array.from(payload), info) as unknown
@@ -255,13 +288,33 @@ class RedisSubscriptionAttempt implements SubscriptionAttempt {
   }
 
   private _connectionClosed(): void {
-    if (this._state === 'closed') return
+    if (this._isStopped()) return
     this._rejectReady(this._lastError)
+    this._rejectFlushes(this._lastError)
     this._transition('closed')
   }
 
-  private _isClosed(): boolean {
-    return this._state === 'closed'
+  private _rejectFlushes(error: unknown): void {
+    for (const flush of this._flushes.values()) flush.reject(error)
+    this._flushes.clear()
+  }
+
+  private _isStopped(): boolean {
+    return this._state === 'closed' || this._state === 'terminated'
+  }
+
+  private _terminate(error: unknown): void {
+    if (this._isStopped()) return
+    this._lastError = error
+    this._resolveReady()
+    this._rejectFlushes(error)
+    this._transition('terminated')
+  }
+
+  private _resolveReady(): void {
+    if (this._readySettled) return
+    this._readySettled = true
+    this._settle.resolve()
   }
 
   private _rejectReady(error: unknown): void {

@@ -25,9 +25,9 @@ same client. An explicit `installBackend()` remains available as an advanced ove
 
 `RedisRoomBackend` accepts either an ioredis `Redis` or `Cluster` client. The Cluster realization keeps
 each room's atomic records in one hash slot, follows `MOVED` and `ASK` redirections, and discovers room
-generation data across every master. Its `receivers` capability is `node-local`: Redis reports the
-subscriber connections attached to the master executing `PUBLISH`, while Cluster Pub/Sub still delivers
-the frame to the package's shared subscriber connection on another master.
+generation data across every master. Its `receivers` capability is `none`: Cluster-wide Pub/Sub delivery
+can reach a subscriber connection on another master, but the executing master's `PUBLISH` count cannot
+report that global receiver total.
 
 ```ts
 import { Cluster } from 'ioredis'

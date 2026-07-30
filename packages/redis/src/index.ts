@@ -4,11 +4,11 @@ export type { RedisRoomBackendOptions } from './room/backend.js'
 
 import type { Cluster, Redis } from 'ioredis'
 import { setDefaultBackend } from 'telefunc/__internal'
-import { RedisRoomBackend } from './room/backend.js'
+import { RedisRoomBackend, type RedisRoomBackendOptions } from './room/backend.js'
 
 /** Installs Redis as Telefunc's complete backend: generic Broadcast plus durable Room state. */
-function installRedis(redis: Redis | Cluster, options: InstallRedisOptions = {}): void {
-  setDefaultBackend(
+function installRedis(redis: Redis | Cluster, options: InstallRedisOptions = {}) {
+  return setDefaultBackend(
     () => new RedisRoomBackend({ redis, prefix: options.prefix }),
     redisBackendDefaultIdentity(redis, options.prefix),
   )
@@ -43,18 +43,6 @@ type InstallRedisOptions = {
   prefix?: string
 }
 
-type RedisBroadcastOptions = {
-  redis: Redis | Cluster
-  /** Default: `tf:`. */
-  prefix?: string
-}
-
-/**
- * The released constructible Redis export is the same backend driver installed by installRedis().
- * Core composes its raw subscription edge into the supervised BackendSpi; no second transport exists.
- */
-class RedisTransport extends RedisRoomBackend {
-  constructor(options: RedisBroadcastOptions) {
-    super(options)
-  }
-}
+type RedisBroadcastOptions = RedisRoomBackendOptions
+type RedisTransport = RedisRoomBackend
+const RedisTransport = RedisRoomBackend

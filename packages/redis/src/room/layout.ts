@@ -17,8 +17,6 @@
 //                                           SREM'd by dropGeneration; the fresh-inc guard is one SISMEMBER
 //   gen-token: tf:room:{rid}:gen-tokens      HASH inc -> non-reusable generation token (the installing
 //                                           head revision), removed only with the final gens SREM
-//   captures:  tf:room:{rid}:g:<inc>:route-captures  HASH attempt id -> bounded capture record;
-//              tf:room:{rid}:g:<inc>:route-capture-exp ZSET of authority expiry -> attempt id
 //   dir index: tf:{rid-dir}<prefix>… — the directory is global, its own two co-slotted keys (backend.ts)
 //
 // AUTHORITY TIME: production derives `now_ms` from `redis.call('TIME')` (the one central clock, atomic
@@ -31,6 +29,8 @@ import { HEAD_TRANSITIONS, ORDERING_FRAME_LAYOUT, laneKey, type LaneId } from 't
 export { laneKey }
 
 export const DEFAULT_ROOM_PREFIX = 'tf:'
+export const REDIS_DELIVERY_FENCE_BYTE = 0xff
+export const REDIS_SAFE_INTEGER_MAX = Number.MAX_SAFE_INTEGER
 
 // ── key naming ────────────────────────────────────────────────────────────
 
@@ -51,12 +51,6 @@ export function gensKey(prefix: string, roomId: string): string {
 }
 export function generationTokensKey(prefix: string, roomId: string): string {
   return `${roomTag(prefix, roomId)}:gen-tokens`
-}
-export function routeCapturesKey(prefix: string, roomId: string, inc: string): string {
-  return `${genPrefix(prefix, roomId, inc)}:route-captures`
-}
-export function routeCaptureExpiriesKey(prefix: string, roomId: string, inc: string): string {
-  return `${genPrefix(prefix, roomId, inc)}:route-capture-exp`
 }
 export function genPrefix(prefix: string, roomId: string, inc: string): string {
   return `${roomTag(prefix, roomId)}:g:${inc}`
@@ -288,89 +282,25 @@ return '{"tag":"head","head":' .. encoded .. '}'
 export const HEAD_CX_CMD = 'tfRoomHeadCx'
 export const HEAD_CX_KEYS = 4
 
-// SUBSCRIBE establishment is a network operation outside Lua. Capture therefore pins the exact,
-// authority-owned generation token before that await. The stable attempt id makes a lost first response
-// idempotent; the authority-aligned creation epoch distinguishes a genuinely fresh absent attempt from
-// a delayed retry after bounded reclamation. Expired rows are swept mechanically at the start of every
-// capture, so one abandoned attempt cannot grow unbounded while the room remains active.
-//   KEYS: [1]=head [2]=gens [3]=generation-tokens [4]=captures-hash [5]=capture-expiry-zset
-//   ARGV: [1]=now [2]=inc [3]=attempt-id [4]=created-at [5]=ttl-ms
-export const CAPTURE_GENERATION_LUA = `${NOW_FN}
-local head_key, gens_key, tokens_key = KEYS[1], KEYS[2], KEYS[3]
-local captures_key, expiries_key = KEYS[4], KEYS[5]
-local now = tf_now(ARGV[1])
-local inc, attempt_id = ARGV[2], ARGV[3]
-local created_at, ttl = tonumber(ARGV[4]), tonumber(ARGV[5])
-
-local expired = redis.call('ZRANGEBYSCORE', expiries_key, '-inf', now)
-for _, id in ipairs(expired) do redis.call('HDEL', captures_key, id) end
-if #expired > 0 then redis.call('ZREM', expiries_key, unpack(expired)) end
-
-local current_token = redis.call('HGET', tokens_key, inc)
-local head = tf_head(head_key, now)
-local generation_live = head and head.state == 'open' and head.inc == inc
-  and redis.call('SISMEMBER', gens_key, inc) == 1 and current_token ~= false
-local raw = redis.call('HGET', captures_key, attempt_id)
-if raw then
-  local prior = cjson.decode(raw)
-  if prior.inc ~= inc or prior.createdAt ~= created_at or prior.expiresAt <= now
-    or not generation_live or prior.token ~= current_token then
-    return cjson.encode({ rejected = true, terminal = true, reason = 'generation capture is invalid' })
-  end
-  prior.expiresAt = now + ttl
-  redis.call('HSET', captures_key, attempt_id, cjson.encode(prior))
-  redis.call('ZADD', expiries_key, prior.expiresAt, attempt_id)
-  return cjson.encode({ ok = true, token = prior.token })
-end
-
-if created_at == nil or created_at ~= math.floor(created_at) or created_at > now or created_at + ttl <= now then
-  return cjson.encode({ rejected = true, terminal = true, reason = 'generation capture attempt is absent or stale' })
-end
-if not generation_live then
-  return cjson.encode({ rejected = true, terminal = true, reason = 'generation is not current and open' })
-end
-local record = { inc = inc, token = current_token, createdAt = created_at, expiresAt = now + ttl }
-redis.call('HSET', captures_key, attempt_id, cjson.encode(record))
-redis.call('ZADD', expiries_key, record.expiresAt, attempt_id)
-return cjson.encode({ ok = true, token = current_token })
-`
-
-export const CAPTURE_GENERATION_CMD = 'tfRoomCaptureGeneration'
-export const CAPTURE_GENERATION_KEYS = 5
-
-// Post-SUBSCRIBE validation is exact and read-only on failure. Only a successful first establishment
-// may touch its capture pin; a stale/delayed ack can never extend abandoned lifecycle state.
-//   KEYS: same five keys as capture
-//   ARGV: [1]=now [2]=inc [3]=expected-token [4]=attempt-id-or-empty [5]=created-at-or-empty [6]=ttl-ms
+// SUBSCRIBE establishment snapshots the generation token before its network await. This atomic
+// post-ack check rejects a token whose generation closed or was dropped during that await.
+//   KEYS: [1]=head [2]=gens [3]=generation-tokens
+//   ARGV: [1]=now [2]=inc [3]=expected-token
 export const VALIDATE_GENERATION_LUA = `${NOW_FN}
 local head_key, gens_key, tokens_key = KEYS[1], KEYS[2], KEYS[3]
-local captures_key, expiries_key = KEYS[4], KEYS[5]
 local now = tf_now(ARGV[1])
 local inc, expected_token = ARGV[2], ARGV[3]
 local head = tf_head(head_key, now)
 local current_token = redis.call('HGET', tokens_key, inc)
 if not head or head.state ~= 'open' or head.inc ~= inc
   or redis.call('SISMEMBER', gens_key, inc) ~= 1 or current_token ~= expected_token then
-  return cjson.encode({ ok = false, terminal = true })
+  return 0
 end
-if ARGV[4] ~= '' then
-  local raw = redis.call('HGET', captures_key, ARGV[4])
-  if not raw then return cjson.encode({ ok = false, terminal = true }) end
-  local capture = cjson.decode(raw)
-  local created_at = tonumber(ARGV[5])
-  if capture.inc ~= inc or capture.token ~= expected_token or capture.createdAt ~= created_at
-    or capture.expiresAt <= now then
-    return cjson.encode({ ok = false, terminal = true })
-  end
-  capture.expiresAt = now + tonumber(ARGV[6])
-  redis.call('HSET', captures_key, ARGV[4], cjson.encode(capture))
-  redis.call('ZADD', expiries_key, capture.expiresAt, ARGV[4])
-end
-return cjson.encode({ ok = true })
+return 1
 `
 
 export const VALIDATE_GENERATION_CMD = 'tfRoomValidateGeneration'
-export const VALIDATE_GENERATION_KEYS = 5
+export const VALIDATE_GENERATION_KEYS = 3
 
 // The durable invalidation sources are removed atomically and LAST, after every fallible local
 // UNSUBSCRIBE cleanup succeeds. A failed cleanup therefore leaves both values available for retry.
@@ -427,7 +357,7 @@ export const CELLS_CX_CMD = 'tfRoomCellsCx'
 //   KEYS: [1]=head [2]=order [3]=retained [4]=channel [5]=retained aggregate payload size
 //         [6..]=required live cells
 //   ARGV: [1]=now [2]=inc [3]=laneKind [4]=closingLease('') [5]=retain('0'|'1')
-//         [6]=payload [7]=aggregate retained payload cap
+//         [6]=payload [7]=aggregate retained payload cap [8]=local delivery-fence token or ''
 export const COMMIT_LUA = `${NOW_FN}
 ${REDIS_ORDERING_FRAME_LUA}
 local head_key, order_key, retained_key, channel_key, retained_size_key = KEYS[1], KEYS[2], KEYS[3], KEYS[4], KEYS[5]
@@ -460,7 +390,9 @@ if ARGV[5] == '1' then
   local current_total = tonumber(redis.call('GET', retained_size_key) or '0')
   local old_frame_bytes = redis.call('STRLEN', retained_key)
   local old_payload_bytes = 0
-  if old_frame_bytes > 16 then old_payload_bytes = old_frame_bytes - 16 end
+  if old_frame_bytes > ${ORDERING_FRAME_LAYOUT.headerBytes} then
+    old_payload_bytes = old_frame_bytes - ${ORDERING_FRAME_LAYOUT.headerBytes}
+  end
   retained_total = current_total - old_payload_bytes + string.len(ARGV[6])
   if retained_total > tonumber(ARGV[7]) then
     return redis.error_reply('commitLane: retained aggregate ' .. retained_total .. ' bytes exceeds the ' .. ARGV[7] .. ' byte cap')
@@ -476,18 +408,18 @@ if prev then
   if not pseq then return redis.error_reply('commitLane: invalid ordering watermark') end
   base_seq = tonumber(pseq)
   base_ts = tonumber(pts)
-  if not base_seq or not base_ts or base_seq < 0 or base_seq > 9007199254740991
-      or base_ts < 0 or base_ts > 9007199254740991 then
+  if not base_seq or not base_ts or base_seq < 0 or base_seq > ${REDIS_SAFE_INTEGER_MAX}
+      or base_ts < 0 or base_ts > ${REDIS_SAFE_INTEGER_MAX} then
     return redis.error_reply('commitLane: invalid ordering watermark')
   end
 end
-if base_seq >= 9007199254740991 then
+if base_seq >= ${REDIS_SAFE_INTEGER_MAX} then
   return redis.error_reply('commitLane: sequence exhausted for the ordering domain')
 end
 local seq = base_seq + 1
 local ts = now
 if base_ts > ts then ts = base_ts end
-if seq < 1 or seq > 9007199254740991 or ts < 0 or ts > 9007199254740991 then
+if seq < 1 or seq > ${REDIS_SAFE_INTEGER_MAX} or ts < 0 or ts > ${REDIS_SAFE_INTEGER_MAX} then
   return redis.error_reply('commitLane: invalid ordering position')
 end
 -- Lua's implicit number-to-string conversion uses limited significant digits at the safe-integer
@@ -502,6 +434,9 @@ if ARGV[5] == '1' then
   redis.call('SET', retained_size_key, retained_total)
 end
 local receivers = redis.call('PUBLISH', channel_key, frame)
+-- A Cluster forwards both publications from this slot owner over the same ordered bus link. The
+-- impossible ordering-frame prefix makes the second publication an internal local-dispatch fence.
+if ARGV[8] ~= '' then redis.call('PUBLISH', channel_key, string.char(${REDIS_DELIVERY_FENCE_BYTE}) .. ARGV[8]) end
 return '{"accepted":true,"seq":' .. seq_text .. ',"timestamp":' .. ts_text .. ',"receivers":' .. receivers .. '}'
 `
 
@@ -516,12 +451,14 @@ local if_seq = ARGV[1]
 if if_seq ~= '' then
   if #KEYS ~= 2 then return redis.error_reply('deleteRetained: ifSeq requires one lane') end
   local expected = tonumber(if_seq)
-  if not expected or expected < 1 or expected > 9007199254740991 or expected ~= math.floor(expected) then
+  if not expected or expected < 1 or expected > ${REDIS_SAFE_INTEGER_MAX} or expected ~= math.floor(expected) then
     return redis.error_reply('deleteRetained: invalid ifSeq')
   end
   local frame = redis.call('GET', KEYS[2])
   if not frame then return total end
-  if string.len(frame) < 16 then return redis.error_reply('deleteRetained: invalid retained frame') end
+  if string.len(frame) < ${ORDERING_FRAME_LAYOUT.headerBytes} then
+    return redis.error_reply('deleteRetained: invalid retained frame')
+  end
   local seq_hi, seq_lo = struct.unpack('>I4I4', frame)
   local current = seq_hi * 4294967296 + seq_lo
   if current ~= expected then return total end
@@ -530,7 +467,9 @@ for i = 2, #KEYS do
   local frame_bytes = redis.call('STRLEN', KEYS[i])
   if frame_bytes > 0 then
     local payload_bytes = 0
-    if frame_bytes > 16 then payload_bytes = frame_bytes - 16 end
+    if frame_bytes > ${ORDERING_FRAME_LAYOUT.headerBytes} then
+      payload_bytes = frame_bytes - ${ORDERING_FRAME_LAYOUT.headerBytes}
+    end
     total = total - payload_bytes
     redis.call('DEL', KEYS[i])
   end
@@ -571,11 +510,6 @@ export const DIRECTORY_DELETE_KEYS = 2
 // descriptors and builders, so a new script or a changed operand cannot silently escape slot/Lua proof.
 export const REDIS_ROOM_COMMANDS = {
   headCx: { name: HEAD_CX_CMD, lua: HEAD_CX_LUA, numberOfKeys: HEAD_CX_KEYS },
-  captureGeneration: {
-    name: CAPTURE_GENERATION_CMD,
-    lua: CAPTURE_GENERATION_LUA,
-    numberOfKeys: CAPTURE_GENERATION_KEYS,
-  },
   validateGeneration: {
     name: VALIDATE_GENERATION_CMD,
     lua: VALIDATE_GENERATION_LUA,
@@ -604,19 +538,10 @@ export const REDIS_ROOM_COMMAND_KEYS = {
     headRevKey(prefix, roomId),
     generationTokensKey(prefix, roomId),
   ],
-  captureGeneration: (prefix: string, roomId: string, inc: string) => [
+  validateGeneration: (prefix: string, roomId: string) => [
     headKey(prefix, roomId),
     gensKey(prefix, roomId),
     generationTokensKey(prefix, roomId),
-    routeCapturesKey(prefix, roomId, inc),
-    routeCaptureExpiriesKey(prefix, roomId, inc),
-  ],
-  validateGeneration: (prefix: string, roomId: string, inc: string) => [
-    headKey(prefix, roomId),
-    gensKey(prefix, roomId),
-    generationTokensKey(prefix, roomId),
-    routeCapturesKey(prefix, roomId, inc),
-    routeCaptureExpiriesKey(prefix, roomId, inc),
   ],
   dropGenerationFinalize: (prefix: string, roomId: string) => [
     gensKey(prefix, roomId),

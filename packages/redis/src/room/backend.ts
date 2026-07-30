@@ -10,7 +10,7 @@
 //                FIFO realizes the ordered at-most-once attempt chain; receivers = the PUBLISH count
 //   subscription SUBSCRIBE ack = establishment (fail-closed); channels keyed by (inc, lane) — I11
 
-import { createHash, randomUUID } from 'node:crypto'
+import { randomUUID } from 'node:crypto'
 import { Cluster, type Redis } from 'ioredis'
 import { assert } from '../assert.js'
 import { callDefinedCommand } from '../callDefinedCommand.js'
@@ -45,18 +45,17 @@ import {
   REDIS_ROOM_COMMAND_KEYS,
   REDIS_ROOM_COMMANDS,
   REDIS_ORDERING_FRAME_LUA,
+  REDIS_SAFE_INTEGER_MAX,
   retainedKey,
   retainedKeyPrefix,
   revKey,
 } from './layout.js'
-import { RedisSubscriptionDriver, type RedisGenerationAttempt } from './subscriber-transport.js'
+import { RedisSubscriptionDriver } from './subscriber-transport.js'
 
 const DEFAULT_MAX_RETAINED_BYTES = 16 * 1024 * 1024
 const DIRECTORY_PAGE_SIZE = 100
 const STABLE_READ_ATTEMPTS = 8
-const SCAN_COUNT = 250
 const NEWLINE = 0x0a
-export const REDIS_GENERATION_CAPTURE_TTL_MS = 90_000
 
 function assertOrderingPosition(seq: number, timestamp: number, context: string): void {
   if (!Number.isSafeInteger(seq) || seq <= 0 || !Number.isSafeInteger(timestamp) || timestamp < 0) {
@@ -73,13 +72,13 @@ export type RedisRoomBackendOptions = {
 const PUBLISH_CMD = 'tfPublish'
 const PUBLISH_LUA = `${REDIS_ORDERING_FRAME_LUA}
 local previous = redis.call('GET', KEYS[1])
-if previous and tonumber(previous) >= 9007199254740991 then
+if previous and tonumber(previous) >= ${REDIS_SAFE_INTEGER_MAX} then
   return redis.error_reply('publish: sequence exhausted for the ordering domain')
 end
 local seq = redis.call('INCR', KEYS[1])
 local t = redis.call('TIME')
 local ts = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
-if seq < 1 or seq > 9007199254740991 or ts < 0 or ts > 9007199254740991 then
+if seq < 1 or seq > ${REDIS_SAFE_INTEGER_MAX} or ts < 0 or ts > ${REDIS_SAFE_INTEGER_MAX} then
   return redis.error_reply('publish: invalid ordering position')
 end
 local frame = tf_ordering_frame(seq, ts, ARGV[1])
@@ -222,8 +221,8 @@ export class RedisRoomBackend implements BackendDriver {
     this.subscriptions = new RedisSubscriptionDriver({
       prefix: this.#prefix,
       createSubscriber,
-      captureGeneration: (source, attempt) => this.#captureGeneration(source, attempt),
-      validateGeneration: (source, attempt) => this.#validateGeneration(source, attempt),
+      captureGeneration: (source) => this.#captureGeneration(source),
+      validateGeneration: (source, token) => this.#validateGeneration(source, token),
     })
   }
 
@@ -267,7 +266,7 @@ export class RedisRoomBackend implements BackendDriver {
     this.#assertLive()
     const reply = (await this.#call(REDIS_ROOM_COMMANDS.headCx.name, [
       ...REDIS_ROOM_COMMAND_KEYS.headCx(this.#prefix, roomId),
-      this.#nowArg(),
+      '',
       encodeCx(cx),
       encodeNext(next),
     ])) as string
@@ -329,7 +328,7 @@ export class RedisRoomBackend implements BackendDriver {
       inc,
       mutations.map((mutation) => mutation.key),
     )
-    const argv: Array<string | Buffer> = [this.#nowArg(), inc, revision]
+    const argv: Array<string | Buffer> = ['', inc, revision]
     for (const mutation of mutations) {
       if (mutation.set === undefined) {
         argv.push('del', '', '')
@@ -361,28 +360,35 @@ export class RedisRoomBackend implements BackendDriver {
     this.#assertLive()
     const source = durableSource(roomId, inc, lane)
     const keys = REDIS_ROOM_COMMAND_KEYS.commit(this.#prefix, roomId, inc, lane, opts?.requiredCellKeys)
-    const reply = (await this.#call(REDIS_ROOM_COMMANDS.commit.name, [
-      String(keys.length),
-      ...keys,
-      this.#nowArg(),
-      inc,
-      lane.kind,
-      opts?.closingLease ?? '',
-      opts?.retain === true ? '1' : '0',
-      toBuffer(payload),
-      String(this.capabilities.maxRetainedPayloadBytes),
-    ])) as string
+    const flush = this.subscriptions.prepareFlush(source)
+    let reply: string
+    try {
+      reply = (await this.#call(REDIS_ROOM_COMMANDS.commit.name, [
+        String(keys.length),
+        ...keys,
+        '',
+        inc,
+        lane.kind,
+        opts?.closingLease ?? '',
+        opts?.retain === true ? '1' : '0',
+        toBuffer(payload),
+        String(this.capabilities.maxRetainedPayloadBytes),
+        flush.token,
+      ])) as string
+    } catch (error) {
+      flush.cancel()
+      throw error
+    }
     const parsed = JSON.parse(reply) as
       | { stale: true }
       | { accepted: true; seq: number; timestamp: number; receivers: number }
-    if ('stale' in parsed) return { stale: true }
+    if ('stale' in parsed) {
+      flush.cancel()
+      return { stale: true }
+    }
     assertOrderingPosition(parsed.seq, parsed.timestamp, 'RedisRoomBackend.commitLane')
-    // The PUBLISH inside the atomic record IS the broker handoff, and the broker's per-connection FIFO
-    // is what orders the attempt (receivers = the PUBLISH count). `delivery` then flushes local dispatch:
-    // the frame was queued to the subscriber socket during the awaited commit, so a PING round-trip on
-    // that connection resolves only after ioredis has dispatched the frame to the local receiver — WITHOUT
-    // awaiting the receiver's own completion, so handoffAwaitsReceiver stays false.
-    const delivery = this.subscriptions.flush(source)
+    // Data and fence leave the same slot owner in order, so observing the fence proves local dispatch.
+    const delivery = flush.delivery
     // Consumers may observe delivery later (or intentionally only use acceptance). Install an immediate
     // rejection observer so a connection/lifecycle epoch crossing is surfaced by `delivery` without an
     // ambient unhandledRejection in the interim.
@@ -447,39 +453,22 @@ export class RedisRoomBackend implements BackendDriver {
 
   // ── subscriptions ──
 
-  async #captureGeneration(
-    source: Extract<BackendSubscriptionSource, { kind: 'durable' }>,
-    attempt: RedisGenerationAttempt,
-  ): Promise<void> {
-    if (attempt.createdAt === null) attempt.createdAt = await this.#authorityNowMs()
-    const reply = (await this.#call(REDIS_ROOM_COMMANDS.captureGeneration.name, [
-      ...REDIS_ROOM_COMMAND_KEYS.captureGeneration(this.#prefix, source.roomId, source.inc),
-      this.#nowArg(),
-      source.inc,
-      attempt.attemptId,
-      String(attempt.createdAt),
-      String(REDIS_GENERATION_CAPTURE_TTL_MS),
-    ])) as string
-    const parsed = JSON.parse(reply) as { ok: true; token: string } | { rejected: true; terminal: true; reason: string }
-    if ('rejected' in parsed) throw new Error(`subscribeLane: ${parsed.reason}`)
-    attempt.generationToken = parsed.token
+  #captureGeneration(source: Extract<BackendSubscriptionSource, { kind: 'durable' }>): Promise<string | null> {
+    return this.#publisher.hget(generationTokensKey(this.#prefix, source.roomId), source.inc)
   }
 
   async #validateGeneration(
     source: Extract<BackendSubscriptionSource, { kind: 'durable' }>,
-    attempt: RedisGenerationAttempt,
+    token: string,
   ): Promise<boolean> {
-    if (attempt.generationToken === null) return false
-    const reply = (await this.#call(REDIS_ROOM_COMMANDS.validateGeneration.name, [
-      ...REDIS_ROOM_COMMAND_KEYS.validateGeneration(this.#prefix, source.roomId, source.inc),
-      this.#nowArg(),
-      source.inc,
-      attempt.generationToken,
-      attempt.attemptId,
-      String(attempt.createdAt),
-      String(REDIS_GENERATION_CAPTURE_TTL_MS),
-    ])) as string
-    return (JSON.parse(reply) as { ok: boolean }).ok
+    return (
+      (await this.#call(REDIS_ROOM_COMMANDS.validateGeneration.name, [
+        ...REDIS_ROOM_COMMAND_KEYS.validateGeneration(this.#prefix, source.roomId),
+        '',
+        source.inc,
+        token,
+      ])) === 1
+    )
   }
 
   // ── generation lifecycle ──
@@ -499,8 +488,8 @@ export class RedisRoomBackend implements BackendDriver {
     if (keys.length > 0) await this.#publisher.unlink(...keys)
     const generationToken = await this.#publisher.hget(generationTokensKey(this.#prefix, roomId), inc)
     if (generationToken !== null) {
-      // Disconnected peers reject this token during their next capture/validation; connected peers close
-      // the raw attempt so the owning consumer can apply its recovery policy.
+      // Disconnected peers reject this token during post-SUBSCRIBE validation; connected peers terminate
+      // immediately because a dropped generation is definitive, not recoverable route loss.
       await this.#publisher.publish(generationInvalidationChannel(this.#prefix, roomId, inc), generationToken)
     }
     await this.#call(REDIS_ROOM_COMMANDS.dropGenerationFinalize.name, [
@@ -545,7 +534,10 @@ export class RedisRoomBackend implements BackendDriver {
     }
     if (matching.length === 0) return { entries: [] }
     const tags = await this.#publisher.hmget(directoryTagsKey(this.#prefix), ...matching)
-    const entries = matching.map((roomId, i) => ({ roomId, incTag: tags[i] as string }))
+    const entries = matching.flatMap((roomId, i) => {
+      const incTag = tags[i]
+      return incTag === null || incTag === undefined ? [] : [{ roomId, incTag }]
+    })
     const last = matching[matching.length - 1] as string
     let more = false
     if (matching.length === DIRECTORY_PAGE_SIZE && page.length === DIRECTORY_PAGE_SIZE) {
@@ -564,10 +556,6 @@ export class RedisRoomBackend implements BackendDriver {
 
   #assertLive(): void {
     if (this.#disposed) throw new Error('RedisRoomBackend: used after dispose()')
-  }
-
-  #nowArg(): string {
-    return ''
   }
 
   async #authorityNowMs(): Promise<number> {
@@ -595,32 +583,6 @@ export class RedisRoomBackend implements BackendDriver {
   }
 
   async #call(command: string, keysAndArgs: ReadonlyArray<string | Uint8Array>): Promise<unknown> {
-    if (this.#publisher instanceof Cluster) {
-      const descriptor = Object.values(REDIS_ROOM_COMMANDS).find((candidate) => candidate.name === command)
-      if (descriptor === undefined) throw new Error(`RedisRoomBackend: unknown command '${command}'`)
-      const dynamic = descriptor.numberOfKeys === null
-      const numberOfKeys = dynamic ? Number(keysAndArgs[0]) : descriptor.numberOfKeys
-      if (!Number.isInteger(numberOfKeys) || numberOfKeys < 0) {
-        throw new Error(`RedisRoomBackend: invalid key count for '${command}'`)
-      }
-      const args = dynamic ? keysAndArgs.slice(1) : keysAndArgs
-      const redisArgs = args.map((arg) =>
-        typeof arg === 'string' ? arg : Buffer.from(arg.buffer, arg.byteOffset, arg.byteLength),
-      )
-      try {
-        return await this.#publisher.evalsha(redisScriptSha(descriptor.lua), numberOfKeys, ...redisArgs)
-      } catch (err) {
-        // NOSCRIPT proves EVALSHA did not execute. Retrying the complete script with EVAL is therefore
-        // non-duplicating, and ioredis preserves MOVED plus ASKING-on-the-same-connection routing for the
-        // fallback command. This also covers SCRIPT FLUSH, restarted masters, and newly promoted owners.
-        if (!(err instanceof Error) || !err.message.includes('NOSCRIPT')) throw normalizeRedisError(err)
-        try {
-          return await this.#publisher.eval(descriptor.lua, numberOfKeys, ...redisArgs)
-        } catch (fallbackError) {
-          throw normalizeRedisError(fallbackError)
-        }
-      }
-    }
     try {
       return await callDefinedCommand(this.#publisher, command, keysAndArgs)
     } catch (error) {
@@ -634,17 +596,13 @@ export class RedisRoomBackend implements BackendDriver {
     for (const node of nodes) {
       let cursor = '0'
       do {
-        const [next, page] = await node.scan(cursor, 'MATCH', pattern, 'COUNT', SCAN_COUNT)
+        const [next, page] = await node.scan(cursor, 'MATCH', pattern)
         cursor = next
         for (const key of page) keys.add(key)
       } while (cursor !== '0')
     }
     return [...keys]
   }
-}
-
-function redisScriptSha(lua: string): string {
-  return createHash('sha1').update(lua).digest('hex')
 }
 
 function normalizeRedisError(error: unknown): Error {
