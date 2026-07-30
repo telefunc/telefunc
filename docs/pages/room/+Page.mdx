@@ -530,13 +530,15 @@ Your own handle, from `join()`. Room-wide messages arrive on the room and each `
 | `publish(data, { coalesce?, retain? }?)` | Publish to the whole room. `coalesce` conflates a same-key burst; `retain` keeps it as the room's last message for late subscribers. |
 | `publishBinary(data, { track?, meta?, retain? }?)` | Publish raw binary. `retain` keeps the last frame per track for late subscribers. When present, `receivers` counts backend delivery routes; `0` proves nobody anywhere, while Redis Cluster omits the field. |
 | `send(to, data)` | Private message to one participant (or their id). Resolves with the receipt `{ seq, timestamp }` (best-effort). |
-| `send(to, data, { ack: true })` | Confirmed send: waits for the recipient's `listen` handler and resolves with `{ response, seq, timestamp }`, rejecting if the recipient leaves — or with the handler's `Abort` (a plain throw is hidden as a bug). |
+| `send(to, data, { ack: true })` | Confirmed send: waits up to 60 seconds for the recipient's `listen` handler and resolves with `{ response, seq, timestamp }`, rejecting on timeout, recipient leave, or pre-listener inbox overflow — or with the handler's `Abort` (a plain throw is hidden as a bug). |
 | `listen(cb)` | Receive private messages: `(data, from)`, `from` is `null` for room-authored. Return a value to reply to a `send(…, { ack: true })` sender; `throw Abort(value)` to reject them with it. |
 | `setMeta(meta)` / `setAttributes(partial)` | Replace / merge your metadata. |
 | `onDemand(cb)` | `(track, wanted)` when a track of yours goes watched or unwatched; `wanted === false` means nobody watching. |
 | `leave()` / `onLeave(cb)` | Leave / observe your own departure: `cause.type` is `'left' \| 'removed' \| 'closed' \| 'disconnected'`. |
 
 Read-only: `id`, `meta`, `identity`, `selfDelivery`. A participant leaves automatically when its holder's connection is gone (`cause: 'disconnected'`).
+
+Before the first `listen()`, a participant holds at most 64 private messages and drops the oldest on overflow. If that message requested an acknowledgement, its sender rejects with an inbox-overflow error; an unacknowledged send has no delivery confirmation.
 
 ### `RemoteParticipant`
 
