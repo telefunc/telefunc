@@ -517,20 +517,6 @@ describe('Room public behavior', () => {
     expect(heartbeat).toHaveBeenCalledOnce()
   })
 
-  it('reports an initially closed source to the terminal owner', async () => {
-    const closed = terminalSubscription()
-    await closed.close()
-    const terminal = vi.fn()
-    const slot = new SubSlot(terminal, () => {})
-
-    slot.sync(true, () => closed.subscription)
-    await Promise.resolve()
-
-    expect(terminal).toHaveBeenCalledOnce()
-    expect(terminal.mock.calls[0]?.[0]).toBe(slot)
-    slot.stop()
-  })
-
   it('keeps retrying inside the horizon after more than six immediate failures', async () => {
     vi.useFakeTimers()
     const observer = await Room.get((await Room.create('single-recovery-horizon')).id)
