@@ -163,7 +163,9 @@ function testRoom() {
 
     await page.requestGC()
     await page.evaluate(() => (window as any).__roomRemoteLifecycle.publish())
-    await autoRetry(async () => expect(await page.evaluate(() => (window as any).__roomRemoteLifecycle.received())).toBe(1))
+    await autoRetry(async () =>
+      expect(await page.evaluate(() => (window as any).__roomRemoteLifecycle.received())).toBe(1),
+    )
     await page.evaluate(() => (window as any).__roomRemoteLifecycle.close())
     await page.evaluate(() => (window as any).__roomRemoteLifecycle.publish())
     await new Promise((resolve) => setTimeout(resolve, 200))
