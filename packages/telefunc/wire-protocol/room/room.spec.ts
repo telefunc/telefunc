@@ -15,6 +15,7 @@ import {
   frameWithMemberId,
   isRoomError,
   roomAckError,
+  roomMemberKvKey,
   sanitizeBinaryWants,
   unframeMemberId,
   type RoomSnapshotMetadata,
@@ -524,13 +525,17 @@ describe('Room public behavior', () => {
 
   it('renews every owned member in one heartbeat cell transaction', async () => {
     const room = (await Room.create('batched-heartbeat')) as ServerRoom
-    await room.join()
-    await room.join()
+    const first = await room.join()
+    const second = await room.join()
     const compare = vi.spyOn(driver, 'compareExchangeCells')
 
     await (room as unknown as { _heartbeatTick(): Promise<void> })._heartbeatTick()
 
     expect(compare).toHaveBeenCalledOnce()
+    expect(compare.mock.calls[0]?.[3].map(({ key, set }) => ({ key, set: set !== undefined }))).toEqual([
+      { key: roomMemberKvKey(room.id, first.id), set: true },
+      { key: roomMemberKvKey(room.id, second.id), set: true },
+    ])
   })
 
   it('replaces a subscription that is already closed on initial establishment', async () => {
