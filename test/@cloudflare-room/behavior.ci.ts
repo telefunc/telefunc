@@ -39,6 +39,7 @@ test('public Room lifecycle and authority settlement controls execute on Cloudfl
       firstSeq: 1,
       secondSeq: 2,
       firstBeforeSecond: 'settled',
+      secondBeforeRelease: 'pending',
     },
     lifecycle: {
       receivers: 1,
@@ -52,9 +53,16 @@ test('public Room lifecycle and authority settlement controls execute on Cloudfl
       invalidations: ['terminal'],
     },
     preAckTerminalDrop: {
+      ready: 'Cloudflare Room subscription terminated before acknowledgement',
       state: 'terminated',
       invalidations: ['terminal'],
       generations: [],
+    },
+    preAckRecoverableDrop: {
+      state: 'closed',
+      ready: 'Cloudflare Room subscription closed before acknowledgement',
+      settlements: ['delivery probe rejected', 'delivery probe rejected', 'delivery probe rejected'],
+      invalidations: ['recoverable'],
     },
     cancelled: 'Cloudflare Room delivery cancelled before handoff',
     cancellationDeliveries: [1],
@@ -69,6 +77,32 @@ test('public Room lifecycle and authority settlement controls execute on Cloudfl
       settlements: ['delivery probe rejected', 'delivery probe rejected', 'delivery probe rejected'],
       invalidations: ['recoverable'],
     },
-    unknown: 'Cloudflare Room delivery has an unknown delivery token',
+    restartSettlement: {
+      old: 'Cloudflare Room delivery has an unknown delivery token',
+      new: 'resolved',
+    },
+    alarmPolicy: {
+      idle: null,
+      afterRoute: 'armed',
+      afterUnsubscribe: null,
+    },
+    controlPreconditions: {
+      waitForCommit: 'response reordering probe was not prepared',
+      releaseCommit: 'response reordering probe was not prepared',
+      releaseDelivery: 'response reordering probe was not prepared',
+      waitForRegistration: 'registration hold probe was not prepared',
+      releaseRegistration: 'registration hold probe was not prepared',
+    },
+  })
+})
+
+test('retained Room payloads above the base64-expanded RPC ceiling replay as native bytes', async () => {
+  const response = await miniflare!.dispatchFetch('https://room.test/large-retained')
+  const result = await response.json()
+  expect(response.status, JSON.stringify(result)).toBe(200)
+  expect(result).toEqual({
+    bytes: 25 * 1024 * 1024,
+    first: 0x11,
+    last: 0xee,
   })
 })

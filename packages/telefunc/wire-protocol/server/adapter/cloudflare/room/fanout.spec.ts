@@ -26,10 +26,19 @@ test('rejects a queued delivery cancelled by incarnation cleanup before handoff'
   expect(delivered).toEqual([1])
 })
 
-test('rejects an unknown delivery token after authority memory is lost', async () => {
-  const fanout = new Fanout(async () => {})
+test('does not alias an old delivery token to a reconstructed authority attempt', async () => {
+  const target = { subscriberDoId: 'subscriber', leaseId: 'lease', generationToken: 'generation' }
+  const info = { roomId: 'room', inc: 'inc', laneKey: 'semantic', seq: 1, timestamp: 1 }
+  const priorAuthority = new Fanout(async () => {})
+  const oldToken = priorAuthority.enqueue('inc', 'semantic', [target], new Uint8Array([1]), info)
+  const reconstructedAuthority = new Fanout(async () => {})
+  const newToken = reconstructedAuthority.enqueue('inc', 'semantic', [target], new Uint8Array([2]), {
+    ...info,
+    seq: 2,
+  })
 
-  await expect(fanout.await('d-from-prior-authority-instance')).rejects.toThrow('unknown delivery token')
+  await expect(reconstructedAuthority.await(oldToken)).rejects.toThrow('unknown delivery token')
+  await expect(reconstructedAuthority.await(newToken)).resolves.toBeUndefined()
 })
 
 test('keeps the lane gated until every target attempt settles after one rejects', async () => {
@@ -70,6 +79,31 @@ test('keeps the lane gated until every target attempt settles after one rejects'
   releaseSlow.resolve()
   await expect(fanout.await(first)).rejects.toThrow('fast rejection')
   await expect(fanout.await(second)).resolves.toBeUndefined()
+})
+
+test('does not issue a flat authority subrequest for every target above the Workers free-tier cap', async () => {
+  let authorityDispatches = 0
+  const delivered = new Set<string>()
+  const fanout = new Fanout(async (target) => {
+    authorityDispatches += 1
+    delivered.add(target.subscriberDoId)
+  })
+  const targets = Array.from({ length: 1_001 }, (_, index) => ({
+    subscriberDoId: `subscriber-${index}`,
+    leaseId: `lease-${index}`,
+    generationToken: 'generation',
+  }))
+  const token = fanout.enqueue('inc', 'semantic', targets, new Uint8Array([1]), {
+    roomId: 'room',
+    inc: 'inc',
+    laneKey: 'semantic',
+    seq: 1,
+    timestamp: 1,
+  })
+
+  await fanout.await(token)
+  expect(delivered.size).toBe(targets.length)
+  expect(authorityDispatches).toBeLessThan(1_000)
 })
 
 function deferred<T>() {
