@@ -236,8 +236,12 @@ function assertBackendDriver(backend: BackendDriver): void {
   if (capabilities === null || typeof capabilities !== 'object') {
     throw new Error('telefunc/backend: invalid backend capabilities; expected an object')
   }
-  if (capabilities.receivers !== 'global' && capabilities.receivers !== 'node-local') {
-    throw new Error('telefunc/backend: backend capabilities.receivers must be "global" or "node-local" (not "none")')
+  if (
+    capabilities.receivers !== 'global' &&
+    capabilities.receivers !== 'node-local' &&
+    capabilities.receivers !== 'none'
+  ) {
+    throw new Error('telefunc/backend: backend capabilities.receivers must be "global", "node-local", or "none"')
   }
   if (!Number.isFinite(capabilities.maxRetainedPayloadBytes) || capabilities.maxRetainedPayloadBytes < 0) {
     throw new Error(

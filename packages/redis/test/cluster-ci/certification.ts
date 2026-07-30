@@ -11,6 +11,8 @@ import {
   laneKey,
   orderKey,
   REDIS_ROOM_COMMANDS,
+  routeCaptureExpiriesKey,
+  routeCapturesKey,
 } from '../../src/room/layout.js'
 
 type RedisClusterNode = { host: string; port: number }
@@ -48,7 +50,7 @@ describe('Redis real three-master Cluster CI certification', () => {
     if (cluster !== undefined) await cluster.quit().catch(() => cluster.disconnect())
   })
 
-  it('covers all slots and every shipped command with complete co-slotted KEYS declarations', async () => {
+  it('covers shipped command KEYS and leaves zero capture residue after a full close', async () => {
     expect(masters).toHaveLength(3)
     expect(masters.reduce((total, master) => total + master.end - master.start + 1, 0)).toBe(16_384)
     for (const master of masters) expect((await clusterInfo(master.client)).cluster_state).toBe('ok')
@@ -62,7 +64,7 @@ describe('Redis real three-master Cluster CI certification', () => {
     const inc = 'runtime-slot-inc'
     let subscription: ReturnType<BackendSpi['subscribeLane']> | undefined
     try {
-      expect(backend.capabilities).toMatchObject({ clusterSafe: true, receivers: 'node-local' })
+      expect(backend.capabilities).toMatchObject({ clusterSafe: true, receivers: 'none' })
       const head = await open(backend, roomId, inc)
       const cells = await backend.readCells(roomId, inc, { keys: [] })
       if ('staleInc' in cells) throw new Error('fresh generation was unexpectedly stale')
@@ -98,6 +100,12 @@ describe('Redis real three-master Cluster CI certification', () => {
       const closed = await close(backend, roomId, head)
       expect(closed.state).toBe('closed')
       await backend.dropGeneration(roomId, inc)
+      expect(
+        await Promise.all([
+          client.exists(routeCapturesKey(prefix, roomId, inc)),
+          client.exists(routeCaptureExpiriesKey(prefix, roomId, inc)),
+        ]),
+      ).toEqual([0, 0])
 
       const expectedNames = new Set(['tfPublish', ...Object.values(REDIS_ROOM_COMMANDS).map(({ name }) => name)])
       expect(new Set(observation.definitions.map(({ name }) => name))).toEqual(expectedNames)
@@ -311,15 +319,15 @@ describe('Redis real three-master Cluster CI certification', () => {
     }
   })
 
-  it('reports exact node-local receiver counts while still delivering cross-node', async () => {
+  it('omits globally unknowable receiver counts while still delivering cross-node', async () => {
     const prefix = uniquePrefix('receivers')
     const backend = redisBackend(cluster, prefix)
     // RedisRoomBackend sorts master endpoints before round-robin subscriber selection. Mirror that
     // order, but identify masters by Cluster node ID: Compose nodes all listen on port 6379.
     const subscriberOrder = [...masters].sort(compareMasterEndpoints)
     const cases = [
-      { label: 'same', roomMasterId: (subscriberOrder[0] as Master).id, expected: 1 },
-      { label: 'cross', roomMasterId: (subscriberOrder[2] as Master).id, expected: 0 },
+      { label: 'cross', roomMasterId: (subscriberOrder[2] as Master).id },
+      { label: 'same', roomMasterId: (subscriberOrder[0] as Master).id },
     ]
     const subscriptions: Array<ReturnType<BackendSpi['subscribeLane']>> = []
     try {
@@ -334,9 +342,9 @@ describe('Redis real three-master Cluster CI certification', () => {
         subscriptions.push(subscription)
         await subscription.ready
         const result = accepted(await backend.commitLane(roomId, inc, SEMANTIC_LANE, Buffer.from(scenario.label)))
-        expect(result.receivers).toBe(scenario.expected)
         await result.delivery
         await waitFor(() => observed.length === 1)
+        expect(result.receivers).toBeUndefined()
       }
     } finally {
       await Promise.allSettled(subscriptions.map((subscription) => subscription.unsubscribe()))

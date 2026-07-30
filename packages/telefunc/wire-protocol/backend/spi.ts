@@ -104,7 +104,7 @@ export type CommitAccepted = {
   accepted: true
   seq: number // positive safe integer; standalone cursor within this incarnation+lane domain
   timestamp: number // safe integer; non-decreasing authority time, independent of seq advancement
-  receivers: number // targets snapshotted at acceptance
+  receivers?: number // globally counted targets at acceptance; absent when the backend cannot know
   delivery: Promise<void> // the backend's ONE at-most-once HANDOFF attempt: settles when its
   // backend-defined handoff settles. Receiver-callback completion is NOT a cross-backend guarantee;
   // per-target failure visibility is a per-backend trace/capability. NEVER retries; NEVER poisons.

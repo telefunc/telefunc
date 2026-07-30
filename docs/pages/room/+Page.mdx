@@ -313,7 +313,7 @@ me.onDemand((track, wanted) => {
 })
 ```
 
-Each `publishBinary()` receipt also reports `receivers`, the track's live subscription count at that moment. Use it to react while you're publishing; use `onDemand` to learn when to resume once you've paused.
+In-memory, standalone Redis, and Cloudflare report `receivers` because they can count globally; `0` means nobody anywhere. Redis Cluster omits it because a node-local count cannot prove global absence. Use `onDemand` to pause and resume portably.
 
 Across nodes, `onDemand`'s `wanted` is aggregated by gossip on the control lane, so it converges rather than updating instantly: a viewer on another node takes a beat to reflect. That's exactly what an encoder pause/resume wants (a signal, not a hard gate). It's a boolean, not a count, on purpose: a node reports only whether it has any watcher, so the room learns whether a track is wanted, never how many want it. Treat `wanted === false` as "resume when it flips true," not a real-time interlock.
 
@@ -515,7 +515,7 @@ Your own handle, from `join()`. Room-wide messages arrive on the room and each `
 | Method | Description |
 |---|---|
 | `publish(data, { coalesce?, retain? }?)` | Publish to the whole room. `coalesce` conflates a same-key burst; `retain` keeps it as the room's last message for late subscribers. |
-| `publishBinary(data, { track?, meta?, retain? }?)` | Publish raw binary. `retain` keeps the last frame per track for late subscribers. The receipt's `receivers` is the live subscription count (`0` = nobody anywhere). |
+| `publishBinary(data, { track?, meta?, retain? }?)` | Publish raw binary. `retain` keeps the last frame per track for late subscribers. When present, `receivers` is the global live subscription count (`0` = nobody anywhere); Redis Cluster omits it. |
 | `send(to, data)` | Private message to one participant (or their id). Resolves with the receipt `{ seq, timestamp }` (best-effort). |
 | `send(to, data, { ack: true })` | Confirmed send: waits for the recipient's `listen` handler and resolves with `{ response, seq, timestamp }`, rejecting if the recipient leaves — or with the handler's `Abort` (a plain throw is hidden as a bug). |
 | `listen(cb)` | Receive private messages: `(data, from)`, `from` is `null` for room-authored. Return a value to reply to a `send(…, { ack: true })` sender; `throw Abort(value)` to reject them with it. |

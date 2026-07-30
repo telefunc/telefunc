@@ -33,10 +33,9 @@ type ChannelPublishInfo = {
 }
 type ChannelPublishAck = ChannelPublishInfo & {
   meta?: ChannelPublishMeta
-  /** Live subscriptions on the published key at its transport hop (in-memory subscriber count,
-   *  redis `PUBLISH` receivers, Cloudflare DO presence). Because subscriptions are want-driven,
-   *  `0` truthfully means nobody anywhere wants this stream — the signal to pause an encoder.
-   *  Not a viewer count (one hop can serve many), and absent when a custom transport can't count. */
+  /** Global live subscriptions on the published key when the backend can count them.
+   *  `0` truthfully means nobody anywhere wants this stream. Absent when the backend cannot know,
+   *  including Redis Cluster. Not a viewer count: one transport hop can serve many viewers. */
   receivers?: number
 }
 

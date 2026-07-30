@@ -17,8 +17,8 @@
 //                                           SREM'd by dropGeneration; the fresh-inc guard is one SISMEMBER
 //   gen-token: tf:room:{rid}:gen-tokens      HASH inc -> non-reusable generation token (the installing
 //                                           head revision), removed only with the final gens SREM
-//   captures:  tf:room:{rid}:route-captures  HASH attempt id -> bounded generation-capture record;
-//              tf:room:{rid}:route-capture-exp ZSET of authority expiry -> attempt id for lazy sweep
+//   captures:  tf:room:{rid}:g:<inc>:route-captures  HASH attempt id -> bounded capture record;
+//              tf:room:{rid}:g:<inc>:route-capture-exp ZSET of authority expiry -> attempt id
 //   dir index: tf:{rid-dir}<prefix>… — the directory is global, its own two co-slotted keys (backend.ts)
 //
 // AUTHORITY TIME: production derives `now_ms` from `redis.call('TIME')` (the one central clock, atomic
@@ -51,11 +51,11 @@ export function gensKey(prefix: string, roomId: string): string {
 export function generationTokensKey(prefix: string, roomId: string): string {
   return `${roomTag(prefix, roomId)}:gen-tokens`
 }
-export function routeCapturesKey(prefix: string, roomId: string): string {
-  return `${roomTag(prefix, roomId)}:route-captures`
+export function routeCapturesKey(prefix: string, roomId: string, inc: string): string {
+  return `${genPrefix(prefix, roomId, inc)}:route-captures`
 }
-export function routeCaptureExpiriesKey(prefix: string, roomId: string): string {
-  return `${roomTag(prefix, roomId)}:route-capture-exp`
+export function routeCaptureExpiriesKey(prefix: string, roomId: string, inc: string): string {
+  return `${genPrefix(prefix, roomId, inc)}:route-capture-exp`
 }
 export function genPrefix(prefix: string, roomId: string, inc: string): string {
   return `${roomTag(prefix, roomId)}:g:${inc}`
@@ -618,19 +618,19 @@ export const REDIS_ROOM_COMMAND_KEYS = {
     headRevKey(prefix, roomId),
     generationTokensKey(prefix, roomId),
   ],
-  captureGeneration: (prefix: string, roomId: string) => [
+  captureGeneration: (prefix: string, roomId: string, inc: string) => [
     headKey(prefix, roomId),
     gensKey(prefix, roomId),
     generationTokensKey(prefix, roomId),
-    routeCapturesKey(prefix, roomId),
-    routeCaptureExpiriesKey(prefix, roomId),
+    routeCapturesKey(prefix, roomId, inc),
+    routeCaptureExpiriesKey(prefix, roomId, inc),
   ],
-  validateGeneration: (prefix: string, roomId: string) => [
+  validateGeneration: (prefix: string, roomId: string, inc: string) => [
     headKey(prefix, roomId),
     gensKey(prefix, roomId),
     generationTokensKey(prefix, roomId),
-    routeCapturesKey(prefix, roomId),
-    routeCaptureExpiriesKey(prefix, roomId),
+    routeCapturesKey(prefix, roomId, inc),
+    routeCaptureExpiriesKey(prefix, roomId, inc),
   ],
   dropGenerationFinalize: (prefix: string, roomId: string) => [
     gensKey(prefix, roomId),

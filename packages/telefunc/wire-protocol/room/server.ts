@@ -1050,7 +1050,8 @@ class ServerRoom implements Room {
   /** @internal — publish a member's binary frame (`[16-byte member ID][flags][…]`, validated at
    *  its entry point — the unframe cannot fail). Binary rides per-publisher lanes — per
    *  (publisher, track) for named tracks: that's what makes delivery track-selective at the
-   *  source, so `receivers: 0` on the ack truthfully means "nobody anywhere wants this track". */
+   *  source. When the backend can count globally, `receivers: 0` truthfully means "nobody anywhere
+   *  wants this track"; backends that cannot know omit `receivers`. */
   async _publishBinaryFramed(from: string, framed: Uint8Array): Promise<ChannelPublishAck> {
     // The single validating unframe of the publish path: a locally-built frame always parses; a
     // hand-crafted one that doesn't (truncated, over-long track/meta, malformed meta JSON) is rejected
