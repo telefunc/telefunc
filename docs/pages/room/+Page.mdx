@@ -381,13 +381,21 @@ current = await nextRoom.join({ meta: { name } })
 
 Publishing to a room you've left throws (`Participant has left the room`).
 
-Telefunc doesn't cap membership; you decide, in the telefunction. Store the cap wherever you like (room `meta` is handy) and check `count`:
+Telefunc doesn't cap membership. `count` is a point-in-time snapshot: it is useful for display or an advisory check, but concurrent telefunctions can read the same value and all join, so it cannot enforce a hard cap. For strict admission, reserve a slot atomically in your application database before `join()` (use a lease if the process can crash), and release it on join failure or participant leave:
 
 ```js
 export async function onJoinLobby(name) {
   const lobby = await Room.get('lobby') // created with meta: { max: 100 }
-  if (lobby.count >= lobby.meta.max) throw Abort('room is full')
-  return await lobby.join({ meta: { name } })
+  const reservation = await db.roomSlots.tryReserve(lobby.id, lobby.meta.max) // one atomic DB operation
+  if (!reservation) throw Abort('room is full')
+  try {
+    const participant = await lobby.join({ meta: { name } })
+    participant.onLeave(() => void reservation.release())
+    return participant
+  } catch (error) {
+    await reservation.release()
+    throw error
+  }
 }
 ```
 
@@ -402,8 +410,7 @@ Players join, ready up through their own `meta`, and the server starts the match
 // Lobby.telefunc.js (server)
 export async function onJoinLobby(lobbyId, name) {
   const { user } = getContext()
-  const room = await Room.getOrCreate(lobbyId, { meta: { max: 4 } })
-  if (room.count >= room.meta.max) throw Abort('lobby full')
+  const room = await Room.getOrCreate(lobbyId)
   return { room, me: await room.join({ meta: { name, ready: false }, identity: user.id }) }
 }
 
