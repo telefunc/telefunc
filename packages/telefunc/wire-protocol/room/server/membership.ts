@@ -107,7 +107,9 @@ async function readMembers(roomId: string, inc: string, ids?: string[]): Promise
       const siblingKeys = [key]
       if (record.identity !== undefined) siblingKeys.push(roomIdentityMemberKvKey(roomId, record.identity, id))
       const cleanup: PendingMemberCleanup = { cause: { cause: 'disconnected' } }
-      const reap = await mutateCells(roomId, inc, { keys: [...siblingKeys, cleanupKey] }, (current) => {
+      const reap = await mutateCells<
+        { kind: 'missing' } | { kind: 'reaped' } | { kind: 'live'; record: RoomMemberRecord }
+      >(roomId, inc, { keys: [...siblingKeys, cleanupKey] }, (current) => {
         const latest = current.get(key)
         if (latest === undefined) return { value: { kind: 'missing' } as const, mutations: [] }
         const latestRecord = parse(decodeRoomText(latest)) as RoomMemberRecord
