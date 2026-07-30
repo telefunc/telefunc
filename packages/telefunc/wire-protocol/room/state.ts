@@ -450,18 +450,18 @@ class RoomState {
    *  Room-level `onLeave`/`onEmpty` intentionally don't fire — `onClose` is the signal. */
   applyClosed(cause: LeaveCause = { type: 'closed' }): void {
     if (this.closed) return
-    this.closed = true
-    this._rosterKnown = true // authoritatively empty
-    // Apply the whole transition before signalling: member-level cleanup (leave handlers, listener
-    // release) runs, the roster clears, then one `onChange` fires — so a subscriber reading `snapshot()`
-    // sees the final closed-and-empty room once, never a transient closed-but-still-populated one.
-    // Room-level `onLeave`/`onEmpty` intentionally stay silent; `onClose` is the signal.
-    for (const entry of this._members.values()) {
-      this._fireAll(entry.leaveCbs, cause)
-      this._releaseEntryListeners(entry)
-    }
-    this._members.clear()
-    this._bumpMembership()
+    this._batchChange(() => {
+      const departed = [...this._members.values()]
+      this.closed = true
+      this._rosterKnown = true // authoritatively empty
+      this._members.clear()
+      this._bumpMembership()
+      // State and snapshot are already closed-and-empty when cleanup callbacks run.
+      for (const entry of departed) {
+        this._fireAll(entry.leaveCbs, cause)
+        this._releaseEntryListeners(entry)
+      }
+    })
     this._fireAll(this._closeCbs)
   }
 

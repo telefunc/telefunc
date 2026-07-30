@@ -715,6 +715,43 @@ describe('client Room lifecycle', () => {
     expect(updates).toEqual([[{ step: 2 }, { step: 0 }]])
   })
 
+  it('makes the closed-and-empty state visible before participant leave callbacks run', async () => {
+    const fake = createFakeStub()
+    const client = new ClientRoom(fake.stub, snapshot('atomic-close-state'))
+    const memberId = crypto.randomUUID()
+    fake.emitText(
+      {
+        __r: 'roster',
+        members: [{ id: memberId, meta: {}, joinedAt: 1, metaSeq: 0 }],
+      },
+      { key: 'atomic-close-state', seq: 1, timestamp: 1 },
+    )
+    const member = await client.getParticipant(memberId)
+    const before = client.snapshot()
+    let observed: unknown
+    member!.onLeave(() => {
+      const snap = client.snapshot()
+      observed = {
+        closed: client.isClosed,
+        count: client.count,
+        snapshotChanged: snap !== before,
+        snapshotClosed: snap.isClosed,
+        snapshotCount: snap.count,
+        participants: snap.participants.length,
+      }
+    })
+
+    fake.emitText({ __r: 'closed' }, { key: 'atomic-close-state', seq: 2, timestamp: 2 })
+    expect(observed).toEqual({
+      closed: true,
+      count: 0,
+      snapshotChanged: true,
+      snapshotClosed: true,
+      snapshotCount: 0,
+      participants: 0,
+    })
+  })
+
   it('redeclares a room-wide text subscription after reconnect even when the local latch already matches', () => {
     const wireDeclarations: boolean[] = []
     let reconnect = () => {}
