@@ -55,7 +55,6 @@ function createServerHarness(extensionTypes: ReplacerType<TypeContract, ServerRe
       return { metadata: { __index: index }, close() {}, abort() {} }
     },
     validators: new Map(),
-    passScope: new Map(),
   }
   const replacer = createStreamingReplacer(
     () => context,

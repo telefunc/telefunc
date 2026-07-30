@@ -196,9 +196,8 @@ type _producerChunks = Assert<Compatible<Producer['chunks'], AsyncIterator<Uint8
 type _producerCancelArguments = Assert<Compatible<Parameters<Producer['cancel']>, [reason?: unknown]>>
 
 type _serverReplacerKeys = Assert<
-  HasKeys<ServerReplacerContext, 'createChannel' | 'registerChannel' | 'sendStream' | 'validators' | 'passScope'>
+  HasKeys<ServerReplacerContext, 'createChannel' | 'registerChannel' | 'sendStream' | 'validators'>
 >
-type _passScopeRemainsOptional = Assert<IsOptional<ServerReplacerContext, 'passScope'>>
 type _serverReviverKeys = Assert<
   HasKeys<ServerReviverContext, 'registerFile' | 'consumeFile' | 'createChannel' | 'receiveStream' | 'validators'>
 >
@@ -229,7 +228,7 @@ function pinServerContextMembers(replacer: ServerReplacerContext, reviver: Serve
   received.stream()
   received.cancel()
   declareAbortCompatibility(sent.abort, received.abort)
-  void [replacer.validators, replacer.passScope, reviver.validators, sent.metadata]
+  void [replacer.validators, reviver.validators, sent.metadata]
 }
 
 function declareAbortCompatibility(replacementAbort: Replacement['abort'], streamAbort: ReceivedStream['abort']): void {

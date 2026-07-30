@@ -101,11 +101,6 @@ type ReviverType<C extends TypeContract = TypeContract, Context = unknown> = {
     value: C['result']
     close: () => Promise<void> | void
     abort: (abortError: AbortError) => void
-    /** `false` for values whose lifetime rides a parent revived in the same payload (e.g. a
-     *  `RemoteParticipant` view of a revived room): no GC proxy, no own close/abort wiring —
-     *  the parent's lifecycle covers them, and wrapping would break `===` with the parent's
-     *  own view objects. Default: `true`. */
-    gcTrack?: boolean
   }
 }
 
@@ -191,13 +186,6 @@ type ServerReplacerContext = {
    *  Replacers pick the names relevant to their data flow. Each returns `true` on success or an error
    *  string — call sites decide the action (throw, drop, ...). */
   validators: ShieldValidators
-  /** Per-response scratch space, stable across every value serialized into one response — the
-   *  semantic twin of the registry's reference-identity dedup cache. Lets replacers that are
-   *  invoked separately rendezvous by a shared key, regardless of the order the serializer visits
-   *  values (object keys are visited in insertion order, which the app controls). The room
-   *  replacers use it to bind a co-returned participant's echo-suppression onto its room's stub;
-   *  it is discarded when the pass ends. Keyed by a module-private symbol per concern. */
-  passScope?: Map<symbol, unknown>
 }
 
 /** Context for all client-side request replacers (File/Blob + Function + ReadableStream). */

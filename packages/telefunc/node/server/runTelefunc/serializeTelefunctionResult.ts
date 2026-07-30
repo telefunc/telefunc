@@ -116,9 +116,6 @@ function serializeTelefunctionResult(runContext: {
     registerChannel(channel)
     return channel
   }
-  // One coordination scope per response — shared by every value serialized in this pass (getContext
-  // runs per value, so it must close over a scope minted once here, not inside).
-  const passScope = new Map<symbol, unknown>()
   const replacer = createStreamingReplacer(
     function getContext(value: unknown) {
       return {
@@ -126,7 +123,6 @@ function serializeTelefunctionResult(runContext: {
         registerChannel,
         sendStream,
         validators: makeValidators(value, valueShields, shieldCtx),
-        passScope,
       }
     },
     function onReplaced({ abort }) {

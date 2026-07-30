@@ -1,4 +1,4 @@
-export { roomReviver, roomParticipantReviver, roomRemoteReviver }
+export { roomReviver, roomParticipantReviver, roomRemoteReviver, isRoomSubordinateReviver }
 export type { RoomClientReviverContext }
 
 import type {
@@ -59,8 +59,8 @@ const roomParticipantReviver: ReviverType<RoomParticipantContract, ClientReviver
 }
 
 /** The metadata's `room` was revived first by the recursive parser — bind the view to that live
- *  `ClientRoom` so `room.getParticipant(m.id) === m`. Subordinate lifetime: the view lives and
- *  dies with its room (`gcTrack: false` — no GC proxy, which would break that `===`). */
+ *  `ClientRoom` so `room.getParticipant(m.id) === m`. The registry recognizes this Room-owned
+ *  reviver as subordinate and leaves its lifecycle with the room. */
 const roomRemoteReviver: ReviverType<RoomRemoteContract, ClientReviverContext> = {
   prefix: SERIALIZER_PREFIX_ROOM_REMOTE,
   revive(metadata) {
@@ -72,7 +72,10 @@ const roomRemoteReviver: ReviverType<RoomRemoteContract, ClientReviverContext> =
       value: room._reviveRemote(metadata),
       close() {},
       abort() {},
-      gcTrack: false,
     }
   },
+}
+
+function isRoomSubordinateReviver(reviver: ReviverType): boolean {
+  return reviver === roomRemoteReviver
 }
