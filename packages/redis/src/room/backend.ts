@@ -211,7 +211,7 @@ export class RedisRoomBackend implements BackendDriver {
     }
     this._prefix = options.prefix ?? DEFAULT_ROOM_PREFIX
     this.capabilities = {
-      receivers: options.redis instanceof Cluster ? 'node-local' : 'global',
+      receivers: options.redis instanceof Cluster ? 'none' : 'global',
       maxRetainedPayloadBytes: options.maxRetainedPayloadBytes ?? DEFAULT_MAX_RETAINED_BYTES,
       clusterSafe: true,
       directory: true,
@@ -245,7 +245,11 @@ export class RedisRoomBackend implements BackendDriver {
       'Publish script returned non-numeric seq/ts/receivers',
     )
     assertOrderingPosition(seq, timestamp, 'RedisRoomBackend.publish')
-    return { seq, timestamp, receivers }
+    return {
+      seq,
+      timestamp,
+      ...(this.capabilities.receivers === 'none' ? {} : { receivers }),
+    }
   }
 
   async readHead(roomId: string): Promise<{ head: RoomHead } | null> {
@@ -389,7 +393,7 @@ export class RedisRoomBackend implements BackendDriver {
       accepted: true,
       seq: parsed.seq,
       timestamp: parsed.timestamp,
-      receivers: parsed.receivers,
+      ...(this.capabilities.receivers === 'none' ? {} : { receivers: parsed.receivers }),
       delivery,
     }
   }
@@ -451,7 +455,7 @@ export class RedisRoomBackend implements BackendDriver {
   ): Promise<void> {
     if (attempt.createdAt === null) attempt.createdAt = await this._authorityNowMs()
     const reply = (await this._call(REDIS_ROOM_COMMANDS.captureGeneration.name, [
-      ...REDIS_ROOM_COMMAND_KEYS.captureGeneration(this._prefix, source.roomId),
+      ...REDIS_ROOM_COMMAND_KEYS.captureGeneration(this._prefix, source.roomId, source.inc),
       this._nowArg(),
       source.inc,
       attempt.attemptId,
@@ -469,7 +473,7 @@ export class RedisRoomBackend implements BackendDriver {
   ): Promise<boolean> {
     if (attempt.generationToken === null) return false
     const reply = (await this._call(REDIS_ROOM_COMMANDS.validateGeneration.name, [
-      ...REDIS_ROOM_COMMAND_KEYS.validateGeneration(this._prefix, source.roomId),
+      ...REDIS_ROOM_COMMAND_KEYS.validateGeneration(this._prefix, source.roomId, source.inc),
       this._nowArg(),
       source.inc,
       attempt.generationToken,

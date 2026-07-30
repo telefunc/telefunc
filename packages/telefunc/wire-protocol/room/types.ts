@@ -345,8 +345,8 @@ type LocalParticipant<P extends ParticipantMeta = ParticipantMeta, Pub = unknown
    *  `{ coalesce: key }` to conflate high-frequency updates — see `PublishOptions`. */
   publish(data: Pub, options?: PublishOptions): Promise<ChannelPublishAck>
   /** Publish binary to the whole room — optionally on a named track and/or with per-frame `meta`.
-   *  The ack's `receivers` reports the track's live subscription count: `0` means nobody
-   *  anywhere wants it right now — the signal to pause the encoder until someone subscribes. */
+   *  When present, `receivers` is the global live subscription count: `0` means nobody anywhere.
+   *  Backends that cannot count globally omit it; use `onDemand` to pause and resume portably. */
   publishBinary(data: Uint8Array, options?: BinaryPublishOptions): Promise<ChannelPublishAck>
 
   /** Send a private message to one participant (or their ID) — nobody else receives it. Resolves
