@@ -1337,6 +1337,32 @@ describe('room demand lifecycle', () => {
 })
 
 describe('room binary protocol validation', () => {
+  it.each([
+    [
+      'member UUIDs',
+      ['12345678-1234-1234-1234-123456789abc', '12345678-1234-1234-1234-123456789ABC'],
+      (id: string) => frameWithMemberId(id, new Uint8Array()),
+    ],
+    [
+      'single-unit tracks',
+      Array.from({ length: 0x1_0000 }, (_, code) => String.fromCharCode(code)),
+      (track: string) => frameWithMemberId('12345678-1234-1234-1234-123456789abc', new Uint8Array(), { track }),
+    ],
+  ] as const)('encodes every accepted %s input injectively', (_name, inputs, encode) => {
+    const seen = new Set<string>()
+    for (const input of inputs) {
+      let frame: Uint8Array
+      try {
+        frame = encode(input)
+      } catch {
+        continue
+      }
+      const key = String.fromCharCode(...frame)
+      expect(seen.has(key)).toBe(false)
+      seen.add(key)
+    }
+  })
+
   it('rejects array metadata and malformed UTF-8 instead of normalizing them', () => {
     const memberId = crypto.randomUUID()
     expect(() =>
