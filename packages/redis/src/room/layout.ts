@@ -382,11 +382,9 @@ local cur = redis.call('GET', rev_key)
 if not cur then cur = '0' end
 if cur ~= ARGV[3] then return 'conflict' end
 local n = #KEYS - 3
-if #ARGV ~= 3 + n * 3 then return redis.error_reply('cells CX: invalid operand count') end
 for i = 1, n do
   local base = 3 + (i - 1) * 3
   local op, ttl = ARGV[base + 1], ARGV[base + 2]
-  if op ~= 'set' and op ~= 'del' then return redis.error_reply('cells CX: invalid mutation operation') end
   if op == 'set' and ttl ~= '' then
     local ttl_number = tonumber(ttl)
     if not ttl_number or ttl_number <= 0 or ttl_number ~= math.floor(ttl_number) then
