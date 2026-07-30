@@ -33,8 +33,6 @@ import {
   getBackend,
   HEAD_TRANSITIONS,
   installBackend,
-  MAX_CLOSE_LEASE_MS,
-  MIN_CLOSE_LEASE_MS,
   ORDERING_FRAME_LAYOUT,
   type BackendDriver,
   type BackendFactory,
@@ -176,10 +174,6 @@ const orderingSeqLow: 4 = ORDERING_FRAME_LAYOUT.offsets.seqLow
 const orderingTimestampHigh: 8 = ORDERING_FRAME_LAYOUT.offsets.timestampHigh
 const orderingTimestampLow: 12 = ORDERING_FRAME_LAYOUT.offsets.timestampLow
 const backendVersion: 1 = BACKEND_SPI_VERSION
-const closeLeaseBounds: readonly [typeof MIN_CLOSE_LEASE_MS, typeof MAX_CLOSE_LEASE_MS] = [
-  MIN_CLOSE_LEASE_MS,
-  MAX_CLOSE_LEASE_MS,
-]
 const broadcastLane: BroadcastLane = { key: 'released', kind: 'text' }
 declare const backendFactory: BackendFactory
 declare const backendDriver: BackendDriver
@@ -285,7 +279,6 @@ void [
   Broadcast,
   Channel,
   backendVersion,
-  closeLeaseBounds,
   broadcastLane,
   backend,
   backendDriver,
