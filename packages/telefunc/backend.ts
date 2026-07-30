@@ -2,6 +2,7 @@
 // cannot drift from the implementations and conformance harnesses that use it.
 export * from './wire-protocol/backend/spi.js'
 export { HEAD_TRANSITIONS } from './wire-protocol/backend/head-transitions.js'
+export { laneKey } from './wire-protocol/backend/subscription-source.js'
 export { ORDERING_FRAME_LAYOUT } from './wire-protocol/ordering-frame.js'
 export {
   disposeBackend,

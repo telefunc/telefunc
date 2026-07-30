@@ -27,7 +27,7 @@
 // an empty value in production and therefore uses Redis TIME. The scalar is never a key and cannot affect
 // the co-slot invariant. A caller-local `Date.now()` is never an authority source.
 
-import { HEAD_TRANSITIONS, ORDERING_FRAME_LAYOUT, type LaneId } from 'telefunc/backend'
+import { HEAD_TRANSITIONS, ORDERING_FRAME_LAYOUT, laneKey, type LaneId } from 'telefunc/backend'
 
 export const DEFAULT_ROOM_PREFIX = 'tf:'
 
@@ -93,21 +93,6 @@ export function directoryIndexKey(prefix: string): string {
 }
 export function directoryTagsKey(prefix: string): string {
   return `${prefix}room-dir:{${prefix}dir}:tags`
-}
-
-// In the fixed lane table each lane's order domain and channel correspond one to one, so a single
-// laneKey indexes both. member/track are percent-encoded so a member named `a:b` cannot collide.
-export function laneKey(lane: LaneId): string {
-  switch (lane.kind) {
-    case 'semantic':
-      return 'semantic'
-    case 'control':
-      return 'control'
-    case 'binary':
-      return `binary:${encodeURIComponent(lane.member)}:${encodeURIComponent(lane.track)}`
-    case 'inbox':
-      return `inbox:${encodeURIComponent(lane.member)}`
-  }
 }
 
 export function parseLaneKey(key: string): LaneId {
