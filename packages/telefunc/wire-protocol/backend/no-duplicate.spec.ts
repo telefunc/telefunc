@@ -103,8 +103,8 @@ function nestedSetMapOwners(): string[] {
     .flatMap(([file, value]) =>
       value.getDescendants().flatMap((node) => {
         if (!Node.isPropertyDeclaration(node) && !Node.isPropertySignature(node)) return []
-      const type = node.getTypeNode()?.getText() ?? node.getInitializer()?.getText() ?? ''
-      if (!/^(?:new )?Map<[\s\S]*,\s*Set<[\s\S]*>>/.test(type)) return []
+        const type = node.getTypeNode()?.getText() ?? node.getInitializer()?.getText() ?? ''
+        if (!/^(?:new )?Map<[\s\S]*,\s*Set<[\s\S]*>>/.test(type)) return []
         const container = node
           .getFirstAncestor(
             (parent) =>
