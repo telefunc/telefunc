@@ -391,8 +391,8 @@ class SubscriptionSlot<Source> {
     this._stopPromise ??= current === null ? Promise.resolve() : this._cleanup(current)
     this._transition('closed')
     this._clearCurrent()
-    this._rejectReady(failure)
     this._onEmpty()
+    this._rejectReady(failure)
   }
 
   private _markUnavailable(state: 'establishing' | 'lost'): void {

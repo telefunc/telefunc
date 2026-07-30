@@ -524,6 +524,21 @@ describe('Broadcast shield validation', () => {
 // ───────────────────────────────────────────────────────────────────────────
 
 describe('Broadcast static bus (publish/subscribe)', () => {
+  it('releases a queued publish when its establishing subscriber terminates', async () => {
+    const { controlled, publish } = await installPendingSubscriptionBackend({ seq: 1, timestamp: 1 })
+    const unsubscribe = Broadcast.subscribe('broadcast:terminal-ready', () => {})
+    try {
+      const publishing = Broadcast.publish('broadcast:terminal-ready', 'after-terminal')
+      controlled.close()
+
+      await expect(publishing).resolves.toMatchObject({ seq: 1 })
+      expect(publish).toHaveBeenCalledOnce()
+    } finally {
+      unsubscribe()
+      publish.mockRestore()
+    }
+  })
+
   it('waits for a static subscription to be ready before publishing', async () => {
     const { controlled: pending, publish } = await installPendingSubscriptionBackend({ seq: 1, timestamp: 1 })
     const unsubscribe = Broadcast.subscribe('broadcast:static-ready', () => {})
