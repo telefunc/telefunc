@@ -53,6 +53,7 @@ import type {
 
 /** One awaiter of a conflated publish — resolved with the winning send's receipt (see `_drainCoalesce`). */
 type CoalesceWaiter = { resolve: (ack: ChannelPublishAck) => void; reject: (err: unknown) => void }
+type ParticipantMutationRequest = Extract<ParticipantStubRequest, { __r: 'req-dm' | 'req-set-meta' | 'req-set-attrs' }>
 
 /**
  * Room's broadcast stub owns two concerns a generic Broadcast doesn't have: local delivery is
@@ -455,7 +456,13 @@ abstract class ClientParticipantBase extends ParticipantBase {
     { sending: boolean; pending: { data: unknown; retain?: boolean; waiters: CoalesceWaiter[] } | null }
   >()
 
-  constructor(id: string, meta: ParticipantMeta, selfDelivery: boolean, identity: string | null) {
+  constructor(
+    id: string,
+    meta: ParticipantMeta,
+    selfDelivery: boolean,
+    identity: string | null,
+    private readonly _requestParticipant: (request: ParticipantMutationRequest) => Promise<unknown>,
+  ) {
     super(id, meta, selfDelivery, identity)
   }
 
@@ -475,6 +482,30 @@ abstract class ClientParticipantBase extends ParticipantBase {
       slot.pending = { data, retain: options?.retain, waiters: [...(slot.pending?.waiters ?? []), { resolve, reject }] }
       this._drainCoalesce(key)
     })
+  }
+
+  // Implementation of the overloaded `LocalParticipant.send`; the interface supplies precise returns.
+  async send(to: string | Sender, data: unknown, options?: { ack?: boolean }): Promise<any> {
+    this._assertActive()
+    const toId = typeof to === 'string' ? to : to.id
+    return await this._requestParticipant({
+      __r: 'req-dm',
+      to: toId,
+      data,
+      ...(options?.ack ? { ack: true } : {}),
+    })
+  }
+
+  async setMeta(meta: ParticipantMeta): Promise<void> {
+    this._assertActive()
+    await this._requestParticipant({ __r: 'req-set-meta', meta })
+    this._meta = meta
+  }
+
+  async setAttributes(attrs: ParticipantMeta): Promise<void> {
+    this._assertActive()
+    await this._requestParticipant({ __r: 'req-set-attrs', attrs })
+    this._meta = mergeAttributes(this._meta, attrs)
   }
 
   private _drainCoalesce(key: string): void {
@@ -506,7 +537,7 @@ class ClientRoomParticipant extends ClientParticipantBase {
 
   constructor(clientRoom: ClientRoom, id: string, meta: ParticipantMeta, selfDelivery: boolean) {
     // Client-side joins carry no identity — it's server-assigned (see JoinOptions.identity).
-    super(id, meta, selfDelivery, null)
+    super(id, meta, selfDelivery, null, (request) => clientRoom._request({ ...request, id } as RoomStubRequest))
     this._room = clientRoom
   }
 
@@ -524,33 +555,6 @@ class ClientRoomParticipant extends ClientParticipantBase {
     return await this._room._publishBinaryFramed(frameWithMemberId(this.id, data, options))
   }
 
-  // Impl of the overloaded `LocalParticipant.send`; callers get precise result types via the interface.
-  // A rejected send rejects the request natively via the channel ack (guard/recipient `Abort` or an
-  // operational `RoomError`) — no envelope to unwrap.
-  async send(to: string | Sender, data: unknown, options?: { ack?: boolean }): Promise<any> {
-    this._assertActive()
-    const toId = typeof to === 'string' ? to : to.id
-    return await this._room._request({
-      __r: 'req-dm',
-      id: this.id,
-      to: toId,
-      data,
-      ...(options?.ack ? { ack: true } : {}),
-    })
-  }
-
-  async setMeta(meta: ParticipantMeta): Promise<void> {
-    this._assertActive()
-    await this._room._request({ __r: 'req-set-meta', id: this.id, meta })
-    this._meta = meta
-  }
-
-  async setAttributes(attrs: ParticipantMeta): Promise<void> {
-    this._assertActive()
-    await this._room._request({ __r: 'req-set-attrs', id: this.id, attrs })
-    this._meta = mergeAttributes(this._meta, attrs)
-  }
-
   async leave(): Promise<void> {
     if (this._left) return
     await this._room._request({ __r: 'req-leave', id: this.id })
@@ -564,7 +568,9 @@ class ClientStandaloneParticipant extends ClientParticipantBase {
   private readonly _channel: ClientChannel
 
   constructor(channel: ClientChannel, metadata: ParticipantStubMetadata) {
-    super(metadata.id, metadata.meta, metadata.selfDelivery, metadata.identity ?? null)
+    super(metadata.id, metadata.meta, metadata.selfDelivery, metadata.identity ?? null, (request) =>
+      channel.send(request, { ack: true }),
+    )
     this._channel = channel
 
     channel.listen((notice: unknown) => {
@@ -598,27 +604,6 @@ class ClientStandaloneParticipant extends ClientParticipantBase {
     return (await this._channel.sendBinary(frameWithMemberId(this.id, data, options), {
       ack: true,
     })) as ChannelPublishAck
-  }
-
-  // Impl of the overloaded `LocalParticipant.send`; callers get precise result types via the interface.
-  // A rejected send (guard `Abort`, recipient's `Abort`, or an operational `RoomError`) rejects the
-  // request natively via the channel ack — no envelope to unwrap.
-  async send(to: string | Sender, data: unknown, options?: { ack?: boolean }): Promise<any> {
-    this._assertActive()
-    const toId = typeof to === 'string' ? to : to.id
-    return await this._request({ __r: 'req-dm', to: toId, data, ...(options?.ack ? { ack: true } : {}) })
-  }
-
-  async setMeta(meta: ParticipantMeta): Promise<void> {
-    this._assertActive()
-    await this._request({ __r: 'req-set-meta', meta })
-    this._meta = meta
-  }
-
-  async setAttributes(attrs: ParticipantMeta): Promise<void> {
-    this._assertActive()
-    await this._request({ __r: 'req-set-attrs', attrs })
-    this._meta = mergeAttributes(this._meta, attrs)
   }
 
   async leave(): Promise<void> {
