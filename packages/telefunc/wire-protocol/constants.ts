@@ -223,43 +223,6 @@ export const FC_SELF_TIME_WINDOW_MS = 1000
  *  telefunc when the choke is elsewhere. */
 export const FC_SELF_UTIL_THRESHOLD = 0.5
 
-// ===== Rooms =====
-
-/** How often a node refreshes the liveness timestamp of the room members it owns. */
-export const ROOM_HEARTBEAT_INTERVAL_MS = 30_000
-/** Age after which a member record counts as dead and is reaped. Sized for one missed
- *  heartbeat plus eventually-consistent KV backends (Workers KV propagates within ~60s).
- *  Graceful departures (leave, disconnect, close) are immediate — this is crash recovery. */
-export const ROOM_MEMBER_TTL_MS = 120_000
-/** Max text messages held for a `Room.get({ tail })` client that hasn't subscribed yet — bounded on
- *  the room until a stub attaches, then on that stub until the client's first text subscribe. Drop-
- *  oldest under BOTH this count cap and a total-size cap (`ROOM_TAIL_HOLD_BYTES_MAX`): the count bound
- *  alone left ~256× the per-message ingress limit of headroom, and a server-side `me.publish()` isn't
- *  ingress-capped at all. The tail carries the *recent* live messages a prompt subscriber would
- *  otherwise miss, not full history — that's `tail: N`. */
-export const ROOM_TAIL_HOLD_MAX = 256
-/** Total held tail size, the size half of the two-part bound (the count half is `ROOM_TAIL_HOLD_MAX`).
- *  Measured as serialized-string length — a tight proxy for encoded/heap bytes. A single entry larger
- *  than the whole budget is dropped, never held; the tail is best-effort. */
-export const ROOM_TAIL_HOLD_BYTES_MAX = 1024 * 1024
-/** Lease on a remote instance's binary-track demand (`onDemand`). Each instance re-gossips its live
- *  demand every heartbeat, so a live watcher's lease is renewed well within this; a reporter that
- *  crashed without sending its 0-transition has its demand swept once the lease lapses, so a member's
- *  `onDemand` eventually flips back to `false` (pause the encoder) instead of staying stuck watched.
- *  Three heartbeats: survives two missed refreshes before a live watcher is wrongly dropped. */
-export const ROOM_DEMAND_TTL_MS = ROOM_HEARTBEAT_INTERVAL_MS * 3
-
-/** Safety net for `send(…, { ack: true })`. The normal outcomes settle promptly — the recipient
- *  replies, leaves, or its inbox overflows — but a recipient that joined yet never `listen()`s and
- *  never leaves would strand the sender forever, so an ack unanswered this long rejects. Generous, so
- *  a legitimately slow `listen` handler is not cut off. Doubles as the sweep age for the relay-side
- *  correlation an ack DM leaves on the recipient's stub: past this the sender has already given up, so
- *  the correlation can no longer settle anyone and is dropped. */
-export const ROOM_DM_ACK_TIMEOUT_MS = 60_000
-/** Product-policy horizon for a Room lane that cannot establish. Raw backends deliberately have no
- * establishment latency SLA; one minute permits six equal attempts through transient stalls without
- * leaving a Room operation pending indefinitely. */
-export const ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS = 60_000
 // ===== Session routing =====
 
 /** User-facing header for sticky session routing (opaque token). */

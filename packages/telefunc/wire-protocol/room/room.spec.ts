@@ -8,7 +8,7 @@ import {
   ROOM_DM_ACK_TIMEOUT_MS,
   ROOM_HEARTBEAT_INTERVAL_MS,
   ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS,
-} from '../constants.js'
+} from './constants.js'
 import {
   DEFAULT_TRACK,
   RoomError,

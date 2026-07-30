@@ -14,7 +14,7 @@ import { parse } from '@brillout/json-serializer/parse'
 import { assertUsage } from '../../../utils/assert.js'
 import { getBackend } from '../../backend/install.js'
 import type { CellMutation } from '../../backend/spi.js'
-import { ROOM_MEMBER_TTL_MS } from '../../constants.js'
+import { ROOM_MEMBER_TTL_MS } from '../constants.js'
 import {
   RoomError,
   leaveCauseToWire,

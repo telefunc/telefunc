@@ -10,7 +10,6 @@ import type {
   ChannelListener,
   ChannelBinaryListener,
   ChannelPublishAck,
-  ChannelPublishInfo,
   BroadcastBinaryListener,
   BroadcastListener,
 } from '../channel.js'
