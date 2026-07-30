@@ -4,7 +4,7 @@ import { IndexedPeer } from '../server/IndexedPeer.js'
 import { ACK_STATUS, TAG, decode } from '../shared-ws.js'
 import { waitForTelefunctionCallBarriers } from '../client/call-barrier.js'
 import { ShieldValidationError, isShieldValidationError } from '../../shared/ShieldValidationError.js'
-import { ROOM_HEARTBEAT_INTERVAL_MS, ROOM_MEMBER_KV_TTL_MS } from '../constants.js'
+import { ROOM_HEARTBEAT_INTERVAL_MS } from '../constants.js'
 import {
   DEFAULT_TRACK,
   frameWithMemberId,
@@ -39,6 +39,7 @@ const encoder = new TextEncoder()
 const decoder = new TextDecoder()
 const semanticLane = { kind: 'semantic' } as const satisfies LaneId
 const allBinary = { everyMember: { all: true, tracks: [] }, members: {} }
+const FORMER_MEMBER_KV_TTL_MS = 180_000
 
 let driver: MemoryBackend
 let memoryState: MemoryBackendState
@@ -1024,6 +1025,7 @@ describe('Room public behavior', () => {
     vi.useFakeTimers()
     vi.setSystemTime(1_000_000)
     const room = (await Room.create('reaped-retained')) as ServerRoom
+    const writes = vi.spyOn(driver, 'compareExchangeCells')
     const publisher = await room.join({ identity: 'expired-owner' })
     const leaves: string[] = []
     room.onLeave((member) => leaves.push(member.id))
@@ -1031,9 +1033,8 @@ describe('Room public behavior', () => {
     await publisher.publishBinary(new Uint8Array([1]), { track: 'screen', retain: true })
     expect(await driver.listRetained(room.id, room._inc)).toHaveLength(2)
 
-    // Cross the backend's former native expiry. If the cell disappears before the seenAt reaper
-    // claims it, there is no record left to identify the owner, clear its indexes, or publish leave.
-    vi.setSystemTime(1_000_000 + ROOM_MEMBER_KV_TTL_MS + 1)
+    expect(writes.mock.calls.flatMap((call) => call[3]).every(({ set }) => set?.ttlMs === undefined)).toBe(true)
+    vi.setSystemTime(1_000_000 + FORMER_MEMBER_KV_TTL_MS + 1)
     expect(await Room.getParticipants(room.id)).toEqual([])
     expect(await driver.listRetained(room.id, room._inc)).toEqual([])
     expect(leaves).toEqual([publisher.id])
@@ -1385,6 +1386,32 @@ describe('room demand lifecycle', () => {
 })
 
 describe('room binary protocol validation', () => {
+  it.each([
+    [
+      'member UUIDs',
+      ['12345678-1234-1234-1234-123456789abc', '12345678-1234-1234-1234-123456789ABC'],
+      (id: string) => frameWithMemberId(id, new Uint8Array()),
+    ],
+    [
+      'single-unit tracks',
+      Array.from({ length: 0x1_0000 }, (_, code) => String.fromCharCode(code)),
+      (track: string) => frameWithMemberId('12345678-1234-1234-1234-123456789abc', new Uint8Array(), { track }),
+    ],
+  ] as const)('encodes every accepted %s input injectively', (_name, inputs, encode) => {
+    const seen = new Set<string>()
+    for (const input of inputs) {
+      let frame: Uint8Array
+      try {
+        frame = encode(input)
+      } catch {
+        continue
+      }
+      const key = String.fromCharCode(...frame)
+      expect(seen.has(key)).toBe(false)
+      seen.add(key)
+    }
+  })
+
   it('rejects array metadata and malformed UTF-8 instead of normalizing them', () => {
     const memberId = crypto.randomUUID()
     expect(() =>

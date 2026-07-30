@@ -18,25 +18,50 @@ afterEach(() => disposeBackend())
 function pendingSubscription(): {
   subscription: BackendSubscription
   ready(): void
+  lost(): void
+  close(): void
 } {
   let resolveReady!: () => void
-  const ready = new Promise<void>((resolve) => {
-    resolveReady = resolve
-  })
+  let ready: Promise<void>
+  const resetReady = () => {
+    ready = new Promise<void>((resolve) => {
+      resolveReady = resolve
+    })
+  }
+  resetReady()
   let state: SubscriptionState = 'establishing'
+  const listeners = new Set<(state: SubscriptionState) => void>()
+  const transition = (next: SubscriptionState) => {
+    state = next
+    for (const listener of listeners) listener(next)
+  }
   return {
     subscription: {
-      ready,
+      get ready() {
+        return ready
+      },
       state: () => state,
-      onStateChange: () => () => {},
+      onStateChange: (listener) => {
+        listeners.add(listener)
+        return () => listeners.delete(listener)
+      },
       unsubscribe: async () => {
-        state = 'closed'
         resolveReady()
+        transition('closed')
       },
     },
     ready() {
-      state = 'ready'
       resolveReady()
+      transition('ready')
+    },
+    lost() {
+      resetReady()
+      transition('lost')
+    },
+    close() {
+      ready = Promise.reject(new Error('terminal subscription'))
+      void ready.catch(() => {})
+      transition('closed')
     },
   }
 }
@@ -230,6 +255,10 @@ describe('keyed in-process broadcast', () => {
       await Promise.resolve()
       expect(publish).not.toHaveBeenCalled()
 
+      controlled.ready()
+      controlled.lost()
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      expect(publish).not.toHaveBeenCalled()
       controlled.ready()
       await publishing
       expect(publish).toHaveBeenCalledOnce()
@@ -456,6 +485,9 @@ describe('Broadcast static bus (publish/subscribe)', () => {
       pending.ready()
       await publishing
       expect(publish).toHaveBeenCalledOnce()
+      pending.close()
+      expect(await Broadcast.publish('broadcast:static-ready', 'after-terminal')).toBeDefined()
+      expect(publish).toHaveBeenCalledTimes(2)
     } finally {
       unsubscribe()
       subscribe.mockRestore()

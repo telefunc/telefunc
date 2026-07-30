@@ -13,6 +13,7 @@ import {
   onJoinAsServer,
   onJoinRoomAsServerSelf,
   onGetRoomWithMember,
+  onGetMember,
   onWatchRoom,
   onGetWatched,
   onAnnounce,
@@ -24,6 +25,7 @@ import {
   onCloseRoom,
 } from './Room.telefunc'
 import { roomScenario } from './Room.scenarios'
+import { close } from 'telefunc/client'
 
 /** Render every poll so the e2e autoRetry sees fresh data on each iteration (see Publish.tsx).
  *  `render` may be async — some scenarios read server-side state (e.g. an audit log) each tick. */
@@ -337,6 +339,14 @@ function Room() {
           // A telefunction returns { room, member } — ref-identity binds the view to the room.
           const out = await onGetRoomWithMember(roomId, me.id)
           const viaRoom = await out.room.getParticipant(me.id)
+          const remote = await onGetMember(roomId, me.id)
+          let received = 0
+          remote!.subscribe(() => received++)
+          ;(window as any).__roomRemoteLifecycle = {
+            publish: () => me.publish('probe'),
+            close: () => close(remote!),
+            received: () => received,
+          }
           const state = {
             hasMember: out.member !== null,
             memberName: out.member?.meta.name ?? null,

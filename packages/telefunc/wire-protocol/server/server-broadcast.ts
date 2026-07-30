@@ -57,13 +57,21 @@ function trackSubscription(backend: BackendSpi, lane: BroadcastLane, subscriptio
   }
   subscriptions.add(tracked)
   let active = true
-  return () => {
+  let unobserve = () => {}
+  const remove = () => {
     if (!active) return
     active = false
+    unobserve()
     tracked.markRemoved()
     subscriptions.delete(tracked)
     if (subscriptions.size === 0) byLane.delete(key)
   }
+  unobserve = subscription.onStateChange((state) => {
+    if (state === 'closed') remove()
+  })
+  if (!active) unobserve()
+  else if (subscription.state() === 'closed') remove()
+  return remove
 }
 
 function publishWhenSubscriptionsReady<T>(
@@ -77,7 +85,7 @@ function publishWhenSubscriptionsReady<T>(
     .filter(({ subscription }) => subscription.state() !== 'ready')
     .map(({ subscription, removed }) => Promise.race([subscription.ready, removed]))
   if (pending.length === 0) return publish()
-  return Promise.all(pending).then(publish)
+  return Promise.all(pending).then(() => publishWhenSubscriptionsReady(backend, lane, publish))
 }
 
 class ServerBroadcast<T = unknown> extends ServerChannel {

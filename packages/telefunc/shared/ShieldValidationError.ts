@@ -16,6 +16,9 @@ class ShieldValidationError extends Error {
 function isShieldValidationError(thing: unknown): thing is ShieldValidationError {
   return (
     thing instanceof ShieldValidationError ||
-    (typeof thing === 'object' && thing !== null && shieldValidationErrorBrand in thing)
+    (typeof thing === 'object' &&
+      thing !== null &&
+      shieldValidationErrorBrand in thing &&
+      thing[shieldValidationErrorBrand] === true)
   )
 }

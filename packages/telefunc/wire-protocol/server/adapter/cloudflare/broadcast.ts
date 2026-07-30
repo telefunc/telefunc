@@ -20,13 +20,12 @@ const PRESENCE_TTL_SECONDS = 90
 const PRESENCE_REFRESH_INTERVAL_MS = 30_000
 const textEncoder = new TextEncoder()
 const textDecoder = new TextDecoder()
+const laneKey = (lane: BroadcastLane) => `${lane.kind}:${lane.key}`
 
 /** Unwrap Cloudflare DO RPC proxy into a plain object.
  *  RPC properties are lazy stubs that must be awaited to resolve their values. */
 async function unwrapRpcResult(rpc: Promise<PublishResult>): Promise<PublishResult> {
   const r = await rpc
-  // `receivers` (the authority's live subscriber count) rides back like `meta` — without this it
-  // was dropped, blinding `publishBinary().receivers` / `onDemand` on Cloudflare.
   const [seq, timestamp, meta, receivers] = await Promise.all([r.seq, r.timestamp, r.meta, r.receivers])
   return {
     seq,
@@ -52,7 +51,6 @@ type BroadcastDeliverRequest = {
   frame: Uint8Array
 }
 
-/** A stub to a Telefunc Durable Object carrying the generic broadcast fan-out RPC surface. */
 type TelefuncDurableObjectStub = DurableObjectStub & {
   telefuncBroadcastPublish(request: BroadcastPublishRequest): Promise<PublishResult>
   telefuncBroadcastDeliver(request: BroadcastDeliverRequest): Promise<void>
@@ -158,7 +156,6 @@ class MemberBucketState {
   setupInFlight = true
   teardownRequested = false
   refreshTimer: ReturnType<typeof setInterval> | null = null
-  /** Raw route acknowledgement: resolves only after KV presence is actually registered. */
   readonly ready: Promise<void>
   private settleReady!: { resolve: () => void; reject: (error: unknown) => void }
   private readonly authority: TelefuncDurableObjectStub
@@ -176,8 +173,6 @@ class MemberBucketState {
     void this.ready.catch(() => {})
   }
 
-  /** Called by the transport once presence registration settles (success or failure). Idempotent —
-   *  resolving an already-resolved promise is a no-op — so a presence refresh never re-arms it. */
   acknowledgePresence(): void {
     this.settleReady.resolve()
   }
@@ -434,10 +429,6 @@ class CloudflareBroadcastTransport {
 
   // --- Local subscriber tracking ---
 
-  private hasLocalCallbacks(key: string): boolean {
-    return this.textSubs.has(key) || this.binarySubs.has(key)
-  }
-
   publish(lane: BroadcastLane, payload: Uint8Array): Promise<PublishResult> {
     return lane.kind === 'text'
       ? this.publishText(lane.key, textDecoder.decode(payload))
@@ -445,7 +436,7 @@ class CloudflareBroadcastTransport {
   }
 
   private publishText(key: string, serialized: string): Promise<PublishResult> {
-    const memberState = this.memberStates.get(key)
+    const memberState = this.memberStates.get(laneKey({ key, kind: 'text' }))
 
     if (memberState) {
       if (memberState.setupInFlight || memberState.pendingPublishes.flushing) {
@@ -466,7 +457,7 @@ class CloudflareBroadcastTransport {
   }
 
   private publishBinary(key: string, data: Uint8Array): Promise<PublishResult> {
-    const memberState = this.memberStates.get(key)
+    const memberState = this.memberStates.get(laneKey({ key, kind: 'binary' }))
 
     if (memberState) {
       if (memberState.setupInFlight || memberState.pendingPublishes.flushing) {
@@ -497,12 +488,11 @@ class CloudflareBroadcastTransport {
     request: BroadcastPublishRequest,
   ): Promise<PublishResult> {
     const { key, locationBucket, serialized, binaryData, forwarded = false } = request
-
+    const kind = serialized === undefined ? 'binary' : 'text'
     if (forwarded) {
       assert(request.info, 'Forwarded publish must include info')
       const info = request.info
       const doNames = request.doNames ?? []
-      const kind = serialized === undefined ? 'binary' : 'text'
       const payload = serialized === undefined ? binaryData : textEncoder.encode(serialized)
       assert(payload !== undefined, 'Forwarded publish must include a payload')
       const frame = encodeOrderingFrame(payload, info)
@@ -515,12 +505,10 @@ class CloudflareBroadcastTransport {
     const { authorityBucket, seq, presenceByBucket } = await authorityState.runInAuthorityChain(async () => ({
       authorityBucket: await authorityState.getOrInitAuthorityBucket(key, locationBucket),
       seq: await authorityState.getNextKeySeq(key),
-      presenceByBucket: await this.listPresenceByBucket(key),
+      presenceByBucket: await this.listPresenceByBucket(laneKey({ key, kind })),
     }))
 
     const info = { seq, timestamp: Date.now() }
-    // `receivers` counts subscribed DOs (presence entries) — the same want-driven zero
-    // semantics as the other transports: 0 ⟺ no subscriber anywhere.
     const fanoutBuckets = Array.from(presenceByBucket.keys())
     let receivers = 0
     for (const doNames of presenceByBucket.values()) receivers += doNames.length
@@ -553,28 +541,30 @@ class CloudflareBroadcastTransport {
 
   openSubscription(lane: BroadcastLane, receiver: BackendReceiver): CloudflareBroadcastSubscriptionAttempt {
     const locationBucket = this.requireLocationBucket()
-    const member = this.ensurePresence(lane.key, locationBucket)
+    const member = this.ensurePresence(lane, locationBucket)
     const routes = lane.kind === 'text' ? this.textSubs : this.binarySubs
     let attempt!: CloudflareBroadcastSubscriptionAttempt
     attempt = new CloudflareBroadcastSubscriptionAttempt(member, receiver, async () => {
       if (routes.get(lane.key) === attempt) routes.delete(lane.key)
-      await this.teardownPresenceIfEmpty(lane.key)
+      await this.teardownPresenceIfEmpty(lane)
     })
     routes.set(lane.key, attempt)
     return attempt
   }
 
-  private ensurePresence(key: string, locationBucket: LocationBucket): MemberBucketState {
+  private ensurePresence(lane: BroadcastLane, locationBucket: LocationBucket): MemberBucketState {
+    const key = laneKey(lane)
     const existing = this.memberStates.get(key)
     if (existing !== undefined) return existing
-    const memberState = new MemberBucketState(key, locationBucket, this.getAuthorityStub(key, locationBucket))
+    const memberState = new MemberBucketState(lane.key, locationBucket, this.getAuthorityStub(lane.key, locationBucket))
     this.memberStates.set(key, memberState)
     void this.initializePresence(key, memberState).catch(() => {})
     return memberState
   }
 
-  private async teardownPresenceIfEmpty(key: string): Promise<void> {
-    if (this.hasLocalCallbacks(key)) return
+  private async teardownPresenceIfEmpty(lane: BroadcastLane): Promise<void> {
+    if ((lane.kind === 'text' ? this.textSubs : this.binarySubs).has(lane.key)) return
+    const key = laneKey(lane)
     const memberState = this.memberStates.get(key)
     if (!memberState) return
 

@@ -28,6 +28,7 @@ export {
   leaveCauseFromWire,
   leaveCauseToWire,
   DEFAULT_TRACK,
+  isRoomTrack,
   emptyTrackWants,
   mergeTrackWants,
   wantsTrack,
@@ -433,7 +434,7 @@ class RoomError extends Error {
 }
 
 function isRoomError(thing: unknown): thing is RoomError {
-  return typeof thing === 'object' && thing !== null && roomErrorBrand in thing
+  return typeof thing === 'object' && thing !== null && roomErrorBrand in thing && thing[roomErrorBrand] === true
 }
 
 /** The generic error a bug becomes on the caller — identical to telefunc's top-level bug message,
@@ -492,7 +493,7 @@ function roomAckError(err: unknown, report: (err: unknown) => void): { text: str
 // ---------------------------------------------------------------------------
 
 const MEMBER_ID_BYTE_LENGTH = 16
-const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const BYTE_TO_HEX: string[] = []
 for (let byte = 0; byte < 256; byte++) BYTE_TO_HEX.push(byte.toString(16).padStart(2, '0'))
 
@@ -536,12 +537,11 @@ function frameWithMemberId(memberId: string, payload: Uint8Array, opts?: BinaryP
   let flags = opts?.retain === true ? FRAME_FLAG_RETAIN : 0
   let trackBytes: Uint8Array | null = null
   if (opts?.track !== undefined) {
-    assertUsage(typeof opts.track === 'string' && opts.track.length > 0, 'track should be a non-empty string')
-    trackBytes = frameTextEncoder.encode(opts.track)
     assertUsage(
-      trackBytes.byteLength <= TRACK_LENGTH_FIELD_MAX,
-      `track should be at most ${TRACK_LENGTH_FIELD_MAX} bytes`,
+      isRoomTrack(opts.track) && opts.track.length > 0,
+      `track should be a non-empty well-formed string of at most ${TRACK_LENGTH_FIELD_MAX} bytes`,
     )
+    trackBytes = frameTextEncoder.encode(opts.track)
     flags |= FRAME_FLAG_TRACK
   }
   let metaBytes: Uint8Array | null = null
@@ -694,11 +694,14 @@ function sanitizeTrackWants(wants: unknown): TrackWants | null {
   if (!isRecord(wants) || typeof wants.all !== 'boolean' || !Array.isArray(wants.tracks)) return null
   // Bound by UTF-8 bytes, the same unit the frame path uses (`frameWithMemberId`) — a `.length` char
   // count could admit a want that doesn't fit the frame's one-byte track-length field.
-  if (
-    !wants.tracks.every(
-      (track) => typeof track === 'string' && frameTextEncoder.encode(track).byteLength <= TRACK_LENGTH_FIELD_MAX,
-    )
-  )
-    return null
+  if (!wants.tracks.every(isRoomTrack)) return null
   return { all: wants.all, tracks: wants.tracks as string[] }
+}
+
+function isRoomTrack(track: unknown): track is string {
+  return (
+    typeof track === 'string' &&
+    track.isWellFormed() &&
+    frameTextEncoder.encode(track).byteLength <= TRACK_LENGTH_FIELD_MAX
+  )
 }

@@ -5,6 +5,7 @@ import type { ChannelPublishInfo } from '../channel.js'
 import {
   DEFAULT_TRACK,
   emptyTrackWants,
+  isRoomTrack,
   stampNewer,
   type BinaryWants,
   type MemberSnapshot,
@@ -708,7 +709,7 @@ class RoomState {
 function normalizeTrackFilter(opts: { track?: string | null } | undefined): TrackFilter {
   const track = opts?.track
   if (track === undefined || track === null) return track
-  assertUsage(typeof track === 'string' && track.length > 0, 'subscribeBinary() track should be a non-empty string')
+  assertUsage(isRoomTrack(track) && track.length > 0, 'subscribeBinary() track should be a valid non-empty string')
   return track
 }
 

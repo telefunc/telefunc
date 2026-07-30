@@ -160,6 +160,16 @@ function testRoom() {
       expect(result.memberName).toBe('Viewed')
       expect(result.sameObject).toBe(true) // ref-identity binds the view to its room
     })
+
+    await page.requestGC()
+    await page.evaluate(() => (window as any).__roomRemoteLifecycle.publish())
+    await autoRetry(async () =>
+      expect(await page.evaluate(() => (window as any).__roomRemoteLifecycle.received())).toBe(1),
+    )
+    await page.evaluate(() => (window as any).__roomRemoteLifecycle.close())
+    await page.evaluate(() => (window as any).__roomRemoteLifecycle.publish())
+    await new Promise((resolve) => setTimeout(resolve, 200))
+    expect(await page.evaluate(() => (window as any).__roomRemoteLifecycle.received())).toBe(1)
   })
 
   testRoomScenario('guard', 'room: guards reject over the wire; allowed messages flow', async () => {

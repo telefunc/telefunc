@@ -1,4 +1,4 @@
-export { wrapProxy }
+export { wrapProxy, adoptSubordinate }
 
 import { isObjectOrFunction } from '../utils/isObjectOrFunction.js'
 import { isPromise } from '../utils/isPromise.js'
@@ -23,7 +23,7 @@ function wrapProxy<T extends object>(target: T): T {
   if (typeof target === 'function') {
     const wrapper = (...args: unknown[]) => {
       const result = (target as Function)(...args)
-      tether(result, wrapper)
+      adoptSubordinate(result, wrapper)
       return result
     }
     Object.assign(wrapper, target)
@@ -37,7 +37,7 @@ function wrapProxy<T extends object>(target: T): T {
       // Return a forwarding function that tethers any returned object to the wrapper.
       return (...args: unknown[]) => {
         const result = property.apply(target, args)
-        tether(result, wrapper)
+        adoptSubordinate(result, wrapper)
         return result
       }
     },
@@ -64,12 +64,12 @@ function wrapProxy<T extends object>(target: T): T {
 
 /** Pin `wrapper` to live as long as `derived` does (via WeakMap). A promise also transfers
  *  the tether to its fulfilled object: callers commonly retain only `await wrapper.method()`. */
-function tether(derived: unknown, wrapper: unknown): void {
+function adoptSubordinate(derived: unknown, wrapper: unknown): void {
   if (!isObjectOrFunction(derived)) return
   keepWrapperAlive.set(derived, wrapper)
   if (isPromise(derived)) {
     void Promise.resolve(derived)
-      .then((value) => tether(value, wrapper))
+      .then((value) => adoptSubordinate(value, wrapper))
       .catch(() => {})
   }
 }
