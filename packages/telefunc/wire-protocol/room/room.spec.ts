@@ -5,10 +5,8 @@ import { ACK_STATUS, TAG, decode } from '../shared-ws.js'
 import { waitForTelefunctionCallBarriers } from '../client/call-barrier.js'
 import { ShieldValidationError, isShieldValidationError } from '../../shared/ShieldValidationError.js'
 import {
-  ROOM_DM_ACK_TIMEOUT_MS,
   ROOM_HEARTBEAT_INTERVAL_MS,
   ROOM_MEMBER_KV_TTL_MS,
-  ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS,
 } from '../constants.js'
 import {
   DEFAULT_TRACK,
@@ -21,7 +19,7 @@ import {
 } from './protocol.js'
 import { ClientRoom, RoomClientBroadcast } from './client.js'
 import { Room, ServerRoom } from './server.js'
-import { configFromHead, encodeRoomConfig } from './server/lanes.js'
+import { SubSlot, configFromHead, encodeRoomConfig } from './server/lanes.js'
 import { RoomStubChannel } from './stubs.js'
 import { RoomDemand } from './demand.js'
 import type { ChannelPublishInfo } from '../channel.js'
@@ -510,141 +508,38 @@ describe('Room public behavior', () => {
     expect(heartbeat).toHaveBeenCalledOnce()
   })
 
-  it('replans a terminal Room lane when its first replacement never becomes ready', async () => {
-    vi.useFakeTimers()
-    const authority = await Room.create('room-owned-subscription-horizon')
-    const publisher = await authority.join()
-    const observer = await Room.get(authority.id)
-    const backend = getBackend()
-    const subscribeLane = backend.subscribeLane.bind(backend)
-    const terminal = terminalSubscription()
-    const never = deferred<void>()
-    let semanticAttempt = 0
-    const subscribe = vi.spyOn(backend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
-      if (lane.kind !== 'semantic') return subscribeLane(roomId, inc, lane, receiver)
-      semanticAttempt++
-      if (semanticAttempt === 1) return terminal.subscription
-      if (semanticAttempt === 2)
-        return {
-          ready: never.promise,
-          state: () => 'establishing',
-          onStateChange: () => () => {},
-          unsubscribe: async () => {},
-        }
-      return subscribeLane(roomId, inc, lane, receiver)
-    })
-    const report = vi.spyOn(console, 'error').mockImplementation(() => {})
-    const received: unknown[] = []
-    observer.subscribe((data) => received.push(data))
-    await terminal.close()
+  it('replaces a subscription that is already closed on initial establishment', async () => {
+    const closed = terminalSubscription()
+    await closed.close()
+    const terminal = vi.fn()
+    const slot = new SubSlot(terminal, () => {})
 
-    await vi.advanceTimersByTimeAsync(ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS / 6)
-    await publisher.publish('recovered')
+    slot.sync(true, () => closed.subscription)
+    await Promise.resolve()
 
-    expect(received).toEqual(['recovered'])
-    expect(report).toHaveBeenCalled()
-    subscribe.mockRestore()
-    report.mockRestore()
+    expect(terminal).toHaveBeenCalledOnce()
+    expect(terminal.mock.calls[0]?.[0]).toBe(slot)
+    slot.stop()
   })
 
-  it('uses exactly one recovery attempt plus five Room-owned replans', async () => {
+  it('keeps retrying inside the horizon after more than six immediate failures', async () => {
     vi.useFakeTimers()
-    const observer = await Room.get((await Room.create('room-replan-budget')).id)
+    const observer = await Room.get((await Room.create('single-recovery-horizon')).id)
     const backend = getBackend()
     const subscribeLane = backend.subscribeLane.bind(backend)
-    const terminal = terminalSubscription()
-    let semanticSubscriptions = 0
-    let recoveryAttempts = 0
+    let attempts = 0
     const subscribe = vi.spyOn(backend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
       if (lane.kind !== 'semantic') return subscribeLane(roomId, inc, lane, receiver)
-      semanticSubscriptions++
-      if (semanticSubscriptions === 1) return terminal.subscription
-      recoveryAttempts++
-      return pendingSubscription()
+      attempts++
+      return attempts < 8 ? rejectedSubscription(`attempt ${attempts}`) : subscribeLane(roomId, inc, lane, receiver)
     })
     const report = vi.spyOn(console, 'error').mockImplementation(() => {})
     try {
       observer.subscribe(() => {})
-      await terminal.close()
-
-      await vi.advanceTimersByTimeAsync(ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS)
-
-      expect(recoveryAttempts).toBe(6)
+      await vi.advanceTimersByTimeAsync(2_000)
+      expect(attempts).toBe(8)
+      expect(observer.isClosed).toBe(false)
     } finally {
-      subscribe.mockRestore()
-      report.mockRestore()
-    }
-  })
-
-  it('keeps exhausted recovery internal and replans the lost lane without closing the Room', async () => {
-    const room = (await Room.create('room-replan-exhaustion')) as ServerRoom
-    const backend = getBackend()
-    const subscribeLane = backend.subscribeLane.bind(backend)
-    const terminal = terminalSubscription()
-    let exhaustedMember: string | undefined
-    let recoveryAttempts = 0
-    let allowRecovery = false
-    const subscribe = vi.spyOn(backend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
-      if (lane.kind !== 'inbox') return subscribeLane(roomId, inc, lane, receiver)
-      if (exhaustedMember === undefined) {
-        exhaustedMember = lane.member
-        return terminal.subscription
-      }
-      if (lane.member !== exhaustedMember) return subscribeLane(roomId, inc, lane, receiver)
-      recoveryAttempts++
-      return allowRecovery
-        ? subscribeLane(roomId, inc, lane, receiver)
-        : rejectedSubscription('Backend subscription closed: room-replan-exhaustion')
-    })
-    const report = vi.spyOn(console, 'error').mockImplementation(() => {})
-    try {
-      const sender = await room.join()
-      const recipient = await room.join()
-      recipient.listen(() => 'acknowledged')
-      expect(exhaustedMember).toBe(sender.id)
-      await terminal.close()
-
-      await vi.waitFor(() => expect(recoveryAttempts).toBe(6))
-      const slot = (
-        room as unknown as {
-          _dmUnsubs: Map<string, { active: boolean; lost: boolean; ready: Promise<void> }>
-        }
-      )._dmUnsubs.get(sender.id)!
-      await vi.waitFor(() => expect(slot.lost).toBe(true))
-      const diagnostics = report.mock.calls.flat().map(String).join('\n')
-      expect(diagnostics).toContain('Backend subscription closed: room-replan-exhaustion')
-      expect(diagnostics).toContain('Room subscription recovery exhausted')
-      let readinessOutcome: 'pending' | 'resolved' | 'rejected' = 'pending'
-      void slot.ready.then(
-        () => {
-          readinessOutcome = 'resolved'
-        },
-        () => {
-          readinessOutcome = 'rejected'
-        },
-      )
-      await Promise.resolve()
-      expect(readinessOutcome).toBe('pending')
-      expect(room.isClosed).toBe(false)
-      expect((await backend.readHead(room.id))?.head.state).toBe('open')
-
-      vi.useFakeTimers()
-      const sending = sender.send(recipient, 'ping', { ack: true }).catch((error: unknown) => error)
-      await vi.advanceTimersByTimeAsync(ROOM_DM_ACK_TIMEOUT_MS)
-      const publicError = await sending
-      expect(isRoomError(publicError)).toBe(true)
-      expect(String(publicError)).toContain('timed out')
-      expect(String(publicError)).not.toContain('subscription')
-      vi.useRealTimers()
-
-      allowRecovery = true
-      const syncSubs = room as unknown as { _syncSubs(): void }
-      syncSubs._syncSubs()
-      await vi.waitFor(() => expect(recoveryAttempts).toBe(7))
-      await vi.waitFor(() => expect(slot).toMatchObject({ active: true, lost: false }))
-      await expect(sender.publish('still-open')).resolves.toMatchObject({ seq: expect.any(Number) })
-    } finally {
-      vi.useRealTimers()
       subscribe.mockRestore()
       report.mockRestore()
     }
@@ -2120,17 +2015,6 @@ function terminalSubscription(inner?: BackendSubscription): {
     },
   }
   return { subscription, close: subscription.unsubscribe }
-}
-
-function pendingSubscription(): BackendSubscription {
-  const readiness = deferred<void>()
-  void readiness.promise.catch(() => {})
-  return {
-    ready: readiness.promise,
-    state: () => 'establishing',
-    onStateChange: () => () => {},
-    unsubscribe: async () => {},
-  }
 }
 
 function rejectedSubscription(diagnostic: string): BackendSubscription {

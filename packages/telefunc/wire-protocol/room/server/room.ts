@@ -90,7 +90,6 @@ import type {
 } from '../types.js'
 import type { Room, RoomGuards } from './statics.js'
 assertIsNotBrowser()
-const ROOM_SUBSCRIPTION_REPLAN_LIMIT = 5
 
 const SERVER_ROOM_BRAND: unique symbol = Symbol.for('telefunc.ServerRoom')
 
@@ -898,8 +897,7 @@ class ServerRoom implements Room {
     this._recoveringSubscriptions.add(slot)
     void (async () => {
       const deadline = Date.now() + ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS
-      const attemptMs = ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS / (ROOM_SUBSCRIPTION_REPLAN_LIMIT + 1)
-      for (let attempt = 0; attempt <= ROOM_SUBSCRIPTION_REPLAN_LIMIT && slot.wanted; attempt++) {
+      while (slot.wanted && Date.now() < deadline) {
         try {
           const current = await withinRoomHorizon(getBackend().readHead(this.id), deadline - Date.now())
           if (current === null || current.head.state !== 'open' || current.head.currentInc !== this._inc) {
@@ -912,11 +910,17 @@ class ServerRoom implements Room {
         }
         slot.retry()
         try {
-          await withinRoomHorizon(slot.attemptReady, Math.min(attemptMs, deadline - Date.now()))
+          await withinRoomHorizon(slot.attemptReady, Math.min(1_000, deadline - Date.now()))
           await this._reconcileAuthority()
           return
         } catch (error) {
           reportRoomError(error)
+        }
+        const remaining = deadline - Date.now()
+        if (remaining > 0) {
+          await new Promise<void>((resolve) => {
+            unrefTimer(setTimeout(resolve, Math.min(100, remaining)))
+          })
         }
       }
       if (slot.wanted) {
