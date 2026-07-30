@@ -423,8 +423,8 @@ describe('Room public behavior', () => {
       const onControl = (
         room as unknown as { _onCtrlMessage(message: string, info: { seq: number; timestamp: number }): void }
       )._onCtrlMessage.bind(room)
-      onControl('{"__r":"announce","data":"first"}', { seq: 1, timestamp: 1 })
-      onControl('{"__r":"announce","data":"gap"}', { seq: 3, timestamp: 3 })
+      onControl('{"__r":"update","meta":{},"at":1,"by":"a"}', { seq: 1, timestamp: 1 })
+      onControl('{"__r":"update","meta":{},"at":2,"by":"a"}', { seq: 3, timestamp: 3 })
       await vi.waitFor(() => expect(room.count).toBe(1))
       expect((await room.getParticipants()).map(({ id }) => id)).toEqual([member.id])
     } finally {
@@ -825,15 +825,23 @@ describe('Room public behavior', () => {
 
   it('relays semantic announcements only to stubs that declared announce demand', async () => {
     const room = (await Room.create('announce-want-gate')) as ServerRoom
+    const backend = getBackend()
+    const subscribeLane = backend.subscribeLane.bind(backend)
+    const semanticReady = deferred<void>()
+    const subscribe = vi.spyOn(backend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
+      const subscription = subscribeLane(roomId, inc, lane, receiver)
+      if (lane.kind === 'semantic') void subscription.ready.then(() => semanticReady.resolve())
+      return subscription
+    })
     const wanted = serve(room)
     const silent = serve(room)
     wanted.stub._onPeerMessage(JSON.stringify({ __r: 'sub-text', members: [], announce: true }), 1)
-    await settle()
+    await semanticReady.promise
+    subscribe.mockRestore()
 
     await Room.announce(room.id, 'wanted')
-    await settle()
 
-    expect(announceFrames(wanted.peer)).toEqual(['wanted'])
+    await vi.waitFor(() => expect(announceFrames(wanted.peer)).toEqual(['wanted']))
     expect(announceFrames(silent.peer)).toEqual([])
   })
 
