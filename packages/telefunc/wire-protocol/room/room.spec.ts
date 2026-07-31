@@ -515,7 +515,7 @@ describe('Room public behavior', () => {
     slot.stop()
   })
 
-  it('makes roster readers join an authoritative refresh already in flight', async () => {
+  it('makes roster readers join one bounded authoritative refresh', async () => {
     const authority = (await Room.create('roster-refresh-owner')) as ServerRoom
     await authority.join()
     const observer = (await Room.get(authority.id)) as ServerRoom
@@ -527,13 +527,16 @@ describe('Room public behavior', () => {
     const started = deferred<void>()
     const release = deferred<void>()
     let held = false
+    let churn = 0
     vi.spyOn(driver, 'readCells').mockImplementation(async (roomId, inc, selector) => {
       if (!held && 'prefix' in selector && selector.prefix.endsWith(':m:')) {
         held = true
         started.resolve()
         await release.promise
       }
-      return readCells(roomId, inc, selector)
+      const result = await readCells(roomId, inc, selector)
+      if (churn-- > 0 && 'prefix' in selector) observer._state.membershipVersion++
+      return result
     })
     const refresh = (
       observer as unknown as {
@@ -551,6 +554,10 @@ describe('Room public behavior', () => {
     release.resolve()
     await refresh
     expect((await participants).map(({ id }) => id)).toHaveLength(1)
+    churn = 20
+    await expect((observer as unknown as { _refreshMembers(): Promise<void> })._refreshMembers()).rejects.toThrow(
+      'Room roster refresh contention',
+    )
   })
 
   it('heartbeats pure control observers without owned members or binary demand', async () => {
@@ -566,12 +573,22 @@ describe('Room public behavior', () => {
 
   it('reconciles authority even when member renewal fails first', async () => {
     const room = (await Room.create('heartbeat-renewal-failure')) as ServerRoom
-    await room.join()
-    vi.spyOn(driver, 'readCells').mockRejectedValue(new Error('renewal failed'))
+    const first = await room.join()
+    const second = await room.join()
+    const firstKey = roomMemberKvKey(room.id, first.id)
+    const secondKey = roomMemberKvKey(room.id, second.id)
+    const compareExchange = driver.compareExchangeCells.bind(driver)
+    const attempted: string[] = []
+    vi.spyOn(Math, 'random').mockReturnValue(0)
+    vi.spyOn(driver, 'compareExchangeCells').mockImplementation(async (roomId, inc, revision, mutations) => {
+      attempted.push(mutations[0]!.key)
+      return mutations[0]!.key === firstKey ? 'conflict' : compareExchange(roomId, inc, revision, mutations)
+    })
     vi.spyOn(driver, 'readHead').mockResolvedValue(null)
     await expect((room as unknown as { _heartbeatTick(): Promise<void> })._heartbeatTick()).rejects.toThrow(
-      'renewal failed',
+      'Room update contention',
     )
+    expect(attempted).toContain(secondKey)
     expect(room.isClosed).toBe(true)
   })
 
@@ -885,20 +902,27 @@ describe('Room public behavior', () => {
     })
   })
 
-  it('reports a participant-left race on a room-authored send without calling the room closed', async () => {
+  it('isolates an identity send from a departed member but preserves exact-ID diagnosis', async () => {
     const room = await Room.create('server-send-race')
-    const target = await room.join()
+    const departed = await room.join({ identity: 'fanout' })
+    const healthy = await room.join({ identity: 'fanout' })
+    const inbox: unknown[] = []
+    healthy.listen((data) => inbox.push(data))
     const commitLane = driver.commitLane.bind(driver)
-    let raced = false
+    let raceId = departed.id
     vi.spyOn(driver, 'commitLane').mockImplementation(async (roomId, inc, lane, payload, options) => {
-      if (!raced && lane.kind === 'inbox') {
-        raced = true
-        await Room.removeParticipant(room.id, { id: target.id })
+      if (lane.kind === 'inbox' && lane.member === raceId) {
+        raceId = ''
+        await Room.removeParticipant(room.id, { id: lane.member })
       }
       return commitLane(roomId, inc, lane, payload, options)
     })
-    await expect(Room.send(room.id, { id: target.id }, 'late')).rejects.toThrow(
-      `Participant not found (left?): ${target.id}`,
+    await expect(Room.send(room.id, { identity: 'fanout' }, 'fanout')).resolves.toBeUndefined()
+    expect(inbox).toEqual(['fanout'])
+    const exact = await room.join()
+    raceId = exact.id
+    await expect(Room.send(room.id, { id: exact.id }, 'late')).rejects.toThrow(
+      `Participant not found (left?): ${exact.id}`,
     )
     expect((await driver.readHead(room.id))?.head.state).toBe('open')
   })
@@ -1480,19 +1504,6 @@ describe('client Room lifecycle', () => {
       expect(gc.closed()).toBe(0)
     })
 
-    it('tethers the Room through an active remote disposer and releases it when invoked', async () => {
-      const gc = gcFixture('gc-remote-disposer', true)
-      const retained = await retainOnlyRemoteDisposer(gc)
-      await forceRoomGc()
-      expect(retained.room.deref()).not.toBeUndefined()
-      expect(gc.closed()).toBe(0)
-      retained.stop()
-      await forceRoomGc()
-      retained.stopped()
-      expect(retained.room.deref()).toBeUndefined()
-      expect(gc.closed()).toBe(1)
-    })
-
     it('releases the Room wrapper from a departed participant handle', async () => {
       const gc = gcFixture('gc-departed-owner', true)
       const retained = await retainOnlyDepartedParticipant(gc)
@@ -1502,11 +1513,16 @@ describe('client Room lifecycle', () => {
       expect(gc.closed()).toBe(1)
     })
 
-    it('releases the Room wrapper after every application handle is dropped', async () => {
+    it('tethers an active disposer but releases snapshot and invoked disposer handles', async () => {
       const gc = gcFixture('gc-drop-owner', true)
-      const room = await dropJoinedRoomHandles(gc)
+      const retained = await dropJoinedRoomHandles(gc)
       await forceRoomGc()
-      expect(room.deref()).toBeUndefined()
+      expect(retained.room.deref()).not.toBeUndefined()
+      expect(gc.closed()).toBe(0)
+      retained.stop()
+      await forceRoomGc()
+      retained.stopped()
+      expect(retained.room.deref()).toBeUndefined()
       expect(gc.closed()).toBe(1)
     })
   })
@@ -2701,16 +2717,6 @@ async function retainOnlyCallbackRemote({ target, fake, registry, onClose, membe
   return { member: member!, room: new WeakRef(room) }
 }
 
-async function retainOnlyRemoteDisposer({ target, registry, onClose, memberId }: GcFixture) {
-  const room = wrapProxy(target)
-  registry.register(room, onClose)
-  const stopped = (await room.join()).listen(() => {})
-  stopped()
-  room.snapshot()
-  const stop = target._getRemote(memberId)!.subscribe(() => {})
-  return { stop, stopped, room: new WeakRef(room) }
-}
-
 async function retainOnlyDepartedParticipant({ target, fake, registry, onClose, memberId }: GcFixture) {
   const room = wrapProxy(target)
   registry.register(room, onClose)
@@ -2719,11 +2725,14 @@ async function retainOnlyDepartedParticipant({ target, fake, registry, onClose, 
   return { member, room: new WeakRef(room) }
 }
 
-async function dropJoinedRoomHandles({ target, registry, onClose }: GcFixture) {
+async function dropJoinedRoomHandles({ target, registry, onClose, memberId }: GcFixture) {
   const room = wrapProxy(target)
   registry.register(room, onClose)
-  await room.join()
-  return new WeakRef(room)
+  const stopped = (await room.join()).listen(() => {})
+  stopped()
+  room.snapshot()
+  const stop = target._getRemote(memberId)!.subscribe(() => {})
+  return { stop, stopped, room: new WeakRef(room) }
 }
 
 type OpenRecord = {

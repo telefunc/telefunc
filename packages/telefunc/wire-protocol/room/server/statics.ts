@@ -458,12 +458,15 @@ async function announceToRoom(id: string, data: unknown): Promise<RoomSendReceip
 
 async function sendToParticipant(id: string, target: ParticipantRef, data: unknown): Promise<void> {
   const { config } = await requireRoom(id)
+  const exact = 'id' in target
   for (const { memberId } of await resolveParticipantRef(id, config.inc, target)) {
-    await sendServerDm(id, config.inc, memberId, data)
+    if (!(await sendServerDm(id, config.inc, memberId, data)) && exact) {
+      throw new RoomError(`Participant not found (left?): ${memberId}`)
+    }
   }
 }
 
-async function sendServerDm(roomId: string, inc: string, memberId: string, data: unknown): Promise<void> {
+async function sendServerDm(roomId: string, inc: string, memberId: string, data: unknown): Promise<boolean> {
   const envelope: RoomDmEnvelope = { __r: 'dm', to: memberId, from: '', fromMeta: null, data }
   const committed = await commitRoomLane(
     roomId,
@@ -472,17 +475,16 @@ async function sendServerDm(roomId: string, inc: string, memberId: string, data:
     encodeRoomText(stringify(envelope)),
     { requiredCellKeys: [roomMemberKvKey(roomId, memberId)] },
   )
-  if (committed === null) {
-    const current = await getBackend().readHead(roomId)
-    if (
-      current?.head.state === 'open' &&
-      current.head.currentInc === inc &&
-      (await readCell(roomId, inc, roomMemberKvKey(roomId, memberId))) === null
-    ) {
-      throw new RoomError(`Participant not found (left?): ${memberId}`)
-    }
-    throw new RoomError(`Room is closed: ${roomId}`)
+  if (committed !== null) return true
+  const current = await getBackend().readHead(roomId)
+  if (
+    current?.head.state === 'open' &&
+    current.head.currentInc === inc &&
+    (await readCell(roomId, inc, roomMemberKvKey(roomId, memberId))) === null
+  ) {
+    return false
   }
+  throw new RoomError(`Room is closed: ${roomId}`)
 }
 
 function normalizeOptions(options: RoomOptions | undefined): { meta: RoomMeta } {
