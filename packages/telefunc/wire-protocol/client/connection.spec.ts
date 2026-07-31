@@ -91,9 +91,30 @@ describe.each([
 test.each([Infinity, 0.5, Number.MAX_SAFE_INTEGER + 1])('channel config rejects %s', (value) => {
   expect(() => (config.channel.reconnectTimeout = value)).toThrow('non-negative safe integer')
 })
-test('channel config preserves zero through server resolution', () => {
+test('channel config preserves zero through server and client resolution', () => {
   config.channel.reconnectTimeout = 0
   expect(getServerConfig().channel.reconnectTimeout).toBe(0)
+  const channel = createChannel()
+  const connection = ClientConnection.getOrCreate('http://zero.test', channel as never, {
+    transports: [CHANNEL_TRANSPORT.SSE],
+    fetchImpl: createStalledTransport().fetchImpl,
+    connectionKey: crypto.randomUUID(),
+  }) as any
+  const ctrl = new Proxy(
+    { sessionId: 'zero', open: [], transports: [CHANNEL_TRANSPORT.SSE] },
+    { get: (target, key) => Reflect.get(target, key) ?? 0 },
+  )
+  connection.applyReconciled(ctrl)
+  connection.transport.applyReconciledSettings(ctrl)
+  expect([
+    connection.reconnectTimeoutMs,
+    connection.idleTimeoutMs,
+    connection.clientReplayBufferBytes,
+    connection.clientReplayBufferBinaryBytes,
+    connection.transport.flushThrottleMs,
+    connection.transport.postIdleFlushDelayMs,
+  ]).toEqual(Array(6).fill(0))
+  connection.dispose()
 })
 
 describe('SSE reconcile watchdog', () => {
