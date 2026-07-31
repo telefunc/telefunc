@@ -2,7 +2,6 @@
 // generics reach every public server/client view without widening, narrowing, bottoming out, or `any`.
 import type * as Server from 'telefunc'
 import type * as Client from 'telefunc/client'
-
 type Assert<T extends true> = T
 type AssertAll<T extends readonly true[]> = T
 type IsAny<T> = 0 extends 1 & T ? true : false
@@ -11,7 +10,6 @@ type Exactly<Left, Right> = IsAny<Left | Right> extends true
   : [Left, Right] extends [Right, Left]
     ? true
     : false
-
 type RoomMeta = { topic: string }
 type MemberMeta = { name: string }
 type ChatMsg = { kind: 'chat'; text: string }
@@ -21,7 +19,6 @@ type ServerLocal = Awaited<ReturnType<ServerRoom['join']>>
 type ClientLocal = Awaited<ReturnType<ClientRoom['join']>>
 type ServerRemote = NonNullable<Awaited<ReturnType<ServerRoom['getParticipant']>>>
 type ClientRemote = NonNullable<Awaited<ReturnType<ClientRoom['getParticipant']>>>
-
 type _ServerSurface = AssertAll<
   [
     Exactly<ServerRoom['meta'], RoomMeta>,
@@ -40,9 +37,7 @@ type _ServerSurface = AssertAll<
     Exactly<ReturnType<ServerRoom['snapshot']>['participants'][number]['meta'], MemberMeta>,
   ]
 >
-
 type _ClientSurface = AssertAll<[Exactly<ClientLocal, ServerLocal>, Exactly<ClientRemote, ServerRemote>]>
-
 function assertClientJoinBoundary(room: ClientRoom) {
   void room.join({ meta: { name: 'Alice' }, selfDelivery: false })
   // @ts-expect-error trusted identities are assigned only by a server-side join
@@ -50,7 +45,6 @@ function assertClientJoinBoundary(room: ClientRoom) {
   // @ts-expect-error hidden membership is created only by a server-side join
   void room.join({ hidden: true })
 }
-
 // Permanent false controls for the three escapes exercised against the public projections above.
 type _ComparatorRejectsEscapes = AssertAll<
   [

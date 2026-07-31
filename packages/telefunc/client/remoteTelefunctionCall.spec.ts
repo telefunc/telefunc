@@ -5,14 +5,11 @@ import type { TelefunctionCallBarrierScope } from '../wire-protocol/client/call-
 import { remoteTelefunctionCall } from './remoteTelefunctionCall.js'
 import { withContext } from './withContext.js'
 import type { ClientCallContext } from './withContext.js'
-
 const originalWindow = Object.getOwnPropertyDescriptor(globalThis, 'window')
-
 afterEach(() => {
   if (originalWindow === undefined) Reflect.deleteProperty(globalThis, 'window')
   else Object.defineProperty(globalThis, 'window', originalWindow)
 })
-
 it.each<[string, TelefunctionCallBarrierScope, ClientCallContext]>([
   ['URL', { telefuncUrl: '/scope-a' }, { telefuncUrl: '/scope-b' }],
   [
@@ -37,7 +34,6 @@ it.each<[string, TelefunctionCallBarrierScope, ClientCallContext]>([
     await call.catch(() => {})
   }
 })
-
 it('preserves the rejection that caused a dependent call barrier to fail', async () => {
   const control = deferred<void>()
   const scope = { telefuncUrl: '/scope-a' }
@@ -45,10 +41,8 @@ it('preserves the rejection that caused a dependent call barrier to fail', async
   const barrier = waitForTelefunctionCallBarriers(scope)
   const failure = new Error('control rejected')
   control.reject(failure)
-
   await expect(barrier).rejects.toBe(failure)
 })
-
 it('lets abort win while a matching channel control remains pending', async () => {
   const control = deferred<void>()
   addTelefunctionCallBarrier({ telefuncUrl: '/scope-a' }, control.promise)
@@ -74,7 +68,6 @@ it('lets abort win while a matching channel control remains pending', async () =
     await call.catch(() => {})
   }
 })
-
 function installPendingFetch() {
   const fetch = vi.fn(
     (_input: RequestInfo | URL, init?: RequestInit) =>
@@ -92,7 +85,6 @@ function installPendingFetch() {
   })
   return fetch
 }
-
 function deferred<T>() {
   let resolve!: (value?: T) => void
   let reject!: (error: unknown) => void

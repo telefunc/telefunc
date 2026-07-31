@@ -105,17 +105,14 @@ describe('SSE reconcile watchdog', () => {
   test('reconnects when RECONCILED never arrives on a stalled downstream', async () => {
     vi.useFakeTimers()
     const { fetchImpl, getSseDownstreamOpens } = createStalledTransport()
-
     ClientConnection.getOrCreate('http://test.local/_telefunc', createChannel() as never, {
       transports: [CHANNEL_TRANSPORT.SSE],
       fetchImpl,
       connectionKey: crypto.randomUUID(),
     })
-
     // `start()` defers the first openStream by one reconcile window; let it connect.
     await vi.advanceTimersByTimeAsync(100)
     expect(getSseDownstreamOpens()).toBe(1)
-
     // The downstream is silent, so RECONCILED never lands. Without the watchdog the
     // connection wedges here forever: pings keep flowing but `handlePongTimeout` is
     // suppressed while reconciling, so the dead wire is never noticed. The watchdog must

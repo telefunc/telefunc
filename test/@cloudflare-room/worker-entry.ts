@@ -1,5 +1,4 @@
 /// <reference types="@cloudflare/workers-types" />
-
 import { DurableObject } from 'cloudflare:workers'
 import '../../packages/telefunc/node/server/async_hooks.js'
 import { setDefaultBackend } from '../../packages/telefunc/wire-protocol/backend/install.js'
@@ -29,17 +28,14 @@ import {
   type RoomShardFanoutNamespace,
   type RoomShardFanoutRequest,
 } from '../../packages/telefunc/wire-protocol/server/adapter/cloudflare/room/fanout.js'
-
 const publicRoomBackend = new CloudflareRoomBackend()
 setDefaultBackend(() => publicRoomBackend, 'cloudflare-room-ci-public')
 const PublicRoomDurableObjectBase = createTelefuncRoomDurableObjectClass('PUBLIC_SESSION')
 const textEncoder = new TextEncoder()
 const CONTROL_HORIZON_MS = 2_000
 type Deferred = ReturnType<typeof Promise.withResolvers<void>>
-
 export class PublicRoomSessionDurableObject extends DurableObject {
   readonly #manager: CloudflareRoomSessionManager
-
   constructor(ctx: DurableObjectState, env: unknown) {
     super(ctx, env as Env)
     this.#manager = new CloudflareRoomSessionManager(
@@ -47,7 +43,6 @@ export class PublicRoomSessionDurableObject extends DurableObject {
       () => (env as { PUBLIC_ROOM: CloudflareRoomNamespace }).PUBLIC_ROOM,
     )
   }
-
   publicRoomLifecycle(roomId: string) {
     return this.#run(async () => {
       const room = await Room.create(roomId, { meta: { purpose: 'cloudflare-room-ci' } })
@@ -72,26 +67,20 @@ export class PublicRoomSessionDurableObject extends DurableObject {
       }
     })
   }
-
   telefuncRoomDeliver(request: RoomShardDeliveryRequest): Promise<void> {
     return this.#run(() => this.#manager.deliver(request))
   }
-
   telefuncRoomInvalidate(request: RoomShardInvalidationRequest): void {
     return this.#run(() => this.#manager.invalidate(request))
   }
-
   telefuncRoomFanout(request: RoomShardFanoutRequest) {
     return dispatchRoomShardFanout((this.env as Env).PUBLIC_SESSION as unknown as RoomShardFanoutNamespace, request)
   }
-
   #run<T>(fn: () => T): T {
     return withCloudflareRoomSessionManager(() => this.#manager, fn)
   }
 }
-
 export class PublicRoomDurableObject extends PublicRoomDurableObjectBase {}
-
 type DeliveryState = {
   blockFirst: boolean
   fail: boolean
@@ -100,12 +89,10 @@ type DeliveryState = {
   invalidations: Array<'recoverable' | 'terminal'>
   gate: Deferred
 }
-
 export class SessionDurableObject extends DurableObject {
   readonly #deliveries = new Map<string, DeliveryState>()
   readonly #attempts = new Map<string, SubscriptionAttempt>()
   readonly #manager: CloudflareRoomSessionManager
-
   constructor(ctx: DurableObjectState, env: unknown) {
     super(ctx, env as Env)
     this.#manager = new CloudflareRoomSessionManager(
@@ -113,7 +100,6 @@ export class SessionDurableObject extends DurableObject {
       () => (env as { ROOM: CloudflareRoomNamespace }).ROOM,
     )
   }
-
   prepareDelivery(roomId: string, blockFirst: boolean, fail: boolean = false): void {
     this.#deliveries.set(roomId, {
       blockFirst,
@@ -124,22 +110,18 @@ export class SessionDurableObject extends DurableObject {
       gate: Promise.withResolvers<void>(),
     })
   }
-
   deliveryState(roomId: string): Pick<DeliveryState, 'started' | 'delivered' | 'invalidations'> {
     const state = this.#delivery(roomId)
     return { started: state.started, delivered: [...state.delivered], invalidations: [...state.invalidations] }
   }
-
   releaseDelivery(roomId: string): void {
     this.#delivery(roomId).gate.resolve()
   }
-
   async openSubscription(roomId: string, inc: string, waitForReady: boolean = true): Promise<void> {
     const attempt = this.#manager.openSubscription(roomId, inc, { kind: 'semantic' }, () => {})
     this.#attempts.set(roomId, attempt)
     if (waitForReady) await attempt.ready
   }
-
   async subscriptionReadyOutcome(roomId: string): Promise<string> {
     try {
       await this.#attempt(roomId).ready
@@ -148,11 +130,9 @@ export class SessionDurableObject extends DurableObject {
       return error instanceof Error ? error.message : String(error)
     }
   }
-
   subscriptionState(roomId: string): SubscriptionAttemptState {
     return this.#attempt(roomId).state()
   }
-
   async telefuncRoomDeliver(request: RoomShardDeliveryRequest): Promise<void> {
     const state = this.#delivery(request.roomId, 'delivery reached an unprepared session')
     state.delivered.push(request.seq)
@@ -162,7 +142,6 @@ export class SessionDurableObject extends DurableObject {
     }
     if (state.fail) throw new Error('delivery probe rejected')
   }
-
   telefuncRoomInvalidate(request: RoomShardInvalidationRequest): void {
     const state = this.#delivery(request.roomId, 'invalidation reached an unprepared session')
     if (request.roomId.startsWith('coordinator-drop-') && (request.laneKey !== request.leaseId || !request.terminal)) {
@@ -171,27 +150,23 @@ export class SessionDurableObject extends DurableObject {
     state.invalidations.push(request.terminal === true ? 'terminal' : 'recoverable')
     this.#manager.invalidate(request)
   }
-
   telefuncRoomFanout(request: RoomShardFanoutRequest) {
     return dispatchRoomShardFanout(
       (this.env as Env).TelefuncDurableObject as unknown as RoomShardFanoutNamespace,
       request,
     )
   }
-
   #delivery(roomId: string, error = 'delivery probe was not prepared'): DeliveryState {
     const state = this.#deliveries.get(roomId)
     if (state === undefined) throw new Error(error)
     return state
   }
-
   #attempt(roomId: string): SubscriptionAttempt {
     const attempt = this.#attempts.get(roomId)
     if (attempt === undefined) throw new Error('subscription probe was not prepared')
     return attempt
   }
 }
-
 type AuthorityControl =
   | 'reconstruct'
   | 'alarm'
@@ -205,14 +180,12 @@ type ResponseReordering = {
   secondToken?: string
 }
 type RegistrationHold = { installed: Deferred; release: Deferred }
-
 export class TelefuncRoomDurableObject extends ProductionRoomDurableObject {
   readonly #probeEnv: unknown
   readonly #authoritySubrequestBudget: { remaining: number }
   #reconstructed: ProductionRoomDurableObject | null = null
   #responseReordering?: ResponseReordering
   #registrationHold?: RegistrationHold
-
   constructor(ctx: DurableObjectState, env: unknown) {
     const authoritySubrequestBudget = { remaining: Number.POSITIVE_INFINITY }
     super(ctx, {
@@ -222,7 +195,6 @@ export class TelefuncRoomDurableObject extends ProductionRoomDurableObject {
     this.#probeEnv = env
     this.#authoritySubrequestBudget = authoritySubrequestBudget
   }
-
   override commitLane(...args: Parameters<ProductionRoomDurableObject['commitLane']>) {
     if (this.#reconstructed !== null) return this.#reconstructed.commitLane(...args)
     const probe = this.#responseReordering
@@ -239,7 +211,6 @@ export class TelefuncRoomDurableObject extends ProductionRoomDurableObject {
       return result
     })()
   }
-
   override registerRoute(...args: Parameters<ProductionRoomDurableObject['registerRoute']>) {
     const hold = this.#registrationHold
     if (hold === undefined) return super.registerRoute(...args)
@@ -251,17 +222,14 @@ export class TelefuncRoomDurableObject extends ProductionRoomDurableObject {
       return result
     })
   }
-
   override awaitDelivery(token: string): Promise<void> {
     const gate =
       this.#responseReordering?.secondToken === token ? this.#responseReordering.secondDelivery.promise : null
     return gate === null ? this.#awaitDelivery(token) : gate.then(() => this.#awaitDelivery(token))
   }
-
   #awaitDelivery(token: string): Promise<void> {
     return this.#reconstructed === null ? super.awaitDelivery(token) : this.#reconstructed.awaitDelivery(token)
   }
-
   async telefuncRoomWideDropForTest(roomId: string, inc: string, subscriberDoId: string): Promise<void> {
     const authority = this as unknown as Authority
     const opened = await openHead(authority, inc, 'wide drop open')
@@ -272,7 +240,6 @@ export class TelefuncRoomDurableObject extends ProductionRoomDurableObject {
     await closeAndDrop(authority, inc, opened, 'wide-drop-close')
     this.#authoritySubrequestBudget.remaining = Number.POSITIVE_INFINITY
   }
-
   async telefuncRoomControlForTest(action: AuthorityControl): Promise<number | null | void> {
     switch (action) {
       case 'reconstruct':
@@ -302,18 +269,15 @@ export class TelefuncRoomDurableObject extends ProductionRoomDurableObject {
         return this.ctx.storage.getAlarm()
     }
   }
-
   #responseProbe(): ResponseReordering {
     if (this.#responseReordering === undefined) throw new Error('response reordering probe was not prepared')
     return this.#responseReordering
   }
-
   #registrationProbe(): RegistrationHold {
     if (this.#registrationHold === undefined) throw new Error('registration hold probe was not prepared')
     return this.#registrationHold
   }
 }
-
 type RpcMethods<T> = {
   [K in keyof T]: T[K] extends (...args: infer Args) => infer Result
     ? (...args: Args) => Promise<Awaited<Result>>
@@ -328,7 +292,6 @@ type Env = {
   PUBLIC_ROOM: DurableObjectNamespace
   PUBLIC_SESSION: DurableObjectNamespace
 }
-
 function budgetNamespace(namespace: DurableObjectNamespace, budget: { remaining: number }): RoomShardFanoutNamespace {
   return {
     idFromString: (id) => namespace.idFromString(id),
@@ -339,7 +302,6 @@ function budgetNamespace(namespace: DurableObjectNamespace, budget: { remaining:
     },
   }
 }
-
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     try {
@@ -373,7 +335,6 @@ export default {
     }
   },
 }
-
 function roomProbe(env: Env, suffix: string, name: string) {
   const roomId = `${name}-${suffix}`
   const inc = `${name}-inc-${suffix}`
@@ -404,7 +365,6 @@ function roomProbe(env: Env, suffix: string, name: string) {
     settle: (commit: Extract<CommitWire, { accepted: true }>) => authority.awaitDelivery(commit.deliveryToken),
   }
 }
-
 async function successfulLifecycle(env: Env, sessionId: DurableObjectId, session: Session, suffix: string) {
   const probe = roomProbe(env, suffix, 'lifecycle')
   const opened = await probe.openAndJoin(sessionId)
@@ -420,7 +380,6 @@ async function successfulLifecycle(env: Env, sessionId: DurableObjectId, session
     invalidations: (await session.deliveryState(probe.roomId)).invalidations,
   }
 }
-
 async function coordinatorFanoutSmoke(env: Env, sessionId: DurableObjectId, session: Session, suffix: string) {
   const roomId = `coordinator-fanout-${suffix}`
   await session.prepareDelivery(roomId, false)
@@ -451,7 +410,6 @@ async function coordinatorFanoutSmoke(env: Env, sessionId: DurableObjectId, sess
     deliveries: (await session.deliveryState(roomId)).delivered.length,
   }
 }
-
 async function facadeResponseOrdering(env: Env, suffix: string) {
   const probe = roomProbe(env, suffix, 'facade-order')
   const opened = await probe.open('facade ordering open')
@@ -483,7 +441,6 @@ async function facadeResponseOrdering(env: Env, suffix: string) {
   await probe.close(opened)
   return result
 }
-
 async function terminalGenerationDrop(env: Env, session: Session, suffix: string) {
   const probe = roomProbe(env, suffix, 'terminal')
   const opened = await probe.open()
@@ -495,7 +452,6 @@ async function terminalGenerationDrop(env: Env, session: Session, suffix: string
     invalidations: (await session.deliveryState(probe.roomId)).invalidations,
   }
 }
-
 async function preAckTerminalGenerationDrop(env: Env, session: Session, suffix: string) {
   const probe = roomProbe(env, suffix, 'pre-ack-terminal')
   const opened = await probe.open('pre-ack terminal open')
@@ -516,7 +472,6 @@ async function preAckTerminalGenerationDrop(env: Env, session: Session, suffix: 
     generations: await probe.authority.listGenerations(),
   }
 }
-
 async function preAckRecoverableRouteDrop(env: Env, session: Session, suffix: string) {
   const probe = roomProbe(env, suffix, 'pre-ack-recoverable')
   const opened = await probe.open('pre-ack recoverable open')
@@ -535,7 +490,6 @@ async function preAckRecoverableRouteDrop(env: Env, session: Session, suffix: st
   await probe.close(opened)
   return { state, ready, settlements, invalidations }
 }
-
 async function cancelledDelivery(env: Env, sessionId: DurableObjectId, session: Session, suffix: string) {
   const probe = roomProbe(env, suffix, 'cancel')
   const opened = await probe.openAndJoin(sessionId)
@@ -551,7 +505,6 @@ async function cancelledDelivery(env: Env, sessionId: DurableObjectId, session: 
     cancellationDeliveries: (await session.deliveryState(probe.roomId)).delivered,
   }
 }
-
 async function failedDeliveryEviction(env: Env, sessionId: DurableObjectId, session: Session, suffix: string) {
   const probe = roomProbe(env, suffix, 'evict')
   const opened = await probe.openAndJoin(sessionId)
@@ -561,7 +514,6 @@ async function failedDeliveryEviction(env: Env, sessionId: DurableObjectId, sess
   await probe.close(opened)
   return { settlements, invalidations }
 }
-
 async function rejectedFanoutOrdering(env: Env, fastSessionId: DurableObjectId, fastSession: Session, suffix: string) {
   const probe = roomProbe(env, suffix, 'fanout')
   const opened = await probe.openAndJoin(fastSessionId, 'fast')
@@ -596,7 +548,6 @@ async function rejectedFanoutOrdering(env: Env, fastSessionId: DurableObjectId, 
     slowDeliveriesBeforeRelease,
   }
 }
-
 async function authorityRestart(env: Env, suffix: string) {
   const probe = roomProbe(env, suffix, 'restart')
   await probe.open()
@@ -608,7 +559,6 @@ async function authorityRestart(env: Env, suffix: string) {
     new: await rejectionOf(probe.settle(newCommit), 'new-token settlement'),
   }
 }
-
 async function alarmScheduling(env: Env, sessionId: DurableObjectId, suffix: string) {
   const probe = roomProbe(env, suffix, 'alarm')
   const idle = await probe.control('alarm')
@@ -619,7 +569,6 @@ async function alarmScheduling(env: Env, sessionId: DurableObjectId, suffix: str
   const afterUnsubscribe = await probe.control('alarm')
   return { idle, afterRoute, afterUnsubscribe }
 }
-
 async function unpreparedControlFailures(env: Env, suffix: string) {
   const authority = roomProbe(env, suffix, 'unprepared').authority
   const controls = [
@@ -635,7 +584,6 @@ async function unpreparedControlFailures(env: Env, suffix: string) {
   }
   return results
 }
-
 async function largeRetainedReplay(env: Env, suffix: string) {
   const probe = roomProbe(env, suffix, 'large-retained')
   await probe.open('large retained open')
@@ -658,7 +606,6 @@ async function largeRetainedReplay(env: Env, suffix: string) {
     last: replayed[replayed.length - 1],
   }
 }
-
 async function nativeRpcRoundTrip(env: Env, suffix: string) {
   const probe = roomProbe(env, suffix, 'native-rpc')
   const config = new Uint8Array([0x11, 0x22, 0x33])
@@ -687,7 +634,6 @@ async function nativeRpcRoundTrip(env: Env, suffix: string) {
     ),
   }
 }
-
 async function openHead(authority: Authority, inc: string, operation: string): Promise<RoomHead> {
   return expectHead(
     await authority.compareExchangeHead(
@@ -697,7 +643,6 @@ async function openHead(authority: Authority, inc: string, operation: string): P
     operation,
   )
 }
-
 async function closeAndDrop(authority: Authority, inc: string, opened: RoomHead, leaseId: string): Promise<void> {
   const closing = expectHead(
     await authority.compareExchangeHead(
@@ -722,7 +667,6 @@ async function closeAndDrop(authority: Authority, inc: string, opened: RoomHead,
   )
   await authority.dropGeneration(inc)
 }
-
 async function rejectedCommits(probe: ReturnType<typeof roomProbe>, label: string): Promise<string[]> {
   const settlements: string[] = []
   for (let attempt = 1; attempt <= 3; attempt += 1) {
@@ -732,18 +676,15 @@ async function rejectedCommits(probe: ReturnType<typeof roomProbe>, label: strin
   }
   return settlements
 }
-
 function expectHead(result: HeadCxResult, operation: string): RoomHead {
   if ('conflict' in result) throw new Error(`${operation} conflicted`)
   if (!('head' in result)) throw new Error(`${operation} returned no head`)
   return result.head
 }
-
 function accepted(result: CommitWire, operation: string): Extract<CommitWire, { accepted: true }> {
   if ('stale' in result) throw new Error(`${operation} commit was stale`)
   return result
 }
-
 async function waitUntil(predicate: () => Promise<boolean>): Promise<void> {
   const deadline = Date.now() + CONTROL_HORIZON_MS
   while (!(await predicate())) {
@@ -751,7 +692,6 @@ async function waitUntil(predicate: () => Promise<boolean>): Promise<void> {
     await new Promise<void>((resolve) => setTimeout(resolve, 10))
   }
 }
-
 async function within<T>(promise: Promise<T>, label: string): Promise<T> {
   let timer!: ReturnType<typeof setTimeout>
   const timeout = new Promise<never>((_, reject) => {
@@ -766,7 +706,6 @@ async function within<T>(promise: Promise<T>, label: string): Promise<T> {
     clearTimeout(timer)
   }
 }
-
 async function rejectionOf(promise: Promise<unknown>, label: string): Promise<string> {
   try {
     await within(promise, label)

@@ -1,12 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { MemoryBackend } from './memory/backend.js'
 import { disposeBackend, installBackend, setDefaultBackend } from './install.js'
-
 afterEach(async () => {
   await disposeBackend().catch(() => {})
   vi.restoreAllMocks()
 })
-
 describe('backend installation lifecycle', () => {
   it('promotes a reused default driver to explicit selection', () => {
     const driver = new MemoryBackend()
@@ -14,7 +12,6 @@ describe('backend installation lifecycle', () => {
     expect(installBackend(() => driver)).toBe(explicit)
     expect(setDefaultBackend(() => new MemoryBackend())).toBe(explicit)
   })
-
   it('reports replacement cleanup failure and includes it in the explicit disposal barrier', async () => {
     const failure = new Error('old backend cleanup failed')
     let rejectOld!: (error: Error) => void
@@ -24,7 +21,6 @@ describe('backend installation lifecycle', () => {
     const oldDriver = new MemoryBackend()
     vi.spyOn(oldDriver, 'dispose').mockReturnValue(oldDisposal)
     const report = vi.spyOn(console, 'error').mockImplementation(() => {})
-
     setDefaultBackend(() => oldDriver)
     installBackend(() => new MemoryBackend())
     const disposal = disposeBackend()
@@ -33,7 +29,6 @@ describe('backend installation lifecycle', () => {
       () => (settled = true),
       () => (settled = true),
     )
-
     await Promise.resolve()
     expect(settled).toBe(false)
     rejectOld(failure)

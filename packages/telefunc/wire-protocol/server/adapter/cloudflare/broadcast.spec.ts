@@ -137,6 +137,27 @@ function createBasicBinding(
   } as unknown as DurableObjectNamespace
 }
 
+function configureTransport(
+  transport: CloudflareBroadcastTransport,
+  kv: KVNamespace,
+  binding: DurableObjectNamespace,
+  isolate = true,
+): CloudflareBroadcastTransport {
+  transport.attachBinding(binding, 'TelefuncDurableObject')
+  transport.attachKV(kv)
+  if (isolate) transport.attachIsolateInfo('telefunc-shard-weur-0', 'weur')
+  return transport
+}
+
+function createTransport(kv = createMockKV(), isolate = true): CloudflareBroadcastTransport {
+  return configureTransport(
+    new CloudflareBroadcastTransport({ baseInstanceName: 'telefunc', scale: 1 }),
+    kv,
+    createBasicBinding(),
+    isolate,
+  )
+}
+
 describe('cloudflare broadcast routing', () => {
   it('uses the six default canonical buckets for mapped Cloudflare locations', () => {
     expect(DEFAULT_BROADCAST_BUCKETS).toEqual(['wnam', 'enam', 'weur', 'eeur', 'apac', 'oc'])
@@ -158,7 +179,6 @@ describe('cloudflare broadcast routing', () => {
     const warsaw = createCloudflareRequest({ colo: 'WAW' })
     const mumbai = createCloudflareRequest({ colo: 'BOM' })
     const sydney = createCloudflareRequest({ colo: 'SYD' })
-
     expect(resolveCloudflareLocationHint(losAngeles, 'weur')).toBe('wnam')
     expect(resolveCloudflareLocationHint(chicago, 'weur')).toBe('enam')
     expect(resolveCloudflareLocationHint(london, 'weur')).toBe('weur')
@@ -176,20 +196,17 @@ describe('cloudflare broadcast routing', () => {
 
   it('prefers a mapped continent bucket when the colo is unmapped', () => {
     const unknown = createCloudflareRequest({ colo: 'ZZZ', continent: 'AF' })
-
     expect(resolveCloudflareLocationHint(unknown, 'weur')).toBe('weur')
   })
 
   it('falls back to locationFallback for ambiguous continents', () => {
     const request = createCloudflareRequest({ colo: 'ZZZ', continent: 'EU' })
-
     expect(resolveCloudflareLocationHint(request, 'weur')).toBe('weur')
     expect(resolveCloudflareLocationHint(request, 'apac')).toBe('apac')
   })
 
   it('falls back to locationFallback when cf.continent is unavailable', () => {
     const request = createCloudflareRequest({ colo: 'ZZZ' })
-
     expect(resolveCloudflareLocationHint(request, 'weur')).toBe('weur')
   })
 
@@ -199,7 +216,6 @@ describe('cloudflare broadcast routing', () => {
 
   it('maps the same room to the same bucket-coordinator offset for a bucket', () => {
     const shardIndices = getBucketCoordinatorShardIndices(2, 'weur')
-
     expect(getDeterministicKeyBucketIndex('room/alpha', shardIndices.length)).toBe(
       getDeterministicKeyBucketIndex('room/alpha', shardIndices.length),
     )
@@ -209,7 +225,6 @@ describe('cloudflare broadcast routing', () => {
     const weurShards = getBucketCoordinatorShardIndices(2, 'weur')
     const apacShards = getBucketCoordinatorShardIndices(2, 'apac')
     const ocShards = getBucketCoordinatorShardIndices(2, 'oc')
-
     expect(weurShards).toContain(weurShards[getDeterministicKeyBucketIndex('room/alpha', weurShards.length)]!)
     expect(apacShards).toContain(apacShards[getDeterministicKeyBucketIndex('room/alpha', apacShards.length)]!)
     expect(ocShards).toContain(ocShards[getDeterministicKeyBucketIndex('room/alpha', ocShards.length)]!)
@@ -251,7 +266,6 @@ describe('cloudflare broadcast routing', () => {
     const unknownRequest = createCloudflareRequest({ continent: 'EU' })
     const exactTarget = resolveSessionRoutingTarget('telefunc', { weur: 2, apac: 1 }, exactRequest, 'weur')
     const fallbackTarget = resolveSessionRoutingTarget('telefunc', { weur: 1, apac: 1 }, unknownRequest, 'weur')
-
     expect(exactTarget).toMatchObject({
       sessionInstanceName: expect.stringMatching(/^telefunc-shard-weur-/),
       locationBucket: 'weur',
@@ -267,7 +281,6 @@ describe('cloudflare broadcast routing', () => {
     // `ABQ` resolves to `wnam`, which is absent from this per-region scale map.
     const wnamRequest = createCloudflareRequest({ colo: 'ABQ' })
     const target = resolveSessionRoutingTarget('telefunc', { weur: 2, apac: 1 }, wnamRequest, 'weur')
-
     expect(target).toMatchObject({
       sessionInstanceName: expect.stringMatching(/^telefunc-shard-weur-/),
       locationBucket: 'weur',
@@ -288,51 +301,37 @@ describe('cloudflare broadcast routing', () => {
     const transport = new CloudflareBroadcastTransport({ baseInstanceName: 'telefunc', scale: 1 })
     const kv = createMockKV()
     const authority = createAuthorityState()
-
     const binding = createBasicBinding({
       onPublish: (_, request) => transport.publishToSubscribers(authority, request),
     })
-    transport.attachBinding(binding, 'TelefuncDurableObject')
-    transport.attachKV(kv)
-    transport.attachIsolateInfo('telefunc-shard-weur-0', 'weur')
-
+    configureTransport(transport, kv, binding)
     const subscription = transport.openSubscription({ key: 'room:test', kind: 'text' }, () => {})
     await subscription.ready
-
     const value = await kv.get('tfps:text%3Aroom%3Atest:weur:telefunc-shard-weur-0')
     expect(value).toBe('telefunc-shard-weur-0')
-
     const binary = await transport.publish({ key: 'room:test', kind: 'binary' }, new Uint8Array([1]))
     const text = await transport.publish({ key: 'room:test', kind: 'text' }, new TextEncoder().encode('"text"'))
     expect([binary.receivers, text.receivers]).toEqual([0, 1])
-
     await subscription.unsubscribe()
   })
 
   it('keeps the first-touch authority bucket in publish receipts', async () => {
     const authorityState = createAuthorityState()
-    const transport = new CloudflareBroadcastTransport({ baseInstanceName: 'telefunc', scale: 1 })
     const kv = createMockKV()
-
+    const transport = createTransport(kv, false)
     await authorityState.getOrInitAuthorityBucket('room:first-touch', 'weur')
-
     await kv.put('tfps:text%3Aroom%3Afirst-touch:weur:telefunc-shard-weur-0', 'telefunc-shard-weur-0', {
       expirationTtl: 90,
     })
     await kv.put('tfps:text%3Aroom%3Afirst-touch:apac:telefunc-shard-apac-0', 'telefunc-shard-apac-0', {
       expirationTtl: 90,
     })
-
-    transport.attachBinding(createBasicBinding(), 'TelefuncDurableObject')
-    transport.attachKV(kv)
-
     const receipt = await transport.publishToSubscribers(authorityState, {
       key: 'room:first-touch',
       locationBucket: 'apac',
       serialized: '{"text":"hello"}',
       forwarded: false,
     })
-
     expect(receipt).toMatchObject({
       seq: 1,
       meta: {
@@ -346,7 +345,6 @@ describe('cloudflare broadcast routing', () => {
   it('rejects generic Broadcast sequence exhaustion before persisting an unsafe cursor', async () => {
     const key = 'room:exhausted'
     const authority = createAuthorityState([[`broadcast:${key}:sequence`, Number.MAX_SAFE_INTEGER]])
-
     await expect(authority.getNextKeySeq(key)).rejects.toThrow('sequence exhausted')
   })
 
@@ -355,31 +353,25 @@ describe('cloudflare broadcast routing', () => {
     const kvPutReady = Promise.withResolvers<void>()
     const kv = createMockKV({ beforePut: () => kvPutReady.promise })
     const publishTargets: string[] = []
-
-    transport.attachBinding(
+    configureTransport(
+      transport,
+      kv,
       createBasicBinding({
         onPublish(id, request) {
           publishTargets.push(id.name)
           return Promise.resolve({ seq: 1, timestamp: Date.now() })
         },
       }),
-      'TelefuncDurableObject',
     )
-    transport.attachKV(kv)
-    transport.attachIsolateInfo('telefunc-shard-weur-0', 'weur')
     installCloudflareTransport(transport)
-
     const room = new ServerBroadcast<{ text: string }>({ key: 'room:test' })
     // subscribe() triggers KV presence setup — publish should wait for it
     room.subscribe(() => {})
     room.publish({ text: 'hello' })
-
     await flushMicrotasks(2)
     expect(publishTargets).toEqual([])
-
     kvPutReady.resolve()
     await flushCoordinatorTurn()
-
     expect(publishTargets).toEqual(['telefunc:broadcast:authority:room:test'])
   })
 
@@ -388,17 +380,9 @@ describe('cloudflare broadcast routing', () => {
     const kvPutReady = Promise.withResolvers<void>()
     const kv = createMockKV({ beforePut: () => kvPutReady.promise })
     const received: string[] = []
-
-    const localRegistry = (() => {
-      // Access the local registry after attachIsolateInfo sets it up
-      transport.attachIsolateInfo('telefunc-shard-weur-0', 'weur')
-      // We need access to the local registry for the mock binding deliver path.
-      // Use deliverToLocal which reads from the internal registry.
-      return null
-    })()
-    void localRegistry
-
-    transport.attachBinding(
+    configureTransport(
+      transport,
+      kv,
       createBasicBinding({
         onPublish(id, request) {
           return transport.publishToSubscribers(createAuthorityState(), {
@@ -410,24 +394,18 @@ describe('cloudflare broadcast routing', () => {
           return transport.deliverToLocal(request)
         },
       }),
-      'TelefuncDurableObject',
     )
-    transport.attachKV(kv)
     installCloudflareTransport(transport)
-
     const subscriber = new ServerBroadcast<{ text: string }>({ key: 'room:test' })
     subscriber.subscribe((message) => {
       received.push(message.text)
     })
     const publisher = new ServerBroadcast<{ text: string }>({ key: 'room:test' })
-
     publisher.publish({ text: 'hello' })
     await flushMicrotasks(2)
     expect(received).toEqual([])
-
     kvPutReady.resolve()
     await flushCoordinatorTurn()
-
     expect(received).toEqual(['hello'])
   })
 
@@ -435,9 +413,9 @@ describe('cloudflare broadcast routing', () => {
     const transport = new CloudflareBroadcastTransport({ baseInstanceName: 'telefunc', scale: 1 })
     const kvPutReady = Promise.withResolvers<void>()
     const kv = createMockKV({ beforePut: () => kvPutReady.promise })
-
-    transport.attachIsolateInfo('telefunc-shard-weur-0', 'weur')
-    transport.attachBinding(
+    configureTransport(
+      transport,
+      kv,
       createBasicBinding({
         onPublish(id, request) {
           return transport.publishToSubscribers(createAuthorityState(), {
@@ -449,21 +427,15 @@ describe('cloudflare broadcast routing', () => {
           return transport.deliverToLocal(request)
         },
       }),
-      'TelefuncDurableObject',
     )
-    transport.attachKV(kv)
     installCloudflareTransport(transport)
-
     const subscriber = new ServerBroadcast<{ text: string }>({ key: 'room:test:ack' })
     subscriber.subscribe(() => undefined)
     const publisher = new ServerBroadcast<{ text: string }>({ key: 'room:test:ack' })
     const receiptPromise = publisher.publish({ text: 'hello' })
-
     await flushMicrotasks(2)
     kvPutReady.resolve()
-
     const receipt = await receiptPromise
-
     expect(receipt).toMatchObject({
       key: 'room:test:ack',
       seq: 1,
@@ -480,18 +452,17 @@ describe('cloudflare broadcast routing', () => {
     const kv = createMockKV()
     const forwardedBuckets: string[] = []
     const transport = new CloudflareBroadcastTransport({ baseInstanceName: 'telefunc', scale: 1 })
-
-    transport.attachBinding(
+    configureTransport(
+      transport,
+      kv,
       createBasicBinding({
         onPublish(id, { locationBucket }) {
           forwardedBuckets.push(locationBucket)
           return Promise.resolve()
         },
       }),
-      'TelefuncDurableObject',
+      false,
     )
-    transport.attachKV(kv)
-
     await kv.put('tfps:text%3Aroom%3Atest:weur:telefunc-shard-weur-0', 'telefunc-shard-weur-0', {
       expirationTtl: 90,
     })
@@ -501,14 +472,12 @@ describe('cloudflare broadcast routing', () => {
     await kv.put('tfps:text%3Aroom%3Atest:eeur:telefunc-shard-eeur-0', 'telefunc-shard-eeur-0', {
       expirationTtl: 90,
     })
-
     await transport.publishToSubscribers(authorityState, {
       key: 'room:test',
       locationBucket: 'weur',
       serialized: '{"text":"hello"}',
       forwarded: false,
     })
-
     expect(forwardedBuckets.sort()).toEqual(['apac', 'eeur', 'weur'])
   })
 
@@ -517,23 +486,20 @@ describe('cloudflare broadcast routing', () => {
     const transport = new CloudflareBroadcastTransport({ baseInstanceName: 'telefunc', scale: 1 })
     const deliveredTo: string[] = []
     const received: Array<{ text: string; seq: number; timestamp: number }> = []
-
-    transport.attachBinding(
+    configureTransport(
+      transport,
+      createMockKV(),
       createBasicBinding({
         onDeliver(id, request) {
           deliveredTo.push(id.name)
           return transport.deliverToLocal(request)
         },
       }),
-      'TelefuncDurableObject',
     )
-    transport.attachKV(createMockKV())
-    transport.attachIsolateInfo('telefunc-shard-weur-0', 'weur')
     const subscription = transport.openSubscription({ key: 'room:test', kind: 'text' }, (payload, info) => {
       received.push({ text: new TextDecoder().decode(payload), ...info })
     })
     await subscription.ready
-
     await transport.publishToSubscribers(authorityState, {
       key: 'room:test',
       locationBucket: 'weur',
@@ -542,7 +508,6 @@ describe('cloudflare broadcast routing', () => {
       doNames: ['telefunc-shard-weur-0', 'telefunc-shard-weur-1'],
       info: { seq: 0x1_0000_0000, timestamp: 0x1_0000_0001 },
     })
-
     expect(deliveredTo.sort()).toEqual(['telefunc-shard-weur-0', 'telefunc-shard-weur-1'])
     expect(received).toEqual([
       { text: '{"text":"hello"}', seq: 0x1_0000_0000, timestamp: 0x1_0000_0001 },
@@ -555,27 +520,21 @@ describe('cloudflare broadcast routing', () => {
     const transport = new CloudflareBroadcastTransport({ baseInstanceName: 'telefunc', scale: 1 })
     const kv = createMockKV()
     const coordinatorPublishes: Array<{ name: string; key: string; locationBucket: string; serialized: string }> = []
-
-    transport.attachBinding(
+    configureTransport(
+      transport,
+      kv,
       createBasicBinding({
         onPublish(id, { key, locationBucket, serialized }) {
           coordinatorPublishes.push({ name: id.name, key, locationBucket, serialized })
           return Promise.resolve({ seq: 1, timestamp: Date.now() })
         },
       }),
-      'TelefuncDurableObject',
     )
-    transport.attachKV(kv)
-    transport.attachIsolateInfo('telefunc-shard-weur-0', 'weur')
     installCloudflareTransport(transport)
-
     // No request context needed — isolate state provides locationBucket
     const room = new ServerBroadcast<{ text: string }>({ key: 'room:test:no-ctx' })
-
     expect(() => room.publish({ text: 'hello' })).not.toThrow()
-
     await flushCoordinatorTurn()
-
     expect(coordinatorPublishes).toEqual([
       {
         name: expect.stringContaining(':broadcast:'),
@@ -587,12 +546,8 @@ describe('cloudflare broadcast routing', () => {
   })
 
   it('asserts when isolate info is not attached before subscribe', () => {
-    const transport = new CloudflareBroadcastTransport({ baseInstanceName: 'telefunc', scale: 1 })
     const kv = createMockKV()
-
-    transport.attachBinding(createBasicBinding(), 'TelefuncDurableObject')
-    transport.attachKV(kv)
-
+    const transport = createTransport(kv, false)
     expect(() => transport.openSubscription({ key: 'room:test', kind: 'text' }, () => {})).toThrow(
       'attachIsolateInfo()',
     )
@@ -607,8 +562,9 @@ describe('cloudflare broadcast routing', () => {
     const firstRemotePublishReady = new Promise<void>((resolve) => {
       releaseFirstRemotePublish = resolve
     })
-
-    transport.attachBinding(
+    configureTransport(
+      transport,
+      kv,
       {
         idFromName(name: string) {
           return {
@@ -632,17 +588,14 @@ describe('cloudflare broadcast routing', () => {
           }
         },
       } as unknown as DurableObjectNamespace,
-      'TelefuncDurableObject',
+      false,
     )
-    transport.attachKV(kv)
-
     await kv.put('tfps:text%3Aroom%3Atest:weur:telefunc-shard-weur-0', 'telefunc-shard-weur-0', {
       expirationTtl: 90,
     })
     await kv.put('tfps:text%3Aroom%3Atest:apac:telefunc-shard-apac-0', 'telefunc-shard-apac-0', {
       expirationTtl: 90,
     })
-
     const firstPublish = transport.publishToSubscribers(authorityState, {
       key: 'room:test',
       locationBucket: 'weur',
@@ -650,7 +603,6 @@ describe('cloudflare broadcast routing', () => {
       forwarded: false,
     })
     await flushMicrotasks(8)
-
     const secondPublish = transport.publishToSubscribers(authorityState, {
       key: 'room:test',
       locationBucket: 'weur',
@@ -658,47 +610,32 @@ describe('cloudflare broadcast routing', () => {
       forwarded: false,
     })
     await flushMicrotasks(8)
-
     expect(coordinatorPublishes).toContain('telefunc:broadcast:weur:0:{"text":"first"}')
     expect(coordinatorPublishes).toContain('telefunc:broadcast:apac:0:{"text":"first"}')
     expect(coordinatorPublishes).toContain('telefunc:broadcast:weur:0:{"text":"second"}')
     expect(coordinatorPublishes).toContain('telefunc:broadcast:apac:0:{"text":"second"}')
-
     releaseFirstRemotePublish!()
     await Promise.all([firstPublish, secondPublish])
-
     expect(coordinatorPublishes).toContain('telefunc:broadcast:weur:0:{"text":"second"}')
     expect(coordinatorPublishes).toContain('telefunc:broadcast:apac:0:{"text":"second"}')
   })
 
   it('deletes KV presence on unsubscribe', async () => {
-    const transport = new CloudflareBroadcastTransport({ baseInstanceName: 'telefunc', scale: 1 })
     const kv = createMockKV()
-
-    transport.attachBinding(createBasicBinding(), 'TelefuncDurableObject')
-    transport.attachKV(kv)
-    transport.attachIsolateInfo('telefunc-shard-weur-0', 'weur')
-
+    const transport = createTransport(kv)
     const subscription = transport.openSubscription({ key: 'room:test', kind: 'text' }, () => {})
     await subscription.ready
-
     const key = 'tfps:text%3Aroom%3Atest:weur:telefunc-shard-weur-0'
     expect(await kv.get(key)).toBe('telefunc-shard-weur-0')
-
     await subscription.unsubscribe()
-
     expect(await kv.get(key)).toBeNull()
   })
 
   it('keeps KV presence generation-safe across setup and delete churn', async () => {
-    const transport = new CloudflareBroadcastTransport({ baseInstanceName: 'telefunc', scale: 1 })
     const setup = Promise.withResolvers<void>()
     const hooks: MockKVHooks = { beforePut: () => setup.promise }
     const kv = createMockKV(hooks)
-    transport.attachBinding(createBasicBinding(), 'TelefuncDurableObject')
-    transport.attachKV(kv)
-    transport.attachIsolateInfo('telefunc-shard-weur-0', 'weur')
-
+    const transport = createTransport(kv)
     const lane = { key: 'room:presence-churn', kind: 'text' } as const
     const presenceKey = 'tfps:text%3Aroom%3Apresence-churn:weur:telefunc-shard-weur-0'
     const first = transport.openSubscription(lane, () => {})
@@ -708,14 +645,12 @@ describe('cloudflare broadcast routing', () => {
     await successor.ready
     await flushMicrotasks()
     expect(await kv.get(presenceKey)).toBe('telefunc-shard-weur-0')
-
     const releaseDeletion = Promise.withResolvers<void>()
     hooks.beforeDelete = () => releaseDeletion.promise
     const teardown = successor.unsubscribe()
     const replacement = transport.openSubscription(lane, () => {})
     await flushMicrotasks()
     expect(replacement.state()).toBe('establishing')
-
     releaseDeletion.resolve()
     await Promise.all([teardown, replacement.ready])
     expect(await kv.get(presenceKey)).toBe('telefunc-shard-weur-0')
@@ -724,8 +659,8 @@ describe('cloudflare broadcast routing', () => {
 
   it('surfaces presence refresh loss and recovery through subscription state', async () => {
     vi.useFakeTimers()
-    const transport = new CloudflareBroadcastTransport({ baseInstanceName: 'telefunc', scale: 1 })
     const kv = createMockKV()
+    const transport = createTransport(kv)
     const originalPut = kv.put.bind(kv)
     let putCalls = 0
     kv.put = (async (key: string, value: string, options?: Parameters<KVNamespace['put']>[2]) => {
@@ -733,20 +668,14 @@ describe('cloudflare broadcast routing', () => {
       if (putCalls === 2) throw new Error('presence refresh rejected')
       return originalPut(key, value, options)
     }) as KVNamespace['put']
-    transport.attachBinding(createBasicBinding(), 'TelefuncDurableObject')
-    transport.attachKV(kv)
-    transport.attachIsolateInfo('telefunc-shard-weur-0', 'weur')
-
     const subscription = transport.openSubscription({ key: 'room:refresh', kind: 'text' }, () => {})
     await subscription.ready
     const states: string[] = []
     const stopObserving = subscription.onStateChange((state) => states.push(state))
-
     try {
       await vi.advanceTimersByTimeAsync(30_000)
       expect(subscription.state()).toBe('lost')
       expect(states).toEqual(['lost'])
-
       await vi.advanceTimersByTimeAsync(30_000)
       expect(subscription.state()).toBe('ready')
       expect(states).toEqual(['lost', 'ready'])

@@ -57,23 +57,19 @@ import type {
 import { ORDERING_FRAME_LAYOUT, decodeOrderingFrame, encodeOrderingFrame } from '../ordering-frame.js'
 import { GcRegistry } from '../gcRegistry.js'
 import { wrapProxy } from '../wrapProxy.js'
-
 const encoder = new TextEncoder()
 const decoder = new TextDecoder()
 const semanticLane = { kind: 'semantic' } as const satisfies LaneId
 const allBinary = { everyMember: { all: true, tracks: [] }, members: {} }
 const FORMER_MEMBER_KV_TTL_MS = 180_000
-
 let driver: MemoryBackend
 let memoryState: MemoryBackendState
-
 beforeEach(async () => {
   await disposeBackend()
   memoryState = new MemoryBackendState()
   driver = new MemoryBackend({ state: memoryState })
   installBackend(() => driver)
 })
-
 afterEach(async () => {
   vi.useRealTimers()
   vi.restoreAllMocks()
@@ -84,7 +80,6 @@ afterEach(async () => {
     report.mockRestore()
   }
 })
-
 describe('Room public behavior', () => {
   it('opens semantic ingestion only when a semantic listener wants delivery', async () => {
     const room = (await Room.create('semantic-demand')) as ServerRoom
@@ -103,7 +98,6 @@ describe('Room public behavior', () => {
     await member.publish('wanted')
     expect(received).toEqual(['wanted'])
   })
-
   it('does not let a removed member publish or receive a DM when its leave frame is lost', async () => {
     const backend = getBackend()
     const subscribeLane = backend.subscribeLane.bind(backend)
@@ -131,7 +125,6 @@ describe('Room public behavior', () => {
     )
     expect({ publish, send, inbox }).toEqual({ publish: 'rejected', send: 'rejected', inbox: [] })
   })
-
   it('keeps a joining identity undiscoverable until its member inbox subscription is ready', async () => {
     const room = await Room.create('join-inbox-readiness')
     const sender = await room.join()
@@ -161,7 +154,6 @@ describe('Room public behavior', () => {
     await sender.send(joined.id, 'ready')
     expect(inbox).toEqual(['ready'])
   })
-
   it('rolls durable membership back when the join announcement fails', async () => {
     const room = await Room.create('join-readiness-rollback')
     const backend = getBackend()
@@ -175,7 +167,6 @@ describe('Room public behavior', () => {
     await expect(room.join()).rejects.toThrow('join announcement failed')
     await expect(Room.getParticipants(room.id)).resolves.toEqual([])
   })
-
   it('keeps a server participant active so a transient durable-leave failure can be retried', async () => {
     const room = await Room.create('retry-local-leave')
     const member = await room.join()
@@ -186,7 +177,6 @@ describe('Room public behavior', () => {
     await expect(member.leave()).resolves.toBeUndefined()
     expect(await Room.getParticipants(room.id)).toEqual([])
   })
-
   it('retains room-stub ownership so a transient durable-leave failure can be retried', async () => {
     const room = (await Room.create('retry-stub-leave')) as ServerRoom
     const stub = register(room)
@@ -203,7 +193,6 @@ describe('Room public behavior', () => {
     await expect(room._handleStubRequest(stub, request)).resolves.toBeUndefined()
     expect(await Room.getParticipants(room.id)).toEqual([])
   })
-
   it('creates, lists, updates, closes fully, and recreates a genuinely fresh domain', async () => {
     const room = (await Room.create('lifecycle', { meta: { topic: 'one' } })) as ServerRoom
     const firstInc = room._inc
@@ -228,7 +217,6 @@ describe('Room public behavior', () => {
     expect(recreated._inc).not.toBe(firstInc)
     expect(await recreated.getParticipants()).toEqual([])
   })
-
   it('closes a head whose directory registration cannot finish', async () => {
     const put = driver.directoryPut.bind(driver)
     vi.spyOn(driver, 'directoryPut').mockImplementation(async (roomId, inc) => {
@@ -238,7 +226,6 @@ describe('Room public behavior', () => {
     await expect(Room.create('index-failure')).rejects.toThrow('persistent index failure')
     expect((await driver.readHead('index-failure'))?.head).toMatchObject({ state: 'closed', currentInc: null })
   })
-
   it('waits for an active close lease and takes over until the head is closed', async () => {
     vi.useFakeTimers()
     const room = (await Room.create('concurrent-close')) as ServerRoom
@@ -272,7 +259,6 @@ describe('Room public behavior', () => {
     await closing
     expect((await driver.readHead(room.id))?.head).toMatchObject({ state: 'closed', currentInc: null })
   })
-
   it('retries generation cleanup after the head was durably finalized', async () => {
     const room = (await Room.create('finalized-cleanup-retry')) as ServerRoom
     const inc = room._inc
@@ -285,7 +271,6 @@ describe('Room public behavior', () => {
     expect(await driver.listGenerations(room.id)).toEqual([])
     expect((await driver.directoryList(room.id)).entries).toEqual([])
   })
-
   it('waits out an active close lease in getOrCreate instead of reporting not-found', async () => {
     vi.useFakeTimers()
     const room = (await Room.create('get-or-create-closing')) as ServerRoom
@@ -319,7 +304,6 @@ describe('Room public behavior', () => {
     expect(recreated._inc).not.toBe(firstInc)
     expect(recreated.isClosed).toBe(false)
   })
-
   it('tears down a close observed by a separate Room runtime that cannot inherit the initiator hold', async () => {
     const authority = await Room.create('remote-close-teardown')
     authority.onAnnounce(() => {})
@@ -367,7 +351,6 @@ describe('Room public behavior', () => {
       await remoteInstall.disposeBackend()
     }
   })
-
   it('replaces a still-demanded Room subscription after its supervised source closes terminally', async () => {
     const authority = await Room.create('terminal-subscription-recovery')
     const publisher = await authority.join()
@@ -398,7 +381,6 @@ describe('Room public behavior', () => {
     await publisher.publish('after-recovery')
     expect(received).toEqual(['after-recovery'])
   })
-
   it('reconciles a zombie Room when terminal control state follows a lost closed frame', async () => {
     const authority = await Room.create('terminal-control-reconcile')
     await authority.join()
@@ -443,7 +425,6 @@ describe('Room public behavior', () => {
       await remoteInstall.disposeBackend()
     }
   })
-
   it('reconciles authority after a control gap or same-attempt recovery', async () => {
     const room = (await Room.create('control-reconcile')) as ServerRoom
     const backend = getBackend()
@@ -484,7 +465,6 @@ describe('Room public behavior', () => {
     await vi.waitFor(() => expect(room.count).toBe(1))
     expect((await room.getParticipants()).map(({ id }) => id)).toEqual([member.id])
   })
-
   it('uses the heartbeat roster snapshot to repair observer drift', async () => {
     const authority = await Room.create('heartbeat-reconcile')
     const member = await authority.join()
@@ -496,7 +476,6 @@ describe('Room public behavior', () => {
     expect(observer.count).toBe(1)
     expect((await observer.getParticipants()).map(({ id }) => id)).toEqual([member.id])
   })
-
   it('reads authority while the control subscription is establishing', async () => {
     const authority = await Room.create('establishing-roster')
     const observer = (await Room.get(authority.id)) as ServerRoom
@@ -514,7 +493,6 @@ describe('Room public behavior', () => {
     readiness.resolve()
     slot.stop()
   })
-
   it('makes roster readers join one bounded authoritative refresh', async () => {
     const authority = (await Room.create('roster-refresh-owner')) as ServerRoom
     await authority.join()
@@ -559,7 +537,6 @@ describe('Room public behavior', () => {
       'Room roster refresh contention',
     )
   })
-
   it('heartbeats pure control observers without owned members or binary demand', async () => {
     vi.useFakeTimers()
     const observer = (await Room.get((await Room.create('observer-heartbeat')).id)) as ServerRoom
@@ -570,7 +547,6 @@ describe('Room public behavior', () => {
     await vi.advanceTimersByTimeAsync(ROOM_HEARTBEAT_INTERVAL_MS)
     expect(heartbeat).toHaveBeenCalledOnce()
   })
-
   it('reconciles authority even when member renewal fails first', async () => {
     const room = (await Room.create('heartbeat-renewal-failure')) as ServerRoom
     const first = await room.join()
@@ -591,7 +567,6 @@ describe('Room public behavior', () => {
     expect(attempted).toContain(secondKey)
     expect(room.isClosed).toBe(true)
   })
-
   it('retries a still-wanted lost subscription on the next planning pass', async () => {
     vi.useFakeTimers()
     const observer = await Room.get((await Room.create('single-recovery-horizon')).id)
@@ -606,7 +581,6 @@ describe('Room public behavior', () => {
     expect(attempts).toBe(8)
     expect(observer.isClosed).toBe(false)
   })
-
   it('keeps an authoritative open Room open after subscription recovery exhausts', async () => {
     const observer = (await Room.get((await Room.create('open-recovery-exhaustion')).id)) as ServerRoom
     const { backend } = rejectLaneSubscriptions('semantic', 'persistent subscription failure')
@@ -619,7 +593,6 @@ describe('Room public behavior', () => {
     expect({ closed: observer.isClosed, onClose: onClose.mock.calls.length }).toEqual({ closed: false, onClose: 0 })
     expect(textSlot).toMatchObject({ wanted: true, active: false })
   })
-
   it('settles an in-flight join when its inbox recovery horizon exhausts', async () => {
     const room = (await Room.create('join-recovery-exhaustion')) as ServerRoom
     const { started } = rejectLaneSubscriptions('inbox', 'persistent inbox subscription failure')
@@ -630,7 +603,6 @@ describe('Room public behavior', () => {
     expect(room.isClosed).toBe(false)
     expect(room.count).toBe(0)
   })
-
   it('settles retained replay when its semantic recovery horizon exhausts', async () => {
     const authority = (await Room.create('replay-recovery-exhaustion')) as ServerRoom
     const publisher = await authority.join()
@@ -645,7 +617,6 @@ describe('Room public behavior', () => {
     expect(outcome.value).toBeInstanceOf(RoomError)
     expect(observer.isClosed).toBe(false)
   })
-
   it('propagates presence/meta while hidden members stay addressable and admin removal carries its cause', async () => {
     const authority = await Room.create('presence')
     const observer = await Room.get('presence')
@@ -668,7 +639,6 @@ describe('Room public behavior', () => {
     expect(events.at(-1)).toBe('leave:Alicia')
     expect((await observer.getParticipants({ hidden: true })).map((member) => member.id)).toEqual([hidden.id])
   })
-
   it('excludes an expired unobserved member from static get and list presence', async () => {
     const room = (await Room.create('expired-static-presence')) as ServerRoom
     const member = await room.join()
@@ -690,7 +660,6 @@ describe('Room public behavior', () => {
     expect(loaded.isEmpty).toBe(true)
     expect((await Room.list()).find(({ id }) => id === room.id)).toMatchObject({ count: 0, isEmpty: true })
   })
-
   it('keeps local and verified sender metadata at the newest accepted sequence', async () => {
     const room = (await Room.create('participant-meta-order')) as ServerRoom
     const participant = await room.join()
@@ -719,7 +688,6 @@ describe('Room public behavior', () => {
     await participant.publish('metadata-check')
     expect(senderMeta).toEqual([{ version: 2 }])
   })
-
   it('keeps a member whose heartbeat wins the expired-record reap race', async () => {
     const room = (await Room.create('reap-heartbeat-race')) as ServerRoom
     const member = await room.join()
@@ -765,7 +733,6 @@ describe('Room public behavior', () => {
     expect((await Room.getParticipants(room.id)).map(({ id }) => id)).toEqual([member.id])
     expect(raced).toBe(true)
   })
-
   it('keeps text self-delivery local and binary subscriptions selective across named tracks', async () => {
     const publisherRoom = await Room.create('media')
     const observer = await Room.get('media')
@@ -785,7 +752,6 @@ describe('Room public behavior', () => {
     await quiet.publishBinary(new Uint8Array([2]), { track: 'screen', meta: { key: true } })
     expect(screen).toEqual([[2, { key: true }]])
   })
-
   it('applies room-wide and member-specific binary wants to both subscription and demand', async () => {
     const room = await Room.create('binary-pairs')
     const publisher = await room.join()
@@ -810,7 +776,6 @@ describe('Room public behavior', () => {
       ['camera', 2],
     ])
   })
-
   it('announces binary demand only after the demanded route is ready', async () => {
     const room = await Room.create('binary-demand-readiness')
     const publisher = await room.join()
@@ -842,7 +807,6 @@ describe('Room public behavior', () => {
     await publishing
     expect(frames).toEqual([8])
   })
-
   it('keeps DMs private, supports acknowledgements, and preserves room-authored sends', async () => {
     const room = await Room.create('dm')
     const bot = await room.join({ meta: { role: 'bot' }, hidden: true })
@@ -863,7 +827,6 @@ describe('Room public behavior', () => {
     await Room.send('dm', { id: player.id }, { notice: true })
     expect(fromRoom).toEqual([[{ notice: true }, null]])
   })
-
   it('surfaces an ack timeout as the operational RoomError at the public send boundary', async () => {
     const room = await Room.create('dm-timeout-error-class')
     const sender = await room.join()
@@ -879,7 +842,6 @@ describe('Room public behavior', () => {
       message: expect.stringContaining('timed out'),
     })
   })
-
   it('isolates an identity send from a departed member but preserves exact-ID diagnosis', async () => {
     const room = await Room.create('server-send-race')
     const departed = await room.join({ identity: 'fanout' })
@@ -904,7 +866,6 @@ describe('Room public behavior', () => {
     )
     expect((await driver.readHead(room.id))?.head.state).toBe('open')
   })
-
   it('drains DMs that arrived before a participant was bound to its client forwarder', async () => {
     const room = await Room.create('pre-bind-inbox')
     const target = await room.join()
@@ -939,7 +900,6 @@ describe('Room public behavior', () => {
     expect(forwarded).toEqual(['plain-before-bind', 'ack-before-bind'])
     await expect(acknowledging).resolves.toMatchObject({ response: 'handled:ack-before-bind' })
   })
-
   it('keeps every live ack correlation instead of silently dropping the oldest', async () => {
     const stub = register(await Room.create('ack-correlations'))
     for (let index = 0; index <= 1_024; index++) {
@@ -947,7 +907,6 @@ describe('Room public behavior', () => {
     }
     expect(stub._takeAckDm('ack-0', 'recipient')).toBe('sender-0')
   })
-
   it('applies before guards and after hooks around authoritative joins, publishes, and sends', async () => {
     await Room.create('guarded')
     const room = (await Room.get('guarded')) as ServerRoom
@@ -985,7 +944,6 @@ describe('Room public behavior', () => {
     expect(published).toEqual(['ok'])
     expect(after).toEqual(['join:Alice', 'join:Bob', 'publish:ok', 'send:ok'])
   })
-
   it('preserves committed join, publish, and send results when after hooks reject', async () => {
     const room = (await Room.create('after-hook-failure')) as ServerRoom
     const report = vi.spyOn(console, 'error').mockImplementation(() => {})
@@ -1010,7 +968,6 @@ describe('Room public behavior', () => {
     expect(inbox).toEqual(['sent'])
     expect(report).toHaveBeenCalledTimes(4)
   })
-
   it('orders participant text and room announcements in one semantic domain', async () => {
     const room = await Room.create('announce-semantic-order')
     const member = await room.join()
@@ -1034,7 +991,6 @@ describe('Room public behavior', () => {
     expect(second.timestamp).toBeLessThanOrEqual(third.timestamp)
     expect(observed).toEqual([['notice', 2]])
   })
-
   it('relays semantic announcements only to stubs that declared announce demand', async () => {
     const room = (await Room.create('announce-want-gate')) as ServerRoom
     const backend = getBackend()
@@ -1053,7 +1009,6 @@ describe('Room public behavior', () => {
     await vi.waitFor(() => expect(announceFrames(wanted.peer)).toEqual(['wanted']))
     expect(announceFrames(silent.peer)).toEqual([])
   })
-
   it("retained owner cleanup is compare-delete, so a newer owner's racing frame survives", async () => {
     const room = (await Room.create('retained-owner')) as ServerRoom
     const departing = await room.join({ meta: { name: 'departing' } })
@@ -1072,7 +1027,6 @@ describe('Room public behavior', () => {
     const retained = await driver.readRetained(room.id, room._inc, semanticLane)
     expect(parse(decoder.decode(retained!.payload))).toMatchObject({ from: replacement.id, data: 'new' })
   })
-
   it('retries retained cleanup after member deletion from durable eviction work', async () => {
     const room = (await Room.create('retained-cleanup-retry')) as ServerRoom
     const member = await room.join()
@@ -1084,7 +1038,6 @@ describe('Room public behavior', () => {
     await expect(Room.getParticipants(room.id)).resolves.toEqual([])
     expect(await driver.listRetained(room.id, room._inc)).toEqual([])
   })
-
   it('reaps legacy orphan-owned retained text instead of replaying it', async () => {
     const authority = (await Room.create('orphan-retained-replay')) as ServerRoom
     const member = await authority.join()
@@ -1103,7 +1056,6 @@ describe('Room public behavior', () => {
     expect(dataFrames(peer)).toEqual([])
     await expect(driver.readRetained(authority.id, authority._inc, semanticLane)).resolves.toBeNull()
   })
-
   it('does not retain or expose mutable lane aliases', async () => {
     const room = (await Room.create('retained-lane-alias')) as ServerRoom
     const lane = { kind: 'binary', member: 'member', track: 'original' } as LaneId
@@ -1119,7 +1071,6 @@ describe('Room public behavior', () => {
       { kind: 'binary', member: 'member', track: 'original' },
     ])
   })
-
   it('does not replay older retained text after a newer global semantic frame', async () => {
     const room = (await Room.create('global-retained-watermark')) as ServerRoom
     const stub = register(room)
@@ -1128,7 +1079,6 @@ describe('Room public behavior', () => {
     stub._emitRetainedText('older-retained', 'sender-a', { seq: 1, timestamp: 1 })
     expect(relay.mock.calls.map(([wire]) => wire)).toEqual(['newer-live'])
   })
-
   it('waits for roster-derived binary routes before reading retained frames', async () => {
     const authority = await Room.create('retained-binary-roster-fence')
     const publisher = await authority.join()
@@ -1159,7 +1109,6 @@ describe('Room public behavior', () => {
       releaseRoster.resolve()
     }
   })
-
   it('delivers exact-member binary frames before the roster is known', async () => {
     const authority = await Room.create('exact-binary-without-roster')
     const publisher = await authority.join()
@@ -1203,7 +1152,6 @@ describe('Room public behavior', () => {
       await observer.getParticipants()
     }
   })
-
   it('drops retained text and binary when a crashed publisher is reaped', async () => {
     vi.useFakeTimers()
     vi.setSystemTime(1_000_000)
@@ -1222,7 +1170,6 @@ describe('Room public behavior', () => {
     expect(leaves).toEqual([publisher.id])
     await expect(Room.removeParticipant(room.id, { identity: 'expired-owner' })).resolves.toBeUndefined()
   })
-
   it('tail mode holds pre-attach text and flushes it in order on first client demand', async () => {
     const { member, tail } = await createTail('tail')
     await member.publish('early')
@@ -1234,7 +1181,6 @@ describe('Room public behavior', () => {
     await member.publish('live')
     expect(dataFrames(peer)).toEqual(['early', 'held', 'live'])
   })
-
   it('releases a tail that is not attached within its 60 second lease', async () => {
     vi.useFakeTimers()
     const { member, tail } = await createTail('tail-pre-attach-expiry')
@@ -1244,7 +1190,6 @@ describe('Room public behavior', () => {
     stub._onPeerBroadcastSubscribe(false)
     expect(dataFrames(peer)).toEqual([])
   })
-
   it('releases an attached tail when first text demand misses its 60 second lease', async () => {
     vi.useFakeTimers()
     const { member, tail } = await createTail('tail-post-attach-expiry')
@@ -1254,7 +1199,6 @@ describe('Room public behavior', () => {
     stub._onPeerBroadcastSubscribe(false)
     expect(dataFrames(peer)).toEqual([])
   })
-
   it('onDemand reports named-track demand turning on and off', async () => {
     const room = await Room.create('demand')
     const camera = await room.join()
@@ -1272,7 +1216,6 @@ describe('Room public behavior', () => {
       ]),
     )
   })
-
   it('replays already-true demand when the publisher attaches its handler', async () => {
     const authority = await Room.create('late-demand-handler')
     const observer = await Room.get(authority.id)
@@ -1282,7 +1225,6 @@ describe('Room public behavior', () => {
     publisher.onDemand((track, wanted) => changes.push([track, wanted]))
     expect(changes).toEqual([[null, true]])
   })
-
   it('uses the inbox hold only before the first listener attaches', async () => {
     const room = await Room.create('one-shot-inbox-hold')
     const member = await room.join()
@@ -1313,14 +1255,12 @@ describe('Room public behavior', () => {
     expect(received).toEqual([])
     expect(reply).toMatchObject({ ok: false })
   })
-
   it('keeps live and retained binary seq above 2^32 through server and public client decode', async () => {
     const live = await wideBinaryScenario('wide-live', false, 7)
     const retained = await wideBinaryScenario('wide-retained', true, 9)
     expect(live).toEqual({ receipt: 0x1_0000_0000, server: 0x1_0000_0000, client: 0x1_0000_0000 })
     expect(retained).toEqual({ receipt: 0x1_0000_0000, server: null, client: 0x1_0000_0000 })
   })
-
   it('keeps zero-configuration memory on the same supervised path as explicit drivers', async () => {
     await disposeBackend()
     const room = await Room.create('zero-config')
@@ -1352,7 +1292,6 @@ describe('Room public behavior', () => {
     expect(second.state()).toBe('ready')
     await second.unsubscribe()
   })
-
   it('keeps snapshot references stable until a real state change', async () => {
     const room = await Room.create('snapshot')
     const first = room.snapshot()
@@ -1369,7 +1308,6 @@ describe('Room public behavior', () => {
     expect(Object.isFrozen(changed.participants[0]!.meta)).toBe(true)
     expect(changes).toBe(1)
   })
-
   it('copies metadata into state and freezes every public metadata view', async () => {
     const roomMeta = { topic: 'original' }
     const room = await Room.create('owned-meta', { meta: roomMeta })
@@ -1387,7 +1325,6 @@ describe('Room public behavior', () => {
     expect(participant.meta).toEqual({ name: 'Bob' })
   })
 })
-
 describe('client Room lifecycle', () => {
   it('keeps RoomError precedence when an error also matches ShieldValidationError', () => {
     const error = Object.assign(new ShieldValidationError('overlap'), {
@@ -1397,7 +1334,6 @@ describe('client Room lifecycle', () => {
     expect(isShieldValidationError(error)).toBe(true)
     expect(roomAckError(error, vi.fn())).toEqual({ text: 'overlap', status: ACK_STATUS.ERROR })
   })
-
   it('classifies only own, real, non-hostile error brands', () => {
     const roomError = new RoomError('room')
     const abortError = Abort('abort')
@@ -1434,7 +1370,6 @@ describe('client Room lifecycle', () => {
     })
     expect(report).toHaveBeenCalledOnce()
   })
-
   it('keeps remote serializer backing unforgeable and exact-keyed', async () => {
     const room = await Room.create('remote-backing')
     const joined = await room.join()
@@ -1453,7 +1388,6 @@ describe('client Room lifecycle', () => {
     expect(() => remoteBacking(hostile)).not.toThrow()
     expect(remoteBacking(hostile)).toBeNull()
   })
-
   describe.skipIf(typeof globalThis.gc !== 'function')('Room-derived handle ownership (real GC)', () => {
     it('keeps the Room wrapper alive through a participant extracted from a roster array', async () => {
       const gc = gcFixture('gc-list-owner')
@@ -1463,7 +1397,6 @@ describe('client Room lifecycle', () => {
       expect(retained.member.id).toBe(gc.memberId)
       expect(gc.closed()).toBe(0)
     })
-
     it('keeps the Room wrapper alive through a joined participant', async () => {
       const gc = gcFixture('gc-join-owner', true)
       const retained = await retainOnlyJoinedParticipant(gc)
@@ -1472,7 +1405,6 @@ describe('client Room lifecycle', () => {
       expect(retained.member.id).toBe(gc.memberId)
       expect(gc.closed()).toBe(0)
     })
-
     it('keeps the Room wrapper alive through a callback-delivered participant', async () => {
       const gc = gcFixture('gc-callback-owner')
       const retained = await retainOnlyCallbackRemote(gc)
@@ -1481,7 +1413,6 @@ describe('client Room lifecycle', () => {
       expect(retained.member.id).toBe(gc.memberId)
       expect(gc.closed()).toBe(0)
     })
-
     it('releases the Room wrapper from a departed participant handle', async () => {
       const gc = gcFixture('gc-departed-owner', true)
       const retained = await retainOnlyDepartedParticipant(gc)
@@ -1490,7 +1421,6 @@ describe('client Room lifecycle', () => {
       expect(retained.room.deref()).toBeUndefined()
       expect(gc.closed()).toBe(1)
     })
-
     it('tethers an active disposer but releases snapshot and invoked disposer handles', async () => {
       const gc = gcFixture('gc-drop-owner', true)
       const retained = await dropJoinedRoomHandles(gc)
@@ -1504,7 +1434,6 @@ describe('client Room lifecycle', () => {
       expect(gc.closed()).toBe(1)
     })
   })
-
   it('does not emit onEmpty from a partial pre-roster member map', () => {
     const { client, emit } = fakeClient('pre-roster-empty', undefined, { count: 2 })
     const memberId = crypto.randomUUID()
@@ -1515,7 +1444,6 @@ describe('client Room lifecycle', () => {
     expect(client.count).toBe(2)
     expect(empty).toBe(0)
   })
-
   it('dirties the roster epoch for unknown member-record events', () => {
     const state = new RoomState({
       roomId: 'unknown-member-epoch',
@@ -1531,7 +1459,6 @@ describe('client Room lifecycle', () => {
     state.applyLeave(id)
     expect(state.membershipVersion).toBe(3)
   })
-
   it('reports rejected async RoomState callbacks without awaiting delivery', async () => {
     const memberId = crypto.randomUUID()
     const errors: unknown[] = []
@@ -1561,7 +1488,6 @@ describe('client Room lifecycle', () => {
     await Promise.resolve()
     expect(errors).toEqual(failures)
   })
-
   it('reports rejected async participant inbox, demand, and leave callbacks', async () => {
     const room = await Room.create('async-participant-callbacks')
     const participant = await room.join()
@@ -1593,7 +1519,6 @@ describe('client Room lifecycle', () => {
     await Promise.resolve()
     expect(errors).toEqual(failures)
   })
-
   it('keeps a client participant active so a rejected leave request can be retried', async () => {
     let leaveAttempts = 0
     const { client } = fakeClient('retry-client-leave', {
@@ -1610,7 +1535,6 @@ describe('client Room lifecycle', () => {
     await expect(member.leave()).resolves.toBeUndefined()
     expect(leaveAttempts).toBe(2)
   })
-
   it.each(['leave', 'closed'] as const)('settles a client join across a pre-ack %s event', async (event) => {
     const { id, ack, emit, joining } = await pendingClientJoin(`pre-ack-${event}`)
     if (event === 'leave') {
@@ -1625,7 +1549,6 @@ describe('client Room lifecycle', () => {
     participant.onLeave((cause) => causes.push(cause))
     expect(causes).toEqual([{ type: event === 'leave' ? 'left' : 'closed' }])
   })
-
   it('replays demand that arrives while a client join ack is pending', async () => {
     const { id, ack, emit, joining } = await pendingClientJoin('pre-ack-demand')
     emit({ __r: 'demand', member: id, track: 'screen', wanted: true })
@@ -1635,7 +1558,6 @@ describe('client Room lifecycle', () => {
     participant.onDemand((track, wanted) => demand.push([track, wanted]))
     expect(demand).toEqual([['screen', true]])
   })
-
   it('keeps every acknowledged DM that arrives while a client join ack is pending', async () => {
     const from = crypto.randomUUID()
     const replies: Array<{ ackId: string }> = []
@@ -1652,7 +1574,6 @@ describe('client Room lifecycle', () => {
     await vi.waitFor(() => expect(replies).toHaveLength(65))
     expect(replies.map(({ ackId }) => ackId)).toEqual(Array.from({ length: 65 }, (_, index) => `ack-${index}`))
   })
-
   it("derives participant-update prev from the receiver's own applied state", async () => {
     const { client, emit } = fakeClient('receiver-local-prev')
     const memberId = crypto.randomUUID()
@@ -1665,7 +1586,6 @@ describe('client Room lifecycle', () => {
     emit({ __r: 'p-meta', id: memberId, meta: { step: 2 }, prev: { step: 1 }, seq: 2 }, 2)
     expect(updates).toEqual([[{ step: 2 }, { step: 0 }]])
   })
-
   it('makes the closed-and-empty state visible before participant leave callbacks run', async () => {
     const { client, emit } = fakeClient('atomic-close-state')
     const memberId = crypto.randomUUID()
@@ -1694,7 +1614,6 @@ describe('client Room lifecycle', () => {
       participants: 0,
     })
   })
-
   it('rejects hidden-roster enumeration in clients instead of returning a partial direct-handle list', async () => {
     const { client, emit } = fakeClient('client-hidden-roster')
     emit({ __r: 'roster', members: [] })
@@ -1710,7 +1629,6 @@ describe('client Room lifecycle', () => {
       'Hidden participants can only be enumerated on the server',
     )
   })
-
   it('declares a room-level default binary track without an earlier all-track listener', () => {
     const sent: unknown[] = []
     const { client } = fakeClient('default-track-declaration', {
@@ -1725,7 +1643,6 @@ describe('client Room lifecycle', () => {
       wants: { everyMember: { all: false, tracks: [DEFAULT_TRACK] }, members: {} },
     })
   })
-
   it('declares and retires client announce demand on the semantic lane', () => {
     const sent: unknown[] = []
     const { client } = fakeClient('announce-declaration', {
@@ -1741,7 +1658,6 @@ describe('client Room lifecycle', () => {
       { __r: 'sub-text', members: [], announce: false },
     ])
   })
-
   it('fences a causally subsequent telefunction call until announce demand is accepted', async () => {
     const accepted = deferred<void>()
     const { client } = fakeClient('announce-demand-fence', {
@@ -1763,7 +1679,6 @@ describe('client Room lifecycle', () => {
     await fence
     expect(ready).toBe(true)
   })
-
   it('redeclares a room-wide text subscription after reconnect even when the local latch already matches', () => {
     const wireDeclarations: boolean[] = []
     const { fake, client } = fakeClient('reconnect-text', { wireDeclarations })
@@ -1774,7 +1689,6 @@ describe('client Room lifecycle', () => {
     fake.reconnect()
     expect(wireDeclarations).toEqual([true, true])
   })
-
   it('turns a server roster read rejection into an explicit client-settling event', async () => {
     const room = (await Room.create('roster-error-event')) as ServerRoom
     const stub = register(room)
@@ -1793,7 +1707,6 @@ describe('client Room lifecycle', () => {
     await expect(participants).rejects.toThrow('Failed to load room participants')
     expect(ensureRoster).toHaveBeenCalledOnce()
   })
-
   it('replays a committed server-pushed roster after reconnect without rerunning onOpen', async () => {
     const room = (await Room.create('roster-replay')) as ServerRoom
     const stub = register(room)
@@ -1807,7 +1720,6 @@ describe('client Room lifecycle', () => {
     expect(ensureRoster).toHaveBeenCalledOnce()
   })
 })
-
 describe('room demand lifecycle', () => {
   it('retires pushed demand when a member departs so a later owner gets a fresh transition', () => {
     let owns = true
@@ -1828,18 +1740,15 @@ describe('room demand lifecycle', () => {
     ])
   })
 })
-
 describe('room binary protocol validation', () => {
   it('rejects malformed key components as usage errors', () => {
     expect(() => roomCtrlKey('\ud800')).toThrow('well-formed')
     expect(() => roomIdentityKvPrefix('room', '\udc00')).toThrow('well-formed')
   })
-
   it('rejects non-boolean self-delivery options', () => {
     expect(() => normalizeJoinOptions({ selfDelivery: 'false' } as never)).toThrow('boolean')
     expect(() => normalizeJoinOptions({ selfDelivery: 0 } as never)).toThrow('boolean')
   })
-
   it('rejects invalid binary subscription option containers', () => {
     const state = new RoomState({
       roomId: 'strict-options',
@@ -1853,7 +1762,6 @@ describe('room binary protocol validation', () => {
       expect(() => state.subscribeBinary(() => {}, options as never)).toThrow('object')
     }
   })
-
   it('bounds tails by count and serialized code units at every cap edge', () => {
     const entry = (serialized: string, seq = 0) => ({
       serialized,
@@ -1875,7 +1783,6 @@ describe('room binary protocol validation', () => {
     pushBoundedTail(nonAscii, entry('💥'.repeat(ROOM_TAIL_HOLD_CODE_UNITS_MAX / 2)))
     expect(nonAscii).toHaveLength(1)
   })
-
   it.each([
     [
       'member UUIDs',
@@ -1902,7 +1809,6 @@ describe('room binary protocol validation', () => {
       if (_name === 'single-unit tracks') expect(unframeMemberId(frame)?.track).toBe(input)
     }
   })
-
   it('preserves __proto__ as data and builds prototype-safe binary wants', () => {
     const attrs = Object.create(null) as Record<string, unknown>
     Object.defineProperty(attrs, '__proto__', { value: { safe: true }, enumerable: true, configurable: true })
@@ -1940,7 +1846,6 @@ describe('room binary protocol validation', () => {
     expect(Object.getPrototypeOf(state.binaryWants().members)).toBeNull()
     expect(Object.hasOwn(state.binaryWants().members, '__proto__')).toBe(true)
   })
-
   it('rejects non-record metadata and malformed UTF-8 instead of normalizing them', () => {
     const memberId = crypto.randomUUID()
     for (const meta of [[], new Date(), new Map(), new Set()].map((value) => parse(stringify(value)))) {
@@ -1957,7 +1862,6 @@ describe('room binary protocol validation', () => {
     malformedTrack[18] = 0xff
     expect(unframeMemberId(malformedTrack)).toBeNull()
   })
-
   it('round-trips every admitted leave cause injectively', () => {
     const causes = [
       { type: 'left' },
@@ -1970,7 +1874,6 @@ describe('room binary protocol validation', () => {
     expect(new Set(encoded)).toHaveLength(causes.length)
     expect(causes.map((cause) => leaveCauseFromWire(leaveCauseToWire(cause)))).toEqual(causes)
   })
-
   it('uses the full wire length fields instead of smaller policy caps', () => {
     const memberId = crypto.randomUUID()
     const track = 't'.repeat(255)
@@ -1982,7 +1885,6 @@ describe('room binary protocol validation', () => {
       '65535 bytes',
     )
   })
-
   it('accepts legal binary declarations regardless of undocumented aggregate counts', () => {
     const members = Object.fromEntries(
       Array.from({ length: 4097 }, (_, index) => [
@@ -1999,7 +1901,6 @@ describe('room binary protocol validation', () => {
     ).not.toBeNull()
   })
 })
-
 describe('memory Backend SPI contract', () => {
   it('covers head/cell/lane/directory/drop postconditions through the supervised consumer', async () => {
     const backend = getBackend()
@@ -2084,7 +1985,6 @@ describe('memory Backend SPI contract', () => {
     await backend.directoryDelete('spi', 'inc-1')
     expect((await backend.directoryList('s')).entries).toEqual([])
   })
-
   it('advances order before delivery and preserves it across time and driver reconstruction', async () => {
     await disposeBackend()
     let now = 1
@@ -2125,7 +2025,6 @@ describe('memory Backend SPI contract', () => {
     expect(reconstructed).toMatchObject({ accepted: true, seq: 3, timestamp: 3 })
     await reconstructedDriver.dispose()
   })
-
   it('interprets every legal head transition from the one exported data table', () => {
     const head = (state: 'open' | 'closing' | 'closed', inc: string | null, lease?: string) => ({
       rev: 'r1',
@@ -2169,7 +2068,6 @@ describe('memory Backend SPI contract', () => {
     expect(Object.keys(failure as object)).toEqual([])
     expect((failure as Error).message).toContain('not a legal head transition')
   })
-
   it('validates HeadNext shape before delegating to any raw driver', async () => {
     const backend = getBackend()
     const opened = await backend.compareExchangeHead(
@@ -2197,7 +2095,6 @@ describe('memory Backend SPI contract', () => {
     }
     expect(delegated).not.toHaveBeenCalled()
   })
-
   it('publishes one immutable wide ordering layout and codec', () => {
     expect(Object.isFrozen(ORDERING_FRAME_LAYOUT)).toBe(true)
     expect(Object.isFrozen(ORDERING_FRAME_LAYOUT.offsets)).toBe(true)
@@ -2212,7 +2109,6 @@ describe('memory Backend SPI contract', () => {
     const info = { seq: 0x1_0000_0007, timestamp: 0x2_0000_0009 }
     expect(decodeOrderingFrame(encodeOrderingFrame(payload, info))).toEqual({ payload, info })
   })
-
   it('tracks raw-driver identity rather than wrapper identity during replacement', async () => {
     await disposeBackend()
     const raw = new MemoryBackend()
@@ -2224,7 +2120,6 @@ describe('memory Backend SPI contract', () => {
     expect(dispose).not.toHaveBeenCalled()
   })
 })
-
 describe('shared subscription supervision', () => {
   it('owns fan-out, refcount, epochs, and raw terminal signalling once', async () => {
     const firstCleanup = deferred<void>()
@@ -2257,7 +2152,6 @@ describe('shared subscription supervision', () => {
     secondCleanup.resolve()
     await stopping
   })
-
   it('does not convert pending raw cleanup into successful settlement', async () => {
     const liveCleanup = deferred<void>()
     const terminalCleanup = deferred<void>()
@@ -2297,7 +2191,6 @@ describe('shared subscription supervision', () => {
       disposeSettled: true,
     })
   })
-
   it('isolates throwing state listeners from siblings and last-detach cleanup', async () => {
     const cleanup = deferred<void>()
     const raw = new ControlledDriver()
@@ -2326,7 +2219,6 @@ describe('shared subscription supervision', () => {
     await expect(stopping).resolves.toBe('resolved')
     expect(reports).toHaveLength(1)
   })
-
   it('does not emit a stale nonterminal state after re-entrant unsubscribe', async () => {
     const raw = new ControlledDriver()
     const subscription = new SubscriptionManager(raw, vi.fn()).subscribe('reentrant-listener', () => {})
@@ -2339,7 +2231,6 @@ describe('shared subscription supervision', () => {
     raw.opens[0]!.attempt.lose()
     expect(siblingStates).toEqual(['closed'])
   })
-
   it('releases an observer returned after synchronous terminal registration', async () => {
     let rawListeners = 0
     let unobserveCalls = 0
@@ -2372,7 +2263,6 @@ describe('shared subscription supervision', () => {
     expect({ rawListeners, unobserveCalls }).toEqual({ rawListeners: 0, unobserveCalls: 1 })
     await subscription.unsubscribe()
   })
-
   it('normalizes initial readiness and surfaces raw recovery or terminal failure', async () => {
     const raw = new ControlledDriver()
     raw.plan(() => new ControlledAttempt())
@@ -2406,7 +2296,6 @@ describe('shared subscription supervision', () => {
     expect(failedRaw.openCalls).toBe(1)
     await failed.unsubscribe()
   })
-
   it('includes the opaque driver partition in source identity', async () => {
     const raw = new ControlledDriver()
     raw.plan(() => ControlledAttempt.ready())
@@ -2424,7 +2313,6 @@ describe('shared subscription supervision', () => {
     expect(received).toEqual(['a:one', 'b:two'])
     await Promise.all([first.unsubscribe(), second.unsubscribe()])
   })
-
   it('maps raw ownership termination to public closed without replanning', async () => {
     const raw = new ControlledDriver()
     raw.plan(() => new ControlledAttempt())
@@ -2457,7 +2345,6 @@ describe('shared subscription supervision', () => {
     expect(pendingRaw.openCalls).toBe(1)
     await pending.unsubscribe()
   })
-
   it('checks binding ownership before opening a raw attempt', async () => {
     const raw = new ControlledDriver()
     raw.bindingValid = false
@@ -2469,9 +2356,7 @@ describe('shared subscription supervision', () => {
     await terminal.unsubscribe()
   })
 })
-
 type Peer = ReturnType<typeof attachPeer>
-
 function attachPeer(stub: RoomStubChannel, lastSeq?: number) {
   const frames: Uint8Array[] = []
   const replay = stub._replayBuffer!
@@ -2490,19 +2375,16 @@ function attachPeer(stub: RoomStubChannel, lastSeq?: number) {
   )
   return { decoded: () => frames.map((frame) => decode(frame as Uint8Array<ArrayBuffer>)) }
 }
-
 function register(room: ServerRoom): RoomStubChannel {
   const stub = new RoomStubChannel(room)
   stub._registerChannel()
   room._attachStub(stub)
   return stub
 }
-
 function serve(room: ServerRoom): { stub: RoomStubChannel; peer: Peer } {
   const stub = register(room)
   return { stub, peer: attachPeer(stub) }
 }
-
 async function createTail(id: string) {
   await Room.create(id)
   const source = await Room.get(id)
@@ -2511,7 +2393,6 @@ async function createTail(id: string) {
     tail: (await Room.get(id, { tail: true })) as ServerRoom,
   }
 }
-
 function dataFrames(peer: Peer): unknown[] {
   return peer
     .decoded()
@@ -2520,7 +2401,6 @@ function dataFrames(peer: Peer): unknown[] {
     .filter((frame) => frame.__r === 'data')
     .map((frame) => frame.data)
 }
-
 function announceFrames(peer: Peer): unknown[] {
   return peer
     .decoded()
@@ -2529,14 +2409,12 @@ function announceFrames(peer: Peer): unknown[] {
     .filter((frame) => frame.__r === 'announce')
     .map((frame) => frame.data)
 }
-
 async function wideBinaryScenario(id: string, retain: boolean, byte: number) {
   const serverRoom = (await Room.create(id)) as ServerRoom
   const camera = await serverRoom.join()
   const { stub, peer } = serve(serverRoom)
   const serverSeqs: number[] = []
   if (!retain) serverRoom.subscribeBinary((_data, info) => serverSeqs.push(info.seq))
-
   const generation = memoryState.rooms.get(id)!.gens.get(serverRoom._inc)!
   generation.order.set(`binary:${encodeURIComponent(camera.id)}:${encodeURIComponent(DEFAULT_TRACK)}`, {
     seq: 0xffff_ffff,
@@ -2552,7 +2430,6 @@ async function wideBinaryScenario(id: string, retain: boolean, byte: number) {
     await (serverRoom as unknown as { _binaryReady(): Promise<void> })._binaryReady()
   }
   await vi.waitFor(() => expect(peer.decoded().some((candidate) => candidate.tag === TAG.PUBLISH_BINARY)).toBe(true))
-
   const frame = peer
     .decoded()
     .filter((candidate) => candidate.tag === TAG.PUBLISH_BINARY)
@@ -2564,7 +2441,6 @@ async function wideBinaryScenario(id: string, retain: boolean, byte: number) {
   fake.emitBinary(frame.data, { key: id, ...frame.info })
   return { receipt: receipt.seq, server: serverSeqs[0] ?? null, client: clientSeqs[0] }
 }
-
 function createFakeStub(options?: {
   send?: (message: unknown, options?: { ack?: boolean }) => Promise<unknown>
   wireDeclarations?: boolean[]
@@ -2610,7 +2486,6 @@ function createFakeStub(options?: {
     reconnect: () => reconnect(),
   }
 }
-
 function fakeClient(
   roomId: string,
   options?: Parameters<typeof createFakeStub>[0],
@@ -2623,7 +2498,6 @@ function fakeClient(
     emit: (data: unknown, seq = 1) => fake.emitText(data, { key: roomId, seq, timestamp: seq }),
   }
 }
-
 function snapshot(roomId: string): RoomSnapshotMetadata {
   return {
     channelId: 'channel',
@@ -2634,7 +2508,6 @@ function snapshot(roomId: string): RoomSnapshotMetadata {
     stamp: { at: 0, by: '' },
   }
 }
-
 async function pendingClientJoin(roomId: string, onSend?: (message: unknown) => unknown) {
   const id = crypto.randomUUID()
   const ack = deferred<{ id: string; joinedAt: number }>()
@@ -2648,14 +2521,12 @@ async function pendingClientJoin(roomId: string, onSend?: (message: unknown) => 
   await Promise.resolve()
   return { id, ack, fake, client, emit, joining }
 }
-
 async function forceRoomGc(): Promise<void> {
   for (let cycle = 0; cycle < 8; cycle++) {
     ;(globalThis as { gc(): void }).gc()
     await new Promise((resolve) => setTimeout(resolve, 20))
   }
 }
-
 function gcFixture(roomId: string, join = false) {
   const memberId = crypto.randomUUID()
   const fake = createFakeStub(
@@ -2673,9 +2544,7 @@ function gcFixture(roomId: string, join = false) {
     closed: () => closeCount,
   }
 }
-
 type GcFixture = ReturnType<typeof gcFixture>
-
 async function retainOnlyListedRemote({ target, fake, registry, onClose, memberId }: GcFixture) {
   const room = wrapProxy(target)
   registry.register(room, onClose)
@@ -2689,13 +2558,11 @@ async function retainOnlyListedRemote({ target, fake, registry, onClose, memberI
   const [member] = await room.getParticipants()
   return { member: member!, room: new WeakRef(room) }
 }
-
 async function retainOnlyJoinedParticipant({ target, registry, onClose }: GcFixture) {
   const room = wrapProxy(target)
   registry.register(room, onClose)
   return { member: await room.join(), room: new WeakRef(room) }
 }
-
 async function retainOnlyCallbackRemote({ target, fake, registry, onClose, memberId }: GcFixture) {
   const room = wrapProxy(target)
   registry.register(room, onClose)
@@ -2707,7 +2574,6 @@ async function retainOnlyCallbackRemote({ target, fake, registry, onClose, membe
   stop()
   return { member: member!, room: new WeakRef(room) }
 }
-
 async function retainOnlyDepartedParticipant({ target, fake, registry, onClose, memberId }: GcFixture) {
   const room = wrapProxy(target)
   registry.register(room, onClose)
@@ -2715,7 +2581,6 @@ async function retainOnlyDepartedParticipant({ target, fake, registry, onClose, 
   fake.emitText({ __r: 'leave', id: memberId }, { key: target.id, seq: 1, timestamp: 1 })
   return { member, room: new WeakRef(room) }
 }
-
 async function dropJoinedRoomHandles({ target, registry, onClose, memberId }: GcFixture) {
   const room = wrapProxy(target)
   registry.register(room, onClose)
@@ -2725,24 +2590,20 @@ async function dropJoinedRoomHandles({ target, registry, onClose, memberId }: Gc
   const stop = target._getRemote(memberId)!.subscribe(() => {})
   return { stop, stopped, room: new WeakRef(room) }
 }
-
 type OpenRecord = {
   receiver: BackendReceiver
   localReceiverCount: () => number
   attempt: ControlledAttempt
 }
-
 class ControlledDriver implements SubscriptionDriver<string> {
   readonly opens: OpenRecord[] = []
   readonly #plans: Array<() => ControlledAttempt> = []
   partition = ''
   bindingValid = true
   openCalls = 0
-
   plan(plan: () => ControlledAttempt): void {
     this.#plans.push(plan)
   }
-
   bind(_source: string) {
     const partition = this.partition
     return {
@@ -2756,12 +2617,10 @@ class ControlledDriver implements SubscriptionDriver<string> {
       },
     }
   }
-
   async deliver(index: number, value: string): Promise<void> {
     await (this.opens[index]!.receiver(encoder.encode(value), { seq: index + 1, timestamp: 1 }) as unknown)
   }
 }
-
 class ControlledAttempt implements SubscriptionAttempt {
   readonly ready: Promise<void>
   unsubscribeCalls = 0
@@ -2769,57 +2628,46 @@ class ControlledAttempt implements SubscriptionAttempt {
   readonly #listeners = new Set<(state: SubscriptionAttemptState) => void>()
   readonly #cleanup: Promise<void>
   #state: SubscriptionAttemptState = 'establishing'
-
   constructor(cleanup: Promise<void> = Promise.resolve()) {
     this.ready = this.#readiness.promise
     this.#cleanup = cleanup
     void this.ready.catch(() => {})
   }
-
   static ready(cleanup?: Promise<void>): ControlledAttempt {
     const attempt = new ControlledAttempt(cleanup)
     attempt.establish()
     return attempt
   }
-
   state(): SubscriptionAttemptState {
     return this.#state
   }
-
   onStateChange(listener: (state: SubscriptionAttemptState) => void): () => void {
     this.#listeners.add(listener)
     return () => this.#listeners.delete(listener)
   }
-
   async unsubscribe(): Promise<void> {
     this.unsubscribeCalls++
     this.#transition('closed')
     await this.#cleanup
   }
-
   establish(): void {
     this.#transition('ready')
     this.#readiness.resolve()
   }
-
   lose(): void {
     this.#transition('lost')
   }
-
   close(): void {
     this.#transition('closed')
   }
-
   terminate(): void {
     this.#transition('terminated')
   }
-
   #transition(state: SubscriptionAttemptState): void {
     this.#state = state
     for (const listener of this.#listeners) listener(state)
   }
 }
-
 function terminalSubscription(inner?: BackendSubscription): {
   subscription: BackendSubscription
   close(): Promise<void>
@@ -2845,7 +2693,6 @@ function terminalSubscription(inner?: BackendSubscription): {
   }
   return { subscription, close: subscription.unsubscribe }
 }
-
 function rejectedSubscription(diagnostic: string): BackendSubscription {
   const ready = Promise.reject(new Error(diagnostic))
   void ready.catch(() => {})
@@ -2856,7 +2703,6 @@ function rejectedSubscription(diagnostic: string): BackendSubscription {
     unsubscribe: async () => {},
   }
 }
-
 function captureOutcome<T>(promise: Promise<T>) {
   const outcome: { value: unknown } = { value: Symbol('pending') }
   void promise.then(
@@ -2869,7 +2715,6 @@ function captureOutcome<T>(promise: Promise<T>) {
   )
   return outcome
 }
-
 function deferred<T>() {
   let resolve!: (value?: T) => void
   const promise = new Promise<T>((resolvePromise) => {
@@ -2877,7 +2722,6 @@ function deferred<T>() {
   })
   return { promise, resolve }
 }
-
 function mockLaneSubscription(
   kind: LaneId['kind'],
   replacement: (
@@ -2897,7 +2741,6 @@ function mockLaneSubscription(
   )
   return backend
 }
-
 function rejectLaneSubscriptions(kind: LaneId['kind'], diagnostic: string) {
   vi.useFakeTimers()
   const started = deferred<void>()
@@ -2908,7 +2751,6 @@ function rejectLaneSubscriptions(kind: LaneId['kind'], diagnostic: string) {
   vi.spyOn(console, 'error').mockImplementation(() => {})
   return { backend, started: started.promise }
 }
-
 function delayLaneSubscription(matches: (lane: LaneId) => boolean) {
   const backend = getBackend()
   const subscribeLane = backend.subscribeLane.bind(backend)

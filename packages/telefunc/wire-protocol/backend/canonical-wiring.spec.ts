@@ -5,14 +5,12 @@ import { extname, join, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Node, Project, SyntaxKind, type SourceFile } from 'ts-morph'
 import { describe, expect, it } from 'vitest'
-
 const root = fileURLToPath(new URL('../../../../', import.meta.url))
 const files = ['packages/telefunc', 'packages/redis']
   .flatMap((dir) => walk(join(root, dir)))
   .filter((file) => !/\.(?:spec|test)\.ts$/.test(file))
 const project = new Project({ skipAddingFilesFromTsConfig: true })
 const sources = new Map(files.map((file) => [file, project.addSourceFileAtPath(join(root, file))]))
-
 describe('canonical backend wiring', () => {
   it('wires the supervisor to the exported subscription owner', () => {
     expect(exportsOf('packages/telefunc/wire-protocol/backend/subscriptions.ts')).toContain('SubscriptionManager')
@@ -23,7 +21,6 @@ describe('canonical backend wiring', () => {
       constructedBy('packages/telefunc/wire-protocol/backend/supervised-backend.ts', 'SubscriptionManager'),
     ).toEqual(['superviseBackend'])
   })
-
   it('wires lane consumers to the canonical lane key', () => {
     expect(reexportsFrom('packages/telefunc/backend.ts', './wire-protocol/backend/subscription-source.js')).toContain(
       'laneKey',
@@ -36,7 +33,6 @@ describe('canonical backend wiring', () => {
       ),
     ).toContain('laneKey')
   })
-
   it('wires ordering consumers to the canonical frame contract', () => {
     expect(
       importsFrom(
@@ -46,7 +42,6 @@ describe('canonical backend wiring', () => {
     ).toEqual(['decodeOrderingFrame', 'encodeOrderingFrame'])
     expect(importsFrom('packages/redis/src/room/layout.ts', 'telefunc/backend')).toContain('ORDERING_FRAME_LAYOUT')
   })
-
   it('keeps Redis public Telefunc imports within the reviewed canonical surface', () => {
     const redisValues = files
       .filter((file) => file.startsWith('packages/redis/'))
@@ -55,7 +50,6 @@ describe('canonical backend wiring', () => {
     expect(importsFrom('packages/redis/src/index.ts', 'telefunc/__internal')).toContain('setDefaultBackend')
   })
 })
-
 function walk(dir: string): string[] {
   return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
     if (entry.name === 'dist' || entry.name === 'node_modules') return []
@@ -64,20 +58,17 @@ function walk(dir: string): string[] {
     return extname(entry.name) === '.ts' ? [relative(root, path).replaceAll('\\', '/')] : []
   })
 }
-
 function source(file: string): SourceFile {
   const value = sources.get(file)
   if (value === undefined) throw new Error(`Production source not loaded: ${file}`)
   return value
 }
-
 function exportsOf(file: string): string[] {
   return source(file)
     .getExportSymbols()
     .map((symbol) => symbol.getName())
     .sort()
 }
-
 function constructedBy(file: string, name: string): string[] {
   return source(file)
     .getDescendantsOfKind(SyntaxKind.NewExpression)
@@ -85,7 +76,6 @@ function constructedBy(file: string, name: string): string[] {
     .map((expression) => callableOwner(expression))
     .sort()
 }
-
 function callableOwner(node: Node): string {
   const callable = node.getFirstAncestor(
     (parent) => Node.isFunctionDeclaration(parent) || Node.isMethodDeclaration(parent) || Node.isArrowFunction(parent),
@@ -98,7 +88,6 @@ function callableOwner(node: Node): string {
   }
   return callable.getFirstAncestorByKind(SyntaxKind.VariableDeclaration)?.getName() ?? '<anonymous>'
 }
-
 function reexportsFrom(file: string, module: string): string[] {
   return source(file)
     .getExportDeclarations()
@@ -106,7 +95,6 @@ function reexportsFrom(file: string, module: string): string[] {
     .flatMap((declaration) => declaration.getNamedExports().map((value) => value.getName()))
     .sort()
 }
-
 function importsFrom(file: string, module: string): string[] {
   return source(file)
     .getImportDeclarations()

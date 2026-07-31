@@ -74,6 +74,16 @@ async function installPendingSubscriptionBackend(result: { seq: number; timestam
   return { controlled, publish }
 }
 
+function registeredBroadcast<T = unknown>(key: string): ServerBroadcast<T> {
+  const broadcast = new ServerBroadcast<T>({ key })
+  broadcast._registerChannel()
+  return broadcast
+}
+
+function peer(send: (frame: Uint8Array) => void): IndexedPeer {
+  return new IndexedPeer({ send }, 7, new ReplayBuffer(1024 * 1024, 60_000, 2 * 1024 * 1024))
+}
+
 // ───────────────────────────────────────────────────────────────────────────
 // In-process delivery — bug classes targeted: cross-key bleed, dropped
 // subscribers, delivery reordering, self-echo loss, late-register and
@@ -82,47 +92,35 @@ async function installPendingSubscriptionBackend(result: { seq: number; timestam
 
 describe('keyed in-process broadcast', () => {
   it('delivers a published message to a sibling broadcast on the same key', () => {
-    const sender = new ServerBroadcast<{ text: string }>({ key: 'room:basic' })
-    const receiver = new ServerBroadcast<{ text: string }>({ key: 'room:basic' })
-    sender._registerChannel()
-    receiver._registerChannel()
-
+    const sender = registeredBroadcast<{ text: string }>('room:basic')
+    const receiver = registeredBroadcast<{ text: string }>('room:basic')
     const received: Array<{ text: string }> = []
     receiver.subscribe((msg) => received.push(msg))
     sender.publish({ text: 'hello' })
-
     expect(received).toEqual([{ text: 'hello' }])
   })
 
   // The publisher's own subscribe must fire too — same instance is both pub and sub.
   // Catches a "skip-self" bug that excludes the source from delivery.
   it('delivers a published message to the source broadcast (self-echo)', () => {
-    const broadcast = new ServerBroadcast<{ text: string }>({ key: 'room:self' })
-    broadcast._registerChannel()
-
+    const broadcast = registeredBroadcast<{ text: string }>('room:self')
     const received: Array<{ text: string }> = []
     broadcast.subscribe((msg) => received.push(msg))
     broadcast.publish({ text: 'hello' })
-
     expect(received).toEqual([{ text: 'hello' }])
   })
 
   // Catches a key-mixup where the adapter routes by reference instead of by key,
   // or strips the key prefix and ends up with a single global topic.
   it('isolates messages by key — publishing on key A does not reach key B subscribers', () => {
-    const a = new ServerBroadcast<{ from: string }>({ key: 'room:A' })
-    const b = new ServerBroadcast<{ from: string }>({ key: 'room:B' })
-    a._registerChannel()
-    b._registerChannel()
-
+    const a = registeredBroadcast<{ from: string }>('room:A')
+    const b = registeredBroadcast<{ from: string }>('room:B')
     const receivedA: Array<{ from: string }> = []
     const receivedB: Array<{ from: string }> = []
     a.subscribe((m) => receivedA.push(m))
     b.subscribe((m) => receivedB.push(m))
-
     a.publish({ from: 'A' })
     b.publish({ from: 'B' })
-
     expect(receivedA).toEqual([{ from: 'A' }])
     expect(receivedB).toEqual([{ from: 'B' }])
   })
@@ -131,22 +129,15 @@ describe('keyed in-process broadcast', () => {
   // (or last) registered listener.
   it('fans out to every subscriber on the key', () => {
     const k = 'room:fanout'
-    const pub = new ServerBroadcast<{ n: number }>({ key: k })
-    const subA = new ServerBroadcast<{ n: number }>({ key: k })
-    const subB = new ServerBroadcast<{ n: number }>({ key: k })
-    const subC = new ServerBroadcast<{ n: number }>({ key: k })
-    pub._registerChannel()
-    subA._registerChannel()
-    subB._registerChannel()
-    subC._registerChannel()
-
+    const pub = registeredBroadcast<{ n: number }>(k)
+    const subA = registeredBroadcast<{ n: number }>(k)
+    const subB = registeredBroadcast<{ n: number }>(k)
+    const subC = registeredBroadcast<{ n: number }>(k)
     const log: Array<[string, number]> = []
     subA.subscribe((m) => log.push(['A', m.n]))
     subB.subscribe((m) => log.push(['B', m.n]))
     subC.subscribe((m) => log.push(['C', m.n]))
-
     pub.publish({ n: 1 })
-
     expect(log.sort()).toEqual([
       ['A', 1],
       ['B', 1],
@@ -157,15 +148,11 @@ describe('keyed in-process broadcast', () => {
   // Catches a reordering bug introduced by an async adapter that races publishes
   // (e.g. swapping `await publish(a)` with `await publish(b)` in flight).
   it('preserves publish order across multiple in-flight messages', () => {
-    const sender = new ServerBroadcast<{ n: number }>({ key: 'room:order' })
-    const receiver = new ServerBroadcast<{ n: number }>({ key: 'room:order' })
-    sender._registerChannel()
-    receiver._registerChannel()
-
+    const sender = registeredBroadcast<{ n: number }>('room:order')
+    const receiver = registeredBroadcast<{ n: number }>('room:order')
     const seen: number[] = []
     receiver.subscribe((m) => seen.push(m.n))
     for (let i = 0; i < 5; i++) sender.publish({ n: i })
-
     expect(seen).toEqual([0, 1, 2, 3, 4])
   })
 
@@ -174,9 +161,7 @@ describe('keyed in-process broadcast', () => {
   // starve the rest.
   it('isolates and reports thrown or rejected subscriber errors without breaking others', async () => {
     const report = vi.spyOn(console, 'error').mockImplementation(() => {})
-    const broadcast = new ServerBroadcast<{ text: string }>({ key: 'room:err' })
-    broadcast._registerChannel()
-
+    const broadcast = registeredBroadcast<{ text: string }>('room:err')
     const goodReceived: string[] = []
     broadcast.subscribe(() => Promise.reject(new Error('bad subscriber')))
     broadcast.subscribe((m) => goodReceived.push(m.text))
@@ -184,10 +169,8 @@ describe('keyed in-process broadcast', () => {
       throw new Error('also bad')
     })
     broadcast.subscribeBinary(() => Promise.reject(new Error('bad binary subscriber')))
-
     broadcast.publish({ text: 'hi' })
     broadcast.publishBinary(new Uint8Array())
-
     expect(goodReceived).toEqual(['hi'])
     await vi.waitFor(() => expect(report).toHaveBeenCalledTimes(3))
   })
@@ -196,16 +179,12 @@ describe('keyed in-process broadcast', () => {
   // detach a callback. A regression here causes silent listener leaks that look
   // like duplicate deliveries.
   it('subscribe() returns an unsubscribe that actually stops further delivery', () => {
-    const broadcast = new ServerBroadcast<{ n: number }>({ key: 'room:unsub' })
-    broadcast._registerChannel()
-
+    const broadcast = registeredBroadcast<{ n: number }>('room:unsub')
     const seen: number[] = []
     const unsubscribe = broadcast.subscribe((m) => seen.push(m.n))
-
     broadcast.publish({ n: 1 })
     unsubscribe()
     broadcast.publish({ n: 2 })
-
     expect(seen).toEqual([1])
   })
 
@@ -214,27 +193,12 @@ describe('keyed in-process broadcast', () => {
   // the previously-published message is delivered to it (not silently dropped).
   // Asserts at the count level — exact frame encoding is impl detail.
   it('buffers wire frames until a peer attaches, then flushes them on attach', () => {
-    const sender = new ServerBroadcast<{ text: string }>({ key: 'room:late-attach' })
-    const receiver = new ServerBroadcast<{ text: string }>({ key: 'room:late-attach' })
-    sender._registerChannel()
-    receiver._registerChannel()
+    const sender = registeredBroadcast<{ text: string }>('room:late-attach')
+    const receiver = registeredBroadcast<{ text: string }>('room:late-attach')
     receiver._onPeerBroadcastSubscribe(false) // simulate client subscribe over wire
-
     sender.publish({ text: 'hello' })
-
     const frames: Uint8Array[] = []
-    receiver._attachPeer(
-      new IndexedPeer(
-        {
-          send: (frame) => {
-            frames.push(frame)
-          },
-        },
-        7,
-        new ReplayBuffer(1024 * 1024, 60_000, 2 * 1024 * 1024),
-      ),
-    )
-
+    receiver._attachPeer(peer((frame) => frames.push(frame)))
     // One publish made before attach → exactly one frame replayed on attach.
     expect(frames.length).toBe(1)
   })
@@ -242,13 +206,10 @@ describe('keyed in-process broadcast', () => {
   it('buffers keyed publishes that arrive before a sibling has registered yet', () => {
     const sender = new ServerBroadcast<{ text: string }>({ key: 'room:late-register' })
     const receiver = new ServerBroadcast<{ text: string }>({ key: 'room:late-register' })
-
     const received: Array<{ text: string }> = []
     receiver.subscribe((m) => received.push(m))
     // Note: no `_registerChannel()` calls here — exercises the "publish before register" path.
-
     sender.publish({ text: 'hello' })
-
     expect(received).toEqual([{ text: 'hello' }])
   })
 
@@ -261,7 +222,6 @@ describe('keyed in-process broadcast', () => {
       const publishing = sender.publish('after-ready')
       await Promise.resolve()
       expect(publish).not.toHaveBeenCalled()
-
       controlled.ready()
       controlled.lost()
       await new Promise((resolve) => setTimeout(resolve, 0))
@@ -278,15 +238,11 @@ describe('keyed in-process broadcast', () => {
   it('publish receipts are key-scoped and seq increments monotonically per key', async () => {
     const k1 = 'room:receipts:A'
     const k2 = 'room:receipts:B'
-    const a = new ServerBroadcast<{ text: string }>({ key: k1 })
-    const b = new ServerBroadcast<{ text: string }>({ key: k2 })
-    a._registerChannel()
-    b._registerChannel()
-
+    const a = registeredBroadcast<{ text: string }>(k1)
+    const b = registeredBroadcast<{ text: string }>(k2)
     const a1 = await a.publish({ text: 'a-one' })
     const a2 = await a.publish({ text: 'a-two' })
     const b1 = await b.publish({ text: 'b-one' })
-
     // Each receipt is keyed to its own topic, and seq counts independently per key.
     expect(a1.key).toBe(k1)
     expect(a2.key).toBe(k1)
@@ -310,8 +266,7 @@ describe('binary in-process broadcast', () => {
       timestamp: 1,
       receivers: 1,
     })
-    const broadcast = new ServerBroadcast({ key: 'room:bin-ready' })
-    broadcast._registerChannel()
+    const broadcast = registeredBroadcast('room:bin-ready')
     broadcast._onPeerBroadcastSubscribe(true)
     const publishing = broadcast.publishBinary(new Uint8Array([1, 2, 3]))
     await Promise.resolve()
@@ -331,7 +286,6 @@ describe('binary in-process broadcast', () => {
     const first = sender.publishBinary(payload)
     payload[0] = 9
     const overflow = sender.publishBinary(new Uint8Array(1))
-
     try {
       pending.ready()
       await expect(overflow).rejects.toBeInstanceOf(ChannelOverflowError)
@@ -342,33 +296,24 @@ describe('binary in-process broadcast', () => {
   })
 
   it('round-trips binary publishes preserving high-bit bytes', () => {
-    const sender = new ServerBroadcast({ key: 'room:bin' })
-    const receiver = new ServerBroadcast({ key: 'room:bin' })
-    sender._registerChannel()
-    receiver._registerChannel()
-
+    const sender = registeredBroadcast('room:bin')
+    const receiver = registeredBroadcast('room:bin')
     const received: Uint8Array[] = []
     receiver.subscribeBinary((data) => received.push(data))
     sender.publishBinary(new Uint8Array([0x00, 0x7f, 0x80, 0xff]))
-
     expect(received).toHaveLength(1)
     expect(Array.from(received[0]!)).toEqual([0x00, 0x7f, 0x80, 0xff])
   })
 
   it('binary subscribers do NOT receive text publishes (and vice versa)', () => {
-    const sender = new ServerBroadcast<{ text: string }>({ key: 'room:mixed' })
-    const receiver = new ServerBroadcast<{ text: string }>({ key: 'room:mixed' })
-    sender._registerChannel()
-    receiver._registerChannel()
-
+    const sender = registeredBroadcast<{ text: string }>('room:mixed')
+    const receiver = registeredBroadcast<{ text: string }>('room:mixed')
     const text: Array<{ text: string }> = []
     const bin: Uint8Array[] = []
     receiver.subscribe((m) => text.push(m))
     receiver.subscribeBinary((d) => bin.push(d))
-
     sender.publish({ text: 'just text' })
     sender.publishBinary(new Uint8Array([1, 2, 3]))
-
     expect(text).toEqual([{ text: 'just text' }])
     expect(bin).toHaveLength(1)
     expect(Array.from(bin[0]!)).toEqual([1, 2, 3])
@@ -377,25 +322,15 @@ describe('binary in-process broadcast', () => {
   it('preserves a sequence wider than 32 bits through the generic public wire frame', async () => {
     const key = 'broadcast:wide-seq'
     memoryState.broadcastOrder.set(key, { seq: 0xffff_ffff, timestamp: 10 })
-    const sender = new ServerBroadcast({ key })
-    const receiver = new ServerBroadcast({ key })
-    sender._registerChannel()
-    receiver._registerChannel()
+    const sender = registeredBroadcast(key)
+    const receiver = registeredBroadcast(key)
     receiver._onPeerBroadcastSubscribe(true)
     const frames: Uint8Array[] = []
-    receiver._attachPeer(
-      new IndexedPeer(
-        { send: (frame) => frames.push(frame) },
-        7,
-        new ReplayBuffer(1024 * 1024, 60_000, 2 * 1024 * 1024),
-      ),
-    )
-
+    receiver._attachPeer(peer((frame) => frames.push(frame)))
     const receipt = await sender.publishBinary(new Uint8Array([7]))
     const publish = frames
       .map((frame) => decode(frame as Uint8Array<ArrayBuffer>))
       .find((frame) => frame.tag === TAG.PUBLISH_BINARY)
-
     expect(receipt.seq).toBe(0x1_0000_0000)
     expect(publish?.tag).toBe(TAG.PUBLISH_BINARY)
     if (publish?.tag !== TAG.PUBLISH_BINARY) throw new Error('Expected binary publish frame')
@@ -436,7 +371,6 @@ describe('Broadcast lifecycle and route ownership', () => {
     const unsubscribe = broadcast.subscribe((message) => received.push(message))
     broadcast._onPeerBroadcastSubscribe(false)
     broadcast._onPeerBroadcastUnsubscribe(false)
-
     expect((await Broadcast.publish(key, 'kept')).receivers).toBe(1)
     expect(received).toEqual(['kept'])
     unsubscribe()
@@ -457,28 +391,14 @@ describe('Broadcast lifecycle and route ownership', () => {
 
 describe('Broadcast shield validation', () => {
   it('rejects client publishes that fail the data shield with a SHIELD_ERROR ack', () => {
-    const broadcast = new ServerBroadcast<{ text: string }>({ key: 'room:shield' })
+    const broadcast = registeredBroadcast<{ text: string }>('room:shield')
     broadcast._validators.set('data', (value) => {
       const v = value as { text?: unknown }
       return typeof v?.text === 'string' ? true : 'expected { text: string }'
     })
-    broadcast._registerChannel()
-
     const frames: Uint8Array[] = []
-    broadcast._attachPeer(
-      new IndexedPeer(
-        {
-          send: (frame) => {
-            frames.push(frame)
-          },
-        },
-        7,
-        new ReplayBuffer(1024 * 1024, 60_000, 2 * 1024 * 1024),
-      ),
-    )
-
+    broadcast._attachPeer(peer((frame) => frames.push(frame)))
     void broadcast._onPeerPublishAckReqMessage(JSON.stringify({ text: 42 }), 1)
-
     const ack = frames.map((f) => decode(f as Uint8Array<ArrayBuffer>)).find((d) => d.tag === TAG.ACK_RES)
     expect(ack).toBeDefined()
     if (ack?.tag !== TAG.ACK_RES) throw new Error('Expected ACK_RES')
@@ -489,19 +409,13 @@ describe('Broadcast shield validation', () => {
   // Shield rejection MUST short-circuit the publish — bad payloads should never reach
   // any subscriber, including the publisher's own self-echo.
   it('a shield-rejected publish is not delivered to subscribers', () => {
-    const sender = new ServerBroadcast<{ text: string }>({ key: 'room:shield-drop' })
-    const receiver = new ServerBroadcast<{ text: string }>({ key: 'room:shield-drop' })
-    sender._registerChannel()
-    receiver._registerChannel()
-
+    const sender = registeredBroadcast<{ text: string }>('room:shield-drop')
+    const receiver = registeredBroadcast<{ text: string }>('room:shield-drop')
     sender._validators.set('data', () => 'always reject')
-
     const seen: Array<{ text: string }> = []
     receiver.subscribe((m) => seen.push(m))
-
-    sender._attachPeer(new IndexedPeer({ send: () => {} }, 7, new ReplayBuffer(1024 * 1024, 60_000, 2 * 1024 * 1024)))
+    sender._attachPeer(peer(() => {}))
     void sender._onPeerPublishAckReqMessage(JSON.stringify({ text: 'malicious' }), 1)
-
     expect(seen).toEqual([])
   })
 })
@@ -519,7 +433,6 @@ describe('Broadcast static bus (publish/subscribe)', () => {
     try {
       const publishing = Broadcast.publish('broadcast:terminal-ready', 'after-terminal')
       controlled.close()
-
       await expect(publishing).resolves.toMatchObject({ seq: 1 })
       expect(publish).toHaveBeenCalledOnce()
     } finally {
@@ -534,7 +447,6 @@ describe('Broadcast static bus (publish/subscribe)', () => {
       const publishing = Broadcast.publish('broadcast:static-ready', 'after-ready')
       await Promise.resolve()
       expect(publish).not.toHaveBeenCalled()
-
       pending.ready()
       await publishing
       expect(publish).toHaveBeenCalledOnce()
@@ -552,9 +464,7 @@ describe('Broadcast static bus (publish/subscribe)', () => {
     const unsubscribe = Broadcast.subscribe<{ text: string }>('room:static', (msg) => received.push(msg))
     const unsubscribeBug = Broadcast.subscribe('room:static', () => Promise.reject(new Error('static text bug')))
     const unsubscribeAbort = Broadcast.subscribe('room:static', () => Promise.reject(Abort('expected')))
-
     await Broadcast.publish('room:static', { text: 'fire-and-forget' })
-
     await vi.waitFor(() => expect(report).toHaveBeenCalledOnce())
     expect(received).toEqual([{ text: 'fire-and-forget' }])
     unsubscribe()
@@ -565,11 +475,9 @@ describe('Broadcast static bus (publish/subscribe)', () => {
   it('static unsubscribe stops further deliveries', async () => {
     const received: Array<{ text: string }> = []
     const unsubscribe = Broadcast.subscribe<{ text: string }>('room:static-unsub', (m) => received.push(m))
-
     await Broadcast.publish('room:static-unsub', { text: 'first' })
     unsubscribe()
     await Broadcast.publish('room:static-unsub', { text: 'second' })
-
     expect(received).toEqual([{ text: 'first' }])
   })
 
@@ -583,7 +491,6 @@ describe('Broadcast static bus (publish/subscribe)', () => {
     )
     const text = await Broadcast.publish('broadcast:shared-order', { text: 'one' })
     const binary = await Broadcast.publishBinary('broadcast:shared-order', new Uint8Array([2]))
-
     await vi.waitFor(() => expect(report).toHaveBeenCalledOnce())
     expect(text.seq).toBe(1)
     expect(binary.seq).toBe(2)
