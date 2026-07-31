@@ -1,7 +1,4 @@
-// Executable reference driver for Redis/Cloudflare parity. Map operations are synchronous and the
-// isolate clock is authority time; only delivery is async, settlement-chained per lane to prevent
-// reentrancy. Head CX mints leases, cells use generation revisions, commit has open/closing-control
-// branches, and TTL expiry is lazy plus janitor-swept.
+// Reference driver: synchronous authority-time state, per-lane async settlement, CX leases/revisions, and lazy/janitor TTL.
 
 import {
   BACKEND_SPI_VERSION,
@@ -146,8 +143,7 @@ class MemorySubscriptionAttempt implements SubscriptionAttempt {
   }
 
   async deliver(payload: Uint8Array, info: { seq: number; timestamp: number }): Promise<void> {
-    // Memory handoff is the dispatch call, so a returned thenable observably extends this attempt even
-    // though callback completion is not a cross-backend guarantee.
+    // Memory dispatch awaits returned thenables for this attempt; cross-backend callback completion is not guaranteed.
     await (this.#receiver(payload, info) as unknown)
   }
 
@@ -182,8 +178,6 @@ export class MemoryBackend implements BackendDriver {
     }
   }
 
-  // ── cheap Broadcast ──
-
   publish(lane: BroadcastLane, payload: Uint8Array): PublishResult {
     this.#assertLive()
     const mark = advanceOrder(this.#state.broadcastOrder, lane.key, this.#now(), 'publish')
@@ -193,8 +187,6 @@ export class MemoryBackend implements BackendDriver {
     const delivered = sumReceiverCounts(targets)
     return { ...mark, receivers: delivered, meta: { delivered, transport: 'in-memory' } }
   }
-
-  // ── head ──
 
   async readHead(roomId: string): Promise<{ head: RoomHead } | null> {
     this.#assertLive()
@@ -258,8 +250,6 @@ export class MemoryBackend implements BackendDriver {
     return stored
   }
 
-  // ── generation cells ──
-
   async readCells(
     roomId: string,
     inc: string,
@@ -305,8 +295,6 @@ export class MemoryBackend implements BackendDriver {
     gen.revision += 1
     return 'committed'
   }
-
-  // ── lane commit ──
 
   async commitLane(
     roomId: string,
@@ -381,8 +369,6 @@ export class MemoryBackend implements BackendDriver {
     return attempt
   }
 
-  // ── retained ──
-
   async readRetained(
     roomId: string,
     inc: string,
@@ -418,8 +404,6 @@ export class MemoryBackend implements BackendDriver {
     }
   }
 
-  // ── subscriptions ──
-
   #openSubscription(
     source: BackendSubscriptionSource,
     receiver: BackendReceiver,
@@ -452,8 +436,6 @@ export class MemoryBackend implements BackendDriver {
     return sub
   }
 
-  // ── generation lifecycle ──
-
   async dropGeneration(roomId: string, inc: string): Promise<void> {
     this.#assertLive()
     const room = this.#state.rooms.get(roomId)
@@ -466,8 +448,6 @@ export class MemoryBackend implements BackendDriver {
     room.gens.delete(inc)
     this.#sweep(room)
   }
-
-  // ── directory ──
 
   async directoryPut(roomId: string, incTag: string): Promise<void> {
     this.#assertLive()

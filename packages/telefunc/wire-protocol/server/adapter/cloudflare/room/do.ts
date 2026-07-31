@@ -1,6 +1,5 @@
 /// <reference types="@cloudflare/workers-types" />
-// One Durable Object per room owns authority time, durable state, acceptance snapshots, fanout chains,
-// and maintenance. The public Cloudflare entrypoint and conformance lane use this implementation.
+// One Room DO owns authority time/state/fanout; transaction rollback and RPC structured clone preserve SPI outcomes.
 
 import { DurableObject } from 'cloudflare:workers'
 import type { CellMutation, CxResult, HeadCx, HeadNext, LaneId, RoomHead } from '../../../../backend/spi.js'
@@ -41,8 +40,6 @@ import {
   readLiveHead,
   type StoredHead,
 } from './storage.js'
-
-// RPC preserves the SPI's structured-cloneable maps, typed arrays, and records directly.
 
 export type HeadCxResult =
   | { ok: true; head: RoomHead }
@@ -112,7 +109,6 @@ export class TelefuncRoomDurableObject extends DurableObject {
   async compareExchangeHead(cx: HeadCx, next: HeadNext): Promise<HeadCxResult> {
     const now = Date.now()
     let outcome!: ReturnType<typeof compareExchangeHead>
-    // Single-object serialization is linearizable; validation throws roll back and reject the RPC.
     this.ctx.storage.transactionSync(() => {
       outcome = compareExchangeHead(this.#sql, cx, next, now, () => crypto.randomUUID())
     })
@@ -148,7 +144,6 @@ export class TelefuncRoomDurableObject extends DurableObject {
     const key = laneKeyOf(lane)
     const frame = payload instanceof Uint8Array ? payload : new Uint8Array(payload)
     let accepted: { seq: number; timestamp: number; targets: RouteTarget[] } | null = null
-    // This is the Redis/memory precondition: zero matches are stale; failures reject and roll back.
     this.ctx.storage.transactionSync(() => {
       if (!commitPreconditionHolds(this.#sql, inc, lane, opts?.closingLease, now)) return
       if (opts?.requiredCellKeys !== undefined) {
@@ -259,8 +254,7 @@ export class TelefuncRoomDurableObject extends DurableObject {
       throw new Error(`dropGeneration: refusing to drop the current incarnation '${inc}'`)
     }
     const installations = listRouteInstallations(this.#sql, inc)
-    // Keep routes and generation durable until every fallible exact-lease uninstall succeeds, allowing
-    // retries after transport failure or crash.
+    // Routes/generation stay durable until exact-lease uninstall succeeds; orphan sweeps retry independently.
     await this.#terminateInstallations(inc, installations)
     this.ctx.storage.transactionSync(() => dropGenerationRows(this.#sql, inc))
     this.#fanout.clearIncarnation(inc)
@@ -303,7 +297,6 @@ export class TelefuncRoomDurableObject extends DurableObject {
       )
     })
 
-    // Each orphan retries independently; failures retain only that generation's durable rows.
     const failedOrphans = new Set<string>()
     for (const inc of orphanIncs) {
       const installations = listRouteInstallations(this.#sql, inc)
@@ -451,8 +444,7 @@ function nextMaintenanceDeadline(sql: SqlStorage, now: number): number | null {
   return deadlines.length === 0 ? null : Math.min(...deadlines)
 }
 
-// A closing lease selects only the closing-control branch; all other lanes are stale while closing.
-// Authority time also makes an expired matching lease stale.
+// Closing accepts only its live authority-time lease through the closing-control branch; all other lanes are stale.
 function commitPreconditionHolds(
   sql: SqlStorage,
   inc: string,
@@ -479,7 +471,6 @@ function commitPreconditionHolds(
   )
 }
 
-// The named class is the Wrangler binding; its closure captures the configured session namespace.
 export function createTelefuncRoomDurableObjectClass(
   sessionBindingName: string = 'TelefuncDurableObject',
 ): typeof TelefuncRoomDurableObject {

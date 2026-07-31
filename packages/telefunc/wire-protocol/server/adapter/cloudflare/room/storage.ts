@@ -1,6 +1,5 @@
 /// <reference types="@cloudflare/workers-types" />
-// Mutations run inside the room DO's `transactionSync`, giving linearizable head CX, atomic cell batches
-// and order advance. `now` is always authority time.
+// Room-DO `transactionSync` makes head CX, cell batches, and order advance atomic under authority time.
 
 import type { CellMutation, CxResult, HeadCx, HeadNext, RoomHead } from '../../../../backend/spi.js'
 import {
@@ -57,8 +56,6 @@ export function initSchema(sql: SqlStorage): void {
     CREATE TABLE IF NOT EXISTS directory (room_id TEXT PRIMARY KEY, inc_tag TEXT NOT NULL);
   `)
 }
-
-// ── directory (best-effort projection; hosted on a singleton DO — one row per roomId, tag-guarded) ──
 
 const DIRECTORY_PAGE_SIZE = 100
 
@@ -200,8 +197,6 @@ function storeHead(sql: SqlStorage, next: HeadWriteNext, now: number, mintRev: (
   return stored
 }
 
-// ── generation cells ──
-
 type CellsRead = { revision: string; cells: Map<string, Uint8Array> } | { staleInc: true }
 
 // Reads stay available while closing; staleInc means the head is absent or names another incarnation.
@@ -277,8 +272,6 @@ export function compareExchangeCells(
   sql.exec('UPDATE gen SET revision = revision + 1 WHERE inc = ?', inc)
   return 'committed'
 }
-
-// ── order domains ──
 
 export type OrderMark = { seq: number; timestamp: number }
 

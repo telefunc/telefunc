@@ -89,32 +89,22 @@ const ROOM_REPLAN_LIMIT = 5
 const SERVER_ROOM_BRAND: unique symbol = Symbol.for('telefunc.ServerRoom')
 
 /**
- * Server-side `Room`.
- *
- * Not a channel itself: serializing a `ServerRoom` attaches a fresh `RoomStubChannel` per
- * response (see `roomReplacer`), so the same instance can be serialized any number of times
- * and `room.id` stays the room ID (wire channel IDs must be globally unique).
- *
- * State changes flow through backend lanes: the node causing a change applies it locally and commits
- * it; every observing node — including the committer's own echo — applies the subscribed payload.
- * Application is idempotent, so the overlap is harmless.
+ * A Server Room is not a channel; each serialization attaches a fresh wire-unique stub.
+ * Repeated serialization preserves the domain `room.id` while channel IDs stay unique.
+ * The source applies mutations locally and commits them through backend lanes.
+ * Every observer, including the source echo, applies the subscribed payload.
+ * Idempotent application makes that overlap converge safely.
  */
 class ServerRoom extends RoomStateView implements Room {
   readonly [SERVER_ROOM_BRAND] = true
   /** Phantom: the publish shield rides the type only (see `RoomShield`), never a runtime field. */
   declare readonly [TELEFUNC_SHIELDS]: { data: unknown }
 
-  /** @internal — the room incarnation id (`RoomConfigRecord.inc`) this handle is bound to. Every
-   *  authority-side legality check (join, mutate, close) and every member record this handle writes
-   *  carries it, so an operation from a previous incarnation is rejected after a close/recreate. */
+  /** Every authority check and member write carries this incarnation, rejecting stale handles after recreate. */
   readonly _inc: string
-  /** @internal — tail mode (`Room.get(id, { tail: true })`): this node ingests and holds the room's
-   *  text from the moment of `Room.get`, so a history read done before the room is serialized misses
-   *  no live message. Cleared when a stub attaches or the room closes. */
+  /** Tail mode ingests from `Room.get` until stub attach or close, closing the pre-serialization gap. */
   _tail = false
-  /** Text held between `Room.get({ tail })` and the stub attaching; handed to the stub on attach (see
-   *  `_attachStub`). Bounded drop-oldest, so a fetched-with-tail room that is never serialized (misuse)
-   *  can't grow it without limit. */
+  /** Pre-attach tail text is bounded drop-oldest, then handed to the attaching stub. */
   private readonly _tailHold: Array<{ serialized: string; ord: RoomOrder; from: string }> = []
   private _tailTimer: ReturnType<typeof setTimeout> | null = null
   /** In-flight `send(…, { ack: true })`s awaiting the recipient's reply, keyed by `ackId`. `to` is the recipient, so a leave/close can fail the ones it strands. Empty at steady state. */
@@ -210,9 +200,7 @@ class ServerRoom extends RoomStateView implements Room {
     return this._state.snapshot()
   }
 
-  /** Join choreography shared by local `join()` and stub `req-join`. `track` registers the
-   *  holder first — the member must count as owned before `_syncSubs()` brings up its inbox
-   *  subscription and heartbeat, and before its join is announced. */
+  /** Both join paths register ownership before inbox/heartbeat sync and join announcement. */
   private async _admitMember(
     meta: ParticipantMeta,
     identity: string | null,
@@ -401,9 +389,7 @@ class ServerRoom extends RoomStateView implements Room {
     return ack
   }
 
-  /** First frame on a new (member, track): record the track on the member's cell (late observers discover it from the roster) and announce it on the control lane (live all-track subscribers bring the
-   * lane subscription up) — both strictly before the frame. Idempotent across owner incarnations via the cell record; O(1) per further frame via `_announcedTracks`.
-   */
+  /** A new track is durably recorded and announced before its first frame; later frames use the idempotent cache. */
   private async _ensureTrackAnnounced(from: string, track: string): Promise<void> {
     let announced = this._announcedTracks.get(from)
     if (announced?.has(track)) return
@@ -825,8 +811,6 @@ class ServerRoom extends RoomStateView implements Room {
     return this._localParticipants.get(from)?.selfDelivery === false
   }
 
-  // ── Client stubs ──
-
   _startTail(): void {
     this._tail = true
     this._syncSubs() // bring up text ingestion before any stub exists
@@ -869,7 +853,6 @@ class ServerRoom extends RoomStateView implements Room {
     stub.onClose(() => {
       this._stubs.delete(stub)
       stub._endTail() // clear any pending tail hold/timer so a closed stub leaves nothing behind
-      // The client is gone — presence says its members leave.
       for (const id of [...stub._stubMembers.keys()])
         void this._removeMember(id, { type: 'disconnected' }).catch(reportRoomError)
       stub._stubMembers.clear()
@@ -907,16 +890,13 @@ class ServerRoom extends RoomStateView implements Room {
         this._assertStubMember(stub, req.id)
         if (!req.ack) return await this._publishDm(req.id, req.to, req.data)
         const { receipt, reply } = await this._sendDmAck(req.id, req.to, req.data)
-        // The recipient's failure rides home too — throw it so the ack encoder emits the native ABORT/ERROR (a re-catch here would reclassify a carried Abort/RoomError as an opaque bug).
         if (!reply.ok) throw roomFailureError(reply)
         return { ...receipt, response: reply.result }
       }
       case 'dm-reply': {
-        // A client-held member replied to an ack DM we relayed it — route the reply to the sender. Fire-and-forget: only an `ackId` we relayed to this stub, replied to by the very member we relayed
-        // it to and not yet expired, is honored (`_takeAckDm` is the guard) — a forged, misattributed, or stale reply matches nothing, so nothing here throws onto the (unacked) wire.
+        // `_takeAckDm` admits only the relayed recipient before deadline; value, Abort, and error replies preserve native ack semantics.
         const sender = stub._takeAckDm(req.ackId, req.id)
         if (sender !== undefined) {
-          // Rebuild a clean `DmReply` from the spread fields (dropping `__r`/`id`/`ackId`), preserving whether it's a value, a carried `Abort`, or an operational error.
           const reply: DmReply = req.ok
             ? { ok: true, result: req.result }
             : 'abort' in req
@@ -928,7 +908,6 @@ class ServerRoom extends RoomStateView implements Room {
       }
       case 'sub-binary': {
         const wants = sanitizeBinaryWants(req.wants)
-        // Fire-and-forget: a malformed declaration is a client bug — report it, don't act on it.
         if (!wants) {
           reportRoomError(new RoomError('Malformed sub-binary declaration'))
           return undefined
@@ -988,9 +967,7 @@ class ServerRoom extends RoomStateView implements Room {
     prevWantsText: boolean,
     prevMemberWants: ReadonlySet<string>,
   ): Promise<void> {
-    // Wait until the shared text subscription is live at the backend before reading the retained slot. A commit stores the retained copy before it publishes, so once the subscription is live, any
-    // publish that raced this subscribe is either already in the copy we read or arrives live — never lost in the gap between subscribing and the read. A synchronous backend (in-memory) resolves
-    // instantly. See `SubSlot.ready` and `BackendSubscription.ready`.
+    // Read retained only after subscription readiness: a racing commit is then retained or live, never lost in the gap.
     await withinRoomHorizon(this._textSub.ready, ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS)
     const stored = await getBackend().readRetained(this.id, this._inc, SEMANTIC_LANE)
     if (stored === null) return
@@ -1002,8 +979,7 @@ class ServerRoom extends RoomStateView implements Room {
       return
     }
     if (prevWantsText || prevMemberWants.has(envelope.from) || !stub._wantsTextFrom(envelope.from)) return
-    // Replay the stored frame as-is (it already carries its real order), and let the stub drop it if a
-    // same-or-newer live frame already reached it (a publish that raced this subscribe) — exactly-once.
+    // Replay the stored order as-is; the stub dedupes a same-or-newer live winner.
     stub._emitRetainedText(encodePublishText(serialized, info), envelope.from, info)
   }
 
@@ -1012,8 +988,7 @@ class ServerRoom extends RoomStateView implements Room {
     const roomWide = stub._binaryWants.everyMember
     if (roomWide.all || roomWide.tracks.length > 0) await this._ensureRoster()
     this._syncSubs()
-    // Same handoff as the text lane (see `_replayRetainedText`): wait for the per-(member, track) subscriptions to be live before reading the retained frames, so a frame racing the subscribe rides
-    // the retained copy or the live lane instead of the gap. A synchronous backend resolves instantly.
+    // Binary uses the same readiness handoff and stored receipt; its stub dedupes the live/retained race per lane.
     await this._binaryReady()
     const backend = getBackend()
     const lanes = (await backend.listRetained(this.id, this._inc)).filter(
@@ -1034,7 +1009,6 @@ class ServerRoom extends RoomStateView implements Room {
       if (!frame) continue
       const track = frame.track ?? DEFAULT_TRACK
       if (binaryWantsCovers(prevWants, frame.from, track) || !stub._wantsBinary(frame.from, track)) continue
-      // Replay with the frame's own stored receipt (never seq:0/Date.now()); the stub drops it if a same-or-newer live frame on this lane already reached it — exactly-once, in order.
       const info: WirePublishInfo = { seq: stored.seq, timestamp: stored.timestamp }
       stub._emitRetainedBinary(encodePublishBinary(framed, info), frame.from, track, info)
     }
@@ -1059,9 +1033,7 @@ class ServerRoom extends RoomStateView implements Room {
     const wantSemantic = open && (wantAnyText || wantAnnounce)
     const memberIds = open ? state.listMemberIds() : []
 
-    // Roster loads are need-driven: a resident roster refreshes on the observe transition (events between its cell snapshot and this subscription were missed); a lazy one loads once something
-    // actually needs the member view — room-level listeners (onLeave/onEmpty and live senders are only correct against it) or a member-keyed lane. A holder that only joins attaches neither, so
-    // `Room.join()` never loads a roster at all — `getParticipants()`/serialization go through `_ensureRoster` on their own.
+    // Rosters refresh when observation resumes or a listener/member lane needs them; join alone stays lazy.
     const binaryWants = this._aggregateBinaryWants()
     const wantAnyBinary = open && wantsAnyBinary(binaryWants)
     const needsRoster = state.listenerCount > 0 || wantAnyBinary
@@ -1205,18 +1177,13 @@ class ServerRoom extends RoomStateView implements Room {
     return this._refreshMembers()
   }
 
-  /** A message from a sender the loaded roster doesn't know is a drift signal — its join event was dropped or reordered away (pub/sub is at-most-once between nodes). The message itself already
-   * delivered correctly (identity rides the envelope); this heals the *view*, so the live participant materializes and long-lived observers can't stay stale forever. Single-flight, so a burst from
-   * the same unknown sender costs one backend snapshot.
-   */
+  /** Unknown-sender traffic heals an at-most-once roster drift through one single-flight snapshot. */
   private _healUnknownSender(from: string): void {
     if (!this._state.rosterKnown || this._state.getRemote(from) !== null) return
     void this._refreshMembers().catch(reportRoomError)
   }
 
-  /** Single-flight roster refresh. A membership event landing mid-read makes the snapshot
-   *  ambiguous (its cell write may or may not be in it) — re-read: joins/leaves write cells before
-   *  publishing, so the next read includes the event that dirtied this one. */
+  /** Roster refresh replans on membership-version drift and re-seeds streamed views from the committed snapshot. */
   private _refreshMembers(): Promise<void> {
     this._pendingRefresh ??= (async () => {
       try {
@@ -1229,7 +1196,6 @@ class ServerRoom extends RoomStateView implements Room {
           }
           const drifted = this._state.reconcileCompleteRoster(members)
           this._syncSubs() // per-member lanes may need subscriptions for the members just learned
-          // Clients seeded from the pre-drift state must be re-synced the same way they were seeded — the streamed roster (position-in-stream consistent, replace semantics).
           if (drifted) {
             for (const stub of this._stubs) stub._relayRoster(this._state.snapshotMembers().filter((m) => !m.hidden))
           }
@@ -1242,10 +1208,7 @@ class ServerRoom extends RoomStateView implements Room {
     return this._pendingRefresh
   }
 
-  // ── Liveness heartbeat ──
-  //
-  // Graceful departures (leave, kick, close, stub death) are handled by events. A hard node crash leaves member records behind — so the node that owns a member refreshes its `seenAt` every interval,
-  // and every heartbeat also reaps members whose owner stopped refreshing.
+  // Graceful departures use events; heartbeats refresh owner `seenAt` and reap records orphaned by hard crashes.
 
   private _ownedMemberIds(): string[] {
     const owned = [...this._localParticipants.keys()]
@@ -1304,8 +1267,6 @@ class ServerRoom extends RoomStateView implements Room {
   }
 }
 
-// ServerLocalParticipant
-
 const SERVER_PARTICIPANT_BRAND: unique symbol = Symbol.for('telefunc.ServerRoomParticipant')
 
 /** Server-side `LocalParticipant`, returned by `ServerRoom.join()`. */
@@ -1328,8 +1289,7 @@ class ServerLocalParticipant extends ParticipantBase {
   }
 
   async publish(data: unknown, options?: PublishOptions): Promise<ChannelPublishAck> {
-    // `coalesce` bounds a client's uplink under a burst; a server-side publisher has no uplink queue to conflate, so it's accepted for signature parity and otherwise a no-op. `retain` still applies —
-    // a server-side publisher retains exactly like a client one.
+    // Server publish has no uplink to coalesce, but retain semantics remain identical.
     this._assertActive()
     return await this._room._publishText(this.id, data, options?.retain)
   }
@@ -1339,20 +1299,17 @@ class ServerLocalParticipant extends ParticipantBase {
     return await this._room._publishBinaryFramed(this.id, frameWithMemberId(this.id, data, options))
   }
 
-  /** @internal — publish a client-framed payload (the frame already carries this member's ID). */
   _publishFramed(framed: Uint8Array): Promise<ChannelPublishAck> {
     this._assertActive()
     return this._room._publishBinaryFramed(this.id, framed)
   }
 
-  // The impl of the overloaded `LocalParticipant.send` (see the interface for the precise result types callers get); `any` is the overload-implementation signature.
   async send(to: string | Sender, data: unknown, options?: { ack?: boolean }): Promise<any> {
     this._assertActive()
     const toId = typeof to === 'string' ? to : to.id
     if (!options?.ack) return this._room._publishDm(this.id, toId, data)
     const { receipt, reply } = await this._room._sendDmAck(this.id, toId, data)
     if (!reply.ok) throw roomFailureError(reply)
-    // Superset of the plain-send receipt: the outbound DM's sequencing plus the recipient's reply.
     return { ...receipt, response: reply.result } satisfies RoomAckReceipt
   }
 
@@ -1379,8 +1336,6 @@ class ServerLocalParticipant extends ParticipantBase {
     reportRoomError(err)
   }
 }
-
-// Helpers
 
 async function runAfterHook(hook: () => unknown): Promise<void> {
   try {

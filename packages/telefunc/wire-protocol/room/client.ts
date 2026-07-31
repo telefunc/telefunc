@@ -47,14 +47,10 @@ type PendingJoinEvent =
   | { kind: 'dm'; message: InboxMessage }
   | { kind: 'leave'; cause: LeaveCause }
 
-// ClientRoom
-
 /**
- * Client-side `Room`, revived from a serialized `ServerRoom`.
- *
- * Composes over a broadcast stub: room events & data arrive as its broadcast
- * messages, requests (join/leave/set-meta) ride its channel messages. Membership starts from
- * the serialized snapshot; the relayed event stream keeps it fresh from there.
+ * Client Room composes delivery and requests over one Broadcast stub.
+ * Broadcast frames carry Room events/data; acked channel messages carry mutations.
+ * Its serialized membership seed stays fresh through the positioned event stream.
  */
 class ClientRoom extends RoomStateView implements Room {
   /** Phantom: the publish shield rides the type only (see `RoomShield`), never a runtime field. */
@@ -105,8 +101,6 @@ class ClientRoom extends RoomStateView implements Room {
     void this._rosterReady.catch(() => {})
   }
 
-  // ── Room API ──
-
   async join(options?: JoinOptions): Promise<LocalParticipant> {
     assertUsage(
       options?.identity === undefined,
@@ -152,7 +146,6 @@ class ClientRoom extends RoomStateView implements Room {
   async getParticipants(options?: { hidden?: boolean }): Promise<RemoteParticipant[]> {
     assertUsage(!options?.hidden, 'Hidden participants can only be enumerated on the server')
     if (!this._state.rosterKnown) await this._rosterReady
-    // kept fresh by the event stream from there on
     return this._state.listRemotes()
   }
 
@@ -174,9 +167,8 @@ class ClientRoom extends RoomStateView implements Room {
     return true
   }
 
-  /** Deliver a DM to a locally-held member. A plain DM just fires its listeners; an ack DM (`send(…, { ack: true })`) routes the handler's reply back up the stub as a `dm-reply`, which the server
-   * turns into the sender's `dm-ack` — so a client recipient replies just like a server-side one.
-   */
+  /** Plain DM fires local listeners; ack DM returns their reply
+   * through the symmetric `dm-reply`/`dm-ack` path. */
   private _deliverDm(participant: ClientRoomParticipant, msg: InboxMessage): void {
     if (msg.ackId === undefined) {
       participant._deliverMessage(msg)
@@ -202,8 +194,6 @@ class ClientRoom extends RoomStateView implements Room {
 
   // The roster streams in right behind the response — its arrival is an onChange.
   snapshot = (): RoomSnapshotView => this._state.snapshot()
-
-  // ── Requests & publishes (used by ClientRoomParticipant) ──
 
   /** @internal — an ack-bearing stub request. Resolves with the handler's raw return, or rejects natively (the channel rebuilds an `AbortError`/`Error` from the ack status) — no envelope. */
   _request(req: RoomStubRequest): Promise<unknown> {
@@ -231,15 +221,12 @@ class ClientRoom extends RoomStateView implements Room {
     this._state.applyLeave(id) // the relayed event is absorbed
   }
 
-  // ── Event stream (relayed broadcast messages) ──
-
   private _onEnvelope(envelope: unknown, rawInfo: ChannelPublishInfo): void {
     if (!hasRoomTag(envelope)) return
     const event = envelope as RoomEnvelope | RoomDmEnvelope | RoomRosterEvent | RoomDemandEvent
     switch (event.__r) {
       case 'roster':
-        // The authoritative member list, positioned in the relay stream: everything relayed before it is reflected in it, later events apply incrementally on top. The client's roster carries only
-        // presence members, so reconcile must not reap directly-granted hidden handles (they aren't roster-managed) — see `RoomState.reconcile`.
+        // Positioned presence rosters reflect prior events; later events layer on without pruning directly granted hidden handles.
         this._applyRoster(event.members)
         return
       case 'roster-error':
@@ -356,9 +343,7 @@ class ClientRoom extends RoomStateView implements Room {
     return participant
   }
 
-  /** Declare this holder's wants to the server. The room-level text want rides the standard broadcast subscription — declared synchronously, like `subscribe()`, so same-connection FIFO guarantees a
-   * publish right after subscribing gets its own frame back.
-   */
+  /** Text wants are declared synchronously through Broadcast so same-connection FIFO covers an immediate publish. */
   private _syncWants(reconcileText = false): void {
     const state = this._state
     const text: MemberWants = state.closed ? { all: false, members: [] } : state.textWants()
@@ -377,11 +362,8 @@ class ClientRoom extends RoomStateView implements Room {
   }
 }
 
-// Local participants
-
-/** Client-side half of both `LocalParticipant` flavors. `selfDelivery` needs nothing here: the
- *  server never relays a self-suppressed member's echo to this client's room stub (see server
- *  `_onTextData`), so the flag is carried purely as a public read-only property. */
+/** Client participant; server-side echo suppression leaves `selfDelivery`
+ * as a public read-only flag here. */
 abstract class ClientParticipantBase extends ParticipantBase {
   /** Per-key conflation state for `publish(data, { coalesce })` — at most one in-flight send per key; while it's in flight the newest value waits in `pending` and supersedes any earlier one. */
   private readonly _coalescers = new Map<
