@@ -1,10 +1,12 @@
 export type {
   Room,
+  ClientRoom,
   RoomInfo,
   RoomOptions,
   RoomMeta,
   RoomGetOptions,
   JoinOptions,
+  ClientJoinOptions,
   PublishOptions,
   ParticipantMeta,
   LocalParticipant,
@@ -122,6 +124,7 @@ type JoinOptions<P extends ParticipantMeta = ParticipantMeta> = {
   /** Exclude this full participant from presence. Server-only. */
   hidden?: boolean
 }
+type ClientJoinOptions<P extends ParticipantMeta = ParticipantMeta> = Omit<JoinOptions<P>, 'identity' | 'hidden'>
 
 /** One participant inside `room.snapshot()`. */
 type ParticipantSnapshotView<P extends ParticipantMeta = ParticipantMeta> = {
@@ -222,6 +225,13 @@ type Room<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = Participant
   /** Immutable whole-room view, reference-stable until the next change. */
   snapshot(): RoomSnapshotView<M, P>
 } & RoomShield<Pub>
+
+type ClientRoom<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = ParticipantMeta, Pub = unknown> = Omit<
+  Room<M, P, Pub>,
+  'join'
+> & {
+  join(options?: ClientJoinOptions<P>): Promise<LocalParticipant<P, Pub>>
+}
 
 /** Your returnable participant handle, returned by `join()`. */
 type LocalParticipant<P extends ParticipantMeta = ParticipantMeta, Pub = unknown> = {

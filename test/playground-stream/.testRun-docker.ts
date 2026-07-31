@@ -36,6 +36,8 @@ function setupDockerRun(command = 'pnpm test:docker'): boolean {
     tolerateError(log) {
       const t = log.logText
       return (
+        // Caller-handled rejections (including unspaced ShieldValidationError) must stay silent;
+        // output from those paths is the double-report canary.
         t.includes('Container ') ||
         t.includes('Network ') ||
         t.includes('Volume ') ||
@@ -46,6 +48,7 @@ function setupDockerRun(command = 'pnpm test:docker'): boolean {
         t.includes('the server responded with a status of 500') ||
         t.includes('the server responded with a status of 422') ||
         t.includes('[telefunc:channel-error]') ||
+        // pages/channel/Channel.telefunc.ts deliberately throws a bug, which must be logged server-side.
         t.includes('Error: server-listener-bug') ||
         t.includes('Unexpected generator error') ||
         t.includes('[telefunc:rxjs]') ||

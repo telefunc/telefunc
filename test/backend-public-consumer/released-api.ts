@@ -2,6 +2,7 @@
 // fcd6fd507e6b8abe382ecd1e86520f37d7eeb320. This fixture is compiled under
 // Node16, NodeNext and Bundler resolution by the public-consumer gate.
 import {
+  Abort,
   Broadcast,
   BroadcastChannel,
   Channel,
@@ -19,13 +20,11 @@ import {
   type StreamingReplacerType,
   type TypeContract,
 } from 'telefunc'
-// PR #436 deliberately removed the legacy broadcast adapter boundary. Keep one negative assertion
-// per symbol so restoring any part of that boundary is an explicit compatibility decision.
-// @ts-expect-error intentionally removed in PR #436
+// @ts-expect-error the legacy broadcast adapter is not released
 import { DefaultBroadcastAdapter } from 'telefunc'
-// @ts-expect-error intentionally removed in PR #436
+// @ts-expect-error the legacy broadcast adapter type is not released
 import type { BroadcastAdapter } from 'telefunc'
-// @ts-expect-error intentionally removed in PR #436
+// @ts-expect-error the legacy broadcast transport type is not released
 import type { BroadcastTransport } from 'telefunc'
 import {
   BACKEND_SPI_VERSION,
@@ -48,7 +47,7 @@ import {
   type SubscriptionBinding,
   type SubscriptionDriver,
 } from 'telefunc/backend'
-import { ConnectionError, withContext } from 'telefunc/client'
+import { Abort as ClientAbort, ConnectionError, withContext } from 'telefunc/client'
 import { Telefunc as NodeTelefunc } from 'telefunc/node'
 import {
   installRedis,
@@ -64,6 +63,7 @@ type Extends<Actual, Baseline> = [Actual] extends [Baseline] ? true : false
 type Compatible<Actual, Baseline> = Extends<Actual, Baseline> extends true ? Extends<Baseline, Actual> : false
 type HasKeys<Actual, Keys extends PropertyKey> = Exclude<Keys, keyof Actual> extends never ? true : false
 type IsOptional<T, K extends keyof T> = {} extends Pick<T, K> ? true : false
+type _abortValueKinds = [typeof Abort, typeof ClientAbort]
 
 type Outbound = (data: string) => number
 type Inbound = (data: number) => string

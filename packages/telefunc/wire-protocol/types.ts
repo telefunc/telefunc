@@ -47,7 +47,7 @@ import type { ServerChannel } from './server/channel.js'
 import type { ServerBroadcast } from './server/server-broadcast.js'
 import type { ClientChannel, ClientBroadcast } from './client/channel.js'
 import type { ServerRoom, ServerLocalParticipant } from './room/server.js'
-import type { Room, LocalParticipant, RemoteParticipant } from './room/types.js'
+import type { ClientRoom, LocalParticipant, RemoteParticipant } from './room/types.js'
 import type { RoomSnapshotMetadata, ParticipantStubMetadata } from './room/protocol.js'
 import type { AbortError } from '../shared/Abort.js'
 import type { ShieldValidators } from '../node/server/shield.js'
@@ -254,7 +254,7 @@ type ChannelContract = TypeContract<ServerChannel, ClientChannel, { channelId: s
 
 type BroadcastContract = TypeContract<ServerBroadcast, ClientBroadcast, { channelId: string; key: string }>
 
-type RoomContract = TypeContract<ServerRoom, Room, RoomSnapshotMetadata>
+type RoomContract = TypeContract<ServerRoom, ClientRoom, RoomSnapshotMetadata>
 
 type RoomParticipantContract = TypeContract<ServerLocalParticipant, LocalParticipant, ParticipantStubMetadata>
 

@@ -380,7 +380,7 @@ function Room() {
         const acks = await Promise.all([1, 2, 3, 4, 5].map((n) => me.publish({ n }, { coalesce: 'cursor' })))
 
         await pollUntil(() => ({
-          result: { received, acked: acks.length, allSeqs: acks.every((ack) => ack.seq > 0) },
+          result: { received, ackSeqs: acks.map((ack) => ack.seq) },
           done: received.includes(5) && received.length >= 2,
         }))
       })}
@@ -580,7 +580,8 @@ function Room() {
         room.onUpdate((meta) => updates.push((meta as { topic?: string }).topic ?? ''))
 
         await onUpdateRoom(roomId, { topic: 'updated' })
-        await onCreateRoom(`${base}:b`) // a second room under the same prefix, for list()
+        const secondRoomId = `${base}:b`
+        await onCreateRoom(secondRoomId) // a second room under the same prefix, for list()
         const same = await onGetOrCreateRoom(roomId) // idempotent — returns the existing room
         const listed = await onListRooms(base)
 
@@ -589,6 +590,7 @@ function Room() {
             result: {
               updates,
               topic: (room.meta as { topic?: string }).topic ?? null,
+              expectedIds: [roomId, secondRoomId],
               listed,
               sameId: same.id === roomId,
               sameCount: same.count,

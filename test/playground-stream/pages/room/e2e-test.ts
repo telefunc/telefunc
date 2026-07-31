@@ -190,13 +190,16 @@ function testRoom() {
     },
   )
 
-  testRoomScenario<{ received: number[]; acked: number; allSeqs: boolean }>(
+  testRoomScenario<{ received: number[]; ackSeqs: number[] }>(
     'conflate',
     'room: coalesce conflates a same-key burst to first + latest',
     (r) => {
+      const first = r.ackSeqs[0]!
+      const latest = r.ackSeqs[4]!
       expect(r.received).deep.equal([1, 5]) // 2..4 collapsed into the single pending slot
-      expect(r.acked).toBe(5) // every caller's promise still resolves...
-      expect(r.allSeqs).toBe(true) // ...with the winning send's ack
+      expect(first).greaterThan(0)
+      expect(latest).toBe(first + 1) // only first and latest committed
+      expect(r.ackSeqs).deep.equal([first, latest, latest, latest, latest]) // overwritten callers share the winner
     },
   )
 
@@ -284,15 +287,16 @@ function testRoom() {
   testRoomScenario<{
     updates: string[]
     topic: string | null
+    expectedIds: string[]
     listed: string[]
     sameId: boolean
     sameCount: number
   }>('reconfig', 'room: Room.setMeta propagates; list and getOrCreate resolve', (r) => {
     expect(r.updates).toContain('updated') // room.onUpdate fired
     expect(r.topic).toBe('updated') // room.meta reflects it
-    expect(r.listed.length).toBe(2) // both prefixed rooms enumerated by Room.list
+    expect([...r.listed].sort()).deep.equal([...r.expectedIds].sort()) // both exact rooms enumerated by Room.list
     expect(r.sameId).toBe(true) // getOrCreate returned the existing room
-    expect(r.sameCount).greaterThanOrEqual(1) // ...with its member preserved
+    expect(r.sameCount).toBe(1) // ...with exactly its original member preserved
   })
 
   testRoomScenario<{ cause: { type: string; reason?: unknown } | null; count: number; empty: boolean }>(

@@ -460,8 +460,10 @@ function applyChannelConfig(val: unknown): void {
       case 'bufferLimitBinary':
       case 'sseFlushThrottle':
       case 'ssePostIdleFlushDelay':
-        assertUsage(typeof value === 'number', `\`${configPath}\` should be a number`)
-        assertUsage(value >= 0, `\`${configPath}\` should be a non-negative number`)
+        assertUsage(
+          typeof value === 'number' && Number.isSafeInteger(value) && value >= 0,
+          `\`${configPath}\` should be a non-negative safe integer`,
+        )
         ;(next as Record<string, unknown>)[key] = value
         break
       default:

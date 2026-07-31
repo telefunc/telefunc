@@ -12,10 +12,10 @@ export { ConnectionError } from './ConnectionError.js'
 export { NetworkError } from '../shared/NetworkError.js'
 export { ChannelClosedError, ChannelOverflowError } from '../wire-protocol/channel-errors.js'
 export type {
-  Room,
+  ClientRoom as Room,
   RoomInfo,
   RoomMeta,
-  JoinOptions,
+  ClientJoinOptions as JoinOptions,
   PublishOptions,
   ParticipantMeta,
   LocalParticipant,
