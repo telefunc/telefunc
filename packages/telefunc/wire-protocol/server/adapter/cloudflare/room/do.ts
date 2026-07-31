@@ -261,7 +261,7 @@ export class TelefuncRoomDurableObject extends DurableObject {
     const installations = listRouteInstallations(this.#sql, inc)
     // Keep routes and generation durable until every fallible exact-lease uninstall succeeds, allowing
     // retries after transport failure or crash.
-    await Promise.all(installations.map((installation) => this.#invalidateInstallation(installation, true)))
+    await this.#terminateInstallations(inc, installations)
     this.ctx.storage.transactionSync(() => dropGenerationRows(this.#sql, inc))
     this.#fanout.clearIncarnation(inc)
     await this.#scheduleMaintenanceIfNeeded()
@@ -307,8 +307,9 @@ export class TelefuncRoomDurableObject extends DurableObject {
     const failedOrphans = new Set<string>()
     for (const inc of orphanIncs) {
       const installations = listRouteInstallations(this.#sql, inc)
-      const outcomes = await Promise.allSettled(installations.map((entry) => this.#invalidateInstallation(entry, true)))
-      if (outcomes.some((outcome) => outcome.status === 'rejected')) {
+      try {
+        await this.#terminateInstallations(inc, installations)
+      } catch {
         failedOrphans.add(inc)
         continue
       }
@@ -345,6 +346,20 @@ export class TelefuncRoomDurableObject extends DurableObject {
       ...installation,
       ...(terminal ? { terminal: true as const } : {}),
     })
+  }
+
+  async #terminateInstallations(inc: string, installations: RouteInstallation[]): Promise<void> {
+    const outcomes = await this.#dispatchFanout({
+      operation: 'invalidate',
+      roomId: installations[0]?.roomId ?? '',
+      inc,
+      laneKey: installations[0]?.laneKey ?? '',
+      targets: installations,
+      path: 'terminate',
+      terminal: true,
+    })
+    const failed = outcomes.find((outcome) => outcome.error !== undefined)
+    if (failed?.error !== undefined) throw new Error(failed.error)
   }
 
   #dispatchFanout(request: RoomShardFanoutRequest, coordinatorIndex?: number): Promise<RoomShardFanoutOutcome[]> {

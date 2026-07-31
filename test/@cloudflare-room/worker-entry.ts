@@ -35,7 +35,7 @@ setDefaultBackend(() => publicRoomBackend, 'cloudflare-room-ci-public')
 const PublicRoomDurableObjectBase = createTelefuncRoomDurableObjectClass('PUBLIC_SESSION')
 const textEncoder = new TextEncoder()
 const CONTROL_HORIZON_MS = 2_000
-type Deferred = ReturnType<typeof deferred>
+type Deferred = ReturnType<typeof Promise.withResolvers<void>>
 
 export class PublicRoomSessionDurableObject extends DurableObject {
   readonly #manager: CloudflareRoomSessionManager
@@ -121,7 +121,7 @@ export class SessionDurableObject extends DurableObject {
       started: false,
       delivered: [],
       invalidations: [],
-      gate: deferred(),
+      gate: Promise.withResolvers<void>(),
     })
   }
 
@@ -165,6 +165,9 @@ export class SessionDurableObject extends DurableObject {
 
   telefuncRoomInvalidate(request: RoomShardInvalidationRequest): void {
     const state = this.#delivery(request.roomId, 'invalidation reached an unprepared session')
+    if (request.roomId.startsWith('coordinator-drop-') && (request.laneKey !== request.leaseId || !request.terminal)) {
+      throw new Error('wide drop lost exact terminal installation metadata')
+    }
     state.invalidations.push(request.terminal === true ? 'terminal' : 'recoverable')
     this.#manager.invalidate(request)
   }
@@ -205,13 +208,19 @@ type RegistrationHold = { installed: Deferred; release: Deferred }
 
 export class TelefuncRoomDurableObject extends ProductionRoomDurableObject {
   readonly #probeEnv: unknown
+  readonly #authoritySubrequestBudget: { remaining: number }
   #reconstructed: ProductionRoomDurableObject | null = null
   #responseReordering?: ResponseReordering
   #registrationHold?: RegistrationHold
 
   constructor(ctx: DurableObjectState, env: unknown) {
-    super(ctx, env)
+    const authoritySubrequestBudget = { remaining: Number.POSITIVE_INFINITY }
+    super(ctx, {
+      ...(env as object),
+      TelefuncDurableObject: budgetNamespace((env as Env).TelefuncDurableObject, authoritySubrequestBudget),
+    })
     this.#probeEnv = env
+    this.#authoritySubrequestBudget = authoritySubrequestBudget
   }
 
   override commitLane(...args: Parameters<ProductionRoomDurableObject['commitLane']>) {
@@ -253,6 +262,17 @@ export class TelefuncRoomDurableObject extends ProductionRoomDurableObject {
     return this.#reconstructed === null ? super.awaitDelivery(token) : this.#reconstructed.awaitDelivery(token)
   }
 
+  async telefuncRoomWideDropForTest(roomId: string, inc: string, subscriberDoId: string): Promise<void> {
+    const authority = this as unknown as Authority
+    const opened = await openHead(authority, inc, 'wide drop open')
+    for (let index = 0; index < 1_001; index++) {
+      await this.registerRoute(roomId, inc, `lane-${index}`, subscriberDoId, `lane-${index}`)
+    }
+    this.#authoritySubrequestBudget.remaining = ROOM_FANOUT_WIDTH
+    await closeAndDrop(authority, inc, opened, 'wide-drop-close')
+    this.#authoritySubrequestBudget.remaining = Number.POSITIVE_INFINITY
+  }
+
   async telefuncRoomControlForTest(action: AuthorityControl): Promise<number | null | void> {
     switch (action) {
       case 'reconstruct':
@@ -260,9 +280,9 @@ export class TelefuncRoomDurableObject extends ProductionRoomDurableObject {
         return
       case 'prepare-response-reordering':
         this.#responseReordering = {
-          firstCommit: deferred(),
-          firstResponse: deferred(),
-          secondDelivery: deferred(),
+          firstCommit: Promise.withResolvers<void>(),
+          firstResponse: Promise.withResolvers<void>(),
+          secondDelivery: Promise.withResolvers<void>(),
         }
         return
       case 'wait-first-commit':
@@ -272,7 +292,7 @@ export class TelefuncRoomDurableObject extends ProductionRoomDurableObject {
       case 'release-second-delivery':
         return this.#responseProbe().secondDelivery.resolve()
       case 'prepare-registration-hold':
-        this.#registrationHold = { installed: deferred(), release: deferred() }
+        this.#registrationHold = { installed: Promise.withResolvers<void>(), release: Promise.withResolvers<void>() }
         return
       case 'wait-registration':
         return this.#registrationProbe().installed.promise
@@ -307,6 +327,17 @@ type Env = {
   TelefuncDurableObject: DurableObjectNamespace
   PUBLIC_ROOM: DurableObjectNamespace
   PUBLIC_SESSION: DurableObjectNamespace
+}
+
+function budgetNamespace(namespace: DurableObjectNamespace, budget: { remaining: number }): RoomShardFanoutNamespace {
+  return {
+    idFromString: (id) => namespace.idFromString(id),
+    idFromName: (name) => namespace.idFromName(name),
+    get(id) {
+      if (budget.remaining-- <= 0) throw new Error('authority subrequest budget exceeded')
+      return namespace.get(id as DurableObjectId) as never
+    },
+  }
 }
 
 export default {
@@ -412,6 +443,9 @@ async function coordinatorFanoutSmoke(env: Env, sessionId: DurableObjectId, sess
   if (outcomes.some((outcome) => outcome.error !== undefined)) {
     throw new Error('coordinator fanout did not settle every leaf successfully')
   }
+  const drop = roomProbe(env, suffix, 'coordinator-drop')
+  await session.prepareDelivery(drop.roomId, false)
+  await drop.authority.telefuncRoomWideDropForTest(drop.roomId, drop.inc, sessionId.toString())
   return {
     outcomes: outcomes.length,
     deliveries: (await session.deliveryState(roomId)).delivered.length,
@@ -740,12 +774,4 @@ async function rejectionOf(promise: Promise<unknown>, label: string): Promise<st
   } catch (error) {
     return error instanceof Error ? error.message : String(error)
   }
-}
-
-function deferred(): { promise: Promise<void>; resolve(): void } {
-  let resolve!: () => void
-  const promise = new Promise<void>((settle) => {
-    resolve = settle
-  })
-  return { promise, resolve }
 }

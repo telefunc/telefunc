@@ -11,7 +11,10 @@ type DeliverFn = (targets: RouteTarget[], frame: Uint8Array, info: DeliveryInfo,
 export const ROOM_FANOUT_WIDTH = 64
 const ROOM_FANOUT_COORDINATOR_POOL_SIZE = 256
 
-type FanoutRequestBase = Omit<DeliveryInfo, 'seq' | 'timestamp'> & { targets: RouteTarget[]; path: string }
+// The recursive tree keeps four invariants: <=64 outgoing calls per node; depth-specific coordinators
+// cannot self-RPC; leaf outcomes stay ordered; coordinator failure expands to every descendant.
+type FanoutTarget = RouteTarget & { laneKey?: string }
+type FanoutRequestBase = Omit<DeliveryInfo, 'seq' | 'timestamp'> & { targets: FanoutTarget[]; path: string }
 export type RoomShardFanoutRequest = FanoutRequestBase &
   (
     | ({ operation: 'deliver'; frame: Uint8Array } & Pick<DeliveryInfo, 'seq' | 'timestamp'>)
@@ -87,7 +90,9 @@ export class Fanout {
     const attempts =
       targets.length <= ROOM_FANOUT_WIDTH
         ? targets.map((target) => this.#deliver([target], frame, info))
-        : groupsOfAtMost(targets, ROOM_FANOUT_WIDTH).map((group, index) => this.#deliver(group, frame, info, index))
+        : partitionIntoAtMost(targets, ROOM_FANOUT_WIDTH).map((group, index) =>
+            this.#deliver(group, frame, info, index),
+          )
     const failures = (await Promise.allSettled(attempts))
       .filter((outcome): outcome is PromiseRejectedResult => outcome.status === 'rejected')
       .map((failure) => failure.reason)
@@ -104,8 +109,12 @@ export async function dispatchRoomShardFanout(
     return Promise.all(
       request.targets.map(async (target): Promise<RoomShardFanoutOutcome> => {
         const stub = namespace.get(namespace.idFromString(target.subscriberDoId))
-        const { roomId, inc, laneKey } = request
-        const route = { roomId, inc, laneKey, ...target }
+        const route = {
+          roomId: request.roomId,
+          inc: request.inc,
+          ...target,
+          laneKey: target.laneKey ?? request.laneKey,
+        }
         try {
           await (request.operation === 'deliver'
             ? stub.telefuncRoomDeliver({
@@ -126,7 +135,7 @@ export async function dispatchRoomShardFanout(
     )
   }
 
-  const groups = groupsOfAtMost(request.targets, ROOM_FANOUT_WIDTH)
+  const groups = partitionIntoAtMost(request.targets, ROOM_FANOUT_WIDTH)
   return (
     await Promise.all(
       groups.map((targets, index) => {
@@ -155,7 +164,7 @@ export async function dispatchRoomShardFanoutViaCoordinator(
   }
 }
 
-function groupsOfAtMost<T>(values: T[], maxGroups: number): T[][] {
+function partitionIntoAtMost<T>(values: T[], maxGroups: number): T[][] {
   const groupSize = Math.ceil(values.length / maxGroups)
   return Array.from({ length: Math.ceil(values.length / groupSize) }, (_, index) =>
     values.slice(index * groupSize, (index + 1) * groupSize),

@@ -67,19 +67,23 @@ function createAuthorityState(initial: ReadonlyArray<readonly [string, unknown]>
   return new CloudflareBroadcastAuthorityState(state)
 }
 
-function createMockKV(): KVNamespace {
+type MockKVHooks = { beforePut?: () => Promise<void>; beforeDelete?: () => Promise<void> }
+
+function createMockKV(hooks: MockKVHooks = {}): KVNamespace {
   const store = new Map<string, { value: string; expirationTtl?: number }>()
   return {
     async get(key: string) {
       return store.get(key)?.value ?? null
     },
     async put(key: string, value: string, options?: { expirationTtl?: number }) {
+      await hooks.beforePut?.()
       store.set(key, { value, expirationTtl: options?.expirationTtl })
     },
     _ttl(key: string) {
       return store.get(key)?.expirationTtl
     },
     async delete(key: string) {
+      await hooks.beforeDelete?.()
       store.delete(key)
     },
     async list({ prefix, cursor }: { prefix?: string; cursor?: string }) {
@@ -348,19 +352,9 @@ describe('cloudflare broadcast routing', () => {
 
   it('waits for KV presence setup before authority publish fanout', async () => {
     const transport = new CloudflareBroadcastTransport({ baseInstanceName: 'telefunc', scale: 1 })
-    const kv = createMockKV()
+    const kvPutReady = Promise.withResolvers<void>()
+    const kv = createMockKV({ beforePut: () => kvPutReady.promise })
     const publishTargets: string[] = []
-    let releaseKVPut: (() => void) | null = null
-    const kvPutReady = new Promise<void>((resolve) => {
-      releaseKVPut = resolve
-    })
-
-    // Intercept KV put to control timing
-    const originalPut = kv.put.bind(kv)
-    kv.put = (async (key: string, value: string, options?: any) => {
-      await kvPutReady
-      return originalPut(key, value, options)
-    }) as any
 
     transport.attachBinding(
       createBasicBinding({
@@ -383,7 +377,7 @@ describe('cloudflare broadcast routing', () => {
     await flushMicrotasks(2)
     expect(publishTargets).toEqual([])
 
-    releaseKVPut!()
+    kvPutReady.resolve()
     await flushCoordinatorTurn()
 
     expect(publishTargets).toEqual(['telefunc:broadcast:authority:room:test'])
@@ -391,18 +385,9 @@ describe('cloudflare broadcast routing', () => {
 
   it('does not deliver locally before ordered publish setup completes', async () => {
     const transport = new CloudflareBroadcastTransport({ baseInstanceName: 'telefunc', scale: 1 })
-    const kv = createMockKV()
+    const kvPutReady = Promise.withResolvers<void>()
+    const kv = createMockKV({ beforePut: () => kvPutReady.promise })
     const received: string[] = []
-    let releaseKVPut: (() => void) | null = null
-    const kvPutReady = new Promise<void>((resolve) => {
-      releaseKVPut = resolve
-    })
-
-    const originalPut = kv.put.bind(kv)
-    kv.put = (async (key: string, value: string, options?: any) => {
-      await kvPutReady
-      return originalPut(key, value, options)
-    }) as any
 
     const localRegistry = (() => {
       // Access the local registry after attachIsolateInfo sets it up
@@ -440,7 +425,7 @@ describe('cloudflare broadcast routing', () => {
     await flushMicrotasks(2)
     expect(received).toEqual([])
 
-    releaseKVPut!()
+    kvPutReady.resolve()
     await flushCoordinatorTurn()
 
     expect(received).toEqual(['hello'])
@@ -448,17 +433,8 @@ describe('cloudflare broadcast routing', () => {
 
   it('resolves publish ack with authority metadata after cold-path setup completes', async () => {
     const transport = new CloudflareBroadcastTransport({ baseInstanceName: 'telefunc', scale: 1 })
-    const kv = createMockKV()
-    let releaseKVPut: (() => void) | null = null
-    const kvPutReady = new Promise<void>((resolve) => {
-      releaseKVPut = resolve
-    })
-
-    const originalPut = kv.put.bind(kv)
-    kv.put = (async (key: string, value: string, options?: any) => {
-      await kvPutReady
-      return originalPut(key, value, options)
-    }) as any
+    const kvPutReady = Promise.withResolvers<void>()
+    const kv = createMockKV({ beforePut: () => kvPutReady.promise })
 
     transport.attachIsolateInfo('telefunc-shard-weur-0', 'weur')
     transport.attachBinding(
@@ -484,7 +460,7 @@ describe('cloudflare broadcast routing', () => {
     const receiptPromise = publisher.publish({ text: 'hello' })
 
     await flushMicrotasks(2)
-    releaseKVPut!()
+    kvPutReady.resolve()
 
     const receipt = await receiptPromise
 
@@ -712,6 +688,38 @@ describe('cloudflare broadcast routing', () => {
     await subscription.unsubscribe()
 
     expect(await kv.get(key)).toBeNull()
+  })
+
+  it('keeps KV presence generation-safe across setup and delete churn', async () => {
+    const transport = new CloudflareBroadcastTransport({ baseInstanceName: 'telefunc', scale: 1 })
+    const setup = Promise.withResolvers<void>()
+    const hooks: MockKVHooks = { beforePut: () => setup.promise }
+    const kv = createMockKV(hooks)
+    transport.attachBinding(createBasicBinding(), 'TelefuncDurableObject')
+    transport.attachKV(kv)
+    transport.attachIsolateInfo('telefunc-shard-weur-0', 'weur')
+
+    const lane = { key: 'room:presence-churn', kind: 'text' } as const
+    const presenceKey = 'tfps:text%3Aroom%3Apresence-churn:weur:telefunc-shard-weur-0'
+    const first = transport.openSubscription(lane, () => {})
+    await first.unsubscribe()
+    const successor = transport.openSubscription(lane, () => {})
+    setup.resolve()
+    await successor.ready
+    await flushMicrotasks()
+    expect(await kv.get(presenceKey)).toBe('telefunc-shard-weur-0')
+
+    const releaseDeletion = Promise.withResolvers<void>()
+    hooks.beforeDelete = () => releaseDeletion.promise
+    const teardown = successor.unsubscribe()
+    const replacement = transport.openSubscription(lane, () => {})
+    await flushMicrotasks()
+    expect(replacement.state()).toBe('establishing')
+
+    releaseDeletion.resolve()
+    await Promise.all([teardown, replacement.ready])
+    expect(await kv.get(presenceKey)).toBe('telefunc-shard-weur-0')
+    await replacement.unsubscribe()
   })
 
   it('surfaces presence refresh loss and recovery through subscription state', async () => {

@@ -262,6 +262,7 @@ class CloudflareBroadcastTransport {
   private kv: KVNamespace | null = null
   private locationBucket: LocationBucket | null = null
   private representativeDOName: string | null = null
+  private readonly presenceMutationChains = new Map<string, Promise<void>>()
   private readonly memberStates = new Map<string, MemberBucketState>()
   private readonly textSubs = new Map<string, CloudflareBroadcastSubscriptionAttempt>()
   private readonly binarySubs = new Map<string, CloudflareBroadcastSubscriptionAttempt>()
@@ -317,14 +318,26 @@ class CloudflareBroadcastTransport {
   }
 
   private async putPresence(key: string): Promise<void> {
-    const doName = this.requireRepresentativeDOName()
-    await this.requireKV().put(this.getPresenceKey(key), doName, {
-      expirationTtl: PRESENCE_TTL_SECONDS,
+    await this.mutatePresence(key, () => {
+      const doName = this.requireRepresentativeDOName()
+      return this.requireKV().put(this.getPresenceKey(key), doName, {
+        expirationTtl: PRESENCE_TTL_SECONDS,
+      })
     })
   }
 
   private async deletePresence(key: string): Promise<void> {
-    await this.requireKV().delete(this.getPresenceKey(key))
+    await this.mutatePresence(key, () => this.requireKV().delete(this.getPresenceKey(key)))
+  }
+
+  private async mutatePresence(key: string, mutation: () => Promise<void>): Promise<void> {
+    const current = (this.presenceMutationChains.get(key) ?? Promise.resolve()).catch(() => {}).then(mutation)
+    this.presenceMutationChains.set(key, current)
+    try {
+      await current
+    } finally {
+      if (this.presenceMutationChains.get(key) === current) this.presenceMutationChains.delete(key)
+    }
   }
 
   private async listPresenceByBucket(key: string): Promise<Map<LocationBucket, string[]>> {
@@ -460,7 +473,10 @@ class CloudflareBroadcastTransport {
   private ensurePresence(lane: BroadcastLane, locationBucket: LocationBucket): MemberBucketState {
     const key = laneKey(lane)
     const existing = this.memberStates.get(key)
-    if (existing !== undefined) return existing
+    if (existing !== undefined) {
+      existing.teardownRequested = false
+      return existing
+    }
     const memberState = new MemberBucketState(lane.key, locationBucket, this.getAuthorityStub(lane.key, locationBucket))
     this.memberStates.set(key, memberState)
     void this.initializePresence(key, memberState).catch(() => {})

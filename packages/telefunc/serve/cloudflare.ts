@@ -272,7 +272,11 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
         locationBucket = target.locationBucket
         token = `${sessionInstanceName}:${crypto.randomUUID()}`
         const value: StoredShardToken = { s: sessionInstanceName, b: locationBucket }
-        ctx.waitUntil(kv.put(`session:${token}`, JSON.stringify(value), { expirationTtl: SHARD_TOKEN_TTL_SECONDS }))
+        const routingCommit = kv.put(`session:${token}`, JSON.stringify(value), {
+          expirationTtl: SHARD_TOKEN_TTL_SECONDS,
+        })
+        ctx.waitUntil(routingCommit)
+        await routingCommit
       }
 
       const forwardedHeaders = new Headers(request.headers as Headers)
