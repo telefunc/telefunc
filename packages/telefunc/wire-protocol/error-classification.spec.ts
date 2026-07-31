@@ -1,5 +1,5 @@
 import { expect, it } from 'vitest'
-import { isRoomError } from './room/protocol.js'
+import { isRoomError } from './room/errors.js'
 import { classifyTelefuncError } from './error-classification.js'
 
 const brands = Object.fromEntries(

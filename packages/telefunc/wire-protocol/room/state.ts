@@ -4,17 +4,9 @@ import { assertUsage } from '../../utils/assert.js'
 import { isPromise } from '../../utils/isPromise.js'
 import type { ChannelPublishInfo } from '../channel.js'
 import { adoptSubordinateOf, makeDisposer, releaseSubordinate } from '../wrapProxy.js'
-import {
-  DEFAULT_TRACK,
-  emptyTrackWants,
-  isRoomTrack,
-  ownMetadata,
-  stampNewer,
-  type BinaryWants,
-  type MemberSnapshot,
-  type MemberWants,
-  type TrackWants,
-} from './protocol.js'
+import { DEFAULT_TRACK, emptyTrackWants, isRoomTrack, type BinaryWants, type TrackWants } from './binary.js'
+import { ownMetadata, stampNewer } from './model.js'
+import type { MemberSnapshot, MemberWants } from './protocol.js'
 import type {
   BinaryFrameInfo,
   LeaveCause,

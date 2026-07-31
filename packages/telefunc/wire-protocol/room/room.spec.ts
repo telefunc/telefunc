@@ -15,30 +15,18 @@ import {
   ROOM_TAIL_HOLD_CODE_UNITS_MAX,
   ROOM_TAIL_HOLD_MAX,
 } from './constants.js'
-import {
-  DEFAULT_TRACK,
-  RoomError,
-  frameWithMemberId,
-  isRoomError,
-  leaveCauseFromWire,
-  leaveCauseToWire,
-  mergeAttributes,
-  normalizeJoinOptions,
-  pushBoundedTail,
-  roomAckError,
-  roomCtrlKey,
-  roomIdentityKvPrefix,
-  roomMemberKvKey,
-  sanitizeBinaryWants,
-  unframeMemberId,
-  type RoomSnapshotMetadata,
-} from './protocol.js'
+import { DEFAULT_TRACK, frameWithMemberId, sanitizeBinaryWants, unframeMemberId } from './binary.js'
+import { RoomError, isRoomError } from './errors.js'
+import { roomCtrlKey, roomIdentityKvPrefix, roomMemberKvKey } from './keys.js'
+import { leaveCauseFromWire, leaveCauseToWire, mergeAttributes, normalizeJoinOptions } from './model.js'
+import { pushBoundedTail, type RoomSnapshotMetadata } from './protocol.js'
 import type { LeaveCause } from './types.js'
 import { ClientRoom } from './client.js'
 import { ClientBroadcast } from '../client/channel.js'
 import { RoomState, remoteBacking } from './state.js'
 import { Room, ServerRoom } from './server.js'
 import { SubSlot, configFromHead, decodeRoomText, encodeRoomConfig } from './server/lanes.js'
+import { roomAckError } from './server/errors.js'
 import { RoomStubChannel } from './stubs.js'
 import { RoomDemand } from './demand.js'
 import type { ChannelPublishInfo } from '../channel.js'

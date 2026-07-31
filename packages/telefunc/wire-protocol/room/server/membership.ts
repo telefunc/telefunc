@@ -15,16 +15,18 @@ import { assertUsage } from '../../../utils/assert.js'
 import { getBackend } from '../../backend/install.js'
 import type { CellMutation } from '../../backend/spi.js'
 import { ROOM_MEMBER_TTL_MS } from '../constants.js'
+import { uuidToBytes } from '../binary.js'
+import { RoomError } from '../errors.js'
 import {
-  RoomError,
-  leaveCauseToWire,
   roomIdentityKvPrefix,
   roomIdentityMemberKvKey,
   roomMemberCleanupKvKey,
   roomMemberCleanupKvPrefix,
   roomMemberKvKey,
   roomMemberKvPrefix,
-  uuidToBytes,
+} from '../keys.js'
+import { leaveCauseToWire } from '../model.js'
+import {
   type MemberSnapshot,
   type RoomConfigRecord,
   type RoomDataEnvelope,
@@ -98,40 +100,47 @@ async function readMembers(roomId: string, inc: string, ids?: string[]): Promise
   for (const { key, id } of memberKeys) {
     const raw = cells.get(key)
     if (raw === undefined) continue
-    const record = parse(decodeRoomText(raw)) as RoomMemberRecord
-    if (Date.now() - record.seenAt > ROOM_MEMBER_TTL_MS) {
-      const cleanupKey = roomMemberCleanupKvKey(roomId, id)
-      const siblingKeys = [key]
-      if (record.identity !== undefined) siblingKeys.push(roomIdentityMemberKvKey(roomId, record.identity, id))
-      const cleanup: PendingMemberCleanup = { cause: { cause: 'disconnected' } }
-      const reap = await mutateCells<
-        { kind: 'missing' } | { kind: 'reaped' } | { kind: 'live'; record: RoomMemberRecord }
-      >(roomId, inc, { keys: [...siblingKeys, cleanupKey] }, (current) => {
-        const latest = current.get(key)
-        if (latest === undefined) return { value: { kind: 'missing' } as const, mutations: [] }
-        const latestRecord = parse(decodeRoomText(latest)) as RoomMemberRecord
-        return Date.now() - latestRecord.seenAt > ROOM_MEMBER_TTL_MS
-          ? {
-              value: { kind: 'reaped' } as const,
-              mutations: [
-                ...siblingKeys.map((siblingKey) => ({ key: siblingKey })),
-                ...(current.has(cleanupKey)
-                  ? []
-                  : [{ key: cleanupKey, set: { bytes: encodeRoomText(stringify(cleanup)) } }]),
-              ],
-            }
-          : { value: { kind: 'live', record: latestRecord } as const, mutations: [] }
-      })
-      if (reap.kind === 'reaped') {
-        await finishPendingMemberCleanup(roomId, inc, id)
-      } else if (reap.kind === 'live') {
-        members.push(memberSnapshot(id, reap.record))
-      }
-      continue
-    }
-    members.push(memberSnapshot(id, record))
+    const record = await readOrReapExpiredMember(roomId, inc, key, id, parse(decodeRoomText(raw)) as RoomMemberRecord)
+    if (record !== null) members.push(memberSnapshot(id, record))
   }
   return members
+}
+
+async function readOrReapExpiredMember(
+  roomId: string,
+  inc: string,
+  key: string,
+  id: string,
+  record: RoomMemberRecord,
+): Promise<RoomMemberRecord | null> {
+  if (Date.now() - record.seenAt <= ROOM_MEMBER_TTL_MS) return record
+  const cleanupKey = roomMemberCleanupKvKey(roomId, id)
+  const siblingKeys = [key]
+  if (record.identity !== undefined) siblingKeys.push(roomIdentityMemberKvKey(roomId, record.identity, id))
+  const cleanup: PendingMemberCleanup = { cause: { cause: 'disconnected' } }
+  const reap = await mutateCells<{ kind: 'missing' } | { kind: 'reaped' } | { kind: 'live'; record: RoomMemberRecord }>(
+    roomId,
+    inc,
+    { keys: [...siblingKeys, cleanupKey] },
+    (current) => {
+      const latest = current.get(key)
+      if (latest === undefined) return { value: { kind: 'missing' } as const, mutations: [] }
+      const latestRecord = parse(decodeRoomText(latest)) as RoomMemberRecord
+      return Date.now() - latestRecord.seenAt > ROOM_MEMBER_TTL_MS
+        ? {
+            value: { kind: 'reaped' } as const,
+            mutations: [
+              ...siblingKeys.map((siblingKey) => ({ key: siblingKey })),
+              ...(current.has(cleanupKey)
+                ? []
+                : [{ key: cleanupKey, set: { bytes: encodeRoomText(stringify(cleanup)) } }]),
+            ],
+          }
+        : { value: { kind: 'live', record: latestRecord } as const, mutations: [] }
+    },
+  )
+  if (reap.kind === 'reaped') await finishPendingMemberCleanup(roomId, inc, id)
+  return reap.kind === 'live' ? reap.record : null
 }
 
 function memberSnapshot(id: string, record: RoomMemberRecord): MemberSnapshot {

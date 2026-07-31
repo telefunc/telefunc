@@ -13,21 +13,15 @@ import type { ShieldValidator } from '../../node/server/shield.js'
 import { ServerBroadcast } from '../server/server-broadcast.js'
 import { encodePublishText, type WirePublishInfo } from '../shared-ws.js'
 import { type ServerLocalParticipant, type ServerRoom } from './server.js'
-import { reportRoomError } from './server/lanes.js'
+import { reportRoomError, roomAckError } from './server/errors.js'
 import type { ParticipantMeta, RoomSendReceipt } from './types.js'
+import { binaryWantsCovers, emptyTrackWants, unframeMemberId, type BinaryWants } from './binary.js'
+import { DM_PARTICIPANT_LEFT, RoomError, roomFailureError } from './errors.js'
+import { roomCtrlKey } from './keys.js'
+import { leaveCauseToWire } from './model.js'
 import {
-  binaryWantsCovers,
   pushBoundedTail,
-  DM_PARTICIPANT_LEFT,
-  emptyTrackWants,
-  RoomError,
-  roomAckError,
-  roomFailureError,
   hasRoomTag,
-  leaveCauseToWire,
-  roomCtrlKey,
-  unframeMemberId,
-  type BinaryWants,
   type RoomOrder,
   type DmReply,
   type MemberSnapshot,

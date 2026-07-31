@@ -5,15 +5,11 @@ import type { TELEFUNC_SHIELDS } from '../../node/shared/transformer/generateShi
 import { makePublishInfo, type ChannelPublishAck, type ChannelPublishInfo } from '../channel.js'
 import { ClientBroadcast } from '../client/channel.js'
 import type { ClientChannel } from '../client/channel.js'
+import { DM_PARTICIPANT_LEFT } from './errors.js'
+import { frameWithMemberId, unframeMemberId } from './binary.js'
+import { leaveCauseFromWire, mergeAttributes, normalizeJoinOptions, ownMetadata } from './model.js'
 import {
-  DM_PARTICIPANT_LEFT,
-  leaveCauseFromWire,
-  frameWithMemberId,
   hasRoomTag,
-  mergeAttributes,
-  normalizeJoinOptions,
-  ownMetadata,
-  unframeMemberId,
   type MemberWants,
   type MemberSnapshot,
   type ParticipantStubMetadata,

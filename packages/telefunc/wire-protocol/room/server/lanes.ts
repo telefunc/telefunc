@@ -8,18 +8,17 @@ export {
   encodeRoomConfig,
   encodeRoomText,
   publishCtrl,
-  reportRoomError,
   withinRoomHorizon,
 }
 
 import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
-import { handleTelefunctionBug } from '../../../node/server/runTelefunc/validateTelefunctionError.js'
 import { unrefTimer } from '../../../utils/unrefTimer.js'
 import { getBackend } from '../../backend/install.js'
 import type { BackendSubscription, CommitAccepted, LaneId, RoomHead } from '../../backend/spi.js'
 import type { RoomConfigRecord, RoomCtrlEnvelope } from '../protocol.js'
-import { RoomError } from '../protocol.js'
+import { RoomError } from '../errors.js'
+import { reportRoomError } from './errors.js'
 
 const roomTextEncoder = new TextEncoder()
 const roomTextDecoder = new TextDecoder()
@@ -192,8 +191,4 @@ function withinRoomHorizon<T>(promise: Promise<T>, ms: number): Promise<T> {
 async function publishCtrl(roomId: string, inc: string, event: RoomCtrlEnvelope): Promise<void> {
   const committed = await commitRoomLane(roomId, inc, CONTROL_LANE, encodeRoomText(stringify(event)))
   if (committed === null) throw new RoomError(`Room is closed: ${roomId}`)
-}
-
-function reportRoomError(err: unknown): void {
-  handleTelefunctionBug(err instanceof Error ? err : new Error(String(err)))
 }

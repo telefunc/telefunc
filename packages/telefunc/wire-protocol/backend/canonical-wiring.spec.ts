@@ -55,6 +55,10 @@ describe('canonical wiring', () => {
     // biome-ignore format: keep the sole Step-2 exception pinned as a manifest
     expect(edges.sort()).toEqual(['packages/telefunc/wire-protocol/client/response/registry.ts -> packages/telefunc/wire-protocol/room/response-client.ts'])
   })
+  it('keeps the Room protocol shape module from becoming a re-export mega-barrel', () => {
+    const declarations = source('packages/telefunc/wire-protocol/room/protocol.ts').getExportDeclarations()
+    expect(declarations.some((declaration) => declaration.getModuleSpecifierValue() !== undefined)).toBe(false)
+  })
 })
 function walk(dir: string): string[] {
   return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {

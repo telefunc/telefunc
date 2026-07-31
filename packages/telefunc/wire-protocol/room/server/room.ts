@@ -20,29 +20,25 @@ import { getBackend } from '../../backend/install.js'
 import type { LaneId, BackendSubscription } from '../../backend/spi.js'
 import { encodePublishBinary, encodePublishText, type WirePublishInfo } from '../../shared-ws.js'
 import {
-  RoomError,
-  roomFailureError,
-  leaveCauseFromWire,
-  leaveCauseToWire,
   frameWithMemberId,
   binaryFrameSender,
-  hasRoomTag,
-  mergeAttributes,
-  normalizeJoinOptions,
-  ownMetadata,
-  roomMemberKvKey,
-  roomIdentityMemberKvKey,
   unframeMemberId,
   DEFAULT_TRACK,
   emptyTrackWants,
   mergeTrackWants,
   binaryWantsCovers,
-  sanitizeBinaryWants,
-  pushBoundedTail,
   wantsAnyBinary,
+  sanitizeBinaryWants,
   type BinaryWants,
-  type MemberWants,
   type TrackWants,
+} from '../binary.js'
+import { RoomError, roomFailureError } from '../errors.js'
+import { roomIdentityMemberKvKey, roomMemberKvKey } from '../keys.js'
+import { leaveCauseFromWire, leaveCauseToWire, mergeAttributes, normalizeJoinOptions, ownMetadata } from '../model.js'
+import {
+  hasRoomTag,
+  pushBoundedTail,
+  type MemberWants,
   type MemberSnapshot,
   type RoomConfigRecord,
   type RoomCtrlEnvelope,
@@ -69,9 +65,9 @@ import {
   decodeRoomText,
   encodeRoomText,
   publishCtrl,
-  reportRoomError,
   withinRoomHorizon,
 } from './lanes.js'
+import { reportRoomError } from './errors.js'
 import { evictMember, mutateCells, readCell, readMembers } from './membership.js'
 import type {
   BinaryPublishOptions,

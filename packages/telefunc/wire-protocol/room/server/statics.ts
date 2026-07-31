@@ -7,11 +7,10 @@ import { assert, assertUsage } from '../../../utils/assert.js'
 import { isObject } from '../../../utils/isObject.js'
 import { getBackend } from '../../backend/install.js'
 import type { BackendSpi, RoomHead } from '../../backend/spi.js'
+import { RoomError } from '../errors.js'
+import { roomMemberKvKey } from '../keys.js'
+import { mergeAttributes, ownMetadata } from '../model.js'
 import {
-  RoomError,
-  mergeAttributes,
-  ownMetadata,
-  roomMemberKvKey,
   type MemberSnapshot,
   type RoomConfigRecord,
   type RoomCtrlEnvelope,

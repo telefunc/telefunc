@@ -5,7 +5,9 @@ import type { ChannelPublishAck } from '../channel.js'
 import { makeDisposer, releaseSubordinate } from '../wrapProxy.js'
 import type { TELEFUNC_SHIELDS } from '../../node/shared/transformer/generateShield/shield-key.js'
 import { isPromise } from '../../utils/isPromise.js'
-import { RoomError, toRoomFailure, DM_PARTICIPANT_LEFT, ownMetadata, type DmReply } from './protocol.js'
+import { DM_PARTICIPANT_LEFT, RoomError, toRoomFailure } from './errors.js'
+import { ownMetadata } from './model.js'
+import type { DmReply } from './protocol.js'
 import type {
   BinaryPublishOptions,
   LeaveCause,
