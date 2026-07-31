@@ -42,6 +42,7 @@ import {
   REDIS_ROOM_COMMANDS,
   REDIS_ORDERING_FRAME_LUA,
   REDIS_SAFE_INTEGER_MAX,
+  redisKeyPrefix,
   retainedKey,
   retainedKeyPrefix,
   revKey,
@@ -50,7 +51,6 @@ import { RedisSubscriptionDriver } from './subscriber-transport.js'
 
 const DIRECTORY_PAGE_SIZE = 100
 const STABLE_READ_ATTEMPTS = 8
-const DROP_RETRY_MS = 20
 const NEWLINE = 0x0a
 
 function assertOrderingPosition(seq: number, timestamp: number, context: string): void {
@@ -96,7 +96,7 @@ type HeadCxReply =
   | { tag: 'head'; head: StoredHead }
   | { tag: 'deleted' }
   | { tag: 'conflict'; current: StoredHead | null }
-type DropGenerationBeginReply = { exists: false } | { busy: true } | { exists: true; token: string }
+type DropGenerationBeginReply = { exists: false } | { exists: true; token: string }
 type ReadCellsFenceReply = { stale: true } | { revision: string; now: number }
 
 function toBase64(bytes: Uint8Array): string {
@@ -152,6 +152,13 @@ export class RedisRoomBackend implements BackendDriver {
     if (options.redis instanceof Cluster && options.redis.options.scaleReads !== 'master') {
       throw new Error("RedisRoomBackend: ioredis Cluster scaleReads must be 'master' for consistent Room reads")
     }
+    const retries =
+      options.redis instanceof Cluster
+        ? options.redis.options.retryDelayOnFailover !== 0 ||
+          options.redis.options.redisOptions?.maxRetriesPerRequest !== 0 ||
+          options.redis.options.redisOptions?.reconnectOnError != null
+        : options.redis.options.maxRetriesPerRequest !== 0 || options.redis.options.reconnectOnError != null
+    if (retries) throw new Error('RedisRoomBackend: ioredis retries violate at-most-once delivery')
     this.#publisher = options.redis
     let clusterSubscriberSelection = 0
     const createSubscriber = async (): Promise<Redis> => {
@@ -184,7 +191,7 @@ export class RedisRoomBackend implements BackendDriver {
         retryStrategy: () => null,
       })
     }
-    this.#prefix = options.prefix ?? DEFAULT_ROOM_PREFIX
+    this.#prefix = redisKeyPrefix(options.prefix ?? DEFAULT_ROOM_PREFIX)
     this.#receivers = options.redis instanceof Cluster ? 'none' : 'global'
     this.#publisher.defineCommand(PUBLISH_CMD, { numberOfKeys: 2, lua: PUBLISH_LUA })
     for (const command of Object.values(REDIS_ROOM_COMMANDS)) {
@@ -456,35 +463,22 @@ export class RedisRoomBackend implements BackendDriver {
 
   async dropGeneration(roomId: string, inc: string): Promise<void> {
     this.#assertLive()
-    const owner = randomUUID()
-    for (;;) {
-      const begin = JSON.parse(
-        (await this.#call(REDIS_ROOM_COMMANDS.dropGenerationBegin.name, [
-          ...REDIS_ROOM_COMMAND_KEYS.dropGenerationBegin(this.#prefix, roomId),
-          '',
-          inc,
-          owner,
-        ])) as string,
-      ) as DropGenerationBeginReply
-      if ('exists' in begin && !begin.exists) return
-      if ('busy' in begin) {
-        await new Promise((resolve) => setTimeout(resolve, DROP_RETRY_MS))
-        continue
-      }
-      const keys = await this.#publisher.smembers(generationKeysKey(this.#prefix, roomId, inc))
-      const finalizeKeys = REDIS_ROOM_COMMAND_KEYS.dropGenerationFinalize(this.#prefix, roomId, inc, keys)
-      if (
-        (await this.#call(REDIS_ROOM_COMMANDS.dropGenerationFinalize.name, [
-          String(finalizeKeys.length),
-          ...finalizeKeys,
-          inc,
-          begin.token,
-          owner,
-        ])) === 1
-      ) {
-        return
-      }
-    }
+    const begin = JSON.parse(
+      (await this.#call(REDIS_ROOM_COMMANDS.dropGenerationBegin.name, [
+        ...REDIS_ROOM_COMMAND_KEYS.dropGenerationBegin(this.#prefix, roomId),
+        '',
+        inc,
+      ])) as string,
+    ) as DropGenerationBeginReply
+    if (!begin.exists) return
+    const keys = await this.#publisher.smembers(generationKeysKey(this.#prefix, roomId, inc))
+    const finalizeKeys = REDIS_ROOM_COMMAND_KEYS.dropGenerationFinalize(this.#prefix, roomId, inc, keys)
+    await this.#call(REDIS_ROOM_COMMANDS.dropGenerationFinalize.name, [
+      String(finalizeKeys.length),
+      ...finalizeKeys,
+      inc,
+      begin.token,
+    ])
   }
 
   // ── directory (global; its own two co-slotted keys) ──
@@ -522,18 +516,19 @@ export class RedisRoomBackend implements BackendDriver {
       else break
     }
     if (matching.length === 0) return { entries: [] }
-    const tags = await this.#publisher.hmget(directoryTagsKey(this.#prefix), ...matching)
+    // Prefix matches are contiguous; the independent tag/peek reads remain all-or-error through Promise.all.
+    const last = matching[matching.length - 1] as string
+    const [tags, peek] = await Promise.all([
+      this.#publisher.hmget(directoryTagsKey(this.#prefix), ...matching),
+      matching.length === DIRECTORY_PAGE_SIZE && page.length === DIRECTORY_PAGE_SIZE
+        ? this.#publisher.zrangebylex(index, `(${last}`, '+', 'LIMIT', 0, 1)
+        : [],
+    ])
     const entries = matching.flatMap((roomId, i) => {
       const incTag = tags[i]
       return incTag === null || incTag === undefined ? [] : [{ roomId, incTag }]
     })
-    const last = matching[matching.length - 1] as string
-    let more = false
-    if (matching.length === DIRECTORY_PAGE_SIZE && page.length === DIRECTORY_PAGE_SIZE) {
-      const peek = await this.#publisher.zrangebylex(index, `(${last}`, '+', 'LIMIT', 0, 1)
-      more = peek.length > 0 && (peek[0] as string).startsWith(prefix)
-    }
-    return more ? { entries, cursor: last } : { entries }
+    return peek.length > 0 && (peek[0] as string).startsWith(prefix) ? { entries, cursor: last } : { entries }
   }
 
   async dispose(): Promise<void> {

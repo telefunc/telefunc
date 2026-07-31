@@ -4,6 +4,7 @@ import type { BackendSpi, CommitAccepted, LaneId, RoomHead, SubscriptionState } 
 import { afterAll, afterEach, beforeAll, describe, expect, it, onTestFinished, vi } from 'vitest'
 import { installRedis, RedisRoomBackend } from '../../src/index.js'
 import {
+  broadcastSequenceKey,
   channelKey,
   decodeRedisOrderingFrame,
   headKey,
@@ -50,22 +51,44 @@ describe('Redis real three-master Cluster CI certification', () => {
   afterEach(() => vi.restoreAllMocks())
 
   afterAll(async () => {
-    await Promise.allSettled((masters ?? []).map(({ client }) => client.quit()))
+    await Promise.all((masters ?? []).map(({ client }) => client.quit().catch(() => client.disconnect())))
     if (cluster !== undefined) await cluster.quit().catch(() => cluster.disconnect())
   })
 
-  it('requires compatible Telefunc and master-routed Cluster reads', () => {
+  it('requires compatible Telefunc, master reads, and a never-resend command connection', async () => {
     const manifest = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')) as {
       peerDependencies: { telefunc: string }
     }
     expect(manifest.peerDependencies.telefunc).toBe('>=0.2.23')
     const scaleReads = cluster.options.scaleReads
+    const retryDelayOnFailover = cluster.options.retryDelayOnFailover
     try {
       cluster.options.scaleReads = 'slave'
       expect(() => new RedisRoomBackend({ redis: cluster, prefix: 'rejected:' })).toThrow(/scaleReads.*master/i)
+      cluster.options.scaleReads = scaleReads
+      cluster.options.retryDelayOnFailover = 100
+      expect(() => new RedisRoomBackend({ redis: cluster, prefix: 'unsafe-cluster:' })).toThrow(/at-most-once/i)
     } finally {
       cluster.options.scaleReads = scaleReads
+      cluster.options.retryDelayOnFailover = retryDelayOnFailover
     }
+
+    const prefix = uniquePrefix('reply-loss')
+    const backend = ownRoomBackend(cluster, prefix)
+    for (const unsafePrefix of ['x{}', 'x{', '{global}']) {
+      expect(() => new RedisRoomBackend({ redis: cluster, prefix: unsafePrefix })).toThrow(/prefix/i)
+    }
+    await expect(backend.publish({ key: '}edge', kind: 'text' }, bytes('unsafe'))).rejects.toThrow(/Broadcast key/)
+    const commands = cluster as unknown as Record<string, (...args: unknown[]) => Promise<unknown>>
+    const publish = commands.tfPublish.bind(cluster)
+    vi.spyOn(commands, 'tfPublish').mockImplementation(async (...args) => {
+      await publish(...args)
+      if (cluster.options.retryDelayOnFailover === 0) throw new Error('simulated reply loss after execution')
+      return await publish(...args)
+    })
+    await expect(backend.publish({ key: 'once', kind: 'text' }, bytes('once'))).rejects.toThrow()
+    expect(await cluster.get(broadcastSequenceKey(prefix, 'once'))).toBe('1')
+    expect(() => new RedisRoomBackend({ redis: masters[0].client })).toThrow(/at-most-once/i)
   })
 
   it('covers shipped command KEYS and terminates live and in-flight attempts when their generation drops', async () => {
@@ -248,24 +271,22 @@ describe('Redis real three-master Cluster CI certification', () => {
     const roomId = await roomOnMaster(prefix, source.id, 'reshard-inventory')
     const inc = 'reshard-inventory-inc'
     const slotNumber = await slot(headKey(prefix, roomId))
+    await target.client.cluster('SETSLOT', slotNumber, 'IMPORTING', source.id)
+    await source.client.cluster('SETSLOT', slotNumber, 'MIGRATING', target.id)
+    await restoreSlot(slotNumber, source, target)
     const smembers = client.smembers.bind(client)
-    let relocated = false
-    const relocate = async (): Promise<void> => {
-      if (relocated) return
-      relocated = true
-      await moveSlot(slotNumber, source, target)
-    }
+    let relocation: Promise<void> | undefined
     vi.spyOn(client, 'smembers').mockImplementation((async (key: string) => {
-      if (key === `${genPrefix(prefix, roomId, inc)}:keys`) await relocate()
+      if (key === `${genPrefix(prefix, roomId, inc)}:keys`) await (relocation ??= moveSlot(slotNumber, source, target))
       return await smembers(key)
     }) as never)
     try {
       await open(backend, roomId, inc)
       accepted(await backend.commitLane(roomId, inc, SEMANTIC_LANE, bytes('retained'), { retain: true }))
       expect(await backend.listRetained(roomId, inc)).toEqual([SEMANTIC_LANE])
-      expect(relocated).toBe(true)
+      expect(relocation).toBeDefined()
     } finally {
-      if (relocated) await restoreSlot(slotNumber, source, target)
+      if (relocation !== undefined) await restoreSlot(slotNumber, source, target)
     }
   })
 
@@ -348,15 +369,10 @@ describe('Redis real three-master Cluster CI certification', () => {
       firstDrop = backend.dropGeneration(roomId, inc)
       await inventoryRead.promise
       secondDrop = secondDropper.dropGeneration(roomId, inc)
-      if (await settlesWithin(secondDrop, 100)) {
-        await reinstall()
-        releaseInventory.resolve()
-        await firstDrop
-      } else {
-        releaseInventory.resolve()
-        await Promise.all([firstDrop, secondDrop])
-        await reinstall()
-      }
+      await secondDrop
+      await reinstall()
+      releaseInventory.resolve()
+      await firstDrop
       const reinstalled = await authority.readCells(roomId, inc, { keys: ['survivor'] })
       if ('staleInc' in reinstalled) throw new Error('reinstalled generation became stale')
       expect(Buffer.from(reinstalled.cells.get('survivor') ?? []).toString()).toBe('new')
@@ -501,7 +517,7 @@ describe('Redis real three-master Cluster CI certification', () => {
     expect(observed).toEqual(['late-second'])
   })
 
-  it('omits globally unknowable receiver counts while still delivering cross-node', async () => {
+  it('omits unknowable receiver counts and shares empty-key text/binary ordering across nodes', async () => {
     const prefix = uniquePrefix('receivers')
     const backend = ownBackend(cluster, prefix)
     // RedisRoomBackend sorts master endpoints before round-robin subscriber selection. Mirror that
@@ -606,9 +622,11 @@ describe('Redis real three-master Cluster CI certification', () => {
   }
 
   async function pubSubClients(): Promise<Array<{ id: number; owner: Master }>> {
+    // Independent reads stay all-or-error: Promise.all rejects instead of returning a partial topology.
+    const lists = await Promise.all(masters.map(({ client }) => client.call('CLIENT', 'LIST', 'TYPE', 'PUBSUB')))
     const clients: Array<{ id: number; owner: Master }> = []
-    for (const master of masters) {
-      const list = String(await master.client.call('CLIENT', 'LIST', 'TYPE', 'PUBSUB'))
+    for (const [index, master] of masters.entries()) {
+      const list = String(lists[index])
       for (const line of list.split('\n')) {
         if (!line.includes('name=telefunc-subscriber-')) continue
         const id = line.match(/(?:^|\s)id=(\d+)(?:\s|$)/)?.[1]
@@ -623,7 +641,8 @@ describe('Redis real three-master Cluster CI certification', () => {
     await source.client.cluster('SETSLOT', slotNumber, 'MIGRATING', target.id)
     const keys = (await source.client.cluster('GETKEYSINSLOT', slotNumber, 10_000)) as string[]
     await migrateKeys(source, target, keys)
-    for (const master of masters) await master.client.cluster('SETSLOT', slotNumber, 'NODE', target.id)
+    // Every NODE write is dispatched before Promise.all can reject, so restoration is all-attempt.
+    await Promise.all(masters.map(({ client }) => client.cluster('SETSLOT', slotNumber, 'NODE', target.id)))
   }
 
   async function migrateKeys(source: Master, target: Master, keys: string[]): Promise<void> {
@@ -634,7 +653,14 @@ describe('Redis real three-master Cluster CI certification', () => {
   }
 
   async function restoreSlot(slotNumber: number, original: Master, current: Master): Promise<void> {
-    await moveSlot(slotNumber, current, original)
+    await Promise.all([original, current].map(({ client }) => client.cluster('SETSLOT', slotNumber, 'STABLE')))
+    await original.client.cluster('SETSLOT', slotNumber, 'IMPORTING', current.id).catch((error: unknown) => {
+      if (!String(error).includes('already the owner')) throw error
+    })
+    const keys = (await current.client.cluster('GETKEYSINSLOT', slotNumber, 10_000)) as string[]
+    await migrateKeys(current, original, keys)
+    await original.client.cluster('SETSLOT', slotNumber, 'STABLE')
+    await Promise.all(masters.map(({ client }) => client.cluster('SETSLOT', slotNumber, 'NODE', original.id)))
     for (const master of masters) expect((await clusterInfo(master.client)).cluster_state).toBe('ok')
   }
 })
@@ -643,7 +669,8 @@ function clusterClient(nodes: RedisClusterNode[]): Cluster {
   const client = new Cluster(nodes, {
     scaleReads: 'master',
     slotsRefreshTimeout: 2_000,
-    redisOptions: { maxRetriesPerRequest: 2 },
+    retryDelayOnFailover: 0,
+    redisOptions: { maxRetriesPerRequest: 0 },
     clusterRetryStrategy: (attempt) => (attempt <= 5 ? 20 : null),
   })
   client.on('error', () => {})
@@ -652,24 +679,30 @@ function clusterClient(nodes: RedisClusterNode[]): Cluster {
 
 async function readMasters(nodes: RedisClusterNode[]): Promise<Master[]> {
   const seed = new Redis(nodes[0] as RedisClusterNode)
-  const raw = (await seed.cluster('SLOTS')) as unknown as Array<[number, number, [string, number, string]]>
-  await seed.quit()
   const masters = new Map<string, Master>()
-  for (const [start, end, [host, port, id]] of raw) {
-    const existing = masters.get(id)
-    if (existing === undefined) {
-      masters.set(id, {
-        host,
-        port,
-        id,
-        ranges: [[start, end]],
-        client: new Redis({ host, port, maxRetriesPerRequest: 2 }),
-      })
-    } else {
-      existing.ranges.push([start, end])
+  try {
+    const raw = (await seed.cluster('SLOTS')) as unknown as Array<[number, number, [string, number, string]]>
+    for (const [start, end, [host, port, id]] of raw) {
+      const existing = masters.get(id)
+      if (existing === undefined) {
+        masters.set(id, {
+          host,
+          port,
+          id,
+          ranges: [[start, end]],
+          client: new Redis({ host, port, maxRetriesPerRequest: 2 }),
+        })
+      } else {
+        existing.ranges.push([start, end])
+      }
     }
+    return [...masters.values()]
+  } catch (error) {
+    for (const { client } of masters.values()) client.disconnect()
+    throw error
+  } finally {
+    seed.disconnect()
   }
-  return [...masters.values()]
 }
 
 async function open(backend: Pick<BackendSpi, 'compareExchangeHead'>, roomId: string, inc: string): Promise<RoomHead> {

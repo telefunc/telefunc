@@ -197,8 +197,8 @@ class RedisSubscriptionAttempt implements SubscriptionAttempt {
       subscriber.on('error', this._onError)
 
       const channels = redisSubscriptionChannels(this._prefix, this._source)
-      // Raw readiness settles only after the real Redis acknowledgement. Core, not this driver, owns
-      // the deadline, retries, readiness generations and attempt epochs.
+      // Raw readiness settles only after the real Redis acknowledgement. Consumers own deadlines and
+      // replacement; core owns readiness generations and attempt epochs.
       await subscriber.subscribe(...channels)
       this._subscribed = true
       if (this._isStopped() || this._subscriber !== subscriber) return

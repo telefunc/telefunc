@@ -16,7 +16,6 @@
 //                                           SREM'd by dropGeneration; the fresh-inc guard is one SISMEMBER
 //   gen-token: tf:room:{rid}:gen-tokens      HASH inc -> non-reusable generation token (the installing
 //                                           head revision), removed only with the final gens SREM
-//   gen-drop:  tf:room:{rid}:gen-drops       HASH inc -> exclusive cleanup owner + lease
 //   dir index: tf:{rid-dir}<prefix>… — the directory is global, its own two co-slotted keys (backend.ts)
 //
 // Each time-sensitive command samples Redis TIME on the room-slot owner (spi.md I13). Tests may inject
@@ -29,15 +28,20 @@ export const DEFAULT_ROOM_PREFIX = 'tf:'
 export const REDIS_DELIVERY_FENCE_BYTE = 0xff
 export const REDIS_SAFE_INTEGER_MAX = Number.MAX_SAFE_INTEGER
 
+export function redisKeyPrefix(prefix: string): string {
+  if (prefix.includes('{')) throw new Error("Redis key prefix must not contain '{'")
+  return prefix
+}
 function broadcastTag(key: string): string {
+  if (key.startsWith('}')) throw new Error("Redis Broadcast key must not start with '}'")
   return key === '' ? '{_}:empty' : `{${key}}`
 }
 export function broadcastSequenceKey(prefix: string, key: string): string {
-  return `${prefix}seq:${broadcastTag(key)}`
+  return `${redisKeyPrefix(prefix)}seq:${broadcastTag(key)}`
 }
 export function broadcastChannel(prefix: string, lane: BroadcastLane): string {
   const kind = lane.kind === 'text' ? 't' : 'b'
-  return `${prefix}${kind}:${broadcastTag(lane.key)}`
+  return `${redisKeyPrefix(prefix)}${kind}:${broadcastTag(lane.key)}`
 }
 
 // ── key naming ────────────────────────────────────────────────────────────
@@ -46,7 +50,7 @@ export function broadcastChannel(prefix: string, lane: BroadcastLane): string {
 export function roomTag(prefix: string, roomId: string): string {
   // A Redis hash tag ends at the first `}`. Encode caller input before placing it in braces so an
   // arbitrary room id cannot escape the tag or split one logical room across slots.
-  return `${prefix}room:{${encodeURIComponent(roomId)}}`
+  return `${redisKeyPrefix(prefix)}room:{${encodeURIComponent(roomId)}}`
 }
 export function headKey(prefix: string, roomId: string): string {
   return `${roomTag(prefix, roomId)}:head`
@@ -59,9 +63,6 @@ export function gensKey(prefix: string, roomId: string): string {
 }
 export function generationTokensKey(prefix: string, roomId: string): string {
   return `${roomTag(prefix, roomId)}:gen-tokens`
-}
-export function generationDropsKey(prefix: string, roomId: string): string {
-  return `${roomTag(prefix, roomId)}:gen-drops`
 }
 export function genPrefix(prefix: string, roomId: string, inc: string): string {
   return `${roomTag(prefix, roomId)}:g:${inc}`
@@ -95,10 +96,10 @@ export function generationInvalidationChannel(prefix: string, roomId: string, in
 }
 // The directory's two keys share their own tag so the tag-guarded delete stays one slot under Cluster.
 export function directoryIndexKey(prefix: string): string {
-  return `${prefix}room-dir:{${prefix}dir}:index`
+  return `${redisKeyPrefix(prefix)}room-dir:{${redisKeyPrefix(prefix)}dir}:index`
 }
 export function directoryTagsKey(prefix: string): string {
-  return `${prefix}room-dir:{${prefix}dir}:tags`
+  return `${redisKeyPrefix(prefix)}room-dir:{${redisKeyPrefix(prefix)}dir}:tags`
 }
 
 export function parseLaneKey(key: string): LaneId {
@@ -323,49 +324,34 @@ end
 return 1
 `
 
-// Begin snapshots the immutable generation token and claims one cleanup lease while gens membership
-// blocks reuse. A second drop waits for that owner; an abandoned owner can be replaced after the lease.
-// Every destructive script below checks the owner id, so a replaced owner is fenced before deletion.
-//   KEYS: [1]=head [2]=gens [3]=generation-tokens [4]=generation-drops
-//   ARGV: [1]=now [2]=inc [3]=owner
+// Begin snapshots the immutable generation token while gens membership blocks reuse.
+//   KEYS: [1]=head [2]=gens [3]=generation-tokens
+//   ARGV: [1]=now [2]=inc
 export const DROP_GENERATION_BEGIN_LUA = `${NOW_FN}
-local now, inc, owner = tf_now(ARGV[1]), ARGV[2], ARGV[3]
+local now, inc = tf_now(ARGV[1]), ARGV[2]
 local head = tf_head(KEYS[1], now)
 if head and head.inc == inc then
   return redis.error_reply("dropGeneration: refusing to drop the current incarnation '" .. inc .. "'")
 end
-if redis.call('SISMEMBER', KEYS[2], inc) == 0 then
-  redis.call('HDEL', KEYS[4], inc)
-  return '{"exists":false}'
-end
+if redis.call('SISMEMBER', KEYS[2], inc) == 0 then return '{"exists":false}' end
 local token = redis.call('HGET', KEYS[3], inc)
 if not token then return redis.error_reply('dropGeneration: generation token is missing') end
-local active_raw = redis.call('HGET', KEYS[4], inc)
-if active_raw then
-  local active = cjson.decode(active_raw)
-  if active.id ~= owner and active['until'] >= now then return '{"busy":true}' end
-end
-redis.call('HSET', KEYS[4], inc, cjson.encode({ id = owner, ['until'] = now + 30000 }))
 return '{"exists":true,"token":' .. cjson.encode(token) .. '}'
 `
 
-// Finalize only while the begin token and exclusive owner still match. Every physical member is a
-// declared key; deletion, keyed invalidation, and retirement are one atomic room-slot operation.
-//   KEYS: [1]=gens [2]=generation-tokens [3]=generation-drops [4]=invalidation-channel
-//         [5]=manifest [6..]=members
-//   ARGV: [1]=inc [2]=expected-token [3]=owner
+// Finalize only while membership and the immutable begin token still match. Every physical member is
+// a declared key; deletion, keyed invalidation, and retirement are one atomic room-slot operation.
+//   KEYS: [1]=gens [2]=generation-tokens [3]=invalidation-channel [4]=manifest [5..]=members
+//   ARGV: [1]=inc [2]=expected-token
 export const DROP_GENERATION_FINALIZE_LUA = `
-local inc, expected_token, owner = ARGV[1], ARGV[2], ARGV[3]
+local inc, expected_token = ARGV[1], ARGV[2]
 if redis.call('SISMEMBER', KEYS[1], inc) == 0 then return 0 end
 if redis.call('HGET', KEYS[2], inc) ~= expected_token then return 0 end
-local active_raw = redis.call('HGET', KEYS[3], inc)
-if not active_raw or cjson.decode(active_raw).id ~= owner then return 0 end
-for i = 6, #KEYS do redis.call('UNLINK', KEYS[i]) end
-redis.call('UNLINK', KEYS[5])
-redis.call('PUBLISH', KEYS[4], expected_token)
+for i = 5, #KEYS do redis.call('UNLINK', KEYS[i]) end
+redis.call('UNLINK', KEYS[4])
+redis.call('PUBLISH', KEYS[3], expected_token)
 redis.call('SREM', KEYS[1], inc)
 redis.call('HDEL', KEYS[2], inc)
-redis.call('HDEL', KEYS[3], inc)
 return 1
 `
 
@@ -548,7 +534,7 @@ export const REDIS_ROOM_COMMANDS = {
   readHead: command('tfRoomReadHead', READ_HEAD_LUA, 1),
   readCellsFence: command('tfRoomReadCellsFence', READ_CELLS_FENCE_LUA, 2),
   validateGeneration: command('tfRoomValidateGeneration', VALIDATE_GENERATION_LUA, 3),
-  dropGenerationBegin: command('tfRoomDropGenerationBegin', DROP_GENERATION_BEGIN_LUA, 4),
+  dropGenerationBegin: command('tfRoomDropGenerationBegin', DROP_GENERATION_BEGIN_LUA, 3),
   dropGenerationFinalize: command('tfRoomDropGenerationFinalize', DROP_GENERATION_FINALIZE_LUA, null),
   cellsCx: command('tfRoomCellsCx', CELLS_CX_LUA, null),
   commit: command('tfRoomCommit', COMMIT_LUA, null),
@@ -578,12 +564,10 @@ export const REDIS_ROOM_COMMAND_KEYS = {
     headKey(prefix, roomId),
     gensKey(prefix, roomId),
     generationTokensKey(prefix, roomId),
-    generationDropsKey(prefix, roomId),
   ],
   dropGenerationFinalize: (prefix: string, roomId: string, inc: string, generationKeys: readonly string[]) => [
     gensKey(prefix, roomId),
     generationTokensKey(prefix, roomId),
-    generationDropsKey(prefix, roomId),
     generationInvalidationChannel(prefix, roomId, inc),
     generationKeysKey(prefix, roomId, inc),
     ...generationKeys,
