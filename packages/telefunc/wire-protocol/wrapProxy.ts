@@ -1,4 +1,4 @@
-export { wrapProxy }
+export { wrapProxy, adoptSubordinateOf, releaseSubordinate, makeDisposer }
 
 import { isObjectOrFunction } from '../utils/isObjectOrFunction.js'
 
@@ -12,6 +12,8 @@ import { isObjectOrFunction } from '../utils/isObjectOrFunction.js'
  *  WeakMap semantics: as long as the derived object (key) is reachable, the
  *  wrapper (value) is held strongly, so FinalizationRegistry won't collect it. */
 const keepWrapperAlive = new WeakMap<object, unknown>()
+const targetWrappers = new WeakMap<object, WeakRef<object>>()
+const releasedSubordinates = new WeakSet<object>()
 
 /** Wrap a value in a transparent proxy so it can be GC'd independently.
  *
@@ -22,10 +24,11 @@ function wrapProxy<T extends object>(target: T): T {
   if (typeof target === 'function') {
     const wrapper = (...args: unknown[]) => {
       const result = (target as Function)(...args)
-      tether(result, wrapper)
+      adoptSubordinate(result, wrapper)
       return result
     }
     Object.assign(wrapper, target)
+    targetWrappers.set(target, new WeakRef(wrapper))
     return wrapper as unknown as T
   }
 
@@ -36,7 +39,7 @@ function wrapProxy<T extends object>(target: T): T {
       // Return a forwarding function that tethers any returned object to the wrapper.
       return (...args: unknown[]) => {
         const result = property.apply(target, args)
-        tether(result, wrapper)
+        adoptSubordinate(result, wrapper)
         return result
       }
     },
@@ -58,10 +61,40 @@ function wrapProxy<T extends object>(target: T): T {
       return Reflect.getPrototypeOf(target)
     },
   })
+  targetWrappers.set(target, new WeakRef(wrapper))
   return wrapper
 }
 
 /** Pin `wrapper` to live as long as `derived` does (via WeakMap). */
-function tether(derived: unknown, wrapper: unknown): void {
-  if (isObjectOrFunction(derived)) keepWrapperAlive.set(derived, wrapper)
+function adoptSubordinate(derived: unknown, wrapper: unknown): void {
+  if (!isObjectOrFunction(derived)) return
+  if (releasedSubordinates.has(derived)) return
+  keepWrapperAlive.set(derived, wrapper)
+  if (Array.isArray(derived)) for (const value of derived) adoptSubordinate(value, wrapper)
+}
+
+/** Tether a value exposed outside a method return (for example, a callback argument). */
+function adoptSubordinateOf(owner: object, derived: unknown): void {
+  const wrapper = targetWrappers.get(owner)?.deref()
+  if (wrapper) adoptSubordinate(derived, wrapper)
+}
+
+/** A terminal child no longer owns its parent resource's lifetime. */
+function releaseSubordinate(derived: object): void {
+  releasedSubordinates.add(derived)
+  keepWrapperAlive.delete(derived)
+}
+
+/** A one-shot cleanup handle; no action creates an already-terminal handle. */
+function makeDisposer(dispose?: () => void, group?: Set<() => void>): () => void {
+  let action = dispose
+  const token = () => {
+    const current = action
+    action = undefined
+    group?.delete(token)
+    releaseSubordinate(token)
+    current?.()
+  }
+  action ? group?.add(token) : releaseSubordinate(token)
+  return token
 }

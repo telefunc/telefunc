@@ -27,7 +27,9 @@ function isBlobDownload(value: unknown): value is BlobDownload {
 
 /** File-shaped streaming download. Inherits Blob/File methods (`stream`/`arrayBuffer`/
  *  `text`/`slice`) from `LazyFile`; overrides `bytes` to use the StreamSource's built-in
- *  onChunk hook for progress + cancel detection. */
+ *  onChunk hook for progress + cancel detection.
+ *  Keep this module's implementation fields as ECMAScript `#private`: `wrapProxy` forwards own keys
+ *  and client `close()` recursively traverses `Object.values()`, so enumerability changes behavior. */
 class FileDownload extends LazyFile {
   readonly [FILE_DOWNLOAD_BRAND] = true
   readonly #core: DownloadCore

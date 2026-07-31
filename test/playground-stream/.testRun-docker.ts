@@ -1,4 +1,4 @@
-export { testRunDocker }
+export { setupDockerRun, testRunDocker }
 
 import { page, test, expect, run, skip, isCI, getServerUrl, autoRetry } from '@brillout/test-e2e'
 import { execSync } from 'node:child_process'
@@ -21,21 +21,23 @@ import { testRefIdentity } from './pages/ref-identity/e2e-test'
 ;(globalThis as { process?: { env: Record<string, string | undefined> } }).process!.env.NODE_TLS_REJECT_UNAUTHORIZED =
   '0'
 
-function testRunDocker() {
+function setupDockerRun(command = 'pnpm test:docker'): boolean {
   // Skip locally when Docker is unavailable. On CI a missing Docker should fail loudly,
   // not silently shrink coverage.
   if (!isCI() && !isDockerAvailable()) {
     skip('SKIPPED: Docker is not available (`docker info` failed).')
-    return
+    return false
   }
 
-  run('pnpm test:docker', {
+  run(command, {
     serverUrl: 'https://localhost:8443',
     serverIsReadyMessage: 'serving initial configuration',
     tolerateExitCode: [130],
     tolerateError(log) {
       const t = log.logText
       return (
+        // Caller-handled rejections (including unspaced ShieldValidationError) must stay silent;
+        // output from those paths is the double-report canary.
         t.includes('Container ') ||
         t.includes('Network ') ||
         t.includes('Volume ') ||
@@ -46,6 +48,7 @@ function testRunDocker() {
         t.includes('the server responded with a status of 500') ||
         t.includes('the server responded with a status of 422') ||
         t.includes('[telefunc:channel-error]') ||
+        // pages/channel/Channel.telefunc.ts deliberately throws a bug, which must be logged server-side.
         t.includes('Error: server-listener-bug') ||
         t.includes('Unexpected generator error') ||
         t.includes('[telefunc:rxjs]') ||
@@ -72,6 +75,12 @@ function testRunDocker() {
       )
     },
   })
+
+  return true
+}
+
+function testRunDocker() {
+  if (!setupDockerRun()) return
 
   test('home page', async () => {
     await navigate(`${getServerUrl()}/`, { waitUntil: 'load' })

@@ -34,6 +34,9 @@ export type {
   BlobDownloadMetadata,
   ChannelContract,
   BroadcastContract,
+  RoomContract,
+  RoomParticipantContract,
+  RoomRemoteContract,
   FunctionContract,
   FileDownload,
   BlobDownload,
@@ -43,6 +46,9 @@ export type {
 import type { ServerChannel } from './server/channel.js'
 import type { ServerBroadcast } from './server/server-broadcast.js'
 import type { ClientChannel, ClientBroadcast } from './client/channel.js'
+import type { ServerRoom, ServerLocalParticipant } from './room/server.js'
+import type { ClientRoom, LocalParticipant, RemoteParticipant } from './room/types.js'
+import type { RoomSnapshotMetadata, ParticipantStubMetadata } from './room/protocol.js'
 import type { AbortError } from '../shared/Abort.js'
 import type { ShieldValidators } from '../node/server/shield.js'
 import type { FileDownload, BlobDownload } from './client/response/DownloadClasses.js'
@@ -91,7 +97,11 @@ type ReviverType<C extends TypeContract = TypeContract, Context = unknown> = {
   revive(
     metadata: C['metadata'],
     context: Context,
-  ): { value: C['result']; close: () => Promise<void> | void; abort: (abortError: AbortError) => void }
+  ): {
+    value: C['result']
+    close: () => Promise<void> | void
+    abort: (abortError: AbortError) => void
+  }
 }
 
 // ===== Producer =====
@@ -135,6 +145,8 @@ type StreamSource = {
 
 /** Context for all client-side response revivers (streaming + placeholder). */
 type ClientReviverContext = {
+  /** Gives a derived value its owner's explicit-close lifetime without changing its identity. */
+  adoptSubordinate(child: object, trackedOwner: object): void
   createChannel<ClientToServer = unknown, ServerToClient = unknown>(opts: {
     channelId: string
     ack?: boolean
@@ -241,6 +253,27 @@ type DownloadProgress = (loaded: number, total: number | undefined) => void
 type ChannelContract = TypeContract<ServerChannel, ClientChannel, { channelId: string; ack?: true }>
 
 type BroadcastContract = TypeContract<ServerBroadcast, ClientBroadcast, { channelId: string; key: string }>
+
+type RoomContract = TypeContract<ServerRoom, ClientRoom, RoomSnapshotMetadata>
+
+type RoomParticipantContract = TypeContract<ServerLocalParticipant, LocalParticipant, ParticipantStubMetadata>
+
+/** A `RemoteParticipant` view crossing the wire: (backing room, member snapshot). The room rides
+ *  inside the metadata — the ref-identity registries dedupe it against any co-returned occurrence,
+ *  so `room.getParticipant(m.id) === m` holds on the client. */
+type RoomRemoteContract = TypeContract<
+  RemoteParticipant,
+  RemoteParticipant,
+  {
+    room: unknown
+    id: string
+    meta: Record<string, unknown>
+    joinedAt: number
+    metaSeq: number
+    identity: string | null
+    hidden?: boolean
+  }
+>
 
 type FunctionContract = TypeContract<
   (...args: readonly unknown[]) => unknown,

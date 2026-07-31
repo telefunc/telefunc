@@ -25,6 +25,7 @@ export type {
 }
 
 import { assert } from '../utils/assert.js'
+import { decodeOrderingFrame, encodeOrderingFrame } from './ordering-frame.js'
 import type { ChannelTransports } from './constants.js'
 
 // ===== Wire protocol =====
@@ -467,25 +468,50 @@ function decodePublishText(wire: string): { text: string; info: WirePublishInfo 
   return { text: wire.slice(nl + 1), info: { seq, timestamp } }
 }
 
-// ===== Binary publish info helpers =====
-// Format: [4 bytes: seq as u32 LE][8 bytes: timestamp as f64 LE][binary data]
-
-const PUBLISH_BINARY_HEADER = 12
+// The deployed v0 layout remains the default so rolling clients can read new writers. A wide
+// sequence uses a tagged prefix whose timestamp bytes are NaN to every v0 reader, making skew fail
+// at its existing validation seam instead of silently shifting four payload bytes.
+const PUBLISH_BINARY_V0_HEADER = 12
+const PUBLISH_BINARY_V1_PREFIX = new Uint8Array([0x54, 0x46, 0x42, 1, 0, 0, 0, 0, 0, 0, 0xf8, 0x7f])
 
 function encodePublishBinary(data: Uint8Array, info: WirePublishInfo): Uint8Array {
-  const result = new Uint8Array(PUBLISH_BINARY_HEADER + data.byteLength)
-  const view = new DataView(result.buffer)
-  view.setUint32(0, info.seq, true)
-  view.setFloat64(4, info.timestamp, true)
-  result.set(data, PUBLISH_BINARY_HEADER)
-  return result
+  assertPublishInfo(info)
+  if (info.seq <= 0xffff_ffff) {
+    const wire = new Uint8Array(PUBLISH_BINARY_V0_HEADER + data.byteLength)
+    const view = new DataView(wire.buffer)
+    view.setUint32(0, info.seq, true)
+    view.setFloat64(4, info.timestamp, true)
+    wire.set(data, PUBLISH_BINARY_V0_HEADER)
+    return wire
+  }
+  const ordered = encodeOrderingFrame(data, info)
+  const wire = new Uint8Array(PUBLISH_BINARY_V1_PREFIX.byteLength + ordered.byteLength)
+  wire.set(PUBLISH_BINARY_V1_PREFIX)
+  wire.set(ordered, PUBLISH_BINARY_V1_PREFIX.byteLength)
+  return wire
 }
 
 function decodePublishBinary(wire: Uint8Array): { data: Uint8Array; info: WirePublishInfo } {
-  assert(wire.byteLength >= PUBLISH_BINARY_HEADER, 'PUBLISH_BINARY frame too short for info header')
+  assert(wire.byteLength >= PUBLISH_BINARY_V0_HEADER, 'PUBLISH_BINARY frame too short for info header')
   const view = new DataView(wire.buffer, wire.byteOffset, wire.byteLength)
-  const seq = view.getUint32(0, true)
-  const timestamp = view.getFloat64(4, true)
-  assert(Number.isFinite(seq) && Number.isFinite(timestamp), 'PUBLISH_BINARY frame info must be finite numbers')
-  return { data: wire.subarray(PUBLISH_BINARY_HEADER), info: { seq, timestamp } }
+  const versioned = view.getUint16(0, true) === 0x4654 && wire[2] === 0x42 && Number.isNaN(view.getFloat64(4, true))
+  if (versioned) {
+    assert(wire[3] === 1, `Unsupported PUBLISH_BINARY wire version ${wire[3]}`)
+    const { payload, info } = decodeOrderingFrame(wire.subarray(PUBLISH_BINARY_V1_PREFIX.byteLength))
+    return { data: payload, info }
+  }
+  const info = { seq: view.getUint32(0, true), timestamp: view.getFloat64(4, true) }
+  assert(
+    Number.isFinite(info.seq) && Number.isFinite(info.timestamp),
+    'PUBLISH_BINARY frame info must be finite numbers',
+  )
+  return { data: wire.subarray(PUBLISH_BINARY_V0_HEADER), info }
+}
+
+function assertPublishInfo(info: WirePublishInfo): void {
+  assert(Number.isSafeInteger(info.seq) && info.seq > 0, 'PUBLISH_BINARY seq must be a positive safe integer')
+  assert(
+    Number.isSafeInteger(info.timestamp) && info.timestamp >= 0,
+    'PUBLISH_BINARY timestamp must be a non-negative safe integer',
+  )
 }

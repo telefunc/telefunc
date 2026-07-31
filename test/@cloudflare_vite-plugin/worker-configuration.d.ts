@@ -7,6 +7,7 @@ interface __BaseEnv_Env {
   SOME_ENV_VAR: 'some-value'
   TO_DO_LIST_DURABLE_OBJECTS: DurableObjectNamespace /* TodoListDurableObject */
   TelefuncDurableObject: DurableObjectNamespace /* TelefuncDurableObject */
+  TelefuncRoomDurableObject: DurableObjectNamespace /* TelefuncRoomDurableObject */
 }
 declare namespace Cloudflare {
   interface Env extends __BaseEnv_Env {}

@@ -5,7 +5,7 @@ import { TelefuncStreamBeta } from '../../components'
 
 <TelefuncStreamBeta />
 
-Redis-backed <Link href="/channel#broadcast">broadcast</Link> fan-out across server instances — a `publish()` on any instance reaches every `subscribe()` on every other instance.
+Redis-backed <Link href="/channel#broadcast">broadcast</Link> fan-out across server instances — a `publish()` on any instance reaches every `subscribe()` on every other instance. <Link href="/room">Rooms</Link> work across instances too: room state lives in Redis keys, room events travel over Redis Pub/Sub.
 
 > You only need this if you scale horizontally — see <Link href="/stream/scale" />.
 
@@ -21,15 +21,15 @@ npm install @telefunc/redis ioredis
 import IORedis from 'ioredis'
 import { installRedis } from '@telefunc/redis'
 
-const redis = new IORedis('redis://localhost:6379')
+const redis = new IORedis('redis://localhost:6379', { maxRetriesPerRequest: 0 })
 installRedis(redis)
 ```
 
-That swaps the default in-memory broadcast transport for one backed by Redis Pub/Sub. All subscribers across the cluster observe the same publish order for a given key.
+That single call installs the Redis backend for both Broadcast and Room from the same client. In steady state, Broadcast subscribers across the cluster observe the publish order for a given key; frames in flight during a Redis Cluster slot-owner change may be lost, consistent with Broadcast's at-most-once delivery. Room state and events are shared across instances automatically.
 
 ### Sharing an existing client
 
-Pass an existing [`ioredis`](https://github.com/redis/ioredis) Redis or Cluster instance when you want to share a connection or set custom options such as TLS or a retry strategy.
+Pass an existing [`ioredis`](https://github.com/redis/ioredis) Redis or Cluster instance when you want to share a connection or set options such as TLS or authentication.
 
 ```ts
 // Environment: server
@@ -37,11 +37,11 @@ Pass an existing [`ioredis`](https://github.com/redis/ioredis) Redis or Cluster 
 import IORedis from 'ioredis'
 import { installRedis } from '@telefunc/redis'
 
-const redis = new IORedis(process.env.REDIS_URL, { tls: {} })
+const redis = new IORedis(process.env.REDIS_URL, { tls: {}, maxRetriesPerRequest: 0 })
 installRedis(redis)
 ```
 
-Internally, Telefunc calls `duplicate()` on the client to open a dedicated subscriber connection — your instance is never mutated or disconnected. You can continue to use it alongside Telefunc without interference.
+Internally, Telefunc calls `duplicate()` on the client for its dedicated subscriber connections — your instance is never disconnected. You can continue to use it alongside Telefunc without interference.
 
 ## Channels
 

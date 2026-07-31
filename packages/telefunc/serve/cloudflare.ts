@@ -8,7 +8,7 @@ import crossws from 'crossws/adapters/cloudflare'
 import { getTelefuncChannelHooks } from '../wire-protocol/server/ws.js'
 import { getServerConfig, enableChannelTransports } from '../node/server/serverConfig.js'
 import { serve as serveTelefunc } from '../node/server/telefunc.js'
-import { installBroadcastAdapter } from '../wire-protocol/server/broadcast.js'
+import { setDefaultBackend } from '../wire-protocol/backend/install.js'
 import {
   CloudflareBroadcastAuthorityState,
   CloudflareBroadcastTransport,
@@ -28,8 +28,33 @@ import { assertUsage } from '../utils/assert.js'
 import type { Telefunc as TelefuncNamespace } from '../node/server/context/getContext.js'
 import type { CloudflareScale, LocationBucket } from '../wire-protocol/server/adapter/cloudflare/routing.js'
 import { CHANNEL_TRANSPORT } from '../wire-protocol/constants.js'
+import {
+  CloudflareRoomSessionManager,
+  CloudflareRoomBackend,
+  CLOUDFLARE_ROOM_CONTEXT_ERROR,
+  getCloudflareRoomSessionManager,
+  requireCloudflareRoomNamespace,
+  withCloudflareRoomSessionManager,
+  type CloudflareRoomNamespace,
+  type RoomShardDeliveryRequest,
+  type RoomShardInvalidationRequest,
+} from '../wire-protocol/server/adapter/cloudflare/room/backend.js'
+import { createTelefuncRoomDurableObjectClass } from '../wire-protocol/server/adapter/cloudflare/room/do.js'
+import {
+  dispatchRoomShardFanout,
+  type RoomShardFanoutNamespace,
+  type RoomShardFanoutRequest,
+} from '../wire-protocol/server/adapter/cloudflare/room/fanout.js'
+import { isAsyncMode } from '../node/server/context/context.js'
+import { getGlobalObject } from '../utils/getGlobalObject.js'
+import { isTelefuncRequest } from './shared.js'
 
 const SHARD_TOKEN_TTL_SECONDS = 86400
+const SESSION_RESET_CLOSE_CODE = 1012
+const SESSION_RESET_CLOSE_REASON = 'Telefunc session reset; reconnect'
+const cloudflareBackendSlot = getGlobalObject<{
+  current?: { identity: string; backend: CloudflareRoomBackend }
+}>('serve/cloudflare.backend.ts', () => ({}))
 
 type CloudflareOptions = {
   bindingName?: string
@@ -39,6 +64,7 @@ type CloudflareOptions = {
   scale?: CloudflareScale
   locationFallback?: DurableObjectLocationHint
   jurisdiction?: DurableObjectJurisdiction
+  roomBindingName?: string
 }
 
 type StoredShardToken = {
@@ -55,6 +81,7 @@ type ServeInput = {
 interface TelefuncServe {
   serve(input: ServeInput): Promise<Response | undefined>
   TelefuncDurableObject: new (ctx: DurableObjectState, env: Cloudflare.Env) => DurableObject
+  TelefuncRoomDurableObject: new (ctx: DurableObjectState, env: Cloudflare.Env) => DurableObject
 }
 
 interface Telefunc extends TelefuncServe {}
@@ -73,15 +100,26 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
   const locationFallback = options?.locationFallback ?? 'weur'
   assertLocationFallbackIsScaled(scale, locationFallback)
   const jurisdiction = options?.jurisdiction
+  const roomBindingName = options?.roomBindingName ?? 'TelefuncRoomDurableObject'
 
   const crosswsAdapter = crossws({
     bindingName,
     instanceName: baseInstanceName,
     hooks: getTelefuncChannelHooks(),
   })
-  // Factory runs only on first install. Bundler quirks can evaluate the user's entry twice in the same isolate;
-  // we want every evaluation to share one transport instance.
-  const broadcast = installBroadcastAdapter(() => new CloudflareBroadcastTransport({ baseInstanceName, scale }))
+  // Stable configuration shares the raw driver without displacing an explicit backend in either call order.
+  const backendIdentity = cloudflareBackendIdentity(baseInstanceName, scale)
+  let cloudflareBackend = cloudflareBackendSlot.current?.backend
+  if (
+    cloudflareBackendSlot.current?.identity !== backendIdentity ||
+    cloudflareBackend === undefined ||
+    cloudflareBackend.disposed
+  ) {
+    cloudflareBackend = new CloudflareRoomBackend(new CloudflareBroadcastTransport({ baseInstanceName, scale }))
+    cloudflareBackendSlot.current = { identity: backendIdentity, backend: cloudflareBackend }
+  }
+  setDefaultBackend(() => cloudflareBackend, backendIdentity)
+  const broadcast = cloudflareBackend.broadcast
 
   function getBinding(env: Cloudflare.Env): DurableObjectNamespace | undefined {
     const baseBinding = (env as Record<string, DurableObjectNamespace | undefined>)[bindingName]
@@ -92,10 +130,15 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
     return (env as Record<string, KVNamespace | undefined>)[kvBindingName]
   }
 
+  function getRoomBinding(env: Cloudflare.Env): DurableObjectNamespace {
+    return requireCloudflareRoomNamespace(env, roomBindingName) as unknown as DurableObjectNamespace
+  }
+
   const getContext = options?.context
 
   const TelefuncDurableObject = class extends DurableObject {
     private readonly authorityState: CloudflareBroadcastAuthorityState
+    private roomManager: CloudflareRoomSessionManager | null = null
 
     constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
       super(ctx, env)
@@ -109,28 +152,30 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
     }
 
     async fetch(request: Request) {
-      const shard = request.headers.get(TELEFUNC_SHARD_HEADER)
-      const bucket = request.headers.get(TELEFUNC_BROADCAST_BUCKET_HEADER) as LocationBucket | null
-      if (shard && bucket) {
-        broadcast.attachIsolateInfo(shard, bucket)
-      }
-      if (request.headers.get('upgrade') === 'websocket') {
-        return crosswsAdapter.handleDurableUpgrade(this, request)
-      }
-      const context = getContext ? await getContext(request, this.env as Cloudflare.Env) : undefined
-      const httpResponse = await serveTelefunc(context ? { request, context } : { request })
-      return new Response(httpResponse.getReadableWebStream(), {
-        status: httpResponse.statusCode,
-        headers: httpResponse.headers,
+      return this.runWithRoomManager(async () => {
+        const shard = request.headers.get(TELEFUNC_SHARD_HEADER)
+        const bucket = request.headers.get(TELEFUNC_BROADCAST_BUCKET_HEADER) as LocationBucket | null
+        if (shard && bucket) {
+          broadcast.attachIsolateInfo(shard, bucket)
+        }
+        if (request.headers.get('upgrade') === 'websocket') {
+          return crosswsAdapter.handleDurableUpgrade(this, request)
+        }
+        const context = getContext ? await getContext(request, this.env as Cloudflare.Env) : undefined
+        const httpResponse = await serveTelefunc(context ? { request, context } : { request })
+        return new Response(httpResponse.getReadableWebStream(), {
+          status: httpResponse.statusCode,
+          headers: httpResponse.headers,
+        })
       })
     }
 
     webSocketMessage(ws: WebSocket, message: string | ArrayBuffer) {
-      return crosswsAdapter.handleDurableMessage(this, ws, message)
+      return this.runWithRoomManager(() => crosswsAdapter.handleDurableMessage(this, ws, message))
     }
 
     webSocketClose(ws: WebSocket, code: number, reason: string, wasClean: boolean) {
-      return crosswsAdapter.handleDurableClose(this, ws, code, reason, wasClean)
+      return this.runWithRoomManager(() => crosswsAdapter.handleDurableClose(this, ws, code, reason, wasClean))
     }
 
     telefuncBroadcastPublish(request: BroadcastPublishRequest) {
@@ -138,14 +183,63 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
     }
 
     telefuncBroadcastDeliver(request: BroadcastDeliverRequest) {
-      broadcast.deliverToLocal(request)
+      return broadcast.deliverToLocal(request)
+    }
+
+    telefuncRoomDeliver(request: RoomShardDeliveryRequest): Promise<void> {
+      return this.runWithRoomManager(() => {
+        const roomManager = getCloudflareRoomSessionManager()
+        if (roomManager !== this.roomManager) throw new Error(CLOUDFLARE_ROOM_CONTEXT_ERROR)
+        return roomManager.deliver(request)
+      })
+    }
+
+    telefuncRoomInvalidate(request: RoomShardInvalidationRequest): void {
+      return this.runWithRoomManager(() => {
+        const roomManager = getCloudflareRoomSessionManager()
+        if (roomManager !== this.roomManager) throw new Error(CLOUDFLARE_ROOM_CONTEXT_ERROR)
+        return roomManager.invalidate(request)
+      })
+    }
+
+    telefuncRoomFanout(request: RoomShardFanoutRequest) {
+      const binding = getBinding(this.env)
+      assertUsage(binding, `Missing Cloudflare Durable Object binding "${bindingName}" during Room fanout.`)
+      return dispatchRoomShardFanout(binding as unknown as RoomShardFanoutNamespace, request)
+    }
+
+    protected runWithRoomManager<T>(fn: () => T): T {
+      // The first real Room call materializes the epoch; ordinary fetch/socket work stays Room-free.
+      return isAsyncMode() ? withCloudflareRoomSessionManager(() => this.activateRoomManager(), fn) : fn()
+    }
+
+    private activateRoomManager(): CloudflareRoomSessionManager {
+      if (this.roomManager) return this.roomManager
+      this.roomManager = this.createRoomManager()
+      this.closeRecoveredSockets()
+      return this.roomManager
+    }
+
+    private createRoomManager(): CloudflareRoomSessionManager {
+      return new CloudflareRoomSessionManager(
+        this.ctx.id.toString(),
+        () => getRoomBinding(this.env as Cloudflare.Env) as unknown as CloudflareRoomNamespace,
+      )
+    }
+
+    private closeRecoveredSockets(): void {
+      for (const socket of this.ctx.getWebSockets?.() ?? []) {
+        socket.close(SESSION_RESET_CLOSE_CODE, SESSION_RESET_CLOSE_REASON)
+      }
     }
   }
 
+  const TelefuncRoomDurableObject = createTelefuncRoomDurableObjectClass(bindingName)
+
   return {
     async serve({ request, env, ctx }: ServeInput): Promise<Response | undefined> {
+      if (!isTelefuncRequest(request)) return undefined
       const config = getServerConfig()
-      if (!new URL(request.url).pathname.startsWith(config.telefuncUrl)) return undefined
 
       const binding = getBinding(env)
       assertUsage(binding, `Missing Cloudflare Durable Object binding "${bindingName}". Add it to your wrangler.jsonc.`)
@@ -178,7 +272,11 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
         locationBucket = target.locationBucket
         token = `${sessionInstanceName}:${crypto.randomUUID()}`
         const value: StoredShardToken = { s: sessionInstanceName, b: locationBucket }
-        ctx.waitUntil(kv.put(`session:${token}`, JSON.stringify(value), { expirationTtl: SHARD_TOKEN_TTL_SECONDS }))
+        const routingCommit = kv.put(`session:${token}`, JSON.stringify(value), {
+          expirationTtl: SHARD_TOKEN_TTL_SECONDS,
+        })
+        ctx.waitUntil(routingCommit)
+        await routingCommit
       }
 
       const forwardedHeaders = new Headers(request.headers as Headers)
@@ -199,5 +297,14 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
       return doResponse
     },
     TelefuncDurableObject,
+    TelefuncRoomDurableObject,
   }
+}
+
+function cloudflareBackendIdentity(baseInstanceName: string, scale: CloudflareScale | undefined): string {
+  const normalizedScale =
+    typeof scale === 'object' && scale !== null
+      ? Object.entries(scale).sort(([left], [right]) => left.localeCompare(right))
+      : (scale ?? null)
+  return JSON.stringify([baseInstanceName, normalizedScale])
 }

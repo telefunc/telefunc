@@ -28,11 +28,14 @@ function testRun(cmd: 'pnpm dev' | 'pnpm preview') {
       (log.includes('Local:') && log.includes('http://localhost:3000')),
     tolerateError(log) {
       return (
+        // Caller-handled rejections (including unspaced ShieldValidationError) must stay silent;
+        // output from those paths is the double-report canary.
         log.logText.includes('File arguments are being consumed out of order') ||
         log.logText.includes('multiple streaming values') ||
         log.logText.includes('the server responded with a status of 500') ||
         log.logText.includes('the server responded with a status of 422') ||
         log.logText.includes('[telefunc:channel-error]') ||
+        // pages/channel/Channel.telefunc.ts deliberately throws a bug, which must be logged server-side.
         log.logText.includes('Error: server-listener-bug') ||
         log.logText.includes('Unexpected generator error') ||
         log.logText.includes('[telefunc:rxjs]') ||

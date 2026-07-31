@@ -7,7 +7,7 @@ If you use <Link href="/stream">Telefunc Stream</Link>, scaling Telefunc horizon
 
 - **Sticky sessions** (so a reconnecting client returns to the same server instance) — your load balancer must route every request from a given client to the same instance.
   > Required: every <Link href="/stream">stream</Link> needs this.
-- **Cross-instance broadcast transport** (a <Link href="/channel#broadcast">broadcast</Link> must reach subscribers on every server instance) — install one such as <Link href="/redis">`@telefunc/redis`</Link>.
+- **Cross-instance backend** (a <Link href="/channel#broadcast">broadcast</Link> must reach subscribers on every server instance) — install one such as <Link href="/redis">`@telefunc/redis`</Link>.
   > Optional: this is required only for streams that broadcast.
 
 
@@ -61,34 +61,32 @@ Serverless platforms that don't expose sticky-session routing aren't a good fit 
 
 ## Broadcast
 
-<Link href="/channel#broadcast">`Broadcast`</Link> is different: publishers and subscribers are intentionally decoupled — they only share a `key` string. Each instance keeps its own subscriber list locally, and the broadcast transport is what makes a publisher on instance A reach a subscriber on instance B.
+<Link href="/channel#broadcast">`Broadcast`</Link> is different: publishers and subscribers are intentionally decoupled — they only share a `key` string. Each instance keeps its own subscriber list locally, and the backend is what makes a publisher on instance A reach a subscriber on instance B.
 
-In a single-instance setup, the default in-memory transport is enough. In a multi-instance setup, install a transport that fans out across the cluster — such as <Link href="/redis"><code>@telefunc/redis</code></Link>.
+In a single-instance setup, the default in-memory backend is enough. In a multi-instance setup, install a backend that fans out across the cluster — such as <Link href="/redis"><code>@telefunc/redis</code></Link>.
 
-> Redis is the only adapter shipped today, but the `BroadcastTransport` interface is small (about four methods), so you can write a custom transport on top of NATS, Kafka, RabbitMQ, or any other message broker.
+> Redis is the only installable backend shipped today. A custom backend can use NATS, Kafka, RabbitMQ, or another system, but it implements Telefunc's complete backend contract — both cheap Broadcast delivery and the durable Room operations — rather than a separate broadcast-only hook.
 
 > For Cloudflare Workers, Telefunc has an adapter that uses Durable Objects — see <Link href="/stream/cloudflare" />.
 
-### `BroadcastTransport`
+### Custom backend
 
-For other backends (NATS, Kafka, …), implement `BroadcastTransport` and assign it to `config.broadcast.transport`. Telefunc wraps it with subscriber multiplexing and same-node delivery, so each `key` only opens one upstream subscription no matter how many local subscribers attach.
+Backend authors implement `BackendDriver` and install a factory from the `telefunc/backend` entry point:
 
 ```ts ts-only
-type BroadcastTransport = {
-  send(key: string, payload: string): { seq: number; timestamp: number } | Promise<{ seq: number; timestamp: number }>
-  listen(key: string, onMessage: (payload: string, info: { seq: number; timestamp: number }) => void): () => void
-  sendBinary(key: string, payload: Uint8Array): { seq: number; timestamp: number } | Promise<{ seq: number; timestamp: number }>
-  listenBinary(key: string, onMessage: (payload: Uint8Array, info: { seq: number; timestamp: number }) => void): () => void
-}
+import { installBackend, type BackendDriver } from 'telefunc/backend'
+
+const backend: BackendDriver = new MyBackend()
+installBackend(() => backend)
 ```
 
-`send()` / `sendBinary()` must return the assigned `{ seq, timestamp }` so subscribers across nodes see a single global order per key. `listen()` / `listenBinary()` return an unsubscribe function and are called at most once per key.
+`BackendDriver` owns storage, ordering, delivery attempts, and one raw subscription driver. Telefunc wraps that raw subscription edge with local fan-out, reference counting, readiness generations, ownership checks, stale-attempt rejection, and cleanup. It doesn't retry a failed raw attempt: recovery policy belongs to the Room or other consumer that needs it. `BackendSpi` is the resulting supervised interface consumed by Telefunc core; backend authors don't implement it directly. Telefunc owns and disposes the driver returned by the factory.
 
-> On Cloudflare Workers, Telefunc handles distributed broadcast automatically via Durable Objects — no transport needed. See <Link href="/stream/cloudflare" />.
+> On Cloudflare Workers, Telefunc installs its Durable Object backend automatically. See <Link href="/stream/cloudflare" />.
 
 ## Cloudflare
 
-[Cloudflare Workers](https://www.cloudflare.com/products/workers/) takes a different approach: `telefunc/cloudflare` routes channels through [Durable Objects](https://developers.cloudflare.com/durable-objects/) instead of sticky sessions, and fans out broadcasts across regions automatically. As a result, neither a sticky load balancer nor a broadcast transport is needed. See:
+[Cloudflare Workers](https://www.cloudflare.com/products/workers/) takes a different approach: `telefunc/cloudflare` routes channels through [Durable Objects](https://developers.cloudflare.com/durable-objects/) instead of sticky sessions, and fans out broadcasts across regions automatically. As a result, neither a sticky load balancer nor a separately installed backend is needed. See:
 - <Link href="/stream/cloudflare" />
 
 > You scale with <Link href="/stream/cloudflare#scaling">the `scale` option</Link> instead of a load balancer.

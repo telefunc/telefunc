@@ -36,6 +36,10 @@
       "types": "./dist/node/server/async_hooks.d.ts",
       "default": "./dist/node/server/async_hooks.js"
     },
+    "./backend": {
+      "types": "./dist/backend.d.ts",
+      "default": "./dist/backend.js"
+    },
     "./client": {
       "worker": "./dist/node/client.js",
       "browser": "./dist/client/index.js",
