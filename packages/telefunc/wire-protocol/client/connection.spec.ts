@@ -4,6 +4,7 @@ import { CHANNEL_RECONNECT_INITIAL_DELAY_MS, CHANNEL_TRANSPORT, RECONCILE_TIMEOU
 import { ClientConnection } from './connection.js'
 import { ClientBroadcast } from './channel.js'
 import { ACK_STATUS, type AckResultStatus } from '../shared-ws.js'
+import { config, getServerConfig } from '../../node/server/serverConfig.js'
 
 afterEach(() => vi.restoreAllMocks())
 
@@ -75,6 +76,14 @@ describe.each([
     })
     expect(report).not.toHaveBeenCalled()
   })
+})
+
+test.each([Infinity, 0.5, Number.MAX_SAFE_INTEGER + 1])('channel config rejects %s', (value) => {
+  expect(() => (config.channel.reconnectTimeout = value)).toThrow('non-negative safe integer')
+})
+test('channel config preserves zero through server resolution', () => {
+  config.channel.reconnectTimeout = 0
+  expect(getServerConfig().channel.reconnectTimeout).toBe(0)
 })
 
 describe('SSE reconcile watchdog', () => {

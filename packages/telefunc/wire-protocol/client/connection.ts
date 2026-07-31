@@ -1064,10 +1064,10 @@ class ClientConnection implements MuxConnection {
 
   private applyReconciled(ctrl: ReconciledPayload): ReconcileOutcome {
     this.sessionId = ctrl.sessionId
-    if (ctrl.reconnectTimeout) this.reconnectTimeoutMs = ctrl.reconnectTimeout
-    if (ctrl.idleTimeout) this.idleTimeoutMs = ctrl.idleTimeout
-    if (ctrl.clientReplayBuffer) this.clientReplayBufferBytes = ctrl.clientReplayBuffer
-    if (ctrl.clientReplayBufferBinary) this.clientReplayBufferBinaryBytes = ctrl.clientReplayBufferBinary
+    if (ctrl.reconnectTimeout !== undefined) this.reconnectTimeoutMs = ctrl.reconnectTimeout
+    if (ctrl.idleTimeout !== undefined) this.idleTimeoutMs = ctrl.idleTimeout
+    if (ctrl.clientReplayBuffer !== undefined) this.clientReplayBufferBytes = ctrl.clientReplayBuffer
+    if (ctrl.clientReplayBufferBinary !== undefined) this.clientReplayBufferBinaryBytes = ctrl.clientReplayBufferBinary
     const serverMap = new Map<number, number>()
     for (const channel of ctrl.open) serverMap.set(channel.ix, channel.lastSeq)
     const reconcileIxes = this.reconcileIxes
@@ -1779,8 +1779,8 @@ class SseTransport implements ClientChannelTransport {
   }
 
   applyReconciledSettings(ctrl: ReconciledPayload): void {
-    if (ctrl.sseFlushThrottle) this.flushThrottleMs = ctrl.sseFlushThrottle
-    if (ctrl.ssePostIdleFlushDelay) this.postIdleFlushDelayMs = ctrl.ssePostIdleFlushDelay
+    if (ctrl.sseFlushThrottle !== undefined) this.flushThrottleMs = ctrl.sseFlushThrottle
+    if (ctrl.ssePostIdleFlushDelay !== undefined) this.postIdleFlushDelayMs = ctrl.ssePostIdleFlushDelay
     this.heartbeatFlushDelayMs = Math.floor(ctrl.pingInterval / 2)
   }
 
