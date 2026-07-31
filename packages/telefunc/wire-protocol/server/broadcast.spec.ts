@@ -8,6 +8,7 @@ import { MemoryBackend, MemoryBackendState } from '../backend/memory/backend.js'
 import type { SubscriptionAttempt, SubscriptionAttemptState } from '../backend/spi.js'
 import { ChannelClosedError, ChannelOverflowError } from '../channel-errors.js'
 import { CHANNEL_BUFFER_LIMIT_BYTES } from '../constants.js'
+import { Abort } from '../../shared/Abort.js'
 
 let memoryState: MemoryBackendState
 beforeEach(async () => {
@@ -15,7 +16,10 @@ beforeEach(async () => {
   memoryState = new MemoryBackendState()
   installBackend(() => new MemoryBackend({ state: memoryState }))
 })
-afterEach(() => disposeBackend())
+afterEach(async () => {
+  await disposeBackend()
+  vi.restoreAllMocks()
+})
 
 function pendingSubscription() {
   let resolveReady!: () => void
@@ -168,22 +172,24 @@ describe('keyed in-process broadcast', () => {
   // Common defensive bug: a single throwing subscriber takes down the whole fan-out.
   // ServerBroadcast must isolate per-subscriber errors so one bad listener doesn't
   // starve the rest.
-  it('isolates subscriber errors — a throwing subscriber does not break others', () => {
+  it('isolates and reports thrown or rejected subscriber errors without breaking others', async () => {
+    const report = vi.spyOn(console, 'error').mockImplementation(() => {})
     const broadcast = new ServerBroadcast<{ text: string }>({ key: 'room:err' })
     broadcast._registerChannel()
 
     const goodReceived: string[] = []
-    broadcast.subscribe(() => {
-      throw new Error('bad subscriber')
-    })
+    broadcast.subscribe(() => Promise.reject(new Error('bad subscriber')))
     broadcast.subscribe((m) => goodReceived.push(m.text))
     broadcast.subscribe(() => {
       throw new Error('also bad')
     })
+    broadcast.subscribeBinary(() => Promise.reject(new Error('bad binary subscriber')))
 
     broadcast.publish({ text: 'hi' })
+    broadcast.publishBinary(new Uint8Array())
 
     expect(goodReceived).toEqual(['hi'])
+    await vi.waitFor(() => expect(report).toHaveBeenCalledTimes(3))
   })
 
   // The unsubscribe handle returned by `subscribe()` is the only way for users to
@@ -266,7 +272,6 @@ describe('keyed in-process broadcast', () => {
     } finally {
       sender.abort()
       receiver.abort()
-      publish.mockRestore()
     }
   })
 
@@ -305,21 +310,15 @@ describe('binary in-process broadcast', () => {
       timestamp: 1,
       receivers: 1,
     })
-    try {
-      const broadcast = new ServerBroadcast({ key: 'room:bin-ready' })
-      broadcast._registerChannel()
-      broadcast._onPeerBroadcastSubscribe(true)
-
-      const publishing = broadcast.publishBinary(new Uint8Array([1, 2, 3]))
-      await Promise.resolve()
-      expect(publish).not.toHaveBeenCalled()
-
-      pending.ready()
-      await expect(publishing).resolves.toMatchObject({ seq: 1, timestamp: 1, receivers: 1 })
-      expect(publish).toHaveBeenCalledOnce()
-    } finally {
-      publish.mockRestore()
-    }
+    const broadcast = new ServerBroadcast({ key: 'room:bin-ready' })
+    broadcast._registerChannel()
+    broadcast._onPeerBroadcastSubscribe(true)
+    const publishing = broadcast.publishBinary(new Uint8Array([1, 2, 3]))
+    await Promise.resolve()
+    expect(publish).not.toHaveBeenCalled()
+    pending.ready()
+    await expect(publishing).resolves.toMatchObject({ seq: 1, timestamp: 1, receivers: 1 })
+    expect(publish).toHaveBeenCalledOnce()
   })
 
   it('caps payload bytes held while a subscription is establishing', async () => {
@@ -334,12 +333,11 @@ describe('binary in-process broadcast', () => {
     const overflow = sender.publishBinary(new Uint8Array(1))
 
     try {
+      pending.ready()
       await expect(overflow).rejects.toBeInstanceOf(ChannelOverflowError)
     } finally {
-      pending.ready()
       await Promise.allSettled([first, overflow])
       expect(publish.mock.calls[0]?.[1][0]).toBe(7)
-      publish.mockRestore()
     }
   })
 
@@ -526,7 +524,6 @@ describe('Broadcast static bus (publish/subscribe)', () => {
       expect(publish).toHaveBeenCalledOnce()
     } finally {
       unsubscribe()
-      publish.mockRestore()
     }
   })
 
@@ -546,18 +543,23 @@ describe('Broadcast static bus (publish/subscribe)', () => {
       expect(publish).toHaveBeenCalledTimes(2)
     } finally {
       unsubscribe()
-      publish.mockRestore()
     }
   })
 
   it('static publish + static subscribe deliver without any instance', async () => {
+    const report = vi.spyOn(console, 'error').mockImplementation(() => {})
     const received: Array<{ text: string }> = []
     const unsubscribe = Broadcast.subscribe<{ text: string }>('room:static', (msg) => received.push(msg))
+    const unsubscribeBug = Broadcast.subscribe('room:static', () => Promise.reject(new Error('static text bug')))
+    const unsubscribeAbort = Broadcast.subscribe('room:static', () => Promise.reject(Abort('expected')))
 
     await Broadcast.publish('room:static', { text: 'fire-and-forget' })
 
+    await vi.waitFor(() => expect(report).toHaveBeenCalledOnce())
     expect(received).toEqual([{ text: 'fire-and-forget' }])
     unsubscribe()
+    unsubscribeBug()
+    unsubscribeAbort()
   })
 
   it('static unsubscribe stops further deliveries', async () => {
@@ -572,10 +574,20 @@ describe('Broadcast static bus (publish/subscribe)', () => {
   })
 
   it('shares one monotonic per-key sequence across text and binary routes', async () => {
+    const report = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const unsubscribeBug = Broadcast.subscribeBinary('broadcast:shared-order', () =>
+      Promise.reject(new Error('static binary bug')),
+    )
+    const unsubscribeAbort = Broadcast.subscribeBinary('broadcast:shared-order', () =>
+      Promise.reject(Abort('expected')),
+    )
     const text = await Broadcast.publish('broadcast:shared-order', { text: 'one' })
     const binary = await Broadcast.publishBinary('broadcast:shared-order', new Uint8Array([2]))
 
+    await vi.waitFor(() => expect(report).toHaveBeenCalledOnce())
     expect(text.seq).toBe(1)
     expect(binary.seq).toBe(2)
+    unsubscribeBug()
+    unsubscribeAbort()
   })
 })

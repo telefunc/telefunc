@@ -54,7 +54,8 @@ it('lets abort win while a matching channel control remains pending', async () =
   addTelefunctionCallBarrier({ telefuncUrl: '/scope-a' }, control.promise)
   const fetch = installPendingFetch()
   const abortController = new AbortController()
-  const call = withContext(() => remoteTelefunctionCall('/scope.telefunc.ts', 'aborted', []), {
+  const stream = new ReadableStream<Uint8Array>()
+  const call = withContext(() => remoteTelefunctionCall('/scope.telefunc.ts', 'aborted', [stream]), {
     telefuncUrl: '/scope-a',
     signal: abortController.signal,
   })()
@@ -63,6 +64,7 @@ it('lets abort win while a matching channel control remains pending', async () =
     failure = error
   })
   try {
+    expect(stream.locked).toBe(false)
     abortController.abort()
     await new Promise<void>((resolve) => setTimeout(resolve, 0))
     expect(isAbort(failure)).toBe(true)
@@ -77,6 +79,10 @@ function installPendingFetch() {
   const fetch = vi.fn(
     (_input: RequestInfo | URL, init?: RequestInit) =>
       new Promise<Response>((_resolve, reject) => {
+        if (init?.signal?.aborted) {
+          reject(new Error('fetch aborted'))
+          return
+        }
         init?.signal?.addEventListener('abort', () => reject(new Error('fetch aborted')), { once: true })
       }),
   )

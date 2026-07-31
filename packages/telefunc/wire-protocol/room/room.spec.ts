@@ -2327,6 +2327,19 @@ describe('shared subscription supervision', () => {
     expect(reports).toHaveLength(1)
   })
 
+  it('does not emit a stale nonterminal state after re-entrant unsubscribe', async () => {
+    const raw = new ControlledDriver()
+    const subscription = new SubscriptionManager(raw, vi.fn()).subscribe('reentrant-listener', () => {})
+    await subscription.ready
+    const siblingStates: SubscriptionState[] = []
+    subscription.onStateChange((state) => {
+      if (state === 'lost') void subscription.unsubscribe()
+    })
+    subscription.onStateChange((state) => siblingStates.push(state))
+    raw.opens[0]!.attempt.lose()
+    expect(siblingStates).toEqual(['closed'])
+  })
+
   it('releases an observer returned after synchronous terminal registration', async () => {
     let rawListeners = 0
     let unobserveCalls = 0

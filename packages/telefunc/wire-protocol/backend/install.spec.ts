@@ -8,6 +8,13 @@ afterEach(async () => {
 })
 
 describe('backend installation lifecycle', () => {
+  it('promotes a reused default driver to explicit selection', () => {
+    const driver = new MemoryBackend()
+    const explicit = setDefaultBackend(() => driver)
+    expect(installBackend(() => driver)).toBe(explicit)
+    expect(setDefaultBackend(() => new MemoryBackend())).toBe(explicit)
+  })
+
   it('reports replacement cleanup failure and includes it in the explicit disposal barrier', async () => {
     const failure = new Error('old backend cleanup failed')
     let rejectOld!: (error: Error) => void

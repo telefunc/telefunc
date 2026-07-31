@@ -1,4 +1,4 @@
-export { makePublishInfo }
+export { invokeChannelListener, makePublishInfo }
 export type {
   ChannelBase,
   ChannelShield,
@@ -19,6 +19,7 @@ export type {
 }
 
 import type { TELEFUNC_SHIELDS } from '../node/shared/transformer/generateShield/shield-key.js'
+import { isPromise } from '../utils/isPromise.js'
 
 type ChannelData<T> = [T] extends [never] ? never : T extends (data: infer D) => any ? D : T
 type ChannelAck<T> = [T] extends [never] ? never : T extends (data: any) => infer R ? Awaited<R> : unknown
@@ -41,6 +42,20 @@ type ChannelPublishAck = ChannelPublishInfo & {
 
 function makePublishInfo(key: string, seq: number, timestamp: number): ChannelPublishInfo {
   return { key, seq, timestamp }
+}
+
+/** Invoke a fire-and-forget listener while routing both thrown and rejected failures. */
+function invokeChannelListener<Args extends unknown[]>(
+  listener: (...args: Args) => unknown,
+  args: Args,
+  handleError: (error: unknown) => boolean | void,
+): boolean | void {
+  try {
+    const result = listener(...args)
+    if (isPromise(result)) void result.catch(handleError)
+  } catch (error) {
+    return handleError(error)
+  }
 }
 type ChannelListenReturn<T> = [T] extends [never]
   ? void

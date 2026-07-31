@@ -54,12 +54,22 @@ describe.each([
   ['text', false],
   ['binary', true],
 ] as const)('ClientBroadcast %s publish errors', (_name, binary) => {
-  test('reports a plain Error through the client bug pipeline', async () => {
+  test('reports a plain Error and a rejected subscriber promise through the client bug pipeline', async () => {
     const report = vi.spyOn(console, 'error').mockImplementation(() => {})
     await expect(publishThatSettlesWith(ACK_STATUS.ERROR, binary)).rejects.toThrow('unexpected publish bug')
     expect(report).toHaveBeenCalledOnce()
     expect(report.mock.calls[0]?.[0]).toBe('[telefunc:channel-error]')
     expect(report.mock.calls[0]?.[1]).toMatchObject({ message: 'unexpected publish bug' })
+    report.mockClear()
+    const listeners = [() => Promise.reject(new Error('subscriber rejected'))]
+    const broadcast = Object.assign(Object.create(ClientBroadcast.prototype), {
+      key: 'listener-errors',
+      _broadcastListeners: binary ? [] : listeners,
+      _broadcastBinaryListeners: binary ? listeners : [],
+    }) as ClientBroadcast
+    if (binary) broadcast._onTransportPublishBinary(new Uint8Array(), { seq: 1, timestamp: 1 })
+    else broadcast._onTransportPublish('null', { seq: 1, timestamp: 1 })
+    await vi.waitFor(() => expect(report).toHaveBeenCalledOnce())
   })
 
   test('keeps an expected Abort quiet', async () => {

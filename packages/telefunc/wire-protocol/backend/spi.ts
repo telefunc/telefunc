@@ -8,6 +8,7 @@ export const BACKEND_SPI_VERSION = 1 as const
 /** A cheap text/binary route; both kinds share one per-key ordering domain. */
 export type BroadcastLane = { key: string; kind: 'text' | 'binary' }
 
+/** Marks identify this accepted publish: positive-safe shared text/binary seq and non-decreasing safe authority time. */
 export type PublishResult = {
   seq: number
   timestamp: number
@@ -33,6 +34,7 @@ export type RoomHead = {
   closeLease?: { id: string; until: number }
 }
 
+/** Drivers enforce exported `HEAD_TRANSITIONS` for writes and permit deletion only from `closed`. */
 export type HeadCx =
   | { expect: 'absent' } // create on a truly fresh id
   | { expect: { rev: string } } // transition from a read head
@@ -92,6 +94,7 @@ export type SubscriptionAttempt = {
   readonly ready: Promise<void>
   state(): SubscriptionAttemptState
   onStateChange(cb: (state: SubscriptionAttemptState) => void): () => void
+  /** Settles only after the raw registration and transport cleanup are complete. */
   unsubscribe(): Promise<void>
 }
 
@@ -100,6 +103,7 @@ export type SubscriptionAttempt = {
 export type SubscriptionBinding = {
   readonly partition: string
   valid(): boolean
+  /** The callback reads the current live supervised receiver count for this source and partition. */
   open(receiver: BackendReceiver, localReceiverCount: () => number): SubscriptionAttempt
 }
 

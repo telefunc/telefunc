@@ -64,7 +64,7 @@ function selectBackend(
   }
 
   if (current.phase === 'ready' && Object.is(driver, current.driver)) {
-    state.current = current
+    state.current = { ...current, selection, ...(selection === 'default' ? { defaultIdentity } : {}) }
     return current.backend
   }
 

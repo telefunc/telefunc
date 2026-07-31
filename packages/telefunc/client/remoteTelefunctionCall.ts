@@ -73,8 +73,11 @@ function remoteTelefunctionCall(
   const abortController = createAbortController(callClientContext?.signal)
   objectAssign(callContext, { abortController })
 
-  const { httpRequestBody, requestCloseHandlers } = serializeTelefunctionArguments(callContext)
-  objectAssign(callContext, { httpRequestBody, requestCloseHandlers })
+  const startCall = () => {
+    const { httpRequestBody, requestCloseHandlers } = serializeTelefunctionArguments(callContext)
+    objectAssign(callContext, { httpRequestBody, requestCloseHandlers })
+    return makeHttpRequest(callContext)
+  }
 
   const barrier = waitForTelefunctionCallBarriers({ telefuncUrl: callContext.telefuncUrl, connectionKey })
   const telefunctionReturnPromise = barrier
@@ -83,8 +86,8 @@ function remoteTelefunctionCall(
         abortController.signal,
         callContext.telefunctionName,
         callContext.telefuncFilePath,
-      ).then(() => makeHttpRequest(callContext))
-    : makeHttpRequest(callContext)
+      ).then(startCall)
+    : startCall()
 
   setAbortController(telefunctionReturnPromise, abortController)
   addAsyncGeneratorInterface(telefunctionReturnPromise, abortController)
