@@ -337,7 +337,7 @@ class ClientRoom extends RoomStateView implements Room {
   }
 
   private _applyRoster(members: MemberSnapshot[]): void {
-    this._state.reconcile(members, true)
+    this._state.reconcilePresenceRoster(members)
     this._syncWants() // per-member binary wants may reference the members just learned
     this._rosterArrived()
   }

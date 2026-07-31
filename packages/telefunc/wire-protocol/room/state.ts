@@ -517,84 +517,78 @@ class RoomState {
       this._invoke(invoke, cb)
     }
   }
-  /** Resync against an authoritative membership snapshot. The first reconcile is the roster *load* and is silent (the documented pattern reads `getParticipants()` and then follows events — narrating
-   * the load would double-render it). Every later reconcile is discovered *drift*, and an observed view never mutates silently: the diff replays through the normal appliers, so
-   * `onJoin`/`onLeave`/`onUpdate` fire exactly once per real change — whichever path (event or reconcile) learns of it first, the other is absorbed as an echo. Returns whether anything drifted, so
-   * the owner can re-sync downstream views (client stubs).
-   */
-  reconcile(members: MemberSnapshot[], rosterOmitsHidden = false): boolean {
-    // Coalesce the whole resync into one `onChange`: a reconcile that drifts N members invalidates the
-    // view once, not once per member, while each member's onJoin/onLeave/onUpdate still fires as usual.
+  reconcileCompleteRoster(members: MemberSnapshot[]): boolean {
+    return this._reconcileRoster(members, false)
+  }
+  reconcilePresenceRoster(members: MemberSnapshot[]): boolean {
+    members = members.filter((member) => !member.hidden)
+    return this._reconcileRoster(members, true)
+  }
+  private _reconcileRoster(roster: MemberSnapshot[], preserveMissingHidden: boolean): boolean {
     return this._batchChange(() => {
-      // A client's streamed roster carries only presence members (hidden ones are server-only), so a hidden entry it holds is a directly-granted handle, not roster-managed — never reap it here.
-      const roster = rosterOmitsHidden ? members.filter((m) => !m.hidden) : members
-      const keepsHidden = (id: string) => rosterOmitsHidden && this.isHidden(id)
-      if (!this._rosterKnown) {
-        // First load: silent — but entries can already exist (pre-roster join events, revived views). Those objects must survive: listeners hang off them and revived handles must stay `===` with the
-        // view. Keep the object, refresh the facts; entries the authoritative roster doesn't know left before the load — their leave is narrated like any other.
-        this._rosterKnown = true
-        const seen = new Set<string>()
-        for (const member of roster) {
-          seen.add(member.id)
-          const existing = this._members.get(member.id)
-          if (!existing) {
-            this._createEntry(member)
-            continue
-          }
-          if (member.metaSeq > existing.metaSeq) {
-            existing.meta = ownMetadata(member.meta)
-            existing.metaSeq = member.metaSeq
-          }
-          existing.joinedAt = member.joinedAt
-          for (const track of member.tracks ?? []) existing.tracks.add(track)
-        }
-        for (const id of [...this._members.keys()]) {
-          if (!seen.has(id) && !keepsHidden(id)) this.applyLeave(id)
-        }
-        // Bump strictly after the roster is populated: the batch's single `onChange` fires at close, so a subscriber that synchronously reads `snapshot()` (the `useSyncExternalStore` contract) sees
-        // the full roster — the silent `_createEntry`s above never bump, so this is what invalidates it.
-        this._bumpMembership()
-        return false
-      }
-      let drifted = false
-      let silentChange = false // a `tracks` refresh no applier narrated (`joinedAt` is immutable)
-      const seen = new Set<string>()
-      for (const member of roster) {
-        seen.add(member.id)
-        const entry = this._members.get(member.id)
-        if (!entry) {
-          this.applyJoin(member.id, member.meta, member.joinedAt, member.identity, member.hidden)
-          const created = this._members.get(member.id)
-          if (created) {
-            created.metaSeq = member.metaSeq
-            for (const track of member.tracks ?? []) created.tracks.add(track)
-          }
-          drifted = true
-        } else {
-          if (member.metaSeq > entry.metaSeq) {
-            this.applyParticipantMeta(member.id, member.meta, member.metaSeq)
-            drifted = true
-          }
-          entry.joinedAt = member.joinedAt
-          for (const track of member.tracks ?? []) {
-            if (!entry.tracks.has(track)) {
-              entry.tracks.add(track)
-              silentChange = true
-            }
-          }
-        }
-      }
-      for (const id of [...this._members.keys()]) {
-        if (!seen.has(id) && !keepsHidden(id)) {
-          this.applyLeave(id)
-          drifted = true
-        }
-      }
-      // Every applier bump (join/meta/leave) and the tracks-only refresh below coalesce into the one batched `onChange`. A tracks-only refresh no applier narrated still needs its own bump so the
-      // snapshot isn't stranded; an echo reconcile that changed nothing bumps nothing, so it fires none.
-      if (silentChange) this._bumpMembership()
-      return drifted
+      if (!this._rosterKnown) return this._loadInitialRoster(roster, preserveMissingHidden)
+      return this._reconcileKnownRoster(roster, preserveMissingHidden)
     })
+  }
+  private _loadInitialRoster(roster: MemberSnapshot[], preserveMissingHidden: boolean): boolean {
+    this._rosterKnown = true
+    const seen = new Set<string>()
+    for (const member of roster) {
+      seen.add(member.id)
+      const existing = this._members.get(member.id)
+      if (!existing) {
+        this._createEntry(member)
+        continue
+      }
+      if (member.metaSeq > existing.metaSeq) {
+        existing.meta = ownMetadata(member.meta)
+        existing.metaSeq = member.metaSeq
+      }
+      existing.joinedAt = member.joinedAt
+      for (const track of member.tracks ?? []) existing.tracks.add(track)
+    }
+    for (const id of [...this._members.keys()]) {
+      if (!seen.has(id) && !(preserveMissingHidden && this.isHidden(id))) this.applyLeave(id)
+    }
+    this._bumpMembership()
+    return false
+  }
+  private _reconcileKnownRoster(roster: MemberSnapshot[], preserveMissingHidden: boolean): boolean {
+    let narratedDrift = false
+    let viewChanged = false
+    const seen = new Set<string>()
+    for (const member of roster) {
+      seen.add(member.id)
+      const entry = this._members.get(member.id)
+      if (!entry) {
+        this.applyJoin(member.id, member.meta, member.joinedAt, member.identity, member.hidden)
+        const created = this._members.get(member.id)
+        if (created) {
+          created.metaSeq = member.metaSeq
+          for (const track of member.tracks ?? []) created.tracks.add(track)
+        }
+        narratedDrift = true
+        continue
+      }
+      if (member.metaSeq > entry.metaSeq) {
+        this.applyParticipantMeta(member.id, member.meta, member.metaSeq)
+        narratedDrift = true
+      }
+      entry.joinedAt = member.joinedAt
+      for (const track of member.tracks ?? []) {
+        if (entry.tracks.has(track)) continue
+        entry.tracks.add(track)
+        viewChanged = true
+      }
+    }
+    for (const id of [...this._members.keys()]) {
+      if (!seen.has(id) && !(preserveMissingHidden && this.isHidden(id))) {
+        this.applyLeave(id)
+        narratedDrift = true
+      }
+    }
+    if (viewChanged && !narratedDrift) this._bumpMembership()
+    return narratedDrift
   }
   // ── Private ──
   private _createEntry(entrySeed: MemberSnapshot): MemberEntry {

@@ -1231,7 +1231,7 @@ class ServerRoom extends RoomStateView implements Room {
             if (attempt === ROOM_REPLAN_LIMIT) throw new RoomError(`Room roster refresh contention: ${this.id}`)
             continue
           }
-          const drifted = this._state.reconcile(members)
+          const drifted = this._state.reconcileCompleteRoster(members)
           this._syncSubs() // per-member lanes may need subscriptions for the members just learned
           // Clients seeded from the pre-drift state must be re-synced the same way they were seeded — the streamed roster (position-in-stream consistent, replace semantics).
           if (drifted) {

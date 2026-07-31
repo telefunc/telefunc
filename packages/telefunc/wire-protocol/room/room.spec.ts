@@ -1445,7 +1445,7 @@ describe('client Room lifecycle', () => {
     expect(client.count).toBe(2)
     expect(empty).toBe(0)
   })
-  it('dirties the roster epoch for unknown member-record events', () => {
+  it('dirties unknown events and keeps reconcile outcomes distinct', () => {
     const state = new RoomState({
       roomId: 'unknown-member-epoch',
       meta: {},
@@ -1459,6 +1459,14 @@ describe('client Room lifecycle', () => {
     state.applyParticipantMeta(id, { step: 1 }, 1)
     state.applyLeave(id)
     expect(state.membershipVersion).toBe(3)
+    const member = { id, meta: {}, joinedAt: 1, metaSeq: 0 }
+    expect(state.reconcileCompleteRoster([member])).toBe(true)
+    const version = state.membershipVersion
+    const reconcile = (tracks: string[]) => state.reconcileCompleteRoster([{ ...member, metaSeq: 1, tracks }])
+    expect(reconcile(['screen'])).toBe(true)
+    expect(state.membershipVersion).toBe(version)
+    expect(reconcile(['screen', 'camera'])).toBe(false)
+    expect(state.membershipVersion).toBe(version + 1)
   })
   it('reports rejected async RoomState callbacks without awaiting delivery', async () => {
     const memberId = crypto.randomUUID()
@@ -1615,10 +1623,10 @@ describe('client Room lifecycle', () => {
       participants: 0,
     })
   })
-  it('rejects hidden-roster enumeration in clients instead of returning a partial direct-handle list', async () => {
+  it('preserves directly held hidden members while rejecting client enumeration', async () => {
     const { client, emit } = fakeClient('client-hidden-roster')
     emit({ __r: 'roster', members: [] })
-    client._reviveRemote({
+    const hidden = client._reviveRemote({
       id: crypto.randomUUID(),
       meta: { role: 'moderator' },
       joinedAt: 1,
@@ -1626,6 +1634,8 @@ describe('client Room lifecycle', () => {
       identity: null,
       hidden: true,
     })
+    emit({ __r: 'roster', members: [] }, 2)
+    expect(client._state.getRemote(hidden.id)).toBe(hidden)
     await expect(client.getParticipants({ hidden: true })).rejects.toThrow(
       'Hidden participants can only be enumerated on the server',
     )
