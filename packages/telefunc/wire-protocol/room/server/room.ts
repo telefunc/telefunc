@@ -29,6 +29,7 @@ import {
   hasRoomTag,
   mergeAttributes,
   normalizeJoinOptions,
+  ownMetadata,
   roomMemberKvKey,
   roomIdentityMemberKvKey,
   unframeMemberId,
@@ -307,13 +308,15 @@ class ServerRoom extends RoomStateView implements Room {
   /** @internal — full replace (`setMeta`). */
   async _setMemberMeta(id: string, meta: ParticipantMeta): Promise<void> {
     assertUsage(isObject(meta), 'setMeta() meta should be an object')
-    await this._writeMemberMeta(id, () => meta)
+    const owned = ownMetadata(meta)
+    await this._writeMemberMeta(id, () => owned)
   }
 
   /** @internal — per-key merge (`setAttributes`); an `undefined` value deletes the key. */
   async _mergeMemberMeta(id: string, attrs: ParticipantMeta): Promise<void> {
     assertUsage(isObject(attrs), 'setAttributes() attributes should be an object')
-    await this._writeMemberMeta(id, (current) => mergeAttributes(current, attrs))
+    const owned = ownMetadata(attrs)
+    await this._writeMemberMeta(id, (current) => mergeAttributes(current, owned))
   }
 
   private async _writeMemberMeta(

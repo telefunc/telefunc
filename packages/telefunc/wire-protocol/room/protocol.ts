@@ -15,6 +15,7 @@ export {
   binaryFrameSender,
   hasRoomTag,
   normalizeJoinOptions,
+  ownMetadata,
   mergeAttributes,
   RoomError,
   isRoomError,
@@ -89,6 +90,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   } catch {
     return false
   }
+}
+/** Take ownership of metadata at a state boundary and expose only the immutable owned value. */
+function ownMetadata<T extends RoomMeta | ParticipantMeta>(meta: T): T {
+  return Object.freeze({ ...meta }) as T
 }
 // Keys & records
 /** Reserved pub/sub + KV namespace for rooms. Don't use it for `BroadcastChannel` keys. */
@@ -339,7 +344,7 @@ function mergeAttributes(meta: ParticipantMeta, attrs: ParticipantMeta): Partici
     if (value === undefined) delete next[key]
     else Object.defineProperty(next, key, { value, enumerable: true, configurable: true, writable: true })
   }
-  return next
+  return Object.freeze(next)
 }
 /** Validates `join(options)` and resolves the participant `meta` + `selfDelivery`. */
 function normalizeJoinOptions(options: JoinOptions | undefined): {
@@ -364,7 +369,7 @@ function normalizeJoinOptions(options: JoinOptions | undefined): {
     'join() options.hidden should be a boolean',
   )
   return {
-    meta,
+    meta: ownMetadata(meta),
     selfDelivery: options?.selfDelivery !== false,
     identity: options?.identity ?? null,
     hidden: options?.hidden ?? false,

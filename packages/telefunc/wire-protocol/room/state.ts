@@ -3,11 +3,12 @@ export { RoomState, RoomStateView, remoteBacking }
 import { assertUsage } from '../../utils/assert.js'
 import { isPromise } from '../../utils/isPromise.js'
 import type { ChannelPublishInfo } from '../channel.js'
-import { adoptSubordinateOf, releaseSubordinate } from '../wrapProxy.js'
+import { adoptSubordinateOf, makeDisposer, releaseSubordinate } from '../wrapProxy.js'
 import {
   DEFAULT_TRACK,
   emptyTrackWants,
   isRoomTrack,
+  ownMetadata,
   stampNewer,
   type BinaryWants,
   type MemberSnapshot,
@@ -146,7 +147,8 @@ class RoomState {
   membershipVersion = 0
   /** Bumped on every observable change (membership, participant meta, room config, closure) — drives `onChange`/`snapshot()` cache invalidation. */
   private _stateVersion = 0
-  private _snapshotCache: { version: number; value: RoomSnapshotView } | null = null
+  private _snapshotCache: { version: number; value: WeakRef<RoomSnapshotView> } | null = null
+  private readonly _listenerCleanups = new Map<object, Set<() => void>>()
   private readonly _changeCbs: Array<() => void> = []
   /** Reconcile coalescing: while a batch is open, `_bumpState` still advances the version (so
    *  `snapshot()` recomputes) but holds the single `onChange` until the batch closes — a reconcile that
@@ -176,7 +178,7 @@ class RoomState {
   private _seedCount = 0
   constructor(opts: RoomStateOptions) {
     this.roomId = opts.roomId
-    this.meta = opts.meta
+    this.meta = ownMetadata(opts.meta)
     this.closed = opts.closed === true
     this._updateStamp = opts.updateStamp
     this._onListenersChanged = opts.onListenersChanged
@@ -323,25 +325,22 @@ class RoomState {
   }
   /** Immutable view of the whole room — cached by state version, so the reference is stable until something actually changes (the `useSyncExternalStore` contract). */
   snapshot(): RoomSnapshotView {
-    if (this._snapshotCache?.version === this._stateVersion) return this._snapshotCache.value
-    // Freeze a shallow copy of every `meta`, not the live object: the snapshot promises immutability, but the live `entry.meta`/`this.meta` are replaced (never mutated) on update, and freezing them
-    // in place would also freeze objects the app may still hold. A frozen copy makes `snap.meta.x = …` throw instead of silently leaking into live state, without touching the live refs. (Top-level;
-    // nested app data is the app's own — same shallow boundary as the rest of the view.)
+    const cached = this._snapshotCache?.version === this._stateVersion ? this._snapshotCache.value.deref() : undefined
+    if (cached) return cached
     const participants = Object.freeze(
       [...this._members.values()]
         .filter((entry) => !entry.hidden)
-        .map(({ id, identity, meta, joinedAt }) =>
-          Object.freeze({ id, identity, meta: Object.freeze({ ...meta }), joinedAt }),
-        ),
+        .map(({ id, identity, meta, joinedAt }) => Object.freeze({ id, identity, meta, joinedAt })),
     )
     const value = Object.freeze({
       id: this.roomId,
-      meta: Object.freeze({ ...this.meta }),
+      meta: this.meta,
       count: this.count,
       isClosed: this.closed,
       participants,
     })
-    this._snapshotCache = { version: this._stateVersion, value }
+    releaseSubordinate(value)
+    this._snapshotCache = { version: this._stateVersion, value: new WeakRef(value) }
     return value
   }
   /** State changed observably — invalidate the snapshot (via the version) and tell `onChange`
@@ -380,7 +379,7 @@ class RoomState {
     const existing = this._members.get(id)
     if (existing) {
       // The origin absorbing its own join echo. The event carries the seq-0 join meta, so it must not regress a value a later p-meta already advanced; `joinedAt` is immutable, so it's a no-op.
-      if (existing.metaSeq === 0) existing.meta = meta
+      if (existing.metaSeq === 0) existing.meta = ownMetadata(meta)
       return
     }
     const entry = this._createEntry({ id, meta, joinedAt, metaSeq: 0, identity, hidden })
@@ -425,10 +424,11 @@ class RoomState {
     if (seq <= entry.metaSeq) return
     const prev = entry.meta
     entry.metaSeq = seq
-    entry.meta = meta
+    const next = ownMetadata(meta)
+    entry.meta = next
     this._bumpState()
-    this._fireAll(entry.updateCbs, meta, prev)
-    this._fireAll(this._participantUpdateCbs, this._remote(entry), meta, prev)
+    this._fireAll(entry.updateCbs, next, prev)
+    this._fireAll(this._participantUpdateCbs, this._remote(entry), next, prev)
   }
   /** Last-writer-wins by `(at, by)`: concurrent `Room.setMeta()`s converge to the same winner on every node regardless of arrival order, and the origin's echo (same stamp) is absorbed. `prev` is
    * derived here, not shipped: it's the meta THIS view is transitioning away from, which under LWW can differ per node (a view that skipped an intermediate update never held the writer's `prev`).
@@ -437,9 +437,10 @@ class RoomState {
     if (!stampNewer({ at, by }, this._updateStamp)) return
     const prev = this.meta
     this._updateStamp = { at, by }
-    this.meta = meta
+    const next = ownMetadata(meta)
+    this.meta = next
     this._bumpState()
-    this._fireAll(this._updateCbs, meta, prev)
+    this._fireAll(this._updateCbs, next, prev)
   }
   /** The stamp of the config this view currently reflects (serialized into room snapshots). */
   get updateStamp(): { at: number; by: string } {
@@ -465,6 +466,7 @@ class RoomState {
       }
     })
     this._fireAll(this._closeCbs)
+    this._releaseAllListeners()
   }
   applyAnnounce(data: unknown, info: ChannelPublishInfo): void {
     this._fireAll(this._announceCbs, data, info)
@@ -540,7 +542,7 @@ class RoomState {
             continue
           }
           if (member.metaSeq > existing.metaSeq) {
-            existing.meta = member.meta
+            existing.meta = ownMetadata(member.meta)
             existing.metaSeq = member.metaSeq
           }
           existing.joinedAt = member.joinedAt
@@ -599,7 +601,7 @@ class RoomState {
     const { id, meta, joinedAt } = entrySeed
     const entry: MemberEntry = {
       id,
-      meta,
+      meta: ownMetadata(meta),
       joinedAt,
       identity: entrySeed.identity ?? null,
       metaSeq: entrySeed.metaSeq,
@@ -636,7 +638,7 @@ class RoomState {
         onLeave: (cb: (cause?: LeaveCause) => void) => {
           if (!entry.left) return this._register(entry.leaveCbs, cb)
           this._invoke(cb, entry.leaveCause)
-          return () => {}
+          return makeDisposer()
         },
       }
       entry.remoteRef = new WeakRef(remote)
@@ -648,25 +650,29 @@ class RoomState {
   private _register<T>(list: T[], cb: T): () => void {
     list.push(cb)
     this._bumpListenerCount(1)
-    // List membership is the source of truth: `_releaseEntryListeners` may have already emptied the list, and a second unlisten call must not decrement twice.
-    return () => {
+    let cleanups = this._listenerCleanups.get(list)
+    if (!cleanups) this._listenerCleanups.set(list, (cleanups = new Set()))
+    const unlisten = makeDisposer(() => {
       const i = list.indexOf(cb)
-      if (i < 0) return
-      list.splice(i, 1)
-      this._bumpListenerCount(-1)
-    }
+      if (i >= 0) {
+        list.splice(i, 1)
+        this._bumpListenerCount(-1)
+      }
+    }, cleanups)
+    if (typeof this._owner === 'object' && this._owner !== null) adoptSubordinateOf(this._owner, unlisten)
+    return unlisten
   }
   /** A member entry is being discarded — its listeners die with it. Releasing them keeps the
    *  counters truthful (callers rarely unsubscribe in `onLeave`), which lets the owners drop
    *  wire/adapter subscriptions the departed member was holding open. */
   private _releaseEntryListeners(entry: MemberEntry): void {
-    this._bumpListenerCount(
-      -(entry.dataCbs.length + entry.binaryCbs.length + entry.updateCbs.length + entry.leaveCbs.length),
-    )
-    entry.dataCbs.length = 0
-    entry.binaryCbs.length = 0
-    entry.updateCbs.length = 0
-    entry.leaveCbs.length = 0
+    for (const list of [entry.dataCbs, entry.binaryCbs, entry.updateCbs, entry.leaveCbs]) {
+      for (const unlisten of [...(this._listenerCleanups.get(list) ?? [])]) unlisten()
+      this._listenerCleanups.delete(list)
+    }
+  }
+  private _releaseAllListeners(): void {
+    for (const cleanups of [...this._listenerCleanups.values()]) for (const unlisten of [...cleanups]) unlisten()
   }
   private _bumpListenerCount(delta: number): void {
     this._listenerCount += delta

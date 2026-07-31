@@ -10,6 +10,7 @@ import type { BackendSpi, RoomHead } from '../../backend/spi.js'
 import {
   RoomError,
   mergeAttributes,
+  ownMetadata,
   roomMemberKvKey,
   type MemberSnapshot,
   type RoomConfigRecord,
@@ -280,14 +281,16 @@ async function listRooms(options?: { prefix?: string }): Promise<RoomInfo[]> {
 
 async function setRoomMeta(id: string, meta: RoomMeta): Promise<void> {
   assertUsage(isObject(meta), 'Room.setMeta() meta should be an object')
+  const owned = ownMetadata(meta)
   const { config } = await requireRoom(id)
-  await writeRoomConfig(id, config, () => meta)
+  await writeRoomConfig(id, config, () => owned)
 }
 
 async function setRoomAttributes(id: string, attributes: RoomMeta): Promise<void> {
   assertUsage(isObject(attributes), 'Room.setAttributes() attributes should be an object')
+  const owned = ownMetadata(attributes)
   const { config } = await requireRoom(id)
-  await writeRoomConfig(id, config, (current) => mergeAttributes(current, attributes))
+  await writeRoomConfig(id, config, (current) => mergeAttributes(current, owned))
 }
 
 async function writeRoomConfig(
@@ -486,5 +489,5 @@ function normalizeOptions(options: RoomOptions | undefined): { meta: RoomMeta } 
   assertUsage(options === undefined || isObject(options), 'Room options should be an object')
   const meta = options?.meta ?? {}
   assertUsage(isObject(meta), 'options.meta should be an object')
-  return { meta }
+  return { meta: ownMetadata(meta) }
 }

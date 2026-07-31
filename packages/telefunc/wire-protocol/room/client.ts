@@ -1,4 +1,4 @@
-export { ClientRoom, ClientRoomParticipant, ClientStandaloneParticipant, RoomClientBroadcast }
+export { ClientRoom, ClientStandaloneParticipant, RoomClientBroadcast }
 
 import { assertUsage } from '../../utils/assert.js'
 import type { TELEFUNC_SHIELDS } from '../../node/shared/transformer/generateShield/shield-key.js'
@@ -22,6 +22,7 @@ import {
   hasRoomTag,
   mergeAttributes,
   normalizeJoinOptions,
+  ownMetadata,
   unframeMemberId,
   type MemberWants,
   type MemberSnapshot,
@@ -48,7 +49,6 @@ import type {
   PublishOptions,
   RemoteParticipant,
   Room,
-  RoomSendReceipt,
   RoomSnapshotView,
   Sender,
 } from './types.js'
@@ -126,7 +126,6 @@ class RoomClientBroadcast<T = unknown> extends ClientBroadcast<T> {
   }
 
   override _onTransportPublish(data: string, wireInfo: WirePublishInfo): void {
-    super._onTransportPublish(data, wireInfo)
     const parsed = parse(data) as ChannelData<T>
     const info = makePublishInfo(this.key!, wireInfo.seq, wireInfo.timestamp)
     for (const callback of this._roomListeners) {
@@ -139,7 +138,6 @@ class RoomClientBroadcast<T = unknown> extends ClientBroadcast<T> {
   }
 
   override _onTransportPublishBinary(data: Uint8Array, wireInfo: WirePublishInfo): void {
-    super._onTransportPublishBinary(data, wireInfo)
     const info = makePublishInfo(this.key!, wireInfo.seq, wireInfo.timestamp)
     for (const callback of this._roomBinaryListeners) {
       try {
@@ -375,7 +373,7 @@ class ClientRoom extends RoomStateView implements Room {
       case 'p-meta': {
         this._state.applyParticipantMeta(event.id, event.meta, event.seq)
         const local = this._localParticipant(event.id)
-        if (local) local._meta = event.meta
+        if (local) local._meta = ownMetadata(event.meta)
         return
       }
       case 'update':
@@ -535,14 +533,16 @@ abstract class ClientParticipantBase extends ParticipantBase {
 
   async setMeta(meta: ParticipantMeta): Promise<void> {
     this._assertActive()
-    await this._requestParticipant({ __r: 'req-set-meta', meta })
-    this._meta = meta
+    const owned = ownMetadata(meta)
+    await this._requestParticipant({ __r: 'req-set-meta', meta: owned })
+    this._meta = owned
   }
 
   async setAttributes(attrs: ParticipantMeta): Promise<void> {
     this._assertActive()
-    await this._requestParticipant({ __r: 'req-set-attrs', attrs })
-    this._meta = mergeAttributes(this._meta, attrs)
+    const owned = ownMetadata(attrs)
+    await this._requestParticipant({ __r: 'req-set-attrs', attrs: owned })
+    this._meta = mergeAttributes(this._meta, owned)
   }
 
   private _drainCoalesce(key: string): void {
@@ -613,7 +613,7 @@ class ClientStandaloneParticipant extends ClientParticipantBase {
     channel.listen((notice: unknown) => {
       if (!hasRoomTag(notice)) return
       const msg = notice as ParticipantStubNotice
-      if (msg.__r === 'p-meta') this._meta = msg.meta
+      if (msg.__r === 'p-meta') this._meta = ownMetadata(msg.meta)
       else if (msg.__r === 'demand') this._onDemand(msg.track, msg.wanted)
       else if (msg.__r === 'dm') {
         const inbox: InboxMessage = {

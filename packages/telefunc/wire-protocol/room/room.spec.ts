@@ -1367,6 +1367,23 @@ describe('Room public behavior', () => {
     expect(Object.isFrozen(changed.participants[0]!.meta)).toBe(true)
     expect(changes).toBe(1)
   })
+
+  it('copies metadata into state and freezes every public metadata view', async () => {
+    const roomMeta = { topic: 'original' }
+    const room = await Room.create('owned-meta', { meta: roomMeta })
+    roomMeta.topic = 'caller mutation'
+    expect(room.meta).toEqual({ topic: 'original' })
+    expect(Object.isFrozen(room.meta)).toBe(true)
+    const joinMeta = { name: 'Alice' }
+    const participant = await room.join({ meta: joinMeta })
+    joinMeta.name = 'caller mutation'
+    expect(participant.meta).toEqual({ name: 'Alice' })
+    expect(Object.isFrozen(participant.meta)).toBe(true)
+    const replacement = { name: 'Bob' }
+    await participant.setMeta(replacement)
+    replacement.name = 'caller mutation'
+    expect(participant.meta).toEqual({ name: 'Bob' })
+  })
 })
 
 describe('client Room lifecycle', () => {
@@ -1461,6 +1478,19 @@ describe('client Room lifecycle', () => {
       expect(retained.room.deref()).not.toBeUndefined()
       expect(retained.member.id).toBe(gc.memberId)
       expect(gc.closed()).toBe(0)
+    })
+
+    it('tethers the Room through an active remote disposer and releases it when invoked', async () => {
+      const gc = gcFixture('gc-remote-disposer', true)
+      const retained = await retainOnlyRemoteDisposer(gc)
+      await forceRoomGc()
+      expect(retained.room.deref()).not.toBeUndefined()
+      expect(gc.closed()).toBe(0)
+      retained.stop()
+      await forceRoomGc()
+      retained.stopped()
+      expect(retained.room.deref()).toBeUndefined()
+      expect(gc.closed()).toBe(1)
     })
 
     it('releases the Room wrapper from a departed participant handle', async () => {
@@ -2669,6 +2699,16 @@ async function retainOnlyCallbackRemote({ target, fake, registry, onClose, membe
   fake.emitText({ __r: 'join', id: memberId, meta: {}, joinedAt: 1 }, { key: target.id, seq: 1, timestamp: 1 })
   stop()
   return { member: member!, room: new WeakRef(room) }
+}
+
+async function retainOnlyRemoteDisposer({ target, registry, onClose, memberId }: GcFixture) {
+  const room = wrapProxy(target)
+  registry.register(room, onClose)
+  const stopped = (await room.join()).listen(() => {})
+  stopped()
+  room.snapshot()
+  const stop = target._getRemote(memberId)!.subscribe(() => {})
+  return { stop, stopped, room: new WeakRef(room) }
 }
 
 async function retainOnlyDepartedParticipant({ target, fake, registry, onClose, memberId }: GcFixture) {

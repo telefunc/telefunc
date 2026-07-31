@@ -1,4 +1,4 @@
-export { wrapProxy, adoptSubordinateOf, releaseSubordinate }
+export { wrapProxy, adoptSubordinateOf, releaseSubordinate, makeDisposer }
 
 import { isObjectOrFunction } from '../utils/isObjectOrFunction.js'
 
@@ -83,4 +83,18 @@ function adoptSubordinateOf(owner: object, derived: unknown): void {
 function releaseSubordinate(derived: object): void {
   releasedSubordinates.add(derived)
   keepWrapperAlive.delete(derived)
+}
+
+/** A one-shot cleanup handle; no action creates an already-terminal handle. */
+function makeDisposer(dispose?: () => void, group?: Set<() => void>): () => void {
+  let action = dispose
+  const token = () => {
+    const current = action
+    action = undefined
+    group?.delete(token)
+    releaseSubordinate(token)
+    current?.()
+  }
+  action ? group?.add(token) : releaseSubordinate(token)
+  return token
 }

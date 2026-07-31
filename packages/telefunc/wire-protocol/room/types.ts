@@ -24,7 +24,6 @@ export type {
   BinaryPublishOptions,
   RoomSnapshotView,
   ParticipantSnapshotView,
-  RoomBinaryListener,
 }
 
 import type { ChannelPublishAck, ChannelPublishInfo } from '../channel.js'
