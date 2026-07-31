@@ -45,43 +45,40 @@ type InstallRedisOptions = {
 
 type RedisBroadcastOptions = RedisRoomBackendOptions
 
-/**
- * Compatibility wrapper for the released pre-Room Redis transport. New applications should use
- * installRedis(), while existing consumers retain the original text/binary send and listen surface.
- */
+/** Released legacy transport wrapper; new applications should use installRedis(). */
 class RedisTransport {
-  readonly #backend
+  private readonly _backend
 
   constructor(options: RedisBroadcastOptions) {
-    this.#backend = superviseBackend(new RedisRoomBackend(options))
+    this._backend = superviseBackend(new RedisRoomBackend(options))
   }
 
   async send(key: string, payload: string): Promise<{ seq: number; timestamp: number }> {
-    const { seq, timestamp } = await this.#backend.publish({ key, kind: 'text' }, textEncoder.encode(payload))
+    const { seq, timestamp } = await this._backend.publish({ key, kind: 'text' }, textEncoder.encode(payload))
     return { seq, timestamp }
   }
 
   async sendBinary(key: string, payload: Uint8Array): Promise<{ seq: number; timestamp: number }> {
-    const { seq, timestamp } = await this.#backend.publish({ key, kind: 'binary' }, payload)
+    const { seq, timestamp } = await this._backend.publish({ key, kind: 'binary' }, payload)
     return { seq, timestamp }
   }
 
   listen(key: string, onMessage: (payload: string, info: { seq: number; timestamp: number }) => void): () => void {
-    return this.#listen({ key, kind: 'text' }, (payload, info) => onMessage(textDecoder.decode(payload), info))
+    return this._listen({ key, kind: 'text' }, (payload, info) => onMessage(textDecoder.decode(payload), info))
   }
 
   listenBinary(
     key: string,
     onMessage: (payload: Uint8Array, info: { seq: number; timestamp: number }) => void,
   ): () => void {
-    return this.#listen({ key, kind: 'binary' }, onMessage)
+    return this._listen({ key, kind: 'binary' }, onMessage)
   }
 
-  #listen(
+  private _listen(
     lane: { key: string; kind: 'text' | 'binary' },
     onMessage: (payload: Uint8Array, info: { seq: number; timestamp: number }) => void,
   ): () => void {
-    const subscription = this.#backend.subscribe(lane, onMessage)
+    const subscription = this._backend.subscribe(lane, onMessage)
     void subscription.ready.catch(() => {})
     return () => void subscription.unsubscribe()
   }
