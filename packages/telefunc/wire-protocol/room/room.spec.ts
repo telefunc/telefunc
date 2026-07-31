@@ -592,28 +592,6 @@ describe('Room public behavior', () => {
     expect(room.isClosed).toBe(true)
   })
 
-  it('rejects only an exhausted internal readiness generation and recovers holder readiness later', async () => {
-    const slot = new SubSlot(
-      () => {},
-      () => {},
-    )
-    slot.sync(true, () => rejectedSubscription('first generation failed'))
-    const holderReady = slot.ready
-    const exhaustedGeneration = slot.generationReady
-    const exhausted = new RoomError('generation exhausted')
-    slot.markLost(exhausted)
-    await expect(exhaustedGeneration).rejects.toBe(exhausted)
-    let holderSettled = false
-    void holderReady.then(() => (holderSettled = true))
-    await Promise.resolve()
-    expect(holderSettled).toBe(false)
-    slot.sync(true, () => terminalSubscription().subscription)
-    await expect(holderReady).resolves.toBeUndefined()
-    await expect(slot.generationReady).resolves.toBeUndefined()
-    expect(slot).toMatchObject({ wanted: true, active: true })
-    slot.stop()
-  })
-
   it('retries a still-wanted lost subscription on the next planning pass', async () => {
     vi.useFakeTimers()
     const observer = await Room.get((await Room.create('single-recovery-horizon')).id)

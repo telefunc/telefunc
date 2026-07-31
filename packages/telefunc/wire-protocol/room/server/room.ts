@@ -800,7 +800,7 @@ class ServerRoom extends RoomStateView implements Room {
       if (slot.wanted) {
         const exhausted = new RoomError(`Room subscription recovery exhausted: ${this.id}`)
         reportRoomError(exhausted)
-        slot.markLost(exhausted)
+        slot.markLost()
       }
     })()
       .catch(reportRoomError)
