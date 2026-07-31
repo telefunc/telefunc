@@ -152,18 +152,13 @@ export class RedisRoomBackend implements BackendDriver {
     if (options.redis instanceof Cluster && options.redis.options.scaleReads !== 'master') {
       throw new Error("RedisRoomBackend: ioredis Cluster scaleReads must be 'master' for consistent Room reads")
     }
-    const reconnectOnError =
+    const retries =
       options.redis instanceof Cluster
-        ? options.redis.options.redisOptions?.reconnectOnError
-        : options.redis.options.reconnectOnError
-    if (
-      reconnectOnError != null ||
-      (options.redis instanceof Cluster
-        ? options.redis.options.retryDelayOnFailover !== 0
-        : options.redis.options.maxRetriesPerRequest !== 0)
-    ) {
-      throw new Error('RedisRoomBackend: ioredis command retries must be disabled to preserve at-most-once delivery')
-    }
+        ? options.redis.options.retryDelayOnFailover !== 0 ||
+          options.redis.options.redisOptions?.maxRetriesPerRequest !== 0 ||
+          options.redis.options.redisOptions?.reconnectOnError != null
+        : options.redis.options.maxRetriesPerRequest !== 0 || options.redis.options.reconnectOnError != null
+    if (retries) throw new Error('RedisRoomBackend: ioredis retries violate at-most-once delivery')
     this.#publisher = options.redis
     let clusterSubscriberSelection = 0
     const createSubscriber = async (): Promise<Redis> => {
@@ -521,18 +516,19 @@ export class RedisRoomBackend implements BackendDriver {
       else break
     }
     if (matching.length === 0) return { entries: [] }
-    const tags = await this.#publisher.hmget(directoryTagsKey(this.#prefix), ...matching)
+    // Prefix matches are contiguous; the independent tag/peek reads remain all-or-error through Promise.all.
+    const last = matching[matching.length - 1] as string
+    const [tags, peek] = await Promise.all([
+      this.#publisher.hmget(directoryTagsKey(this.#prefix), ...matching),
+      matching.length === DIRECTORY_PAGE_SIZE && page.length === DIRECTORY_PAGE_SIZE
+        ? this.#publisher.zrangebylex(index, `(${last}`, '+', 'LIMIT', 0, 1)
+        : [],
+    ])
     const entries = matching.flatMap((roomId, i) => {
       const incTag = tags[i]
       return incTag === null || incTag === undefined ? [] : [{ roomId, incTag }]
     })
-    const last = matching[matching.length - 1] as string
-    let more = false
-    if (matching.length === DIRECTORY_PAGE_SIZE && page.length === DIRECTORY_PAGE_SIZE) {
-      const peek = await this.#publisher.zrangebylex(index, `(${last}`, '+', 'LIMIT', 0, 1)
-      more = peek.length > 0 && (peek[0] as string).startsWith(prefix)
-    }
-    return more ? { entries, cursor: last } : { entries }
+    return peek.length > 0 && (peek[0] as string).startsWith(prefix) ? { entries, cursor: last } : { entries }
   }
 
   async dispose(): Promise<void> {
