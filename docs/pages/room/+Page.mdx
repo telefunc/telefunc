@@ -129,7 +129,7 @@ function Roster() {
 const byUser = Map.groupBy(snapshot.participants, (p) => p.identity ?? p.id)
 ```
 
-**Your own metadata.** `me.setMeta({ name: 'Alice', score: 42 })` replaces it wholesale; `me.setAttributes({ score: 42 })` merges by key (other keys survive; a key set to `undefined` is removed). Both propagate to every observer. Keep durable state here (name, avatar, score); ephemeral state like cursors belongs on `publish()`.
+**Your own metadata.** `me.setMeta({ name: 'Alice', score: 42 })` replaces it wholesale; `me.setAttributes({ score: 42 })` merges by key (other keys survive; a key set to `undefined` is removed). Both propagate to every observer. Keep membership-scoped state here (name, avatar, score); it is deleted when that membership leaves, is removed, or is reaped. Persist state that must survive a membership in your own store, keyed by `identity`. Ephemeral state like cursors belongs on `publish()`.
 
 ### Messaging
 
@@ -206,7 +206,7 @@ Room.guard(room, {
 
 ### Moderation
 
-`Room.guard()` attaches server-side policy to one room instance. It runs on every membership granted through that instance: your own `join()`, and every `join()`, `publish()`, and `send()` a client makes after you return the room. Declare it in the telefunction, where `getContext()` is available:
+`Room.guard()` attaches server-side policy to one room instance. It runs on every client-visible membership granted through that instance: your own `join()`, and every `join()`, `publish()`, and `send()` a client makes after you return the room. A trusted server `join({ hidden: true })` bypasses both join hooks; it is authority code, not client admission. Declare guards in the telefunction, where `getContext()` is available:
 
 ```js
 // Chat.telefunc.js (server)
@@ -459,7 +459,7 @@ Rooms work across multiple server nodes out of the box with <Link href="/redis">
 
 - **Selective delivery.** A node opens the shared semantic backend lane while it owns a participant or any holder on that node wants text or announcements, then filters delivery at each stub's relay. A presence-only observer with no participant, text, or announcement demand opens only the control lane. Binary is source-selective instead: each `(member, track)` backend subscription exists only while someone on that node wants it.
 - **Internal lane recovery.** Room owns bounded replacement of a lost backend subscription. Raw readiness failures and terminal exhaustion are reported server-side; holder-facing readiness stays pending, and a later subscription-planning pass can open a fresh raw attempt while the lane remains wanted. No new subscription-error class reaches application code: public operations keep their existing error contract, such as an acknowledged direct message timing out after 60 seconds when its inbox is unavailable.
-- **Crash-safe presence.** A clean `leave()` shows up everywhere at once. A crash can't: the node holding each connection refreshes its members every 30s, any member that stops being refreshed is removed and its departure announced, with the store's own key-expiry as a final backstop, so a crashed node leaves no ghosts.
+- **Crash-safe presence.** A clean `leave()` shows up everywhere at once. A crash can't: the node holding each connection refreshes its members every 30s; reads treat a member unseen for 120s as stale, then the reaper removes its membership, retained payloads, and indexes before announcing its departure. Member records deliberately have no store key-expiry: silent expiry would erase the evidence that cleanup needs.
 - **Tuning presence latency.** A silently-dropped connection is held for <Link href="/channel-config">`config.channel.reconnectTimeout`</Link> before its members leave, so a brief blip does not flap presence. Lower it for snappier away-detection, raise it to ride out flaky mobile networks.
 - **Deterministic convergence.** Metadata and config updates land in the same final state on every node, whatever order they arrive in.
 - **Backend-native reads.** `Room.get` and `Room.list` use the installed Room backend's authority and directory surfaces. On <Link href="/stream/cloudflare#room-state">Cloudflare</Link>, both are SQLite Durable Object state; room heads and retained replay are strongly consistent, while the directory is a repairable projection verified against each room head.
@@ -484,7 +484,7 @@ The server-side entry point. Clients get a room when a telefunction returns it.
 | `Room.setMeta(id, meta)` | `void` | If the room doesn't exist |
 | `Room.setAttributes(id, attributes)` | `void` | If the room doesn't exist |
 | `Room.close(id)` | `void` | - |
-| `Room.removeParticipant(id, target)` | `void` | Unknown participant `{ id }` |
+| `Room.removeParticipant(id, target)` | `void` | Missing or closed room; unknown participant `{ id }` |
 | `Room.announce(id, data)` | `RoomSendReceipt` | If the room doesn't exist |
 | `Room.send(id, target, data)` | `void` | If the room doesn't exist; unknown participant `{ id }` |
 | `Room.getParticipants(id, target?)` | `ParticipantSnapshotView[]` | If the room doesn't exist |
