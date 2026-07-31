@@ -339,7 +339,6 @@ async function closeRoom(id: string): Promise<void> {
 
 async function acquireClosingLease(backend: BackendSpi, roomId: string, current: RoomHead): Promise<RoomHead | null> {
   if (current.currentInc === null) return null
-  const nextConfig = { ...configFromHead(current), status: 'closing' as const }
   const closeLease = { id: crypto.randomUUID(), durationMs: ROOM_CLOSE_LEASE_MS }
   const result = await backend.compareExchangeHead(
     roomId,
@@ -350,7 +349,7 @@ async function acquireClosingLease(backend: BackendSpi, roomId: string, current:
       head: {
         currentInc: current.currentInc,
         state: 'closing',
-        config: encodeRoomConfig(nextConfig),
+        config: encodeRoomConfig(configFromHead(current)),
         closeLease,
       },
     },

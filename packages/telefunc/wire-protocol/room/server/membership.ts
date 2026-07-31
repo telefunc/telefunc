@@ -1,6 +1,5 @@
 export {
   assertRoomId,
-  dropRetainedOwnedBy,
   evictMember,
   mutateCells,
   presenceCount,
