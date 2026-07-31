@@ -50,7 +50,6 @@ import { RedisSubscriptionDriver } from './subscriber-transport.js'
 
 const DIRECTORY_PAGE_SIZE = 100
 const STABLE_READ_ATTEMPTS = 8
-const DROP_RETRY_MS = 20
 const NEWLINE = 0x0a
 
 function assertOrderingPosition(seq: number, timestamp: number, context: string): void {
@@ -96,7 +95,7 @@ type HeadCxReply =
   | { tag: 'head'; head: StoredHead }
   | { tag: 'deleted' }
   | { tag: 'conflict'; current: StoredHead | null }
-type DropGenerationBeginReply = { exists: false } | { busy: true } | { exists: true; token: string }
+type DropGenerationBeginReply = { exists: false } | { exists: true; token: string }
 type ReadCellsFenceReply = { stale: true } | { revision: string; now: number }
 
 function toBase64(bytes: Uint8Array): string {
@@ -456,35 +455,22 @@ export class RedisRoomBackend implements BackendDriver {
 
   async dropGeneration(roomId: string, inc: string): Promise<void> {
     this.#assertLive()
-    const owner = randomUUID()
-    for (;;) {
-      const begin = JSON.parse(
-        (await this.#call(REDIS_ROOM_COMMANDS.dropGenerationBegin.name, [
-          ...REDIS_ROOM_COMMAND_KEYS.dropGenerationBegin(this.#prefix, roomId),
-          '',
-          inc,
-          owner,
-        ])) as string,
-      ) as DropGenerationBeginReply
-      if ('exists' in begin && !begin.exists) return
-      if ('busy' in begin) {
-        await new Promise((resolve) => setTimeout(resolve, DROP_RETRY_MS))
-        continue
-      }
-      const keys = await this.#publisher.smembers(generationKeysKey(this.#prefix, roomId, inc))
-      const finalizeKeys = REDIS_ROOM_COMMAND_KEYS.dropGenerationFinalize(this.#prefix, roomId, inc, keys)
-      if (
-        (await this.#call(REDIS_ROOM_COMMANDS.dropGenerationFinalize.name, [
-          String(finalizeKeys.length),
-          ...finalizeKeys,
-          inc,
-          begin.token,
-          owner,
-        ])) === 1
-      ) {
-        return
-      }
-    }
+    const begin = JSON.parse(
+      (await this.#call(REDIS_ROOM_COMMANDS.dropGenerationBegin.name, [
+        ...REDIS_ROOM_COMMAND_KEYS.dropGenerationBegin(this.#prefix, roomId),
+        '',
+        inc,
+      ])) as string,
+    ) as DropGenerationBeginReply
+    if (!begin.exists) return
+    const keys = await this.#publisher.smembers(generationKeysKey(this.#prefix, roomId, inc))
+    const finalizeKeys = REDIS_ROOM_COMMAND_KEYS.dropGenerationFinalize(this.#prefix, roomId, inc, keys)
+    await this.#call(REDIS_ROOM_COMMANDS.dropGenerationFinalize.name, [
+      String(finalizeKeys.length),
+      ...finalizeKeys,
+      inc,
+      begin.token,
+    ])
   }
 
   // ── directory (global; its own two co-slotted keys) ──

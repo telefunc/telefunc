@@ -348,15 +348,10 @@ describe('Redis real three-master Cluster CI certification', () => {
       firstDrop = backend.dropGeneration(roomId, inc)
       await inventoryRead.promise
       secondDrop = secondDropper.dropGeneration(roomId, inc)
-      if (await settlesWithin(secondDrop, 100)) {
-        await reinstall()
-        releaseInventory.resolve()
-        await firstDrop
-      } else {
-        releaseInventory.resolve()
-        await Promise.all([firstDrop, secondDrop])
-        await reinstall()
-      }
+      await secondDrop
+      await reinstall()
+      releaseInventory.resolve()
+      await firstDrop
       const reinstalled = await authority.readCells(roomId, inc, { keys: ['survivor'] })
       if ('staleInc' in reinstalled) throw new Error('reinstalled generation became stale')
       expect(Buffer.from(reinstalled.cells.get('survivor') ?? []).toString()).toBe('new')
