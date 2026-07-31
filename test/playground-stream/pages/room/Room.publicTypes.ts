@@ -41,9 +41,15 @@ type _ServerSurface = AssertAll<
   ]
 >
 
-type _ClientSurface = AssertAll<
-  [Exactly<ClientRoom, ServerRoom>, Exactly<ClientLocal, ServerLocal>, Exactly<ClientRemote, ServerRemote>]
->
+type _ClientSurface = AssertAll<[Exactly<ClientLocal, ServerLocal>, Exactly<ClientRemote, ServerRemote>]>
+
+function assertClientJoinBoundary(room: ClientRoom) {
+  void room.join({ meta: { name: 'Alice' }, selfDelivery: false })
+  // @ts-expect-error trusted identities are assigned only by a server-side join
+  void room.join({ identity: 'user-1' })
+  // @ts-expect-error hidden membership is created only by a server-side join
+  void room.join({ hidden: true })
+}
 
 // Permanent false controls for the three escapes exercised against the public projections above.
 type _ComparatorRejectsEscapes = AssertAll<
