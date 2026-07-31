@@ -1,6 +1,6 @@
 // The released Redis BackendDriver for standalone Redis and Redis Cluster deployments.
 //
-// Mechanism map (spi.md §5.2), with atomic pieces in layout.ts's Lua:
+// Mechanism map, with atomic pieces in layout.ts's Lua:
 //   head/cells CX  validate ownership, compare, and mutate one room slot
 //   cells read     revision → manifest/MGET → keyed head/revision/time fence, bounded to 8 attempts
 //   commit         validate, advance order, retain, and publish data plus its in-band delivery fence

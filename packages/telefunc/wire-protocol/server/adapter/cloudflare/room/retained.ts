@@ -3,7 +3,7 @@
 
 import type { LaneId } from '../../../../backend/spi.js'
 import { laneKey, type LaneParts, laneToParts, partsToLane } from './codec.js'
-import type { OrderMark } from './storage.js'
+import { toBytes, type OrderMark } from './storage.js'
 
 const MAX_RETAINED_CHUNK_BYTES = 1_500_000
 
@@ -15,10 +15,6 @@ type ManifestRow = {
   lane_kind: string
   lane_member: string | null
   lane_track: string | null
-}
-
-function toBytes(value: ArrayBuffer | Uint8Array): Uint8Array {
-  return value instanceof Uint8Array ? value : new Uint8Array(value)
 }
 
 // Install retained state inside the acceptance `transactionSync`; partial chunk replacement rolls back.

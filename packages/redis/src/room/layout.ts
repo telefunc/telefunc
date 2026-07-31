@@ -1,7 +1,7 @@
 // Physical key layout and Lua scripts shared by standalone and Cluster RedisRoomBackend.
 //
 // Layout — every key of one room shares the `{<rid>}` hash tag, so a whole room lives in ONE Cluster
-// slot and each script can declare all the keys it touches in KEYS (spi.md §5.2):
+// slot and each script can declare all the keys it touches in KEYS:
 //
 //   head:      tf:room:{rid}:head          JSON { rev, state, config(b64), inc?, lease?{id,until}, exp? }
 //   headrev:   tf:room:{rid}:headrev        INCR counter — the monotonic source of every head `rev`
@@ -11,7 +11,7 @@
 //   retained:  tf:room:{rid}:g:<inc>:rt:<laneKey>  16-byte [seq_hi][seq_lo][ts_hi][ts_lo] + payload
 //   gen keys:  tf:room:{rid}:g:<inc>:keys   SET of generation-owned physical keys
 //   channels:  tf:room:{rid}:ch:<inc>:<laneKey>    PUBLISH/SUBSCRIBE — INC-SCOPED (an old-inc SUBSCRIBE
-//                                                  can never hear a recreation — I11)
+//                                                  can never hear a recreation)
 //   gens:      tf:room:{rid}:gens           SET of incs — SADD'd by the head-CX that installs an inc,
 //                                           SREM'd by dropGeneration; the fresh-inc guard is one SISMEMBER
 //   gen-token: tf:room:{rid}:gen-tokens      HASH inc -> non-reusable generation token (the installing
@@ -19,7 +19,7 @@
 //   gen-drop:  tf:room:{rid}:gen-drops       HASH inc -> exclusive cleanup owner + lease
 //   dir index: tf:{rid-dir}<prefix>… — the directory is global, its own two co-slotted keys (backend.ts)
 //
-// Each time-sensitive command samples Redis TIME on the room-slot owner (spi.md I13). Tests may inject
+// Each time-sensitive command samples Redis TIME on the room-slot owner. Tests may inject
 // `now_ms`; production passes empty and never uses caller-local Date.now().
 
 import { HEAD_TRANSITIONS, ORDERING_FRAME_LAYOUT, laneKey, type BroadcastLane, type LaneId } from 'telefunc/backend'
@@ -126,7 +126,7 @@ local function tf_now(v)
   return tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
 end
 -- read the head, treating a logically-expired tombstone as absent (a lapsed tombstone reopens the
--- absence epoch — I1); the PX backstop only reclaims memory, it is never what makes it invisible.
+-- absence epoch); the PX backstop only reclaims memory, it is never what makes it invisible.
 local function tf_head(key, now)
   local raw = redis.call('GET', key)
   if not raw then return nil end
@@ -192,7 +192,7 @@ function renderLuaHeadTransitionTable(variable = 'HEAD_TRANSITIONS'): string {
 
 // HEAD CX — the single lifecycle primitive. One atomic record does legality (throw), compare (conflict),
 // the fresh-inc guard, minting and the store. The guarded transitions cannot be reached through any
-// other compare form (spi.md §2 transition table), so a generic {rev} can never install/replace a lease,
+// other compare form, so a generic {rev} can never install/replace a lease,
 // re-lease a live 'closing' head, or reach 'closed'.
 //   KEYS: [1]=head [2]=gens [3]=headrev [4]=generation-tokens
 //   ARGV: [1]=now [2]=cxJson{form,rev?,closingLease?} [3]=nextJson{kind,state?,inc?,config?,lease?,ttlMs?}
@@ -212,7 +212,7 @@ local function conflict()
 end
 
 -- Operation legality of the tombstone delete is decided BEFORE any compare, so misuse throws even where
--- the compare would have conflicted (spi.md §2 — the delete row only). A legal delete still goes through
+-- the compare would have conflicted. A legal delete still goes through
 -- the selected HeadCx compare form below: guarded takeover/finalize forms cannot bypass their predicates.
 if nx.kind == 'delete' then
   if from ~= 'closed' then
@@ -420,7 +420,7 @@ return 'committed'
 
 // COMMIT — atomic acceptance: head precondition (one boolean, two branches), order advance, optional
 // retained install, then PUBLISH. Supplying a closing lease selects the narrow closing-control branch,
-// which is what makes every other lane stale while closing (I12).
+// which is what makes every other lane stale while closing.
 //   KEYS: [1]=head [2]=order [3]=retained [4]=channel [5]=generation-keys [6..]=required live cells
 //   ARGV: [1]=now [2]=inc [3]=laneKind [4]=closingLease('') [5]=retain('0'|'1')
 //         [6]=payload [7]=local delivery-fence token or ''

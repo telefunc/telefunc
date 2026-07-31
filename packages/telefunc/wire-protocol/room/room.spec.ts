@@ -12,7 +12,7 @@ import {
   ROOM_MEMBER_TTL_MS,
   ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS,
   ROOM_TAIL_ATTACH_TIMEOUT_MS,
-  ROOM_TAIL_HOLD_BYTES_MAX,
+  ROOM_TAIL_HOLD_CODE_UNITS_MAX,
   ROOM_TAIL_HOLD_MAX,
 } from './constants.js'
 import {
@@ -1842,14 +1842,14 @@ describe('room binary protocol validation', () => {
     expect(byCount).toHaveLength(ROOM_TAIL_HOLD_MAX)
     expect(byCount[0]!.ord.seq).toBe(1)
     const bySize: ReturnType<typeof entry>[] = []
-    const halfPlusOne = 'x'.repeat(ROOM_TAIL_HOLD_BYTES_MAX / 2 + 1)
+    const halfPlusOne = 'x'.repeat(ROOM_TAIL_HOLD_CODE_UNITS_MAX / 2 + 1)
     pushBoundedTail(bySize, entry(halfPlusOne, 1))
     pushBoundedTail(bySize, entry(halfPlusOne, 2))
     expect(bySize.map(({ ord }) => ord.seq)).toEqual([2])
-    pushBoundedTail(bySize, entry('x'.repeat(ROOM_TAIL_HOLD_BYTES_MAX + 1), 3))
+    pushBoundedTail(bySize, entry('x'.repeat(ROOM_TAIL_HOLD_CODE_UNITS_MAX + 1), 3))
     expect(bySize.map(({ ord }) => ord.seq)).toEqual([2])
     const nonAscii: ReturnType<typeof entry>[] = []
-    pushBoundedTail(nonAscii, entry('💥'.repeat(ROOM_TAIL_HOLD_BYTES_MAX / 2)))
+    pushBoundedTail(nonAscii, entry('💥'.repeat(ROOM_TAIL_HOLD_CODE_UNITS_MAX / 2)))
     expect(nonAscii).toHaveLength(1)
   })
 

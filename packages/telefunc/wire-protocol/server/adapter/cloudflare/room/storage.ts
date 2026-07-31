@@ -28,7 +28,7 @@ type HeadRow = {
   expires_at: number | null
 }
 
-function toBytes(value: ArrayBuffer | Uint8Array): Uint8Array {
+export function toBytes(value: ArrayBuffer | Uint8Array): Uint8Array {
   return value instanceof Uint8Array ? value : new Uint8Array(value)
 }
 

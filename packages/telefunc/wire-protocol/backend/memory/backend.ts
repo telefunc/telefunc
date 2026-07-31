@@ -522,7 +522,7 @@ export class MemoryBackend implements BackendDriver {
     return getOrCreate(room.gens, inc, newGeneration)
   }
 
-  // Lazy TTL: a lapsed tombstone reads as absent, which is what reopens an absence epoch (I1).
+  // Lazy TTL: a lapsed tombstone reads as absent, which is what reopens an absence epoch.
   #liveHead(room: RoomRecord | undefined): StoredHead | null {
     if (room === undefined || room.head === null) return null
     if (!isExpired(room.head, this.#now())) return room.head
