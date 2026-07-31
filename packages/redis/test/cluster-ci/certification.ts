@@ -4,6 +4,7 @@ import type { BackendSpi, CommitAccepted, LaneId, RoomHead, SubscriptionState } 
 import { afterAll, afterEach, beforeAll, describe, expect, it, onTestFinished, vi } from 'vitest'
 import { installRedis, RedisRoomBackend } from '../../src/index.js'
 import {
+  broadcastSequenceKey,
   channelKey,
   decodeRedisOrderingFrame,
   headKey,
@@ -54,7 +55,7 @@ describe('Redis real three-master Cluster CI certification', () => {
     if (cluster !== undefined) await cluster.quit().catch(() => cluster.disconnect())
   })
 
-  it('requires compatible Telefunc and master-routed Cluster reads', () => {
+  it('requires compatible Telefunc, master reads, and a never-resend command connection', async () => {
     const manifest = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')) as {
       peerDependencies: { telefunc: string }
     }
@@ -66,6 +67,29 @@ describe('Redis real three-master Cluster CI certification', () => {
     } finally {
       cluster.options.scaleReads = scaleReads
     }
+
+    const prefix = uniquePrefix('reply-loss')
+    const backend = ownRoomBackend(cluster, prefix)
+    const commands = cluster as unknown as Record<string, (...args: unknown[]) => Promise<unknown>>
+    const publish = commands.tfPublish.bind(cluster)
+    vi.spyOn(commands, 'tfPublish').mockImplementation(async (...args) => {
+      await publish(...args)
+      if (cluster.options.retryDelayOnFailover === 0) throw new Error('simulated reply loss after execution')
+      return await publish(...args)
+    })
+    await expect(backend.publish({ key: 'once', kind: 'text' }, bytes('once'))).rejects.toThrow()
+    expect(await cluster.get(broadcastSequenceKey(prefix, 'once'))).toBe('1')
+
+    const retryDelayOnFailover = cluster.options.retryDelayOnFailover
+    onTestFinished(() => {
+      cluster.options.retryDelayOnFailover = retryDelayOnFailover
+    })
+    cluster.options.retryDelayOnFailover = 100
+    expect(() => new RedisRoomBackend({ redis: cluster, prefix: 'unsafe-cluster:' })).toThrow(/at-most-once/i)
+    cluster.options.retryDelayOnFailover = retryDelayOnFailover
+    expect(() => new RedisRoomBackend({ redis: (masters[0] as Master).client, prefix: 'unsafe-direct:' })).toThrow(
+      /at-most-once/i,
+    )
   })
 
   it('covers shipped command KEYS and terminates live and in-flight attempts when their generation drops', async () => {
@@ -638,6 +662,7 @@ function clusterClient(nodes: RedisClusterNode[]): Cluster {
   const client = new Cluster(nodes, {
     scaleReads: 'master',
     slotsRefreshTimeout: 2_000,
+    retryDelayOnFailover: 0,
     redisOptions: { maxRetriesPerRequest: 2 },
     clusterRetryStrategy: (attempt) => (attempt <= 5 ? 20 : null),
   })

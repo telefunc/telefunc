@@ -151,6 +151,18 @@ export class RedisRoomBackend implements BackendDriver {
     if (options.redis instanceof Cluster && options.redis.options.scaleReads !== 'master') {
       throw new Error("RedisRoomBackend: ioredis Cluster scaleReads must be 'master' for consistent Room reads")
     }
+    const reconnectOnError =
+      options.redis instanceof Cluster
+        ? options.redis.options.redisOptions?.reconnectOnError
+        : options.redis.options.reconnectOnError
+    if (
+      reconnectOnError != null ||
+      (options.redis instanceof Cluster
+        ? options.redis.options.retryDelayOnFailover !== 0
+        : options.redis.options.maxRetriesPerRequest !== 0)
+    ) {
+      throw new Error('RedisRoomBackend: ioredis command retries must be disabled to preserve at-most-once delivery')
+    }
     this.#publisher = options.redis
     let clusterSubscriberSelection = 0
     const createSubscriber = async (): Promise<Redis> => {
