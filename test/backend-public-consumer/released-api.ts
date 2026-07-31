@@ -62,6 +62,7 @@ type Assert<T extends true> = T
 type Extends<Actual, Baseline> = [Actual] extends [Baseline] ? true : false
 type Compatible<Actual, Baseline> = Extends<Actual, Baseline> extends true ? Extends<Baseline, Actual> : false
 type HasKeys<Actual, Keys extends PropertyKey> = Exclude<Keys, keyof Actual> extends never ? true : false
+type HasExactKeys<Actual, Keys extends keyof Actual> = Compatible<keyof Actual, Keys>
 type IsOptional<T, K extends keyof T> = {} extends Pick<T, K> ? true : false
 void [Abort, ClientAbort]
 
@@ -107,13 +108,12 @@ type ReleasedBackendKeys =
   | 'readRetained'
   | 'listRetained'
   | 'deleteRetained'
-  | 'listGenerations'
   | 'dropGeneration'
   | 'directoryPut'
   | 'directoryDelete'
   | 'directoryList'
   | 'dispose'
-type _backendKeys = Assert<HasKeys<BackendSpi, ReleasedBackendKeys | 'subscribe' | 'subscribeLane'>>
+type _backendKeys = Assert<HasExactKeys<BackendSpi, ReleasedBackendKeys | 'subscribe' | 'subscribeLane'>>
 type _subscriptionKeys = Assert<HasKeys<BackendSubscription, 'ready' | 'state' | 'onStateChange' | 'unsubscribe'>>
 type _attemptKeys = Assert<HasKeys<SubscriptionAttempt, 'ready' | 'state' | 'onStateChange' | 'unsubscribe'>>
 type _attemptStateShape = Assert<
@@ -128,7 +128,7 @@ type _bindingOpenArguments = Assert<
 type _driverKeys = Assert<HasKeys<SubscriptionDriver<string>, 'bind'>>
 type _driverBindArguments = Assert<Compatible<Parameters<SubscriptionDriver<string>['bind']>, [string]>>
 type _driverBindResult = Assert<Compatible<ReturnType<SubscriptionDriver<string>['bind']>, SubscriptionBinding>>
-type _backendDriverKeys = Assert<HasKeys<BackendDriver, ReleasedBackendKeys | 'subscriptions'>>
+type _backendDriverKeys = Assert<HasExactKeys<BackendDriver, ReleasedBackendKeys | 'subscriptions'>>
 type _sourceShape = Assert<
   Compatible<
     BackendSubscriptionSource,

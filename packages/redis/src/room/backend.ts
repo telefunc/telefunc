@@ -26,7 +26,6 @@ import {
   directoryTagsKey,
   generationKeysKey,
   generationTokensKey,
-  gensKey,
   headKey,
   laneKey,
   parseLaneKey,
@@ -429,11 +428,6 @@ export class RedisRoomBackend implements BackendDriver {
         token,
       ])) === 1
     )
-  }
-
-  async listGenerations(roomId: string): Promise<string[]> {
-    this._assertLive()
-    return this._publisher.smembers(gensKey(this._prefix, roomId))
   }
 
   async dropGeneration(roomId: string, inc: string): Promise<void> {

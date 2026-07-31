@@ -454,14 +454,6 @@ export class MemoryBackend implements BackendDriver {
 
   // ── generation lifecycle ──
 
-  async listGenerations(roomId: string): Promise<string[]> {
-    this.#assertLive()
-    const room = this.#state.rooms.get(roomId)
-    if (room === undefined) return []
-    this.#sweep(room)
-    return [...room.gens.keys()]
-  }
-
   async dropGeneration(roomId: string, inc: string): Promise<void> {
     this.#assertLive()
     const room = this.#state.rooms.get(roomId)

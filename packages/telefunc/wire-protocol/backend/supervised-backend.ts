@@ -36,7 +36,6 @@ function superviseBackend(driver: BackendDriver): BackendSpi {
     subscribeLane: (roomId, inc, lane, receiver) =>
       subscriptions.subscribe({ kind: 'durable', roomId, inc, lane }, receiver),
 
-    listGenerations: (roomId) => driver.listGenerations(roomId),
     dropGeneration: async (roomId, inc) => {
       // Normative ordering: a refused or failed durable drop cannot close live sources. Termination is
       // the local consequence of a successful destruction, never an optimistic precursor to it.

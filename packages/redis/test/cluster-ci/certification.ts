@@ -7,6 +7,7 @@ import {
   broadcastSequenceKey,
   channelKey,
   decodeRedisOrderingFrame,
+  gensKey,
   headKey,
   genPrefix,
   laneKey,
@@ -333,7 +334,7 @@ describe('Redis real three-master Cluster CI certification', () => {
       releaseDrop.resolve()
       await dropping
       expect((await authority.readHead(roomId))?.head.currentInc).toBe(inc)
-      expect(await authority.listGenerations(roomId)).toContain(inc)
+      expect(await client.smembers(gensKey(prefix, roomId))).toContain(inc)
       if (begin !== undefined) commands.tfRoomDropGenerationBegin = begin
       await writeCell('old')
       const active = await authority.readHead(roomId)

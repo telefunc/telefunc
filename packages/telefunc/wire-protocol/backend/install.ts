@@ -139,7 +139,6 @@ const REQUIRED_METHODS = [
   'readRetained',
   'listRetained',
   'deleteRetained',
-  'listGenerations',
   'dropGeneration',
   'directoryPut',
   'directoryDelete',

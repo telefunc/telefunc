@@ -222,9 +222,6 @@ export class CloudflareRoomBackend implements BackendDriver {
   async deleteRetained(roomId: string, inc: string, lane?: LaneId, opts?: { ifSeq?: number }) {
     await this.#stub(roomId).deleteRetainedLane(inc, lane, opts)
   }
-  async listGenerations(roomId: string) {
-    return this.#stub(roomId).listGenerations()
-  }
   async dropGeneration(roomId: string, inc: string) {
     await this.#stub(roomId).dropGeneration(inc)
   }

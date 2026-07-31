@@ -176,7 +176,6 @@ export type BackendSpi = {
   // a surviving old-inc subscription from receiving recreated-room frames.
 
   // ── generation lifecycle (janitor) ──
-  listGenerations(roomId: string): Promise<string[]> // incs with any surviving state
   dropGeneration(roomId: string, inc: string): Promise<void> // MUST refuse head.currentInc === inc
 
   // ── directory ──
