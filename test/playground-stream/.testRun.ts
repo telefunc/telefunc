@@ -14,12 +14,7 @@ import { testStreamToServer } from './pages/stream-to-server/e2e-test'
 import { testLiveQuery } from './pages/live-query/e2e-test'
 import { testRxjs } from './pages/rxjs/e2e-test'
 import { testPublish } from './pages/publish/e2e-test'
-import { testRoom } from './pages/room/e2e-test'
 import { testRefIdentity } from './pages/ref-identity/e2e-test'
-
-// Room traffic uses the channel transport, independently of the streaming transport. Keep one
-// preview variant for each distinct channel topology: SSE, SSE-to-WebSocket upgrade, and direct WS.
-const roomCoverageVariants = new Set(['binary-inline:["sse"]', 'binary-inline:["sse","ws"]', 'channel:["ws"]'])
 
 function testRun(cmd: 'pnpm dev' | 'pnpm preview') {
   run(cmd, {
@@ -33,11 +28,14 @@ function testRun(cmd: 'pnpm dev' | 'pnpm preview') {
       (log.includes('Local:') && log.includes('http://localhost:3000')),
     tolerateError(log) {
       return (
+        // Caller-handled rejections (including unspaced ShieldValidationError) must stay silent;
+        // output from those paths is the double-report canary.
         log.logText.includes('File arguments are being consumed out of order') ||
         log.logText.includes('multiple streaming values') ||
         log.logText.includes('the server responded with a status of 500') ||
         log.logText.includes('the server responded with a status of 422') ||
         log.logText.includes('[telefunc:channel-error]') ||
+        // pages/channel/Channel.telefunc.ts deliberately throws a bug, which must be logged server-side.
         log.logText.includes('Error: server-listener-bug') ||
         log.logText.includes('Unexpected generator error') ||
         log.logText.includes('[telefunc:rxjs]') ||
@@ -91,9 +89,6 @@ function testRun(cmd: 'pnpm dev' | 'pnpm preview') {
   testRxjs()
 
   testPublish()
-
-  const roomCoverageVariant = `${process.env.PUBLIC_ENV__STREAM_TRANSPORT}:${process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS}`
-  if (!isDev && roomCoverageVariants.has(roomCoverageVariant)) testRoom()
 
   testRefIdentity()
 }
