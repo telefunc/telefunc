@@ -87,8 +87,7 @@ function testRoom() {
     'retain',
     'room: a retained message reaches a subscriber that joins after it was published',
     (r) => {
-      // The late subscriber gets the pinned message via the retained slot — read only after its
-      // subscription is live, so the subscribe/read handoff cannot drop it.
+      // Retained replay begins only after subscription readiness.
       expect(r.received).deep.equal(['pinned'])
     },
   )
@@ -148,8 +147,7 @@ function testRoom() {
     'room: the declared message type is shielded at runtime — a malformed publish is rejected',
     (r) => {
       expect(r.okAck).toBe(true) // the well-typed payload is admitted
-      // The shield auto-generated from `Room<…, ChatMsg>` rejects the malformed payload at the ingress;
-      // the branded error rides home over the wire and rejects the client's `publish()` promise.
+      // The generated shield rejects malformed ingress through the publish promise.
       expect(r.badError).toBe('ShieldValidationError')
       expect(r.received).deep.equal(['hi']) // only the valid payload ever reached the room
     },
@@ -158,7 +156,6 @@ function testRoom() {
     'admin',
     'room: room-authored messages, admin kick and close reach the client',
     (result) => {
-      // Room-authored: Room.announce() landed on onAnnounce, Room.send() on listen with from null.
       expect(result.announcements).deep.equal(['maintenance'])
       expect(result.system).deep.equal([{ data: 'welcome', fromRoom: true }])
       expect(result.kicked).toBe(true) // LocalParticipant.onLeave fired on removeParticipant()
@@ -283,8 +280,7 @@ function testRoom() {
       expect(r.phase).toBe('ready')
     },
     async () => {
-      // This is a client-side proxy, so force Chromium's heap rather than the playground server's
-      // `/api/gc`. The WeakRef makes collection observable without depending on finalizer timing.
+      // Force Chromium's heap; WeakRef observes collection without finalizer timing.
       for (let cycle = 0; cycle < 3; cycle++) await page.requestGC()
       await page.click('#test-room-gc-participant-publish')
       await autoRetry(async () => {

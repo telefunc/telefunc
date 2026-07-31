@@ -1,25 +1,13 @@
-// Physical key layout and Lua scripts shared by standalone and Cluster RedisRoomBackend.
-//
-// Layout — every key of one room shares the `{<rid>}` hash tag, so a whole room lives in ONE Cluster
-// slot and each script can declare all the keys it touches in KEYS:
-//
-//   head:      tf:room:{rid}:head          JSON { rev, state, config(b64), inc?, lease?{id,until}, exp? }
-//   headrev:   tf:room:{rid}:headrev        INCR counter — the monotonic source of every head `rev`
-//   cells:     tf:room:{rid}:g:<inc>:c:<key>   logical cell:  "<expiresAt|''>\n<bytes>"  (PX = backstop)
-//   revision:  tf:room:{rid}:g:<inc>:rev    INCR'd by every cell CX — the coarse per-generation revision
-//   order:     tf:room:{rid}:g:<inc>:o:<laneKey>   "<seq>:<ts>"
-//   retained:  tf:room:{rid}:g:<inc>:rt:<laneKey>  16-byte [seq_hi][seq_lo][ts_hi][ts_lo] + payload
-//   gen keys:  tf:room:{rid}:g:<inc>:keys   SET of generation-owned physical keys
-//   channels:  tf:room:{rid}:ch:<inc>:<laneKey>    PUBLISH/SUBSCRIBE — INC-SCOPED (an old-inc SUBSCRIBE
-//                                                  can never hear a recreation)
-//   gens:      tf:room:{rid}:gens           SET of incs — SADD'd by the head-CX that installs an inc,
-//                                           SREM'd by dropGeneration; the fresh-inc guard is one SISMEMBER
-//   gen-token: tf:room:{rid}:gen-tokens      HASH inc -> non-reusable generation token (the installing
-//                                           head revision), removed only with the final gens SREM
-//   dir index: tf:{rid-dir}<prefix>… — the directory is global, its own two co-slotted keys (backend.ts)
-//
-// Each time-sensitive command samples Redis TIME on the room-slot owner. Tests may inject
-// `now_ms`; production passes empty and never uses caller-local Date.now().
+// Redis Room keys; every per-room key shares `{rid}` and one Cluster slot.
+// head/headrev: tf:room:{rid}:{head|headrev}; JSON head plus monotonic revision.
+// cells/revision: tf:room:{rid}:g:<inc>:{c:<key>|rev}; logical cells plus coarse generation revision.
+// order/retained: tf:room:{rid}:g:<inc>:{o|rt}:<laneKey>; ordering mark or 16-byte mark + payload.
+// gen keys: tf:room:{rid}:g:<inc>:keys; generation-owned physical-key set.
+// channels: tf:room:{rid}:ch:<inc>:<laneKey>; incarnation-scoped PUBLISH/SUBSCRIBE.
+// gens: tf:room:{rid}:gens; installed incarnations and the fresh-inc SISMEMBER guard.
+// gen-token: tf:room:{rid}:gen-tokens; non-reusable install revision removed with final SREM.
+// dir index: tf:{rid-dir}<prefix>…; the global directory's two keys are co-slotted.
+// Commands sample Redis TIME; tests may inject `now_ms`, production never uses caller time.
 
 import { HEAD_TRANSITIONS, ORDERING_FRAME_LAYOUT, laneKey, type BroadcastLane, type LaneId } from 'telefunc/backend'
 export { laneKey }
@@ -140,8 +128,7 @@ local function tf_head(key, now)
 end
 `
 
-// Redis renders the frozen, backend-neutral ordering layout into its own runtime language. Both generic
-// Broadcast and durable Room embed this exact function; the decoder below interprets the same data.
+// Broadcast and Room render the frozen ordering layout into Lua; the decoder reads the same data.
 const orderingFrameFormat = [
   ORDERING_FRAME_LAYOUT.endianness === 'big' ? '>' : '<',
   ...Object.values(ORDERING_FRAME_LAYOUT.offsets)
@@ -191,10 +178,8 @@ function renderLuaHeadTransitionTable(variable = 'HEAD_TRANSITIONS'): string {
   return [`local ${variable} = {`, ...rows, '}'].join('\n')
 }
 
-// HEAD CX — the single lifecycle primitive. One atomic record does legality (throw), compare (conflict),
-// the fresh-inc guard, minting and the store. The guarded transitions cannot be reached through any
-// other compare form, so a generic {rev} can never install/replace a lease,
-// re-lease a live 'closing' head, or reach 'closed'.
+// HEAD CX owns legality, compare, fresh-inc minting, and store; guarded transitions cannot use generic rev CX.
+// This prevents lease replacement, live-closing re-lease, or closure through the generic form.
 //   KEYS: [1]=head [2]=gens [3]=headrev [4]=generation-tokens
 //   ARGV: [1]=now [2]=cxJson{form,rev?,closingLease?} [3]=nextJson{kind,state?,inc?,config?,lease?,ttlMs?}
 export const HEAD_CX_LUA = `${NOW_FN}

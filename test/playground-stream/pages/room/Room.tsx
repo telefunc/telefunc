@@ -138,11 +138,7 @@ function Room() {
       {scenario('retain', 'Retained Replay', 'Retained replay to a late subscriber', async () => {
         const roomId = await createRoomId('retain')
 
-        // A publisher pins a retained message; a subscriber that arrives *after* the publish must
-        // still receive it (MQTT-style). The retained slot is read only once the subscription is
-        // live at the backend — the readiness handoff — so the subscriber can't miss it in the
-        // gap between subscribing and the read. Keep the publisher's view referenced so
-        // its membership (and thus the owned retained slot) survives until the late subscriber reads.
+        // Read retained state only after subscription readiness; keep its membership-owning publisher referenced.
         const pubView = await onGetRoom(roomId)
         const author = await pubView.join({ meta: { name: 'Author' } })
         await author.publish({ text: 'pinned' }, { retain: true })
@@ -168,8 +164,6 @@ function Room() {
         // Live handle (meta stays fresh); retry — the join event may still be in flight.
         const remoteMe = await getParticipantWhenJoined(observer, me.id)
 
-        // Direct message: a room-joined participant whispers to the standalone one.
-        // Privacy: it must reach Bob's inbox and never the room stream.
         const ally = await observer.join({ meta: { name: 'Ally' } })
         const dms: Array<{ data: unknown; fromAlly: boolean }> = []
         me.listen((data, from) => dms.push({ data, fromAlly: from?.id === ally.id }))
@@ -248,7 +242,6 @@ function Room() {
 
         const received: unknown[] = []
         room.subscribe((data) => received.push(data))
-        // Admission is guarded too — the rejection reaches the joiner's promise over the wire.
         const joinError = await room.join({ meta: { name: 'Banned' } }).then(
           () => null,
           (err: Error) => err.message,
@@ -258,7 +251,6 @@ function Room() {
         const inbox: unknown[] = []
         peer.listen((data) => inbox.push(data))
 
-        // Guard rejections travel back over the wire to the caller's promise.
         const publishError = await me.publish('forbidden').then(
           () => null,
           (err: Error) => err.message,
@@ -278,19 +270,16 @@ function Room() {
 
       {scenario('shield', null, 'Shielded publish', async () => {
         const roomId = `e2e-shield:${crypto.randomUUID()}`
-        // A room declared with a message type — `Room.create<…, ChatMsg>` inside the telefunction.
         const room = await onGetTypedRoom(roomId)
         const me = await room.join({ meta: { name: 'A' } })
         const received: string[] = []
         room.subscribe((data) => received.push(data.text))
 
-        // A well-typed payload sails through the shield auto-generated from the declared type.
         const okAck = await me.publish({ kind: 'chat', text: 'hi' }).then(
           () => true,
           () => false,
         )
-        // A malformed payload — cast past the compile-time type, as an untyped or hostile client could
-        // send — is rejected at the server ingress by that same auto-generated shield, before any handler.
+        // Cast past the type to prove the generated shield rejects hostile ingress.
         const badError = await me.publish({ kind: 'chat' } as unknown as { kind: 'chat'; text: string }).then(
           () => null,
           (err: Error) => err.name,
@@ -303,7 +292,6 @@ function Room() {
         const [roomId, lobby] = await createRoom('member')
         const me = await lobby.join({ meta: { name: 'Viewed' } })
 
-        // A telefunction returns { room, member } — ref-identity binds the view to the room.
         const out = await onGetRoomWithMember(roomId, me.id)
         const viaRoom = await out.room.getParticipant(me.id)
         const remote = await onGetMember(roomId, me.id)
@@ -330,7 +318,6 @@ function Room() {
           const [roomId, lobby] = await createRoom('admin')
           const me = await lobby.join({ meta: { name: 'Eve' } })
 
-          // Room-authored messages: a broadcast to everyone, and a whisper (fromId === '').
           const announcements: unknown[] = []
           lobby.onAnnounce((data) => announcements.push(data))
           const system: Array<{ data: unknown; fromRoom: boolean }> = []
@@ -375,8 +362,7 @@ function Room() {
         lobby.subscribe((data) => received.push((data as { n: number }).n))
         const me = await lobby.join({ meta: { name: 'Cursor' } })
 
-        // A synchronous burst under one key: the first send goes, 2..5 collapse into a single
-        // pending, so only the first and the latest reach the room — deterministically [1, 5].
+        // One key emits only the first and latest values: [1, 5].
         const acks = await Promise.all([1, 2, 3, 4, 5].map((n) => me.publish({ n }, { coalesce: 'cursor' })))
 
         await pollUntil(() => ({
@@ -417,10 +403,8 @@ function Room() {
         pub.onDemand((track, wanted) => {
           if (track === 'camera') cam.push(wanted)
         })
-        // Announce the camera track so demand is attributable to (Pub, camera).
         await pub.publishBinary(new Uint8Array(8).fill(1), { track: 'camera', meta: { key: true } })
 
-        // A separate observer wants the track — demand rises; releasing it — demand falls.
         const viewer = await onGetRoom(roomId)
         const unsub = viewer.subscribeBinary(() => {}, { track: 'camera' })
         await pollUntil(() => ({ result: { cam }, done: cam.includes(true) }))
@@ -435,9 +419,8 @@ function Room() {
         const [roomId, owner] = await createRoom('tail')
         const me = await owner.join({ meta: { name: 'Src' } })
 
-        // Tail handle: relay starts at serialize time, buffered on the client until subscribe().
         const tailed = await onGetRoomTail(roomId)
-        // Published AFTER the tail handle exists but BEFORE we subscribe — must not be dropped.
+        // Publish after tail creation but before subscribe; it must be replayed.
         await me.publish({ t: 'between' })
 
         const received: string[] = []
@@ -512,7 +495,6 @@ function Room() {
         const bob = await onJoinAsServer(roomId, 'Bob')
         const ally = await observer.join({ meta: { name: 'Ally' } })
 
-        // Sent BEFORE Bob listens — held in his inbox, flushed the moment he attaches.
         await ally.send(bob.id, 'early')
         const held: string[] = []
         bob.listen((data) => held.push(data as string))
@@ -522,8 +504,6 @@ function Room() {
 
       {scenario('self', 'selfDelivery: false', 'Own frames suppressed', async () => {
         const roomId = await createRoomId('self')
-        // The "others receive it" observer is a genuinely different room consumer, so its receipt
-        // distinguishes self-delivery suppression from a publish that disappeared altogether.
         await onWatchRoom(roomId)
         const room = await onGetRoom(roomId)
         const me = await room.join({ meta: { name: 'Solo' }, selfDelivery: false })
@@ -547,15 +527,13 @@ function Room() {
           const roomId = await createRoomId('self-server')
           await onWatchRoom(roomId) // a different (server-side) client — receives everything
 
-          // `me`: server-side join with selfDelivery:false, co-returned with its room. Its own
-          // publish must be absent from the room view's observable deliveries.
+          // The co-returned server join suppresses its own publish on this room view.
           const { room, me } = await onJoinRoomAsServerSelf(roomId, 'Solo')
           const mine: string[] = []
           room.subscribe((data) => mine.push(data as string))
           await me.publish('from-me')
 
-          // `notMe`: a client-side join (selfDelivery on) on the SAME room stub — its publishes DO
-          // come back to `mine`. Proves the two self-delivery behaviours coexist on one room view.
+          // A client join on the same stub keeps default self-delivery.
           const notMe = await room.join({ meta: { name: 'NotMe' } })
           await notMe.publish('from-notme')
 
@@ -607,7 +585,6 @@ function Room() {
           empty = true
         })
 
-        // Server-side join stamps identity 'user:Multi'.
         const multi = await onJoinAsServer(roomId, 'Multi')
         let cause: { type: string; reason?: unknown } | null = null
         multi.onLeave((c) => {
