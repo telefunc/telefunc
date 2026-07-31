@@ -626,7 +626,7 @@ class ClientStandaloneParticipant extends ClientParticipantBase {
         // An ack DM replies through the channel's own ack — the handler's return rides it home.
         if (msg.ackId) return this._deliverMessageAck(inbox)
         this._deliverMessage(inbox)
-      } else if (msg.__r === 'left') this._onLeft(standaloneLeftCause(msg))
+      } else if (msg.__r === 'left') this._onLeft(leaveCauseFromWire(msg))
     })
     channel.onClose(() => this._onLeft({ type: 'disconnected' }))
   }
@@ -653,14 +653,6 @@ class ClientStandaloneParticipant extends ClientParticipantBase {
   private _request(req: ParticipantStubRequest): Promise<unknown> {
     return this._channel.send(req, { ack: true })
   }
-}
-
-// Helpers
-
-/** A standalone participant's `left` notice carries the server-side cause verbatim. */
-function standaloneLeftCause(msg: { cause?: 'removed' | 'disconnected' | 'closed'; reason?: unknown }): LeaveCause {
-  const type = msg.cause ?? 'left'
-  return msg.reason === undefined ? { type } : { type, reason: msg.reason }
 }
 
 function reportRoomError(err: unknown): void {

@@ -621,14 +621,8 @@ class ServerRoom extends RoomStateView implements Room {
     if (envelope.__r !== 'data') return
     const event = envelope as RoomDataEnvelope
     const info = makePublishInfo(this.id, rawInfo.seq, rawInfo.timestamp)
-    this._state.applyData(
-      event.from,
-      event.fromMeta,
-      event.fromIdentity ?? null,
-      event.data,
-      info,
-      this._suppress(event.from),
-    )
+    if (!this._suppress(event.from))
+      this._state.applyData(event.from, event.fromMeta, event.fromIdentity ?? null, event.data, info)
     this._healUnknownSender(event.from)
 
     if (this._stubs.size > 0) {
@@ -653,14 +647,8 @@ class ServerRoom extends RoomStateView implements Room {
     const unframed = unframeMemberId(framed)
     if (!unframed) return // junk on the binary lane
     const info = makePublishInfo(this.id, rawInfo.seq, rawInfo.timestamp)
-    this._state.applyBinary(
-      unframed.from,
-      unframed.payload,
-      unframed.track,
-      unframed.meta,
-      info,
-      this._suppress(unframed.from),
-    )
+    if (!this._suppress(unframed.from))
+      this._state.applyBinary(unframed.from, unframed.payload, unframed.track, unframed.meta, info)
     this._healUnknownSender(unframed.from)
 
     if (this._stubs.size > 0) {

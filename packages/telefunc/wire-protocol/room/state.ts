@@ -222,7 +222,7 @@ class RoomState {
   }
   /** Which (member, track) binary streams this holder needs delivered — drives the wire/adapter subscriptions on both sides (client declares it, server aggregates it per stub). */
   binaryWants(): BinaryWants {
-    const members: Record<string, TrackWants> = {}
+    const members: Record<string, TrackWants> = Object.create(null)
     for (const entry of this._members.values()) {
       if (entry.binaryCbs.length > 0) members[entry.id] = trackWantsOf(entry.binaryCbs)
     }
@@ -478,11 +478,7 @@ class RoomState {
     fromIdentity: string | null,
     data: unknown,
     info: ChannelPublishInfo,
-    // Server-only: a server-side room subscriber drops its own echo (see ServerRoom._suppress). The client never passes this — the server already withholds a self-suppressed member's echo at the
-    // relay gate, so nothing to drop here.
-    suppress = false,
   ): void {
-    if (suppress) return
     const entry = this._members.get(from)
     this._fireAll(
       this._roomDataCbs,
@@ -501,10 +497,7 @@ class RoomState {
     track: string | null,
     meta: Record<string, unknown> | null,
     info: ChannelPublishInfo,
-    // Server-only (see applyData) — the client omits it; suppression already happened at the source.
-    suppress = false,
   ): void {
-    if (suppress) return
     const frameInfo: ChannelPublishInfo & BinaryFrameInfo = { ...info, track, meta }
     const entry = this._members.get(from)
     const sender = entry ? this._remote(entry) : { id: from, meta: {}, identity: null }

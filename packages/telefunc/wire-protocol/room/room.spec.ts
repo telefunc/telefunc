@@ -20,6 +20,8 @@ import {
   RoomError,
   frameWithMemberId,
   isRoomError,
+  leaveCauseFromWire,
+  leaveCauseToWire,
   mergeAttributes,
   normalizeJoinOptions,
   pushBoundedTail,
@@ -31,6 +33,7 @@ import {
   unframeMemberId,
   type RoomSnapshotMetadata,
 } from './protocol.js'
+import type { LeaveCause } from './types.js'
 import { ClientRoom, RoomClientBroadcast } from './client.js'
 import { RoomState, remoteBacking } from './state.js'
 import { Room, ServerRoom } from './server.js'
@@ -1901,15 +1904,27 @@ describe('room binary protocol validation', () => {
         members: { 'not-a-member-id': { all: false, tracks: [] } },
       }),
     ).toBeNull()
+    const state = new RoomState({
+      roomId: 'state-wants',
+      meta: {},
+      seed: { members: [{ id: '__proto__', meta: {}, joinedAt: 1, metaSeq: 0 }] },
+      updateStamp: { at: 0, by: '' },
+      onListenersChanged: () => {},
+      onCallbackError: () => {},
+    })
+    state.getRemote('__proto__')!.subscribeBinary(() => {})
+    expect(Object.getPrototypeOf(state.binaryWants().members)).toBeNull()
+    expect(Object.hasOwn(state.binaryWants().members, '__proto__')).toBe(true)
   })
 
-  it('rejects array metadata and malformed UTF-8 instead of normalizing them', () => {
+  it('rejects non-record metadata and malformed UTF-8 instead of normalizing them', () => {
     const memberId = crypto.randomUUID()
-    expect(() =>
-      frameWithMemberId(memberId, new Uint8Array(), {
-        meta: [] as unknown as Record<string, unknown>,
-      }),
-    ).toThrow('meta should be an object')
+    for (const meta of [[], new Date(), new Map(), new Set()].map((value) => parse(stringify(value)))) {
+      expect(() => frameWithMemberId(memberId, new Uint8Array(), { meta: meta as never })).toThrow(
+        'meta should be an object',
+      )
+      expect(sanitizeBinaryWants({ everyMember: { all: false, tracks: [] }, members: meta })).toBeNull()
+    }
     const arrayMeta = frameWithMemberId(memberId, new Uint8Array(), { meta: {} })
     arrayMeta[19] = '['.charCodeAt(0)
     arrayMeta[20] = ']'.charCodeAt(0)
@@ -1917,6 +1932,19 @@ describe('room binary protocol validation', () => {
     const malformedTrack = frameWithMemberId(memberId, new Uint8Array(), { track: 'x' })
     malformedTrack[18] = 0xff
     expect(unframeMemberId(malformedTrack)).toBeNull()
+  })
+
+  it('round-trips every admitted leave cause injectively', () => {
+    const causes = [
+      { type: 'left' },
+      { type: 'removed' },
+      { type: 'removed', reason: null },
+      { type: 'disconnected' },
+      { type: 'closed' },
+    ] satisfies LeaveCause[]
+    const encoded = causes.map((cause) => stringify(leaveCauseToWire(cause)))
+    expect(new Set(encoded)).toHaveLength(causes.length)
+    expect(causes.map((cause) => leaveCauseFromWire(leaveCauseToWire(cause)))).toEqual(causes)
   })
 
   it('uses the full wire length fields instead of smaller policy caps', () => {

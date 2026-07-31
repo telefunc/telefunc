@@ -82,7 +82,13 @@ import type {
   RoomSendReceipt,
 } from './types.js'
 function isRecord(value: unknown): value is Record<string, unknown> {
-  return isObject(value) && !Array.isArray(value)
+  if (!isObject(value) || Array.isArray(value)) return false
+  try {
+    const prototype = Object.getPrototypeOf(value)
+    return prototype === null || (Object.getPrototypeOf(prototype) === null && prototype.constructor?.name === 'Object')
+  } catch {
+    return false
+  }
 }
 // Keys & records
 /** Reserved pub/sub + KV namespace for rooms. Don't use it for `BroadcastChannel` keys. */
@@ -198,7 +204,7 @@ type ParticipantStubMetadata = {
  *  concurrent writers converge to the same winner on every node, whatever the arrival order. */
 type RoomCtrlEnvelope =
   | { __r: 'join'; id: string; meta: ParticipantMeta; joinedAt: number; identity?: string; hidden?: boolean }
-  | { __r: 'leave'; id: string; cause?: 'removed' | 'disconnected'; reason?: unknown }
+  | { __r: 'leave'; id: string; cause?: 'removed' | 'disconnected' | 'closed'; reason?: unknown }
   | { __r: 'p-meta'; id: string; meta: ParticipantMeta; seq: number }
   | { __r: 'update'; meta: RoomMeta; at: number; by: string }
   // A member's first publish on a new named track — announced before the frame, so live all-track subscribers bring up the track-key subscription (idempotent, like join).
@@ -304,18 +310,23 @@ type ParticipantStubNotice =
 /** Which members' streams a holder wants on the text lane — `all` for room-level listeners, or a specific member set for participant-scoped ones. */
 type MemberWants = { all: boolean; members: string[] }
 /** Decode a leave event's cause — an absent wire cause means a voluntary leave. */
-function leaveCauseFromWire(event: { cause?: 'removed' | 'disconnected'; reason?: unknown }): LeaveCause {
+function leaveCauseFromWire(event: {
+  cause?: 'removed' | 'disconnected' | 'closed'
+  reason?: unknown
+}): LeaveCause {
   if (event.cause === 'removed') {
     return event.reason === undefined ? { type: 'removed' } : { type: 'removed', reason: event.reason }
   }
-  return { type: event.cause === 'disconnected' ? 'disconnected' : 'left' }
+  return { type: event.cause ?? 'left' }
 }
 /** Encode a cause into leave-event fields — `'left'` is the wire default and travels as nothing. */
-function leaveCauseToWire(cause: LeaveCause): { cause?: 'removed' | 'disconnected'; reason?: unknown } {
+function leaveCauseToWire(cause: LeaveCause): {
+  cause?: 'removed' | 'disconnected' | 'closed'
+  reason?: unknown
+} {
   if (cause.type === 'removed')
     return cause.reason === undefined ? { cause: 'removed' } : { cause: 'removed', reason: cause.reason }
-  if (cause.type === 'disconnected') return { cause: 'disconnected' }
-  return {}
+  return cause.type === 'left' ? {} : { cause: cause.type }
 }
 /** All room messages are tagged with `__r` — envelopes, requests, and notices alike. */
 function hasRoomTag(value: unknown): value is { __r: string } {
@@ -359,13 +370,10 @@ function normalizeJoinOptions(options: JoinOptions | undefined): {
     hidden: options?.hidden ?? false,
   }
 }
-// Error contract — mirrors telefunc's own: `Abort` carries its value to the caller, framework-level rejections (`RoomError`) show their message, and any other throw is a hidden bug (reported on the
-// throwing side, generic to the caller). See `RoomFailure`.
+// Error contract: Abort carries its value, RoomError carries a safe message, and bugs are reported
+// on the throwing side and hidden from the caller.
 const roomErrorBrand = Symbol.for('telefunc.RoomError')
-/** An expected, caller-facing room rejection — the room is closed, a participant left, a DM target isn't a member. Its message is safe to surface to the caller, exactly like a channel's framework ack
- * error (e.g. `'No listener registered for ack request'`). This is what separates an operational "no, you can't do that" from an unexpected bug, which is hidden. The `Symbol.for` brand survives
- * bundling and cross-realm boundaries where `instanceof` wouldn't.
- */
+/** An expected caller-facing rejection; the global brand survives duplicate module graphs. */
 class RoomError extends Error {
   readonly [roomErrorBrand] = true as const
   constructor(message: string) {
@@ -378,16 +386,9 @@ class RoomError extends Error {
 function isRoomError(thing: unknown): thing is RoomError {
   return isBrandedError(thing, roomErrorBrand)
 }
-/** The generic error a bug becomes on the caller — identical to telefunc's top-level bug message, so a hidden room error reads the same as a hidden telefunction error. */
 const ROOM_BUG_MESSAGE = `${STATUS_BODY_INTERNAL_SERVER_ERROR} — see server logs`
-/** How a failed room operation crosses back to its awaiting caller. Room mirrors telefunc's error contract exactly: - `abort` — the guard/handler raised `Abort(value)`: the value rides home and the
- * caller's promise rejects with an `AbortError`, so `err instanceof Abort` and `err.abortValue` hold. - `err` — a safe, human-facing reason for an expected operational rejection (a `RoomError`). A
- * throw that is neither never reaches the caller as itself: it's a bug — reported on the throwing side and replaced with `ROOM_BUG_MESSAGE`, so nothing internal leaks.
- */
+/** Published failure form for the one path that cannot use a native channel ack. */
 type RoomFailure = { ok: false; abort: true; abortValue: unknown } | { ok: false; err: string }
-/** Classify a caught error for the one place a failure can't ride a channel ack — a DM handler's outcome, relayed to the sender as published data (`DmReply`, the sender's inbox lane). `report` is the
- * throwing side's bug pipeline (server: `handleTelefunctionBug`; client: console), invoked only for genuine bugs. Everything that *does* ride an ack uses `roomAckError` instead.
- */
 function toRoomFailure(err: unknown, report: (err: unknown) => void): RoomFailure {
   const classified = classifyTelefuncError(err, isRoomError)
   if (classified.kind === 'abort') return { ok: false, abort: true, abortValue: classified.error.abortValue }
@@ -395,18 +396,10 @@ function toRoomFailure(err: unknown, report: (err: unknown) => void): RoomFailur
   report(err)
   return { ok: false, err: ROOM_BUG_MESSAGE }
 }
-/** Rebuild the error a relayed `RoomFailure` stands for, to throw it at the sender boundary — where the channel's ack encoder (`roomAckError`) re-classifies it. An `Abort` value rebuilds an
- * `AbortError` (so `instanceof Abort` / `abortValue` hold); an operational reason rebuilds a `RoomError` so its message is surfaced (not re-reported as a fresh bug).
- */
 function roomFailureError(res: RoomFailure): Error {
   if ('abort' in res) return createAbortError(res.abortValue)
   return new RoomError(res.err)
 }
-/** Map a caught room error onto the channel's native ack status — the wire form of the same three-way contract as `toRoomFailure`, for every operation that rides a channel ack (all stub requests +
- * publishes). A carried `Abort` → `ABORT` (value); a `RoomError` → `ERROR` (its safe message); a publish that failed its shield → `SHIELD_ERROR` (the client rebuilds a `ShieldValidationError`, the
- * same class every telefunc shield fail throws); anything else is a bug → reported here, replaced with `ROOM_BUG_MESSAGE`. The client channel rebuilds the matching error from the status, so no `{ ok:
- * false }` envelope is needed — the awaiting request promise simply rejects.
- */
 function roomAckError(err: unknown, report: (err: unknown) => void): { text: string; status: AckResultStatus } {
   const classified = classifyTelefuncError(err, isRoomError)
   if (classified.kind === 'abort') return { text: stringify(classified.error.abortValue), status: ACK_STATUS.ABORT }
