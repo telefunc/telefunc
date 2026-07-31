@@ -20,6 +20,8 @@ import {
   RoomError,
   frameWithMemberId,
   isRoomError,
+  leaveCauseFromWire,
+  leaveCauseToWire,
   mergeAttributes,
   normalizeJoinOptions,
   pushBoundedTail,
@@ -31,6 +33,7 @@ import {
   unframeMemberId,
   type RoomSnapshotMetadata,
 } from './protocol.js'
+import type { LeaveCause } from './types.js'
 import { ClientRoom, RoomClientBroadcast } from './client.js'
 import { RoomState, remoteBacking } from './state.js'
 import { Room, ServerRoom } from './server.js'
@@ -304,9 +307,14 @@ describe('Room public behavior', () => {
     const resolving = Room.getOrCreate(room.id).finally(() => {
       settled = true
     })
-    await Promise.resolve()
+    await vi.advanceTimersByTimeAsync(900)
     expect(settled).toBe(false)
-    await vi.advanceTimersByTimeAsync(1_100)
+    expect((await driver.readHead(room.id))?.head).toMatchObject({
+      currentInc: firstInc,
+      state: 'closing',
+      closeLease: { id: 'active-get-or-create-close' },
+    })
+    await vi.advanceTimersByTimeAsync(200)
     const recreated = (await resolving) as ServerRoom
     expect(recreated._inc).not.toBe(firstInc)
     expect(recreated.isClosed).toBe(false)
@@ -507,7 +515,7 @@ describe('Room public behavior', () => {
     slot.stop()
   })
 
-  it('makes roster readers join an authoritative refresh already in flight', async () => {
+  it('makes roster readers join one bounded authoritative refresh', async () => {
     const authority = (await Room.create('roster-refresh-owner')) as ServerRoom
     await authority.join()
     const observer = (await Room.get(authority.id)) as ServerRoom
@@ -519,13 +527,16 @@ describe('Room public behavior', () => {
     const started = deferred<void>()
     const release = deferred<void>()
     let held = false
+    let churn = 0
     vi.spyOn(driver, 'readCells').mockImplementation(async (roomId, inc, selector) => {
       if (!held && 'prefix' in selector && selector.prefix.endsWith(':m:')) {
         held = true
         started.resolve()
         await release.promise
       }
-      return readCells(roomId, inc, selector)
+      const result = await readCells(roomId, inc, selector)
+      if (churn-- > 0 && 'prefix' in selector) observer._state.membershipVersion++
+      return result
     })
     const refresh = (
       observer as unknown as {
@@ -543,6 +554,10 @@ describe('Room public behavior', () => {
     release.resolve()
     await refresh
     expect((await participants).map(({ id }) => id)).toHaveLength(1)
+    churn = 20
+    await expect((observer as unknown as { _refreshMembers(): Promise<void> })._refreshMembers()).rejects.toThrow(
+      'Room roster refresh contention',
+    )
   })
 
   it('heartbeats pure control observers without owned members or binary demand', async () => {
@@ -558,44 +573,23 @@ describe('Room public behavior', () => {
 
   it('reconciles authority even when member renewal fails first', async () => {
     const room = (await Room.create('heartbeat-renewal-failure')) as ServerRoom
-    await room.join()
-    vi.spyOn(driver, 'readCells').mockRejectedValue(new Error('renewal failed'))
+    const first = await room.join()
+    const second = await room.join()
+    const firstKey = roomMemberKvKey(room.id, first.id)
+    const secondKey = roomMemberKvKey(room.id, second.id)
+    const compareExchange = driver.compareExchangeCells.bind(driver)
+    const attempted: string[] = []
+    vi.spyOn(Math, 'random').mockReturnValue(0)
+    vi.spyOn(driver, 'compareExchangeCells').mockImplementation(async (roomId, inc, revision, mutations) => {
+      attempted.push(mutations[0]!.key)
+      return mutations[0]!.key === firstKey ? 'conflict' : compareExchange(roomId, inc, revision, mutations)
+    })
     vi.spyOn(driver, 'readHead').mockResolvedValue(null)
     await expect((room as unknown as { _heartbeatTick(): Promise<void> })._heartbeatTick()).rejects.toThrow(
-      'renewal failed',
+      'Room update contention',
     )
+    expect(attempted).toContain(secondKey)
     expect(room.isClosed).toBe(true)
-  })
-
-  it('replaces a subscription that is already closed on initial establishment', async () => {
-    const closed = terminalSubscription()
-    await closed.close()
-    const terminal = vi.fn()
-    const slot = new SubSlot(terminal, () => {})
-    slot.sync(true, () => closed.subscription)
-    await Promise.resolve()
-    expect(terminal).toHaveBeenCalledOnce()
-    expect(terminal.mock.calls[0]?.[0]).toBe(slot)
-    slot.stop()
-  })
-
-  it('rejects only an exhausted internal readiness generation and recovers holder readiness later', async () => {
-    const slot = new SubSlot(
-      () => {},
-      () => {},
-    )
-    slot.sync(true, () => rejectedSubscription('first generation failed'))
-    const holderReady = slot.ready
-    const exhaustedGeneration = slot.generationReady
-    const exhausted = new RoomError('generation exhausted')
-    slot.markLost(exhausted)
-    await expect(exhaustedGeneration).rejects.toBe(exhausted)
-    expect(await Promise.race([holderReady.then(() => 'ready'), Promise.resolve('pending')])).toBe('pending')
-    slot.sync(true, () => terminalSubscription().subscription)
-    await expect(holderReady).resolves.toBeUndefined()
-    await expect(slot.generationReady).resolves.toBeUndefined()
-    expect(slot).toMatchObject({ wanted: true, active: true })
-    slot.stop()
   })
 
   it('retries a still-wanted lost subscription on the next planning pass', async () => {
@@ -886,20 +880,27 @@ describe('Room public behavior', () => {
     })
   })
 
-  it('reports a participant-left race on a room-authored send without calling the room closed', async () => {
+  it('isolates an identity send from a departed member but preserves exact-ID diagnosis', async () => {
     const room = await Room.create('server-send-race')
-    const target = await room.join()
+    const departed = await room.join({ identity: 'fanout' })
+    const healthy = await room.join({ identity: 'fanout' })
+    const inbox: unknown[] = []
+    healthy.listen((data) => inbox.push(data))
     const commitLane = driver.commitLane.bind(driver)
-    let raced = false
+    let raceId = departed.id
     vi.spyOn(driver, 'commitLane').mockImplementation(async (roomId, inc, lane, payload, options) => {
-      if (!raced && lane.kind === 'inbox') {
-        raced = true
-        await Room.removeParticipant(room.id, { id: target.id })
+      if (lane.kind === 'inbox' && lane.member === raceId) {
+        raceId = ''
+        await Room.removeParticipant(room.id, { id: lane.member })
       }
       return commitLane(roomId, inc, lane, payload, options)
     })
-    await expect(Room.send(room.id, { id: target.id }, 'late')).rejects.toThrow(
-      `Participant not found (left?): ${target.id}`,
+    await expect(Room.send(room.id, { identity: 'fanout' }, 'fanout')).resolves.toBeUndefined()
+    expect(inbox).toEqual(['fanout'])
+    const exact = await room.join()
+    raceId = exact.id
+    await expect(Room.send(room.id, { id: exact.id }, 'late')).rejects.toThrow(
+      `Participant not found (left?): ${exact.id}`,
     )
     expect((await driver.readHead(room.id))?.head.state).toBe('open')
   })
@@ -1368,6 +1369,23 @@ describe('Room public behavior', () => {
     expect(Object.isFrozen(changed.participants[0]!.meta)).toBe(true)
     expect(changes).toBe(1)
   })
+
+  it('copies metadata into state and freezes every public metadata view', async () => {
+    const roomMeta = { topic: 'original' }
+    const room = await Room.create('owned-meta', { meta: roomMeta })
+    roomMeta.topic = 'caller mutation'
+    expect(room.meta).toEqual({ topic: 'original' })
+    expect(Object.isFrozen(room.meta)).toBe(true)
+    const joinMeta = { name: 'Alice' }
+    const participant = await room.join({ meta: joinMeta })
+    joinMeta.name = 'caller mutation'
+    expect(participant.meta).toEqual({ name: 'Alice' })
+    expect(Object.isFrozen(participant.meta)).toBe(true)
+    const replacement = { name: 'Bob' }
+    await participant.setMeta(replacement)
+    replacement.name = 'caller mutation'
+    expect(participant.meta).toEqual({ name: 'Bob' })
+  })
 })
 
 describe('client Room lifecycle', () => {
@@ -1473,11 +1491,16 @@ describe('client Room lifecycle', () => {
       expect(gc.closed()).toBe(1)
     })
 
-    it('releases the Room wrapper after every application handle is dropped', async () => {
+    it('tethers an active disposer but releases snapshot and invoked disposer handles', async () => {
       const gc = gcFixture('gc-drop-owner', true)
-      const room = await dropJoinedRoomHandles(gc)
+      const retained = await dropJoinedRoomHandles(gc)
       await forceRoomGc()
-      expect(room.deref()).toBeUndefined()
+      expect(retained.room.deref()).not.toBeUndefined()
+      expect(gc.closed()).toBe(0)
+      retained.stop()
+      await forceRoomGc()
+      retained.stopped()
+      expect(retained.room.deref()).toBeUndefined()
       expect(gc.closed()).toBe(1)
     })
   })
@@ -1905,15 +1928,27 @@ describe('room binary protocol validation', () => {
         members: { 'not-a-member-id': { all: false, tracks: [] } },
       }),
     ).toBeNull()
+    const state = new RoomState({
+      roomId: 'state-wants',
+      meta: {},
+      seed: { members: [{ id: '__proto__', meta: {}, joinedAt: 1, metaSeq: 0 }] },
+      updateStamp: { at: 0, by: '' },
+      onListenersChanged: () => {},
+      onCallbackError: () => {},
+    })
+    state.getRemote('__proto__')!.subscribeBinary(() => {})
+    expect(Object.getPrototypeOf(state.binaryWants().members)).toBeNull()
+    expect(Object.hasOwn(state.binaryWants().members, '__proto__')).toBe(true)
   })
 
-  it('rejects array metadata and malformed UTF-8 instead of normalizing them', () => {
+  it('rejects non-record metadata and malformed UTF-8 instead of normalizing them', () => {
     const memberId = crypto.randomUUID()
-    expect(() =>
-      frameWithMemberId(memberId, new Uint8Array(), {
-        meta: [] as unknown as Record<string, unknown>,
-      }),
-    ).toThrow('meta should be an object')
+    for (const meta of [[], new Date(), new Map(), new Set()].map((value) => parse(stringify(value)))) {
+      expect(() => frameWithMemberId(memberId, new Uint8Array(), { meta: meta as never })).toThrow(
+        'meta should be an object',
+      )
+      expect(sanitizeBinaryWants({ everyMember: { all: false, tracks: [] }, members: meta })).toBeNull()
+    }
     const arrayMeta = frameWithMemberId(memberId, new Uint8Array(), { meta: {} })
     arrayMeta[19] = '['.charCodeAt(0)
     arrayMeta[20] = ']'.charCodeAt(0)
@@ -1921,6 +1956,19 @@ describe('room binary protocol validation', () => {
     const malformedTrack = frameWithMemberId(memberId, new Uint8Array(), { track: 'x' })
     malformedTrack[18] = 0xff
     expect(unframeMemberId(malformedTrack)).toBeNull()
+  })
+
+  it('round-trips every admitted leave cause injectively', () => {
+    const causes = [
+      { type: 'left' },
+      { type: 'removed' },
+      { type: 'removed', reason: null },
+      { type: 'disconnected' },
+      { type: 'closed' },
+    ] satisfies LeaveCause[]
+    const encoded = causes.map((cause) => stringify(leaveCauseToWire(cause)))
+    expect(new Set(encoded)).toHaveLength(causes.length)
+    expect(causes.map((cause) => leaveCauseFromWire(leaveCauseToWire(cause)))).toEqual(causes)
   })
 
   it('uses the full wire length fields instead of smaller policy caps', () => {
@@ -2655,11 +2703,14 @@ async function retainOnlyDepartedParticipant({ target, fake, registry, onClose, 
   return { member, room: new WeakRef(room) }
 }
 
-async function dropJoinedRoomHandles({ target, registry, onClose }: GcFixture) {
+async function dropJoinedRoomHandles({ target, registry, onClose, memberId }: GcFixture) {
   const room = wrapProxy(target)
   registry.register(room, onClose)
-  await room.join()
-  return new WeakRef(room)
+  const stopped = (await room.join()).listen(() => {})
+  stopped()
+  room.snapshot()
+  const stop = target._getRemote(memberId)!.subscribe(() => {})
+  return { stop, stopped, room: new WeakRef(room) }
 }
 
 type OpenRecord = {

@@ -10,6 +10,7 @@ import type { BackendSpi, RoomHead } from '../../backend/spi.js'
 import {
   RoomError,
   mergeAttributes,
+  ownMetadata,
   roomMemberKvKey,
   type MemberSnapshot,
   type RoomConfigRecord,
@@ -280,14 +281,16 @@ async function listRooms(options?: { prefix?: string }): Promise<RoomInfo[]> {
 
 async function setRoomMeta(id: string, meta: RoomMeta): Promise<void> {
   assertUsage(isObject(meta), 'Room.setMeta() meta should be an object')
+  const owned = ownMetadata(meta)
   const { config } = await requireRoom(id)
-  await writeRoomConfig(id, config, () => meta)
+  await writeRoomConfig(id, config, () => owned)
 }
 
 async function setRoomAttributes(id: string, attributes: RoomMeta): Promise<void> {
   assertUsage(isObject(attributes), 'Room.setAttributes() attributes should be an object')
+  const owned = ownMetadata(attributes)
   const { config } = await requireRoom(id)
-  await writeRoomConfig(id, config, (current) => mergeAttributes(current, attributes))
+  await writeRoomConfig(id, config, (current) => mergeAttributes(current, owned))
 }
 
 async function writeRoomConfig(
@@ -336,7 +339,6 @@ async function closeRoom(id: string): Promise<void> {
 
 async function acquireClosingLease(backend: BackendSpi, roomId: string, current: RoomHead): Promise<RoomHead | null> {
   if (current.currentInc === null) return null
-  const nextConfig = { ...configFromHead(current), status: 'closing' as const }
   const closeLease = { id: crypto.randomUUID(), durationMs: ROOM_CLOSE_LEASE_MS }
   const result = await backend.compareExchangeHead(
     roomId,
@@ -347,7 +349,7 @@ async function acquireClosingLease(backend: BackendSpi, roomId: string, current:
       head: {
         currentInc: current.currentInc,
         state: 'closing',
-        config: encodeRoomConfig(nextConfig),
+        config: encodeRoomConfig(configFromHead(current)),
         closeLease,
       },
     },
@@ -455,12 +457,15 @@ async function announceToRoom(id: string, data: unknown): Promise<RoomSendReceip
 
 async function sendToParticipant(id: string, target: ParticipantRef, data: unknown): Promise<void> {
   const { config } = await requireRoom(id)
+  const exact = 'id' in target
   for (const { memberId } of await resolveParticipantRef(id, config.inc, target)) {
-    await sendServerDm(id, config.inc, memberId, data)
+    if (!(await sendServerDm(id, config.inc, memberId, data)) && exact) {
+      throw new RoomError(`Participant not found (left?): ${memberId}`)
+    }
   }
 }
 
-async function sendServerDm(roomId: string, inc: string, memberId: string, data: unknown): Promise<void> {
+async function sendServerDm(roomId: string, inc: string, memberId: string, data: unknown): Promise<boolean> {
   const envelope: RoomDmEnvelope = { __r: 'dm', to: memberId, from: '', fromMeta: null, data }
   const committed = await commitRoomLane(
     roomId,
@@ -469,22 +474,21 @@ async function sendServerDm(roomId: string, inc: string, memberId: string, data:
     encodeRoomText(stringify(envelope)),
     { requiredCellKeys: [roomMemberKvKey(roomId, memberId)] },
   )
-  if (committed === null) {
-    const current = await getBackend().readHead(roomId)
-    if (
-      current?.head.state === 'open' &&
-      current.head.currentInc === inc &&
-      (await readCell(roomId, inc, roomMemberKvKey(roomId, memberId))) === null
-    ) {
-      throw new RoomError(`Participant not found (left?): ${memberId}`)
-    }
-    throw new RoomError(`Room is closed: ${roomId}`)
+  if (committed !== null) return true
+  const current = await getBackend().readHead(roomId)
+  if (
+    current?.head.state === 'open' &&
+    current.head.currentInc === inc &&
+    (await readCell(roomId, inc, roomMemberKvKey(roomId, memberId))) === null
+  ) {
+    return false
   }
+  throw new RoomError(`Room is closed: ${roomId}`)
 }
 
 function normalizeOptions(options: RoomOptions | undefined): { meta: RoomMeta } {
   assertUsage(options === undefined || isObject(options), 'Room options should be an object')
   const meta = options?.meta ?? {}
   assertUsage(isObject(meta), 'options.meta should be an object')
-  return { meta }
+  return { meta: ownMetadata(meta) }
 }

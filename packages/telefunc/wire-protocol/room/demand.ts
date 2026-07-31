@@ -1,5 +1,4 @@
 export { RoomDemand }
-export type { WantGossip }
 
 import { ROOM_DEMAND_TTL_MS } from './constants.js'
 

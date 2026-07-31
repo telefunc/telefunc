@@ -24,6 +24,7 @@ import {
   roomAckError,
   roomFailureError,
   hasRoomTag,
+  leaveCauseToWire,
   roomCtrlKey,
   unframeMemberId,
   type BinaryWants,
@@ -420,10 +421,7 @@ function bindParticipantStubChannel(
   })
 
   const unlistenLeave = participant.onLeave((cause) => {
-    const notice =
-      cause.type === 'left'
-        ? { __r: 'left' as const }
-        : { __r: 'left' as const, cause: cause.type, ...(cause.reason === undefined ? {} : { reason: cause.reason }) }
+    const notice = { __r: 'left' as const, ...leaveCauseToWire(cause) }
     void channel.send(notice).catch(() => {})
     void channel.close().catch(() => {})
   })

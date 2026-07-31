@@ -29,6 +29,7 @@ import {
   hasRoomTag,
   mergeAttributes,
   normalizeJoinOptions,
+  ownMetadata,
   roomMemberKvKey,
   roomIdentityMemberKvKey,
   unframeMemberId,
@@ -88,7 +89,7 @@ import type {
 import type { Room, RoomGuards } from './statics.js'
 assertIsNotBrowser()
 
-const ROOM_SUBSCRIPTION_REPLAN_LIMIT = 5
+const ROOM_REPLAN_LIMIT = 5
 const SERVER_ROOM_BRAND: unique symbol = Symbol.for('telefunc.ServerRoom')
 
 /**
@@ -307,13 +308,15 @@ class ServerRoom extends RoomStateView implements Room {
   /** @internal — full replace (`setMeta`). */
   async _setMemberMeta(id: string, meta: ParticipantMeta): Promise<void> {
     assertUsage(isObject(meta), 'setMeta() meta should be an object')
-    await this._writeMemberMeta(id, () => meta)
+    const owned = ownMetadata(meta)
+    await this._writeMemberMeta(id, () => owned)
   }
 
   /** @internal — per-key merge (`setAttributes`); an `undefined` value deletes the key. */
   async _mergeMemberMeta(id: string, attrs: ParticipantMeta): Promise<void> {
     assertUsage(isObject(attrs), 'setAttributes() attributes should be an object')
-    await this._writeMemberMeta(id, (current) => mergeAttributes(current, attrs))
+    const owned = ownMetadata(attrs)
+    await this._writeMemberMeta(id, (current) => mergeAttributes(current, owned))
   }
 
   private async _writeMemberMeta(
@@ -621,14 +624,8 @@ class ServerRoom extends RoomStateView implements Room {
     if (envelope.__r !== 'data') return
     const event = envelope as RoomDataEnvelope
     const info = makePublishInfo(this.id, rawInfo.seq, rawInfo.timestamp)
-    this._state.applyData(
-      event.from,
-      event.fromMeta,
-      event.fromIdentity ?? null,
-      event.data,
-      info,
-      this._suppress(event.from),
-    )
+    if (!this._suppress(event.from))
+      this._state.applyData(event.from, event.fromMeta, event.fromIdentity ?? null, event.data, info)
     this._healUnknownSender(event.from)
 
     if (this._stubs.size > 0) {
@@ -653,14 +650,8 @@ class ServerRoom extends RoomStateView implements Room {
     const unframed = unframeMemberId(framed)
     if (!unframed) return // junk on the binary lane
     const info = makePublishInfo(this.id, rawInfo.seq, rawInfo.timestamp)
-    this._state.applyBinary(
-      unframed.from,
-      unframed.payload,
-      unframed.track,
-      unframed.meta,
-      info,
-      this._suppress(unframed.from),
-    )
+    if (!this._suppress(unframed.from))
+      this._state.applyBinary(unframed.from, unframed.payload, unframed.track, unframed.meta, info)
     this._healUnknownSender(unframed.from)
 
     if (this._stubs.size > 0) {
@@ -785,8 +776,8 @@ class ServerRoom extends RoomStateView implements Room {
     this._recoveringSubscriptions.add(slot)
     void (async () => {
       const deadline = Date.now() + ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS
-      const attemptMs = ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS / (ROOM_SUBSCRIPTION_REPLAN_LIMIT + 1)
-      for (let attempt = 0; attempt <= ROOM_SUBSCRIPTION_REPLAN_LIMIT && slot.wanted; attempt++) {
+      const attemptMs = ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS / (ROOM_REPLAN_LIMIT + 1)
+      for (let attempt = 0; attempt <= ROOM_REPLAN_LIMIT && slot.wanted; attempt++) {
         try {
           const current = await withinRoomHorizon(getBackend().readHead(this.id), deadline - Date.now())
           if (current === null || current.head.state !== 'open' || current.head.currentInc !== this._inc) {
@@ -809,7 +800,7 @@ class ServerRoom extends RoomStateView implements Room {
       if (slot.wanted) {
         const exhausted = new RoomError(`Room subscription recovery exhausted: ${this.id}`)
         reportRoomError(exhausted)
-        slot.markLost(exhausted)
+        slot.markLost()
       }
     })()
       .catch(reportRoomError)
@@ -1233,10 +1224,13 @@ class ServerRoom extends RoomStateView implements Room {
   private _refreshMembers(): Promise<void> {
     this._pendingRefresh ??= (async () => {
       try {
-        while (!this._state.closed) {
+        for (let attempt = 0; !this._state.closed; attempt++) {
           const version = this._state.membershipVersion
           const members = await readMembers(this.id, this._inc)
-          if (this._state.membershipVersion !== version) continue
+          if (this._state.membershipVersion !== version) {
+            if (attempt === ROOM_REPLAN_LIMIT) throw new RoomError(`Room roster refresh contention: ${this.id}`)
+            continue
+          }
           const drifted = this._state.reconcile(members)
           this._syncSubs() // per-member lanes may need subscriptions for the members just learned
           // Clients seeded from the pre-drift state must be re-synced the same way they were seeded — the streamed roster (position-in-stream consistent, replace semantics).
@@ -1284,19 +1278,26 @@ class ServerRoom extends RoomStateView implements Room {
         // Renew this node's binary-demand lease on every owner and sweep any crashed reporter's demand.
         // No cell I/O — runs first so member-cell latency never delays it (the demand TTL has slack for skips).
         this._demand.heartbeat()
+        let renewalFailure: { error: unknown } | null = null
         for (const id of this._ownedMemberIds().filter((id) => !this._pendingAdmissions.has(id))) {
-          const key = roomMemberKvKey(this.id, id)
-          const present = await mutateCells(this.id, this._inc, { keys: [key] }, (cells) => {
-            const raw = cells.get(key)
-            if (raw === undefined) return { value: false, mutations: [] }
-            const record = { ...(parse(decodeRoomText(raw)) as RoomMemberRecord), seenAt: Date.now() }
-            return {
-              value: true,
-              mutations: [{ key, set: { bytes: encodeRoomText(stringify(record)) } }],
-            }
-          })
-          if (!present) this._applyLeave(id)
+          try {
+            const key = roomMemberKvKey(this.id, id)
+            const present = await mutateCells(this.id, this._inc, { keys: [key] }, (cells) => {
+              const raw = cells.get(key)
+              if (raw === undefined) return { value: false, mutations: [] }
+              const record = { ...(parse(decodeRoomText(raw)) as RoomMemberRecord), seenAt: Date.now() }
+              return {
+                value: true,
+                mutations: [{ key, set: { bytes: encodeRoomText(stringify(record)) } }],
+              }
+            })
+            if (!present) this._applyLeave(id)
+          } catch (error) {
+            if (error instanceof RoomError && error.message === `Room is closed: ${this.id}`) throw error
+            renewalFailure ??= { error }
+          }
         }
+        if (renewalFailure) throw renewalFailure.error
       } finally {
         // Authority diagnosis owns convergence after a missed close. Renewal failure cannot bypass it.
         await this._reconcileAuthority()

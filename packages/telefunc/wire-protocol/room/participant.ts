@@ -2,10 +2,10 @@ export { ParticipantBase }
 export type { InboxMessage }
 
 import type { ChannelPublishAck } from '../channel.js'
-import { releaseSubordinate } from '../wrapProxy.js'
+import { makeDisposer, releaseSubordinate } from '../wrapProxy.js'
 import type { TELEFUNC_SHIELDS } from '../../node/shared/transformer/generateShield/shield-key.js'
 import { isPromise } from '../../utils/isPromise.js'
-import { RoomError, toRoomFailure, DM_PARTICIPANT_LEFT, type DmReply } from './protocol.js'
+import { RoomError, toRoomFailure, DM_PARTICIPANT_LEFT, ownMetadata, type DmReply } from './protocol.js'
 import type {
   BinaryPublishOptions,
   LeaveCause,
@@ -43,6 +43,7 @@ abstract class ParticipantBase implements LocalParticipant {
   private readonly _messageCbs: Array<(data: unknown, from: Sender | null) => unknown> = []
   private readonly _demandCbs: Array<(track: string | null, wanted: boolean) => unknown> = []
   private readonly _wantedTracks = new Set<string | null>()
+  private readonly _listenerCleanups = new Set<() => void>()
   private _inboxAttached = false
   /** DMs delivered before the first `listen()` — held bounded, flushed on attach, then never
    *  allocated again (`null` = flushed or empty; zero steady-state cost). An entry carries an
@@ -68,7 +69,7 @@ abstract class ParticipantBase implements LocalParticipant {
   }
   constructor(id: string, meta: ParticipantMeta, selfDelivery: boolean, identity: string | null) {
     this.id = id
-    this._meta = meta
+    this._meta = ownMetadata(meta)
     this.selfDelivery = selfDelivery
     this.identity = identity
   }
@@ -86,7 +87,7 @@ abstract class ParticipantBase implements LocalParticipant {
   /** A user callback threw — each side reports through its own pipeline. */
   protected abstract _reportError(err: unknown): void
   listen(callback: (data: unknown, from: Sender | null) => unknown): () => void {
-    this._messageCbs.push(callback)
+    const unlisten = this._register(this._messageCbs, callback)
     this._inboxAttached = true
     if (this._pendingInbox) {
       const held = this._pendingInbox
@@ -96,10 +97,7 @@ abstract class ParticipantBase implements LocalParticipant {
         else this._fireInbox(entry.msg)
       }
     }
-    return () => {
-      const i = this._messageCbs.indexOf(callback)
-      if (i >= 0) this._messageCbs.splice(i, 1)
-    }
+    return unlisten
   }
   /** @internal — a direct message arrived on this member's inbox. Forwarded to a remote holder if
    *  one is bound (client-held), else delivered to local listeners — held bounded until the first
@@ -168,12 +166,9 @@ abstract class ParticipantBase implements LocalParticipant {
     return null
   }
   onDemand(callback: (track: string | null, wanted: boolean) => void): () => void {
-    this._demandCbs.push(callback)
+    const unlisten = this._register(this._demandCbs, callback)
     for (const track of this._wantedTracks) this._invoke(callback, track, true)
-    return () => {
-      const i = this._demandCbs.indexOf(callback)
-      if (i >= 0) this._demandCbs.splice(i, 1)
-    }
+    return unlisten
   }
   /** @internal — whether any node wants one of this member's tracks flipped (see the room's demand aggregation). `track` is `null` for the default `publishBinary()` lane. */
   _onDemand(track: string | null, wanted: boolean): void {
@@ -184,13 +179,9 @@ abstract class ParticipantBase implements LocalParticipant {
   onLeave(callback: (cause: LeaveCause) => void): () => void {
     if (this._leftCause) {
       this._invoke(callback, this._leftCause)
-      return () => {}
+      return makeDisposer()
     }
-    this._leaveCbs.push(callback)
-    return () => {
-      const i = this._leaveCbs.indexOf(callback)
-      if (i >= 0) this._leaveCbs.splice(i, 1)
-    }
+    return this._register(this._leaveCbs, callback)
   }
   /** @internal — the member is gone; `cause` says how. A local participant always knows its cause: its holder either initiated the leave or witnessed the event/closure that caused it. */
   _onLeft(cause: LeaveCause): void {
@@ -202,15 +193,20 @@ abstract class ParticipantBase implements LocalParticipant {
     const held = this._pendingInbox
     this._pendingInbox = null
     if (held) for (const entry of held) entry.ackResolve?.(DM_PARTICIPANT_LEFT)
-    const cbs = this._leaveCbs
-    this._leaveCbs = []
+    const cbs = [...this._leaveCbs]
+    for (const unlisten of [...this._listenerCleanups]) unlisten()
     for (const cb of cbs) this._invoke(cb, cause)
-    this._messageCbs.length = 0
-    this._demandCbs.length = 0
     this._wantedTracks.clear()
   }
   protected _assertActive(): void {
     if (this._left) throw new RoomError('Participant has left the room')
+  }
+  private _register<T>(list: T[], cb: T): () => void {
+    list.push(cb)
+    return makeDisposer(() => {
+      const i = list.indexOf(cb)
+      if (i >= 0) list.splice(i, 1)
+    }, this._listenerCleanups)
   }
   private _invoke<Args extends unknown[]>(cb: (...args: Args) => unknown, ...args: Args): void {
     try {
