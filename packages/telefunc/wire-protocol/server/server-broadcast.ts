@@ -10,7 +10,7 @@ import type {
   ChannelCloseResult,
 } from '../channel.js'
 import type { TELEFUNC_SHIELDS } from '../../node/shared/transformer/generateShield/shield-key.js'
-import { makePublishInfo } from '../channel.js'
+import { invokeChannelListener, makePublishInfo } from '../channel.js'
 import { ServerChannel } from './channel.js'
 import { getBackend } from '../backend/install.js'
 import type { BackendSpi, BackendSubscription, PublishResult } from '../backend/spi.js'
@@ -18,11 +18,13 @@ import { stringify } from '@brillout/json-serializer/stringify'
 import { parse } from '@brillout/json-serializer/parse'
 import { assert, assertUsage } from '../../utils/assert.js'
 import { isPromise } from '../../utils/isPromise.js'
-import { ChannelClosedError } from '../channel-errors.js'
+import { ChannelClosedError, isExpectedChannelFailure } from '../channel-errors.js'
 import { ACK_STATUS, encodePublishText, encodePublishBinary, TAG } from '../shared-ws.js'
 import type { ChannelCtrlFrame, ChannelDataFrame, WirePublishInfo } from '../shared-ws.js'
 import { STATUS_BODY_INTERNAL_SERVER_ERROR } from '../../shared/constants.js'
 import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
+import { classifyTelefuncError } from '../error-classification.js'
+import { handleTelefunctionBug } from '../../node/server/runTelefunc/validateTelefunctionError.js'
 assertIsNotBrowser()
 
 const SERVER_BROADCAST_BRAND: unique symbol = Symbol.for('ServerBroadcast')
@@ -134,11 +136,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
     const info = makePublishInfo(this.key, rawInfo.seq, rawInfo.timestamp)
     const data = parse(serialized) as ChannelData<T>
     for (const cb of this._broadcastListeners) {
-      try {
-        cb(data, info)
-      } catch (err) {
-        if (this._handleCallbackError(err)) return
-      }
+      if (invokeChannelListener(cb, [data, info], (error) => this._handleCallbackError(error))) return
     }
     if (!this._peerSubscriptions.text) return
     const wireText = encodePublishText(serialized, rawInfo)
@@ -152,11 +150,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
   _deliverBroadcastBinaryMessage(data: Uint8Array, rawInfo: WirePublishInfo): void {
     const info = makePublishInfo(this.key, rawInfo.seq, rawInfo.timestamp)
     for (const cb of this._broadcastBinaryListeners) {
-      try {
-        cb(data, info)
-      } catch (err) {
-        if (this._handleCallbackError(err)) return
-      }
+      if (invokeChannelListener(cb, [data, info], (error) => this._handleCallbackError(error))) return
     }
     if (!this._peerSubscriptions.binary) return
     const wireData = encodePublishBinary(data, rawInfo)
@@ -316,7 +310,8 @@ const Broadcast = {
     const lane = { key, kind: 'text' } as const
     const subscription = backend.subscribe(lane, (payload, info) => {
       const data = parse(textDecoder.decode(payload)) as ChannelData<U>
-      callback(data, { key, seq: info.seq, timestamp: info.timestamp })
+      const publishInfo = makePublishInfo(key, info.seq, info.timestamp)
+      invokeChannelListener(callback, [data, publishInfo], reportStaticListenerError)
     })
     return () => {
       void subscription.unsubscribe()
@@ -331,10 +326,16 @@ const Broadcast = {
     const backend = getBackend()
     const lane = { key, kind: 'binary' } as const
     const subscription = backend.subscribe(lane, (data, info) => {
-      callback(data, { key, seq: info.seq, timestamp: info.timestamp })
+      const publishInfo = makePublishInfo(key, info.seq, info.timestamp)
+      invokeChannelListener(callback, [data, publishInfo], reportStaticListenerError)
     })
     return () => {
       void subscription.unsubscribe()
     }
   },
+}
+
+function reportStaticListenerError(error: unknown): void {
+  if (classifyTelefuncError(error, isExpectedChannelFailure).kind !== 'bug') return
+  handleTelefunctionBug(error instanceof Error ? error : new Error(String(error)))
 }

@@ -14,7 +14,7 @@ import type {
   BroadcastListener,
 } from '../channel.js'
 import type { TELEFUNC_SHIELDS } from '../../node/shared/transformer/generateShield/shield-key.js'
-import { makePublishInfo } from '../channel.js'
+import { invokeChannelListener, makePublishInfo } from '../channel.js'
 import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { resolveClientConfig } from '../../client/clientConfig.js'
@@ -32,13 +32,12 @@ import {
 import { assert } from '../../utils/assert.js'
 import { makeAbortError, makeBugError } from '../../client/remoteTelefunctionCall/errors.js'
 import { ShieldValidationError } from '../../shared/ShieldValidationError.js'
-import { NetworkError } from '../../shared/NetworkError.js'
 import { ClientConnection } from './connection.js'
 import { appendSessionParam, getSessionToken } from './session-registry.js'
 import { CHANNEL_CLOSE_TIMEOUT_MS, type ChannelTransports } from '../constants.js'
 import { FlowControl } from '../flow-control/flow-control.js'
 import type { MuxChannel, MuxConnection } from './connection.js'
-import { ChannelClosedError, ChannelOverflowError } from '../channel-errors.js'
+import { ChannelClosedError, ChannelOverflowError, isExpectedChannelFailure } from '../channel-errors.js'
 import { isPromise } from '../../utils/isPromise.js'
 import { hasProp } from '../../utils/hasProp.js'
 import { classifyTelefuncError } from '../error-classification.js'
@@ -686,22 +685,14 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
     const parsed = parse(data) as ChannelData<T>
     const info = makePublishInfo(this.key!, wireInfo.seq, wireInfo.timestamp)
     for (const cb of this._broadcastListeners) {
-      try {
-        cb(parsed, info)
-      } catch (err) {
-        if (this._handleCallbackError(err)) return
-      }
+      if (invokeChannelListener(cb, [parsed, info], (error) => this._handleCallbackError(error))) return
     }
   }
 
   _onTransportPublishBinary(data: Uint8Array, wireInfo: WirePublishInfo): void {
     const info = makePublishInfo(this.key!, wireInfo.seq, wireInfo.timestamp)
     for (const cb of this._broadcastBinaryListeners) {
-      try {
-        cb(data, info)
-      } catch (err) {
-        if (this._handleCallbackError(err)) return
-      }
+      if (invokeChannelListener(cb, [data, info], (error) => this._handleCallbackError(error))) return
     }
   }
 }
@@ -712,10 +703,6 @@ function reportChannelError(err: unknown): void {
 
 function reportUnexpectedPublishError(err: unknown): void {
   if (classifyTelefuncError(err, isExpectedChannelFailure).kind === 'bug') reportChannelError(err)
-}
-
-function isExpectedChannelFailure(err: unknown): err is ChannelClosedError | ChannelOverflowError | NetworkError {
-  return err instanceof ChannelClosedError || err instanceof ChannelOverflowError || err instanceof NetworkError
 }
 
 function normalizeCloseTimeout(timeout: number | undefined): number {

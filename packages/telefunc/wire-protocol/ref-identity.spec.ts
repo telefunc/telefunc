@@ -469,13 +469,18 @@ describe('reference identity — full pipeline', () => {
       yield 2
       yield 3
     })()
-    const { ret } = await roundTrip({ gen, genDupe: gen })
+    let upstreamCancelled = false
+    const pending = new ReadableStream({ cancel: () => void (upstreamCancelled = true) })
+    const { ret } = await roundTrip({ gen, genDupe: gen, pending })
     const retTyped = ret as { gen: AsyncGenerator<number>; genDupe: AsyncGenerator<number> }
 
     expect(retTyped.gen).toBe(retTyped.genDupe)
     // One consumer sees every chunk — duplicated producers used to steal chunks
     // from one another (each occurrence pulled the same underlying generator).
     expect(await collect(retTyped.gen)).toEqual([1, 2, 3])
+    await (ret as { pending: ReadableStream }).pending.cancel()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(upstreamCancelled).toBe(true)
   })
 
   test('duplicated ReadableStream: previously crashed with a locked-stream error', async () => {
