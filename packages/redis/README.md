@@ -54,8 +54,8 @@ const redis = new Cluster([
 installRedis(redis)
 ```
 
-`installRedis()` uses the same optional `prefix` for broadcast and Room keys. Repeating it with the same
-client and prefix is idempotent for the Room connection.
+`installRedis()` uses the same optional `prefix` for Broadcast and Room; `{` is reserved in prefixes and
+a Broadcast key cannot begin with `}`. Repeating the same client/prefix is idempotent for Room.
 
 `Channel` is per-instance — reconnects must land on the instance holding the channel's state. Pair this package with sticky sessions at the load balancer; see [Scaling](https://telefunc.com/stream/scale).
 

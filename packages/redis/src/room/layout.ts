@@ -28,15 +28,20 @@ export const DEFAULT_ROOM_PREFIX = 'tf:'
 export const REDIS_DELIVERY_FENCE_BYTE = 0xff
 export const REDIS_SAFE_INTEGER_MAX = Number.MAX_SAFE_INTEGER
 
+export function redisKeyPrefix(prefix: string): string {
+  if (prefix.includes('{')) throw new Error("Redis key prefix must not contain '{'")
+  return prefix
+}
 function broadcastTag(key: string): string {
+  if (key.startsWith('}')) throw new Error("Redis Broadcast key must not start with '}'")
   return key === '' ? '{_}:empty' : `{${key}}`
 }
 export function broadcastSequenceKey(prefix: string, key: string): string {
-  return `${prefix}seq:${broadcastTag(key)}`
+  return `${redisKeyPrefix(prefix)}seq:${broadcastTag(key)}`
 }
 export function broadcastChannel(prefix: string, lane: BroadcastLane): string {
   const kind = lane.kind === 'text' ? 't' : 'b'
-  return `${prefix}${kind}:${broadcastTag(lane.key)}`
+  return `${redisKeyPrefix(prefix)}${kind}:${broadcastTag(lane.key)}`
 }
 
 // ── key naming ────────────────────────────────────────────────────────────
@@ -45,7 +50,7 @@ export function broadcastChannel(prefix: string, lane: BroadcastLane): string {
 export function roomTag(prefix: string, roomId: string): string {
   // A Redis hash tag ends at the first `}`. Encode caller input before placing it in braces so an
   // arbitrary room id cannot escape the tag or split one logical room across slots.
-  return `${prefix}room:{${encodeURIComponent(roomId)}}`
+  return `${redisKeyPrefix(prefix)}room:{${encodeURIComponent(roomId)}}`
 }
 export function headKey(prefix: string, roomId: string): string {
   return `${roomTag(prefix, roomId)}:head`
@@ -91,10 +96,10 @@ export function generationInvalidationChannel(prefix: string, roomId: string, in
 }
 // The directory's two keys share their own tag so the tag-guarded delete stays one slot under Cluster.
 export function directoryIndexKey(prefix: string): string {
-  return `${prefix}room-dir:{${prefix}dir}:index`
+  return `${redisKeyPrefix(prefix)}room-dir:{${redisKeyPrefix(prefix)}dir}:index`
 }
 export function directoryTagsKey(prefix: string): string {
-  return `${prefix}room-dir:{${prefix}dir}:tags`
+  return `${redisKeyPrefix(prefix)}room-dir:{${redisKeyPrefix(prefix)}dir}:tags`
 }
 
 export function parseLaneKey(key: string): LaneId {

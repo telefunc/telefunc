@@ -42,6 +42,7 @@ import {
   REDIS_ROOM_COMMANDS,
   REDIS_ORDERING_FRAME_LUA,
   REDIS_SAFE_INTEGER_MAX,
+  redisKeyPrefix,
   retainedKey,
   retainedKeyPrefix,
   revKey,
@@ -195,7 +196,7 @@ export class RedisRoomBackend implements BackendDriver {
         retryStrategy: () => null,
       })
     }
-    this.#prefix = options.prefix ?? DEFAULT_ROOM_PREFIX
+    this.#prefix = redisKeyPrefix(options.prefix ?? DEFAULT_ROOM_PREFIX)
     this.#receivers = options.redis instanceof Cluster ? 'none' : 'global'
     this.#publisher.defineCommand(PUBLISH_CMD, { numberOfKeys: 2, lua: PUBLISH_LUA })
     for (const command of Object.values(REDIS_ROOM_COMMANDS)) {

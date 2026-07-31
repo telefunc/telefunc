@@ -70,6 +70,10 @@ describe('Redis real three-master Cluster CI certification', () => {
 
     const prefix = uniquePrefix('reply-loss')
     const backend = ownRoomBackend(cluster, prefix)
+    for (const unsafePrefix of ['x{}', 'x{', '{global}']) {
+      expect(() => new RedisRoomBackend({ redis: cluster, prefix: unsafePrefix })).toThrow(/prefix/i)
+    }
+    await expect(backend.publish({ key: '}edge', kind: 'text' }, bytes('unsafe'))).rejects.toThrow(/Broadcast key/)
     const commands = cluster as unknown as Record<string, (...args: unknown[]) => Promise<unknown>>
     const publish = commands.tfPublish.bind(cluster)
     vi.spyOn(commands, 'tfPublish').mockImplementation(async (...args) => {
