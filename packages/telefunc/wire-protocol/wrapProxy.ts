@@ -1,7 +1,6 @@
 export { wrapProxy, adoptSubordinateOf, releaseSubordinate }
 
 import { isObjectOrFunction } from '../utils/isObjectOrFunction.js'
-import { isPromise } from '../utils/isPromise.js'
 
 /** Keeps the wrapper reachable as long as any object derived from it (e.g. a
  *  ReadableStreamReader obtained via `stream.getReader()`, a Promise chain, a
@@ -66,18 +65,12 @@ function wrapProxy<T extends object>(target: T): T {
   return wrapper
 }
 
-/** Pin `wrapper` to live as long as `derived` does (via WeakMap). A promise also transfers
- *  the tether to its fulfilled object: callers commonly retain only `await wrapper.method()`. */
+/** Pin `wrapper` to live as long as `derived` does (via WeakMap). */
 function adoptSubordinate(derived: unknown, wrapper: unknown): void {
   if (!isObjectOrFunction(derived)) return
   if (releasedSubordinates.has(derived)) return
   keepWrapperAlive.set(derived, wrapper)
   if (Array.isArray(derived)) for (const value of derived) adoptSubordinate(value, wrapper)
-  if (isPromise(derived)) {
-    // Keep the fulfillment tether without handling rejection: the derived chain then preserves the
-    // runtime's unhandled-rejection signal when an application ignores a rejected method promise.
-    void Promise.resolve(derived).then((value) => adoptSubordinate(value, wrapper))
-  }
 }
 
 /** Tether a value exposed outside a method return (for example, a callback argument). */

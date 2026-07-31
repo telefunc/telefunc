@@ -38,6 +38,7 @@ import {
 } from './protocol.js'
 import { RoomState, RoomStateView } from './state.js'
 import { ParticipantBase, type InboxMessage } from './participant.js'
+import { adoptSubordinateOf } from '../wrapProxy.js'
 import type {
   BinaryPublishOptions,
   JoinOptions,
@@ -228,6 +229,7 @@ class ClientRoom extends RoomStateView implements Room {
         joinedAt: number
       }
       const participant = new ClientRoomParticipant(this, id, meta, selfDelivery)
+      adoptSubordinateOf(this, participant)
       if (this._closedCause) {
         participant._onLeft(this._closedCause)
         return participant
