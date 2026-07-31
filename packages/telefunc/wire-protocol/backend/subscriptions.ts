@@ -355,6 +355,7 @@ class SubscriptionSlot<Source> {
 
   private _notify(listeners: Iterable<StateListener>, state: SubscriptionState): void {
     for (const listener of [...listeners]) {
+      if (listeners instanceof Set && !listeners.has(listener)) continue
       try {
         listener(state)
       } catch (error) {

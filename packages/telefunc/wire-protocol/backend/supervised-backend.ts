@@ -6,10 +6,7 @@ import { assertHeadNextWellFormed } from './head-transitions.js'
 import type { BackendDriver, BackendSpi, HeadCx, HeadNext } from './spi.js'
 
 /** The sole raw-driver-to-consumer composition path and owner of subscription supervision. */
-function superviseBackend(
-  driver: BackendDriver,
-  disposeDriver: () => Promise<void> = () => driver.dispose(),
-): BackendSpi {
+function superviseBackend(driver: BackendDriver): BackendSpi {
   const subscriptions = new SubscriptionManager(driver.subscriptions, console.error, subscriptionSourceKey)
   let disposal: Promise<void> | undefined
 
@@ -52,6 +49,6 @@ function superviseBackend(
     directoryList: (prefix, cursor) => driver.directoryList(prefix, cursor),
 
     // Detach raw attempts before closing the resources their cleanup uses.
-    dispose: () => (disposal ??= subscriptions.dispose().then(disposeDriver)),
+    dispose: () => (disposal ??= subscriptions.dispose().then(() => driver.dispose())),
   }
 }
