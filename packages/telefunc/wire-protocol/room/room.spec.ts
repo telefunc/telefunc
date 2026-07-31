@@ -304,9 +304,14 @@ describe('Room public behavior', () => {
     const resolving = Room.getOrCreate(room.id).finally(() => {
       settled = true
     })
-    await Promise.resolve()
+    await vi.advanceTimersByTimeAsync(900)
     expect(settled).toBe(false)
-    await vi.advanceTimersByTimeAsync(1_100)
+    expect((await driver.readHead(room.id))?.head).toMatchObject({
+      currentInc: firstInc,
+      state: 'closing',
+      closeLease: { id: 'active-get-or-create-close' },
+    })
+    await vi.advanceTimersByTimeAsync(200)
     const recreated = (await resolving) as ServerRoom
     expect(recreated._inc).not.toBe(firstInc)
     expect(recreated.isClosed).toBe(false)
@@ -567,18 +572,6 @@ describe('Room public behavior', () => {
     expect(room.isClosed).toBe(true)
   })
 
-  it('replaces a subscription that is already closed on initial establishment', async () => {
-    const closed = terminalSubscription()
-    await closed.close()
-    const terminal = vi.fn()
-    const slot = new SubSlot(terminal, () => {})
-    slot.sync(true, () => closed.subscription)
-    await Promise.resolve()
-    expect(terminal).toHaveBeenCalledOnce()
-    expect(terminal.mock.calls[0]?.[0]).toBe(slot)
-    slot.stop()
-  })
-
   it('rejects only an exhausted internal readiness generation and recovers holder readiness later', async () => {
     const slot = new SubSlot(
       () => {},
@@ -590,7 +583,10 @@ describe('Room public behavior', () => {
     const exhausted = new RoomError('generation exhausted')
     slot.markLost(exhausted)
     await expect(exhaustedGeneration).rejects.toBe(exhausted)
-    expect(await Promise.race([holderReady.then(() => 'ready'), Promise.resolve('pending')])).toBe('pending')
+    let holderSettled = false
+    void holderReady.then(() => (holderSettled = true))
+    await Promise.resolve()
+    expect(holderSettled).toBe(false)
     slot.sync(true, () => terminalSubscription().subscription)
     await expect(holderReady).resolves.toBeUndefined()
     await expect(slot.generationReady).resolves.toBeUndefined()

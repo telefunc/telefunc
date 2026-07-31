@@ -156,7 +156,6 @@ class SubSlot {
         notifyTerminal()
       }
     })
-    if (subscription.state() === 'closed') notifyTerminal()
     if (previous) void previous.unsubscribe().catch(reportRoomError)
   }
 
