@@ -226,14 +226,28 @@ describe('cloudflare adapter entrypoint', () => {
     const { binding, get, fetch } = createBinding()
     const tf = new Telefunc()
     const kv = createMockKV()
+    const putGate = Promise.withResolvers<void>()
+    const originalPut = kv.put.bind(kv)
+    kv.put = (async (...args: Parameters<KVNamespace['put']>) => {
+      await putGate.promise
+      return originalPut(...args)
+    }) as KVNamespace['put']
     const waitUntilFns: Array<Promise<unknown>> = []
     const request = new Request('https://telefunc.test/_telefunc')
 
-    const response = await tf.serve({
+    const responsePromise = tf.serve({
       request,
       env: { TelefuncDurableObject: binding, TelefuncKV: kv } as unknown as Cloudflare.Env,
       ctx: { waitUntil: (p: Promise<unknown>) => waitUntilFns.push(p) } as unknown as ExecutionContext,
     })
+    expect(
+      await Promise.race([
+        responsePromise.then(() => 'exposed' as const),
+        new Promise<'pending'>((resolve) => setTimeout(() => resolve('pending'), 0)),
+      ]),
+    ).toBe('pending')
+    putGate.resolve()
+    const response = await responsePromise
 
     expect(get).toHaveBeenCalledWith(expect.objectContaining({ name: 'telefunc-shard-weur-0' }), {
       locationHint: 'weur',
