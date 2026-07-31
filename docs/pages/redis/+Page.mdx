@@ -21,7 +21,7 @@ npm install @telefunc/redis ioredis
 import IORedis from 'ioredis'
 import { installRedis } from '@telefunc/redis'
 
-const redis = new IORedis('redis://localhost:6379')
+const redis = new IORedis('redis://localhost:6379', { maxRetriesPerRequest: 0 })
 installRedis(redis)
 ```
 
@@ -29,7 +29,7 @@ That single call installs the Redis backend for both Broadcast and Room from the
 
 ### Sharing an existing client
 
-Pass an existing [`ioredis`](https://github.com/redis/ioredis) Redis or Cluster instance when you want to share a connection or set custom options such as TLS or a retry strategy.
+Pass an existing [`ioredis`](https://github.com/redis/ioredis) Redis or Cluster instance when you want to share a connection or set options such as TLS or authentication.
 
 ```ts
 // Environment: server
@@ -37,7 +37,7 @@ Pass an existing [`ioredis`](https://github.com/redis/ioredis) Redis or Cluster 
 import IORedis from 'ioredis'
 import { installRedis } from '@telefunc/redis'
 
-const redis = new IORedis(process.env.REDIS_URL, { tls: {} })
+const redis = new IORedis(process.env.REDIS_URL, { tls: {}, maxRetriesPerRequest: 0 })
 installRedis(redis)
 ```
 

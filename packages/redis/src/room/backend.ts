@@ -1,7 +1,3 @@
-// Redis BackendDriver for standalone and Cluster deployments.
-// Lua atomically covers head/cell mutation, fenced reads, and ordered retained publication.
-// SUBSCRIBE acknowledgements establish readiness; invalidation and late-sequence checks fence delivery.
-
 import { randomUUID } from 'node:crypto'
 import { Cluster, type Redis } from 'ioredis'
 import { assert } from '../assert.js'
@@ -77,7 +73,6 @@ local receivers = redis.call('PUBLISH', KEYS[2], frame)
 return {seq, ts, receivers}
 `.trim()
 
-// Lua's stored head: opaque base64 `config`, authority timestamps, and optional `inc`/`lease`/`exp`.
 type StoredHead = {
   rev: string
   state: 'open' | 'closing' | 'closed'
@@ -153,14 +148,16 @@ export class RedisRoomBackend implements BackendDriver {
           options.redis.options.redisOptions?.maxRetriesPerRequest !== 0 ||
           options.redis.options.redisOptions?.reconnectOnError != null
         : options.redis.options.maxRetriesPerRequest !== 0 || options.redis.options.reconnectOnError != null
-    if (retries) throw new Error('RedisRoomBackend: ioredis retries violate at-most-once delivery')
+    if (retries)
+      throw new Error(
+        'RedisRoomBackend: at-most-once requires maxRetriesPerRequest: 0 (standalone Redis), or retryDelayOnFailover: 0 and redisOptions.maxRetriesPerRequest: 0 (Cluster); reconnectOnError must be unset',
+      )
     this._publisher = options.redis
     let clusterSubscriberSelection = 0
     const createSubscriber = async (): Promise<Redis> => {
       let source: Redis
       if (options.redis instanceof Cluster) {
-        // A direct live-master duplicate keeps SUBSCRIBE, dispatch, and the delivery-fence PING on one
-        // Room-owned socket; re-evaluate topology on every replacement.
+        // Keep SUBSCRIBE, dispatch, and the delivery-fence PING on one Room-owned live-master socket.
         let topology = options.redis.nodes('master')
         if (topology.length === 0) {
           await options.redis.ping()
@@ -199,8 +196,6 @@ export class RedisRoomBackend implements BackendDriver {
       validateGeneration: (source, token) => this._validateGeneration(source, token),
     })
   }
-
-  // ── head ──
 
   async publish(lane: BroadcastLane, payload: Uint8Array): Promise<PublishResult> {
     this._assertLive()
@@ -253,8 +248,6 @@ export class RedisRoomBackend implements BackendDriver {
     return { conflict: true, current: parsed.current === null ? null : toPublicHead(parsed.current) }
   }
 
-  // ── generation cells ──
-
   async readCells(
     roomId: string,
     inc: string,
@@ -263,8 +256,7 @@ export class RedisRoomBackend implements BackendDriver {
     this._assertLive()
     const hKey = headKey(this._prefix, roomId)
     const rKey = revKey(this._prefix, roomId, inc)
-    // Fence the enumerated set against its generation revision: mutations retry an inconsistent snapshot;
-    // silent PX expiry does not bump rev and is hidden by the logical expiresAt filter.
+    // Revision fencing retries mutations; logical expiry hides silent PX expiry without a rev bump.
     for (let attempt = 0; attempt < STABLE_READ_ATTEMPTS; attempt++) {
       const [headRaw, revBefore] = await this._publisher.mget(hKey, rKey)
       const head = this._parseHead(headRaw ?? null)
@@ -328,8 +320,6 @@ export class RedisRoomBackend implements BackendDriver {
     return reply as CxResult
   }
 
-  // ── lane commit ──
-
   async commitLane(
     roomId: string,
     inc: string,
@@ -368,8 +358,7 @@ export class RedisRoomBackend implements BackendDriver {
     assertOrderingPosition(parsed.seq, parsed.timestamp, 'RedisRoomBackend.commitLane')
     // Data and fence leave the same slot owner in order, so observing the fence proves local dispatch.
     const delivery = flush.delivery
-    // Observe rejection immediately so a later-awaited `delivery` surfaces epoch crossings without an
-    // interim unhandledRejection.
+    // Observe rejection now so later-awaited delivery has no interim unhandledRejection.
     void delivery.catch(() => {})
     return {
       accepted: true,
@@ -379,8 +368,6 @@ export class RedisRoomBackend implements BackendDriver {
       delivery,
     }
   }
-
-  // ── retained ──
 
   async readRetained(
     roomId: string,
@@ -426,8 +413,6 @@ export class RedisRoomBackend implements BackendDriver {
     ])
   }
 
-  // ── subscriptions ──
-
   private _captureGeneration(source: Extract<BackendSubscriptionSource, { kind: 'durable' }>): Promise<string | null> {
     return this._publisher.hget(generationTokensKey(this._prefix, source.roomId), source.inc)
   }
@@ -445,8 +430,6 @@ export class RedisRoomBackend implements BackendDriver {
       ])) === 1
     )
   }
-
-  // ── generation lifecycle ──
 
   async listGenerations(roomId: string): Promise<string[]> {
     this._assertLive()
@@ -472,8 +455,6 @@ export class RedisRoomBackend implements BackendDriver {
       begin.token,
     ])
   }
-
-  // ── directory (global; its own two co-slotted keys) ──
 
   async directoryPut(roomId: string, incTag: string): Promise<void> {
     this._assertLive()
@@ -501,7 +482,6 @@ export class RedisRoomBackend implements BackendDriver {
     const index = directoryIndexKey(this._prefix)
     const min = cursor === undefined ? `[${prefix}` : `(${cursor}`
     const page = await this._publisher.zrangebylex(index, min, '+', 'LIMIT', 0, DIRECTORY_PAGE_SIZE)
-    // Prefix-matching members are contiguous from `min`; the first non-match ends the prefix range.
     const matching: string[] = []
     for (const member of page) {
       if (member.startsWith(prefix)) matching.push(member)
@@ -527,8 +507,6 @@ export class RedisRoomBackend implements BackendDriver {
     if (this._disposed) return
     this._disposed = true
   }
-
-  // ── internals ──
 
   private _assertLive(): void {
     if (this._disposed) throw new Error('RedisRoomBackend: used after dispose()')
