@@ -41,6 +41,7 @@ import { ChannelClosedError, ChannelOverflowError, isExpectedChannelFailure } fr
 import { isPromise } from '../../utils/isPromise.js'
 import { hasProp } from '../../utils/hasProp.js'
 import { classifyTelefuncError } from '../error-classification.js'
+import { addTelefunctionCallBarrier, type TelefunctionCallBarrierScope } from './call-barrier.js'
 
 const CLIENT_BROADCAST_BRAND = Symbol.for('telefunc.ClientBroadcast')
 
@@ -609,9 +610,54 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   readonly [CLIENT_BROADCAST_BRAND] = true
   private _broadcastListeners: Array<BroadcastListener<T>> = []
   private _broadcastBinaryListeners: Array<BroadcastBinaryListener> = []
+  private readonly _reconnectCallbacks: Array<() => void> = []
+  private readonly _callBarrierScope: TelefunctionCallBarrierScope
+  private _wireTextSubscribed = false
+  private _didOpen = false
+
+  constructor(options: ConstructorParameters<typeof ClientChannel>[0]) {
+    super(options)
+    this._callBarrierScope = { telefuncUrl: options.telefuncUrl, connectionKey: options.connectionKey }
+  }
 
   static isClientBroadcast(value: unknown): value is ClientBroadcast {
     return hasProp(value, CLIENT_BROADCAST_BRAND)
+  }
+
+  /** @internal — register a local text listener without changing wire intent. */
+  _subscribeLocal(callback: BroadcastListener<T>): () => void {
+    this._broadcastListeners.push(callback)
+    return () => {
+      const index = this._broadcastListeners.indexOf(callback)
+      if (index >= 0) this._broadcastListeners.splice(index, 1)
+    }
+  }
+
+  /** @internal — register a local binary listener without changing wire intent. */
+  _subscribeBinaryLocal(callback: BroadcastBinaryListener): () => void {
+    this._broadcastBinaryListeners.push(callback)
+    return () => {
+      const index = this._broadcastBinaryListeners.indexOf(callback)
+      if (index >= 0) this._broadcastBinaryListeners.splice(index, 1)
+    }
+  }
+
+  /** @internal — declare text wire intent; `reconcile` re-emits it after reconnect. */
+  _setWireTextSubscribed(on: boolean, reconcile = false): void {
+    if ((!reconcile && on === this._wireTextSubscribed) || this._isClosed) return
+    this._wireTextSubscribed = on
+    if (on) this._connection.sendBroadcastSubscribe(this, false)
+    else this._connection.sendBroadcastUnsubscribe(this, false)
+  }
+
+  /** @internal — observe transport reopens after the initial open. */
+  _onReconnect(callback: () => void): void {
+    this._reconnectCallbacks.push(callback)
+  }
+
+  /** @internal — fence a same-scope telefunction call behind this broadcast control. */
+  _addTelefunctionCallBarrier(promise: Promise<unknown>): void {
+    addTelefunctionCallBarrier(this._callBarrierScope, promise)
   }
 
   publish(data: ChannelData<T>): Promise<ChannelPublishAck> {
@@ -630,14 +676,13 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
 
   subscribe(callback: BroadcastListener<T>): () => void {
     if (this._broadcastListeners.length === 0) {
-      this._connection.sendBroadcastSubscribe(this, false)
+      this._setWireTextSubscribed(true)
     }
-    this._broadcastListeners.push(callback)
+    const unsubscribe = this._subscribeLocal(callback)
     return () => {
-      const index = this._broadcastListeners.indexOf(callback)
-      if (index >= 0) this._broadcastListeners.splice(index, 1)
+      unsubscribe()
       if (this._broadcastListeners.length === 0) {
-        this._connection.sendBroadcastUnsubscribe(this, false)
+        this._setWireTextSubscribed(false)
       }
     }
   }
@@ -659,12 +704,28 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
     if (this._broadcastBinaryListeners.length === 0) {
       this._connection.sendBroadcastSubscribe(this, true)
     }
-    this._broadcastBinaryListeners.push(callback)
+    const unsubscribe = this._subscribeBinaryLocal(callback)
     return () => {
-      const index = this._broadcastBinaryListeners.indexOf(callback)
-      if (index >= 0) this._broadcastBinaryListeners.splice(index, 1)
+      unsubscribe()
       if (this._broadcastBinaryListeners.length === 0) {
         this._connection.sendBroadcastUnsubscribe(this, true)
+      }
+    }
+  }
+
+  override _onTransportOpen(batched: boolean): void {
+    const reopened = this._didOpen
+    super._onTransportOpen(batched)
+    if (this._isClosed) return
+    if (!reopened) {
+      this._didOpen = true
+      return
+    }
+    for (const callback of this._reconnectCallbacks) {
+      try {
+        callback()
+      } catch (error) {
+        if (this._handleCallbackError(error)) return
       }
     }
   }

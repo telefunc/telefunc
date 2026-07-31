@@ -1,5 +1,4 @@
 export { roomReviver, roomParticipantReviver, roomRemoteReviver }
-export type { RoomClientReviverContext }
 
 import type {
   ClientReviverContext,
@@ -13,17 +12,14 @@ import {
   SERIALIZER_PREFIX_ROOM_PARTICIPANT,
   SERIALIZER_PREFIX_ROOM_REMOTE,
 } from '../constants.js'
-import { ClientRoom, ClientStandaloneParticipant, type RoomClientBroadcast } from './client.js'
+import { ClientRoom, ClientStandaloneParticipant } from './client.js'
 import { roomCtrlKey } from './protocol.js'
 import { assert } from '../../utils/assert.js'
 
-type RoomClientReviverContext = ClientReviverContext & {
-  createRoomBroadcast<T = unknown>(opts: { channelId: string; key: string }): RoomClientBroadcast<T>
-}
 const roomReviver: ReviverType<RoomContract, ClientReviverContext> = {
   prefix: SERIALIZER_PREFIX_ROOM,
   revive(metadata, context) {
-    const stub = (context as RoomClientReviverContext).createRoomBroadcast({
+    const stub = context.createBroadcast({
       channelId: metadata.channelId,
       key: roomCtrlKey(metadata.roomId),
     })

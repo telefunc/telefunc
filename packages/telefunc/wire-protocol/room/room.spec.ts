@@ -34,7 +34,8 @@ import {
   type RoomSnapshotMetadata,
 } from './protocol.js'
 import type { LeaveCause } from './types.js'
-import { ClientRoom, RoomClientBroadcast } from './client.js'
+import { ClientRoom } from './client.js'
+import { ClientBroadcast } from '../client/channel.js'
 import { RoomState, remoteBacking } from './state.js'
 import { Room, ServerRoom } from './server.js'
 import { SubSlot, configFromHead, decodeRoomText, encodeRoomConfig } from './server/lanes.js'
@@ -2445,7 +2446,7 @@ function createFakeStub(options?: {
   send?: (message: unknown, options?: { ack?: boolean }) => Promise<unknown>
   wireDeclarations?: boolean[]
 }): {
-  stub: RoomClientBroadcast
+  stub: ClientBroadcast
   emitText(data: unknown, info: ChannelPublishInfo): void
   emitBinary(data: Uint8Array, info: ChannelPublishInfo): void
   reconnect(): void
@@ -2468,7 +2469,7 @@ function createFakeStub(options?: {
       binary.push(callback)
       return () => binary.splice(binary.indexOf(callback), 1)
     },
-    _setWireTextSubscribed: RoomClientBroadcast.prototype._setWireTextSubscribed,
+    _setWireTextSubscribed: ClientBroadcast.prototype._setWireTextSubscribed,
     _addTelefunctionCallBarrier: (promise: Promise<unknown>) =>
       addTelefunctionCallBarrier({ telefuncUrl: '/_telefunc' }, promise),
     send: options?.send ?? (async () => undefined),
@@ -2478,7 +2479,7 @@ function createFakeStub(options?: {
     _onReconnect: (callback: () => void) => {
       reconnect = callback
     },
-  } as unknown as RoomClientBroadcast
+  } as unknown as ClientBroadcast
   return {
     stub,
     emitText: (data, info) => text.forEach((callback) => callback(data, info)),

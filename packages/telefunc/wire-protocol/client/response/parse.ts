@@ -14,8 +14,6 @@ import { BaseStreamReader } from './BaseStreamReader.js'
 import { StreamReader } from './StreamReader.js'
 import { SSEStreamReader } from './SSEStreamReader.js'
 import { ClientChannel, ClientBroadcast } from '../channel.js'
-import { RoomClientBroadcast } from '../../room/client.js'
-import type { RoomClientReviverContext } from '../../room/response-client.js'
 import { wrapProxy } from '../../wrapProxy.js'
 import { GcRegistry } from '../../gcRegistry.js'
 import { ChannelStreamSource } from '../../ChannelStreamSource.js'
@@ -106,7 +104,7 @@ async function reviveResponse(
   const headers = callContext.headers ?? undefined
   const telefuncUrl = callContext.telefuncUrl
   const promises: Promise<unknown>[] = []
-  const context: RoomClientReviverContext = {
+  const context: ClientReviverContext = {
     adoptSubordinate(child, trackedOwner) {
       const close = closeHandlers.get(trackedOwner)
       assert(close)
@@ -130,17 +128,6 @@ async function reviveResponse(
     },
     createBroadcast(opts) {
       return new ClientBroadcast({
-        channelId: opts.channelId,
-        key: opts.key,
-        transports,
-        connectionKey,
-        headers,
-        telefuncUrl,
-        idleTimeout,
-      })
-    },
-    createRoomBroadcast(opts) {
-      return new RoomClientBroadcast({
         channelId: opts.channelId,
         key: opts.key,
         transports,
