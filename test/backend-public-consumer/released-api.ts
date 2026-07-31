@@ -63,7 +63,7 @@ type Extends<Actual, Baseline> = [Actual] extends [Baseline] ? true : false
 type Compatible<Actual, Baseline> = Extends<Actual, Baseline> extends true ? Extends<Baseline, Actual> : false
 type HasKeys<Actual, Keys extends PropertyKey> = Exclude<Keys, keyof Actual> extends never ? true : false
 type IsOptional<T, K extends keyof T> = {} extends Pick<T, K> ? true : false
-type _abortValueKinds = [typeof Abort, typeof ClientAbort]
+void [Abort, ClientAbort]
 
 type Outbound = (data: string) => number
 type Inbound = (data: number) => string
