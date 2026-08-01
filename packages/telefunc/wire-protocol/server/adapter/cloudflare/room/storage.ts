@@ -6,7 +6,7 @@ import {
   assertHeadDeleteLegal,
   assertHeadNextWellFormed,
   assertHeadTransition,
-} from '../../../../backend/head-transitions.js'
+} from '../../../../backend/room/head-transitions.js'
 
 type HeadWriteNext = Extract<HeadNext, { head: unknown }>
 export type StoredHead = RoomHead & { expiresAt: number | null }

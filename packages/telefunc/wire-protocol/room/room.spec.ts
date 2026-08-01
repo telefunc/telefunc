@@ -31,9 +31,9 @@ import { RoomStubChannel } from './stubs.js'
 import { RoomDemand } from './demand.js'
 import type { ChannelPublishInfo } from '../channel.js'
 import { disposeBackend, getBackend, installBackend, setDefaultBackend } from '../backend/install.js'
-import { HEAD_TRANSITIONS, assertHeadTransition } from '../backend/head-transitions.js'
+import { HEAD_TRANSITIONS, assertHeadTransition } from '../backend/room/head-transitions.js'
 import { MemoryBackend, MemoryBackendState } from '../backend/memory/backend.js'
-import { SubscriptionManager } from '../backend/subscriptions.js'
+import { SubscriptionManager } from '../backend/subscription-manager.js'
 import type {
   BackendReceiver,
   BackendSubscription,

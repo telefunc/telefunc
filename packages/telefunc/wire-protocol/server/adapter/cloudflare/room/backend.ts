@@ -167,7 +167,7 @@ export function getCloudflareRoomSessionManager(): CloudflareRoomSessionManager 
 export class CloudflareRoomBackend implements BackendDriver {
   readonly spiVersion = BACKEND_SPI_VERSION
   readonly broadcast: CloudflareBroadcastTransport
-  readonly subscriptions: SubscriptionDriver
+  readonly subscriptions: SubscriptionDriver<BackendSubscriptionSource>
   #disposed = false
 
   constructor(broadcast = new CloudflareBroadcastTransport({ baseInstanceName: 'telefunc' })) {

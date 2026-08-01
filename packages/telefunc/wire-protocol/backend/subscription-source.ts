@@ -1,15 +1,10 @@
 export { broadcastRouteKey, laneKey, subscriptionSourceKey }
 
-import type { BackendSubscriptionSource, BroadcastLane, LaneId } from './spi.js'
+import { broadcastRouteKey } from './broadcast/route-key.js'
+import { laneKey } from './room/lane-key.js'
+import type { BackendSubscriptionSource } from './spi.js'
 
-function laneKey(lane: LaneId): string {
-  if (lane.kind === 'semantic' || lane.kind === 'control') return lane.kind
-  if (lane.kind === 'inbox') return `inbox:${encodeURIComponent(lane.member)}`
-  return `binary:${encodeURIComponent(lane.member)}:${encodeURIComponent(lane.track)}`
-}
-
-const broadcastRouteKey = (lane: BroadcastLane) => `${lane.kind}:${encodeURIComponent(lane.key)}`
-
+/** Temporary key delegate for the fused adapters; plane supervisors no longer consume this union. */
 const subscriptionSourceKey = (source: BackendSubscriptionSource) =>
   source.kind === 'broadcast'
     ? `broadcast:${broadcastRouteKey(source.lane)}`

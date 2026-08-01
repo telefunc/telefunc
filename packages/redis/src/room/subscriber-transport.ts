@@ -30,7 +30,7 @@ type RedisSubscriptionDriverOptions = {
  * Redis's only backend-specific subscription edge. General fan-out, refcounts, readiness generations,
  * attempt epochs, ownership checks, and terminal signalling live in core's supervised backend.
  */
-export class RedisSubscriptionDriver implements SubscriptionDriver {
+export class RedisSubscriptionDriver implements SubscriptionDriver<BackendSubscriptionSource> {
   private readonly _prefix: string
   private readonly _createSubscriber: () => Promise<Redis>
   private readonly _captureGeneration: RedisSubscriptionDriverOptions['captureGeneration']

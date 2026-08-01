@@ -10,25 +10,33 @@ const files = ['packages/telefunc', 'packages/redis']
   .filter((file) => !/\.(?:spec|test)\.ts$/.test(file))
 const project = new Project({ skipAddingFilesFromTsConfig: true })
 const sources = new Map(files.map((file) => [file, project.addSourceFileAtPath(join(root, file))]))
-describe('canonical wiring', () => {
-  it('wires the supervisor to the exported subscription owner', () => {
-    expect(exportsOf('packages/telefunc/wire-protocol/backend/subscriptions.ts')).toContain('SubscriptionManager')
+describe('canonical backend wiring', () => {
+  it('wires both plane supervisors to the exported subscription owner', () => {
+    expect(exportsOf('packages/telefunc/wire-protocol/backend/subscription-manager.ts')).toContain(
+      'SubscriptionManager',
+    )
     expect(
-      importsFrom('packages/telefunc/wire-protocol/backend/supervised-backend.ts', './subscriptions.js'),
+      importsFrom('packages/telefunc/wire-protocol/backend/broadcast/supervise.ts', '../subscription-manager.js'),
     ).toContain('SubscriptionManager')
     expect(
-      constructedBy('packages/telefunc/wire-protocol/backend/supervised-backend.ts', 'SubscriptionManager'),
-    ).toEqual(['superviseBackend'])
+      constructedBy('packages/telefunc/wire-protocol/backend/broadcast/supervise.ts', 'SubscriptionManager'),
+    ).toEqual(['superviseBroadcastDriver'])
+    expect(
+      importsFrom('packages/telefunc/wire-protocol/backend/room/supervise.ts', '../subscription-manager.js'),
+    ).toContain('SubscriptionManager')
+    expect(constructedBy('packages/telefunc/wire-protocol/backend/room/supervise.ts', 'SubscriptionManager')).toEqual([
+      'superviseRoomDriver',
+    ])
   })
   it('wires lane consumers to the canonical lane key', () => {
-    expect(reexportsFrom('packages/telefunc/backend.ts', './wire-protocol/backend/subscription-source.js')).toContain(
+    expect(reexportsFrom('packages/telefunc/backend.ts', './wire-protocol/backend/room/lane-key.js')).toContain(
       'laneKey',
     )
     expect(importsFrom('packages/redis/src/room/layout.ts', 'telefunc/backend')).toContain('laneKey')
     expect(
       reexportsFrom(
         'packages/telefunc/wire-protocol/server/adapter/cloudflare/room/codec.ts',
-        '../../../../backend/subscription-source.js',
+        '../../../../backend/room/lane-key.js',
       ),
     ).toContain('laneKey')
   })
@@ -47,6 +55,15 @@ describe('canonical wiring', () => {
       .flatMap((file) => importsFrom(file, 'telefunc/backend'))
     expect([...new Set(redisValues)].sort()).toEqual(['HEAD_TRANSITIONS', 'ORDERING_FRAME_LAYOUT', 'laneKey'])
     expect(importsFrom('packages/redis/src/index.ts', 'telefunc/__internal')).toContain('setDefaultBackend')
+  })
+  it('keeps fused subscription sources out of plane modules', () => {
+    const forbidden = new Set(['BackendSubscriptionSource', 'subscriptionSourceKey'])
+    // biome-ignore format: keep the bounded identifier scan atomic
+    const owners = files.filter((file) => source(file).getDescendantsOfKind(SyntaxKind.Identifier).some((node) => forbidden.has(node.getText()))).sort()
+    // biome-ignore format: keep the two plane roots pinned together
+    expect(owners.filter((file) => /^packages\/telefunc\/wire-protocol\/backend\/(?:broadcast|room)\//.test(file))).toEqual([])
+    // biome-ignore format: keep the temporary owner manifest reviewable as one datum
+    expect(owners).toEqual(['packages/redis/src/room/backend.ts', 'packages/redis/src/room/subscriber-transport.ts', 'packages/telefunc/wire-protocol/backend/memory/backend.ts', 'packages/telefunc/wire-protocol/backend/spi.ts', 'packages/telefunc/wire-protocol/backend/subscription-source.ts', 'packages/telefunc/wire-protocol/server/adapter/cloudflare/room/backend.ts'])
   })
   it('keeps generic client core independent from Room', () => {
     // Static import declarations include value and type-only imports.

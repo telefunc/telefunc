@@ -18,8 +18,9 @@ import {
   type SubscriptionAttemptState,
   type SubscriptionDriver,
 } from '../spi.js'
-import { assertHeadDeleteLegal, assertHeadTransition } from '../head-transitions.js'
-import { broadcastRouteKey, laneKey } from '../subscription-source.js'
+import { broadcastRouteKey } from '../broadcast/route-key.js'
+import { assertHeadDeleteLegal, assertHeadTransition } from '../room/head-transitions.js'
+import { laneKey } from '../room/lane-key.js'
 
 export type MemoryBackendOptions = {
   // Tests inject authority time to prove expiry independently of caller clock skew.
@@ -160,7 +161,7 @@ class MemorySubscriptionAttempt implements SubscriptionAttempt {
 
 export class MemoryBackend implements BackendDriver {
   readonly spiVersion = BACKEND_SPI_VERSION
-  readonly subscriptions: SubscriptionDriver
+  readonly subscriptions: SubscriptionDriver<BackendSubscriptionSource>
 
   readonly #now: () => number
   readonly #state: MemoryBackendState

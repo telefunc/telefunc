@@ -1,6 +1,6 @@
 export { HEAD_TRANSITIONS, assertHeadDeleteLegal, assertHeadNextWellFormed, assertHeadTransition }
 
-import type { HeadCx, HeadNext, RoomHead } from './spi.js'
+import type { HeadCx, HeadNext, RoomHead } from './contract.js'
 
 type HeadState = RoomHead['state'] | 'absent'
 type HeadCxForm = 'absent' | 'generic' | 'takeover' | 'finalize'

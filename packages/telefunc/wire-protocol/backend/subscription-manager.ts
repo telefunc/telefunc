@@ -8,7 +8,7 @@ import type {
   SubscriptionBinding,
   SubscriptionDriver,
   SubscriptionState,
-} from './spi.js'
+} from './subscription.js'
 import { CHANNEL_BUFFER_LIMIT_BYTES } from '../constants.js'
 import { ChannelOverflowError } from '../channel-errors.js'
 
