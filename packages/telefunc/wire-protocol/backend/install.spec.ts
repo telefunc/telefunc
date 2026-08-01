@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { BACKEND_SPI_VERSION, type BackendDriverPair } from './driver-pair.js'
 import { disposeBackend, getBroadcastBackend, getRoomBackend, installBackend, setDefaultBackend } from './install.js'
 import { MemoryBackend } from './memory/backend.js'
+import { SubscriptionManager } from './subscription-manager.js'
 afterEach(async () => {
   await disposeBackend().catch(() => {})
   vi.restoreAllMocks()
@@ -41,11 +42,15 @@ describe('backend installation lifecycle', () => {
     expect(getRoomBackend()).toBe(current)
   })
   it('disposes both managers before invoking the pair disposer exactly once', async () => {
+    const gate = Promise.withResolvers<void>()
+    const stops = vi.spyOn(SubscriptionManager.prototype, 'dispose').mockReturnValue(gate.promise)
     const dispose = vi.fn(async () => {})
     installBackend(() => memoryPair(new MemoryBackend(), dispose))
     const first = disposeBackend()
-    const second = disposeBackend()
-    expect(second).toBe(first)
+    expect(disposeBackend()).toBe(first)
+    await Promise.resolve()
+    expect([stops.mock.calls.length, new Set(stops.mock.instances).size, dispose.mock.calls.length]).toEqual([2, 2, 0])
+    gate.resolve()
     await first
     expect(dispose).toHaveBeenCalledOnce()
   })
