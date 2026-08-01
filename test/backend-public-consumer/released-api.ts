@@ -40,22 +40,6 @@ import type { BackendSubscriptionSource } from 'telefunc/backend'
 // @ts-expect-error the fused supervised subscription is absent
 import type { BackendSubscription } from 'telefunc/backend'
 
-// Deferred author surface: one missing author name per diagnostic.
-// @ts-expect-error the public backend SPI version is deferred
-import { BACKEND_SPI_VERSION } from 'telefunc/backend'
-// @ts-expect-error the public backend pair type is deferred
-import type { BackendDriverPair } from 'telefunc/backend'
-// @ts-expect-error the public backend factory type is deferred
-import type { BackendFactory } from 'telefunc/backend'
-// @ts-expect-error the public Broadcast driver type is deferred
-import type { BroadcastDriver } from 'telefunc/backend'
-// @ts-expect-error the public Room driver type is deferred
-import type { RoomDriver } from 'telefunc/backend'
-// @ts-expect-error the public subscription driver type is deferred
-import type { SubscriptionDriver } from 'telefunc/backend'
-// @ts-expect-error public custom-backend installation is deferred
-import { installBackend } from 'telefunc/backend'
-
 // Descriptor and alternate-runtime paths are independently absent.
 // @ts-expect-error there is one scalar version, not a descriptor
 import { BACKEND_PROTOCOL } from 'telefunc/backend'

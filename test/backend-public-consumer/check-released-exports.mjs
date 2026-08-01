@@ -11,6 +11,11 @@ const packageRoots = [
   ['telefunc', path.join(root, 'packages/telefunc')],
   ['@telefunc/redis', path.join(root, 'packages/redis')],
 ]
+const forbiddenBackendExports = new Set(
+  'BACKEND_SPI_VERSION BackendDriverPair BackendFactory BackendReceiver BroadcastDriver BroadcastLane CellMutation CommitAccepted CommitResult CxResult HeadCx HeadNext LaneId PublishResult RoomDriver RoomHead RoomSubscriptionSource SubscriptionAttempt SubscriptionAttemptState SubscriptionBinding SubscriptionDriver SubscriptionState installBackend'.split(
+    ' ',
+  ),
+)
 
 const publicEntryPoints = packageRoots.flatMap(([packageName, packageRoot]) => {
   const packageJson = JSON.parse(fs.readFileSync(path.join(packageRoot, 'package.json'), 'utf8'))
@@ -87,6 +92,13 @@ publicEntryPoints.forEach((entryPoint, index) => {
       actual.filter((name) => !expected.includes(name)),
     ),
   )
+  if (entryPoint === 'telefunc/backend')
+    differences.push(
+      formatDifference(
+        `${entryPoint}: forbidden deferred exports`,
+        actual.filter((name) => forbiddenBackendExports.has(name)),
+      ),
+    )
 })
 
 fail(differences)
