@@ -2187,11 +2187,12 @@ describe('shared subscription supervision', () => {
     await stopping
   })
   it('does not convert pending raw cleanup into successful settlement', async () => {
-    const liveCleanup = deferred<void>()
+    const unsubscribeCleanup = deferred<void>()
+    const disposeCleanup = deferred<void>()
     const terminalCleanup = deferred<void>()
     const raw = new ControlledDriver()
-    raw.plan(() => ControlledAttempt.ready(liveCleanup.promise))
-    raw.plan(() => ControlledAttempt.ready(liveCleanup.promise))
+    raw.plan(() => ControlledAttempt.ready(unsubscribeCleanup.promise))
+    raw.plan(() => ControlledAttempt.ready(disposeCleanup.promise))
     raw.plan(() => ControlledAttempt.ready(terminalCleanup.promise))
     const manager = new SubscriptionManager(raw)
     const first = manager.subscribe('unsubscribe', () => {})
@@ -2205,25 +2206,23 @@ describe('shared subscription supervision', () => {
     const unsubscribing = first.unsubscribe().then(() => (unsubscribeSettled = true))
     const terminalUnsubscribing = terminal.unsubscribe().then(() => (terminalUnsubscribeSettled = true))
     const disposing = manager.dispose().then(() => (disposeSettled = true))
-    expect({ unsubscribeSettled, terminalUnsubscribeSettled, disposeSettled }).toEqual({
-      unsubscribeSettled: false,
-      terminalUnsubscribeSettled: false,
-      disposeSettled: false,
-    })
-    liveCleanup.resolve()
+    expect(unsubscribeSettled).toBe(false)
+    expect(terminalUnsubscribeSettled).toBe(false)
+    expect(disposeSettled).toBe(false)
+    unsubscribeCleanup.resolve()
     await unsubscribing
-    expect({ unsubscribeSettled, terminalUnsubscribeSettled, disposeSettled }).toEqual({
-      unsubscribeSettled: true,
-      terminalUnsubscribeSettled: false,
-      disposeSettled: false,
-    })
+    expect(unsubscribeSettled).toBe(true)
+    expect(terminalUnsubscribeSettled).toBe(false)
+    expect(disposeSettled).toBe(false)
     terminalCleanup.resolve()
-    await Promise.all([terminalUnsubscribing, disposing])
-    expect({ unsubscribeSettled, terminalUnsubscribeSettled, disposeSettled }).toEqual({
-      unsubscribeSettled: true,
-      terminalUnsubscribeSettled: true,
-      disposeSettled: true,
-    })
+    await terminalUnsubscribing
+    await Promise.resolve()
+    expect(disposeSettled).toBe(false)
+    disposeCleanup.resolve()
+    await disposing
+    expect(unsubscribeSettled).toBe(true)
+    expect(terminalUnsubscribeSettled).toBe(true)
+    expect(disposeSettled).toBe(true)
   })
   it('isolates throwing state listeners from siblings and last-detach cleanup', async () => {
     const cleanup = deferred<void>()
