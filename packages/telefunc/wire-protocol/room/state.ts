@@ -552,36 +552,44 @@ class RoomState {
     const seen = new Set<string>()
     for (const member of roster) {
       seen.add(member.id)
-      const entry = this._members.get(member.id)
-      if (!entry) {
-        this.applyJoin(member.id, member.meta, member.joinedAt, member.identity, member.hidden)
-        const created = this._members.get(member.id)
-        if (created) {
-          created.metaSeq = member.metaSeq
-          for (const track of member.tracks ?? []) created.tracks.add(track)
-        }
-        narratedDrift = true
-        continue
-      }
-      if (member.metaSeq > entry.metaSeq) {
-        this.applyParticipantMeta(member.id, member.meta, member.metaSeq)
-        narratedDrift = true
-      }
-      entry.joinedAt = member.joinedAt
-      for (const track of member.tracks ?? []) {
-        if (entry.tracks.has(track)) continue
-        entry.tracks.add(track)
-        viewChanged = true
-      }
+      const outcome = this._applyRosterMember(member)
+      narratedDrift ||= outcome.narratedDrift
+      viewChanged ||= outcome.viewChanged
     }
-    for (const id of [...this._members.keys()]) {
-      if (!seen.has(id) && !(preserveMissingHidden && this.isHidden(id))) {
-        this.applyLeave(id)
-        narratedDrift = true
-      }
-    }
+    narratedDrift = this._removeMissingMembers(seen, preserveMissingHidden) || narratedDrift
     if (viewChanged && !narratedDrift) this._bumpMembership()
     return narratedDrift
+  }
+  private _applyRosterMember(member: MemberSnapshot): { narratedDrift: boolean; viewChanged: boolean } {
+    const entry = this._members.get(member.id)
+    if (!entry) {
+      this.applyJoin(member.id, member.meta, member.joinedAt, member.identity, member.hidden)
+      const created = this._members.get(member.id)!
+      created.metaSeq = member.metaSeq
+      this._mergeKnownTracks(created, member.tracks)
+      return { narratedDrift: true, viewChanged: false }
+    }
+    let narratedDrift = false
+    if (member.metaSeq > entry.metaSeq) {
+      this.applyParticipantMeta(member.id, member.meta, member.metaSeq)
+      narratedDrift = true
+    }
+    entry.joinedAt = member.joinedAt
+    return { narratedDrift, viewChanged: this._mergeKnownTracks(entry, member.tracks) }
+  }
+  private _mergeKnownTracks(entry: MemberEntry, tracks: string[] | undefined): boolean {
+    const before = entry.tracks.size
+    for (const track of tracks ?? []) entry.tracks.add(track)
+    return entry.tracks.size !== before
+  }
+  private _removeMissingMembers(seen: Set<string>, preserveMissingHidden: boolean): boolean {
+    let removed = false
+    for (const id of [...this._members.keys()]) {
+      if (seen.has(id) || (preserveMissingHidden && this.isHidden(id))) continue
+      this.applyLeave(id)
+      removed = true
+    }
+    return removed
   }
   // ── Private ──
   private _createEntry(entrySeed: MemberSnapshot): MemberEntry {
