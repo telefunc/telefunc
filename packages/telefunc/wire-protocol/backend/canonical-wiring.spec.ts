@@ -84,7 +84,7 @@ describe('canonical backend wiring', () => {
   it('keeps generic client core independent from Room', () => {
     // Static import declarations include value and type-only imports.
     // biome-ignore format: keep the bounded dependency scan visually atomic
-    const edges = files.filter((file) => /^packages\/telefunc\/wire-protocol\/(?:client\/(?:response\/|(?:channel|connection|call-barrier|deadlineScheduler|session-registry)\.ts$)|channel\.ts$)/.test(file)).flatMap((file) => source(file).getImportDeclarations().flatMap((node) => { const target = node.getModuleSpecifierSourceFile(); if (target === undefined) return []; const path = relative(root, target.getFilePath()).replaceAll('\\', '/'); return path.startsWith('packages/telefunc/wire-protocol/room/') ? [`${file} -> ${path}`] : [] }))
+    const edges = files.filter((file) => /^packages\/telefunc\/wire-protocol\/(?:client\/(?!dialect\.ts$)|channel\.ts$)/.test(file)).flatMap((file) => source(file).getImportDeclarations().flatMap((node) => { const target = node.getModuleSpecifierSourceFile(); if (target === undefined) return []; const path = relative(root, target.getFilePath()).replaceAll('\\', '/'); return path.startsWith('packages/telefunc/wire-protocol/room/') ? [`${file} -> ${path}`] : [] }))
     // biome-ignore format: keep the empty edge manifest pinned
     expect(edges.sort()).toEqual([])
   })
