@@ -1,7 +1,6 @@
 export { getTelefuncChannelHooks }
 
 import { defineHooks, type Peer } from 'crossws'
-import { enableChannelTransports } from '../../node/server/serverConfig.js'
 import { getChannelMux } from './mux.js'
 import type { ServerTransport } from './mux.js'
 
@@ -12,7 +11,6 @@ declare module 'crossws' {
 }
 
 function getTelefuncChannelHooks() {
-  enableChannelTransports(['ws'])
   const mux = getChannelMux()
   const transport: ServerTransport<Peer> = {
     getSessionId: (peer) => peer.context.telefuncSessionId,

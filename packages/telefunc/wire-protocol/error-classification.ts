@@ -10,8 +10,7 @@ type TelefuncErrorClassification =
   | { kind: 'expected'; error: Error }
   | { kind: 'bug'; error: unknown }
 
-/** The shared expected-error/bug split. Callers supply their operational error type
- *  (RoomError, channel lifecycle errors); Abort and shield failures are universal. */
+/** Shared error precedence. Callers supply their operational predicate; Abort and shield failures are universal. */
 function classifyTelefuncError(
   error: unknown,
   isExpected: (error: unknown) => error is Error,
