@@ -35,7 +35,7 @@ import {
 } from '../binary.js'
 import { RoomError, roomFailureError } from '../errors.js'
 import { roomIdentityMemberKvKey, roomMemberKvKey } from '../keys.js'
-import { leaveCauseFromWire, leaveCauseToWire, mergeAttributes, normalizeJoinOptions, ownMetadata } from '../model.js'
+import { leaveCauseFromWire, mergeAttributes, normalizeJoinOptions, ownMetadata } from '../model.js'
 import {
   hasRoomTag,
   pushBoundedTail,

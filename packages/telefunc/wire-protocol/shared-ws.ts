@@ -7,7 +7,6 @@ export {
   isChannelDataFrame,
   isConnCtrlTag,
   encodePublishText,
-  decodePublishText,
   encodePublishBinary,
   decodePublishBinary,
   payloadBytes,
@@ -20,7 +19,6 @@ export type {
   ChannelDataFrame,
   ReconcilePayload,
   ReconciledPayload,
-  ServerCtrlTag,
   WirePublishInfo,
 }
 
@@ -205,19 +203,6 @@ type ConnCtrlFrame =
   | { tag: typeof TAG.RECONCILE; payload: ReconcilePayload }
   | { tag: typeof TAG.RECONCILED; payload: ReconciledPayload }
   | { tag: typeof TAG.STREAM_REQUEST_OPEN_ACK }
-
-/** Ctrl frame tags the client receives from the server. */
-type ServerCtrlTag =
-  | typeof TAG.CLOSE
-  | typeof TAG.CLOSE_ACK
-  | typeof TAG.ABORT
-  | typeof TAG.ERROR
-  | typeof TAG.WINDOW
-  | typeof TAG.MSG_WINDOW
-  | typeof TAG.BDP_PING
-  | typeof TAG.BDP_PING_ACK
-  | typeof TAG.FIN
-  | typeof TAG.RECONCILED
 
 type DecodedFrame = ChannelFrame | ConnCtrlFrame
 

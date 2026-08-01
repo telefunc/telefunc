@@ -11,7 +11,6 @@ import type {
   BinaryFrameInfo,
   LeaveCause,
   ParticipantMeta,
-  ParticipantSnapshotView,
   RemoteParticipant,
   RoomMeta,
   RoomSnapshotView,

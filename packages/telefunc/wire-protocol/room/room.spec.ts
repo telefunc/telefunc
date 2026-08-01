@@ -1009,8 +1009,8 @@ describe('Room public behavior', () => {
     wanted.stub._onPeerMessage(JSON.stringify({ __r: 'sub-text', members: [], announce: true }), 1)
     await semanticReady.promise
     await Room.announce(room.id, 'wanted')
-    await vi.waitFor(() => expect(announceFrames(wanted.peer)).toEqual(['wanted']))
-    expect(announceFrames(silent.peer)).toEqual([])
+    await vi.waitFor(() => expect(semanticFrames(wanted.peer, 'announce')).toEqual(['wanted']))
+    expect(semanticFrames(silent.peer, 'announce')).toEqual([])
   })
   it("retained owner cleanup is compare-delete, so a newer owner's racing frame survives", async () => {
     const room = (await Room.create('retained-owner')) as ServerRoom
@@ -1056,7 +1056,7 @@ describe('Room public behavior', () => {
     const { stub, peer } = serve(observer)
     stub._wantsText = true
     await observer._replayRetainedText(stub, false, new Set())
-    expect(dataFrames(peer)).toEqual([])
+    expect(semanticFrames(peer, 'data')).toEqual([])
     await expect(driver.readRetained(authority.id, authority._inc, semanticLane)).resolves.toBeNull()
   })
   it('does not retain or expose mutable lane aliases', async () => {
@@ -1088,28 +1088,19 @@ describe('Room public behavior', () => {
     await publisher.publishBinary(new Uint8Array([1]), { track: 'screen', retain: true })
     const observer = (await Room.get(authority.id)) as ServerRoom
     const stub = register(observer)
-    const readCells = driver.readCells.bind(driver)
-    const rosterStarted = deferred<void>()
-    const releaseRoster = deferred<void>()
-    vi.spyOn(driver, 'readCells').mockImplementation(async (roomId, inc, selector) => {
-      if (roomId === authority.id && 'prefix' in selector) {
-        rosterStarted.resolve()
-        await releaseRoster.promise
-      }
-      return readCells(roomId, inc, selector)
-    })
+    const roster = delayRosterRead(authority.id)
     const listRetained = vi.spyOn(driver, 'listRetained')
     try {
       await observer._handleStubRequest(stub, {
         __r: 'sub-binary',
         wants: { everyMember: { all: true, tracks: [] }, members: {} },
       })
-      await rosterStarted.promise
+      await roster.started
       expect(listRetained).not.toHaveBeenCalled()
-      releaseRoster.resolve()
+      roster.release()
       await vi.waitFor(() => expect(listRetained).toHaveBeenCalled())
     } finally {
-      releaseRoster.resolve()
+      roster.release()
     }
   })
   it('delivers exact-member binary frames before the roster is known', async () => {
@@ -1117,16 +1108,7 @@ describe('Room public behavior', () => {
     const publisher = await authority.join()
     const observer = (await Room.get(authority.id)) as ServerRoom
     const stub = register(observer)
-    const readCells = driver.readCells.bind(driver)
-    const rosterStarted = deferred<void>()
-    const releaseRoster = deferred<void>()
-    vi.spyOn(driver, 'readCells').mockImplementation(async (roomId, inc, selector) => {
-      if (roomId === authority.id && 'prefix' in selector) {
-        rosterStarted.resolve()
-        await releaseRoster.promise
-      }
-      return readCells(roomId, inc, selector)
-    })
+    const roster = delayRosterRead(authority.id)
     expect(observer._state.rosterKnown).toBe(false)
     try {
       await observer._handleStubRequest(stub, {
@@ -1136,7 +1118,7 @@ describe('Room public behavior', () => {
           members: { [publisher.id]: { all: false, tracks: ['screen'] } },
         },
       })
-      await rosterStarted.promise
+      await roster.started
       await (observer as unknown as { _binaryReady(): Promise<void> })._binaryReady()
       expect(observer._state.rosterKnown).toBe(false)
       await publisher.publishBinary(new Uint8Array([7]), { track: 'screen' })
@@ -1151,7 +1133,7 @@ describe('Room public behavior', () => {
         payload: new Uint8Array([7]),
       })
     } finally {
-      releaseRoster.resolve()
+      roster.release()
       await observer.getParticipants()
     }
   })
@@ -1178,11 +1160,11 @@ describe('Room public behavior', () => {
     await member.publish('early')
     const { stub, peer } = serve(tail)
     await member.publish('held')
-    expect(dataFrames(peer)).toEqual([])
+    expect(semanticFrames(peer, 'data')).toEqual([])
     stub._onPeerBroadcastSubscribe(false)
-    await vi.waitFor(() => expect(dataFrames(peer)).toEqual(['early', 'held']))
+    await vi.waitFor(() => expect(semanticFrames(peer, 'data')).toEqual(['early', 'held']))
     await member.publish('live')
-    expect(dataFrames(peer)).toEqual(['early', 'held', 'live'])
+    expect(semanticFrames(peer, 'data')).toEqual(['early', 'held', 'live'])
   })
   it('releases a tail that is not attached within its 60 second lease', async () => {
     vi.useFakeTimers()
@@ -1191,7 +1173,7 @@ describe('Room public behavior', () => {
     await vi.advanceTimersByTimeAsync(ROOM_TAIL_ATTACH_TIMEOUT_MS + 1)
     const { stub, peer } = serve(tail)
     stub._onPeerBroadcastSubscribe(false)
-    expect(dataFrames(peer)).toEqual([])
+    expect(semanticFrames(peer, 'data')).toEqual([])
   })
   it('releases an attached tail when first text demand misses its 60 second lease', async () => {
     vi.useFakeTimers()
@@ -1200,7 +1182,7 @@ describe('Room public behavior', () => {
     const { stub, peer } = serve(tail)
     await vi.advanceTimersByTimeAsync(ROOM_TAIL_ATTACH_TIMEOUT_MS + 1)
     stub._onPeerBroadcastSubscribe(false)
-    expect(dataFrames(peer)).toEqual([])
+    expect(semanticFrames(peer, 'data')).toEqual([])
   })
   it('onDemand reports named-track demand turning on and off', async () => {
     const room = await Room.create('demand')
@@ -2410,21 +2392,26 @@ async function createTail(id: string) {
     tail: (await Room.get(id, { tail: true })) as ServerRoom,
   }
 }
-function dataFrames(peer: Peer): unknown[] {
+function semanticFrames(peer: Peer, kind: 'data' | 'announce'): unknown[] {
   return peer
     .decoded()
     .filter((frame) => frame.tag === TAG.PUBLISH)
     .map((frame) => JSON.parse(frame.text) as { __r: string; data?: unknown })
-    .filter((frame) => frame.__r === 'data')
+    .filter((frame) => frame.__r === kind)
     .map((frame) => frame.data)
 }
-function announceFrames(peer: Peer): unknown[] {
-  return peer
-    .decoded()
-    .filter((frame) => frame.tag === TAG.PUBLISH)
-    .map((frame) => JSON.parse(frame.text) as { __r: string; data?: unknown })
-    .filter((frame) => frame.__r === 'announce')
-    .map((frame) => frame.data)
+
+function delayRosterRead(roomId: string): { started: Promise<void>; release: () => void } {
+  const readCells = driver.readCells.bind(driver)
+  const roster = { started: deferred<void>(), release: deferred<void>() }
+  vi.spyOn(driver, 'readCells').mockImplementation(async (candidateRoomId, inc, selector) => {
+    if (candidateRoomId === roomId && 'prefix' in selector) {
+      roster.started.resolve()
+      await roster.release.promise
+    }
+    return readCells(candidateRoomId, inc, selector)
+  })
+  return { started: roster.started.promise, release: roster.release.resolve }
 }
 async function wideBinaryScenario(id: string, retain: boolean, byte: number) {
   const serverRoom = (await Room.create(id)) as ServerRoom

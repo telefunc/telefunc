@@ -7,7 +7,6 @@ export {
   isRoomTrack,
   emptyTrackWants,
   mergeTrackWants,
-  wantsTrack,
   wantsAnyBinary,
   binaryWantsCovers,
   sanitizeBinaryWants,

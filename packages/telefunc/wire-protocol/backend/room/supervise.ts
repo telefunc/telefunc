@@ -6,7 +6,7 @@ import type { HeadCx, HeadNext, RoomBackend, RoomDriver } from './contract.js'
 import { roomSubscriptionSourceKey } from './lane-key.js'
 
 /** Owns the Room subscription manager and durable head/drop supervision. */
-function superviseRoomDriver(driver: RoomDriver, dispose: () => void | Promise<void> = () => {}): RoomBackend {
+function superviseRoomDriver(driver: RoomDriver): RoomBackend {
   const subscriptions = new SubscriptionManager(driver.subscriptions, console.error, roomSubscriptionSourceKey)
   let disposal: Promise<void> | undefined
 
@@ -31,6 +31,6 @@ function superviseRoomDriver(driver: RoomDriver, dispose: () => void | Promise<v
     directoryPut: (roomId, incTag) => driver.directoryPut(roomId, incTag),
     directoryDelete: (roomId, incTag) => driver.directoryDelete(roomId, incTag),
     directoryList: (prefix, cursor) => driver.directoryList(prefix, cursor),
-    dispose: () => (disposal ??= subscriptions.dispose().then(dispose)),
+    dispose: () => (disposal ??= subscriptions.dispose()),
   }
 }

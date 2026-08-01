@@ -1,5 +1,4 @@
 export { createRequestReviver, resolveDeferredRevivals, serverRequestTypes }
-export type { DeferredRevival }
 
 import type { Reviver } from '@brillout/json-serializer/parse'
 import { fileReviver } from './file.js'

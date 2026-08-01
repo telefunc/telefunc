@@ -108,9 +108,8 @@ function source(file: string): SourceFile {
 }
 function exportsOf(file: string): string[] {
   return source(file)
-    .getExportSymbols()
-    .map((symbol) => symbol.getName())
-    .sort()
+    .getExportDeclarations()
+    .flatMap((declaration) => declaration.getNamedExports().map((specifier) => specifier.getName()))
 }
 function constructedBy(file: string, name: string): string[] {
   return source(file)

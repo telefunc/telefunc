@@ -12,7 +12,6 @@ export type {
   RoomCtrlEnvelope,
   RoomDataEnvelope,
   RoomDataPublish,
-  RoomAnnounceEnvelope,
   RoomOrder,
   RoomDmEnvelope,
   RoomDmAckEnvelope,

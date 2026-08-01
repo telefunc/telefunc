@@ -1,5 +1,4 @@
 export { classifyTelefuncError }
-export type { TelefuncErrorClassification }
 
 import { isAbort, type AbortError } from '../shared/Abort.js'
 import { isShieldValidationError, type ShieldValidationError } from '../shared/ShieldValidationError.js'

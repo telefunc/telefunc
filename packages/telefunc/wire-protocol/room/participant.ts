@@ -14,7 +14,6 @@ import type {
   LocalParticipant,
   ParticipantMeta,
   PublishOptions,
-  RoomSendReceipt,
   Sender,
 } from './types.js'
 // ParticipantBase — the shared half of every LocalParticipant
