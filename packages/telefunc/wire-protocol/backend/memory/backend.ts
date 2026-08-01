@@ -1,32 +1,45 @@
 // Reference driver: synchronous authority-time state, per-lane async settlement, CX leases/revisions, and lazy/janitor TTL.
 
-import {
-  BACKEND_SPI_VERSION,
-  type BackendDriver,
-  type BackendReceiver,
-  type BackendSubscriptionSource,
-  type BroadcastLane,
-  type CellMutation,
-  type CommitResult,
-  type CxResult,
-  type HeadCx,
-  type HeadNext,
-  type LaneId,
-  type PublishResult,
-  type RoomHead,
-  type SubscriptionAttempt,
-  type SubscriptionAttemptState,
-  type SubscriptionDriver,
-} from '../spi.js'
+import type { BroadcastDriver, BroadcastLane, PublishResult } from '../broadcast/contract.js'
 import { broadcastRouteKey } from '../broadcast/route-key.js'
+import { BACKEND_SPI_VERSION, type BackendDriverPair } from '../driver-pair.js'
+import type {
+  CellMutation,
+  CommitResult,
+  CxResult,
+  HeadCx,
+  HeadNext,
+  LaneId,
+  RoomDriver,
+  RoomHead,
+  RoomSubscriptionSource,
+} from '../room/contract.js'
 import { assertHeadDeleteLegal, assertHeadTransition } from '../room/head-transitions.js'
 import { laneKey } from '../room/lane-key.js'
+import type {
+  BackendReceiver,
+  SubscriptionAttempt,
+  SubscriptionAttemptState,
+  SubscriptionDriver,
+} from '../subscription.js'
 
 export type MemoryBackendOptions = {
   // Tests inject authority time to prove expiry independently of caller clock skew.
   authorityNow?: () => number
   /** @internal Ownership injection for an embedding that preserves state across facade reconstruction. */
   state?: MemoryBackendState
+}
+
+type MemorySubscriptionSource = BroadcastLane | RoomSubscriptionSource
+
+export function createMemoryBackendPair(): BackendDriverPair {
+  const driver = new MemoryBackend()
+  return {
+    spiVersion: BACKEND_SPI_VERSION,
+    broadcast: driver,
+    room: driver,
+    dispose: () => driver.dispose(),
+  }
 }
 
 type Expiring = { expiresAt: number | null }
@@ -159,9 +172,8 @@ class MemorySubscriptionAttempt implements SubscriptionAttempt {
   }
 }
 
-export class MemoryBackend implements BackendDriver {
-  readonly spiVersion = BACKEND_SPI_VERSION
-  readonly subscriptions: SubscriptionDriver<BackendSubscriptionSource>
+export class MemoryBackend implements BroadcastDriver, RoomDriver {
+  readonly subscriptions: SubscriptionDriver<MemorySubscriptionSource>
 
   readonly #now: () => number
   readonly #state: MemoryBackendState
@@ -406,12 +418,12 @@ export class MemoryBackend implements BackendDriver {
   }
 
   #openSubscription(
-    source: BackendSubscriptionSource,
+    source: MemorySubscriptionSource,
     receiver: BackendReceiver,
     localReceiverCount: () => number,
   ): MemorySubscriptionAttempt {
-    if (source.kind === 'broadcast') {
-      const key = broadcastRouteKey(source.lane)
+    if (!('roomId' in source)) {
+      const key = broadcastRouteKey(source)
       const subs = getOrCreate(this.#state.broadcastSubs, key, () => new Set())
       const sub = new MemorySubscriptionAttempt(receiver, localReceiverCount, subs)
       subs.add(sub)

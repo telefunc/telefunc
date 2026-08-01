@@ -3,22 +3,18 @@
 // The authority proxy has no callback map; callback ownership stays on the installing session shard.
 
 import { getRawContext, isAsyncMode, restoreContext, type Context } from '../../../../../node/server/context/context.js'
+import type { BroadcastDriver, BroadcastLane, PublishResult } from '../../../../backend/broadcast/contract.js'
 import type {
-  BackendDriver,
-  BackendReceiver,
-  BackendSubscriptionSource,
-  BroadcastLane,
   CellMutation,
   CommitResult,
   HeadCx,
   HeadNext,
   LaneId,
-  PublishResult,
+  RoomDriver,
   RoomHead,
-  SubscriptionBinding,
-  SubscriptionDriver,
-} from '../../../../backend/spi.js'
-import { BACKEND_SPI_VERSION } from '../../../../backend/spi.js'
+  RoomSubscriptionSource,
+} from '../../../../backend/room/contract.js'
+import type { BackendReceiver, SubscriptionBinding, SubscriptionDriver } from '../../../../backend/subscription.js'
 import { CloudflareBroadcastTransport } from '../broadcast.js'
 import { laneKey as laneKeyOf } from './codec.js'
 import { CloudflareRoomSubscriptionAttempt } from './subscription.js'
@@ -164,10 +160,11 @@ export function getCloudflareRoomSessionManager(): CloudflareRoomSessionManager 
   return manager
 }
 
-export class CloudflareRoomBackend implements BackendDriver {
-  readonly spiVersion = BACKEND_SPI_VERSION
+type CloudflareSubscriptionSource = BroadcastLane | RoomSubscriptionSource
+
+export class CloudflareRoomBackend implements BroadcastDriver, RoomDriver {
   readonly broadcast: CloudflareBroadcastTransport
-  readonly subscriptions: SubscriptionDriver<BackendSubscriptionSource>
+  readonly subscriptions: SubscriptionDriver<CloudflareSubscriptionSource>
   #disposed = false
 
   constructor(broadcast = new CloudflareBroadcastTransport({ baseInstanceName: 'telefunc' })) {
@@ -242,12 +239,12 @@ export class CloudflareRoomBackend implements BackendDriver {
   get disposed(): boolean {
     return this.#disposed
   }
-  #bindSubscription(source: BackendSubscriptionSource): SubscriptionBinding {
-    if (source.kind === 'broadcast') {
+  #bindSubscription(source: CloudflareSubscriptionSource): SubscriptionBinding {
+    if (!('roomId' in source)) {
       return {
         partition: '',
         valid: () => !this.#disposed,
-        open: (receiver) => this.broadcast.openSubscription(source.lane, receiver),
+        open: (receiver) => this.broadcast.openSubscription(source, receiver),
       }
     }
     const manager = getCloudflareRoomSessionManager()

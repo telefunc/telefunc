@@ -1,13 +1,17 @@
 /// <reference types="@cloudflare/workers-types" />
 import { DurableObject } from 'cloudflare:workers'
 import '../../packages/telefunc/node/server/async_hooks.js'
+import {
+  BACKEND_SPI_VERSION,
+  type BackendDriverPair,
+} from '../../packages/telefunc/wire-protocol/backend/driver-pair.js'
 import { setDefaultBackend } from '../../packages/telefunc/wire-protocol/backend/install.js'
-import { Room } from '../../packages/telefunc/wire-protocol/room/server.js'
+import type { RoomHead } from '../../packages/telefunc/wire-protocol/backend/room/contract.js'
 import type {
-  RoomHead,
   SubscriptionAttempt,
   SubscriptionAttemptState,
-} from '../../packages/telefunc/wire-protocol/backend/spi.js'
+} from '../../packages/telefunc/wire-protocol/backend/subscription.js'
+import { Room } from '../../packages/telefunc/wire-protocol/room/server.js'
 import {
   CloudflareRoomBackend,
   CloudflareRoomSessionManager,
@@ -29,7 +33,13 @@ import {
   type RoomShardFanoutRequest,
 } from '../../packages/telefunc/wire-protocol/server/adapter/cloudflare/room/fanout.js'
 const publicRoomBackend = new CloudflareRoomBackend()
-setDefaultBackend(() => publicRoomBackend, 'cloudflare-room-ci-public')
+const publicRoomPair: BackendDriverPair = {
+  spiVersion: BACKEND_SPI_VERSION,
+  broadcast: publicRoomBackend,
+  room: publicRoomBackend,
+  dispose: () => publicRoomBackend.dispose(),
+}
+setDefaultBackend(() => publicRoomPair, 'cloudflare-room-ci-public')
 const PublicRoomDurableObjectBase = createTelefuncRoomDurableObjectClass('PUBLIC_SESSION')
 const textEncoder = new TextEncoder()
 const CONTROL_HORIZON_MS = 2_000

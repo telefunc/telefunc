@@ -30,19 +30,26 @@ import { roomAckError } from './server/errors.js'
 import { RoomStubChannel } from './stubs.js'
 import { RoomDemand } from './demand.js'
 import type { ChannelPublishInfo } from '../channel.js'
-import { disposeBackend, getBackend, installBackend, setDefaultBackend } from '../backend/install.js'
+import {
+  disposeBackend,
+  getBroadcastBackend,
+  getRoomBackend,
+  installBackend,
+  setDefaultBackend,
+} from '../backend/install.js'
+import { BACKEND_SPI_VERSION, type BackendDriverPair } from '../backend/driver-pair.js'
 import { HEAD_TRANSITIONS, assertHeadTransition } from '../backend/room/head-transitions.js'
 import { MemoryBackend, MemoryBackendState } from '../backend/memory/backend.js'
 import { SubscriptionManager } from '../backend/subscription-manager.js'
+import type { LaneId } from '../backend/room/contract.js'
 import type {
   BackendReceiver,
   BackendSubscription,
-  LaneId,
   SubscriptionAttempt,
   SubscriptionAttemptState,
   SubscriptionDriver,
   SubscriptionState,
-} from '../backend/spi.js'
+} from '../backend/subscription.js'
 import { ORDERING_FRAME_LAYOUT, decodeOrderingFrame, encodeOrderingFrame } from '../ordering-frame.js'
 import { GcRegistry } from '../gcRegistry.js'
 import { wrapProxy } from '../wrapProxy.js'
@@ -53,11 +60,17 @@ const allBinary = { everyMember: { all: true, tracks: [] }, members: {} }
 const FORMER_MEMBER_KV_TTL_MS = 180_000
 let driver: MemoryBackend
 let memoryState: MemoryBackendState
+const memoryPair = (value: MemoryBackend): BackendDriverPair => ({
+  spiVersion: BACKEND_SPI_VERSION,
+  broadcast: value,
+  room: value,
+  dispose: () => value.dispose(),
+})
 beforeEach(async () => {
   await disposeBackend()
   memoryState = new MemoryBackendState()
   driver = new MemoryBackend({ state: memoryState })
-  installBackend(() => driver)
+  installBackend(() => memoryPair(driver))
 })
 afterEach(async () => {
   vi.useRealTimers()
@@ -72,7 +85,7 @@ afterEach(async () => {
 describe('Room public behavior', () => {
   it('opens semantic ingestion only when a semantic listener wants delivery', async () => {
     const room = (await Room.create('semantic-demand')) as ServerRoom
-    const backend = getBackend()
+    const backend = getRoomBackend()
     const subscribeLane = backend.subscribeLane.bind(backend)
     let semanticSubscriptions = 0
     vi.spyOn(backend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
@@ -88,7 +101,7 @@ describe('Room public behavior', () => {
     expect(received).toEqual(['wanted'])
   })
   it('does not let a removed member publish or receive a DM when its leave frame is lost', async () => {
-    const backend = getBackend()
+    const backend = getRoomBackend()
     const subscribeLane = backend.subscribeLane.bind(backend)
     vi.spyOn(backend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
       if (lane.kind !== 'control') return subscribeLane(roomId, inc, lane, receiver)
@@ -117,7 +130,7 @@ describe('Room public behavior', () => {
   it('keeps a joining identity undiscoverable until its member inbox subscription is ready', async () => {
     const room = await Room.create('join-inbox-readiness')
     const sender = await room.join()
-    const backend = getBackend()
+    const backend = getRoomBackend()
     const commitLane = vi.spyOn(backend, 'commitLane')
     const delayed = delayLaneSubscription((lane) => lane.kind === 'inbox')
     let joinSettled = false
@@ -145,7 +158,7 @@ describe('Room public behavior', () => {
   })
   it('rolls durable membership back when the join announcement fails', async () => {
     const room = await Room.create('join-readiness-rollback')
-    const backend = getBackend()
+    const backend = getRoomBackend()
     const commitLane = backend.commitLane.bind(backend)
     vi.spyOn(backend, 'commitLane').mockImplementation((roomId, inc, lane, payload, options) => {
       if (lane.kind === 'control' && (parse(decoder.decode(payload)) as { __r?: string }).__r === 'join') {
@@ -302,7 +315,8 @@ describe('Room public behavior', () => {
     vi.resetModules()
     const remoteInstall = await import('../backend/install.js')
     const remoteServer = await import('./server.js')
-    const remoteBackend = remoteInstall.installBackend(() => driver)
+    remoteInstall.installBackend(() => memoryPair(driver))
+    const remoteBackend = remoteInstall.getRoomBackend()
     const unsubscribed: string[] = []
     const observedLanes = new Set<string>()
     const observationReady = deferred<void>()
@@ -344,7 +358,7 @@ describe('Room public behavior', () => {
     const authority = await Room.create('terminal-subscription-recovery')
     const publisher = await authority.join()
     const observer = await Room.get(authority.id)
-    const backend = getBackend()
+    const backend = getRoomBackend()
     const subscribeLane = backend.subscribeLane.bind(backend)
     let terminal: ReturnType<typeof terminalSubscription> | undefined
     const replacementReady = deferred<void>()
@@ -376,7 +390,8 @@ describe('Room public behavior', () => {
     vi.resetModules()
     const remoteInstall = await import('../backend/install.js')
     const remoteServer = await import('./server.js')
-    const remoteBackend = remoteInstall.installBackend(() => driver)
+    remoteInstall.installBackend(() => memoryPair(driver))
+    const remoteBackend = remoteInstall.getRoomBackend()
     const subscribeLane = remoteBackend.subscribeLane.bind(remoteBackend)
     let terminal: ReturnType<typeof terminalSubscription> | undefined
     vi.spyOn(remoteBackend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
@@ -416,7 +431,7 @@ describe('Room public behavior', () => {
   })
   it('reconciles authority after a control gap or same-attempt recovery', async () => {
     const room = (await Room.create('control-reconcile')) as ServerRoom
-    const backend = getBackend()
+    const backend = getRoomBackend()
     const subscribeLane = backend.subscribeLane.bind(backend)
     const controlSubscribed = deferred<void>()
     let transition!: (state: SubscriptionState) => void
@@ -962,7 +977,7 @@ describe('Room public behavior', () => {
     const member = await room.join()
     const observer = await Room.get(room.id)
     const observed: Array<[unknown, number]> = []
-    const backend = getBackend()
+    const backend = getRoomBackend()
     const subscribeLane = backend.subscribeLane.bind(backend)
     const controlReady = deferred<void>()
     vi.spyOn(backend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
@@ -982,7 +997,7 @@ describe('Room public behavior', () => {
   })
   it('relays semantic announcements only to stubs that declared announce demand', async () => {
     const room = (await Room.create('announce-want-gate')) as ServerRoom
-    const backend = getBackend()
+    const backend = getRoomBackend()
     const subscribeLane = backend.subscribeLane.bind(backend)
     const semanticReady = deferred<void>()
     vi.spyOn(backend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
@@ -1253,7 +1268,8 @@ describe('Room public behavior', () => {
   it('keeps zero-configuration memory on the same supervised path as explicit drivers', async () => {
     await disposeBackend()
     const room = await Room.create('zero-config')
-    const backend = getBackend()
+    const backend = getRoomBackend()
+    const broadcast = getBroadcastBackend()
     expect(backend).not.toBeInstanceOf(MemoryBackend)
     const member = await room.join()
     expect(await member.publish('works')).toMatchObject({ seq: 1 })
@@ -1261,21 +1277,21 @@ describe('Room public behavior', () => {
     const received: string[] = []
     const firstReceived = deferred<void>()
     let secondReceived = deferred<void>()
-    const first = backend.subscribe(lane, (payload) => {
+    const first = broadcast.subscribe(lane, (payload) => {
       received.push(`first:${decoder.decode(payload)}`)
       firstReceived.resolve()
     })
-    const second = backend.subscribe(lane, (payload) => {
+    const second = broadcast.subscribe(lane, (payload) => {
       received.push(`second:${decoder.decode(payload)}`)
       secondReceived.resolve()
     })
     await Promise.all([first.ready, second.ready])
-    await backend.publish(lane, encoder.encode('one'))
+    await broadcast.publish(lane, encoder.encode('one'))
     await Promise.all([firstReceived.promise, secondReceived.promise])
     expect(received).toEqual(['first:one', 'second:one'])
     await first.unsubscribe()
     secondReceived = deferred<void>()
-    await backend.publish(lane, encoder.encode('two'))
+    await broadcast.publish(lane, encoder.encode('two'))
     await secondReceived.promise
     expect(received).toEqual(['first:one', 'second:one', 'second:two'])
     expect(second.state()).toBe('ready')
@@ -1902,7 +1918,7 @@ describe('room binary protocol validation', () => {
 })
 describe('memory Backend SPI contract', () => {
   it('covers head/cell/lane/directory/drop postconditions through the supervised consumer', async () => {
-    const backend = getBackend()
+    const backend = getRoomBackend()
     const created = await backend.compareExchangeHead(
       'spi',
       { expect: 'absent' },
@@ -1988,8 +2004,8 @@ describe('memory Backend SPI contract', () => {
     await disposeBackend()
     let now = 1
     driver = new MemoryBackend({ state: memoryState, authorityNow: () => now })
-    setDefaultBackend(() => driver)
-    const backend = getBackend()
+    setDefaultBackend(() => memoryPair(driver))
+    const backend = getRoomBackend()
     const created = await backend.compareExchangeHead(
       'order-survivor',
       { expect: 'absent' },
@@ -2068,7 +2084,7 @@ describe('memory Backend SPI contract', () => {
     expect((failure as Error).message).toContain('not a legal head transition')
   })
   it('validates HeadNext shape before delegating to any raw driver', async () => {
-    const backend = getBackend()
+    const backend = getRoomBackend()
     const opened = await backend.compareExchangeHead(
       'head-shape',
       { expect: 'absent' },
@@ -2112,8 +2128,11 @@ describe('memory Backend SPI contract', () => {
     await disposeBackend()
     const raw = new MemoryBackend()
     const dispose = vi.spyOn(raw, 'dispose')
-    const first = setDefaultBackend(() => raw, {})
-    const second = setDefaultBackend(() => raw, {})
+    const selected = memoryPair(raw)
+    setDefaultBackend(() => selected, {})
+    const first = getRoomBackend()
+    setDefaultBackend(() => selected, {})
+    const second = getRoomBackend()
     await expect(first.readHead('same-driver')).resolves.toBe(null)
     expect(second).toBe(first)
     expect(dispose).not.toHaveBeenCalled()
@@ -2724,14 +2743,14 @@ function deferred<T>() {
 function mockLaneSubscription(
   kind: LaneId['kind'],
   replacement: (
-    subscribeLane: ReturnType<typeof getBackend>['subscribeLane'],
+    subscribeLane: ReturnType<typeof getRoomBackend>['subscribeLane'],
     roomId: string,
     inc: string,
     lane: LaneId,
     receiver: BackendReceiver,
   ) => BackendSubscription,
 ) {
-  const backend = getBackend()
+  const backend = getRoomBackend()
   const subscribeLane = backend.subscribeLane.bind(backend)
   vi.spyOn(backend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) =>
     lane.kind === kind
@@ -2751,7 +2770,7 @@ function rejectLaneSubscriptions(kind: LaneId['kind'], diagnostic: string) {
   return { backend, started: started.promise }
 }
 function delayLaneSubscription(matches: (lane: LaneId) => boolean) {
-  const backend = getBackend()
+  const backend = getRoomBackend()
   const subscribeLane = backend.subscribeLane.bind(backend)
   const started = deferred<void>()
   let release!: () => Promise<void>

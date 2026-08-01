@@ -20,9 +20,9 @@ installRedis(redis)
 
 That one `installRedis()` call configures Broadcast and Room from the same client. Never-resend options make a lost command reply reject rather than execute twice; `installBackend()` remains an advanced override.
 
-## Room backend
+## Room storage
 
-`RedisRoomBackend` accepts either an ioredis `Redis` or `Cluster` client. Cluster keeps each room's atomic records and generation manifest in one hash slot and follows `MOVED`/`ASK`; replica or custom routing is rejected because Room reads are strongly consistent. Head and cell expiry use keyed Lua `TIME` from the room-slot master.
+The installed backend accepts either an ioredis `Redis` or `Cluster` client. Cluster keeps each room's atomic records and generation manifest in one hash slot and follows `MOVED`/`ASK`; replica or custom routing is rejected because Room reads are strongly consistent. Head and cell expiry use keyed Lua `TIME` from the room-slot master.
 
 Redis Cluster delivery stays at-most-once during resharding. While a slot changes owner, an old-master frame can arrive after a newer frame or generation invalidation; Telefunc drops that late lower sequence (and ignores frames after invalidation).
 Callbacks never move backward, but the in-flight frame is lost rather than replayed; a frame arriving before invalidation may still be handed off after cleanup starts. Commands follow pre-execution `MOVED`/`ASK` replies but never resend after connection loss. Keep master clocks synchronized: expiries use the new owner's clock.
@@ -47,7 +47,7 @@ installRedis(redis)
 
 ### Sharing an existing client
 
-Pass an [`ioredis`](https://github.com/redis/ioredis) instance to share TLS/authentication settings. Keep the never-resend settings above; `RedisRoomBackend` rejects retry-capable clients:
+Pass an [`ioredis`](https://github.com/redis/ioredis) instance to share TLS/authentication settings. Keep the never-resend settings above; installation rejects retry-capable clients:
 
 ```ts
 import IORedis from 'ioredis'

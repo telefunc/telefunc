@@ -10,12 +10,7 @@
     "getContext", "getRawContext", "isShieldValidationError", "onBug", "provideTelefuncContext", "serve", "shield", "telefunc", "telefuncConfig"
   ],
   "telefunc/async_hooks": [],
-  "telefunc/backend": [
-    "BACKEND_SPI_VERSION", "BackendDriver", "BackendFactory", "BackendReceiver", "BackendSpi", "BackendSubscription", "BackendSubscriptionSource", "BroadcastLane",
-    "CellMutation", "CommitAccepted", "CommitResult", "CxResult", "HEAD_TRANSITIONS", "HeadCx", "HeadNext", "LaneId",
-    "ORDERING_FRAME_LAYOUT", "PublishResult", "RoomHead", "SubscriptionAttempt", "SubscriptionAttemptState", "SubscriptionBinding", "SubscriptionDriver", "SubscriptionState",
-    "disposeBackend", "getBackend", "installBackend", "laneKey"
-  ],
+  "telefunc/backend": ["HEAD_TRANSITIONS", "ORDERING_FRAME_LAYOUT", "disposeBackend", "laneKey"],
   "telefunc/client": [
     "Abort", "BinaryFrameInfo", "BinaryPublishOptions", "ChannelClosedError", "ChannelOverflowError", "ClientReplacerContext", "ClientReviverContext", "ConnectionError",
     "JoinOptions", "LeaveCause", "LocalParticipant", "NetworkError", "ParticipantMeta", "ParticipantSnapshotView", "PublishOptions", "RemoteParticipant",
@@ -35,5 +30,5 @@
   "telefunc/bun": ["Telefunc"],
   "telefunc/deno": ["Telefunc"],
   "telefunc/cloudflare": ["CloudflareOptions", "Telefunc"],
-  "@telefunc/redis": ["InstallRedisOptions", "RedisBroadcastOptions", "RedisRoomBackend", "RedisRoomBackendOptions", "RedisTransport", "installRedis"]
+  "@telefunc/redis": ["InstallRedisOptions", "RedisBroadcastOptions", "RedisTransport", "installRedis"]
 }

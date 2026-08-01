@@ -2,12 +2,13 @@ import { randomUUID } from 'node:crypto'
 import type { Redis } from 'ioredis'
 import type {
   BackendReceiver,
-  BackendSubscriptionSource,
+  BroadcastLane,
+  RoomSubscriptionSource,
   SubscriptionAttempt,
   SubscriptionAttemptState,
   SubscriptionBinding,
   SubscriptionDriver,
-} from 'telefunc/backend'
+} from 'telefunc/__internal'
 import {
   broadcastChannel,
   channelKey,
@@ -17,20 +18,20 @@ import {
   REDIS_DELIVERY_FENCE_BYTE,
 } from './layout.js'
 
-type RedisDurableSource = Extract<BackendSubscriptionSource, { kind: 'durable' }>
+type RedisSubscriptionSource = BroadcastLane | RoomSubscriptionSource
 
 type RedisSubscriptionDriverOptions = {
   prefix: string
   createSubscriber: () => Promise<Redis>
-  captureGeneration: (source: RedisDurableSource) => Promise<string | null>
-  validateGeneration: (source: RedisDurableSource, token: string) => Promise<boolean>
+  captureGeneration: (source: RoomSubscriptionSource) => Promise<string | null>
+  validateGeneration: (source: RoomSubscriptionSource, token: string) => Promise<boolean>
 }
 
 /**
  * Redis's only backend-specific subscription edge. General fan-out, refcounts, readiness generations,
  * attempt epochs, ownership checks, and terminal signalling live in core's supervised backend.
  */
-export class RedisSubscriptionDriver implements SubscriptionDriver<BackendSubscriptionSource> {
+export class RedisSubscriptionDriver implements SubscriptionDriver<RedisSubscriptionSource> {
   private readonly _prefix: string
   private readonly _createSubscriber: () => Promise<Redis>
   private readonly _captureGeneration: RedisSubscriptionDriverOptions['captureGeneration']
@@ -44,7 +45,7 @@ export class RedisSubscriptionDriver implements SubscriptionDriver<BackendSubscr
     this._validateGeneration = options.validateGeneration
   }
 
-  bind(source: BackendSubscriptionSource): SubscriptionBinding {
+  bind(source: RedisSubscriptionSource): SubscriptionBinding {
     return {
       partition: '',
       valid: () => true,
@@ -53,7 +54,7 @@ export class RedisSubscriptionDriver implements SubscriptionDriver<BackendSubscr
   }
 
   private _open(
-    source: BackendSubscriptionSource,
+    source: RedisSubscriptionSource,
     receiver: BackendReceiver,
     localReceiverCount: () => number,
   ): SubscriptionAttempt {
@@ -79,7 +80,7 @@ export class RedisSubscriptionDriver implements SubscriptionDriver<BackendSubscr
     return attempt
   }
 
-  prepareFlush(source: BackendSubscriptionSource): { token: string; delivery: Promise<void>; cancel(): void } {
+  prepareFlush(source: RoomSubscriptionSource): { token: string; delivery: Promise<void>; cancel(): void } {
     const token = randomUUID()
     const attempts = [...(this._attempts.get(redisSubscriptionChannel(this._prefix, source)) ?? [])]
     const armed = attempts.flatMap((attempt) => {
@@ -97,7 +98,7 @@ export class RedisSubscriptionDriver implements SubscriptionDriver<BackendSubscr
 }
 
 type RedisSubscriptionAttemptOptions = RedisSubscriptionDriverOptions & {
-  source: BackendSubscriptionSource
+  source: RedisSubscriptionSource
   receiver: BackendReceiver
   localReceiverCount: () => number
   onDisposed: () => void
@@ -106,7 +107,7 @@ type RedisSubscriptionAttemptOptions = RedisSubscriptionDriverOptions & {
 class RedisSubscriptionAttempt implements SubscriptionAttempt {
   readonly ready: Promise<void>
   private readonly _prefix: string
-  private readonly _source: BackendSubscriptionSource
+  private readonly _source: RedisSubscriptionSource
   private readonly _receiver: BackendReceiver
   private readonly _localReceiverCount: () => number
   private readonly _createSubscriber: () => Promise<Redis>
@@ -177,7 +178,7 @@ class RedisSubscriptionAttempt implements SubscriptionAttempt {
 
   private async _establish(): Promise<void> {
     try {
-      if (this._source.kind === 'durable') {
+      if ('roomId' in this._source) {
         this._generationToken = await this._captureGeneration(this._source)
         if (this._generationToken === null) {
           this._terminate(new Error(`subscribeLane: generation '${this._source.roomId}/${this._source.inc}' is absent`))
@@ -204,7 +205,7 @@ class RedisSubscriptionAttempt implements SubscriptionAttempt {
       if (this._isStopped() || this._subscriber !== subscriber) return
 
       if (
-        this._source.kind === 'durable' &&
+        'roomId' in this._source &&
         (this._generationToken === null || !(await this._validateGeneration(this._source, this._generationToken)))
       ) {
         this._terminate(
@@ -252,7 +253,7 @@ class RedisSubscriptionAttempt implements SubscriptionAttempt {
 
   private readonly _onMessage = (channelBytes: Buffer, frame: Buffer): void => {
     const channel = channelBytes.toString()
-    if (this._source.kind === 'durable' && channel === redisInvalidationChannel(this._prefix, this._source)) {
+    if ('roomId' in this._source && channel === redisInvalidationChannel(this._prefix, this._source)) {
       if (this._generationToken === null || frame.toString() === this._generationToken) {
         this._terminate(new Error('Redis generation subscription was invalidated'))
       }
@@ -333,18 +334,16 @@ class RedisSubscriptionAttempt implements SubscriptionAttempt {
   }
 }
 
-function redisSubscriptionChannels(prefix: string, source: BackendSubscriptionSource): string[] {
+function redisSubscriptionChannels(prefix: string, source: RedisSubscriptionSource): string[] {
   const channel = redisSubscriptionChannel(prefix, source)
-  return source.kind === 'durable' ? [channel, redisInvalidationChannel(prefix, source)] : [channel]
+  return 'roomId' in source ? [channel, redisInvalidationChannel(prefix, source)] : [channel]
 }
 
-function redisSubscriptionChannel(prefix: string, source: BackendSubscriptionSource): string {
-  if (source.kind === 'broadcast') {
-    return broadcastChannel(prefix, source.lane)
-  }
+function redisSubscriptionChannel(prefix: string, source: RedisSubscriptionSource): string {
+  if (!('roomId' in source)) return broadcastChannel(prefix, source)
   return channelKey(prefix, source.roomId, source.inc, laneKey(source.lane))
 }
 
-function redisInvalidationChannel(prefix: string, source: RedisDurableSource): string {
+function redisInvalidationChannel(prefix: string, source: RoomSubscriptionSource): string {
   return generationInvalidationChannel(prefix, source.roomId, source.inc)
 }

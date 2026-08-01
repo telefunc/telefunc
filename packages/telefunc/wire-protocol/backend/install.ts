@@ -1,17 +1,26 @@
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
-import { MemoryBackend } from './memory/backend.js'
-import { BACKEND_SPI_VERSION, type BackendDriver, type BackendSpi } from './spi.js'
-import { superviseBackend } from './supervised-backend.js'
+import type { BroadcastBackend, BroadcastDriver } from './broadcast/contract.js'
+import { superviseBroadcastDriver } from './broadcast/supervise.js'
+import { BACKEND_SPI_VERSION, type BackendDriverPair } from './driver-pair.js'
+import { createMemoryBackendPair } from './memory/backend.js'
+import type { RoomBackend, RoomDriver } from './room/contract.js'
+import { superviseRoomDriver } from './room/supervise.js'
 
-export type BackendFactory = () => BackendDriver
+export type BackendFactory = () => BackendDriverPair
+
+type ManagedBackendPair = {
+  readonly broadcast: BroadcastBackend
+  readonly room: RoomBackend
+  dispose(): Promise<void>
+}
 
 type BackendState =
   | { phase: 'empty' }
   | { phase: 'installing' }
   | {
       phase: 'ready'
-      driver: BackendDriver
-      backend: BackendSpi
+      pair: BackendDriverPair
+      backend: ManagedBackendPair
       selection: 'memory' | 'default' | 'explicit'
       defaultIdentity?: unknown
     }
@@ -26,53 +35,51 @@ const INSTALLING_ERROR = 'telefunc/backend: the backend is still installing; ret
 const DISPOSING_ERROR = 'telefunc/backend: the backend is still disposing and cannot be acquired or installed yet'
 
 /** Lazily installs one backend per isolate; repeated entry evaluation reuses the canonical instance. */
-export function installBackend(factory: BackendFactory): BackendSpi {
-  const current = state.current
-  if (current.phase === 'ready' && current.selection === 'explicit') return current.backend
-  return selectBackend(factory, 'explicit')
+export function installBackend(factory: BackendFactory): void {
+  if (state.current.phase === 'ready' && state.current.selection === 'explicit') return
+  selectBackend(factory, 'explicit')
 }
 
 /** Installs an environment default above memory but below explicit selection. `identity` deduplicates
  * repeated wrapper evaluation without constructing a candidate. */
-export function setDefaultBackend(factory: BackendFactory, identity: unknown = factory): BackendSpi {
+export function setDefaultBackend(factory: BackendFactory, identity: unknown = factory): void {
   const current = state.current
-  if (current.phase === 'ready' && current.selection === 'explicit') return current.backend
-  if (current.phase === 'ready' && current.selection === 'default' && Object.is(current.defaultIdentity, identity)) {
-    return current.backend
-  }
-  return selectBackend(factory, 'default', identity)
+  if (current.phase === 'ready' && current.selection === 'explicit') return
+  if (current.phase === 'ready' && current.selection === 'default' && Object.is(current.defaultIdentity, identity))
+    return
+  selectBackend(factory, 'default', identity)
 }
 
 function selectBackend(
   factory: BackendFactory,
   selection: 'memory' | 'default' | 'explicit',
   defaultIdentity?: unknown,
-): BackendSpi {
+): ManagedBackendPair {
   const current = state.current
   if (current.phase === 'installing') throw new Error(INSTALLING_ERROR)
   if (current.phase === 'disposing') throw new Error(DISPOSING_ERROR)
   if (typeof factory !== 'function') throw new Error('telefunc/backend: installBackend() requires a backend factory')
 
   state.current = { phase: 'installing' }
-  let driver: BackendDriver
+  let pair: BackendDriverPair
   try {
-    driver = factory()
-    assertBackendDriver(driver)
+    pair = factory()
+    assertBackendDriverPair(pair)
   } catch (error) {
     state.current = current.phase === 'ready' ? current : { phase: 'empty' }
     throw error
   }
 
-  if (current.phase === 'ready' && Object.is(driver, current.driver)) {
+  if (current.phase === 'ready' && Object.is(pair, current.pair)) {
     state.current = { ...current, selection, ...(selection === 'default' ? { defaultIdentity } : {}) }
     return current.backend
   }
 
   if (current.phase === 'ready') retireBackend(current.backend)
-  const backend = superviseBackend(driver)
+  const backend = superviseBackendPair(pair)
   state.current = {
     phase: 'ready',
-    driver,
+    pair,
     backend,
     selection,
     ...(selection === 'default' ? { defaultIdentity } : {}),
@@ -80,11 +87,18 @@ function selectBackend(
   return backend
 }
 
-/** Returns the current generation. Callers must reacquire after the disposal barrier settles. */
-export function getBackend(): BackendSpi {
+export function getBroadcastBackend(): BroadcastBackend {
+  return getBackendPair().broadcast
+}
+
+export function getRoomBackend(): RoomBackend {
+  return getBackendPair().room
+}
+
+function getBackendPair(): ManagedBackendPair {
   const current = state.current
   if (current.phase === 'ready') return current.backend
-  return selectBackend(() => new MemoryBackend(), 'memory')
+  return selectBackend(createMemoryBackendPair, 'memory')
 }
 
 /** Disposes the canonical backend behind one shared promise, blocking acquisition until settlement. */
@@ -104,8 +118,18 @@ export function disposeBackend(): Promise<void> {
   return promise
 }
 
-function retireBackend(backend: BackendSpi): void {
-  // Replacement cleanup may overlap but remains observable through the next disposal barrier.
+function superviseBackendPair(pair: BackendDriverPair): ManagedBackendPair {
+  const broadcast = superviseBroadcastDriver(pair.broadcast)
+  const room = superviseRoomDriver(pair.room)
+  let disposal: Promise<void> | undefined
+  return {
+    broadcast,
+    room,
+    dispose: () => (disposal ??= Promise.all([broadcast.dispose(), room.dispose()]).then(() => pair.dispose())),
+  }
+}
+
+function retireBackend(backend: ManagedBackendPair): void {
   const disposal = Promise.resolve().then(() => backend.dispose())
   retiredDisposals.add(disposal)
   void disposal.then(
@@ -129,8 +153,7 @@ function clearDisposalPhase(disposal: Extract<BackendState, { phase: 'disposing'
   if (state.current === disposal) state.current = { phase: 'empty' }
 }
 
-const REQUIRED_METHODS = [
-  'publish',
+const ROOM_METHODS = [
   'readHead',
   'compareExchangeHead',
   'readCells',
@@ -143,27 +166,34 @@ const REQUIRED_METHODS = [
   'directoryPut',
   'directoryDelete',
   'directoryList',
-  'dispose',
 ] as const
 
-function assertBackendDriver(backend: BackendDriver): void {
-  if (backend === null || typeof backend !== 'object') {
-    throw new Error('telefunc/backend: invalid backend; expected an object')
-  }
-  if (backend.spiVersion !== BACKEND_SPI_VERSION) {
+function assertBackendDriverPair(pair: BackendDriverPair): void {
+  if (pair === null || typeof pair !== 'object')
+    throw new Error('telefunc/backend: invalid backend pair; expected an object')
+  if (pair.spiVersion !== BACKEND_SPI_VERSION) {
     throw new Error(
-      `telefunc/backend: incompatible backend spiVersion ${String(backend.spiVersion)}; expected ${BACKEND_SPI_VERSION}`,
+      `telefunc/backend: incompatible backend spiVersion ${String(pair.spiVersion)}; expected ${BACKEND_SPI_VERSION}`,
     )
   }
-  for (const method of REQUIRED_METHODS) assertMethod(backend, method)
-  if (backend.subscriptions === null || typeof backend.subscriptions !== 'object') {
-    throw new Error('telefunc/backend: invalid backend subscriptions; expected an object')
-  }
-  assertMethod(backend.subscriptions, 'bind')
+  assertDriver(pair.broadcast, 'broadcast', ['publish'])
+  assertDriver(pair.room, 'room', ROOM_METHODS)
+  assertMethod(pair, 'dispose')
 }
 
-function assertMethod(backend: object, method: string): void {
-  if (typeof (backend as unknown as Record<string, unknown>)[method] !== 'function') {
+function assertDriver(driver: BroadcastDriver | RoomDriver, plane: string, methods: readonly string[]): void {
+  if (driver === null || typeof driver !== 'object') {
+    throw new Error(`telefunc/backend: invalid ${plane} driver; expected an object`)
+  }
+  for (const method of methods) assertMethod(driver, method)
+  if (driver.subscriptions === null || typeof driver.subscriptions !== 'object') {
+    throw new Error(`telefunc/backend: invalid ${plane} subscriptions; expected an object`)
+  }
+  assertMethod(driver.subscriptions, 'bind')
+}
+
+function assertMethod(owner: object, method: string): void {
+  if (typeof (owner as unknown as Record<string, unknown>)[method] !== 'function') {
     throw new Error(`telefunc/backend: invalid backend; missing required method "${method}"`)
   }
 }

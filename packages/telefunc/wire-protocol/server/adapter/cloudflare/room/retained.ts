@@ -1,7 +1,7 @@
 /// <reference types="@cloudflare/workers-types" />
 // Retained payloads are internally chunked to 1.5 MB rows below workerd's 2 MB cap.
 
-import type { LaneId } from '../../../../backend/spi.js'
+import type { LaneId } from '../../../../backend/room/contract.js'
 import { laneKey, type LaneParts, laneToParts, partsToLane } from './codec.js'
 import { toBytes, type OrderMark } from './storage.js'
 

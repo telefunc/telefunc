@@ -1,17 +1,31 @@
-export { installRedis, RedisRoomBackend, RedisTransport }
+export { installRedis, RedisTransport }
 export type { InstallRedisOptions, RedisBroadcastOptions }
-export type { RedisRoomBackendOptions } from './room/backend.js'
 
 import type { Cluster, Redis } from 'ioredis'
-import { setDefaultBackend, superviseBackend } from 'telefunc/__internal'
-import { RedisRoomBackend, type RedisRoomBackendOptions } from './room/backend.js'
+import {
+  BACKEND_SPI_VERSION,
+  setDefaultBackend,
+  superviseBroadcastDriver,
+  type BackendDriverPair,
+} from 'telefunc/__internal'
+import { RedisBackend, type RedisBackendOptions } from './room/backend.js'
 
 /** Installs Redis as Telefunc's complete backend: generic Broadcast plus durable Room state. */
-function installRedis(redis: Redis | Cluster, options: InstallRedisOptions = {}) {
-  return setDefaultBackend(
-    () => new RedisRoomBackend({ redis, prefix: options.prefix }),
+function installRedis(redis: Redis | Cluster, options: InstallRedisOptions = {}): void {
+  setDefaultBackend(
+    () => createRedisBackendPair({ redis, prefix: options.prefix }),
     redisBackendDefaultIdentity(redis, options.prefix),
   )
+}
+
+function createRedisBackendPair(options: RedisBackendOptions): BackendDriverPair {
+  const driver = new RedisBackend(options)
+  return {
+    spiVersion: BACKEND_SPI_VERSION,
+    broadcast: driver,
+    room: driver,
+    dispose: () => driver.dispose(),
+  }
 }
 
 const REDIS_BACKEND_DEFAULT_IDENTITIES = Symbol.for('telefunc.redis.backendDefaultIdentities')
@@ -43,14 +57,15 @@ type InstallRedisOptions = {
   prefix?: string
 }
 
-type RedisBroadcastOptions = RedisRoomBackendOptions
+type RedisBroadcastOptions = RedisBackendOptions
 
 /** Released legacy transport wrapper; new applications should use installRedis(). */
 class RedisTransport {
   private readonly _backend
 
   constructor(options: RedisBroadcastOptions) {
-    this._backend = superviseBackend(new RedisRoomBackend(options))
+    const driver = new RedisBackend(options)
+    this._backend = superviseBroadcastDriver(driver, () => driver.dispose())
   }
 
   async send(key: string, payload: string): Promise<{ seq: number; timestamp: number }> {

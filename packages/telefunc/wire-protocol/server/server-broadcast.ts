@@ -12,8 +12,9 @@ import type {
 import type { TELEFUNC_SHIELDS } from '../../node/shared/transformer/generateShield/shield-key.js'
 import { invokeChannelListener, makePublishInfo } from '../channel.js'
 import { ServerChannel } from './channel.js'
-import { getBackend } from '../backend/install.js'
-import type { BackendSpi, BackendSubscription, PublishResult } from '../backend/spi.js'
+import type { BroadcastBackend, PublishResult } from '../backend/broadcast/contract.js'
+import { getBroadcastBackend } from '../backend/install.js'
+import type { BackendSubscription } from '../backend/subscription.js'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { parse } from '@brillout/json-serializer/parse'
 import { assert, assertUsage } from '../../utils/assert.js'
@@ -47,7 +48,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
 
   private _broadcastListeners: Array<BroadcastListener<T>> = []
   private _broadcastBinaryListeners: Array<BroadcastBinaryListener> = []
-  private _backend: BackendSpi | null = null
+  private _backend: BroadcastBackend | null = null
   private readonly _subscriptions: Record<BroadcastKind, BackendSubscription | null> = { text: null, binary: null }
   private readonly _peerSubscriptions: Record<BroadcastKind, boolean> = { text: false, binary: false }
 
@@ -187,7 +188,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
   private _ensureBroadcast(): void {
     if (this._isClosed) throw new ChannelClosedError()
     if (this._backend) return
-    this._backend = getBackend()
+    this._backend = getBroadcastBackend()
   }
 
   private _subscribe<Listener>(kind: BroadcastKind, listeners: Listener[], callback: Listener): BroadcastUnsubscribe {
@@ -300,13 +301,13 @@ const BroadcastChannel = ServerBroadcast as {
 
 const Broadcast = {
   publish<U = unknown>(key: string, data: ChannelData<U>): PublishResult | Promise<PublishResult> {
-    const backend = getBackend()
+    const backend = getBroadcastBackend()
     const serialized = stringify(data)
     const lane = { key, kind: 'text' } as const
     return backend.publish(lane, textEncoder.encode(serialized))
   },
   subscribe<U = unknown>(key: string, callback: BroadcastListener<U>): BroadcastUnsubscribe {
-    const backend = getBackend()
+    const backend = getBroadcastBackend()
     const lane = { key, kind: 'text' } as const
     const subscription = backend.subscribe(lane, (payload, info) => {
       const data = parse(textDecoder.decode(payload)) as ChannelData<U>
@@ -318,12 +319,12 @@ const Broadcast = {
     }
   },
   publishBinary(key: string, data: Uint8Array): PublishResult | Promise<PublishResult> {
-    const backend = getBackend()
+    const backend = getBroadcastBackend()
     const lane = { key, kind: 'binary' } as const
     return backend.publish(lane, data)
   },
   subscribeBinary(key: string, callback: BroadcastBinaryListener): BroadcastUnsubscribe {
-    const backend = getBackend()
+    const backend = getBroadcastBackend()
     const lane = { key, kind: 'binary' } as const
     const subscription = backend.subscribe(lane, (data, info) => {
       const publishInfo = makePublishInfo(key, info.seq, info.timestamp)

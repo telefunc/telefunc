@@ -1,4 +1,8 @@
-import type { BackendReceiver, SubscriptionAttempt, SubscriptionAttemptState } from '../../../../backend/spi.js'
+import type {
+  BackendReceiver,
+  SubscriptionAttempt,
+  SubscriptionAttemptState,
+} from '../../../../backend/subscription.js'
 import { ROUTE_RENEW_EVERY_MS } from './routes.js'
 import type { CloudflareRoomAuthorityStub, RoomShardInvalidationRequest } from './backend.js'
 

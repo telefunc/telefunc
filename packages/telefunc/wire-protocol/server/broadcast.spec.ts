@@ -3,18 +3,25 @@ import { Broadcast, ServerBroadcast } from './server-broadcast.js'
 import { ReplayBuffer } from '../replay-buffer.js'
 import { ACK_STATUS, TAG, decode } from '../shared-ws.js'
 import { IndexedPeer } from './IndexedPeer.js'
-import { disposeBackend, getBackend, installBackend } from '../backend/install.js'
+import { disposeBackend, installBackend } from '../backend/install.js'
+import { BACKEND_SPI_VERSION, type BackendDriverPair } from '../backend/driver-pair.js'
 import { MemoryBackend, MemoryBackendState } from '../backend/memory/backend.js'
-import type { SubscriptionAttempt, SubscriptionAttemptState } from '../backend/spi.js'
+import type { SubscriptionAttempt, SubscriptionAttemptState } from '../backend/subscription.js'
 import { ChannelClosedError, ChannelOverflowError } from '../channel-errors.js'
 import { CHANNEL_BUFFER_LIMIT_BYTES } from '../constants.js'
 import { Abort } from '../../shared/Abort.js'
 
 let memoryState: MemoryBackendState
+const memoryPair = (driver: MemoryBackend): BackendDriverPair => ({
+  spiVersion: BACKEND_SPI_VERSION,
+  broadcast: driver,
+  room: driver,
+  dispose: () => driver.dispose(),
+})
 beforeEach(async () => {
   await disposeBackend()
   memoryState = new MemoryBackendState()
-  installBackend(() => new MemoryBackend({ state: memoryState }))
+  installBackend(() => memoryPair(new MemoryBackend({ state: memoryState })))
 })
 afterEach(async () => {
   await disposeBackend()
@@ -70,7 +77,7 @@ async function installPendingSubscriptionBackend(result: { seq: number; timestam
   const bind = driver.subscriptions.bind.bind(driver.subscriptions)
   driver.subscriptions.bind = (source) => ({ ...bind(source), open: () => controlled.subscription })
   const publish = vi.spyOn(driver, 'publish').mockReturnValue(result)
-  installBackend(() => driver)
+  installBackend(() => memoryPair(driver))
   return { controlled, publish }
 }
 

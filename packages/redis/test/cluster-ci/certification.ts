@@ -1,8 +1,10 @@
 import { readFileSync } from 'node:fs'
 import { Cluster, Redis } from 'ioredis'
-import type { BackendSpi, CommitAccepted, LaneId, RoomHead, SubscriptionState } from 'telefunc/backend'
+import type { CommitAccepted, LaneId, RoomHead, SubscriptionState } from 'telefunc/__internal'
 import { afterAll, afterEach, beforeAll, describe, expect, it, onTestFinished, vi } from 'vitest'
-import { installRedis, RedisRoomBackend } from '../../src/index.js'
+import { installRedis } from '../../src/index.js'
+import { RedisBackend } from '../../src/room/backend.js'
+import { disposeBackend, getBroadcastBackend, getRoomBackend } from '../../../telefunc/wire-protocol/backend/install.js'
 import {
   broadcastSequenceKey,
   channelKey,
@@ -20,8 +22,10 @@ type Master = RedisClusterNode & { id: string; ranges: Array<[number, number]>; 
 type CommandCall = { name: string; keyCount: number; args: unknown[] }
 type CommandDefinition = { name: string; lua: string; numberOfKeys: number | null }
 type CommandOptions = { lua: string; numberOfKeys?: number }
-type Subscription = ReturnType<BackendSpi['subscribeLane']>
-type LaneReceiver = Parameters<BackendSpi['subscribeLane']>[3]
+type ManagedBackend = Omit<ReturnType<typeof getBroadcastBackend>, 'dispose'> &
+  Omit<ReturnType<typeof getRoomBackend>, 'dispose'>
+type Subscription = ReturnType<ManagedBackend['subscribeLane']>
+type LaneReceiver = Parameters<ManagedBackend['subscribeLane']>[3]
 const rawNodes = process.env.REDIS_CLUSTER_NODES
 if (!rawNodes) throw new Error('Redis Cluster CI certification requires REDIS_CLUSTER_NODES')
 const CLUSTER_NODES = rawNodes.split(',').map((entry): RedisClusterNode => {
@@ -52,15 +56,15 @@ describe('Redis real three-master Cluster CI certification', () => {
     const manifest = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')) as {
       peerDependencies: { telefunc: string }
     }
-    expect(manifest.peerDependencies.telefunc).toBe('>=0.2.23')
+    expect(manifest.peerDependencies.telefunc).toBe('0.2.23')
     const scaleReads = cluster.options.scaleReads
     const retryDelayOnFailover = cluster.options.retryDelayOnFailover
     try {
       cluster.options.scaleReads = 'slave'
-      expect(() => new RedisRoomBackend({ redis: cluster, prefix: 'rejected:' })).toThrow(/scaleReads.*master/i)
+      expect(() => new RedisBackend({ redis: cluster, prefix: 'rejected:' })).toThrow(/scaleReads.*master/i)
       cluster.options.scaleReads = scaleReads
       cluster.options.retryDelayOnFailover = 100
-      expect(() => new RedisRoomBackend({ redis: cluster, prefix: 'unsafe-cluster:' })).toThrow(/at-most-once/i)
+      expect(() => new RedisBackend({ redis: cluster, prefix: 'unsafe-cluster:' })).toThrow(/at-most-once/i)
     } finally {
       cluster.options.scaleReads = scaleReads
       cluster.options.retryDelayOnFailover = retryDelayOnFailover
@@ -68,7 +72,7 @@ describe('Redis real three-master Cluster CI certification', () => {
     const prefix = uniquePrefix('reply-loss')
     const backend = ownRoomBackend(cluster, prefix)
     for (const unsafePrefix of ['x{}', 'x{', '{global}']) {
-      expect(() => new RedisRoomBackend({ redis: cluster, prefix: unsafePrefix })).toThrow(/prefix/i)
+      expect(() => new RedisBackend({ redis: cluster, prefix: unsafePrefix })).toThrow(/prefix/i)
     }
     await expect(backend.publish({ key: '}edge', kind: 'text' }, bytes('unsafe'))).rejects.toThrow(/Broadcast key/)
     const commands = cluster as unknown as Record<string, (...args: unknown[]) => Promise<unknown>>
@@ -80,7 +84,7 @@ describe('Redis real three-master Cluster CI certification', () => {
     })
     await expect(backend.publish({ key: 'once', kind: 'text' }, bytes('once'))).rejects.toThrow()
     expect(await cluster.get(broadcastSequenceKey(prefix, 'once'))).toBe('1')
-    expect(() => new RedisRoomBackend({ redis: masters[0].client })).toThrow(/at-most-once/i)
+    expect(() => new RedisBackend({ redis: masters[0].client })).toThrow(/at-most-once/i)
   })
   it('covers shipped command KEYS and terminates live and in-flight attempts when their generation drops', async () => {
     expect(masters).toHaveLength(3)
@@ -490,7 +494,7 @@ describe('Redis real three-master Cluster CI certification', () => {
   it('omits unknowable receiver counts and shares empty-key text/binary ordering across nodes', async () => {
     const prefix = uniquePrefix('receivers')
     const backend = ownBackend(cluster, prefix)
-    // RedisRoomBackend sorts master endpoints before round-robin subscriber selection. Mirror that
+    // RedisBackend sorts master endpoints before round-robin subscriber selection. Mirror that
     // order, but identify masters by Cluster node ID: Compose nodes all listen on port 6379.
     const subscriberOrder = [...masters].sort((left, right) =>
       `${left.host}:${left.port}`.localeCompare(`${right.host}:${right.port}`),
@@ -539,10 +543,13 @@ describe('Redis real three-master Cluster CI certification', () => {
     onTestFinished(async () => void (await dispose(value)))
     return value
   }
-  const ownBackend = (redis: Redis | Cluster, prefix: string): BackendSpi =>
-    own(installRedis(redis, { prefix }), (backend) => backend.dispose())
-  function ownRoomBackend(redis: Redis | Cluster, prefix: string): RedisRoomBackend {
-    return own(new RedisRoomBackend({ redis, prefix }), (backend) => backend.dispose())
+  const ownBackend = (redis: Redis | Cluster, prefix: string): ManagedBackend => {
+    installRedis(redis, { prefix })
+    onTestFinished(() => disposeBackend())
+    return { ...getBroadcastBackend(), ...getRoomBackend() }
+  }
+  function ownRoomBackend(redis: Redis | Cluster, prefix: string): RedisBackend {
+    return own(new RedisBackend({ redis, prefix }), (backend) => backend.dispose())
   }
   const ownCluster = (): Cluster =>
     own(clusterClient(CLUSTER_NODES), (client) => client.quit().catch(() => client.disconnect()))
@@ -550,7 +557,7 @@ describe('Redis real three-master Cluster CI certification', () => {
     return own(subscription, (current) => current.unsubscribe())
   }
   const room = (label: string) => ({ prefix: uniquePrefix(label), roomId: `${label}-room`, inc: `${label}-inc` })
-  function subscribe(backend: BackendSpi, roomId: string, inc: string, receiver: LaneReceiver): Subscription {
+  function subscribe(backend: ManagedBackend, roomId: string, inc: string, receiver: LaneReceiver): Subscription {
     return ownSubscription(backend.subscribeLane(roomId, inc, SEMANTIC_LANE, receiver))
   }
   function interceptSubscribers(redis: Cluster, onOpen: (subscriber: Redis) => void): void {
@@ -656,7 +663,11 @@ async function readMasters(nodes: RedisClusterNode[]): Promise<Master[]> {
     seed.disconnect()
   }
 }
-async function open(backend: Pick<BackendSpi, 'compareExchangeHead'>, roomId: string, inc: string): Promise<RoomHead> {
+async function open(
+  backend: Pick<ManagedBackend, 'compareExchangeHead'>,
+  roomId: string,
+  inc: string,
+): Promise<RoomHead> {
   const result = await backend.compareExchangeHead(
     roomId,
     { expect: 'absent' },
@@ -666,7 +677,7 @@ async function open(backend: Pick<BackendSpi, 'compareExchangeHead'>, roomId: st
   return result.head
 }
 async function close(
-  backend: Pick<BackendSpi, 'compareExchangeHead'>,
+  backend: Pick<ManagedBackend, 'compareExchangeHead'>,
   roomId: string,
   head: RoomHead,
 ): Promise<RoomHead> {
@@ -692,7 +703,7 @@ async function close(
   if (!('ok' in closed) || !('head' in closed)) throw new Error(`failed to finalize close for '${roomId}'`)
   return closed.head
 }
-function accepted(result: Awaited<ReturnType<BackendSpi['commitLane']>>): CommitAccepted {
+function accepted(result: Awaited<ReturnType<ManagedBackend['commitLane']>>): CommitAccepted {
   if (!('accepted' in result)) throw new Error('commit was unexpectedly stale')
   return result
 }

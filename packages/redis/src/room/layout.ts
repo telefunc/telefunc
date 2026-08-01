@@ -9,7 +9,8 @@
 // dir index: tf:{rid-dir}<prefix>…; the global directory's two keys are co-slotted.
 // Commands sample Redis TIME; tests may inject `now_ms`, production never uses caller time.
 
-import { HEAD_TRANSITIONS, ORDERING_FRAME_LAYOUT, laneKey, type BroadcastLane, type LaneId } from 'telefunc/backend'
+import { HEAD_TRANSITIONS, ORDERING_FRAME_LAYOUT, laneKey } from 'telefunc/backend'
+import type { BroadcastLane, LaneId } from 'telefunc/__internal'
 export { laneKey }
 
 export const DEFAULT_ROOM_PREFIX = 'tf:'

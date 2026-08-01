@@ -12,8 +12,8 @@ export {
 import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { assertUsage } from '../../../utils/assert.js'
-import { getBackend } from '../../backend/install.js'
-import type { CellMutation } from '../../backend/spi.js'
+import { getRoomBackend } from '../../backend/install.js'
+import type { CellMutation } from '../../backend/room/contract.js'
 import { ROOM_MEMBER_TTL_MS } from '../constants.js'
 import { uuidToBytes } from '../binary.js'
 import { RoomError } from '../errors.js'
@@ -46,7 +46,7 @@ async function readCellSet(
   inc: string,
   selector: CellSelector,
 ): Promise<{ revision: string; cells: Map<string, Uint8Array> }> {
-  const result = await getBackend().readCells(roomId, inc, selector)
+  const result = await getRoomBackend().readCells(roomId, inc, selector)
   if ('staleInc' in result) throw new RoomError(`Room is closed: ${roomId}`)
   return result
 }
@@ -62,7 +62,7 @@ async function mutateCells<T>(
   selector: CellSelector,
   plan: (cells: ReadonlyMap<string, Uint8Array>) => CellPlan<T>,
 ): Promise<T> {
-  const backend = getBackend()
+  const backend = getRoomBackend()
   for (let attempt = 0; attempt < ROOM_CX_ATTEMPTS; attempt++) {
     const read = await backend.readCells(roomId, inc, selector)
     if ('staleInc' in read) throw new RoomError(`Room is closed: ${roomId}`)
@@ -79,7 +79,7 @@ async function mutateCells<T>(
 
 async function requireRoom(id: string): Promise<{ config: RoomConfigRecord }> {
   assertRoomId(id)
-  const current = await getBackend().readHead(id)
+  const current = await getRoomBackend().readHead(id)
   if (current === null || current.head.state !== 'open' || current.head.currentInc === null) {
     throw new RoomError(`Room not found: ${id}`)
   }
@@ -192,7 +192,7 @@ async function resolveIdentityMembers(roomId: string, inc: string, identity: str
 }
 
 async function dropRetainedTextOwnedBy(roomId: string, inc: string, memberId: string): Promise<void> {
-  const backend = getBackend()
+  const backend = getRoomBackend()
   const retained = await backend.readRetained(roomId, inc, SEMANTIC_LANE)
   if (retained === null) return
   const envelope = parse(decodeRoomText(retained.payload)) as RoomDataEnvelope
@@ -201,7 +201,7 @@ async function dropRetainedTextOwnedBy(roomId: string, inc: string, memberId: st
 }
 
 async function dropRetainedOwnedBy(roomId: string, inc: string, memberId: string): Promise<void> {
-  const backend = getBackend()
+  const backend = getRoomBackend()
   for (const lane of await backend.listRetained(roomId, inc)) {
     if (lane.kind === 'binary' && lane.member === memberId) await backend.deleteRetained(roomId, inc, lane)
   }

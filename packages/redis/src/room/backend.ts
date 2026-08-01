@@ -3,8 +3,7 @@ import { Cluster, type Redis } from 'ioredis'
 import { assert } from '../assert.js'
 import { callDefinedCommand } from '../callDefinedCommand.js'
 import type {
-  BackendDriver,
-  BackendSubscriptionSource,
+  BroadcastDriver,
   BroadcastLane,
   CellMutation,
   CommitResult,
@@ -13,8 +12,10 @@ import type {
   HeadNext,
   LaneId,
   PublishResult,
+  RoomDriver,
   RoomHead,
-} from 'telefunc/backend'
+  RoomSubscriptionSource,
+} from 'telefunc/__internal'
 import {
   broadcastChannel,
   broadcastSequenceKey,
@@ -50,7 +51,7 @@ function assertOrderingPosition(seq: number, timestamp: number, context: string)
   }
 }
 
-export type RedisRoomBackendOptions = {
+export type RedisBackendOptions = {
   redis: Redis | Cluster
   prefix?: string
 }
@@ -128,8 +129,7 @@ function encodeNext(next: HeadNext): string {
   return JSON.stringify(payload)
 }
 
-export class RedisRoomBackend implements BackendDriver {
-  readonly spiVersion = 1 as const
+export class RedisBackend implements BroadcastDriver, RoomDriver {
   readonly subscriptions: RedisSubscriptionDriver
 
   private readonly _publisher: Redis | Cluster
@@ -137,9 +137,9 @@ export class RedisRoomBackend implements BackendDriver {
   private readonly _receivers: 'global' | 'none'
   private _disposed = false
 
-  constructor(options: RedisRoomBackendOptions) {
+  constructor(options: RedisBackendOptions) {
     if (options.redis instanceof Cluster && options.redis.options.scaleReads !== 'master') {
-      throw new Error("RedisRoomBackend: ioredis Cluster scaleReads must be 'master' for consistent Room reads")
+      throw new Error("RedisBackend: ioredis Cluster scaleReads must be 'master' for consistent Room reads")
     }
     const retries =
       options.redis instanceof Cluster
@@ -149,7 +149,7 @@ export class RedisRoomBackend implements BackendDriver {
         : options.redis.options.maxRetriesPerRequest !== 0 || options.redis.options.reconnectOnError != null
     if (retries)
       throw new Error(
-        'RedisRoomBackend: at-most-once requires maxRetriesPerRequest: 0 (standalone Redis), or retryDelayOnFailover: 0 and redisOptions.maxRetriesPerRequest: 0 (Cluster); reconnectOnError must be unset',
+        'RedisBackend: at-most-once requires maxRetriesPerRequest: 0 (standalone Redis), or retryDelayOnFailover: 0 and redisOptions.maxRetriesPerRequest: 0 (Cluster); reconnectOnError must be unset',
       )
     this._publisher = options.redis
     let clusterSubscriberSelection = 0
@@ -169,7 +169,7 @@ export class RedisRoomBackend implements BackendDriver {
               `${right.options.host ?? ''}:${right.options.port ?? ''}`,
             ),
           )
-        if (masters.length === 0) throw new Error('RedisRoomBackend: Cluster has no available masters')
+        if (masters.length === 0) throw new Error('RedisBackend: Cluster has no available masters')
         source = masters[clusterSubscriberSelection % masters.length] as Redis
         clusterSubscriberSelection++
       } else source = options.redis
@@ -209,7 +209,7 @@ export class RedisRoomBackend implements BackendDriver {
       typeof seq === 'number' && typeof timestamp === 'number' && typeof receivers === 'number',
       'Publish script returned non-numeric seq/ts/receivers',
     )
-    assertOrderingPosition(seq, timestamp, 'RedisRoomBackend.publish')
+    assertOrderingPosition(seq, timestamp, 'RedisBackend.publish')
     return {
       seq,
       timestamp,
@@ -327,7 +327,7 @@ export class RedisRoomBackend implements BackendDriver {
     opts?: { retain?: boolean; closingLease?: string; requiredCellKeys?: string[] },
   ): Promise<CommitResult> {
     this._assertLive()
-    const source = { kind: 'durable' as const, roomId, inc, lane }
+    const source = { roomId, inc, lane }
     const keys = REDIS_ROOM_COMMAND_KEYS.commit(this._prefix, roomId, inc, lane, opts?.requiredCellKeys)
     const flush = this.subscriptions.prepareFlush(source)
     let reply: string
@@ -354,7 +354,7 @@ export class RedisRoomBackend implements BackendDriver {
       flush.cancel()
       return { stale: true }
     }
-    assertOrderingPosition(parsed.seq, parsed.timestamp, 'RedisRoomBackend.commitLane')
+    assertOrderingPosition(parsed.seq, parsed.timestamp, 'RedisBackend.commitLane')
     // Data and fence leave the same slot owner in order, so observing the fence proves local dispatch.
     const delivery = flush.delivery
     // Observe rejection now so later-awaited delivery has no interim unhandledRejection.
@@ -412,14 +412,11 @@ export class RedisRoomBackend implements BackendDriver {
     ])
   }
 
-  private _captureGeneration(source: Extract<BackendSubscriptionSource, { kind: 'durable' }>): Promise<string | null> {
+  private _captureGeneration(source: RoomSubscriptionSource): Promise<string | null> {
     return this._publisher.hget(generationTokensKey(this._prefix, source.roomId), source.inc)
   }
 
-  private async _validateGeneration(
-    source: Extract<BackendSubscriptionSource, { kind: 'durable' }>,
-    token: string,
-  ): Promise<boolean> {
+  private async _validateGeneration(source: RoomSubscriptionSource, token: string): Promise<boolean> {
     return (
       (await this._call(REDIS_ROOM_COMMANDS.validateGeneration.name, [
         ...REDIS_ROOM_COMMAND_KEYS.validateGeneration(this._prefix, source.roomId),
@@ -503,7 +500,7 @@ export class RedisRoomBackend implements BackendDriver {
   }
 
   private _assertLive(): void {
-    if (this._disposed) throw new Error('RedisRoomBackend: used after dispose()')
+    if (this._disposed) throw new Error('RedisBackend: used after dispose()')
   }
 
   private _parseHead(raw: string | null): StoredHead | null {

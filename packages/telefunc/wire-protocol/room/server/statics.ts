@@ -5,8 +5,8 @@ import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { assert, assertUsage } from '../../../utils/assert.js'
 import { isObject } from '../../../utils/isObject.js'
-import { getBackend } from '../../backend/install.js'
-import type { BackendSpi, RoomHead } from '../../backend/spi.js'
+import { getRoomBackend } from '../../backend/install.js'
+import type { RoomBackend, RoomHead } from '../../backend/room/contract.js'
 import { RoomError } from '../errors.js'
 import { roomMemberKvKey } from '../keys.js'
 import { mergeAttributes, ownMetadata } from '../model.js'
@@ -133,14 +133,14 @@ function writerId(): string {
 }
 
 async function registerRoomIndex(id: string, inc: string): Promise<void> {
-  await getBackend().directoryPut(id, inc)
+  await getRoomBackend().directoryPut(id, inc)
 }
 
 type TryCreateRoomResult = { kind: 'created'; room: Room } | { kind: 'exists' } | { kind: 'closing' }
 
 async function tryCreateRoom(id: string, options: RoomOptions | undefined): Promise<TryCreateRoomResult> {
   const { meta } = normalizeOptions(options)
-  const backend = getBackend()
+  const backend = getRoomBackend()
   let current = await backend.readHead(id)
   if (current?.head.state === 'closing') {
     const closing = await acquireClosingLease(backend, id, current.head)
@@ -200,7 +200,7 @@ async function getOrCreateRoom(id: string, options?: RoomOptions): Promise<Room>
         await registerRoomIndex(id, room._inc)
         return room
       } catch (error) {
-        const current = await getBackend().readHead(id)
+        const current = await getRoomBackend().readHead(id)
         if (current?.head.state === 'open') throw error
       }
     }
@@ -257,7 +257,7 @@ async function listRooms(options?: { prefix?: string }): Promise<RoomInfo[]> {
       (isObject(options) && (options.prefix === undefined || typeof options.prefix === 'string')),
     'Room.list() options.prefix should be a string',
   )
-  const backend = getBackend()
+  const backend = getRoomBackend()
   const rooms: RoomInfo[] = []
   let cursor: string | undefined
   do {
@@ -298,7 +298,7 @@ async function writeRoomConfig(
   computeMeta: (current: RoomMeta) => RoomMeta,
 ): Promise<void> {
   const by = writerId()
-  const backend = getBackend()
+  const backend = getRoomBackend()
   for (let attempt = 0; attempt < ROOM_CX_ATTEMPTS; attempt++) {
     const current = await backend.readHead(id)
     if (current === null || current.head.state !== 'open' || current.head.currentInc !== config.inc) {
@@ -322,7 +322,7 @@ async function writeRoomConfig(
 
 async function closeRoom(id: string): Promise<void> {
   assertRoomId(id)
-  const backend = getBackend()
+  const backend = getRoomBackend()
   for (;;) {
     const current = await backend.readHead(id)
     if (current === null) return
@@ -336,7 +336,7 @@ async function closeRoom(id: string): Promise<void> {
   }
 }
 
-async function acquireClosingLease(backend: BackendSpi, roomId: string, current: RoomHead): Promise<RoomHead | null> {
+async function acquireClosingLease(backend: RoomBackend, roomId: string, current: RoomHead): Promise<RoomHead | null> {
   if (current.currentInc === null) return null
   const closeLease = { id: crypto.randomUUID(), durationMs: ROOM_CLOSE_LEASE_MS }
   const result = await backend.compareExchangeHead(
@@ -356,7 +356,7 @@ async function acquireClosingLease(backend: BackendSpi, roomId: string, current:
   return 'conflict' in result || !('head' in result) ? null : result.head
 }
 
-async function finishClose(backend: BackendSpi, roomId: string, closing: RoomHead): Promise<boolean> {
+async function finishClose(backend: RoomBackend, roomId: string, closing: RoomHead): Promise<boolean> {
   const inc = closing.currentInc
   const lease = closing.closeLease
   if (inc === null || lease === undefined) return false
@@ -383,7 +383,7 @@ async function finishClose(backend: BackendSpi, roomId: string, closing: RoomHea
   return true
 }
 
-async function cleanupFinalizedGeneration(backend: BackendSpi, roomId: string, closed: RoomHead): Promise<void> {
+async function cleanupFinalizedGeneration(backend: RoomBackend, roomId: string, closed: RoomHead): Promise<void> {
   const inc = configFromHead(closed).inc
   await backend.dropGeneration(roomId, inc)
   await backend.directoryDelete(roomId, inc)
@@ -474,7 +474,7 @@ async function sendServerDm(roomId: string, inc: string, memberId: string, data:
     { requiredCellKeys: [roomMemberKvKey(roomId, memberId)] },
   )
   if (committed !== null) return true
-  const current = await getBackend().readHead(roomId)
+  const current = await getRoomBackend().readHead(roomId)
   if (
     current?.head.state === 'open' &&
     current.head.currentInc === inc &&

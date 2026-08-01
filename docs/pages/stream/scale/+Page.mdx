@@ -69,21 +69,6 @@ In a single-instance setup, the default in-memory backend is enough. In a multi-
 
 > For Cloudflare Workers, Telefunc has an adapter that uses Durable Objects — see <Link href="/stream/cloudflare" />.
 
-### Custom backend
-
-Backend authors implement `BackendDriver` and install a factory from the `telefunc/backend` entry point:
-
-```ts ts-only
-import { installBackend, type BackendDriver } from 'telefunc/backend'
-
-const backend: BackendDriver = new MyBackend()
-installBackend(() => backend)
-```
-
-`BackendDriver` owns storage, ordering, delivery attempts, and one raw subscription driver. Telefunc wraps that raw subscription edge with local fan-out, reference counting, readiness generations, ownership checks, stale-attempt rejection, and cleanup. It doesn't retry a failed raw attempt: recovery policy belongs to the Room or other consumer that needs it. `BackendSpi` is the resulting supervised interface consumed by Telefunc core; backend authors don't implement it directly. Telefunc owns and disposes the driver returned by the factory.
-
-> On Cloudflare Workers, Telefunc installs its Durable Object backend automatically. See <Link href="/stream/cloudflare" />.
-
 ## Cloudflare
 
 [Cloudflare Workers](https://www.cloudflare.com/products/workers/) takes a different approach: `telefunc/cloudflare` routes channels through [Durable Objects](https://developers.cloudflare.com/durable-objects/) instead of sticky sessions, and fans out broadcasts across regions automatically. As a result, neither a sticky load balancer nor a separately installed backend is needed. See:

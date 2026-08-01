@@ -1,6 +1,6 @@
 // Pure, runtime-agnostic lane helpers shared by the Durable Object body and facade.
 
-import type { LaneId } from '../../../../backend/spi.js'
+import type { LaneId } from '../../../../backend/room/contract.js'
 
 // One collision-safe key indexes a lane's order, retained slot, routes, and delivery chain.
 export { laneKey } from '../../../../backend/room/lane-key.js'

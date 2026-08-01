@@ -16,8 +16,9 @@ import {
   ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS,
   ROOM_TAIL_ATTACH_TIMEOUT_MS,
 } from '../constants.js'
-import { getBackend } from '../../backend/install.js'
-import type { LaneId, BackendSubscription } from '../../backend/spi.js'
+import { getRoomBackend } from '../../backend/install.js'
+import type { LaneId } from '../../backend/room/contract.js'
+import type { BackendSubscription } from '../../backend/subscription.js'
 import { encodePublishBinary, encodePublishText, type WirePublishInfo } from '../../shared-ws.js'
 import {
   frameWithMemberId,
@@ -516,7 +517,7 @@ class ServerRoom extends RoomStateView implements Room {
   }
 
   private async _openConfig(): Promise<RoomConfigRecord | null> {
-    const current = await getBackend().readHead(this.id)
+    const current = await getRoomBackend().readHead(this.id)
     if (current === null || current.head.state !== 'open' || current.head.currentInc !== this._inc) return null
     return configFromHead(current.head)
   }
@@ -761,7 +762,7 @@ class ServerRoom extends RoomStateView implements Room {
       const attemptMs = ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS / (ROOM_REPLAN_LIMIT + 1)
       for (let attempt = 0; attempt <= ROOM_REPLAN_LIMIT && slot.wanted; attempt++) {
         try {
-          const current = await withinRoomHorizon(getBackend().readHead(this.id), deadline - Date.now())
+          const current = await withinRoomHorizon(getRoomBackend().readHead(this.id), deadline - Date.now())
           if (current === null || current.head.state !== 'open' || current.head.currentInc !== this._inc) {
             this._settleTerminalSubscription()
             return
@@ -797,7 +798,7 @@ class ServerRoom extends RoomStateView implements Room {
 
   private async _reconcileAuthority(): Promise<void> {
     if (this._state.closed) return
-    const current = await getBackend().readHead(this.id)
+    const current = await getRoomBackend().readHead(this.id)
     if (current === null || current.head.state !== 'open' || current.head.currentInc !== this._inc) {
       this._settleTerminalSubscription()
       return
@@ -969,13 +970,13 @@ class ServerRoom extends RoomStateView implements Room {
   ): Promise<void> {
     // Read retained only after subscription readiness: a racing commit is then retained or live, never lost in the gap.
     await withinRoomHorizon(this._textSub.ready, ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS)
-    const stored = await getBackend().readRetained(this.id, this._inc, SEMANTIC_LANE)
+    const stored = await getRoomBackend().readRetained(this.id, this._inc, SEMANTIC_LANE)
     if (stored === null) return
     const serialized = decodeRoomText(stored.payload)
     const info = { seq: stored.seq, timestamp: stored.timestamp }
     const envelope = parse(serialized) as RoomDataEnvelope
     if ((await readMembers(this.id, this._inc, [envelope.from])).length === 0) {
-      await getBackend().deleteRetained(this.id, this._inc, SEMANTIC_LANE, { ifSeq: stored.seq })
+      await getRoomBackend().deleteRetained(this.id, this._inc, SEMANTIC_LANE, { ifSeq: stored.seq })
       return
     }
     if (prevWantsText || prevMemberWants.has(envelope.from) || !stub._wantsTextFrom(envelope.from)) return
@@ -990,7 +991,7 @@ class ServerRoom extends RoomStateView implements Room {
     this._syncSubs()
     // Binary uses the same readiness handoff and stored receipt; its stub dedupes the live/retained race per lane.
     await this._binaryReady()
-    const backend = getBackend()
+    const backend = getRoomBackend()
     const lanes = (await backend.listRetained(this.id, this._inc)).filter(
       (lane): lane is Extract<LaneId, { kind: 'binary' }> => lane.kind === 'binary',
     )
@@ -1015,7 +1016,7 @@ class ServerRoom extends RoomStateView implements Room {
   }
 
   _syncSubs(): void {
-    const backend = getBackend()
+    const backend = getRoomBackend()
     const state = this._state
     const open = !state.closed
     const observed = this._stubs.size > 0 || this._localParticipants.size > 0 || state.listenerCount > 0

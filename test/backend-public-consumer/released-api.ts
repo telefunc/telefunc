@@ -26,43 +26,53 @@ import { DefaultBroadcastAdapter } from 'telefunc'
 import type { BroadcastAdapter } from 'telefunc'
 // @ts-expect-error the legacy broadcast transport type is not released
 import type { BroadcastTransport } from 'telefunc'
-import {
-  BACKEND_SPI_VERSION,
-  disposeBackend,
-  getBackend,
-  HEAD_TRANSITIONS,
-  installBackend,
-  ORDERING_FRAME_LAYOUT,
-  type BackendDriver,
-  type BackendFactory,
-  type BackendReceiver,
-  type BackendSpi,
-  type BackendSubscription,
-  type BackendSubscriptionSource,
-  type BroadcastLane,
-  type LaneId,
-  type PublishResult,
-  type SubscriptionAttempt,
-  type SubscriptionAttemptState,
-  type SubscriptionBinding,
-  type SubscriptionDriver,
-} from 'telefunc/backend'
+import { disposeBackend, HEAD_TRANSITIONS, laneKey, ORDERING_FRAME_LAYOUT } from 'telefunc/backend'
+
+// Dead fused surface: each diagnostic owns one removed name.
+// @ts-expect-error the fused supervised consumer getter is absent
+import { getBackend } from 'telefunc/backend'
+// @ts-expect-error the fused driver type is absent
+import type { BackendDriver } from 'telefunc/backend'
+// @ts-expect-error the fused consumer type is absent
+import type { BackendSpi } from 'telefunc/backend'
+// @ts-expect-error the fused subscription source is absent
+import type { BackendSubscriptionSource } from 'telefunc/backend'
+// @ts-expect-error the fused supervised subscription is absent
+import type { BackendSubscription } from 'telefunc/backend'
+
+// Deferred author surface: one missing author name per diagnostic.
+// @ts-expect-error the public backend SPI version is deferred
+import { BACKEND_SPI_VERSION } from 'telefunc/backend'
+// @ts-expect-error the public backend pair type is deferred
+import type { BackendDriverPair } from 'telefunc/backend'
+// @ts-expect-error the public backend factory type is deferred
+import type { BackendFactory } from 'telefunc/backend'
+// @ts-expect-error the public Broadcast driver type is deferred
+import type { BroadcastDriver } from 'telefunc/backend'
+// @ts-expect-error the public Room driver type is deferred
+import type { RoomDriver } from 'telefunc/backend'
+// @ts-expect-error the public subscription driver type is deferred
+import type { SubscriptionDriver } from 'telefunc/backend'
+// @ts-expect-error public custom-backend installation is deferred
+import { installBackend } from 'telefunc/backend'
+
+// Descriptor and alternate-runtime paths are independently absent.
+// @ts-expect-error there is one scalar version, not a descriptor
+import { BACKEND_PROTOCOL } from 'telefunc/backend'
+// @ts-expect-error no backend runtime subpath is published
+import type {} from 'telefunc/backend/runtime'
 import { Abort as ClientAbort, ConnectionError, withContext } from 'telefunc/client'
 import { Telefunc as NodeTelefunc } from 'telefunc/node'
-import {
-  installRedis,
-  RedisRoomBackend,
-  RedisTransport,
-  type InstallRedisOptions,
-  type RedisBroadcastOptions,
-  type RedisRoomBackendOptions,
-} from '@telefunc/redis'
+import { installRedis, RedisTransport, type InstallRedisOptions, type RedisBroadcastOptions } from '@telefunc/redis'
+// @ts-expect-error the deferred package driver fission has no fused public backend
+import { RedisRoomBackend } from '@telefunc/redis'
+// @ts-expect-error the deferred package driver fission has no fused public options
+import type { RedisRoomBackendOptions } from '@telefunc/redis'
 
 type Assert<T extends true> = T
 type Extends<Actual, Baseline> = [Actual] extends [Baseline] ? true : false
 type Compatible<Actual, Baseline> = Extends<Actual, Baseline> extends true ? Extends<Baseline, Actual> : false
 type HasKeys<Actual, Keys extends PropertyKey> = Exclude<Keys, keyof Actual> extends never ? true : false
-type HasExactKeys<Actual, Keys extends keyof Actual> = Compatible<keyof Actual, Keys>
 type IsOptional<T, K extends keyof T> = {} extends Pick<T, K> ? true : false
 void [Abort, ClientAbort]
 
@@ -97,46 +107,7 @@ type ReleasedPublishAck = ReleasedPublishResult & { key: string }
 type CurrentPublishAck = Awaited<ReturnType<InstanceType<typeof BroadcastChannel>['publish']>>
 type _publishAckShape = Assert<Compatible<CurrentPublishAck, ReleasedPublishAck>>
 
-type ReleasedBackendKeys =
-  | 'spiVersion'
-  | 'publish'
-  | 'readHead'
-  | 'compareExchangeHead'
-  | 'readCells'
-  | 'compareExchangeCells'
-  | 'commitLane'
-  | 'readRetained'
-  | 'listRetained'
-  | 'deleteRetained'
-  | 'dropGeneration'
-  | 'directoryPut'
-  | 'directoryDelete'
-  | 'directoryList'
-  | 'dispose'
-type _backendKeys = Assert<HasExactKeys<BackendSpi, ReleasedBackendKeys | 'subscribe' | 'subscribeLane'>>
-type _subscriptionKeys = Assert<HasKeys<BackendSubscription, 'ready' | 'state' | 'onStateChange' | 'unsubscribe'>>
-type _attemptKeys = Assert<HasKeys<SubscriptionAttempt, 'ready' | 'state' | 'onStateChange' | 'unsubscribe'>>
-type _attemptStateShape = Assert<
-  Compatible<SubscriptionAttemptState, 'establishing' | 'ready' | 'lost' | 'closed' | 'terminated'>
->
-type _bindingKeys = Assert<HasKeys<SubscriptionBinding, 'partition' | 'valid' | 'open'>>
-type _bindingPartition = Assert<Compatible<SubscriptionBinding['partition'], string>>
-type _bindingValid = Assert<Compatible<ReturnType<SubscriptionBinding['valid']>, boolean>>
-type _bindingOpenArguments = Assert<
-  Compatible<Parameters<SubscriptionBinding['open']>, [BackendReceiver, () => number]>
->
-type _driverKeys = Assert<HasKeys<SubscriptionDriver<string>, 'bind'>>
-type _driverBindArguments = Assert<Compatible<Parameters<SubscriptionDriver<string>['bind']>, [string]>>
-type _driverBindResult = Assert<Compatible<ReturnType<SubscriptionDriver<string>['bind']>, SubscriptionBinding>>
-type _backendDriverKeys = Assert<HasExactKeys<BackendDriver, ReleasedBackendKeys | 'subscriptions'>>
-type _sourceShape = Assert<
-  Compatible<
-    BackendSubscriptionSource,
-    { kind: 'broadcast'; lane: BroadcastLane } | { kind: 'durable'; roomId: string; inc: string; lane: LaneId }
-  >
->
 type _transitionRowKeys = Assert<HasKeys<(typeof HEAD_TRANSITIONS)[number], 'from' | 'cx' | 'to' | 'constraint'>>
-type _publishResultShape = Assert<Compatible<PublishResult, ReleasedPublishResult & { receivers?: number }>>
 const orderingHeaderBytes: 16 = ORDERING_FRAME_LAYOUT.headerBytes
 const orderingWordBytes: 4 = ORDERING_FRAME_LAYOUT.wordBytes
 const orderingWordRange: 0x1_0000_0000 = ORDERING_FRAME_LAYOUT.wordRange
@@ -145,13 +116,7 @@ const orderingSeqHigh: 0 = ORDERING_FRAME_LAYOUT.offsets.seqHigh
 const orderingSeqLow: 4 = ORDERING_FRAME_LAYOUT.offsets.seqLow
 const orderingTimestampHigh: 8 = ORDERING_FRAME_LAYOUT.offsets.timestampHigh
 const orderingTimestampLow: 12 = ORDERING_FRAME_LAYOUT.offsets.timestampLow
-const backendVersion: 1 = BACKEND_SPI_VERSION
-const broadcastLane: BroadcastLane = { key: 'released', kind: 'text' }
-declare const backendFactory: BackendFactory
-declare const backendDriver: BackendDriver
-declare const backend: BackendSpi
-const installedBackend: BackendSpi = installBackend(backendFactory)
-const currentBackend: BackendSpi = getBackend()
+const releasedLaneKey: string = laneKey({ kind: 'semantic' })
 
 type Contract = TypeContract<string, number, { token: string }>
 type ReleasedContract = { value: string; result: number; metadata: { token: string } }
@@ -258,18 +223,13 @@ const redisBinarySend: Promise<{ seq: number; timestamp: number }> = redisTransp
 )
 const stopRedisText = redisTransport.listen('released', (_payload, info) => void info.seq)
 const stopRedisBinary = redisTransport.listenBinary('released', (_payload, info) => void info.timestamp)
-declare const redisRoomBackendOptions: RedisRoomBackendOptions
-const redisRoomBackend: BackendDriver = new RedisRoomBackend(redisRoomBackendOptions)
-// @ts-expect-error the released constructor has no test-hook/runtime dependency argument
-const noRuntimeHooks = new RedisRoomBackend(redisRoomBackendOptions, { authorityNow: () => 0 })
-installRedis(redisClient, redisInstallOptions)
+const redisInstallResult: void = installRedis(redisClient, redisInstallOptions)
 
-void [Broadcast, Channel, backendVersion, broadcastLane]
-void [backend, backendDriver, orderingHeaderBytes, orderingWordBytes]
+void [Broadcast, Channel, releasedLaneKey, orderingHeaderBytes, orderingWordBytes]
 void [orderingWordRange, orderingEndianness, orderingSeqHigh, orderingSeqLow]
-void [orderingTimestampHigh, orderingTimestampLow, installedBackend, currentBackend]
+void [orderingTimestampHigh, orderingTimestampLow]
 void [disposeBackend, HEAD_TRANSITIONS, sameConfig, call]
 void [node, redisTransport, redisTextSend, redisBinarySend]
-void [stopRedisText, stopRedisBinary, redisRoomBackend, noRuntimeHooks]
+void [stopRedisText, stopRedisBinary, redisInstallResult]
 void [pinServerContextMembers, ChannelClosedError, ChannelOverflowError, ConnectionError]
 void NetworkError

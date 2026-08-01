@@ -27,6 +27,12 @@ describe('canonical backend wiring', () => {
     expect(constructedBy('packages/telefunc/wire-protocol/backend/room/supervise.ts', 'SubscriptionManager')).toEqual([
       'superviseRoomDriver',
     ])
+    expect(importsFrom('packages/telefunc/wire-protocol/backend/install.ts', './broadcast/supervise.js')).toContain(
+      'superviseBroadcastDriver',
+    )
+    expect(importsFrom('packages/telefunc/wire-protocol/backend/install.ts', './room/supervise.js')).toContain(
+      'superviseRoomDriver',
+    )
   })
   it('wires lane consumers to the canonical lane key', () => {
     expect(reexportsFrom('packages/telefunc/backend.ts', './wire-protocol/backend/room/lane-key.js')).toContain(
@@ -49,21 +55,31 @@ describe('canonical backend wiring', () => {
     ).toEqual(['decodeOrderingFrame', 'encodeOrderingFrame'])
     expect(importsFrom('packages/redis/src/room/layout.ts', 'telefunc/backend')).toContain('ORDERING_FRAME_LAYOUT')
   })
-  it('keeps Redis public Telefunc imports within the reviewed canonical surface', () => {
+  it('keeps Redis Telefunc imports within the reviewed exact-peer surfaces', () => {
     const redisValues = files
       .filter((file) => file.startsWith('packages/redis/'))
       .flatMap((file) => importsFrom(file, 'telefunc/backend'))
     expect([...new Set(redisValues)].sort()).toEqual(['HEAD_TRANSITIONS', 'ORDERING_FRAME_LAYOUT', 'laneKey'])
-    expect(importsFrom('packages/redis/src/index.ts', 'telefunc/__internal')).toContain('setDefaultBackend')
+    expect(importsFrom('packages/redis/src/index.ts', 'telefunc/__internal')).toEqual([
+      'BACKEND_SPI_VERSION',
+      'setDefaultBackend',
+      'superviseBroadcastDriver',
+    ])
   })
   it('keeps fused subscription sources out of plane modules', () => {
-    const forbidden = new Set(['BackendSubscriptionSource', 'subscriptionSourceKey'])
+    const forbidden = new Set([
+      'BackendDriver',
+      'BackendSpi',
+      'BackendSubscriptionSource',
+      'subscriptionSourceKey',
+      'superviseBackend',
+    ])
     // biome-ignore format: keep the bounded identifier scan atomic
     const owners = files.filter((file) => source(file).getDescendantsOfKind(SyntaxKind.Identifier).some((node) => forbidden.has(node.getText()))).sort()
     // biome-ignore format: keep the two plane roots pinned together
     expect(owners.filter((file) => /^packages\/telefunc\/wire-protocol\/backend\/(?:broadcast|room)\//.test(file))).toEqual([])
-    // biome-ignore format: keep the temporary owner manifest reviewable as one datum
-    expect(owners).toEqual(['packages/redis/src/room/backend.ts', 'packages/redis/src/room/subscriber-transport.ts', 'packages/telefunc/wire-protocol/backend/memory/backend.ts', 'packages/telefunc/wire-protocol/backend/spi.ts', 'packages/telefunc/wire-protocol/backend/subscription-source.ts', 'packages/telefunc/wire-protocol/server/adapter/cloudflare/room/backend.ts'])
+    // biome-ignore format: keep the empty retired-name manifest pinned
+    expect(owners).toEqual([])
   })
   it('keeps generic client core independent from Room', () => {
     // Static import declarations include value and type-only imports.

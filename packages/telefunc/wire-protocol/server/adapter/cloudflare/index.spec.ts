@@ -124,8 +124,16 @@ vi.mock('./routing.js', () => ({
 }))
 
 import { Telefunc } from '../../../../serve/cloudflare.js'
-import { disposeBackend, getBackend, installBackend } from '../../../backend/install.js'
+import { BACKEND_SPI_VERSION, type BackendDriverPair } from '../../../backend/driver-pair.js'
+import { disposeBackend, getRoomBackend, installBackend } from '../../../backend/install.js'
 import { MemoryBackend } from '../../../backend/memory/backend.js'
+
+const memoryPair = (driver: MemoryBackend): BackendDriverPair => ({
+  spiVersion: BACKEND_SPI_VERSION,
+  broadcast: driver,
+  room: driver,
+  dispose: () => driver.dispose(),
+})
 
 function createMockKV(): KVNamespace {
   const store = new Map<string, { value: string; expirationTtl?: number }>()
@@ -308,30 +316,32 @@ describe('cloudflare adapter entrypoint', () => {
 
   it('installs the Durable Object Room backend from the documented Cloudflare setup alone', async () => {
     new Telefunc()
-    await expect(getBackend().readHead('cloudflare-default-probe')).rejects.toThrow(
+    await expect(getRoomBackend().readHead('cloudflare-default-probe')).rejects.toThrow(
       'Cloudflare Room requires await-safe context',
     )
   })
 
   it('keeps an explicit Room backend installation as the Cloudflare policy override', () => {
     const explicit = new MemoryBackend()
-    const selected = installBackend(() => explicit)
+    installBackend(() => memoryPair(explicit))
+    const selected = getRoomBackend()
     new Telefunc()
-    expect(getBackend()).toBe(selected)
+    expect(getRoomBackend()).toBe(selected)
   })
 
   it('lets an explicit Room backend override an already-installed Cloudflare default', () => {
     new Telefunc()
     const explicit = new MemoryBackend()
-    const selected = installBackend(() => explicit)
-    expect(getBackend()).toBe(selected)
+    installBackend(() => memoryPair(explicit))
+    const selected = getRoomBackend()
+    expect(getRoomBackend()).toBe(selected)
   })
 
   it('keeps the same Durable Object Room backend across repeated Worker entry evaluation', () => {
     new Telefunc()
-    const installed = getBackend()
+    const installed = getRoomBackend()
     new Telefunc()
-    expect(getBackend()).toBe(installed)
+    expect(getRoomBackend()).toBe(installed)
     expect(mocks.transportInstances).toHaveLength(1)
   })
 
@@ -348,7 +358,7 @@ describe('cloudflare adapter entrypoint', () => {
       { TelefuncDurableObject: binding } as unknown as Cloudflare.Env,
     ) as InstanceType<typeof DurableClass> & { fetch(request: Request): Promise<Response> }
     mocks.telefuncMock.mockImplementationOnce(async () => {
-      await getBackend().readHead('binding-probe')
+      await getRoomBackend().readHead('binding-probe')
       throw new Error('Room backend unexpectedly returned without a binding')
     })
     await expect(instance.fetch(new Request('https://telefunc.test/_telefunc'))).rejects.toThrow(

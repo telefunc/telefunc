@@ -2,7 +2,7 @@
 // One Room DO owns authority time/state/fanout; transaction rollback and RPC structured clone preserve SPI outcomes.
 
 import { DurableObject } from 'cloudflare:workers'
-import type { CellMutation, CxResult, HeadCx, HeadNext, LaneId, RoomHead } from '../../../../backend/spi.js'
+import type { CellMutation, CxResult, HeadCx, HeadNext, LaneId, RoomHead } from '../../../../backend/room/contract.js'
 import { laneKey as laneKeyOf } from './codec.js'
 import {
   dispatchRoomShardFanout,

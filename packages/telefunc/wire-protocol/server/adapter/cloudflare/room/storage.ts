@@ -1,7 +1,7 @@
 /// <reference types="@cloudflare/workers-types" />
 // Room-DO `transactionSync` makes head CX, cell batches, and order advance atomic under authority time.
 
-import type { CellMutation, CxResult, HeadCx, HeadNext, RoomHead } from '../../../../backend/spi.js'
+import type { CellMutation, CxResult, HeadCx, HeadNext, RoomHead } from '../../../../backend/room/contract.js'
 import {
   assertHeadDeleteLegal,
   assertHeadNextWellFormed,

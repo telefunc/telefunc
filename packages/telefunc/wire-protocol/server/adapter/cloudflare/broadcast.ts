@@ -4,13 +4,8 @@ export type { BroadcastDeliverRequest, BroadcastPublishRequest, TelefuncDurableO
 
 import { KNOWN_BROADCAST_BUCKETS, getBucketCoordinatorShardIndices, getDeterministicKeyBucketIndex } from './routing.js'
 import { assert } from '../../../../utils/assert.js'
-import type {
-  BackendReceiver,
-  BroadcastLane,
-  PublishResult,
-  SubscriptionAttempt,
-  SubscriptionState,
-} from '../../../backend/spi.js'
+import type { BroadcastLane, PublishResult } from '../../../backend/broadcast/contract.js'
+import type { BackendReceiver, SubscriptionAttempt, SubscriptionState } from '../../../backend/subscription.js'
 import { decodeOrderingFrame, encodeOrderingFrame, type OrderingInfo } from '../../../ordering-frame.js'
 import type { CloudflareScale, LocationBucket } from './routing.js'
 
