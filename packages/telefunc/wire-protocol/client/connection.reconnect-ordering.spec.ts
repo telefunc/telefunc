@@ -17,11 +17,16 @@ import { stringify } from '@brillout/json-serializer/stringify'
 
 import { ClientConnection } from './connection.js'
 import { ServerChannel } from '../server/channel.js'
-import { decode, encode, TAG } from '../shared-ws.js'
+import { decode, encode, TAG, type DecodedFrame } from '../shared-ws.js'
 import { decodeU32, concat } from '../frame.js'
 import { uint8ArrayToBase64url } from '../base64url.js'
 
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms))
+
+type Bytes = Uint8Array<ArrayBuffer>
+type TextFrame = Extract<DecodedFrame, { tag: typeof TAG.TEXT }>
+type FetchStub = typeof fetch
+type SsePostMetadata = { streamResponse?: boolean }
 
 function createChannel(id = crypto.randomUUID()) {
   return { id, isClosed: false, _onTransportOpen() {}, _dispatchFrame() {}, _onTransportClose() {} }
@@ -29,13 +34,12 @@ function createChannel(id = crypto.randomUUID()) {
 
 /** SSE downstream response stream the client reads (server→client). */
 function makeSseDownstream() {
-  let controller!: ReadableStreamDefaultController<Uint8Array>
+  let controller!: ReadableStreamDefaultController<Bytes>
   const enc = new TextEncoder()
-  const stream = new ReadableStream<Uint8Array>({ start: (c) => (controller = c) })
+  const stream = new ReadableStream<Bytes>({ start: (c) => (controller = c) })
   return {
     stream,
-    pushFrame: (frame: Uint8Array) =>
-      controller.enqueue(enc.encode(`data: ${uint8ArrayToBase64url(frame as any)}\n\n`)),
+    pushFrame: (frame: Bytes) => controller.enqueue(enc.encode(`data: ${uint8ArrayToBase64url(frame)}\n\n`)),
     open: () => controller.enqueue(enc.encode(`: open\n\n`)),
     close: () => {
       try {
@@ -46,30 +50,30 @@ function makeSseDownstream() {
 }
 
 /** Parse a one-shot Blob body: [u32 len][metadata json][u32 len][frame]... */
-async function parseBlobBody(blob: Blob): Promise<{ metadata: any; frames: Uint8Array[] }> {
+async function parseBlobBody(blob: Blob): Promise<{ metadata: SsePostMetadata; frames: Bytes[] }> {
   const bytes = new Uint8Array(await blob.arrayBuffer())
   let off = 0
-  const next = (): Uint8Array => {
-    const len = decodeU32(bytes.subarray(off, off + 4) as any)
+  const next = (): Bytes => {
+    const len = decodeU32(bytes.subarray(off, off + 4))
     off += 4
     const chunk = bytes.subarray(off, off + len)
     off += len
     return chunk
   }
-  const metadata = JSON.parse(new TextDecoder().decode(next()))
-  const frames: Uint8Array[] = []
+  const metadata: SsePostMetadata = JSON.parse(new TextDecoder().decode(next()))
+  const frames: Bytes[] = []
   while (off < bytes.length) frames.push(next())
   return { metadata, frames }
 }
 
 /** Incrementally yield length-prefixed chunks from a ReadableStream (streamRequest body). */
-async function* readLengthPrefixed(stream: ReadableStream<Uint8Array>): AsyncGenerator<Uint8Array> {
+async function* readLengthPrefixed(stream: ReadableStream<Bytes>): AsyncGenerator<Bytes> {
   const reader = stream.getReader()
   let buf = new Uint8Array(0)
   const pull = async (): Promise<boolean> => {
     const { value, done } = await reader.read()
     if (done) return false
-    buf = buf.length === 0 ? value : concat(buf as any, value as any)
+    buf = buf.length === 0 ? value : concat(buf, value)
     return true
   }
   const ensure = async (n: number): Promise<boolean> => {
@@ -78,12 +82,21 @@ async function* readLengthPrefixed(stream: ReadableStream<Uint8Array>): AsyncGen
   }
   while (true) {
     if (!(await ensure(4))) return
-    const len = decodeU32(buf.subarray(0, 4) as any)
+    const len = decodeU32(buf.subarray(0, 4))
     buf = buf.subarray(4)
     if (!(await ensure(len))) return
     yield buf.subarray(0, len)
     buf = buf.subarray(len)
   }
+}
+
+function decodeTextFrames(frames: Bytes[]): TextFrame[] {
+  const textFrames: TextFrame[] = []
+  for (const raw of frames) {
+    const frame = decode(raw)
+    if (frame.tag === TAG.TEXT) textFrames.push(frame)
+  }
+  return textFrames
 }
 
 /**
@@ -93,7 +106,7 @@ async function* readLengthPrefixed(stream: ReadableStream<Uint8Array>): AsyncGen
 async function runScenario(loseSeq1: boolean): Promise<{ received: number[]; wire2Upstream: number[] }> {
   const received: number[] = []
   const serverCh = new ServerChannel<(n: number) => void, never>()
-  serverCh.listen((n) => received.push(n))
+  serverCh.listen((n) => void received.push(n))
 
   const upstreamSeqsByPost: number[][] = []
   let streamReqCount = 0
@@ -103,16 +116,14 @@ async function runScenario(loseSeq1: boolean): Promise<{ received: number[]; wir
 
   // Faithful model of server/sse.ts runStreamResponse + mux reconcile:
   // capture lastSeq BEFORE dispatching the batch's data frames, then dispatch, then RECONCILED.
-  const handleInitialBatch = (frames: Uint8Array[], sse: ReturnType<typeof makeSseDownstream>) => {
+  const handleInitialBatch = (frames: Bytes[], sse: ReturnType<typeof makeSseDownstream>) => {
     let ix = 0
-    const dataFrames: any[] = []
     for (const raw of frames) {
-      const f = decode(raw as any)
+      const f = decode(raw)
       if (f.tag === TAG.RECONCILE) ix = f.payload.open[0]!.ix
-      else if (f.tag === TAG.TEXT) dataFrames.push(f)
     }
     const lastSeqAtReconcile = serverCh._lastClientSeq // mux.ts:313 — captured at reconcile time
-    for (const f of dataFrames) serverCh._dispatchFrame(f) // bumps _lastClientSeq, real dedup
+    for (const f of decodeTextFrames(frames)) serverCh._dispatchFrame(f) // bumps _lastClientSeq, real dedup
     sse.open()
     sse.pushFrame(encode.streamRequestOpenAck())
     sse.pushFrame(
@@ -131,32 +142,25 @@ async function runScenario(loseSeq1: boolean): Promise<{ received: number[]; wir
     )
   }
 
-  const fetchImpl = (async (_url: string, init: RequestInit) => {
-    const body = init.body as unknown
-    // Blob body → SSE downstream POST (streamResponse) or short batch POST.
-    if (body instanceof Blob) {
-      const { metadata, frames } = await parseBlobBody(body)
-      if (metadata.streamResponse) {
-        wire += 1
-        const sse = makeSseDownstream()
-        downstream = sse
-        handleInitialBatch(frames, sse)
-        return new Response(sse.stream as any, { status: 200, headers: { 'Content-Type': 'text/event-stream' } })
-      }
-      for (const raw of frames) {
-        const f = decode(raw as any)
-        if (f.tag === TAG.TEXT) serverCh._dispatchFrame(f)
-      }
-      return new Response('', { status: 200 })
+  const handleSsePost = async (body: Blob): Promise<Response> => {
+    const { metadata, frames } = await parseBlobBody(body)
+    if (metadata.streamResponse) {
+      wire += 1
+      const sse = makeSseDownstream()
+      downstream = sse
+      handleInitialBatch(frames, sse)
+      return new Response(sse.stream, { status: 200, headers: { 'Content-Type': 'text/event-stream' } })
     }
+    for (const frame of decodeTextFrames(frames)) serverCh._dispatchFrame(frame)
+    return new Response('', { status: 200 })
+  }
 
-    // ReadableStream body → long-lived streamRequest POST.
+  const handleStreamRequest = (stream: ReadableStream<Bytes>, signal?: AbortSignal | null): Promise<Response> => {
     const postIx = ++streamReqCount
     const seen: number[] = []
     upstreamSeqsByPost[postIx] = seen
-    const stream = body as ReadableStream<Uint8Array>
-    return await new Promise<Response>((resolve, reject) => {
-      init.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')), { once: true })
+    return new Promise<Response>((resolve, reject) => {
+      signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')), { once: true })
       ;(async () => {
         let first = true
         for await (const chunk of readLengthPrefixed(stream)) {
@@ -164,7 +168,7 @@ async function runScenario(loseSeq1: boolean): Promise<{ received: number[]; wir
             first = false
             continue
           } // metadata
-          const f = decode(chunk as any)
+          const f = decode(chunk)
           if (f.tag === TAG.TEXT) {
             seen.push(f.seq)
             if (!dropUpstream) serverCh._dispatchFrame(f) // wire 1 dropped in the lost-frame case
@@ -173,7 +177,14 @@ async function runScenario(loseSeq1: boolean): Promise<{ received: number[]; wir
         resolve(new Response('', { status: 200 }))
       })().catch(reject)
     })
-  }) as unknown as typeof fetch
+  }
+
+  const fetchImpl = (async (_input, init) => {
+    const body = init?.body
+    if (body instanceof Blob) return handleSsePost(body)
+    if (body instanceof ReadableStream) return handleStreamRequest(body, init?.signal)
+    throw new TypeError('Expected an SSE Blob or byte stream request body')
+  }) satisfies FetchStub
 
   const channel = createChannel()
   const conn = ClientConnection.getOrCreate('http://test.local/_telefunc', channel as never, {
