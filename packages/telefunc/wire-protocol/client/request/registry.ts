@@ -1,4 +1,4 @@
-export { createRequestReplacer }
+export { createRequestReplacer, clientRequestTypes }
 
 import type { ClientReplacerContext, ReplacerType, TypeContract } from '../../types.js'
 import type { AbortError } from '../../../shared/Abort.js'
@@ -24,8 +24,9 @@ function createRequestReplacer(
     abort: (abortError: AbortError) => void
   }) => void,
   extensionTypes: ReplacerType<TypeContract, ClientReplacerContext>[],
+  builtInTypes: readonly ReplacerType<TypeContract, ClientReplacerContext>[] = clientRequestTypes,
 ) {
-  const allTypes = [...clientRequestTypes, ...extensionTypes]
+  const allTypes = [...builtInTypes, ...extensionTypes]
   const replacer = (_key: string, value: unknown, serializer: (v: unknown) => string) => {
     for (const type of allTypes) {
       if (type.detect(value)) {

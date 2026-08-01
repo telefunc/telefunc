@@ -6,6 +6,7 @@ import { assert, assertUsage } from '../../../utils/assert.js'
 import { hasProp } from '../../../utils/hasProp.js'
 import { lowercaseFirstLetter } from '../../../utils/lowercaseFirstLetter.js'
 import { createStreamingReplacer } from '../../../wire-protocol/server/response/registry.js'
+import { serverDialect } from '../../../wire-protocol/server/dialect.js'
 import { ServerChannel } from '../../../wire-protocol/server/channel.js'
 import { getChannelMux } from '../../../wire-protocol/server/mux.js'
 import {
@@ -129,6 +130,7 @@ function serializeTelefunctionResult(runContext: {
       requestContext.responseAbort.onAbort(abort)
     },
     extensionResponseTypes,
+    serverDialect.response,
   )
 
   let httpResponseBody: string

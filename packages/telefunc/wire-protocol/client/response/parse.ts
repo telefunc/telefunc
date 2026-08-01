@@ -6,6 +6,7 @@ import { assert } from '../../../utils/assert.js'
 import { isObject } from '../../../utils/isObject.js'
 import { isObjectOrFunction } from '../../../utils/isObjectOrFunction.js'
 import { createStreamingReviver } from './registry.js'
+import { clientDialect } from '../dialect.js'
 import type { StreamSource, ClientReviverContext, ReviverType, TypeContract } from '../../types.js'
 import { setAbortController } from '../../../client/abort.js'
 import { setCloseHandlers, addExtraCloseHandlers, type CloseHandler } from '../../../client/close.js'
@@ -185,6 +186,7 @@ async function reviveResponse(
       }
     },
     extensionResponseTypes,
+    clientDialect.response,
   )
 
   let parsed: unknown

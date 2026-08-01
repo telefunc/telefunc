@@ -1,22 +1,31 @@
 export { roomReplacer, roomParticipantReplacer, roomRemoteReplacer }
 
-import type {
-  ReplacerType,
-  RoomContract,
-  RoomParticipantContract,
-  RoomRemoteContract,
-  ServerReplacerContext,
-} from '../types.js'
-import {
-  SERIALIZER_PREFIX_ROOM,
-  SERIALIZER_PREFIX_ROOM_PARTICIPANT,
-  SERIALIZER_PREFIX_ROOM_REMOTE,
-} from '../constants.js'
+import type { ReplacerType, ServerReplacerContext, TypeContract } from '../types.js'
 import { ServerLocalParticipant, ServerRoom } from './server.js'
+import type { RemoteParticipant } from './types.js'
+import type { ParticipantStubMetadata, RoomSnapshotMetadata } from './protocol.js'
 import { bindParticipantStubChannel, RoomParticipantStubChannel, RoomStubChannel } from './stubs.js'
 import { remoteBacking } from './state.js'
 import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
 assertIsNotBrowser()
+const ROOM_PREFIX = '!TelefuncRoom:'
+const ROOM_PARTICIPANT_PREFIX = '!TelefuncRoomParticipant:'
+const ROOM_REMOTE_PREFIX = '!TelefuncRoomRemoteParticipant:'
+type RoomReplacerContract = TypeContract<ServerRoom, never, RoomSnapshotMetadata>
+type RoomParticipantReplacerContract = TypeContract<ServerLocalParticipant, never, ParticipantStubMetadata>
+type RoomRemoteReplacerContract = TypeContract<
+  RemoteParticipant,
+  never,
+  {
+    room: unknown
+    id: string
+    meta: Record<string, unknown>
+    joinedAt: number
+    metaSeq: number
+    identity: string | null
+    hidden?: boolean
+  }
+>
 /** Per-response echo-suppression rendezvous (`selfDelivery: false`). The response's stable `registerChannel` closure is the pass identity; a global-symbol WeakMap lets Room replacers rendezvous across
  * duplicate SSR module graphs without adding Room scratch state to the public serializer context. Entries disappear with the response closure.
  */
@@ -33,9 +42,9 @@ function roomSelfSuppressSet(context: ServerReplacerContext, room: ServerRoom): 
   if (!set) byRoom.set(room, (set = new Set()))
   return set
 }
-const roomReplacer: ReplacerType<RoomContract, ServerReplacerContext> = {
-  prefix: SERIALIZER_PREFIX_ROOM,
-  detect(value): value is RoomContract['value'] {
+const roomReplacer: ReplacerType<RoomReplacerContract, ServerReplacerContext> = {
+  prefix: ROOM_PREFIX,
+  detect(value): value is RoomReplacerContract['value'] {
     return ServerRoom.isServerRoom(value)
   },
   replace(serverRoom, context) {
@@ -71,9 +80,9 @@ const roomReplacer: ReplacerType<RoomContract, ServerReplacerContext> = {
 /** A `RemoteParticipant` view: serialized as (backing room, member snapshot). The room is a regular value inside the metadata — the recursive serializer replaces it (or dedupes it against a
  * co-returned occurrence), so the client revives the view bound to the same live `ClientRoom`. The view has no lifecycle of its own — it rides the room's stub.
  */
-const roomRemoteReplacer: ReplacerType<RoomRemoteContract, ServerReplacerContext> = {
-  prefix: SERIALIZER_PREFIX_ROOM_REMOTE,
-  detect(value): value is RoomRemoteContract['value'] {
+const roomRemoteReplacer: ReplacerType<RoomRemoteReplacerContract, ServerReplacerContext> = {
+  prefix: ROOM_REMOTE_PREFIX,
+  detect(value): value is RoomRemoteReplacerContract['value'] {
     // Brand check, not instanceof — dev servers load two SSR module graphs, and a class from one graph never instanceof-matches the other's. Brands (Symbol.for) span graphs.
     return ServerRoom.isServerRoom(remoteBacking(value)?.state._owner)
   },
@@ -98,9 +107,9 @@ const roomRemoteReplacer: ReplacerType<RoomRemoteContract, ServerReplacerContext
     }
   },
 }
-const roomParticipantReplacer: ReplacerType<RoomParticipantContract, ServerReplacerContext> = {
-  prefix: SERIALIZER_PREFIX_ROOM_PARTICIPANT,
-  detect(value): value is RoomParticipantContract['value'] {
+const roomParticipantReplacer: ReplacerType<RoomParticipantReplacerContract, ServerReplacerContext> = {
+  prefix: ROOM_PARTICIPANT_PREFIX,
+  detect(value): value is RoomParticipantReplacerContract['value'] {
     return ServerLocalParticipant.isServerLocalParticipant(value)
   },
   replace(participant, context) {

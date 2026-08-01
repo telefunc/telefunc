@@ -34,9 +34,6 @@ export type {
   BlobDownloadMetadata,
   ChannelContract,
   BroadcastContract,
-  RoomContract,
-  RoomParticipantContract,
-  RoomRemoteContract,
   FunctionContract,
   FileDownload,
   BlobDownload,
@@ -46,9 +43,6 @@ export type {
 import type { ServerChannel } from './server/channel.js'
 import type { ServerBroadcast } from './server/server-broadcast.js'
 import type { ClientChannel, ClientBroadcast } from './client/channel.js'
-import type { ServerRoom, ServerLocalParticipant } from './room/server.js'
-import type { ClientRoom, LocalParticipant, RemoteParticipant } from './room/types.js'
-import type { RoomSnapshotMetadata, ParticipantStubMetadata } from './room/protocol.js'
 import type { AbortError } from '../shared/Abort.js'
 import type { ShieldValidators } from '../node/server/shield.js'
 import type { FileDownload, BlobDownload } from './client/response/DownloadClasses.js'
@@ -253,27 +247,6 @@ type DownloadProgress = (loaded: number, total: number | undefined) => void
 type ChannelContract = TypeContract<ServerChannel, ClientChannel, { channelId: string; ack?: true }>
 
 type BroadcastContract = TypeContract<ServerBroadcast, ClientBroadcast, { channelId: string; key: string }>
-
-type RoomContract = TypeContract<ServerRoom, ClientRoom, RoomSnapshotMetadata>
-
-type RoomParticipantContract = TypeContract<ServerLocalParticipant, LocalParticipant, ParticipantStubMetadata>
-
-/** A `RemoteParticipant` view crossing the wire: (backing room, member snapshot). The room rides
- *  inside the metadata — the ref-identity registries dedupe it against any co-returned occurrence,
- *  so `room.getParticipant(m.id) === m` holds on the client. */
-type RoomRemoteContract = TypeContract<
-  RemoteParticipant,
-  RemoteParticipant,
-  {
-    room: unknown
-    id: string
-    meta: Record<string, unknown>
-    joinedAt: number
-    metaSeq: number
-    identity: string | null
-    hidden?: boolean
-  }
->
 
 type FunctionContract = TypeContract<
   (...args: readonly unknown[]) => unknown,

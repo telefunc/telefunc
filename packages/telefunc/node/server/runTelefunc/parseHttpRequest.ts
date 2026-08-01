@@ -8,6 +8,7 @@ import { getUrlPathname } from '../../../utils/getUrlPathname.js'
 import { hasProp } from '../../../utils/hasProp.js'
 import { isProduction } from '../../../utils/isProduction.js'
 import { createRequestReviver, resolveDeferredRevivals } from '../../../wire-protocol/server/request/registry.js'
+import { serverDialect } from '../../../wire-protocol/server/dialect.js'
 import { StreamReader } from '../../../wire-protocol/server/request/StreamReader.js'
 import { REQUEST_KIND, getRequestKind } from '../../../wire-protocol/request-kind.js'
 import type { RequestContext } from '../context/requestContext.js'
@@ -96,7 +97,7 @@ async function parseHttpRequest(runContext: RunContext): Promise<ParseResult> {
 
   // Parse the envelope; each reviver-prefixed string becomes a deferred placeholder that
   // `reviveArgs(telefunction)` will resolve post-findTelefunction with shield-aware validators.
-  const { reviver, deferreds } = createRequestReviver(serverConfig.extensionRequestTypes)
+  const { reviver, deferreds } = createRequestReviver(serverConfig.extensionRequestTypes, serverDialect.request)
   const envelope = parseEnvelope(text, reviver, runContext)
   if (envelope.isMalformedRequest) return envelope
 

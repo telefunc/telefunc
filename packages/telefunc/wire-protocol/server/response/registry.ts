@@ -1,4 +1,4 @@
-export { createStreamingReplacer }
+export { createStreamingReplacer, serverTypes }
 
 import { asyncGeneratorReplacer } from './async-generator.js'
 import { readableStreamReplacer } from './readable-stream.js'
@@ -7,7 +7,6 @@ import { blobReplacer } from './blob.js'
 import { fileDownloadReplacer } from './fileDownload.js'
 import { blobDownloadReplacer } from './blobDownload.js'
 import { promiseReplacer } from './promise.js'
-import { roomReplacer, roomParticipantReplacer, roomRemoteReplacer } from '../../room/response-server.js'
 import { broadcastReplacer } from './broadcast.js'
 import { channelReplacer } from './channel.js'
 import { functionReplacer } from './function.js'
@@ -28,9 +27,6 @@ const serverTypes = [
   fileReplacer,
   blobReplacer,
   promiseReplacer,
-  roomReplacer,
-  roomParticipantReplacer,
-  roomRemoteReplacer,
   broadcastReplacer,
   channelReplacer,
   functionReplacer,
@@ -49,8 +45,9 @@ function createStreamingReplacer(
   getContext: (value: unknown) => ServerReplacerContext,
   onReplaced: (replaced: { close: () => Promise<void> | void; abort: (abortError: AbortError) => void }) => void,
   extensionTypes: ReplacerType<TypeContract, ServerReplacerContext>[],
+  builtInTypes: readonly ReplacerType<TypeContract, ServerReplacerContext>[] = serverTypes,
 ) {
-  const allTypes = [...serverTypes, ...extensionTypes]
+  const allTypes = [...builtInTypes, ...extensionTypes]
   const replaced = new WeakMap<object, string>()
   const replacements = new Set<string>()
   const replacer = (_key: string, value: unknown, serializer: (v: unknown) => string) => {

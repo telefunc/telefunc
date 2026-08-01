@@ -48,12 +48,12 @@ describe('canonical wiring', () => {
     expect([...new Set(redisValues)].sort()).toEqual(['HEAD_TRANSITIONS', 'ORDERING_FRAME_LAYOUT', 'laneKey'])
     expect(importsFrom('packages/redis/src/index.ts', 'telefunc/__internal')).toContain('setDefaultBackend')
   })
-  it('keeps generic client core independent from Room except the pinned registry edge', () => {
+  it('keeps generic client core independent from Room', () => {
     // Static import declarations include value and type-only imports.
     // biome-ignore format: keep the bounded dependency scan visually atomic
     const edges = files.filter((file) => /^packages\/telefunc\/wire-protocol\/(?:client\/(?:response\/|(?:channel|connection|call-barrier|deadlineScheduler|session-registry)\.ts$)|channel\.ts$)/.test(file)).flatMap((file) => source(file).getImportDeclarations().flatMap((node) => { const target = node.getModuleSpecifierSourceFile(); if (target === undefined) return []; const path = relative(root, target.getFilePath()).replaceAll('\\', '/'); return path.startsWith('packages/telefunc/wire-protocol/room/') ? [`${file} -> ${path}`] : [] }))
-    // biome-ignore format: keep the sole Step-2 exception pinned as a manifest
-    expect(edges.sort()).toEqual(['packages/telefunc/wire-protocol/client/response/registry.ts -> packages/telefunc/wire-protocol/room/response-client.ts'])
+    // biome-ignore format: keep the empty edge manifest pinned
+    expect(edges.sort()).toEqual([])
   })
   it('keeps the Room protocol shape module from becoming a re-export mega-barrel', () => {
     const declarations = source('packages/telefunc/wire-protocol/room/protocol.ts').getExportDeclarations()

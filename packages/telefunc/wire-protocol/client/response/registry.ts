@@ -1,4 +1,4 @@
-export { createStreamingReviver }
+export { createStreamingReviver, clientTypes }
 
 import type { Reviver } from '@brillout/json-serializer/parse'
 import { asyncGeneratorReviver } from './async-generator.js'
@@ -8,7 +8,6 @@ import { blobReviver } from './blob.js'
 import { fileDownloadReviver } from './fileDownload.js'
 import { blobDownloadReviver } from './blobDownload.js'
 import { promiseReviver } from './promise.js'
-import { roomReviver, roomParticipantReviver, roomRemoteReviver } from '../../room/response-client.js'
 import { broadcastReviver } from './broadcast.js'
 import { channelReviver } from './channel.js'
 import { functionReviver } from './function.js'
@@ -25,9 +24,6 @@ const clientTypes = [
   fileDownloadReviver,
   blobDownloadReviver,
   promiseReviver,
-  roomReviver,
-  roomParticipantReviver,
-  roomRemoteReviver,
   broadcastReviver,
   channelReviver,
   functionReviver,
@@ -47,8 +43,9 @@ function createStreamingReviver(
     abort: (abortError: AbortError) => void
   }) => void,
   extensionTypes: ReviverType<TypeContract, ClientReviverContext>[],
+  builtInTypes: readonly ReviverType<TypeContract, ClientReviverContext>[] = clientTypes,
 ) {
-  const allTypes = [...clientTypes, ...extensionTypes]
+  const allTypes = [...builtInTypes, ...extensionTypes]
   const revivedByWireString = new Map<string, unknown>()
   const reviver: Reviver = (_path, value, parser) => {
     if (revivedByWireString.has(value)) return { replacement: revivedByWireString.get(value) }

@@ -5,6 +5,7 @@ import { assert, assertUsage } from '../../utils/assert.js'
 import { hasProp } from '../../utils/hasProp.js'
 import { lowercaseFirstLetter } from '../../utils/lowercaseFirstLetter.js'
 import { createRequestReplacer } from '../../wire-protocol/client/request/registry.js'
+import { clientDialect } from '../../wire-protocol/client/dialect.js'
 import { encodeRequestEnvelope } from '../../wire-protocol/frame.js'
 import { pumpClientProducerToChannel } from '../../wire-protocol/client/request/pumpToChannel.js'
 import { ClientChannel } from '../../wire-protocol/client/channel.js'
@@ -107,6 +108,7 @@ function serializeTelefunctionArguments(callContext: CallContext): SerializeResu
       }
     },
     callContext.extensionRequestTypes,
+    clientDialect.request,
   )
   const dataMainSerialized = serialize(dataMain, callContext, replacer)
   const httpRequestBody = files.length > 0 ? encodeRequestEnvelope(dataMainSerialized, files) : dataMainSerialized
