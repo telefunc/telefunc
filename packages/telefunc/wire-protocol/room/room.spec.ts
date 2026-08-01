@@ -18,8 +18,8 @@ import {
 import { DEFAULT_TRACK, frameWithMemberId, sanitizeBinaryWants, unframeMemberId } from './binary.js'
 import { RoomError, isRoomError } from './errors.js'
 import { roomCtrlKey, roomIdentityKvPrefix, roomMemberKvKey } from './keys.js'
-import { leaveCauseFromWire, leaveCauseToWire, mergeAttributes, normalizeJoinOptions } from './model.js'
-import { pushBoundedTail, type RoomSnapshotMetadata } from './protocol.js'
+import { isRecord, leaveCauseFromWire, leaveCauseToWire, mergeAttributes, normalizeJoinOptions } from './model.js'
+import { hasRoomTag, pushBoundedTail, type RoomSnapshotMetadata } from './protocol.js'
 import type { LeaveCause } from './types.js'
 import { ClientRoom } from './client.js'
 import { ClientBroadcast } from '../client/channel.js'
@@ -1860,6 +1860,17 @@ describe('room binary protocol validation', () => {
     const malformedTrack = frameWithMemberId(memberId, new Uint8Array(), { track: 'x' })
     malformedTrack[18] = 0xff
     expect(unframeMemberId(malformedTrack)).toBeNull()
+  })
+  it('keeps Room shape predicates total and own-tagged on hostile values', () => {
+    const throwOnRead = () => Number(Symbol())
+    const accessorTag = Object.defineProperty({}, '__r', { get: throwOnRead })
+    const revoked = Proxy.revocable({}, {})
+    revoked.revoke()
+    const hostileWants = Object.defineProperty({}, 'everyMember', { get: throwOnRead })
+    expect(() => hasRoomTag(accessorTag)).not.toThrow()
+    expect(isRecord(revoked.proxy)).toBe(false)
+    expect(sanitizeBinaryWants(hostileWants)).toBeNull()
+    expect(hasRoomTag(Object.create({ __r: 'closed' }))).toBe(false)
   })
   it('round-trips every admitted leave cause injectively', () => {
     const causes = [

@@ -13,8 +13,9 @@ import { isObject } from '../../utils/isObject.js'
 import type { JoinOptions, LeaveCause, ParticipantMeta, RoomMeta } from './types.js'
 
 function isRecord(value: unknown): value is Record<string, unknown> {
-  if (!isObject(value) || Array.isArray(value)) return false
+  if (!isObject(value)) return false
   try {
+    if (Array.isArray(value)) return false
     const prototype = Object.getPrototypeOf(value)
     return prototype === null || (Object.getPrototypeOf(prototype) === null && prototype.constructor?.name === 'Object')
   } catch {
