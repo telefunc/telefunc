@@ -5,7 +5,7 @@ import { isPromise } from '../../utils/isPromise.js'
 import type { ChannelPublishInfo } from '../channel.js'
 import { adoptSubordinateOf, makeDisposer, releaseSubordinate } from '../wrapProxy.js'
 import { DEFAULT_TRACK, emptyTrackWants, isRoomTrack, type BinaryWants, type TrackWants } from './binary.js'
-import { ownMetadata, stampNewer } from './model.js'
+import { ownLeaveCause, ownMetadata, stampNewer } from './model.js'
 import type { MemberSnapshot, MemberWants } from './protocol.js'
 import type {
   BinaryFrameInfo,
@@ -390,16 +390,17 @@ class RoomState {
       this.membershipVersion++
       return
     }
+    const ownedCause = cause && ownLeaveCause(cause)
     entry.left = true
-    entry.leaveCause = cause
+    entry.leaveCause = ownedCause
     const remote = this._remote(entry)
     this._members.delete(id)
     // A hidden participant leaving is invisible to presence — no count change, no room-level `onLeave`, and it's never the "last participant" that empties the room. Its own leave handler and listener
     // release still run. The participant path keeps its exact original ordering.
     if (!entry.hidden) this._seedCount = Math.max(0, this._seedCount - 1)
     this._bumpMembership()
-    this._fireAll(entry.leaveCbs, cause)
-    if (!entry.hidden) this._fireAll(this._leaveCbs, remote, cause)
+    this._fireAll(entry.leaveCbs, ownedCause)
+    if (!entry.hidden) this._fireAll(this._leaveCbs, remote, ownedCause)
     this._releaseEntryListeners(entry)
     releaseSubordinate(remote)
     if (entry.hidden) return
@@ -440,6 +441,7 @@ class RoomState {
   /** Room closed: member-level cleanup callbacks run (decoders etc.), then `onClose`. Room-level `onLeave`/`onEmpty` intentionally don't fire — `onClose` is the signal. */
   applyClosed(cause: LeaveCause = { type: 'closed' }): void {
     if (this.closed) return
+    cause = ownLeaveCause(cause)
     this._batchChange(() => {
       const departed = [...this._members.values()]
       this.closed = true

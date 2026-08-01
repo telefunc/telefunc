@@ -95,10 +95,10 @@ type AfterJoinHook<P extends ParticipantMeta = ParticipantMeta> = (
 
 /** Why a participant left; roster reconciliation may report no cause. */
 type LeaveCause =
-  | { type: 'left' }
-  | { type: 'removed'; reason?: unknown }
-  | { type: 'closed' }
-  | { type: 'disconnected' }
+  | { readonly type: 'left' }
+  | { readonly type: 'removed'; readonly reason?: unknown }
+  | { readonly type: 'closed' }
+  | { readonly type: 'disconnected' }
 
 /** One membership by id, or all memberships of an app identity. */
 type ParticipantRef = { id: string } | { identity: string }

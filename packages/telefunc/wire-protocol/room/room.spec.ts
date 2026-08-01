@@ -20,7 +20,7 @@ import { RoomError, isRoomError } from './errors.js'
 import { roomCtrlKey, roomIdentityKvPrefix, roomMemberKvKey } from './keys.js'
 import { isRecord, leaveCauseFromWire, leaveCauseToWire, mergeAttributes, normalizeJoinOptions } from './model.js'
 import { hasRoomTag, pushBoundedTail, type RoomSnapshotMetadata } from './protocol.js'
-import type { LeaveCause } from './types.js'
+import type { LeaveCause, Sender } from './types.js'
 import { ClientRoom } from './client.js'
 import { ClientBroadcast } from '../client/channel.js'
 import { RoomState, remoteBacking } from './state.js'
@@ -629,15 +629,19 @@ describe('Room public behavior', () => {
     observer.onLeave((member) => events.push(`leave:${String(member.meta.name)}`))
     const hidden = await authority.join({ meta: { role: 'bot' }, hidden: true })
     const player = await authority.join({ meta: { name: 'Alice' }, identity: 'user-1' })
+    authority.onLeave((_member, cause) => Reflect.set(cause!, 'type', 'closed'))
     await player.setAttributes({ name: 'Alicia', score: 1 })
     expect(observer.count).toBe(1)
     expect((await observer.getParticipants()).map((member) => member.id)).toEqual([player.id])
     expect((await observer.getParticipants({ hidden: true })).map((member) => member.id)).toEqual([hidden.id])
     expect(events).toEqual(['join:Alice', 'update:Alicia'])
     const causes: unknown[] = []
+    player.onLeave((cause) => Reflect.set(cause, 'type', 'disconnected'))
     player.onLeave((cause) => causes.push(cause))
     await Room.removeParticipant('presence', { identity: 'user-1', reason: 'moderated' })
-    expect(causes).toEqual([{ type: 'removed', reason: 'moderated' }])
+    player.onLeave((cause) => causes.push(cause))
+    expect(causes).toEqual(Array(2).fill({ type: 'removed', reason: 'moderated' }))
+    expect(causes.every(Object.isFrozen)).toBe(true)
     expect(observer.count).toBe(0)
     expect(events.at(-1)).toBe('leave:Alicia')
     expect((await observer.getParticipants({ hidden: true })).map((member) => member.id)).toEqual([hidden.id])
@@ -1416,7 +1420,11 @@ describe('client Room lifecycle', () => {
       await forceRoomGc()
       expect(retained.room.deref()).not.toBeUndefined()
       expect(gc.closed()).toBe(0)
-      retained.stop()
+      const stop = retained.startRemote()
+      retained.stopLocal()
+      await forceRoomGc()
+      expect(retained.room.deref()).not.toBeUndefined()
+      stop()
       await forceRoomGc()
       retained.stopped()
       expect(retained.room.deref()).toBeUndefined()
@@ -1515,6 +1523,18 @@ describe('client Room lifecycle', () => {
     internal._onLeft({ type: 'left' })
     await Promise.resolve()
     expect(errors).toEqual(failures)
+  })
+  it('owns fallback sender snapshots before listener fan-out', async () => {
+    const participant = await (await Room.create('owned-fallback-sender')).join()
+    const seen: Sender[] = []
+    participant.listen((_data, from) => Reflect.set(from!.meta, 'name', 'listener mutation'))
+    participant.listen((_data, from) => seen.push(from!))
+    const meta = { name: 'owned' }
+    const raw = participant as unknown as { _deliverMessage(message: unknown): void }
+    raw._deliverMessage({ from: 'unknown', fromMeta: meta, fromIdentity: null, data: null })
+    meta.name = 'wire mutation'
+    expect(seen.map(({ meta }) => meta)).toEqual([{ name: 'owned' }])
+    expect(Object.isFrozen(seen[0]) && Object.isFrozen(seen[0]!.meta)).toBe(true)
   })
   it('keeps a client participant active so a rejected leave request can be retried', async () => {
     let leaveAttempts = 0
@@ -2602,11 +2622,13 @@ async function retainOnlyDepartedParticipant({ target, fake, registry, onClose, 
 async function dropJoinedRoomHandles({ target, registry, onClose, memberId }: GcFixture) {
   const room = wrapProxy(target)
   registry.register(room, onClose)
-  const stopped = (await room.join()).listen(() => {})
+  const member = await room.join()
+  const stopLocal = member.listen(() => {})
+  const stopped = member.onDemand(() => {})
   stopped()
   room.snapshot()
-  const stop = target._getRemote(memberId)!.subscribe(() => {})
-  return { stop, stopped, room: new WeakRef(room) }
+  const startRemote = () => target._getRemote(memberId)!.subscribe(() => {})
+  return { startRemote, stopLocal, stopped, room: new WeakRef(room) }
 }
 type OpenRecord = {
   receiver: BackendReceiver

@@ -6,7 +6,7 @@ import { makeDisposer, releaseSubordinate } from '../wrapProxy.js'
 import type { TELEFUNC_SHIELDS } from '../../node/shared/transformer/generateShield/shield-key.js'
 import { isPromise } from '../../utils/isPromise.js'
 import { DM_PARTICIPANT_LEFT, RoomError, toRoomFailure } from './errors.js'
-import { ownMetadata } from './model.js'
+import { ownLeaveCause, ownMetadata } from './model.js'
 import type { DmReply } from './protocol.js'
 import type {
   BinaryPublishOptions,
@@ -136,10 +136,10 @@ abstract class ParticipantBase implements LocalParticipant {
   }
   /** `from`/`fromMeta` come from the wire envelope; upgrades to the live `RemoteParticipant` when a room view exists. An empty `from` is the wire encoding of a room-authored message → `null`. */
   private _senderOf(msg: InboxMessage): Sender | null {
-    const { from, fromMeta, fromIdentity } = msg
+    const { from, fromMeta, fromIdentity: identity } = msg
     return from === ''
       ? null
-      : (this._resolveSender(from) ?? { id: from, meta: fromMeta ?? {}, identity: fromIdentity })
+      : (this._resolveSender(from) ?? Object.freeze({ id: from, meta: ownMetadata(fromMeta ?? {}), identity }))
   }
   private _fireInbox(msg: InboxMessage): void {
     const sender = this._senderOf(msg)
@@ -188,7 +188,7 @@ abstract class ParticipantBase implements LocalParticipant {
   _onLeft(cause: LeaveCause): void {
     this._left = true
     if (this._leftCause) return
-    this._leftCause = cause
+    const ownedCause = (this._leftCause = ownLeaveCause(cause))
     releaseSubordinate(this)
     // Held ack DMs will never be handled now — fail their senders instead of hanging them.
     const held = this._pendingInbox
@@ -196,7 +196,7 @@ abstract class ParticipantBase implements LocalParticipant {
     if (held) for (const entry of held) entry.ackResolve?.(DM_PARTICIPANT_LEFT)
     const cbs = [...this._leaveCbs]
     for (const unlisten of [...this._listenerCleanups]) unlisten()
-    for (const cb of cbs) this._invoke(cb, cause)
+    for (const cb of cbs) this._invoke(cb, ownedCause)
     this._wantedTracks.clear()
   }
   protected _assertActive(): void {
@@ -205,6 +205,7 @@ abstract class ParticipantBase implements LocalParticipant {
   private _register<T>(list: T[], cb: T): () => void {
     list.push(cb)
     return makeDisposer(() => {
+      void this // the active listener owns its participant; `makeDisposer` severs this edge
       const i = list.indexOf(cb)
       if (i >= 0) list.splice(i, 1)
     }, this._listenerCleanups)

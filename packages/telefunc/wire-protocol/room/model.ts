@@ -1,6 +1,7 @@
 export {
   isRecord,
   ownMetadata,
+  ownLeaveCause,
   stampNewer,
   leaveCauseFromWire,
   leaveCauseToWire,
@@ -26,6 +27,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function ownMetadata<T extends RoomMeta | ParticipantMeta>(meta: T): T {
   return Object.freeze({ ...meta }) as T
 }
+const ownLeaveCause = (cause: LeaveCause): LeaveCause => Object.freeze({ ...cause })
 
 /** Later timestamp wins; equal timestamps break deterministically by writer ID. */
 function stampNewer(a: { at: number; by: string }, b: { at: number; by: string }): boolean {
@@ -38,9 +40,9 @@ function leaveCauseFromWire(event: {
   reason?: unknown
 }): LeaveCause {
   if (event.cause === 'removed') {
-    return event.reason === undefined ? { type: 'removed' } : { type: 'removed', reason: event.reason }
+    return ownLeaveCause(event.reason === undefined ? { type: 'removed' } : { type: 'removed', reason: event.reason })
   }
-  return { type: event.cause ?? 'left' }
+  return ownLeaveCause({ type: event.cause ?? 'left' })
 }
 /** Encode a cause into leave-event fields — `'left'` is the wire default and travels as nothing. */
 function leaveCauseToWire(cause: LeaveCause): {
