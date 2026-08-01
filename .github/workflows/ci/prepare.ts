@@ -81,6 +81,7 @@ async function getJobs(testFiles: string[]): Promise<Job[]> {
     assert(ci)
     ci.jobs.forEach((jobSpec) => {
       assert(typeof jobSpec.name === 'string')
+      assert(jobSpec.setups.length > 0)
       jobSpec.setups.forEach((setup) => {
         assert(typeof setup.os === 'string')
         assert(typeof setup.node_version === 'string')
