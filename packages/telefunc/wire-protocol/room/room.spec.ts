@@ -642,7 +642,7 @@ describe('Room public behavior', () => {
     expect(events.at(-1)).toBe('leave:Alicia')
     expect((await observer.getParticipants({ hidden: true })).map((member) => member.id)).toEqual([hidden.id])
   })
-  it('excludes an expired unobserved member from static get and list presence', async () => {
+  it('rejects exact sends to an expired member and excludes it from static presence', async () => {
     const room = (await Room.create('expired-static-presence')) as ServerRoom
     const member = await room.join()
     const memberKey = roomMemberKvKey(room.id, member.id)
@@ -658,6 +658,9 @@ describe('Room public behavior', () => {
         },
       ]),
     ).resolves.toBe('committed')
+    const commitLane = vi.spyOn(driver, 'commitLane')
+    await expect(Room.send(room.id, { id: member.id }, 'post-crash')).rejects.toThrow('Participant not found')
+    expect(commitLane.mock.calls.some(([, , lane]) => lane.kind === 'inbox')).toBe(false)
     const loaded = await Room.get(room.id)
     expect(loaded.count).toBe(0)
     expect(loaded.isEmpty).toBe(true)

@@ -1,7 +1,6 @@
 export { Room }
 export type { RoomGuards }
 
-import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { assert, assertUsage } from '../../../utils/assert.js'
 import { isObject } from '../../../utils/isObject.js'
@@ -16,7 +15,6 @@ import {
   type RoomCtrlEnvelope,
   type RoomDmEnvelope,
   type RoomEnvelope,
-  type RoomMemberRecord,
 } from '../protocol.js'
 import type {
   AfterJoinHook,
@@ -43,6 +41,7 @@ import {
   evictMember,
   presenceCount,
   readCell,
+  readLiveMember,
   readMembers,
   requireRoom,
   resolveIdentityMembers,
@@ -52,7 +51,6 @@ import {
   SEMANTIC_LANE,
   commitRoomLane,
   configFromHead,
-  decodeRoomText,
   encodeRoomConfig,
   encodeRoomText,
   publishCtrl,
@@ -399,9 +397,9 @@ async function resolveParticipantRef(
       typeof target.id === 'string' && target.id.length > 0,
       'The participant { id } should be a non-empty string',
     )
-    const raw = await readCell(roomId, inc, roomMemberKvKey(roomId, target.id))
-    if (raw === null) throw new RoomError(`Participant not found: ${target.id}`)
-    return [{ memberId: target.id, identity: (parse(decodeRoomText(raw)) as RoomMemberRecord).identity }]
+    const member = await readLiveMember(roomId, inc, target.id)
+    if (member === null) throw new RoomError(`Participant not found: ${target.id}`)
+    return [{ memberId: target.id, identity: member.identity }]
   }
   assertUsage(
     isObject(target) && typeof target.identity === 'string' && target.identity.length > 0,

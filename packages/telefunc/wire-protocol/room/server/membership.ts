@@ -4,6 +4,7 @@ export {
   mutateCells,
   presenceCount,
   readCell,
+  readLiveMember,
   readMembers,
   requireRoom,
   resolveIdentityMembers,
@@ -54,6 +55,14 @@ async function readCellSet(
 async function readCell(roomId: string, inc: string, key: string): Promise<Uint8Array | null> {
   const { cells } = await readCellSet(roomId, inc, { keys: [key] })
   return cells.get(key) ?? null
+}
+
+async function readLiveMember(roomId: string, inc: string, id: string): Promise<RoomMemberRecord | null> {
+  const key = roomMemberKvKey(roomId, id)
+  const raw = await readCell(roomId, inc, key)
+  return raw === null
+    ? null
+    : readOrReapExpiredMember(roomId, inc, key, id, parse(decodeRoomText(raw)) as RoomMemberRecord)
 }
 
 async function mutateCells<T>(
@@ -179,7 +188,7 @@ async function resolveIdentityMembers(roomId: string, inc: string, identity: str
   for (const key of markers.cells.keys()) {
     const memberId = key.slice(prefix.length)
     const memberKey = roomMemberKvKey(roomId, memberId)
-    if (matches(await readCell(roomId, inc, memberKey))) {
+    if ((await readLiveMember(roomId, inc, memberId))?.identity === identity) {
       members.push(memberId)
       continue
     }
