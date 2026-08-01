@@ -119,8 +119,8 @@ export function disposeBackend(): Promise<void> {
 }
 
 function superviseBackendPair(pair: BackendDriverPair): ManagedBackendPair {
-  const broadcast = superviseBroadcastDriver(pair.broadcast)
-  const room = superviseRoomDriver(pair.room)
+  const broadcast = superviseBroadcastDriver(pair.driver)
+  const room = superviseRoomDriver(pair.driver)
   let disposal: Promise<void> | undefined
   return {
     broadcast,
@@ -176,8 +176,7 @@ function assertBackendDriverPair(pair: BackendDriverPair): void {
       `telefunc/backend: incompatible backend spiVersion ${String(pair.spiVersion)}; expected ${BACKEND_SPI_VERSION}`,
     )
   }
-  assertDriver(pair.broadcast, 'broadcast', ['publish'])
-  assertDriver(pair.room, 'room', ROOM_METHODS)
+  assertDriver(pair.driver, 'driver', ['publish', ...ROOM_METHODS])
   assertMethod(pair, 'dispose')
 }
 

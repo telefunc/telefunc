@@ -8,7 +8,6 @@ const BACKEND_SPI_VERSION = 1 as const
 
 type BackendDriverPair = {
   readonly spiVersion: typeof BACKEND_SPI_VERSION
-  readonly broadcast: BroadcastDriver
-  readonly room: RoomDriver
+  readonly driver: BroadcastDriver & RoomDriver
   dispose(): Promise<void>
 }

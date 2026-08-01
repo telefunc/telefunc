@@ -14,8 +14,7 @@ import { Abort } from '../../shared/Abort.js'
 let memoryState: MemoryBackendState
 const memoryPair = (driver: MemoryBackend): BackendDriverPair => ({
   spiVersion: BACKEND_SPI_VERSION,
-  broadcast: driver,
-  room: driver,
+  driver,
   dispose: () => driver.dispose(),
 })
 beforeEach(async () => {

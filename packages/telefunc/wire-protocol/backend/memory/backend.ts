@@ -36,8 +36,7 @@ export function createMemoryBackendPair(): BackendDriverPair {
   const driver = new MemoryBackend()
   return {
     spiVersion: BACKEND_SPI_VERSION,
-    broadcast: driver,
-    room: driver,
+    driver,
     dispose: () => driver.dispose(),
   }
 }

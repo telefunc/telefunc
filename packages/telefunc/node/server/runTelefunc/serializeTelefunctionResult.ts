@@ -130,7 +130,7 @@ function serializeTelefunctionResult(runContext: {
       requestContext.responseAbort.onAbort(abort)
     },
     extensionResponseTypes,
-    serverDialect.response,
+    serverDialect,
   )
 
   let httpResponseBody: string

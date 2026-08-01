@@ -121,8 +121,7 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
   }
   const backendPair: BackendDriverPair = {
     spiVersion: BACKEND_SPI_VERSION,
-    broadcast: cloudflareBackend,
-    room: cloudflareBackend,
+    driver: cloudflareBackend,
     dispose: () => cloudflareBackend.dispose(),
   }
   setDefaultBackend(() => backendPair, backendIdentity)

@@ -62,8 +62,7 @@ let driver: MemoryBackend
 let memoryState: MemoryBackendState
 const memoryPair = (value: MemoryBackend): BackendDriverPair => ({
   spiVersion: BACKEND_SPI_VERSION,
-  broadcast: value,
-  room: value,
+  driver: value,
   dispose: () => value.dispose(),
 })
 beforeEach(async () => {

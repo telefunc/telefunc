@@ -22,8 +22,7 @@ function createRedisBackendPair(options: RedisBackendOptions): BackendDriverPair
   const driver = new RedisBackend(options)
   return {
     spiVersion: BACKEND_SPI_VERSION,
-    broadcast: driver,
-    room: driver,
+    driver,
     dispose: () => driver.dispose(),
   }
 }

@@ -186,7 +186,7 @@ async function reviveResponse(
       }
     },
     extensionResponseTypes,
-    clientDialect.response,
+    clientDialect,
   )
 
   let parsed: unknown

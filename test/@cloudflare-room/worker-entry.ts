@@ -35,8 +35,7 @@ import {
 const publicRoomBackend = new CloudflareRoomBackend()
 const publicRoomPair: BackendDriverPair = {
   spiVersion: BACKEND_SPI_VERSION,
-  broadcast: publicRoomBackend,
-  room: publicRoomBackend,
+  driver: publicRoomBackend,
   dispose: () => publicRoomBackend.dispose(),
 }
 setDefaultBackend(() => publicRoomPair, 'cloudflare-room-ci-public')

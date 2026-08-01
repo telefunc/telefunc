@@ -130,8 +130,7 @@ import { MemoryBackend } from '../../../backend/memory/backend.js'
 
 const memoryPair = (driver: MemoryBackend): BackendDriverPair => ({
   spiVersion: BACKEND_SPI_VERSION,
-  broadcast: driver,
-  room: driver,
+  driver,
   dispose: () => driver.dispose(),
 })
 

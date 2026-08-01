@@ -26,8 +26,7 @@ function installCloudflareTransport(transport: CloudflareBroadcastTransport): vo
   const driver = new CloudflareRoomBackend(transport)
   const pair: BackendDriverPair = {
     spiVersion: BACKEND_SPI_VERSION,
-    broadcast: driver,
-    room: driver,
+    driver,
     dispose: () => driver.dispose(),
   }
   installBackend(() => pair)

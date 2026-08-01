@@ -34,9 +34,10 @@ describe('backend installation lifecycle', () => {
     const selected = memoryPair(new MemoryBackend())
     setDefaultBackend(() => selected)
     const current = getRoomBackend()
-    expect(() => installBackend(() => ({ ...memoryPair(new MemoryBackend()), room: {} }) as BackendDriverPair)).toThrow(
-      'missing required method "readHead"',
-    )
+    const incomplete = Object.assign(new MemoryBackend(), { readHead: undefined })
+    expect(() =>
+      installBackend(() => ({ ...memoryPair(new MemoryBackend()), driver: incomplete }) as BackendDriverPair),
+    ).toThrow('missing required method "readHead"')
     expect(getRoomBackend()).toBe(current)
   })
   it('disposes both managers before invoking the pair disposer exactly once', async () => {
@@ -73,5 +74,5 @@ describe('backend installation lifecycle', () => {
   })
 })
 function memoryPair(driver: MemoryBackend, dispose = () => driver.dispose()): BackendDriverPair {
-  return { spiVersion: BACKEND_SPI_VERSION, broadcast: driver, room: driver, dispose }
+  return { spiVersion: BACKEND_SPI_VERSION, driver, dispose }
 }
