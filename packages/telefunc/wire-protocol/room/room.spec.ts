@@ -1426,6 +1426,7 @@ describe('client Room lifecycle', () => {
       expect(retained.room.deref()).not.toBeUndefined()
       stop()
       await forceRoomGc()
+      expect(retained.snapshot.meta).toEqual({})
       retained.stopped()
       expect(retained.room.deref()).toBeUndefined()
       expect(gc.closed()).toBe(1)
@@ -2626,9 +2627,8 @@ async function dropJoinedRoomHandles({ target, registry, onClose, memberId }: Gc
   const stopLocal = member.listen(() => {})
   const stopped = member.onDemand(() => {})
   stopped()
-  room.snapshot()
   const startRemote = () => target._getRemote(memberId)!.subscribe(() => {})
-  return { startRemote, stopLocal, stopped, room: new WeakRef(room) }
+  return { startRemote, stopLocal, stopped, snapshot: room.snapshot(), room: new WeakRef(room) }
 }
 type OpenRecord = {
   receiver: BackendReceiver
