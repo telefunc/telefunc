@@ -1444,6 +1444,26 @@ describe('client Room lifecycle', () => {
     expect(reconcile(['screen', 'camera'])).toBe(false)
     expect(state.membershipVersion).toBe(version + 1)
   })
+  it('reconciles every member to the final state and preserves semantic joins', () => {
+    const alice = { id: crypto.randomUUID(), meta: {}, joinedAt: 1, metaSeq: 0 }
+    const bob = { id: crypto.randomUUID(), meta: {}, joinedAt: 2, metaSeq: 0 }
+    const carol = { id: crypto.randomUUID(), meta: {}, joinedAt: 3, metaSeq: 0 }
+    const state = new RoomState({
+      roomId: 'reconcile-change-count',
+      meta: {},
+      seed: { members: [alice] },
+      updateStamp: { at: 0, by: '' },
+      onListenersChanged: () => {},
+      onCallbackError: () => {},
+    })
+    const observed: string[][] = []
+    const joins: string[] = []
+    state.onChange(() => observed.push(state.snapshotMembers().map((member) => member.id)))
+    state.onJoin((member) => joins.push(member.id))
+    state.reconcileCompleteRoster([alice, bob, carol])
+    expect(observed.at(-1)).toEqual([alice.id, bob.id, carol.id])
+    expect(joins).toEqual([bob.id, carol.id])
+  })
   it('reports rejected async RoomState callbacks without awaiting delivery', async () => {
     const memberId = crypto.randomUUID()
     const errors: unknown[] = []

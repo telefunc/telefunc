@@ -140,11 +140,6 @@ class RoomState {
   private _snapshotCache: { version: number; value: WeakRef<RoomSnapshotView> } | null = null
   private readonly _listenerCleanups = new Map<object, Set<() => void>>()
   private readonly _changeCbs: Array<() => void> = []
-  /** Reconcile coalescing: while a batch is open, `_bumpState` still advances the version (so
-   *  `snapshot()` recomputes) but holds the single `onChange` until the batch closes — a reconcile that
-   *  touched N members invalidates the view once, not once per member. Re-entrant via the depth count. */
-  private _changeBatchDepth = 0
-  private _changeDeferred = false
   private readonly _members = new Map<string, MemberEntry>()
   private readonly _onListenersChanged: () => void
   private readonly _onCallbackError: (err: unknown) => void
@@ -333,27 +328,10 @@ class RoomState {
     this._snapshotCache = { version: this._stateVersion, value: new WeakRef(value) }
     return value
   }
-  /** State changed observably — invalidate the snapshot (via the version) and tell `onChange`
-   *  subscribers, unless a change batch is open, in which case the single notification is deferred to
-   *  its close (see `_batchChange`). */
+  /** State changed observably — invalidate the snapshot and tell `onChange` subscribers. */
   private _bumpState(): void {
     this._stateVersion++
-    if (this._changeBatchDepth > 0) this._changeDeferred = true
-    else this._fireAll(this._changeCbs)
-  }
-  /** Run `fn` with `onChange` coalesced: bumps inside still advance the version, but the subscriber notification fires once when the outermost batch closes, and only if something actually bumped.
-   * Semantic callbacks (`onJoin`/`onLeave`/`onUpdate`) still fire per event — only the snapshot- invalidation signal is batched.
-   */
-  private _batchChange<T>(fn: () => T): T {
-    this._changeBatchDepth++
-    try {
-      return fn()
-    } finally {
-      if (--this._changeBatchDepth === 0 && this._changeDeferred) {
-        this._changeDeferred = false
-        this._fireAll(this._changeCbs)
-      }
-    }
+    this._fireAll(this._changeCbs)
   }
   /** Membership changed: guard async KV reconciles against going stale, and narrate the change. */
   private _bumpMembership(): void {
@@ -440,20 +418,18 @@ class RoomState {
   applyClosed(cause: LeaveCause = { type: 'closed' }): void {
     if (this.closed) return
     cause = ownLeaveCause(cause)
-    this._batchChange(() => {
-      const departed = [...this._members.values()]
-      this.closed = true
-      this._rosterKnown = true // authoritatively empty
-      this._members.clear()
-      this._bumpMembership()
-      // State and snapshot are already closed-and-empty when cleanup callbacks run.
-      for (const entry of departed) {
-        entry.left = true
-        entry.leaveCause = cause
-        this._fireAll(entry.leaveCbs, cause)
-        this._releaseEntryListeners(entry)
-      }
-    })
+    const departed = [...this._members.values()]
+    this.closed = true
+    this._rosterKnown = true // authoritatively empty
+    this._members.clear()
+    this._bumpMembership()
+    // State and snapshot are already closed-and-empty when cleanup callbacks run.
+    for (const entry of departed) {
+      entry.left = true
+      entry.leaveCause = cause
+      this._fireAll(entry.leaveCbs, cause)
+      this._releaseEntryListeners(entry)
+    }
     this._fireAll(this._closeCbs)
     this._releaseAllListeners()
   }
@@ -514,10 +490,8 @@ class RoomState {
     return this._reconcileRoster(members, true)
   }
   private _reconcileRoster(roster: MemberSnapshot[], preserveMissingHidden: boolean): boolean {
-    return this._batchChange(() => {
-      if (!this._rosterKnown) return this._loadInitialRoster(roster, preserveMissingHidden)
-      return this._reconcileKnownRoster(roster, preserveMissingHidden)
-    })
+    if (!this._rosterKnown) return this._loadInitialRoster(roster, preserveMissingHidden)
+    return this._reconcileKnownRoster(roster, preserveMissingHidden)
   }
   private _loadInitialRoster(roster: MemberSnapshot[], preserveMissingHidden: boolean): boolean {
     this._rosterKnown = true
