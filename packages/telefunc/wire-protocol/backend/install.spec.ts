@@ -54,28 +54,15 @@ describe('backend installation lifecycle', () => {
     await first
     expect(dispose).toHaveBeenCalledOnce()
   })
-  it('reports replacement cleanup failure and includes it in the explicit disposal barrier', async () => {
-    const failure = new Error('old backend cleanup failed')
-    let rejectOld!: (error: Error) => void
-    const oldDisposal = new Promise<void>((_resolve, reject) => {
-      rejectOld = reject
-    })
-    const report = vi.spyOn(console, 'error').mockImplementation(() => {})
-    setDefaultBackend(() => memoryPair(new MemoryBackend(), () => oldDisposal))
-    installBackend(() => memoryPair(new MemoryBackend()))
-    const disposal = disposeBackend()
-    let settled = false
-    void disposal.then(
-      () => (settled = true),
-      () => (settled = true),
+  it('rejects a different backend after acquisition and disposes the rejected candidate', async () => {
+    const active = memoryPair(new MemoryBackend())
+    const rejectedDispose = vi.fn(async () => {})
+    setDefaultBackend(() => active)
+    expect(() => installBackend(() => memoryPair(new MemoryBackend(), rejectedDispose))).toThrow(
+      'a backend is already active',
     )
-    await Promise.resolve()
-    expect(settled).toBe(false)
-    rejectOld(failure)
-    await expect(disposal).rejects.toBe(failure)
-    await vi.waitFor(() =>
-      expect(report).toHaveBeenCalledWith('telefunc/backend: replaced backend disposal failed', failure),
-    )
+    await vi.waitFor(() => expect(rejectedDispose).toHaveBeenCalledOnce())
+    expect(getRoomBackend()).toBeDefined()
   })
 })
 function memoryPair(driver: MemoryBackend, dispose = () => driver.dispose()): BackendDriverPair {

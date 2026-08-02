@@ -328,11 +328,10 @@ describe('cloudflare adapter entrypoint', () => {
     expect(getRoomBackend()).toBe(selected)
   })
 
-  it('lets an explicit Room backend override an already-installed Cloudflare default', () => {
+  it('rejects an explicit backend installed after the Cloudflare default is acquired', () => {
     new Telefunc()
-    const explicit = new MemoryBackend()
-    installBackend(() => memoryPair(explicit))
     const selected = getRoomBackend()
+    expect(() => installBackend(() => memoryPair(new MemoryBackend()))).toThrow('a backend is already active')
     expect(getRoomBackend()).toBe(selected)
   })
 

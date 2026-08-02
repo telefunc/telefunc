@@ -2116,19 +2116,6 @@ describe('memory Backend SPI contract', () => {
     const info = { seq: 0x1_0000_0007, timestamp: 0x2_0000_0009 }
     expect(decodeOrderingFrame(encodeOrderingFrame(payload, info))).toEqual({ payload, info })
   })
-  it('tracks raw-driver identity rather than wrapper identity during replacement', async () => {
-    await disposeBackend()
-    const raw = new MemoryBackend()
-    const dispose = vi.spyOn(raw, 'dispose')
-    const selected = memoryPair(raw)
-    setDefaultBackend(() => selected, {})
-    const first = getRoomBackend()
-    setDefaultBackend(() => selected, {})
-    const second = getRoomBackend()
-    await expect(first.readHead('same-driver')).resolves.toBe(null)
-    expect(second).toBe(first)
-    expect(dispose).not.toHaveBeenCalled()
-  })
 })
 describe('shared subscription supervision', () => {
   it('owns fan-out, refcount, epochs, and raw terminal signalling once', async () => {

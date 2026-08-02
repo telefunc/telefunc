@@ -26,13 +26,13 @@ type BackendState =
     }
   | { phase: 'disposing'; promise: Promise<void> }
 
-type BackendStore = { current: BackendState; retiredDisposals?: Set<Promise<void>> }
+type BackendStore = { current: BackendState }
 
 const state = getGlobalObject<BackendStore>('wire-protocol/backend/install.ts', () => ({ current: { phase: 'empty' } }))
-const retiredDisposals = (state.retiredDisposals ??= new Set())
 
 const INSTALLING_ERROR = 'telefunc/backend: the backend is still installing; retry after installation settles'
 const DISPOSING_ERROR = 'telefunc/backend: the backend is still disposing and cannot be acquired or installed yet'
+const REPLACEMENT_ERROR = 'telefunc/backend: a backend is already active; dispose it before installing another'
 
 /** Lazily installs one backend per isolate; repeated entry evaluation reuses the canonical instance. */
 export function installBackend(factory: BackendFactory): void {
@@ -47,6 +47,7 @@ export function setDefaultBackend(factory: BackendFactory, identity: unknown = f
   if (current.phase === 'ready' && current.selection === 'explicit') return
   if (current.phase === 'ready' && current.selection === 'default' && Object.is(current.defaultIdentity, identity))
     return
+  if (current.phase === 'ready') throw new Error(REPLACEMENT_ERROR)
   selectBackend(factory, 'default', identity)
 }
 
@@ -75,7 +76,13 @@ function selectBackend(
     return current.backend
   }
 
-  if (current.phase === 'ready') retireBackend(current.backend)
+  if (current.phase === 'ready') {
+    state.current = current
+    void Promise.resolve(pair.dispose()).catch((error) =>
+      console.error('telefunc/backend: rejected backend disposal failed', error),
+    )
+    throw new Error(REPLACEMENT_ERROR)
+  }
   const backend = superviseBackendPair(pair)
   state.current = {
     phase: 'ready',
@@ -104,13 +111,11 @@ function getBackendPair(): ManagedBackendPair {
 /** Disposes the canonical backend behind one shared promise, blocking acquisition until settlement. */
 export function disposeBackend(): Promise<void> {
   const current = state.current
-  if (current.phase === 'empty' && retiredDisposals.size === 0) return Promise.resolve()
+  if (current.phase === 'empty') return Promise.resolve()
   if (current.phase === 'installing') return Promise.reject(new Error(INSTALLING_ERROR))
   if (current.phase === 'disposing') return current.promise
 
-  const disposals = [...retiredDisposals]
-  if (current.phase === 'ready') disposals.push(Promise.resolve().then(() => current.backend.dispose()))
-  const promise = settleDisposals(disposals)
+  const promise = current.backend.dispose()
   const disposing: Extract<BackendState, { phase: 'disposing' }> = { phase: 'disposing', promise }
   state.current = disposing
   const clear = () => clearDisposalPhase(disposing)
@@ -127,26 +132,6 @@ function superviseBackendPair(pair: BackendDriverPair): ManagedBackendPair {
     room,
     dispose: () => (disposal ??= Promise.all([broadcast.dispose(), room.dispose()]).then(() => pair.dispose())),
   }
-}
-
-function retireBackend(backend: ManagedBackendPair): void {
-  const disposal = Promise.resolve().then(() => backend.dispose())
-  retiredDisposals.add(disposal)
-  void disposal.then(
-    () => retiredDisposals.delete(disposal),
-    (error) => {
-      retiredDisposals.delete(disposal)
-      console.error('telefunc/backend: replaced backend disposal failed', error)
-    },
-  )
-}
-
-async function settleDisposals(disposals: Promise<void>[]): Promise<void> {
-  const errors = (await Promise.allSettled(disposals)).flatMap((result) =>
-    result.status === 'rejected' ? [result.reason] : [],
-  )
-  if (errors.length === 1) throw errors[0]
-  if (errors.length > 1) throw new AggregateError(errors, 'telefunc/backend: multiple backend disposals failed')
 }
 
 function clearDisposalPhase(disposal: Extract<BackendState, { phase: 'disposing' }>): void {
