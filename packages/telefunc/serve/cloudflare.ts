@@ -8,7 +8,7 @@ import crossws from 'crossws/adapters/cloudflare'
 import { getTelefuncChannelHooks } from '../wire-protocol/server/ws.js'
 import { getServerConfig, enableChannelTransports } from '../node/server/serverConfig.js'
 import { serve as serveTelefunc } from '../node/server/telefunc.js'
-import { BACKEND_SPI_VERSION } from '../wire-protocol/backend/driver-pair.js'
+import { BACKEND_SPI_VERSION, type BackendDriverPair } from '../wire-protocol/backend/driver-pair.js'
 import { setDefaultBackend } from '../wire-protocol/backend/install.js'
 import {
   CloudflareBroadcastAuthorityState,
@@ -47,11 +47,15 @@ import {
   type RoomShardFanoutRequest,
 } from '../wire-protocol/server/adapter/cloudflare/room/fanout.js'
 import { isAsyncMode } from '../node/server/context/context.js'
+import { getGlobalObject } from '../utils/getGlobalObject.js'
 import { isTelefuncRequest } from './shared.js'
 
 const SHARD_TOKEN_TTL_SECONDS = 86400
 const SESSION_RESET_CLOSE_CODE = 1012
 const SESSION_RESET_CLOSE_REASON = 'Telefunc session reset; reconnect'
+const cloudflareBackendSlot = getGlobalObject<{
+  current?: { identity: string; backend: CloudflareRoomBackend }
+}>('serve/cloudflare.backend.ts', () => ({}))
 
 type CloudflareOptions = {
   bindingName?: string
@@ -104,14 +108,23 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
     instanceName: baseInstanceName,
     hooks: getTelefuncChannelHooks(),
   })
-  const createBackend = () => new CloudflareRoomBackend(new CloudflareBroadcastTransport({ baseInstanceName, scale }))
-  let cloudflareBackend: CloudflareRoomBackend | undefined
-  setDefaultBackend(() => {
-    const backend = createBackend()
-    cloudflareBackend = backend
-    return { spiVersion: BACKEND_SPI_VERSION, driver: backend, dispose: () => backend.dispose() }
-  })
-  cloudflareBackend ??= createBackend()
+  // Stable configuration shares the raw driver without displacing an explicit backend in either call order.
+  const backendIdentity = cloudflareBackendIdentity(baseInstanceName, scale)
+  let cloudflareBackend = cloudflareBackendSlot.current?.backend
+  if (
+    cloudflareBackendSlot.current?.identity !== backendIdentity ||
+    cloudflareBackend === undefined ||
+    cloudflareBackend.disposed
+  ) {
+    cloudflareBackend = new CloudflareRoomBackend(new CloudflareBroadcastTransport({ baseInstanceName, scale }))
+    cloudflareBackendSlot.current = { identity: backendIdentity, backend: cloudflareBackend }
+  }
+  const backendPair: BackendDriverPair = {
+    spiVersion: BACKEND_SPI_VERSION,
+    driver: cloudflareBackend,
+    dispose: () => cloudflareBackend.dispose(),
+  }
+  setDefaultBackend(() => backendPair, backendIdentity)
   const broadcast = cloudflareBackend.broadcast
 
   function getBinding(env: Cloudflare.Env): DurableObjectNamespace | undefined {
@@ -292,4 +305,12 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
     TelefuncDurableObject,
     TelefuncRoomDurableObject,
   }
+}
+
+function cloudflareBackendIdentity(baseInstanceName: string, scale: CloudflareScale | undefined): string {
+  const normalizedScale =
+    typeof scale === 'object' && scale !== null
+      ? Object.entries(scale).sort(([left], [right]) => left.localeCompare(right))
+      : (scale ?? null)
+  return JSON.stringify([baseInstanceName, normalizedScale])
 }
