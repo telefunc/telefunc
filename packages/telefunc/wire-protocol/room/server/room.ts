@@ -116,6 +116,7 @@ type SubscriptionPlan = {
   needsRoster: boolean
   binaryPairs: Array<[string, string]>
 }
+type Admission = { id: string; meta: ParticipantMeta; identity: string | null; joinedAt: number; hidden: boolean }
 
 /**
  * A Server Room is not a channel; each serialization attaches a fresh wire-unique stub.
@@ -200,16 +201,12 @@ class ServerRoom extends RoomStateView implements Room {
 
   async join(options?: JoinOptions): Promise<LocalParticipant> {
     const { meta, selfDelivery, identity, hidden } = normalizeJoinOptions(options)
-    let participant!: ServerLocalParticipant
-    await this._admitMember(
-      meta,
-      identity,
-      (id) => {
-        participant = new ServerLocalParticipant(this, id, meta, selfDelivery, identity)
-        this._localParticipants.set(id, participant)
-      },
-      hidden,
-    )
+    await this._assertOpen()
+    const admission = { id: crypto.randomUUID(), meta, identity, joinedAt: Date.now(), hidden }
+    await this._guardAdmission(admission)
+    const participant = new ServerLocalParticipant(this, admission.id, meta, selfDelivery, identity)
+    this._localParticipants.set(admission.id, participant)
+    await this._commitAdmission(admission)
     return participant
   }
 
@@ -229,21 +226,14 @@ class ServerRoom extends RoomStateView implements Room {
     return this._state.snapshot()
   }
 
-  /** Both join paths register ownership before inbox/heartbeat sync and join announcement. */
-  private async _admitMember(
-    meta: ParticipantMeta,
-    identity: string | null,
-    track: (id: string) => void,
-    hidden = false,
-  ): Promise<{ id: string; joinedAt: number }> {
-    await this._assertOpen()
-    const id = crypto.randomUUID()
-    const joinedAt = Date.now()
-    // Admission policy runs first, on the definitive member ID — a rejected join writes nothing.
+  private async _guardAdmission({ id, meta, identity, hidden }: Admission): Promise<void> {
     const onBeforeJoin = this._guards?.onBeforeJoin
     if (!hidden && onBeforeJoin) await onBeforeJoin({ id, meta, identity })
+  }
+
+  /** Both join paths register ownership before inbox/heartbeat sync and join announcement. */
+  private async _commitAdmission({ id, meta, identity, joinedAt, hidden }: Admission): Promise<void> {
     this._pendingAdmissions.add(id)
-    track(id)
     this._syncSubs()
     let created = false
     try {
@@ -274,10 +264,9 @@ class ServerRoom extends RoomStateView implements Room {
       this._applyLeave(id, { type: 'left' })
       throw error
     }
-    if (hidden) return { id, joinedAt } // announced above; a hidden participant has no post-join hook
+    if (hidden) return // announced above; a hidden participant has no post-join hook
     const onAfterJoin = this._guards?.onAfterJoin
     if (onAfterJoin) await runAfterHook(() => onAfterJoin({ id, meta, identity }, { joinedAt }))
-    return { id, joinedAt }
   }
 
   /** Persist the member cells for a join, guarding against a concurrent `Room.close()`. */
@@ -904,11 +893,13 @@ class ServerRoom extends RoomStateView implements Room {
   }
   private async _joinStubMember(stub: RoomStubChannel, req: Extract<RoomStubRequest, { __r: 'req-join' }>) {
     const meta = isObject(req.meta) ? req.meta : {}
-    const { id, joinedAt } = await this._admitMember(meta, null, (id) => {
-      stub._stubMembers.add(id)
-      if (req.selfDelivery === false) stub._selfSuppressed.add(id)
-    })
-    return { id, joinedAt }
+    await this._assertOpen()
+    const admission = { id: crypto.randomUUID(), meta, identity: null, joinedAt: Date.now(), hidden: false }
+    await this._guardAdmission(admission)
+    stub._stubMembers.add(admission.id)
+    if (req.selfDelivery === false) stub._selfSuppressed.add(admission.id)
+    await this._commitAdmission(admission)
+    return { id: admission.id, joinedAt: admission.joinedAt }
   }
   private async _sendStubDm(stub: RoomStubChannel, req: Extract<RoomStubRequest, { __r: 'req-dm' }>) {
     const id = requireStubMember(stub, req.id)
