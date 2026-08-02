@@ -89,6 +89,18 @@ assertIsNotBrowser()
 const ROOM_REPLAN_LIMIT = 5
 const SERVER_ROOM_BRAND: unique symbol = Symbol.for('telefunc.ServerRoom')
 
+function decodeSemanticEnvelope(serialized: string): RoomEnvelope | undefined {
+  try {
+    const envelope: unknown = parse(serialized)
+    return hasRoomTag(envelope) ? (envelope as RoomEnvelope) : undefined
+  } catch {
+    return undefined
+  }
+}
+function shouldRelayMemberData(stub: RoomStubChannel, from: string): boolean {
+  return stub._wantsTextFrom(from) && !stub._selfSuppressed.has(from)
+}
+
 /**
  * A Server Room is not a channel; each serialization attaches a fresh wire-unique stub.
  * Repeated serialization preserves the domain `room.id` while channel IDs stay unique.
@@ -515,19 +527,16 @@ class ServerRoom extends RoomStateView implements Room {
     const record = parse(decodeRoomText(raw)) as RoomMemberRecord
     return { id, meta: record.meta, identity: record.identity ?? null }
   }
-
   private async _openConfig(): Promise<RoomConfigRecord | null> {
     const current = await getRoomBackend().readHead(this.id)
     if (current === null || current.head.state !== 'open' || current.head.currentInc !== this._inc) return null
     return configFromHead(current.head)
   }
-
   private async _assertOpen(): Promise<void> {
     if (this._state.closed || (await this._openConfig()) === null) {
       throw new RoomError(`Room is closed: ${this.id}`)
     }
   }
-
   private async _throwStaleMembers(...ids: string[]): Promise<never> {
     await this._assertOpen()
     for (const id of ids) {
@@ -537,7 +546,6 @@ class ServerRoom extends RoomStateView implements Room {
     }
     throw new RoomError(`Room is closed: ${this.id}`)
   }
-
   private _onCtrlMessage(serialized: string, rawInfo: WirePublishInfo): void {
     let envelope: unknown
     try {
@@ -560,17 +568,13 @@ class ServerRoom extends RoomStateView implements Room {
     }
     const wasClosed = this._state.closed
     const serverOnly = this._hidesFromClients(event)
-
     this._applyCtrl(event)
-
     if (this._stubs.size > 0 && !serverOnly) {
       const wireText = encodePublishText(serialized, rawInfo)
       for (const stub of this._stubs) stub._relayPublishText(wireText)
     }
-
     if (this._state.closed && !wasClosed) this._teardown()
   }
-
   private _hidesFromClients(event: RoomEnvelope): boolean {
     switch (event.__r) {
       case 'join':
@@ -584,49 +588,39 @@ class ServerRoom extends RoomStateView implements Room {
     }
   }
 
-  private _onTextData(serialized: string, rawInfo: WirePublishInfo): void {
-    let envelope: unknown
-    try {
-      envelope = parse(serialized)
-    } catch {
-      return // junk on the semantic lane
-    }
-    if (!hasRoomTag(envelope)) return
-    if (envelope.__r === 'announce') {
-      const announce = envelope as Extract<RoomEnvelope, { __r: 'announce' }>
-      const info = makePublishInfo(this.id, rawInfo.seq, rawInfo.timestamp)
-      this._state.applyAnnounce(announce.data, info)
-      if (this._stubs.size > 0) {
-        const wireText = encodePublishText(serialized, rawInfo)
-        for (const stub of this._stubs) {
-          if (stub._wantsAnnounce) stub._relayTextLive(wireText, '', rawInfo)
-        }
-      }
-      return
-    }
-    if (envelope.__r !== 'data') return
-    const event = envelope as RoomDataEnvelope
+  private _applyAnnouncement(announce: Extract<RoomEnvelope, { __r: 'announce' }>, serialized: string, rawInfo: WirePublishInfo): void {
+    const info = makePublishInfo(this.id, rawInfo.seq, rawInfo.timestamp)
+    this._state.applyAnnounce(announce.data, info)
+    const wireText = encodePublishText(serialized, rawInfo)
+    for (const stub of this._stubs) if (stub._wantsAnnounce) stub._relayTextLive(wireText, '', rawInfo)
+  }
+
+  private _applyMemberData(event: RoomDataEnvelope, rawInfo: WirePublishInfo): void {
     const info = makePublishInfo(this.id, rawInfo.seq, rawInfo.timestamp)
     if (!this._suppress(event.from))
       this._state.applyData(event.from, event.fromMeta, event.fromIdentity ?? null, event.data, info)
     this._healUnknownSender(event.from)
+  }
 
-    if (this._stubs.size > 0) {
-      const wireText = encodePublishText(serialized, rawInfo)
-      for (const stub of this._stubs) {
-        // A stub still awaiting its client's first text want holds the message server-side (bounded, drop-oldest) instead of relaying — flushed selectively once the want declares the selector.
-        if (stub._tailPending !== null) {
-          stub._holdTail(serialized, rawInfo, event.from)
-          continue
-        }
-        if (!stub._wantsTextFrom(event.from)) continue
-        if (stub._selfSuppressed.has(event.from)) continue
-        stub._relayTextLive(wireText, event.from, rawInfo)
-      }
-    } else if (this._tail) {
-      // Tail, pre-attach: no stub yet, but `Room.get({ tail })` opened ingestion — hold the message so the stub inherits it on attach. Bounded by count and total size; the client dedupes any overlap.
+  private _relayMemberData(serialized: string, event: RoomDataEnvelope, rawInfo: WirePublishInfo): void {
+    if (this._stubs.size === 0) {
+      if (!this._tail) return
       pushBoundedTail(this._tailHold, { serialized, ord: rawInfo, from: event.from })
+      return
     }
+    const wireText = encodePublishText(serialized, rawInfo)
+    for (const stub of this._stubs) {
+      if (stub._tailPending !== null) stub._holdTail(serialized, rawInfo, event.from)
+      else if (shouldRelayMemberData(stub, event.from)) stub._relayTextLive(wireText, event.from, rawInfo)
+    }
+  }
+  private _onTextData(serialized: string, rawInfo: WirePublishInfo): void {
+    const envelope = decodeSemanticEnvelope(serialized)
+    if (!envelope) return
+    if (envelope.__r === 'announce') return this._applyAnnouncement(envelope, serialized, rawInfo)
+    if (envelope.__r !== 'data') return
+    this._applyMemberData(envelope, rawInfo)
+    this._relayMemberData(serialized, envelope, rawInfo)
   }
 
   private _onBinary(framed: Uint8Array, rawInfo: WirePublishInfo): void {
