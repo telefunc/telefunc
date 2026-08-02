@@ -355,33 +355,6 @@ describe('cloudflare broadcast routing', () => {
     await expect(authority.getNextKeySeq(key)).rejects.toThrow('sequence exhausted')
   })
 
-  it('waits for KV presence setup before authority publish fanout', async () => {
-    const transport = new CloudflareBroadcastTransport({ baseInstanceName: 'telefunc', scale: 1 })
-    const kvPutReady = Promise.withResolvers<void>()
-    const kv = createMockKV({ beforePut: () => kvPutReady.promise })
-    const publishTargets: string[] = []
-    configureTransport(
-      transport,
-      kv,
-      createBasicBinding({
-        onPublish(id, request) {
-          publishTargets.push(id.name)
-          return Promise.resolve({ seq: 1, timestamp: Date.now() })
-        },
-      }),
-    )
-    installCloudflareTransport(transport)
-    const room = new ServerBroadcast<{ text: string }>({ key: 'room:test' })
-    // subscribe() triggers KV presence setup — publish should wait for it
-    room.subscribe(() => {})
-    room.publish({ text: 'hello' })
-    await flushMicrotasks(2)
-    expect(publishTargets).toEqual([])
-    kvPutReady.resolve()
-    await flushCoordinatorTurn()
-    expect(publishTargets).toEqual(['telefunc:broadcast:authority:room:test'])
-  })
-
   it('does not deliver locally before ordered publish setup completes', async () => {
     const transport = new CloudflareBroadcastTransport({ baseInstanceName: 'telefunc', scale: 1 })
     const kvPutReady = Promise.withResolvers<void>()

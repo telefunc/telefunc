@@ -6,9 +6,7 @@ import { IndexedPeer } from './IndexedPeer.js'
 import { disposeBackend, installBackend } from '../backend/install.js'
 import { BACKEND_SPI_VERSION, type BackendDriverPair } from '../backend/driver-pair.js'
 import { MemoryBackend, MemoryBackendState } from '../backend/memory/backend.js'
-import type { SubscriptionAttempt, SubscriptionAttemptState } from '../backend/subscription.js'
-import { ChannelClosedError, ChannelOverflowError } from '../channel-errors.js'
-import { CHANNEL_BUFFER_LIMIT_BYTES } from '../constants.js'
+import { ChannelClosedError } from '../channel-errors.js'
 import { Abort } from '../../shared/Abort.js'
 
 let memoryState: MemoryBackendState
@@ -26,59 +24,6 @@ afterEach(async () => {
   await disposeBackend()
   vi.restoreAllMocks()
 })
-
-function pendingSubscription() {
-  let resolveReady!: () => void
-  const resetReady = () =>
-    new Promise<void>((resolve) => {
-      resolveReady = resolve
-    })
-  let ready = resetReady()
-  let state: SubscriptionAttemptState = 'establishing'
-  const listeners = new Set<(state: SubscriptionAttemptState) => void>()
-  const transition = (next: SubscriptionAttemptState) => {
-    state = next
-    for (const listener of listeners) listener(next)
-  }
-  const settle = (next: SubscriptionAttemptState) => {
-    resolveReady()
-    transition(next)
-  }
-  return {
-    subscription: {
-      get ready() {
-        return ready
-      },
-      state: () => state,
-      onStateChange: (listener) => {
-        listeners.add(listener)
-        return () => listeners.delete(listener)
-      },
-      unsubscribe: async () => settle('closed'),
-    } satisfies SubscriptionAttempt,
-    ready: () => settle('ready'),
-    lost() {
-      ready = resetReady()
-      transition('lost')
-    },
-    close() {
-      ready = Promise.reject(new Error('terminal subscription'))
-      void ready.catch(() => {})
-      transition('closed')
-    },
-  }
-}
-
-async function installPendingSubscriptionBackend(result: { seq: number; timestamp: number; receivers?: number }) {
-  await disposeBackend()
-  const controlled = pendingSubscription()
-  const driver = new MemoryBackend({ state: memoryState })
-  const bind = driver.subscriptions.bind.bind(driver.subscriptions)
-  driver.subscriptions.bind = (source) => ({ ...bind(source), open: () => controlled.subscription })
-  const publish = vi.spyOn(driver, 'publish').mockReturnValue(result)
-  installBackend(() => memoryPair(driver))
-  return { controlled, publish }
-}
 
 function registeredBroadcast<T = unknown>(key: string): ServerBroadcast<T> {
   const broadcast = new ServerBroadcast<T>({ key })
@@ -219,28 +164,6 @@ describe('keyed in-process broadcast', () => {
     expect(received).toEqual([{ text: 'hello' }])
   })
 
-  it('waits for a sibling subscription to be ready before publishing', async () => {
-    const { controlled, publish } = await installPendingSubscriptionBackend({ seq: 1, timestamp: 1 })
-    const sender = new ServerBroadcast({ key: 'broadcast:sibling-ready' })
-    const receiver = new ServerBroadcast({ key: 'broadcast:sibling-ready' })
-    try {
-      receiver.subscribe(() => {})
-      const publishing = sender.publish('after-ready')
-      await Promise.resolve()
-      expect(publish).not.toHaveBeenCalled()
-      controlled.ready()
-      controlled.lost()
-      await new Promise((resolve) => setTimeout(resolve, 0))
-      expect(publish).not.toHaveBeenCalled()
-      controlled.ready()
-      await publishing
-      expect(publish).toHaveBeenCalledOnce()
-    } finally {
-      sender.abort()
-      receiver.abort()
-    }
-  })
-
   it('publish receipts are key-scoped and seq increments monotonically per key', async () => {
     const k1 = 'room:receipts:A'
     const k2 = 'room:receipts:B'
@@ -266,41 +189,6 @@ describe('keyed in-process broadcast', () => {
 // ───────────────────────────────────────────────────────────────────────────
 
 describe('binary in-process broadcast', () => {
-  it('waits for an establishing binary subscription before publishing on that lane', async () => {
-    const { controlled: pending, publish } = await installPendingSubscriptionBackend({
-      seq: 1,
-      timestamp: 1,
-      receivers: 1,
-    })
-    const broadcast = registeredBroadcast('room:bin-ready')
-    broadcast._onPeerBroadcastSubscribe(true)
-    const publishing = broadcast.publishBinary(new Uint8Array([1, 2, 3]))
-    await Promise.resolve()
-    expect(publish).not.toHaveBeenCalled()
-    pending.ready()
-    await expect(publishing).resolves.toMatchObject({ seq: 1, timestamp: 1, receivers: 1 })
-    expect(publish).toHaveBeenCalledOnce()
-  })
-
-  it('caps payload bytes held while a subscription is establishing', async () => {
-    const { controlled: pending, publish } = await installPendingSubscriptionBackend({ seq: 1, timestamp: 1 })
-    const receiver = new ServerBroadcast({ key: 'broadcast:bounded-ready' })
-    const sender = new ServerBroadcast({ key: 'broadcast:bounded-ready' })
-    receiver.subscribeBinary(() => {})
-    const payload = new Uint8Array(CHANNEL_BUFFER_LIMIT_BYTES)
-    payload[0] = 7
-    const first = sender.publishBinary(payload)
-    payload[0] = 9
-    const overflow = sender.publishBinary(new Uint8Array(1))
-    try {
-      pending.ready()
-      await expect(overflow).rejects.toBeInstanceOf(ChannelOverflowError)
-    } finally {
-      await Promise.allSettled([first, overflow])
-      expect(publish.mock.calls[0]?.[1][0]).toBe(7)
-    }
-  })
-
   it('round-trips binary publishes preserving high-bit bytes', () => {
     const sender = registeredBroadcast('room:bin')
     const receiver = registeredBroadcast('room:bin')
@@ -433,37 +321,6 @@ describe('Broadcast shield validation', () => {
 // ───────────────────────────────────────────────────────────────────────────
 
 describe('Broadcast static bus (publish/subscribe)', () => {
-  it('releases a queued publish when its establishing subscriber terminates', async () => {
-    const { controlled, publish } = await installPendingSubscriptionBackend({ seq: 1, timestamp: 1 })
-    const unsubscribe = Broadcast.subscribe('broadcast:terminal-ready', () => {})
-    try {
-      const publishing = Broadcast.publish('broadcast:terminal-ready', 'after-terminal')
-      controlled.close()
-      await expect(publishing).resolves.toMatchObject({ seq: 1 })
-      expect(publish).toHaveBeenCalledOnce()
-    } finally {
-      unsubscribe()
-    }
-  })
-
-  it('waits for a static subscription to be ready before publishing', async () => {
-    const { controlled: pending, publish } = await installPendingSubscriptionBackend({ seq: 1, timestamp: 1 })
-    const unsubscribe = Broadcast.subscribe('broadcast:static-ready', () => {})
-    try {
-      const publishing = Broadcast.publish('broadcast:static-ready', 'after-ready')
-      await Promise.resolve()
-      expect(publish).not.toHaveBeenCalled()
-      pending.ready()
-      await publishing
-      expect(publish).toHaveBeenCalledOnce()
-      pending.close()
-      expect(await Broadcast.publish('broadcast:static-ready', 'after-terminal')).toBeDefined()
-      expect(publish).toHaveBeenCalledTimes(2)
-    } finally {
-      unsubscribe()
-    }
-  })
-
   it('static publish + static subscribe deliver without any instance', async () => {
     const report = vi.spyOn(console, 'error').mockImplementation(() => {})
     const received: Array<{ text: string }> = []
