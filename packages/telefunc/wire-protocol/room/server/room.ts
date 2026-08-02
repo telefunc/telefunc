@@ -622,7 +622,6 @@ class ServerRoom extends RoomStateView implements Room {
     this._applyMemberData(envelope, rawInfo)
     this._relayMemberData(serialized, envelope, rawInfo)
   }
-
   private _onBinary(framed: Uint8Array, rawInfo: WirePublishInfo): void {
     const unframed = unframeMemberId(framed)
     if (!unframed) return // junk on the binary lane
@@ -630,7 +629,6 @@ class ServerRoom extends RoomStateView implements Room {
     if (!this._suppress(unframed.from))
       this._state.applyBinary(unframed.from, unframed.payload, unframed.track, unframed.meta, info)
     this._healUnknownSender(unframed.from)
-
     if (this._stubs.size > 0) {
       const wireData = encodePublishBinary(framed, rawInfo)
       const track = unframed.track ?? DEFAULT_TRACK
@@ -641,7 +639,6 @@ class ServerRoom extends RoomStateView implements Room {
       }
     }
   }
-
   /** A message on the inbox key of a member this instance owns — route it to the holder: a server-side participant's listeners, or the one client stub the member joined through. */
   private _onDm(serialized: string, rawInfo: WirePublishInfo): void {
     let envelope: unknown
@@ -683,7 +680,6 @@ class ServerRoom extends RoomStateView implements Room {
       stub._relayPublishText(wireText)
     }
   }
-
   private _applyCtrl(event: RoomCtrlEnvelope): void {
     switch (event.__r) {
       case 'join':
@@ -709,7 +705,6 @@ class ServerRoom extends RoomStateView implements Room {
         this._state.applyClosed()
     }
   }
-
   private _applyLeave(id: string, cause?: LeaveCause): void {
     this._state.applyLeave(id, cause)
     this._announcedTracks.delete(id)
@@ -728,14 +723,12 @@ class ServerRoom extends RoomStateView implements Room {
     this._demand.forgetMember(id)
     this._syncSubs()
   }
-
   /** Mirror only the sequence-accepted projection into the local facade. */
   private _syncLocalMemberMeta(id: string): void {
     const local = this._localParticipants.get(id)
     const accepted = this._state.getRemote(id)
     if (local && accepted) local._meta = accepted.meta
   }
-
   /** The room closed — runs once, after the `closed` event has been applied and relayed. */
   private _teardown(): void {
     this._rejectDmAcks('Room is closed') // no recipient will reply now
@@ -751,37 +744,39 @@ class ServerRoom extends RoomStateView implements Room {
     if (failure !== undefined) reportRoomError(failure)
     if (this._recoveringSubscriptions.has(slot)) return
     this._recoveringSubscriptions.add(slot)
-    void (async () => {
-      const deadline = Date.now() + ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS
-      const attemptMs = ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS / (ROOM_REPLAN_LIMIT + 1)
-      for (let attempt = 0; attempt <= ROOM_REPLAN_LIMIT && slot.wanted; attempt++) {
-        try {
-          const current = await withinRoomHorizon(getRoomBackend().readHead(this.id), deadline - Date.now())
-          if (current === null || current.head.state !== 'open' || current.head.currentInc !== this._inc) {
-            this._settleTerminalSubscription()
-            return
-          }
-        } catch (error) {
-          reportRoomError(error)
-          if (Date.now() >= deadline) break
-        }
-        slot.retry()
-        try {
-          await withinRoomHorizon(slot.attemptReady, Math.min(attemptMs, deadline - Date.now()))
-          await this._reconcileAuthority()
-          return
-        } catch (error) {
-          reportRoomError(error)
-        }
-      }
-      if (slot.wanted) {
-        const exhausted = new RoomError(`Room subscription recovery exhausted: ${this.id}`)
-        reportRoomError(exhausted)
-        slot.markLost()
-      }
-    })()
+    void this._recoverTerminalSubscription(slot)
       .catch(reportRoomError)
       .finally(() => this._recoveringSubscriptions.delete(slot))
+  }
+  private async _authorityStillOwnsSubscription(deadline: number): Promise<boolean> { const current = await withinRoomHorizon(getRoomBackend().readHead(this.id), deadline - Date.now()); return current !== null && current.head.state === 'open' && current.head.currentInc === this._inc }
+  private async _retryTerminalSubscription(slot: SubSlot, deadline: number, attemptMs: number): Promise<'recovered' | 'retry' | 'exhausted'> {
+    slot.retry()
+    try {
+      await withinRoomHorizon(slot.attemptReady, Math.min(attemptMs, deadline - Date.now()))
+      await this._reconcileAuthority()
+      return 'recovered'
+    } catch (error) {
+      reportRoomError(error)
+      return Date.now() >= deadline ? 'exhausted' : 'retry'
+    }
+  }
+  private async _recoverTerminalSubscription(slot: SubSlot): Promise<void> {
+    const deadline = Date.now() + ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS
+    const attemptMs = ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS / (ROOM_REPLAN_LIMIT + 1)
+    for (let attempt = 0; attempt <= ROOM_REPLAN_LIMIT && slot.wanted; attempt++) {
+      try {
+        if (!(await this._authorityStillOwnsSubscription(deadline))) return this._settleTerminalSubscription()
+      } catch (error) {
+        reportRoomError(error)
+        if (Date.now() >= deadline) break
+      }
+      const outcome = await this._retryTerminalSubscription(slot, deadline, attemptMs)
+      if (outcome === 'recovered') return
+      if (outcome === 'exhausted') break
+    }
+    if (!slot.wanted) return
+    reportRoomError(new RoomError(`Room subscription recovery exhausted: ${this.id}`))
+    slot.markLost()
   }
 
   private _settleTerminalSubscription(): void {
