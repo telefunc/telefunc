@@ -58,11 +58,11 @@ async function readCell(roomId: string, inc: string, key: string): Promise<Uint8
 }
 
 async function readLiveMember(roomId: string, inc: string, id: string): Promise<RoomMemberRecord | null> {
-  const key = roomMemberKvKey(roomId, id)
-  const raw = await readCell(roomId, inc, key)
-  return raw === null
-    ? null
-    : readOrReapExpiredMember(roomId, inc, key, id, parse(decodeRoomText(raw)) as RoomMemberRecord)
+  const raw = await readCell(roomId, inc, roomMemberKvKey(roomId, id))
+  if (raw === null) return null
+  const record = parse(decodeRoomText(raw)) as RoomMemberRecord
+  if (Date.now() - record.seenAt <= ROOM_MEMBER_TTL_MS) return record
+  return await reapExpiredMember({ roomId, inc, id, record })
 }
 
 async function mutateCells<T>(
@@ -95,13 +95,9 @@ async function requireRoom(id: string): Promise<{ config: RoomConfigRecord }> {
   return { config: configFromHead(current.head) }
 }
 
-/** Read a room's member records, reaping members whose owning node stopped heartbeating
- *  (hard crash): their record is deleted and their leave announced to all observers. Pass `ids`
- *  to read a specific subset (e.g. one identity's memberships) instead of scanning the whole roster. */
 async function readMembers(roomId: string, inc: string, ids?: string[]): Promise<MemberSnapshot[]> {
   if (ids === undefined) await completePendingMemberCleanups(roomId, inc)
-  // Roster reads run against the authority, not the replica: `_refreshMembers` relies on read-your- writes (a join/leave writes its record before publishing the event that triggers the read), and the
-  // reap below keys off `seenAt` — a replica lag could drop a live member from the roster or reap a member a live heartbeat just refreshed. The reap delete stays replicated so both tiers drop it.
+  // Authority reads keep replica lag from reaping a heartbeat that already renewed.
   const memberKeys =
     ids === undefined ? await listMemberKeys(roomId, inc) : ids.map((id) => ({ key: roomMemberKvKey(roomId, id), id }))
   const { cells } = await readCellSet(roomId, inc, { keys: memberKeys.map(({ key }) => key) })
@@ -109,20 +105,24 @@ async function readMembers(roomId: string, inc: string, ids?: string[]): Promise
   for (const { key, id } of memberKeys) {
     const raw = cells.get(key)
     if (raw === undefined) continue
-    const record = await readOrReapExpiredMember(roomId, inc, key, id, parse(decodeRoomText(raw)) as RoomMemberRecord)
+    const candidate = parse(decodeRoomText(raw)) as RoomMemberRecord
+    const record =
+      Date.now() - candidate.seenAt > ROOM_MEMBER_TTL_MS
+        ? await reapExpiredMember({ roomId, inc, id, record: candidate })
+        : candidate
     if (record !== null) members.push(memberSnapshot(id, record))
   }
   return members
 }
 
-async function readOrReapExpiredMember(
-  roomId: string,
-  inc: string,
-  key: string,
-  id: string,
-  record: RoomMemberRecord,
-): Promise<RoomMemberRecord | null> {
-  if (Date.now() - record.seenAt <= ROOM_MEMBER_TTL_MS) return record
+async function reapExpiredMember(input: {
+  roomId: string
+  inc: string
+  id: string
+  record: RoomMemberRecord
+}): Promise<RoomMemberRecord | null> {
+  const { roomId, inc, id, record } = input
+  const key = roomMemberKvKey(roomId, id)
   const cleanupKey = roomMemberCleanupKvKey(roomId, id)
   const siblingKeys = [key]
   if (record.identity !== undefined) siblingKeys.push(roomIdentityMemberKvKey(roomId, record.identity, id))
