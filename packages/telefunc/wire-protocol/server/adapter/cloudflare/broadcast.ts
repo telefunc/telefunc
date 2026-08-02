@@ -237,18 +237,6 @@ class CloudflareBroadcastAuthorityState {
   }
 }
 
-// ---------------------------------------------------------------------------
-// CloudflareBroadcastTransport — per-isolate broadcast transport.
-//
-// A single CloudflareBroadcastTransport instance exists per worker isolate.
-// Multiple Durable Object instances in the same isolate share this transport.
-//
-// State stored here:
-//   - textSubs/binarySubs: local subscriber callbacks by key
-//   - locationBucket: set once on first attachIsolateInfo call
-//   - representativeDOName: the first shard DO name, used for RPC delivery
-// ---------------------------------------------------------------------------
-
 class CloudflareBroadcastTransport {
   private readonly baseInstanceName: string
   private readonly scale: CloudflareScale | undefined
