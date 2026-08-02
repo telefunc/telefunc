@@ -182,24 +182,13 @@ async function getRoom(id: string, options?: RoomGetOptions): Promise<Room> {
 
 async function getOrCreateRoom(id: string, options?: RoomOptions): Promise<Room> {
   assertRoomId(id)
-  const deadline = Date.now() + ROOM_CLOSE_LEASE_MS * 2
-  for (;;) {
-    const result = await tryCreateRoom(id, options)
-    if (result.kind === 'created') return result.room
-    if (result.kind === 'exists') {
-      try {
-        const room = await getRoom(id)
-        assert(ServerRoom.isServerRoom(room))
-        await getRoomBackend().directoryPut(id, room._inc)
-        return room
-      } catch (error) {
-        const current = await getRoomBackend().readHead(id)
-        if (current?.head.state === 'open') throw error
-      }
-    }
-    if (Date.now() >= deadline) throw new RoomError(`Room lifecycle contention: ${id}`)
-    await new Promise((resolve) => setTimeout(resolve, 100))
-  }
+  const result = await tryCreateRoom(id, options)
+  if (result.kind === 'created') return result.room
+  if (result.kind === 'closing') throw new RoomError(`Room is closing: ${id}`)
+  const room = await getRoom(id)
+  assert(ServerRoom.isServerRoom(room))
+  await getRoomBackend().directoryPut(id, room._inc)
+  return room
 }
 
 const ROOM_GUARD_KEYS = [

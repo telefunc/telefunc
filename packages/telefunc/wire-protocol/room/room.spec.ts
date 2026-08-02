@@ -275,7 +275,7 @@ describe('Room public behavior', () => {
     expect([...memoryState.rooms.get(room.id)!.gens.keys()]).toEqual([])
     expect((await driver.directoryList(room.id)).entries).toEqual([])
   })
-  it('waits out an active close lease in getOrCreate instead of reporting not-found', async () => {
+  it('reports an active close lease and lets the caller retry after its deadline', async () => {
     vi.useFakeTimers()
     const room = (await Room.create('get-or-create-closing')) as ServerRoom
     const firstInc = room._inc
@@ -292,19 +292,14 @@ describe('Room public behavior', () => {
         },
       },
     )
-    let settled = false
-    const resolving = Room.getOrCreate(room.id).finally(() => {
-      settled = true
-    })
-    await vi.advanceTimersByTimeAsync(900)
-    expect(settled).toBe(false)
+    await expect(Room.getOrCreate(room.id)).rejects.toThrow(`Room is closing: ${room.id}`)
     expect((await driver.readHead(room.id))?.head).toMatchObject({
       currentInc: firstInc,
       state: 'closing',
       closeLease: { id: 'active-get-or-create-close' },
     })
-    await vi.advanceTimersByTimeAsync(200)
-    const recreated = (await resolving) as ServerRoom
+    await vi.advanceTimersByTimeAsync(1_100)
+    const recreated = (await Room.getOrCreate(room.id)) as ServerRoom
     expect(recreated._inc).not.toBe(firstInc)
     expect(recreated.isClosed).toBe(false)
   })
