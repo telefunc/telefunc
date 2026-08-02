@@ -33,7 +33,7 @@ import {
   CloudflareRoomSessionManager,
   CloudflareRoomBackend,
   CLOUDFLARE_ROOM_CONTEXT_ERROR,
-  getCloudflareRoomSessionManager,
+  materializeCloudflareRoomSessionManager,
   requireCloudflareRoomNamespace,
   withCloudflareRoomSessionManager,
   type CloudflareRoomNamespace,
@@ -194,7 +194,7 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
 
     telefuncRoomDeliver(request: RoomShardDeliveryRequest): Promise<void> {
       return this.runWithRoomManager(() => {
-        const roomManager = getCloudflareRoomSessionManager()
+        const roomManager = materializeCloudflareRoomSessionManager()
         if (roomManager !== this.roomManager) throw new Error(CLOUDFLARE_ROOM_CONTEXT_ERROR)
         return roomManager.deliver(request)
       })
@@ -202,7 +202,7 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
 
     telefuncRoomInvalidate(request: RoomShardInvalidationRequest): void {
       return this.runWithRoomManager(() => {
-        const roomManager = getCloudflareRoomSessionManager()
+        const roomManager = materializeCloudflareRoomSessionManager()
         if (roomManager !== this.roomManager) throw new Error(CLOUDFLARE_ROOM_CONTEXT_ERROR)
         return roomManager.invalidate(request)
       })

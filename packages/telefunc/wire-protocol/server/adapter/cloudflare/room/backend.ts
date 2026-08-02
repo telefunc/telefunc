@@ -1,7 +1,5 @@
 /// <reference types="@cloudflare/workers-types" />
 
-// The authority proxy has no callback map; callback ownership stays on the installing session shard.
-
 import { getRawContext, isAsyncMode, restoreContext, type Context } from '../../../../../node/server/context/context.js'
 import type { BroadcastDriver, BroadcastLane, PublishResult } from '../../../../backend/broadcast/contract.js'
 import type {
@@ -152,7 +150,7 @@ export function withCloudflareRoomSessionManager<T>(
   return restoreContext(raw, fn)
 }
 
-export function getCloudflareRoomSessionManager(): CloudflareRoomSessionManager {
+export function materializeCloudflareRoomSessionManager(): CloudflareRoomSessionManager {
   if (!isAsyncMode()) throw new Error(CLOUDFLARE_ROOM_CONTEXT_ERROR)
   const managerOrFactory = getRawContext()?.[ROOM_MANAGER]
   const manager = typeof managerOrFactory === 'function' ? managerOrFactory() : managerOrFactory
@@ -198,7 +196,7 @@ export class CloudflareRoomBackend implements BroadcastDriver, RoomDriver {
     payload: Uint8Array,
     opts?: { retain?: boolean; closingLease?: string; requiredCellKeys?: string[] },
   ): Promise<CommitResult> {
-    const manager = getCloudflareRoomSessionManager()
+    const manager = materializeCloudflareRoomSessionManager()
     const stub = manager.authority(roomId)
     const wire = await stub.commitLane(roomId, inc, lane, payload, opts)
     if ('stale' in wire) return { stale: true }
@@ -247,7 +245,7 @@ export class CloudflareRoomBackend implements BroadcastDriver, RoomDriver {
         open: (receiver) => this.broadcast.openSubscription(source, receiver),
       }
     }
-    const manager = getCloudflareRoomSessionManager()
+    const manager = materializeCloudflareRoomSessionManager()
     return {
       partition: manager.subscriptionPartition,
       valid: () => manager.valid(),
@@ -255,7 +253,7 @@ export class CloudflareRoomBackend implements BroadcastDriver, RoomDriver {
     }
   }
   #stub(roomId: string): CloudflareRoomAuthorityStub {
-    return getCloudflareRoomSessionManager().authority(roomId)
+    return materializeCloudflareRoomSessionManager().authority(roomId)
   }
   #directory(): CloudflareRoomAuthorityStub {
     return this.#stub(DIRECTORY_DO_NAME)
