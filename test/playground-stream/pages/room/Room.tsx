@@ -6,9 +6,9 @@ import {
   onGetRoom,
   onGetRoomTail,
   onGetOrCreateRoom,
-  onGetTypedRoom,
-  onGetGuardedRoom,
-  onGetAuditRoom,
+  onCreateTypedRoom,
+  onOpenGuardedRoom,
+  onOpenAuditedRoom,
   onGetAudit,
   onJoinAsServer,
   onJoinRoomAsServerSelf,
@@ -238,7 +238,7 @@ function Room() {
 
       {scenario('guard', 'Guards', 'Guarded publish & send', async () => {
         const roomId = await createRoomId('guard')
-        const room = await onGetGuardedRoom(roomId)
+        const room = await onOpenGuardedRoom(roomId)
 
         const received: unknown[] = []
         room.subscribe((data) => received.push(data))
@@ -270,7 +270,7 @@ function Room() {
 
       {scenario('shield', null, 'Shielded publish', async () => {
         const roomId = `e2e-shield:${crypto.randomUUID()}`
-        const room = await onGetTypedRoom(roomId)
+        const room = await onCreateTypedRoom(roomId)
         const me = await room.join({ meta: { name: 'A' } })
         const received: string[] = []
         room.subscribe((data) => received.push(data.text))
@@ -432,7 +432,7 @@ function Room() {
 
       {scenario('hooks', 'After-hooks (persistence receipts)', 'After-join/publish/send receipts', async () => {
         const roomId = await createRoomId('hooks')
-        const room = await onGetAuditRoom(roomId)
+        const room = await onOpenAuditedRoom(roomId)
         const a = await room.join({ meta: { name: 'A' } })
         const b = await room.join({ meta: { name: 'B' } })
         await a.publish('hello')

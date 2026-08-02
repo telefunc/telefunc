@@ -3,9 +3,9 @@ export {
   onGetRoom,
   onGetRoomTail,
   onGetOrCreateRoom,
-  onGetTypedRoom,
-  onGetGuardedRoom,
-  onGetAuditRoom,
+  onCreateTypedRoom,
+  onOpenGuardedRoom,
+  onOpenAuditedRoom,
   onGetAudit,
   onJoinAsServer,
   onJoinRoomAsServerSelf,
@@ -24,7 +24,6 @@ export {
 
 import { Room, Abort } from 'telefunc'
 
-/** Per-run Room IDs prevent persistent in-memory state from leaking across page loads. */
 async function onCreateRoom(roomId: string) {
   return await Room.create(roomId, { meta: { topic: 'e2e' } })
 }
@@ -43,11 +42,11 @@ async function onGetOrCreateRoom(roomId: string) {
 }
 
 type ChatMsg = { kind: 'chat'; text: string }
-async function onGetTypedRoom(roomId: string) {
+async function onCreateTypedRoom(roomId: string) {
   return await Room.create<{ topic: string }, { name: string }, ChatMsg>(roomId, { meta: { topic: 'typed' } })
 }
 
-async function onGetGuardedRoom(roomId: string) {
+async function onOpenGuardedRoom(roomId: string) {
   const room = await Room.get(roomId)
   Room.guard(room, {
     onBeforeJoin: (member) => {
@@ -69,7 +68,7 @@ function audit(roomId: string, entry: Record<string, unknown>) {
   list.push(entry)
   auditLog.set(roomId, list)
 }
-async function onGetAuditRoom(roomId: string) {
+async function onOpenAuditedRoom(roomId: string) {
   const room = await Room.get(roomId)
   Room.guard(room, {
     onAfterJoin: (member, info) => {
