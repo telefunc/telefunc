@@ -87,123 +87,114 @@ describe('Redis real three-master Cluster CI certification', () => {
     expect(() => new RedisBackend({ redis: masters[0].client })).toThrow(/at-most-once/i)
   })
   it('covers shipped command KEYS and terminates live and in-flight attempts when their generation drops', async () => {
-    expect(masters).toHaveLength(3)
-    expect(masters.flatMap(({ ranges }) => ranges).reduce((total, [start, end]) => total + end - start + 1, 0)).toBe(
-      16_384,
-    )
-    expect((await clusterInfo((masters[0] as Master).client)).cluster_size).toBe('3')
-    for (const master of masters) expect((await clusterInfo(master.client)).cluster_state).toBe('ok')
-    const prefix = uniquePrefix('runtime-slots')
-    const client = ownCluster()
-    await client.ping()
-    let subscriberOpens = 0
-    let holdNextSubscribe = false
-    const subscribeEntered = deferred()
-    const releaseSubscribe = deferred()
-    interceptSubscribers(client, (subscriber) => {
-      subscriberOpens++
-      if (!holdNextSubscribe) return
-      holdNextSubscribe = false
-      const subscribe = subscriber.subscribe.bind(subscriber)
-      subscriber.subscribe = (async (...channels: string[]) => {
-        subscribeEntered.resolve()
-        await releaseSubscribe.promise
-        return await subscribe(...channels)
-      }) as typeof subscriber.subscribe
-    })
-    const observation = observeCommands(client)
-    const backend = ownBackend(client, prefix)
-    const authority = ownRoomBackend(client, prefix)
-    const genericCalls = observation.wrapDefinedCommand('tfPublish')
-    for (const { name } of Object.values(REDIS_ROOM_COMMANDS)) observation.wrapDefinedCommand(name)
-    const roomId = 'runtime-slot} proof'
-    const inc = 'runtime-slot-inc'
-    const head = await open(backend, roomId, inc)
-    const time = vi.spyOn(client, 'time').mockImplementation(async () => {
-      throw new Error('control: keyless TIME escaped the room slot')
-    })
-    expect((await authority.readHead(roomId))?.head.currentInc).toBe(inc)
-    const cells = await backend.readCells(roomId, inc, { keys: [] })
-    time.mockRestore()
-    if ('staleInc' in cells) throw new Error('fresh generation was unexpectedly stale')
-    expect(
-      await backend.compareExchangeCells(roomId, inc, cells.revision, [
-        { key: 'cell} escape', set: { bytes: bytes('value') } },
-      ]),
-    ).toBe('committed')
-    const firstSubscription = subscribe(backend, roomId, inc, () => {})
-    await firstSubscription.ready
-    await accepted(
-      await backend.commitLane(roomId, inc, SEMANTIC_LANE, bytes('payload'), {
-        retain: true,
-        requiredCellKeys: ['cell} escape'],
-      }),
-    ).delivery
-    const currentCells = await backend.readCells(roomId, inc, { keys: ['cell} escape'] })
-    if ('staleInc' in currentCells) throw new Error('cell fence generation vanished')
-    expect(await backend.compareExchangeCells(roomId, inc, currentCells.revision, [{ key: 'cell} escape' }])).toBe(
-      'committed',
-    )
-    expect(
-      await backend.commitLane(roomId, inc, SEMANTIC_LANE, bytes('fenced'), {
-        requiredCellKeys: ['cell} escape'],
-      }),
-    ).toEqual({ stale: true })
-    await backend.deleteRetained(roomId, inc, SEMANTIC_LANE)
-    await backend.directoryPut(roomId, inc)
-    const hmget = client.hmget.bind(client)
-    const hmgetMock = vi.spyOn(client, 'hmget').mockImplementation((async (key: string, ...fields: string[]) => {
-      await client.hdel(key, ...fields)
-      return await hmget(key, ...fields)
-    }) as never)
-    expect(await backend.directoryList(roomId)).toEqual({ entries: [] })
-    hmgetMock.mockRestore()
-    await backend.directoryPut(roomId, inc)
-    await backend.directoryDelete(roomId, inc)
-    const genericPublish = await backend.publish({ key: 'generic} escape', kind: 'binary' }, bytes('generic'))
-    expect(genericPublish.receivers).toBeUndefined()
-    const closed = await close(authority, roomId, head)
-    expect(closed.state).toBe('closed')
-    await authority.dropGeneration(roomId, inc)
-    await waitFor(() => firstSubscription.state() === 'closed')
-    expect(subscriberOpens).toBe(1)
-    await firstSubscription.unsubscribe()
-    const delayedRoom = 'runtime-delayed-subscribe'
-    const delayedInc = 'runtime-delayed-inc'
-    const delayedHead = await open(backend, delayedRoom, delayedInc)
-    holdNextSubscribe = true
-    const delayedSubscription = subscribe(backend, delayedRoom, delayedInc, () => {})
-    onTestFinished(releaseSubscribe.resolve)
-    const delayedStates: SubscriptionState[] = []
-    delayedSubscription.onStateChange((state) => delayedStates.push(state))
-    const delayedReady = delayedSubscription.ready.catch((error: unknown) => error)
-    await subscribeEntered.promise
-    await close(authority, delayedRoom, delayedHead)
-    await authority.dropGeneration(delayedRoom, delayedInc)
-    releaseSubscribe.resolve()
-    await waitFor(() => delayedSubscription.state() === 'closed')
-    expect(String(await delayedReady)).toMatch(/ownership terminated/i)
-    expect(delayedStates).not.toContain('lost')
-    expect(subscriberOpens).toBe(2)
-    await delayedSubscription.unsubscribe()
-    const expectedNames = new Set(['tfPublish', ...Object.values(REDIS_ROOM_COMMANDS).map(({ name }) => name)])
-    expect(new Set(observation.definitions.map(({ name }) => name))).toEqual(expectedNames)
-    for (const definition of observation.definitions) {
-      if (definition.numberOfKeys === null) continue
-      const referenced = [...definition.lua.matchAll(/\bKEYS\[(\d+)\]/g)].map((match) => Number(match[1]))
-      expect(new Set(referenced), `${definition.name}: Lua KEYS references`).toEqual(
-        new Set(Array.from({ length: definition.numberOfKeys }, (_, index) => index + 1)),
-      )
+    const runtime = await exerciseRuntimeSlotCommands()
+    await exerciseGenerationDropDuringSubscribe(runtime)
+    await assertCommandKeyCoverage(runtime)
+    async function assertHealthyClusterTopology(): Promise<void> {
+      expect(masters).toHaveLength(3)
+      const covered = masters.flatMap(({ ranges }) => ranges).reduce((sum, [start, end]) => sum + end - start + 1, 0)
+      expect(covered).toBe(16_384)
+      expect((await clusterInfo((masters[0] as Master).client)).cluster_size).toBe('3')
+      for (const master of masters) expect((await clusterInfo(master.client)).cluster_state).toBe('ok')
     }
-    expect(genericCalls).toHaveLength(1)
-    const genericKeys = genericCalls[0]?.slice(0, 2).map(String) ?? []
-    expect(new Set(await Promise.all(genericKeys.map(slot))).size, `tfPublish: ${genericKeys.join(', ')}`).toBe(1)
-    for (const descriptor of Object.values(REDIS_ROOM_COMMANDS)) {
-      const calls = observation.calls.filter(({ name }) => name === descriptor.name)
-      expect(calls.length, descriptor.name).toBeGreaterThan(0)
+    async function exerciseRuntimeSlotCommands() {
+      await assertHealthyClusterTopology()
+      const prefix = uniquePrefix('runtime-slots')
+      const client = ownCluster()
+      await client.ping()
+      let subscriberOpens = 0
+      let holdNextSubscribe = false
+      const subscribeEntered = deferred()
+      const releaseSubscribe = deferred()
+      interceptSubscribers(client, (subscriber) => {
+        subscriberOpens++
+        if (!holdNextSubscribe) return
+        holdNextSubscribe = false
+        const subscribe = subscriber.subscribe.bind(subscriber)
+        subscriber.subscribe = (async (...channels: string[]) => {
+          subscribeEntered.resolve(); await releaseSubscribe.promise
+          return await subscribe(...channels)
+        }) as typeof subscriber.subscribe
+      })
+      const observation = observeCommands(client)
+      const backend = ownBackend(client, prefix)
+      const authority = ownRoomBackend(client, prefix)
+      const genericCalls = observation.wrapDefinedCommand('tfPublish')
+      for (const { name } of Object.values(REDIS_ROOM_COMMANDS)) observation.wrapDefinedCommand(name)
+      const roomId = 'runtime-slot} proof'
+      const inc = 'runtime-slot-inc'
+      const head = await open(backend, roomId, inc)
+      const time = vi.spyOn(client, 'time').mockImplementation(async () => { throw new Error('control: keyless TIME escaped the room slot') })
+      expect((await authority.readHead(roomId))?.head.currentInc).toBe(inc)
+      const cells = await backend.readCells(roomId, inc, { keys: [] })
+      time.mockRestore()
+      if ('staleInc' in cells) throw new Error('fresh generation was unexpectedly stale')
+      expect(await backend.compareExchangeCells(roomId, inc, cells.revision, [{ key: 'cell} escape', set: { bytes: bytes('value') } }])).toBe('committed')
+      const firstSubscription = subscribe(backend, roomId, inc, () => {})
+      await firstSubscription.ready
+      await accepted(await backend.commitLane(roomId, inc, SEMANTIC_LANE, bytes('payload'),
+        { retain: true, requiredCellKeys: ['cell} escape'] })).delivery
+      const currentCells = await backend.readCells(roomId, inc, { keys: ['cell} escape'] })
+      if ('staleInc' in currentCells) throw new Error('cell fence generation vanished')
+      expect(await backend.compareExchangeCells(roomId, inc, currentCells.revision, [{ key: 'cell} escape' }])).toBe('committed')
+      expect(await backend.commitLane(roomId, inc, SEMANTIC_LANE, bytes('fenced'), { requiredCellKeys: ['cell} escape'] })).toEqual({ stale: true })
+      await backend.deleteRetained(roomId, inc, SEMANTIC_LANE)
+      await backend.directoryPut(roomId, inc)
+      const hmget = client.hmget.bind(client)
+      const hmgetMock = vi.spyOn(client, 'hmget').mockImplementation((async (key: string, ...fields: string[]) => {
+        await client.hdel(key, ...fields); return await hmget(key, ...fields)
+      }) as never)
+      expect(await backend.directoryList(roomId)).toEqual({ entries: [] })
+      hmgetMock.mockRestore()
+      await backend.directoryPut(roomId, inc)
+      await backend.directoryDelete(roomId, inc)
+      expect((await backend.publish({ key: 'generic} escape', kind: 'binary' }, bytes('generic'))).receivers).toBeUndefined()
+      expect((await close(authority, roomId, head)).state).toBe('closed')
+      await authority.dropGeneration(roomId, inc)
+      await waitFor(() => firstSubscription.state() === 'closed')
+      expect(subscriberOpens).toBe(1)
+      await firstSubscription.unsubscribe()
+      return { backend, authority, observation, genericCalls, subscribeEntered, releaseSubscribe, holdNextSubscribe: () => { holdNextSubscribe = true }, subscriberOpens: () => subscriberOpens }
+    }
+    async function exerciseGenerationDropDuringSubscribe(runtime: Awaited<ReturnType<typeof exerciseRuntimeSlotCommands>>) {
+      const [roomId, inc] = ['runtime-delayed-subscribe', 'runtime-delayed-inc']
+      const head = await open(runtime.backend, roomId, inc)
+      runtime.holdNextSubscribe()
+      const subscription = subscribe(runtime.backend, roomId, inc, () => {})
+      onTestFinished(runtime.releaseSubscribe.resolve)
+      const states: SubscriptionState[] = []
+      subscription.onStateChange((state) => states.push(state))
+      const ready = subscription.ready.catch((error: unknown) => error)
+      await runtime.subscribeEntered.promise
+      await close(runtime.authority, roomId, head)
+      await runtime.authority.dropGeneration(roomId, inc)
+      runtime.releaseSubscribe.resolve()
+      await waitFor(() => subscription.state() === 'closed')
+      expect(String(await ready)).toMatch(/ownership terminated/i)
+      expect(states).not.toContain('lost')
+      expect(runtime.subscriberOpens()).toBe(2)
+      await subscription.unsubscribe()
+    }
+    async function assertCommandKeyCoverage(runtime: Awaited<ReturnType<typeof exerciseRuntimeSlotCommands>>) {
+      expect(new Set(runtime.observation.definitions.map(({ name }) => name))).toEqual(
+        new Set(['tfPublish', ...Object.values(REDIS_ROOM_COMMANDS).map(({ name }) => name)]))
+      for (const definition of runtime.observation.definitions) {
+        if (definition.numberOfKeys === null) continue
+        const referenced = [...definition.lua.matchAll(/\bKEYS\[(\d+)\]/g)].map((match) => Number(match[1]))
+        expect(new Set(referenced), `${definition.name}: Lua KEYS references`).toEqual(new Set(Array.from({ length: definition.numberOfKeys }, (_, index) => index + 1)))
+      }
+      expect(runtime.genericCalls).toHaveLength(1)
+      await assertCallsStayInOneSlot(runtime.genericCalls.map((args) => ({ name: 'tfPublish', keyCount: 2, args })))
+      for (const descriptor of Object.values(REDIS_ROOM_COMMANDS)) {
+        const calls = runtime.observation.calls.filter(({ name }) => name === descriptor.name)
+        expect(calls.length, descriptor.name).toBeGreaterThan(0)
+        await assertCallsStayInOneSlot(calls)
+      }
+    }
+    async function assertCallsStayInOneSlot(calls: CommandCall[]): Promise<void> {
       for (const call of calls) {
         const keys = call.args.slice(0, call.keyCount).map(String)
-        expect(new Set(await Promise.all(keys.map(slot))).size, `${descriptor.name}: ${keys.join(', ')}`).toBe(1)
+        expect(new Set(await Promise.all(keys.map(slot))).size, `${call.name}: ${keys.join(', ')}`).toBe(1)
       }
     }
   })
@@ -494,8 +485,6 @@ describe('Redis real three-master Cluster CI certification', () => {
   it('omits unknowable receiver counts and shares empty-key text/binary ordering across nodes', async () => {
     const prefix = uniquePrefix('receivers')
     const backend = ownBackend(cluster, prefix)
-    // RedisBackend sorts master endpoints before round-robin subscriber selection. Mirror that
-    // order, but identify masters by Cluster node ID: Compose nodes all listen on port 6379.
     const subscriberOrder = [...masters].sort((left, right) =>
       `${left.host}:${left.port}`.localeCompare(`${right.host}:${right.port}`),
     )
@@ -586,7 +575,6 @@ describe('Redis real three-master Cluster CI certification', () => {
     throw new Error(`failed to find a room on master '${masterId}'`)
   }
   async function pubSubClients(): Promise<Array<{ id: number; owner: Master }>> {
-    // Independent reads stay all-or-error: Promise.all rejects instead of returning a partial topology.
     const lists = await Promise.all(masters.map(({ client }) => client.call('CLIENT', 'LIST', 'TYPE', 'PUBSUB')))
     const clients: Array<{ id: number; owner: Master }> = []
     for (const [index, master] of masters.entries()) {
@@ -604,7 +592,6 @@ describe('Redis real three-master Cluster CI certification', () => {
     await source.client.cluster('SETSLOT', slotNumber, 'MIGRATING', target.id)
     const keys = (await source.client.cluster('GETKEYSINSLOT', slotNumber, 10_000)) as string[]
     await migrateKeys(source, target, keys)
-    // Every NODE write is dispatched before Promise.all can reject, so restoration is all-attempt.
     await Promise.all(masters.map(({ client }) => client.cluster('SETSLOT', slotNumber, 'NODE', target.id)))
   }
   async function migrateKeys(source: Master, target: Master, keys: string[]): Promise<void> {
