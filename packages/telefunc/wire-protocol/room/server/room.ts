@@ -953,10 +953,6 @@ class ServerRoom extends RoomStateView implements Room {
     const serialized = decodeRoomText(stored.payload)
     const info = { seq: stored.seq, timestamp: stored.timestamp }
     const envelope = parse(serialized) as RoomDataEnvelope
-    if ((await readMembers(this.id, this._inc, [envelope.from])).length === 0) {
-      await getRoomBackend().deleteRetained(this.id, this._inc, SEMANTIC_LANE, { ifSeq: stored.seq })
-      return
-    }
     if (prevWantsText || prevMemberWants.has(envelope.from) || !stub._wantsTextFrom(envelope.from)) return
     // Replay the stored order as-is; the stub dedupes a same-or-newer live winner.
     stub._emitRetainedText(encodePublishText(serialized, info), envelope.from, info)
@@ -972,16 +968,9 @@ class ServerRoom extends RoomStateView implements Room {
     const lanes = (await backend.listRetained(this.id, this._inc)).filter(
       (lane): lane is Extract<LaneId, { kind: 'binary' }> => lane.kind === 'binary',
     )
-    const owners = new Set(
-      (await readMembers(this.id, this._inc, [...new Set(lanes.map((lane) => lane.member))])).map(({ id }) => id),
-    )
     for (const lane of lanes) {
       const stored = await backend.readRetained(this.id, this._inc, lane)
       if (stored === null) continue
-      if (!owners.has(lane.member)) {
-        await backend.deleteRetained(this.id, this._inc, lane, { ifSeq: stored.seq })
-        continue
-      }
       const framed = stored.payload
       const frame = unframeMemberId(framed)
       if (!frame) continue

@@ -1046,24 +1046,6 @@ describe('Room public behavior', () => {
     await expect(Room.getParticipants(room.id)).resolves.toEqual([])
     expect(await driver.listRetained(room.id, room._inc)).toEqual([])
   })
-  it('reaps legacy orphan-owned retained text instead of replaying it', async () => {
-    const authority = (await Room.create('orphan-retained-replay')) as ServerRoom
-    const member = await authority.join()
-    await member.publish('orphan', { retain: true })
-    const memberKey = roomMemberKvKey(authority.id, member.id)
-    const cells = await driver.readCells(authority.id, authority._inc, { keys: [memberKey] })
-    expect('staleInc' in cells).toBe(false)
-    if ('staleInc' in cells) throw new Error('unexpected stale generation')
-    await expect(
-      driver.compareExchangeCells(authority.id, authority._inc, cells.revision, [{ key: memberKey }]),
-    ).resolves.toBe('committed')
-    const observer = (await Room.get(authority.id)) as ServerRoom
-    const { stub, peer } = serve(observer)
-    stub._wantsText = true
-    await observer._replayRetainedText(stub, false, new Set())
-    expect(semanticFrames(peer, 'data')).toEqual([])
-    await expect(driver.readRetained(authority.id, authority._inc, semanticLane)).resolves.toBeNull()
-  })
   it('does not retain or expose mutable lane aliases', async () => {
     const room = (await Room.create('retained-lane-alias')) as ServerRoom
     const lane = { kind: 'binary', member: 'member', track: 'original' } as LaneId
