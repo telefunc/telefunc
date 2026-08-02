@@ -10,11 +10,10 @@ import {
 } from 'telefunc/__internal'
 import { RedisBackend, type RedisBackendOptions } from './room/backend.js'
 
-/** Installs Redis as Telefunc's complete backend: generic Broadcast plus durable Room state. */
 function installRedis(redis: Redis | Cluster, options: InstallRedisOptions = {}): void {
   setDefaultBackend(
     () => createRedisBackendPair({ redis, prefix: options.prefix }),
-    redisBackendDefaultIdentity(redis, options.prefix),
+    internRedisBackendIdentity(redis, options.prefix),
   )
 }
 
@@ -36,7 +35,7 @@ const redisBackendDefaultIdentities = (() => {
   return (global[REDIS_BACKEND_DEFAULT_IDENTITIES] ??= new WeakMap())
 })()
 
-function redisBackendDefaultIdentity(redis: Redis | Cluster, prefix: string | undefined): object {
+function internRedisBackendIdentity(redis: Redis | Cluster, prefix: string | undefined): object {
   let byPrefix = redisBackendDefaultIdentities.get(redis)
   if (byPrefix === undefined) {
     byPrefix = new Map()
