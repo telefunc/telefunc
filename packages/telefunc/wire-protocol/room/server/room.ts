@@ -1171,27 +1171,28 @@ class ServerRoom extends RoomStateView implements Room {
   }
   /** Roster refresh replans on membership-version drift and re-seeds streamed views from the committed snapshot. */
   private _refreshMembers(): Promise<void> {
-    this._pendingRefresh ??= (async () => {
-      try {
-        for (let attempt = 0; !this._state.closed; attempt++) {
-          const version = this._state.membershipVersion
-          const members = await readMembers(this.id, this._inc)
-          if (this._state.membershipVersion !== version) {
-            if (attempt === ROOM_REPLAN_LIMIT) throw new RoomError(`Room roster refresh contention: ${this.id}`)
-            continue
-          }
-          const drifted = this._state.reconcileCompleteRoster(members)
-          this._syncSubs() // per-member lanes may need subscriptions for the members just learned
-          if (drifted) {
-            for (const stub of this._stubs) stub._relayRoster(this._state.snapshotMembers().filter((m) => !m.hidden))
-          }
-          return
-        }
-      } finally {
-        this._pendingRefresh = null
-      }
-    })()
+    this._pendingRefresh ??= this._runMemberRefresh().finally(() => { this._pendingRefresh = null })
     return this._pendingRefresh
+  }
+
+  private async _runMemberRefresh(): Promise<void> {
+    for (let attempt = 0; !this._state.closed; attempt++) {
+      const version = this._state.membershipVersion
+      const members = await readMembers(this.id, this._inc)
+      if (this._commitRefreshedRoster(version, members) === 'done') return
+      if (attempt === ROOM_REPLAN_LIMIT) throw new RoomError(`Room roster refresh contention: ${this.id}`)
+    }
+  }
+  private _commitRefreshedRoster(version: number, members: MemberSnapshot[]): 'retry' | 'done' {
+    if (this._state.membershipVersion !== version) return 'retry'
+    const drifted = this._state.reconcileCompleteRoster(members)
+    this._syncSubs()
+    if (drifted) this._relayVisibleRoster()
+    return 'done'
+  }
+  private _relayVisibleRoster(): void {
+    const members = this._state.snapshotMembers().filter((member) => !member.hidden)
+    for (const stub of this._stubs) stub._relayRoster(members)
   }
   // Graceful departures use events; heartbeats refresh owner `seenAt` and reap records orphaned by hard crashes.
   private _ownedMemberIds(): string[] {
@@ -1291,17 +1292,14 @@ class ServerLocalParticipant extends ParticipantBase {
     this._assertActive()
     await this._room._setMemberMeta(this.id, meta)
   }
-
   async setAttributes(attrs: ParticipantMeta): Promise<void> {
     this._assertActive()
     await this._room._mergeMemberMeta(this.id, attrs)
   }
-
   async leave(): Promise<void> {
     if (this._left) return
     await this._room._removeMember(this.id, { type: 'left' })
   }
-
   protected override _resolveSender(id: string): Sender | null {
     return this._room._state.getRemote(id) // sync view read — delivery must not wait on I/O
   }
