@@ -46,7 +46,7 @@ import { BACKEND_PROTOCOL } from 'telefunc/backend'
 // @ts-expect-error no backend runtime subpath is published
 import type {} from 'telefunc/backend/runtime'
 import { Abort as ClientAbort, ConnectionError, withContext } from 'telefunc/client'
-import { Telefunc as NodeTelefunc } from 'telefunc/node'
+import { Telefunc } from 'telefunc/node'
 import { installRedis, RedisTransport, type InstallRedisOptions, type RedisBroadcastOptions } from '@telefunc/redis'
 // @ts-expect-error the deferred package driver fission has no fused public backend
 import { RedisRoomBackend } from '@telefunc/redis'
@@ -180,7 +180,7 @@ const call = withContext(async () => 1, {
   extensions: { released: { enabled: true } },
 })
 
-const node = new NodeTelefunc()
+const node = new Telefunc()
 node.serve({ request: new Request('http://localhost/_telefunc') })
 
 type _installRedisOptionKeys = Assert<HasKeys<InstallRedisOptions, 'prefix'>>
