@@ -254,7 +254,11 @@ class SubscriptionSlot<Source> {
           if (this._stopPromise !== null) return
           await Promise.all(
             [...this._receivers.values()].map(async (receiver) => {
-              await (receiver(payload, info) as unknown)
+              try {
+                await (receiver(payload, info) as unknown)
+              } catch (error) {
+                this._reportError(error)
+              }
             }),
           )
         },

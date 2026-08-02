@@ -270,12 +270,7 @@ class RedisSubscriptionAttempt implements SubscriptionAttempt {
     // remain loss, never replay.
     if (info.seq <= this._lastSequence) return
     this._lastSequence = info.seq
-    try {
-      const result = this._receiver(Uint8Array.from(payload), info) as unknown
-      if (result instanceof Promise) void result.catch((error: unknown) => console.error(error))
-    } catch (error) {
-      console.error(error)
-    }
+    void this._receiver(Uint8Array.from(payload), info)
   }
 
   private readonly _onConnectionClosed = (): void => {
