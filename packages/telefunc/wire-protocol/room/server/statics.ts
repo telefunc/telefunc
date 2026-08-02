@@ -130,10 +130,10 @@ function writerId(): string {
   return _writerId
 }
 
-async function registerRoomIndex(id: string, inc: string): Promise<void> {
-  await getRoomBackend().directoryPut(id, inc)
+async function repairRoomIndex(id: string, listedInc: string | null, liveInc: string | null): Promise<void> {
+  if (liveInc === null) return await getRoomBackend().directoryDelete(id, listedInc!)
+  if (liveInc !== listedInc) await getRoomBackend().directoryPut(id, liveInc)
 }
-
 type TryCreateRoomResult = { kind: 'created'; room: Room } | { kind: 'exists' } | { kind: 'closing' }
 
 async function tryCreateRoom(id: string, options: RoomOptions | undefined): Promise<TryCreateRoomResult> {
@@ -163,7 +163,7 @@ async function tryCreateRoom(id: string, options: RoomOptions | undefined): Prom
   }
   assert('head' in result)
   try {
-    await registerRoomIndex(id, created.inc)
+    await repairRoomIndex(id, null, created.inc)
   } catch (error) {
     await closeRoom(id)
     throw error
@@ -195,7 +195,7 @@ async function getOrCreateRoom(id: string, options?: RoomOptions): Promise<Room>
       try {
         const room = await getRoom(id)
         assert(ServerRoom.isServerRoom(room))
-        await registerRoomIndex(id, room._inc)
+        await repairRoomIndex(id, null, room._inc)
         return room
       } catch (error) {
         const current = await getRoomBackend().readHead(id)
@@ -264,11 +264,11 @@ async function listRooms(options?: { prefix?: string }): Promise<RoomInfo[]> {
     for (const { roomId, incTag } of page.entries) {
       const current = await backend.readHead(roomId)
       if (current === null || current.head.state !== 'open' || current.head.currentInc === null) {
-        await backend.directoryDelete(roomId, incTag)
+        await repairRoomIndex(roomId, incTag, null)
         continue
       }
       const config = configFromHead(current.head)
-      if (current.head.currentInc !== incTag) await backend.directoryPut(roomId, current.head.currentInc)
+      await repairRoomIndex(roomId, incTag, current.head.currentInc)
       const count = await presenceCount(roomId, config.inc)
       rooms.push({ id: roomId, meta: config.meta, count, isEmpty: count === 0 })
     }
