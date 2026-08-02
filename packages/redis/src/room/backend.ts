@@ -151,12 +151,8 @@ export class RedisBackend implements BroadcastDriver, RoomDriver {
       let source: Redis
       if (options.redis instanceof Cluster) {
         // Keep SUBSCRIBE, dispatch, and the delivery-fence PING on one Room-owned live-master socket.
-        let topology = options.redis.nodes('master')
-        if (topology.length === 0) {
-          await options.redis.ping()
-          topology = options.redis.nodes('master')
-        }
-        const masters = topology
+        const masters = options.redis
+          .nodes('master')
           .filter((master) => master.status !== 'end')
           .sort((left, right) =>
             `${left.options.host ?? ''}:${left.options.port ?? ''}`.localeCompare(
