@@ -604,7 +604,11 @@ class ServerRoom extends RoomStateView implements Room {
     }
   }
 
-  private _applyAnnouncement(announce: Extract<RoomEnvelope, { __r: 'announce' }>, serialized: string, rawInfo: WirePublishInfo): void {
+  private _applyAnnouncement(
+    announce: Extract<RoomEnvelope, { __r: 'announce' }>,
+    serialized: string,
+    rawInfo: WirePublishInfo,
+  ): void {
     const info = makePublishInfo(this.id, rawInfo.seq, rawInfo.timestamp)
     this._state.applyAnnounce(announce.data, info)
     const wireText = encodePublishText(serialized, rawInfo)
@@ -764,8 +768,15 @@ class ServerRoom extends RoomStateView implements Room {
       .catch(reportRoomError)
       .finally(() => this._recoveringSubscriptions.delete(slot))
   }
-  private async _authorityStillOwnsSubscription(deadline: number): Promise<boolean> { const current = await withinRoomHorizon(getRoomBackend().readHead(this.id), deadline - Date.now()); return current !== null && current.head.state === 'open' && current.head.currentInc === this._inc }
-  private async _retryTerminalSubscription(slot: SubSlot, deadline: number, attemptMs: number): Promise<'recovered' | 'retry' | 'exhausted'> {
+  private async _authorityStillOwnsSubscription(deadline: number): Promise<boolean> {
+    const current = await withinRoomHorizon(getRoomBackend().readHead(this.id), deadline - Date.now())
+    return current !== null && current.head.state === 'open' && current.head.currentInc === this._inc
+  }
+  private async _retryTerminalSubscription(
+    slot: SubSlot,
+    deadline: number,
+    attemptMs: number,
+  ): Promise<'recovered' | 'retry' | 'exhausted'> {
     slot.retry()
     try {
       await withinRoomHorizon(slot.attemptReady, Math.min(attemptMs, deadline - Date.now()))
@@ -911,7 +922,9 @@ class ServerRoom extends RoomStateView implements Room {
     if (sender === undefined) return
     const reply: DmReply = req.ok
       ? { ok: true, result: req.result }
-      : 'abort' in req ? { ok: false, abort: true, abortValue: req.abortValue } : { ok: false, err: req.err }
+      : 'abort' in req
+        ? { ok: false, abort: true, abortValue: req.abortValue }
+        : { ok: false, err: req.err }
     void this._publishDmAck(sender, req.ackId, reply).catch(reportRoomError)
   }
   private _applyStubBinaryWants(stub: RoomStubChannel, req: Extract<RoomStubRequest, { __r: 'sub-binary' }>): void {
@@ -1011,7 +1024,9 @@ class ServerRoom extends RoomStateView implements Room {
   }
 
   private deriveSubscriptionPlan(
-    state: RoomState, stubs: ReadonlySet<RoomStubChannel>, locals: ReadonlyMap<string, ServerLocalParticipant>,
+    state: RoomState,
+    stubs: ReadonlySet<RoomStubChannel>,
+    locals: ReadonlyMap<string, ServerLocalParticipant>,
   ): SubscriptionPlan {
     const backend = getRoomBackend()
     const open = !state.closed
@@ -1023,9 +1038,16 @@ class ServerRoom extends RoomStateView implements Room {
     const wantAnyBinary = open && wantsAnyBinary(binaryWants)
     const memberIds = open ? state.listMemberIds() : []
     const binaryPairs = open ? this._binaryPairs(binaryWants, memberIds) : []
-    return { backend, open, observed, becomesObserved: open && observed && !this._ctrlSub.active,
-      wantSemantic: open && (wantAnyText || wantAnnounce), wantAnyBinary,
-      needsRoster: state.listenerCount > 0 || wantAnyBinary, binaryPairs }
+    return {
+      backend,
+      open,
+      observed,
+      becomesObserved: open && observed && !this._ctrlSub.active,
+      wantSemantic: open && (wantAnyText || wantAnnounce),
+      wantAnyBinary,
+      needsRoster: state.listenerCount > 0 || wantAnyBinary,
+      binaryPairs,
+    }
   }
 
   private _syncControlAndSemantic(plan: SubscriptionPlan): void {
@@ -1062,9 +1084,13 @@ class ServerRoom extends RoomStateView implements Room {
   private _syncInbox(plan: SubscriptionPlan): void {
     this._syncKeyedSubs(
       this._dmUnsubs,
-      plan.open ? this._ownedMemberIds().map((member) => ({ key: member, value: { kind: 'inbox', member } as const })) : [],
+      plan.open
+        ? this._ownedMemberIds().map((member) => ({ key: member, value: { kind: 'inbox', member } as const }))
+        : [],
       (lane) =>
-        plan.backend.subscribeLane(this.id, this._inc, lane, (payload, info) => this._onDm(decodeRoomText(payload), info)),
+        plan.backend.subscribeLane(this.id, this._inc, lane, (payload, info) =>
+          this._onDm(decodeRoomText(payload), info),
+        ),
     )
   }
   private _aggregateBinaryWants(): BinaryWants {
@@ -1171,7 +1197,9 @@ class ServerRoom extends RoomStateView implements Room {
   }
   /** Roster refresh replans on membership-version drift and re-seeds streamed views from the committed snapshot. */
   private _refreshMembers(): Promise<void> {
-    this._pendingRefresh ??= this._runMemberRefresh().finally(() => { this._pendingRefresh = null })
+    this._pendingRefresh ??= this._runMemberRefresh().finally(() => {
+      this._pendingRefresh = null
+    })
     return this._pendingRefresh
   }
 

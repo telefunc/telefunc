@@ -112,7 +112,8 @@ describe('Redis real three-master Cluster CI certification', () => {
         holdNextSubscribe = false
         const subscribe = subscriber.subscribe.bind(subscriber)
         subscriber.subscribe = (async (...channels: string[]) => {
-          subscribeEntered.resolve(); await releaseSubscribe.promise
+          subscribeEntered.resolve()
+          await releaseSubscribe.promise
           return await subscribe(...channels)
         }) as typeof subscriber.subscribe
       })
@@ -124,39 +125,69 @@ describe('Redis real three-master Cluster CI certification', () => {
       const roomId = 'runtime-slot} proof'
       const inc = 'runtime-slot-inc'
       const head = await open(backend, roomId, inc)
-      const time = vi.spyOn(client, 'time').mockImplementation(async () => { throw new Error('control: keyless TIME escaped the room slot') })
+      const time = vi.spyOn(client, 'time').mockImplementation(async () => {
+        throw new Error('control: keyless TIME escaped the room slot')
+      })
       expect((await authority.readHead(roomId))?.head.currentInc).toBe(inc)
       const cells = await backend.readCells(roomId, inc, { keys: [] })
       time.mockRestore()
       if ('staleInc' in cells) throw new Error('fresh generation was unexpectedly stale')
-      expect(await backend.compareExchangeCells(roomId, inc, cells.revision, [{ key: 'cell} escape', set: { bytes: bytes('value') } }])).toBe('committed')
+      expect(
+        await backend.compareExchangeCells(roomId, inc, cells.revision, [
+          { key: 'cell} escape', set: { bytes: bytes('value') } },
+        ]),
+      ).toBe('committed')
       const firstSubscription = subscribe(backend, roomId, inc, () => {})
       await firstSubscription.ready
-      await accepted(await backend.commitLane(roomId, inc, SEMANTIC_LANE, bytes('payload'),
-        { retain: true, requiredCellKeys: ['cell} escape'] })).delivery
+      await accepted(
+        await backend.commitLane(roomId, inc, SEMANTIC_LANE, bytes('payload'), {
+          retain: true,
+          requiredCellKeys: ['cell} escape'],
+        }),
+      ).delivery
       const currentCells = await backend.readCells(roomId, inc, { keys: ['cell} escape'] })
       if ('staleInc' in currentCells) throw new Error('cell fence generation vanished')
-      expect(await backend.compareExchangeCells(roomId, inc, currentCells.revision, [{ key: 'cell} escape' }])).toBe('committed')
-      expect(await backend.commitLane(roomId, inc, SEMANTIC_LANE, bytes('fenced'), { requiredCellKeys: ['cell} escape'] })).toEqual({ stale: true })
+      expect(await backend.compareExchangeCells(roomId, inc, currentCells.revision, [{ key: 'cell} escape' }])).toBe(
+        'committed',
+      )
+      expect(
+        await backend.commitLane(roomId, inc, SEMANTIC_LANE, bytes('fenced'), { requiredCellKeys: ['cell} escape'] }),
+      ).toEqual({ stale: true })
       await backend.deleteRetained(roomId, inc, SEMANTIC_LANE)
       await backend.directoryPut(roomId, inc)
       const hmget = client.hmget.bind(client)
       const hmgetMock = vi.spyOn(client, 'hmget').mockImplementation((async (key: string, ...fields: string[]) => {
-        await client.hdel(key, ...fields); return await hmget(key, ...fields)
+        await client.hdel(key, ...fields)
+        return await hmget(key, ...fields)
       }) as never)
       expect(await backend.directoryList(roomId)).toEqual({ entries: [] })
       hmgetMock.mockRestore()
       await backend.directoryPut(roomId, inc)
       await backend.directoryDelete(roomId, inc)
-      expect((await backend.publish({ key: 'generic} escape', kind: 'binary' }, bytes('generic'))).receivers).toBeUndefined()
+      expect(
+        (await backend.publish({ key: 'generic} escape', kind: 'binary' }, bytes('generic'))).receivers,
+      ).toBeUndefined()
       expect((await close(authority, roomId, head)).state).toBe('closed')
       await authority.dropGeneration(roomId, inc)
       await waitFor(() => firstSubscription.state() === 'closed')
       expect(subscriberOpens).toBe(1)
       await firstSubscription.unsubscribe()
-      return { backend, authority, observation, genericCalls, subscribeEntered, releaseSubscribe, holdNextSubscribe: () => { holdNextSubscribe = true }, subscriberOpens: () => subscriberOpens }
+      return {
+        backend,
+        authority,
+        observation,
+        genericCalls,
+        subscribeEntered,
+        releaseSubscribe,
+        holdNextSubscribe: () => {
+          holdNextSubscribe = true
+        },
+        subscriberOpens: () => subscriberOpens,
+      }
     }
-    async function exerciseGenerationDropDuringSubscribe(runtime: Awaited<ReturnType<typeof exerciseRuntimeSlotCommands>>) {
+    async function exerciseGenerationDropDuringSubscribe(
+      runtime: Awaited<ReturnType<typeof exerciseRuntimeSlotCommands>>,
+    ) {
       const [roomId, inc] = ['runtime-delayed-subscribe', 'runtime-delayed-inc']
       const head = await open(runtime.backend, roomId, inc)
       runtime.holdNextSubscribe()
@@ -177,11 +208,14 @@ describe('Redis real three-master Cluster CI certification', () => {
     }
     async function assertCommandKeyCoverage(runtime: Awaited<ReturnType<typeof exerciseRuntimeSlotCommands>>) {
       expect(new Set(runtime.observation.definitions.map(({ name }) => name))).toEqual(
-        new Set(['tfPublish', ...Object.values(REDIS_ROOM_COMMANDS).map(({ name }) => name)]))
+        new Set(['tfPublish', ...Object.values(REDIS_ROOM_COMMANDS).map(({ name }) => name)]),
+      )
       for (const definition of runtime.observation.definitions) {
         if (definition.numberOfKeys === null) continue
         const referenced = [...definition.lua.matchAll(/\bKEYS\[(\d+)\]/g)].map((match) => Number(match[1]))
-        expect(new Set(referenced), `${definition.name}: Lua KEYS references`).toEqual(new Set(Array.from({ length: definition.numberOfKeys }, (_, index) => index + 1)))
+        expect(new Set(referenced), `${definition.name}: Lua KEYS references`).toEqual(
+          new Set(Array.from({ length: definition.numberOfKeys }, (_, index) => index + 1)),
+        )
       }
       expect(runtime.genericCalls).toHaveLength(1)
       await assertCallsStayInOneSlot(runtime.genericCalls.map((args) => ({ name: 'tfPublish', keyCount: 2, args })))

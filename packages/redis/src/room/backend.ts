@@ -241,11 +241,7 @@ export class RedisBackend implements BroadcastDriver, RoomDriver {
     return { conflict: true, current: parsed.current === null ? null : toPublicHead(parsed.current) }
   }
 
-  async readCells(
-    roomId: string,
-    inc: string,
-    sel: CellSelector,
-  ): Promise<CellsRead> {
+  async readCells(roomId: string, inc: string, sel: CellSelector): Promise<CellsRead> {
     this._assertLive()
     for (let attempt = 0; attempt < STABLE_READ_ATTEMPTS; attempt++) {
       const result = await this._readCellAttempt(roomId, inc, sel)
@@ -255,7 +251,10 @@ export class RedisBackend implements BroadcastDriver, RoomDriver {
   }
 
   private async _readCellAttempt(roomId: string, inc: string, sel: CellSelector): Promise<CellsRead | null> {
-    const [headRaw, revBefore] = await this._publisher.mget(headKey(this._prefix, roomId), revKey(this._prefix, roomId, inc))
+    const [headRaw, revBefore] = await this._publisher.mget(
+      headKey(this._prefix, roomId),
+      revKey(this._prefix, roomId, inc),
+    )
     const head = this._parseHead(headRaw ?? null)
     if (head === null || (head.inc ?? null) !== inc) return { staleInc: true }
     const logicalKeys = await this._resolveLogicalCellKeys(roomId, inc, sel)
@@ -263,7 +262,9 @@ export class RedisBackend implements BroadcastDriver, RoomDriver {
     const values = physicalKeys.length > 0 ? await this._publisher.mgetBuffer(...physicalKeys) : []
     const before = revBefore ?? '0'
     const fenceKeys = REDIS_ROOM_COMMAND_KEYS.readCellsFence(this._prefix, roomId, inc)
-    const fence = JSON.parse((await this._call(REDIS_ROOM_COMMANDS.readCellsFence.name, [...fenceKeys, inc])) as string) as ReadCellsFenceReply
+    const fence = JSON.parse(
+      (await this._call(REDIS_ROOM_COMMANDS.readCellsFence.name, [...fenceKeys, inc])) as string,
+    ) as ReadCellsFenceReply
     if ('stale' in fence) return { staleInc: true }
     if (before !== fence.revision) return null
     return { revision: before, cells: collectVisibleCells(logicalKeys, values, fence.now) }
@@ -513,7 +514,11 @@ function parseCellValue(value: Buffer): { expiresAt: number | null; payload: Uin
   const header = value.subarray(0, nl).toString('ascii')
   return { expiresAt: header === '' ? null : Number(header), payload: Uint8Array.from(value.subarray(nl + 1)) }
 }
-function collectVisibleCells(logicalKeys: string[], values: Array<Buffer | null>, now: number): Map<string, Uint8Array> {
+function collectVisibleCells(
+  logicalKeys: string[],
+  values: Array<Buffer | null>,
+  now: number,
+): Map<string, Uint8Array> {
   const cells = new Map<string, Uint8Array>()
   for (let i = 0; i < logicalKeys.length; i++) {
     const value = values[i]

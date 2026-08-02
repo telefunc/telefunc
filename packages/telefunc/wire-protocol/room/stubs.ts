@@ -299,15 +299,22 @@ class RoomParticipantStubChannel extends ServerChannel<unknown, unknown> {
   }
 }
 
-function asRoomRecord(value: unknown): ParticipantMeta { return isObject(value) ? value : {} }
-async function sendParticipantDm(participant: ServerLocalParticipant, req: Extract<ParticipantStubRequest, { __r: 'req-dm' }>) {
+function asRoomRecord(value: unknown): ParticipantMeta {
+  return isObject(value) ? value : {}
+}
+async function sendParticipantDm(
+  participant: ServerLocalParticipant,
+  req: Extract<ParticipantStubRequest, { __r: 'req-dm' }>,
+) {
   if (!req.ack) return (await participant.send(req.to, req.data)) as RoomSendReceipt
   const { receipt, reply } = await participant._room._sendDmAck(participant.id, req.to, req.data)
   if (!reply.ok) throw roomFailureError(reply)
   return { ...receipt, response: reply.result }
 }
 async function handleParticipantStubRequest(
-  participant: ServerLocalParticipant, publishShield: ShieldValidator | undefined, msg: unknown,
+  participant: ServerLocalParticipant,
+  publishShield: ShieldValidator | undefined,
+  msg: unknown,
 ): Promise<unknown> {
   if (!hasRoomTag(msg)) return undefined
   const req = msg as ParticipantStubRequest

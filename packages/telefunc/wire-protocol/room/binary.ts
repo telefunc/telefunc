@@ -144,7 +144,13 @@ function unframeMemberId(data: Uint8Array): {
   if (track === undefined) return null
   const meta = flags & FRAME_FLAG_META ? readMetaSection(data, cursor) : null
   if (meta === undefined) return null
-  return { from: bytesToUuid(data), payload: data.subarray(cursor.offset), track, meta, retain: !!(flags & FRAME_FLAG_RETAIN) }
+  return {
+    from: bytesToUuid(data),
+    payload: data.subarray(cursor.offset),
+    track,
+    meta,
+    retain: !!(flags & FRAME_FLAG_RETAIN),
+  }
 }
 function binaryFrameSender(data: Uint8Array): string | null {
   return data.byteLength >= MEMBER_ID_BYTE_LENGTH ? bytesToUuid(data) : null
