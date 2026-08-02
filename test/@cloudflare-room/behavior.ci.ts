@@ -58,12 +58,6 @@ test('public Room lifecycle and authority settlement controls execute on Cloudfl
       invalidations: ['terminal'],
       generations: [],
     },
-    preAckRecoverableDrop: {
-      state: 'closed',
-      ready: 'Cloudflare Room subscription closed before acknowledgement',
-      settlements: ['delivery probe rejected', 'delivery probe rejected', 'delivery probe rejected'],
-      invalidations: ['recoverable'],
-    },
     cancelled: 'Cloudflare Room delivery cancelled before handoff',
     cancellationDeliveries: [1],
     fanoutOrdering: {
@@ -77,9 +71,17 @@ test('public Room lifecycle and authority settlement controls execute on Cloudfl
       outcomes: 65,
       deliveries: 65,
     },
-    evictionInvalidations: {
-      settlements: ['delivery probe rejected', 'delivery probe rejected', 'delivery probe rejected'],
-      invalidations: ['recoverable'],
+    transientFailureRecovery: {
+      settlements: [
+        'delivery probe rejected',
+        'delivery probe rejected',
+        'delivery probe rejected',
+        'delivery probe rejected',
+        'delivery probe rejected',
+      ],
+      recovered: 'resolved',
+      deliveries: [1, 2, 3, 4, 5, 6],
+      invalidations: ['terminal'],
     },
     restartSettlement: {
       old: 'Cloudflare Room delivery has an unknown delivery token',

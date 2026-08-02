@@ -126,6 +126,9 @@ export class SessionDurableObject extends DurableObject {
   releaseDelivery(roomId: string): void {
     this.#delivery(roomId).gate.resolve()
   }
+  setDeliveryFailure(roomId: string, fail: boolean): void {
+    this.#delivery(roomId).fail = fail
+  }
   async openSubscription(roomId: string, inc: string, waitForReady: boolean = true): Promise<void> {
     const attempt = this.#manager.openSubscription(roomId, inc, { kind: 'semantic' }, () => {})
     this.#attempts.set(roomId, attempt)
@@ -329,11 +332,10 @@ export default {
         lifecycle: await successfulLifecycle(env, sessionId, session, suffix),
         terminalDrop: await terminalGenerationDrop(env, session, suffix),
         preAckTerminalDrop: await preAckTerminalGenerationDrop(env, session, suffix),
-        preAckRecoverableDrop: await preAckRecoverableRouteDrop(env, session, suffix),
         ...(await cancelledDelivery(env, sessionId, session, suffix)),
         fanoutOrdering: await rejectedFanoutOrdering(env, sessionId, session, suffix),
         coordinatorFanout: await coordinatorFanoutSmoke(env, sessionId, session, suffix),
-        evictionInvalidations: await failedDeliveryEviction(env, sessionId, session, suffix),
+        transientFailureRecovery: await transientDeliveryFailureRecovery(env, sessionId, session, suffix),
         restartSettlement: await authorityRestart(env, suffix),
         alarmPolicy: await alarmScheduling(env, sessionId, suffix),
         controlPreconditions: await unpreparedControlFailures(env, suffix),
@@ -481,24 +483,6 @@ async function preAckTerminalGenerationDrop(env: Env, session: Session, suffix: 
     generations: await probe.authority.listGenerations(),
   }
 }
-async function preAckRecoverableRouteDrop(env: Env, session: Session, suffix: string) {
-  const probe = roomProbe(env, suffix, 'pre-ack-recoverable')
-  const opened = await probe.open('pre-ack recoverable open')
-  await session.prepareDelivery(probe.roomId, false, true)
-  await probe.control('prepare-registration-hold')
-  await session.openSubscription(probe.roomId, probe.inc, false)
-  await within(probe.control('wait-registration'), 'held recoverable route registration')
-  if ((await session.subscriptionState(probe.roomId)) !== 'establishing') {
-    throw new Error('pre-ack recoverable control did not hold the subscription in establishing state')
-  }
-  const settlements = await rejectedCommits(probe, 'pre-ack failed delivery')
-  const invalidations = (await session.deliveryState(probe.roomId)).invalidations
-  await probe.control('release-registration')
-  const ready = await session.subscriptionReadyOutcome(probe.roomId)
-  const state = await session.subscriptionState(probe.roomId)
-  await probe.close(opened)
-  return { state, ready, settlements, invalidations }
-}
 async function cancelledDelivery(env: Env, sessionId: DurableObjectId, session: Session, suffix: string) {
   const probe = roomProbe(env, suffix, 'cancel')
   const opened = await probe.openAndJoin(sessionId)
@@ -514,14 +498,23 @@ async function cancelledDelivery(env: Env, sessionId: DurableObjectId, session: 
     cancellationDeliveries: (await session.deliveryState(probe.roomId)).delivered,
   }
 }
-async function failedDeliveryEviction(env: Env, sessionId: DurableObjectId, session: Session, suffix: string) {
-  const probe = roomProbe(env, suffix, 'evict')
+async function transientDeliveryFailureRecovery(
+  env: Env,
+  sessionId: DurableObjectId,
+  session: Session,
+  suffix: string,
+) {
+  const probe = roomProbe(env, suffix, 'transient-failure')
   const opened = await probe.openAndJoin(sessionId)
   await session.prepareDelivery(probe.roomId, false, true)
-  const settlements = await rejectedCommits(probe, 'failed delivery')
-  const invalidations = (await session.deliveryState(probe.roomId)).invalidations
+  const settlements = await rejectedCommits(probe, 'transient failed delivery', 5)
+  session.setDeliveryFailure(probe.roomId, false)
+  const recoveredCommit = await probe.commit(6, 'recovered delivery')
+  await within(probe.settle(recoveredCommit), 'recovered delivery')
+  const deliveries = (await session.deliveryState(probe.roomId)).delivered
   await probe.close(opened)
-  return { settlements, invalidations }
+  const invalidations = (await session.deliveryState(probe.roomId)).invalidations
+  return { settlements, recovered: 'resolved', deliveries, invalidations }
 }
 async function rejectedFanoutOrdering(env: Env, fastSessionId: DurableObjectId, fastSession: Session, suffix: string) {
   const probe = roomProbe(env, suffix, 'fanout')
@@ -676,9 +669,13 @@ async function closeAndDrop(authority: Authority, inc: string, opened: RoomHead,
   )
   await authority.dropGeneration(inc)
 }
-async function rejectedCommits(probe: ReturnType<typeof roomProbe>, label: string): Promise<string[]> {
+async function rejectedCommits(
+  probe: ReturnType<typeof roomProbe>,
+  label: string,
+  attempts: number = 3,
+): Promise<string[]> {
   const settlements: string[] = []
-  for (let attempt = 1; attempt <= 3; attempt += 1) {
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
     const operation = `${label} ${attempt}`
     const commit = await probe.commit(attempt, operation)
     settlements.push(await rejectionOf(probe.settle(commit), operation))

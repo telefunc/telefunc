@@ -17,8 +17,6 @@ import {
   deleteRoute,
   listExpiredRouteInstallations,
   listRouteInstallations,
-  recordRouteDeliveryFailure,
-  recordRouteDeliverySuccess,
   renewRoute,
   snapshotRoutes,
   type RouteInstallation,
@@ -92,7 +90,7 @@ export class TelefuncRoomDurableObject extends DurableObject {
           path: String(coordinatorIndex ?? 0),
         }
         const outcomes = await this.#dispatchFanout(request, coordinatorIndex)
-        await this.#settleDeliveryOutcomes(outcomes, info, coordinatorIndex)
+        this.#settleDeliveryOutcomes(outcomes)
       },
       (resume) => setTimeout(resume, 0),
     )
@@ -360,53 +358,11 @@ export class TelefuncRoomDurableObject extends DurableObject {
       : dispatchRoomShardFanoutViaCoordinator(this.#sessionNamespaceValue, request)
   }
 
-  async #settleDeliveryOutcomes(
-    outcomes: RoomShardFanoutOutcome[],
-    info: { roomId: string; inc: string; laneKey: string; seq: number; timestamp: number },
-    coordinatorIndex?: number,
-  ): Promise<void> {
-    const deliveryFailures: Error[] = []
-    const evicted: RouteTarget[] = []
-    this.ctx.storage.transactionSync(() => {
-      for (const outcome of outcomes) {
-        const target = outcome.target
-        if (outcome.error === undefined) {
-          recordRouteDeliverySuccess(this.#sql, info.inc, info.laneKey, target.subscriberDoId, target.leaseId)
-          continue
-        }
-        deliveryFailures.push(new Error(outcome.error))
-        if (recordRouteDeliveryFailure(this.#sql, info.inc, info.laneKey, target.subscriberDoId, target.leaseId)) {
-          evicted.push(target)
-        }
-      }
-    })
-    if (evicted.length > 0) await this.#scheduleMaintenanceIfNeeded()
-
-    const invalidationFailures: Error[] = []
-    if (evicted.length > 0) {
-      // K=3 invalidation stays exact-lease scoped and uses the delivery coordinator bucket.
-      const request: RoomShardFanoutRequest = {
-        operation: 'invalidate',
-        roomId: info.roomId,
-        inc: info.inc,
-        laneKey: info.laneKey,
-        targets: evicted,
-        path: `${coordinatorIndex ?? 0}.invalidate`,
-      }
-      const invalidations = await this.#dispatchFanout(request, coordinatorIndex)
-      for (const outcome of invalidations) {
-        if (outcome.error !== undefined) invalidationFailures.push(new Error(outcome.error))
-      }
-    }
-
-    if (deliveryFailures.length === 1 && invalidationFailures.length === 0) throw deliveryFailures[0]
-    const failures = [...deliveryFailures, ...invalidationFailures]
+  #settleDeliveryOutcomes(outcomes: RoomShardFanoutOutcome[]): void {
+    const failures = outcomes.flatMap((outcome) => (outcome.error === undefined ? [] : [new Error(outcome.error)]))
+    if (failures.length === 1) throw failures[0]
     if (failures.length > 0) {
-      const message =
-        deliveryFailures.length === 1 && invalidationFailures.length === 1
-          ? 'Cloudflare Room delivery and exact-route invalidation both failed'
-          : 'Cloudflare Room fanout failed'
-      throw new AggregateError(failures, message)
+      throw new AggregateError(failures, 'Cloudflare Room fanout failed')
     }
   }
 

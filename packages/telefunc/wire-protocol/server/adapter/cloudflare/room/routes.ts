@@ -4,7 +4,6 @@
 
 const ROUTE_TTL_MS = 90_000
 export const ROUTE_RENEW_EVERY_MS = ROUTE_TTL_MS / 3
-const ROUTE_DELIVERY_FAILURE_LIMIT = 3
 
 export type RouteTarget = { subscriberDoId: string; leaseId: string; generationToken: string }
 export type RouteInstallation = {
@@ -29,7 +28,7 @@ export function upsertRoute(
 ): void {
   const expiresAt = now + ROUTE_TTL_MS
   sql.exec(
-    'INSERT OR REPLACE INTO route (room_id, inc, lane_key, subscriber_do_id, lease_id, generation_token, expires_at, failures) VALUES (?, ?, ?, ?, ?, ?, ?, 0)',
+    'INSERT OR REPLACE INTO route (room_id, inc, lane_key, subscriber_do_id, lease_id, generation_token, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
     roomId,
     inc,
     laneKey,
@@ -52,9 +51,8 @@ export function listRouteInstallations(sql: SqlStorage, inc: string): RouteInsta
 export function listExpiredRouteInstallations(sql: SqlStorage, now: number): RouteInstallation[] {
   return sql
     .exec<RouteInstallation>(
-      'SELECT room_id AS roomId, inc, lane_key AS laneKey, subscriber_do_id AS subscriberDoId, lease_id AS leaseId, generation_token AS generationToken FROM route WHERE expires_at <= ? OR failures >= ?',
+      'SELECT room_id AS roomId, inc, lane_key AS laneKey, subscriber_do_id AS subscriberDoId, lease_id AS leaseId, generation_token AS generationToken FROM route WHERE expires_at <= ?',
       now,
-      ROUTE_DELIVERY_FAILURE_LIMIT,
     )
     .toArray()
 }
@@ -70,14 +68,13 @@ export function renewRoute(
 ): boolean {
   const expiresAt = now + ROUTE_TTL_MS
   const changed = sql.exec(
-    'UPDATE route SET expires_at = ? WHERE inc = ? AND lane_key = ? AND subscriber_do_id = ? AND lease_id = ? AND expires_at > ? AND failures < ?',
+    'UPDATE route SET expires_at = ? WHERE inc = ? AND lane_key = ? AND subscriber_do_id = ? AND lease_id = ? AND expires_at > ?',
     expiresAt,
     inc,
     laneKey,
     subscriberDoId,
     leaseId,
     now,
-    ROUTE_DELIVERY_FAILURE_LIMIT,
   ).rowsWritten
   return changed === 1
 }
@@ -103,11 +100,10 @@ export function deleteRoute(
 export function snapshotRoutes(sql: SqlStorage, inc: string, laneKey: string, now: number): RouteTarget[] {
   return sql
     .exec<{ subscriber_do_id: string; lease_id: string; generation_token: string }>(
-      'SELECT subscriber_do_id, lease_id, generation_token FROM route WHERE inc = ? AND lane_key = ? AND expires_at > ? AND failures < ?',
+      'SELECT subscriber_do_id, lease_id, generation_token FROM route WHERE inc = ? AND lane_key = ? AND expires_at > ?',
       inc,
       laneKey,
       now,
-      ROUTE_DELIVERY_FAILURE_LIMIT,
     )
     .toArray()
     .map((row) => ({
@@ -115,61 +111,4 @@ export function snapshotRoutes(sql: SqlStorage, inc: string, laneKey: string, no
       leaseId: row.lease_id,
       generationToken: row.generation_token,
     }))
-}
-
-// Outcomes are exact-lease guarded. Success resets failures; the third failure makes the row non-live
-// while retaining it as the durable invalidation source.
-export function recordRouteDeliverySuccess(
-  sql: SqlStorage,
-  inc: string,
-  laneKey: string,
-  subscriberDoId: string,
-  leaseId: string,
-): void {
-  sql.exec(
-    'UPDATE route SET failures = 0 WHERE inc = ? AND lane_key = ? AND subscriber_do_id = ? AND lease_id = ?',
-    inc,
-    laneKey,
-    subscriberDoId,
-    leaseId,
-  )
-}
-
-export function recordRouteDeliveryFailure(
-  sql: SqlStorage,
-  inc: string,
-  laneKey: string,
-  subscriberDoId: string,
-  leaseId: string,
-): boolean {
-  const changed = sql.exec(
-    'UPDATE route SET failures = failures + 1 WHERE inc = ? AND lane_key = ? AND subscriber_do_id = ? AND lease_id = ?',
-    inc,
-    laneKey,
-    subscriberDoId,
-    leaseId,
-  ).rowsWritten
-  if (changed !== 1) return false
-  const failures = sql
-    .exec<{
-      failures: number
-    }>(
-      'SELECT failures FROM route WHERE inc = ? AND lane_key = ? AND subscriber_do_id = ? AND lease_id = ?',
-      inc,
-      laneKey,
-      subscriberDoId,
-      leaseId,
-    )
-    .toArray()[0]?.failures
-  if (failures === undefined || failures < ROUTE_DELIVERY_FAILURE_LIMIT) {
-    return false
-  }
-  sql.exec(
-    'UPDATE route SET expires_at = 0 WHERE inc = ? AND lane_key = ? AND subscriber_do_id = ? AND lease_id = ?',
-    inc,
-    laneKey,
-    subscriberDoId,
-    leaseId,
-  )
-  return true
 }

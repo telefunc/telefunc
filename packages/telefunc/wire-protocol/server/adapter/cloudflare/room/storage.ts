@@ -50,7 +50,7 @@ export function initSchema(sql: SqlStorage): void {
     CREATE TABLE IF NOT EXISTS rt_chunk
       (inc TEXT NOT NULL, lane_key TEXT NOT NULL, i INTEGER NOT NULL, bytes BLOB NOT NULL, PRIMARY KEY (inc, lane_key, i));
     CREATE TABLE IF NOT EXISTS route
-      (room_id TEXT NOT NULL, inc TEXT NOT NULL, lane_key TEXT NOT NULL, subscriber_do_id TEXT NOT NULL, lease_id TEXT NOT NULL, generation_token TEXT NOT NULL, expires_at INTEGER NOT NULL, failures INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (inc, lane_key, subscriber_do_id));
+      (room_id TEXT NOT NULL, inc TEXT NOT NULL, lane_key TEXT NOT NULL, subscriber_do_id TEXT NOT NULL, lease_id TEXT NOT NULL, generation_token TEXT NOT NULL, expires_at INTEGER NOT NULL, PRIMARY KEY (inc, lane_key, subscriber_do_id));
     CREATE INDEX IF NOT EXISTS route_expires_at ON route(expires_at);
     CREATE TABLE IF NOT EXISTS directory (room_id TEXT PRIMARY KEY, inc_tag TEXT NOT NULL);
   `)
