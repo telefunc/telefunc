@@ -50,12 +50,10 @@ function assertOrderingPosition(seq: number, timestamp: number, context: string)
     throw new Error(`${context}: invalid Room ordering position`)
   }
 }
-
 export type RedisBackendOptions = {
   redis: Redis | Cluster
   prefix?: string
 }
-
 const PUBLISH_CMD = 'tfPublish'
 const PUBLISH_LUA = `${REDIS_ORDERING_FRAME_LUA}
 local previous = redis.call('GET', KEYS[1])
@@ -72,7 +70,6 @@ local frame = tf_ordering_frame(seq, ts, ARGV[1])
 local receivers = redis.call('PUBLISH', KEYS[2], frame)
 return {seq, ts, receivers}
 `.trim()
-
 type StoredHead = {
   rev: string
   state: 'open' | 'closing' | 'closed'
@@ -81,14 +78,14 @@ type StoredHead = {
   lease?: { id: string; until: number }
   exp?: number
 }
-
 type HeadCxReply =
   | { tag: 'head'; head: StoredHead }
   | { tag: 'deleted' }
   | { tag: 'conflict'; current: StoredHead | null }
 type DropGenerationBeginReply = { exists: false } | { exists: true; token: string }
 type ReadCellsFenceReply = { stale: true } | { revision: string; now: number }
-
+type CellSelector = { keys: string[] } | { prefix: string }
+type CellsRead = { revision: string; cells: Map<string, Uint8Array> } | { staleInc: true }
 function toBase64(bytes: Uint8Array): string {
   return Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString('base64')
 }
@@ -98,7 +95,6 @@ function fromBase64(b64: string): Uint8Array {
 function toBuffer(bytes: Uint8Array): Buffer {
   return Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength)
 }
-
 function toPublicHead(stored: StoredHead): RoomHead {
   const head: RoomHead = {
     rev: stored.rev,
@@ -109,7 +105,6 @@ function toPublicHead(stored: StoredHead): RoomHead {
   if (stored.lease !== undefined) head.closeLease = { id: stored.lease.id, until: stored.lease.until }
   return head
 }
-
 function encodeCx(cx: HeadCx): string {
   if (cx.expect === 'absent') return JSON.stringify({ form: 'absent' })
   const expect = cx.expect
@@ -118,7 +113,6 @@ function encodeCx(cx: HeadCx): string {
     return JSON.stringify({ form: 'finalize', rev: expect.rev, closingLease: expect.closingLease })
   return JSON.stringify({ form: 'generic', rev: expect.rev })
 }
-
 function encodeNext(next: HeadNext): string {
   if ('delete' in next) return JSON.stringify({ kind: 'delete' })
   const { head, ttlMs } = next
@@ -250,42 +244,30 @@ export class RedisBackend implements BroadcastDriver, RoomDriver {
   async readCells(
     roomId: string,
     inc: string,
-    sel: { keys: string[] } | { prefix: string },
-  ): Promise<{ revision: string; cells: Map<string, Uint8Array> } | { staleInc: true }> {
+    sel: CellSelector,
+  ): Promise<CellsRead> {
     this._assertLive()
-    const hKey = headKey(this._prefix, roomId)
-    const rKey = revKey(this._prefix, roomId, inc)
-    // Revision fencing retries mutations; logical expiry hides silent PX expiry without a rev bump.
     for (let attempt = 0; attempt < STABLE_READ_ATTEMPTS; attempt++) {
-      const [headRaw, revBefore] = await this._publisher.mget(hKey, rKey)
-      const head = this._parseHead(headRaw ?? null)
-      // Reads need only generation existence — available while 'closing' (the closer's tail needs them).
-      if (head === null || (head.inc ?? null) !== inc) return { staleInc: true }
-      const logicalKeys = 'keys' in sel ? sel.keys : await this._scanCellKeys(roomId, inc, sel.prefix)
-      const physicalKeys = logicalKeys.map((key) => cellKey(this._prefix, roomId, inc, key))
-      const values = physicalKeys.length > 0 ? await this._publisher.mgetBuffer(...physicalKeys) : []
-      const before = revBefore ?? '0'
-      const fence = JSON.parse(
-        (await this._call(REDIS_ROOM_COMMANDS.readCellsFence.name, [
-          ...REDIS_ROOM_COMMAND_KEYS.readCellsFence(this._prefix, roomId, inc),
-          inc,
-        ])) as string,
-      ) as ReadCellsFenceReply
-      if ('stale' in fence) return { staleInc: true }
-      if (before !== fence.revision) continue
-      const cells = new Map<string, Uint8Array>()
-      for (let i = 0; i < logicalKeys.length; i++) {
-        const value = values[i]
-        if (value === null || value === undefined) continue
-        const parsed = parseCellValue(value)
-        if (parsed.expiresAt !== null && parsed.expiresAt <= fence.now) continue
-        cells.set(logicalKeys[i] as string, parsed.payload)
-      }
-      return { revision: before, cells }
+      const result = await this._readCellAttempt(roomId, inc, sel)
+      if (result !== null) return result
     }
     throw new Error(`readCells: stable read did not converge in ${STABLE_READ_ATTEMPTS} attempts (room '${roomId}')`)
   }
 
+  private async _readCellAttempt(roomId: string, inc: string, sel: CellSelector): Promise<CellsRead | null> {
+    const [headRaw, revBefore] = await this._publisher.mget(headKey(this._prefix, roomId), revKey(this._prefix, roomId, inc))
+    const head = this._parseHead(headRaw ?? null)
+    if (head === null || (head.inc ?? null) !== inc) return { staleInc: true }
+    const logicalKeys = await this._resolveLogicalCellKeys(roomId, inc, sel)
+    const physicalKeys = logicalKeys.map((key) => cellKey(this._prefix, roomId, inc, key))
+    const values = physicalKeys.length > 0 ? await this._publisher.mgetBuffer(...physicalKeys) : []
+    const before = revBefore ?? '0'
+    const fenceKeys = REDIS_ROOM_COMMAND_KEYS.readCellsFence(this._prefix, roomId, inc)
+    const fence = JSON.parse((await this._call(REDIS_ROOM_COMMANDS.readCellsFence.name, [...fenceKeys, inc])) as string) as ReadCellsFenceReply
+    if ('stale' in fence) return { staleInc: true }
+    if (before !== fence.revision) return null
+    return { revision: before, cells: collectVisibleCells(logicalKeys, values, fence.now) }
+  }
   async compareExchangeCells(
     roomId: string,
     inc: string,
@@ -512,7 +494,9 @@ export class RedisBackend implements BroadcastDriver, RoomDriver {
     const physical = (await this._generationKeys(roomId, inc)).filter((key) => key.startsWith(physicalPrefix + prefix))
     return physical.map((key) => key.slice(physicalPrefix.length))
   }
-
+  private _resolveLogicalCellKeys(roomId: string, inc: string, sel: CellSelector): Promise<string[]> {
+    return 'keys' in sel ? Promise.resolve(sel.keys) : this._scanCellKeys(roomId, inc, sel.prefix)
+  }
   private _generationKeys(roomId: string, inc: string): Promise<string[]> {
     return this._publisher.smembers(generationKeysKey(this._prefix, roomId, inc))
   }
@@ -528,4 +512,15 @@ function parseCellValue(value: Buffer): { expiresAt: number | null; payload: Uin
   if (nl < 0) return { expiresAt: null, payload: Uint8Array.from(value) }
   const header = value.subarray(0, nl).toString('ascii')
   return { expiresAt: header === '' ? null : Number(header), payload: Uint8Array.from(value.subarray(nl + 1)) }
+}
+function collectVisibleCells(logicalKeys: string[], values: Array<Buffer | null>, now: number): Map<string, Uint8Array> {
+  const cells = new Map<string, Uint8Array>()
+  for (let i = 0; i < logicalKeys.length; i++) {
+    const value = values[i]
+    if (value === null || value === undefined) continue
+    const parsed = parseCellValue(value)
+    if (parsed.expiresAt !== null && parsed.expiresAt <= now) continue
+    cells.set(logicalKeys[i] as string, parsed.payload)
+  }
+  return cells
 }
