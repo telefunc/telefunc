@@ -5,21 +5,18 @@ const payload = new Uint8Array([0, 1, 2, 3, 4, 5, 6, 7])
 const info = { seq: 17, timestamp: 1_700_000_000_000 }
 const legacyWire = new Uint8Array([17, 0, 0, 0, 0, 0, 128, 86, 254, 188, 120, 66, ...payload])
 
-describe('PUBLISH_BINARY rolling-version compatibility', () => {
-  it('decodes the previous writer layout', () => {
-    expect(decodePublishBinary(legacyWire)).toEqual({ data: payload, info })
-  })
+describe('PUBLISH_BINARY wire-version boundary', () => {
+  it.each([info, { ...info, seq: 0x1_0000_0000 }])(
+    'round-trips current ordering info and fails loudly in the previous reader',
+    (ordering) => {
+      const wire = encodePublishBinary(payload, ordering)
+      expect(() => legacyDecode(wire)).toThrow('finite numbers')
+      expect(decodePublishBinary(wire)).toEqual({ data: payload, info: ordering })
+    },
+  )
 
-  it('writes the previous reader layout while ordering values fit it', () => {
-    expect(encodePublishBinary(payload, info)).toEqual(legacyWire)
-  })
-
-  it('makes a wide ordering value fail loudly in the previous reader', () => {
-    const wide = { ...info, seq: 0x1_0000_0000 }
-    const wire = encodePublishBinary(payload, wide)
-
-    expect(() => legacyDecode(wire)).toThrow('finite numbers')
-    expect(decodePublishBinary(wire)).toEqual({ data: payload, info: wide })
+  it('rejects the previous unversioned writer layout', () => {
+    expect(() => decodePublishBinary(legacyWire)).toThrow('unsupported legacy wire format')
   })
 })
 
