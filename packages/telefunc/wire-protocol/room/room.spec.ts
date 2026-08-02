@@ -217,14 +217,18 @@ describe('Room public behavior', () => {
     expect(recreated._inc).not.toBe(firstInc)
     expect(await recreated.getParticipants()).toEqual([])
   })
-  it('closes a head whose directory registration cannot finish', async () => {
+  it('reports directory registration failure and repairs the open head on getOrCreate', async () => {
     const put = driver.directoryPut.bind(driver)
+    let attempts = 0
     vi.spyOn(driver, 'directoryPut').mockImplementation(async (roomId, inc) => {
-      if (roomId === 'index-failure') throw new Error('persistent index failure')
+      if (roomId === 'index-repair' && attempts++ === 0) throw new Error('index registration failure')
       await put(roomId, inc)
     })
-    await expect(Room.create('index-failure')).rejects.toThrow('persistent index failure')
-    expect((await driver.readHead('index-failure'))?.head).toMatchObject({ state: 'closed', currentInc: null })
+    await expect(Room.create('index-repair')).rejects.toThrow('index registration failure')
+    const open = (await driver.readHead('index-repair'))!.head
+    expect(open).toMatchObject({ state: 'open', currentInc: expect.any(String) })
+    expect(((await Room.getOrCreate('index-repair')) as ServerRoom)._inc).toBe(open.currentInc)
+    expect((await Room.list()).map(({ id }) => id)).toContain('index-repair')
   })
   it('waits for an active close lease and takes over until the head is closed', async () => {
     vi.useFakeTimers()

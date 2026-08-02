@@ -162,12 +162,7 @@ async function tryCreateRoom(id: string, options: RoomOptions | undefined): Prom
     return result.current?.state === 'closing' ? { kind: 'closing' } : { kind: 'exists' }
   }
   assert('head' in result)
-  try {
-    await repairRoomIndex(id, null, created.inc)
-  } catch (error) {
-    await closeRoom(id)
-    throw error
-  }
+  await backend.directoryPut(id, created.inc)
   return { kind: 'created', room: new ServerRoom(id, created, { members: [] }) }
 }
 
@@ -195,7 +190,7 @@ async function getOrCreateRoom(id: string, options?: RoomOptions): Promise<Room>
       try {
         const room = await getRoom(id)
         assert(ServerRoom.isServerRoom(room))
-        await repairRoomIndex(id, null, room._inc)
+        await getRoomBackend().directoryPut(id, room._inc)
         return room
       } catch (error) {
         const current = await getRoomBackend().readHead(id)
