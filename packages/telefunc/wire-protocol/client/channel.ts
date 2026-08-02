@@ -40,7 +40,6 @@ import { ChannelClosedError, isExpectedChannelFailure } from '../channel-errors.
 import { isPromise } from '../../utils/isPromise.js'
 import { hasProp } from '../../utils/hasProp.js'
 import { classifyTelefuncError } from '../error-classification.js'
-import { addTelefunctionCallBarrier, type TelefunctionCallBarrierScope } from './call-barrier.js'
 
 const CLIENT_BROADCAST_BRAND = Symbol.for('telefunc.ClientBroadcast')
 
@@ -610,14 +609,8 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   private _broadcastListeners: Array<BroadcastListener<T>> = []
   private _broadcastBinaryListeners: Array<BroadcastBinaryListener> = []
   private readonly _reconnectCallbacks: Array<() => void> = []
-  private readonly _callBarrierScope: TelefunctionCallBarrierScope
   private _wireTextSubscribed = false
   private _didOpen = false
-
-  constructor(options: ConstructorParameters<typeof ClientChannel>[0]) {
-    super(options)
-    this._callBarrierScope = { telefuncUrl: options.telefuncUrl, connectionKey: options.connectionKey }
-  }
 
   static isClientBroadcast(value: unknown): value is ClientBroadcast {
     return hasProp(value, CLIENT_BROADCAST_BRAND)
@@ -652,11 +645,6 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   /** @internal — observe transport reopens after the initial open. */
   _onReconnect(callback: () => void): void {
     this._reconnectCallbacks.push(callback)
-  }
-
-  /** @internal — fence a same-scope telefunction call behind this broadcast control. */
-  _addTelefunctionCallBarrier(promise: Promise<unknown>): void {
-    addTelefunctionCallBarrier(this._callBarrierScope, promise)
   }
 
   publish(data: ChannelData<T>): Promise<ChannelPublishAck> {

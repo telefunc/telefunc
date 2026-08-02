@@ -9,8 +9,6 @@ import { objectAssign } from '../utils/objectAssign.js'
 import { setAbortController } from './abort.js'
 import { getPendingContext } from './withContext.js'
 import { addAsyncGeneratorInterface } from './remoteTelefunctionCall/async-generator-interface.js'
-import { waitForTelefunctionCallBarriers } from '../wire-protocol/client/call-barrier.js'
-import { throwAbortError } from './remoteTelefunctionCall/errors.js'
 
 function remoteTelefunctionCall(
   telefuncFilePath: string,
@@ -79,54 +77,12 @@ function remoteTelefunctionCall(
     return makeHttpRequest(callContext)
   }
 
-  const barrier = waitForTelefunctionCallBarriers({ telefuncUrl: callContext.telefuncUrl, connectionKey })
-  const telefunctionReturnPromise = barrier
-    ? waitForBarrierOrAbort(
-        barrier,
-        abortController.signal,
-        callContext.telefunctionName,
-        callContext.telefuncFilePath,
-      ).then(startCall)
-    : startCall()
+  const telefunctionReturnPromise = startCall()
 
   setAbortController(telefunctionReturnPromise, abortController)
   addAsyncGeneratorInterface(telefunctionReturnPromise, abortController)
 
   return telefunctionReturnPromise
-}
-
-function waitForBarrierOrAbort(
-  barrier: Promise<void>,
-  signal: AbortSignal,
-  telefunctionName: string,
-  telefuncFilePath: string,
-): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const cleanup = () => signal.removeEventListener('abort', onAbort)
-    const onAbort = () => {
-      cleanup()
-      try {
-        throwAbortError(telefunctionName, telefuncFilePath, undefined)
-      } catch (error) {
-        reject(error)
-      }
-    }
-    if (signal.aborted) {
-      onAbort()
-      return
-    }
-    signal.addEventListener('abort', onAbort, { once: true })
-    void barrier.then(
-      () => {
-        cleanup()
-        resolve()
-      },
-      (error) => {
-        cleanup()
-        reject(error)
-      },
-    )
-  })
 }
 
 /** Create an AbortController optionally wired to an external signal. */

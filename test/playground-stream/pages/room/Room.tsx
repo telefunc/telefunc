@@ -322,6 +322,7 @@ function Room() {
           lobby.onAnnounce((data) => announcements.push(data))
           const system: Array<{ data: unknown; fromRoom: boolean }> = []
           me.listen((data, from) => system.push({ data, fromRoom: from === null }))
+          await me.setAttributes({}) // same-channel ack orders the declarations before the HTTP-triggered broadcasts
 
           let kicked = false
           let kickCause: unknown = null

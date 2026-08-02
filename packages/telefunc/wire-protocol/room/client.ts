@@ -59,7 +59,6 @@ class ClientRoom extends RoomStateView implements Room {
   protected readonly _state: RoomState
   /** Routing never owns public handles: a live handle owns this Room, not the reverse. */
   private readonly _localParticipants = new Map<string, WeakRef<ClientRoomParticipant>>()
-  private _announcedDemand = false
   /** Member-targeted events that beat an in-flight join ack, keyed once their wire ID is known. */
   private _inFlightJoins = 0
   private readonly _pendingJoinEvents = new Map<string, PendingJoinEvent[]>()
@@ -353,10 +352,7 @@ class ClientRoom extends RoomStateView implements Room {
     // A room-level text subscription supersedes the member set — clear it server-side.
     const announce = state.wantsAnnounce
     const declaration = { __r: 'sub-text', members: text.all ? [] : text.members, announce } as const
-    const fence = reconcileText || announce !== this._announcedDemand
-    this._announcedDemand = announce
-    if (fence) this._stub._addTelefunctionCallBarrier(this._stub.send(declaration, { ack: true }))
-    else void this._stub.send(declaration, { ack: false }).catch(() => {})
+    void this._stub.send(declaration, { ack: false }).catch(() => {})
     const binary = state.binaryWants()
     void this._stub.send({ __r: 'sub-binary', wants: binary }, { ack: false }).catch(() => {})
   }

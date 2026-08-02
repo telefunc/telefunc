@@ -3,7 +3,6 @@ import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { IndexedPeer } from '../server/IndexedPeer.js'
 import { ACK_STATUS, TAG, decode } from '../shared-ws.js'
-import { addTelefunctionCallBarrier, waitForTelefunctionCallBarriers } from '../client/call-barrier.js'
 import { ShieldValidationError, isShieldValidationError } from '../../shared/ShieldValidationError.js'
 import { Abort, isAbort } from '../../shared/Abort.js'
 import {
@@ -1678,27 +1677,6 @@ describe('client Room lifecycle', () => {
       { __r: 'sub-text', members: [], announce: false },
     ])
   })
-  it('fences a causally subsequent telefunction call until announce demand is accepted', async () => {
-    const accepted = deferred<void>()
-    const { client } = fakeClient('announce-demand-fence', {
-      send: async (_message, options) => {
-        if (options?.ack) await accepted.promise
-        return undefined
-      },
-    })
-    client.onAnnounce(() => {})
-    const fence = waitForTelefunctionCallBarriers({ telefuncUrl: '/_telefunc' })
-    expect(fence).not.toBeNull()
-    let ready = false
-    void fence!.then(() => {
-      ready = true
-    })
-    await Promise.resolve()
-    expect(ready).toBe(false)
-    accepted.resolve()
-    await fence
-    expect(ready).toBe(true)
-  })
   it('redeclares a room-wide text subscription after reconnect even when the local latch already matches', () => {
     const wireDeclarations: boolean[] = []
     const { fake, client } = fakeClient('reconnect-text', { wireDeclarations })
@@ -2507,8 +2485,6 @@ function createFakeStub(options?: {
       return () => binary.splice(binary.indexOf(callback), 1)
     },
     _setWireTextSubscribed: ClientBroadcast.prototype._setWireTextSubscribed,
-    _addTelefunctionCallBarrier: (promise: Promise<unknown>) =>
-      addTelefunctionCallBarrier({ telefuncUrl: '/_telefunc' }, promise),
     send: options?.send ?? (async () => undefined),
     publish: async () => ({ key: 'fake', seq: 1, timestamp: 1 }),
     publishBinary: async () => ({ key: 'fake', seq: 1, timestamp: 1 }),

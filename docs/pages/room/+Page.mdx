@@ -81,6 +81,8 @@ Every message carries its verified sender, and each kind of message has one send
 
 `from` is the verified sender (`from.id`, `from.meta`, `from.identity`), stamped by the server and impossible to spoof; `from === null` means the room itself spoke.
 
+All live handlers — `subscribe()`, participant `subscribe()`, `subscribeBinary()`, `listen()`, and `onAnnounce()` — take effect remotely when the server processes their subscription declaration. Same-connection FIFO orders that declaration before a later publish sent through the same Room connection, but a separate HTTP telefunction call can overtake a handler registered in the same tick. Install must-see handlers during join/setup before the action that can trigger such a call, or use retained publishes for data late subscribers must receive.
+
 ### Identity vs meta
 
 Two fields describe a participant, and confusing them is the most common mistake:
