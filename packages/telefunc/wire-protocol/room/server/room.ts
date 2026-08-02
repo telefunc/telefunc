@@ -757,38 +757,24 @@ class ServerRoom extends RoomStateView implements Room {
       .catch(reportRoomError)
       .finally(() => this._recoveringSubscriptions.delete(slot))
   }
-  private async _authorityStillOwnsSubscription(deadline: number): Promise<boolean> {
-    const current = await withinRoomHorizon(getRoomBackend().readHead(this.id), deadline - Date.now())
-    return current !== null && current.head.state === 'open' && current.head.currentInc === this._inc
-  }
-  private async _retryTerminalSubscription(
-    slot: SubSlot,
-    deadline: number,
-    attemptMs: number,
-  ): Promise<'recovered' | 'retry' | 'exhausted'> {
-    slot.retry()
-    try {
-      await withinRoomHorizon(slot.attemptReady, Math.min(attemptMs, deadline - Date.now()))
-      await this._reconcileAuthority()
-      return 'recovered'
-    } catch (error) {
-      reportRoomError(error)
-      return Date.now() >= deadline ? 'exhausted' : 'retry'
-    }
-  }
   private async _recoverTerminalSubscription(slot: SubSlot): Promise<void> {
     const deadline = Date.now() + ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS
     const attemptMs = ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS / (ROOM_REPLAN_LIMIT + 1)
     for (let attempt = 0; attempt <= ROOM_REPLAN_LIMIT && slot.wanted; attempt++) {
       try {
-        if (!(await this._authorityStillOwnsSubscription(deadline))) return this._settleTerminalSubscription()
+        const current = await withinRoomHorizon(getRoomBackend().readHead(this.id), deadline - Date.now())
+        if (current === null || current.head.state !== 'open' || current.head.currentInc !== this._inc) {
+          this._settleTerminalSubscription()
+          return
+        }
+        slot.retry()
+        await withinRoomHorizon(slot.attemptReady, Math.min(attemptMs, deadline - Date.now()))
+        await this._reconcileAuthority()
+        return
       } catch (error) {
         reportRoomError(error)
         if (Date.now() >= deadline) break
       }
-      const outcome = await this._retryTerminalSubscription(slot, deadline, attemptMs)
-      if (outcome === 'recovered') return
-      if (outcome === 'exhausted') break
     }
     if (!slot.wanted) return
     reportRoomError(new RoomError(`Room subscription recovery exhausted: ${this.id}`))
