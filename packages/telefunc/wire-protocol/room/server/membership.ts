@@ -183,19 +183,11 @@ async function resolveIdentityMembers(roomId: string, inc: string, identity: str
   const prefix = roomIdentityKvPrefix(roomId, identity)
   const members: string[] = []
   const markers = await readCellSet(roomId, inc, { prefix })
-  const matches = (raw: Uint8Array | null | undefined) =>
-    raw != null && (parse(decodeRoomText(raw)) as RoomMemberRecord).identity === identity
   for (const key of markers.cells.keys()) {
     const memberId = key.slice(prefix.length)
-    const memberKey = roomMemberKvKey(roomId, memberId)
     if ((await readLiveMember(roomId, inc, memberId))?.identity === identity) {
       members.push(memberId)
-      continue
     }
-    await mutateCells(roomId, inc, { keys: [key, memberKey] }, (cells) => ({
-      value: undefined,
-      mutations: matches(cells.get(memberKey)) ? [] : [{ key }],
-    }))
   }
   return members
 }
