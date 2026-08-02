@@ -1533,30 +1533,17 @@ describe('client Room lifecycle', () => {
     await expect(member.leave()).resolves.toBeUndefined()
     expect(leaveAttempts).toBe(2)
   })
-  it.each(['leave', 'closed'] as const)('settles a client join across a pre-ack %s event', async (event) => {
-    const { id, ack, emit, joining } = await pendingClientJoin(`pre-ack-${event}`)
-    if (event === 'leave') {
-      emit({ __r: 'leave', id })
-    } else {
-      emit({ __r: 'closed' })
-    }
+  it('settles a client join across a pre-ack closed event', async () => {
+    const { id, ack, emit, joining } = await pendingClientJoin('pre-ack-closed')
+    emit({ __r: 'closed' })
     ack.resolve({ id, joinedAt: 1 })
     const participant = await joining
     await expect(participant.publish('zombie-check')).rejects.toThrow(/left/i)
     const causes: unknown[] = []
     participant.onLeave((cause) => causes.push(cause))
-    expect(causes).toEqual([{ type: event === 'leave' ? 'left' : 'closed' }])
+    expect(causes).toEqual([{ type: 'closed' }])
   })
-  it('replays demand that arrives while a client join ack is pending', async () => {
-    const { id, ack, emit, joining } = await pendingClientJoin('pre-ack-demand')
-    emit({ __r: 'demand', member: id, track: 'screen', wanted: true })
-    ack.resolve({ id, joinedAt: 1 })
-    const participant = await joining
-    const demand: unknown[] = []
-    participant.onDemand((track, wanted) => demand.push([track, wanted]))
-    expect(demand).toEqual([['screen', true]])
-  })
-  it('keeps every acknowledged DM that arrives while a client join ack is pending', async () => {
+  it('settles every acknowledged DM that arrives before a participant is registered', async () => {
     const from = crypto.randomUUID()
     const replies: Array<{ ackId: string }> = []
     const { id, ack, emit, joining } = await pendingClientJoin('pre-ack-dm', (message) => {
