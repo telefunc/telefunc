@@ -52,9 +52,6 @@ const TRACK_LENGTH_FIELD_MAX = 0xff
 const META_LENGTH_FIELD_MAX = 0xffff
 const frameTextEncoder = /* @__PURE__ */ new TextEncoder()
 const frameTextDecoder = /* @__PURE__ */ new TextDecoder('utf-8', { fatal: true, ignoreBOM: true })
-/** Binary relay format: `[16-byte member UUID][1-byte flags][?1-byte track length + track][?2-byte meta length + meta][payload]`. A plain publish costs one flag byte; named tracks (mic/camera/screen
- * on one member lane) and optional per-frame `meta` ride only when set, so media multiplexing needs no hand-rolled envelopes.
- */
 function frameWithMemberId(memberId: string, payload: Uint8Array, opts?: BinaryPublishOptions): Uint8Array {
   const idBytes = uuidToBytes(memberId)
   assert(idBytes, 'room member IDs are UUIDs')
@@ -101,9 +98,37 @@ function frameWithMemberId(memberId: string, payload: Uint8Array, opts?: BinaryP
   framed.set(payload, headerLength)
   return framed
 }
-/** Split a binary relay frame into sender, track, per-frame meta, and payload. The one validating seam for an untrusted frame (a hand-crafted publish need not have gone through `frameWithMemberId`):
- * `null` on truncation, an empty named track (`''` is the default lane), or metadata that isn't valid serialized JSON. A `null` return means "reject this frame" — callers never see a half-parsed one.
- */
+type FrameCursor = { offset: number }
+function decodeFrameText(bytes: Uint8Array): string | undefined {
+  try {
+    return frameTextDecoder.decode(bytes)
+  } catch {
+    return undefined
+  }
+}
+function readTrackSection(data: Uint8Array, cursor: FrameCursor): string | undefined {
+  const length = data[cursor.offset++]
+  if (length === undefined || length === 0 || data.byteLength < cursor.offset + length) return undefined
+  const track = decodeFrameText(data.subarray(cursor.offset, cursor.offset + length))
+  if (track === undefined) return undefined
+  cursor.offset += length
+  return track
+}
+function readMetaSection(data: Uint8Array, cursor: FrameCursor): Record<string, unknown> | undefined {
+  const length = data.byteLength < cursor.offset + 2 ? -1 : (data[cursor.offset]! << 8) | data[cursor.offset + 1]!
+  cursor.offset += 2
+  if (length < 0 || data.byteLength < cursor.offset + length) return undefined
+  const serialized = decodeFrameText(data.subarray(cursor.offset, cursor.offset + length))
+  if (serialized === undefined) return undefined
+  try {
+    const meta: unknown = parse(serialized)
+    if (!isRecord(meta)) return undefined
+    cursor.offset += length
+    return meta
+  } catch {
+    return undefined
+  }
+}
 function unframeMemberId(data: Uint8Array): {
   from: string
   payload: Uint8Array
@@ -113,42 +138,14 @@ function unframeMemberId(data: Uint8Array): {
 } | null {
   if (data.byteLength < MEMBER_ID_BYTE_LENGTH + 1) return null
   const flags = data[MEMBER_ID_BYTE_LENGTH]!
-  if (flags & ~FRAME_FLAGS_KNOWN) return null // an unknown flag bit — malformed or forward-incompatible; reject it
-  const retain = (flags & FRAME_FLAG_RETAIN) !== 0
-  let track: string | null = null
-  let meta: Record<string, unknown> | null = null
-  let offset = MEMBER_ID_BYTE_LENGTH + 1
-  if (flags & FRAME_FLAG_TRACK) {
-    if (data.byteLength < offset + 1) return null
-    const trackLength = data[offset]!
-    offset += 1
-    if (trackLength === 0 || data.byteLength < offset + trackLength) return null
-    try {
-      track = frameTextDecoder.decode(data.subarray(offset, offset + trackLength))
-    } catch {
-      return null
-    }
-    offset += trackLength
-  }
-  if (flags & FRAME_FLAG_META) {
-    if (data.byteLength < offset + 2) return null
-    const metaLength = (data[offset]! << 8) | data[offset + 1]!
-    offset += 2
-    if (data.byteLength < offset + metaLength) return null
-    try {
-      const parsedMeta: unknown = parse(frameTextDecoder.decode(data.subarray(offset, offset + metaLength)))
-      if (!isRecord(parsedMeta)) return null // meta must be a record — scalars/arrays are rejected
-      meta = parsedMeta
-    } catch {
-      return null // malformed meta JSON on a hand-crafted frame — reject the whole frame, don't throw
-    }
-    offset += metaLength
-  }
-  return { from: bytesToUuid(data), payload: data.subarray(offset), track, meta, retain }
+  if (flags & ~FRAME_FLAGS_KNOWN) return null
+  const cursor = { offset: MEMBER_ID_BYTE_LENGTH + 1 }
+  const track = flags & FRAME_FLAG_TRACK ? readTrackSection(data, cursor) : null
+  if (track === undefined) return null
+  const meta = flags & FRAME_FLAG_META ? readMetaSection(data, cursor) : null
+  if (meta === undefined) return null
+  return { from: bytesToUuid(data), payload: data.subarray(cursor.offset), track, meta, retain: !!(flags & FRAME_FLAG_RETAIN) }
 }
-/** The sender UUID carried in a binary frame's fixed prefix, or `null` if the frame is too short to
- *  hold one. Cheap (reads only the member-ID prefix): lets the publish path check membership before
- *  the full validating `unframeMemberId`, so a frame is parsed once, not twice. */
 function binaryFrameSender(data: Uint8Array): string | null {
   return data.byteLength >= MEMBER_ID_BYTE_LENGTH ? bytesToUuid(data) : null
 }
@@ -157,9 +154,6 @@ function binaryFrameSender(data: Uint8Array): string | null {
 const DEFAULT_TRACK = ''
 /** Which of a publisher's tracks a holder wants: every track, or an exact set (`DEFAULT_TRACK` selects the unnamed lane). */
 type TrackWants = { all: boolean; tracks: string[] }
-/** A holder's complete binary wants. `everyMember` comes from room-level listeners and applies
- *  to all members; `members` adds participant-scoped wants on top. This one shape drives all
- *  three gates: the client's declaration, the server's upstream key set, and the per-stub relay. */
 type BinaryWants = { everyMember: TrackWants; members: Record<string, TrackWants> }
 function emptyTrackWants(): TrackWants {
   return { all: false, tracks: [] }
@@ -171,9 +165,6 @@ function mergeTrackWants(a: TrackWants, b: TrackWants): TrackWants {
 function wantsTrack(wants: TrackWants, track: string): boolean {
   return wants.all || wants.tracks.includes(track)
 }
-/** Does a complete binary want cover one (member, track)? The one predicate behind both the live
- *  relay gate (`RoomStubChannel._wantsBinary`) and retained-frame replay: `everyMember` applies to
- *  all members, `members` adds participant-scoped wants on top. */
 function binaryWantsCovers(wants: BinaryWants, memberId: string, track: string): boolean {
   if (wantsTrack(wants.everyMember, track)) return true
   const memberWants = wants.members[memberId]
