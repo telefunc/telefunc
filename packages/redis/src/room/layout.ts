@@ -431,10 +431,6 @@ if prev then
   if not pseq then return redis.error_reply('commitLane: invalid ordering watermark') end
   base_seq = tonumber(pseq)
   base_ts = tonumber(pts)
-  if not base_seq or not base_ts or base_seq < 0 or base_seq > ${REDIS_SAFE_INTEGER_MAX}
-      or base_ts < 0 or base_ts > ${REDIS_SAFE_INTEGER_MAX} then
-    return redis.error_reply('commitLane: invalid ordering watermark')
-  end
 end
 if base_seq >= ${REDIS_SAFE_INTEGER_MAX} then
   return redis.error_reply('commitLane: sequence exhausted for the ordering domain')
@@ -442,9 +438,6 @@ end
 local seq = base_seq + 1
 local ts = now
 if base_ts > ts then ts = base_ts end
-if seq < 1 or seq > ${REDIS_SAFE_INTEGER_MAX} or ts < 0 or ts > ${REDIS_SAFE_INTEGER_MAX} then
-  return redis.error_reply('commitLane: invalid ordering position')
-end
 -- Lua's implicit number-to-string conversion uses limited significant digits at the safe-integer
 -- boundary. Format both exact integers once, then use those decimal strings for durable state and the
 -- JSON receipt so the final legal commit cannot effect successfully and fail only while decoding reply.
