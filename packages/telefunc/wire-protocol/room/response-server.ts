@@ -26,18 +26,13 @@ type RoomRemoteReplacerContract = TypeContract<
     hidden?: boolean
   }
 >
-/** Per-response echo-suppression rendezvous (`selfDelivery: false`). The response's stable `registerChannel` closure is the pass identity; a global-symbol WeakMap lets Room replacers rendezvous across
- * duplicate SSR module graphs without adding Room scratch state to the public serializer context. Entries disappear with the response closure.
- */
-const ROOM_SELF_SUPPRESS = Symbol.for('telefunc:roomSelfSuppressPasses')
-type RoomSelfSuppressPasses = WeakMap<ServerReplacerContext['registerChannel'], Map<ServerRoom, Set<string>>>
-const globalWithRoomPasses = globalThis as typeof globalThis & {
-  [ROOM_SELF_SUPPRESS]?: RoomSelfSuppressPasses
+/** Per-response echo suppression shared by the Room replacers in one serializer pass. */
+const ROOM_SELF_SUPPRESS = Symbol()
+type RoomReplacerContext = ServerReplacerContext & {
+  [ROOM_SELF_SUPPRESS]?: Map<ServerRoom, Set<string>>
 }
-const roomSelfSuppressPasses = (globalWithRoomPasses[ROOM_SELF_SUPPRESS] ??= new WeakMap())
 function roomSelfSuppressSet(context: ServerReplacerContext, room: ServerRoom): Set<string> {
-  let byRoom = roomSelfSuppressPasses.get(context.registerChannel)
-  if (!byRoom) roomSelfSuppressPasses.set(context.registerChannel, (byRoom = new Map()))
+  const byRoom = ((context as RoomReplacerContext)[ROOM_SELF_SUPPRESS] ??= new Map())
   let set = byRoom.get(room)
   if (!set) byRoom.set(room, (set = new Set()))
   return set
