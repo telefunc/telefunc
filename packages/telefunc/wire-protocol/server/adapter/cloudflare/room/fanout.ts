@@ -106,27 +106,24 @@ export async function dispatchRoomShardFanout(
   request: RoomShardFanoutRequest,
 ): Promise<RoomShardFanoutOutcome[]> {
   if (request.targets.length <= ROOM_FANOUT_WIDTH) {
+    const { roomId, inc, laneKey } = request
     return Promise.all(
       request.targets.map(async (target): Promise<RoomShardFanoutOutcome> => {
         const stub = namespace.get(namespace.idFromString(target.subscriberDoId))
-        const route = {
-          roomId: request.roomId,
-          inc: request.inc,
-          ...target,
-          laneKey: target.laneKey ?? request.laneKey,
-        }
+        const route = { roomId, inc, ...target, laneKey: target.laneKey ?? laneKey }
         try {
-          await (request.operation === 'deliver'
-            ? stub.telefuncRoomDeliver({
-                ...route,
-                frame: request.frame,
-                seq: request.seq,
-                timestamp: request.timestamp,
-              })
-            : stub.telefuncRoomInvalidate({
-                ...route,
-                ...(request.terminal === true ? { terminal: true as const } : {}),
-              }))
+          if (request.operation === 'deliver')
+            await stub.telefuncRoomDeliver({
+              ...route,
+              frame: request.frame,
+              seq: request.seq,
+              timestamp: request.timestamp,
+            })
+          else
+            await stub.telefuncRoomInvalidate({
+              ...route,
+              ...(request.terminal === true ? { terminal: true as const } : {}),
+            })
           return { target }
         } catch (error) {
           return { target, error: errorMessage(error) }
