@@ -104,8 +104,7 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
     instanceName: baseInstanceName,
     hooks: getTelefuncChannelHooks(),
   })
-  const createBackend = () =>
-    new CloudflareRoomBackend(new CloudflareBroadcastTransport({ baseInstanceName, scale }))
+  const createBackend = () => new CloudflareRoomBackend(new CloudflareBroadcastTransport({ baseInstanceName, scale }))
   let cloudflareBackend: CloudflareRoomBackend | undefined
   setDefaultBackend(() => {
     const backend = createBackend()
