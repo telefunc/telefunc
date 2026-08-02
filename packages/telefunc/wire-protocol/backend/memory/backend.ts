@@ -202,7 +202,7 @@ export class MemoryBackend implements BroadcastDriver, RoomDriver {
 
   async readHead(roomId: string): Promise<{ head: RoomHead } | null> {
     this.#assertLive()
-    const head = this.#liveHead(this.#state.rooms.get(roomId))
+    const head = this.#readAndExpireHead(this.#state.rooms.get(roomId))
     return head === null ? null : { head: publicHead(head) }
   }
 
@@ -215,7 +215,7 @@ export class MemoryBackend implements BroadcastDriver, RoomDriver {
   > {
     this.#assertLive()
     const existing = this.#state.rooms.get(roomId)
-    const current = this.#liveHead(existing)
+    const current = this.#readAndExpireHead(existing)
     // Only delete legality precedes compare; other transitions validate the matched head.
     assertHeadDeleteLegal(next, current)
     if (!this.#headCxMatches(cx, current)) {
@@ -269,7 +269,7 @@ export class MemoryBackend implements BroadcastDriver, RoomDriver {
   ): Promise<{ revision: string; cells: Map<string, Uint8Array> } | { staleInc: true }> {
     this.#assertLive()
     const room = this.#state.rooms.get(roomId)
-    const head = this.#liveHead(room)
+    const head = this.#readAndExpireHead(room)
     // Closing tails may read; only writes require an open head.
     if (room === undefined || head === null || head.currentInc !== inc) return { staleInc: true }
     const gen = this.#generation(room, inc)
@@ -292,7 +292,7 @@ export class MemoryBackend implements BroadcastDriver, RoomDriver {
   ): Promise<CxResult> {
     this.#assertLive()
     const room = this.#state.rooms.get(roomId)
-    const head = this.#liveHead(room)
+    const head = this.#readAndExpireHead(room)
     if (room === undefined || head === null || head.currentInc !== inc || head.state !== 'open') return 'stale-inc'
     const gen = this.#generation(room, inc)
     if (String(gen.revision) !== revision) return 'conflict'
@@ -317,7 +317,7 @@ export class MemoryBackend implements BroadcastDriver, RoomDriver {
   ): Promise<CommitResult> {
     this.#assertLive()
     const room = this.#state.rooms.get(roomId)
-    const head = this.#liveHead(room)
+    const head = this.#readAndExpireHead(room)
     if (room === undefined || head === null || !this.#commitPreconditionHolds(head, inc, lane, opts?.closingLease)) {
       return { stale: true }
     }
@@ -432,7 +432,7 @@ export class MemoryBackend implements BroadcastDriver, RoomDriver {
 
     const { roomId, inc, lane } = source
     const room = this.#state.rooms.get(roomId)
-    const head = this.#liveHead(room)
+    const head = this.#readAndExpireHead(room)
     const key = laneKey(lane)
     if (room === undefined || head === null || head.currentInc !== inc || head.state !== 'open') {
       const sub = new MemorySubscriptionAttempt(receiver, localReceiverCount)
@@ -452,7 +452,7 @@ export class MemoryBackend implements BroadcastDriver, RoomDriver {
     this.#assertLive()
     const room = this.#state.rooms.get(roomId)
     if (room === undefined) return
-    if (this.#liveHead(room)?.currentInc === inc) {
+    if (this.#readAndExpireHead(room)?.currentInc === inc) {
       throw new Error(`dropGeneration: refusing to drop the current incarnation '${inc}' of room '${roomId}'`)
     }
     const gen = room.gens.get(inc)
@@ -507,7 +507,7 @@ export class MemoryBackend implements BroadcastDriver, RoomDriver {
   }
 
   // Lazy TTL: a lapsed tombstone reads as absent, which is what reopens an absence epoch.
-  #liveHead(room: RoomRecord | undefined): StoredHead | null {
+  #readAndExpireHead(room: RoomRecord | undefined): StoredHead | null {
     if (room === undefined || room.head === null) return null
     if (!isExpired(room.head, this.#now())) return room.head
     room.head = null
@@ -517,7 +517,7 @@ export class MemoryBackend implements BroadcastDriver, RoomDriver {
   // Sweep expiring heads/cells; only generation drop removes ordering marks.
   #sweep(room: RoomRecord): void {
     const now = this.#now()
-    this.#liveHead(room)
+    this.#readAndExpireHead(room)
     for (const gen of room.gens.values()) {
       for (const [key, cell] of gen.cells) if (isExpired(cell, now)) gen.cells.delete(key)
     }

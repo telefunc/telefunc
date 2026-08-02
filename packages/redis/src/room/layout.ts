@@ -117,7 +117,7 @@ local function tf_now(v)
 end
 -- read the head, treating a logically-expired tombstone as absent (a lapsed tombstone reopens the
 -- absence epoch); the PX backstop only reclaims memory, it is never what makes it invisible.
-local function tf_head(key, now)
+local function tf_read_and_expire_head(key, now)
   local raw = redis.call('GET', key)
   if not raw then return nil end
   local h = cjson.decode(raw)
@@ -189,7 +189,7 @@ local head_key, gens_key, rev_key, generation_tokens_key = KEYS[1], KEYS[2], KEY
 local now = tf_now(ARGV[1])
 local cx = cjson.decode(ARGV[2])
 local nx = cjson.decode(ARGV[3])
-local cur = tf_head(head_key, now)
+local cur = tf_read_and_expire_head(head_key, now)
 local from = 'absent'
 if cur then from = cur.state end
 
@@ -275,7 +275,7 @@ return '{"tag":"head","head":' .. encoded .. '}'
 //   KEYS: [1]=head
 export const READ_HEAD_LUA = `${NOW_FN}
 local now = tf_now('')
-local head = tf_head(KEYS[1], now)
+local head = tf_read_and_expire_head(KEYS[1], now)
 if not head then return '{"head":null}' end
 return '{"head":' .. cjson.encode(head) .. '}'
 `
@@ -286,7 +286,7 @@ return '{"head":' .. cjson.encode(head) .. '}'
 //   ARGV: [1]=inc
 export const READ_CELLS_FENCE_LUA = `${NOW_FN}
 local now = tf_now('')
-local head = tf_head(KEYS[1], now)
+local head = tf_read_and_expire_head(KEYS[1], now)
 if not head or head.inc ~= ARGV[1] then return '{"stale":true}' end
 local revision = redis.call('GET', KEYS[2])
 if not revision then revision = '0' end
@@ -301,7 +301,7 @@ export const VALIDATE_GENERATION_LUA = `${NOW_FN}
 local head_key, gens_key, tokens_key = KEYS[1], KEYS[2], KEYS[3]
 local now = tf_now(ARGV[1])
 local inc, expected_token = ARGV[2], ARGV[3]
-local head = tf_head(head_key, now)
+local head = tf_read_and_expire_head(head_key, now)
 local current_token = redis.call('HGET', tokens_key, inc)
 if not head or head.state ~= 'open' or head.inc ~= inc
   or redis.call('SISMEMBER', gens_key, inc) ~= 1 or current_token ~= expected_token then
@@ -315,7 +315,7 @@ return 1
 //   ARGV: [1]=now [2]=inc
 export const DROP_GENERATION_BEGIN_LUA = `${NOW_FN}
 local now, inc = tf_now(ARGV[1]), ARGV[2]
-local head = tf_head(KEYS[1], now)
+local head = tf_read_and_expire_head(KEYS[1], now)
 if head and head.inc == inc then
   return redis.error_reply("dropGeneration: refusing to drop the current incarnation '" .. inc .. "'")
 end
@@ -348,7 +348,7 @@ return 1
 export const CELLS_CX_LUA = `${NOW_FN}
 local head_key, rev_key, generation_keys_key = KEYS[1], KEYS[2], KEYS[3]
 local now = tf_now(ARGV[1])
-local head = tf_head(head_key, now)
+local head = tf_read_and_expire_head(head_key, now)
 if (not head) or head.inc ~= ARGV[2] or head.state ~= 'open' then return 'stale-inc' end
 local cur = redis.call('GET', rev_key)
 if not cur then cur = '0' end
@@ -401,7 +401,7 @@ ${REDIS_ORDERING_FRAME_LUA}
 local head_key, order_key, retained_key, channel_key, generation_keys_key =
   KEYS[1], KEYS[2], KEYS[3], KEYS[4], KEYS[5]
 local now = tf_now(ARGV[1])
-local head = tf_head(head_key, now)
+local head = tf_read_and_expire_head(head_key, now)
 local ok = false
 if head and head.inc == ARGV[2] then
   if ARGV[4] == '' then
