@@ -3,7 +3,7 @@
 import type { LaneId } from '../../../../backend/room/contract.js'
 
 // One collision-safe key indexes a lane's order, retained slot, routes, and delivery chain.
-export { laneKey } from '../../../../backend/room/lane-key.js'
+export { encodeLaneKey } from '../../../../backend/room/lane-key.js'
 
 // Retained manifests preserve structural fields instead of reversing the encoded key.
 export type LaneParts = { kind: LaneId['kind']; member: string | null; track: string | null }

@@ -3,7 +3,7 @@
 
 import { DurableObject } from 'cloudflare:workers'
 import type { CellMutation, CxResult, HeadCx, HeadNext, LaneId, RoomHead } from '../../../../backend/room/contract.js'
-import { laneKey as laneKeyOf } from './codec.js'
+import { encodeLaneKey } from './codec.js'
 import {
   dispatchRoomShardFanout,
   dispatchRoomShardFanoutViaCoordinator,
@@ -139,7 +139,7 @@ export class TelefuncRoomDurableObject extends DurableObject {
     opts?: { retain?: boolean; closingLease?: string; requiredCellKeys?: string[] },
   ): Promise<CommitWire> {
     const now = Date.now()
-    const key = laneKeyOf(lane)
+    const key = encodeLaneKey(lane)
     const frame = payload instanceof Uint8Array ? payload : new Uint8Array(payload)
     let accepted: { seq: number; timestamp: number; targets: RouteTarget[] } | null = null
     this.ctx.storage.transactionSync(() => {

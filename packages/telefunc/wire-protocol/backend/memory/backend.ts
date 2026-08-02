@@ -15,7 +15,7 @@ import type {
   RoomSubscriptionSource,
 } from '../room/contract.js'
 import { assertHeadDeleteLegal, assertHeadTransition } from '../room/head-transitions.js'
-import { laneKey } from '../room/lane-key.js'
+import { encodeLaneKey } from '../room/lane-key.js'
 import type {
   BackendReceiver,
   SubscriptionAttempt,
@@ -320,7 +320,7 @@ export class MemoryBackend implements BroadcastDriver, RoomDriver {
     if (opts?.requiredCellKeys?.some((key) => !gen.cells.has(key))) {
       return { stale: true }
     }
-    const key = laneKey(lane)
+    const key = encodeLaneKey(lane)
     const frame = copyBytes(payload)
     const mark = advanceOrder(gen.order, key, this.#now(), 'commitLane')
     if (opts?.retain) {
@@ -376,7 +376,7 @@ export class MemoryBackend implements BroadcastDriver, RoomDriver {
     lane: LaneId,
   ): Promise<{ payload: Uint8Array; seq: number; timestamp: number } | null> {
     this.#assertLive()
-    const entry = this.#state.rooms.get(roomId)?.gens.get(inc)?.retained.get(laneKey(lane))
+    const entry = this.#state.rooms.get(roomId)?.gens.get(inc)?.retained.get(encodeLaneKey(lane))
     if (entry === undefined) return null
     return { payload: copyBytes(entry.payload), seq: entry.seq, timestamp: entry.timestamp }
   }
@@ -399,7 +399,7 @@ export class MemoryBackend implements BroadcastDriver, RoomDriver {
     if (gen === undefined) return
     if (lane === undefined) gen.retained.clear()
     else {
-      const key = laneKey(lane)
+      const key = encodeLaneKey(lane)
       const retained = gen.retained.get(key)
       if (opts?.ifSeq === undefined || retained?.seq === opts.ifSeq) gen.retained.delete(key)
     }
@@ -422,7 +422,7 @@ export class MemoryBackend implements BroadcastDriver, RoomDriver {
     const { roomId, inc, lane } = source
     const room = this.#state.rooms.get(roomId)
     const head = this.#readAndExpireHead(room)
-    const key = laneKey(lane)
+    const key = encodeLaneKey(lane)
     if (room === undefined || head === null || head.currentInc !== inc || head.state !== 'open') {
       const sub = new MemorySubscriptionAttempt(receiver, localReceiverCount)
       sub.failEstablishment(`subscribeLane: room '${roomId}' has no open incarnation '${inc}'`)

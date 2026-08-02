@@ -34,9 +34,9 @@ describe('canonical backend wiring', () => {
       'superviseRoomDriver',
     )
   })
-  it('wires lane consumers to the canonical lane key', () => {
+  it('wires lane consumers to the canonical lane encoder', () => {
     expect(reexportsFrom('packages/telefunc/backend.ts', './wire-protocol/backend/room/lane-key.js')).toContain(
-      'laneKey',
+      'encodeLaneKey',
     )
     expect(importsFrom('packages/redis/src/room/layout.ts', 'telefunc/backend')).toContain('laneKey')
     expect(
@@ -44,7 +44,7 @@ describe('canonical backend wiring', () => {
         'packages/telefunc/wire-protocol/server/adapter/cloudflare/room/codec.ts',
         '../../../../backend/room/lane-key.js',
       ),
-    ).toContain('laneKey')
+    ).toContain('encodeLaneKey')
   })
   it('wires ordering consumers to the canonical frame contract', () => {
     expect(

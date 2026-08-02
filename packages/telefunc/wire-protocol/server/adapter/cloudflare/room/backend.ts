@@ -14,7 +14,7 @@ import type {
 } from '../../../../backend/room/contract.js'
 import type { BackendReceiver, SubscriptionBinding, SubscriptionDriver } from '../../../../backend/subscription.js'
 import { CloudflareBroadcastTransport } from '../broadcast.js'
-import { laneKey as laneKeyOf } from './codec.js'
+import { encodeLaneKey } from './codec.js'
 import { CloudflareRoomSubscriptionAttempt } from './subscription.js'
 import type { TelefuncRoomDurableObject } from './do.js'
 import type { RouteInstallation } from './routes.js'
@@ -81,7 +81,7 @@ export class CloudflareRoomSessionManager {
     if (this.#disposed) throw new Error('Cloudflare Room session manager is disposed')
     // Resolve the binding before installing provisional local state.
     const authority = this.authority(roomId)
-    const laneKey = laneKeyOf(lane)
+    const laneKey = encodeLaneKey(lane)
     const source = {
       roomId,
       inc,

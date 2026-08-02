@@ -2,7 +2,7 @@
 // Retained payloads are internally chunked to 1.5 MB rows below workerd's 2 MB cap.
 
 import type { LaneId } from '../../../../backend/room/contract.js'
-import { laneKey, type LaneParts, laneToParts, partsToLane } from './codec.js'
+import { encodeLaneKey, type LaneParts, laneToParts, partsToLane } from './codec.js'
 import { toBytes, type OrderMark } from './storage.js'
 
 const MAX_RETAINED_CHUNK_BYTES = 1_500_000
@@ -25,7 +25,7 @@ export function installRetained(
   payload: Uint8Array,
   mark: OrderMark,
 ): void {
-  const key = laneKey(lane)
+  const key = encodeLaneKey(lane)
   sql.exec('DELETE FROM rt_chunk WHERE inc = ? AND lane_key = ?', inc, key)
   const chunkCount = Math.max(1, Math.ceil(payload.byteLength / MAX_RETAINED_CHUNK_BYTES))
   for (let i = 0; i < chunkCount; i++) {
@@ -52,7 +52,7 @@ export function readRetained(
   inc: string,
   lane: LaneId,
 ): { payload: Uint8Array; seq: number; timestamp: number } | null {
-  const key = laneKey(lane)
+  const key = encodeLaneKey(lane)
   const manifest = sql
     .exec<ManifestRow>('SELECT * FROM rt_manifest WHERE inc = ? AND lane_key = ?', inc, key)
     .toArray()[0]
@@ -101,7 +101,7 @@ export function deleteRetained(sql: SqlStorage, inc: string, lane?: LaneId, opts
     sql.exec('DELETE FROM rt_chunk WHERE inc = ?', inc)
     return
   }
-  const key = laneKey(lane)
+  const key = encodeLaneKey(lane)
   if (opts?.ifSeq !== undefined) {
     const manifest = sql
       .exec<Pick<ManifestRow, 'seq'>>('SELECT seq FROM rt_manifest WHERE inc = ? AND lane_key = ?', inc, key)
