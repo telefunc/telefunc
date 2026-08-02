@@ -17,16 +17,13 @@ import {
   laneKey,
   REDIS_DELIVERY_FENCE_BYTE,
 } from './layout.js'
-
 type RedisSubscriptionSource = BroadcastLane | RoomSubscriptionSource
-
 type RedisSubscriptionDriverOptions = {
   prefix: string
   createSubscriber: () => Promise<Redis>
   captureGeneration: (source: RoomSubscriptionSource) => Promise<string | null>
   validateGeneration: (source: RoomSubscriptionSource, token: string) => Promise<boolean>
 }
-
 /**
  * Redis's only backend-specific subscription edge. General fan-out, refcounts, readiness generations,
  * attempt epochs, ownership checks, and terminal signalling live in core's supervised backend.
@@ -37,14 +34,12 @@ export class RedisSubscriptionDriver implements SubscriptionDriver<RedisSubscrip
   private readonly _captureGeneration: RedisSubscriptionDriverOptions['captureGeneration']
   private readonly _validateGeneration: RedisSubscriptionDriverOptions['validateGeneration']
   private readonly _attempts = new Map<string, Set<RedisSubscriptionAttempt>>()
-
   constructor(options: RedisSubscriptionDriverOptions) {
     this._prefix = options.prefix
     this._createSubscriber = options.createSubscriber
     this._captureGeneration = options.captureGeneration
     this._validateGeneration = options.validateGeneration
   }
-
   bind(source: RedisSubscriptionSource): SubscriptionBinding {
     return {
       partition: '',
@@ -52,7 +47,6 @@ export class RedisSubscriptionDriver implements SubscriptionDriver<RedisSubscrip
       open: (receiver, localReceiverCount) => this._open(source, receiver, localReceiverCount),
     }
   }
-
   private _open(
     source: RedisSubscriptionSource,
     receiver: BackendReceiver,
@@ -79,7 +73,6 @@ export class RedisSubscriptionDriver implements SubscriptionDriver<RedisSubscrip
     this._attempts.set(key, attempts)
     return attempt
   }
-
   prepareFlush(source: RoomSubscriptionSource): { token: string; delivery: Promise<void>; cancel(): void } {
     const token = randomUUID()
     const attempts = [...(this._attempts.get(redisSubscriptionChannel(this._prefix, source)) ?? [])]
@@ -96,14 +89,12 @@ export class RedisSubscriptionDriver implements SubscriptionDriver<RedisSubscrip
     }
   }
 }
-
 type RedisSubscriptionAttemptOptions = RedisSubscriptionDriverOptions & {
   source: RedisSubscriptionSource
   receiver: BackendReceiver
   localReceiverCount: () => number
   onDisposed: () => void
 }
-
 class RedisSubscriptionAttempt implements SubscriptionAttempt {
   readonly ready: Promise<void>
   private readonly _prefix: string
@@ -125,7 +116,6 @@ class RedisSubscriptionAttempt implements SubscriptionAttempt {
   private _lastError: unknown = new Error('Redis subscriber connection closed')
   private _lastSequence = 0
   private readonly _flushes = new Map<string, { resolve(): void; reject(error: unknown): void }>()
-
   constructor(options: RedisSubscriptionAttemptOptions) {
     this._prefix = options.prefix
     this._source = options.source
@@ -141,7 +131,6 @@ class RedisSubscriptionAttempt implements SubscriptionAttempt {
     void this.ready.catch(() => {})
     void this._establish()
   }
-
   state(): SubscriptionAttemptState {
     return this._state
   }
@@ -178,50 +167,56 @@ class RedisSubscriptionAttempt implements SubscriptionAttempt {
 
   private async _establish(): Promise<void> {
     try {
-      if ('roomId' in this._source) {
-        this._generationToken = await this._captureGeneration(this._source)
-        if (this._generationToken === null) {
-          this._terminate(new Error(`subscribeLane: generation '${this._source.roomId}/${this._source.inc}' is absent`))
-          return
-        }
-        if (this._isStopped()) return
-      }
+      if ((await this._captureAttemptGeneration()) !== 'valid') return
       const subscriber = await this._createSubscriber()
       if (this._isStopped()) {
         subscriber.disconnect()
         return
       }
-      this._subscriber = subscriber
-      subscriber.on('messageBuffer', this._onMessage)
-      subscriber.on('close', this._onConnectionClosed)
-      subscriber.on('end', this._onConnectionClosed)
-      subscriber.on('error', this._onError)
-
-      const channels = redisSubscriptionChannels(this._prefix, this._source)
-      // Raw readiness settles only after the real Redis acknowledgement. Consumers own deadlines and
-      // replacement; core owns readiness generations and attempt epochs.
-      await subscriber.subscribe(...channels)
+      this._bindSubscriber(subscriber)
+      await subscriber.subscribe(...redisSubscriptionChannels(this._prefix, this._source))
       this._subscribed = true
-      if (this._isStopped() || this._subscriber !== subscriber) return
-
-      if (
-        'roomId' in this._source &&
-        (this._generationToken === null || !(await this._validateGeneration(this._source, this._generationToken)))
-      ) {
-        this._terminate(
-          new Error(`subscribeLane: generation '${this._source.roomId}/${this._source.inc}' was invalidated`),
-        )
-        return
-      }
-      if (this._isStopped() || this._subscriber !== subscriber) return
+      if (!(await this._validateEstablishedAttempt(subscriber))) return
       this._resolveReady()
       this._transition('ready')
     } catch (error) {
-      if (this._isStopped()) return
-      this._lastError = error
-      this._rejectReady(error)
-      this._transition('closed')
+      this._failEstablish(error)
     }
+  }
+  private async _captureAttemptGeneration(): Promise<'valid' | 'absent' | 'stopped'> {
+    if (!('roomId' in this._source)) return 'valid'
+    this._generationToken = await this._captureGeneration(this._source)
+    if (this._generationToken === null) {
+      this._terminate(new Error(`subscribeLane: generation '${this._source.roomId}/${this._source.inc}' is absent`))
+      return 'absent'
+    }
+    return this._isStopped() ? 'stopped' : 'valid'
+  }
+  private _bindSubscriber(subscriber: Redis): void {
+    this._subscriber = subscriber
+    subscriber.on('messageBuffer', this._onMessage)
+    subscriber.on('close', this._onConnectionClosed)
+    subscriber.on('end', this._onConnectionClosed)
+    subscriber.on('error', this._onError)
+  }
+  private async _validateEstablishedAttempt(subscriber: Redis): Promise<boolean> {
+    if (this._isStopped() || this._subscriber !== subscriber) return false
+    if (
+      'roomId' in this._source &&
+      (this._generationToken === null || !(await this._validateGeneration(this._source, this._generationToken)))
+    ) {
+      this._terminate(
+        new Error(`subscribeLane: generation '${this._source.roomId}/${this._source.inc}' was invalidated`),
+      )
+      return false
+    }
+    return !this._isStopped() && this._subscriber === subscriber
+  }
+  private _failEstablish(error: unknown): void {
+    if (this._isStopped()) return
+    this._lastError = error
+    this._rejectReady(error)
+    this._transition('closed')
   }
 
   private async _dispose(): Promise<void> {
