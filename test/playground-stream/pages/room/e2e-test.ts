@@ -115,11 +115,15 @@ function testRoom() {
     expect(result.defaultOnly).deep.equal([1, 2, 3])
     expect(result.camReceivers).greaterThanOrEqual(1)
   })
-  testRoomScenario<MemberResult>('member', 'room: a returned RemoteParticipant is the same object as the room view', (result) => {
-    expect(result.hasMember).toBe(true)
-    expect(result.memberName).toBe('Viewed')
-    expect(result.sameObject).toBe(true) // ref-identity binds the view to its room
-  })
+  testRoomScenario<MemberResult>(
+    'member',
+    'room: a returned RemoteParticipant is the same object as the room view',
+    (result) => {
+      expect(result.hasMember).toBe(true)
+      expect(result.memberName).toBe('Viewed')
+      expect(result.sameObject).toBe(true) // ref-identity binds the view to its room
+    },
+  )
   testRoomScenario<GuardResult>('guard', 'room: guards reject over the wire; allowed messages flow', (result) => {
     expect(result.joinError).toBe('blocked join of Banned')
     expect(result.publishError).toBe('blocked publish from Mallory')

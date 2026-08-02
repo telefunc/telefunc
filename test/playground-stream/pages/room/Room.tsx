@@ -580,7 +580,6 @@ function Room() {
           done: cause !== null && observer.count === 0,
         }))
       })}
-
     </div>
   )
 }
