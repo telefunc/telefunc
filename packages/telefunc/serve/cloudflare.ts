@@ -51,8 +51,6 @@ import { getGlobalObject } from '../utils/getGlobalObject.js'
 import { isTelefuncRequest } from './shared.js'
 
 const SHARD_TOKEN_TTL_SECONDS = 86400
-const SESSION_RESET_CLOSE_CODE = 1012
-const SESSION_RESET_CLOSE_REASON = 'Telefunc session reset; reconnect'
 const cloudflareBackendSlot = getGlobalObject<{
   current?: { identity: string; backend: CloudflareRoomBackend }
 }>('serve/cloudflare.backend.ts', () => ({}))
@@ -145,6 +143,7 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
   const TelefuncDurableObject = class extends DurableObject {
     private readonly authorityState: CloudflareBroadcastAuthorityState
     private roomManager: CloudflareRoomSessionManager | null = null
+    private readonly recoveredSockets = [...(this.ctx.getWebSockets?.() ?? [])]
 
     constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
       super(ctx, env)
@@ -177,7 +176,7 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
     }
 
     webSocketMessage(ws: WebSocket, message: string | ArrayBuffer) {
-      return this.runWithRoomManager(() => crosswsAdapter.handleDurableMessage(this, ws, message))
+      return this.runWithRoomManager(() => crosswsAdapter.handleDurableMessage(this, ws, message), ws)
     }
 
     webSocketClose(ws: WebSocket, code: number, reason: string, wasClean: boolean) {
@@ -214,29 +213,28 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
       return dispatchRoomShardFanout(binding as unknown as RoomShardFanoutNamespace, request)
     }
 
-    protected runWithRoomManager<T>(fn: () => T): T {
+    protected runWithRoomManager<T>(fn: () => T, socket?: WebSocket): T {
       // The first real Room call materializes the epoch; ordinary fetch/socket work stays Room-free.
-      return isAsyncMode() ? withCloudflareRoomSessionManager(() => this.activateRoomManager(), fn) : fn()
+      return isAsyncMode() ? withCloudflareRoomSessionManager(() => this.activateRoomManager(socket), fn) : fn()
     }
 
-    private activateRoomManager(): CloudflareRoomSessionManager {
+    private activateRoomManager(socket?: WebSocket): CloudflareRoomSessionManager {
+      if (socket) {
+        const state = ((socket as WebSocket & { _crosswsState?: Record<string, unknown> })._crosswsState ??
+          socket.deserializeAttachment() ??
+          {}) as Record<string, unknown>
+        socket.serializeAttachment(Object.assign(state, { __telefuncRoom: true }))
+      }
       if (this.roomManager) return this.roomManager
-      this.roomManager = this.createRoomManager()
-      this.closeRecoveredSockets()
-      return this.roomManager
-    }
-
-    private createRoomManager(): CloudflareRoomSessionManager {
-      return new CloudflareRoomSessionManager(
+      this.roomManager = new CloudflareRoomSessionManager(
         this.ctx.id.toString(),
         () => getRoomBinding(this.env as Cloudflare.Env) as unknown as CloudflareRoomNamespace,
       )
-    }
-
-    private closeRecoveredSockets(): void {
-      for (const socket of this.ctx.getWebSockets?.() ?? []) {
-        socket.close(SESSION_RESET_CLOSE_CODE, SESSION_RESET_CLOSE_REASON)
+      for (const recovered of this.recoveredSockets.splice(0)) {
+        if (recovered.deserializeAttachment?.()?.__telefuncRoom === true)
+          recovered.close(1012, 'Telefunc session reset; reconnect')
       }
+      return this.roomManager
     }
   }
 

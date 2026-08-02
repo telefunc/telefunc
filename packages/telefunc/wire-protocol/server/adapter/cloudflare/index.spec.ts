@@ -376,10 +376,11 @@ describe('cloudflare adapter entrypoint', () => {
     const { binding } = createBinding()
     const tf = new Telefunc({ context: vi.fn(async () => ({ userId: 'user-1' })) })
     const DurableClass = tf.TelefuncDurableObject
-    const hibernatedSocket = { close: vi.fn() }
+    const hibernatedRoomSocket = { close: vi.fn(), deserializeAttachment: () => ({ __telefuncRoom: true }) }
+    const hibernatedPlainSocket = { close: vi.fn(), deserializeAttachment: () => ({}) }
     const ctx = {
       id: { name: 'telefunc-shard-weur-1' },
-      getWebSockets: () => [hibernatedSocket],
+      getWebSockets: () => [hibernatedRoomSocket, hibernatedPlainSocket],
     } as unknown as DurableObjectState
     const instance = new DurableClass(ctx, {
       TelefuncDurableObject: binding,
@@ -395,7 +396,6 @@ describe('cloudflare adapter entrypoint', () => {
     expect(mocks.crosswsAdapter.handleDurableInit).toHaveBeenCalledWith(instance, ctx, {
       TelefuncDurableObject: binding,
     })
-    expect(hibernatedSocket.close).not.toHaveBeenCalled()
     mocks.crosswsAdapter.handleDurableUpgrade.mockResolvedValue(new Response('upgrade'))
     const upgradeResponse = await instance.fetch(
       new Request('https://telefunc.test/_telefunc', { headers: { upgrade: 'websocket' } }),
@@ -441,7 +441,7 @@ describe('cloudflare adapter entrypoint', () => {
       serialized: '{"text":"hello"}',
       info: expect.any(Object),
     })
-    expect(hibernatedSocket.close).not.toHaveBeenCalled()
+    expect(hibernatedRoomSocket.close).not.toHaveBeenCalled()
     // Importing and using the ordinary Cloudflare adapter remains flag-free. Only the first Room entry
     // asks for the opt-in async carrier and reports the recipe diagnostic.
     const invalidation = {
@@ -453,9 +453,9 @@ describe('cloudflare adapter entrypoint', () => {
       generationToken: 'generation',
     }
     expect(() => instance.telefuncRoomInvalidate(invalidation)).toThrow('Cloudflare Room requires await-safe context')
-    expect(hibernatedSocket.close).not.toHaveBeenCalled()
     mocks.asyncMode = true
     instance.telefuncRoomInvalidate(invalidation)
-    expect(hibernatedSocket.close).toHaveBeenCalledWith(1012, 'Telefunc session reset; reconnect')
+    expect(hibernatedRoomSocket.close).toHaveBeenCalledWith(1012, 'Telefunc session reset; reconnect')
+    expect(hibernatedPlainSocket.close).not.toHaveBeenCalled()
   })
 })
