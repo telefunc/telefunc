@@ -43,7 +43,6 @@ import { RedisSubscriptionDriver } from './subscriber-transport.js'
 
 const DIRECTORY_PAGE_SIZE = 100
 const STABLE_READ_ATTEMPTS = 8
-const NEWLINE = 0x0a
 
 function assertOrderingPosition(seq: number, timestamp: number, context: string): void {
   if (!Number.isSafeInteger(seq) || seq <= 0 || !Number.isSafeInteger(timestamp) || timestamp < 0) {
@@ -83,7 +82,7 @@ type HeadCxReply =
   | { tag: 'deleted' }
   | { tag: 'conflict'; current: StoredHead | null }
 type DropGenerationBeginReply = { exists: false } | { exists: true; token: string }
-type ReadCellsFenceReply = { stale: true } | { revision: string; now: number }
+type ReadCellsFenceReply = { stale: true } | { revision: string }
 type CellSelector = { keys: string[] } | { prefix: string }
 type CellsRead = { revision: string; cells: Map<string, Uint8Array> } | { staleInc: true }
 function toBase64(bytes: Uint8Array): string {
@@ -263,7 +262,7 @@ export class RedisBackend implements BroadcastDriver, RoomDriver {
     ) as ReadCellsFenceReply
     if ('stale' in fence) return { staleInc: true }
     if (before !== fence.revision) return null
-    return { revision: before, cells: collectVisibleCells(logicalKeys, values, fence.now) }
+    return { revision: before, cells: collectCells(logicalKeys, values) }
   }
   async compareExchangeCells(
     roomId: string,
@@ -281,13 +280,9 @@ export class RedisBackend implements BroadcastDriver, RoomDriver {
     const argv: Array<string | Buffer> = ['', inc, revision]
     for (const mutation of mutations) {
       if (mutation.set === undefined) {
-        argv.push('del', '', '')
+        argv.push('del', '')
       } else {
-        argv.push(
-          'set',
-          mutation.set.ttlMs === undefined ? '' : String(mutation.set.ttlMs),
-          toBuffer(mutation.set.bytes),
-        )
+        argv.push('set', toBuffer(mutation.set.bytes))
       }
     }
     const reply = (await this._call(REDIS_ROOM_COMMANDS.cellsCx.name, [
@@ -503,25 +498,12 @@ export class RedisBackend implements BroadcastDriver, RoomDriver {
   }
 }
 
-// A stored cell is "<expiresAt|''>\n<payload>"; its first newline always separates ASCII header and bytes.
-function parseCellValue(value: Buffer): { expiresAt: number | null; payload: Uint8Array } {
-  const nl = value.indexOf(NEWLINE)
-  if (nl < 0) return { expiresAt: null, payload: Uint8Array.from(value) }
-  const header = value.subarray(0, nl).toString('ascii')
-  return { expiresAt: header === '' ? null : Number(header), payload: Uint8Array.from(value.subarray(nl + 1)) }
-}
-function collectVisibleCells(
-  logicalKeys: string[],
-  values: Array<Buffer | null>,
-  now: number,
-): Map<string, Uint8Array> {
+function collectCells(logicalKeys: string[], values: Array<Buffer | null>): Map<string, Uint8Array> {
   const cells = new Map<string, Uint8Array>()
   for (let i = 0; i < logicalKeys.length; i++) {
     const value = values[i]
     if (value === null || value === undefined) continue
-    const parsed = parseCellValue(value)
-    if (parsed.expiresAt !== null && parsed.expiresAt <= now) continue
-    cells.set(logicalKeys[i] as string, parsed.payload)
+    cells.set(logicalKeys[i] as string, Uint8Array.from(value))
   }
   return cells
 }

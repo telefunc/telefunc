@@ -1147,14 +1147,12 @@ describe('Room public behavior', () => {
     vi.useFakeTimers()
     vi.setSystemTime(1_000_000)
     const room = (await Room.create('reaped-retained')) as ServerRoom
-    const writes = vi.spyOn(driver, 'compareExchangeCells')
     const publisher = await room.join({ identity: 'expired-owner' })
     const leaves: string[] = []
     room.onLeave((member) => leaves.push(member.id))
     await publisher.publish('text', { retain: true })
     await publisher.publishBinary(new Uint8Array([1]), { track: 'screen', retain: true })
     expect(await driver.listRetained(room.id, room._inc)).toHaveLength(2)
-    expect(writes.mock.calls.flatMap((call) => call[3]).every(({ set }) => set?.ttlMs === undefined)).toBe(true)
     vi.setSystemTime(1_000_000 + FORMER_MEMBER_KV_TTL_MS + 1)
     expect(await Room.getParticipants(room.id)).toEqual([])
     expect(await driver.listRetained(room.id, room._inc)).toEqual([])

@@ -42,8 +42,7 @@ export function initSchema(sql: SqlStorage): void {
       (id INTEGER PRIMARY KEY CHECK (id = 1), rev TEXT NOT NULL, inc TEXT, state TEXT NOT NULL, config BLOB NOT NULL, lease_id TEXT, lease_until INTEGER, expires_at INTEGER);
     CREATE TABLE IF NOT EXISTS gen (inc TEXT PRIMARY KEY, token TEXT NOT NULL, revision INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS cell
-      (inc TEXT NOT NULL, key TEXT NOT NULL, bytes BLOB NOT NULL, expires_at INTEGER, PRIMARY KEY (inc, key));
-    CREATE INDEX IF NOT EXISTS cell_expires_at ON cell(expires_at);
+      (inc TEXT NOT NULL, key TEXT NOT NULL, bytes BLOB NOT NULL, PRIMARY KEY (inc, key));
     CREATE TABLE IF NOT EXISTS ord
       (inc TEXT NOT NULL, domain TEXT NOT NULL, seq INTEGER NOT NULL, ts INTEGER NOT NULL, PRIMARY KEY (inc, domain));
     CREATE TABLE IF NOT EXISTS rt_manifest
@@ -198,25 +197,17 @@ function storeHead(sql: SqlStorage, next: HeadWriteNext, now: number, mintRev: (
 }
 
 type CellsRead = { revision: string; cells: Map<string, Uint8Array> } | { staleInc: true }
-type CellRow = { key: string; bytes: ArrayBuffer; expires_at: number | null }
+type CellRow = { key: string; bytes: ArrayBuffer }
 function selectCellRows(sql: SqlStorage, inc: string, sel: { keys: string[] } | { prefix: string }): CellRow[] {
   if ('keys' in sel)
     return sel.keys.flatMap((key) => {
       const row = sql
-        .exec<Omit<CellRow, 'key'>>('SELECT bytes, expires_at FROM cell WHERE inc = ? AND key = ?', inc, key)
+        .exec<Omit<CellRow, 'key'>>('SELECT bytes FROM cell WHERE inc = ? AND key = ?', inc, key)
         .toArray()[0]
       return row === undefined ? [] : [{ key, ...row }]
     })
-  const query = 'SELECT key, bytes, expires_at FROM cell WHERE inc = ? AND substr(key, 1, length(?)) = ?'
+  const query = 'SELECT key, bytes FROM cell WHERE inc = ? AND substr(key, 1, length(?)) = ?'
   return sql.exec<CellRow>(query, inc, sel.prefix, sel.prefix).toArray()
-}
-function collectUnexpiredCells(rows: CellRow[], now: number): Map<string, Uint8Array> {
-  const cells = new Map<string, Uint8Array>()
-  for (const row of rows) {
-    if (row.expires_at !== null && row.expires_at <= now) continue
-    cells.set(row.key, toBytes(row.bytes))
-  }
-  return cells
 }
 
 // Reads stay available while closing; staleInc means the head is absent or names another incarnation.
@@ -229,7 +220,7 @@ export function readCells(
   const head = readLiveHead(sql, now)
   if (head === null || head.currentInc !== inc) return { staleInc: true }
   const revision = String(readRevision(sql, inc))
-  return { revision, cells: collectUnexpiredCells(selectCellRows(sql, inc, sel), now) }
+  return { revision, cells: new Map(selectCellRows(sql, inc, sel).map((row) => [row.key, toBytes(row.bytes)])) }
 }
 
 function readRevision(sql: SqlStorage, inc: string): number {
@@ -252,14 +243,7 @@ export function compareExchangeCells(
     if (mutation.set === undefined) {
       sql.exec('DELETE FROM cell WHERE inc = ? AND key = ?', inc, mutation.key)
     } else {
-      const expiresAt = mutation.set.ttlMs === undefined ? null : now + mutation.set.ttlMs
-      sql.exec(
-        'INSERT OR REPLACE INTO cell (inc, key, bytes, expires_at) VALUES (?, ?, ?, ?)',
-        inc,
-        mutation.key,
-        mutation.set.bytes,
-        expiresAt,
-      )
+      sql.exec('INSERT OR REPLACE INTO cell (inc, key, bytes) VALUES (?, ?, ?)', inc, mutation.key, mutation.set.bytes)
     }
   }
   sql.exec('UPDATE gen SET revision = revision + 1 WHERE inc = ?', inc)

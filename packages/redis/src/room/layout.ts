@@ -280,8 +280,7 @@ if not head then return '{"head":null}' end
 return '{"head":' .. cjson.encode(head) .. '}'
 `
 
-// Finish a stable cell read on the same room-slot master: recheck both incarnation and revision while
-// sampling the clock that filters logical cell expiry.
+// Finish a stable cell read on the same room-slot master by rechecking incarnation and revision.
 //   KEYS: [1]=head [2]=generation revision
 //   ARGV: [1]=inc
 export const READ_CELLS_FENCE_LUA = `${NOW_FN}
@@ -290,7 +289,7 @@ local head = tf_read_and_expire_head(KEYS[1], now)
 if not head or head.inc ~= ARGV[1] then return '{"stale":true}' end
 local revision = redis.call('GET', KEYS[2])
 if not revision then revision = '0' end
-return '{"revision":' .. cjson.encode(revision) .. ',"now":' .. string.format('%.0f', now) .. '}'
+return '{"revision":' .. cjson.encode(revision) .. '}'
 `
 
 // SUBSCRIBE establishment snapshots the generation token before its network await. This atomic
@@ -344,7 +343,7 @@ return 1
 // CELLS CX — all mutations or none; success implies the head precondition (open + inc) held at apply
 // time; the revision is the coarse per-generation counter, allowed to over-conflict but never mislead.
 //   KEYS: [1]=head [2]=rev [3]=generation-keys [4..]=cell keys (one per mutation, in order)
-//   ARGV: [1]=now [2]=inc [3]=expectedRev, then per mutation: op('set'|'del'), ttlMs(''|number), value
+//   ARGV: [1]=now [2]=inc [3]=expectedRev, then per mutation: op('set'|'del'), value
 export const CELLS_CX_LUA = `${NOW_FN}
 local head_key, rev_key, generation_keys_key = KEYS[1], KEYS[2], KEYS[3]
 local now = tf_now(ARGV[1])
@@ -355,33 +354,14 @@ if not cur then cur = '0' end
 if cur ~= ARGV[3] then return 'conflict' end
 local n = #KEYS - 3
 for i = 1, n do
-  local base = 3 + (i - 1) * 3
-  local op, ttl = ARGV[base + 1], ARGV[base + 2]
-  if op == 'set' and ttl ~= '' then
-    local ttl_number = tonumber(ttl)
-    if not ttl_number or ttl_number <= 0 or ttl_number ~= math.floor(ttl_number) then
-      return redis.error_reply('cells CX: ttlMs must be a positive integer')
-    end
-  end
-end
-for i = 1, n do
   local key = KEYS[3 + i]
-  local base = 3 + (i - 1) * 3
+  local base = 3 + (i - 1) * 2
   local op = ARGV[base + 1]
   if op == 'del' then
     redis.call('DEL', key)
     redis.call('SREM', generation_keys_key, key)
   else
-    local ttl = ARGV[base + 2]
-    local val = ARGV[base + 3]
-    local head_str = ''
-    if ttl ~= '' then head_str = tostring(now + tonumber(ttl)) end
-    local stored = head_str .. '\\n' .. val
-    if ttl == '' then
-      redis.call('SET', key, stored)
-    else
-      redis.call('SET', key, stored, 'PX', tonumber(ttl))
-    end
+    redis.call('SET', key, ARGV[base + 2])
     redis.call('SADD', generation_keys_key, key)
   end
 end
@@ -413,13 +393,7 @@ if head and head.inc == ARGV[2] then
 end
 if not ok then return '{"stale":true}' end
 for i = 6, #KEYS do
-  local raw = redis.call('GET', KEYS[i])
-  if not raw then return '{"stale":true}' end
-  local newline = string.find(raw, '\\n', 1, true)
-  if newline then
-    local expires_at = string.sub(raw, 1, newline - 1)
-    if expires_at ~= '' and tonumber(expires_at) <= now then return '{"stale":true}' end
-  end
+  if not redis.call('GET', KEYS[i]) then return '{"stale":true}' end
 end
 
 -- Advance the live lane-domain cursor exactly once. It has no TTL: generation deletion is its cleanup

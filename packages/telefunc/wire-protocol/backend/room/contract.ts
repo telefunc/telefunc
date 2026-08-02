@@ -46,7 +46,7 @@ type HeadNext =
     }
   | { delete: true }
 
-type CellMutation = { key: string; set?: { bytes: Uint8Array; ttlMs?: number } }
+type CellMutation = { key: string; set?: { bytes: Uint8Array } }
 
 type CxResult = 'committed' | 'conflict' | 'stale-inc'
 

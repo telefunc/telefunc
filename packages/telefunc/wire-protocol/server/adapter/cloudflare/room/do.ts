@@ -287,7 +287,6 @@ export class TelefuncRoomDurableObject extends DurableObject {
   async #runSweep(now: number): Promise<number> {
     let orphanIncs: string[] = []
     this.ctx.storage.transactionSync(() => {
-      this.#sql.exec('DELETE FROM cell WHERE expires_at IS NOT NULL AND expires_at <= ?', now)
       const currentInc = readLiveHead(this.#sql, now)?.currentInc ?? null
       orphanIncs = listGenerations(this.#sql).filter((inc) => inc !== currentInc)
       // A lapsed tombstone is reclaimed through the delete path (this backend has no native head TTL).
@@ -430,9 +429,6 @@ export class TelefuncRoomDurableObject extends DurableObject {
 function nextMaintenanceDeadline(sql: SqlStorage, now: number): number | null {
   const deadlines = [
     sql.exec<{ deadline: number | null }>('SELECT MIN(expires_at) AS deadline FROM head').toArray()[0]?.deadline,
-    sql
-      .exec<{ deadline: number | null }>('SELECT MIN(expires_at) AS deadline FROM cell WHERE expires_at IS NOT NULL')
-      .toArray()[0]?.deadline,
     sql.exec<{ deadline: number | null }>('SELECT MIN(expires_at) AS deadline FROM route').toArray()[0]?.deadline,
   ].filter((deadline): deadline is number => deadline !== null && deadline !== undefined)
   const currentInc = readLiveHead(sql, now)?.currentInc ?? null

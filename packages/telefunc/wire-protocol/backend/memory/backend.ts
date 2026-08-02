@@ -43,7 +43,7 @@ export function createMemoryBackendPair(): BackendDriverPair {
 
 type Expiring = { expiresAt: number | null }
 type StoredHead = RoomHead & Expiring
-type StoredCell = Expiring & { bytes: Uint8Array }
+type StoredCell = { bytes: Uint8Array }
 type OrderMark = { seq: number; timestamp: number }
 type RetainedEntry = { lane: LaneId; payload: Uint8Array; seq: number; timestamp: number }
 
@@ -273,12 +273,11 @@ export class MemoryBackend implements BroadcastDriver, RoomDriver {
     // Closing tails may read; only writes require an open head.
     if (room === undefined || head === null || head.currentInc !== inc) return { staleInc: true }
     const gen = this.#generation(room, inc)
-    const now = this.#now()
     const keys = 'keys' in sel ? sel.keys : [...gen.cells.keys()].filter((key) => key.startsWith(sel.prefix))
     const cells = new Map<string, Uint8Array>()
     for (const key of keys) {
       const cell = gen.cells.get(key)
-      if (cell === undefined || isExpired(cell, now)) continue
+      if (cell === undefined) continue
       cells.set(key, copyBytes(cell.bytes))
     }
     return { revision: String(gen.revision), cells }
@@ -296,13 +295,9 @@ export class MemoryBackend implements BroadcastDriver, RoomDriver {
     if (room === undefined || head === null || head.currentInc !== inc || head.state !== 'open') return 'stale-inc'
     const gen = this.#generation(room, inc)
     if (String(gen.revision) !== revision) return 'conflict'
-    const now = this.#now()
     for (const mutation of mutations) {
       if (mutation.set === undefined) gen.cells.delete(mutation.key)
-      else {
-        const { bytes, ttlMs } = mutation.set
-        gen.cells.set(mutation.key, { bytes: copyBytes(bytes), expiresAt: ttlMs === undefined ? null : now + ttlMs })
-      }
+      else gen.cells.set(mutation.key, { bytes: copyBytes(mutation.set.bytes) })
     }
     gen.revision += 1
     return 'committed'
@@ -322,13 +317,7 @@ export class MemoryBackend implements BroadcastDriver, RoomDriver {
       return { stale: true }
     }
     const gen = this.#generation(room, inc)
-    const now = this.#now()
-    if (
-      opts?.requiredCellKeys?.some((key) => {
-        const cell = gen.cells.get(key)
-        return cell === undefined || isExpired(cell, now)
-      })
-    ) {
+    if (opts?.requiredCellKeys?.some((key) => !gen.cells.has(key))) {
       return { stale: true }
     }
     const key = laneKey(lane)
@@ -458,7 +447,6 @@ export class MemoryBackend implements BroadcastDriver, RoomDriver {
     const gen = room.gens.get(inc)
     if (gen === undefined) return // already dropped — the janitor is resumable
     room.gens.delete(inc)
-    this.#sweep(room)
   }
 
   async directoryPut(roomId: string, incTag: string): Promise<void> {
@@ -512,15 +500,6 @@ export class MemoryBackend implements BroadcastDriver, RoomDriver {
     if (!isExpired(room.head, this.#now())) return room.head
     room.head = null
     return null
-  }
-
-  // Sweep expiring heads/cells; only generation drop removes ordering marks.
-  #sweep(room: RoomRecord): void {
-    const now = this.#now()
-    this.#readAndExpireHead(room)
-    for (const gen of room.gens.values()) {
-      for (const [key, cell] of gen.cells) if (isExpired(cell, now)) gen.cells.delete(key)
-    }
   }
 }
 
