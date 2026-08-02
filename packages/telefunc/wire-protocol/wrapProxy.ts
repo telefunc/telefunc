@@ -1,4 +1,4 @@
-export { wrapProxy, adoptSubordinateOf, releaseSubordinate, makeDisposer }
+export { wrapProxy, releaseSubordinate, makeDisposer }
 
 import { isObjectOrFunction } from '../utils/isObjectOrFunction.js'
 
@@ -12,7 +12,6 @@ import { isObjectOrFunction } from '../utils/isObjectOrFunction.js'
  *  WeakMap semantics: as long as the derived object (key) is reachable, the
  *  wrapper (value) is held strongly, so FinalizationRegistry won't collect it. */
 const keepWrapperAlive = new WeakMap<object, unknown>()
-const targetWrappers = new WeakMap<object, WeakRef<object>>()
 const releasedSubordinates = new WeakSet<object>()
 
 /** Wrap a value in a transparent proxy so it can be GC'd independently.
@@ -28,7 +27,6 @@ function wrapProxy<T extends object>(target: T): T {
       return result
     }
     Object.assign(wrapper, target)
-    targetWrappers.set(target, new WeakRef(wrapper))
     return wrapper as unknown as T
   }
 
@@ -61,7 +59,6 @@ function wrapProxy<T extends object>(target: T): T {
       return Reflect.getPrototypeOf(target)
     },
   })
-  targetWrappers.set(target, new WeakRef(wrapper))
   return wrapper
 }
 
@@ -71,12 +68,6 @@ function adoptSubordinate(derived: unknown, wrapper: unknown): void {
   if (releasedSubordinates.has(derived)) return
   keepWrapperAlive.set(derived, wrapper)
   if (Array.isArray(derived)) for (const value of derived) adoptSubordinate(value, wrapper)
-}
-
-/** Tether a value exposed outside a method return (for example, a callback argument). */
-function adoptSubordinateOf(owner: object, derived: unknown): void {
-  const wrapper = targetWrappers.get(owner)?.deref()
-  if (wrapper) adoptSubordinate(derived, wrapper)
 }
 
 /** A terminal child no longer owns its parent resource's lifetime. */

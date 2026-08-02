@@ -3,7 +3,7 @@ export { RoomState, RoomStateView, remoteBacking }
 import { assertUsage } from '../../utils/assert.js'
 import { isPromise } from '../../utils/isPromise.js'
 import type { ChannelPublishInfo } from '../channel.js'
-import { adoptSubordinateOf, makeDisposer, releaseSubordinate } from '../wrapProxy.js'
+import { makeDisposer, releaseSubordinate } from '../wrapProxy.js'
 import { DEFAULT_TRACK, emptyTrackWants, isRoomTrack, type BinaryWants, type TrackWants } from './binary.js'
 import { ownLeaveCause, ownMetadata, stampNewer } from './model.js'
 import type { MemberSnapshot, MemberWants } from './protocol.js'
@@ -30,8 +30,7 @@ type MemberEntry = {
   tracks: Set<string>
   /** An off-presence participant — a member for routing/discovery, excluded from every presence read (`count`, `snapshot`, `onJoin`/`onLeave`/`onEmpty`). Any number per room. */
   hidden: boolean
-  /** Structural view keeps the WeakRef implementation detail out of the public declaration. */
-  remoteRef: { deref(): RemoteParticipant | undefined } | null
+  remote: RemoteParticipant | null
   left: boolean
   leaveCause?: LeaveCause
   dataCbs: Array<(data: unknown, info: ChannelPublishInfo) => unknown>
@@ -402,7 +401,6 @@ class RoomState {
     this._fireAll(entry.leaveCbs, ownedCause)
     if (!entry.hidden) this._fireAll(this._leaveCbs, remote, ownedCause)
     this._releaseEntryListeners(entry)
-    releaseSubordinate(remote)
     if (entry.hidden) return
     if (this.count === 0) this._fireAll(this._emptyCbs)
   }
@@ -454,8 +452,6 @@ class RoomState {
         entry.leaveCause = cause
         this._fireAll(entry.leaveCbs, cause)
         this._releaseEntryListeners(entry)
-        const remote = entry.remoteRef?.deref()
-        if (remote) releaseSubordinate(remote)
       }
     })
     this._fireAll(this._closeCbs)
@@ -602,7 +598,7 @@ class RoomState {
       metaSeq: entrySeed.metaSeq,
       tracks: new Set(entrySeed.tracks),
       hidden: entrySeed.hidden === true,
-      remoteRef: null,
+      remote: null,
       left: false,
       dataCbs: [],
       binaryCbs: [],
@@ -612,9 +608,8 @@ class RoomState {
     this._members.set(id, entry)
     return entry
   }
-  /** Preserve public handle identity while userland holds it, without making live state its owner. */
   private _remote(entry: MemberEntry): RemoteParticipant {
-    let remote = entry.remoteRef?.deref()
+    let remote = entry.remote
     if (!remote) {
       remote = {
         id: entry.id,
@@ -636,10 +631,9 @@ class RoomState {
           return makeDisposer()
         },
       }
-      entry.remoteRef = new WeakRef(remote)
+      entry.remote = remote
       remoteBackings.set(remote, { state: this, entry })
     }
-    if (typeof this._owner === 'object' && this._owner !== null) adoptSubordinateOf(this._owner, remote)
     return remote
   }
   private _register<T>(list: T[], cb: T): () => void {
@@ -654,7 +648,6 @@ class RoomState {
         this._bumpListenerCount(-1)
       }
     }, cleanups)
-    if (typeof this._owner === 'object' && this._owner !== null) adoptSubordinateOf(this._owner, unlisten)
     return unlisten
   }
   /** A member entry is being discarded — its listeners die with it. Releasing them keeps the

@@ -25,7 +25,6 @@ import {
 } from './protocol.js'
 import { RoomState, RoomStateView } from './state.js'
 import { ParticipantBase, type InboxMessage } from './participant.js'
-import { adoptSubordinateOf } from '../wrapProxy.js'
 import type {
   BinaryPublishOptions,
   JoinOptions,
@@ -57,8 +56,7 @@ class ClientRoom extends RoomStateView implements Room {
   declare readonly [TELEFUNC_SHIELDS]: { data: unknown }
   private readonly _stub: ClientBroadcast
   protected readonly _state: RoomState
-  /** Routing never owns public handles: a live handle owns this Room, not the reverse. */
-  private readonly _localParticipants = new Map<string, WeakRef<ClientRoomParticipant>>()
+  private readonly _localParticipants = new Map<string, ClientRoomParticipant>()
   /** Member-targeted events that beat an in-flight join ack, keyed once their wire ID is known. */
   private _inFlightJoins = 0
   private readonly _pendingJoinEvents = new Map<string, PendingJoinEvent[]>()
@@ -118,12 +116,11 @@ class ClientRoom extends RoomStateView implements Room {
         joinedAt: number
       }
       const participant = new ClientRoomParticipant(this, id, meta, selfDelivery)
-      adoptSubordinateOf(this, participant)
       if (this._closedCause) {
         participant._onLeft(this._closedCause)
         return participant
       }
-      this._localParticipants.set(id, new WeakRef(participant))
+      this._localParticipants.set(id, participant)
       this._state.applyJoin(id, meta, joinedAt)
       for (const event of this._pendingJoinEvents.get(id) ?? []) {
         if (event.kind === 'demand') participant._onDemand(event.track, event.wanted)
@@ -247,7 +244,7 @@ class ClientRoom extends RoomStateView implements Room {
       case 'leave': {
         const cause = leaveCauseFromWire(event)
         this._state.applyLeave(event.id, cause)
-        const local = this._localParticipant(event.id)
+        const local = this._localParticipants.get(event.id)
         if (local) {
           this._localParticipants.delete(event.id)
           local._onLeft(cause) // kicked (with the kick's reason), or left through another handle
@@ -256,7 +253,7 @@ class ClientRoom extends RoomStateView implements Room {
       }
       case 'p-meta': {
         this._state.applyParticipantMeta(event.id, event.meta, event.seq)
-        const local = this._localParticipant(event.id)
+        const local = this._localParticipants.get(event.id)
         if (local) local._meta = ownMetadata(event.meta)
         return
       }
@@ -272,7 +269,7 @@ class ClientRoom extends RoomStateView implements Room {
       case 'demand':
         // Whether anyone wants one of our own members' tracks flipped (onDemand).
         {
-          const local = this._localParticipant(event.member)
+          const local = this._localParticipants.get(event.member)
           if (local) local._onDemand(event.track, event.wanted)
           else
             this._holdPendingJoinEvent(event.member, {
@@ -291,7 +288,7 @@ class ClientRoom extends RoomStateView implements Room {
           data: event.data,
           ...(event.ackId ? { ackId: event.ackId } : {}),
         }
-        const local = this._localParticipant(event.to)
+        const local = this._localParticipants.get(event.to)
         if (local) {
           this._deliverDm(local, msg)
           return
@@ -332,14 +329,8 @@ class ClientRoom extends RoomStateView implements Room {
     this._state.applyClosed(cause)
     this._rosterArrived() // unblock any getParticipants() waiting on a wire that just died
     // After onClose, like on the server: the room-level signal fires before per-handle cleanup.
-    for (const ref of this._localParticipants.values()) ref.deref()?._onLeft(cause)
+    for (const local of this._localParticipants.values()) local._onLeft(cause)
     this._localParticipants.clear()
-  }
-
-  private _localParticipant(id: string): ClientRoomParticipant | null {
-    const participant = this._localParticipants.get(id)?.deref() ?? null
-    if (!participant) this._localParticipants.delete(id)
-    return participant
   }
 
   /** Text wants are declared synchronously through Broadcast so same-connection FIFO covers an immediate publish. */

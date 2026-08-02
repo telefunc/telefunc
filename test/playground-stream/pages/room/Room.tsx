@@ -13,7 +13,6 @@ import {
   onJoinAsServer,
   onJoinRoomAsServerSelf,
   onGetRoomWithMember,
-  onGetMember,
   onWatchRoom,
   onGetWatched,
   onAnnounce,
@@ -25,7 +24,6 @@ import {
   onCloseRoom,
 } from './Room.telefunc'
 import { roomScenario, type RoomScenarioId } from './Room.scenarios'
-import { close } from 'telefunc/client'
 
 type PollResult = { done: boolean; result?: unknown }
 
@@ -48,15 +46,6 @@ async function createRoomId(label: string): Promise<string> {
 async function createRoom(label: string) {
   const roomId = await createRoomId(label)
   return [roomId, await onGetRoom(roomId)] as const
-}
-
-let gcParticipant: { publish(data: unknown): Promise<unknown> } | null = null
-let gcRoomRef: WeakRef<object> | null = null
-
-async function retainOnlyJoinedParticipant(roomId: string): Promise<void> {
-  const room = await onGetRoom(roomId)
-  gcRoomRef = new WeakRef(room)
-  gcParticipant = await room.join({ meta: { name: 'GC survivor' } })
 }
 
 function Room() {
@@ -294,14 +283,6 @@ function Room() {
 
         const out = await onGetRoomWithMember(roomId, me.id)
         const viaRoom = await out.room.getParticipant(me.id)
-        const remote = await onGetMember(roomId, me.id)
-        let received = 0
-        remote!.subscribe(() => received++)
-        ;(window as any).__roomRemoteLifecycle = {
-          publish: () => me.publish('probe'),
-          close: () => close(remote!),
-          received: () => received,
-        }
         const state = {
           hasMember: out.member !== null,
           memberName: out.member?.meta.name ?? null,
@@ -600,29 +581,6 @@ function Room() {
         }))
       })}
 
-      {scenario(
-        'gc-participant',
-        'Participant keeps its Room alive',
-        'Join and retain only the participant',
-        async () => {
-          const roomId = await createRoomId('gc-participant')
-          await retainOnlyJoinedParticipant(roomId)
-          setResult(JSON.stringify({ phase: 'ready' }))
-        },
-      )}
-      <button
-        id="test-room-gc-participant-publish"
-        onClick={async () => {
-          const roomAlive = gcRoomRef?.deref() !== undefined
-          const published = await gcParticipant!.publish('after-gc').then(
-            () => true,
-            () => false,
-          )
-          setResult(JSON.stringify({ phase: 'published', roomAlive, published }))
-        }}
-      >
-        Publish from retained participant
-      </button>
     </div>
   )
 }

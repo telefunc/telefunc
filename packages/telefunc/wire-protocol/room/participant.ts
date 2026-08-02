@@ -2,7 +2,7 @@ export { ParticipantBase }
 export type { InboxMessage }
 
 import type { ChannelPublishAck } from '../channel.js'
-import { makeDisposer, releaseSubordinate } from '../wrapProxy.js'
+import { makeDisposer } from '../wrapProxy.js'
 import type { TELEFUNC_SHIELDS } from '../../node/shared/transformer/generateShield/shield-key.js'
 import { isPromise } from '../../utils/isPromise.js'
 import { DM_PARTICIPANT_LEFT, RoomError, toRoomFailure } from './errors.js'
@@ -189,7 +189,6 @@ abstract class ParticipantBase implements LocalParticipant {
     this._left = true
     if (this._leftCause) return
     const ownedCause = (this._leftCause = ownLeaveCause(cause))
-    releaseSubordinate(this)
     // Held ack DMs will never be handled now — fail their senders instead of hanging them.
     const held = this._pendingInbox
     this._pendingInbox = null

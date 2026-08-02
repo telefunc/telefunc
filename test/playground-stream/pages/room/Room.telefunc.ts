@@ -10,7 +10,6 @@ export {
   onJoinAsServer,
   onJoinRoomAsServerSelf,
   onGetRoomWithMember,
-  onGetMember,
   onWatchRoom,
   onGetWatched,
   onAnnounce,
@@ -102,10 +101,6 @@ async function onGetRoomWithMember(roomId: string, memberId: string) {
   const room = await Room.get(roomId)
   const member = await room.getParticipant(memberId)
   return { room, member }
-}
-
-async function onGetMember(roomId: string, memberId: string) {
-  return await (await Room.get(roomId)).getParticipant(memberId)
 }
 
 /** Keep the watched Room referenced so its independent server subscription survives. */

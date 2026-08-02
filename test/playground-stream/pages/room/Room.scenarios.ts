@@ -20,7 +20,6 @@ const roomScenarios = [
   'self-server',
   'reconfig',
   'identity',
-  'gc-participant',
 ] as const
 
 type RoomScenarioId = (typeof roomScenarios)[number]

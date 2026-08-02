@@ -115,26 +115,11 @@ function testRoom() {
     expect(result.defaultOnly).deep.equal([1, 2, 3])
     expect(result.camReceivers).greaterThanOrEqual(1)
   })
-  testRoomScenario<MemberResult>(
-    'member',
-    'room: a returned RemoteParticipant is the same object as the room view',
-    (result) => {
-      expect(result.hasMember).toBe(true)
-      expect(result.memberName).toBe('Viewed')
-      expect(result.sameObject).toBe(true) // ref-identity binds the view to its room
-    },
-    async () => {
-      await page.requestGC()
-      await page.evaluate(() => (window as any).__roomRemoteLifecycle.publish())
-      await autoRetry(async () =>
-        expect(await page.evaluate(() => (window as any).__roomRemoteLifecycle.received())).toBe(1),
-      )
-      await page.evaluate(() => (window as any).__roomRemoteLifecycle.close())
-      await page.evaluate(() => (window as any).__roomRemoteLifecycle.publish())
-      await new Promise((resolve) => setTimeout(resolve, 200))
-      expect(await page.evaluate(() => (window as any).__roomRemoteLifecycle.received())).toBe(1)
-    },
-  )
+  testRoomScenario<MemberResult>('member', 'room: a returned RemoteParticipant is the same object as the room view', (result) => {
+    expect(result.hasMember).toBe(true)
+    expect(result.memberName).toBe('Viewed')
+    expect(result.sameObject).toBe(true) // ref-identity binds the view to its room
+  })
   testRoomScenario<GuardResult>('guard', 'room: guards reject over the wire; allowed messages flow', (result) => {
     expect(result.joinError).toBe('blocked join of Banned')
     expect(result.publishError).toBe('blocked publish from Mallory')
@@ -271,24 +256,6 @@ function testRoom() {
       expect(r.cause).deep.equal({ type: 'removed', reason: 'multi-tab' }) // kicked by identity, reason rode along
       expect(r.count).toBe(0)
       expect(r.empty).toBe(true) // onEmpty fired when the last member went
-    },
-  )
-  testRoomScenario<{ phase: string }>(
-    'gc-participant',
-    'room: a live participant keeps its Room proxy alive',
-    (r) => {
-      expect(r.phase).toBe('ready')
-    },
-    async () => {
-      // Force Chromium's heap; WeakRef observes collection without finalizer timing.
-      for (let cycle = 0; cycle < 3; cycle++) await page.requestGC()
-      await page.click('#test-room-gc-participant-publish')
-      await autoRetry(async () => {
-        const r = await getResult<{ phase: string; roomAlive: boolean; published: boolean }>('#room-result')
-        expect(r.phase).toBe('published')
-        expect(r.roomAlive).toBe(true)
-        expect(r.published).toBe(true)
-      })
     },
   )
   assertRoomScenarioExecutions(executedScenarios)

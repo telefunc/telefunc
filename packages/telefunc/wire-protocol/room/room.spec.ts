@@ -1379,52 +1379,35 @@ describe('client Room lifecycle', () => {
     expect(remoteBacking(hostile)).toBeNull()
   })
   describe.skipIf(typeof globalThis.gc !== 'function')('Room-derived handle ownership (real GC)', () => {
-    it('keeps the Room wrapper alive through a participant extracted from a roster array', async () => {
+    it('does not make a roster participant the owner of its Room wrapper', async () => {
       const gc = gcFixture('gc-list-owner')
       const retained = await retainOnlyListedRemote(gc)
       await forceRoomGc()
-      expect(retained.room.deref()).not.toBeUndefined()
+      expect(retained.room.deref()).toBeUndefined()
       expect(retained.member.id).toBe(gc.memberId)
-      expect(gc.closed()).toBe(0)
+      expect(gc.closed()).toBe(1)
     })
-    it('keeps the Room wrapper alive through a joined participant', async () => {
+    it('does not make a joined participant the owner of its Room wrapper', async () => {
       const gc = gcFixture('gc-join-owner', true)
       const retained = await retainOnlyJoinedParticipant(gc)
       await forceRoomGc()
-      expect(retained.room.deref()).not.toBeUndefined()
+      expect(retained.room.deref()).toBeUndefined()
       expect(retained.member.id).toBe(gc.memberId)
-      expect(gc.closed()).toBe(0)
+      expect(gc.closed()).toBe(1)
     })
-    it('keeps the Room wrapper alive through a callback-delivered participant', async () => {
+    it('does not make a callback participant the owner of its Room wrapper', async () => {
       const gc = gcFixture('gc-callback-owner')
       const retained = await retainOnlyCallbackRemote(gc)
       await forceRoomGc()
-      expect(retained.room.deref()).not.toBeUndefined()
+      expect(retained.room.deref()).toBeUndefined()
       expect(retained.member.id).toBe(gc.memberId)
-      expect(gc.closed()).toBe(0)
+      expect(gc.closed()).toBe(1)
     })
     it('releases the Room wrapper from a departed participant handle', async () => {
       const gc = gcFixture('gc-departed-owner', true)
       const retained = await retainOnlyDepartedParticipant(gc)
       await forceRoomGc()
       expect(retained.member.id).toBe(gc.memberId)
-      expect(retained.room.deref()).toBeUndefined()
-      expect(gc.closed()).toBe(1)
-    })
-    it('tethers an active disposer but releases snapshot and invoked disposer handles', async () => {
-      const gc = gcFixture('gc-drop-owner', true)
-      const retained = await dropJoinedRoomHandles(gc)
-      await forceRoomGc()
-      expect(retained.room.deref()).not.toBeUndefined()
-      expect(gc.closed()).toBe(0)
-      const stop = retained.startRemote()
-      retained.stopLocal()
-      await forceRoomGc()
-      expect(retained.room.deref()).not.toBeUndefined()
-      stop()
-      await forceRoomGc()
-      expect(retained.snapshot.meta).toEqual({})
-      retained.stopped()
       expect(retained.room.deref()).toBeUndefined()
       expect(gc.closed()).toBe(1)
     })
@@ -2579,16 +2562,6 @@ async function retainOnlyDepartedParticipant({ target, fake, registry, onClose, 
   const member = await room.join()
   fake.emitText({ __r: 'leave', id: memberId }, { key: target.id, seq: 1, timestamp: 1 })
   return { member, room: new WeakRef(room) }
-}
-async function dropJoinedRoomHandles({ target, registry, onClose, memberId }: GcFixture) {
-  const room = wrapProxy(target)
-  registry.register(room, onClose)
-  const member = await room.join()
-  const stopLocal = member.listen(() => {})
-  const stopped = member.onDemand(() => {})
-  stopped()
-  const startRemote = () => target._getRemote(memberId)!.subscribe(() => {})
-  return { startRemote, stopLocal, stopped, snapshot: room.snapshot(), room: new WeakRef(room) }
 }
 type OpenRecord = {
   receiver: BackendReceiver
