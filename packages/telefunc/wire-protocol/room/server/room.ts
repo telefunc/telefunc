@@ -100,6 +100,11 @@ function decodeSemanticEnvelope(serialized: string): RoomEnvelope | undefined {
 function shouldRelayMemberData(stub: RoomStubChannel, from: string): boolean {
   return stub._wantsTextFrom(from) && !stub._selfSuppressed.has(from)
 }
+function requireStubMember(stub: RoomStubChannel, id: unknown): string {
+  if (typeof id !== 'string' || !stub._stubMembers.has(id))
+    throw new RoomError('Not a participant of this room (joined through this connection)')
+  return id
+}
 
 /**
  * A Server Room is not a channel; each serialization attaches a fresh wire-unique stub.
@@ -778,13 +783,11 @@ class ServerRoom extends RoomStateView implements Room {
     reportRoomError(new RoomError(`Room subscription recovery exhausted: ${this.id}`))
     slot.markLost()
   }
-
   private _settleTerminalSubscription(): void {
     if (this._state.closed) return
     this._state.applyClosed()
     this._teardown()
   }
-
   private async _reconcileAuthority(): Promise<void> {
     if (this._state.closed) return
     const current = await getRoomBackend().readHead(this.id)
@@ -796,17 +799,14 @@ class ServerRoom extends RoomStateView implements Room {
     this._state.applyRoomUpdate(config.meta, config.at, config.by)
     await this._refreshMembers()
   }
-
   private _suppress(from: string): boolean {
     return this._localParticipants.get(from)?.selfDelivery === false
   }
-
   _startTail(): void {
     this._tail = true
     this._syncSubs() // bring up text ingestion before any stub exists
     this._tailTimer = unrefTimer(setTimeout(() => this._teardownTail(), ROOM_TAIL_ATTACH_TIMEOUT_MS))
   }
-
   private _teardownTail(): void {
     if (!this._tail) return // already handed off to a stub
     this._tail = false
@@ -817,7 +817,6 @@ class ServerRoom extends RoomStateView implements Room {
     }
     this._syncSubs() // drop the text ingestion nothing is consuming
   }
-
   _attachStub(stub: RoomStubChannel): void {
     this._stubs.add(stub)
     if (this._tail) {
@@ -850,85 +849,82 @@ class ServerRoom extends RoomStateView implements Room {
     })
     this._syncSubs()
   }
-
   async _handleStubRequest(stub: RoomStubChannel, msg: unknown): Promise<unknown> {
     if (!hasRoomTag(msg)) return undefined
     const req = msg as RoomStubRequest
     switch (req.__r) {
-      case 'req-join': {
-        const meta = isObject(req.meta) ? req.meta : {}
-        const { id, joinedAt } = await this._admitMember(meta, null, (id) => {
-          stub._stubMembers.add(id)
-          if (req.selfDelivery === false) stub._selfSuppressed.add(id)
-        })
-        return { id, joinedAt }
-      }
+      case 'req-join':
+        return await this._joinStubMember(stub, req)
       case 'req-leave':
-        this._assertStubMember(stub, req.id)
-        await this._removeMember(req.id, { type: 'left' })
-        stub._stubMembers.delete(req.id)
+        await this._removeMember(requireStubMember(stub, req.id), { type: 'left' })
+        stub._stubMembers.delete(req.id as string)
         return undefined
       case 'req-set-meta':
-        this._assertStubMember(stub, req.id)
-        await this._setMemberMeta(req.id, isObject(req.meta) ? req.meta : {})
+        await this._setMemberMeta(requireStubMember(stub, req.id), isObject(req.meta) ? req.meta : {})
         return undefined
       case 'req-set-attrs':
-        this._assertStubMember(stub, req.id)
-        await this._mergeMemberMeta(req.id, isObject(req.attrs) ? req.attrs : {})
+        await this._mergeMemberMeta(requireStubMember(stub, req.id), isObject(req.attrs) ? req.attrs : {})
         return undefined
-      case 'req-dm': {
-        this._assertStubMember(stub, req.id)
-        if (!req.ack) return await this._publishDm(req.id, req.to, req.data)
-        const { receipt, reply } = await this._sendDmAck(req.id, req.to, req.data)
-        if (!reply.ok) throw roomFailureError(reply)
-        return { ...receipt, response: reply.result }
-      }
-      case 'dm-reply': {
-        // `_takeAckDm` admits only the relayed recipient before deadline; value, Abort, and error replies preserve native ack semantics.
-        const sender = stub._takeAckDm(req.ackId, req.id)
-        if (sender !== undefined) {
-          const reply: DmReply = req.ok
-            ? { ok: true, result: req.result }
-            : 'abort' in req
-              ? { ok: false, abort: true, abortValue: req.abortValue }
-              : { ok: false, err: req.err }
-          void this._publishDmAck(sender, req.ackId, reply).catch(reportRoomError)
-        }
+      case 'req-dm':
+        return await this._sendStubDm(stub, req)
+      case 'dm-reply':
+        this._applyStubDmReply(stub, req)
         return undefined
-      }
-      case 'sub-binary': {
-        const wants = sanitizeBinaryWants(req.wants)
-        if (!wants) {
-          reportRoomError(new RoomError('Malformed sub-binary declaration'))
-          return undefined
-        }
-        const prev = stub._binaryWants
-        stub._binaryWants = wants
-        this._syncSubs()
-        void this._replayRetainedBinary(stub, prev).catch(reportRoomError)
+      case 'sub-binary':
+        this._applyStubBinaryWants(stub, req)
         return undefined
-      }
-      case 'sub-text': {
-        const members = Array.isArray(req.members) ? req.members.filter((m) => typeof m === 'string') : []
-        const prev = stub._textMemberWants
-        stub._textMemberWants = new Set(members)
-        stub._wantsAnnounce = req.announce === true
-        stub._flushTail()
-        this._syncSubs()
-        void this._replayRetainedText(stub, stub._wantsText, prev).catch(reportRoomError)
+      case 'sub-text':
+        this._applyStubTextWants(stub, req)
         return undefined
-      }
       default:
         return undefined
     }
   }
-
+  private async _joinStubMember(stub: RoomStubChannel, req: Extract<RoomStubRequest, { __r: 'req-join' }>) {
+    const meta = isObject(req.meta) ? req.meta : {}
+    const { id, joinedAt } = await this._admitMember(meta, null, (id) => {
+      stub._stubMembers.add(id)
+      if (req.selfDelivery === false) stub._selfSuppressed.add(id)
+    })
+    return { id, joinedAt }
+  }
+  private async _sendStubDm(stub: RoomStubChannel, req: Extract<RoomStubRequest, { __r: 'req-dm' }>) {
+    const id = requireStubMember(stub, req.id)
+    if (!req.ack) return await this._publishDm(id, req.to, req.data)
+    const { receipt, reply } = await this._sendDmAck(id, req.to, req.data)
+    if (!reply.ok) throw roomFailureError(reply)
+    return { ...receipt, response: reply.result }
+  }
+  private _applyStubDmReply(stub: RoomStubChannel, req: Extract<RoomStubRequest, { __r: 'dm-reply' }>): void {
+    const sender = stub._takeAckDm(req.ackId, req.id)
+    if (sender === undefined) return
+    const reply: DmReply = req.ok
+      ? { ok: true, result: req.result }
+      : 'abort' in req ? { ok: false, abort: true, abortValue: req.abortValue } : { ok: false, err: req.err }
+    void this._publishDmAck(sender, req.ackId, reply).catch(reportRoomError)
+  }
+  private _applyStubBinaryWants(stub: RoomStubChannel, req: Extract<RoomStubRequest, { __r: 'sub-binary' }>): void {
+    const wants = sanitizeBinaryWants(req.wants)
+    if (!wants) return reportRoomError(new RoomError('Malformed sub-binary declaration'))
+    const prev = stub._binaryWants
+    stub._binaryWants = wants
+    this._syncSubs()
+    void this._replayRetainedBinary(stub, prev).catch(reportRoomError)
+  }
+  private _applyStubTextWants(stub: RoomStubChannel, req: Extract<RoomStubRequest, { __r: 'sub-text' }>): void {
+    const members = Array.isArray(req.members) ? req.members.filter((member) => typeof member === 'string') : []
+    const prev = stub._textMemberWants
+    stub._textMemberWants = new Set(members)
+    stub._wantsAnnounce = req.announce === true
+    stub._flushTail()
+    this._syncSubs()
+    void this._replayRetainedText(stub, stub._wantsText, prev).catch(reportRoomError)
+  }
   _shieldPublishData(validate: ShieldValidator | undefined, data: unknown): void {
     if (!validate) return
     const result = validate(data)
     if (result !== true) throw new ShieldValidationError(result)
   }
-
   async _publishFromStub(
     stub: RoomStubChannel,
     payload: { text: string } | { binary: Uint8Array },
@@ -937,19 +933,12 @@ class ServerRoom extends RoomStateView implements Room {
       const envelope = parse(payload.text) as unknown
       if (!hasRoomTag(envelope) || envelope.__r !== 'data') throw new RoomError('Malformed room publish')
       const publish = envelope as RoomDataPublish
-      this._assertStubMember(stub, publish.from)
+      requireStubMember(stub, publish.from)
       this._shieldPublishData(stub._publishShield, publish.data)
       return await this._publishText(publish.from, publish.data, publish.retain)
     }
-    const from = binaryFrameSender(payload.binary)
-    this._assertStubMember(stub, from)
+    const from = requireStubMember(stub, binaryFrameSender(payload.binary))
     return await this._publishBinaryFramed(from, payload.binary)
-  }
-
-  private _assertStubMember(stub: RoomStubChannel, id: unknown): asserts id is string {
-    if (typeof id !== 'string' || !stub._stubMembers.has(id)) {
-      throw new RoomError('Not a participant of this room (joined through this connection)')
-    }
   }
 
   async _replayRetainedText(
