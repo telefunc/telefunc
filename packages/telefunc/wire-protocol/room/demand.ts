@@ -4,6 +4,7 @@ import { ROOM_DEMAND_TTL_MS } from './constants.js'
 
 /** A demand-gossip event on the room's control lane — node-to-node only, never relayed to clients. */
 type WantGossip = { member: string; track: string; node: string; on: boolean }
+type DemandTransition = 'start' | 'stop'
 const DEMAND_SEP = '\u0000'
 function demandKey(member: string, track: string): string {
   return member + DEMAND_SEP + track
@@ -30,18 +31,14 @@ class RoomDemand {
     private readonly _ownsMember: (id: string) => boolean,
     private readonly _deliver: (member: string, track: string, wanted: boolean) => void,
   ) {}
-  /** Diff this instance's local demand against `localPairs` (the (member, track) streams it now
-   *  wants), gossiping each 0↔>0 transition and recomputing demand for any owned member. Pass an
-   *  empty list to drop all local demand (e.g. the room closed). */
   sync(localPairs: ReadonlyArray<readonly [string, string]>): void {
     const prev = this._localDemand
     const next = new Map<string, [string, string]>()
     for (const [member, track] of localPairs) next.set(demandKey(member, track), [member, track])
     this._localDemand = next
-    for (const [k, [member, track]] of next) if (!prev.has(k)) this._transition(member, track, true)
-    for (const [k, [member, track]] of prev) if (!next.has(k)) this._transition(member, track, false)
+    for (const [k, [member, track]] of next) if (!prev.has(k)) this._transition(member, track, 'start')
+    for (const [k, [member, track]] of prev) if (!next.has(k)) this._transition(member, track, 'stop')
   }
-  /** A demand gossip from another instance/node. Recorded regardless of ownership (ownership can arrive later); only a member's owning instance pushes the resulting `wanted` to it. */
   applyWant(event: WantGossip): void {
     if (event.node === this._instanceId) return // our own gossip echoed back
     const k = demandKey(event.member, event.track)
@@ -56,9 +53,6 @@ class RoomDemand {
     }
     if (this._ownsMember(event.member)) this._recompute(event.member, event.track)
   }
-  /** Called on the room heartbeat. Renews this instance's demand lease on every owner by re-gossiping
-   *  its live local demand, then sweeps remote demand whose lease lapsed — a reporter that crashed
-   *  without sending its 0-transition — recomputing any owned member it thereby stops wanting. */
   heartbeat(): void {
     for (const [, [member, track]] of this._localDemand)
       this._publishWant({ member, track, node: this._instanceId, on: true })
@@ -89,7 +83,8 @@ class RoomDemand {
     for (const key of this._remoteDemand.keys()) if (key.startsWith(prefix)) this._remoteDemand.delete(key)
     for (const key of this._pushedWanted) if (key.startsWith(prefix)) this._pushedWanted.delete(key)
   }
-  private _transition(member: string, track: string, on: boolean): void {
+  private _transition(member: string, track: string, transition: DemandTransition): void {
+    const on = transition === 'start'
     this._publishWant({ member, track, node: this._instanceId, on })
     if (this._ownsMember(member)) this._recompute(member, track)
   }
