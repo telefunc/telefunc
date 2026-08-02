@@ -24,9 +24,8 @@ function createRequestReplacer(
     abort: (abortError: AbortError) => void
   }) => void,
   extensionTypes: ReplacerType<TypeContract, ClientReplacerContext>[],
-  builtInTypes: readonly ReplacerType<TypeContract, ClientReplacerContext>[] = clientRequestTypes,
 ) {
-  const allTypes = [...builtInTypes, ...extensionTypes]
+  const allTypes = [...clientRequestTypes, ...extensionTypes]
   const replacer = (_key: string, value: unknown, serializer: (v: unknown) => string) => {
     for (const type of allTypes) {
       if (type.detect(value)) {

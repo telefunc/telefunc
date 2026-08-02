@@ -27,15 +27,12 @@ type DeferredRevival = {
 
 /** Brillout-shape reviver that defers `revive`. The same instance is returned to the parser
  *  as the placeholder AND collected into `deferreds` for later resolution. */
-function createRequestReviver(
-  extensionTypes: ReviverType<TypeContract, ServerReviverContext>[],
-  builtInTypes: readonly ReviverType<TypeContract, ServerReviverContext>[] = serverRequestTypes,
-): {
+function createRequestReviver(extensionTypes: ReviverType<TypeContract, ServerReviverContext>[]): {
   reviver: Reviver
   deferreds: DeferredRevival[]
 } {
   const deferreds: DeferredRevival[] = []
-  const allTypes = [...builtInTypes, ...extensionTypes]
+  const allTypes = [...serverRequestTypes, ...extensionTypes]
   const reviver: Reviver = (path, value, parser) => {
     for (const type of allTypes) {
       if (!value.startsWith(type.prefix)) continue
