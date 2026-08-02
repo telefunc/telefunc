@@ -299,6 +299,29 @@ class RoomParticipantStubChannel extends ServerChannel<unknown, unknown> {
   }
 }
 
+function asRoomRecord(value: unknown): ParticipantMeta { return isObject(value) ? value : {} }
+async function sendParticipantDm(participant: ServerLocalParticipant, req: Extract<ParticipantStubRequest, { __r: 'req-dm' }>) {
+  if (!req.ack) return (await participant.send(req.to, req.data)) as RoomSendReceipt
+  const { receipt, reply } = await participant._room._sendDmAck(participant.id, req.to, req.data)
+  if (!reply.ok) throw roomFailureError(reply)
+  return { ...receipt, response: reply.result }
+}
+async function handleParticipantStubRequest(
+  participant: ServerLocalParticipant, publishShield: ShieldValidator | undefined, msg: unknown,
+): Promise<unknown> {
+  if (!hasRoomTag(msg)) return undefined
+  const req = msg as ParticipantStubRequest
+  if (req.__r === 'req-publish') {
+    participant._room._shieldPublishData(publishShield, req.data)
+    return await participant.publish(req.data, req.retain ? { retain: true } : undefined)
+  }
+  if (req.__r === 'req-set-meta') return await participant.setMeta(asRoomRecord(req.meta))
+  if (req.__r === 'req-set-attrs') return await participant.setAttributes(asRoomRecord(req.attrs))
+  if (req.__r === 'req-dm') return await sendParticipantDm(participant, req)
+  if (req.__r === 'req-leave') return await participant.leave()
+  return undefined
+}
+
 function bindParticipantStubChannel(
   channel: RoomParticipantStubChannel,
   participant: ServerLocalParticipant,
@@ -309,32 +332,7 @@ function bindParticipantStubChannel(
     !participant._isBound,
     'This LocalParticipant is already bound to a client and cannot be handed to another. A LocalParticipant is a single member: give each client its own join(), or share a getParticipants() view (which is read-only) instead.',
   )
-  channel._listenRoomRequests(async (msg: unknown) => {
-    if (!hasRoomTag(msg)) return undefined
-    const req = msg as ParticipantStubRequest
-    switch (req.__r) {
-      case 'req-publish':
-        participant._room._shieldPublishData(publishShield, req.data) // reject malformed data before publish
-        return await participant.publish(req.data, req.retain ? { retain: true } : undefined)
-      case 'req-set-meta':
-        await participant.setMeta(isObject(req.meta) ? req.meta : {})
-        return undefined
-      case 'req-set-attrs':
-        await participant.setAttributes(isObject(req.attrs) ? req.attrs : {})
-        return undefined
-      case 'req-dm': {
-        if (!req.ack) return (await participant.send(req.to, req.data)) as RoomSendReceipt
-        const { receipt, reply } = await participant._room._sendDmAck(participant.id, req.to, req.data)
-        if (!reply.ok) throw roomFailureError(reply)
-        return { ...receipt, response: reply.result }
-      }
-      case 'req-leave':
-        await participant.leave()
-        return undefined
-      default:
-        return undefined
-    }
-  })
+  channel._listenRoomRequests((msg) => handleParticipantStubRequest(participant, publishShield, msg))
 
   channel.listenBinary(async (framed: Uint8Array) => {
     if (unframeMemberId(framed)?.from !== participant.id) throw new RoomError('Malformed room binary publish')
