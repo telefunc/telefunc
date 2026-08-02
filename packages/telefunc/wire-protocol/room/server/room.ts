@@ -1210,34 +1210,30 @@ class ServerRoom extends RoomStateView implements Room {
     if (this._heartbeatBusy) return // a slow backend must not pile up overlapping ticks
     this._heartbeatBusy = true
     try {
-      try {
-        // Renew this node's binary-demand lease on every owner and sweep any crashed reporter's demand.
-        // No cell I/O — runs first so member-cell latency never delays it (the demand TTL has slack for skips).
-        this._demand.heartbeat()
-        let renewalFailure: { error: unknown } | null = null
-        for (const id of this._ownedMemberIds().filter((id) => !this._pendingAdmissions.has(id))) {
-          try {
-            const key = roomMemberKvKey(this.id, id)
-            const present = await mutateCells(this.id, this._inc, { keys: [key] }, (cells) => {
-              const raw = cells.get(key)
-              if (raw === undefined) return { value: false, mutations: [] }
-              const record = { ...(parse(decodeRoomText(raw)) as RoomMemberRecord), seenAt: Date.now() }
-              return {
-                value: true,
-                mutations: [{ key, set: { bytes: encodeRoomText(stringify(record)) } }],
-              }
-            })
-            if (!present) this._applyLeave(id)
-          } catch (error) {
-            if (error instanceof RoomError && error.message === `Room is closed: ${this.id}`) throw error
-            renewalFailure ??= { error }
-          }
+      // Renew this node's binary-demand lease on every owner and sweep any crashed reporter's demand.
+      // No cell I/O — runs first so member-cell latency never delays it (the demand TTL has slack for skips).
+      this._demand.heartbeat()
+      let renewalFailure: { error: unknown } | null = null
+      for (const id of this._ownedMemberIds().filter((id) => !this._pendingAdmissions.has(id))) {
+        try {
+          const key = roomMemberKvKey(this.id, id)
+          const present = await mutateCells(this.id, this._inc, { keys: [key] }, (cells) => {
+            const raw = cells.get(key)
+            if (raw === undefined) return { value: false, mutations: [] }
+            const record = { ...(parse(decodeRoomText(raw)) as RoomMemberRecord), seenAt: Date.now() }
+            return {
+              value: true,
+              mutations: [{ key, set: { bytes: encodeRoomText(stringify(record)) } }],
+            }
+          })
+          if (!present) this._applyLeave(id)
+        } catch (error) {
+          if (error instanceof RoomError && error.message === `Room is closed: ${this.id}`) throw error
+          renewalFailure ??= { error }
         }
-        if (renewalFailure) throw renewalFailure.error
-      } finally {
-        // Authority diagnosis owns convergence after a missed close. Renewal failure cannot bypass it.
-        await this._reconcileAuthority()
       }
+      this._syncSubs() // bounded retry trigger for still-wanted terminal lanes; no authority read
+      if (renewalFailure) throw renewalFailure.error
     } finally {
       this._heartbeatBusy = false
     }

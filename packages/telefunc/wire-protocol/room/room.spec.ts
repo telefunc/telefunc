@@ -466,16 +466,16 @@ describe('Room public behavior', () => {
     await vi.waitFor(() => expect(room.count).toBe(1))
     expect((await room.getParticipants()).map(({ id }) => id)).toEqual([member.id])
   })
-  it('uses the heartbeat roster snapshot to repair observer drift', async () => {
-    const authority = await Room.create('heartbeat-reconcile')
+  it('heals roster drift when traffic identifies an unknown sender', async () => {
+    const authority = await Room.create('unknown-sender-reconcile')
     const member = await authority.join()
     const observer = (await Room.get(authority.id)) as ServerRoom
+    observer.subscribe(() => {})
     await observer.getParticipants()
     observer._state.applyLeave(member.id)
     expect(observer.count).toBe(0)
-    await (observer as unknown as { _heartbeatTick(): Promise<void> })._heartbeatTick()
-    expect(observer.count).toBe(1)
-    expect((await observer.getParticipants()).map(({ id }) => id)).toEqual([member.id])
+    await member.publish('unknown sender')
+    await vi.waitFor(() => expect(observer.count).toBe(1))
   })
   it('reads authority while the control subscription is establishing', async () => {
     const authority = await Room.create('establishing-roster')
@@ -547,26 +547,6 @@ describe('Room public behavior', () => {
     observer.onJoin(() => {})
     await vi.advanceTimersByTimeAsync(ROOM_HEARTBEAT_INTERVAL_MS)
     expect(heartbeat).toHaveBeenCalledOnce()
-  })
-  it('reconciles authority even when member renewal fails first', async () => {
-    const room = (await Room.create('heartbeat-renewal-failure')) as ServerRoom
-    const first = await room.join()
-    const second = await room.join()
-    const firstKey = roomMemberKvKey(room.id, first.id)
-    const secondKey = roomMemberKvKey(room.id, second.id)
-    const compareExchange = driver.compareExchangeCells.bind(driver)
-    const attempted: string[] = []
-    vi.spyOn(Math, 'random').mockReturnValue(0)
-    vi.spyOn(driver, 'compareExchangeCells').mockImplementation(async (roomId, inc, revision, mutations) => {
-      attempted.push(mutations[0]!.key)
-      return mutations[0]!.key === firstKey ? 'conflict' : compareExchange(roomId, inc, revision, mutations)
-    })
-    vi.spyOn(driver, 'readHead').mockResolvedValue(null)
-    await expect((room as unknown as { _heartbeatTick(): Promise<void> })._heartbeatTick()).rejects.toThrow(
-      'Room update contention',
-    )
-    expect(attempted).toContain(secondKey)
-    expect(room.isClosed).toBe(true)
   })
   it('retries a still-wanted lost subscription on the next planning pass', async () => {
     vi.useFakeTimers()
