@@ -9,15 +9,32 @@ import type {
   SubscriptionDriver,
   SubscriptionState,
 } from './subscription.js'
+import { CHANNEL_BUFFER_LIMIT_BYTES } from '../constants.js'
+import { ChannelOverflowError } from '../channel-errors.js'
 
 type ReadinessGeneration = ReturnType<typeof createReadinessGeneration>
 type StateListener = (state: SubscriptionState) => void
+
+type PendingPublish = {
+  payload: Uint8Array
+  publish: (payload: Uint8Array) => unknown
+  resolve: (value: unknown) => void
+  reject: (error: unknown) => void
+}
+
+type PendingPublishState = {
+  entries: PendingPublish[]
+  bytes: number
+}
+
+const PENDING_PUBLISH_LIMIT = 1024
 
 /** One upstream attempt per source with local fan-out/refcount, ownership/readiness checks, and
  * stale-attempt rejection. Consumers own retry budgets and deadlines. */
 class SubscriptionManager<Source> {
   private readonly _slots = new Map<string, SubscriptionSlot<Source>>()
   private readonly _cleanups = new Set<Promise<void>>()
+  private readonly _pendingPublishes = new Map<string, PendingPublishState>()
 
   constructor(
     private readonly _driver: SubscriptionDriver<Source>,
@@ -39,12 +56,45 @@ class SubscriptionManager<Source> {
         sourceKey,
         (attempt) => this._cleanup(attempt),
         () => {
+          slot!.markRemoved()
           if (this._slots.get(key) === slot) this._slots.delete(key)
         },
       )
       this._slots.set(key, slot)
     }
     return slot.attach(receiver)
+  }
+
+  publish<T>(
+    source: Source,
+    payload: Uint8Array,
+    publish: (ownedPayload: Uint8Array) => T | Promise<T>,
+  ): T | Promise<T> {
+    const sourceKey = this._sourceKey(source)
+    let state = this._pendingPublishes.get(sourceKey)
+    if (state === undefined && this._readinessWaits(sourceKey).length === 0) return publish(payload)
+
+    const ownedPayload = payload.slice()
+    const startFlushing = state === undefined
+    state ??= { entries: [], bytes: 0 }
+    if (
+      state.entries.length >= PENDING_PUBLISH_LIMIT ||
+      state.bytes + ownedPayload.byteLength > CHANNEL_BUFFER_LIMIT_BYTES
+    ) {
+      return Promise.reject(new ChannelOverflowError('Broadcast readiness buffer overflow'))
+    }
+    if (!this._pendingPublishes.has(sourceKey)) this._pendingPublishes.set(sourceKey, state)
+    state.bytes += ownedPayload.byteLength
+    const result = new Promise<T>((resolve, reject) => {
+      state.entries.push({
+        payload: ownedPayload,
+        publish,
+        resolve: resolve as (value: unknown) => void,
+        reject,
+      })
+    })
+    if (startFlushing) void this._flushPublishes(sourceKey, state)
+    return result
   }
 
   terminate(predicate: (source: Source) => boolean): void {
@@ -69,6 +119,42 @@ class SubscriptionManager<Source> {
     void cleanup.finally(() => this._cleanups.delete(cleanup))
     return cleanup
   }
+
+  private async _flushPublishes(sourceKey: string, state: PendingPublishState): Promise<void> {
+    try {
+      while (state.entries.length > 0) {
+        await this._waitUntilReady(sourceKey)
+        const entries = state.entries.splice(0)
+        state.bytes = 0
+        for (const entry of entries) {
+          try {
+            entry.resolve(entry.publish(entry.payload))
+          } catch (error) {
+            entry.reject(error)
+          }
+        }
+      }
+    } catch (error) {
+      for (const entry of state.entries.splice(0)) entry.reject(error)
+      state.bytes = 0
+    } finally {
+      this._pendingPublishes.delete(sourceKey)
+    }
+  }
+
+  private async _waitUntilReady(sourceKey: string): Promise<void> {
+    for (;;) {
+      const pending = this._readinessWaits(sourceKey)
+      if (pending.length === 0) return
+      await Promise.all(pending)
+    }
+  }
+
+  private _readinessWaits(sourceKey: string): Promise<void>[] {
+    return [...this._slots.values()]
+      .filter((slot) => slot.sourceKey === sourceKey)
+      .flatMap((slot) => slot.waitForReadyOrRemoved() ?? [])
+  }
 }
 
 class SubscriptionSlot<Source> {
@@ -79,6 +165,7 @@ class SubscriptionSlot<Source> {
   private _readiness: ReadinessGeneration = createReadinessGeneration()
   private _state: SubscriptionState = 'establishing'
   private _stopPromise: Promise<void> | null = null
+  private readonly _removed = createReadinessGeneration()
 
   constructor(
     readonly source: Source,
@@ -88,6 +175,15 @@ class SubscriptionSlot<Source> {
     private readonly _cleanup: (attempt: SubscriptionAttempt) => Promise<void>,
     private readonly _onEmpty: () => void,
   ) {}
+
+  markRemoved(): void {
+    this._removed.resolve()
+  }
+
+  waitForReadyOrRemoved(): Promise<void> | null {
+    if (this._stopPromise !== null || this._state === 'ready') return null
+    return Promise.race([this._readiness.promise, this._removed.promise])
+  }
 
   attach(receiver: BackendReceiver): BackendSubscription {
     if (this._stopPromise !== null) throw new Error('SubscriptionManager: cannot attach to a stopped source')
