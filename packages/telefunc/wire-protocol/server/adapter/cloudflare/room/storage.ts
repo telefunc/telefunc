@@ -198,6 +198,26 @@ function storeHead(sql: SqlStorage, next: HeadWriteNext, now: number, mintRev: (
 }
 
 type CellsRead = { revision: string; cells: Map<string, Uint8Array> } | { staleInc: true }
+type CellRow = { key: string; bytes: ArrayBuffer; expires_at: number | null }
+function selectCellRows(sql: SqlStorage, inc: string, sel: { keys: string[] } | { prefix: string }): CellRow[] {
+  if ('keys' in sel)
+    return sel.keys.flatMap((key) => {
+      const row = sql
+        .exec<Omit<CellRow, 'key'>>('SELECT bytes, expires_at FROM cell WHERE inc = ? AND key = ?', inc, key)
+        .toArray()[0]
+      return row === undefined ? [] : [{ key, ...row }]
+    })
+  const query = 'SELECT key, bytes, expires_at FROM cell WHERE inc = ? AND substr(key, 1, length(?)) = ?'
+  return sql.exec<CellRow>(query, inc, sel.prefix, sel.prefix).toArray()
+}
+function collectUnexpiredCells(rows: CellRow[], now: number): Map<string, Uint8Array> {
+  const cells = new Map<string, Uint8Array>()
+  for (const row of rows) {
+    if (row.expires_at !== null && row.expires_at <= now) continue
+    cells.set(row.key, toBytes(row.bytes))
+  }
+  return cells
+}
 
 // Reads stay available while closing; staleInc means the head is absent or names another incarnation.
 export function readCells(
@@ -209,34 +229,7 @@ export function readCells(
   const head = readLiveHead(sql, now)
   if (head === null || head.currentInc !== inc) return { staleInc: true }
   const revision = String(readRevision(sql, inc))
-  const cells = new Map<string, Uint8Array>()
-  if ('keys' in sel) {
-    for (const key of sel.keys) {
-      const row = sql
-        .exec<{ bytes: ArrayBuffer; expires_at: number | null }>(
-          'SELECT bytes, expires_at FROM cell WHERE inc = ? AND key = ?',
-          inc,
-          key,
-        )
-        .toArray()[0]
-      if (row === undefined || (row.expires_at !== null && row.expires_at <= now)) continue
-      cells.set(key, toBytes(row.bytes))
-    }
-  } else {
-    const rows = sql
-      .exec<{ key: string; bytes: ArrayBuffer; expires_at: number | null }>(
-        'SELECT key, bytes, expires_at FROM cell WHERE inc = ? AND substr(key, 1, length(?)) = ?',
-        inc,
-        sel.prefix,
-        sel.prefix,
-      )
-      .toArray()
-    for (const row of rows) {
-      if (row.expires_at !== null && row.expires_at <= now) continue
-      cells.set(row.key, toBytes(row.bytes))
-    }
-  }
-  return { revision, cells }
+  return { revision, cells: collectUnexpiredCells(selectCellRows(sql, inc, sel), now) }
 }
 
 function readRevision(sql: SqlStorage, inc: string): number {
