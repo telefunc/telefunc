@@ -335,12 +335,14 @@ describe('cloudflare adapter entrypoint', () => {
     expect(getRoomBackend()).toBe(selected)
   })
 
-  it('keeps the same Durable Object Room backend across repeated Worker entry evaluation', () => {
+  it('fails loudly on duplicate initialization and permits a new owner after disposal', async () => {
     new Telefunc()
-    const installed = getRoomBackend()
-    new Telefunc()
-    expect(getRoomBackend()).toBe(installed)
+    expect(() => new Telefunc()).toThrow('a backend is already active')
+    expect(() => new Telefunc({ instanceName: 'different' })).toThrow('a backend is already active')
     expect(mocks.transportInstances).toHaveLength(1)
+    await disposeBackend()
+    expect(() => new Telefunc({ instanceName: 'different' })).not.toThrow()
+    expect(mocks.transportInstances).toHaveLength(2)
   })
 
   it('reports the normative Room binding diagnostic instead of using the memory backend', async () => {
