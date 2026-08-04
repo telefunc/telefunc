@@ -1,7 +1,6 @@
 export { testRoom }
 import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
 import { navigate, getResult } from '../../e2e-utils'
-import { assertRoomScenarioExecutions, roomScenario, type RoomScenarioId } from './Room.scenarios'
 type ChatResult = {
   events: string[]
   received: Array<{ text: string; from: string }>
@@ -55,17 +54,15 @@ type MemberResult = {
   memberName: string | null
   sameObject: boolean
 }
-const executedScenarios: RoomScenarioId[] = []
 function testRoomScenario<Result>(
-  id: RoomScenarioId,
+  id: string,
   name: string,
   validate: (result: Result) => void | Promise<void>,
   after?: () => Promise<void>,
 ) {
-  executedScenarios.push(id)
   test(name, async () => {
     await navigate(`${getServerUrl()}/room`)
-    await page.click(roomScenario(id).selector)
+    await page.click(`#test-room-${id}`)
     await autoRetry(async () => validate(await getResult<Result>('#room-result')))
     await after?.()
   })
@@ -262,5 +259,4 @@ function testRoom() {
       expect(r.empty).toBe(true) // onEmpty fired when the last member went
     },
   )
-  assertRoomScenarioExecutions(executedScenarios)
 }

@@ -23,7 +23,6 @@ import {
   onKickByIdentity,
   onCloseRoom,
 } from './Room.telefunc'
-import { roomScenario, type RoomScenarioId } from './Room.scenarios'
 
 type PollResult = { done: boolean; result?: unknown }
 
@@ -62,11 +61,11 @@ function Room() {
     }
   }
 
-  const scenario = (id: RoomScenarioId, heading: string | null, label: string, run: () => Promise<void>) => (
+  const scenario = (id: string, heading: string | null, label: string, run: () => Promise<void>) => (
     <>
       {heading && <h2>{heading}</h2>}
       <button
-        id={roomScenario(id).selector.slice(1)}
+        id={`test-room-${id}`}
         onClick={async () => {
           setResult('')
           await run()
