@@ -110,7 +110,6 @@ class RedisSubscriptionAttempt implements SubscriptionAttempt {
   private _settle!: { resolve: () => void; reject: (error: unknown) => void }
   private _state: SubscriptionAttemptState = 'establishing'
   private _subscriber: Redis | null = null
-  private _subscribed = false
   private _readySettled = false
   private _cleanup: Promise<void> | null = null
   private _lastError: unknown = new Error('Redis subscriber connection closed')
@@ -175,7 +174,6 @@ class RedisSubscriptionAttempt implements SubscriptionAttempt {
       }
       this._bindSubscriber(subscriber)
       await subscriber.subscribe(...redisSubscriptionChannels(this._prefix, this._source))
-      this._subscribed = true
       if (!(await this._validateEstablishedAttempt(subscriber))) return
       this._resolveReady()
       this._transition('ready')
@@ -234,14 +232,7 @@ class RedisSubscriptionAttempt implements SubscriptionAttempt {
       subscriber.off('close', this._onConnectionClosed)
       subscriber.off('end', this._onConnectionClosed)
       subscriber.off('error', this._onError)
-      try {
-        if (this._subscribed && subscriber.status === 'ready') {
-          await subscriber.unsubscribe(...redisSubscriptionChannels(this._prefix, this._source))
-        }
-        await subscriber.quit()
-      } catch {
-        subscriber.disconnect()
-      }
+      subscriber.disconnect()
     }
     this._onDisposed()
   }
