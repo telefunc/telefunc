@@ -502,12 +502,17 @@ describe('Redis real three-master Cluster CI certification', () => {
   it('omits unknowable receiver counts and shares empty-key text/binary ordering across nodes', async () => {
     const prefix = uniquePrefix('receivers')
     const backend = ownBackend(cluster, prefix)
-    const subscriberOrder = [...masters].sort((left, right) =>
-      `${left.host}:${left.port}`.localeCompare(`${right.host}:${right.port}`),
+    const subscriberNode = cluster.nodes('master').find((node) => node.status !== 'end')
+    if (subscriberNode === undefined) throw new Error('Cluster has no live subscriber master')
+    const subscriberMaster = masters.find(
+      ({ host, port }) => host === subscriberNode.options.host && port === subscriberNode.options.port,
     )
+    if (subscriberMaster === undefined) throw new Error('Subscriber master is absent from the certified topology')
+    const crossMaster = masters.find(({ id }) => id !== subscriberMaster.id)
+    if (crossMaster === undefined) throw new Error('Certification requires at least two masters')
     const cases = [
-      { label: 'cross', roomMasterId: (subscriberOrder[2] as Master).id, same: false },
-      { label: 'same', roomMasterId: (subscriberOrder[1] as Master).id, same: true },
+      { label: 'cross', roomMasterId: crossMaster.id, same: false },
+      { label: 'same', roomMasterId: subscriberMaster.id, same: true },
     ]
     const knownClients = new Set((await pubSubClients()).map(clientIdentity))
     for (const scenario of cases) {

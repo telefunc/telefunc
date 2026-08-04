@@ -145,22 +145,13 @@ export class RedisBackend implements BroadcastDriver, RoomDriver {
         'RedisBackend: at-most-once requires maxRetriesPerRequest: 0 (standalone Redis), or retryDelayOnFailover: 0 and redisOptions.maxRetriesPerRequest: 0 (Cluster); reconnectOnError must be unset',
       )
     this._publisher = options.redis
-    let clusterSubscriberSelection = 0
     const createSubscriber = async (): Promise<Redis> => {
       let source: Redis
       if (options.redis instanceof Cluster) {
         // Keep SUBSCRIBE, dispatch, and the delivery-fence PING on one Room-owned live-master socket.
-        const masters = options.redis
-          .nodes('master')
-          .filter((master) => master.status !== 'end')
-          .sort((left, right) =>
-            `${left.options.host ?? ''}:${left.options.port ?? ''}`.localeCompare(
-              `${right.options.host ?? ''}:${right.options.port ?? ''}`,
-            ),
-          )
-        if (masters.length === 0) throw new Error('RedisBackend: Cluster has no available masters')
-        source = masters[clusterSubscriberSelection % masters.length] as Redis
-        clusterSubscriberSelection++
+        const master = options.redis.nodes('master').find((candidate) => candidate.status !== 'end')
+        if (master === undefined) throw new Error('RedisBackend: Cluster has no available masters')
+        source = master
       } else source = options.redis
       return source.duplicate({
         connectionName: `telefunc-subscriber-${randomUUID()}`,
