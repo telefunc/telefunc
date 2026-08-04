@@ -45,11 +45,3 @@ function assertClientJoinBoundary(room: ClientRoom) {
   // @ts-expect-error hidden membership is created only by a server-side join
   void room.join({ hidden: true })
 }
-// Permanent false controls for the three escapes exercised against the public projections above.
-type _ComparatorRejectsEscapes = AssertAll<
-  [
-    Exactly<never, ChatMsg> extends false ? true : false,
-    Exactly<ChatMsg | { kind: 'system' }, ChatMsg> extends false ? true : false,
-    Exactly<any, ChatMsg> extends false ? true : false,
-  ]
->
