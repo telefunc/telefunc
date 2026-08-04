@@ -7,8 +7,7 @@
       "build/",
       ".svelte-kit/",
       ".next/",
-      ".wrangler/",
-      "test/backend-public-consumer/released-exports.json"
+      ".wrangler/"
     ]
   },
   "formatter": {
