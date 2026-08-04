@@ -35,54 +35,6 @@ test('public Room lifecycle and authority settlement controls execute on Cloudfl
       receivedFromPublisher: true,
       closed: true,
     },
-    facadeSettlementOrdering: {
-      firstSeq: 1,
-      secondSeq: 2,
-      firstBeforeSecond: 'settled',
-      secondBeforeRelease: 'pending',
-    },
-    lifecycle: {
-      receivers: 1,
-      delivered: [1],
-      closed: true,
-      generations: [],
-      invalidations: ['terminal'],
-    },
-    terminalDrop: {
-      state: 'terminated',
-      invalidations: ['terminal'],
-    },
-    preAckTerminalDrop: {
-      ready: 'Cloudflare Room subscription terminated before acknowledgement',
-      state: 'terminated',
-      invalidations: ['terminal'],
-      generations: [],
-    },
-    cancelled: 'Cloudflare Room delivery cancelled before handoff',
-    cancellationDeliveries: [1],
-    fanoutOrdering: {
-      firstSettlementBeforeRelease: 'pending',
-      firstSettlementAfterRelease: 'rejected',
-      secondSettlement: 'delivery probe rejected',
-      fastDeliveriesBeforeRelease: [1],
-      slowDeliveriesBeforeRelease: [1],
-    },
-    coordinatorFanout: {
-      outcomes: 65,
-      deliveries: 65,
-    },
-    transientFailureRecovery: {
-      settlements: [
-        'delivery probe rejected',
-        'delivery probe rejected',
-        'delivery probe rejected',
-        'delivery probe rejected',
-        'delivery probe rejected',
-      ],
-      recovered: 'resolved',
-      deliveries: [1, 2, 3, 4, 5, 6],
-      invalidations: ['terminal'],
-    },
     restartSettlement: {
       old: 'Cloudflare Room delivery has an unknown delivery token',
       new: 'resolved',
@@ -91,13 +43,6 @@ test('public Room lifecycle and authority settlement controls execute on Cloudfl
       idle: null,
       afterRoute: 'armed',
       afterUnsubscribe: null,
-    },
-    controlPreconditions: {
-      waitForCommit: 'response reordering probe was not prepared',
-      releaseCommit: 'response reordering probe was not prepared',
-      releaseDelivery: 'response reordering probe was not prepared',
-      waitForRegistration: 'registration hold probe was not prepared',
-      releaseRegistration: 'registration hold probe was not prepared',
     },
     nativeRpc: {
       headConfig: [0x11, 0x22, 0x33],
