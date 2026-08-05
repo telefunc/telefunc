@@ -5,7 +5,7 @@ import { TelefuncStreamBeta } from '../../components'
 
 <TelefuncStreamBeta />
 
-Redis-backed <Link href="/channel#broadcast">broadcast</Link> fan-out across server instances — a `publish()` on any instance reaches every `subscribe()` on every other instance. <Link href="/room">Rooms</Link> work across instances too: room state lives in Redis keys, room events travel over Redis Pub/Sub.
+Redis-backed <Link href="/channel#broadcast">broadcast</Link> fan-out across server instances — a `publish()` on any instance reaches every `subscribe()` on every other instance. <Link href="/room">Rooms</Link> work across instances too.
 
 > You only need this if you scale horizontally — see <Link href="/stream/scale" />.
 
@@ -25,7 +25,7 @@ const redis = new IORedis('redis://localhost:6379', { maxRetriesPerRequest: 0 })
 installRedis(redis)
 ```
 
-That single call installs the Redis backend for both Broadcast and Room from the same client. In steady state, Broadcast subscribers across the cluster observe the publish order for a given key; frames in flight during a Redis Cluster slot-owner change may be lost, consistent with Broadcast's at-most-once delivery. Room state and events are shared across instances automatically.
+That single call installs the Redis backend for both Broadcast and Room. Room state and events are then shared across server instances.
 
 ### Sharing an existing client
 
@@ -41,7 +41,7 @@ const redis = new IORedis(process.env.REDIS_URL, { tls: {}, maxRetriesPerRequest
 installRedis(redis)
 ```
 
-Internally, Telefunc calls `duplicate()` on the client for its dedicated subscriber connections — your instance is never disconnected. You can continue to use it alongside Telefunc without interference.
+Telefunc duplicates the supplied client as needed without disconnecting it, so you can continue to use it alongside Telefunc.
 
 ## Channels
 

@@ -65,7 +65,7 @@ Serverless platforms that don't expose sticky-session routing aren't a good fit 
 
 In a single-instance setup, the default in-memory backend is enough. In a multi-instance setup, install a backend that fans out across the cluster — such as <Link href="/redis"><code>@telefunc/redis</code></Link>.
 
-> Redis is the only installable backend shipped today. A custom backend can use NATS, Kafka, RabbitMQ, or another system, but it implements Telefunc's complete backend contract — both cheap Broadcast delivery and the durable Room operations — rather than a separate broadcast-only hook.
+> Redis is the only backend shipped today. A custom backend implements Telefunc's full backend contract for both Broadcast and Room.
 
 > For Cloudflare Workers, Telefunc has an adapter that uses Durable Objects — see <Link href="/stream/cloudflare" />.
 

@@ -58,7 +58,7 @@ export default {
 > - **Durable Objects** provide stateful compute: each channel lives on a Durable Object, which holds the connection and its state.
 > - **KV** provides shared storage: it's how stateless workers find the Durable Object that holds the state, no matter which worker a request lands on.
 >
-> The session Durable Object and KV bindings are required whenever you use `telefunc/cloudflare`. Rooms additionally require the SQLite `TelefuncRoomDurableObject` binding shown above. `new Telefunc()` installs that backend automatically; no explicit `installBackend()` call is needed for the standard Cloudflare setup. A missing Room binding fails with a setup diagnostic instead of falling back to per-isolate memory. If your app doesn't use `Channel`, `Broadcast`, or `Room`, there's no state to keep — you can skip these bindings and use <Link href="/serve"><code>serve()</code></Link> instead.
+> The session Durable Object and KV bindings are required whenever you use `telefunc/cloudflare`; Rooms additionally require the SQLite `TelefuncRoomDurableObject` binding shown above. If your app doesn't use `Channel`, `Broadcast`, or `Room`, you can skip these bindings and use <Link href="/serve"><code>serve()</code></Link> instead.
 >
 > See <Link href="#architecture" /> for implementation details.
 
@@ -122,9 +122,6 @@ On the first request, Telefunc picks a Durable Object in the nearest region, sto
 | Room head, roster, ordering, retained messages | Per-room SQLite Durable Object | Strongly consistent |
 | `Room.list` directory projection | SQLite directory Durable Object | Repairable projection, verified against the room head |
 | Session affinity and generic Broadcast presence | Workers KV | Eventually consistent |
-
-Retained Room data is chunked internally into rows of at most 1.5 MB and installed by an atomic manifest swap. The application still publishes and reads one payload — chunking isn't part of the Room API.
-
 
 ## Scaling
 

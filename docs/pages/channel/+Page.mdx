@@ -23,7 +23,7 @@ The following low-level **primitives** enable all kinds of <Link href="/stream">
 
 > For short-lived callbacks (e.g. progress updates), <Link href="/stream#callback">function passing</Link> is usually simpler.
 
-> By default, channels and broadcasts use [SSE](https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events) and work without extra server setup. When <Link href="/transport#channel-transport">WebSocket is enabled</Link>, the client starts on SSE and upgrades to WebSocket in the background.
+> By default, channels and broadcasts use [SSE](https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events) and work without extra server setup. When <Link href="/transport#channel-transport">WebSocket is enabled</Link>, the client starts on SSE and seamlessly upgrades to WebSocket in the background.
 
 > **Needs a long-running server.** A channel holds a connection open for its entire lifetime, so channels and broadcasts don't work on serverless platforms that enforce a short time limit on connections (e.g. Vercel, AWS Lambda). See <Link href="/stream/cloudflare" /> for using channels on Cloudflare Workers, and <Link href="/stream/scale" /> for running multiple server instances.
 
@@ -264,7 +264,7 @@ info.timestamp  // server timestamp (Unix epoch ms)
 
 `seq` is monotonic per `key`, which is useful for ordering and gap detection. `publish()` resolves to `info` once the message is accepted.
 
-In-memory and standalone Redis report an authoritative `receivers` count; `0` means no transport subscription was reachable when the publish was accepted. Cloudflare also reports `receivers`, but its cross-region presence registry is eventually consistent: the count can temporarily lag joins or leaves, so `0` isn't proof that nobody is subscribed. Redis Cluster omits the field because `PUBLISH` reports only a node-local count. The field always counts transport subscriptions, not the end viewers each peer may serve.
+The `receivers` count is authoritative with the in-memory backend and standalone Redis. On Cloudflare it is eventually consistent, so `0` isn't proof that nobody is subscribed; Redis Cluster omits it.
 
 > By default, broadcast is in-memory — messages only reach subscribers on the same server. This works out-of-the-box for single-server deployments.
 >
