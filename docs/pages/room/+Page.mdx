@@ -319,7 +319,7 @@ me.onDemand((track, wanted) => {
 })
 ```
 
-In-memory, standalone Redis, and Cloudflare report `receivers` because they can prove global absence; `0` means nobody anywhere. A positive value counts backend delivery routes, not end viewers. Redis Cluster omits the field because a node-local count cannot prove global absence. Use `onDemand` to pause and resume portably.
+In-memory, standalone Redis, and Cloudflare report `receivers` because they can prove global absence — on Cloudflare, Room routes are tracked by the Room authority, unlike Broadcast presence in KV — so `0` means nobody anywhere. A positive value counts backend delivery routes, not end viewers. Redis Cluster omits the field because a node-local count cannot prove global absence. Use `onDemand` to pause and resume portably.
 
 Across nodes, `onDemand` is eventually consistent, so a viewer on another node can take a moment to appear. Treat `wanted === false` as a pause/resume signal, not a real-time interlock.
 
