@@ -7,5 +7,5 @@
     "strict": true,
     "target": "ES2022"
   },
-  "include": ["certification.ts", "vitest.config.ts"]
+  "include": ["certification.spec.ts", "vitest.config.ts"]
 }
