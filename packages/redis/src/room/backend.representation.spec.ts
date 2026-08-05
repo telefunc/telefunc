@@ -1,6 +1,6 @@
 import { Cluster, Redis } from 'ioredis'
 import { expect, onTestFinished, test } from 'vitest'
-import { RedisBackend } from './src/room/backend.js'
+import { RedisBackend } from './backend.js'
 
 test('keeps the ratified Redis backend representation', () => {
   const backend = new RedisBackend({ redis: new Redis({ lazyConnect: true, maxRetriesPerRequest: 0 }) })

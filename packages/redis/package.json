@@ -21,8 +21,8 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsc --build",
-    "dev": "tsc --watch"
+    "build": "tsc --build tsconfig.build.json",
+    "dev": "tsc --build --watch tsconfig.build.json"
   },
   "peerDependencies": {
     "ioredis": "^5.10.1",

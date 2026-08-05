@@ -2,8 +2,8 @@ import { readFileSync } from 'node:fs'
 import { Cluster, Redis } from 'ioredis'
 import type { CommitAccepted, LaneId, RoomHead, SubscriptionState } from 'telefunc/__internal'
 import { afterAll, afterEach, beforeAll, describe, expect, it, onTestFinished, vi } from 'vitest'
-import { installRedis } from '../../src/index.js'
-import { RedisBackend } from '../../src/room/backend.js'
+import { installRedis } from '../index.js'
+import { RedisBackend } from './backend.js'
 import { disposeBackend, getBroadcastBackend, getRoomBackend } from '../../../telefunc/wire-protocol/backend/install.js'
 import {
   broadcastSequenceKey,
@@ -16,7 +16,7 @@ import {
   orderKey,
   REDIS_DELIVERY_FENCE_BYTE,
   REDIS_ROOM_COMMANDS,
-} from '../../src/room/layout.js'
+} from './layout.js'
 type RedisClusterNode = { host: string; port: number }
 type Master = RedisClusterNode & { id: string; ranges: Array<[number, number]>; client: Redis }
 type CommandCall = { name: string; keyCount: number; args: unknown[] }
@@ -76,7 +76,8 @@ describe('Redis real three-master Cluster CI certification', () => {
     }
     await expect(backend.publish({ key: '}edge', kind: 'text' }, bytes('unsafe'))).rejects.toThrow(/Broadcast key/)
     const commands = cluster as unknown as Record<string, (...args: unknown[]) => Promise<unknown>>
-    const publish = commands.tfPublish.bind(cluster)
+    const publish = commands.tfPublish?.bind(cluster)
+    if (publish === undefined) throw new Error('tfPublish is not registered')
     vi.spyOn(commands, 'tfPublish').mockImplementation(async (...args) => {
       await publish(...args)
       if (cluster.options.retryDelayOnFailover === 0) throw new Error('simulated reply loss after execution')
@@ -84,7 +85,7 @@ describe('Redis real three-master Cluster CI certification', () => {
     })
     await expect(backend.publish({ key: 'once', kind: 'text' }, bytes('once'))).rejects.toThrow()
     expect(await cluster.get(broadcastSequenceKey(prefix, 'once'))).toBe('1')
-    expect(() => new RedisBackend({ redis: masters[0].client })).toThrow(/at-most-once/i)
+    expect(() => new RedisBackend({ redis: (masters[0] as Master).client })).toThrow(/at-most-once/i)
   })
   it('covers shipped command KEYS and terminates live and in-flight attempts when their generation drops', async () => {
     const runtime = await exerciseRuntimeSlotCommands()

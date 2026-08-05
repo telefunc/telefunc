@@ -3,6 +3,6 @@ import { configDefaults, defineConfig } from 'vitest/config'
 export default defineConfig({
   test: {
     include: ['packages/**/*.spec.ts'],
-    exclude: [...configDefaults.exclude, 'packages/redis/test/cluster-ci/certification.spec.ts'],
+    exclude: [...configDefaults.exclude, 'packages/redis/src/room/cluster.certification.spec.ts'],
   },
 })
