@@ -124,7 +124,7 @@ export function getRoomBackend(): RoomBackend {
   ) {
     assertUsage(
       false,
-      'config.broadcast.transport configures Broadcast only. Room requires a full backend; install @telefunc/redis or use the Cloudflare adapter.',
+      'config.broadcast.transport configures Broadcast only. Room requires a full backend; install the Redis backend or use the Cloudflare adapter.',
     )
   }
   return getBackendPair().room
