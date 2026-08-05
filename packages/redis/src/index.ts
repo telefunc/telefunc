@@ -4,6 +4,7 @@ export type { InstallRedisOptions, RedisBroadcastOptions }
 import type { Cluster, Redis } from 'ioredis'
 import {
   BACKEND_SPI_VERSION,
+  getGlobalObject,
   setDefaultBackend,
   superviseBroadcastDriver,
   type BackendDriverPair,
@@ -26,16 +27,14 @@ function createRedisBackendPair(options: RedisBackendOptions): BackendDriverPair
   }
 }
 
-const REDIS_BACKEND_DEFAULT_IDENTITIES = Symbol.for('telefunc.redis.backendDefaultIdentities')
 type RedisBackendDefaultIdentities = WeakMap<object, Map<string, object>>
-const redisBackendDefaultIdentities = (() => {
-  const global = globalThis as typeof globalThis & {
-    [REDIS_BACKEND_DEFAULT_IDENTITIES]?: RedisBackendDefaultIdentities
-  }
-  return (global[REDIS_BACKEND_DEFAULT_IDENTITIES] ??= new WeakMap())
-})()
+
+function getRedisBackendDefaultIdentities(): RedisBackendDefaultIdentities {
+  return getGlobalObject('redis/index.ts', { backendDefaultIdentities: new WeakMap() }).backendDefaultIdentities
+}
 
 function internRedisBackendIdentity(redis: Redis | Cluster, prefix: string | undefined): object {
+  const redisBackendDefaultIdentities = getRedisBackendDefaultIdentities()
   let byPrefix = redisBackendDefaultIdentities.get(redis)
   if (byPrefix === undefined) {
     byPrefix = new Map()

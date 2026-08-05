@@ -2,6 +2,7 @@ export type { TELEFUNC_SHIELDS } from '../shared/transformer/generateShield/shie
 export type * from '../../wire-protocol/backend/broadcast/contract.js'
 export { BACKEND_SPI_VERSION, type BackendDriverPair } from '../../wire-protocol/backend/driver-pair.js'
 export { setDefaultBackend } from '../../wire-protocol/backend/install.js'
+export { getGlobalObject } from '../../utils/getGlobalObject.js'
 export type * from '../../wire-protocol/backend/room/contract.js'
 export type * from '../../wire-protocol/backend/subscription.js'
 export { superviseBroadcastDriver } from '../../wire-protocol/backend/broadcast/supervise.js'
