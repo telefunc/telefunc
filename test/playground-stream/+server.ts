@@ -4,7 +4,7 @@ import type { IncomingMessage, Server as HttpServer, ServerResponse } from 'node
 import { Hono } from 'hono'
 import vike from '@vikejs/hono'
 import IORedis, { Cluster } from 'ioredis'
-import { installRedis } from '@telefunc/redis'
+import { installRedis, RedisTransport } from '@telefunc/redis'
 import { BroadcastChannel, config, Room } from 'telefunc'
 import { Telefunc } from 'telefunc/node'
 import { cleanupState, resetCleanupState, getCleanupStateSnapshot } from './cleanup-state'
@@ -24,11 +24,24 @@ if (process.env.REDIS_CLUSTER_NODES) {
     }
     return { host, port }
   })
-  installRedis(new Cluster(nodes, { retryDelayOnFailover: 0, redisOptions: { maxRetriesPerRequest: 0 } }))
+  installClusterBackend(new Cluster(nodes, { retryDelayOnFailover: 0, redisOptions: { maxRetriesPerRequest: 0 } }))
   console.log(`[INST=${INST}] Redis Cluster backend installed (${nodes.length} seeds)`)
 } else if (process.env.REDIS_URL) {
-  installRedis(new IORedis(process.env.REDIS_URL, { maxRetriesPerRequest: 0 }))
+  installClusterBackend(new IORedis(process.env.REDIS_URL, { maxRetriesPerRequest: 0 }))
   console.log(`[INST=${INST}] Redis backend installed`)
+}
+
+function installClusterBackend(redis: IORedis | Cluster): void {
+  const installTransport = () => {
+    config.broadcast.transport = new RedisTransport({ redis })
+  }
+  if (INST === 'A') {
+    installTransport()
+    installRedis(redis)
+  } else {
+    installRedis(redis)
+    installTransport()
+  }
 }
 
 // Exit cleanly on Docker stop so V8 flushes `--cpu-prof` output.

@@ -13,6 +13,7 @@ import {
   telefuncConfig,
   type ChannelBase,
   type ClientChannel,
+  type BroadcastTransport,
   type ReplacerType,
   type ReviverType,
   type ServerReplacerContext,
@@ -24,8 +25,6 @@ import {
 import { DefaultBroadcastAdapter } from 'telefunc'
 // @ts-expect-error the legacy broadcast adapter type is not released
 import type { BroadcastAdapter } from 'telefunc'
-// @ts-expect-error the legacy broadcast transport type is not released
-import type { BroadcastTransport } from 'telefunc'
 import { disposeBackend, HEAD_TRANSITIONS, laneKey, ORDERING_FRAME_LAYOUT } from 'telefunc/backend'
 
 // Dead fused surface: each diagnostic owns one removed name.
@@ -89,6 +88,16 @@ type ReleasedPublishResult = {
 type ReleasedPublishAck = ReleasedPublishResult & { key: string }
 type CurrentPublishAck = Awaited<ReturnType<InstanceType<typeof BroadcastChannel>['publish']>>
 type _publishAckShape = Assert<Compatible<CurrentPublishAck, ReleasedPublishAck>>
+
+type ReleasedBroadcastTransport = {
+  send(key: string, payload: string): ReleasedPublishResult | Promise<ReleasedPublishResult>
+  listen(key: string, onMessage: (payload: string, info: ReleasedPublishResult) => void): () => void
+  sendBinary(key: string, payload: Uint8Array): ReleasedPublishResult | Promise<ReleasedPublishResult>
+  listenBinary(key: string, onMessage: (payload: Uint8Array, info: ReleasedPublishResult) => void): () => void
+}
+type _broadcastTransportShape = Assert<Compatible<BroadcastTransport, ReleasedBroadcastTransport>>
+declare const broadcastTransport: BroadcastTransport
+config.broadcast.transport = broadcastTransport
 
 type _transitionRowKeys = Assert<HasKeys<(typeof HEAD_TRANSITIONS)[number], 'from' | 'cx' | 'to' | 'constraint'>>
 const orderingHeaderBytes: 16 = ORDERING_FRAME_LAYOUT.headerBytes

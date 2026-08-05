@@ -63,11 +63,26 @@ Serverless platforms that don't expose sticky-session routing aren't a good fit 
 
 <Link href="/channel#broadcast">`Broadcast`</Link> is different: publishers and subscribers are intentionally decoupled — they only share a `key` string. Each instance keeps its own subscriber list locally, and the backend is what makes a publisher on instance A reach a subscriber on instance B.
 
-In a single-instance setup, the default in-memory backend is enough. In a multi-instance setup, install a backend that fans out across the cluster — such as <Link href="/redis"><code>@telefunc/redis</code></Link>.
+In a single-instance setup, the default in-memory backend is enough. In a multi-instance setup, install a backend that fans out across the cluster — such as <Link href="/redis"><code>@telefunc/redis</code></Link> — or configure a broadcast transport.
 
-> Redis is the only backend shipped today. A custom backend implements Telefunc's full backend contract for both Broadcast and Room.
+> A broadcast transport (NATS, Kafka, RabbitMQ, …) provides cross-instance Broadcast only. <Link href="/room">Rooms</Link> require a shipped full backend such as <Link href="/redis"><code>@telefunc/redis</code></Link> or the Cloudflare adapter.
 
 > For Cloudflare Workers, Telefunc has an adapter that uses Durable Objects — see <Link href="/stream/cloudflare" />.
+
+### `BroadcastTransport`
+
+Implement `BroadcastTransport` and assign it to `config.broadcast.transport`:
+
+```ts ts-only
+type BroadcastTransport = {
+  send(key: string, payload: string): { seq: number; timestamp: number } | Promise<{ seq: number; timestamp: number }>
+  listen(key: string, onMessage: (payload: string, info: { seq: number; timestamp: number }) => void): () => void
+  sendBinary(key: string, payload: Uint8Array): { seq: number; timestamp: number } | Promise<{ seq: number; timestamp: number }>
+  listenBinary(key: string, onMessage: (payload: Uint8Array, info: { seq: number; timestamp: number }) => void): () => void
+}
+```
+
+`send()` and `sendBinary()` return the assigned `{ seq, timestamp }`, giving every node one global order per key; `listen()` and `listenBinary()` return an unsubscribe function. A configured broadcast transport takes precedence over an installed backend's broadcast plane, which takes precedence over the in-memory default.
 
 ## Cloudflare
 

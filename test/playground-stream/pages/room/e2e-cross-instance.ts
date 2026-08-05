@@ -38,7 +38,7 @@ function testRedisRoomCrossInstance() {
 }
 
 function testRedisBroadcastCrossInstance() {
-  test('broadcast: Redis Cluster delivers a generic publish from instance A to instance B', async () => {
+  test('broadcast: config transport delivers a generic publish from instance A to instance B', async () => {
     const key = `redis-cluster-broadcast-${Date.now()}-${Math.random().toString(36).slice(2)}`
     const message = { kind: 'generic-from-a', nonce: Math.random().toString(36).slice(2) }
     try {

@@ -1,18 +1,23 @@
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
 import type { BroadcastBackend, BroadcastDriver } from './broadcast/contract.js'
 import { superviseBroadcastDriver } from './broadcast/supervise.js'
+import { createBroadcastTransportDriver, type BroadcastTransport } from './broadcast/transport.js'
 import { BACKEND_SPI_VERSION, type BackendDriverPair } from './driver-pair.js'
 import { createMemoryBackendPair } from './memory/backend.js'
 import type { RoomBackend, RoomDriver } from './room/contract.js'
 import { superviseRoomDriver } from './room/supervise.js'
+import { assertUsage } from '../../utils/assert.js'
 
 export type BackendFactory = () => BackendDriverPair
 
 type ManagedBackendPair = {
-  readonly broadcast: BroadcastBackend
   readonly room: RoomBackend
+  getBroadcast(): BroadcastBackend
+  suspendBroadcast(): Promise<void>
   dispose(): Promise<void>
 }
+
+type BroadcastOverride = { transport: BroadcastTransport; backend?: BroadcastBackend }
 
 type BackendState =
   | { phase: 'empty' }
@@ -26,7 +31,7 @@ type BackendState =
     }
   | { phase: 'disposing'; promise: Promise<void> }
 
-type BackendStore = { current: BackendState }
+type BackendStore = { current: BackendState; broadcastOverride?: BroadcastOverride }
 
 const state = getGlobalObject<BackendStore>('wire-protocol/backend/install.ts', () => ({ current: { phase: 'empty' } }))
 
@@ -49,6 +54,15 @@ export function setDefaultBackend(factory: BackendFactory, identity: unknown = f
     return
   if (current.phase === 'ready') throw new Error(REPLACEMENT_ERROR)
   selectBackend(factory, 'default', identity)
+}
+
+/** Installs the public broadcast-only override without displacing the full backend's Room plane. */
+export function configureBroadcastTransport(transport: BroadcastTransport): void {
+  const previous = state.broadcastOverride
+  if (previous?.transport === transport) return
+  state.broadcastOverride = { transport }
+  if (previous?.backend) void previous.backend.dispose()
+  if (state.current.phase === 'ready') void state.current.backend.suspendBroadcast()
 }
 
 function selectBackend(
@@ -95,10 +109,24 @@ function selectBackend(
 }
 
 export function getBroadcastBackend(): BroadcastBackend {
-  return getBackendPair().broadcast
+  if (state.current.phase === 'installing') throw new Error(INSTALLING_ERROR)
+  if (state.current.phase === 'disposing') throw new Error(DISPOSING_ERROR)
+  const override = state.broadcastOverride
+  if (override)
+    return (override.backend ??= superviseBroadcastDriver(createBroadcastTransportDriver(override.transport)))
+  return getBackendPair().getBroadcast()
 }
 
 export function getRoomBackend(): RoomBackend {
+  if (
+    state.broadcastOverride &&
+    (state.current.phase === 'empty' || (state.current.phase === 'ready' && state.current.selection === 'memory'))
+  ) {
+    assertUsage(
+      false,
+      'config.broadcast.transport configures Broadcast only. Room requires a full backend; install @telefunc/redis or use the Cloudflare adapter.',
+    )
+  }
   return getBackendPair().room
 }
 
@@ -111,11 +139,15 @@ function getBackendPair(): ManagedBackendPair {
 /** Disposes the canonical backend behind one shared promise, blocking acquisition until settlement. */
 export function disposeBackend(): Promise<void> {
   const current = state.current
-  if (current.phase === 'empty') return Promise.resolve()
+  const override = state.broadcastOverride
+  if (current.phase === 'empty' && !override?.backend) return Promise.resolve()
   if (current.phase === 'installing') return Promise.reject(new Error(INSTALLING_ERROR))
   if (current.phase === 'disposing') return current.promise
 
-  const promise = current.backend.dispose()
+  const overrideDisposal = override?.backend?.dispose() ?? Promise.resolve()
+  if (override) delete override.backend
+  const fullDisposal = current.phase === 'ready' ? current.backend.dispose() : Promise.resolve()
+  const promise = Promise.all([overrideDisposal, fullDisposal]).then(() => {})
   const disposing: Extract<BackendState, { phase: 'disposing' }> = { phase: 'disposing', promise }
   state.current = disposing
   const clear = () => clearDisposalPhase(disposing)
@@ -124,14 +156,30 @@ export function disposeBackend(): Promise<void> {
 }
 
 function superviseBackendPair(pair: BackendDriverPair): ManagedBackendPair {
-  const broadcast = superviseBroadcastDriver(pair.driver)
-  const room = superviseRoomDriver(pair.driver)
+  const drivers = resolveBackendDrivers(pair)
+  let broadcast = state.broadcastOverride ? null : superviseBroadcastDriver(drivers.broadcast)
+  let broadcastRetirement: Promise<void> | undefined
+  const room = superviseRoomDriver(drivers.room)
   let disposal: Promise<void> | undefined
   return {
-    broadcast,
     room,
-    dispose: () => (disposal ??= Promise.all([broadcast.dispose(), room.dispose()]).then(() => pair.dispose())),
+    getBroadcast: () => (broadcast ??= superviseBroadcastDriver(drivers.broadcast)),
+    suspendBroadcast: () => {
+      const active = broadcast
+      broadcast = null
+      if (active) broadcastRetirement = active.dispose()
+      return broadcastRetirement ?? Promise.resolve()
+    },
+    dispose: () =>
+      (disposal ??= Promise.all([broadcast?.dispose(), broadcastRetirement, room.dispose()]).then(() => {
+        broadcast = null
+        return pair.dispose()
+      })),
   }
+}
+
+function resolveBackendDrivers(pair: BackendDriverPair): { broadcast: BroadcastDriver; room: RoomDriver } {
+  return pair.driver ? { broadcast: pair.driver, room: pair.driver } : { broadcast: pair.broadcast, room: pair.room }
 }
 
 function clearDisposalPhase(disposal: Extract<BackendState, { phase: 'disposing' }>): void {
@@ -161,7 +209,9 @@ function assertBackendDriverPair(pair: BackendDriverPair): void {
       `telefunc/backend: incompatible backend spiVersion ${String(pair.spiVersion)}; expected ${BACKEND_SPI_VERSION}`,
     )
   }
-  assertDriver(pair.driver, 'driver', ['publish', ...ROOM_METHODS])
+  const drivers = resolveBackendDrivers(pair)
+  assertDriver(drivers.broadcast, 'broadcast', ['publish'])
+  assertDriver(drivers.room, 'room', ROOM_METHODS)
   assertMethod(pair, 'dispose')
 }
 
