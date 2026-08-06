@@ -1,5 +1,5 @@
 export { ChannelMux, getChannelMux }
-export type { ReconcileOutcome, ServerTransport, MuxResourceLimits, UpgradeResourceSnapshot, BacklogSnapshot }
+export type { ReconcileOutcome, ServerTransport }
 
 import { assert } from '../../utils/assert.js'
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
@@ -51,20 +51,7 @@ type ReconcileOutcome = {
   upgradeId?: string
 }
 
-type MuxResourceLimits = {
-  maxFrameBytes: number
-  maxOpenEntries: number
-  maxIdBytes: number
-  maxStagedRecords: number
-  maxStagedBytes: number
-  stageTtlMs: number
-  maxRawFrameBytes: number
-  maxRecvBacklogBytes: number
-  maxRecvBacklogFrames: number
-  maxMetadataBytes: number
-}
-
-const DEFAULT_MUX_LIMITS: MuxResourceLimits = Object.freeze({
+const DEFAULT_MUX_LIMITS = Object.freeze({
   maxFrameBytes: UPGRADE_MAX_FRAME_BYTES,
   maxOpenEntries: UPGRADE_MAX_OPEN_ENTRIES,
   maxIdBytes: UPGRADE_MAX_ID_BYTES,
@@ -83,17 +70,6 @@ type StagedUpgrade = {
   bytes: number
   timer: ReturnType<typeof setTimeout>
   phase: 'staged' | 'committing'
-}
-
-type UpgradeResourceSnapshot = {
-  records: number
-  reverseRecords: number
-  bytes: number
-}
-
-type BacklogSnapshot = {
-  bytes: number
-  frames: number
 }
 
 function retargetToProbe(err: unknown, probe: unknown): unknown {
@@ -171,15 +147,11 @@ class ChannelMux {
   private readonly stagedUpgrades = new Map<unknown, StagedUpgrade>()
   private readonly stagedByPrevSession = new Map<string, unknown>()
   private stagedBytes = 0
-  private readonly limits: MuxResourceLimits
+  private readonly limits = DEFAULT_MUX_LIMITS
 
   /** Resolved lazily so the mux can be constructed at module-load (the globalObject factory
    *  runs before `serverConfig` is initialized). */
   private resolvedOptions: MuxServerOptions | null = null
-
-  constructor(limits: Partial<MuxResourceLimits> = {}) {
-    this.limits = { ...DEFAULT_MUX_LIMITS, ...limits }
-  }
 
   private get options(): MuxServerOptions {
     return (this.resolvedOptions ??= resolveMuxServerOptions())
@@ -693,35 +665,6 @@ class ChannelMux {
       }, this.options.pingDeadline),
     )
   }
-
-  // ── Test-only ───────────────────────────────────────────────────────
-
-  dispose(): void {
-    this.channels.clear()
-    this.pendingRegisterWaiters.clear()
-    this.sessions.clear()
-    this.sessionFinalizers.clear()
-    this.connectionEntries.clear()
-    this.connectionsByConnId.clear()
-    for (const stage of this.stagedUpgrades.values()) clearTimeout(stage.timer)
-    this.stagedUpgrades.clear()
-    this.stagedByPrevSession.clear()
-    this.stagedBytes = 0
-  }
-
-  _getUpgradeResourceSnapshot(): UpgradeResourceSnapshot {
-    return {
-      records: this.stagedUpgrades.size,
-      reverseRecords: this.stagedByPrevSession.size,
-      bytes: this.stagedBytes,
-    }
-  }
-
-  _getBacklogSnapshot(connection: unknown): BacklogSnapshot | null {
-    const entry = this.connectionEntries.get(connection)
-    if (!entry) return null
-    return { bytes: entry.state.recvBacklogBytes, frames: entry.state.recvBacklogFrames }
-  }
 }
 
 /** Forward (`bySession`: sessionId → ix → handle) for per-frame routing; reverse
@@ -786,11 +729,6 @@ class SessionRegistry {
       // ever name it (transient-closed sessions are otherwise only removed by reconcile).
       if (session.size === 0) this.bySession.delete(sessionId)
     }
-  }
-
-  clear(): void {
-    this.bySession.clear()
-    this.byChannel.clear()
   }
 }
 

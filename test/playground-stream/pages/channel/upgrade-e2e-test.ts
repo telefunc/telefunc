@@ -12,7 +12,7 @@ import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
 import type { WebSocket } from 'playwright-chromium'
 import { navigate, getResult, getCleanupState, resetCleanupState } from '../../e2e-utils'
 
-type FrameCounts = { received: number; sent: number }
+type FrameCounts = { received: number }
 
 function testUpgrade() {
   const transports = parseChannelTransports(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS)
@@ -33,10 +33,9 @@ function testUpgrade() {
     const sockets: FrameCounts[] = []
     const onWebSocket = (ws: WebSocket) => {
       if (!ws.url().includes('/_telefunc')) return
-      const counts: FrameCounts = { received: 0, sent: 0 }
+      const counts: FrameCounts = { received: 0 }
       sockets.push(counts)
       ws.on('framereceived', () => counts.received++)
-      ws.on('framesent', () => counts.sent++)
     }
     page.on('websocket', onWebSocket)
     try {
