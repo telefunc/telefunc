@@ -879,7 +879,7 @@ class ClientConnection implements MuxConnection {
   private tryCompleteUpgrade(): void {
     const u = this.committing
     if (u === null || this.transport !== u.to || this.reingestingFlip) return
-    if (!u.finReceived || u.upgradeId !== null || this.reconciling) return
+    if (!u.finReceived || u.upgradeId !== null) return
     const { from, buffer, deferredOmitted } = this.exitUpgradeCommitting()
     this.retireOldWire(from)
     for (const entry of buffer.old) this.dispatchFrame(entry.frame)
