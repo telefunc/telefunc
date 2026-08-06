@@ -466,6 +466,7 @@ class ClientConnection implements MuxConnection {
       clearTimeout(this.ttl)
       this.ttl = null
     }
+    if (this.nextIndex > 0xffff) throw new Error('Channel index limit reached')
     const ix = this.nextIndex++
     this.enterChannelPending(ix, channel, true)
     this.replayBuffers.set(

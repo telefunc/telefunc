@@ -116,8 +116,11 @@ describe('decodeClientFrame — hostile schemas', () => {
     ['an entry with a non-string id', { sessionId: 's', open: [{ id: 7, ix: 0, lastSeq: 0 }] }],
     ['an entry with a non-integer ix', { sessionId: 's', open: [{ id: 'A', ix: 1.5, lastSeq: 0 }] }],
     ['an entry with a negative ix', { sessionId: 's', open: [{ id: 'A', ix: -1, lastSeq: 0 }] }],
+    ['an entry with an overflowing ix', { sessionId: 's', open: [{ id: 'A', ix: 0x10000, lastSeq: 0 }] }],
+    ['duplicate ix entries', { sessionId: 's', open: [...goodOpen, { id: 'B', ix: goodOpen[0]!.ix, lastSeq: 0 }] }],
     ['an entry with a non-integer lastSeq', { sessionId: 's', open: [{ id: 'A', ix: 0, lastSeq: 'x' }] }],
     ['an entry with a negative lastSeq', { sessionId: 's', open: [{ id: 'A', ix: 0, lastSeq: -3 }] }],
+    ['an entry with an overflowing lastSeq', { sessionId: 's', open: [{ id: 'A', ix: 0, lastSeq: 0x100000000 }] }],
     // `lastSeq` present and valid, so this row can only be refused for the `initial` field.
     [
       'an entry whose initial is not literally true',
@@ -135,6 +138,7 @@ describe('decodeClientFrame — hostile schemas', () => {
       { sessionId: 's', open: goodOpen },
       { sessionId: 's', barrier: true, upgradeId: 'u', open: goodOpen },
       { open: [{ id: 'A', ix: 0, lastSeq: 0, initial: true }] },
+      { open: [{ id: 'A', ix: 0xffff, lastSeq: 0xffffffff }] },
       { open: [] },
     ]
     for (const payload of legal) expect(clientFrame(encode.reconcile(payload)).tag).toBe(TAG.RECONCILE)

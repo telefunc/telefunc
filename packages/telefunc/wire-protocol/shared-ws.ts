@@ -515,10 +515,14 @@ function validateReconcile(payload: ReconcilePayload): void {
   assertObjectPayload(payload)
   const p = payload as { open?: unknown; sessionId?: unknown; barrier?: unknown; upgradeId?: unknown }
   if (!Array.isArray(p.open)) throw new ProtocolViolationError()
+  const indexes = new Set<number>()
   for (const entry of p.open) {
     if (typeof entry?.id !== 'string') throw new ProtocolViolationError()
-    if (!Number.isInteger(entry.ix) || entry.ix < 0) throw new ProtocolViolationError()
-    if (!Number.isInteger(entry.lastSeq) || entry.lastSeq < 0) throw new ProtocolViolationError()
+    if (!Number.isInteger(entry.ix) || entry.ix < 0 || entry.ix > 0xffff || indexes.has(entry.ix))
+      throw new ProtocolViolationError()
+    indexes.add(entry.ix)
+    if (!Number.isInteger(entry.lastSeq) || entry.lastSeq < 0 || entry.lastSeq > 0xffffffff)
+      throw new ProtocolViolationError()
     if (entry.initial !== undefined && entry.initial !== true) throw new ProtocolViolationError()
   }
   if (p.sessionId !== undefined && !isNonEmptyString(p.sessionId)) throw new ProtocolViolationError()
