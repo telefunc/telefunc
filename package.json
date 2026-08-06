@@ -8,7 +8,7 @@
     "test": "pnpm run test:units && pnpm run test:e2e && pnpm run test:types",
     "test:units": "vitest run",
     "test:e2e": "test-e2e",
-    "test:types": "test-types",
+    "test:types": "test-types && tsc --noEmit -p packages/telefunc/tsconfig.spec.json",
     "// Run `$ pnpm test:setup` before running `$ pnpm test`": "",
     "test:setup": "pnpm install && pnpm run build",
     "========= Docs": "",
