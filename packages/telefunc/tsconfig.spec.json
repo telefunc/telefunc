@@ -1,6 +1,9 @@
 {
   "extends": "./tsconfig.json",
   "compilerOptions": { "noEmit": true },
-  "files": ["wire-protocol/upgrade.wire-codec.spec.ts"],
+  "files": [
+    "wire-protocol/upgrade.ordering.spec.ts",
+    "wire-protocol/upgrade.wire-codec.spec.ts"
+  ],
   "include": ["client/**/*", "node/**/*", "serve/**/*", "wire-protocol/**/*"]
 }
