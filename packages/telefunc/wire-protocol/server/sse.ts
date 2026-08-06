@@ -6,6 +6,7 @@ import { assert } from '../../utils/assert.js'
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
 import { unrefTimer } from '../../utils/unrefTimer.js'
 import { getServerConfig } from '../../node/server/serverConfig.js'
+import { handleTelefunctionBug } from '../../node/server/runTelefunc/validateTelefunctionError.js'
 import { CHANNEL_TRANSPORT } from '../constants.js'
 import { createPushReadableStream, type PushReadableStream } from '../push-readable-stream.js'
 import { createPushReadable, type PushReadable } from '../push-readable.js'
@@ -37,6 +38,7 @@ type SseConnection = {
   ready: Promise<void>
   resolveReady: () => void
   pendingDispatches: Set<Promise<unknown>>
+  reportedDispatches: WeakSet<Promise<unknown>>
 }
 
 const sseOpenComment = textEncoder.encode(': open\n\n')
@@ -127,6 +129,7 @@ class SseConnectionTransport {
       ready,
       resolveReady,
       pendingDispatches: new Set(),
+      reportedDispatches: new WeakSet(),
     }
     this.mux.onConnectionOpen(connection, this.transport)
     this.resolvePendingConnections(connId, connection)
@@ -160,10 +163,14 @@ class SseConnectionTransport {
         const dispatch = this.mux.onConnectionRawMessage(connection, raw)
         connection.pendingDispatches.add(dispatch)
         const evict = () => connection.pendingDispatches.delete(dispatch)
-        dispatch.then(evict, evict)
+        dispatch.then(evict, (err) => {
+          connection.reportedDispatches.add(dispatch)
+          evict()
+          reportDispatchBug(err)
+        })
       }
     } finally {
-      await Promise.allSettled(connection.pendingDispatches)
+      await this.settlePendingDispatches(connection)
     }
     return okResponse()
   }
@@ -191,19 +198,31 @@ class SseConnectionTransport {
     let outcome: ReconcileOutcome | null = null
     try {
       outcome = await this.drainDeferred(connection, reader)
-    } catch {
+    } catch (err) {
       // Body truncated mid-frame (`StreamReader` throws). The caller fire-and-forgets this
       // promise, so a rethrow would be an unhandled rejection. Transient close: the channels
       // keep their reconnect grace and the client's retry can re-attach them.
+      reportDispatchBug(err)
       this.closeConnection(connection, false) // resolves `ready` — the parked POSTs see it closed
       return
     }
     try {
       if (!shouldSendReconciled(outcome, connection)) return
-      await Promise.allSettled(connection.pendingDispatches)
+      await this.settlePendingDispatches(connection)
       this.mux.sendReconciled(connection, outcome)
     } finally {
       connection.resolveReady()
+    }
+  }
+
+  private async settlePendingDispatches(connection: SseConnection): Promise<void> {
+    const pending = [...connection.pendingDispatches]
+    const results = await Promise.allSettled(pending)
+    for (let i = 0; i < results.length; i++) {
+      const dispatch = pending[i]!
+      connection.pendingDispatches.delete(dispatch)
+      const result = results[i]!
+      if (result.status === 'rejected' && !connection.reportedDispatches.has(dispatch)) reportDispatchBug(result.reason)
     }
   }
 
@@ -296,6 +315,12 @@ class SseConnectionTransport {
     const terminatePermanently = this.mux.readPermanentTermination(connection)
     this.closeConnection(connection, terminatePermanently === true)
   }
+}
+
+function reportDispatchBug(err: unknown): void {
+  if (err instanceof ProtocolViolationError || err instanceof OversizeFrameError || err instanceof StreamTruncatedError)
+    return
+  handleTelefunctionBug(err instanceof Error ? err : new Error(String(err)))
 }
 
 function shouldSendReconciled(
