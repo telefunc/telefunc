@@ -506,31 +506,40 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   _onPeerAckRes(ackedSeq: number, resultText: string, status: AckResultStatus = ACK_STATUS.OK): void {
     const pending = this._pendingAcks.get(ackedSeq)
     if (!pending) return
-    this._pendingAcks.delete(ackedSeq)
-    switch (status) {
-      case ACK_STATUS.OK: {
-        const parsed = parsePeerText(resultText) as ChannelAck<ServerToClient>
-        const validateAck = this._validators.get('ack')
-        if (validateAck) {
-          const result = validateAck(parsed)
-          // Server-declared ack shield rejected the peer's response — same class as every
-          // other shield-fail surface, so user code can catch with `isShieldValidationError`.
-          if (result !== true) {
-            pending.reject(new ShieldValidationError(result))
-            return
+    try {
+      switch (status) {
+        case ACK_STATUS.OK: {
+          const parsed = parsePeerText(resultText) as ChannelAck<ServerToClient>
+          const validateAck = this._validators.get('ack')
+          if (validateAck) {
+            const result = validateAck(parsed)
+            // Server-declared ack shield rejected the peer's response — same class as every
+            // other shield-fail surface, so user code can catch with `isShieldValidationError`.
+            if (result !== true) {
+              pending.reject(new ShieldValidationError(result))
+              return
+            }
           }
+          pending.resolve(parsed)
+          return
         }
-        pending.resolve(parsed)
-        return
+        case ACK_STATUS.ABORT:
+          pending.reject(createAbortError(parsePeerText(resultText)))
+          return
+        case ACK_STATUS.ERROR:
+          pending.reject(new Error(resultText || 'Internal client channel error — see client logs'))
+          return
+        case ACK_STATUS.SHIELD_ERROR:
+          pending.reject(new ShieldValidationError(resultText))
+          return
+        default:
+          throw new ProtocolViolationError()
       }
-      case ACK_STATUS.ABORT:
-        pending.reject(createAbortError(parsePeerText(resultText)))
-        return
-      case ACK_STATUS.ERROR:
-        pending.reject(new Error(resultText || 'Internal client channel error — see client logs'))
-        return
-      case ACK_STATUS.SHIELD_ERROR:
-        pending.reject(new ShieldValidationError(resultText))
+    } catch (err) {
+      pending.reject(err instanceof Error ? err : new Error(String(err)))
+      throw err
+    } finally {
+      this._pendingAcks.delete(ackedSeq)
     }
   }
 
