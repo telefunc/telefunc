@@ -7,8 +7,12 @@ export default {
   // cert from Caddy's auto-generated local CA — Chromium has no reason to trust that CA, so
   // we tell it to skip cert validation. Same flag is harmless for non-docker tests that
   // already speak HTTP or have a real cert chain.
+  //
+  // `--enable-unsafe-swiftshader` opts headless Chromium into software (SwiftShader) WebGL for
+  // the RTS Game suite (a PixiJS/WebGL renderer) — headless runners have no GPU, and recent
+  // Chromium deprecated the silent software fallback. Harmless for suites that never touch WebGL.
   chromiumLaunchOptions: {
-    args: ['--ignore-certificate-errors'],
+    args: ['--ignore-certificate-errors', '--enable-unsafe-swiftshader'],
   },
 }
 
@@ -54,6 +58,13 @@ function getCiJobs() {
       // Tests use bash-only syntax (`fuser`, `rm -rf`, `2>/dev/null`) and the docker test needs Linux containers => Ubuntu-only
       setups: setupModern,
       // Fans out one CI runner per `.test-*.test.ts` so the suite runs in parallel instead of sequentially
+      splitFiles: true,
+    },
+    {
+      name: 'RTS Game',
+      // WebGL (PixiJS) runs on headless Chromium's SwiftShader — tuned on Linux runners => Ubuntu-only
+      setups: setupModern,
+      // Fans out one CI runner per `.test-*.test.ts` (dev + preview) so they run in parallel
       splitFiles: true,
     },
     {
