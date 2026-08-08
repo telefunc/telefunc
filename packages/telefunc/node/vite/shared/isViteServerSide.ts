@@ -13,7 +13,9 @@ type ViteEnv = { name?: string; config: EnvironmentOptions | Environment['config
 function isViteServerSide_withoutEnv(configGlobal: ResolvedConfig | UserConfig, viteEnv?: ViteEnv): boolean {
   assert(!('consumer' in configGlobal)) // make sure configGlobal isn't viteEnv.config
   const isServerSide1: boolean | null = !viteEnv?.config.consumer ? null : viteEnv.config.consumer !== 'client'
-  const isServerSide2: boolean | null = !viteEnv?.name ? null : viteEnv.name !== 'client' // I can't think of a use case for creating another client-side environment
+  // Environment names are arbitrary: plugins can define client-side environments under any name
+  // (e.g. vite-plugin-vercel uses `vercel_client`), so only Vite's default names are conclusive.
+  const isServerSide2: boolean | null = viteEnv?.name === 'client' ? false : viteEnv?.name === 'ssr' ? true : null
   const isServerSide3: boolean | null = !viteEnv ? null : !!viteEnv.config.build?.ssr
   const isServerSide4: boolean = !!configGlobal.build?.ssr
   const debug = {
