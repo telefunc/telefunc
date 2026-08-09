@@ -28,13 +28,18 @@ describe('isViteServerSide()', () => {
     expect(isViteServerSide(globalConfig({ ssr: true }), env('ssr', { consumer: 'server' }))).toBe(true)
   })
 
-  it('falls back to the environment name when config.consumer is missing', () => {
-    expect(isViteServerSide(globalConfig({ ssr: false }), env('client', {}))).toBe(false)
-    expect(isViteServerSide(globalConfig({ ssr: false }), env('ssr', {}))).toBe(true)
-  })
-
-  it('falls back to build.ssr when neither config.consumer nor a known name is available', () => {
+  it('falls back to build.ssr when config.consumer is missing', () => {
+    expect(isViteServerSide(globalConfig({ ssr: false }), env('client', { build: { ssr: false } }))).toBe(false)
+    expect(isViteServerSide(globalConfig({ ssr: true }), env('ssr', { build: { ssr: true } }))).toBe(true)
     expect(isViteServerSide(globalConfig({ ssr: true }), env('vercel_node', { build: { ssr: true } }))).toBe(true)
     expect(isViteServerSide(globalConfig({ ssr: true }), env('vercel_client', { build: { ssr: false } }))).toBe(false)
+  })
+
+  it('handles build.ssr being a string', () => {
+    expect(isViteServerSide(globalConfig({ ssr: true }), env('vercel_node', { build: { ssr: 'entry.js' } }))).toBe(true)
+  })
+
+  it('throws when the environment name contradicts config.consumer', () => {
+    expect(() => isViteServerSide(globalConfig({ ssr: true }), env('client', { consumer: 'server' }))).toThrow()
   })
 })
