@@ -1,3 +1,14 @@
+## [0.2.23](https://github.com/telefunc/telefunc/compare/v0.2.22...v0.2.23) (2026-08-09)
+
+
+### Bug Fixes
+
+* reference-identity-preserving serialization ([#444](https://github.com/telefunc/telefunc/issues/444)) ([6f496b7](https://github.com/telefunc/telefunc/commit/6f496b72e4fb145399f1dc8c09b98c052ef390c5))
+* resolve extension types after telefunc loading ([#457](https://github.com/telefunc/telefunc/issues/457)) ([2e70d5b](https://github.com/telefunc/telefunc/commit/2e70d5be671243b5afaeae8b02c71c9f538f29a8))
+* support client Vite environment names other than `client` ([#459](https://github.com/telefunc/telefunc/issues/459)) ([18544d3](https://github.com/telefunc/telefunc/commit/18544d39cc6871edac72ebd6c91bc74d8652f894))
+
+
+
 ## [0.2.22](https://github.com/telefunc/telefunc/compare/v0.2.21...v0.2.22) (2026-07-08)
 
 

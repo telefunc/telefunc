@@ -10,7 +10,7 @@
     "next": "^15.3.3",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
-    "telefunc": "0.2.22"
+    "telefunc": "0.2.23"
   },
   "devDependencies": {
     "@types/node": "^24.0.1",
