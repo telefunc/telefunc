@@ -1,5 +1,4 @@
 export { isViteServerSide }
-export { isViteClientSide }
 export { isViteServerSide_viteEnvOptional }
 export { isViteServerSide_onlySsrEnv }
 export { isViteServerSide_extraSafe }
@@ -97,9 +96,4 @@ function isViteServerSide_configEnvironment(name: string, config: EnvironmentOpt
 }
 function isViteServerSide_consumer(consumer: string) {
   return consumer !== 'client'
-}
-
-// Telefunc only
-function isViteClientSide(configGlobal: ResolvedConfig, viteEnv: ViteEnv) {
-  return !isViteServerSide(configGlobal, viteEnv)
 }
