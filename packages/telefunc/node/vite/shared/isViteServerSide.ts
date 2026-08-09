@@ -1,17 +1,19 @@
 export { isViteServerSide }
 export { isViteClientSide }
-export { isViteServerSide_withoutEnv }
+export { isViteServerSide_viteEnvOptional }
 export { isViteServerSide_onlySsrEnv }
 export { isViteServerSide_extraSafe }
+export { isViteServerSide_applyToEnvironment }
+export { isViteServerSide_configEnvironment }
 export type { ViteEnv }
 
-import type { Environment, EnvironmentOptions, ResolvedConfig, UserConfig } from 'vite'
-import { assert } from '../../../utils/assert.js'
+import type { Environment, EnvironmentOptions, ResolvedConfig, UserConfig, Plugin } from 'vite'
+import { viteVersionMin } from '../../../utils/assertViteVersion.js'
+import { assert, assertUsage } from '../../../utils/assert.js'
 
 type ViteEnv = { name?: string; config: EnvironmentOptions | Environment['config'] }
 
-// Keep in sync with Vike: https://github.com/vikejs/vike/blob/main/packages/vike/src/node/vite/shared/isViteServerSide.ts
-function isViteServerSide_withoutEnv(configGlobal: ResolvedConfig | UserConfig, viteEnv?: ViteEnv): boolean {
+function isViteServerSide_impl(configGlobal: ResolvedConfig | UserConfig, viteEnv: ViteEnv | undefined): boolean {
   assert(!('consumer' in configGlobal)) // make sure configGlobal isn't viteEnv.config
   const debug = {
     viteEnvIsUndefined: !viteEnv,
@@ -27,8 +29,6 @@ function isViteServerSide_withoutEnv(configGlobal: ResolvedConfig | UserConfig, 
   } else {
     const isServerSide1: boolean | null = !viteEnv.config.consumer ? null : viteEnv.config.consumer !== 'client'
     const isServerSide2: boolean | null = getBuildSsrValue(viteEnv.config.build?.ssr)
-    // Environment names are arbitrary — e.g. vite-plugin-vercel uses `vercel_client` for a
-    // client-side environment — so the name is only used as an assertion, never as the source of truth.
     const isServerSide3: boolean | null = viteEnv.name === 'ssr' ? true : viteEnv.name === 'client' ? false : null
     const isServerSide = isServerSide1 ?? isServerSide2
     assert(isServerSide === isServerSide1 || isServerSide1 === null, debug)
@@ -45,11 +45,13 @@ function getBuildSsrValue(buildSsr: string | boolean | undefined): boolean | nul
 }
 
 function isViteServerSide(configGlobal: ResolvedConfig | UserConfig, viteEnv: ViteEnv) {
-  return isViteServerSide_withoutEnv(configGlobal, viteEnv)
+  return isViteServerSide_impl(configGlobal, viteEnv)
 }
-
-function isViteClientSide(configGlobal: ResolvedConfig, viteEnv: ViteEnv) {
-  return !isViteServerSide(configGlobal, viteEnv)
+function isViteServerSide_viteEnvOptional(
+  configGlobal: ResolvedConfig | UserConfig,
+  viteEnv?: ViteEnv | undefined,
+): boolean {
+  return isViteServerSide_impl(configGlobal, viteEnv)
 }
 
 // Only `ssr` env: for example don't include `vercel_edge` nor `vercel_node`.
@@ -60,22 +62,44 @@ function isViteServerSide_onlySsrEnv(configGlobal: ResolvedConfig, viteEnv: Vite
 // Vite is quite messy about setting config.build.ssr — for security purposes, we use an extra safe implementation with lots of assertions, which is needed for the .client.js and .server.js guarantee.
 function isViteServerSide_extraSafe(
   config: ResolvedConfig,
-  options: { ssr?: boolean } | undefined,
   viteEnv: ViteEnv,
+  options: { ssr?: boolean } | undefined,
 ): boolean {
-  if (config.command === 'build') {
-    const res = config.build.ssr
-    assert(typeof res === 'boolean')
-    assert(res === options?.ssr || options?.ssr === undefined)
-    assert(res === isViteServerSide(config, viteEnv))
-    return res
-  } else {
-    const res = options?.ssr
-    assert(typeof res === 'boolean')
-    /* This assertion can fail, seems to be a Vite bug? It's very unexpected.
-    if (typeof config.build.ssr === 'boolean') assert(res === config.build.ssr)
-    */
-    assert(res === isViteServerSide(config, viteEnv))
-    return res
+  const isServerSide = isViteServerSide(config, viteEnv)
+  const debug = {
+    isServerSide,
+    configCommand: config.command,
+    configBuildSsr: getBuildSsrValue(config.build.ssr),
+    optionsIsUndefined: options === undefined,
+    optionsSsr: options?.ssr ?? null,
   }
+  assert(options, debug)
+  /* TO-DO/eventually: use internal assert() instead of assertUsage() once we can use this.meta.viteVersion — see utils/assertViteVersion.ts
+  assert(typeof options.ssr === 'boolean', debug)
+  /*/
+  assertUsage(
+    typeof options.ssr === 'boolean',
+    `You're using an old Vite version — update Vite to ${viteVersionMin} or above.`,
+  )
+  //*/
+  assert(options.ssr === isServerSide, debug)
+  return isServerSide
+}
+
+type PartialEnvironment = Parameters<NonNullable<Plugin['applyToEnvironment']>>[0]
+function isViteServerSide_applyToEnvironment(env: PartialEnvironment) {
+  const { consumer } = env.config
+  return isViteServerSide_consumer(consumer)
+}
+function isViteServerSide_configEnvironment(name: string, config: EnvironmentOptions) {
+  const consumer = config.consumer ?? (name === 'client' ? 'client' : 'server')
+  return isViteServerSide_consumer(consumer)
+}
+function isViteServerSide_consumer(consumer: string) {
+  return consumer !== 'client'
+}
+
+// Telefunc only
+function isViteClientSide(configGlobal: ResolvedConfig, viteEnv: ViteEnv) {
+  return !isViteServerSide(configGlobal, viteEnv)
 }
