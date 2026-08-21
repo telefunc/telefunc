@@ -1,3 +1,13 @@
+## [0.2.24](https://github.com/telefunc/telefunc/compare/v0.2.23...v0.2.24) (2026-08-21)
+
+
+### Bug Fixes
+
+* @brillout/vite-plugin-server-entry@^0.7.20 ([16ccec6](https://github.com/telefunc/telefunc/commit/16ccec609e3ddf1797afd171d92e7119d91d6e02))
+* show usage error for re-exports in .telefunc files ([#462](https://github.com/telefunc/telefunc/issues/462)) ([#463](https://github.com/telefunc/telefunc/issues/463)) ([9407f08](https://github.com/telefunc/telefunc/commit/9407f08152835aafbd9a6765ff66700542824a74))
+
+
+
 ## [0.2.23](https://github.com/telefunc/telefunc/compare/v0.2.22...v0.2.23) (2026-08-09)
 
 
