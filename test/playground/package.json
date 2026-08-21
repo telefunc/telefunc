@@ -13,7 +13,7 @@
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
     "telefunc": "workspace:*",
-    "typescript": "^6.0.3",
+    "typescript": "^7.0.2",
     "vike": "^0.4.259",
     "vike-react": "^0.6.21",
     "vite": "^8.0.16"
