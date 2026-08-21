@@ -8,7 +8,7 @@ import { Project, SourceFile, Type, TypeAliasDeclaration, getCompilerOptionsFrom
 import { toPathKey } from '../../../../utils/pathKey.js'
 import { assert, assertUsage, assertWarning } from '../../../../utils/assert.js'
 import { assertModuleScope } from '../../../../utils/assertModuleScope.js'
-import { getRandomId } from '../../../../utils/getRandomId.js'
+import { genRandomId } from '../../../../utils/genRandomId.js'
 import { objectAssign } from '../../../../utils/objectAssign.js'
 import { unique } from '../../../../utils/unique.js'
 import { type ExportList, getExportList } from '../getExportList.js'
@@ -361,7 +361,7 @@ function formatEntries(
 }
 
 async function testGenerateShield(telefuncFileCode: string): Promise<string> {
-  const telefuncFilePath = path.join(__dirname_, `virtual-${getRandomId()}.telefunc.ts`)
+  const telefuncFilePath = path.join(__dirname_, `virtual-${genRandomId()}.telefunc.ts`)
   const { project, shieldGenSource, shieldsEscapedName } = getProject(
     telefuncFilePath,
     telefuncFileCode,
