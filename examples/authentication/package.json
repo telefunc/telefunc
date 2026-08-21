@@ -22,7 +22,7 @@
     "react-streaming": "^0.4.17",
     "telefunc": "0.2.23",
     "ts-node": "^10.9.2",
-    "typescript": "^7.0.2",
+    "typescript": "^6.0.3",
     "vike": "^0.4.259",
     "vike-node": "^0.3.7",
     "vite": "^8.0.16"

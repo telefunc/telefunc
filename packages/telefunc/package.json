@@ -125,7 +125,7 @@
     "next": "^15.3.4",
     "react": "^19.2.4",
     "react-streaming": "^0.4.17",
-    "typescript": "^7.0.2",
+    "typescript": "^6.0.3",
     "vite": "^8.0.16"
   },
   "peerDependencies": {
