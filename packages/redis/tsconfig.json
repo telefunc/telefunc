@@ -1,6 +1,7 @@
 {
   "compilerOptions": {
     "outDir": "./dist/",
+    "rootDir": "./src",
     "target": "ES2019",
     "module": "Node16",
     "moduleResolution": "Node16",

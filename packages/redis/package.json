@@ -31,6 +31,6 @@
   "devDependencies": {
     "ioredis": "5.10.1",
     "telefunc": "workspace:*",
-    "typescript": "^5.9.2"
+    "typescript": "^7.0.2"
   }
 }
