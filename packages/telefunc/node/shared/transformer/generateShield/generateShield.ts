@@ -369,7 +369,7 @@ async function testGenerateShield(telefuncFileCode: string): Promise<string> {
     true,
   )
   objectAssign(project, { tsConfigFilePath: null })
-  const exportList = await getExportList(telefuncFileCode)
+  const exportList = await getExportList(telefuncFileCode, telefuncFilePath)
   const shieldCode = generateShieldCode({
     project,
     shieldGenSource,
