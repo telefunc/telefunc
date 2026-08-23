@@ -38,6 +38,16 @@
     "enabled": true,
     "clientKind": "git"
   },
+  "overrides": [
+    {
+      "include": ["tsconfig.json", "tsconfig.*.json"],
+      "json": {
+        "parser": {
+          "allowComments": true
+        }
+      }
+    }
+  ],
   "css": {
     "formatter": {
       "quoteStyle": "single"

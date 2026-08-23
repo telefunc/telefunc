@@ -11,10 +11,12 @@
     "test:docker": "vike build && docker compose down --remove-orphans && docker compose up --force-recreate 2>&1; code=$?; if [ \"$code\" = \"130\" ] || [ \"$code\" = \"143\" ]; then exit 0; fi; exit $code"
   },
   "dependencies": {
+    "@electric-sql/pglite": "0.5.4",
     "@tailwindcss/vite": "^4.2.1",
     "@tanstack/ai": "^0.13.0",
     "@tanstack/ai-react": "^0.7.7",
     "@tanstack/react-query": "^5.95.2",
+    "@telefunc/drizzle-experimental": "workspace:*",
     "@telefunc/redis": "workspace:*",
     "@telefunc/rxjs": "workspace:*",
     "@telefunc/tanstack-query": "workspace:*",
@@ -23,6 +25,7 @@
     "@universal-middleware/core": "^0.4.17",
     "@vikejs/hono": "^0.2.0",
     "@vitejs/plugin-react": "^6.0.2",
+    "drizzle-orm": "1.0.0-rc.4",
     "hono": "^4.10.4",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
