@@ -1,4 +1,4 @@
-export { StreamReader }
+export { StreamReader, OversizeFrameError, StreamTruncatedError }
 
 import type { Readable } from 'node:stream'
 import { assert, assertUsage, assertWarning } from '../../../utils/assert.js'
@@ -7,6 +7,12 @@ import { decodeU32 } from '../../frame.js'
 /** Shared sentinel — avoids zero-length subarray views that pin large ArrayBuffers. */
 const EMPTY = new Uint8Array(0)
 const DISCONNECT_MSG = 'Client disconnected during file upload'
+
+class OversizeFrameError extends Error {}
+
+/** The request body ended mid-frame — the client disconnected or truncated the upload. Typed so error
+ *  sinks discriminate an expected client truncation from a real server bug by class, not message text. */
+class StreamTruncatedError extends Error {}
 
 /**
  * Pull-based byte-counting stream reader for the binary frame protocol.
@@ -43,23 +49,18 @@ class StreamReader {
     this.source = (source as AsyncIterable<Uint8Array<ArrayBuffer>>)[Symbol.asyncIterator]()
   }
 
-  /** Read the metadata: [u32 big-endian length][UTF-8 bytes]. */
-  async readMetadata() {
+  async readMetadata(maxBytes: number) {
     const length = await this.readU32()
+    if (length > maxBytes) throw new OversizeFrameError()
     return new TextDecoder().decode(await this.readExact(length))
   }
 
-  /** Read one length-prefixed chunk, or null if the stream is cleanly exhausted. */
-  async readLengthPrefixedBytesOrNull() {
+  async readLengthPrefixedBytesOrNull(maxBytes: number) {
     const lengthBytes = await this.readExactOrNull(4)
     if (!lengthBytes) return null
-    return this.readExact(decodeU32(lengthBytes))
-  }
-
-  /** Ensure no trailing bytes remain. */
-  async assertDone() {
-    const chunk = await this.pullChunk()
-    assert(chunk === null && this.buffer.length === 0, 'Malformed request body')
+    const length = decodeU32(lengthBytes)
+    if (length > maxBytes) throw new OversizeFrameError()
+    return this.readExact(length)
   }
 
   /** Register a file's size (called during deserialization). */
@@ -119,7 +120,7 @@ class StreamReader {
           const chunk = await this.pullChunk()
           if (!chunk) {
             remaining = 0
-            controller.error(new Error(DISCONNECT_MSG))
+            controller.error(new StreamTruncatedError(DISCONNECT_MSG))
             return
           }
           const take = Math.min(chunk.length, remaining)
@@ -183,7 +184,7 @@ class StreamReader {
   private async readExact(n: number) {
     while (this.buffer.length < n) {
       const chunk = await this.pullChunk()
-      if (!chunk) throw new Error(DISCONNECT_MSG)
+      if (!chunk) throw new StreamTruncatedError(DISCONNECT_MSG)
       this.buffer = this.buffer.length === 0 ? chunk : concat(this.buffer, chunk)
     }
     const result = this.buffer.subarray(0, n)
@@ -208,7 +209,7 @@ class StreamReader {
     if (buffered) remaining -= buffered.length
     while (remaining > 0) {
       const chunk = await this.pullChunk()
-      if (!chunk) throw new Error(DISCONNECT_MSG)
+      if (!chunk) throw new StreamTruncatedError(DISCONNECT_MSG)
       remaining -= chunk.length
       if (remaining < 0) this.buffer = chunk.subarray(chunk.length + remaining)
     }

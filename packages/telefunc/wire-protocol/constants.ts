@@ -1,3 +1,5 @@
+import { assert } from '../utils/assert.js'
+
 export const SERIALIZER_PREFIX_FILE = '!TelefuncFile:'
 export const SERIALIZER_PREFIX_BLOB = '!TelefuncBlob:'
 export const SERIALIZER_PREFIX_FILE_DOWNLOAD = '!TelefuncFileDownload:'
@@ -79,13 +81,30 @@ export const WS_PROBE_TIMEOUT_MS = 3_000
  *  before declaring the upstream wire dead and falling back to outbox+batch POSTs. */
 export const STREAM_REQUEST_HANDSHAKE_TIMEOUT_MS = 3_000
 
-/** How long phase 1 of the upgrade drain waits for natural SSE outbox drain before
- *  phase 2 gates the producer and forces the cutover. */
 export const UPGRADE_DRAIN_TIMEOUT_MS = 2_000
 
-/** How long the client waits for RECONCILED on the new wire after FIN arrives on the old
- *  wire (cross-wire reordering can deliver FIN first) before aborting the upgrade. */
-export const UPGRADE_FIN_RECONCILED_TIMEOUT_MS = 2_000
+export const UPGRADE_HANDOFF_JOIN_TIMEOUT_MS = 2_000
+
+export const UPGRADE_HANDOFF_BUFFER_BYTES = 8 * 1024 * 1024
+export const UPGRADE_HANDOFF_BUFFER_FRAMES = 4_096
+
+export const UPGRADE_ATTEMPT_TIMEOUT_MS = 10_000
+
+export const UPGRADE_STAGE_TTL_MS = 10_000
+
+export const UPGRADE_MAX_FRAME_BYTES = 256 * 1024
+export const UPGRADE_MAX_OPEN_ENTRIES = 1_024
+export const UPGRADE_MAX_ID_BYTES = 256
+
+export const UPGRADE_MAX_STAGED_RECORDS = 1_024
+export const UPGRADE_MAX_STAGED_BYTES = 64 * 1024 * 1024
+
+export const WIRE_MAX_RAW_FRAME_BYTES = 64 * 1024 * 1024
+
+export const WIRE_MAX_RECV_BACKLOG_BYTES = 64 * 1024 * 1024
+export const WIRE_MAX_RECV_BACKLOG_FRAMES = 50_000
+
+export const SSE_METADATA_MAX_BYTES = 64 * 1024
 
 /** How long the client waits for RECONCILED after sending a RECONCILE before declaring the
  *  wire dead and reconnecting. A downstream that stalls without erroring (bytes stop, no FIN)
@@ -93,6 +112,8 @@ export const UPGRADE_FIN_RECONCILED_TIMEOUT_MS = 2_000
  *  is suppressed while reconciling, so nothing notices the dead wire and every call buffered
  *  behind the un-acked RECONCILE hangs. */
 export const RECONCILE_TIMEOUT_MS = 10_000
+
+assert(UPGRADE_ATTEMPT_TIMEOUT_MS <= RECONCILE_TIMEOUT_MS)
 
 // ===== Multiplexed SSE transport =====
 

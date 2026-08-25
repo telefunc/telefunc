@@ -39,8 +39,16 @@ import { ServerChannelBuffer } from './ServerChannelBuffer.js'
 import { ReplayBuffer } from '../replay-buffer.js'
 import { getServerConfig } from '../../node/server/serverConfig.js'
 import { assert } from '../../utils/assert.js'
-import { ACK_STATUS, TAG, isChannelCtrlTag } from '../shared-ws.js'
+import { ACK_STATUS, ProtocolViolationError, TAG, isChannelCtrlTag } from '../shared-ws.js'
 import type { AckResultStatus, ChannelCtrlFrame, ChannelDataFrame, ChannelFrame } from '../shared-ws.js'
+
+function parsePeerText(text: string): unknown {
+  try {
+    return parse(text)
+  } catch {
+    throw new ProtocolViolationError()
+  }
+}
 
 class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   implements Channel<ClientToServer, ServerToClient>
@@ -428,7 +436,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     const t0 = performance.now()
     try {
       this._flow.onReceived(bytes)
-      const data = parse(text) as ChannelData<ClientToServer>
+      const data = parsePeerText(text) as ChannelData<ClientToServer>
       const validateData = this._validators.get('data')
       // Shield fail on a no-ack message: silent drop (validator auto-logs). The client doesn't
       // await a response, so there's no `ShieldValidationError` to surface — listeners simply
@@ -462,7 +470,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   }
 
   _onPeerAckReqMessage(text: string, seq: number): Promise<void> {
-    return this._trackAck(this._dispatchAckReq(text, seq))
+    return this._trackAck(this._dispatchAckReq(parsePeerText(text) as ChannelData<ClientToServer>, seq))
   }
 
   _onPeerBinaryAckReqMessage(data: Uint8Array, seq: number): Promise<void> {
@@ -498,31 +506,40 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   _onPeerAckRes(ackedSeq: number, resultText: string, status: AckResultStatus = ACK_STATUS.OK): void {
     const pending = this._pendingAcks.get(ackedSeq)
     if (!pending) return
-    this._pendingAcks.delete(ackedSeq)
-    switch (status) {
-      case ACK_STATUS.OK: {
-        const parsed = parse(resultText) as ChannelAck<ServerToClient>
-        const validateAck = this._validators.get('ack')
-        if (validateAck) {
-          const result = validateAck(parsed)
-          // Server-declared ack shield rejected the peer's response — same class as every
-          // other shield-fail surface, so user code can catch with `isShieldValidationError`.
-          if (result !== true) {
-            pending.reject(new ShieldValidationError(result))
-            return
+    try {
+      switch (status) {
+        case ACK_STATUS.OK: {
+          const parsed = parsePeerText(resultText) as ChannelAck<ServerToClient>
+          const validateAck = this._validators.get('ack')
+          if (validateAck) {
+            const result = validateAck(parsed)
+            // Server-declared ack shield rejected the peer's response — same class as every
+            // other shield-fail surface, so user code can catch with `isShieldValidationError`.
+            if (result !== true) {
+              pending.reject(new ShieldValidationError(result))
+              return
+            }
           }
+          pending.resolve(parsed)
+          return
         }
-        pending.resolve(parsed)
-        return
+        case ACK_STATUS.ABORT:
+          pending.reject(createAbortError(parsePeerText(resultText)))
+          return
+        case ACK_STATUS.ERROR:
+          pending.reject(new Error(resultText || 'Internal client channel error — see client logs'))
+          return
+        case ACK_STATUS.SHIELD_ERROR:
+          pending.reject(new ShieldValidationError(resultText))
+          return
+        default:
+          throw new ProtocolViolationError()
       }
-      case ACK_STATUS.ABORT:
-        pending.reject(createAbortError(parse(resultText)))
-        return
-      case ACK_STATUS.ERROR:
-        pending.reject(new Error(resultText || 'Internal client channel error — see client logs'))
-        return
-      case ACK_STATUS.SHIELD_ERROR:
-        pending.reject(new ShieldValidationError(resultText))
+    } catch (err) {
+      pending.reject(err instanceof Error ? err : new Error(String(err)))
+      throw err
+    } finally {
+      this._pendingAcks.delete(ackedSeq)
     }
   }
 
@@ -631,12 +648,11 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     for (const waiter of waiters) waiter()
   }
 
-  private async _dispatchAckReq(text: string, seq: number): Promise<void> {
+  private async _dispatchAckReq(data: ChannelData<ClientToServer>, seq: number): Promise<void> {
     if (this._listeners.length === 0) {
       this._sendAckRes(seq, 'No listener registered for ack request', ACK_STATUS.ERROR)
       return
     }
-    const data = parse(text) as ChannelData<ClientToServer>
     const validateData = this._validators.get('data')
     if (validateData) {
       const result = validateData(data)

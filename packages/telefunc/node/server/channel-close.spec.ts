@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'vitest'
 
 import { ReplayBuffer } from '../../wire-protocol/replay-buffer.js'
-import { TAG, decode } from '../../wire-protocol/shared-ws.js'
+import { ACK_STATUS, ProtocolViolationError, TAG, decode } from '../../wire-protocol/shared-ws.js'
 import { IndexedPeer } from '../../wire-protocol/server/IndexedPeer.js'
 import { ServerChannel } from '../../wire-protocol/server/channel.js'
 
@@ -34,6 +34,19 @@ function expectCloseAckFrame(frame: Uint8Array) {
 // ── Self-initiated close ──
 
 describe('self-initiated close', () => {
+  test.each([ACK_STATUS.OK, ACK_STATUS.ABORT])('malformed ack status %s rejects its waiter', async (status) => {
+    const channel = new ServerChannel<string, string>({ ack: true })
+    const frames: Uint8Array[] = []
+    channel._attachPeer(createPeer(frames))
+    const pending = channel.send('hello', { ack: true })
+    const frame = decode(frames[0]!)
+    if (frame.tag !== TAG.TEXT_ACK_REQ) throw new Error('Expected TEXT_ACK_REQ')
+
+    expect(() => channel._onPeerAckRes(frame.seq, '{', status)).toThrow(ProtocolViolationError)
+
+    await expect(pending).rejects.toBeInstanceOf(ProtocolViolationError)
+  })
+
   test('isClosed=true on close(); onClose fires after close-ack roundtrip', async () => {
     const channel = new ServerChannel<number, never>({ id: crypto.randomUUID() })
     const frames: Uint8Array[] = []

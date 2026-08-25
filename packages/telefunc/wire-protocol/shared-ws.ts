@@ -3,6 +3,8 @@ export {
   ACK_STATUS,
   encode,
   decode,
+  decodeClientFrame,
+  ProtocolViolationError,
   isChannelCtrlTag,
   isChannelDataFrame,
   isConnCtrlTag,
@@ -20,7 +22,8 @@ export type {
   ChannelDataFrame,
   ReconcilePayload,
   ReconciledPayload,
-  ServerCtrlTag,
+  PreparePayload,
+  ReadyPayload,
   WirePublishInfo,
 }
 
@@ -45,7 +48,7 @@ import type { ChannelTransports } from './constants.js'
 // Sequence numbers are sender-assigned for replayable data frames in both directions.
 // Each side tracks the highest seq received and replays after reconnect via reconcile.
 
-export const HEADER = 7
+const HEADER = 7
 const payloadBytes = (frame: Uint8Array): number => frame.byteLength - HEADER
 const DATA_TAG_MIN = 0x10
 
@@ -71,6 +74,8 @@ const TAG = {
    *  within `STREAM_REQUEST_HANDSHAKE_TIMEOUT_MS` before declaring the transport open —
    *  confirms the half-duplex streaming wire round-trips end-to-end. */
   STREAM_REQUEST_OPEN_ACK: 0x06 as const,
+  PREPARE: 0x07 as const,
+  READY: 0x08 as const,
 
   // ─── Data plane ───
   TEXT: 0x10 as const,
@@ -125,15 +130,21 @@ function isChannelDataFrame(frame: DecodedFrame): frame is ChannelDataFrame {
 
 type ReconcilePayload = {
   sessionId?: string
-  /** Set when the client is upgrading from SSE to WS and has kept SSE alive.
-   *  Server should drain the SSE send chain before replaying and attaching. */
-  upgrade?: true
   /** `initial: true` means this is the first reconcile for that channel — the server may
    *  not have created it yet (late-creation race during request body parse), so the server
    *  should wait up to `connectTtl` for it. Established channels (already reconciled at
    *  least once) omit `initial`; the server fails them fast if they're missing rather than
    *  stalling the entire reconcile. */
   open: { id: string; ix: number; lastSeq: number; initial?: true }[]
+} & ({ barrier?: undefined; upgradeId?: undefined } | { barrier: true; upgradeId: string })
+
+type PreparePayload = {
+  upgradeId: string
+  sessionId: string
+}
+
+type ReadyPayload = {
+  upgradeId: string
 }
 
 /** Per-channel acknowledgment: the server confirms each `ix` it attached and tells the
@@ -149,6 +160,7 @@ type ReconciledPayload = {
   sseFlushThrottle: number
   ssePostIdleFlushDelay: number
   transports: ChannelTransports
+  upgradeId?: string
 }
 
 /** Ack result outcome on the wire — same byte value in memory and on the wire.
@@ -204,19 +216,8 @@ type ConnCtrlFrame =
   | { tag: typeof TAG.RECONCILE; payload: ReconcilePayload }
   | { tag: typeof TAG.RECONCILED; payload: ReconciledPayload }
   | { tag: typeof TAG.STREAM_REQUEST_OPEN_ACK }
-
-/** Ctrl frame tags the client receives from the server. */
-type ServerCtrlTag =
-  | typeof TAG.CLOSE
-  | typeof TAG.CLOSE_ACK
-  | typeof TAG.ABORT
-  | typeof TAG.ERROR
-  | typeof TAG.WINDOW
-  | typeof TAG.MSG_WINDOW
-  | typeof TAG.BDP_PING
-  | typeof TAG.BDP_PING_ACK
-  | typeof TAG.FIN
-  | typeof TAG.RECONCILED
+  | { tag: typeof TAG.PREPARE; payload: PreparePayload }
+  | { tag: typeof TAG.READY; payload: ReadyPayload }
 
 type DecodedFrame = ChannelFrame | ConnCtrlFrame
 
@@ -315,6 +316,8 @@ const encode = {
   reconcile: (payload: ReconcilePayload) => encodeJsonFrame(TAG.RECONCILE, payload),
   reconciled: (payload: ReconciledPayload) => encodeJsonFrame(TAG.RECONCILED, payload),
   streamRequestOpenAck: () => encodeBareFrame(TAG.STREAM_REQUEST_OPEN_ACK),
+  prepare: (payload: PreparePayload) => encodeJsonFrame(TAG.PREPARE, payload),
+  ready: (payload: ReadyPayload) => encodeJsonFrame(TAG.READY, payload),
 
   // ── Per-channel ctrls ──
   close(index: number, timeoutMs: number): Uint8Array<ArrayBuffer> {
@@ -416,6 +419,10 @@ function decode(frame: Uint8Array): DecodedFrame {
       return { tag: TAG.RECONCILED, payload: JSON.parse(textDecoder.decode(payload)) as ReconciledPayload }
     case TAG.STREAM_REQUEST_OPEN_ACK:
       return { tag: TAG.STREAM_REQUEST_OPEN_ACK }
+    case TAG.PREPARE:
+      return { tag: TAG.PREPARE, payload: JSON.parse(textDecoder.decode(payload)) as PreparePayload }
+    case TAG.READY:
+      return { tag: TAG.READY, payload: JSON.parse(textDecoder.decode(payload)) as ReadyPayload }
 
     case TAG.CLOSE:
       assert(payload.length >= 4, 'CLOSE payload too short')
@@ -446,6 +453,83 @@ function decode(frame: Uint8Array): DecodedFrame {
     default:
       assert(false, `Unknown wire frame tag ${tag}`)
   }
+}
+
+class ProtocolViolationError extends Error {
+  constructor(readonly target?: unknown) {
+    super()
+  }
+}
+
+const CLIENT_TAGS: ReadonlySet<number> = new Set([
+  TAG.PING,
+  TAG.RECONCILE,
+  TAG.PREPARE,
+  TAG.TEXT,
+  TAG.BINARY,
+  TAG.TEXT_ACK_REQ,
+  TAG.BINARY_ACK_REQ,
+  TAG.ACK_RES,
+  TAG.PUBLISH_ACK_REQ,
+  TAG.PUBLISH_BINARY_ACK_REQ,
+  TAG.CLOSE,
+  TAG.CLOSE_ACK,
+  TAG.WINDOW,
+  TAG.MSG_WINDOW,
+  TAG.BDP_PING,
+  TAG.BDP_PING_ACK,
+  TAG.BROADCAST_SUB,
+  TAG.BROADCAST_UNSUB,
+])
+
+function decodeClientFrame(raw: Uint8Array<ArrayBuffer>, maxPrepareBytes: number): DecodedFrame {
+  if (raw[0] === TAG.PREPARE && raw.byteLength > maxPrepareBytes) throw new ProtocolViolationError()
+  let frame: DecodedFrame
+  try {
+    frame = decode(raw)
+  } catch {
+    throw new ProtocolViolationError()
+  }
+  if (!CLIENT_TAGS.has(frame.tag)) throw new ProtocolViolationError()
+  if (frame.tag === TAG.PREPARE) validatePrepare(frame.payload)
+  if (frame.tag === TAG.RECONCILE) validateReconcile(frame.payload)
+  return frame
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0
+}
+
+function assertObjectPayload(payload: unknown): void {
+  if (payload === null || typeof payload !== 'object') throw new ProtocolViolationError()
+}
+
+function validatePrepare(payload: PreparePayload): void {
+  assertObjectPayload(payload)
+  const p = payload as { upgradeId?: unknown; sessionId?: unknown }
+  if (!isNonEmptyString(p.upgradeId)) throw new ProtocolViolationError()
+  if (!isNonEmptyString(p.sessionId)) throw new ProtocolViolationError()
+}
+
+function validateReconcile(payload: ReconcilePayload): void {
+  assertObjectPayload(payload)
+  const p = payload as { open?: unknown; sessionId?: unknown; barrier?: unknown; upgradeId?: unknown }
+  if (!Array.isArray(p.open)) throw new ProtocolViolationError()
+  const indexes = new Set<number>()
+  for (const entry of p.open) {
+    if (typeof entry?.id !== 'string') throw new ProtocolViolationError()
+    if (!Number.isInteger(entry.ix) || entry.ix < 0 || entry.ix > 0xffff || indexes.has(entry.ix))
+      throw new ProtocolViolationError()
+    indexes.add(entry.ix)
+    if (!Number.isInteger(entry.lastSeq) || entry.lastSeq < 0 || entry.lastSeq > 0xffffffff)
+      throw new ProtocolViolationError()
+    if (entry.initial !== undefined && entry.initial !== true) throw new ProtocolViolationError()
+  }
+  if (p.sessionId !== undefined && !isNonEmptyString(p.sessionId)) throw new ProtocolViolationError()
+  if (p.barrier === undefined && p.upgradeId === undefined) return
+  if (p.barrier !== true) throw new ProtocolViolationError()
+  if (!isNonEmptyString(p.upgradeId)) throw new ProtocolViolationError()
+  if (!isNonEmptyString(p.sessionId)) throw new ProtocolViolationError()
 }
 
 // ===== Publish info helpers =====
