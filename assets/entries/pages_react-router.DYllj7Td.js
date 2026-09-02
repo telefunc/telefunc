@@ -1,0 +1,12 @@
+import{n as e}from"../chunks/chunk-QTnfLwEv.js";import{N as t,i as n}from"../chunks/chunk-CINPQgwY.js";import{n as r,t as i}from"../chunks/chunk-B8X3DK4-.js";import{i as a}from"../chunks/chunk-COnXdaEI.js";var o=e({default:()=>u,pageSectionsExport:()=>c}),s=t(),c=[];function l(e){let t={a:`a`,li:`li`,p:`p`,ul:`ul`,...n(),...e.components};return(0,s.jsxs)(s.Fragment,{children:[(0,s.jsxs)(t.p,{children:[`Example of using Telefunc with `,(0,s.jsx)(t.a,{href:`https://reactrouter.com`,children:`React Router`}),`:`]}),`
+`,(0,s.jsxs)(t.ul,{children:[`
+`,(0,s.jsxs)(t.li,{children:[`
+`,(0,s.jsx)(a,{timestamp:`09.2025`,repo:`arnaudsm/telefunc-react-router-demo`}),`
+`]}),`
+`]}),`
+`,(0,s.jsxs)(t.p,{children:[`Example with `,(0,s.jsx)(t.a,{href:`https://remix.run`,children:`Remix`}),` (React Router was `,(0,s.jsx)(t.a,{href:`https://remix.run/blog/merging-remix-and-react-router`,children:`formerly known as Remix`}),`):`]}),`
+`,(0,s.jsxs)(t.ul,{children:[`
+`,(0,s.jsxs)(t.li,{children:[`
+`,(0,s.jsx)(a,{timestamp:`06.2024`,repo:`overshom/remix-telefunc-demo`}),`
+`]}),`
+`]})]})}function u(e={}){let{wrapper:t}={...n(),...e.components};return t?(0,s.jsx)(t,{...e,children:(0,s.jsx)(l,{...e})}):l(e)}var d={hasServerOnlyHook:{type:`computed`,definedAtData:null,valueSerialized:{type:`js-serialized`,value:!1}},isClientRuntimeLoaded:{type:`computed`,definedAtData:null,valueSerialized:{type:`js-serialized`,value:!0}},onBeforeRenderEnv:{type:`computed`,definedAtData:null,valueSerialized:{type:`js-serialized`,value:null}},dataEnv:{type:`computed`,definedAtData:null,valueSerialized:{type:`js-serialized`,value:null}},guardEnv:{type:`computed`,definedAtData:null,valueSerialized:{type:`js-serialized`,value:null}},onRenderClient:{type:`standard`,definedAtData:{filePathToShowToUser:`@brillout/docpress/renderer/onRenderClient`,fileExportPathToShowToUser:[]},valueSerialized:{type:`pointer-import`,value:r}},onCreatePageContext:{type:`cumulative`,definedAtData:[{filePathToShowToUser:`@brillout/docpress/renderer/onCreatePageContext`,fileExportPathToShowToUser:[]}],valueSerialized:[{type:`pointer-import`,value:i}]},Page:{type:`standard`,definedAtData:{filePathToShowToUser:`/pages/react-router/+Page.mdx`,fileExportPathToShowToUser:[]},valueSerialized:{type:`plus-file`,exportValues:o}},hydrationCanBeAborted:{type:`standard`,definedAtData:{filePathToShowToUser:`@brillout/docpress/config`,fileExportPathToShowToUser:[`default`,`hydrationCanBeAborted`]},valueSerialized:{type:`js-serialized`,value:!0}}};export{d as configValuesSerialized};

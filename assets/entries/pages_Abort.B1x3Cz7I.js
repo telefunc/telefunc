@@ -1,0 +1,15 @@
+import{n as e}from"../chunks/chunk-QTnfLwEv.js";import{N as t,i as n,v as r}from"../chunks/chunk-CINPQgwY.js";import{n as i,t as a}from"../chunks/chunk-B8X3DK4-.js";var o=e({default:()=>u,pageSectionsExport:()=>c}),s=t(),c=[{pageSectionId:`see-also`,pageSectionLevel:2,pageSectionTitle:`See also`}];function l(e){let t={blockquote:`blockquote`,code:`code`,li:`li`,p:`p`,strong:`strong`,ul:`ul`,...n(),...e.components};return(0,s.jsxs)(s.Fragment,{children:[(0,s.jsxs)(t.p,{children:[(0,s.jsx)(t.strong,{children:`Environment`}),`: server.`]}),`
+`,(0,s.jsxs)(t.p,{children:[`Use `,(0,s.jsx)(t.code,{children:`throw Abort()`}),` to implement permissions and other guards, see `,(0,s.jsx)(r,{href:`/permissions`}),`.`]}),`
+`,(0,s.jsxs)(t.blockquote,{children:[`
+`,(0,s.jsxs)(t.p,{children:[(0,s.jsx)(t.code,{children:`Abort`}),` is Telefunc's way of identifying expected errors, and passing error data to the client. Other errors (e.g., `,(0,s.jsx)(t.code,{children:`throw new Error()`}),`) are treated as unexpected (bugs), see `,(0,s.jsx)(r,{href:`/abort-vs-error`}),`.`]}),`
+`]}),`
+`,(0,s.jsxs)(t.p,{children:[`You can also call `,(0,s.jsx)(t.code,{children:`throw Abort(someValue)`}),` for implementing `,(0,s.jsx)(t.code,{children:`getContext()`}),` wrappers, see `,(0,s.jsx)(r,{href:`/permissions#getcontext-wrapping`,doNotInferSectionTitle:!0}),`.`]}),`
+`,(0,s.jsx)(`h2`,{id:`see-also`,children:`See also`}),`
+`,(0,s.jsxs)(t.ul,{children:[`
+`,(0,s.jsxs)(t.li,{children:[`
+`,(0,s.jsx)(r,{href:`/permissions`}),`
+`]}),`
+`,(0,s.jsxs)(t.li,{children:[`
+`,(0,s.jsx)(r,{href:`/onAbort`}),`
+`]}),`
+`]})]})}function u(e={}){let{wrapper:t}={...n(),...e.components};return t?(0,s.jsx)(t,{...e,children:(0,s.jsx)(l,{...e})}):l(e)}var d={hasServerOnlyHook:{type:`computed`,definedAtData:null,valueSerialized:{type:`js-serialized`,value:!1}},isClientRuntimeLoaded:{type:`computed`,definedAtData:null,valueSerialized:{type:`js-serialized`,value:!0}},onBeforeRenderEnv:{type:`computed`,definedAtData:null,valueSerialized:{type:`js-serialized`,value:null}},dataEnv:{type:`computed`,definedAtData:null,valueSerialized:{type:`js-serialized`,value:null}},guardEnv:{type:`computed`,definedAtData:null,valueSerialized:{type:`js-serialized`,value:null}},onRenderClient:{type:`standard`,definedAtData:{filePathToShowToUser:`@brillout/docpress/renderer/onRenderClient`,fileExportPathToShowToUser:[]},valueSerialized:{type:`pointer-import`,value:i}},onCreatePageContext:{type:`cumulative`,definedAtData:[{filePathToShowToUser:`@brillout/docpress/renderer/onCreatePageContext`,fileExportPathToShowToUser:[]}],valueSerialized:[{type:`pointer-import`,value:a}]},Page:{type:`standard`,definedAtData:{filePathToShowToUser:`/pages/Abort/+Page.mdx`,fileExportPathToShowToUser:[]},valueSerialized:{type:`plus-file`,exportValues:o}},hydrationCanBeAborted:{type:`standard`,definedAtData:{filePathToShowToUser:`@brillout/docpress/config`,fileExportPathToShowToUser:[`default`,`hydrationCanBeAborted`]},valueSerialized:{type:`js-serialized`,value:!0}}};export{d as configValuesSerialized};

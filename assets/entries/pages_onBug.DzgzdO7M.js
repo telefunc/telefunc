@@ -1,0 +1,25 @@
+import{n as e}from"../chunks/chunk-QTnfLwEv.js";import{N as t,i as n,v as r}from"../chunks/chunk-CINPQgwY.js";import{n as i,t as a}from"../chunks/chunk-B8X3DK4-.js";var o=e({default:()=>u,pageSectionsExport:()=>c}),s=t(),c=[{pageSectionId:`see-also`,pageSectionLevel:2,pageSectionTitle:`See also`}];function l(e){let t={a:`a`,blockquote:`blockquote`,code:`code`,em:`em`,figure:`figure`,li:`li`,p:`p`,pre:`pre`,span:`span`,strong:`strong`,ul:`ul`,...n(),...e.components};return(0,s.jsxs)(s.Fragment,{children:[(0,s.jsxs)(t.p,{children:[(0,s.jsx)(t.strong,{children:`Environment`}),`: server.`]}),`
+`,(0,s.jsxs)(t.p,{children:[`To track bugs, use `,(0,s.jsx)(t.code,{children:`onBug()`}),`:`]}),`
+`,(0,s.jsx)(t.figure,{"data-rehype-pretty-code-figure":``,children:(0,s.jsx)(t.pre,{tabIndex:`0`,"data-language":`ts`,"data-theme":`github-light`,children:(0,s.jsxs)(t.code,{"data-language":`ts`,"data-theme":`github-light`,style:{display:`grid`},children:[(0,s.jsxs)(t.span,{"data-line":``,children:[(0,s.jsx)(t.span,{style:{color:`#D73A49`},children:`import`}),(0,s.jsx)(t.span,{style:{color:`#24292E`},children:` { onBug } `}),(0,s.jsx)(t.span,{style:{color:`#D73A49`},children:`from`}),(0,s.jsx)(t.span,{style:{color:`#032F62`},children:` 'telefunc'`})]}),`
+`,(0,s.jsx)(t.span,{"data-line":``,children:` `}),`
+`,(0,s.jsxs)(t.span,{"data-line":``,children:[(0,s.jsx)(t.span,{style:{color:`#6F42C1`},children:`onBug`}),(0,s.jsx)(t.span,{style:{color:`#24292E`},children:`((`}),(0,s.jsx)(t.span,{style:{color:`#E36209`},children:`err`}),(0,s.jsx)(t.span,{style:{color:`#24292E`},children:`) `}),(0,s.jsx)(t.span,{style:{color:`#D73A49`},children:`=>`}),(0,s.jsx)(t.span,{style:{color:`#24292E`},children:` {`})]}),`
+`,(0,s.jsx)(t.span,{"data-line":``,children:(0,s.jsx)(t.span,{style:{color:`#6A737D`},children:`  // ...`})}),`
+`,(0,s.jsx)(t.span,{"data-line":``,children:(0,s.jsx)(t.span,{style:{color:`#24292E`},children:`})`})})]})})}),`
+`,(0,s.jsxs)(t.p,{children:[`This allows you, for example, to install the tracker code of some tracking service (`,(0,s.jsx)(t.a,{href:`https://sentry.io/`,children:`Sentry`}),`, `,(0,s.jsx)(t.a,{href:`https://www.bugsnag.com/`,children:`Bugsnag`}),`, `,(0,s.jsx)(t.a,{href:`https://rollbar.com/`,children:`Rollbar`}),`, ...).`]}),`
+`,(0,s.jsxs)(t.p,{children:[(0,s.jsx)(t.code,{children:`onBug()`}),` is called:`]}),`
+`,(0,s.jsxs)(t.ul,{children:[`
+`,(0,s.jsxs)(t.li,{children:[`When a telefunction throws an error `,(0,s.jsxs)(t.strong,{children:[`that is not `,(0,s.jsx)(t.code,{children:`Abort()`})]}),`. (The telefunction has a bug.)`]}),`
+`,(0,s.jsx)(t.li,{children:`When Telefunc throws an error. (Telefunc has a bug.)`}),`
+`]}),`
+`,(0,s.jsxs)(t.blockquote,{children:[`
+`,(0,s.jsxs)(t.p,{children:[(0,s.jsx)(t.code,{children:`throw Abort()`}),` does `,(0,s.jsx)(t.em,{children:`not`}),` trigger `,(0,s.jsx)(t.code,{children:`onBug()`}),`. Telefunc handles `,(0,s.jsx)(t.code,{children:`Abort`}),` as an expected error, and returns the error data (if any) as part of a >= `,(0,s.jsx)(t.code,{children:`4xx`}),` response, see `,(0,s.jsx)(r,{href:`/abort-vs-error`}),`.`]}),`
+`]}),`
+`,(0,s.jsx)(`h2`,{id:`see-also`,children:`See also`}),`
+`,(0,s.jsxs)(t.ul,{children:[`
+`,(0,s.jsxs)(t.li,{children:[`
+`,(0,s.jsx)(r,{href:`/error-handling`}),`
+`]}),`
+`,(0,s.jsxs)(t.li,{children:[`
+`,(0,s.jsx)(r,{href:`/abort-vs-error`}),`
+`]}),`
+`]})]})}function u(e={}){let{wrapper:t}={...n(),...e.components};return t?(0,s.jsx)(t,{...e,children:(0,s.jsx)(l,{...e})}):l(e)}var d={hasServerOnlyHook:{type:`computed`,definedAtData:null,valueSerialized:{type:`js-serialized`,value:!1}},isClientRuntimeLoaded:{type:`computed`,definedAtData:null,valueSerialized:{type:`js-serialized`,value:!0}},onBeforeRenderEnv:{type:`computed`,definedAtData:null,valueSerialized:{type:`js-serialized`,value:null}},dataEnv:{type:`computed`,definedAtData:null,valueSerialized:{type:`js-serialized`,value:null}},guardEnv:{type:`computed`,definedAtData:null,valueSerialized:{type:`js-serialized`,value:null}},onRenderClient:{type:`standard`,definedAtData:{filePathToShowToUser:`@brillout/docpress/renderer/onRenderClient`,fileExportPathToShowToUser:[]},valueSerialized:{type:`pointer-import`,value:i}},onCreatePageContext:{type:`cumulative`,definedAtData:[{filePathToShowToUser:`@brillout/docpress/renderer/onCreatePageContext`,fileExportPathToShowToUser:[]}],valueSerialized:[{type:`pointer-import`,value:a}]},Page:{type:`standard`,definedAtData:{filePathToShowToUser:`/pages/onBug/+Page.mdx`,fileExportPathToShowToUser:[]},valueSerialized:{type:`plus-file`,exportValues:o}},hydrationCanBeAborted:{type:`standard`,definedAtData:{filePathToShowToUser:`@brillout/docpress/config`,fileExportPathToShowToUser:[`default`,`hydrationCanBeAborted`]},valueSerialized:{type:`js-serialized`,value:!0}}};export{d as configValuesSerialized};
