@@ -1,4 +1,4 @@
-export { testRun }
+export { testRun, runPlayground }
 
 import { page, test, expect, run, getServerUrl, autoRetry } from '@brillout/test-e2e'
 import { navigate } from './e2e-utils'
@@ -16,7 +16,7 @@ import { testRxjs } from './pages/rxjs/e2e-test'
 import { testPublish } from './pages/publish/e2e-test'
 import { testRefIdentity } from './pages/ref-identity/e2e-test'
 
-function testRun(cmd: 'pnpm dev' | 'pnpm preview') {
+function runPlayground(cmd: 'pnpm dev' | 'pnpm preview') {
   run(cmd, {
     // `pnpm preview` runs srvx (prints `Listening on:`); `pnpm dev` is `vike dev` on vite
     // (prints `Local:` + `http://localhost:3000`). Neither matches test-e2e's default
@@ -51,7 +51,10 @@ function testRun(cmd: 'pnpm dev' | 'pnpm preview') {
       )
     },
   })
+}
 
+function testRun(cmd: 'pnpm dev' | 'pnpm preview') {
+  runPlayground(cmd)
   const isDev = cmd === 'pnpm dev'
 
   test('home page', async () => {
