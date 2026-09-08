@@ -96,6 +96,10 @@ function buildInlineResponseBody(runContext: {
     if (cancelled) return
     cancelled = true
     cancelProducers()
+    // Release this stream's lifecycle hold now: an async generator's return()
+    // cannot interrupt a pending next() that is waiting for context.onClose().
+    // The release from trackPending() is idempotent, so finally can call it again.
+    onComplete()
   }
 
   const sink = useNodeStream
