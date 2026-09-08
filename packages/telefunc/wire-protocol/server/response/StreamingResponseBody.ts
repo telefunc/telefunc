@@ -75,6 +75,10 @@ function buildInlineResponseBody(runContext: {
   const producers = streamingValues.map((sv) => ({ producer: sv.createProducer(), index: sv.index }))
 
   let cancelled = false
+  let resolveCancelled!: (value: { type: 'cancelled' }) => void
+  // Async-generator return() queues behind a pending next(). Race cancellation
+  // separately so the merge loop can release its lifecycle hold in finally.
+  const cancelledPromise = new Promise<{ type: 'cancelled' }>((resolve) => (resolveCancelled = resolve))
   let drainResolve: (() => void) | null = null
 
   const wakeDrain = () => {
@@ -95,11 +99,8 @@ function buildInlineResponseBody(runContext: {
   const onConsumerGone = () => {
     if (cancelled) return
     cancelled = true
+    resolveCancelled({ type: 'cancelled' })
     cancelProducers()
-    // Release this stream's lifecycle hold now: an async generator's return()
-    // cannot interrupt a pending next() that is waiting for context.onClose().
-    // The release from trackPending() is idempotent, so finally can call it again.
-    onComplete()
   }
 
   const sink = useNodeStream
@@ -114,10 +115,10 @@ function buildInlineResponseBody(runContext: {
   type RaceEntry = {
     index: number
     iter: AsyncIterator<Uint8Array<ArrayBuffer>>
-    pending: Promise<{ entry: RaceEntry; result: IteratorResult<Uint8Array<ArrayBuffer>> }>
+    pending: Promise<{ type: 'chunk'; entry: RaceEntry; result: IteratorResult<Uint8Array<ArrayBuffer>> }>
   }
   const advance = (entry: RaceEntry) => {
-    entry.pending = entry.iter.next().then((result) => ({ entry, result }))
+    entry.pending = entry.iter.next().then((result) => ({ type: 'chunk', entry, result }))
   }
 
   void (async () => {
@@ -154,10 +155,15 @@ function buildInlineResponseBody(runContext: {
         while (active.length > 0) {
           // `responseAbort.errorPromise` rejects on a response-wide abort; it
           // wins the race and routes us into the catch below.
-          const { entry, result } = await Promise.race([responseAbort.errorPromise, ...active.map((e) => e.pending)])
+          const winner = await Promise.race([
+            cancelledPromise,
+            responseAbort.errorPromise,
+            ...active.map((e) => e.pending),
+          ])
           // Consumer is gone: bail before emitting a "this producer is done" frame
           // — would also be misleading for cancelled producers returning done.
-          if (cancelled) return
+          if (winner.type === 'cancelled' || cancelled) return
+          const { entry, result } = winner
           if (result.done) {
             // Empty-payload frame so the client knows this index is done
             // without waiting for the global terminator.
