@@ -4,14 +4,13 @@ export {
   encode,
   decode,
   decodeClientFrame,
+  peekTag,
   ProtocolViolationError,
   isChannelCtrlTag,
   isChannelDataFrame,
   isConnCtrlTag,
   encodePublishText,
-  decodePublishText,
   encodePublishBinary,
-  decodePublishBinary,
   payloadBytes,
 }
 export type {
@@ -27,7 +26,6 @@ export type {
   WirePublishInfo,
 }
 
-import { assert } from '../utils/assert.js'
 import type { ChannelTransports } from './constants.js'
 
 // ===== Wire protocol =====
@@ -365,8 +363,22 @@ const encode = {
 
 // ===== Decode =====
 
+/** Raised for every malformed-bytes path: short header, unparsable JSON, unknown tag, out-of-range
+ *  field. Never `assert` — these bytes come from a peer, so the fault is the peer's, not a telefunc
+ *  bug. `target`, when set, names the wire to terminate instead of the one the frame arrived on. */
+class ProtocolViolationError extends Error {
+  constructor(readonly target?: unknown) {
+    super()
+  }
+}
+
+/** The tag is the first header byte, readable before the frame is known to be well-formed. */
+function peekTag(raw: Uint8Array): number | undefined {
+  return raw[0]
+}
+
 function decode(frame: Uint8Array): DecodedFrame {
-  assert(frame.length >= HEADER, 'frame too short')
+  if (frame.length < HEADER) throw new ProtocolViolationError()
   const tag = frame[0] as number
   const index = (frame[1] as number) | ((frame[2] as number) << 8)
   const seq = readU32(frame, 3)
@@ -394,16 +406,16 @@ function decode(frame: Uint8Array): DecodedFrame {
     case TAG.PUBLISH_BINARY_ACK_REQ:
       return { tag: TAG.PUBLISH_BINARY_ACK_REQ, index, seq, data: payload }
     case TAG.ACK_RES: {
-      assert(payload.length >= 5, 'ACK_RES payload too short')
+      if (payload.length < 5) throw new ProtocolViolationError()
       const ackedSeq = readU32(payload, 0)
       const status = payload[4] as number
-      assert(
-        status === ACK_STATUS.OK ||
-          status === ACK_STATUS.ERROR ||
-          status === ACK_STATUS.ABORT ||
-          status === ACK_STATUS.SHIELD_ERROR,
-        `ACK_RES unknown status ${status}`,
+      if (
+        status !== ACK_STATUS.OK &&
+        status !== ACK_STATUS.ERROR &&
+        status !== ACK_STATUS.ABORT &&
+        status !== ACK_STATUS.SHIELD_ERROR
       )
+        throw new ProtocolViolationError()
       return { tag: TAG.ACK_RES, index, seq, ackedSeq, status, text: textDecoder.decode(payload.subarray(5)) }
     }
 
@@ -413,19 +425,21 @@ function decode(frame: Uint8Array): DecodedFrame {
       return { tag: TAG.PONG }
     case TAG.FIN:
       return { tag: TAG.FIN }
+    // The client→server payloads are validated here, at the trust boundary. The server→client ones
+    // are authored by our own server, trusted like every other server-sent payload the client parses.
     case TAG.RECONCILE:
-      return { tag: TAG.RECONCILE, payload: JSON.parse(textDecoder.decode(payload)) as ReconcilePayload }
+      return { tag: TAG.RECONCILE, payload: parseReconcilePayload(parseJsonPayload(payload)) }
     case TAG.RECONCILED:
-      return { tag: TAG.RECONCILED, payload: JSON.parse(textDecoder.decode(payload)) as ReconciledPayload }
+      return { tag: TAG.RECONCILED, payload: parseJsonPayload(payload) as ReconciledPayload }
     case TAG.STREAM_REQUEST_OPEN_ACK:
       return { tag: TAG.STREAM_REQUEST_OPEN_ACK }
     case TAG.PREPARE:
-      return { tag: TAG.PREPARE, payload: JSON.parse(textDecoder.decode(payload)) as PreparePayload }
+      return { tag: TAG.PREPARE, payload: parsePreparePayload(parseJsonPayload(payload)) }
     case TAG.READY:
-      return { tag: TAG.READY, payload: JSON.parse(textDecoder.decode(payload)) as ReadyPayload }
+      return { tag: TAG.READY, payload: parseJsonPayload(payload) as ReadyPayload }
 
     case TAG.CLOSE:
-      assert(payload.length >= 4, 'CLOSE payload too short')
+      if (payload.length < 4) throw new ProtocolViolationError()
       return { tag: TAG.CLOSE, index, timeoutMs: readU32(payload, 0) }
     case TAG.CLOSE_ACK:
       return { tag: TAG.CLOSE_ACK, index }
@@ -434,30 +448,24 @@ function decode(frame: Uint8Array): DecodedFrame {
     case TAG.ERROR:
       return { tag: TAG.ERROR, index }
     case TAG.WINDOW:
-      assert(payload.length >= 4, 'WINDOW payload too short')
+      if (payload.length < 4) throw new ProtocolViolationError()
       return { tag: TAG.WINDOW, index, bytes: readU32(payload, 0) }
     case TAG.MSG_WINDOW:
-      assert(payload.length >= 4, 'MSG_WINDOW payload too short')
+      if (payload.length < 4) throw new ProtocolViolationError()
       return { tag: TAG.MSG_WINDOW, index, count: readU32(payload, 0) }
     case TAG.BDP_PING:
       return { tag: TAG.BDP_PING, index }
     case TAG.BDP_PING_ACK:
       return { tag: TAG.BDP_PING_ACK, index }
     case TAG.BROADCAST_SUB:
-      assert(payload.length >= 1, 'BROADCAST_SUB payload too short')
+      if (payload.length < 1) throw new ProtocolViolationError()
       return { tag: TAG.BROADCAST_SUB, index, binary: payload[0] === 1 }
     case TAG.BROADCAST_UNSUB:
-      assert(payload.length >= 1, 'BROADCAST_UNSUB payload too short')
+      if (payload.length < 1) throw new ProtocolViolationError()
       return { tag: TAG.BROADCAST_UNSUB, index, binary: payload[0] === 1 }
 
     default:
-      assert(false, `Unknown wire frame tag ${tag}`)
-  }
-}
-
-class ProtocolViolationError extends Error {
-  constructor(readonly target?: unknown) {
-    super()
+      throw new ProtocolViolationError()
   }
 }
 
@@ -482,54 +490,65 @@ const CLIENT_TAGS: ReadonlySet<number> = new Set([
   TAG.BROADCAST_UNSUB,
 ])
 
+/** Server ingress: `decode` owns the frame's shape, this owns its direction. The PREPARE cap is
+ *  checked on the raw bytes because it bounds what a peer may make us parse. */
 function decodeClientFrame(raw: Uint8Array<ArrayBuffer>, maxPrepareBytes: number): DecodedFrame {
-  if (raw[0] === TAG.PREPARE && raw.byteLength > maxPrepareBytes) throw new ProtocolViolationError()
-  let frame: DecodedFrame
+  if (peekTag(raw) === TAG.PREPARE && raw.byteLength > maxPrepareBytes) throw new ProtocolViolationError()
+  const frame = decode(raw)
+  if (!CLIENT_TAGS.has(frame.tag)) throw new ProtocolViolationError()
+  return frame
+}
+
+function parseJsonPayload(payload: Uint8Array): unknown {
   try {
-    frame = decode(raw)
+    return JSON.parse(textDecoder.decode(payload))
   } catch {
     throw new ProtocolViolationError()
   }
-  if (!CLIENT_TAGS.has(frame.tag)) throw new ProtocolViolationError()
-  if (frame.tag === TAG.PREPARE) validatePrepare(frame.payload)
-  if (frame.tag === TAG.RECONCILE) validateReconcile(frame.payload)
-  return frame
+}
+
+function asObject(value: unknown): Record<string, unknown> {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) throw new ProtocolViolationError()
+  return value as Record<string, unknown>
 }
 
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === 'string' && value.length > 0
 }
 
-function assertObjectPayload(payload: unknown): void {
-  if (payload === null || typeof payload !== 'object') throw new ProtocolViolationError()
+function isUint(value: unknown, max: number): value is number {
+  return Number.isInteger(value) && (value as number) >= 0 && (value as number) <= max
 }
 
-function validatePrepare(payload: PreparePayload): void {
-  assertObjectPayload(payload)
-  const p = payload as { upgradeId?: unknown; sessionId?: unknown }
-  if (!isNonEmptyString(p.upgradeId)) throw new ProtocolViolationError()
-  if (!isNonEmptyString(p.sessionId)) throw new ProtocolViolationError()
+function parsePreparePayload(value: unknown): PreparePayload {
+  const payload = asObject(value)
+  if (!isNonEmptyString(payload.upgradeId)) throw new ProtocolViolationError()
+  if (!isNonEmptyString(payload.sessionId)) throw new ProtocolViolationError()
+  return { upgradeId: payload.upgradeId, sessionId: payload.sessionId }
 }
 
-function validateReconcile(payload: ReconcilePayload): void {
-  assertObjectPayload(payload)
-  const p = payload as { open?: unknown; sessionId?: unknown; barrier?: unknown; upgradeId?: unknown }
-  if (!Array.isArray(p.open)) throw new ProtocolViolationError()
+function parseReconcilePayload(value: unknown): ReconcilePayload {
+  const payload = asObject(value)
+  if (!Array.isArray(payload.open)) throw new ProtocolViolationError()
   const indexes = new Set<number>()
-  for (const entry of p.open) {
-    if (typeof entry?.id !== 'string') throw new ProtocolViolationError()
-    if (!Number.isInteger(entry.ix) || entry.ix < 0 || entry.ix > 0xffff || indexes.has(entry.ix))
-      throw new ProtocolViolationError()
+  for (const rawEntry of payload.open as unknown[]) {
+    const entry = asObject(rawEntry)
+    if (typeof entry.id !== 'string') throw new ProtocolViolationError()
+    // `ix` is truncated to u16 by the header writer, so a wider one would alias onto another channel.
+    if (!isUint(entry.ix, 0xffff) || indexes.has(entry.ix)) throw new ProtocolViolationError()
     indexes.add(entry.ix)
-    if (!Number.isInteger(entry.lastSeq) || entry.lastSeq < 0 || entry.lastSeq > 0xffffffff)
-      throw new ProtocolViolationError()
+    if (!isUint(entry.lastSeq, 0xffffffff)) throw new ProtocolViolationError()
     if (entry.initial !== undefined && entry.initial !== true) throw new ProtocolViolationError()
   }
-  if (p.sessionId !== undefined && !isNonEmptyString(p.sessionId)) throw new ProtocolViolationError()
-  if (p.barrier === undefined && p.upgradeId === undefined) return
-  if (p.barrier !== true) throw new ProtocolViolationError()
-  if (!isNonEmptyString(p.upgradeId)) throw new ProtocolViolationError()
-  if (!isNonEmptyString(p.sessionId)) throw new ProtocolViolationError()
+  if (payload.sessionId !== undefined && !isNonEmptyString(payload.sessionId)) throw new ProtocolViolationError()
+  // The barrier leg is all-or-nothing: either both discriminants are absent, or `barrier` is
+  // literally `true` and both ids are present. Anything else could commit an upgrade it cannot name.
+  if (payload.barrier !== undefined || payload.upgradeId !== undefined) {
+    if (payload.barrier !== true) throw new ProtocolViolationError()
+    if (!isNonEmptyString(payload.upgradeId)) throw new ProtocolViolationError()
+    if (!isNonEmptyString(payload.sessionId)) throw new ProtocolViolationError()
+  }
+  return payload as ReconcilePayload
 }
 
 // ===== Publish info helpers =====
@@ -542,12 +561,12 @@ function encodePublishText(text: string, info: WirePublishInfo): string {
 
 function decodePublishText(wire: string): { text: string; info: WirePublishInfo } {
   const nl = wire.indexOf('\n')
-  assert(nl !== -1, 'PUBLISH frame missing info prefix')
+  if (nl === -1) throw new ProtocolViolationError()
   const comma = wire.indexOf(',')
-  assert(comma !== -1 && comma < nl, 'PUBLISH frame malformed info prefix')
+  if (comma === -1 || comma >= nl) throw new ProtocolViolationError()
   const seq = Number(wire.slice(0, comma))
   const timestamp = Number(wire.slice(comma + 1, nl))
-  assert(Number.isFinite(seq) && Number.isFinite(timestamp), 'PUBLISH frame info must be finite numbers')
+  if (!Number.isFinite(seq) || !Number.isFinite(timestamp)) throw new ProtocolViolationError()
   return { text: wire.slice(nl + 1), info: { seq, timestamp } }
 }
 
@@ -566,10 +585,10 @@ function encodePublishBinary(data: Uint8Array, info: WirePublishInfo): Uint8Arra
 }
 
 function decodePublishBinary(wire: Uint8Array): { data: Uint8Array; info: WirePublishInfo } {
-  assert(wire.byteLength >= PUBLISH_BINARY_HEADER, 'PUBLISH_BINARY frame too short for info header')
+  if (wire.byteLength < PUBLISH_BINARY_HEADER) throw new ProtocolViolationError()
   const view = new DataView(wire.buffer, wire.byteOffset, wire.byteLength)
   const seq = view.getUint32(0, true)
   const timestamp = view.getFloat64(4, true)
-  assert(Number.isFinite(seq) && Number.isFinite(timestamp), 'PUBLISH_BINARY frame info must be finite numbers')
+  if (!Number.isFinite(seq) || !Number.isFinite(timestamp)) throw new ProtocolViolationError()
   return { data: wire.subarray(PUBLISH_BINARY_HEADER), info: { seq, timestamp } }
 }
