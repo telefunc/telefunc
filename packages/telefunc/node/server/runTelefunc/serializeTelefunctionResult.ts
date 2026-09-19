@@ -24,8 +24,8 @@ import { uint8ArrayToBase64url } from '../../../wire-protocol/base64url.js'
 import type { StreamingProducer, StreamingValueServer } from '../../../wire-protocol/types.js'
 import { type RequestContext } from '../context/requestContext.js'
 import type { Context } from '../context/context.js'
-import type { ReplacerType, TypeContract, ServerReplacerContext } from '../../../wire-protocol/types.js'
 import type { Readable } from 'node:stream'
+import { getServerExtensionTypes } from '../serverConfig.js'
 
 /** Look up the shields for a revived value and build its auto-logging validator map.
  *  Empty map when the value isn't tracked in `valueShields` or has no registered shields. */
@@ -64,13 +64,12 @@ function serializeTelefunctionResult(runContext: {
   streamTransport: StreamTransport
   useNodeStream: boolean
   serverConfig: {
-    extensionResponseTypes: ReplacerType<TypeContract, ServerReplacerContext>[]
     log: { shieldErrors: ShieldLogConfig }
   }
   valueShields?: ValueShields
 }): SerializeResult {
   const { requestContext } = runContext
-  const { extensionResponseTypes } = runContext.serverConfig
+  const { responseTypes } = getServerExtensionTypes()
 
   const bodyValue = runContext.telefunctionAborted
     ? { ret: runContext.telefunctionReturn, abort: true }
@@ -128,7 +127,7 @@ function serializeTelefunctionResult(runContext: {
     function onReplaced({ abort }) {
       requestContext.responseAbort.onAbort(abort)
     },
-    extensionResponseTypes,
+    responseTypes,
   )
 
   let httpResponseBody: string

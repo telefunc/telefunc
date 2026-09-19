@@ -1,5 +1,6 @@
 export { configUser as config }
 export { getServerConfig }
+export { getServerExtensionTypes }
 export { enableChannelTransports }
 export { setRootFromVite }
 export type {
@@ -16,13 +17,6 @@ import { getGlobalObject } from '../../utils/getGlobalObject.js'
 import { hasProp } from '../../utils/hasProp.js'
 import { isObject } from '../../utils/isObject.js'
 import type { TelefuncServerExtension } from './extensions.js'
-import type {
-  ReplacerType,
-  ReviverType,
-  TypeContract,
-  ServerReplacerContext,
-  ServerReviverContext,
-} from '../../wire-protocol/types.js'
 import { registerShieldType } from './shield.js'
 import { isTelefuncFilePath } from '../../utils/isTelefuncFilePath.js'
 import { toPosixPath, pathIsAbsolute, assertPosixPath } from '../../utils/path.js'
@@ -221,8 +215,6 @@ type ConfigResolved = {
   }
   channel: ChannelConfigResolved
   extensions: TelefuncServerExtension[]
-  extensionResponseTypes: ReplacerType<TypeContract, ServerReplacerContext>[]
-  extensionRequestTypes: ReviverType<TypeContract, ServerReviverContext>[]
 }
 
 const configState: ConfigUser = getGlobalObject('serverConfig.ts', {
@@ -361,8 +353,15 @@ function getServerConfig(): ConfigResolved {
       ssePostIdleFlushDelay: configState.channel.ssePostIdleFlushDelay ?? SSE_POST_IDLE_FLUSH_DELAY_MS,
     },
     extensions: configState.extensions,
-    extensionResponseTypes: configState.extensions.flatMap((ext) => ext.responseTypes ?? []),
-    extensionRequestTypes: configState.extensions.flatMap((ext) => ext.requestTypes ?? []),
+  }
+}
+
+/** Extension wire types are consumed after user modules may have registered more extensions.
+ * Keep them out of the request-start config snapshot and resolve only at the operation that uses them. */
+function getServerExtensionTypes() {
+  return {
+    responseTypes: configState.extensions.flatMap((ext) => ext.responseTypes ?? []),
+    requestTypes: configState.extensions.flatMap((ext) => ext.requestTypes ?? []),
   }
 }
 

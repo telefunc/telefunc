@@ -6,6 +6,7 @@ import type { ClientChannel } from 'telefunc'
 import {
   onMixedForClose,
   onCloseGen,
+  onIdleGen,
   onCloseStream,
   onCloseChannel,
   onCloseFn,
@@ -26,6 +27,8 @@ function Close() {
     <div>
       {hydrated && <span id="hydrated" />}
       <pre id="close-result">{result}</pre>
+
+      <IdleGenerator />
 
       <h2>Generator</h2>
 
@@ -312,6 +315,57 @@ function Close() {
         }}
       >
         Mixed: close(result)
+      </button>
+    </div>
+  )
+}
+
+function IdleGenerator() {
+  const pending = useRef<Awaited<ReturnType<typeof onIdleGen>> | null>(null)
+  const [result, setResult] = useState('')
+
+  async function start(wakeOn: 'onClose' | 'signal', withChannel = false) {
+    setResult('')
+    pending.current = await onIdleGen(wakeOn, withChannel)
+    const first = await pending.current.generator.next()
+    setResult(JSON.stringify({ phase: 'started', first }))
+  }
+
+  return (
+    <div>
+      <h2>Idle generator cleanup</h2>
+      <pre id="idle-gen-result">{result}</pre>
+      <button id="test-idle-gen-onClose" onClick={() => start('onClose')}>
+        Start generator waiting for onClose
+      </button>
+      <button id="test-idle-gen-signal" onClick={() => start('signal')}>
+        Start generator waiting for signal
+      </button>
+      <button id="test-idle-gen-channel" onClick={() => start('signal', true)}>
+        Start generator with an active channel
+      </button>
+      <button
+        id="test-idle-gen-cancel"
+        onClick={async () => {
+          if (!pending.current) return
+          const { generator, channel } = pending.current
+          const last = await generator.return(undefined)
+          // A reply proves the channel still works after cancelling the generator.
+          const signalAborted = channel ? await channel.send('ping') : null
+          setResult(JSON.stringify({ phase: 'cancelled', last, signalAborted }))
+        }}
+      >
+        Cancel generator
+      </button>
+      <button
+        id="test-idle-gen-close-channel"
+        onClick={async () => {
+          await pending.current?.channel?.close()
+          pending.current = null
+          setResult(JSON.stringify({ phase: 'channel-closed' }))
+        }}
+      >
+        Close channel
       </button>
     </div>
   )

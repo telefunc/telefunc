@@ -4,6 +4,49 @@ import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
 import { resetCleanupState, getCleanupState, forceServerGc, navigate, getResult, sleep } from '../../e2e-utils'
 
 function testClose() {
+  for (const wakeOn of ['onClose', 'signal', 'channel'] as const) {
+    test(`close: idle generator releases its subscription via ${wakeOn}`, async () => {
+      await navigate(`${getServerUrl()}/close`)
+      await resetCleanupState()
+      await page.click(`#test-idle-gen-${wakeOn}`)
+
+      await autoRetry(async () => {
+        const result = await getResult('#idle-gen-result')
+        expect(result.first).deep.equal({ value: 'snapshot', done: false })
+        const state = await getCleanupState()
+        expect(state.idleGenWaiting).toBe('true')
+        expect(state.idleGenListeners).toBe('1')
+        expect(state.idleGenOnClose).toBe('0')
+        expect(state.idleGenSignal).toBe('false')
+      })
+
+      await page.click('#test-idle-gen-cancel')
+      await autoRetry(async () => {
+        const result = await getResult('#idle-gen-result')
+        expect(result.phase).toBe('cancelled')
+        expect(result.last).deep.equal({ done: true })
+        if (wakeOn === 'channel') expect(result.signalAborted).toBe(false)
+      })
+
+      if (wakeOn === 'channel') {
+        // Cancelling the HTTP body must release only the inline stream's hold.
+        const state = await getCleanupState()
+        expect(state.idleGenOnClose).toBe('0')
+        expect(state.idleGenSignal).toBe('false')
+        expect(state.idleGenListeners).toBe('1')
+        await page.click('#test-idle-gen-close-channel')
+      }
+
+      await autoRetry(async () => {
+        const state = await getCleanupState()
+        expect(state.idleGenOnClose).toBe('1')
+        expect(state.idleGenSignal).toBe('true')
+        expect(state.idleGenFinally).toBe('true')
+        expect(state.idleGenListeners).toBe('0')
+      })
+    })
+  }
+
   // ── Targeted: generator ──────────────────────────────────────────────
 
   test('close: generator — close(gen) terminates cleanly; done=true, no error, finally block runs', async () => {

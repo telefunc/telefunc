@@ -22,7 +22,7 @@ async function transformTelefuncFileServerSide(
   //   2. the magicString output (so the runtime extension registers at module load)
   const srcWithImports = [...extensionImports, src].join('\n')
 
-  const exportList = await getExportList(srcWithImports)
+  const exportList = await getExportList(srcWithImports, id)
   const codeDecoration = decorateTelefunctions(exportList, id.replace(appRootDir, ''), appRootDir)
 
   let codeShield: string | undefined
