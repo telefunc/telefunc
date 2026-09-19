@@ -110,7 +110,7 @@ export const UPGRADE_MAX_FRAME_BYTES = 256 * 1024
 export const UPGRADE_MAX_OPEN_ENTRIES = 1_024
 export const UPGRADE_MAX_ID_BYTES = 256
 
-/** Server-wide ceiling on concurrently staged upgrades — bounds what unauthenticated PREPAREs
+/** Server-wide ceiling on concurrently staged upgrades — bounds what unauthenticated PREPARE frames
  *  can pin in memory before any of them commits. */
 export const UPGRADE_MAX_STAGED_RECORDS = 1_024
 export const UPGRADE_MAX_STAGED_BYTES = 64 * 1024 * 1024
