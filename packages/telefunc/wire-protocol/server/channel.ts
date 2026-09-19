@@ -47,7 +47,7 @@ function parsePeerText(text: string): unknown {
   try {
     return parse(text)
   } catch {
-    throw new ProtocolViolationError()
+    throw new ProtocolViolationError('peer payload is not parsable')
   }
 }
 
@@ -536,7 +536,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
           pending.reject(new ShieldValidationError(resultText))
           return
         default:
-          throw new ProtocolViolationError()
+          throw new ProtocolViolationError(`ACK_RES unknown status ${status}`)
       }
     } catch (err) {
       // Settle the caller AND rethrow: the awaiting `send()` must not hang, and a malformed ack is

@@ -61,7 +61,7 @@ type StagedUpgrade = {
 
 function retargetToProbe(err: unknown, probe: unknown): unknown {
   if (!(err instanceof ProtocolViolationError) || err.target !== undefined) return err
-  return new ProtocolViolationError(probe)
+  return new ProtocolViolationError(err.message, probe)
 }
 
 const textEncoder = new TextEncoder()
@@ -321,32 +321,34 @@ class ChannelMux {
       this.send(connection, encode.pong())
       return null
     }
-    assertProtocol(!entry.state.retiredByBarrier)
-    assertProtocol(!this.stagedUpgrades.has(connection))
+    assertProtocol(!entry.state.retiredByBarrier, 'frame on a wire retired by its barrier')
+    assertProtocol(!this.stagedUpgrades.has(connection), 'frame on a staged probe')
     if (frame.tag === TAG.PREPARE) return this.handlePrepare(entry, connection, frame.payload, rawFrame.byteLength)
     if (frame.tag === TAG.RECONCILE) {
       if (frame.payload.barrier === true) {
         return this.handleBarrier(entry, connection, frame.payload, rawFrame.byteLength)
       }
-      this.releaseStagesForReconcile(frame.payload, entry, connection)
+      this.claimSessionForReconcile(frame.payload, entry, connection)
       return this.reconcile(entry, connection, frame.payload)
     }
     const sessionId = entry.transport.getSessionId(connection)
-    assertProtocol(sessionId)
+    assertProtocol(sessionId, 'frame before reconcile')
     // Frame for an ix that's no longer in the session — client closed the channel and the
     // server reconciled it out, but a frame was still in flight. Drop silently.
     this.sessions.get(sessionId, (frame as ChannelFrame).index)?.channel._dispatchFrame(frame as ChannelFrame)
     return null
   }
 
-  private releaseStagesForReconcile(ctrl: ReconcilePayload, entry: ConnectionEntry, connection: unknown): void {
-    for (const doomed of [ctrl.sessionId, entry.transport.getSessionId(connection)]) {
-      if (doomed === undefined) continue
-      const staleProbe = this.stagedByPrevSession.get(doomed)
+  /** An ordinary reconcile claims its session, abandoning any probe staged on it — unless a barrier
+   *  is mid-commit on that session, in which case the claim is refused instead. */
+  private claimSessionForReconcile(ctrl: ReconcilePayload, entry: ConnectionEntry, connection: unknown): void {
+    for (const claimed of [ctrl.sessionId, entry.transport.getSessionId(connection)]) {
+      if (claimed === undefined) continue
+      const staleProbe = this.stagedByPrevSession.get(claimed)
       if (staleProbe === undefined) continue
       // A committing barrier already owns this session; a concurrent claim on it is refused rather
       // than allowed to abandon the stage out from under the in-flight commit.
-      assertProtocol(this.stagedUpgrades.get(staleProbe)?.phase !== 'committing')
+      assertProtocol(this.stagedUpgrades.get(staleProbe)?.phase !== 'committing', 'session claimed mid-commit')
       this.abandonStage(staleProbe)
     }
   }
@@ -357,11 +359,11 @@ class ChannelMux {
     payload: PreparePayload,
     rawByteLength: number,
   ): null {
-    assertProtocol(!entry.transport.getSessionId(connection))
-    assertProtocol(this.sessions.peekSession(payload.sessionId))
-    assertProtocol(!this.stagedByPrevSession.has(payload.sessionId))
-    assertProtocol(this.stagedUpgrades.size < UPGRADE_MAX_STAGED_RECORDS)
-    assertProtocol(this.stagedBytes + rawByteLength <= UPGRADE_MAX_STAGED_BYTES)
+    assertProtocol(!entry.transport.getSessionId(connection), 'PREPARE on a reconciled wire')
+    assertProtocol(this.sessions.peekSession(payload.sessionId), 'PREPARE for an unknown session')
+    assertProtocol(!this.stagedByPrevSession.has(payload.sessionId), 'session already staged')
+    assertProtocol(this.stagedUpgrades.size < UPGRADE_MAX_STAGED_RECORDS, 'staged record budget')
+    assertProtocol(this.stagedBytes + rawByteLength <= UPGRADE_MAX_STAGED_BYTES, 'staged byte budget')
 
     const timer = unrefTimer(setTimeout(() => this.abandonStage(connection), UPGRADE_STAGE_TTL_MS))
     this.stagedUpgrades.set(connection, {
@@ -393,9 +395,14 @@ class ChannelMux {
 
     try {
       this.enforceUpgradeAdmission(ctrl.open, rawByteLength)
-      for (const channel of ctrl.open) assertProtocol(!channel.initial, wsConnection)
-      assertProtocol(ctrl.upgradeId === stage.upgradeId, wsConnection)
-      assertProtocol(entry.transport.getSessionId(connection) === stage.prevSessionId, wsConnection)
+      for (const channel of ctrl.open)
+        assertProtocol(!channel.initial, 'barrier carries an initial channel', wsConnection)
+      assertProtocol(ctrl.upgradeId === stage.upgradeId, 'barrier upgradeId mismatch', wsConnection)
+      assertProtocol(
+        entry.transport.getSessionId(connection) === stage.prevSessionId,
+        'barrier session mismatch',
+        wsConnection,
+      )
 
       const wsEntry = this.connectionEntries.get(wsConnection)
       assert(wsEntry, 'staged probe has no connection entry')
@@ -428,6 +435,7 @@ class ChannelMux {
     }
   }
 
+  /** Forgets the stage AND kills the probe holding it. No-op once the stage is committing. */
   private abandonStage(wsConnection: unknown): void {
     if (this.stagedUpgrades.get(wsConnection)?.phase !== 'staged') return
     this.clearStage(wsConnection)
@@ -437,6 +445,7 @@ class ChannelMux {
     entry.transport.terminateConnection(wsConnection)
   }
 
+  /** Bookkeeping only — the probe wire is left alone. */
   private clearStage(wsConnection: unknown): void {
     const stage = this.stagedUpgrades.get(wsConnection)
     if (!stage) return
@@ -450,10 +459,10 @@ class ChannelMux {
 
   /** Admission policy only — `decodeClientFrame` has already established the frame's shape. */
   private enforceUpgradeAdmission(open: ReconcilePayload['open'], rawByteLength: number): void {
-    assertProtocol(rawByteLength <= UPGRADE_MAX_FRAME_BYTES)
-    assertProtocol(open.length <= UPGRADE_MAX_OPEN_ENTRIES)
+    assertProtocol(rawByteLength <= UPGRADE_MAX_FRAME_BYTES, 'barrier frame over byte cap')
+    assertProtocol(open.length <= UPGRADE_MAX_OPEN_ENTRIES, 'barrier over entry cap')
     for (const channel of open) {
-      assertProtocol(textEncoder.encode(channel.id).byteLength <= UPGRADE_MAX_ID_BYTES)
+      assertProtocol(textEncoder.encode(channel.id).byteLength <= UPGRADE_MAX_ID_BYTES, 'channel id over byte cap')
     }
   }
 
@@ -480,7 +489,7 @@ class ChannelMux {
       const reason = state.closed.isPermanent ? DETACH_REASON.PERMANENT : DETACH_REASON.TRANSIENT
       const session = this.sessions.removeSession(newSessionId)
       if (session) for (const handle of session.values()) this.detachHandle(handle, reason)
-      throw new ProtocolViolationError()
+      throw new ProtocolViolationError('connection closed mid-reconcile')
     }
 
     if (ctrl.sessionId) this.sessionFinalizers.delete(ctrl.sessionId)

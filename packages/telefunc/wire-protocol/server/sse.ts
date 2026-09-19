@@ -81,7 +81,7 @@ class SseConnectionTransport {
         metadata = parseSseRequestMetadata(rawMetadata)
       } catch {
         // Malformed metadata is untrusted client ingress, not a truncation — same class as the decode seam.
-        throw new ProtocolViolationError()
+        throw new ProtocolViolationError('malformed SSE request metadata')
       }
       if (metadata.streamResponse) return await this.handleStreamResponsePost(metadata.connId, reader, useNodeStream)
       if (metadata.streamRequest) return await this.handleStreamRequestPost(metadata.connId, reader)
@@ -108,11 +108,11 @@ class SseConnectionTransport {
     useNodeStream: boolean,
   ): Promise<SseChannelHttpResponse> {
     const existing = this.mux.getConnectionByConnId<SseConnection>(connId)
-    if (existing) this.closeConnection(existing, false)
+    if (existing) this.closeConnection(existing, { permanent: false })
 
     const onCancel = () => {
       const conn = this.mux.getConnectionByConnId<SseConnection>(connId)
-      if (conn) this.closeConnection(conn, false)
+      if (conn) this.closeConnection(conn, { permanent: false })
     }
     const stream = useNodeStream
       ? createPushReadable(onCancel)
@@ -160,9 +160,9 @@ class SseConnectionTransport {
     if (!(await this.waitReady(connection))) return badRequest()
     try {
       while (true) {
-        const raw = await this.readFrameOrNull(connection, reader)
+        const raw = await this.readFrameOrCloseWire(connection, reader)
         if (!raw || connection.closed) break
-        this.trackDispatch(connection, this.mux.onConnectionRawMessage(connection, raw))
+        this.dispatchAndReport(connection, raw)
       }
     } finally {
       await this.settlePendingDispatches(connection)
@@ -193,29 +193,27 @@ class SseConnectionTransport {
    *  in flight so their `_lastClientSeq` mutations land first, emit `reconciled`, then release the
    *  `ready` gate the other POSTs are parked on. */
   private async runStreamResponse(connection: SseConnection, reader: StreamReader): Promise<void> {
-    let outcome: ReconcileOutcome | null = null
     try {
-      outcome = await this.drainDeferred(connection, reader)
-    } catch (err) {
-      // Body truncated mid-frame (`StreamReader` throws). The caller fire-and-forgets this
-      // promise, so a rethrow would be an unhandled rejection. Transient close: the channels
-      // keep their reconnect grace and the client's retry can re-attach them.
-      reportDispatchBug(err)
-      this.closeConnection(connection, false) // resolves `ready` — the parked POSTs see it closed
-      return
-    }
-    try {
+      const outcome = await this.drainDeferred(connection, reader)
       if (!shouldSendReconciled(outcome, connection)) return
       await this.settlePendingDispatches(connection)
       this.mux.sendReconciled(outcome)
+    } catch (err) {
+      // Body truncated mid-frame (`StreamReader` throws). This promise is fire-and-forget, so a
+      // rethrow would be an unhandled rejection. Transient: the channels keep their reconnect
+      // grace and the client's retry re-attaches them.
+      reportDispatchBug(err)
+      this.closeConnection(connection, { permanent: false })
     } finally {
+      // Every path releases the gate here — the parked POSTs then see whatever state we left.
       connection.resolveReady()
     }
   }
 
-  /** Fire-and-forget dispatch: registered so a reconcile can wait for it, and reported here because
-   *  no caller will. Awaited dispatches (the batch POST's) report through their own caller instead. */
-  private trackDispatch(connection: SseConnection, dispatch: Promise<unknown>): void {
+  /** Fire-and-forget dispatch: registered so a reconcile waits for it, and reported here because
+   *  nothing else will. Awaited dispatches (the batch POST's) report through their caller instead. */
+  private dispatchAndReport(connection: SseConnection, raw: Uint8Array<ArrayBuffer>): void {
+    const dispatch = this.mux.onConnectionRawMessage(connection, raw)
     connection.pendingDispatches.add(dispatch)
     const evict = () => connection.pendingDispatches.delete(dispatch)
     dispatch.then(evict, (err) => {
@@ -234,7 +232,7 @@ class SseConnectionTransport {
   private async drainDeferred(connection: SseConnection, reader: StreamReader): Promise<ReconcileOutcome | null> {
     let outcome: ReconcileOutcome | null = null
     while (true) {
-      const raw = await this.readFrameOrNull(connection, reader)
+      const raw = await this.readFrameOrCloseWire(connection, reader)
       if (!raw || connection.closed) break
       const next = await this.mux.onConnectionRawMessageDeferredReconciled(connection, raw)
       if (next !== null) outcome = next
@@ -242,11 +240,13 @@ class SseConnectionTransport {
     return outcome
   }
 
-  private async readFrameOrNull(connection: SseConnection, reader: StreamReader) {
+  /** Next frame, or null at a clean end of body. An oversize frame desynchronises the body — there
+   *  is no next frame boundary to find — so the wire is closed for good and the error rethrown. */
+  private async readFrameOrCloseWire(connection: SseConnection, reader: StreamReader) {
     try {
       return await reader.readLengthPrefixedBytesOrNull(WIRE_MAX_RAW_FRAME_BYTES)
     } catch (err) {
-      if (err instanceof OversizeFrameError) this.closeConnection(connection, true)
+      if (err instanceof OversizeFrameError) this.closeConnection(connection, { permanent: true })
       throw err
     }
   }
@@ -305,7 +305,7 @@ class SseConnectionTransport {
     })
   }
 
-  private closeConnection(connection: SseConnection, permanent: boolean): void {
+  private closeConnection(connection: SseConnection, { permanent }: { permanent: boolean }): void {
     if (connection.closed) return
     connection.closed = true
     // Unblock any data POST awaiting `ready` — its dispatch sees the closed connection and bails.
@@ -316,7 +316,7 @@ class SseConnectionTransport {
 
   private terminateConnection(connection: SseConnection): void {
     const terminatePermanently = this.mux.readPermanentTermination(connection)
-    this.closeConnection(connection, terminatePermanently === true)
+    this.closeConnection(connection, { permanent: terminatePermanently === true })
   }
 }
 

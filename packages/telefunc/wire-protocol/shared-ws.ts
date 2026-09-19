@@ -367,14 +367,18 @@ const encode = {
 /** Raised for every malformed-bytes path. Never `assert`: that one tells the user they found a
  *  telefunc bug, and these bytes are the peer's. */
 class ProtocolViolationError extends Error {
-  constructor(readonly target?: unknown) {
-    super()
+  constructor(
+    debugInfo?: string,
+    readonly target?: unknown,
+  ) {
+    super(debugInfo)
   }
 }
 
-/** `assert` for peer input. `target` names the wire to terminate when it isn't the sender. */
-function assertProtocol(condition: unknown, target?: unknown): asserts condition {
-  if (!condition) throw new ProtocolViolationError(target)
+/** `assert` for peer input, `debugInfo` and all. `target` names the wire to terminate when it
+ *  isn't the sender. */
+function assertProtocol(condition: unknown, debugInfo: string, target?: unknown): asserts condition {
+  if (!condition) throw new ProtocolViolationError(debugInfo, target)
 }
 
 /** The tag is the first header byte — readable before the frame is known to be well-formed. */
@@ -383,7 +387,7 @@ function peekTag(raw: Uint8Array): number | undefined {
 }
 
 function decode(frame: Uint8Array): DecodedFrame {
-  assertProtocol(frame.length >= HEADER)
+  assertProtocol(frame.length >= HEADER, 'frame too short')
   const tag = frame[0] as number
   const index = (frame[1] as number) | ((frame[2] as number) << 8)
   const seq = readU32(frame, 3)
@@ -411,7 +415,7 @@ function decode(frame: Uint8Array): DecodedFrame {
     case TAG.PUBLISH_BINARY_ACK_REQ:
       return { tag: TAG.PUBLISH_BINARY_ACK_REQ, index, seq, data: payload }
     case TAG.ACK_RES: {
-      assertProtocol(payload.length >= 5)
+      assertProtocol(payload.length >= 5, 'ACK_RES payload too short')
       const ackedSeq = readU32(payload, 0)
       const status = payload[4] as number
       assertProtocol(
@@ -419,6 +423,7 @@ function decode(frame: Uint8Array): DecodedFrame {
           status === ACK_STATUS.ERROR ||
           status === ACK_STATUS.ABORT ||
           status === ACK_STATUS.SHIELD_ERROR,
+        `ACK_RES unknown status ${status}`,
       )
       return { tag: TAG.ACK_RES, index, seq, ackedSeq, status, text: textDecoder.decode(payload.subarray(5)) }
     }
@@ -443,7 +448,7 @@ function decode(frame: Uint8Array): DecodedFrame {
       return { tag: TAG.READY, payload: parseJsonPayload(payload) as ReadyPayload }
 
     case TAG.CLOSE:
-      assertProtocol(payload.length >= 4)
+      assertProtocol(payload.length >= 4, 'CLOSE payload too short')
       return { tag: TAG.CLOSE, index, timeoutMs: readU32(payload, 0) }
     case TAG.CLOSE_ACK:
       return { tag: TAG.CLOSE_ACK, index }
@@ -452,24 +457,24 @@ function decode(frame: Uint8Array): DecodedFrame {
     case TAG.ERROR:
       return { tag: TAG.ERROR, index }
     case TAG.WINDOW:
-      assertProtocol(payload.length >= 4)
+      assertProtocol(payload.length >= 4, 'WINDOW payload too short')
       return { tag: TAG.WINDOW, index, bytes: readU32(payload, 0) }
     case TAG.MSG_WINDOW:
-      assertProtocol(payload.length >= 4)
+      assertProtocol(payload.length >= 4, 'MSG_WINDOW payload too short')
       return { tag: TAG.MSG_WINDOW, index, count: readU32(payload, 0) }
     case TAG.BDP_PING:
       return { tag: TAG.BDP_PING, index }
     case TAG.BDP_PING_ACK:
       return { tag: TAG.BDP_PING_ACK, index }
     case TAG.BROADCAST_SUB:
-      assertProtocol(payload.length >= 1)
+      assertProtocol(payload.length >= 1, 'BROADCAST_SUB payload too short')
       return { tag: TAG.BROADCAST_SUB, index, binary: payload[0] === 1 }
     case TAG.BROADCAST_UNSUB:
-      assertProtocol(payload.length >= 1)
+      assertProtocol(payload.length >= 1, 'BROADCAST_UNSUB payload too short')
       return { tag: TAG.BROADCAST_UNSUB, index, binary: payload[0] === 1 }
 
     default:
-      throw new ProtocolViolationError()
+      throw new ProtocolViolationError(`unknown wire frame tag ${tag}`)
   }
 }
 
@@ -497,9 +502,9 @@ const CLIENT_TAGS: ReadonlySet<number> = new Set([
 /** Server ingress: `decode` owns the frame's shape, this owns its direction and the PREPARE cap
  *  (checked on raw bytes — it bounds what a peer can make us parse). */
 function decodeClientFrame(raw: Uint8Array<ArrayBuffer>, maxPrepareBytes: number): DecodedFrame {
-  assertProtocol(peekTag(raw) !== TAG.PREPARE || raw.byteLength <= maxPrepareBytes)
+  assertProtocol(peekTag(raw) !== TAG.PREPARE || raw.byteLength <= maxPrepareBytes, 'PREPARE over byte cap')
   const frame = decode(raw)
-  assertProtocol(CLIENT_TAGS.has(frame.tag))
+  assertProtocol(CLIENT_TAGS.has(frame.tag), `client sent a server-only frame ${frame.tag}`)
   return frame
 }
 
@@ -507,12 +512,12 @@ function parseJsonPayload(payload: Uint8Array): unknown {
   try {
     return JSON.parse(textDecoder.decode(payload))
   } catch {
-    throw new ProtocolViolationError()
+    throw new ProtocolViolationError('payload is not JSON')
   }
 }
 
 function asObject(value: unknown): Record<string, unknown> {
-  assertProtocol(value !== null && typeof value === 'object' && !Array.isArray(value))
+  assertProtocol(value !== null && typeof value === 'object' && !Array.isArray(value), 'payload is not an object')
   return value as Record<string, unknown>
 }
 
@@ -526,31 +531,31 @@ function isUint(value: unknown, max: number): value is number {
 
 function parsePreparePayload(value: unknown): PreparePayload {
   const payload = asObject(value)
-  assertProtocol(isNonEmptyString(payload.upgradeId))
-  assertProtocol(isNonEmptyString(payload.sessionId))
+  assertProtocol(isNonEmptyString(payload.upgradeId), 'PREPARE upgradeId')
+  assertProtocol(isNonEmptyString(payload.sessionId), 'PREPARE sessionId')
   return { upgradeId: payload.upgradeId, sessionId: payload.sessionId }
 }
 
 function parseReconcilePayload(value: unknown): ReconcilePayload {
   const payload = asObject(value)
-  assertProtocol(Array.isArray(payload.open))
+  assertProtocol(Array.isArray(payload.open), 'RECONCILE open')
   const indexes = new Set<number>()
   for (const rawEntry of payload.open) {
     const entry = asObject(rawEntry)
-    assertProtocol(typeof entry.id === 'string')
+    assertProtocol(typeof entry.id === 'string', 'RECONCILE entry id')
     // `ix` is truncated to u16 by the header writer, so a wider one would alias onto another channel.
-    assertProtocol(isUint(entry.ix, 0xffff) && !indexes.has(entry.ix))
+    assertProtocol(isUint(entry.ix, 0xffff) && !indexes.has(entry.ix), 'RECONCILE entry ix')
     indexes.add(entry.ix)
-    assertProtocol(isUint(entry.lastSeq, 0xffffffff))
-    assertProtocol(entry.initial === undefined || entry.initial === true)
+    assertProtocol(isUint(entry.lastSeq, 0xffffffff), 'RECONCILE entry lastSeq')
+    assertProtocol(entry.initial === undefined || entry.initial === true, 'RECONCILE entry initial')
   }
-  assertProtocol(payload.sessionId === undefined || isNonEmptyString(payload.sessionId))
+  assertProtocol(payload.sessionId === undefined || isNonEmptyString(payload.sessionId), 'RECONCILE sessionId')
   // The barrier leg is all-or-nothing: either both discriminants are absent, or `barrier` is
   // literally `true` and both ids are present. Anything else could commit an upgrade it cannot name.
   if (payload.barrier !== undefined || payload.upgradeId !== undefined) {
-    assertProtocol(payload.barrier === true)
-    assertProtocol(isNonEmptyString(payload.upgradeId))
-    assertProtocol(isNonEmptyString(payload.sessionId))
+    assertProtocol(payload.barrier === true, 'barrier discriminant')
+    assertProtocol(isNonEmptyString(payload.upgradeId), 'barrier upgradeId')
+    assertProtocol(isNonEmptyString(payload.sessionId), 'barrier sessionId')
   }
   return payload as ReconcilePayload
 }
@@ -565,12 +570,12 @@ function encodePublishText(text: string, info: WirePublishInfo): string {
 
 function decodePublishText(wire: string): { text: string; info: WirePublishInfo } {
   const nl = wire.indexOf('\n')
-  assertProtocol(nl !== -1)
+  assertProtocol(nl !== -1, 'PUBLISH frame missing info prefix')
   const comma = wire.indexOf(',')
-  assertProtocol(comma !== -1 && comma < nl)
+  assertProtocol(comma !== -1 && comma < nl, 'PUBLISH frame malformed info prefix')
   const seq = Number(wire.slice(0, comma))
   const timestamp = Number(wire.slice(comma + 1, nl))
-  assertProtocol(Number.isFinite(seq) && Number.isFinite(timestamp))
+  assertProtocol(Number.isFinite(seq) && Number.isFinite(timestamp), 'PUBLISH frame info must be finite numbers')
   return { text: wire.slice(nl + 1), info: { seq, timestamp } }
 }
 
@@ -589,10 +594,10 @@ function encodePublishBinary(data: Uint8Array, info: WirePublishInfo): Uint8Arra
 }
 
 function decodePublishBinary(wire: Uint8Array): { data: Uint8Array; info: WirePublishInfo } {
-  assertProtocol(wire.byteLength >= PUBLISH_BINARY_HEADER)
+  assertProtocol(wire.byteLength >= PUBLISH_BINARY_HEADER, 'PUBLISH_BINARY frame too short for info header')
   const view = new DataView(wire.buffer, wire.byteOffset, wire.byteLength)
   const seq = view.getUint32(0, true)
   const timestamp = view.getFloat64(4, true)
-  assertProtocol(Number.isFinite(seq) && Number.isFinite(timestamp))
+  assertProtocol(Number.isFinite(seq) && Number.isFinite(timestamp), 'PUBLISH_BINARY frame info must be finite numbers')
   return { data: wire.subarray(PUBLISH_BINARY_HEADER), info: { seq, timestamp } }
 }
