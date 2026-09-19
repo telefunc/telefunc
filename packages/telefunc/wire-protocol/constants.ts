@@ -81,29 +81,51 @@ export const WS_PROBE_TIMEOUT_MS = 3_000
  *  before declaring the upstream wire dead and falling back to outbox+batch POSTs. */
 export const STREAM_REQUEST_HANDSHAKE_TIMEOUT_MS = 3_000
 
+// ===== SSE -> WS upgrade =====
+
+/** How long the barrier waits for a batch-mode outbox to drain naturally before taking the wire
+ *  over and flushing the queue itself. Unused on a duplex upstream — there the barrier is simply
+ *  the last frame pushed onto the open body. */
 export const UPGRADE_DRAIN_TIMEOUT_MS = 2_000
 
+/** After the client flips to the new wire, how long it waits for the two limbs of the join — FIN on
+ *  the old wire, RECONCILED on the new one — before giving up and falling back to a fresh SSE. */
 export const UPGRADE_HANDOFF_JOIN_TIMEOUT_MS = 2_000
 
+/** Frames arriving on either wire mid-handoff are buffered until the join completes. Exceeding
+ *  either bound abandons the upgrade rather than letting a stalled join grow the buffer unbounded. */
 export const UPGRADE_HANDOFF_BUFFER_BYTES = 8 * 1024 * 1024
 export const UPGRADE_HANDOFF_BUFFER_FRAMES = 4_096
 
+/** Wall-clock bound on one upgrade attempt, from PREPARE to COMMITTED. Kept at or below
+ *  `RECONCILE_TIMEOUT_MS` so the attempt gives up before the reconcile watchdog it runs inside. */
 export const UPGRADE_ATTEMPT_TIMEOUT_MS = 10_000
 
+/** How long the server keeps a staged (PREPARE'd, uncommitted) record before dropping it and
+ *  terminating the probe. An abandoned probe must not hold a session hostage. */
 export const UPGRADE_STAGE_TTL_MS = 10_000
 
+/** Caps on what one PREPARE/barrier frame may make the server parse and stage. */
 export const UPGRADE_MAX_FRAME_BYTES = 256 * 1024
 export const UPGRADE_MAX_OPEN_ENTRIES = 1_024
 export const UPGRADE_MAX_ID_BYTES = 256
 
+/** Server-wide ceiling on concurrently staged upgrades — bounds what unauthenticated PREPAREs
+ *  can pin in memory before any of them commits. */
 export const UPGRADE_MAX_STAGED_RECORDS = 1_024
 export const UPGRADE_MAX_STAGED_BYTES = 64 * 1024 * 1024
 
+// ===== Server ingress bounds =====
+
+/** Largest frame the server will decode. Checked on the raw bytes, before any parse. */
 export const WIRE_MAX_RAW_FRAME_BYTES = 64 * 1024 * 1024
 
+/** Per-connection ceiling on frames accepted but not yet processed. A peer that pushes faster than
+ *  its recv chain drains is terminated instead of being allowed to queue without bound. */
 export const WIRE_MAX_RECV_BACKLOG_BYTES = 64 * 1024 * 1024
 export const WIRE_MAX_RECV_BACKLOG_FRAMES = 50_000
 
+/** Largest SSE request metadata header the server will read off a POST body. */
 export const SSE_METADATA_MAX_BYTES = 64 * 1024
 
 /** How long the client waits for RECONCILED after sending a RECONCILE before declaring the
@@ -113,6 +135,7 @@ export const SSE_METADATA_MAX_BYTES = 64 * 1024
  *  behind the un-acked RECONCILE hangs. */
 export const RECONCILE_TIMEOUT_MS = 10_000
 
+// An attempt outliving the reconcile watchdog would let the watchdog drop the wire mid-commit.
 assert(UPGRADE_ATTEMPT_TIMEOUT_MS <= RECONCILE_TIMEOUT_MS)
 
 // ===== Multiplexed SSE transport =====

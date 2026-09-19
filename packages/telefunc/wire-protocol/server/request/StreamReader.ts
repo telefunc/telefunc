@@ -49,12 +49,15 @@ class StreamReader {
     this.source = (source as AsyncIterable<Uint8Array<ArrayBuffer>>)[Symbol.asyncIterator]()
   }
 
+  /** Read the metadata: [u32 big-endian length][UTF-8 bytes]. `maxBytes` bounds what a peer can
+   *  make us buffer before the frame is known to be legitimate. */
   async readMetadata(maxBytes: number) {
     const length = await this.readU32()
     if (length > maxBytes) throw new OversizeFrameError()
     return new TextDecoder().decode(await this.readExact(length))
   }
 
+  /** Read one length-prefixed chunk, or null if the stream is cleanly exhausted. */
   async readLengthPrefixedBytesOrNull(maxBytes: number) {
     const lengthBytes = await this.readExactOrNull(4)
     if (!lengthBytes) return null

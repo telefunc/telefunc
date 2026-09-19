@@ -42,6 +42,8 @@ import { assert } from '../../utils/assert.js'
 import { ACK_STATUS, ProtocolViolationError, TAG, isChannelCtrlTag } from '../shared-ws.js'
 import type { AckResultStatus, ChannelCtrlFrame, ChannelDataFrame, ChannelFrame } from '../shared-ws.js'
 
+/** Peer-authored JSON: a parse failure is the peer's fault, so it must reach the recv turn as a
+ *  protocol violation rather than as an internal bug. */
 function parsePeerText(text: string): unknown {
   try {
     return parse(text)
@@ -470,6 +472,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   }
 
   _onPeerAckReqMessage(text: string, seq: number): Promise<void> {
+    // Parsed here rather than inside the async dispatch so a malformed payload throws in the recv
+    // turn, where the violation still names the wire that sent it.
     return this._trackAck(this._dispatchAckReq(parsePeerText(text) as ChannelData<ClientToServer>, seq))
   }
 
@@ -536,6 +540,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
           throw new ProtocolViolationError()
       }
     } catch (err) {
+      // Settle the caller AND rethrow: the awaiting `send()` must not hang, and a malformed ack is
+      // still a wire-level violation for the recv turn to act on.
       pending.reject(err instanceof Error ? err : new Error(String(err)))
       throw err
     } finally {
