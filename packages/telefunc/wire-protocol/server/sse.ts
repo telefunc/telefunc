@@ -73,20 +73,18 @@ class SseConnectionTransport {
     // and should answer with a Node `Readable` so it pipes straight to the socket. Web
     // adapters get `request.body` (no `readable`) and want a `ReadableStream` back.
     const useNodeStream = readable !== undefined
+    let connId: string | null = null
     try {
       const reader = new StreamReader(source)
-      const rawMetadata = await reader.readMetadata(SSE_METADATA_MAX_BYTES)
-      let metadata: SseRequestMetadata
-      try {
-        metadata = parseSseRequestMetadata(rawMetadata)
-      } catch {
-        // Malformed metadata is untrusted client ingress, not a truncation — same class as the decode seam.
-        throw new ProtocolViolationError('malformed SSE request metadata')
-      }
-      if (metadata.streamResponse) return await this.handleStreamResponsePost(metadata.connId, reader, useNodeStream)
-      if (metadata.streamRequest) return await this.handleStreamRequestPost(metadata.connId, reader)
-      return await this.handleBatchPost(metadata.connId, reader)
+      const metadata = parseMetadata(await reader.readMetadata(SSE_METADATA_MAX_BYTES))
+      connId = metadata.connId
+      if (metadata.streamResponse) return await this.handleStreamResponsePost(connId, reader, useNodeStream)
+      if (metadata.streamRequest) return await this.handleStreamRequestPost(connId, reader)
+      return await this.handleBatchPost(connId, reader)
     } catch (err) {
+      // An oversize frame leaves no next frame boundary to resume from, so it ends the wire, not
+      // just this POST.
+      if (err instanceof OversizeFrameError && connId !== null) this.closeWire(connId)
       // A typed protocol-input fault is the client's: answer 400 and stay quiet. Anything else is our
       // bug — rethrow so the request pipeline (`runTelefunc`) logs it and masks it as a 500.
       if (
@@ -160,7 +158,7 @@ class SseConnectionTransport {
     if (!(await this.waitReady(connection))) return badRequest()
     try {
       while (true) {
-        const raw = await this.readFrameOrCloseWire(connection, reader)
+        const raw = await reader.readLengthPrefixedBytesOrNull(WIRE_MAX_RAW_FRAME_BYTES)
         if (!raw || connection.closed) break
         this.dispatchAndReport(connection, raw)
       }
@@ -199,11 +197,11 @@ class SseConnectionTransport {
       await this.settlePendingDispatches(connection)
       this.mux.sendReconciled(outcome)
     } catch (err) {
-      // Body truncated mid-frame (`StreamReader` throws). This promise is fire-and-forget, so a
-      // rethrow would be an unhandled rejection. Transient: the channels keep their reconnect
-      // grace and the client's retry re-attaches them.
+      // The body ended mid-frame. This promise is fire-and-forget, so a rethrow would be an
+      // unhandled rejection. A truncation is just the client hanging up — the channels keep their
+      // reconnect grace; an oversize frame leaves no next frame boundary, so that wire is finished.
       reportDispatchBug(err)
-      this.closeConnection(connection, { permanent: false })
+      this.closeConnection(connection, { permanent: err instanceof OversizeFrameError })
     } finally {
       // Every path releases the gate here — the parked POSTs then see whatever state we left.
       connection.resolveReady()
@@ -232,23 +230,12 @@ class SseConnectionTransport {
   private async drainDeferred(connection: SseConnection, reader: StreamReader): Promise<ReconcileOutcome | null> {
     let outcome: ReconcileOutcome | null = null
     while (true) {
-      const raw = await this.readFrameOrCloseWire(connection, reader)
+      const raw = await reader.readLengthPrefixedBytesOrNull(WIRE_MAX_RAW_FRAME_BYTES)
       if (!raw || connection.closed) break
       const next = await this.mux.onConnectionRawMessageDeferredReconciled(connection, raw)
       if (next !== null) outcome = next
     }
     return outcome
-  }
-
-  /** Next frame, or null at a clean end of body. An oversize frame desynchronises the body — there
-   *  is no next frame boundary to find — so the wire is closed for good and the error rethrown. */
-  private async readFrameOrCloseWire(connection: SseConnection, reader: StreamReader) {
-    try {
-      return await reader.readLengthPrefixedBytesOrNull(WIRE_MAX_RAW_FRAME_BYTES)
-    } catch (err) {
-      if (err instanceof OversizeFrameError) this.closeConnection(connection, { permanent: true })
-      throw err
-    }
   }
 
   private async resolveConnection(connId: string): Promise<SseConnection | null> {
@@ -289,6 +276,11 @@ class SseConnectionTransport {
     for (const resolve of pending) resolve(connection)
   }
 
+  private closeWire(connId: string): void {
+    const connection = this.mux.getConnectionByConnId<SseConnection>(connId)
+    if (connection) this.closeConnection(connection, { permanent: true })
+  }
+
   private sendNow(connection: SseConnection, frame: Uint8Array<ArrayBuffer>): void {
     if (connection.closed) return
     connection.stream.push(textEncoder.encode(`data: ${uint8ArrayToBase64url(frame)}\n\n`))
@@ -317,6 +309,15 @@ class SseConnectionTransport {
   private terminateConnection(connection: SseConnection): void {
     const terminatePermanently = this.mux.readPermanentTermination(connection)
     this.closeConnection(connection, { permanent: terminatePermanently === true })
+  }
+}
+
+/** Malformed metadata is untrusted client ingress, not a truncation — same class as the decode seam. */
+function parseMetadata(raw: string): SseRequestMetadata {
+  try {
+    return parseSseRequestMetadata(raw)
+  } catch {
+    throw new ProtocolViolationError('malformed SSE request metadata')
   }
 }
 
