@@ -3,7 +3,7 @@ export type { MuxChannel, MuxConnection }
 
 import { parse } from '@brillout/json-serializer/parse'
 import { makeAbortError, makeBugError } from '../../client/remoteTelefunctionCall/errors.js'
-import { assert } from '../../utils/assert.js'
+import { assert, assertUsage } from '../../utils/assert.js'
 import { ChannelClosedError } from '../channel-errors.js'
 import { NetworkError } from '../../shared/NetworkError.js'
 import { base64urlToUint8Array } from '../base64url.js'
@@ -466,7 +466,8 @@ class ClientConnection implements MuxConnection {
       clearTimeout(this.ttl)
       this.ttl = null
     }
-    if (this.nextIndex > 0xffff) throw new Error('Channel index limit reached')
+    // The wire header truncates `ix` to u16, so index 0x10000 would alias onto channel 0.
+    assertUsage(this.nextIndex <= 0xffff, 'Too many channels opened on one connection (65536 max)')
     const ix = this.nextIndex++
     this.enterChannelPending(ix, channel, true)
     this.replayBuffers.set(
@@ -746,8 +747,9 @@ class ClientConnection implements MuxConnection {
     if (isChannelDataFrame(frame)) {
       if (this.trackSeq(frame.index, frame.seq) === 'dup') return
     }
-    // Connection-level + channel-termination ctrls stay here; they involve connection
-    // and goes through `channel._dispatchFrame`.
+    // Connection-level + channel-termination ctrls stay here; they involve connection bookkeeping
+    // (upgrade state, channel release, TTL). Everything else is per-channel and goes through
+    // `channel._dispatchFrame`.
     switch (frame.tag) {
       case TAG.FIN:
         this.handleUpgradeFin()
@@ -1058,7 +1060,7 @@ class ClientConnection implements MuxConnection {
       attempt.signal.addEventListener('abort', () => resolve(null), { once: true })
     })
     this.armAttemptDeadline(attempt)
-    probe.send(this.buildPrepareFrame(upgradeId, sessionId))
+    probe.send(encode.prepare({ upgradeId, sessionId }))
     const ready = await readyP
     if (!ready || ready.upgradeId !== upgradeId || attempt.signal.aborted) {
       attempt.abort()
@@ -1234,10 +1236,6 @@ class ClientConnection implements MuxConnection {
     return { kind: 'reconcile', frame: encode.reconcile(reconcile) }
   }
 
-  private buildPrepareFrame(upgradeId: string, sessionId: string): Uint8Array<ArrayBuffer> {
-    return encode.prepare({ upgradeId, sessionId })
-  }
-
   drainBufferedFramesForReconcile(isInitialBatch: boolean): OutboundFrame[] {
     if (this.transport.reconcileMode !== 'batch-on-reconcile') return []
     // The hazard is confined to a *reconnect's* initial batch: the previous wire may have died
@@ -1349,6 +1347,8 @@ class ClientConnection implements MuxConnection {
     this.dispose()
   }
 
+  /** Dedup against double-delivery. Transports are TCP-ordered and replay sends a contiguous slice
+   *  starting at our reported `lastSeq + 1`, so duplicates shouldn't occur in normal operation. */
   private trackSeq(ix: number, seq: number): 'accept' | 'dup' {
     const prev = this.lastSeqByChannel.get(ix) ?? 0
     if (seq <= prev) return 'dup'
@@ -1486,7 +1486,9 @@ class WsTransport implements ClientChannelTransport {
       send: (frame) => {
         try {
           ws.send(frame)
-        } catch {}
+        } catch {
+          // Socket died between the open event and this send — `onClose` aborts the attempt.
+        }
       },
       onFrame: (cb) => {
         onFrame = cb
