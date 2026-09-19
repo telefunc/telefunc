@@ -466,7 +466,6 @@ class ClientConnection implements MuxConnection {
       clearTimeout(this.ttl)
       this.ttl = null
     }
-    // The wire header truncates `ix` to u16, so index 0x10000 would alias onto channel 0.
     assertUsage(this.nextIndex <= 0xffff, 'Too many channels opened on one connection (65536 max)')
     const ix = this.nextIndex++
     this.enterChannelPending(ix, channel, true)

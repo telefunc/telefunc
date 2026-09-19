@@ -42,8 +42,7 @@ import { assert } from '../../utils/assert.js'
 import { ACK_STATUS, ProtocolViolationError, TAG, isChannelCtrlTag } from '../shared-ws.js'
 import type { AckResultStatus, ChannelCtrlFrame, ChannelDataFrame, ChannelFrame } from '../shared-ws.js'
 
-/** Peer-authored JSON: a parse failure is the peer's fault, so it must reach the recv turn as a
- *  protocol violation rather than as an internal bug. */
+/** Peer-authored JSON: a parse failure is the peer's, so it surfaces as a protocol violation. */
 function parsePeerText(text: string): unknown {
   try {
     return parse(text)

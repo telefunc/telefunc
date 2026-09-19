@@ -83,26 +83,22 @@ export const STREAM_REQUEST_HANDSHAKE_TIMEOUT_MS = 3_000
 
 // ===== SSE -> WS upgrade =====
 
-/** How long the barrier waits for a batch-mode outbox to drain naturally before taking the wire
- *  over and flushing the queue itself. Unused on a duplex upstream — there the barrier is simply
- *  the last frame pushed onto the open body. */
+/** Batch mode only: how long the barrier waits for a natural outbox drain before flushing it
+ *  itself. On a duplex upstream the barrier is just the last frame pushed onto the open body. */
 export const UPGRADE_DRAIN_TIMEOUT_MS = 2_000
 
-/** After the client flips to the new wire, how long it waits for the two limbs of the join — FIN on
- *  the old wire, RECONCILED on the new one — before giving up and falling back to a fresh SSE. */
+/** Post-flip wait for both join limbs — FIN on the old wire, RECONCILED on the new one. */
 export const UPGRADE_HANDOFF_JOIN_TIMEOUT_MS = 2_000
 
-/** Frames arriving on either wire mid-handoff are buffered until the join completes. Exceeding
- *  either bound abandons the upgrade rather than letting a stalled join grow the buffer unbounded. */
+/** Mid-handoff frames are buffered until the join completes; past either bound the upgrade is
+ *  abandoned rather than letting a stalled join grow the buffer without limit. */
 export const UPGRADE_HANDOFF_BUFFER_BYTES = 8 * 1024 * 1024
 export const UPGRADE_HANDOFF_BUFFER_FRAMES = 4_096
 
-/** Wall-clock bound on one upgrade attempt, from PREPARE to COMMITTED. Kept at or below
- *  `RECONCILE_TIMEOUT_MS` so the attempt gives up before the reconcile watchdog it runs inside. */
+/** Wall-clock bound on one attempt, PREPARE to COMMITTED (see the assertion below). */
 export const UPGRADE_ATTEMPT_TIMEOUT_MS = 10_000
 
-/** How long the server keeps a staged (PREPARE'd, uncommitted) record before dropping it and
- *  terminating the probe. An abandoned probe must not hold a session hostage. */
+/** How long a staged, uncommitted upgrade may hold its session before the probe is dropped. */
 export const UPGRADE_STAGE_TTL_MS = 10_000
 
 /** Caps on what one PREPARE/barrier frame may make the server parse and stage. */
@@ -110,18 +106,17 @@ export const UPGRADE_MAX_FRAME_BYTES = 256 * 1024
 export const UPGRADE_MAX_OPEN_ENTRIES = 1_024
 export const UPGRADE_MAX_ID_BYTES = 256
 
-/** Server-wide ceiling on concurrently staged upgrades — bounds what unauthenticated PREPARE frames
- *  can pin in memory before any of them commits. */
+/** Bounds what unauthenticated PREPARE frames can pin in memory before any of them commits. */
 export const UPGRADE_MAX_STAGED_RECORDS = 1_024
 export const UPGRADE_MAX_STAGED_BYTES = 64 * 1024 * 1024
 
 // ===== Server ingress bounds =====
 
-/** Largest frame the server will decode. Checked on the raw bytes, before any parse. */
+/** Largest frame the server will decode, checked on the raw bytes before any parse. */
 export const WIRE_MAX_RAW_FRAME_BYTES = 64 * 1024 * 1024
 
-/** Per-connection ceiling on frames accepted but not yet processed. A peer that pushes faster than
- *  its recv chain drains is terminated instead of being allowed to queue without bound. */
+/** Per-connection ceiling on accepted-but-unprocessed frames: a peer that outruns its recv chain
+ *  is terminated rather than allowed to queue without bound. */
 export const WIRE_MAX_RECV_BACKLOG_BYTES = 64 * 1024 * 1024
 export const WIRE_MAX_RECV_BACKLOG_FRAMES = 50_000
 

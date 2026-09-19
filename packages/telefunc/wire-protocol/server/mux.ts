@@ -18,7 +18,7 @@ import {
   WIRE_MAX_RECV_BACKLOG_FRAMES,
   type ChannelTransports,
 } from '../constants.js'
-import { TAG, ProtocolViolationError, decodeClientFrame, encode, peekTag } from '../shared-ws.js'
+import { TAG, ProtocolViolationError, assertProtocol, decodeClientFrame, encode, peekTag } from '../shared-ws.js'
 import type { ChannelFrame, PreparePayload, ReconcilePayload, ReconciledPayload } from '../shared-ws.js'
 import { IndexedPeer, type PeerSender } from './IndexedPeer.js'
 import type { ServerChannel } from './channel.js'
@@ -46,8 +46,7 @@ type ReconcileOutcome = {
   sessionId: string
   openList: ReconciledPayload['open']
   finalizeUpgrade: (() => void) | null
-  /** The wire this RECONCILED belongs on. A barrier reconciles the staged WS, so it is not always
-   *  the wire the frame arrived on. */
+  /** The wire this RECONCILED belongs on — a barrier reconciles the staged WS, not the sender. */
   deliverTo: unknown
   upgradeId?: string
 }
@@ -322,8 +321,8 @@ class ChannelMux {
       this.send(connection, encode.pong())
       return null
     }
-    if (entry.state.retiredByBarrier) throw new ProtocolViolationError()
-    if (this.stagedUpgrades.has(connection)) throw new ProtocolViolationError()
+    assertProtocol(!entry.state.retiredByBarrier)
+    assertProtocol(!this.stagedUpgrades.has(connection))
     if (frame.tag === TAG.PREPARE) return this.handlePrepare(entry, connection, frame.payload, rawFrame.byteLength)
     if (frame.tag === TAG.RECONCILE) {
       if (frame.payload.barrier === true) {
@@ -333,7 +332,7 @@ class ChannelMux {
       return this.reconcile(entry, connection, frame.payload)
     }
     const sessionId = entry.transport.getSessionId(connection)
-    if (!sessionId) throw new ProtocolViolationError()
+    assertProtocol(sessionId)
     // Frame for an ix that's no longer in the session — client closed the channel and the
     // server reconciled it out, but a frame was still in flight. Drop silently.
     this.sessions.get(sessionId, (frame as ChannelFrame).index)?.channel._dispatchFrame(frame as ChannelFrame)
@@ -347,7 +346,7 @@ class ChannelMux {
       if (staleProbe === undefined) continue
       // A committing barrier already owns this session; a concurrent claim on it is refused rather
       // than allowed to abandon the stage out from under the in-flight commit.
-      if (this.stagedUpgrades.get(staleProbe)?.phase === 'committing') throw new ProtocolViolationError()
+      assertProtocol(this.stagedUpgrades.get(staleProbe)?.phase !== 'committing')
       this.abandonStage(staleProbe)
     }
   }
@@ -358,11 +357,11 @@ class ChannelMux {
     payload: PreparePayload,
     rawByteLength: number,
   ): null {
-    if (entry.transport.getSessionId(connection)) throw new ProtocolViolationError()
-    if (!this.sessions.peekSession(payload.sessionId)) throw new ProtocolViolationError()
-    if (this.stagedByPrevSession.has(payload.sessionId)) throw new ProtocolViolationError()
-    if (this.stagedUpgrades.size >= UPGRADE_MAX_STAGED_RECORDS) throw new ProtocolViolationError()
-    if (this.stagedBytes + rawByteLength > UPGRADE_MAX_STAGED_BYTES) throw new ProtocolViolationError()
+    assertProtocol(!entry.transport.getSessionId(connection))
+    assertProtocol(this.sessions.peekSession(payload.sessionId))
+    assertProtocol(!this.stagedByPrevSession.has(payload.sessionId))
+    assertProtocol(this.stagedUpgrades.size < UPGRADE_MAX_STAGED_RECORDS)
+    assertProtocol(this.stagedBytes + rawByteLength <= UPGRADE_MAX_STAGED_BYTES)
 
     const timer = unrefTimer(setTimeout(() => this.abandonStage(connection), UPGRADE_STAGE_TTL_MS))
     this.stagedUpgrades.set(connection, {
@@ -394,11 +393,9 @@ class ChannelMux {
 
     try {
       this.enforceUpgradeAdmission(ctrl.open, rawByteLength)
-      for (const channel of ctrl.open) if (channel.initial) throw new ProtocolViolationError(wsConnection)
-      if (ctrl.upgradeId !== stage.upgradeId) throw new ProtocolViolationError(wsConnection)
-      if (entry.transport.getSessionId(connection) !== stage.prevSessionId) {
-        throw new ProtocolViolationError(wsConnection)
-      }
+      for (const channel of ctrl.open) assertProtocol(!channel.initial, wsConnection)
+      assertProtocol(ctrl.upgradeId === stage.upgradeId, wsConnection)
+      assertProtocol(entry.transport.getSessionId(connection) === stage.prevSessionId, wsConnection)
 
       const wsEntry = this.connectionEntries.get(wsConnection)
       assert(wsEntry, 'staged probe has no connection entry')
@@ -453,10 +450,10 @@ class ChannelMux {
 
   /** Admission policy only — `decodeClientFrame` has already established the frame's shape. */
   private enforceUpgradeAdmission(open: ReconcilePayload['open'], rawByteLength: number): void {
-    if (rawByteLength > UPGRADE_MAX_FRAME_BYTES) throw new ProtocolViolationError()
-    if (open.length > UPGRADE_MAX_OPEN_ENTRIES) throw new ProtocolViolationError()
+    assertProtocol(rawByteLength <= UPGRADE_MAX_FRAME_BYTES)
+    assertProtocol(open.length <= UPGRADE_MAX_OPEN_ENTRIES)
     for (const channel of open) {
-      if (textEncoder.encode(channel.id).byteLength > UPGRADE_MAX_ID_BYTES) throw new ProtocolViolationError()
+      assertProtocol(textEncoder.encode(channel.id).byteLength <= UPGRADE_MAX_ID_BYTES)
     }
   }
 

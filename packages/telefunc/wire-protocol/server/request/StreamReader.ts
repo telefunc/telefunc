@@ -49,8 +49,7 @@ class StreamReader {
     this.source = (source as AsyncIterable<Uint8Array<ArrayBuffer>>)[Symbol.asyncIterator]()
   }
 
-  /** Read the metadata: [u32 big-endian length][UTF-8 bytes]. `maxBytes` bounds what a peer can
-   *  make us buffer before the frame is known to be legitimate. */
+  /** Read the metadata: [u32 big-endian length][UTF-8 bytes]. `maxBytes` bounds what a peer buffers. */
   async readMetadata(maxBytes: number) {
     const length = await this.readU32()
     if (length > maxBytes) throw new OversizeFrameError()
