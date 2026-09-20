@@ -302,7 +302,7 @@ class SseConnectionTransport {
     connection.closed = true
     // Unblock any data POST awaiting `ready` — its dispatch sees the closed connection and bails.
     connection.resolveReady()
-    this.mux.onConnectionClosed(connection, permanent)
+    this.mux.onConnectionClosed(connection, { permanent })
     connection.stream.close()
   }
 

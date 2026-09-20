@@ -23,6 +23,10 @@ import type { ChannelFrame, PreparePayload, ReconcilePayload, ReconciledPayload 
 import { IndexedPeer, type PeerSender } from './IndexedPeer.js'
 import type { ServerChannel } from './channel.js'
 
+/** A transport-owned connection handle. The mux never looks inside one — it only compares them by
+ *  identity and hands them back to the transport that created it. */
+type Wire = unknown
+
 // Single-instance kernel: owns channels, sessions, per-connection runtime. Transports talk
 // to this class via `onConnectionOpen` and from then on identify connections by object
 // identity. Multi-instance deployments rely on sticky sessions at the load balancer.
@@ -47,7 +51,7 @@ type ReconcileOutcome = {
   openList: ReconciledPayload['open']
   finalizeUpgrade: (() => void) | null
   /** The wire this RECONCILED belongs on — a barrier reconciles the staged WS, not the sender. */
-  deliverTo: unknown
+  deliverTo: Wire
   upgradeId?: string
 }
 
@@ -59,7 +63,7 @@ type StagedUpgrade = {
   phase: 'staged' | 'committing'
 }
 
-function retargetToProbe(err: unknown, probe: unknown): unknown {
+function retargetToProbe(err: unknown, probe: Wire): unknown {
   if (!(err instanceof ProtocolViolationError) || err.target !== undefined) return err
   return new ProtocolViolationError(err.message, probe)
 }
@@ -120,9 +124,9 @@ class ChannelMux {
   private readonly connectionEntries = new Map<unknown, ConnectionEntry>()
   /** Reverse index for transports with a stable connId (SSE). Lets data POSTs locate the
    *  live stream connection, and catches a duplicate-connId reconnect racing teardown. */
-  private readonly connectionsByConnId = new Map<string, unknown>()
-  private readonly stagedUpgrades = new Map<unknown, StagedUpgrade>()
-  private readonly stagedByPrevSession = new Map<string, unknown>()
+  private readonly connectionsByConnId = new Map<string, Wire>()
+  private readonly stagedUpgrades = new Map<Wire, StagedUpgrade>()
+  private readonly stagedByPrevSession = new Map<string, Wire>()
   private stagedBytes = 0
 
   /** Resolved lazily so the mux can be constructed at module-load (the globalObject factory
@@ -185,13 +189,13 @@ class ChannelMux {
     this.resetPingTimer(connection)
   }
 
-  async onConnectionRawMessage(connection: unknown, rawFrame: Uint8Array<ArrayBuffer>): Promise<void> {
+  async onConnectionRawMessage(connection: Wire, rawFrame: Uint8Array<ArrayBuffer>): Promise<void> {
     const outcome = await this.dispatchInbound(connection, rawFrame)
     if (outcome) this.sendReconciled(outcome)
   }
 
   onConnectionRawMessageDeferredReconciled(
-    connection: unknown,
+    connection: Wire,
     rawFrame: Uint8Array<ArrayBuffer>,
   ): Promise<ReconcileOutcome | null> {
     return this.dispatchInbound(connection, rawFrame)
@@ -218,10 +222,10 @@ class ChannelMux {
     outcome.finalizeUpgrade?.()
   }
 
-  onConnectionClosed(connection: unknown, isPermanent: boolean): void {
+  onConnectionClosed(connection: Wire, { permanent }: { permanent: boolean }): void {
     const entry = this.connectionEntries.get(connection)
     if (!entry) return
-    entry.state.closed = { isPermanent }
+    entry.state.closed = { isPermanent: permanent }
     this.clearPingTimer(entry.state)
     this.connectionEntries.delete(connection)
     const connId = entry.transport.getConnId(connection)
@@ -238,11 +242,11 @@ class ChannelMux {
     // Channels survive a transient close (`_onPeerDisconnect`'s reconnectTimeout grace);
     // permanent tears them down. The session-level finalizer is dropped on any close;
     // reconcile rebuilds it on next attach.
-    this.detachSession(sessionId, isPermanent ? DETACH_REASON.PERMANENT : DETACH_REASON.TRANSIENT)
+    this.detachSession(sessionId, permanent ? DETACH_REASON.PERMANENT : DETACH_REASON.TRANSIENT)
     this.sessionFinalizers.delete(sessionId)
   }
 
-  readPermanentTermination(connection: unknown): boolean | null {
+  readPermanentTermination(connection: Wire): boolean | null {
     return this.connectionEntries.get(connection)?.state.terminatePermanently ?? null
   }
 
@@ -256,7 +260,7 @@ class ChannelMux {
 
   /** PING bypasses the recv chain — serializing it would tie liveness to the slowest
    *  awaitable on the connection. */
-  private dispatchInbound(connection: unknown, rawFrame: Uint8Array<ArrayBuffer>): Promise<ReconcileOutcome | null> {
+  private dispatchInbound(connection: Wire, rawFrame: Uint8Array<ArrayBuffer>): Promise<ReconcileOutcome | null> {
     const entry = this.connectionEntries.get(connection)
     if (!entry) return Promise.resolve(null)
     const { state } = entry
@@ -282,7 +286,7 @@ class ChannelMux {
 
   private async runInboundTurn(
     entry: ConnectionEntry,
-    connection: unknown,
+    connection: Wire,
     rawFrame: Uint8Array<ArrayBuffer>,
     byteLength: number,
   ): Promise<ReconcileOutcome | null> {
@@ -302,7 +306,7 @@ class ChannelMux {
     }
   }
 
-  private terminateWire(entry: ConnectionEntry, connection: unknown): void {
+  private terminateWire(entry: ConnectionEntry, connection: Wire): void {
     if (this.stagedUpgrades.get(connection)?.phase === 'staged') this.clearStage(connection)
     entry.state.terminatePermanently = true
     entry.transport.terminateConnection(connection)
@@ -312,7 +316,7 @@ class ChannelMux {
    *  `reconciled`). Anything but reconcile/ping before reconciliation is a violation. */
   private handleFrame(
     entry: ConnectionEntry,
-    connection: unknown,
+    connection: Wire,
     rawFrame: Uint8Array<ArrayBuffer>,
   ): null | Promise<ReconcileOutcome | null> {
     const frame = decodeClientFrame(rawFrame, UPGRADE_MAX_FRAME_BYTES)
@@ -341,7 +345,7 @@ class ChannelMux {
 
   /** An ordinary reconcile claims its session, abandoning any probe staged on it — unless a barrier
    *  is mid-commit on that session, in which case the claim is refused instead. */
-  private claimSessionForReconcile(ctrl: ReconcilePayload, entry: ConnectionEntry, connection: unknown): void {
+  private claimSessionForReconcile(ctrl: ReconcilePayload, entry: ConnectionEntry, connection: Wire): void {
     for (const claimed of [ctrl.sessionId, entry.transport.getSessionId(connection)]) {
       if (claimed === undefined) continue
       const staleProbe = this.stagedByPrevSession.get(claimed)
@@ -355,7 +359,7 @@ class ChannelMux {
 
   private handlePrepare(
     entry: ConnectionEntry,
-    connection: unknown,
+    connection: Wire,
     payload: PreparePayload,
     rawByteLength: number,
   ): null {
@@ -381,7 +385,7 @@ class ChannelMux {
 
   private handleBarrier(
     entry: ConnectionEntry,
-    connection: unknown,
+    connection: Wire,
     ctrl: ReconcilePayload,
     rawByteLength: number,
   ): Promise<ReconcileOutcome> | null {
@@ -419,7 +423,7 @@ class ChannelMux {
   private async settleBarrierCommit(
     oldEntry: ConnectionEntry,
     wsEntry: ConnectionEntry,
-    wsConnection: unknown,
+    wsConnection: Wire,
     ctrl: ReconcilePayload,
     upgradeId: string,
   ): Promise<ReconcileOutcome> {
@@ -436,7 +440,7 @@ class ChannelMux {
   }
 
   /** Forgets the stage AND kills the probe holding it. No-op once the stage is committing. */
-  private abandonStage(wsConnection: unknown): void {
+  private abandonStage(wsConnection: Wire): void {
     if (this.stagedUpgrades.get(wsConnection)?.phase !== 'staged') return
     this.clearStage(wsConnection)
     const entry = this.connectionEntries.get(wsConnection)
@@ -446,7 +450,7 @@ class ChannelMux {
   }
 
   /** Bookkeeping only — the probe wire is left alone. */
-  private clearStage(wsConnection: unknown): void {
+  private clearStage(wsConnection: Wire): void {
     const stage = this.stagedUpgrades.get(wsConnection)
     if (!stage) return
     clearTimeout(stage.timer)
@@ -468,11 +472,7 @@ class ChannelMux {
 
   // ── Reconcile + attach ──────────────────────────────────────────────
 
-  private async reconcile(
-    entry: ConnectionEntry,
-    connection: unknown,
-    ctrl: ReconcilePayload,
-  ): Promise<ReconcileOutcome> {
+  private async reconcile(entry: ConnectionEntry, connection: Wire, ctrl: ReconcilePayload): Promise<ReconcileOutcome> {
     const { state, transport } = entry
     const finalizeUpgrade = ctrl.barrier && ctrl.sessionId ? this.buildUpgradeFinalizer(ctrl.sessionId) : null
     state.reconciling = true
@@ -602,7 +602,7 @@ class ChannelMux {
 
   /** Sole server→client send path; sync so wire order = call order. Per-channel
    *  byte+msg credit (see `flow-control/`) bounds queue growth. */
-  private send(connection: unknown, frame: Uint8Array<ArrayBuffer>, onCommit?: () => void): void {
+  private send(connection: Wire, frame: Uint8Array<ArrayBuffer>, onCommit?: () => void): void {
     const entry = this.connectionEntries.get(connection)
     if (!entry) return
     onCommit?.()
@@ -624,7 +624,7 @@ class ChannelMux {
     state.pingTimer = null
   }
 
-  private resetPingTimer(connection: unknown): void {
+  private resetPingTimer(connection: Wire): void {
     const entry = this.connectionEntries.get(connection)
     if (!entry) return
     const { state, transport } = entry

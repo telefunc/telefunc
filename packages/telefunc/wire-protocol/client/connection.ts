@@ -197,8 +197,6 @@ type ClientChannelTransport = {
   /** True iff client→server frames are per-POST batched instead of pushed onto
    *  one streaming body — signals the channel to use a larger initial window. */
   readonly batched: boolean
-  probe(): Promise<ProbeWire | null>
-  adoptProbe(): void
   start(): void
   hasWire(): boolean
   isConnecting(): boolean
@@ -208,13 +206,28 @@ type ClientChannelTransport = {
   abandonActiveTransport(): void
   closeAbandonedTransport(): void
   applyReconciledSettings(ctrl: ReconciledPayload): void
-  emitBarrier(buildFrame: () => OutboundFrame, signal: AbortSignal): Promise<BarrierEmission>
   /** Connection constructs the Heartbeat (with the funnel-bound onDead) and hands it over.
    *  Transport's frame receive path routes PONG to it directly (`heartbeat?.resetPong()`). */
   attachHeartbeat(hb: Heartbeat): void
   detachHeartbeat(): void
   hasHeartbeat(): boolean
   dispose(): void
+}
+
+/** The wire an upgrade moves FROM: it has to carry the barrier as its last frame. */
+type UpgradeSource = ClientChannelTransport & {
+  emitBarrier(buildFrame: () => OutboundFrame, signal: AbortSignal): Promise<BarrierEmission>
+}
+
+/** The wire an upgrade moves TO: it has to be openable without becoming the transport, and
+ *  adoptable once the barrier commits. */
+type UpgradeTarget = ClientChannelTransport & {
+  probe(): Promise<ProbeWire | null>
+  adoptProbe(): void
+}
+
+function isUpgradeSource(transport: ClientChannelTransport): transport is UpgradeSource {
+  return transport.type === CHANNEL_TRANSPORT.SSE
 }
 
 type OutboxEntry = { frame: Uint8Array<ArrayBuffer>; deadline: number }
@@ -247,12 +260,16 @@ type UpgradeState =
       tag: 'committing'
       attempt: AbortController
       deadline: ReturnType<typeof setTimeout> | null
-      from: ClientChannelTransport
-      to: ClientChannelTransport
+      from: UpgradeSource
+      to: UpgradeTarget
       probeHeartbeat: Heartbeat
-      /** Consumed to null by the COMMITTED echoing it — the exactly-once settle marker. */
-      upgradeId: string | null
+      upgradeId: string
+      /** The join's two limbs, one per wire. Both must land before dispatching resumes. */
       finReceived: boolean
+      committed: boolean
+      /** Frames the probe delivered before the flip. The swap has not happened, so not even a
+       *  control frame may be acted on yet; the flip is what releases them. */
+      heldBeforeFlip: BufferedWireFrame[]
       buffer: UpgradeBuffer
       bufferedBytes: number
       bufferedFrames: number
@@ -267,6 +284,11 @@ type BufferedWireFrame = { frame: DecodedFrame; byteLength: number }
 /** Partitioned by SOURCE WIRE, not one arrival-ordered list, and `old` drains FIRST: old-wire frames
  *  are largely non-recoverable (seq-less terminal ctrls) while new-wire frames all replay. */
 type UpgradeBuffer = { old: BufferedWireFrame[]; new: BufferedWireFrame[] }
+
+/** FIN (old wire) and RECONCILED (new wire) are the join's two limbs; everything else is payload. */
+function isJoinLimb(frame: DecodedFrame): boolean {
+  return frame.tag === TAG.FIN || frame.tag === TAG.RECONCILED
+}
 
 /** Per-channel lifecycle. `releasing` = unregistered before the server confirmed —
  *  entry stays so the upcoming RECONCILE carries the ix and buffered ABORT/CLOSE flow alongside. */
@@ -314,10 +336,6 @@ class ClientConnection implements MuxConnection {
   private reconciling = false
   private reconcileTimer: ReturnType<typeof setTimeout> | null = null
   private ttl: ReturnType<typeof setTimeout> | null = null
-  /** Held across the flip's synchronous re-ingest: a COMMITTED landing mid-loop would exit
-   *  `committing` and leave every frame behind it with no record to buffer into. */
-  private reingestingFlip = false
-
   private get closed(): boolean {
     return this.state.tag === 'closed'
   }
@@ -335,9 +353,10 @@ class ClientConnection implements MuxConnection {
     return u !== null && this.transport === u.to
   }
 
+  /** Sends are gated from the barrier's emission until its COMMITTED lands. */
   private get upgradeGatesSends(): boolean {
     const u = this.committing
-    return u !== null && u.upgradeId !== null
+    return u !== null && !u.committed
   }
 
   private sessionId: string | null = null
@@ -392,8 +411,8 @@ class ClientConnection implements MuxConnection {
   }
 
   private enterUpgradeCommitting(
-    from: ClientChannelTransport,
-    to: ClientChannelTransport,
+    from: UpgradeSource,
+    to: UpgradeTarget,
     session: ProbeSession,
     attempt: AbortController,
   ): void {
@@ -411,6 +430,8 @@ class ClientConnection implements MuxConnection {
         probeHeartbeat: session.probeHeartbeat,
         upgradeId: session.upgradeId,
         finReceived: false,
+        committed: false,
+        heldBeforeFlip: [],
         buffer: { old: [], new: [] },
         bufferedBytes: 0,
         bufferedFrames: 0,
@@ -735,7 +756,7 @@ class ClientConnection implements MuxConnection {
   _onTransportFrame(frame: DecodedFrame, source: ClientChannelTransport, byteLength: number): void {
     const u = this.committing
     if (u !== null && this.transport === u.to) {
-      this.bufferDuringCommitting(frame, source === u.from ? 'old' : 'new', byteLength)
+      this.ingestDuringHandoff(frame, source === u.from ? 'old' : 'new', byteLength)
     } else {
       this.dispatchFrame(frame)
     }
@@ -772,43 +793,36 @@ class ClientConnection implements MuxConnection {
     this.channels.get(channelFrame.index)?.channel._dispatchFrame(channelFrame)
   }
 
-  /** The ONE charge site, both partitions and both sides of the flip — the flip refunds before
-   *  re-ingesting rather than charging twice. Tested after the push, so the frame that trips the
-   *  budget is still in the prefix the fallback delivers. */
-  private chargeAndBuffer(
-    u: CommittingUpgrade,
-    source: 'old' | 'new',
-    frame: DecodedFrame,
-    byteLength: number,
-  ): boolean {
-    u.buffer[source].push({ frame, byteLength })
-    u.bufferedFrames += 1
-    u.bufferedBytes += byteLength
-    return u.bufferedFrames > UPGRADE_HANDOFF_BUFFER_FRAMES || u.bufferedBytes > UPGRADE_HANDOFF_BUFFER_BYTES
-  }
-
-  /** Pre-flip the probe is nobody's wire and carries no session: only COMMITTED legitimately lands
-   *  here and it must WAIT, since acting on it early would settle a swap that has not happened. */
-  private ingestPreFlipNewFrame(frame: DecodedFrame, byteLength: number): void {
+  /** Every frame that arrives while the handoff is in flight lands here — the one charge site.
+   *  Before the flip the probe is nobody's wire, so even a join limb has to wait: acting on one
+   *  would settle a swap that has not happened. After the flip the limbs are applied and
+   *  everything else waits for the join, partitioned by the wire it came from. */
+  private ingestDuringHandoff(frame: DecodedFrame, source: 'old' | 'new', byteLength: number): void {
     const u = this.committing
     if (u === null) return
-    if (this.chargeAndBuffer(u, 'new', frame, byteLength)) u.attempt.abort()
+    const flipped = this.transport === u.to
+    if (flipped && this.applyJoinLimb(frame)) return
+    ;(flipped ? u.buffer[source] : u.heldBeforeFlip).push({ frame, byteLength })
+    u.bufferedFrames += 1
+    u.bufferedBytes += byteLength
+    // Checked after the push, so the frame that trips the budget is still in the prefix the
+    // fallback delivers. Pre-flip nothing is committed yet, so the attempt can simply be dropped.
+    if (u.bufferedFrames <= UPGRADE_HANDOFF_BUFFER_FRAMES && u.bufferedBytes <= UPGRADE_HANDOFF_BUFFER_BYTES) return
+    if (flipped) this.fallbackToSse(new NetworkError('Upgrade handoff buffer limit exceeded', true))
+    else u.attempt.abort()
   }
 
-  private bufferDuringCommitting(frame: DecodedFrame, source: 'old' | 'new', byteLength: number): void {
-    switch (frame.tag) {
-      case TAG.FIN:
-        this.handleUpgradeFin()
-        return
-      case TAG.RECONCILED:
-        this.handleReconciled(frame.payload)
-        return
+  /** True if the frame was one of the join's limbs, and has been applied. */
+  private applyJoinLimb(frame: DecodedFrame): boolean {
+    if (frame.tag === TAG.FIN) {
+      this.handleUpgradeFin()
+      return true
     }
-    const u = this.committing
-    assert(u !== null)
-    if (this.chargeAndBuffer(u, source, frame, byteLength)) {
-      this.fallbackToSse(new NetworkError('Upgrade handoff buffer limit exceeded', true))
+    if (frame.tag === TAG.RECONCILED) {
+      this.handleReconciled(frame.payload)
+      return true
     }
+    return false
   }
 
   private onJoinTimeout(): void {
@@ -837,7 +851,7 @@ class ClientConnection implements MuxConnection {
   private dropWire(transport: ClientChannelTransport): void {
     transport.detachHeartbeat()
     transport.abandonActiveTransport()
-    this._onTransportClosed(transport, false)
+    this._onTransportClosed(transport)
   }
 
   /** Funnel for pong-timeouts. Suppress while reconciling — pings are delayed by the round-trip;
@@ -880,8 +894,8 @@ class ClientConnection implements MuxConnection {
 
   private tryCompleteUpgrade(): void {
     const u = this.committing
-    if (u === null || this.transport !== u.to || this.reingestingFlip) return
-    if (!u.finReceived || u.upgradeId !== null) return
+    if (u === null || this.transport !== u.to) return
+    if (!u.finReceived || !u.committed) return
     const { from, buffer, deferredOmitted } = this.exitUpgradeCommitting()
     this.retireOldWire(from)
     for (const entry of buffer.old) this.dispatchFrame(entry.frame)
@@ -892,6 +906,8 @@ class ClientConnection implements MuxConnection {
     this.startTtlIfIdle()
   }
 
+  /** Tears down whichever upgrade phase is in flight. Returns the join's record when the flip had
+   *  already happened — its buffered frames are then the caller's to drain — and null otherwise. */
   private teardownUpgrade(): CommittingUpgrade | null {
     if (this.state.tag !== 'open' || this.state.upgrade.tag === 'none') return null
     const u = this.state.upgrade
@@ -922,7 +938,7 @@ class ClientConnection implements MuxConnection {
     sendBuffer.length = writeIx
   }
 
-  _onTransportClosed(transport: ClientChannelTransport, rejectedInitial = false): void {
+  _onTransportClosed(transport: ClientChannelTransport, { rejectedByServer = false } = {}): void {
     if (this.closed) return
     transport.detachHeartbeat()
     if (transport !== this.transport) {
@@ -935,19 +951,20 @@ class ClientConnection implements MuxConnection {
       this.state.upgrade.attempt.abort()
     }
     const err = new NetworkError(
-      rejectedInitial
+      rejectedByServer
         ? `Server rejected ${this.transport.type === CHANNEL_TRANSPORT.SSE ? 'SSE' : 'WebSocket'} connection`
         : 'Connection dropped',
       true,
     )
-    this.handleTransportLoss(err, rejectedInitial)
+    this.handleTransportLoss(err, rejectedByServer)
   }
 
   private handleReconciled(ctrl: ReconciledPayload): void {
     const committing = this.committing
-    if (committing !== null && committing.upgradeId !== null) {
+    if (committing !== null && !committing.committed) {
+      // A RECONCILED that does not echo this attempt's id belongs to someone else's upgrade.
       if (ctrl.upgradeId !== committing.upgradeId) return
-      committing.upgradeId = null
+      committing.committed = true
     }
     this.transport.applyReconciledSettings(ctrl)
     const deferredOmitted = committing?.deferredOmitted ?? null
@@ -977,7 +994,8 @@ class ClientConnection implements MuxConnection {
     if (!nextTransport) return
     if (!this.isTransportUpgradeAllowed(nextTransport)) return
     if (!this.serverTransports?.includes(nextTransport)) return
-    void this.probeAndUpgrade(nextTransport)
+    if (!isUpgradeSource(this.transport)) return
+    void this.probeAndUpgrade(this.transport, nextTransport)
   }
 
   private fallbackToSse(err: Error): void {
@@ -998,15 +1016,14 @@ class ClientConnection implements MuxConnection {
     return this.connectionOptions.transports.includes(nextTransport)
   }
 
-  private async probeAndUpgrade(targetTransport: ChannelTransport): Promise<void> {
+  private async probeAndUpgrade(from: UpgradeSource, targetTransport: UpgradeTargetTransport): Promise<void> {
     this.flushPendingRegisterReconcile()
     const sessionId = this.sessionId
     if (sessionId === null) return
     const attempt = new AbortController()
     this.enterUpgradeStaging(attempt)
     try {
-      const from = this.transport
-      const to = TRANSPORT_REGISTRY[targetTransport](this.telefuncUrl, this.connectionOptions, this)
+      const to = UPGRADE_TARGET_REGISTRY[targetTransport](this.telefuncUrl, this)
       const session = await this.stageProbe(to, sessionId, attempt)
       if (!session) return
       await this.commitBarrier(from, to, session, attempt)
@@ -1017,7 +1034,7 @@ class ClientConnection implements MuxConnection {
   }
 
   private async stageProbe(
-    to: ClientChannelTransport,
+    to: UpgradeTarget,
     sessionId: string,
     attempt: AbortController,
   ): Promise<ProbeSession | null> {
@@ -1051,7 +1068,7 @@ class ClientConnection implements MuxConnection {
         onReady?.(frame.payload)
         return
       }
-      this.ingestPreFlipNewFrame(frame, byteLength)
+      this.ingestDuringHandoff(frame, 'new', byteLength)
     })
 
     const readyP = new Promise<ReadyPayload | null>((resolve) => {
@@ -1070,8 +1087,8 @@ class ClientConnection implements MuxConnection {
   }
 
   private async commitBarrier(
-    from: ClientChannelTransport,
-    to: ClientChannelTransport,
+    from: UpgradeSource,
+    to: UpgradeTarget,
     session: ProbeSession,
     attempt: AbortController,
   ): Promise<void> {
@@ -1109,17 +1126,11 @@ class ClientConnection implements MuxConnection {
     this.transport = u.to
     u.to.adoptProbe()
     u.joinTimer = setTimeout(() => this.onJoinTimeout(), UPGRADE_HANDOFF_JOIN_TIMEOUT_MS)
-    const pending = u.buffer.new.splice(0)
-    for (const entry of pending) {
-      u.bufferedFrames -= 1
-      u.bufferedBytes -= entry.byteLength
-    }
-    this.reingestingFlip = true
-    try {
-      for (const entry of pending) this.bufferDuringCommitting(entry.frame, 'new', entry.byteLength)
-    } finally {
-      this.reingestingFlip = false
-    }
+    // What the probe delivered before the swap can be acted on now. The buffer is made whole
+    // first, so the COMMITTED that may be among them cannot complete a join over a partial one.
+    const held = u.heldBeforeFlip.splice(0)
+    for (const { frame, byteLength } of held) if (!isJoinLimb(frame)) u.buffer.new.push({ frame, byteLength })
+    for (const { frame } of held) if (isJoinLimb(frame)) this.applyJoinLimb(frame)
     this.tryCompleteUpgrade()
   }
 
@@ -1137,7 +1148,7 @@ class ClientConnection implements MuxConnection {
   }
 
   private drainBufferedFramesToWire(): void {
-    for (const frame of this.drainBufferedFrames(this.channels, undefined)) this.transport.sendFrame(frame)
+    for (const frame of this.drainBufferedFrames(this.channels)) this.transport.sendFrame(frame)
   }
 
   private handleTransportLoss(err: Error, rejected = false): void {
@@ -1247,7 +1258,7 @@ class ClientConnection implements MuxConnection {
     // reconcile on an established wire (new-channel registration, chained reconcile) has no
     // in-transit replay frame to jump ahead of — so eager-batch, it saves a round-trip.
     if (isInitialBatch && this.sessionId !== null) return []
-    return this.drainBufferedFrames(this.channels, undefined)
+    return this.drainBufferedFrames(this.channels)
   }
 
   stageReconcileBatch(isInitialBatch = false): ReconcileBatch {
@@ -1357,7 +1368,8 @@ class ClientConnection implements MuxConnection {
 
   private drainBufferedFrames(
     releasableChannels: Set<number> | Map<number, unknown>,
-    retainedChannels: Set<number> | Map<number, unknown> | undefined,
+    /** Frames for these channels stay in the buffer. Omitted: nothing is retained. */
+    retainedChannels?: Set<number> | Map<number, unknown>,
   ): OutboundFrame[] {
     const frames: OutboundFrame[] = []
     const sendBuffer = this.sendBuffer
@@ -1392,7 +1404,7 @@ class ClientConnection implements MuxConnection {
   }
 }
 
-class WsTransport implements ClientChannelTransport {
+class WsTransport implements UpgradeTarget {
   readonly type = CHANNEL_TRANSPORT.WS
   readonly sendReconcileOnOpen = true
   readonly reconcileMode = 'release-after-reconciled' as const
@@ -1501,10 +1513,6 @@ class WsTransport implements ClientChannelTransport {
     }
   }
 
-  async emitBarrier(): Promise<BarrierEmission> {
-    throw new Error('WS transport does not emit an upgrade barrier')
-  }
-
   adoptProbe(): void {
     const ws = this.probedWs
     assert(ws !== null)
@@ -1525,7 +1533,7 @@ class WsTransport implements ClientChannelTransport {
       ws = new WebSocket(this.wsUrl)
     } catch {
       this.connecting = false
-      this.owner._onTransportClosed(this, false)
+      this.owner._onTransportClosed(this)
       return
     }
 
@@ -1579,7 +1587,7 @@ class WsTransport implements ClientChannelTransport {
     ws.onclose = () => {
       if (this.ws === ws) this.ws = null
       this.connecting = false
-      this.owner._onTransportClosed(this, !this.everOpened)
+      this.owner._onTransportClosed(this, { rejectedByServer: !this.everOpened })
     }
     ws.onerror = () => {}
   }
@@ -1646,18 +1654,10 @@ class WsTransport implements ClientChannelTransport {
   }
 }
 
-class SseTransport implements ClientChannelTransport {
+class SseTransport implements UpgradeSource {
   readonly type = CHANNEL_TRANSPORT.SSE
   readonly sendReconcileOnOpen = false
   readonly reconcileMode = 'batch-on-reconcile' as const
-  async probe(): Promise<ProbeWire | null> {
-    throw new Error('SSE transport does not implement probe()')
-  }
-
-  adoptProbe(): void {
-    throw new Error('SSE transport does not implement adoptProbe()')
-  }
-
   readonly connId = crypto.randomUUID()
   get batched(): boolean {
     return this.streamRequest.tag !== 'active'
@@ -1803,13 +1803,13 @@ class SseTransport implements ClientChannelTransport {
       })()
     }
 
-    const failOpen = (permanent: boolean): void => {
+    const failOpen = (rejectedByServer: boolean): void => {
       this.rollbackInitialBatch(stage)
       this.closeStreamRequest()
       abortController.abort()
       this.transportAbort = null
       this.connecting = false
-      this.owner._onTransportClosed(this, permanent)
+      this.owner._onTransportClosed(this, { rejectedByServer })
     }
 
     let response: Response
@@ -1863,7 +1863,7 @@ class SseTransport implements ClientChannelTransport {
           this.transportAbort = null
         }
         // Abandoned controllers are owned by a successor transport — don't notify closed.
-        if (!this.abandonedControllers.has(abortController)) this.owner._onTransportClosed(this, false)
+        if (!this.abandonedControllers.has(abortController)) this.owner._onTransportClosed(this)
       }
     })()
 
@@ -1940,7 +1940,7 @@ class SseTransport implements ClientChannelTransport {
       } catch {
         this.outbox = queued.concat(this.outbox)
         this.abandonActiveTransport()
-        this.owner._onTransportClosed(this, false)
+        this.owner._onTransportClosed(this)
         return
       }
     } finally {
@@ -2111,8 +2111,17 @@ const TRANSPORT_REGISTRY: Record<
 }
 
 /** Defines which transport can upgrade to which. */
-const UPGRADE_PATH: Partial<Record<ChannelTransport, ChannelTransport>> = {
+type UpgradeTargetTransport = typeof CHANNEL_TRANSPORT.WS
+
+const UPGRADE_PATH: Partial<Record<ChannelTransport, UpgradeTargetTransport>> = {
   [CHANNEL_TRANSPORT.SSE]: CHANNEL_TRANSPORT.WS,
+}
+
+const UPGRADE_TARGET_REGISTRY: Record<
+  UpgradeTargetTransport,
+  (telefuncUrl: string, owner: ClientConnection) => UpgradeTarget
+> = {
+  [CHANNEL_TRANSPORT.WS]: (telefuncUrl, owner) => new WsTransport(telefuncUrl, owner),
 }
 
 function createSseEventStreamReader(

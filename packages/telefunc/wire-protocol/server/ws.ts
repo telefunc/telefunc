@@ -36,8 +36,8 @@ function getTelefuncChannelHooks() {
       const isPermanent =
         terminatePermanently === true ||
         (terminatePermanently === null && (details?.code === 1000 || details?.code === 1001))
-      mux.onConnectionClosed(peer, isPermanent)
+      mux.onConnectionClosed(peer, { permanent: isPermanent })
     },
-    error: (peer) => mux.onConnectionClosed(peer, false),
+    error: (peer) => mux.onConnectionClosed(peer, { permanent: false }),
   })
 }
