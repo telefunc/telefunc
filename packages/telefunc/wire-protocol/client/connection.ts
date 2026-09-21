@@ -1046,23 +1046,7 @@ class ClientConnection implements MuxConnection {
       probe?.close()
       return null
     }
-    const probeHeartbeat = new Heartbeat(
-      this.pingIntervalMs,
-      this.pingIntervalMs * 2,
-      () => probe.ping(),
-      () => attempt.abort(),
-    )
-    probe.onPong(() => probeHeartbeat.resetPong())
-    probe.onClose(() => attempt.abort())
-    probeHeartbeat.start()
-    attempt.signal.addEventListener(
-      'abort',
-      () => {
-        probeHeartbeat.stop()
-        probe.close()
-      },
-      { once: true },
-    )
+    const probeHeartbeat = this.keepProbeAlive(probe, attempt)
 
     const upgradeId = crypto.randomUUID()
     let onReady: ((payload: ReadyPayload) => void) | null = null
@@ -1087,6 +1071,29 @@ class ClientConnection implements MuxConnection {
       return null
     }
     return { upgradeId, probeHeartbeat }
+  }
+
+  /** The probe is nobody's transport yet, so it has no heartbeat of its own: this one keeps it
+   *  alive until the flip adopts it, and any death — its own or the attempt's — closes both. */
+  private keepProbeAlive(probe: ProbeWire, attempt: AbortController): Heartbeat {
+    const heartbeat = new Heartbeat(
+      this.pingIntervalMs,
+      this.pingIntervalMs * 2,
+      () => probe.ping(),
+      () => attempt.abort(),
+    )
+    probe.onPong(() => heartbeat.resetPong())
+    probe.onClose(() => attempt.abort())
+    heartbeat.start()
+    attempt.signal.addEventListener(
+      'abort',
+      () => {
+        heartbeat.stop()
+        probe.close()
+      },
+      { once: true },
+    )
+    return heartbeat
   }
 
   private async commitBarrier(

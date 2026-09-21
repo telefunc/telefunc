@@ -84,10 +84,7 @@ class SseConnectionTransport {
     } catch (err) {
       // An oversize frame leaves no next frame boundary to resume from, so it ends the wire, not
       // just this POST.
-      if (err instanceof OversizeFrameError && connId !== null) {
-        const connection = this.mux.getConnectionByConnId<SseConnection>(connId)
-        if (connection) this.closeConnection(connection, { permanent: true })
-      }
+      if (err instanceof OversizeFrameError && connId !== null) this.closeWire(connId)
       // A typed protocol-input fault is the client's: answer 400 and stay quiet. Anything else is our
       // bug — rethrow so the request pipeline (`runTelefunc`) logs it and masks it as a 500.
       if (
@@ -277,6 +274,11 @@ class SseConnectionTransport {
     if (!pending) return
     this.pendingConnections.delete(connId)
     for (const resolve of pending) resolve(connection)
+  }
+
+  private closeWire(connId: string): void {
+    const connection = this.mux.getConnectionByConnId<SseConnection>(connId)
+    if (connection) this.closeConnection(connection, { permanent: true })
   }
 
   private sendNow(connection: SseConnection, frame: Uint8Array<ArrayBuffer>): void {

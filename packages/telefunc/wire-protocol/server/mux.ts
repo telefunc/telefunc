@@ -273,23 +273,25 @@ class ChannelMux {
     if (!entry) return Promise.resolve(null)
     const { state } = entry
     const byteLength = rawFrame.byteLength
-    const tag = peekTag(rawFrame)
-    // Control frames are bounded by what the protocol itself can describe; only the data plane
-    // carries user payloads, and only it gets the multi-megabyte allowance.
-    const maxFrameBytes =
-      tag !== undefined && isConnCtrlTag(tag) ? WIRE_MAX_CONN_CTRL_FRAME_BYTES : WIRE_MAX_RAW_FRAME_BYTES
-    if (this.isOverBudget(state, byteLength, maxFrameBytes)) {
-      this.terminateWire(entry, connection)
+    if (this.isOverBudget(state, rawFrame)) {
+      this.terminateWire(connection)
       return Promise.resolve(null)
     }
     state.recvBacklogBytes += byteLength
     state.recvBacklogFrames++
+    const tag = peekTag(rawFrame)
     const exec = (): Promise<ReconcileOutcome | null> => this.runInboundTurn(entry, connection, rawFrame, byteLength)
     if (tag === TAG.PING) return exec()
     return this.chainRecv(entry, exec)
   }
 
-  private isOverBudget(state: ConnectionState, byteLength: number, maxFrameBytes: number): boolean {
+  /** Control frames are bounded by what the protocol itself can describe; only the data plane
+   *  carries user payloads, and only it gets the multi-megabyte allowance. */
+  private isOverBudget(state: ConnectionState, rawFrame: Uint8Array<ArrayBuffer>): boolean {
+    const tag = peekTag(rawFrame)
+    const maxFrameBytes =
+      tag !== undefined && isConnCtrlTag(tag) ? WIRE_MAX_CONN_CTRL_FRAME_BYTES : WIRE_MAX_RAW_FRAME_BYTES
+    const byteLength = rawFrame.byteLength
     return (
       byteLength > maxFrameBytes ||
       state.recvBacklogBytes + byteLength > WIRE_MAX_RECV_BACKLOG_BYTES ||
@@ -307,10 +309,7 @@ class ChannelMux {
       return (await this.handleFrame(entry, connection, rawFrame)) ?? null
     } catch (err) {
       if (!(err instanceof ProtocolViolationError)) throw err
-      const target = err.target ?? connection
-      const targetEntry = target === connection ? entry : this.connectionEntries.get(target)
-      if (!targetEntry) return null
-      this.terminateWire(targetEntry, target)
+      this.terminateWire(err.target ?? connection)
       return null
     } finally {
       entry.state.recvBacklogBytes -= byteLength
@@ -318,7 +317,11 @@ class ChannelMux {
     }
   }
 
-  private terminateWire(entry: ConnectionEntry, connection: Wire): void {
+  /** `connection` may be a wire other than the one that sent the offending frame — a barrier's
+   *  violation is the staged probe's. */
+  private terminateWire(connection: Wire): void {
+    const entry = this.connectionEntries.get(connection)
+    if (!entry) return
     if (this.stagedUpgrades.get(connection)?.phase === 'staged') this.clearStage(connection)
     entry.state.terminatePermanently = true
     entry.transport.terminateConnection(connection)
