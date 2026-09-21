@@ -40,9 +40,8 @@ async function setupUpgrade() {
   const sessionId = old.sessionId()
   expect(sessionId).toBeTypeOf('string')
   await probe.deliver(encode.prepare({ sessionId: sessionId!, upgradeId: 'upgrade-1' }))
-  const barrier = encode.reconcile({
+  const barrier = encode.barrier({
     sessionId: sessionId!,
-    barrier: true,
     upgradeId: 'upgrade-1',
     open: [{ id: 'A', ix: 0, lastSeq: 2 }],
   })

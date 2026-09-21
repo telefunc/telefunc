@@ -19,7 +19,7 @@ import {
   type ChannelTransports,
 } from '../constants.js'
 import { TAG, ProtocolViolationError, assertProtocol, decodeClientFrame, encode, peekTag } from '../shared-ws.js'
-import type { ChannelFrame, PreparePayload, ReconcilePayload, ReconciledPayload } from '../shared-ws.js'
+import type { BarrierPayload, ChannelFrame, PreparePayload, ReconcilePayload, ReconciledPayload } from '../shared-ws.js'
 import { IndexedPeer, type PeerSender } from './IndexedPeer.js'
 import type { ServerChannel } from './channel.js'
 
@@ -328,10 +328,8 @@ class ChannelMux {
     assertProtocol(!entry.state.retiredByBarrier, 'frame on a wire retired by its barrier')
     assertProtocol(!this.stagedUpgrades.has(connection), 'frame on a staged probe')
     if (frame.tag === TAG.PREPARE) return this.handlePrepare(entry, connection, frame.payload, rawFrame.byteLength)
+    if (frame.tag === TAG.BARRIER) return this.handleBarrier(entry, connection, frame.payload, rawFrame.byteLength)
     if (frame.tag === TAG.RECONCILE) {
-      if (frame.payload.barrier === true) {
-        return this.handleBarrier(entry, connection, frame.payload, rawFrame.byteLength)
-      }
       this.claimSessionForReconcile(frame.payload, entry, connection)
       return this.reconcile(entry, connection, frame.payload)
     }
@@ -386,12 +384,10 @@ class ChannelMux {
   private handleBarrier(
     entry: ConnectionEntry,
     connection: Wire,
-    ctrl: ReconcilePayload,
+    ctrl: BarrierPayload,
     rawByteLength: number,
   ): Promise<ReconcileOutcome> | null {
-    const sessionId = ctrl.sessionId
-    assert(sessionId, 'barrier without a sessionId reached handleBarrier')
-    const wsConnection = this.stagedByPrevSession.get(sessionId)
+    const wsConnection = this.stagedByPrevSession.get(ctrl.sessionId)
     const stage = wsConnection === undefined ? undefined : this.stagedUpgrades.get(wsConnection)
     // A barrier for an unknown or already-committing stage is refused SILENTLY (the client's attempt
     // deadline is the only watchdog) — erroring would tear down a wire this frame has no claim on.
@@ -424,12 +420,12 @@ class ChannelMux {
     oldEntry: ConnectionEntry,
     wsEntry: ConnectionEntry,
     wsConnection: Wire,
-    ctrl: ReconcilePayload,
+    ctrl: BarrierPayload,
     upgradeId: string,
   ): Promise<ReconcileOutcome> {
     try {
       // `reconcile` ran against the staged WS, so the outcome already carries it as `deliverTo`.
-      const outcome = await this.reconcile(wsEntry, wsConnection, ctrl)
+      const outcome = await this.reconcile(wsEntry, wsConnection, ctrl, true)
       return { ...outcome, upgradeId }
     } catch (err) {
       oldEntry.state.retiredByBarrier = false
@@ -462,7 +458,7 @@ class ChannelMux {
   }
 
   /** Admission policy only — `decodeClientFrame` has already established the frame's shape. */
-  private enforceUpgradeAdmission(open: ReconcilePayload['open'], rawByteLength: number): void {
+  private enforceUpgradeAdmission(open: BarrierPayload['open'], rawByteLength: number): void {
     assertProtocol(rawByteLength <= UPGRADE_MAX_FRAME_BYTES, 'barrier frame over byte cap')
     assertProtocol(open.length <= UPGRADE_MAX_OPEN_ENTRIES, 'barrier over entry cap')
     for (const channel of open) {
@@ -472,9 +468,16 @@ class ChannelMux {
 
   // ── Reconcile + attach ──────────────────────────────────────────────
 
-  private async reconcile(entry: ConnectionEntry, connection: Wire, ctrl: ReconcilePayload): Promise<ReconcileOutcome> {
+  /** `isBarrier`: the old wire's session is retired by this commit, so it gets a finalizer that
+   *  FINs it once the new wire's RECONCILED has gone out. */
+  private async reconcile(
+    entry: ConnectionEntry,
+    connection: Wire,
+    ctrl: ReconcilePayload,
+    isBarrier = false,
+  ): Promise<ReconcileOutcome> {
     const { state, transport } = entry
-    const finalizeUpgrade = ctrl.barrier && ctrl.sessionId ? this.buildUpgradeFinalizer(ctrl.sessionId) : null
+    const finalizeUpgrade = isBarrier && ctrl.sessionId ? this.buildUpgradeFinalizer(ctrl.sessionId) : null
     state.reconciling = true
     this.resetPingTimer(connection)
     const send: SendFn = (frame, onCommit) => this.send(connection, frame, onCommit)

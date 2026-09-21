@@ -21,6 +21,8 @@ export type {
   ChannelCtrlFrame,
   ChannelDataFrame,
   ReconcilePayload,
+  ReconcileOpenEntry,
+  BarrierPayload,
   ReconciledPayload,
   PreparePayload,
   ReadyPayload,
@@ -75,6 +77,9 @@ const TAG = {
   STREAM_REQUEST_OPEN_ACK: 0x06 as const,
   PREPARE: 0x07 as const,
   READY: 0x08 as const,
+  /** Client → server on the OLD wire as its final frame: the same cursors as a RECONCILE, but
+   *  addressed to the staged probe. Its own tag so the size cap lands on the raw bytes. */
+  BARRIER: 0x09 as const,
 
   // ─── Data plane ───
   TEXT: 0x10 as const,
@@ -127,15 +132,30 @@ function isChannelDataFrame(frame: DecodedFrame): frame is ChannelDataFrame {
 
 // ===== Reconcile payloads (JSON-encoded after the header) =====
 
-type ReconcilePayload = {
-  sessionId?: string
+type ReconcileOpenEntry = {
+  id: string
+  ix: number
+  lastSeq: number
   /** `initial: true` means this is the first reconcile for that channel — the server may
    *  not have created it yet (late-creation race during request body parse), so the server
    *  should wait up to `connectTtl` for it. Established channels (already reconciled at
    *  least once) omit `initial`; the server fails them fast if they're missing rather than
    *  stalling the entire reconcile. */
-  open: { id: string; ix: number; lastSeq: number; initial?: true }[]
-} & ({ barrier?: undefined; upgradeId?: undefined } | { barrier: true; upgradeId: string })
+  initial?: true
+}
+
+type ReconcilePayload = {
+  sessionId?: string
+  open: ReconcileOpenEntry[]
+}
+
+/** A barrier names the session it retires and the upgrade it commits — both mandatory, where a
+ *  reconcile has neither. A malformed one can no longer fall through to ordinary reconciliation. */
+type BarrierPayload = {
+  sessionId: string
+  upgradeId: string
+  open: ReconcileOpenEntry[]
+}
 
 type PreparePayload = {
   upgradeId: string
@@ -213,6 +233,7 @@ type ConnCtrlFrame =
   | { tag: typeof TAG.PONG }
   | { tag: typeof TAG.FIN }
   | { tag: typeof TAG.RECONCILE; payload: ReconcilePayload }
+  | { tag: typeof TAG.BARRIER; payload: BarrierPayload }
   | { tag: typeof TAG.RECONCILED; payload: ReconciledPayload }
   | { tag: typeof TAG.STREAM_REQUEST_OPEN_ACK }
   | { tag: typeof TAG.PREPARE; payload: PreparePayload }
@@ -313,6 +334,7 @@ const encode = {
   pong: () => encodeBareFrame(TAG.PONG),
   fin: () => encodeBareFrame(TAG.FIN),
   reconcile: (payload: ReconcilePayload) => encodeJsonFrame(TAG.RECONCILE, payload),
+  barrier: (payload: BarrierPayload) => encodeJsonFrame(TAG.BARRIER, payload),
   reconciled: (payload: ReconciledPayload) => encodeJsonFrame(TAG.RECONCILED, payload),
   streamRequestOpenAck: () => encodeBareFrame(TAG.STREAM_REQUEST_OPEN_ACK),
   prepare: (payload: PreparePayload) => encodeJsonFrame(TAG.PREPARE, payload),
@@ -438,6 +460,8 @@ function decode(frame: Uint8Array): DecodedFrame {
     // trusted like every other payload our own server sends.
     case TAG.RECONCILE:
       return { tag: TAG.RECONCILE, payload: parseReconcilePayload(parseJsonPayload(payload)) }
+    case TAG.BARRIER:
+      return { tag: TAG.BARRIER, payload: parseBarrierPayload(parseJsonPayload(payload)) }
     case TAG.RECONCILED:
       return { tag: TAG.RECONCILED, payload: parseJsonPayload(payload) as ReconciledPayload }
     case TAG.STREAM_REQUEST_OPEN_ACK:
@@ -481,6 +505,7 @@ function decode(frame: Uint8Array): DecodedFrame {
 const CLIENT_TAGS: ReadonlySet<number> = new Set([
   TAG.PING,
   TAG.RECONCILE,
+  TAG.BARRIER,
   TAG.PREPARE,
   TAG.TEXT,
   TAG.BINARY,
@@ -499,10 +524,13 @@ const CLIENT_TAGS: ReadonlySet<number> = new Set([
   TAG.BROADCAST_UNSUB,
 ])
 
-/** Server ingress: `decode` owns the frame's shape, this owns its direction and the PREPARE cap
- *  (checked on raw bytes — it bounds what a peer can make us parse). */
-function decodeClientFrame(raw: Uint8Array<ArrayBuffer>, maxPrepareBytes: number): DecodedFrame {
-  assertProtocol(peekTag(raw) !== TAG.PREPARE || raw.byteLength <= maxPrepareBytes, 'PREPARE over byte cap')
+/** Server ingress: `decode` owns the frame's shape, this owns its direction and the upgrade frames'
+ *  size cap. The cap is checked on the raw bytes because its job is to bound what an unauthenticated
+ *  peer can make us parse — after `decode` it would be bounding nothing. */
+function decodeClientFrame(raw: Uint8Array<ArrayBuffer>, maxUpgradeFrameBytes: number): DecodedFrame {
+  const tag = peekTag(raw)
+  const isUpgradeFrame = tag === TAG.PREPARE || tag === TAG.BARRIER
+  assertProtocol(!isUpgradeFrame || raw.byteLength <= maxUpgradeFrameBytes, 'upgrade frame over byte cap')
   const frame = decode(raw)
   assertProtocol(CLIENT_TAGS.has(frame.tag), `client sent a server-only frame ${frame.tag}`)
   return frame
@@ -536,8 +564,7 @@ function parsePreparePayload(value: unknown): PreparePayload {
   return { upgradeId: payload.upgradeId, sessionId: payload.sessionId }
 }
 
-function parseReconcilePayload(value: unknown): ReconcilePayload {
-  const payload = asObject(value)
+function parseOpenList(payload: Record<string, unknown>): void {
   assertProtocol(Array.isArray(payload.open), 'RECONCILE open')
   const indexes = new Set<number>()
   for (const rawEntry of payload.open) {
@@ -549,15 +576,23 @@ function parseReconcilePayload(value: unknown): ReconcilePayload {
     assertProtocol(isUint(entry.lastSeq, 0xffffffff), 'RECONCILE entry lastSeq')
     assertProtocol(entry.initial === undefined || entry.initial === true, 'RECONCILE entry initial')
   }
+}
+
+function parseReconcilePayload(value: unknown): ReconcilePayload {
+  const payload = asObject(value)
+  parseOpenList(payload)
   assertProtocol(payload.sessionId === undefined || isNonEmptyString(payload.sessionId), 'RECONCILE sessionId')
-  // The barrier leg is all-or-nothing: either both discriminants are absent, or `barrier` is
-  // literally `true` and both ids are present. Anything else could commit an upgrade it cannot name.
-  if (payload.barrier !== undefined || payload.upgradeId !== undefined) {
-    assertProtocol(payload.barrier === true, 'barrier discriminant')
-    assertProtocol(isNonEmptyString(payload.upgradeId), 'barrier upgradeId')
-    assertProtocol(isNonEmptyString(payload.sessionId), 'barrier sessionId')
-  }
   return payload as ReconcilePayload
+}
+
+function parseBarrierPayload(value: unknown): BarrierPayload {
+  const payload = asObject(value)
+  parseOpenList(payload)
+  // Both ids are mandatory: a barrier that cannot name its session and its upgrade has no claim
+  // on either, and there is no ordinary-reconcile leg left for it to fall through to.
+  assertProtocol(isNonEmptyString(payload.sessionId), 'barrier sessionId')
+  assertProtocol(isNonEmptyString(payload.upgradeId), 'barrier upgradeId')
+  return payload as BarrierPayload
 }
 
 // ===== Publish info helpers =====

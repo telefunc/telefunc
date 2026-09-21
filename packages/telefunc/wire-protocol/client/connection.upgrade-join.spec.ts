@@ -137,8 +137,7 @@ async function upgradeToBarrier(): Promise<Harness> {
   })
 
   const onUpstreamFrame = (frame: DecodedFrame) => {
-    if (frame.tag !== TAG.RECONCILE) return
-    if (frame.payload.barrier === true) resolveBarrier({ upgradeId: frame.payload.upgradeId })
+    if (frame.tag === TAG.BARRIER) resolveBarrier({ upgradeId: frame.payload.upgradeId })
   }
 
   const fetchImpl = (async (_url: string, init: RequestInit) => {

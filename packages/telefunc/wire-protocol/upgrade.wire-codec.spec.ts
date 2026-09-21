@@ -8,10 +8,16 @@ import {
   encode,
   isChannelCtrlTag,
   isConnCtrlTag,
+  type BarrierPayload,
   type ReconcilePayload,
   type ReconciledPayload,
 } from './shared-ws.js'
-import { CHANNEL_TRANSPORT, UPGRADE_MAX_ID_BYTES, UPGRADE_MAX_OPEN_ENTRIES } from './constants.js'
+import {
+  CHANNEL_TRANSPORT,
+  UPGRADE_MAX_FRAME_BYTES,
+  UPGRADE_MAX_ID_BYTES,
+  UPGRADE_MAX_OPEN_ENTRIES,
+} from './constants.js'
 
 const clientFrame = (raw: Uint8Array<ArrayBuffer>) => decodeClientFrame(raw, 64 * 1024)
 const hostile = (build: (payload: never) => Uint8Array<ArrayBuffer>, payload: unknown) => build(payload as never)
@@ -37,37 +43,33 @@ describe('upgrade wire vocabulary', () => {
     expect(decode(encode.ready({ upgradeId: 'upg-9' }))).toEqual({ tag: TAG.READY, payload: { upgradeId: 'upg-9' } })
   })
 
-  test('the new tags are connection ctrl and 0x09 stays reserved', () => {
-    for (const tag of [TAG.PREPARE, TAG.READY]) {
+  test('the new tags are connection ctrl and 0x0a stays reserved', () => {
+    for (const tag of [TAG.PREPARE, TAG.READY, TAG.BARRIER]) {
       expect(isConnCtrlTag(tag)).toBe(true)
       expect(isChannelCtrlTag(tag)).toBe(false)
     }
-    expect([TAG.PREPARE, TAG.READY]).toEqual([0x07, 0x08])
+    expect([TAG.PREPARE, TAG.READY, TAG.BARRIER]).toEqual([0x07, 0x08, 0x09])
     const reserved = new Uint8Array(7)
-    reserved[0] = 0x09
+    reserved[0] = 0x0a
     expect(() => decode(reserved)).toThrow()
   })
 
-  test('a barrier RECONCILE round-trips at one entry and at the admission cap', () => {
-    const one: ReconcilePayload = { sessionId: 'sess-0', barrier: true, upgradeId: 'upg-1', open: goodOpen }
-    expect(decode(encode.reconcile(one))).toEqual({ tag: TAG.RECONCILE, payload: one })
+  test('a BARRIER round-trips at one entry and at the largest shape the caps admit', () => {
+    const one: BarrierPayload = { sessionId: 'sess-0', upgradeId: 'upg-1', open: goodOpen }
+    expect(decode(encode.barrier(one))).toEqual({ tag: TAG.BARRIER, payload: one })
     const open = Array.from({ length: UPGRADE_MAX_OPEN_ENTRIES }, (_, ix) => ({
       id: String(ix).padStart(UPGRADE_MAX_ID_BYTES, 'x'),
-      ix,
-      lastSeq: ix,
+      ix: 0xffff - ix,
+      lastSeq: 0xffffffff,
+      initial: true as const,
     }))
-    const max: ReconcilePayload = { sessionId: 'sess-0', barrier: true, upgradeId: 'upg-1', open }
-    const encoded = encode.reconcile(max)
+    const max: BarrierPayload = { sessionId: 'x'.repeat(64), upgradeId: 'y'.repeat(64), open }
+    const encoded = encode.barrier(max)
+    // The byte cap is derived from the entry caps precisely so this frame is admissible: a cap
+    // that refuses the largest legal barrier would fail every client that hit the entry cap.
     expect(encoded.byteLength).toBeGreaterThan(UPGRADE_MAX_OPEN_ENTRIES * UPGRADE_MAX_ID_BYTES)
-    expect(decode(encoded)).toEqual({ tag: TAG.RECONCILE, payload: max })
-  })
-
-  test('an ordinary RECONCILE decodes with the barrier fields ABSENT, not undefined', () => {
-    const frame = decode(encode.reconcile({ sessionId: 'sess-0', open: goodOpen }))
-    expect(frame.tag).toBe(TAG.RECONCILE)
-    if (frame.tag !== TAG.RECONCILE) return
-    expect('barrier' in frame.payload).toBe(false)
-    expect('upgradeId' in frame.payload).toBe(false)
+    expect(encoded.byteLength).toBeLessThanOrEqual(UPGRADE_MAX_FRAME_BYTES)
+    expect(decodeClientFrame(encoded, UPGRADE_MAX_FRAME_BYTES)).toEqual({ tag: TAG.BARRIER, payload: max })
   })
 
   test('a RECONCILED round-trips the commit upgradeId', () => {
@@ -78,15 +80,7 @@ describe('upgrade wire vocabulary', () => {
 
 describe('decodeClientFrame — hostile schemas', () => {
   const badReconcile: [string, Record<string, unknown>][] = [
-    ['barrier:false with a valid upgradeId', { sessionId: 's', barrier: false, upgradeId: 'u', open: goodOpen }],
-    ['barrier:"yes"', { sessionId: 's', barrier: 'yes', upgradeId: 'u', open: goodOpen }],
-    ['barrier:1', { sessionId: 's', barrier: 1, upgradeId: 'u', open: goodOpen }],
-    ['an orphaned upgradeId and no barrier leg', { sessionId: 's', upgradeId: 'u', open: goodOpen }],
-    ['barrier:true and no upgradeId', { sessionId: 's', barrier: true, open: goodOpen }],
-    ['barrier:true and a non-string upgradeId', { sessionId: 's', barrier: true, upgradeId: 7, open: goodOpen }],
-    ['barrier:true and no sessionId', { barrier: true, upgradeId: 'u', open: goodOpen }],
-    ['barrier:true and a non-string sessionId', { sessionId: 7, barrier: true, upgradeId: 'u', open: goodOpen }],
-    ['a non-string sessionId and no barrier legs', { sessionId: 7, open: goodOpen }],
+    ['a non-string sessionId', { sessionId: 7, open: goodOpen }],
     ['open that is not an array', { sessionId: 's', open: 'nope' }],
     ['an entry with a non-string id', { sessionId: 's', open: [{ id: 7, ix: 0, lastSeq: 0 }] }],
     ['an entry with a non-integer ix', { sessionId: 's', open: [{ id: 'A', ix: 1.5, lastSeq: 0 }] }],
@@ -109,7 +103,6 @@ describe('decodeClientFrame — hostile schemas', () => {
   test('control: every legal RECONCILE shape passes', () => {
     const legal: ReconcilePayload[] = [
       { sessionId: 's', open: goodOpen },
-      { sessionId: 's', barrier: true, upgradeId: 'u', open: goodOpen },
       { open: [{ id: 'A', ix: 0, lastSeq: 0, initial: true }] },
       { open: [{ id: 'A', ix: 0xffff, lastSeq: 0xffffffff }] },
       { open: [] },
@@ -117,22 +110,32 @@ describe('decodeClientFrame — hostile schemas', () => {
     for (const payload of legal) expect(clientFrame(encode.reconcile(payload)).tag).toBe(TAG.RECONCILE)
   })
 
-  const badPrepare: [string, Record<string, unknown>][] = [
-    ['no upgradeId', { sessionId: 's' }],
-    ['an empty upgradeId', { upgradeId: '', sessionId: 's' }],
-    ['a non-string upgradeId', { upgradeId: 7, sessionId: 's' }],
-    ['no sessionId', { upgradeId: 'u' }],
-    ['an empty sessionId', { upgradeId: 'u', sessionId: '' }],
-    ['a non-string sessionId', { upgradeId: 'u', sessionId: 7 }],
+  const badBarrier: [string, Record<string, unknown>][] = [
+    ['no sessionId', { upgradeId: 'u', open: goodOpen }],
+    ['an empty sessionId', { sessionId: '', upgradeId: 'u', open: goodOpen }],
+    ['a non-string sessionId', { sessionId: 7, upgradeId: 'u', open: goodOpen }],
+    ['no upgradeId', { sessionId: 's', open: goodOpen }],
+    ['an empty upgradeId', { sessionId: 's', upgradeId: '', open: goodOpen }],
+    ['a non-string upgradeId', { sessionId: 's', upgradeId: 7, open: goodOpen }],
+    ['open that is not an array', { sessionId: 's', upgradeId: 'u', open: 'nope' }],
+    [
+      'an entry with an overflowing ix',
+      { sessionId: 's', upgradeId: 'u', open: [{ id: 'A', ix: 0x10000, lastSeq: 0 }] },
+    ],
   ]
-  test.each(badPrepare)('a PREPARE with %s is refused', (_name, payload) => {
-    expect(() => clientFrame(hostile(encode.prepare, payload))).toThrow(ProtocolViolationError)
+  test.each(badBarrier)('a BARRIER with %s is refused', (_name, payload) => {
+    expect(() => clientFrame(hostile(encode.barrier, payload))).toThrow(ProtocolViolationError)
   })
 
-  test('a PREPARE over the byte cap is refused BEFORE it is parsed', () => {
-    const frame = encode.prepare({ upgradeId: 'u'.repeat(4_096), sessionId: 's' })
-    expect(() => decodeClientFrame(frame, 32)).toThrow(ProtocolViolationError)
-    expect(decodeClientFrame(frame, frame.byteLength).tag).toBe(TAG.PREPARE)
+  test('a BARRIER over the byte cap is refused BEFORE it is parsed', () => {
+    // Payload is zero bytes — not JSON. If the cap were checked after `decode`, the failure would
+    // be the parser's ('payload is not JSON'); naming the cap proves nothing parsed it.
+    const oversize = new Uint8Array(UPGRADE_MAX_FRAME_BYTES + 1) as Uint8Array<ArrayBuffer>
+    oversize[0] = TAG.BARRIER
+    expect(() => decodeClientFrame(oversize, UPGRADE_MAX_FRAME_BYTES)).toThrow('upgrade frame over byte cap')
+
+    const legal = encode.barrier({ sessionId: 's', upgradeId: 'u', open: goodOpen })
+    expect(decodeClientFrame(legal, UPGRADE_MAX_FRAME_BYTES).tag).toBe(TAG.BARRIER)
   })
 
   const nonObjects: [string, unknown][] = [
@@ -179,6 +182,7 @@ describe('decodeClientFrame — direction', () => {
     ['PING', encode.ping()],
     ['RECONCILE', encode.reconcile({ open: goodOpen })],
     ['PREPARE', encode.prepare({ upgradeId: 'u', sessionId: 's' })],
+    ['BARRIER', encode.barrier({ upgradeId: 'u', sessionId: 's', open: goodOpen })],
     ['TEXT', encode.text(0, '"hi"', 1)],
     ['BINARY', encode.binary(0, new Uint8Array([1]), 1)],
     ['TEXT_ACK_REQ', encode.textAckReq(0, '"hi"', 1)],

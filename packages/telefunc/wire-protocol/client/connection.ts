@@ -41,6 +41,7 @@ import type {
   ChannelFrame,
   DecodedFrame,
   ReadyPayload,
+  ReconcileOpenEntry,
   ReconcilePayload,
   ReconciledPayload,
 } from '../shared-ws.js'
@@ -1026,7 +1027,7 @@ class ClientConnection implements MuxConnection {
       const to = UPGRADE_TARGET_REGISTRY[targetTransport](this.telefuncUrl, this)
       const session = await this.stageProbe(to, sessionId, attempt)
       if (!session) return
-      await this.commitBarrier(from, to, session, attempt)
+      await this.commitBarrier(from, to, session, sessionId, attempt)
     } finally {
       this.exitUpgradeAttempt(attempt)
       this.flushPendingRegisterReconcile()
@@ -1090,13 +1091,11 @@ class ClientConnection implements MuxConnection {
     from: UpgradeSource,
     to: UpgradeTarget,
     session: ProbeSession,
+    sessionId: string,
     attempt: AbortController,
   ): Promise<void> {
     this.enterUpgradeCommitting(from, to, session, attempt)
-    const emission = await from.emitBarrier(
-      () => this.buildReconcileFrame({ upgradeId: session.upgradeId }),
-      attempt.signal,
-    )
+    const emission = await from.emitBarrier(() => this.buildBarrierFrame(sessionId, session.upgradeId), attempt.signal)
 
     if (emission === 'wedged') {
       attempt.abort()
@@ -1225,15 +1224,28 @@ class ClientConnection implements MuxConnection {
 
   // ── Protocol internals ──
 
-  buildReconcileFrame(barrier?: { upgradeId: string }): OutboundFrame {
+  buildReconcileFrame(): OutboundFrame {
+    const open = this.collectOpenEntries({ skipInitial: false })
+    const reconcile: ReconcilePayload = { open, ...(this.sessionId ? { sessionId: this.sessionId } : {}) }
+    return { kind: 'reconcile', frame: encode.reconcile(reconcile) }
+  }
+
+  /** The old wire's last frame. Channels the server has not acknowledged yet are left out: the
+   *  staged probe has no record of them, so they reconcile again after the handoff. */
+  private buildBarrierFrame(sessionId: string, upgradeId: string): OutboundFrame {
+    const open = this.collectOpenEntries({ skipInitial: true })
+    return { kind: 'reconcile', frame: encode.barrier({ sessionId, upgradeId, open }) }
+  }
+
+  private collectOpenEntries({ skipInitial }: { skipInitial: boolean }): ReconcileOpenEntry[] {
     this.enterReconciling()
     this.reconcileIxes = new Set()
-    const open: ReconcilePayload['open'] = []
+    const open: ReconcileOpenEntry[] = []
     for (const [ix, entry] of this.channels) {
       const isInitial = entry.state.tag !== 'open' && entry.state.initial
-      if (barrier && isInitial) continue
+      if (skipInitial && isInitial) continue
       this.reconcileIxes.add(ix)
-      const payloadEntry: ReconcilePayload['open'][number] = {
+      const payloadEntry: ReconcileOpenEntry = {
         id: entry.channel.id,
         ix,
         lastSeq: this.lastSeqByChannel.get(ix) ?? 0,
@@ -1241,9 +1253,7 @@ class ClientConnection implements MuxConnection {
       if (isInitial) payloadEntry.initial = true
       open.push(payloadEntry)
     }
-    const base = { open, ...(this.sessionId ? { sessionId: this.sessionId } : {}) }
-    const reconcile: ReconcilePayload = barrier ? { ...base, barrier: true, upgradeId: barrier.upgradeId } : base
-    return { kind: 'reconcile', frame: encode.reconcile(reconcile) }
+    return open
   }
 
   drainBufferedFramesForReconcile(isInitialBatch: boolean): OutboundFrame[] {

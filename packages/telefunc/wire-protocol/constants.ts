@@ -101,10 +101,19 @@ export const UPGRADE_ATTEMPT_TIMEOUT_MS = 10_000
 /** How long a staged, uncommitted upgrade may hold its session before the probe is dropped. */
 export const UPGRADE_STAGE_TTL_MS = 10_000
 
-/** Caps on what one PREPARE/barrier frame may make the server parse and stage. */
-export const UPGRADE_MAX_FRAME_BYTES = 256 * 1024
+/** Caps on what one barrier may carry. */
 export const UPGRADE_MAX_OPEN_ENTRIES = 1_024
 export const UPGRADE_MAX_ID_BYTES = 256
+
+/** Worst case for one open entry beyond its id: the key names, `"ix":65535`,
+ *  `"lastSeq":4294967295`, `"initial":true` and the separator. */
+const RECONCILE_ENTRY_ENVELOPE_BYTES = 96
+
+/** Size cap on the upgrade frames, checked on the raw bytes so it bounds what a peer can make the
+ *  server parse. Derived from the two caps above rather than picked: a cap that refuses the largest
+ *  legal barrier is worse than no cap, and hand-picked bytes drift the moment either cap moves. */
+export const UPGRADE_MAX_FRAME_BYTES =
+  UPGRADE_MAX_OPEN_ENTRIES * (UPGRADE_MAX_ID_BYTES + RECONCILE_ENTRY_ENVELOPE_BYTES) + 1_024
 
 /** Bounds what unauthenticated PREPARE frames can pin in memory before any of them commits. */
 export const UPGRADE_MAX_STAGED_RECORDS = 1_024
