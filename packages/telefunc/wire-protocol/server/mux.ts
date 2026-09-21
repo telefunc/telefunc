@@ -7,18 +7,26 @@ import { getServerConfig } from '../../node/server/serverConfig.js'
 import { unrefTimer } from '../../utils/unrefTimer.js'
 import {
   CHANNEL_PING_INTERVAL_MIN_MS,
-  UPGRADE_MAX_FRAME_BYTES,
+  MAX_CHANNELS_PER_CONNECTION,
   UPGRADE_MAX_ID_BYTES,
-  UPGRADE_MAX_OPEN_ENTRIES,
   UPGRADE_MAX_STAGED_BYTES,
   UPGRADE_MAX_STAGED_RECORDS,
   UPGRADE_STAGE_TTL_MS,
+  WIRE_MAX_CONN_CTRL_FRAME_BYTES,
   WIRE_MAX_RAW_FRAME_BYTES,
   WIRE_MAX_RECV_BACKLOG_BYTES,
   WIRE_MAX_RECV_BACKLOG_FRAMES,
   type ChannelTransports,
 } from '../constants.js'
-import { TAG, ProtocolViolationError, assertProtocol, decodeClientFrame, encode, peekTag } from '../shared-ws.js'
+import {
+  TAG,
+  ProtocolViolationError,
+  assertProtocol,
+  decodeClientFrame,
+  encode,
+  isConnCtrlTag,
+  peekTag,
+} from '../shared-ws.js'
 import type { BarrierPayload, ChannelFrame, PreparePayload, ReconcilePayload, ReconciledPayload } from '../shared-ws.js'
 import { IndexedPeer, type PeerSender } from './IndexedPeer.js'
 import type { ServerChannel } from './channel.js'
@@ -265,20 +273,25 @@ class ChannelMux {
     if (!entry) return Promise.resolve(null)
     const { state } = entry
     const byteLength = rawFrame.byteLength
-    if (this.isRecvBacklogOverBudget(state, byteLength)) {
+    const tag = peekTag(rawFrame)
+    // Control frames are bounded by what the protocol itself can describe; only the data plane
+    // carries user payloads, and only it gets the multi-megabyte allowance.
+    const maxFrameBytes =
+      tag !== undefined && isConnCtrlTag(tag) ? WIRE_MAX_CONN_CTRL_FRAME_BYTES : WIRE_MAX_RAW_FRAME_BYTES
+    if (this.isOverBudget(state, byteLength, maxFrameBytes)) {
       this.terminateWire(entry, connection)
       return Promise.resolve(null)
     }
     state.recvBacklogBytes += byteLength
     state.recvBacklogFrames++
     const exec = (): Promise<ReconcileOutcome | null> => this.runInboundTurn(entry, connection, rawFrame, byteLength)
-    if (peekTag(rawFrame) === TAG.PING) return exec()
+    if (tag === TAG.PING) return exec()
     return this.chainRecv(entry, exec)
   }
 
-  private isRecvBacklogOverBudget(state: ConnectionState, byteLength: number): boolean {
+  private isOverBudget(state: ConnectionState, byteLength: number, maxFrameBytes: number): boolean {
     return (
-      byteLength > WIRE_MAX_RAW_FRAME_BYTES ||
+      byteLength > maxFrameBytes ||
       state.recvBacklogBytes + byteLength > WIRE_MAX_RECV_BACKLOG_BYTES ||
       state.recvBacklogFrames >= WIRE_MAX_RECV_BACKLOG_FRAMES
     )
@@ -319,7 +332,7 @@ class ChannelMux {
     connection: Wire,
     rawFrame: Uint8Array<ArrayBuffer>,
   ): null | Promise<ReconcileOutcome | null> {
-    const frame = decodeClientFrame(rawFrame, UPGRADE_MAX_FRAME_BYTES)
+    const frame = decodeClientFrame(rawFrame, WIRE_MAX_CONN_CTRL_FRAME_BYTES)
     if (frame.tag === TAG.PING) {
       this.resetPingTimer(connection)
       this.send(connection, encode.pong())
@@ -459,8 +472,8 @@ class ChannelMux {
 
   /** Admission policy only — `decodeClientFrame` has already established the frame's shape. */
   private enforceUpgradeAdmission(open: BarrierPayload['open'], rawByteLength: number): void {
-    assertProtocol(rawByteLength <= UPGRADE_MAX_FRAME_BYTES, 'barrier frame over byte cap')
-    assertProtocol(open.length <= UPGRADE_MAX_OPEN_ENTRIES, 'barrier over entry cap')
+    assertProtocol(rawByteLength <= WIRE_MAX_CONN_CTRL_FRAME_BYTES, 'barrier frame over byte cap')
+    assertProtocol(open.length <= MAX_CHANNELS_PER_CONNECTION, 'barrier over entry cap')
     for (const channel of open) {
       assertProtocol(textEncoder.encode(channel.id).byteLength <= UPGRADE_MAX_ID_BYTES, 'channel id over byte cap')
     }

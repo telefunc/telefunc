@@ -2,6 +2,7 @@ import { expect, test } from 'vitest'
 import { ChannelMux, type ServerTransport } from './server/mux.js'
 import { ServerChannel } from './server/channel.js'
 import { decode, encode, TAG, type DecodedFrame } from './shared-ws.js'
+import { WIRE_MAX_CONN_CTRL_FRAME_BYTES, WIRE_MAX_RAW_FRAME_BYTES } from './constants.js'
 
 function createHarness() {
   const mux = new ChannelMux()
@@ -69,4 +70,28 @@ test('a concurrent ordinary claim of the old session loses to the barrier commit
   expect(h.probe.sent.filter((frame) => frame.tag === TAG.RECONCILED)).toHaveLength(1)
   expect(claimant.terminated()).toBe(true)
   expect(claimant.sent.filter((frame) => frame.tag === TAG.RECONCILED)).toHaveLength(0)
+})
+
+test('a control frame is bounded by what the protocol can describe, a data frame is not', async () => {
+  const h = createHarness()
+  const wire = h.wire()
+  // A perfectly well-formed RECONCILE, just larger than a connection could legitimately need.
+  // Well-formed matters: a malformed one would be refused by the parser either way, which is
+  // exactly what this has to distinguish — the cap has to reject it without parsing it.
+  const open = Array.from({ length: 5_200 }, (_, ix) => ({ id: 'x'.repeat(256), ix, lastSeq: 0 }))
+  const oversize = encode.reconcile({ open })
+  expect(oversize.byteLength).toBeGreaterThan(WIRE_MAX_CONN_CTRL_FRAME_BYTES)
+  await wire.deliver(oversize)
+  expect(wire.terminated()).toBe(true)
+  expect(wire.sent.filter((frame) => frame.tag === TAG.RECONCILED)).toHaveLength(0)
+
+  // The same byte count on the data plane is ordinary traffic: user payloads are why that limit
+  // is 64 MiB, and applying it to control frames is what let a peer make the server parse one.
+  const data = h.wire()
+  await data.deliver(encode.reconcile({ open: [{ id: 'A', ix: 0, lastSeq: 0, initial: true }] }))
+  const big = encode.text(0, `"${'x'.repeat(oversize.byteLength)}"`, 1)
+  expect(big.byteLength).toBeGreaterThan(WIRE_MAX_CONN_CTRL_FRAME_BYTES)
+  expect(big.byteLength).toBeLessThan(WIRE_MAX_RAW_FRAME_BYTES)
+  await data.deliver(big)
+  expect(data.terminated()).toBe(false)
 })

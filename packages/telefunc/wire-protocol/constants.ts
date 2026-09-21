@@ -101,19 +101,12 @@ export const UPGRADE_ATTEMPT_TIMEOUT_MS = 10_000
 /** How long a staged, uncommitted upgrade may hold its session before the probe is dropped. */
 export const UPGRADE_STAGE_TTL_MS = 10_000
 
-/** Caps on what one barrier may carry. */
-export const UPGRADE_MAX_OPEN_ENTRIES = 1_024
+/** Longest channel id the wire will carry. */
 export const UPGRADE_MAX_ID_BYTES = 256
 
 /** Worst case for one open entry beyond its id: the key names, `"ix":65535`,
  *  `"lastSeq":4294967295`, `"initial":true` and the separator. */
 const RECONCILE_ENTRY_ENVELOPE_BYTES = 96
-
-/** Size cap on the upgrade frames, checked on the raw bytes so it bounds what a peer can make the
- *  server parse. Derived from the two caps above rather than picked: a cap that refuses the largest
- *  legal barrier is worse than no cap, and hand-picked bytes drift the moment either cap moves. */
-export const UPGRADE_MAX_FRAME_BYTES =
-  UPGRADE_MAX_OPEN_ENTRIES * (UPGRADE_MAX_ID_BYTES + RECONCILE_ENTRY_ENVELOPE_BYTES) + 1_024
 
 /** Bounds what unauthenticated PREPARE frames can pin in memory before any of them commits. */
 export const UPGRADE_MAX_STAGED_RECORDS = 1_024
@@ -121,8 +114,24 @@ export const UPGRADE_MAX_STAGED_BYTES = 64 * 1024 * 1024
 
 // ===== Server ingress bounds =====
 
-/** Largest frame the server will decode, checked on the raw bytes before any parse. */
+/** Largest data-plane frame the server will decode, checked on the raw bytes before any parse.
+ *  Generous because it carries user payloads — a multi-megabyte upload is a legitimate frame. */
 export const WIRE_MAX_RAW_FRAME_BYTES = 64 * 1024 * 1024
+
+/** How many channels one connection may carry. The wire could address 65 536 (the index is u16),
+ *  but that is an exhaustion ceiling, not a working limit: every reconcile and every barrier lists
+ *  all of them, so the ceiling is also what a peer can make the server parse. This is the single
+ *  limit — the client refuses to open past it, the barrier's entry cap is it, and the control
+ *  frames' byte cap is derived from it. Beyond this many channels, open a second connection with
+ *  `connectionKey`. */
+export const MAX_CHANNELS_PER_CONNECTION = 4_096
+
+/** Largest connection-control frame the server will decode, checked on the raw bytes so it bounds
+ *  what a peer can make it parse. The biggest legitimate one is a reconcile or barrier naming every
+ *  channel the connection may carry, each at the id cap. Derived, never picked: a cap that refuses
+ *  a legal frame is worse than no cap, and picked bytes drift the moment a limit above moves. */
+export const WIRE_MAX_CONN_CTRL_FRAME_BYTES =
+  MAX_CHANNELS_PER_CONNECTION * (UPGRADE_MAX_ID_BYTES + RECONCILE_ENTRY_ENVELOPE_BYTES) + 1_024
 
 /** Per-connection ceiling on accepted-but-unprocessed frames: a peer that outruns its recv chain
  *  is terminated rather than allowed to queue without bound. */

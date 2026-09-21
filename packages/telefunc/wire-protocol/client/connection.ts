@@ -22,6 +22,7 @@ import {
   SSE_RECONCILE_DEADLINE_MS,
   STREAM_REQUEST_HANDSHAKE_TIMEOUT_MS,
   TELEFUNC_SESSION_HEADER,
+  MAX_CHANNELS_PER_CONNECTION,
   UPGRADE_HANDOFF_BUFFER_BYTES,
   UPGRADE_HANDOFF_BUFFER_FRAMES,
   UPGRADE_HANDOFF_JOIN_TIMEOUT_MS,
@@ -488,7 +489,10 @@ class ClientConnection implements MuxConnection {
       clearTimeout(this.ttl)
       this.ttl = null
     }
-    assertUsage(this.nextIndex <= 0xffff, 'Too many channels opened on one connection (65536 max)')
+    assertUsage(
+      this.nextIndex < MAX_CHANNELS_PER_CONNECTION,
+      `Too many channels on one connection (${MAX_CHANNELS_PER_CONNECTION} max) — open another with \`connectionKey\``,
+    )
     const ix = this.nextIndex++
     this.enterChannelPending(ix, channel, true)
     this.replayBuffers.set(
