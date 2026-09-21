@@ -110,7 +110,10 @@ class Heartbeat {
   }
 }
 
-function raceAbort(promise: Promise<unknown>, signal: AbortSignal): Promise<void> {
+/** Resolves when `promise` settles or `signal` aborts, whichever is first, and discards both
+ *  outcomes — a caller that needs to know re-reads the signal. Taking the promise's rejection here
+ *  is deliberate: on an abort-first race nothing else would be left to handle it. */
+function settledOrAborted(promise: Promise<unknown>, signal: AbortSignal): Promise<void> {
   if (signal.aborted) return Promise.resolve()
   return new Promise<void>((resolve) => {
     const settle = (): void => {
@@ -1732,13 +1735,18 @@ class SseTransport implements UpgradeSource {
     while (this.flushing) {
       if (!this.hasWire()) return 'not-emitted'
       if (signal.aborted) return 'wedged'
-      await raceAbort(new Promise<void>((resolve) => this.drainCallbacks.push(resolve)), signal)
+      await settledOrAborted(new Promise<void>((resolve) => this.drainCallbacks.push(resolve)), signal)
     }
     if (!this.hasWire() || signal.aborted) return 'not-emitted'
     this.flushScheduler.cancel()
     const queued = this.outbox.splice(0, this.outbox.length).map((entry) => entry.frame)
     queued.push(buildFrame().frame)
-    await raceAbort(this.sendStandalonePost(queued), signal)
+    // Not `flushOutbox`: that re-queues its frames when a POST fails, and a barrier must never be
+    // replayed onto the next wire — the stage it names is gone by then. `emitted` is already
+    // decided too, since this POST cannot report whether the server saw it and a barrier that may
+    // have arrived has to be treated as arrived. The wait only holds the flip back until the frame
+    // has left the client.
+    await settledOrAborted(this.sendStandalonePost(queued), signal)
     return 'emitted'
   }
 
@@ -1936,20 +1944,7 @@ class SseTransport implements UpgradeSource {
       this.lastPostStartedAt = now
 
       try {
-        const response = await this.fetchImpl(getMarkedRequestUrl(this.telefuncUrl, REQUEST_KIND.SSE), {
-          method: 'POST',
-          headers: {
-            ...this.userHeaders,
-            'Content-Type': 'application/octet-stream',
-            [REQUEST_KIND_HEADER]: REQUEST_KIND.SSE,
-            ...(this.sessionToken ? { [TELEFUNC_SESSION_HEADER]: this.sessionToken } : undefined),
-          },
-          body: encodeSseRequest(
-            { connId: this.connId },
-            encodeLengthPrefixedFrames(queued, (entry) => entry.frame),
-          ),
-          signal: this.transportAbort.signal,
-        })
+        const response = await this.postUpstream(encodeLengthPrefixedFrames(queued, (entry) => entry.frame))
         if (!response.ok) throw new Error('POST failed')
       } catch {
         this.outbox = queued.concat(this.outbox)
@@ -1980,22 +1975,31 @@ class SseTransport implements UpgradeSource {
     }, delay)
   }
 
+  /** The upstream POST. Both senders build this same request; they differ only in what a failure
+   *  means to them, which is why that stays at the call sites. */
+  private postUpstream(batch: Uint8Array<ArrayBuffer>): Promise<Response> {
+    assert(this.transportAbort)
+    return this.fetchImpl(getMarkedRequestUrl(this.telefuncUrl, REQUEST_KIND.SSE), {
+      method: 'POST',
+      headers: {
+        ...this.userHeaders,
+        'Content-Type': 'application/octet-stream',
+        [REQUEST_KIND_HEADER]: REQUEST_KIND.SSE,
+        ...(this.sessionToken ? { [TELEFUNC_SESSION_HEADER]: this.sessionToken } : undefined),
+      },
+      body: encodeSseRequest({ connId: this.connId }, batch),
+      signal: this.transportAbort.signal,
+    })
+  }
+
+  /** A POST outside the outbox, for frames that cannot wait for the next flush. Failure is
+   *  swallowed: the only two senders are a heartbeat ping (whose own deadline notices a dead wire)
+   *  and the barrier (which must be treated as delivered either way). */
   private async sendStandalonePost(frames: Uint8Array<ArrayBuffer>[]): Promise<void> {
     if (!this.hasWire()) return
-    assert(this.transportAbort)
     try {
-      await this.fetchImpl(getMarkedRequestUrl(this.telefuncUrl, REQUEST_KIND.SSE), {
-        method: 'POST',
-        headers: {
-          ...this.userHeaders,
-          'Content-Type': 'application/octet-stream',
-          [REQUEST_KIND_HEADER]: REQUEST_KIND.SSE,
-          ...(this.sessionToken ? { [TELEFUNC_SESSION_HEADER]: this.sessionToken } : undefined),
-        },
-        body: encodeSseRequest({ connId: this.connId }, encodeLengthPrefixedFrames(frames)),
-        signal: this.transportAbort.signal,
-      })
-    } catch {} // best-effort — connection will timeout and reconnect on real failure
+      await this.postUpstream(encodeLengthPrefixedFrames(frames))
+    } catch {}
   }
 
   private scheduleFlush(): void {
