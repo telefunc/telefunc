@@ -84,7 +84,10 @@ class SseConnectionTransport {
     } catch (err) {
       // An oversize frame leaves no next frame boundary to resume from, so it ends the wire, not
       // just this POST.
-      if (err instanceof OversizeFrameError && connId !== null) this.closeWire(connId)
+      if (err instanceof OversizeFrameError && connId !== null) {
+        const connection = this.mux.getConnectionByConnId<SseConnection>(connId)
+        if (connection) this.closeConnection(connection, { permanent: true })
+      }
       // A typed protocol-input fault is the client's: answer 400 and stay quiet. Anything else is our
       // bug — rethrow so the request pipeline (`runTelefunc`) logs it and masks it as a 500.
       if (
@@ -197,9 +200,9 @@ class SseConnectionTransport {
       await this.settlePendingDispatches(connection)
       this.mux.sendReconciled(outcome)
     } catch (err) {
-      // The body ended mid-frame. This promise is fire-and-forget, so a rethrow would be an
-      // unhandled rejection. A truncation is just the client hanging up — the channels keep their
-      // reconnect grace; an oversize frame leaves no next frame boundary, so that wire is finished.
+      // The body ended mid-frame; this promise is fire-and-forget, so a rethrow would be unhandled.
+      // A truncation is the client hanging up (channels keep their grace); an oversize frame leaves
+      // no next frame boundary, so that wire is finished.
       reportDispatchBug(err)
       this.closeConnection(connection, { permanent: err instanceof OversizeFrameError })
     } finally {
@@ -208,8 +211,8 @@ class SseConnectionTransport {
     }
   }
 
-  /** Fire-and-forget dispatch: registered so a reconcile waits for it, and reported here because
-   *  nothing else will. Awaited dispatches (the batch POST's) report through their caller instead. */
+  /** Registered so a reconcile waits for it, and reported here because nothing else will — awaited
+   *  dispatches (the batch POST's) report through their caller. */
   private dispatchAndReport(connection: SseConnection, raw: Uint8Array<ArrayBuffer>): void {
     const dispatch = this.mux.onConnectionRawMessage(connection, raw)
     connection.pendingDispatches.add(dispatch)
@@ -221,8 +224,8 @@ class SseConnectionTransport {
   }
 
   /** Waits without consuming failures — every dispatch is reported by whoever started it. */
-  private async settlePendingDispatches(connection: SseConnection): Promise<void> {
-    await Promise.allSettled([...connection.pendingDispatches])
+  private settlePendingDispatches(connection: SseConnection): Promise<unknown> {
+    return Promise.allSettled([...connection.pendingDispatches])
   }
 
   /** Read length-prefixed frames from `reader`, dispatch each through the deferred-reconcile
@@ -274,11 +277,6 @@ class SseConnectionTransport {
     if (!pending) return
     this.pendingConnections.delete(connId)
     for (const resolve of pending) resolve(connection)
-  }
-
-  private closeWire(connId: string): void {
-    const connection = this.mux.getConnectionByConnId<SseConnection>(connId)
-    if (connection) this.closeConnection(connection, { permanent: true })
   }
 
   private sendNow(connection: SseConnection, frame: Uint8Array<ArrayBuffer>): void {

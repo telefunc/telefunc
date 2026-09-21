@@ -304,8 +304,7 @@ class ChannelMux {
     byteLength: number,
   ): Promise<ReconcileOutcome | null> {
     try {
-      const pending = this.handleFrame(entry, connection, rawFrame)
-      return pending ? ((await pending) ?? null) : null
+      return (await this.handleFrame(entry, connection, rawFrame)) ?? null
     } catch (err) {
       if (!(err instanceof ProtocolViolationError)) throw err
       const target = err.target ?? connection
@@ -407,7 +406,12 @@ class ChannelMux {
     if (wsConnection === undefined || stage?.phase !== 'staged') return null
 
     try {
-      this.enforceUpgradeAdmission(ctrl.open, rawByteLength)
+      // Admission policy — `decodeClientFrame` has already established the frame's shape.
+      assertProtocol(rawByteLength <= WIRE_MAX_CONN_CTRL_FRAME_BYTES, 'barrier frame over byte cap')
+      assertProtocol(ctrl.open.length <= MAX_CHANNELS_PER_CONNECTION, 'barrier over entry cap')
+      for (const channel of ctrl.open) {
+        assertProtocol(textEncoder.encode(channel.id).byteLength <= UPGRADE_MAX_ID_BYTES, 'channel id over byte cap')
+      }
       for (const channel of ctrl.open)
         assertProtocol(!channel.initial, 'barrier carries an initial channel', wsConnection)
       assertProtocol(ctrl.upgradeId === stage.upgradeId, 'barrier upgradeId mismatch', wsConnection)
@@ -470,15 +474,6 @@ class ChannelMux {
     this.stagedBytes -= stage.bytes
   }
 
-  /** Admission policy only — `decodeClientFrame` has already established the frame's shape. */
-  private enforceUpgradeAdmission(open: BarrierPayload['open'], rawByteLength: number): void {
-    assertProtocol(rawByteLength <= WIRE_MAX_CONN_CTRL_FRAME_BYTES, 'barrier frame over byte cap')
-    assertProtocol(open.length <= MAX_CHANNELS_PER_CONNECTION, 'barrier over entry cap')
-    for (const channel of open) {
-      assertProtocol(textEncoder.encode(channel.id).byteLength <= UPGRADE_MAX_ID_BYTES, 'channel id over byte cap')
-    }
-  }
-
   // ── Reconcile + attach ──────────────────────────────────────────────
 
   /** `isBarrier`: the old wire's session is retired by this commit, so it gets a finalizer that
@@ -490,7 +485,7 @@ class ChannelMux {
     isBarrier = false,
   ): Promise<ReconcileOutcome> {
     const { state, transport } = entry
-    const finalizeUpgrade = isBarrier && ctrl.sessionId ? this.buildUpgradeFinalizer(ctrl.sessionId) : null
+    const finalizeUpgrade = isBarrier && ctrl.sessionId ? (this.sessionFinalizers.get(ctrl.sessionId) ?? null) : null
     state.reconciling = true
     this.resetPingTimer(connection)
     const send: SendFn = (frame, onCommit) => this.send(connection, frame, onCommit)
@@ -514,10 +509,6 @@ class ChannelMux {
     state.reconciling = false
     this.resetPingTimer(connection)
     return { sessionId: newSessionId, openList, finalizeUpgrade, deliverTo: connection }
-  }
-
-  private buildUpgradeFinalizer(prevSessionId: string): (() => void) | null {
-    return this.sessionFinalizers.get(prevSessionId) ?? null
   }
 
   private async reconcileSession(

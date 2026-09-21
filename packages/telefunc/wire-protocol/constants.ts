@@ -90,8 +90,7 @@ export const UPGRADE_DRAIN_TIMEOUT_MS = 2_000
 /** Post-flip wait for both join limbs — FIN on the old wire, RECONCILED on the new one. */
 export const UPGRADE_HANDOFF_JOIN_TIMEOUT_MS = 2_000
 
-/** Mid-handoff frames are buffered until the join completes; past either bound the upgrade is
- *  abandoned rather than letting a stalled join grow the buffer without limit. */
+/** Past either bound the upgrade is abandoned rather than letting a stalled join buffer forever. */
 export const UPGRADE_HANDOFF_BUFFER_BYTES = 8 * 1024 * 1024
 export const UPGRADE_HANDOFF_BUFFER_FRAMES = 4_096
 
@@ -114,22 +113,18 @@ export const UPGRADE_MAX_STAGED_BYTES = 64 * 1024 * 1024
 
 // ===== Server ingress bounds =====
 
-/** Largest data-plane frame the server will decode, checked on the raw bytes before any parse.
- *  Generous because it carries user payloads — a multi-megabyte upload is a legitimate frame. */
+/** Largest data-plane frame. Generous because it carries user payloads. */
 export const WIRE_MAX_RAW_FRAME_BYTES = 64 * 1024 * 1024
 
-/** How many channels one connection may carry. The wire could address 65 536 (the index is u16),
- *  but that is an exhaustion ceiling, not a working limit: every reconcile and every barrier lists
- *  all of them, so the ceiling is also what a peer can make the server parse. This is the single
- *  limit — the client refuses to open past it, the barrier's entry cap is it, and the control
- *  frames' byte cap is derived from it. Beyond this many channels, open a second connection with
- *  `connectionKey`. */
+/** The single channels-per-connection limit: the client refuses to open past it, a barrier may
+ *  list no more, and the control-frame byte cap below is derived from it. Every reconcile lists
+ *  every channel, so this is also what a peer can make the server parse. (The wire could address
+ *  65 536 — a u16 index — but that is exhaustion, not a working limit.) */
 export const MAX_CHANNELS_PER_CONNECTION = 4_096
 
-/** Largest connection-control frame the server will decode, checked on the raw bytes so it bounds
- *  what a peer can make it parse. The biggest legitimate one is a reconcile or barrier naming every
- *  channel the connection may carry, each at the id cap. Derived, never picked: a cap that refuses
- *  a legal frame is worse than no cap, and picked bytes drift the moment a limit above moves. */
+/** Largest control frame the server will decode, checked on the raw bytes. Derived, never picked:
+ *  the biggest legitimate one lists every channel at the id cap, and a cap that refuses a legal
+ *  frame is worse than no cap. */
 export const WIRE_MAX_CONN_CTRL_FRAME_BYTES =
   MAX_CHANNELS_PER_CONNECTION * (UPGRADE_MAX_ID_BYTES + RECONCILE_ENTRY_ENVELOPE_BYTES) + 1_024
 

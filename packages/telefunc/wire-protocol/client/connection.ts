@@ -110,9 +110,8 @@ class Heartbeat {
   }
 }
 
-/** Resolves when `promise` settles or `signal` aborts, whichever is first, and discards both
- *  outcomes — a caller that needs to know re-reads the signal. Taking the promise's rejection here
- *  is deliberate: on an abort-first race nothing else would be left to handle it. */
+/** Settles on either, discards both outcomes — a caller that needs to know re-reads the signal.
+ *  Taking the rejection matters: on an abort-first race nothing else would handle it. */
 function settledOrAborted(promise: Promise<unknown>, signal: AbortSignal): Promise<void> {
   if (signal.aborted) return Promise.resolve()
   return new Promise<void>((resolve) => {
@@ -229,10 +228,6 @@ type UpgradeSource = ClientChannelTransport & {
 type UpgradeTarget = ClientChannelTransport & {
   probe(): Promise<ProbeWire | null>
   adoptProbe(): void
-}
-
-function isUpgradeSource(transport: ClientChannelTransport): transport is UpgradeSource {
-  return transport.type === CHANNEL_TRANSPORT.SSE
 }
 
 type OutboxEntry = { frame: Uint8Array<ArrayBuffer>; deadline: number }
@@ -801,10 +796,9 @@ class ClientConnection implements MuxConnection {
     this.channels.get(channelFrame.index)?.channel._dispatchFrame(channelFrame)
   }
 
-  /** Every frame that arrives while the handoff is in flight lands here — the one charge site.
-   *  Before the flip the probe is nobody's wire, so even a join limb has to wait: acting on one
-   *  would settle a swap that has not happened. After the flip the limbs are applied and
-   *  everything else waits for the join, partitioned by the wire it came from. */
+  /** Every frame arriving mid-handoff lands here — the one charge site. Before the flip the probe
+   *  is nobody's wire, so even a join limb waits: acting on one would settle a swap that has not
+   *  happened. After it, limbs apply and the rest waits, partitioned by the wire it came from. */
   private ingestDuringHandoff(frame: DecodedFrame, source: 'old' | 'new', byteLength: number): void {
     const u = this.committing
     if (u === null) return
@@ -1002,8 +996,9 @@ class ClientConnection implements MuxConnection {
     if (!nextTransport) return
     if (!this.isTransportUpgradeAllowed(nextTransport)) return
     if (!this.serverTransports?.includes(nextTransport)) return
-    if (!isUpgradeSource(this.transport)) return
-    void this.probeAndUpgrade(this.transport, nextTransport)
+    // Only SSE can carry a barrier as its last frame, and only SSE has anywhere to upgrade to.
+    if (this.transport.type !== CHANNEL_TRANSPORT.SSE) return
+    void this.probeAndUpgrade(this.transport as UpgradeSource, nextTransport)
   }
 
   private fallbackToSse(err: Error): void {
@@ -1088,7 +1083,7 @@ class ClientConnection implements MuxConnection {
     const ready = await readyP
     if (!ready || ready.upgradeId !== upgradeId || attempt.signal.aborted) {
       attempt.abort()
-      this.rollbackToOldWire()
+      if (this.registerReconcileTimer === null) this.drainBufferedFramesToWire()
       return null
     }
     return { upgradeId, probeHeartbeat }
@@ -1111,7 +1106,7 @@ class ClientConnection implements MuxConnection {
     }
     if (emission === 'not-emitted') {
       attempt.abort()
-      this.rollbackToOldWire()
+      if (this.registerReconcileTimer === null) this.drainBufferedFramesToWire()
       return
     }
     if (attempt.signal.aborted) {
@@ -1146,11 +1141,6 @@ class ClientConnection implements MuxConnection {
     wedged.abandonActiveTransport()
     wedged.dispose()
     this.handleTransportLoss(err)
-  }
-
-  private rollbackToOldWire(): void {
-    if (this.registerReconcileTimer !== null) return
-    this.drainBufferedFramesToWire()
   }
 
   private drainBufferedFramesToWire(): void {
@@ -1741,11 +1731,9 @@ class SseTransport implements UpgradeSource {
     this.flushScheduler.cancel()
     const queued = this.outbox.splice(0, this.outbox.length).map((entry) => entry.frame)
     queued.push(buildFrame().frame)
-    // Not `flushOutbox`: that re-queues its frames when a POST fails, and a barrier must never be
-    // replayed onto the next wire — the stage it names is gone by then. `emitted` is already
-    // decided too, since this POST cannot report whether the server saw it and a barrier that may
-    // have arrived has to be treated as arrived. The wait only holds the flip back until the frame
-    // has left the client.
+    // Not `flushOutbox`: it re-queues on failure, and a barrier must never be replayed onto the
+    // next wire. `emitted` is already decided — this POST cannot report whether the server saw it,
+    // and a barrier that may have arrived counts as arrived. The wait only delays the flip.
     await settledOrAborted(this.sendStandalonePost(queued), signal)
     return 'emitted'
   }
@@ -1792,21 +1780,14 @@ class SseTransport implements UpgradeSource {
     const stage = this.stageInitialBatch()
 
     // SSE downstream + upstream POST fire in parallel. If upstream fails, we fall back to outbox+batch.
-    const ssePromise = this.fetchImpl(getMarkedRequestUrl(this.telefuncUrl, REQUEST_KIND.SSE), {
-      method: 'POST',
-      headers: {
-        ...this.userHeaders,
-        Accept: 'text/event-stream',
-        'Content-Type': 'application/octet-stream',
-        [REQUEST_KIND_HEADER]: REQUEST_KIND.SSE,
-        ...(this.sessionToken ? { [TELEFUNC_SESSION_HEADER]: this.sessionToken } : undefined),
-      },
-      body: encodeSseRequest(
+    const ssePromise = this.post(
+      encodeSseRequest(
         { connId: this.connId, streamResponse: true },
         encodeLengthPrefixedFrames(stage.initialFrames, (entry) => entry.frame),
       ),
-      signal: abortController.signal,
-    })
+      abortController.signal,
+      { accept: 'text/event-stream' },
+    )
     // The duplex:'half' POST never resolves while the body stays open. `fetchEndedP`
     // catches its rejection eagerly so it's always handled even if openStream exits early.
     let fetchEndedP: Promise<'fetch-ended'> | undefined
@@ -1944,7 +1925,14 @@ class SseTransport implements UpgradeSource {
       this.lastPostStartedAt = now
 
       try {
-        const response = await this.postUpstream(encodeLengthPrefixedFrames(queued, (entry) => entry.frame))
+        assert(this.transportAbort)
+        const response = await this.post(
+          encodeSseRequest(
+            { connId: this.connId },
+            encodeLengthPrefixedFrames(queued, (entry) => entry.frame),
+          ),
+          this.transportAbort.signal,
+        )
         if (!response.ok) throw new Error('POST failed')
       } catch {
         this.outbox = queued.concat(this.outbox)
@@ -1975,30 +1963,35 @@ class SseTransport implements UpgradeSource {
     }, delay)
   }
 
-  /** The upstream POST. Both senders build this same request; they differ only in what a failure
-   *  means to them, which is why that stays at the call sites. */
-  private postUpstream(batch: Uint8Array<ArrayBuffer>): Promise<Response> {
-    assert(this.transportAbort)
+  /** Every request this transport makes. The three senders differ only in what they send and what
+   *  a failure means to them, so that is all they say. */
+  private post(body: BodyInit, signal: AbortSignal, extra?: { accept?: string; duplex?: 'half' }): Promise<Response> {
     return this.fetchImpl(getMarkedRequestUrl(this.telefuncUrl, REQUEST_KIND.SSE), {
       method: 'POST',
       headers: {
         ...this.userHeaders,
+        ...(extra?.accept ? { Accept: extra.accept } : undefined),
         'Content-Type': 'application/octet-stream',
         [REQUEST_KIND_HEADER]: REQUEST_KIND.SSE,
         ...(this.sessionToken ? { [TELEFUNC_SESSION_HEADER]: this.sessionToken } : undefined),
       },
-      body: encodeSseRequest({ connId: this.connId }, batch),
-      signal: this.transportAbort.signal,
+      body,
+      signal,
+      // @ts-ignore duplex is not yet in TypeScript's RequestInit
+      duplex: extra?.duplex,
     })
   }
 
-  /** A POST outside the outbox, for frames that cannot wait for the next flush. Failure is
-   *  swallowed: the only two senders are a heartbeat ping (whose own deadline notices a dead wire)
-   *  and the barrier (which must be treated as delivered either way). */
+  /** For frames that cannot wait for the next flush. Failure is swallowed: its two senders are a
+   *  heartbeat ping (its own deadline notices a dead wire) and the barrier (delivered either way). */
   private async sendStandalonePost(frames: Uint8Array<ArrayBuffer>[]): Promise<void> {
     if (!this.hasWire()) return
+    assert(this.transportAbort)
     try {
-      await this.postUpstream(encodeLengthPrefixedFrames(frames))
+      await this.post(
+        encodeSseRequest({ connId: this.connId }, encodeLengthPrefixedFrames(frames)),
+        this.transportAbort.signal,
+      )
     } catch {}
   }
 
@@ -2089,23 +2082,10 @@ class SseTransport implements UpgradeSource {
   // ── Persistent client→server stream-request POST (half-duplex streaming body) ──
 
   /** Half-duplex POST. Resolves on body-end, rejects on fetch error. */
+  /** `PushReadableStream` IS-A `ReadableStream` — fetch reads it directly, the producer's
+   *  `push(chunk)` lands in the same stream's queue, no async-iterator adapter in between. */
   private openStreamRequest(body: PushReadableStream<Uint8Array<ArrayBuffer>>, signal: AbortSignal): Promise<unknown> {
-    return this.fetchImpl(getMarkedRequestUrl(this.telefuncUrl, REQUEST_KIND.SSE), {
-      method: 'POST',
-      headers: {
-        ...this.userHeaders,
-        'Content-Type': 'application/octet-stream',
-        [REQUEST_KIND_HEADER]: REQUEST_KIND.SSE,
-        ...(this.sessionToken ? { [TELEFUNC_SESSION_HEADER]: this.sessionToken } : undefined),
-      },
-      // `PushReadableStream` IS-A `ReadableStream` — fetch reads it directly,
-      // producer's `push(chunk)` lands in the same stream's internal queue via
-      // `controller.enqueue`, no async-iterator adapter in between.
-      body,
-      signal,
-      // @ts-ignore duplex is not yet in TypeScript's RequestInit
-      duplex: 'half',
-    })
+    return this.post(body, signal, { duplex: 'half' })
   }
 
   private closeStreamRequest(): void {
