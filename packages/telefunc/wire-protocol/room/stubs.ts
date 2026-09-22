@@ -22,8 +22,8 @@ import { leaveCauseToWire } from './model.js'
 import {
   pushBoundedTail,
   hasRoomTag,
+  toDmReply,
   type RoomOrder,
-  type DmReply,
   type MemberSnapshot,
   type ParticipantStubRequest,
   type RoomDemandEvent,
@@ -351,7 +351,7 @@ function bindParticipantStubChannel(
     (meta: ParticipantMeta) => void channel.send({ __r: 'p-meta', meta }).catch(() => {}),
   )
 
-  // Channel ack returns resolved DmReply outcomes; only transport rejection means the holder left.
+  // The ack carries the client's reply; only a transport rejection means the holder left.
   participant._setForwarder((msg) => {
     const notice = {
       __r: 'dm' as const,
@@ -365,10 +365,7 @@ function bindParticipantStubChannel(
       void channel.send(notice).catch(() => {})
       return
     }
-    return channel.send(notice, { ack: true }).then(
-      (reply) => reply as DmReply,
-      () => DM_PARTICIPANT_LEFT,
-    )
+    return channel.send(notice, { ack: true }).then(toDmReply, () => DM_PARTICIPANT_LEFT)
   })
 
   const unlistenDemand = participant.onDemand((track, wanted) => {

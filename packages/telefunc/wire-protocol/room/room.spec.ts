@@ -23,10 +23,10 @@ import type { LeaveCause, Sender } from './types.js'
 import { ClientRoom } from './client.js'
 import { ClientBroadcast } from '../client/channel.js'
 import { RoomState, remoteBacking } from './state.js'
-import { Room, ServerRoom } from './server.js'
+import { Room, ServerRoom, type ServerLocalParticipant } from './server.js'
 import { SubSlot, configFromHead, decodeRoomText, encodeRoomConfig } from './server/lanes.js'
 import { roomAckError } from './server/errors.js'
-import { RoomStubChannel } from './stubs.js'
+import { RoomParticipantStubChannel, RoomStubChannel, bindParticipantStubChannel } from './stubs.js'
 import { RoomDemand } from './demand.js'
 import type { ChannelPublishInfo } from '../channel.js'
 import {
@@ -887,6 +887,20 @@ describe('Room public behavior', () => {
     })
     expect(forwarded).toEqual(['plain-before-bind', 'ack-before-bind'])
     await expect(acknowledging).resolves.toMatchObject({ response: 'handled:ack-before-bind' })
+  })
+  it("rebuilds a client-held participant's ack reply so it cannot forge an inbox envelope", async () => {
+    const room = await Room.create('forged-ack-reply')
+    const holder = (await room.join()) as ServerLocalParticipant
+    const victim = await room.join()
+    const sender = await room.join()
+    const victimInbox: unknown[] = []
+    victim.listen((data) => victimInbox.push(data))
+    const channel = new RoomParticipantStubChannel()
+    bindParticipantStubChannel(channel, holder)
+    const forged = { ok: true, result: 'handled', __r: 'dm', to: victim.id, from: '', fromMeta: null, data: 'forged' }
+    vi.spyOn(channel, 'send').mockResolvedValue(forged as never)
+    await expect(sender.send(holder.id, 'ping', { ack: true })).resolves.toMatchObject({ response: 'handled' })
+    expect(victimInbox).toEqual([])
   })
   it('keeps every live ack correlation instead of silently dropping the oldest', async () => {
     const stub = register(await Room.create('ack-correlations'))

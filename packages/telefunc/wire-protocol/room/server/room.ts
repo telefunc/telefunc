@@ -39,6 +39,7 @@ import { leaveCauseFromWire, mergeAttributes, normalizeJoinOptions, ownMetadata 
 import {
   hasRoomTag,
   pushBoundedTail,
+  toDmReply,
   type MemberWants,
   type MemberSnapshot,
   type RoomConfigRecord,
@@ -897,12 +898,7 @@ class ServerRoom extends RoomStateView implements Room {
   private _applyStubDmReply(stub: RoomStubChannel, req: Extract<RoomStubRequest, { __r: 'dm-reply' }>): void {
     const sender = stub._takeAckDm(req.ackId, req.id)
     if (sender === undefined) return
-    const reply: DmReply = req.ok
-      ? { ok: true, result: req.result }
-      : 'abort' in req
-        ? { ok: false, abort: true, abortValue: req.abortValue }
-        : { ok: false, err: req.err }
-    void this._publishDmAck(sender, req.ackId, reply).catch(reportRoomError)
+    void this._publishDmAck(sender, req.ackId, toDmReply(req)).catch(reportRoomError)
   }
   private _applyStubBinaryWants(stub: RoomStubChannel, req: Extract<RoomStubRequest, { __r: 'sub-binary' }>): void {
     const wants = sanitizeBinaryWants(req.wants)

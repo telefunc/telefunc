@@ -1,5 +1,5 @@
 // Shared Room storage records and wire envelopes. Behavior lives in the model, error, key, and binary modules.
-export { hasRoomTag, pushBoundedTail }
+export { hasRoomTag, pushBoundedTail, toDmReply }
 export type {
   RoomConfigRecord,
   RoomMemberRecord,
@@ -168,6 +168,14 @@ type RoomDmEnvelope = {
 type RoomDmAckEnvelope = { __r: 'dm-ack'; to: string; ackId: string } & DmReply
 /** The result of handling an `{ ack: true }` DM: the recipient's `listen` return, or its failure (an `Abort` value the handler raised, or an operational/generic error — see `RoomFailure`). */
 type DmReply = { ok: true; result: unknown } | RoomFailure
+
+/** A client-supplied reply, rebuilt field by field so no other key rides into the `dm-ack` envelope. */
+function toDmReply(reply: unknown): DmReply {
+  if (!isRecord(reply)) return { ok: false, err: 'Malformed DM reply' }
+  if (reply.ok) return { ok: true, result: reply.result }
+  if ('abort' in reply) return { ok: false, abort: true, abortValue: reply.abortValue }
+  return { ok: false, err: String(reply.err) }
+}
 
 /** Published failure form for the one path that cannot use a native channel ack. */
 type RoomFailure = { ok: false; abort: true; abortValue: unknown } | { ok: false; err: string }
