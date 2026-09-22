@@ -5,11 +5,35 @@ import { assert } from '../../utils/assert.js'
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
 import { getServerConfig } from '../../node/server/serverConfig.js'
 import { unrefTimer } from '../../utils/unrefTimer.js'
-import { CHANNEL_PING_INTERVAL_MIN_MS, type ChannelTransports } from '../constants.js'
-import { TAG, decode, encode, isConnCtrlTag } from '../shared-ws.js'
-import type { ChannelFrame, ReconcilePayload, ReconciledPayload } from '../shared-ws.js'
+import {
+  CHANNEL_PING_INTERVAL_MIN_MS,
+  MAX_CHANNELS_PER_CONNECTION,
+  UPGRADE_MAX_ID_BYTES,
+  UPGRADE_MAX_STAGED_BYTES,
+  UPGRADE_MAX_STAGED_RECORDS,
+  UPGRADE_STAGE_TTL_MS,
+  WIRE_MAX_CONN_CTRL_FRAME_BYTES,
+  WIRE_MAX_RAW_FRAME_BYTES,
+  WIRE_MAX_RECV_BACKLOG_BYTES,
+  WIRE_MAX_RECV_BACKLOG_FRAMES,
+  type ChannelTransports,
+} from '../constants.js'
+import {
+  TAG,
+  ProtocolViolationError,
+  assertProtocol,
+  decodeClientFrame,
+  encode,
+  isConnCtrlTag,
+  peekTag,
+} from '../shared-ws.js'
+import type { BarrierPayload, ChannelFrame, PreparePayload, ReconcilePayload, ReconciledPayload } from '../shared-ws.js'
 import { IndexedPeer, type PeerSender } from './IndexedPeer.js'
 import type { ServerChannel } from './channel.js'
+
+/** A transport-owned connection handle. The mux never looks inside one — it only compares them by
+ *  identity and hands them back to the transport that created it. */
+type Wire = unknown
 
 // Single-instance kernel: owns channels, sessions, per-connection runtime. Transports talk
 // to this class via `onConnectionOpen` and from then on identify connections by object
@@ -34,7 +58,25 @@ type ReconcileOutcome = {
   sessionId: string
   openList: ReconciledPayload['open']
   finalizeUpgrade: (() => void) | null
+  /** The wire this RECONCILED belongs on — a barrier reconciles the staged WS, not the sender. */
+  deliverTo: Wire
+  upgradeId?: string
 }
+
+type StagedUpgrade = {
+  upgradeId: string
+  prevSessionId: string
+  bytes: number
+  timer: ReturnType<typeof setTimeout>
+  phase: 'staged' | 'committing'
+}
+
+function retargetToProbe(err: unknown, probe: Wire): unknown {
+  if (!(err instanceof ProtocolViolationError) || err.target !== undefined) return err
+  return new ProtocolViolationError(err.message, probe)
+}
+
+const textEncoder = new TextEncoder()
 
 type MuxServerOptions = {
   reconnectTimeout: number
@@ -44,8 +86,6 @@ type MuxServerOptions = {
   clientReplayBuffer: number
   clientReplayBufferBinary: number
   connectTtl: number
-  bufferLimit: number
-  bufferLimitBinary: number
   sseFlushThrottle: number
   ssePostIdleFlushDelay: number
   transports: ChannelTransports
@@ -68,14 +108,15 @@ type ConnectionState = {
   recvChain: Promise<unknown> | null
   /** Set by `onConnectionClosed` so an in-flight `reconcile` can see the close and its kind. */
   closed: { isPermanent: boolean } | null
+  retiredByBarrier: boolean
+  recvBacklogBytes: number
+  recvBacklogFrames: number
 }
 
 type ConnectionEntry = {
   state: ConnectionState
   transport: ServerTransport<unknown>
 }
-
-class ProtocolViolationError extends Error {}
 
 function getChannelMux(): ChannelMux {
   return getGlobals().mux
@@ -91,7 +132,10 @@ class ChannelMux {
   private readonly connectionEntries = new Map<unknown, ConnectionEntry>()
   /** Reverse index for transports with a stable connId (SSE). Lets data POSTs locate the
    *  live stream connection, and catches a duplicate-connId reconnect racing teardown. */
-  private readonly connectionsByConnId = new Map<string, unknown>()
+  private readonly connectionsByConnId = new Map<string, Wire>()
+  private readonly stagedUpgrades = new Map<Wire, StagedUpgrade>()
+  private readonly stagedByPrevSession = new Map<string, Wire>()
+  private stagedBytes = 0
 
   /** Resolved lazily so the mux can be constructed at module-load (the globalObject factory
    *  runs before `serverConfig` is initialized). */
@@ -136,7 +180,16 @@ class ChannelMux {
 
   onConnectionOpen<TConnection>(connection: TConnection, transport: ServerTransport<TConnection>): void {
     this.connectionEntries.set(connection, {
-      state: { pingTimer: null, terminatePermanently: null, reconciling: false, recvChain: null, closed: null },
+      state: {
+        pingTimer: null,
+        terminatePermanently: null,
+        reconciling: false,
+        recvChain: null,
+        closed: null,
+        retiredByBarrier: false,
+        recvBacklogBytes: 0,
+        recvBacklogFrames: 0,
+      },
       transport: transport as ServerTransport<unknown>,
     })
     const connId = transport.getConnId(connection)
@@ -144,22 +197,23 @@ class ChannelMux {
     this.resetPingTimer(connection)
   }
 
-  async onConnectionRawMessage(connection: unknown, rawFrame: Uint8Array<ArrayBuffer>): Promise<void> {
+  async onConnectionRawMessage(connection: Wire, rawFrame: Uint8Array<ArrayBuffer>): Promise<void> {
     const outcome = await this.dispatchInbound(connection, rawFrame)
-    if (outcome) this.sendReconciled(connection, outcome)
+    if (outcome) this.sendReconciled(outcome)
   }
 
   onConnectionRawMessageDeferredReconciled(
-    connection: unknown,
+    connection: Wire,
     rawFrame: Uint8Array<ArrayBuffer>,
   ): Promise<ReconcileOutcome | null> {
     return this.dispatchInbound(connection, rawFrame)
   }
 
-  sendReconciled(connection: unknown, outcome: ReconcileOutcome): void {
+  sendReconciled(outcome: ReconcileOutcome): void {
     this.send(
-      connection,
+      outcome.deliverTo,
       encode.reconciled({
+        upgradeId: outcome.upgradeId,
         sessionId: outcome.sessionId,
         open: outcome.openList,
         reconnectTimeout: this.options.reconnectTimeout,
@@ -176,10 +230,10 @@ class ChannelMux {
     outcome.finalizeUpgrade?.()
   }
 
-  onConnectionClosed(connection: unknown, isPermanent: boolean): void {
+  onConnectionClosed(connection: Wire, { permanent }: { permanent: boolean }): void {
     const entry = this.connectionEntries.get(connection)
     if (!entry) return
-    entry.state.closed = { isPermanent }
+    entry.state.closed = { isPermanent: permanent }
     this.clearPingTimer(entry.state)
     this.connectionEntries.delete(connection)
     const connId = entry.transport.getConnId(connection)
@@ -188,16 +242,19 @@ class ChannelMux {
     if (connId !== null && this.connectionsByConnId.get(connId) === connection) {
       this.connectionsByConnId.delete(connId)
     }
+    this.clearStage(connection)
     const sessionId = entry.transport.getSessionId(connection)
     if (!sessionId) return // Closed before reconciling — nothing to clean up.
+    const stagedWs = this.stagedByPrevSession.get(sessionId)
+    if (stagedWs !== undefined) this.abandonStage(stagedWs)
     // Channels survive a transient close (`_onPeerDisconnect`'s reconnectTimeout grace);
     // permanent tears them down. The session-level finalizer is dropped on any close;
     // reconcile rebuilds it on next attach.
-    this.detachSession(sessionId, isPermanent ? DETACH_REASON.PERMANENT : DETACH_REASON.TRANSIENT)
+    this.detachSession(sessionId, permanent ? DETACH_REASON.PERMANENT : DETACH_REASON.TRANSIENT)
     this.sessionFinalizers.delete(sessionId)
   }
 
-  consumePermanentTermination(connection: unknown): boolean | null {
+  readPermanentTermination(connection: Wire): boolean | null {
     return this.connectionEntries.get(connection)?.state.terminatePermanently ?? null
   }
 
@@ -211,56 +268,227 @@ class ChannelMux {
 
   /** PING bypasses the recv chain — serializing it would tie liveness to the slowest
    *  awaitable on the connection. */
-  private dispatchInbound(connection: unknown, rawFrame: Uint8Array<ArrayBuffer>): Promise<ReconcileOutcome | null> {
+  private dispatchInbound(connection: Wire, rawFrame: Uint8Array<ArrayBuffer>): Promise<ReconcileOutcome | null> {
     const entry = this.connectionEntries.get(connection)
     if (!entry) return Promise.resolve(null)
-    const exec = async (): Promise<ReconcileOutcome | null> => {
-      try {
-        const pending = this.handleFrame(entry, connection, rawFrame)
-        return pending ? ((await pending) ?? null) : null
-      } catch {
-        entry.state.terminatePermanently = true
-        entry.transport.terminateConnection(connection)
-        return null
-      }
+    const { state } = entry
+    const byteLength = rawFrame.byteLength
+    if (this.isOverBudget(state, rawFrame)) {
+      this.terminateWire(connection)
+      return Promise.resolve(null)
     }
-    if (rawFrame[0] === TAG.PING) return exec()
+    state.recvBacklogBytes += byteLength
+    state.recvBacklogFrames++
+    const tag = peekTag(rawFrame)
+    const exec = (): Promise<ReconcileOutcome | null> => this.runInboundTurn(entry, connection, rawFrame, byteLength)
+    if (tag === TAG.PING) return exec()
     return this.chainRecv(entry, exec)
+  }
+
+  /** Control frames are bounded by what the protocol itself can describe; only the data plane
+   *  carries user payloads, and only it gets the multi-megabyte allowance. */
+  private isOverBudget(state: ConnectionState, rawFrame: Uint8Array<ArrayBuffer>): boolean {
+    const tag = peekTag(rawFrame)
+    const maxFrameBytes =
+      tag !== undefined && isConnCtrlTag(tag) ? WIRE_MAX_CONN_CTRL_FRAME_BYTES : WIRE_MAX_RAW_FRAME_BYTES
+    const byteLength = rawFrame.byteLength
+    return (
+      byteLength > maxFrameBytes ||
+      state.recvBacklogBytes + byteLength > WIRE_MAX_RECV_BACKLOG_BYTES ||
+      state.recvBacklogFrames >= WIRE_MAX_RECV_BACKLOG_FRAMES
+    )
+  }
+
+  private async runInboundTurn(
+    entry: ConnectionEntry,
+    connection: Wire,
+    rawFrame: Uint8Array<ArrayBuffer>,
+    byteLength: number,
+  ): Promise<ReconcileOutcome | null> {
+    try {
+      return (await this.handleFrame(entry, connection, rawFrame)) ?? null
+    } catch (err) {
+      if (!(err instanceof ProtocolViolationError)) throw err
+      this.terminateWire(err.target ?? connection)
+      return null
+    } finally {
+      entry.state.recvBacklogBytes -= byteLength
+      entry.state.recvBacklogFrames--
+    }
+  }
+
+  /** `connection` may be a wire other than the one that sent the offending frame — a barrier's
+   *  violation is the staged probe's. */
+  private terminateWire(connection: Wire): void {
+    const entry = this.connectionEntries.get(connection)
+    if (!entry) return
+    if (this.stagedUpgrades.get(connection)?.phase === 'staged') this.clearStage(connection)
+    entry.state.terminatePermanently = true
+    entry.transport.terminateConnection(connection)
   }
 
   /** Returns a `ReconcileOutcome` only on reconcile (so the caller decides when to send
    *  `reconciled`). Anything but reconcile/ping before reconciliation is a violation. */
   private handleFrame(
     entry: ConnectionEntry,
-    connection: unknown,
+    connection: Wire,
     rawFrame: Uint8Array<ArrayBuffer>,
   ): null | Promise<ReconcileOutcome | null> {
-    const frame = decode(rawFrame)
-    if (frame.tag === TAG.RECONCILE) return this.reconcile(entry, connection, frame.payload)
+    const frame = decodeClientFrame(rawFrame, WIRE_MAX_CONN_CTRL_FRAME_BYTES)
     if (frame.tag === TAG.PING) {
       this.resetPingTimer(connection)
       this.send(connection, encode.pong())
       return null
     }
+    assertProtocol(!entry.state.retiredByBarrier, 'frame on a wire retired by its barrier')
+    assertProtocol(!this.stagedUpgrades.has(connection), 'frame on a staged probe')
+    if (frame.tag === TAG.PREPARE) return this.handlePrepare(entry, connection, frame.payload, rawFrame.byteLength)
+    if (frame.tag === TAG.BARRIER) return this.handleBarrier(entry, connection, frame.payload, rawFrame.byteLength)
+    if (frame.tag === TAG.RECONCILE) {
+      this.claimSessionForReconcile(frame.payload, entry, connection)
+      return this.reconcile(entry, connection, frame.payload)
+    }
     const sessionId = entry.transport.getSessionId(connection)
-    if (!sessionId) throw new ProtocolViolationError()
-    // PONG/FIN/RECONCILED are server→client only; a client sending one is a violation.
-    if (isConnCtrlTag(frame.tag)) throw new ProtocolViolationError()
+    assertProtocol(sessionId, 'frame before reconcile')
     // Frame for an ix that's no longer in the session — client closed the channel and the
     // server reconciled it out, but a frame was still in flight. Drop silently.
     this.sessions.get(sessionId, (frame as ChannelFrame).index)?.channel._dispatchFrame(frame as ChannelFrame)
     return null
   }
 
+  /** An ordinary reconcile claims its session, abandoning any probe staged on it — unless a barrier
+   *  is mid-commit on that session, in which case the claim is refused instead. */
+  private claimSessionForReconcile(ctrl: ReconcilePayload, entry: ConnectionEntry, connection: Wire): void {
+    for (const claimed of [ctrl.sessionId, entry.transport.getSessionId(connection)]) {
+      if (claimed === undefined) continue
+      const staleProbe = this.stagedByPrevSession.get(claimed)
+      if (staleProbe === undefined) continue
+      // A committing barrier already owns this session; a concurrent claim on it is refused rather
+      // than allowed to abandon the stage out from under the in-flight commit.
+      assertProtocol(this.stagedUpgrades.get(staleProbe)?.phase !== 'committing', 'session claimed mid-commit')
+      this.abandonStage(staleProbe)
+    }
+  }
+
+  private handlePrepare(
+    entry: ConnectionEntry,
+    connection: Wire,
+    payload: PreparePayload,
+    rawByteLength: number,
+  ): null {
+    assertProtocol(!entry.transport.getSessionId(connection), 'PREPARE on a reconciled wire')
+    assertProtocol(this.sessions.peekSession(payload.sessionId), 'PREPARE for an unknown session')
+    assertProtocol(!this.stagedByPrevSession.has(payload.sessionId), 'session already staged')
+    assertProtocol(this.stagedUpgrades.size < UPGRADE_MAX_STAGED_RECORDS, 'staged record budget')
+    assertProtocol(this.stagedBytes + rawByteLength <= UPGRADE_MAX_STAGED_BYTES, 'staged byte budget')
+
+    const timer = unrefTimer(setTimeout(() => this.abandonStage(connection), UPGRADE_STAGE_TTL_MS))
+    this.stagedUpgrades.set(connection, {
+      upgradeId: payload.upgradeId,
+      prevSessionId: payload.sessionId,
+      bytes: rawByteLength,
+      timer,
+      phase: 'staged',
+    })
+    this.stagedByPrevSession.set(payload.sessionId, connection)
+    this.stagedBytes += rawByteLength
+    this.send(connection, encode.ready({ upgradeId: payload.upgradeId }))
+    return null
+  }
+
+  private handleBarrier(
+    entry: ConnectionEntry,
+    connection: Wire,
+    ctrl: BarrierPayload,
+    rawByteLength: number,
+  ): Promise<ReconcileOutcome> | null {
+    const wsConnection = this.stagedByPrevSession.get(ctrl.sessionId)
+    const stage = wsConnection === undefined ? undefined : this.stagedUpgrades.get(wsConnection)
+    // A barrier for an unknown or already-committing stage is refused SILENTLY (the client's attempt
+    // deadline is the only watchdog) — erroring would tear down a wire this frame has no claim on.
+    if (wsConnection === undefined || stage?.phase !== 'staged') return null
+
+    try {
+      // Admission policy — `decodeClientFrame` has already established the frame's shape.
+      assertProtocol(rawByteLength <= WIRE_MAX_CONN_CTRL_FRAME_BYTES, 'barrier frame over byte cap')
+      assertProtocol(ctrl.open.length <= MAX_CHANNELS_PER_CONNECTION, 'barrier over entry cap')
+      for (const channel of ctrl.open) {
+        assertProtocol(textEncoder.encode(channel.id).byteLength <= UPGRADE_MAX_ID_BYTES, 'channel id over byte cap')
+      }
+      for (const channel of ctrl.open)
+        assertProtocol(!channel.initial, 'barrier carries an initial channel', wsConnection)
+      assertProtocol(ctrl.upgradeId === stage.upgradeId, 'barrier upgradeId mismatch', wsConnection)
+      assertProtocol(
+        entry.transport.getSessionId(connection) === stage.prevSessionId,
+        'barrier session mismatch',
+        wsConnection,
+      )
+
+      const wsEntry = this.connectionEntries.get(wsConnection)
+      assert(wsEntry, 'staged probe has no connection entry')
+
+      stage.phase = 'committing'
+      entry.state.retiredByBarrier = true
+      return this.settleBarrierCommit(entry, wsEntry, wsConnection, ctrl, stage.upgradeId)
+    } catch (err) {
+      this.clearStage(wsConnection)
+      throw retargetToProbe(err, wsConnection)
+    }
+  }
+
+  private async settleBarrierCommit(
+    oldEntry: ConnectionEntry,
+    wsEntry: ConnectionEntry,
+    wsConnection: Wire,
+    ctrl: BarrierPayload,
+    upgradeId: string,
+  ): Promise<ReconcileOutcome> {
+    try {
+      // `reconcile` ran against the staged WS, so the outcome already carries it as `deliverTo`.
+      const outcome = await this.reconcile(wsEntry, wsConnection, ctrl, true)
+      return { ...outcome, upgradeId }
+    } catch (err) {
+      oldEntry.state.retiredByBarrier = false
+      throw retargetToProbe(err, wsConnection)
+    } finally {
+      this.clearStage(wsConnection)
+    }
+  }
+
+  /** Forgets the stage AND kills the probe holding it. No-op once the stage is committing. */
+  private abandonStage(wsConnection: Wire): void {
+    if (this.stagedUpgrades.get(wsConnection)?.phase !== 'staged') return
+    this.clearStage(wsConnection)
+    const entry = this.connectionEntries.get(wsConnection)
+    if (!entry) return
+    entry.state.terminatePermanently = true
+    entry.transport.terminateConnection(wsConnection)
+  }
+
+  /** Bookkeeping only — the probe wire is left alone. */
+  private clearStage(wsConnection: Wire): void {
+    const stage = this.stagedUpgrades.get(wsConnection)
+    if (!stage) return
+    clearTimeout(stage.timer)
+    this.stagedUpgrades.delete(wsConnection)
+    if (this.stagedByPrevSession.get(stage.prevSessionId) === wsConnection) {
+      this.stagedByPrevSession.delete(stage.prevSessionId)
+    }
+    this.stagedBytes -= stage.bytes
+  }
+
   // ── Reconcile + attach ──────────────────────────────────────────────
 
+  /** `isBarrier`: the old wire's session is retired by this commit, so it gets a finalizer that
+   *  FINs it once the new wire's RECONCILED has gone out. */
   private async reconcile(
     entry: ConnectionEntry,
-    connection: unknown,
+    connection: Wire,
     ctrl: ReconcilePayload,
+    isBarrier = false,
   ): Promise<ReconcileOutcome> {
     const { state, transport } = entry
-    const finalizeUpgrade = ctrl.upgrade && ctrl.sessionId ? this.buildUpgradeFinalizer(ctrl.sessionId) : null
+    const finalizeUpgrade = isBarrier && ctrl.sessionId ? (this.sessionFinalizers.get(ctrl.sessionId) ?? null) : null
     state.reconciling = true
     this.resetPingTimer(connection)
     const send: SendFn = (frame, onCommit) => this.send(connection, frame, onCommit)
@@ -275,7 +503,7 @@ class ChannelMux {
       const reason = state.closed.isPermanent ? DETACH_REASON.PERMANENT : DETACH_REASON.TRANSIENT
       const session = this.sessions.removeSession(newSessionId)
       if (session) for (const handle of session.values()) this.detachHandle(handle, reason)
-      throw new ProtocolViolationError()
+      throw new ProtocolViolationError('connection closed mid-reconcile')
     }
 
     if (ctrl.sessionId) this.sessionFinalizers.delete(ctrl.sessionId)
@@ -283,11 +511,7 @@ class ChannelMux {
     transport.setSessionId(connection, newSessionId)
     state.reconciling = false
     this.resetPingTimer(connection)
-    return { sessionId: newSessionId, openList, finalizeUpgrade }
-  }
-
-  private buildUpgradeFinalizer(prevSessionId: string): (() => void) | null {
-    return this.sessionFinalizers.get(prevSessionId) ?? null
+    return { sessionId: newSessionId, openList, finalizeUpgrade, deliverTo: connection }
   }
 
   private async reconcileSession(
@@ -388,7 +612,7 @@ class ChannelMux {
 
   /** Sole server→client send path; sync so wire order = call order. Per-channel
    *  byte+msg credit (see `flow-control/`) bounds queue growth. */
-  private send(connection: unknown, frame: Uint8Array<ArrayBuffer>, onCommit?: () => void): void {
+  private send(connection: Wire, frame: Uint8Array<ArrayBuffer>, onCommit?: () => void): void {
     const entry = this.connectionEntries.get(connection)
     if (!entry) return
     onCommit?.()
@@ -410,7 +634,7 @@ class ChannelMux {
     state.pingTimer = null
   }
 
-  private resetPingTimer(connection: unknown): void {
+  private resetPingTimer(connection: Wire): void {
     const entry = this.connectionEntries.get(connection)
     if (!entry) return
     const { state, transport } = entry
@@ -425,17 +649,6 @@ class ChannelMux {
         state.terminatePermanently = false
       }, this.options.pingDeadline),
     )
-  }
-
-  // ── Test-only ───────────────────────────────────────────────────────
-
-  dispose(): void {
-    this.channels.clear()
-    this.pendingRegisterWaiters.clear()
-    this.sessions.clear()
-    this.sessionFinalizers.clear()
-    this.connectionEntries.clear()
-    this.connectionsByConnId.clear()
   }
 }
 
@@ -502,11 +715,6 @@ class SessionRegistry {
       if (session.size === 0) this.bySession.delete(sessionId)
     }
   }
-
-  clear(): void {
-    this.bySession.clear()
-    this.byChannel.clear()
-  }
 }
 
 function resolveMuxServerOptions(): MuxServerOptions {
@@ -520,8 +728,6 @@ function resolveMuxServerOptions(): MuxServerOptions {
     clientReplayBuffer: c.clientReplayBuffer,
     clientReplayBufferBinary: c.clientReplayBufferBinary,
     connectTtl: c.connectTtl,
-    bufferLimit: c.bufferLimit,
-    bufferLimitBinary: c.bufferLimitBinary,
     sseFlushThrottle: c.sseFlushThrottle,
     ssePostIdleFlushDelay: c.ssePostIdleFlushDelay,
     transports: c.transports,

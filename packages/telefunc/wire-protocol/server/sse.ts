@@ -4,17 +4,19 @@ export type { SseChannelHttpResponse }
 import type { Readable } from 'node:stream'
 import { assert } from '../../utils/assert.js'
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
+import { unrefTimer } from '../../utils/unrefTimer.js'
 import { getServerConfig } from '../../node/server/serverConfig.js'
-import { CHANNEL_TRANSPORT } from '../constants.js'
+import { handleTelefunctionBug } from '../../node/server/runTelefunc/validateTelefunctionError.js'
+import { CHANNEL_TRANSPORT, SSE_METADATA_MAX_BYTES, WIRE_MAX_RAW_FRAME_BYTES } from '../constants.js'
 import { createPushReadableStream, type PushReadableStream } from '../push-readable-stream.js'
 import { createPushReadable, type PushReadable } from '../push-readable.js'
 import { uint8ArrayToBase64url } from '../base64url.js'
 import { textEncoder } from '../frame.js'
-import { parseSseRequestMetadata } from '../sse-request.js'
-import { StreamReader } from './request/StreamReader.js'
+import { parseSseRequestMetadata, type SseRequestMetadata } from '../sse-request.js'
+import { OversizeFrameError, StreamReader, StreamTruncatedError } from './request/StreamReader.js'
 import { getChannelMux } from './mux.js'
 import type { ReconcileOutcome, ServerTransport } from './mux.js'
-import { encode } from '../shared-ws.js'
+import { encode, ProtocolViolationError } from '../shared-ws.js'
 
 type SseChannelHttpResponse = {
   statusCode: 200 | 400
@@ -35,8 +37,8 @@ type SseConnection = {
    *  POSTs gate on this before dispatching so they can't race ahead of the reconcile. */
   ready: Promise<void>
   resolveReady: () => void
-  /** Batch data POSTs whose dispatch is in flight. Drained by `runStreamResponse` before
-   *  `sendReconciled` so their `_lastClientSeq` mutations land first. */
+  /** Dispatches in flight for this connection. A reconcile waits on these before reporting a seq,
+   *  so a batch POST's `_lastClientSeq` mutations can't land after the RECONCILED that reports them. */
   pendingDispatches: Set<Promise<unknown>>
 }
 
@@ -71,14 +73,28 @@ class SseConnectionTransport {
     // and should answer with a Node `Readable` so it pipes straight to the socket. Web
     // adapters get `request.body` (no `readable`) and want a `ReadableStream` back.
     const useNodeStream = readable !== undefined
+    let connId: string | null = null
     try {
       const reader = new StreamReader(source)
-      const metadata = parseSseRequestMetadata(await reader.readMetadata())
-      if (metadata.streamResponse) return await this.handleStreamResponsePost(metadata.connId, reader, useNodeStream)
-      if (metadata.streamRequest) return await this.handleStreamRequestPost(metadata.connId, reader)
-      return await this.handleBatchPost(metadata.connId, reader)
-    } catch {
-      return badRequest()
+      const metadata = parseMetadata(await reader.readMetadata(SSE_METADATA_MAX_BYTES))
+      connId = metadata.connId
+      if (metadata.streamResponse) return await this.handleStreamResponsePost(connId, reader, useNodeStream)
+      if (metadata.streamRequest) return await this.handleStreamRequestPost(connId, reader)
+      return await this.handleBatchPost(connId, reader)
+    } catch (err) {
+      // An oversize frame leaves no next frame boundary to resume from, so it ends the wire, not
+      // just this POST.
+      if (err instanceof OversizeFrameError && connId !== null) this.closeWire(connId)
+      // A typed protocol-input fault is the client's: answer 400 and stay quiet. Anything else is our
+      // bug — rethrow so the request pipeline (`runTelefunc`) logs it and masks it as a 500.
+      if (
+        err instanceof ProtocolViolationError ||
+        err instanceof OversizeFrameError ||
+        err instanceof StreamTruncatedError
+      ) {
+        return badRequest()
+      }
+      throw err
     }
   }
 
@@ -90,11 +106,11 @@ class SseConnectionTransport {
     useNodeStream: boolean,
   ): Promise<SseChannelHttpResponse> {
     const existing = this.mux.getConnectionByConnId<SseConnection>(connId)
-    if (existing) this.closeConnection(existing, false)
+    if (existing) this.closeConnection(existing, { permanent: false })
 
     const onCancel = () => {
       const conn = this.mux.getConnectionByConnId<SseConnection>(connId)
-      if (conn) this.closeConnection(conn, false)
+      if (conn) this.closeConnection(conn, { permanent: false })
     }
     const stream = useNodeStream
       ? createPushReadable(onCancel)
@@ -129,20 +145,25 @@ class SseConnectionTransport {
     }
   }
 
-  /** Long-lived client→server upload POST. Body streams over the connection's lifetime;
-   *  each frame is dispatched fire-and-forget so the loop never blocks the body, and the
-   *  mux emits `reconciled` inline whenever one fires. */
+  /** Long-lived client→server upload POST. The body streams for the connection's lifetime, so every
+   *  frame is dispatched fire-and-forget — awaiting one would stall the read loop behind it. */
   private async handleStreamRequestPost(connId: string, reader: StreamReader): Promise<SseChannelHttpResponse> {
     const connection = await this.resolveConnection(connId)
     if (!connection) return badRequest()
-    // Send the open-ack as soon as we have a connection — the client races this ack against
-    // its handshake timeout to commit to using this wire as its upload channel.
+    // The open-ack is the client's duplex probe (ACK ⇒ its upload bytes reached the server) and must
+    // not wait on reconcile settlement, or a slow attach would falsely demote a healthy duplex wire to
+    // sticky batch. Dispatch safety is owned by `runStreamResponse` releasing `ready` only after
+    // RECONCILED — the read loop below still waits on that gate, so early bytes sit unread until then.
     this.sendNow(connection, encode.streamRequestOpenAck())
     if (!(await this.waitReady(connection))) return badRequest()
-    while (true) {
-      const raw = await reader.readLengthPrefixedBytesOrNull()
-      if (!raw || connection.closed) break
-      void this.mux.onConnectionRawMessage(connection, raw)
+    try {
+      while (true) {
+        const raw = await reader.readLengthPrefixedBytesOrNull(WIRE_MAX_RAW_FRAME_BYTES)
+        if (!raw || connection.closed) break
+        this.dispatchAndReport(connection, raw)
+      }
+    } finally {
+      await this.settlePendingDispatches(connection)
     }
     return okResponse()
   }
@@ -159,32 +180,49 @@ class SseConnectionTransport {
     connection.pendingDispatches.add(drain)
     try {
       const outcome = await drain
-      if (outcome !== null && !connection.closed) this.mux.sendReconciled(connection, outcome)
+      if (shouldSendReconciled(outcome, connection)) this.mux.sendReconciled(outcome)
     } finally {
       connection.pendingDispatches.delete(drain)
     }
     return okResponse()
   }
 
-  /** Stream-response POST lifecycle: consume the initial reconcile batch, release the
-   *  `ready` gate, drain in-flight batch POSTs (so their `_lastClientSeq` mutations land
-   *  first), then emit `reconciled`. */
+  /** Stream-response POST lifecycle: consume the initial reconcile batch, drain the batch POSTs
+   *  in flight so their `_lastClientSeq` mutations land first, emit `reconciled`, then release the
+   *  `ready` gate the other POSTs are parked on. */
   private async runStreamResponse(connection: SseConnection, reader: StreamReader): Promise<void> {
-    let outcome: ReconcileOutcome | null = null
     try {
-      outcome = await this.drainDeferred(connection, reader)
-    } catch {
-      // Body truncated mid-frame (`StreamReader` throws). The caller fire-and-forgets this
-      // promise, so a rethrow would be an unhandled rejection. Transient close: the channels
-      // keep their reconnect grace and the client's retry can re-attach them.
-      this.closeConnection(connection, false)
-      return
+      const outcome = await this.drainDeferred(connection, reader)
+      if (!shouldSendReconciled(outcome, connection)) return
+      await this.settlePendingDispatches(connection)
+      this.mux.sendReconciled(outcome)
+    } catch (err) {
+      // The body ended mid-frame; this promise is fire-and-forget, so a rethrow would be unhandled.
+      // A truncation is the client hanging up (channels keep their grace); an oversize frame leaves
+      // no next frame boundary, so that wire is finished.
+      reportDispatchBug(err)
+      this.closeConnection(connection, { permanent: err instanceof OversizeFrameError })
     } finally {
+      // Every path releases the gate here — the parked POSTs then see whatever state we left.
       connection.resolveReady()
     }
-    if (outcome === null || connection.closed) return
-    if (connection.pendingDispatches.size > 0) await Promise.allSettled(connection.pendingDispatches)
-    this.mux.sendReconciled(connection, outcome)
+  }
+
+  /** Registered so a reconcile waits for it, and reported here because nothing else will — awaited
+   *  dispatches (the batch POST's) report through their caller. */
+  private dispatchAndReport(connection: SseConnection, raw: Uint8Array<ArrayBuffer>): void {
+    const dispatch = this.mux.onConnectionRawMessage(connection, raw)
+    connection.pendingDispatches.add(dispatch)
+    const evict = () => connection.pendingDispatches.delete(dispatch)
+    dispatch.then(evict, (err) => {
+      evict()
+      reportDispatchBug(err)
+    })
+  }
+
+  /** Waits without consuming failures — every dispatch is reported by whoever started it. */
+  private settlePendingDispatches(connection: SseConnection): Promise<unknown> {
+    return Promise.allSettled([...connection.pendingDispatches])
   }
 
   /** Read length-prefixed frames from `reader`, dispatch each through the deferred-reconcile
@@ -192,7 +230,7 @@ class SseConnectionTransport {
   private async drainDeferred(connection: SseConnection, reader: StreamReader): Promise<ReconcileOutcome | null> {
     let outcome: ReconcileOutcome | null = null
     while (true) {
-      const raw = await reader.readLengthPrefixedBytesOrNull()
+      const raw = await reader.readLengthPrefixedBytesOrNull(WIRE_MAX_RAW_FRAME_BYTES)
       if (!raw || connection.closed) break
       const next = await this.mux.onConnectionRawMessageDeferredReconciled(connection, raw)
       if (next !== null) outcome = next
@@ -231,11 +269,16 @@ class SseConnectionTransport {
     })
   }
 
-  private resolvePendingConnections(connId: string, connection: SseConnection | null): void {
+  private resolvePendingConnections(connId: string, connection: SseConnection): void {
     const pending = this.pendingConnections.get(connId)
     if (!pending) return
     this.pendingConnections.delete(connId)
     for (const resolve of pending) resolve(connection)
+  }
+
+  private closeWire(connId: string): void {
+    const connection = this.mux.getConnectionByConnId<SseConnection>(connId)
+    if (connection) this.closeConnection(connection, { permanent: true })
   }
 
   private sendNow(connection: SseConnection, frame: Uint8Array<ArrayBuffer>): void {
@@ -246,7 +289,7 @@ class SseConnectionTransport {
   /** Resolves false on timeout — caller drops the POST. */
   private waitReady(connection: SseConnection): Promise<boolean> {
     return new Promise<boolean>((resolve) => {
-      const timer = setTimeout(() => resolve(false), this.mux.connectTtl)
+      const timer = unrefTimer(setTimeout(() => resolve(false), this.mux.connectTtl))
       connection.ready.then(() => {
         clearTimeout(timer)
         resolve(true)
@@ -254,19 +297,44 @@ class SseConnectionTransport {
     })
   }
 
-  private closeConnection(connection: SseConnection, permanent: boolean): void {
+  private closeConnection(connection: SseConnection, { permanent }: { permanent: boolean }): void {
     if (connection.closed) return
     connection.closed = true
     // Unblock any data POST awaiting `ready` — its dispatch sees the closed connection and bails.
     connection.resolveReady()
-    this.mux.onConnectionClosed(connection, permanent)
+    this.mux.onConnectionClosed(connection, { permanent })
     connection.stream.close()
   }
 
   private terminateConnection(connection: SseConnection): void {
-    const terminatePermanently = this.mux.consumePermanentTermination(connection)
-    this.closeConnection(connection, terminatePermanently === true)
+    const terminatePermanently = this.mux.readPermanentTermination(connection)
+    this.closeConnection(connection, { permanent: terminatePermanently === true })
   }
+}
+
+/** Malformed metadata is untrusted client ingress, not a truncation — same class as the decode seam. */
+function parseMetadata(raw: string): SseRequestMetadata {
+  try {
+    return parseSseRequestMetadata(raw)
+  } catch {
+    throw new ProtocolViolationError('malformed SSE request metadata')
+  }
+}
+
+function reportDispatchBug(err: unknown): void {
+  if (err instanceof ProtocolViolationError || err instanceof OversizeFrameError || err instanceof StreamTruncatedError)
+    return
+  handleTelefunctionBug(err instanceof Error ? err : new Error(String(err)))
+}
+
+/** A closed SSE wire has nothing to say — except on a barrier commit, where the RECONCILED is
+ *  bound for the WS and this wire's own retirement is exactly what the upgrade just did. */
+function shouldSendReconciled(
+  outcome: ReconcileOutcome | null,
+  connection: SseConnection,
+): outcome is ReconcileOutcome {
+  if (outcome === null) return false
+  return outcome.deliverTo !== connection || !connection.closed
 }
 
 function badRequest(): SseChannelHttpResponse {

@@ -178,7 +178,7 @@ async function readBody(
     assert(source)
     const reader = new StreamReader(source)
     return {
-      text: await reader.readMetadata(),
+      text: await reader.readMetadata(Number.POSITIVE_INFINITY),
       registerFile: (i, s) => reader.registerFile(i, s),
       consumeFile: (i, s) => reader.consumeFile(i, s),
     }
