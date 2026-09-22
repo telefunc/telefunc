@@ -1,0 +1,56 @@
+{
+  "name": "@telefunc/drizzle-experimental",
+  "version": "0.1.0",
+  "description": "Experimental reactive Drizzle queries for Telefunc — server-owned live-query invalidation derived from the SQL your telefunctions run.",
+  "homepage": "https://github.com/telefunc/telefunc/tree/main/packages/drizzle-experimental#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/telefunc/telefunc.git",
+    "directory": "packages/drizzle-experimental"
+  },
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    "./package.json": "./package.json",
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./tanstack-query": {
+      "types": "./dist/tanstack-query/index.d.ts",
+      "default": "./dist/tanstack-query/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "rm -rf dist/ && tsc -p tsconfig.json && tsc -p tsconfig.spec.json",
+    "dev": "tsc --watch"
+  },
+  "dependencies": {
+    "@brillout/json-serializer": "^0.5.25",
+    "@tanstack/db-ivm": "0.1.18"
+  },
+  "peerDependencies": {
+    "@tanstack/query-core": ">=5.66.0",
+    "drizzle-orm": "1.0.0-rc.4",
+    "telefunc": ">=0.2.21"
+  },
+  "peerDependenciesMeta": {
+    "@tanstack/query-core": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "0.5.4",
+    "@tanstack/query-core": "^5.66.0",
+    "@types/node": "^22.10.0",
+    "@types/pg": "^8.11.10",
+    "drizzle-orm": "1.0.0-rc.4",
+    "pg": "^8.13.1",
+    "postgres": "^3.4.5",
+    "telefunc": "workspace:*",
+    "typescript": "^5.9.2"
+  }
+}
