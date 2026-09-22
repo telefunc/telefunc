@@ -383,6 +383,15 @@ describe('Broadcast lifecycle and route ownership', () => {
     expect((await Broadcast.publish(key, 'released')).receivers).toBe(0)
   })
 
+  it('absorbs a client subscribe that crosses our close on the wire', async () => {
+    const key = 'broadcast:sub-crosses-close'
+    const broadcast = registeredBroadcast(key)
+    broadcast._attachPeer(peer(() => {}))
+    void broadcast.close()
+    expect(() => broadcast._dispatchFrame({ tag: TAG.BROADCAST_SUB, index: 7, binary: false })).not.toThrow()
+    expect((await Broadcast.publish(key, 'after-close')).receivers).toBe(0)
+  })
+
   it.each([
     ['publish', (broadcast: ServerBroadcast) => broadcast.publish(null)],
     ['publishBinary', (broadcast: ServerBroadcast) => broadcast.publishBinary(new Uint8Array())],

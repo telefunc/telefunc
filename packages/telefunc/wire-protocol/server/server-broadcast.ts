@@ -163,6 +163,8 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
   }
 
   _onPeerBroadcastSubscribe(binary: boolean): void {
+    // A client's subscribe can cross our CLOSE on the wire.
+    if (this._isClosed) return
     this._ensureBroadcast()
     const kind = binary ? 'binary' : 'text'
     this._peerSubscriptions[kind] = true
