@@ -1,3 +1,5 @@
+import { assert } from '../utils/assert.js'
+
 export const SERIALIZER_PREFIX_FILE = '!TelefuncFile:'
 export const SERIALIZER_PREFIX_BLOB = '!TelefuncBlob:'
 export const SERIALIZER_PREFIX_FILE_DOWNLOAD = '!TelefuncFileDownload:'
@@ -73,13 +75,60 @@ export const WS_PROBE_TIMEOUT_MS = 3_000
  *  before declaring the upstream wire dead and falling back to outbox+batch POSTs. */
 export const STREAM_REQUEST_HANDSHAKE_TIMEOUT_MS = 3_000
 
-/** How long phase 1 of the upgrade drain waits for natural SSE outbox drain before
- *  phase 2 gates the producer and forces the cutover. */
+// ===== SSE -> WS upgrade =====
+
+/** Batch mode only: how long the barrier waits for a natural outbox drain before flushing it
+ *  itself. On a duplex upstream the barrier is just the last frame pushed onto the open body. */
 export const UPGRADE_DRAIN_TIMEOUT_MS = 2_000
 
-/** How long the client waits for RECONCILED on the new wire after FIN arrives on the old
- *  wire (cross-wire reordering can deliver FIN first) before aborting the upgrade. */
-export const UPGRADE_FIN_RECONCILED_TIMEOUT_MS = 2_000
+/** Post-flip wait for both join limbs — FIN on the old wire, RECONCILED on the new one. */
+export const UPGRADE_HANDOFF_JOIN_TIMEOUT_MS = 2_000
+
+/** Past either bound the upgrade is abandoned rather than letting a stalled join buffer forever. */
+export const UPGRADE_HANDOFF_BUFFER_BYTES = 8 * 1024 * 1024
+export const UPGRADE_HANDOFF_BUFFER_FRAMES = 4_096
+
+/** Wall-clock bound on one attempt, PREPARE to COMMITTED (see the assertion below). */
+export const UPGRADE_ATTEMPT_TIMEOUT_MS = 10_000
+
+/** How long a staged, uncommitted upgrade may hold its session before the probe is dropped. */
+export const UPGRADE_STAGE_TTL_MS = 10_000
+
+/** Longest channel id the wire will carry. */
+export const UPGRADE_MAX_ID_BYTES = 256
+
+/** Worst case for one open entry beyond its id: the key names, `"ix":65535`,
+ *  `"lastSeq":4294967295`, `"initial":true` and the separator. */
+const RECONCILE_ENTRY_ENVELOPE_BYTES = 96
+
+/** Bounds what unauthenticated PREPARE frames can pin in memory before any of them commits. */
+export const UPGRADE_MAX_STAGED_RECORDS = 1_024
+export const UPGRADE_MAX_STAGED_BYTES = 64 * 1024 * 1024
+
+// ===== Server ingress bounds =====
+
+/** Largest data-plane frame. Generous because it carries user payloads. */
+export const WIRE_MAX_RAW_FRAME_BYTES = 64 * 1024 * 1024
+
+/** The single channels-per-connection limit: the client refuses to open past it, a barrier may
+ *  list no more, and the control-frame byte cap below is derived from it. Every reconcile lists
+ *  every channel, so this is also what a peer can make the server parse. (The wire could address
+ *  65 536 — a u16 index — but that is exhaustion, not a working limit.) */
+export const MAX_CHANNELS_PER_CONNECTION = 4_096
+
+/** Largest control frame the server will decode, checked on the raw bytes. Derived, never picked:
+ *  the biggest legitimate one lists every channel at the id cap, and a cap that refuses a legal
+ *  frame is worse than no cap. */
+export const WIRE_MAX_CONN_CTRL_FRAME_BYTES =
+  MAX_CHANNELS_PER_CONNECTION * (UPGRADE_MAX_ID_BYTES + RECONCILE_ENTRY_ENVELOPE_BYTES) + 1_024
+
+/** Per-connection ceiling on accepted-but-unprocessed frames: a peer that outruns its recv chain
+ *  is terminated rather than allowed to queue without bound. */
+export const WIRE_MAX_RECV_BACKLOG_BYTES = 64 * 1024 * 1024
+export const WIRE_MAX_RECV_BACKLOG_FRAMES = 50_000
+
+/** Largest SSE request metadata header the server will read off a POST body. */
+export const SSE_METADATA_MAX_BYTES = 64 * 1024
 
 /** How long the client waits for RECONCILED after sending a RECONCILE before declaring the
  *  wire dead and reconnecting. A downstream that stalls without erroring (bytes stop, no FIN)
@@ -87,6 +136,9 @@ export const UPGRADE_FIN_RECONCILED_TIMEOUT_MS = 2_000
  *  is suppressed while reconciling, so nothing notices the dead wire and every call buffered
  *  behind the un-acked RECONCILE hangs. */
 export const RECONCILE_TIMEOUT_MS = 10_000
+
+// An attempt outliving the reconcile watchdog would let the watchdog drop the wire mid-commit.
+assert(UPGRADE_ATTEMPT_TIMEOUT_MS <= RECONCILE_TIMEOUT_MS)
 
 // ===== Multiplexed SSE transport =====
 

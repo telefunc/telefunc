@@ -9,7 +9,7 @@ async function transformTelefuncFileClientSide(
   appRootDir: string,
   extensionImports: string[],
 ) {
-  const exportList = await getExportList(src)
+  const exportList = await getExportList(src, id)
   const exportNames = exportList.map((e) => e.exportName)
   return transformTelefuncFileClientSideSync(id, appRootDir, exportNames, extensionImports)
 }

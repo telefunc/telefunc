@@ -9,6 +9,9 @@
     "directory": "packages/rxjs"
   },
   "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
   "telefunc": {
     "server": "@telefunc/rxjs/server",
     "client": "@telefunc/rxjs/client"
@@ -39,7 +42,7 @@
     "dev": "tsc --watch"
   },
   "peerDependencies": {
-    "telefunc": ">=0.2.0",
+    "telefunc": ">=0.2.24",
     "rxjs": ">=7.0.0"
   },
   "devDependencies": {

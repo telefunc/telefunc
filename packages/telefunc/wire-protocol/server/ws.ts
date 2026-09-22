@@ -30,12 +30,12 @@ function getTelefuncChannelHooks() {
     open: (peer) => mux.onConnectionOpen(peer, transport),
     message: (peer, message) => mux.onConnectionRawMessage(peer, message.uint8Array() as Uint8Array<ArrayBuffer>),
     close: (peer, details) => {
-      const terminatePermanently = mux.consumePermanentTermination(peer)
+      const terminatePermanently = mux.readPermanentTermination(peer)
       const isPermanent =
         terminatePermanently === true ||
         (terminatePermanently === null && (details?.code === 1000 || details?.code === 1001))
-      mux.onConnectionClosed(peer, isPermanent)
+      mux.onConnectionClosed(peer, { permanent: isPermanent })
     },
-    error: (peer) => mux.onConnectionClosed(peer, false),
+    error: (peer) => mux.onConnectionClosed(peer, { permanent: false }),
   })
 }
