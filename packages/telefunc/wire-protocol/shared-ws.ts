@@ -527,15 +527,14 @@ const CLIENT_TAGS: ReadonlySet<number> = new Set([
 ])
 
 /** Server ingress: `decode` owns the frame's shape, this owns its direction and the upgrade frames'
- *  size cap. The cap is checked on the raw bytes because its job is to bound what an unauthenticated
- *  peer can make us parse — after `decode` it would be bounding nothing. */
+ *  size cap. Both are checked on the raw bytes because their job is to bound what an unauthenticated
+ *  peer can make us parse — after `decode` they would be bounding nothing. */
 function decodeClientFrame(raw: Uint8Array<ArrayBuffer>, maxUpgradeFrameBytes: number): DecodedFrame {
   const tag = peekTag(raw)
+  assertProtocol(tag !== undefined && CLIENT_TAGS.has(tag), `client sent a server-only frame ${tag}`)
   const isUpgradeFrame = tag === TAG.PREPARE || tag === TAG.BARRIER
   assertProtocol(!isUpgradeFrame || raw.byteLength <= maxUpgradeFrameBytes, 'upgrade frame over byte cap')
-  const frame = decode(raw)
-  assertProtocol(CLIENT_TAGS.has(frame.tag), `client sent a server-only frame ${frame.tag}`)
-  return frame
+  return decode(raw)
 }
 
 function parseJsonPayload(payload: Uint8Array): unknown {
