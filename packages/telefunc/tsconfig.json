@@ -13,12 +13,6 @@
     "lib": ["DOM", "ESNext"],
     "types": ["vite/client"]
   },
-  "include": [
-    "backend.ts",
-    "client/**/*",
-    "node/**/*",
-    "serve/**/*",
-    "wire-protocol/**/*"
-  ],
+  "include": ["client/**/*", "node/**/*", "serve/**/*", "wire-protocol/**/*"],
   "exclude": ["**/*.spec.ts"]
 }

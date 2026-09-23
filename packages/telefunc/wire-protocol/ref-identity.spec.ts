@@ -433,16 +433,20 @@ async function roundTrip(
             headers: { 'content-type': 'application/octet-stream' },
           })
     const abortController = new AbortController()
-    const parsed = (await parseResponse(response, {
-      telefunctionName: 'testFn',
-      telefuncFilePath: '/pages/spec/ref-identity.telefunc.ts',
-      abortController,
-      channel: { transports: ['sse'] },
-      requestCloseHandlers: [],
-      extensionResponseTypes: opts.clientExtensions ?? [],
-      headers: null,
-      telefuncUrl: 'http://localhost/_telefunc',
-    })) as { ret: unknown }
+    const parsed = (await parseResponse(
+      response,
+      {
+        telefunctionName: 'testFn',
+        telefuncFilePath: '/pages/spec/ref-identity.telefunc.ts',
+        abortController,
+        channel: { transports: ['sse'] },
+        requestCloseHandlers: [],
+        extensionResponseTypes: opts.clientExtensions ?? [],
+        headers: null,
+        telefuncUrl: 'http://localhost/_telefunc',
+      },
+      undefined,
+    )) as { ret: unknown }
     return { ret: parsed.ret, abortController }
   } finally {
     const index = config.extensions.findIndex((extension) => extension.name === extensionName)

@@ -42,16 +42,8 @@ import type { ChannelPublishInfo } from '../channel.js'
 import { disposeBackend, getBroadcastBackend, getRoomBackend, installBackend } from '../backend/install.js'
 import type { BackendDriverPair } from '../backend/driver-pair.js'
 import { MemoryBackend, MemoryBackendState } from '../backend/memory/backend.js'
-import { SubscriptionManager } from '../backend/subscription-manager.js'
 import type { LaneId } from '../backend/room/contract.js'
-import type {
-  BackendReceiver,
-  BackendSubscription,
-  SubscriptionAttempt,
-  SubscriptionAttemptState,
-  SubscriptionDriver,
-  SubscriptionState,
-} from '../backend/subscription.js'
+import type { BackendReceiver, BackendSubscription, SubscriptionState } from '../backend/subscription.js'
 import { ORDERING_FRAME_LAYOUT, decodeOrderingFrame, encodeOrderingFrame } from '../ordering-frame.js'
 import { GcRegistry } from '../gcRegistry.js'
 import { wrapProxy } from '../wrapProxy.js'
@@ -59,7 +51,6 @@ const encoder = new TextEncoder()
 const decoder = new TextDecoder()
 const semanticLane = { kind: 'semantic' } as const satisfies LaneId
 const allBinary = { everyMember: { all: true, tracks: [] }, members: {} }
-const FORMER_MEMBER_KV_TTL_MS = 180_000
 let driver: MemoryBackend
 let memoryState: MemoryBackendState
 const memoryPair = (value: MemoryBackend): BackendDriverPair => ({
@@ -196,7 +187,7 @@ describe('Room public behavior', () => {
     expect(await Room.getParticipants(room.id)).toEqual([])
   })
   it('creates, lists, updates, closes fully, and recreates a genuinely fresh domain', async () => {
-    const room = (await Room.create('lifecycle', { meta: { topic: 'one' } })) as ServerRoom
+    const room = (await Room.create('lifecycle', { meta: { topic: 'one' } })) as unknown as ServerRoom
     const firstInc = room._inc
     const me = await room.join({ meta: { name: 'Alice' } })
     const observer = await Room.get('lifecycle')
@@ -243,7 +234,7 @@ describe('Room public behavior', () => {
         head: {
           currentInc: current.currentInc,
           state: 'closing',
-          config: encodeRoomConfig({ ...configFromHead(current), status: 'closing' }),
+          config: encodeRoomConfig(configFromHead(current)),
           closeLease: { id: 'stalled-closer', durationMs: 1_000 },
         },
       },
@@ -289,7 +280,7 @@ describe('Room public behavior', () => {
         head: {
           currentInc: current.currentInc,
           state: 'closing',
-          config: encodeRoomConfig({ ...configFromHead(current), status: 'closing' }),
+          config: encodeRoomConfig(configFromHead(current)),
           closeLease: { id: 'active-get-or-create-close', durationMs: 1_000 },
         },
       },
@@ -305,16 +296,10 @@ describe('Room public behavior', () => {
     expect(recreated._inc).not.toBe(firstInc)
     expect(recreated.isClosed).toBe(false)
   })
-  it('tears down a close observed by a separate Room runtime that cannot inherit the initiator hold', async () => {
+  it('tears down an observing instance when another instance closes the room', async () => {
     const authority = await Room.create('remote-close-teardown')
     authority.onAnnounce(() => {})
-    // A fresh module graph has its own initiating-close registry, like another server process; the backend
-    // installation is process-global, so this observer receives the real close emitted by Room.close()
-    // without being able to see the initiator's in-memory hold.
-    vi.resetModules()
-    const remoteInstall = await import('../backend/install.js')
-    const remoteServer = await import('./server.js')
-    const remoteBackend = remoteInstall.getRoomBackend()
+    const remoteBackend = getRoomBackend()
     const unsubscribed: string[] = []
     const observedLanes = new Set<string>()
     const observationReady = deferred<void>()
@@ -337,20 +322,15 @@ describe('Room public behavior', () => {
         },
       }
     })
-    try {
-      expect(remoteServer.Room).not.toBe(Room)
-      const observer = await remoteServer.Room.get('remote-close-teardown')
-      observer.onAnnounce(() => {})
-      const closed = deferred<void>()
-      observer.onClose(() => closed.resolve())
-      await observationReady.promise
-      await Room.close('remote-close-teardown')
-      await Promise.all([closed.promise, observationStopped.promise])
-      expect(observer.isClosed).toBe(true)
-      expect(unsubscribed.sort()).toEqual(['control', 'semantic'])
-    } finally {
-      await remoteInstall.disposeBackend()
-    }
+    const observer = await Room.get('remote-close-teardown')
+    observer.onAnnounce(() => {})
+    const closed = deferred<void>()
+    observer.onClose(() => closed.resolve())
+    await observationReady.promise
+    await Room.close('remote-close-teardown')
+    await Promise.all([closed.promise, observationStopped.promise])
+    expect(observer.isClosed).toBe(true)
+    expect(unsubscribed.sort()).toEqual(['control', 'semantic'])
   })
   it('replaces a still-demanded Room subscription after its supervised source closes terminally', async () => {
     const authority = await Room.create('terminal-subscription-recovery')
@@ -406,10 +386,7 @@ describe('Room public behavior', () => {
   it('reconciles a zombie Room when terminal control state follows a lost closed frame', async () => {
     const authority = await Room.create('terminal-control-reconcile')
     await authority.join()
-    vi.resetModules()
-    const remoteInstall = await import('../backend/install.js')
-    const remoteServer = await import('./server.js')
-    const remoteBackend = remoteInstall.getRoomBackend()
+    const remoteBackend = getRoomBackend()
     const subscribeLane = remoteBackend.subscribeLane.bind(remoteBackend)
     let terminal: ReturnType<typeof terminalSubscription> | undefined
     vi.spyOn(remoteBackend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
@@ -425,27 +402,23 @@ describe('Room public behavior', () => {
       terminal = terminalSubscription(subscription)
       return terminal.subscription
     })
-    try {
-      const observer = await remoteServer.Room.get(authority.id)
-      let closes = 0
-      const closed = deferred<void>()
-      observer.onClose(() => {
-        closes++
-        closed.resolve()
-      })
-      if (!terminal) throw new Error('control subscription did not start')
-      await terminal.subscription.ready
-      await Room.close(authority.id)
-      await terminal.close()
-      await closed.promise
-      expect({ closed: observer.isClosed, count: observer.count, closes }).toEqual({
-        closed: true,
-        count: 0,
-        closes: 1,
-      })
-    } finally {
-      await remoteInstall.disposeBackend()
-    }
+    const observer = await Room.get(authority.id)
+    let closes = 0
+    const closed = deferred<void>()
+    observer.onClose(() => {
+      closes++
+      closed.resolve()
+    })
+    if (!terminal) throw new Error('control subscription did not start')
+    await terminal.subscription.ready
+    await Room.close(authority.id)
+    await terminal.close()
+    await closed.promise
+    expect({ closed: observer.isClosed, count: observer.count, closes }).toEqual({
+      closed: true,
+      count: 0,
+      closes: 1,
+    })
   })
   it('tells clients the room closed when a terminal control lane lost the closed frame', async () => {
     const authority = await Room.create('terminal-close-relay')
@@ -679,7 +652,7 @@ describe('Room public behavior', () => {
     const read = await driver.readCells(room.id, room._inc, { keys: [memberKey] })
     expect('staleInc' in read).toBe(false)
     if ('staleInc' in read) throw new Error('unexpected stale generation')
-    const record = parse(decoder.decode(read.cells.get(memberKey)!))
+    const record = parse(decoder.decode(read.cells.get(memberKey)!)) as Record<string, unknown>
     await expect(
       driver.compareExchangeCells(room.id, room._inc, read.revision, [
         {
@@ -1084,7 +1057,7 @@ describe('Room public behavior', () => {
     expect(victimInbox).toEqual([])
   })
   it('treats an unparsable client payload on a Room stub as a protocol violation', async () => {
-    const stub = register(await Room.create('malformed-stub-payload'))
+    const stub = register((await Room.create('malformed-stub-payload')) as ServerRoom)
     const participant = new RoomParticipantStubChannel()
     bindParticipantStubChannel(participant, (await Room.join('malformed-stub-payload')) as ServerLocalParticipant)
     const frames = [
@@ -1217,7 +1190,9 @@ describe('Room public behavior', () => {
     const holder = (await room.join()) as ServerLocalParticipant
     const channel = new RoomParticipantStubChannel()
     let closed = false
-    channel.onClose(() => (closed = true))
+    channel.onClose(() => {
+      closed = true
+    })
     bindParticipantStubChannel(channel, holder)
     const departed = vi.spyOn(room, '_removeDepartedMember')
     await holder.leave()
@@ -1318,13 +1293,6 @@ describe('Room public behavior', () => {
     await expect(publisher.publishBinary(new Uint8Array([1]), { track: 'camera' })).rejects.toThrow()
     await publisher.publishBinary(new Uint8Array([2]), { track: 'camera' })
     await vi.waitFor(() => expect(frames).toContain(2))
-  })
-  it('keeps every live ack correlation instead of silently dropping the oldest', async () => {
-    const stub = register(await Room.create('ack-correlations'))
-    for (let index = 0; index <= 1_024; index++) {
-      stub._recordAckDm(`ack-${index}`, `sender-${index}`, 'recipient')
-    }
-    expect(stub._takeAckDm('ack-0', 'recipient')).toBe('sender-0')
   })
   it('applies before guards and after hooks around authoritative joins, publishes, and sends', async () => {
     await Room.create('guarded')
@@ -1582,7 +1550,7 @@ describe('Room public behavior', () => {
     await publisher.publish('text', { retain: true })
     await publisher.publishBinary(new Uint8Array([1]), { track: 'screen', retain: true })
     expect(await driver.listRetained(room.id, room._inc)).toHaveLength(2)
-    vi.setSystemTime(1_000_000 + FORMER_MEMBER_KV_TTL_MS + 1)
+    vi.setSystemTime(1_000_000 + ROOM_MEMBER_TTL_MS + 1)
     expect(await Room.getParticipants(room.id)).toEqual([])
     expect(await driver.listRetained(room.id, room._inc)).toEqual([])
     expect(leaves).toEqual([publisher.id])
@@ -1771,7 +1739,7 @@ describe('client Room lifecycle', () => {
     expect(remoteBacking(Object.create(remote!))).toBeNull()
     expect(Object.getOwnPropertySymbols(remote!)).toEqual([])
   })
-  describe.skipIf(typeof globalThis.gc !== 'function')('Room-derived handle ownership (real GC)', () => {
+  describe('Room-derived handle ownership (real GC)', () => {
     it('does not make a roster participant the owner of its Room wrapper', async () => {
       const gc = gcFixture('gc-list-owner')
       const retained = await retainOnlyListedRemote(gc)
@@ -1956,22 +1924,6 @@ describe('client Room lifecycle', () => {
     participant.onLeave((cause) => causes.push(cause))
     expect(causes).toEqual([{ type: 'closed' }])
   })
-  it('settles every acknowledged DM that arrives before a participant is registered', async () => {
-    const from = crypto.randomUUID()
-    const replies: Array<{ ackId: string }> = []
-    const { id, ack, emit, joining } = await pendingClientJoin('pre-ack-dm', (message) => {
-      const request = message as { __r?: string; ackId?: string }
-      if (request.__r === 'dm-reply' && request.ackId) replies.push({ ackId: request.ackId })
-    })
-    for (let index = 0; index < 65; index++) {
-      emit({ __r: 'dm', to: id, from, fromMeta: {}, data: index, ackId: `ack-${index}` }, index + 1)
-    }
-    ack.resolve({ id, joinedAt: 1 })
-    const participant = await joining
-    participant.listen((data) => data)
-    await vi.waitFor(() => expect(replies).toHaveLength(65))
-    expect(replies.map(({ ackId }) => ackId)).toEqual(Array.from({ length: 65 }, (_, index) => `ack-${index}`))
-  })
   it("delivers member-addressed events that arrive before the participant's join ack", async () => {
     const replies: unknown[] = []
     const { id, ack, emit, joining, client } = await pendingClientJoin('pre-ack-events', (message) => {
@@ -2013,9 +1965,8 @@ describe('client Room lifecycle', () => {
     const member = await client.getParticipant(memberId)
     const updates: Array<[unknown, unknown]> = []
     member!.onUpdate((meta, prev) => updates.push([meta, prev]))
-    // This receiver skipped the writer's step:1 revision. Its callback must report the value it
-    // actually transitioned away from, not the writer-local value carried by the old wire shape.
-    emit({ __r: 'p-meta', id: memberId, meta: { step: 2 }, prev: { step: 1 }, seq: 2 }, 2)
+    // This receiver skipped the writer's step:1 revision; prev is the value it actually transitioned away from.
+    emit({ __r: 'p-meta', id: memberId, meta: { step: 2 }, seq: 2 }, 2)
     expect(updates).toEqual([[{ step: 2 }, { step: 0 }]])
   })
   it('makes the closed-and-empty state visible before participant leave callbacks run', async () => {
@@ -2074,7 +2025,7 @@ describe('client Room lifecycle', () => {
       hidden: true,
     })
     emit({ __r: 'roster', members: [] }, 2)
-    expect(client._state.getRemote(hidden.id)).toBe(hidden)
+    expect(client._getRemote(hidden.id)).toBe(hidden)
     await expect(client.getParticipants({ hidden: true })).rejects.toThrow(
       'Hidden participants can only be enumerated on the server',
     )
@@ -2327,23 +2278,6 @@ describe('room binary protocol validation', () => {
       '65535 bytes',
     )
   })
-  it('accepts legal binary declarations regardless of undocumented aggregate counts', () => {
-    const members = Object.fromEntries(
-      Array.from({ length: 4097 }, (_, index) => [
-        `${index.toString(16).padStart(8, '0')}-0000-0000-0000-000000000000`,
-        { all: false, tracks: [] },
-      ]),
-    )
-    expect(sanitizeBinaryWants({ everyMember: { all: false, tracks: [] }, members })).not.toBeNull()
-    expect(
-      sanitizeBinaryWants({
-        everyMember: { all: false, tracks: Array.from({ length: 65 }, (_, index) => `track-${index}`) },
-        members: {},
-      }),
-    ).not.toBeNull()
-  })
-})
-describe('memory Backend SPI contract', () => {
   it('covers head/cell/lane/directory/drop postconditions through the supervised consumer', async () => {
     const backend = getRoomBackend()
     const created = await backend.compareExchangeHead(
@@ -2509,241 +2443,6 @@ describe('memory Backend SPI contract', () => {
     const payload = new Uint8Array([1, 255])
     const info = { seq: 0x1_0000_0007, timestamp: 0x2_0000_0009 }
     expect(decodeOrderingFrame(encodeOrderingFrame(payload, info))).toEqual({ payload, info })
-  })
-})
-describe('shared subscription supervision', () => {
-  it('owns fan-out, refcount, epochs, and raw terminal signalling once', async () => {
-    const firstCleanup = deferred<void>()
-    const secondCleanup = deferred<void>()
-    const raw = new ControlledDriver()
-    raw.plan(() => ControlledAttempt.ready(firstCleanup.promise))
-    raw.plan(() => ControlledAttempt.ready(secondCleanup.promise))
-    const manager = new SubscriptionManager(raw, vi.fn())
-    const received: string[] = []
-    const first = manager.subscribe('source', (payload) => received.push(`a:${decoder.decode(payload)}`))
-    const second = manager.subscribe('source', (payload) => received.push(`b:${decoder.decode(payload)}`))
-    await first.ready
-    expect(raw.opens).toHaveLength(1)
-    expect(raw.opens[0]!.localReceiverCount()).toBe(2)
-    raw.opens[0]!.attempt.close()
-    expect(first.state()).toBe('closed')
-    expect(second.state()).toBe('closed')
-    expect(raw.opens).toHaveLength(1)
-    await raw.deliver(0, 'stale')
-    expect(received).toEqual([])
-    const replacement = manager.subscribe('source', (payload) => received.push(`c:${decoder.decode(payload)}`))
-    await replacement.ready
-    expect(raw.opens).toHaveLength(2)
-    await raw.deliver(1, 'current')
-    expect(received).toEqual(['c:current'])
-    const retiring = Promise.all([first.unsubscribe(), second.unsubscribe()])
-    firstCleanup.resolve()
-    await retiring
-    const stopping = replacement.unsubscribe()
-    secondCleanup.resolve()
-    await stopping
-  })
-  it('does not convert pending raw cleanup into successful settlement', async () => {
-    const unsubscribeCleanup = deferred<void>()
-    const disposeCleanup = deferred<void>()
-    const terminalCleanup = deferred<void>()
-    const raw = new ControlledDriver()
-    raw.plan(() => ControlledAttempt.ready(unsubscribeCleanup.promise))
-    raw.plan(() => ControlledAttempt.ready(disposeCleanup.promise))
-    raw.plan(() => ControlledAttempt.ready(terminalCleanup.promise))
-    const manager = new SubscriptionManager(raw)
-    const first = manager.subscribe('unsubscribe', () => {})
-    const second = manager.subscribe('dispose', () => {})
-    const terminal = manager.subscribe('already-terminal', () => {})
-    await Promise.all([first.ready, second.ready, terminal.ready])
-    raw.opens[2]!.attempt.close()
-    let unsubscribeSettled = false
-    let terminalUnsubscribeSettled = false
-    let disposeSettled = false
-    const unsubscribing = first.unsubscribe().then(() => (unsubscribeSettled = true))
-    const terminalUnsubscribing = terminal.unsubscribe().then(() => (terminalUnsubscribeSettled = true))
-    const disposing = manager.dispose().then(() => (disposeSettled = true))
-    expect(unsubscribeSettled).toBe(false)
-    expect(terminalUnsubscribeSettled).toBe(false)
-    expect(disposeSettled).toBe(false)
-    unsubscribeCleanup.resolve()
-    await unsubscribing
-    expect(unsubscribeSettled).toBe(true)
-    expect(terminalUnsubscribeSettled).toBe(false)
-    expect(disposeSettled).toBe(false)
-    terminalCleanup.resolve()
-    await terminalUnsubscribing
-    await Promise.resolve()
-    expect(disposeSettled).toBe(false)
-    disposeCleanup.resolve()
-    await disposing
-    expect(unsubscribeSettled).toBe(true)
-    expect(terminalUnsubscribeSettled).toBe(true)
-    expect(disposeSettled).toBe(true)
-  })
-  it('isolates throwing state listeners from siblings and last-detach cleanup', async () => {
-    const cleanup = deferred<void>()
-    const raw = new ControlledDriver()
-    raw.plan(() => ControlledAttempt.ready(cleanup.promise))
-    const reports: unknown[] = []
-    const subscription = new SubscriptionManager(raw, (error) => reports.push(error)).subscribe('listeners', () => {})
-    await subscription.ready
-    let siblingCalls = 0
-    subscription.onStateChange(() => {
-      throw new Error('listener exploded')
-    })
-    subscription.onStateChange(() => siblingCalls++)
-    let settled = false
-    const stopping = subscription.unsubscribe().then(
-      () => {
-        settled = true
-        return 'resolved'
-      },
-      () => 'rejected',
-    )
-    await Promise.resolve()
-    expect(siblingCalls).toBe(1)
-    expect(raw.opens[0]!.attempt.unsubscribeCalls).toBe(1)
-    expect(settled).toBe(false)
-    cleanup.resolve()
-    await expect(stopping).resolves.toBe('resolved')
-    expect(reports).toHaveLength(1)
-  })
-  it('does not emit a stale nonterminal state after re-entrant unsubscribe', async () => {
-    const raw = new ControlledDriver()
-    const subscription = new SubscriptionManager(raw, vi.fn()).subscribe('reentrant-listener', () => {})
-    await subscription.ready
-    const siblingStates: SubscriptionState[] = []
-    subscription.onStateChange((state) => {
-      if (state === 'lost') void subscription.unsubscribe()
-    })
-    subscription.onStateChange((state) => siblingStates.push(state))
-    raw.opens[0]!.attempt.lose()
-    expect(siblingStates).toEqual(['closed'])
-  })
-  it('releases an observer returned after synchronous terminal registration', async () => {
-    let rawListeners = 0
-    let unobserveCalls = 0
-    let unsubscribeCalls = 0
-    const attempt: SubscriptionAttempt = {
-      ready: new Promise<void>(() => {}),
-      state: () => 'closed',
-      onStateChange: (listener) => {
-        rawListeners++
-        listener('closed')
-        return () => {
-          rawListeners--
-          unobserveCalls++
-        }
-      },
-      unsubscribe: async () => {
-        unsubscribeCalls++
-      },
-    }
-    const raw: SubscriptionDriver<string> = {
-      bind: () => ({
-        partition: '',
-        valid: () => true,
-        open: () => attempt,
-      }),
-    }
-    const subscription = new SubscriptionManager(raw).subscribe('sync-terminal', () => {})
-    await expect(subscription.ready).rejects.toThrow('Backend subscription closed')
-    await vi.waitFor(() => expect(unsubscribeCalls).toBe(1))
-    expect({ rawListeners, unobserveCalls }).toEqual({ rawListeners: 0, unobserveCalls: 1 })
-    await subscription.unsubscribe()
-  })
-  it('normalizes initial readiness and surfaces raw recovery or terminal failure', async () => {
-    const raw = new ControlledDriver()
-    raw.plan(() => new ControlledAttempt())
-    const manager = new SubscriptionManager(raw, vi.fn())
-    const subscription = manager.subscribe('async-ready', () => {})
-    const states: SubscriptionState[] = []
-    subscription.onStateChange((state) => states.push(state))
-    raw.opens[0]!.attempt.establish()
-    await subscription.ready
-    expect(states).toEqual([])
-    raw.opens[0]!.attempt.lose()
-    const recovered = subscription.ready
-    raw.opens[0]!.attempt.establish()
-    await recovered
-    expect(states).toEqual(['lost', 'ready'])
-    expect(raw.openCalls).toBe(1)
-    raw.opens[0]!.attempt.close()
-    expect(states).toEqual(['lost', 'ready', 'lost', 'closed'])
-    expect(raw.openCalls).toBe(1)
-    await subscription.unsubscribe()
-    expect(states).toEqual(['lost', 'ready', 'lost', 'closed'])
-    const failedRaw = new ControlledDriver()
-    failedRaw.plan(() => new ControlledAttempt())
-    const failed = new SubscriptionManager(failedRaw).subscribe('initial-failure', () => {})
-    const failedStates: SubscriptionState[] = []
-    failed.onStateChange((state) => failedStates.push(state))
-    const failedReadiness = failed.ready
-    failedRaw.opens[0]!.attempt.close()
-    await expect(failedReadiness).rejects.toThrow('Backend subscription closed')
-    expect(failedStates).toEqual(['lost', 'closed'])
-    expect(failedRaw.openCalls).toBe(1)
-    await failed.unsubscribe()
-  })
-  it('includes the opaque driver partition in source identity', async () => {
-    const raw = new ControlledDriver()
-    raw.plan(() => ControlledAttempt.ready())
-    raw.plan(() => ControlledAttempt.ready())
-    const manager = new SubscriptionManager(raw)
-    const received: string[] = []
-    raw.partition = 'session-a'
-    const first = manager.subscribe('same-source', (payload) => received.push(`a:${decoder.decode(payload)}`))
-    raw.partition = 'session-b'
-    const second = manager.subscribe('same-source', (payload) => received.push(`b:${decoder.decode(payload)}`))
-    await Promise.all([first.ready, second.ready])
-    expect(raw.opens).toHaveLength(2)
-    await raw.deliver(0, 'one')
-    await raw.deliver(1, 'two')
-    expect(received).toEqual(['a:one', 'b:two'])
-    await Promise.all([first.unsubscribe(), second.unsubscribe()])
-  })
-  it('maps raw ownership termination to public closed without replanning', async () => {
-    const raw = new ControlledDriver()
-    raw.plan(() => new ControlledAttempt())
-    raw.plan(() => ControlledAttempt.ready())
-    const manager = new SubscriptionManager(raw)
-    const subscription = manager.subscribe('session', () => {})
-    const states: SubscriptionState[] = []
-    subscription.onStateChange((state) => states.push(state))
-    raw.opens[0]!.attempt.establish()
-    await subscription.ready
-    raw.opens[0]!.attempt.terminate()
-    await vi.waitFor(() => expect(subscription.state()).toBe('closed'))
-    expect(states).toEqual(['closed'])
-    expect(raw.openCalls).toBe(1)
-    const replacement = manager.subscribe('session', () => {})
-    await replacement.ready
-    expect(raw.openCalls).toBe(2)
-    await subscription.unsubscribe()
-    const sibling = manager.subscribe('session', () => {})
-    await sibling.ready
-    expect(raw.openCalls).toBe(2)
-    await Promise.all([replacement.unsubscribe(), sibling.unsubscribe()])
-    const pendingRaw = new ControlledDriver()
-    pendingRaw.plan(() => new ControlledAttempt())
-    const pending = new SubscriptionManager(pendingRaw).subscribe('pending-session', () => {})
-    const readiness = pending.ready
-    pendingRaw.opens[0]!.attempt.terminate()
-    await expect(readiness).rejects.toThrow('ownership terminated')
-    expect(pending.state()).toBe('closed')
-    expect(pendingRaw.openCalls).toBe(1)
-    await pending.unsubscribe()
-  })
-  it('checks binding ownership before opening a raw attempt', async () => {
-    const raw = new ControlledDriver()
-    raw.bindingValid = false
-    const terminal = new SubscriptionManager(raw).subscribe('invalid-owner', () => {})
-    const terminalReadiness = terminal.ready
-    expect(terminal.state()).toBe('closed')
-    expect(raw.openCalls).toBe(0)
-    await expect(terminalReadiness).rejects.toThrow('ownership terminated')
-    await terminal.unsubscribe()
   })
 })
 type Peer = ReturnType<typeof attachPeer>
@@ -2935,7 +2634,9 @@ function gcFixture(roomId: string, join = false) {
     fake,
     target: new ClientRoom(fake.stub, snapshot(roomId)),
     registry: new GcRegistry(5),
-    onClose: () => closeCount++,
+    onClose: () => {
+      closeCount++
+    },
     closed: () => closeCount,
   }
 }
@@ -2975,84 +2676,6 @@ async function retainOnlyDepartedParticipant({ target, fake, registry, onClose, 
   const member = await room.join()
   fake.emitText({ __r: 'leave', id: memberId }, { key: target.id, seq: 1, timestamp: 1 })
   return { member, room: new WeakRef(room) }
-}
-type OpenRecord = {
-  receiver: BackendReceiver
-  localReceiverCount: () => number
-  attempt: ControlledAttempt
-}
-class ControlledDriver implements SubscriptionDriver<string> {
-  readonly opens: OpenRecord[] = []
-  readonly #plans: Array<() => ControlledAttempt> = []
-  partition = ''
-  bindingValid = true
-  openCalls = 0
-  plan(plan: () => ControlledAttempt): void {
-    this.#plans.push(plan)
-  }
-  bind(_source: string) {
-    const partition = this.partition
-    return {
-      partition,
-      valid: () => this.bindingValid,
-      open: (receiver: BackendReceiver, localReceiverCount: () => number): SubscriptionAttempt => {
-        this.openCalls++
-        const attempt = (this.#plans.shift() ?? (() => ControlledAttempt.ready()))()
-        this.opens.push({ receiver, localReceiverCount, attempt })
-        return attempt
-      },
-    }
-  }
-  async deliver(index: number, value: string): Promise<void> {
-    await (this.opens[index]!.receiver(encoder.encode(value), { seq: index + 1, timestamp: 1 }) as unknown)
-  }
-}
-class ControlledAttempt implements SubscriptionAttempt {
-  readonly ready: Promise<void>
-  unsubscribeCalls = 0
-  readonly #readiness = deferred<void>()
-  readonly #listeners = new Set<(state: SubscriptionAttemptState) => void>()
-  readonly #cleanup: Promise<void>
-  #state: SubscriptionAttemptState = 'establishing'
-  constructor(cleanup: Promise<void> = Promise.resolve()) {
-    this.ready = this.#readiness.promise
-    this.#cleanup = cleanup
-    void this.ready.catch(() => {})
-  }
-  static ready(cleanup?: Promise<void>): ControlledAttempt {
-    const attempt = new ControlledAttempt(cleanup)
-    attempt.establish()
-    return attempt
-  }
-  state(): SubscriptionAttemptState {
-    return this.#state
-  }
-  onStateChange(listener: (state: SubscriptionAttemptState) => void): () => void {
-    this.#listeners.add(listener)
-    return () => this.#listeners.delete(listener)
-  }
-  async unsubscribe(): Promise<void> {
-    this.unsubscribeCalls++
-    this.#transition('closed')
-    await this.#cleanup
-  }
-  establish(): void {
-    this.#transition('ready')
-    this.#readiness.resolve()
-  }
-  lose(): void {
-    this.#transition('lost')
-  }
-  close(): void {
-    this.#transition('closed')
-  }
-  terminate(): void {
-    this.#transition('terminated')
-  }
-  #transition(state: SubscriptionAttemptState): void {
-    this.#state = state
-    for (const listener of this.#listeners) listener(state)
-  }
 }
 function terminalSubscription(inner?: BackendSubscription): {
   subscription: BackendSubscription

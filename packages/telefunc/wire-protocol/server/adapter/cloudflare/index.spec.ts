@@ -127,6 +127,7 @@ import { Telefunc } from '../../../../serve/cloudflare.js'
 import type { BackendDriverPair } from '../../../backend/driver-pair.js'
 import { disposeBackend, getRoomBackend, installBackend } from '../../../backend/install.js'
 import { MemoryBackend } from '../../../backend/memory/backend.js'
+import type { BroadcastDeliverRequest, BroadcastPublishRequest } from './broadcast.js'
 
 const memoryPair = (driver: MemoryBackend): BackendDriverPair => ({
   driver,
@@ -375,7 +376,7 @@ describe('cloudflare adapter entrypoint', () => {
         .catch(() => {})
       throw new Error('probe done')
     })
-    await instance.fetch(new Request('https://telefunc.test/_telefunc')).catch(() => {})
+    await Promise.resolve(instance.fetch(new Request('https://telefunc.test/_telefunc'))).catch(() => {})
     expect(room.jurisdiction).toHaveBeenCalledWith('eu')
 
     session.jurisdiction.mockClear()
@@ -411,8 +412,8 @@ describe('cloudflare adapter entrypoint', () => {
       fetch(request: Request): Promise<Response>
       webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): void
       webSocketClose(ws: WebSocket, code: number, reason: string, wasClean: boolean): void
-      telefuncBroadcastPublish(request: unknown): unknown
-      telefuncBroadcastDeliver(request: unknown): void
+      telefuncBroadcastPublish(request: BroadcastPublishRequest): unknown
+      telefuncBroadcastDeliver(request: BroadcastDeliverRequest): void
       telefuncRoomInvalidate(request: unknown): void
     }
     expect(mocks.transportInstances[0]?.attachBinding).toHaveBeenCalledWith(binding, 'TelefuncDurableObject')
@@ -454,16 +455,9 @@ describe('cloudflare adapter entrypoint', () => {
       serialized: '{"text":"hello"}',
       forwarded: false,
     })
-    instance.telefuncBroadcastDeliver({
-      key: 'room:test',
-      serialized: '{"text":"hello"}',
-      info: { seq: 1, timestamp: Date.now() },
-    })
-    expect(mocks.transportInstances[0]?.deliverToLocal).toHaveBeenCalledWith({
-      key: 'room:test',
-      serialized: '{"text":"hello"}',
-      info: expect.any(Object),
-    })
+    const delivery = { key: 'room:test', kind: 'text' as const, frame: new Uint8Array([1]) }
+    instance.telefuncBroadcastDeliver(delivery)
+    expect(mocks.transportInstances[0]?.deliverToLocal).toHaveBeenCalledWith(delivery)
     expect(hibernatedRoomSocket.close).not.toHaveBeenCalled()
     // Importing and using the ordinary Cloudflare adapter remains flag-free. Only the first Room entry
     // asks for the opt-in async carrier and reports the recipe diagnostic.

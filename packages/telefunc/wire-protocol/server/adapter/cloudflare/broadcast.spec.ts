@@ -363,7 +363,7 @@ describe('cloudflare broadcast routing', () => {
       transport,
       kv,
       createBasicBinding({
-        onPublish(id, request) {
+        onPublish(id, _request) {
           publishTargets.push(id.name)
           return Promise.resolve({ seq: 1, timestamp: Date.now() })
         },
@@ -390,13 +390,13 @@ describe('cloudflare broadcast routing', () => {
       transport,
       kv,
       createBasicBinding({
-        onPublish(id, request) {
+        onPublish(_id, request) {
           return transport.publishToSubscribers(createAuthorityState(), {
             ...request,
             locationBucket: request.locationBucket,
           })
         },
-        onDeliver(id, request) {
+        onDeliver(_id, request) {
           return transport.deliverToLocal(request)
         },
       }),
@@ -423,13 +423,13 @@ describe('cloudflare broadcast routing', () => {
       transport,
       kv,
       createBasicBinding({
-        onPublish(id, request) {
+        onPublish(_id, request) {
           return transport.publishToSubscribers(createAuthorityState(), {
             ...request,
             locationBucket: request.locationBucket,
           })
         },
-        onDeliver(id, request) {
+        onDeliver(_id, request) {
           return transport.deliverToLocal(request)
         },
       }),
@@ -462,7 +462,7 @@ describe('cloudflare broadcast routing', () => {
       transport,
       kv,
       createBasicBinding({
-        onPublish(id, { locationBucket }) {
+        onPublish(_id, { locationBucket }) {
           forwardedBuckets.push(locationBucket)
           return Promise.resolve()
         },
