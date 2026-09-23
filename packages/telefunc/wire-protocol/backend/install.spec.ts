@@ -104,7 +104,7 @@ describe('backend installation lifecycle', () => {
       },
     })
     const backend = getBroadcastBackend()
-    const usage = /\[Wrong Usage\] config\.broadcast\.transport/
+    const usage = 'config.broadcast.transport returned'
     await expect(backend.publish({ key: 'k', kind: 'text' }, new Uint8Array())).rejects.toThrow(usage)
     expect(() => backend.publish({ key: 'k', kind: 'binary' }, new Uint8Array())).toThrow(usage)
 
