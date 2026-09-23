@@ -6,6 +6,7 @@ export type {
   MemberSnapshot,
   RoomSnapshotMetadata,
   ParticipantStubMetadata,
+  RemoteParticipantMetadata,
   RoomEnvelope,
   RoomRosterEvent,
   RoomDemandEvent,
@@ -82,6 +83,8 @@ type RoomSnapshotMetadata = {
   /** LWW stamp of the config the snapshot reflects — seeds `applyRoomUpdate` ordering. */
   stamp: { at: number; by: string }
 }
+/** Serializer metadata of a `RemoteParticipant` crossing the wire: its room, revived first, and the member snapshot. */
+type RemoteParticipantMetadata = MemberSnapshot & { room: unknown; identity: string | null }
 /** Serializer metadata of a `LocalParticipant` crossing the wire. */
 type ParticipantStubMetadata = {
   channelId: string

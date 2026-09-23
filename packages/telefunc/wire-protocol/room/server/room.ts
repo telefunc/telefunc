@@ -44,6 +44,7 @@ import {
   type MemberWants,
   type MemberSnapshot,
   type RoomConfigRecord,
+  type RoomSnapshotMetadata,
   type RoomCtrlEnvelope,
   type RoomDataEnvelope,
   type RoomDmEnvelope,
@@ -55,7 +56,7 @@ import {
 import { RoomState, RoomStateView } from '../state.js'
 import { RoomDemand } from '../demand.js'
 import { ParticipantBase } from '../participant.js'
-import type { RoomStubChannel } from './stub.js'
+import { RoomStubChannel } from './stub.js'
 import type { RoomRequest } from './requests.js'
 import { LocalHolder, type LaneHolder } from './replay.js'
 import { TailHold } from './tail.js'
@@ -708,6 +709,26 @@ class ServerRoom extends RoomStateView implements Room {
     this._tail.end()
     this._tail = null
     this._syncSubs() // drop the text ingestion nothing is consuming
+  }
+  /** @internal — a client's view of this room. It attaches before the snapshot, so every later event relays and every earlier one is in the snapshot. */
+  _openStub(options: ConstructorParameters<typeof RoomStubChannel>[1]): {
+    stub: RoomStubChannel
+    metadata: RoomSnapshotMetadata
+  } {
+    const stub = new RoomStubChannel(this, options)
+    this._attachStub(stub)
+    return {
+      stub,
+      metadata: {
+        channelId: stub.id,
+        roomId: this.id,
+        meta: this.meta,
+        closed: this.isClosed,
+        stamp: this._state.updateStamp,
+        // Scalars only: the roster streams over the stub once its peer attaches.
+        count: this.count,
+      },
+    }
   }
   _attachStub(stub: RoomStubChannel): void {
     this._stubs.add(stub)

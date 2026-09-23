@@ -137,7 +137,7 @@ abstract class RoomStateView {
  */
 class RoomState {
   /** @internal — the owning `ServerRoom`/`ClientRoom`, for serialization backing. */
-  _owner: unknown = null
+  _owner: RoomStateView | null = null
   readonly roomId: string
   meta: RoomMeta
   closed: boolean
