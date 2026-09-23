@@ -954,6 +954,21 @@ describe('Room public behavior', () => {
       message: expect.stringContaining('timed out'),
     })
   })
+  it("drops a reply that arrives after its sender's ack timeout", async () => {
+    const room = await Room.create('late-ack-reply')
+    const sender = await room.join()
+    const recipient = await room.join()
+    vi.useFakeTimers()
+    const report = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const sending = sender.send(recipient, 'late', { ack: true }).catch((error: unknown) => error)
+    await vi.advanceTimersByTimeAsync(ROOM_DM_ACK_TIMEOUT_MS)
+    expect(isRoomError(await sending)).toBe(true)
+    const handler = vi.fn(() => 'too late')
+    recipient.listen(handler)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(handler).toHaveBeenCalled()
+    expect(report).not.toHaveBeenCalled()
+  })
   it('isolates an identity send from a departed member but preserves exact-ID diagnosis', async () => {
     const room = await Room.create('server-send-race')
     const departed = await room.join({ identity: 'fanout' })

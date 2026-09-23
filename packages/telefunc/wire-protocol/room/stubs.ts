@@ -51,15 +51,10 @@ class RoomStubChannel extends ServerBroadcast {
     this._pendingAckDms.set(ackId, { sender, recipient, expiresAt: now + ROOM_DM_ACK_TIMEOUT_MS })
   }
 
-  /** @internal — consume a live correlation only for the recipient it was relayed to. */
+  /** @internal — consume a correlation only for the recipient it was relayed to; the sender drops a reply after its timeout. */
   _takeAckDm(ackId: string, replier: unknown): string | undefined {
     const entry = this._pendingAckDms.get(ackId)
-    if (!entry) return undefined
-    if (entry.expiresAt <= Date.now()) {
-      this._pendingAckDms.delete(ackId)
-      return undefined
-    }
-    if (entry.recipient !== replier) return undefined
+    if (!entry || entry.recipient !== replier) return undefined
     this._pendingAckDms.delete(ackId)
     return entry.sender
   }
