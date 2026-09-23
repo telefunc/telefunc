@@ -19,7 +19,7 @@ import { DEFAULT_TRACK, decodeBinaryFrame, emptyTrackWants, encodeBinaryFrame, s
 import { RoomError, isRoomError, roomAckError, toRoomFailure } from './errors.js'
 import { leaveCauseFromWire, leaveCauseToWire, mergeAttributes, normalizeJoinOptions } from './model.js'
 import { hasRoomTag, type RoomSnapshotMetadata } from './protocol.js'
-import { MEMBER_CELL_PREFIX, memberCellKey } from './server/membership.js'
+import { MEMBER_CELL_PREFIX, memberCellKey } from './server/cells.js'
 import type { LeaveCause, Sender } from './types.js'
 import { ClientRoom, ClientStandaloneParticipant } from './client.js'
 import { ClientBroadcast, type ClientChannel } from '../client/channel.js'

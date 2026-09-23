@@ -1,11 +1,4 @@
 export {
-  MEMBER_CELL_PREFIX,
-  CLEANUP_CELL_PREFIX,
-  memberCellKey,
-  memberIdOfCellKey,
-  cleanupCellKey,
-  identityCellKey,
-  identityCellPrefix,
   createMember,
   updateMemberRecord,
   renewMemberLease,
@@ -21,35 +14,24 @@ import type { CellMutation } from '../../backend/room/contract.js'
 import { ROOM_MEMBER_TTL_MS } from '../constants.js'
 import { participantGoneError, roomClosedError } from '../errors.js'
 import { leaveCauseToWire } from '../model.js'
-import type { MemberSnapshot, RoomDataEnvelope, RoomMemberRecord } from '../protocol.js'
+import type { MemberSnapshot, RoomDataEnvelope, RoomMemberRecord, WireLeaveCause } from '../protocol.js'
 import type { LeaveCause } from '../types.js'
 import { SEMANTIC_LANE, decodeRoomRecord, encodeRoomRecord, publishCtrl } from './lanes.js'
 import { CX_CONFLICT, retryCompareExchange } from './cx.js'
-
-// Cell keys: drivers scope cells by (room, incarnation), so a key names only what is inside the room.
-const MEMBER_CELL_PREFIX = 'm:'
-const CLEANUP_CELL_PREFIX = 'cleanup:'
-function memberCellKey(memberId: string): string {
-  return MEMBER_CELL_PREFIX + memberId
-}
-function memberIdOfCellKey(key: string): string {
-  return key.slice(MEMBER_CELL_PREFIX.length)
-}
-/** Durable eviction work: committed with the member's removal, cleared once retained data and the leave are done. */
-function cleanupCellKey(memberId: string): string {
-  return CLEANUP_CELL_PREFIX + memberId
-}
-/** One marker per (identity, member), written before the member record and cleared after it; readers confirm each against the record. */
-function identityCellPrefix(identity: string): string {
-  return `identity:${encodeURIComponent(identity)}:`
-}
-function identityCellKey(identity: string, memberId: string): string {
-  return identityCellPrefix(identity) + memberId
-}
+import {
+  CLEANUP_CELL_PREFIX,
+  MEMBER_CELL_PREFIX,
+  cleanupCellKey,
+  identityCellKey,
+  identityCellPrefix,
+  memberCellKey,
+  memberIdOfCellKey,
+  memberIdOfCleanupKey,
+} from './cells.js'
 
 type CellSelector = { keys: string[] } | { prefix: string }
 type CellPlan<T> = { value: T; mutations: CellMutation[] }
-type PendingMemberCleanup = { cause: ReturnType<typeof leaveCauseToWire>; hidden?: true }
+type PendingMemberCleanup = { cause: WireLeaveCause; hidden?: true }
 
 function isLapsed(record: RoomMemberRecord): boolean {
   return Date.now() - record.seenAt > ROOM_MEMBER_TTL_MS
@@ -166,7 +148,7 @@ async function evictMember(
 /** Every live member, after completing any eviction a crash interrupted; lapsed members are reaped on the way. */
 async function readAllMembers(roomId: string, inc: string): Promise<MemberSnapshot[]> {
   const cleanups = await readCells(roomId, inc, { prefix: CLEANUP_CELL_PREFIX })
-  for (const [key, raw] of cleanups) await completeCleanup(roomId, inc, key.slice(CLEANUP_CELL_PREFIX.length), raw)
+  for (const [key, raw] of cleanups) await completeCleanup(roomId, inc, memberIdOfCleanupKey(key), raw)
   const cells = await readCells(roomId, inc, { prefix: MEMBER_CELL_PREFIX })
   return await liveMembers(
     roomId,
@@ -237,7 +219,8 @@ async function dropRetainedOwnedBy(roomId: string, inc: string, memberId: string
 }
 
 async function finishPendingMemberCleanup(roomId: string, inc: string, memberId: string): Promise<void> {
-  const raw = (await readCells(roomId, inc, { keys: [cleanupCellKey(memberId)] })).get(cleanupCellKey(memberId))
+  const key = cleanupCellKey(memberId)
+  const raw = (await readCells(roomId, inc, { keys: [key] })).get(key)
   if (raw !== undefined) await completeCleanup(roomId, inc, memberId, raw)
 }
 

@@ -75,7 +75,8 @@ import {
   withinRoomHorizon,
 } from './lanes.js'
 import { reportCallbackError, reportRoomError } from './errors.js'
-import { createMember, evictMember, memberCellKey, readMembersById, updateMemberRecord } from './membership.js'
+import { createMember, evictMember, readMembersById, updateMemberRecord } from './membership.js'
+import { memberCellKey } from './cells.js'
 import type {
   BinaryPublishOptions,
   JoinOptions,

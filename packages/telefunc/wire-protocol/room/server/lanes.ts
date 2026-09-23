@@ -25,7 +25,7 @@ import { RoomError, participantGoneError, roomClosedError } from '../errors.js'
 import { assert } from '../../../utils/assert.js'
 import { ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS } from '../constants.js'
 import { reportRoomError } from './errors.js'
-import { memberIdOfCellKey } from './membership.js'
+import { memberIdOfCellKey } from './cells.js'
 
 const roomTextEncoder = new TextEncoder()
 const roomTextDecoder = new TextDecoder()

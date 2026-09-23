@@ -27,14 +27,8 @@ import type {
   RoomSendReceipt,
   SendGuard,
 } from '../types.js'
-import {
-  evictMember,
-  memberCellKey,
-  presenceCount,
-  readAllMembers,
-  readMembersById,
-  resolveIdentityMembers,
-} from './membership.js'
+import { evictMember, presenceCount, readAllMembers, readMembersById, resolveIdentityMembers } from './membership.js'
+import { memberCellKey } from './cells.js'
 import {
   CONTROL_LANE,
   SEMANTIC_LANE,
