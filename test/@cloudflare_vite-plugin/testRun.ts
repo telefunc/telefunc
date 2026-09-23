@@ -18,6 +18,7 @@ function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
   testTodolist()
   testChannel()
   testChat()
+  testRoom()
 }
 
 function testRoomAsyncContextRecipe() {
@@ -144,6 +145,18 @@ function testChat() {
     await autoRetry(
       async () => {
         expect(await page.textContent('#root')).toContain(`${username} joined`)
+      },
+      { timeout: 10000 },
+    )
+  })
+}
+
+function testRoom() {
+  test('Room inside a telefunction', async () => {
+    await page.goto(getServerUrl() + '/room')
+    await autoRetry(
+      async () => {
+        expect(await page.textContent('#room-result')).toBe(JSON.stringify({ joined: 1, received: ['hello'] }))
       },
       { timeout: 10000 },
     )

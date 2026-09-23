@@ -1,6 +1,6 @@
 /// <reference types="@cloudflare/workers-types" />
 
-import { getRawContext, isAsyncMode, restoreContext, type Context } from '../../../../../node/server/context/context.js'
+import { getRawContext, isAsyncMode, restoreContext } from '../../../../../node/server/context/context.js'
 import type { BroadcastDriver, BroadcastLane, PublishResult } from '../../../../backend/broadcast/contract.js'
 import type {
   CellMutation,
@@ -146,8 +146,7 @@ export function withCloudflareRoomSessionManager<T>(
   fn: () => T,
 ): T {
   if (!isAsyncMode()) throw new Error(CLOUDFLARE_ROOM_CONTEXT_ERROR)
-  const raw: Context = { ...(getRawContext() ?? {}), [ROOM_MANAGER]: manager }
-  return restoreContext(raw, fn)
+  return restoreContext({ [ROOM_MANAGER]: manager }, fn)
 }
 
 export function materializeCloudflareRoomSessionManager(): CloudflareRoomSessionManager {
