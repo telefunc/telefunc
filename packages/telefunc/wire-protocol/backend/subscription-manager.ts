@@ -190,7 +190,7 @@ class SubscriptionSlot<Source> {
     this._unobserve = attempt.onStateChange((state) => this._onStateChange(attempt, state))
     attempt.ready.then(
       () => this._becameReady(attempt),
-      (error: unknown) => this._failCurrent(attempt, error),
+      (error: unknown) => this._terminal(error, attempt),
     )
     // The attempt may have settled inside open(), before it had an observer.
     const state = attempt.state()
@@ -202,7 +202,7 @@ class SubscriptionSlot<Source> {
     if (state === 'terminated') return this._ownershipTerminated(attempt)
     if (state === 'ready') return this._becameReady(attempt)
     if (state === 'closed') {
-      return this._failCurrent(attempt, new Error(`Backend subscription closed: ${this.config.sourceKey}`))
+      return this._terminal(new Error(`Backend subscription closed: ${this.config.sourceKey}`), attempt)
     }
     this._markUnavailable(state)
     if (state === 'lost') this.config.reportError(new Error(`Backend subscription lost: ${this.config.sourceKey}`))
@@ -218,16 +218,12 @@ class SubscriptionSlot<Source> {
     this._terminal(new Error(`Backend subscription ownership terminated: ${this.config.sourceKey}`), attempt)
   }
 
-  private _failCurrent(attempt: SubscriptionAttempt, error: unknown): void {
-    if (this._attempt !== attempt) return
-    this._markUnavailable('lost')
-    this._terminal(error, attempt)
-  }
-
   private _terminal(error: unknown, attempt: SubscriptionAttempt | null = this._attempt): void {
     if (attempt !== null && this._attempt !== attempt) return
     const failure = error instanceof Error ? error : new Error(String(error))
     this._stopPromise ??= this._attempt === null ? Promise.resolve() : this.config.cleanup(this._attempt)
+    // A resolved readiness cannot carry the failure, so `ready` read from here on is a fresh, rejected one.
+    if (this._state === 'ready') this._readiness = createReadinessGeneration()
     this._transition('closed')
     this._clearCurrent()
     this.config.onEmpty()
