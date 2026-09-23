@@ -16,6 +16,7 @@ export type {
   RoomDmEnvelope,
   RoomDmAckEnvelope,
   DmReply,
+  AcceptedMeta,
   RoomFailure,
   RoomStubRequest,
   ParticipantStubRequest,
@@ -176,6 +177,9 @@ function toDmReply(reply: unknown): DmReply {
   if ('abort' in reply) return { ok: false, abort: true, abortValue: reply.abortValue }
   return { ok: false, err: String(reply.err) }
 }
+
+/** The ack of a member meta write: the committed value and its sequence. */
+type AcceptedMeta = { meta: ParticipantMeta; seq: number }
 
 /** Published failure form for the one path that cannot use a native channel ack. */
 type RoomFailure = { ok: false; abort: true; abortValue: unknown } | { ok: false; err: string }

@@ -793,6 +793,28 @@ describe('Room public behavior', () => {
     await vi.waitFor(() => expect(semanticFrames(peer, 'data')).toContain('marker'))
     expect(semanticFrames(peer, 'data')).not.toContain('echo')
   })
+  it("keeps a client participant's own meta on the value every observer converged to", async () => {
+    const acks = { A: deferred<unknown>(), B: deferred<unknown>() }
+    const { client, emit } = fakeClient('own-meta', {
+      send: async (message) => {
+        const request = message as { __r: string; meta?: { v: 'A' | 'B' } }
+        if (request.__r === 'req-join') return { id: 'me', joinedAt: 1 }
+        if (request.__r === 'req-set-meta') return await acks[request.meta!.v].promise
+        return undefined
+      },
+    })
+    const me = await client.join()
+    emit({ __r: 'join', id: 'me', meta: {}, joinedAt: 1 }, 1)
+    const settingA = me.setMeta({ v: 'A' })
+    const settingB = me.setMeta({ v: 'B' })
+    emit({ __r: 'p-meta', id: 'me', meta: { v: 'B' }, seq: 1 }, 2)
+    emit({ __r: 'p-meta', id: 'me', meta: { v: 'A' }, seq: 2 }, 3)
+    acks.A.resolve({ meta: { v: 'A' }, seq: 2 })
+    await settingA
+    acks.B.resolve({ meta: { v: 'B' }, seq: 1 })
+    await settingB
+    expect(me.meta).toEqual({ v: 'A' })
+  })
   it('applies room-wide and member-specific binary wants to both subscription and demand', async () => {
     const room = await Room.create('binary-pairs')
     const publisher = await room.join()

@@ -15,6 +15,7 @@ import {
   type ParticipantStubMetadata,
   type ParticipantStubNotice,
   type ParticipantStubRequest,
+  type AcceptedMeta,
   type RoomDemandEvent,
   type RoomDataPublish,
   type RoomDmEnvelope,
@@ -220,12 +221,9 @@ class ClientRoom extends RoomStateView implements Room {
         }
         return
       }
-      case 'p-meta': {
-        this._state.applyParticipantMeta(event.id, event.meta, event.seq)
-        const local = this._localParticipants.get(event.id)
-        if (local) local._meta = ownMetadata(event.meta)
+      case 'p-meta':
+        this._acceptParticipantMeta(event.id, event)
         return
-      }
       case 'update':
         this._state.applyRoomUpdate(event.meta, event.at, event.by)
         return
@@ -278,6 +276,13 @@ class ClientRoom extends RoomStateView implements Room {
     this._state.reconcilePresenceRoster(members)
     this._syncWants() // per-member binary wants may reference the members just learned
     this._rosterArrived()
+  }
+
+  /** @internal — apply an accepted member meta (event or own write's ack) and mirror it into a local participant. */
+  _acceptParticipantMeta(id: string, { meta, seq }: AcceptedMeta): void {
+    this._state.applyParticipantMeta(id, meta, seq)
+    const local = this._localParticipants.get(id)
+    if (local) local._meta = this._state.getRemote(id)?.meta ?? meta
   }
 
   private _applyClosed(causeType: 'closed' | 'disconnected'): void {
@@ -359,15 +364,20 @@ abstract class ClientParticipantBase extends ParticipantBase {
   async setMeta(meta: ParticipantMeta): Promise<void> {
     this._assertActive()
     const owned = ownMetadata(meta)
-    await this._requestParticipant({ __r: 'req-set-meta', meta: owned })
-    this._meta = owned
+    const ack = await this._requestParticipant({ __r: 'req-set-meta', meta: owned })
+    this._onOwnMetaWritten(ack, owned)
   }
 
   async setAttributes(attrs: ParticipantMeta): Promise<void> {
     this._assertActive()
     const owned = ownMetadata(attrs)
-    await this._requestParticipant({ __r: 'req-set-attrs', attrs: owned })
-    this._meta = mergeAttributes(this._meta, owned)
+    const ack = await this._requestParticipant({ __r: 'req-set-attrs', attrs: owned })
+    this._onOwnMetaWritten(ack, mergeAttributes(this._meta, owned))
+  }
+
+  /** A meta write committed; `requested` is the value this holder asked for. */
+  protected _onOwnMetaWritten(_ack: unknown, requested: ParticipantMeta): void {
+    this._meta = requested
   }
 
   private _drainCoalesce(key: string): void {
@@ -405,6 +415,11 @@ class ClientRoomParticipant extends ClientParticipantBase {
 
   protected override _resolveSender(id: string): Sender | null {
     return this._room._getRemote(id)
+  }
+
+  /** Concurrent writes can commit out of request order: adopt the sequence-accepted value, as observers do. */
+  protected override _onOwnMetaWritten(ack: unknown): void {
+    this._room._acceptParticipantMeta(this.id, ack as AcceptedMeta)
   }
 
   protected async _sendPublish(data: unknown, retain?: boolean): Promise<ChannelPublishAck> {

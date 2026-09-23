@@ -50,6 +50,7 @@ import {
   type RoomDmEnvelope,
   type RoomDmAckEnvelope,
   type DmReply,
+  type AcceptedMeta,
   type RoomEnvelope,
   type RoomMemberRecord,
   type RoomStubRequest,
@@ -329,23 +330,23 @@ class ServerRoom extends RoomStateView implements Room {
   }
 
   /** @internal — full replace (`setMeta`). */
-  async _setMemberMeta(id: string, meta: ParticipantMeta): Promise<void> {
+  async _setMemberMeta(id: string, meta: ParticipantMeta): Promise<AcceptedMeta> {
     assertUsage(isObject(meta), 'setMeta() meta should be an object')
     const owned = ownMetadata(meta)
-    await this._writeMemberMeta(id, () => owned)
+    return await this._writeMemberMeta(id, () => owned)
   }
 
   /** @internal — per-key merge (`setAttributes`); an `undefined` value deletes the key. */
-  async _mergeMemberMeta(id: string, attrs: ParticipantMeta): Promise<void> {
+  async _mergeMemberMeta(id: string, attrs: ParticipantMeta): Promise<AcceptedMeta> {
     assertUsage(isObject(attrs), 'setAttributes() attributes should be an object')
     const owned = ownMetadata(attrs)
-    await this._writeMemberMeta(id, (current) => mergeAttributes(current, owned))
+    return await this._writeMemberMeta(id, (current) => mergeAttributes(current, owned))
   }
 
   private async _writeMemberMeta(
     id: string,
     computeMeta: (current: ParticipantMeta) => ParticipantMeta,
-  ): Promise<void> {
+  ): Promise<AcceptedMeta> {
     const key = roomMemberKvKey(this.id, id)
     const { meta, seq } = await mutateCells(this.id, this._inc, { keys: [key] }, (cells) => {
       const raw = cells.get(key)
@@ -362,6 +363,7 @@ class ServerRoom extends RoomStateView implements Room {
     this._state.applyParticipantMeta(id, meta, seq)
     this._syncLocalMemberMeta(id)
     await publishCtrl(this.id, this._inc, { __r: 'p-meta', id, meta, seq })
+    return { meta, seq }
   }
 
   async _publishText(from: string, data: unknown, retain = false): Promise<ChannelPublishAck> {
@@ -879,11 +881,9 @@ class ServerRoom extends RoomStateView implements Room {
         stub._stubMembers.delete(req.id as string)
         return undefined
       case 'req-set-meta':
-        await this._setMemberMeta(requireStubMember(stub, req.id), isObject(req.meta) ? req.meta : {})
-        return undefined
+        return await this._setMemberMeta(requireStubMember(stub, req.id), isObject(req.meta) ? req.meta : {})
       case 'req-set-attrs':
-        await this._mergeMemberMeta(requireStubMember(stub, req.id), isObject(req.attrs) ? req.attrs : {})
-        return undefined
+        return await this._mergeMemberMeta(requireStubMember(stub, req.id), isObject(req.attrs) ? req.attrs : {})
       case 'req-dm':
         return await this._sendStubDm(stub, req)
       case 'dm-reply':
