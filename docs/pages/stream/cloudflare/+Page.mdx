@@ -117,6 +117,8 @@ On the first request, Telefunc picks a Durable Object in the nearest region, sto
 
 <Link href="/room">Rooms</Link> use a separate SQLite-backed Durable Object namespace. Each logical room has one authority object holding its head, members, ordering watermarks, retained generations, and live delivery routes. A directory object in the same namespace backs `Room.list`. Room writes and reads therefore go through the Room authority tier; they don't use the generic Broadcast authority or a Workers KV room-state mirror.
 
+Room calls such as `Room.create()`, `Room.announce()` and `Room.close()` work anywhere in your Worker, including cron triggers and queue consumers. Server-side listeners (`subscribe()`, `onJoin()`, …) deliver to a Telefunc session, so install them inside a telefunction or a channel handler.
+
 | State | Storage | Consistency |
 |---|---|---|
 | Room head, roster, ordering, retained messages | Per-room SQLite Durable Object | Strongly consistent |

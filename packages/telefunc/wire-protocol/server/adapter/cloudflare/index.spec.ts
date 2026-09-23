@@ -41,6 +41,7 @@ const mocks = vi.hoisted(() => {
     })),
     asyncMode: false,
     rawContext: null as Record<symbol, unknown> | null,
+    workerEnv: {} as Record<string, unknown>,
     transportInstances: [] as MockCloudflareBroadcastTransport[],
     authorityInstances: [] as MockCloudflareBroadcastAuthorityState[],
     MockCloudflareBroadcastAuthorityState,
@@ -49,6 +50,7 @@ const mocks = vi.hoisted(() => {
 })
 
 vi.mock('cloudflare:workers', () => ({
+  env: mocks.workerEnv,
   DurableObject: class {
     protected readonly ctx: DurableObjectState
     protected readonly env: Cloudflare.Env
@@ -188,6 +190,7 @@ beforeEach(() => {
   })
   mocks.asyncMode = false
   mocks.rawContext = null
+  for (const key of Object.keys(mocks.workerEnv)) delete mocks.workerEnv[key]
   mocks.transportInstances.length = 0
   mocks.authorityInstances.length = 0
 })
@@ -314,10 +317,24 @@ describe('cloudflare adapter entrypoint', () => {
   })
 
   it('installs the Durable Object Room backend from the documented Cloudflare setup alone', async () => {
+    const room = createBinding()
+    const readHead = vi.fn(async () => null)
+    room.get.mockReturnValue({ readHead } as never)
+    mocks.workerEnv.TelefuncRoomDurableObject = room.binding
     new Telefunc()
-    await expect(getRoomBackend().readHead('cloudflare-default-probe')).rejects.toThrow(
-      'Cloudflare Room requires await-safe context',
-    )
+    // Outside any request or Durable Object context, as from a cron trigger.
+    await expect(getRoomBackend().readHead('cloudflare-default-probe')).resolves.toBeNull()
+    expect(room.idFromName).toHaveBeenCalledWith('cloudflare-default-probe')
+    expect(readHead).toHaveBeenCalled()
+  })
+
+  it('keeps await-safe context a requirement of Room subscriptions only', () => {
+    mocks.workerEnv.TelefuncRoomDurableObject = createBinding().binding
+    new Telefunc()
+    const subscribe = () => getRoomBackend().subscribeLane('r', 'i', { kind: 'control' }, () => {})
+    expect(subscribe).toThrow('Cloudflare Room requires await-safe context')
+    mocks.asyncMode = true
+    expect(subscribe).toThrow('A Cloudflare Room subscription delivers to a Telefunc session')
   })
 
   it('rejects another backend once the Cloudflare one is installed', () => {
@@ -364,6 +381,7 @@ describe('cloudflare adapter entrypoint', () => {
       TelefuncDurableObject: session.binding,
       TelefuncRoomDurableObject: room.binding,
     } as unknown as Cloudflare.Env
+    Object.assign(mocks.workerEnv, env)
     const tf = new Telefunc({ jurisdiction: 'eu' as DurableObjectJurisdiction })
     const DurableClass = tf.TelefuncDurableObject
     const instance = new DurableClass(
@@ -392,7 +410,7 @@ describe('cloudflare adapter entrypoint', () => {
     const tf = new Telefunc({ bindingName: 'CustomTelefuncSession', roomBindingName: 'CustomRoomAuthority' })
     expect(tf.TelefuncRoomDurableObject.name).toBe('TelefuncRoomDurableObject')
     expect(() => new tf.TelefuncRoomDurableObject({} as DurableObjectState, {} as Cloudflare.Env)).toThrow(
-      'Missing Cloudflare session Durable Object binding "CustomTelefuncSession" in TelefuncRoomDurableObject constructor.',
+      'Missing Cloudflare Durable Object binding "CustomTelefuncSession". Add it to your wrangler.jsonc.',
     )
   })
 

@@ -54,6 +54,8 @@ export type CommitWire =
   | StaleCommit
 export type RetainedResult = { payload: Uint8Array; seq: number; timestamp: number }
 export type RegisterWire = { ok: true } | { rejected: true; reason: string; terminal?: boolean }
+/** The session Durable Object namespace fan-out delivers to, as the adapter scopes it. */
+export type SessionNamespaceResolver = (env: unknown) => DurableObjectNamespace
 
 const ROOM_MAINTENANCE_RETRY_MS = 30_000
 
@@ -79,22 +81,9 @@ export class TelefuncRoomDurableObject extends DurableObject {
   readonly #fanout: Fanout
   readonly #sessionNamespaceValue: RoomShardFanoutNamespace
 
-  constructor(
-    ctx: DurableObjectState,
-    env: unknown,
-    sessionBindingName: string = 'TelefuncDurableObject',
-    jurisdiction?: DurableObjectJurisdiction,
-  ) {
+  constructor(ctx: DurableObjectState, env: unknown, sessionNamespace: SessionNamespaceResolver) {
     super(ctx, env as never)
-    const sessionNamespace = (env as Record<string, DurableObjectNamespace | undefined>)[sessionBindingName]
-    if (sessionNamespace === undefined) {
-      throw new Error(
-        `Missing Cloudflare session Durable Object binding "${sessionBindingName}" in TelefuncRoomDurableObject constructor.`,
-      )
-    }
-    this.#sessionNamespaceValue = (jurisdiction
-      ? sessionNamespace.jurisdiction(jurisdiction)
-      : sessionNamespace) as unknown as RoomShardFanoutNamespace
+    this.#sessionNamespaceValue = sessionNamespace(env) as unknown as RoomShardFanoutNamespace
     this.#sql = ctx.storage.sql
     initSchema(this.#sql)
     this.#fanout = new Fanout(
@@ -430,13 +419,15 @@ function commitPreconditionHolds(
 }
 
 export function createTelefuncRoomDurableObjectClass(
-  sessionBindingName: string = 'TelefuncDurableObject',
-  jurisdiction?: DurableObjectJurisdiction,
-): typeof TelefuncRoomDurableObject {
+  sessionNamespace: SessionNamespaceResolver,
+): new (
+  ctx: DurableObjectState,
+  env: unknown,
+) => TelefuncRoomDurableObject {
   const BaseTelefuncRoomDurableObject = TelefuncRoomDurableObject
   return class TelefuncRoomDurableObject extends BaseTelefuncRoomDurableObject {
     constructor(ctx: DurableObjectState, env: unknown) {
-      super(ctx, env, sessionBindingName, jurisdiction)
+      super(ctx, env, sessionNamespace)
     }
   }
 }

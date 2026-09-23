@@ -31,6 +31,8 @@ function assertOrderingPosition(seq: number, timestamp: number, context: string)
 export const CLOUDFLARE_ROOM_CONTEXT_ERROR =
   // spellcheck-ignore  nodejs_als is a real Cloudflare compatibility flag (AsyncLocalStorage), not a typo
   'Cloudflare Room requires await-safe context. Import "telefunc/async_hooks" and enable the Cloudflare "nodejs_als" or "nodejs_compat" compatibility flag.'
+export const CLOUDFLARE_ROOM_SESSION_ERROR =
+  'A Cloudflare Room subscription delivers to a Telefunc session: subscribe from a telefunction or a channel handler, not from outside a request.'
 
 export type RoomShardDeliveryRequest = RouteInstallation & {
   frame: Uint8Array
@@ -49,15 +51,8 @@ export type CloudflareRoomNamespace = {
   get(id: unknown): CloudflareRoomAuthorityStub
 }
 
-export function requireCloudflareRoomNamespace(
-  env: unknown,
-  bindingName: string = 'TelefuncRoomDurableObject',
-): CloudflareRoomNamespace {
-  const binding = (env as Record<string, CloudflareRoomNamespace | undefined>)[bindingName]
-  if (binding === undefined) {
-    throw new Error(`Missing Cloudflare Room Durable Object binding "${bindingName}". Add it to your wrangler.jsonc.`)
-  }
-  return binding
+function roomAuthority(namespace: CloudflareRoomNamespace, roomId: string): CloudflareRoomAuthorityStub {
+  return namespace.get(namespace.idFromName(roomId))
 }
 
 export class CloudflareRoomSessionManager {
@@ -136,8 +131,7 @@ export class CloudflareRoomSessionManager {
   }
 
   authority(roomId: string): CloudflareRoomAuthorityStub {
-    const namespace = this.#getRoomNamespace()
-    return namespace.get(namespace.idFromName(roomId))
+    return roomAuthority(this.#getRoomNamespace(), roomId)
   }
 }
 
@@ -153,18 +147,21 @@ export function materializeCloudflareRoomSessionManager(): CloudflareRoomSession
   if (!isAsyncMode()) throw new Error(CLOUDFLARE_ROOM_CONTEXT_ERROR)
   const managerOrFactory = getRawContext()?.[ROOM_MANAGER]
   const manager = typeof managerOrFactory === 'function' ? managerOrFactory() : managerOrFactory
-  if (!(manager instanceof CloudflareRoomSessionManager)) throw new Error(CLOUDFLARE_ROOM_CONTEXT_ERROR)
+  if (!(manager instanceof CloudflareRoomSessionManager)) throw new Error(CLOUDFLARE_ROOM_SESSION_ERROR)
   return manager
 }
 
 type CloudflareSubscriptionSource = BroadcastLane | RoomSubscriptionSource
 
+/** Room reads and commits address the authority straight from the bindings; only a subscription needs its session, from context. */
 export class CloudflareRoomBackend implements BroadcastDriver, RoomDriver {
   readonly broadcast: CloudflareBroadcastTransport
   readonly subscriptions: SubscriptionDriver<CloudflareSubscriptionSource>
+  readonly #rooms: () => CloudflareRoomNamespace
   #disposed = false
 
-  constructor(broadcast = new CloudflareBroadcastTransport({ baseInstanceName: 'telefunc' })) {
+  constructor({ rooms, broadcast }: { rooms: () => CloudflareRoomNamespace; broadcast: CloudflareBroadcastTransport }) {
+    this.#rooms = rooms
     this.broadcast = broadcast
     this.subscriptions = {
       bind: (source) => this.#bindSubscription(source),
@@ -195,8 +192,7 @@ export class CloudflareRoomBackend implements BroadcastDriver, RoomDriver {
     payload: Uint8Array,
     opts?: { retain?: boolean; closingLease?: string; requiredCellKeys?: string[] },
   ): Promise<CommitResult> {
-    const manager = materializeCloudflareRoomSessionManager()
-    const stub = manager.authority(roomId)
+    const stub = this.#stub(roomId)
     const wire = await stub.commitLane(roomId, inc, lane, payload, opts)
     if ('stale' in wire) return wire
     assertOrderingPosition(wire.seq, wire.timestamp, 'CloudflareRoomBackend.commitLane')
@@ -252,7 +248,7 @@ export class CloudflareRoomBackend implements BroadcastDriver, RoomDriver {
     }
   }
   #stub(roomId: string): CloudflareRoomAuthorityStub {
-    return materializeCloudflareRoomSessionManager().authority(roomId)
+    return roomAuthority(this.#rooms(), roomId)
   }
   #directory(): CloudflareRoomAuthorityStub {
     return this.#stub(DIRECTORY_DO_NAME)

@@ -1,5 +1,5 @@
 /// <reference types="@cloudflare/workers-types" />
-import { DurableObject } from 'cloudflare:workers'
+import { DurableObject, env as workerEnv } from 'cloudflare:workers'
 import '../../packages/telefunc/node/server/async_hooks.js'
 import { type BackendDriverPair } from '../../packages/telefunc/wire-protocol/backend/driver-pair.js'
 import { installBackend } from '../../packages/telefunc/wire-protocol/backend/install.js'
@@ -19,18 +19,23 @@ import {
   type CommitWire,
   type HeadCxResult,
 } from '../../packages/telefunc/wire-protocol/server/adapter/cloudflare/room/do.js'
+import { CloudflareBroadcastTransport } from '../../packages/telefunc/wire-protocol/server/adapter/cloudflare/broadcast.js'
 import {
   dispatchRoomShardFanout,
   type RoomShardFanoutNamespace,
   type RoomShardFanoutRequest,
 } from '../../packages/telefunc/wire-protocol/server/adapter/cloudflare/room/fanout.js'
-const publicRoomBackend = new CloudflareRoomBackend()
+const publicRoomBackend = new CloudflareRoomBackend({
+  rooms: () => (workerEnv as unknown as Env).PUBLIC_ROOM as unknown as CloudflareRoomNamespace,
+  broadcast: new CloudflareBroadcastTransport({ baseInstanceName: 'telefunc' }),
+})
 const publicRoomPair: BackendDriverPair = {
   driver: publicRoomBackend,
   dispose: () => publicRoomBackend.dispose(),
 }
 installBackend(() => publicRoomPair, 'cloudflare-room-ci-public')
-const PublicRoomDurableObjectBase = createTelefuncRoomDurableObjectClass('PUBLIC_SESSION')
+const PublicRoomDurableObjectBase = createTelefuncRoomDurableObjectClass((env) => (env as Env).PUBLIC_SESSION)
+const productionSession = (env: unknown) => (env as Env).TelefuncDurableObject
 const textEncoder = new TextEncoder()
 const CONTROL_HORIZON_MS = 2_000
 export class PublicRoomSessionDurableObject extends DurableObject {
@@ -86,7 +91,7 @@ export class TelefuncRoomDurableObject extends ProductionRoomDurableObject {
   readonly #probeEnv: unknown
   #reconstructed: ProductionRoomDurableObject | null = null
   constructor(ctx: DurableObjectState, env: unknown) {
-    super(ctx, env)
+    super(ctx, env, productionSession)
     this.#probeEnv = env
   }
   override commitLane(...args: Parameters<ProductionRoomDurableObject['commitLane']>) {
@@ -97,7 +102,7 @@ export class TelefuncRoomDurableObject extends ProductionRoomDurableObject {
   }
   async telefuncRoomControlForTest(action: AuthorityControl): Promise<number | null | void> {
     if (action === 'reconstruct') {
-      this.#reconstructed = new ProductionRoomDurableObject(this.ctx, this.#probeEnv)
+      this.#reconstructed = new ProductionRoomDurableObject(this.ctx, this.#probeEnv, productionSession)
       return
     }
     return this.ctx.storage.getAlarm()

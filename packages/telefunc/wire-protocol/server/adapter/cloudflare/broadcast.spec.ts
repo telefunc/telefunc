@@ -23,7 +23,12 @@ afterEach(async () => {
 })
 
 function installCloudflareTransport(transport: CloudflareBroadcastTransport): void {
-  const driver = new CloudflareRoomBackend(transport)
+  const driver = new CloudflareRoomBackend({
+    rooms: () => {
+      throw new Error('Broadcast specs use no Room namespace')
+    },
+    broadcast: transport,
+  })
   const pair: BackendDriverPair = {
     driver,
     dispose: () => driver.dispose(),

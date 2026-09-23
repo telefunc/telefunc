@@ -3,7 +3,7 @@
 export { Telefunc }
 export type { CloudflareOptions }
 
-import { DurableObject } from 'cloudflare:workers'
+import { DurableObject, env as workerEnv } from 'cloudflare:workers'
 import crossws from 'crossws/adapters/cloudflare'
 import { getTelefuncChannelHooks } from '../wire-protocol/server/ws.js'
 import { getServerConfig, enableChannelTransports } from '../node/server/serverConfig.js'
@@ -33,7 +33,6 @@ import {
   CloudflareRoomSessionManager,
   CloudflareRoomBackend,
   materializeCloudflareRoomSessionManager,
-  requireCloudflareRoomNamespace,
   withCloudflareRoomSessionManager,
   type CloudflareRoomNamespace,
   type RoomShardDeliveryRequest,
@@ -105,15 +104,36 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
     instanceName: baseInstanceName,
     hooks: getTelefuncChannelHooks(),
   })
+  function requireBinding<T>(env: Cloudflare.Env, name: string, kind: string): T {
+    const binding = (env as Record<string, T | undefined>)[name]
+    assertUsage(binding, `Missing Cloudflare ${kind} binding "${name}". Add it to your wrangler.jsonc.`)
+    return binding
+  }
+  function scoped(namespace: DurableObjectNamespace): DurableObjectNamespace {
+    return jurisdiction ? namespace.jurisdiction(jurisdiction) : namespace
+  }
+  function sessionNamespace(env: Cloudflare.Env): DurableObjectNamespace {
+    return scoped(requireBinding(env, bindingName, 'Durable Object'))
+  }
+  function roomNamespace(env: Cloudflare.Env): CloudflareRoomNamespace {
+    return scoped(requireBinding(env, roomBindingName, 'Room Durable Object')) as unknown as CloudflareRoomNamespace
+  }
+  function kvNamespace(env: Cloudflare.Env): KVNamespace | undefined {
+    return (env as Record<string, KVNamespace | undefined>)[kvBindingName]
+  }
+
   // Stable configuration shares the raw driver without displacing an explicit backend in either call order.
-  const backendIdentity = cloudflareBackendIdentity(baseInstanceName, scale)
+  const backendIdentity = cloudflareBackendIdentity(baseInstanceName, scale, roomBindingName, jurisdiction)
   let cloudflareBackend = cloudflareBackendSlot.current?.backend
   if (
     cloudflareBackendSlot.current?.identity !== backendIdentity ||
     cloudflareBackend === undefined ||
     cloudflareBackend.disposed
   ) {
-    cloudflareBackend = new CloudflareRoomBackend(new CloudflareBroadcastTransport({ baseInstanceName, scale }))
+    cloudflareBackend = new CloudflareRoomBackend({
+      rooms: () => roomNamespace(workerEnv as Cloudflare.Env),
+      broadcast: new CloudflareBroadcastTransport({ baseInstanceName, scale }),
+    })
     cloudflareBackendSlot.current = { identity: backendIdentity, backend: cloudflareBackend }
   }
   const backendPair: BackendDriverPair = {
@@ -122,20 +142,6 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
   }
   installBackend(() => backendPair, backendIdentity)
   const broadcast = cloudflareBackend.broadcast
-
-  function getBinding(env: Cloudflare.Env): DurableObjectNamespace | undefined {
-    const baseBinding = (env as Record<string, DurableObjectNamespace | undefined>)[bindingName]
-    return baseBinding && jurisdiction ? baseBinding.jurisdiction(jurisdiction) : baseBinding
-  }
-
-  function getKVBinding(env: Cloudflare.Env): KVNamespace | undefined {
-    return (env as Record<string, KVNamespace | undefined>)[kvBindingName]
-  }
-
-  function getRoomBinding(env: Cloudflare.Env): DurableObjectNamespace {
-    const binding = requireCloudflareRoomNamespace(env, roomBindingName) as unknown as DurableObjectNamespace
-    return jurisdiction ? binding.jurisdiction(jurisdiction) : binding
-  }
 
   const getContext = options?.context
 
@@ -146,10 +152,8 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
 
     constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
       super(ctx, env)
-      const binding = getBinding(env)
-      assertUsage(binding, `Missing Cloudflare Durable Object binding "${bindingName}" in Durable Object constructor.`)
-      broadcast.attachBinding(binding, bindingName)
-      const kv = getKVBinding(env)
+      broadcast.attachBinding(sessionNamespace(env), bindingName)
+      const kv = kvNamespace(env)
       if (kv) broadcast.attachKV(kv)
       this.authorityState = new CloudflareBroadcastAuthorityState(ctx)
       crosswsAdapter.handleDurableInit(this, ctx, env)
@@ -199,9 +203,7 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
     }
 
     telefuncRoomFanout(request: RoomShardFanoutRequest) {
-      const binding = getBinding(this.env)
-      assertUsage(binding, `Missing Cloudflare Durable Object binding "${bindingName}" during Room fanout.`)
-      return dispatchRoomShardFanout(binding as unknown as RoomShardFanoutNamespace, request)
+      return dispatchRoomShardFanout(sessionNamespace(this.env) as unknown as RoomShardFanoutNamespace, request)
     }
 
     protected runWithRoomManager<T>(fn: () => T, socket?: WebSocket): T {
@@ -217,10 +219,7 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
         socket.serializeAttachment(Object.assign(state, { __telefuncRoom: true }))
       }
       if (this.roomManager) return this.roomManager
-      this.roomManager = new CloudflareRoomSessionManager(
-        this.ctx.id.toString(),
-        () => getRoomBinding(this.env as Cloudflare.Env) as unknown as CloudflareRoomNamespace,
-      )
+      this.roomManager = new CloudflareRoomSessionManager(this.ctx.id.toString(), () => roomNamespace(this.env))
       for (const recovered of this.recoveredSockets.splice(0)) {
         if (recovered.deserializeAttachment?.()?.__telefuncRoom === true)
           recovered.close(1012, 'Telefunc session reset; reconnect')
@@ -229,23 +228,23 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
     }
   }
 
-  const TelefuncRoomDurableObject = createTelefuncRoomDurableObjectClass(bindingName, jurisdiction)
+  const TelefuncRoomDurableObject = createTelefuncRoomDurableObjectClass((env) =>
+    sessionNamespace(env as Cloudflare.Env),
+  )
 
   return {
     async serve({ request, env }: ServeInput): Promise<Response | undefined> {
       if (!isTelefuncRequest(request)) return undefined
       const config = getServerConfig()
 
-      const binding = getBinding(env)
-      assertUsage(binding, `Missing Cloudflare Durable Object binding "${bindingName}". Add it to your wrangler.jsonc.`)
+      const binding = sessionNamespace(env)
 
       const isWebSocketRequest = request.headers.get('upgrade') === 'websocket'
       if (isWebSocketRequest && !config.channel.transports.includes(CHANNEL_TRANSPORT.WS)) {
         return new Response(null, { status: 400 })
       }
 
-      const kv = getKVBinding(env)
-      assertUsage(kv, `Missing Cloudflare KV namespace binding "${kvBindingName}". Add it to your wrangler.jsonc.`)
+      const kv = requireBinding<KVNamespace>(env, kvBindingName, 'KV namespace')
       const sessionToken =
         request.headers.get(TELEFUNC_SESSION_HEADER) || new URL(request.url).searchParams.get('session')
 
@@ -295,10 +294,15 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
   }
 }
 
-function cloudflareBackendIdentity(baseInstanceName: string, scale: CloudflareScale | undefined): string {
+function cloudflareBackendIdentity(
+  baseInstanceName: string,
+  scale: CloudflareScale | undefined,
+  roomBindingName: string,
+  jurisdiction: DurableObjectJurisdiction | undefined,
+): string {
   const normalizedScale =
     typeof scale === 'object' && scale !== null
       ? Object.entries(scale).sort(([left], [right]) => left.localeCompare(right))
       : (scale ?? null)
-  return JSON.stringify([baseInstanceName, normalizedScale])
+  return JSON.stringify([baseInstanceName, normalizedScale, roomBindingName, jurisdiction ?? null])
 }
