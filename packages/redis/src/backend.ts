@@ -23,17 +23,13 @@ import type {
 } from 'telefunc/__internal'
 import { decodeLaneKey, decodeOrderingFrame, encodeLaneKey } from 'telefunc/__internal'
 import {
-  cellKey,
-  cellKeyPrefix,
   DEFAULT_ROOM_PREFIX,
   directoryIndexKey,
   directoryTagsKey,
   generationKeysKey,
-  headKey,
   redisKeyPrefix,
   retainedKey,
   retainedKeyPrefix,
-  revKey,
 } from './keys.js'
 import { REDIS_COMMANDS, type RedisCommand } from './commands.js'
 import { RedisSubscriptionDriver } from './subscriber.js'
@@ -49,8 +45,6 @@ export type RedisBackendOptions = {
 type CellSelector = { keys: string[] } | { prefix: string }
 
 type CellsRead = { revision: string; cells: Map<string, Uint8Array> } | { staleInc: true }
-
-type StoredHeadIdentity = { inc?: string }
 
 export class RedisBackend implements BroadcastDriver, RoomDriver {
   readonly subscriptions: RedisSubscriptionDriver
@@ -88,29 +82,18 @@ export class RedisBackend implements BroadcastDriver, RoomDriver {
   }
 
   async readCells(roomId: string, inc: string, sel: CellSelector): Promise<CellsRead> {
-    this._assertLive()
+    if ('keys' in sel) {
+      const read = await this._run(REDIS_COMMANDS.readCells, { roomId, inc, keys: sel.keys })
+      assert(read !== 'moved') // without an expected revision there is nothing to move from
+      return read
+    }
     for (let attempt = 0; attempt < STABLE_READ_ATTEMPTS; attempt++) {
-      const result = await this._readCellAttempt(roomId, inc, sel)
-      if (result !== null) return result
+      const found = await this._run(REDIS_COMMANDS.findCells, { roomId, inc, cellPrefix: sel.prefix })
+      if ('staleInc' in found) return found
+      const read = await this._run(REDIS_COMMANDS.readCells, { roomId, inc, ...found })
+      if (read !== 'moved') return read
     }
     throw new Error(`readCells: stable read did not converge in ${STABLE_READ_ATTEMPTS} attempts (room '${roomId}')`)
-  }
-
-  private async _readCellAttempt(roomId: string, inc: string, sel: CellSelector): Promise<CellsRead | null> {
-    const [headRaw, revBefore] = await this._publisher.mget(
-      headKey(this._prefix, roomId),
-      revKey(this._prefix, roomId, inc),
-    )
-    const head = headRaw === null || headRaw === undefined ? null : (JSON.parse(headRaw) as StoredHeadIdentity)
-    if (head === null || (head.inc ?? null) !== inc) return { staleInc: true }
-    const logicalKeys = await this._resolveLogicalCellKeys(roomId, inc, sel)
-    const physicalKeys = logicalKeys.map((key) => cellKey(this._prefix, roomId, inc, key))
-    const values = physicalKeys.length > 0 ? await this._publisher.mgetBuffer(...physicalKeys) : []
-    const before = revBefore ?? '0'
-    const fence = await this._run(REDIS_COMMANDS.readCellsFence, { roomId, inc })
-    if ('stale' in fence) return { staleInc: true }
-    if (before !== fence.revision) return null
-    return { revision: before, cells: collectCells(logicalKeys, values) }
   }
 
   compareExchangeCells(roomId: string, inc: string, revision: string, mutations: CellMutation[]): Promise<CxResult> {
@@ -126,7 +109,6 @@ export class RedisBackend implements BroadcastDriver, RoomDriver {
   ): Promise<CommitResult> {
     this._assertLive()
     const flush = this.subscriptions.prepareFlush({ roomId, inc, lane })
-    const requiredCellKeys = opts?.requiredCellKeys ?? []
     let reply
     try {
       reply = await this._run(REDIS_COMMANDS.commit, {
@@ -136,7 +118,7 @@ export class RedisBackend implements BroadcastDriver, RoomDriver {
         payload,
         retain: opts?.retain === true,
         closingLease: opts?.closingLease,
-        requiredCellKeys,
+        requiredCellKeys: opts?.requiredCellKeys ?? [],
         fenceToken: flush.token,
       })
     } catch (error) {
@@ -145,10 +127,7 @@ export class RedisBackend implements BroadcastDriver, RoomDriver {
     }
     if ('stale' in reply) {
       flush.cancel()
-      if (reply.stale === 'incarnation') return reply
-      const key = requiredCellKeys[reply.index]
-      assert(key !== undefined)
-      return { stale: 'cell', key }
+      return reply
     }
     // Data and fence leave the same slot owner in order, so observing the fence proves local dispatch.
     return {
@@ -238,14 +217,6 @@ export class RedisBackend implements BroadcastDriver, RoomDriver {
     if (this._disposed) throw new Error('RedisBackend: used after dispose()')
   }
 
-  private async _scanCellKeys(roomId: string, inc: string, prefix: string): Promise<string[]> {
-    const physicalPrefix = cellKeyPrefix(this._prefix, roomId, inc)
-    const physical = (await this._generationKeys(roomId, inc)).filter((key) => key.startsWith(physicalPrefix + prefix))
-    return physical.map((key) => key.slice(physicalPrefix.length))
-  }
-  private _resolveLogicalCellKeys(roomId: string, inc: string, sel: CellSelector): Promise<string[]> {
-    return 'keys' in sel ? Promise.resolve(sel.keys) : this._scanCellKeys(roomId, inc, sel.prefix)
-  }
   private _generationKeys(roomId: string, inc: string): Promise<string[]> {
     return this._publisher.smembers(generationKeysKey(this._prefix, roomId, inc))
   }
@@ -255,16 +226,7 @@ export class RedisBackend implements BroadcastDriver, RoomDriver {
     const { keys, argv } = command.invoke(this._prefix, input)
     assert(command.numberOfKeys === null || command.numberOfKeys === keys.length)
     const keysAndArgs = command.numberOfKeys === null ? [String(keys.length), ...keys, ...argv] : [...keys, ...argv]
-    return command.parse(await callDefinedCommand(this._publisher, command.name, keysAndArgs))
+    const name = command.binaryReply ? `${command.name}Buffer` : command.name
+    return command.parse(await callDefinedCommand(this._publisher, name, keysAndArgs), input)
   }
-}
-
-function collectCells(logicalKeys: string[], values: Array<Buffer | null>): Map<string, Uint8Array> {
-  const cells = new Map<string, Uint8Array>()
-  for (let i = 0; i < logicalKeys.length; i++) {
-    const value = values[i]
-    if (value === null || value === undefined) continue
-    cells.set(logicalKeys[i] as string, Uint8Array.from(value))
-  }
-  return cells
 }

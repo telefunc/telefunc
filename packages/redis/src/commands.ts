@@ -16,6 +16,7 @@ import {
   broadcastChannel,
   broadcastSequenceKey,
   cellKey,
+  cellKeyPrefix,
   channelKey,
   directoryIndexKey,
   directoryTagsKey,
@@ -127,16 +128,32 @@ if not head then return '{"head":null}' end
 return '{"head":' .. cjson.encode(head) .. '}'
 `
 
-// Finish a stable cell read on the same room-slot master by rechecking incarnation and revision.
-//   KEYS: [1]=head [2]=generation revision
-//   ARGV: [1]=inc
-export const READ_CELLS_FENCE_LUA = `${NOW_FN}
-local now = tf_now()
-local head = tf_read_and_expire_head(KEYS[1], now)
-if not head or head.inc ~= ARGV[1] then return '{"stale":true}' end
-local revision = redis.call('GET', KEYS[2])
-if not revision then revision = '0' end
-return '{"revision":' .. cjson.encode(revision) .. '}'
+// The generation's cells under a prefix, with the revision that fences reading them.
+//   KEYS: [1]=head [2]=revision [3]=generation-keys
+//   ARGV: [1]=inc [2]=cell-key prefix [3]=cell prefix
+export const FIND_CELLS_LUA = `${NOW_FN}
+local head = tf_read_and_expire_head(KEYS[1], tf_now())
+if not head or head.inc ~= ARGV[1] then return {'stale'} end
+local reply = {'found', redis.call('GET', KEYS[2]) or '0'}
+local wanted = ARGV[2] .. ARGV[3]
+for _, key in ipairs(redis.call('SMEMBERS', KEYS[3])) do
+  if string.sub(key, 1, #wanted) == wanted then reply[#reply + 1] = string.sub(key, #ARGV[2] + 1) end
+end
+return reply
+`
+
+// Reads cells while the head still names the incarnation (closing tails may read). With an expected
+// revision, a moved one reads as 'moved'; a missing cell reads as nil.
+//   KEYS: [1]=head [2]=revision [3..]=cells
+//   ARGV: [1]=inc [2]=expected revision or ''
+export const READ_CELLS_LUA = `${NOW_FN}
+local head = tf_read_and_expire_head(KEYS[1], tf_now())
+if not head or head.inc ~= ARGV[1] then return {'stale'} end
+local revision = redis.call('GET', KEYS[2]) or '0'
+if ARGV[2] ~= '' and revision ~= ARGV[2] then return {'moved'} end
+local reply = {'cells', revision}
+for i = 3, #KEYS do reply[#reply + 1] = redis.call('GET', KEYS[i]) end
+return reply
 `
 
 // Checked once SUBSCRIBE is acknowledged: a lane subscription is live only while its incarnation is the
@@ -295,13 +312,15 @@ return 1
 
 type Invocation = { keys: string[]; argv: Array<string | Buffer> }
 
-/** One script: its KEYS and ARGV for a call, and its reply decoded. `numberOfKeys: null` sends the key count first. */
+/** One script: its KEYS and ARGV for a call, and its reply decoded. `numberOfKeys: null` sends the key count
+ *  first; `binaryReply` reads bulk strings as Buffers. */
 export type RedisCommand<Input, Output> = {
   readonly name: string
   readonly lua: string
   readonly numberOfKeys: number | null
+  readonly binaryReply?: true
   invoke(prefix: string, input: Input): Invocation
-  parse(reply: unknown): Output
+  parse(reply: unknown, input: Input): Output
 }
 
 const command = <Input, Output>(spec: RedisCommand<Input, Output>): RedisCommand<Input, Output> => spec
@@ -319,6 +338,7 @@ type CommitReply =
   | { stale: 'incarnation' }
   | { stale: 'cell'; index: number }
   | { accepted: true; seq: number; timestamp: number; receivers: number }
+type CellsRead = { revision: string; cells: Map<string, Uint8Array> } | { staleInc: true }
 
 export const REDIS_COMMANDS = {
   publish: command({
@@ -364,15 +384,44 @@ export const REDIS_COMMANDS = {
       return head === null ? null : toPublicHead(head)
     },
   }),
-  readCellsFence: command({
-    name: 'tfRoomReadCellsFence',
-    lua: READ_CELLS_FENCE_LUA,
-    numberOfKeys: 2,
-    invoke: (prefix, { roomId, inc }: RoomInc) => ({
-      keys: [headKey(prefix, roomId), revKey(prefix, roomId, inc)],
-      argv: [inc],
+  findCells: command({
+    name: 'tfRoomFindCells',
+    lua: FIND_CELLS_LUA,
+    numberOfKeys: 3,
+    invoke: (prefix, { roomId, inc, cellPrefix }: RoomInc & { cellPrefix: string }) => ({
+      keys: [headKey(prefix, roomId), revKey(prefix, roomId, inc), generationKeysKey(prefix, roomId, inc)],
+      argv: [inc, cellKeyPrefix(prefix, roomId, inc), cellPrefix],
     }),
-    parse: (reply) => JSON.parse(reply as string) as { stale: true } | { revision: string },
+    parse: (reply): { staleInc: true } | { revision: string; keys: string[] } => {
+      const [tag, revision, ...keys] = reply as string[]
+      return tag === 'stale' ? { staleInc: true } : { revision: revision!, keys }
+    },
+  }),
+  readCells: command({
+    name: 'tfRoomReadCells',
+    lua: READ_CELLS_LUA,
+    numberOfKeys: null,
+    binaryReply: true,
+    invoke: (prefix, { roomId, inc, keys, revision }: RoomInc & { keys: readonly string[]; revision?: string }) => ({
+      keys: [
+        headKey(prefix, roomId),
+        revKey(prefix, roomId, inc),
+        ...keys.map((key) => cellKey(prefix, roomId, inc, key)),
+      ],
+      argv: [inc, revision ?? ''],
+    }),
+    parse: (reply, { keys }): CellsRead | 'moved' => {
+      const [tag, revision, ...values] = reply as Array<Buffer | null>
+      const outcome = tag!.toString()
+      if (outcome === 'stale') return { staleInc: true }
+      if (outcome === 'moved') return 'moved'
+      const cells = new Map<string, Uint8Array>()
+      keys.forEach((key, i) => {
+        const value = values[i]
+        if (value !== null && value !== undefined) cells.set(key, Uint8Array.from(value))
+      })
+      return { revision: revision!.toString(), cells }
+    },
   }),
   validateGeneration: command({
     name: 'tfRoomValidateGeneration',
@@ -451,7 +500,13 @@ export const REDIS_COMMANDS = {
         ],
       }
     },
-    parse: (reply) => JSON.parse(reply as string) as CommitReply,
+    parse: (reply, { requiredCellKeys }) => {
+      const parsed = JSON.parse(reply as string) as CommitReply
+      if (!('stale' in parsed) || parsed.stale === 'incarnation') return parsed
+      const key = requiredCellKeys[parsed.index]
+      assert(key !== undefined)
+      return { stale: 'cell' as const, key }
+    },
   }),
   retainedDelete: command({
     name: 'tfRoomRetainedDelete',

@@ -138,6 +138,7 @@ describe('Redis real three-master Cluster CI certification', () => {
       ).delivery
       const currentCells = await backend.readCells(roomId, inc, { keys: ['cell} escape'] })
       if ('staleInc' in currentCells) throw new Error('cell fence generation vanished')
+      expect(await backend.readCells(roomId, inc, { prefix: 'cell}' })).toEqual(currentCells)
       expect(
         await backend.compareExchangeCells(roomId, inc, currentCells.revision, [{ key: 'cell} escape', bytes: null }]),
       ).toBe('committed')
@@ -753,23 +754,26 @@ function observeCommands(client: Cluster): {
     calls,
     wrapDefinedCommand(name) {
       const target = client as unknown as Record<string, (...args: unknown[]) => Promise<unknown>>
-      const command = target[name]
-      if (command === undefined) throw new Error(`defined command '${name}' was not installed`)
-      const bound = command.bind(client)
       const observed: unknown[][] = []
-      vi.spyOn(target, name).mockImplementation(async (...args) => {
-        observed.push(args)
-        const definition = [...definitions].reverse().find((candidate) => candidate.name === name)
-        if (definition !== undefined) {
-          const dynamic = definition.numberOfKeys === null
-          calls.push({
-            name,
-            keyCount: definition.numberOfKeys ?? Number(args[0]),
-            args: dynamic ? args.slice(1) : args,
-          })
-        }
-        return await bound(...args)
-      })
+      // ioredis installs a Buffer-reply twin of every defined command; both are this command's calls.
+      for (const method of [name, `${name}Buffer`]) {
+        const command = target[method]
+        if (command === undefined) throw new Error(`defined command '${method}' was not installed`)
+        const bound = command.bind(client)
+        vi.spyOn(target, method).mockImplementation(async (...args) => {
+          observed.push(args)
+          const definition = [...definitions].reverse().find((candidate) => candidate.name === name)
+          if (definition !== undefined) {
+            const dynamic = definition.numberOfKeys === null
+            calls.push({
+              name,
+              keyCount: definition.numberOfKeys ?? Number(args[0]),
+              args: dynamic ? args.slice(1) : args,
+            })
+          }
+          return await bound(...args)
+        })
+      }
       return observed
     },
   }
