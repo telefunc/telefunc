@@ -1245,7 +1245,6 @@ class ServerRoom extends RoomStateView implements Room {
           })
           if (!present) this._applyLeave(id)
         } catch (error) {
-          if (error instanceof RoomError && error.message === `Room is closed: ${this.id}`) throw error
           renewalFailure ??= { error }
         }
       }

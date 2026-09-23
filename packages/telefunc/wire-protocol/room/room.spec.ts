@@ -1149,6 +1149,23 @@ describe('Room public behavior', () => {
     await vi.advanceTimersByTimeAsync(ROOM_MEMBER_TTL_MS + 2 * ROOM_HEARTBEAT_INTERVAL_MS)
     expect(left).toEqual([member.id])
   })
+  it('settles closure on the next heartbeat for an owning instance that missed `closed`', async () => {
+    vi.useFakeTimers()
+    const room = (await Room.create('missed-close')) as ServerRoom
+    const member = await room.join()
+    const causes: string[] = []
+    member.onLeave((cause) => causes.push(cause.type))
+    const onCtrlMessage = room['_onCtrlMessage'].bind(room)
+    vi.spyOn(room as any, '_onCtrlMessage').mockImplementation((...args: any[]) => {
+      if (!String(args[0]).includes('"__r":"closed"')) (onCtrlMessage as any)(...args)
+    })
+    vi.spyOn(driver, 'dropGeneration').mockRejectedValue(new Error('transient drop failure'))
+    await expect(Room.close('missed-close')).rejects.toThrow('transient drop failure')
+    expect(room.isClosed).toBe(false)
+    await vi.advanceTimersByTimeAsync(ROOM_HEARTBEAT_INTERVAL_MS)
+    expect(room.isClosed).toBe(true)
+    expect(causes).toEqual(['closed'])
+  })
   it('reports bugs, not expected RoomErrors, from background Room work', () => {
     const report = vi.spyOn(console, 'error').mockImplementation(() => {})
     reportRoomError(new RoomError('Room is closed: background'))
