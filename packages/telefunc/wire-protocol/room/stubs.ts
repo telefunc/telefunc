@@ -25,6 +25,7 @@ import {
   type RoomOrder,
   type MemberSnapshot,
   type ParticipantStubRequest,
+  type RoomCtrlEnvelope,
   type RoomDemandEvent,
   type RoomRosterEvent,
 } from './protocol.js'
@@ -173,6 +174,11 @@ class RoomStubChannel extends ServerBroadcast {
 
   _relayRosterError(): void {
     const event: RoomRosterEvent = { __r: 'roster-error' }
+    this._relayPublishText(encodePublishText(stringify(event), { seq: 0, timestamp: Date.now() }))
+  }
+
+  _relayClosed(): void {
+    const event: RoomCtrlEnvelope = { __r: 'closed' }
     this._relayPublishText(encodePublishText(stringify(event), { seq: 0, timestamp: Date.now() }))
   }
 

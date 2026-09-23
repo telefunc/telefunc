@@ -805,6 +805,7 @@ class ServerRoom extends RoomStateView implements Room {
   private _settleTerminalSubscription(): void {
     if (this._state.closed) return
     this._state.applyClosed()
+    for (const stub of this._stubs) stub._relayClosed() // the lane that carried `closed` failed
     this._teardown()
   }
   private async _reconcileAuthority(): Promise<void> {

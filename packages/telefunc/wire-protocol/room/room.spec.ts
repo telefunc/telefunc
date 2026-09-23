@@ -426,6 +426,33 @@ describe('Room public behavior', () => {
       await remoteInstall.disposeBackend()
     }
   })
+  it('tells clients the room closed when a terminal control lane lost the closed frame', async () => {
+    const authority = await Room.create('terminal-close-relay')
+    await authority.join()
+    const backend = getRoomBackend()
+    const subscribeLane = backend.subscribeLane.bind(backend)
+    let terminal: ReturnType<typeof terminalSubscription> | undefined
+    vi.spyOn(backend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
+      if (lane.kind !== 'control') return subscribeLane(roomId, inc, lane, receiver)
+      const withoutClosed = (payload: Uint8Array, info: { seq: number; timestamp: number }) => {
+        if ((parse(decoder.decode(payload)) as { __r?: string }).__r !== 'closed') receiver(payload, info)
+      }
+      terminal ??= terminalSubscription(subscribeLane(roomId, inc, lane, withoutClosed))
+      return terminal.subscription
+    })
+    const observer = (await Room.get(authority.id)) as ServerRoom
+    const { peer } = serve(observer)
+    if (!terminal) throw new Error('control subscription did not start')
+    await terminal.subscription.ready
+    await Room.close(authority.id)
+    await terminal.close()
+    await vi.waitFor(() => expect(observer.isClosed).toBe(true))
+    const relayed = peer
+      .decoded()
+      .filter((frame) => frame.tag === TAG.PUBLISH)
+      .map((frame) => (JSON.parse(frame.text) as { __r: string }).__r)
+    expect(relayed).toContain('closed')
+  })
   it('reconciles authority after a control gap or same-attempt recovery', async () => {
     const room = (await Room.create('control-reconcile')) as ServerRoom
     const backend = getRoomBackend()
