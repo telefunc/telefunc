@@ -62,5 +62,5 @@ function roomFailureError(res: RoomFailure): Error {
   return new RoomError(res.err)
 }
 
-/** The `{ ack: true }` reply a sender gets when its recipient has already left — resolved (never left hanging) with one stable reason, wherever the departure is noticed (its stub, its held inbox). */
+/** The reply an `{ ack: true }` sender gets when its recipient left, wherever the departure is noticed. */
 const DM_PARTICIPANT_LEFT: DmReply = { ok: false, err: 'Participant left the room' }

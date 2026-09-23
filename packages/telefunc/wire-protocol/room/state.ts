@@ -126,15 +126,8 @@ abstract class RoomStateView {
     return this._state.onChange(callback)
   }
 }
-/**
- * The local, event-driven view of a room: membership, metadata, and every user-facing callback.
- * Server and client share this class so event semantics are identical on both sides; only the
- * event *source* differs (adapter subscription vs relayed wire frames).
- *
- * Event application is idempotent — a `join` for a known member or a `leave` for an unknown one
- * is absorbed silently. This lets owners seed state from a snapshot and apply a concurrently
- * produced event stream without double-firing.
- */
+/** A room's local view and callbacks, shared by server and client. A `join` for a known member or a `leave` for an
+ *  unknown one is a no-op, so a snapshot and a concurrent event stream compose without double-firing. */
 class RoomState {
   /** @internal — the owning `ServerRoom`/`ClientRoom`, for serialization backing. */
   _owner: RoomStateView | null = null

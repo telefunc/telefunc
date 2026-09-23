@@ -17,6 +17,7 @@ export {
 import { assertUsage } from '../../utils/assert.js'
 import { isObject } from '../../utils/isObject.js'
 import type { JoinOptions, LeaveCause, ParticipantMeta, RoomMeta, Sender } from './types.js'
+import type { WireLeaveCause } from './protocol.js'
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   if (!isObject(value) || Array.isArray(value)) return false
@@ -51,19 +52,11 @@ function stampNewer(a: { at: number; by: string }, b: { at: number; by: string }
   return a.at > b.at || (a.at === b.at && a.by > b.by)
 }
 
-/** Decode a leave event's cause — an absent wire cause means a voluntary leave. */
-function leaveCauseFromWire(event: {
-  cause?: 'removed' | 'disconnected' | 'closed'
-  reason?: unknown
-}): LeaveCause {
+function leaveCauseFromWire(event: WireLeaveCause): LeaveCause {
   if (event.cause === 'removed') return removedCause(event.reason)
   return ownLeaveCause({ type: event.cause ?? 'left' })
 }
-/** Encode a cause into leave-event fields — `'left'` is the wire default and travels as nothing. */
-function leaveCauseToWire(cause: LeaveCause): {
-  cause?: 'removed' | 'disconnected' | 'closed'
-  reason?: unknown
-} {
+function leaveCauseToWire(cause: LeaveCause): WireLeaveCause {
   if (cause.type === 'removed')
     return cause.reason === undefined ? { cause: 'removed' } : { cause: 'removed', reason: cause.reason }
   return cause.type === 'left' ? {} : { cause: cause.type }

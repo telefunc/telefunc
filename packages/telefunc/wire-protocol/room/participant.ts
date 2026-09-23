@@ -15,9 +15,7 @@ import type {
   PublishOptions,
   Sender,
 } from './types.js'
-/** Pre-listen inbox hold: count-capped, drop-oldest. The DM lane is the only unconditionally-delivered lane (addressed — there are no wants to gate it on), so it's the only lane with a client-side
- * attach window to bridge; every room lane is want-gated at the server and has nothing to hold.
- */
+/** DMs held before the first `listen()`, dropping the oldest. The inbox is the one lane no want gates, so the only one to bridge. */
 const PENDING_INBOX_MAX_COUNT = 64
 const DM_NO_INBOX_LISTENER: DmReply = { ok: false, err: 'No participant inbox listener is attached' }
 /** The private-message inbox and the leave lifecycle, identical on server and client; flavors supply the transport. */
@@ -35,9 +33,7 @@ abstract class ParticipantBase implements LocalParticipant {
   private readonly _wantedTracks = new Set<string | null>()
   private readonly _listenerCleanups = new Set<() => void>()
   private _inboxAttached = false
-  /** DMs delivered before the first `listen()` — held bounded, flushed on attach, then never
-   *  allocated again (`null` = flushed or empty; zero steady-state cost). An entry carries an
-   *  `ackResolve` when the sender awaits a reply — resolved when the hold flushes (or on leave). */
+  /** DMs held until the first `listen()` (`null` once flushed); an ack DM carries the resolver of its reply. */
   private _pendingInbox: Array<{ msg: InboxMessage; ackResolve?: (reply: DmReply) => void }> | null = null
   /** When a client holds this participant, its inbox forwards there instead of to local listeners; the forwarder returns the client's reply for an ack DM (see `RoomParticipantStubChannel`). */
   private _forwarder: ((msg: InboxMessage) => Promise<DmReply> | void) | null = null
@@ -85,9 +81,7 @@ abstract class ParticipantBase implements LocalParticipant {
     })
     return unlisten
   }
-  /** @internal — a direct message arrived on this member's inbox. Forwarded to a remote holder if
-   *  one is bound (client-held), else delivered to local listeners — held bounded until the first
-   *  `listen()` if none is registered yet (a reactive send can beat `listen()` by a tick). */
+  /** @internal — a DM for this member: to its remote holder if bound, else its listeners (held until the first `listen()`). */
   _deliverMessage(msg: InboxMessage): void {
     if (this._forwarder) {
       void this._forwarder(msg)
@@ -100,9 +94,7 @@ abstract class ParticipantBase implements LocalParticipant {
     }
     this._fireInbox(msg)
   }
-  /** @internal — deliver an `{ ack: true }` DM and resolve with the recipient's reply: the last listener's return, its thrown error, or — when a client holds this participant — the client's reply.
-   * Held (like any DM) until the first `listen()` if none is registered; resolves with an error if the participant leaves first (see `_onLeft`). Never rejects.
-   */
+  /** @internal — an `{ ack: true }` DM, resolved with the recipient's reply (or an error if it leaves first); never rejects. */
   _deliverMessageAck(msg: InboxMessage): Promise<DmReply> {
     if (this._forwarder) {
       const reply = this._forwarder(msg)

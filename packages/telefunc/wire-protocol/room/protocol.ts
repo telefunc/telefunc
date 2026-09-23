@@ -24,6 +24,7 @@ export type {
   ParticipantStubNotice,
   MemberWants,
   InboxMessage,
+  WireLeaveCause,
 }
 
 import { isRecord } from './model.js'
@@ -85,7 +86,7 @@ type ParticipantStubMetadata = {
  *  idempotent, `p-meta` orders by `seq` and `update` by its stamp, so every instance converges. */
 type RoomCtrlEnvelope =
   | { __r: 'join'; id: string; meta: ParticipantMeta; joinedAt: number; identity?: string; hidden?: boolean }
-  | { __r: 'leave'; id: string; cause?: 'removed' | 'disconnected' | 'closed'; reason?: unknown; hidden?: boolean }
+  | ({ __r: 'leave'; id: string; hidden?: boolean } & WireLeaveCause)
   | { __r: 'p-meta'; id: string; meta: ParticipantMeta; seq: number; hidden?: boolean }
   | { __r: 'update'; meta: RoomMeta; at: number; by: string }
   // Announced before a named track's first frame, so all-track subscribers open its lane.
@@ -96,6 +97,9 @@ type RoomCtrlEnvelope =
 
 /** A lane frame's position: `seq` increases strictly per lane within an incarnation; `timestamp` is authority time. */
 type RoomOrder = { seq: number; timestamp: number }
+
+/** A `LeaveCause` on the wire: no `cause` means the member left on its own. */
+type WireLeaveCause = { cause?: 'removed' | 'disconnected' | 'closed'; reason?: unknown }
 /** A member's message; its order rides the transport frame. `fromMeta` is stamped by the sender's instance, never the client, so a receiver behind on the roster still names the sender. */
 type RoomDataEnvelope = {
   __r: 'data'
@@ -104,7 +108,7 @@ type RoomDataEnvelope = {
   fromIdentity?: string
   data: unknown
 }
-/** What a client sends upward to publish — its node verifies membership and stamps `fromMeta`. */
+/** What a client sends upward to publish — its instance verifies membership and stamps `fromMeta`. */
 type RoomDataPublish = { __r: 'data'; from: string; data: unknown; retain?: boolean }
 /** A room-authored message (`Room.announce()`), on the semantic lane so it shares one order with member text. */
 type RoomAnnounceEnvelope = { __r: 'announce'; data: unknown }
@@ -164,7 +168,7 @@ type ParticipantStubRequest =
 
 /** Server→client notices on a participant stub. */
 type ParticipantStubNotice =
-  | { __r: 'left'; cause?: 'removed' | 'disconnected' | 'closed'; reason?: unknown }
+  | ({ __r: 'left' } & WireLeaveCause)
   | { __r: 'p-meta'; meta: ParticipantMeta; seq: number }
   | { __r: 'dm'; from: string; fromMeta: ParticipantMeta | null; fromIdentity?: string; data: unknown; ackId?: string }
   | { __r: 'demand'; track: string | null; wanted: boolean }
@@ -172,7 +176,7 @@ type ParticipantStubNotice =
 /** Which members' streams a holder wants on the text lane — `all` for room-level listeners, or a specific member set for participant-scoped ones. */
 type MemberWants = { all: boolean; members: string[] }
 
-/** A delivered private message, as stamped by the sender's node. `ackId` is present when the sender awaits a reply (`send(…, { ack: true })`). */
+/** A delivered private message, as stamped by the sender's instance. `ackId` is present when the sender awaits a reply (`send(…, { ack: true })`). */
 type InboxMessage = {
   from: string
   fromMeta: ParticipantMeta | null
