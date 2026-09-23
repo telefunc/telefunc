@@ -56,6 +56,9 @@ class ClientRoom extends RoomStateView implements Room {
   protected readonly _state: RoomState
   private readonly _localParticipants = new Map<string, ClientRoomParticipant>()
   private _closedCause: LeaveCause | null = null
+  /** Joins awaiting their ack. The server relays to a member from its admission, before the ack registers it here, so events naming an unknown member wait for the joins to settle. */
+  private _pendingJoins = 0
+  private _heldForJoins: Array<{ envelope: unknown; rawInfo: ChannelPublishInfo }> = []
   /** The wants the server stub holds, as last declared; a fresh stub holds none. */
   private readonly _declared: Record<WantsDeclaration['__r'], string> = {
     'sub-text': JSON.stringify({ __r: 'sub-text', members: [], announce: false }),
@@ -106,19 +109,31 @@ class ClientRoom extends RoomStateView implements Room {
       'join() options.hidden is server-side only: a hidden participant is created by the granting telefunction (server-side join({ hidden: true })), not by a client.',
     )
     const { meta, selfDelivery } = normalizeJoinOptions(options)
-    // A rejected join (guard `Abort`, or a `RoomError` like a closed room) rejects this request natively via the channel ack — no envelope to unwrap.
-    const { id, joinedAt } = (await this._request({ __r: 'req-join', meta, selfDelivery })) as {
-      id: string
-      joinedAt: number
-    }
-    const participant = new ClientRoomParticipant(this, id, meta, selfDelivery)
-    if (this._closedCause) {
-      participant._onLeft(this._closedCause)
+    this._pendingJoins++
+    try {
+      // A rejected join (guard `Abort`, or a `RoomError` like a closed room) rejects this request natively via the channel ack — no envelope to unwrap.
+      const { id, joinedAt } = (await this._request({ __r: 'req-join', meta, selfDelivery })) as {
+        id: string
+        joinedAt: number
+      }
+      const participant = new ClientRoomParticipant(this, id, meta, selfDelivery)
+      if (this._closedCause) {
+        participant._onLeft(this._closedCause)
+        return participant
+      }
+      this._localParticipants.set(id, participant)
+      this._state.applyJoin(id, meta, joinedAt)
       return participant
+    } finally {
+      this._pendingJoins--
+      const held = this._heldForJoins
+      this._heldForJoins = []
+      for (const { envelope, rawInfo } of held) this._onEnvelope(envelope, rawInfo)
     }
-    this._localParticipants.set(id, participant)
-    this._state.applyJoin(id, meta, joinedAt)
-    return participant
+  }
+
+  private _holdsForJoin(memberId: string): boolean {
+    return this._pendingJoins > 0 && !this._localParticipants.has(memberId)
   }
 
   async getParticipants(options?: { hidden?: boolean }): Promise<RemoteParticipant[]> {
@@ -196,6 +211,12 @@ class ClientRoom extends RoomStateView implements Room {
   private _onEnvelope(envelope: unknown, rawInfo: ChannelPublishInfo): void {
     if (!hasRoomTag(envelope)) return
     const event = envelope as RoomEnvelope | RoomDmEnvelope | RoomRosterEvent | RoomDemandEvent
+    const member =
+      event.__r === 'dm' ? event.to : event.__r === 'demand' ? event.member : event.__r === 'leave' ? event.id : null
+    if (member !== null && this._holdsForJoin(member)) {
+      this._heldForJoins.push({ envelope, rawInfo })
+      return
+    }
     switch (event.__r) {
       case 'roster':
         // Positioned presence rosters reflect prior events; later events layer on without pruning directly granted hidden handles.

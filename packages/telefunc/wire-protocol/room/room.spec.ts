@@ -1957,6 +1957,40 @@ describe('client Room lifecycle', () => {
     await vi.waitFor(() => expect(replies).toHaveLength(65))
     expect(replies.map(({ ackId }) => ackId)).toEqual(Array.from({ length: 65 }, (_, index) => `ack-${index}`))
   })
+  it("delivers member-addressed events that arrive before the participant's join ack", async () => {
+    const replies: unknown[] = []
+    const { id, ack, emit, joining, client } = await pendingClientJoin('pre-ack-events', (message) => {
+      if ((message as { __r?: string }).__r === 'dm-reply') replies.push(message)
+    })
+    emit({ __r: 'dm', to: id, from: crypto.randomUUID(), fromMeta: {}, data: 'welcome', ackId: 'ack-welcome' }, 1)
+    emit({ __r: 'join', id, meta: {}, joinedAt: 1 }, 2)
+    emit({ __r: 'dm', to: id, from: crypto.randomUUID(), fromMeta: {}, data: 'again', ackId: 'ack-again' }, 3)
+    emit({ __r: 'demand', member: id, track: 'screen', wanted: true }, 4)
+    ack.resolve({ id, joinedAt: 1 })
+    const participant = await joining
+    const demand: unknown[] = []
+    participant.onDemand((track, wanted) => demand.push([track, wanted]))
+    participant.listen((data) => `got ${String(data)}`)
+    await vi.waitFor(() =>
+      expect(replies).toEqual([
+        expect.objectContaining({ ackId: 'ack-welcome', ok: true, result: 'got welcome' }),
+        expect.objectContaining({ ackId: 'ack-again', ok: true, result: 'got again' }),
+      ]),
+    )
+    expect(demand).toEqual([['screen', true]])
+    expect(client.count).toBe(1)
+  })
+  it('leaves, without a ghost, a participant whose leave beat its join ack', async () => {
+    const { id, ack, emit, joining, client } = await pendingClientJoin('pre-ack-leave')
+    emit({ __r: 'join', id, meta: {}, joinedAt: 1 }, 1)
+    emit({ __r: 'leave', id, cause: 'removed' }, 2)
+    ack.resolve({ id, joinedAt: 1 })
+    const participant = await joining
+    const causes: unknown[] = []
+    participant.onLeave((cause) => causes.push(cause.type))
+    expect(causes).toEqual(['removed'])
+    expect(client.count).toBe(0)
+  })
   it("derives participant-update prev from the receiver's own applied state", async () => {
     const { client, emit } = fakeClient('receiver-local-prev')
     const memberId = crypto.randomUUID()
