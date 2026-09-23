@@ -2,7 +2,6 @@ export { RoomError, isRoomError, toRoomFailure, roomFailureError, ROOM_BUG_MESSA
 
 import { createAbortError } from '../../shared/Abort.js'
 import { STATUS_BODY_INTERNAL_SERVER_ERROR } from '../../shared/constants.js'
-import { isBrandedError } from '../../utils/isBrandedError.js'
 import { classifyTelefuncError } from '../error-classification.js'
 import type { DmReply, RoomFailure } from './protocol.js'
 
@@ -20,7 +19,7 @@ class RoomError extends Error {
   }
 }
 function isRoomError(thing: unknown): thing is RoomError {
-  return isBrandedError(thing, roomErrorBrand)
+  return thing instanceof RoomError || (typeof thing === 'object' && thing !== null && roomErrorBrand in thing)
 }
 const ROOM_BUG_MESSAGE = `${STATUS_BODY_INTERNAL_SERVER_ERROR} — see server logs`
 /** Published failure form for the one path that cannot use a native channel ack. */

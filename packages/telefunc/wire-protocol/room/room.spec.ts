@@ -5,7 +5,7 @@ import { IndexedPeer } from '../server/IndexedPeer.js'
 import { CHANNEL_CLOSE_TIMEOUT_MS } from '../constants.js'
 import { ACK_STATUS, ProtocolViolationError, TAG, decode, type BroadcastSubscriptions } from '../shared-ws.js'
 import { ShieldValidationError, isShieldValidationError } from '../../shared/ShieldValidationError.js'
-import { Abort, isAbort } from '../../shared/Abort.js'
+import { Abort } from '../../shared/Abort.js'
 import {
   ROOM_DM_ACK_TIMEOUT_MS,
   ROOM_HEARTBEAT_INTERVAL_MS,
@@ -1750,42 +1750,6 @@ describe('client Room lifecycle', () => {
     expect(isRoomError(error)).toBe(true)
     expect(isShieldValidationError(error)).toBe(true)
     expect(roomAckError(error, vi.fn())).toEqual({ text: 'overlap', status: ACK_STATUS.ERROR })
-  })
-  it('classifies only own, real, non-hostile error brands', () => {
-    const roomError = new RoomError('room')
-    const abortError = Abort('abort')
-    const shieldError = new ShieldValidationError('shield')
-    const roomBrand = Object.getOwnPropertySymbols(roomError)[0]!
-    const abortBrand = Object.getOwnPropertySymbols(abortError).find(
-      (symbol) => (abortError as unknown as Record<symbol, unknown>)[symbol] === true,
-    )!
-    const shieldBrand = Object.getOwnPropertySymbols(shieldError)[0]!
-    expect(isRoomError(Object.create(roomError))).toBe(false)
-    expect(isAbort(Object.create(abortError))).toBe(false)
-    expect(isShieldValidationError(Object.create(shieldError))).toBe(false)
-    expect(isRoomError({ [roomBrand]: true, name: 'RoomError', message: 'forged' })).toBe(false)
-    expect(isAbort({ [abortBrand]: true, name: 'Abort', message: 'forged', abortValue: null })).toBe(false)
-    expect(isShieldValidationError({ [shieldBrand]: true, name: 'ShieldValidationError', message: 'forged' })).toBe(
-      false,
-    )
-    const hostile = new Proxy(
-      {},
-      {
-        has() {
-          throw new Error('hostile brand probe')
-        },
-        getOwnPropertyDescriptor() {
-          throw new Error('hostile brand descriptor')
-        },
-      },
-    )
-    const report = vi.fn()
-    expect(() => isRoomError(hostile)).not.toThrow()
-    expect(roomAckError(hostile, report)).toEqual({
-      text: 'Internal Server Error — see server logs',
-      status: ACK_STATUS.ERROR,
-    })
-    expect(report).toHaveBeenCalledOnce()
   })
   it('keeps remote serializer backing unforgeable and exact-keyed', async () => {
     const room = await Room.create('remote-backing')

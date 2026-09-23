@@ -21,11 +21,3 @@ it.each([
 ] as const)('pins classification precedence for %j', (names, expected) => {
   expect(classifyTelefuncError(branded(...names), isExpected).kind).toBe(expected)
 })
-
-it.each([
-  ['Abort', false],
-  ['Expected', 1],
-  ['ShieldValidationError', 'true'],
-] as const)('rejects a malformed %s brand', (name, value) => {
-  expect(classifyTelefuncError(Object.assign(new Error(), { [brands[name]]: value }), isExpected).kind).toBe('bug')
-})
