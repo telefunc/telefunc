@@ -5,7 +5,7 @@ import { assert, assertUsage } from '../../../utils/assert.js'
 import { isObject } from '../../../utils/isObject.js'
 import { getRoomBackend } from '../../backend/install.js'
 import type { RoomBackend, RoomHead } from '../../backend/room/contract.js'
-import { RoomError } from '../errors.js'
+import { RoomError, participantGoneError, roomClosedError } from '../errors.js'
 import { mergeAttributes, ownMetadata } from '../model.js'
 import type { MemberSnapshot, RoomConfigRecord, RoomCtrlEnvelope, RoomDmEnvelope, RoomEnvelope } from '../protocol.js'
 import type {
@@ -40,7 +40,9 @@ import {
   CONTROL_LANE,
   SEMANTIC_LANE,
   commitRoomLane,
+  commitRoomLaneOrThrow,
   configFromHead,
+  openConfig,
   encodeRoomConfig,
   encodeRoomRecord,
   publishCtrl,
@@ -128,11 +130,9 @@ function assertRoomId(id: unknown): asserts id is string {
 
 async function requireRoom(id: string): Promise<RoomConfigRecord> {
   assertRoomId(id)
-  const current = await getRoomBackend().readHead(id)
-  if (current === null || current.head.state !== 'open' || current.head.currentInc === null) {
-    throw new RoomError(`Room not found: ${id}`)
-  }
-  return configFromHead(current.head)
+  const config = openConfig(await getRoomBackend().readHead(id))
+  if (config === null) throw new RoomError(`Room not found: ${id}`)
+  return config
 }
 
 async function repairRoomIndex(id: string, listedInc: string | null, liveInc: string | null): Promise<void> {
@@ -251,13 +251,9 @@ async function listRooms(options?: { prefix?: string }): Promise<RoomInfo[]> {
     const page = await backend.directoryList(options?.prefix ?? '', cursor)
     cursor = page.cursor
     for (const { roomId, incTag } of page.entries) {
-      const current = await backend.readHead(roomId)
-      if (current === null || current.head.state !== 'open' || current.head.currentInc === null) {
-        await repairRoomIndex(roomId, incTag, null)
-        continue
-      }
-      const config = configFromHead(current.head)
-      await repairRoomIndex(roomId, incTag, current.head.currentInc)
+      const config = openConfig(await backend.readHead(roomId))
+      await repairRoomIndex(roomId, incTag, config?.inc ?? null)
+      if (config === null) continue
       const count = await presenceCount(roomId, config.inc)
       rooms.push({ id: roomId, meta: config.meta, count, isEmpty: count === 0 })
     }
@@ -288,10 +284,8 @@ async function writeRoomConfig(
   const backend = getRoomBackend()
   for (let attempt = 0; attempt < ROOM_CX_ATTEMPTS; attempt++) {
     const current = await backend.readHead(id)
-    if (current === null || current.head.state !== 'open' || current.head.currentInc !== config.inc) {
-      throw new RoomError(`Room is closed: ${id}`)
-    }
-    const currentConfig = configFromHead(current.head)
+    const currentConfig = openConfig(current, config.inc)
+    if (current === null || currentConfig === null) throw roomClosedError(id)
     const at = Math.max(Date.now(), currentConfig.at + 1)
     const meta = computeMeta(currentConfig.meta)
     const nextConfig = { meta, at, by, inc: config.inc }
@@ -335,7 +329,7 @@ async function acquireClosingLease(backend: RoomBackend, roomId: string, current
       head: {
         currentInc: current.currentInc,
         state: 'closing',
-        config: encodeRoomConfig(configFromHead(current)),
+        config: current.config,
         closeLease,
       },
     },
@@ -357,12 +351,11 @@ async function finishClose(backend: RoomBackend, roomId: string, closing: RoomHe
     { closingLease: lease.id },
   )
   if ('stale' in closedEvent) return false
-  const config = configFromHead(closing)
   const finalized = await backend.compareExchangeHead(
     roomId,
     { expect: { rev: closing.rev, closingLease: lease.id } },
     {
-      head: { currentInc: null, state: 'closed', config: encodeRoomConfig(config) },
+      head: { currentInc: null, state: 'closed', config: closing.config },
       ttlMs: ROOM_TOMBSTONE_TTL_MS,
     },
   )
@@ -385,7 +378,7 @@ async function resolveParticipantRef(roomId: string, inc: string, target: Partic
       'The participant { id } should be a non-empty string',
     )
     const members = await readMembersById(roomId, inc, [target.id])
-    if (members.length === 0) throw new RoomError(`Participant not found: ${target.id}`)
+    if (members.length === 0) throw participantGoneError(target.id)
     return members
   }
   assertUsage(
@@ -428,13 +421,12 @@ async function getRoomParticipants(id: string, target?: { identity: string }): P
 
 async function announceToRoom(id: string, data: unknown): Promise<RoomSendReceipt> {
   const config = await requireRoom(id)
-  const commit = await commitRoomLane(
+  const commit = await commitRoomLaneOrThrow(
     id,
     config.inc,
     SEMANTIC_LANE,
     encodeRoomRecord({ __r: 'announce', data } satisfies RoomEnvelope),
   )
-  if ('stale' in commit) throw staleCommitError(id, commit)
   return { seq: commit.seq, timestamp: commit.timestamp }
 }
 
@@ -443,7 +435,7 @@ async function sendToParticipant(id: string, target: ParticipantRef, data: unkno
   const exact = 'id' in target
   for (const member of await resolveParticipantRef(id, config.inc, target)) {
     if (!(await sendServerDm(id, config.inc, member.id, data)) && exact) {
-      throw new RoomError(`Participant not found (left?): ${member.id}`)
+      throw participantGoneError(member.id)
     }
   }
 }

@@ -1,4 +1,13 @@
-export { RoomError, isRoomError, toRoomFailure, roomFailureError, ROOM_BUG_MESSAGE, DM_PARTICIPANT_LEFT }
+export {
+  RoomError,
+  isRoomError,
+  roomClosedError,
+  participantGoneError,
+  toRoomFailure,
+  roomFailureError,
+  ROOM_BUG_MESSAGE,
+  DM_PARTICIPANT_LEFT,
+}
 
 import { createAbortError } from '../../shared/Abort.js'
 import { STATUS_BODY_INTERNAL_SERVER_ERROR } from '../../shared/constants.js'
@@ -20,6 +29,12 @@ class RoomError extends Error {
 }
 function isRoomError(thing: unknown): thing is RoomError {
   return thing instanceof RoomError || (typeof thing === 'object' && thing !== null && roomErrorBrand in thing)
+}
+function roomClosedError(roomId: string): RoomError {
+  return new RoomError(`Room is closed: ${roomId}`)
+}
+function participantGoneError(memberId: string): RoomError {
+  return new RoomError(`Participant not found (left?): ${memberId}`)
 }
 const ROOM_BUG_MESSAGE = `${STATUS_BODY_INTERNAL_SERVER_ERROR} — see server logs`
 /** The failure an ack DM's reply carries: it travels on the recipient's inbox lane, not as a channel ack. */

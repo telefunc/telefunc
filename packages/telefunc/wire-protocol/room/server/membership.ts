@@ -20,7 +20,7 @@ import { assertUsage } from '../../../utils/assert.js'
 import { getRoomBackend } from '../../backend/install.js'
 import type { CellMutation } from '../../backend/room/contract.js'
 import { ROOM_MEMBER_TTL_MS } from '../constants.js'
-import { RoomError } from '../errors.js'
+import { RoomError, participantGoneError, roomClosedError } from '../errors.js'
 import { leaveCauseToWire } from '../model.js'
 import type { MemberSnapshot, RoomDataEnvelope, RoomMemberRecord } from '../protocol.js'
 import type { LeaveCause } from '../types.js'
@@ -60,7 +60,7 @@ function isLapsed(record: RoomMemberRecord): boolean {
 
 async function readCells(roomId: string, inc: string, selector: CellSelector): Promise<Map<string, Uint8Array>> {
   const result = await getRoomBackend().readCells(roomId, inc, selector)
-  if ('staleInc' in result) throw new RoomError(`Room is closed: ${roomId}`)
+  if ('staleInc' in result) throw roomClosedError(roomId)
   return result.cells
 }
 
@@ -73,12 +73,12 @@ async function mutateCells<T>(
   const backend = getRoomBackend()
   for (let attempt = 0; attempt < ROOM_CX_ATTEMPTS; attempt++) {
     const read = await backend.readCells(roomId, inc, selector)
-    if ('staleInc' in read) throw new RoomError(`Room is closed: ${roomId}`)
+    if ('staleInc' in read) throw roomClosedError(roomId)
     const next = plan(read.cells)
     if (next.mutations.length === 0) return next.value
     const result = await backend.compareExchangeCells(roomId, inc, read.revision, next.mutations)
     if (result === 'committed') return next.value
-    if (result === 'stale-inc') throw new RoomError(`Room is closed: ${roomId}`)
+    if (result === 'stale-inc') throw roomClosedError(roomId)
     const ceiling = Math.min(64, 2 ** attempt)
     await new Promise((resolve) => setTimeout(resolve, Math.floor(Math.random() * ceiling) + 1))
   }
@@ -116,7 +116,7 @@ async function updateMemberRecord<T>(
   update: (record: RoomMemberRecord) => { value: T; next?: RoomMemberRecord },
 ): Promise<T> {
   return await mutateMember(roomId, inc, id, (record) => {
-    if (record === null) throw new RoomError(`Participant not found (left?): ${id}`)
+    if (record === null) throw participantGoneError(id)
     return update(record)
   })
 }

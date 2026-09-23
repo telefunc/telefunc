@@ -26,7 +26,7 @@ import {
   type BinaryWants,
   type TrackWants,
 } from '../binary.js'
-import { DM_PARTICIPANT_LEFT, RoomError, roomFailureError } from '../errors.js'
+import { DM_PARTICIPANT_LEFT, RoomError, participantGoneError, roomClosedError, roomFailureError } from '../errors.js'
 import { leaveCauseFromWire, mergeAttributes, normalizeJoinOptions, ownMetaArgument, recipientId } from '../model.js'
 import {
   hasRoomTag,
@@ -53,11 +53,12 @@ import {
   SEMANTIC_LANE,
   SubSlot,
   commitRoomLane,
-  configFromHead,
   decodeRoomText,
   encodeRoomRecord,
   publishCtrl,
   staleCommitError,
+  commitRoomLaneOrThrow,
+  openConfig,
   withinRoomHorizon,
 } from './lanes.js'
 import { reportCallbackError, reportRoomError } from './errors.js'
@@ -335,11 +336,10 @@ class ServerRoom extends RoomStateView implements Room {
       ...(sender.identity === null ? {} : { fromIdentity: sender.identity }),
       data,
     }
-    const commit = await commitRoomLane(this.id, this._inc, SEMANTIC_LANE, encodeRoomRecord(envelope), {
+    const commit = await commitRoomLaneOrThrow(this.id, this._inc, SEMANTIC_LANE, encodeRoomRecord(envelope), {
       retain,
       requiredCellKeys: [memberCellKey(from)],
     })
-    if ('stale' in commit) throw staleCommitError(this.id, commit)
     return this._finishPublish(sender, data, commit)
   }
 
@@ -349,20 +349,18 @@ class ServerRoom extends RoomStateView implements Room {
     if (frame?.from !== from) throw new RoomError('Malformed binary frame')
     const sender = await this._admitPublish(from, frame.payload)
     if (frame.track !== null) await this._ensureTrackAnnounced(from, frame.track)
-    const result = await commitRoomLane(
+    const commit = await commitRoomLaneOrThrow(
       this.id,
       this._inc,
       { kind: 'binary', member: from, track: frame.track ?? DEFAULT_TRACK },
       framed,
       { retain: frame.retain, requiredCellKeys: [memberCellKey(from)] },
     )
-    if ('stale' in result) throw staleCommitError(this.id, result)
-    const ack = await this._finishPublish(sender, frame.payload, result)
-    return ack
+    return await this._finishPublish(sender, frame.payload, commit)
   }
 
   private async _admitPublish(from: string, payload: unknown): Promise<Sender> {
-    if (this._state.closed) throw new RoomError(`Room is closed: ${this.id}`)
+    if (this._state.closed) throw roomClosedError(this.id)
     const sender = this._memberSender(from)
     const onBeforePublish = this._guards?.onBeforePublish
     if (onBeforePublish) await onBeforePublish(sender, payload)
@@ -455,9 +453,9 @@ class ServerRoom extends RoomStateView implements Room {
   }
 
   async _publishDm(from: string, to: string, data: unknown, ackId?: string): Promise<RoomSendReceipt> {
-    if (this._state.closed) throw new RoomError(`Room is closed: ${this.id}`)
+    if (this._state.closed) throw roomClosedError(this.id)
     const target = await this._resolveMember(to)
-    if (!target) throw new RoomError(`Participant not found: ${to}`)
+    if (!target) throw participantGoneError(to)
     const sender = this._memberSender(from)
     const onBeforeSend = this._guards?.onBeforeSend
     if (onBeforeSend) await onBeforeSend(sender, target, data)
@@ -470,14 +468,13 @@ class ServerRoom extends RoomStateView implements Room {
       data,
       ...(ackId ? { ackId } : {}),
     }
-    const receipt = await commitRoomLane(
+    const receipt = await commitRoomLaneOrThrow(
       this.id,
       this._inc,
       { kind: 'inbox', member: to },
       encodeRoomRecord(envelope),
       { requiredCellKeys: [memberCellKey(from), memberCellKey(to)] },
     )
-    if ('stale' in receipt) throw staleCommitError(this.id, receipt)
     const info: RoomSendReceipt = { seq: receipt.seq, timestamp: receipt.timestamp }
     const onAfterSend = this._guards?.onAfterSend
     if (onAfterSend) await runAfterHook(() => onAfterSend(sender, target, data, info))
@@ -518,15 +515,11 @@ class ServerRoom extends RoomStateView implements Room {
     const [member] = await readMembersById(this.id, this._inc, [id])
     return member === undefined ? null : { id, meta: member.meta, identity: member.identity ?? null }
   }
-  private async _openConfig(): Promise<RoomConfigRecord | null> {
-    const current = await getRoomBackend().readHead(this.id)
-    if (current === null || current.head.state !== 'open' || current.head.currentInc !== this._inc) return null
-    return configFromHead(current.head)
+  private async _readOpenConfig(): Promise<RoomConfigRecord | null> {
+    return openConfig(await getRoomBackend().readHead(this.id), this._inc)
   }
   private async _assertOpen(): Promise<void> {
-    if (this._state.closed || (await this._openConfig()) === null) {
-      throw new RoomError(`Room is closed: ${this.id}`)
-    }
+    if (this._state.closed || (await this._readOpenConfig()) === null) throw roomClosedError(this.id)
   }
   private _onCtrlMessage(serialized: string, rawInfo: WirePublishInfo): void {
     const event = decodeLaneEnvelope(serialized) as RoomCtrlEnvelope
@@ -687,9 +680,8 @@ class ServerRoom extends RoomStateView implements Room {
     const attemptMs = ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS / (ROOM_REPLAN_LIMIT + 1)
     for (let attempt = 0; attempt <= ROOM_REPLAN_LIMIT && slot.wanted; attempt++) {
       try {
-        const current = await withinRoomHorizon(getRoomBackend().readHead(this.id), deadline - Date.now())
-        if (current === null || current.head.state !== 'open' || current.head.currentInc !== this._inc) {
-          this._settleTerminalSubscription()
+        if ((await withinRoomHorizon(this._readOpenConfig(), deadline - Date.now())) === null) {
+          this._closeFromAuthority()
           return
         }
         slot.retry()
@@ -706,20 +698,17 @@ class ServerRoom extends RoomStateView implements Room {
     reportRoomError(new Error(`Room subscription recovery exhausted: ${this.id}`))
     slot.markLost()
   }
-  private _settleTerminalSubscription(): void {
+  /** The authority says the room closed; the lane that would have carried `closed` failed, so relay it here. */
+  private _closeFromAuthority(): void {
     if (this._state.closed) return
     this._state.applyClosed()
-    for (const stub of this._stubs) stub._relayEvent({ __r: 'closed' }) // the lane that carried `closed` failed
+    for (const stub of this._stubs) stub._relayEvent({ __r: 'closed' })
     this._teardown()
   }
   private async _reconcileAuthority(): Promise<void> {
     if (this._state.closed) return
-    const current = await getRoomBackend().readHead(this.id)
-    if (current === null || current.head.state !== 'open' || current.head.currentInc !== this._inc) {
-      this._settleTerminalSubscription()
-      return
-    }
-    const config = configFromHead(current.head)
+    const config = await this._readOpenConfig()
+    if (config === null) return this._closeFromAuthority()
     this._state.applyRoomUpdate(config.meta, config.at, config.by)
     await this._refreshMembers()
   }

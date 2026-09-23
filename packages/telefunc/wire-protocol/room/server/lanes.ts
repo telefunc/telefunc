@@ -3,6 +3,8 @@ export {
   SEMANTIC_LANE,
   SubSlot,
   commitRoomLane,
+  commitRoomLaneOrThrow,
+  openConfig,
   configFromHead,
   decodeRoomRecord,
   decodeRoomText,
@@ -21,7 +23,8 @@ import { getRoomBackend } from '../../backend/install.js'
 import type { CommitAccepted, LaneId, RoomHead, StaleCommit } from '../../backend/room/contract.js'
 import type { BackendSubscription } from '../../backend/subscription.js'
 import type { RoomConfigRecord, RoomCtrlEnvelope } from '../protocol.js'
-import { RoomError } from '../errors.js'
+import { RoomError, participantGoneError, roomClosedError } from '../errors.js'
+import { assert } from '../../../utils/assert.js'
 import { ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS } from '../constants.js'
 import { reportRoomError } from './errors.js'
 import { memberIdOfCellKey } from './membership.js'
@@ -52,11 +55,15 @@ function encodeRoomConfig(config: RoomConfigRecord): Uint8Array {
 }
 
 function configFromHead(head: RoomHead): RoomConfigRecord {
-  const stored = decodeRoomRecord<RoomConfigRecord>(head.config)
-  return {
-    ...stored,
-    ...(head.currentInc === null ? {} : { inc: head.currentInc }),
-  }
+  const config = decodeRoomRecord<RoomConfigRecord>(head.config)
+  assert(head.currentInc === null || config.inc === head.currentInc)
+  return config
+}
+
+/** The config of an open head, and only of `inc` when given. */
+function openConfig(current: { head: RoomHead } | null, inc?: string): RoomConfigRecord | null {
+  if (current?.head.state !== 'open' || (inc !== undefined && current.head.currentInc !== inc)) return null
+  return configFromHead(current.head)
 }
 
 async function commitRoomLane(
@@ -71,6 +78,18 @@ async function commitRoomLane(
   // Delivery is at-most-once: a handoff lost with its fence (e.g. a partition) must not hang the caller.
   if (!(await settlesWithin(result.delivery, ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS)))
     reportRoomError(new Error(`Room delivery unconfirmed after ${ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS} ms: ${id}`))
+  return result
+}
+
+async function commitRoomLaneOrThrow(
+  id: string,
+  inc: string,
+  lane: LaneId,
+  payload: Uint8Array,
+  opts?: { retain?: boolean; requiredCellKeys?: string[] },
+): Promise<CommitAccepted> {
+  const result = await commitRoomLane(id, inc, lane, payload, opts)
+  if ('stale' in result) throw staleCommitError(id, result)
   return result
 }
 
@@ -215,15 +234,10 @@ function withinRoomHorizon<T>(promise: Promise<T>, ms: number): Promise<T> {
 }
 
 async function publishCtrl(roomId: string, inc: string, event: RoomCtrlEnvelope): Promise<void> {
-  const committed = await commitRoomLane(roomId, inc, CONTROL_LANE, encodeRoomRecord(event))
-  if ('stale' in committed) throw staleCommitError(roomId, committed)
+  await commitRoomLaneOrThrow(roomId, inc, CONTROL_LANE, encodeRoomRecord(event))
 }
 
 /** Required cells are member records, so a missing one names the member that left. */
 function staleCommitError(roomId: string, stale: StaleCommit): RoomError {
-  return new RoomError(
-    stale.stale === 'cell'
-      ? `Participant not found (left?): ${memberIdOfCellKey(stale.key)}`
-      : `Room is closed: ${roomId}`,
-  )
+  return stale.stale === 'cell' ? participantGoneError(memberIdOfCellKey(stale.key)) : roomClosedError(roomId)
 }
