@@ -193,13 +193,8 @@ return 1
 // Begin refuses the current incarnation and reports whether the generation is still installed.
 //   KEYS: [1]=head [2]=gens
 //   ARGV: [1]=inc
-export const DROP_GENERATION_BEGIN_LUA = `${NOW_FN}
-local inc = ARGV[1]
-local head = tf_read_and_expire_head(KEYS[1], tf_now())
-if head and head.inc == inc then
-  return redis.error_reply("dropGeneration: refusing to drop the current incarnation '" .. inc .. "'")
-end
-return redis.call('SISMEMBER', KEYS[2], inc)
+export const DROP_GENERATION_BEGIN_LUA = `
+return redis.call('SISMEMBER', KEYS[1], ARGV[1])
 `
 
 // Finalize only while the generation is still installed: incarnation ids are never reused, so a
@@ -355,7 +350,7 @@ export const REDIS_ROOM_COMMANDS = {
   readHead: command('tfRoomReadHead', READ_HEAD_LUA, 1),
   readCellsFence: command('tfRoomReadCellsFence', READ_CELLS_FENCE_LUA, 2),
   validateGeneration: command('tfRoomValidateGeneration', VALIDATE_GENERATION_LUA, 2),
-  dropGenerationBegin: command('tfRoomDropGenerationBegin', DROP_GENERATION_BEGIN_LUA, 2),
+  dropGenerationBegin: command('tfRoomDropGenerationBegin', DROP_GENERATION_BEGIN_LUA, 1),
   dropGenerationFinalize: command('tfRoomDropGenerationFinalize', DROP_GENERATION_FINALIZE_LUA, null),
   cellsCx: command('tfRoomCellsCx', CELLS_CX_LUA, null),
   commit: command('tfRoomCommit', COMMIT_LUA, null),
@@ -376,7 +371,7 @@ export const REDIS_ROOM_COMMAND_KEYS = {
     revKey(prefix, roomId, inc),
   ],
   validateGeneration: (prefix: string, roomId: string) => [headKey(prefix, roomId), gensKey(prefix, roomId)],
-  dropGenerationBegin: (prefix: string, roomId: string) => [headKey(prefix, roomId), gensKey(prefix, roomId)],
+  dropGenerationBegin: (prefix: string, roomId: string) => [gensKey(prefix, roomId)],
   dropGenerationFinalize: (prefix: string, roomId: string, inc: string, generationKeys: readonly string[]) => [
     gensKey(prefix, roomId),
     generationInvalidationChannel(prefix, roomId, inc),

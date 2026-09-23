@@ -11,6 +11,7 @@ import type {
   RoomHead,
   StaleCommit,
 } from '../../../../backend/room/contract.js'
+import { assert } from '../../../../../utils/assert.js'
 import { encodeLaneKey } from '../../../../backend/room/lane-key.js'
 import { commitPreconditionHolds } from '../../../../backend/room/semantics.js'
 import {
@@ -112,10 +113,9 @@ export class TelefuncRoomDurableObject extends DurableObject {
 
   async compareExchangeHead(cx: HeadCx, next: HeadNext): Promise<HeadCxResult> {
     const now = Date.now()
-    let outcome!: ReturnType<typeof compareExchangeHead>
-    this.ctx.storage.transactionSync(() => {
-      outcome = compareExchangeHead(this.#sql, cx, next, now, () => crypto.randomUUID())
-    })
+    const outcome = this.ctx.storage.transactionSync(() =>
+      compareExchangeHead(this.#sql, cx, next, now, () => crypto.randomUUID()),
+    )
     await this.#scheduleMaintenanceIfNeeded()
     if ('conflict' in outcome)
       return { conflict: true, current: outcome.current === null ? null : headForRpc(outcome.current) }
@@ -128,12 +128,7 @@ export class TelefuncRoomDurableObject extends DurableObject {
 
   async compareExchangeCells(inc: string, revision: string, mutations: CellMutation[]): Promise<CxResult> {
     const now = Date.now()
-    let result!: CxResult
-    this.ctx.storage.transactionSync(() => {
-      result = compareExchangeCells(this.#sql, inc, revision, mutations, now)
-    })
-    if (result === 'committed') await this.#scheduleMaintenanceIfNeeded()
-    return result
+    return this.ctx.storage.transactionSync(() => compareExchangeCells(this.#sql, inc, revision, mutations, now))
   }
 
   async commitLane(
@@ -146,26 +141,23 @@ export class TelefuncRoomDurableObject extends DurableObject {
     const now = Date.now()
     const key = encodeLaneKey(lane)
     const frame = payload instanceof Uint8Array ? payload : new Uint8Array(payload)
-    let accepted: { seq: number; timestamp: number; targets: RouteTarget[] } | null = null
-    let stale: StaleCommit = { stale: 'incarnation' }
-    this.ctx.storage.transactionSync(() => {
-      if (!commitPreconditionHolds(readLiveHead(this.#sql, now), inc, lane.kind, opts?.closingLease, now)) return
-      if (opts?.requiredCellKeys !== undefined) {
-        const required = readCells(this.#sql, inc, { keys: opts.requiredCellKeys }, now)
-        if ('staleInc' in required) return
-        const missing = opts.requiredCellKeys.find((cell) => !required.cells.has(cell))
-        if (missing !== undefined) {
-          stale = { stale: 'cell', key: missing }
-          return
+    const outcome = this.ctx.storage.transactionSync(
+      (): StaleCommit | { seq: number; timestamp: number; targets: RouteTarget[] } => {
+        if (!commitPreconditionHolds(readLiveHead(this.#sql, now), inc, lane.kind, opts?.closingLease, now))
+          return { stale: 'incarnation' }
+        if (opts?.requiredCellKeys !== undefined) {
+          const required = readCells(this.#sql, inc, { keys: opts.requiredCellKeys }, now)
+          assert(!('staleInc' in required)) // the precondition just found this incarnation open
+          const missing = opts.requiredCellKeys.find((cell) => !required.cells.has(cell))
+          if (missing !== undefined) return { stale: 'cell', key: missing }
         }
-      }
-      const mark = advanceOrder(this.#sql, inc, key, now)
-      if (opts?.retain === true) installRetained(this.#sql, inc, lane, frame, mark)
-      const targets = snapshotRoutes(this.#sql, inc, key, now)
-      accepted = { seq: mark.seq, timestamp: mark.timestamp, targets }
-    })
-    if (accepted === null) return stale
-    const { seq, timestamp, targets } = accepted as { seq: number; timestamp: number; targets: RouteTarget[] }
+        const mark = advanceOrder(this.#sql, inc, key, now)
+        if (opts?.retain === true) installRetained(this.#sql, inc, lane, frame, mark)
+        return { ...mark, targets: snapshotRoutes(this.#sql, inc, key, now) }
+      },
+    )
+    if ('stale' in outcome) return outcome
+    const { seq, timestamp, targets } = outcome
     const deliveryToken = this.#fanout.enqueue(inc, key, targets, frame, {
       roomId,
       inc,
@@ -205,17 +197,13 @@ export class TelefuncRoomDurableObject extends DurableObject {
     } catch {
       return { rejected: true, reason: `subscriber Durable Object id '${subscriberDoId}' is invalid`, terminal: true }
     }
-    let result: RegisterWire = {
-      rejected: true,
-      reason: `room has no open incarnation '${inc}'`,
-      terminal: true,
-    }
-    this.ctx.storage.transactionSync(() => {
+    const result = this.ctx.storage.transactionSync((): RegisterWire => {
       const now = Date.now()
       const head = readLiveHead(this.#sql, now)
-      if (head === null || head.currentInc !== inc || head.state !== 'open') return
+      if (head === null || head.currentInc !== inc || head.state !== 'open')
+        return { rejected: true, reason: `room has no open incarnation '${inc}'`, terminal: true }
       upsertRoute(this.#sql, roomId, inc, laneKey, subscriberDoId, leaseId, now)
-      result = { ok: true }
+      return { ok: true }
     })
     if ('ok' in result) await this.#scheduleMaintenanceIfNeeded()
     return result
@@ -228,16 +216,14 @@ export class TelefuncRoomDurableObject extends DurableObject {
     leaseId: string,
   ): Promise<{ ok: boolean; terminal?: boolean }> {
     const now = Date.now()
-    let renewed = false
-    let dropped = false
-    this.ctx.storage.transactionSync(() => {
-      dropped = !hasGeneration(this.#sql, inc)
-      if (!dropped) renewed = renewRoute(this.#sql, inc, laneKey, subscriberDoId, leaseId, now)
-    })
-    await this.#scheduleMaintenanceIfNeeded()
-    if (dropped) return { ok: false, terminal: true }
     // Missing exact routes recover with a fresh lease; only a dropped generation is terminal.
-    return { ok: renewed }
+    const result = this.ctx.storage.transactionSync(() =>
+      hasGeneration(this.#sql, inc)
+        ? { ok: renewRoute(this.#sql, inc, laneKey, subscriberDoId, leaseId, now) }
+        : { ok: false, terminal: true },
+    )
+    await this.#scheduleMaintenanceIfNeeded()
+    return result
   }
 
   async unsubscribeRoute(inc: string, laneKey: string, subscriberDoId: string, leaseId: string): Promise<void> {
@@ -245,22 +231,16 @@ export class TelefuncRoomDurableObject extends DurableObject {
     await this.#scheduleMaintenanceIfNeeded()
   }
 
-  async listGenerations(): Promise<string[]> {
-    return listGenerations(this.#sql)
+  async dropGeneration(inc: string): Promise<void> {
+    await this.#dropGenerationNow(inc)
+    await this.#scheduleMaintenanceIfNeeded()
   }
 
-  async dropGeneration(inc: string): Promise<void> {
-    const now = Date.now()
-    const head = readLiveHead(this.#sql, now)
-    if (head?.currentInc === inc) {
-      throw new Error(`dropGeneration: refusing to drop the current incarnation '${inc}'`)
-    }
-    const installations = listRouteInstallations(this.#sql, inc)
-    // Routes/generation stay durable until exact-lease uninstall succeeds; orphan sweeps retry independently.
-    await this.#terminateInstallations(inc, installations)
+  /** Routes and rows stay durable until every exact-lease uninstall succeeds, so a failed drop is retried by the sweep. */
+  async #dropGenerationNow(inc: string): Promise<void> {
+    await this.#terminateInstallations(inc, listRouteInstallations(this.#sql, inc))
     this.ctx.storage.transactionSync(() => dropGenerationRows(this.#sql, inc))
     this.#fanout.clearIncarnation(inc)
-    await this.#scheduleMaintenanceIfNeeded()
   }
 
   async directoryPut(roomId: string, incTag: string): Promise<void> {
@@ -286,32 +266,26 @@ export class TelefuncRoomDurableObject extends DurableObject {
     }
   }
 
-  async #runSweep(now: number): Promise<number> {
-    let orphanIncs: string[] = []
-    this.ctx.storage.transactionSync(() => {
+  async #runSweep(now: number): Promise<void> {
+    const orphanIncs = this.ctx.storage.transactionSync(() => {
       const currentInc = readLiveHead(this.#sql, now)?.currentInc ?? null
-      orphanIncs = listGenerations(this.#sql).filter((inc) => inc !== currentInc)
       // A lapsed tombstone is reclaimed through the delete path (this backend has no native head TTL).
       this.#sql.exec(
         "DELETE FROM head WHERE id = 1 AND state = 'closed' AND expires_at IS NOT NULL AND expires_at <= ?",
         now,
       )
+      return listGenerations(this.#sql).filter((inc) => inc !== currentInc)
     })
 
     const failedOrphans = new Set<string>()
     for (const inc of orphanIncs) {
-      const installations = listRouteInstallations(this.#sql, inc)
       try {
-        await this.#terminateInstallations(inc, installations)
+        await this.#dropGenerationNow(inc)
       } catch {
         failedOrphans.add(inc)
-        continue
       }
-      this.ctx.storage.transactionSync(() => dropGenerationRows(this.#sql, inc))
-      this.#fanout.clearIncarnation(inc)
     }
 
-    let prunedRoutes = 0
     for (const installation of listExpiredRouteInstallations(this.#sql, now)) {
       if (failedOrphans.has(installation.inc)) continue
       try {
@@ -329,17 +303,12 @@ export class TelefuncRoomDurableObject extends DurableObject {
           installation.leaseId,
         )
       })
-      prunedRoutes += 1
     }
-    return prunedRoutes
   }
 
-  async #invalidateInstallation(installation: RouteInstallation, terminal: boolean = false): Promise<void> {
+  async #invalidateInstallation(installation: RouteInstallation): Promise<void> {
     const session = this.#sessionNamespaceValue
-    await session.get(session.idFromString(installation.subscriberDoId)).telefuncRoomInvalidate({
-      ...installation,
-      ...(terminal ? { terminal: true as const } : {}),
-    })
+    await session.get(session.idFromString(installation.subscriberDoId)).telefuncRoomInvalidate(installation)
   }
 
   async #terminateInstallations(inc: string, installations: RouteInstallation[]): Promise<void> {
