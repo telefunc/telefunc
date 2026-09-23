@@ -3,7 +3,7 @@ export { RoomDemand }
 import { ROOM_DEMAND_TTL_MS } from './constants.js'
 
 /** A demand-gossip event on the room's control lane — node-to-node only, never relayed to clients. */
-type WantGossip = { member: string; track: string; node: string; on: boolean }
+type WantGossip = { member: string; track: string; instance: string; on: boolean }
 type DemandTransition = 'start' | 'stop'
 const DEMAND_SEP = '\u0000'
 function demandKey(member: string, track: string): string {
@@ -39,37 +39,37 @@ class RoomDemand {
     for (const [k, [member, track]] of next) if (!prev.has(k)) this._transition(member, track, 'start')
     for (const [k, [member, track]] of prev) if (!next.has(k)) this._transition(member, track, 'stop')
   }
+  /** Only a member's owner aggregates its demand; ownership is fixed from before the member exists anywhere. */
   applyWant(event: WantGossip): void {
-    if (event.node === this._instanceId) return // our own gossip echoed back
+    if (event.instance === this._instanceId || !this._ownsMember(event.member)) return
     const k = demandKey(event.member, event.track)
     if (event.on) {
       let leases = this._remoteDemand.get(k)
       if (!leases) this._remoteDemand.set(k, (leases = new Map()))
-      leases.set(event.node, Date.now() + ROOM_DEMAND_TTL_MS) // (re)new the reporter's lease
+      leases.set(event.instance, Date.now() + ROOM_DEMAND_TTL_MS) // (re)new the reporter's lease
     } else {
       const leases = this._remoteDemand.get(k)
-      leases?.delete(event.node)
+      leases?.delete(event.instance)
       if (leases && leases.size === 0) this._remoteDemand.delete(k)
     }
-    if (this._ownsMember(event.member)) this._recompute(event.member, event.track)
+    this._recompute(event.member, event.track)
   }
   heartbeat(): void {
     for (const [, [member, track]] of this._localDemand)
-      this._publishWant({ member, track, node: this._instanceId, on: true })
+      this._publishWant({ member, track, instance: this._instanceId, on: true })
     const now = Date.now()
     for (const [k, leases] of this._remoteDemand) {
       let expired = false
-      for (const [node, expiresAt] of leases) {
+      for (const [instance, expiresAt] of leases) {
         if (expiresAt <= now) {
-          leases.delete(node)
+          leases.delete(instance)
           expired = true
         }
       }
       if (leases.size === 0) this._remoteDemand.delete(k)
       if (expired) {
         const sep = k.indexOf(DEMAND_SEP)
-        const member = k.slice(0, sep)
-        if (this._ownsMember(member)) this._recompute(member, k.slice(sep + 1))
+        this._recompute(k.slice(0, sep), k.slice(sep + 1))
       }
     }
   }
@@ -85,7 +85,7 @@ class RoomDemand {
   }
   private _transition(member: string, track: string, transition: DemandTransition): void {
     const on = transition === 'start'
-    this._publishWant({ member, track, node: this._instanceId, on })
+    this._publishWant({ member, track, instance: this._instanceId, on })
     if (this._ownsMember(member)) this._recompute(member, track)
   }
   private _recompute(member: string, track: string): void {

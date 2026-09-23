@@ -116,7 +116,7 @@ type RoomCtrlEnvelope =
   | { __r: 'track'; id: string; track: string; hidden?: boolean }
   // Track-demand gossip (`onDemand`): a node announces that its local demand for one member's (member, track) stream turned on/off, tagged with its instance id. The member's owning node aggregates
   // these across nodes into one wanted transition — node-to-node only, never relayed to clients. `track` is `DEFAULT_TRACK` for the plain `publishBinary()` lane.
-  | { __r: 'want'; member: string; track: string; node: string; on: boolean }
+  | { __r: 'want'; member: string; track: string; instance: string; on: boolean }
   | { __r: 'closed' }
 
 /** A semantic message's position. Within one incarnation `seq` is the strictly increasing domain cursor; `timestamp` is independently clamped authority time and never controls sequence reset. */

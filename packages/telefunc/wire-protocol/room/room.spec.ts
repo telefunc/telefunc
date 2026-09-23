@@ -2153,23 +2153,22 @@ describe('client Room lifecycle', () => {
   })
 })
 describe('room demand lifecycle', () => {
-  it('retires pushed demand when a member departs so a later owner gets a fresh transition', () => {
-    let owns = true
+  it("aggregates remote demand only for the members this instance owns, and forgets a departed member's", () => {
+    const owned = new Set(['member'])
     const delivered: Array<[string, string, boolean]> = []
     const demand = new RoomDemand(
       () => {},
-      () => owns,
+      (id) => owned.has(id),
       (member, track, wanted) => delivered.push([member, track, wanted]),
     )
-    demand.applyWant({ member: 'member', track: 'screen', node: 'remote-a', on: true })
-    owns = false
+    demand.applyWant({ member: 'elsewhere', track: 'screen', instance: 'remote-a', on: true })
+    expect(demand.isActive()).toBe(false)
+    demand.applyWant({ member: 'member', track: 'screen', instance: 'remote-a', on: true })
+    owned.delete('member')
     demand.forgetMember('member')
-    owns = true
-    demand.applyWant({ member: 'member', track: 'screen', node: 'remote-b', on: true })
-    expect(delivered).toEqual([
-      ['member', 'screen', true],
-      ['member', 'screen', true],
-    ])
+    demand.applyWant({ member: 'member', track: 'screen', instance: 'remote-b', on: true })
+    expect(delivered).toEqual([['member', 'screen', true]])
+    expect(demand.isActive()).toBe(false)
   })
 })
 describe('room binary protocol validation', () => {
