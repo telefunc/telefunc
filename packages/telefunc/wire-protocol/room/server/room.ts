@@ -308,6 +308,17 @@ class ServerRoom extends RoomStateView implements Room {
     this._applyLeave(id, cause)
   }
 
+  /** @internal — the member's holder is gone and nothing will retry: ownership ends even if eviction fails, leaving a record whose lease expires. */
+  async _removeDepartedMember(id: string): Promise<void> {
+    const cause = { type: 'disconnected' } as const
+    try {
+      await this._removeMember(id, cause)
+    } catch (error) {
+      this._applyLeave(id, cause)
+      throw error
+    }
+  }
+
   /** @internal — full replace (`setMeta`). */
   async _setMemberMeta(id: string, meta: ParticipantMeta): Promise<void> {
     assertUsage(isObject(meta), 'setMeta() meta should be an object')
@@ -840,8 +851,7 @@ class ServerRoom extends RoomStateView implements Room {
     stub.onClose(() => {
       this._stubs.delete(stub)
       stub._endTail() // clear any pending tail hold/timer so a closed stub leaves nothing behind
-      for (const id of [...stub._stubMembers.keys()])
-        void this._removeMember(id, { type: 'disconnected' }).catch(reportRoomError)
+      for (const id of [...stub._stubMembers.keys()]) void this._removeDepartedMember(id).catch(reportRoomError)
       stub._stubMembers.clear()
       this._syncSubs()
     })

@@ -947,6 +947,19 @@ describe('Room public behavior', () => {
     channel.abort()
     await vi.waitFor(() => expect(causes).toEqual(['disconnected']))
   })
+  it('stops renewing a client-held participant whose removal failed after its client went away', async () => {
+    vi.useFakeTimers()
+    const room = await Room.create('standalone-expire')
+    const holder = (await room.join()) as ServerLocalParticipant
+    const channel = new RoomParticipantStubChannel()
+    bindParticipantStubChannel(channel, holder)
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    vi.spyOn(driver, 'compareExchangeCells').mockRejectedValueOnce(new Error('backend unavailable'))
+    channel.abort()
+    await vi.advanceTimersByTimeAsync(ROOM_MEMBER_TTL_MS + 2 * ROOM_HEARTBEAT_INTERVAL_MS)
+    const observer = await Room.get('standalone-expire')
+    expect((await observer.getParticipants()).map((member) => member.id)).not.toContain(holder.id)
+  })
   it('keeps every live ack correlation instead of silently dropping the oldest', async () => {
     const stub = register(await Room.create('ack-correlations'))
     for (let index = 0; index <= 1_024; index++) {
