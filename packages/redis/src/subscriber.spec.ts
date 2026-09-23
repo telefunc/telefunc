@@ -1,8 +1,24 @@
 import { EventEmitter } from 'node:events'
 import type { SubscriberSocket } from './ioredis.js'
 import { expect, onTestFinished, test, vi } from 'vitest'
-import type { SubscriptionAttemptState } from 'telefunc/__internal'
+import type { SubscriptionAttempt, SubscriptionAttemptState } from 'telefunc/__internal'
 import { RedisSubscriptionDriver } from './subscriber.js'
+
+/** Resolves once the attempt is ready; rejects if it ends first. */
+function untilReady(attempt: SubscriptionAttempt): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const settle = (state: SubscriptionAttemptState, reason?: Error): boolean => {
+      if (state === 'ready') resolve()
+      else if (state === 'closed' || state === 'terminated') reject(reason ?? new Error(`attempt ${state}`))
+      else return false
+      return true
+    }
+    if (settle(attempt.state())) return
+    const stop = attempt.onStateChange((state, reason) => {
+      if (settle(state, reason)) stop()
+    })
+  })
+}
 
 function fakeSubscriber() {
   const subscribed: string[][] = []
@@ -57,7 +73,7 @@ test('shares one subscriber connection across lanes', async () => {
     () => {},
     () => 1,
   )
-  await Promise.all([first.ready, second.ready])
+  await Promise.all([untilReady(first), untilReady(second)])
   expect(createSubscriber).toHaveBeenCalledOnce()
   expect(sockets[0]!.subscribed.flat()).toHaveLength(2)
 })
@@ -71,7 +87,7 @@ test('re-subscribes on a fresh connection and resumes delivery after a drop', as
     (payload) => void received.push(payload[0]!),
     () => 1,
   )
-  await attempt.ready
+  await untilReady(attempt)
   attempt.onStateChange((state) => states.push(state))
   const channel = sockets[0]!.subscribed[0]![0]!
   sockets[0]!.deliver(channel, orderingFrame(5, 1))
@@ -94,7 +110,7 @@ test('a subscriber dropping before the commit returns rejects its delivery witho
     () => {},
     () => 1,
   )
-  await attempt.ready
+  await untilReady(attempt)
   const fence = driver.prepareFence(source)
   sockets[0]!.socket.emit('close')
   await new Promise((resolve) => setTimeout(resolve, 10))
@@ -110,7 +126,7 @@ test('terminates a Room lane whose incarnation closed while the connection was d
     () => {},
     () => 1,
   )
-  await attempt.ready
+  await untilReady(attempt)
   open = false
   sockets[0]!.socket.emit('close')
   await vi.waitFor(() => expect(attempt.state()).toBe('terminated'))
@@ -123,7 +139,7 @@ test('releases the connection once the last subscription leaves', async () => {
     () => {},
     () => 1,
   )
-  await attempt.ready
+  await untilReady(attempt)
   const disconnect = vi.spyOn(sockets[0]!.socket, 'disconnect')
   await attempt.unsubscribe()
   expect(disconnect).toHaveBeenCalledOnce()

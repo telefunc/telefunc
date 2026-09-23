@@ -24,44 +24,24 @@ afterEach(async () => {
 })
 
 function pendingSubscription() {
-  let resolveReady!: () => void
-  const resetReady = () =>
-    new Promise<void>((resolve) => {
-      resolveReady = resolve
-    })
-  let ready = resetReady()
   let state: SubscriptionAttemptState = 'establishing'
   const listeners = new Set<(state: SubscriptionAttemptState) => void>()
   const transition = (next: SubscriptionAttemptState) => {
     state = next
     for (const listener of listeners) listener(next)
   }
-  const settle = (next: SubscriptionAttemptState) => {
-    resolveReady()
-    transition(next)
-  }
   return {
     subscription: {
-      get ready() {
-        return ready
-      },
       state: () => state,
       onStateChange: (listener) => {
         listeners.add(listener)
         return () => listeners.delete(listener)
       },
-      unsubscribe: async () => settle('closed'),
+      unsubscribe: async () => transition('closed'),
     } satisfies SubscriptionAttempt,
-    ready: () => settle('ready'),
-    lost() {
-      ready = resetReady()
-      transition('lost')
-    },
-    close() {
-      ready = Promise.reject(new Error('terminal subscription'))
-      void ready.catch(() => {})
-      transition('closed')
-    },
+    ready: () => transition('ready'),
+    lost: () => transition('lost'),
+    close: () => transition('closed'),
   }
 }
 

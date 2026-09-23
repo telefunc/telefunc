@@ -180,7 +180,7 @@ class SubscriptionSlot<Source> {
   }
 
   private _start(): void {
-    if (!this.config.binding.valid()) return this._ownershipTerminated()
+    if (!this.config.binding.valid()) return this._ended('terminated')
     let attempt: SubscriptionAttempt
     try {
       attempt = this.config.binding.open(
@@ -203,35 +203,36 @@ class SubscriptionSlot<Source> {
       return
     }
     this._attempt = attempt
-    this._unobserve = attempt.onStateChange((state) => this._onStateChange(attempt, state))
-    attempt.ready.then(
-      () => this._becameReady(attempt),
-      (error: unknown) => this._terminal(error, attempt),
-    )
+    this._unobserve = attempt.onStateChange((state, reason) => this._onStateChange(attempt, state, reason))
     // The attempt may have settled inside open(), before it had an observer.
     const state = attempt.state()
     if (state === 'ready' || state === 'closed' || state === 'terminated') this._onStateChange(attempt, state)
   }
 
-  private _onStateChange(attempt: SubscriptionAttempt, state: SubscriptionAttemptState): void {
+  private _onStateChange(attempt: SubscriptionAttempt, state: SubscriptionAttemptState, reason?: Error): void {
     if (this._attempt !== attempt) return
-    if (state === 'terminated') return this._ownershipTerminated(attempt)
-    if (state === 'ready') return this._becameReady(attempt)
-    if (state === 'closed') {
-      return this._terminal(new Error(`Backend subscription closed: ${this.config.sourceKey}`), attempt)
-    }
+    if (state === 'ready') return this._becameReady()
+    if (state === 'closed' || state === 'terminated') return this._ended(state, reason, attempt)
     this._markUnavailable(state)
     if (state === 'lost') this.config.reportError(new Error(`Backend subscription lost: ${this.config.sourceKey}`))
   }
 
-  private _becameReady(attempt: SubscriptionAttempt): void {
-    if (this._attempt !== attempt || attempt.state() !== 'ready') return
+  private _becameReady(): void {
     this._readiness.resolve()
     this._transition('ready')
   }
 
-  private _ownershipTerminated(attempt: SubscriptionAttempt | null = this._attempt): void {
-    this._terminal(new Error(`Backend subscription ownership terminated: ${this.config.sourceKey}`), attempt)
+  /** The driver's reason, if any, is the failure's cause. */
+  private _ended(
+    state: 'closed' | 'terminated',
+    reason?: Error,
+    attempt: SubscriptionAttempt | null = this._attempt,
+  ): void {
+    const what = state === 'closed' ? 'closed' : 'ownership terminated'
+    this._terminal(
+      new Error(`Backend subscription ${what}: ${this.config.sourceKey}`, reason && { cause: reason }),
+      attempt,
+    )
   }
 
   private _terminal(error: unknown, attempt: SubscriptionAttempt | null = this._attempt): void {

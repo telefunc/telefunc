@@ -23,11 +23,10 @@ type BackendSubscription = {
 
 type BackendReceiver = (payload: Uint8Array, info: { seq: number; timestamp: number }) => void | Promise<void>
 
-/** One driver establishment. Its `ready` may stay pending indefinitely. */
+/** One driver establishment, reporting each state change; an end carries its reason when the driver has one. */
 type SubscriptionAttempt = {
-  readonly ready: Promise<void>
   state(): SubscriptionAttemptState
-  onStateChange(cb: (state: SubscriptionAttemptState) => void): () => void
+  onStateChange(cb: (state: SubscriptionAttemptState, reason?: Error) => void): () => void
   /** Settles after the driver's registration and transport cleanup. */
   unsubscribe(): Promise<void>
 }

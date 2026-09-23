@@ -156,6 +156,19 @@ describe('shared subscription supervision', () => {
     expect(failedRaw.openCalls).toBe(1)
     await failed.unsubscribe()
   })
+  it("keeps a driver's reason for an end as the failure's cause", async () => {
+    const raw = new ControlledDriver()
+    raw.plan(() => new ControlledAttempt())
+    const subscription = new SubscriptionManager(raw).subscribe('with-reason', () => {})
+    const readiness = subscription.ready
+    const reason = new Error('room has no open incarnation')
+    raw.opens[0]!.attempt.close(reason)
+    await expect(readiness).rejects.toMatchObject({
+      message: 'Backend subscription closed: with-reason',
+      cause: reason,
+    })
+    await subscription.unsubscribe()
+  })
   it('includes the opaque driver partition in source identity', async () => {
     const raw = new ControlledDriver()
     raw.plan(() => ControlledAttempt.ready())
@@ -248,16 +261,12 @@ class ControlledDriver implements SubscriptionDriver<string> {
   }
 }
 class ControlledAttempt implements SubscriptionAttempt {
-  readonly ready: Promise<void>
   unsubscribeCalls = 0
-  readonly #readiness = deferred<void>()
-  readonly #listeners = new Set<(state: SubscriptionAttemptState) => void>()
+  readonly #listeners = new Set<(state: SubscriptionAttemptState, reason?: Error) => void>()
   readonly #cleanup: Promise<void>
   #state: SubscriptionAttemptState = 'establishing'
   constructor(cleanup: Promise<void> = Promise.resolve()) {
-    this.ready = this.#readiness.promise
     this.#cleanup = cleanup
-    void this.ready.catch(() => {})
   }
   static ready(cleanup?: Promise<void>): ControlledAttempt {
     const attempt = new ControlledAttempt(cleanup)
@@ -267,7 +276,7 @@ class ControlledAttempt implements SubscriptionAttempt {
   state(): SubscriptionAttemptState {
     return this.#state
   }
-  onStateChange(listener: (state: SubscriptionAttemptState) => void): () => void {
+  onStateChange(listener: (state: SubscriptionAttemptState, reason?: Error) => void): () => void {
     this.#listeners.add(listener)
     return () => this.#listeners.delete(listener)
   }
@@ -278,19 +287,18 @@ class ControlledAttempt implements SubscriptionAttempt {
   }
   establish(): void {
     this.#transition('ready')
-    this.#readiness.resolve()
   }
   lose(): void {
     this.#transition('lost')
   }
-  close(): void {
-    this.#transition('closed')
+  close(reason?: Error): void {
+    this.#transition('closed', reason)
   }
   terminate(): void {
     this.#transition('terminated')
   }
-  #transition(state: SubscriptionAttemptState): void {
+  #transition(state: SubscriptionAttemptState, reason?: Error): void {
     this.#state = state
-    for (const listener of this.#listeners) listener(state)
+    for (const listener of this.#listeners) listener(state, reason)
   }
 }

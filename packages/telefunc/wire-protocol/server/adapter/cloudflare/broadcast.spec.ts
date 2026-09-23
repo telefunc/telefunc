@@ -14,9 +14,26 @@ import { CLOUDFLARE_COLO_LOCATION_HINT_MAP } from './coloLocationHintMap.js'
 import { ServerBroadcast } from '../../server-broadcast.js'
 import { disposeBackend, installBackend } from '../../../backend/install.js'
 import { CloudflareRoomBackend } from './room/backend.js'
+import type { SubscriptionAttempt, SubscriptionAttemptState } from '../../../backend/subscription.js'
 
 const encode = (text: string) => new TextEncoder().encode(text)
 const decode = (bytes: Uint8Array) => new TextDecoder().decode(bytes)
+
+/** Resolves once the attempt is ready; rejects if it ends first. */
+function untilReady(attempt: SubscriptionAttempt): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const settle = (state: SubscriptionAttemptState, reason?: Error): boolean => {
+      if (state === 'ready') resolve()
+      else if (state === 'closed' || state === 'terminated') reject(reason ?? new Error(`attempt ${state}`))
+      else return false
+      return true
+    }
+    if (settle(attempt.state())) return
+    const stop = attempt.onStateChange((state, reason) => {
+      if (settle(state, reason)) stop()
+    })
+  })
+}
 
 type CloudflareRequest = Request & { cf?: { colo?: string; continent?: string } }
 
@@ -321,7 +338,7 @@ describe('cloudflare broadcast routing', () => {
     })
     configureTransport(transport, kv, binding)
     const subscription = transport.openSubscription({ key: 'room:test', kind: 'text' }, () => {})
-    await subscription.ready
+    await untilReady(subscription)
     const value = await kv.get('tfps:text:room%3Atest:weur:telefunc-shard-weur-0')
     expect(value).toBe('telefunc-shard-weur-0')
     const binary = await transport.publish({ key: 'room:test', kind: 'binary' }, new Uint8Array([1]))
@@ -518,7 +535,7 @@ describe('cloudflare broadcast routing', () => {
     const subscription = transport.openSubscription({ key: 'room:test', kind: 'text' }, (payload, info) => {
       received.push({ text: decode(payload), ...info })
     })
-    await subscription.ready
+    await untilReady(subscription)
     await transport.forwardToBucket({
       key: 'room:test',
       kind: 'text',
@@ -642,7 +659,7 @@ describe('cloudflare broadcast routing', () => {
     const kv = createMockKV()
     const transport = createTransport(kv)
     const subscription = transport.openSubscription({ key: 'room:test', kind: 'text' }, () => {})
-    await subscription.ready
+    await untilReady(subscription)
     const key = 'tfps:text:room%3Atest:weur:telefunc-shard-weur-0'
     expect(await kv.get(key)).toBe('telefunc-shard-weur-0')
     await subscription.unsubscribe()
@@ -660,7 +677,7 @@ describe('cloudflare broadcast routing', () => {
     await first.unsubscribe()
     const successor = transport.openSubscription(lane, () => {})
     setup.resolve()
-    await successor.ready
+    await untilReady(successor)
     await flushMicrotasks()
     expect(await kv.get(presenceKey)).toBe('telefunc-shard-weur-0')
     const releaseDeletion = Promise.withResolvers<void>()
@@ -670,7 +687,7 @@ describe('cloudflare broadcast routing', () => {
     await flushMicrotasks()
     expect(replacement.state()).toBe('establishing')
     releaseDeletion.resolve()
-    await Promise.all([teardown, replacement.ready])
+    await Promise.all([teardown, untilReady(replacement)])
     expect(await kv.get(presenceKey)).toBe('telefunc-shard-weur-0')
     await replacement.unsubscribe()
   })
@@ -693,7 +710,7 @@ describe('cloudflare broadcast routing', () => {
     await deleting.promise
     const replacement = transport.openSubscription(lane, () => {})
     deletion.resolve()
-    await replacement.ready
+    await untilReady(replacement)
     await flushMicrotasks()
     expect(await kv.get(presenceKey)).toBe('telefunc-shard-weur-0')
     await replacement.unsubscribe()
@@ -711,7 +728,7 @@ describe('cloudflare broadcast routing', () => {
       return originalPut(key, value, options)
     }) as KVNamespace['put']
     const subscription = transport.openSubscription({ key: 'room:refresh', kind: 'text' }, () => {})
-    await subscription.ready
+    await untilReady(subscription)
     const states: string[] = []
     const stopObserving = subscription.onStateChange((state) => states.push(state))
     try {

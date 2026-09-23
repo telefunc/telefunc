@@ -1,22 +1,13 @@
 export { DriverAttempt }
 
-import { createDeferred } from '../../utils/createDeferred.js'
 import type { SubscriptionAttempt, SubscriptionAttemptState } from './subscription.js'
 
-/** A driver attempt's state, listeners and readiness. `ready` resolves on the first `ready` and rejects if the
- *  attempt ends before it; an ended attempt never transitions again. */
+type StateListener = (state: SubscriptionAttemptState, reason?: Error) => void
+
+/** A driver attempt's state and listeners; an ended attempt never transitions again. */
 abstract class DriverAttempt implements SubscriptionAttempt {
-  readonly #readiness = createDeferred()
-  readonly #listeners = new Set<(state: SubscriptionAttemptState) => void>()
+  readonly #listeners = new Set<StateListener>()
   #state: SubscriptionAttemptState = 'establishing'
-
-  constructor() {
-    void this.#readiness.promise.catch(() => {})
-  }
-
-  get ready(): Promise<void> {
-    return this.#readiness.promise
-  }
 
   get ended(): boolean {
     return this.#state === 'closed' || this.#state === 'terminated'
@@ -26,18 +17,18 @@ abstract class DriverAttempt implements SubscriptionAttempt {
     return this.#state
   }
 
-  onStateChange(listener: (state: SubscriptionAttemptState) => void): () => void {
+  onStateChange(listener: StateListener): () => void {
     this.#listeners.add(listener)
     return () => this.#listeners.delete(listener)
   }
 
   abstract unsubscribe(): Promise<void>
 
-  protected transition(state: SubscriptionAttemptState, error?: unknown): void {
+  /** `reason` explains an end, when the driver has one. */
+  protected transition(state: SubscriptionAttemptState, reason?: unknown): void {
     if (this.#state === state || this.ended) return
     this.#state = state
-    if (state === 'ready') this.#readiness.resolve()
-    else if (this.ended) this.#readiness.reject(error ?? new Error(`The subscription ${state} before it was ready`))
-    for (const listener of [...this.#listeners]) listener(state)
+    const error = reason === undefined || reason instanceof Error ? reason : new Error(String(reason))
+    for (const listener of [...this.#listeners]) listener(state, error)
   }
 }
