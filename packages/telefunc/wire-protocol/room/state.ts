@@ -486,8 +486,8 @@ class RoomState {
   reconcileCompleteRoster(members: MemberSnapshot[]): boolean {
     return this._reconcileRoster(members, false)
   }
+  /** A client's roster: the server strips hidden members, and a directly held hidden handle survives it. */
   reconcilePresenceRoster(members: MemberSnapshot[]): boolean {
-    members = members.filter((member) => !member.hidden)
     return this._reconcileRoster(members, true)
   }
   private _reconcileRoster(roster: MemberSnapshot[], preserveMissingHidden: boolean): boolean {

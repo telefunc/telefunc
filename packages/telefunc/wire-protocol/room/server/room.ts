@@ -5,7 +5,7 @@ import { stringify } from '@brillout/json-serializer/stringify'
 import { ShieldValidationError } from '../../../shared/ShieldValidationError.js'
 import type { ShieldValidator } from '../../../node/server/shield.js'
 import type { TELEFUNC_SHIELDS } from '../../../node/shared/transformer/generateShield/shield-key.js'
-import { assertUsage } from '../../../utils/assert.js'
+import { assert, assertUsage } from '../../../utils/assert.js'
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 import { isObject } from '../../../utils/isObject.js'
 import { unrefTimer } from '../../../utils/unrefTimer.js'
@@ -91,13 +91,11 @@ assertIsNotBrowser()
 const ROOM_REPLAN_LIMIT = 5
 const SERVER_ROOM_BRAND: unique symbol = Symbol.for('telefunc.ServerRoom')
 
-function decodeSemanticEnvelope(serialized: string): RoomEnvelope | undefined {
-  try {
-    const envelope: unknown = parse(serialized)
-    return hasRoomTag(envelope) ? (envelope as RoomEnvelope) : undefined
-  } catch {
-    return undefined
-  }
+/** Lanes carry only Room's own encodings. */
+function decodeLaneEnvelope(serialized: string): { __r: string } {
+  const envelope: unknown = parse(serialized)
+  assert(hasRoomTag(envelope))
+  return envelope
 }
 /** The owner that wrote the event flags a hidden member; room-level events always reach clients. */
 function hiddenMemberOf(event: RoomCtrlEnvelope): string | null {
@@ -583,15 +581,7 @@ class ServerRoom extends RoomStateView implements Room {
     throw new RoomError(`Room is closed: ${this.id}`)
   }
   private _onCtrlMessage(serialized: string, rawInfo: WirePublishInfo): void {
-    let envelope: unknown
-    try {
-      envelope = parse(serialized)
-    } catch {
-      return // junk on the control lane
-    }
-    if (!hasRoomTag(envelope)) return
-    const event = envelope as RoomEnvelope
-    if (event.__r === 'data' || event.__r === 'announce') return // semantic messages never travel here
+    const event = decodeLaneEnvelope(serialized) as RoomCtrlEnvelope
     const previousSeq = this._controlSeq
     if (rawInfo.seq <= previousSeq) return
     this._controlSeq = rawInfo.seq
@@ -645,16 +635,14 @@ class ServerRoom extends RoomStateView implements Room {
     }
   }
   private _onTextData(serialized: string, rawInfo: WirePublishInfo): void {
-    const envelope = decodeSemanticEnvelope(serialized)
-    if (!envelope) return
+    const envelope = decodeLaneEnvelope(serialized) as RoomDataEnvelope | Extract<RoomEnvelope, { __r: 'announce' }>
     if (envelope.__r === 'announce') return this._applyAnnouncement(envelope, serialized, rawInfo)
-    if (envelope.__r !== 'data') return
     this._applyMemberData(envelope, rawInfo)
     this._relayMemberData(serialized, envelope, rawInfo)
   }
   private _onBinary(framed: Uint8Array, rawInfo: WirePublishInfo): void {
     const unframed = unframeMemberId(framed)
-    if (!unframed) return // junk on the binary lane
+    assert(unframed)
     const info = makePublishInfo(this.id, rawInfo.seq, rawInfo.timestamp)
     if (!this._suppress(unframed.from))
       this._state.applyBinary(unframed.from, unframed.payload, unframed.track, unframed.meta, info)
@@ -671,17 +659,10 @@ class ServerRoom extends RoomStateView implements Room {
   }
   /** A message on the inbox key of a member this instance owns — route it to the holder: a server-side participant's listeners, or the one client stub the member joined through. */
   private _onDm(serialized: string, rawInfo: WirePublishInfo): void {
-    let envelope: unknown
-    try {
-      envelope = parse(serialized)
-    } catch {
-      return // junk on the inbox lane
-    }
-    if (!hasRoomTag(envelope)) return
+    const envelope = decodeLaneEnvelope(serialized) as RoomDmEnvelope | RoomDmAckEnvelope
     // A reply to one of our own `send(…, { ack: true })`s, riding our inbox back home.
-    if (envelope.__r === 'dm-ack') return this._resolveDmAck(envelope as RoomDmAckEnvelope)
-    if (envelope.__r !== 'dm') return
-    const dm = envelope as RoomDmEnvelope
+    if (envelope.__r === 'dm-ack') return this._resolveDmAck(envelope)
+    const dm = envelope
     const msg: InboxMessage = {
       from: dm.from,
       fromMeta: dm.fromMeta,
