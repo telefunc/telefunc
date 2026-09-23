@@ -153,16 +153,15 @@ class RoomStubChannel extends ServerBroadcast {
 
   // Control always flows; text follows broadcast/member wants, while binary uses `sub-binary`.
   override _onPeerBroadcastSubscribe(binary: boolean): void {
-    if (binary) return
-    const prevWantsText = this._wantsText
+    if (binary || this._wantsText) return
     this._wantsText = true
     // Tail mode: this room-level want covers the whole held tail — flush it before the retained back-fill, so the flush advances the causal watermark and the retained replay dedupes against it.
     this._flushTail()
     this._room._syncSubs()
-    void this._room._replayRetainedText(this, prevWantsText, this._textMemberWants).catch(reportRoomError)
+    void this._room._replayRetainedText(this, false, this._textMemberWants).catch(reportRoomError)
   }
   override _onPeerBroadcastUnsubscribe(binary: boolean): void {
-    if (binary) return
+    if (binary || !this._wantsText) return
     this._wantsText = false
     this._room._syncSubs()
   }

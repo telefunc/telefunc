@@ -173,7 +173,11 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
 
   /** The peer's declared subscriptions ride its (re)attach, so they apply before `onOpen` fires. */
   override _attachPeer(peer: IndexedPeer, broadcast?: BroadcastSubscriptions): void {
-    if (broadcast) for (const kind of BROADCAST_KINDS) this._setPeerSubscription(kind, broadcast[kind])
+    if (broadcast)
+      for (const kind of BROADCAST_KINDS) {
+        if (broadcast[kind]) this._onPeerBroadcastSubscribe(kind === 'binary')
+        else this._onPeerBroadcastUnsubscribe(kind === 'binary')
+      }
     super._attachPeer(peer)
   }
 

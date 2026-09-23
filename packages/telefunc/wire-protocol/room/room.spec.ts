@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { IndexedPeer } from '../server/IndexedPeer.js'
-import { ACK_STATUS, ProtocolViolationError, TAG, decode } from '../shared-ws.js'
+import { ACK_STATUS, ProtocolViolationError, TAG, decode, type BroadcastSubscriptions } from '../shared-ws.js'
 import { ShieldValidationError, isShieldValidationError } from '../../shared/ShieldValidationError.js'
 import { Abort, isAbort } from '../../shared/Abort.js'
 import {
@@ -1419,6 +1419,16 @@ describe('Room public behavior', () => {
     await member.publish('live')
     expect(semanticFrames(peer, 'data')).toEqual(['early', 'held', 'live'])
   })
+  it("applies a reattach entry's text subscription as the Room stub's want, not as a Broadcast route", async () => {
+    const room = (await Room.create('reattach-text')) as ServerRoom
+    const member = await room.join()
+    const stub = register(room)
+    attachPeer(stub)
+    const peer = attachPeer(stub, undefined, { text: true, binary: false })
+    await member.publish('after-reattach')
+    await vi.waitFor(() => expect(semanticFrames(peer, 'data')).toEqual(['after-reattach']))
+    expect(memoryState.broadcastSubs.size).toBe(0)
+  })
   it('releases a tail that is not attached within its 60 second lease', async () => {
     vi.useFakeTimers()
     const { member, tail } = await createTail('tail-pre-attach-expiry')
@@ -2592,7 +2602,7 @@ describe('shared subscription supervision', () => {
   })
 })
 type Peer = ReturnType<typeof attachPeer>
-function attachPeer(stub: RoomStubChannel, lastSeq?: number) {
+function attachPeer(stub: RoomStubChannel, lastSeq?: number, broadcast?: BroadcastSubscriptions) {
   const frames: Uint8Array[] = []
   const replay = stub._replayBuffer!
   if (lastSeq !== undefined) frames.push(...replay.getAfter(lastSeq))
@@ -2607,6 +2617,7 @@ function attachPeer(stub: RoomStubChannel, lastSeq?: number) {
       7,
       replay,
     ),
+    broadcast,
   )
   return { decoded: () => frames.map((frame) => decode(frame as Uint8Array<ArrayBuffer>)) }
 }
