@@ -103,6 +103,11 @@ function hiddenMemberOf(event: RoomCtrlEnvelope): string | null {
   return null
 }
 
+/** Guards and hooks get a detached snapshot of a member, never a live handle. */
+function senderOf(id: string, meta: ParticipantMeta, identity: string | null): Sender {
+  return Object.freeze({ id, meta, identity })
+}
+
 type SubscriptionPlan = {
   open: boolean
   observed: boolean
@@ -391,11 +396,8 @@ class ServerRoom extends RoomStateView implements Room {
   }
 
   private _memberSender(from: string): Sender {
-    const remote = this._state.getRemote(from)
-    if (remote) return { id: from, meta: remote.meta, identity: remote.identity }
-    const local = this._localParticipants.get(from)
-    if (local) return { id: from, meta: local.meta, identity: local.identity }
-    return { id: from, meta: {}, identity: null }
+    const known = this._state.getRemote(from) ?? this._localParticipants.get(from)
+    return senderOf(from, known?.meta ?? {}, known?.identity ?? null)
   }
 
   async _sendDm(from: string, to: string, data: unknown, ack: boolean): Promise<RoomSendReceipt | RoomAckReceipt> {
@@ -493,9 +495,9 @@ class ServerRoom extends RoomStateView implements Room {
 
   private async _resolveMember(id: string): Promise<Sender | null> {
     const remote = this._state.getRemote(id)
-    if (remote) return remote
+    if (remote) return senderOf(id, remote.meta, remote.identity)
     const [member] = await readMembersById(this.id, this._inc, [id])
-    return member === undefined ? null : { id, meta: member.meta, identity: member.identity ?? null }
+    return member === undefined ? null : senderOf(id, member.meta, member.identity ?? null)
   }
   private async _readOpenConfig(): Promise<RoomConfigRecord | null> {
     return openConfig(await getRoomBackend().readHead(this.id), this._inc)

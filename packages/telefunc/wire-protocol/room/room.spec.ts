@@ -1167,6 +1167,26 @@ describe('Room public behavior', () => {
     ] as const
     for (const [channel, frame] of frames) expect(() => channel._dispatchFrame(frame)).toThrow(ProtocolViolationError)
   })
+  it('hands send guards a detached sender snapshot for both ends', async () => {
+    const room = await Room.create('guard-snapshots')
+    const seen: Sender[] = []
+    Room.guard(room, {
+      onBeforeSend: (from, to) => {
+        seen.push(from, to)
+      },
+    })
+    const alice = await room.join({ meta: { name: 'Alice' } })
+    const bob = await room.join({ meta: { name: 'Bob' } })
+    await alice.send(bob.id, 'hi')
+    expect(seen).toEqual([
+      { id: alice.id, meta: { name: 'Alice' }, identity: null },
+      { id: bob.id, meta: { name: 'Bob' }, identity: null },
+    ])
+    for (const sender of seen) {
+      expect(Object.isFrozen(sender)).toBe(true)
+      expect(Object.keys(sender)).toEqual(['id', 'meta', 'identity'])
+    }
+  })
   it('rejects a participant ref that is not an object as a usage error', async () => {
     const room = await Room.create('ref-shape')
     for (const call of [
