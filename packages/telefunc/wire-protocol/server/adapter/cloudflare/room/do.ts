@@ -169,50 +169,40 @@ export class TelefuncRoomDurableObject extends DurableObject {
     this.ctx.storage.transactionSync(() => deleteRetained(this.#sql, inc, lane, opts))
   }
 
-  async registerRoute(
-    roomId: string,
-    inc: string,
-    laneKey: string,
-    subscriberDoId: string,
-    leaseId: string,
-  ): Promise<RegisterWire> {
-    const sessionNamespace = this.#sessionNamespaceValue
+  async registerRoute(route: RouteInstallation): Promise<RegisterWire> {
     try {
-      sessionNamespace.idFromString(subscriberDoId)
+      this.#sessionNamespaceValue.idFromString(route.subscriberDoId)
     } catch {
-      return { rejected: true, reason: `subscriber Durable Object id '${subscriberDoId}' is invalid`, terminal: true }
+      return {
+        rejected: true,
+        reason: `subscriber Durable Object id '${route.subscriberDoId}' is invalid`,
+        terminal: true,
+      }
     }
     const result = this.ctx.storage.transactionSync((): RegisterWire => {
       const now = Date.now()
       const head = readLiveHead(this.#sql, now)
-      if (head === null || head.currentInc !== inc || head.state !== 'open')
-        return { rejected: true, reason: `room has no open incarnation '${inc}'`, terminal: true }
-      upsertRoute(this.#sql, roomId, inc, laneKey, subscriberDoId, leaseId, now)
+      if (head === null || head.currentInc !== route.inc || head.state !== 'open')
+        return { rejected: true, reason: `room has no open incarnation '${route.inc}'`, terminal: true }
+      upsertRoute(this.#sql, route, now)
       return { ok: true }
     })
     if ('ok' in result) await this.#scheduleMaintenanceIfNeeded()
     return result
   }
 
-  async renewRoute(
-    inc: string,
-    laneKey: string,
-    subscriberDoId: string,
-    leaseId: string,
-  ): Promise<{ ok: boolean; terminal?: boolean }> {
+  async renewRoute(route: RouteInstallation): Promise<{ ok: boolean; terminal?: boolean }> {
     const now = Date.now()
     // Missing exact routes recover with a fresh lease; only a dropped generation is terminal.
     const result = this.ctx.storage.transactionSync(() =>
-      hasGeneration(this.#sql, inc)
-        ? { ok: renewRoute(this.#sql, inc, laneKey, subscriberDoId, leaseId, now) }
-        : { ok: false, terminal: true },
+      hasGeneration(this.#sql, route.inc) ? { ok: renewRoute(this.#sql, route, now) } : { ok: false, terminal: true },
     )
     await this.#scheduleMaintenanceIfNeeded()
     return result
   }
 
-  async unsubscribeRoute(inc: string, laneKey: string, subscriberDoId: string, leaseId: string): Promise<void> {
-    this.ctx.storage.transactionSync(() => deleteRoute(this.#sql, inc, laneKey, subscriberDoId, leaseId))
+  async unsubscribeRoute(route: RouteInstallation): Promise<void> {
+    this.ctx.storage.transactionSync(() => deleteRoute(this.#sql, route))
     await this.#scheduleMaintenanceIfNeeded()
   }
 
@@ -279,15 +269,7 @@ export class TelefuncRoomDurableObject extends DurableObject {
         // Preserve this exact route row as the next sweep's retry source.
         continue
       }
-      this.ctx.storage.transactionSync(() => {
-        deleteRoute(
-          this.#sql,
-          installation.inc,
-          installation.laneKey,
-          installation.subscriberDoId,
-          installation.leaseId,
-        )
-      })
+      this.ctx.storage.transactionSync(() => deleteRoute(this.#sql, installation))
     }
   }
 

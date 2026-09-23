@@ -3,14 +3,10 @@ import type {
   SubscriptionAttempt,
   SubscriptionAttemptState,
 } from '../../../../backend/subscription.js'
-import { ROUTE_RENEW_EVERY_MS } from './routes.js'
-import type { CloudflareRoomAuthorityStub, RoomShardInvalidationRequest } from './backend.js'
+import { ROUTE_RENEW_EVERY_MS, type RouteInstallation } from './routes.js'
+import type { CloudflareRoomAuthorityStub } from './backend.js'
 
-export type CloudflareRoomSubscriptionSource = {
-  roomId: string
-  inc: string
-  laneKey: string
-  subscriberDoId: string
+export type CloudflareRoomSubscriptionSource = Omit<RouteInstallation, 'leaseId'> & {
   authority: CloudflareRoomAuthorityStub
 }
 
@@ -22,10 +18,10 @@ type CloudflareRoomSubscriptionOptions = {
  * exact route. Room owns retry/replacement policy; shared subscription code owns readiness and local fan-out. */
 export class CloudflareRoomSubscriptionAttempt implements SubscriptionAttempt {
   readonly ready: Promise<void>
-  readonly #source: CloudflareRoomSubscriptionSource
+  readonly #authority: CloudflareRoomAuthorityStub
+  readonly #route: RouteInstallation
   readonly #receiver: BackendReceiver
   readonly #onClosed: () => void
-  readonly #leaseId = crypto.randomUUID()
   readonly #listeners = new Set<(state: SubscriptionAttemptState) => void>()
   #state: SubscriptionAttemptState = 'establishing'
   #settleReady!: { resolve: () => void; reject: (error: unknown) => void }
@@ -38,7 +34,9 @@ export class CloudflareRoomSubscriptionAttempt implements SubscriptionAttempt {
     receiver: BackendReceiver,
     options: CloudflareRoomSubscriptionOptions,
   ) {
-    this.#source = source
+    const { authority, ...route } = source
+    this.#authority = authority
+    this.#route = { ...route, leaseId: crypto.randomUUID() }
     this.#receiver = receiver
     this.#onClosed = options.onClosed
     this.ready = new Promise<void>((resolve, reject) => {
@@ -62,13 +60,13 @@ export class CloudflareRoomSubscriptionAttempt implements SubscriptionAttempt {
     return () => this.#listeners.delete(cb)
   }
 
-  matches(request: RoomShardInvalidationRequest): boolean {
+  matches(request: RouteInstallation): boolean {
     return (
-      request.roomId === this.#source.roomId &&
-      request.inc === this.#source.inc &&
-      request.laneKey === this.#source.laneKey &&
-      request.subscriberDoId === this.#source.subscriberDoId &&
-      request.leaseId === this.#leaseId
+      request.roomId === this.#route.roomId &&
+      request.inc === this.#route.inc &&
+      request.laneKey === this.#route.laneKey &&
+      request.subscriberDoId === this.#route.subscriberDoId &&
+      request.leaseId === this.#route.leaseId
     )
   }
 
@@ -98,7 +96,7 @@ export class CloudflareRoomSubscriptionAttempt implements SubscriptionAttempt {
 
   async #establish(): Promise<void> {
     try {
-      const registered = await this.#source.authority.registerRoute(this.#source.roomId, ...this.#route())
+      const registered = await this.#authority.registerRoute(this.#route)
       if (this.#isClosed()) return
       if (!('ok' in registered)) {
         const error = new Error(registered.reason)
@@ -130,7 +128,7 @@ export class CloudflareRoomSubscriptionAttempt implements SubscriptionAttempt {
     this.#cancelRenewal = null
     if (this.#state !== 'ready') return
     try {
-      const renewed = await this.#source.authority.renewRoute(...this.#route())
+      const renewed = await this.#authority.renewRoute(this.#route)
       if (this.#state !== 'ready') return
       if (!renewed.ok) {
         if (renewed.terminal === true) this.terminate()
@@ -144,11 +142,7 @@ export class CloudflareRoomSubscriptionAttempt implements SubscriptionAttempt {
   }
 
   async #teardown(): Promise<void> {
-    await this.#source.authority.unsubscribeRoute(...this.#route())
-  }
-
-  #route(): readonly [string, string, string, string] {
-    return [this.#source.inc, this.#source.laneKey, this.#source.subscriberDoId, this.#leaseId]
+    await this.#authority.unsubscribeRoute(this.#route)
   }
 
   #finish(state: 'closed' | 'terminated'): void {

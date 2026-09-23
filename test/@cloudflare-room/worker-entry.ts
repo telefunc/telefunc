@@ -149,7 +149,13 @@ function roomProbe(env: Env, suffix: string, name: string) {
   const lease = (role = 'lease') => `${name}-${role}-${suffix}`
   const open = (operation = `${name} open`) => openHead(authority, inc, operation)
   const join = async (sessionId: DurableObjectId, role = 'lease') => {
-    const registration = await authority.registerRoute(roomId, inc, 'semantic', sessionId.toString(), lease(role))
+    const registration = await authority.registerRoute({
+      roomId,
+      inc,
+      laneKey: 'semantic',
+      subscriberDoId: sessionId.toString(),
+      leaseId: lease(role),
+    })
     if (!('ok' in registration)) throw new Error(`route registration failed: ${registration.reason}`)
   }
   return {
@@ -191,7 +197,13 @@ async function alarmScheduling(env: Env, sessionId: DurableObjectId, suffix: str
   await probe.open()
   await probe.join(sessionId)
   const afterRoute = (await probe.control('alarm')) === null ? 'idle' : 'armed'
-  await probe.authority.unsubscribeRoute(probe.inc, 'semantic', sessionId.toString(), `alarm-lease-${suffix}`)
+  await probe.authority.unsubscribeRoute({
+    roomId: probe.roomId,
+    inc: probe.inc,
+    laneKey: 'semantic',
+    subscriberDoId: sessionId.toString(),
+    leaseId: `alarm-lease-${suffix}`,
+  })
   const afterUnsubscribe = await probe.control('alarm')
   return { idle, afterRoute, afterUnsubscribe }
 }
