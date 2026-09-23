@@ -9,7 +9,7 @@ export {
   ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS,
 }
 const ROOM_HEARTBEAT_INTERVAL_MS = 30_000
-// One missed heartbeat plus the eventual-consistency window used by remote membership stores.
+// Four heartbeats: a member is reaped only after several renewals in a row were missed.
 const ROOM_MEMBER_TTL_MS = 120_000
 // A tail is a bounded recent suffix, not history: enforce both entry count and serialized code units.
 const ROOM_TAIL_HOLD_MAX = 256

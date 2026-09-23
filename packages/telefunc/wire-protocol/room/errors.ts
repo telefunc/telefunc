@@ -22,8 +22,7 @@ function isRoomError(thing: unknown): thing is RoomError {
   return thing instanceof RoomError || (typeof thing === 'object' && thing !== null && roomErrorBrand in thing)
 }
 const ROOM_BUG_MESSAGE = `${STATUS_BODY_INTERNAL_SERVER_ERROR} — see server logs`
-/** Published failure form for the one path that cannot use a native channel ack. */
-
+/** The failure an ack DM's reply carries: it travels on the recipient's inbox lane, not as a channel ack. */
 function toRoomFailure(err: unknown, report: (err: unknown) => void): RoomFailure {
   const classified = classifyTelefuncError(err, isRoomError)
   if (classified.kind === 'abort') return { ok: false, abort: true, abortValue: classified.error.abortValue }

@@ -1,4 +1,4 @@
-// Shared Room storage records and wire envelopes. Behavior lives in the model, error, key, and binary modules.
+// Shared Room storage records and wire envelopes.
 export { hasRoomTag, pushBoundedTail, toDmReply }
 export type {
   RoomConfigRecord,
@@ -30,9 +30,8 @@ import type { BinaryWants } from './binary.js'
 import type { ParticipantMeta, RoomMeta } from './types.js'
 
 /** Stored opaquely in the backend head. `at`/`by` is the last-writer-wins stamp of the latest `Room.setMeta()`/`Room.setAttributes()` (see `applyRoomUpdate`). `inc` is the room's incarnation id: a
- * fresh random id on every (re)create, so a member record or mutation from a previous incarnation can't attach to the current one (see `RoomMemberRecord.inc`). Random, not a counter, so a recreation
- * after the tombstone TTL lapses can't reuse a previous incarnation's id and let a stale handle false-match. The authority owns this record; legality (join/mutate/close) is decided against it, never
- * against the eventually-consistent replica.
+ * fresh random id on every (re)create, so work from a previous incarnation can't attach to the current one. Random, not a counter, so a recreation after the tombstone TTL lapses can't reuse a
+ * previous incarnation's id and let a stale handle false-match.
  */
 type RoomConfigRecord = {
   meta: RoomMeta

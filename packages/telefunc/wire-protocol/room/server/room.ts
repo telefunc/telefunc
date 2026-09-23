@@ -33,7 +33,7 @@ import {
   type BinaryWants,
   type TrackWants,
 } from '../binary.js'
-import { RoomError, roomFailureError } from '../errors.js'
+import { DM_PARTICIPANT_LEFT, RoomError, roomFailureError } from '../errors.js'
 import { roomIdentityMemberKvKey, roomMemberKvKey } from '../keys.js'
 import { leaveCauseFromWire, mergeAttributes, normalizeJoinOptions, ownMetadata } from '../model.js'
 import {
@@ -547,11 +547,11 @@ class ServerRoom extends RoomStateView implements Room {
     pending.settle(envelope)
   }
 
-  private _rejectDmAcks(message: string, to?: string): void {
+  private _rejectDmAcks(reply: DmReply, to?: string): void {
     for (const [ackId, pending] of this._pendingDmAcks) {
       if (to !== undefined && pending.to !== to) continue
       this._pendingDmAcks.delete(ackId)
-      pending.settle({ ok: false, err: message })
+      pending.settle(reply)
     }
   }
 
@@ -738,7 +738,7 @@ class ServerRoom extends RoomStateView implements Room {
   private _applyLeave(id: string, cause?: LeaveCause): void {
     this._state.applyLeave(id, cause)
     this._announcedTracks.delete(id)
-    this._rejectDmAcks('Recipient left the room before replying', id) // strand no waiter on a gone member
+    this._rejectDmAcks(DM_PARTICIPANT_LEFT, id) // strand no waiter on a gone member
     const local = this._localParticipants.get(id)
     if (local) {
       this._localParticipants.delete(id)
@@ -761,7 +761,7 @@ class ServerRoom extends RoomStateView implements Room {
   }
   /** The room closed — runs once, after the `closed` event has been applied and relayed. */
   private _teardown(): void {
-    this._rejectDmAcks('Room is closed') // no recipient will reply now
+    this._rejectDmAcks({ ok: false, err: 'Room is closed' }) // no recipient will reply now
     this._teardownTail()
     for (const local of this._localParticipants.values()) local._onLeft({ type: 'closed' })
     this._localParticipants.clear()
