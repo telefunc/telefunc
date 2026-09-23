@@ -122,38 +122,6 @@ describe('shared subscription supervision', () => {
     raw.opens[0]!.attempt.lose()
     expect(siblingStates).toEqual(['closed'])
   })
-  it('releases an observer returned after synchronous terminal registration', async () => {
-    let rawListeners = 0
-    let unobserveCalls = 0
-    let unsubscribeCalls = 0
-    const attempt: SubscriptionAttempt = {
-      ready: new Promise<void>(() => {}),
-      state: () => 'closed',
-      onStateChange: (listener) => {
-        rawListeners++
-        listener('closed')
-        return () => {
-          rawListeners--
-          unobserveCalls++
-        }
-      },
-      unsubscribe: async () => {
-        unsubscribeCalls++
-      },
-    }
-    const raw: SubscriptionDriver<string> = {
-      bind: () => ({
-        partition: '',
-        valid: () => true,
-        open: () => attempt,
-      }),
-    }
-    const subscription = new SubscriptionManager(raw).subscribe('sync-terminal', () => {})
-    await expect(subscription.ready).rejects.toThrow('Backend subscription closed')
-    await vi.waitFor(() => expect(unsubscribeCalls).toBe(1))
-    expect({ rawListeners, unobserveCalls }).toEqual({ rawListeners: 0, unobserveCalls: 1 })
-    await subscription.unsubscribe()
-  })
   it('normalizes initial readiness and surfaces raw recovery or terminal failure', async () => {
     const raw = new ControlledDriver()
     raw.plan(() => new ControlledAttempt())

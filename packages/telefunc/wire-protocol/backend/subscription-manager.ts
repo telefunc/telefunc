@@ -1,5 +1,6 @@
 export { SubscriptionManager }
 
+import { assert } from '../../utils/assert.js'
 import type {
   BackendReceiver,
   BackendSubscription,
@@ -34,7 +35,6 @@ class SubscriptionManager<Source> {
 
   subscribe(source: Source, receiver: BackendReceiver): BackendSubscription {
     const binding = this._driver.bind(source)
-    assertBinding(binding)
     const sourceKey = this._sourceKey(source)
     const key = JSON.stringify([sourceKey, binding.partition])
     let slot = this._slots.get(key)
@@ -107,12 +107,13 @@ class SubscriptionSlot<Source> {
   }
 
   attach(receiver: BackendReceiver): BackendSubscription {
-    if (this._stopPromise !== null) throw new Error('SubscriptionManager: cannot attach to a stopped source')
+    assert(this._stopPromise === null) // the manager unmaps a slot before stopping it
     const attachment = Symbol()
     this._receivers.set(attachment, receiver)
     if (this._attempt === null) this._start()
     let attached = true
     const listeners = new Set<StateListener>()
+    // Consumers attached while establishing await `ready`; only a later lost → ready is an event for them.
     let suppressInitialReady = this._state === 'establishing'
     const observer: StateListener = (state) => {
       if (suppressInitialReady) {
@@ -131,7 +132,7 @@ class SubscriptionSlot<Source> {
       state: () => (attached ? this._state : 'closed'),
       onStateChange: (listener) => {
         if (!attached) {
-          this._notify([listener], 'closed')
+          this._report(() => listener('closed'))
           return () => {}
         }
         listeners.add(listener)
@@ -163,11 +164,7 @@ class SubscriptionSlot<Source> {
   }
 
   private _start(): void {
-    if (this._stopPromise !== null || this._receivers.size === 0 || this._attempt !== null) return
-    if (!this._safely(() => this.config.binding.valid() === true, false)) {
-      this._ownershipTerminated()
-      return
-    }
+    if (!this.config.binding.valid()) return this._ownershipTerminated()
     let attempt: SubscriptionAttempt
     try {
       attempt = this.config.binding.open(
@@ -190,22 +187,14 @@ class SubscriptionSlot<Source> {
       return
     }
     this._attempt = attempt
-    try {
-      const unobserve = attempt.onStateChange((state) => this._onStateChange(attempt, state))
-      if (this._attempt === attempt) this._unobserve = unobserve
-      else this._safely(unobserve, undefined)
-      attempt.ready.then(
-        () => this._becameReady(attempt),
-        (error: unknown) => this._failCurrent(attempt, error),
-      )
-      const state = attempt.state()
-      if (state === 'ready') this._becameReady(attempt)
-      else if (state === 'closed')
-        this._failCurrent(attempt, new Error(`Backend subscription closed: ${this.config.sourceKey}`))
-      else if (state === 'terminated') this._ownershipTerminated(attempt)
-    } catch (error) {
-      this._failCurrent(attempt, error)
-    }
+    this._unobserve = attempt.onStateChange((state) => this._onStateChange(attempt, state))
+    attempt.ready.then(
+      () => this._becameReady(attempt),
+      (error: unknown) => this._failCurrent(attempt, error),
+    )
+    // The attempt may have settled inside open(), before it had an observer.
+    const state = attempt.state()
+    if (state === 'ready' || state === 'closed' || state === 'terminated') this._onStateChange(attempt, state)
   }
 
   private _onStateChange(attempt: SubscriptionAttempt, state: SubscriptionAttemptState): void {
@@ -220,13 +209,7 @@ class SubscriptionSlot<Source> {
   }
 
   private _becameReady(attempt: SubscriptionAttempt): void {
-    if (this._attempt !== attempt) return
-    try {
-      if (attempt.state() !== 'ready') return
-    } catch (error) {
-      this._failCurrent(attempt, error)
-      return
-    }
+    if (this._attempt !== attempt || attempt.state() !== 'ready') return
     this._readiness.resolve()
     this._transition('ready')
   }
@@ -263,42 +246,25 @@ class SubscriptionSlot<Source> {
   }
 
   private _clearCurrent(): void {
-    const unobserve = this._unobserve
+    this._unobserve?.()
     this._unobserve = null
     this._attempt = null
-    if (unobserve !== null) this._safely(unobserve, undefined)
   }
 
-  private _safely<Value>(operation: () => Value, fallback: Value): Value {
+  /** Consumer listeners are isolated from each other; one that throws is reported. */
+  private _notify(listeners: Set<StateListener>, state: SubscriptionState): void {
+    for (const listener of [...listeners]) {
+      if (listeners.has(listener)) this._report(() => listener(state))
+    }
+  }
+
+  private _report(notify: () => void): void {
     try {
-      return operation()
+      notify()
     } catch (error) {
       this.config.reportError(error)
-      return fallback
     }
   }
-
-  private _notify(listeners: Iterable<StateListener>, state: SubscriptionState): void {
-    for (const listener of [...listeners]) {
-      if (listeners instanceof Set && !listeners.has(listener)) continue
-      try {
-        listener(state)
-      } catch (error) {
-        this.config.reportError(error)
-      }
-    }
-  }
-}
-
-function assertBinding(binding: SubscriptionBinding): void {
-  const invalid =
-    binding === null ||
-    typeof binding !== 'object' ||
-    typeof binding.partition !== 'string' ||
-    typeof binding.valid !== 'function' ||
-    typeof binding.open !== 'function'
-  if (invalid)
-    throw new Error('SubscriptionDriver.bind() must return a string partition plus valid() and open() functions')
 }
 
 function createReadinessGeneration() {
