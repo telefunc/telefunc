@@ -43,7 +43,8 @@ function makePublishInfo(key: string, seq: number, timestamp: number): ChannelPu
   return { key, seq, timestamp }
 }
 
-/** Invoke a fire-and-forget listener while routing both thrown and rejected failures. */
+/** Invoke a fire-and-forget listener while routing both thrown and rejected failures. Returns what `handleError`
+ *  returned for a synchronous throw only, which a caller can use to stop iterating; a rejection can't stop it. */
 function invokeChannelListener<Args extends unknown[]>(
   listener: (...args: Args) => unknown,
   args: Args,
