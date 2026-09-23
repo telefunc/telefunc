@@ -80,9 +80,12 @@ export class RedisSubscriptionDriver implements SubscriptionDriver<RedisSubscrip
       const delivery = attempt.prepareFlush(token)
       return delivery === null ? [] : [delivery]
     })
+    const delivery = Promise.all(armed).then(() => {})
+    // A subscriber can drop before the commit awaiting this delivery returns.
+    void delivery.catch(() => {})
     return {
       token: armed.length === 0 ? '' : token,
-      delivery: Promise.all(armed).then(() => {}),
+      delivery,
       cancel: () => {
         for (const attempt of attempts) attempt.cancelFlush(token)
       },

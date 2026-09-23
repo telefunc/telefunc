@@ -321,15 +321,12 @@ export class RedisBackend implements BroadcastDriver, RoomDriver {
     }
     assertOrderingPosition(parsed.seq, parsed.timestamp, 'RedisBackend.commitLane')
     // Data and fence leave the same slot owner in order, so observing the fence proves local dispatch.
-    const delivery = flush.delivery
-    // Observe rejection now so later-awaited delivery has no interim unhandledRejection.
-    void delivery.catch(() => {})
     return {
       accepted: true,
       seq: parsed.seq,
       timestamp: parsed.timestamp,
       ...(this._receivers === 'none' ? {} : { receivers: parsed.receivers }),
-      delivery,
+      delivery: flush.delivery,
     }
   }
 
