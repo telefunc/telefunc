@@ -134,7 +134,6 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
   const TelefuncDurableObject = class extends DurableObject {
     private readonly authorityState: CloudflareBroadcastAuthorityState
     private roomManager: CloudflareRoomSessionManager | null = null
-    private readonly recoveredSockets = [...(this.ctx.getWebSockets?.() ?? [])]
 
     constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
       super(ctx, env)
@@ -143,6 +142,11 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
       if (kv) broadcast.attachKV(kv)
       this.authorityState = new CloudflareBroadcastAuthorityState(ctx)
       crosswsAdapter.handleDurableInit(this, ctx, env)
+      // Room subscriptions live in memory, so a socket that used Room before this construction lost them.
+      for (const socket of ctx.getWebSockets()) {
+        if (socket.deserializeAttachment()?.__telefuncRoom === true)
+          socket.close(1012, 'Telefunc session reset; reconnect')
+      }
     }
 
     async fetch(request: Request) {
@@ -210,10 +214,6 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
       }
       if (this.roomManager) return this.roomManager
       this.roomManager = new CloudflareRoomSessionManager(this.ctx.id.toString(), () => roomNamespace(this.env))
-      for (const recovered of this.recoveredSockets.splice(0)) {
-        if (recovered.deserializeAttachment?.()?.__telefuncRoom === true)
-          recovered.close(1012, 'Telefunc session reset; reconnect')
-      }
       return this.roomManager
     }
   }

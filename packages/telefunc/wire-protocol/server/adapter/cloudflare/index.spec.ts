@@ -430,6 +430,8 @@ describe('cloudflare adapter entrypoint', () => {
       telefuncBroadcastDeliver(request: BroadcastDeliverRequest): void
       telefuncRoomInvalidate(request: unknown): void
     }
+    expect(hibernatedRoomSocket.close).toHaveBeenCalledWith(1012, 'Telefunc session reset; reconnect')
+    expect(hibernatedPlainSocket.close).not.toHaveBeenCalled()
     expect(mocks.transportInstances[0]?.attachBinding).toHaveBeenCalledWith(binding, 'TelefuncDurableObject')
     expect(mocks.crosswsAdapter.handleDurableInit).toHaveBeenCalledWith(instance, ctx, {
       TelefuncDurableObject: binding,
@@ -476,7 +478,6 @@ describe('cloudflare adapter entrypoint', () => {
     }
     instance.telefuncBroadcastDeliver(delivery)
     expect(mocks.transportInstances[0]?.deliverToLocal).toHaveBeenCalledWith(delivery)
-    expect(hibernatedRoomSocket.close).not.toHaveBeenCalled()
     // Importing and using the ordinary Cloudflare adapter remains flag-free. Only the first Room entry
     // asks for the opt-in async carrier and reports the recipe diagnostic.
     const invalidation = {
@@ -489,7 +490,5 @@ describe('cloudflare adapter entrypoint', () => {
     expect(() => instance.telefuncRoomInvalidate(invalidation)).toThrow('Cloudflare Room requires await-safe context')
     mocks.asyncMode = true
     instance.telefuncRoomInvalidate(invalidation)
-    expect(hibernatedRoomSocket.close).toHaveBeenCalledWith(1012, 'Telefunc session reset; reconnect')
-    expect(hibernatedPlainSocket.close).not.toHaveBeenCalled()
   })
 })
