@@ -46,7 +46,6 @@ class SubscriptionManager<Source> {
         sourceKey,
         cleanup: (attempt) => this._cleanup(attempt),
         onEmpty: () => {
-          slot!.markRemoved()
           if (this._slots.get(key) === slot) this._slots.delete(key)
         },
       })
@@ -78,12 +77,12 @@ class SubscriptionManager<Source> {
     return cleanup
   }
 
-  /** Readiness of every live slot on the source's route: settles when each is ready or removed, rejects if one terminates. */
-  readinessWaits(source: Source): Promise<void>[] {
+  /** One wait per unsettled slot on the source's route; each resolves once its slot is ready, stopped or terminal. */
+  settledWaits(source: Source): Promise<void>[] {
     const sourceKey = this._sourceKey(source)
     return [...this._slots.values()]
       .filter((slot) => slot.config.sourceKey === sourceKey)
-      .flatMap((slot) => slot.waitForReadyOrRemoved() ?? [])
+      .flatMap((slot) => slot.settled() ?? [])
   }
 }
 
@@ -95,17 +94,16 @@ class SubscriptionSlot<Source> {
   private _readiness: ReadinessGeneration = createReadinessGeneration()
   private _state: SubscriptionState = 'establishing'
   private _stopPromise: Promise<void> | null = null
-  private readonly _removed = createReadinessGeneration()
 
   constructor(readonly config: SubscriptionSlotConfig<Source>) {}
 
-  markRemoved(): void {
-    this._removed.resolve()
-  }
-
-  waitForReadyOrRemoved(): Promise<void> | null {
+  /** `null` once ready or stopped; otherwise resolves when readiness settles either way. */
+  settled(): Promise<void> | null {
     if (this._stopPromise !== null || this._state === 'ready') return null
-    return Promise.race([this._readiness.promise, this._removed.promise])
+    return this._readiness.promise.then(
+      () => {},
+      () => {},
+    )
   }
 
   attach(receiver: BackendReceiver): BackendSubscription {
