@@ -12,6 +12,7 @@ import type {
 import type { TELEFUNC_SHIELDS } from '../../node/shared/transformer/generateShield/shield-key.js'
 import { invokeChannelListener, makePublishInfo } from '../channel.js'
 import { ServerChannel } from './channel.js'
+import type { IndexedPeer } from './IndexedPeer.js'
 import type { BroadcastBackend, PublishResult } from '../backend/broadcast/contract.js'
 import { getBroadcastBackend } from '../backend/install.js'
 import type { BackendSubscription } from '../backend/subscription.js'
@@ -21,7 +22,7 @@ import { assert, assertUsage } from '../../utils/assert.js'
 import { isPromise } from '../../utils/isPromise.js'
 import { ChannelClosedError, isExpectedChannelFailure } from '../channel-errors.js'
 import { ACK_STATUS, encodePublishText, encodePublishBinary, TAG } from '../shared-ws.js'
-import type { ChannelCtrlFrame, ChannelDataFrame, WirePublishInfo } from '../shared-ws.js'
+import type { BroadcastSubscriptions, ChannelCtrlFrame, ChannelDataFrame, WirePublishInfo } from '../shared-ws.js'
 import { STATUS_BODY_INTERNAL_SERVER_ERROR } from '../../shared/constants.js'
 import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
 import { classifyTelefuncError } from '../error-classification.js'
@@ -163,16 +164,17 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
   }
 
   _onPeerBroadcastSubscribe(binary: boolean): void {
-    this._ensureBroadcast()
-    const kind = binary ? 'binary' : 'text'
-    this._peerSubscriptions[kind] = true
-    this._reconcileSubscription(kind)
+    this._setPeerSubscription(binary ? 'binary' : 'text', true)
   }
 
   _onPeerBroadcastUnsubscribe(binary: boolean): void {
-    const kind = binary ? 'binary' : 'text'
-    this._peerSubscriptions[kind] = false
-    this._reconcileSubscription(kind)
+    this._setPeerSubscription(binary ? 'binary' : 'text', false)
+  }
+
+  /** The peer's declared subscriptions ride its (re)attach, so they apply before `onOpen` fires. */
+  override _attachPeer(peer: IndexedPeer, broadcast?: BroadcastSubscriptions): void {
+    if (broadcast) for (const kind of BROADCAST_KINDS) this._setPeerSubscription(kind, broadcast[kind])
+    super._attachPeer(peer)
   }
 
   protected override _shutdown(err?: Error): void {
@@ -184,6 +186,12 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
   }
 
   // --- Internal broadcast helpers ---
+
+  private _setPeerSubscription(kind: BroadcastKind, on: boolean): void {
+    if (on) this._ensureBroadcast()
+    this._peerSubscriptions[kind] = on
+    this._reconcileSubscription(kind)
+  }
 
   private _ensureBroadcast(): void {
     if (this._backend) return

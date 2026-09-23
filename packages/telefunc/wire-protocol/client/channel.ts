@@ -24,6 +24,7 @@ import {
   TAG,
   isChannelCtrlTag,
   type AckResultStatus,
+  type BroadcastSubscriptions,
   type ChannelCtrlFrame,
   type ChannelDataFrame,
   type ChannelFrame,
@@ -610,6 +611,7 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   private _broadcastBinaryListeners: Array<BroadcastBinaryListener> = []
   private readonly _reconnectCallbacks: Array<() => void> = []
   private _wireTextSubscribed = false
+  private _wireBinarySubscribed = false
   private _didOpen = false
 
   static isClientBroadcast(value: unknown): value is ClientBroadcast {
@@ -640,6 +642,17 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
     this._wireTextSubscribed = on
     if (on) this._connection.sendBroadcastSubscribe(this, false)
     else this._connection.sendBroadcastUnsubscribe(this, false)
+  }
+
+  _broadcastSubscriptions(): BroadcastSubscriptions {
+    return { text: this._wireTextSubscribed, binary: this._wireBinarySubscribed }
+  }
+
+  private _setWireBinarySubscribed(on: boolean): void {
+    if (on === this._wireBinarySubscribed || this._isClosed) return
+    this._wireBinarySubscribed = on
+    if (on) this._connection.sendBroadcastSubscribe(this, true)
+    else this._connection.sendBroadcastUnsubscribe(this, true)
   }
 
   /** @internal — observe transport reopens after the initial open. */
@@ -688,15 +701,11 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   }
 
   subscribeBinary(callback: BroadcastBinaryListener): () => void {
-    if (this._broadcastBinaryListeners.length === 0) {
-      this._connection.sendBroadcastSubscribe(this, true)
-    }
+    if (this._broadcastBinaryListeners.length === 0) this._setWireBinarySubscribed(true)
     const unsubscribe = this._subscribeBinaryLocal(callback)
     return () => {
       unsubscribe()
-      if (this._broadcastBinaryListeners.length === 0) {
-        this._connection.sendBroadcastUnsubscribe(this, true)
-      }
+      if (this._broadcastBinaryListeners.length === 0) this._setWireBinarySubscribed(false)
     }
   }
 

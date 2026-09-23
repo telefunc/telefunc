@@ -40,7 +40,13 @@ import { ReplayBuffer } from '../replay-buffer.js'
 import { getServerConfig } from '../../node/server/serverConfig.js'
 import { assert } from '../../utils/assert.js'
 import { ACK_STATUS, ProtocolViolationError, TAG, isChannelCtrlTag } from '../shared-ws.js'
-import type { AckResultStatus, ChannelCtrlFrame, ChannelDataFrame, ChannelFrame } from '../shared-ws.js'
+import type {
+  AckResultStatus,
+  BroadcastSubscriptions,
+  ChannelCtrlFrame,
+  ChannelDataFrame,
+  ChannelFrame,
+} from '../shared-ws.js'
 
 /** Peer-authored JSON: a parse failure is the peer's, so it surfaces as a protocol violation. */
 function parsePeerText(text: string): unknown {
@@ -334,7 +340,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     )
   }
 
-  _attachPeer(peer: IndexedPeer): void {
+  _attachPeer(peer: IndexedPeer, _broadcast?: BroadcastSubscriptions): void {
     if (this._didShutdown) return
     this._clearTimer('_ttlTimer')
     this._clearTimer('_reconnectTimer')

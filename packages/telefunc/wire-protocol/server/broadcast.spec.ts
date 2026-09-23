@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Broadcast, ServerBroadcast } from './server-broadcast.js'
 import { ReplayBuffer } from '../replay-buffer.js'
-import { ACK_STATUS, TAG, decode } from '../shared-ws.js'
+import { ACK_STATUS, TAG, decode, encode, type DecodedFrame } from '../shared-ws.js'
+import { ChannelMux, type ServerTransport } from './mux.js'
 import { IndexedPeer } from './IndexedPeer.js'
 import { disposeBackend, installBackend } from '../backend/install.js'
 import { BACKEND_SPI_VERSION, type BackendDriverPair } from '../backend/driver-pair.js'
@@ -390,6 +391,29 @@ describe('Broadcast lifecycle and route ownership', () => {
     void broadcast.close()
     expect(() => broadcast._dispatchFrame({ tag: TAG.BROADCAST_SUB, index: 7, binary: false })).not.toThrow()
     expect((await Broadcast.publish(key, 'after-close')).receivers).toBe(0)
+  })
+
+  it("delivers onOpen's publish to the client whose open declared its subscription", async () => {
+    const mux = new ChannelMux()
+    const connection = {}
+    const sent: DecodedFrame[] = []
+    let sessionId: string | undefined
+    const transport: ServerTransport<object> = {
+      getSessionId: () => sessionId,
+      setSessionId: (_connection, id) => (sessionId = id),
+      getConnId: () => null,
+      sendNow: (_connection, frame) => sent.push(decode(frame)),
+      terminateConnection: () => {},
+    }
+    mux.onConnectionOpen(connection, transport)
+    const chat = new ServerBroadcast<string>({ key: 'broadcast:joined-on-open' })
+    chat.onOpen(() => void chat.publish('joined'))
+    mux.registerChannel(chat)
+    const entry = { id: chat.id, ix: 0, lastSeq: 0, initial: true, broadcast: { text: true, binary: false } } as const
+    await mux.onConnectionRawMessage(connection, encode.reconcile({ open: [entry] }))
+    await vi.waitFor(() =>
+      expect(sent.some((frame) => frame.tag === TAG.PUBLISH && frame.text === '"joined"')).toBe(true),
+    )
   })
 
   it('publishes from onClose to the key, as the documented chat pattern does', async () => {

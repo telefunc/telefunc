@@ -151,6 +151,17 @@ describe('decodeClientFrame — hostile schemas', () => {
     expect(() => clientFrame(hostile(encode.reconcile, payload))).toThrow(ProtocolViolationError)
   })
 
+  test("a RECONCILE entry's broadcast subscriptions must be two booleans", () => {
+    const entry = { id: 'A', ix: 0, lastSeq: 0 }
+    const legal = encode.reconcile({ open: [{ ...entry, broadcast: { text: true, binary: false } }] })
+    expect(clientFrame(legal)).toMatchObject({ payload: { open: [{ broadcast: { text: true, binary: false } }] } })
+    for (const broadcast of [null, true, { text: true }, { text: 'yes', binary: false }]) {
+      expect(() => clientFrame(hostile(encode.reconcile, { open: [{ ...entry, broadcast }] }))).toThrow(
+        ProtocolViolationError,
+      )
+    }
+  })
+
   test('truncated bytes, unparsable JSON and an unknown tag are all violations', () => {
     expect(() => clientFrame(new Uint8Array(2) as Uint8Array<ArrayBuffer>)).toThrow(ProtocolViolationError)
     const junk = encode.text(0, 'not json', 1)

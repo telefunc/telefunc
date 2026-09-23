@@ -23,6 +23,7 @@ export type {
   ChannelDataFrame,
   ReconcilePayload,
   ReconcileOpenEntry,
+  BroadcastSubscriptions,
   BarrierPayload,
   ReconciledPayload,
   PreparePayload,
@@ -144,7 +145,11 @@ type ReconcileOpenEntry = {
    *  least once) omit `initial`; the server fails them fast if they're missing rather than
    *  stalling the entire reconcile. */
   initial?: true
+  /** A broadcast's subscriptions as of this (re)attach — applied before its `onOpen` fires. */
+  broadcast?: BroadcastSubscriptions
 }
+
+type BroadcastSubscriptions = { text: boolean; binary: boolean }
 
 type ReconcilePayload = {
   sessionId?: string
@@ -576,6 +581,13 @@ function parseOpenList(payload: Record<string, unknown>): void {
     indexes.add(entry.ix)
     assertProtocol(isUint(entry.lastSeq, 0xffffffff), 'RECONCILE entry lastSeq')
     assertProtocol(entry.initial === undefined || entry.initial === true, 'RECONCILE entry initial')
+    if (entry.broadcast !== undefined) {
+      const broadcast = asObject(entry.broadcast)
+      assertProtocol(
+        typeof broadcast.text === 'boolean' && typeof broadcast.binary === 'boolean',
+        'RECONCILE entry broadcast',
+      )
+    }
   }
 }
 

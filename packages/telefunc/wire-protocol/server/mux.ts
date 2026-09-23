@@ -27,7 +27,14 @@ import {
   isConnCtrlTag,
   peekTag,
 } from '../shared-ws.js'
-import type { BarrierPayload, ChannelFrame, PreparePayload, ReconcilePayload, ReconciledPayload } from '../shared-ws.js'
+import type {
+  BarrierPayload,
+  ChannelFrame,
+  PreparePayload,
+  ReconcileOpenEntry,
+  ReconcilePayload,
+  ReconciledPayload,
+} from '../shared-ws.js'
 import { IndexedPeer, type PeerSender } from './IndexedPeer.js'
 import type { ServerChannel } from './channel.js'
 
@@ -541,24 +548,28 @@ class ChannelMux {
    *  reconciles fail fast if the channel is gone. */
   private async attach(entry: ReconcilePayload['open'][number], send: SendFn): Promise<ChannelHandle | null> {
     const existing = this.channels.get(entry.id)
-    if (existing) return this.attachChannel(existing, entry.ix, entry.lastSeq, send)
+    if (existing) return this.attachChannel(existing, entry, send)
     if (!entry.initial) return null
     return new Promise<ChannelHandle | null>((resolve) => {
       this.waitForChannelRegistration(entry.id, this.options.connectTtl, (channel) => {
-        resolve(channel ? this.attachChannel(channel, entry.ix, entry.lastSeq, send) : null)
+        resolve(channel ? this.attachChannel(channel, entry, send) : null)
       })
     })
   }
 
   /** Drains replay frames missed since `lastSeq` (sends are sync — see `send`), then
    *  attaches an `IndexedPeer`. Returns null if the channel already shut down. */
-  private attachChannel(channel: ServerChannel, ix: number, lastSeq: number, send: SendFn): ChannelHandle | null {
+  private attachChannel(
+    channel: ServerChannel,
+    { ix, lastSeq, broadcast }: ReconcileOpenEntry,
+    send: SendFn,
+  ): ChannelHandle | null {
     if (channel._didShutdown) return null
     const replay = channel._replayBuffer
     assert(replay !== null, `ServerChannel "${channel.id}" attached without a replay buffer`)
     for (const frame of replay.getAfter(lastSeq)) send(frame as Uint8Array<ArrayBuffer>)
     const sender: PeerSender = { send }
-    channel._attachPeer(new IndexedPeer(sender, ix, replay))
+    channel._attachPeer(new IndexedPeer(sender, ix, replay), broadcast)
     return { channel, ix }
   }
 
