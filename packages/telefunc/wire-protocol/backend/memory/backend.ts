@@ -365,22 +365,11 @@ export class MemoryBackend implements BroadcastDriver, RoomDriver {
     return gen === undefined ? [] : [...gen.retained.values()].map((entry) => copyLane(entry.lane))
   }
 
-  async deleteRetained(roomId: string, inc: string, lane?: LaneId, opts?: { ifSeq?: number }): Promise<void> {
+  async deleteRetained(roomId: string, inc: string, lane: LaneId, opts?: { ifSeq?: number }): Promise<void> {
     this.#assertLive()
-    if (lane === undefined && opts?.ifSeq !== undefined) {
-      throw new Error('deleteRetained: ifSeq requires a lane')
-    }
-    if (opts?.ifSeq !== undefined && (!Number.isSafeInteger(opts.ifSeq) || opts.ifSeq <= 0)) {
-      throw new Error('deleteRetained: ifSeq must be a positive safe integer')
-    }
-    const gen = this.#state.rooms.get(roomId)?.gens.get(inc)
-    if (gen === undefined) return
-    if (lane === undefined) gen.retained.clear()
-    else {
-      const key = encodeLaneKey(lane)
-      const retained = gen.retained.get(key)
-      if (opts?.ifSeq === undefined || retained?.seq === opts.ifSeq) gen.retained.delete(key)
-    }
+    const retained = this.#state.rooms.get(roomId)?.gens.get(inc)?.retained
+    const key = encodeLaneKey(lane)
+    if (opts?.ifSeq === undefined || retained?.get(key)?.seq === opts.ifSeq) retained?.delete(key)
   }
 
   #openSubscription(

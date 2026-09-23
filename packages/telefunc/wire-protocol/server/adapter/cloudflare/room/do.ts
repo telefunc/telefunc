@@ -187,7 +187,7 @@ export class TelefuncRoomDurableObject extends DurableObject {
     return listRetained(this.#sql, inc)
   }
 
-  async deleteRetainedLane(inc: string, lane?: LaneId, opts?: { ifSeq?: number }): Promise<void> {
+  async deleteRetained(inc: string, lane: LaneId, opts?: { ifSeq?: number }): Promise<void> {
     this.ctx.storage.transactionSync(() => deleteRetained(this.#sql, inc, lane, opts))
   }
 

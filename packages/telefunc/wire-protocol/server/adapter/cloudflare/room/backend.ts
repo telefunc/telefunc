@@ -209,8 +209,8 @@ export class CloudflareRoomBackend implements BroadcastDriver, RoomDriver {
   async listRetained(roomId: string, inc: string) {
     return this.#stub(roomId).listRetained(inc)
   }
-  async deleteRetained(roomId: string, inc: string, lane?: LaneId, opts?: { ifSeq?: number }) {
-    await this.#stub(roomId).deleteRetainedLane(inc, lane, opts)
+  async deleteRetained(roomId: string, inc: string, lane: LaneId, opts?: { ifSeq?: number }) {
+    await this.#stub(roomId).deleteRetained(inc, lane, opts)
   }
   async dropGeneration(roomId: string, inc: string) {
     await this.#stub(roomId).dropGeneration(inc)

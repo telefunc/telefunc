@@ -96,7 +96,7 @@ type RoomDriver = {
     lane: LaneId,
   ): Promise<{ payload: Uint8Array; seq: number; timestamp: number } | null>
   listRetained(roomId: string, inc: string): Promise<LaneId[]>
-  deleteRetained(roomId: string, inc: string, lane?: LaneId, opts?: { ifSeq?: number }): Promise<void>
+  deleteRetained(roomId: string, inc: string, lane: LaneId, opts?: { ifSeq?: number }): Promise<void>
   dropGeneration(roomId: string, inc: string): Promise<void>
   directoryPut(roomId: string, incTag: string): Promise<void>
   directoryDelete(roomId: string, incTag: string): Promise<void>

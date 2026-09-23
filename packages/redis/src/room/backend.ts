@@ -319,20 +319,9 @@ export class RedisBackend implements BroadcastDriver, RoomDriver {
     return keys.map((physical) => parseLaneKey(physical.slice(prefix.length)))
   }
 
-  async deleteRetained(roomId: string, inc: string, lane?: LaneId, opts?: { ifSeq?: number }): Promise<void> {
+  async deleteRetained(roomId: string, inc: string, lane: LaneId, opts?: { ifSeq?: number }): Promise<void> {
     this._assertLive()
-    if (lane === undefined && opts?.ifSeq !== undefined) {
-      throw new Error('deleteRetained: ifSeq requires a lane')
-    }
-    if (opts?.ifSeq !== undefined && (!Number.isSafeInteger(opts.ifSeq) || opts.ifSeq <= 0)) {
-      throw new Error('deleteRetained: ifSeq must be a positive safe integer')
-    }
-    const retainedKeys =
-      lane === undefined
-        ? (await this._generationKeys(roomId, inc)).filter((key) =>
-            key.startsWith(retainedKeyPrefix(this._prefix, roomId, inc)),
-          )
-        : [retainedKey(this._prefix, roomId, inc, laneKey(lane))]
+    const retainedKeys = [retainedKey(this._prefix, roomId, inc, laneKey(lane))]
     const keys = REDIS_ROOM_COMMAND_KEYS.retainedDelete(this._prefix, roomId, inc, retainedKeys)
     await this._call(REDIS_ROOM_COMMANDS.retainedDelete.name, [
       String(keys.length),
