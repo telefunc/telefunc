@@ -220,11 +220,5 @@ type MemberWants = { all: boolean; members: string[] }
 
 /** All room messages are tagged with `__r` — envelopes, requests, and notices alike. */
 function hasRoomTag(value: unknown): value is { __r: string } {
-  if (!isRecord(value)) return false
-  try {
-    const tag = Object.getOwnPropertyDescriptor(value, '__r')
-    return tag !== undefined && 'value' in tag && typeof tag.value === 'string'
-  } catch {
-    return false
-  }
+  return isRecord(value) && typeof value.__r === 'string'
 }

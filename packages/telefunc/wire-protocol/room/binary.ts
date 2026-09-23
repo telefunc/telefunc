@@ -181,21 +181,17 @@ function wantsAnyBinary(wants: BinaryWants): boolean {
 }
 /** Validate a client-declared `sub-binary` want (untrusted input), or return `null`. */
 function sanitizeBinaryWants(wants: unknown): BinaryWants | null {
-  try {
-    if (!isRecord(wants)) return null
-    const everyMember = sanitizeTrackWants(wants.everyMember)
-    if (!everyMember || !isRecord(wants.members)) return null
-    const members: Record<string, TrackWants> = Object.create(null)
-    for (const [memberId, trackWants] of Object.entries(wants.members)) {
-      if (uuidToBytes(memberId) === null) return null
-      const sanitized = sanitizeTrackWants(trackWants)
-      if (!sanitized) return null
-      members[memberId] = sanitized
-    }
-    return { everyMember, members }
-  } catch {
-    return null
+  if (!isRecord(wants)) return null
+  const everyMember = sanitizeTrackWants(wants.everyMember)
+  if (!everyMember || !isRecord(wants.members)) return null
+  const members: Record<string, TrackWants> = Object.create(null)
+  for (const [memberId, trackWants] of Object.entries(wants.members)) {
+    if (uuidToBytes(memberId) === null) return null
+    const sanitized = sanitizeTrackWants(trackWants)
+    if (!sanitized) return null
+    members[memberId] = sanitized
   }
+  return { everyMember, members }
 }
 function sanitizeTrackWants(wants: unknown): TrackWants | null {
   if (!isRecord(wants) || typeof wants.all !== 'boolean' || !Array.isArray(wants.tracks)) return null
