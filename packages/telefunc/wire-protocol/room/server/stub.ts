@@ -13,6 +13,7 @@ import type { ShieldValidator } from '../../../node/server/shield.js'
 import { encodePublishText, type WirePublishInfo } from '../../shared-ws.js'
 import { type ServerLocalParticipant, type ServerRoom } from './room.js'
 import { reportRoomError, roomAckError } from './errors.js'
+import { ReplayGate, TEXT_LANE_KEY, binaryLaneKey } from './replay.js'
 import type { ParticipantMeta, RoomSendReceipt } from '../types.js'
 import { binaryWantsCovers, emptyTrackWants, type BinaryWants } from '../binary.js'
 import { DM_PARTICIPANT_LEFT, roomFailureError } from '../errors.js'
@@ -84,11 +85,7 @@ class RoomStubChannel extends ServerChannel {
   _tailPending: Array<{ serialized: string; ord: RoomOrder; from: string }> | null = null
   private _tailTimer: ReturnType<typeof setTimeout> | null = null
 
-  /** Retained/live dedup uses one text watermark and flat `${member}\0${track}` binary watermarks, pruned on leave. */
-  private _textHigh: RoomOrder | null = null
-  private _textPendingRetained: RoomOrder | null = null
-  private readonly _binaryHigh = new Map<string, WirePublishInfo>()
-  private readonly _binaryPendingRetained = new Map<string, WirePublishInfo>()
+  private readonly _replay = new ReplayGate()
 
   /** @internal — relay gate: does this client want the (member, track) the frame belongs to? */
   _wantsBinary(memberId: string, track: string): boolean {
@@ -195,49 +192,24 @@ class RoomStubChannel extends ServerChannel {
     else this._prePeerBuffer.pushPublishBinary(wireData)
   }
 
-  /** Live text advances its watermark and drops the echo of a retained frame just emitted. */
-  _relayTextLive(wireText: string, _from: string, ord: RoomOrder): void {
-    const pending = this._textPendingRetained
-    if (pending && pending.seq === ord.seq && pending.timestamp === ord.timestamp) {
-      this._textPendingRetained = null // this live frame is the echo of the retained we emitted
-      return
-    }
-    this._relayPublishText(wireText)
-    if (!this._textHigh || this._textHigh.seq < ord.seq) this._textHigh = ord
+  _relayTextLive(wireText: string, ord: RoomOrder): void {
+    if (this._replay.admitLive(TEXT_LANE_KEY, ord.seq)) this._relayPublishText(wireText)
   }
 
-  /** Retained text replays only above the live watermark, then suppresses its matching live echo. */
-  _emitRetainedText(wireText: string, _from: string, ord: RoomOrder): void {
-    const high = this._textHigh
-    if (high && high.seq >= ord.seq) return // superseded by a same-or-newer live frame
-    this._relayPublishText(wireText)
-    this._textHigh = ord
-    this._textPendingRetained = ord
+  _emitRetainedText(wireText: string, ord: RoomOrder): void {
+    if (this._replay.admitRetained(TEXT_LANE_KEY, ord.seq)) this._relayPublishText(wireText)
   }
 
   _relayBinaryLive(wireData: Uint8Array, from: string, track: string, info: WirePublishInfo): void {
-    const lane = `${from}\0${track}`
-    if (this._binaryPendingRetained.get(lane)?.seq === info.seq) {
-      this._binaryPendingRetained.delete(lane) // this live frame is the echo of the retained we emitted
-      return
-    }
-    this._relayPublishBinary(wireData)
-    const seen = this._binaryHigh.get(lane)
-    if (!seen || seen.seq < info.seq) this._binaryHigh.set(lane, info)
+    if (this._replay.admitLive(binaryLaneKey(from, track), info.seq)) this._relayPublishBinary(wireData)
   }
 
   _emitRetainedBinary(wireData: Uint8Array, from: string, track: string, info: WirePublishInfo): void {
-    const lane = `${from}\0${track}`
-    if ((this._binaryHigh.get(lane)?.seq ?? -1) >= info.seq) return // superseded by a same-or-newer live frame
-    this._relayPublishBinary(wireData)
-    this._binaryHigh.set(lane, info)
-    this._binaryPendingRetained.set(lane, info)
+    if (this._replay.admitRetained(binaryLaneKey(from, track), info.seq)) this._relayPublishBinary(wireData)
   }
 
   _forgetMember(from: string): void {
-    const prefix = `${from}\0`
-    for (const lane of [this._binaryHigh, this._binaryPendingRetained])
-      for (const key of lane.keys()) if (key.startsWith(prefix)) lane.delete(key)
+    this._replay.forgetMember(from)
   }
 
   /** @internal — begin holding the bounded tail, seeded from the room's pre-attach hold. The client gets a fresh lease after attach; expiry drops the hold and lets the room release ingestion. */
@@ -268,7 +240,7 @@ class RoomStubChannel extends ServerChannel {
     for (const { serialized, ord, from } of hold) {
       if (!this._wantsTextFrom(from)) continue
       if (this._selfSuppressed.has(from)) continue
-      this._relayTextLive(encodePublishText(serialized, ord), from, ord)
+      this._relayTextLive(encodePublishText(serialized, ord), ord)
     }
   }
 

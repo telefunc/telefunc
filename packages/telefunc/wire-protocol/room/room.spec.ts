@@ -1464,8 +1464,8 @@ describe('Room public behavior', () => {
     const room = (await Room.create('global-retained-watermark')) as ServerRoom
     const stub = register(room)
     const relay = vi.spyOn(stub, '_relayPublishText').mockImplementation(() => {})
-    stub._relayTextLive('newer-live', 'sender-b', { seq: 2, timestamp: 2 })
-    stub._emitRetainedText('older-retained', 'sender-a', { seq: 1, timestamp: 1 })
+    stub._relayTextLive('newer-live', { seq: 2, timestamp: 2 })
+    stub._emitRetainedText('older-retained', { seq: 1, timestamp: 1 })
     expect(relay.mock.calls.map(([wire]) => wire)).toEqual(['newer-live'])
   })
   it('waits for roster-derived binary routes before reading retained frames', async () => {

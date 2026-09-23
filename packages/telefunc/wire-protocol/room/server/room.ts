@@ -606,7 +606,7 @@ class ServerRoom extends RoomStateView implements Room {
     const info = makePublishInfo(this.id, rawInfo.seq, rawInfo.timestamp)
     this._state.applyAnnounce(announce.data, info)
     const wireText = encodePublishText(serialized, rawInfo)
-    for (const stub of this._stubs) if (stub._wantsAnnounce) stub._relayTextLive(wireText, '', rawInfo)
+    for (const stub of this._stubs) if (stub._wantsAnnounce) stub._relayTextLive(wireText, rawInfo)
   }
 
   private _applyMemberData(event: RoomDataEnvelope, rawInfo: WirePublishInfo): void {
@@ -625,7 +625,7 @@ class ServerRoom extends RoomStateView implements Room {
     const wireText = encodePublishText(serialized, rawInfo)
     for (const stub of this._stubs) {
       if (stub._tailPending !== null) stub._holdTail(serialized, rawInfo, event.from)
-      else if (shouldRelayMemberData(stub, event.from)) stub._relayTextLive(wireText, event.from, rawInfo)
+      else if (shouldRelayMemberData(stub, event.from)) stub._relayTextLive(wireText, rawInfo)
     }
   }
   private _onTextData(serialized: string, rawInfo: WirePublishInfo): void {
@@ -948,7 +948,7 @@ class ServerRoom extends RoomStateView implements Room {
     const envelope = parse(serialized) as RoomDataEnvelope
     if (prevWantsText || prevMemberWants.has(envelope.from) || !stub._wantsTextFrom(envelope.from)) return
     // Replay the stored order as-is; the stub dedupes a same-or-newer live winner.
-    stub._emitRetainedText(encodePublishText(serialized, info), envelope.from, info)
+    stub._emitRetainedText(encodePublishText(serialized, info), info)
   }
   async _replayRetainedBinary(stub: RoomStubChannel, prevWants: BinaryWants): Promise<void> {
     if (!wantsAnyBinary(stub._binaryWants)) return
