@@ -161,7 +161,12 @@ export class CloudflareRoomBackend implements BroadcastDriver, RoomDriver {
     return this.#stub(roomId).readCells(inc, sel)
   }
 
-  async compareExchangeCells(roomId: string, inc: string, revision: string, mutations: CellMutation[]): Promise<CxResult> {
+  async compareExchangeCells(
+    roomId: string,
+    inc: string,
+    revision: string,
+    mutations: CellMutation[],
+  ): Promise<CxResult> {
     return this.#stub(roomId).compareExchangeCells(inc, revision, mutations)
   }
 
