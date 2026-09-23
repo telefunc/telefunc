@@ -437,21 +437,20 @@ class ServerRoom extends RoomStateView implements Room {
       this._announcedTracks.set(from, announced)
     }
     const key = roomMemberKvKey(this.id, from)
-    const appended = await mutateCells(this.id, this._inc, { keys: [key] }, (cells) => {
+    await mutateCells(this.id, this._inc, { keys: [key] }, (cells) => {
       const raw = cells.get(key)
       if (raw === undefined) throw new RoomError(`Participant not found (left?): ${from}`)
       const record = parse(decodeRoomText(raw)) as RoomMemberRecord
       const tracks = record.tracks ?? []
-      if (tracks.includes(track)) {
-        return { value: false, mutations: [] }
-      }
+      // Already recorded by an attempt whose announcement failed: announce it now.
+      if (tracks.includes(track)) return { value: undefined, mutations: [] }
       const next = { ...record, tracks: [...tracks, track], seenAt: Date.now() } satisfies RoomMemberRecord
       return {
-        value: true,
+        value: undefined,
         mutations: [{ key, set: { bytes: encodeRoomText(stringify(next)) } }],
       }
     })
-    if (appended) await publishCtrl(this.id, this._inc, { __r: 'track', id: from, track })
+    await publishCtrl(this.id, this._inc, { __r: 'track', id: from, track })
     this._state.applyTrack(from, track)
     announced.add(track)
   }

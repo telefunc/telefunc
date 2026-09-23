@@ -1057,6 +1057,26 @@ describe('Room public behavior', () => {
     reportRoomError(new Error('a real bug'))
     expect(report).toHaveBeenCalled()
   })
+  it('announces a named track on the next publish after its first announcement failed', async () => {
+    const room = await Room.create('track-announce-retry')
+    const publisher = await room.join()
+    const observer = await Room.get('track-announce-retry')
+    const frames: number[] = []
+    observer.subscribeBinary((data) => frames.push(data[0]!))
+    await observer.getParticipants()
+    const commitLane = driver.commitLane.bind(driver)
+    let failed = false
+    vi.spyOn(driver, 'commitLane').mockImplementation(async (roomId, inc, lane, payload, options) => {
+      if (!failed && lane.kind === 'control' && decoder.decode(payload).includes('"__r":"track"')) {
+        failed = true
+        throw new Error('transient control-lane failure')
+      }
+      return commitLane(roomId, inc, lane, payload, options)
+    })
+    await expect(publisher.publishBinary(new Uint8Array([1]), { track: 'camera' })).rejects.toThrow()
+    await publisher.publishBinary(new Uint8Array([2]), { track: 'camera' })
+    await vi.waitFor(() => expect(frames).toContain(2))
+  })
   it('keeps every live ack correlation instead of silently dropping the oldest', async () => {
     const stub = register(await Room.create('ack-correlations'))
     for (let index = 0; index <= 1_024; index++) {
