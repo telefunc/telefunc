@@ -6,7 +6,7 @@ import { isObject } from '../../../utils/isObject.js'
 import { getRoomBackend } from '../../backend/install.js'
 import type { RoomBackend, RoomHead } from '../../backend/room/contract.js'
 import { RoomError, participantGoneError, roomClosedError } from '../errors.js'
-import { assertParticipantIdentity, mergeAttributes, ownMetadata, removedCause } from '../model.js'
+import { assertParticipantIdentity, isRecord, mergeAttributes, ownMetadata, removedCause } from '../model.js'
 import type { MemberSnapshot, RoomConfigRecord, RoomCtrlEnvelope, RoomDmEnvelope, RoomEnvelope } from '../protocol.js'
 import type {
   AfterJoinHook,
@@ -247,14 +247,14 @@ async function listRooms(options?: { prefix?: string }): Promise<RoomInfo[]> {
 }
 
 async function setRoomMeta(id: string, meta: RoomMeta): Promise<void> {
-  assertUsage(isObject(meta), 'Room.setMeta() meta should be an object')
+  assertUsage(isRecord(meta), 'Room.setMeta() meta should be an object')
   const owned = ownMetadata(meta)
   const config = await requireRoom(id)
   await writeRoomConfig(id, config, () => owned)
 }
 
 async function setRoomAttributes(id: string, attributes: RoomMeta): Promise<void> {
-  assertUsage(isObject(attributes), 'Room.setAttributes() attributes should be an object')
+  assertUsage(isRecord(attributes), 'Room.setAttributes() attributes should be an object')
   const owned = ownMetadata(attributes)
   const config = await requireRoom(id)
   await writeRoomConfig(id, config, (current) => mergeAttributes(current, owned))
@@ -425,6 +425,6 @@ async function sendServerDm(roomId: string, inc: string, memberId: string, data:
 function normalizeOptions(options: RoomOptions | undefined): { meta: RoomMeta } {
   assertUsage(options === undefined || isObject(options), 'Room options should be an object')
   const meta = options?.meta ?? {}
-  assertUsage(isObject(meta), 'options.meta should be an object')
+  assertUsage(isRecord(meta), 'options.meta should be an object')
   return { meta: ownMetadata(meta) }
 }

@@ -1176,6 +1176,16 @@ describe('Room public behavior', () => {
     await expect(member.setMeta([] as never)).rejects.toThrow('setMeta() meta should be an object')
     await expect(member.setAttributes('x' as never)).rejects.toThrow('setAttributes() attributes should be an object')
   })
+  it('rejects a room meta that is not a plain object, like participant meta', async () => {
+    await Room.create('room-meta-edge')
+    await expect(Room.setMeta('room-meta-edge', [] as never)).rejects.toThrow('Room.setMeta() meta should be an object')
+    await expect(Room.setAttributes('room-meta-edge', [] as never)).rejects.toThrow(
+      'Room.setAttributes() attributes should be an object',
+    )
+    await expect(Room.create('room-meta-array', { meta: [] as never })).rejects.toThrow(
+      'options.meta should be an object',
+    )
+  })
   it("round-trips an ack DM through a room stub and keeps only the reply's own fields", async () => {
     const room = (await Room.create('stub-ack-dm')) as ServerRoom
     const { stub, peer } = serve(room)
