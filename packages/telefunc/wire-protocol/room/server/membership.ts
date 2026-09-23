@@ -20,11 +20,12 @@ import { assertUsage } from '../../../utils/assert.js'
 import { getRoomBackend } from '../../backend/install.js'
 import type { CellMutation } from '../../backend/room/contract.js'
 import { ROOM_MEMBER_TTL_MS } from '../constants.js'
-import { RoomError, participantGoneError, roomClosedError } from '../errors.js'
+import { participantGoneError, roomClosedError } from '../errors.js'
 import { leaveCauseToWire } from '../model.js'
 import type { MemberSnapshot, RoomDataEnvelope, RoomMemberRecord } from '../protocol.js'
 import type { LeaveCause } from '../types.js'
 import { SEMANTIC_LANE, decodeRoomRecord, encodeRoomRecord, publishCtrl } from './lanes.js'
+import { CX_CONFLICT, retryCompareExchange } from './cx.js'
 
 // Cell keys: drivers scope cells by (room, incarnation), so a key names only what is inside the room.
 const MEMBER_CELL_PREFIX = 'm:'
@@ -48,8 +49,6 @@ function identityCellKey(identity: string, memberId: string): string {
   return identityCellPrefix(identity) + memberId
 }
 
-// Room owns conflict recovery: 16 attempts with 1→64 ms jitter, then a contention RoomError.
-const ROOM_CX_ATTEMPTS = 16
 type CellSelector = { keys: string[] } | { prefix: string }
 type CellPlan<T> = { value: T; mutations: CellMutation[] }
 type PendingMemberCleanup = { cause: ReturnType<typeof leaveCauseToWire>; hidden?: true }
@@ -71,18 +70,15 @@ async function mutateCells<T>(
   plan: (cells: ReadonlyMap<string, Uint8Array>) => CellPlan<T>,
 ): Promise<T> {
   const backend = getRoomBackend()
-  for (let attempt = 0; attempt < ROOM_CX_ATTEMPTS; attempt++) {
+  return await retryCompareExchange(roomId, async () => {
     const read = await backend.readCells(roomId, inc, selector)
     if ('staleInc' in read) throw roomClosedError(roomId)
     const next = plan(read.cells)
     if (next.mutations.length === 0) return next.value
     const result = await backend.compareExchangeCells(roomId, inc, read.revision, next.mutations)
-    if (result === 'committed') return next.value
     if (result === 'stale-inc') throw roomClosedError(roomId)
-    const ceiling = Math.min(64, 2 ** attempt)
-    await new Promise((resolve) => setTimeout(resolve, Math.floor(Math.random() * ceiling) + 1))
-  }
-  throw new RoomError(`Room update contention: ${roomId}`)
+    return result === 'committed' ? next.value : CX_CONFLICT
+  })
 }
 
 /** Persist a join's member record and identity marker. */

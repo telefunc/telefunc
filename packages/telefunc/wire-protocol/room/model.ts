@@ -7,6 +7,7 @@ export {
   leaveCauseToWire,
   mergeAttributes,
   normalizeJoinOptions,
+  removedCause,
   ownMetaArgument,
   recipientId,
 }
@@ -25,6 +26,9 @@ function ownMetadata<T extends RoomMeta | ParticipantMeta>(meta: T): T {
   return Object.freeze({ ...meta }) as T
 }
 const ownLeaveCause = (cause: LeaveCause): LeaveCause => Object.freeze({ ...cause })
+function removedCause(reason: unknown): LeaveCause {
+  return ownLeaveCause(reason === undefined ? { type: 'removed' } : { type: 'removed', reason })
+}
 /** Validate and own a `setMeta()`/`setAttributes()` argument. */
 function ownMetaArgument(value: ParticipantMeta, what: string): ParticipantMeta {
   assertUsage(isRecord(value), `${what} should be an object`)
@@ -46,9 +50,7 @@ function leaveCauseFromWire(event: {
   cause?: 'removed' | 'disconnected' | 'closed'
   reason?: unknown
 }): LeaveCause {
-  if (event.cause === 'removed') {
-    return ownLeaveCause(event.reason === undefined ? { type: 'removed' } : { type: 'removed', reason: event.reason })
-  }
+  if (event.cause === 'removed') return removedCause(event.reason)
   return ownLeaveCause({ type: event.cause ?? 'left' })
 }
 /** Encode a cause into leave-event fields — `'left'` is the wire default and travels as nothing. */
