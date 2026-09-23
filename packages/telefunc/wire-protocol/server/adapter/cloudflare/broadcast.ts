@@ -62,6 +62,7 @@ class MemberBucketState {
   state: 'establishing' | 'ready' | 'lost' = 'establishing'
   teardownRequested = false
   refreshTimer: ReturnType<typeof setInterval> | null = null
+  /** Publishes reuse this stub: calls through one stub arrive in order, calls through fresh stubs don't. */
   readonly authority: TelefuncDurableObjectStub
   readonly #setup = createDeferred()
   readonly #presenceListeners = new Set<(state: 'ready' | 'lost') => void>()
