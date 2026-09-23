@@ -1,6 +1,6 @@
 export { reportRoomError }
 /** Application code (listeners, handlers, after-hooks): whatever escapes it is a bug. */
-export { reportServerChannelError as reportCallbackError }
+export { reportServerChannelError as reportCallbackError } from '../../server/channel.js'
 
 import { reportServerChannelError } from '../../server/channel.js'
 import { isRoomError } from '../errors.js'
