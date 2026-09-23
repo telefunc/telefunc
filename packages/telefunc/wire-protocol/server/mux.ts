@@ -569,7 +569,7 @@ class ChannelMux {
     assert(replay !== null, `ServerChannel "${channel.id}" attached without a replay buffer`)
     for (const frame of replay.getAfter(lastSeq)) send(frame as Uint8Array<ArrayBuffer>)
     const sender: PeerSender = { send }
-    channel._attachPeer(new IndexedPeer(sender, ix, replay), broadcast)
+    channel._attachPeer(new IndexedPeer(sender, ix, replay), { broadcast })
     return { channel, ix }
   }
 

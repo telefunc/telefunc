@@ -2621,7 +2621,7 @@ function attachPeer(stub: RoomStubChannel, lastSeq?: number, broadcast?: Broadca
       7,
       replay,
     ),
-    broadcast,
+    { broadcast },
   )
   return { decoded: () => frames.map((frame) => decode(frame as Uint8Array<ArrayBuffer>)) }
 }

@@ -26,6 +26,7 @@ import {
   type AckResultStatus,
   type BroadcastKind,
   type BroadcastSubscriptions,
+  type ReattachState,
   type ChannelCtrlFrame,
   type ChannelDataFrame,
   type ChannelFrame,
@@ -635,8 +636,8 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
     else this._connection.sendBroadcastUnsubscribe(this, kind === 'binary')
   }
 
-  _broadcastSubscriptions(): BroadcastSubscriptions {
-    return { ...this._wire }
+  _reattachState(): ReattachState {
+    return { broadcast: { ...this._wire } }
   }
 
   publish(data: ChannelData<T>): Promise<ChannelPublishAck> {

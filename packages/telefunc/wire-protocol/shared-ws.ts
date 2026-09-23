@@ -24,6 +24,7 @@ export type {
   ReconcileOpenEntry,
   BroadcastKind,
   BroadcastSubscriptions,
+  ReattachState,
   BarrierPayload,
   ReconciledPayload,
   PreparePayload,
@@ -151,6 +152,9 @@ type ReconcileOpenEntry = {
 
 type BroadcastKind = 'text' | 'binary'
 type BroadcastSubscriptions = Record<BroadcastKind, boolean>
+
+/** What a channel adds to its own RECONCILE entry. */
+type ReattachState = Pick<ReconcileOpenEntry, 'broadcast'>
 
 type ReconcilePayload = {
   sessionId?: string

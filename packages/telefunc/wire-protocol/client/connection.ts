@@ -39,7 +39,7 @@ import { REQUEST_KIND, REQUEST_KIND_HEADER, getMarkedRequestUrl } from '../reque
 import { ACK_STATUS, TAG, decode, encode, isChannelDataFrame, payloadBytes } from '../shared-ws.js'
 import type {
   AckResultStatus,
-  BroadcastSubscriptions,
+  ReattachState,
   ChannelFrame,
   DecodedFrame,
   ReadyPayload,
@@ -147,8 +147,8 @@ interface MuxChannel {
    *  connection — they involve connection-side cleanup. */
   _dispatchFrame(frame: ChannelFrame): void
   _onTransportClose(err?: Error): void
-  /** A broadcast's wire subscriptions, declared with every (re)attach. */
-  _broadcastSubscriptions?(): BroadcastSubscriptions
+  /** What this channel declares in its RECONCILE entry on every (re)attach. */
+  _reattachState?(): ReattachState
 }
 
 interface MuxConnection {
@@ -1258,8 +1258,7 @@ class ClientConnection implements MuxConnection {
         lastSeq: this.lastSeqByChannel.get(ix) ?? 0,
       }
       if (isInitial) payloadEntry.initial = true
-      const broadcast = entry.channel._broadcastSubscriptions?.()
-      if (broadcast) payloadEntry.broadcast = broadcast
+      Object.assign(payloadEntry, entry.channel._reattachState?.())
       open.push(payloadEntry)
     }
     return open

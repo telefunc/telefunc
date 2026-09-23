@@ -40,13 +40,7 @@ import { ReplayBuffer } from '../replay-buffer.js'
 import { getServerConfig } from '../../node/server/serverConfig.js'
 import { assert } from '../../utils/assert.js'
 import { ACK_STATUS, ProtocolViolationError, TAG, isChannelCtrlTag } from '../shared-ws.js'
-import type {
-  AckResultStatus,
-  BroadcastSubscriptions,
-  ChannelCtrlFrame,
-  ChannelDataFrame,
-  ChannelFrame,
-} from '../shared-ws.js'
+import type { AckResultStatus, ReattachState, ChannelCtrlFrame, ChannelDataFrame, ChannelFrame } from '../shared-ws.js'
 
 /** Peer-authored JSON: a parse failure is the peer's, so it surfaces as a protocol violation. */
 function parsePeerText(text: string): unknown {
@@ -345,12 +339,12 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     else this._onPeerBroadcastUnsubscribe(binary)
   }
 
-  /** The peer's declared subscriptions ride its (re)attach, so they apply before `onOpen` fires. */
-  _attachPeer(peer: IndexedPeer, broadcast?: BroadcastSubscriptions): void {
+  /** The peer's RECONCILE declarations apply before `onOpen` fires, through the same hooks as its frames. */
+  _attachPeer(peer: IndexedPeer, state?: ReattachState): void {
     if (this._didShutdown) return
-    if (broadcast) {
-      this._applyPeerSubscription(false, broadcast.text)
-      this._applyPeerSubscription(true, broadcast.binary)
+    if (state?.broadcast) {
+      this._applyPeerSubscription(false, state.broadcast.text)
+      this._applyPeerSubscription(true, state.broadcast.binary)
     }
     this._clearTimer('_ttlTimer')
     this._clearTimer('_reconnectTimer')
