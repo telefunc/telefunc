@@ -1,7 +1,12 @@
-import { randomUUID } from 'node:crypto'
-import { Cluster, type Redis } from 'ioredis'
 import { assert } from '../assert.js'
-import { callDefinedCommand } from '../callDefinedCommand.js'
+import {
+  assertAtMostOnceClient,
+  callDefinedCommand,
+  createSubscriberSocket,
+  defineCommand,
+  isCluster,
+  type RedisClient,
+} from '../ioredis.js'
 import type {
   BroadcastDriver,
   BroadcastLane,
@@ -49,7 +54,7 @@ function assertOrderingPosition(seq: number, timestamp: number, context: string)
   }
 }
 export type RedisBackendOptions = {
-  redis: Redis | Cluster
+  redis: RedisClient
   prefix?: string
 }
 const PUBLISH_CMD = 'tfPublish'
@@ -119,58 +124,22 @@ function encodeNext(next: HeadNext): string {
 export class RedisBackend implements BroadcastDriver, RoomDriver {
   readonly subscriptions: RedisSubscriptionDriver
 
-  private readonly _publisher: Redis | Cluster
+  private readonly _publisher: RedisClient
   private readonly _prefix: string
   private readonly _receivers: 'global' | 'none'
   private _disposed = false
 
   constructor(options: RedisBackendOptions) {
-    if (options.redis instanceof Cluster && options.redis.options.scaleReads !== 'master') {
-      throw new Error("RedisBackend: ioredis Cluster scaleReads must be 'master' for consistent Room reads")
-    }
-    const retries =
-      options.redis instanceof Cluster
-        ? options.redis.options.retryDelayOnFailover !== 0 ||
-          options.redis.options.redisOptions?.maxRetriesPerRequest !== 0 ||
-          options.redis.options.redisOptions?.reconnectOnError != null
-        : options.redis.options.maxRetriesPerRequest !== 0 || options.redis.options.reconnectOnError != null
-    if (retries)
-      throw new Error(
-        'RedisBackend: at-most-once requires maxRetriesPerRequest: 0 (standalone Redis), or retryDelayOnFailover: 0 and redisOptions.maxRetriesPerRequest: 0 (Cluster); reconnectOnError must be unset',
-      )
-    const keyPrefix =
-      options.redis instanceof Cluster ? options.redis.options.redisOptions?.keyPrefix : options.redis.options.keyPrefix
-    if (keyPrefix)
-      throw new Error(
-        "RedisBackend: ioredis keyPrefix isn't supported — it doesn't apply to Pub/Sub channels. Use installRedis(redis, { prefix }) instead",
-      )
+    assertAtMostOnceClient(options.redis)
     this._publisher = options.redis
-    const createSubscriber = async (): Promise<Redis> => {
-      let source: Redis
-      if (options.redis instanceof Cluster) {
-        // The backend's one subscriber socket sits on a live master; after a drop the driver opens a fresh one.
-        const master = options.redis.nodes('master').find((candidate) => candidate.status !== 'end')
-        if (master === undefined) throw new Error('RedisBackend: Cluster has no available masters')
-        source = master
-      } else source = options.redis
-      return source.duplicate({
-        connectionName: `telefunc-subscriber-${randomUUID()}`,
-        autoResubscribe: false,
-        lazyConnect: true,
-        maxRetriesPerRequest: 1,
-        retryStrategy: () => null,
-      })
-    }
     this._prefix = redisKeyPrefix(options.prefix ?? DEFAULT_ROOM_PREFIX)
-    this._receivers = options.redis instanceof Cluster ? 'none' : 'global'
-    this._publisher.defineCommand(PUBLISH_CMD, { numberOfKeys: 2, lua: PUBLISH_LUA })
-    for (const command of Object.values(REDIS_ROOM_COMMANDS)) {
-      if (command.numberOfKeys === null) this._publisher.defineCommand(command.name, { lua: command.lua })
-      else this._publisher.defineCommand(command.name, { numberOfKeys: command.numberOfKeys, lua: command.lua })
-    }
+    this._receivers = isCluster(options.redis) ? 'none' : 'global'
+    defineCommand(this._publisher, PUBLISH_CMD, PUBLISH_LUA, 2)
+    for (const command of Object.values(REDIS_ROOM_COMMANDS))
+      defineCommand(this._publisher, command.name, command.lua, command.numberOfKeys)
     this.subscriptions = new RedisSubscriptionDriver({
       prefix: this._prefix,
-      createSubscriber,
+      createSubscriber: () => createSubscriberSocket(options.redis),
       validateGeneration: (source) => this._validateGeneration(source),
     })
   }

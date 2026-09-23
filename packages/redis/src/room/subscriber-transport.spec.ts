@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events'
-import type { Redis } from 'ioredis'
+import type { SubscriberSocket } from '../ioredis.js'
 import { expect, onTestFinished, test, vi } from 'vitest'
 import type { SubscriptionAttemptState } from 'telefunc/__internal'
 import { RedisSubscriptionDriver } from './subscriber-transport.js'
@@ -36,7 +36,7 @@ function driverWith(
   const createSubscriber = vi.fn(async () => {
     const next = fakeSubscriber()
     sockets.push(next)
-    return next.socket as unknown as Redis
+    return next.socket as unknown as SubscriberSocket
   })
   return {
     driver: new RedisSubscriptionDriver({ prefix: 'tf:', createSubscriber, validateGeneration }),

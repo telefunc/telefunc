@@ -1,5 +1,4 @@
 import { randomUUID } from 'node:crypto'
-import type { Redis } from 'ioredis'
 import type {
   BackendReceiver,
   BroadcastLane,
@@ -17,11 +16,12 @@ import {
   laneKey,
   REDIS_DELIVERY_FENCE_BYTE,
 } from './layout.js'
+import type { SubscriberSocket } from '../ioredis.js'
 type RedisSubscriptionSource = BroadcastLane | RoomSubscriptionSource
 type RedisSubscriptionDriverOptions = {
   prefix: string
   /** A fresh, unconnected subscriber socket that never retries on its own. */
-  createSubscriber: () => Promise<Redis>
+  createSubscriber: () => Promise<SubscriberSocket>
   /** Whether the source's incarnation is still the open head. */
   validateGeneration: (source: RoomSubscriptionSource) => Promise<boolean>
 }
@@ -36,10 +36,10 @@ const RECONNECT_DELAY_MAX_MS = 2_000
  */
 export class RedisSubscriptionDriver implements SubscriptionDriver<RedisSubscriptionSource> {
   private readonly _prefix: string
-  private readonly _createSubscriber: () => Promise<Redis>
+  private readonly _createSubscriber: () => Promise<SubscriberSocket>
   private readonly _validateGeneration: RedisSubscriptionDriverOptions['validateGeneration']
   private readonly _attempts = new Map<string, Set<RedisSubscriptionAttempt>>()
-  private _subscriber: Redis | null = null
+  private _subscriber: SubscriberSocket | null = null
   /** Bumped per connection, so work that awaited across a drop sees it is stale. */
   private _connection = 0
   private _connecting = false
@@ -121,7 +121,7 @@ export class RedisSubscriptionDriver implements SubscriptionDriver<RedisSubscrip
     this._reconnectTimer = null
     this._connecting = true
     const connection = ++this._connection
-    let subscriber: Redis
+    let subscriber: SubscriberSocket
     try {
       subscriber = await this._createSubscriber()
     } catch (error) {

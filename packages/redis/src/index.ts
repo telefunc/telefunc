@@ -1,11 +1,11 @@
 export { installRedis }
 export type { InstallRedisOptions }
 
-import type { Cluster, Redis } from 'ioredis'
+import type { RedisClient } from './ioredis.js'
 import { getGlobalObject, installBackend, type BackendDriverPair } from 'telefunc/__internal'
 import { RedisBackend, type RedisBackendOptions } from './room/backend.js'
 
-function installRedis(redis: Redis | Cluster, options: InstallRedisOptions = {}): void {
+function installRedis(redis: RedisClient, options: InstallRedisOptions = {}): void {
   installBackend(
     () => createRedisBackendPair({ redis, prefix: options.prefix }),
     internRedisBackendIdentity(redis, options.prefix),
@@ -26,7 +26,7 @@ function getRedisBackendDefaultIdentities(): RedisBackendDefaultIdentities {
   return getGlobalObject('redis/index.ts', { backendDefaultIdentities: new WeakMap() }).backendDefaultIdentities
 }
 
-function internRedisBackendIdentity(redis: Redis | Cluster, prefix: string | undefined): object {
+function internRedisBackendIdentity(redis: RedisClient, prefix: string | undefined): object {
   const redisBackendDefaultIdentities = getRedisBackendDefaultIdentities()
   let byPrefix = redisBackendDefaultIdentities.get(redis)
   if (byPrefix === undefined) {
