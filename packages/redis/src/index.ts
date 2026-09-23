@@ -2,11 +2,11 @@ export { installRedis }
 export type { InstallRedisOptions }
 
 import type { Cluster, Redis } from 'ioredis'
-import { getGlobalObject, setDefaultBackend, type BackendDriverPair } from 'telefunc/__internal'
+import { getGlobalObject, installBackend, type BackendDriverPair } from 'telefunc/__internal'
 import { RedisBackend, type RedisBackendOptions } from './room/backend.js'
 
 function installRedis(redis: Redis | Cluster, options: InstallRedisOptions = {}): void {
-  setDefaultBackend(
+  installBackend(
     () => createRedisBackendPair({ redis, prefix: options.prefix }),
     internRedisBackendIdentity(redis, options.prefix),
   )

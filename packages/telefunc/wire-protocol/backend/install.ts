@@ -6,7 +6,7 @@ import type { BackendDriverPair } from './driver-pair.js'
 import { createMemoryBackendPair } from './memory/backend.js'
 import type { RoomBackend, RoomDriver } from './room/contract.js'
 import { superviseRoomDriver } from './room/supervise.js'
-import { assertUsage } from '../../utils/assert.js'
+import { assert, assertUsage } from '../../utils/assert.js'
 
 export type BackendFactory = () => BackendDriverPair
 
@@ -21,39 +21,25 @@ type BroadcastOverride = { transport: BroadcastTransport; backend?: BroadcastBac
 
 type BackendState =
   | { phase: 'empty' }
-  | { phase: 'installing' }
-  | {
-      phase: 'ready'
-      pair: BackendDriverPair
-      backend: ManagedBackendPair
-      selection: 'memory' | 'default' | 'explicit'
-      defaultIdentity?: unknown
-    }
+  | { phase: 'ready'; backend: ManagedBackendPair; identity: unknown }
   | { phase: 'disposing'; promise: Promise<void> }
 
-type BackendStore = { current: BackendState; broadcastOverride?: BroadcastOverride }
+type BackendStore = { current: BackendState; installing: boolean; broadcastOverride?: BroadcastOverride }
 
-const state = getGlobalObject<BackendStore>('wire-protocol/backend/install.ts', () => ({ current: { phase: 'empty' } }))
+const state = getGlobalObject<BackendStore>('wire-protocol/backend/install.ts', () => ({
+  current: { phase: 'empty' },
+  installing: false,
+}))
 
-const INSTALLING_ERROR = 'telefunc/backend: the backend is still installing; retry after installation settles'
 const DISPOSING_ERROR = 'telefunc/backend: the backend is still disposing and cannot be acquired or installed yet'
 const REPLACEMENT_ERROR = 'telefunc/backend: a backend is already active; dispose it before installing another'
 
-/** Lazily installs one backend per isolate; repeated entry evaluation reuses the canonical instance. */
-export function installBackend(factory: BackendFactory): void {
-  if (state.current.phase === 'ready' && state.current.selection === 'explicit') return
-  selectBackend(factory, 'explicit')
-}
-
-/** Installs an environment default above memory but below explicit selection. `identity` deduplicates
- * repeated wrapper evaluation without constructing a candidate. */
-export function setDefaultBackend(factory: BackendFactory, identity: unknown = factory): void {
+/** Installs the process's one backend; re-evaluating the same entry (same `identity`) is a no-op. */
+export function installBackend(factory: BackendFactory, identity: unknown = factory): void {
   const current = state.current
-  if (current.phase === 'ready' && current.selection === 'explicit') return
-  if (current.phase === 'ready' && current.selection === 'default' && Object.is(current.defaultIdentity, identity))
-    return
+  if (current.phase === 'ready' && Object.is(current.identity, identity)) return
   if (current.phase === 'ready') throw new Error(REPLACEMENT_ERROR)
-  selectBackend(factory, 'default', identity)
+  selectBackend(factory, identity)
 }
 
 /** Installs the public broadcast-only override without displacing the full backend's Room plane. */
@@ -65,51 +51,23 @@ export function configureBroadcastTransport(transport: BroadcastTransport): void
   if (state.current.phase === 'ready') void state.current.backend.suspendBroadcast()
 }
 
-function selectBackend(
-  factory: BackendFactory,
-  selection: 'memory' | 'default' | 'explicit',
-  defaultIdentity?: unknown,
-): ManagedBackendPair {
-  const current = state.current
-  if (current.phase === 'installing') throw new Error(INSTALLING_ERROR)
-  if (current.phase === 'disposing') throw new Error(DISPOSING_ERROR)
-  if (typeof factory !== 'function') throw new Error('telefunc/backend: installBackend() requires a backend factory')
-
-  state.current = { phase: 'installing' }
+function selectBackend(factory: BackendFactory, identity: unknown): ManagedBackendPair {
+  if (state.current.phase === 'disposing') throw new Error(DISPOSING_ERROR)
+  assert(!state.installing) // a backend factory never reaches back into the backend
+  state.installing = true
   let pair: BackendDriverPair
   try {
     pair = factory()
-    assertBackendDriverPair(pair)
-  } catch (error) {
-    state.current = current.phase === 'ready' ? current : { phase: 'empty' }
-    throw error
+  } finally {
+    state.installing = false
   }
-
-  if (current.phase === 'ready' && Object.is(pair, current.pair)) {
-    state.current = { ...current, selection, ...(selection === 'default' ? { defaultIdentity } : {}) }
-    return current.backend
-  }
-
-  if (current.phase === 'ready') {
-    state.current = current
-    void Promise.resolve(pair.dispose()).catch((error) =>
-      console.error('telefunc/backend: rejected backend disposal failed', error),
-    )
-    throw new Error(REPLACEMENT_ERROR)
-  }
+  assertBackendDriverPair(pair)
   const backend = superviseBackendPair(pair)
-  state.current = {
-    phase: 'ready',
-    pair,
-    backend,
-    selection,
-    ...(selection === 'default' ? { defaultIdentity } : {}),
-  }
+  state.current = { phase: 'ready', backend, identity }
   return backend
 }
 
 export function getBroadcastBackend(): BroadcastBackend {
-  if (state.current.phase === 'installing') throw new Error(INSTALLING_ERROR)
   if (state.current.phase === 'disposing') throw new Error(DISPOSING_ERROR)
   const override = state.broadcastOverride
   if (override)
@@ -120,7 +78,8 @@ export function getBroadcastBackend(): BroadcastBackend {
 export function getRoomBackend(): RoomBackend {
   if (
     state.broadcastOverride &&
-    (state.current.phase === 'empty' || (state.current.phase === 'ready' && state.current.selection === 'memory'))
+    (state.current.phase === 'empty' ||
+      (state.current.phase === 'ready' && state.current.identity === createMemoryBackendPair))
   ) {
     assertUsage(
       false,
@@ -133,7 +92,7 @@ export function getRoomBackend(): RoomBackend {
 function getBackendPair(): ManagedBackendPair {
   const current = state.current
   if (current.phase === 'ready') return current.backend
-  return selectBackend(createMemoryBackendPair, 'memory')
+  return selectBackend(createMemoryBackendPair, createMemoryBackendPair)
 }
 
 /** Disposes the canonical backend behind one shared promise, blocking acquisition until settlement. */
@@ -141,7 +100,6 @@ export function disposeBackend(): Promise<void> {
   const current = state.current
   const override = state.broadcastOverride
   if (current.phase === 'empty' && !override?.backend) return Promise.resolve()
-  if (current.phase === 'installing') return Promise.reject(new Error(INSTALLING_ERROR))
   if (current.phase === 'disposing') return current.promise
 
   const overrideDisposal = override?.backend?.dispose() ?? Promise.resolve()
@@ -156,14 +114,14 @@ export function disposeBackend(): Promise<void> {
 }
 
 function superviseBackendPair(pair: BackendDriverPair): ManagedBackendPair {
-  const drivers = resolveBackendDrivers(pair)
-  let broadcast = state.broadcastOverride ? null : superviseBroadcastDriver(drivers.broadcast)
+  const { driver } = pair
+  let broadcast = state.broadcastOverride ? null : superviseBroadcastDriver(driver)
   let broadcastRetirement: Promise<void> | undefined
-  const room = superviseRoomDriver(drivers.room)
+  const room = superviseRoomDriver(driver)
   let disposal: Promise<void> | undefined
   return {
     room,
-    getBroadcast: () => (broadcast ??= superviseBroadcastDriver(drivers.broadcast)),
+    getBroadcast: () => (broadcast ??= superviseBroadcastDriver(driver)),
     suspendBroadcast: () => {
       const active = broadcast
       broadcast = null
@@ -176,10 +134,6 @@ function superviseBackendPair(pair: BackendDriverPair): ManagedBackendPair {
         return pair.dispose()
       })),
   }
-}
-
-function resolveBackendDrivers(pair: BackendDriverPair): { broadcast: BroadcastDriver; room: RoomDriver } {
-  return pair.driver ? { broadcast: pair.driver, room: pair.driver } : { broadcast: pair.broadcast, room: pair.room }
 }
 
 function clearDisposalPhase(disposal: Extract<BackendState, { phase: 'disposing' }>): void {
@@ -204,19 +158,17 @@ const ROOM_METHODS = [
 function assertBackendDriverPair(pair: BackendDriverPair): void {
   if (pair === null || typeof pair !== 'object')
     throw new Error('telefunc/backend: invalid backend pair; expected an object')
-  const drivers = resolveBackendDrivers(pair)
-  assertDriver(drivers.broadcast, 'broadcast', ['publish'])
-  assertDriver(drivers.room, 'room', ROOM_METHODS)
+  assertDriver(pair.driver, ['publish', ...ROOM_METHODS])
   assertMethod(pair, 'dispose')
 }
 
-function assertDriver(driver: BroadcastDriver | RoomDriver, plane: string, methods: readonly string[]): void {
+function assertDriver(driver: BroadcastDriver & RoomDriver, methods: readonly string[]): void {
   if (driver === null || typeof driver !== 'object') {
-    throw new Error(`telefunc/backend: invalid ${plane} driver; expected an object`)
+    throw new Error('telefunc/backend: invalid backend driver; expected an object')
   }
   for (const method of methods) assertMethod(driver, method)
   if (driver.subscriptions === null || typeof driver.subscriptions !== 'object') {
-    throw new Error(`telefunc/backend: invalid ${plane} subscriptions; expected an object`)
+    throw new Error('telefunc/backend: invalid backend subscriptions; expected an object')
   }
   assertMethod(driver.subscriptions, 'bind')
 }

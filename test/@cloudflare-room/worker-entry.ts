@@ -2,7 +2,7 @@
 import { DurableObject } from 'cloudflare:workers'
 import '../../packages/telefunc/node/server/async_hooks.js'
 import { type BackendDriverPair } from '../../packages/telefunc/wire-protocol/backend/driver-pair.js'
-import { setDefaultBackend } from '../../packages/telefunc/wire-protocol/backend/install.js'
+import { installBackend } from '../../packages/telefunc/wire-protocol/backend/install.js'
 import type { RoomHead } from '../../packages/telefunc/wire-protocol/backend/room/contract.js'
 import { Room } from '../../packages/telefunc/wire-protocol/room/server.js'
 import {
@@ -29,7 +29,7 @@ const publicRoomPair: BackendDriverPair = {
   driver: publicRoomBackend,
   dispose: () => publicRoomBackend.dispose(),
 }
-setDefaultBackend(() => publicRoomPair, 'cloudflare-room-ci-public')
+installBackend(() => publicRoomPair, 'cloudflare-room-ci-public')
 const PublicRoomDurableObjectBase = createTelefuncRoomDurableObjectClass('PUBLIC_SESSION')
 const textEncoder = new TextEncoder()
 const CONTROL_HORIZON_MS = 2_000

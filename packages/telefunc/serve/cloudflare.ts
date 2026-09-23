@@ -9,7 +9,7 @@ import { getTelefuncChannelHooks } from '../wire-protocol/server/ws.js'
 import { getServerConfig, enableChannelTransports } from '../node/server/serverConfig.js'
 import { serve as serveTelefunc } from '../node/server/telefunc.js'
 import type { BackendDriverPair } from '../wire-protocol/backend/driver-pair.js'
-import { setDefaultBackend } from '../wire-protocol/backend/install.js'
+import { installBackend } from '../wire-protocol/backend/install.js'
 import {
   CloudflareBroadcastAuthorityState,
   CloudflareBroadcastTransport,
@@ -120,7 +120,7 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
     driver: cloudflareBackend,
     dispose: () => cloudflareBackend.dispose(),
   }
-  setDefaultBackend(() => backendPair, backendIdentity)
+  installBackend(() => backendPair, backendIdentity)
   const broadcast = cloudflareBackend.broadcast
 
   function getBinding(env: Cloudflare.Env): DurableObjectNamespace | undefined {

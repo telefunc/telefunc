@@ -319,15 +319,7 @@ describe('cloudflare adapter entrypoint', () => {
     )
   })
 
-  it('keeps an explicit Room backend installation as the Cloudflare policy override', () => {
-    const explicit = new MemoryBackend()
-    installBackend(() => memoryPair(explicit))
-    const selected = getRoomBackend()
-    new Telefunc()
-    expect(getRoomBackend()).toBe(selected)
-  })
-
-  it('rejects an explicit backend installed after the Cloudflare default is acquired', () => {
+  it('rejects another backend once the Cloudflare one is installed', () => {
     new Telefunc()
     const selected = getRoomBackend()
     expect(() => installBackend(() => memoryPair(new MemoryBackend()))).toThrow('a backend is already active')

@@ -39,13 +39,7 @@ import { roomParticipantReplacer, roomRemoteReplacer, roomReplacer } from './res
 import type { ServerReplacerContext } from '../types.js'
 import type { ServerChannel } from '../server/channel.js'
 import type { ChannelPublishInfo } from '../channel.js'
-import {
-  disposeBackend,
-  getBroadcastBackend,
-  getRoomBackend,
-  installBackend,
-  setDefaultBackend,
-} from '../backend/install.js'
+import { disposeBackend, getBroadcastBackend, getRoomBackend, installBackend } from '../backend/install.js'
 import type { BackendDriverPair } from '../backend/driver-pair.js'
 import { MemoryBackend, MemoryBackendState } from '../backend/memory/backend.js'
 import { SubscriptionManager } from '../backend/subscription-manager.js'
@@ -314,13 +308,12 @@ describe('Room public behavior', () => {
   it('tears down a close observed by a separate Room runtime that cannot inherit the initiator hold', async () => {
     const authority = await Room.create('remote-close-teardown')
     authority.onAnnounce(() => {})
-    // A fresh module graph has its own initiating-close registry and backend installation, like another
-    // server process. It shares only the raw authority driver, so this observer receives the real close
-    // emitted by Room.close() without being able to see the initiator's in-memory hold.
+    // A fresh module graph has its own initiating-close registry, like another server process; the backend
+    // installation is process-global, so this observer receives the real close emitted by Room.close()
+    // without being able to see the initiator's in-memory hold.
     vi.resetModules()
     const remoteInstall = await import('../backend/install.js')
     const remoteServer = await import('./server.js')
-    remoteInstall.installBackend(() => memoryPair(driver))
     const remoteBackend = remoteInstall.getRoomBackend()
     const unsubscribed: string[] = []
     const observedLanes = new Set<string>()
@@ -416,7 +409,6 @@ describe('Room public behavior', () => {
     vi.resetModules()
     const remoteInstall = await import('../backend/install.js')
     const remoteServer = await import('./server.js')
-    remoteInstall.installBackend(() => memoryPair(driver))
     const remoteBackend = remoteInstall.getRoomBackend()
     const subscribeLane = remoteBackend.subscribeLane.bind(remoteBackend)
     let terminal: ReturnType<typeof terminalSubscription> | undefined
@@ -2441,7 +2433,7 @@ describe('memory Backend SPI contract', () => {
     await disposeBackend()
     let now = 1
     driver = new MemoryBackend({ state: memoryState, authorityNow: () => now })
-    setDefaultBackend(() => memoryPair(driver))
+    installBackend(() => memoryPair(driver))
     const backend = getRoomBackend()
     const created = await backend.compareExchangeHead(
       'order-survivor',

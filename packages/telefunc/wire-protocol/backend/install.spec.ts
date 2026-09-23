@@ -6,7 +6,6 @@ import {
   getBroadcastBackend,
   getRoomBackend,
   installBackend,
-  setDefaultBackend,
 } from './install.js'
 import type { BroadcastTransport } from './broadcast/transport.js'
 import { MemoryBackend } from './memory/backend.js'
@@ -16,17 +15,16 @@ afterEach(async () => {
   vi.restoreAllMocks()
 })
 describe('backend installation lifecycle', () => {
-  it('promotes a reused default pair to explicit selection', () => {
-    const selected = memoryPair(new MemoryBackend())
-    setDefaultBackend(() => selected)
-    const explicit = getRoomBackend()
-    installBackend(() => selected)
-    setDefaultBackend(() => {
-      throw new Error('default constructed after explicit selection')
-    })
-    expect(getRoomBackend()).toBe(explicit)
+  it('reuses the installed backend when the same entry installs it again', () => {
+    const factory = () => memoryPair(new MemoryBackend())
+    installBackend(factory, 'entry')
+    const installed = getRoomBackend()
+    installBackend(() => {
+      throw new Error('a repeated entry must not construct another backend')
+    }, 'entry')
+    expect(getRoomBackend()).toBe(installed)
   })
-  it('accepts equal halves while supervising their subscriptions independently', async () => {
+  it("supervises one driver's Broadcast and Room subscriptions independently", async () => {
     const driver = new MemoryBackend()
     const bind = vi.spyOn(driver.subscriptions, 'bind')
     installBackend(() => memoryPair(driver))
@@ -39,15 +37,14 @@ describe('backend installation lifecycle', () => {
       { roomId: 'missing', inc: 'inc', lane: { kind: 'semantic' } },
     ])
   })
-  it('rejects an incomplete half and restores the selected pair after construction failure', () => {
-    const selected = memoryPair(new MemoryBackend())
-    setDefaultBackend(() => selected)
-    const current = getRoomBackend()
+  it('rejects an incomplete driver and stays uninstalled', () => {
     const incomplete = Object.assign(new MemoryBackend(), { readHead: undefined })
     expect(() =>
       installBackend(() => ({ ...memoryPair(new MemoryBackend()), driver: incomplete }) as BackendDriverPair),
     ).toThrow('missing required method "readHead"')
-    expect(getRoomBackend()).toBe(current)
+    const factory = () => memoryPair(new MemoryBackend())
+    installBackend(factory)
+    expect(getRoomBackend()).toBeDefined()
   })
   it('disposes both managers before invoking the pair disposer exactly once', async () => {
     const gate = Promise.withResolvers<void>()
@@ -62,15 +59,11 @@ describe('backend installation lifecycle', () => {
     await first
     expect(dispose).toHaveBeenCalledOnce()
   })
-  it('rejects a different backend after acquisition and disposes the rejected candidate', async () => {
-    const active = memoryPair(new MemoryBackend())
-    const rejectedDispose = vi.fn(async () => {})
-    setDefaultBackend(() => active)
-    expect(() => installBackend(() => memoryPair(new MemoryBackend(), rejectedDispose))).toThrow(
-      'a backend is already active',
-    )
-    await vi.waitFor(() => expect(rejectedDispose).toHaveBeenCalledOnce())
-    expect(getRoomBackend()).toBeDefined()
+  it('rejects a second backend without constructing it', () => {
+    installBackend(() => memoryPair(new MemoryBackend()))
+    const factory = vi.fn(() => memoryPair(new MemoryBackend()))
+    expect(() => installBackend(factory)).toThrow('a backend is already active')
+    expect(factory).not.toHaveBeenCalled()
   })
   it('composes a broadcast override with a full backend in either configuration order', async () => {
     const transport = localTransport()
