@@ -127,8 +127,7 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
   }
 
   override _onPeerPublishBinaryAckReqMessage(framed: Uint8Array, seq: number): Promise<void> {
-    const { from } = decodeStubBinaryFrame(framed)
-    return this._ackRoomResult(seq, this._publishBinary(from, framed))
+    return this._ackRoomResult(seq, this._publishBinary(decodeStubBinaryFrame(framed), framed))
   }
 
   // Control always flows; text follows broadcast/member wants, while binary uses `sub-binary`.
@@ -182,8 +181,9 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
     return await this._room._publishText(publish.from, publish.data, publish.retain)
   }
 
-  private async _publishBinary(from: string, framed: Uint8Array): Promise<ChannelPublishAck> {
-    return await this._room._publishBinaryFramed(this._requireMember(from), framed)
+  private async _publishBinary(frame: BinaryFrame, framed: Uint8Array): Promise<ChannelPublishAck> {
+    this._requireMember(frame.from)
+    return await this._room._publishBinaryFrame(frame, framed)
   }
 
   // Membership
@@ -351,8 +351,8 @@ class RoomParticipantStubChannel extends RoomRequestChannel {
   }
 
   override _onPeerBinaryAckReqMessage(framed: Uint8Array, seq: number): Promise<void> {
-    decodeParticipantFrame(framed, this._participant.id)
-    return this._ackRoomResult(seq, this._publishBinary(framed))
+    const frame = decodeParticipantFrame(framed, this._participant.id)
+    return this._ackRoomResult(seq, this._participant._publishFrame(frame, framed))
   }
 
   private async _handleRequest(req: ParticipantStubRequest): Promise<unknown> {
@@ -370,10 +370,6 @@ class RoomParticipantStubChannel extends RoomRequestChannel {
       case 'req-leave':
         return await participant.leave()
     }
-  }
-
-  private async _publishBinary(framed: Uint8Array): Promise<unknown> {
-    return await this._participant._publishFramed(framed)
   }
 
   private _mirrorParticipant(): void {

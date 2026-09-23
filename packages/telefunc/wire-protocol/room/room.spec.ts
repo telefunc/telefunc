@@ -1214,17 +1214,6 @@ describe('Room public behavior', () => {
     const observer = await Room.get('standalone-expire')
     expect((await observer.getParticipants()).map((member) => member.id)).not.toContain(holder.id)
   })
-  it('refuses a binary frame whose sender is not the publishing member', async () => {
-    const room = await Room.create('binary-sender-mismatch')
-    const publisher = (await room.join()) as ServerLocalParticipant
-    const other = await room.join()
-    const frames: Uint8Array[] = []
-    room.subscribeBinary((data) => frames.push(data))
-    await expect(publisher._publishFramed(encodeBinaryFrame(other.id, new Uint8Array([1])))).rejects.toThrow(
-      'Malformed binary frame',
-    )
-    expect(frames).toEqual([])
-  })
   it("rejects a client-held participant's binary publish with the guard's Abort, not the whole response", async () => {
     const room = await Room.create('standalone-binary-abort')
     Room.guard(room, {

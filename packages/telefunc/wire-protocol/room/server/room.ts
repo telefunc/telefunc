@@ -19,6 +19,7 @@ import {
   mergeTrackWants,
   binaryWantsCovers,
   wantsAnyBinary,
+  type BinaryFrame,
   type BinaryWants,
   type TrackWants,
 } from '../binary.js'
@@ -317,10 +318,9 @@ class ServerRoom extends RoomStateView implements Room {
     return this._finishPublish(sender, data, commit)
   }
 
-  async _publishBinaryFramed(from: string, framed: Uint8Array): Promise<ChannelPublishAck> {
-    const frame = decodeBinaryFrame(framed)
-    // Receivers trust the frame's own sender id, so it must be the publisher's.
-    if (frame?.from !== from) throw new RoomError('Malformed binary frame')
+  /** `frame` is `framed` decoded; receivers trust its sender id, which every caller checked is the publisher's. */
+  async _publishBinaryFrame(frame: BinaryFrame, framed: Uint8Array): Promise<ChannelPublishAck> {
+    const { from } = frame
     const sender = await this._admitPublish(from, frame.payload)
     if (frame.track !== null) await this._ensureTrackAnnounced(from, frame.track)
     const commit = await commitRoomLaneOrThrow(
@@ -834,12 +834,15 @@ class ServerLocalParticipant extends ParticipantBase {
     return await this._room._publishText(this.id, data, options?.retain)
   }
   async publishBinary(data: Uint8Array, options?: BinaryPublishOptions): Promise<ChannelPublishAck> {
-    this._assertActive()
-    return await this._room._publishBinaryFramed(this.id, encodeBinaryFrame(this.id, data, options))
+    const framed = encodeBinaryFrame(this.id, data, options)
+    const frame = decodeBinaryFrame(framed)
+    assert(frame !== null)
+    return await this._publishFrame(frame, framed)
   }
-  _publishFramed(framed: Uint8Array): Promise<ChannelPublishAck> {
+  /** @internal */
+  _publishFrame(frame: BinaryFrame, framed: Uint8Array): Promise<ChannelPublishAck> {
     this._assertActive()
-    return this._room._publishBinaryFramed(this.id, framed)
+    return this._room._publishBinaryFrame(frame, framed)
   }
   async send(to: string | Sender, data: unknown, options?: { ack?: boolean }): Promise<any> {
     this._assertActive()
