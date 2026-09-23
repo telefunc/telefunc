@@ -1,10 +1,9 @@
 export { ParticipantBase }
 export type { InboxMessage }
 
-import type { ChannelPublishAck } from '../channel.js'
+import { invokeChannelListener, type ChannelPublishAck } from '../channel.js'
 import { makeDisposer } from '../wrapProxy.js'
 import type { TELEFUNC_SHIELDS } from '../../node/shared/transformer/generateShield/shield-key.js'
-import { isPromise } from '../../utils/isPromise.js'
 import { assert } from '../../utils/assert.js'
 import { DM_PARTICIPANT_LEFT, RoomError, toRoomFailure } from './errors.js'
 import { ownLeaveCause, ownMetadata, senderOf } from './model.js'
@@ -39,7 +38,6 @@ abstract class ParticipantBase implements LocalParticipant {
   readonly identity: string | null
   readonly selfDelivery: boolean
   /** @internal */ _meta: ParticipantMeta
-  protected _left = false
   private _leftCause: LeaveCause | null = null
   private _leaveCbs: Array<(cause: LeaveCause) => unknown> = []
   private readonly _messageCbs: Array<(data: unknown, from: Sender | null) => unknown> = []
@@ -56,16 +54,12 @@ abstract class ParticipantBase implements LocalParticipant {
   /** @internal — route this participant's inbox to a remote holder instead of local listeners. */
   _setForwarder(forwarder: (msg: InboxMessage) => Promise<DmReply> | void): void {
     this._forwarder = forwarder
-    this._inboxAttached = true
-    const held = this._pendingInbox
-    this._pendingInbox = null
-    if (!held) return
-    for (const { msg, ackResolve } of held) {
+    this._flushHeld((msg, ackResolve) => {
       const reply = forwarder(msg)
-      if (!ackResolve) continue
+      if (!ackResolve) return
       assert(reply) // an ack DM's forwarder answers
       void reply.then(ackResolve)
-    }
+    })
   }
   /** @internal — already bound to a client holder (serialized once, via `RoomParticipantStubChannel`)? */
   get _isBound(): boolean {
@@ -80,6 +74,9 @@ abstract class ParticipantBase implements LocalParticipant {
   get meta(): ParticipantMeta {
     return this._meta
   }
+  protected get _left(): boolean {
+    return this._leftCause !== null
+  }
   abstract publish(data: unknown, options?: PublishOptions): Promise<ChannelPublishAck>
   abstract publishBinary(data: Uint8Array, options?: BinaryPublishOptions): Promise<ChannelPublishAck>
   // Implementation signature for the overloaded `LocalParticipant.send` (receipt, or the recipient's reply with `{ ack: true }`); callers see the precise overloads through the interface. `any` is the
@@ -92,15 +89,10 @@ abstract class ParticipantBase implements LocalParticipant {
   protected abstract _reportError(err: unknown): void
   listen(callback: (data: unknown, from: Sender | null) => unknown): () => void {
     const unlisten = this._register(this._messageCbs, callback)
-    this._inboxAttached = true
-    if (this._pendingInbox) {
-      const held = this._pendingInbox
-      this._pendingInbox = null
-      for (const entry of held) {
-        if (entry.ackResolve) void this._fireInboxAck(entry.msg).then(entry.ackResolve)
-        else this._fireInbox(entry.msg)
-      }
-    }
+    this._flushHeld((msg, ackResolve) => {
+      if (ackResolve) void this._fireInboxAck(msg).then(ackResolve)
+      else this._fireInbox(msg)
+    })
     return unlisten
   }
   /** @internal — a direct message arrived on this member's inbox. Forwarded to a remote holder if
@@ -134,6 +126,13 @@ abstract class ParticipantBase implements LocalParticipant {
     }
     return this._fireInboxAck(msg)
   }
+  /** The inbox attached: DMs held until now go out in order, and nothing is held again. */
+  private _flushHeld(deliver: (msg: InboxMessage, ackResolve?: (reply: DmReply) => void) => void): void {
+    this._inboxAttached = true
+    const held = this._pendingInbox
+    this._pendingInbox = null
+    for (const { msg, ackResolve } of held ?? []) deliver(msg, ackResolve)
+  }
   private _hold(msg: InboxMessage, ackResolve?: (reply: DmReply) => void): void {
     const pending = (this._pendingInbox ??= [])
     pending.push({ msg, ackResolve })
@@ -148,9 +147,7 @@ abstract class ParticipantBase implements LocalParticipant {
   }
   private _fireInbox(msg: InboxMessage): void {
     const sender = this._senderOf(msg)
-    for (const cb of [...this._messageCbs]) {
-      this._invoke(cb, msg.data, sender)
-    }
+    for (const cb of [...this._messageCbs]) this._invoke(cb, msg.data, sender)
   }
   /** Run every listener (channel semantics: the last non-throwing return is the reply); a throw short-circuits to a failure reply. The handler is user code, so it obeys telefunc's contract: `throw
    * Abort(value)` sends the value to the sender, any other throw is a hidden bug (reported on this — the recipient's — side).
@@ -191,7 +188,6 @@ abstract class ParticipantBase implements LocalParticipant {
   }
   /** @internal — the member is gone; `cause` says how. A local participant always knows its cause: its holder either initiated the leave or witnessed the event/closure that caused it. */
   _onLeft(cause: LeaveCause): void {
-    this._left = true
     if (this._leftCause) return
     const ownedCause = (this._leftCause = ownLeaveCause(cause))
     // Held ack DMs will never be handled now — fail their senders instead of hanging them.
@@ -209,17 +205,11 @@ abstract class ParticipantBase implements LocalParticipant {
   private _register<T>(list: T[], cb: T): () => void {
     list.push(cb)
     return makeDisposer(() => {
-      void this // the active listener owns its participant; `makeDisposer` severs this edge
       const i = list.indexOf(cb)
       if (i >= 0) list.splice(i, 1)
     }, this._listenerCleanups)
   }
   private _invoke<Args extends unknown[]>(cb: (...args: Args) => unknown, ...args: Args): void {
-    try {
-      const result = cb(...args)
-      if (isPromise(result)) void Promise.resolve(result).catch((err) => this._reportError(err))
-    } catch (err) {
-      this._reportError(err)
-    }
+    invokeChannelListener(cb, args, (err) => this._reportError(err))
   }
 }
