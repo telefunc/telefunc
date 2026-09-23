@@ -5,7 +5,7 @@ import type { TELEFUNC_SHIELDS } from '../../node/shared/transformer/generateShi
 import { makePublishInfo, type ChannelPublishAck, type ChannelPublishInfo } from '../channel.js'
 import { ClientBroadcast } from '../client/channel.js'
 import type { ClientChannel } from '../client/channel.js'
-import { DM_PARTICIPANT_LEFT } from './errors.js'
+import { DM_FAILURE } from './errors.js'
 import { decodeBinaryFrame, emptyBinaryWants, encodeBinaryFrame } from './binary.js'
 import { leaveCauseFromWire, normalizeJoinOptions, ownMetaArgument, ownMetadata, recipientId } from './model.js'
 import {
@@ -273,7 +273,7 @@ class ClientRoom extends RoomStateView implements Room {
         // Relayed from this member's private inbox — only its own stub ever receives it.
         const local = this._localParticipants.get(event.to)
         if (local) this._deliverDm(local, inboxMessageFromWire(event))
-        else if (event.ackId) this._replyDm(event.to, event.ackId, DM_PARTICIPANT_LEFT)
+        else if (event.ackId) this._replyDm(event.to, event.ackId, DM_FAILURE.left)
         return
       }
     }

@@ -25,7 +25,7 @@ import { ReplayGate, TEXT_LANE_KEY, binaryLaneKey, type LaneHolder } from './rep
 import { TailHold, type TailEntry } from './tail.js'
 import type { ParticipantMeta } from '../types.js'
 import { binaryWantsCovers, emptyBinaryWants, laneTrack, type BinaryFrame, type BinaryWants } from '../binary.js'
-import { DM_PARTICIPANT_LEFT, RoomError, roomAckError } from '../errors.js'
+import { DM_FAILURE, RoomError, roomAckError } from '../errors.js'
 import { leaveCauseToWire } from '../model.js'
 import {
   decodeDmReply,
@@ -394,7 +394,7 @@ class RoomParticipantStubChannel extends RoomRequestChannel {
       }
       return this.send(notice, { ack: true }).then(
         (reply) => decodeDmReply(reply) ?? { ok: false, err: 'Malformed DM reply' },
-        () => DM_PARTICIPANT_LEFT,
+        () => DM_FAILURE.left,
       )
     })
 

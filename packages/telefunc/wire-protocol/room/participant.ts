@@ -4,7 +4,7 @@ import { invokeChannelListener, type ChannelPublishAck } from '../channel.js'
 import { makeDisposer } from '../wrapProxy.js'
 import type { TELEFUNC_SHIELDS } from '../../node/shared/transformer/generateShield/shield-key.js'
 import { assert } from '../../utils/assert.js'
-import { DM_PARTICIPANT_LEFT, RoomError, toRoomFailure } from './errors.js'
+import { DM_FAILURE, participantLeftError, toRoomFailure } from './errors.js'
 import { ownLeaveCause, ownMetadata, senderOf } from './model.js'
 import type { DmReply, InboxMessage } from './protocol.js'
 import type {
@@ -17,7 +17,6 @@ import type {
 } from './types.js'
 /** DMs held before the first `listen()`, dropping the oldest. The inbox is the one lane no want gates, so the only one to bridge. */
 const PENDING_INBOX_MAX_COUNT = 64
-const DM_NO_INBOX_LISTENER: DmReply = { ok: false, err: 'No participant inbox listener is attached' }
 /** The private-message inbox and the leave lifecycle, identical on server and client; flavors supply the transport. */
 abstract class ParticipantBase implements LocalParticipant {
   /** Phantom: the publish shield rides the type only (see `RoomShield`), never a runtime field. */
@@ -101,8 +100,8 @@ abstract class ParticipantBase implements LocalParticipant {
       return reply
     }
     if (this._messageCbs.length === 0) {
-      if (this._left) return Promise.resolve(DM_PARTICIPANT_LEFT)
-      if (this._inboxAttached) return Promise.resolve(DM_NO_INBOX_LISTENER)
+      if (this._left) return Promise.resolve(DM_FAILURE.left)
+      if (this._inboxAttached) return Promise.resolve(DM_FAILURE.noListener)
       return new Promise<DmReply>((resolve) => this._hold(msg, resolve))
     }
     return this._fireInboxAck(msg)
@@ -118,7 +117,7 @@ abstract class ParticipantBase implements LocalParticipant {
     const pending = (this._pendingInbox ??= [])
     pending.push({ msg, ackResolve })
     if (pending.length > PENDING_INBOX_MAX_COUNT) {
-      pending.shift()?.ackResolve?.({ ok: false, err: 'Inbox overflowed before the message was handled' })
+      pending.shift()?.ackResolve?.(DM_FAILURE.overflow)
     }
   }
   /** `from`/`fromMeta` come from the wire envelope; upgrades to the live `RemoteParticipant` when a room view exists. An empty `from` is the wire encoding of a room-authored message → `null`. */
@@ -172,14 +171,14 @@ abstract class ParticipantBase implements LocalParticipant {
     // Held ack DMs will never be handled now — fail their senders instead of hanging them.
     const held = this._pendingInbox
     this._pendingInbox = null
-    if (held) for (const entry of held) entry.ackResolve?.(DM_PARTICIPANT_LEFT)
+    if (held) for (const entry of held) entry.ackResolve?.(DM_FAILURE.left)
     const cbs = [...this._leaveCbs]
     for (const unlisten of [...this._listenerCleanups]) unlisten()
     for (const cb of cbs) this._invoke(cb, ownedCause)
     this._wantedTracks.clear()
   }
   protected _assertActive(): void {
-    if (this._left) throw new RoomError('Participant has left the room')
+    if (this._left) throw participantLeftError()
   }
   private _register<T>(list: T[], cb: T): () => void {
     list.push(cb)

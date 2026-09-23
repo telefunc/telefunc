@@ -382,7 +382,7 @@ await current?.leave()
 current = await nextRoom.join({ meta: { name } })
 ```
 
-Publishing to a room you've left throws (`Participant has left the room`).
+Publishing to a room you've left throws (`Participant left the room`).
 
 Telefunc doesn't cap membership. `count` is a point-in-time snapshot: it is useful for display or an advisory check, but concurrent telefunctions can read the same value and all join, so it cannot enforce a hard cap. For strict admission, reserve a slot atomically in your application database before `join()` (use a lease if the process can crash), and release it on join failure or participant leave:
 

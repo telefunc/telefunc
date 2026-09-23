@@ -22,7 +22,14 @@ import {
   type BinaryWants,
   type TrackWants,
 } from '../binary.js'
-import { DM_PARTICIPANT_LEFT, RoomError, participantGoneError, roomClosedError, roomFailureError } from '../errors.js'
+import {
+  DM_FAILURE,
+  RoomError,
+  participantGoneError,
+  participantLeftError,
+  roomClosedError,
+  roomFailureError,
+} from '../errors.js'
 import {
   leaveCauseFromWire,
   mergeAttributes,
@@ -244,8 +251,7 @@ class ServerRoom extends RoomStateView implements Room {
   /** The member's inbox slot exists exactly while the room is open and its holder owns the member, so this also checks the admission still holds. */
   private _admittedInbox(id: string): LaneSubscription {
     const inbox = this._subs.inboxOf(id)
-    if (inbox === undefined)
-      throw new RoomError(this._state.closed ? `Room is closed: ${this.id}` : 'Participant left the room')
+    if (inbox === undefined) throw this._state.closed ? roomClosedError(this.id) : participantLeftError()
     return inbox
   }
 
@@ -388,8 +394,7 @@ class ServerRoom extends RoomStateView implements Room {
       // The recipient replying/leaving/overflowing settles this promptly; this bounds the one case none of those cover — a recipient that joined but never listens and never leaves.
       timer = unrefTimer(
         setTimeout(() => {
-          if (this._pendingDmAcks.delete(ackId))
-            settle({ ok: false, err: 'send({ ack: true }) timed out — the recipient never handled the message' })
+          if (this._pendingDmAcks.delete(ackId)) settle(DM_FAILURE.timeout)
         }, ROOM_DM_ACK_TIMEOUT_MS),
       )
     })
@@ -594,7 +599,7 @@ class ServerRoom extends RoomStateView implements Room {
   _applyLeave(id: string, cause?: LeaveCause): void {
     this._state.applyLeave(id, cause)
     this._announcedTracks.delete(id)
-    this._rejectDmAcks(DM_PARTICIPANT_LEFT, id) // strand no waiter on a gone member
+    this._rejectDmAcks(DM_FAILURE.left, id) // strand no waiter on a gone member
     const local = this._localParticipants.get(id)
     if (local) {
       this._localParticipants.delete(id)
@@ -614,7 +619,7 @@ class ServerRoom extends RoomStateView implements Room {
   }
   /** The room closed — runs once, after the `closed` event has been applied and relayed. */
   private _teardown(): void {
-    this._rejectDmAcks({ ok: false, err: 'Room is closed' }) // no recipient will reply now
+    this._rejectDmAcks(DM_FAILURE.roomClosed) // no recipient will reply now
     this._teardownTail()
     for (const local of this._localParticipants.values()) local._onLeft({ type: 'closed' })
     this._localParticipants.clear()

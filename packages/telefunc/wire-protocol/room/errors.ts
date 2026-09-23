@@ -3,11 +3,12 @@ export {
   isRoomError,
   roomClosedError,
   participantGoneError,
+  participantLeftError,
   toRoomFailure,
   roomAckError,
   roomFailureError,
   ROOM_BUG_MESSAGE,
-  DM_PARTICIPANT_LEFT,
+  DM_FAILURE,
 }
 
 import { createAbortError } from '../../shared/Abort.js'
@@ -39,6 +40,10 @@ function roomClosedError(roomId: string): RoomError {
 function participantGoneError(memberId: string): RoomError {
   return new RoomError(`Participant not found (left?): ${memberId}`)
 }
+const PARTICIPANT_LEFT = 'Participant left the room'
+function participantLeftError(): RoomError {
+  return new RoomError(PARTICIPANT_LEFT)
+}
 const ROOM_BUG_MESSAGE = `${STATUS_BODY_INTERNAL_SERVER_ERROR} — see server logs`
 /** `roomAckError`'s classification rendered for an ack DM's reply, which travels on an inbox lane, not as a channel ack. */
 function toRoomFailure(err: unknown, report: (err: unknown) => void): RoomFailure {
@@ -61,5 +66,11 @@ function roomFailureError(res: RoomFailure): Error {
   return new RoomError(res.err)
 }
 
-/** The reply an `{ ack: true }` sender gets when its recipient left, wherever the departure is noticed. */
-const DM_PARTICIPANT_LEFT: DmReply = { ok: false, err: 'Participant left the room' }
+/** The replies an `{ ack: true }` sender gets when no handler of the recipient answered. */
+const DM_FAILURE = {
+  left: { ok: false, err: PARTICIPANT_LEFT },
+  noListener: { ok: false, err: 'No participant inbox listener is attached' },
+  overflow: { ok: false, err: 'Inbox overflowed before the message was handled' },
+  timeout: { ok: false, err: 'send({ ack: true }) timed out — the recipient never handled the message' },
+  roomClosed: { ok: false, err: 'Room is closed' },
+} as const satisfies Record<string, DmReply>
