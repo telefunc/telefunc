@@ -13,7 +13,6 @@ import { CloudflareBroadcastAuthorityState, CloudflareBroadcastTransport } from 
 import { CLOUDFLARE_COLO_LOCATION_HINT_MAP } from './coloLocationHintMap.js'
 import { ServerBroadcast } from '../../server-broadcast.js'
 import { disposeBackend, installBackend } from '../../../backend/install.js'
-import type { BackendDriverPair } from '../../../backend/driver-pair.js'
 import { CloudflareRoomBackend } from './room/backend.js'
 
 type CloudflareRequest = Request & { cf?: { colo?: string; continent?: string } }
@@ -23,17 +22,15 @@ afterEach(async () => {
 })
 
 function installCloudflareTransport(transport: CloudflareBroadcastTransport): void {
-  const driver = new CloudflareRoomBackend({
-    rooms: () => {
-      throw new Error('Broadcast specs use no Room namespace')
-    },
-    broadcast: transport,
-  })
-  const pair: BackendDriverPair = {
-    driver,
-    dispose: () => driver.dispose(),
-  }
-  installBackend(() => pair)
+  installBackend(
+    () =>
+      new CloudflareRoomBackend({
+        rooms: () => {
+          throw new Error('Broadcast specs use no Room namespace')
+        },
+        broadcast: transport,
+      }),
+  )
 }
 
 function createCloudflareRequest({ colo, continent }: { colo?: string; continent?: string } = {}): CloudflareRequest {

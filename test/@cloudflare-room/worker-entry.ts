@@ -1,7 +1,6 @@
 /// <reference types="@cloudflare/workers-types" />
 import { DurableObject, env as workerEnv } from 'cloudflare:workers'
 import '../../packages/telefunc/node/server/async_hooks.js'
-import { type BackendDriverPair } from '../../packages/telefunc/wire-protocol/backend/driver-pair.js'
 import { installBackend } from '../../packages/telefunc/wire-protocol/backend/install.js'
 import type { RoomHead } from '../../packages/telefunc/wire-protocol/backend/room/contract.js'
 import { Room } from '../../packages/telefunc/wire-protocol/room/server/statics.js'
@@ -25,15 +24,14 @@ import {
   type RoomShardFanoutNamespace,
   type RoomShardFanoutRequest,
 } from '../../packages/telefunc/wire-protocol/server/adapter/cloudflare/room/fanout.js'
-const publicRoomBackend = new CloudflareRoomBackend({
-  rooms: () => (workerEnv as unknown as Env).PUBLIC_ROOM as unknown as CloudflareRoomNamespace,
-  broadcast: new CloudflareBroadcastTransport({ baseInstanceName: 'telefunc' }),
-})
-const publicRoomPair: BackendDriverPair = {
-  driver: publicRoomBackend,
-  dispose: () => publicRoomBackend.dispose(),
-}
-installBackend(() => publicRoomPair, 'cloudflare-room-ci-public')
+installBackend(
+  () =>
+    new CloudflareRoomBackend({
+      rooms: () => (workerEnv as unknown as Env).PUBLIC_ROOM as unknown as CloudflareRoomNamespace,
+      broadcast: new CloudflareBroadcastTransport({ baseInstanceName: 'telefunc' }),
+    }),
+  ['cloudflare-room-ci-public'],
+)
 const PublicRoomDurableObjectBase = createTelefuncRoomDurableObjectClass((env) => (env as Env).PUBLIC_SESSION)
 const productionSession = (env: unknown) => (env as Env).TelefuncDurableObject
 const textEncoder = new TextEncoder()

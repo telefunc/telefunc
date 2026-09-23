@@ -6,7 +6,6 @@ import { ACK_STATUS, ProtocolViolationError, TAG, decode, encode, type DecodedFr
 import { ChannelMux, type ServerTransport } from './mux.js'
 import { IndexedPeer } from './IndexedPeer.js'
 import { disposeBackend, installBackend } from '../backend/install.js'
-import type { BackendDriverPair } from '../backend/driver-pair.js'
 import { MemoryBackend, MemoryBackendState } from '../backend/memory/backend.js'
 import type { SubscriptionAttempt, SubscriptionAttemptState } from '../backend/subscription.js'
 import { ChannelClosedError, ChannelOverflowError } from '../channel-errors.js'
@@ -14,14 +13,10 @@ import { CHANNEL_BUFFER_LIMIT_BYTES } from '../constants.js'
 import { Abort } from '../../shared/Abort.js'
 
 let memoryState: MemoryBackendState
-const memoryPair = (driver: MemoryBackend): BackendDriverPair => ({
-  driver,
-  dispose: () => driver.dispose(),
-})
 beforeEach(async () => {
   await disposeBackend()
   memoryState = new MemoryBackendState()
-  installBackend(() => memoryPair(new MemoryBackend({ state: memoryState })))
+  installBackend(() => new MemoryBackend({ state: memoryState }))
 })
 afterEach(async () => {
   await disposeBackend()
@@ -77,7 +72,7 @@ async function installPendingSubscriptionBackend(result: { seq: number; timestam
   const bind = driver.subscriptions.bind.bind(driver.subscriptions)
   driver.subscriptions.bind = (source) => ({ ...bind(source), open: () => controlled.subscription })
   const publish = vi.spyOn(driver, 'publish').mockReturnValue(result)
-  installBackend(() => memoryPair(driver))
+  installBackend(() => driver)
   return { controlled, publish }
 }
 

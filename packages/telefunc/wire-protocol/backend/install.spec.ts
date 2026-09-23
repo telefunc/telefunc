@@ -1,5 +1,4 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import type { BackendDriverPair } from './driver-pair.js'
 import {
   configureBroadcastTransport,
   disposeBackend,
@@ -16,18 +15,18 @@ afterEach(async () => {
 })
 describe('backend installation lifecycle', () => {
   it('reuses the installed backend when the same entry installs it again', () => {
-    const factory = () => memoryPair(new MemoryBackend())
-    installBackend(factory, 'entry')
+    const driver = installBackend(() => new MemoryBackend(), ['entry', 1])
     const installed = getRoomBackend()
-    installBackend(() => {
+    const again = installBackend(() => {
       throw new Error('a repeated entry must not construct another backend')
-    }, 'entry')
+    }, ['entry', 1])
+    expect(again).toBe(driver)
     expect(getRoomBackend()).toBe(installed)
   })
   it("supervises one driver's Broadcast and Room subscriptions independently", async () => {
     const driver = new MemoryBackend()
     const bind = vi.spyOn(driver.subscriptions, 'bind')
-    installBackend(() => memoryPair(driver))
+    installBackend(() => driver)
     const broadcast = getBroadcastBackend().subscribe({ key: 'same', kind: 'text' }, () => {})
     const room = getRoomBackend().subscribeLane('missing', 'inc', { kind: 'semantic' }, () => {})
     await expect(broadcast.ready).resolves.toBeUndefined()
@@ -37,20 +36,12 @@ describe('backend installation lifecycle', () => {
       { roomId: 'missing', inc: 'inc', lane: { kind: 'semantic' } },
     ])
   })
-  it('rejects an incomplete driver and stays uninstalled', () => {
-    const incomplete = Object.assign(new MemoryBackend(), { readHead: undefined })
-    expect(() =>
-      installBackend(() => ({ ...memoryPair(new MemoryBackend()), driver: incomplete }) as BackendDriverPair),
-    ).toThrow('missing required method "readHead"')
-    const factory = () => memoryPair(new MemoryBackend())
-    installBackend(factory)
-    expect(getRoomBackend()).toBeDefined()
-  })
-  it('disposes both managers before invoking the pair disposer exactly once', async () => {
+  it('disposes both managers before disposing the driver exactly once', async () => {
     const gate = Promise.withResolvers<void>()
     const stops = vi.spyOn(SubscriptionManager.prototype, 'dispose').mockReturnValue(gate.promise)
-    const dispose = vi.fn(async () => {})
-    installBackend(() => memoryPair(new MemoryBackend(), dispose))
+    const driver = new MemoryBackend()
+    const dispose = vi.spyOn(driver, 'dispose')
+    installBackend(() => driver)
     const first = disposeBackend()
     expect(disposeBackend()).toBe(first)
     await Promise.resolve()
@@ -60,21 +51,21 @@ describe('backend installation lifecycle', () => {
     expect(dispose).toHaveBeenCalledOnce()
   })
   it('rejects a second backend without constructing it', () => {
-    installBackend(() => memoryPair(new MemoryBackend()))
-    const factory = vi.fn(() => memoryPair(new MemoryBackend()))
+    installBackend(() => new MemoryBackend())
+    const factory = vi.fn(() => new MemoryBackend())
     expect(() => installBackend(factory)).toThrow('a backend is already active')
     expect(factory).not.toHaveBeenCalled()
   })
   it('composes a broadcast override with a full backend in either configuration order', async () => {
     const transport = localTransport()
-    installBackend(() => memoryPair(new MemoryBackend()))
+    installBackend(() => new MemoryBackend())
     const roomInstalledFirst = getRoomBackend()
     configureBroadcastTransport(transport)
     await expectBroadcastRoundTrip('installed-first')
     expect(getRoomBackend()).toBe(roomInstalledFirst)
 
     await disposeBackend()
-    installBackend(() => memoryPair(new MemoryBackend()))
+    installBackend(() => new MemoryBackend())
     const roomConfiguredFirst = getRoomBackend()
     await expectBroadcastRoundTrip('configured-first')
     expect(getRoomBackend()).toBe(roomConfiguredFirst)
@@ -116,9 +107,6 @@ describe('backend installation lifecycle', () => {
     expect(received).not.toHaveBeenCalled()
   })
 })
-function memoryPair(driver: MemoryBackend, dispose = () => driver.dispose()): BackendDriverPair {
-  return { driver, dispose }
-}
 
 function localTransport(): BroadcastTransport {
   let seq = 0

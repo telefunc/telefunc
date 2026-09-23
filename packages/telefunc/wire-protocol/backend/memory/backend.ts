@@ -2,7 +2,6 @@
 
 import type { BroadcastDriver, BroadcastLane, PublishResult } from '../broadcast/contract.js'
 import { broadcastRouteKey } from '../broadcast/route-key.js'
-import type { BackendDriverPair } from '../driver-pair.js'
 import type {
   CellMutation,
   CommitResult,
@@ -31,14 +30,6 @@ export type MemoryBackendOptions = {
 }
 
 type MemorySubscriptionSource = BroadcastLane | RoomSubscriptionSource
-
-export function createMemoryBackendPair(): BackendDriverPair {
-  const driver = new MemoryBackend()
-  return {
-    driver,
-    dispose: () => driver.dispose(),
-  }
-}
 
 type Expiring = { expiresAt: number | null }
 type StoredHead = RoomHead & Expiring

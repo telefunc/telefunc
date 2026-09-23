@@ -126,15 +126,9 @@ vi.mock('./routing.js', () => ({
 }))
 
 import { Telefunc } from '../../../../serve/cloudflare.js'
-import type { BackendDriverPair } from '../../../backend/driver-pair.js'
 import { disposeBackend, getRoomBackend, installBackend } from '../../../backend/install.js'
 import { MemoryBackend } from '../../../backend/memory/backend.js'
 import type { BroadcastDeliverRequest, BroadcastPublishRequest } from './broadcast.js'
-
-const memoryPair = (driver: MemoryBackend): BackendDriverPair => ({
-  driver,
-  dispose: () => driver.dispose(),
-})
 
 function createMockKV(): KVNamespace {
   const store = new Map<string, { value: string; expirationTtl?: number }>()
@@ -340,7 +334,7 @@ describe('cloudflare adapter entrypoint', () => {
   it('rejects another backend once the Cloudflare one is installed', () => {
     new Telefunc()
     const selected = getRoomBackend()
-    expect(() => installBackend(() => memoryPair(new MemoryBackend()))).toThrow('a backend is already active')
+    expect(() => installBackend(() => new MemoryBackend())).toThrow('a backend is already active')
     expect(getRoomBackend()).toBe(selected)
   })
 

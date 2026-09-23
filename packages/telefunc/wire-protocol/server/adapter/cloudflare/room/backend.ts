@@ -229,9 +229,6 @@ export class CloudflareRoomBackend implements BroadcastDriver, RoomDriver {
     this.#disposed = true
     await this.broadcast.dispose()
   }
-  get disposed(): boolean {
-    return this.#disposed
-  }
   #bindSubscription(source: CloudflareSubscriptionSource): SubscriptionBinding {
     if (!('roomId' in source)) {
       return {

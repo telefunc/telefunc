@@ -38,7 +38,6 @@ import type { ServerReplacerContext } from '../types.js'
 import type { ServerChannel } from '../server/channel.js'
 import type { ChannelPublishInfo } from '../channel.js'
 import { disposeBackend, getBroadcastBackend, getRoomBackend, installBackend } from '../backend/install.js'
-import type { BackendDriverPair } from '../backend/driver-pair.js'
 import { MemoryBackend, MemoryBackendState } from '../backend/memory/backend.js'
 import type { LaneId } from '../backend/room/contract.js'
 import type { BackendReceiver, BackendSubscription, SubscriptionState } from '../backend/subscription.js'
@@ -51,15 +50,11 @@ const semanticLane = { kind: 'semantic' } as const satisfies LaneId
 const allBinary = { everyMember: { all: true, tracks: [] }, members: {} }
 let driver: MemoryBackend
 let memoryState: MemoryBackendState
-const memoryPair = (value: MemoryBackend): BackendDriverPair => ({
-  driver: value,
-  dispose: () => value.dispose(),
-})
 beforeEach(async () => {
   await disposeBackend()
   memoryState = new MemoryBackendState()
   driver = new MemoryBackend({ state: memoryState })
-  installBackend(() => memoryPair(driver))
+  installBackend(() => driver)
 })
 afterEach(async () => {
   vi.useRealTimers()
@@ -2528,7 +2523,7 @@ describe('room binary protocol validation', () => {
     await disposeBackend()
     let now = 1
     driver = new MemoryBackend({ state: memoryState, authorityNow: () => now })
-    installBackend(() => memoryPair(driver))
+    installBackend(() => driver)
     const backend = getRoomBackend()
     const created = await backend.compareExchangeHead(
       'order-survivor',
