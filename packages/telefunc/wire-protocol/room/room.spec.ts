@@ -960,6 +960,27 @@ describe('Room public behavior', () => {
     const observer = await Room.get('standalone-expire')
     expect((await observer.getParticipants()).map((member) => member.id)).not.toContain(holder.id)
   })
+  it("rejects a client-held participant's binary publish with the guard's Abort, not the whole response", async () => {
+    const room = await Room.create('standalone-binary-abort')
+    Room.guard(room, {
+      onBeforePublish: () => {
+        throw Abort('blocked')
+      },
+    })
+    const holder = (await room.join()) as ServerLocalParticipant
+    const channel = new RoomParticipantStubChannel()
+    channel._registerChannel()
+    bindParticipantStubChannel(channel, holder)
+    const responseAbort = vi.fn()
+    channel._setResponseAbort(responseAbort)
+    const peer = attachPeer(channel as unknown as RoomStubChannel)
+    const data = frameWithMemberId(holder.id, new Uint8Array([1]))
+    channel._dispatchFrame({ tag: TAG.BINARY_ACK_REQ, index: 7, seq: 1, data })
+    await vi.waitFor(() =>
+      expect(peer.decoded().find((frame) => frame.tag === TAG.ACK_RES)).toMatchObject({ status: ACK_STATUS.ABORT }),
+    )
+    expect(responseAbort).not.toHaveBeenCalled()
+  })
   it('keeps every live ack correlation instead of silently dropping the oldest', async () => {
     const stub = register(await Room.create('ack-correlations'))
     for (let index = 0; index <= 1_024; index++) {

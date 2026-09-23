@@ -277,25 +277,36 @@ class RoomStubChannel extends ServerBroadcast {
 }
 
 /** Serializes one server participant; metadata observation may be absent after a leave race. */
-class RoomParticipantStubChannel extends ServerChannel<unknown, unknown> {
-  private _requestHandler: ((message: unknown) => Promise<unknown>) | null = null
+type ParticipantStubHandlers = {
+  request(message: unknown): Promise<unknown>
+  publishBinary(framed: Uint8Array): Promise<unknown>
+}
 
-  _listenRoomRequests(handler: (message: unknown) => Promise<unknown>): void {
-    this._requestHandler = handler
+class RoomParticipantStubChannel extends ServerChannel<unknown, unknown> {
+  private _handlers: ParticipantStubHandlers | null = null
+
+  _listenRoomRequests(handlers: ParticipantStubHandlers): void {
+    this._handlers = handlers
   }
 
   override _onPeerAckReqMessage(text: string, seq: number): Promise<void> {
     const request = parsePeerText(text)
+    return this._ackRoomRequest(seq, this._handlers?.request(request))
+  }
+
+  override _onPeerBinaryAckReqMessage(framed: Uint8Array, seq: number): Promise<void> {
+    return this._ackRoomRequest(seq, this._handlers?.publishBinary(framed))
+  }
+
+  private _ackRoomRequest(seq: number, pending: Promise<unknown> | undefined): Promise<void> {
     return this._trackAck(
-      (async () => {
-        try {
-          const result = await this._requestHandler?.(request)
-          this._sendAckRes(seq, stringify(result))
-        } catch (error) {
+      Promise.resolve(pending).then(
+        (result) => this._sendAckRes(seq, stringify(result)),
+        (error: unknown) => {
           const failure = roomAckError(error, reportRoomError)
           this._sendAckRes(seq, failure.text, failure.status)
-        }
-      })(),
+        },
+      ),
     )
   }
 }
@@ -340,11 +351,12 @@ function bindParticipantStubChannel(
     !participant._isBound,
     'This LocalParticipant is already bound to a client and cannot be handed to another. A LocalParticipant is a single member: give each client its own join(), or share a getParticipants() view (which is read-only) instead.',
   )
-  channel._listenRoomRequests((msg) => handleParticipantStubRequest(participant, publishShield, msg))
-
-  channel.listenBinary(async (framed: Uint8Array) => {
-    if (unframeMemberId(framed)?.from !== participant.id) throw new RoomError('Malformed room binary publish')
-    return await participant._publishFramed(framed)
+  channel._listenRoomRequests({
+    request: (msg) => handleParticipantStubRequest(participant, publishShield, msg),
+    publishBinary: async (framed) => {
+      if (unframeMemberId(framed)?.from !== participant.id) throw new RoomError('Malformed room binary publish')
+      return await participant._publishFramed(framed)
+    },
   })
 
   const remote = participant._room._state.getRemote(participant.id)
