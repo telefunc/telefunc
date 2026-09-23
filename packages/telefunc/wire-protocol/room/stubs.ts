@@ -14,8 +14,8 @@ import { encodePublishText, type WirePublishInfo } from '../shared-ws.js'
 import { type ServerLocalParticipant, type ServerRoom } from './server.js'
 import { reportRoomError, roomAckError } from './server/errors.js'
 import type { ParticipantMeta, RoomSendReceipt } from './types.js'
-import { binaryWantsCovers, emptyTrackWants, unframeMemberId, type BinaryWants } from './binary.js'
-import { DM_PARTICIPANT_LEFT, RoomError, roomFailureError } from './errors.js'
+import { binaryWantsCovers, emptyTrackWants, type BinaryWants } from './binary.js'
+import { DM_PARTICIPANT_LEFT, roomFailureError } from './errors.js'
 import { roomCtrlKey } from './keys.js'
 import { leaveCauseToWire } from './model.js'
 import {
@@ -358,10 +358,7 @@ function bindParticipantStubChannel(
   )
   channel._listenRoomRequests({
     request: (msg) => handleParticipantStubRequest(participant, publishShield, msg),
-    publishBinary: async (framed) => {
-      if (unframeMemberId(framed)?.from !== participant.id) throw new RoomError('Malformed room binary publish')
-      return await participant._publishFramed(framed)
-    },
+    publishBinary: async (framed) => await participant._publishFramed(framed),
   })
 
   const remote = participant._room._state.getRemote(participant.id)

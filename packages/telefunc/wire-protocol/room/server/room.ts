@@ -385,7 +385,8 @@ class ServerRoom extends RoomStateView implements Room {
 
   async _publishBinaryFramed(from: string, framed: Uint8Array): Promise<ChannelPublishAck> {
     const frame = unframeMemberId(framed)
-    if (!frame) throw new RoomError('Malformed binary frame')
+    // Receivers trust the frame's own sender id, so it must be the publisher's.
+    if (frame?.from !== from) throw new RoomError('Malformed binary frame')
     const sender = await this._admitPublish(from, frame.payload)
     if (frame.track !== null) await this._ensureTrackAnnounced(from, frame.track)
     const result = await commitRoomLane(
