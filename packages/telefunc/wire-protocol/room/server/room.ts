@@ -5,14 +5,14 @@ import type { TELEFUNC_SHIELDS } from '../../../node/shared/transformer/generate
 import { assert, assertUsage } from '../../../utils/assert.js'
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 import { unrefTimer } from '../../../utils/unrefTimer.js'
-import { makePublishInfo, type ChannelPublishAck } from '../../channel.js'
+import type { ChannelPublishAck } from '../../channel.js'
 import {
   ROOM_DM_ACK_TIMEOUT_MS,
   ROOM_HEARTBEAT_INTERVAL_MS,
   ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS,
 } from '../constants.js'
 import { getRoomBackend } from '../../backend/install.js'
-import type { LaneId } from '../../backend/room/contract.js'
+import type { CommitAccepted, LaneId } from '../../backend/room/contract.js'
 import type { BackendSubscription } from '../../backend/subscription.js'
 import { encodePublishBinary, encodePublishText, type WirePublishInfo } from '../../shared-ws.js'
 import {
@@ -104,7 +104,6 @@ function hiddenMemberOf(event: RoomCtrlEnvelope): string | null {
 }
 
 type SubscriptionPlan = {
-  backend: ReturnType<typeof getRoomBackend>
   open: boolean
   observed: boolean
   becomesObserved: boolean
@@ -191,12 +190,9 @@ class ServerRoom extends RoomStateView implements Room {
 
   async join(options?: JoinOptions): Promise<LocalParticipant> {
     const { meta, selfDelivery, identity, hidden } = normalizeJoinOptions(options)
-    await this._assertOpen()
     const admission = { id: crypto.randomUUID(), meta, identity, joinedAt: Date.now(), hidden }
-    await this._guardAdmission(admission)
     const participant = new ServerLocalParticipant(this, admission.id, meta, selfDelivery, identity)
-    this._localParticipants.set(admission.id, participant)
-    await this._commitAdmission(admission)
+    await this._admit(admission, () => this._localParticipants.set(admission.id, participant))
     return participant
   }
 
@@ -216,19 +212,27 @@ class ServerRoom extends RoomStateView implements Room {
     return this._state.snapshot()
   }
 
-  private async _guardAdmission({ id, meta, identity, hidden }: Admission): Promise<void> {
+  /** Both join paths: the room is open, the guard passes, the holder takes the member, then the member commits. */
+  private async _admit(admission: Admission, hold: () => void): Promise<void> {
+    await this._assertOpen()
+    const { id, meta, identity, joinedAt, hidden } = admission
     const onBeforeJoin = this._guards?.onBeforeJoin
     if (!hidden && onBeforeJoin) await onBeforeJoin({ id, meta, identity })
+    hold()
+    await this._commitAdmission(admission)
+    if (hidden) return // a hidden participant has no post-join hook
+    const onAfterJoin = this._guards?.onAfterJoin
+    if (onAfterJoin) await runAfterHook(() => onAfterJoin({ id, meta, identity }, { joinedAt }))
   }
 
-  /** Both join paths register ownership before inbox/heartbeat sync and join announcement. */
-  private async _commitAdmission({ id, meta, identity, joinedAt, hidden }: Admission): Promise<void> {
+  /** The member's inbox is ready before its record is durable, and the join is announced after, so no DM or event is lost. */
+  private async _commitAdmission(admission: Admission): Promise<void> {
+    const { id, meta, identity, joinedAt, hidden } = admission
     this._pendingAdmissions.add(id)
     this._syncSubs()
     let created = false
     try {
-      const inbox = this._admittedInbox(id)
-      await withinRoomHorizon(inbox.ready, ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS)
+      await withinRoomHorizon(this._admittedInbox(id).ready, ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS)
       this._admittedInbox(id)
       await createMember(this.id, this._inc, id, {
         meta,
@@ -251,23 +255,18 @@ class ServerRoom extends RoomStateView implements Room {
         ...(hidden ? { hidden: true } : {}),
       })
     } catch (error) {
-      this._pendingAdmissions.delete(id)
-      if (created) {
-        try {
-          await evictMember(this.id, this._inc, id, identity, { type: 'left' })
-        } catch (rollbackError) {
-          reportRoomError(rollbackError)
-        }
-      }
-      this._applyLeave(id, { type: 'left' })
+      await this._rollbackAdmission(admission, created)
       throw error
     }
-    if (hidden) return // announced above; a hidden participant has no post-join hook
-    const onAfterJoin = this._guards?.onAfterJoin
-    if (onAfterJoin) await runAfterHook(() => onAfterJoin({ id, meta, identity }, { joinedAt }))
   }
 
-  /** The member's inbox slot exists exactly while the room is open and its holder owns the member. */
+  private async _rollbackAdmission({ id, identity }: Admission, created: boolean): Promise<void> {
+    this._pendingAdmissions.delete(id)
+    if (created) await evictMember(this.id, this._inc, id, identity, { type: 'left' }).catch(reportRoomError)
+    this._applyLeave(id, { type: 'left' })
+  }
+
+  /** The member's inbox slot exists exactly while the room is open and its holder owns the member, so this also checks the admission still holds. */
   private _admittedInbox(id: string): LaneSubscription {
     const inbox = this._inboxSubs.get(id)
     if (inbox === undefined)
@@ -361,26 +360,15 @@ class ServerRoom extends RoomStateView implements Room {
     return sender
   }
 
-  private async _finishPublish(
-    sender: Sender,
-    payload: unknown,
-    info: { seq: number; timestamp: number; receivers?: number; meta?: Record<string, unknown> },
-  ): Promise<ChannelPublishAck> {
-    const ack = Object.assign(makePublishInfo(this.id, info.seq, info.timestamp), {
-      meta: info.meta,
-      ...(info.receivers === undefined ? {} : { receivers: info.receivers }),
-    })
-    const onAfterPublish = this._guards?.onAfterPublish
-    if (onAfterPublish) {
-      await runAfterHook(() =>
-        onAfterPublish(sender, payload, {
-          seq: ack.seq,
-          timestamp: ack.timestamp,
-          ...(ack.receivers === undefined ? {} : { receivers: ack.receivers }),
-        }),
-      )
+  private async _finishPublish(sender: Sender, payload: unknown, commit: CommitAccepted): Promise<ChannelPublishAck> {
+    const receipt = {
+      seq: commit.seq,
+      timestamp: commit.timestamp,
+      ...(commit.receivers === undefined ? {} : { receivers: commit.receivers }),
     }
-    return ack
+    const onAfterPublish = this._guards?.onAfterPublish
+    if (onAfterPublish) await runAfterHook(() => onAfterPublish(sender, payload, receipt))
+    return { key: this.id, ...receipt }
   }
 
   /** A new track is durably recorded and announced before its first frame; later frames use the idempotent cache. */
@@ -515,14 +503,17 @@ class ServerRoom extends RoomStateView implements Room {
   private async _assertOpen(): Promise<void> {
     if (this._state.closed || (await this._readOpenConfig()) === null) throw roomClosedError(this.id)
   }
+  /** Drops a duplicate; a gap means control events were lost, so the room reconciles. */
+  private _acceptControlSeq(seq: number): boolean {
+    const previous = this._controlSeq
+    if (seq <= previous) return false
+    this._controlSeq = seq
+    if (previous !== 0 && seq !== previous + 1) void this._reconcileAuthority().catch(reportRoomError)
+    return true
+  }
   private _onCtrlMessage(serialized: string, rawInfo: WirePublishInfo): void {
+    if (!this._acceptControlSeq(rawInfo.seq)) return
     const event = decodeLaneEnvelope(serialized) as RoomCtrlEnvelope
-    const previousSeq = this._controlSeq
-    if (rawInfo.seq <= previousSeq) return
-    this._controlSeq = rawInfo.seq
-    if (previousSeq !== 0 && rawInfo.seq !== previousSeq + 1) {
-      void this._reconcileAuthority().catch(reportRoomError)
-    }
     if (event.__r === 'want') {
       this._demand.applyWant(event) // demand gossip — node-to-node only, never relayed to clients
       return
@@ -722,30 +713,32 @@ class ServerRoom extends RoomStateView implements Room {
       stub._beginTail(this._tail.take(), () => this._syncSubs())
       this._tail = null
     }
-    stub.onOpen(() => {
-      void this._ensureRoster()
-        .then(() => {
-          if (this._stubs.has(stub) && !this._state.closed)
-            stub._relayEvent({
-              __r: 'roster',
-              members: this._state.snapshotMembers().filter((member) => !member.hidden),
-            })
-        })
-        .catch((error) => {
-          reportRoomError(error)
-          if (this._stubs.has(stub) && !this._state.closed) stub._relayEvent({ __r: 'roster-error' })
-        })
-    })
-    stub.onClose(() => {
-      this._stubs.delete(stub)
-      stub._endTail() // clear any pending tail hold/timer so a closed stub leaves nothing behind
-      for (const id of stub._heldMembers()) {
-        if (this._pendingAdmissions.has(id)) continue // the admission rolls itself back
-        void this._removeDepartedMember(id).catch(reportRoomError)
-      }
-      this._syncSubs()
-    })
+    stub.onOpen(() => this._sendRosterTo(stub))
+    stub.onClose(() => this._detachStub(stub))
     this._syncSubs()
+  }
+  private _sendRosterTo(stub: RoomStubChannel): void {
+    void this._ensureRoster()
+      .then(() => {
+        if (this._stubs.has(stub) && !this._state.closed)
+          stub._relayEvent({ __r: 'roster', members: this._visibleRoster() })
+      })
+      .catch((error) => {
+        reportRoomError(error)
+        if (this._stubs.has(stub) && !this._state.closed) stub._relayEvent({ __r: 'roster-error' })
+      })
+  }
+  private _detachStub(stub: RoomStubChannel): void {
+    this._stubs.delete(stub)
+    stub._endTail()
+    for (const id of stub._heldMembers()) {
+      if (this._pendingAdmissions.has(id)) continue // the admission rolls itself back
+      void this._removeDepartedMember(id).catch(reportRoomError)
+    }
+    this._syncSubs()
+  }
+  private _visibleRoster(): MemberSnapshot[] {
+    return this._state.snapshotMembers().filter((member) => !member.hidden)
   }
   async _handleStubRequest(stub: RoomStubChannel, req: RoomRequest): Promise<unknown> {
     switch (req.__r) {
@@ -764,11 +757,8 @@ class ServerRoom extends RoomStateView implements Room {
     }
   }
   private async _joinStubMember(stub: RoomStubChannel, req: Extract<RoomRequest, { __r: 'req-join' }>) {
-    await this._assertOpen()
     const admission = { id: crypto.randomUUID(), meta: req.meta, identity: null, joinedAt: Date.now(), hidden: false }
-    await this._guardAdmission(admission)
-    stub._addMember(admission.id, req.selfDelivery)
-    await this._commitAdmission(admission)
+    await this._admit(admission, () => stub._addMember(admission.id, req.selfDelivery))
     return { id: admission.id, joinedAt: admission.joinedAt }
   }
   async _replayRetainedText(holder: LaneHolder, prevWantedFrom: (member: string) => boolean): Promise<void> {
@@ -786,7 +776,6 @@ class ServerRoom extends RoomStateView implements Room {
     if (!wantsAnyBinary(holder._binaryWants)) return
     const roomWide = holder._binaryWants.everyMember
     if (roomWide.all || roomWide.tracks.length > 0) await this._ensureRoster()
-    this._syncSubs()
     // Binary uses the same readiness handoff and stored receipt; its holder dedupes the live/retained race per lane.
     await this._binaryReady()
     const backend = getRoomBackend()
@@ -816,69 +805,64 @@ class ServerRoom extends RoomStateView implements Room {
   }
 
   _syncSubs(): void {
-    const plan = this.deriveSubscriptionPlan(this._state, this._stubs, this._localParticipants)
+    const plan = this._derivePlan()
     this._syncControlAndSemantic(plan)
-    this._syncRosterAndBinary(plan)
+    this._syncRoster(plan)
+    this._syncBinary(plan)
     this._syncInbox(plan)
     this._syncHeartbeat()
   }
 
-  private deriveSubscriptionPlan(
-    state: RoomState,
-    stubs: ReadonlySet<RoomStubChannel>,
-    locals: ReadonlyMap<string, ServerLocalParticipant>,
-  ): SubscriptionPlan {
-    const backend = getRoomBackend()
+  private _derivePlan(): SubscriptionPlan {
+    const state = this._state
     const open = !state.closed
-    const observed = stubs.size > 0 || locals.size > 0 || state.listenerCount > 0
-    const textWants = this._aggregateTextWants()
-    const wantAnyText = open && (textWants.all || textWants.members.size > 0)
-    const wantAnnounce = state.wantsAnnounce || [...stubs].some((stub) => stub._wantsAnnounce)
+    const observed = this._stubs.size > 0 || this._localParticipants.size > 0 || state.listenerCount > 0
+    const text = this._aggregateTextWants()
+    const announce = state.wantsAnnounce || [...this._stubs].some((stub) => stub._wantsAnnounce)
     const binaryWants = this._aggregateBinaryWants()
     const wantAnyBinary = open && wantsAnyBinary(binaryWants)
-    const memberIds = open ? state.listMemberIds() : []
-    const binaryPairs = open ? this._binaryPairs(binaryWants, memberIds) : []
     return {
-      backend,
       open,
       observed,
       becomesObserved: open && observed && !this._ctrlSub.active,
-      wantSemantic: open && (wantAnyText || wantAnnounce),
+      wantSemantic: open && (text.all || text.members.size > 0 || announce),
       wantAnyBinary,
       needsRoster: state.listenerCount > 0 || wantAnyBinary,
-      binaryPairs,
+      binaryPairs: open ? this._binaryPairs(binaryWants, state.listMemberIds()) : [],
     }
   }
 
   private _syncControlAndSemantic(plan: SubscriptionPlan): void {
     this._ctrlSub.sync(plan.open && plan.observed, () =>
-      plan.backend.subscribeLane(this.id, this._inc, CONTROL_LANE, (payload, info) =>
+      getRoomBackend().subscribeLane(this.id, this._inc, CONTROL_LANE, (payload, info) =>
         this._onCtrlMessage(decodeRoomText(payload), info),
       ),
     )
     this._textSub.sync(plan.wantSemantic, () =>
-      plan.backend.subscribeLane(this.id, this._inc, SEMANTIC_LANE, (payload, info) =>
+      getRoomBackend().subscribeLane(this.id, this._inc, SEMANTIC_LANE, (payload, info) =>
         this._onTextData(decodeRoomText(payload), info),
       ),
     )
   }
 
-  private _syncRosterAndBinary(plan: SubscriptionPlan): void {
+  private _syncRoster(plan: SubscriptionPlan): void {
     const state = this._state
     if ((plan.becomesObserved && state.rosterKnown) || (plan.open && !state.rosterKnown && plan.needsRoster))
       void this._refreshMembers().catch(reportRoomError)
+  }
+
+  private _syncBinary(plan: SubscriptionPlan): void {
     this._syncKeyedSubs(this._binarySubs, plan.wantAnyBinary ? this._binaryLanes(plan.binaryPairs) : [], (lane) =>
-      plan.backend.subscribeLane(this.id, this._inc, lane, (framed, info) => this._onBinary(framed, info)),
+      getRoomBackend().subscribeLane(this.id, this._inc, lane, (framed, info) => this._onBinary(framed, info)),
     )
-    if (plan.binaryPairs.length === 0) this._demand.sync([])
-    else {
-      void this._binaryReady()
-        .then(() => {
-          const currentWants = this._aggregateBinaryWants()
-          this._demand.sync(this._state.closed ? [] : this._binaryPairs(currentWants, this._state.listMemberIds()))
-        })
-        .catch(reportRoomError)
-    }
+    if (plan.binaryPairs.length === 0) return this._demand.sync([])
+    // Demand is reported once the lanes are ready, so an encoder started on demand loses no frames.
+    void this._binaryReady()
+      .then(() => {
+        const currentWants = this._aggregateBinaryWants()
+        this._demand.sync(this._state.closed ? [] : this._binaryPairs(currentWants, this._state.listMemberIds()))
+      })
+      .catch(reportRoomError)
   }
 
   private _syncInbox(plan: SubscriptionPlan): void {
@@ -888,7 +872,7 @@ class ServerRoom extends RoomStateView implements Room {
         ? this._ownedMemberIds().map((member) => ({ key: member, value: { kind: 'inbox', member } as const }))
         : [],
       (lane) =>
-        plan.backend.subscribeLane(this.id, this._inc, lane, (payload, info) =>
+        getRoomBackend().subscribeLane(this.id, this._inc, lane, (payload, info) =>
           this._onDm(decodeRoomText(payload), info),
         ),
     )
@@ -994,24 +978,19 @@ class ServerRoom extends RoomStateView implements Room {
     return this._pendingRefresh
   }
 
+  /** A roster read that raced a membership event is retried, so the committed snapshot never undoes a newer event. */
   private async _runMemberRefresh(): Promise<void> {
     for (let attempt = 0; !this._state.closed; attempt++) {
       const version = this._state.membershipVersion
       const members = await readAllMembers(this.id, this._inc)
-      if (this._commitRefreshedRoster(version, members) === 'done') return
+      if (this._state.membershipVersion === version) {
+        const drifted = this._state.reconcileCompleteRoster(members)
+        this._syncSubs()
+        if (drifted) for (const stub of this._stubs) stub._relayEvent({ __r: 'roster', members: this._visibleRoster() })
+        return
+      }
       if (attempt === ROOM_REPLAN_LIMIT) throw new RoomError(`Room roster refresh contention: ${this.id}`)
     }
-  }
-  private _commitRefreshedRoster(version: number, members: MemberSnapshot[]): 'retry' | 'done' {
-    if (this._state.membershipVersion !== version) return 'retry'
-    const drifted = this._state.reconcileCompleteRoster(members)
-    this._syncSubs()
-    if (drifted) this._relayVisibleRoster()
-    return 'done'
-  }
-  private _relayVisibleRoster(): void {
-    const members = this._state.snapshotMembers().filter((member) => !member.hidden)
-    for (const stub of this._stubs) stub._relayEvent({ __r: 'roster', members })
   }
   // Graceful departures use events; heartbeats refresh owner `seenAt` and reap records orphaned by hard crashes.
   private _ownedMemberIds(): string[] {
