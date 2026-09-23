@@ -144,6 +144,12 @@ export class RedisBackend implements BroadcastDriver, RoomDriver {
       throw new Error(
         'RedisBackend: at-most-once requires maxRetriesPerRequest: 0 (standalone Redis), or retryDelayOnFailover: 0 and redisOptions.maxRetriesPerRequest: 0 (Cluster); reconnectOnError must be unset',
       )
+    const keyPrefix =
+      options.redis instanceof Cluster ? options.redis.options.redisOptions?.keyPrefix : options.redis.options.keyPrefix
+    if (keyPrefix)
+      throw new Error(
+        "RedisBackend: ioredis keyPrefix isn't supported — it doesn't apply to Pub/Sub channels. Use installRedis(redis, { prefix }) instead",
+      )
     this._publisher = options.redis
     const createSubscriber = async (): Promise<Redis> => {
       let source: Redis

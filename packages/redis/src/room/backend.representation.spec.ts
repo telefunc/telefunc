@@ -20,3 +20,13 @@ test('requires explicit never-resend playground clients', () => {
   for (const redis of defaults) expect(() => new RedisBackend({ redis })).toThrow(message)
   for (const redis of safe) expect(() => new RedisBackend({ redis })).not.toThrow()
 })
+
+test("rejects an ioredis keyPrefix, which Pub/Sub channel names don't get", () => {
+  const nodes = [{ host: '127.0.0.1', port: 6379 }]
+  const prefixed = [
+    new Redis('redis://127.0.0.1:6379', { maxRetriesPerRequest: 0, keyPrefix: 'app:' }),
+    new Cluster(nodes, { retryDelayOnFailover: 0, redisOptions: { maxRetriesPerRequest: 0, keyPrefix: 'app:' } }),
+  ]
+  onTestFinished(() => prefixed.forEach((redis) => redis.disconnect()))
+  for (const redis of prefixed) expect(() => new RedisBackend({ redis })).toThrow('keyPrefix')
+})
