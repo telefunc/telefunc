@@ -146,14 +146,14 @@ export class RedisBackend implements BroadcastDriver, RoomDriver {
     }
   }
 
-  async readHead(roomId: string): Promise<{ head: RoomHead } | null> {
+  async readHead(roomId: string): Promise<RoomHead | null> {
     this._assertLive()
     const reply = JSON.parse(
       (await this._call(REDIS_ROOM_COMMANDS.readHead.name, [
         ...REDIS_ROOM_COMMAND_KEYS.readHead(this._prefix, roomId),
       ])) as string,
     ) as { head: StoredHead | null }
-    return reply.head === null ? null : { head: toPublicHead(reply.head) }
+    return reply.head === null ? null : toPublicHead(reply.head)
   }
 
   async compareExchangeHead(

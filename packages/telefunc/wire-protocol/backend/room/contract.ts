@@ -73,7 +73,7 @@ type RoomSubscriptionSource = {
 
 /** Raw author contract for durable Room storage and subscriptions. */
 type RoomDriver = {
-  readHead(roomId: string): Promise<{ head: RoomHead } | null>
+  readHead(roomId: string): Promise<RoomHead | null>
   compareExchangeHead(
     roomId: string,
     cx: HeadCx,

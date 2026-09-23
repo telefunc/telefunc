@@ -144,13 +144,13 @@ async function tryCreateRoom(id: string, options: RoomOptions | undefined): Prom
   const { meta } = normalizeOptions(options)
   const backend = getRoomBackend()
   let current = await backend.readHead(id)
-  if (current?.head.state === 'closing') {
-    const closing = await acquireClosingLease(backend, id, current.head)
+  if (current?.state === 'closing') {
+    const closing = await acquireClosingLease(backend, id, current)
     if (closing === null || !(await finishClose(backend, id, closing))) return { kind: 'closing' }
     current = await backend.readHead(id)
   }
-  if (current?.head.state === 'closed') await cleanupFinalizedIncarnation(backend, id, current.head)
-  if (current !== null && current.head.state !== 'closed') return { kind: 'exists' }
+  if (current?.state === 'closed') await cleanupFinalizedIncarnation(backend, id, current)
+  if (current !== null && current.state !== 'closed') return { kind: 'exists' }
   const created: RoomConfigRecord = {
     meta,
     at: Date.now(),
@@ -159,7 +159,7 @@ async function tryCreateRoom(id: string, options: RoomOptions | undefined): Prom
   }
   const result = await backend.compareExchangeHead(
     id,
-    current === null ? { form: 'absent' } : { form: 'rev', rev: current.head.rev },
+    current === null ? { form: 'absent' } : { form: 'rev', rev: current.rev },
     { head: { currentInc: created.inc, state: 'open', config: encodeRoomConfig(created) } },
   )
   if ('conflict' in result) {
@@ -285,7 +285,7 @@ async function writeRoomConfig(
     const next = { meta: computeMeta(currentConfig.meta), at: Math.max(Date.now(), currentConfig.at + 1), by }
     const result = await backend.compareExchangeHead(
       id,
-      { form: 'rev', rev: current.head.rev },
+      { form: 'rev', rev: current.rev },
       { head: { currentInc: config.inc, state: 'open', config: encodeRoomConfig({ ...next, inc: config.inc }) } },
     )
     return 'conflict' in result ? CX_CONFLICT : next
@@ -299,11 +299,11 @@ async function closeRoom(id: string): Promise<void> {
   for (;;) {
     const current = await backend.readHead(id)
     if (current === null) return
-    if (current.head.state === 'closed') {
-      await cleanupFinalizedIncarnation(backend, id, current.head)
+    if (current.state === 'closed') {
+      await cleanupFinalizedIncarnation(backend, id, current)
       return
     }
-    const closing = await acquireClosingLease(backend, id, current.head)
+    const closing = await acquireClosingLease(backend, id, current)
     if (closing !== null && (await finishClose(backend, id, closing))) return
     await new Promise((resolve) => setTimeout(resolve, 100))
   }

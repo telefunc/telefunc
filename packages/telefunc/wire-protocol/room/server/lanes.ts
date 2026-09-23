@@ -59,9 +59,9 @@ function configFromHead(head: RoomHead): RoomConfigRecord {
 }
 
 /** The config of an open head, and only of `inc` when given. */
-function openConfig(current: { head: RoomHead } | null, inc?: string): RoomConfigRecord | null {
-  if (current?.head.state !== 'open' || (inc !== undefined && current.head.currentInc !== inc)) return null
-  return configFromHead(current.head)
+function openConfig(current: RoomHead | null, inc?: string): RoomConfigRecord | null {
+  if (current?.state !== 'open' || (inc !== undefined && current.currentInc !== inc)) return null
+  return configFromHead(current)
 }
 
 async function commitRoomLane(

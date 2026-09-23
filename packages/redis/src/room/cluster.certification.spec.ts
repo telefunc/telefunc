@@ -128,7 +128,7 @@ describe('Redis real three-master Cluster CI certification', () => {
       const time = vi.spyOn(client, 'time').mockImplementation(async () => {
         throw new Error('control: keyless TIME escaped the room slot')
       })
-      expect((await authority.readHead(roomId))?.head.currentInc).toBe(inc)
+      expect((await authority.readHead(roomId))?.currentInc).toBe(inc)
       const cells = await backend.readCells(roomId, inc, { keys: [] })
       time.mockRestore()
       if ('staleInc' in cells) throw new Error('fresh generation was unexpectedly stale')
@@ -315,7 +315,7 @@ describe('Redis real three-master Cluster CI certification', () => {
     const recreated = `${inc}-recreated`
     const reinstall = async (): Promise<void> => {
       const tombstone = await authority.readHead(roomId)
-      await open(authority, roomId, recreated, tombstone?.head.rev)
+      await open(authority, roomId, recreated, tombstone?.rev)
       await writeCell(recreated, 'new')
     }
     if (begin === undefined) {
@@ -342,13 +342,13 @@ describe('Redis real three-master Cluster CI certification', () => {
       await open(authority, roomId, inc)
       releaseDrop.resolve()
       await dropping
-      expect((await authority.readHead(roomId))?.head.currentInc).toBe(inc)
+      expect((await authority.readHead(roomId))?.currentInc).toBe(inc)
       expect(await client.smembers(gensKey(prefix, roomId))).toContain(inc)
       if (begin !== undefined) commands.tfRoomDropGenerationBegin = begin
       await writeCell(inc, 'old')
       const active = await authority.readHead(roomId)
       if (active === null) throw new Error('installed generation lost its head')
-      await close(authority, roomId, active.head)
+      await close(authority, roomId, active)
       vi.spyOn(client, 'smembers').mockImplementation((async (key: string) => {
         if (key === `${genPrefix(prefix, roomId, inc)}:keys` && !inventoryHeld) {
           inventoryHeld = true

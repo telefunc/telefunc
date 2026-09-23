@@ -177,10 +177,10 @@ export class MemoryBackend implements BroadcastDriver, RoomDriver {
     return { ...mark, receivers: delivered, meta: { delivered, transport: 'in-memory' } }
   }
 
-  async readHead(roomId: string): Promise<{ head: RoomHead } | null> {
+  async readHead(roomId: string): Promise<RoomHead | null> {
     this.#assertLive()
     const head = this.#readAndExpireHead(this.#state.rooms.get(roomId))
-    return head === null ? null : { head: publicHead(head) }
+    return head === null ? null : publicHead(head)
   }
 
   async compareExchangeHead(

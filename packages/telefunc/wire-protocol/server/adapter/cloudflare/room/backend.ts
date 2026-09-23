@@ -158,9 +158,8 @@ export class CloudflareRoomBackend implements BroadcastDriver, RoomDriver {
     return this.broadcast.publish(lane, payload)
   }
 
-  async readHead(roomId: string): Promise<{ head: RoomHead } | null> {
-    const head = await this.#stub(roomId).readHead()
-    return head === null ? null : { head }
+  async readHead(roomId: string): Promise<RoomHead | null> {
+    return this.#stub(roomId).readHead()
   }
   async compareExchangeHead(roomId: string, cx: HeadCx, next: HeadNext) {
     return this.#stub(roomId).compareExchangeHead(cx, next)

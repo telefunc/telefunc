@@ -194,7 +194,7 @@ describe('Room public behavior', () => {
     await Room.close('lifecycle')
     expect(closed).toBe(1)
     expect(memberLeaves).toBe(1)
-    expect((await driver.readHead('lifecycle'))?.head).toMatchObject({ state: 'closed', currentInc: null })
+    expect(await driver.readHead('lifecycle')).toMatchObject({ state: 'closed', currentInc: null })
     expect([...memoryState.rooms.get('lifecycle')!.gens.keys()]).toEqual([])
     expect((await driver.directoryList('lifecycle')).entries).toEqual([])
     await expect(room.join()).rejects.toThrow(/closed/i)
@@ -211,7 +211,7 @@ describe('Room public behavior', () => {
       await put(roomId, inc)
     })
     await expect(Room.create('index-repair')).rejects.toThrow('index registration failure')
-    const open = (await driver.readHead('index-repair'))!.head
+    const open = (await driver.readHead('index-repair'))!
     expect(open).toMatchObject({ state: 'open', currentInc: expect.any(String) })
     expect(((await Room.getOrCreate('index-repair')) as ServerRoom)._inc).toBe(open.currentInc)
     expect((await Room.list()).map(({ id }) => id)).toContain('index-repair')
@@ -219,7 +219,7 @@ describe('Room public behavior', () => {
   it('waits for an active close lease and takes over until the head is closed', async () => {
     vi.useFakeTimers()
     const room = (await Room.create('concurrent-close')) as ServerRoom
-    const current = (await driver.readHead(room.id))!.head
+    const current = (await driver.readHead(room.id))!
     const leased = await driver.compareExchangeHead(
       room.id,
       { form: 'rev', rev: current.rev },
@@ -240,14 +240,14 @@ describe('Room public behavior', () => {
     })
     await vi.advanceTimersByTimeAsync(900)
     expect(settled).toBe(false)
-    expect((await driver.readHead(room.id))?.head).toMatchObject({
+    expect(await driver.readHead(room.id)).toMatchObject({
       currentInc: room._inc,
       state: 'closing',
       closeLease: { id: leased.head.closeLease?.id },
     })
     await vi.advanceTimersByTimeAsync(200)
     await closing
-    expect((await driver.readHead(room.id))?.head).toMatchObject({ state: 'closed', currentInc: null })
+    expect(await driver.readHead(room.id)).toMatchObject({ state: 'closed', currentInc: null })
   })
   it('retries generation cleanup after the head was durably finalized', async () => {
     const room = (await Room.create('finalized-cleanup-retry')) as ServerRoom
@@ -255,7 +255,7 @@ describe('Room public behavior', () => {
     await room.join()
     vi.spyOn(driver, 'dropGeneration').mockRejectedValueOnce(new Error('transient generation cleanup failure'))
     await expect(Room.close(room.id)).rejects.toThrow('transient generation cleanup failure')
-    expect((await driver.readHead(room.id))?.head).toMatchObject({ state: 'closed', currentInc: null })
+    expect(await driver.readHead(room.id)).toMatchObject({ state: 'closed', currentInc: null })
     expect([...memoryState.rooms.get(room.id)!.gens.keys()]).toEqual([inc])
     await expect(Room.close(room.id)).resolves.toBeUndefined()
     expect([...memoryState.rooms.get(room.id)!.gens.keys()]).toEqual([])
@@ -265,7 +265,7 @@ describe('Room public behavior', () => {
     vi.useFakeTimers()
     const room = (await Room.create('get-or-create-closing')) as ServerRoom
     const firstInc = room._inc
-    const current = (await driver.readHead(room.id))!.head
+    const current = (await driver.readHead(room.id))!
     await driver.compareExchangeHead(
       room.id,
       { form: 'rev', rev: current.rev },
@@ -279,7 +279,7 @@ describe('Room public behavior', () => {
       },
     )
     await expect(Room.getOrCreate(room.id)).rejects.toThrow(`Room is closing: ${room.id}`)
-    expect((await driver.readHead(room.id))?.head).toMatchObject({
+    expect(await driver.readHead(room.id)).toMatchObject({
       currentInc: firstInc,
       state: 'closing',
       closeLease: { id: 'active-get-or-create-close' },
@@ -576,7 +576,7 @@ describe('Room public behavior', () => {
     observer.subscribe(() => {})
     await vi.advanceTimersByTimeAsync(ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS + 100)
     const textSlot = subsOf(observer)._semantic
-    expect((await backend.readHead(observer.id))?.head.state).toBe('open')
+    expect((await backend.readHead(observer.id))?.state).toBe('open')
     expect({ closed: observer.isClosed, onClose: onClose.mock.calls.length }).toEqual({ closed: false, onClose: 0 })
     expect(textSlot).toMatchObject({ wanted: true, active: false })
   })
@@ -1002,7 +1002,7 @@ describe('Room public behavior', () => {
     await expect(Room.send(room.id, { id: exact.id }, 'late')).rejects.toThrow(
       `Participant not found (left?): ${exact.id}`,
     )
-    expect((await driver.readHead(room.id))?.head.state).toBe('open')
+    expect((await driver.readHead(room.id))?.state).toBe('open')
   })
   it('drains DMs that arrived before a participant was bound to its client forwarder', async () => {
     const room = await Room.create('pre-bind-inbox')
