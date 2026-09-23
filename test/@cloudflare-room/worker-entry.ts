@@ -2,7 +2,7 @@
 import { DurableObject, env as workerEnv } from 'cloudflare:workers'
 import '../../packages/telefunc/node/server/async_hooks.js'
 import { installBackend } from '../../packages/telefunc/wire-protocol/backend/install.js'
-import type { RoomHead } from '../../packages/telefunc/wire-protocol/backend/room/contract.js'
+import type { HeadCxResult, RoomHead } from '../../packages/telefunc/wire-protocol/backend/room/contract.js'
 import { Room } from '../../packages/telefunc/wire-protocol/room/server/statics.js'
 import {
   CloudflareRoomBackend,
@@ -16,7 +16,6 @@ import {
   TelefuncRoomDurableObject as ProductionRoomDurableObject,
   createTelefuncRoomDurableObjectClass,
   type CommitWire,
-  type HeadCxResult,
 } from '../../packages/telefunc/wire-protocol/server/adapter/cloudflare/room/do.js'
 import { CloudflareBroadcastTransport } from '../../packages/telefunc/wire-protocol/server/adapter/cloudflare/broadcast.js'
 import {
@@ -242,7 +241,7 @@ async function nativeRpcRoundTrip(env: Env, suffix: string) {
   const initialCells = await probe.authority.readCells(probe.inc, { keys: ['native'] })
   if ('staleInc' in initialCells) throw new Error('native RPC cell read was stale')
   const cellResult = await probe.authority.compareExchangeCells(probe.inc, initialCells.revision, [
-    { key: 'native', set: { bytes: new Uint8Array([0x44, 0x55]) } },
+    { key: 'native', bytes: new Uint8Array([0x44, 0x55]) },
   ])
   if (cellResult !== 'committed') throw new Error(`native RPC cell write returned ${cellResult}`)
   const storedCells = await probe.authority.readCells(probe.inc, { keys: ['native'] })

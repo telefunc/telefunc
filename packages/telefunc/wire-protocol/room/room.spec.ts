@@ -232,7 +232,7 @@ describe('Room public behavior', () => {
         },
       },
     )
-    expect(leased).toMatchObject({ ok: true, head: { state: 'closing' } })
+    expect(leased).toMatchObject({ head: { state: 'closing' } })
     if (!('head' in leased)) throw new Error('expected an active close lease')
     let settled = false
     const closing = Room.close(room.id).then(() => {
@@ -642,7 +642,7 @@ describe('Room public behavior', () => {
       driver.compareExchangeCells(room.id, room._inc, read.revision, [
         {
           key: memberKey,
-          set: { bytes: encoder.encode(stringify({ ...record, seenAt: Date.now() - ROOM_MEMBER_TTL_MS - 1 })) },
+          bytes: encoder.encode(stringify({ ...record, seenAt: Date.now() - ROOM_MEMBER_TTL_MS - 1 })),
         },
       ]),
     ).resolves.toBe('committed')
@@ -697,15 +697,13 @@ describe('Room public behavior', () => {
       compareExchange(room.id, room._inc, initial.revision, [
         {
           key: memberKey,
-          set: {
-            bytes: encoder.encode(stringify({ ...initialRecord, seenAt: Date.now() - ROOM_MEMBER_TTL_MS - 1 })),
-          },
+          bytes: encoder.encode(stringify({ ...initialRecord, seenAt: Date.now() - ROOM_MEMBER_TTL_MS - 1 })),
         },
       ]),
     ).resolves.toBe('committed')
     let raced = false
     vi.spyOn(driver, 'compareExchangeCells').mockImplementation(async (roomId, inc, revision, mutations) => {
-      if (!raced && mutations.some(({ key, set }) => key === memberKey && set === undefined)) {
+      if (!raced && mutations.some(({ key, bytes }) => key === memberKey && bytes === null)) {
         raced = true
         const fresh = await driver.readCells(roomId, inc, { keys: [memberKey] })
         expect('staleInc' in fresh).toBe(false)
@@ -717,7 +715,7 @@ describe('Room public behavior', () => {
           compareExchange(roomId, inc, fresh.revision, [
             {
               key: memberKey,
-              set: { bytes: encoder.encode(stringify({ ...record, seenAt: Date.now() })) },
+              bytes: encoder.encode(stringify({ ...record, seenAt: Date.now() })),
             },
           ]),
         ).resolves.toBe('committed')
@@ -1330,7 +1328,8 @@ describe('Room public behavior', () => {
     const memberKey = memberCellKey(member.id)
     const compareExchange = driver.compareExchangeCells.bind(driver)
     vi.spyOn(driver, 'compareExchangeCells').mockImplementation(async (roomId, inc, revision, mutations) => {
-      if (mutations.some((mutation) => mutation.key === memberKey && 'set' in mutation)) throw new Error('crashed')
+      if (mutations.some((mutation) => mutation.key === memberKey && mutation.bytes !== null))
+        throw new Error('crashed')
       return compareExchange(roomId, inc, revision, mutations)
     })
     vi.spyOn(console, 'error').mockImplementation(() => {})
@@ -1541,7 +1540,9 @@ describe('Room public behavior', () => {
     expect(await driver.commitLane(room.id, 'other-inc', semantic, payload)).toEqual({ stale: 'incarnation' })
     const current = await driver.readCells(room.id, room._inc, { keys: [memberCellKey(member.id)] })
     if ('staleInc' in current) throw new Error('room went stale')
-    await driver.compareExchangeCells(room.id, room._inc, current.revision, [{ key: memberCellKey(member.id) }])
+    await driver.compareExchangeCells(room.id, room._inc, current.revision, [
+      { key: memberCellKey(member.id), bytes: null },
+    ])
     const target = await room.join()
     const readCells = vi.spyOn(driver, 'readCells')
     const readHead = vi.spyOn(driver, 'readHead')
@@ -2441,12 +2442,12 @@ describe('room binary protocol validation', () => {
       { form: 'absent' },
       { head: { state: 'open', currentInc: 'inc-1', config: encoder.encode('config') } },
     )
-    if (!('ok' in created) || !('head' in created)) throw new Error('head create failed')
+    if (!('head' in created)) throw new Error('head create failed')
     const cells = await backend.readCells('spi', 'inc-1', { keys: ['member'] })
     if (!('revision' in cells)) throw new Error('cell read fenced unexpectedly')
     expect(
       await backend.compareExchangeCells('spi', 'inc-1', cells.revision, [
-        { key: 'member', set: { bytes: encoder.encode('Alice') } },
+        { key: 'member', bytes: encoder.encode('Alice') },
       ]),
     ).toBe('committed')
     expect(await backend.compareExchangeCells('spi', 'inc-1', cells.revision, [])).toBe('conflict')
@@ -2472,9 +2473,9 @@ describe('room binary protocol validation', () => {
     expect(decoder.decode((await backend.readRetained('spi', 'inc-1', semanticLane))!.payload)).toBe('one')
     const currentCells = await backend.readCells('spi', 'inc-1', { keys: ['member'] })
     if ('staleInc' in currentCells) throw new Error('cell fence generation vanished')
-    expect(await backend.compareExchangeCells('spi', 'inc-1', currentCells.revision, [{ key: 'member' }])).toBe(
-      'committed',
-    )
+    expect(
+      await backend.compareExchangeCells('spi', 'inc-1', currentCells.revision, [{ key: 'member', bytes: null }]),
+    ).toBe('committed')
     expect(
       await backend.commitLane('spi', 'inc-1', semanticLane, encoder.encode('fenced'), {
         requiredCellKeys: ['member'],
@@ -2493,7 +2494,7 @@ describe('room binary protocol validation', () => {
         },
       },
     )
-    if (!('ok' in closing) || !('head' in closing) || closing.head.closeLease === undefined) {
+    if (!('head' in closing) || closing.head.closeLease === undefined) {
       throw new Error('head close failed')
     }
     const closed = await backend.compareExchangeHead(
@@ -2501,13 +2502,13 @@ describe('room binary protocol validation', () => {
       { form: 'finalize', rev: closing.head.rev, lease: closing.head.closeLease.id },
       { head: { state: 'closed', currentInc: null, config: closing.head.config }, ttlMs: 60_000 },
     )
-    if (!('ok' in closed) || !('head' in closed)) throw new Error('head finalize failed')
+    if (!('head' in closed)) throw new Error('head finalize failed')
     const reopened = await backend.compareExchangeHead(
       'spi',
       { form: 'rev', rev: closed.head.rev },
       { head: { state: 'open', currentInc: 'inc-2', config: closed.head.config } },
     )
-    expect(reopened).toMatchObject({ ok: true, head: { state: 'open', currentInc: 'inc-2' } })
+    expect(reopened).toMatchObject({ head: { state: 'open', currentInc: 'inc-2' } })
     expect(await backend.commitLane('spi', 'inc-1', semanticLane, encoder.encode('stale'))).toEqual({
       stale: 'incarnation',
     })
@@ -2532,7 +2533,7 @@ describe('room binary protocol validation', () => {
       { form: 'absent' },
       { head: { state: 'open', currentInc: 'inc-1', config: encoder.encode('config') } },
     )
-    if (!('ok' in created) || !('head' in created)) throw new Error('head create failed')
+    if (!('head' in created)) throw new Error('head create failed')
     let nestedMark: { seq: number; timestamp: number } | undefined
     const subscription = backend.subscribeLane('order-survivor', 'inc-1', semanticLane, async (payload) => {
       if (decoder.decode(payload) !== 'outer') return
@@ -2568,7 +2569,7 @@ describe('room binary protocol validation', () => {
       { form: 'absent' },
       { head: { state: 'open', currentInc: 'inc-1', config: encoder.encode('config') } },
     )
-    if (!('ok' in opened) || !('head' in opened)) throw new Error('head create failed')
+    if (!('head' in opened)) throw new Error('head create failed')
     const delegated = vi.spyOn(driver, 'compareExchangeHead')
     for (const durationMs of [0, Number.POSITIVE_INFINITY]) {
       await expect(

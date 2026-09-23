@@ -11,6 +11,7 @@ import type {
   BroadcastDriver,
   BroadcastLane,
   CellMutation,
+  HeadCxResult,
   CommitResult,
   CxResult,
   HeadCx,
@@ -156,11 +157,7 @@ export class RedisBackend implements BroadcastDriver, RoomDriver {
     return reply.head === null ? null : toPublicHead(reply.head)
   }
 
-  async compareExchangeHead(
-    roomId: string,
-    cx: HeadCx,
-    next: HeadNext,
-  ): Promise<{ ok: true; head: RoomHead } | { conflict: true; current: RoomHead | null }> {
+  async compareExchangeHead(roomId: string, cx: HeadCx, next: HeadNext): Promise<HeadCxResult> {
     this._assertLive()
     const reply = (await this._call(REDIS_ROOM_COMMANDS.headCx.name, [
       ...REDIS_ROOM_COMMAND_KEYS.headCx(this._prefix, roomId),
@@ -168,7 +165,7 @@ export class RedisBackend implements BroadcastDriver, RoomDriver {
       encodeNext(next),
     ])) as string
     const parsed = JSON.parse(reply) as HeadCxReply
-    if (parsed.tag === 'head') return { ok: true, head: toPublicHead(parsed.head) }
+    if (parsed.tag === 'head') return { head: toPublicHead(parsed.head) }
     return { conflict: true, current: parsed.current === null ? null : toPublicHead(parsed.current) }
   }
 
@@ -215,10 +212,10 @@ export class RedisBackend implements BroadcastDriver, RoomDriver {
     )
     const argv: Array<string | Buffer> = [inc, revision]
     for (const mutation of mutations) {
-      if (mutation.set === undefined) {
+      if (mutation.bytes === null) {
         argv.push('del', '')
       } else {
-        argv.push('set', toBuffer(mutation.set.bytes))
+        argv.push('set', toBuffer(mutation.bytes))
       }
     }
     const reply = (await this._call(REDIS_ROOM_COMMANDS.cellsCx.name, [

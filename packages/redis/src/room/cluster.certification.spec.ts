@@ -134,7 +134,7 @@ describe('Redis real three-master Cluster CI certification', () => {
       if ('staleInc' in cells) throw new Error('fresh generation was unexpectedly stale')
       expect(
         await backend.compareExchangeCells(roomId, inc, cells.revision, [
-          { key: 'cell} escape', set: { bytes: bytes('value') } },
+          { key: 'cell} escape', bytes: bytes('value') },
         ]),
       ).toBe('committed')
       const firstSubscription = subscribe(backend, roomId, inc, () => {})
@@ -147,9 +147,9 @@ describe('Redis real three-master Cluster CI certification', () => {
       ).delivery
       const currentCells = await backend.readCells(roomId, inc, { keys: ['cell} escape'] })
       if ('staleInc' in currentCells) throw new Error('cell fence generation vanished')
-      expect(await backend.compareExchangeCells(roomId, inc, currentCells.revision, [{ key: 'cell} escape' }])).toBe(
-        'committed',
-      )
+      expect(
+        await backend.compareExchangeCells(roomId, inc, currentCells.revision, [{ key: 'cell} escape', bytes: null }]),
+      ).toBe('committed')
       expect(
         await backend.commitLane(roomId, inc, SEMANTIC_LANE, bytes('fenced'), { requiredCellKeys: ['cell} escape'] }),
       ).toEqual({ stale: 'cell', key: 'cell} escape' })
@@ -307,7 +307,7 @@ describe('Redis real three-master Cluster CI certification', () => {
       if ('staleInc' in read) throw new Error('installed generation was stale')
       expect(
         await authority.compareExchangeCells(roomId, generation, read.revision, [
-          { key: 'survivor', set: { bytes: bytes(value) } },
+          { key: 'survivor', bytes: bytes(value) },
         ]),
       ).toBe('committed')
     }
@@ -672,7 +672,7 @@ async function open(
     tombstoneRev === undefined ? { form: 'absent' } : { form: 'rev', rev: tombstoneRev },
     { head: { currentInc: inc, state: 'open', config: bytes('redis-cluster-ci') } },
   )
-  if (!('ok' in result) || !('head' in result)) throw new Error(`failed to open '${roomId}'`)
+  if (!('head' in result)) throw new Error(`failed to open '${roomId}'`)
   return result.head
 }
 async function close(
@@ -693,13 +693,13 @@ async function close(
       },
     },
   )
-  if (!('ok' in closing) || !('head' in closing)) throw new Error(`failed to enter closing for '${roomId}'`)
+  if (!('head' in closing)) throw new Error(`failed to enter closing for '${roomId}'`)
   const closed = await backend.compareExchangeHead(
     roomId,
     { form: 'finalize', rev: closing.head.rev, lease: leaseId },
     { head: { currentInc: null, state: 'closed', config: closing.head.config }, ttlMs: 60_000 },
   )
-  if (!('ok' in closed) || !('head' in closed)) throw new Error(`failed to finalize close for '${roomId}'`)
+  if (!('head' in closed)) throw new Error(`failed to finalize close for '${roomId}'`)
   return closed.head
 }
 function accepted(result: Awaited<ReturnType<ManagedBackend['commitLane']>>): CommitAccepted {

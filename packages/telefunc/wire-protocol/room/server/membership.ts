@@ -81,9 +81,9 @@ async function mutateCells<T>(
 
 /** Persist a join's member record and identity marker. */
 async function createMember(roomId: string, inc: string, id: string, record: RoomMemberRecord): Promise<void> {
-  const mutations: CellMutation[] = [{ key: memberCellKey(id), set: { bytes: encodeRoomRecord(record) } }]
+  const mutations: CellMutation[] = [{ key: memberCellKey(id), bytes: encodeRoomRecord(record) }]
   if (record.identity !== undefined)
-    mutations.push({ key: identityCellKey(record.identity, id), set: { bytes: new Uint8Array() } })
+    mutations.push({ key: identityCellKey(record.identity, id), bytes: new Uint8Array() })
   await mutateCells(roomId, inc, { keys: mutations.map(({ key }) => key) }, () => ({ value: undefined, mutations }))
 }
 
@@ -99,7 +99,7 @@ async function mutateMember<T>(
     const raw = cells.get(key)
     const { value, next } = update(raw === undefined ? null : decodeRoomRecord<RoomMemberRecord>(raw))
     if (next === undefined) return { value, mutations: [] }
-    return { value, mutations: [{ key, set: { bytes: encodeRoomRecord({ ...next, seenAt: Date.now() }) } }] }
+    return { value, mutations: [{ key, bytes: encodeRoomRecord({ ...next, seenAt: Date.now() }) }] }
   })
 }
 
@@ -152,8 +152,8 @@ async function evictMember(
       return {
         value: { cleanup: true },
         mutations: [
-          ...removedKeys.map((key) => ({ key })),
-          ...(pending ? [] : [{ key: cleanupKey, set: { bytes: encodeRoomRecord(cleanup) } }]),
+          ...removedKeys.map((key) => ({ key, bytes: null })),
+          ...(pending ? [] : [{ key: cleanupKey, bytes: encodeRoomRecord(cleanup) }]),
         ],
       }
     },
@@ -253,6 +253,6 @@ async function completeCleanup(roomId: string, inc: string, memberId: string, ra
   })
   await mutateCells(roomId, inc, { keys: [key] }, (cells) => ({
     value: undefined,
-    mutations: cells.has(key) ? [{ key }] : [],
+    mutations: cells.has(key) ? [{ key, bytes: null }] : [],
   }))
 }

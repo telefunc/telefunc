@@ -5,6 +5,7 @@ export type {
   StaleCommit,
   CxResult,
   HeadCx,
+  HeadCxResult,
   HeadNext,
   LaneId,
   RoomBackend,
@@ -43,11 +44,19 @@ type HeadCx =
   | { form: 'finalize'; rev: string; lease: string }
 
 type HeadNext = {
-  head: Omit<RoomHead, 'rev' | 'closeLease'> & { closeLease?: { id: string; durationMs: number } }
+  head: {
+    currentInc: string | null
+    state: RoomHead['state']
+    config: Uint8Array
+    closeLease?: { id: string; durationMs: number }
+  }
   ttlMs?: number
 }
 
-type CellMutation = { key: string; set?: { bytes: Uint8Array } }
+type HeadCxResult = { head: RoomHead } | { conflict: true; current: RoomHead | null }
+
+/** `bytes: null` deletes the cell. */
+type CellMutation = { key: string; bytes: Uint8Array | null }
 
 type CxResult = 'committed' | 'conflict' | 'stale-inc'
 
@@ -74,11 +83,7 @@ type RoomSubscriptionSource = {
 /** Raw author contract for durable Room storage and subscriptions. */
 type RoomDriver = {
   readHead(roomId: string): Promise<RoomHead | null>
-  compareExchangeHead(
-    roomId: string,
-    cx: HeadCx,
-    next: HeadNext,
-  ): Promise<{ ok: true; head: RoomHead } | { conflict: true; current: RoomHead | null }>
+  compareExchangeHead(roomId: string, cx: HeadCx, next: HeadNext): Promise<HeadCxResult>
   readCells(
     roomId: string,
     inc: string,

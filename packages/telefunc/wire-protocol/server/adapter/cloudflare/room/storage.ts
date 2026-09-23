@@ -6,7 +6,7 @@ import { headCxMatches, nextOrderMark, type OrderMark } from '../../../../backen
 export type { OrderMark }
 export type StoredHead = RoomHead & { expiresAt: number | null }
 
-type HeadCxOutcome = { ok: true; head: StoredHead } | { conflict: true; current: StoredHead | null }
+type HeadCxOutcome = { head: StoredHead } | { conflict: true; current: StoredHead | null }
 
 // Row shapes as SQLite hands them back (BLOB columns arrive as ArrayBuffer).
 type HeadRow = {
@@ -117,7 +117,7 @@ export function compareExchangeHead(
 ): HeadCxOutcome {
   const current = readLiveHead(sql, now)
   if (!headCxMatches(cx, current, now)) return { conflict: true, current }
-  return { ok: true, head: storeHead(sql, next, now, mintRev) }
+  return { head: storeHead(sql, next, now, mintRev) }
 }
 
 function storeHead(sql: SqlStorage, next: HeadNext, now: number, mintRev: () => string): StoredHead {
@@ -196,10 +196,10 @@ export function compareExchangeCells(
   if (head === null || head.currentInc !== inc || head.state !== 'open') return 'stale-inc'
   if (String(readRevision(sql, inc)) !== revision) return 'conflict'
   for (const mutation of mutations) {
-    if (mutation.set === undefined) {
+    if (mutation.bytes === null) {
       sql.exec('DELETE FROM cell WHERE inc = ? AND key = ?', inc, mutation.key)
     } else {
-      sql.exec('INSERT OR REPLACE INTO cell (inc, key, bytes) VALUES (?, ?, ?)', inc, mutation.key, mutation.set.bytes)
+      sql.exec('INSERT OR REPLACE INTO cell (inc, key, bytes) VALUES (?, ?, ?)', inc, mutation.key, mutation.bytes)
     }
   }
   sql.exec('UPDATE gen SET revision = revision + 1 WHERE inc = ?', inc)

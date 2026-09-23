@@ -4,6 +4,7 @@ import type { BroadcastDriver, BroadcastLane, PublishResult } from '../broadcast
 import { broadcastRouteKey } from '../broadcast/route-key.js'
 import type {
   CellMutation,
+  HeadCxResult,
   CommitResult,
   CxResult,
   HeadCx,
@@ -183,18 +184,14 @@ export class MemoryBackend implements BroadcastDriver, RoomDriver {
     return head === null ? null : publicHead(head)
   }
 
-  async compareExchangeHead(
-    roomId: string,
-    cx: HeadCx,
-    next: HeadNext,
-  ): Promise<{ ok: true; head: RoomHead } | { conflict: true; current: RoomHead | null }> {
+  async compareExchangeHead(roomId: string, cx: HeadCx, next: HeadNext): Promise<HeadCxResult> {
     this.#assertLive()
     const current = this.#readAndExpireHead(this.#state.rooms.get(roomId))
     if (!headCxMatches(cx, current, this.#now())) {
       return { conflict: true, current: current === null ? null : publicHead(current) }
     }
     // Only a CX that actually applies materializes a room record.
-    return { ok: true, head: publicHead(this.#storeHead(this.#roomFor(roomId), next)) }
+    return { head: publicHead(this.#storeHead(this.#roomFor(roomId), next)) }
   }
 
   #storeHead(room: RoomRecord, next: HeadNext): StoredHead {
@@ -249,8 +246,8 @@ export class MemoryBackend implements BroadcastDriver, RoomDriver {
     const gen = this.#generation(room, inc)
     if (String(gen.revision) !== revision) return 'conflict'
     for (const mutation of mutations) {
-      if (mutation.set === undefined) gen.cells.delete(mutation.key)
-      else gen.cells.set(mutation.key, { bytes: copyBytes(mutation.set.bytes) })
+      if (mutation.bytes === null) gen.cells.delete(mutation.key)
+      else gen.cells.set(mutation.key, { bytes: copyBytes(mutation.bytes) })
     }
     gen.revision += 1
     return 'committed'

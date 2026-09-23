@@ -6,6 +6,7 @@ import type {
   CellMutation,
   CxResult,
   HeadCx,
+  HeadCxResult,
   HeadNext,
   LaneId,
   RoomHead,
@@ -41,7 +42,6 @@ import {
   type StoredHead,
 } from './storage.js'
 
-export type HeadCxResult = { ok: true; head: RoomHead } | { conflict: true; current: RoomHead | null }
 export type CellsResult = { revision: string; cells: Map<string, Uint8Array> } | { staleInc: true }
 export type CommitWire =
   | { accepted: true; seq: number; timestamp: number; receivers: number; deliveryToken: string }
@@ -106,7 +106,7 @@ export class TelefuncRoomDurableObject extends DurableObject {
     await this.#scheduleMaintenanceIfNeeded()
     if ('conflict' in outcome)
       return { conflict: true, current: outcome.current === null ? null : headForRpc(outcome.current) }
-    return { ok: true, head: headForRpc(outcome.head) }
+    return { head: headForRpc(outcome.head) }
   }
 
   async readCells(inc: string, sel: { keys: string[] } | { prefix: string }): Promise<CellsResult> {
