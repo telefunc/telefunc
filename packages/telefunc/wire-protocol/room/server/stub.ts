@@ -11,7 +11,7 @@ import { encodePublishBinary, encodePublishText, type WirePublishInfo } from '..
 import { ShieldValidationError } from '../../../shared/ShieldValidationError.js'
 import type { ChannelPublishAck } from '../../channel.js'
 import type { ServerLocalParticipant, ServerRoom } from './room.js'
-import { reportRoomError, roomAckError } from './errors.js'
+import { reportRoomError } from './errors.js'
 import {
   decodeParticipantFrame,
   decodeParticipantRequest,
@@ -25,7 +25,7 @@ import { ReplayGate, TEXT_LANE_KEY, binaryLaneKey, type LaneHolder } from './rep
 import { TailHold, type TailEntry } from './tail.js'
 import type { ParticipantMeta } from '../types.js'
 import { binaryWantsCovers, emptyBinaryWants, laneTrack, type BinaryFrame, type BinaryWants } from '../binary.js'
-import { DM_PARTICIPANT_LEFT, RoomError } from '../errors.js'
+import { DM_PARTICIPANT_LEFT, RoomError, roomAckError } from '../errors.js'
 import { leaveCauseToWire } from '../model.js'
 import {
   decodeDmReply,

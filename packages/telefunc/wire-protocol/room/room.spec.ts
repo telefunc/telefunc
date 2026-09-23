@@ -16,7 +16,7 @@ import {
   ROOM_TAIL_HOLD_MAX,
 } from './constants.js'
 import { DEFAULT_TRACK, decodeBinaryFrame, emptyTrackWants, encodeBinaryFrame, sanitizeBinaryWants } from './binary.js'
-import { RoomError, isRoomError } from './errors.js'
+import { RoomError, isRoomError, roomAckError, toRoomFailure } from './errors.js'
 import { leaveCauseFromWire, leaveCauseToWire, mergeAttributes, normalizeJoinOptions } from './model.js'
 import { hasRoomTag, type RoomSnapshotMetadata } from './protocol.js'
 import { MEMBER_CELL_PREFIX, identityCellPrefix, memberCellKey } from './server/membership.js'
@@ -28,7 +28,7 @@ import { Room } from './server/statics.js'
 import { ServerRoom, type ServerLocalParticipant } from './server/room.js'
 import { configFromHead, decodeRoomText, encodeRoomConfig } from './server/lanes.js'
 import type { LaneSubscription } from './server/lane-subscription.js'
-import { reportRoomError, roomAckError } from './server/errors.js'
+import { reportRoomError } from './server/errors.js'
 import { RoomParticipantStubChannel, RoomStubChannel } from './server/stub.js'
 import { ReplayGate } from './server/replay.js'
 import { TailHold } from './server/tail.js'
@@ -1882,6 +1882,13 @@ describe('client Room lifecycle', () => {
     expect(isRoomError(error)).toBe(true)
     expect(isShieldValidationError(error)).toBe(true)
     expect(roomAckError(error, vi.fn())).toEqual({ text: 'overlap', status: ACK_STATUS.ERROR })
+  })
+  it('renders a shield failure to the caller on both failure carriers, and reports no bug', () => {
+    const report = vi.fn()
+    const error = new ShieldValidationError('data.text should be a string')
+    expect(roomAckError(error, report)).toEqual({ text: error.message, status: ACK_STATUS.SHIELD_ERROR })
+    expect(toRoomFailure(error, report)).toEqual({ ok: false, err: error.message })
+    expect(report).not.toHaveBeenCalled()
   })
   it('keeps remote serializer backing unforgeable and exact-keyed', async () => {
     const room = await Room.create('remote-backing')
