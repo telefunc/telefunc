@@ -16,6 +16,7 @@ export type { TrackWants, BinaryWants, BinaryFrame }
 import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { assert, assertUsage } from '../../utils/assert.js'
+import { ROOM_WANTED_TRACKS_MAX } from './constants.js'
 import { isRecord } from './model.js'
 import type { BinaryPublishOptions } from './types.js'
 
@@ -197,7 +198,7 @@ function sanitizeBinaryWants(wants: unknown): BinaryWants | null {
 function sanitizeTrackWants(wants: unknown): TrackWants | null {
   if (!isRecord(wants) || typeof wants.all !== 'boolean' || !Array.isArray(wants.tracks)) return null
   // Bound by UTF-8 bytes, the same unit the frame path uses (`frameWithMemberId`) — a `.length` char count could admit a want that doesn't fit the frame's one-byte track-length field.
-  if (!wants.tracks.every(isRoomTrack)) return null
+  if (wants.tracks.length > ROOM_WANTED_TRACKS_MAX || !wants.tracks.every(isRoomTrack)) return null
   return { all: wants.all, tracks: wants.tracks as string[] }
 }
 function isRoomTrack(track: unknown): track is string {

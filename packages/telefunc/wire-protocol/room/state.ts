@@ -5,6 +5,7 @@ import { isPromise } from '../../utils/isPromise.js'
 import type { ChannelPublishInfo } from '../channel.js'
 import { makeDisposer, releaseSubordinate } from '../wrapProxy.js'
 import { DEFAULT_TRACK, emptyTrackWants, isRoomTrack, type BinaryWants, type TrackWants } from './binary.js'
+import { ROOM_WANTED_TRACKS_MAX } from './constants.js'
 import { ownLeaveCause, ownMetadata, stampNewer } from './model.js'
 import type { MemberSnapshot, MemberWants } from './protocol.js'
 import type {
@@ -274,7 +275,7 @@ class RoomState {
     cb: (data: Uint8Array, info: ChannelPublishInfo & BinaryFrameInfo, from: Sender) => unknown,
     opts?: { track?: string | null },
   ): () => void {
-    return this._register(this._roomBinaryCbs, { cb, track: normalizeTrackFilter(opts) })
+    return this._register(this._roomBinaryCbs, binaryListener(this._roomBinaryCbs, cb, opts))
   }
   onJoin(cb: (member: RemoteParticipant) => void): () => void {
     return this._register(this._joinCbs, cb)
@@ -598,7 +599,7 @@ class RoomState {
           return entry.identity
         },
         subscribe: (cb) => this._register(entry.dataCbs, cb),
-        subscribeBinary: (cb, opts) => this._register(entry.binaryCbs, { cb, track: normalizeTrackFilter(opts) }),
+        subscribeBinary: (cb, opts) => this._register(entry.binaryCbs, binaryListener(entry.binaryCbs, cb, opts)),
         onUpdate: (cb) => this._register(entry.updateCbs, cb),
         onLeave: (cb: (cause?: LeaveCause) => void) => {
           if (!entry.left) return this._register(entry.leaveCbs, cb)
@@ -663,6 +664,18 @@ function normalizeTrackFilter(opts: { track?: string | null } | undefined): Trac
   if (track === undefined || track === null) return track
   assertUsage(isRoomTrack(track) && track.length > 0, 'subscribeBinary() track should be a valid non-empty string')
   return track
+}
+function binaryListener<CB>(
+  cbs: ReadonlyArray<{ track: TrackFilter }>,
+  cb: CB,
+  opts: { track?: string | null } | undefined,
+): { cb: CB; track: TrackFilter } {
+  const listener = { cb, track: normalizeTrackFilter(opts) }
+  assertUsage(
+    trackWantsOf([...cbs, listener]).tracks.length <= ROOM_WANTED_TRACKS_MAX,
+    `subscribeBinary() can name at most ${ROOM_WANTED_TRACKS_MAX} tracks per participant, and as many room-wide; subscribe without a track to receive every track`,
+  )
+  return listener
 }
 /** Fold a listener list's track filters into the `TrackWants` they add up to. */
 function trackWantsOf(cbs: ReadonlyArray<{ track: TrackFilter }>): TrackWants {

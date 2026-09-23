@@ -7,6 +7,7 @@ export {
   ROOM_DEMAND_TTL_MS,
   ROOM_DM_ACK_TIMEOUT_MS,
   ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS,
+  ROOM_WANTED_TRACKS_MAX,
 }
 const ROOM_HEARTBEAT_INTERVAL_MS = 30_000
 // Four heartbeats: a member is reaped only after several renewals in a row were missed.
@@ -21,3 +22,5 @@ const ROOM_DEMAND_TTL_MS = ROOM_HEARTBEAT_INTERVAL_MS * 3
 const ROOM_DM_ACK_TIMEOUT_MS = 60_000
 // Room owns the product-policy horizon; raw subscription attempts deliberately have no deadline.
 const ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS = 60_000
+// Each named track a subscriber wants opens a lane before its first frame, so a client can't name unbounded tracks.
+const ROOM_WANTED_TRACKS_MAX = 16

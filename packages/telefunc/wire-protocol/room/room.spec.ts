@@ -15,7 +15,7 @@ import {
   ROOM_TAIL_HOLD_CODE_UNITS_MAX,
   ROOM_TAIL_HOLD_MAX,
 } from './constants.js'
-import { DEFAULT_TRACK, frameWithMemberId, sanitizeBinaryWants, unframeMemberId } from './binary.js'
+import { DEFAULT_TRACK, emptyTrackWants, frameWithMemberId, sanitizeBinaryWants, unframeMemberId } from './binary.js'
 import { RoomError, isRoomError } from './errors.js'
 import { leaveCauseFromWire, leaveCauseToWire, mergeAttributes, normalizeJoinOptions } from './model.js'
 import {
@@ -1096,6 +1096,32 @@ describe('Room public behavior', () => {
       [participant, { tag: TAG.TEXT_ACK_REQ, index: 7, seq: 1, text: '{' }],
     ] as const
     for (const [channel, frame] of frames) expect(() => channel._dispatchFrame(frame)).toThrow(ProtocolViolationError)
+  })
+  it('bounds the named tracks a subscriber can want, on the API and on the wire', async () => {
+    const room = (await Room.create('track-cap')) as ServerRoom
+    const member = await room.join()
+    const remote = (await room.getParticipant(member.id))!
+    const tracks = Array.from({ length: 17 }, (_, i) => `t${i}`)
+    for (const track of tracks.slice(0, 16)) remote.subscribeBinary(() => {}, { track })
+    expect(() => remote.subscribeBinary(() => {}, { track: tracks[16] })).toThrow('at most 16 tracks per participant')
+    remote.subscribeBinary(() => {}, { track: tracks[0] })
+    for (const track of tracks.slice(0, 16)) room.subscribeBinary(() => {}, { track })
+    expect(() => room.subscribeBinary(() => {}, { track: tracks[16] })).toThrow('at most 16 tracks per participant')
+    const stub = register(room)
+    let seq = 0
+    const declare = (wanted: string[]) =>
+      stub._dispatchFrame({
+        tag: TAG.TEXT,
+        index: 7,
+        seq: ++seq,
+        text: stringify({
+          __r: 'sub-binary',
+          wants: { everyMember: emptyTrackWants(), members: { [member.id]: { all: false, tracks: wanted } } },
+        }),
+        bytes: 1,
+      })
+    expect(() => declare(tracks.slice(0, 16))).not.toThrow()
+    expect(() => declare(tracks)).toThrow(ProtocolViolationError)
   })
   it('treats a request shape the client library never sends as a protocol violation', async () => {
     const stub = register((await Room.create('malformed-stub-request')) as ServerRoom)
