@@ -1,13 +1,8 @@
-export { installRedis, RedisTransport }
-export type { InstallRedisOptions, RedisBroadcastOptions }
+export { installRedis }
+export type { InstallRedisOptions }
 
 import type { Cluster, Redis } from 'ioredis'
-import {
-  getGlobalObject,
-  setDefaultBackend,
-  superviseBroadcastDriver,
-  type BackendDriverPair,
-} from 'telefunc/__internal'
+import { getGlobalObject, setDefaultBackend, type BackendDriverPair } from 'telefunc/__internal'
 import { RedisBackend, type RedisBackendOptions } from './room/backend.js'
 
 function installRedis(redis: Redis | Cluster, options: InstallRedisOptions = {}): void {
@@ -51,48 +46,3 @@ type InstallRedisOptions = {
   /** Default: `tf:`. */
   prefix?: string
 }
-
-type RedisBroadcastOptions = RedisBackendOptions
-
-/** Released legacy transport wrapper; new applications should use installRedis(). */
-class RedisTransport {
-  private readonly _backend
-
-  constructor(options: RedisBroadcastOptions) {
-    const driver = new RedisBackend(options)
-    this._backend = superviseBroadcastDriver(driver, () => driver.dispose())
-  }
-
-  async send(key: string, payload: string): Promise<{ seq: number; timestamp: number }> {
-    const { seq, timestamp } = await this._backend.publish({ key, kind: 'text' }, textEncoder.encode(payload))
-    return { seq, timestamp }
-  }
-
-  async sendBinary(key: string, payload: Uint8Array): Promise<{ seq: number; timestamp: number }> {
-    const { seq, timestamp } = await this._backend.publish({ key, kind: 'binary' }, payload)
-    return { seq, timestamp }
-  }
-
-  listen(key: string, onMessage: (payload: string, info: { seq: number; timestamp: number }) => void): () => void {
-    return this._listen({ key, kind: 'text' }, (payload, info) => onMessage(textDecoder.decode(payload), info))
-  }
-
-  listenBinary(
-    key: string,
-    onMessage: (payload: Uint8Array, info: { seq: number; timestamp: number }) => void,
-  ): () => void {
-    return this._listen({ key, kind: 'binary' }, onMessage)
-  }
-
-  private _listen(
-    lane: { key: string; kind: 'text' | 'binary' },
-    onMessage: (payload: Uint8Array, info: { seq: number; timestamp: number }) => void,
-  ): () => void {
-    const subscription = this._backend.subscribe(lane, onMessage)
-    void subscription.ready.catch(() => {})
-    return () => void subscription.unsubscribe()
-  }
-}
-
-const textEncoder = new TextEncoder()
-const textDecoder = new TextDecoder()
