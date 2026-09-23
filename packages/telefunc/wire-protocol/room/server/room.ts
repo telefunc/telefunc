@@ -470,10 +470,12 @@ class ServerRoom extends RoomStateView implements Room {
     const reply = new Promise<DmReply>((settle) => {
       this._pendingDmAcks.set(ackId, { to, settle })
       // The recipient replying/leaving/overflowing settles this promptly; this bounds the one case none of those cover — a recipient that joined but never listens and never leaves.
-      timer = setTimeout(() => {
-        if (this._pendingDmAcks.delete(ackId))
-          settle({ ok: false, err: 'send({ ack: true }) timed out — the recipient never handled the message' })
-      }, ROOM_DM_ACK_TIMEOUT_MS)
+      timer = unrefTimer(
+        setTimeout(() => {
+          if (this._pendingDmAcks.delete(ackId))
+            settle({ ok: false, err: 'send({ ack: true }) timed out — the recipient never handled the message' })
+        }, ROOM_DM_ACK_TIMEOUT_MS),
+      )
     })
     let receipt: RoomSendReceipt
     try {

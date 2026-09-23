@@ -1017,6 +1017,21 @@ describe('Room public behavior', () => {
     expect(isRoomError(await joining)).toBe(true)
     expect(await Room.getParticipants(room.id)).toEqual([])
   })
+  it('does not hold the process open for a pending ack DM', async () => {
+    const room = await Room.create('ack-timer-unref')
+    const sender = await room.join()
+    const recipient = await room.join()
+    const ackTimers: ReturnType<typeof setTimeout>[] = []
+    const realSetTimeout = globalThis.setTimeout
+    vi.spyOn(globalThis, 'setTimeout').mockImplementation(((callback: () => void, ms?: number) => {
+      const timer = realSetTimeout(callback, ms)
+      if (ms === ROOM_DM_ACK_TIMEOUT_MS) ackTimers.push(timer)
+      return timer
+    }) as typeof setTimeout)
+    void sender.send(recipient.id, 'unanswered', { ack: true }).catch(() => {})
+    await vi.waitFor(() => expect(ackTimers).toHaveLength(1))
+    expect(ackTimers[0]!.hasRef()).toBe(false)
+  })
   it('keeps every live ack correlation instead of silently dropping the oldest', async () => {
     const stub = register(await Room.create('ack-correlations'))
     for (let index = 0; index <= 1_024; index++) {
