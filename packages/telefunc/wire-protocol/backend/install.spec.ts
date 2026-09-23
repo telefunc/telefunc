@@ -11,6 +11,7 @@ import { MemoryBackend } from './memory/backend.js'
 import { SubscriptionManager } from './subscription-manager.js'
 import { config } from '../../node/server/serverConfig.js'
 afterEach(async () => {
+  config.broadcast = {}
   await disposeBackend().catch(() => {})
   vi.restoreAllMocks()
 })
@@ -74,6 +75,14 @@ describe('backend installation lifecycle', () => {
     await disposeBackend()
     await expectBroadcastRoundTrip('transport-only')
     expect(() => getRoomBackend()).toThrow('Room requires a full backend')
+  })
+
+  it('removing config.broadcast.transport hands Broadcast back to the backend', async () => {
+    config.broadcast = { transport: localTransport() }
+    expect(() => getRoomBackend()).toThrow('Room requires a full backend')
+    config.broadcast = {}
+    expect(getRoomBackend()).toBeDefined()
+    await expectBroadcastRoundTrip('removed')
   })
 
   it('rejects a Broadcast transport missing a binary method when it is configured', () => {

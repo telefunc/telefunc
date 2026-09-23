@@ -469,7 +469,7 @@ function applyBroadcastConfig(val: unknown): void {
     }
   }
   configState.broadcast = next
-  if (next.transport) configureBroadcastTransport(next.transport)
+  configureBroadcastTransport(next.transport)
 }
 
 function applyChannelConfig(val: unknown): void {

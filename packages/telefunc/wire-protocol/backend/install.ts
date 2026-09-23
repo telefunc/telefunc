@@ -51,12 +51,17 @@ export function installBackend<Driver extends BackendDriver>(
   return current.installed.driver as Driver
 }
 
-/** Installs the public broadcast-only override without displacing the full backend's Room plane. */
-export function configureBroadcastTransport(transport: BroadcastTransport): void {
+/** Sets the public broadcast-only override, or removes it with `undefined`; the full backend's Room plane stays. */
+export function configureBroadcastTransport(transport: BroadcastTransport | undefined): void {
   const previous = state.broadcastOverride
   if (previous?.transport === transport) return
-  state.broadcastOverride = { transport }
   if (previous?.backend) void previous.backend.dispose()
+  if (transport === undefined) {
+    // The backend's own Broadcast plane is supervised again on next use.
+    delete state.broadcastOverride
+    return
+  }
+  state.broadcastOverride = { transport }
   if (state.current.phase !== 'ready') return
   const installed = state.current.installed
   if (installed.broadcast) installed.retiredBroadcast = installed.broadcast.dispose()
