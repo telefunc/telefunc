@@ -384,6 +384,30 @@ describe('Room public behavior', () => {
     await publisher.publish('after-recovery')
     expect(received).toEqual(['after-recovery'])
   })
+  it('does not re-subscribe a recovered lane when its catch-up reconcile fails', async () => {
+    const authority = await Room.create('recovered-reconcile-failure')
+    const observer = (await Room.get(authority.id)) as ServerRoom
+    const backend = getRoomBackend()
+    const subscribeLane = backend.subscribeLane.bind(backend)
+    let terminal: ReturnType<typeof terminalSubscription> | undefined
+    let semanticOpens = 0
+    vi.spyOn(backend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
+      if (lane.kind !== 'semantic') return subscribeLane(roomId, inc, lane, receiver)
+      semanticOpens++
+      if (terminal === undefined) return (terminal = terminalSubscription()).subscription
+      return subscribeLane(roomId, inc, lane, receiver)
+    })
+    observer.subscribe(() => {})
+    if (!terminal) throw new Error('semantic subscription did not start')
+    await terminal.subscription.ready
+    await observer.getParticipants()
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const reconcile = vi.spyOn(observer as any, '_reconcileAuthority').mockRejectedValue(new Error('contention'))
+    await terminal.close()
+    await vi.waitFor(() => expect(reconcile).toHaveBeenCalled())
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(semanticOpens).toBe(2)
+  })
   it('reconciles a zombie Room when terminal control state follows a lost closed frame', async () => {
     const authority = await Room.create('terminal-control-reconcile')
     await authority.join()

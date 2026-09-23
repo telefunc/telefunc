@@ -793,12 +793,13 @@ class ServerRoom extends RoomStateView implements Room {
         }
         slot.retry()
         await withinRoomHorizon(slot.attemptReady, Math.min(attemptMs, deadline - Date.now()))
-        await this._reconcileAuthority()
-        return
       } catch (error) {
         reportRoomError(error)
         if (Date.now() >= deadline) break
+        continue
       }
+      await this._reconcileAuthority() // catch up on what the outage dropped; the lane itself is healthy
+      return
     }
     if (!slot.wanted) return
     reportRoomError(new Error(`Room subscription recovery exhausted: ${this.id}`))
