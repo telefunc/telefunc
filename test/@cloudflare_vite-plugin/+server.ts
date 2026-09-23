@@ -18,9 +18,9 @@ export class TelefuncDurableObject extends TelefuncDurableObjectBase {
             roomId: string
             inc: string
             laneKey: string
-            subscriberDoId: string
+            sessionDoId: string
             leaseId: string
-            frame: ArrayBuffer
+            payload: ArrayBuffer
             seq: number
             timestamp: number
           }): Promise<void>
@@ -29,9 +29,9 @@ export class TelefuncDurableObject extends TelefuncDurableObjectBase {
         roomId: 'recipe-probe',
         inc: 'recipe-probe',
         laneKey: 'recipe-probe',
-        subscriberDoId: 'recipe-probe',
+        sessionDoId: 'recipe-probe',
         leaseId: 'recipe-probe',
-        frame: new ArrayBuffer(0),
+        payload: new ArrayBuffer(0),
         seq: 1,
         timestamp: 0,
       })

@@ -14,12 +14,7 @@ import type {
 import { assert } from '../../../../../utils/assert.js'
 import { encodeLaneKey } from '../../../../backend/room/lane-key.js'
 import { commitPreconditionHolds } from '../../../../backend/room/semantics.js'
-import {
-  dispatchRoomShardFanout,
-  Fanout,
-  type RoomShardFanoutNamespace,
-  type RoomShardFanoutOutcome,
-} from './fanout.js'
+import { dispatchRoomFanout, Fanout, type RoomFanoutNamespace, type RoomFanoutOutcome } from './fanout.js'
 import { deleteRetained, installRetained, listRetained, readRetained } from './retained.js'
 import {
   deleteRoute,
@@ -69,7 +64,7 @@ function headForRpc(head: StoredHead): RoomHead {
 }
 
 // Delivery is at-most-once: a failed target is loss, not the publisher's error; its route lapses with its lease.
-function reportLostDeliveries(outcomes: RoomShardFanoutOutcome[]): void {
+function reportLostDeliveries(outcomes: RoomFanoutOutcome[]): void {
   const failed = outcomes.filter((outcome) => outcome.error !== undefined)
   if (failed.length > 0)
     console.error(`Cloudflare Room delivery lost to ${failed.length}/${outcomes.length} routes: ${failed[0]!.error}`)
@@ -78,17 +73,17 @@ function reportLostDeliveries(outcomes: RoomShardFanoutOutcome[]): void {
 export class TelefuncRoomDurableObject extends DurableObject {
   readonly #sql: SqlStorage
   readonly #fanout: Fanout
-  readonly #sessionNamespaceValue: RoomShardFanoutNamespace
+  readonly #sessions: RoomFanoutNamespace
 
   constructor(ctx: DurableObjectState, env: unknown, sessionNamespace: SessionNamespaceResolver) {
     super(ctx, env as never)
-    this.#sessionNamespaceValue = sessionNamespace(env) as unknown as RoomShardFanoutNamespace
+    this.#sessions = sessionNamespace(env) as unknown as RoomFanoutNamespace
     this.#sql = ctx.storage.sql
     initSchema(this.#sql)
     this.#fanout = new Fanout(
-      async (targets, frame, { seq, timestamp }) => {
-        const request = { operation: 'deliver' as const, path: 'root', targets, frame, seq, timestamp }
-        reportLostDeliveries(await dispatchRoomShardFanout(this.#sessionNamespaceValue, request))
+      async (routes, payload, { seq, timestamp }) => {
+        const request = { operation: 'deliver' as const, path: 'root', routes, payload, seq, timestamp }
+        reportLostDeliveries(await dispatchRoomFanout(this.#sessions, request))
       },
       // A macrotask, so a commit's RPC reply is sent before its fanout starts.
       (resume) => setTimeout(resume, 0),
@@ -131,9 +126,8 @@ export class TelefuncRoomDurableObject extends DurableObject {
   ): Promise<CommitWire> {
     const now = Date.now()
     const key = encodeLaneKey(lane)
-    const frame = payload instanceof Uint8Array ? payload : new Uint8Array(payload)
     const outcome = this.ctx.storage.transactionSync(
-      (): StaleCommit | { seq: number; timestamp: number; targets: RouteInstallation[] } => {
+      (): StaleCommit | { seq: number; timestamp: number; routes: RouteInstallation[] } => {
         if (!commitPreconditionHolds(readLiveHead(this.#sql, now), inc, lane.kind, opts?.closingLease, now))
           return { stale: 'incarnation' }
         if (opts?.requiredCellKeys !== undefined) {
@@ -143,14 +137,14 @@ export class TelefuncRoomDurableObject extends DurableObject {
           if (missing !== undefined) return { stale: 'cell', key: missing }
         }
         const mark = advanceOrder(this.#sql, inc, key, now)
-        if (opts?.retain === true) installRetained(this.#sql, inc, key, frame, mark)
-        return { ...mark, targets: snapshotRoutes(this.#sql, inc, key, now) }
+        if (opts?.retain === true) installRetained(this.#sql, inc, key, payload, mark)
+        return { ...mark, routes: snapshotRoutes(this.#sql, inc, key, now) }
       },
     )
     if ('stale' in outcome) return outcome
-    const { seq, timestamp, targets } = outcome
-    const deliveryToken = this.#fanout.enqueue(targets, frame, { inc, laneKey: key, seq, timestamp })
-    return { accepted: true, seq, timestamp, receivers: targets.length, deliveryToken }
+    const { seq, timestamp, routes } = outcome
+    const deliveryToken = this.#fanout.enqueue(routes, payload, { inc, laneKey: key, seq, timestamp })
+    return { accepted: true, seq, timestamp, receivers: routes.length, deliveryToken }
   }
 
   async awaitDelivery(token: string): Promise<void> {
@@ -171,11 +165,11 @@ export class TelefuncRoomDurableObject extends DurableObject {
 
   async registerRoute(route: RouteInstallation): Promise<RegisterWire> {
     try {
-      this.#sessionNamespaceValue.idFromString(route.subscriberDoId)
+      this.#sessions.idFromString(route.sessionDoId)
     } catch {
       return {
         rejected: true,
-        reason: `subscriber Durable Object id '${route.subscriberDoId}' is invalid`,
+        reason: `session Durable Object id '${route.sessionDoId}' is invalid`,
         terminal: true,
       }
     }
@@ -274,15 +268,15 @@ export class TelefuncRoomDurableObject extends DurableObject {
   }
 
   async #invalidateInstallation(installation: RouteInstallation): Promise<void> {
-    const session = this.#sessionNamespaceValue
-    await session.get(session.idFromString(installation.subscriberDoId)).telefuncRoomInvalidate(installation)
+    const session = this.#sessions
+    await session.get(session.idFromString(installation.sessionDoId)).telefuncRoomInvalidate(installation)
   }
 
   async #terminateInstallations(installations: RouteInstallation[]): Promise<void> {
-    const outcomes = await dispatchRoomShardFanout(this.#sessionNamespaceValue, {
+    const outcomes = await dispatchRoomFanout(this.#sessions, {
       operation: 'invalidate',
       path: 'root',
-      targets: installations,
+      routes: installations,
       terminal: true,
     })
     const failed = outcomes.find((outcome) => outcome.error !== undefined)

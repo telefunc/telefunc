@@ -28,13 +28,13 @@ export const CLOUDFLARE_ROOM_CONTEXT_ERROR =
 export const CLOUDFLARE_ROOM_SESSION_ERROR =
   'A Cloudflare Room subscription delivers to a Telefunc session: subscribe from a telefunction or a channel handler, not from outside a request.'
 
-export type RoomShardDeliveryRequest = RouteInstallation & {
-  frame: Uint8Array
+export type RoomSessionDeliveryRequest = RouteInstallation & {
+  payload: Uint8Array
   seq: number
   timestamp: number
 }
 
-export type RoomShardInvalidationRequest = Omit<RoomShardDeliveryRequest, 'frame' | 'seq' | 'timestamp'> & {
+export type RoomSessionInvalidationRequest = Omit<RoomSessionDeliveryRequest, 'payload' | 'seq' | 'timestamp'> & {
   terminal?: true
 }
 
@@ -76,7 +76,7 @@ export class CloudflareRoomSessionManager {
       roomId,
       inc,
       laneKey: encodeLaneKey(lane),
-      subscriberDoId: this.#id,
+      sessionDoId: this.#id,
       authority: this.authority(roomId),
     }
     const key = entryKey(source)
@@ -90,13 +90,13 @@ export class CloudflareRoomSessionManager {
     return attempt
   }
 
-  async deliver(request: RoomShardDeliveryRequest): Promise<void> {
+  async deliver(request: RoomSessionDeliveryRequest): Promise<void> {
     const entry = this.#entries.get(entryKey(request))
     if (entry?.leaseId !== request.leaseId) throw new Error('Cloudflare Room delivery lease is not installed')
-    await entry.deliver(request.frame, request.seq, request.timestamp)
+    await entry.deliver(request.payload, request.seq, request.timestamp)
   }
 
-  invalidate(request: RoomShardInvalidationRequest): void {
+  invalidate(request: RoomSessionInvalidationRequest): void {
     const entry = this.#entries.get(entryKey(request))
     if (entry?.leaseId === request.leaseId) {
       if (request.terminal === true) entry.terminate()

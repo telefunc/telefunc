@@ -484,7 +484,7 @@ describe('cloudflare adapter entrypoint', () => {
       roomId: 'room',
       inc: 'inc',
       laneKey: 'lane',
-      subscriberDoId: 'id',
+      sessionDoId: 'id',
       leaseId: 'lease',
     }
     expect(() => instance.telefuncRoomInvalidate(invalidation)).toThrow('Cloudflare Room requires await-safe context')

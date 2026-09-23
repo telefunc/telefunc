@@ -3,33 +3,33 @@
 
 import type { RouteInstallation } from './routes.js'
 import { getDeterministicKeyBucketIndex } from '../routing.js'
-import type { RoomShardDeliveryRequest, RoomShardInvalidationRequest } from './backend.js'
+import type { RoomSessionDeliveryRequest, RoomSessionInvalidationRequest } from './backend.js'
 
 type DeliveryInfo = { inc: string; laneKey: string; seq: number; timestamp: number }
-type DeliverFn = (targets: RouteInstallation[], frame: Uint8Array, info: DeliveryInfo) => Promise<void>
+type DeliverFn = (routes: RouteInstallation[], payload: Uint8Array, info: DeliveryInfo) => Promise<void>
 
 export const ROOM_FANOUT_WIDTH = 64
 const ROOM_FANOUT_COORDINATOR_POOL_SIZE = 256
 
 // The recursive tree keeps four invariants: <=64 outgoing calls per node; depth-specific coordinators
 // cannot self-RPC; leaf outcomes stay ordered; coordinator failure expands to every descendant.
-export type RoomShardFanoutRequest = { targets: RouteInstallation[]; path: string } & (
-  | { operation: 'deliver'; frame: Uint8Array; seq: number; timestamp: number }
+export type RoomFanoutRequest = { routes: RouteInstallation[]; path: string } & (
+  | { operation: 'deliver'; payload: Uint8Array; seq: number; timestamp: number }
   | { operation: 'invalidate'; terminal?: true }
 )
 
-export type RoomShardFanoutOutcome = { target: RouteInstallation; error?: string }
+export type RoomFanoutOutcome = { route: RouteInstallation; error?: string }
 
-type RoomShardFanoutStub = {
-  telefuncRoomDeliver(request: RoomShardDeliveryRequest): Promise<void>
-  telefuncRoomInvalidate(request: RoomShardInvalidationRequest): Promise<void>
-  telefuncRoomFanout(request: RoomShardFanoutRequest): Promise<RoomShardFanoutOutcome[]>
+type RoomFanoutStub = {
+  telefuncRoomDeliver(request: RoomSessionDeliveryRequest): Promise<void>
+  telefuncRoomInvalidate(request: RoomSessionInvalidationRequest): Promise<void>
+  telefuncRoomFanout(request: RoomFanoutRequest): Promise<RoomFanoutOutcome[]>
 }
 
-export type RoomShardFanoutNamespace = {
+export type RoomFanoutNamespace = {
   idFromString(id: string): unknown
   idFromName(name: string): unknown
-  get(id: unknown): RoomShardFanoutStub
+  get(id: unknown): RoomFanoutStub
 }
 
 const noop = (): void => {}
@@ -38,36 +38,36 @@ export class Fanout {
   readonly #deliver: DeliverFn
   readonly #defer: (resume: () => void) => void
   readonly #incarnations = new Map<string, { active: boolean; lanes: Map<string, Promise<void>> }>()
-  readonly #attempts = new Map<string, Promise<void>>()
+  readonly #deliveries = new Map<string, Promise<void>>()
 
   constructor(deliver: DeliverFn, defer: (resume: () => void) => void = queueMicrotask) {
     this.#deliver = deliver
     this.#defer = defer
   }
 
-  enqueue(targets: RouteInstallation[], frame: Uint8Array, info: DeliveryInfo): string {
+  enqueue(routes: RouteInstallation[], payload: Uint8Array, info: DeliveryInfo): string {
     let incarnation = this.#incarnations.get(info.inc)
     if (!incarnation) this.#incarnations.set(info.inc, (incarnation = { active: true, lanes: new Map() }))
     const fence = incarnation
-    const attempt = (fence.lanes.get(info.laneKey) ?? Promise.resolve())
+    const delivery = (fence.lanes.get(info.laneKey) ?? Promise.resolve())
       .then(() => new Promise<void>((resolve) => this.#defer(resolve)))
       .then(() => {
         if (!fence.active) throw new Error('Cloudflare Room delivery cancelled before handoff')
-        return this.#deliver(targets, frame, info)
+        return this.#deliver(routes, payload, info)
       })
-    fence.lanes.set(info.laneKey, attempt.then(noop, noop))
+    fence.lanes.set(info.laneKey, delivery.then(noop, noop))
     const token = crypto.randomUUID()
-    this.#attempts.set(token, attempt)
+    this.#deliveries.set(token, delivery)
     return token
   }
 
   async await(token: string): Promise<void> {
-    const attempt = this.#attempts.get(token)
-    if (attempt === undefined) throw new Error('Cloudflare Room delivery has an unknown delivery token')
+    const delivery = this.#deliveries.get(token)
+    if (delivery === undefined) throw new Error('Cloudflare Room delivery has an unknown delivery token')
     try {
-      await attempt
+      await delivery
     } finally {
-      this.#attempts.delete(token)
+      this.#deliveries.delete(token)
     }
   }
 
@@ -78,42 +78,40 @@ export class Fanout {
   }
 }
 
-export async function dispatchRoomShardFanout(
-  namespace: RoomShardFanoutNamespace,
-  request: RoomShardFanoutRequest,
-): Promise<RoomShardFanoutOutcome[]> {
-  if (request.targets.length <= ROOM_FANOUT_WIDTH) {
+export async function dispatchRoomFanout(
+  namespace: RoomFanoutNamespace,
+  request: RoomFanoutRequest,
+): Promise<RoomFanoutOutcome[]> {
+  if (request.routes.length <= ROOM_FANOUT_WIDTH) {
     return Promise.all(
-      request.targets.map(async (target): Promise<RoomShardFanoutOutcome> => {
-        const stub = namespace.get(namespace.idFromString(target.subscriberDoId))
+      request.routes.map(async (route): Promise<RoomFanoutOutcome> => {
+        const stub = namespace.get(namespace.idFromString(route.sessionDoId))
         try {
           if (request.operation === 'deliver') {
-            const { frame, seq, timestamp } = request
-            await stub.telefuncRoomDeliver({ ...target, frame, seq, timestamp })
+            const { payload, seq, timestamp } = request
+            await stub.telefuncRoomDeliver({ ...route, payload, seq, timestamp })
           } else {
-            await stub.telefuncRoomInvalidate({ ...target, ...(request.terminal ? { terminal: true as const } : {}) })
+            await stub.telefuncRoomInvalidate({ ...route, ...(request.terminal ? { terminal: true as const } : {}) })
           }
-          return { target }
+          return { route }
         } catch (error) {
-          return { target, error: errorMessage(error) }
+          return { route, error: errorMessage(error) }
         }
       }),
     )
   }
-  const groups = partitionIntoAtMost(request.targets, ROOM_FANOUT_WIDTH)
+  const groups = partitionIntoAtMost(request.routes, ROOM_FANOUT_WIDTH)
   const outcomes = await Promise.all(
-    groups.map((targets, index) =>
-      viaCoordinator(namespace, { ...request, targets, path: `${request.path}.${index}` }),
-    ),
+    groups.map((routes, index) => viaCoordinator(namespace, { ...request, routes, path: `${request.path}.${index}` })),
   )
   return outcomes.flat()
 }
 
 async function viaCoordinator(
-  namespace: RoomShardFanoutNamespace,
-  request: RoomShardFanoutRequest,
-): Promise<RoomShardFanoutOutcome[]> {
-  const first = request.targets[0]!
+  namespace: RoomFanoutNamespace,
+  request: RoomFanoutRequest,
+): Promise<RoomFanoutOutcome[]> {
+  const first = request.routes[0]!
   const nameIndex = getDeterministicKeyBucketIndex(
     JSON.stringify([first.roomId, first.inc, first.laneKey, request.operation, request.path]),
     ROOM_FANOUT_COORDINATOR_POOL_SIZE,
@@ -124,7 +122,7 @@ async function viaCoordinator(
   try {
     return await coordinator.telefuncRoomFanout(request)
   } catch (error) {
-    return request.targets.map((target) => ({ target, error: errorMessage(error) }))
+    return request.routes.map((route) => ({ route, error: errorMessage(error) }))
   }
 }
 

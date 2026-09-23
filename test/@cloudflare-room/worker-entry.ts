@@ -9,8 +9,8 @@ import {
   CloudflareRoomSessionManager,
   withCloudflareRoomSessionManager,
   type CloudflareRoomNamespace,
-  type RoomShardDeliveryRequest,
-  type RoomShardInvalidationRequest,
+  type RoomSessionDeliveryRequest,
+  type RoomSessionInvalidationRequest,
 } from '../../packages/telefunc/wire-protocol/server/adapter/cloudflare/room/backend.js'
 import {
   TelefuncRoomDurableObject as ProductionRoomDurableObject,
@@ -20,9 +20,9 @@ import {
 } from '../../packages/telefunc/wire-protocol/server/adapter/cloudflare/room/do.js'
 import { CloudflareBroadcastTransport } from '../../packages/telefunc/wire-protocol/server/adapter/cloudflare/broadcast.js'
 import {
-  dispatchRoomShardFanout,
-  type RoomShardFanoutNamespace,
-  type RoomShardFanoutRequest,
+  dispatchRoomFanout,
+  type RoomFanoutNamespace,
+  type RoomFanoutRequest,
 } from '../../packages/telefunc/wire-protocol/server/adapter/cloudflare/room/fanout.js'
 installBackend(
   () =>
@@ -69,14 +69,14 @@ export class PublicRoomSessionDurableObject extends DurableObject {
       }
     })
   }
-  telefuncRoomDeliver(request: RoomShardDeliveryRequest): Promise<void> {
+  telefuncRoomDeliver(request: RoomSessionDeliveryRequest): Promise<void> {
     return this.#run(() => this.#manager.deliver(request))
   }
-  telefuncRoomInvalidate(request: RoomShardInvalidationRequest): void {
+  telefuncRoomInvalidate(request: RoomSessionInvalidationRequest): void {
     return this.#run(() => this.#manager.invalidate(request))
   }
-  telefuncRoomFanout(request: RoomShardFanoutRequest) {
-    return dispatchRoomShardFanout((this.env as Env).PUBLIC_SESSION as unknown as RoomShardFanoutNamespace, request)
+  telefuncRoomFanout(request: RoomFanoutRequest) {
+    return dispatchRoomFanout((this.env as Env).PUBLIC_SESSION as unknown as RoomFanoutNamespace, request)
   }
   #run<T>(fn: () => T): T {
     return withCloudflareRoomSessionManager(() => this.#manager, fn)
@@ -153,7 +153,7 @@ function roomProbe(env: Env, suffix: string, name: string) {
       roomId,
       inc,
       laneKey: 'semantic',
-      subscriberDoId: sessionId.toString(),
+      sessionDoId: sessionId.toString(),
       leaseId: lease(role),
     })
     if (!('ok' in registration)) throw new Error(`route registration failed: ${registration.reason}`)
@@ -201,7 +201,7 @@ async function alarmScheduling(env: Env, sessionId: DurableObjectId, suffix: str
     roomId: probe.roomId,
     inc: probe.inc,
     laneKey: 'semantic',
-    subscriberDoId: sessionId.toString(),
+    sessionDoId: sessionId.toString(),
     leaseId: `alarm-lease-${suffix}`,
   })
   const afterUnsubscribe = await probe.control('alarm')

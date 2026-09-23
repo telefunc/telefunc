@@ -35,14 +35,14 @@ import {
   materializeCloudflareRoomSessionManager,
   withCloudflareRoomSessionManager,
   type CloudflareRoomNamespace,
-  type RoomShardDeliveryRequest,
-  type RoomShardInvalidationRequest,
+  type RoomSessionDeliveryRequest,
+  type RoomSessionInvalidationRequest,
 } from '../wire-protocol/server/adapter/cloudflare/room/backend.js'
 import { createTelefuncRoomDurableObjectClass } from '../wire-protocol/server/adapter/cloudflare/room/do.js'
 import {
-  dispatchRoomShardFanout,
-  type RoomShardFanoutNamespace,
-  type RoomShardFanoutRequest,
+  dispatchRoomFanout,
+  type RoomFanoutNamespace,
+  type RoomFanoutRequest,
 } from '../wire-protocol/server/adapter/cloudflare/room/fanout.js'
 import { isAsyncMode } from '../node/server/context/context.js'
 import { getGlobalObject } from '../utils/getGlobalObject.js'
@@ -184,16 +184,16 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
       return broadcast.deliverToLocal(request)
     }
 
-    telefuncRoomDeliver(request: RoomShardDeliveryRequest): Promise<void> {
+    telefuncRoomDeliver(request: RoomSessionDeliveryRequest): Promise<void> {
       return this.runWithRoomManager(() => materializeCloudflareRoomSessionManager().deliver(request))
     }
 
-    telefuncRoomInvalidate(request: RoomShardInvalidationRequest): void {
+    telefuncRoomInvalidate(request: RoomSessionInvalidationRequest): void {
       return this.runWithRoomManager(() => materializeCloudflareRoomSessionManager().invalidate(request))
     }
 
-    telefuncRoomFanout(request: RoomShardFanoutRequest) {
-      return dispatchRoomShardFanout(sessionNamespace(this.env) as unknown as RoomShardFanoutNamespace, request)
+    telefuncRoomFanout(request: RoomFanoutRequest) {
+      return dispatchRoomFanout(sessionNamespace(this.env) as unknown as RoomFanoutNamespace, request)
     }
 
     // The manager is built on the first Room call, so ordinary fetch/socket work never touches the Room binding.
