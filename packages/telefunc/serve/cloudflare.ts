@@ -135,7 +135,8 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
   }
 
   function getRoomBinding(env: Cloudflare.Env): DurableObjectNamespace {
-    return requireCloudflareRoomNamespace(env, roomBindingName) as unknown as DurableObjectNamespace
+    const binding = requireCloudflareRoomNamespace(env, roomBindingName) as unknown as DurableObjectNamespace
+    return jurisdiction ? binding.jurisdiction(jurisdiction) : binding
   }
 
   const getContext = options?.context
@@ -238,7 +239,7 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
     }
   }
 
-  const TelefuncRoomDurableObject = createTelefuncRoomDurableObjectClass(bindingName)
+  const TelefuncRoomDurableObject = createTelefuncRoomDurableObjectClass(bindingName, jurisdiction)
 
   return {
     async serve({ request, env, ctx }: ServeInput): Promise<Response | undefined> {

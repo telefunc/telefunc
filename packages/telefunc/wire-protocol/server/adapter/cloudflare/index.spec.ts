@@ -364,6 +364,38 @@ describe('cloudflare adapter entrypoint', () => {
     )
   })
 
+  it('restricts the Room authority and its fan-out coordinators to the jurisdiction', async () => {
+    mocks.asyncMode = true
+    const session = createBinding()
+    const room = createBinding()
+    const env = {
+      TelefuncDurableObject: session.binding,
+      TelefuncRoomDurableObject: room.binding,
+    } as unknown as Cloudflare.Env
+    const tf = new Telefunc({ jurisdiction: 'eu' as DurableObjectJurisdiction })
+    const DurableClass = tf.TelefuncDurableObject
+    const instance = new DurableClass(
+      { id: { toString: () => 'jurisdiction-probe' }, getWebSockets: () => [] } as unknown as DurableObjectState,
+      env,
+    ) as InstanceType<typeof DurableClass> & { fetch(request: Request): Promise<Response> }
+    mocks.telefuncMock.mockImplementationOnce(async () => {
+      await getRoomBackend()
+        .readHead('jurisdiction-probe')
+        .catch(() => {})
+      throw new Error('probe done')
+    })
+    await instance.fetch(new Request('https://telefunc.test/_telefunc')).catch(() => {})
+    expect(room.jurisdiction).toHaveBeenCalledWith('eu')
+
+    session.jurisdiction.mockClear()
+    const ctx = {
+      storage: { sql: { exec: () => ({ toArray: () => [] }) } },
+      blockConcurrencyWhile: () => Promise.resolve(),
+    } as unknown as DurableObjectState
+    new tf.TelefuncRoomDurableObject(ctx, env)
+    expect(session.jurisdiction).toHaveBeenCalledWith('eu')
+  })
+
   it('publishes the named SQLite Room authority and carries the configured session binding into it', () => {
     const tf = new Telefunc({ bindingName: 'CustomTelefuncSession', roomBindingName: 'CustomRoomAuthority' })
     expect(tf.TelefuncRoomDurableObject.name).toBe('TelefuncRoomDurableObject')

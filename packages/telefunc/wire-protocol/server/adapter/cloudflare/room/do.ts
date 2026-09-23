@@ -69,15 +69,22 @@ export class TelefuncRoomDurableObject extends DurableObject {
   readonly #fanout: Fanout
   readonly #sessionNamespaceValue: RoomShardFanoutNamespace
 
-  constructor(ctx: DurableObjectState, env: unknown, sessionBindingName: string = 'TelefuncDurableObject') {
+  constructor(
+    ctx: DurableObjectState,
+    env: unknown,
+    sessionBindingName: string = 'TelefuncDurableObject',
+    jurisdiction?: DurableObjectJurisdiction,
+  ) {
     super(ctx, env as never)
-    const sessionNamespace = (env as Record<string, RoomShardFanoutNamespace | undefined>)[sessionBindingName]
+    const sessionNamespace = (env as Record<string, DurableObjectNamespace | undefined>)[sessionBindingName]
     if (sessionNamespace === undefined) {
       throw new Error(
         `Missing Cloudflare session Durable Object binding "${sessionBindingName}" in TelefuncRoomDurableObject constructor.`,
       )
     }
-    this.#sessionNamespaceValue = sessionNamespace
+    this.#sessionNamespaceValue = (jurisdiction
+      ? sessionNamespace.jurisdiction(jurisdiction)
+      : sessionNamespace) as unknown as RoomShardFanoutNamespace
     this.#sql = ctx.storage.sql
     initSchema(this.#sql)
     this.#fanout = new Fanout(
@@ -425,11 +432,12 @@ function commitPreconditionHolds(
 
 export function createTelefuncRoomDurableObjectClass(
   sessionBindingName: string = 'TelefuncDurableObject',
+  jurisdiction?: DurableObjectJurisdiction,
 ): typeof TelefuncRoomDurableObject {
   const BaseTelefuncRoomDurableObject = TelefuncRoomDurableObject
   return class TelefuncRoomDurableObject extends BaseTelefuncRoomDurableObject {
     constructor(ctx: DurableObjectState, env: unknown) {
-      super(ctx, env, sessionBindingName)
+      super(ctx, env, sessionBindingName, jurisdiction)
     }
   }
 }
