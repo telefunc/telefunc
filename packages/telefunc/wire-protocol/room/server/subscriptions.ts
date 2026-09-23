@@ -15,6 +15,7 @@ import type { RoomConfigRecord } from '../protocol.js'
 import type { RoomState } from '../state.js'
 import { reportRoomError } from './errors.js'
 import { LaneSubscription } from './lane-subscription.js'
+import { binaryLaneKey } from './replay.js'
 import { CONTROL_LANE, SEMANTIC_LANE, decodeRoomText, withinRoomHorizon } from './lanes.js'
 import { readAllMembers, renewMemberLease } from './membership.js'
 assertIsNotBrowser()
@@ -161,10 +162,12 @@ class RoomSubscriptions {
 
   private _syncBinary(plan: SubscriptionPlan): void {
     const host = this._host
-    const lanes = plan.wantAnyBinary ? plan.binaryPairs : []
     this._syncKeyedSubs(
       this._binary,
-      lanes.map(([member, track]) => ({ key: `${member}\u0000${track}`, value: { kind: 'binary', member, track } })),
+      plan.binaryPairs.map(([member, track]) => ({
+        key: binaryLaneKey(member, track),
+        value: { kind: 'binary', member, track },
+      })),
       (lane) =>
         getRoomBackend().subscribeLane(host.id, host._inc, lane, (framed, info) => host._onBinary(framed, info)),
     )

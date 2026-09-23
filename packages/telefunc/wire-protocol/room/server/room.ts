@@ -554,21 +554,18 @@ class ServerRoom extends RoomStateView implements Room {
     const envelope = decodeLaneEnvelope(serialized) as RoomDmEnvelope | RoomDmAckEnvelope
     // A reply to one of our own `send(…, { ack: true })`s, riding our inbox back home.
     if (envelope.__r === 'dm-ack') return this._resolveDmAck(envelope)
-    const dm = envelope
-    const holder = this._holderOf(dm.to)
-    // A client held through a room stub gets the DM relayed (its `ackId` rides along) and replies with `dm-reply`.
-    if (holder === undefined || !(holder instanceof ServerLocalParticipant))
-      return holder?._relayDm(encodePublishText(serialized, rawInfo), dm)
-    const msg = inboxMessageFromWire(dm)
-    // A server-side participant, or one a client holds (its forwarder replies). Either way, for an ack DM we route the handler's reply back to the sender's inbox.
-    if (dm.ackId) {
-      void holder
-        ._deliverMessageAck(msg)
-        .then((reply) => this._publishDmAck(dm.from, dm.ackId!, reply))
-        .catch(reportRoomError)
-    } else {
-      holder._deliverMessage(msg)
-    }
+    const holder = this._holderOf(envelope.to)
+    // A client that joined through a stub gets the DM relayed (its `ackId` rides along) and answers with `dm-reply`.
+    if (holder instanceof RoomStubChannel) return holder._relayDm(encodePublishText(serialized, rawInfo), envelope)
+    if (holder === undefined) return
+    const msg = inboxMessageFromWire(envelope)
+    const { ackId } = envelope
+    if (ackId === undefined) return holder._deliverMessage(msg)
+    // A server participant, or one a client holds (its forwarder answers): the reply goes to the sender's inbox.
+    void holder
+      ._deliverMessageAck(msg)
+      .then((reply) => this._publishDmAck(envelope.from, ackId, reply))
+      .catch(reportRoomError)
   }
   private _applyCtrl(event: RoomCtrlEnvelope): void {
     switch (event.__r) {
@@ -707,7 +704,6 @@ class ServerRoom extends RoomStateView implements Room {
         return await this._joinStubMember(stub, req)
       case 'req-leave':
         await this._removeMember(stub._requireMember(req.id), { type: 'left' })
-        stub._forgetMember(req.id)
         return undefined
       case 'req-set-meta':
         return await this._setMemberMeta(stub._requireMember(req.id), req.meta)

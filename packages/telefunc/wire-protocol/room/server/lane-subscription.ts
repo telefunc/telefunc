@@ -2,7 +2,6 @@ export { LaneSubscription }
 
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 import type { BackendSubscription } from '../../backend/subscription.js'
-import { reportRoomError } from './errors.js'
 assertIsNotBrowser()
 
 /** A lane subscription the room wants: holder-facing readiness survives failed attempts, and Room's recovery policy replaces them. */
@@ -91,7 +90,7 @@ class LaneSubscription {
         notifyTerminal()
       }
     })
-    if (previous) void previous.unsubscribe().catch(reportRoomError)
+    if (previous) void previous.unsubscribe()
   }
 
   /** Exhausted policy keeps demand and holder readiness pending, but drops the dead attempt until the next planning pass. */
@@ -111,7 +110,7 @@ class LaneSubscription {
     this._subscription = null
     this._unobserve?.()
     this._unobserve = null
-    if (subscription) void subscription.unsubscribe().catch(reportRoomError)
+    if (subscription) void subscription.unsubscribe()
   }
 
   private _ensurePendingReady(): void {
