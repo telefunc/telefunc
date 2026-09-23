@@ -375,7 +375,7 @@ describe('Room public behavior', () => {
     await terminal.subscription.ready
     await observer.getParticipants()
     vi.spyOn(console, 'error').mockImplementation(() => {})
-    const reconcile = vi.spyOn(observer as any, '_reconcileAuthority').mockRejectedValue(new Error('contention'))
+    const reconcile = vi.spyOn(subsOf(observer), 'reconcileAuthority').mockRejectedValue(new Error('contention'))
     await terminal.close()
     await vi.waitFor(() => expect(reconcile).toHaveBeenCalled())
     await new Promise((resolve) => setTimeout(resolve, 50))
@@ -501,7 +501,7 @@ describe('Room public behavior', () => {
     const observer = (await Room.get(authority.id)) as ServerRoom
     expect(await observer.getParticipants()).toEqual([])
     const readiness = deferred<void>()
-    const slot = (observer as unknown as { _ctrlSub: LaneSubscription })._ctrlSub
+    const slot = subsOf(observer)._control
     slot.sync(true, () => ({
       ready: readiness.promise,
       state: () => 'establishing',
@@ -519,9 +519,7 @@ describe('Room public behavior', () => {
     const observer = (await Room.get(authority.id)) as ServerRoom
     observer.onJoin(() => {})
     await observer.getParticipants()
-    await vi.waitFor(() =>
-      expect((observer as unknown as { _ctrlSub: LaneSubscription })._ctrlSub.established).toBe(true),
-    )
+    await vi.waitFor(() => expect(subsOf(observer)._control.established).toBe(true))
     expect(observer._state.rosterKnown).toBe(true)
     const readCells = driver.readCells.bind(driver)
     const started = deferred<void>()
@@ -538,13 +536,9 @@ describe('Room public behavior', () => {
       if (churn-- > 0 && 'prefix' in selector) observer._state.membershipVersion++
       return result
     })
-    const refresh = (
-      observer as unknown as {
-        _refreshMembers(): Promise<void>
-      }
-    )._refreshMembers()
+    const refresh = subsOf(observer)._refreshMembers()
     await started.promise
-    expect((observer as unknown as { _ctrlSub: LaneSubscription })._ctrlSub.established).toBe(true)
+    expect(subsOf(observer)._control.established).toBe(true)
     const participants = observer.getParticipants()
     const status = await Promise.race([
       participants.then(() => 'settled' as const),
@@ -555,16 +549,12 @@ describe('Room public behavior', () => {
     await refresh
     expect((await participants).map(({ id }) => id)).toHaveLength(1)
     churn = 20
-    await expect((observer as unknown as { _refreshMembers(): Promise<void> })._refreshMembers()).rejects.toThrow(
-      'Room roster refresh contention',
-    )
+    await expect(subsOf(observer)._refreshMembers()).rejects.toThrow('Room roster refresh contention')
   })
   it('heartbeats pure control observers without owned members or binary demand', async () => {
     vi.useFakeTimers()
     const observer = (await Room.get((await Room.create('observer-heartbeat')).id)) as ServerRoom
-    const heartbeat = vi
-      .spyOn(observer as unknown as { _heartbeatTick(): Promise<void> }, '_heartbeatTick')
-      .mockResolvedValue()
+    const heartbeat = vi.spyOn(subsOf(observer), '_heartbeatTick').mockResolvedValue()
     observer.onJoin(() => {})
     await vi.advanceTimersByTimeAsync(ROOM_HEARTBEAT_INTERVAL_MS)
     expect(heartbeat).toHaveBeenCalledOnce()
@@ -590,7 +580,7 @@ describe('Room public behavior', () => {
     observer.onClose(onClose)
     observer.subscribe(() => {})
     await vi.advanceTimersByTimeAsync(ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS + 100)
-    const textSlot = (observer as unknown as { _textSub: LaneSubscription })._textSub
+    const textSlot = subsOf(observer)._semantic
     expect((await backend.readHead(observer.id))?.head.state).toBe('open')
     expect({ closed: observer.isClosed, onClose: onClose.mock.calls.length }).toEqual({ closed: false, onClose: 0 })
     expect(textSlot).toMatchObject({ wanted: true, active: false })
@@ -1659,7 +1649,7 @@ describe('Room public behavior', () => {
       expect(binaryLanes()).toBe(0)
       roster.release()
       await vi.waitFor(() => expect(binaryLanes()).toBe(1))
-      await (observer as unknown as { _binaryReady(): Promise<void> })._binaryReady()
+      await subsOf(observer).binaryReady()
       await publisher.publishBinary(new Uint8Array([7]), { track: 'screen' })
       const frame = attachPeer(stub)
         .decoded()
@@ -2251,9 +2241,7 @@ describe('client Room lifecycle', () => {
     const room = (await Room.create('roster-error-event')) as ServerRoom
     const stub = register(room)
     const failure = new Error('backend roster read failed')
-    const ensureRoster = vi
-      .spyOn(room as unknown as { _ensureRoster(): Promise<void> }, '_ensureRoster')
-      .mockRejectedValue(failure)
+    const ensureRoster = vi.spyOn(subsOf(room), 'ensureRoster').mockRejectedValue(failure)
     vi.spyOn(console, 'error').mockImplementation(() => {})
     const peer = attachPeer(stub)
     await vi.waitFor(() => expect(peer.decoded().some((frame) => frame.tag === TAG.PUBLISH)).toBe(true))
@@ -2268,7 +2256,7 @@ describe('client Room lifecycle', () => {
   it('replays a committed server-pushed roster after reconnect without rerunning onOpen', async () => {
     const room = (await Room.create('roster-replay')) as ServerRoom
     const stub = register(room)
-    const ensureRoster = vi.spyOn(room as unknown as { _ensureRoster(): Promise<void> }, '_ensureRoster')
+    const ensureRoster = vi.spyOn(subsOf(room), 'ensureRoster')
     const peer = attachPeer(stub)
     await vi.waitFor(() => expect(peer.decoded().some((frame) => frame.tag === TAG.PUBLISH)).toBe(true))
     stub._onPeerDisconnect(1_000)
@@ -2638,6 +2626,17 @@ function attachPeer(stub: RoomStubChannel, lastSeq?: number, broadcast?: Broadca
   )
   return { decoded: () => frames.map((frame) => decode(frame as Uint8Array<ArrayBuffer>)) }
 }
+function subsOf(room: Room | ServerRoom): {
+  _control: LaneSubscription
+  _semantic: LaneSubscription
+  _refreshMembers(): Promise<void>
+  _heartbeatTick(): Promise<void>
+  binaryReady(): Promise<void>
+  ensureRoster(): Promise<void>
+  reconcileAuthority(): Promise<void>
+} {
+  return (room as unknown as { _subs: ReturnType<typeof subsOf> })._subs
+}
 function replacerContext(channels: ServerChannel[]): ServerReplacerContext {
   const states = new Map<symbol, unknown>()
   return {
@@ -2714,12 +2713,12 @@ async function wideBinaryScenario(id: string, retain: boolean, byte: number) {
   })
   if (!retain) {
     declare(stub, { __r: 'sub-binary', wants: allBinary })
-    await (serverRoom as unknown as { _binaryReady(): Promise<void> })._binaryReady()
+    await subsOf(serverRoom).binaryReady()
   }
   const receipt = await camera.publishBinary(new Uint8Array([byte]), retain ? { retain: true } : undefined)
   if (retain) {
     declare(stub, { __r: 'sub-binary', wants: allBinary })
-    await (serverRoom as unknown as { _binaryReady(): Promise<void> })._binaryReady()
+    await subsOf(serverRoom).binaryReady()
   }
   await vi.waitFor(() => expect(peer.decoded().some((candidate) => candidate.tag === TAG.PUBLISH_BINARY)).toBe(true))
   const frame = peer
