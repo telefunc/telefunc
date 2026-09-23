@@ -3,13 +3,15 @@ export type { ResponseRoomGrants }
 
 import { stringify } from '@brillout/json-serializer/stringify'
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
-import { assert, assertUsage } from '../../../utils/assert.js'
+import { assertUsage } from '../../../utils/assert.js'
 import { unrefTimer } from '../../../utils/unrefTimer.js'
 import { ROOM_DM_ACK_TIMEOUT_MS, ROOM_TAIL_ATTACH_TIMEOUT_MS } from '../constants.js'
 import { ServerChannel, parsePeerText } from '../../server/channel.js'
 import type { ShieldValidator } from '../../../node/server/shield.js'
 import { encodePublishBinary, encodePublishText, type WirePublishInfo } from '../../shared-ws.js'
-import { type ServerLocalParticipant, type ServerRoom } from './room.js'
+import { ShieldValidationError } from '../../../shared/ShieldValidationError.js'
+import type { ChannelPublishAck } from '../../channel.js'
+import type { ServerLocalParticipant, ServerRoom } from './room.js'
 import { reportRoomError, roomAckError } from './errors.js'
 import {
   decodeParticipantFrame,
@@ -18,25 +20,28 @@ import {
   decodeRoomPublish,
   decodeRoomRequest,
   decodeStubBinaryFrame,
+  type RoomDeclaration,
 } from './requests.js'
 import { ReplayGate, TEXT_LANE_KEY, binaryLaneKey, type LaneHolder } from './replay.js'
-import type { ParticipantMeta, RoomSendReceipt } from '../types.js'
+import type { ParticipantMeta } from '../types.js'
 import { DEFAULT_TRACK, binaryWantsCovers, emptyTrackWants, type BinaryFrame, type BinaryWants } from '../binary.js'
-import { DM_PARTICIPANT_LEFT, roomFailureError } from '../errors.js'
+import { DM_PARTICIPANT_LEFT, RoomError } from '../errors.js'
 import { leaveCauseToWire } from '../model.js'
 import {
   pushBoundedTail,
   decodeDmReply,
+  type DmReply,
   type RoomOrder,
   type ParticipantStubRequest,
   type RoomCtrlEnvelope,
   type RoomDataEnvelope,
+  type RoomDataPublish,
   type RoomDemandEvent,
+  type RoomDmEnvelope,
   type RoomRosterEvent,
+  type TailEntry,
 } from '../protocol.js'
 assertIsNotBrowser()
-
-// Room authority stays server-side; each wire stub owns one holder's wants, buffering, watermarks, and correlations.
 
 /** What one response's Room values grant the client on a room: echo drops for its own members, and hidden members it returned. */
 type ResponseRoomGrants = { selfSuppressed: Set<string>; hidden: Set<string> }
@@ -56,60 +61,32 @@ abstract class RoomRequestChannel extends ServerChannel {
   }
 }
 
-/** Server→client control/data obey wants; client→server membership/control and validated publishes use native channel acks. */
+/** The publish shield validates Room data at ingress only; the base channel's validators see every request envelope. */
+function assertPublishShield(validate: ShieldValidator | undefined, data: unknown): void {
+  if (!validate) return
+  const result = validate(data)
+  if (result !== true) throw new ShieldValidationError(result)
+}
+
+/** One client's view of a server room: it relays what the client wants and acts for the members the client joined. */
 class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
   private readonly _room: ServerRoom
-  /** @internal — members the remote client joined through this stub (membership & lifecycle). */
-  readonly _stubMembers = new Set<string>()
+  private readonly _publishShield: ShieldValidator | undefined
+  private readonly _members = new Set<string>()
+  /** Members whose own messages this client doesn't get back: its selfDelivery: false joins and co-returned server joins. */
+  private readonly _selfSuppressed: Set<string>
+  /** Hidden members this response handed the client: their events are relayed to it alone. */
+  private readonly _grantedHidden: Set<string>
   /** Live ack-DM correlations, stored in their constant-offset deadline order. */
   private readonly _pendingAckDms = new Map<string, { sender: string; recipient: string; expiresAt: number }>()
-
-  /** @internal — record a relayed ack DM and sweep correlations whose sender already timed out. */
-  _recordAckDm(ackId: string, sender: string, recipient: string): void {
-    const now = Date.now()
-    for (const [id, entry] of this._pendingAckDms) {
-      if (entry.expiresAt > now) break // constant offset ⇒ insertion order is deadline order; the rest are younger
-      this._pendingAckDms.delete(id)
-    }
-    this._pendingAckDms.set(ackId, { sender, recipient, expiresAt: now + ROOM_DM_ACK_TIMEOUT_MS })
-  }
-
-  /** @internal — consume a correlation only for the recipient it was relayed to; the sender drops a reply after its timeout. */
-  _takeAckDm(ackId: string, replier: unknown): string | undefined {
-    const entry = this._pendingAckDms.get(ackId)
-    if (!entry || entry.recipient !== replier) return undefined
-    this._pendingAckDms.delete(ackId)
-    return entry.sender
-  }
-  /** One self-delivery gate combines direct client joins and co-returned server joins before wire emission. */
-  readonly _selfSuppressed: Set<string>
-  /** Hidden members this response handed the client: their events are relayed to it alone. */
-  readonly _grantedHidden: Set<string>
-  /** The generated publish shield validates Room data ingress only; base validators own multiplexed request envelopes. */
-  readonly _publishShield: ShieldValidator | undefined
-  /** @internal — the client's declared binary wants, per member and track (`sub-binary`). */
-  _binaryWants: BinaryWants = { everyMember: emptyTrackWants(), members: {} }
-  /** @internal — whether the client subscribes to the whole text lane (the broadcast-sub ctrl). */
-  _wantsText = false
-  /** @internal — which members' text the client wants without a room-level subscription (`sub-text`). */
-  _textMemberWants: Set<string> = new Set()
-  /** @internal — whether the client wants room-authored messages on the shared semantic lane. */
-  _wantsAnnounce = false
-
-  /** A bounded server-side tail waits for the first text selector, then flushes once in order. */
-  _tailPending: Array<{ serialized: string; ord: RoomOrder; from: string }> | null = null
-  private _tailTimer: ReturnType<typeof setTimeout> | null = null
-
   private readonly _replay = new ReplayGate()
-
-  /** @internal — relay gate: does this client want the (member, track) the frame belongs to? */
-  _wantsBinary(memberId: string, track: string): boolean {
-    return !this._selfSuppressed.has(memberId) && binaryWantsCovers(this._binaryWants, memberId, track)
-  }
-
-  _wantsTextFrom(memberId: string): boolean {
-    return !this._selfSuppressed.has(memberId) && (this._wantsText || this._textMemberWants.has(memberId))
-  }
+  private _wantsText = false
+  private _textMemberWants: ReadonlySet<string> = new Set()
+  private _announce = false
+  private _binary: BinaryWants = { everyMember: emptyTrackWants(), members: {} }
+  /** A bounded server-side tail waits for the first text selector, then flushes once in order. */
+  private _tailPending: TailEntry[] | null = null
+  private _tailTimer: ReturnType<typeof setTimeout> | null = null
 
   constructor(
     serverRoom: ServerRoom,
@@ -122,13 +99,15 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
     this._grantedHidden = grants.hidden
   }
 
+  // Client requests
+
   override _onPeerMessage(text: string, bytes: number): void {
     const started = performance.now()
     try {
       this._flow.onReceived(bytes)
       const declaration = decodeRoomDeclaration(parsePeerText(text))
       try {
-        this._room._applyStubDeclaration(this, declaration)
+        this._applyDeclaration(declaration)
       } catch (error) {
         this._handleCallbackError(error)
       }
@@ -145,12 +124,12 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
 
   override _onPeerPublishAckReqMessage(text: string, seq: number): Promise<void> {
     const publish = decodeRoomPublish(parsePeerText(text))
-    return this._ackRoomResult(seq, this._room._publishTextFromStub(this, publish))
+    return this._ackRoomResult(seq, this._publishText(publish))
   }
 
   override _onPeerPublishBinaryAckReqMessage(framed: Uint8Array, seq: number): Promise<void> {
     const { from } = decodeStubBinaryFrame(framed)
-    return this._ackRoomResult(seq, this._room._publishBinaryFromStub(this, from, framed))
+    return this._ackRoomResult(seq, this._publishBinary(from, framed))
   }
 
   // Control always flows; text follows broadcast/member wants, while binary uses `sub-binary`.
@@ -163,27 +142,136 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
     this._room._syncSubs()
     void this._room._replayRetainedText(this, (member) => prevMembers.has(member)).catch(reportRoomError)
   }
+
   override _onPeerBroadcastUnsubscribe(binary: boolean): void {
     if (binary || !this._wantsText) return
     this._wantsText = false
     this._room._syncSubs()
   }
 
+  private _applyDeclaration(declaration: RoomDeclaration): void {
+    switch (declaration.__r) {
+      case 'sub-binary':
+        return this._declareBinaryWants(declaration.wants)
+      case 'sub-text':
+        return this._declareTextWants(declaration.members, declaration.announce)
+      case 'dm-reply':
+        return this._replyDm(declaration.id, declaration.ackId, declaration.reply)
+    }
+  }
+
+  private _declareBinaryWants(wants: BinaryWants): void {
+    const prev = this._binary
+    this._binary = wants
+    this._room._syncSubs()
+    void this._room._replayRetainedBinary(this, prev).catch(reportRoomError)
+  }
+
+  private _declareTextWants(members: string[], announce: boolean): void {
+    const prevMembers = this._textMemberWants
+    const prevWantsText = this._wantsText
+    this._textMemberWants = new Set(members)
+    this._announce = announce
+    this._flushTail()
+    this._room._syncSubs()
+    void this._room
+      ._replayRetainedText(this, (member) => prevWantsText || prevMembers.has(member))
+      .catch(reportRoomError)
+  }
+
+  private async _publishText(publish: RoomDataPublish): Promise<ChannelPublishAck> {
+    this._requireMember(publish.from)
+    assertPublishShield(this._publishShield, publish.data)
+    return await this._room._publishText(publish.from, publish.data, publish.retain)
+  }
+
+  private async _publishBinary(from: string, framed: Uint8Array): Promise<ChannelPublishAck> {
+    return await this._room._publishBinaryFramed(this._requireMember(from), framed)
+  }
+
+  // Membership
+
+  _holds(id: string): boolean {
+    return this._members.has(id)
+  }
+
+  _heldMembers(): IterableIterator<string> {
+    return this._members.values()
+  }
+
+  _requireMember(id: string): string {
+    if (!this._members.has(id)) throw new RoomError('Not a participant of this room (joined through this connection)')
+    return id
+  }
+
+  _addMember(id: string, selfDelivery: boolean): void {
+    this._members.add(id)
+    if (!selfDelivery) this._selfSuppressed.add(id)
+  }
+
+  _forgetMember(id: string): void {
+    this._members.delete(id)
+    this._selfSuppressed.delete(id)
+    this._replay.forgetMember(id)
+  }
+
+  // Wants, as the room's subscription planner reads them
+
+  get _binaryWants(): BinaryWants {
+    return this._binary
+  }
+
+  get _wantsAnnounce(): boolean {
+    return this._announce
+  }
+
+  /** A tail-pending stub ingests all text so its hold captures the whole recent tail; its selector applies at flush. */
+  _textDemand(): 'all' | ReadonlySet<string> {
+    return this._wantsText || this._tailPending !== null ? 'all' : this._textMemberWants
+  }
+
+  _wantsTextFrom(memberId: string): boolean {
+    return !this._selfSuppressed.has(memberId) && (this._wantsText || this._textMemberWants.has(memberId))
+  }
+
+  _wantsBinary(memberId: string, track: string): boolean {
+    return !this._selfSuppressed.has(memberId) && binaryWantsCovers(this._binary, memberId, track)
+  }
+
+  // Relays
+
   /** An event this instance originates for this client alone, outside any lane's order. */
   _relayEvent(event: RoomRosterEvent | RoomDemandEvent | Extract<RoomCtrlEnvelope, { __r: 'closed' }>): void {
     this._sendPublish(encodePublishText(stringify(event), { seq: 0, timestamp: Date.now() }))
   }
 
-  _relayTextLive(wireText: string, ord: RoomOrder): void {
-    if (this._replay.admitLive(TEXT_LANE_KEY, ord.seq)) this._sendPublish(wireText)
+  /** A hidden member's events reach only the clients that were handed it. */
+  _relayControl(wireText: string, hiddenMember: string | null): void {
+    if (hiddenMember === null || this._grantedHidden.has(hiddenMember)) this._sendPublish(wireText)
+  }
+
+  _relayAnnouncement(wireText: string, ord: RoomOrder): void {
+    if (this._announce) this._relayTextLive(wireText, ord)
+  }
+
+  _relayText(serialized: string, wireText: string, from: string, ord: RoomOrder): void {
+    if (this._tailPending !== null) pushBoundedTail(this._tailPending, { serialized, ord, from })
+    else if (this._wantsTextFrom(from)) this._relayTextLive(wireText, ord)
+  }
+
+  _relayBinary(wireData: Uint8Array, from: string, track: string, info: WirePublishInfo): void {
+    if (this._wantsBinary(from, track) && this._replay.admitLive(binaryLaneKey(from, track), info.seq))
+      this._sendPublishBinary(wireData)
+  }
+
+  /** The client replies to an ack DM with `dm-reply`, which only the recipient it was relayed to may send. */
+  _relayDm(wireText: string, { from, to, ackId }: RoomDmEnvelope): void {
+    if (ackId) this._recordAckDm(ackId, from, to)
+    this._sendPublish(wireText)
   }
 
   _emitRetainedText(serialized: string, _event: RoomDataEnvelope, info: WirePublishInfo): void {
     if (this._replay.admitRetained(TEXT_LANE_KEY, info.seq)) this._sendPublish(encodePublishText(serialized, info))
-  }
-
-  _relayBinaryLive(wireData: Uint8Array, from: string, track: string, info: WirePublishInfo): void {
-    if (this._replay.admitLive(binaryLaneKey(from, track), info.seq)) this._sendPublishBinary(wireData)
   }
 
   _emitRetainedBinary(framed: Uint8Array, frame: BinaryFrame, info: WirePublishInfo): void {
@@ -191,12 +279,34 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
       this._sendPublishBinary(encodePublishBinary(framed, info))
   }
 
-  _forgetMember(from: string): void {
-    this._replay.forgetMember(from)
+  private _relayTextLive(wireText: string, ord: RoomOrder): void {
+    if (this._replay.admitLive(TEXT_LANE_KEY, ord.seq)) this._sendPublish(wireText)
   }
 
+  // Ack-DM correlations
+
+  /** Sweeps correlations whose sender already timed out. */
+  private _recordAckDm(ackId: string, sender: string, recipient: string): void {
+    const now = Date.now()
+    for (const [id, entry] of this._pendingAckDms) {
+      if (entry.expiresAt > now) break // constant offset ⇒ insertion order is deadline order; the rest are younger
+      this._pendingAckDms.delete(id)
+    }
+    this._pendingAckDms.set(ackId, { sender, recipient, expiresAt: now + ROOM_DM_ACK_TIMEOUT_MS })
+  }
+
+  private _replyDm(replier: string, ackId: string, reply: DmReply): void {
+    const entry = this._pendingAckDms.get(ackId)
+    // The sender drops a reply after its timeout.
+    if (!entry || entry.recipient !== replier) return
+    this._pendingAckDms.delete(ackId)
+    void this._room._publishDmAck(entry.sender, ackId, reply).catch(reportRoomError)
+  }
+
+  // Tail
+
   /** @internal — begin holding the bounded tail, seeded from the room's pre-attach hold. The client gets a fresh lease after attach; expiry drops the hold and lets the room release ingestion. */
-  _beginTail(seed: Array<{ serialized: string; ord: RoomOrder; from: string }>, onExpire: () => void): void {
+  _beginTail(seed: TailEntry[], onExpire: () => void): void {
     this._tailPending = seed
     this._tailTimer = unrefTimer(
       setTimeout(() => {
@@ -207,15 +317,8 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
     )
   }
 
-  /** @internal — append a live message to the pending tail, bounded drop-oldest (the freshest tail is what a late subscriber wants). Called only while `_tailPending` is non-null. */
-  _holdTail(serialized: string, ord: RoomOrder, from: string): void {
-    const hold = this._tailPending
-    assert(hold)
-    pushBoundedTail(hold, { serialized, ord, from })
-  }
-
   /** The first real text want flushes the bounded tail in order through retained/live dedup. */
-  _flushTail(): void {
+  private _flushTail(): void {
     const hold = this._tailPending
     if (!hold) return
     if (!this._wantsText && this._textMemberWants.size === 0) return // keep holding until a real want
@@ -233,16 +336,6 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
       this._tailTimer = null
     }
   }
-}
-
-async function sendParticipantDm(
-  participant: ServerLocalParticipant,
-  req: Extract<ParticipantStubRequest, { __r: 'req-dm' }>,
-) {
-  if (!req.ack) return (await participant.send(req.to, req.data)) as RoomSendReceipt
-  const { receipt, reply } = await participant._room._sendDmAck(participant.id, req.to, req.data)
-  if (!reply.ok) throw roomFailureError(reply)
-  return { ...receipt, response: reply.result }
 }
 
 /** One client's hold on a server participant: its requests act as that participant, whose inbox, demand, meta and leave flow back to the client. */
@@ -276,14 +369,14 @@ class RoomParticipantStubChannel extends RoomRequestChannel {
     const participant = this._participant
     switch (req.__r) {
       case 'req-publish':
-        participant._room._shieldPublishData(this._publishShield, req.data)
+        assertPublishShield(this._publishShield, req.data)
         return await participant.publish(req.data, req.retain ? { retain: true } : undefined)
       case 'req-set-meta':
         return await participant.setMeta(req.meta)
       case 'req-set-attrs':
         return await participant.setAttributes(req.attrs)
       case 'req-dm':
-        return await sendParticipantDm(participant, req)
+        return await participant.send(req.to, req.data, req.ack ? { ack: true } : undefined)
       case 'req-leave':
         return await participant.leave()
     }

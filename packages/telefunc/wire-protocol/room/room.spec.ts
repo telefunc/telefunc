@@ -35,6 +35,7 @@ import { ServerRoom, type ServerLocalParticipant } from './server/room.js'
 import { SubSlot, configFromHead, decodeRoomText, encodeRoomConfig } from './server/lanes.js'
 import { reportRoomError, roomAckError } from './server/errors.js'
 import { RoomParticipantStubChannel, RoomStubChannel } from './server/stub.js'
+import { ReplayGate } from './server/replay.js'
 import { RoomDemand } from './demand.js'
 import { roomParticipantReplacer, roomRemoteReplacer, roomReplacer } from './response-server.js'
 import type { ServerReplacerContext } from '../types.js'
@@ -183,7 +184,7 @@ describe('Room public behavior', () => {
     const failure = new Error('transient member delete failure')
     vi.spyOn(driver, 'compareExchangeCells').mockRejectedValueOnce(failure)
     await expect(room._handleStubRequest(stub, request)).rejects.toBe(failure)
-    expect(stub._stubMembers.has(joined.id)).toBe(true)
+    expect(stub._holds(joined.id)).toBe(true)
     await expect(room._handleStubRequest(stub, request)).resolves.toBeUndefined()
     expect(await Room.getParticipants(room.id)).toEqual([])
   })
@@ -806,7 +807,7 @@ describe('Room public behavior', () => {
     const replayText = vi.spyOn(room, '_replayRetainedText')
     const replayBinary = vi.spyOn(room, '_replayRetainedBinary')
     stub._onPeerBroadcastSubscribe(false)
-    await room._applyStubDeclaration(stub, {
+    declare(stub, {
       __r: 'sub-binary',
       wants: { everyMember: { all: true, tracks: [] }, members: {} },
     })
@@ -1569,17 +1570,13 @@ describe('Room public behavior', () => {
       { kind: 'binary', member: 'member', track: 'original' },
     ])
   })
-  it('does not replay older retained text after a newer global semantic frame', async () => {
-    const room = (await Room.create('global-retained-watermark')) as ServerRoom
-    const stub = register(room)
-    const relay = vi.spyOn(stub, '_sendPublish').mockImplementation(() => {})
-    stub._relayTextLive('newer-live', { seq: 2, timestamp: 2 })
-    stub._emitRetainedText(
-      'older-retained',
-      { __r: 'data', from: 'sender-a', fromMeta: {}, data: null },
-      { seq: 1, timestamp: 1 },
-    )
-    expect(relay.mock.calls.map(([wire]) => wire)).toEqual(['newer-live'])
+  it('admits a retained frame once, never behind a same-or-newer frame, and drops its live echo', () => {
+    const gate = new ReplayGate()
+    expect(gate.admitLive('text', 2)).toBe(true)
+    expect(gate.admitRetained('text', 1)).toBe(false)
+    expect(gate.admitRetained('text', 3)).toBe(true)
+    expect(gate.admitLive('text', 3)).toBe(false)
+    expect(gate.admitLive('text', 4)).toBe(true)
   })
   it('replays retained text and binary once to a late server-side subscriber', async () => {
     const authority = await Room.create('late-server-subscriber')
@@ -1605,7 +1602,7 @@ describe('Room public behavior', () => {
     const roster = delayRosterRead(authority.id)
     const listRetained = vi.spyOn(driver, 'listRetained')
     try {
-      await observer._applyStubDeclaration(stub, {
+      declare(stub, {
         __r: 'sub-binary',
         wants: { everyMember: { all: true, tracks: [] }, members: {} },
       })
@@ -1626,7 +1623,7 @@ describe('Room public behavior', () => {
     const members = Object.fromEntries(
       Array.from({ length: 100 }, () => [crypto.randomUUID(), { all: false, tracks: ['screen'] }]),
     )
-    await observer._applyStubDeclaration(stub, {
+    declare(stub, {
       __r: 'sub-binary',
       wants: { everyMember: { all: false, tracks: [] }, members },
     })
@@ -1643,7 +1640,7 @@ describe('Room public behavior', () => {
     const binaryLanes = () => subscribeLane.mock.calls.filter(([, , lane]) => lane.kind === 'binary').length
     expect(observer._state.rosterKnown).toBe(false)
     try {
-      await observer._applyStubDeclaration(stub, {
+      declare(stub, {
         __r: 'sub-binary',
         wants: {
           everyMember: { all: false, tracks: [] },
@@ -2594,6 +2591,9 @@ function attachPeer(stub: RoomStubChannel, lastSeq?: number, broadcast?: Broadca
   )
   return { decoded: () => frames.map((frame) => decode(frame as Uint8Array<ArrayBuffer>)) }
 }
+function declare(stub: RoomStubChannel, declaration: unknown): void {
+  stub._onPeerMessage(stringify(declaration), 0)
+}
 function register(room: ServerRoom): RoomStubChannel {
   const stub = new RoomStubChannel(room, { grants: { selfSuppressed: new Set(), hidden: new Set() } })
   stub._registerChannel()
@@ -2652,12 +2652,12 @@ async function wideBinaryScenario(id: string, retain: boolean, byte: number) {
     timestamp: 10,
   })
   if (!retain) {
-    await serverRoom._applyStubDeclaration(stub, { __r: 'sub-binary', wants: allBinary })
+    declare(stub, { __r: 'sub-binary', wants: allBinary })
     await (serverRoom as unknown as { _binaryReady(): Promise<void> })._binaryReady()
   }
   const receipt = await camera.publishBinary(new Uint8Array([byte]), retain ? { retain: true } : undefined)
   if (retain) {
-    await serverRoom._applyStubDeclaration(stub, { __r: 'sub-binary', wants: allBinary })
+    declare(stub, { __r: 'sub-binary', wants: allBinary })
     await (serverRoom as unknown as { _binaryReady(): Promise<void> })._binaryReady()
   }
   await vi.waitFor(() => expect(peer.decoded().some((candidate) => candidate.tag === TAG.PUBLISH_BINARY)).toBe(true))

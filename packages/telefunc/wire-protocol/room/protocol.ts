@@ -32,6 +32,7 @@ export type {
   ParticipantStubRequest,
   ParticipantStubNotice,
   MemberWants,
+  TailEntry,
 }
 
 import { ROOM_TAIL_HOLD_CODE_UNITS_MAX, ROOM_TAIL_HOLD_MAX } from './constants.js'

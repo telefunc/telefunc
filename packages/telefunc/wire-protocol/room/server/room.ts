@@ -2,8 +2,6 @@ export { ServerRoom, ServerLocalParticipant }
 
 import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
-import { ShieldValidationError } from '../../../shared/ShieldValidationError.js'
-import type { ShieldValidator } from '../../../node/server/shield.js'
 import type { TELEFUNC_SHIELDS } from '../../../node/shared/transformer/generateShield/shield-key.js'
 import { assert, assertUsage } from '../../../utils/assert.js'
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
@@ -41,7 +39,6 @@ import {
   type RoomCtrlEnvelope,
   type RoomDataEnvelope,
   type RoomOrder,
-  type RoomDataPublish,
   type RoomDmEnvelope,
   type RoomDmAckEnvelope,
   type DmReply,
@@ -55,7 +52,7 @@ import { RoomState, RoomStateView } from '../state.js'
 import { RoomDemand } from '../demand.js'
 import { ParticipantBase, type InboxMessage } from '../participant.js'
 import type { RoomStubChannel } from './stub.js'
-import type { RoomDeclaration, RoomRequest } from './requests.js'
+import type { RoomRequest } from './requests.js'
 import { LocalHolder, type LaneHolder } from './replay.js'
 import {
   CONTROL_LANE,
@@ -101,10 +98,6 @@ function hiddenMemberOf(event: RoomCtrlEnvelope): string | null {
   if (event.__r === 'join' || event.__r === 'leave' || event.__r === 'p-meta' || event.__r === 'track')
     return event.hidden === true ? event.id : null
   return null
-}
-function requireStubMember(stub: RoomStubChannel, id: string): string {
-  if (!stub._stubMembers.has(id)) throw new RoomError('Not a participant of this room (joined through this connection)')
-  return id
 }
 
 type SubscriptionPlan = {
@@ -184,7 +177,7 @@ class ServerRoom extends RoomStateView implements Room {
     this._local = new LocalHolder(this._state, (member) => this._suppress(member))
     this._demand = new RoomDemand(
       (event) => void publishCtrl(roomId, config.inc, { __r: 'want', ...event }).catch(reportRoomError),
-      (id) => this._ownsMember(id),
+      (id) => this._holderOf(id) !== undefined,
       (member, track, wanted) => this._deliverDemand(member, track, wanted),
     )
   }
@@ -465,7 +458,17 @@ class ServerRoom extends RoomStateView implements Room {
     return { id: from, meta: {}, identity: null }
   }
 
-  async _sendDmAck(from: string, to: string, data: unknown): Promise<{ receipt: RoomSendReceipt; reply: DmReply }> {
+  async _sendDm(from: string, to: string, data: unknown, ack: boolean): Promise<RoomSendReceipt | RoomAckReceipt> {
+    if (!ack) return await this._publishDm(from, to, data)
+    const { receipt, reply } = await this._sendDmAck(from, to, data)
+    if (!reply.ok) throw roomFailureError(reply)
+    return { ...receipt, response: reply.result }
+  }
+  private async _sendDmAck(
+    from: string,
+    to: string,
+    data: unknown,
+  ): Promise<{ receipt: RoomSendReceipt; reply: DmReply }> {
     const ackId = crypto.randomUUID()
     let timer: ReturnType<typeof setTimeout> | undefined
     const reply = new Promise<DmReply>((settle) => {
@@ -521,7 +524,7 @@ class ServerRoom extends RoomStateView implements Room {
     return info
   }
 
-  private async _publishDmAck(to: string, ackId: string, reply: DmReply): Promise<void> {
+  async _publishDmAck(to: string, ackId: string, reply: DmReply): Promise<void> {
     const envelope: RoomDmAckEnvelope = { __r: 'dm-ack', to, ackId, ...reply }
     const committed = await commitRoomLane(
       this.id,
@@ -584,9 +587,7 @@ class ServerRoom extends RoomStateView implements Room {
     this._applyCtrl(event)
     if (this._stubs.size > 0) {
       const wireText = encodePublishText(serialized, rawInfo)
-      // A hidden member's events reach only the clients that were handed it.
-      for (const stub of this._stubs)
-        if (hiddenMember === null || stub._grantedHidden.has(hiddenMember)) stub._sendPublish(wireText)
+      for (const stub of this._stubs) stub._relayControl(wireText, hiddenMember)
     }
     if (this._state.closed && !wasClosed) this._teardown()
   }
@@ -598,7 +599,7 @@ class ServerRoom extends RoomStateView implements Room {
   ): void {
     this._local.relayAnnouncement(announce.data, rawInfo)
     const wireText = encodePublishText(serialized, rawInfo)
-    for (const stub of this._stubs) if (stub._wantsAnnounce) stub._relayTextLive(wireText, rawInfo)
+    for (const stub of this._stubs) stub._relayAnnouncement(wireText, rawInfo)
   }
 
   private _applyMemberData(event: RoomDataEnvelope, rawInfo: WirePublishInfo): void {
@@ -613,10 +614,7 @@ class ServerRoom extends RoomStateView implements Room {
       return
     }
     const wireText = encodePublishText(serialized, rawInfo)
-    for (const stub of this._stubs) {
-      if (stub._tailPending !== null) stub._holdTail(serialized, rawInfo, event.from)
-      else if (stub._wantsTextFrom(event.from)) stub._relayTextLive(wireText, rawInfo)
-    }
+    for (const stub of this._stubs) stub._relayText(serialized, wireText, event.from, rawInfo)
   }
   private _onTextData(serialized: string, rawInfo: WirePublishInfo): void {
     const envelope = decodeLaneEnvelope(serialized) as RoomDataEnvelope | Extract<RoomEnvelope, { __r: 'announce' }>
@@ -632,10 +630,7 @@ class ServerRoom extends RoomStateView implements Room {
     if (this._stubs.size > 0) {
       const wireData = encodePublishBinary(framed, rawInfo)
       const track = unframed.track ?? DEFAULT_TRACK
-      for (const stub of this._stubs) {
-        if (!stub._wantsBinary(unframed.from, track)) continue
-        stub._relayBinaryLive(wireData, unframed.from, track, rawInfo)
-      }
+      for (const stub of this._stubs) stub._relayBinary(wireData, unframed.from, track, rawInfo)
     }
   }
   /** A message on the inbox key of a member this instance owns — route it to the holder: a server-side participant's listeners, or the one client stub the member joined through. */
@@ -644,6 +639,10 @@ class ServerRoom extends RoomStateView implements Room {
     // A reply to one of our own `send(…, { ack: true })`s, riding our inbox back home.
     if (envelope.__r === 'dm-ack') return this._resolveDmAck(envelope)
     const dm = envelope
+    const holder = this._holderOf(dm.to)
+    // A client held through a room stub gets the DM relayed (its `ackId` rides along) and replies with `dm-reply`.
+    if (holder === undefined || !(holder instanceof ServerLocalParticipant))
+      return holder?._relayDm(encodePublishText(serialized, rawInfo), dm)
     const msg: InboxMessage = {
       from: dm.from,
       fromMeta: dm.fromMeta,
@@ -651,25 +650,14 @@ class ServerRoom extends RoomStateView implements Room {
       data: dm.data,
       ...(dm.ackId ? { ackId: dm.ackId } : {}),
     }
-    const local = this._localParticipants.get(dm.to)
-    if (local) {
-      // A server-side participant, or one a client holds (its forwarder replies). Either way, for an ack DM we route the handler's reply back to the sender's inbox.
-      if (dm.ackId) {
-        void local
-          ._deliverMessageAck(msg)
-          .then((reply) => this._publishDmAck(dm.from, dm.ackId!, reply))
-          .catch(reportRoomError)
-      } else {
-        local._deliverMessage(msg)
-      }
-      return
-    }
-    // A client held through a room stub — relay the DM (its `ackId` rides along); the client replies with `dm-reply`, which `_handleStubRequest` turns into the `dm-ack` above.
-    const wireText = encodePublishText(serialized, rawInfo)
-    for (const stub of this._stubs) {
-      if (!stub._stubMembers.has(dm.to)) continue
-      if (dm.ackId) stub._recordAckDm(dm.ackId, dm.from, dm.to)
-      stub._sendPublish(wireText)
+    // A server-side participant, or one a client holds (its forwarder replies). Either way, for an ack DM we route the handler's reply back to the sender's inbox.
+    if (dm.ackId) {
+      void holder
+        ._deliverMessageAck(msg)
+        .then((reply) => this._publishDmAck(dm.from, dm.ackId!, reply))
+        .catch(reportRoomError)
+    } else {
+      holder._deliverMessage(msg)
     }
   }
   private _applyCtrl(event: RoomCtrlEnvelope): void {
@@ -707,11 +695,7 @@ class ServerRoom extends RoomStateView implements Room {
       // A live-heartbeating owner can't be reaped (heartbeats outpace the TTL by 4x), so a vanished record with no observed event means the member was removed.
       local._onLeft(cause ?? { type: 'removed' })
     }
-    for (const stub of this._stubs) {
-      stub._stubMembers.delete(id)
-      stub._selfSuppressed.delete(id)
-      stub._forgetMember(id) // drop the departed member's retained-replay watermarks (bounded state)
-    }
+    for (const stub of this._stubs) stub._forgetMember(id)
     this._local.forgetMember(id)
     this._demand.forgetMember(id)
     this._syncSubs()
@@ -828,11 +812,10 @@ class ServerRoom extends RoomStateView implements Room {
     stub.onClose(() => {
       this._stubs.delete(stub)
       stub._endTail() // clear any pending tail hold/timer so a closed stub leaves nothing behind
-      for (const id of stub._stubMembers.keys()) {
+      for (const id of stub._heldMembers()) {
         if (this._pendingAdmissions.has(id)) continue // the admission rolls itself back
         void this._removeDepartedMember(id).catch(reportRoomError)
       }
-      stub._stubMembers.clear()
       this._syncSubs()
     })
     this._syncSubs()
@@ -842,75 +825,24 @@ class ServerRoom extends RoomStateView implements Room {
       case 'req-join':
         return await this._joinStubMember(stub, req)
       case 'req-leave':
-        await this._removeMember(requireStubMember(stub, req.id), { type: 'left' })
-        stub._stubMembers.delete(req.id)
+        await this._removeMember(stub._requireMember(req.id), { type: 'left' })
+        stub._forgetMember(req.id)
         return undefined
       case 'req-set-meta':
-        return await this._setMemberMeta(requireStubMember(stub, req.id), req.meta)
+        return await this._setMemberMeta(stub._requireMember(req.id), req.meta)
       case 'req-set-attrs':
-        return await this._mergeMemberMeta(requireStubMember(stub, req.id), req.attrs)
+        return await this._mergeMemberMeta(stub._requireMember(req.id), req.attrs)
       case 'req-dm':
-        return await this._sendStubDm(stub, req)
-    }
-  }
-  _applyStubDeclaration(stub: RoomStubChannel, decl: RoomDeclaration): void {
-    switch (decl.__r) {
-      case 'dm-reply':
-        return this._applyStubDmReply(stub, decl)
-      case 'sub-binary':
-        return this._applyStubBinaryWants(stub, decl)
-      case 'sub-text':
-        return this._applyStubTextWants(stub, decl)
+        return await this._sendDm(stub._requireMember(req.id), req.to, req.data, req.ack === true)
     }
   }
   private async _joinStubMember(stub: RoomStubChannel, req: Extract<RoomRequest, { __r: 'req-join' }>) {
     await this._assertOpen()
     const admission = { id: crypto.randomUUID(), meta: req.meta, identity: null, joinedAt: Date.now(), hidden: false }
     await this._guardAdmission(admission)
-    stub._stubMembers.add(admission.id)
-    if (!req.selfDelivery) stub._selfSuppressed.add(admission.id)
+    stub._addMember(admission.id, req.selfDelivery)
     await this._commitAdmission(admission)
     return { id: admission.id, joinedAt: admission.joinedAt }
-  }
-  private async _sendStubDm(stub: RoomStubChannel, req: Extract<RoomRequest, { __r: 'req-dm' }>) {
-    const id = requireStubMember(stub, req.id)
-    if (!req.ack) return await this._publishDm(id, req.to, req.data)
-    const { receipt, reply } = await this._sendDmAck(id, req.to, req.data)
-    if (!reply.ok) throw roomFailureError(reply)
-    return { ...receipt, response: reply.result }
-  }
-  private _applyStubDmReply(stub: RoomStubChannel, decl: Extract<RoomDeclaration, { __r: 'dm-reply' }>): void {
-    const sender = stub._takeAckDm(decl.ackId, decl.id)
-    if (sender === undefined) return
-    void this._publishDmAck(sender, decl.ackId, decl.reply).catch(reportRoomError)
-  }
-  private _applyStubBinaryWants(stub: RoomStubChannel, decl: Extract<RoomDeclaration, { __r: 'sub-binary' }>): void {
-    const prev = stub._binaryWants
-    stub._binaryWants = decl.wants
-    this._syncSubs()
-    void this._replayRetainedBinary(stub, prev).catch(reportRoomError)
-  }
-  private _applyStubTextWants(stub: RoomStubChannel, decl: Extract<RoomDeclaration, { __r: 'sub-text' }>): void {
-    const prevMembers = stub._textMemberWants
-    const prevWantsText = stub._wantsText
-    stub._textMemberWants = new Set(decl.members)
-    stub._wantsAnnounce = decl.announce
-    stub._flushTail()
-    this._syncSubs()
-    void this._replayRetainedText(stub, (member) => prevWantsText || prevMembers.has(member)).catch(reportRoomError)
-  }
-  _shieldPublishData(validate: ShieldValidator | undefined, data: unknown): void {
-    if (!validate) return
-    const result = validate(data)
-    if (result !== true) throw new ShieldValidationError(result)
-  }
-  async _publishTextFromStub(stub: RoomStubChannel, publish: RoomDataPublish): Promise<ChannelPublishAck> {
-    requireStubMember(stub, publish.from)
-    this._shieldPublishData(stub._publishShield, publish.data)
-    return await this._publishText(publish.from, publish.data, publish.retain)
-  }
-  async _publishBinaryFromStub(stub: RoomStubChannel, from: string, framed: Uint8Array): Promise<ChannelPublishAck> {
-    return await this._publishBinaryFramed(requireStubMember(stub, from), framed)
   }
   async _replayRetainedText(holder: LaneHolder, prevWantedFrom: (member: string) => boolean): Promise<void> {
     // Read retained only after subscription readiness: a racing commit is then retained or live, never lost in the gap.
@@ -1065,24 +997,14 @@ class ServerRoom extends RoomStateView implements Room {
     }
     return pairs
   }
-  private _ownsMember(id: string): boolean {
-    if (this._localParticipants.has(id)) return true
-    for (const stub of this._stubs) if (stub._stubMembers.has(id)) return true
-    return false
+  private _holderOf(id: string): ServerLocalParticipant | RoomStubChannel | undefined {
+    return this._localParticipants.get(id) ?? [...this._stubs].find((stub) => stub._holds(id))
   }
   private _deliverDemand(member: string, track: string, wanted: boolean): void {
     const trackOut = track === DEFAULT_TRACK ? null : track
-    const local = this._localParticipants.get(member)
-    if (local) {
-      local._onDemand(trackOut, wanted)
-      return
-    }
-    for (const stub of this._stubs) {
-      if (stub._stubMembers.has(member)) {
-        stub._relayEvent({ __r: 'demand', member, track: trackOut, wanted })
-        return
-      }
-    }
+    const holder = this._holderOf(member)
+    if (holder instanceof ServerLocalParticipant) holder._onDemand(trackOut, wanted)
+    else holder?._relayEvent({ __r: 'demand', member, track: trackOut, wanted })
   }
   private _aggregateTextWants(): { all: boolean; members: Set<string> } {
     if (this._tail) return { all: true, members: new Set() } // pre-attach tail: ingest everything now
@@ -1090,9 +1012,9 @@ class ServerRoom extends RoomStateView implements Room {
     if (local.all) return { all: true, members: new Set() }
     const members = new Set(local.members)
     for (const stub of this._stubs) {
-      // A tail-pending stub ingests everything so its hold captures the whole recent tail; the selector is applied at flush, not here (the want isn't known until the client subscribes).
-      if (stub._wantsText || stub._tailPending !== null) return { all: true, members: new Set() }
-      for (const id of stub._textMemberWants) members.add(id)
+      const demand = stub._textDemand()
+      if (demand === 'all') return { all: true, members: new Set() }
+      for (const id of demand) members.add(id)
     }
     return { all: false, members }
   }
@@ -1167,7 +1089,7 @@ class ServerRoom extends RoomStateView implements Room {
   // Graceful departures use events; heartbeats refresh owner `seenAt` and reap records orphaned by hard crashes.
   private _ownedMemberIds(): string[] {
     const owned = [...this._localParticipants.keys()]
-    for (const stub of this._stubs) owned.push(...stub._stubMembers.keys())
+    for (const stub of this._stubs) owned.push(...stub._heldMembers())
     return owned
   }
   private _syncHeartbeat(): void {
@@ -1248,11 +1170,7 @@ class ServerLocalParticipant extends ParticipantBase {
   }
   async send(to: string | Sender, data: unknown, options?: { ack?: boolean }): Promise<any> {
     this._assertActive()
-    const toId = recipientId(to)
-    if (!options?.ack) return this._room._publishDm(this.id, toId, data)
-    const { receipt, reply } = await this._room._sendDmAck(this.id, toId, data)
-    if (!reply.ok) throw roomFailureError(reply)
-    return { ...receipt, response: reply.result } satisfies RoomAckReceipt
+    return await this._room._sendDm(this.id, recipientId(to), data, options?.ack === true)
   }
   async setMeta(meta: ParticipantMeta): Promise<void> {
     this._assertActive()
