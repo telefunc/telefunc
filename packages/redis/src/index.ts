@@ -3,7 +3,6 @@ export type { InstallRedisOptions, RedisBroadcastOptions }
 
 import type { Cluster, Redis } from 'ioredis'
 import {
-  BACKEND_SPI_VERSION,
   getGlobalObject,
   setDefaultBackend,
   superviseBroadcastDriver,
@@ -21,7 +20,6 @@ function installRedis(redis: Redis | Cluster, options: InstallRedisOptions = {})
 function createRedisBackendPair(options: RedisBackendOptions): BackendDriverPair {
   const driver = new RedisBackend(options)
   return {
-    spiVersion: BACKEND_SPI_VERSION,
     driver,
     dispose: () => driver.dispose(),
   }

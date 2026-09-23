@@ -8,7 +8,7 @@ import crossws from 'crossws/adapters/cloudflare'
 import { getTelefuncChannelHooks } from '../wire-protocol/server/ws.js'
 import { getServerConfig, enableChannelTransports } from '../node/server/serverConfig.js'
 import { serve as serveTelefunc } from '../node/server/telefunc.js'
-import { BACKEND_SPI_VERSION, type BackendDriverPair } from '../wire-protocol/backend/driver-pair.js'
+import type { BackendDriverPair } from '../wire-protocol/backend/driver-pair.js'
 import { setDefaultBackend } from '../wire-protocol/backend/install.js'
 import {
   CloudflareBroadcastAuthorityState,
@@ -118,7 +118,6 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
     cloudflareBackendSlot.current = { identity: backendIdentity, backend: cloudflareBackend }
   }
   const backendPair: BackendDriverPair = {
-    spiVersion: BACKEND_SPI_VERSION,
     driver: cloudflareBackend,
     dispose: () => cloudflareBackend.dispose(),
   }

@@ -1,10 +1,7 @@
 /// <reference types="@cloudflare/workers-types" />
 import { DurableObject } from 'cloudflare:workers'
 import '../../packages/telefunc/node/server/async_hooks.js'
-import {
-  BACKEND_SPI_VERSION,
-  type BackendDriverPair,
-} from '../../packages/telefunc/wire-protocol/backend/driver-pair.js'
+import { type BackendDriverPair } from '../../packages/telefunc/wire-protocol/backend/driver-pair.js'
 import { setDefaultBackend } from '../../packages/telefunc/wire-protocol/backend/install.js'
 import type { RoomHead } from '../../packages/telefunc/wire-protocol/backend/room/contract.js'
 import { Room } from '../../packages/telefunc/wire-protocol/room/server.js'
@@ -29,7 +26,6 @@ import {
 } from '../../packages/telefunc/wire-protocol/server/adapter/cloudflare/room/fanout.js'
 const publicRoomBackend = new CloudflareRoomBackend()
 const publicRoomPair: BackendDriverPair = {
-  spiVersion: BACKEND_SPI_VERSION,
   driver: publicRoomBackend,
   dispose: () => publicRoomBackend.dispose(),
 }

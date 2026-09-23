@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { BACKEND_SPI_VERSION, type BackendDriverPair } from './driver-pair.js'
+import type { BackendDriverPair } from './driver-pair.js'
 import {
   configureBroadcastTransport,
   disposeBackend,
@@ -124,7 +124,7 @@ describe('backend installation lifecycle', () => {
   })
 })
 function memoryPair(driver: MemoryBackend, dispose = () => driver.dispose()): BackendDriverPair {
-  return { spiVersion: BACKEND_SPI_VERSION, driver, dispose }
+  return { driver, dispose }
 }
 
 function localTransport(): BroadcastTransport {

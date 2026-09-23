@@ -5,7 +5,7 @@ import { ACK_STATUS, TAG, decode, encode, type DecodedFrame } from '../shared-ws
 import { ChannelMux, type ServerTransport } from './mux.js'
 import { IndexedPeer } from './IndexedPeer.js'
 import { disposeBackend, installBackend } from '../backend/install.js'
-import { BACKEND_SPI_VERSION, type BackendDriverPair } from '../backend/driver-pair.js'
+import type { BackendDriverPair } from '../backend/driver-pair.js'
 import { MemoryBackend, MemoryBackendState } from '../backend/memory/backend.js'
 import type { SubscriptionAttempt, SubscriptionAttemptState } from '../backend/subscription.js'
 import { ChannelClosedError, ChannelOverflowError } from '../channel-errors.js'
@@ -14,7 +14,6 @@ import { Abort } from '../../shared/Abort.js'
 
 let memoryState: MemoryBackendState
 const memoryPair = (driver: MemoryBackend): BackendDriverPair => ({
-  spiVersion: BACKEND_SPI_VERSION,
   driver,
   dispose: () => driver.dispose(),
 })

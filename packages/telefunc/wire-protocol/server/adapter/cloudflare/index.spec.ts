@@ -124,12 +124,11 @@ vi.mock('./routing.js', () => ({
 }))
 
 import { Telefunc } from '../../../../serve/cloudflare.js'
-import { BACKEND_SPI_VERSION, type BackendDriverPair } from '../../../backend/driver-pair.js'
+import type { BackendDriverPair } from '../../../backend/driver-pair.js'
 import { disposeBackend, getRoomBackend, installBackend } from '../../../backend/install.js'
 import { MemoryBackend } from '../../../backend/memory/backend.js'
 
 const memoryPair = (driver: MemoryBackend): BackendDriverPair => ({
-  spiVersion: BACKEND_SPI_VERSION,
   driver,
   dispose: () => driver.dispose(),
 })

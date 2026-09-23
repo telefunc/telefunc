@@ -25,25 +25,8 @@ import {
 import { DefaultBroadcastAdapter } from 'telefunc'
 // @ts-expect-error the legacy broadcast adapter type is not released
 import type { BroadcastAdapter } from 'telefunc'
-import { disposeBackend, HEAD_TRANSITIONS, laneKey, ORDERING_FRAME_LAYOUT } from 'telefunc/backend'
-
-// Dead fused surface: each diagnostic owns one removed name.
-// @ts-expect-error the fused supervised consumer getter is absent
-import { getBackend } from 'telefunc/backend'
-// @ts-expect-error the fused driver type is absent
-import type { BackendDriver } from 'telefunc/backend'
-// @ts-expect-error the fused consumer type is absent
-import type { BackendSpi } from 'telefunc/backend'
-// @ts-expect-error the fused subscription source is absent
-import type { BackendSubscriptionSource } from 'telefunc/backend'
-// @ts-expect-error the fused supervised subscription is absent
-import type { BackendSubscription } from 'telefunc/backend'
-
-// Descriptor and alternate-runtime paths are independently absent.
-// @ts-expect-error there is one scalar version, not a descriptor
-import { BACKEND_PROTOCOL } from 'telefunc/backend'
-// @ts-expect-error no backend runtime subpath is published
-import type {} from 'telefunc/backend/runtime'
+// @ts-expect-error the backend SPI is internal, not a public subpath
+import type {} from 'telefunc/backend'
 import { Abort as ClientAbort, ConnectionError, withContext } from 'telefunc/client'
 import { Telefunc } from 'telefunc/node'
 import { installRedis, RedisTransport, type InstallRedisOptions, type RedisBroadcastOptions } from '@telefunc/redis'
@@ -98,17 +81,6 @@ type ReleasedBroadcastTransport = {
 type _broadcastTransportShape = Assert<Compatible<BroadcastTransport, ReleasedBroadcastTransport>>
 declare const broadcastTransport: BroadcastTransport
 config.broadcast.transport = broadcastTransport
-
-type _transitionRowKeys = Assert<HasKeys<(typeof HEAD_TRANSITIONS)[number], 'from' | 'cx' | 'to' | 'constraint'>>
-const orderingHeaderBytes: 16 = ORDERING_FRAME_LAYOUT.headerBytes
-const orderingWordBytes: 4 = ORDERING_FRAME_LAYOUT.wordBytes
-const orderingWordRange: 0x1_0000_0000 = ORDERING_FRAME_LAYOUT.wordRange
-const orderingEndianness: 'big' = ORDERING_FRAME_LAYOUT.endianness
-const orderingSeqHigh: 0 = ORDERING_FRAME_LAYOUT.offsets.seqHigh
-const orderingSeqLow: 4 = ORDERING_FRAME_LAYOUT.offsets.seqLow
-const orderingTimestampHigh: 8 = ORDERING_FRAME_LAYOUT.offsets.timestampHigh
-const orderingTimestampLow: 12 = ORDERING_FRAME_LAYOUT.offsets.timestampLow
-const releasedLaneKey: string = laneKey({ kind: 'semantic' })
 
 type Contract = TypeContract<string, number, { token: string }>
 type ReleasedContract = { value: string; result: number; metadata: { token: string } }
@@ -217,10 +189,7 @@ const stopRedisText = redisTransport.listen('released', (_payload, info) => void
 const stopRedisBinary = redisTransport.listenBinary('released', (_payload, info) => void info.timestamp)
 const redisInstallResult: void = installRedis(redisClient, redisInstallOptions)
 
-void [Broadcast, Channel, releasedLaneKey, orderingHeaderBytes, orderingWordBytes]
-void [orderingWordRange, orderingEndianness, orderingSeqHigh, orderingSeqLow]
-void [orderingTimestampHigh, orderingTimestampLow]
-void [disposeBackend, HEAD_TRANSITIONS, sameConfig, call]
+void [Broadcast, Channel, sameConfig, call]
 void [node, redisTransport, redisTextSend, redisBinarySend]
 void [stopRedisText, stopRedisBinary, redisInstallResult]
 void [pinServerContextMembers, ChannelClosedError, ChannelOverflowError, ConnectionError]

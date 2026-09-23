@@ -13,7 +13,7 @@ import { CloudflareBroadcastAuthorityState, CloudflareBroadcastTransport } from 
 import { CLOUDFLARE_COLO_LOCATION_HINT_MAP } from './coloLocationHintMap.js'
 import { ServerBroadcast } from '../../server-broadcast.js'
 import { disposeBackend, installBackend } from '../../../backend/install.js'
-import { BACKEND_SPI_VERSION, type BackendDriverPair } from '../../../backend/driver-pair.js'
+import type { BackendDriverPair } from '../../../backend/driver-pair.js'
 import { CloudflareRoomBackend } from './room/backend.js'
 
 type CloudflareRequest = Request & { cf?: { colo?: string; continent?: string } }
@@ -25,7 +25,6 @@ afterEach(async () => {
 function installCloudflareTransport(transport: CloudflareBroadcastTransport): void {
   const driver = new CloudflareRoomBackend(transport)
   const pair: BackendDriverPair = {
-    spiVersion: BACKEND_SPI_VERSION,
     driver,
     dispose: () => driver.dispose(),
   }

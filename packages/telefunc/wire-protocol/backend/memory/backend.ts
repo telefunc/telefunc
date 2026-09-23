@@ -2,7 +2,7 @@
 
 import type { BroadcastDriver, BroadcastLane, PublishResult } from '../broadcast/contract.js'
 import { broadcastRouteKey } from '../broadcast/route-key.js'
-import { BACKEND_SPI_VERSION, type BackendDriverPair } from '../driver-pair.js'
+import type { BackendDriverPair } from '../driver-pair.js'
 import type {
   CellMutation,
   CommitResult,
@@ -36,7 +36,6 @@ type MemorySubscriptionSource = BroadcastLane | RoomSubscriptionSource
 export function createMemoryBackendPair(): BackendDriverPair {
   const driver = new MemoryBackend()
   return {
-    spiVersion: BACKEND_SPI_VERSION,
     driver,
     dispose: () => driver.dispose(),
   }

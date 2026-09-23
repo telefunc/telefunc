@@ -40,7 +40,7 @@ import {
   installBackend,
   setDefaultBackend,
 } from '../backend/install.js'
-import { BACKEND_SPI_VERSION, type BackendDriverPair } from '../backend/driver-pair.js'
+import type { BackendDriverPair } from '../backend/driver-pair.js'
 import { HEAD_TRANSITIONS, assertHeadTransition } from '../backend/room/head-transitions.js'
 import { MemoryBackend, MemoryBackendState } from '../backend/memory/backend.js'
 import { SubscriptionManager } from '../backend/subscription-manager.js'
@@ -64,7 +64,6 @@ const FORMER_MEMBER_KV_TTL_MS = 180_000
 let driver: MemoryBackend
 let memoryState: MemoryBackendState
 const memoryPair = (value: MemoryBackend): BackendDriverPair => ({
-  spiVersion: BACKEND_SPI_VERSION,
   driver: value,
   dispose: () => value.dispose(),
 })

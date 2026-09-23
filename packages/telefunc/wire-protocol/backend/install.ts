@@ -2,7 +2,7 @@ import { getGlobalObject } from '../../utils/getGlobalObject.js'
 import type { BroadcastBackend, BroadcastDriver } from './broadcast/contract.js'
 import { superviseBroadcastDriver } from './broadcast/supervise.js'
 import { createBroadcastTransportDriver, type BroadcastTransport } from './broadcast/transport.js'
-import { BACKEND_SPI_VERSION, type BackendDriverPair } from './driver-pair.js'
+import type { BackendDriverPair } from './driver-pair.js'
 import { createMemoryBackendPair } from './memory/backend.js'
 import type { RoomBackend, RoomDriver } from './room/contract.js'
 import { superviseRoomDriver } from './room/supervise.js'
@@ -204,11 +204,6 @@ const ROOM_METHODS = [
 function assertBackendDriverPair(pair: BackendDriverPair): void {
   if (pair === null || typeof pair !== 'object')
     throw new Error('telefunc/backend: invalid backend pair; expected an object')
-  if (pair.spiVersion !== BACKEND_SPI_VERSION) {
-    throw new Error(
-      `telefunc/backend: incompatible backend spiVersion ${String(pair.spiVersion)}; expected ${BACKEND_SPI_VERSION}`,
-    )
-  }
   const drivers = resolveBackendDrivers(pair)
   assertDriver(drivers.broadcast, 'broadcast', ['publish'])
   assertDriver(drivers.room, 'room', ROOM_METHODS)
