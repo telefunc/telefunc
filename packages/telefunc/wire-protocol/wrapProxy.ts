@@ -23,7 +23,7 @@ function wrapProxy<T extends object>(target: T): T {
   if (typeof target === 'function') {
     const wrapper = (...args: unknown[]) => {
       const result = (target as Function)(...args)
-      adoptSubordinate(result, wrapper)
+      tether(result, wrapper)
       return result
     }
     Object.assign(wrapper, target)
@@ -40,7 +40,7 @@ function wrapProxy<T extends object>(target: T): T {
       if (cached?.property === property) return cached.forward
       const forward = (...args: unknown[]) => {
         const result = property.apply(target, args)
-        adoptSubordinate(result, wrapper)
+        tether(result, wrapper)
         return result
       }
       forwarders.set(prop, { property, forward })
@@ -68,11 +68,12 @@ function wrapProxy<T extends object>(target: T): T {
 }
 
 /** Pin `wrapper` to live as long as `derived` does (via WeakMap). */
-function adoptSubordinate(derived: unknown, wrapper: unknown): void {
+function tether(derived: unknown, wrapper: unknown): void {
   if (!isObjectOrFunction(derived)) return
   if (releasedSubordinates.has(derived)) return
   keepWrapperAlive.set(derived, wrapper)
-  if (Array.isArray(derived)) for (const value of derived) adoptSubordinate(value, wrapper)
+  // A synchronous array return, such as `tee()`'s branches, hands out each element.
+  if (Array.isArray(derived)) for (const value of derived) tether(value, wrapper)
 }
 
 /** A terminal child no longer owns its parent resource's lifetime. */
@@ -91,6 +92,7 @@ function makeDisposer(dispose?: () => void, group?: Set<() => void>): () => void
     releaseSubordinate(token)
     current?.()
   }
-  action ? group?.add(token) : releaseSubordinate(token)
+  if (action) group?.add(token)
+  else releaseSubordinate(token)
   return token
 }
