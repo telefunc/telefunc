@@ -90,11 +90,11 @@ class RoomStubChannel extends ServerChannel implements LaneHolder {
 
   /** @internal — relay gate: does this client want the (member, track) the frame belongs to? */
   _wantsBinary(memberId: string, track: string): boolean {
-    return binaryWantsCovers(this._binaryWants, memberId, track)
+    return !this._selfSuppressed.has(memberId) && binaryWantsCovers(this._binaryWants, memberId, track)
   }
 
   _wantsTextFrom(memberId: string): boolean {
-    return this._wantsText || this._textMemberWants.has(memberId)
+    return !this._selfSuppressed.has(memberId) && (this._wantsText || this._textMemberWants.has(memberId))
   }
 
   constructor(serverRoom: ServerRoom) {
@@ -242,7 +242,6 @@ class RoomStubChannel extends ServerChannel implements LaneHolder {
     this._endTail()
     for (const { serialized, ord, from } of hold) {
       if (!this._wantsTextFrom(from)) continue
-      if (this._selfSuppressed.has(from)) continue
       this._relayTextLive(encodePublishText(serialized, ord), ord)
     }
   }

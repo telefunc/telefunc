@@ -106,9 +106,6 @@ function hiddenMemberOf(event: RoomCtrlEnvelope): string | null {
     return event.hidden === true ? event.id : null
   return null
 }
-function shouldRelayMemberData(stub: RoomStubChannel, from: string): boolean {
-  return stub._wantsTextFrom(from) && !stub._selfSuppressed.has(from)
-}
 function requireStubMember(stub: RoomStubChannel, id: unknown): string {
   if (typeof id !== 'string' || !stub._stubMembers.has(id))
     throw new RoomError('Not a participant of this room (joined through this connection)')
@@ -625,7 +622,7 @@ class ServerRoom extends RoomStateView implements Room {
     const wireText = encodePublishText(serialized, rawInfo)
     for (const stub of this._stubs) {
       if (stub._tailPending !== null) stub._holdTail(serialized, rawInfo, event.from)
-      else if (shouldRelayMemberData(stub, event.from)) stub._relayTextLive(wireText, rawInfo)
+      else if (stub._wantsTextFrom(event.from)) stub._relayTextLive(wireText, rawInfo)
     }
   }
   private _onTextData(serialized: string, rawInfo: WirePublishInfo): void {
@@ -644,7 +641,6 @@ class ServerRoom extends RoomStateView implements Room {
       const track = unframed.track ?? DEFAULT_TRACK
       for (const stub of this._stubs) {
         if (!stub._wantsBinary(unframed.from, track)) continue
-        if (stub._selfSuppressed.has(unframed.from)) continue
         stub._relayBinaryLive(wireData, unframed.from, track, rawInfo)
       }
     }

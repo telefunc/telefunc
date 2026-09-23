@@ -785,6 +785,35 @@ describe('Room public behavior', () => {
     await vi.waitFor(() => expect(semanticFrames(peer, 'data')).toContain('marker'))
     expect(semanticFrames(peer, 'data')).not.toContain('echo')
   })
+  it("replays no self-suppressed member's own retained frames to its client", async () => {
+    await Room.create('self-suppress-retained')
+    const me = (await Room.join('self-suppress-retained', { selfDelivery: false })) as ServerLocalParticipant
+    await me.publish('mine', { retain: true })
+    await me.publishBinary(new Uint8Array([1]), { track: 'screen', retain: true })
+    const room = (await Room.get('self-suppress-retained')) as ServerRoom
+    const channels: ServerChannel[] = []
+    const context = {
+      registerChannel: (channel: ServerChannel) => {
+        channel._registerChannel()
+        channels.push(channel)
+      },
+      validators: new Map(),
+    } as unknown as ServerReplacerContext
+    roomReplacer.replace(room, context)
+    roomParticipantReplacer.replace(me, context)
+    const stub = channels.find((channel) => channel instanceof RoomStubChannel) as RoomStubChannel
+    const peer = attachPeer(stub)
+    const replayText = vi.spyOn(room, '_replayRetainedText')
+    const replayBinary = vi.spyOn(room, '_replayRetainedBinary')
+    stub._onPeerBroadcastSubscribe(false)
+    await room._handleStubRequest(stub, {
+      __r: 'sub-binary',
+      wants: { everyMember: { all: true, tracks: [] }, members: {} },
+    })
+    await Promise.all([...replayText.mock.results, ...replayBinary.mock.results].map(({ value }) => value))
+    expect(semanticFrames(peer, 'data')).toEqual([])
+    expect(peer.decoded().filter((frame) => frame.tag === TAG.PUBLISH_BINARY)).toEqual([])
+  })
   it("relays none of a hidden member's events from an instance that has not loaded the roster", async () => {
     const authority = await Room.create('hidden-pre-roster')
     const bot = await authority.join({ hidden: true })
