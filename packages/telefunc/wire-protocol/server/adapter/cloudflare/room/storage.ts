@@ -99,6 +99,15 @@ export function hasGeneration(sql: SqlStorage, inc: string): boolean {
   return sql.exec('SELECT 1 FROM gen WHERE inc = ?', inc).toArray().length > 0
 }
 
+export function hasOrphanGeneration(sql: SqlStorage, currentInc: string | null): boolean {
+  return sql.exec('SELECT 1 FROM gen WHERE inc IS NOT ? LIMIT 1', currentInc).toArray().length > 0
+}
+
+/** A lapsed tombstone is reclaimed here: this backend has no native head TTL. */
+export function deleteLapsedTombstone(sql: SqlStorage, now: number): void {
+  sql.exec("DELETE FROM head WHERE id = 1 AND state = 'closed' AND expires_at IS NOT NULL AND expires_at <= ?", now)
+}
+
 /** Installed incarnations other than `currentInc`. */
 export function listOrphanGenerations(sql: SqlStorage, currentInc: string | null): string[] {
   return sql

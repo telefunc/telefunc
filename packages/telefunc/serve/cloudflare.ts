@@ -125,7 +125,7 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
         rooms: () => roomNamespace(workerEnv as Cloudflare.Env),
         broadcast: new CloudflareBroadcastTransport({ baseInstanceName, scale }),
       }),
-    ['cloudflare', baseInstanceName, normalizedScale(scale), roomBindingName, jurisdiction ?? null],
+    ['cloudflare', baseInstanceName, JSON.stringify(scale ?? null), roomBindingName, jurisdiction ?? null],
   )
   const broadcast = cloudflareBackend.broadcast
 
@@ -196,14 +196,12 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
       return dispatchRoomFanout(sessionNamespace(this.env) as unknown as RoomFanoutNamespace, request)
     }
 
-    // The manager is built on the first Room call, so ordinary fetch/socket work never touches the Room binding.
+    // Only a Room subscription materializes the manager, and marks the socket it came through.
     private runWithRoomManager<T>(fn: () => T, socket?: WebSocket): T {
       if (!isAsyncMode()) return fn()
       return withCloudflareRoomSessionManager(() => {
         if (socket) markRoomSocket(socket)
-        return (this.roomManager ??= new CloudflareRoomSessionManager(this.ctx.id.toString(), () =>
-          roomNamespace(this.env),
-        ))
+        return (this.roomManager ??= new CloudflareRoomSessionManager(this.ctx.id.toString()))
       }, fn)
     }
   }
@@ -277,12 +275,4 @@ function markRoomSocket(socket: WebSocket): void {
     socket.deserializeAttachment() ??
     {}) as Record<string, unknown>
   socket.serializeAttachment(Object.assign(state, { __telefuncRoom: true }))
-}
-
-function normalizedScale(scale: CloudflareScale | undefined): string {
-  return JSON.stringify(
-    typeof scale === 'object' && scale !== null
-      ? Object.entries(scale).sort(([left], [right]) => left.localeCompare(right))
-      : (scale ?? null),
-  )
 }

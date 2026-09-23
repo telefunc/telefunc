@@ -34,9 +34,7 @@ export type RoomSessionDeliveryRequest = RouteInstallation & {
   timestamp: number
 }
 
-export type RoomSessionInvalidationRequest = Omit<RoomSessionDeliveryRequest, 'payload' | 'seq' | 'timestamp'> & {
-  terminal?: true
-}
+export type RoomSessionInvalidationRequest = RouteInstallation & { terminal?: true }
 
 export type CloudflareRoomAuthorityStub = Omit<TelefuncRoomDurableObject, 'alarm'>
 
@@ -55,30 +53,20 @@ function roomAuthority(namespace: CloudflareRoomNamespace, roomId: string): Clou
 export class CloudflareRoomSessionManager {
   readonly #id: string
   readonly #subscriptionPartition = crypto.randomUUID()
-  readonly #getRoomNamespace: () => CloudflareRoomNamespace
   readonly #entries = new Map<string, CloudflareRoomSubscriptionAttempt>()
   #disposed = false
 
-  constructor(sessionId: string, getRoomNamespace: () => CloudflareRoomNamespace) {
+  constructor(sessionId: string) {
     this.#id = sessionId
-    this.#getRoomNamespace = getRoomNamespace
   }
 
   openSubscription(
-    roomId: string,
-    inc: string,
-    lane: LaneId,
+    { roomId, inc, lane }: RoomSubscriptionSource,
+    authority: CloudflareRoomAuthorityStub,
     receiver: BackendReceiver,
   ): CloudflareRoomSubscriptionAttempt {
     if (this.#disposed) throw new Error('Cloudflare Room session manager is disposed')
-    // Resolve the binding before installing provisional local state.
-    const source = {
-      roomId,
-      inc,
-      laneKey: encodeLaneKey(lane),
-      sessionDoId: this.#id,
-      authority: this.authority(roomId),
-    }
+    const source = { roomId, inc, laneKey: encodeLaneKey(lane), sessionDoId: this.#id, authority }
     const key = entryKey(source)
     const attempt: CloudflareRoomSubscriptionAttempt = new CloudflareRoomSubscriptionAttempt(source, receiver, {
       onClosed: () => {
@@ -117,10 +105,6 @@ export class CloudflareRoomSessionManager {
 
   valid(): boolean {
     return !this.#disposed
-  }
-
-  authority(roomId: string): CloudflareRoomAuthorityStub {
-    return roomAuthority(this.#getRoomNamespace(), roomId)
   }
 }
 
@@ -222,7 +206,8 @@ export class CloudflareRoomBackend implements BroadcastDriver, RoomDriver {
     return {
       partition: manager.subscriptionPartition,
       valid: () => manager.valid(),
-      open: (receiver) => manager.openSubscription(source.roomId, source.inc, source.lane, receiver),
+      // The authority stub resolves before the manager installs any local state.
+      open: (receiver) => manager.openSubscription(source, this.#stub(source.roomId), receiver),
     }
   }
   #stub(roomId: string): CloudflareRoomAuthorityStub {

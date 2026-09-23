@@ -85,8 +85,8 @@ export async function dispatchRoomFanout(
   if (request.routes.length <= ROOM_FANOUT_WIDTH) {
     return Promise.all(
       request.routes.map(async (route): Promise<RoomFanoutOutcome> => {
-        const stub = namespace.get(namespace.idFromString(route.sessionDoId))
         try {
+          const stub = namespace.get(namespace.idFromString(route.sessionDoId))
           if (request.operation === 'deliver') {
             const { payload, seq, timestamp } = request
             await stub.telefuncRoomDeliver({ ...route, payload, seq, timestamp })

@@ -19,7 +19,6 @@ export class CloudflareRoomSubscriptionAttempt extends DriverAttempt {
   readonly #receiver: BackendReceiver
   readonly #onClosed: () => void
   #cancelRenewal: (() => void) | null = null
-  #started = false
   /** The route's removal from the authority was requested. */
   #released = false
 
@@ -37,8 +36,6 @@ export class CloudflareRoomSubscriptionAttempt extends DriverAttempt {
   }
 
   start(): void {
-    if (this.#started || this.ended) return
-    this.#started = true
     void this.#establish()
   }
 

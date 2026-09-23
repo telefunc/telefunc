@@ -39,10 +39,7 @@ export class PublicRoomSessionDurableObject extends DurableObject {
   readonly #manager: CloudflareRoomSessionManager
   constructor(ctx: DurableObjectState, env: unknown) {
     super(ctx, env as Env)
-    this.#manager = new CloudflareRoomSessionManager(
-      ctx.id.toString(),
-      () => (env as { PUBLIC_ROOM: CloudflareRoomNamespace }).PUBLIC_ROOM,
-    )
+    this.#manager = new CloudflareRoomSessionManager(ctx.id.toString())
   }
   publicRoomLifecycle(roomId: string) {
     return this.#run(async () => {

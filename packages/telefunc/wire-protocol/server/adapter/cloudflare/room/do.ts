@@ -35,6 +35,8 @@ import {
   directoryPut,
   dropGenerationRows,
   initSchema,
+  deleteLapsedTombstone,
+  hasOrphanGeneration,
   listOrphanGenerations,
   readCells,
   hasGeneration,
@@ -164,15 +166,6 @@ export class TelefuncRoomDurableObject extends DurableObject {
   }
 
   async registerRoute(route: RouteInstallation): Promise<RegisterWire> {
-    try {
-      this.#sessions.idFromString(route.sessionDoId)
-    } catch {
-      return {
-        rejected: true,
-        reason: `session Durable Object id '${route.sessionDoId}' is invalid`,
-        terminal: true,
-      }
-    }
     const result = this.ctx.storage.transactionSync((): RegisterWire => {
       const now = Date.now()
       const head = readLiveHead(this.#sql, now)
@@ -238,14 +231,11 @@ export class TelefuncRoomDurableObject extends DurableObject {
   async #runSweep(now: number): Promise<void> {
     const orphanIncs = this.ctx.storage.transactionSync(() => {
       const currentInc = readLiveHead(this.#sql, now)?.currentInc ?? null
-      // A lapsed tombstone is reclaimed through the delete path (this backend has no native head TTL).
-      this.#sql.exec(
-        "DELETE FROM head WHERE id = 1 AND state = 'closed' AND expires_at IS NOT NULL AND expires_at <= ?",
-        now,
-      )
+      deleteLapsedTombstone(this.#sql, now)
       return listOrphanGenerations(this.#sql, currentInc)
     })
 
+    // An orphan whose drop failed keeps its expired routes, so its retried drop terminates those sessions.
     const failedOrphans = new Set<string>()
     for (const inc of orphanIncs) {
       try {
@@ -304,12 +294,7 @@ function nextMaintenanceDeadline(sql: SqlStorage, now: number): number | null {
     sql.exec<{ deadline: number | null }>('SELECT MIN(expires_at) AS deadline FROM head').toArray()[0]?.deadline,
     sql.exec<{ deadline: number | null }>('SELECT MIN(expires_at) AS deadline FROM route').toArray()[0]?.deadline,
   ].filter((deadline): deadline is number => deadline !== null && deadline !== undefined)
-  const currentInc = readLiveHead(sql, now)?.currentInc ?? null
-  const hasOrphan =
-    currentInc === null
-      ? sql.exec('SELECT 1 FROM gen LIMIT 1').toArray().length > 0
-      : sql.exec('SELECT 1 FROM gen WHERE inc <> ? LIMIT 1', currentInc).toArray().length > 0
-  if (hasOrphan) deadlines.push(now)
+  if (hasOrphanGeneration(sql, readLiveHead(sql, now)?.currentInc ?? null)) deadlines.push(now)
   return deadlines.length === 0 ? null : Math.min(...deadlines)
 }
 
