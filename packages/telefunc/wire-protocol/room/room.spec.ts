@@ -981,6 +981,42 @@ describe('Room public behavior', () => {
     )
     expect(responseAbort).not.toHaveBeenCalled()
   })
+  it('rejects, not as a bug, a join whose client stub closed during the guard', async () => {
+    const room = (await Room.create('stub-close-during-guard')) as ServerRoom
+    const stub = register(room)
+    const entered = deferred<void>()
+    const release = deferred<void>()
+    Room.guard(room, {
+      onBeforeJoin: async () => {
+        entered.resolve()
+        await release.promise
+      },
+    })
+    const joining = room._handleStubRequest(stub, { __r: 'req-join', meta: {} }).catch((error: unknown) => error)
+    await entered.promise
+    stub.abort()
+    release.resolve()
+    expect(isRoomError(await joining)).toBe(true)
+    expect(await Room.getParticipants(room.id)).toEqual([])
+  })
+  it('does not admit a member whose client stub closed while the join was committing', async () => {
+    const room = (await Room.create('stub-close-during-join')) as ServerRoom
+    const stub = register(room)
+    const compareExchange = driver.compareExchangeCells.bind(driver)
+    const writing = deferred<void>()
+    const release = deferred<void>()
+    vi.spyOn(driver, 'compareExchangeCells').mockImplementationOnce(async (...args) => {
+      writing.resolve()
+      await release.promise
+      return compareExchange(...args)
+    })
+    const joining = room._handleStubRequest(stub, { __r: 'req-join', meta: {} }).catch((error: unknown) => error)
+    await writing.promise
+    stub.abort()
+    release.resolve()
+    expect(isRoomError(await joining)).toBe(true)
+    expect(await Room.getParticipants(room.id)).toEqual([])
+  })
   it('keeps every live ack correlation instead of silently dropping the oldest', async () => {
     const stub = register(await Room.create('ack-correlations'))
     for (let index = 0; index <= 1_024; index++) {

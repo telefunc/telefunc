@@ -5,7 +5,7 @@ import { stringify } from '@brillout/json-serializer/stringify'
 import { ShieldValidationError } from '../../../shared/ShieldValidationError.js'
 import type { ShieldValidator } from '../../../node/server/shield.js'
 import type { TELEFUNC_SHIELDS } from '../../../node/shared/transformer/generateShield/shield-key.js'
-import { assert, assertUsage } from '../../../utils/assert.js'
+import { assertUsage } from '../../../utils/assert.js'
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 import { isObject } from '../../../utils/isObject.js'
 import { unrefTimer } from '../../../utils/unrefTimer.js'
@@ -238,11 +238,12 @@ class ServerRoom extends RoomStateView implements Room {
     this._syncSubs()
     let created = false
     try {
-      const inbox = this._dmUnsubs.get(id)
-      assert(inbox)
+      const inbox = this._admittedInbox(id)
       await withinRoomHorizon(inbox.ready, ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS)
+      this._admittedInbox(id, inbox)
       await this._createMember(id, meta, identity, joinedAt, hidden)
       created = true
+      this._admittedInbox(id, inbox)
       this._pendingAdmissions.delete(id)
       this._state.applyJoin(id, meta, joinedAt, identity, hidden)
       await publishCtrl(this.id, this._inc, {
@@ -268,6 +269,14 @@ class ServerRoom extends RoomStateView implements Room {
     if (hidden) return // announced above; a hidden participant has no post-join hook
     const onAfterJoin = this._guards?.onAfterJoin
     if (onAfterJoin) await runAfterHook(() => onAfterJoin({ id, meta, identity }, { joinedAt }))
+  }
+
+  /** The member's inbox slot exists exactly while the room is open and its holder owns the member. */
+  private _admittedInbox(id: string, expected?: SubSlot): SubSlot {
+    const inbox = this._dmUnsubs.get(id)
+    if (inbox === undefined || (expected !== undefined && inbox !== expected))
+      throw new RoomError(this._state.closed ? `Room is closed: ${this.id}` : 'Participant left the room')
+    return inbox
   }
 
   /** Persist the member cells for a join, guarding against a concurrent `Room.close()`. */
