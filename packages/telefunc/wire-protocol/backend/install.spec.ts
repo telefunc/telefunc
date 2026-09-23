@@ -90,6 +90,38 @@ describe('backend installation lifecycle', () => {
     await expectBroadcastRoundTrip('transport-only')
     expect(() => getRoomBackend()).toThrow('Room requires a full backend')
   })
+
+  it.each([
+    { seq: 0, timestamp: 1 },
+    { seq: 1.5, timestamp: 1 },
+    { seq: 1, timestamp: -1 },
+    { seq: 1, timestamp: Number.NaN },
+  ])('rejects transport ordering marks %o as a usage error on both kinds', async (mark) => {
+    const delivered: Array<(info: { seq: number; timestamp: number }) => void> = []
+    configureBroadcastTransport({
+      send: async () => mark,
+      sendBinary: () => mark,
+      listen: (_key, onMessage) => {
+        delivered.push((info) => onMessage('"x"', info))
+        return () => {}
+      },
+      listenBinary: (_key, onMessage) => {
+        delivered.push((info) => onMessage(new Uint8Array([1]), info))
+        return () => {}
+      },
+    })
+    const backend = getBroadcastBackend()
+    const usage = /\[Wrong Usage\] config\.broadcast\.transport/
+    await expect(backend.publish({ key: 'k', kind: 'text' }, new Uint8Array())).rejects.toThrow(usage)
+    expect(() => backend.publish({ key: 'k', kind: 'binary' }, new Uint8Array())).toThrow(usage)
+
+    const received = vi.fn()
+    backend.subscribe({ key: 'k', kind: 'text' }, received)
+    backend.subscribe({ key: 'k', kind: 'binary' }, received)
+    expect(delivered).toHaveLength(2)
+    for (const deliver of delivered) expect(() => deliver(mark)).toThrow(usage)
+    expect(received).not.toHaveBeenCalled()
+  })
 })
 function memoryPair(driver: MemoryBackend, dispose = () => driver.dispose()): BackendDriverPair {
   return { spiVersion: BACKEND_SPI_VERSION, driver, dispose }

@@ -3,7 +3,10 @@ export type { BroadcastTransport }
 
 import type { BroadcastDriver, BroadcastLane, PublishResult } from './contract.js'
 import type { BackendReceiver, SubscriptionAttempt, SubscriptionBinding } from '../subscription.js'
+import { assertUsage } from '../../../utils/assert.js'
+import { isPromise } from '../../../utils/isPromise.js'
 
+/** `seq`: positive safe integer, one order per key across both kinds; `timestamp`: non-negative safe integer. */
 type BroadcastTransport = {
   send(key: string, payload: string): { seq: number; timestamp: number } | Promise<{ seq: number; timestamp: number }>
   listen(key: string, onMessage: (payload: string, info: { seq: number; timestamp: number }) => void): () => void
@@ -34,9 +37,19 @@ function publish(
   lane: BroadcastLane,
   payload: Uint8Array,
 ): PublishResult | Promise<PublishResult> {
-  return lane.kind === 'text'
-    ? transport.send(lane.key, textDecoder.decode(payload))
-    : transport.sendBinary(lane.key, payload)
+  const result =
+    lane.kind === 'text'
+      ? transport.send(lane.key, textDecoder.decode(payload))
+      : transport.sendBinary(lane.key, payload)
+  return isPromise(result) ? result.then(checkMark) : checkMark(result)
+}
+
+function checkMark<Mark extends { seq: number; timestamp: number }>(mark: Mark): Mark {
+  assertUsage(
+    Number.isSafeInteger(mark.seq) && mark.seq > 0 && Number.isSafeInteger(mark.timestamp) && mark.timestamp >= 0,
+    `config.broadcast.transport returned { seq: ${mark.seq}, timestamp: ${mark.timestamp} }: seq must be a positive safe integer and timestamp a non-negative safe integer.`,
+  )
+  return mark
 }
 
 function bind(transport: BroadcastTransport, lane: BroadcastLane): SubscriptionBinding {
@@ -50,8 +63,8 @@ function bind(transport: BroadcastTransport, lane: BroadcastLane): SubscriptionB
 function open(transport: BroadcastTransport, lane: BroadcastLane, receiver: BackendReceiver): SubscriptionAttempt {
   const stop =
     lane.kind === 'text'
-      ? transport.listen(lane.key, (payload, info) => receiver(textEncoder.encode(payload), info))
-      : transport.listenBinary(lane.key, receiver)
+      ? transport.listen(lane.key, (payload, info) => receiver(textEncoder.encode(payload), checkMark(info)))
+      : transport.listenBinary(lane.key, (payload, info) => receiver(payload, checkMark(info)))
   let closed = false
   const listeners = new Set<(state: 'ready' | 'closed') => void>()
   return {
