@@ -95,11 +95,11 @@ test('a subscriber dropping before the commit returns rejects its delivery witho
     () => 1,
   )
   await attempt.ready
-  const flush = driver.prepareFlush(source)
+  const fence = driver.prepareFence(source)
   sockets[0]!.socket.emit('close')
   await new Promise((resolve) => setTimeout(resolve, 10))
   expect(unhandled).toEqual([])
-  await expect(flush.delivery).rejects.toThrow()
+  await expect(fence.delivery).rejects.toThrow()
 })
 
 test('terminates a Room lane whose incarnation closed while the connection was down', async () => {

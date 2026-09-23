@@ -2,8 +2,8 @@ import { randomUUID } from 'node:crypto'
 import type {
   BackendReceiver,
   BroadcastLane,
-  RoomSubscriptionSource,
   Deferred,
+  RoomSubscriptionSource,
   SubscriptionAttempt,
   SubscriptionBinding,
   SubscriptionDriver,
@@ -12,7 +12,9 @@ import { DriverAttempt, createDeferred, decodeOrderingFrame, encodeLaneKey } fro
 import { broadcastChannel, channelKey, generationInvalidationChannel } from './keys.js'
 import { REDIS_DELIVERY_FENCE_BYTE } from './commands.js'
 import type { SubscriberSocket } from './ioredis.js'
+
 type RedisSubscriptionSource = BroadcastLane | RoomSubscriptionSource
+
 type RedisSubscriptionDriverOptions = {
   prefix: string
   /** A fresh, unconnected subscriber socket that never retries on its own. */
@@ -20,6 +22,15 @@ type RedisSubscriptionDriverOptions = {
   /** Whether the source's incarnation is still the open head. */
   validateGeneration: (source: RoomSubscriptionSource) => Promise<boolean>
 }
+
+/** The subscriber connection; `id` tells work that awaited across a drop that it is stale. */
+type Connection =
+  | { phase: 'idle' }
+  | { phase: 'waiting'; timer: ReturnType<typeof setTimeout> }
+  | { phase: 'connecting'; id: number; socket: SubscriberSocket | null }
+  | { phase: 'connected'; id: number; socket: SubscriberSocket; subscribed: Set<string> }
+
+type Connected = Extract<Connection, { phase: 'connected' }>
 
 const RECONNECT_DELAY_MIN_MS = 50
 const RECONNECT_DELAY_MAX_MS = 2_000
@@ -33,15 +44,11 @@ export class RedisSubscriptionDriver implements SubscriptionDriver<RedisSubscrip
   private readonly _prefix: string
   private readonly _createSubscriber: () => Promise<SubscriberSocket>
   private readonly _validateGeneration: RedisSubscriptionDriverOptions['validateGeneration']
-  private readonly _attempts = new Map<string, Set<RedisSubscriptionAttempt>>()
-  private _subscriber: SubscriberSocket | null = null
-  /** Bumped per connection, so work that awaited across a drop sees it is stale. */
-  private _connection = 0
-  private _connecting = false
-  private _connected = false
-  private readonly _subscribed = new Set<string>()
+  /** Every channel some attempt needs, with the attempts that listen on it. */
+  private readonly _byChannel = new Map<string, Set<RedisSubscriptionAttempt>>()
+  private _connection: Connection = { phase: 'idle' }
+  private _nextId = 0
   private _reconciling: Promise<void> = Promise.resolve()
-  private _reconnectTimer: ReturnType<typeof setTimeout> | null = null
   private _reconnectDelay = RECONNECT_DELAY_MIN_MS
   private _lastError: unknown = new Error('Redis subscriber connection closed')
 
@@ -59,13 +66,11 @@ export class RedisSubscriptionDriver implements SubscriptionDriver<RedisSubscrip
     }
   }
 
-  prepareFlush(source: RoomSubscriptionSource): { token: string; delivery: Promise<void>; cancel(): void } {
+  /** Arms a delivery fence on the lane's ready attempts: `delivery` settles once each saw the commit. */
+  prepareFence(source: RoomSubscriptionSource): { token: string; delivery: Promise<void>; cancel(): void } {
     const token = randomUUID()
-    const attempts = [...(this._attempts.get(redisSubscriptionChannel(this._prefix, source)) ?? [])]
-    const armed = attempts.flatMap((attempt) => {
-      const delivery = attempt.prepareFlush(token)
-      return delivery === null ? [] : [delivery]
-    })
+    const attempts = [...(this._byChannel.get(laneChannel(this._prefix, source)) ?? [])]
+    const armed = attempts.flatMap((attempt) => attempt.prepareFence(token) ?? [])
     const delivery = Promise.all(armed).then(() => {})
     // A subscriber can drop before the commit awaiting this delivery returns.
     void delivery.catch(() => {})
@@ -73,7 +78,7 @@ export class RedisSubscriptionDriver implements SubscriptionDriver<RedisSubscrip
       token: armed.length === 0 ? '' : token,
       delivery,
       cancel: () => {
-        for (const attempt of attempts) attempt.cancelFlush(token)
+        for (const attempt of attempts) attempt.cancelFence(token)
       },
     }
   }
@@ -83,149 +88,158 @@ export class RedisSubscriptionDriver implements SubscriptionDriver<RedisSubscrip
     receiver: BackendReceiver,
     localReceiverCount: () => number,
   ): SubscriptionAttempt {
-    const channel = redisSubscriptionChannel(this._prefix, source)
     const attempt: RedisSubscriptionAttempt = new RedisSubscriptionAttempt(
       source,
-      redisSubscriptionChannels(this._prefix, source),
+      laneChannel(this._prefix, source),
+      'roomId' in source ? generationInvalidationChannel(this._prefix, source.roomId, source.inc) : null,
       receiver,
       localReceiverCount,
-      () => this._detach(channel, attempt),
+      () => this._detach(attempt),
     )
-    const attempts = this._attempts.get(channel) ?? new Set<RedisSubscriptionAttempt>()
-    attempts.add(attempt)
-    this._attempts.set(channel, attempts)
-    if (this._connected) this._reconcile()
-    else if (!this._connecting && this._reconnectTimer === null) void this._connect()
+    for (const channel of attempt.channels) {
+      const attempts = this._byChannel.get(channel) ?? new Set()
+      this._byChannel.set(channel, attempts.add(attempt))
+    }
+    if (this._connection.phase === 'connected') this._reconcile()
+    else if (this._connection.phase === 'idle') void this._connect()
     return attempt
   }
 
-  private _detach(channel: string, attempt: RedisSubscriptionAttempt): void {
-    const attempts = this._attempts.get(channel)
-    attempts?.delete(attempt)
-    if (attempts?.size === 0) this._attempts.delete(channel)
-    if (this._attempts.size > 0) return this._reconcile()
+  private _detach(attempt: RedisSubscriptionAttempt): void {
+    for (const channel of attempt.channels) {
+      const attempts = this._byChannel.get(channel)
+      attempts?.delete(attempt)
+      if (attempts?.size === 0) this._byChannel.delete(channel)
+    }
+    if (this._byChannel.size > 0) return this._reconcile()
     // Nothing left to deliver to: release the connection until the next subscription.
-    if (this._reconnectTimer !== null) clearTimeout(this._reconnectTimer)
-    this._reconnectTimer = null
-    const subscriber = this._subscriber
-    this._down()
-    subscriber?.disconnect()
+    this._disconnect()
   }
 
   private async _connect(): Promise<void> {
-    this._reconnectTimer = null
-    this._connecting = true
-    const connection = ++this._connection
-    let subscriber: SubscriberSocket
+    const id = ++this._nextId
+    const connecting: Extract<Connection, { phase: 'connecting' }> = { phase: 'connecting', id, socket: null }
+    this._connection = connecting
+    let socket: SubscriberSocket
     try {
-      subscriber = await this._createSubscriber()
+      socket = await this._createSubscriber()
     } catch (error) {
-      return this._lost(connection, error)
+      return this._lost(id, error)
     }
-    if (connection !== this._connection || this._attempts.size === 0) return subscriber.disconnect()
-    this._subscriber = subscriber
-    subscriber.on('messageBuffer', (channel: Buffer, frame: Buffer) => {
-      if (connection === this._connection) this._dispatch(channel.toString(), frame)
+    if (!this._isCurrent(id)) return socket.disconnect()
+    connecting.socket = socket
+    socket.on('messageBuffer', (channel: Buffer, frame: Buffer) => {
+      if (this._isCurrent(id)) this._dispatch(channel.toString(), frame)
     })
-    subscriber.on('error', (error: unknown) => {
+    socket.on('error', (error: unknown) => {
       this._lastError = error
     })
-    subscriber.on('close', () => this._lost(connection, this._lastError))
+    socket.on('close', () => this._lost(id, this._lastError))
     try {
-      await subscriber.connect()
+      await socket.connect()
     } catch (error) {
-      return this._lost(connection, error)
+      return this._lost(id, error)
     }
-    if (connection !== this._connection) return
-    this._connecting = false
-    this._connected = true
+    if (!this._isCurrent(id)) return
+    this._connection = { phase: 'connected', id, socket, subscribed: new Set() }
     this._reconnectDelay = RECONNECT_DELAY_MIN_MS
     this._reconcile()
   }
 
-  private _lost(connection: number, error: unknown): void {
-    if (connection !== this._connection) return
-    const subscriber = this._subscriber
-    this._down()
-    subscriber?.disconnect()
-    for (const attempts of this._attempts.values()) for (const attempt of attempts) attempt.lose(error)
-    if (this._attempts.size === 0 || this._reconnectTimer !== null) return
-    this._reconnectTimer = setTimeout(() => void this._connect(), this._reconnectDelay)
-    this._reconnectTimer.unref()
+  private _lost(id: number, error: unknown): void {
+    if (!this._isCurrent(id)) return
+    this._disconnect()
+    for (const attempt of this._attempts()) attempt.lose(error)
+    // A listener may have released the last attempt, or opened one that is already connecting.
+    if (this._byChannel.size === 0 || this._connection.phase !== 'idle') return
+    const timer = setTimeout(() => void this._connect(), this._reconnectDelay)
+    timer.unref()
+    this._connection = { phase: 'waiting', timer }
     this._reconnectDelay = Math.min(this._reconnectDelay * 2, RECONNECT_DELAY_MAX_MS)
   }
 
-  private _down(): void {
-    this._connection++
-    this._subscriber = null
-    this._connecting = false
-    this._connected = false
-    this._subscribed.clear()
+  private _disconnect(): void {
+    const connection = this._connection
+    this._connection = { phase: 'idle' }
+    if (connection.phase === 'waiting') clearTimeout(connection.timer)
+    else if (connection.phase !== 'idle') connection.socket?.disconnect()
+  }
+
+  private _isCurrent(id: number): boolean {
+    const connection = this._connection
+    return (connection.phase === 'connecting' || connection.phase === 'connected') && connection.id === id
   }
 
   /** Serialized: brings the connection's channel set to the attempts' and confirms what it covers. */
   private _reconcile(): void {
     this._reconciling = this._reconciling.then(async () => {
       const connection = this._connection
+      if (connection.phase !== 'connected') return
       try {
         await this._reconcileOnce(connection)
       } catch (error) {
         // A failed (UN)SUBSCRIBE leaves the channel set unknown: start over on a fresh connection.
-        this._lost(connection, error)
+        this._lost(connection.id, error)
       }
     })
   }
 
-  private async _reconcileOnce(connection: number): Promise<void> {
-    const subscriber = this._subscriber
-    if (subscriber === null || !this._connected) return
-    const wanted = new Set<string>()
-    for (const attempts of this._attempts.values())
-      for (const attempt of attempts) for (const channel of attempt.channels) wanted.add(channel)
-    const stale = [...this._subscribed].filter((channel) => !wanted.has(channel))
-    const missing = [...wanted].filter((channel) => !this._subscribed.has(channel))
+  private async _reconcileOnce({ id, socket, subscribed }: Connected): Promise<void> {
+    const stale = [...subscribed].filter((channel) => !this._byChannel.has(channel))
+    const missing = [...this._byChannel.keys()].filter((channel) => !subscribed.has(channel))
     if (stale.length > 0) {
-      for (const channel of stale) this._subscribed.delete(channel)
-      await subscriber.unsubscribe(...stale)
+      for (const channel of stale) subscribed.delete(channel)
+      await socket.unsubscribe(...stale)
     }
     if (missing.length > 0) {
-      await subscriber.subscribe(...missing)
-      if (connection !== this._connection) return
-      for (const channel of missing) this._subscribed.add(channel)
+      await socket.subscribe(...missing)
+      if (!this._isCurrent(id)) return
+      for (const channel of missing) subscribed.add(channel)
     }
     // An attempt attached during the SUBSCRIBE above waits for the reconcile it queued.
-    const pending = [...this._attempts.values()].flatMap((attempts) =>
-      [...attempts].filter(
-        (attempt) => attempt.awaitsConfirmation() && attempt.channels.every((channel) => this._subscribed.has(channel)),
-      ),
+    const covered = [...this._attempts()].filter(
+      (attempt) => attempt.awaitsConfirmation() && attempt.channels.every((channel) => subscribed.has(channel)),
     )
-    await Promise.all(
-      pending.map((attempt) => attempt.confirm(this._validateGeneration, () => connection === this._connection)),
-    )
+    await Promise.all(covered.map((attempt) => this._confirm(attempt, id)))
+  }
+
+  /** Its channels are subscribed on a live connection: ready, unless its incarnation is no longer open. */
+  private async _confirm(attempt: RedisSubscriptionAttempt, id: number): Promise<void> {
+    const { source } = attempt
+    if ('roomId' in source && !(await this._validateGeneration(source))) {
+      if (this._isCurrent(id))
+        attempt.terminate(new Error(`subscribeLane: generation '${source.roomId}/${source.inc}' is not open`))
+      return
+    }
+    if (this._isCurrent(id)) attempt.markReady()
+  }
+
+  private _attempts(): Set<RedisSubscriptionAttempt> {
+    return new Set([...this._byChannel.values()].flatMap((attempts) => [...attempts]))
   }
 
   private _dispatch(channel: string, frame: Buffer): void {
-    // A lane's own channel indexes its attempts; its generation's invalidation channel is shared by all lanes.
-    const attempts =
-      this._attempts.get(channel) ??
-      [...this._attempts.values()].flatMap((lane) => [...lane].filter((attempt) => attempt.channels.includes(channel)))
-    for (const attempt of [...attempts]) attempt.receive(channel, frame)
+    for (const attempt of [...(this._byChannel.get(channel) ?? [])]) attempt.receive(channel, frame)
   }
 }
 
 class RedisSubscriptionAttempt extends DriverAttempt {
-  private readonly _flushes = new Map<string, Deferred<void>>()
+  readonly channels: readonly string[]
+  private readonly _fences = new Map<string, Deferred<void>>()
   private _lastSequence = 0
   private _cleanup: Promise<void> | null = null
 
   constructor(
-    private readonly _source: RedisSubscriptionSource,
-    readonly channels: readonly string[],
+    readonly source: RedisSubscriptionSource,
+    readonly laneChannel: string,
+    /** A Room lane's generation channel: a message on it means the generation was dropped. */
+    readonly invalidationChannel: string | null,
     private readonly _receiver: BackendReceiver,
     private readonly _localReceiverCount: () => number,
     private readonly _onDetach: () => void,
   ) {
     super()
+    this.channels = invalidationChannel === null ? [laneChannel] : [laneChannel, invalidationChannel]
   }
 
   unsubscribe(): Promise<void> {
@@ -233,59 +247,49 @@ class RedisSubscriptionAttempt extends DriverAttempt {
     return this._cleanup
   }
 
-  prepareFlush(token: string): Promise<void> | null {
+  prepareFence(token: string): Promise<void> | null {
     if (this._localReceiverCount() === 0 || this.state() !== 'ready') return null
-    const flush = createDeferred()
-    this._flushes.set(token, flush)
-    return flush.promise
+    const fence = createDeferred()
+    this._fences.set(token, fence)
+    return fence.promise
   }
 
-  cancelFlush(token: string): void {
-    const flush = this._flushes.get(token)
-    if (flush === undefined) return
-    this._flushes.delete(token)
-    flush.resolve()
+  cancelFence(token: string): void {
+    this._fences.get(token)?.resolve()
+    this._fences.delete(token)
   }
 
   awaitsConfirmation(): boolean {
     return this.state() === 'establishing' || this.state() === 'lost'
   }
 
-  /** Its channels are subscribed on a live connection: ready, unless its incarnation is no longer open. */
-  async confirm(
-    validateGeneration: RedisSubscriptionDriverOptions['validateGeneration'],
-    isCurrent: () => boolean,
-  ): Promise<void> {
-    if ('roomId' in this._source && !(await validateGeneration(this._source))) {
-      if (isCurrent())
-        this._terminate(new Error(`subscribeLane: generation '${this._source.roomId}/${this._source.inc}' is not open`))
-      return
-    }
-    if (!isCurrent() || !this.awaitsConfirmation()) return
+  markReady(): void {
+    if (!this.awaitsConfirmation()) return
     // Frames published while lost are gone; a Redis restarted without its data may restart the sequence.
     this._lastSequence = 0
     this.transition('ready')
   }
 
+  terminate(error: unknown): void {
+    if (this.ended) return
+    this._rejectFences(error)
+    this.transition('terminated', error)
+  }
+
   lose(error: unknown): void {
     if (this.state() !== 'ready') return
-    this._rejectFlushes(error)
+    this._rejectFences(error)
     this.transition('lost')
   }
 
   receive(channel: string, frame: Buffer): void {
-    if ('roomId' in this._source && channel === this.channels[1]) {
-      this._terminate(new Error('Redis generation subscription was invalidated'))
-      return
-    }
+    if (channel === this.invalidationChannel)
+      return this.terminate(new Error('Redis generation subscription was invalidated'))
     if (this.state() !== 'ready') return
     if (frame[0] === REDIS_DELIVERY_FENCE_BYTE) {
       const token = frame.subarray(1).toString()
-      const flush = this._flushes.get(token)
-      if (flush !== undefined) {
-        this._flushes.delete(token)
-        flush.resolve()
-      }
+      this._fences.get(token)?.resolve()
+      this._fences.delete(token)
       return
     }
     const { payload, info } = decodeOrderingFrame(frame)
@@ -298,29 +302,19 @@ class RedisSubscriptionAttempt extends DriverAttempt {
   }
 
   private async _dispose(): Promise<void> {
-    this._rejectFlushes(new Error('Redis delivery fence was closed'))
-    this.transition('closed', new Error(`Redis subscription '${this.channels[0]}' was closed`))
+    this._rejectFences(new Error('Redis delivery fence was closed'))
+    this.transition('closed', new Error(`Redis subscription '${this.laneChannel}' was closed`))
     this._onDetach()
   }
 
-  private _terminate(error: unknown): void {
-    if (this.ended) return
-    this._rejectFlushes(error)
-    this.transition('terminated', error)
-  }
-
-  private _rejectFlushes(error: unknown): void {
-    for (const flush of this._flushes.values()) flush.reject(error)
-    this._flushes.clear()
+  private _rejectFences(error: unknown): void {
+    for (const fence of this._fences.values()) fence.reject(error)
+    this._fences.clear()
   }
 }
 
-function redisSubscriptionChannels(prefix: string, source: RedisSubscriptionSource): string[] {
-  const channel = redisSubscriptionChannel(prefix, source)
-  return 'roomId' in source ? [channel, generationInvalidationChannel(prefix, source.roomId, source.inc)] : [channel]
-}
-
-function redisSubscriptionChannel(prefix: string, source: RedisSubscriptionSource): string {
-  if (!('roomId' in source)) return broadcastChannel(prefix, source)
-  return channelKey(prefix, source.roomId, source.inc, encodeLaneKey(source.lane))
+function laneChannel(prefix: string, source: RedisSubscriptionSource): string {
+  return 'roomId' in source
+    ? channelKey(prefix, source.roomId, source.inc, encodeLaneKey(source.lane))
+    : broadcastChannel(prefix, source)
 }

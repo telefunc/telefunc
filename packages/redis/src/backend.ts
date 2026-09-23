@@ -109,7 +109,7 @@ export class RedisBackend implements BroadcastDriver, RoomDriver {
     opts?: { retain?: boolean; closingLease?: string; requiredCellKeys?: string[] },
   ): Promise<CommitResult> {
     this._assertLive()
-    const flush = this.subscriptions.prepareFlush({ roomId, inc, lane })
+    const fence = this.subscriptions.prepareFence({ roomId, inc, lane })
     let reply
     try {
       reply = await this._run(REDIS_COMMANDS.commit, {
@@ -120,14 +120,14 @@ export class RedisBackend implements BroadcastDriver, RoomDriver {
         retain: opts?.retain === true,
         closingLease: opts?.closingLease,
         requiredCellKeys: opts?.requiredCellKeys ?? [],
-        fenceToken: flush.token,
+        fenceToken: fence.token,
       })
     } catch (error) {
-      flush.cancel()
+      fence.cancel()
       throw error
     }
     if ('stale' in reply) {
-      flush.cancel()
+      fence.cancel()
       return reply
     }
     // Data and fence leave the same slot owner in order, so observing the fence proves local dispatch.
@@ -136,7 +136,7 @@ export class RedisBackend implements BroadcastDriver, RoomDriver {
       seq: reply.seq,
       timestamp: reply.timestamp,
       ...(this._reportsReceivers ? { receivers: reply.receivers } : {}),
-      delivery: flush.delivery,
+      delivery: fence.delivery,
     }
   }
 
