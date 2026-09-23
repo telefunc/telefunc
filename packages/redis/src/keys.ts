@@ -17,9 +17,9 @@ export function redisKeyPrefix(prefix: string): string {
   if (prefix.includes('{')) throw new Error("Redis key prefix must not contain '{'")
   return prefix
 }
+// Encoded like a room id, so any key is one hash tag; an empty tag would hash the whole name instead.
 function broadcastTag(key: string): string {
-  if (key.startsWith('}')) throw new Error("Redis Broadcast key must not start with '}'")
-  return key === '' ? '{_}:empty' : `{${key}}`
+  return key === '' ? '{_}:empty' : `{${encodeURIComponent(key)}}`
 }
 export function broadcastSequenceKey(prefix: string, key: string): string {
   return `${prefix}seq:${broadcastTag(key)}`

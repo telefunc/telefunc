@@ -65,7 +65,7 @@ describe('Redis real three-master Cluster CI certification', () => {
     for (const unsafePrefix of ['x{}', 'x{', '{global}']) {
       expect(() => new RedisBackend({ redis: cluster, prefix: unsafePrefix })).toThrow(/prefix/i)
     }
-    await expect(backend.publish({ key: '}edge', kind: 'text' }, bytes('unsafe'))).rejects.toThrow(/Broadcast key/)
+    expect(await backend.publish({ key: '}edge', kind: 'text' }, bytes('edge'))).toMatchObject({ seq: 1 })
     const commands = cluster as unknown as Record<string, (...args: unknown[]) => Promise<unknown>>
     const publish = commands.tfPublish?.bind(cluster)
     if (publish === undefined) throw new Error('tfPublish is not registered')
