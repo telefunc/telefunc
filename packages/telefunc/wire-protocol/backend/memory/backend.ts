@@ -141,8 +141,7 @@ export class MemoryBackend implements BroadcastDriver, RoomDriver {
     const targets = [...(this.#state.broadcastSubs.get(broadcastRouteKey(lane)) ?? [])]
     const frame = copyBytes(payload)
     for (const target of targets) void target.deliver(copyBytes(frame), mark).catch(console.error)
-    const delivered = sumReceiverCounts(targets)
-    return { ...mark, receivers: delivered, meta: { delivered, transport: 'in-memory' } }
+    return { ...mark, receivers: sumReceiverCounts(targets), meta: { transport: 'in-memory' } }
   }
 
   async readHead(roomId: string): Promise<RoomHead | null> {
