@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { Cluster, Redis } from 'ioredis'
 import type { CommitAccepted, LaneId, RoomHead, SubscriptionState } from 'telefunc/__internal'
+import { decodeOrderingFrame } from 'telefunc/__internal'
 import { afterAll, afterEach, beforeAll, describe, expect, it, onTestFinished, vi } from 'vitest'
 import { installRedis } from '../index.js'
 import { RedisBackend } from './backend.js'
@@ -8,7 +9,6 @@ import { disposeBackend, getBroadcastBackend, getRoomBackend } from '../../../te
 import {
   broadcastSequenceKey,
   channelKey,
-  decodeRedisOrderingFrame,
   gensKey,
   headKey,
   genPrefix,
@@ -457,9 +457,7 @@ describe('Redis real three-master Cluster CI certification', () => {
     setHolding(false)
     for (const [channel, frame] of held
       .filter(([, frame]) => frame[0] !== REDIS_DELIVERY_FENCE_BYTE)
-      .sort(
-        (left, right) => decodeRedisOrderingFrame(right[1]).info.seq - decodeRedisOrderingFrame(left[1]).info.seq,
-      )) {
+      .sort((left, right) => decodeOrderingFrame(right[1]).info.seq - decodeOrderingFrame(left[1]).info.seq)) {
       dispatch(channel, frame)
     }
     for (const [channel, frame] of held.filter(([, frame]) => frame[0] === REDIS_DELIVERY_FENCE_BYTE)) {
@@ -474,7 +472,7 @@ describe('Redis real three-master Cluster CI certification', () => {
     await waitFor(() => held.length === 2)
     const expectedChannel = channelKey(prefix, roomId, inc, laneKey(SEMANTIC_LANE))
     expect(held.map(([channel]) => channel.toString())).toEqual([expectedChannel, expectedChannel])
-    expect(Buffer.from(decodeRedisOrderingFrame(held[0]![1]).payload).toString()).toBe('old-epoch')
+    expect(Buffer.from(decodeOrderingFrame(held[0]![1]).payload).toString()).toBe('old-epoch')
     expect(held[1]?.[1][0]).toBe(REDIS_DELIVERY_FENCE_BYTE)
     expect(await settlesWithin(committed.delivery, 100)).toBe(false)
     const first = await waitForValue(async () =>

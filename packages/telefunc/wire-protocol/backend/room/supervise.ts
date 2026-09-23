@@ -4,6 +4,7 @@ import { assertHeadNextWellFormed } from './head.js'
 import { SubscriptionManager } from '../subscription-manager.js'
 import type { HeadCx, HeadNext, RoomBackend, RoomDriver } from './contract.js'
 import { roomSubscriptionSourceKey } from './lane-key.js'
+import { assertDriverPosition } from '../driver-position.js'
 
 /** Owns the Room subscription manager and durable head/drop supervision. */
 function superviseRoomDriver(driver: RoomDriver): RoomBackend {
@@ -19,11 +20,23 @@ function superviseRoomDriver(driver: RoomDriver): RoomBackend {
     readCells: (roomId, inc, sel) => driver.readCells(roomId, inc, sel),
     compareExchangeCells: (roomId, inc, revision, mutations) =>
       driver.compareExchangeCells(roomId, inc, revision, mutations),
-    commitLane: (roomId, inc, lane, payload, opts) => driver.commitLane(roomId, inc, lane, payload, opts),
-    readRetained: (roomId, inc, lane) => driver.readRetained(roomId, inc, lane),
+    commitLane: async (roomId, inc, lane, payload, opts) => {
+      const result = await driver.commitLane(roomId, inc, lane, payload, opts)
+      if ('accepted' in result) assertDriverPosition(result)
+      return result
+    },
+    readRetained: async (roomId, inc, lane) => {
+      const retained = await driver.readRetained(roomId, inc, lane)
+      if (retained !== null) assertDriverPosition(retained)
+      return retained
+    },
     listRetained: (roomId, inc) => driver.listRetained(roomId, inc),
     deleteRetained: (roomId, inc, lane, opts) => driver.deleteRetained(roomId, inc, lane, opts),
-    subscribeLane: (roomId, inc, lane, receiver) => subscriptions.subscribe({ roomId, inc, lane }, receiver),
+    subscribeLane: (roomId, inc, lane, receiver) =>
+      subscriptions.subscribe({ roomId, inc, lane }, (payload, info) => {
+        assertDriverPosition(info)
+        return receiver(payload, info)
+      }),
     dropGeneration: async (roomId, inc) => {
       await driver.dropGeneration(roomId, inc)
       subscriptions.terminate((source) => source.roomId === roomId && source.inc === inc)

@@ -1,6 +1,7 @@
 export { createBroadcastTransportDriver }
 export type { BroadcastTransport }
 
+import { isOrderingPosition } from '../../ordering-frame.js'
 import type { BroadcastDriver, BroadcastLane, PublishResult } from './contract.js'
 import type { BackendReceiver, SubscriptionAttempt, SubscriptionBinding } from '../subscription.js'
 import { assertUsage } from '../../../utils/assert.js'
@@ -46,7 +47,7 @@ function publish(
 
 function checkMark<Mark extends { seq: number; timestamp: number }>(mark: Mark): Mark {
   assertUsage(
-    Number.isSafeInteger(mark.seq) && mark.seq > 0 && Number.isSafeInteger(mark.timestamp) && mark.timestamp >= 0,
+    isOrderingPosition(mark),
     `config.broadcast.transport returned { seq: ${mark.seq}, timestamp: ${mark.timestamp} }: seq must be a positive safe integer and timestamp a non-negative safe integer.`,
   )
   return mark

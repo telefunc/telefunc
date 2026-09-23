@@ -5,6 +5,13 @@ import { CHANNEL_BUFFER_LIMIT_BYTES } from '../../constants.js'
 import { SubscriptionManager } from '../subscription-manager.js'
 import type { BroadcastBackend, BroadcastDriver, BroadcastLane, PublishResult } from './contract.js'
 import { broadcastRouteKey } from './route-key.js'
+import { assertDriverPosition } from '../driver-position.js'
+import { isPromise } from '../../../utils/isPromise.js'
+
+function checked(result: PublishResult): PublishResult {
+  assertDriverPosition(result)
+  return result
+}
 
 const PENDING_PUBLISH_LIMIT = 1024
 
@@ -22,10 +29,15 @@ function superviseBroadcastDriver(driver: BroadcastDriver): BroadcastBackend {
   const pending = new Map<string, PendingRoute>()
   let disposal: Promise<void> | undefined
 
+  const publishNow = (lane: BroadcastLane, payload: Uint8Array): PublishResult | Promise<PublishResult> => {
+    const result = driver.publish(lane, payload)
+    return isPromise(result) ? result.then(checked) : checked(result)
+  }
+
   const publish = (lane: BroadcastLane, payload: Uint8Array): PublishResult | Promise<PublishResult> => {
     const routeKey = broadcastRouteKey(lane)
     const waiting = pending.get(routeKey)
-    if (waiting === undefined && subscriptions.settledWaits(lane).length === 0) return driver.publish(lane, payload)
+    if (waiting === undefined && subscriptions.settledWaits(lane).length === 0) return publishNow(lane, payload)
     const owned = payload.slice()
     const route = waiting ?? { lane, entries: [], bytes: 0 }
     if (route.entries.length >= PENDING_PUBLISH_LIMIT || route.bytes + owned.byteLength > CHANNEL_BUFFER_LIMIT_BYTES) {
@@ -54,7 +66,7 @@ function superviseBroadcastDriver(driver: BroadcastDriver): BroadcastBackend {
       route.bytes = 0
       for (const entry of entries) {
         try {
-          entry.resolve(driver.publish(route.lane, entry.payload))
+          entry.resolve(publishNow(route.lane, entry.payload))
         } catch (error) {
           entry.reject(error)
         }
@@ -65,7 +77,11 @@ function superviseBroadcastDriver(driver: BroadcastDriver): BroadcastBackend {
 
   return {
     publish,
-    subscribe: (lane, receiver) => subscriptions.subscribe(lane, receiver),
+    subscribe: (lane, receiver) =>
+      subscriptions.subscribe(lane, (payload, info) => {
+        assertDriverPosition(info)
+        return receiver(payload, info)
+      }),
     dispose: () => (disposal ??= subscriptions.dispose()),
   }
 }

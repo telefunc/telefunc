@@ -8,10 +8,10 @@ import type {
   SubscriptionBinding,
   SubscriptionDriver,
 } from 'telefunc/__internal'
+import { decodeOrderingFrame } from 'telefunc/__internal'
 import {
   broadcastChannel,
   channelKey,
-  decodeRedisOrderingFrame,
   generationInvalidationChannel,
   laneKey,
   REDIS_DELIVERY_FENCE_BYTE,
@@ -308,7 +308,7 @@ class RedisSubscriptionAttempt implements SubscriptionAttempt {
       }
       return
     }
-    const { payload, info } = decodeRedisOrderingFrame(frame)
+    const { payload, info } = decodeOrderingFrame(frame)
     // Redis Cluster can forward publications from the old and new slot owners over independent bus
     // paths during resharding. Preserve ordered at-most-once delivery by dropping a late frame; gaps
     // remain loss, never replay.

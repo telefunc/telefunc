@@ -22,12 +22,6 @@ import type { RouteInstallation } from './routes.js'
 const DIRECTORY_DO_NAME = '__telefunc_room_directory__'
 const ROOM_MANAGER = Symbol('telefunc.cloudflare.room-manager')
 
-function assertOrderingPosition(seq: number, timestamp: number, context: string): void {
-  if (!Number.isSafeInteger(seq) || seq <= 0 || !Number.isSafeInteger(timestamp) || timestamp < 0) {
-    throw new Error(`${context}: invalid Room ordering position`)
-  }
-}
-
 export const CLOUDFLARE_ROOM_CONTEXT_ERROR =
   // spellcheck-ignore  nodejs_als is a real Cloudflare compatibility flag (AsyncLocalStorage), not a typo
   'Cloudflare Room requires await-safe context. Import "telefunc/async_hooks" and enable the Cloudflare "nodejs_als" or "nodejs_compat" compatibility flag.'
@@ -97,7 +91,6 @@ export class CloudflareRoomSessionManager {
   }
 
   async deliver(request: RoomShardDeliveryRequest): Promise<void> {
-    assertOrderingPosition(request.seq, request.timestamp, 'Cloudflare Room delivery')
     if (request.subscriberDoId !== this.#id)
       throw new Error('Cloudflare Room delivery addressed the wrong session shard')
     const entry = this.#entries.get(JSON.stringify([request.roomId, request.inc, request.laneKey]))
@@ -195,16 +188,12 @@ export class CloudflareRoomBackend implements BroadcastDriver, RoomDriver {
     const stub = this.#stub(roomId)
     const wire = await stub.commitLane(roomId, inc, lane, payload, opts)
     if ('stale' in wire) return wire
-    assertOrderingPosition(wire.seq, wire.timestamp, 'CloudflareRoomBackend.commitLane')
     const deliveryToken = wire.deliveryToken
     const delivery = stub.awaitDelivery(deliveryToken)
     return { accepted: true, seq: wire.seq, timestamp: wire.timestamp, receivers: wire.receivers, delivery }
   }
   async readRetained(roomId: string, inc: string, lane: LaneId) {
-    const wire = await this.#stub(roomId).readRetained(inc, lane)
-    if (wire === null) return null
-    assertOrderingPosition(wire.seq, wire.timestamp, 'CloudflareRoomBackend.readRetained')
-    return wire
+    return this.#stub(roomId).readRetained(inc, lane)
   }
   async listRetained(roomId: string, inc: string) {
     return this.#stub(roomId).listRetained(inc)

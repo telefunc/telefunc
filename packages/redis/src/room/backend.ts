@@ -21,13 +21,13 @@ import type {
   RoomHead,
   RoomSubscriptionSource,
 } from 'telefunc/__internal'
+import { decodeOrderingFrame } from 'telefunc/__internal'
 import {
   broadcastChannel,
   broadcastSequenceKey,
   cellKey,
   cellKeyPrefix,
   DEFAULT_ROOM_PREFIX,
-  decodeRedisOrderingFrame,
   directoryIndexKey,
   directoryTagsKey,
   generationKeysKey,
@@ -48,11 +48,6 @@ import { RedisSubscriptionDriver } from './subscriber-transport.js'
 const DIRECTORY_PAGE_SIZE = 100
 const STABLE_READ_ATTEMPTS = 8
 
-function assertOrderingPosition(seq: number, timestamp: number, context: string): void {
-  if (!Number.isSafeInteger(seq) || seq <= 0 || !Number.isSafeInteger(timestamp) || timestamp < 0) {
-    throw new Error(`${context}: invalid Room ordering position`)
-  }
-}
 export type RedisBackendOptions = {
   redis: RedisClient
   prefix?: string
@@ -66,9 +61,6 @@ end
 local seq = redis.call('INCR', KEYS[1])
 local t = redis.call('TIME')
 local ts = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
-if seq < 1 or seq > ${REDIS_SAFE_INTEGER_MAX} or ts < 0 or ts > ${REDIS_SAFE_INTEGER_MAX} then
-  return redis.error_reply('publish: invalid ordering position')
-end
 local frame = tf_ordering_frame(seq, ts, ARGV[1])
 local receivers = redis.call('PUBLISH', KEYS[2], frame)
 return {seq, ts, receivers}
@@ -157,7 +149,6 @@ export class RedisBackend implements BroadcastDriver, RoomDriver {
       typeof seq === 'number' && typeof timestamp === 'number' && typeof receivers === 'number',
       'Publish script returned non-numeric seq/ts/receivers',
     )
-    assertOrderingPosition(seq, timestamp, 'RedisBackend.publish')
     return {
       seq,
       timestamp,
@@ -286,7 +277,6 @@ export class RedisBackend implements BroadcastDriver, RoomDriver {
       assert(key !== undefined)
       return { stale: 'cell', key }
     }
-    assertOrderingPosition(parsed.seq, parsed.timestamp, 'RedisBackend.commitLane')
     // Data and fence leave the same slot owner in order, so observing the fence proves local dispatch.
     return {
       accepted: true,
@@ -308,7 +298,7 @@ export class RedisBackend implements BroadcastDriver, RoomDriver {
     const {
       payload,
       info: { seq, timestamp },
-    } = decodeRedisOrderingFrame(frame)
+    } = decodeOrderingFrame(frame)
     return { payload: Uint8Array.from(payload), seq, timestamp }
   }
 

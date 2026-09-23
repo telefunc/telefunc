@@ -41,7 +41,7 @@ import { disposeBackend, getBroadcastBackend, getRoomBackend, installBackend } f
 import { MemoryBackend, MemoryBackendState } from '../backend/memory/backend.js'
 import type { LaneId } from '../backend/room/contract.js'
 import type { BackendReceiver, BackendSubscription, SubscriptionState } from '../backend/subscription.js'
-import { ORDERING_FRAME_LAYOUT, decodeOrderingFrame, encodeOrderingFrame } from '../ordering-frame.js'
+import { decodeOrderingFrame, encodeOrderingFrame } from '../ordering-frame.js'
 import { GcRegistry } from '../gcRegistry.js'
 import { wrapProxy } from '../wrapProxy.js'
 const encoder = new TextEncoder()
@@ -2586,19 +2586,12 @@ describe('room binary protocol validation', () => {
     }
     expect(delegated).not.toHaveBeenCalled()
   })
-  it('publishes one immutable wide ordering layout and codec', () => {
-    expect(Object.isFrozen(ORDERING_FRAME_LAYOUT)).toBe(true)
-    expect(Object.isFrozen(ORDERING_FRAME_LAYOUT.offsets)).toBe(true)
-    expect(ORDERING_FRAME_LAYOUT).toEqual({
-      headerBytes: 16,
-      wordBytes: 4,
-      wordRange: 0x1_0000_0000,
-      endianness: 'big',
-      offsets: { seqHigh: 0, seqLow: 4, timestampHigh: 8, timestampLow: 12 },
-    })
+  it('encodes the wide ordering frame as four big-endian u32 words ahead of the payload', () => {
     const payload = new Uint8Array([1, 255])
     const info = { seq: 0x1_0000_0007, timestamp: 0x2_0000_0009 }
-    expect(decodeOrderingFrame(encodeOrderingFrame(payload, info))).toEqual({ payload, info })
+    const frame = encodeOrderingFrame(payload, info)
+    expect([...frame]).toEqual([0, 0, 0, 1, 0, 0, 0, 7, 0, 0, 0, 2, 0, 0, 0, 9, 1, 255])
+    expect(decodeOrderingFrame(frame)).toEqual({ payload, info })
   })
 })
 type Peer = ReturnType<typeof attachPeer>

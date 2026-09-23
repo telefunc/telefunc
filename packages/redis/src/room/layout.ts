@@ -8,7 +8,7 @@
 // directory: <prefix>room-dir:{<prefix>dir}:{index|tags}; one global, co-slotted pair.
 // Commands take authority time from Redis TIME, never from the caller.
 
-import { ORDERING_FRAME_LAYOUT, laneKey, type BroadcastLane, type LaneId } from 'telefunc/__internal'
+import { laneKey, type BroadcastLane, type LaneId } from 'telefunc/__internal'
 export { laneKey }
 
 export const DEFAULT_ROOM_PREFIX = 'tf:'
@@ -122,44 +122,16 @@ local function tf_read_and_expire_head(key, now)
 end
 `
 
-// Broadcast and Room render the frozen ordering layout into Lua; the decoder reads the same data.
-const orderingFrameFormat = [
-  '>',
-  ...Object.values(ORDERING_FRAME_LAYOUT.offsets)
-    .sort((left, right) => left - right)
-    .map(() => `I${ORDERING_FRAME_LAYOUT.wordBytes}`),
-].join('')
+// The same bytes as telefunc's ordering frame (wire-protocol/ordering-frame.ts): four u32 big-endian words, then the payload.
 export const REDIS_ORDERING_FRAME_LUA = `
 local function tf_ordering_frame(seq, ts, payload)
-  local seq_hi = math.floor(seq / ${ORDERING_FRAME_LAYOUT.wordRange})
-  local seq_lo = seq - seq_hi * ${ORDERING_FRAME_LAYOUT.wordRange}
-  local ts_hi = math.floor(ts / ${ORDERING_FRAME_LAYOUT.wordRange})
-  local ts_lo = ts - ts_hi * ${ORDERING_FRAME_LAYOUT.wordRange}
-  return struct.pack('${orderingFrameFormat}', seq_hi, seq_lo, ts_hi, ts_lo) .. payload
+  local seq_hi = math.floor(seq / 4294967296)
+  local seq_lo = seq - seq_hi * 4294967296
+  local ts_hi = math.floor(ts / 4294967296)
+  local ts_lo = ts - ts_hi * 4294967296
+  return struct.pack('>I4I4I4I4', seq_hi, seq_lo, ts_hi, ts_lo) .. payload
 end
 `
-
-export function decodeRedisOrderingFrame(frame: Uint8Array): {
-  payload: Uint8Array
-  info: { seq: number; timestamp: number }
-} {
-  if (frame.byteLength < ORDERING_FRAME_LAYOUT.headerBytes) {
-    throw new Error(`Redis ordering frame is shorter than its ${ORDERING_FRAME_LAYOUT.headerBytes}-byte header`)
-  }
-  const view = new DataView(frame.buffer, frame.byteOffset, frame.byteLength)
-  const { offsets, wordRange } = ORDERING_FRAME_LAYOUT
-  const info = {
-    seq: view.getUint32(offsets.seqHigh) * wordRange + view.getUint32(offsets.seqLow),
-    timestamp: view.getUint32(offsets.timestampHigh) * wordRange + view.getUint32(offsets.timestampLow),
-  }
-  if (!Number.isSafeInteger(info.seq) || info.seq <= 0) {
-    throw new Error('Redis ordering frame has an invalid sequence')
-  }
-  if (!Number.isSafeInteger(info.timestamp) || info.timestamp < 0) {
-    throw new Error('Redis ordering frame has an invalid timestamp')
-  }
-  return { payload: frame.subarray(ORDERING_FRAME_LAYOUT.headerBytes), info }
-}
 
 // HEAD CX compares by form, then stores; core decides every transition and the supervisor checks its shape.
 //   KEYS: [1]=head [2]=gens [3]=headrev
