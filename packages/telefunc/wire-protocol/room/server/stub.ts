@@ -2,21 +2,21 @@ export { RoomStubChannel, RoomParticipantStubChannel, bindParticipantStubChannel
 export type { ResponseRoomGrants }
 
 import { stringify } from '@brillout/json-serializer/stringify'
-import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
-import { assert, assertUsage } from '../../utils/assert.js'
-import { isObject } from '../../utils/isObject.js'
-import { unrefTimer } from '../../utils/unrefTimer.js'
-import { ROOM_DM_ACK_TIMEOUT_MS, ROOM_TAIL_ATTACH_TIMEOUT_MS } from './constants.js'
-import type { ChannelPublishAck } from '../channel.js'
-import { ServerChannel, parsePeerText } from '../server/channel.js'
-import type { ShieldValidator } from '../../node/server/shield.js'
-import { encodePublishText, type WirePublishInfo } from '../shared-ws.js'
-import { type ServerLocalParticipant, type ServerRoom } from './server.js'
-import { reportRoomError, roomAckError } from './server/errors.js'
-import type { ParticipantMeta, RoomSendReceipt } from './types.js'
-import { binaryWantsCovers, emptyTrackWants, type BinaryWants } from './binary.js'
-import { DM_PARTICIPANT_LEFT, roomFailureError } from './errors.js'
-import { leaveCauseToWire } from './model.js'
+import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
+import { assert, assertUsage } from '../../../utils/assert.js'
+import { isObject } from '../../../utils/isObject.js'
+import { unrefTimer } from '../../../utils/unrefTimer.js'
+import { ROOM_DM_ACK_TIMEOUT_MS, ROOM_TAIL_ATTACH_TIMEOUT_MS } from '../constants.js'
+import type { ChannelPublishAck } from '../../channel.js'
+import { ServerChannel, parsePeerText } from '../../server/channel.js'
+import type { ShieldValidator } from '../../../node/server/shield.js'
+import { encodePublishText, type WirePublishInfo } from '../../shared-ws.js'
+import { type ServerLocalParticipant, type ServerRoom } from './room.js'
+import { reportRoomError, roomAckError } from './errors.js'
+import type { ParticipantMeta, RoomSendReceipt } from '../types.js'
+import { binaryWantsCovers, emptyTrackWants, type BinaryWants } from '../binary.js'
+import { DM_PARTICIPANT_LEFT, roomFailureError } from '../errors.js'
+import { leaveCauseToWire } from '../model.js'
 import {
   pushBoundedTail,
   hasRoomTag,
@@ -27,7 +27,7 @@ import {
   type RoomCtrlEnvelope,
   type RoomDemandEvent,
   type RoomRosterEvent,
-} from './protocol.js'
+} from '../protocol.js'
 assertIsNotBrowser()
 
 // Room authority stays server-side; each wire stub owns one holder's wants, buffering, watermarks, and correlations.

@@ -18,7 +18,7 @@ export { Channel } from '../../wire-protocol/server/channel.js'
 export { Broadcast, BroadcastChannel } from '../../wire-protocol/server/server-broadcast.js'
 export type { BroadcastTransport } from '../../wire-protocol/backend/broadcast/transport.js'
 // `Room` is both the statics object and the instance type — one export carries both meanings.
-export { Room } from '../../wire-protocol/room/server.js'
+export { Room } from '../../wire-protocol/room/server/statics.js'
 export type {
   RoomInfo,
   RoomOptions,

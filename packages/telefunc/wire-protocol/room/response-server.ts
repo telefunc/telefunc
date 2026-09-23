@@ -1,7 +1,7 @@
 export { roomReplacer, roomParticipantReplacer, roomRemoteReplacer }
 
 import type { ReplacerType, ServerReplacerContext, TypeContract } from '../types.js'
-import { ServerLocalParticipant, ServerRoom } from './server.js'
+import { ServerLocalParticipant, ServerRoom } from './server/room.js'
 import type { RemoteParticipant } from './types.js'
 import type { ParticipantStubMetadata, RoomSnapshotMetadata } from './protocol.js'
 import {
@@ -9,7 +9,7 @@ import {
   RoomParticipantStubChannel,
   RoomStubChannel,
   type ResponseRoomGrants,
-} from './stubs.js'
+} from './server/stub.js'
 import { remoteBacking } from './state.js'
 import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
 assertIsNotBrowser()

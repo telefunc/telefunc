@@ -59,7 +59,7 @@ import {
 import { RoomState, RoomStateView } from '../state.js'
 import { RoomDemand } from '../demand.js'
 import { ParticipantBase, type InboxMessage } from '../participant.js'
-import type { RoomStubChannel } from '../stubs.js'
+import type { RoomStubChannel } from './stub.js'
 import {
   CONTROL_LANE,
   SEMANTIC_LANE,

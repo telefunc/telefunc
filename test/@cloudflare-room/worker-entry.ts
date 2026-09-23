@@ -4,7 +4,7 @@ import '../../packages/telefunc/node/server/async_hooks.js'
 import { type BackendDriverPair } from '../../packages/telefunc/wire-protocol/backend/driver-pair.js'
 import { installBackend } from '../../packages/telefunc/wire-protocol/backend/install.js'
 import type { RoomHead } from '../../packages/telefunc/wire-protocol/backend/room/contract.js'
-import { Room } from '../../packages/telefunc/wire-protocol/room/server.js'
+import { Room } from '../../packages/telefunc/wire-protocol/room/server/statics.js'
 import {
   CloudflareRoomBackend,
   CloudflareRoomSessionManager,
