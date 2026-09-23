@@ -222,7 +222,7 @@ export function advanceOrder(sql: SqlStorage, inc: string, domain: string, now: 
   return mark
 }
 
-// Drops every generation row; the DO separately refuses its live incarnation.
+// Drops every generation row.
 export function dropGenerationRows(sql: SqlStorage, inc: string): void {
   for (const table of ['cell', 'ord', 'rt_manifest', 'rt_chunk', 'route', 'gen']) {
     sql.exec(`DELETE FROM ${table} WHERE inc = ?`, inc)

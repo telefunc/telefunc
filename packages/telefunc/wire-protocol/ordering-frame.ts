@@ -1,4 +1,4 @@
-export { ORDERING_FRAME_HEADER_BYTES, encodeOrderingFrame, decodeOrderingFrame, isOrderingPosition }
+export { encodeOrderingFrame, decodeOrderingFrame, isOrderingPosition }
 export type { OrderingInfo }
 
 import { assert } from '../utils/assert.js'

@@ -53,7 +53,7 @@ end
 `
 
 // The same bytes as telefunc's ordering frame (wire-protocol/ordering-frame.ts): four u32 big-endian words, then the payload.
-export const REDIS_ORDERING_FRAME_LUA = `
+const REDIS_ORDERING_FRAME_LUA = `
 local function tf_ordering_frame(seq, ts, payload)
   local seq_hi = math.floor(seq / 4294967296)
   local seq_lo = seq - seq_hi * 4294967296
@@ -82,7 +82,7 @@ return {seq, ts, receivers}
 // HEAD CX compares by form, then stores; core decides every transition and the supervisor checks its shape.
 //   KEYS: [1]=head [2]=gens [3]=headrev
 //   ARGV: [1]=HeadCx JSON {form,rev?,lease?} [2]=nextJson{state,inc?,config,lease?,ttlMs?}
-export const HEAD_CX_LUA = `${HEAD_PRELUDE}
+const HEAD_CX_LUA = `${HEAD_PRELUDE}
 local head_key, gens_key, rev_key = KEYS[1], KEYS[2], KEYS[3]
 local now = tf_now()
 local cx = cjson.decode(ARGV[1])
@@ -120,7 +120,7 @@ return '{"tag":"head","head":' .. encoded .. '}'
 
 // A head read and the clock used to interpret its logical tombstone are one slot-owner operation.
 //   KEYS: [1]=head
-export const READ_HEAD_LUA = `${HEAD_PRELUDE}
+const READ_HEAD_LUA = `${HEAD_PRELUDE}
 local now = tf_now()
 local head = tf_read_and_expire_head(KEYS[1], now)
 if not head then return '{"head":null}' end
@@ -130,7 +130,7 @@ return '{"head":' .. cjson.encode(head) .. '}'
 // The generation's cells under a prefix, with the revision that fences reading them.
 //   KEYS: [1]=head [2]=revision [3]=generation-keys
 //   ARGV: [1]=inc [2]=cell-key prefix [3]=cell prefix
-export const FIND_CELLS_LUA = `${HEAD_PRELUDE}
+const FIND_CELLS_LUA = `${HEAD_PRELUDE}
 local head = tf_read_and_expire_head(KEYS[1], tf_now())
 if not head or head.inc ~= ARGV[1] then return {'stale'} end
 local reply = {'found', redis.call('GET', KEYS[2]) or '0'}
@@ -145,7 +145,7 @@ return reply
 // revision, a moved one reads as 'moved'; a missing cell reads as nil.
 //   KEYS: [1]=head [2]=revision [3..]=cells
 //   ARGV: [1]=inc [2]=expected revision or ''
-export const READ_CELLS_LUA = `${HEAD_PRELUDE}
+const READ_CELLS_LUA = `${HEAD_PRELUDE}
 local head = tf_read_and_expire_head(KEYS[1], tf_now())
 if not head or head.inc ~= ARGV[1] then return {'stale'} end
 local revision = redis.call('GET', KEYS[2]) or '0'
@@ -159,7 +159,7 @@ return reply
 // open head, so one closed or dropped during establishment is never reported ready.
 //   KEYS: [1]=head [2]=gens
 //   ARGV: [1]=inc
-export const VALIDATE_GENERATION_LUA = `${HEAD_PRELUDE}
+const VALIDATE_GENERATION_LUA = `${HEAD_PRELUDE}
 local head = tf_read_and_expire_head(KEYS[1], tf_now())
 if not head or head.state ~= 'open' or head.inc ~= ARGV[1] or redis.call('SISMEMBER', KEYS[2], ARGV[1]) ~= 1 then
   return 0
@@ -170,7 +170,7 @@ return 1
 // Whether the generation is still installed.
 //   KEYS: [1]=gens
 //   ARGV: [1]=inc
-export const DROP_GENERATION_BEGIN_LUA = `
+const DROP_GENERATION_BEGIN_LUA = `
 return redis.call('SISMEMBER', KEYS[1], ARGV[1])
 `
 
@@ -179,7 +179,7 @@ return redis.call('SISMEMBER', KEYS[1], ARGV[1])
 // deletion, keyed invalidation, and retirement are one atomic room-slot operation.
 //   KEYS: [1]=gens [2]=invalidation-channel [3]=manifest [4..]=members
 //   ARGV: [1]=inc
-export const DROP_GENERATION_FINALIZE_LUA = `
+const DROP_GENERATION_FINALIZE_LUA = `
 local inc = ARGV[1]
 if redis.call('SISMEMBER', KEYS[1], inc) == 0 then return 0 end
 for i = 4, #KEYS do redis.call('UNLINK', KEYS[i]) end
@@ -193,7 +193,7 @@ return 1
 // time; the revision is the coarse per-generation counter, allowed to over-conflict but never mislead.
 //   KEYS: [1]=head [2]=rev [3]=generation-keys [4..]=cell keys (one per mutation, in order)
 //   ARGV: [1]=inc [2]=expectedRev, then per mutation: op('set'|'del'), value
-export const CELLS_CX_LUA = `${HEAD_PRELUDE}
+const CELLS_CX_LUA = `${HEAD_PRELUDE}
 local head_key, rev_key, generation_keys_key = KEYS[1], KEYS[2], KEYS[3]
 local now = tf_now()
 local head = tf_read_and_expire_head(head_key, now)
@@ -225,7 +225,7 @@ return 'committed'
 //   KEYS: [1]=head [2]=order [3]=retained [4]=channel [5]=generation-keys [6..]=required live cells
 //   ARGV: [1]=inc [2]=laneKind [3]=closingLease('') [4]=retain('0'|'1')
 //         [5]=payload [6]=local delivery-fence token or ''
-export const COMMIT_LUA = `${HEAD_PRELUDE}
+const COMMIT_LUA = `${HEAD_PRELUDE}
 ${REDIS_ORDERING_FRAME_LUA}
 local head_key, order_key, retained_key, channel_key, generation_keys_key =
   KEYS[1], KEYS[2], KEYS[3], KEYS[4], KEYS[5]
@@ -283,7 +283,7 @@ return '{"accepted":true,"seq":' .. seq_text .. ',"timestamp":' .. ts_text .. ',
 // Deletes one lane's retained frame, optionally only while it still holds seq ARGV[1].
 //   KEYS: [1]=generation-keys [2]=retained
 //   ARGV: [1]=ifSeq or ''
-export const RETAINED_DELETE_LUA = `
+const RETAINED_DELETE_LUA = `
 if ARGV[1] ~= '' then
   local frame = redis.call('GET', KEYS[2])
   if not frame then return 0 end
@@ -296,13 +296,13 @@ return redis.call('DEL', KEYS[2])
 
 // Directory records use two co-slotted global keys. Put and compare-delete are each one atomic record,
 // so stale cleanup cannot erase (or de-index) a concurrent newer tag.
-export const DIRECTORY_PUT_LUA = `
+const DIRECTORY_PUT_LUA = `
 redis.call('ZADD', KEYS[1], 0, ARGV[1])
 redis.call('HSET', KEYS[2], ARGV[1], ARGV[2])
 return 1
 `
 
-export const DIRECTORY_DELETE_LUA = `
+const DIRECTORY_DELETE_LUA = `
 if redis.call('HGET', KEYS[2], ARGV[1]) ~= ARGV[2] then return 0 end
 redis.call('HDEL', KEYS[2], ARGV[1])
 redis.call('ZREM', KEYS[1], ARGV[1])

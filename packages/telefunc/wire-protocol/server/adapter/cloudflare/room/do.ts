@@ -313,7 +313,6 @@ function nextMaintenanceDeadline(sql: SqlStorage, now: number): number | null {
   return deadlines.length === 0 ? null : Math.min(...deadlines)
 }
 
-// Closing accepts only its live authority-time lease through the closing-control branch; all other lanes are stale.
 export function createTelefuncRoomDurableObjectClass(
   sessionNamespace: SessionNamespaceResolver,
 ): new (

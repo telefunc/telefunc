@@ -252,9 +252,7 @@ class FrameDemuxer {
     this.totalConsumers++
   }
 
-  /** Cancel the given index. Follows .tee() semantics:
-   *  drops its buffered/future frames, resolves any pending waiter with null.
-   *  Upstream is cancelled once every consumer is terminal and at least one cancelled. */
+  /** Cancel the given index (.tee() semantics): drops its frames and resolves a pending waiter with null. */
   cancelIndex(index: number): void {
     if (this.cancelledIndices.has(index) || this.doneIndices.has(index)) return
     this.cancelledIndices.add(index)
