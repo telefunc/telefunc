@@ -153,7 +153,7 @@ describe('Redis real three-master Cluster CI certification', () => {
       )
       expect(
         await backend.commitLane(roomId, inc, SEMANTIC_LANE, bytes('fenced'), { requiredCellKeys: ['cell} escape'] }),
-      ).toEqual({ stale: true })
+      ).toEqual({ stale: 'cell', key: 'cell} escape' })
       await backend.deleteRetained(roomId, inc, SEMANTIC_LANE)
       await backend.directoryPut(roomId, inc)
       const hmget = client.hmget.bind(client)

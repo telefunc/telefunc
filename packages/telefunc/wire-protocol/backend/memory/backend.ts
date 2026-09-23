@@ -302,12 +302,11 @@ export class MemoryBackend implements BroadcastDriver, RoomDriver {
     const room = this.#state.rooms.get(roomId)
     const head = this.#readAndExpireHead(room)
     if (room === undefined || head === null || !this.#commitPreconditionHolds(head, inc, lane, opts?.closingLease)) {
-      return { stale: true }
+      return { stale: 'incarnation' }
     }
     const gen = this.#generation(room, inc)
-    if (opts?.requiredCellKeys?.some((key) => !gen.cells.has(key))) {
-      return { stale: true }
-    }
+    const missing = opts?.requiredCellKeys?.find((key) => !gen.cells.has(key))
+    if (missing !== undefined) return { stale: 'cell', key: missing }
     const key = encodeLaneKey(lane)
     const frame = copyBytes(payload)
     const mark = advanceOrder(gen.order, key, this.#now(), 'commitLane')

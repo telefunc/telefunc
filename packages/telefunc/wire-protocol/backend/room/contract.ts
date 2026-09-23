@@ -2,6 +2,7 @@ export type {
   CellMutation,
   CommitAccepted,
   CommitResult,
+  StaleCommit,
   CxResult,
   HeadCx,
   HeadNext,
@@ -57,7 +58,10 @@ type CommitAccepted = {
   delivery: Promise<void>
 }
 
-type CommitResult = CommitAccepted | { stale: true }
+/** Why a commit was refused: the incarnation isn't open (or its closing lease lapsed), or a required cell is gone. */
+type StaleCommit = { stale: 'incarnation' } | { stale: 'cell'; key: string }
+
+type CommitResult = CommitAccepted | StaleCommit
 
 type RoomSubscriptionSource = {
   roomId: string

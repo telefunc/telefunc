@@ -8,6 +8,7 @@ export {
   encodeRoomConfig,
   encodeRoomText,
   publishCtrl,
+  staleCommitError,
   withinRoomHorizon,
 }
 
@@ -15,9 +16,9 @@ import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { unrefTimer } from '../../../utils/unrefTimer.js'
 import { getRoomBackend } from '../../backend/install.js'
-import type { CommitAccepted, LaneId, RoomHead } from '../../backend/room/contract.js'
+import type { CommitAccepted, LaneId, RoomHead, StaleCommit } from '../../backend/room/contract.js'
 import type { BackendSubscription } from '../../backend/subscription.js'
-import type { RoomConfigRecord, RoomCtrlEnvelope } from '../protocol.js'
+import { MEMBER_CELL_PREFIX, type RoomConfigRecord, type RoomCtrlEnvelope } from '../protocol.js'
 import { RoomError } from '../errors.js'
 import { ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS } from '../constants.js'
 import { reportRoomError } from './errors.js'
@@ -53,9 +54,9 @@ async function commitRoomLane(
   lane: LaneId,
   payload: Uint8Array,
   opts?: { retain?: boolean; closingLease?: string; requiredCellKeys?: string[] },
-): Promise<CommitAccepted | null> {
+): Promise<CommitAccepted | StaleCommit> {
   const result = await getRoomBackend().commitLane(id, inc, lane, payload, opts)
-  if ('stale' in result) return null
+  if ('stale' in result) return result
   // Delivery is at-most-once: a handoff lost with its fence (e.g. a partition) must not hang the caller.
   if (!(await settlesWithin(result.delivery, ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS)))
     reportRoomError(new Error(`Room delivery unconfirmed after ${ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS} ms: ${id}`))
@@ -204,5 +205,14 @@ function withinRoomHorizon<T>(promise: Promise<T>, ms: number): Promise<T> {
 
 async function publishCtrl(roomId: string, inc: string, event: RoomCtrlEnvelope): Promise<void> {
   const committed = await commitRoomLane(roomId, inc, CONTROL_LANE, encodeRoomText(stringify(event)))
-  if (committed === null) throw new RoomError(`Room is closed: ${roomId}`)
+  if ('stale' in committed) throw staleCommitError(roomId, committed)
+}
+
+/** Required cells are member records, so a missing one names the member that left. */
+function staleCommitError(roomId: string, stale: StaleCommit): RoomError {
+  return new RoomError(
+    stale.stale === 'cell'
+      ? `Participant not found (left?): ${stale.key.slice(MEMBER_CELL_PREFIX.length)}`
+      : `Room is closed: ${roomId}`,
+  )
 }

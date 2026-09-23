@@ -310,11 +310,15 @@ export class RedisBackend implements BroadcastDriver, RoomDriver {
       throw error
     }
     const parsed = JSON.parse(reply) as
-      | { stale: true }
+      | { stale: 'incarnation' }
+      | { stale: 'cell'; index: number }
       | { accepted: true; seq: number; timestamp: number; receivers: number }
     if ('stale' in parsed) {
       flush.cancel()
-      return { stale: true }
+      if (parsed.stale === 'incarnation') return parsed
+      const key = opts?.requiredCellKeys?.[parsed.index]
+      assert(key !== undefined)
+      return { stale: 'cell', key }
     }
     assertOrderingPosition(parsed.seq, parsed.timestamp, 'RedisBackend.commitLane')
     // Data and fence leave the same slot owner in order, so observing the fence proves local dispatch.

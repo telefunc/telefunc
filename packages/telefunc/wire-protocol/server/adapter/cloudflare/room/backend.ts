@@ -198,7 +198,7 @@ export class CloudflareRoomBackend implements BroadcastDriver, RoomDriver {
     const manager = materializeCloudflareRoomSessionManager()
     const stub = manager.authority(roomId)
     const wire = await stub.commitLane(roomId, inc, lane, payload, opts)
-    if ('stale' in wire) return { stale: true }
+    if ('stale' in wire) return wire
     assertOrderingPosition(wire.seq, wire.timestamp, 'CloudflareRoomBackend.commitLane')
     const deliveryToken = wire.deliveryToken
     const delivery = stub.awaitDelivery(deliveryToken)

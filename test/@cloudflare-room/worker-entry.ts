@@ -236,6 +236,9 @@ async function nativeRpcRoundTrip(env: Env, suffix: string) {
   return {
     headConfig: [...opened.config],
     cell: stored === undefined ? null : [...stored],
+    staleCell: await probe.authority.commitLane(probe.roomId, probe.inc, { kind: 'semantic' }, new Uint8Array([1]), {
+      requiredCellKeys: ['m:missing'],
+    }),
   }
 }
 async function openHead(authority: Authority, inc: string, operation: string): Promise<RoomHead> {

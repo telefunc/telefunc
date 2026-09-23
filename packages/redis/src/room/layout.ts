@@ -327,9 +327,9 @@ if head and head.inc == ARGV[1] then
           and head.lease.id == ARGV[3] and now <= head.lease['until'])
   end
 end
-if not ok then return '{"stale":true}' end
+if not ok then return '{"stale":"incarnation"}' end
 for i = 6, #KEYS do
-  if not redis.call('GET', KEYS[i]) then return '{"stale":true}' end
+  if not redis.call('GET', KEYS[i]) then return '{"stale":"cell","index":' .. (i - 6) .. '}' end
 end
 
 -- Advance the live lane-domain cursor exactly once. It has no TTL: generation deletion is its cleanup

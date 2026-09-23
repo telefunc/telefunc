@@ -1465,6 +1465,25 @@ describe('Room public behavior', () => {
     await expect(Room.getParticipants(room.id)).resolves.toEqual([])
     expect(await driver.listRetained(room.id, room._inc)).toEqual([])
   })
+  it('names why a commit was stale, so callers need no diagnosis reads', async () => {
+    const room = (await Room.create('stale-reason')) as ServerRoom
+    const member = await room.join()
+    const semantic = { kind: 'semantic' } as const
+    const payload = new Uint8Array([1])
+    expect(await driver.commitLane(room.id, room._inc, semantic, payload, { requiredCellKeys: ['m:gone'] })).toEqual({
+      stale: 'cell',
+      key: 'm:gone',
+    })
+    expect(await driver.commitLane(room.id, 'other-inc', semantic, payload)).toEqual({ stale: 'incarnation' })
+    const current = await driver.readCells(room.id, room._inc, { keys: [memberCellKey(member.id)] })
+    if ('staleInc' in current) throw new Error('room went stale')
+    await driver.compareExchangeCells(room.id, room._inc, current.revision, [{ key: memberCellKey(member.id) }])
+    const target = await room.join()
+    const readCells = vi.spyOn(driver, 'readCells')
+    const readHead = vi.spyOn(driver, 'readHead')
+    await expect(member.send(target.id, 'hi')).rejects.toThrow(`Participant not found (left?): ${member.id}`)
+    expect([readCells.mock.calls.length, readHead.mock.calls.length]).toEqual([0, 0])
+  })
   it('does not retain or expose mutable lane aliases', async () => {
     const room = (await Room.create('retained-lane-alias')) as ServerRoom
     const lane = { kind: 'binary', member: 'member', track: 'original' } as LaneId
@@ -2375,7 +2394,7 @@ describe('memory Backend SPI contract', () => {
       await backend.commitLane('spi', 'inc-1', semanticLane, encoder.encode('fenced'), {
         requiredCellKeys: ['member'],
       }),
-    ).toEqual({ stale: true })
+    ).toEqual({ stale: 'cell', key: 'member' })
     await expect(backend.dropGeneration('spi', 'inc-1')).rejects.toThrow('refusing to drop the current')
     expect(subscription.state()).toBe('ready')
     const closing = await backend.compareExchangeHead(
@@ -2405,7 +2424,9 @@ describe('memory Backend SPI contract', () => {
       { head: { state: 'open', currentInc: 'inc-2', config: closed.head.config } },
     )
     expect(reopened).toMatchObject({ ok: true, head: { state: 'open', currentInc: 'inc-2' } })
-    expect(await backend.commitLane('spi', 'inc-1', semanticLane, encoder.encode('stale'))).toEqual({ stale: true })
+    expect(await backend.commitLane('spi', 'inc-1', semanticLane, encoder.encode('stale'))).toEqual({
+      stale: 'incarnation',
+    })
     await backend.dropGeneration('spi', 'inc-1')
     expect([...memoryState.rooms.get('spi')!.gens.keys()]).toEqual(['inc-2'])
     expect(subscription.state()).toBe('closed')

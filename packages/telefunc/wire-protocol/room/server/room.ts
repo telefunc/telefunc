@@ -69,6 +69,7 @@ import {
   decodeRoomText,
   encodeRoomText,
   publishCtrl,
+  staleCommitError,
   withinRoomHorizon,
 } from './lanes.js'
 import { reportCallbackError, reportRoomError } from './errors.js'
@@ -384,7 +385,7 @@ class ServerRoom extends RoomStateView implements Room {
       retain,
       requiredCellKeys: [memberCellKey(from)],
     })
-    if (commit === null) return await this._throwStaleMembers(from)
+    if ('stale' in commit) throw staleCommitError(this.id, commit)
     return this._finishPublish(sender, data, commit)
   }
 
@@ -401,7 +402,7 @@ class ServerRoom extends RoomStateView implements Room {
       framed,
       { retain: frame.retain, requiredCellKeys: [memberCellKey(from)] },
     )
-    if (result === null) return await this._throwStaleMembers(from)
+    if ('stale' in result) throw staleCommitError(this.id, result)
     const ack = await this._finishPublish(sender, frame.payload, result)
     return ack
   }
@@ -520,7 +521,7 @@ class ServerRoom extends RoomStateView implements Room {
       encodeRoomText(stringify(envelope)),
       { requiredCellKeys: [memberCellKey(from), memberCellKey(to)] },
     )
-    if (receipt === null) return await this._throwStaleMembers(from, to)
+    if ('stale' in receipt) throw staleCommitError(this.id, receipt)
     const info: RoomSendReceipt = { seq: receipt.seq, timestamp: receipt.timestamp }
     const onAfterSend = this._guards?.onAfterSend
     if (onAfterSend) await runAfterHook(() => onAfterSend(sender, target, data, info))
@@ -536,7 +537,8 @@ class ServerRoom extends RoomStateView implements Room {
       encodeRoomText(stringify(envelope)),
       { requiredCellKeys: [memberCellKey(to)] },
     )
-    if (committed === null) throw new RoomError(`Room is closed: ${this.id}`)
+    // A sender that left has no ack left to settle; only a closed room is an error.
+    if ('stale' in committed && committed.stale === 'incarnation') throw staleCommitError(this.id, committed)
   }
 
   private _resolveDmAck(envelope: RoomDmAckEnvelope): void {
@@ -571,15 +573,6 @@ class ServerRoom extends RoomStateView implements Room {
     if (this._state.closed || (await this._openConfig()) === null) {
       throw new RoomError(`Room is closed: ${this.id}`)
     }
-  }
-  private async _throwStaleMembers(...ids: string[]): Promise<never> {
-    await this._assertOpen()
-    for (const id of ids) {
-      if ((await readCell(this.id, this._inc, memberCellKey(id))) === null) {
-        throw new RoomError(`Participant not found (left?): ${id}`)
-      }
-    }
-    throw new RoomError(`Room is closed: ${this.id}`)
   }
   private _onCtrlMessage(serialized: string, rawInfo: WirePublishInfo): void {
     const event = decodeLaneEnvelope(serialized) as RoomCtrlEnvelope

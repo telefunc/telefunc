@@ -54,6 +54,7 @@ import {
   encodeRoomConfig,
   encodeRoomText,
   publishCtrl,
+  staleCommitError,
 } from './lanes.js'
 import { ServerRoom } from './room.js'
 
@@ -351,7 +352,7 @@ async function finishClose(backend: RoomBackend, roomId: string, closing: RoomHe
     encodeRoomText(stringify({ __r: 'closed' } satisfies RoomCtrlEnvelope)),
     { closingLease: lease.id },
   )
-  if (closedEvent === null) return false
+  if ('stale' in closedEvent) return false
   const config = configFromHead(closing)
   const finalized = await backend.compareExchangeHead(
     roomId,
@@ -434,7 +435,7 @@ async function announceToRoom(id: string, data: unknown): Promise<RoomSendReceip
     SEMANTIC_LANE,
     encodeRoomText(stringify({ __r: 'announce', data } satisfies RoomEnvelope)),
   )
-  if (commit === null) throw new RoomError(`Room is closed: ${id}`)
+  if ('stale' in commit) throw staleCommitError(id, commit)
   return { seq: commit.seq, timestamp: commit.timestamp }
 }
 
@@ -457,16 +458,9 @@ async function sendServerDm(roomId: string, inc: string, memberId: string, data:
     encodeRoomText(stringify(envelope)),
     { requiredCellKeys: [memberCellKey(memberId)] },
   )
-  if (committed !== null) return true
-  const current = await getRoomBackend().readHead(roomId)
-  if (
-    current?.head.state === 'open' &&
-    current.head.currentInc === inc &&
-    (await readCell(roomId, inc, memberCellKey(memberId))) === null
-  ) {
-    return false
-  }
-  throw new RoomError(`Room is closed: ${roomId}`)
+  if (!('stale' in committed)) return true
+  if (committed.stale === 'cell') return false
+  throw staleCommitError(roomId, committed)
 }
 
 function normalizeOptions(options: RoomOptions | undefined): { meta: RoomMeta } {

@@ -2,7 +2,15 @@
 // One Room DO owns authority time/state/fanout; transaction rollback and RPC structured clone preserve SPI outcomes.
 
 import { DurableObject } from 'cloudflare:workers'
-import type { CellMutation, CxResult, HeadCx, HeadNext, LaneId, RoomHead } from '../../../../backend/room/contract.js'
+import type {
+  CellMutation,
+  CxResult,
+  HeadCx,
+  HeadNext,
+  LaneId,
+  RoomHead,
+  StaleCommit,
+} from '../../../../backend/room/contract.js'
 import { encodeLaneKey } from '../../../../backend/room/lane-key.js'
 import {
   dispatchRoomShardFanout,
@@ -43,7 +51,7 @@ export type HeadCxResult = { ok: true; head: RoomHead } | { conflict: true; curr
 export type CellsResult = { revision: string; cells: Map<string, Uint8Array> } | { staleInc: true }
 export type CommitWire =
   | { accepted: true; seq: number; timestamp: number; receivers: number; deliveryToken: string }
-  | { stale: true }
+  | StaleCommit
 export type RetainedResult = { payload: Uint8Array; seq: number; timestamp: number }
 export type RegisterWire =
   | { ok: true; generationToken: string }
@@ -151,18 +159,24 @@ export class TelefuncRoomDurableObject extends DurableObject {
     const key = encodeLaneKey(lane)
     const frame = payload instanceof Uint8Array ? payload : new Uint8Array(payload)
     let accepted: { seq: number; timestamp: number; targets: RouteTarget[] } | null = null
+    let stale: StaleCommit = { stale: 'incarnation' }
     this.ctx.storage.transactionSync(() => {
       if (!commitPreconditionHolds(this.#sql, inc, lane, opts?.closingLease, now)) return
       if (opts?.requiredCellKeys !== undefined) {
         const required = readCells(this.#sql, inc, { keys: opts.requiredCellKeys }, now)
-        if ('staleInc' in required || opts.requiredCellKeys.some((cell) => !required.cells.has(cell))) return
+        if ('staleInc' in required) return
+        const missing = opts.requiredCellKeys.find((cell) => !required.cells.has(cell))
+        if (missing !== undefined) {
+          stale = { stale: 'cell', key: missing }
+          return
+        }
       }
       const mark = advanceOrder(this.#sql, inc, key, now)
       if (opts?.retain === true) installRetained(this.#sql, inc, lane, frame, mark)
       const targets = snapshotRoutes(this.#sql, inc, key, now)
       accepted = { seq: mark.seq, timestamp: mark.timestamp, targets }
     })
-    if (accepted === null) return { stale: true }
+    if (accepted === null) return stale
     const { seq, timestamp, targets } = accepted as { seq: number; timestamp: number; targets: RouteTarget[] }
     const deliveryToken = this.#fanout.enqueue(inc, key, targets, frame, {
       roomId,
