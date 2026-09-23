@@ -15,6 +15,9 @@ import { ServerBroadcast } from '../../server-broadcast.js'
 import { disposeBackend, installBackend } from '../../../backend/install.js'
 import { CloudflareRoomBackend } from './room/backend.js'
 
+const encode = (text: string) => new TextEncoder().encode(text)
+const decode = (bytes: Uint8Array) => new TextDecoder().decode(bytes)
+
 type CloudflareRequest = Request & { cf?: { colo?: string; continent?: string } }
 
 afterEach(async () => {
@@ -120,6 +123,7 @@ async function flushCoordinatorTurn(): Promise<void> {
 function createBasicBinding(
   overrides?: Partial<{
     onPublish: (id: { name: string }, request: any) => any
+    onForward: (id: { name: string }, request: any) => any
     onDeliver: (id: { name: string }, request: any) => any
   }>,
 ) {
@@ -136,6 +140,9 @@ function createBasicBinding(
       return {
         telefuncBroadcastPublish(request: any) {
           return overrides?.onPublish?.(id, request) ?? Promise.resolve({ seq: 1, timestamp: Date.now() })
+        },
+        telefuncBroadcastForward(request: any) {
+          return overrides?.onForward?.(id, request) ?? Promise.resolve()
         },
         telefuncBroadcastDeliver(request: any) {
           return overrides?.onDeliver?.(id, request) ?? Promise.resolve()
@@ -318,7 +325,7 @@ describe('cloudflare broadcast routing', () => {
     const value = await kv.get('tfps:text%3Aroom%3Atest:weur:telefunc-shard-weur-0')
     expect(value).toBe('telefunc-shard-weur-0')
     const binary = await transport.publish({ key: 'room:test', kind: 'binary' }, new Uint8Array([1]))
-    const text = await transport.publish({ key: 'room:test', kind: 'text' }, new TextEncoder().encode('"text"'))
+    const text = await transport.publish({ key: 'room:test', kind: 'text' }, encode('"text"'))
     expect([binary.receivers, text.receivers]).toEqual([0, 1])
     await subscription.unsubscribe()
   })
@@ -336,9 +343,9 @@ describe('cloudflare broadcast routing', () => {
     })
     const receipt = await transport.publishToSubscribers(authorityState, {
       key: 'room:first-touch',
+      kind: 'text',
       locationBucket: 'apac',
-      serialized: '{"text":"hello"}',
-      forwarded: false,
+      payload: encode('{"text":"hello"}'),
     })
     expect(receipt).toMatchObject({
       seq: 1,
@@ -393,10 +400,10 @@ describe('cloudflare broadcast routing', () => {
       kv,
       createBasicBinding({
         onPublish(_id, request) {
-          return transport.publishToSubscribers(createAuthorityState(), {
-            ...request,
-            locationBucket: request.locationBucket,
-          })
+          return transport.publishToSubscribers(createAuthorityState(), request)
+        },
+        onForward(_id, request) {
+          return transport.forwardToBucket(request)
         },
         onDeliver(_id, request) {
           return transport.deliverToLocal(request)
@@ -426,10 +433,10 @@ describe('cloudflare broadcast routing', () => {
       kv,
       createBasicBinding({
         onPublish(_id, request) {
-          return transport.publishToSubscribers(createAuthorityState(), {
-            ...request,
-            locationBucket: request.locationBucket,
-          })
+          return transport.publishToSubscribers(createAuthorityState(), request)
+        },
+        onForward(_id, request) {
+          return transport.forwardToBucket(request)
         },
         onDeliver(_id, request) {
           return transport.deliverToLocal(request)
@@ -458,14 +465,14 @@ describe('cloudflare broadcast routing', () => {
   it('authority forwards once to each populated bucket coordinator', async () => {
     const authorityState = createAuthorityState()
     const kv = createMockKV()
-    const forwardedBuckets: string[] = []
+    const coordinators: string[] = []
     const transport = new CloudflareBroadcastTransport({ baseInstanceName: 'telefunc', scale: 1 })
     configureTransport(
       transport,
       kv,
       createBasicBinding({
-        onPublish(_id, { locationBucket }) {
-          forwardedBuckets.push(locationBucket)
+        onForward(id) {
+          coordinators.push(id.name)
           return Promise.resolve()
         },
       }),
@@ -482,14 +489,18 @@ describe('cloudflare broadcast routing', () => {
     })
     await transport.publishToSubscribers(authorityState, {
       key: 'room:test',
+      kind: 'text',
       locationBucket: 'weur',
-      serialized: '{"text":"hello"}',
-      forwarded: false,
+      payload: encode('{"text":"hello"}'),
     })
-    expect(forwardedBuckets.sort()).toEqual(['apac', 'eeur', 'weur'])
+    expect(coordinators.sort()).toEqual([
+      'telefunc:broadcast:apac:0',
+      'telefunc:broadcast:eeur:0',
+      'telefunc:broadcast:weur:0',
+    ])
   })
 
-  it('forwarded publish round-trips a wide ordering frame to every named DO', async () => {
+  it('a forward round-trips a wide ordering frame to every named DO', async () => {
     const authorityState = createAuthorityState()
     const transport = new CloudflareBroadcastTransport({ baseInstanceName: 'telefunc', scale: 1 })
     const deliveredTo: string[] = []
@@ -505,16 +516,15 @@ describe('cloudflare broadcast routing', () => {
       }),
     )
     const subscription = transport.openSubscription({ key: 'room:test', kind: 'text' }, (payload, info) => {
-      received.push({ text: new TextDecoder().decode(payload), ...info })
+      received.push({ text: decode(payload), ...info })
     })
     await subscription.ready
-    await transport.publishToSubscribers(authorityState, {
+    await transport.forwardToBucket({
       key: 'room:test',
-      locationBucket: 'weur',
-      serialized: '{"text":"hello"}',
-      forwarded: true,
-      doNames: ['telefunc-shard-weur-0', 'telefunc-shard-weur-1'],
+      kind: 'text',
+      payload: encode('{"text":"hello"}'),
       info: { seq: 0x1_0000_0000, timestamp: 0x1_0000_0001 },
+      doNames: ['telefunc-shard-weur-0', 'telefunc-shard-weur-1'],
     })
     expect(deliveredTo.sort()).toEqual(['telefunc-shard-weur-0', 'telefunc-shard-weur-1'])
     expect(received).toEqual([
@@ -527,13 +537,13 @@ describe('cloudflare broadcast routing', () => {
   it('can publish without request context — uses isolate state directly', async () => {
     const transport = new CloudflareBroadcastTransport({ baseInstanceName: 'telefunc', scale: 1 })
     const kv = createMockKV()
-    const coordinatorPublishes: Array<{ name: string; key: string; locationBucket: string; serialized: string }> = []
+    const coordinatorPublishes: Array<{ name: string; key: string; locationBucket: string; text: string }> = []
     configureTransport(
       transport,
       kv,
       createBasicBinding({
-        onPublish(id, { key, locationBucket, serialized }) {
-          coordinatorPublishes.push({ name: id.name, key, locationBucket, serialized })
+        onPublish(id, { key, locationBucket, payload }) {
+          coordinatorPublishes.push({ name: id.name, key, locationBucket, text: decode(payload) })
           return Promise.resolve({ seq: 1, timestamp: Date.now() })
         },
       }),
@@ -548,7 +558,7 @@ describe('cloudflare broadcast routing', () => {
         name: expect.stringContaining(':broadcast:'),
         key: 'room:test:no-ctx',
         locationBucket: expect.any(String),
-        serialized: '{"text":"hello"}',
+        text: '{"text":"hello"}',
       },
     ])
   })
@@ -584,10 +594,10 @@ describe('cloudflare broadcast routing', () => {
         },
         get(id: { name: string }) {
           return {
-            telefuncBroadcastPublish({ serialized }: any) {
-              coordinatorPublishes.push(`${id.name}:${serialized}`)
-              if (id.name.includes(':broadcast:apac:') && serialized === '{"text":"first"}')
-                return firstRemotePublishReady
+            telefuncBroadcastForward({ payload }: any) {
+              const text = decode(payload)
+              coordinatorPublishes.push(`${id.name}:${text}`)
+              if (id.name.includes(':broadcast:apac:') && text === '{"text":"first"}') return firstRemotePublishReady
               return Promise.resolve()
             },
             telefuncBroadcastDeliver() {
@@ -606,16 +616,16 @@ describe('cloudflare broadcast routing', () => {
     })
     const firstPublish = transport.publishToSubscribers(authorityState, {
       key: 'room:test',
+      kind: 'text',
       locationBucket: 'weur',
-      serialized: '{"text":"first"}',
-      forwarded: false,
+      payload: encode('{"text":"first"}'),
     })
     await flushMicrotasks(8)
     const secondPublish = transport.publishToSubscribers(authorityState, {
       key: 'room:test',
+      kind: 'text',
       locationBucket: 'weur',
-      serialized: '{"text":"second"}',
-      forwarded: false,
+      payload: encode('{"text":"second"}'),
     })
     await flushMicrotasks(8)
     expect(coordinatorPublishes).toContain('telefunc:broadcast:weur:0:{"text":"first"}')

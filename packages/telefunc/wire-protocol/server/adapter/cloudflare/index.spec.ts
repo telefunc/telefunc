@@ -20,6 +20,7 @@ const mocks = vi.hoisted(() => {
     readonly attachKV = vi.fn()
     readonly attachIsolateInfo = vi.fn()
     readonly publishToSubscribers = vi.fn()
+    readonly forwardToBucket = vi.fn()
     readonly deliverToLocal = vi.fn()
     readonly dispose = vi.fn(async () => {})
     constructor(options: unknown) {
@@ -128,7 +129,7 @@ vi.mock('./routing.js', () => ({
 import { Telefunc } from '../../../../serve/cloudflare.js'
 import { disposeBackend, getRoomBackend, installBackend } from '../../../backend/install.js'
 import { MemoryBackend } from '../../../backend/memory/backend.js'
-import type { BroadcastDeliverRequest, BroadcastPublishRequest } from './broadcast.js'
+import type { BroadcastDeliverRequest, BroadcastForwardRequest, BroadcastPublishRequest } from './broadcast.js'
 
 function createMockKV(): KVNamespace {
   const store = new Map<string, { value: string; expirationTtl?: number }>()
@@ -425,6 +426,7 @@ describe('cloudflare adapter entrypoint', () => {
       webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): void
       webSocketClose(ws: WebSocket, code: number, reason: string, wasClean: boolean): void
       telefuncBroadcastPublish(request: BroadcastPublishRequest): unknown
+      telefuncBroadcastForward(request: BroadcastForwardRequest): unknown
       telefuncBroadcastDeliver(request: BroadcastDeliverRequest): void
       telefuncRoomInvalidate(request: unknown): void
     }
@@ -455,18 +457,17 @@ describe('cloudflare adapter entrypoint', () => {
       'done',
       true,
     )
-    instance.telefuncBroadcastPublish({
+    const publish = {
       key: 'room:test',
-      locationBucket: 'weur',
-      serialized: '{"text":"hello"}',
-      forwarded: false,
-    })
-    expect(mocks.transportInstances[0]?.publishToSubscribers).toHaveBeenCalledWith(mocks.authorityInstances[0], {
-      key: 'room:test',
-      locationBucket: 'weur',
-      serialized: '{"text":"hello"}',
-      forwarded: false,
-    })
+      kind: 'text' as const,
+      locationBucket: 'weur' as const,
+      payload: new Uint8Array(),
+    }
+    instance.telefuncBroadcastPublish(publish)
+    expect(mocks.transportInstances[0]?.publishToSubscribers).toHaveBeenCalledWith(mocks.authorityInstances[0], publish)
+    const forward = { ...publish, info: { seq: 1, timestamp: 1 }, doNames: ['telefunc-shard-weur-0'] }
+    instance.telefuncBroadcastForward(forward)
+    expect(mocks.transportInstances[0]?.forwardToBucket).toHaveBeenCalledWith(forward)
     const delivery = { key: 'room:test', kind: 'text' as const, frame: new Uint8Array([1]) }
     instance.telefuncBroadcastDeliver(delivery)
     expect(mocks.transportInstances[0]?.deliverToLocal).toHaveBeenCalledWith(delivery)

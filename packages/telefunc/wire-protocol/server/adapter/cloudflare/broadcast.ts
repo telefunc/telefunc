@@ -1,6 +1,6 @@
 /// <reference types="@cloudflare/workers-types" />
 export { CloudflareBroadcastTransport, CloudflareBroadcastAuthorityState }
-export type { BroadcastDeliverRequest, BroadcastPublishRequest, TelefuncDurableObjectStub }
+export type { BroadcastDeliverRequest, BroadcastForwardRequest, BroadcastPublishRequest, TelefuncDurableObjectStub }
 
 import { KNOWN_BROADCAST_BUCKETS, getBucketCoordinatorShardIndices, getDeterministicKeyBucketIndex } from './routing.js'
 import { assert } from '../../../../utils/assert.js'
@@ -11,8 +11,6 @@ import type { CloudflareScale, LocationBucket } from './routing.js'
 
 const PRESENCE_TTL_SECONDS = 90
 const PRESENCE_REFRESH_INTERVAL_MS = 30_000
-const textEncoder = new TextEncoder()
-const textDecoder = new TextDecoder()
 const laneKey = (lane: BroadcastLane) => `${lane.kind}:${lane.key}`
 
 /** Unwrap Cloudflare DO RPC proxy into a plain object.
@@ -30,12 +28,18 @@ async function unwrapRpcResult(rpc: Promise<PublishResult>): Promise<PublishResu
 
 type BroadcastPublishRequest = {
   key: string
+  kind: BroadcastLane['kind']
   locationBucket: LocationBucket
-  forwarded?: boolean
-  doNames?: string[]
-  info?: OrderingInfo
-  serialized?: string
-  binaryData?: Uint8Array
+  payload: Uint8Array
+}
+
+/** The authority's sequenced publish, handed to one bucket coordinator for the member DOs it names. */
+type BroadcastForwardRequest = {
+  key: string
+  kind: BroadcastLane['kind']
+  payload: Uint8Array
+  info: OrderingInfo
+  doNames: string[]
 }
 
 type BroadcastDeliverRequest = {
@@ -46,6 +50,7 @@ type BroadcastDeliverRequest = {
 
 type TelefuncDurableObjectStub = DurableObjectStub & {
   telefuncBroadcastPublish(request: BroadcastPublishRequest): Promise<PublishResult>
+  telefuncBroadcastForward(request: BroadcastForwardRequest): Promise<void>
   telefuncBroadcastDeliver(request: BroadcastDeliverRequest): Promise<void>
 }
 
@@ -55,15 +60,11 @@ class MemberBucketState {
   refreshTimer: ReturnType<typeof setInterval> | null = null
   readonly ready: Promise<void>
   private settleReady!: { resolve: () => void; reject: (error: unknown) => void }
-  private readonly authority: TelefuncDurableObjectStub
-  private readonly key: string
-  private readonly locationBucket: LocationBucket
+  readonly authority: TelefuncDurableObjectStub
   readonly #presenceListeners = new Set<(state: 'ready' | 'lost') => void>()
   #presenceState: 'establishing' | 'ready' | 'lost' = 'establishing'
 
-  constructor(key: string, locationBucket: LocationBucket, authority: TelefuncDurableObjectStub) {
-    this.key = key
-    this.locationBucket = locationBucket
+  constructor(authority: TelefuncDurableObjectStub) {
     this.authority = authority
     this.ready = new Promise((resolve, reject) => {
       this.settleReady = { resolve, reject }
@@ -91,26 +92,6 @@ class MemberBucketState {
   onPresenceStateChange(cb: (state: 'ready' | 'lost') => void): () => void {
     this.#presenceListeners.add(cb)
     return () => this.#presenceListeners.delete(cb)
-  }
-
-  publish(serialized: string): Promise<PublishResult> {
-    return unwrapRpcResult(
-      this.authority.telefuncBroadcastPublish({
-        key: this.key,
-        locationBucket: this.locationBucket,
-        serialized,
-      }),
-    )
-  }
-
-  publishBinary(data: Uint8Array): Promise<PublishResult> {
-    return unwrapRpcResult(
-      this.authority.telefuncBroadcastPublish({
-        key: this.key,
-        locationBucket: this.locationBucket,
-        binaryData: data,
-      }),
-    )
   }
 
   stopRefresh(): void {
@@ -353,56 +334,19 @@ class CloudflareBroadcastTransport {
   // --- Local subscriber tracking ---
 
   publish(lane: BroadcastLane, payload: Uint8Array): Promise<PublishResult> {
-    return lane.kind === 'text'
-      ? this.publishText(lane.key, textDecoder.decode(payload))
-      : this.publishBinary(lane.key, payload)
-  }
-
-  private publishText(key: string, serialized: string): Promise<PublishResult> {
-    const memberState = this.memberStates.get(laneKey({ key, kind: 'text' }))
-
-    if (memberState) return memberState.publish(serialized)
-
     const locationBucket = this.requireLocationBucket()
-    const authority = this.getAuthorityStub(key, locationBucket)
-    return unwrapRpcResult(authority.telefuncBroadcastPublish({ key, locationBucket, serialized }))
+    const authority = this.memberStates.get(laneKey(lane))?.authority ?? this.getAuthorityStub(lane.key, locationBucket)
+    return unwrapRpcResult(
+      authority.telefuncBroadcastPublish({ key: lane.key, kind: lane.kind, locationBucket, payload }),
+    )
   }
 
-  private publishBinary(key: string, data: Uint8Array): Promise<PublishResult> {
-    const memberState = this.memberStates.get(laneKey({ key, kind: 'binary' }))
-
-    if (memberState) return memberState.publishBinary(data)
-
-    const locationBucket = this.requireLocationBucket()
-    const authority = this.getAuthorityStub(key, locationBucket)
-    return unwrapRpcResult(authority.telefuncBroadcastPublish({ key, locationBucket, binaryData: data }))
-  }
-
-  /**
-   * Fans out one keyed publish from either a key authority or a bucket coordinator.
-   *
-   * Non-forwarded: reads KV presence, sequences through authority, forwards to bucket coordinators.
-   * Forwarded: delivers to listed DO names without reading KV again.
-   */
+  /** At the key's authority: sequences the publish, reads KV presence and forwards once per populated bucket. */
   async publishToSubscribers(
     authorityState: CloudflareBroadcastAuthorityState,
     request: BroadcastPublishRequest,
   ): Promise<PublishResult> {
-    const { key, locationBucket, serialized, binaryData, forwarded = false } = request
-    const kind = serialized === undefined ? 'binary' : 'text'
-    if (forwarded) {
-      assert(request.info, 'Forwarded publish must include info')
-      const info = request.info
-      const doNames = request.doNames ?? []
-      const payload = serialized === undefined ? binaryData : textEncoder.encode(serialized)
-      assert(payload !== undefined, 'Forwarded publish must include a payload')
-      const frame = encodeOrderingFrame(payload, info)
-      await Promise.all(
-        doNames.map((doName) => this.getBoundStub(doName).telefuncBroadcastDeliver({ key, kind, frame })),
-      )
-      return { seq: info.seq, timestamp: info.timestamp }
-    }
-
+    const { key, kind, locationBucket, payload } = request
     const { authorityBucket, seq, presenceByBucket } = await authorityState.runInAuthorityChain(async () => ({
       authorityBucket: await authorityState.getOrInitAuthorityBucket(key, locationBucket),
       seq: await authorityState.getNextKeySeq(key),
@@ -415,18 +359,23 @@ class CloudflareBroadcastTransport {
     for (const doNames of presenceByBucket.values()) receivers += doNames.length
     await Promise.all(
       fanoutBuckets.map((activeBucket) =>
-        this.getBucketCoordinatorStub(key, activeBucket).telefuncBroadcastPublish({
+        this.getBucketCoordinatorStub(key, activeBucket).telefuncBroadcastForward({
           key,
-          serialized,
-          binaryData,
-          forwarded: true,
-          locationBucket: activeBucket,
-          doNames: presenceByBucket.get(activeBucket)!,
+          kind,
+          payload,
           info,
+          doNames: presenceByBucket.get(activeBucket)!,
         }),
       ),
     )
     return { seq: info.seq, timestamp: info.timestamp, receivers, meta: { authorityBucket, fanoutBuckets } }
+  }
+
+  /** At a bucket coordinator: delivers the authority's sequenced publish to the named member DOs. */
+  async forwardToBucket(request: BroadcastForwardRequest): Promise<void> {
+    const { key, kind, payload, info, doNames } = request
+    const frame = encodeOrderingFrame(payload, info)
+    await Promise.all(doNames.map((doName) => this.getBoundStub(doName).telefuncBroadcastDeliver({ key, kind, frame })))
   }
 
   /**
@@ -460,7 +409,7 @@ class CloudflareBroadcastTransport {
       existing.teardownRequested = false
       return existing
     }
-    const memberState = new MemberBucketState(lane.key, locationBucket, this.getAuthorityStub(lane.key, locationBucket))
+    const memberState = new MemberBucketState(this.getAuthorityStub(lane.key, locationBucket))
     this.memberStates.set(key, memberState)
     void this.initializePresence(key, memberState).catch(() => {})
     return memberState

@@ -15,6 +15,7 @@ import {
 } from '../wire-protocol/server/adapter/cloudflare/broadcast.js'
 import type {
   BroadcastDeliverRequest,
+  BroadcastForwardRequest,
   BroadcastPublishRequest,
 } from '../wire-protocol/server/adapter/cloudflare/broadcast.js'
 import {
@@ -173,6 +174,10 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
 
     telefuncBroadcastPublish(request: BroadcastPublishRequest) {
       return broadcast.publishToSubscribers(this.authorityState, request)
+    }
+
+    telefuncBroadcastForward(request: BroadcastForwardRequest) {
+      return broadcast.forwardToBucket(request)
     }
 
     telefuncBroadcastDeliver(request: BroadcastDeliverRequest) {
