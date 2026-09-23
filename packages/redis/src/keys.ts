@@ -12,6 +12,7 @@ import type { BroadcastLane } from 'telefunc/__internal'
 
 export const DEFAULT_ROOM_PREFIX = 'tf:'
 
+/** Builders take the prefix as validated here, once: a `{` would open a hash tag of its own. */
 export function redisKeyPrefix(prefix: string): string {
   if (prefix.includes('{')) throw new Error("Redis key prefix must not contain '{'")
   return prefix
@@ -21,18 +22,18 @@ function broadcastTag(key: string): string {
   return key === '' ? '{_}:empty' : `{${key}}`
 }
 export function broadcastSequenceKey(prefix: string, key: string): string {
-  return `${redisKeyPrefix(prefix)}seq:${broadcastTag(key)}`
+  return `${prefix}seq:${broadcastTag(key)}`
 }
 export function broadcastChannel(prefix: string, lane: BroadcastLane): string {
   const kind = lane.kind === 'text' ? 't' : 'b'
-  return `${redisKeyPrefix(prefix)}${kind}:${broadcastTag(lane.key)}`
+  return `${prefix}${kind}:${broadcastTag(lane.key)}`
 }
 
 // `{<rid>}` is the Cluster hash tag; every per-room key carries it so the room is one slot.
 export function roomTag(prefix: string, roomId: string): string {
   // A Redis hash tag ends at the first `}`. Encode caller input before placing it in braces so an
   // arbitrary room id cannot escape the tag or split one logical room across slots.
-  return `${redisKeyPrefix(prefix)}room:{${encodeURIComponent(roomId)}}`
+  return `${prefix}room:{${encodeURIComponent(roomId)}}`
 }
 export function headKey(prefix: string, roomId: string): string {
   return `${roomTag(prefix, roomId)}:head`
@@ -75,8 +76,8 @@ export function generationInvalidationChannel(prefix: string, roomId: string, in
 }
 // The directory's two keys share their own tag so the tag-guarded delete stays one slot under Cluster.
 export function directoryIndexKey(prefix: string): string {
-  return `${redisKeyPrefix(prefix)}room-dir:{${redisKeyPrefix(prefix)}dir}:index`
+  return `${prefix}room-dir:{${prefix}dir}:index`
 }
 export function directoryTagsKey(prefix: string): string {
-  return `${redisKeyPrefix(prefix)}room-dir:{${redisKeyPrefix(prefix)}dir}:tags`
+  return `${prefix}room-dir:{${prefix}dir}:tags`
 }
