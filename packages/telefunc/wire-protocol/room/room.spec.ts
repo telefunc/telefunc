@@ -824,6 +824,21 @@ describe('Room public behavior', () => {
     expect(memoryState.rooms.has('released-record')).toBe(false)
     await expect(Room.create('released-record')).resolves.toMatchObject({ id: 'released-record' })
   })
+  it('treats a delivery handoff that never settles as lost instead of hanging the publisher', async () => {
+    vi.useFakeTimers()
+    const room = await Room.create('lost-delivery')
+    const member = await room.join()
+    const commitLane = driver.commitLane.bind(driver)
+    vi.spyOn(driver, 'commitLane').mockImplementation(async (...args) => {
+      const result = await commitLane(...args)
+      return 'stale' in result ? result : { ...result, delivery: new Promise<void>(() => {}) }
+    })
+    const report = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const publishing = member.publish('lost')
+    await vi.advanceTimersByTimeAsync(ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS)
+    await expect(publishing).resolves.toMatchObject({ seq: expect.any(Number) })
+    expect(report).toHaveBeenCalled()
+  })
   it('applies room-wide and member-specific binary wants to both subscription and demand', async () => {
     const room = await Room.create('binary-pairs')
     const publisher = await room.join()

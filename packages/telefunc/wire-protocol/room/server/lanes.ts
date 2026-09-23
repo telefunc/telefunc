@@ -19,6 +19,7 @@ import type { CommitAccepted, LaneId, RoomHead } from '../../backend/room/contra
 import type { BackendSubscription } from '../../backend/subscription.js'
 import type { RoomConfigRecord, RoomCtrlEnvelope } from '../protocol.js'
 import { RoomError } from '../errors.js'
+import { ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS } from '../constants.js'
 import { reportRoomError } from './errors.js'
 
 const roomTextEncoder = new TextEncoder()
@@ -55,8 +56,19 @@ async function commitRoomLane(
 ): Promise<CommitAccepted | null> {
   const result = await getRoomBackend().commitLane(id, inc, lane, payload, opts)
   if ('stale' in result) return null
-  await result.delivery
+  // Delivery is at-most-once: a handoff lost with its fence (e.g. a partition) must not hang the caller.
+  if (!(await settlesWithin(result.delivery, ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS)))
+    reportRoomError(new Error(`Room delivery unconfirmed after ${ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS} ms: ${id}`))
   return result
+}
+
+/** `true` once `promise` resolves, `false` if `ms` passes first; a rejection propagates. */
+function settlesWithin(promise: Promise<unknown>, ms: number): Promise<boolean> {
+  let timer!: ReturnType<typeof setTimeout>
+  const timeout = new Promise<false>((resolve) => {
+    timer = unrefTimer(setTimeout(() => resolve(false), ms))
+  })
+  return Promise.race([promise.then(() => true as const), timeout]).finally(() => clearTimeout(timer))
 }
 
 class SubSlot {
