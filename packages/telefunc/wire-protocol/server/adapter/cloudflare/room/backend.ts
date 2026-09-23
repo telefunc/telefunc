@@ -128,20 +128,17 @@ export class CloudflareRoomSessionManager {
   }
 }
 
-export function withCloudflareRoomSessionManager<T>(
-  manager: CloudflareRoomSessionManager | (() => CloudflareRoomSessionManager),
-  fn: () => T,
-): T {
-  if (!isAsyncMode()) throw new Error(CLOUDFLARE_ROOM_CONTEXT_ERROR)
-  return restoreContext({ [ROOM_MANAGER]: manager }, fn)
+/** Runs `fn` with a session's Room manager in context; `createManager` runs at most once per scope. */
+export function withCloudflareRoomSessionManager<T>(createManager: () => CloudflareRoomSessionManager, fn: () => T): T {
+  let manager: CloudflareRoomSessionManager | undefined
+  return restoreContext({ [ROOM_MANAGER]: () => (manager ??= createManager()) }, fn)
 }
 
 export function materializeCloudflareRoomSessionManager(): CloudflareRoomSessionManager {
   if (!isAsyncMode()) throw new Error(CLOUDFLARE_ROOM_CONTEXT_ERROR)
-  const managerOrFactory = getRawContext()?.[ROOM_MANAGER]
-  const manager = typeof managerOrFactory === 'function' ? managerOrFactory() : managerOrFactory
-  if (!(manager instanceof CloudflareRoomSessionManager)) throw new Error(CLOUDFLARE_ROOM_SESSION_ERROR)
-  return manager
+  const manager = getRawContext()?.[ROOM_MANAGER] as (() => CloudflareRoomSessionManager) | undefined
+  if (manager === undefined) throw new Error(CLOUDFLARE_ROOM_SESSION_ERROR)
+  return manager()
 }
 
 type CloudflareSubscriptionSource = BroadcastLane | RoomSubscriptionSource

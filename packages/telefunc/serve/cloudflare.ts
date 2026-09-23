@@ -46,7 +46,7 @@ import {
 } from '../wire-protocol/server/adapter/cloudflare/room/fanout.js'
 import { isAsyncMode } from '../node/server/context/context.js'
 import { getGlobalObject } from '../utils/getGlobalObject.js'
-import { isTelefuncRequest } from './shared.js'
+import { isTelefuncRequest, toResponse } from './shared.js'
 
 const SHARD_TOKEN_TTL_SECONDS = 86400
 
@@ -160,11 +160,7 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
           return crosswsAdapter.handleDurableUpgrade(this, request)
         }
         const context = getContext ? await getContext(request, this.env as Cloudflare.Env) : undefined
-        const httpResponse = await serveTelefunc(context ? { request, context } : { request })
-        return new Response(httpResponse.getReadableWebStream(), {
-          status: httpResponse.statusCode,
-          headers: httpResponse.headers,
-        })
+        return toResponse(await serveTelefunc(context ? { request, context } : { request }))
       })
     }
 
@@ -200,21 +196,15 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
       return dispatchRoomShardFanout(sessionNamespace(this.env) as unknown as RoomShardFanoutNamespace, request)
     }
 
-    protected runWithRoomManager<T>(fn: () => T, socket?: WebSocket): T {
-      // The first real Room call materializes the epoch; ordinary fetch/socket work stays Room-free.
-      return isAsyncMode() ? withCloudflareRoomSessionManager(() => this.activateRoomManager(socket), fn) : fn()
-    }
-
-    private activateRoomManager(socket?: WebSocket): CloudflareRoomSessionManager {
-      if (socket) {
-        const state = ((socket as WebSocket & { _crosswsState?: Record<string, unknown> })._crosswsState ??
-          socket.deserializeAttachment() ??
-          {}) as Record<string, unknown>
-        socket.serializeAttachment(Object.assign(state, { __telefuncRoom: true }))
-      }
-      if (this.roomManager) return this.roomManager
-      this.roomManager = new CloudflareRoomSessionManager(this.ctx.id.toString(), () => roomNamespace(this.env))
-      return this.roomManager
+    // The manager is built on the first Room call, so ordinary fetch/socket work never touches the Room binding.
+    private runWithRoomManager<T>(fn: () => T, socket?: WebSocket): T {
+      if (!isAsyncMode()) return fn()
+      return withCloudflareRoomSessionManager(() => {
+        if (socket) markRoomSocket(socket)
+        return (this.roomManager ??= new CloudflareRoomSessionManager(this.ctx.id.toString(), () =>
+          roomNamespace(this.env),
+        ))
+      }, fn)
     }
   }
 
@@ -256,10 +246,7 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
         locationBucket = target.locationBucket
         token = `${sessionInstanceName}:${crypto.randomUUID()}`
         const value: StoredShardToken = { s: sessionInstanceName, b: locationBucket }
-        const routingCommit = kv.put(`session:${token}`, JSON.stringify(value), {
-          expirationTtl: SHARD_TOKEN_TTL_SECONDS,
-        })
-        await routingCommit
+        await kv.put(`session:${token}`, JSON.stringify(value), { expirationTtl: SHARD_TOKEN_TTL_SECONDS })
       }
 
       const forwardedHeaders = new Headers(request.headers as Headers)
@@ -282,6 +269,14 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
     TelefuncDurableObject,
     TelefuncRoomDurableObject,
   }
+}
+
+/** Marks the socket in crossws's attachment state, so a later construction knows it used Room. */
+function markRoomSocket(socket: WebSocket): void {
+  const state = ((socket as WebSocket & { _crosswsState?: Record<string, unknown> })._crosswsState ??
+    socket.deserializeAttachment() ??
+    {}) as Record<string, unknown>
+  socket.serializeAttachment(Object.assign(state, { __telefuncRoom: true }))
 }
 
 function normalizedScale(scale: CloudflareScale | undefined): string {
