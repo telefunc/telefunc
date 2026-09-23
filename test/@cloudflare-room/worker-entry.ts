@@ -134,6 +134,7 @@ export default {
       return Response.json({
         publicLifecycle: await publicSession.publicRoomLifecycle(`public-room-${suffix}`),
         restartSettlement: await authorityRestart(env, suffix),
+        lostTarget: await lostTarget(env, sessionId, suffix),
         alarmPolicy: await alarmScheduling(env, sessionId, suffix),
         nativeRpc: await nativeRpcRoundTrip(env, suffix),
       })
@@ -176,6 +177,14 @@ async function authorityRestart(env: Env, suffix: string) {
     old: await rejectionOf(probe.settle(oldCommit), 'old-token settlement'),
     new: await rejectionOf(probe.settle(newCommit), 'new-token settlement'),
   }
+}
+async function lostTarget(env: Env, sessionId: DurableObjectId, suffix: string) {
+  const probe = roomProbe(env, suffix, 'lost-target')
+  await probe.open()
+  // SessionDurableObject has no telefuncRoomDeliver, so every handoff to this route fails.
+  await probe.join(sessionId)
+  const commit = await probe.commit(1, 'lost target')
+  return { receivers: commit.receivers, settlement: await rejectionOf(probe.settle(commit), 'lost-target settlement') }
 }
 async function alarmScheduling(env: Env, sessionId: DurableObjectId, suffix: string) {
   const probe = roomProbe(env, suffix, 'alarm')

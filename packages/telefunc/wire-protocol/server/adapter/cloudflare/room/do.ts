@@ -64,6 +64,13 @@ function headForRpc(head: StoredHead): RoomHead {
   }
 }
 
+// Delivery is at-most-once: a failed target is loss, not the publisher's error; its route lapses with its lease.
+function reportLostDeliveries(outcomes: RoomShardFanoutOutcome[]): void {
+  const failed = outcomes.filter((outcome) => outcome.error !== undefined)
+  if (failed.length > 0)
+    console.error(`Cloudflare Room delivery lost to ${failed.length}/${outcomes.length} routes: ${failed[0]!.error}`)
+}
+
 export class TelefuncRoomDurableObject extends DurableObject {
   readonly #sql: SqlStorage
   readonly #fanout: Fanout
@@ -96,8 +103,7 @@ export class TelefuncRoomDurableObject extends DurableObject {
           frame,
           path: String(coordinatorIndex ?? 0),
         }
-        const outcomes = await this.#dispatchFanout(request, coordinatorIndex)
-        this.#settleDeliveryOutcomes(outcomes)
+        reportLostDeliveries(await this.#dispatchFanout(request, coordinatorIndex))
       },
       (resume) => setTimeout(resume, 0),
     )
@@ -363,14 +369,6 @@ export class TelefuncRoomDurableObject extends DurableObject {
     return coordinatorIndex === undefined
       ? dispatchRoomShardFanout(this.#sessionNamespaceValue, request)
       : dispatchRoomShardFanoutViaCoordinator(this.#sessionNamespaceValue, request)
-  }
-
-  #settleDeliveryOutcomes(outcomes: RoomShardFanoutOutcome[]): void {
-    const failures = outcomes.flatMap((outcome) => (outcome.error === undefined ? [] : [new Error(outcome.error)]))
-    if (failures.length === 1) throw failures[0]
-    if (failures.length > 0) {
-      throw new AggregateError(failures, 'Cloudflare Room fanout failed')
-    }
   }
 
   async #scheduleMaintenanceIfNeeded(): Promise<void> {

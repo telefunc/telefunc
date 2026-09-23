@@ -39,6 +39,7 @@ test('public Room lifecycle and authority settlement controls execute on Cloudfl
       old: 'Cloudflare Room delivery has an unknown delivery token',
       new: 'resolved',
     },
+    lostTarget: { receivers: 1, settlement: 'resolved' },
     alarmPolicy: {
       idle: null,
       afterRoute: 'armed',
