@@ -2,10 +2,10 @@ export type { BroadcastBackend, BroadcastDriver, BroadcastLane, PublishResult }
 
 import type { BackendReceiver, BackendSubscription, SubscriptionDriver } from '../subscription.js'
 
-/** A cheap text/binary route; both kinds share one per-key ordering domain. */
+/** A Broadcast route; text and binary of one key share one ordering domain. */
 type BroadcastLane = { key: string; kind: 'text' | 'binary' }
 
-/** Marks identify this accepted publish: positive-safe shared text/binary seq and non-decreasing safe authority time. */
+/** An accepted publish's position: a positive safe-integer seq and a non-decreasing authority timestamp. */
 type PublishResult = {
   seq: number
   timestamp: number
@@ -13,13 +13,13 @@ type PublishResult = {
   meta?: Record<string, unknown>
 }
 
-/** Raw author contract for the cheap Broadcast plane. */
+/** What a backend implements for Broadcast. */
 type BroadcastDriver = {
   publish(lane: BroadcastLane, payload: Uint8Array): PublishResult | Promise<PublishResult>
   readonly subscriptions: SubscriptionDriver<BroadcastLane>
 }
 
-/** Internal supervised Broadcast consumer contract. */
+/** What core consumes: the driver, supervised. */
 type BroadcastBackend = {
   publish(lane: BroadcastLane, payload: Uint8Array): PublishResult | Promise<PublishResult>
   subscribe(lane: BroadcastLane, receiver: BackendReceiver): BackendSubscription

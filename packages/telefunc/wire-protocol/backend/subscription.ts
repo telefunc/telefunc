@@ -10,11 +10,11 @@ export type {
 
 type SubscriptionState = 'establishing' | 'ready' | 'lost' | 'closed'
 
-/** Raw-only ownership terminal. Core maps this to public `closed`; consumers never receive it. */
+/** Driver-only: ownership lost; reported to consumers as `closed`. */
 type SubscriptionAttemptState = SubscriptionState | 'terminated'
 
 type BackendSubscription = {
-  /** Current readiness generation: replaced after loss, rejected on terminal failure. */
+  /** Settles when the current establishment does: replaced after loss, rejected on a terminal failure. */
   readonly ready: Promise<void>
   state(): SubscriptionState
   onStateChange(cb: (state: SubscriptionState) => void): () => void
@@ -23,26 +23,24 @@ type BackendSubscription = {
 
 type BackendReceiver = (payload: Uint8Array, info: { seq: number; timestamp: number }) => void | Promise<void>
 
-/** One raw backend establishment attempt. Its readiness may remain pending indefinitely. */
+/** One driver establishment. Its `ready` may stay pending indefinitely. */
 type SubscriptionAttempt = {
   readonly ready: Promise<void>
   state(): SubscriptionAttemptState
   onStateChange(cb: (state: SubscriptionAttemptState) => void): () => void
-  /** Settles only after the raw registration and transport cleanup are complete. */
+  /** Settles after the driver's registration and transport cleanup. */
   unsubscribe(): Promise<void>
 }
 
-/** Captured synchronously under local ownership. `partition` is an opaque value key; `open` is
- * ambient-free and `valid` is a synchronous, side-effect-free, non-throwing ownership read. */
+/** A source bound to its current owner. Bindings with equal `partition` share one attempt; `valid()` is a pure read. */
 type SubscriptionBinding = {
   readonly partition: string
   valid(): boolean
-  /** The callback reads the current live supervised receiver count for this source and partition. */
+  /** `localReceiverCount` reads how many consumers currently share this attempt. */
   open(receiver: BackendReceiver, localReceiverCount: () => number): SubscriptionAttempt
 }
 
-/** Sole backend-specific subscription edge: one ownership capture and one raw attempt; core owns
- * identity, stale-attempt rejection, fan-out, ownership checks, and readiness. */
+/** A driver's subscription edge: bind a source to its owner, then open attempts from the binding. */
 type SubscriptionDriver<Source> = {
   bind(source: Source): SubscriptionBinding
 }
