@@ -1459,12 +1459,30 @@ describe('Room public behavior', () => {
       roster.release()
     }
   })
-  it('delivers exact-member binary frames before the roster is known', async () => {
-    const authority = await Room.create('exact-binary-without-roster')
+  it('opens no backend lane for a declared want naming no member', async () => {
+    const authority = await Room.create('declared-strangers')
+    await authority.join()
+    const observer = (await Room.get(authority.id)) as ServerRoom
+    const stub = register(observer)
+    const subscribeLane = vi.spyOn(getRoomBackend(), 'subscribeLane')
+    const members = Object.fromEntries(
+      Array.from({ length: 100 }, () => [crypto.randomUUID(), { all: false, tracks: ['screen'] }]),
+    )
+    await observer._handleStubRequest(stub, {
+      __r: 'sub-binary',
+      wants: { everyMember: { all: false, tracks: [] }, members },
+    })
+    await observer.getParticipants()
+    expect(subscribeLane.mock.calls.filter(([, , lane]) => lane.kind === 'binary')).toEqual([])
+  })
+  it('opens an exact-member binary lane once the roster names the member', async () => {
+    const authority = await Room.create('exact-binary-after-roster')
     const publisher = await authority.join()
     const observer = (await Room.get(authority.id)) as ServerRoom
     const stub = register(observer)
     const roster = delayRosterRead(authority.id)
+    const subscribeLane = vi.spyOn(getRoomBackend(), 'subscribeLane')
+    const binaryLanes = () => subscribeLane.mock.calls.filter(([, , lane]) => lane.kind === 'binary').length
     expect(observer._state.rosterKnown).toBe(false)
     try {
       await observer._handleStubRequest(stub, {
@@ -1475,10 +1493,11 @@ describe('Room public behavior', () => {
         },
       })
       await roster.started
+      expect(binaryLanes()).toBe(0)
+      roster.release()
+      await vi.waitFor(() => expect(binaryLanes()).toBe(1))
       await (observer as unknown as { _binaryReady(): Promise<void> })._binaryReady()
-      expect(observer._state.rosterKnown).toBe(false)
       await publisher.publishBinary(new Uint8Array([7]), { track: 'screen' })
-      expect(observer._state.rosterKnown).toBe(false)
       const frame = attachPeer(stub)
         .decoded()
         .find((candidate) => candidate.tag === TAG.PUBLISH_BINARY)
@@ -1490,7 +1509,6 @@ describe('Room public behavior', () => {
       })
     } finally {
       roster.release()
-      await observer.getParticipants()
     }
   })
   it('drops retained text and binary when a crashed publisher is reaped', async () => {

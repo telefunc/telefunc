@@ -1101,9 +1101,10 @@ class ServerRoom extends RoomStateView implements Room {
       value: { kind: 'binary', member, track },
     }))
   }
+  /** Declared wants filter the room's members; a want naming anyone else takes effect on their `join`. */
   private _binaryPairs(wants: BinaryWants, memberIds: string[]): Array<[string, string]> {
     const pairs: Array<[string, string]> = []
-    for (const memberId of new Set([...memberIds, ...Object.keys(wants.members)])) {
+    for (const memberId of memberIds) {
       const memberWants = wants.members[memberId]
       const eff = memberWants ? mergeTrackWants(wants.everyMember, memberWants) : wants.everyMember
       const tracks = eff.all ? [DEFAULT_TRACK, ...this._state.memberTracks(memberId)] : eff.tracks
