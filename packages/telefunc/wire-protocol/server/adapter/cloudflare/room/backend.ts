@@ -186,7 +186,7 @@ export class CloudflareRoomBackend implements BroadcastDriver, RoomDriver {
     opts?: { retain?: boolean; closingLease?: string; requiredCellKeys?: string[] },
   ): Promise<CommitResult> {
     const stub = this.#stub(roomId)
-    const wire = await stub.commitLane(roomId, inc, lane, payload, opts)
+    const wire = await stub.commitLane(inc, lane, payload, opts)
     if ('stale' in wire) return wire
     const deliveryToken = wire.deliveryToken
     const delivery = stub.awaitDelivery(deliveryToken)

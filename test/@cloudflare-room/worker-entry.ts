@@ -160,7 +160,7 @@ function roomProbe(env: Env, suffix: string, name: string) {
     join,
     async commit(payload: string | number, operation: string) {
       const frame = typeof payload === 'string' ? textEncoder.encode(payload) : new Uint8Array([payload])
-      return accepted(await authority.commitLane(roomId, inc, { kind: 'semantic' }, frame), operation)
+      return accepted(await authority.commitLane(inc, { kind: 'semantic' }, frame), operation)
     },
     control: (action: AuthorityControl) => authority.telefuncRoomControlForTest(action),
     settle: (commit: Extract<CommitWire, { accepted: true }>) => authority.awaitDelivery(commit.deliveryToken),
@@ -204,7 +204,7 @@ async function largeRetainedReplay(env: Env, suffix: string) {
   payload[payload.length - 1] = 0xee
   const lane = { kind: 'binary' as const, member: 'member', track: 'track' }
   const commit = accepted(
-    await probe.authority.commitLane(probe.roomId, probe.inc, lane, payload, { retain: true }),
+    await probe.authority.commitLane(probe.inc, lane, payload, { retain: true }),
     'large retained',
   )
   await probe.settle(commit)
@@ -239,7 +239,7 @@ async function nativeRpcRoundTrip(env: Env, suffix: string) {
   return {
     headConfig: [...opened.config],
     cell: stored === undefined ? null : [...stored],
-    staleCell: await probe.authority.commitLane(probe.roomId, probe.inc, { kind: 'semantic' }, new Uint8Array([1]), {
+    staleCell: await probe.authority.commitLane(probe.inc, { kind: 'semantic' }, new Uint8Array([1]), {
       requiredCellKeys: ['m:missing'],
     }),
   }

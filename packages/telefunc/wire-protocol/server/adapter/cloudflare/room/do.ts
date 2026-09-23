@@ -16,11 +16,9 @@ import { encodeLaneKey } from '../../../../backend/room/lane-key.js'
 import { commitPreconditionHolds } from '../../../../backend/room/semantics.js'
 import {
   dispatchRoomShardFanout,
-  dispatchRoomShardFanoutViaCoordinator,
   Fanout,
   type RoomShardFanoutNamespace,
   type RoomShardFanoutOutcome,
-  type RoomShardFanoutRequest,
 } from './fanout.js'
 import { deleteRetained, installRetained, listRetained, readRetained } from './retained.js'
 import {
@@ -30,7 +28,6 @@ import {
   renewRoute,
   snapshotRoutes,
   type RouteInstallation,
-  type RouteTarget,
   upsertRoute,
 } from './routes.js'
 import {
@@ -89,16 +86,11 @@ export class TelefuncRoomDurableObject extends DurableObject {
     this.#sql = ctx.storage.sql
     initSchema(this.#sql)
     this.#fanout = new Fanout(
-      async (targets, frame, info, coordinatorIndex) => {
-        const request: RoomShardFanoutRequest = {
-          operation: 'deliver',
-          ...info,
-          targets,
-          frame,
-          path: String(coordinatorIndex ?? 0),
-        }
-        reportLostDeliveries(await this.#dispatchFanout(request, coordinatorIndex))
+      async (targets, frame, { seq, timestamp }) => {
+        const request = { operation: 'deliver' as const, path: 'root', targets, frame, seq, timestamp }
+        reportLostDeliveries(await dispatchRoomShardFanout(this.#sessionNamespaceValue, request))
       },
+      // A macrotask, so a commit's RPC reply is sent before its fanout starts.
       (resume) => setTimeout(resume, 0),
     )
     this.ctx.blockConcurrencyWhile(async () => {
@@ -132,7 +124,6 @@ export class TelefuncRoomDurableObject extends DurableObject {
   }
 
   async commitLane(
-    roomId: string,
     inc: string,
     lane: LaneId,
     payload: Uint8Array,
@@ -142,7 +133,7 @@ export class TelefuncRoomDurableObject extends DurableObject {
     const key = encodeLaneKey(lane)
     const frame = payload instanceof Uint8Array ? payload : new Uint8Array(payload)
     const outcome = this.ctx.storage.transactionSync(
-      (): StaleCommit | { seq: number; timestamp: number; targets: RouteTarget[] } => {
+      (): StaleCommit | { seq: number; timestamp: number; targets: RouteInstallation[] } => {
         if (!commitPreconditionHolds(readLiveHead(this.#sql, now), inc, lane.kind, opts?.closingLease, now))
           return { stale: 'incarnation' }
         if (opts?.requiredCellKeys !== undefined) {
@@ -158,13 +149,7 @@ export class TelefuncRoomDurableObject extends DurableObject {
     )
     if ('stale' in outcome) return outcome
     const { seq, timestamp, targets } = outcome
-    const deliveryToken = this.#fanout.enqueue(inc, key, targets, frame, {
-      roomId,
-      inc,
-      laneKey: key,
-      seq,
-      timestamp,
-    })
+    const deliveryToken = this.#fanout.enqueue(targets, frame, { inc, laneKey: key, seq, timestamp })
     return { accepted: true, seq, timestamp, receivers: targets.length, deliveryToken }
   }
 
@@ -238,7 +223,7 @@ export class TelefuncRoomDurableObject extends DurableObject {
 
   /** Routes and rows stay durable until every exact-lease uninstall succeeds, so a failed drop is retried by the sweep. */
   async #dropGenerationNow(inc: string): Promise<void> {
-    await this.#terminateInstallations(inc, listRouteInstallations(this.#sql, inc))
+    await this.#terminateInstallations(listRouteInstallations(this.#sql, inc))
     this.ctx.storage.transactionSync(() => dropGenerationRows(this.#sql, inc))
     this.#fanout.clearIncarnation(inc)
   }
@@ -311,24 +296,15 @@ export class TelefuncRoomDurableObject extends DurableObject {
     await session.get(session.idFromString(installation.subscriberDoId)).telefuncRoomInvalidate(installation)
   }
 
-  async #terminateInstallations(inc: string, installations: RouteInstallation[]): Promise<void> {
-    const outcomes = await this.#dispatchFanout({
+  async #terminateInstallations(installations: RouteInstallation[]): Promise<void> {
+    const outcomes = await dispatchRoomShardFanout(this.#sessionNamespaceValue, {
       operation: 'invalidate',
-      roomId: installations[0]?.roomId ?? '',
-      inc,
-      laneKey: installations[0]?.laneKey ?? '',
+      path: 'root',
       targets: installations,
-      path: 'terminate',
       terminal: true,
     })
     const failed = outcomes.find((outcome) => outcome.error !== undefined)
     if (failed?.error !== undefined) throw new Error(failed.error)
-  }
-
-  #dispatchFanout(request: RoomShardFanoutRequest, coordinatorIndex?: number): Promise<RoomShardFanoutOutcome[]> {
-    return coordinatorIndex === undefined
-      ? dispatchRoomShardFanout(this.#sessionNamespaceValue, request)
-      : dispatchRoomShardFanoutViaCoordinator(this.#sessionNamespaceValue, request)
   }
 
   async #scheduleMaintenanceIfNeeded(): Promise<void> {

@@ -8,10 +8,13 @@ import {
 } from './fanout.js'
 
 const target = (subscriberDoId: string, leaseId = subscriberDoId) => ({
+  roomId: 'room',
+  inc: 'inc',
+  laneKey: 'semantic',
   subscriberDoId,
   leaseId,
 })
-const deliveryInfo = (seq = 1) => ({ roomId: 'room', inc: 'inc', laneKey: 'semantic', seq, timestamp: 1 })
+const deliveryInfo = (seq = 1) => ({ inc: 'inc', laneKey: 'semantic', seq, timestamp: 1 })
 const targets = (count: number) =>
   Array.from({ length: count }, (_, index) => target(`subscriber-${index}`, `lease-${index}`))
 
@@ -27,8 +30,8 @@ test('rejects a queued delivery cancelled by incarnation cleanup before handoff'
     }
   })
   const route = target('subscriber', 'lease')
-  const first = fanout.enqueue('inc', 'semantic', [route], new Uint8Array([1]), deliveryInfo())
-  const second = fanout.enqueue('inc', 'semantic', [route], new Uint8Array([2]), deliveryInfo(2))
+  const first = fanout.enqueue([route], new Uint8Array([1]), deliveryInfo())
+  const second = fanout.enqueue([route], new Uint8Array([2]), deliveryInfo(2))
 
   await firstStarted.promise
   fanout.clearIncarnation('inc')
@@ -42,52 +45,38 @@ test('rejects a queued delivery cancelled by incarnation cleanup before handoff'
 test('does not alias an old delivery token to a reconstructed authority attempt', async () => {
   const route = target('subscriber', 'lease')
   const priorAuthority = new Fanout(async () => {})
-  const oldToken = priorAuthority.enqueue('inc', 'semantic', [route], new Uint8Array([1]), deliveryInfo())
+  const oldToken = priorAuthority.enqueue([route], new Uint8Array([1]), deliveryInfo())
   const reconstructedAuthority = new Fanout(async () => {})
-  const newToken = reconstructedAuthority.enqueue('inc', 'semantic', [route], new Uint8Array([2]), deliveryInfo(2))
+  const newToken = reconstructedAuthority.enqueue([route], new Uint8Array([2]), deliveryInfo(2))
 
   await expect(reconstructedAuthority.await(oldToken)).rejects.toThrow('unknown delivery token')
   await expect(reconstructedAuthority.await(newToken)).resolves.toBeUndefined()
 })
 
-test('keeps the lane gated until every target attempt settles after one rejects', async () => {
-  const slowStarted = deferred<void>()
-  const releaseSlow = deferred<void>()
+test("starts a lane's next frame only after a rejected handoff settles", async () => {
+  const firstStarted = deferred<void>()
+  const rejectFirst = deferred<void>()
   let nextStarted = false
-  const fanout = new Fanout(async (targets, _frame, info) => {
-    const target = targets[0]!
+  const fanout = new Fanout(async (_targets, _frame, info) => {
     if (info.seq === 2) {
       nextStarted = true
       return
     }
-    if (target.subscriberDoId === 'fast') throw new Error('fast rejection')
-    slowStarted.resolve()
-    await releaseSlow.promise
+    firstStarted.resolve()
+    await rejectFirst.promise
+    throw new Error('handoff rejection')
   })
-  const first = fanout.enqueue('inc', 'semantic', [target('fast'), target('slow')], new Uint8Array([1]), deliveryInfo())
-  const second = fanout.enqueue('inc', 'semantic', [target('slow')], new Uint8Array([2]), deliveryInfo(2))
+  const route = target('subscriber', 'lease')
+  const first = fanout.enqueue([route], new Uint8Array([1]), deliveryInfo())
+  const second = fanout.enqueue([route], new Uint8Array([2]), deliveryInfo(2))
 
-  await slowStarted.promise
+  await firstStarted.promise
   await new Promise<void>((resolve) => setTimeout(resolve, 0))
   expect(nextStarted).toBe(false)
-  releaseSlow.resolve()
-  await expect(fanout.await(first)).rejects.toThrow('fast rejection')
+  rejectFirst.resolve()
+  await expect(fanout.await(first)).rejects.toThrow('handoff rejection')
   await expect(fanout.await(second)).resolves.toBeUndefined()
-})
-
-test('does not issue a flat authority subrequest for every target above the Workers free-tier cap', async () => {
-  let authorityDispatches = 0
-  const delivered = new Set<string>()
-  const fanout = new Fanout(async (targets) => {
-    authorityDispatches += 1
-    for (const target of targets) delivered.add(target.subscriberDoId)
-  })
-  const routes = targets(1_001)
-  const token = fanout.enqueue('inc', 'semantic', routes, new Uint8Array([1]), deliveryInfo())
-
-  await fanout.await(token)
-  expect(delivered.size).toBe(routes.length)
-  expect(authorityDispatches).toBeLessThan(1_000)
+  expect(nextStarted).toBe(true)
 })
 
 test('keeps every recursive coordinator invocation within the configured fanout width', async () => {
@@ -126,9 +115,6 @@ test('keeps every recursive coordinator invocation within the configured fanout 
 
   const outcomes = await runInvocation({
     operation: 'deliver',
-    roomId: 'room',
-    inc: 'inc',
-    laneKey: 'semantic',
     targets: routes,
     frame: new Uint8Array([1]),
     seq: 1,

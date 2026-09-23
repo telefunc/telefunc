@@ -1,27 +1,24 @@
 // One ephemeral chain per (incarnation, lane): N+1 starts after N settles, and failed handoffs do not
 // poison later frames. Incarnation cleanup discards the chains; each accepted handoff runs at most once.
 
-import type { RouteTarget } from './routes.js'
+import type { RouteInstallation } from './routes.js'
 import { getDeterministicKeyBucketIndex } from '../routing.js'
 import type { RoomShardDeliveryRequest, RoomShardInvalidationRequest } from './backend.js'
 
-type DeliveryInfo = { roomId: string; inc: string; laneKey: string; seq: number; timestamp: number }
-type DeliverFn = (targets: RouteTarget[], frame: Uint8Array, info: DeliveryInfo, shard?: number) => Promise<void>
+type DeliveryInfo = { inc: string; laneKey: string; seq: number; timestamp: number }
+type DeliverFn = (targets: RouteInstallation[], frame: Uint8Array, info: DeliveryInfo) => Promise<void>
 
 export const ROOM_FANOUT_WIDTH = 64
 const ROOM_FANOUT_COORDINATOR_POOL_SIZE = 256
 
 // The recursive tree keeps four invariants: <=64 outgoing calls per node; depth-specific coordinators
 // cannot self-RPC; leaf outcomes stay ordered; coordinator failure expands to every descendant.
-type FanoutTarget = RouteTarget & { laneKey?: string }
-type FanoutRequestBase = Omit<DeliveryInfo, 'seq' | 'timestamp'> & { targets: FanoutTarget[]; path: string }
-export type RoomShardFanoutRequest = FanoutRequestBase &
-  (
-    | ({ operation: 'deliver'; frame: Uint8Array } & Pick<DeliveryInfo, 'seq' | 'timestamp'>)
-    | { operation: 'invalidate'; terminal?: true }
-  )
+export type RoomShardFanoutRequest = { targets: RouteInstallation[]; path: string } & (
+  | { operation: 'deliver'; frame: Uint8Array; seq: number; timestamp: number }
+  | { operation: 'invalidate'; terminal?: true }
+)
 
-export type RoomShardFanoutOutcome = { target: RouteTarget; error?: string }
+export type RoomShardFanoutOutcome = { target: RouteInstallation; error?: string }
 
 type RoomShardFanoutStub = {
   telefuncRoomDeliver(request: RoomShardDeliveryRequest): Promise<void>
@@ -40,8 +37,7 @@ const noop = (): void => {}
 export class Fanout {
   readonly #deliver: DeliverFn
   readonly #defer: (resume: () => void) => void
-  readonly #chains = new Map<string, Map<string, Promise<void>>>()
-  readonly #incarnationFences = new Map<string, { active: boolean }>()
+  readonly #incarnations = new Map<string, { active: boolean; lanes: Map<string, Promise<void>> }>()
   readonly #attempts = new Map<string, Promise<void>>()
 
   constructor(deliver: DeliverFn, defer: (resume: () => void) => void = queueMicrotask) {
@@ -49,21 +45,17 @@ export class Fanout {
     this.#defer = defer
   }
 
-  enqueue(inc: string, laneKey: string, targets: RouteTarget[], frame: Uint8Array, info: DeliveryInfo): string {
-    const lanes = this.#chains.get(inc) ?? new Map<string, Promise<void>>()
-    this.#chains.set(inc, lanes)
-    const acceptedFrame = new Uint8Array(frame)
-    const acceptedTargets = targets.map((target) => ({ ...target }))
-    const fence = this.#incarnationFences.get(inc) ?? { active: true }
-    this.#incarnationFences.set(inc, fence)
-    const previous = lanes.get(laneKey) ?? Promise.resolve()
-    const attempt = previous
+  enqueue(targets: RouteInstallation[], frame: Uint8Array, info: DeliveryInfo): string {
+    let incarnation = this.#incarnations.get(info.inc)
+    if (!incarnation) this.#incarnations.set(info.inc, (incarnation = { active: true, lanes: new Map() }))
+    const fence = incarnation
+    const attempt = (fence.lanes.get(info.laneKey) ?? Promise.resolve())
       .then(() => new Promise<void>((resolve) => this.#defer(resolve)))
       .then(() => {
         if (!fence.active) throw new Error('Cloudflare Room delivery cancelled before handoff')
-        return this.#fanout(acceptedTargets, acceptedFrame, info)
+        return this.#deliver(targets, frame, info)
       })
-    lanes.set(laneKey, attempt.then(noop, noop))
+    fence.lanes.set(info.laneKey, attempt.then(noop, noop))
     const token = crypto.randomUUID()
     this.#attempts.set(token, attempt)
     return token
@@ -80,24 +72,9 @@ export class Fanout {
   }
 
   clearIncarnation(inc: string): void {
-    const fence = this.#incarnationFences.get(inc)
-    if (fence !== undefined) fence.active = false
-    this.#incarnationFences.delete(inc)
-    this.#chains.delete(inc)
-  }
-
-  async #fanout(targets: RouteTarget[], frame: Uint8Array, info: DeliveryInfo): Promise<void> {
-    const attempts =
-      targets.length <= ROOM_FANOUT_WIDTH
-        ? targets.map((target) => this.#deliver([target], frame, info))
-        : partitionIntoAtMost(targets, ROOM_FANOUT_WIDTH).map((group, index) =>
-            this.#deliver(group, frame, info, index),
-          )
-    const failures = (await Promise.allSettled(attempts))
-      .filter((outcome): outcome is PromiseRejectedResult => outcome.status === 'rejected')
-      .map((failure) => failure.reason)
-    if (failures.length === 1) throw failures[0]
-    if (failures.length > 1) throw new AggregateError(failures, 'Cloudflare Room fanout failed')
+    const incarnation = this.#incarnations.get(inc)
+    if (incarnation !== undefined) incarnation.active = false
+    this.#incarnations.delete(inc)
   }
 }
 
@@ -106,24 +83,16 @@ export async function dispatchRoomShardFanout(
   request: RoomShardFanoutRequest,
 ): Promise<RoomShardFanoutOutcome[]> {
   if (request.targets.length <= ROOM_FANOUT_WIDTH) {
-    const { roomId, inc, laneKey } = request
     return Promise.all(
       request.targets.map(async (target): Promise<RoomShardFanoutOutcome> => {
         const stub = namespace.get(namespace.idFromString(target.subscriberDoId))
-        const route = { roomId, inc, ...target, laneKey: target.laneKey ?? laneKey }
         try {
-          if (request.operation === 'deliver')
-            await stub.telefuncRoomDeliver({
-              ...route,
-              frame: request.frame,
-              seq: request.seq,
-              timestamp: request.timestamp,
-            })
-          else
-            await stub.telefuncRoomInvalidate({
-              ...route,
-              ...(request.terminal === true ? { terminal: true as const } : {}),
-            })
+          if (request.operation === 'deliver') {
+            const { frame, seq, timestamp } = request
+            await stub.telefuncRoomDeliver({ ...target, frame, seq, timestamp })
+          } else {
+            await stub.telefuncRoomInvalidate({ ...target, ...(request.terminal ? { terminal: true as const } : {}) })
+          }
           return { target }
         } catch (error) {
           return { target, error: errorMessage(error) }
@@ -131,24 +100,22 @@ export async function dispatchRoomShardFanout(
       }),
     )
   }
-
   const groups = partitionIntoAtMost(request.targets, ROOM_FANOUT_WIDTH)
-  return (
-    await Promise.all(
-      groups.map((targets, index) => {
-        const path = `${request.path}.${index}`
-        return dispatchRoomShardFanoutViaCoordinator(namespace, { ...request, targets, path })
-      }),
-    )
-  ).flat()
+  const outcomes = await Promise.all(
+    groups.map((targets, index) =>
+      viaCoordinator(namespace, { ...request, targets, path: `${request.path}.${index}` }),
+    ),
+  )
+  return outcomes.flat()
 }
 
-export async function dispatchRoomShardFanoutViaCoordinator(
+async function viaCoordinator(
   namespace: RoomShardFanoutNamespace,
   request: RoomShardFanoutRequest,
 ): Promise<RoomShardFanoutOutcome[]> {
+  const first = request.targets[0]!
   const nameIndex = getDeterministicKeyBucketIndex(
-    JSON.stringify([request.roomId, request.inc, request.laneKey, request.operation, request.path]),
+    JSON.stringify([first.roomId, first.inc, first.laneKey, request.operation, request.path]),
     ROOM_FANOUT_COORDINATOR_POOL_SIZE,
   )
   // Depth-specific pools prevent recursive self-RPC; stateless peers at one depth may share objects.

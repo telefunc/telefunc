@@ -5,7 +5,6 @@
 const ROUTE_TTL_MS = 90_000
 export const ROUTE_RENEW_EVERY_MS = ROUTE_TTL_MS / 3
 
-export type RouteTarget = { subscriberDoId: string; leaseId: string }
 export type RouteInstallation = {
   roomId: string
   inc: string
@@ -94,14 +93,14 @@ export function deleteRoute(
 }
 
 // The delivery target snapshot at acceptance: live (non-expired) routes for this (inc, lane) only.
-export function snapshotRoutes(sql: SqlStorage, inc: string, laneKey: string, now: number): RouteTarget[] {
+export function snapshotRoutes(sql: SqlStorage, inc: string, laneKey: string, now: number): RouteInstallation[] {
   return sql
-    .exec<{ subscriber_do_id: string; lease_id: string }>(
-      'SELECT subscriber_do_id, lease_id FROM route WHERE inc = ? AND lane_key = ? AND expires_at > ?',
+    .exec<{ room_id: string; subscriber_do_id: string; lease_id: string }>(
+      'SELECT room_id, subscriber_do_id, lease_id FROM route WHERE inc = ? AND lane_key = ? AND expires_at > ?',
       inc,
       laneKey,
       now,
     )
     .toArray()
-    .map((row) => ({ subscriberDoId: row.subscriber_do_id, leaseId: row.lease_id }))
+    .map((row) => ({ roomId: row.room_id, inc, laneKey, subscriberDoId: row.subscriber_do_id, leaseId: row.lease_id }))
 }
