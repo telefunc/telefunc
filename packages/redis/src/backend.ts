@@ -193,20 +193,17 @@ export class RedisBackend implements BroadcastDriver, RoomDriver {
       if (member.startsWith(prefix)) matching.push(member)
       else break
     }
-    if (matching.length === 0) return { entries: [] }
-    // Prefix matches are contiguous; the independent tag/peek reads remain all-or-error through Promise.all.
-    const last = matching[matching.length - 1] as string
+    const last = matching.at(-1)
+    if (last === undefined) return { entries: [] }
     const [tags, peek] = await Promise.all([
       this._publisher.hmget(directoryTagsKey(this._prefix), ...matching),
-      matching.length === DIRECTORY_PAGE_SIZE && page.length === DIRECTORY_PAGE_SIZE
-        ? this._publisher.zrangebylex(index, `(${last}`, '+', 'LIMIT', 0, 1)
-        : [],
+      matching.length === DIRECTORY_PAGE_SIZE ? this._publisher.zrangebylex(index, `(${last}`, '+', 'LIMIT', 0, 1) : [],
     ])
     const entries = matching.flatMap((roomId, i) => {
       const incTag = tags[i]
       return incTag === null || incTag === undefined ? [] : [{ roomId, incTag }]
     })
-    return peek.length > 0 && (peek[0] as string).startsWith(prefix) ? { entries, cursor: last } : { entries }
+    return peek[0]?.startsWith(prefix) ? { entries, cursor: last } : { entries }
   }
 
   async dispose(): Promise<void> {

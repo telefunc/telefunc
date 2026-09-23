@@ -32,12 +32,15 @@ import {
 
 export const REDIS_DELIVERY_FENCE_BYTE = 0xff
 
-// Shared preamble: authority time in ms from Redis TIME's [sec, µs] pair, and the head read that applies it.
-const HEAD_PRELUDE = `
+// Authority time in ms from Redis TIME's [sec, µs] pair.
+const NOW_LUA = `
 local function tf_now()
   local t = redis.call('TIME')
   return tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
 end
+`
+
+const HEAD_PRELUDE = `${NOW_LUA}
 -- read the head, treating a logically-expired tombstone as absent (a lapsed tombstone reopens the
 -- absence epoch); the PX backstop only reclaims memory, it is never what makes it invisible.
 local function tf_read_and_expire_head(key, now)
@@ -66,14 +69,13 @@ end
 // Broadcast publish: next per-key seq, authority time, one PUBLISH of the ordering frame.
 //   KEYS: [1]=sequence [2]=channel
 //   ARGV: [1]=payload
-const PUBLISH_LUA = `${REDIS_ORDERING_FRAME_LUA}
+const PUBLISH_LUA = `${NOW_LUA}${REDIS_ORDERING_FRAME_LUA}
 local previous = redis.call('GET', KEYS[1])
 if previous and tonumber(previous) >= ${Number.MAX_SAFE_INTEGER} then
   return redis.error_reply('publish: sequence exhausted for the ordering domain')
 end
 local seq = redis.call('INCR', KEYS[1])
-local t = redis.call('TIME')
-local ts = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
+local ts = tf_now()
 local frame = tf_ordering_frame(seq, ts, ARGV[1])
 local receivers = redis.call('PUBLISH', KEYS[2], frame)
 return {seq, ts, receivers}

@@ -78,7 +78,7 @@ export class RedisSubscriptionDriver implements SubscriptionDriver<RedisSubscrip
       token: armed.length === 0 ? '' : token,
       delivery,
       cancel: () => {
-        for (const attempt of attempts) attempt.cancelFence(token)
+        for (const attempt of attempts) attempt.settleFence(token)
       },
     }
   }
@@ -254,7 +254,8 @@ class RedisSubscriptionAttempt extends DriverAttempt {
     return fence.promise
   }
 
-  cancelFence(token: string): void {
+  /** Resolves the fence: its token arrived, or the commit that armed it was refused. */
+  settleFence(token: string): void {
     this._fences.get(token)?.resolve()
     this._fences.delete(token)
   }
@@ -287,10 +288,7 @@ class RedisSubscriptionAttempt extends DriverAttempt {
       return this.terminate(new Error('Redis generation subscription was invalidated'))
     if (this.state() !== 'ready') return
     if (frame[0] === REDIS_DELIVERY_FENCE_BYTE) {
-      const token = frame.subarray(1).toString()
-      this._fences.get(token)?.resolve()
-      this._fences.delete(token)
-      return
+      return this.settleFence(frame.subarray(1).toString())
     }
     const { payload, info } = decodeOrderingFrame(frame)
     // Redis Cluster can forward publications from the old and new slot owners over independent bus
