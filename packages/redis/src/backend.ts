@@ -23,7 +23,7 @@ import type {
 } from 'telefunc/__internal'
 import { decodeLaneKey, decodeOrderingFrame, encodeLaneKey } from 'telefunc/__internal'
 import {
-  DEFAULT_ROOM_PREFIX,
+  DEFAULT_PREFIX,
   directoryIndexKey,
   directoryTagsKey,
   generationKeysKey,
@@ -57,7 +57,7 @@ export class RedisBackend implements BroadcastDriver, RoomDriver {
   constructor(options: RedisBackendOptions) {
     assertAtMostOnceClient(options.redis)
     this._publisher = options.redis
-    this._prefix = redisKeyPrefix(options.prefix ?? DEFAULT_ROOM_PREFIX)
+    this._prefix = redisKeyPrefix(options.prefix ?? DEFAULT_PREFIX)
     // A Cluster node's PUBLISH count is node-local, so it cannot prove global absence.
     this._reportsReceivers = !isCluster(options.redis)
     for (const command of Object.values(REDIS_COMMANDS))

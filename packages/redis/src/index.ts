@@ -4,10 +4,10 @@ export type { InstallRedisOptions }
 import type { RedisClient } from './ioredis.js'
 import { installBackend } from 'telefunc/__internal'
 import { RedisBackend } from './backend.js'
-import { DEFAULT_ROOM_PREFIX } from './keys.js'
+import { DEFAULT_PREFIX } from './keys.js'
 
 function installRedis(redis: RedisClient, options: InstallRedisOptions = {}): void {
-  const prefix = options.prefix ?? DEFAULT_ROOM_PREFIX
+  const prefix = options.prefix ?? DEFAULT_PREFIX
   installBackend(() => new RedisBackend({ redis, prefix }), ['redis', redis, prefix])
 }
 

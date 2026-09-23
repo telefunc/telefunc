@@ -10,7 +10,7 @@
 
 import type { BroadcastLane } from 'telefunc/__internal'
 
-export const DEFAULT_ROOM_PREFIX = 'tf:'
+export const DEFAULT_PREFIX = 'tf:'
 
 /** Builders take the prefix as validated here, once: a `{` would open a hash tag of its own. */
 export function redisKeyPrefix(prefix: string): string {
