@@ -937,6 +937,16 @@ describe('Room public behavior', () => {
     await expect(acking).resolves.toMatchObject({ response: 'handled' })
     expect(victimInbox).toEqual([])
   })
+  it('reports a client-held participant whose channel closed as disconnected', async () => {
+    const room = await Room.create('standalone-disconnect')
+    const holder = (await room.join()) as ServerLocalParticipant
+    const causes: unknown[] = []
+    room.onLeave((member, cause) => member.id === holder.id && causes.push(cause?.type))
+    const channel = new RoomParticipantStubChannel()
+    bindParticipantStubChannel(channel, holder)
+    channel.abort()
+    await vi.waitFor(() => expect(causes).toEqual(['disconnected']))
+  })
   it('keeps every live ack correlation instead of silently dropping the oldest', async () => {
     const stub = register(await Room.create('ack-correlations'))
     for (let index = 0; index <= 1_024; index++) {

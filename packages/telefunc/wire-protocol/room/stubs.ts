@@ -383,6 +383,6 @@ function bindParticipantStubChannel(
     unlistenMeta?.()
     unlistenDemand()
     unlistenLeave()
-    void participant.leave().catch(reportRoomError)
+    void participant._room._removeMember(participant.id, { type: 'disconnected' }).catch(reportRoomError)
   })
 }
