@@ -13,7 +13,7 @@ import {
 } from './binary.js'
 import { ROOM_WANTED_TRACKS_MAX } from './constants.js'
 import { ownLeaveCause, ownMetadata, senderOf, stampNewer } from './model.js'
-import type { MemberSnapshot, MemberWants, RoomDataEnvelope } from './protocol.js'
+import type { AcceptedMeta, MemberSnapshot, MemberWants, RoomDataEnvelope } from './protocol.js'
 import type {
   BinaryFrameInfo,
   LeaveCause,
@@ -222,6 +222,11 @@ class RoomState {
       if (entry.binaryCbs.length > 0) members[entry.id] = trackWantsOf(entry.binaryCbs)
     }
     return { everyMember: trackWantsOf(this._roomBinaryCbs), members }
+  }
+  /** A member's meta with the revision it was accepted at. */
+  acceptedMeta(id: string): AcceptedMeta | null {
+    const entry = this._members.get(id)
+    return entry ? { meta: entry.meta, seq: entry.metaSeq } : null
   }
   /** Named tracks the member is known to publish — `[]` for unknown members. */
   memberTracks(id: string): string[] {

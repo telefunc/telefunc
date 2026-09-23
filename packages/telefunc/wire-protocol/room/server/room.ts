@@ -1071,12 +1071,20 @@ class ServerLocalParticipant extends ParticipantBase {
     return await this._room._sendDm(this.id, recipientId(to), data, options?.ack === true)
   }
   async setMeta(meta: ParticipantMeta): Promise<void> {
-    this._assertActive()
-    await this._room._setMemberMeta(this.id, meta)
+    await this._setMeta(meta)
   }
   async setAttributes(attrs: ParticipantMeta): Promise<void> {
+    await this._setAttributes(attrs)
+  }
+  /** @internal — the accepted write, which a client holder mirrors in revision order. */
+  async _setMeta(meta: ParticipantMeta): Promise<AcceptedMeta> {
     this._assertActive()
-    await this._room._mergeMemberMeta(this.id, attrs)
+    return await this._room._setMemberMeta(this.id, meta)
+  }
+  /** @internal */
+  async _setAttributes(attrs: ParticipantMeta): Promise<AcceptedMeta> {
+    this._assertActive()
+    return await this._room._mergeMemberMeta(this.id, attrs)
   }
   async leave(): Promise<void> {
     if (this._left) return

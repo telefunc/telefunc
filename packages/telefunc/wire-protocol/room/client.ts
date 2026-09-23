@@ -7,14 +7,7 @@ import { ClientBroadcast } from '../client/channel.js'
 import type { ClientChannel } from '../client/channel.js'
 import { DM_PARTICIPANT_LEFT } from './errors.js'
 import { decodeBinaryFrame, emptyBinaryWants, encodeBinaryFrame } from './binary.js'
-import {
-  leaveCauseFromWire,
-  mergeAttributes,
-  normalizeJoinOptions,
-  ownMetaArgument,
-  ownMetadata,
-  recipientId,
-} from './model.js'
+import { leaveCauseFromWire, normalizeJoinOptions, ownMetaArgument, ownMetadata, recipientId } from './model.js'
 import {
   hasRoomTag,
   inboxMessageFromWire,
@@ -387,21 +380,17 @@ abstract class ClientParticipantBase extends ParticipantBase {
   async setMeta(meta: ParticipantMeta): Promise<void> {
     this._assertActive()
     const owned = ownMetaArgument(meta, 'setMeta() meta')
-    const ack = await this._requestParticipant({ __r: 'req-set-meta', meta: owned })
-    this._onOwnMetaWritten(ack, owned)
+    this._onOwnMetaWritten((await this._requestParticipant({ __r: 'req-set-meta', meta: owned })) as AcceptedMeta)
   }
 
   async setAttributes(attrs: ParticipantMeta): Promise<void> {
     this._assertActive()
     const owned = ownMetaArgument(attrs, 'setAttributes() attributes')
-    const ack = await this._requestParticipant({ __r: 'req-set-attrs', attrs: owned })
-    this._onOwnMetaWritten(ack, mergeAttributes(this._meta, owned))
+    this._onOwnMetaWritten((await this._requestParticipant({ __r: 'req-set-attrs', attrs: owned })) as AcceptedMeta)
   }
 
-  /** A meta write committed; `requested` is the value this holder asked for. */
-  protected _onOwnMetaWritten(_ack: unknown, requested: ParticipantMeta): void {
-    this._meta = requested
-  }
+  /** Concurrent writes can commit out of request order: adopt the sequence-accepted value, as observers do. */
+  protected abstract _onOwnMetaWritten(accepted: AcceptedMeta): void
 
   private _drainCoalesce(key: string): void {
     const slot = this._coalescers.get(key)
@@ -440,9 +429,8 @@ class ClientRoomParticipant extends ClientParticipantBase {
     return this._room._getRemote(id)
   }
 
-  /** Concurrent writes can commit out of request order: adopt the sequence-accepted value, as observers do. */
-  protected override _onOwnMetaWritten(ack: unknown): void {
-    this._room._acceptParticipantMeta(this.id, ack as AcceptedMeta)
+  protected override _onOwnMetaWritten(accepted: AcceptedMeta): void {
+    this._room._acceptParticipantMeta(this.id, accepted)
   }
 
   protected async _sendPublish(data: unknown, retain?: boolean): Promise<ChannelPublishAck> {
@@ -466,6 +454,7 @@ class ClientRoomParticipant extends ClientParticipantBase {
 /** `LocalParticipant` revived from a serialized `ServerLocalParticipant` — owns its stub channel. */
 class ClientStandaloneParticipant extends ClientParticipantBase {
   private readonly _channel: ClientChannel
+  private _metaSeq = 0
 
   constructor(channel: ClientChannel, metadata: ParticipantStubMetadata) {
     super(metadata.id, metadata.meta, metadata.selfDelivery, metadata.identity ?? null, (request) =>
@@ -478,8 +467,7 @@ class ClientStandaloneParticipant extends ClientParticipantBase {
       const msg = notice as ParticipantStubNotice
       switch (msg.__r) {
         case 'p-meta':
-          this._meta = ownMetadata(msg.meta)
-          return
+          return this._onOwnMetaWritten(msg)
         case 'demand':
           return this._onDemand(msg.track, msg.wanted)
         case 'dm':
@@ -491,6 +479,13 @@ class ClientStandaloneParticipant extends ClientParticipantBase {
       }
     })
     channel.onClose(() => this._onLeft({ type: 'disconnected' }))
+  }
+
+  /** Its own writes and the room's `p-meta` both land here; only a newer revision applies. */
+  protected override _onOwnMetaWritten({ meta, seq }: AcceptedMeta): void {
+    if (seq <= this._metaSeq) return
+    this._metaSeq = seq
+    this._meta = ownMetadata(meta)
   }
 
   protected async _sendPublish(data: unknown, retain?: boolean): Promise<ChannelPublishAck> {

@@ -363,9 +363,9 @@ class RoomParticipantStubChannel extends RoomRequestChannel {
         assertPublishShield(this._publishShield, req.data)
         return await participant.publish(req.data, req.retain ? { retain: true } : undefined)
       case 'req-set-meta':
-        return await participant.setMeta(req.meta)
+        return await participant._setMeta(req.meta)
       case 'req-set-attrs':
-        return await participant.setAttributes(req.attrs)
+        return await participant._setAttributes(req.attrs)
       case 'req-dm':
         return await participant.send(req.to, req.data, req.ack ? { ack: true } : undefined)
       case 'req-leave':
@@ -379,10 +379,11 @@ class RoomParticipantStubChannel extends RoomRequestChannel {
 
   private _mirrorParticipant(): void {
     const participant = this._participant
-    const remote = participant._room._state.getRemote(participant.id)
-    const unlistenMeta = remote?.onUpdate(
-      (meta: ParticipantMeta) => void this.send({ __r: 'p-meta', meta }).catch(() => {}),
-    )
+    const state = participant._room._state
+    const unlistenMeta = state.getRemote(participant.id)?.onUpdate(() => {
+      const accepted = state.acceptedMeta(participant.id)
+      if (accepted) void this.send({ __r: 'p-meta', ...accepted }).catch(() => {})
+    })
 
     // The ack carries the client's reply; only a transport rejection means the holder left.
     participant._setForwarder((msg) => {

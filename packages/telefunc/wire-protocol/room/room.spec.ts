@@ -21,8 +21,8 @@ import { leaveCauseFromWire, leaveCauseToWire, mergeAttributes, normalizeJoinOpt
 import { hasRoomTag, type RoomSnapshotMetadata } from './protocol.js'
 import { MEMBER_CELL_PREFIX, memberCellKey } from './server/membership.js'
 import type { LeaveCause, Sender } from './types.js'
-import { ClientRoom } from './client.js'
-import { ClientBroadcast } from '../client/channel.js'
+import { ClientRoom, ClientStandaloneParticipant } from './client.js'
+import { ClientBroadcast, type ClientChannel } from '../client/channel.js'
 import { RoomState, remoteBacking } from './state.js'
 import { Room } from './server/statics.js'
 import { ServerRoom, type ServerLocalParticipant } from './server/room.js'
@@ -1889,6 +1889,31 @@ describe('client Room lifecycle', () => {
     expect(roomAckError(error, report)).toEqual({ text: error.message, status: ACK_STATUS.SHIELD_ERROR })
     expect(toRoomFailure(error, report)).toEqual({ ok: false, err: error.message })
     expect(report).not.toHaveBeenCalled()
+  })
+  it("keeps a client-held participant's meta in accepted revision order", async () => {
+    let notify!: (notice: unknown) => unknown
+    const acks: Array<(accepted: unknown) => void> = []
+    const channel = {
+      listen: (cb: (notice: unknown) => unknown) => {
+        notify = cb
+      },
+      onClose: () => {},
+      send: () => new Promise((resolve) => acks.push(resolve)),
+    } as unknown as ClientChannel
+    const participant = new ClientStandaloneParticipant(channel, {
+      channelId: 'channel',
+      id: 'me',
+      meta: { v: 0 },
+      selfDelivery: true,
+      identity: null,
+    })
+    const first = participant.setMeta({ v: 'A' })
+    const second = participant.setMeta({ v: 'B' })
+    notify({ __r: 'p-meta', meta: { v: 'B' }, seq: 2 })
+    acks[1]!({ meta: { v: 'B' }, seq: 2 })
+    acks[0]!({ meta: { v: 'A' }, seq: 1 }) // the older write's ack arrives last
+    await Promise.all([first, second])
+    expect(participant.meta).toEqual({ v: 'B' })
   })
   it('keeps remote serializer backing unforgeable and exact-keyed', async () => {
     const room = await Room.create('remote-backing')

@@ -196,7 +196,7 @@ type ParticipantStubRequest =
 /** Server→client notices on a standalone `LocalParticipant` stub channel. `dm`'s `ackId`, when present, asks the client to reply (`send(…, { ack: true })`) — see `RoomDmEnvelope`. */
 type ParticipantStubNotice =
   | { __r: 'left'; cause?: 'removed' | 'disconnected' | 'closed'; reason?: unknown }
-  | { __r: 'p-meta'; meta: ParticipantMeta }
+  | { __r: 'p-meta'; meta: ParticipantMeta; seq: number }
   | { __r: 'dm'; from: string; fromMeta: ParticipantMeta | null; fromIdentity?: string; data: unknown; ackId?: string }
   | { __r: 'demand'; track: string | null; wanted: boolean }
 
