@@ -221,16 +221,14 @@ const configState: ConfigUser = getGlobalObject('serverConfig.ts', {
   extensions: [],
 })
 
-const configGroupAccessors = {
-  stream: () => configGroupProxy(() => configState.stream, applyStreamConfig),
-  channel: () => configGroupProxy(() => configState.channel, applyChannelConfig),
-  broadcast: () => configGroupProxy(() => configState.broadcast, applyBroadcastConfig),
-}
-const configGroupAppliers = {
+/** The nested config objects: each validates and replaces its whole group on every write. */
+const configGroups = {
   stream: applyStreamConfig,
   channel: applyChannelConfig,
   broadcast: applyBroadcastConfig,
 }
+const isConfigGroup = (prop: string | symbol): prop is keyof typeof configGroups =>
+  typeof prop === 'string' && Object.hasOwn(configGroups, prop)
 
 const configUser: ConfigUser = new Proxy({} as ConfigUser, {
   get(_target, prop) {
@@ -259,8 +257,7 @@ const configUser: ConfigUser = new Proxy({} as ConfigUser, {
         },
       })
     }
-    const configGroup = configGroupAccessors[prop as keyof typeof configGroupAccessors]
-    if (configGroup) return configGroup()
+    if (isConfigGroup(prop)) return configGroupProxy(() => configState[prop], configGroups[prop])
     return configState[prop as keyof typeof configState]
   },
   set(_target, prop, val) {
@@ -363,11 +360,7 @@ function enableChannelTransports(transports: ChannelTransports): void {
 
 function applyUserConfig(prop: string | symbol, val: unknown) {
   if (typeof prop !== 'string') return
-  const applyConfigGroup = configGroupAppliers[prop as keyof typeof configGroupAppliers]
-  if (applyConfigGroup) {
-    applyConfigGroup(val)
-    return
-  }
+  if (isConfigGroup(prop)) return configGroups[prop](val)
 
   if (prop === 'root') {
     assertUsage(typeof val === 'string', 'config.root should be a string')
