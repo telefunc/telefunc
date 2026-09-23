@@ -630,6 +630,14 @@ class ServerRoom extends RoomStateView implements Room {
     this._subs.replan()
   }
 
+  /** @internal */
+  _applyAuthorityConfig(config: RoomConfigRecord): void {
+    this._state.applyRoomUpdate(config.meta, config.at, config.by)
+  }
+  /** @internal */
+  _applyAuthorityRoster(members: MemberSnapshot[]): boolean {
+    return this._state.reconcileCompleteRoster(members)
+  }
   /** @internal — the authority says the room closed; the lane that would have carried `closed` failed. */
   _closeFromAuthority(): void {
     if (this._state.closed) return

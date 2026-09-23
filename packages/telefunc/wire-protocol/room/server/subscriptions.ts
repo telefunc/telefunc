@@ -11,7 +11,7 @@ import { DEFAULT_TRACK, mergeTrackWants, wantsAnyBinary, type BinaryWants } from
 import { ROOM_HEARTBEAT_INTERVAL_MS, ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS } from '../constants.js'
 import type { RoomDemand } from '../demand.js'
 import { RoomError } from '../errors.js'
-import type { RoomConfigRecord } from '../protocol.js'
+import type { MemberSnapshot, RoomConfigRecord } from '../protocol.js'
 import type { RoomState } from '../state.js'
 import { reportRoomError } from './errors.js'
 import { LaneSubscription } from './lane-subscription.js'
@@ -30,11 +30,15 @@ type HolderWants = {
   binary: BinaryWants
 }
 
-/** The room side these subscriptions serve: it aggregates its holders and applies what the lanes carry. */
+/** The room side these subscriptions serve: it aggregates its holders and applies what the lanes and the authority carry. */
 type SubscriptionHost = {
   readonly id: string
   readonly _inc: string
-  readonly _state: RoomState
+  /** Read-only here: every change goes through the host's methods. */
+  readonly _state: Pick<
+    RoomState,
+    'closed' | 'rosterKnown' | 'listenerCount' | 'membershipVersion' | 'getRemote' | 'listMemberIds' | 'memberTracks'
+  >
   _holderWants(): HolderWants
   /** A pending admission owns its inbox, but its record is renewed only once it commits. */
   _ownedMembers(): { all: string[]; renewable: string[] }
@@ -43,6 +47,9 @@ type SubscriptionHost = {
   _onBinary(framed: Uint8Array, info: WirePublishInfo): void
   _onDm(serialized: string, info: WirePublishInfo): void
   _readOpenConfig(): Promise<RoomConfigRecord | null>
+  _applyAuthorityConfig(config: RoomConfigRecord): void
+  /** `true` when the complete roster corrected a drift. */
+  _applyAuthorityRoster(members: MemberSnapshot[]): boolean
   _closeFromAuthority(): void
   _onRosterDrift(): void
   _applyLeave(id: string): void
@@ -120,7 +127,7 @@ class RoomSubscriptions {
     if (host._state.closed) return
     const config = await host._readOpenConfig()
     if (config === null) return host._closeFromAuthority()
-    host._state.applyRoomUpdate(config.meta, config.at, config.by)
+    host._applyAuthorityConfig(config)
     await this._refreshMembers()
   }
 
@@ -279,7 +286,7 @@ class RoomSubscriptions {
       const version = host._state.membershipVersion
       const members = await readAllMembers(host.id, host._inc)
       if (host._state.membershipVersion === version) {
-        const drifted = host._state.reconcileCompleteRoster(members)
+        const drifted = host._applyAuthorityRoster(members)
         this.replan()
         if (drifted) host._onRosterDrift()
         return
