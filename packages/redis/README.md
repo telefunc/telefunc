@@ -38,6 +38,8 @@ The installed backend accepts either an ioredis `Redis` or `Cluster` client. Clu
 Redis Cluster delivery stays at-most-once during resharding. While a slot changes owner, an old-master frame can arrive after a newer frame or generation invalidation; Telefunc drops that late lower sequence (and ignores frames after invalidation).
 Callbacks never move backward, but the in-flight frame is lost rather than replayed; a frame arriving before invalidation may still be handed off after cleanup starts. Commands follow pre-execution `MOVED`/`ASK` replies but never resend after connection loss. Keep master clocks synchronized: expiries use the new owner's clock.
 
+All subscriptions share one subscriber connection on a live master. When it drops, they resume on a fresh connection; frames published in between are lost.
+
 The Cluster `receivers` capability is `none`: cluster-wide Pub/Sub can reach another master's subscriber, but the executing master's `PUBLISH` count cannot report that global receiver total.
 
 ```ts

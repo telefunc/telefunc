@@ -148,7 +148,7 @@ export class RedisBackend implements BroadcastDriver, RoomDriver {
     const createSubscriber = async (): Promise<Redis> => {
       let source: Redis
       if (options.redis instanceof Cluster) {
-        // Keep SUBSCRIBE, dispatch, and the delivery-fence PING on one Room-owned live-master socket.
+        // The backend's one subscriber socket sits on a live master; after a drop the driver opens a fresh one.
         const master = options.redis.nodes('master').find((candidate) => candidate.status !== 'end')
         if (master === undefined) throw new Error('RedisBackend: Cluster has no available masters')
         source = master

@@ -375,7 +375,7 @@ describe('Redis real three-master Cluster CI certification', () => {
       if (begin !== undefined) commands.tfRoomDropGenerationBegin = begin
     }
   })
-  it('exposes terminal attempts so consumer replacement can fail once, recover, and deliver', async () => {
+  it('recovers a killed subscriber connection on a fresh one, through a failed first reconnect', async () => {
     const { prefix, roomId, inc } = room('replacement')
     let failNext = false
     let injectedFailure = false
@@ -409,14 +409,8 @@ describe('Redis real three-master Cluster CI certification', () => {
     )
     failNext = true
     await first.owner.client.call('CLIENT', 'KILL', 'ID', String(first.id))
-    await waitFor(() => states.includes('lost') && subscription.state() === 'closed')
-    const failed = subscribe(backend, roomId, inc, receiver)
-    await expect(failed.ready).rejects.toThrow('Backend subscription closed')
+    await waitFor(() => states.includes('lost') && subscription.state() === 'ready')
     expect(injectedFailure).toBe(true)
-    expect(failed.state()).toBe('closed')
-    const recovered = subscribe(backend, roomId, inc, receiver)
-    await recovered.ready
-    expect(recovered.state()).toBe('ready')
     expect(opens).toBeGreaterThanOrEqual(3)
     const committed = accepted(await backend.commitLane(roomId, inc, SEMANTIC_LANE, bytes('recovered')))
     await committed.delivery
@@ -487,9 +481,7 @@ describe('Redis real three-master Cluster CI certification', () => {
       (await pubSubClients()).filter((client) => !baseline.has(clientIdentity(client))),
     )
     await first.owner.client.call('CLIENT', 'KILL', 'ID', String(first.id))
-    await waitFor(() => states.includes('lost') && subscription.state() === 'closed')
-    const replacement = subscribe(backend, roomId, inc, receiver)
-    await replacement.ready
+    await waitFor(() => states.includes('lost') && subscription.state() === 'ready')
     setHolding(false)
     for (const [channel, frame] of held) dispatch(channel, frame)
     const error = await deliveryOutcome
@@ -500,19 +492,19 @@ describe('Redis real three-master Cluster CI certification', () => {
   it('omits unknowable receiver counts and shares empty-key text/binary ordering across nodes', async () => {
     const prefix = uniquePrefix('receivers')
     const backend = ownBackend(cluster, prefix)
-    const subscriberNode = cluster.nodes('master').find((node) => node.status !== 'end')
-    if (subscriberNode === undefined) throw new Error('Cluster has no live subscriber master')
-    const subscriberMaster = masters.find(
-      ({ host, port }) => host === subscriberNode.options.host && port === subscriberNode.options.port,
+    const knownClients = new Set((await pubSubClients()).map(clientIdentity))
+    // The backend's one subscriber connection: rooms are placed on its master and on another.
+    const probe = ownSubscription(backend.subscribe({ key: 'probe', kind: 'text' }, () => {}))
+    await probe.ready
+    const subscriber = await waitForValue(async () =>
+      (await pubSubClients()).filter((client) => !knownClients.has(clientIdentity(client))),
     )
-    if (subscriberMaster === undefined) throw new Error('Subscriber master is absent from the certified topology')
-    const crossMaster = masters.find(({ id }) => id !== subscriberMaster.id)
+    const crossMaster = masters.find(({ id }) => id !== subscriber.owner.id)
     if (crossMaster === undefined) throw new Error('Certification requires at least two masters')
     const cases = [
-      { label: 'cross', roomMasterId: crossMaster.id, same: false },
-      { label: 'same', roomMasterId: subscriberMaster.id, same: true },
+      { label: 'cross', roomMasterId: crossMaster.id },
+      { label: 'same', roomMasterId: subscriber.owner.id },
     ]
-    const knownClients = new Set((await pubSubClients()).map(clientIdentity))
     for (const scenario of cases) {
       const roomId = await roomOnMaster(prefix, scenario.roomMasterId, scenario.label)
       const inc = `${scenario.label}-inc`
@@ -520,11 +512,6 @@ describe('Redis real three-master Cluster CI certification', () => {
       const observed: string[] = []
       const subscription = subscribe(backend, roomId, inc, (payload) => observed.push(Buffer.from(payload).toString()))
       await subscription.ready
-      const subscriber = await waitForValue(async () =>
-        (await pubSubClients()).filter((client) => !knownClients.has(clientIdentity(client))),
-      )
-      expect(subscriber.owner.id === scenario.roomMasterId).toBe(scenario.same)
-      knownClients.add(clientIdentity(subscriber))
       const result = accepted(await backend.commitLane(roomId, inc, SEMANTIC_LANE, Buffer.from(scenario.label)))
       await result.delivery
       expect(observed).toEqual([scenario.label])
