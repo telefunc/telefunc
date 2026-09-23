@@ -1,7 +1,6 @@
 export {
   CONTROL_LANE,
   SEMANTIC_LANE,
-  SubSlot,
   commitRoomLane,
   commitRoomLaneOrThrow,
   openConfig,
@@ -21,7 +20,6 @@ import { stringify } from '@brillout/json-serializer/stringify'
 import { unrefTimer } from '../../../utils/unrefTimer.js'
 import { getRoomBackend } from '../../backend/install.js'
 import type { CommitAccepted, LaneId, RoomHead, StaleCommit } from '../../backend/room/contract.js'
-import type { BackendSubscription } from '../../backend/subscription.js'
 import type { RoomConfigRecord, RoomCtrlEnvelope } from '../protocol.js'
 import { RoomError, participantGoneError, roomClosedError } from '../errors.js'
 import { assert } from '../../../utils/assert.js'
@@ -76,7 +74,12 @@ async function commitRoomLane(
   const result = await getRoomBackend().commitLane(id, inc, lane, payload, opts)
   if ('stale' in result) return result
   // Delivery is at-most-once: a handoff lost with its fence (e.g. a partition) must not hang the caller.
-  if (!(await settlesWithin(result.delivery, ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS)))
+  const delivered = raceTimeout(
+    result.delivery.then(() => true),
+    ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS,
+    () => false,
+  )
+  if (!(await delivered))
     reportRoomError(new Error(`Room delivery unconfirmed after ${ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS} ms: ${id}`))
   return result
 }
@@ -93,144 +96,20 @@ async function commitRoomLaneOrThrow(
   return result
 }
 
-/** `true` once `promise` resolves, `false` if `ms` passes first; a rejection propagates. */
-function settlesWithin(promise: Promise<unknown>, ms: number): Promise<boolean> {
+/** Settles like `promise`, or like `onTimeout()` once `ms` pass first; a spent budget times out at once. */
+function raceTimeout<T>(promise: Promise<T>, ms: number, onTimeout: () => T): Promise<T> {
+  if (ms <= 0) return Promise.resolve().then(onTimeout)
   let timer!: ReturnType<typeof setTimeout>
-  const timeout = new Promise<false>((resolve) => {
-    timer = unrefTimer(setTimeout(() => resolve(false), ms))
+  const timeout = new Promise<T>((resolve) => {
+    timer = unrefTimer(setTimeout(() => resolve(Promise.resolve().then(onTimeout)), ms))
   })
-  return Promise.race([promise.then(() => true as const), timeout]).finally(() => clearTimeout(timer))
-}
-
-class SubSlot {
-  private _subscription: BackendSubscription | null = null
-  private _subscribe: (() => BackendSubscription) | null = null
-  private _unobserve: (() => void) | null = null
-  private _readyPromise = Promise.resolve()
-  private _resolveReady: (() => void) | null = null
-
-  constructor(
-    private readonly _onTerminal: (slot: SubSlot, error?: unknown) => void,
-    private readonly _onRecovered: () => void,
-  ) {}
-
-  get active(): boolean {
-    return this._subscription !== null && this._subscription.state() !== 'closed'
-  }
-
-  get established(): boolean {
-    return this._subscription?.state() === 'ready'
-  }
-
-  get wanted(): boolean {
-    return this._subscribe !== null
-  }
-
-  /** Holder-facing readiness survives raw attempt failures; Room's policy owns replacement. */
-  get ready(): Promise<void> {
-    return this._readyPromise
-  }
-
-  /** The current raw generation, used only by Room's bounded recovery policy. */
-  get attemptReady(): Promise<void> {
-    return this._subscription?.ready ?? Promise.resolve()
-  }
-
-  /** Starts a wanted slot; a closed subscription is replaced by the recovery policy, not by re-planning. */
-  sync(want: boolean, subscribe: () => BackendSubscription): void {
-    if (!want) return this.stop()
-    this._subscribe = subscribe
-    if (this._subscription !== null) return
-    this.retry()
-  }
-
-  retry(): void {
-    if (this._subscribe === null) return
-    this._ensurePendingReady()
-    const previous = this._subscription
-    this._unobserve?.()
-    const subscription = this._subscribe()
-    this._subscription = subscription
-    let terminalNotified = false
-    const notifyTerminal = (error?: unknown) => {
-      if (terminalNotified) return
-      terminalNotified = true
-      this._onTerminal(this, error)
-    }
-    let wasReady = subscription.state() === 'ready'
-    if (wasReady) this._settleReady()
-    let lostAfterReady = false
-    void subscription.ready.then(
-      () => {
-        if (this._subscription === subscription && subscription.state() === 'ready') {
-          wasReady = true
-          this._settleReady()
-        }
-      },
-      (error: unknown) => {
-        if (this._subscription !== subscription) return
-        this._ensurePendingReady()
-        notifyTerminal(error)
-      },
-    )
-    // Every reassignment of `_subscription` unobserves first, so this listener only hears the current one.
-    this._unobserve = subscription.onStateChange((state) => {
-      if (state === 'lost') {
-        if (wasReady) lostAfterReady = true
-        this._ensurePendingReady()
-      } else if (state === 'ready') {
-        if (lostAfterReady) this._onRecovered()
-        wasReady = true
-        lostAfterReady = false
-        this._settleReady()
-      } else if (state === 'closed') {
-        this._ensurePendingReady()
-        notifyTerminal()
-      }
-    })
-    if (previous) void previous.unsubscribe().catch(reportRoomError)
-  }
-
-  /** Exhausted policy keeps demand and holder readiness pending, but drops the dead raw attempt until the next planning pass. */
-  markLost(): void {
-    const subscription = this._subscription
-    this._subscription = null
-    this._unobserve?.()
-    this._unobserve = null
-    if (subscription) void subscription.unsubscribe().catch(reportRoomError)
-  }
-
-  stop(): void {
-    const subscription = this._subscription
-    this._subscription = null
-    this._subscribe = null
-    this._unobserve?.()
-    this._unobserve = null
-    this._settleReady()
-    this._readyPromise = Promise.resolve()
-    if (subscription) void subscription.unsubscribe().catch(reportRoomError)
-  }
-
-  private _ensurePendingReady(): void {
-    if (this._resolveReady !== null) return
-    this._readyPromise = new Promise<void>((resolve) => {
-      this._resolveReady = resolve
-    })
-  }
-
-  private _settleReady(): void {
-    this._resolveReady?.()
-    this._resolveReady = null
-  }
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer))
 }
 
 function withinRoomHorizon<T>(promise: Promise<T>, ms: number): Promise<T> {
-  if (ms <= 0) return Promise.reject(new RoomError('Room subscription recovery horizon expired'))
-  let timer!: ReturnType<typeof setTimeout>
-  const timeout = new Promise<never>((_, reject) => {
-    timer = unrefTimer(setTimeout(() => reject(new RoomError('Room subscription recovery horizon expired')), ms))
+  return raceTimeout(promise, ms, () => {
+    throw new RoomError('Room subscription recovery horizon expired')
   })
-  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer))
 }
 
 async function publishCtrl(roomId: string, inc: string, event: RoomCtrlEnvelope): Promise<void> {

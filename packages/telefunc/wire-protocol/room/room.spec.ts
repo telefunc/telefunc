@@ -26,7 +26,8 @@ import { ClientBroadcast } from '../client/channel.js'
 import { RoomState, remoteBacking } from './state.js'
 import { Room } from './server/statics.js'
 import { ServerRoom, type ServerLocalParticipant } from './server/room.js'
-import { SubSlot, configFromHead, decodeRoomText, encodeRoomConfig } from './server/lanes.js'
+import { configFromHead, decodeRoomText, encodeRoomConfig } from './server/lanes.js'
+import type { LaneSubscription } from './server/lane-subscription.js'
 import { reportRoomError, roomAckError } from './server/errors.js'
 import { RoomParticipantStubChannel, RoomStubChannel } from './server/stub.js'
 import { ReplayGate } from './server/replay.js'
@@ -500,7 +501,7 @@ describe('Room public behavior', () => {
     const observer = (await Room.get(authority.id)) as ServerRoom
     expect(await observer.getParticipants()).toEqual([])
     const readiness = deferred<void>()
-    const slot = (observer as unknown as { _ctrlSub: SubSlot })._ctrlSub
+    const slot = (observer as unknown as { _ctrlSub: LaneSubscription })._ctrlSub
     slot.sync(true, () => ({
       ready: readiness.promise,
       state: () => 'establishing',
@@ -518,7 +519,9 @@ describe('Room public behavior', () => {
     const observer = (await Room.get(authority.id)) as ServerRoom
     observer.onJoin(() => {})
     await observer.getParticipants()
-    await vi.waitFor(() => expect((observer as unknown as { _ctrlSub: SubSlot })._ctrlSub.established).toBe(true))
+    await vi.waitFor(() =>
+      expect((observer as unknown as { _ctrlSub: LaneSubscription })._ctrlSub.established).toBe(true),
+    )
     expect(observer._state.rosterKnown).toBe(true)
     const readCells = driver.readCells.bind(driver)
     const started = deferred<void>()
@@ -541,7 +544,7 @@ describe('Room public behavior', () => {
       }
     )._refreshMembers()
     await started.promise
-    expect((observer as unknown as { _ctrlSub: SubSlot })._ctrlSub.established).toBe(true)
+    expect((observer as unknown as { _ctrlSub: LaneSubscription })._ctrlSub.established).toBe(true)
     const participants = observer.getParticipants()
     const status = await Promise.race([
       participants.then(() => 'settled' as const),
@@ -587,7 +590,7 @@ describe('Room public behavior', () => {
     observer.onClose(onClose)
     observer.subscribe(() => {})
     await vi.advanceTimersByTimeAsync(ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS + 100)
-    const textSlot = (observer as unknown as { _textSub: SubSlot })._textSub
+    const textSlot = (observer as unknown as { _textSub: LaneSubscription })._textSub
     expect((await backend.readHead(observer.id))?.head.state).toBe('open')
     expect({ closed: observer.isClosed, onClose: onClose.mock.calls.length }).toEqual({ closed: false, onClose: 0 })
     expect(textSlot).toMatchObject({ wanted: true, active: false })

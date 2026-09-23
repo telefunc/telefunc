@@ -48,10 +48,10 @@ import type { RoomStubChannel } from './stub.js'
 import type { RoomRequest } from './requests.js'
 import { LocalHolder, type LaneHolder } from './replay.js'
 import { TailHold } from './tail.js'
+import { LaneSubscription } from './lane-subscription.js'
 import {
   CONTROL_LANE,
   SEMANTIC_LANE,
-  SubSlot,
   commitRoomLane,
   decodeRoomText,
   encodeRoomRecord,
@@ -141,17 +141,11 @@ class ServerRoom extends RoomStateView implements Room {
   /** Members registered with their holder so their inbox can establish, but not yet durable. They own inbox routes; heartbeat must not renew/reap them until the member cell commits. */
   private readonly _pendingAdmissions = new Set<string>()
 
-  private readonly _ctrlSub = new SubSlot(
-    (slot, error) => this._onTerminalSubscription(slot, error),
-    () => void this._reconcileAuthority().catch(reportRoomError),
-  )
-  private readonly _textSub = new SubSlot(
-    (slot, error) => this._onTerminalSubscription(slot, error),
-    () => void this._reconcileAuthority().catch(reportRoomError),
-  )
-  /** Upstream subscriptions keyed by their policy identity. */
-  private readonly _binaryKeyUnsubs = new Map<string, SubSlot>()
-  private readonly _dmUnsubs = new Map<string, SubSlot>()
+  private readonly _ctrlSub = this._newLaneSubscription()
+  private readonly _textSub = this._newLaneSubscription()
+  /** Keyed by (member, track) and by member. */
+  private readonly _binarySubs = new Map<string, LaneSubscription>()
+  private readonly _inboxSubs = new Map<string, LaneSubscription>()
   /** (member, track) pairs this instance has already announced — first publish pays the KV append + ctrl event, every further frame is a Set lookup. */
   private readonly _announcedTracks = new Map<string, Set<string>>()
   /** Cross-node binary-demand aggregation (`onDemand`) — constructed once `roomId` and the ownership/delivery callbacks are available (see the constructor). */
@@ -159,7 +153,7 @@ class ServerRoom extends RoomStateView implements Room {
   private _heartbeatTimer: ReturnType<typeof setInterval> | null = null
   private _heartbeatBusy = false
   private _pendingRefresh: Promise<void> | null = null
-  private readonly _recoveringSubscriptions = new Set<SubSlot>()
+  private readonly _recoveringSubscriptions = new Set<LaneSubscription>()
   private _controlSeq = 0
 
   constructor(roomId: string, config: RoomConfigRecord, seed: { members: MemberSnapshot[] } | { count: number }) {
@@ -274,8 +268,8 @@ class ServerRoom extends RoomStateView implements Room {
   }
 
   /** The member's inbox slot exists exactly while the room is open and its holder owns the member. */
-  private _admittedInbox(id: string): SubSlot {
-    const inbox = this._dmUnsubs.get(id)
+  private _admittedInbox(id: string): LaneSubscription {
+    const inbox = this._inboxSubs.get(id)
     if (inbox === undefined)
       throw new RoomError(this._state.closed ? `Room is closed: ${this.id}` : 'Participant left the room')
     return inbox
@@ -667,7 +661,7 @@ class ServerRoom extends RoomStateView implements Room {
   }
 
   /** Recover a still-wanted terminal lane inside Room's one policy horizon. */
-  private _onTerminalSubscription(slot: SubSlot, failure?: unknown): void {
+  private _onTerminalSubscription(slot: LaneSubscription, failure?: unknown): void {
     if (failure !== undefined) reportRoomError(failure)
     if (this._recoveringSubscriptions.has(slot)) return
     this._recoveringSubscriptions.add(slot)
@@ -675,28 +669,25 @@ class ServerRoom extends RoomStateView implements Room {
       .catch(reportRoomError)
       .finally(() => this._recoveringSubscriptions.delete(slot))
   }
-  private async _recoverTerminalSubscription(slot: SubSlot): Promise<void> {
+  private async _recoverTerminalSubscription(slot: LaneSubscription): Promise<void> {
     const deadline = Date.now() + ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS
-    const attemptMs = ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS / (ROOM_REPLAN_LIMIT + 1)
-    for (let attempt = 0; attempt <= ROOM_REPLAN_LIMIT && slot.wanted; attempt++) {
-      try {
-        if ((await withinRoomHorizon(this._readOpenConfig(), deadline - Date.now())) === null) {
-          this._closeFromAuthority()
-          return
-        }
-        slot.retry()
-        await withinRoomHorizon(slot.attemptReady, Math.min(attemptMs, deadline - Date.now()))
-      } catch (error) {
-        reportRoomError(error)
-        if (Date.now() >= deadline) break
-        continue
-      }
-      await this._reconcileAuthority() // catch up on what the outage dropped; the lane itself is healthy
-      return
+    for (let attempt = 0; attempt <= ROOM_REPLAN_LIMIT && slot.wanted && Date.now() < deadline; attempt++) {
+      const outcome = await this._attemptRecovery(slot, deadline).catch((error: unknown) => reportRoomError(error))
+      if (outcome === 'closed') return this._closeFromAuthority()
+      // Catch up on what the outage dropped; the lane itself is healthy.
+      if (outcome === 'ready') return await this._reconcileAuthority()
     }
     if (!slot.wanted) return
     reportRoomError(new Error(`Room subscription recovery exhausted: ${this.id}`))
     slot.markLost()
+  }
+  /** One replacement attempt, within its share of the horizon. */
+  private async _attemptRecovery(slot: LaneSubscription, deadline: number): Promise<'closed' | 'ready'> {
+    if ((await withinRoomHorizon(this._readOpenConfig(), deadline - Date.now())) === null) return 'closed'
+    slot.retry()
+    const attemptMs = ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS / (ROOM_REPLAN_LIMIT + 1)
+    await withinRoomHorizon(slot.attemptReady, Math.min(attemptMs, deadline - Date.now()))
+    return 'ready'
   }
   /** The authority says the room closed; the lane that would have carried `closed` failed, so relay it here. */
   private _closeFromAuthority(): void {
@@ -876,7 +867,7 @@ class ServerRoom extends RoomStateView implements Room {
     const state = this._state
     if ((plan.becomesObserved && state.rosterKnown) || (plan.open && !state.rosterKnown && plan.needsRoster))
       void this._refreshMembers().catch(reportRoomError)
-    this._syncKeyedSubs(this._binaryKeyUnsubs, plan.wantAnyBinary ? this._binaryLanes(plan.binaryPairs) : [], (lane) =>
+    this._syncKeyedSubs(this._binarySubs, plan.wantAnyBinary ? this._binaryLanes(plan.binaryPairs) : [], (lane) =>
       plan.backend.subscribeLane(this.id, this._inc, lane, (framed, info) => this._onBinary(framed, info)),
     )
     if (plan.binaryPairs.length === 0) this._demand.sync([])
@@ -892,7 +883,7 @@ class ServerRoom extends RoomStateView implements Room {
 
   private _syncInbox(plan: SubscriptionPlan): void {
     this._syncKeyedSubs(
-      this._dmUnsubs,
+      this._inboxSubs,
       plan.open
         ? this._ownedMemberIds().map((member) => ({ key: member, value: { kind: 'inbox', member } as const }))
         : [],
@@ -955,7 +946,7 @@ class ServerRoom extends RoomStateView implements Room {
     return { all: false, members }
   }
   private _syncKeyedSubs<T>(
-    subs: Map<string, SubSlot>,
+    subs: Map<string, LaneSubscription>,
     wantedEntries: Array<{ key: string; value: T }>,
     subscribe: (value: T) => BackendSubscription,
   ) {
@@ -968,19 +959,19 @@ class ServerRoom extends RoomStateView implements Room {
     }
     for (const [key, value] of wanted) {
       let slot = subs.get(key)
-      if (!slot) {
-        slot = new SubSlot(
-          (terminal, error) => this._onTerminalSubscription(terminal, error),
-          () => void this._reconcileAuthority().catch(reportRoomError),
-        )
-        subs.set(key, slot)
-      }
+      if (!slot) subs.set(key, (slot = this._newLaneSubscription()))
       slot.sync(true, () => subscribe(value))
     }
   }
+  private _newLaneSubscription(): LaneSubscription {
+    return new LaneSubscription(
+      (slot, error) => this._onTerminalSubscription(slot, error),
+      () => void this._reconcileAuthority().catch(reportRoomError),
+    )
+  }
   private _binaryReady(): Promise<void> {
     const pending: Promise<void>[] = []
-    for (const subscription of this._binaryKeyUnsubs.values()) pending.push(subscription.ready)
+    for (const subscription of this._binarySubs.values()) pending.push(subscription.ready)
     return pending.length === 0
       ? Promise.resolve()
       : withinRoomHorizon(Promise.all(pending), ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS).then(() => undefined)
