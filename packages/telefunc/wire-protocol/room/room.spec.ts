@@ -815,6 +815,15 @@ describe('Room public behavior', () => {
     await settingB
     expect(me.meta).toEqual({ v: 'A' })
   })
+  it("releases a closed room's memory record once its tombstone lapses", async () => {
+    vi.useFakeTimers()
+    await Room.create('released-record')
+    await Room.close('released-record')
+    expect(memoryState.rooms.has('released-record')).toBe(true)
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(memoryState.rooms.has('released-record')).toBe(false)
+    await expect(Room.create('released-record')).resolves.toMatchObject({ id: 'released-record' })
+  })
   it('applies room-wide and member-specific binary wants to both subscription and demand', async () => {
     const room = await Room.create('binary-pairs')
     const publisher = await room.join()

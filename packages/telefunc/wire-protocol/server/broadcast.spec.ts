@@ -416,6 +416,13 @@ describe('Broadcast lifecycle and route ownership', () => {
     )
   })
 
+  it('forgets a broadcast route once its last subscriber leaves', async () => {
+    const unsubscribe = Broadcast.subscribe('broadcast:route-released', () => {})
+    expect(memoryState.broadcastSubs.size).toBe(1)
+    unsubscribe()
+    await vi.waitFor(() => expect(memoryState.broadcastSubs.size).toBe(0))
+  })
+
   it('publishes from onClose to the key, as the documented chat pattern does', async () => {
     const key = 'broadcast:publish-on-close'
     const received: string[] = []

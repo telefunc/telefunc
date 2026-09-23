@@ -16,6 +16,7 @@ import type {
 } from '../room/contract.js'
 import { assertHeadDeleteLegal, assertHeadTransition } from '../room/head-transitions.js'
 import { encodeLaneKey } from '../room/lane-key.js'
+import { unrefTimer } from '../../../utils/unrefTimer.js'
 import type {
   BackendReceiver,
   SubscriptionAttempt,
@@ -113,12 +114,12 @@ class MemorySubscriptionAttempt implements SubscriptionAttempt {
   readonly #listeners = new Set<(state: SubscriptionAttemptState) => void>()
   readonly #receiver: BackendReceiver
   readonly #localReceiverCount: () => number
-  readonly #targets?: Set<MemorySubscriptionAttempt>
+  readonly #detach?: () => void
 
-  constructor(receiver: BackendReceiver, localReceiverCount: () => number, targets?: Set<MemorySubscriptionAttempt>) {
+  constructor(receiver: BackendReceiver, localReceiverCount: () => number, detach?: () => void) {
     this.#receiver = receiver
     this.#localReceiverCount = localReceiverCount
-    this.#targets = targets
+    this.#detach = detach
     this.ready = new Promise<void>((resolve, reject) => {
       this.#settle = { resolve, reject }
     })
@@ -141,7 +142,7 @@ class MemorySubscriptionAttempt implements SubscriptionAttempt {
 
   async unsubscribe(): Promise<void> {
     if (this.closed) return
-    this.#targets?.delete(this)
+    this.#detach?.()
     this.#transition('closed')
   }
 
@@ -412,9 +413,10 @@ export class MemoryBackend implements BroadcastDriver, RoomDriver {
   ): MemorySubscriptionAttempt {
     if (!('roomId' in source)) {
       const key = broadcastRouteKey(source)
-      const subs = getOrCreate(this.#state.broadcastSubs, key, () => new Set())
-      const sub = new MemorySubscriptionAttempt(receiver, localReceiverCount, subs)
-      subs.add(sub)
+      const sub: MemorySubscriptionAttempt = new MemorySubscriptionAttempt(receiver, localReceiverCount, () =>
+        removeFromSet(this.#state.broadcastSubs, key, sub),
+      )
+      getOrCreate(this.#state.broadcastSubs, key, () => new Set()).add(sub)
       sub.establish()
       return sub
     }
@@ -430,9 +432,10 @@ export class MemoryBackend implements BroadcastDriver, RoomDriver {
     }
     // Registration is durable before `ready` resolves: a commit accepted after this point must see it.
     const gen = this.#generation(room, inc)
-    const subs = getOrCreate(gen.subs, key, () => new Set())
-    const sub = new MemorySubscriptionAttempt(receiver, localReceiverCount, subs)
-    subs.add(sub)
+    const sub: MemorySubscriptionAttempt = new MemorySubscriptionAttempt(receiver, localReceiverCount, () =>
+      removeFromSet(gen.subs, key, sub),
+    )
+    getOrCreate(gen.subs, key, () => new Set()).add(sub)
     sub.establish()
     return sub
   }
@@ -447,6 +450,7 @@ export class MemoryBackend implements BroadcastDriver, RoomDriver {
     const gen = room.gens.get(inc)
     if (gen === undefined) return // already dropped — the janitor is resumable
     room.gens.delete(inc)
+    this.#releaseWhenLapsed(roomId, room)
   }
 
   async directoryPut(roomId: string, incTag: string): Promise<void> {
@@ -490,6 +494,18 @@ export class MemoryBackend implements BroadcastDriver, RoomDriver {
     return getOrCreate(this.#state.rooms, roomId, () => ({ head: null, gens: new Map() }))
   }
 
+  /** A room with no incarnation left is forgotten once its tombstone lapses (revs are process-global, never reused). */
+  #releaseWhenLapsed(roomId: string, room: RoomRecord): void {
+    if (this.#state.rooms.get(roomId) !== room || room.gens.size > 0) return
+    const head = this.#readAndExpireHead(room)
+    if (head === null) {
+      this.#state.rooms.delete(roomId)
+      return
+    }
+    if (head.expiresAt === null) return
+    unrefTimer(setTimeout(() => this.#releaseWhenLapsed(roomId, room), head.expiresAt - this.#now()))
+  }
+
   #generation(room: RoomRecord, inc: string): Generation {
     return getOrCreate(room.gens, inc, newGeneration)
   }
@@ -501,6 +517,11 @@ export class MemoryBackend implements BroadcastDriver, RoomDriver {
     room.head = null
     return null
   }
+}
+
+function removeFromSet<Key, Value>(map: Map<Key, Set<Value>>, key: Key, value: Value): void {
+  const set = map.get(key)
+  if (set?.delete(value) && set.size === 0) map.delete(key)
 }
 
 function getOrCreate<Key, Value>(map: Map<Key, Value>, key: Key, create: () => Value): Value {
