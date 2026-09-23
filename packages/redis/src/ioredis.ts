@@ -1,4 +1,4 @@
-// The package's only ioredis import: every fact about ioredis's options and internals lives here.
+// ioredis policy: the client options Room requires, subscriber creation, and calls to defined commands.
 export { assertAtMostOnceClient, createSubscriberSocket, defineCommand, callDefinedCommand, isCluster }
 export type { RedisClient, SubscriberSocket }
 
