@@ -322,7 +322,7 @@ describe('cloudflare broadcast routing', () => {
     configureTransport(transport, kv, binding)
     const subscription = transport.openSubscription({ key: 'room:test', kind: 'text' }, () => {})
     await subscription.ready
-    const value = await kv.get('tfps:text%3Aroom%3Atest:weur:telefunc-shard-weur-0')
+    const value = await kv.get('tfps:text:room%3Atest:weur:telefunc-shard-weur-0')
     expect(value).toBe('telefunc-shard-weur-0')
     const binary = await transport.publish({ key: 'room:test', kind: 'binary' }, new Uint8Array([1]))
     const text = await transport.publish({ key: 'room:test', kind: 'text' }, encode('"text"'))
@@ -335,10 +335,10 @@ describe('cloudflare broadcast routing', () => {
     const kv = createMockKV()
     const transport = createTransport(kv, false)
     await authorityState.getOrInitAuthorityBucket('room:first-touch', 'weur')
-    await kv.put('tfps:text%3Aroom%3Afirst-touch:weur:telefunc-shard-weur-0', 'telefunc-shard-weur-0', {
+    await kv.put('tfps:text:room%3Afirst-touch:weur:telefunc-shard-weur-0', 'telefunc-shard-weur-0', {
       expirationTtl: 90,
     })
-    await kv.put('tfps:text%3Aroom%3Afirst-touch:apac:telefunc-shard-apac-0', 'telefunc-shard-apac-0', {
+    await kv.put('tfps:text:room%3Afirst-touch:apac:telefunc-shard-apac-0', 'telefunc-shard-apac-0', {
       expirationTtl: 90,
     })
     const receipt = await transport.publishToSubscribers(authorityState, {
@@ -478,13 +478,13 @@ describe('cloudflare broadcast routing', () => {
       }),
       false,
     )
-    await kv.put('tfps:text%3Aroom%3Atest:weur:telefunc-shard-weur-0', 'telefunc-shard-weur-0', {
+    await kv.put('tfps:text:room%3Atest:weur:telefunc-shard-weur-0', 'telefunc-shard-weur-0', {
       expirationTtl: 90,
     })
-    await kv.put('tfps:text%3Aroom%3Atest:apac:telefunc-shard-apac-0', 'telefunc-shard-apac-0', {
+    await kv.put('tfps:text:room%3Atest:apac:telefunc-shard-apac-0', 'telefunc-shard-apac-0', {
       expirationTtl: 90,
     })
-    await kv.put('tfps:text%3Aroom%3Atest:eeur:telefunc-shard-eeur-0', 'telefunc-shard-eeur-0', {
+    await kv.put('tfps:text:room%3Atest:eeur:telefunc-shard-eeur-0', 'telefunc-shard-eeur-0', {
       expirationTtl: 90,
     })
     await transport.publishToSubscribers(authorityState, {
@@ -608,10 +608,10 @@ describe('cloudflare broadcast routing', () => {
       } as unknown as DurableObjectNamespace,
       false,
     )
-    await kv.put('tfps:text%3Aroom%3Atest:weur:telefunc-shard-weur-0', 'telefunc-shard-weur-0', {
+    await kv.put('tfps:text:room%3Atest:weur:telefunc-shard-weur-0', 'telefunc-shard-weur-0', {
       expirationTtl: 90,
     })
-    await kv.put('tfps:text%3Aroom%3Atest:apac:telefunc-shard-apac-0', 'telefunc-shard-apac-0', {
+    await kv.put('tfps:text:room%3Atest:apac:telefunc-shard-apac-0', 'telefunc-shard-apac-0', {
       expirationTtl: 90,
     })
     const firstPublish = transport.publishToSubscribers(authorityState, {
@@ -643,7 +643,7 @@ describe('cloudflare broadcast routing', () => {
     const transport = createTransport(kv)
     const subscription = transport.openSubscription({ key: 'room:test', kind: 'text' }, () => {})
     await subscription.ready
-    const key = 'tfps:text%3Aroom%3Atest:weur:telefunc-shard-weur-0'
+    const key = 'tfps:text:room%3Atest:weur:telefunc-shard-weur-0'
     expect(await kv.get(key)).toBe('telefunc-shard-weur-0')
     await subscription.unsubscribe()
     expect(await kv.get(key)).toBeNull()
@@ -655,7 +655,7 @@ describe('cloudflare broadcast routing', () => {
     const kv = createMockKV(hooks)
     const transport = createTransport(kv)
     const lane = { key: 'room:presence-churn', kind: 'text' } as const
-    const presenceKey = 'tfps:text%3Aroom%3Apresence-churn:weur:telefunc-shard-weur-0'
+    const presenceKey = 'tfps:text:room%3Apresence-churn:weur:telefunc-shard-weur-0'
     const first = transport.openSubscription(lane, () => {})
     await first.unsubscribe()
     const successor = transport.openSubscription(lane, () => {})
@@ -683,7 +683,7 @@ describe('cloudflare broadcast routing', () => {
     const kv = createMockKV(hooks)
     const transport = createTransport(kv)
     const lane = { key: 'room:deferred-teardown', kind: 'text' } as const
-    const presenceKey = 'tfps:text%3Aroom%3Adeferred-teardown:weur:telefunc-shard-weur-0'
+    const presenceKey = 'tfps:text:room%3Adeferred-teardown:weur:telefunc-shard-weur-0'
     await transport.openSubscription(lane, () => {}).unsubscribe()
     hooks.beforeDelete = () => {
       deleting.resolve()

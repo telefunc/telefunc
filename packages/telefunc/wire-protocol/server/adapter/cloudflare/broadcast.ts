@@ -5,13 +5,13 @@ export type { BroadcastDeliverRequest, BroadcastForwardRequest, BroadcastPublish
 import { KNOWN_BROADCAST_BUCKETS, getBucketCoordinatorShardIndices, getDeterministicKeyBucketIndex } from './routing.js'
 import { assert } from '../../../../utils/assert.js'
 import type { BroadcastLane, PublishResult } from '../../../backend/broadcast/contract.js'
+import { broadcastRouteKey } from '../../../backend/broadcast/route-key.js'
 import type { BackendReceiver, SubscriptionAttempt, SubscriptionState } from '../../../backend/subscription.js'
 import type { OrderingInfo } from '../../../ordering-frame.js'
 import type { CloudflareScale, LocationBucket } from './routing.js'
 
 const PRESENCE_TTL_SECONDS = 90
 const PRESENCE_REFRESH_INTERVAL_MS = 30_000
-const laneKey = (lane: BroadcastLane) => `${lane.kind}:${lane.key}`
 
 /** Unwrap Cloudflare DO RPC proxy into a plain object.
  *  RPC properties are lazy stubs that must be awaited to resolve their values. */
@@ -55,15 +55,15 @@ type TelefuncDurableObjectStub = DurableObjectStub & {
   telefuncBroadcastDeliver(request: BroadcastDeliverRequest): Promise<void>
 }
 
+/** One lane's KV presence for this isolate's representative DO. */
 class MemberBucketState {
-  setupInFlight = true
+  state: 'establishing' | 'ready' | 'lost' = 'establishing'
   teardownRequested = false
   refreshTimer: ReturnType<typeof setInterval> | null = null
   readonly ready: Promise<void>
   private settleReady!: { resolve: () => void; reject: (error: unknown) => void }
   readonly authority: TelefuncDurableObjectStub
   readonly #presenceListeners = new Set<(state: 'ready' | 'lost') => void>()
-  #presenceState: 'establishing' | 'ready' | 'lost' = 'establishing'
 
   constructor(authority: TelefuncDurableObjectStub) {
     this.authority = authority
@@ -74,8 +74,8 @@ class MemberBucketState {
   }
 
   acknowledgePresence(): void {
-    const recovered = this.#presenceState === 'lost'
-    this.#presenceState = 'ready'
+    const recovered = this.state === 'lost'
+    this.state = 'ready'
     this.settleReady.resolve()
     if (recovered) this.#notifyPresenceState('ready')
   }
@@ -85,8 +85,8 @@ class MemberBucketState {
   }
 
   losePresence(): void {
-    if (this.#presenceState !== 'ready') return
-    this.#presenceState = 'lost'
+    if (this.state !== 'ready') return
+    this.state = 'lost'
     this.#notifyPresenceState('lost')
   }
 
@@ -106,11 +106,6 @@ class MemberBucketState {
     for (const listener of [...this.#presenceListeners]) listener(state)
   }
 }
-
-// ---------------------------------------------------------------------------
-// CloudflareBroadcastAuthorityState — wraps DurableObjectState for seq counters
-// and authority bucket persistence. One per DO instance, passed to publishToSubscribers.
-// ---------------------------------------------------------------------------
 
 class CloudflareBroadcastSubscriptionAttempt implements SubscriptionAttempt {
   readonly ready: Promise<void>
@@ -169,6 +164,7 @@ class CloudflareBroadcastSubscriptionAttempt implements SubscriptionAttempt {
   }
 }
 
+/** A key authority DO's sequence counters and first-touch authority buckets. */
 class CloudflareBroadcastAuthorityState {
   private readonly state: DurableObjectState
   private authorityPublishChain: Promise<void> = Promise.resolve()
@@ -229,8 +225,7 @@ class CloudflareBroadcastTransport {
   private representativeDOName: string | null = null
   private readonly presenceMutationChains = new Map<string, Promise<void>>()
   private readonly memberStates = new Map<string, MemberBucketState>()
-  private readonly textSubs = new Map<string, CloudflareBroadcastSubscriptionAttempt>()
-  private readonly binarySubs = new Map<string, CloudflareBroadcastSubscriptionAttempt>()
+  private readonly subscriptions = new Map<string, CloudflareBroadcastSubscriptionAttempt>()
 
   constructor({ baseInstanceName, scale }: { baseInstanceName: string; scale?: CloudflareScale }) {
     this.baseInstanceName = baseInstanceName
@@ -257,8 +252,6 @@ class CloudflareBroadcastTransport {
     }
   }
 
-  // --- KV presence ---
-
   private requireKV(): KVNamespace {
     assert(this.kv, 'Cloudflare KV binding is not attached. Broadcast requires a KV namespace.')
     return this.kv
@@ -274,40 +267,40 @@ class CloudflareBroadcastTransport {
     return this.representativeDOName
   }
 
-  private getPresenceKey(key: string): string {
-    return `tfps:${encodeURIComponent(key)}:${this.locationBucket}:${this.representativeDOName}`
+  private getPresenceKey(routeKey: string): string {
+    return `${this.getPresencePrefix(routeKey)}${this.locationBucket}:${this.representativeDOName}`
   }
 
-  private getPresencePrefix(key: string): string {
-    return `tfps:${encodeURIComponent(key)}:`
+  private getPresencePrefix(routeKey: string): string {
+    return `tfps:${routeKey}:`
   }
 
-  private async putPresence(key: string): Promise<void> {
-    await this.mutatePresence(key, () => {
+  private async putPresence(routeKey: string): Promise<void> {
+    await this.mutatePresence(routeKey, () => {
       const doName = this.requireRepresentativeDOName()
-      return this.requireKV().put(this.getPresenceKey(key), doName, {
+      return this.requireKV().put(this.getPresenceKey(routeKey), doName, {
         expirationTtl: PRESENCE_TTL_SECONDS,
       })
     })
   }
 
-  private async deletePresence(key: string): Promise<void> {
-    await this.mutatePresence(key, () => this.requireKV().delete(this.getPresenceKey(key)))
+  private async deletePresence(routeKey: string): Promise<void> {
+    await this.mutatePresence(routeKey, () => this.requireKV().delete(this.getPresenceKey(routeKey)))
   }
 
-  private async mutatePresence(key: string, mutation: () => Promise<void>): Promise<void> {
-    const current = (this.presenceMutationChains.get(key) ?? Promise.resolve()).catch(() => {}).then(mutation)
-    this.presenceMutationChains.set(key, current)
+  private async mutatePresence(routeKey: string, mutation: () => Promise<void>): Promise<void> {
+    const current = (this.presenceMutationChains.get(routeKey) ?? Promise.resolve()).catch(() => {}).then(mutation)
+    this.presenceMutationChains.set(routeKey, current)
     try {
       await current
     } finally {
-      if (this.presenceMutationChains.get(key) === current) this.presenceMutationChains.delete(key)
+      if (this.presenceMutationChains.get(routeKey) === current) this.presenceMutationChains.delete(routeKey)
     }
   }
 
-  private async listPresenceByBucket(key: string): Promise<Map<LocationBucket, string[]>> {
+  private async listPresenceByBucket(routeKey: string): Promise<Map<LocationBucket, string[]>> {
     const kv = this.requireKV()
-    const prefix = this.getPresencePrefix(key)
+    const prefix = this.getPresencePrefix(routeKey)
     const result = new Map<LocationBucket, string[]>()
     let cursor: string | undefined
 
@@ -332,11 +325,10 @@ class CloudflareBroadcastTransport {
     return result
   }
 
-  // --- Local subscriber tracking ---
-
   publish(lane: BroadcastLane, payload: Uint8Array): Promise<PublishResult> {
     const locationBucket = this.requireLocationBucket()
-    const authority = this.memberStates.get(laneKey(lane))?.authority ?? this.getAuthorityStub(lane.key, locationBucket)
+    const authority =
+      this.memberStates.get(broadcastRouteKey(lane))?.authority ?? this.getAuthorityStub(lane.key, locationBucket)
     return unwrapRpcResult(
       authority.telefuncBroadcastPublish({ key: lane.key, kind: lane.kind, locationBucket, payload }),
     )
@@ -351,7 +343,7 @@ class CloudflareBroadcastTransport {
     const { authorityBucket, seq, presenceByBucket } = await authorityState.runInAuthorityChain(async () => ({
       authorityBucket: await authorityState.getOrInitAuthorityBucket(key, locationBucket),
       seq: await authorityState.getNextKeySeq(key),
-      presenceByBucket: await this.listPresenceByBucket(laneKey({ key, kind })),
+      presenceByBucket: await this.listPresenceByBucket(broadcastRouteKey({ key, kind })),
     }))
 
     const info = { seq, timestamp: Date.now() }
@@ -378,97 +370,77 @@ class CloudflareBroadcastTransport {
     await Promise.all(doNames.map((doName) => this.getBoundStub(doName).telefuncBroadcastDeliver(delivery)))
   }
 
-  /**
-   * Delivers a publish to local subscribers. Called via RPC on the representative DO for this isolate.
-   */
+  /** Delivers a publish to this isolate's subscription. Called via RPC on its representative DO. */
   async deliverToLocal(request: BroadcastDeliverRequest): Promise<void> {
-    const attempt = (request.kind === 'text' ? this.textSubs : this.binarySubs).get(request.key)
-    await attempt?.deliver(request.payload, request.info)
+    await this.subscriptions.get(broadcastRouteKey(request))?.deliver(request.payload, request.info)
   }
 
-  // --- Private ---
-
   openSubscription(lane: BroadcastLane, receiver: BackendReceiver): CloudflareBroadcastSubscriptionAttempt {
-    const locationBucket = this.requireLocationBucket()
-    const member = this.ensurePresence(lane, locationBucket)
-    const routes = lane.kind === 'text' ? this.textSubs : this.binarySubs
-    let attempt!: CloudflareBroadcastSubscriptionAttempt
-    attempt = new CloudflareBroadcastSubscriptionAttempt(member, receiver, async () => {
-      if (routes.get(lane.key) === attempt) routes.delete(lane.key)
-      await this.teardownPresenceIfEmpty(lane)
-    })
-    routes.set(lane.key, attempt)
+    const routeKey = broadcastRouteKey(lane)
+    const member = this.ensurePresence(lane, routeKey)
+    const attempt: CloudflareBroadcastSubscriptionAttempt = new CloudflareBroadcastSubscriptionAttempt(
+      member,
+      receiver,
+      async () => {
+        if (this.subscriptions.get(routeKey) === attempt) this.subscriptions.delete(routeKey)
+        await this.teardownPresenceIfEmpty(routeKey)
+      },
+    )
+    this.subscriptions.set(routeKey, attempt)
     return attempt
   }
 
-  private ensurePresence(lane: BroadcastLane, locationBucket: LocationBucket): MemberBucketState {
-    const key = laneKey(lane)
-    const existing = this.memberStates.get(key)
+  async dispose(): Promise<void> {
+    await Promise.allSettled([...this.subscriptions.values()].map((attempt) => attempt.unsubscribe()))
+    this.subscriptions.clear()
+    await Promise.allSettled([...this.memberStates].map(([routeKey, member]) => this.releasePresence(routeKey, member)))
+  }
+
+  private ensurePresence(lane: BroadcastLane, routeKey: string): MemberBucketState {
+    const existing = this.memberStates.get(routeKey)
     if (existing !== undefined) {
       existing.teardownRequested = false
       return existing
     }
-    const memberState = new MemberBucketState(this.getAuthorityStub(lane.key, locationBucket))
-    this.memberStates.set(key, memberState)
-    void this.initializePresence(key, memberState).catch(() => {})
-    return memberState
+    const member = new MemberBucketState(this.getAuthorityStub(lane.key, this.requireLocationBucket()))
+    this.memberStates.set(routeKey, member)
+    // Nobody awaits a deferred teardown; a failed presence delete lapses with the presence TTL.
+    void this.initializePresence(routeKey, member).catch(() => {})
+    return member
   }
 
-  private async teardownPresenceIfEmpty(lane: BroadcastLane): Promise<void> {
-    if ((lane.kind === 'text' ? this.textSubs : this.binarySubs).has(lane.key)) return
-    const key = laneKey(lane)
-    const memberState = this.memberStates.get(key)
-    if (!memberState) return
-
-    if (memberState.setupInFlight) {
-      memberState.teardownRequested = true
+  private async initializePresence(routeKey: string, member: MemberBucketState): Promise<void> {
+    try {
+      await this.putPresence(routeKey)
+    } catch (error) {
+      member.rejectPresence(error)
+      if (this.memberStates.get(routeKey) === member) this.memberStates.delete(routeKey)
       return
     }
-
-    memberState.stopRefresh()
-    this.memberStates.delete(key)
-    await this.deletePresence(key)
-  }
-
-  private async initializePresence(key: string, memberState: MemberBucketState): Promise<void> {
-    try {
-      await this.putPresence(key)
-      memberState.setupInFlight = false
-      memberState.acknowledgePresence()
-    } catch (error) {
-      memberState.setupInFlight = false
-      memberState.rejectPresence(error)
-      if (this.memberStates.get(key) === memberState) this.memberStates.delete(key)
-      throw error
-    }
-
-    memberState.refreshTimer = setInterval(() => {
-      void this.putPresence(key).then(
-        () => memberState.acknowledgePresence(),
-        () => memberState.losePresence(),
+    member.acknowledgePresence()
+    if (member.teardownRequested) return this.releasePresence(routeKey, member)
+    member.refreshTimer = setInterval(() => {
+      void this.putPresence(routeKey).then(
+        () => member.acknowledgePresence(),
+        () => member.losePresence(),
       )
     }, PRESENCE_REFRESH_INTERVAL_MS)
-
-    if (memberState.teardownRequested) {
-      memberState.stopRefresh()
-      if (this.memberStates.get(key) === memberState) this.memberStates.delete(key)
-      await this.deletePresence(key)
-    }
   }
 
-  async dispose(): Promise<void> {
-    const attempts = [...this.textSubs.values(), ...this.binarySubs.values()]
-    await Promise.allSettled(attempts.map((attempt) => attempt.unsubscribe()))
-    const states = [...this.memberStates.entries()]
-    this.memberStates.clear()
-    this.textSubs.clear()
-    this.binarySubs.clear()
-    await Promise.allSettled(
-      states.map(async ([key, state]) => {
-        state.stopRefresh()
-        await this.deletePresence(key)
-      }),
-    )
+  private async teardownPresenceIfEmpty(routeKey: string): Promise<void> {
+    const member = this.memberStates.get(routeKey)
+    if (member === undefined || this.subscriptions.has(routeKey)) return
+    if (member.state === 'establishing') {
+      member.teardownRequested = true
+      return
+    }
+    await this.releasePresence(routeKey, member)
+  }
+
+  private async releasePresence(routeKey: string, member: MemberBucketState): Promise<void> {
+    member.stopRefresh()
+    if (this.memberStates.get(routeKey) === member) this.memberStates.delete(routeKey)
+    await this.deletePresence(routeKey)
   }
 
   private getBucketCoordinatorStub(key: string, locationBucket: LocationBucket): TelefuncDurableObjectStub {
