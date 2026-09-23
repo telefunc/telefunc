@@ -28,6 +28,9 @@ import { SubSlot, configFromHead, decodeRoomText, encodeRoomConfig } from './ser
 import { reportRoomError, roomAckError } from './server/errors.js'
 import { RoomParticipantStubChannel, RoomStubChannel, bindParticipantStubChannel } from './stubs.js'
 import { RoomDemand } from './demand.js'
+import { roomParticipantReplacer, roomReplacer } from './response-server.js'
+import type { ServerReplacerContext } from '../types.js'
+import type { ServerChannel } from '../server/channel.js'
 import type { ChannelPublishInfo } from '../channel.js'
 import {
   disposeBackend,
@@ -766,6 +769,29 @@ describe('Room public behavior', () => {
     await quiet.publishBinary(new Uint8Array([1]))
     await quiet.publishBinary(new Uint8Array([2]), { track: 'screen', meta: { key: true } })
     expect(screen).toEqual([[2, { key: true }]])
+  })
+  it("drops a co-returned participant's echo on the room stub even across Room instances", async () => {
+    await Room.create('self-suppress-by-id')
+    const me = (await Room.join('self-suppress-by-id', { selfDelivery: false })) as ServerLocalParticipant
+    const room = (await Room.get('self-suppress-by-id')) as ServerRoom
+    const channels: ServerChannel[] = []
+    const context = {
+      registerChannel: (channel: ServerChannel) => {
+        channel._registerChannel()
+        channels.push(channel)
+      },
+      validators: new Map(),
+    } as unknown as ServerReplacerContext
+    roomReplacer.replace(room, context)
+    roomParticipantReplacer.replace(me, context)
+    const stub = channels.find((channel) => channel instanceof RoomStubChannel) as RoomStubChannel
+    const peer = attachPeer(stub)
+    stub._onPeerBroadcastSubscribe(false)
+    const other = await room.join()
+    await me.publish('echo')
+    await other.publish('marker')
+    await vi.waitFor(() => expect(semanticFrames(peer, 'data')).toContain('marker'))
+    expect(semanticFrames(peer, 'data')).not.toContain('echo')
   })
   it('applies room-wide and member-specific binary wants to both subscription and demand', async () => {
     const room = await Room.create('binary-pairs')

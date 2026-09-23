@@ -29,12 +29,13 @@ type RoomRemoteReplacerContract = TypeContract<
 /** Per-response echo suppression shared by the Room replacers in one serializer pass. */
 const ROOM_SELF_SUPPRESS = Symbol()
 type RoomReplacerContext = ServerReplacerContext & {
-  [ROOM_SELF_SUPPRESS]?: Map<ServerRoom, Set<string>>
+  [ROOM_SELF_SUPPRESS]?: Map<string, Set<string>>
 }
+/** Keyed by room id: `Room.join(id)` and `Room.get(id)` build separate instances of one room. */
 function roomSelfSuppressSet(context: ServerReplacerContext, room: ServerRoom): Set<string> {
   const byRoom = ((context as RoomReplacerContext)[ROOM_SELF_SUPPRESS] ??= new Map())
-  let set = byRoom.get(room)
-  if (!set) byRoom.set(room, (set = new Set()))
+  let set = byRoom.get(room.id)
+  if (!set) byRoom.set(room.id, (set = new Set()))
   return set
 }
 const roomReplacer: ReplacerType<RoomReplacerContract, ServerReplacerContext> = {
