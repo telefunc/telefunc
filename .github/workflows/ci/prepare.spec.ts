@@ -211,6 +211,14 @@ describe('prepare()', () => {
                   "job": "Playground Stream",
                 },
               },
+              "testFilePath": "test/playground-stream/.test-preview.binary-inline.node.test.ts",
+            },
+            {
+              "localConfig": {
+                "ci": {
+                  "job": "Playground Stream",
+                },
+              },
               "testFilePath": "test/playground-stream/.test-preview.binary-inline.sse.test.ts",
             },
             {
