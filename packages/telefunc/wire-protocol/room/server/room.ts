@@ -27,9 +27,17 @@ import {
   type TrackWants,
 } from '../binary.js'
 import { DM_PARTICIPANT_LEFT, RoomError, participantGoneError, roomClosedError, roomFailureError } from '../errors.js'
-import { leaveCauseFromWire, mergeAttributes, normalizeJoinOptions, ownMetaArgument, recipientId } from '../model.js'
+import {
+  leaveCauseFromWire,
+  mergeAttributes,
+  normalizeJoinOptions,
+  ownMetaArgument,
+  recipientId,
+  senderOf,
+} from '../model.js'
 import {
   hasRoomTag,
+  joinedMember,
   type MemberWants,
   type MemberSnapshot,
   type RoomConfigRecord,
@@ -101,11 +109,6 @@ function hiddenMemberOf(event: RoomCtrlEnvelope): string | null {
   if (event.__r === 'join' || event.__r === 'leave' || event.__r === 'p-meta' || event.__r === 'track')
     return event.hidden === true ? event.id : null
   return null
-}
-
-/** Guards and hooks get a detached snapshot of a member, never a live handle. */
-function senderOf(id: string, meta: ParticipantMeta, identity: string | null): Sender {
-  return Object.freeze({ id, meta, identity })
 }
 
 type SubscriptionPlan = {
@@ -203,7 +206,7 @@ class ServerRoom extends RoomStateView implements Room {
 
   async getParticipants(options?: { hidden?: boolean }): Promise<RemoteParticipant[]> {
     await this._ensureRoster()
-    return options?.hidden ? this._state.listHidden() : this._state.listRemotes()
+    return options?.hidden ? this._state.listHidden() : this._state.listVisible()
   }
 
   async getParticipant(id: string): Promise<RemoteParticipant | null> {
@@ -250,7 +253,7 @@ class ServerRoom extends RoomStateView implements Room {
       created = true
       this._admittedInbox(id)
       this._pendingAdmissions.delete(id)
-      this._state.applyJoin(id, meta, joinedAt, identity, hidden)
+      this._state.applyJoin({ id, meta, joinedAt, metaSeq: 0, identity, ...(hidden ? { hidden: true } : {}) })
       await publishCtrl(this.id, this._inc, {
         __r: 'join',
         id,
@@ -600,7 +603,7 @@ class ServerRoom extends RoomStateView implements Room {
   private _applyCtrl(event: RoomCtrlEnvelope): void {
     switch (event.__r) {
       case 'join':
-        this._state.applyJoin(event.id, event.meta, event.joinedAt, event.identity ?? null, event.hidden)
+        this._state.applyJoin(joinedMember(event))
         this._syncSubs() // a new member means a new per-member key candidate
         return
       case 'track':

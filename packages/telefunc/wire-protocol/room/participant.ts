@@ -7,7 +7,7 @@ import type { TELEFUNC_SHIELDS } from '../../node/shared/transformer/generateShi
 import { isPromise } from '../../utils/isPromise.js'
 import { assert } from '../../utils/assert.js'
 import { DM_PARTICIPANT_LEFT, RoomError, toRoomFailure } from './errors.js'
-import { ownLeaveCause, ownMetadata } from './model.js'
+import { ownLeaveCause, ownMetadata, senderOf } from './model.js'
 import type { DmReply } from './protocol.js'
 import type {
   BinaryPublishOptions,
@@ -144,9 +144,7 @@ abstract class ParticipantBase implements LocalParticipant {
   /** `from`/`fromMeta` come from the wire envelope; upgrades to the live `RemoteParticipant` when a room view exists. An empty `from` is the wire encoding of a room-authored message → `null`. */
   private _senderOf(msg: InboxMessage): Sender | null {
     const { from, fromMeta, fromIdentity: identity } = msg
-    return from === ''
-      ? null
-      : (this._resolveSender(from) ?? Object.freeze({ id: from, meta: ownMetadata(fromMeta ?? {}), identity }))
+    return from === '' ? null : (this._resolveSender(from) ?? senderOf(from, ownMetadata(fromMeta ?? {}), identity))
   }
   private _fireInbox(msg: InboxMessage): void {
     const sender = this._senderOf(msg)

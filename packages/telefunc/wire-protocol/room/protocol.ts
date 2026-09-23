@@ -1,5 +1,5 @@
 // Shared Room storage records and wire envelopes.
-export { hasRoomTag, decodeDmReply }
+export { hasRoomTag, joinedMember, decodeDmReply }
 export type {
   RoomConfigRecord,
   RoomMemberRecord,
@@ -201,6 +201,18 @@ type ParticipantStubNotice =
 
 /** Which members' streams a holder wants on the text lane — `all` for room-level listeners, or a specific member set for participant-scoped ones. */
 type MemberWants = { all: boolean; members: string[] }
+
+/** The member a `join` event announces, before any meta write or track. */
+function joinedMember(event: Extract<RoomCtrlEnvelope, { __r: 'join' }>): MemberSnapshot {
+  return {
+    id: event.id,
+    meta: event.meta,
+    joinedAt: event.joinedAt,
+    metaSeq: 0,
+    identity: event.identity ?? null,
+    ...(event.hidden ? { hidden: true } : {}),
+  }
+}
 
 /** All room messages are tagged with `__r` — envelopes, requests, and notices alike. */
 function hasRoomTag(value: unknown): value is { __r: string } {

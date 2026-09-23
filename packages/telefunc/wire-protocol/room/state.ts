@@ -1,13 +1,19 @@
 export { RoomState, RoomStateView, remoteBacking }
 
 import { assertUsage } from '../../utils/assert.js'
-import { isPromise } from '../../utils/isPromise.js'
-import type { ChannelPublishInfo } from '../channel.js'
+import { invokeChannelListener, type ChannelPublishInfo } from '../channel.js'
 import { makeDisposer, releaseSubordinate } from '../wrapProxy.js'
-import { DEFAULT_TRACK, emptyTrackWants, isRoomTrack, type BinaryWants, type TrackWants } from './binary.js'
+import {
+  DEFAULT_TRACK,
+  emptyTrackWants,
+  isRoomTrack,
+  type BinaryFrame,
+  type BinaryWants,
+  type TrackWants,
+} from './binary.js'
 import { ROOM_WANTED_TRACKS_MAX } from './constants.js'
-import { ownLeaveCause, ownMetadata, stampNewer } from './model.js'
-import type { MemberSnapshot, MemberWants } from './protocol.js'
+import { ownLeaveCause, ownMetadata, senderOf, stampNewer } from './model.js'
+import type { MemberSnapshot, MemberWants, RoomDataEnvelope } from './protocol.js'
 import type {
   BinaryFrameInfo,
   LeaveCause,
@@ -239,7 +245,7 @@ class RoomState {
     const entry = this._members.get(id)
     return entry ? this._remote(entry) : null
   }
-  listRemotes(): RemoteParticipant[] {
+  listVisible(): RemoteParticipant[] {
     return [...this._members.values()].filter((entry) => !entry.hidden).map((entry) => this._remote(entry))
   }
   /** Member IDs currently known — drives the per-member binary key subscriptions. */
@@ -300,15 +306,14 @@ class RoomState {
   onChange(cb: () => void): () => void {
     return this._register(this._changeCbs, cb)
   }
-  /** A member published its first frame on a new named track (idempotent — echoes, rosters, and the owner's local apply all land here). Unknown members are absorbed like any other pre-roster event.
-   */
+  onAnnounce(cb: (data: unknown, info: ChannelPublishInfo) => void): () => void {
+    return this._register(this._announceCbs, cb)
+  }
+  /** A member published its first frame on a new named track (idempotent — echoes, rosters, and the owner's local apply all land here). */
   applyTrack(id: string, track: string): void {
     const entry = this._members.get(id)
-    if (!entry) {
-      this.membershipVersion++
-      return
-    }
-    entry.tracks.add(track)
+    if (entry) entry.tracks.add(track)
+    else this._markUnknownMember()
   }
   /** Immutable view of the whole room — cached by state version, so the reference is stable until something actually changes (the `useSyncExternalStore` contract). */
   snapshot(): RoomSnapshotView {
@@ -340,35 +345,33 @@ class RoomState {
     this.membershipVersion++
     this._bumpState()
   }
-  onAnnounce(cb: (data: unknown, info: ChannelPublishInfo) => void): () => void {
-    return this._register(this._announceCbs, cb)
+  /** An event for a member this view doesn't know means the roster drifted, so an in-flight roster read is stale. */
+  private _markUnknownMember(): void {
+    this.membershipVersion++
   }
   // ── Event application ──
-  applyJoin(id: string, meta: ParticipantMeta, joinedAt: number, identity?: string | null, hidden?: boolean): void {
+  applyJoin(member: MemberSnapshot): void {
     if (this.closed) return
-    const existing = this._members.get(id)
+    const existing = this._members.get(member.id)
     if (existing) {
       // The origin absorbing its own join echo. The event carries the seq-0 join meta, so it must not regress a value a later p-meta already advanced; `joinedAt` is immutable, so it's a no-op.
-      if (existing.metaSeq === 0) existing.meta = ownMetadata(meta)
+      if (existing.metaSeq === 0) existing.meta = ownMetadata(member.meta)
       return
     }
-    const entry = this._createEntry({ id, meta, joinedAt, metaSeq: 0, identity, hidden })
+    const entry = this._createEntry(member)
     // A hidden participant is not counted: it never moves the count, fires no `onJoin`, and can't fill the room — it's not narrated as a presence event. But the roster did change, so `onChange` still
     // fires and observers re-read (its join is announced on the control lane, so already-connected observers learn of it live, not only from a fresh roster).
     if (entry.hidden) {
       this._bumpMembership()
       return
     }
-    this._seedCount++ // pre-reconcile, `count` tracks the seed adjusted by applied events
+    if (!this._rosterKnown) this._seedCount++ // pre-roster, `count` is the seed adjusted by applied events
     this._bumpMembership()
     this._fireAll(this._joinCbs, this._remote(entry))
   }
   applyLeave(id: string, cause?: LeaveCause): void {
     const entry = this._members.get(id)
-    if (!entry) {
-      this.membershipVersion++
-      return
-    }
+    if (!entry) return this._markUnknownMember()
     const ownedCause = cause && ownLeaveCause(cause)
     entry.left = true
     entry.leaveCause = ownedCause
@@ -376,7 +379,7 @@ class RoomState {
     this._members.delete(id)
     // A hidden participant leaving is invisible to presence — no count change, no room-level `onLeave`, and it's never the "last participant" that empties the room. Its own leave handler and listener
     // release still run. The participant path keeps its exact original ordering.
-    if (!entry.hidden) this._seedCount = Math.max(0, this._seedCount - 1)
+    if (!entry.hidden && !this._rosterKnown) this._seedCount = Math.max(0, this._seedCount - 1)
     this._bumpMembership()
     this._fireAll(entry.leaveCbs, ownedCause)
     if (!entry.hidden) this._fireAll(this._leaveCbs, remote, ownedCause)
@@ -387,10 +390,7 @@ class RoomState {
   /** Applies only revisions newer than the entry's — the origin's echo (same seq) and events arriving behind a fresher reconcile are absorbed. */
   applyParticipantMeta(id: string, meta: ParticipantMeta, seq: number): void {
     const entry = this._members.get(id)
-    if (!entry) {
-      this.membershipVersion++
-      return
-    }
+    if (!entry) return this._markUnknownMember()
     if (seq <= entry.metaSeq) return
     const prev = entry.meta
     entry.metaSeq = seq
@@ -441,35 +441,19 @@ class RoomState {
   /** Messages never wait on the roster: `from` is the live `RemoteParticipant` when this view knows the sender, else the `{ id, meta }` snapshot the sender's node stamped into the envelope. Control
    * and data travel on separate lanes, so a message can beat its sender's join — identity is in the message, delivery is immediate, and nothing drops.
    */
-  applyData(
-    from: string,
-    fromMeta: ParticipantMeta,
-    fromIdentity: string | null,
-    data: unknown,
-    info: ChannelPublishInfo,
-  ): void {
-    const entry = this._members.get(from)
-    this._fireAll(
-      this._roomDataCbs,
-      data,
-      info,
-      entry ? this._remote(entry) : { id: from, meta: fromMeta, identity: fromIdentity },
-    )
-    if (entry) this._fireAll(entry.dataCbs, data, info)
+  applyData(event: RoomDataEnvelope, info: ChannelPublishInfo): void {
+    const entry = this._members.get(event.from)
+    const sender = entry ? this._remote(entry) : senderOf(event.from, event.fromMeta, event.fromIdentity ?? null)
+    this._fireAll(this._roomDataCbs, event.data, info, sender)
+    if (entry) this._fireAll(entry.dataCbs, event.data, info)
   }
   /** Binary frames carry only the sender's ID — a pre-join frame surfaces as `{ id, meta: {} }` (rare: binary pipelines attach per member via `onJoin`, so the roster is normally ahead). `track`/`meta`
    * come from the frame header; listeners with a `track` filter receive only that track's frames.
    */
-  applyBinary(
-    from: string,
-    payload: Uint8Array,
-    track: string | null,
-    meta: Record<string, unknown> | null,
-    info: ChannelPublishInfo,
-  ): void {
+  applyBinary({ from, payload, track, meta }: BinaryFrame, info: ChannelPublishInfo): void {
     const frameInfo: ChannelPublishInfo & BinaryFrameInfo = { ...info, track, meta }
     const entry = this._members.get(from)
-    const sender = entry ? this._remote(entry) : { id: from, meta: {}, identity: null }
+    const sender = entry ? this._remote(entry) : senderOf(from, {}, null)
     this._fireTrackFiltered(this._roomBinaryCbs, track, (cb) => cb(payload, frameInfo, sender))
     if (entry) this._fireTrackFiltered(entry.binaryCbs, track, (cb) => cb(payload, frameInfo))
   }
@@ -481,7 +465,7 @@ class RoomState {
   ): void {
     for (const { cb, track: want } of [...cbs]) {
       if (want !== undefined && want !== track) continue
-      this._invoke(invoke, cb)
+      invokeChannelListener(invoke, [cb], this._onCallbackError)
     }
   }
   reconcileCompleteRoster(members: MemberSnapshot[]): boolean {
@@ -491,63 +475,48 @@ class RoomState {
   reconcilePresenceRoster(members: MemberSnapshot[]): boolean {
     return this._reconcileRoster(members, true)
   }
+  /** The first roster loads silently; later ones narrate the drift they correct as events. */
   private _reconcileRoster(roster: MemberSnapshot[], preserveMissingHidden: boolean): boolean {
-    if (!this._rosterKnown) return this._loadInitialRoster(roster, preserveMissingHidden)
-    return this._reconcileKnownRoster(roster, preserveMissingHidden)
-  }
-  private _loadInitialRoster(roster: MemberSnapshot[], preserveMissingHidden: boolean): boolean {
+    const narrate = this._rosterKnown
     this._rosterKnown = true
-    const seen = new Set<string>()
-    for (const member of roster) {
-      seen.add(member.id)
-      const existing = this._members.get(member.id)
-      if (!existing) {
-        this._createEntry(member)
-        continue
-      }
-      if (member.metaSeq > existing.metaSeq) {
-        existing.meta = ownMetadata(member.meta)
-        existing.metaSeq = member.metaSeq
-      }
-      existing.joinedAt = member.joinedAt
-      for (const track of member.tracks ?? []) existing.tracks.add(track)
-    }
-    for (const id of [...this._members.keys()]) {
-      if (!seen.has(id) && !(preserveMissingHidden && this.isHidden(id))) this.applyLeave(id)
-    }
-    this._bumpMembership()
-    return false
-  }
-  private _reconcileKnownRoster(roster: MemberSnapshot[], preserveMissingHidden: boolean): boolean {
     let narratedDrift = false
     let viewChanged = false
-    const seen = new Set<string>()
     for (const member of roster) {
-      seen.add(member.id)
-      const outcome = this._applyRosterMember(member)
-      narratedDrift ||= outcome.narratedDrift
+      const outcome = this._mergeRosterMember(member, narrate)
+      narratedDrift ||= outcome.narrated
       viewChanged ||= outcome.viewChanged
     }
-    narratedDrift = this._removeMissingMembers(seen, preserveMissingHidden) || narratedDrift
+    const listed = new Set(roster.map((member) => member.id))
+    narratedDrift = this._removeMissingMembers(listed, preserveMissingHidden) || narratedDrift
+    if (!narrate) {
+      this._bumpMembership()
+      return false
+    }
     if (viewChanged && !narratedDrift) this._bumpMembership()
     return narratedDrift
   }
-  private _applyRosterMember(member: MemberSnapshot): { narratedDrift: boolean; viewChanged: boolean } {
+  private _mergeRosterMember(member: MemberSnapshot, narrate: boolean): { narrated: boolean; viewChanged: boolean } {
     const entry = this._members.get(member.id)
     if (!entry) {
-      this.applyJoin(member.id, member.meta, member.joinedAt, member.identity, member.hidden)
-      const created = this._members.get(member.id)!
-      created.metaSeq = member.metaSeq
-      this._mergeKnownTracks(created, member.tracks)
-      return { narratedDrift: true, viewChanged: false }
+      if (!narrate) {
+        this._createEntry(member)
+        return { narrated: false, viewChanged: true }
+      }
+      this.applyJoin(member)
+      return { narrated: true, viewChanged: false }
     }
-    let narratedDrift = false
+    let narrated = false
     if (member.metaSeq > entry.metaSeq) {
-      this.applyParticipantMeta(member.id, member.meta, member.metaSeq)
-      narratedDrift = true
+      if (narrate) {
+        this.applyParticipantMeta(member.id, member.meta, member.metaSeq)
+        narrated = true
+      } else {
+        entry.meta = ownMetadata(member.meta)
+        entry.metaSeq = member.metaSeq
+      }
     }
     entry.joinedAt = member.joinedAt
-    return { narratedDrift, viewChanged: this._mergeKnownTracks(entry, member.tracks) }
+    return { narrated, viewChanged: this._mergeKnownTracks(entry, member.tracks) }
   }
   private _mergeKnownTracks(entry: MemberEntry, tracks: string[] | undefined): boolean {
     const before = entry.tracks.size
@@ -603,7 +572,7 @@ class RoomState {
         onUpdate: (cb) => this._register(entry.updateCbs, cb),
         onLeave: (cb: (cause?: LeaveCause) => void) => {
           if (!entry.left) return this._register(entry.leaveCbs, cb)
-          this._invoke(cb, entry.leaveCause)
+          invokeChannelListener(cb, [entry.leaveCause], this._onCallbackError)
           return makeDisposer()
         },
       }
@@ -643,15 +612,7 @@ class RoomState {
     this._onListenersChanged()
   }
   private _fireAll<Args extends unknown[]>(cbs: Array<(...args: Args) => unknown>, ...args: Args): void {
-    for (const cb of [...cbs]) this._invoke(cb, ...args)
-  }
-  private _invoke<Args extends unknown[]>(cb: (...args: Args) => unknown, ...args: Args): void {
-    try {
-      const result = cb(...args)
-      if (isPromise(result)) void Promise.resolve(result).catch((err) => this._onCallbackError(err))
-    } catch (err) {
-      this._onCallbackError(err)
-    }
+    for (const cb of [...cbs]) invokeChannelListener(cb, args, this._onCallbackError)
   }
 }
 /** Validate a `subscribeBinary` track option: `undefined` = every track, `null` = the default lane, a non-empty name = that track. */

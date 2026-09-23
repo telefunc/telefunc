@@ -8,6 +8,7 @@ export {
   mergeAttributes,
   normalizeJoinOptions,
   removedCause,
+  senderOf,
   ownMetaArgument,
   recipientId,
 }
@@ -26,6 +27,10 @@ function ownMetadata<T extends RoomMeta | ParticipantMeta>(meta: T): T {
   return Object.freeze({ ...meta }) as T
 }
 const ownLeaveCause = (cause: LeaveCause): LeaveCause => Object.freeze({ ...cause })
+/** A detached snapshot of a member, for guards and for senders a view doesn't know. */
+function senderOf(id: string, meta: ParticipantMeta, identity: string | null): Sender {
+  return Object.freeze({ id, meta, identity })
+}
 function removedCause(reason: unknown): LeaveCause {
   return ownLeaveCause(reason === undefined ? { type: 'removed' } : { type: 'removed', reason })
 }

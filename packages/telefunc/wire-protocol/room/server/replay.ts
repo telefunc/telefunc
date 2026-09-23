@@ -111,11 +111,11 @@ class LocalHolder implements LaneHolder {
   }
 
   private _applyText(event: RoomDataEnvelope, info: WirePublishInfo): void {
-    this._state.applyData(event.from, event.fromMeta, event.fromIdentity ?? null, event.data, this._publishInfo(info))
+    this._state.applyData(event, this._publishInfo(info))
   }
 
   private _applyBinary(frame: BinaryFrame, info: WirePublishInfo): void {
-    this._state.applyBinary(frame.from, frame.payload, frame.track, frame.meta, this._publishInfo(info))
+    this._state.applyBinary(frame, this._publishInfo(info))
   }
 
   private _publishInfo(info: WirePublishInfo) {

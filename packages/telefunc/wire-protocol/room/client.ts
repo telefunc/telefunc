@@ -17,6 +17,7 @@ import {
 } from './model.js'
 import {
   hasRoomTag,
+  joinedMember,
   type MemberWants,
   type MemberSnapshot,
   type ParticipantStubMetadata,
@@ -129,7 +130,7 @@ class ClientRoom extends RoomStateView implements Room {
         return participant
       }
       this._localParticipants.set(id, participant)
-      this._state.applyJoin(id, meta, joinedAt)
+      this._state.applyJoin({ id, meta, joinedAt, metaSeq: 0, identity: null })
       return participant
     } finally {
       this._pendingJoins--
@@ -146,7 +147,7 @@ class ClientRoom extends RoomStateView implements Room {
   async getParticipants(options?: { hidden?: boolean }): Promise<RemoteParticipant[]> {
     assertUsage(!options?.hidden, 'Hidden participants can only be enumerated on the server')
     if (!this._state.rosterKnown) await this._rosterReady
-    return this._state.listRemotes()
+    return this._state.listVisible()
   }
 
   async getParticipant(id: string): Promise<RemoteParticipant | null> {
@@ -234,16 +235,10 @@ class ClientRoom extends RoomStateView implements Room {
         return
       case 'data':
         // Tail mode holds server-side (see `RoomStubChannel._tailPending`): text reaches this client only once it subscribes, already selected and ordered, so nothing is buffered here.
-        this._state.applyData(
-          event.from,
-          event.fromMeta,
-          event.fromIdentity ?? null,
-          event.data,
-          makePublishInfo(this.id, rawInfo.seq, rawInfo.timestamp),
-        )
+        this._state.applyData(event, makePublishInfo(this.id, rawInfo.seq, rawInfo.timestamp))
         return
       case 'join':
-        this._state.applyJoin(event.id, event.meta, event.joinedAt, event.identity ?? null, event.hidden)
+        this._state.applyJoin(joinedMember(event))
         return
       case 'leave': {
         const cause = leaveCauseFromWire(event)
@@ -295,15 +290,8 @@ class ClientRoom extends RoomStateView implements Room {
   }
 
   private _onBinaryFrame(framed: Uint8Array, rawInfo: ChannelPublishInfo): void {
-    const unframed = unframeMemberId(framed)
-    if (!unframed) return
-    this._state.applyBinary(
-      unframed.from,
-      unframed.payload,
-      unframed.track,
-      unframed.meta,
-      makePublishInfo(this.id, rawInfo.seq, rawInfo.timestamp),
-    )
+    const frame = unframeMemberId(framed)
+    if (frame) this._state.applyBinary(frame, makePublishInfo(this.id, rawInfo.seq, rawInfo.timestamp))
   }
 
   private _applyRoster(members: MemberSnapshot[]): void {

@@ -2001,8 +2001,9 @@ describe('client Room lifecycle', () => {
     state.subscribeBinary(() => rejected[2])
     remote.subscribeBinary(() => rejected[3])
     state.onClose(() => rejected[4])
-    state.applyData(memberId, {}, null, 'text', { key: state.roomId, seq: 1, timestamp: 1 })
-    state.applyBinary(memberId, new Uint8Array(), null, null, { key: state.roomId, seq: 1, timestamp: 1 })
+    const info = { key: state.roomId, seq: 1, timestamp: 1 }
+    state.applyData({ __r: 'data', from: memberId, fromMeta: {}, data: 'text' }, info)
+    state.applyBinary({ from: memberId, payload: new Uint8Array(), track: null, meta: null, retain: false }, info)
     state.applyClosed()
     await Promise.resolve()
     expect(errors).toEqual(failures)
