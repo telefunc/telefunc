@@ -319,7 +319,7 @@ async function closeRoom(id: string): Promise<void> {
 }
 
 async function acquireClosingLease(backend: RoomBackend, roomId: string, current: RoomHead): Promise<RoomHead | null> {
-  if (current.currentInc === null) return null
+  assert(current.currentInc !== null) // only open and closing heads reach here; both name an incarnation
   const closeLease = { id: crypto.randomUUID(), durationMs: ROOM_CLOSE_LEASE_MS }
   const result = await backend.compareExchangeHead(
     roomId,
@@ -335,13 +335,15 @@ async function acquireClosingLease(backend: RoomBackend, roomId: string, current
       },
     },
   )
-  return 'conflict' in result || !('head' in result) ? null : result.head
+  if ('conflict' in result) return null
+  assert('head' in result)
+  return result.head
 }
 
 async function finishClose(backend: RoomBackend, roomId: string, closing: RoomHead): Promise<boolean> {
   const inc = closing.currentInc
   const lease = closing.closeLease
-  if (inc === null || lease === undefined) return false
+  assert(inc !== null && lease !== undefined) // the closing head acquireClosingLease just wrote
   const closedEvent = await commitRoomLane(
     roomId,
     inc,
