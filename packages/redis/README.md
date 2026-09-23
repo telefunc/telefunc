@@ -20,6 +20,17 @@ installRedis(redis)
 
 That one `installRedis()` call configures Broadcast and Room from the same client. Never-resend options make a lost command reply reject rather than execute twice.
 
+### Required client options
+
+`installRedis()` rejects a client configured otherwise:
+
+| Client | Required |
+|---|---|
+| `Redis` | `maxRetriesPerRequest: 0`; no `reconnectOnError`; no `keyPrefix` |
+| `Cluster` | `retryDelayOnFailover: 0`; `redisOptions.maxRetriesPerRequest: 0`; no `redisOptions.reconnectOnError`; no `redisOptions.keyPrefix`; `scaleReads: 'master'` (the default) |
+
+ioredis applies `keyPrefix` to commands but not to Pub/Sub channels; use `installRedis(redis, { prefix })` instead.
+
 ## Room storage
 
 The installed backend accepts either an ioredis `Redis` or `Cluster` client. Cluster keeps each room's atomic records and generation manifest in one hash slot and follows `MOVED`/`ASK`; replica or custom routing is rejected because Room reads are strongly consistent. Head expiry uses keyed Lua `TIME` from the room-slot master.

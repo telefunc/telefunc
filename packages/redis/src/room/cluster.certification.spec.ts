@@ -56,7 +56,7 @@ describe('Redis real three-master Cluster CI certification', () => {
     const manifest = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')) as {
       peerDependencies: { telefunc: string }
     }
-    expect(manifest.peerDependencies.telefunc).toBe('0.2.23')
+    expect(manifest.peerDependencies.telefunc).toBe('>=0.2.25')
     const scaleReads = cluster.options.scaleReads
     const retryDelayOnFailover = cluster.options.retryDelayOnFailover
     try {
