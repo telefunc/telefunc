@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { IndexedPeer } from '../server/IndexedPeer.js'
+import { CHANNEL_CLOSE_TIMEOUT_MS } from '../constants.js'
 import { ACK_STATUS, ProtocolViolationError, TAG, decode, type BroadcastSubscriptions } from '../shared-ws.js'
 import { ShieldValidationError, isShieldValidationError } from '../../shared/ShieldValidationError.js'
 import { Abort, isAbort } from '../../shared/Abort.js'
@@ -1133,12 +1134,28 @@ describe('Room public behavior', () => {
       await release.promise
       return compareExchange(...args)
     })
+    const departed = vi.spyOn(room, '_removeDepartedMember')
     const joining = room._handleStubRequest(stub, { __r: 'req-join', meta: {} }).catch((error: unknown) => error)
     await writing.promise
     stub.abort()
     release.resolve()
     expect(isRoomError(await joining)).toBe(true)
     expect(await Room.getParticipants(room.id)).toEqual([])
+    expect(departed).not.toHaveBeenCalled() // the admission rolls itself back
+  })
+  it('does not evict a client-held participant again once it left', async () => {
+    vi.useFakeTimers()
+    const room = (await Room.create('standalone-leave-once')) as ServerRoom
+    const holder = (await room.join()) as ServerLocalParticipant
+    const channel = new RoomParticipantStubChannel()
+    let closed = false
+    channel.onClose(() => (closed = true))
+    bindParticipantStubChannel(channel, holder)
+    const departed = vi.spyOn(room, '_removeDepartedMember')
+    await holder.leave()
+    await vi.advanceTimersByTimeAsync(CHANNEL_CLOSE_TIMEOUT_MS + 1)
+    expect(closed).toBe(true)
+    expect(departed).not.toHaveBeenCalled()
   })
   it('does not hold the process open for a pending ack DM', async () => {
     const room = await Room.create('ack-timer-unref')

@@ -390,7 +390,9 @@ function bindParticipantStubChannel(
     void channel.send({ __r: 'demand', track, wanted }).catch(() => {})
   })
 
+  let left = false
   const unlistenLeave = participant.onLeave((cause) => {
+    left = true
     const notice = { __r: 'left' as const, ...leaveCauseToWire(cause) }
     void channel.send(notice).catch(() => {})
     void channel.close().catch(() => {})
@@ -400,6 +402,6 @@ function bindParticipantStubChannel(
     unlistenMeta?.()
     unlistenDemand()
     unlistenLeave()
-    void participant._room._removeDepartedMember(participant.id).catch(reportRoomError)
+    if (!left) void participant._room._removeDepartedMember(participant.id).catch(reportRoomError)
   })
 }

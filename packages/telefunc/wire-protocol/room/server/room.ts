@@ -865,7 +865,10 @@ class ServerRoom extends RoomStateView implements Room {
     stub.onClose(() => {
       this._stubs.delete(stub)
       stub._endTail() // clear any pending tail hold/timer so a closed stub leaves nothing behind
-      for (const id of [...stub._stubMembers.keys()]) void this._removeDepartedMember(id).catch(reportRoomError)
+      for (const id of stub._stubMembers.keys()) {
+        if (this._pendingAdmissions.has(id)) continue // the admission rolls itself back
+        void this._removeDepartedMember(id).catch(reportRoomError)
+      }
       stub._stubMembers.clear()
       this._syncSubs()
     })
