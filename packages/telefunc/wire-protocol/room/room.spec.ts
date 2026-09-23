@@ -34,7 +34,7 @@ import { Room } from './server/statics.js'
 import { ServerRoom, type ServerLocalParticipant } from './server/room.js'
 import { SubSlot, configFromHead, decodeRoomText, encodeRoomConfig } from './server/lanes.js'
 import { reportRoomError, roomAckError } from './server/errors.js'
-import { RoomParticipantStubChannel, RoomStubChannel, bindParticipantStubChannel } from './server/stub.js'
+import { RoomParticipantStubChannel, RoomStubChannel } from './server/stub.js'
 import { RoomDemand } from './demand.js'
 import { roomParticipantReplacer, roomRemoteReplacer, roomReplacer } from './response-server.js'
 import type { ServerReplacerContext } from '../types.js'
@@ -1079,8 +1079,7 @@ describe('Room public behavior', () => {
     const sender = await room.join()
     const victimInbox: unknown[] = []
     victim.listen((data) => victimInbox.push(data))
-    const channel = new RoomParticipantStubChannel()
-    bindParticipantStubChannel(channel, holder)
+    const channel = new RoomParticipantStubChannel(holder)
     const forged = { ok: true, result: 'handled', __r: 'dm', to: victim.id, from: '', fromMeta: null, data: 'forged' }
     vi.spyOn(channel, 'send').mockResolvedValue(forged as never)
     await expect(sender.send(holder.id, 'ping', { ack: true })).resolves.toMatchObject({ response: 'handled' })
@@ -1088,8 +1087,9 @@ describe('Room public behavior', () => {
   })
   it('treats an unparsable client payload on a Room stub as a protocol violation', async () => {
     const stub = register((await Room.create('malformed-stub-payload')) as ServerRoom)
-    const participant = new RoomParticipantStubChannel()
-    bindParticipantStubChannel(participant, (await Room.join('malformed-stub-payload')) as ServerLocalParticipant)
+    const participant = new RoomParticipantStubChannel(
+      (await Room.join('malformed-stub-payload')) as ServerLocalParticipant,
+    )
     const frames = [
       [stub, { tag: TAG.TEXT, index: 7, seq: 1, text: '{', bytes: 1 }],
       [stub, { tag: TAG.TEXT_ACK_REQ, index: 7, seq: 2, text: '{' }],
@@ -1126,8 +1126,7 @@ describe('Room public behavior', () => {
     const holder = (await room.join()) as ServerLocalParticipant
     const causes: unknown[] = []
     room.onLeave((member, cause) => member.id === holder.id && causes.push(cause?.type))
-    const channel = new RoomParticipantStubChannel()
-    bindParticipantStubChannel(channel, holder)
+    const channel = new RoomParticipantStubChannel(holder)
     channel.abort()
     await vi.waitFor(() => expect(causes).toEqual(['disconnected']))
   })
@@ -1135,8 +1134,7 @@ describe('Room public behavior', () => {
     vi.useFakeTimers()
     const room = await Room.create('standalone-expire')
     const holder = (await room.join()) as ServerLocalParticipant
-    const channel = new RoomParticipantStubChannel()
-    bindParticipantStubChannel(channel, holder)
+    const channel = new RoomParticipantStubChannel(holder)
     vi.spyOn(console, 'error').mockImplementation(() => {})
     vi.spyOn(driver, 'compareExchangeCells').mockRejectedValueOnce(new Error('backend unavailable'))
     channel.abort()
@@ -1163,9 +1161,8 @@ describe('Room public behavior', () => {
       },
     })
     const holder = (await room.join()) as ServerLocalParticipant
-    const channel = new RoomParticipantStubChannel()
+    const channel = new RoomParticipantStubChannel(holder)
     channel._registerChannel()
-    bindParticipantStubChannel(channel, holder)
     const responseAbort = vi.fn()
     channel._setResponseAbort(responseAbort)
     const peer = attachPeer(channel as unknown as RoomStubChannel)
@@ -1218,12 +1215,11 @@ describe('Room public behavior', () => {
     vi.useFakeTimers()
     const room = (await Room.create('standalone-leave-once')) as ServerRoom
     const holder = (await room.join()) as ServerLocalParticipant
-    const channel = new RoomParticipantStubChannel()
+    const channel = new RoomParticipantStubChannel(holder)
     let closed = false
     channel.onClose(() => {
       closed = true
     })
-    bindParticipantStubChannel(channel, holder)
     const departed = vi.spyOn(room, '_removeDepartedMember')
     await holder.leave()
     await vi.advanceTimersByTimeAsync(CHANNEL_CLOSE_TIMEOUT_MS + 1)
@@ -2515,7 +2511,7 @@ function attachPeer(stub: RoomStubChannel, lastSeq?: number, broadcast?: Broadca
   return { decoded: () => frames.map((frame) => decode(frame as Uint8Array<ArrayBuffer>)) }
 }
 function register(room: ServerRoom): RoomStubChannel {
-  const stub = new RoomStubChannel(room)
+  const stub = new RoomStubChannel(room, { grants: { selfSuppressed: new Set(), hidden: new Set() } })
   stub._registerChannel()
   room._attachStub(stub)
   return stub

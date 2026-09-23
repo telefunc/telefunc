@@ -4,12 +4,7 @@ import type { ReplacerType, ServerReplacerContext, TypeContract } from '../types
 import { ServerLocalParticipant, ServerRoom } from './server/room.js'
 import type { RemoteParticipant } from './types.js'
 import type { ParticipantStubMetadata, RoomSnapshotMetadata } from './protocol.js'
-import {
-  bindParticipantStubChannel,
-  RoomParticipantStubChannel,
-  RoomStubChannel,
-  type ResponseRoomGrants,
-} from './server/stub.js'
+import { RoomParticipantStubChannel, RoomStubChannel, type ResponseRoomGrants } from './server/stub.js'
 import { remoteBacking } from './state.js'
 import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
 assertIsNotBrowser()
@@ -49,13 +44,12 @@ const roomReplacer: ReplacerType<RoomReplacerContract, ServerReplacerContext> = 
     return ServerRoom.isServerRoom(value)
   },
   replace(serverRoom, context) {
-    const stub = new RoomStubChannel(serverRoom)
+    // The publish shield stays off the stub's `_validators`, which the base channel runs against every request envelope.
+    const stub = new RoomStubChannel(serverRoom, {
+      publishShield: context.validators.get('data'),
+      grants: responseRoomGrants(context, serverRoom),
+    })
     context.registerChannel(stub)
-    // The publish shield, auto-generated from the room's declared message type (`Pub`, see `RoomShield`), lives in `context.validators` under the `data` slot. Install it on the stub's dedicated
-    // `_publishShield` — never its `_validators` map, which the base channel runs against every request envelope (join/leave/dm); the payload is shielded at the publish ingress (`_publishFromStub`).
-    stub._publishShield = context.validators.get('data')
-    // Adopt this response's grants for the room: co-returned self-suppressing members and returned hidden members (either serialization order) land in the same sets, read by the relay gates at source.
-    stub._adoptResponseGrants(responseRoomGrants(context, serverRoom))
     // Attach before snapshotting: events from this point on are relayed to the client, earlier state is in the snapshot — overlaps are absorbed by idempotent application. In tail mode (`Room.get({
     // tail })`), attaching hands the pre-attach hold to the stub, which keeps it server-side until the client's first subscribe (see `ServerRoom._attachStub`).
     serverRoom._attachStub(stub)
@@ -116,12 +110,8 @@ const roomParticipantReplacer: ReplacerType<RoomParticipantReplacerContract, Ser
     return ServerLocalParticipant.isServerLocalParticipant(value)
   },
   replace(participant, context) {
-    const channel = new RoomParticipantStubChannel()
+    const channel = new RoomParticipantStubChannel(participant, context.validators.get('data'))
     context.registerChannel(channel)
-    // Same publish shield as the room stub, for a standalone participant that publishes through its own channel (`req-publish`) rather than the room stub. The `data` verifier auto-generated from the
-    // participant value's declared message type (see `RoomShield`) is handed straight to the binding, which runs it at the publish ingress — kept off `channel._validators` for the same reason as the
-    // stub.
-    bindParticipantStubChannel(channel, participant, context.validators.get('data'))
     // selfDelivery off: bind this member's id onto its room's stub drop-set for this response, so the server drops its echo at the source. If the room isn't co-returned there's no stub to adopt the
     // set and it's discarded with the pass — a clean no-op, never leaking to another client's stub.
     if (!participant.selfDelivery) responseRoomGrants(context, participant._room).selfSuppressed.add(participant.id)

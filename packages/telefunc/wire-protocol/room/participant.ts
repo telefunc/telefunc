@@ -51,7 +51,7 @@ abstract class ParticipantBase implements LocalParticipant {
    *  allocated again (`null` = flushed or empty; zero steady-state cost). An entry carries an
    *  `ackResolve` when the sender awaits a reply — resolved when the hold flushes (or on leave). */
   private _pendingInbox: Array<{ msg: InboxMessage; ackResolve?: (reply: DmReply) => void }> | null = null
-  /** When a client holds this participant, its inbox forwards there instead of to local listeners; the forwarder returns the client's reply for an ack DM (see `bindParticipantStubChannel`). */
+  /** When a client holds this participant, its inbox forwards there instead of to local listeners; the forwarder returns the client's reply for an ack DM (see `RoomParticipantStubChannel`). */
   private _forwarder: ((msg: InboxMessage) => Promise<DmReply> | void) | null = null
   /** @internal — route this participant's inbox to a remote holder instead of local listeners. */
   _setForwarder(forwarder: (msg: InboxMessage) => Promise<DmReply> | void): void {
@@ -67,7 +67,7 @@ abstract class ParticipantBase implements LocalParticipant {
       void reply.then(ackResolve)
     }
   }
-  /** @internal — already bound to a client holder (serialized once, via `bindParticipantStubChannel`)? */
+  /** @internal — already bound to a client holder (serialized once, via `RoomParticipantStubChannel`)? */
   get _isBound(): boolean {
     return this._forwarder !== null
   }

@@ -1,4 +1,4 @@
-export { RoomStubChannel, RoomParticipantStubChannel, bindParticipantStubChannel }
+export { RoomStubChannel, RoomParticipantStubChannel }
 export type { ResponseRoomGrants }
 
 import { stringify } from '@brillout/json-serializer/stringify'
@@ -63,16 +63,11 @@ class RoomStubChannel extends ServerChannel implements LaneHolder {
     return entry.sender
   }
   /** One self-delivery gate combines direct client joins and co-returned server joins before wire emission. */
-  _selfSuppressed = new Set<string>()
+  readonly _selfSuppressed: Set<string>
   /** Hidden members this response handed the client: their events are relayed to it alone. */
-  _grantedHidden = new Set<string>()
-  /** Adopts the serialization pass's shared grants for this room. */
-  _adoptResponseGrants(grants: ResponseRoomGrants): void {
-    this._selfSuppressed = grants.selfSuppressed
-    this._grantedHidden = grants.hidden
-  }
+  readonly _grantedHidden: Set<string>
   /** The generated publish shield validates Room data ingress only; base validators own multiplexed request envelopes. */
-  _publishShield?: ShieldValidator
+  readonly _publishShield: ShieldValidator | undefined
   /** @internal — the client's declared binary wants, per member and track (`sub-binary`). */
   _binaryWants: BinaryWants = { everyMember: emptyTrackWants(), members: {} }
   /** @internal — whether the client subscribes to the whole text lane (the broadcast-sub ctrl). */
@@ -97,9 +92,15 @@ class RoomStubChannel extends ServerChannel implements LaneHolder {
     return !this._selfSuppressed.has(memberId) && (this._wantsText || this._textMemberWants.has(memberId))
   }
 
-  constructor(serverRoom: ServerRoom) {
+  constructor(
+    serverRoom: ServerRoom,
+    { publishShield, grants }: { publishShield?: ShieldValidator; grants: ResponseRoomGrants },
+  ) {
     super()
     this._room = serverRoom
+    this._publishShield = publishShield
+    this._selfSuppressed = grants.selfSuppressed
+    this._grantedHidden = grants.hidden
   }
 
   override _onPeerMessage(text: string, bytes: number): void {
@@ -255,41 +256,6 @@ class RoomStubChannel extends ServerChannel implements LaneHolder {
   }
 }
 
-/** Serializes one server participant; metadata observation may be absent after a leave race. */
-type ParticipantStubHandlers = {
-  request(message: unknown): Promise<unknown>
-  publishBinary(framed: Uint8Array): Promise<unknown>
-}
-
-class RoomParticipantStubChannel extends ServerChannel<unknown, unknown> {
-  private _handlers: ParticipantStubHandlers | null = null
-
-  _listenRoomRequests(handlers: ParticipantStubHandlers): void {
-    this._handlers = handlers
-  }
-
-  override _onPeerAckReqMessage(text: string, seq: number): Promise<void> {
-    const request = parsePeerText(text)
-    return this._ackRoomRequest(seq, this._handlers?.request(request))
-  }
-
-  override _onPeerBinaryAckReqMessage(framed: Uint8Array, seq: number): Promise<void> {
-    return this._ackRoomRequest(seq, this._handlers?.publishBinary(framed))
-  }
-
-  private _ackRoomRequest(seq: number, pending: Promise<unknown> | undefined): Promise<void> {
-    return this._trackAck(
-      Promise.resolve(pending).then(
-        (result) => this._sendAckRes(seq, stringify(result)),
-        (error: unknown) => {
-          const failure = roomAckError(error, reportRoomError)
-          this._sendAckRes(seq, failure.text, failure.status)
-        },
-      ),
-    )
-  }
-}
-
 function asRoomRecord(value: unknown): ParticipantMeta {
   return isObject(value) ? value : {}
 }
@@ -302,77 +268,105 @@ async function sendParticipantDm(
   if (!reply.ok) throw roomFailureError(reply)
   return { ...receipt, response: reply.result }
 }
-async function handleParticipantStubRequest(
-  participant: ServerLocalParticipant,
-  publishShield: ShieldValidator | undefined,
-  msg: unknown,
-): Promise<unknown> {
-  if (!hasRoomTag(msg)) return undefined
-  const req = msg as ParticipantStubRequest
-  if (req.__r === 'req-publish') {
-    participant._room._shieldPublishData(publishShield, req.data)
-    return await participant.publish(req.data, req.retain ? { retain: true } : undefined)
+
+/** One client's hold on a server participant: its requests act as that participant, whose inbox, demand, meta and leave flow back to the client. */
+class RoomParticipantStubChannel extends ServerChannel<unknown, unknown> {
+  private readonly _participant: ServerLocalParticipant
+  private readonly _publishShield: ShieldValidator | undefined
+
+  constructor(participant: ServerLocalParticipant, publishShield?: ShieldValidator) {
+    super()
+    // A LocalParticipant has one holder; rebinding would overwrite its inbox forwarder and let either close drop it.
+    assertUsage(
+      !participant._isBound,
+      'This LocalParticipant is already bound to a client and cannot be handed to another. A LocalParticipant is a single member: give each client its own join(), or share a getParticipants() view (which is read-only) instead.',
+    )
+    this._participant = participant
+    this._publishShield = publishShield
+    this._mirrorParticipant()
   }
-  if (req.__r === 'req-set-meta') return await participant.setMeta(asRoomRecord(req.meta))
-  if (req.__r === 'req-set-attrs') return await participant.setAttributes(asRoomRecord(req.attrs))
-  if (req.__r === 'req-dm') return await sendParticipantDm(participant, req)
-  if (req.__r === 'req-leave') return await participant.leave()
-  return undefined
-}
 
-function bindParticipantStubChannel(
-  channel: RoomParticipantStubChannel,
-  participant: ServerLocalParticipant,
-  publishShield?: ShieldValidator,
-): void {
-  // A LocalParticipant has one holder; rebinding would overwrite its inbox forwarder and let either close drop it.
-  assertUsage(
-    !participant._isBound,
-    'This LocalParticipant is already bound to a client and cannot be handed to another. A LocalParticipant is a single member: give each client its own join(), or share a getParticipants() view (which is read-only) instead.',
-  )
-  channel._listenRoomRequests({
-    request: (msg) => handleParticipantStubRequest(participant, publishShield, msg),
-    publishBinary: async (framed) => await participant._publishFramed(framed),
-  })
+  override _onPeerAckReqMessage(text: string, seq: number): Promise<void> {
+    const request = parsePeerText(text)
+    return this._ackRoomRequest(seq, this._handleRequest(request))
+  }
 
-  const remote = participant._room._state.getRemote(participant.id)
-  const unlistenMeta = remote?.onUpdate(
-    (meta: ParticipantMeta) => void channel.send({ __r: 'p-meta', meta }).catch(() => {}),
-  )
+  override _onPeerBinaryAckReqMessage(framed: Uint8Array, seq: number): Promise<void> {
+    return this._ackRoomRequest(seq, this._publishBinary(framed))
+  }
 
-  // The ack carries the client's reply; only a transport rejection means the holder left.
-  participant._setForwarder((msg) => {
-    const notice = {
-      __r: 'dm' as const,
-      from: msg.from,
-      fromMeta: msg.fromMeta,
-      ...(msg.fromIdentity == null ? {} : { fromIdentity: msg.fromIdentity }),
-      data: msg.data,
-      ...(msg.ackId ? { ackId: msg.ackId } : {}),
+  private _ackRoomRequest(seq: number, pending: Promise<unknown>): Promise<void> {
+    return this._trackAck(
+      pending.then(
+        (result) => this._sendAckRes(seq, stringify(result)),
+        (error: unknown) => {
+          const failure = roomAckError(error, reportRoomError)
+          this._sendAckRes(seq, failure.text, failure.status)
+        },
+      ),
+    )
+  }
+
+  private async _handleRequest(msg: unknown): Promise<unknown> {
+    if (!hasRoomTag(msg)) return undefined
+    const participant = this._participant
+    const req = msg as ParticipantStubRequest
+    if (req.__r === 'req-publish') {
+      participant._room._shieldPublishData(this._publishShield, req.data)
+      return await participant.publish(req.data, req.retain ? { retain: true } : undefined)
     }
-    if (!msg.ackId) {
-      void channel.send(notice).catch(() => {})
-      return
-    }
-    return channel.send(notice, { ack: true }).then(toDmReply, () => DM_PARTICIPANT_LEFT)
-  })
+    if (req.__r === 'req-set-meta') return await participant.setMeta(asRoomRecord(req.meta))
+    if (req.__r === 'req-set-attrs') return await participant.setAttributes(asRoomRecord(req.attrs))
+    if (req.__r === 'req-dm') return await sendParticipantDm(participant, req)
+    if (req.__r === 'req-leave') return await participant.leave()
+    return undefined
+  }
 
-  const unlistenDemand = participant.onDemand((track, wanted) => {
-    void channel.send({ __r: 'demand', track, wanted }).catch(() => {})
-  })
+  private async _publishBinary(framed: Uint8Array): Promise<unknown> {
+    return await this._participant._publishFramed(framed)
+  }
 
-  let left = false
-  const unlistenLeave = participant.onLeave((cause) => {
-    left = true
-    const notice = { __r: 'left' as const, ...leaveCauseToWire(cause) }
-    void channel.send(notice).catch(() => {})
-    void channel.close().catch(() => {})
-  })
+  private _mirrorParticipant(): void {
+    const participant = this._participant
+    const remote = participant._room._state.getRemote(participant.id)
+    const unlistenMeta = remote?.onUpdate(
+      (meta: ParticipantMeta) => void this.send({ __r: 'p-meta', meta }).catch(() => {}),
+    )
 
-  channel.onClose(() => {
-    unlistenMeta?.()
-    unlistenDemand()
-    unlistenLeave()
-    if (!left) void participant._room._removeDepartedMember(participant.id).catch(reportRoomError)
-  })
+    // The ack carries the client's reply; only a transport rejection means the holder left.
+    participant._setForwarder((msg) => {
+      const notice = {
+        __r: 'dm' as const,
+        from: msg.from,
+        fromMeta: msg.fromMeta,
+        ...(msg.fromIdentity == null ? {} : { fromIdentity: msg.fromIdentity }),
+        data: msg.data,
+        ...(msg.ackId ? { ackId: msg.ackId } : {}),
+      }
+      if (!msg.ackId) {
+        void this.send(notice).catch(() => {})
+        return
+      }
+      return this.send(notice, { ack: true }).then(toDmReply, () => DM_PARTICIPANT_LEFT)
+    })
+
+    const unlistenDemand = participant.onDemand((track, wanted) => {
+      void this.send({ __r: 'demand', track, wanted }).catch(() => {})
+    })
+
+    let left = false
+    const unlistenLeave = participant.onLeave((cause) => {
+      left = true
+      const notice = { __r: 'left' as const, ...leaveCauseToWire(cause) }
+      void this.send(notice).catch(() => {})
+      void this.close().catch(() => {})
+    })
+
+    this.onClose(() => {
+      unlistenMeta?.()
+      unlistenDemand()
+      unlistenLeave()
+      if (!left) void participant._room._removeDepartedMember(participant.id).catch(reportRoomError)
+    })
+  }
 }
