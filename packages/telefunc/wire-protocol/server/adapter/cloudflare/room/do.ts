@@ -12,6 +12,7 @@ import type {
   StaleCommit,
 } from '../../../../backend/room/contract.js'
 import { encodeLaneKey } from '../../../../backend/room/lane-key.js'
+import { commitPreconditionHolds } from '../../../../backend/room/semantics.js'
 import {
   dispatchRoomShardFanout,
   dispatchRoomShardFanoutViaCoordinator,
@@ -148,7 +149,7 @@ export class TelefuncRoomDurableObject extends DurableObject {
     let accepted: { seq: number; timestamp: number; targets: RouteTarget[] } | null = null
     let stale: StaleCommit = { stale: 'incarnation' }
     this.ctx.storage.transactionSync(() => {
-      if (!commitPreconditionHolds(this.#sql, inc, lane, opts?.closingLease, now)) return
+      if (!commitPreconditionHolds(readLiveHead(this.#sql, now), inc, lane.kind, opts?.closingLease, now)) return
       if (opts?.requiredCellKeys !== undefined) {
         const required = readCells(this.#sql, inc, { keys: opts.requiredCellKeys }, now)
         if ('staleInc' in required) return
@@ -392,32 +393,6 @@ function nextMaintenanceDeadline(sql: SqlStorage, now: number): number | null {
 }
 
 // Closing accepts only its live authority-time lease through the closing-control branch; all other lanes are stale.
-function commitPreconditionHolds(
-  sql: SqlStorage,
-  inc: string,
-  lane: LaneId,
-  closingLease: string | undefined,
-  now: number,
-): boolean {
-  const hasClosingLease = closingLease === undefined ? 0 : 1
-  return (
-    sql
-      .exec(
-        `SELECT 1 FROM head WHERE id = 1 AND inc = ? AND (
-          (? = 0 AND state = 'open') OR
-          (? = 1 AND ? = 'control' AND state = 'closing' AND lease_id = ? AND lease_until IS NOT NULL AND ? <= lease_until)
-        )`,
-        inc,
-        hasClosingLease,
-        hasClosingLease,
-        lane.kind,
-        closingLease ?? '',
-        now,
-      )
-      .toArray().length === 1
-  )
-}
-
 export function createTelefuncRoomDurableObjectClass(
   sessionNamespace: SessionNamespaceResolver,
 ): new (

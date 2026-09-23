@@ -14,6 +14,7 @@ import type {
   RoomSubscriptionSource,
 } from '../room/contract.js'
 import { encodeLaneKey } from '../room/lane-key.js'
+import { commitPreconditionHolds, headCxMatches, nextOrderMark, type OrderMark } from '../room/semantics.js'
 import { unrefTimer } from '../../../utils/unrefTimer.js'
 import type {
   BackendReceiver,
@@ -34,7 +35,6 @@ type MemorySubscriptionSource = BroadcastLane | RoomSubscriptionSource
 type Expiring = { expiresAt: number | null }
 type StoredHead = RoomHead & Expiring
 type StoredCell = { bytes: Uint8Array }
-type OrderMark = { seq: number; timestamp: number }
 type RetainedEntry = { lane: LaneId; payload: Uint8Array; seq: number; timestamp: number }
 
 type Generation = {
@@ -68,21 +68,8 @@ function newGeneration(): Generation {
   return { revision: 0, cells: new Map(), order: new Map(), retained: new Map(), subs: new Map(), chains: new Map() }
 }
 
-function advanceOrder(
-  order: Map<string, OrderMark>,
-  domain: string,
-  now: number,
-  operation: 'publish' | 'commitLane',
-): OrderMark {
-  const previous = order.get(domain)
-  // seq is a standalone monotonic cursor; timestamp is independently clamped and cannot reset it.
-  const mark: OrderMark = {
-    seq: (previous?.seq ?? 0) + 1,
-    timestamp: Math.max(now, previous?.timestamp ?? 0),
-  }
-  if (!Number.isSafeInteger(mark.seq) || mark.seq <= 0 || !Number.isSafeInteger(mark.timestamp)) {
-    throw new Error(`${operation}: sequence exhausted for the ordering domain`)
-  }
+function advanceOrder(order: Map<string, OrderMark>, domain: string, now: number): OrderMark {
+  const mark = nextOrderMark(order.get(domain), now)
   order.set(domain, mark)
   return mark
 }
@@ -182,7 +169,7 @@ export class MemoryBackend implements BroadcastDriver, RoomDriver {
 
   publish(lane: BroadcastLane, payload: Uint8Array): PublishResult {
     this.#assertLive()
-    const mark = advanceOrder(this.#state.broadcastOrder, lane.key, this.#now(), 'publish')
+    const mark = advanceOrder(this.#state.broadcastOrder, lane.key, this.#now())
     const targets = [...(this.#state.broadcastSubs.get(broadcastRouteKey(lane)) ?? [])]
     const frame = copyBytes(payload)
     for (const target of targets) void target.deliver(copyBytes(frame), mark).catch(console.error)
@@ -203,24 +190,11 @@ export class MemoryBackend implements BroadcastDriver, RoomDriver {
   ): Promise<{ ok: true; head: RoomHead } | { conflict: true; current: RoomHead | null }> {
     this.#assertLive()
     const current = this.#readAndExpireHead(this.#state.rooms.get(roomId))
-    if (!this.#headCxMatches(cx, current)) {
+    if (!headCxMatches(cx, current, this.#now())) {
       return { conflict: true, current: current === null ? null : publicHead(current) }
     }
     // Only a CX that actually applies materializes a room record.
     return { ok: true, head: publicHead(this.#storeHead(this.#roomFor(roomId), next)) }
-  }
-
-  #headCxMatches(cx: HeadCx, current: StoredHead | null): boolean {
-    if (cx.expect === 'absent') return current === null
-    if (current === null || current.rev !== cx.expect.rev) return false
-    const expect = cx.expect
-    if ('closingLeaseExpired' in expect) {
-      return current.state === 'closing' && current.closeLease !== undefined && current.closeLease.until < this.#now()
-    }
-    if ('closingLease' in expect) {
-      return current.state === 'closing' && current.closeLease?.id === expect.closingLease
-    }
-    return true
   }
 
   #storeHead(room: RoomRecord, next: HeadNext): StoredHead {
@@ -292,7 +266,11 @@ export class MemoryBackend implements BroadcastDriver, RoomDriver {
     this.#assertLive()
     const room = this.#state.rooms.get(roomId)
     const head = this.#readAndExpireHead(room)
-    if (room === undefined || head === null || !this.#commitPreconditionHolds(head, inc, lane, opts?.closingLease)) {
+    if (
+      room === undefined ||
+      head === null ||
+      !commitPreconditionHolds(head, inc, lane.kind, opts?.closingLease, this.#now())
+    ) {
       return { stale: 'incarnation' }
     }
     const gen = this.#generation(room, inc)
@@ -300,7 +278,7 @@ export class MemoryBackend implements BroadcastDriver, RoomDriver {
     if (missing !== undefined) return { stale: 'cell', key: missing }
     const key = encodeLaneKey(lane)
     const frame = copyBytes(payload)
-    const mark = advanceOrder(gen.order, key, this.#now(), 'commitLane')
+    const mark = advanceOrder(gen.order, key, this.#now())
     if (opts?.retain) {
       gen.retained.set(key, {
         lane: Object.freeze(copyLane(lane)),
@@ -316,18 +294,6 @@ export class MemoryBackend implements BroadcastDriver, RoomDriver {
       receivers: sumReceiverCounts(targets),
       delivery: this.#enqueueAttempt(gen, key, targets, frame, info),
     }
-  }
-
-  // Supplying a lease selects the narrow closing-control branch; all other closing lanes are stale.
-  #commitPreconditionHolds(head: StoredHead, inc: string, lane: LaneId, closingLease: string | undefined): boolean {
-    if (head.currentInc !== inc) return false
-    return closingLease === undefined
-      ? head.state === 'open'
-      : lane.kind === 'control' &&
-          head.state === 'closing' &&
-          head.closeLease !== undefined &&
-          head.closeLease.id === closingLease &&
-          this.#now() <= head.closeLease.until
   }
 
   // Per-(inc,lane) at-most-once chain: settlement gates the next attempt without poisoning it.

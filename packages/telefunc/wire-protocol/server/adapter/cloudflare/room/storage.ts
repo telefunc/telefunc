@@ -2,6 +2,8 @@
 // Room-DO `transactionSync` makes head CX, cell batches, and order advance atomic under authority time.
 
 import type { CellMutation, CxResult, HeadCx, HeadNext, RoomHead } from '../../../../backend/room/contract.js'
+import { headCxMatches, nextOrderMark, type OrderMark } from '../../../../backend/room/semantics.js'
+export type { OrderMark }
 export type StoredHead = RoomHead & { expiresAt: number | null }
 
 type HeadCxOutcome = { ok: true; head: StoredHead } | { conflict: true; current: StoredHead | null }
@@ -19,10 +21,6 @@ type HeadRow = {
 
 export function toBytes(value: ArrayBuffer | Uint8Array): Uint8Array {
   return value instanceof Uint8Array ? value : new Uint8Array(value)
-}
-
-function rowExists(sql: SqlStorage, query: string, ...bindings: Array<string | number>): boolean {
-  return sql.exec(query, ...bindings).toArray().length === 1
 }
 
 export function initSchema(sql: SqlStorage): void {
@@ -105,29 +103,6 @@ export function listGenerations(sql: SqlStorage): string[] {
     .map((row) => row.inc)
 }
 
-function headCxMatches(sql: SqlStorage, cx: HeadCx, current: StoredHead | null, now: number): boolean {
-  if (cx.expect === 'absent') return current === null
-  if (current === null) return false
-  const expect = cx.expect
-  if ('closingLeaseExpired' in expect) {
-    return rowExists(
-      sql,
-      "SELECT 1 FROM head WHERE id = 1 AND rev = ? AND state = 'closing' AND lease_until IS NOT NULL AND lease_until < ?",
-      expect.rev,
-      now,
-    )
-  }
-  if ('closingLease' in expect) {
-    return rowExists(
-      sql,
-      "SELECT 1 FROM head WHERE id = 1 AND rev = ? AND state = 'closing' AND lease_id = ?",
-      expect.rev,
-      expect.closingLease,
-    )
-  }
-  return rowExists(sql, 'SELECT 1 FROM head WHERE id = 1 AND rev = ?', expect.rev)
-}
-
 // Called inside `transactionSync`; a lost race returns the current head.
 export function compareExchangeHead(
   sql: SqlStorage,
@@ -137,7 +112,7 @@ export function compareExchangeHead(
   mintRev: () => string,
 ): HeadCxOutcome {
   const current = readLiveHead(sql, now)
-  if (!headCxMatches(sql, cx, current, now)) return { conflict: true, current }
+  if (!headCxMatches(cx, current, now)) return { conflict: true, current }
   return { ok: true, head: storeHead(sql, next, now, mintRev) }
 }
 
@@ -227,20 +202,12 @@ export function compareExchangeCells(
   return 'committed'
 }
 
-export type OrderMark = { seq: number; timestamp: number }
-
-// seq strictly increases for the lifetime of a domain instance; timestamp is clamped independently.
+// `seq` strictly increases for the lifetime of a domain instance.
 export function advanceOrder(sql: SqlStorage, inc: string, domain: string, now: number): OrderMark {
   const row = sql
     .exec<{ seq: number; ts: number }>('SELECT seq, ts FROM ord WHERE inc = ? AND domain = ?', inc, domain)
     .toArray()[0]
-  if (row?.seq === Number.MAX_SAFE_INTEGER) {
-    throw new Error('commitLane: sequence exhausted for the ordering domain')
-  }
-  const mark: OrderMark = { seq: (row?.seq ?? 0) + 1, timestamp: Math.max(now, row?.ts ?? 0) }
-  if (!Number.isSafeInteger(mark.seq) || mark.seq <= 0 || !Number.isSafeInteger(mark.timestamp)) {
-    throw new Error('commitLane: invalid ordering position')
-  }
+  const mark = nextOrderMark(row === undefined ? undefined : { seq: row.seq, timestamp: row.ts }, now)
   sql.exec(
     'INSERT OR REPLACE INTO ord (inc, domain, seq, ts) VALUES (?, ?, ?, ?)',
     inc,
