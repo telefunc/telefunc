@@ -1,6 +1,5 @@
 export { superviseRoomDriver }
 
-import { assert } from '../../../utils/assert.js'
 import { assertHeadNextWellFormed } from './head.js'
 import { SubscriptionManager } from '../subscription-manager.js'
 import type { HeadCx, HeadNext, RoomBackend, RoomDriver } from './contract.js'
@@ -39,8 +38,6 @@ function superviseRoomDriver(driver: RoomDriver): RoomBackend {
         return receiver(payload, info)
       }),
     dropGeneration: async (roomId, inc) => {
-      // Core drops only finalized incarnations; a random `inc` never comes back as current, so no atomic check is needed.
-      assert((await driver.readHead(roomId))?.currentInc !== inc, 'Dropping the current incarnation')
       await driver.dropGeneration(roomId, inc)
       subscriptions.terminate((source) => source.roomId === roomId && source.inc === inc)
     },

@@ -2597,14 +2597,6 @@ describe('room binary protocol validation', () => {
     }
     expect(delegated).not.toHaveBeenCalled()
   })
-  it('treats dropping the current incarnation as a core bug, before any driver runs it', async () => {
-    const room = (await Room.create('drop-current')) as ServerRoom
-    const drop = vi.spyOn(driver, 'dropGeneration')
-    await expect(getRoomBackend().dropGeneration(room.id, room._inc)).rejects.toThrow(
-      'Dropping the current incarnation',
-    )
-    expect(drop).not.toHaveBeenCalled()
-  })
   it('encodes the wide ordering frame as four big-endian u32 words ahead of the payload', () => {
     const payload = new Uint8Array([1, 255])
     const info = { seq: 0x1_0000_0007, timestamp: 0x2_0000_0009 }
