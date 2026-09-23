@@ -1488,7 +1488,7 @@ describe('Room public behavior', () => {
   it('does not replay older retained text after a newer global semantic frame', async () => {
     const room = (await Room.create('global-retained-watermark')) as ServerRoom
     const stub = register(room)
-    const relay = vi.spyOn(stub, '_relayPublishText').mockImplementation(() => {})
+    const relay = vi.spyOn(stub, '_sendPublish').mockImplementation(() => {})
     stub._relayTextLive('newer-live', { seq: 2, timestamp: 2 })
     stub._emitRetainedText(
       'older-retained',

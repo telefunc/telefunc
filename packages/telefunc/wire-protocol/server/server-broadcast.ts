@@ -114,12 +114,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
       if (invokeChannelListener(cb, [data, info], (error) => this._handleCallbackError(error))) return
     }
     if (!this._peerSubscriptions.text) return
-    const wireText = encodePublishText(serialized, rawInfo)
-    if (this._peer) {
-      this._peer.sendPublish(wireText)
-      return
-    }
-    this._prePeerBuffer.pushPublish(wireText)
+    this._sendPublish(encodePublishText(serialized, rawInfo))
   }
 
   _deliverBroadcastBinaryMessage(data: Uint8Array, rawInfo: WirePublishInfo): void {
@@ -128,12 +123,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
       if (invokeChannelListener(cb, [data, info], (error) => this._handleCallbackError(error))) return
     }
     if (!this._peerSubscriptions.binary) return
-    const wireData = encodePublishBinary(data, rawInfo)
-    if (this._peer) {
-      this._peer.sendPublishBinary(wireData)
-      return
-    }
-    this._prePeerBuffer.pushPublishBinary(wireData)
+    this._sendPublishBinary(encodePublishBinary(data, rawInfo))
   }
 
   override _onPeerBroadcastSubscribe(binary: boolean): void {

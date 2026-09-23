@@ -623,6 +623,18 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this._shutdown()
   }
 
+  /** @internal — a PUBLISH frame to the peer, buffered until it attaches. */
+  _sendPublish(wireText: string): void {
+    if (this._peer) this._peer.sendPublish(wireText)
+    else this._prePeerBuffer.pushPublish(wireText)
+  }
+
+  /** @internal — a binary PUBLISH frame to the peer, buffered until it attaches. */
+  _sendPublishBinary(wireData: Uint8Array): void {
+    if (this._peer) this._peer.sendPublishBinary(wireData)
+    else this._prePeerBuffer.pushPublishBinary(wireData)
+  }
+
   /** Send an ack response, buffering it if the peer is currently disconnected. */
   protected _sendAckRes(ackedSeq: number, result: string, status: AckResultStatus = ACK_STATUS.OK): void {
     if (this._peer) {

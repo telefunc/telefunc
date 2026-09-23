@@ -7,7 +7,6 @@ import { assert, assertUsage } from '../../../utils/assert.js'
 import { isObject } from '../../../utils/isObject.js'
 import { unrefTimer } from '../../../utils/unrefTimer.js'
 import { ROOM_DM_ACK_TIMEOUT_MS, ROOM_TAIL_ATTACH_TIMEOUT_MS } from '../constants.js'
-import type { ChannelPublishAck } from '../../channel.js'
 import { ServerChannel, parsePeerText } from '../../server/channel.js'
 import type { ShieldValidator } from '../../../node/server/shield.js'
 import { encodePublishBinary, encodePublishText, type WirePublishInfo } from '../../shared-ws.js'
@@ -23,7 +22,6 @@ import {
   hasRoomTag,
   toDmReply,
   type RoomOrder,
-  type MemberSnapshot,
   type ParticipantStubRequest,
   type RoomCtrlEnvelope,
   type RoomDataEnvelope,
@@ -37,8 +35,23 @@ assertIsNotBrowser()
 /** What one response's Room values grant the client on a room: echo drops for its own members, and hidden members it returned. */
 type ResponseRoomGrants = { selfSuppressed: Set<string>; hidden: Set<string> }
 
+/** A Room stub answers each client request through its channel ack, under the Room error contract. */
+abstract class RoomRequestChannel extends ServerChannel {
+  protected _ackRoomResult(seq: number, work: Promise<unknown>): Promise<void> {
+    return this._trackAck(
+      work.then(
+        (result) => this._sendAckRes(seq, stringify(result)),
+        (error: unknown) => {
+          const { text, status } = roomAckError(error, reportRoomError)
+          this._sendAckRes(seq, text, status)
+        },
+      ),
+    )
+  }
+}
+
 /** Server→client control/data obey wants; client→server membership/control and validated publishes use native channel acks. */
-class RoomStubChannel extends ServerChannel implements LaneHolder {
+class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
   private readonly _room: ServerRoom
   /** @internal — members the remote client joined through this stub (membership & lifecycle). */
   readonly _stubMembers = new Set<string>()
@@ -117,37 +130,15 @@ class RoomStubChannel extends ServerChannel implements LaneHolder {
 
   override _onPeerAckReqMessage(text: string, seq: number): Promise<void> {
     const request = parsePeerText(text)
-    return this._trackAck(
-      (async () => {
-        try {
-          const result = await this._room._handleStubRequest(this, request)
-          this._sendAckRes(seq, stringify(result))
-        } catch (error) {
-          const failure = roomAckError(error, reportRoomError)
-          this._sendAckRes(seq, failure.text, failure.status)
-        }
-      })(),
-    )
+    return this._ackRoomResult(seq, this._room._handleStubRequest(this, request))
   }
 
   override _onPeerPublishAckReqMessage(text: string, seq: number): Promise<void> {
-    return this._ackPublish(this._room._publishFromStub(this, { text }), seq)
+    return this._ackRoomResult(seq, this._room._publishFromStub(this, { text }))
   }
 
   override _onPeerPublishBinaryAckReqMessage(binary: Uint8Array, seq: number): Promise<void> {
-    return this._ackPublish(this._room._publishFromStub(this, { binary }), seq)
-  }
-
-  private _ackPublish(publishing: Promise<ChannelPublishAck>, seq: number): Promise<void> {
-    return this._trackAck(
-      publishing.then(
-        (ack) => this._sendAckRes(seq, stringify(ack)),
-        (err: unknown) => {
-          const { text, status } = roomAckError(err, reportRoomError)
-          this._sendAckRes(seq, text, status)
-        },
-      ),
-    )
+    return this._ackRoomResult(seq, this._room._publishFromStub(this, { binary }))
   }
 
   // Control always flows; text follows broadcast/member wants, while binary uses `sub-binary`.
@@ -166,50 +157,26 @@ class RoomStubChannel extends ServerChannel implements LaneHolder {
     this._room._syncSubs()
   }
 
-  _relayRoster(members: MemberSnapshot[]): void {
-    const event: RoomRosterEvent = { __r: 'roster', members }
-    this._relayPublishText(encodePublishText(stringify(event), { seq: 0, timestamp: Date.now() }))
-  }
-
-  _relayRosterError(): void {
-    const event: RoomRosterEvent = { __r: 'roster-error' }
-    this._relayPublishText(encodePublishText(stringify(event), { seq: 0, timestamp: Date.now() }))
-  }
-
-  _relayClosed(): void {
-    const event: RoomCtrlEnvelope = { __r: 'closed' }
-    this._relayPublishText(encodePublishText(stringify(event), { seq: 0, timestamp: Date.now() }))
-  }
-
-  _relayDemand(event: RoomDemandEvent): void {
-    this._relayPublishText(encodePublishText(stringify(event), { seq: 0, timestamp: Date.now() }))
-  }
-
-  _relayPublishText(wireText: string): void {
-    if (this._peer) this._peer.sendPublish(wireText)
-    else this._prePeerBuffer.pushPublish(wireText)
-  }
-
-  _relayPublishBinary(wireData: Uint8Array): void {
-    if (this._peer) this._peer.sendPublishBinary(wireData)
-    else this._prePeerBuffer.pushPublishBinary(wireData)
+  /** An event this instance originates for this client alone, outside any lane's order. */
+  _relayEvent(event: RoomRosterEvent | RoomDemandEvent | Extract<RoomCtrlEnvelope, { __r: 'closed' }>): void {
+    this._sendPublish(encodePublishText(stringify(event), { seq: 0, timestamp: Date.now() }))
   }
 
   _relayTextLive(wireText: string, ord: RoomOrder): void {
-    if (this._replay.admitLive(TEXT_LANE_KEY, ord.seq)) this._relayPublishText(wireText)
+    if (this._replay.admitLive(TEXT_LANE_KEY, ord.seq)) this._sendPublish(wireText)
   }
 
   _emitRetainedText(serialized: string, _event: RoomDataEnvelope, info: WirePublishInfo): void {
-    if (this._replay.admitRetained(TEXT_LANE_KEY, info.seq)) this._relayPublishText(encodePublishText(serialized, info))
+    if (this._replay.admitRetained(TEXT_LANE_KEY, info.seq)) this._sendPublish(encodePublishText(serialized, info))
   }
 
   _relayBinaryLive(wireData: Uint8Array, from: string, track: string, info: WirePublishInfo): void {
-    if (this._replay.admitLive(binaryLaneKey(from, track), info.seq)) this._relayPublishBinary(wireData)
+    if (this._replay.admitLive(binaryLaneKey(from, track), info.seq)) this._sendPublishBinary(wireData)
   }
 
   _emitRetainedBinary(framed: Uint8Array, frame: BinaryFrame, info: WirePublishInfo): void {
     if (this._replay.admitRetained(binaryLaneKey(frame.from, frame.track ?? DEFAULT_TRACK), info.seq))
-      this._relayPublishBinary(encodePublishBinary(framed, info))
+      this._sendPublishBinary(encodePublishBinary(framed, info))
   }
 
   _forgetMember(from: string): void {
@@ -270,7 +237,7 @@ async function sendParticipantDm(
 }
 
 /** One client's hold on a server participant: its requests act as that participant, whose inbox, demand, meta and leave flow back to the client. */
-class RoomParticipantStubChannel extends ServerChannel<unknown, unknown> {
+class RoomParticipantStubChannel extends RoomRequestChannel {
   private readonly _participant: ServerLocalParticipant
   private readonly _publishShield: ShieldValidator | undefined
 
@@ -288,23 +255,11 @@ class RoomParticipantStubChannel extends ServerChannel<unknown, unknown> {
 
   override _onPeerAckReqMessage(text: string, seq: number): Promise<void> {
     const request = parsePeerText(text)
-    return this._ackRoomRequest(seq, this._handleRequest(request))
+    return this._ackRoomResult(seq, this._handleRequest(request))
   }
 
   override _onPeerBinaryAckReqMessage(framed: Uint8Array, seq: number): Promise<void> {
-    return this._ackRoomRequest(seq, this._publishBinary(framed))
-  }
-
-  private _ackRoomRequest(seq: number, pending: Promise<unknown>): Promise<void> {
-    return this._trackAck(
-      pending.then(
-        (result) => this._sendAckRes(seq, stringify(result)),
-        (error: unknown) => {
-          const failure = roomAckError(error, reportRoomError)
-          this._sendAckRes(seq, failure.text, failure.status)
-        },
-      ),
-    )
+    return this._ackRoomResult(seq, this._publishBinary(framed))
   }
 
   private async _handleRequest(msg: unknown): Promise<unknown> {

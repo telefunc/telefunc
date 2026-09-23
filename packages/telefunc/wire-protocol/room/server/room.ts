@@ -593,7 +593,7 @@ class ServerRoom extends RoomStateView implements Room {
       const wireText = encodePublishText(serialized, rawInfo)
       // A hidden member's events reach only the clients that were handed it.
       for (const stub of this._stubs)
-        if (hiddenMember === null || stub._grantedHidden.has(hiddenMember)) stub._relayPublishText(wireText)
+        if (hiddenMember === null || stub._grantedHidden.has(hiddenMember)) stub._sendPublish(wireText)
     }
     if (this._state.closed && !wasClosed) this._teardown()
   }
@@ -676,7 +676,7 @@ class ServerRoom extends RoomStateView implements Room {
     for (const stub of this._stubs) {
       if (!stub._stubMembers.has(dm.to)) continue
       if (dm.ackId) stub._recordAckDm(dm.ackId, dm.from, dm.to)
-      stub._relayPublishText(wireText)
+      stub._sendPublish(wireText)
     }
   }
   private _applyCtrl(event: RoomCtrlEnvelope): void {
@@ -775,7 +775,7 @@ class ServerRoom extends RoomStateView implements Room {
   private _settleTerminalSubscription(): void {
     if (this._state.closed) return
     this._state.applyClosed()
-    for (const stub of this._stubs) stub._relayClosed() // the lane that carried `closed` failed
+    for (const stub of this._stubs) stub._relayEvent({ __r: 'closed' }) // the lane that carried `closed` failed
     this._teardown()
   }
   private async _reconcileAuthority(): Promise<void> {
@@ -822,11 +822,14 @@ class ServerRoom extends RoomStateView implements Room {
       void this._ensureRoster()
         .then(() => {
           if (this._stubs.has(stub) && !this._state.closed)
-            stub._relayRoster(this._state.snapshotMembers().filter((member) => !member.hidden))
+            stub._relayEvent({
+              __r: 'roster',
+              members: this._state.snapshotMembers().filter((member) => !member.hidden),
+            })
         })
         .catch((error) => {
           reportRoomError(error)
-          if (this._stubs.has(stub) && !this._state.closed) stub._relayRosterError()
+          if (this._stubs.has(stub) && !this._state.closed) stub._relayEvent({ __r: 'roster-error' })
         })
     })
     stub.onClose(() => {
@@ -1097,7 +1100,7 @@ class ServerRoom extends RoomStateView implements Room {
     }
     for (const stub of this._stubs) {
       if (stub._stubMembers.has(member)) {
-        stub._relayDemand({ __r: 'demand', member, track: trackOut, wanted })
+        stub._relayEvent({ __r: 'demand', member, track: trackOut, wanted })
         return
       }
     }
@@ -1180,7 +1183,7 @@ class ServerRoom extends RoomStateView implements Room {
   }
   private _relayVisibleRoster(): void {
     const members = this._state.snapshotMembers().filter((member) => !member.hidden)
-    for (const stub of this._stubs) stub._relayRoster(members)
+    for (const stub of this._stubs) stub._relayEvent({ __r: 'roster', members })
   }
   // Graceful departures use events; heartbeats refresh owner `seenAt` and reap records orphaned by hard crashes.
   private _ownedMemberIds(): string[] {
