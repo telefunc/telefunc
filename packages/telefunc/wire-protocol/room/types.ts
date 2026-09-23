@@ -183,6 +183,9 @@ type RoomBinaryListener<P extends ParticipantMeta = ParticipantMeta> = (
   from: Sender<P>,
 ) => unknown
 
+/** One member's binary frames: the sender is the member subscribed to. */
+type MemberBinaryListener = (data: Uint8Array, info: ChannelPublishInfo & BinaryFrameInfo) => unknown
+
 /** A returnable multi-party room with presence, membership, and events. */
 type Room<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = ParticipantMeta, Pub = unknown> = {
   /** The ID the room was created with. */
@@ -278,10 +281,7 @@ type RemoteParticipant<P extends ParticipantMeta = ParticipantMeta, Pub = unknow
   /** Receive only this member's messages. Returns an unsubscribe function. */
   subscribe(callback: (data: Pub, info: ChannelPublishInfo) => unknown): () => void
   /** Receive only this member's binary frames, optionally filtered to one track. */
-  subscribeBinary(
-    callback: (data: Uint8Array, info: ChannelPublishInfo & BinaryFrameInfo) => unknown,
-    options?: { track?: string | null },
-  ): () => void
+  subscribeBinary(callback: MemberBinaryListener, options?: { track?: string | null }): () => void
 
   /** This member's metadata changed. */
   onUpdate(callback: (meta: P, prev: P) => void): () => void
