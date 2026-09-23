@@ -456,6 +456,7 @@ function applyBroadcastConfig(val: unknown): void {
   const next: BroadcastConfigUser = {}
   for (const [key, value] of Object.entries(val)) {
     if (key === 'transport') {
+      if (value === undefined) continue // unset, like an absent key
       assertUsage(
         isObject(value) &&
           (['send', 'listen', 'sendBinary', 'listenBinary'] as const).every(

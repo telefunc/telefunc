@@ -85,6 +85,13 @@ describe('backend installation lifecycle', () => {
     await expectBroadcastRoundTrip('removed')
   })
 
+  it('setting config.broadcast.transport to undefined removes it too', async () => {
+    config.broadcast.transport = localTransport()
+    config.broadcast.transport = undefined
+    expect(getRoomBackend()).toBeDefined()
+    await expectBroadcastRoundTrip('unset')
+  })
+
   it('rejects a Broadcast transport missing a binary method when it is configured', () => {
     const { sendBinary: _, ...textOnly } = localTransport()
     expect(() => {
