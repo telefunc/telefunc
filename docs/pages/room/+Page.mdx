@@ -292,7 +292,10 @@ export async function onJoinMatch(matchId, name) {
 // Client
 const verdict = await me.send(authority, { type: 'move', to: 'e4' }, { ack: true }) // command + await its reply
 authority.subscribeBinary((frame) => world.apply(frame))                            // read its state
+authority.onLeave(() => showMatchAborted())                                         // the handle you were given stays live
 ```
+
+The client you hand a hidden participant sees that participant's `onUpdate` and `onLeave`; every other client still sees nothing of it.
 
 Two properties to design around:
 

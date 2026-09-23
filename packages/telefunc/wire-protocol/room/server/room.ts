@@ -99,6 +99,12 @@ function decodeSemanticEnvelope(serialized: string): RoomEnvelope | undefined {
     return undefined
   }
 }
+/** The owner that wrote the event flags a hidden member; room-level events always reach clients. */
+function hiddenMemberOf(event: RoomCtrlEnvelope): string | null {
+  if (event.__r === 'join' || event.__r === 'leave' || event.__r === 'p-meta' || event.__r === 'track')
+    return event.hidden === true ? event.id : null
+  return null
+}
 function shouldRelayMemberData(stub: RoomStubChannel, from: string): boolean {
   return stub._wantsTextFrom(from) && !stub._selfSuppressed.has(from)
 }
@@ -348,7 +354,7 @@ class ServerRoom extends RoomStateView implements Room {
     computeMeta: (current: ParticipantMeta) => ParticipantMeta,
   ): Promise<AcceptedMeta> {
     const key = roomMemberKvKey(this.id, id)
-    const { meta, seq } = await mutateCells(this.id, this._inc, { keys: [key] }, (cells) => {
+    const { meta, seq, hidden } = await mutateCells(this.id, this._inc, { keys: [key] }, (cells) => {
       const raw = cells.get(key)
       if (raw === undefined) throw new RoomError(`Participant not found (left?): ${id}`)
       const record = parse(decodeRoomText(raw)) as RoomMemberRecord
@@ -356,13 +362,13 @@ class ServerRoom extends RoomStateView implements Room {
       const seq = record.metaSeq + 1
       const next = { ...record, meta, metaSeq: seq, seenAt: Date.now() } satisfies RoomMemberRecord
       return {
-        value: { meta, seq },
+        value: { meta, seq, hidden: record.hidden === true },
         mutations: [{ key, set: { bytes: encodeRoomText(stringify(next)) } }],
       }
     })
     this._state.applyParticipantMeta(id, meta, seq)
     this._syncLocalMemberMeta(id)
-    await publishCtrl(this.id, this._inc, { __r: 'p-meta', id, meta, seq })
+    await publishCtrl(this.id, this._inc, { __r: 'p-meta', id, meta, seq, ...(hidden ? { hidden: true } : {}) })
     return { meta, seq }
   }
 
@@ -440,20 +446,20 @@ class ServerRoom extends RoomStateView implements Room {
       this._announcedTracks.set(from, announced)
     }
     const key = roomMemberKvKey(this.id, from)
-    await mutateCells(this.id, this._inc, { keys: [key] }, (cells) => {
+    const hidden = await mutateCells(this.id, this._inc, { keys: [key] }, (cells) => {
       const raw = cells.get(key)
       if (raw === undefined) throw new RoomError(`Participant not found (left?): ${from}`)
       const record = parse(decodeRoomText(raw)) as RoomMemberRecord
       const tracks = record.tracks ?? []
       // Already recorded by an attempt whose announcement failed: announce it now.
-      if (tracks.includes(track)) return { value: undefined, mutations: [] }
+      if (tracks.includes(track)) return { value: record.hidden === true, mutations: [] }
       const next = { ...record, tracks: [...tracks, track], seenAt: Date.now() } satisfies RoomMemberRecord
       return {
-        value: undefined,
+        value: record.hidden === true,
         mutations: [{ key, set: { bytes: encodeRoomText(stringify(next)) } }],
       }
     })
-    await publishCtrl(this.id, this._inc, { __r: 'track', id: from, track })
+    await publishCtrl(this.id, this._inc, { __r: 'track', id: from, track, ...(hidden ? { hidden: true } : {}) })
     this._state.applyTrack(from, track)
     announced.add(track)
   }
@@ -597,25 +603,15 @@ class ServerRoom extends RoomStateView implements Room {
       return
     }
     const wasClosed = this._state.closed
-    const serverOnly = this._hidesFromClients(event)
+    const hiddenMember = hiddenMemberOf(event)
     this._applyCtrl(event)
-    if (this._stubs.size > 0 && !serverOnly) {
+    if (this._stubs.size > 0) {
       const wireText = encodePublishText(serialized, rawInfo)
-      for (const stub of this._stubs) stub._relayPublishText(wireText)
+      // A hidden member's events reach only the clients that were handed it.
+      for (const stub of this._stubs)
+        if (hiddenMember === null || stub._grantedHidden.has(hiddenMember)) stub._relayPublishText(wireText)
     }
     if (this._state.closed && !wasClosed) this._teardown()
-  }
-  private _hidesFromClients(event: RoomEnvelope): boolean {
-    switch (event.__r) {
-      case 'join':
-        return event.hidden === true
-      case 'leave':
-      case 'p-meta':
-      case 'track':
-        return this._state.isHidden(event.id)
-      default:
-        return false // room-level events (update/closed) always reach clients
-    }
   }
 
   private _applyAnnouncement(

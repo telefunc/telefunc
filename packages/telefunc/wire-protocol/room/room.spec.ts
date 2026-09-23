@@ -29,7 +29,7 @@ import { SubSlot, configFromHead, decodeRoomText, encodeRoomConfig } from './ser
 import { reportRoomError, roomAckError } from './server/errors.js'
 import { RoomParticipantStubChannel, RoomStubChannel, bindParticipantStubChannel } from './stubs.js'
 import { RoomDemand } from './demand.js'
-import { roomParticipantReplacer, roomReplacer } from './response-server.js'
+import { roomParticipantReplacer, roomRemoteReplacer, roomReplacer } from './response-server.js'
 import type { ServerReplacerContext } from '../types.js'
 import type { ServerChannel } from '../server/channel.js'
 import type { ChannelPublishInfo } from '../channel.js'
@@ -817,6 +817,55 @@ describe('Room public behavior', () => {
     await other.publish('marker')
     await vi.waitFor(() => expect(semanticFrames(peer, 'data')).toContain('marker'))
     expect(semanticFrames(peer, 'data')).not.toContain('echo')
+  })
+  it("relays none of a hidden member's events from an instance that has not loaded the roster", async () => {
+    const authority = await Room.create('hidden-pre-roster')
+    const bot = await authority.join({ hidden: true })
+    const observer = (await Room.get(authority.id)) as ServerRoom
+    const roster = delayRosterRead(authority.id)
+    try {
+      const { peer } = serve(observer)
+      const before = await authority.join()
+      await vi.waitFor(() =>
+        expect(memberEvents(peer, before.id)).toContainEqual(expect.objectContaining({ __r: 'join' })),
+      )
+      expect(observer._state.rosterKnown).toBe(false)
+      await bot.setMeta({ secret: true })
+      await bot.publishBinary(new Uint8Array([1]), { track: 'hidden-track' })
+      await bot.leave()
+      const after = await authority.join()
+      await vi.waitFor(() =>
+        expect(memberEvents(peer, after.id)).toContainEqual(expect.objectContaining({ __r: 'join' })),
+      )
+      expect(memberEvents(peer, bot.id)).toEqual([])
+    } finally {
+      roster.release()
+    }
+  })
+  it("relays a returned hidden participant's updates and leave to that response's client only", async () => {
+    const room = (await Room.create('hidden-grant')) as ServerRoom
+    const bot = await room.join({ hidden: true })
+    const [remote] = await room.getParticipants({ hidden: true })
+    const channels: ServerChannel[] = []
+    const context = {
+      registerChannel: (channel: ServerChannel) => {
+        channel._registerChannel()
+        channels.push(channel)
+      },
+      validators: new Map(),
+    } as unknown as ServerReplacerContext
+    roomRemoteReplacer.replace(remote!, context)
+    roomReplacer.replace(room, context)
+    const granted = attachPeer(channels.find((channel) => channel instanceof RoomStubChannel) as RoomStubChannel)
+    const { peer: other } = serve(room)
+    await bot.setMeta({ mood: 'busy' })
+    await bot.leave()
+    await vi.waitFor(() => expect(memberEvents(granted, bot.id).map((event) => event.__r)).toEqual(['p-meta', 'leave']))
+    const marker = await room.join()
+    await vi.waitFor(() =>
+      expect(memberEvents(other, marker.id)).toContainEqual(expect.objectContaining({ __r: 'join' })),
+    )
+    expect(memberEvents(other, bot.id)).toEqual([])
   })
   it("keeps a client participant's own meta on the value every observer converged to", async () => {
     const acks = { A: deferred<unknown>(), B: deferred<unknown>() }
@@ -2031,6 +2080,22 @@ describe('client Room lifecycle', () => {
       participants: 0,
     })
   })
+  it('fires onLeave on a directly held hidden member when its leave is relayed', () => {
+    const { client, emit } = fakeClient('client-hidden-leave')
+    emit({ __r: 'roster', members: [] })
+    const hidden = client._reviveRemote({
+      id: crypto.randomUUID(),
+      meta: {},
+      joinedAt: 1,
+      metaSeq: 0,
+      identity: null,
+      hidden: true,
+    })
+    const causes: unknown[] = []
+    hidden.onLeave((cause) => causes.push(cause?.type))
+    emit({ __r: 'leave', id: hidden.id, cause: 'removed', hidden: true }, 2)
+    expect(causes).toEqual(['removed'])
+  })
   it('preserves directly held hidden members while rejecting client enumeration', async () => {
     const { client, emit } = fakeClient('client-hidden-roster')
     emit({ __r: 'roster', members: [] })
@@ -2802,6 +2867,13 @@ async function createTail(id: string) {
     member: await source.join(),
     tail: (await Room.get(id, { tail: true })) as ServerRoom,
   }
+}
+function memberEvents(peer: Peer, id: string): Array<{ __r: string }> {
+  return peer
+    .decoded()
+    .filter((frame) => frame.tag === TAG.PUBLISH)
+    .map((frame) => JSON.parse(frame.text) as { __r: string; id?: string })
+    .filter((event) => event.id === id)
 }
 function semanticFrames(peer: Peer, kind: 'data' | 'announce'): unknown[] {
   return peer

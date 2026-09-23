@@ -4,7 +4,12 @@ import type { ReplacerType, ServerReplacerContext, TypeContract } from '../types
 import { ServerLocalParticipant, ServerRoom } from './server.js'
 import type { RemoteParticipant } from './types.js'
 import type { ParticipantStubMetadata, RoomSnapshotMetadata } from './protocol.js'
-import { bindParticipantStubChannel, RoomParticipantStubChannel, RoomStubChannel } from './stubs.js'
+import {
+  bindParticipantStubChannel,
+  RoomParticipantStubChannel,
+  RoomStubChannel,
+  type ResponseRoomGrants,
+} from './stubs.js'
 import { remoteBacking } from './state.js'
 import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
 assertIsNotBrowser()
@@ -26,17 +31,17 @@ type RoomRemoteReplacerContract = TypeContract<
     hidden?: boolean
   }
 >
-/** Per-response echo suppression shared by the Room replacers in one serializer pass. */
-const ROOM_SELF_SUPPRESS = Symbol()
+/** Per-response grants shared by the Room replacers in one serializer pass. */
+const ROOM_GRANTS = Symbol()
 type RoomReplacerContext = ServerReplacerContext & {
-  [ROOM_SELF_SUPPRESS]?: Map<string, Set<string>>
+  [ROOM_GRANTS]?: Map<string, ResponseRoomGrants>
 }
 /** Keyed by room id: `Room.join(id)` and `Room.get(id)` build separate instances of one room. */
-function roomSelfSuppressSet(context: ServerReplacerContext, room: ServerRoom): Set<string> {
-  const byRoom = ((context as RoomReplacerContext)[ROOM_SELF_SUPPRESS] ??= new Map())
-  let set = byRoom.get(room.id)
-  if (!set) byRoom.set(room.id, (set = new Set()))
-  return set
+function responseRoomGrants(context: ServerReplacerContext, room: ServerRoom): ResponseRoomGrants {
+  const byRoom = ((context as RoomReplacerContext)[ROOM_GRANTS] ??= new Map())
+  let grants = byRoom.get(room.id)
+  if (!grants) byRoom.set(room.id, (grants = { selfSuppressed: new Set(), hidden: new Set() }))
+  return grants
 }
 const roomReplacer: ReplacerType<RoomReplacerContract, ServerReplacerContext> = {
   prefix: ROOM_PREFIX,
@@ -49,8 +54,8 @@ const roomReplacer: ReplacerType<RoomReplacerContract, ServerReplacerContext> = 
     // The publish shield, auto-generated from the room's declared message type (`Pub`, see `RoomShield`), lives in `context.validators` under the `data` slot. Install it on the stub's dedicated
     // `_publishShield` — never its `_validators` map, which the base channel runs against every request envelope (join/leave/dm); the payload is shielded at the publish ingress (`_publishFromStub`).
     stub._publishShield = context.validators.get('data')
-    // Adopt this response's echo drop-set for the room: any co-returned self-suppressing member (either serialization order) lands in the same set, and the relay gate reads it at source.
-    stub._adoptSelfSuppressed(roomSelfSuppressSet(context, serverRoom))
+    // Adopt this response's grants for the room: co-returned self-suppressing members and returned hidden members (either serialization order) land in the same sets, read by the relay gates at source.
+    stub._adoptResponseGrants(responseRoomGrants(context, serverRoom))
     // Attach before snapshotting: events from this point on are relayed to the client, earlier state is in the snapshot — overlaps are absorbed by idempotent application. In tail mode (`Room.get({
     // tail })`), attaching hands the pre-attach hold to the stub, which keeps it server-side until the client's first subscribe (see `ServerRoom._attachStub`).
     serverRoom._attachStub(stub)
@@ -82,8 +87,10 @@ const roomRemoteReplacer: ReplacerType<RoomRemoteReplacerContract, ServerReplace
     // Brand check, not instanceof — dev servers load two SSR module graphs, and a class from one graph never instanceof-matches the other's. Brands (Symbol.for) span graphs.
     return ServerRoom.isServerRoom(remoteBacking(value)?.state._owner)
   },
-  replace(remote, _context) {
+  replace(remote, context) {
     const { state, entry } = remoteBacking(remote)!
+    // Returning a hidden member hands it to this client: its room stub relays that member's events.
+    if (entry.hidden) responseRoomGrants(context, state._owner as ServerRoom).hidden.add(entry.id)
     return {
       // The entry survives the member's departure (the handle closes over it), so a serialize racing a leave still ships a coherent snapshot — the client's roster then heals it.
       metadata: {
@@ -117,7 +124,7 @@ const roomParticipantReplacer: ReplacerType<RoomParticipantReplacerContract, Ser
     bindParticipantStubChannel(channel, participant, context.validators.get('data'))
     // selfDelivery off: bind this member's id onto its room's stub drop-set for this response, so the server drops its echo at the source. If the room isn't co-returned there's no stub to adopt the
     // set and it's discarded with the pass — a clean no-op, never leaking to another client's stub.
-    if (!participant.selfDelivery) roomSelfSuppressSet(context, participant._room).add(participant.id)
+    if (!participant.selfDelivery) responseRoomGrants(context, participant._room).selfSuppressed.add(participant.id)
     return {
       metadata: {
         channelId: channel.id,

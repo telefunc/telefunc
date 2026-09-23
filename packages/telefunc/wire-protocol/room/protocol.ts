@@ -99,11 +99,11 @@ type ParticipantStubMetadata = {
  *  concurrent writers converge to the same winner on every node, whatever the arrival order. */
 type RoomCtrlEnvelope =
   | { __r: 'join'; id: string; meta: ParticipantMeta; joinedAt: number; identity?: string; hidden?: boolean }
-  | { __r: 'leave'; id: string; cause?: 'removed' | 'disconnected' | 'closed'; reason?: unknown }
-  | { __r: 'p-meta'; id: string; meta: ParticipantMeta; seq: number }
+  | { __r: 'leave'; id: string; cause?: 'removed' | 'disconnected' | 'closed'; reason?: unknown; hidden?: boolean }
+  | { __r: 'p-meta'; id: string; meta: ParticipantMeta; seq: number; hidden?: boolean }
   | { __r: 'update'; meta: RoomMeta; at: number; by: string }
   // A member's first publish on a new named track — announced before the frame, so live all-track subscribers bring up the track-key subscription (idempotent, like join).
-  | { __r: 'track'; id: string; track: string }
+  | { __r: 'track'; id: string; track: string; hidden?: boolean }
   // Track-demand gossip (`onDemand`): a node announces that its local demand for one member's (member, track) stream turned on/off, tagged with its instance id. The member's owning node aggregates
   // these across nodes into one wanted transition — node-to-node only, never relayed to clients. `track` is `DEFAULT_TRACK` for the plain `publishBinary()` lane.
   | { __r: 'want'; member: string; track: string; node: string; on: boolean }

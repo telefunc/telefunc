@@ -40,7 +40,7 @@ import { SEMANTIC_LANE, configFromHead, decodeRoomText, encodeRoomText, publishC
 const ROOM_CX_ATTEMPTS = 16
 type CellSelector = { keys: string[] } | { prefix: string }
 type CellPlan<T> = { value: T; mutations: CellMutation[] }
-type PendingMemberCleanup = { cause: ReturnType<typeof leaveCauseToWire> }
+type PendingMemberCleanup = { cause: ReturnType<typeof leaveCauseToWire>; hidden?: true }
 
 async function readCellSet(
   roomId: string,
@@ -126,7 +126,7 @@ async function reapExpiredMember(input: {
   const cleanupKey = roomMemberCleanupKvKey(roomId, id)
   const siblingKeys = [key]
   if (record.identity !== undefined) siblingKeys.push(roomIdentityMemberKvKey(roomId, record.identity, id))
-  const cleanup: PendingMemberCleanup = { cause: { cause: 'disconnected' } }
+  const cleanup: PendingMemberCleanup = { cause: { cause: 'disconnected' }, ...(record.hidden ? { hidden: true } : {}) }
   const reap = await mutateCells<{ kind: 'missing' } | { kind: 'reaped' } | { kind: 'live'; record: RoomMemberRecord }>(
     roomId,
     inc,
@@ -222,8 +222,10 @@ async function evictMember(
   if (identity !== undefined) keys.push(roomIdentityMemberKvKey(roomId, identity, memberId))
   const hasCleanup = await mutateCells(roomId, inc, { keys: [...keys, cleanupKey] }, (cells) => {
     const pending = cells.has(cleanupKey)
-    if (!cells.has(memberKey) && !pending) return { value: false, mutations: [] }
-    const cleanup: PendingMemberCleanup = { cause: leaveCauseToWire(cause) }
+    const member = cells.get(memberKey)
+    if (member === undefined && !pending) return { value: false, mutations: [] }
+    const hidden = member !== undefined && (parse(decodeRoomText(member)) as RoomMemberRecord).hidden === true
+    const cleanup: PendingMemberCleanup = { cause: leaveCauseToWire(cause), ...(hidden ? { hidden: true } : {}) }
     return {
       value: true,
       mutations: [
@@ -250,7 +252,12 @@ async function finishPendingMemberCleanup(roomId: string, inc: string, memberId:
   if (raw === null) return
   const cleanup = parse(decodeRoomText(raw)) as PendingMemberCleanup
   await dropRetainedOwnedBy(roomId, inc, memberId)
-  await publishCtrl(roomId, inc, { __r: 'leave', id: memberId, ...cleanup.cause })
+  await publishCtrl(roomId, inc, {
+    __r: 'leave',
+    id: memberId,
+    ...cleanup.cause,
+    ...(cleanup.hidden ? { hidden: true } : {}),
+  })
   await mutateCells(roomId, inc, { keys: [key] }, (cells) => ({
     value: undefined,
     mutations: cells.has(key) ? [{ key }] : [],

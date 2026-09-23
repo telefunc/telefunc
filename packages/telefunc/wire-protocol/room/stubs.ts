@@ -1,4 +1,5 @@
 export { RoomStubChannel, RoomParticipantStubChannel, bindParticipantStubChannel }
+export type { ResponseRoomGrants }
 
 import { stringify } from '@brillout/json-serializer/stringify'
 import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
@@ -33,6 +34,9 @@ assertIsNotBrowser()
 
 // Room authority stays server-side; each wire stub owns one holder's wants, buffering, watermarks, and correlations.
 
+/** What one response's Room values grant the client on a room: echo drops for its own members, and hidden members it returned. */
+type ResponseRoomGrants = { selfSuppressed: Set<string>; hidden: Set<string> }
+
 /** Server→client control/data obey wants; client→server membership/control and validated publishes use native channel acks. */
 class RoomStubChannel extends ServerBroadcast {
   private readonly _room: ServerRoom
@@ -60,9 +64,12 @@ class RoomStubChannel extends ServerBroadcast {
   }
   /** One self-delivery gate combines direct client joins and co-returned server joins before wire emission. */
   _selfSuppressed = new Set<string>()
-  /** Adopts the serialization pass's shared self-delivery gate. */
-  _adoptSelfSuppressed(set: Set<string>): void {
-    this._selfSuppressed = set
+  /** Hidden members this response handed the client: their events are relayed to it alone. */
+  _grantedHidden = new Set<string>()
+  /** Adopts the serialization pass's shared grants for this room. */
+  _adoptResponseGrants(grants: ResponseRoomGrants): void {
+    this._selfSuppressed = grants.selfSuppressed
+    this._grantedHidden = grants.hidden
   }
   /** The generated publish shield validates Room data ingress only; base validators own multiplexed request envelopes. */
   _publishShield?: ShieldValidator
