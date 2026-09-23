@@ -16,18 +16,15 @@ import { assertUsage } from '../../../utils/assert.js'
 import { getRoomBackend } from '../../backend/install.js'
 import type { CellMutation } from '../../backend/room/contract.js'
 import { ROOM_MEMBER_TTL_MS } from '../constants.js'
-import { uuidToBytes } from '../binary.js'
 import { RoomError } from '../errors.js'
-import {
-  roomIdentityKvPrefix,
-  roomIdentityMemberKvKey,
-  roomMemberCleanupKvKey,
-  roomMemberCleanupKvPrefix,
-  roomMemberKvKey,
-  roomMemberKvPrefix,
-} from '../keys.js'
 import { leaveCauseToWire } from '../model.js'
 import {
+  CLEANUP_CELL_PREFIX,
+  MEMBER_CELL_PREFIX,
+  cleanupCellKey,
+  identityCellKey,
+  identityCellPrefix,
+  memberCellKey,
   type MemberSnapshot,
   type RoomConfigRecord,
   type RoomDataEnvelope,
@@ -58,7 +55,7 @@ async function readCell(roomId: string, inc: string, key: string): Promise<Uint8
 }
 
 async function readLiveMember(roomId: string, inc: string, id: string): Promise<RoomMemberRecord | null> {
-  const raw = await readCell(roomId, inc, roomMemberKvKey(roomId, id))
+  const raw = await readCell(roomId, inc, memberCellKey(id))
   if (raw === null) return null
   const record = parse(decodeRoomText(raw)) as RoomMemberRecord
   if (Date.now() - record.seenAt <= ROOM_MEMBER_TTL_MS) return record
@@ -99,7 +96,7 @@ async function readMembers(roomId: string, inc: string, ids?: string[]): Promise
   if (ids === undefined) await completePendingMemberCleanups(roomId, inc)
   // Authority reads keep replica lag from reaping a heartbeat that already renewed.
   const memberKeys =
-    ids === undefined ? await listMemberKeys(roomId, inc) : ids.map((id) => ({ key: roomMemberKvKey(roomId, id), id }))
+    ids === undefined ? await listMemberKeys(roomId, inc) : ids.map((id) => ({ key: memberCellKey(id), id }))
   const { cells } = await readCellSet(roomId, inc, { keys: memberKeys.map(({ key }) => key) })
   const members: MemberSnapshot[] = []
   for (const { key, id } of memberKeys) {
@@ -122,10 +119,10 @@ async function reapExpiredMember(input: {
   record: RoomMemberRecord
 }): Promise<RoomMemberRecord | null> {
   const { roomId, inc, id, record } = input
-  const key = roomMemberKvKey(roomId, id)
-  const cleanupKey = roomMemberCleanupKvKey(roomId, id)
+  const key = memberCellKey(id)
+  const cleanupKey = cleanupCellKey(id)
   const siblingKeys = [key]
-  if (record.identity !== undefined) siblingKeys.push(roomIdentityMemberKvKey(roomId, record.identity, id))
+  if (record.identity !== undefined) siblingKeys.push(identityCellKey(record.identity, id))
   const cleanup: PendingMemberCleanup = { cause: { cause: 'disconnected' }, ...(record.hidden ? { hidden: true } : {}) }
   const reap = await mutateCells<{ kind: 'missing' } | { kind: 'reaped' } | { kind: 'live'; record: RoomMemberRecord }>(
     roomId,
@@ -165,14 +162,8 @@ function memberSnapshot(id: string, record: RoomMemberRecord): MemberSnapshot {
 }
 
 async function listMemberKeys(roomId: string, inc: string): Promise<Array<{ key: string; id: string }>> {
-  const prefix = roomMemberKvPrefix(roomId)
-  const memberKeys: Array<{ key: string; id: string }> = []
-  const { cells } = await readCellSet(roomId, inc, { prefix })
-  for (const key of cells.keys()) {
-    const id = key.slice(prefix.length)
-    if (uuidToBytes(id)) memberKeys.push({ key, id })
-  }
-  return memberKeys
+  const { cells } = await readCellSet(roomId, inc, { prefix: MEMBER_CELL_PREFIX })
+  return [...cells.keys()].map((key) => ({ key, id: key.slice(MEMBER_CELL_PREFIX.length) }))
 }
 
 async function presenceCount(roomId: string, inc: string): Promise<number> {
@@ -180,7 +171,7 @@ async function presenceCount(roomId: string, inc: string): Promise<number> {
 }
 
 async function resolveIdentityMembers(roomId: string, inc: string, identity: string): Promise<string[]> {
-  const prefix = roomIdentityKvPrefix(roomId, identity)
+  const prefix = identityCellPrefix(identity)
   const members: string[] = []
   const markers = await readCellSet(roomId, inc, { prefix })
   for (const key of markers.cells.keys()) {
@@ -216,10 +207,10 @@ async function evictMember(
   identity: string | undefined,
   cause: LeaveCause,
 ): Promise<void> {
-  const memberKey = roomMemberKvKey(roomId, memberId)
-  const cleanupKey = roomMemberCleanupKvKey(roomId, memberId)
+  const memberKey = memberCellKey(memberId)
+  const cleanupKey = cleanupCellKey(memberId)
   const keys = [memberKey]
-  if (identity !== undefined) keys.push(roomIdentityMemberKvKey(roomId, identity, memberId))
+  if (identity !== undefined) keys.push(identityCellKey(identity, memberId))
   const hasCleanup = await mutateCells(roomId, inc, { keys: [...keys, cleanupKey] }, (cells) => {
     const pending = cells.has(cleanupKey)
     const member = cells.get(memberKey)
@@ -238,16 +229,12 @@ async function evictMember(
 }
 
 async function completePendingMemberCleanups(roomId: string, inc: string): Promise<void> {
-  const prefix = roomMemberCleanupKvPrefix(roomId)
-  const { cells } = await readCellSet(roomId, inc, { prefix })
-  for (const key of cells.keys()) {
-    const memberId = key.slice(prefix.length)
-    if (uuidToBytes(memberId)) await finishPendingMemberCleanup(roomId, inc, memberId)
-  }
+  const { cells } = await readCellSet(roomId, inc, { prefix: CLEANUP_CELL_PREFIX })
+  for (const key of cells.keys()) await finishPendingMemberCleanup(roomId, inc, key.slice(CLEANUP_CELL_PREFIX.length))
 }
 
 async function finishPendingMemberCleanup(roomId: string, inc: string, memberId: string): Promise<void> {
-  const key = roomMemberCleanupKvKey(roomId, memberId)
+  const key = cleanupCellKey(memberId)
   const raw = await readCell(roomId, inc, key)
   if (raw === null) return
   const cleanup = parse(decodeRoomText(raw)) as PendingMemberCleanup
@@ -266,4 +253,5 @@ async function finishPendingMemberCleanup(roomId: string, inc: string, memberId:
 
 function assertRoomId(id: unknown): asserts id is string {
   assertUsage(typeof id === 'string' && id.length > 0, 'The room ID should be a non-empty string')
+  assertUsage(id.isWellFormed(), 'The room ID should be a well-formed string')
 }

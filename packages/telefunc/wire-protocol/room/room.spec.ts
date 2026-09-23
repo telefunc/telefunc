@@ -17,9 +17,15 @@ import {
 } from './constants.js'
 import { DEFAULT_TRACK, frameWithMemberId, sanitizeBinaryWants, unframeMemberId } from './binary.js'
 import { RoomError, isRoomError } from './errors.js'
-import { roomCtrlKey, roomIdentityKvPrefix, roomMemberKvKey } from './keys.js'
 import { leaveCauseFromWire, leaveCauseToWire, mergeAttributes, normalizeJoinOptions } from './model.js'
-import { hasRoomTag, pushBoundedTail, type RoomSnapshotMetadata } from './protocol.js'
+import {
+  MEMBER_CELL_PREFIX,
+  hasRoomTag,
+  identityCellPrefix,
+  memberCellKey,
+  pushBoundedTail,
+  type RoomSnapshotMetadata,
+} from './protocol.js'
 import type { LeaveCause, Sender } from './types.js'
 import { ClientRoom } from './client.js'
 import { ClientBroadcast } from '../client/channel.js'
@@ -561,7 +567,7 @@ describe('Room public behavior', () => {
     let held = false
     let churn = 0
     vi.spyOn(driver, 'readCells').mockImplementation(async (roomId, inc, selector) => {
-      if (!held && 'prefix' in selector && selector.prefix.endsWith(':m:')) {
+      if (!held && 'prefix' in selector && selector.prefix === MEMBER_CELL_PREFIX) {
         held = true
         started.resolve()
         await release.promise
@@ -680,7 +686,7 @@ describe('Room public behavior', () => {
   it('rejects exact sends to an expired member and excludes it from static presence', async () => {
     const room = (await Room.create('expired-static-presence')) as ServerRoom
     const member = await room.join()
-    const memberKey = roomMemberKvKey(room.id, member.id)
+    const memberKey = memberCellKey(member.id)
     const read = await driver.readCells(room.id, room._inc, { keys: [memberKey] })
     expect('staleInc' in read).toBe(false)
     if ('staleInc' in read) throw new Error('unexpected stale generation')
@@ -732,7 +738,7 @@ describe('Room public behavior', () => {
   it('keeps a member whose heartbeat wins the expired-record reap race', async () => {
     const room = (await Room.create('reap-heartbeat-race')) as ServerRoom
     const member = await room.join()
-    const memberKey = roomMemberKvKey(room.id, member.id)
+    const memberKey = memberCellKey(member.id)
     const compareExchange = driver.compareExchangeCells.bind(driver)
     const initial = await driver.readCells(room.id, room._inc, { keys: [memberKey] })
     expect('staleInc' in initial).toBe(false)
@@ -1253,7 +1259,7 @@ describe('Room public behavior', () => {
     const left: string[] = []
     observer.onLeave((participant) => left.push(participant.id))
     await observer.getParticipants()
-    const memberKey = roomMemberKvKey(owner.id, member.id)
+    const memberKey = memberCellKey(member.id)
     const compareExchange = driver.compareExchangeCells.bind(driver)
     vi.spyOn(driver, 'compareExchangeCells').mockImplementation(async (roomId, inc, revision, mutations) => {
       if (mutations.some((mutation) => mutation.key === memberKey && 'set' in mutation)) throw new Error('crashed')
@@ -2167,9 +2173,9 @@ describe('room demand lifecycle', () => {
   })
 })
 describe('room binary protocol validation', () => {
-  it('rejects malformed key components as usage errors', () => {
-    expect(() => roomCtrlKey('\ud800')).toThrow('well-formed')
-    expect(() => roomIdentityKvPrefix('room', '\udc00')).toThrow('well-formed')
+  it('rejects malformed room ids and identities as usage errors', async () => {
+    await expect(Room.create('\ud800')).rejects.toThrow('well-formed')
+    expect(() => identityCellPrefix('\udc00')).toThrow('well-formed')
   })
   it('rejects non-boolean self-delivery options', () => {
     expect(() => normalizeJoinOptions({ selfDelivery: 'false' } as never)).toThrow('boolean')

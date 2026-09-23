@@ -4,7 +4,6 @@ import type { ClientReviverContext, ReviverType, TypeContract } from '../types.j
 import { ClientRoom, ClientStandaloneParticipant } from './client.js'
 import type { LocalParticipant, RemoteParticipant } from './types.js'
 import type { ParticipantStubMetadata, RoomSnapshotMetadata } from './protocol.js'
-import { roomCtrlKey } from './keys.js'
 import { assert } from '../../utils/assert.js'
 
 const ROOM_PREFIX = '!TelefuncRoom:'
@@ -31,7 +30,7 @@ const roomReviver: ReviverType<RoomReviverContract, ClientReviverContext> = {
   revive(metadata, context) {
     const stub = context.createBroadcast({
       channelId: metadata.channelId,
-      key: roomCtrlKey(metadata.roomId),
+      key: metadata.roomId,
     })
     return {
       value: new ClientRoom(stub, metadata),

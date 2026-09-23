@@ -17,7 +17,6 @@ import { reportRoomError, roomAckError } from './server/errors.js'
 import type { ParticipantMeta, RoomSendReceipt } from './types.js'
 import { binaryWantsCovers, emptyTrackWants, type BinaryWants } from './binary.js'
 import { DM_PARTICIPANT_LEFT, roomFailureError } from './errors.js'
-import { roomCtrlKey } from './keys.js'
 import { leaveCauseToWire } from './model.js'
 import {
   pushBoundedTail,
@@ -102,7 +101,7 @@ class RoomStubChannel extends ServerBroadcast {
   }
 
   constructor(serverRoom: ServerRoom) {
-    super({ key: roomCtrlKey(serverRoom.id) })
+    super({ key: serverRoom.id })
     this._room = serverRoom
   }
 

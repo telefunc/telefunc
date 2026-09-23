@@ -1,5 +1,15 @@
 // Shared Room storage records and wire envelopes.
-export { hasRoomTag, pushBoundedTail, toDmReply }
+export {
+  hasRoomTag,
+  pushBoundedTail,
+  toDmReply,
+  MEMBER_CELL_PREFIX,
+  CLEANUP_CELL_PREFIX,
+  memberCellKey,
+  cleanupCellKey,
+  identityCellKey,
+  identityCellPrefix,
+}
 export type {
   RoomConfigRecord,
   RoomMemberRecord,
@@ -25,6 +35,7 @@ export type {
 }
 
 import { ROOM_TAIL_HOLD_CODE_UNITS_MAX, ROOM_TAIL_HOLD_MAX } from './constants.js'
+import { assertUsage } from '../../utils/assert.js'
 import { isRecord } from './model.js'
 import type { BinaryWants } from './binary.js'
 import type { ParticipantMeta, RoomMeta } from './types.js'
@@ -220,4 +231,23 @@ type MemberWants = { all: boolean; members: string[] }
 /** All room messages are tagged with `__r` — envelopes, requests, and notices alike. */
 function hasRoomTag(value: unknown): value is { __r: string } {
   return isRecord(value) && typeof value.__r === 'string'
+}
+
+// Cell keys: drivers scope cells by (room, incarnation), so a key names only what is inside the room.
+const MEMBER_CELL_PREFIX = 'm:'
+const CLEANUP_CELL_PREFIX = 'cleanup:'
+function memberCellKey(memberId: string): string {
+  return MEMBER_CELL_PREFIX + memberId
+}
+/** Durable eviction work: committed with the member's removal, cleared once retained data and the leave are done. */
+function cleanupCellKey(memberId: string): string {
+  return CLEANUP_CELL_PREFIX + memberId
+}
+/** One marker per (identity, member), written before the member record and cleared after it; readers confirm each against the record. */
+function identityCellPrefix(identity: string): string {
+  assertUsage(identity.isWellFormed(), 'A participant identity should be a well-formed string')
+  return `identity:${encodeURIComponent(identity)}:`
+}
+function identityCellKey(identity: string, memberId: string): string {
+  return identityCellPrefix(identity) + memberId
 }

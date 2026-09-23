@@ -34,7 +34,6 @@ import {
   type TrackWants,
 } from '../binary.js'
 import { DM_PARTICIPANT_LEFT, RoomError, roomFailureError } from '../errors.js'
-import { roomIdentityMemberKvKey, roomMemberKvKey } from '../keys.js'
 import { leaveCauseFromWire, mergeAttributes, normalizeJoinOptions, ownMetadata } from '../model.js'
 import {
   hasRoomTag,
@@ -54,6 +53,8 @@ import {
   type RoomEnvelope,
   type RoomMemberRecord,
   type RoomStubRequest,
+  identityCellKey,
+  memberCellKey,
 } from '../protocol.js'
 import { RoomState, RoomStateView } from '../state.js'
 import { RoomDemand } from '../demand.js'
@@ -300,9 +301,9 @@ class ServerRoom extends RoomStateView implements Room {
       ...(identity === null ? {} : { identity }),
       ...(hidden ? { hidden: true } : {}),
     }
-    const memberKey = roomMemberKvKey(this.id, id)
+    const memberKey = memberCellKey(id)
     const keys = [memberKey]
-    if (identity !== null) keys.push(roomIdentityMemberKvKey(this.id, identity, id))
+    if (identity !== null) keys.push(identityCellKey(identity, id))
     await mutateCells(this.id, this._inc, { keys }, () => ({
       value: undefined,
       mutations: keys.map((key) => ({
@@ -351,7 +352,7 @@ class ServerRoom extends RoomStateView implements Room {
     id: string,
     computeMeta: (current: ParticipantMeta) => ParticipantMeta,
   ): Promise<AcceptedMeta> {
-    const key = roomMemberKvKey(this.id, id)
+    const key = memberCellKey(id)
     const { meta, seq, hidden } = await mutateCells(this.id, this._inc, { keys: [key] }, (cells) => {
       const raw = cells.get(key)
       if (raw === undefined) throw new RoomError(`Participant not found (left?): ${id}`)
@@ -381,7 +382,7 @@ class ServerRoom extends RoomStateView implements Room {
     }
     const commit = await commitRoomLane(this.id, this._inc, SEMANTIC_LANE, encodeRoomText(stringify(envelope)), {
       retain,
-      requiredCellKeys: [roomMemberKvKey(this.id, from)],
+      requiredCellKeys: [memberCellKey(from)],
     })
     if (commit === null) return await this._throwStaleMembers(from)
     return this._finishPublish(sender, data, commit)
@@ -398,7 +399,7 @@ class ServerRoom extends RoomStateView implements Room {
       this._inc,
       { kind: 'binary', member: from, track: frame.track ?? DEFAULT_TRACK },
       framed,
-      { retain: frame.retain, requiredCellKeys: [roomMemberKvKey(this.id, from)] },
+      { retain: frame.retain, requiredCellKeys: [memberCellKey(from)] },
     )
     if (result === null) return await this._throwStaleMembers(from)
     const ack = await this._finishPublish(sender, frame.payload, result)
@@ -443,7 +444,7 @@ class ServerRoom extends RoomStateView implements Room {
       announced = new Set()
       this._announcedTracks.set(from, announced)
     }
-    const key = roomMemberKvKey(this.id, from)
+    const key = memberCellKey(from)
     const hidden = await mutateCells(this.id, this._inc, { keys: [key] }, (cells) => {
       const raw = cells.get(key)
       if (raw === undefined) throw new RoomError(`Participant not found (left?): ${from}`)
@@ -517,7 +518,7 @@ class ServerRoom extends RoomStateView implements Room {
       this._inc,
       { kind: 'inbox', member: to },
       encodeRoomText(stringify(envelope)),
-      { requiredCellKeys: [roomMemberKvKey(this.id, from), roomMemberKvKey(this.id, to)] },
+      { requiredCellKeys: [memberCellKey(from), memberCellKey(to)] },
     )
     if (receipt === null) return await this._throwStaleMembers(from, to)
     const info: RoomSendReceipt = { seq: receipt.seq, timestamp: receipt.timestamp }
@@ -533,7 +534,7 @@ class ServerRoom extends RoomStateView implements Room {
       this._inc,
       { kind: 'inbox', member: to },
       encodeRoomText(stringify(envelope)),
-      { requiredCellKeys: [roomMemberKvKey(this.id, to)] },
+      { requiredCellKeys: [memberCellKey(to)] },
     )
     if (committed === null) throw new RoomError(`Room is closed: ${this.id}`)
   }
@@ -556,7 +557,7 @@ class ServerRoom extends RoomStateView implements Room {
   private async _resolveMember(id: string): Promise<Sender | null> {
     const remote = this._state.getRemote(id)
     if (remote) return remote
-    const raw = await readCell(this.id, this._inc, roomMemberKvKey(this.id, id))
+    const raw = await readCell(this.id, this._inc, memberCellKey(id))
     if (raw === null) return null
     const record = parse(decodeRoomText(raw)) as RoomMemberRecord
     return { id, meta: record.meta, identity: record.identity ?? null }
@@ -574,7 +575,7 @@ class ServerRoom extends RoomStateView implements Room {
   private async _throwStaleMembers(...ids: string[]): Promise<never> {
     await this._assertOpen()
     for (const id of ids) {
-      if ((await readCell(this.id, this._inc, roomMemberKvKey(this.id, id))) === null) {
+      if ((await readCell(this.id, this._inc, memberCellKey(id))) === null) {
         throw new RoomError(`Participant not found (left?): ${id}`)
       }
     }
@@ -1216,7 +1217,7 @@ class ServerRoom extends RoomStateView implements Room {
       let renewalFailure: { error: unknown } | null = null
       for (const id of this._ownedMemberIds().filter((id) => !this._pendingAdmissions.has(id))) {
         try {
-          const key = roomMemberKvKey(this.id, id)
+          const key = memberCellKey(id)
           const present = await mutateCells(this.id, this._inc, { keys: [key] }, (cells) => {
             const raw = cells.get(key)
             if (raw === undefined) return { value: false, mutations: [] }

@@ -7,7 +7,6 @@ import { isObject } from '../../../utils/isObject.js'
 import { getRoomBackend } from '../../backend/install.js'
 import type { RoomBackend, RoomHead } from '../../backend/room/contract.js'
 import { RoomError } from '../errors.js'
-import { roomMemberKvKey } from '../keys.js'
 import { mergeAttributes, ownMetadata } from '../model.js'
 import {
   type MemberSnapshot,
@@ -15,6 +14,7 @@ import {
   type RoomCtrlEnvelope,
   type RoomDmEnvelope,
   type RoomEnvelope,
+  memberCellKey,
 } from '../protocol.js'
 import type {
   AfterJoinHook,
@@ -455,14 +455,14 @@ async function sendServerDm(roomId: string, inc: string, memberId: string, data:
     inc,
     { kind: 'inbox', member: memberId },
     encodeRoomText(stringify(envelope)),
-    { requiredCellKeys: [roomMemberKvKey(roomId, memberId)] },
+    { requiredCellKeys: [memberCellKey(memberId)] },
   )
   if (committed !== null) return true
   const current = await getRoomBackend().readHead(roomId)
   if (
     current?.head.state === 'open' &&
     current.head.currentInc === inc &&
-    (await readCell(roomId, inc, roomMemberKvKey(roomId, memberId))) === null
+    (await readCell(roomId, inc, memberCellKey(memberId))) === null
   ) {
     return false
   }
