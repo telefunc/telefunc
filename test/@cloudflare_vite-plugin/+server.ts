@@ -58,7 +58,7 @@ export default {
         telefuncRoomAsyncContextProbe(): Promise<string>
       }
       const result = await session.telefuncRoomAsyncContextProbe()
-      return result.includes('delivery addressed the wrong session shard')
+      return result.includes('Cloudflare Room delivery lease is not installed')
         ? new Response(null, { status: 204 })
         : new Response(result, { status: 500 })
     }

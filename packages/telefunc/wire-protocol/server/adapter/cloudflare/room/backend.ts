@@ -45,6 +45,9 @@ export type CloudflareRoomNamespace = {
   get(id: unknown): CloudflareRoomAuthorityStub
 }
 
+const entryKey = (route: Pick<RouteInstallation, 'roomId' | 'inc' | 'laneKey'>) =>
+  JSON.stringify([route.roomId, route.inc, route.laneKey])
+
 function roomAuthority(namespace: CloudflareRoomNamespace, roomId: string): CloudflareRoomAuthorityStub {
   return namespace.get(namespace.idFromName(roomId))
 }
@@ -69,18 +72,15 @@ export class CloudflareRoomSessionManager {
   ): CloudflareRoomSubscriptionAttempt {
     if (this.#disposed) throw new Error('Cloudflare Room session manager is disposed')
     // Resolve the binding before installing provisional local state.
-    const authority = this.authority(roomId)
-    const laneKey = encodeLaneKey(lane)
     const source = {
       roomId,
       inc,
-      laneKey,
+      laneKey: encodeLaneKey(lane),
       subscriberDoId: this.#id,
-      authority,
+      authority: this.authority(roomId),
     }
-    const key = JSON.stringify([roomId, inc, laneKey])
-    let attempt!: CloudflareRoomSubscriptionAttempt
-    attempt = new CloudflareRoomSubscriptionAttempt(source, receiver, {
+    const key = entryKey(source)
+    const attempt: CloudflareRoomSubscriptionAttempt = new CloudflareRoomSubscriptionAttempt(source, receiver, {
       onClosed: () => {
         if (this.#entries.get(key) === attempt) this.#entries.delete(key)
       },
@@ -91,18 +91,14 @@ export class CloudflareRoomSessionManager {
   }
 
   async deliver(request: RoomShardDeliveryRequest): Promise<void> {
-    if (request.subscriberDoId !== this.#id)
-      throw new Error('Cloudflare Room delivery addressed the wrong session shard')
-    const entry = this.#entries.get(JSON.stringify([request.roomId, request.inc, request.laneKey]))
-    if (entry === undefined || !entry.matches(request)) {
-      throw new Error('Cloudflare Room delivery lease is not installed')
-    }
+    const entry = this.#entries.get(entryKey(request))
+    if (entry?.leaseId !== request.leaseId) throw new Error('Cloudflare Room delivery lease is not installed')
     await entry.deliver(request.frame, request.seq, request.timestamp)
   }
 
   invalidate(request: RoomShardInvalidationRequest): void {
-    const entry = this.#entries.get(JSON.stringify([request.roomId, request.inc, request.laneKey]))
-    if (entry?.matches(request)) {
+    const entry = this.#entries.get(entryKey(request))
+    if (entry?.leaseId === request.leaseId) {
       if (request.terminal === true) entry.terminate()
       else entry.invalidate()
     }

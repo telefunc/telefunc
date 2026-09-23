@@ -60,14 +60,8 @@ export class CloudflareRoomSubscriptionAttempt implements SubscriptionAttempt {
     return () => this.#listeners.delete(cb)
   }
 
-  matches(request: RouteInstallation): boolean {
-    return (
-      request.roomId === this.#route.roomId &&
-      request.inc === this.#route.inc &&
-      request.laneKey === this.#route.laneKey &&
-      request.subscriberDoId === this.#route.subscriberDoId &&
-      request.leaseId === this.#route.leaseId
-    )
+  get leaseId(): string {
+    return this.#route.leaseId
   }
 
   async deliver(frame: Uint8Array, seq: number, timestamp: number): Promise<void> {
