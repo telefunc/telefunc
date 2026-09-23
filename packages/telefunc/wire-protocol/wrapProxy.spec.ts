@@ -1,6 +1,7 @@
 import { spawnSync } from 'node:child_process'
 import { buildSync } from 'esbuild'
 import { expect, it } from 'vitest'
+import { wrapProxy } from './wrapProxy.js'
 
 it.each([
   ['ignored', '', ['wrapped rejection']],
@@ -29,4 +30,10 @@ it.each([
   expect(result.stderr).toBe('')
   expect(result.status).toBe(0)
   expect(JSON.parse(result.stdout)).toEqual(expected)
+})
+
+it('a proxied method keeps its identity across reads, as useSyncExternalStore requires', () => {
+  const target = { onChange: (callback: () => void) => callback }
+  const proxy = wrapProxy(target)
+  expect(proxy.onChange).toBe(proxy.onChange)
 })

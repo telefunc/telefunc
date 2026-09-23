@@ -30,16 +30,21 @@ function wrapProxy<T extends object>(target: T): T {
     return wrapper as unknown as T
   }
 
+  const forwarders = new Map<PropertyKey, { property: Function; forward: (...args: unknown[]) => unknown }>()
   const wrapper: T = new Proxy({} as T, {
     get(_proxy, prop) {
       const property = Reflect.get(target, prop, target)
       if (typeof property !== 'function') return property
-      // Return a forwarding function that tethers any returned object to the wrapper.
-      return (...args: unknown[]) => {
+      // One forwarder per method, so identity holds like on the target; it tethers any returned object to the wrapper.
+      const cached = forwarders.get(prop)
+      if (cached?.property === property) return cached.forward
+      const forward = (...args: unknown[]) => {
         const result = property.apply(target, args)
         adoptSubordinate(result, wrapper)
         return result
       }
+      forwarders.set(prop, { property, forward })
+      return forward
     },
     set(_proxy, prop, value) {
       return Reflect.set(target, prop, value, target)
