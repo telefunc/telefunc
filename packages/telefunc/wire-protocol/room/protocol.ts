@@ -1,7 +1,6 @@
 // Shared Room storage records and wire envelopes.
 export {
   hasRoomTag,
-  pushBoundedTail,
   decodeDmReply,
   MEMBER_CELL_PREFIX,
   CLEANUP_CELL_PREFIX,
@@ -32,10 +31,8 @@ export type {
   ParticipantStubRequest,
   ParticipantStubNotice,
   MemberWants,
-  TailEntry,
 }
 
-import { ROOM_TAIL_HOLD_CODE_UNITS_MAX, ROOM_TAIL_HOLD_MAX } from './constants.js'
 import { assertUsage } from '../../utils/assert.js'
 import { isRecord } from './model.js'
 import type { BinaryWants } from './binary.js'
@@ -122,21 +119,6 @@ type RoomCtrlEnvelope =
 
 /** A semantic message's position. Within one incarnation `seq` is the strictly increasing domain cursor; `timestamp` is independently clamped authority time and never controls sequence reset. */
 type RoomOrder = { seq: number; timestamp: number }
-/** One tail-entry: a held recent text message (see `ROOM_TAIL_HOLD_MAX`). */
-type TailEntry = { serialized: string; ord: RoomOrder; from: string }
-/** Append to a tail hold, drop-oldest under BOTH the count cap and the serialized-code-unit cap. A single
- *  entry larger than the whole code-unit budget is dropped, never held — the tail is best-effort. Shared by the
- *  room's pre-attach hold (`ServerRoom._tailHold`) and the per-stub hold (`RoomStubChannel._holdTail`)
- *  so neither can grow to ~256 × the ingress limit, nor be fed an uncapped server-side `me.publish()`. */
-function pushBoundedTail(hold: TailEntry[], entry: TailEntry): void {
-  if (entry.serialized.length > ROOM_TAIL_HOLD_CODE_UNITS_MAX) return
-  hold.push(entry)
-  let size = 0
-  for (const e of hold) size += e.serialized.length
-  while (hold.length > ROOM_TAIL_HOLD_MAX || size > ROOM_TAIL_HOLD_CODE_UNITS_MAX) {
-    size -= hold.shift()!.serialized.length
-  }
-}
 /** A participant's message. Committed on the semantic lane, whose receipt rides the transport frame; the order is not duplicated in this envelope. The receiver reads `WirePublishInfo`, the source of
  * the message's place in the room's semantic timeline. `fromMeta` is the sender's meta as verified by the sender's own node — never client-supplied — so any receiver can surface a correct sender even
  * before its roster view catches up (see `RoomState.applyData`).

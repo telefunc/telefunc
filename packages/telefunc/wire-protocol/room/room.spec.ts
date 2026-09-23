@@ -23,7 +23,6 @@ import {
   hasRoomTag,
   identityCellPrefix,
   memberCellKey,
-  pushBoundedTail,
   type RoomSnapshotMetadata,
 } from './protocol.js'
 import type { LeaveCause, Sender } from './types.js'
@@ -36,6 +35,7 @@ import { SubSlot, configFromHead, decodeRoomText, encodeRoomConfig } from './ser
 import { reportRoomError, roomAckError } from './server/errors.js'
 import { RoomParticipantStubChannel, RoomStubChannel } from './server/stub.js'
 import { ReplayGate } from './server/replay.js'
+import { TailHold } from './server/tail.js'
 import { RoomDemand } from './demand.js'
 import { roomParticipantReplacer, roomRemoteReplacer, roomReplacer } from './response-server.js'
 import type { ServerReplacerContext } from '../types.js'
@@ -2279,25 +2279,21 @@ describe('room binary protocol validation', () => {
     }
   })
   it('bounds tails by count and serialized code units at every cap edge', () => {
-    const entry = (serialized: string, seq = 0) => ({
-      serialized,
-      ord: { seq, timestamp: 0 },
-      from: '',
-    })
-    const byCount: ReturnType<typeof entry>[] = []
-    for (let seq = 0; seq <= ROOM_TAIL_HOLD_MAX; seq++) pushBoundedTail(byCount, entry('x', seq))
-    expect(byCount).toHaveLength(ROOM_TAIL_HOLD_MAX)
-    expect(byCount[0]!.ord.seq).toBe(1)
-    const bySize: ReturnType<typeof entry>[] = []
+    const entry = (serialized: string, seq = 0) => ({ serialized, ord: { seq, timestamp: 0 }, from: '' })
+    const byCount = new TailHold(() => {})
+    for (let seq = 0; seq <= ROOM_TAIL_HOLD_MAX; seq++) byCount.push(entry('x', seq))
+    const counted = byCount.take()
+    expect(counted).toHaveLength(ROOM_TAIL_HOLD_MAX)
+    expect(counted[0]!.ord.seq).toBe(1)
+    const bySize = new TailHold(() => {})
     const halfPlusOne = 'x'.repeat(ROOM_TAIL_HOLD_CODE_UNITS_MAX / 2 + 1)
-    pushBoundedTail(bySize, entry(halfPlusOne, 1))
-    pushBoundedTail(bySize, entry(halfPlusOne, 2))
-    expect(bySize.map(({ ord }) => ord.seq)).toEqual([2])
-    pushBoundedTail(bySize, entry('x'.repeat(ROOM_TAIL_HOLD_CODE_UNITS_MAX + 1), 3))
-    expect(bySize.map(({ ord }) => ord.seq)).toEqual([2])
-    const nonAscii: ReturnType<typeof entry>[] = []
-    pushBoundedTail(nonAscii, entry('💥'.repeat(ROOM_TAIL_HOLD_CODE_UNITS_MAX / 2)))
-    expect(nonAscii).toHaveLength(1)
+    bySize.push(entry(halfPlusOne, 1))
+    bySize.push(entry(halfPlusOne, 2))
+    bySize.push(entry('x'.repeat(ROOM_TAIL_HOLD_CODE_UNITS_MAX + 1), 3))
+    expect(bySize.take().map(({ ord }) => ord.seq)).toEqual([2])
+    const nonAscii = new TailHold(() => {})
+    nonAscii.push(entry('💥'.repeat(ROOM_TAIL_HOLD_CODE_UNITS_MAX / 2)))
+    expect(nonAscii.take()).toHaveLength(1)
   })
   it.each([
     [

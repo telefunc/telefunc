@@ -11,7 +11,6 @@ import {
   ROOM_DM_ACK_TIMEOUT_MS,
   ROOM_HEARTBEAT_INTERVAL_MS,
   ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS,
-  ROOM_TAIL_ATTACH_TIMEOUT_MS,
 } from '../constants.js'
 import { getRoomBackend } from '../../backend/install.js'
 import type { LaneId } from '../../backend/room/contract.js'
@@ -32,13 +31,11 @@ import { DM_PARTICIPANT_LEFT, RoomError, roomFailureError } from '../errors.js'
 import { leaveCauseFromWire, mergeAttributes, normalizeJoinOptions, ownMetaArgument, recipientId } from '../model.js'
 import {
   hasRoomTag,
-  pushBoundedTail,
   type MemberWants,
   type MemberSnapshot,
   type RoomConfigRecord,
   type RoomCtrlEnvelope,
   type RoomDataEnvelope,
-  type RoomOrder,
   type RoomDmEnvelope,
   type RoomDmAckEnvelope,
   type DmReply,
@@ -54,6 +51,7 @@ import { ParticipantBase, type InboxMessage } from '../participant.js'
 import type { RoomStubChannel } from './stub.js'
 import type { RoomRequest } from './requests.js'
 import { LocalHolder, type LaneHolder } from './replay.js'
+import { TailHold } from './tail.js'
 import {
   CONTROL_LANE,
   SEMANTIC_LANE,
@@ -126,11 +124,8 @@ class ServerRoom extends RoomStateView implements Room {
 
   /** Every authority check and member write carries this incarnation, rejecting stale handles after recreate. */
   readonly _inc: string
-  /** Tail mode ingests from `Room.get` until stub attach or close, closing the pre-serialization gap. */
-  _tail = false
-  /** Pre-attach tail text is bounded drop-oldest, then handed to the attaching stub. */
-  private readonly _tailHold: Array<{ serialized: string; ord: RoomOrder; from: string }> = []
-  private _tailTimer: ReturnType<typeof setTimeout> | null = null
+  /** Tail mode ingests from `Room.get` until stub attach or close, closing the pre-serialization gap; the attaching stub takes the hold. */
+  private _tail: TailHold | null = null
   /** In-flight `send(…, { ack: true })`s awaiting the recipient's reply, keyed by `ackId`. `to` is the recipient, so a leave/close can fail the ones it strands. Empty at steady state. */
   private readonly _pendingDmAcks = new Map<string, { to: string; settle: (reply: DmReply) => void }>()
   private _guards: RoomGuards | null = null
@@ -609,8 +604,7 @@ class ServerRoom extends RoomStateView implements Room {
 
   private _relayMemberData(serialized: string, event: RoomDataEnvelope, rawInfo: WirePublishInfo): void {
     if (this._stubs.size === 0) {
-      if (!this._tail) return
-      pushBoundedTail(this._tailHold, { serialized, ord: rawInfo, from: event.from })
+      this._tail?.push({ serialized, ord: rawInfo, from: event.from })
       return
     }
     const wireText = encodePublishText(serialized, rawInfo)
@@ -770,30 +764,20 @@ class ServerRoom extends RoomStateView implements Room {
     return this._localParticipants.get(from)?.selfDelivery === false
   }
   _startTail(): void {
-    this._tail = true
+    this._tail = new TailHold(() => this._teardownTail())
     this._syncSubs() // bring up text ingestion before any stub exists
-    this._tailTimer = unrefTimer(setTimeout(() => this._teardownTail(), ROOM_TAIL_ATTACH_TIMEOUT_MS))
   }
   private _teardownTail(): void {
-    if (!this._tail) return // already handed off to a stub
-    this._tail = false
-    this._tailHold.length = 0
-    if (this._tailTimer !== null) {
-      clearTimeout(this._tailTimer)
-      this._tailTimer = null
-    }
+    if (this._tail === null) return // already handed off to a stub
+    this._tail.end()
+    this._tail = null
     this._syncSubs() // drop the text ingestion nothing is consuming
   }
   _attachStub(stub: RoomStubChannel): void {
     this._stubs.add(stub)
-    if (this._tail) {
-      if (this._tailTimer !== null) {
-        clearTimeout(this._tailTimer)
-        this._tailTimer = null
-      }
-      stub._beginTail(this._tailHold.slice(), () => this._syncSubs())
-      this._tailHold.length = 0
-      this._tail = false
+    if (this._tail !== null) {
+      stub._beginTail(this._tail.take(), () => this._syncSubs())
+      this._tail = null
     }
     stub.onOpen(() => {
       void this._ensureRoster()
@@ -1007,7 +991,7 @@ class ServerRoom extends RoomStateView implements Room {
     else holder?._relayEvent({ __r: 'demand', member, track: trackOut, wanted })
   }
   private _aggregateTextWants(): { all: boolean; members: Set<string> } {
-    if (this._tail) return { all: true, members: new Set() } // pre-attach tail: ingest everything now
+    if (this._tail !== null) return { all: true, members: new Set() } // pre-attach tail: ingest everything now
     const local: MemberWants = this._state.textWants()
     if (local.all) return { all: true, members: new Set() }
     const members = new Set(local.members)

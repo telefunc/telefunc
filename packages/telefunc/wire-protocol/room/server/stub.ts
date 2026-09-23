@@ -4,8 +4,7 @@ export type { ResponseRoomGrants }
 import { stringify } from '@brillout/json-serializer/stringify'
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 import { assertUsage } from '../../../utils/assert.js'
-import { unrefTimer } from '../../../utils/unrefTimer.js'
-import { ROOM_DM_ACK_TIMEOUT_MS, ROOM_TAIL_ATTACH_TIMEOUT_MS } from '../constants.js'
+import { ROOM_DM_ACK_TIMEOUT_MS } from '../constants.js'
 import { ServerChannel, parsePeerText } from '../../server/channel.js'
 import type { ShieldValidator } from '../../../node/server/shield.js'
 import { encodePublishBinary, encodePublishText, type WirePublishInfo } from '../../shared-ws.js'
@@ -23,12 +22,12 @@ import {
   type RoomDeclaration,
 } from './requests.js'
 import { ReplayGate, TEXT_LANE_KEY, binaryLaneKey, type LaneHolder } from './replay.js'
+import { TailHold, type TailEntry } from './tail.js'
 import type { ParticipantMeta } from '../types.js'
 import { DEFAULT_TRACK, binaryWantsCovers, emptyTrackWants, type BinaryFrame, type BinaryWants } from '../binary.js'
 import { DM_PARTICIPANT_LEFT, RoomError } from '../errors.js'
 import { leaveCauseToWire } from '../model.js'
 import {
-  pushBoundedTail,
   decodeDmReply,
   type DmReply,
   type RoomOrder,
@@ -39,7 +38,6 @@ import {
   type RoomDemandEvent,
   type RoomDmEnvelope,
   type RoomRosterEvent,
-  type TailEntry,
 } from '../protocol.js'
 assertIsNotBrowser()
 
@@ -84,9 +82,8 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
   private _textMemberWants: ReadonlySet<string> = new Set()
   private _announce = false
   private _binary: BinaryWants = { everyMember: emptyTrackWants(), members: {} }
-  /** A bounded server-side tail waits for the first text selector, then flushes once in order. */
-  private _tailPending: TailEntry[] | null = null
-  private _tailTimer: ReturnType<typeof setTimeout> | null = null
+  /** A tail waits for the client's first text selector, then flushes once in order. */
+  private _tail: TailHold | null = null
 
   constructor(
     serverRoom: ServerRoom,
@@ -227,7 +224,7 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
 
   /** A tail-pending stub ingests all text so its hold captures the whole recent tail; its selector applies at flush. */
   _textDemand(): 'all' | ReadonlySet<string> {
-    return this._wantsText || this._tailPending !== null ? 'all' : this._textMemberWants
+    return this._wantsText || this._tail !== null ? 'all' : this._textMemberWants
   }
 
   _wantsTextFrom(memberId: string): boolean {
@@ -255,7 +252,7 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
   }
 
   _relayText(serialized: string, wireText: string, from: string, ord: RoomOrder): void {
-    if (this._tailPending !== null) pushBoundedTail(this._tailPending, { serialized, ord, from })
+    if (this._tail !== null) this._tail.push({ serialized, ord, from })
     else if (this._wantsTextFrom(from)) this._relayTextLive(wireText, ord)
   }
 
@@ -305,36 +302,29 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
 
   // Tail
 
-  /** @internal — begin holding the bounded tail, seeded from the room's pre-attach hold. The client gets a fresh lease after attach; expiry drops the hold and lets the room release ingestion. */
+  /** Seeded from the room's pre-attach hold, with a fresh lease; expiry drops the hold and lets the room release ingestion. */
   _beginTail(seed: TailEntry[], onExpire: () => void): void {
-    this._tailPending = seed
-    this._tailTimer = unrefTimer(
-      setTimeout(() => {
-        this._tailPending = null
-        this._tailTimer = null
-        onExpire()
-      }, ROOM_TAIL_ATTACH_TIMEOUT_MS),
-    )
+    this._tail = new TailHold(() => {
+      this._tail = null
+      onExpire()
+    }, seed)
   }
 
-  /** The first real text want flushes the bounded tail in order through retained/live dedup. */
+  /** The first real text want flushes the tail in order through the replay gate. */
   private _flushTail(): void {
-    const hold = this._tailPending
-    if (!hold) return
+    if (this._tail === null) return
     if (!this._wantsText && this._textMemberWants.size === 0) return // keep holding until a real want
-    this._endTail()
-    for (const { serialized, ord, from } of hold) {
+    const held = this._tail.take()
+    this._tail = null
+    for (const { serialized, ord, from } of held) {
       if (!this._wantsTextFrom(from)) continue
       this._relayTextLive(encodePublishText(serialized, ord), ord)
     }
   }
 
   _endTail(): void {
-    this._tailPending = null
-    if (this._tailTimer !== null) {
-      clearTimeout(this._tailTimer)
-      this._tailTimer = null
-    }
+    this._tail?.end()
+    this._tail = null
   }
 }
 
