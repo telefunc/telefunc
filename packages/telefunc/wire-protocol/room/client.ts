@@ -6,7 +6,7 @@ import { makePublishInfo, type ChannelPublishAck, type ChannelPublishInfo } from
 import { ClientBroadcast } from '../client/channel.js'
 import type { ClientChannel } from '../client/channel.js'
 import { DM_PARTICIPANT_LEFT } from './errors.js'
-import { frameWithMemberId, unframeMemberId } from './binary.js'
+import { emptyTrackWants, frameWithMemberId, unframeMemberId } from './binary.js'
 import { leaveCauseFromWire, mergeAttributes, normalizeJoinOptions, ownMetadata } from './model.js'
 import {
   hasRoomTag,
@@ -42,6 +42,7 @@ import type {
 /** One awaiter of a conflated publish — resolved with the winning send's receipt (see `_drainCoalesce`). */
 type CoalesceWaiter = { resolve: (ack: ChannelPublishAck) => void; reject: (err: unknown) => void }
 type ParticipantMutationRequest = Extract<ParticipantStubRequest, { __r: 'req-dm' | 'req-set-meta' | 'req-set-attrs' }>
+type WantsDeclaration = Extract<RoomStubRequest, { __r: 'sub-text' | 'sub-binary' }>
 
 /**
  * Client Room composes delivery and requests over one Broadcast stub.
@@ -55,6 +56,11 @@ class ClientRoom extends RoomStateView implements Room {
   protected readonly _state: RoomState
   private readonly _localParticipants = new Map<string, ClientRoomParticipant>()
   private _closedCause: LeaveCause | null = null
+  /** The wants the server stub holds, as last declared; a fresh stub holds none. */
+  private readonly _declared: Record<WantsDeclaration['__r'], string> = {
+    'sub-text': JSON.stringify({ __r: 'sub-text', members: [], announce: false }),
+    'sub-binary': JSON.stringify({ __r: 'sub-binary', wants: { everyMember: emptyTrackWants(), members: {} } }),
+  }
   private _rosterArrived!: () => void
   private _rosterFailed!: (error: unknown) => void
   /** Settled by the replayable initial roster response (or wire death) — gates `getParticipants()`. */
@@ -86,8 +92,6 @@ class ClientRoom extends RoomStateView implements Room {
     stub._subscribeBinaryLocal((framed, info) => this._onBinaryFrame(framed, info))
     // Wire death — the network gave up or the stub was GC'd. (A server `Room.close()` arrives as the `closed` ctrl event before the stub shuts down, so it takes the 'closed' path.)
     stub.onClose(() => this._applyClosed('disconnected'))
-    // Reconnect reconciles the existing holder and redeclares current intent.
-    stub._onReconnect(() => this._syncWants(true))
     // A backend rejection can arrive before the application asks for the roster. Mark it handled here while preserving the original rejection for each later getter.
     void this._rosterReady.catch(() => {})
   }
@@ -297,18 +301,23 @@ class ClientRoom extends RoomStateView implements Room {
   }
 
   /** Text wants are declared synchronously through Broadcast so same-connection FIFO covers an immediate publish. */
-  private _syncWants(reconcileText = false): void {
+  private _syncWants(): void {
     const state = this._state
     const text: MemberWants = state.closed ? { all: false, members: [] } : state.textWants()
-    this._stub._setWireTextSubscribed(text.all, reconcileText)
+    this._stub._setWireTextSubscribed(text.all)
     if (state.closed) return // stub is dead — nothing to declare
 
     // A room-level text subscription supersedes the member set — clear it server-side.
-    const announce = state.wantsAnnounce
-    const declaration = { __r: 'sub-text', members: text.all ? [] : text.members, announce } as const
+    this._declare({ __r: 'sub-text', members: text.all ? [] : text.members, announce: state.wantsAnnounce })
+    this._declare({ __r: 'sub-binary', wants: state.binaryWants() })
+  }
+
+  /** Declarations are replayed channel messages, so the server keeps them across reconnects: send only changes. */
+  private _declare(declaration: WantsDeclaration): void {
+    const serialized = JSON.stringify(declaration)
+    if (this._declared[declaration.__r] === serialized) return
+    this._declared[declaration.__r] = serialized
     void this._stub.send(declaration, { ack: false }).catch(() => {})
-    const binary = state.binaryWants()
-    void this._stub.send({ __r: 'sub-binary', wants: binary }, { ack: false }).catch(() => {})
   }
 }
 

@@ -609,10 +609,8 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   readonly [CLIENT_BROADCAST_BRAND] = true
   private _broadcastListeners: Array<BroadcastListener<T>> = []
   private _broadcastBinaryListeners: Array<BroadcastBinaryListener> = []
-  private readonly _reconnectCallbacks: Array<() => void> = []
   private _wireTextSubscribed = false
   private _wireBinarySubscribed = false
-  private _didOpen = false
 
   static isClientBroadcast(value: unknown): value is ClientBroadcast {
     return hasProp(value, CLIENT_BROADCAST_BRAND)
@@ -636,9 +634,9 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
     }
   }
 
-  /** @internal — declare text wire intent; `reconcile` re-emits it after reconnect. */
-  _setWireTextSubscribed(on: boolean, reconcile = false): void {
-    if ((!reconcile && on === this._wireTextSubscribed) || this._isClosed) return
+  /** @internal — declare text wire intent; a reconnect carries it in the RECONCILE entry. */
+  _setWireTextSubscribed(on: boolean): void {
+    if (on === this._wireTextSubscribed || this._isClosed) return
     this._wireTextSubscribed = on
     if (on) this._connection.sendBroadcastSubscribe(this, false)
     else this._connection.sendBroadcastUnsubscribe(this, false)
@@ -653,11 +651,6 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
     this._wireBinarySubscribed = on
     if (on) this._connection.sendBroadcastSubscribe(this, true)
     else this._connection.sendBroadcastUnsubscribe(this, true)
-  }
-
-  /** @internal — observe transport reopens after the initial open. */
-  _onReconnect(callback: () => void): void {
-    this._reconnectCallbacks.push(callback)
   }
 
   publish(data: ChannelData<T>): Promise<ChannelPublishAck> {
@@ -706,23 +699,6 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
     return () => {
       unsubscribe()
       if (this._broadcastBinaryListeners.length === 0) this._setWireBinarySubscribed(false)
-    }
-  }
-
-  override _onTransportOpen(batched: boolean): void {
-    const reopened = this._didOpen
-    super._onTransportOpen(batched)
-    if (this._isClosed) return
-    if (!reopened) {
-      this._didOpen = true
-      return
-    }
-    for (const callback of this._reconnectCallbacks) {
-      try {
-        callback()
-      } catch (error) {
-        if (this._handleCallbackError(error)) return
-      }
     }
   }
 

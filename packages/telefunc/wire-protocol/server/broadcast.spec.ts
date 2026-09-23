@@ -416,6 +416,36 @@ describe('Broadcast lifecycle and route ownership', () => {
     )
   })
 
+  it('restores a subscription whose BROADCAST_SUB died with the previous transport from the reconnect entry', async () => {
+    const mux = new ChannelMux()
+    const sent: DecodedFrame[] = []
+    const sessions = new Map<object, string>()
+    const transport: ServerTransport<object> = {
+      getSessionId: (connection) => sessions.get(connection),
+      setSessionId: (connection, id) => void sessions.set(connection, id),
+      getConnId: () => null,
+      sendNow: (_connection, frame) => sent.push(decode(frame)),
+      terminateConnection: () => {},
+    }
+    const key = 'broadcast:reconnect-entry'
+    const chat = new ServerBroadcast<string>({ key })
+    mux.registerChannel(chat)
+    const first = {}
+    mux.onConnectionOpen(first, transport)
+    const entry = { id: chat.id, ix: 0, lastSeq: 0, broadcast: { text: false, binary: false } }
+    await mux.onConnectionRawMessage(first, encode.reconcile({ open: [{ ...entry, initial: true }] }))
+    mux.onConnectionClosed(first, { permanent: false })
+
+    const second = {}
+    mux.onConnectionOpen(second, transport)
+    const reopened = { ...entry, broadcast: { text: true, binary: false } }
+    await mux.onConnectionRawMessage(second, encode.reconcile({ sessionId: sessions.get(first), open: [reopened] }))
+    await Broadcast.publish(key, 'after-reconnect')
+    await vi.waitFor(() =>
+      expect(sent.some((frame) => frame.tag === TAG.PUBLISH && frame.text === '"after-reconnect"')).toBe(true),
+    )
+  })
+
   it('forgets a broadcast route once its last subscriber leaves', async () => {
     const unsubscribe = Broadcast.subscribe('broadcast:route-released', () => {})
     expect(memoryState.broadcastSubs.size).toBe(1)

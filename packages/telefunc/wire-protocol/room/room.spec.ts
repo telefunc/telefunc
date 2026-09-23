@@ -1924,15 +1924,26 @@ describe('client Room lifecycle', () => {
       { __r: 'sub-text', members: [], announce: false },
     ])
   })
-  it('redeclares a room-wide text subscription after reconnect even when the local latch already matches', () => {
+  it('declares wants only when they change, so listener churn sends nothing', () => {
+    const sent: unknown[] = []
     const wireDeclarations: boolean[] = []
-    const { fake, client } = fakeClient('reconnect-text', { wireDeclarations })
-    client.subscribe(() => {})
-    expect(wireDeclarations).toEqual([true])
-    // Model the transport dying after the client emitted BROADCAST_SUB but before the server
-    // applied it: the client latch is true, while the peer's authoritative state is still false.
-    fake.reconnect()
-    expect(wireDeclarations).toEqual([true, true])
+    const { client } = fakeClient('wants-on-change', {
+      wireDeclarations,
+      send: async (message) => {
+        sent.push(message)
+        return undefined
+      },
+    })
+    for (let i = 0; i < 3; i++) client.onChange(() => {})()
+    expect(sent).toEqual([])
+    const stop = client.onAnnounce(() => {})
+    client.onChange(() => {})()
+    stop()
+    expect(sent).toEqual([
+      { __r: 'sub-text', members: [], announce: true },
+      { __r: 'sub-text', members: [], announce: false },
+    ])
+    expect(wireDeclarations).toEqual([])
   })
   it('turns a server roster read rejection into an explicit client-settling event', async () => {
     const room = (await Room.create('roster-error-event')) as ServerRoom
@@ -2699,11 +2710,9 @@ function createFakeStub(options?: {
   stub: ClientBroadcast
   emitText(data: unknown, info: ChannelPublishInfo): void
   emitBinary(data: Uint8Array, info: ChannelPublishInfo): void
-  reconnect(): void
 } {
   const text: Array<(data: unknown, info: ChannelPublishInfo) => void> = []
   const binary: Array<(data: Uint8Array, info: ChannelPublishInfo) => void> = []
-  let reconnect = () => {}
   const stub = {
     _wireTextSubscribed: false,
     _isClosed: false,
@@ -2724,15 +2733,11 @@ function createFakeStub(options?: {
     publish: async () => ({ key: 'fake', seq: 1, timestamp: 1 }),
     publishBinary: async () => ({ key: 'fake', seq: 1, timestamp: 1 }),
     onClose: () => {},
-    _onReconnect: (callback: () => void) => {
-      reconnect = callback
-    },
   } as unknown as ClientBroadcast
   return {
     stub,
     emitText: (data, info) => text.forEach((callback) => callback(data, info)),
     emitBinary: (data, info) => binary.forEach((callback) => callback(data, info)),
-    reconnect: () => reconnect(),
   }
 }
 function fakeClient(
