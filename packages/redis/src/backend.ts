@@ -51,14 +51,15 @@ export class RedisBackend implements BroadcastDriver, RoomDriver {
 
   private readonly _publisher: RedisClient
   private readonly _prefix: string
-  private readonly _receivers: 'global' | 'none'
+  private readonly _reportsReceivers: boolean
   private _disposed = false
 
   constructor(options: RedisBackendOptions) {
     assertAtMostOnceClient(options.redis)
     this._publisher = options.redis
     this._prefix = redisKeyPrefix(options.prefix ?? DEFAULT_ROOM_PREFIX)
-    this._receivers = isCluster(options.redis) ? 'none' : 'global'
+    // A Cluster node's PUBLISH count is node-local, so it cannot prove global absence.
+    this._reportsReceivers = !isCluster(options.redis)
     for (const command of Object.values(REDIS_COMMANDS))
       defineCommand(this._publisher, command.name, command.lua, command.numberOfKeys)
     this.subscriptions = new RedisSubscriptionDriver({
@@ -70,7 +71,7 @@ export class RedisBackend implements BroadcastDriver, RoomDriver {
 
   async publish(lane: BroadcastLane, payload: Uint8Array): Promise<PublishResult> {
     const { seq, timestamp, receivers } = await this._run(REDIS_COMMANDS.publish, { lane, payload })
-    return { seq, timestamp, ...(this._receivers === 'none' ? {} : { receivers }) }
+    return { seq, timestamp, ...(this._reportsReceivers ? { receivers } : {}) }
   }
 
   readHead(roomId: string): Promise<RoomHead | null> {
@@ -134,7 +135,7 @@ export class RedisBackend implements BroadcastDriver, RoomDriver {
       accepted: true,
       seq: reply.seq,
       timestamp: reply.timestamp,
-      ...(this._receivers === 'none' ? {} : { receivers: reply.receivers }),
+      ...(this._reportsReceivers ? { receivers: reply.receivers } : {}),
       delivery: flush.delivery,
     }
   }

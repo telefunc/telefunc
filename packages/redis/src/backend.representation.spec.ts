@@ -4,7 +4,7 @@ import { RedisBackend } from './backend.js'
 
 test('keeps the ratified Redis backend representation', () => {
   const backend = new RedisBackend({ redis: new Redis({ lazyConnect: true, maxRetriesPerRequest: 0 }) })
-  expect(Object.keys(backend).sort()).toEqual('_disposed,_prefix,_publisher,_receivers,subscriptions'.split(','))
+  expect(Object.keys(backend).sort()).toEqual('_disposed,_prefix,_publisher,_reportsReceivers,subscriptions'.split(','))
 })
 
 test('requires explicit never-resend playground clients', () => {
