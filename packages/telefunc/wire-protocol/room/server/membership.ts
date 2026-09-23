@@ -16,7 +16,6 @@ export {
   resolveIdentityMembers,
 }
 
-import { assertUsage } from '../../../utils/assert.js'
 import { getRoomBackend } from '../../backend/install.js'
 import type { CellMutation } from '../../backend/room/contract.js'
 import { ROOM_MEMBER_TTL_MS } from '../constants.js'
@@ -42,7 +41,6 @@ function cleanupCellKey(memberId: string): string {
 }
 /** One marker per (identity, member), written before the member record and cleared after it; readers confirm each against the record. */
 function identityCellPrefix(identity: string): string {
-  assertUsage(identity.isWellFormed(), 'A participant identity should be a well-formed string')
   return `identity:${encodeURIComponent(identity)}:`
 }
 function identityCellKey(identity: string, memberId: string): string {

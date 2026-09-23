@@ -19,7 +19,7 @@ import { DEFAULT_TRACK, decodeBinaryFrame, emptyTrackWants, encodeBinaryFrame, s
 import { RoomError, isRoomError, roomAckError, toRoomFailure } from './errors.js'
 import { leaveCauseFromWire, leaveCauseToWire, mergeAttributes, normalizeJoinOptions } from './model.js'
 import { hasRoomTag, type RoomSnapshotMetadata } from './protocol.js'
-import { MEMBER_CELL_PREFIX, identityCellPrefix, memberCellKey } from './server/membership.js'
+import { MEMBER_CELL_PREFIX, memberCellKey } from './server/membership.js'
 import type { LeaveCause, Sender } from './types.js'
 import { ClientRoom } from './client.js'
 import { ClientBroadcast } from '../client/channel.js'
@@ -2293,7 +2293,17 @@ describe('room demand lifecycle', () => {
 describe('room binary protocol validation', () => {
   it('rejects malformed room ids and identities as usage errors', async () => {
     await expect(Room.create('\ud800')).rejects.toThrow('well-formed')
-    expect(() => identityCellPrefix('\udc00')).toThrow('well-formed')
+  })
+  it('rejects an ill-formed identity at the API edge, before any guard runs', async () => {
+    const room = await Room.create('identity-shape')
+    const onBeforeJoin = vi.fn()
+    Room.guard(room, { onBeforeJoin })
+    await expect(room.join({ identity: '\udc00' })).rejects.toThrow(
+      'join() options.identity should be a non-empty well-formed string',
+    )
+    expect(onBeforeJoin).not.toHaveBeenCalled()
+    await expect(Room.getParticipants(room.id, { identity: '\udc00' })).rejects.toThrow('well-formed')
+    await expect(Room.removeParticipant(room.id, { identity: '\udc00' })).rejects.toThrow('well-formed')
   })
   it('rejects non-boolean self-delivery options', () => {
     expect(() => normalizeJoinOptions({ selfDelivery: 'false' } as never)).toThrow('boolean')

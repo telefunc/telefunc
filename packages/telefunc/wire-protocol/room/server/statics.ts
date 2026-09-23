@@ -6,7 +6,7 @@ import { isObject } from '../../../utils/isObject.js'
 import { getRoomBackend } from '../../backend/install.js'
 import type { RoomBackend, RoomHead } from '../../backend/room/contract.js'
 import { RoomError, participantGoneError, roomClosedError } from '../errors.js'
-import { mergeAttributes, ownMetadata, removedCause } from '../model.js'
+import { assertParticipantIdentity, mergeAttributes, ownMetadata, removedCause } from '../model.js'
 import type { MemberSnapshot, RoomConfigRecord, RoomCtrlEnvelope, RoomDmEnvelope, RoomEnvelope } from '../protocol.js'
 import type {
   AfterJoinHook,
@@ -374,10 +374,7 @@ async function resolveParticipantRef(roomId: string, inc: string, target: Partic
     if (members.length === 0) throw participantGoneError(target.id)
     return members
   }
-  assertUsage(
-    isObject(target) && typeof target.identity === 'string' && target.identity.length > 0,
-    'The participant ref should be { id } or { identity }',
-  )
+  assertParticipantIdentity(target.identity, 'The participant ref { identity }')
   return await resolveIdentityMembers(roomId, inc, target.identity)
 }
 
@@ -394,10 +391,8 @@ async function getRoomParticipants(id: string, target?: { identity: string }): P
   if (target === undefined) {
     members = await readAllMembers(id, config.inc)
   } else {
-    assertUsage(
-      isObject(target) && typeof target.identity === 'string' && target.identity.length > 0,
-      'Room.getParticipants() target should be { identity }',
-    )
+    assertUsage(isObject(target), 'Room.getParticipants() target should be { identity }')
+    assertParticipantIdentity(target.identity, 'Room.getParticipants() target identity')
     members = await resolveIdentityMembers(id, config.inc, target.identity)
   }
   return members

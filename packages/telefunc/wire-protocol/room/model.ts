@@ -7,6 +7,7 @@ export {
   leaveCauseToWire,
   mergeAttributes,
   normalizeJoinOptions,
+  assertParticipantIdentity,
   removedCause,
   senderOf,
   ownMetaArgument,
@@ -77,6 +78,12 @@ function mergeAttributes(meta: ParticipantMeta, attrs: ParticipantMeta): Partici
   }
   return Object.freeze(next)
 }
+function assertParticipantIdentity(identity: unknown, where: string): asserts identity is string {
+  assertUsage(
+    typeof identity === 'string' && identity.length > 0 && identity.isWellFormed(),
+    `${where} should be a non-empty well-formed string`,
+  )
+}
 /** Validates `join(options)` and resolves the participant `meta` + `selfDelivery`. */
 function normalizeJoinOptions(options: JoinOptions | undefined): {
   meta: ParticipantMeta
@@ -91,10 +98,7 @@ function normalizeJoinOptions(options: JoinOptions | undefined): {
     options?.selfDelivery === undefined || typeof options.selfDelivery === 'boolean',
     'join() options.selfDelivery should be a boolean',
   )
-  assertUsage(
-    options?.identity === undefined || (typeof options.identity === 'string' && options.identity.length > 0),
-    'join() options.identity should be a non-empty string',
-  )
+  if (options?.identity !== undefined) assertParticipantIdentity(options.identity, 'join() options.identity')
   assertUsage(
     options?.hidden === undefined || typeof options.hidden === 'boolean',
     'join() options.hidden should be a boolean',
