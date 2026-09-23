@@ -10,7 +10,6 @@ import { ROOM_DM_ACK_TIMEOUT_MS, ROOM_TAIL_ATTACH_TIMEOUT_MS } from './constants
 import type { ChannelPublishAck } from '../channel.js'
 import { ServerChannel, parsePeerText } from '../server/channel.js'
 import type { ShieldValidator } from '../../node/server/shield.js'
-import { ServerBroadcast } from '../server/server-broadcast.js'
 import { encodePublishText, type WirePublishInfo } from '../shared-ws.js'
 import { type ServerLocalParticipant, type ServerRoom } from './server.js'
 import { reportRoomError, roomAckError } from './server/errors.js'
@@ -37,7 +36,7 @@ assertIsNotBrowser()
 type ResponseRoomGrants = { selfSuppressed: Set<string>; hidden: Set<string> }
 
 /** Server→client control/data obey wants; client→server membership/control and validated publishes use native channel acks. */
-class RoomStubChannel extends ServerBroadcast {
+class RoomStubChannel extends ServerChannel {
   private readonly _room: ServerRoom
   /** @internal — members the remote client joined through this stub (membership & lifecycle). */
   readonly _stubMembers = new Set<string>()
@@ -101,7 +100,7 @@ class RoomStubChannel extends ServerBroadcast {
   }
 
   constructor(serverRoom: ServerRoom) {
-    super({ key: serverRoom.id })
+    super()
     this._room = serverRoom
   }
 

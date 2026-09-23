@@ -340,8 +340,14 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     )
   }
 
-  _attachPeer(peer: IndexedPeer, _broadcast?: BroadcastSubscriptions): void {
+  /** The peer's declared subscriptions ride its (re)attach, so they apply before `onOpen` fires. */
+  _attachPeer(peer: IndexedPeer, broadcast?: BroadcastSubscriptions): void {
     if (this._didShutdown) return
+    if (broadcast)
+      for (const binary of [false, true]) {
+        if (broadcast[binary ? 'binary' : 'text']) this._onPeerBroadcastSubscribe(binary)
+        else this._onPeerBroadcastUnsubscribe(binary)
+      }
     this._clearTimer('_ttlTimer')
     this._clearTimer('_reconnectTimer')
     this._flow.reset()
@@ -388,8 +394,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this._dispatchDataFrame(data)
   }
 
-  /** @internal — Tag-keyed data-frame switch. Subclasses (`ServerBroadcast`) override
-   *  to handle their extra tags and fall back to `super` for the common cases. */
+  /** @internal — Tag-keyed data-frame switch. */
   protected _dispatchDataFrame(frame: ChannelDataFrame): void {
     switch (frame.tag) {
       case TAG.TEXT:
@@ -406,6 +411,12 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         return
       case TAG.ACK_RES:
         this._onPeerAckRes(frame.ackedSeq, frame.text, frame.status)
+        return
+      case TAG.PUBLISH_ACK_REQ:
+        void this._onPeerPublishAckReqMessage(frame.text, frame.seq)
+        return
+      case TAG.PUBLISH_BINARY_ACK_REQ:
+        void this._onPeerPublishBinaryAckReqMessage(frame.data, frame.seq)
         return
       case TAG.PUBLISH:
       case TAG.PUBLISH_BINARY:
@@ -435,9 +446,23 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       case TAG.BDP_PING_ACK:
         this._flow.onPingAck()
         return
-      // BROADCAST_SUB / BROADCAST_UNSUB: dropped on plain channels; ServerBroadcast overrides.
+      case TAG.BROADCAST_SUB:
+        this._onPeerBroadcastSubscribe(frame.binary)
+        return
+      case TAG.BROADCAST_UNSUB:
+        this._onPeerBroadcastUnsubscribe(frame.binary)
     }
   }
+
+  // Publishes and subscriptions are for broadcast-shaped channels; a plain channel drops them.
+  _onPeerPublishAckReqMessage(_text: string, _seq: number): Promise<void> {
+    return Promise.resolve()
+  }
+  _onPeerPublishBinaryAckReqMessage(_data: Uint8Array, _seq: number): Promise<void> {
+    return Promise.resolve()
+  }
+  _onPeerBroadcastSubscribe(_binary: boolean): void {}
+  _onPeerBroadcastUnsubscribe(_binary: boolean): void {}
 
   _onPeerMessage(text: string, bytes: number): void {
     const t0 = performance.now()

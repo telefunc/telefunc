@@ -12,7 +12,6 @@ import type {
 import type { TELEFUNC_SHIELDS } from '../../node/shared/transformer/generateShield/shield-key.js'
 import { invokeChannelListener, makePublishInfo } from '../channel.js'
 import { ServerChannel } from './channel.js'
-import type { IndexedPeer } from './IndexedPeer.js'
 import type { BroadcastBackend, PublishResult } from '../backend/broadcast/contract.js'
 import { getBroadcastBackend } from '../backend/install.js'
 import type { BackendSubscription } from '../backend/subscription.js'
@@ -21,8 +20,8 @@ import { parse } from '@brillout/json-serializer/parse'
 import { assert, assertUsage } from '../../utils/assert.js'
 import { isPromise } from '../../utils/isPromise.js'
 import { ChannelClosedError, isExpectedChannelFailure } from '../channel-errors.js'
-import { ACK_STATUS, encodePublishText, encodePublishBinary, TAG } from '../shared-ws.js'
-import type { BroadcastSubscriptions, ChannelCtrlFrame, ChannelDataFrame, WirePublishInfo } from '../shared-ws.js'
+import { ACK_STATUS, encodePublishText, encodePublishBinary } from '../shared-ws.js'
+import type { WirePublishInfo } from '../shared-ws.js'
 import { STATUS_BODY_INTERNAL_SERVER_ERROR } from '../../shared/constants.js'
 import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
 import { classifyTelefuncError } from '../error-classification.js'
@@ -100,35 +99,11 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
 
   // --- Transport callbacks ---
 
-  protected override _dispatchDataFrame(frame: ChannelDataFrame): void {
-    if (frame.tag === TAG.PUBLISH_ACK_REQ) {
-      void this._onPeerPublishAckReqMessage(frame.text, frame.seq)
-      return
-    }
-    if (frame.tag === TAG.PUBLISH_BINARY_ACK_REQ) {
-      void this._onPeerPublishBinaryAckReqMessage(frame.data, frame.seq)
-      return
-    }
-    super._dispatchDataFrame(frame)
-  }
-
-  override _dispatchCtrl(frame: ChannelCtrlFrame): void {
-    if (frame.tag === TAG.BROADCAST_SUB) {
-      this._onPeerBroadcastSubscribe(frame.binary)
-      return
-    }
-    if (frame.tag === TAG.BROADCAST_UNSUB) {
-      this._onPeerBroadcastUnsubscribe(frame.binary)
-      return
-    }
-    super._dispatchCtrl(frame)
-  }
-
-  _onPeerPublishAckReqMessage(text: string, seq: number): Promise<void> {
+  override _onPeerPublishAckReqMessage(text: string, seq: number): Promise<void> {
     return this._trackAck(this._dispatchPublishAckReq(text, seq))
   }
 
-  _onPeerPublishBinaryAckReqMessage(data: Uint8Array, seq: number): Promise<void> {
+  override _onPeerPublishBinaryAckReqMessage(data: Uint8Array, seq: number): Promise<void> {
     return this._trackAck(this._dispatchPublishBinaryAckReq(data, seq))
   }
 
@@ -161,22 +136,12 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
     this._prePeerBuffer.pushPublishBinary(wireData)
   }
 
-  _onPeerBroadcastSubscribe(binary: boolean): void {
+  override _onPeerBroadcastSubscribe(binary: boolean): void {
     this._setPeerSubscription(binary ? 'binary' : 'text', true)
   }
 
-  _onPeerBroadcastUnsubscribe(binary: boolean): void {
+  override _onPeerBroadcastUnsubscribe(binary: boolean): void {
     this._setPeerSubscription(binary ? 'binary' : 'text', false)
-  }
-
-  /** The peer's declared subscriptions ride its (re)attach, so they apply before `onOpen` fires. */
-  override _attachPeer(peer: IndexedPeer, broadcast?: BroadcastSubscriptions): void {
-    if (broadcast)
-      for (const kind of BROADCAST_KINDS) {
-        if (broadcast[kind]) this._onPeerBroadcastSubscribe(kind === 'binary')
-        else this._onPeerBroadcastUnsubscribe(kind === 'binary')
-      }
-    super._attachPeer(peer)
   }
 
   protected override _shutdown(err?: Error): void {
