@@ -16,10 +16,12 @@ import type { CommitAccepted, LaneId } from '../../backend/room/contract.js'
 import type { BackendSubscription } from '../../backend/subscription.js'
 import { encodePublishBinary, encodePublishText, type WirePublishInfo } from '../../shared-ws.js'
 import {
-  frameWithMemberId,
-  unframeMemberId,
+  encodeBinaryFrame,
+  decodeBinaryFrame,
   DEFAULT_TRACK,
   emptyTrackWants,
+  laneTrack,
+  publicTrack,
   mergeTrackWants,
   binaryWantsCovers,
   wantsAnyBinary,
@@ -345,7 +347,7 @@ class ServerRoom extends RoomStateView implements Room {
   }
 
   async _publishBinaryFramed(from: string, framed: Uint8Array): Promise<ChannelPublishAck> {
-    const frame = unframeMemberId(framed)
+    const frame = decodeBinaryFrame(framed)
     // Receivers trust the frame's own sender id, so it must be the publisher's.
     if (frame?.from !== from) throw new RoomError('Malformed binary frame')
     const sender = await this._admitPublish(from, frame.payload)
@@ -353,7 +355,7 @@ class ServerRoom extends RoomStateView implements Room {
     const commit = await commitRoomLaneOrThrow(
       this.id,
       this._inc,
-      { kind: 'binary', member: from, track: frame.track ?? DEFAULT_TRACK },
+      { kind: 'binary', member: from, track: laneTrack(frame.track) },
       framed,
       { retain: frame.retain, requiredCellKeys: [memberCellKey(from)] },
     )
@@ -563,13 +565,13 @@ class ServerRoom extends RoomStateView implements Room {
     this._relayMemberData(serialized, envelope, rawInfo)
   }
   private _onBinary(framed: Uint8Array, rawInfo: WirePublishInfo): void {
-    const unframed = unframeMemberId(framed)
+    const unframed = decodeBinaryFrame(framed)
     assert(unframed)
     this._local.relayBinary(unframed, rawInfo)
     this._healUnknownSender(unframed.from)
     if (this._stubs.size > 0) {
       const wireData = encodePublishBinary(framed, rawInfo)
-      const track = unframed.track ?? DEFAULT_TRACK
+      const track = laneTrack(unframed.track)
       for (const stub of this._stubs) stub._relayBinary(wireData, unframed.from, track, rawInfo)
     }
   }
@@ -791,9 +793,9 @@ class ServerRoom extends RoomStateView implements Room {
       const stored = await backend.readRetained(this.id, this._inc, lane)
       if (stored === null) continue
       const framed = stored.payload
-      const frame = unframeMemberId(framed)
+      const frame = decodeBinaryFrame(framed)
       if (!frame) continue
-      const track = frame.track ?? DEFAULT_TRACK
+      const track = laneTrack(frame.track)
       if (binaryWantsCovers(prevWants, frame.from, track) || !holder._wantsBinary(frame.from, track)) continue
       holder._emitRetainedBinary(framed, frame, { seq: stored.seq, timestamp: stored.timestamp })
     }
@@ -917,7 +919,7 @@ class ServerRoom extends RoomStateView implements Room {
     return this._localParticipants.get(id) ?? [...this._stubs].find((stub) => stub._holds(id))
   }
   private _deliverDemand(member: string, track: string, wanted: boolean): void {
-    const trackOut = track === DEFAULT_TRACK ? null : track
+    const trackOut = publicTrack(track)
     const holder = this._holderOf(member)
     if (holder instanceof ServerLocalParticipant) holder._onDemand(trackOut, wanted)
     else holder?._relayEvent({ __r: 'demand', member, track: trackOut, wanted })
@@ -1063,7 +1065,7 @@ class ServerLocalParticipant extends ParticipantBase {
   }
   async publishBinary(data: Uint8Array, options?: BinaryPublishOptions): Promise<ChannelPublishAck> {
     this._assertActive()
-    return await this._room._publishBinaryFramed(this.id, frameWithMemberId(this.id, data, options))
+    return await this._room._publishBinaryFramed(this.id, encodeBinaryFrame(this.id, data, options))
   }
   _publishFramed(framed: Uint8Array): Promise<ChannelPublishAck> {
     this._assertActive()

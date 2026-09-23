@@ -24,7 +24,7 @@ import {
 import { ReplayGate, TEXT_LANE_KEY, binaryLaneKey, type LaneHolder } from './replay.js'
 import { TailHold, type TailEntry } from './tail.js'
 import type { ParticipantMeta } from '../types.js'
-import { DEFAULT_TRACK, binaryWantsCovers, emptyTrackWants, type BinaryFrame, type BinaryWants } from '../binary.js'
+import { binaryWantsCovers, emptyBinaryWants, laneTrack, type BinaryFrame, type BinaryWants } from '../binary.js'
 import { DM_PARTICIPANT_LEFT, RoomError } from '../errors.js'
 import { leaveCauseToWire } from '../model.js'
 import {
@@ -81,7 +81,7 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
   private _wantsText = false
   private _textMemberWants: ReadonlySet<string> = new Set()
   private _announce = false
-  private _binary: BinaryWants = { everyMember: emptyTrackWants(), members: {} }
+  private _binary: BinaryWants = emptyBinaryWants()
   /** A tail waits for the client's first text selector, then flushes once in order. */
   private _tail: TailHold | null = null
 
@@ -272,7 +272,7 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
   }
 
   _emitRetainedBinary(framed: Uint8Array, frame: BinaryFrame, info: WirePublishInfo): void {
-    if (this._replay.admitRetained(binaryLaneKey(frame.from, frame.track ?? DEFAULT_TRACK), info.seq))
+    if (this._replay.admitRetained(binaryLaneKey(frame.from, laneTrack(frame.track)), info.seq))
       this._sendPublishBinary(encodePublishBinary(framed, info))
   }
 

@@ -6,7 +6,7 @@ import { makePublishInfo, type ChannelPublishAck, type ChannelPublishInfo } from
 import { ClientBroadcast } from '../client/channel.js'
 import type { ClientChannel } from '../client/channel.js'
 import { DM_PARTICIPANT_LEFT } from './errors.js'
-import { emptyTrackWants, frameWithMemberId, unframeMemberId } from './binary.js'
+import { decodeBinaryFrame, emptyBinaryWants, encodeBinaryFrame } from './binary.js'
 import {
   leaveCauseFromWire,
   mergeAttributes,
@@ -70,7 +70,7 @@ class ClientRoom extends RoomStateView implements Room {
   /** The wants the server stub holds, as last declared; a fresh stub holds none. */
   private readonly _declared: Record<WantsDeclaration['__r'], string> = {
     'sub-text': JSON.stringify({ __r: 'sub-text', members: [], announce: false }),
-    'sub-binary': JSON.stringify({ __r: 'sub-binary', wants: { everyMember: emptyTrackWants(), members: {} } }),
+    'sub-binary': JSON.stringify({ __r: 'sub-binary', wants: emptyBinaryWants() }),
   }
   private _rosterArrived!: () => void
   private _rosterFailed!: (error: unknown) => void
@@ -290,7 +290,7 @@ class ClientRoom extends RoomStateView implements Room {
   }
 
   private _onBinaryFrame(framed: Uint8Array, rawInfo: ChannelPublishInfo): void {
-    const frame = unframeMemberId(framed)
+    const frame = decodeBinaryFrame(framed)
     if (frame) this._state.applyBinary(frame, makePublishInfo(this.id, rawInfo.seq, rawInfo.timestamp))
   }
 
@@ -455,7 +455,7 @@ class ClientRoomParticipant extends ClientParticipantBase {
 
   async publishBinary(data: Uint8Array, options?: BinaryPublishOptions): Promise<ChannelPublishAck> {
     this._assertActive()
-    return await this._room._publishBinaryFramed(frameWithMemberId(this.id, data, options))
+    return await this._room._publishBinaryFramed(encodeBinaryFrame(this.id, data, options))
   }
 
   async leave(): Promise<void> {
@@ -504,7 +504,7 @@ class ClientStandaloneParticipant extends ClientParticipantBase {
 
   async publishBinary(data: Uint8Array, options?: BinaryPublishOptions): Promise<ChannelPublishAck> {
     this._assertActive()
-    return (await this._channel.sendBinary(frameWithMemberId(this.id, data, options), {
+    return (await this._channel.sendBinary(encodeBinaryFrame(this.id, data, options), {
       ack: true,
     })) as ChannelPublishAck
   }

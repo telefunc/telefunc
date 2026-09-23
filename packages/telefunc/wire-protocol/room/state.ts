@@ -4,9 +4,9 @@ import { assertUsage } from '../../utils/assert.js'
 import { invokeChannelListener, type ChannelPublishInfo } from '../channel.js'
 import { makeDisposer, releaseSubordinate } from '../wrapProxy.js'
 import {
-  DEFAULT_TRACK,
   emptyTrackWants,
-  isRoomTrack,
+  isNamedTrack,
+  laneTrack,
   type BinaryFrame,
   type BinaryWants,
   type TrackWants,
@@ -623,7 +623,7 @@ function normalizeTrackFilter(opts: { track?: string | null } | undefined): Trac
   )
   const track = opts?.track
   if (track === undefined || track === null) return track
-  assertUsage(isRoomTrack(track) && track.length > 0, 'subscribeBinary() track should be a valid non-empty string')
+  assertUsage(isNamedTrack(track), 'subscribeBinary() track should be a valid non-empty string')
   return track
 }
 function binaryListener<CB>(
@@ -643,7 +643,7 @@ function trackWantsOf(cbs: ReadonlyArray<{ track: TrackFilter }>): TrackWants {
   const wants = emptyTrackWants()
   for (const { track } of cbs) {
     if (track === undefined) return { all: true, tracks: [] }
-    const asTrack = track ?? DEFAULT_TRACK
+    const asTrack = laneTrack(track)
     if (!wants.tracks.includes(asTrack)) wants.tracks.push(asTrack)
   }
   return wants

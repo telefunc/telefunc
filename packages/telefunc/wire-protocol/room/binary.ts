@@ -1,11 +1,15 @@
 export {
-  uuidToBytes,
-  frameWithMemberId,
-  unframeMemberId,
+  isMemberId,
+  encodeBinaryFrame,
+  decodeBinaryFrame,
   binaryFrameSender,
   DEFAULT_TRACK,
+  laneTrack,
+  publicTrack,
   isRoomTrack,
+  isNamedTrack,
   emptyTrackWants,
+  emptyBinaryWants,
   mergeTrackWants,
   wantsAnyBinary,
   binaryWantsCovers,
@@ -25,6 +29,9 @@ const MEMBER_ID_BYTE_LENGTH = 16
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const BYTE_TO_HEX: string[] = []
 for (let byte = 0; byte < 256; byte++) BYTE_TO_HEX.push(byte.toString(16).padStart(2, '0'))
+function isMemberId(value: unknown): value is string {
+  return typeof value === 'string' && UUID_REGEX.test(value)
+}
 /** Canonical UUID string → 16 bytes. Returns `null` for anything else. */
 function uuidToBytes(uuid: string): Uint8Array | null {
   if (!UUID_REGEX.test(uuid)) return null
@@ -53,14 +60,14 @@ const TRACK_LENGTH_FIELD_MAX = 0xff
 const META_LENGTH_FIELD_MAX = 0xffff
 const frameTextEncoder = /* @__PURE__ */ new TextEncoder()
 const frameTextDecoder = /* @__PURE__ */ new TextDecoder('utf-8', { fatal: true, ignoreBOM: true })
-function frameWithMemberId(memberId: string, payload: Uint8Array, opts?: BinaryPublishOptions): Uint8Array {
+function encodeBinaryFrame(memberId: string, payload: Uint8Array, opts?: BinaryPublishOptions): Uint8Array {
   const idBytes = uuidToBytes(memberId)
   assert(idBytes, 'room member IDs are UUIDs')
   let flags = opts?.retain === true ? FRAME_FLAG_RETAIN : 0
   let trackBytes: Uint8Array | null = null
   if (opts?.track !== undefined) {
     assertUsage(
-      isRoomTrack(opts.track) && opts.track.length > 0,
+      isNamedTrack(opts.track),
       `track should be a non-empty well-formed string of at most ${TRACK_LENGTH_FIELD_MAX} bytes`,
     )
     trackBytes = frameTextEncoder.encode(opts.track)
@@ -116,19 +123,21 @@ function readTrackSection(data: Uint8Array, cursor: FrameCursor): string | undef
   return track
 }
 function readMetaSection(data: Uint8Array, cursor: FrameCursor): Record<string, unknown> | undefined {
-  const length = data.byteLength < cursor.offset + 2 ? -1 : (data[cursor.offset]! << 8) | data[cursor.offset + 1]!
+  if (data.byteLength < cursor.offset + 2) return undefined
+  const length = (data[cursor.offset]! << 8) | data[cursor.offset + 1]!
   cursor.offset += 2
-  if (length < 0 || data.byteLength < cursor.offset + length) return undefined
+  if (data.byteLength < cursor.offset + length) return undefined
   const serialized = decodeFrameText(data.subarray(cursor.offset, cursor.offset + length))
   if (serialized === undefined) return undefined
+  let meta: unknown
   try {
-    const meta: unknown = parse(serialized)
-    if (!isRecord(meta)) return undefined
-    cursor.offset += length
-    return meta
+    meta = parse(serialized)
   } catch {
     return undefined
   }
+  if (!isRecord(meta)) return undefined
+  cursor.offset += length
+  return meta
 }
 type BinaryFrame = {
   from: string
@@ -137,7 +146,7 @@ type BinaryFrame = {
   meta: Record<string, unknown> | null
   retain: boolean
 }
-function unframeMemberId(data: Uint8Array): BinaryFrame | null {
+function decodeBinaryFrame(data: Uint8Array): BinaryFrame | null {
   if (data.byteLength < MEMBER_ID_BYTE_LENGTH + 1) return null
   const flags = data[MEMBER_ID_BYTE_LENGTH]!
   if (flags & ~FRAME_FLAGS_KNOWN) return null
@@ -158,13 +167,22 @@ function binaryFrameSender(data: Uint8Array): string | null {
   return data.byteLength >= MEMBER_ID_BYTE_LENGTH ? bytesToUuid(data) : null
 }
 // Binary wants — per member, per track
-/** The default (unnamed) track's slot in want sets and key routing — track names are non-empty by contract (`frameWithMemberId`), so `''` is unambiguous. */
+/** The default (unnamed) track's slot in want sets and lane keys; named tracks are non-empty, so `''` is unambiguous. */
 const DEFAULT_TRACK = ''
+function laneTrack(track: string | null): string {
+  return track ?? DEFAULT_TRACK
+}
+function publicTrack(track: string): string | null {
+  return track === DEFAULT_TRACK ? null : track
+}
 /** Which of a publisher's tracks a holder wants: every track, or an exact set (`DEFAULT_TRACK` selects the unnamed lane). */
 type TrackWants = { all: boolean; tracks: string[] }
 type BinaryWants = { everyMember: TrackWants; members: Record<string, TrackWants> }
 function emptyTrackWants(): TrackWants {
   return { all: false, tracks: [] }
+}
+function emptyBinaryWants(): BinaryWants {
+  return { everyMember: emptyTrackWants(), members: {} }
 }
 function mergeTrackWants(a: TrackWants, b: TrackWants): TrackWants {
   if (a.all || b.all) return { all: true, tracks: [] }
@@ -188,7 +206,7 @@ function sanitizeBinaryWants(wants: unknown): BinaryWants | null {
   if (!everyMember || !isRecord(wants.members)) return null
   const members: Record<string, TrackWants> = Object.create(null)
   for (const [memberId, trackWants] of Object.entries(wants.members)) {
-    if (uuidToBytes(memberId) === null) return null
+    if (!isMemberId(memberId)) return null
     const sanitized = sanitizeTrackWants(trackWants)
     if (!sanitized) return null
     members[memberId] = sanitized
@@ -197,14 +215,17 @@ function sanitizeBinaryWants(wants: unknown): BinaryWants | null {
 }
 function sanitizeTrackWants(wants: unknown): TrackWants | null {
   if (!isRecord(wants) || typeof wants.all !== 'boolean' || !Array.isArray(wants.tracks)) return null
-  // Bound by UTF-8 bytes, the same unit the frame path uses (`frameWithMemberId`) — a `.length` char count could admit a want that doesn't fit the frame's one-byte track-length field.
   if (wants.tracks.length > ROOM_WANTED_TRACKS_MAX || !wants.tracks.every(isRoomTrack)) return null
   return { all: wants.all, tracks: wants.tracks as string[] }
 }
+/** Bounded by UTF-8 bytes, the unit of the frame's one-byte track length; a `.length` count could admit a track that doesn't fit. */
 function isRoomTrack(track: unknown): track is string {
   return (
     typeof track === 'string' &&
     track.isWellFormed() &&
     frameTextEncoder.encode(track).byteLength <= TRACK_LENGTH_FIELD_MAX
   )
+}
+function isNamedTrack(track: unknown): track is string {
+  return isRoomTrack(track) && track.length > 0
 }

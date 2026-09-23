@@ -10,7 +10,7 @@ export type { RoomRequest, RoomDeclaration }
 
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 import { ProtocolViolationError } from '../../shared-ws.js'
-import { sanitizeBinaryWants, unframeMemberId, uuidToBytes, type BinaryFrame } from '../binary.js'
+import { decodeBinaryFrame, isMemberId, sanitizeBinaryWants, type BinaryFrame } from '../binary.js'
 import { isRecord } from '../model.js'
 import { decodeDmReply, type ParticipantStubRequest, type RoomDataPublish, type RoomStubRequest } from '../protocol.js'
 assertIsNotBrowser()
@@ -34,7 +34,7 @@ function text(value: unknown, what: string): string {
   return value
 }
 function memberId(value: unknown, what: string): string {
-  if (typeof value !== 'string' || uuidToBytes(value) === null) malformed(what)
+  if (!isMemberId(value)) malformed(what)
   return value
 }
 function flag(value: unknown, what: string): boolean {
@@ -105,7 +105,7 @@ function decodeRoomPublish(value: unknown): RoomDataPublish {
 }
 
 function decodeStubBinaryFrame(framed: Uint8Array): BinaryFrame {
-  return unframeMemberId(framed) ?? malformed('binary frame')
+  return decodeBinaryFrame(framed) ?? malformed('binary frame')
 }
 
 function decodeParticipantFrame(framed: Uint8Array, participantId: string): BinaryFrame {

@@ -15,7 +15,7 @@ import {
   ROOM_TAIL_HOLD_CODE_UNITS_MAX,
   ROOM_TAIL_HOLD_MAX,
 } from './constants.js'
-import { DEFAULT_TRACK, emptyTrackWants, frameWithMemberId, sanitizeBinaryWants, unframeMemberId } from './binary.js'
+import { DEFAULT_TRACK, decodeBinaryFrame, emptyTrackWants, encodeBinaryFrame, sanitizeBinaryWants } from './binary.js'
 import { RoomError, isRoomError } from './errors.js'
 import { leaveCauseFromWire, leaveCauseToWire, mergeAttributes, normalizeJoinOptions } from './model.js'
 import { hasRoomTag, type RoomSnapshotMetadata } from './protocol.js'
@@ -1162,7 +1162,7 @@ describe('Room public behavior', () => {
       [participant, { tag: TAG.TEXT_ACK_REQ, index: 7, seq: 1, text: text({ __r: 'req-set-attrs', attrs: 'x' }) }],
       [
         participant,
-        { tag: TAG.BINARY_ACK_REQ, index: 7, seq: 2, data: frameWithMemberId(member, new Uint8Array([1])) },
+        { tag: TAG.BINARY_ACK_REQ, index: 7, seq: 2, data: encodeBinaryFrame(member, new Uint8Array([1])) },
       ],
     ] as const
     for (const [channel, frame] of frames) expect(() => channel._dispatchFrame(frame)).toThrow(ProtocolViolationError)
@@ -1255,7 +1255,7 @@ describe('Room public behavior', () => {
     const other = await room.join()
     const frames: Uint8Array[] = []
     room.subscribeBinary((data) => frames.push(data))
-    await expect(publisher._publishFramed(frameWithMemberId(other.id, new Uint8Array([1])))).rejects.toThrow(
+    await expect(publisher._publishFramed(encodeBinaryFrame(other.id, new Uint8Array([1])))).rejects.toThrow(
       'Malformed binary frame',
     )
     expect(frames).toEqual([])
@@ -1273,7 +1273,7 @@ describe('Room public behavior', () => {
     const responseAbort = vi.fn()
     channel._setResponseAbort(responseAbort)
     const peer = attachPeer(channel as unknown as RoomStubChannel)
-    const data = frameWithMemberId(holder.id, new Uint8Array([1]))
+    const data = encodeBinaryFrame(holder.id, new Uint8Array([1]))
     channel._dispatchFrame({ tag: TAG.BINARY_ACK_REQ, index: 7, seq: 1, data })
     await vi.waitFor(() =>
       expect(peer.decoded().find((frame) => frame.tag === TAG.ACK_RES)).toMatchObject({ status: ACK_STATUS.ABORT }),
@@ -1683,7 +1683,7 @@ describe('Room public behavior', () => {
         .decoded()
         .find((candidate) => candidate.tag === TAG.PUBLISH_BINARY)
       if (frame?.tag !== TAG.PUBLISH_BINARY) throw new Error('expected exact-member binary publish')
-      expect(unframeMemberId(frame.data)).toMatchObject({
+      expect(decodeBinaryFrame(frame.data)).toMatchObject({
         from: publisher.id,
         track: 'screen',
         payload: new Uint8Array([7]),
@@ -2326,12 +2326,12 @@ describe('room binary protocol validation', () => {
     [
       'member UUIDs',
       ['12345678-1234-1234-1234-123456789abc', '12345678-1234-1234-1234-123456789ABC'],
-      (id: string) => frameWithMemberId(id, new Uint8Array()),
+      (id: string) => encodeBinaryFrame(id, new Uint8Array()),
     ],
     [
       'single-unit tracks',
       Array.from({ length: 0x1_0000 }, (_, code) => String.fromCharCode(code)),
-      (track: string) => frameWithMemberId('12345678-1234-1234-1234-123456789abc', new Uint8Array(), { track }),
+      (track: string) => encodeBinaryFrame('12345678-1234-1234-1234-123456789abc', new Uint8Array(), { track }),
     ],
   ] as const)('encodes every accepted %s input injectively', (_name, inputs, encode) => {
     const seen = new Set<string>()
@@ -2345,7 +2345,7 @@ describe('room binary protocol validation', () => {
       const key = String.fromCharCode(...frame)
       expect(seen.has(key)).toBe(false)
       seen.add(key)
-      if (_name === 'single-unit tracks') expect(unframeMemberId(frame)?.track).toBe(input)
+      if (_name === 'single-unit tracks') expect(decodeBinaryFrame(frame)?.track).toBe(input)
     }
   })
   it('preserves __proto__ as data and builds prototype-safe binary wants', () => {
@@ -2388,18 +2388,18 @@ describe('room binary protocol validation', () => {
   it('rejects non-record metadata and malformed UTF-8 instead of normalizing them', () => {
     const memberId = crypto.randomUUID()
     for (const meta of [[], new Date(), new Map(), new Set()].map((value) => parse(stringify(value)))) {
-      expect(() => frameWithMemberId(memberId, new Uint8Array(), { meta: meta as never })).toThrow(
+      expect(() => encodeBinaryFrame(memberId, new Uint8Array(), { meta: meta as never })).toThrow(
         'meta should be an object',
       )
       expect(sanitizeBinaryWants({ everyMember: { all: false, tracks: [] }, members: meta })).toBeNull()
     }
-    const arrayMeta = frameWithMemberId(memberId, new Uint8Array(), { meta: {} })
+    const arrayMeta = encodeBinaryFrame(memberId, new Uint8Array(), { meta: {} })
     arrayMeta[19] = '['.charCodeAt(0)
     arrayMeta[20] = ']'.charCodeAt(0)
-    expect(unframeMemberId(arrayMeta)).toBeNull()
-    const malformedTrack = frameWithMemberId(memberId, new Uint8Array(), { track: 'x' })
+    expect(decodeBinaryFrame(arrayMeta)).toBeNull()
+    const malformedTrack = encodeBinaryFrame(memberId, new Uint8Array(), { track: 'x' })
     malformedTrack[18] = 0xff
-    expect(unframeMemberId(malformedTrack)).toBeNull()
+    expect(decodeBinaryFrame(malformedTrack)).toBeNull()
   })
   it('takes a Room tag only from a plain record', () => {
     expect(hasRoomTag(Object.create({ __r: 'closed' }))).toBe(false)
@@ -2420,10 +2420,10 @@ describe('room binary protocol validation', () => {
     const memberId = crypto.randomUUID()
     const track = 't'.repeat(255)
     const meta = { note: 'm'.repeat(5000) }
-    const framed = frameWithMemberId(memberId, new Uint8Array([1]), { track, meta })
-    expect(unframeMemberId(framed)).toMatchObject({ track, meta, payload: new Uint8Array([1]) })
-    expect(() => frameWithMemberId(memberId, new Uint8Array(), { track: 't'.repeat(256) })).toThrow('255 bytes')
-    expect(() => frameWithMemberId(memberId, new Uint8Array(), { meta: { note: 'm'.repeat(70_000) } })).toThrow(
+    const framed = encodeBinaryFrame(memberId, new Uint8Array([1]), { track, meta })
+    expect(decodeBinaryFrame(framed)).toMatchObject({ track, meta, payload: new Uint8Array([1]) })
+    expect(() => encodeBinaryFrame(memberId, new Uint8Array(), { track: 't'.repeat(256) })).toThrow('255 bytes')
+    expect(() => encodeBinaryFrame(memberId, new Uint8Array(), { meta: { note: 'm'.repeat(70_000) } })).toThrow(
       '65535 bytes',
     )
   })

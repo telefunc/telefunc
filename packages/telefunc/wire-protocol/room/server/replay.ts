@@ -4,7 +4,7 @@ export type { LaneHolder }
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 import { makePublishInfo } from '../../channel.js'
 import type { WirePublishInfo } from '../../shared-ws.js'
-import { DEFAULT_TRACK, binaryWantsCovers, emptyTrackWants, type BinaryFrame, type BinaryWants } from '../binary.js'
+import { binaryWantsCovers, emptyBinaryWants, laneTrack, type BinaryFrame, type BinaryWants } from '../binary.js'
 import type { MemberWants, RoomDataEnvelope } from '../protocol.js'
 import type { RoomState } from '../state.js'
 assertIsNotBrowser()
@@ -55,7 +55,7 @@ interface LaneHolder {
 class LocalHolder implements LaneHolder {
   private readonly _replay = new ReplayGate()
   private _textWants: MemberWants = { all: false, members: [] }
-  _binaryWants: BinaryWants = { everyMember: emptyTrackWants(), members: {} }
+  _binaryWants: BinaryWants = emptyBinaryWants()
 
   constructor(
     private readonly _state: RoomState,
@@ -92,7 +92,7 @@ class LocalHolder implements LaneHolder {
   }
 
   relayBinary(frame: BinaryFrame, info: WirePublishInfo): void {
-    const track = frame.track ?? DEFAULT_TRACK
+    const track = laneTrack(frame.track)
     if (this._wantsBinary(frame.from, track) && this._replay.admitLive(binaryLaneKey(frame.from, track), info.seq))
       this._applyBinary(frame, info)
   }
@@ -102,7 +102,7 @@ class LocalHolder implements LaneHolder {
   }
 
   _emitRetainedBinary(_framed: Uint8Array, frame: BinaryFrame, info: WirePublishInfo): void {
-    if (this._replay.admitRetained(binaryLaneKey(frame.from, frame.track ?? DEFAULT_TRACK), info.seq))
+    if (this._replay.admitRetained(binaryLaneKey(frame.from, laneTrack(frame.track)), info.seq))
       this._applyBinary(frame, info)
   }
 
