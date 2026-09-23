@@ -614,7 +614,7 @@ describe('Room public behavior', () => {
     const { stub } = serve(observer)
     const { started } = rejectLaneSubscriptions('semantic', 'persistent semantic subscription failure')
     stub._onPeerBroadcastSubscribe(false)
-    const outcome = captureOutcome(observer._replayRetainedText(stub, false, new Set()))
+    const outcome = captureOutcome(observer._replayRetainedText(stub, () => false))
     await started
     await vi.advanceTimersByTimeAsync(ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS + 100)
     expect(outcome.value).toBeInstanceOf(RoomError)
@@ -1465,8 +1465,27 @@ describe('Room public behavior', () => {
     const stub = register(room)
     const relay = vi.spyOn(stub, '_relayPublishText').mockImplementation(() => {})
     stub._relayTextLive('newer-live', { seq: 2, timestamp: 2 })
-    stub._emitRetainedText('older-retained', { seq: 1, timestamp: 1 })
+    stub._emitRetainedText(
+      'older-retained',
+      { __r: 'data', from: 'sender-a', fromMeta: {}, data: null },
+      { seq: 1, timestamp: 1 },
+    )
     expect(relay.mock.calls.map(([wire]) => wire)).toEqual(['newer-live'])
+  })
+  it('replays retained text and binary once to a late server-side subscriber', async () => {
+    const authority = await Room.create('late-server-subscriber')
+    const publisher = await authority.join()
+    await publisher.publish('state', { retain: true })
+    await publisher.publishBinary(new Uint8Array([7]), { track: 'camera', retain: true })
+    const observer = await Room.get(authority.id)
+    const texts: unknown[] = []
+    const frames: number[][] = []
+    observer.subscribe((data) => void texts.push(data))
+    observer.subscribeBinary((data) => void frames.push([...data]), { track: 'camera' })
+    await vi.waitFor(() => expect({ texts, frames }).toEqual({ texts: ['state'], frames: [[7]] }))
+    await publisher.publish('live')
+    await publisher.publishBinary(new Uint8Array([8]), { track: 'camera' })
+    await vi.waitFor(() => expect({ texts, frames }).toEqual({ texts: ['state', 'live'], frames: [[7], [8]] }))
   })
   it('waits for roster-derived binary routes before reading retained frames', async () => {
     const authority = await Room.create('retained-binary-roster-fence')

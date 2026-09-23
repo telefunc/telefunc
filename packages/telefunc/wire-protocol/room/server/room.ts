@@ -60,6 +60,7 @@ import { RoomState, RoomStateView } from '../state.js'
 import { RoomDemand } from '../demand.js'
 import { ParticipantBase, type InboxMessage } from '../participant.js'
 import type { RoomStubChannel } from './stub.js'
+import { LocalHolder, type LaneHolder } from './replay.js'
 import {
   CONTROL_LANE,
   SEMANTIC_LANE,
@@ -149,6 +150,7 @@ class ServerRoom extends RoomStateView implements Room {
   private readonly _pendingDmAcks = new Map<string, { to: string; settle: (reply: DmReply) => void }>()
   private _guards: RoomGuards | null = null
   /** @internal */ readonly _state: RoomState
+  private readonly _local: LocalHolder
   private readonly _stubs = new Set<RoomStubChannel>()
   private readonly _localParticipants = new Map<string, ServerLocalParticipant>()
   /** Members registered with their holder so their inbox can establish, but not yet durable. They own inbox routes; heartbeat must not renew/reap them until the member cell commits. */
@@ -183,10 +185,11 @@ class ServerRoom extends RoomStateView implements Room {
       meta: config.meta,
       seed,
       updateStamp: { at: config.at, by: config.by },
-      onListenersChanged: () => this._syncSubs(),
+      onListenersChanged: () => this._onLocalListenersChanged(),
       onCallbackError: reportCallbackError,
     })
     this._state._owner = this
+    this._local = new LocalHolder(this._state, (member) => this._suppress(member))
     this._demand = new RoomDemand(
       (event) => void publishCtrl(roomId, config.inc, { __r: 'want', ...event }).catch(reportRoomError),
       (id) => this._ownsMember(id),
@@ -603,16 +606,13 @@ class ServerRoom extends RoomStateView implements Room {
     serialized: string,
     rawInfo: WirePublishInfo,
   ): void {
-    const info = makePublishInfo(this.id, rawInfo.seq, rawInfo.timestamp)
-    this._state.applyAnnounce(announce.data, info)
+    this._local.relayAnnouncement(announce.data, rawInfo)
     const wireText = encodePublishText(serialized, rawInfo)
     for (const stub of this._stubs) if (stub._wantsAnnounce) stub._relayTextLive(wireText, rawInfo)
   }
 
   private _applyMemberData(event: RoomDataEnvelope, rawInfo: WirePublishInfo): void {
-    const info = makePublishInfo(this.id, rawInfo.seq, rawInfo.timestamp)
-    if (!this._suppress(event.from))
-      this._state.applyData(event.from, event.fromMeta, event.fromIdentity ?? null, event.data, info)
+    this._local.relayText(event, rawInfo)
     this._healUnknownSender(event.from)
   }
 
@@ -637,9 +637,7 @@ class ServerRoom extends RoomStateView implements Room {
   private _onBinary(framed: Uint8Array, rawInfo: WirePublishInfo): void {
     const unframed = unframeMemberId(framed)
     assert(unframed)
-    const info = makePublishInfo(this.id, rawInfo.seq, rawInfo.timestamp)
-    if (!this._suppress(unframed.from))
-      this._state.applyBinary(unframed.from, unframed.payload, unframed.track, unframed.meta, info)
+    this._local.relayBinary(unframed, rawInfo)
     this._healUnknownSender(unframed.from)
     if (this._stubs.size > 0) {
       const wireData = encodePublishBinary(framed, rawInfo)
@@ -725,6 +723,7 @@ class ServerRoom extends RoomStateView implements Room {
       stub._selfSuppressed.delete(id)
       stub._forgetMember(id) // drop the departed member's retained-replay watermarks (bounded state)
     }
+    this._local.forgetMember(id)
     this._demand.forgetMember(id)
     this._syncSubs()
   }
@@ -907,12 +906,13 @@ class ServerRoom extends RoomStateView implements Room {
   }
   private _applyStubTextWants(stub: RoomStubChannel, req: Extract<RoomStubRequest, { __r: 'sub-text' }>): void {
     const members = Array.isArray(req.members) ? req.members.filter((member) => typeof member === 'string') : []
-    const prev = stub._textMemberWants
+    const prevMembers = stub._textMemberWants
+    const prevWantsText = stub._wantsText
     stub._textMemberWants = new Set(members)
     stub._wantsAnnounce = req.announce === true
     stub._flushTail()
     this._syncSubs()
-    void this._replayRetainedText(stub, stub._wantsText, prev).catch(reportRoomError)
+    void this._replayRetainedText(stub, (member) => prevWantsText || prevMembers.has(member)).catch(reportRoomError)
   }
   _shieldPublishData(validate: ShieldValidator | undefined, data: unknown): void {
     if (!validate) return
@@ -934,28 +934,23 @@ class ServerRoom extends RoomStateView implements Room {
     const from = requireStubMember(stub, binaryFrameSender(payload.binary))
     return await this._publishBinaryFramed(from, payload.binary)
   }
-  async _replayRetainedText(
-    stub: RoomStubChannel,
-    prevWantsText: boolean,
-    prevMemberWants: ReadonlySet<string>,
-  ): Promise<void> {
+  async _replayRetainedText(holder: LaneHolder, prevWantedFrom: (member: string) => boolean): Promise<void> {
     // Read retained only after subscription readiness: a racing commit is then retained or live, never lost in the gap.
     await withinRoomHorizon(this._textSub.ready, ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS)
     const stored = await getRoomBackend().readRetained(this.id, this._inc, SEMANTIC_LANE)
     if (stored === null) return
     const serialized = decodeRoomText(stored.payload)
-    const info = { seq: stored.seq, timestamp: stored.timestamp }
-    const envelope = parse(serialized) as RoomDataEnvelope
-    if (prevWantsText || prevMemberWants.has(envelope.from) || !stub._wantsTextFrom(envelope.from)) return
-    // Replay the stored order as-is; the stub dedupes a same-or-newer live winner.
-    stub._emitRetainedText(encodePublishText(serialized, info), info)
+    const event = parse(serialized) as RoomDataEnvelope
+    if (prevWantedFrom(event.from) || !holder._wantsTextFrom(event.from)) return
+    // Replay the stored order as-is; the holder dedupes a same-or-newer live winner.
+    holder._emitRetainedText(serialized, event, { seq: stored.seq, timestamp: stored.timestamp })
   }
-  async _replayRetainedBinary(stub: RoomStubChannel, prevWants: BinaryWants): Promise<void> {
-    if (!wantsAnyBinary(stub._binaryWants)) return
-    const roomWide = stub._binaryWants.everyMember
+  async _replayRetainedBinary(holder: LaneHolder, prevWants: BinaryWants): Promise<void> {
+    if (!wantsAnyBinary(holder._binaryWants)) return
+    const roomWide = holder._binaryWants.everyMember
     if (roomWide.all || roomWide.tracks.length > 0) await this._ensureRoster()
     this._syncSubs()
-    // Binary uses the same readiness handoff and stored receipt; its stub dedupes the live/retained race per lane.
+    // Binary uses the same readiness handoff and stored receipt; its holder dedupes the live/retained race per lane.
     await this._binaryReady()
     const backend = getRoomBackend()
     const lanes = (await backend.listRetained(this.id, this._inc)).filter(
@@ -968,10 +963,19 @@ class ServerRoom extends RoomStateView implements Room {
       const frame = unframeMemberId(framed)
       if (!frame) continue
       const track = frame.track ?? DEFAULT_TRACK
-      if (binaryWantsCovers(prevWants, frame.from, track) || !stub._wantsBinary(frame.from, track)) continue
-      const info: WirePublishInfo = { seq: stored.seq, timestamp: stored.timestamp }
-      stub._emitRetainedBinary(encodePublishBinary(framed, info), frame.from, track, info)
+      if (binaryWantsCovers(prevWants, frame.from, track) || !holder._wantsBinary(frame.from, track)) continue
+      holder._emitRetainedBinary(framed, frame, { seq: stored.seq, timestamp: stored.timestamp })
     }
+  }
+
+  private _onLocalListenersChanged(): void {
+    const { prevText, prevBinary } = this._local.refreshWants()
+    this._syncSubs()
+    if (prevText)
+      void this._replayRetainedText(this._local, (member) => prevText.all || prevText.members.includes(member)).catch(
+        reportRoomError,
+      )
+    if (prevBinary) void this._replayRetainedBinary(this._local, prevBinary).catch(reportRoomError)
   }
 
   _syncSubs(): void {

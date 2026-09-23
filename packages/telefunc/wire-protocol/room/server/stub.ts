@@ -10,12 +10,12 @@ import { ROOM_DM_ACK_TIMEOUT_MS, ROOM_TAIL_ATTACH_TIMEOUT_MS } from '../constant
 import type { ChannelPublishAck } from '../../channel.js'
 import { ServerChannel, parsePeerText } from '../../server/channel.js'
 import type { ShieldValidator } from '../../../node/server/shield.js'
-import { encodePublishText, type WirePublishInfo } from '../../shared-ws.js'
+import { encodePublishBinary, encodePublishText, type WirePublishInfo } from '../../shared-ws.js'
 import { type ServerLocalParticipant, type ServerRoom } from './room.js'
 import { reportRoomError, roomAckError } from './errors.js'
-import { ReplayGate, TEXT_LANE_KEY, binaryLaneKey } from './replay.js'
+import { ReplayGate, TEXT_LANE_KEY, binaryLaneKey, type LaneHolder } from './replay.js'
 import type { ParticipantMeta, RoomSendReceipt } from '../types.js'
-import { binaryWantsCovers, emptyTrackWants, type BinaryWants } from '../binary.js'
+import { DEFAULT_TRACK, binaryWantsCovers, emptyTrackWants, type BinaryFrame, type BinaryWants } from '../binary.js'
 import { DM_PARTICIPANT_LEFT, roomFailureError } from '../errors.js'
 import { leaveCauseToWire } from '../model.js'
 import {
@@ -26,6 +26,7 @@ import {
   type MemberSnapshot,
   type ParticipantStubRequest,
   type RoomCtrlEnvelope,
+  type RoomDataEnvelope,
   type RoomDemandEvent,
   type RoomRosterEvent,
 } from '../protocol.js'
@@ -37,7 +38,7 @@ assertIsNotBrowser()
 type ResponseRoomGrants = { selfSuppressed: Set<string>; hidden: Set<string> }
 
 /** Server→client control/data obey wants; client→server membership/control and validated publishes use native channel acks. */
-class RoomStubChannel extends ServerChannel {
+class RoomStubChannel extends ServerChannel implements LaneHolder {
   private readonly _room: ServerRoom
   /** @internal — members the remote client joined through this stub (membership & lifecycle). */
   readonly _stubMembers = new Set<string>()
@@ -151,11 +152,12 @@ class RoomStubChannel extends ServerChannel {
   // Control always flows; text follows broadcast/member wants, while binary uses `sub-binary`.
   override _onPeerBroadcastSubscribe(binary: boolean): void {
     if (binary || this._wantsText) return
+    const prevMembers = this._textMemberWants
     this._wantsText = true
     // Tail mode: this room-level want covers the whole held tail — flush it before the retained back-fill, so the flush advances the causal watermark and the retained replay dedupes against it.
     this._flushTail()
     this._room._syncSubs()
-    void this._room._replayRetainedText(this, false, this._textMemberWants).catch(reportRoomError)
+    void this._room._replayRetainedText(this, (member) => prevMembers.has(member)).catch(reportRoomError)
   }
   override _onPeerBroadcastUnsubscribe(binary: boolean): void {
     if (binary || !this._wantsText) return
@@ -196,16 +198,17 @@ class RoomStubChannel extends ServerChannel {
     if (this._replay.admitLive(TEXT_LANE_KEY, ord.seq)) this._relayPublishText(wireText)
   }
 
-  _emitRetainedText(wireText: string, ord: RoomOrder): void {
-    if (this._replay.admitRetained(TEXT_LANE_KEY, ord.seq)) this._relayPublishText(wireText)
+  _emitRetainedText(serialized: string, _event: RoomDataEnvelope, info: WirePublishInfo): void {
+    if (this._replay.admitRetained(TEXT_LANE_KEY, info.seq)) this._relayPublishText(encodePublishText(serialized, info))
   }
 
   _relayBinaryLive(wireData: Uint8Array, from: string, track: string, info: WirePublishInfo): void {
     if (this._replay.admitLive(binaryLaneKey(from, track), info.seq)) this._relayPublishBinary(wireData)
   }
 
-  _emitRetainedBinary(wireData: Uint8Array, from: string, track: string, info: WirePublishInfo): void {
-    if (this._replay.admitRetained(binaryLaneKey(from, track), info.seq)) this._relayPublishBinary(wireData)
+  _emitRetainedBinary(framed: Uint8Array, frame: BinaryFrame, info: WirePublishInfo): void {
+    if (this._replay.admitRetained(binaryLaneKey(frame.from, frame.track ?? DEFAULT_TRACK), info.seq))
+      this._relayPublishBinary(encodePublishBinary(framed, info))
   }
 
   _forgetMember(from: string): void {

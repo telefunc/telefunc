@@ -11,7 +11,7 @@ export {
   binaryWantsCovers,
   sanitizeBinaryWants,
 }
-export type { TrackWants, BinaryWants }
+export type { TrackWants, BinaryWants, BinaryFrame }
 
 import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
@@ -129,13 +129,14 @@ function readMetaSection(data: Uint8Array, cursor: FrameCursor): Record<string, 
     return undefined
   }
 }
-function unframeMemberId(data: Uint8Array): {
+type BinaryFrame = {
   from: string
   payload: Uint8Array
   track: string | null
   meta: Record<string, unknown> | null
   retain: boolean
-} | null {
+}
+function unframeMemberId(data: Uint8Array): BinaryFrame | null {
   if (data.byteLength < MEMBER_ID_BYTE_LENGTH + 1) return null
   const flags = data[MEMBER_ID_BYTE_LENGTH]!
   if (flags & ~FRAME_FLAGS_KNOWN) return null
