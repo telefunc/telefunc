@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { IndexedPeer } from '../server/IndexedPeer.js'
-import { ACK_STATUS, TAG, decode } from '../shared-ws.js'
+import { ACK_STATUS, ProtocolViolationError, TAG, decode } from '../shared-ws.js'
 import { ShieldValidationError, isShieldValidationError } from '../../shared/ShieldValidationError.js'
 import { Abort, isAbort } from '../../shared/Abort.js'
 import {
@@ -901,6 +901,17 @@ describe('Room public behavior', () => {
     vi.spyOn(channel, 'send').mockResolvedValue(forged as never)
     await expect(sender.send(holder.id, 'ping', { ack: true })).resolves.toMatchObject({ response: 'handled' })
     expect(victimInbox).toEqual([])
+  })
+  it('treats an unparsable client payload on a Room stub as a protocol violation', async () => {
+    const stub = register(await Room.create('malformed-stub-payload'))
+    const participant = new RoomParticipantStubChannel()
+    bindParticipantStubChannel(participant, (await Room.join('malformed-stub-payload')) as ServerLocalParticipant)
+    const frames = [
+      [stub, { tag: TAG.TEXT, index: 7, seq: 1, text: '{', bytes: 1 }],
+      [stub, { tag: TAG.TEXT_ACK_REQ, index: 7, seq: 2, text: '{' }],
+      [participant, { tag: TAG.TEXT_ACK_REQ, index: 7, seq: 1, text: '{' }],
+    ] as const
+    for (const [channel, frame] of frames) expect(() => channel._dispatchFrame(frame)).toThrow(ProtocolViolationError)
   })
   it('keeps every live ack correlation instead of silently dropping the oldest', async () => {
     const stub = register(await Room.create('ack-correlations'))

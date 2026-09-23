@@ -1,14 +1,13 @@
 export { RoomStubChannel, RoomParticipantStubChannel, bindParticipantStubChannel }
 
 import { stringify } from '@brillout/json-serializer/stringify'
-import { parse } from '@brillout/json-serializer/parse'
 import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
 import { assertUsage } from '../../utils/assert.js'
 import { isObject } from '../../utils/isObject.js'
 import { unrefTimer } from '../../utils/unrefTimer.js'
 import { ROOM_DM_ACK_TIMEOUT_MS, ROOM_TAIL_ATTACH_TIMEOUT_MS } from './constants.js'
 import type { ChannelPublishAck } from '../channel.js'
-import { ServerChannel } from '../server/channel.js'
+import { ServerChannel, parsePeerText } from '../server/channel.js'
 import type { ShieldValidator } from '../../node/server/shield.js'
 import { ServerBroadcast } from '../server/server-broadcast.js'
 import { encodePublishText, type WirePublishInfo } from '../shared-ws.js'
@@ -108,7 +107,7 @@ class RoomStubChannel extends ServerBroadcast {
     const started = performance.now()
     try {
       this._flow.onReceived(bytes)
-      Promise.resolve(this._room._handleStubRequest(this, parse(text)))
+      Promise.resolve(this._room._handleStubRequest(this, parsePeerText(text)))
         .catch((error: unknown) => this._handleCallbackError(error))
         .finally(() => this._flow.onConsumed(bytes))
     } finally {
@@ -117,10 +116,11 @@ class RoomStubChannel extends ServerBroadcast {
   }
 
   override _onPeerAckReqMessage(text: string, seq: number): Promise<void> {
+    const request = parsePeerText(text)
     return this._trackAck(
       (async () => {
         try {
-          const result = await this._room._handleStubRequest(this, parse(text))
+          const result = await this._room._handleStubRequest(this, request)
           this._sendAckRes(seq, stringify(result))
         } catch (error) {
           const failure = roomAckError(error, reportRoomError)
@@ -285,10 +285,11 @@ class RoomParticipantStubChannel extends ServerChannel<unknown, unknown> {
   }
 
   override _onPeerAckReqMessage(text: string, seq: number): Promise<void> {
+    const request = parsePeerText(text)
     return this._trackAck(
       (async () => {
         try {
-          const result = await this._requestHandler?.(parse(text))
+          const result = await this._requestHandler?.(request)
           this._sendAckRes(seq, stringify(result))
         } catch (error) {
           const failure = roomAckError(error, reportRoomError)
