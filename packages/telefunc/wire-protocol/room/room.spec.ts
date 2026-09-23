@@ -1166,6 +1166,23 @@ describe('Room public behavior', () => {
     expect(room.isClosed).toBe(true)
     expect(causes).toEqual(['closed'])
   })
+  it('reports a RoomError escaping application code as a bug', async () => {
+    const report = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const room = await Room.create('listener-room-error')
+    room.onJoin(() => {
+      throw new RoomError('Room is closed: from a listener')
+    })
+    const member = await room.join()
+    member.listen(() => {
+      throw new RoomError('Participant left the room')
+    })
+    await (await Room.get('listener-room-error')).join().then((sender) => sender.send(member.id, 'hi'))
+    await vi.waitFor(() => {
+      const reported = report.mock.calls.flat().map(String).join('\n')
+      expect(reported).toContain('Room is closed: from a listener')
+      expect(reported).toContain('Participant left the room')
+    })
+  })
   it('reports bugs, not expected RoomErrors, from background Room work', () => {
     const report = vi.spyOn(console, 'error').mockImplementation(() => {})
     reportRoomError(new RoomError('Room is closed: background'))

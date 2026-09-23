@@ -70,7 +70,7 @@ import {
   publishCtrl,
   withinRoomHorizon,
 } from './lanes.js'
-import { reportRoomError } from './errors.js'
+import { reportCallbackError, reportRoomError } from './errors.js'
 import { evictMember, mutateCells, readCell, readMembers } from './membership.js'
 import type {
   BinaryPublishOptions,
@@ -178,7 +178,7 @@ class ServerRoom extends RoomStateView implements Room {
       seed,
       updateStamp: { at: config.at, by: config.by },
       onListenersChanged: () => this._syncSubs(),
-      onCallbackError: reportRoomError,
+      onCallbackError: reportCallbackError,
     })
     this._state._owner = this
     this._demand = new RoomDemand(
@@ -1312,7 +1312,7 @@ class ServerLocalParticipant extends ParticipantBase {
   }
 
   protected _reportError(err: unknown): void {
-    reportRoomError(err)
+    reportCallbackError(err)
   }
 }
 
@@ -1320,6 +1320,6 @@ async function runAfterHook(hook: () => unknown): Promise<void> {
   try {
     await hook()
   } catch (error) {
-    reportRoomError(error)
+    reportCallbackError(error)
   }
 }
