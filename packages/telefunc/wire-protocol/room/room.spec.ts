@@ -381,9 +381,6 @@ describe('Room public behavior', () => {
     observer.subscribe((data) => received.push(data))
     if (!terminal) throw new Error('semantic subscription did not start')
     await terminal.subscription.ready
-    // Let the observe-transition roster refresh finish before the terminal event; otherwise its
-    // unrelated trailing `_syncSubs()` would accidentally replace the closed slot.
-    await observer.getParticipants()
     await terminal.close()
     await replacementReady.promise
     await publisher.publish('after-recovery')

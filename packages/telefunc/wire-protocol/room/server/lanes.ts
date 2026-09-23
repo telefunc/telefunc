@@ -105,10 +105,11 @@ class SubSlot {
     return this._subscription?.ready ?? Promise.resolve()
   }
 
+  /** Starts a wanted slot; a closed subscription is replaced by the recovery policy, not by re-planning. */
   sync(want: boolean, subscribe: () => BackendSubscription): void {
     if (!want) return this.stop()
     this._subscribe = subscribe
-    if (this._subscription !== null && this._subscription.state() !== 'closed') return
+    if (this._subscription !== null) return
     this.retry()
   }
 
