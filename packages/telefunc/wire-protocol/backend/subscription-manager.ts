@@ -78,12 +78,24 @@ class SubscriptionManager<Source> {
     return cleanup
   }
 
-  /** One wait per unsettled slot on the source's route; each resolves once its slot is ready, stopped or terminal. */
-  settledWaits(source: Source): Promise<void>[] {
+  /** Whether a slot on the source's route is neither ready nor ended. */
+  hasUnsettled(source: Source): boolean {
+    return this._slotsOf(source).some((slot) => slot.unsettled)
+  }
+
+  /** Resolves once every slot on the source's route, including ones added meanwhile, is ready, stopped or terminal. */
+  async settled(source: Source): Promise<void> {
+    for (let waits = this._settledWaits(source); waits.length > 0; waits = this._settledWaits(source))
+      await Promise.all(waits)
+  }
+
+  private _settledWaits(source: Source): Promise<void>[] {
+    return this._slotsOf(source).flatMap((slot) => (slot.unsettled ? [slot.settled()] : []))
+  }
+
+  private _slotsOf(source: Source): SubscriptionSlot<Source>[] {
     const sourceKey = this._sourceKey(source)
-    return [...this._slots.values()]
-      .filter((slot) => slot.config.sourceKey === sourceKey)
-      .flatMap((slot) => slot.settled() ?? [])
+    return [...this._slots.values()].filter((slot) => slot.config.sourceKey === sourceKey)
   }
 }
 
@@ -98,9 +110,12 @@ class SubscriptionSlot<Source> {
 
   constructor(readonly config: SubscriptionSlotConfig<Source>) {}
 
-  /** `null` once ready or stopped; otherwise resolves when readiness settles either way. */
-  settled(): Promise<void> | null {
-    if (this._stopPromise !== null || this._state === 'ready') return null
+  get unsettled(): boolean {
+    return this._stopPromise === null && this._state !== 'ready'
+  }
+
+  /** Resolves when the current readiness settles either way. */
+  settled(): Promise<void> {
     return this._readiness.promise.then(
       () => {},
       () => {},

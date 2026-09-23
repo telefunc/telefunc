@@ -37,7 +37,7 @@ function superviseBroadcastDriver(driver: BroadcastDriver): BroadcastBackend {
   const publish = (lane: BroadcastLane, payload: Uint8Array): PublishResult | Promise<PublishResult> => {
     const routeKey = broadcastRouteKey(lane)
     const waiting = pending.get(routeKey)
-    if (waiting === undefined && subscriptions.settledWaits(lane).length === 0) return publishNow(lane, payload)
+    if (waiting === undefined && !subscriptions.hasUnsettled(lane)) return publishNow(lane, payload)
     const owned = payload.slice()
     const route = waiting ?? { lane, entries: [], bytes: 0 }
     const byteLimit = lane.kind === 'binary' ? CHANNEL_BUFFER_LIMIT_BINARY_BYTES : CHANNEL_BUFFER_LIMIT_BYTES
@@ -57,12 +57,7 @@ function superviseBroadcastDriver(driver: BroadcastDriver): BroadcastBackend {
 
   const flush = async (routeKey: string, route: PendingRoute): Promise<void> => {
     while (route.entries.length > 0) {
-      for (
-        let waits = subscriptions.settledWaits(route.lane);
-        waits.length > 0;
-        waits = subscriptions.settledWaits(route.lane)
-      )
-        await Promise.all(waits)
+      await subscriptions.settled(route.lane)
       const entries = route.entries.splice(0)
       route.bytes = 0
       for (const entry of entries) {
