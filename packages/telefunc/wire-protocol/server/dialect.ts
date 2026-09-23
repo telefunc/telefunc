@@ -1,12 +1,29 @@
 export { serverDialect }
 
-import { serverTypes } from './response/registry.js'
+import { asyncGeneratorReplacer } from './response/async-generator.js'
+import { readableStreamReplacer } from './response/readable-stream.js'
+import { fileDownloadReplacer } from './response/fileDownload.js'
+import { blobDownloadReplacer } from './response/blobDownload.js'
+import { fileReplacer } from './response/file.js'
+import { blobReplacer } from './response/blob.js'
+import { promiseReplacer } from './response/promise.js'
+import { broadcastReplacer } from './response/broadcast.js'
+import { channelReplacer } from './response/channel.js'
+import { functionReplacer } from './response/function.js'
 import { roomReplacer, roomParticipantReplacer, roomRemoteReplacer } from '../room/response-server.js'
 
 const serverDialect = Object.freeze([
-  ...serverTypes.slice(0, 7),
+  asyncGeneratorReplacer,
+  readableStreamReplacer,
+  fileDownloadReplacer,
+  blobDownloadReplacer,
+  fileReplacer,
+  blobReplacer,
+  promiseReplacer,
   roomReplacer,
   roomParticipantReplacer,
   roomRemoteReplacer,
-  ...serverTypes.slice(7),
+  broadcastReplacer,
+  channelReplacer,
+  functionReplacer,
 ])
