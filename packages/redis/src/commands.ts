@@ -1,6 +1,17 @@
 // Every Lua script and the one command table that registers and invokes them.
 
-import { encodeLaneKey, type BroadcastLane, type LaneId } from 'telefunc/__internal'
+import {
+  encodeLaneKey,
+  type BroadcastLane,
+  type CellMutation,
+  type CxResult,
+  type HeadCx,
+  type HeadCxResult,
+  type HeadNext,
+  type LaneId,
+  type RoomHead,
+} from 'telefunc/__internal'
+import { assert } from './assert.js'
 import {
   broadcastChannel,
   broadcastSequenceKey,
@@ -140,8 +151,8 @@ end
 return 1
 `
 
-// Begin refuses the current incarnation and reports whether the generation is still installed.
-//   KEYS: [1]=head [2]=gens
+// Whether the generation is still installed.
+//   KEYS: [1]=gens
 //   ARGV: [1]=inc
 export const DROP_GENERATION_BEGIN_LUA = `
 return redis.call('SISMEMBER', KEYS[1], ARGV[1])
@@ -253,21 +264,18 @@ if ARGV[6] ~= '' then redis.call('PUBLISH', channel_key, string.char(${REDIS_DEL
 return '{"accepted":true,"seq":' .. seq_text .. ',"timestamp":' .. ts_text .. ',"receivers":' .. receivers .. '}'
 `
 
-// Retained deletion optionally fences one lane by its current sequence.
+// Deletes one lane's retained frame, optionally only while it still holds seq ARGV[1].
+//   KEYS: [1]=generation-keys [2]=retained
+//   ARGV: [1]=ifSeq or ''
 export const RETAINED_DELETE_LUA = `
-local if_seq = ARGV[1]
-if if_seq ~= '' then
+if ARGV[1] ~= '' then
   local frame = redis.call('GET', KEYS[2])
   if not frame then return 0 end
   local seq_hi, seq_lo = struct.unpack('>I4I4', frame)
-  if seq_hi * 4294967296 + seq_lo ~= tonumber(if_seq) then return 0 end
+  if seq_hi * 4294967296 + seq_lo ~= tonumber(ARGV[1]) then return 0 end
 end
-local deleted = 0
-for i = 2, #KEYS do
-  deleted = deleted + redis.call('DEL', KEYS[i])
-  redis.call('SREM', KEYS[1], KEYS[i])
-end
-return deleted
+redis.call('SREM', KEYS[1], KEYS[2])
+return redis.call('DEL', KEYS[2])
 `
 
 // Directory records use two co-slotted global keys. Put and compare-delete are each one atomic record,
@@ -285,75 +293,228 @@ redis.call('ZREM', KEYS[1], ARGV[1])
 return 1
 `
 
-// One production-owned inventory drives command registration and key assembly. Tests consume the same
-// descriptors and builders, so a new script or a changed operand cannot silently escape slot/Lua proof.
-function command<const Name extends string, const Keys extends number | null>(
-  name: Name,
-  lua: string,
-  numberOfKeys: Keys,
-) {
-  return { name, lua, numberOfKeys }
+type Invocation = { keys: string[]; argv: Array<string | Buffer> }
+
+/** One script: its KEYS and ARGV for a call, and its reply decoded. `numberOfKeys: null` sends the key count first. */
+export type RedisCommand<Input, Output> = {
+  readonly name: string
+  readonly lua: string
+  readonly numberOfKeys: number | null
+  invoke(prefix: string, input: Input): Invocation
+  parse(reply: unknown): Output
 }
 
-export const REDIS_COMMANDS = {
-  publish: command('tfPublish', PUBLISH_LUA, 2),
-  headCx: command('tfRoomHeadCx', HEAD_CX_LUA, 3),
-  readHead: command('tfRoomReadHead', READ_HEAD_LUA, 1),
-  readCellsFence: command('tfRoomReadCellsFence', READ_CELLS_FENCE_LUA, 2),
-  validateGeneration: command('tfRoomValidateGeneration', VALIDATE_GENERATION_LUA, 2),
-  dropGenerationBegin: command('tfRoomDropGenerationBegin', DROP_GENERATION_BEGIN_LUA, 1),
-  dropGenerationFinalize: command('tfRoomDropGenerationFinalize', DROP_GENERATION_FINALIZE_LUA, null),
-  cellsCx: command('tfRoomCellsCx', CELLS_CX_LUA, null),
-  commit: command('tfRoomCommit', COMMIT_LUA, null),
-  retainedDelete: command('tfRoomRetainedDelete', RETAINED_DELETE_LUA, null),
-  directoryPut: command('tfRoomDirectoryPut', DIRECTORY_PUT_LUA, 2),
-  directoryDelete: command('tfRoomDirectoryDelete', DIRECTORY_DELETE_LUA, 2),
-} as const
+const command = <Input, Output>(spec: RedisCommand<Input, Output>): RedisCommand<Input, Output> => spec
 
-export const REDIS_COMMAND_KEYS = {
-  publish: (prefix: string, lane: BroadcastLane) => [
-    broadcastSequenceKey(prefix, lane.key),
-    broadcastChannel(prefix, lane),
-  ],
-  headCx: (prefix: string, roomId: string) => [
-    headKey(prefix, roomId),
-    gensKey(prefix, roomId),
-    headRevKey(prefix, roomId),
-  ],
-  readHead: (prefix: string, roomId: string) => [headKey(prefix, roomId)],
-  readCellsFence: (prefix: string, roomId: string, inc: string) => [
-    headKey(prefix, roomId),
-    revKey(prefix, roomId, inc),
-  ],
-  validateGeneration: (prefix: string, roomId: string) => [headKey(prefix, roomId), gensKey(prefix, roomId)],
-  dropGenerationBegin: (prefix: string, roomId: string) => [gensKey(prefix, roomId)],
-  dropGenerationFinalize: (prefix: string, roomId: string, inc: string, generationKeys: readonly string[]) => [
-    gensKey(prefix, roomId),
-    generationInvalidationChannel(prefix, roomId, inc),
-    generationKeysKey(prefix, roomId, inc),
-    ...generationKeys,
-  ],
-  cellsCx: (prefix: string, roomId: string, inc: string, cells: readonly string[]) => [
-    headKey(prefix, roomId),
-    revKey(prefix, roomId, inc),
-    generationKeysKey(prefix, roomId, inc),
-    ...cells.map((key) => cellKey(prefix, roomId, inc, key)),
-  ],
-  commit: (prefix: string, roomId: string, inc: string, lane: LaneId, requiredCellKeys: readonly string[] = []) => {
-    const key = encodeLaneKey(lane)
-    return [
-      headKey(prefix, roomId),
-      orderKey(prefix, roomId, inc, key),
-      retainedKey(prefix, roomId, inc, key),
-      channelKey(prefix, roomId, inc, key),
-      generationKeysKey(prefix, roomId, inc),
-      ...requiredCellKeys.map((required) => cellKey(prefix, roomId, inc, required)),
-    ]
-  },
-  retainedDelete: (prefix: string, roomId: string, inc: string, retainedKeys: readonly string[]) => [
-    generationKeysKey(prefix, roomId, inc),
-    ...retainedKeys,
-  ],
-  directoryPut: (prefix: string) => [directoryIndexKey(prefix), directoryTagsKey(prefix)],
-  directoryDelete: (prefix: string) => [directoryIndexKey(prefix), directoryTagsKey(prefix)],
-} as const
+type RoomInc = { roomId: string; inc: string }
+type CommitInput = RoomInc & {
+  lane: LaneId
+  payload: Uint8Array
+  retain: boolean
+  closingLease: string | undefined
+  requiredCellKeys: readonly string[]
+  fenceToken: string
+}
+type CommitReply =
+  | { stale: 'incarnation' }
+  | { stale: 'cell'; index: number }
+  | { accepted: true; seq: number; timestamp: number; receivers: number }
+
+export const REDIS_COMMANDS = {
+  publish: command({
+    name: 'tfPublish',
+    lua: PUBLISH_LUA,
+    numberOfKeys: 2,
+    invoke: (prefix, { lane, payload }: { lane: BroadcastLane; payload: Uint8Array }) => ({
+      keys: [broadcastSequenceKey(prefix, lane.key), broadcastChannel(prefix, lane)],
+      argv: [toBuffer(payload)],
+    }),
+    parse: (reply) => {
+      assert(
+        Array.isArray(reply) && reply.length === 3 && reply.every((value) => typeof value === 'number'),
+        'Publish script returned an unexpected reply',
+      )
+      const [seq, timestamp, receivers] = reply as [number, number, number]
+      return { seq, timestamp, receivers }
+    },
+  }),
+  headCx: command({
+    name: 'tfRoomHeadCx',
+    lua: HEAD_CX_LUA,
+    numberOfKeys: 3,
+    invoke: (prefix, { roomId, cx, next }: { roomId: string; cx: HeadCx; next: HeadNext }) => ({
+      keys: [headKey(prefix, roomId), gensKey(prefix, roomId), headRevKey(prefix, roomId)],
+      argv: [JSON.stringify(cx), encodeNext(next)],
+    }),
+    parse: (reply): HeadCxResult => {
+      const parsed = JSON.parse(reply as string) as
+        | { tag: 'head'; head: StoredHead }
+        | { tag: 'conflict'; current: StoredHead | null }
+      if (parsed.tag === 'head') return { head: toPublicHead(parsed.head) }
+      return { conflict: true, current: parsed.current === null ? null : toPublicHead(parsed.current) }
+    },
+  }),
+  readHead: command({
+    name: 'tfRoomReadHead',
+    lua: READ_HEAD_LUA,
+    numberOfKeys: 1,
+    invoke: (prefix, roomId: string) => ({ keys: [headKey(prefix, roomId)], argv: [] }),
+    parse: (reply): RoomHead | null => {
+      const { head } = JSON.parse(reply as string) as { head: StoredHead | null }
+      return head === null ? null : toPublicHead(head)
+    },
+  }),
+  readCellsFence: command({
+    name: 'tfRoomReadCellsFence',
+    lua: READ_CELLS_FENCE_LUA,
+    numberOfKeys: 2,
+    invoke: (prefix, { roomId, inc }: RoomInc) => ({
+      keys: [headKey(prefix, roomId), revKey(prefix, roomId, inc)],
+      argv: [inc],
+    }),
+    parse: (reply) => JSON.parse(reply as string) as { stale: true } | { revision: string },
+  }),
+  validateGeneration: command({
+    name: 'tfRoomValidateGeneration',
+    lua: VALIDATE_GENERATION_LUA,
+    numberOfKeys: 2,
+    invoke: (prefix, { roomId, inc }: RoomInc) => ({
+      keys: [headKey(prefix, roomId), gensKey(prefix, roomId)],
+      argv: [inc],
+    }),
+    parse: (reply) => reply === 1,
+  }),
+  dropGenerationBegin: command({
+    name: 'tfRoomDropGenerationBegin',
+    lua: DROP_GENERATION_BEGIN_LUA,
+    numberOfKeys: 1,
+    invoke: (prefix, { roomId, inc }: RoomInc) => ({ keys: [gensKey(prefix, roomId)], argv: [inc] }),
+    parse: (reply) => reply === 1,
+  }),
+  dropGenerationFinalize: command({
+    name: 'tfRoomDropGenerationFinalize',
+    lua: DROP_GENERATION_FINALIZE_LUA,
+    numberOfKeys: null,
+    invoke: (prefix, { roomId, inc, generationKeys }: RoomInc & { generationKeys: readonly string[] }) => ({
+      keys: [
+        gensKey(prefix, roomId),
+        generationInvalidationChannel(prefix, roomId, inc),
+        generationKeysKey(prefix, roomId, inc),
+        ...generationKeys,
+      ],
+      argv: [inc],
+    }),
+    parse: () => {},
+  }),
+  cellsCx: command({
+    name: 'tfRoomCellsCx',
+    lua: CELLS_CX_LUA,
+    numberOfKeys: null,
+    invoke: (prefix, input: RoomInc & { revision: string; mutations: readonly CellMutation[] }) => ({
+      keys: [
+        headKey(prefix, input.roomId),
+        revKey(prefix, input.roomId, input.inc),
+        generationKeysKey(prefix, input.roomId, input.inc),
+        ...input.mutations.map(({ key }) => cellKey(prefix, input.roomId, input.inc, key)),
+      ],
+      argv: [
+        input.inc,
+        input.revision,
+        ...input.mutations.flatMap(({ bytes }) => (bytes === null ? ['del', ''] : ['set', toBuffer(bytes)])),
+      ],
+    }),
+    parse: (reply) => reply as CxResult,
+  }),
+  commit: command({
+    name: 'tfRoomCommit',
+    lua: COMMIT_LUA,
+    numberOfKeys: null,
+    invoke: (prefix, input: CommitInput) => {
+      const { roomId, inc } = input
+      const laneKey = encodeLaneKey(input.lane)
+      return {
+        keys: [
+          headKey(prefix, roomId),
+          orderKey(prefix, roomId, inc, laneKey),
+          retainedKey(prefix, roomId, inc, laneKey),
+          channelKey(prefix, roomId, inc, laneKey),
+          generationKeysKey(prefix, roomId, inc),
+          ...input.requiredCellKeys.map((required) => cellKey(prefix, roomId, inc, required)),
+        ],
+        argv: [
+          inc,
+          input.lane.kind,
+          input.closingLease ?? '',
+          input.retain ? '1' : '0',
+          toBuffer(input.payload),
+          input.fenceToken,
+        ],
+      }
+    },
+    parse: (reply) => JSON.parse(reply as string) as CommitReply,
+  }),
+  retainedDelete: command({
+    name: 'tfRoomRetainedDelete',
+    lua: RETAINED_DELETE_LUA,
+    numberOfKeys: 2,
+    invoke: (prefix, { roomId, inc, lane, ifSeq }: RoomInc & { lane: LaneId; ifSeq: number | undefined }) => ({
+      keys: [generationKeysKey(prefix, roomId, inc), retainedKey(prefix, roomId, inc, encodeLaneKey(lane))],
+      argv: [ifSeq === undefined ? '' : String(ifSeq)],
+    }),
+    parse: () => {},
+  }),
+  directoryPut: command({
+    name: 'tfRoomDirectoryPut',
+    lua: DIRECTORY_PUT_LUA,
+    numberOfKeys: 2,
+    invoke: (prefix, { roomId, incTag }: { roomId: string; incTag: string }) => ({
+      keys: [directoryIndexKey(prefix), directoryTagsKey(prefix)],
+      argv: [roomId, incTag],
+    }),
+    parse: () => {},
+  }),
+  directoryDelete: command({
+    name: 'tfRoomDirectoryDelete',
+    lua: DIRECTORY_DELETE_LUA,
+    numberOfKeys: 2,
+    invoke: (prefix, { roomId, incTag }: { roomId: string; incTag: string }) => ({
+      keys: [directoryIndexKey(prefix), directoryTagsKey(prefix)],
+      argv: [roomId, incTag],
+    }),
+    parse: () => {},
+  }),
+}
+
+/** A head as the scripts store it: JSON, config base64, lease deadline minted from Redis TIME. */
+type StoredHead = {
+  rev: string
+  state: 'open' | 'closing' | 'closed'
+  config: string
+  inc?: string
+  lease?: { id: string; until: number }
+  exp?: number
+}
+
+function toPublicHead(stored: StoredHead): RoomHead {
+  const head: RoomHead = {
+    rev: stored.rev,
+    currentInc: stored.inc ?? null,
+    state: stored.state,
+    config: Uint8Array.from(Buffer.from(stored.config, 'base64')),
+  }
+  if (stored.lease !== undefined) head.closeLease = { id: stored.lease.id, until: stored.lease.until }
+  return head
+}
+
+function encodeNext(next: HeadNext): string {
+  const { head, ttlMs } = next
+  const payload: Record<string, unknown> = { state: head.state, config: toBuffer(head.config).toString('base64') }
+  if (head.currentInc !== null) payload.inc = head.currentInc
+  if (head.closeLease !== undefined) payload.lease = { id: head.closeLease.id, durationMs: head.closeLease.durationMs }
+  if (ttlMs !== undefined) payload.ttlMs = ttlMs
+  return JSON.stringify(payload)
+}
+
+function toBuffer(bytes: Uint8Array): Buffer {
+  return Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+}
