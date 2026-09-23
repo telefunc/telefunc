@@ -222,7 +222,7 @@ describe('Room public behavior', () => {
     const current = (await driver.readHead(room.id))!.head
     const leased = await driver.compareExchangeHead(
       room.id,
-      { expect: { rev: current.rev } },
+      { form: 'rev', rev: current.rev },
       {
         head: {
           currentInc: current.currentInc,
@@ -268,7 +268,7 @@ describe('Room public behavior', () => {
     const current = (await driver.readHead(room.id))!.head
     await driver.compareExchangeHead(
       room.id,
-      { expect: { rev: current.rev } },
+      { form: 'rev', rev: current.rev },
       {
         head: {
           currentInc: current.currentInc,
@@ -2438,7 +2438,7 @@ describe('room binary protocol validation', () => {
     const backend = getRoomBackend()
     const created = await backend.compareExchangeHead(
       'spi',
-      { expect: 'absent' },
+      { form: 'absent' },
       { head: { state: 'open', currentInc: 'inc-1', config: encoder.encode('config') } },
     )
     if (!('ok' in created) || !('head' in created)) throw new Error('head create failed')
@@ -2483,7 +2483,7 @@ describe('room binary protocol validation', () => {
     expect(subscription.state()).toBe('ready')
     const closing = await backend.compareExchangeHead(
       'spi',
-      { expect: { rev: created.head.rev } },
+      { form: 'rev', rev: created.head.rev },
       {
         head: {
           state: 'closing',
@@ -2498,13 +2498,13 @@ describe('room binary protocol validation', () => {
     }
     const closed = await backend.compareExchangeHead(
       'spi',
-      { expect: { rev: closing.head.rev, closingLease: closing.head.closeLease.id } },
+      { form: 'finalize', rev: closing.head.rev, lease: closing.head.closeLease.id },
       { head: { state: 'closed', currentInc: null, config: closing.head.config }, ttlMs: 60_000 },
     )
     if (!('ok' in closed) || !('head' in closed)) throw new Error('head finalize failed')
     const reopened = await backend.compareExchangeHead(
       'spi',
-      { expect: { rev: closed.head.rev } },
+      { form: 'rev', rev: closed.head.rev },
       { head: { state: 'open', currentInc: 'inc-2', config: closed.head.config } },
     )
     expect(reopened).toMatchObject({ ok: true, head: { state: 'open', currentInc: 'inc-2' } })
@@ -2529,7 +2529,7 @@ describe('room binary protocol validation', () => {
     const backend = getRoomBackend()
     const created = await backend.compareExchangeHead(
       'order-survivor',
-      { expect: 'absent' },
+      { form: 'absent' },
       { head: { state: 'open', currentInc: 'inc-1', config: encoder.encode('config') } },
     )
     if (!('ok' in created) || !('head' in created)) throw new Error('head create failed')
@@ -2565,7 +2565,7 @@ describe('room binary protocol validation', () => {
     const backend = getRoomBackend()
     const opened = await backend.compareExchangeHead(
       'head-shape',
-      { expect: 'absent' },
+      { form: 'absent' },
       { head: { state: 'open', currentInc: 'inc-1', config: encoder.encode('config') } },
     )
     if (!('ok' in opened) || !('head' in opened)) throw new Error('head create failed')
@@ -2574,7 +2574,7 @@ describe('room binary protocol validation', () => {
       await expect(
         backend.compareExchangeHead(
           'head-shape',
-          { expect: { rev: opened.head.rev } },
+          { form: 'rev', rev: opened.head.rev },
           {
             head: {
               state: 'closing',

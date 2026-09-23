@@ -669,7 +669,7 @@ async function open(
 ): Promise<RoomHead> {
   const result = await backend.compareExchangeHead(
     roomId,
-    tombstoneRev === undefined ? { expect: 'absent' } : { expect: { rev: tombstoneRev } },
+    tombstoneRev === undefined ? { form: 'absent' } : { form: 'rev', rev: tombstoneRev },
     { head: { currentInc: inc, state: 'open', config: bytes('redis-cluster-ci') } },
   )
   if (!('ok' in result) || !('head' in result)) throw new Error(`failed to open '${roomId}'`)
@@ -683,7 +683,7 @@ async function close(
   const leaseId = `lease-${Date.now().toString(36)}`
   const closing = await backend.compareExchangeHead(
     roomId,
-    { expect: { rev: head.rev } },
+    { form: 'rev', rev: head.rev },
     {
       head: {
         currentInc: head.currentInc,
@@ -696,7 +696,7 @@ async function close(
   if (!('ok' in closing) || !('head' in closing)) throw new Error(`failed to enter closing for '${roomId}'`)
   const closed = await backend.compareExchangeHead(
     roomId,
-    { expect: { rev: closing.head.rev, closingLease: leaseId } },
+    { form: 'finalize', rev: closing.head.rev, lease: leaseId },
     { head: { currentInc: null, state: 'closed', config: closing.head.config }, ttlMs: 60_000 },
   )
   if (!('ok' in closed) || !('head' in closed)) throw new Error(`failed to finalize close for '${roomId}'`)

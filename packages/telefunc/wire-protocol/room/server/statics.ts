@@ -159,7 +159,7 @@ async function tryCreateRoom(id: string, options: RoomOptions | undefined): Prom
   }
   const result = await backend.compareExchangeHead(
     id,
-    current === null ? { expect: 'absent' } : { expect: { rev: current.head.rev } },
+    current === null ? { form: 'absent' } : { form: 'rev', rev: current.head.rev },
     { head: { currentInc: created.inc, state: 'open', config: encodeRoomConfig(created) } },
   )
   if ('conflict' in result) {
@@ -285,7 +285,7 @@ async function writeRoomConfig(
     const next = { meta: computeMeta(currentConfig.meta), at: Math.max(Date.now(), currentConfig.at + 1), by }
     const result = await backend.compareExchangeHead(
       id,
-      { expect: { rev: current.head.rev } },
+      { form: 'rev', rev: current.head.rev },
       { head: { currentInc: config.inc, state: 'open', config: encodeRoomConfig({ ...next, inc: config.inc }) } },
     )
     return 'conflict' in result ? CX_CONFLICT : next
@@ -314,9 +314,7 @@ async function acquireClosingLease(backend: RoomBackend, roomId: string, current
   const closeLease = { id: crypto.randomUUID(), durationMs: ROOM_CLOSE_LEASE_MS }
   const result = await backend.compareExchangeHead(
     roomId,
-    current.state === 'open'
-      ? { expect: { rev: current.rev } }
-      : { expect: { rev: current.rev, closingLeaseExpired: true } },
+    current.state === 'open' ? { form: 'rev', rev: current.rev } : { form: 'takeover', rev: current.rev },
     {
       head: {
         currentInc: current.currentInc,
@@ -345,7 +343,7 @@ async function finishClose(backend: RoomBackend, roomId: string, closing: RoomHe
   if ('stale' in closedEvent) return false
   const finalized = await backend.compareExchangeHead(
     roomId,
-    { expect: { rev: closing.rev, closingLease: lease.id } },
+    { form: 'finalize', rev: closing.rev, lease: lease.id },
     {
       head: { currentInc: null, state: 'closed', config: closing.config },
       ttlMs: ROOM_TOMBSTONE_TTL_MS,

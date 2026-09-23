@@ -120,7 +120,7 @@ end
 
 // HEAD CX compares by form, then stores; core decides every transition and the supervisor checks its shape.
 //   KEYS: [1]=head [2]=gens [3]=headrev
-//   ARGV: [1]=cxJson{form,rev?,closingLease?} [2]=nextJson{state,inc?,config,lease?,ttlMs?}
+//   ARGV: [1]=HeadCx JSON {form,rev?,lease?} [2]=nextJson{state,inc?,config,lease?,ttlMs?}
 export const HEAD_CX_LUA = `${NOW_FN}
 local head_key, gens_key, rev_key = KEYS[1], KEYS[2], KEYS[3]
 local now = tf_now()
@@ -135,7 +135,7 @@ elseif cur ~= nil and cur.rev == cx.rev then
   if cx.form == 'takeover' then
     matches = (cur.state == 'closing' and cur.lease ~= nil and cur.lease['until'] < now)
   elseif cx.form == 'finalize' then
-    matches = (cur.state == 'closing' and cur.lease ~= nil and cur.lease.id == cx.closingLease)
+    matches = (cur.state == 'closing' and cur.lease ~= nil and cur.lease.id == cx.lease)
   else
     matches = true
   end

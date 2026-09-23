@@ -234,7 +234,7 @@ async function nativeRpcRoundTrip(env: Env, suffix: string) {
   const config = new Uint8Array([0x11, 0x22, 0x33])
   const opened = expectHead(
     await probe.authority.compareExchangeHead(
-      { expect: 'absent' },
+      { form: 'absent' },
       { head: { currentInc: probe.inc, state: 'open', config } },
     ),
     'native RPC open',
@@ -259,7 +259,7 @@ async function nativeRpcRoundTrip(env: Env, suffix: string) {
 async function openHead(authority: Authority, inc: string, operation: string): Promise<RoomHead> {
   return expectHead(
     await authority.compareExchangeHead(
-      { expect: 'absent' },
+      { form: 'absent' },
       { head: { currentInc: inc, state: 'open', config: textEncoder.encode('{}') } },
     ),
     operation,

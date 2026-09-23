@@ -8,13 +8,16 @@ import type { HeadCx, LaneId, RoomHead } from './contract.js'
 type OrderMark = { seq: number; timestamp: number }
 
 function headCxMatches(cx: HeadCx, current: RoomHead | null, now: number): boolean {
-  if (cx.expect === 'absent') return current === null
-  if (current === null || current.rev !== cx.expect.rev) return false
-  const expect = cx.expect
-  if ('closingLeaseExpired' in expect)
-    return current.state === 'closing' && current.closeLease !== undefined && current.closeLease.until < now
-  if ('closingLease' in expect) return current.state === 'closing' && current.closeLease?.id === expect.closingLease
-  return true
+  if (cx.form === 'absent') return current === null
+  if (current === null || current.rev !== cx.rev) return false
+  switch (cx.form) {
+    case 'rev':
+      return true
+    case 'takeover':
+      return current.state === 'closing' && current.closeLease !== undefined && current.closeLease.until < now
+    case 'finalize':
+      return current.state === 'closing' && current.closeLease?.id === cx.lease
+  }
 }
 
 /** A lane commit needs its incarnation open; only the close's own control commit lands while it is closing. */

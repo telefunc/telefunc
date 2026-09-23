@@ -94,14 +94,6 @@ function toPublicHead(stored: StoredHead): RoomHead {
   if (stored.lease !== undefined) head.closeLease = { id: stored.lease.id, until: stored.lease.until }
   return head
 }
-function encodeCx(cx: HeadCx): string {
-  if (cx.expect === 'absent') return JSON.stringify({ form: 'absent' })
-  const expect = cx.expect
-  if ('closingLeaseExpired' in expect) return JSON.stringify({ form: 'takeover', rev: expect.rev })
-  if ('closingLease' in expect)
-    return JSON.stringify({ form: 'finalize', rev: expect.rev, closingLease: expect.closingLease })
-  return JSON.stringify({ form: 'generic', rev: expect.rev })
-}
 function encodeNext(next: HeadNext): string {
   const { head, ttlMs } = next
   const payload: Record<string, unknown> = { state: head.state, config: toBase64(head.config) }
@@ -172,7 +164,7 @@ export class RedisBackend implements BroadcastDriver, RoomDriver {
     this._assertLive()
     const reply = (await this._call(REDIS_ROOM_COMMANDS.headCx.name, [
       ...REDIS_ROOM_COMMAND_KEYS.headCx(this._prefix, roomId),
-      encodeCx(cx),
+      JSON.stringify(cx),
       encodeNext(next),
     ])) as string
     const parsed = JSON.parse(reply) as HeadCxReply

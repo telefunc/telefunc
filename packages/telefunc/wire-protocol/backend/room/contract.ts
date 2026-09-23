@@ -35,10 +35,12 @@ type RoomHead = {
 
 /** Drivers compare-exchange; core is the only writer and decides every transition. */
 type HeadCx =
-  | { expect: 'absent' }
-  | { expect: { rev: string } }
-  | { expect: { rev: string; closingLeaseExpired: true } }
-  | { expect: { rev: string; closingLease: string } }
+  | { form: 'absent' }
+  | { form: 'rev'; rev: string }
+  /** At `rev`, closing, and the close lease has lapsed. */
+  | { form: 'takeover'; rev: string }
+  /** At `rev`, closing under `lease`. */
+  | { form: 'finalize'; rev: string; lease: string }
 
 type HeadNext = {
   head: Omit<RoomHead, 'rev' | 'closeLease'> & { closeLease?: { id: string; durationMs: number } }
