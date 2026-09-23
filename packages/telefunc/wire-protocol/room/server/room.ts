@@ -36,6 +36,7 @@ import {
   mergeAttributes,
   normalizeJoinOptions,
   ownMetaArgument,
+  ownMetadata,
   recipientId,
   senderOf,
 } from '../model.js'
@@ -728,7 +729,13 @@ class ServerRoom extends RoomStateView implements Room {
     }
   }
   private async _joinStubMember(stub: RoomStubChannel, req: Extract<RoomRequest, { __r: 'req-join' }>) {
-    const admission = { id: crypto.randomUUID(), meta: req.meta, identity: null, joinedAt: Date.now(), hidden: false }
+    const admission = {
+      id: crypto.randomUUID(),
+      meta: ownMetadata(req.meta),
+      identity: null,
+      joinedAt: Date.now(),
+      hidden: false,
+    }
     await this._admit(admission, () => stub._addMember(admission.id, req.selfDelivery))
     return { id: admission.id, joinedAt: admission.joinedAt }
   }

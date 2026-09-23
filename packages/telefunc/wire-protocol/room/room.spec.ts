@@ -1132,6 +1132,15 @@ describe('Room public behavior', () => {
     ] as const
     for (const [channel, frame] of frames) expect(() => channel._dispatchFrame(frame)).toThrow(ProtocolViolationError)
   })
+  it("hands a client join's guard a frozen meta, as a server join does", async () => {
+    const room = (await Room.create('stub-join-guard')) as ServerRoom
+    const frozen: boolean[] = []
+    Room.guard(room, { onBeforeJoin: ({ meta }) => void frozen.push(Object.isFrozen(meta)) })
+    const { stub } = serve(room)
+    await room._handleStubRequest(stub, { __r: 'req-join', meta: { name: 'a' }, selfDelivery: true })
+    await room.join({ meta: { name: 'b' } })
+    expect(frozen).toEqual([true, true])
+  })
   it('hands send guards a detached sender snapshot for both ends', async () => {
     const room = await Room.create('guard-snapshots')
     const seen: Sender[] = []
