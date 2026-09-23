@@ -9,7 +9,7 @@ import { disposeBackend, installBackend } from '../backend/install.js'
 import { MemoryBackend, MemoryBackendState } from '../backend/memory/backend.js'
 import type { SubscriptionAttempt, SubscriptionAttemptState } from '../backend/subscription.js'
 import { ChannelClosedError, ChannelOverflowError } from '../channel-errors.js'
-import { CHANNEL_BUFFER_LIMIT_BYTES } from '../constants.js'
+import { CHANNEL_BUFFER_LIMIT_BINARY_BYTES } from '../constants.js'
 import { Abort } from '../../shared/Abort.js'
 
 let memoryState: MemoryBackendState
@@ -278,12 +278,12 @@ describe('binary in-process broadcast', () => {
     expect(publish).toHaveBeenCalledOnce()
   })
 
-  it('caps payload bytes held while a subscription is establishing', async () => {
+  it('caps binary payload bytes held while a subscription is establishing at the binary buffer limit', async () => {
     const { controlled: pending, publish } = await installPendingSubscriptionBackend({ seq: 1, timestamp: 1 })
     const receiver = new ServerBroadcast({ key: 'broadcast:bounded-ready' })
     const sender = new ServerBroadcast({ key: 'broadcast:bounded-ready' })
     receiver.subscribeBinary(() => {})
-    const payload = new Uint8Array(CHANNEL_BUFFER_LIMIT_BYTES)
+    const payload = new Uint8Array(CHANNEL_BUFFER_LIMIT_BINARY_BYTES)
     payload[0] = 7
     const first = sender.publishBinary(payload)
     payload[0] = 9
