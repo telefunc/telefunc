@@ -13,6 +13,7 @@ export const SERIALIZER_PREFIX_BROADCAST = '!TelefuncBroadcast:'
 export const SERIALIZER_PREFIX_ROOM = '!TelefuncRoom:'
 export const SERIALIZER_PREFIX_ROOM_PARTICIPANT = '!TelefuncRoomParticipant:'
 export const SERIALIZER_PREFIX_ROOM_REMOTE = '!TelefuncRoomRemoteParticipant:'
+
 /** Marker key used on the ack payload of a server-returned function when its arg shield
  *  rejects the incoming args. The client-side reviver detects this and throws on the
  *  caller's side — keeps the channel oblivious to shield semantics. */
@@ -34,6 +35,7 @@ export const STREAMING_ERROR_TYPE = {
   ABORT: 'abort',
   BUG: 'bug',
 } as const
+
 /** Streaming error frame payload: abort with value. */
 export type StreamingErrorFrameAbort = {
   type: typeof STREAMING_ERROR_TYPE.ABORT
@@ -177,6 +179,7 @@ export const CHANNEL_CLIENT_REPLAY_BUFFER_BINARY_BYTES = 2 * 1024 * 1024
 export const CHANNEL_BUFFER_LIMIT_BYTES = 512 * 1024
 /** Maximum bytes buffered per channel for binary messages sent before a peer connects. */
 export const CHANNEL_BUFFER_LIMIT_BINARY_BYTES = 2 * 1024 * 1024
+
 /** How long a channel waits for a peer to connect after the server→client
  *  HTTP response carrying `channel.client` has been serialized. */
 export const CHANNEL_CONNECT_TTL_MS = 5_000

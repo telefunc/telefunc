@@ -50,9 +50,7 @@ function telefunc<Req extends NodeRequest = NodeRequest, Res extends ServerRespo
   Req,
   Res
 > {
-  const ws = crossws({
-    hooks: getTelefuncChannelHooks(),
-  })
+  const ws = crossws({ hooks: getTelefuncChannelHooks() })
 
   function installWebSocket(server: HttpServerOrWrapper): void {
     enableChannelTransports([CHANNEL_TRANSPORT.WS])

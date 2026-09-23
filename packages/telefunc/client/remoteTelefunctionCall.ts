@@ -71,13 +71,10 @@ function remoteTelefunctionCall(
   const abortController = createAbortController(callClientContext?.signal)
   objectAssign(callContext, { abortController })
 
-  const startCall = () => {
-    const { httpRequestBody, requestCloseHandlers } = serializeTelefunctionArguments(callContext)
-    objectAssign(callContext, { httpRequestBody, requestCloseHandlers })
-    return makeHttpRequest(callContext)
-  }
+  const { httpRequestBody, requestCloseHandlers } = serializeTelefunctionArguments(callContext)
+  objectAssign(callContext, { httpRequestBody, requestCloseHandlers })
 
-  const telefunctionReturnPromise = startCall()
+  const telefunctionReturnPromise = makeHttpRequest(callContext)
 
   setAbortController(telefunctionReturnPromise, abortController)
   addAsyncGeneratorInterface(telefunctionReturnPromise, abortController)
