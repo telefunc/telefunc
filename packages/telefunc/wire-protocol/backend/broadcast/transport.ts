@@ -6,6 +6,7 @@ import type { BroadcastDriver, BroadcastLane, PublishResult } from './contract.j
 import type { BackendReceiver, SubscriptionAttempt, SubscriptionBinding } from '../subscription.js'
 import { assertUsage } from '../../../utils/assert.js'
 import { isPromise } from '../../../utils/isPromise.js'
+import { DriverAttempt } from '../attempt.js'
 
 /** `seq`: positive safe integer, one order per key across both kinds; `timestamp`: non-negative safe integer. */
 type BroadcastTransport = {
@@ -66,21 +67,22 @@ function open(transport: BroadcastTransport, lane: BroadcastLane, receiver: Back
     lane.kind === 'text'
       ? transport.listen(lane.key, (payload, info) => receiver(textEncoder.encode(payload), checkMark(info)))
       : transport.listenBinary(lane.key, (payload, info) => receiver(payload, checkMark(info)))
-  let closed = false
-  const listeners = new Set<(state: 'ready' | 'closed') => void>()
-  return {
-    ready: Promise.resolve(),
-    state: () => (closed ? 'closed' : 'ready'),
-    onStateChange: (listener) => {
-      listeners.add(listener)
-      return () => listeners.delete(listener)
-    },
-    unsubscribe: async () => {
-      if (closed) return
-      closed = true
-      stop()
-      for (const listener of listeners) listener('closed')
-      listeners.clear()
-    },
+  return new TransportAttempt(stop)
+}
+
+/** Ready at once: a user transport's listen() has no establishment to wait for. */
+class TransportAttempt extends DriverAttempt {
+  readonly #stop: () => void
+
+  constructor(stop: () => void) {
+    super()
+    this.#stop = stop
+    this.transition('ready')
+  }
+
+  async unsubscribe(): Promise<void> {
+    if (this.ended) return
+    this.#stop()
+    this.transition('closed')
   }
 }

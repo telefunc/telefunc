@@ -6,7 +6,9 @@ import { KNOWN_BROADCAST_BUCKETS, getBucketCoordinatorShardIndices, getDetermini
 import { assert } from '../../../../utils/assert.js'
 import type { BroadcastLane, PublishResult } from '../../../backend/broadcast/contract.js'
 import { broadcastRouteKey } from '../../../backend/broadcast/route-key.js'
-import type { BackendReceiver, SubscriptionAttempt, SubscriptionState } from '../../../backend/subscription.js'
+import type { BackendReceiver } from '../../../backend/subscription.js'
+import { DriverAttempt } from '../../../backend/attempt.js'
+import { createDeferred } from '../../../../utils/createDeferred.js'
 import type { OrderingInfo } from '../../../ordering-frame.js'
 import type { CloudflareScale, LocationBucket } from './routing.js'
 
@@ -60,28 +62,29 @@ class MemberBucketState {
   state: 'establishing' | 'ready' | 'lost' = 'establishing'
   teardownRequested = false
   refreshTimer: ReturnType<typeof setInterval> | null = null
-  readonly ready: Promise<void>
-  private settleReady!: { resolve: () => void; reject: (error: unknown) => void }
   readonly authority: TelefuncDurableObjectStub
+  readonly #setup = createDeferred()
   readonly #presenceListeners = new Set<(state: 'ready' | 'lost') => void>()
 
   constructor(authority: TelefuncDurableObjectStub) {
     this.authority = authority
-    this.ready = new Promise((resolve, reject) => {
-      this.settleReady = { resolve, reject }
-    })
-    void this.ready.catch(() => {})
+    void this.#setup.promise.catch(() => {})
+  }
+
+  /** Settles with the first presence write. */
+  get ready(): Promise<void> {
+    return this.#setup.promise
   }
 
   acknowledgePresence(): void {
     const recovered = this.state === 'lost'
     this.state = 'ready'
-    this.settleReady.resolve()
+    this.#setup.resolve()
     if (recovered) this.#notifyPresenceState('ready')
   }
 
   rejectPresence(error: unknown): void {
-    this.settleReady.reject(error)
+    this.#setup.reject(error)
   }
 
   losePresence(): void {
@@ -107,45 +110,29 @@ class MemberBucketState {
   }
 }
 
-class CloudflareBroadcastSubscriptionAttempt implements SubscriptionAttempt {
-  readonly ready: Promise<void>
+/** Follows its lane's presence: ready once presence is written, lost while a refresh fails. */
+class CloudflareBroadcastSubscriptionAttempt extends DriverAttempt {
   readonly #receiver: BackendReceiver
   readonly #detach: () => Promise<void>
-  readonly #listeners = new Set<(state: SubscriptionState) => void>()
   readonly #stopPresenceObservation: () => void
-  #state: SubscriptionState = 'establishing'
   #unsubscribed = false
 
   constructor(member: MemberBucketState, receiver: BackendReceiver, detach: () => Promise<void>) {
+    super()
     this.#receiver = receiver
     this.#detach = detach
-    this.#stopPresenceObservation = member.onPresenceStateChange((state) => {
-      if (!this.#unsubscribed && this.#state !== 'closed') this.#transition(state)
-    })
-    this.ready = member.ready.then(
-      () => {
-        if (this.#state !== 'closed') this.#transition('ready')
-      },
-      (error) => {
+    this.#stopPresenceObservation = member.onPresenceStateChange((state) => this.transition(state))
+    member.ready.then(
+      () => this.transition('ready'),
+      (error: unknown) => {
         this.#stopPresenceObservation()
-        this.#transition('closed')
-        throw error
+        this.transition('closed', error)
       },
     )
-    void this.ready.catch(() => {})
-  }
-
-  state(): SubscriptionState {
-    return this.#state
-  }
-
-  onStateChange(cb: (state: SubscriptionState) => void): () => void {
-    this.#listeners.add(cb)
-    return () => this.#listeners.delete(cb)
   }
 
   async deliver(payload: Uint8Array, info: OrderingInfo): Promise<void> {
-    if (this.#state !== 'ready') return
+    if (this.state() !== 'ready') return
     await this.#receiver(payload, info)
   }
 
@@ -153,14 +140,8 @@ class CloudflareBroadcastSubscriptionAttempt implements SubscriptionAttempt {
     if (this.#unsubscribed) return
     this.#unsubscribed = true
     this.#stopPresenceObservation()
-    this.#transition('closed')
+    this.transition('closed')
     await this.#detach()
-  }
-
-  #transition(state: SubscriptionState): void {
-    if (this.#state === state) return
-    this.#state = state
-    for (const listener of [...this.#listeners]) listener(state)
   }
 }
 

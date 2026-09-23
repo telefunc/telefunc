@@ -17,12 +17,8 @@ import type {
 import { encodeLaneKey } from '../room/lane-key.js'
 import { commitPreconditionHolds, headCxMatches, nextOrderMark, type OrderMark } from '../room/semantics.js'
 import { unrefTimer } from '../../../utils/unrefTimer.js'
-import type {
-  BackendReceiver,
-  SubscriptionAttempt,
-  SubscriptionAttemptState,
-  SubscriptionDriver,
-} from '../subscription.js'
+import type { BackendReceiver, SubscriptionDriver } from '../subscription.js'
+import { DriverAttempt } from '../attempt.js'
 
 export type MemoryBackendOptions = {
   // Tests inject authority time to prove expiry independently of caller clock skew.
@@ -84,53 +80,30 @@ function publicHead(head: StoredHead): RoomHead {
   }
 }
 
-class MemorySubscriptionAttempt implements SubscriptionAttempt {
-  readonly ready: Promise<void>
-  #state: SubscriptionAttemptState = 'establishing'
-  #settle!: { resolve: () => void; reject: (err: unknown) => void }
-  readonly #listeners = new Set<(state: SubscriptionAttemptState) => void>()
+class MemorySubscriptionAttempt extends DriverAttempt {
   readonly #receiver: BackendReceiver
   readonly #localReceiverCount: () => number
   readonly #detach?: () => void
 
   constructor(receiver: BackendReceiver, localReceiverCount: () => number, detach?: () => void) {
+    super()
     this.#receiver = receiver
     this.#localReceiverCount = localReceiverCount
     this.#detach = detach
-    this.ready = new Promise<void>((resolve, reject) => {
-      this.#settle = { resolve, reject }
-    })
-    // Observe fail-closed rejection without swallowing it from callers.
-    void this.ready.catch(noop)
-  }
-
-  get closed(): boolean {
-    return this.#state === 'closed'
-  }
-
-  state(): SubscriptionAttemptState {
-    return this.#state
-  }
-
-  onStateChange(cb: (state: SubscriptionAttemptState) => void): () => void {
-    this.#listeners.add(cb)
-    return () => this.#listeners.delete(cb)
   }
 
   async unsubscribe(): Promise<void> {
-    if (this.closed) return
+    if (this.ended) return
     this.#detach?.()
-    this.#transition('closed')
+    this.transition('closed')
   }
 
   establish(): void {
-    this.#transition('ready')
-    this.#settle.resolve()
+    this.transition('ready')
   }
 
   failEstablishment(reason: string): void {
-    this.#transition('closed')
-    this.#settle.reject(new Error(reason))
+    this.transition('closed', new Error(reason))
   }
 
   async deliver(payload: Uint8Array, info: { seq: number; timestamp: number }): Promise<void> {
@@ -139,13 +112,7 @@ class MemorySubscriptionAttempt implements SubscriptionAttempt {
   }
 
   receiverCount(): number {
-    return this.closed ? 0 : this.#localReceiverCount()
-  }
-
-  #transition(state: SubscriptionAttemptState): void {
-    if (this.#state === state) return
-    this.#state = state
-    for (const cb of this.#listeners) cb(state)
+    return this.ended ? 0 : this.#localReceiverCount()
   }
 }
 
@@ -304,7 +271,7 @@ export class MemoryBackend implements BroadcastDriver, RoomDriver {
     const previous = gen.chains.get(key) ?? Promise.resolve()
     const attempt = previous.then(() =>
       Promise.all(
-        targets.map((target) => (target.closed ? undefined : target.deliver(copyBytes(frame), { ...info }))),
+        targets.map((target) => (target.ended ? undefined : target.deliver(copyBytes(frame), { ...info }))),
       ).then(noop),
     )
     gen.chains.set(key, attempt.then(noop, noop))

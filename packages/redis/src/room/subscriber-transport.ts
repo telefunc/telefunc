@@ -3,12 +3,12 @@ import type {
   BackendReceiver,
   BroadcastLane,
   RoomSubscriptionSource,
+  Deferred,
   SubscriptionAttempt,
-  SubscriptionAttemptState,
   SubscriptionBinding,
   SubscriptionDriver,
 } from 'telefunc/__internal'
-import { decodeOrderingFrame, encodeLaneKey } from 'telefunc/__internal'
+import { DriverAttempt, createDeferred, decodeOrderingFrame, encodeLaneKey } from 'telefunc/__internal'
 import { broadcastChannel, channelKey, generationInvalidationChannel, REDIS_DELIVERY_FENCE_BYTE } from './layout.js'
 import type { SubscriberSocket } from '../ioredis.js'
 type RedisSubscriptionSource = BroadcastLane | RoomSubscriptionSource
@@ -212,12 +212,8 @@ export class RedisSubscriptionDriver implements SubscriptionDriver<RedisSubscrip
   }
 }
 
-class RedisSubscriptionAttempt implements SubscriptionAttempt {
-  readonly ready: Promise<void>
-  private readonly _listeners = new Set<(state: SubscriptionAttemptState) => void>()
-  private readonly _flushes = new Map<string, { resolve(): void; reject(error: unknown): void }>()
-  private _settle!: { resolve: () => void; reject: (error: unknown) => void }
-  private _state: SubscriptionAttemptState = 'establishing'
+class RedisSubscriptionAttempt extends DriverAttempt {
+  private readonly _flushes = new Map<string, Deferred<void>>()
   private _lastSequence = 0
   private _cleanup: Promise<void> | null = null
 
@@ -228,19 +224,7 @@ class RedisSubscriptionAttempt implements SubscriptionAttempt {
     private readonly _localReceiverCount: () => number,
     private readonly _onDetach: () => void,
   ) {
-    this.ready = new Promise<void>((resolve, reject) => {
-      this._settle = { resolve, reject }
-    })
-    void this.ready.catch(() => {})
-  }
-
-  state(): SubscriptionAttemptState {
-    return this._state
-  }
-
-  onStateChange(listener: (state: SubscriptionAttemptState) => void): () => void {
-    this._listeners.add(listener)
-    return () => this._listeners.delete(listener)
+    super()
   }
 
   unsubscribe(): Promise<void> {
@@ -249,8 +233,10 @@ class RedisSubscriptionAttempt implements SubscriptionAttempt {
   }
 
   prepareFlush(token: string): Promise<void> | null {
-    if (this._localReceiverCount() === 0 || this._state !== 'ready') return null
-    return new Promise<void>((resolve, reject) => this._flushes.set(token, { resolve, reject }))
+    if (this._localReceiverCount() === 0 || this.state() !== 'ready') return null
+    const flush = createDeferred()
+    this._flushes.set(token, flush)
+    return flush.promise
   }
 
   cancelFlush(token: string): void {
@@ -261,7 +247,7 @@ class RedisSubscriptionAttempt implements SubscriptionAttempt {
   }
 
   awaitsConfirmation(): boolean {
-    return this._state === 'establishing' || this._state === 'lost'
+    return this.state() === 'establishing' || this.state() === 'lost'
   }
 
   /** Its channels are subscribed on a live connection: ready, unless its incarnation is no longer open. */
@@ -277,14 +263,13 @@ class RedisSubscriptionAttempt implements SubscriptionAttempt {
     if (!isCurrent() || !this.awaitsConfirmation()) return
     // Frames published while lost are gone; a Redis restarted without its data may restart the sequence.
     this._lastSequence = 0
-    this._resolveReady()
-    this._transition('ready')
+    this.transition('ready')
   }
 
   lose(error: unknown): void {
-    if (this._state !== 'ready') return
+    if (this.state() !== 'ready') return
     this._rejectFlushes(error)
-    this._transition('lost')
+    this.transition('lost')
   }
 
   receive(channel: string, frame: Buffer): void {
@@ -292,7 +277,7 @@ class RedisSubscriptionAttempt implements SubscriptionAttempt {
       this._terminate(new Error('Redis generation subscription was invalidated'))
       return
     }
-    if (this._state !== 'ready') return
+    if (this.state() !== 'ready') return
     if (frame[0] === REDIS_DELIVERY_FENCE_BYTE) {
       const token = frame.subarray(1).toString()
       const flush = this._flushes.get(token)
@@ -313,37 +298,19 @@ class RedisSubscriptionAttempt implements SubscriptionAttempt {
 
   private async _dispose(): Promise<void> {
     this._rejectFlushes(new Error('Redis delivery fence was closed'))
-    if (this._state !== 'terminated') {
-      this._transition('closed')
-      this._rejectReady(new Error(`Redis subscription '${this.channels[0]}' was closed`))
-    }
+    this.transition('closed', new Error(`Redis subscription '${this.channels[0]}' was closed`))
     this._onDetach()
   }
 
   private _terminate(error: unknown): void {
-    if (this._state === 'closed' || this._state === 'terminated') return
-    this._resolveReady()
+    if (this.ended) return
     this._rejectFlushes(error)
-    this._transition('terminated')
+    this.transition('terminated', error)
   }
 
   private _rejectFlushes(error: unknown): void {
     for (const flush of this._flushes.values()) flush.reject(error)
     this._flushes.clear()
-  }
-
-  private _resolveReady(): void {
-    this._settle.resolve()
-  }
-
-  private _rejectReady(error: unknown): void {
-    this._settle.reject(error)
-  }
-
-  private _transition(state: SubscriptionAttemptState): void {
-    if (this._state === state) return
-    this._state = state
-    for (const listener of [...this._listeners]) listener(state)
   }
 }
 

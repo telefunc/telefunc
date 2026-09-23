@@ -1,6 +1,7 @@
 export { SubscriptionManager }
 
 import { assert } from '../../utils/assert.js'
+import { createDeferred } from '../../utils/createDeferred.js'
 import type {
   BackendReceiver,
   BackendSubscription,
@@ -264,12 +265,7 @@ class SubscriptionSlot<Source> {
 }
 
 function createReadinessGeneration() {
-  let resolve!: () => void
-  let reject!: (error: Error) => void
-  const promise = new Promise<void>((resolvePromise, rejectPromise) => {
-    resolve = resolvePromise
-    reject = rejectPromise
-  })
-  void promise.catch(() => {})
-  return { promise, resolve, reject }
+  const readiness = createDeferred()
+  void readiness.promise.catch(() => {})
+  return readiness
 }
