@@ -6,7 +6,7 @@ import { KNOWN_BROADCAST_BUCKETS, getBucketCoordinatorShardIndices, getDetermini
 import { assert } from '../../../../utils/assert.js'
 import type { BroadcastLane, PublishResult } from '../../../backend/broadcast/contract.js'
 import type { BackendReceiver, SubscriptionAttempt, SubscriptionState } from '../../../backend/subscription.js'
-import { decodeOrderingFrame, encodeOrderingFrame, type OrderingInfo } from '../../../ordering-frame.js'
+import type { OrderingInfo } from '../../../ordering-frame.js'
 import type { CloudflareScale, LocationBucket } from './routing.js'
 
 const PRESENCE_TTL_SECONDS = 90
@@ -45,7 +45,8 @@ type BroadcastForwardRequest = {
 type BroadcastDeliverRequest = {
   key: string
   kind: BroadcastLane['kind']
-  frame: Uint8Array
+  payload: Uint8Array
+  info: OrderingInfo
 }
 
 type TelefuncDurableObjectStub = DurableObjectStub & {
@@ -373,18 +374,16 @@ class CloudflareBroadcastTransport {
 
   /** At a bucket coordinator: delivers the authority's sequenced publish to the named member DOs. */
   async forwardToBucket(request: BroadcastForwardRequest): Promise<void> {
-    const { key, kind, payload, info, doNames } = request
-    const frame = encodeOrderingFrame(payload, info)
-    await Promise.all(doNames.map((doName) => this.getBoundStub(doName).telefuncBroadcastDeliver({ key, kind, frame })))
+    const { doNames, ...delivery } = request
+    await Promise.all(doNames.map((doName) => this.getBoundStub(doName).telefuncBroadcastDeliver(delivery)))
   }
 
   /**
    * Delivers a publish to local subscribers. Called via RPC on the representative DO for this isolate.
    */
   async deliverToLocal(request: BroadcastDeliverRequest): Promise<void> {
-    const { payload, info } = decodeOrderingFrame(request.frame)
     const attempt = (request.kind === 'text' ? this.textSubs : this.binarySubs).get(request.key)
-    await attempt?.deliver(payload, info)
+    await attempt?.deliver(request.payload, request.info)
   }
 
   // --- Private ---

@@ -500,7 +500,7 @@ describe('cloudflare broadcast routing', () => {
     ])
   })
 
-  it('a forward round-trips a wide ordering frame to every named DO', async () => {
+  it('a forward delivers wide ordering positions to every named DO', async () => {
     const authorityState = createAuthorityState()
     const transport = new CloudflareBroadcastTransport({ baseInstanceName: 'telefunc', scale: 1 })
     const deliveredTo: string[] = []

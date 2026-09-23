@@ -468,7 +468,12 @@ describe('cloudflare adapter entrypoint', () => {
     const forward = { ...publish, info: { seq: 1, timestamp: 1 }, doNames: ['telefunc-shard-weur-0'] }
     instance.telefuncBroadcastForward(forward)
     expect(mocks.transportInstances[0]?.forwardToBucket).toHaveBeenCalledWith(forward)
-    const delivery = { key: 'room:test', kind: 'text' as const, frame: new Uint8Array([1]) }
+    const delivery = {
+      key: 'room:test',
+      kind: 'text' as const,
+      payload: new Uint8Array([1]),
+      info: { seq: 1, timestamp: 1 },
+    }
     instance.telefuncBroadcastDeliver(delivery)
     expect(mocks.transportInstances[0]?.deliverToLocal).toHaveBeenCalledWith(delivery)
     expect(hibernatedRoomSocket.close).not.toHaveBeenCalled()
