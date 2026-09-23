@@ -467,7 +467,6 @@ describe('cloudflare adapter entrypoint', () => {
       laneKey: 'lane',
       subscriberDoId: 'id',
       leaseId: 'lease',
-      generationToken: 'generation',
     }
     expect(() => instance.telefuncRoomInvalidate(invalidation)).toThrow('Cloudflare Room requires await-safe context')
     mocks.asyncMode = true

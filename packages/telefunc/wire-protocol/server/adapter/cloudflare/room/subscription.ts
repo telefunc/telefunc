@@ -28,7 +28,6 @@ export class CloudflareRoomSubscriptionAttempt implements SubscriptionAttempt {
   readonly #leaseId = crypto.randomUUID()
   readonly #listeners = new Set<(state: SubscriptionAttemptState) => void>()
   #state: SubscriptionAttemptState = 'establishing'
-  #generationToken = ''
   #settleReady!: { resolve: () => void; reject: (error: unknown) => void }
   #readySettled = false
   #cancelRenewal: (() => void) | null = null
@@ -70,8 +69,7 @@ export class CloudflareRoomSubscriptionAttempt implements SubscriptionAttempt {
       request.inc === this.#source.inc &&
       request.laneKey === this.#source.laneKey &&
       request.subscriberDoId === this.#source.subscriberDoId &&
-      request.leaseId === this.#leaseId &&
-      (request.generationToken === this.#generationToken || this.#state === 'establishing')
+      request.leaseId === this.#leaseId
     )
   }
 
@@ -112,7 +110,6 @@ export class CloudflareRoomSubscriptionAttempt implements SubscriptionAttempt {
         }
         throw error
       }
-      this.#generationToken = registered.generationToken
       this.#transition('ready')
       this.#settleReadiness()
       this.#scheduleRenewal()
@@ -134,7 +131,7 @@ export class CloudflareRoomSubscriptionAttempt implements SubscriptionAttempt {
     this.#cancelRenewal = null
     if (this.#state !== 'ready') return
     try {
-      const renewed = await this.#source.authority.renewRoute(...this.#route(), this.#generationToken)
+      const renewed = await this.#source.authority.renewRoute(...this.#route())
       if (this.#state !== 'ready') return
       if (!renewed.ok) {
         if (renewed.terminal === true) this.terminate()

@@ -303,19 +303,21 @@ describe('Redis real three-master Cluster CI certification', () => {
     let inventoryHeld = false
     let firstDrop: Promise<void> | undefined
     let secondDrop: Promise<void> | undefined
-    const writeCell = async (value: string): Promise<void> => {
-      const read = await authority.readCells(roomId, inc, { keys: [] })
+    const writeCell = async (generation: string, value: string): Promise<void> => {
+      const read = await authority.readCells(roomId, generation, { keys: [] })
       if ('staleInc' in read) throw new Error('installed generation was stale')
       expect(
-        await authority.compareExchangeCells(roomId, inc, read.revision, [
+        await authority.compareExchangeCells(roomId, generation, read.revision, [
           { key: 'survivor', set: { bytes: bytes(value) } },
         ]),
       ).toBe('committed')
     }
+    // Incarnation ids are never reused: the room comes back under a fresh one.
+    const recreated = `${inc}-recreated`
     const reinstall = async (): Promise<void> => {
       const tombstone = await authority.readHead(roomId)
-      await open(authority, roomId, inc, tombstone?.head.rev)
-      await writeCell('new')
+      await open(authority, roomId, recreated, tombstone?.head.rev)
+      await writeCell(recreated, 'new')
     }
     if (begin === undefined) {
       vi.spyOn(client, 'smembers').mockImplementation((async (key: string) => {
@@ -344,7 +346,7 @@ describe('Redis real three-master Cluster CI certification', () => {
       expect((await authority.readHead(roomId))?.head.currentInc).toBe(inc)
       expect(await client.smembers(gensKey(prefix, roomId))).toContain(inc)
       if (begin !== undefined) commands.tfRoomDropGenerationBegin = begin
-      await writeCell('old')
+      await writeCell(inc, 'old')
       const active = await authority.readHead(roomId)
       if (active === null) throw new Error('installed generation lost its head')
       await close(authority, roomId, active.head)
@@ -363,7 +365,7 @@ describe('Redis real three-master Cluster CI certification', () => {
       await reinstall()
       releaseInventory.resolve()
       await firstDrop
-      const reinstalled = await authority.readCells(roomId, inc, { keys: ['survivor'] })
+      const reinstalled = await authority.readCells(roomId, recreated, { keys: ['survivor'] })
       if ('staleInc' in reinstalled) throw new Error('reinstalled generation became stale')
       expect(Buffer.from(reinstalled.cells.get('survivor') ?? []).toString()).toBe('new')
     } finally {

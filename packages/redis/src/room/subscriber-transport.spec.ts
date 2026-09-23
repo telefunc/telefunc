@@ -12,7 +12,6 @@ test('a subscriber dropping before the commit returns rejects its delivery witho
   const driver = new RedisSubscriptionDriver({
     prefix: 'telefunc',
     createSubscriber: async () => subscriber as unknown as Redis,
-    captureGeneration: async () => 'generation',
     validateGeneration: async () => true,
   })
   const source = { roomId: 'room', inc: 'inc', lane: { kind: 'semantic' } } as const

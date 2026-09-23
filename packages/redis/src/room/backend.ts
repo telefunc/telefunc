@@ -26,7 +26,6 @@ import {
   directoryIndexKey,
   directoryTagsKey,
   generationKeysKey,
-  generationTokensKey,
   headKey,
   laneKey,
   parseLaneKey,
@@ -78,7 +77,6 @@ type StoredHead = {
   exp?: number
 }
 type HeadCxReply = { tag: 'head'; head: StoredHead } | { tag: 'conflict'; current: StoredHead | null }
-type DropGenerationBeginReply = { exists: false } | { exists: true; token: string }
 type ReadCellsFenceReply = { stale: true } | { revision: string }
 type CellSelector = { keys: string[] } | { prefix: string }
 type CellsRead = { revision: string; cells: Map<string, Uint8Array> } | { staleInc: true }
@@ -173,8 +171,7 @@ export class RedisBackend implements BroadcastDriver, RoomDriver {
     this.subscriptions = new RedisSubscriptionDriver({
       prefix: this._prefix,
       createSubscriber,
-      captureGeneration: (source) => this._captureGeneration(source),
-      validateGeneration: (source, token) => this._validateGeneration(source, token),
+      validateGeneration: (source) => this._validateGeneration(source),
     })
   }
 
@@ -375,36 +372,28 @@ export class RedisBackend implements BroadcastDriver, RoomDriver {
     ])
   }
 
-  private _captureGeneration(source: RoomSubscriptionSource): Promise<string | null> {
-    return this._publisher.hget(generationTokensKey(this._prefix, source.roomId), source.inc)
-  }
-
-  private async _validateGeneration(source: RoomSubscriptionSource, token: string): Promise<boolean> {
+  private async _validateGeneration(source: RoomSubscriptionSource): Promise<boolean> {
     return (
       (await this._call(REDIS_ROOM_COMMANDS.validateGeneration.name, [
         ...REDIS_ROOM_COMMAND_KEYS.validateGeneration(this._prefix, source.roomId),
         source.inc,
-        token,
       ])) === 1
     )
   }
 
   async dropGeneration(roomId: string, inc: string): Promise<void> {
     this._assertLive()
-    const begin = JSON.parse(
-      (await this._call(REDIS_ROOM_COMMANDS.dropGenerationBegin.name, [
-        ...REDIS_ROOM_COMMAND_KEYS.dropGenerationBegin(this._prefix, roomId),
-        inc,
-      ])) as string,
-    ) as DropGenerationBeginReply
-    if (!begin.exists) return
+    const installed = await this._call(REDIS_ROOM_COMMANDS.dropGenerationBegin.name, [
+      ...REDIS_ROOM_COMMAND_KEYS.dropGenerationBegin(this._prefix, roomId),
+      inc,
+    ])
+    if (installed !== 1) return
     const keys = await this._publisher.smembers(generationKeysKey(this._prefix, roomId, inc))
     const finalizeKeys = REDIS_ROOM_COMMAND_KEYS.dropGenerationFinalize(this._prefix, roomId, inc, keys)
     await this._call(REDIS_ROOM_COMMANDS.dropGenerationFinalize.name, [
       String(finalizeKeys.length),
       ...finalizeKeys,
       inc,
-      begin.token,
     ])
   }
 

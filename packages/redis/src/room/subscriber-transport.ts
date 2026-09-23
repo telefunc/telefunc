@@ -21,8 +21,8 @@ type RedisSubscriptionSource = BroadcastLane | RoomSubscriptionSource
 type RedisSubscriptionDriverOptions = {
   prefix: string
   createSubscriber: () => Promise<Redis>
-  captureGeneration: (source: RoomSubscriptionSource) => Promise<string | null>
-  validateGeneration: (source: RoomSubscriptionSource, token: string) => Promise<boolean>
+  /** Whether the source's incarnation is still the open head. */
+  validateGeneration: (source: RoomSubscriptionSource) => Promise<boolean>
 }
 /**
  * Redis's only backend-specific subscription edge. General fan-out, refcounts, readiness generations,
@@ -31,13 +31,11 @@ type RedisSubscriptionDriverOptions = {
 export class RedisSubscriptionDriver implements SubscriptionDriver<RedisSubscriptionSource> {
   private readonly _prefix: string
   private readonly _createSubscriber: () => Promise<Redis>
-  private readonly _captureGeneration: RedisSubscriptionDriverOptions['captureGeneration']
   private readonly _validateGeneration: RedisSubscriptionDriverOptions['validateGeneration']
   private readonly _attempts = new Map<string, Set<RedisSubscriptionAttempt>>()
   constructor(options: RedisSubscriptionDriverOptions) {
     this._prefix = options.prefix
     this._createSubscriber = options.createSubscriber
-    this._captureGeneration = options.captureGeneration
     this._validateGeneration = options.validateGeneration
   }
   bind(source: RedisSubscriptionSource): SubscriptionBinding {
@@ -60,7 +58,6 @@ export class RedisSubscriptionDriver implements SubscriptionDriver<RedisSubscrip
       receiver,
       localReceiverCount,
       createSubscriber: this._createSubscriber,
-      captureGeneration: this._captureGeneration,
       validateGeneration: this._validateGeneration,
       onDisposed: () => {
         const attempts = this._attempts.get(key)
@@ -105,11 +102,9 @@ class RedisSubscriptionAttempt implements SubscriptionAttempt {
   private readonly _receiver: BackendReceiver
   private readonly _localReceiverCount: () => number
   private readonly _createSubscriber: () => Promise<Redis>
-  private readonly _captureGeneration: RedisSubscriptionDriverOptions['captureGeneration']
   private readonly _validateGeneration: RedisSubscriptionDriverOptions['validateGeneration']
   private readonly _onDisposed: () => void
   private readonly _listeners = new Set<(state: SubscriptionAttemptState) => void>()
-  private _generationToken: string | null = null
   private _settle!: { resolve: () => void; reject: (error: unknown) => void }
   private _state: SubscriptionAttemptState = 'establishing'
   private _subscriber: Redis | null = null
@@ -124,7 +119,6 @@ class RedisSubscriptionAttempt implements SubscriptionAttempt {
     this._receiver = options.receiver
     this._localReceiverCount = options.localReceiverCount
     this._createSubscriber = options.createSubscriber
-    this._captureGeneration = options.captureGeneration
     this._validateGeneration = options.validateGeneration
     this._onDisposed = options.onDisposed
     this.ready = new Promise<void>((resolve, reject) => {
@@ -169,7 +163,6 @@ class RedisSubscriptionAttempt implements SubscriptionAttempt {
 
   private async _establish(): Promise<void> {
     try {
-      if ((await this._captureAttemptGeneration()) !== 'valid') return
       const subscriber = await this._createSubscriber()
       if (this._isStopped()) {
         subscriber.disconnect()
@@ -184,15 +177,6 @@ class RedisSubscriptionAttempt implements SubscriptionAttempt {
       this._failEstablish(error)
     }
   }
-  private async _captureAttemptGeneration(): Promise<'valid' | 'absent' | 'stopped'> {
-    if (!('roomId' in this._source)) return 'valid'
-    this._generationToken = await this._captureGeneration(this._source)
-    if (this._generationToken === null) {
-      this._terminate(new Error(`subscribeLane: generation '${this._source.roomId}/${this._source.inc}' is absent`))
-      return 'absent'
-    }
-    return this._isStopped() ? 'stopped' : 'valid'
-  }
   private _bindSubscriber(subscriber: Redis): void {
     this._subscriber = subscriber
     subscriber.on('messageBuffer', this._onMessage)
@@ -202,13 +186,8 @@ class RedisSubscriptionAttempt implements SubscriptionAttempt {
   }
   private async _validateEstablishedAttempt(subscriber: Redis): Promise<boolean> {
     if (this._isStopped() || this._subscriber !== subscriber) return false
-    if (
-      'roomId' in this._source &&
-      (this._generationToken === null || !(await this._validateGeneration(this._source, this._generationToken)))
-    ) {
-      this._terminate(
-        new Error(`subscribeLane: generation '${this._source.roomId}/${this._source.inc}' was invalidated`),
-      )
+    if ('roomId' in this._source && !(await this._validateGeneration(this._source))) {
+      this._terminate(new Error(`subscribeLane: generation '${this._source.roomId}/${this._source.inc}' is not open`))
       return false
     }
     return !this._isStopped() && this._subscriber === subscriber
@@ -243,9 +222,7 @@ class RedisSubscriptionAttempt implements SubscriptionAttempt {
   private readonly _onMessage = (channelBytes: Buffer, frame: Buffer): void => {
     const channel = channelBytes.toString()
     if ('roomId' in this._source && channel === redisInvalidationChannel(this._prefix, this._source)) {
-      if (this._generationToken === null || frame.toString() === this._generationToken) {
-        this._terminate(new Error('Redis generation subscription was invalidated'))
-      }
+      this._terminate(new Error('Redis generation subscription was invalidated'))
       return
     }
     if (channel !== redisSubscriptionChannel(this._prefix, this._source) || this._state !== 'ready') return

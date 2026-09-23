@@ -5,7 +5,6 @@
 // gen keys: tf:room:{rid}:g:<inc>:keys; generation-owned physical-key set.
 // channels: tf:room:{rid}:ch:<inc>:<laneKey>; incarnation-scoped PUBLISH/SUBSCRIBE.
 // gens: tf:room:{rid}:gens; installed incarnations.
-// gen-token: tf:room:{rid}:gen-tokens; non-reusable install revision removed with final SREM.
 // directory: <prefix>room-dir:{<prefix>dir}:{index|tags}; one global, co-slotted pair.
 // Commands take authority time from Redis TIME, never from the caller.
 
@@ -48,9 +47,6 @@ export function headRevKey(prefix: string, roomId: string): string {
 }
 export function gensKey(prefix: string, roomId: string): string {
   return `${roomTag(prefix, roomId)}:gens`
-}
-export function generationTokensKey(prefix: string, roomId: string): string {
-  return `${roomTag(prefix, roomId)}:gen-tokens`
 }
 export function genPrefix(prefix: string, roomId: string, inc: string): string {
   return `${roomTag(prefix, roomId)}:g:${inc}`
@@ -166,10 +162,10 @@ export function decodeRedisOrderingFrame(frame: Uint8Array): {
 }
 
 // HEAD CX compares by form, then stores; core decides every transition and the supervisor checks its shape.
-//   KEYS: [1]=head [2]=gens [3]=headrev [4]=generation-tokens
+//   KEYS: [1]=head [2]=gens [3]=headrev
 //   ARGV: [1]=cxJson{form,rev?,closingLease?} [2]=nextJson{state,inc?,config,lease?,ttlMs?}
 export const HEAD_CX_LUA = `${NOW_FN}
-local head_key, gens_key, rev_key, generation_tokens_key = KEYS[1], KEYS[2], KEYS[3], KEYS[4]
+local head_key, gens_key, rev_key = KEYS[1], KEYS[2], KEYS[3]
 local now = tf_now()
 local cx = cjson.decode(ARGV[1])
 local nx = cjson.decode(ARGV[2])
@@ -200,10 +196,7 @@ if nx.ttlMs ~= nil then stored.exp = now + nx.ttlMs end
 local encoded = cjson.encode(stored)
 redis.call('SET', head_key, encoded)
 if nx.ttlMs ~= nil then redis.call('PEXPIRE', head_key, nx.ttlMs) end
-if nx.inc ~= nil then
-  redis.call('SADD', gens_key, nx.inc)
-  if cur == nil or cur.inc ~= nx.inc then redis.call('HSET', generation_tokens_key, nx.inc, stored.rev) end
-end
+if nx.inc ~= nil then redis.call('SADD', gens_key, nx.inc) end
 return '{"tag":"head","head":' .. encoded .. '}'
 `
 
@@ -228,51 +221,42 @@ if not revision then revision = '0' end
 return '{"revision":' .. cjson.encode(revision) .. '}'
 `
 
-// SUBSCRIBE establishment snapshots the generation token before its network await. This atomic
-// post-ack check rejects a token whose generation closed or was dropped during that await.
-//   KEYS: [1]=head [2]=gens [3]=generation-tokens
-//   ARGV: [1]=inc [2]=expected-token
+// Checked once SUBSCRIBE is acknowledged: a lane subscription is live only while its incarnation is the
+// open head, so one closed or dropped during establishment is never reported ready.
+//   KEYS: [1]=head [2]=gens
+//   ARGV: [1]=inc
 export const VALIDATE_GENERATION_LUA = `${NOW_FN}
-local head_key, gens_key, tokens_key = KEYS[1], KEYS[2], KEYS[3]
-local now = tf_now()
-local inc, expected_token = ARGV[1], ARGV[2]
-local head = tf_read_and_expire_head(head_key, now)
-local current_token = redis.call('HGET', tokens_key, inc)
-if not head or head.state ~= 'open' or head.inc ~= inc
-  or redis.call('SISMEMBER', gens_key, inc) ~= 1 or current_token ~= expected_token then
+local head = tf_read_and_expire_head(KEYS[1], tf_now())
+if not head or head.state ~= 'open' or head.inc ~= ARGV[1] or redis.call('SISMEMBER', KEYS[2], ARGV[1]) ~= 1 then
   return 0
 end
 return 1
 `
 
-// Begin snapshots the immutable generation token while gens membership blocks reuse.
-//   KEYS: [1]=head [2]=gens [3]=generation-tokens
+// Begin refuses the current incarnation and reports whether the generation is still installed.
+//   KEYS: [1]=head [2]=gens
 //   ARGV: [1]=inc
 export const DROP_GENERATION_BEGIN_LUA = `${NOW_FN}
-local now, inc = tf_now(), ARGV[1]
-local head = tf_read_and_expire_head(KEYS[1], now)
+local inc = ARGV[1]
+local head = tf_read_and_expire_head(KEYS[1], tf_now())
 if head and head.inc == inc then
   return redis.error_reply("dropGeneration: refusing to drop the current incarnation '" .. inc .. "'")
 end
-if redis.call('SISMEMBER', KEYS[2], inc) == 0 then return '{"exists":false}' end
-local token = redis.call('HGET', KEYS[3], inc)
-if not token then return redis.error_reply('dropGeneration: generation token is missing') end
-return '{"exists":true,"token":' .. cjson.encode(token) .. '}'
+return redis.call('SISMEMBER', KEYS[2], inc)
 `
 
-// Finalize only while membership and the immutable begin token still match. Every physical member is
-// a declared key; deletion, keyed invalidation, and retirement are one atomic room-slot operation.
-//   KEYS: [1]=gens [2]=generation-tokens [3]=invalidation-channel [4]=manifest [5..]=members
-//   ARGV: [1]=inc [2]=expected-token
+// Finalize only while the generation is still installed: incarnation ids are never reused, so a
+// concurrent drop that finished first leaves nothing to do. Every physical member is a declared key;
+// deletion, keyed invalidation, and retirement are one atomic room-slot operation.
+//   KEYS: [1]=gens [2]=invalidation-channel [3]=manifest [4..]=members
+//   ARGV: [1]=inc
 export const DROP_GENERATION_FINALIZE_LUA = `
-local inc, expected_token = ARGV[1], ARGV[2]
+local inc = ARGV[1]
 if redis.call('SISMEMBER', KEYS[1], inc) == 0 then return 0 end
-if redis.call('HGET', KEYS[2], inc) ~= expected_token then return 0 end
-for i = 5, #KEYS do redis.call('UNLINK', KEYS[i]) end
-redis.call('UNLINK', KEYS[4])
-redis.call('PUBLISH', KEYS[3], expected_token)
+for i = 4, #KEYS do redis.call('UNLINK', KEYS[i]) end
+redis.call('UNLINK', KEYS[3])
+redis.call('PUBLISH', KEYS[2], inc)
 redis.call('SREM', KEYS[1], inc)
-redis.call('HDEL', KEYS[2], inc)
 return 1
 `
 
@@ -410,11 +394,11 @@ function command<const Name extends string, const Keys extends number | null>(
 }
 
 export const REDIS_ROOM_COMMANDS = {
-  headCx: command('tfRoomHeadCx', HEAD_CX_LUA, 4),
+  headCx: command('tfRoomHeadCx', HEAD_CX_LUA, 3),
   readHead: command('tfRoomReadHead', READ_HEAD_LUA, 1),
   readCellsFence: command('tfRoomReadCellsFence', READ_CELLS_FENCE_LUA, 2),
-  validateGeneration: command('tfRoomValidateGeneration', VALIDATE_GENERATION_LUA, 3),
-  dropGenerationBegin: command('tfRoomDropGenerationBegin', DROP_GENERATION_BEGIN_LUA, 3),
+  validateGeneration: command('tfRoomValidateGeneration', VALIDATE_GENERATION_LUA, 2),
+  dropGenerationBegin: command('tfRoomDropGenerationBegin', DROP_GENERATION_BEGIN_LUA, 2),
   dropGenerationFinalize: command('tfRoomDropGenerationFinalize', DROP_GENERATION_FINALIZE_LUA, null),
   cellsCx: command('tfRoomCellsCx', CELLS_CX_LUA, null),
   commit: command('tfRoomCommit', COMMIT_LUA, null),
@@ -428,26 +412,16 @@ export const REDIS_ROOM_COMMAND_KEYS = {
     headKey(prefix, roomId),
     gensKey(prefix, roomId),
     headRevKey(prefix, roomId),
-    generationTokensKey(prefix, roomId),
   ],
   readHead: (prefix: string, roomId: string) => [headKey(prefix, roomId)],
   readCellsFence: (prefix: string, roomId: string, inc: string) => [
     headKey(prefix, roomId),
     revKey(prefix, roomId, inc),
   ],
-  validateGeneration: (prefix: string, roomId: string) => [
-    headKey(prefix, roomId),
-    gensKey(prefix, roomId),
-    generationTokensKey(prefix, roomId),
-  ],
-  dropGenerationBegin: (prefix: string, roomId: string) => [
-    headKey(prefix, roomId),
-    gensKey(prefix, roomId),
-    generationTokensKey(prefix, roomId),
-  ],
+  validateGeneration: (prefix: string, roomId: string) => [headKey(prefix, roomId), gensKey(prefix, roomId)],
+  dropGenerationBegin: (prefix: string, roomId: string) => [headKey(prefix, roomId), gensKey(prefix, roomId)],
   dropGenerationFinalize: (prefix: string, roomId: string, inc: string, generationKeys: readonly string[]) => [
     gensKey(prefix, roomId),
-    generationTokensKey(prefix, roomId),
     generationInvalidationChannel(prefix, roomId, inc),
     generationKeysKey(prefix, roomId, inc),
     ...generationKeys,

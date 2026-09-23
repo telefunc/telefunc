@@ -5,14 +5,13 @@
 const ROUTE_TTL_MS = 90_000
 export const ROUTE_RENEW_EVERY_MS = ROUTE_TTL_MS / 3
 
-export type RouteTarget = { subscriberDoId: string; leaseId: string; generationToken: string }
+export type RouteTarget = { subscriberDoId: string; leaseId: string }
 export type RouteInstallation = {
   roomId: string
   inc: string
   laneKey: string
   subscriberDoId: string
   leaseId: string
-  generationToken: string
 }
 
 // The DO checks the open head; this UPSERT atomically replaces the prior exact lease.
@@ -23,18 +22,16 @@ export function upsertRoute(
   laneKey: string,
   subscriberDoId: string,
   leaseId: string,
-  generationToken: string,
   now: number,
 ): void {
   const expiresAt = now + ROUTE_TTL_MS
   sql.exec(
-    'INSERT OR REPLACE INTO route (room_id, inc, lane_key, subscriber_do_id, lease_id, generation_token, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+    'INSERT OR REPLACE INTO route (room_id, inc, lane_key, subscriber_do_id, lease_id, expires_at) VALUES (?, ?, ?, ?, ?, ?)',
     roomId,
     inc,
     laneKey,
     subscriberDoId,
     leaseId,
-    generationToken,
     expiresAt,
   )
 }
@@ -42,7 +39,7 @@ export function upsertRoute(
 export function listRouteInstallations(sql: SqlStorage, inc: string): RouteInstallation[] {
   return sql
     .exec<RouteInstallation>(
-      'SELECT room_id AS roomId, inc, lane_key AS laneKey, subscriber_do_id AS subscriberDoId, lease_id AS leaseId, generation_token AS generationToken FROM route WHERE inc = ?',
+      'SELECT room_id AS roomId, inc, lane_key AS laneKey, subscriber_do_id AS subscriberDoId, lease_id AS leaseId FROM route WHERE inc = ?',
       inc,
     )
     .toArray()
@@ -51,7 +48,7 @@ export function listRouteInstallations(sql: SqlStorage, inc: string): RouteInsta
 export function listExpiredRouteInstallations(sql: SqlStorage, now: number): RouteInstallation[] {
   return sql
     .exec<RouteInstallation>(
-      'SELECT room_id AS roomId, inc, lane_key AS laneKey, subscriber_do_id AS subscriberDoId, lease_id AS leaseId, generation_token AS generationToken FROM route WHERE expires_at <= ?',
+      'SELECT room_id AS roomId, inc, lane_key AS laneKey, subscriber_do_id AS subscriberDoId, lease_id AS leaseId FROM route WHERE expires_at <= ?',
       now,
     )
     .toArray()
@@ -99,16 +96,12 @@ export function deleteRoute(
 // The delivery target snapshot at acceptance: live (non-expired) routes for this (inc, lane) only.
 export function snapshotRoutes(sql: SqlStorage, inc: string, laneKey: string, now: number): RouteTarget[] {
   return sql
-    .exec<{ subscriber_do_id: string; lease_id: string; generation_token: string }>(
-      'SELECT subscriber_do_id, lease_id, generation_token FROM route WHERE inc = ? AND lane_key = ? AND expires_at > ?',
+    .exec<{ subscriber_do_id: string; lease_id: string }>(
+      'SELECT subscriber_do_id, lease_id FROM route WHERE inc = ? AND lane_key = ? AND expires_at > ?',
       inc,
       laneKey,
       now,
     )
     .toArray()
-    .map((row) => ({
-      subscriberDoId: row.subscriber_do_id,
-      leaseId: row.lease_id,
-      generationToken: row.generation_token,
-    }))
+    .map((row) => ({ subscriberDoId: row.subscriber_do_id, leaseId: row.lease_id }))
 }

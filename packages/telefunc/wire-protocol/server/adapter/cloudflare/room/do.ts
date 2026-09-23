@@ -42,7 +42,7 @@ import {
   initSchema,
   listGenerations,
   readCells,
-  readGenerationToken,
+  hasGeneration,
   readLiveHead,
   type StoredHead,
 } from './storage.js'
@@ -53,9 +53,7 @@ export type CommitWire =
   | { accepted: true; seq: number; timestamp: number; receivers: number; deliveryToken: string }
   | StaleCommit
 export type RetainedResult = { payload: Uint8Array; seq: number; timestamp: number }
-export type RegisterWire =
-  | { ok: true; generationToken: string }
-  | { rejected: true; reason: string; terminal?: boolean }
+export type RegisterWire = { ok: true } | { rejected: true; reason: string; terminal?: boolean }
 
 const ROOM_MAINTENANCE_RETRY_MS = 30_000
 
@@ -226,10 +224,8 @@ export class TelefuncRoomDurableObject extends DurableObject {
       const now = Date.now()
       const head = readLiveHead(this.#sql, now)
       if (head === null || head.currentInc !== inc || head.state !== 'open') return
-      const generationToken = readGenerationToken(this.#sql, inc)
-      if (generationToken === null) return
-      upsertRoute(this.#sql, roomId, inc, laneKey, subscriberDoId, leaseId, generationToken, now)
-      result = { ok: true, generationToken }
+      upsertRoute(this.#sql, roomId, inc, laneKey, subscriberDoId, leaseId, now)
+      result = { ok: true }
     })
     if ('ok' in result) await this.#scheduleMaintenanceIfNeeded()
     return result
@@ -240,22 +236,17 @@ export class TelefuncRoomDurableObject extends DurableObject {
     laneKey: string,
     subscriberDoId: string,
     leaseId: string,
-    expectedGenerationToken: string,
   ): Promise<{ ok: boolean; terminal?: boolean }> {
     const now = Date.now()
     let renewed = false
-    let generationInvalid = false
+    let dropped = false
     this.ctx.storage.transactionSync(() => {
-      const currentGenerationToken = readGenerationToken(this.#sql, inc)
-      if (currentGenerationToken === null || currentGenerationToken !== expectedGenerationToken) {
-        generationInvalid = true
-        return
-      }
-      renewed = renewRoute(this.#sql, inc, laneKey, subscriberDoId, leaseId, now)
+      dropped = !hasGeneration(this.#sql, inc)
+      if (!dropped) renewed = renewRoute(this.#sql, inc, laneKey, subscriberDoId, leaseId, now)
     })
     await this.#scheduleMaintenanceIfNeeded()
-    if (generationInvalid) return { ok: false, terminal: true }
-    // Missing exact routes recover with a fresh lease; only generation identity loss is terminal.
+    if (dropped) return { ok: false, terminal: true }
+    // Missing exact routes recover with a fresh lease; only a dropped generation is terminal.
     return { ok: renewed }
   }
 

@@ -10,7 +10,6 @@ import {
 const target = (subscriberDoId: string, leaseId = subscriberDoId) => ({
   subscriberDoId,
   leaseId,
-  generationToken: 'generation',
 })
 const deliveryInfo = (seq = 1) => ({ roomId: 'room', inc: 'inc', laneKey: 'semantic', seq, timestamp: 1 })
 const targets = (count: number) =>

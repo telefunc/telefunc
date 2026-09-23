@@ -20,7 +20,6 @@ export class TelefuncDurableObject extends TelefuncDurableObjectBase {
             laneKey: string
             subscriberDoId: string
             leaseId: string
-            generationToken: string
             frame: ArrayBuffer
             seq: number
             timestamp: number
@@ -32,7 +31,6 @@ export class TelefuncDurableObject extends TelefuncDurableObjectBase {
         laneKey: 'recipe-probe',
         subscriberDoId: 'recipe-probe',
         leaseId: 'recipe-probe',
-        generationToken: 'recipe-probe',
         frame: new ArrayBuffer(0),
         seq: 1,
         timestamp: 0,

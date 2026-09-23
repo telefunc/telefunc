@@ -30,7 +30,7 @@ export function initSchema(sql: SqlStorage): void {
   sql.exec(`
     CREATE TABLE IF NOT EXISTS head
       (id INTEGER PRIMARY KEY CHECK (id = 1), rev TEXT NOT NULL, inc TEXT, state TEXT NOT NULL, config BLOB NOT NULL, lease_id TEXT, lease_until INTEGER, expires_at INTEGER);
-    CREATE TABLE IF NOT EXISTS gen (inc TEXT PRIMARY KEY, token TEXT NOT NULL, revision INTEGER NOT NULL);
+    CREATE TABLE IF NOT EXISTS gen (inc TEXT PRIMARY KEY, revision INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS cell
       (inc TEXT NOT NULL, key TEXT NOT NULL, bytes BLOB NOT NULL, PRIMARY KEY (inc, key));
     CREATE TABLE IF NOT EXISTS ord
@@ -40,7 +40,7 @@ export function initSchema(sql: SqlStorage): void {
     CREATE TABLE IF NOT EXISTS rt_chunk
       (inc TEXT NOT NULL, lane_key TEXT NOT NULL, i INTEGER NOT NULL, bytes BLOB NOT NULL, PRIMARY KEY (inc, lane_key, i));
     CREATE TABLE IF NOT EXISTS route
-      (room_id TEXT NOT NULL, inc TEXT NOT NULL, lane_key TEXT NOT NULL, subscriber_do_id TEXT NOT NULL, lease_id TEXT NOT NULL, generation_token TEXT NOT NULL, expires_at INTEGER NOT NULL, PRIMARY KEY (inc, lane_key, subscriber_do_id));
+      (room_id TEXT NOT NULL, inc TEXT NOT NULL, lane_key TEXT NOT NULL, subscriber_do_id TEXT NOT NULL, lease_id TEXT NOT NULL, expires_at INTEGER NOT NULL, PRIMARY KEY (inc, lane_key, subscriber_do_id));
     CREATE INDEX IF NOT EXISTS route_expires_at ON route(expires_at);
     CREATE TABLE IF NOT EXISTS directory (room_id TEXT PRIMARY KEY, inc_tag TEXT NOT NULL);
   `)
@@ -94,9 +94,8 @@ export function readLiveHead(sql: SqlStorage, now: number): StoredHead | null {
   return head
 }
 
-// A generation token prevents stale work from authorizing a lease after an incarnation string is reused.
-export function readGenerationToken(sql: SqlStorage, inc: string): string | null {
-  return sql.exec<{ token: string }>('SELECT token FROM gen WHERE inc = ?', inc).toArray()[0]?.token ?? null
+export function hasGeneration(sql: SqlStorage, inc: string): boolean {
+  return sql.exec('SELECT 1 FROM gen WHERE inc = ?', inc).toArray().length > 0
 }
 
 export function listGenerations(sql: SqlStorage): string[] {
@@ -161,7 +160,7 @@ function storeHead(sql: SqlStorage, next: HeadNext, now: number, mintRev: () => 
   )
   // A new incarnation's generation is registered inside the CX that names it.
   if (next.head.currentInc !== null) {
-    sql.exec('INSERT OR IGNORE INTO gen (inc, token, revision) VALUES (?, ?, 0)', next.head.currentInc, rev)
+    sql.exec('INSERT OR IGNORE INTO gen (inc, revision) VALUES (?, 0)', next.head.currentInc)
   }
   const stored: StoredHead = {
     rev,
