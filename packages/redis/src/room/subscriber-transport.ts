@@ -223,7 +223,6 @@ class RedisSubscriptionAttempt implements SubscriptionAttempt {
   private readonly _listeners = new Set<(state: SubscriptionAttemptState) => void>()
   private readonly _flushes = new Map<string, { resolve(): void; reject(error: unknown): void }>()
   private _settle!: { resolve: () => void; reject: (error: unknown) => void }
-  private _readySettled = false
   private _state: SubscriptionAttemptState = 'establishing'
   private _lastSequence = 0
   private _cleanup: Promise<void> | null = null
@@ -340,14 +339,10 @@ class RedisSubscriptionAttempt implements SubscriptionAttempt {
   }
 
   private _resolveReady(): void {
-    if (this._readySettled) return
-    this._readySettled = true
     this._settle.resolve()
   }
 
   private _rejectReady(error: unknown): void {
-    if (this._readySettled) return
-    this._readySettled = true
     this._settle.reject(error)
   }
 

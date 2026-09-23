@@ -29,7 +29,6 @@ export class CloudflareRoomSubscriptionAttempt implements SubscriptionAttempt {
   readonly #listeners = new Set<(state: SubscriptionAttemptState) => void>()
   #state: SubscriptionAttemptState = 'establishing'
   #settleReady!: { resolve: () => void; reject: (error: unknown) => void }
-  #readySettled = false
   #cancelRenewal: (() => void) | null = null
   #started = false
   #unsubscribed = false
@@ -156,9 +155,8 @@ export class CloudflareRoomSubscriptionAttempt implements SubscriptionAttempt {
     if (this.#isClosed()) return
     this.#cancelRenewal?.()
     this.#cancelRenewal = null
-    if (!this.#readySettled) {
-      this.#settleReadiness(new Error(`Cloudflare Room subscription ${state} before acknowledgement`))
-    }
+    // A no-op once the attempt was acknowledged.
+    this.#settleReady.reject(new Error(`Cloudflare Room subscription ${state} before acknowledgement`))
     this.#transition(state)
     this.#onClosed()
   }
@@ -168,8 +166,6 @@ export class CloudflareRoomSubscriptionAttempt implements SubscriptionAttempt {
   }
 
   #settleReadiness(error?: unknown): void {
-    if (this.#readySettled) return
-    this.#readySettled = true
     if (error === undefined) this.#settleReady.resolve()
     else this.#settleReady.reject(error)
   }

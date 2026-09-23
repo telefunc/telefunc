@@ -143,8 +143,8 @@ class SubSlot {
         notifyTerminal(error)
       },
     )
+    // Every reassignment of `_subscription` unobserves first, so this listener only hears the current one.
     this._unobserve = subscription.onStateChange((state) => {
-      if (this._subscription !== subscription) return
       if (state === 'lost') {
         if (wasReady) lostAfterReady = true
         this._ensurePendingReady()
