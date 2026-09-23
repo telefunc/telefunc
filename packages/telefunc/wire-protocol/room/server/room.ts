@@ -241,10 +241,10 @@ class ServerRoom extends RoomStateView implements Room {
     try {
       const inbox = this._admittedInbox(id)
       await withinRoomHorizon(inbox.ready, ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS)
-      this._admittedInbox(id, inbox)
+      this._admittedInbox(id)
       await this._createMember(id, meta, identity, joinedAt, hidden)
       created = true
-      this._admittedInbox(id, inbox)
+      this._admittedInbox(id)
       this._pendingAdmissions.delete(id)
       this._state.applyJoin(id, meta, joinedAt, identity, hidden)
       await publishCtrl(this.id, this._inc, {
@@ -273,9 +273,9 @@ class ServerRoom extends RoomStateView implements Room {
   }
 
   /** The member's inbox slot exists exactly while the room is open and its holder owns the member. */
-  private _admittedInbox(id: string, expected?: SubSlot): SubSlot {
+  private _admittedInbox(id: string): SubSlot {
     const inbox = this._dmUnsubs.get(id)
-    if (inbox === undefined || (expected !== undefined && inbox !== expected))
+    if (inbox === undefined)
       throw new RoomError(this._state.closed ? `Room is closed: ${this.id}` : 'Participant left the room')
     return inbox
   }
