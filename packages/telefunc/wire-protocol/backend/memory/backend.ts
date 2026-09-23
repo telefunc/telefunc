@@ -134,7 +134,7 @@ class MemorySubscriptionAttempt implements SubscriptionAttempt {
 
   async deliver(payload: Uint8Array, info: { seq: number; timestamp: number }): Promise<void> {
     // Memory dispatch awaits returned thenables for this attempt; cross-backend callback completion is not guaranteed.
-    await (this.#receiver(payload, info) as unknown)
+    await this.#receiver(payload, info)
   }
 
   receiverCount(): number {

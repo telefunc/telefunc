@@ -142,7 +142,7 @@ function localTransport(): BroadcastTransport {
 async function expectBroadcastRoundTrip(payload: string): Promise<void> {
   const lane = { key: 'override-order', kind: 'text' } as const
   const seen: string[] = []
-  const subscription = getBroadcastBackend().subscribe(lane, (bytes) => seen.push(new TextDecoder().decode(bytes)))
+  const subscription = getBroadcastBackend().subscribe(lane, (bytes) => void seen.push(new TextDecoder().decode(bytes)))
   await subscription.ready
   await getBroadcastBackend().publish(lane, new TextEncoder().encode(payload))
   expect(seen).toEqual([payload])

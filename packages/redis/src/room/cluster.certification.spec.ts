@@ -238,7 +238,7 @@ describe('Redis real three-master Cluster CI certification', () => {
     const fresh = ownRoomBackend(cluster, prefix)
     const observed: number[] = []
     await open(backend, roomId, inc)
-    const subscription = subscribe(backend, roomId, inc, (_payload, info) => observed.push(info.seq))
+    const subscription = subscribe(backend, roomId, inc, (_payload, info) => void observed.push(info.seq))
     await subscription.ready
     const orderingKey = orderKey(prefix, roomId, inc, encodeLaneKey(SEMANTIC_LANE))
     await cluster.set(orderingKey, `${Number.MAX_SAFE_INTEGER - 1}:1`)
@@ -399,7 +399,7 @@ describe('Redis real three-master Cluster CI certification', () => {
     const states: SubscriptionState[] = []
     const observed: string[] = []
     await open(backend, roomId, inc)
-    const receiver = (payload: Uint8Array) => observed.push(Buffer.from(payload).toString())
+    const receiver = (payload: Uint8Array) => void observed.push(Buffer.from(payload).toString())
     const subscription = subscribe(backend, roomId, inc, receiver)
     subscription.onStateChange((state) => states.push(state))
     await subscription.ready
@@ -428,7 +428,7 @@ describe('Redis real three-master Cluster CI certification', () => {
     const backend = ownBackend(cluster, prefix)
     const states: SubscriptionState[] = []
     const observed: string[] = []
-    const receiver = (payload: Uint8Array) => observed.push(Buffer.from(payload).toString())
+    const receiver = (payload: Uint8Array) => void observed.push(Buffer.from(payload).toString())
     const held: Array<[Buffer, Buffer]> = []
     let holding = false
     await open(backend, roomId, inc)
@@ -507,7 +507,12 @@ describe('Redis real three-master Cluster CI certification', () => {
       const inc = `${scenario.label}-inc`
       await open(backend, roomId, inc)
       const observed: string[] = []
-      const subscription = subscribe(backend, roomId, inc, (payload) => observed.push(Buffer.from(payload).toString()))
+      const subscription = subscribe(
+        backend,
+        roomId,
+        inc,
+        (payload) => void observed.push(Buffer.from(payload).toString()),
+      )
       await subscription.ready
       const result = accepted(await backend.commitLane(roomId, inc, SEMANTIC_LANE, Buffer.from(scenario.label)))
       await result.delivery
@@ -516,13 +521,15 @@ describe('Redis real three-master Cluster CI certification', () => {
     }
     const emptyObserved: string[] = []
     const text = ownSubscription(
-      backend.subscribe({ key: '', kind: 'text' }, (payload, info) =>
-        emptyObserved.push(`text:${info.seq}:${Buffer.from(payload).toString()}`),
+      backend.subscribe(
+        { key: '', kind: 'text' },
+        (payload, info) => void emptyObserved.push(`text:${info.seq}:${Buffer.from(payload).toString()}`),
       ),
     )
     const binary = ownSubscription(
-      backend.subscribe({ key: '', kind: 'binary' }, (payload, info) =>
-        emptyObserved.push(`binary:${info.seq}:${Buffer.from(payload).toString()}`),
+      backend.subscribe(
+        { key: '', kind: 'binary' },
+        (payload, info) => void emptyObserved.push(`binary:${info.seq}:${Buffer.from(payload).toString()}`),
       ),
     )
     await Promise.all([text.ready, binary.ready])

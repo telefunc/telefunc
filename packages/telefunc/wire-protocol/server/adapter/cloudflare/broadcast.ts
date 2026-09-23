@@ -146,7 +146,7 @@ class CloudflareBroadcastSubscriptionAttempt implements SubscriptionAttempt {
 
   async deliver(payload: Uint8Array, info: OrderingInfo): Promise<void> {
     if (this.#state !== 'ready') return
-    await (this.#receiver(payload, info) as unknown)
+    await this.#receiver(payload, info)
   }
 
   async unsubscribe(): Promise<void> {

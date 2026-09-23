@@ -66,7 +66,7 @@ export class CloudflareRoomSubscriptionAttempt implements SubscriptionAttempt {
 
   async deliver(payload: Uint8Array, seq: number, timestamp: number): Promise<void> {
     if (this.#state !== 'ready') throw new Error('Cloudflare Room delivery lease is not installed')
-    await (this.#receiver(new Uint8Array(payload), { seq, timestamp }) as unknown)
+    await this.#receiver(new Uint8Array(payload), { seq, timestamp })
   }
 
   invalidate(): void {

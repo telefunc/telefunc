@@ -21,8 +21,8 @@ describe('shared subscription supervision', () => {
     raw.plan(() => ControlledAttempt.ready(secondCleanup.promise))
     const manager = new SubscriptionManager(raw, vi.fn())
     const received: string[] = []
-    const first = manager.subscribe('source', (payload) => received.push(`a:${decoder.decode(payload)}`))
-    const second = manager.subscribe('source', (payload) => received.push(`b:${decoder.decode(payload)}`))
+    const first = manager.subscribe('source', (payload) => void received.push(`a:${decoder.decode(payload)}`))
+    const second = manager.subscribe('source', (payload) => void received.push(`b:${decoder.decode(payload)}`))
     await first.ready
     expect(raw.opens).toHaveLength(1)
     expect(raw.opens[0]!.localReceiverCount()).toBe(2)
@@ -32,7 +32,7 @@ describe('shared subscription supervision', () => {
     expect(raw.opens).toHaveLength(1)
     await raw.deliver(0, 'stale')
     expect(received).toEqual([])
-    const replacement = manager.subscribe('source', (payload) => received.push(`c:${decoder.decode(payload)}`))
+    const replacement = manager.subscribe('source', (payload) => void received.push(`c:${decoder.decode(payload)}`))
     await replacement.ready
     expect(raw.opens).toHaveLength(2)
     await raw.deliver(1, 'current')
@@ -194,9 +194,9 @@ describe('shared subscription supervision', () => {
     const manager = new SubscriptionManager(raw)
     const received: string[] = []
     raw.partition = 'session-a'
-    const first = manager.subscribe('same-source', (payload) => received.push(`a:${decoder.decode(payload)}`))
+    const first = manager.subscribe('same-source', (payload) => void received.push(`a:${decoder.decode(payload)}`))
     raw.partition = 'session-b'
-    const second = manager.subscribe('same-source', (payload) => received.push(`b:${decoder.decode(payload)}`))
+    const second = manager.subscribe('same-source', (payload) => void received.push(`b:${decoder.decode(payload)}`))
     await Promise.all([first.ready, second.ready])
     expect(raw.opens).toHaveLength(2)
     await raw.deliver(0, 'one')

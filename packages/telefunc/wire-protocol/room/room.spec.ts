@@ -2451,8 +2451,11 @@ describe('room binary protocol validation', () => {
     ).toBe('committed')
     expect(await backend.compareExchangeCells('spi', 'inc-1', cells.revision, [])).toBe('conflict')
     const received: string[] = []
-    const subscription = backend.subscribeLane('spi', 'inc-1', semanticLane, (payload) =>
-      received.push(decoder.decode(payload)),
+    const subscription = backend.subscribeLane(
+      'spi',
+      'inc-1',
+      semanticLane,
+      (payload) => void received.push(decoder.decode(payload)),
     )
     await subscription.ready
     const commit = await backend.commitLane('spi', 'inc-1', semanticLane, encoder.encode('one'), {
