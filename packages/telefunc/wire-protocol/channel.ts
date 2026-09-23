@@ -34,9 +34,8 @@ type ChannelPublishInfo = {
 }
 type ChannelPublishAck = ChannelPublishInfo & {
   meta?: ChannelPublishMeta
-  /** Global live subscriptions on the published key when the backend can count them.
-   *  `0` truthfully means nobody anywhere wants this stream. Absent when the backend cannot know,
-   *  including Redis Cluster. Not a viewer count: one transport hop can serve many viewers. */
+  /** Live subscriptions on the published key when the backend can count them; absent on Redis Cluster. A Broadcast
+   *  on Cloudflare counts eventually consistent presence, so `0` there isn't proof of absence. Not a viewer count. */
   receivers?: number
 }
 

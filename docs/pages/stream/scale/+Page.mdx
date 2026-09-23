@@ -7,8 +7,8 @@ If you use <Link href="/stream">Telefunc Stream</Link>, scaling Telefunc horizon
 
 - **Sticky sessions** (so a reconnecting client returns to the same server instance) — your load balancer must route every request from a given client to the same instance.
   > Required: every <Link href="/stream">stream</Link> needs this.
-- **Cross-instance backend** (a <Link href="/channel#broadcast">broadcast</Link> must reach subscribers on every server instance) — install one such as <Link href="/redis">`@telefunc/redis`</Link>.
-  > Optional: this is required only for streams that broadcast.
+- **Cross-instance backend** (a <Link href="/channel#broadcast">broadcast</Link> or a <Link href="/room">room</Link> must reach subscribers on every server instance) — install one such as <Link href="/redis">`@telefunc/redis`</Link>.
+  > Optional: this is required only for broadcasts and rooms.
 
 
 ## Sticky sessions

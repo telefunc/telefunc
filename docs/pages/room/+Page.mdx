@@ -224,7 +224,7 @@ export async function onJoinChat(roomId) {
 }
 ```
 
-Each `onBefore*` runs before the operation commits, and rejects the caller — on the client too — following Telefunc's usual <Link href="/error-handling">error contract</Link>: `throw Abort(value)` rejects with an `Abort` carrying `value` (the caller inspects `err.abortValue` / `err instanceof Abort`), the way to surface a reason a client can act on; any other throw is treated as a bug — the caller gets a generic error and the real one is logged server-side. Each `onAfter*` (`onAfterJoin`, `onAfterSend`, `onAfterPublish`) runs once it commits, with the receipt (`{ seq, timestamp }`): the place to persist a message in its server-assigned order (see <Link href="#history-live-tail">History</Link>).
+Each `onBefore*` runs before the operation commits, and rejects the caller — on the client too — following Telefunc's usual <Link href="/error-handling">error contract</Link>: `throw Abort(value)` rejects with an `Abort` carrying `value` (the caller inspects `err.abortValue` / `err instanceof Abort`), the way to surface a reason a client can act on; any other throw is treated as a bug — the caller gets a generic error and the real one is logged server-side. Each `onAfter*` (`onAfterJoin`, `onAfterSend`, `onAfterPublish`) runs once it commits, with the receipt (`{ seq, timestamp }`; `onAfterJoin` gets `{ joinedAt }`): the place to persist a message in its server-assigned order (see <Link href="#history-live-tail">History</Link>).
 
 Room operations can also reject for expected conditions such as a closed room, a gone participant, or a target that isn't a member. These failures aren't reported as bugs, and their safe message reaches the caller.
 
@@ -245,7 +245,7 @@ me.onLeave((cause) => {
 
 `cause.type` is one of `'left'`, `'removed'`, `'closed'`, `'disconnected'`.
 
-**System notices** come from the room itself, so receivers can't confuse them with a member message. `Room.announce()` shares the room-wide order with participant `publish()`. `onAnnounce()` works without `subscribe()`; an observer that registers neither handler does not receive announcements:
+**System notices** come from the room itself, so receivers can't confuse them with a member message. `Room.announce()` shares the room-wide order with participant `publish()`. Only `onAnnounce()` receives them, with or without `subscribe()`; `subscribe()` never does:
 
 ```js
 // Server
@@ -368,7 +368,7 @@ Order the stored history and live tail for the current room lifecycle by `seq`. 
 
 Participant text published with `publish()` and room-authored notices sent with `Room.announce()` share one ordering domain. Presence events, each `(member, binary track)`, and each recipient inbox use separate domains. Closing and recreating a room restarts its domains at `seq = 1`, so positions from different domains or lifecycles aren't comparable. If your application combines several room lifecycles into one history, persist its own lifecycle or message identity alongside `seq`.
 
-The tail is a bounded, drop-oldest buffer of the most recent messages, sized for a prompt subscribe, not a second copy of history. It holds at most 256 messages and 1 MiB of serialized text; a single message larger than that budget isn't held. If the room isn't attached or the client doesn't make its first text subscription within 60 seconds, the pending tail is released. On a busy or slow path the database history you loaded above therefore stays the source of truth.
+The tail is a bounded, drop-oldest buffer of the most recent messages, sized for a prompt subscribe, not a second copy of history. It holds at most 256 messages and 1,048,576 characters (UTF-16 code units) of serialized text; a single message larger than that budget isn't held. If the room isn't attached or the client doesn't make its first text subscription within 60 seconds, the pending tail is released. On a busy or slow path the database history you loaded above therefore stays the source of truth.
 
 ### Switching rooms & capacity
 
@@ -462,7 +462,7 @@ Rooms work across multiple server nodes out of the box with <Link href="/redis">
 - **Crash-safe presence.** A clean `leave()` propagates immediately. After a crash, stale participants are removed automatically.
 - **Tuning presence latency.** A silently-dropped connection is held for <Link href="/channel-config">`config.channel.reconnectTimeout`</Link> before its members leave, so a brief blip does not flap presence. Lower it for snappier away-detection, raise it to ride out flaky mobile networks.
 
-- **Bounded tail.** The `{ tail }` backfill is limited to 256 messages / 1 MiB / 60 seconds. Membership itself is uncapped; use atomic application-level admission for a hard limit (see <Link href="#switching-rooms-capacity">Capacity</Link>).
+- **Bounded tail.** The `{ tail }` backfill is limited to 256 messages / 1,048,576 characters / 60 seconds. Membership itself is uncapped; use atomic application-level admission for a hard limit (see <Link href="#switching-rooms-capacity">Capacity</Link>).
 
 ## Reference
 
@@ -474,7 +474,7 @@ The server-side entry point. Clients get a room when a telefunction returns it.
 |---|---|---|
 | `Room.create(id, options?)` | `Room` | If the room already exists |
 | `Room.get(id, options?)` | `Room` | If the room doesn't exist |
-| `Room.getOrCreate(id, options?)` | `Room` | - |
+| `Room.getOrCreate(id, options?)` | `Room` | While the room is closing |
 | `Room.guard(room, { onBefore*?, onAfter*? })` | `void` | If called twice for one instance |
 | `Room.join(id, options?)` | `LocalParticipant` | If the room doesn't exist |
 | `Room.list({ prefix? }?)` | `RoomInfo[]` | - |
@@ -488,7 +488,10 @@ The server-side entry point. Clients get a room when a telefunction returns it.
 
 ```ts
 type RoomOptions = {
-  meta?: Record<string, unknown> // room metadata (default: {})
+  meta?: Record<string, unknown> // room metadata (default: {}); Room.create, Room.getOrCreate
+}
+type RoomGetOptions = {
+  tail?: boolean // Room.get
 }
 ```
 
