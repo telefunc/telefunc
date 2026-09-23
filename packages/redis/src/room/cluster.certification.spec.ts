@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { Cluster, Redis } from 'ioredis'
 import type { CommitAccepted, LaneId, RoomHead, SubscriptionState } from 'telefunc/__internal'
-import { decodeOrderingFrame } from 'telefunc/__internal'
+import { decodeOrderingFrame, encodeLaneKey } from 'telefunc/__internal'
 import { afterAll, afterEach, beforeAll, describe, expect, it, onTestFinished, vi } from 'vitest'
 import { installRedis } from '../index.js'
 import { RedisBackend } from './backend.js'
@@ -12,7 +12,6 @@ import {
   gensKey,
   headKey,
   genPrefix,
-  laneKey,
   orderKey,
   REDIS_DELIVERY_FENCE_BYTE,
   REDIS_ROOM_COMMANDS,
@@ -241,7 +240,7 @@ describe('Redis real three-master Cluster CI certification', () => {
     await open(backend, roomId, inc)
     const subscription = subscribe(backend, roomId, inc, (_payload, info) => observed.push(info.seq))
     await subscription.ready
-    const orderingKey = orderKey(prefix, roomId, inc, laneKey(SEMANTIC_LANE))
+    const orderingKey = orderKey(prefix, roomId, inc, encodeLaneKey(SEMANTIC_LANE))
     await cluster.set(orderingKey, `${Number.MAX_SAFE_INTEGER - 1}:1`)
     const last = accepted(await backend.commitLane(roomId, inc, SEMANTIC_LANE, Buffer.from('last'), { retain: true }))
     await last.delivery
@@ -470,7 +469,7 @@ describe('Redis real three-master Cluster CI certification', () => {
     const committed = accepted(await backend.commitLane(roomId, inc, SEMANTIC_LANE, bytes('old-epoch')))
     const deliveryOutcome = committed.delivery.catch((error: unknown) => error)
     await waitFor(() => held.length === 2)
-    const expectedChannel = channelKey(prefix, roomId, inc, laneKey(SEMANTIC_LANE))
+    const expectedChannel = channelKey(prefix, roomId, inc, encodeLaneKey(SEMANTIC_LANE))
     expect(held.map(([channel]) => channel.toString())).toEqual([expectedChannel, expectedChannel])
     expect(Buffer.from(decodeOrderingFrame(held[0]![1]).payload).toString()).toBe('old-epoch')
     expect(held[1]?.[1][0]).toBe(REDIS_DELIVERY_FENCE_BYTE)

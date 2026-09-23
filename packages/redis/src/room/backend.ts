@@ -21,7 +21,7 @@ import type {
   RoomHead,
   RoomSubscriptionSource,
 } from 'telefunc/__internal'
-import { decodeOrderingFrame } from 'telefunc/__internal'
+import { decodeOrderingFrame, encodeLaneKey, decodeLaneKey } from 'telefunc/__internal'
 import {
   broadcastChannel,
   broadcastSequenceKey,
@@ -32,8 +32,6 @@ import {
   directoryTagsKey,
   generationKeysKey,
   headKey,
-  laneKey,
-  parseLaneKey,
   REDIS_ROOM_COMMAND_KEYS,
   REDIS_ROOM_COMMANDS,
   REDIS_ORDERING_FRAME_LUA,
@@ -293,7 +291,7 @@ export class RedisBackend implements BroadcastDriver, RoomDriver {
     lane: LaneId,
   ): Promise<{ payload: Uint8Array; seq: number; timestamp: number } | null> {
     this._assertLive()
-    const frame = await this._publisher.getBuffer(retainedKey(this._prefix, roomId, inc, laneKey(lane)))
+    const frame = await this._publisher.getBuffer(retainedKey(this._prefix, roomId, inc, encodeLaneKey(lane)))
     if (frame === null) return null
     const {
       payload,
@@ -306,12 +304,12 @@ export class RedisBackend implements BroadcastDriver, RoomDriver {
     this._assertLive()
     const prefix = retainedKeyPrefix(this._prefix, roomId, inc)
     const keys = (await this._generationKeys(roomId, inc)).filter((key) => key.startsWith(prefix))
-    return keys.map((physical) => parseLaneKey(physical.slice(prefix.length)))
+    return keys.map((physical) => decodeLaneKey(physical.slice(prefix.length)))
   }
 
   async deleteRetained(roomId: string, inc: string, lane: LaneId, opts?: { ifSeq?: number }): Promise<void> {
     this._assertLive()
-    const retainedKeys = [retainedKey(this._prefix, roomId, inc, laneKey(lane))]
+    const retainedKeys = [retainedKey(this._prefix, roomId, inc, encodeLaneKey(lane))]
     const keys = REDIS_ROOM_COMMAND_KEYS.retainedDelete(this._prefix, roomId, inc, retainedKeys)
     await this._call(REDIS_ROOM_COMMANDS.retainedDelete.name, [
       String(keys.length),

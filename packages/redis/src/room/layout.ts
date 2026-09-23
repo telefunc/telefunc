@@ -8,8 +8,7 @@
 // directory: <prefix>room-dir:{<prefix>dir}:{index|tags}; one global, co-slotted pair.
 // Commands take authority time from Redis TIME, never from the caller.
 
-import { laneKey, type BroadcastLane, type LaneId } from 'telefunc/__internal'
-export { laneKey }
+import { encodeLaneKey, type BroadcastLane, type LaneId } from 'telefunc/__internal'
 
 export const DEFAULT_ROOM_PREFIX = 'tf:'
 export const REDIS_DELIVERY_FENCE_BYTE = 0xff
@@ -84,20 +83,6 @@ export function directoryIndexKey(prefix: string): string {
 }
 export function directoryTagsKey(prefix: string): string {
   return `${redisKeyPrefix(prefix)}room-dir:{${redisKeyPrefix(prefix)}dir}:tags`
-}
-
-export function parseLaneKey(key: string): LaneId {
-  if (key === 'semantic') return { kind: 'semantic' }
-  if (key === 'control') return { kind: 'control' }
-  if (key.startsWith('binary:')) {
-    const [, member, track] = key.split(':')
-    return { kind: 'binary', member: decodeURIComponent(member ?? ''), track: decodeURIComponent(track ?? '') }
-  }
-  if (key.startsWith('inbox:')) {
-    const [, member] = key.split(':')
-    return { kind: 'inbox', member: decodeURIComponent(member ?? '') }
-  }
-  throw new Error(`parseLaneKey: unrecognized lane key '${key}'`)
 }
 
 // ── Lua ─────────────────────────────────────────────────────────────────
@@ -405,7 +390,7 @@ export const REDIS_ROOM_COMMAND_KEYS = {
     ...cells.map((key) => cellKey(prefix, roomId, inc, key)),
   ],
   commit: (prefix: string, roomId: string, inc: string, lane: LaneId, requiredCellKeys: readonly string[] = []) => {
-    const key = laneKey(lane)
+    const key = encodeLaneKey(lane)
     return [
       headKey(prefix, roomId),
       orderKey(prefix, roomId, inc, key),

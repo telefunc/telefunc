@@ -8,14 +8,8 @@ import type {
   SubscriptionBinding,
   SubscriptionDriver,
 } from 'telefunc/__internal'
-import { decodeOrderingFrame } from 'telefunc/__internal'
-import {
-  broadcastChannel,
-  channelKey,
-  generationInvalidationChannel,
-  laneKey,
-  REDIS_DELIVERY_FENCE_BYTE,
-} from './layout.js'
+import { decodeOrderingFrame, encodeLaneKey } from 'telefunc/__internal'
+import { broadcastChannel, channelKey, generationInvalidationChannel, REDIS_DELIVERY_FENCE_BYTE } from './layout.js'
 import type { SubscriberSocket } from '../ioredis.js'
 type RedisSubscriptionSource = BroadcastLane | RoomSubscriptionSource
 type RedisSubscriptionDriverOptions = {
@@ -360,5 +354,5 @@ function redisSubscriptionChannels(prefix: string, source: RedisSubscriptionSour
 
 function redisSubscriptionChannel(prefix: string, source: RedisSubscriptionSource): string {
   if (!('roomId' in source)) return broadcastChannel(prefix, source)
-  return channelKey(prefix, source.roomId, source.inc, laneKey(source.lane))
+  return channelKey(prefix, source.roomId, source.inc, encodeLaneKey(source.lane))
 }

@@ -2,21 +2,12 @@
 // Retained payloads are internally chunked to 1.5 MB rows below workerd's 2 MB cap.
 
 import type { LaneId } from '../../../../backend/room/contract.js'
-import { encodeLaneKey } from '../../../../backend/room/lane-key.js'
-import { type LaneParts, laneToParts, partsToLane } from './codec.js'
+import { decodeLaneKey, encodeLaneKey } from '../../../../backend/room/lane-key.js'
 import { toBytes, type OrderMark } from './storage.js'
 
 const MAX_RETAINED_CHUNK_BYTES = 1_500_000
 
-type ManifestRow = {
-  lane_key: string
-  size: number
-  seq: number
-  ts: number
-  lane_kind: string
-  lane_member: string | null
-  lane_track: string | null
-}
+type ManifestRow = { lane_key: string; size: number; seq: number; ts: number }
 
 // Install retained state inside the acceptance `transactionSync`; partial chunk replacement rolls back.
 export function installRetained(
@@ -34,17 +25,13 @@ export function installRetained(
     // Copy out of the subarray view so SQLite stores exactly the chunk bytes.
     sql.exec('INSERT INTO rt_chunk (inc, lane_key, i, bytes) VALUES (?, ?, ?, ?)', inc, key, i, new Uint8Array(slice))
   }
-  const parts = laneToParts(lane)
   sql.exec(
-    'INSERT OR REPLACE INTO rt_manifest (inc, lane_key, size, seq, ts, lane_kind, lane_member, lane_track) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+    'INSERT OR REPLACE INTO rt_manifest (inc, lane_key, size, seq, ts) VALUES (?, ?, ?, ?, ?)',
     inc,
     key,
     payload.byteLength,
     mark.seq,
     mark.timestamp,
-    parts.kind,
-    parts.member,
-    parts.track,
   )
 }
 
@@ -72,16 +59,10 @@ export function readRetained(
 }
 
 export function listRetained(sql: SqlStorage, inc: string): LaneId[] {
-  const rows = sql
-    .exec<Pick<ManifestRow, 'lane_kind' | 'lane_member' | 'lane_track'>>(
-      'SELECT lane_kind, lane_member, lane_track FROM rt_manifest WHERE inc = ?',
-      inc,
-    )
+  return sql
+    .exec<Pick<ManifestRow, 'lane_key'>>('SELECT lane_key FROM rt_manifest WHERE inc = ?', inc)
     .toArray()
-  return rows.map((row) => {
-    const parts: LaneParts = { kind: row.lane_kind as LaneId['kind'], member: row.lane_member, track: row.lane_track }
-    return partsToLane(parts)
-  })
+    .map((row) => decodeLaneKey(row.lane_key))
 }
 
 export function deleteRetained(sql: SqlStorage, inc: string, lane: LaneId, opts?: { ifSeq?: number }): void {
