@@ -1032,6 +1032,24 @@ describe('Room public behavior', () => {
     await vi.waitFor(() => expect(ackTimers).toHaveLength(1))
     expect(ackTimers[0]!.hasRef()).toBe(false)
   })
+  it("removes a crashed node's member from a quiet observer's view", async () => {
+    vi.useFakeTimers()
+    const owner = await Room.create('crash-reap')
+    const member = await owner.join()
+    const observer = await Room.get('crash-reap')
+    const left: string[] = []
+    observer.onLeave((participant) => left.push(participant.id))
+    await observer.getParticipants()
+    const memberKey = roomMemberKvKey(owner.id, member.id)
+    const compareExchange = driver.compareExchangeCells.bind(driver)
+    vi.spyOn(driver, 'compareExchangeCells').mockImplementation(async (roomId, inc, revision, mutations) => {
+      if (mutations.some((mutation) => mutation.key === memberKey && 'set' in mutation)) throw new Error('crashed')
+      return compareExchange(roomId, inc, revision, mutations)
+    })
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    await vi.advanceTimersByTimeAsync(ROOM_MEMBER_TTL_MS + 2 * ROOM_HEARTBEAT_INTERVAL_MS)
+    expect(left).toEqual([member.id])
+  })
   it('keeps every live ack correlation instead of silently dropping the oldest', async () => {
     const stub = register(await Room.create('ack-correlations'))
     for (let index = 0; index <= 1_024; index++) {

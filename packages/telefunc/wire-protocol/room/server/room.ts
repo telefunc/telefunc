@@ -1249,7 +1249,8 @@ class ServerRoom extends RoomStateView implements Room {
           renewalFailure ??= { error }
         }
       }
-      this._syncSubs() // bounded retry trigger for still-wanted terminal lanes; no authority read
+      this._syncSubs() // bounded retry trigger for still-wanted terminal lanes
+      await this._reconcileAuthority() // the roster read reaps crashed nodes' expired members
       if (renewalFailure) throw renewalFailure.error
     } finally {
       this._heartbeatBusy = false
