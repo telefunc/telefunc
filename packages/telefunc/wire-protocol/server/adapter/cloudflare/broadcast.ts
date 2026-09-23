@@ -451,8 +451,8 @@ class CloudflareBroadcastTransport {
 
     if (memberState.teardownRequested) {
       memberState.stopRefresh()
-      await this.deletePresence(key)
       if (this.memberStates.get(key) === memberState) this.memberStates.delete(key)
+      await this.deletePresence(key)
     }
   }
 

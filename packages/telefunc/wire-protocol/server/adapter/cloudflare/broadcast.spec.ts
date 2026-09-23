@@ -675,6 +675,30 @@ describe('cloudflare broadcast routing', () => {
     await replacement.unsubscribe()
   })
 
+  it('a subscription opened during a deferred presence teardown establishes fresh presence', async () => {
+    const setup = Promise.withResolvers<void>()
+    const deleting = Promise.withResolvers<void>()
+    const deletion = Promise.withResolvers<void>()
+    const hooks: MockKVHooks = { beforePut: () => setup.promise }
+    const kv = createMockKV(hooks)
+    const transport = createTransport(kv)
+    const lane = { key: 'room:deferred-teardown', kind: 'text' } as const
+    const presenceKey = 'tfps:text%3Aroom%3Adeferred-teardown:weur:telefunc-shard-weur-0'
+    await transport.openSubscription(lane, () => {}).unsubscribe()
+    hooks.beforeDelete = () => {
+      deleting.resolve()
+      return deletion.promise
+    }
+    setup.resolve()
+    await deleting.promise
+    const replacement = transport.openSubscription(lane, () => {})
+    deletion.resolve()
+    await replacement.ready
+    await flushMicrotasks()
+    expect(await kv.get(presenceKey)).toBe('telefunc-shard-weur-0')
+    await replacement.unsubscribe()
+  })
+
   it('surfaces presence refresh loss and recovery through subscription state', async () => {
     vi.useFakeTimers()
     const kv = createMockKV()
