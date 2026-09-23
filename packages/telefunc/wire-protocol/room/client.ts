@@ -17,8 +17,10 @@ import {
 } from './model.js'
 import {
   hasRoomTag,
+  inboxMessageFromWire,
   joinedMember,
-  type MemberWants,
+  type DmReply,
+  type InboxMessage,
   type MemberSnapshot,
   type ParticipantStubMetadata,
   type ParticipantStubNotice,
@@ -33,7 +35,7 @@ import {
   type RoomStubRequest,
 } from './protocol.js'
 import { RoomState, RoomStateView } from './state.js'
-import { ParticipantBase, type InboxMessage } from './participant.js'
+import { ParticipantBase } from './participant.js'
 import type {
   BinaryPublishOptions,
   JoinOptions,
@@ -46,6 +48,20 @@ import type {
   RoomSnapshotView,
   Sender,
 } from './types.js'
+
+/** The member an event concerns while that member's join may still be settling. */
+function heldMemberOf(event: RoomEnvelope | RoomDmEnvelope | RoomRosterEvent | RoomDemandEvent): string | null {
+  switch (event.__r) {
+    case 'dm':
+      return event.to
+    case 'demand':
+      return event.member
+    case 'leave':
+      return event.id
+    default:
+      return null
+  }
+}
 
 /** One awaiter of a conflated publish — resolved with the winning send's receipt (see `_drainCoalesce`). */
 type CoalesceWaiter = { resolve: (ack: ChannelPublishAck) => void; reject: (err: unknown) => void }
@@ -90,7 +106,7 @@ class ClientRoom extends RoomStateView implements Room {
       updateStamp: snapshot.stamp,
       closed: snapshot.closed,
       onListenersChanged: () => this._syncWants(),
-      onCallbackError: reportRoomError,
+      onCallbackError: reportClientCallbackError,
     })
     this._state._owner = this
     if (snapshot.closed) {
@@ -168,20 +184,15 @@ class ClientRoom extends RoomStateView implements Room {
       return
     }
     const ackId = msg.ackId
-    void participant._deliverMessageAck(msg).then((reply) => {
-      void this._stub.send({ __r: 'dm-reply', id: participant.id, ackId, reply }, { ack: false }).catch(() => {})
-    })
+    void participant._deliverMessageAck(msg).then((reply) => this._replyDm(participant.id, ackId, reply))
+  }
+
+  private _replyDm(id: string, ackId: string, reply: DmReply): void {
+    void this._stub.send({ __r: 'dm-reply', id, ackId, reply }, { ack: false }).catch(() => {})
   }
 
   /** @internal — revival of a serialized `RemoteParticipant` (see `roomRemoteReviver`). */
-  _reviveRemote(snap: {
-    id: string
-    meta: ParticipantMeta
-    joinedAt: number
-    metaSeq: number
-    identity: string | null
-    hidden?: boolean
-  }): RemoteParticipant {
+  _reviveRemote(snap: MemberSnapshot): RemoteParticipant {
     return this._state.ensureRemoteFromSnapshot(snap)
   }
 
@@ -219,8 +230,7 @@ class ClientRoom extends RoomStateView implements Room {
   private _onEnvelope(envelope: unknown, rawInfo: ChannelPublishInfo): void {
     if (!hasRoomTag(envelope)) return
     const event = envelope as RoomEnvelope | RoomDmEnvelope | RoomRosterEvent | RoomDemandEvent
-    const member =
-      event.__r === 'dm' ? event.to : event.__r === 'demand' ? event.member : event.__r === 'leave' ? event.id : null
+    const member = heldMemberOf(event)
     if (member !== null && this._holdsForJoin(member)) {
       this._heldForJoins.push({ envelope, rawInfo })
       return
@@ -268,22 +278,9 @@ class ClientRoom extends RoomStateView implements Room {
         return
       case 'dm': {
         // Relayed from this member's private inbox — only its own stub ever receives it.
-        const msg: InboxMessage = {
-          from: event.from,
-          fromMeta: event.fromMeta,
-          fromIdentity: event.fromIdentity ?? null,
-          data: event.data,
-          ...(event.ackId ? { ackId: event.ackId } : {}),
-        }
         const local = this._localParticipants.get(event.to)
-        if (local) {
-          this._deliverDm(local, msg)
-          return
-        }
-        if (event.ackId)
-          void this._stub
-            .send({ __r: 'dm-reply', id: event.to, ackId: event.ackId, reply: DM_PARTICIPANT_LEFT }, { ack: false })
-            .catch(() => {})
+        if (local) this._deliverDm(local, inboxMessageFromWire(event))
+        else if (event.ackId) this._replyDm(event.to, event.ackId, DM_PARTICIPANT_LEFT)
         return
       }
     }
@@ -321,9 +318,9 @@ class ClientRoom extends RoomStateView implements Room {
   /** Text wants are declared synchronously through Broadcast so same-connection FIFO covers an immediate publish. */
   private _syncWants(): void {
     const state = this._state
-    const text: MemberWants = state.closed ? { all: false, members: [] } : state.textWants()
+    if (state.closed) return this._stub._setWireTextSubscribed(false) // the stub is dead: nothing to declare
+    const text = state.textWants()
     this._stub._setWireTextSubscribed(text.all)
-    if (state.closed) return // stub is dead — nothing to declare
 
     // A room-level text subscription supersedes the member set — clear it server-side.
     this._declare({ __r: 'sub-text', members: text.all ? [] : text.members, announce: state.wantsAnnounce })
@@ -425,7 +422,7 @@ abstract class ClientParticipantBase extends ParticipantBase {
   }
 
   protected _reportError(err: unknown): void {
-    reportRoomError(err)
+    reportClientCallbackError(err)
   }
 }
 
@@ -479,20 +476,19 @@ class ClientStandaloneParticipant extends ClientParticipantBase {
     channel.listen((notice: unknown) => {
       if (!hasRoomTag(notice)) return
       const msg = notice as ParticipantStubNotice
-      if (msg.__r === 'p-meta') this._meta = ownMetadata(msg.meta)
-      else if (msg.__r === 'demand') this._onDemand(msg.track, msg.wanted)
-      else if (msg.__r === 'dm') {
-        const inbox: InboxMessage = {
-          from: msg.from,
-          fromMeta: msg.fromMeta,
-          fromIdentity: msg.fromIdentity ?? null,
-          data: msg.data,
-          ...(msg.ackId ? { ackId: msg.ackId } : {}),
-        }
-        // An ack DM replies through the channel's own ack — the handler's return rides it home.
-        if (msg.ackId) return this._deliverMessageAck(inbox)
-        this._deliverMessage(inbox)
-      } else if (msg.__r === 'left') this._onLeft(leaveCauseFromWire(msg))
+      switch (msg.__r) {
+        case 'p-meta':
+          this._meta = ownMetadata(msg.meta)
+          return
+        case 'demand':
+          return this._onDemand(msg.track, msg.wanted)
+        case 'dm':
+          // An ack DM replies through the channel's own ack — the handler's return rides it home.
+          if (msg.ackId) return this._deliverMessageAck(inboxMessageFromWire(msg))
+          return this._deliverMessage(inboxMessageFromWire(msg))
+        case 'left':
+          return this._onLeft(leaveCauseFromWire(msg))
+      }
     })
     channel.onClose(() => this._onLeft({ type: 'disconnected' }))
   }
@@ -521,6 +517,6 @@ class ClientStandaloneParticipant extends ClientParticipantBase {
   }
 }
 
-function reportRoomError(err: unknown): void {
+function reportClientCallbackError(err: unknown): void {
   console.error('[telefunc:room-error]', err instanceof Error ? err : new Error(String(err)))
 }

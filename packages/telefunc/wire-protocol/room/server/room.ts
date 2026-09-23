@@ -39,6 +39,7 @@ import {
 } from '../model.js'
 import {
   hasRoomTag,
+  inboxMessageFromWire,
   joinedMember,
   type MemberWants,
   type MemberSnapshot,
@@ -53,7 +54,7 @@ import {
 } from '../protocol.js'
 import { RoomState, RoomStateView } from '../state.js'
 import { RoomDemand } from '../demand.js'
-import { ParticipantBase, type InboxMessage } from '../participant.js'
+import { ParticipantBase } from '../participant.js'
 import type { RoomStubChannel } from './stub.js'
 import type { RoomRequest } from './requests.js'
 import { LocalHolder, type LaneHolder } from './replay.js'
@@ -585,13 +586,7 @@ class ServerRoom extends RoomStateView implements Room {
     // A client held through a room stub gets the DM relayed (its `ackId` rides along) and replies with `dm-reply`.
     if (holder === undefined || !(holder instanceof ServerLocalParticipant))
       return holder?._relayDm(encodePublishText(serialized, rawInfo), dm)
-    const msg: InboxMessage = {
-      from: dm.from,
-      fromMeta: dm.fromMeta,
-      fromIdentity: dm.fromIdentity ?? null,
-      data: dm.data,
-      ...(dm.ackId ? { ackId: dm.ackId } : {}),
-    }
+    const msg = inboxMessageFromWire(dm)
     // A server-side participant, or one a client holds (its forwarder replies). Either way, for an ack DM we route the handler's reply back to the sender's inbox.
     if (dm.ackId) {
       void holder

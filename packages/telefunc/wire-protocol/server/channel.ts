@@ -1,4 +1,4 @@
-export { Channel, ServerChannel, SERVER_CHANNEL_BRAND, parsePeerText }
+export { Channel, ServerChannel, SERVER_CHANNEL_BRAND, parsePeerText, reportServerChannelError }
 export { ChannelClosedError, ChannelOverflowError } from '../channel-errors.js'
 export { NetworkError } from '../../shared/NetworkError.js'
 

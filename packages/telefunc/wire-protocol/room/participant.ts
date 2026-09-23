@@ -1,5 +1,4 @@
 export { ParticipantBase }
-export type { InboxMessage }
 
 import { invokeChannelListener, type ChannelPublishAck } from '../channel.js'
 import { makeDisposer } from '../wrapProxy.js'
@@ -7,7 +6,7 @@ import type { TELEFUNC_SHIELDS } from '../../node/shared/transformer/generateShi
 import { assert } from '../../utils/assert.js'
 import { DM_PARTICIPANT_LEFT, RoomError, toRoomFailure } from './errors.js'
 import { ownLeaveCause, ownMetadata, senderOf } from './model.js'
-import type { DmReply } from './protocol.js'
+import type { DmReply, InboxMessage } from './protocol.js'
 import type {
   BinaryPublishOptions,
   LeaveCause,
@@ -16,21 +15,12 @@ import type {
   PublishOptions,
   Sender,
 } from './types.js'
-// ParticipantBase — the shared half of every LocalParticipant
-/** The private-message inbox and the leave lifecycle, identical on server and client. Flavors supply the transport through the abstract operations and their own error pipeline. */
-/** A delivered private message, as stamped by the sender's node. `ackId` is present when the sender awaits a reply (`send(…, { ack: true })`) — the recipient's handler return is routed back. */
-type InboxMessage = {
-  from: string
-  fromMeta: ParticipantMeta | null
-  fromIdentity: string | null
-  data: unknown
-  ackId?: string
-}
 /** Pre-listen inbox hold: count-capped, drop-oldest. The DM lane is the only unconditionally-delivered lane (addressed — there are no wants to gate it on), so it's the only lane with a client-side
  * attach window to bridge; every room lane is want-gated at the server and has nothing to hold.
  */
 const PENDING_INBOX_MAX_COUNT = 64
 const DM_NO_INBOX_LISTENER: DmReply = { ok: false, err: 'No participant inbox listener is attached' }
+/** The private-message inbox and the leave lifecycle, identical on server and client; flavors supply the transport. */
 abstract class ParticipantBase implements LocalParticipant {
   /** Phantom: the publish shield rides the type only (see `RoomShield`), never a runtime field. */
   declare readonly [TELEFUNC_SHIELDS]: { data: unknown }

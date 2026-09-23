@@ -1,5 +1,5 @@
 // Shared Room storage records and wire envelopes.
-export { hasRoomTag, joinedMember, decodeDmReply }
+export { hasRoomTag, joinedMember, decodeDmReply, inboxMessageFromWire, wireDmFromInbox }
 export type {
   RoomConfigRecord,
   RoomMemberRecord,
@@ -22,6 +22,7 @@ export type {
   ParticipantStubRequest,
   ParticipantStubNotice,
   MemberWants,
+  InboxMessage,
 }
 
 import { isRecord } from './model.js'
@@ -201,6 +202,34 @@ type ParticipantStubNotice =
 
 /** Which members' streams a holder wants on the text lane — `all` for room-level listeners, or a specific member set for participant-scoped ones. */
 type MemberWants = { all: boolean; members: string[] }
+
+/** A delivered private message, as stamped by the sender's node. `ackId` is present when the sender awaits a reply (`send(…, { ack: true })`). */
+type InboxMessage = {
+  from: string
+  fromMeta: ParticipantMeta | null
+  fromIdentity: string | null
+  data: unknown
+  ackId?: string
+}
+type WireDm = Omit<RoomDmEnvelope, '__r' | 'to'>
+function inboxMessageFromWire(dm: WireDm): InboxMessage {
+  return {
+    from: dm.from,
+    fromMeta: dm.fromMeta,
+    fromIdentity: dm.fromIdentity ?? null,
+    data: dm.data,
+    ...(dm.ackId ? { ackId: dm.ackId } : {}),
+  }
+}
+function wireDmFromInbox(msg: InboxMessage): WireDm {
+  return {
+    from: msg.from,
+    fromMeta: msg.fromMeta,
+    ...(msg.fromIdentity === null ? {} : { fromIdentity: msg.fromIdentity }),
+    data: msg.data,
+    ...(msg.ackId ? { ackId: msg.ackId } : {}),
+  }
+}
 
 /** The member a `join` event announces, before any meta write or track. */
 function joinedMember(event: Extract<RoomCtrlEnvelope, { __r: 'join' }>): MemberSnapshot {

@@ -11,7 +11,7 @@ import type {
 } from '../channel.js'
 import type { TELEFUNC_SHIELDS } from '../../node/shared/transformer/generateShield/shield-key.js'
 import { invokeChannelListener, makePublishInfo } from '../channel.js'
-import { ServerChannel } from './channel.js'
+import { ServerChannel, reportServerChannelError } from './channel.js'
 import type { BroadcastBackend, PublishResult } from '../backend/broadcast/contract.js'
 import { getBroadcastBackend } from '../backend/install.js'
 import type { BackendSubscription } from '../backend/subscription.js'
@@ -25,7 +25,6 @@ import type { WirePublishInfo } from '../shared-ws.js'
 import { STATUS_BODY_INTERNAL_SERVER_ERROR } from '../../shared/constants.js'
 import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
 import { classifyTelefuncError } from '../error-classification.js'
-import { handleTelefunctionBug } from '../../node/server/runTelefunc/validateTelefunctionError.js'
 assertIsNotBrowser()
 
 const SERVER_BROADCAST_BRAND: unique symbol = Symbol.for('ServerBroadcast')
@@ -303,5 +302,5 @@ const Broadcast = {
 
 function reportStaticListenerError(error: unknown): void {
   if (classifyTelefuncError(error, isExpectedChannelFailure).kind !== 'bug') return
-  handleTelefunctionBug(error instanceof Error ? error : new Error(String(error)))
+  reportServerChannelError(error)
 }

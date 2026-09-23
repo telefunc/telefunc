@@ -1,7 +1,7 @@
 export { reportCallbackError, reportRoomError, roomAckError }
 
 import { stringify } from '@brillout/json-serializer/stringify'
-import { handleTelefunctionBug } from '../../../node/server/runTelefunc/validateTelefunctionError.js'
+import { reportServerChannelError } from '../../server/channel.js'
 import { ACK_STATUS, type AckResultStatus } from '../../shared-ws.js'
 import { classifyTelefuncError } from '../../error-classification.js'
 import { isRoomError, ROOM_BUG_MESSAGE } from '../errors.js'
@@ -23,5 +23,5 @@ function reportRoomError(err: unknown): void {
 
 /** Application code (listeners, handlers, after-hooks): whatever escapes it is a bug. */
 function reportCallbackError(err: unknown): void {
-  handleTelefunctionBug(err instanceof Error ? err : new Error(String(err)))
+  reportServerChannelError(err)
 }

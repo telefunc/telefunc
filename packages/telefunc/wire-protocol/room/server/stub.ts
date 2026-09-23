@@ -29,6 +29,7 @@ import { DM_PARTICIPANT_LEFT, RoomError } from '../errors.js'
 import { leaveCauseToWire } from '../model.js'
 import {
   decodeDmReply,
+  wireDmFromInbox,
   type DmReply,
   type RoomOrder,
   type ParticipantStubRequest,
@@ -385,14 +386,7 @@ class RoomParticipantStubChannel extends RoomRequestChannel {
 
     // The ack carries the client's reply; only a transport rejection means the holder left.
     participant._setForwarder((msg) => {
-      const notice = {
-        __r: 'dm' as const,
-        from: msg.from,
-        fromMeta: msg.fromMeta,
-        ...(msg.fromIdentity == null ? {} : { fromIdentity: msg.fromIdentity }),
-        data: msg.data,
-        ...(msg.ackId ? { ackId: msg.ackId } : {}),
-      }
+      const notice = { __r: 'dm' as const, ...wireDmFromInbox(msg) }
       if (!msg.ackId) {
         void this.send(notice).catch(() => {})
         return
