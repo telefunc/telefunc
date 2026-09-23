@@ -39,7 +39,7 @@ import {
   directoryPut,
   dropGenerationRows,
   initSchema,
-  listGenerations,
+  listOrphanGenerations,
   readCells,
   hasGeneration,
   readLiveHead,
@@ -143,7 +143,7 @@ export class TelefuncRoomDurableObject extends DurableObject {
           if (missing !== undefined) return { stale: 'cell', key: missing }
         }
         const mark = advanceOrder(this.#sql, inc, key, now)
-        if (opts?.retain === true) installRetained(this.#sql, inc, lane, frame, mark)
+        if (opts?.retain === true) installRetained(this.#sql, inc, key, frame, mark)
         return { ...mark, targets: snapshotRoutes(this.#sql, inc, key, now) }
       },
     )
@@ -249,7 +249,7 @@ export class TelefuncRoomDurableObject extends DurableObject {
         "DELETE FROM head WHERE id = 1 AND state = 'closed' AND expires_at IS NOT NULL AND expires_at <= ?",
         now,
       )
-      return listGenerations(this.#sql).filter((inc) => inc !== currentInc)
+      return listOrphanGenerations(this.#sql, currentInc)
     })
 
     const failedOrphans = new Set<string>()

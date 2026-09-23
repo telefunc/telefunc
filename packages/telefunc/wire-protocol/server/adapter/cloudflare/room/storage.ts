@@ -24,7 +24,7 @@ export function toBytes(value: ArrayBuffer | Uint8Array): Uint8Array {
 }
 
 export function initSchema(sql: SqlStorage): void {
-  // The DO is the room: `head` is one row or absent; `gen` guards fresh incarnations and cell revisions.
+  // The DO is the room: `head` is one row or absent; `gen` is each installed incarnation's cell revision.
   sql.exec(`
     CREATE TABLE IF NOT EXISTS head
       (id INTEGER PRIMARY KEY CHECK (id = 1), rev TEXT NOT NULL, inc TEXT, state TEXT NOT NULL, config BLOB NOT NULL, lease_id TEXT, lease_until INTEGER, expires_at INTEGER);
@@ -60,14 +60,17 @@ export function directoryList(
   prefix: string,
   cursor?: string,
 ): { entries: { roomId: string; incTag: string }[]; cursor?: string } {
-  const query =
-    cursor === undefined
-      ? 'SELECT room_id, inc_tag FROM directory WHERE substr(room_id, 1, length(?)) = ? ORDER BY room_id LIMIT ?'
-      : 'SELECT room_id, inc_tag FROM directory WHERE substr(room_id, 1, length(?)) = ? AND room_id > ? ORDER BY room_id LIMIT ?'
-  const matching =
-    cursor === undefined
-      ? sql.exec<{ room_id: string; inc_tag: string }>(query, prefix, prefix, DIRECTORY_PAGE_SIZE + 1).toArray()
-      : sql.exec<{ room_id: string; inc_tag: string }>(query, prefix, prefix, cursor, DIRECTORY_PAGE_SIZE + 1).toArray()
+  const after = cursor ?? null
+  const matching = sql
+    .exec<{ room_id: string; inc_tag: string }>(
+      'SELECT room_id, inc_tag FROM directory WHERE substr(room_id, 1, length(?)) = ? AND (? IS NULL OR room_id > ?) ORDER BY room_id LIMIT ?',
+      prefix,
+      prefix,
+      after,
+      after,
+      DIRECTORY_PAGE_SIZE + 1,
+    )
+    .toArray()
   const page = matching.slice(0, DIRECTORY_PAGE_SIZE)
   const entries = page.map((row) => ({ roomId: row.room_id, incTag: row.inc_tag }))
   const last = page[page.length - 1]
@@ -96,9 +99,10 @@ export function hasGeneration(sql: SqlStorage, inc: string): boolean {
   return sql.exec('SELECT 1 FROM gen WHERE inc = ?', inc).toArray().length > 0
 }
 
-export function listGenerations(sql: SqlStorage): string[] {
+/** Installed incarnations other than `currentInc`. */
+export function listOrphanGenerations(sql: SqlStorage, currentInc: string | null): string[] {
   return sql
-    .exec<{ inc: string }>('SELECT inc FROM gen')
+    .exec<{ inc: string }>('SELECT inc FROM gen WHERE inc IS NOT ?', currentInc)
     .toArray()
     .map((row) => row.inc)
 }
