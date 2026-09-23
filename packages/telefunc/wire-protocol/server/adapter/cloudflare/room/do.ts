@@ -3,7 +3,7 @@
 
 import { DurableObject } from 'cloudflare:workers'
 import type { CellMutation, CxResult, HeadCx, HeadNext, LaneId, RoomHead } from '../../../../backend/room/contract.js'
-import { encodeLaneKey } from './codec.js'
+import { encodeLaneKey } from '../../../../backend/room/lane-key.js'
 import {
   dispatchRoomShardFanout,
   dispatchRoomShardFanoutViaCoordinator,

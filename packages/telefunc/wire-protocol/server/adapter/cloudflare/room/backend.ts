@@ -14,7 +14,7 @@ import type {
 } from '../../../../backend/room/contract.js'
 import type { BackendReceiver, SubscriptionBinding, SubscriptionDriver } from '../../../../backend/subscription.js'
 import { CloudflareBroadcastTransport } from '../broadcast.js'
-import { encodeLaneKey } from './codec.js'
+import { encodeLaneKey } from '../../../../backend/room/lane-key.js'
 import { CloudflareRoomSubscriptionAttempt } from './subscription.js'
 import type { TelefuncRoomDurableObject } from './do.js'
 import type { RouteInstallation } from './routes.js'

@@ -78,7 +78,6 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
 
   publish(data: ChannelData<T>): Promise<ChannelPublishAck> {
     this._ensureBroadcast()
-    if (!this._backend) throw new ChannelClosedError()
     const ret = this._trackAck(Promise.resolve(this._publish('text', textEncoder.encode(stringify(data)))))
     ret.catch(() => {})
     return ret
@@ -90,7 +89,6 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
 
   publishBinary(data: Uint8Array): Promise<ChannelPublishAck> {
     this._ensureBroadcast()
-    if (!this._backend) throw new ChannelClosedError()
     const ret = this._trackAck(Promise.resolve(this._publish('binary', data)))
     ret.catch(() => {})
     return ret

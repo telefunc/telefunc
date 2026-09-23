@@ -2,7 +2,8 @@
 // Retained payloads are internally chunked to 1.5 MB rows below workerd's 2 MB cap.
 
 import type { LaneId } from '../../../../backend/room/contract.js'
-import { encodeLaneKey, type LaneParts, laneToParts, partsToLane } from './codec.js'
+import { encodeLaneKey } from '../../../../backend/room/lane-key.js'
+import { type LaneParts, laneToParts, partsToLane } from './codec.js'
 import { toBytes, type OrderMark } from './storage.js'
 
 const MAX_RETAINED_CHUNK_BYTES = 1_500_000

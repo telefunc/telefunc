@@ -3,7 +3,7 @@ export type { ResponseRoomGrants }
 
 import { stringify } from '@brillout/json-serializer/stringify'
 import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
-import { assertUsage } from '../../utils/assert.js'
+import { assert, assertUsage } from '../../utils/assert.js'
 import { isObject } from '../../utils/isObject.js'
 import { unrefTimer } from '../../utils/unrefTimer.js'
 import { ROOM_DM_ACK_TIMEOUT_MS, ROOM_TAIL_ATTACH_TIMEOUT_MS } from './constants.js'
@@ -257,7 +257,7 @@ class RoomStubChannel extends ServerBroadcast {
   /** @internal — append a live message to the pending tail, bounded drop-oldest (the freshest tail is what a late subscriber wants). Called only while `_tailPending` is non-null. */
   _holdTail(serialized: string, ord: RoomOrder, from: string): void {
     const hold = this._tailPending
-    if (!hold) return
+    assert(hold)
     pushBoundedTail(hold, { serialized, ord, from })
   }
 

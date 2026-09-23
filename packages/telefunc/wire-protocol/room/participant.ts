@@ -5,6 +5,7 @@ import type { ChannelPublishAck } from '../channel.js'
 import { makeDisposer } from '../wrapProxy.js'
 import type { TELEFUNC_SHIELDS } from '../../node/shared/transformer/generateShield/shield-key.js'
 import { isPromise } from '../../utils/isPromise.js'
+import { assert } from '../../utils/assert.js'
 import { DM_PARTICIPANT_LEFT, RoomError, toRoomFailure } from './errors.js'
 import { ownLeaveCause, ownMetadata } from './model.js'
 import type { DmReply } from './protocol.js'
@@ -60,8 +61,10 @@ abstract class ParticipantBase implements LocalParticipant {
     this._pendingInbox = null
     if (!held) return
     for (const { msg, ackResolve } of held) {
-      const reply: DmReply | Promise<DmReply> = forwarder(msg) ?? { ok: true, result: undefined }
-      if (ackResolve) void Promise.resolve(reply).then(ackResolve)
+      const reply = forwarder(msg)
+      if (!ackResolve) continue
+      assert(reply) // an ack DM's forwarder answers
+      void reply.then(ackResolve)
     }
   }
   /** @internal — already bound to a client holder (serialized once, via `bindParticipantStubChannel`)? */
@@ -119,7 +122,11 @@ abstract class ParticipantBase implements LocalParticipant {
    * Held (like any DM) until the first `listen()` if none is registered; resolves with an error if the participant leaves first (see `_onLeft`). Never rejects.
    */
   _deliverMessageAck(msg: InboxMessage): Promise<DmReply> {
-    if (this._forwarder) return Promise.resolve(this._forwarder(msg) ?? { ok: true, result: undefined })
+    if (this._forwarder) {
+      const reply = this._forwarder(msg)
+      assert(reply) // an ack DM's forwarder answers
+      return reply
+    }
     if (this._messageCbs.length === 0) {
       if (this._left) return Promise.resolve(DM_PARTICIPANT_LEFT)
       if (this._inboxAttached) return Promise.resolve(DM_NO_INBOX_LISTENER)

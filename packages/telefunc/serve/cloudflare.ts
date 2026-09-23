@@ -32,7 +32,6 @@ import { CHANNEL_TRANSPORT } from '../wire-protocol/constants.js'
 import {
   CloudflareRoomSessionManager,
   CloudflareRoomBackend,
-  CLOUDFLARE_ROOM_CONTEXT_ERROR,
   materializeCloudflareRoomSessionManager,
   requireCloudflareRoomNamespace,
   withCloudflareRoomSessionManager,
@@ -192,19 +191,11 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
     }
 
     telefuncRoomDeliver(request: RoomShardDeliveryRequest): Promise<void> {
-      return this.runWithRoomManager(() => {
-        const roomManager = materializeCloudflareRoomSessionManager()
-        if (roomManager !== this.roomManager) throw new Error(CLOUDFLARE_ROOM_CONTEXT_ERROR)
-        return roomManager.deliver(request)
-      })
+      return this.runWithRoomManager(() => materializeCloudflareRoomSessionManager().deliver(request))
     }
 
     telefuncRoomInvalidate(request: RoomShardInvalidationRequest): void {
-      return this.runWithRoomManager(() => {
-        const roomManager = materializeCloudflareRoomSessionManager()
-        if (roomManager !== this.roomManager) throw new Error(CLOUDFLARE_ROOM_CONTEXT_ERROR)
-        return roomManager.invalidate(request)
-      })
+      return this.runWithRoomManager(() => materializeCloudflareRoomSessionManager().invalidate(request))
     }
 
     telefuncRoomFanout(request: RoomShardFanoutRequest) {
@@ -241,7 +232,7 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
   const TelefuncRoomDurableObject = createTelefuncRoomDurableObjectClass(bindingName, jurisdiction)
 
   return {
-    async serve({ request, env, ctx }: ServeInput): Promise<Response | undefined> {
+    async serve({ request, env }: ServeInput): Promise<Response | undefined> {
       if (!isTelefuncRequest(request)) return undefined
       const config = getServerConfig()
 
@@ -279,7 +270,6 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
         const routingCommit = kv.put(`session:${token}`, JSON.stringify(value), {
           expirationTtl: SHARD_TOKEN_TTL_SECONDS,
         })
-        ctx.waitUntil(routingCommit)
         await routingCommit
       }
 
