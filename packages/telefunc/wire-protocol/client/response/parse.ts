@@ -159,30 +159,23 @@ async function reviveResponse(
   const reviver = createStreamingReviver(
     context,
     function onRevived(revived) {
+      const { value, abort, close } = revived
+      assert(isObjectOrFunction(value))
       // An adopted value keeps exact identity and shares its tracked owner's lifecycle.
-      if (isObjectOrFunction(revived.value) && closeHandlers.has(revived.value)) return
-      {
-        const { value, close } = revived
-        assert(isObjectOrFunction(value))
-        const wrapper = wrapProxy(value)
-        globalObject.gcRegistry.register(wrapper, close)
-        // This is what the user gets
-        revived.value = wrapper
-      }
-
-      {
-        const { value, abort, close } = revived
-        assert(isObjectOrFunction(value))
-        closeHandlers.set(value, close)
-        allCloseHandlers.push(close)
-        callContext.abortController.signal.addEventListener(
-          'abort',
-          () => {
-            abort(makeAbortError(undefined, callContext))
-          },
-          { once: true },
-        )
-      }
+      if (closeHandlers.has(value)) return
+      // This is what the user gets
+      const wrapper = wrapProxy(value)
+      revived.value = wrapper
+      globalObject.gcRegistry.register(wrapper, close)
+      closeHandlers.set(wrapper, close)
+      allCloseHandlers.push(close)
+      callContext.abortController.signal.addEventListener(
+        'abort',
+        () => {
+          abort(makeAbortError(undefined, callContext))
+        },
+        { once: true },
+      )
     },
     extensionResponseTypes,
   )
