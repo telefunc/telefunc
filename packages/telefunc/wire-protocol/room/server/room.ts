@@ -62,7 +62,6 @@ import { RoomStubChannel } from './stub.js'
 import type { RoomRequest } from './requests.js'
 import { LocalHolder, type LaneHolder, type WantsChange } from './replay.js'
 import { TailHold } from './tail.js'
-import type { LaneSubscription } from './lane-subscription.js'
 import { RoomSubscriptions, type HolderWants } from './subscriptions.js'
 import {
   SEMANTIC_LANE,
@@ -213,10 +212,8 @@ class ServerRoom extends RoomStateView implements Room {
     const { id, meta, identity, joinedAt, hidden } = admission
     this._pendingAdmissions.add(id)
     this._subs.replan()
-    let created = false
     try {
-      await withinRoomHorizon(this._admittedInbox(id).ready, ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS)
-      this._admittedInbox(id)
+      await this._inboxReady(id)
       await createMember(this.id, this._inc, id, {
         meta,
         joinedAt,
@@ -225,8 +222,13 @@ class ServerRoom extends RoomStateView implements Room {
         ...(identity === null ? {} : { identity }),
         ...(hidden ? { hidden: true } : {}),
       })
-      created = true
-      this._admittedInbox(id)
+    } catch (error) {
+      this._abandonAdmission(id)
+      throw error
+    }
+    // The member cell is written: from here a failure evicts it again.
+    try {
+      this._assertAdmitted(id)
       this._pendingAdmissions.delete(id)
       this._state.applyJoin({ id, meta, joinedAt, metaSeq: 0, identity, ...(hidden ? { hidden: true } : {}) })
       await publishCtrl(this.id, this._inc, {
@@ -238,22 +240,25 @@ class ServerRoom extends RoomStateView implements Room {
         ...(hidden ? { hidden: true } : {}),
       })
     } catch (error) {
-      await this._rollbackAdmission(admission, created)
+      await evictMember(this.id, this._inc, id, identity, { type: 'left' }).catch(reportRoomError)
+      this._abandonAdmission(id)
       throw error
     }
   }
-
-  private async _rollbackAdmission({ id, identity }: Admission, created: boolean): Promise<void> {
-    this._pendingAdmissions.delete(id)
-    if (created) await evictMember(this.id, this._inc, id, identity, { type: 'left' }).catch(reportRoomError)
-    this._applyLeave(id, { type: 'left' })
-  }
-
-  /** The member's inbox slot exists exactly while the room is open and its holder owns the member, so this also checks the admission still holds. */
-  private _admittedInbox(id: string): LaneSubscription {
+  /** The member's inbox delivers (within the horizon) before its join is visible, and the admission still holds. */
+  private async _inboxReady(id: string): Promise<void> {
     const inbox = this._subs.inboxOf(id)
-    if (inbox === undefined) throw this._state.closed ? roomClosedError(this.id) : participantLeftError()
-    return inbox
+    if (inbox !== undefined) await withinRoomHorizon(inbox.ready, ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS)
+    this._assertAdmitted(id)
+  }
+  /** A closed room or a departed member drops the admission's inbox. */
+  private _assertAdmitted(id: string): void {
+    if (this._subs.inboxOf(id) === undefined)
+      throw this._state.closed ? roomClosedError(this.id) : participantLeftError()
+  }
+  private _abandonAdmission(id: string): void {
+    this._pendingAdmissions.delete(id)
+    this._applyLeave(id, { type: 'left' })
   }
 
   /** @internal */
