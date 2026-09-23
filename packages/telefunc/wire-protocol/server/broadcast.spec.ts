@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Broadcast, ServerBroadcast } from './server-broadcast.js'
+import { ServerChannel } from './channel.js'
 import { ReplayBuffer } from '../replay-buffer.js'
-import { ACK_STATUS, TAG, decode, encode, type DecodedFrame } from '../shared-ws.js'
+import { ACK_STATUS, ProtocolViolationError, TAG, decode, encode, type DecodedFrame } from '../shared-ws.js'
 import { ChannelMux, type ServerTransport } from './mux.js'
 import { IndexedPeer } from './IndexedPeer.js'
 import { disposeBackend, installBackend } from '../backend/install.js'
@@ -368,6 +369,17 @@ describe('Broadcast disallows channel methods', () => {
 // publishes. The shield is wired via `[TELEFUNC_SHIELDS]` on the type;
 // the runtime check lives in _dispatchPublishAckReq.
 // ───────────────────────────────────────────────────────────────────────────
+
+describe('publish frames outside a broadcast', () => {
+  it('treats a publish on a plain channel as a protocol violation instead of never answering it', () => {
+    const channel = new ServerChannel()
+    for (const frame of [
+      { tag: TAG.PUBLISH_ACK_REQ, index: 1, seq: 1, text: '"hi"' },
+      { tag: TAG.PUBLISH_BINARY_ACK_REQ, index: 1, seq: 2, data: new Uint8Array([1]) },
+    ] as const)
+      expect(() => channel._dispatchFrame(frame)).toThrow(ProtocolViolationError)
+  })
+})
 
 describe('Broadcast lifecycle and route ownership', () => {
   it('keeps a local route after peer unsubscribe and releases it with the final local listener', async () => {

@@ -459,11 +459,12 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   }
 
   // Publishes and subscriptions are for broadcast-shaped channels; a plain channel drops them.
+  // Only a broadcast takes publishes; an unanswered publish on another channel would hang its sender.
   _onPeerPublishAckReqMessage(_text: string, _seq: number): Promise<void> {
-    return Promise.resolve()
+    throw new ProtocolViolationError('publish on a channel that is not a broadcast')
   }
   _onPeerPublishBinaryAckReqMessage(_data: Uint8Array, _seq: number): Promise<void> {
-    return Promise.resolve()
+    throw new ProtocolViolationError('publish on a channel that is not a broadcast')
   }
   _onPeerBroadcastSubscribe(_binary: boolean): void {}
   _onPeerBroadcastUnsubscribe(_binary: boolean): void {}
