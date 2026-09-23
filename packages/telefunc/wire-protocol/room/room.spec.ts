@@ -1167,6 +1167,14 @@ describe('Room public behavior', () => {
     ] as const
     for (const [channel, frame] of frames) expect(() => channel._dispatchFrame(frame)).toThrow(ProtocolViolationError)
   })
+  it('rejects a participant ref that is not an object as a usage error', async () => {
+    const room = await Room.create('ref-shape')
+    for (const call of [
+      () => Room.removeParticipant(room.id, 'member-id' as never),
+      () => Room.send(room.id, null as never, 'hi'),
+    ])
+      await expect(call()).rejects.toThrow('The participant ref should be { id } or { identity }')
+  })
   it('validates send() recipients and meta arguments at the API edge', async () => {
     await Room.create('api-edge')
     const member = await Room.join('api-edge')

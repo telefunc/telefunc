@@ -364,6 +364,7 @@ async function cleanupFinalizedIncarnation(backend: RoomBackend, roomId: string,
 }
 
 async function resolveParticipantRef(roomId: string, inc: string, target: ParticipantRef): Promise<MemberSnapshot[]> {
+  assertUsage(isObject(target), 'The participant ref should be { id } or { identity }')
   if ('id' in target) {
     assertUsage(
       typeof target.id === 'string' && target.id.length > 0,
@@ -381,10 +382,10 @@ async function resolveParticipantRef(roomId: string, inc: string, target: Partic
 }
 
 async function removeParticipant(id: string, target: ParticipantRef & { reason?: unknown }): Promise<void> {
-  const cause = removedCause(target.reason)
   const config = await requireRoom(id)
-  for (const member of await resolveParticipantRef(id, config.inc, target))
-    await evictMember(id, config.inc, member.id, member.identity ?? null, cause)
+  const members = await resolveParticipantRef(id, config.inc, target)
+  const cause = removedCause(target.reason)
+  for (const member of members) await evictMember(id, config.inc, member.id, member.identity ?? null, cause)
 }
 
 async function getRoomParticipants(id: string, target?: { identity: string }): Promise<ParticipantSnapshotView[]> {
@@ -422,11 +423,10 @@ async function announceToRoom(id: string, data: unknown): Promise<RoomSendReceip
 
 async function sendToParticipant(id: string, target: ParticipantRef, data: unknown): Promise<void> {
   const config = await requireRoom(id)
+  const members = await resolveParticipantRef(id, config.inc, target)
   const exact = 'id' in target
-  for (const member of await resolveParticipantRef(id, config.inc, target)) {
-    if (!(await sendServerDm(id, config.inc, member.id, data)) && exact) {
-      throw participantGoneError(member.id)
-    }
+  for (const member of members) {
+    if (!(await sendServerDm(id, config.inc, member.id, data)) && exact) throw participantGoneError(member.id)
   }
 }
 
