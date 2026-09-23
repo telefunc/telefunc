@@ -106,8 +106,8 @@ async function reviveResponse(
   const telefuncUrl = callContext.telefuncUrl
   const promises: Promise<unknown>[] = []
   const context: ClientReviverContext = {
-    adoptSubordinate(child, trackedOwner) {
-      const close = closeHandlers.get(trackedOwner)
+    shareLifecycle(child, owner) {
+      const close = closeHandlers.get(owner)
       assert(close)
       closeHandlers.set(child, close)
     },

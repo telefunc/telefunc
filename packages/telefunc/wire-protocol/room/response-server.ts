@@ -18,14 +18,10 @@ type RoomReplacerContract = TypeContract<ServerRoom, never, RoomSnapshotMetadata
 type RoomParticipantReplacerContract = TypeContract<ServerLocalParticipant, never, ParticipantStubMetadata>
 type RoomRemoteReplacerContract = TypeContract<RemoteParticipant, never, RemoteParticipantMetadata>
 
-/** Per-response grants shared by the Room replacers in one serializer pass. */
-const ROOM_GRANTS = Symbol()
-type RoomReplacerContext = ServerReplacerContext & {
-  [ROOM_GRANTS]?: Map<string, ResponseRoomGrants>
-}
+const ROOM_GRANTS = Symbol('telefunc.RoomResponseGrants')
 /** Keyed by room id: `Room.join(id)` and `Room.get(id)` build separate instances of one room. */
 function responseRoomGrants(context: ServerReplacerContext, roomId: string): ResponseRoomGrants {
-  const byRoom = ((context as RoomReplacerContext)[ROOM_GRANTS] ??= new Map())
+  const byRoom = context.responseState(ROOM_GRANTS, () => new Map<string, ResponseRoomGrants>())
   let grants = byRoom.get(roomId)
   if (!grants) byRoom.set(roomId, (grants = { selfSuppressed: new Set(), hidden: new Set() }))
   return grants

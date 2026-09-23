@@ -766,13 +766,7 @@ describe('Room public behavior', () => {
     const me = (await Room.join('self-suppress-by-id', { selfDelivery: false })) as ServerLocalParticipant
     const room = (await Room.get('self-suppress-by-id')) as ServerRoom
     const channels: ServerChannel[] = []
-    const context = {
-      registerChannel: (channel: ServerChannel) => {
-        channel._registerChannel()
-        channels.push(channel)
-      },
-      validators: new Map(),
-    } as unknown as ServerReplacerContext
+    const context = replacerContext(channels)
     roomReplacer.replace(room, context)
     roomParticipantReplacer.replace(me, context)
     const stub = channels.find((channel) => channel instanceof RoomStubChannel) as RoomStubChannel
@@ -791,13 +785,7 @@ describe('Room public behavior', () => {
     await me.publishBinary(new Uint8Array([1]), { track: 'screen', retain: true })
     const room = (await Room.get('self-suppress-retained')) as ServerRoom
     const channels: ServerChannel[] = []
-    const context = {
-      registerChannel: (channel: ServerChannel) => {
-        channel._registerChannel()
-        channels.push(channel)
-      },
-      validators: new Map(),
-    } as unknown as ServerReplacerContext
+    const context = replacerContext(channels)
     roomReplacer.replace(room, context)
     roomParticipantReplacer.replace(me, context)
     const stub = channels.find((channel) => channel instanceof RoomStubChannel) as RoomStubChannel
@@ -842,13 +830,7 @@ describe('Room public behavior', () => {
     const bot = await room.join({ hidden: true })
     const [remote] = await room.getParticipants({ hidden: true })
     const channels: ServerChannel[] = []
-    const context = {
-      registerChannel: (channel: ServerChannel) => {
-        channel._registerChannel()
-        channels.push(channel)
-      },
-      validators: new Map(),
-    } as unknown as ServerReplacerContext
+    const context = replacerContext(channels)
     roomRemoteReplacer.replace(remote!, context)
     roomReplacer.replace(room, context)
     const granted = attachPeer(channels.find((channel) => channel instanceof RoomStubChannel) as RoomStubChannel)
@@ -2655,6 +2637,20 @@ function attachPeer(stub: RoomStubChannel, lastSeq?: number, broadcast?: Broadca
     broadcast,
   )
   return { decoded: () => frames.map((frame) => decode(frame as Uint8Array<ArrayBuffer>)) }
+}
+function replacerContext(channels: ServerChannel[]): ServerReplacerContext {
+  const states = new Map<symbol, unknown>()
+  return {
+    registerChannel: (channel: ServerChannel) => {
+      channel._registerChannel()
+      channels.push(channel)
+    },
+    validators: new Map(),
+    responseState<T>(key: symbol, init: () => T): T {
+      if (!states.has(key)) states.set(key, init())
+      return states.get(key) as T
+    },
+  } as unknown as ServerReplacerContext
 }
 function declare(stub: RoomStubChannel, declaration: unknown): void {
   stub._onPeerMessage(stringify(declaration), 0)

@@ -116,11 +116,20 @@ function serializeTelefunctionResult(runContext: {
     registerChannel(channel)
     return channel
   }
-  const replacerContext: ServerReplacerContext = { createChannel, registerChannel, sendStream, validators: new Map() }
+  const responseStates = new Map<symbol, unknown>()
+  function responseState<T>(key: symbol, init: () => T): T {
+    if (!responseStates.has(key)) responseStates.set(key, init())
+    return responseStates.get(key) as T
+  }
   const replacer = createStreamingReplacer(
-    function getContext(value: unknown) {
-      replacerContext.validators = makeValidators(value, valueShields, shieldCtx)
-      return replacerContext
+    function getContext(value: unknown): ServerReplacerContext {
+      return {
+        createChannel,
+        registerChannel,
+        sendStream,
+        responseState,
+        validators: makeValidators(value, valueShields, shieldCtx),
+      }
     },
     function onReplaced({ abort }) {
       requestContext.responseAbort.onAbort(abort)

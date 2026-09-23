@@ -58,6 +58,7 @@ function createServerHarness(extensionTypes: ReplacerType<TypeContract, ServerRe
       return { metadata: { __index: index }, close() {}, abort() {} }
     },
     validators: new Map(),
+    responseState: (_key, init) => init(),
   }
   const replacer = createStreamingReplacer(
     () => context,
@@ -76,7 +77,7 @@ function createClientHarness(extensionTypes: ReviverType<TypeContract, ClientRev
   const lifecycles: { value: unknown; close: () => Promise<void> | void; abort: (abortError: AbortError) => void }[] =
     []
   const context: ClientReviverContext = {
-    adoptSubordinate() {},
+    shareLifecycle() {},
     createChannel(opts) {
       mintedChannels.push(opts)
       return { kind: 'client-channel', ...opts, close: async () => {}, abort: () => {} } as never

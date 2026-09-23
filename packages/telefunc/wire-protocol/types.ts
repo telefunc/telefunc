@@ -91,11 +91,7 @@ type ReviverType<C extends TypeContract = TypeContract, Context = unknown> = {
   revive(
     metadata: C['metadata'],
     context: Context,
-  ): {
-    value: C['result']
-    close: () => Promise<void> | void
-    abort: (abortError: AbortError) => void
-  }
+  ): { value: C['result']; close: () => Promise<void> | void; abort: (abortError: AbortError) => void }
 }
 
 // ===== Producer =====
@@ -140,7 +136,7 @@ type StreamSource = {
 /** Context for all client-side response revivers (streaming + placeholder). */
 type ClientReviverContext = {
   /** Gives a derived value its owner's explicit-close lifetime without changing its identity. */
-  adoptSubordinate(child: object, trackedOwner: object): void
+  shareLifecycle(child: object, owner: object): void
   createChannel<ClientToServer = unknown, ServerToClient = unknown>(opts: {
     channelId: string
     ack?: boolean
@@ -173,6 +169,8 @@ type ServerReplacerContext = {
   }): ServerChannel<ClientToServer, ServerToClient>
   /** Registers a channel with the response lifecycle. Also installs shield validators if the channel has shields. */
   registerChannel(channel: ServerChannel<any, any>): void
+  /** One store per response, shared by every replacer in it; `init` runs on the first call for `key`. */
+  responseState<T>(key: symbol, init: () => T): T
   sendStream(createProducer: () => StreamingProducer): {
     metadata: StreamingMetadata
     close: () => Promise<void> | void

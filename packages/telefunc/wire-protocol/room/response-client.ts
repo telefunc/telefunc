@@ -55,7 +55,7 @@ const roomRemoteReviver: ReviverType<RoomRemoteReviverContract, ClientReviverCon
     assert(metadata.room instanceof ClientRoom)
     const room = metadata.room
     const remote = room._reviveRemote(metadata)
-    context.adoptSubordinate(remote, room)
+    context.shareLifecycle(remote, room)
     return {
       value: remote,
       close() {},
