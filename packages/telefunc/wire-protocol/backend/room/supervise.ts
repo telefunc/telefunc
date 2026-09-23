@@ -1,6 +1,6 @@
 export { superviseRoomDriver }
 
-import { assertHeadNextWellFormed } from './head-transitions.js'
+import { assertHeadNextWellFormed } from './head.js'
 import { SubscriptionManager } from '../subscription-manager.js'
 import type { HeadCx, HeadNext, RoomBackend, RoomDriver } from './contract.js'
 import { roomSubscriptionSourceKey } from './lane-key.js'

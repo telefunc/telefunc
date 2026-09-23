@@ -14,7 +14,6 @@ import type {
   RoomHead,
   RoomSubscriptionSource,
 } from '../room/contract.js'
-import { assertHeadDeleteLegal, assertHeadTransition } from '../room/head-transitions.js'
 import { encodeLaneKey } from '../room/lane-key.js'
 import { unrefTimer } from '../../../utils/unrefTimer.js'
 import type {
@@ -210,25 +209,14 @@ export class MemoryBackend implements BroadcastDriver, RoomDriver {
     roomId: string,
     cx: HeadCx,
     next: HeadNext,
-  ): Promise<
-    { ok: true; head: RoomHead } | { ok: true; deleted: true } | { conflict: true; current: RoomHead | null }
-  > {
+  ): Promise<{ ok: true; head: RoomHead } | { conflict: true; current: RoomHead | null }> {
     this.#assertLive()
-    const existing = this.#state.rooms.get(roomId)
-    const current = this.#readAndExpireHead(existing)
-    // Only delete legality precedes compare; other transitions validate the matched head.
-    assertHeadDeleteLegal(next, current)
+    const current = this.#readAndExpireHead(this.#state.rooms.get(roomId))
     if (!this.#headCxMatches(cx, current)) {
       return { conflict: true, current: current === null ? null : publicHead(current) }
     }
     // Only a CX that actually applies materializes a room record.
-    const room = this.#roomFor(roomId)
-    if ('delete' in next) {
-      room.head = null
-      return { ok: true, deleted: true }
-    }
-    assertHeadTransition(cx, next, current, (inc) => existing?.gens.has(inc) === true)
-    return { ok: true, head: publicHead(this.#storeHead(room, next)) }
+    return { ok: true, head: publicHead(this.#storeHead(this.#roomFor(roomId), next)) }
   }
 
   #headCxMatches(cx: HeadCx, current: StoredHead | null): boolean {
@@ -244,7 +232,7 @@ export class MemoryBackend implements BroadcastDriver, RoomDriver {
     return true
   }
 
-  #storeHead(room: RoomRecord, next: Extract<HeadNext, { head: unknown }>): StoredHead {
+  #storeHead(room: RoomRecord, next: HeadNext): StoredHead {
     const now = this.#now()
     const stored: StoredHead = {
       rev: `rev-${++this.#state.revSeq}`,

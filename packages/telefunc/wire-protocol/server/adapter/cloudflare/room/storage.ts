@@ -2,19 +2,9 @@
 // Room-DO `transactionSync` makes head CX, cell batches, and order advance atomic under authority time.
 
 import type { CellMutation, CxResult, HeadCx, HeadNext, RoomHead } from '../../../../backend/room/contract.js'
-import {
-  assertHeadDeleteLegal,
-  assertHeadNextWellFormed,
-  assertHeadTransition,
-} from '../../../../backend/room/head-transitions.js'
-
-type HeadWriteNext = Extract<HeadNext, { head: unknown }>
 export type StoredHead = RoomHead & { expiresAt: number | null }
 
-type HeadCxOutcome =
-  | { ok: true; head: StoredHead }
-  | { ok: true; deleted: true }
-  | { conflict: true; current: StoredHead | null }
+type HeadCxOutcome = { ok: true; head: StoredHead } | { conflict: true; current: StoredHead | null }
 
 // Row shapes as SQLite hands them back (BLOB columns arrive as ArrayBuffer).
 type HeadRow = {
@@ -104,10 +94,6 @@ export function readLiveHead(sql: SqlStorage, now: number): StoredHead | null {
   return head
 }
 
-export function hasGeneration(sql: SqlStorage, inc: string): boolean {
-  return sql.exec('SELECT 1 FROM gen WHERE inc = ? LIMIT 1', inc).toArray().length > 0
-}
-
 // A generation token prevents stale work from authorizing a lease after an incarnation string is reused.
 export function readGenerationToken(sql: SqlStorage, inc: string): string | null {
   return sql.exec<{ token: string }>('SELECT token FROM gen WHERE inc = ?', inc).toArray()[0]?.token ?? null
@@ -143,7 +129,7 @@ function headCxMatches(sql: SqlStorage, cx: HeadCx, current: StoredHead | null, 
   return rowExists(sql, 'SELECT 1 FROM head WHERE id = 1 AND rev = ?', expect.rev)
 }
 
-// Called inside `transactionSync`; invalid transitions throw, while lost races return the current head.
+// Called inside `transactionSync`; a lost race returns the current head.
 export function compareExchangeHead(
   sql: SqlStorage,
   cx: HeadCx,
@@ -151,20 +137,12 @@ export function compareExchangeHead(
   now: number,
   mintRev: () => string,
 ): HeadCxOutcome {
-  assertHeadNextWellFormed(next)
   const current = readLiveHead(sql, now)
-  // Delete legality precedes comparison; other transitions validate the head that actually matched.
-  assertHeadDeleteLegal(next, current)
   if (!headCxMatches(sql, cx, current, now)) return { conflict: true, current }
-  if ('delete' in next) {
-    sql.exec('DELETE FROM head WHERE id = 1')
-    return { ok: true, deleted: true }
-  }
-  assertHeadTransition(cx, next as HeadWriteNext, current, (inc) => hasGeneration(sql, inc))
-  return { ok: true, head: storeHead(sql, next as HeadWriteNext, now, mintRev) }
+  return { ok: true, head: storeHead(sql, next, now, mintRev) }
 }
 
-function storeHead(sql: SqlStorage, next: HeadWriteNext, now: number, mintRev: () => string): StoredHead {
+function storeHead(sql: SqlStorage, next: HeadNext, now: number, mintRev: () => string): StoredHead {
   const rev = mintRev()
   const expiresAt = next.ttlMs === undefined ? null : now + next.ttlMs
   // The lease deadline is minted here, inside the CX, from authority time — never supplied by a caller.
@@ -181,7 +159,7 @@ function storeHead(sql: SqlStorage, next: HeadWriteNext, now: number, mintRev: (
     leaseUntil,
     expiresAt,
   )
-  // Registering the generation inside this CX makes the fresh-inc guard deterministic.
+  // A new incarnation's generation is registered inside the CX that names it.
   if (next.head.currentInc !== null) {
     sql.exec('INSERT OR IGNORE INTO gen (inc, token, revision) VALUES (?, ?, 0)', next.head.currentInc, rev)
   }

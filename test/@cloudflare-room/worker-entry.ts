@@ -236,10 +236,6 @@ async function nativeRpcRoundTrip(env: Env, suffix: string) {
   return {
     headConfig: [...opened.config],
     cell: stored === undefined ? null : [...stored],
-    validationError: await rejectionOf(
-      probe.authority.compareExchangeHead({ expect: 'absent' }, { delete: true }),
-      'native RPC validation error',
-    ),
   }
 }
 async function openHead(authority: Authority, inc: string, operation: string): Promise<RoomHead> {

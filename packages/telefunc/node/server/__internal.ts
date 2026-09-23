@@ -2,7 +2,6 @@ export type { TELEFUNC_SHIELDS } from '../shared/transformer/generateShield/shie
 export type * from '../../wire-protocol/backend/broadcast/contract.js'
 export type { BackendDriverPair } from '../../wire-protocol/backend/driver-pair.js'
 export { disposeBackend, setDefaultBackend } from '../../wire-protocol/backend/install.js'
-export { HEAD_TRANSITIONS } from '../../wire-protocol/backend/room/head-transitions.js'
 export { encodeLaneKey as laneKey } from '../../wire-protocol/backend/room/lane-key.js'
 export { ORDERING_FRAME_LAYOUT } from '../../wire-protocol/ordering-frame.js'
 export { getGlobalObject } from '../../utils/getGlobalObject.js'

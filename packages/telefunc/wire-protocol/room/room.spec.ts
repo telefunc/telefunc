@@ -41,7 +41,6 @@ import {
   setDefaultBackend,
 } from '../backend/install.js'
 import type { BackendDriverPair } from '../backend/driver-pair.js'
-import { HEAD_TRANSITIONS, assertHeadTransition } from '../backend/room/head-transitions.js'
 import { MemoryBackend, MemoryBackendState } from '../backend/memory/backend.js'
 import { SubscriptionManager } from '../backend/subscription-manager.js'
 import type { LaneId } from '../backend/room/contract.js'
@@ -2472,49 +2471,6 @@ describe('memory Backend SPI contract', () => {
     )
     expect(reconstructed).toMatchObject({ accepted: true, seq: 3, timestamp: 3 })
     await reconstructedDriver.dispose()
-  })
-  it('interprets every legal head transition from the one exported data table', () => {
-    const head = (state: 'open' | 'closing' | 'closed', inc: string | null, lease?: string) => ({
-      rev: 'r1',
-      state,
-      currentInc: inc,
-      config: new Uint8Array([1]),
-      ...(lease === undefined ? {} : { closeLease: { id: lease, until: 10 } }),
-    })
-    const next = (state: 'open' | 'closing' | 'closed', inc: string | null, lease?: string) => ({
-      head: {
-        state,
-        currentInc: inc,
-        config: new Uint8Array([1]),
-        ...(lease === undefined ? {} : { closeLease: { id: lease, durationMs: 1_000 } }),
-      },
-    })
-    const cases = [
-      [{ expect: 'absent' as const }, null, next('open', 'i1')],
-      [{ expect: { rev: 'r1' } }, head('closed', null), next('open', 'i1')],
-      [{ expect: { rev: 'r1' } }, head('open', 'i1'), next('open', 'i1')],
-      [{ expect: { rev: 'r1' } }, head('open', 'i1'), next('closing', 'i1', 'l1')],
-      [
-        { expect: { rev: 'r1', closingLeaseExpired: true as const } },
-        head('closing', 'i1', 'l1'),
-        next('closing', 'i1', 'l2'),
-      ],
-      [{ expect: { rev: 'r1', closingLease: 'l1' } }, head('closing', 'i1', 'l1'), next('closed', null)],
-    ] as const
-    expect(HEAD_TRANSITIONS).toHaveLength(cases.length)
-    for (const [cx, current, candidate] of cases) {
-      expect(() => assertHeadTransition(cx, candidate, current, () => false)).not.toThrow()
-    }
-    let failure: unknown
-    try {
-      assertHeadTransition({ expect: { rev: 'r1' } }, next('closed', null), head('open', 'i1'), () => false)
-    } catch (error) {
-      failure = error
-    }
-    expect(failure).toBeInstanceOf(Error)
-    expect(Object.getPrototypeOf(failure)).toBe(Error.prototype)
-    expect(Object.keys(failure as object)).toEqual([])
-    expect((failure as Error).message).toContain('not a legal head transition')
   })
   it('validates HeadNext shape before delegating to any raw driver', async () => {
     const backend = getRoomBackend()

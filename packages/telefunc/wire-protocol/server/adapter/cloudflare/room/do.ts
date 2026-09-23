@@ -39,10 +39,7 @@ import {
   type StoredHead,
 } from './storage.js'
 
-export type HeadCxResult =
-  | { ok: true; head: RoomHead }
-  | { ok: true; deleted: true }
-  | { conflict: true; current: RoomHead | null }
+export type HeadCxResult = { ok: true; head: RoomHead } | { conflict: true; current: RoomHead | null }
 export type CellsResult = { revision: string; cells: Map<string, Uint8Array> } | { staleInc: true }
 export type CommitWire =
   | { accepted: true; seq: number; timestamp: number; receivers: number; deliveryToken: string }
@@ -126,7 +123,6 @@ export class TelefuncRoomDurableObject extends DurableObject {
     await this.#scheduleMaintenanceIfNeeded()
     if ('conflict' in outcome)
       return { conflict: true, current: outcome.current === null ? null : headForRpc(outcome.current) }
-    if ('deleted' in outcome) return { ok: true, deleted: true }
     return { ok: true, head: headForRpc(outcome.head) }
   }
 

@@ -77,10 +77,7 @@ type StoredHead = {
   lease?: { id: string; until: number }
   exp?: number
 }
-type HeadCxReply =
-  | { tag: 'head'; head: StoredHead }
-  | { tag: 'deleted' }
-  | { tag: 'conflict'; current: StoredHead | null }
+type HeadCxReply = { tag: 'head'; head: StoredHead } | { tag: 'conflict'; current: StoredHead | null }
 type DropGenerationBeginReply = { exists: false } | { exists: true; token: string }
 type ReadCellsFenceReply = { stale: true } | { revision: string }
 type CellSelector = { keys: string[] } | { prefix: string }
@@ -113,9 +110,8 @@ function encodeCx(cx: HeadCx): string {
   return JSON.stringify({ form: 'generic', rev: expect.rev })
 }
 function encodeNext(next: HeadNext): string {
-  if ('delete' in next) return JSON.stringify({ kind: 'delete' })
   const { head, ttlMs } = next
-  const payload: Record<string, unknown> = { kind: 'head', state: head.state, config: toBase64(head.config) }
+  const payload: Record<string, unknown> = { state: head.state, config: toBase64(head.config) }
   if (head.currentInc !== null) payload.inc = head.currentInc
   if (head.closeLease !== undefined) payload.lease = { id: head.closeLease.id, durationMs: head.closeLease.durationMs }
   if (ttlMs !== undefined) payload.ttlMs = ttlMs
@@ -217,9 +213,7 @@ export class RedisBackend implements BroadcastDriver, RoomDriver {
     roomId: string,
     cx: HeadCx,
     next: HeadNext,
-  ): Promise<
-    { ok: true; head: RoomHead } | { ok: true; deleted: true } | { conflict: true; current: RoomHead | null }
-  > {
+  ): Promise<{ ok: true; head: RoomHead } | { conflict: true; current: RoomHead | null }> {
     this._assertLive()
     const reply = (await this._call(REDIS_ROOM_COMMANDS.headCx.name, [
       ...REDIS_ROOM_COMMAND_KEYS.headCx(this._prefix, roomId),
@@ -229,7 +223,6 @@ export class RedisBackend implements BroadcastDriver, RoomDriver {
     ])) as string
     const parsed = JSON.parse(reply) as HeadCxReply
     if (parsed.tag === 'head') return { ok: true, head: toPublicHead(parsed.head) }
-    if (parsed.tag === 'deleted') return { ok: true, deleted: true }
     return { conflict: true, current: parsed.current === null ? null : toPublicHead(parsed.current) }
   }
 

@@ -314,12 +314,7 @@ describe('Redis real three-master Cluster CI certification', () => {
     }
     const reinstall = async (): Promise<void> => {
       const tombstone = await authority.readHead(roomId)
-      if (tombstone !== null) {
-        expect(
-          await authority.compareExchangeHead(roomId, { expect: { rev: tombstone.head.rev } }, { delete: true }),
-        ).toEqual({ ok: true, deleted: true })
-      }
-      await open(authority, roomId, inc)
+      await open(authority, roomId, inc, tombstone?.head.rev)
       await writeCell('new')
     }
     if (begin === undefined) {
@@ -677,10 +672,11 @@ async function open(
   backend: Pick<ManagedBackend, 'compareExchangeHead'>,
   roomId: string,
   inc: string,
+  tombstoneRev?: string,
 ): Promise<RoomHead> {
   const result = await backend.compareExchangeHead(
     roomId,
-    { expect: 'absent' },
+    tombstoneRev === undefined ? { expect: 'absent' } : { expect: { rev: tombstoneRev } },
     { head: { currentInc: inc, state: 'open', config: bytes('redis-cluster-ci') } },
   )
   if (!('ok' in result) || !('head' in result)) throw new Error(`failed to open '${roomId}'`)

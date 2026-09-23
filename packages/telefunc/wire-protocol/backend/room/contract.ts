@@ -32,19 +32,17 @@ type RoomHead = {
   closeLease?: { id: string; until: number }
 }
 
-/** Drivers enforce exported `HEAD_TRANSITIONS` for writes and permit deletion only from `closed`. */
+/** Drivers compare-exchange; core is the only writer and decides every transition. */
 type HeadCx =
   | { expect: 'absent' }
   | { expect: { rev: string } }
   | { expect: { rev: string; closingLeaseExpired: true } }
   | { expect: { rev: string; closingLease: string } }
 
-type HeadNext =
-  | {
-      head: Omit<RoomHead, 'rev' | 'closeLease'> & { closeLease?: { id: string; durationMs: number } }
-      ttlMs?: number
-    }
-  | { delete: true }
+type HeadNext = {
+  head: Omit<RoomHead, 'rev' | 'closeLease'> & { closeLease?: { id: string; durationMs: number } }
+  ttlMs?: number
+}
 
 type CellMutation = { key: string; set?: { bytes: Uint8Array } }
 
@@ -74,7 +72,7 @@ type RoomDriver = {
     roomId: string,
     cx: HeadCx,
     next: HeadNext,
-  ): Promise<{ ok: true; head: RoomHead } | { ok: true; deleted: true } | { conflict: true; current: RoomHead | null }>
+  ): Promise<{ ok: true; head: RoomHead } | { conflict: true; current: RoomHead | null }>
   readCells(
     roomId: string,
     inc: string,

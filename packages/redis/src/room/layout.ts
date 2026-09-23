@@ -9,7 +9,7 @@
 // dir index: tf:{rid-dir}<prefix>…; the global directory's two keys are co-slotted.
 // Commands sample Redis TIME; tests may inject `now_ms`, production never uses caller time.
 
-import { HEAD_TRANSITIONS, ORDERING_FRAME_LAYOUT, laneKey, type BroadcastLane, type LaneId } from 'telefunc/__internal'
+import { ORDERING_FRAME_LAYOUT, laneKey, type BroadcastLane, type LaneId } from 'telefunc/__internal'
 export { laneKey }
 
 export const DEFAULT_ROOM_PREFIX = 'tf:'
@@ -170,43 +170,16 @@ export function decodeRedisOrderingFrame(frame: Uint8Array): {
   return { payload: frame.subarray(ORDERING_FRAME_LAYOUT.headerBytes), info }
 }
 
-function renderLuaHeadTransitionTable(variable = 'HEAD_TRANSITIONS'): string {
-  const rows = HEAD_TRANSITIONS.map((rule) => {
-    const key = `${rule.from}|${rule.cx}|${rule.to}`
-    return `  ["${key}"] = "${rule.constraint}",`
-  })
-  return [`local ${variable} = {`, ...rows, '}'].join('\n')
-}
-
-// HEAD CX owns legality, compare, fresh-inc minting, and store; guarded transitions cannot use generic rev CX.
-// This prevents lease replacement, live-closing re-lease, or closure through the generic form.
+// HEAD CX compares by form, then stores; core decides every transition and the supervisor checks its shape.
 //   KEYS: [1]=head [2]=gens [3]=headrev [4]=generation-tokens
-//   ARGV: [1]=now [2]=cxJson{form,rev?,closingLease?} [3]=nextJson{kind,state?,inc?,config?,lease?,ttlMs?}
+//   ARGV: [1]=now [2]=cxJson{form,rev?,closingLease?} [3]=nextJson{state,inc?,config,lease?,ttlMs?}
 export const HEAD_CX_LUA = `${NOW_FN}
-${renderLuaHeadTransitionTable()}
 local head_key, gens_key, rev_key, generation_tokens_key = KEYS[1], KEYS[2], KEYS[3], KEYS[4]
 local now = tf_now(ARGV[1])
 local cx = cjson.decode(ARGV[2])
 local nx = cjson.decode(ARGV[3])
 local cur = tf_read_and_expire_head(head_key, now)
-local from = 'absent'
-if cur then from = cur.state end
 
-local function conflict()
-  if cur then return '{"tag":"conflict","current":' .. cjson.encode(cur) .. '}' end
-  return '{"tag":"conflict","current":null}'
-end
-
--- Operation legality of the tombstone delete is decided BEFORE any compare, so misuse throws even where
--- the compare would have conflicted. A legal delete still goes through
--- the selected HeadCx compare form below: guarded takeover/finalize forms cannot bypass their predicates.
-if nx.kind == 'delete' then
-  if from ~= 'closed' then
-    return redis.error_reply("head CX: {delete} is legal only against a 'closed' tombstone, not '" .. from .. "'")
-  end
-end
-
--- compare, by cx form
 local matches = false
 if cx.form == 'absent' then
   matches = (cur == nil)
@@ -219,40 +192,9 @@ elseif cur ~= nil and cur.rev == cx.rev then
     matches = true
   end
 end
-if not matches then return conflict() end
-
-if nx.kind == 'delete' then
-  redis.call('DEL', head_key)
-  return '{"tag":"deleted"}'
-end
-
--- Interpret the generated transition table against the head the compare matched.
-local transition = from .. ' + ' .. cx.form .. ' -> ' .. nx.state
-local constraint = HEAD_TRANSITIONS[from .. '|' .. cx.form .. '|' .. nx.state]
-if not constraint then
-  return redis.error_reply("head CX: '" .. transition .. "' is not a legal head transition")
-end
-local installs_generation = constraint == 'fresh-inc'
-if constraint == 'fresh-inc' then
-  if nx.inc ~= nil and redis.call('SISMEMBER', gens_key, nx.inc) == 1 then
-    return redis.error_reply("head CX: incarnation '" .. tostring(nx.inc) ..
-      "' still has surviving generation state — creating a room on it would resurrect it")
-  end
-elseif constraint == 'same-inc' then
-  if nx.inc ~= cur.inc then
-    return redis.error_reply('head CX: ' .. transition .. ' must keep the same incarnation')
-  end
-elseif constraint == 'replace-lease' then
-  if nx.inc ~= cur.inc then
-    return redis.error_reply('head CX: an expired-close takeover must keep the same incarnation')
-  end
-  if nx.config ~= cur.config then
-    return redis.error_reply(
-      'head CX: an expired-close takeover must not change the config — it replaces only the lease')
-  end
-  if nx.lease.id == cur.lease.id then
-    return redis.error_reply('head CX: an expired-close takeover must mint a different lease id')
-  end
+if not matches then
+  if cur then return '{"tag":"conflict","current":' .. cjson.encode(cur) .. '}' end
+  return '{"tag":"conflict","current":null}'
 end
 
 -- apply: mint the lease deadline from authority time inside this same atomic record, store, register gen
@@ -265,7 +207,7 @@ redis.call('SET', head_key, encoded)
 if nx.ttlMs ~= nil then redis.call('PEXPIRE', head_key, nx.ttlMs) end
 if nx.inc ~= nil then
   redis.call('SADD', gens_key, nx.inc)
-  if installs_generation then redis.call('HSET', generation_tokens_key, nx.inc, stored.rev) end
+  if cur == nil or cur.inc ~= nx.inc then redis.call('HSET', generation_tokens_key, nx.inc, stored.rev) end
 end
 return '{"tag":"head","head":' .. encoded .. '}'
 `
