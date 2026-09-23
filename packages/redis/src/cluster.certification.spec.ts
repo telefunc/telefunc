@@ -3,19 +3,11 @@ import { Cluster, Redis } from 'ioredis'
 import type { CommitAccepted, LaneId, RoomHead, SubscriptionState } from 'telefunc/__internal'
 import { decodeOrderingFrame, encodeLaneKey } from 'telefunc/__internal'
 import { afterAll, afterEach, beforeAll, describe, expect, it, onTestFinished, vi } from 'vitest'
-import { installRedis } from '../index.js'
+import { installRedis } from './index.js'
 import { RedisBackend } from './backend.js'
-import { disposeBackend, getBroadcastBackend, getRoomBackend } from '../../../telefunc/wire-protocol/backend/install.js'
-import {
-  broadcastSequenceKey,
-  channelKey,
-  gensKey,
-  headKey,
-  genPrefix,
-  orderKey,
-  REDIS_DELIVERY_FENCE_BYTE,
-  REDIS_ROOM_COMMANDS,
-} from './layout.js'
+import { disposeBackend, getBroadcastBackend, getRoomBackend } from '../../telefunc/wire-protocol/backend/install.js'
+import { broadcastSequenceKey, channelKey, gensKey, headKey, genPrefix, orderKey } from './keys.js'
+import { REDIS_COMMANDS, REDIS_DELIVERY_FENCE_BYTE } from './commands.js'
 type RedisClusterNode = { host: string; port: number }
 type Master = RedisClusterNode & { id: string; ranges: Array<[number, number]>; client: Redis }
 type CommandCall = { name: string; keyCount: number; args: unknown[] }
@@ -52,7 +44,7 @@ describe('Redis real three-master Cluster CI certification', () => {
     if (cluster !== undefined) await cluster.quit().catch(() => cluster.disconnect())
   })
   it('requires compatible Telefunc, master reads, and a never-resend command connection', async () => {
-    const manifest = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')) as {
+    const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as {
       peerDependencies: { telefunc: string }
     }
     expect(manifest.peerDependencies.telefunc).toBe('>=0.2.25')
@@ -120,8 +112,7 @@ describe('Redis real three-master Cluster CI certification', () => {
       const observation = observeCommands(client)
       const backend = ownBackend(client, prefix)
       const authority = ownRoomBackend(client, prefix)
-      const genericCalls = observation.wrapDefinedCommand('tfPublish')
-      for (const { name } of Object.values(REDIS_ROOM_COMMANDS)) observation.wrapDefinedCommand(name)
+      for (const { name } of Object.values(REDIS_COMMANDS)) observation.wrapDefinedCommand(name)
       const roomId = 'runtime-slot} proof'
       const inc = 'runtime-slot-inc'
       const head = await open(backend, roomId, inc)
@@ -176,7 +167,6 @@ describe('Redis real three-master Cluster CI certification', () => {
         backend,
         authority,
         observation,
-        genericCalls,
         subscribeEntered,
         releaseSubscribe,
         holdNextSubscribe: () => {
@@ -208,7 +198,7 @@ describe('Redis real three-master Cluster CI certification', () => {
     }
     async function assertCommandKeyCoverage(runtime: Awaited<ReturnType<typeof exerciseRuntimeSlotCommands>>) {
       expect(new Set(runtime.observation.definitions.map(({ name }) => name))).toEqual(
-        new Set(['tfPublish', ...Object.values(REDIS_ROOM_COMMANDS).map(({ name }) => name)]),
+        new Set(Object.values(REDIS_COMMANDS).map(({ name }) => name)),
       )
       for (const definition of runtime.observation.definitions) {
         if (definition.numberOfKeys === null) continue
@@ -217,9 +207,7 @@ describe('Redis real three-master Cluster CI certification', () => {
           new Set(Array.from({ length: definition.numberOfKeys }, (_, index) => index + 1)),
         )
       }
-      expect(runtime.genericCalls).toHaveLength(1)
-      await assertCallsStayInOneSlot(runtime.genericCalls.map((args) => ({ name: 'tfPublish', keyCount: 2, args })))
-      for (const descriptor of Object.values(REDIS_ROOM_COMMANDS)) {
+      for (const descriptor of Object.values(REDIS_COMMANDS)) {
         const calls = runtime.observation.calls.filter(({ name }) => name === descriptor.name)
         expect(calls.length, descriptor.name).toBeGreaterThan(0)
         await assertCallsStayInOneSlot(calls)

@@ -1,4 +1,4 @@
-import { assert } from '../assert.js'
+import { assert } from './assert.js'
 import {
   assertAtMostOnceClient,
   callDefinedCommand,
@@ -6,7 +6,7 @@ import {
   defineCommand,
   isCluster,
   type RedisClient,
-} from '../ioredis.js'
+} from './ioredis.js'
 import type {
   BroadcastDriver,
   BroadcastLane,
@@ -24,8 +24,6 @@ import type {
 } from 'telefunc/__internal'
 import { decodeOrderingFrame, encodeLaneKey, decodeLaneKey } from 'telefunc/__internal'
 import {
-  broadcastChannel,
-  broadcastSequenceKey,
   cellKey,
   cellKeyPrefix,
   DEFAULT_ROOM_PREFIX,
@@ -33,16 +31,13 @@ import {
   directoryTagsKey,
   generationKeysKey,
   headKey,
-  REDIS_ROOM_COMMAND_KEYS,
-  REDIS_ROOM_COMMANDS,
-  REDIS_ORDERING_FRAME_LUA,
-  REDIS_SAFE_INTEGER_MAX,
   redisKeyPrefix,
   retainedKey,
   retainedKeyPrefix,
   revKey,
-} from './layout.js'
-import { RedisSubscriptionDriver } from './subscriber-transport.js'
+} from './keys.js'
+import { REDIS_COMMAND_KEYS, REDIS_COMMANDS } from './commands.js'
+import { RedisSubscriptionDriver } from './subscriber.js'
 
 const DIRECTORY_PAGE_SIZE = 100
 const STABLE_READ_ATTEMPTS = 8
@@ -51,19 +46,7 @@ export type RedisBackendOptions = {
   redis: RedisClient
   prefix?: string
 }
-const PUBLISH_CMD = 'tfPublish'
-const PUBLISH_LUA = `${REDIS_ORDERING_FRAME_LUA}
-local previous = redis.call('GET', KEYS[1])
-if previous and tonumber(previous) >= ${REDIS_SAFE_INTEGER_MAX} then
-  return redis.error_reply('publish: sequence exhausted for the ordering domain')
-end
-local seq = redis.call('INCR', KEYS[1])
-local t = redis.call('TIME')
-local ts = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
-local frame = tf_ordering_frame(seq, ts, ARGV[1])
-local receivers = redis.call('PUBLISH', KEYS[2], frame)
-return {seq, ts, receivers}
-`.trim()
+
 type StoredHead = {
   rev: string
   state: 'open' | 'closing' | 'closed'
@@ -72,19 +55,27 @@ type StoredHead = {
   lease?: { id: string; until: number }
   exp?: number
 }
+
 type HeadCxReply = { tag: 'head'; head: StoredHead } | { tag: 'conflict'; current: StoredHead | null }
+
 type ReadCellsFenceReply = { stale: true } | { revision: string }
+
 type CellSelector = { keys: string[] } | { prefix: string }
+
 type CellsRead = { revision: string; cells: Map<string, Uint8Array> } | { staleInc: true }
+
 function toBase64(bytes: Uint8Array): string {
   return Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString('base64')
 }
+
 function fromBase64(b64: string): Uint8Array {
   return Uint8Array.from(Buffer.from(b64, 'base64'))
 }
+
 function toBuffer(bytes: Uint8Array): Buffer {
   return Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength)
 }
+
 function toPublicHead(stored: StoredHead): RoomHead {
   const head: RoomHead = {
     rev: stored.rev,
@@ -95,6 +86,7 @@ function toPublicHead(stored: StoredHead): RoomHead {
   if (stored.lease !== undefined) head.closeLease = { id: stored.lease.id, until: stored.lease.until }
   return head
 }
+
 function encodeNext(next: HeadNext): string {
   const { head, ttlMs } = next
   const payload: Record<string, unknown> = { state: head.state, config: toBase64(head.config) }
@@ -117,8 +109,7 @@ export class RedisBackend implements BroadcastDriver, RoomDriver {
     this._publisher = options.redis
     this._prefix = redisKeyPrefix(options.prefix ?? DEFAULT_ROOM_PREFIX)
     this._receivers = isCluster(options.redis) ? 'none' : 'global'
-    defineCommand(this._publisher, PUBLISH_CMD, PUBLISH_LUA, 2)
-    for (const command of Object.values(REDIS_ROOM_COMMANDS))
+    for (const command of Object.values(REDIS_COMMANDS))
       defineCommand(this._publisher, command.name, command.lua, command.numberOfKeys)
     this.subscriptions = new RedisSubscriptionDriver({
       prefix: this._prefix,
@@ -129,9 +120,8 @@ export class RedisBackend implements BroadcastDriver, RoomDriver {
 
   async publish(lane: BroadcastLane, payload: Uint8Array): Promise<PublishResult> {
     this._assertLive()
-    const reply = await callDefinedCommand(this._publisher, PUBLISH_CMD, [
-      broadcastSequenceKey(this._prefix, lane.key),
-      broadcastChannel(this._prefix, lane),
+    const reply = await this._call(REDIS_COMMANDS.publish.name, [
+      ...REDIS_COMMAND_KEYS.publish(this._prefix, lane),
       toBuffer(payload),
     ])
     assert(Array.isArray(reply) && reply.length === 3, 'Publish script returned an unexpected shape')
@@ -150,8 +140,8 @@ export class RedisBackend implements BroadcastDriver, RoomDriver {
   async readHead(roomId: string): Promise<RoomHead | null> {
     this._assertLive()
     const reply = JSON.parse(
-      (await this._call(REDIS_ROOM_COMMANDS.readHead.name, [
-        ...REDIS_ROOM_COMMAND_KEYS.readHead(this._prefix, roomId),
+      (await this._call(REDIS_COMMANDS.readHead.name, [
+        ...REDIS_COMMAND_KEYS.readHead(this._prefix, roomId),
       ])) as string,
     ) as { head: StoredHead | null }
     return reply.head === null ? null : toPublicHead(reply.head)
@@ -159,8 +149,8 @@ export class RedisBackend implements BroadcastDriver, RoomDriver {
 
   async compareExchangeHead(roomId: string, cx: HeadCx, next: HeadNext): Promise<HeadCxResult> {
     this._assertLive()
-    const reply = (await this._call(REDIS_ROOM_COMMANDS.headCx.name, [
-      ...REDIS_ROOM_COMMAND_KEYS.headCx(this._prefix, roomId),
+    const reply = (await this._call(REDIS_COMMANDS.headCx.name, [
+      ...REDIS_COMMAND_KEYS.headCx(this._prefix, roomId),
       JSON.stringify(cx),
       encodeNext(next),
     ])) as string
@@ -189,9 +179,9 @@ export class RedisBackend implements BroadcastDriver, RoomDriver {
     const physicalKeys = logicalKeys.map((key) => cellKey(this._prefix, roomId, inc, key))
     const values = physicalKeys.length > 0 ? await this._publisher.mgetBuffer(...physicalKeys) : []
     const before = revBefore ?? '0'
-    const fenceKeys = REDIS_ROOM_COMMAND_KEYS.readCellsFence(this._prefix, roomId, inc)
+    const fenceKeys = REDIS_COMMAND_KEYS.readCellsFence(this._prefix, roomId, inc)
     const fence = JSON.parse(
-      (await this._call(REDIS_ROOM_COMMANDS.readCellsFence.name, [...fenceKeys, inc])) as string,
+      (await this._call(REDIS_COMMANDS.readCellsFence.name, [...fenceKeys, inc])) as string,
     ) as ReadCellsFenceReply
     if ('stale' in fence) return { staleInc: true }
     if (before !== fence.revision) return null
@@ -204,7 +194,7 @@ export class RedisBackend implements BroadcastDriver, RoomDriver {
     mutations: CellMutation[],
   ): Promise<CxResult> {
     this._assertLive()
-    const keys = REDIS_ROOM_COMMAND_KEYS.cellsCx(
+    const keys = REDIS_COMMAND_KEYS.cellsCx(
       this._prefix,
       roomId,
       inc,
@@ -218,11 +208,7 @@ export class RedisBackend implements BroadcastDriver, RoomDriver {
         argv.push('set', toBuffer(mutation.bytes))
       }
     }
-    const reply = (await this._call(REDIS_ROOM_COMMANDS.cellsCx.name, [
-      String(keys.length),
-      ...keys,
-      ...argv,
-    ])) as string
+    const reply = (await this._call(REDIS_COMMANDS.cellsCx.name, [String(keys.length), ...keys, ...argv])) as string
     return reply as CxResult
   }
 
@@ -235,11 +221,11 @@ export class RedisBackend implements BroadcastDriver, RoomDriver {
   ): Promise<CommitResult> {
     this._assertLive()
     const source = { roomId, inc, lane }
-    const keys = REDIS_ROOM_COMMAND_KEYS.commit(this._prefix, roomId, inc, lane, opts?.requiredCellKeys)
+    const keys = REDIS_COMMAND_KEYS.commit(this._prefix, roomId, inc, lane, opts?.requiredCellKeys)
     const flush = this.subscriptions.prepareFlush(source)
     let reply: string
     try {
-      reply = (await this._call(REDIS_ROOM_COMMANDS.commit.name, [
+      reply = (await this._call(REDIS_COMMANDS.commit.name, [
         String(keys.length),
         ...keys,
         inc,
@@ -299,8 +285,8 @@ export class RedisBackend implements BroadcastDriver, RoomDriver {
   async deleteRetained(roomId: string, inc: string, lane: LaneId, opts?: { ifSeq?: number }): Promise<void> {
     this._assertLive()
     const retainedKeys = [retainedKey(this._prefix, roomId, inc, encodeLaneKey(lane))]
-    const keys = REDIS_ROOM_COMMAND_KEYS.retainedDelete(this._prefix, roomId, inc, retainedKeys)
-    await this._call(REDIS_ROOM_COMMANDS.retainedDelete.name, [
+    const keys = REDIS_COMMAND_KEYS.retainedDelete(this._prefix, roomId, inc, retainedKeys)
+    await this._call(REDIS_COMMANDS.retainedDelete.name, [
       String(keys.length),
       ...keys,
       opts?.ifSeq === undefined ? '' : String(opts.ifSeq),
@@ -309,8 +295,8 @@ export class RedisBackend implements BroadcastDriver, RoomDriver {
 
   private async _validateGeneration(source: RoomSubscriptionSource): Promise<boolean> {
     return (
-      (await this._call(REDIS_ROOM_COMMANDS.validateGeneration.name, [
-        ...REDIS_ROOM_COMMAND_KEYS.validateGeneration(this._prefix, source.roomId),
+      (await this._call(REDIS_COMMANDS.validateGeneration.name, [
+        ...REDIS_COMMAND_KEYS.validateGeneration(this._prefix, source.roomId),
         source.inc,
       ])) === 1
     )
@@ -318,24 +304,20 @@ export class RedisBackend implements BroadcastDriver, RoomDriver {
 
   async dropGeneration(roomId: string, inc: string): Promise<void> {
     this._assertLive()
-    const installed = await this._call(REDIS_ROOM_COMMANDS.dropGenerationBegin.name, [
-      ...REDIS_ROOM_COMMAND_KEYS.dropGenerationBegin(this._prefix, roomId),
+    const installed = await this._call(REDIS_COMMANDS.dropGenerationBegin.name, [
+      ...REDIS_COMMAND_KEYS.dropGenerationBegin(this._prefix, roomId),
       inc,
     ])
     if (installed !== 1) return
     const keys = await this._publisher.smembers(generationKeysKey(this._prefix, roomId, inc))
-    const finalizeKeys = REDIS_ROOM_COMMAND_KEYS.dropGenerationFinalize(this._prefix, roomId, inc, keys)
-    await this._call(REDIS_ROOM_COMMANDS.dropGenerationFinalize.name, [
-      String(finalizeKeys.length),
-      ...finalizeKeys,
-      inc,
-    ])
+    const finalizeKeys = REDIS_COMMAND_KEYS.dropGenerationFinalize(this._prefix, roomId, inc, keys)
+    await this._call(REDIS_COMMANDS.dropGenerationFinalize.name, [String(finalizeKeys.length), ...finalizeKeys, inc])
   }
 
   async directoryPut(roomId: string, incTag: string): Promise<void> {
     this._assertLive()
-    await this._call(REDIS_ROOM_COMMANDS.directoryPut.name, [
-      ...REDIS_ROOM_COMMAND_KEYS.directoryPut(this._prefix),
+    await this._call(REDIS_COMMANDS.directoryPut.name, [
+      ...REDIS_COMMAND_KEYS.directoryPut(this._prefix),
       roomId,
       incTag,
     ])
@@ -343,8 +325,8 @@ export class RedisBackend implements BroadcastDriver, RoomDriver {
 
   async directoryDelete(roomId: string, incTag: string): Promise<void> {
     this._assertLive()
-    await this._call(REDIS_ROOM_COMMANDS.directoryDelete.name, [
-      ...REDIS_ROOM_COMMAND_KEYS.directoryDelete(this._prefix),
+    await this._call(REDIS_COMMANDS.directoryDelete.name, [
+      ...REDIS_COMMAND_KEYS.directoryDelete(this._prefix),
       roomId,
       incTag,
     ])

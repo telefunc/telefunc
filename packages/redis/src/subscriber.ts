@@ -9,8 +9,9 @@ import type {
   SubscriptionDriver,
 } from 'telefunc/__internal'
 import { DriverAttempt, createDeferred, decodeOrderingFrame, encodeLaneKey } from 'telefunc/__internal'
-import { broadcastChannel, channelKey, generationInvalidationChannel, REDIS_DELIVERY_FENCE_BYTE } from './layout.js'
-import type { SubscriberSocket } from '../ioredis.js'
+import { broadcastChannel, channelKey, generationInvalidationChannel } from './keys.js'
+import { REDIS_DELIVERY_FENCE_BYTE } from './commands.js'
+import type { SubscriberSocket } from './ioredis.js'
 type RedisSubscriptionSource = BroadcastLane | RoomSubscriptionSource
 type RedisSubscriptionDriverOptions = {
   prefix: string

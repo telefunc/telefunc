@@ -1,8 +1,8 @@
 import { EventEmitter } from 'node:events'
-import type { SubscriberSocket } from '../ioredis.js'
+import type { SubscriberSocket } from './ioredis.js'
 import { expect, onTestFinished, test, vi } from 'vitest'
 import type { SubscriptionAttemptState } from 'telefunc/__internal'
-import { RedisSubscriptionDriver } from './subscriber-transport.js'
+import { RedisSubscriptionDriver } from './subscriber.js'
 
 function fakeSubscriber() {
   const subscribed: string[][] = []

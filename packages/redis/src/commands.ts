@@ -1,91 +1,25 @@
-// Redis Room keys; every per-room key shares `{rid}` and one Cluster slot.
-// head/headrev: tf:room:{rid}:{head|headrev}; JSON head plus monotonic revision.
-// cells/revision: tf:room:{rid}:g:<inc>:{c:<key>|rev}; logical cells plus coarse generation revision.
-// order/retained: tf:room:{rid}:g:<inc>:{o|rt}:<laneKey>; ordering mark or 16-byte mark + payload.
-// gen keys: tf:room:{rid}:g:<inc>:keys; generation-owned physical-key set.
-// channels: tf:room:{rid}:ch:<inc>:<laneKey>; incarnation-scoped PUBLISH/SUBSCRIBE.
-// gens: tf:room:{rid}:gens; installed incarnations.
-// directory: <prefix>room-dir:{<prefix>dir}:{index|tags}; one global, co-slotted pair.
-// Commands take authority time from Redis TIME, never from the caller.
+// Every Lua script and the one command table that registers and invokes them.
 
 import { encodeLaneKey, type BroadcastLane, type LaneId } from 'telefunc/__internal'
+import {
+  broadcastChannel,
+  broadcastSequenceKey,
+  cellKey,
+  channelKey,
+  directoryIndexKey,
+  directoryTagsKey,
+  generationInvalidationChannel,
+  generationKeysKey,
+  gensKey,
+  headKey,
+  headRevKey,
+  orderKey,
+  retainedKey,
+  revKey,
+} from './keys.js'
 
-export const DEFAULT_ROOM_PREFIX = 'tf:'
 export const REDIS_DELIVERY_FENCE_BYTE = 0xff
 export const REDIS_SAFE_INTEGER_MAX = Number.MAX_SAFE_INTEGER
-
-export function redisKeyPrefix(prefix: string): string {
-  if (prefix.includes('{')) throw new Error("Redis key prefix must not contain '{'")
-  return prefix
-}
-function broadcastTag(key: string): string {
-  if (key.startsWith('}')) throw new Error("Redis Broadcast key must not start with '}'")
-  return key === '' ? '{_}:empty' : `{${key}}`
-}
-export function broadcastSequenceKey(prefix: string, key: string): string {
-  return `${redisKeyPrefix(prefix)}seq:${broadcastTag(key)}`
-}
-export function broadcastChannel(prefix: string, lane: BroadcastLane): string {
-  const kind = lane.kind === 'text' ? 't' : 'b'
-  return `${redisKeyPrefix(prefix)}${kind}:${broadcastTag(lane.key)}`
-}
-
-// ── key naming ────────────────────────────────────────────────────────────
-
-// `{<rid>}` is the Cluster hash tag; every per-room key carries it so the room is one slot.
-export function roomTag(prefix: string, roomId: string): string {
-  // A Redis hash tag ends at the first `}`. Encode caller input before placing it in braces so an
-  // arbitrary room id cannot escape the tag or split one logical room across slots.
-  return `${redisKeyPrefix(prefix)}room:{${encodeURIComponent(roomId)}}`
-}
-export function headKey(prefix: string, roomId: string): string {
-  return `${roomTag(prefix, roomId)}:head`
-}
-export function headRevKey(prefix: string, roomId: string): string {
-  return `${roomTag(prefix, roomId)}:headrev`
-}
-export function gensKey(prefix: string, roomId: string): string {
-  return `${roomTag(prefix, roomId)}:gens`
-}
-export function genPrefix(prefix: string, roomId: string, inc: string): string {
-  return `${roomTag(prefix, roomId)}:g:${inc}`
-}
-export function generationKeysKey(prefix: string, roomId: string, inc: string): string {
-  return `${genPrefix(prefix, roomId, inc)}:keys`
-}
-export function revKey(prefix: string, roomId: string, inc: string): string {
-  return `${genPrefix(prefix, roomId, inc)}:rev`
-}
-export function cellKeyPrefix(prefix: string, roomId: string, inc: string): string {
-  return `${genPrefix(prefix, roomId, inc)}:c:`
-}
-export function cellKey(prefix: string, roomId: string, inc: string, key: string): string {
-  return `${cellKeyPrefix(prefix, roomId, inc)}${key}`
-}
-export function orderKey(prefix: string, roomId: string, inc: string, laneKey: string): string {
-  return `${genPrefix(prefix, roomId, inc)}:o:${laneKey}`
-}
-export function retainedKeyPrefix(prefix: string, roomId: string, inc: string): string {
-  return `${genPrefix(prefix, roomId, inc)}:rt:`
-}
-export function retainedKey(prefix: string, roomId: string, inc: string, laneKey: string): string {
-  return `${retainedKeyPrefix(prefix, roomId, inc)}${laneKey}`
-}
-export function channelKey(prefix: string, roomId: string, inc: string, laneKey: string): string {
-  return `${roomTag(prefix, roomId)}:ch:${inc}:${laneKey}`
-}
-export function generationInvalidationChannel(prefix: string, roomId: string, inc: string): string {
-  return `${roomTag(prefix, roomId)}:invalidate:${inc}`
-}
-// The directory's two keys share their own tag so the tag-guarded delete stays one slot under Cluster.
-export function directoryIndexKey(prefix: string): string {
-  return `${redisKeyPrefix(prefix)}room-dir:{${redisKeyPrefix(prefix)}dir}:index`
-}
-export function directoryTagsKey(prefix: string): string {
-  return `${redisKeyPrefix(prefix)}room-dir:{${redisKeyPrefix(prefix)}dir}:tags`
-}
-
-// ── Lua ─────────────────────────────────────────────────────────────────
 
 // Shared preamble: authority time in ms from Redis TIME's [sec, µs] pair.
 const NOW_FN = `
@@ -116,6 +50,22 @@ local function tf_ordering_frame(seq, ts, payload)
   local ts_lo = ts - ts_hi * 4294967296
   return struct.pack('>I4I4I4I4', seq_hi, seq_lo, ts_hi, ts_lo) .. payload
 end
+`
+
+// Broadcast publish: next per-key seq, authority time, one PUBLISH of the ordering frame.
+//   KEYS: [1]=sequence [2]=channel
+//   ARGV: [1]=payload
+const PUBLISH_LUA = `${REDIS_ORDERING_FRAME_LUA}
+local previous = redis.call('GET', KEYS[1])
+if previous and tonumber(previous) >= ${REDIS_SAFE_INTEGER_MAX} then
+  return redis.error_reply('publish: sequence exhausted for the ordering domain')
+end
+local seq = redis.call('INCR', KEYS[1])
+local t = redis.call('TIME')
+local ts = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
+local frame = tf_ordering_frame(seq, ts, ARGV[1])
+local receivers = redis.call('PUBLISH', KEYS[2], frame)
+return {seq, ts, receivers}
 `
 
 // HEAD CX compares by form, then stores; core decides every transition and the supervisor checks its shape.
@@ -345,7 +295,8 @@ function command<const Name extends string, const Keys extends number | null>(
   return { name, lua, numberOfKeys }
 }
 
-export const REDIS_ROOM_COMMANDS = {
+export const REDIS_COMMANDS = {
+  publish: command('tfPublish', PUBLISH_LUA, 2),
   headCx: command('tfRoomHeadCx', HEAD_CX_LUA, 3),
   readHead: command('tfRoomReadHead', READ_HEAD_LUA, 1),
   readCellsFence: command('tfRoomReadCellsFence', READ_CELLS_FENCE_LUA, 2),
@@ -359,7 +310,11 @@ export const REDIS_ROOM_COMMANDS = {
   directoryDelete: command('tfRoomDirectoryDelete', DIRECTORY_DELETE_LUA, 2),
 } as const
 
-export const REDIS_ROOM_COMMAND_KEYS = {
+export const REDIS_COMMAND_KEYS = {
+  publish: (prefix: string, lane: BroadcastLane) => [
+    broadcastSequenceKey(prefix, lane.key),
+    broadcastChannel(prefix, lane),
+  ],
   headCx: (prefix: string, roomId: string) => [
     headKey(prefix, roomId),
     gensKey(prefix, roomId),
