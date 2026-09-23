@@ -4,10 +4,10 @@
 // order/retained: tf:room:{rid}:g:<inc>:{o|rt}:<laneKey>; ordering mark or 16-byte mark + payload.
 // gen keys: tf:room:{rid}:g:<inc>:keys; generation-owned physical-key set.
 // channels: tf:room:{rid}:ch:<inc>:<laneKey>; incarnation-scoped PUBLISH/SUBSCRIBE.
-// gens: tf:room:{rid}:gens; installed incarnations and the fresh-inc SISMEMBER guard.
+// gens: tf:room:{rid}:gens; installed incarnations.
 // gen-token: tf:room:{rid}:gen-tokens; non-reusable install revision removed with final SREM.
-// dir index: tf:{rid-dir}<prefix>…; the global directory's two keys are co-slotted.
-// Commands sample Redis TIME; tests may inject `now_ms`, production never uses caller time.
+// directory: <prefix>room-dir:{<prefix>dir}:{index|tags}; one global, co-slotted pair.
+// Commands take authority time from Redis TIME, never from the caller.
 
 import { ORDERING_FRAME_LAYOUT, laneKey, type BroadcastLane, type LaneId } from 'telefunc/__internal'
 export { laneKey }
@@ -106,11 +106,9 @@ export function parseLaneKey(key: string): LaneId {
 
 // ── Lua ─────────────────────────────────────────────────────────────────
 
-// Shared preamble: authority time, either the injected frozen clock (conformance) or the central
-// server clock (production). ms precision from Redis TIME's [sec, µs] pair.
+// Shared preamble: authority time in ms from Redis TIME's [sec, µs] pair.
 const NOW_FN = `
-local function tf_now(v)
-  if v ~= nil and v ~= '' then return tonumber(v) end
+local function tf_now()
   local t = redis.call('TIME')
   return tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
 end
@@ -130,7 +128,7 @@ end
 
 // Broadcast and Room render the frozen ordering layout into Lua; the decoder reads the same data.
 const orderingFrameFormat = [
-  ORDERING_FRAME_LAYOUT.endianness === 'big' ? '>' : '<',
+  '>',
   ...Object.values(ORDERING_FRAME_LAYOUT.offsets)
     .sort((left, right) => left - right)
     .map(() => `I${ORDERING_FRAME_LAYOUT.wordBytes}`),
@@ -153,13 +151,10 @@ export function decodeRedisOrderingFrame(frame: Uint8Array): {
     throw new Error(`Redis ordering frame is shorter than its ${ORDERING_FRAME_LAYOUT.headerBytes}-byte header`)
   }
   const view = new DataView(frame.buffer, frame.byteOffset, frame.byteLength)
-  const littleEndian = String(ORDERING_FRAME_LAYOUT.endianness) === 'little'
   const { offsets, wordRange } = ORDERING_FRAME_LAYOUT
   const info = {
-    seq: view.getUint32(offsets.seqHigh, littleEndian) * wordRange + view.getUint32(offsets.seqLow, littleEndian),
-    timestamp:
-      view.getUint32(offsets.timestampHigh, littleEndian) * wordRange +
-      view.getUint32(offsets.timestampLow, littleEndian),
+    seq: view.getUint32(offsets.seqHigh) * wordRange + view.getUint32(offsets.seqLow),
+    timestamp: view.getUint32(offsets.timestampHigh) * wordRange + view.getUint32(offsets.timestampLow),
   }
   if (!Number.isSafeInteger(info.seq) || info.seq <= 0) {
     throw new Error('Redis ordering frame has an invalid sequence')
@@ -172,12 +167,12 @@ export function decodeRedisOrderingFrame(frame: Uint8Array): {
 
 // HEAD CX compares by form, then stores; core decides every transition and the supervisor checks its shape.
 //   KEYS: [1]=head [2]=gens [3]=headrev [4]=generation-tokens
-//   ARGV: [1]=now [2]=cxJson{form,rev?,closingLease?} [3]=nextJson{state,inc?,config,lease?,ttlMs?}
+//   ARGV: [1]=cxJson{form,rev?,closingLease?} [2]=nextJson{state,inc?,config,lease?,ttlMs?}
 export const HEAD_CX_LUA = `${NOW_FN}
 local head_key, gens_key, rev_key, generation_tokens_key = KEYS[1], KEYS[2], KEYS[3], KEYS[4]
-local now = tf_now(ARGV[1])
-local cx = cjson.decode(ARGV[2])
-local nx = cjson.decode(ARGV[3])
+local now = tf_now()
+local cx = cjson.decode(ARGV[1])
+local nx = cjson.decode(ARGV[2])
 local cur = tf_read_and_expire_head(head_key, now)
 
 local matches = false
@@ -215,7 +210,7 @@ return '{"tag":"head","head":' .. encoded .. '}'
 // A head read and the clock used to interpret its logical tombstone are one slot-owner operation.
 //   KEYS: [1]=head
 export const READ_HEAD_LUA = `${NOW_FN}
-local now = tf_now('')
+local now = tf_now()
 local head = tf_read_and_expire_head(KEYS[1], now)
 if not head then return '{"head":null}' end
 return '{"head":' .. cjson.encode(head) .. '}'
@@ -225,7 +220,7 @@ return '{"head":' .. cjson.encode(head) .. '}'
 //   KEYS: [1]=head [2]=generation revision
 //   ARGV: [1]=inc
 export const READ_CELLS_FENCE_LUA = `${NOW_FN}
-local now = tf_now('')
+local now = tf_now()
 local head = tf_read_and_expire_head(KEYS[1], now)
 if not head or head.inc ~= ARGV[1] then return '{"stale":true}' end
 local revision = redis.call('GET', KEYS[2])
@@ -236,11 +231,11 @@ return '{"revision":' .. cjson.encode(revision) .. '}'
 // SUBSCRIBE establishment snapshots the generation token before its network await. This atomic
 // post-ack check rejects a token whose generation closed or was dropped during that await.
 //   KEYS: [1]=head [2]=gens [3]=generation-tokens
-//   ARGV: [1]=now [2]=inc [3]=expected-token
+//   ARGV: [1]=inc [2]=expected-token
 export const VALIDATE_GENERATION_LUA = `${NOW_FN}
 local head_key, gens_key, tokens_key = KEYS[1], KEYS[2], KEYS[3]
-local now = tf_now(ARGV[1])
-local inc, expected_token = ARGV[2], ARGV[3]
+local now = tf_now()
+local inc, expected_token = ARGV[1], ARGV[2]
 local head = tf_read_and_expire_head(head_key, now)
 local current_token = redis.call('HGET', tokens_key, inc)
 if not head or head.state ~= 'open' or head.inc ~= inc
@@ -252,9 +247,9 @@ return 1
 
 // Begin snapshots the immutable generation token while gens membership blocks reuse.
 //   KEYS: [1]=head [2]=gens [3]=generation-tokens
-//   ARGV: [1]=now [2]=inc
+//   ARGV: [1]=inc
 export const DROP_GENERATION_BEGIN_LUA = `${NOW_FN}
-local now, inc = tf_now(ARGV[1]), ARGV[2]
+local now, inc = tf_now(), ARGV[1]
 local head = tf_read_and_expire_head(KEYS[1], now)
 if head and head.inc == inc then
   return redis.error_reply("dropGeneration: refusing to drop the current incarnation '" .. inc .. "'")
@@ -284,19 +279,19 @@ return 1
 // CELLS CX — all mutations or none; success implies the head precondition (open + inc) held at apply
 // time; the revision is the coarse per-generation counter, allowed to over-conflict but never mislead.
 //   KEYS: [1]=head [2]=rev [3]=generation-keys [4..]=cell keys (one per mutation, in order)
-//   ARGV: [1]=now [2]=inc [3]=expectedRev, then per mutation: op('set'|'del'), value
+//   ARGV: [1]=inc [2]=expectedRev, then per mutation: op('set'|'del'), value
 export const CELLS_CX_LUA = `${NOW_FN}
 local head_key, rev_key, generation_keys_key = KEYS[1], KEYS[2], KEYS[3]
-local now = tf_now(ARGV[1])
+local now = tf_now()
 local head = tf_read_and_expire_head(head_key, now)
-if (not head) or head.inc ~= ARGV[2] or head.state ~= 'open' then return 'stale-inc' end
+if (not head) or head.inc ~= ARGV[1] or head.state ~= 'open' then return 'stale-inc' end
 local cur = redis.call('GET', rev_key)
 if not cur then cur = '0' end
-if cur ~= ARGV[3] then return 'conflict' end
+if cur ~= ARGV[2] then return 'conflict' end
 local n = #KEYS - 3
 for i = 1, n do
   local key = KEYS[3 + i]
-  local base = 3 + (i - 1) * 2
+  local base = 2 + (i - 1) * 2
   local op = ARGV[base + 1]
   if op == 'del' then
     redis.call('DEL', key)
@@ -315,21 +310,21 @@ return 'committed'
 // retained install, then PUBLISH. Supplying a closing lease selects the narrow closing-control branch,
 // which is what makes every other lane stale while closing.
 //   KEYS: [1]=head [2]=order [3]=retained [4]=channel [5]=generation-keys [6..]=required live cells
-//   ARGV: [1]=now [2]=inc [3]=laneKind [4]=closingLease('') [5]=retain('0'|'1')
-//         [6]=payload [7]=local delivery-fence token or ''
+//   ARGV: [1]=inc [2]=laneKind [3]=closingLease('') [4]=retain('0'|'1')
+//         [5]=payload [6]=local delivery-fence token or ''
 export const COMMIT_LUA = `${NOW_FN}
 ${REDIS_ORDERING_FRAME_LUA}
 local head_key, order_key, retained_key, channel_key, generation_keys_key =
   KEYS[1], KEYS[2], KEYS[3], KEYS[4], KEYS[5]
-local now = tf_now(ARGV[1])
+local now = tf_now()
 local head = tf_read_and_expire_head(head_key, now)
 local ok = false
-if head and head.inc == ARGV[2] then
-  if ARGV[4] == '' then
+if head and head.inc == ARGV[1] then
+  if ARGV[3] == '' then
     ok = (head.state == 'open')
   else
-    ok = (ARGV[3] == 'control' and head.state == 'closing' and head.lease ~= nil
-          and head.lease.id == ARGV[4] and now <= head.lease['until'])
+    ok = (ARGV[2] == 'control' and head.state == 'closing' and head.lease ~= nil
+          and head.lease.id == ARGV[3] and now <= head.lease['until'])
   end
 end
 if not ok then return '{"stale":true}' end
@@ -360,15 +355,15 @@ local seq_text = string.format('%.0f', seq)
 local ts_text = string.format('%.0f', ts)
 redis.call('SET', order_key, seq_text .. ':' .. ts_text)
 redis.call('SADD', generation_keys_key, order_key)
-local frame = tf_ordering_frame(seq, ts, ARGV[6])
-if ARGV[5] == '1' then
+local frame = tf_ordering_frame(seq, ts, ARGV[5])
+if ARGV[4] == '1' then
   redis.call('SET', retained_key, frame)
   redis.call('SADD', generation_keys_key, retained_key)
 end
 local receivers = redis.call('PUBLISH', channel_key, frame)
 -- A Cluster forwards both publications from this slot owner over the same ordered bus link. The
 -- impossible ordering-frame prefix makes the second publication an internal local-dispatch fence.
-if ARGV[7] ~= '' then redis.call('PUBLISH', channel_key, string.char(${REDIS_DELIVERY_FENCE_BYTE}) .. ARGV[7]) end
+if ARGV[6] ~= '' then redis.call('PUBLISH', channel_key, string.char(${REDIS_DELIVERY_FENCE_BYTE}) .. ARGV[6]) end
 return '{"accepted":true,"seq":' .. seq_text .. ',"timestamp":' .. ts_text .. ',"receivers":' .. receivers .. '}'
 `
 
@@ -376,19 +371,10 @@ return '{"accepted":true,"seq":' .. seq_text .. ',"timestamp":' .. ts_text .. ',
 export const RETAINED_DELETE_LUA = `
 local if_seq = ARGV[1]
 if if_seq ~= '' then
-  if #KEYS ~= 2 then return redis.error_reply('deleteRetained: ifSeq requires one lane') end
-  local expected = tonumber(if_seq)
-  if not expected or expected < 1 or expected > ${REDIS_SAFE_INTEGER_MAX} or expected ~= math.floor(expected) then
-    return redis.error_reply('deleteRetained: invalid ifSeq')
-  end
   local frame = redis.call('GET', KEYS[2])
   if not frame then return 0 end
-  if string.len(frame) < ${ORDERING_FRAME_LAYOUT.headerBytes} then
-    return redis.error_reply('deleteRetained: invalid retained frame')
-  end
   local seq_hi, seq_lo = struct.unpack('>I4I4', frame)
-  local current = seq_hi * 4294967296 + seq_lo
-  if current ~= expected then return 0 end
+  if seq_hi * 4294967296 + seq_lo ~= tonumber(if_seq) then return 0 end
 end
 local deleted = 0
 for i = 2, #KEYS do

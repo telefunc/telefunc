@@ -217,7 +217,6 @@ export class RedisBackend implements BroadcastDriver, RoomDriver {
     this._assertLive()
     const reply = (await this._call(REDIS_ROOM_COMMANDS.headCx.name, [
       ...REDIS_ROOM_COMMAND_KEYS.headCx(this._prefix, roomId),
-      '',
       encodeCx(cx),
       encodeNext(next),
     ])) as string
@@ -267,7 +266,7 @@ export class RedisBackend implements BroadcastDriver, RoomDriver {
       inc,
       mutations.map((mutation) => mutation.key),
     )
-    const argv: Array<string | Buffer> = ['', inc, revision]
+    const argv: Array<string | Buffer> = [inc, revision]
     for (const mutation of mutations) {
       if (mutation.set === undefined) {
         argv.push('del', '')
@@ -299,7 +298,6 @@ export class RedisBackend implements BroadcastDriver, RoomDriver {
       reply = (await this._call(REDIS_ROOM_COMMANDS.commit.name, [
         String(keys.length),
         ...keys,
-        '',
         inc,
         lane.kind,
         opts?.closingLease ?? '',
@@ -381,7 +379,6 @@ export class RedisBackend implements BroadcastDriver, RoomDriver {
     return (
       (await this._call(REDIS_ROOM_COMMANDS.validateGeneration.name, [
         ...REDIS_ROOM_COMMAND_KEYS.validateGeneration(this._prefix, source.roomId),
-        '',
         source.inc,
         token,
       ])) === 1
@@ -393,7 +390,6 @@ export class RedisBackend implements BroadcastDriver, RoomDriver {
     const begin = JSON.parse(
       (await this._call(REDIS_ROOM_COMMANDS.dropGenerationBegin.name, [
         ...REDIS_ROOM_COMMAND_KEYS.dropGenerationBegin(this._prefix, roomId),
-        '',
         inc,
       ])) as string,
     ) as DropGenerationBeginReply
