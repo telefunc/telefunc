@@ -1,11 +1,9 @@
 export { headCxMatches, commitPreconditionHolds, nextOrderMark }
-export type { OrderMark }
 
 import type { HeadCx, LaneId, RoomHead } from './contract.js'
+import type { OrderingInfo } from '../../ordering-frame.js'
 
 // The authority rules both TypeScript drivers apply; Redis spells the same rules in Lua.
-
-type OrderMark = { seq: number; timestamp: number }
 
 function headCxMatches(cx: HeadCx, current: RoomHead | null, now: number): boolean {
   if (cx.form === 'absent') return current === null
@@ -39,7 +37,7 @@ function commitPreconditionHolds(
 }
 
 /** `seq` strictly increases per domain; `timestamp` is authority time, clamped so it never goes back. */
-function nextOrderMark(previous: OrderMark | undefined, now: number): OrderMark {
+function nextOrderMark(previous: OrderingInfo | undefined, now: number): OrderingInfo {
   if (previous?.seq === Number.MAX_SAFE_INTEGER) throw new Error('sequence exhausted for the ordering domain')
   return { seq: (previous?.seq ?? 0) + 1, timestamp: Math.max(now, previous?.timestamp ?? 0) }
 }

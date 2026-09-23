@@ -4,10 +4,17 @@ import { getRawContext, isAsyncMode, restoreContext } from '../../../../../node/
 import type { BroadcastDriver, BroadcastLane, PublishResult } from '../../../../backend/broadcast/contract.js'
 import type {
   CellMutation,
+  CellSelector,
+  CellsRead,
+  CommitOptions,
   CommitResult,
+  CxResult,
+  DirectoryPage,
   HeadCx,
+  HeadCxResult,
   HeadNext,
   LaneId,
+  RetainedFrame,
   RoomDriver,
   RoomHead,
   RoomSubscriptionSource,
@@ -145,55 +152,67 @@ export class CloudflareRoomBackend implements BroadcastDriver, RoomDriver {
   async readHead(roomId: string): Promise<RoomHead | null> {
     return this.#stub(roomId).readHead()
   }
-  async compareExchangeHead(roomId: string, cx: HeadCx, next: HeadNext) {
+
+  async compareExchangeHead(roomId: string, cx: HeadCx, next: HeadNext): Promise<HeadCxResult> {
     return this.#stub(roomId).compareExchangeHead(cx, next)
   }
-  async readCells(roomId: string, inc: string, sel: { keys: string[] } | { prefix: string }) {
+
+  async readCells(roomId: string, inc: string, sel: CellSelector): Promise<CellsRead> {
     return this.#stub(roomId).readCells(inc, sel)
   }
-  async compareExchangeCells(roomId: string, inc: string, revision: string, mutations: CellMutation[]) {
+
+  async compareExchangeCells(roomId: string, inc: string, revision: string, mutations: CellMutation[]): Promise<CxResult> {
     return this.#stub(roomId).compareExchangeCells(inc, revision, mutations)
   }
+
   async commitLane(
     roomId: string,
     inc: string,
     lane: LaneId,
     payload: Uint8Array,
-    opts?: { retain?: boolean; closingLease?: string; requiredCellKeys?: string[] },
+    opts?: CommitOptions,
   ): Promise<CommitResult> {
     const stub = this.#stub(roomId)
     const wire = await stub.commitLane(inc, lane, payload, opts)
     if ('stale' in wire) return wire
-    const deliveryToken = wire.deliveryToken
-    const delivery = stub.awaitDelivery(deliveryToken)
+    const delivery = stub.awaitDelivery(wire.deliveryToken)
     return { accepted: true, seq: wire.seq, timestamp: wire.timestamp, receivers: wire.receivers, delivery }
   }
-  async readRetained(roomId: string, inc: string, lane: LaneId) {
+
+  async readRetained(roomId: string, inc: string, lane: LaneId): Promise<RetainedFrame | null> {
     return this.#stub(roomId).readRetained(inc, lane)
   }
-  async listRetained(roomId: string, inc: string) {
+
+  async listRetained(roomId: string, inc: string): Promise<LaneId[]> {
     return this.#stub(roomId).listRetained(inc)
   }
-  async deleteRetained(roomId: string, inc: string, lane: LaneId, opts?: { ifSeq?: number }) {
-    await this.#stub(roomId).deleteRetained(inc, lane, opts)
+
+  async deleteRetained(roomId: string, inc: string, lane: LaneId, opts?: { ifSeq?: number }): Promise<void> {
+    return this.#stub(roomId).deleteRetained(inc, lane, opts)
   }
-  async dropGeneration(roomId: string, inc: string) {
-    await this.#stub(roomId).dropGeneration(inc)
+
+  async dropGeneration(roomId: string, inc: string): Promise<void> {
+    return this.#stub(roomId).dropGeneration(inc)
   }
-  async directoryPut(roomId: string, incTag: string) {
-    await this.#directory().directoryPut(roomId, incTag)
+
+  async directoryPut(roomId: string, incTag: string): Promise<void> {
+    return this.#directory().directoryPut(roomId, incTag)
   }
-  async directoryDelete(roomId: string, incTag: string) {
-    await this.#directory().directoryDelete(roomId, incTag)
+
+  async directoryDelete(roomId: string, incTag: string): Promise<void> {
+    return this.#directory().directoryDelete(roomId, incTag)
   }
-  async directoryList(prefix: string, cursor?: string) {
+
+  async directoryList(prefix: string, cursor?: string): Promise<DirectoryPage> {
     return this.#directory().directoryList(prefix, cursor)
   }
-  async dispose() {
+
+  async dispose(): Promise<void> {
     if (this.#disposed) return
     this.#disposed = true
     await this.broadcast.dispose()
   }
+
   #bindSubscription(source: CloudflareSubscriptionSource): SubscriptionBinding {
     if (!('roomId' in source)) {
       return {
@@ -210,9 +229,11 @@ export class CloudflareRoomBackend implements BroadcastDriver, RoomDriver {
       open: (receiver) => manager.openSubscription(source, this.#stub(source.roomId), receiver),
     }
   }
+
   #stub(roomId: string): CloudflareRoomAuthorityStub {
     return roomAuthority(this.#rooms(), roomId)
   }
+
   #directory(): CloudflareRoomAuthorityStub {
     return this.#stub(DIRECTORY_DO_NAME)
   }

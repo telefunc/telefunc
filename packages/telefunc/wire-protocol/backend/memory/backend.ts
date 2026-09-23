@@ -13,9 +13,15 @@ import type {
   RoomDriver,
   RoomHead,
   RoomSubscriptionSource,
+  CellSelector,
+  CellsRead,
+  CommitOptions,
+  RetainedFrame,
+  DirectoryPage,
 } from '../room/contract.js'
 import { encodeLaneKey } from '../room/lane-key.js'
-import { commitPreconditionHolds, headCxMatches, nextOrderMark, type OrderMark } from '../room/semantics.js'
+import { commitPreconditionHolds, headCxMatches, nextOrderMark } from '../room/semantics.js'
+import type { OrderingInfo } from '../../ordering-frame.js'
 import { unrefTimer } from '../../../utils/unrefTimer.js'
 import type { BackendReceiver, SubscriptionDriver } from '../subscription.js'
 import { DriverAttempt } from '../attempt.js'
@@ -37,7 +43,7 @@ type RetainedEntry = { lane: LaneId; payload: Uint8Array; seq: number; timestamp
 type Generation = {
   revision: number
   cells: Map<string, StoredCell>
-  order: Map<string, OrderMark>
+  order: Map<string, OrderingInfo>
   retained: Map<string, RetainedEntry>
   subs: Map<string, Set<MemorySubscriptionAttempt>>
   chains: Map<string, Promise<void>>
@@ -50,7 +56,7 @@ const noop = () => {}
 export class MemoryBackendState {
   readonly rooms = new Map<string, RoomRecord>()
   readonly directory = new Map<string, string>()
-  readonly broadcastOrder = new Map<string, OrderMark>()
+  readonly broadcastOrder = new Map<string, OrderingInfo>()
   readonly broadcastSubs = new Map<string, Set<MemorySubscriptionAttempt>>()
   revSeq = 0
 }
@@ -65,7 +71,7 @@ function newGeneration(): Generation {
   return { revision: 0, cells: new Map(), order: new Map(), retained: new Map(), subs: new Map(), chains: new Map() }
 }
 
-function advanceOrder(order: Map<string, OrderMark>, domain: string, now: number): OrderMark {
+function advanceOrder(order: Map<string, OrderingInfo>, domain: string, now: number): OrderingInfo {
   const mark = nextOrderMark(order.get(domain), now)
   order.set(domain, mark)
   return mark
@@ -176,11 +182,7 @@ export class MemoryBackend implements BroadcastDriver, RoomDriver {
     return stored
   }
 
-  async readCells(
-    roomId: string,
-    inc: string,
-    sel: { keys: string[] } | { prefix: string },
-  ): Promise<{ revision: string; cells: Map<string, Uint8Array> } | { staleInc: true }> {
+  async readCells(roomId: string, inc: string, sel: CellSelector): Promise<CellsRead> {
     this.#assertLive()
     const room = this.#state.rooms.get(roomId)
     const head = this.#readAndExpireHead(room)
@@ -222,7 +224,7 @@ export class MemoryBackend implements BroadcastDriver, RoomDriver {
     inc: string,
     lane: LaneId,
     payload: Uint8Array,
-    opts?: { retain?: boolean; closingLease?: string; requiredCellKeys?: string[] },
+    opts?: CommitOptions,
   ): Promise<CommitResult> {
     this.#assertLive()
     const room = this.#state.rooms.get(roomId)
@@ -258,7 +260,7 @@ export class MemoryBackend implements BroadcastDriver, RoomDriver {
     key: string,
     targets: MemorySubscriptionAttempt[],
     frame: Uint8Array,
-    mark: OrderMark,
+    mark: OrderingInfo,
   ): Promise<void> {
     const previous = gen.chains.get(key) ?? Promise.resolve()
     const delivery = previous.then(() =>
@@ -270,11 +272,7 @@ export class MemoryBackend implements BroadcastDriver, RoomDriver {
     return delivery
   }
 
-  async readRetained(
-    roomId: string,
-    inc: string,
-    lane: LaneId,
-  ): Promise<{ payload: Uint8Array; seq: number; timestamp: number } | null> {
+  async readRetained(roomId: string, inc: string, lane: LaneId): Promise<RetainedFrame | null> {
     this.#assertLive()
     const entry = this.#state.rooms.get(roomId)?.gens.get(inc)?.retained.get(encodeLaneKey(lane))
     if (entry === undefined) return null
@@ -345,10 +343,7 @@ export class MemoryBackend implements BroadcastDriver, RoomDriver {
     if (this.#state.directory.get(roomId) === incTag) this.#state.directory.delete(roomId)
   }
 
-  async directoryList(
-    prefix: string,
-    cursor?: string,
-  ): Promise<{ entries: { roomId: string; incTag: string }[]; cursor?: string }> {
+  async directoryList(prefix: string, cursor?: string): Promise<DirectoryPage> {
     this.#assertLive()
     const entries = [...this.#state.directory]
       .filter(([roomId]) => roomId.startsWith(prefix) && (cursor === undefined || roomId > cursor))

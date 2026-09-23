@@ -1,5 +1,10 @@
 export type {
   CellMutation,
+  CellSelector,
+  CellsRead,
+  CommitOptions,
+  DirectoryPage,
+  RetainedFrame,
   CommitAccepted,
   CommitResult,
   StaleCommit,
@@ -15,6 +20,7 @@ export type {
 }
 
 import type { BackendReceiver, BackendSubscription, SubscriptionDriver } from '../subscription.js'
+import type { OrderingInfo } from '../../ordering-frame.js'
 
 /** Fixed channels/order domains: semantic shares RoomOrder; control uses ControlSeq; binary uses
  * per-(member,track) LaneSeq; inbox uses per-member InboxSeq. */
@@ -58,7 +64,18 @@ type HeadCxResult = { head: RoomHead } | { conflict: true; current: RoomHead | n
 /** `bytes: null` deletes the cell. */
 type CellMutation = { key: string; bytes: Uint8Array | null }
 
+type CellSelector = { keys: string[] } | { prefix: string }
+
+/** Cells at one revision, or the incarnation is no longer the head's. */
+type CellsRead = { revision: string; cells: Map<string, Uint8Array> } | { staleInc: true }
+
 type CxResult = 'committed' | 'conflict' | 'stale-inc'
+
+type CommitOptions = { retain?: boolean; closingLease?: string; requiredCellKeys?: string[] }
+
+type RetainedFrame = OrderingInfo & { payload: Uint8Array }
+
+type DirectoryPage = { entries: { roomId: string; incTag: string }[]; cursor?: string }
 
 type CommitAccepted = {
   accepted: true
@@ -80,37 +97,26 @@ type RoomSubscriptionSource = {
   lane: LaneId
 }
 
-/** Raw author contract for durable Room storage and subscriptions. */
+/** What a backend implements for Room: durable heads, cells, lanes and retained frames, and lane subscriptions. */
 type RoomDriver = {
   readHead(roomId: string): Promise<RoomHead | null>
   compareExchangeHead(roomId: string, cx: HeadCx, next: HeadNext): Promise<HeadCxResult>
-  readCells(
-    roomId: string,
-    inc: string,
-    sel: { keys: string[] } | { prefix: string },
-  ): Promise<{ revision: string; cells: Map<string, Uint8Array> } | { staleInc: true }>
+  readCells(roomId: string, inc: string, sel: CellSelector): Promise<CellsRead>
   compareExchangeCells(roomId: string, inc: string, revision: string, mutations: CellMutation[]): Promise<CxResult>
   commitLane(
     roomId: string,
     inc: string,
     lane: LaneId,
     payload: Uint8Array,
-    opts?: { retain?: boolean; closingLease?: string; requiredCellKeys?: string[] },
+    opts?: CommitOptions,
   ): Promise<CommitResult>
-  readRetained(
-    roomId: string,
-    inc: string,
-    lane: LaneId,
-  ): Promise<{ payload: Uint8Array; seq: number; timestamp: number } | null>
+  readRetained(roomId: string, inc: string, lane: LaneId): Promise<RetainedFrame | null>
   listRetained(roomId: string, inc: string): Promise<LaneId[]>
   deleteRetained(roomId: string, inc: string, lane: LaneId, opts?: { ifSeq?: number }): Promise<void>
   dropGeneration(roomId: string, inc: string): Promise<void>
   directoryPut(roomId: string, incTag: string): Promise<void>
   directoryDelete(roomId: string, incTag: string): Promise<void>
-  directoryList(
-    prefix: string,
-    cursor?: string,
-  ): Promise<{ entries: { roomId: string; incTag: string }[]; cursor?: string }>
+  directoryList(prefix: string, cursor?: string): Promise<DirectoryPage>
   readonly subscriptions: SubscriptionDriver<RoomSubscriptionSource>
 }
 

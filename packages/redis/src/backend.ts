@@ -20,6 +20,11 @@ import type {
   PublishResult,
   RoomDriver,
   RoomHead,
+  CellSelector,
+  CellsRead,
+  CommitOptions,
+  RetainedFrame,
+  DirectoryPage,
 } from 'telefunc/__internal'
 import { decodeLaneKey, decodeOrderingFrame, encodeLaneKey } from 'telefunc/__internal'
 import {
@@ -41,10 +46,6 @@ export type RedisBackendOptions = {
   redis: RedisClient
   prefix?: string
 }
-
-type CellSelector = { keys: string[] } | { prefix: string }
-
-type CellsRead = { revision: string; cells: Map<string, Uint8Array> } | { staleInc: true }
 
 export class RedisBackend implements BroadcastDriver, RoomDriver {
   readonly subscriptions: RedisSubscriptionDriver
@@ -106,7 +107,7 @@ export class RedisBackend implements BroadcastDriver, RoomDriver {
     inc: string,
     lane: LaneId,
     payload: Uint8Array,
-    opts?: { retain?: boolean; closingLease?: string; requiredCellKeys?: string[] },
+    opts?: CommitOptions,
   ): Promise<CommitResult> {
     this._assertLive()
     const fence = this.subscriptions.prepareFence({ roomId, inc, lane })
@@ -140,11 +141,7 @@ export class RedisBackend implements BroadcastDriver, RoomDriver {
     }
   }
 
-  async readRetained(
-    roomId: string,
-    inc: string,
-    lane: LaneId,
-  ): Promise<{ payload: Uint8Array; seq: number; timestamp: number } | null> {
+  async readRetained(roomId: string, inc: string, lane: LaneId): Promise<RetainedFrame | null> {
     this._assertLive()
     const frame = await this._publisher.getBuffer(retainedKey(this._prefix, roomId, inc, encodeLaneKey(lane)))
     if (frame === null) return null
@@ -179,10 +176,7 @@ export class RedisBackend implements BroadcastDriver, RoomDriver {
     return this._run(REDIS_COMMANDS.directoryDelete, { roomId, incTag })
   }
 
-  async directoryList(
-    prefix: string,
-    cursor?: string,
-  ): Promise<{ entries: { roomId: string; incTag: string }[]; cursor?: string }> {
+  async directoryList(prefix: string, cursor?: string): Promise<DirectoryPage> {
     this._assertLive()
     const index = directoryIndexKey(this._prefix)
     const min = cursor === undefined ? `[${prefix}` : `(${cursor}`

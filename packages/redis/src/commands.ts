@@ -10,6 +10,7 @@ import {
   type HeadNext,
   type LaneId,
   type RoomHead,
+  type CellsRead,
 } from 'telefunc/__internal'
 import { assert } from './assert.js'
 import {
@@ -332,7 +333,6 @@ type CommitReply =
   | { stale: 'incarnation' }
   | { stale: 'cell'; index: number }
   | { accepted: true; seq: number; timestamp: number; receivers: number }
-type CellsRead = { revision: string; cells: Map<string, Uint8Array> } | { staleInc: true }
 
 export const REDIS_COMMANDS = {
   publish: command({

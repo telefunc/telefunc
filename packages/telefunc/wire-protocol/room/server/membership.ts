@@ -10,7 +10,7 @@ export {
 }
 
 import { getRoomBackend } from '../../backend/install.js'
-import type { CellMutation } from '../../backend/room/contract.js'
+import type { CellMutation, CellSelector } from '../../backend/room/contract.js'
 import { ROOM_MEMBER_TTL_MS } from '../constants.js'
 import { participantGoneError, roomClosedError } from '../errors.js'
 import { leaveCauseToWire } from '../model.js'
@@ -29,7 +29,6 @@ import {
   memberIdOfCleanupKey,
 } from './cells.js'
 
-type CellSelector = { keys: string[] } | { prefix: string }
 type CellPlan<T> = { value: T; mutations: CellMutation[] }
 type PendingMemberCleanup = { cause: WireLeaveCause; hidden?: true }
 

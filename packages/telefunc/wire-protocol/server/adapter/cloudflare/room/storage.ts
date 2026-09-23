@@ -1,9 +1,18 @@
 /// <reference types="@cloudflare/workers-types" />
 // Room-DO `transactionSync` makes head CX, cell batches, and order advance atomic under authority time.
 
-import type { CellMutation, CxResult, HeadCx, HeadNext, RoomHead } from '../../../../backend/room/contract.js'
-import { headCxMatches, nextOrderMark, type OrderMark } from '../../../../backend/room/semantics.js'
-export type { OrderMark }
+import type {
+  CellMutation,
+  CxResult,
+  HeadCx,
+  HeadNext,
+  RoomHead,
+  CellSelector,
+  CellsRead,
+  DirectoryPage,
+} from '../../../../backend/room/contract.js'
+import { headCxMatches, nextOrderMark } from '../../../../backend/room/semantics.js'
+import type { OrderingInfo } from '../../../../ordering-frame.js'
 export type StoredHead = RoomHead & { expiresAt: number | null }
 
 type HeadCxOutcome = { head: StoredHead } | { conflict: true; current: StoredHead | null }
@@ -55,11 +64,7 @@ export function directoryDelete(sql: SqlStorage, roomId: string, incTag: string)
   sql.exec('DELETE FROM directory WHERE room_id = ? AND inc_tag = ?', roomId, incTag)
 }
 
-export function directoryList(
-  sql: SqlStorage,
-  prefix: string,
-  cursor?: string,
-): { entries: { roomId: string; incTag: string }[]; cursor?: string } {
+export function directoryList(sql: SqlStorage, prefix: string, cursor?: string): DirectoryPage {
   const after = cursor ?? null
   const matching = sql
     .exec<{ room_id: string; inc_tag: string }>(
@@ -161,9 +166,8 @@ function storeHead(sql: SqlStorage, next: HeadNext, now: number, mintRev: () => 
   return stored
 }
 
-type CellsRead = { revision: string; cells: Map<string, Uint8Array> } | { staleInc: true }
 type CellRow = { key: string; bytes: ArrayBuffer }
-function selectCellRows(sql: SqlStorage, inc: string, sel: { keys: string[] } | { prefix: string }): CellRow[] {
+function selectCellRows(sql: SqlStorage, inc: string, sel: CellSelector): CellRow[] {
   if ('keys' in sel)
     return sel.keys.flatMap((key) => {
       const row = sql
@@ -176,12 +180,7 @@ function selectCellRows(sql: SqlStorage, inc: string, sel: { keys: string[] } | 
 }
 
 // Reads stay available while closing; staleInc means the head is absent or names another incarnation.
-export function readCells(
-  sql: SqlStorage,
-  inc: string,
-  sel: { keys: string[] } | { prefix: string },
-  now: number,
-): CellsRead {
+export function readCells(sql: SqlStorage, inc: string, sel: CellSelector, now: number): CellsRead {
   const head = readLiveHead(sql, now)
   if (head === null || head.currentInc !== inc) return { staleInc: true }
   const revision = String(readRevision(sql, inc))
@@ -216,7 +215,7 @@ export function compareExchangeCells(
 }
 
 // `seq` strictly increases for the lifetime of a domain instance.
-export function advanceOrder(sql: SqlStorage, inc: string, domain: string, now: number): OrderMark {
+export function advanceOrder(sql: SqlStorage, inc: string, domain: string, now: number): OrderingInfo {
   const row = sql
     .exec<{ seq: number; ts: number }>('SELECT seq, ts FROM ord WHERE inc = ? AND domain = ?', inc, domain)
     .toArray()[0]

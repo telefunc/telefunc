@@ -19,7 +19,7 @@ import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { unrefTimer } from '../../../utils/unrefTimer.js'
 import { getRoomBackend } from '../../backend/install.js'
-import type { CommitAccepted, LaneId, RoomHead, StaleCommit } from '../../backend/room/contract.js'
+import type { CommitAccepted, LaneId, RoomHead, StaleCommit, CommitOptions } from '../../backend/room/contract.js'
 import type { RoomConfigRecord, RoomCtrlEnvelope } from '../protocol.js'
 import { RoomError, participantGoneError, roomClosedError } from '../errors.js'
 import { assert } from '../../../utils/assert.js'
@@ -69,7 +69,7 @@ async function commitRoomLane(
   inc: string,
   lane: LaneId,
   payload: Uint8Array,
-  opts?: { retain?: boolean; closingLease?: string; requiredCellKeys?: string[] },
+  opts?: CommitOptions,
 ): Promise<CommitAccepted | StaleCommit> {
   const result = await getRoomBackend().commitLane(id, inc, lane, payload, opts)
   if ('stale' in result) return result

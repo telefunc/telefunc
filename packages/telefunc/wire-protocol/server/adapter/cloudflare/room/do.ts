@@ -11,6 +11,11 @@ import type {
   LaneId,
   RoomHead,
   StaleCommit,
+  CellSelector,
+  CellsRead,
+  CommitOptions,
+  RetainedFrame,
+  DirectoryPage,
 } from '../../../../backend/room/contract.js'
 import { assert } from '../../../../../utils/assert.js'
 import { encodeLaneKey } from '../../../../backend/room/lane-key.js'
@@ -44,11 +49,9 @@ import {
   type StoredHead,
 } from './storage.js'
 
-export type CellsResult = { revision: string; cells: Map<string, Uint8Array> } | { staleInc: true }
 export type CommitWire =
   | { accepted: true; seq: number; timestamp: number; receivers: number; deliveryToken: string }
   | StaleCommit
-export type RetainedResult = { payload: Uint8Array; seq: number; timestamp: number }
 export type RegisterWire = { ok: true } | { rejected: true; reason: string; terminal?: boolean }
 /** The session Durable Object namespace fan-out delivers to, as the adapter scopes it. */
 export type SessionNamespaceResolver = (env: unknown) => DurableObjectNamespace
@@ -111,7 +114,7 @@ export class TelefuncRoomDurableObject extends DurableObject {
     return { head: headForRpc(outcome.head) }
   }
 
-  async readCells(inc: string, sel: { keys: string[] } | { prefix: string }): Promise<CellsResult> {
+  async readCells(inc: string, sel: CellSelector): Promise<CellsRead> {
     return readCells(this.#sql, inc, sel, Date.now())
   }
 
@@ -120,12 +123,7 @@ export class TelefuncRoomDurableObject extends DurableObject {
     return this.ctx.storage.transactionSync(() => compareExchangeCells(this.#sql, inc, revision, mutations, now))
   }
 
-  async commitLane(
-    inc: string,
-    lane: LaneId,
-    payload: Uint8Array,
-    opts?: { retain?: boolean; closingLease?: string; requiredCellKeys?: string[] },
-  ): Promise<CommitWire> {
+  async commitLane(inc: string, lane: LaneId, payload: Uint8Array, opts?: CommitOptions): Promise<CommitWire> {
     const now = Date.now()
     const key = encodeLaneKey(lane)
     const outcome = this.ctx.storage.transactionSync(
@@ -153,7 +151,7 @@ export class TelefuncRoomDurableObject extends DurableObject {
     await this.#fanout.await(token)
   }
 
-  async readRetained(inc: string, lane: LaneId): Promise<RetainedResult | null> {
+  async readRetained(inc: string, lane: LaneId): Promise<RetainedFrame | null> {
     return readRetained(this.#sql, inc, lane)
   }
 
@@ -213,10 +211,7 @@ export class TelefuncRoomDurableObject extends DurableObject {
     this.ctx.storage.transactionSync(() => directoryDelete(this.#sql, roomId, incTag))
   }
 
-  async directoryList(
-    prefix: string,
-    cursor?: string,
-  ): Promise<{ entries: { roomId: string; incTag: string }[]; cursor?: string }> {
+  async directoryList(prefix: string, cursor?: string): Promise<DirectoryPage> {
     return directoryList(this.#sql, prefix, cursor)
   }
 
