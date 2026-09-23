@@ -2744,21 +2744,18 @@ function createFakeStub(options?: {
   const text: Array<(data: unknown, info: ChannelPublishInfo) => void> = []
   const binary: Array<(data: Uint8Array, info: ChannelPublishInfo) => void> = []
   const stub = {
-    _wireTextSubscribed: false,
+    _wire: { text: false, binary: false },
     _isClosed: false,
     _connection: {
       sendBroadcastSubscribe: () => options?.wireDeclarations?.push(true),
       sendBroadcastUnsubscribe: () => options?.wireDeclarations?.push(false),
     },
-    _subscribeLocal: (callback: (data: unknown, info: ChannelPublishInfo) => void) => {
-      text.push(callback)
-      return () => text.splice(text.indexOf(callback), 1)
+    _subscribeLocal: (kind: 'text' | 'binary', callback: never) => {
+      const listeners: unknown[] = kind === 'text' ? text : binary
+      listeners.push(callback)
+      return () => listeners.splice(listeners.indexOf(callback), 1)
     },
-    _subscribeBinaryLocal: (callback: (data: Uint8Array, info: ChannelPublishInfo) => void) => {
-      binary.push(callback)
-      return () => binary.splice(binary.indexOf(callback), 1)
-    },
-    _setWireTextSubscribed: ClientBroadcast.prototype._setWireTextSubscribed,
+    _setWireSubscribed: ClientBroadcast.prototype._setWireSubscribed,
     send: options?.send ?? (async () => undefined),
     publish: async () => ({ key: 'fake', seq: 1, timestamp: 1 }),
     publishBinary: async () => ({ key: 'fake', seq: 1, timestamp: 1 }),

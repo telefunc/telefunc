@@ -108,8 +108,8 @@ class ClientRoom extends RoomStateView implements Room {
     }
 
     // Delivery handlers are local-only — what the server relays is driven by the declared wants: control always arrives, text while subscribed, binary per `sub-binary`.
-    stub._subscribeLocal((envelope, info) => this._onEnvelope(envelope, info))
-    stub._subscribeBinaryLocal((framed, info) => this._onBinaryFrame(framed, info))
+    stub._subscribeLocal('text', (envelope, info) => this._onEnvelope(envelope, info))
+    stub._subscribeLocal('binary', (framed, info) => this._onBinaryFrame(framed, info))
     // Wire death — the network gave up or the stub was GC'd. (A server `Room.close()` arrives as the `closed` ctrl event before the stub shuts down, so it takes the 'closed' path.)
     stub.onClose(() => this._applyClosed('disconnected'))
     // A backend rejection can arrive before the application asks for the roster. Mark it handled here while preserving the original rejection for each later getter.
@@ -311,9 +311,9 @@ class ClientRoom extends RoomStateView implements Room {
   /** Text wants are declared synchronously through Broadcast so same-connection FIFO covers an immediate publish. */
   private _syncWants(): void {
     const state = this._state
-    if (state.closed) return this._stub._setWireTextSubscribed(false) // the stub is dead: nothing to declare
+    if (state.closed) return this._stub._setWireSubscribed('text', false) // the stub is dead: nothing to declare
     const text = state.textWants()
-    this._stub._setWireTextSubscribed(text.all)
+    this._stub._setWireSubscribed('text', text.all)
 
     // A room-level text subscription supersedes the member set — clear it server-side.
     this._declare({ __r: 'sub-text', members: text.all ? [] : text.members, announce: state.wantsAnnounce })

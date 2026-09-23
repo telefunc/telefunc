@@ -24,6 +24,7 @@ import {
   TAG,
   isChannelCtrlTag,
   type AckResultStatus,
+  type BroadcastKind,
   type BroadcastSubscriptions,
   type ChannelCtrlFrame,
   type ChannelDataFrame,
@@ -605,52 +606,37 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   }
 }
 
+type BroadcastListeners<T> = { text: Array<BroadcastListener<T>>; binary: Array<BroadcastBinaryListener> }
+
 class ClientBroadcast<T = unknown> extends ClientChannel {
   readonly [CLIENT_BROADCAST_BRAND] = true
-  private _broadcastListeners: Array<BroadcastListener<T>> = []
-  private _broadcastBinaryListeners: Array<BroadcastBinaryListener> = []
-  private _wireTextSubscribed = false
-  private _wireBinarySubscribed = false
+  private readonly _subscribers: BroadcastListeners<T> = { text: [], binary: [] }
+  private readonly _wire: BroadcastSubscriptions = { text: false, binary: false }
 
   static isClientBroadcast(value: unknown): value is ClientBroadcast {
     return hasProp(value, CLIENT_BROADCAST_BRAND)
   }
 
-  /** @internal — register a local text listener without changing wire intent. */
-  _subscribeLocal(callback: BroadcastListener<T>): () => void {
-    this._broadcastListeners.push(callback)
+  /** @internal — register a local listener without changing wire intent. */
+  _subscribeLocal<K extends BroadcastKind>(kind: K, callback: BroadcastListeners<T>[K][number]): () => void {
+    const listeners = this._subscribers[kind] as Array<typeof callback>
+    listeners.push(callback)
     return () => {
-      const index = this._broadcastListeners.indexOf(callback)
-      if (index >= 0) this._broadcastListeners.splice(index, 1)
+      const index = listeners.indexOf(callback)
+      if (index >= 0) listeners.splice(index, 1)
     }
   }
 
-  /** @internal — register a local binary listener without changing wire intent. */
-  _subscribeBinaryLocal(callback: BroadcastBinaryListener): () => void {
-    this._broadcastBinaryListeners.push(callback)
-    return () => {
-      const index = this._broadcastBinaryListeners.indexOf(callback)
-      if (index >= 0) this._broadcastBinaryListeners.splice(index, 1)
-    }
-  }
-
-  /** @internal — declare text wire intent; a reconnect carries it in the RECONCILE entry. */
-  _setWireTextSubscribed(on: boolean): void {
-    if (on === this._wireTextSubscribed || this._isClosed) return
-    this._wireTextSubscribed = on
-    if (on) this._connection.sendBroadcastSubscribe(this, false)
-    else this._connection.sendBroadcastUnsubscribe(this, false)
+  /** @internal — declare wire intent; a reconnect carries it in the RECONCILE entry. */
+  _setWireSubscribed(kind: BroadcastKind, on: boolean): void {
+    if (on === this._wire[kind] || this._isClosed) return
+    this._wire[kind] = on
+    if (on) this._connection.sendBroadcastSubscribe(this, kind === 'binary')
+    else this._connection.sendBroadcastUnsubscribe(this, kind === 'binary')
   }
 
   _broadcastSubscriptions(): BroadcastSubscriptions {
-    return { text: this._wireTextSubscribed, binary: this._wireBinarySubscribed }
-  }
-
-  private _setWireBinarySubscribed(on: boolean): void {
-    if (on === this._wireBinarySubscribed || this._isClosed) return
-    this._wireBinarySubscribed = on
-    if (on) this._connection.sendBroadcastSubscribe(this, true)
-    else this._connection.sendBroadcastUnsubscribe(this, true)
+    return { ...this._wire }
   }
 
   publish(data: ChannelData<T>): Promise<ChannelPublishAck> {
@@ -668,16 +654,7 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   }
 
   subscribe(callback: BroadcastListener<T>): () => void {
-    if (this._broadcastListeners.length === 0) {
-      this._setWireTextSubscribed(true)
-    }
-    const unsubscribe = this._subscribeLocal(callback)
-    return () => {
-      unsubscribe()
-      if (this._broadcastListeners.length === 0) {
-        this._setWireTextSubscribed(false)
-      }
-    }
+    return this._subscribeWired('text', callback)
   }
 
   publishBinary(data: Uint8Array): Promise<ChannelPublishAck> {
@@ -694,11 +671,16 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   }
 
   subscribeBinary(callback: BroadcastBinaryListener): () => void {
-    if (this._broadcastBinaryListeners.length === 0) this._setWireBinarySubscribed(true)
-    const unsubscribe = this._subscribeBinaryLocal(callback)
+    return this._subscribeWired('binary', callback)
+  }
+
+  /** The first listener of a kind subscribes the wire, and the last one unsubscribes it. */
+  private _subscribeWired<K extends BroadcastKind>(kind: K, callback: BroadcastListeners<T>[K][number]): () => void {
+    if (this._subscribers[kind].length === 0) this._setWireSubscribed(kind, true)
+    const unsubscribe = this._subscribeLocal(kind, callback)
     return () => {
       unsubscribe()
-      if (this._broadcastBinaryListeners.length === 0) this._setWireBinarySubscribed(false)
+      if (this._subscribers[kind].length === 0) this._setWireSubscribed(kind, false)
     }
   }
 
@@ -717,14 +699,14 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   _onTransportPublish(data: string, wireInfo: WirePublishInfo): void {
     const parsed = parse(data) as ChannelData<T>
     const info = makePublishInfo(this.key!, wireInfo.seq, wireInfo.timestamp)
-    for (const cb of this._broadcastListeners) {
+    for (const cb of this._subscribers.text) {
       if (invokeChannelListener(cb, [parsed, info], (error) => this._handleCallbackError(error))) return
     }
   }
 
   _onTransportPublishBinary(data: Uint8Array, wireInfo: WirePublishInfo): void {
     const info = makePublishInfo(this.key!, wireInfo.seq, wireInfo.timestamp)
-    for (const cb of this._broadcastBinaryListeners) {
+    for (const cb of this._subscribers.binary) {
       if (invokeChannelListener(cb, [data, info], (error) => this._handleCallbackError(error))) return
     }
   }

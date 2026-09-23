@@ -8,6 +8,7 @@ import type {
   ChannelCloseCallback,
   ChannelCloseOptions,
   ChannelCloseResult,
+  ChannelPublishInfo,
 } from '../channel.js'
 import type { TELEFUNC_SHIELDS } from '../../node/shared/transformer/generateShield/shield-key.js'
 import { invokeChannelListener, makePublishInfo } from '../channel.js'
@@ -21,7 +22,7 @@ import { assert, assertUsage } from '../../utils/assert.js'
 import { isPromise } from '../../utils/isPromise.js'
 import { ChannelClosedError, isExpectedChannelFailure } from '../channel-errors.js'
 import { ACK_STATUS, encodePublishText, encodePublishBinary } from '../shared-ws.js'
-import type { WirePublishInfo } from '../shared-ws.js'
+import type { BroadcastKind, WirePublishInfo } from '../shared-ws.js'
 import { STATUS_BODY_INTERNAL_SERVER_ERROR } from '../../shared/constants.js'
 import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
 import { classifyTelefuncError } from '../error-classification.js'
@@ -31,7 +32,7 @@ const SERVER_BROADCAST_BRAND: unique symbol = Symbol.for('ServerBroadcast')
 const textEncoder = new TextEncoder()
 const textDecoder = new TextDecoder()
 type BroadcastUnsubscribe = () => void
-type BroadcastKind = 'text' | 'binary'
+type BroadcastListeners<T> = { text: Array<BroadcastListener<T>>; binary: Array<BroadcastBinaryListener> }
 const BROADCAST_KINDS = ['text', 'binary'] as const
 
 class ServerBroadcast<T = unknown> extends ServerChannel {
@@ -45,8 +46,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
   }
   readonly key: string
 
-  private _broadcastListeners: Array<BroadcastListener<T>> = []
-  private _broadcastBinaryListeners: Array<BroadcastBinaryListener> = []
+  private readonly _subscribers: BroadcastListeners<T> = { text: [], binary: [] }
   private _backend: BroadcastBackend | null = null
   private readonly _subscriptions: Record<BroadcastKind, BackendSubscription | null> = { text: null, binary: null }
   private readonly _peerSubscriptions: Record<BroadcastKind, boolean> = { text: false, binary: false }
@@ -75,25 +75,19 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
   }
 
   publish(data: ChannelData<T>): Promise<ChannelPublishAck> {
-    this._ensureBroadcast()
-    const ret = this._trackAck(Promise.resolve(this._publish('text', textEncoder.encode(stringify(data)))))
-    ret.catch(() => {})
-    return ret
+    return this._publishTracked('text', textEncoder.encode(stringify(data)))
   }
 
   subscribe(callback: BroadcastListener<T>): () => void {
-    return this._subscribe('text', this._broadcastListeners, callback)
+    return this._subscribe('text', callback)
   }
 
   publishBinary(data: Uint8Array): Promise<ChannelPublishAck> {
-    this._ensureBroadcast()
-    const ret = this._trackAck(Promise.resolve(this._publish('binary', data)))
-    ret.catch(() => {})
-    return ret
+    return this._publishTracked('binary', data)
   }
 
   subscribeBinary(callback: BroadcastBinaryListener): () => void {
-    return this._subscribe('binary', this._broadcastBinaryListeners, callback)
+    return this._subscribe('binary', callback)
   }
 
   // --- Transport callbacks ---
@@ -109,7 +103,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
   _deliverBroadcastMessage(serialized: string, rawInfo: WirePublishInfo): void {
     const info = makePublishInfo(this.key, rawInfo.seq, rawInfo.timestamp)
     const data = parse(serialized) as ChannelData<T>
-    for (const cb of this._broadcastListeners) {
+    for (const cb of this._subscribers.text) {
       if (invokeChannelListener(cb, [data, info], (error) => this._handleCallbackError(error))) return
     }
     if (!this._peerSubscriptions.text) return
@@ -118,7 +112,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
 
   _deliverBroadcastBinaryMessage(data: Uint8Array, rawInfo: WirePublishInfo): void {
     const info = makePublishInfo(this.key, rawInfo.seq, rawInfo.timestamp)
-    for (const cb of this._broadcastBinaryListeners) {
+    for (const cb of this._subscribers.binary) {
       if (invokeChannelListener(cb, [data, info], (error) => this._handleCallbackError(error))) return
     }
     if (!this._peerSubscriptions.binary) return
@@ -154,7 +148,11 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
     this._backend = getBroadcastBackend()
   }
 
-  private _subscribe<Listener>(kind: BroadcastKind, listeners: Listener[], callback: Listener): BroadcastUnsubscribe {
+  private _subscribe<K extends BroadcastKind>(
+    kind: K,
+    callback: BroadcastListeners<T>[K][number],
+  ): BroadcastUnsubscribe {
+    const listeners = this._subscribers[kind] as Array<typeof callback>
     if (this._isClosed) throw new ChannelClosedError()
     this._ensureBroadcast()
     listeners.push(callback)
@@ -173,8 +171,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
   }
 
   private _reconcileSubscription(kind: BroadcastKind): void {
-    const listenerCount = kind === 'text' ? this._broadcastListeners.length : this._broadcastBinaryListeners.length
-    if (this._isClosed || (!this._peerSubscriptions[kind] && listenerCount === 0)) {
+    if (this._isClosed || (!this._peerSubscriptions[kind] && this._subscribers[kind].length === 0)) {
       this._clearSubscription(kind)
       return
     }
@@ -190,6 +187,13 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
     const subscription = this._subscriptions[kind]
     if (subscription) void subscription.unsubscribe()
     this._subscriptions[kind] = null
+  }
+
+  private _publishTracked(kind: BroadcastKind, payload: Uint8Array): Promise<ChannelPublishAck> {
+    this._ensureBroadcast()
+    const ret = this._trackAck(Promise.resolve(this._publish(kind, payload)))
+    ret.catch(() => {})
+    return ret
   }
 
   private _publish(kind: BroadcastKind, payload: Uint8Array): ChannelPublishAck | Promise<ChannelPublishAck> {
@@ -271,16 +275,11 @@ const Broadcast = {
     return backend.publish(lane, textEncoder.encode(serialized))
   },
   subscribe<U = unknown>(key: string, callback: BroadcastListener<U>): BroadcastUnsubscribe {
-    const backend = getBroadcastBackend()
-    const lane = { key, kind: 'text' } as const
-    const subscription = backend.subscribe(lane, (payload, info) => {
-      const data = parse(textDecoder.decode(payload)) as ChannelData<U>
-      const publishInfo = makePublishInfo(key, info.seq, info.timestamp)
-      invokeChannelListener(callback, [data, publishInfo], reportStaticListenerError)
-    })
-    return () => {
-      void subscription.unsubscribe()
-    }
+    return subscribeLane(
+      { key, kind: 'text' },
+      (payload) => parse(textDecoder.decode(payload)) as ChannelData<U>,
+      callback,
+    )
   },
   publishBinary(key: string, data: Uint8Array): PublishResult | Promise<PublishResult> {
     const backend = getBroadcastBackend()
@@ -288,16 +287,25 @@ const Broadcast = {
     return backend.publish(lane, data)
   },
   subscribeBinary(key: string, callback: BroadcastBinaryListener): BroadcastUnsubscribe {
-    const backend = getBroadcastBackend()
-    const lane = { key, kind: 'binary' } as const
-    const subscription = backend.subscribe(lane, (data, info) => {
-      const publishInfo = makePublishInfo(key, info.seq, info.timestamp)
-      invokeChannelListener(callback, [data, publishInfo], reportStaticListenerError)
-    })
-    return () => {
-      void subscription.unsubscribe()
-    }
+    return subscribeLane({ key, kind: 'binary' }, (payload) => payload, callback)
   },
+}
+
+function subscribeLane<Data>(
+  lane: { key: string; kind: BroadcastKind },
+  decode: (payload: Uint8Array) => Data,
+  callback: (data: Data, info: ChannelPublishInfo) => unknown,
+): BroadcastUnsubscribe {
+  const subscription = getBroadcastBackend().subscribe(lane, (payload, info) => {
+    invokeChannelListener(
+      callback,
+      [decode(payload), makePublishInfo(lane.key, info.seq, info.timestamp)],
+      reportStaticListenerError,
+    )
+  })
+  return () => {
+    void subscription.unsubscribe()
+  }
 }
 
 function reportStaticListenerError(error: unknown): void {

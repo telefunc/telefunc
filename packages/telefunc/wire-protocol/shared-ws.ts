@@ -23,6 +23,7 @@ export type {
   ChannelDataFrame,
   ReconcilePayload,
   ReconcileOpenEntry,
+  BroadcastKind,
   BroadcastSubscriptions,
   BarrierPayload,
   ReconciledPayload,
@@ -149,7 +150,8 @@ type ReconcileOpenEntry = {
   broadcast?: BroadcastSubscriptions
 }
 
-type BroadcastSubscriptions = { text: boolean; binary: boolean }
+type BroadcastKind = 'text' | 'binary'
+type BroadcastSubscriptions = Record<BroadcastKind, boolean>
 
 type ReconcilePayload = {
   sessionId?: string

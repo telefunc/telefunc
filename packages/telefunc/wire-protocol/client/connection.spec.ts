@@ -65,8 +65,7 @@ describe.each([
     const listeners = [() => Promise.reject(new Error('subscriber rejected'))]
     const broadcast = Object.assign(Object.create(ClientBroadcast.prototype), {
       key: 'listener-errors',
-      _broadcastListeners: binary ? [] : listeners,
-      _broadcastBinaryListeners: binary ? listeners : [],
+      _subscribers: { text: binary ? [] : listeners, binary: binary ? listeners : [] },
     }) as ClientBroadcast
     if (binary) broadcast._onTransportPublishBinary(new Uint8Array(), { seq: 1, timestamp: 1 })
     else broadcast._onTransportPublish('null', { seq: 1, timestamp: 1 })

@@ -340,14 +340,18 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     )
   }
 
+  private _applyPeerSubscription(binary: boolean, on: boolean): void {
+    if (on) this._onPeerBroadcastSubscribe(binary)
+    else this._onPeerBroadcastUnsubscribe(binary)
+  }
+
   /** The peer's declared subscriptions ride its (re)attach, so they apply before `onOpen` fires. */
   _attachPeer(peer: IndexedPeer, broadcast?: BroadcastSubscriptions): void {
     if (this._didShutdown) return
-    if (broadcast)
-      for (const binary of [false, true]) {
-        if (broadcast[binary ? 'binary' : 'text']) this._onPeerBroadcastSubscribe(binary)
-        else this._onPeerBroadcastUnsubscribe(binary)
-      }
+    if (broadcast) {
+      this._applyPeerSubscription(false, broadcast.text)
+      this._applyPeerSubscription(true, broadcast.binary)
+    }
     this._clearTimer('_ttlTimer')
     this._clearTimer('_reconnectTimer')
     this._flow.reset()
