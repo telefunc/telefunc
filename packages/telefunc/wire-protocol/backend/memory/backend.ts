@@ -251,31 +251,30 @@ export class MemoryBackend implements BroadcastDriver, RoomDriver {
       })
     }
     const targets = [...(gen.subs.get(key) ?? [])]
-    const info = { seq: mark.seq, timestamp: mark.timestamp }
     return {
       accepted: true,
       ...mark,
       receivers: sumReceiverCounts(targets),
-      delivery: this.#enqueueAttempt(gen, key, targets, frame, info),
+      delivery: this.#enqueueDelivery(gen, key, targets, frame, mark),
     }
   }
 
-  // Per-(inc,lane) at-most-once chain: settlement gates the next attempt without poisoning it.
-  #enqueueAttempt(
+  // Per-(inc,lane) at-most-once chain: settlement gates the next delivery without poisoning it.
+  #enqueueDelivery(
     gen: Generation,
     key: string,
     targets: MemorySubscriptionAttempt[],
     frame: Uint8Array,
-    info: { seq: number; timestamp: number },
+    mark: OrderMark,
   ): Promise<void> {
     const previous = gen.chains.get(key) ?? Promise.resolve()
-    const attempt = previous.then(() =>
-      Promise.all(
-        targets.map((target) => (target.ended ? undefined : target.deliver(copyBytes(frame), { ...info }))),
-      ).then(noop),
+    const delivery = previous.then(() =>
+      Promise.all(targets.map((target) => (target.ended ? undefined : target.deliver(copyBytes(frame), mark)))).then(
+        noop,
+      ),
     )
-    gen.chains.set(key, attempt.then(noop, noop))
-    return attempt
+    gen.chains.set(key, delivery.then(noop, noop))
+    return delivery
   }
 
   async readRetained(
@@ -307,31 +306,28 @@ export class MemoryBackend implements BroadcastDriver, RoomDriver {
     receiver: BackendReceiver,
     localReceiverCount: () => number,
   ): MemorySubscriptionAttempt {
-    if (!('roomId' in source)) {
-      const key = broadcastRouteKey(source)
-      const sub: MemorySubscriptionAttempt = new MemorySubscriptionAttempt(receiver, localReceiverCount, () =>
-        removeFromSet(this.#state.broadcastSubs, key, sub),
-      )
-      getOrCreate(this.#state.broadcastSubs, key, () => new Set()).add(sub)
-      sub.establish()
-      return sub
+    let subs: Map<string, Set<MemorySubscriptionAttempt>>
+    let key: string
+    if ('roomId' in source) {
+      const { roomId, inc, lane } = source
+      const room = this.#state.rooms.get(roomId)
+      const head = this.#readAndExpireHead(room)
+      if (room === undefined || head === null || head.currentInc !== inc || head.state !== 'open') {
+        const sub = new MemorySubscriptionAttempt(receiver, localReceiverCount)
+        sub.failEstablishment(`subscribeLane: room '${roomId}' has no open incarnation '${inc}'`)
+        return sub
+      }
+      // Registration is durable before `ready` resolves: a commit accepted after this point must see it.
+      subs = this.#generation(room, inc).subs
+      key = encodeLaneKey(lane)
+    } else {
+      subs = this.#state.broadcastSubs
+      key = broadcastRouteKey(source)
     }
-
-    const { roomId, inc, lane } = source
-    const room = this.#state.rooms.get(roomId)
-    const head = this.#readAndExpireHead(room)
-    const key = encodeLaneKey(lane)
-    if (room === undefined || head === null || head.currentInc !== inc || head.state !== 'open') {
-      const sub = new MemorySubscriptionAttempt(receiver, localReceiverCount)
-      sub.failEstablishment(`subscribeLane: room '${roomId}' has no open incarnation '${inc}'`)
-      return sub
-    }
-    // Registration is durable before `ready` resolves: a commit accepted after this point must see it.
-    const gen = this.#generation(room, inc)
     const sub: MemorySubscriptionAttempt = new MemorySubscriptionAttempt(receiver, localReceiverCount, () =>
-      removeFromSet(gen.subs, key, sub),
+      removeFromSet(subs, key, sub),
     )
-    getOrCreate(gen.subs, key, () => new Set()).add(sub)
+    getOrCreate(subs, key, () => new Set()).add(sub)
     sub.establish()
     return sub
   }
