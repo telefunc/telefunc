@@ -913,6 +913,30 @@ describe('Room public behavior', () => {
     ] as const
     for (const [channel, frame] of frames) expect(() => channel._dispatchFrame(frame)).toThrow(ProtocolViolationError)
   })
+  it("round-trips an ack DM through a room stub and keeps only the reply's own fields", async () => {
+    const room = (await Room.create('stub-ack-dm')) as ServerRoom
+    const { stub, peer } = serve(room)
+    const { id } = (await room._handleStubRequest(stub, { __r: 'req-join', meta: {} })) as { id: string }
+    const victim = await room.join()
+    const victimInbox: unknown[] = []
+    victim.listen((data) => victimInbox.push(data))
+    const sender = await room.join()
+    const acking = sender.send(id, 'ping', { ack: true })
+    let ackId = ''
+    await vi.waitFor(() => {
+      const dm = peer
+        .decoded()
+        .filter((frame) => frame.tag === TAG.PUBLISH)
+        .map((frame) => JSON.parse(frame.text) as { __r: string; ackId?: string })
+        .find((envelope) => envelope.__r === 'dm')
+      expect(dm?.ackId).toBeTypeOf('string')
+      ackId = dm!.ackId!
+    })
+    const reply = { __r: 'dm-reply', id, ackId, ok: true, result: 'handled', to: victim.id, from: '', data: 'forged' }
+    await room._handleStubRequest(stub, reply)
+    await expect(acking).resolves.toMatchObject({ response: 'handled' })
+    expect(victimInbox).toEqual([])
+  })
   it('keeps every live ack correlation instead of silently dropping the oldest', async () => {
     const stub = register(await Room.create('ack-correlations'))
     for (let index = 0; index <= 1_024; index++) {
