@@ -63,11 +63,13 @@ describe('self-initiated close', () => {
 
     expect(channel.isClosed).toBe(true)
     expect(didFireClose).toBe(false)
+    expect(channel._didShutdown).toBe(false)
 
     channel._onPeerCloseAck()
     await expect(closePromise).resolves.toBe(0)
     expect(didFireClose).toBe(true)
     expect(closeErr).toBe(undefined)
+    expect(channel._didShutdown).toBe(true)
   })
 
   test('close() sends close frame and resolves 0 after ack', async () => {
@@ -84,6 +86,7 @@ describe('self-initiated close', () => {
 
     channel._onPeerCloseAck()
     await expect(closePromise).resolves.toBe(0)
+    expect(channel._didShutdown).toBe(true)
   })
 
   test('close() resolves 1 when peer never acks', async () => {
@@ -98,6 +101,7 @@ describe('self-initiated close', () => {
     expectCloseFrame(frames[0]!)
 
     await expect(closePromise).resolves.toBe(1)
+    expect(channel._didShutdown).toBe(true)
   })
 
   test('close() waits for inflight inbound ack before resolving', async () => {
@@ -121,10 +125,12 @@ describe('self-initiated close', () => {
 
     // close() hasn't resolved yet — inflight inbound ack still in progress
     await new Promise((resolve) => setTimeout(resolve, 10))
+    expect(channel._didShutdown).toBe(false)
 
     // Inbound work finishes → close resolves
     await expect(inboundPending).resolves.toBeUndefined()
     await expect(closePromise).resolves.toBe(0)
+    expect(channel._didShutdown).toBe(true)
   })
 
   test('close() waits for inflight outbound ack before resolving', async () => {
@@ -141,6 +147,7 @@ describe('self-initiated close', () => {
 
     // close() hasn't resolved yet — outbound ack still pending
     await new Promise((resolve) => setTimeout(resolve, 10))
+    expect(channel._didShutdown).toBe(false)
 
     // Ack arrives → close resolves
     const ackReqFrame = decode(frames[0]!)
@@ -149,6 +156,7 @@ describe('self-initiated close', () => {
 
     await expect(sendPromise).resolves.toBe('received')
     await expect(closePromise).resolves.toBe(0)
+    expect(channel._didShutdown).toBe(true)
   })
 
   test('close() waits for async onClose callbacks before resolving', async () => {
@@ -169,9 +177,11 @@ describe('self-initiated close', () => {
     // close() hasn't resolved — async onClose still running
     await new Promise((resolve) => setTimeout(resolve, 10))
     expect(didFinishOnClose).toBe(false)
+    expect(channel._didShutdown).toBe(false)
 
     await expect(closePromise).resolves.toBe(0)
     expect(didFinishOnClose).toBe(true)
+    expect(channel._didShutdown).toBe(true)
   })
 
   test('buffered send flushes before close request on attachPeer', async () => {
@@ -285,8 +295,10 @@ describe('peer-initiated close', () => {
 
     // Not terminated yet — inflight work
     await new Promise((resolve) => setTimeout(resolve, 10))
+    expect(channel._didShutdown).toBe(false)
 
     await expect(pending).resolves.toBeUndefined()
+    expect(channel._didShutdown).toBe(true)
   })
 
   test('peer timeout cuts short long-running inflight work', async () => {
@@ -308,6 +320,7 @@ describe('peer-initiated close', () => {
     expectCloseAckFrame(frames[0]!)
 
     await new Promise((resolve) => setTimeout(resolve, 25))
+    expect(channel._didShutdown).toBe(true)
   })
 
   test('shutdown waits for async onClose callbacks', async () => {
@@ -324,9 +337,11 @@ describe('peer-initiated close', () => {
 
     await new Promise((resolve) => setTimeout(resolve, 10))
     expect(didFinishOnClose).toBe(false)
+    expect(channel._didShutdown).toBe(false)
 
     await new Promise((resolve) => setTimeout(resolve, 25))
     expect(didFinishOnClose).toBe(true)
+    expect(channel._didShutdown).toBe(true)
   })
 })
 
@@ -356,6 +371,7 @@ describe('cross-close', () => {
     channel._onPeerCloseAck()
 
     await expect(closePromise).resolves.toBe(0)
+    expect(channel._didShutdown).toBe(true)
   })
 
   test('both sides close: close() resolves 1 on timeout without ack', async () => {
@@ -370,5 +386,6 @@ describe('cross-close', () => {
     channel._onPeerCloseRequest(10)
 
     await expect(closePromise).resolves.toBe(1)
+    expect(channel._didShutdown).toBe(true)
   })
 })
