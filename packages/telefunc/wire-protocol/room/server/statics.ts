@@ -65,14 +65,7 @@ type RoomStatic = {
   ): Promise<Room<M, P, Pub>>
   guard<M extends RoomMeta, P extends ParticipantMeta, Pub = unknown>(
     room: Room<M, P, Pub>,
-    guards: {
-      onBeforeJoin?: JoinGuard<P>
-      onAfterJoin?: AfterJoinHook<P>
-      onBeforeSend?: SendGuard<P>
-      onAfterSend?: AfterSendHook<P>
-      onBeforePublish?: PublishGuard<P>
-      onAfterPublish?: AfterPublishHook<P>
-    },
+    guards: Partial<RoomGuardHooks<P>>,
   ): void
   join<P extends ParticipantMeta = ParticipantMeta, Pub = unknown>(
     id: string,
@@ -193,25 +186,27 @@ async function getOrCreateRoom(id: string, options?: RoomOptions): Promise<Room>
   return room
 }
 
-const ROOM_GUARD_KEYS = [
-  'onBeforeJoin',
-  'onAfterJoin',
-  'onBeforeSend',
-  'onAfterSend',
-  'onBeforePublish',
-  'onAfterPublish',
-] as const
-
-type RoomGuards = {
-  onBeforeJoin: JoinGuard | null
-  onAfterJoin: AfterJoinHook | null
-  onBeforeSend: SendGuard | null
-  onAfterSend: AfterSendHook | null
-  onBeforePublish: PublishGuard | null
-  onAfterPublish: AfterPublishHook | null
+/** A room's guards and after-hooks, typed by its participants' meta. */
+type RoomGuardHooks<P extends ParticipantMeta = ParticipantMeta> = {
+  onBeforeJoin: JoinGuard<P>
+  onAfterJoin: AfterJoinHook<P>
+  onBeforeSend: SendGuard<P>
+  onAfterSend: AfterSendHook<P>
+  onBeforePublish: PublishGuard<P>
+  onAfterPublish: AfterPublishHook<P>
 }
+type RoomGuards = { [K in keyof RoomGuardHooks]: RoomGuardHooks[K] | null }
 
-function guardRoom(room: Room, guards: Partial<Record<(typeof ROOM_GUARD_KEYS)[number], unknown>>): void {
+const ROOM_GUARD_KEYS = Object.keys({
+  onBeforeJoin: true,
+  onAfterJoin: true,
+  onBeforeSend: true,
+  onAfterSend: true,
+  onBeforePublish: true,
+  onAfterPublish: true,
+} satisfies Record<keyof RoomGuardHooks, true>) as (keyof RoomGuardHooks)[]
+
+function guardRoom(room: Room, guards: Partial<Record<keyof RoomGuardHooks, unknown>>): void {
   assertUsage(ServerRoom.isServerRoom(room), 'Room.guard() expects a room obtained from Room.get()/Room.create()')
   assertUsage(isObject(guards), 'Room.guard() guards should be an object')
   for (const key of ROOM_GUARD_KEYS) {
