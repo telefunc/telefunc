@@ -115,8 +115,9 @@ abstract class RoomStateView {
   onAnnounce(callback: (data: unknown, info: ChannelPublishInfo) => void): () => void {
     return this._state.onAnnounce(callback)
   }
-  // Detached use is documented for React's `useSyncExternalStore(room.onChange, room.snapshot)`.
-  onChange = (callback: () => void): (() => void) => this._state.onChange(callback)
+  onChange(callback: () => void): () => void {
+    return this._state.onChange(callback)
+  }
 }
 /**
  * The local, event-driven view of a room: membership, metadata, and every user-facing callback.

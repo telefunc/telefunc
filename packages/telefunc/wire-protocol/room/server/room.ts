@@ -222,7 +222,7 @@ class ServerRoom extends RoomStateView implements Room {
     return this._state.getRemote(id)
   }
 
-  snapshot = (): RoomSnapshotView => {
+  snapshot(): RoomSnapshotView {
     // Snapshot consumers want the member view — load it (need-driven, single-flight); the arrival lands as an onChange, and the next snapshot() is complete.
     if (!this._state.rosterKnown) void this._ensureRoster().catch(reportRoomError)
     return this._state.snapshot()

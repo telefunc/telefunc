@@ -163,7 +163,9 @@ class ClientRoom extends RoomStateView implements Room {
   }
 
   // The roster streams in right behind the response — its arrival is an onChange.
-  snapshot = (): RoomSnapshotView => this._state.snapshot()
+  snapshot(): RoomSnapshotView {
+    return this._state.snapshot()
+  }
 
   /** @internal — an ack-bearing stub request. Resolves with the handler's raw return, or rejects natively (the channel rebuilds an `AbortError`/`Error` from the ack status) — no envelope. */
   _request(req: RoomStubRequest): Promise<unknown> {
