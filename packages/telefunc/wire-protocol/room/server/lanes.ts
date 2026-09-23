@@ -4,8 +4,10 @@ export {
   SubSlot,
   commitRoomLane,
   configFromHead,
+  decodeRoomRecord,
   decodeRoomText,
   encodeRoomConfig,
+  encodeRoomRecord,
   encodeRoomText,
   publishCtrl,
   staleCommitError,
@@ -18,10 +20,11 @@ import { unrefTimer } from '../../../utils/unrefTimer.js'
 import { getRoomBackend } from '../../backend/install.js'
 import type { CommitAccepted, LaneId, RoomHead, StaleCommit } from '../../backend/room/contract.js'
 import type { BackendSubscription } from '../../backend/subscription.js'
-import { MEMBER_CELL_PREFIX, type RoomConfigRecord, type RoomCtrlEnvelope } from '../protocol.js'
+import type { RoomConfigRecord, RoomCtrlEnvelope } from '../protocol.js'
 import { RoomError } from '../errors.js'
 import { ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS } from '../constants.js'
 import { reportRoomError } from './errors.js'
+import { memberIdOfCellKey } from './membership.js'
 
 const roomTextEncoder = new TextEncoder()
 const roomTextDecoder = new TextDecoder()
@@ -36,12 +39,20 @@ function decodeRoomText(value: Uint8Array): string {
   return roomTextDecoder.decode(value)
 }
 
+function encodeRoomRecord(value: unknown): Uint8Array {
+  return encodeRoomText(stringify(value))
+}
+
+function decodeRoomRecord<T>(bytes: Uint8Array): T {
+  return parse(decodeRoomText(bytes)) as T
+}
+
 function encodeRoomConfig(config: RoomConfigRecord): Uint8Array {
-  return encodeRoomText(stringify(config))
+  return encodeRoomRecord(config)
 }
 
 function configFromHead(head: RoomHead): RoomConfigRecord {
-  const stored = parse(decodeRoomText(head.config)) as RoomConfigRecord
+  const stored = decodeRoomRecord<RoomConfigRecord>(head.config)
   return {
     ...stored,
     ...(head.currentInc === null ? {} : { inc: head.currentInc }),
@@ -204,7 +215,7 @@ function withinRoomHorizon<T>(promise: Promise<T>, ms: number): Promise<T> {
 }
 
 async function publishCtrl(roomId: string, inc: string, event: RoomCtrlEnvelope): Promise<void> {
-  const committed = await commitRoomLane(roomId, inc, CONTROL_LANE, encodeRoomText(stringify(event)))
+  const committed = await commitRoomLane(roomId, inc, CONTROL_LANE, encodeRoomRecord(event))
   if ('stale' in committed) throw staleCommitError(roomId, committed)
 }
 
@@ -212,7 +223,7 @@ async function publishCtrl(roomId: string, inc: string, event: RoomCtrlEnvelope)
 function staleCommitError(roomId: string, stale: StaleCommit): RoomError {
   return new RoomError(
     stale.stale === 'cell'
-      ? `Participant not found (left?): ${stale.key.slice(MEMBER_CELL_PREFIX.length)}`
+      ? `Participant not found (left?): ${memberIdOfCellKey(stale.key)}`
       : `Room is closed: ${roomId}`,
   )
 }

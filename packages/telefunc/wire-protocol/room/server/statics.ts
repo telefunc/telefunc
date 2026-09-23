@@ -1,21 +1,13 @@
 export { Room }
 export type { RoomGuards }
 
-import { stringify } from '@brillout/json-serializer/stringify'
 import { assert, assertUsage } from '../../../utils/assert.js'
 import { isObject } from '../../../utils/isObject.js'
 import { getRoomBackend } from '../../backend/install.js'
 import type { RoomBackend, RoomHead } from '../../backend/room/contract.js'
 import { RoomError } from '../errors.js'
 import { mergeAttributes, ownMetadata } from '../model.js'
-import {
-  type MemberSnapshot,
-  type RoomConfigRecord,
-  type RoomCtrlEnvelope,
-  type RoomDmEnvelope,
-  type RoomEnvelope,
-  memberCellKey,
-} from '../protocol.js'
+import type { MemberSnapshot, RoomConfigRecord, RoomCtrlEnvelope, RoomDmEnvelope, RoomEnvelope } from '../protocol.js'
 import type {
   AfterJoinHook,
   AfterPublishHook,
@@ -37,13 +29,11 @@ import type {
   SendGuard,
 } from '../types.js'
 import {
-  assertRoomId,
   evictMember,
+  memberCellKey,
   presenceCount,
-  readCell,
-  readLiveMember,
-  readMembers,
-  requireRoom,
+  readAllMembers,
+  readMembersById,
   resolveIdentityMembers,
 } from './membership.js'
 import {
@@ -52,7 +42,7 @@ import {
   commitRoomLane,
   configFromHead,
   encodeRoomConfig,
-  encodeRoomText,
+  encodeRoomRecord,
   publishCtrl,
   staleCommitError,
 } from './lanes.js'
@@ -131,6 +121,20 @@ function writerId(): string {
   return _writerId
 }
 
+function assertRoomId(id: unknown): asserts id is string {
+  assertUsage(typeof id === 'string' && id.length > 0, 'The room ID should be a non-empty string')
+  assertUsage(id.isWellFormed(), 'The room ID should be a well-formed string')
+}
+
+async function requireRoom(id: string): Promise<RoomConfigRecord> {
+  assertRoomId(id)
+  const current = await getRoomBackend().readHead(id)
+  if (current === null || current.head.state !== 'open' || current.head.currentInc === null) {
+    throw new RoomError(`Room not found: ${id}`)
+  }
+  return configFromHead(current.head)
+}
+
 async function repairRoomIndex(id: string, listedInc: string | null, liveInc: string | null): Promise<void> {
   if (liveInc === null) return await getRoomBackend().directoryDelete(id, listedInc!)
   if (liveInc !== listedInc) await getRoomBackend().directoryPut(id, liveInc)
@@ -175,7 +179,7 @@ async function createRoom(id: string, options?: RoomOptions): Promise<Room> {
 }
 
 async function getRoom(id: string, options?: RoomGetOptions): Promise<Room> {
-  const { config } = await requireRoom(id)
+  const config = await requireRoom(id)
   const room = new ServerRoom(id, config, { count: await presenceCount(id, config.inc) })
   if (options?.tail === true) room._startTail()
   return room
@@ -230,7 +234,7 @@ function guardRoom(room: Room, guards: Partial<Record<(typeof ROOM_GUARD_KEYS)[n
 }
 
 async function joinRoom(id: string, options?: JoinOptions): Promise<LocalParticipant> {
-  const { config } = await requireRoom(id)
+  const config = await requireRoom(id)
   return await new ServerRoom(id, config, { count: 0 }).join(options)
 }
 
@@ -264,14 +268,14 @@ async function listRooms(options?: { prefix?: string }): Promise<RoomInfo[]> {
 async function setRoomMeta(id: string, meta: RoomMeta): Promise<void> {
   assertUsage(isObject(meta), 'Room.setMeta() meta should be an object')
   const owned = ownMetadata(meta)
-  const { config } = await requireRoom(id)
+  const config = await requireRoom(id)
   await writeRoomConfig(id, config, () => owned)
 }
 
 async function setRoomAttributes(id: string, attributes: RoomMeta): Promise<void> {
   assertUsage(isObject(attributes), 'Room.setAttributes() attributes should be an object')
   const owned = ownMetadata(attributes)
-  const { config } = await requireRoom(id)
+  const config = await requireRoom(id)
   await writeRoomConfig(id, config, (current) => mergeAttributes(current, owned))
 }
 
@@ -349,7 +353,7 @@ async function finishClose(backend: RoomBackend, roomId: string, closing: RoomHe
     roomId,
     inc,
     CONTROL_LANE,
-    encodeRoomText(stringify({ __r: 'closed' } satisfies RoomCtrlEnvelope)),
+    encodeRoomRecord({ __r: 'closed' } satisfies RoomCtrlEnvelope),
     { closingLease: lease.id },
   )
   if ('stale' in closedEvent) return false
@@ -374,48 +378,43 @@ async function cleanupFinalizedGeneration(backend: RoomBackend, roomId: string, 
   await backend.directoryDelete(roomId, inc)
 }
 
-async function resolveParticipantRef(
-  roomId: string,
-  inc: string,
-  target: ParticipantRef,
-): Promise<{ memberId: string; identity: string | undefined }[]> {
+async function resolveParticipantRef(roomId: string, inc: string, target: ParticipantRef): Promise<MemberSnapshot[]> {
   if ('id' in target) {
     assertUsage(
       typeof target.id === 'string' && target.id.length > 0,
       'The participant { id } should be a non-empty string',
     )
-    const member = await readLiveMember(roomId, inc, target.id)
-    if (member === null) throw new RoomError(`Participant not found: ${target.id}`)
-    return [{ memberId: target.id, identity: member.identity }]
+    const members = await readMembersById(roomId, inc, [target.id])
+    if (members.length === 0) throw new RoomError(`Participant not found: ${target.id}`)
+    return members
   }
   assertUsage(
     isObject(target) && typeof target.identity === 'string' && target.identity.length > 0,
     'The participant ref should be { id } or { identity }',
   )
-  const { identity } = target
-  return (await resolveIdentityMembers(roomId, inc, identity)).map((memberId) => ({ memberId, identity }))
+  return await resolveIdentityMembers(roomId, inc, target.identity)
 }
 
 async function removeParticipant(id: string, target: ParticipantRef & { reason?: unknown }): Promise<void> {
   const cause: LeaveCause =
     target.reason === undefined ? { type: 'removed' } : { type: 'removed', reason: target.reason }
-  const { config } = await requireRoom(id)
-  for (const { memberId, identity } of await resolveParticipantRef(id, config.inc, target)) {
-    await evictMember(id, config.inc, memberId, identity, cause)
+  const config = await requireRoom(id)
+  for (const member of await resolveParticipantRef(id, config.inc, target)) {
+    await evictMember(id, config.inc, member.id, member.identity ?? null, cause)
   }
 }
 
 async function getRoomParticipants(id: string, target?: { identity: string }): Promise<ParticipantSnapshotView[]> {
-  const { config } = await requireRoom(id)
+  const config = await requireRoom(id)
   let members: MemberSnapshot[]
   if (target === undefined) {
-    members = await readMembers(id, config.inc)
+    members = await readAllMembers(id, config.inc)
   } else {
     assertUsage(
       isObject(target) && typeof target.identity === 'string' && target.identity.length > 0,
       'Room.getParticipants() target should be { identity }',
     )
-    members = await readMembers(id, config.inc, await resolveIdentityMembers(id, config.inc, target.identity))
+    members = await resolveIdentityMembers(id, config.inc, target.identity)
   }
   return members
     .filter((member) => !member.hidden)
@@ -428,36 +427,32 @@ async function getRoomParticipants(id: string, target?: { identity: string }): P
 }
 
 async function announceToRoom(id: string, data: unknown): Promise<RoomSendReceipt> {
-  const { config } = await requireRoom(id)
+  const config = await requireRoom(id)
   const commit = await commitRoomLane(
     id,
     config.inc,
     SEMANTIC_LANE,
-    encodeRoomText(stringify({ __r: 'announce', data } satisfies RoomEnvelope)),
+    encodeRoomRecord({ __r: 'announce', data } satisfies RoomEnvelope),
   )
   if ('stale' in commit) throw staleCommitError(id, commit)
   return { seq: commit.seq, timestamp: commit.timestamp }
 }
 
 async function sendToParticipant(id: string, target: ParticipantRef, data: unknown): Promise<void> {
-  const { config } = await requireRoom(id)
+  const config = await requireRoom(id)
   const exact = 'id' in target
-  for (const { memberId } of await resolveParticipantRef(id, config.inc, target)) {
-    if (!(await sendServerDm(id, config.inc, memberId, data)) && exact) {
-      throw new RoomError(`Participant not found (left?): ${memberId}`)
+  for (const member of await resolveParticipantRef(id, config.inc, target)) {
+    if (!(await sendServerDm(id, config.inc, member.id, data)) && exact) {
+      throw new RoomError(`Participant not found (left?): ${member.id}`)
     }
   }
 }
 
 async function sendServerDm(roomId: string, inc: string, memberId: string, data: unknown): Promise<boolean> {
   const envelope: RoomDmEnvelope = { __r: 'dm', to: memberId, from: '', fromMeta: null, data }
-  const committed = await commitRoomLane(
-    roomId,
-    inc,
-    { kind: 'inbox', member: memberId },
-    encodeRoomText(stringify(envelope)),
-    { requiredCellKeys: [memberCellKey(memberId)] },
-  )
+  const committed = await commitRoomLane(roomId, inc, { kind: 'inbox', member: memberId }, encodeRoomRecord(envelope), {
+    requiredCellKeys: [memberCellKey(memberId)],
+  })
   if (!('stale' in committed)) return true
   if (committed.stale === 'cell') return false
   throw staleCommitError(roomId, committed)

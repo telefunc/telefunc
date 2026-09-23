@@ -18,13 +18,8 @@ import {
 import { DEFAULT_TRACK, emptyTrackWants, frameWithMemberId, sanitizeBinaryWants, unframeMemberId } from './binary.js'
 import { RoomError, isRoomError } from './errors.js'
 import { leaveCauseFromWire, leaveCauseToWire, mergeAttributes, normalizeJoinOptions } from './model.js'
-import {
-  MEMBER_CELL_PREFIX,
-  hasRoomTag,
-  identityCellPrefix,
-  memberCellKey,
-  type RoomSnapshotMetadata,
-} from './protocol.js'
+import { hasRoomTag, type RoomSnapshotMetadata } from './protocol.js'
+import { MEMBER_CELL_PREFIX, identityCellPrefix, memberCellKey } from './server/membership.js'
 import type { LeaveCause, Sender } from './types.js'
 import { ClientRoom } from './client.js'
 import { ClientBroadcast } from '../client/channel.js'

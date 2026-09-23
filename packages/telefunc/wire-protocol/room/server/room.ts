@@ -1,7 +1,6 @@
 export { ServerRoom, ServerLocalParticipant }
 
 import { parse } from '@brillout/json-serializer/parse'
-import { stringify } from '@brillout/json-serializer/stringify'
 import type { TELEFUNC_SHIELDS } from '../../../node/shared/transformer/generateShield/shield-key.js'
 import { assert, assertUsage } from '../../../utils/assert.js'
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
@@ -41,9 +40,6 @@ import {
   type DmReply,
   type AcceptedMeta,
   type RoomEnvelope,
-  type RoomMemberRecord,
-  identityCellKey,
-  memberCellKey,
 } from '../protocol.js'
 import { RoomState, RoomStateView } from '../state.js'
 import { RoomDemand } from '../demand.js'
@@ -59,13 +55,21 @@ import {
   commitRoomLane,
   configFromHead,
   decodeRoomText,
-  encodeRoomText,
+  encodeRoomRecord,
   publishCtrl,
   staleCommitError,
   withinRoomHorizon,
 } from './lanes.js'
 import { reportCallbackError, reportRoomError } from './errors.js'
-import { evictMember, mutateCells, readCell, readMembers } from './membership.js'
+import {
+  createMember,
+  evictMember,
+  memberCellKey,
+  readAllMembers,
+  readMembersById,
+  renewMemberLease,
+  updateMemberRecord,
+} from './membership.js'
 import type {
   BinaryPublishOptions,
   JoinOptions,
@@ -231,7 +235,14 @@ class ServerRoom extends RoomStateView implements Room {
       const inbox = this._admittedInbox(id)
       await withinRoomHorizon(inbox.ready, ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS)
       this._admittedInbox(id)
-      await this._createMember(id, meta, identity, joinedAt, hidden)
+      await createMember(this.id, this._inc, id, {
+        meta,
+        joinedAt,
+        seenAt: joinedAt,
+        metaSeq: 0,
+        ...(identity === null ? {} : { identity }),
+        ...(hidden ? { hidden: true } : {}),
+      })
       created = true
       this._admittedInbox(id)
       this._pendingAdmissions.delete(id)
@@ -248,7 +259,7 @@ class ServerRoom extends RoomStateView implements Room {
       this._pendingAdmissions.delete(id)
       if (created) {
         try {
-          await evictMember(this.id, this._inc, id, identity ?? undefined, { type: 'left' })
+          await evictMember(this.id, this._inc, id, identity, { type: 'left' })
         } catch (rollbackError) {
           reportRoomError(rollbackError)
         }
@@ -269,41 +280,11 @@ class ServerRoom extends RoomStateView implements Room {
     return inbox
   }
 
-  /** Persist the member cells for a join, guarding against a concurrent `Room.close()`. */
-  private async _createMember(
-    id: string,
-    meta: ParticipantMeta,
-    identity: string | null,
-    joinedAt: number,
-    hidden = false,
-  ): Promise<void> {
-    const record: RoomMemberRecord = {
-      meta,
-      joinedAt,
-      seenAt: joinedAt,
-      metaSeq: 0,
-      ...(identity === null ? {} : { identity }),
-      ...(hidden ? { hidden: true } : {}),
-    }
-    const memberKey = memberCellKey(id)
-    const keys = [memberKey]
-    if (identity !== null) keys.push(identityCellKey(identity, id))
-    await mutateCells(this.id, this._inc, { keys }, () => ({
-      value: undefined,
-      mutations: keys.map((key) => ({
-        key,
-        set: {
-          bytes: key === memberKey ? encodeRoomText(stringify(record)) : new Uint8Array(),
-        },
-      })),
-    }))
-  }
-
   /** @internal */
   async _removeMember(id: string, cause: LeaveCause): Promise<void> {
     if (this._state.closed) return // close() already removed everyone
     const identity = this._state.getRemote(id)?.identity ?? null
-    await evictMember(this.id, this._inc, id, identity ?? undefined, cause)
+    await evictMember(this.id, this._inc, id, identity, cause)
     this._applyLeave(id, cause)
   }
 
@@ -334,18 +315,10 @@ class ServerRoom extends RoomStateView implements Room {
     id: string,
     computeMeta: (current: ParticipantMeta) => ParticipantMeta,
   ): Promise<AcceptedMeta> {
-    const key = memberCellKey(id)
-    const { meta, seq, hidden } = await mutateCells(this.id, this._inc, { keys: [key] }, (cells) => {
-      const raw = cells.get(key)
-      if (raw === undefined) throw new RoomError(`Participant not found (left?): ${id}`)
-      const record = parse(decodeRoomText(raw)) as RoomMemberRecord
+    const { meta, seq, hidden } = await updateMemberRecord(this.id, this._inc, id, (record) => {
       const meta = computeMeta(record.meta)
       const seq = record.metaSeq + 1
-      const next = { ...record, meta, metaSeq: seq, seenAt: Date.now() } satisfies RoomMemberRecord
-      return {
-        value: { meta, seq, hidden: record.hidden === true },
-        mutations: [{ key, set: { bytes: encodeRoomText(stringify(next)) } }],
-      }
+      return { value: { meta, seq, hidden: record.hidden === true }, next: { ...record, meta, metaSeq: seq } }
     })
     this._state.applyParticipantMeta(id, meta, seq)
     this._syncLocalMemberMeta(id)
@@ -362,7 +335,7 @@ class ServerRoom extends RoomStateView implements Room {
       ...(sender.identity === null ? {} : { fromIdentity: sender.identity }),
       data,
     }
-    const commit = await commitRoomLane(this.id, this._inc, SEMANTIC_LANE, encodeRoomText(stringify(envelope)), {
+    const commit = await commitRoomLane(this.id, this._inc, SEMANTIC_LANE, encodeRoomRecord(envelope), {
       retain,
       requiredCellKeys: [memberCellKey(from)],
     })
@@ -426,19 +399,11 @@ class ServerRoom extends RoomStateView implements Room {
       announced = new Set()
       this._announcedTracks.set(from, announced)
     }
-    const key = memberCellKey(from)
-    const hidden = await mutateCells(this.id, this._inc, { keys: [key] }, (cells) => {
-      const raw = cells.get(key)
-      if (raw === undefined) throw new RoomError(`Participant not found (left?): ${from}`)
-      const record = parse(decodeRoomText(raw)) as RoomMemberRecord
+    const hidden = await updateMemberRecord(this.id, this._inc, from, (record) => {
       const tracks = record.tracks ?? []
       // Already recorded by an attempt whose announcement failed: announce it now.
-      if (tracks.includes(track)) return { value: record.hidden === true, mutations: [] }
-      const next = { ...record, tracks: [...tracks, track], seenAt: Date.now() } satisfies RoomMemberRecord
-      return {
-        value: record.hidden === true,
-        mutations: [{ key, set: { bytes: encodeRoomText(stringify(next)) } }],
-      }
+      if (tracks.includes(track)) return { value: record.hidden === true }
+      return { value: record.hidden === true, next: { ...record, tracks: [...tracks, track] } }
     })
     await publishCtrl(this.id, this._inc, { __r: 'track', id: from, track, ...(hidden ? { hidden: true } : {}) })
     this._state.applyTrack(from, track)
@@ -509,7 +474,7 @@ class ServerRoom extends RoomStateView implements Room {
       this.id,
       this._inc,
       { kind: 'inbox', member: to },
-      encodeRoomText(stringify(envelope)),
+      encodeRoomRecord(envelope),
       { requiredCellKeys: [memberCellKey(from), memberCellKey(to)] },
     )
     if ('stale' in receipt) throw staleCommitError(this.id, receipt)
@@ -525,7 +490,7 @@ class ServerRoom extends RoomStateView implements Room {
       this.id,
       this._inc,
       { kind: 'inbox', member: to },
-      encodeRoomText(stringify(envelope)),
+      encodeRoomRecord(envelope),
       { requiredCellKeys: [memberCellKey(to)] },
     )
     // A sender that left has no ack left to settle; only a closed room is an error.
@@ -550,10 +515,8 @@ class ServerRoom extends RoomStateView implements Room {
   private async _resolveMember(id: string): Promise<Sender | null> {
     const remote = this._state.getRemote(id)
     if (remote) return remote
-    const raw = await readCell(this.id, this._inc, memberCellKey(id))
-    if (raw === null) return null
-    const record = parse(decodeRoomText(raw)) as RoomMemberRecord
-    return { id, meta: record.meta, identity: record.identity ?? null }
+    const [member] = await readMembersById(this.id, this._inc, [id])
+    return member === undefined ? null : { id, meta: member.meta, identity: member.identity ?? null }
   }
   private async _openConfig(): Promise<RoomConfigRecord | null> {
     const current = await getRoomBackend().readHead(this.id)
@@ -1054,7 +1017,7 @@ class ServerRoom extends RoomStateView implements Room {
   private async _runMemberRefresh(): Promise<void> {
     for (let attempt = 0; !this._state.closed; attempt++) {
       const version = this._state.membershipVersion
-      const members = await readMembers(this.id, this._inc)
+      const members = await readAllMembers(this.id, this._inc)
       if (this._commitRefreshedRoster(version, members) === 'done') return
       if (attempt === ROOM_REPLAN_LIMIT) throw new RoomError(`Room roster refresh contention: ${this.id}`)
     }
@@ -1098,17 +1061,7 @@ class ServerRoom extends RoomStateView implements Room {
       let renewalFailure: { error: unknown } | null = null
       for (const id of this._ownedMemberIds().filter((id) => !this._pendingAdmissions.has(id))) {
         try {
-          const key = memberCellKey(id)
-          const present = await mutateCells(this.id, this._inc, { keys: [key] }, (cells) => {
-            const raw = cells.get(key)
-            if (raw === undefined) return { value: false, mutations: [] }
-            const record = { ...(parse(decodeRoomText(raw)) as RoomMemberRecord), seenAt: Date.now() }
-            return {
-              value: true,
-              mutations: [{ key, set: { bytes: encodeRoomText(stringify(record)) } }],
-            }
-          })
-          if (!present) this._applyLeave(id)
+          if (!(await renewMemberLease(this.id, this._inc, id))) this._applyLeave(id)
         } catch (error) {
           renewalFailure ??= { error }
         }
