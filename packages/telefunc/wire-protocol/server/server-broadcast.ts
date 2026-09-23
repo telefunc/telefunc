@@ -163,8 +163,6 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
   }
 
   _onPeerBroadcastSubscribe(binary: boolean): void {
-    // A client's subscribe can cross our CLOSE on the wire.
-    if (this._isClosed) return
     this._ensureBroadcast()
     const kind = binary ? 'binary' : 'text'
     this._peerSubscriptions[kind] = true
@@ -188,12 +186,12 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
   // --- Internal broadcast helpers ---
 
   private _ensureBroadcast(): void {
-    if (this._isClosed) throw new ChannelClosedError()
     if (this._backend) return
     this._backend = getBroadcastBackend()
   }
 
   private _subscribe<Listener>(kind: BroadcastKind, listeners: Listener[], callback: Listener): BroadcastUnsubscribe {
+    if (this._isClosed) throw new ChannelClosedError()
     this._ensureBroadcast()
     listeners.push(callback)
     try {

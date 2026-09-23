@@ -392,9 +392,18 @@ describe('Broadcast lifecycle and route ownership', () => {
     expect((await Broadcast.publish(key, 'after-close')).receivers).toBe(0)
   })
 
+  it('publishes from onClose to the key, as the documented chat pattern does', async () => {
+    const key = 'broadcast:publish-on-close'
+    const received: string[] = []
+    const unsubscribe = Broadcast.subscribe<string>(key, (message) => received.push(message))
+    const chat = registeredBroadcast<string>(key)
+    chat.onClose(() => void chat.publish('left'))
+    await chat.close({ timeout: 0 })
+    await vi.waitFor(() => expect(received).toEqual(['left']))
+    unsubscribe()
+  })
+
   it.each([
-    ['publish', (broadcast: ServerBroadcast) => broadcast.publish(null)],
-    ['publishBinary', (broadcast: ServerBroadcast) => broadcast.publishBinary(new Uint8Array())],
     ['subscribe', (broadcast: ServerBroadcast) => broadcast.subscribe(() => {})],
     ['subscribeBinary', (broadcast: ServerBroadcast) => broadcast.subscribeBinary(() => {})],
   ])('%s() throws after abort', (_name, operation) => {
