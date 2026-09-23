@@ -9,6 +9,7 @@ import {
 import type { BroadcastTransport } from './broadcast/transport.js'
 import { MemoryBackend } from './memory/backend.js'
 import { SubscriptionManager } from './subscription-manager.js'
+import { config } from '../../node/server/serverConfig.js'
 afterEach(async () => {
   await disposeBackend().catch(() => {})
   vi.restoreAllMocks()
@@ -73,6 +74,13 @@ describe('backend installation lifecycle', () => {
     await disposeBackend()
     await expectBroadcastRoundTrip('transport-only')
     expect(() => getRoomBackend()).toThrow('Room requires a full backend')
+  })
+
+  it('rejects a Broadcast transport missing a binary method when it is configured', () => {
+    const { sendBinary: _, ...textOnly } = localTransport()
+    expect(() => {
+      config.broadcast = { transport: textOnly as BroadcastTransport }
+    }).toThrow('config.broadcast.transport must be a BroadcastTransport with send(), listen(), sendBinary()')
   })
 
   it.each([
