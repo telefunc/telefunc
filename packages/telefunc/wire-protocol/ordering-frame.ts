@@ -14,15 +14,18 @@ function isOrderingPosition({ seq, timestamp }: OrderingInfo): boolean {
   return Number.isSafeInteger(seq) && seq > 0 && Number.isSafeInteger(timestamp) && timestamp >= 0
 }
 
-function encodeOrderingFrame(payload: Uint8Array, info: OrderingInfo): Uint8Array {
+/** `prefix`, when given, leads the frame in the same allocation. */
+function encodeOrderingFrame(payload: Uint8Array, info: OrderingInfo, prefix?: Uint8Array): Uint8Array {
   assert(isOrderingPosition(info))
-  const frame = new Uint8Array(ORDERING_FRAME_HEADER_BYTES + payload.byteLength)
-  const view = new DataView(frame.buffer)
+  const start = prefix?.byteLength ?? 0
+  const frame = new Uint8Array(start + ORDERING_FRAME_HEADER_BYTES + payload.byteLength)
+  if (prefix) frame.set(prefix)
+  const view = new DataView(frame.buffer, start)
   view.setUint32(0, Math.floor(info.seq / WORD_RANGE))
   view.setUint32(4, info.seq % WORD_RANGE)
   view.setUint32(8, Math.floor(info.timestamp / WORD_RANGE))
   view.setUint32(12, info.timestamp % WORD_RANGE)
-  frame.set(payload, ORDERING_FRAME_HEADER_BYTES)
+  frame.set(payload, start + ORDERING_FRAME_HEADER_BYTES)
   return frame
 }
 

@@ -1,9 +1,10 @@
 import { describe, expect, it } from 'vitest'
-import { decodePublishBinary, encodePublishBinary } from './shared-ws.js'
+import { TAG, decode, encode, encodePublishBinary } from './shared-ws.js'
 
 const payload = new Uint8Array([0, 1, 2, 3, 4, 5, 6, 7])
 const info = { seq: 17, timestamp: 1_700_000_000_000 }
 const legacyWire = new Uint8Array([17, 0, 0, 0, 0, 0, 128, 86, 254, 188, 120, 66, ...payload])
+const decodePublished = (wire: Uint8Array) => decode(encode.publishBinary(0, wire, 1))
 
 describe('PUBLISH_BINARY wire-version boundary', () => {
   it.each([info, { ...info, seq: 0x1_0000_0000 }])(
@@ -11,12 +12,12 @@ describe('PUBLISH_BINARY wire-version boundary', () => {
     (ordering) => {
       const wire = encodePublishBinary(payload, ordering)
       expect(() => legacyDecode(wire)).toThrow('finite numbers')
-      expect(decodePublishBinary(wire)).toEqual({ data: payload, info: ordering })
+      expect(decodePublished(wire)).toMatchObject({ tag: TAG.PUBLISH_BINARY, data: payload, info: ordering })
     },
   )
 
   it('rejects the previous unversioned writer layout', () => {
-    expect(() => decodePublishBinary(legacyWire)).toThrow('unsupported legacy wire format')
+    expect(() => decodePublished(legacyWire)).toThrow('unsupported legacy wire format')
   })
 })
 

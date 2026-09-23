@@ -12,7 +12,6 @@ export {
   isConnCtrlTag,
   encodePublishText,
   encodePublishBinary,
-  decodePublishBinary,
   payloadBytes,
 }
 export type {
@@ -632,24 +631,17 @@ function decodePublishText(wire: string): { text: string; info: WirePublishInfo 
 // Current binary publish frames are explicitly versioned. The NaN timestamp sentinel makes an
 // older 12-byte reader fail loudly instead of silently shifting payload bytes.
 const PUBLISH_BINARY_PREFIX = new Uint8Array([0x54, 0x46, 0x42, 1, 0, 0, 0, 0, 0, 0, 0xf8, 0x7f])
+const PUBLISH_BINARY_VERSION_BYTE = 3
 
 function encodePublishBinary(data: Uint8Array, info: WirePublishInfo): Uint8Array {
-  const ordered = encodeOrderingFrame(data, info)
-  const wire = new Uint8Array(PUBLISH_BINARY_PREFIX.byteLength + ordered.byteLength)
-  wire.set(PUBLISH_BINARY_PREFIX)
-  wire.set(ordered, PUBLISH_BINARY_PREFIX.byteLength)
-  return wire
+  return encodeOrderingFrame(data, info, PUBLISH_BINARY_PREFIX)
 }
 
 function decodePublishBinary(wire: Uint8Array): { data: Uint8Array; info: WirePublishInfo } {
-  assertProtocol(
-    wire.byteLength >= PUBLISH_BINARY_PREFIX.byteLength,
-    'PUBLISH_BINARY frame too short for version header',
-  )
-  const view = new DataView(wire.buffer, wire.byteOffset, wire.byteLength)
-  const versioned = view.getUint16(0, true) === 0x4654 && wire[2] === 0x42 && Number.isNaN(view.getFloat64(4, true))
+  const versioned = PUBLISH_BINARY_PREFIX.every((byte, i) => i === PUBLISH_BINARY_VERSION_BYTE || wire[i] === byte)
   assertProtocol(versioned, 'PUBLISH_BINARY frame uses an unsupported legacy wire format')
-  assertProtocol(wire[3] === 1, `Unsupported PUBLISH_BINARY wire version ${wire[3]}`)
+  const version = wire[PUBLISH_BINARY_VERSION_BYTE]
+  assertProtocol(version === 1, `Unsupported PUBLISH_BINARY wire version ${version}`)
   const { payload, info } = decodeOrderingFrame(wire.subarray(PUBLISH_BINARY_PREFIX.byteLength))
   return { data: payload, info }
 }
