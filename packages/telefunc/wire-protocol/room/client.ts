@@ -1,5 +1,6 @@
 export { ClientRoom, ClientStandaloneParticipant }
 
+import { createDeferred } from '../../utils/createDeferred.js'
 import { assertUsage } from '../../utils/assert.js'
 import type { TELEFUNC_SHIELDS } from '../../node/shared/transformer/generateShield/shield-key.js'
 import { makePublishInfo, type ChannelPublishAck, type ChannelPublishInfo } from '../channel.js'
@@ -81,13 +82,8 @@ class ClientRoom extends RoomStateView implements Room {
     'sub-text': JSON.stringify({ __r: 'sub-text', members: [], announce: false }),
     'sub-binary': JSON.stringify({ __r: 'sub-binary', wants: emptyBinaryWants() }),
   }
-  private _rosterArrived!: () => void
-  private _rosterFailed!: (error: unknown) => void
   /** Settled by the replayable initial roster response (or wire death) — gates `getParticipants()`. */
-  private readonly _rosterReady = new Promise<void>((resolve, reject) => {
-    this._rosterArrived = resolve
-    this._rosterFailed = reject
-  })
+  private readonly _roster = createDeferred()
 
   constructor(stub: ClientBroadcast, snapshot: RoomSnapshotMetadata) {
     super()
@@ -104,7 +100,7 @@ class ClientRoom extends RoomStateView implements Room {
     this._state._owner = this
     if (snapshot.closed) {
       this._closedCause = { type: 'closed' }
-      this._rosterArrived()
+      this._roster.resolve()
     }
 
     // Delivery handlers are local-only — what the server relays is driven by the declared wants: control always arrives, text while subscribed, binary per `sub-binary`.
@@ -113,7 +109,7 @@ class ClientRoom extends RoomStateView implements Room {
     // Wire death — the network gave up or the stub was GC'd. (A server `Room.close()` arrives as the `closed` ctrl event before the stub shuts down, so it takes the 'closed' path.)
     stub.onClose(() => this._applyClosed('disconnected'))
     // A backend rejection can arrive before the application asks for the roster. Mark it handled here while preserving the original rejection for each later getter.
-    void this._rosterReady.catch(() => {})
+    void this._roster.promise.catch(() => {})
   }
 
   async join(options?: JoinOptions): Promise<LocalParticipant> {
@@ -155,13 +151,17 @@ class ClientRoom extends RoomStateView implements Room {
 
   async getParticipants(options?: { hidden?: boolean }): Promise<RemoteParticipant[]> {
     assertUsage(!options?.hidden, 'Hidden participants can only be enumerated on the server')
-    if (!this._state.rosterKnown) await this._rosterReady
+    await this._awaitRoster()
     return this._state.listVisible()
   }
 
   async getParticipant(id: string): Promise<RemoteParticipant | null> {
-    if (!this._state.rosterKnown) await this._rosterReady
+    await this._awaitRoster()
     return this._state.getRemote(id)
+  }
+
+  private async _awaitRoster(): Promise<void> {
+    if (!this._state.rosterKnown) await this._roster.promise
   }
 
   /** @internal — sync view read for sender resolution (delivery must not wait on I/O). */
@@ -234,7 +234,7 @@ class ClientRoom extends RoomStateView implements Room {
         this._applyRoster(event.members)
         return
       case 'roster-error':
-        this._rosterFailed(new Error('Failed to load room participants'))
+        this._roster.reject(new Error('Failed to load room participants'))
         return
       case 'data':
         // Tail mode holds server-side (see `RoomStubChannel._tailPending`): text reaches this client only once it subscribes, already selected and ordered, so nothing is buffered here.
@@ -287,7 +287,7 @@ class ClientRoom extends RoomStateView implements Room {
   private _applyRoster(members: MemberSnapshot[]): void {
     this._state.reconcilePresenceRoster(members)
     this._syncWants() // per-member binary wants may reference the members just learned
-    this._rosterArrived()
+    this._roster.resolve()
   }
 
   /** @internal — apply an accepted member meta (event or own write's ack) and mirror it into a local participant. */
@@ -302,7 +302,7 @@ class ClientRoom extends RoomStateView implements Room {
     const cause: LeaveCause = { type: causeType }
     this._closedCause = cause
     this._state.applyClosed(cause)
-    this._rosterArrived() // unblock any getParticipants() waiting on a wire that just died
+    this._roster.resolve() // unblock any getParticipants() waiting on a wire that just died
     // After onClose, like on the server: the room-level signal fires before per-handle cleanup.
     for (const local of this._localParticipants.values()) local._onLeft(cause)
     this._localParticipants.clear()
@@ -454,13 +454,14 @@ class ClientRoomParticipant extends ClientParticipantBase {
 /** `LocalParticipant` revived from a serialized `ServerLocalParticipant` — owns its stub channel. */
 class ClientStandaloneParticipant extends ClientParticipantBase {
   private readonly _channel: ClientChannel
+  private readonly _request: (req: ParticipantStubRequest) => Promise<unknown>
   private _metaSeq = 0
 
   constructor(channel: ClientChannel, metadata: ParticipantStubMetadata) {
-    super(metadata.id, metadata.meta, metadata.selfDelivery, metadata.identity ?? null, (request) =>
-      channel.send(request, { ack: true }),
-    )
+    const request = (req: ParticipantStubRequest) => channel.send(req, { ack: true })
+    super(metadata.id, metadata.meta, metadata.selfDelivery, metadata.identity, request)
     this._channel = channel
+    this._request = request
 
     channel.listen((notice: unknown) => {
       if (!hasRoomTag(notice)) return
@@ -505,10 +506,6 @@ class ClientStandaloneParticipant extends ClientParticipantBase {
     await this._request({ __r: 'req-leave' })
     this._onLeft({ type: 'left' })
     void this._channel.close().catch(() => {})
-  }
-
-  private _request(req: ParticipantStubRequest): Promise<unknown> {
-    return this._channel.send(req, { ack: true })
   }
 }
 
