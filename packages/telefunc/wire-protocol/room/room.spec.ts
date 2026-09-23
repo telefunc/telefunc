@@ -25,7 +25,7 @@ import { ClientBroadcast } from '../client/channel.js'
 import { RoomState, remoteBacking } from './state.js'
 import { Room, ServerRoom, type ServerLocalParticipant } from './server.js'
 import { SubSlot, configFromHead, decodeRoomText, encodeRoomConfig } from './server/lanes.js'
-import { roomAckError } from './server/errors.js'
+import { reportRoomError, roomAckError } from './server/errors.js'
 import { RoomParticipantStubChannel, RoomStubChannel, bindParticipantStubChannel } from './stubs.js'
 import { RoomDemand } from './demand.js'
 import type { ChannelPublishInfo } from '../channel.js'
@@ -1049,6 +1049,13 @@ describe('Room public behavior', () => {
     vi.spyOn(console, 'error').mockImplementation(() => {})
     await vi.advanceTimersByTimeAsync(ROOM_MEMBER_TTL_MS + 2 * ROOM_HEARTBEAT_INTERVAL_MS)
     expect(left).toEqual([member.id])
+  })
+  it('reports bugs, not expected RoomErrors, from background Room work', () => {
+    const report = vi.spyOn(console, 'error').mockImplementation(() => {})
+    reportRoomError(new RoomError('Room is closed: background'))
+    expect(report).not.toHaveBeenCalled()
+    reportRoomError(new Error('a real bug'))
+    expect(report).toHaveBeenCalled()
   })
   it('keeps every live ack correlation instead of silently dropping the oldest', async () => {
     const stub = register(await Room.create('ack-correlations'))

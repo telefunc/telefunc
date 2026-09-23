@@ -800,7 +800,7 @@ class ServerRoom extends RoomStateView implements Room {
       }
     }
     if (!slot.wanted) return
-    reportRoomError(new RoomError(`Room subscription recovery exhausted: ${this.id}`))
+    reportRoomError(new Error(`Room subscription recovery exhausted: ${this.id}`))
     slot.markLost()
   }
   private _settleTerminalSubscription(): void {
@@ -923,7 +923,7 @@ class ServerRoom extends RoomStateView implements Room {
   }
   private _applyStubBinaryWants(stub: RoomStubChannel, req: Extract<RoomStubRequest, { __r: 'sub-binary' }>): void {
     const wants = sanitizeBinaryWants(req.wants)
-    if (!wants) return reportRoomError(new RoomError('Malformed sub-binary declaration'))
+    if (!wants) return
     const prev = stub._binaryWants
     stub._binaryWants = wants
     this._syncSubs()

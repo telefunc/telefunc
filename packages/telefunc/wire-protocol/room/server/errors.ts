@@ -16,5 +16,6 @@ function roomAckError(err: unknown, report: (err: unknown) => void): { text: str
 }
 
 function reportRoomError(err: unknown): void {
+  if (isRoomError(err)) return // an expected outcome (closed room, departed member), not a bug
   handleTelefunctionBug(err instanceof Error ? err : new Error(String(err)))
 }
