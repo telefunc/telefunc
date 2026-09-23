@@ -1,4 +1,4 @@
-// Reference driver: synchronous authority-time state, per-lane async settlement, CX leases/revisions, and lazy/janitor TTL.
+// The in-process backend, and the reference for Room SPI semantics: this process's clock is authority time.
 
 import type { BroadcastDriver, BroadcastLane, PublishResult } from '../broadcast/contract.js'
 import { broadcastRouteKey } from '../broadcast/route-key.js'
@@ -23,7 +23,7 @@ import { DriverAttempt } from '../attempt.js'
 export type MemoryBackendOptions = {
   // Tests inject authority time to prove expiry independently of caller clock skew.
   authorityNow?: () => number
-  /** @internal Ownership injection for an embedding that preserves state across facade reconstruction. */
+  /** @internal Storage to share with a reconstructed backend. */
   state?: MemoryBackendState
 }
 
@@ -46,7 +46,7 @@ type Generation = {
 type RoomRecord = { head: StoredHead | null; gens: Map<string, Generation> }
 const noop = () => {}
 
-/** Durable in-process storage owner, separable from a reconstructed facade. @internal */
+/** @internal The storage, kept apart from the backend so a reconstructed one can reuse it. */
 export class MemoryBackendState {
   readonly rooms = new Map<string, RoomRecord>()
   readonly directory = new Map<string, string>()
@@ -107,7 +107,6 @@ class MemorySubscriptionAttempt extends DriverAttempt {
   }
 
   async deliver(payload: Uint8Array, info: { seq: number; timestamp: number }): Promise<void> {
-    // Memory dispatch awaits returned thenables for this attempt; cross-backend callback completion is not guaranteed.
     await this.#receiver(payload, info)
   }
 
