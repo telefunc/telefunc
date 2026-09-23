@@ -65,8 +65,7 @@ abstract class ParticipantBase implements LocalParticipant {
   }
   abstract publish(data: unknown, options?: PublishOptions): Promise<ChannelPublishAck>
   abstract publishBinary(data: Uint8Array, options?: BinaryPublishOptions): Promise<ChannelPublishAck>
-  // Implementation signature for the overloaded `LocalParticipant.send` (receipt, or the recipient's reply with `{ ack: true }`); callers see the precise overloads through the interface. `any` is the
-  // standard overload-implementation return.
+  // The overloads live on `LocalParticipant`; this is their implementation signature.
   abstract send(to: string | Sender, data: unknown, options?: { ack?: boolean }): Promise<any>
   abstract setMeta(meta: ParticipantMeta): Promise<void>
   abstract setAttributes(attributes: ParticipantMeta): Promise<void>
@@ -131,9 +130,7 @@ abstract class ParticipantBase implements LocalParticipant {
     const sender = this._senderOf(msg)
     for (const cb of [...this._messageCbs]) this._invoke(cb, msg.data, sender)
   }
-  /** Run every listener (channel semantics: the last non-throwing return is the reply); a throw short-circuits to a failure reply. The handler is user code, so it obeys telefunc's contract: `throw
-   * Abort(value)` sends the value to the sender, any other throw is a hidden bug (reported on this — the recipient's — side).
-   */
+  /** The last listener's return is the reply; a throw is the failure reply (`Abort(value)` reaches the sender, anything else is a bug reported here). */
   private async _fireInboxAck(msg: InboxMessage): Promise<DmReply> {
     const sender = this._senderOf(msg)
     let result: unknown
@@ -155,7 +152,7 @@ abstract class ParticipantBase implements LocalParticipant {
     for (const track of this._wantedTracks) this._invoke(callback, track, true)
     return unlisten
   }
-  /** @internal — whether any node wants one of this member's tracks flipped (see the room's demand aggregation). `track` is `null` for the default `publishBinary()` lane. */
+  /** @internal — room-wide demand for one of this member's tracks changed; `null` is the default track. */
   _onDemand(track: string | null, wanted: boolean): void {
     if (wanted) this._wantedTracks.add(track)
     else this._wantedTracks.delete(track)

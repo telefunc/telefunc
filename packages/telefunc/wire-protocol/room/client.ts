@@ -308,7 +308,7 @@ class ClientRoom extends RoomStateView implements Room {
     this._localParticipants.clear()
   }
 
-  /** Text wants are declared synchronously through Broadcast so same-connection FIFO covers an immediate publish. */
+  /** Room-wide text wants ride the Broadcast subscription, which reattaches before the stub's `onOpen`. */
   private _syncWants(): void {
     const state = this._state
     if (state.closed) return this._stub._setWireSubscribed('text', false) // the stub is dead: nothing to declare

@@ -102,13 +102,7 @@ function hiddenMemberOf(event: RoomCtrlEnvelope): string | null {
 
 type Admission = { id: string; meta: ParticipantMeta; identity: string | null; joinedAt: number; hidden: boolean }
 
-/**
- * A Server Room is not a channel; each serialization attaches a fresh wire-unique stub.
- * Repeated serialization preserves the domain `room.id` while channel IDs stay unique.
- * The source applies mutations locally and commits them through backend lanes.
- * Every observer, including the source echo, applies the subscribed payload.
- * Idempotent application makes that overlap converge safely.
- */
+/** One instance's view of a room. Each serialization opens a fresh stub; every event, the origin's echo included, applies idempotently. */
 class ServerRoom extends RoomStateView implements Room {
   readonly [SERVER_ROOM_BRAND] = true
   /** Phantom: the publish shield rides the type only (see `RoomShield`), never a runtime field. */
@@ -116,21 +110,21 @@ class ServerRoom extends RoomStateView implements Room {
 
   /** Every authority check and member write carries this incarnation, rejecting stale handles after recreate. */
   readonly _inc: string
-  /** Tail mode ingests from `Room.get` until stub attach or close, closing the pre-serialization gap; the attaching stub takes the hold. */
+  /** `Room.get({ tail: true })`'s hold until a stub attaches and takes it. */
   private _tail: TailHold | null = null
-  /** In-flight `send(…, { ack: true })`s awaiting the recipient's reply, keyed by `ackId`. `to` is the recipient, so a leave/close can fail the ones it strands. Empty at steady state. */
+  /** In-flight `send(…, { ack: true })`s by `ackId`; `to` lets a leave or close fail the ones it strands. */
   private readonly _pendingDmAcks = new Map<string, { to: string; settle: (reply: DmReply) => void }>()
   private _guards: RoomGuards | null = null
   /** @internal */ readonly _state: RoomState
   private readonly _local: LocalHolder
   private readonly _stubs = new Set<RoomStubChannel>()
   private readonly _localParticipants = new Map<string, ServerLocalParticipant>()
-  /** Members registered with their holder so their inbox can establish, but not yet durable. They own inbox routes; heartbeat must not renew/reap them until the member cell commits. */
+  /** Members whose inbox is establishing before their cell commits; the heartbeat leaves them alone. */
   private readonly _pendingAdmissions = new Set<string>()
 
-  /** (member, track) pairs this instance has already announced — first publish pays the KV append + ctrl event, every further frame is a Set lookup. */
+  /** (member, track) pairs this instance announced, so only a track's first frame pays for the announcement. */
   private readonly _announcedTracks = new Map<string, Set<string>>()
-  /** Cross-node binary-demand aggregation (`onDemand`) — constructed once `roomId` and the ownership/delivery callbacks are available (see the constructor). */
+  /** Binary demand across instances (`onDemand`). */
   private readonly _demand: RoomDemand
   private readonly _subs: RoomSubscriptions
   private _controlSeq = 0
@@ -495,7 +489,7 @@ class ServerRoom extends RoomStateView implements Room {
     if (!this._acceptControlSeq(rawInfo.seq)) return
     const event = decodeLaneEnvelope(serialized) as RoomCtrlEnvelope
     if (event.__r === 'want') {
-      this._demand.applyWant(event) // demand gossip — node-to-node only, never relayed to clients
+      this._demand.applyWant(event) // between instances only, never relayed to clients
       return
     }
     const wasClosed = this._state.closed
@@ -550,8 +544,7 @@ class ServerRoom extends RoomStateView implements Room {
       for (const stub of this._stubs) stub._relayBinary(wireData, unframed.from, track, rawInfo)
     }
   }
-  /** A message on the inbox key of a member this instance owns — route it to the holder: a server-side participant's listeners, or the one client stub the member joined through. */
-  /** @internal */
+  /** @internal — a DM for a member this instance owns, routed to its holder: a server participant or its client stub. */
   _onDm(serialized: string, rawInfo: WirePublishInfo): void {
     const envelope = decodeLaneEnvelope(serialized) as RoomDmEnvelope | RoomDmAckEnvelope
     // A reply to one of our own `send(…, { ack: true })`s, riding our inbox back home.
@@ -629,8 +622,7 @@ class ServerRoom extends RoomStateView implements Room {
     this._syncSubs()
   }
 
-  /** The authority says the room closed; the lane that would have carried `closed` failed, so relay it here. */
-  /** @internal */
+  /** @internal — the authority says the room closed; the lane that would have carried `closed` failed. */
   _closeFromAuthority(): void {
     if (this._state.closed) return
     this._state.applyClosed()

@@ -178,16 +178,12 @@ class RoomState {
     }
   }
   // ── Reads ──
-  /** Exact once the roster is known (seeded or reconciled), and presence-accurate before that too:
-   *  the seed (`Room.get`/`Room.list`) already excludes hidden participants — members for routing,
-   *  never counted — so the pre-roster count is that seed adjusted by the events applied since. */
+  /** Before the roster is known: the seed count (which excludes hidden members) adjusted by the events since. */
   get count(): number {
     if (!this._rosterKnown) return this._seedCount
     return this._members.size - this._hiddenCount()
   }
-  /** The off-presence participants (`join({ hidden: true })`) — a server authority, a bot, a
-   *  recorder. Members for routing and discovery, excluded from every presence read; read here via
-   *  `getParticipants({ hidden: true })`. Any number per room. */
+  /** `join({ hidden: true })` members: routable, excluded from every presence read. */
   listHidden(): RemoteParticipant[] {
     return [...this._members.values()].filter((entry) => entry.hidden).map((entry) => this._remote(entry))
   }
@@ -261,9 +257,7 @@ class RoomState {
       ...(hidden ? { hidden: true } : {}),
     }))
   }
-  /** Revival side of a serialized `RemoteParticipant`: the live view wins when it already knows the member; otherwise the entry is seeded silently from the snapshot — no events fire, no count
-   * adjustment (the seed count already included the member), and the streamed roster reconciles it like any other pre-roster knowledge.
-   */
+  /** A revived `RemoteParticipant`: the live entry if known, else seeded silently from the snapshot (its seed count already includes it). */
   ensureRemoteFromSnapshot(snap: MemberSnapshot): RemoteParticipant {
     const existing = this._members.get(snap.id)
     if (existing) return this._remote(existing)
@@ -352,13 +346,12 @@ class RoomState {
     if (this.closed) return
     const existing = this._members.get(member.id)
     if (existing) {
-      // The origin absorbing its own join echo. The event carries the seq-0 join meta, so it must not regress a value a later p-meta already advanced; `joinedAt` is immutable, so it's a no-op.
+      // The origin's own join echo carries the seq-0 meta: it must not regress a later p-meta.
       if (existing.metaSeq === 0) existing.meta = ownMetadata(member.meta)
       return
     }
     const entry = this._createEntry(member)
-    // A hidden participant is not counted: it never moves the count, fires no `onJoin`, and can't fill the room — it's not narrated as a presence event. But the roster did change, so `onChange` still
-    // fires and observers re-read (its join is announced on the control lane, so already-connected observers learn of it live, not only from a fresh roster).
+    // A hidden participant is no presence event (no count, no `onJoin`), but the roster changed, so `onChange` fires.
     if (entry.hidden) {
       this._bumpMembership()
       return
@@ -375,8 +368,7 @@ class RoomState {
     entry.leaveCause = ownedCause
     const remote = this._remote(entry)
     this._members.delete(id)
-    // A hidden participant leaving is invisible to presence — no count change, no room-level `onLeave`, and it's never the "last participant" that empties the room. Its own leave handler and listener
-    // release still run. The participant path keeps its exact original ordering.
+    // A hidden participant's leave is no presence event either; its own handlers and listener release still run.
     if (!entry.hidden && !this._rosterKnown) this._seedCount = Math.max(0, this._seedCount - 1)
     this._bumpMembership()
     this._fireAll(entry.leaveCbs, ownedCause)
@@ -398,9 +390,7 @@ class RoomState {
     this._fireAll(entry.updateCbs, next, prev)
     this._fireAll(this._participantUpdateCbs, this._remote(entry), next, prev)
   }
-  /** Last-writer-wins by `(at, by)`: concurrent `Room.setMeta()`s converge to the same winner on every node regardless of arrival order, and the origin's echo (same stamp) is absorbed. `prev` is
-   * derived here, not shipped: it's the meta THIS view is transitioning away from, which under LWW can differ per node (a view that skipped an intermediate update never held the writer's `prev`).
-   */
+  /** Last-writer-wins by `(at, by)`, so every instance converges; `prev` is this view's own previous meta, which can differ per instance. */
   applyRoomUpdate(meta: RoomMeta, at: number, by: string): void {
     if (!stampNewer({ at, by }, this._updateStamp)) return
     const prev = this.meta
@@ -436,18 +426,14 @@ class RoomState {
   applyAnnounce(data: unknown, info: ChannelPublishInfo): void {
     this._fireAll(this._announceCbs, data, info)
   }
-  /** Messages never wait on the roster: `from` is the live `RemoteParticipant` when this view knows the sender, else the `{ id, meta }` snapshot the sender's node stamped into the envelope. Control
-   * and data travel on separate lanes, so a message can beat its sender's join — identity is in the message, delivery is immediate, and nothing drops.
-   */
+  /** Never waits on the roster: an unknown sender (its join may be behind on the control lane) is the snapshot its instance stamped. */
   applyData(event: RoomDataEnvelope, info: ChannelPublishInfo): void {
     const entry = this._members.get(event.from)
     const sender = entry ? this._remote(entry) : senderOf(event.from, event.fromMeta, event.fromIdentity ?? null)
     this._fireAll(this._roomDataCbs, event.data, info, sender)
     if (entry) this._fireAll(entry.dataCbs, event.data, info)
   }
-  /** Binary frames carry only the sender's ID — a pre-join frame surfaces as `{ id, meta: {} }` (rare: binary pipelines attach per member via `onJoin`, so the roster is normally ahead). `track`/`meta`
-   * come from the frame header; listeners with a `track` filter receive only that track's frames.
-   */
+  /** A binary frame names only its sender's id: one from a member not yet known surfaces as `{ id, meta: {} }`. */
   applyBinary({ from, payload, track, meta }: BinaryFrame, info: ChannelPublishInfo): void {
     const frameInfo: ChannelPublishInfo & BinaryFrameInfo = { ...info, track, meta }
     const entry = this._members.get(from)
@@ -593,9 +579,7 @@ class RoomState {
     }, cleanups)
     return unlisten
   }
-  /** A member entry is being discarded — its listeners die with it. Releasing them keeps the
-   *  counters truthful (callers rarely unsubscribe in `onLeave`), which lets the owners drop
-   *  wire/adapter subscriptions the departed member was holding open. */
+  /** A discarded entry's listeners die with it, so the counters let owners drop what it held open. */
   private _releaseEntryListeners(entry: MemberEntry): void {
     for (const list of [entry.dataCbs, entry.binaryCbs, entry.updateCbs, entry.leaveCbs]) {
       for (const unlisten of [...(this._listenerCleanups.get(list) ?? [])]) unlisten()
