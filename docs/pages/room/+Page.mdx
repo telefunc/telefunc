@@ -228,7 +228,7 @@ Each `onBefore*` runs before the operation commits, and rejects the caller — o
 
 Room operations can also reject for expected conditions such as a closed room, a gone participant, or a target that isn't a member. These failures aren't reported as bugs, and their safe message reaches the caller.
 
-<Warning>Guards apply only to the specific instance passed to `Room.guard()`. Attach guards in the telefunction that hands the room to clients; other Room instances are unguarded.</Warning>
+<Warning>Guards apply only to the specific instance passed to `Room.guard()`. Attach guards in the telefunction that hands the room to clients; other Room instances are unguarded. Returning a room — or any participant of it — opens that room instance to the client, which can join through it under that instance's guards.</Warning>
 
 **Kick a participant**, with a reason that arrives with the removal:
 

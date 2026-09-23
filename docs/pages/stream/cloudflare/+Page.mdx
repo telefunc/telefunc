@@ -170,7 +170,7 @@ Publisher (Durable Object)
 
 ### Ordering
 
-<Link href="/channel#broadcast">Broadcast</Link> publishes for a given `key` go through a single authority, so subscribers receive messages in order with a <Link href="/channel#broadcast">monotonic `seq`</Link>.
+<Link href="/channel#broadcast">Broadcast</Link> publishes for a given `key` go through a single authority, which assigns a <Link href="/channel#broadcast">monotonic `seq`</Link>. Fan-out to subscribers runs in parallel, so a later publish can arrive before an earlier one; order by `info.seq` when order matters.
 
 ### Presence
 
@@ -200,9 +200,9 @@ A KV record is created on subscribe and deleted on unsubscribe. If a Durable Obj
 
 | Guarantee | Details |
 |---|---|
-| Ordering | Publishes for a given key are serialized and delivered in order. |
+| Ordering | Publishes for a given key get a monotonic `seq`; delivery order across publishes isn't guaranteed. |
 | Delivery | `publish()` resolves after all Durable Objects with subscribers have received the message. Delivery to clients then happens over the channel connection. |
-| Presence lag | A new subscriber may miss publishes during the few milliseconds it takes to write its KV presence record. |
+| Presence lag | A new subscriber may miss publishes until the key's authority sees its KV presence record; Workers KV can take up to 60 seconds to propagate across locations. |
 
 > Once a broadcast message reaches a Durable Object, it has the same buffering and replay guarantees as regular channel messages.
 
