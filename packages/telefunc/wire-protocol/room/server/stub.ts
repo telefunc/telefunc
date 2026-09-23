@@ -374,10 +374,8 @@ class RoomParticipantStubChannel extends RoomRequestChannel {
 
   private _mirrorParticipant(): void {
     const participant = this._participant
-    const state = participant._room._state
-    const unlistenMeta = state.getRemote(participant.id)?.onUpdate(() => {
-      const accepted = state.acceptedMeta(participant.id)
-      if (accepted) void this.send({ __r: 'p-meta', ...accepted }).catch(() => {})
+    const unlistenMeta = participant._onAcceptedMeta((accepted) => {
+      void this.send({ __r: 'p-meta', ...accepted }).catch(() => {})
     })
 
     // The ack carries the client's reply; only a transport rejection means the holder left.
@@ -388,7 +386,7 @@ class RoomParticipantStubChannel extends RoomRequestChannel {
         return
       }
       return this.send(notice, { ack: true }).then(
-        (reply) => decodeDmReply(reply) ?? { ok: false, err: 'Malformed DM reply' },
+        (reply) => decodeDmReply(reply) ?? DM_FAILURE.malformedReply,
         () => DM_FAILURE.left,
       )
     })
@@ -406,10 +404,10 @@ class RoomParticipantStubChannel extends RoomRequestChannel {
     })
 
     this.onClose(() => {
-      unlistenMeta?.()
+      unlistenMeta()
       unlistenDemand()
       unlistenLeave()
-      if (!left) void participant._room._removeDepartedMember(participant.id).catch(reportRoomError)
+      if (!left) void participant._releaseHolder().catch(reportRoomError)
     })
   }
 }

@@ -850,6 +850,19 @@ class ServerLocalParticipant extends ParticipantBase {
     this._assertActive()
     return this._room._publishBinaryFrame(frame, framed)
   }
+  /** @internal — each meta write this room accepts for the participant, with its revision. */
+  _onAcceptedMeta(callback: (accepted: AcceptedMeta) => void): () => void {
+    const state = this._room._state
+    const unlisten = state.getRemote(this.id)?.onUpdate(() => {
+      const accepted = state.acceptedMeta(this.id)
+      if (accepted) callback(accepted)
+    })
+    return unlisten ?? (() => {})
+  }
+  /** @internal — the client holding this participant went away without leaving. */
+  _releaseHolder(): Promise<void> {
+    return this._room._removeDepartedMember(this.id)
+  }
   async send(to: string | Sender, data: unknown, options?: { ack?: boolean }): Promise<any> {
     this._assertActive()
     return await this._room._sendDm(this.id, recipientId(to), data, options?.ack === true)
