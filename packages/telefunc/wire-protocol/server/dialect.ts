@@ -12,6 +12,8 @@ import { channelReplacer } from './response/channel.js'
 import { functionReplacer } from './response/function.js'
 import { roomReplacer, roomParticipantReplacer, roomRemoteReplacer } from '../room/response-server.js'
 
+// Order: fileDownload/blobDownload before file/blob (brand-checked vs instanceof);
+// file before blob (File extends Blob); broadcast before channel (Broadcast extends Channel).
 const serverDialect = Object.freeze([
   asyncGeneratorReplacer,
   readableStreamReplacer,

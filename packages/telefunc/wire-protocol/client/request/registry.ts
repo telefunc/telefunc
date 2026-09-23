@@ -1,4 +1,4 @@
-export { createRequestReplacer, clientRequestTypes }
+export { createRequestReplacer }
 
 import type { ClientReplacerContext, ReplacerType, TypeContract } from '../../types.js'
 import type { AbortError } from '../../../shared/Abort.js'
