@@ -806,7 +806,7 @@ describe('Room public behavior', () => {
     const replayText = vi.spyOn(room, '_replayRetainedText')
     const replayBinary = vi.spyOn(room, '_replayRetainedBinary')
     stub._onPeerBroadcastSubscribe(false)
-    await room._handleStubRequest(stub, {
+    await room._applyStubDeclaration(stub, {
       __r: 'sub-binary',
       wants: { everyMember: { all: true, tracks: [] }, members: {} },
     })
@@ -1097,10 +1097,64 @@ describe('Room public behavior', () => {
     ] as const
     for (const [channel, frame] of frames) expect(() => channel._dispatchFrame(frame)).toThrow(ProtocolViolationError)
   })
+  it('treats a request shape the client library never sends as a protocol violation', async () => {
+    const stub = register((await Room.create('malformed-stub-request')) as ServerRoom)
+    const holder = (await Room.join('malformed-stub-request')) as ServerLocalParticipant
+    const participant = new RoomParticipantStubChannel(holder)
+    const member = crypto.randomUUID()
+    const text = (value: unknown) => stringify(value)
+    const frames = [
+      [stub, { tag: TAG.TEXT, index: 7, seq: 1, text: text({ __r: 'sub-binary', wants: 5 }), bytes: 1 }],
+      [
+        stub,
+        { tag: TAG.TEXT, index: 7, seq: 2, text: text({ __r: 'sub-text', members: [1], announce: false }), bytes: 1 },
+      ],
+      [
+        stub,
+        {
+          tag: TAG.TEXT,
+          index: 7,
+          seq: 3,
+          text: text({ __r: 'dm-reply', id: member, ackId: 'a', reply: {} }),
+          bytes: 1,
+        },
+      ],
+      [
+        stub,
+        { tag: TAG.TEXT, index: 7, seq: 4, text: text({ __r: 'req-join', meta: {}, selfDelivery: true }), bytes: 1 },
+      ],
+      [
+        stub,
+        { tag: TAG.TEXT_ACK_REQ, index: 7, seq: 5, text: text({ __r: 'req-join', meta: [], selfDelivery: true }) },
+      ],
+      [stub, { tag: TAG.TEXT_ACK_REQ, index: 7, seq: 6, text: text({ __r: 'req-set-meta', id: 'nope', meta: {} }) }],
+      [
+        stub,
+        { tag: TAG.TEXT_ACK_REQ, index: 7, seq: 7, text: text({ __r: 'sub-text', members: [], announce: false }) },
+      ],
+      [stub, { tag: TAG.PUBLISH_ACK_REQ, index: 7, seq: 8, text: text({ __r: 'data', from: member, retain: 1 }) }],
+      [stub, { tag: TAG.PUBLISH_BINARY_ACK_REQ, index: 7, seq: 9, data: new Uint8Array([1, 2]) }],
+      [participant, { tag: TAG.TEXT_ACK_REQ, index: 7, seq: 1, text: text({ __r: 'req-set-attrs', attrs: 'x' }) }],
+      [
+        participant,
+        { tag: TAG.BINARY_ACK_REQ, index: 7, seq: 2, data: frameWithMemberId(member, new Uint8Array([1])) },
+      ],
+    ] as const
+    for (const [channel, frame] of frames) expect(() => channel._dispatchFrame(frame)).toThrow(ProtocolViolationError)
+  })
+  it('validates send() recipients and meta arguments at the API edge', async () => {
+    await Room.create('api-edge')
+    const member = await Room.join('api-edge')
+    await expect(member.send(null as never, 'hi')).rejects.toThrow('send() recipient should be a participant or its id')
+    await expect(member.setMeta([] as never)).rejects.toThrow('setMeta() meta should be an object')
+    await expect(member.setAttributes('x' as never)).rejects.toThrow('setAttributes() attributes should be an object')
+  })
   it("round-trips an ack DM through a room stub and keeps only the reply's own fields", async () => {
     const room = (await Room.create('stub-ack-dm')) as ServerRoom
     const { stub, peer } = serve(room)
-    const { id } = (await room._handleStubRequest(stub, { __r: 'req-join', meta: {} })) as { id: string }
+    const { id } = (await room._handleStubRequest(stub, { __r: 'req-join', meta: {}, selfDelivery: true })) as {
+      id: string
+    }
     const victim = await room.join()
     const victimInbox: unknown[] = []
     victim.listen((data) => victimInbox.push(data))
@@ -1116,8 +1170,8 @@ describe('Room public behavior', () => {
       expect(dm?.ackId).toBeTypeOf('string')
       ackId = dm!.ackId!
     })
-    const reply = { __r: 'dm-reply', id, ackId, ok: true, result: 'handled', to: victim.id, from: '', data: 'forged' }
-    await room._handleStubRequest(stub, reply)
+    const reply = { ok: true, result: 'handled', __r: 'dm', to: victim.id, from: '', data: 'forged' }
+    stub._onPeerMessage(stringify({ __r: 'dm-reply', id, ackId, reply }), 0)
     await expect(acking).resolves.toMatchObject({ response: 'handled' })
     expect(victimInbox).toEqual([])
   })
@@ -1184,7 +1238,9 @@ describe('Room public behavior', () => {
         await release.promise
       },
     })
-    const joining = room._handleStubRequest(stub, { __r: 'req-join', meta: {} }).catch((error: unknown) => error)
+    const joining = room
+      ._handleStubRequest(stub, { __r: 'req-join', meta: {}, selfDelivery: true })
+      .catch((error: unknown) => error)
     await entered.promise
     stub.abort()
     release.resolve()
@@ -1203,7 +1259,9 @@ describe('Room public behavior', () => {
       return compareExchange(...args)
     })
     const departed = vi.spyOn(room, '_removeDepartedMember')
-    const joining = room._handleStubRequest(stub, { __r: 'req-join', meta: {} }).catch((error: unknown) => error)
+    const joining = room
+      ._handleStubRequest(stub, { __r: 'req-join', meta: {}, selfDelivery: true })
+      .catch((error: unknown) => error)
     await writing.promise
     stub.abort()
     release.resolve()
@@ -1521,7 +1579,7 @@ describe('Room public behavior', () => {
     const roster = delayRosterRead(authority.id)
     const listRetained = vi.spyOn(driver, 'listRetained')
     try {
-      await observer._handleStubRequest(stub, {
+      await observer._applyStubDeclaration(stub, {
         __r: 'sub-binary',
         wants: { everyMember: { all: true, tracks: [] }, members: {} },
       })
@@ -1542,7 +1600,7 @@ describe('Room public behavior', () => {
     const members = Object.fromEntries(
       Array.from({ length: 100 }, () => [crypto.randomUUID(), { all: false, tracks: ['screen'] }]),
     )
-    await observer._handleStubRequest(stub, {
+    await observer._applyStubDeclaration(stub, {
       __r: 'sub-binary',
       wants: { everyMember: { all: false, tracks: [] }, members },
     })
@@ -1559,7 +1617,7 @@ describe('Room public behavior', () => {
     const binaryLanes = () => subscribeLane.mock.calls.filter(([, , lane]) => lane.kind === 'binary').length
     expect(observer._state.rosterKnown).toBe(false)
     try {
-      await observer._handleStubRequest(stub, {
+      await observer._applyStubDeclaration(stub, {
         __r: 'sub-binary',
         wants: {
           everyMember: { all: false, tracks: [] },
@@ -1985,8 +2043,8 @@ describe('client Room lifecycle', () => {
     participant.listen((data) => `got ${String(data)}`)
     await vi.waitFor(() =>
       expect(replies).toEqual([
-        expect.objectContaining({ ackId: 'ack-welcome', ok: true, result: 'got welcome' }),
-        expect.objectContaining({ ackId: 'ack-again', ok: true, result: 'got again' }),
+        expect.objectContaining({ ackId: 'ack-welcome', reply: { ok: true, result: 'got welcome' } }),
+        expect.objectContaining({ ackId: 'ack-again', reply: { ok: true, result: 'got again' } }),
       ]),
     )
     expect(demand).toEqual([['screen', true]])
@@ -2568,12 +2626,12 @@ async function wideBinaryScenario(id: string, retain: boolean, byte: number) {
     timestamp: 10,
   })
   if (!retain) {
-    await serverRoom._handleStubRequest(stub, { __r: 'sub-binary', wants: allBinary })
+    await serverRoom._applyStubDeclaration(stub, { __r: 'sub-binary', wants: allBinary })
     await (serverRoom as unknown as { _binaryReady(): Promise<void> })._binaryReady()
   }
   const receipt = await camera.publishBinary(new Uint8Array([byte]), retain ? { retain: true } : undefined)
   if (retain) {
-    await serverRoom._handleStubRequest(stub, { __r: 'sub-binary', wants: allBinary })
+    await serverRoom._applyStubDeclaration(stub, { __r: 'sub-binary', wants: allBinary })
     await (serverRoom as unknown as { _binaryReady(): Promise<void> })._binaryReady()
   }
   await vi.waitFor(() => expect(peer.decoded().some((candidate) => candidate.tag === TAG.PUBLISH_BINARY)).toBe(true))

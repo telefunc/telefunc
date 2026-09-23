@@ -7,11 +7,13 @@ export {
   leaveCauseToWire,
   mergeAttributes,
   normalizeJoinOptions,
+  ownMetaArgument,
+  recipientId,
 }
 
 import { assertUsage } from '../../utils/assert.js'
 import { isObject } from '../../utils/isObject.js'
-import type { JoinOptions, LeaveCause, ParticipantMeta, RoomMeta } from './types.js'
+import type { JoinOptions, LeaveCause, ParticipantMeta, RoomMeta, Sender } from './types.js'
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   if (!isObject(value) || Array.isArray(value)) return false
@@ -23,6 +25,16 @@ function ownMetadata<T extends RoomMeta | ParticipantMeta>(meta: T): T {
   return Object.freeze({ ...meta }) as T
 }
 const ownLeaveCause = (cause: LeaveCause): LeaveCause => Object.freeze({ ...cause })
+/** Validate and own a `setMeta()`/`setAttributes()` argument. */
+function ownMetaArgument(value: ParticipantMeta, what: string): ParticipantMeta {
+  assertUsage(isRecord(value), `${what} should be an object`)
+  return ownMetadata(value)
+}
+function recipientId(to: string | Sender): string {
+  const id: unknown = typeof to === 'object' && to !== null ? to.id : to
+  assertUsage(typeof id === 'string', 'send() recipient should be a participant or its id')
+  return id
+}
 
 /** Later timestamp wins; equal timestamps break deterministically by writer ID. */
 function stampNewer(a: { at: number; by: string }, b: { at: number; by: string }): boolean {

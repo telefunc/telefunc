@@ -2,7 +2,7 @@
 export {
   hasRoomTag,
   pushBoundedTail,
-  toDmReply,
+  decodeDmReply,
   MEMBER_CELL_PREFIX,
   CLEANUP_CELL_PREFIX,
   memberCellKey,
@@ -181,11 +181,12 @@ type RoomDmAckEnvelope = { __r: 'dm-ack'; to: string; ackId: string } & DmReply
 type DmReply = { ok: true; result: unknown } | RoomFailure
 
 /** A client-supplied reply, rebuilt field by field so no other key rides into the `dm-ack` envelope. */
-function toDmReply(reply: unknown): DmReply {
-  if (!isRecord(reply)) return { ok: false, err: 'Malformed DM reply' }
-  if (reply.ok) return { ok: true, result: reply.result }
-  if ('abort' in reply) return { ok: false, abort: true, abortValue: reply.abortValue }
-  return { ok: false, err: String(reply.err) }
+function decodeDmReply(reply: unknown): DmReply | null {
+  if (!isRecord(reply)) return null
+  if (reply.ok === true) return { ok: true, result: reply.result }
+  if (reply.ok !== false) return null
+  if (reply.abort === true) return { ok: false, abort: true, abortValue: reply.abortValue }
+  return typeof reply.err === 'string' ? { ok: false, err: reply.err } : null
 }
 
 /** The ack of a member meta write: the committed value and its sequence. */
@@ -204,7 +205,7 @@ type RoomStubRequest =
   | { __r: 'req-set-attrs'; id: string; attrs: ParticipantMeta }
   | { __r: 'req-dm'; id: string; to: string; data: unknown; ack?: boolean }
   // A client-held member's reply to an `{ ack: true }` DM it received — routed back to the sender.
-  | ({ __r: 'dm-reply'; id: string; ackId: string } & DmReply)
+  | { __r: 'dm-reply'; id: string; ackId: string; reply: DmReply }
   | { __r: 'sub-binary'; wants: BinaryWants }
   | { __r: 'sub-text'; members: string[]; announce: boolean }
 

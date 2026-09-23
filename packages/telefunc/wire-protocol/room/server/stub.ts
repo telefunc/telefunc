@@ -4,7 +4,6 @@ export type { ResponseRoomGrants }
 import { stringify } from '@brillout/json-serializer/stringify'
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 import { assert, assertUsage } from '../../../utils/assert.js'
-import { isObject } from '../../../utils/isObject.js'
 import { unrefTimer } from '../../../utils/unrefTimer.js'
 import { ROOM_DM_ACK_TIMEOUT_MS, ROOM_TAIL_ATTACH_TIMEOUT_MS } from '../constants.js'
 import { ServerChannel, parsePeerText } from '../../server/channel.js'
@@ -12,6 +11,14 @@ import type { ShieldValidator } from '../../../node/server/shield.js'
 import { encodePublishBinary, encodePublishText, type WirePublishInfo } from '../../shared-ws.js'
 import { type ServerLocalParticipant, type ServerRoom } from './room.js'
 import { reportRoomError, roomAckError } from './errors.js'
+import {
+  decodeParticipantFrame,
+  decodeParticipantRequest,
+  decodeRoomDeclaration,
+  decodeRoomPublish,
+  decodeRoomRequest,
+  decodeStubBinaryFrame,
+} from './requests.js'
 import { ReplayGate, TEXT_LANE_KEY, binaryLaneKey, type LaneHolder } from './replay.js'
 import type { ParticipantMeta, RoomSendReceipt } from '../types.js'
 import { DEFAULT_TRACK, binaryWantsCovers, emptyTrackWants, type BinaryFrame, type BinaryWants } from '../binary.js'
@@ -19,8 +26,7 @@ import { DM_PARTICIPANT_LEFT, roomFailureError } from '../errors.js'
 import { leaveCauseToWire } from '../model.js'
 import {
   pushBoundedTail,
-  hasRoomTag,
-  toDmReply,
+  decodeDmReply,
   type RoomOrder,
   type ParticipantStubRequest,
   type RoomCtrlEnvelope,
@@ -120,25 +126,31 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
     const started = performance.now()
     try {
       this._flow.onReceived(bytes)
-      Promise.resolve(this._room._handleStubRequest(this, parsePeerText(text)))
-        .catch((error: unknown) => this._handleCallbackError(error))
-        .finally(() => this._flow.onConsumed(bytes))
+      const declaration = decodeRoomDeclaration(parsePeerText(text))
+      try {
+        this._room._applyStubDeclaration(this, declaration)
+      } catch (error) {
+        this._handleCallbackError(error)
+      }
+      this._flow.onConsumed(bytes)
     } finally {
       this._flow._recordSelfTime(performance.now() - started)
     }
   }
 
   override _onPeerAckReqMessage(text: string, seq: number): Promise<void> {
-    const request = parsePeerText(text)
+    const request = decodeRoomRequest(parsePeerText(text))
     return this._ackRoomResult(seq, this._room._handleStubRequest(this, request))
   }
 
   override _onPeerPublishAckReqMessage(text: string, seq: number): Promise<void> {
-    return this._ackRoomResult(seq, this._room._publishFromStub(this, { text }))
+    const publish = decodeRoomPublish(parsePeerText(text))
+    return this._ackRoomResult(seq, this._room._publishTextFromStub(this, publish))
   }
 
-  override _onPeerPublishBinaryAckReqMessage(binary: Uint8Array, seq: number): Promise<void> {
-    return this._ackRoomResult(seq, this._room._publishFromStub(this, { binary }))
+  override _onPeerPublishBinaryAckReqMessage(framed: Uint8Array, seq: number): Promise<void> {
+    const { from } = decodeStubBinaryFrame(framed)
+    return this._ackRoomResult(seq, this._room._publishBinaryFromStub(this, from, framed))
   }
 
   // Control always flows; text follows broadcast/member wants, while binary uses `sub-binary`.
@@ -223,9 +235,6 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
   }
 }
 
-function asRoomRecord(value: unknown): ParticipantMeta {
-  return isObject(value) ? value : {}
-}
 async function sendParticipantDm(
   participant: ServerLocalParticipant,
   req: Extract<ParticipantStubRequest, { __r: 'req-dm' }>,
@@ -254,27 +263,30 @@ class RoomParticipantStubChannel extends RoomRequestChannel {
   }
 
   override _onPeerAckReqMessage(text: string, seq: number): Promise<void> {
-    const request = parsePeerText(text)
+    const request = decodeParticipantRequest(parsePeerText(text))
     return this._ackRoomResult(seq, this._handleRequest(request))
   }
 
   override _onPeerBinaryAckReqMessage(framed: Uint8Array, seq: number): Promise<void> {
+    decodeParticipantFrame(framed, this._participant.id)
     return this._ackRoomResult(seq, this._publishBinary(framed))
   }
 
-  private async _handleRequest(msg: unknown): Promise<unknown> {
-    if (!hasRoomTag(msg)) return undefined
+  private async _handleRequest(req: ParticipantStubRequest): Promise<unknown> {
     const participant = this._participant
-    const req = msg as ParticipantStubRequest
-    if (req.__r === 'req-publish') {
-      participant._room._shieldPublishData(this._publishShield, req.data)
-      return await participant.publish(req.data, req.retain ? { retain: true } : undefined)
+    switch (req.__r) {
+      case 'req-publish':
+        participant._room._shieldPublishData(this._publishShield, req.data)
+        return await participant.publish(req.data, req.retain ? { retain: true } : undefined)
+      case 'req-set-meta':
+        return await participant.setMeta(req.meta)
+      case 'req-set-attrs':
+        return await participant.setAttributes(req.attrs)
+      case 'req-dm':
+        return await sendParticipantDm(participant, req)
+      case 'req-leave':
+        return await participant.leave()
     }
-    if (req.__r === 'req-set-meta') return await participant.setMeta(asRoomRecord(req.meta))
-    if (req.__r === 'req-set-attrs') return await participant.setAttributes(asRoomRecord(req.attrs))
-    if (req.__r === 'req-dm') return await sendParticipantDm(participant, req)
-    if (req.__r === 'req-leave') return await participant.leave()
-    return undefined
   }
 
   private async _publishBinary(framed: Uint8Array): Promise<unknown> {
@@ -302,7 +314,10 @@ class RoomParticipantStubChannel extends RoomRequestChannel {
         void this.send(notice).catch(() => {})
         return
       }
-      return this.send(notice, { ack: true }).then(toDmReply, () => DM_PARTICIPANT_LEFT)
+      return this.send(notice, { ack: true }).then(
+        (reply) => decodeDmReply(reply) ?? { ok: false, err: 'Malformed DM reply' },
+        () => DM_PARTICIPANT_LEFT,
+      )
     })
 
     const unlistenDemand = participant.onDemand((track, wanted) => {

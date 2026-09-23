@@ -7,7 +7,14 @@ import { ClientBroadcast } from '../client/channel.js'
 import type { ClientChannel } from '../client/channel.js'
 import { DM_PARTICIPANT_LEFT } from './errors.js'
 import { emptyTrackWants, frameWithMemberId, unframeMemberId } from './binary.js'
-import { leaveCauseFromWire, mergeAttributes, normalizeJoinOptions, ownMetadata } from './model.js'
+import {
+  leaveCauseFromWire,
+  mergeAttributes,
+  normalizeJoinOptions,
+  ownMetaArgument,
+  ownMetadata,
+  recipientId,
+} from './model.js'
 import {
   hasRoomTag,
   type MemberWants,
@@ -161,7 +168,7 @@ class ClientRoom extends RoomStateView implements Room {
     }
     const ackId = msg.ackId
     void participant._deliverMessageAck(msg).then((reply) => {
-      void this._stub.send({ __r: 'dm-reply', id: participant.id, ackId, ...reply }, { ack: false }).catch(() => {})
+      void this._stub.send({ __r: 'dm-reply', id: participant.id, ackId, reply }, { ack: false }).catch(() => {})
     })
   }
 
@@ -280,7 +287,7 @@ class ClientRoom extends RoomStateView implements Room {
         }
         if (event.ackId)
           void this._stub
-            .send({ __r: 'dm-reply', id: event.to, ackId: event.ackId, ...DM_PARTICIPANT_LEFT }, { ack: false })
+            .send({ __r: 'dm-reply', id: event.to, ackId: event.ackId, reply: DM_PARTICIPANT_LEFT }, { ack: false })
             .catch(() => {})
         return
       }
@@ -384,10 +391,9 @@ abstract class ClientParticipantBase extends ParticipantBase {
   // Implementation of the overloaded `LocalParticipant.send`; the interface supplies precise returns.
   async send(to: string | Sender, data: unknown, options?: { ack?: boolean }): Promise<any> {
     this._assertActive()
-    const toId = typeof to === 'string' ? to : to.id
     return await this._requestParticipant({
       __r: 'req-dm',
-      to: toId,
+      to: recipientId(to),
       data,
       ...(options?.ack ? { ack: true } : {}),
     })
@@ -395,14 +401,14 @@ abstract class ClientParticipantBase extends ParticipantBase {
 
   async setMeta(meta: ParticipantMeta): Promise<void> {
     this._assertActive()
-    const owned = ownMetadata(meta)
+    const owned = ownMetaArgument(meta, 'setMeta() meta')
     const ack = await this._requestParticipant({ __r: 'req-set-meta', meta: owned })
     this._onOwnMetaWritten(ack, owned)
   }
 
   async setAttributes(attrs: ParticipantMeta): Promise<void> {
     this._assertActive()
-    const owned = ownMetadata(attrs)
+    const owned = ownMetaArgument(attrs, 'setAttributes() attributes')
     const ack = await this._requestParticipant({ __r: 'req-set-attrs', attrs: owned })
     this._onOwnMetaWritten(ack, mergeAttributes(this._meta, owned))
   }
