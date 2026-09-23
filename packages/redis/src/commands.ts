@@ -169,19 +169,12 @@ end
 return 1
 `
 
-// Whether the generation is still installed.
-//   KEYS: [1]=gens
-//   ARGV: [1]=inc
-const DROP_GENERATION_BEGIN_LUA = `
-return redis.call('SISMEMBER', KEYS[1], ARGV[1])
-`
-
-// Finalize only while the generation is still installed: incarnation ids are never reused, so a
-// concurrent drop that finished first leaves nothing to do. Every physical member is a declared key;
-// deletion, keyed invalidation, and retirement are one atomic room-slot operation.
+// Drops the generation while it is still installed: incarnation ids are never reused, so a concurrent
+// drop that finished first leaves nothing to do. Every physical member is a declared key; deletion,
+// keyed invalidation, and retirement are one atomic room-slot operation.
 //   KEYS: [1]=gens [2]=invalidation-channel [3]=manifest [4..]=members
 //   ARGV: [1]=inc
-const DROP_GENERATION_FINALIZE_LUA = `
+const DROP_GENERATION_LUA = `
 local inc = ARGV[1]
 if redis.call('SISMEMBER', KEYS[1], inc) == 0 then return 0 end
 for i = 4, #KEYS do redis.call('UNLINK', KEYS[i]) end
@@ -434,16 +427,9 @@ export const REDIS_COMMANDS = {
     }),
     parse: (reply) => reply === 1,
   }),
-  dropGenerationBegin: command({
-    name: 'tfRoomDropGenerationBegin',
-    lua: DROP_GENERATION_BEGIN_LUA,
-    numberOfKeys: 1,
-    invoke: (prefix, { roomId, inc }: RoomInc) => ({ keys: [gensKey(prefix, roomId)], argv: [inc] }),
-    parse: (reply) => reply === 1,
-  }),
-  dropGenerationFinalize: command({
-    name: 'tfRoomDropGenerationFinalize',
-    lua: DROP_GENERATION_FINALIZE_LUA,
+  dropGeneration: command({
+    name: 'tfRoomDropGeneration',
+    lua: DROP_GENERATION_LUA,
     numberOfKeys: null,
     invoke: (prefix, { roomId, inc, generationKeys }: RoomInc & { generationKeys: readonly string[] }) => ({
       keys: [

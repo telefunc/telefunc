@@ -167,9 +167,8 @@ export class RedisBackend implements BroadcastDriver, RoomDriver {
   }
 
   async dropGeneration(roomId: string, inc: string): Promise<void> {
-    if (!(await this._run(REDIS_COMMANDS.dropGenerationBegin, { roomId, inc }))) return
     const generationKeys = await this._generationKeys(roomId, inc)
-    await this._run(REDIS_COMMANDS.dropGenerationFinalize, { roomId, inc, generationKeys })
+    await this._run(REDIS_COMMANDS.dropGeneration, { roomId, inc, generationKeys })
   }
 
   directoryPut(roomId: string, incTag: string): Promise<void> {

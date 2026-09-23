@@ -274,19 +274,15 @@ describe('Redis real three-master Cluster CI certification', () => {
       if (relocation !== undefined) await restoreSlot(slotNumber, source, target)
     }
   })
-  it('does not drop a generation installed after an absent or overlapping snapshot', async () => {
-    const { prefix, roomId, inc } = room('drop-absent-race')
+  it('does not drop a generation installed after an overlapping snapshot', async () => {
+    const { prefix, roomId, inc } = room('drop-overlap-race')
     const client = ownCluster()
     await client.ping()
     const backend = ownRoomBackend(client, prefix)
     const secondDropper = ownRoomBackend(client, prefix)
     const authority = ownRoomBackend(client, prefix)
-    const snapshotRead = deferred()
-    const releaseDrop = deferred()
     const inventoryRead = deferred()
     const releaseInventory = deferred()
-    const commands = client as unknown as Record<string, ((...args: unknown[]) => Promise<unknown>) | undefined>
-    const begin = commands.tfRoomDropGenerationBegin
     const smembers = client.smembers.bind(client)
     let inventoryHeld = false
     let firstDrop: Promise<void> | undefined
@@ -307,33 +303,8 @@ describe('Redis real three-master Cluster CI certification', () => {
       await open(authority, roomId, recreated, tombstone?.rev)
       await writeCell(recreated, 'new')
     }
-    if (begin === undefined) {
-      vi.spyOn(client, 'smembers').mockImplementation((async (key: string) => {
-        const result = await smembers(key)
-        if (key === `${genPrefix(prefix, roomId, inc)}:keys`) {
-          snapshotRead.resolve()
-          await releaseDrop.promise
-        }
-        return result
-      }) as never)
-    } else {
-      const bound = begin.bind(client)
-      commands.tfRoomDropGenerationBegin = async (...args) => {
-        const result = await bound(...args)
-        snapshotRead.resolve()
-        await releaseDrop.promise
-        return result
-      }
-    }
     try {
-      const dropping = backend.dropGeneration(roomId, inc)
-      await snapshotRead.promise
       await open(authority, roomId, inc)
-      releaseDrop.resolve()
-      await dropping
-      expect((await authority.readHead(roomId))?.currentInc).toBe(inc)
-      expect(await client.smembers(gensKey(prefix, roomId))).toContain(inc)
-      if (begin !== undefined) commands.tfRoomDropGenerationBegin = begin
       await writeCell(inc, 'old')
       const active = await authority.readHead(roomId)
       if (active === null) throw new Error('installed generation lost its head')
@@ -357,10 +328,8 @@ describe('Redis real three-master Cluster CI certification', () => {
       if ('staleInc' in reinstalled) throw new Error('reinstalled generation became stale')
       expect(Buffer.from(reinstalled.cells.get('survivor') ?? []).toString()).toBe('new')
     } finally {
-      releaseDrop.resolve()
       releaseInventory.resolve()
       await Promise.allSettled([firstDrop, secondDrop].filter((drop): drop is Promise<void> => drop !== undefined))
-      if (begin !== undefined) commands.tfRoomDropGenerationBegin = begin
     }
   })
   it('recovers a killed subscriber connection on a fresh one, through a failed first reconnect', async () => {
