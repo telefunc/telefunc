@@ -138,8 +138,7 @@ export class MemoryBackend implements BroadcastDriver, RoomDriver {
     this.#assertLive()
     const mark = advanceOrder(this.#state.broadcastOrder, lane.key, this.#now())
     const targets = [...(this.#state.broadcastSubs.get(broadcastRouteKey(lane)) ?? [])]
-    const frame = copyBytes(payload)
-    for (const target of targets) void target.deliver(copyBytes(frame), mark).catch(console.error)
+    for (const target of targets) void target.deliver(copyBytes(payload), mark).catch(console.error)
     return { ...mark, receivers: sumReceiverCounts(targets), meta: { transport: 'in-memory' } }
   }
 
@@ -228,11 +227,7 @@ export class MemoryBackend implements BroadcastDriver, RoomDriver {
     this.#assertLive()
     const room = this.#state.rooms.get(roomId)
     const head = this.#readAndExpireHead(room)
-    if (
-      room === undefined ||
-      head === null ||
-      !commitPreconditionHolds(head, inc, lane.kind, opts?.closingLease, this.#now())
-    ) {
+    if (room === undefined || !commitPreconditionHolds(head, inc, lane.kind, opts?.closingLease, this.#now())) {
       return { stale: 'incarnation' }
     }
     const gen = this.#generation(room, inc)

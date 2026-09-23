@@ -559,18 +559,14 @@ class ChannelMux {
 
   /** Drains replay frames missed since `lastSeq` (sends are sync — see `send`), then
    *  attaches an `IndexedPeer`. Returns null if the channel already shut down. */
-  private attachChannel(
-    channel: ServerChannel,
-    { ix, lastSeq, broadcast }: ReconcileOpenEntry,
-    send: SendFn,
-  ): ChannelHandle | null {
+  private attachChannel(channel: ServerChannel, entry: ReconcileOpenEntry, send: SendFn): ChannelHandle | null {
     if (channel._didShutdown) return null
     const replay = channel._replayBuffer
     assert(replay !== null, `ServerChannel "${channel.id}" attached without a replay buffer`)
-    for (const frame of replay.getAfter(lastSeq)) send(frame as Uint8Array<ArrayBuffer>)
+    for (const frame of replay.getAfter(entry.lastSeq)) send(frame as Uint8Array<ArrayBuffer>)
     const sender: PeerSender = { send }
-    channel._attachPeer(new IndexedPeer(sender, ix, replay), { broadcast })
-    return { channel, ix }
+    channel._attachPeer(new IndexedPeer(sender, entry.ix, replay), entry)
+    return { channel, ix: entry.ix }
   }
 
   private waitForChannelRegistration(

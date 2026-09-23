@@ -64,7 +64,9 @@ export function configureBroadcastTransport(transport: BroadcastTransport | unde
   state.broadcastOverride = { transport }
   if (state.current.phase !== 'ready') return
   const installed = state.current.installed
-  if (installed.broadcast) installed.retiredBroadcast = installed.broadcast.dispose()
+  // Retiring accumulates, so disposal awaits every plane a transport change retired.
+  if (installed.broadcast)
+    installed.retiredBroadcast = Promise.all([installed.retiredBroadcast, installed.broadcast.dispose()]).then(() => {})
   installed.broadcast = null
 }
 
