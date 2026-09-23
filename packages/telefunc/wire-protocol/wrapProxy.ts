@@ -1,4 +1,4 @@
-export { wrapProxy, releaseSubordinate, makeDisposer }
+export { wrapProxy, untether, makeDisposer }
 
 import { isObjectOrFunction } from '../utils/isObjectOrFunction.js'
 
@@ -12,7 +12,7 @@ import { isObjectOrFunction } from '../utils/isObjectOrFunction.js'
  *  WeakMap semantics: as long as the derived object (key) is reachable, the
  *  wrapper (value) is held strongly, so FinalizationRegistry won't collect it. */
 const keepWrapperAlive = new WeakMap<object, unknown>()
-const releasedSubordinates = new WeakSet<object>()
+const untethered = new WeakSet<object>()
 
 /** Wrap a value in a transparent proxy so it can be GC'd independently.
  *
@@ -70,15 +70,15 @@ function wrapProxy<T extends object>(target: T): T {
 /** Pin `wrapper` to live as long as `derived` does (via WeakMap). */
 function tether(derived: unknown, wrapper: unknown): void {
   if (!isObjectOrFunction(derived)) return
-  if (releasedSubordinates.has(derived)) return
+  if (untethered.has(derived)) return
   keepWrapperAlive.set(derived, wrapper)
   // A synchronous array return, such as `tee()`'s branches, hands out each element.
   if (Array.isArray(derived)) for (const value of derived) tether(value, wrapper)
 }
 
-/** A terminal child no longer owns its parent resource's lifetime. */
-function releaseSubordinate(derived: object): void {
-  releasedSubordinates.add(derived)
+/** `derived` never pins a wrapper: a terminal child no longer owns its parent's lifetime. */
+function untether(derived: object): void {
+  untethered.add(derived)
   keepWrapperAlive.delete(derived)
 }
 
@@ -89,10 +89,10 @@ function makeDisposer(dispose?: () => void, group?: Set<() => void>): () => void
     const current = action
     action = undefined
     group?.delete(token)
-    releaseSubordinate(token)
+    untether(token)
     current?.()
   }
   if (action) group?.add(token)
-  else releaseSubordinate(token)
+  else untether(token)
   return token
 }

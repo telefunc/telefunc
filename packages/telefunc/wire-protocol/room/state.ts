@@ -2,7 +2,7 @@ export { RoomState, RoomStateView, remoteBacking }
 
 import { assertUsage } from '../../utils/assert.js'
 import { invokeChannelListener, type ChannelPublishInfo } from '../channel.js'
-import { makeDisposer, releaseSubordinate } from '../wrapProxy.js'
+import { makeDisposer, untether } from '../wrapProxy.js'
 import {
   emptyTrackWants,
   isNamedTrack,
@@ -323,7 +323,7 @@ class RoomState {
       isClosed: this.closed,
       participants,
     })
-    releaseSubordinate(value)
+    untether(value) // plain data: holding a snapshot must not keep the room's wrapper alive
     this._snapshotCache = { version: this._stateVersion, value: new WeakRef(value) }
     return value
   }
