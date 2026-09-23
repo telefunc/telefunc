@@ -43,7 +43,8 @@ function getRawContext(): Context | null {
 
 function restoreContext<T>(context: Context, fn: () => T): T {
   globalObject.neverRestored = false
-  return globalObject.restoreContext(context, fn)
+  // Each concern owns its key: a nested scope overrides only the keys it sets.
+  return globalObject.restoreContext({ ...getRawContext(), ...context }, fn)
 }
 
 function provideContext(context: Telefunc.Context): void {

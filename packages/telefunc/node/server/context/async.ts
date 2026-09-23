@@ -35,6 +35,5 @@ function restoreContext_async<T>(rawContext: Context, fn: () => T): T {
     { onlyOnce: true },
   )
   globalObject.asyncStore = globalObject.asyncStore ?? new AsyncLocalStorage()
-  // Each concern owns its key: a nested scope overrides only the keys it sets.
-  return globalObject.asyncStore.run({ ...globalObject.asyncStore.getStore(), ...rawContext }, fn)
+  return globalObject.asyncStore.run(rawContext, fn)
 }
