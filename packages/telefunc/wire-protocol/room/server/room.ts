@@ -59,7 +59,7 @@ import { RoomDemand } from '../demand.js'
 import { ParticipantBase } from '../participant.js'
 import { RoomStubChannel } from './stub.js'
 import type { RoomRequest } from './requests.js'
-import { LocalHolder, type LaneHolder } from './replay.js'
+import { LocalHolder, type LaneHolder, type WantsChange } from './replay.js'
 import { TailHold } from './tail.js'
 import type { LaneSubscription } from './lane-subscription.js'
 import { RoomSubscriptions, type HolderWants } from './subscriptions.js'
@@ -144,7 +144,7 @@ class ServerRoom extends RoomStateView implements Room {
       meta: config.meta,
       seed,
       updateStamp: { at: config.at, by: config.by },
-      onListenersChanged: () => this._onLocalListenersChanged(),
+      onListenersChanged: () => this._onHolderWantsChanged(this._local, this._local.refreshWants()),
       onCallbackError: reportCallbackError,
     })
     this._state._owner = this
@@ -211,7 +211,7 @@ class ServerRoom extends RoomStateView implements Room {
   private async _commitAdmission(admission: Admission): Promise<void> {
     const { id, meta, identity, joinedAt, hidden } = admission
     this._pendingAdmissions.add(id)
-    this._syncSubs()
+    this._subs.replan()
     let created = false
     try {
       await withinRoomHorizon(this._admittedInbox(id).ready, ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS)
@@ -571,11 +571,11 @@ class ServerRoom extends RoomStateView implements Room {
     switch (event.__r) {
       case 'join':
         this._state.applyJoin(joinedMember(event))
-        this._syncSubs() // a new member means a new per-member key candidate
+        this._subs.replan() // a new member means a new per-member key candidate
         return
       case 'track':
         this._state.applyTrack(event.id, event.track)
-        this._syncSubs() // all-track subscribers need the new (member, track) key
+        this._subs.replan() // all-track subscribers need the new (member, track) key
         return
       case 'leave':
         this._applyLeave(event.id, leaveCauseFromWire(event))
@@ -606,7 +606,7 @@ class ServerRoom extends RoomStateView implements Room {
     for (const stub of this._stubs) stub._forgetMember(id)
     this._local.forgetMember(id)
     this._demand.forgetMember(id)
-    this._syncSubs()
+    this._subs.replan()
   }
   /** Mirror only the sequence-accepted projection into the local facade. */
   private _syncLocalMemberMeta(id: string): void {
@@ -621,7 +621,7 @@ class ServerRoom extends RoomStateView implements Room {
     for (const local of this._localParticipants.values()) local._onLeft({ type: 'closed' })
     this._localParticipants.clear()
     for (const stub of this._stubs) void stub.close().catch(() => {})
-    this._syncSubs()
+    this._subs.replan()
   }
 
   /** @internal — the authority says the room closed; the lane that would have carried `closed` failed. */
@@ -636,13 +636,13 @@ class ServerRoom extends RoomStateView implements Room {
   }
   _startTail(): void {
     this._tail = new TailHold(() => this._teardownTail())
-    this._syncSubs() // bring up text ingestion before any stub exists
+    this._subs.replan() // bring up text ingestion before any stub exists
   }
   private _teardownTail(): void {
     if (this._tail === null) return // already handed off to a stub
     this._tail.end()
     this._tail = null
-    this._syncSubs() // drop the text ingestion nothing is consuming
+    this._subs.replan() // drop the text ingestion nothing is consuming
   }
   /** @internal — a client's view of this room. It attaches before the snapshot, so every later event relays and every earlier one is in the snapshot. */
   _openStub(options: ConstructorParameters<typeof RoomStubChannel>[1]): {
@@ -667,12 +667,12 @@ class ServerRoom extends RoomStateView implements Room {
   _attachStub(stub: RoomStubChannel): void {
     this._stubs.add(stub)
     if (this._tail !== null) {
-      stub._beginTail(this._tail.take(), () => this._syncSubs())
+      stub._beginTail(this._tail.take(), () => this._subs.replan())
       this._tail = null
     }
     stub.onOpen(() => this._sendRosterTo(stub))
     stub.onClose(() => this._detachStub(stub))
-    this._syncSubs()
+    this._subs.replan()
   }
   private _sendRosterTo(stub: RoomStubChannel): void {
     void this._subs
@@ -693,7 +693,7 @@ class ServerRoom extends RoomStateView implements Room {
       if (this._pendingAdmissions.has(id)) continue // the admission rolls itself back
       void this._removeDepartedMember(id).catch(reportRoomError)
     }
-    this._syncSubs()
+    this._subs.replan()
   }
   private _visibleRoster(): MemberSnapshot[] {
     return this._state.snapshotMembers().filter((member) => !member.hidden)
@@ -718,14 +718,14 @@ class ServerRoom extends RoomStateView implements Room {
     await this._admit(admission, () => stub._addMember(admission.id, req.selfDelivery))
     return { id: admission.id, joinedAt: admission.joinedAt }
   }
-  async _replayRetainedText(holder: LaneHolder, prevWantedFrom: (member: string) => boolean): Promise<void> {
+  async _replayRetainedText(holder: LaneHolder, previous: MemberWants): Promise<void> {
     // Read retained only after subscription readiness: a racing commit is then retained or live, never lost in the gap.
     await withinRoomHorizon(this._subs.semanticReady, ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS)
     const stored = await getRoomBackend().readRetained(this.id, this._inc, SEMANTIC_LANE)
     if (stored === null) return
     const serialized = decodeRoomText(stored.payload)
     const event = parse(serialized) as RoomDataEnvelope
-    if (prevWantedFrom(event.from) || !holder._wantsTextFrom(event.from)) return
+    if (previous.all || previous.members.includes(event.from) || !holder._wantsTextFrom(event.from)) return
     // Replay the stored order as-is; the holder dedupes a same-or-newer live winner.
     holder._emitRetainedText(serialized, event, { seq: stored.seq, timestamp: stored.timestamp })
   }
@@ -751,46 +751,36 @@ class ServerRoom extends RoomStateView implements Room {
     }
   }
 
-  private _onLocalListenersChanged(): void {
-    const { prevText, prevBinary } = this._local.refreshWants()
-    this._syncSubs()
-    if (prevText)
-      void this._replayRetainedText(this._local, (member) => prevText.all || prevText.members.includes(member)).catch(
-        reportRoomError,
-      )
-    if (prevBinary) void this._replayRetainedBinary(this._local, prevBinary).catch(reportRoomError)
-  }
-
-  _syncSubs(): void {
+  /** @internal — a holder's wants changed: replan, then replay the retained frames it now wants. */
+  _onHolderWantsChanged(holder: LaneHolder, previous: WantsChange): void {
     this._subs.replan()
+    if (previous.text) void this._replayRetainedText(holder, previous.text).catch(reportRoomError)
+    if (previous.binary) void this._replayRetainedBinary(holder, previous.binary).catch(reportRoomError)
   }
 
   /** @internal */
   _holderWants(): HolderWants {
-    const state = this._state
-    const binary = state.binaryWants()
-    let everyMember = binary.everyMember
-    const members = new Map<string, TrackWants>(Object.entries(binary.members))
-    for (const stub of this._stubs) {
-      everyMember = mergeTrackWants(everyMember, stub._binaryWants.everyMember)
-      for (const [id, wants] of Object.entries(stub._binaryWants.members))
-        members.set(id, mergeTrackWants(members.get(id) ?? emptyTrackWants(), wants))
+    const holders: LaneHolder[] = [this._local, ...this._stubs]
+    let everyMember = emptyTrackWants()
+    const members: Record<string, TrackWants> = Object.create(null)
+    for (const { _binaryWants: wants } of holders) {
+      everyMember = mergeTrackWants(everyMember, wants.everyMember)
+      for (const [id, trackWants] of Object.entries(wants.members))
+        members[id] = mergeTrackWants(members[id] ?? emptyTrackWants(), trackWants)
     }
     return {
-      observed: this._stubs.size > 0 || this._localParticipants.size > 0 || state.listenerCount > 0,
-      text: this._textWants(),
-      announce: state.wantsAnnounce || [...this._stubs].some((stub) => stub._wantsAnnounce),
-      binary: { everyMember, members: Object.fromEntries(members) },
+      observed: this._stubs.size > 0 || this._localParticipants.size > 0 || this._state.listenerCount > 0,
+      text: this._textWants(holders),
+      announce: holders.some((holder) => holder._wantsAnnounce),
+      binary: { everyMember, members },
     }
   }
 
-  private _textWants(): { all: boolean; members: Set<string> } {
+  private _textWants(holders: LaneHolder[]): { all: boolean; members: Set<string> } {
     if (this._tail !== null) return { all: true, members: new Set() } // pre-attach tail: ingest everything now
-    const local: MemberWants = this._state.textWants()
-    if (local.all) return { all: true, members: new Set() }
-    const members = new Set(local.members)
-    for (const stub of this._stubs) {
-      const demand = stub._textDemand()
+    const members = new Set<string>()
+    for (const holder of holders) {
+      const demand = holder._textDemand()
       if (demand === 'all') return { all: true, members: new Set() }
       for (const id of demand) members.add(id)
     }

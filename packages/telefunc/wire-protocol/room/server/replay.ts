@@ -1,5 +1,5 @@
 export { ReplayGate, LocalHolder, TEXT_LANE_KEY, binaryLaneKey }
-export type { LaneHolder }
+export type { LaneHolder, WantsChange }
 
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 import { makePublishInfo } from '../../channel.js'
@@ -42,9 +42,15 @@ class ReplayGate {
   }
 }
 
+/** The previous wants of each lane kind whose wants changed. */
+type WantsChange = { text?: MemberWants; binary?: BinaryWants }
+
 /** A consumer of a room's lanes that retained frames replay into: a client's stub, or this instance's own listeners. */
 interface LaneHolder {
   readonly _binaryWants: BinaryWants
+  readonly _wantsAnnounce: boolean
+  /** The text the holder needs ingested; its relay filters further. */
+  _textDemand(): 'all' | ReadonlySet<string>
   _wantsTextFrom(member: string): boolean
   _wantsBinary(member: string, track: string): boolean
   _emitRetainedText(serialized: string, event: RoomDataEnvelope, info: WirePublishInfo): void
@@ -62,16 +68,24 @@ class LocalHolder implements LaneHolder {
     private readonly _suppress: (member: string) => boolean,
   ) {}
 
-  /** Re-derive the listeners' wants; each lane kind whose wants changed reports its previous ones. */
-  refreshWants(): { prevText: MemberWants | null; prevBinary: BinaryWants | null } {
-    const prevText = this._textWants
-    const prevBinary = this._binaryWants
+  /** Re-derives the listeners' wants. */
+  refreshWants(): WantsChange {
+    const text = this._textWants
+    const binary = this._binaryWants
     this._textWants = this._state.textWants()
     this._binaryWants = this._state.binaryWants()
     return {
-      prevText: JSON.stringify(prevText) === JSON.stringify(this._textWants) ? null : prevText,
-      prevBinary: JSON.stringify(prevBinary) === JSON.stringify(this._binaryWants) ? null : prevBinary,
+      ...(JSON.stringify(text) === JSON.stringify(this._textWants) ? {} : { text }),
+      ...(JSON.stringify(binary) === JSON.stringify(this._binaryWants) ? {} : { binary }),
     }
+  }
+
+  get _wantsAnnounce(): boolean {
+    return this._state.wantsAnnounce
+  }
+
+  _textDemand(): 'all' | ReadonlySet<string> {
+    return this._textWants.all ? 'all' : new Set(this._textWants.members)
   }
 
   _wantsTextFrom(member: string): boolean {

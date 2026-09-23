@@ -31,6 +31,7 @@ import {
   decodeDmReply,
   wireDmFromInbox,
   type DmReply,
+  type MemberWants,
   type RoomOrder,
   type ParticipantStubRequest,
   type RoomCtrlEnvelope,
@@ -133,18 +134,17 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
   // Control always flows; text follows broadcast/member wants, while binary uses `sub-binary`.
   override _onPeerBroadcastSubscribe(binary: boolean): void {
     if (binary || this._wantsText) return
-    const prevMembers = this._textMemberWants
+    const text = this._memberWants()
     this._wantsText = true
-    // Tail mode: this room-level want covers the whole held tail — flush it before the retained back-fill, so the flush advances the causal watermark and the retained replay dedupes against it.
+    // The tail flush precedes the retained back-fill, so the replay dedupes against what the flush relayed.
     this._flushTail()
-    this._room._syncSubs()
-    void this._room._replayRetainedText(this, (member) => prevMembers.has(member)).catch(reportRoomError)
+    this._room._onHolderWantsChanged(this, { text })
   }
 
   override _onPeerBroadcastUnsubscribe(binary: boolean): void {
     if (binary || !this._wantsText) return
     this._wantsText = false
-    this._room._syncSubs()
+    this._room._onHolderWantsChanged(this, {})
   }
 
   private _applyDeclaration(declaration: RoomDeclaration): void {
@@ -159,22 +159,21 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
   }
 
   private _declareBinaryWants(wants: BinaryWants): void {
-    const prev = this._binary
+    const binary = this._binary
     this._binary = wants
-    this._room._syncSubs()
-    void this._room._replayRetainedBinary(this, prev).catch(reportRoomError)
+    this._room._onHolderWantsChanged(this, { binary })
   }
 
   private _declareTextWants(members: string[], announce: boolean): void {
-    const prevMembers = this._textMemberWants
-    const prevWantsText = this._wantsText
+    const text = this._memberWants()
     this._textMemberWants = new Set(members)
     this._announce = announce
     this._flushTail()
-    this._room._syncSubs()
-    void this._room
-      ._replayRetainedText(this, (member) => prevWantsText || prevMembers.has(member))
-      .catch(reportRoomError)
+    this._room._onHolderWantsChanged(this, { text })
+  }
+
+  private _memberWants(): MemberWants {
+    return { all: this._wantsText, members: [...this._textMemberWants] }
   }
 
   private async _publishText(publish: RoomDataPublish): Promise<ChannelPublishAck> {
