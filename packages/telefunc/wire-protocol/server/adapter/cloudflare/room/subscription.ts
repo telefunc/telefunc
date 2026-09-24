@@ -4,7 +4,7 @@ import { ROUTE_RENEW_EVERY_MS, type RouteInstallation } from './routes.js'
 import type { CloudflareRoomAuthorityStub } from './backend.js'
 import type { RegisterWire } from './do.js'
 
-export type CloudflareRoomSubscriptionSource = Omit<RouteInstallation, 'leaseId'> & {
+type CloudflareRoomSubscriptionSource = Omit<RouteInstallation, 'leaseId'> & {
   authority: CloudflareRoomAuthorityStub
 }
 

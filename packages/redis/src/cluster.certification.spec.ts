@@ -6,7 +6,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, onTestFinished, v
 import { installRedis } from './index.js'
 import { RedisBackend } from './backend.js'
 import { disposeBackend, getBroadcastBackend, getRoomBackend } from '../../telefunc/wire-protocol/backend/install.js'
-import { broadcastSequenceKey, channelKey, gensKey, headKey, genPrefix, orderKey } from './keys.js'
+import { broadcastSequenceKey, channelKey, headKey, genPrefix, orderKey } from './keys.js'
 import { REDIS_COMMANDS, REDIS_DELIVERY_FENCE_BYTE } from './commands.js'
 type RedisClusterNode = { host: string; port: number }
 type Master = RedisClusterNode & { id: string; ranges: Array<[number, number]>; client: Redis }

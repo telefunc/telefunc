@@ -3,7 +3,6 @@
 
 import type { LaneId, RetainedFrame } from '../../../../backend/room/contract.js'
 import { decodeLaneKey, encodeLaneKey } from '../../../../backend/room/lane-key.js'
-import { toBytes } from './storage.js'
 import type { OrderingInfo } from '../../../../ordering-frame.js'
 
 const MAX_RETAINED_CHUNK_BYTES = 1_500_000
@@ -47,7 +46,7 @@ export function readRetained(sql: SqlStorage, inc: string, lane: LaneId): Retain
   const payload = new Uint8Array(manifest.size)
   let offset = 0
   for (const chunk of chunks) {
-    const bytes = toBytes(chunk.bytes)
+    const bytes = new Uint8Array(chunk.bytes)
     payload.set(bytes, offset)
     offset += bytes.byteLength
   }

@@ -7,7 +7,6 @@ export {
   toRoomFailure,
   roomAckError,
   roomFailureError,
-  ROOM_BUG_MESSAGE,
   DM_FAILURE,
 }
 

@@ -42,7 +42,7 @@ import { RedisSubscriptionDriver } from './subscriber.js'
 const DIRECTORY_PAGE_SIZE = 100
 const STABLE_READ_ATTEMPTS = 8
 
-export type RedisBackendOptions = {
+type RedisBackendOptions = {
   redis: RedisClient
   prefix?: string
 }

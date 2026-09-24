@@ -28,10 +28,6 @@ type HeadRow = {
   expires_at: number | null
 }
 
-export function toBytes(value: ArrayBuffer | Uint8Array): Uint8Array {
-  return value instanceof Uint8Array ? value : new Uint8Array(value)
-}
-
 export function initSchema(sql: SqlStorage): void {
   // The DO is the room: `head` is one row or absent; `gen` is each installed incarnation's cell revision.
   sql.exec(`
@@ -93,7 +89,7 @@ export function readLiveHead(sql: SqlStorage, now: number): StoredHead | null {
     rev: row.rev,
     currentInc: row.inc,
     state: row.state as StoredHead['state'],
-    config: toBytes(row.config),
+    config: new Uint8Array(row.config),
     expiresAt: row.expires_at,
   }
   if (row.lease_id !== null && row.lease_until !== null) head.closeLease = { id: row.lease_id, until: row.lease_until }
@@ -184,7 +180,7 @@ export function readCells(sql: SqlStorage, inc: string, sel: CellSelector, now: 
   const head = readLiveHead(sql, now)
   if (head === null || head.currentInc !== inc) return { staleInc: true }
   const revision = String(readRevision(sql, inc))
-  return { revision, cells: new Map(selectCellRows(sql, inc, sel).map((row) => [row.key, toBytes(row.bytes)])) }
+  return { revision, cells: new Map(selectCellRows(sql, inc, sel).map((row) => [row.key, new Uint8Array(row.bytes)])) }
 }
 
 function readRevision(sql: SqlStorage, inc: string): number {

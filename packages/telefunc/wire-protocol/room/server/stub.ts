@@ -23,7 +23,6 @@ import {
 } from './requests.js'
 import { ANNOUNCE_KEY, ReplayGate, binaryLaneKey, type LaneHolder } from './replay.js'
 import { TailHold, type TailEntry } from './tail.js'
-import type { ParticipantMeta } from '../types.js'
 import { binaryWantsCovers, emptyBinaryWants, laneTrack, type BinaryFrame, type BinaryWants } from '../binary.js'
 import { DM_FAILURE, RoomError, roomAckError } from '../errors.js'
 import { leaveCauseToWire } from '../model.js'

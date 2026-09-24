@@ -9,7 +9,6 @@ export {
   decodeRoomText,
   encodeRoomConfig,
   encodeRoomRecord,
-  encodeRoomText,
   publishCtrl,
   staleCommitError,
   withinRoomHorizon,

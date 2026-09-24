@@ -1,5 +1,5 @@
 export { RoomSubscriptions }
-export type { SubscriptionHost, HolderWants }
+export type { HolderWants }
 
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 import { unrefTimer } from '../../../utils/unrefTimer.js'
@@ -62,7 +62,6 @@ type SubscriptionPlan = {
   observed: boolean
   becomesObserved: boolean
   wantSemantic: boolean
-  wantAnyBinary: boolean
   needsRoster: boolean
   binaryPairs: Array<[string, string]>
 }
@@ -136,7 +135,6 @@ class RoomSubscriptions {
       observed: wants.observed,
       becomesObserved: open && wants.observed && !this._control.active,
       wantSemantic: open && (wants.text.all || wants.text.members.size > 0 || wants.announce),
-      wantAnyBinary,
       needsRoster: state.listenerCount > 0 || wantAnyBinary,
       binaryPairs: open ? this._binaryPairs(wants.binary) : [],
     }

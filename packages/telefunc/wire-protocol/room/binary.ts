@@ -2,11 +2,9 @@ export {
   isMemberId,
   encodeBinaryFrame,
   decodeBinaryFrame,
-  binaryFrameSender,
   DEFAULT_TRACK,
   laneTrack,
   publicTrack,
-  isRoomTrack,
   isNamedTrack,
   emptyTrackWants,
   emptyBinaryWants,
@@ -163,9 +161,6 @@ function decodeBinaryFrame(data: Uint8Array): BinaryFrame | null {
     meta,
     retain: !!(flags & FRAME_FLAG_RETAIN),
   }
-}
-function binaryFrameSender(data: Uint8Array): string | null {
-  return data.byteLength >= MEMBER_ID_BYTE_LENGTH ? bytesToUuid(data) : null
 }
 // Binary wants — per member, per track
 /** The default (unnamed) track's slot in want sets and lane keys; named tracks are non-empty, so `''` is unambiguous. */

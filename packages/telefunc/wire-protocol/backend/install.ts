@@ -1,5 +1,3 @@
-export type { BackendDriver }
-
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
 import type { BroadcastBackend, BroadcastDriver } from './broadcast/contract.js'
 import { superviseBroadcastDriver } from './broadcast/supervise.js'

@@ -26,7 +26,7 @@ import { unrefTimer } from '../../../utils/unrefTimer.js'
 import type { BackendReceiver, SubscriptionDriver } from '../subscription.js'
 import { DriverAttempt } from '../attempt.js'
 
-export type MemoryBackendOptions = {
+type MemoryBackendOptions = {
   // Tests inject authority time to prove expiry independently of caller clock skew.
   authorityNow?: () => number
   /** @internal Storage to share with a reconstructed backend. */
@@ -126,7 +126,7 @@ class MemorySubscriptionAttempt extends DriverAttempt {
   }
 
   receiverCount(): number {
-    return this.ended ? 0 : this.#localReceiverCount()
+    return this.#localReceiverCount()
   }
 }
 
@@ -248,7 +248,7 @@ export class MemoryBackend implements BroadcastDriver, RoomDriver {
     const mark = advanceOrder(gen.order, key, this.#now())
     if (opts?.retain) {
       gen.retained.set(key, {
-        lane: Object.freeze(copyLane(lane)),
+        lane: copyLane(lane),
         payload: frame,
         ...mark,
       })

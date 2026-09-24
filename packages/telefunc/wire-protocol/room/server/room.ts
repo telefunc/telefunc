@@ -25,14 +25,7 @@ import {
   type BinaryWants,
   type TrackWants,
 } from '../binary.js'
-import {
-  DM_FAILURE,
-  RoomError,
-  participantGoneError,
-  participantLeftError,
-  roomClosedError,
-  roomFailureError,
-} from '../errors.js'
+import { DM_FAILURE, participantGoneError, participantLeftError, roomClosedError, roomFailureError } from '../errors.js'
 import {
   assertKnownOptions,
   leaveCauseFromWire,
@@ -512,7 +505,6 @@ class ServerRoom extends RoomStateView implements Room {
   private async _assertOpen(): Promise<void> {
     if (this._state.closed || (await this._readOpenConfig()) === null) throw roomClosedError(this.id)
   }
-  /** Drops a duplicate; a gap means control events were lost, so the room reconciles. */
   /** @internal */
   _onCtrlMessage(serialized: string, rawInfo: WirePublishInfo): void {
     const event = decodeLaneEnvelope(serialized) as RoomCtrlEnvelope

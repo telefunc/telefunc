@@ -623,7 +623,6 @@ describe('cloudflare broadcast routing', () => {
   })
 
   it('a forward delivers wide ordering positions to every named DO', async () => {
-    const authorityState = createAuthorityState()
     const deliveredTo: string[] = []
     const received: Array<{ text: string; seq: number; timestamp: number }> = []
     const transport: CloudflareBroadcastTransport = createTransport(

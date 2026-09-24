@@ -1,4 +1,4 @@
-export { CLOUDFLARE_SESSION_ERROR, currentCloudflareSession, materializeCloudflareSession, withCloudflareSession }
+export { currentCloudflareSession, materializeCloudflareSession, withCloudflareSession }
 export type { CloudflareSession }
 
 import { getRawContext, restoreContext } from '../../../../node/server/context/context.js'
