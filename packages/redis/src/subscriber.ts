@@ -50,6 +50,8 @@ export class RedisSubscriptionDriver implements SubscriptionDriver<RedisSubscrip
   private _nextId = 0
   private _reconciling: Promise<void> = Promise.resolve()
   private _reconnectDelay = RECONNECT_DELAY_MIN_MS
+  /** An establishing attempt reports no failure, so the first one of an outage is reported here. */
+  private _outageReported = false
   private _lastError: unknown = new Error('Redis subscriber connection closed')
 
   constructor(options: RedisSubscriptionDriverOptions) {
@@ -142,7 +144,6 @@ export class RedisSubscriptionDriver implements SubscriptionDriver<RedisSubscrip
     }
     if (!this._isCurrent(id)) return
     this._connection = { phase: 'connected', id, socket, subscribed: new Set() }
-    this._reconnectDelay = RECONNECT_DELAY_MIN_MS
     this._reconcile()
   }
 
@@ -152,6 +153,10 @@ export class RedisSubscriptionDriver implements SubscriptionDriver<RedisSubscrip
     for (const attempt of this._attempts()) attempt.lose(error)
     // A listener may have released the last attempt, or opened one that is already connecting.
     if (this._byChannel.size === 0 || this._connection.phase !== 'idle') return
+    if (!this._outageReported) {
+      this._outageReported = true
+      console.error(error)
+    }
     const timer = setTimeout(() => void this._connect(), this._reconnectDelay)
     timer.unref()
     this._connection = { phase: 'waiting', timer }
@@ -179,8 +184,11 @@ export class RedisSubscriptionDriver implements SubscriptionDriver<RedisSubscrip
         await this._reconcileOnce(connection)
       } catch (error) {
         // A failed (UN)SUBSCRIBE leaves the channel set unknown: start over on a fresh connection.
-        this._lost(connection.id, error)
+        return this._lost(connection.id, error)
       }
+      // Recovered once the channels are subscribed, not when the socket connects: a refused SUBSCRIBE keeps backing off.
+      this._reconnectDelay = RECONNECT_DELAY_MIN_MS
+      this._outageReported = false
     })
   }
 

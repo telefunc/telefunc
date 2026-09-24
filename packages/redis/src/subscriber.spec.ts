@@ -98,6 +98,32 @@ test('re-subscribes on a fresh connection and resumes delivery after a drop', as
   expect(received).toEqual([1, 2])
 })
 
+test('a SUBSCRIBE that keeps failing backs off and is reported once', async () => {
+  vi.useFakeTimers()
+  onTestFinished(() => void vi.useRealTimers())
+  const report = vi.spyOn(console, 'error').mockImplementation(() => {})
+  onTestFinished(() => report.mockRestore())
+  const refused = new Error('NOPERM this user has no permissions to access one of the channels')
+  const createSubscriber = vi.fn(async () => {
+    const { socket } = fakeSubscriber()
+    socket.subscribe = async () => {
+      throw refused
+    }
+    return socket as unknown as SubscriberSocket
+  })
+  const driver = new RedisSubscriptionDriver({ prefix: 'tf:', createSubscriber, validateGeneration: async () => true })
+  const attempt = driver.bind(lane).open(
+    () => {},
+    () => 1,
+  )
+  await vi.advanceTimersByTimeAsync(10_000)
+  // The delay doubles from 50 ms to 2 s: ten connections in ten seconds, not one every 50 ms.
+  expect(createSubscriber).toHaveBeenCalledTimes(10)
+  expect(report).toHaveBeenCalledOnce()
+  expect(report).toHaveBeenCalledWith(refused)
+  await attempt.unsubscribe()
+})
+
 test('a subscriber dropping before the commit returns rejects its delivery without an unhandled rejection', async () => {
   const unhandled: unknown[] = []
   const onUnhandled = (reason: unknown) => unhandled.push(reason)
