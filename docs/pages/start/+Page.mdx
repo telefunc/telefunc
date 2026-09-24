@@ -165,7 +165,8 @@ On the client, use <Link href="/onAbort"><code>onAbort()</code></Link> to handle
 import { onAbort } from 'telefunc/client'
 
 onAbort((err) => {
-  if (err.abortValue.code === 'unauthenticated') {
+  const { code } = err.abortValue as { code: string }
+  if (code === 'unauthenticated') {
     // Redirect the user to the login page
     window.location.href = '/login'
   }
@@ -210,7 +211,7 @@ With Telefunc, frontend-backend communication is just a function call: validatio
 
 Telefunc automatically validates telefunction arguments at runtime, based on their TypeScript types — there is no schema to define:
 
-```ts
+```ts ts-only
 // components/TodoList.telefunc.ts
 // Environment: server
 

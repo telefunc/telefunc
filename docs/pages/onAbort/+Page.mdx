@@ -15,7 +15,7 @@ Use the `abortValue` property to access the error data.
 ```ts
 // *.telefunc.ts
 // Environment: server
-import { abort, getContext } from 'telefunc'
+import { Abort, getContext } from 'telefunc'
 
 export async function someTelefunction() {
   const { user } = getContext()
@@ -23,7 +23,7 @@ export async function someTelefunction() {
     throw Abort({ code: 'unauthenticated' })
   }
 }
-````
+```
 
 ```ts
 // onAbort.ts
@@ -31,12 +31,9 @@ export async function someTelefunction() {
 
 import { onAbort } from 'telefunc/client'
 
-onAbort((error: TelefunctionCallAbort) => {
-  if (error.isConnectionError) {
-    // ...
-  }
-  
-  if (error.abortValue.code === 'unauthenticated') {
+onAbort((error) => {
+  const { code } = error.abortValue as { code: string }
+  if (code === 'unauthenticated') {
     // Redirect user to login page
     window.location.href = '/login'
   }

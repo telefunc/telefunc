@@ -35,11 +35,11 @@ Since telefunctions can be customized to a specific page, display component, or 
   // MarkAllDone.telefunc.ts
   // Environment: server
 
-  import { getContext } from 'telefunc'
+  import { Abort, getContext } from 'telefunc'
 
-  async function onMarkAllDone() {
+  export async function onMarkAllDone() {
     const { user } = getContext()
-    if (!getContext().user) {
+    if (!user) {
       throw Abort()
     }
 
@@ -47,7 +47,7 @@ Since telefunctions can be customized to a specific page, display component, or 
       'UPDATE todo_items SET is_completed = TRUE WHERE userId = :userId;',
       { userId: user.id }
     )
-  };
+  }
   ```
   ```tsx ts-only
   // MarkAllDone.tsx

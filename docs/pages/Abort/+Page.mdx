@@ -23,7 +23,9 @@ In the following example, unauthenticated calls are rejected with `throw Abort()
 ```js
 // hello.telefunc.js
 // Environment: server
- 
+
+import { Abort, getContext } from 'telefunc'
+
 export async function hello(name) {
   const { user } = getContext()
   if (!user) {
