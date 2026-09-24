@@ -783,7 +783,7 @@ class ServerRoom extends RoomStateView implements Room {
       if (stored === null) continue
       const framed = stored.payload
       const frame = decodeBinaryFrame(framed)
-      if (!frame) continue
+      assert(frame)
       const track = laneTrack(frame.track)
       if (binaryWantsCovers(prevWants, frame.from, track) || !holder._wantsBinary(frame.from, track)) continue
       holder._emitRetainedBinary(framed, frame, { seq: stored.seq, timestamp: stored.timestamp })

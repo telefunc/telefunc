@@ -1,7 +1,7 @@
 export { ClientRoom, ClientStandaloneParticipant }
 
 import { createDeferred } from '../../utils/createDeferred.js'
-import { assertUsage } from '../../utils/assert.js'
+import { assert, assertUsage } from '../../utils/assert.js'
 import type { TELEFUNC_SHIELDS } from '../../node/shared/transformer/generateShield/shield-key.js'
 import { makePublishInfo, type ChannelPublishAck, type ChannelPublishInfo } from '../channel.js'
 import { ClientBroadcast } from '../client/channel.js'
@@ -230,7 +230,7 @@ class ClientRoom extends RoomStateView implements Room {
   }
 
   private _onEnvelope(envelope: unknown, rawInfo: ChannelPublishInfo): void {
-    if (!hasRoomTag(envelope)) return
+    assert(hasRoomTag(envelope))
     const event = envelope as RoomEnvelope | RoomDmEnvelope | RoomRosterEvent | RoomDemandEvent
     const member = heldMemberOf(event)
     if (member !== null && this._holdsForJoin(member)) {
@@ -292,7 +292,8 @@ class ClientRoom extends RoomStateView implements Room {
 
   private _onBinaryFrame(framed: Uint8Array, rawInfo: ChannelPublishInfo): void {
     const frame = decodeBinaryFrame(framed)
-    if (frame) this._state.applyBinary(frame, makePublishInfo(this.id, rawInfo.seq, rawInfo.timestamp))
+    assert(frame)
+    this._state.applyBinary(frame, makePublishInfo(this.id, rawInfo.seq, rawInfo.timestamp))
   }
 
   private _applyRoster(members: MemberSnapshot[]): void {
@@ -477,7 +478,7 @@ class ClientStandaloneParticipant extends ClientParticipantBase {
     this._request = request
 
     channel.listen((notice: unknown) => {
-      if (!hasRoomTag(notice)) return
+      assert(hasRoomTag(notice))
       const msg = notice as ParticipantStubNotice
       switch (msg.__r) {
         case 'p-meta':
