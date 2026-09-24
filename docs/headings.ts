@@ -8,7 +8,7 @@ import type {
   HeadingDefinition,
   HeadingDetachedDefinition as HeadingDetachedDefinition_,
 } from '@brillout/docpress'
-import { iconScroll, iconEyes, iconGear, iconSeedling } from '@brillout/docpress' with { type: 'vike:pointer' }
+import { iconGear, iconPlug, iconSeedling } from '@brillout/docpress' with { type: 'vike:pointer' }
 type HeadingDetachedDefinition = Omit<HeadingDetachedDefinition_, 'category'> & {
   category: CategoryNames | 'Miscellaneous'
 }
@@ -21,26 +21,20 @@ type CategoryNames = ExtractCategoryName<(typeof categories)[number]>
 const categories = [
   'Guides',
   'Guides (more)',
+  'Integrations',
   'API',
-  'Get Started',
-  'Overview',
   'Miscellaneous',
 ] as const satisfies Config['categories']
 
 const headingsDetached = [...misc(), ...guidesMore()] satisfies HeadingDetachedDefinition[]
 
 const headings = [
+  // #region Onboarding
   {
     level: 1,
-    title: 'Learn',
-    titleIcon: iconEyes,
-    color: '#bd55dd',
-    titleIconStyle: {
-      width: 30,
-      height: 30,
-      position: 'relative',
-      top: -2,
-    },
+    title: 'Guides',
+    titleIcon: iconSeedling,
+    color: '#74d717',
   },
   {
     level: 2,
@@ -50,70 +44,32 @@ const headings = [
   },
   {
     level: 2,
-    title: 'RPC',
-    url: '/RPC',
-  },
-  {
-    level: 2,
-    title: 'RPC vs GraphQL/REST',
-    url: '/RPC-vs-GraphQL-REST',
-  },
-  {
-    level: 1,
     title: 'Get Started',
-    titleIcon: iconSeedling,
-    color: '#74d717',
-  },
-  {
-    level: 4,
-    title: 'Framework integration',
+    url: '/start',
+    sectionTitles: ['My first telefunction'],
   },
   {
     level: 2,
-    title: 'Next.js',
-    url: '/next',
+    title: 'Server Integration',
+    url: '/server-integration',
   },
   {
     level: 2,
-    title: 'SvelteKit',
-    url: '/svelte-kit',
+    title: 'Initial Data',
+    url: '/initial-data',
   },
   {
     level: 2,
-    title: 'Vike',
-    url: '/vike',
+    title: 'Why Telefunc?',
+    url: '/why-telefunc',
   },
   {
     level: 2,
-    title: 'Nuxt',
-    url: '/nuxt',
+    title: 'Best Practices',
+    url: '/best-practices',
   },
-  {
-    level: 2,
-    title: 'React Native',
-    url: '/react-native',
-  },
-  {
-    level: 2,
-    title: 'React Router',
-    url: '/react-router',
-  },
-  {
-    level: 4,
-    title: 'Bundler integration',
-  },
-  {
-    level: 2,
-    title: 'Custom bundler',
-    titleInNav: 'Custom bundler',
-    url: '/install',
-  },
-  {
-    level: 1,
-    title: 'Guides',
-    titleIcon: iconScroll,
-    color: '#ffd511',
-  },
+
+  // #region Guides
   {
     level: 4,
     title: 'Basics',
@@ -122,23 +78,17 @@ const headings = [
     level: 2,
     title: 'Permissions',
     url: '/permissions',
-    sectionTitles: ['`getContext()` wrapping'],
+    sectionTitles: ['DRY Permissions'],
+  },
+  {
+    level: 2,
+    title: 'Validation',
+    url: '/validation',
   },
   {
     level: 2,
     title: 'Error handling',
     url: '/error-handling',
-  },
-  {
-    level: 2,
-    title: 'Form validation',
-    url: '/form-validation',
-    sectionTitles: ['`throw Abort(someValue)`'],
-  },
-  {
-    level: 2,
-    title: 'Event-based telefunctions',
-    url: '/event-based',
   },
   {
     level: 2,
@@ -178,12 +128,117 @@ const headings = [
     title: 'File download',
     url: '/file-download',
   },
+  // #endregion
+
+  {
+    level: 4,
+    title: 'Learn More',
+  },
+  {
+    level: 2,
+    title: 'Why Schemaless?',
+    url: '/schemaless',
+    sectionTitles: ['Schemaless vs schema-full', 'RPC vs GraphQL/REST'],
+  },
+  {
+    level: 2,
+    title: 'How it works',
+    url: '/how-it-works',
+    sectionTitles: ['Telefunction lifecycle'],
+  },
+  // #endregion
+
+  // #region Integrations
+  {
+    level: 1,
+    title: 'Integrations',
+    titleIcon: iconPlug,
+    color: '#ffd511',
+  },
+  {
+    level: 4,
+    title: 'Metaframeworks',
+  },
+  {
+    level: 2,
+    title: 'Next.js',
+    url: '/next',
+  },
+  {
+    level: 2,
+    title: 'SvelteKit',
+    url: '/svelte-kit',
+  },
+  {
+    level: 2,
+    title: 'Vike',
+    url: '/vike',
+  },
+  {
+    level: 2,
+    title: 'Nuxt',
+    url: '/nuxt',
+  },
+  {
+    level: 2,
+    title: 'React Router',
+    url: '/react-router',
+  },
+  {
+    level: 4,
+    title: 'Native',
+  },
+  {
+    level: 2,
+    title: 'React Native',
+    url: '/react-native',
+  },
+  {
+    level: 4,
+    title: 'Bundlers',
+  },
+  {
+    level: 2,
+    title: 'Custom bundler',
+    url: '/bundler',
+  },
+  {
+    level: 2,
+    title: 'Vite',
+    url: '/vite-plugin',
+  },
+  {
+    level: 2,
+    title: 'Webpack',
+    url: '/webpack-plugin',
+  },
+  {
+    level: 2,
+    title: 'Babel',
+    url: '/babel-plugin',
+  },
+  // #endregion
+
+  // #region API
   {
     level: 1,
     title: 'API',
     titleIcon: iconGear,
     color: '#80c1db',
-    menuModalFullWidth: true,
+  },
+  {
+    level: 4,
+    title: 'Server Middleware',
+  },
+  {
+    level: 2,
+    title: '`new Telefunc()`',
+    url: '/Telefunc',
+  },
+  {
+    level: 2,
+    title: '`serve()`',
+    url: '/serve',
   },
   {
     level: 4,
@@ -217,7 +272,7 @@ const headings = [
     level: 2,
     title: '`shield()`',
     url: '/shield',
-    sectionTitles: ['TypeScript - Automatic', 'TypeScript - Manual'],
+    sectionTitles: ['Automatic (from TypeScript)', 'Manual'],
   },
   {
     level: 4,
@@ -238,6 +293,21 @@ const headings = [
     title: '`onClose()`',
     url: '/onClose',
     sectionTitles: ['`context.onClose()`', '`channel.onClose()`', '`context.signal`'],
+  },
+  {
+    level: 4,
+    title: 'Stream',
+  },
+  {
+    level: 2,
+    title: '`Channel`',
+    url: '/channel',
+    sectionTitles: ['`new Channel()`', '`Broadcast`', '`new BroadcastChannel()`'],
+  },
+  {
+    level: 2,
+    title: '`close()`',
+    url: '/close',
   },
   {
     level: 4,
@@ -295,79 +365,12 @@ const headings = [
     title: '`log`',
     url: '/log',
   },
-  {
-    level: 4,
-    title: 'Server Middleware',
-  },
-  {
-    level: 2,
-    title: '`new Telefunc()`',
-    url: '/Telefunc',
-  },
-  {
-    level: 2,
-    title: '`serve()`',
-    url: '/serve',
-  },
-  {
-    level: 4,
-    title: 'Stream',
-  },
-  {
-    level: 2,
-    title: '`Channel`',
-    url: '/channel',
-    sectionTitles: ['`new Channel()`', '`Broadcast`', '`new BroadcastChannel()`'],
-  },
-  {
-    level: 2,
-    title: '`close()`',
-    url: '/close',
-  },
-  {
-    level: 4,
-    title: 'Plugins',
-  },
-  {
-    level: 2,
-    title: 'Vite Plugin',
-    url: '/vite-plugin',
-  },
-  {
-    level: 2,
-    title: 'Webpack Plugin',
-    url: '/webpack-plugin',
-  },
-  {
-    level: 2,
-    title: 'Babel Plugin',
-    url: '/babel-plugin',
-  },
+  // #endregion
 ] as const satisfies HeadingDefinition[]
 
 function misc() {
   return (
     [
-      {
-        title: '`throw Abort()` vs `throw new Error()`',
-        url: '/abort-vs-error',
-      },
-      {
-        title: 'Telefunc Transformer',
-        url: '/transformer',
-      },
-      {
-        title: 'Initial Page Data',
-        url: '/initial-page-data',
-      },
-      {
-        title: 'Initial Data',
-        url: '/initial-data',
-      },
-      {
-        title: 'Multiple Clients',
-        url: '/multiple-clients',
-      },
       {
         title: '❌ Non-function exports',
         url: '/warning/non-function-export',

@@ -2,7 +2,7 @@
   display: flex;
 }
 .code-preview_code-block {
-  width: 465px;
+  width: 400px;
   font-size: 13px;
 }
 .debug-layout {

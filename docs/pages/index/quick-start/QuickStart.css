@@ -1,0 +1,41 @@
+.setup-info {
+  max-width: 40%;
+}
+
+@media screen and (max-width: 500px) {
+  h2 {
+    font-size: 1.5em;
+  }
+
+  .cta-stack {
+    flex-direction: column;
+  }
+  .hero-block {
+    padding: 0px 20px;
+  }
+  .setup-info {
+    max-width: 100%;
+  }
+  .setup-step {
+    flex-direction: column;
+  }
+}
+
+@media screen and (max-width: 700px) {
+  h2 {
+    font-size: 1.5em;
+  }
+
+  .cta-stack {
+    flex-direction: column;
+  }
+  .hero-block {
+    padding: 0px 20px;
+  }
+  .setup-info {
+    max-width: 100%;
+  }
+  .setup-step {
+    flex-direction: column;
+  }
+}

@@ -1,29 +1,39 @@
 import { Link } from '@brillout/docpress'
 
-> This page is about handling: bugs, expected errors, and network errors.
->
-> - To block unauthorized access, see: <Link href="/permissions" />
-> - To handle invalid `<form>` values, see: <Link href="/form-validation" />
-> - To install error tracking, see: <Link href="/onBug" />
+This page is about handling bugs, expected errors, and network errors.
+ - To block unauthorized access, see: <Link href="/permissions">Permissions</Link>
+ - To handle invalid telefunction arguments, see: <Link href="/validation">Validation</Link>
+ - To install error tracking, see: <Link href="/onBug"><code>onBug()</code></Link>
 
+> To prevent leaking sensitive information, Telefunc never forwards unexpected server errors to the client.
 
-## Bugs
+## Error flows
 
-If a telefunction has a bug:
+|                             | `return someErrorData` | `throw Abort()`  | `throw Error()`           |
+| --------------------------- | ---------------------- | -----------------|-------------------------- |
+| When to use                 | For expected failures  | For control flow | For **bugs**              |
+| triggers `onBug` (server)   | ❌                      | ❌                | ✅                        |
+| `onAbort` (client)          | ❌                      | ✅               | ❌                         |
+| Passes error data to client | ✅                     | ✅               | ❌                         |
+| Logged with `console.error` | ❌                      | ❌                | ✅                        |
 
-```ts
-// hello.telefunc.ts
-// Environment: server
+### Security errors
 
-export { hello }
+<Link href="/Abort" /> is used to reject invalid requests (e.g., an unauthorized user or invalid arguments).
 
-async function hello(name: string) {
-  // Typo => syntax error => it should be `name` instead of `namee`
-  return 'Hello ' + namee
-}
-```
+### App errors
 
-Then a telefunction call throws an error:
+To handle expected errors (e.g., `"Email exists"`) gracefully, just return early with an error message. Add a flag to easily discriminate the return type.
+
+If a telefunction throws an uncaught exception, then <Link href="/onBug" /> is called. Catch the error and return early or `throw Abort(errorData)` to send information back to the client. To avoid leaking sensitive information, Telefunc doesn't send the original `Error` object to the frontend.
+
+### Network errors
+
+If the user's browser can't connect to your server, the error thrown client-side is a `NetworkError` (`import { NetworkError } from 'telefunc/client'`).
+
+## Client side handling
+
+If `throw Abort(abortValue)` interrupts a telefunction call, the telefunction call on the client throws an error with `err.isAbort === true` and `err.abortValue`. It can be accessed with the <Link href="/onAbort" /> hook, or caught and handled by your frontend:
 
 ```html
 <!-- index.html -->
@@ -38,76 +48,20 @@ Then a telefunction call throws an error:
         await hello('Eva')
         console.log("I'm never printed")
       } catch(err) {
-        console.log(err.message) // Prints 'Internal Server Error'
-        // E.g. show a popup "Something went wrong. Try again (later)."
-        // ...
+        if (err.isAbort) {
+          // The telefunction ran `throw Abort(abortValue)`
+          console.log(err.abortValue)
+        } else {
+          console.log(err.message) // Prints 'Internal Server Error'
+          // E.g. show a popup "Something went wrong. Try again (later)."
+        }
       }
     </script>
   </body>
 </html>
 ```
 
-> To avoid leaking sensitive information, Telefunc doesn't send the original `Error` object to the frontend.
-
-
-## Expected Errors
-
-An error thrown by a telefunction doesn't have to be a bug — it can be expected.
-
-For example:
- - An authentication library throwing an error if the user isn't logged in.
- - A validation library throwing an error upon invalid data.
-
-In this situation, you can:
- 1. Propagate the error to the frontend, or
- 2. handle the error on the server-side.
-
-<br/>
-
-**1. Propagate the error to the frontend.**
-
-You can propagate error information to the frontend like this:
-
-```ts
-import { validate } from 'some-library'
-
-function onFormSubmit(data) {
-  try {
-    validate(data)
-  } catch (err) {
-    return {
-      errorMessage: `Data is invalid: ${err.message}. Please enter valid data.`
-    }
-  }
-}
-```
-
-You can also use `throw Abort(someValue)`:
-
-```ts
-import { validate } from 'some-library'
-import { Abort } from 'telefunc'
-
-function onFormSubmit(data) {
-  try {
-    validate(data)
-  } catch (err) {
-    throw Abort({
-      errorMessage: `Data is invalid: ${err.message}. Please enter valid data.`
-    })
-  }
-}
-```
-
-In general, we recommend using `return { someValue }` instead of `throw Abort(someValue)`, see explanation at <Link href="/form-validation#throw-abort-somevalue" doNotInferSectionTitle={true} />.
-
-> You must catch the error and use `throw Abort(someValue)` because Telefunc doesn't send the original `Error` object to the frontend (in order to avoid leaking sensitive information).
-
-See also: <Link href="/permissions#getcontext-wrapping" doNotInferSectionTitle={true} />.
-
-<br/>
-
-**2. Handle the error on the server-side.**
+## Server side handling
 
 Register an <Link href="/onBug"><code>onBug()</code></Link> hook — it's called whenever a telefunction throws a bug (any error that isn't `Abort()`):
 
@@ -122,40 +76,14 @@ onBug((err) => {
 })
 ```
 
-> With the low-level <Link href="/serve">`serve()`</Link>, the error is also exposed at `httpResponse.err`.
+> With the low-level <Link href="/serve"><code>serve()</code></Link>, the error is also exposed at `httpResponse.err`.
 
+### Next
 
-## Network Errors
-
-If the user's browser can't connect to your server:
-
-```html
-<!-- index.html -->
-<!-- Environment: client -->
-
-<html>
-  <body>
-    <script type="module">
-      import { hello } from './hello.telefunc.js'
-      import { NetworkError } from 'telefunc/client'
-
-      try {
-        await hello('Eva')
-      } catch(err) {
-        if (err instanceof NetworkError) {
-          // There is a network problem:
-          //  - the user isn't connected to the internet, or
-          //  - your server is down.
-          console.log(err.message) // Prints 'No Server Connection'
-        }
-      }
-    </script>
-  </body>
-</html>
-```
-
+<Link href="/schemaless" />
 
 ## See also
 
+- <Link href="/Abort" />
+- <Link href="/shield" />
 - <Link href="/onBug" />
-- <Link href="/abort-vs-error" />

@@ -8,16 +8,16 @@ function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
   test('HTML', async () => {
     const html = await fetchHtml('/')
     expect(html).toContain('<meta name="description" content="Remote Functions." />')
-    expect(html).toMatch(partRegex`<h2>${/[^\/]+/}Simple</h2>`)
-    expect(html).toMatch(partRegex`<h2>${/[^\/]+/}Rock-solid</h2>`)
-    expect(html).toContain('no known bug')
+    expect(html).toMatch(partRegex`<h2>${/<img .+>/} Type-Safe by definition</h2>`)
+    expect(html).toMatch(partRegex`<h2>${/[^\/]+/} Schemaless by design</h2>`)
+    expect(html).toContain('Couple code, not environments.')
   })
   test('DOM', async () => {
     await page.goto(getServerUrl() + '/')
     await autoRetry(async () => {
       const body = await page.textContent('body')
-      expect(body).toContain('Seamless TypeScript support')
-      expect(body).toContain("Telefunc enables programmatically defined permissions. It's both simple and flexible.")
+      expect(body).toContain('Iterate flexibly and rapidly.')
+      expect(body).toContain('The types are the contract.')
     })
   })
 }

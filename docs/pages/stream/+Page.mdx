@@ -519,8 +519,8 @@ onClose((err) => {
 > See: <Link href="/onClose" />
 
 > The expected-vs-bug distinction described at <Link href="/error-handling" /> applies to streams too:
-> - `throw Abort()` during a stream is relayed <Link href="/error-handling#expected-errors">as an expected error</Link>
-> - Any other thrown error is treated <Link href="/error-handling#bugs">as a bug</Link>
+> - `throw Abort()` during a stream is relayed <Link href="/error-handling#error-flows">as an expected error</Link>
+> - Any other thrown error is treated <Link href="/error-handling#error-flows">as a bug</Link>
 
 See also:
 - <Link href="/error-handling" />
