@@ -196,28 +196,43 @@ describe('keyed in-process broadcast', () => {
     expect(received).toEqual([{ text: 'hello' }])
   })
 
-  it('reports a subscription that ends on its own, and the next subscribe opens a fresh one', async () => {
-    await disposeBackend()
-    const ending = pendingSubscription()
-    const driver = new MemoryBackend({ state: memoryState })
-    const bind = driver.subscriptions.bind.bind(driver.subscriptions)
-    let opens = 0
-    driver.subscriptions.bind = (source) => {
-      const binding = bind(source)
-      return { ...binding, open: (...args) => (opens++ === 0 ? ending.subscription : binding.open(...args)) }
-    }
-    installBackend(() => driver)
-    const report = vi.spyOn(console, 'error').mockImplementation(() => {})
-    const receiver = new ServerBroadcast<string>({ key: 'broadcast:ended' })
-    const received: string[] = []
-    receiver.subscribe(() => {})
-    ending.close()
-    await vi.waitFor(() => expect(report).toHaveBeenCalledWith(expect.stringContaining('Backend subscription closed')))
-    receiver.subscribe((text) => received.push(text))
-    await Broadcast.publish('broadcast:ended', 'after')
-    expect(received).toEqual(['after'])
-    receiver.abort()
-  })
+  it.each([
+    ['as it opens', true],
+    ['after it opened', false],
+  ])(
+    'reports a subscription that ends on its own %s, and the next subscribe opens a fresh one',
+    async (_when, atOpen) => {
+      await disposeBackend()
+      const ending = pendingSubscription()
+      const driver = new MemoryBackend({ state: memoryState })
+      const bind = driver.subscriptions.bind.bind(driver.subscriptions)
+      let opens = 0
+      driver.subscriptions.bind = (source) => {
+        const binding = bind(source)
+        return {
+          ...binding,
+          open: (...args) => {
+            if (opens++ > 0) return binding.open(...args)
+            if (atOpen) throw new Error('listen refused')
+            return ending.subscription
+          },
+        }
+      }
+      installBackend(() => driver)
+      const report = vi.spyOn(console, 'error').mockImplementation(() => {})
+      const receiver = new ServerBroadcast<string>({ key: 'broadcast:ended' })
+      const received: string[] = []
+      receiver.subscribe(() => {})
+      if (!atOpen) ending.close()
+      await vi.waitFor(() =>
+        expect(report).toHaveBeenCalledWith(expect.stringContaining(atOpen ? 'listen refused' : 'subscription closed')),
+      )
+      receiver.subscribe((text) => received.push(text))
+      await Broadcast.publish('broadcast:ended', 'after')
+      expect(received).toEqual(['after'])
+      receiver.abort()
+    },
+  )
 
   it('waits for a sibling subscription to be ready before publishing', async () => {
     const { controlled, publish } = await installPendingSubscriptionBackend({ seq: 1, timestamp: 1 })
@@ -500,19 +515,30 @@ describe('Broadcast lifecycle and route ownership', () => {
   })
 })
 
-describe('Broadcast client publish refused by a full buffer', () => {
-  it('acks OVERFLOW without reporting a bug', async () => {
-    const { controlled } = await installPendingSubscriptionBackend({ seq: 1, timestamp: 1 })
+describe('Broadcast client publish acks', () => {
+  it.each([
+    ['accepted acks OK', 'ok', ACK_STATUS.OK],
+    ['refused by a full buffer acks OVERFLOW, reporting no bug', 'overflow', ACK_STATUS.OVERFLOW],
+    ['failing with a bug acks ERROR and reports it', 'bug', ACK_STATUS.ERROR],
+  ] as const)('a client publish %s', async (_name, outcome, status) => {
+    const { controlled, publish } = await installPendingSubscriptionBackend({ seq: 1, timestamp: 1 })
     const report = vi.spyOn(console, 'error').mockImplementation(() => {})
-    const broadcast = registeredBroadcast('broadcast:refused')
+    const broadcast = registeredBroadcast('broadcast:client-publish')
     const frames: Uint8Array[] = []
     broadcast._attachPeer(peer((frame) => frames.push(frame)))
-    broadcast.subscribe(() => {})
-    await broadcast._onPeerPublishAckReqMessage(JSON.stringify('x'.repeat(600 * 1024)), 1)
+    if (outcome === 'overflow') broadcast.subscribe(() => {})
+    if (outcome === 'bug')
+      publish.mockImplementation(() => {
+        throw new Error('driver bug')
+      })
+    await broadcast._onPeerPublishAckReqMessage(
+      JSON.stringify(outcome === 'overflow' ? 'x'.repeat(600 * 1024) : 'x'),
+      1,
+    )
     const ack = frames.map((f) => decode(f as Uint8Array<ArrayBuffer>)).find((d) => d.tag === TAG.ACK_RES)
     if (ack?.tag !== TAG.ACK_RES) throw new Error('Expected ACK_RES')
-    expect(ack.status).toBe(ACK_STATUS.OVERFLOW)
-    expect(report).not.toHaveBeenCalled()
+    expect(ack.status).toBe(status)
+    expect(report).toHaveBeenCalledTimes(outcome === 'bug' ? 1 : 0)
     controlled.ready()
   })
 })
