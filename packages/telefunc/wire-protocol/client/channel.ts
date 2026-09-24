@@ -12,6 +12,7 @@ import type {
   ChannelPublishAck,
   BroadcastBinaryListener,
   BroadcastListener,
+  BroadcastListeners,
 } from '../channel.js'
 import type { TELEFUNC_SHIELDS } from '../../node/shared/transformer/generateShield/shield-key.js'
 import { invokeChannelListener, makePublishInfo } from '../channel.js'
@@ -610,8 +611,6 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     return false
   }
 }
-
-type BroadcastListeners<T> = { text: Array<BroadcastListener<T>>; binary: Array<BroadcastBinaryListener> }
 
 class ClientBroadcast<T = unknown> extends ClientChannel {
   readonly [CLIENT_BROADCAST_BRAND] = true

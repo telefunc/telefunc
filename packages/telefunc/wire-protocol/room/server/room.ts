@@ -8,7 +8,7 @@ import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 import { unrefTimer } from '../../../utils/unrefTimer.js'
 import { createDeferred } from '../../../utils/createDeferred.js'
 import type { ChannelPublishAck } from '../../channel.js'
-import { ROOM_DM_ACK_TIMEOUT_MS, ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS } from '../constants.js'
+import { ROOM_DM_ACK_TIMEOUT_MS, ROOM_HORIZON_MS } from '../constants.js'
 import { getRoomBackend } from '../../backend/install.js'
 import type { CommitAccepted, LaneId } from '../../backend/room/contract.js'
 import { encodePublishBinary, encodePublishText, type WirePublishInfo } from '../../shared-ws.js'
@@ -71,7 +71,8 @@ import {
   openConfig,
   withinRoomHorizon,
 } from './lanes.js'
-import { reportCallbackError, reportRoomError } from './errors.js'
+import { reportRoomError } from './errors.js'
+import { reportServerChannelError } from '../../server/channel.js'
 import { createMember, evictMember, readMembersById, updateMemberRecord } from './membership.js'
 import { memberCellKey } from './cells.js'
 import type {
@@ -143,7 +144,7 @@ class ServerRoom extends RoomStateView implements Room {
       seed,
       updateStamp: { at: config.at, by: config.by },
       onListenersChanged: () => this._onHolderWantsChanged(this._local, this._local.refreshWants()),
-      onCallbackError: reportCallbackError,
+      onCallbackError: reportServerChannelError,
       onLeave: (id, cause, hidden) => this._onLeave(id, cause, hidden),
     })
     this._state._owner = this
@@ -248,7 +249,7 @@ class ServerRoom extends RoomStateView implements Room {
   /** The member's inbox delivers (within the horizon) before its join is visible, and the admission still holds. */
   private async _inboxReady(id: string): Promise<void> {
     const inbox = this._subs.inboxOf(id)
-    if (inbox !== undefined) await withinRoomHorizon(inbox.ready, ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS)
+    if (inbox !== undefined) await withinRoomHorizon(inbox.ready, ROOM_HORIZON_MS)
     this._assertAdmitted(id)
   }
   /** A closed room or a departed member drops the admission's inbox. */
@@ -669,7 +670,7 @@ class ServerRoom extends RoomStateView implements Room {
   async _startTail(): Promise<void> {
     this._tail = new TailHold(() => this._teardownTail())
     this._subs.replan() // bring up text ingestion before any stub exists
-    await withinRoomHorizon(this._subs.semanticReady, ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS)
+    await withinRoomHorizon(this._subs.semanticReady, ROOM_HORIZON_MS)
   }
   private _teardownTail(): void {
     if (this._tail === null) return // already handed off to a stub
@@ -759,7 +760,7 @@ class ServerRoom extends RoomStateView implements Room {
   }
   async _replayRetainedText(holder: LaneHolder, previous: MemberWants): Promise<void> {
     // Read retained only after subscription readiness: a racing commit is then retained or live, never lost in the gap.
-    await withinRoomHorizon(this._subs.semanticReady, ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS)
+    await withinRoomHorizon(this._subs.semanticReady, ROOM_HORIZON_MS)
     const stored = await getRoomBackend().readRetained(this.id, this._inc, SEMANTIC_LANE)
     if (stored === null) return
     const serialized = decodeRoomText(stored.payload)
@@ -932,7 +933,7 @@ class ServerLocalParticipant extends ParticipantBase {
   }
 
   protected _reportError(err: unknown): void {
-    reportCallbackError(err)
+    reportServerChannelError(err)
   }
 }
 
@@ -940,6 +941,6 @@ async function runAfterHook(hook: () => unknown): Promise<void> {
   try {
     await hook()
   } catch (error) {
-    reportCallbackError(error)
+    reportServerChannelError(error)
   }
 }

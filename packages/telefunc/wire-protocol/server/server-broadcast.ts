@@ -5,6 +5,7 @@ import type {
   ChannelPublishAck,
   BroadcastBinaryListener,
   BroadcastListener,
+  BroadcastListeners,
   ChannelCloseCallback,
   ChannelCloseOptions,
   ChannelCloseResult,
@@ -33,7 +34,6 @@ const SERVER_BROADCAST_BRAND: unique symbol = Symbol.for('ServerBroadcast')
 const textEncoder = new TextEncoder()
 const textDecoder = new TextDecoder()
 type BroadcastUnsubscribe = () => void
-type BroadcastListeners<T> = { text: Array<BroadcastListener<T>>; binary: Array<BroadcastBinaryListener> }
 const BROADCAST_KINDS = ['text', 'binary'] as const
 
 class ServerBroadcast<T = unknown> extends ServerChannel {

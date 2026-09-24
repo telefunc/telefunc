@@ -22,8 +22,8 @@ export type {
 import type { BackendReceiver, BackendSubscription, SubscriptionDriver } from '../subscription.js'
 import type { OrderingInfo } from '../../ordering-frame.js'
 
-/** Fixed channels/order domains: semantic shares RoomOrder; control uses ControlSeq; binary uses
- * per-(member,track) LaneSeq; inbox uses per-member InboxSeq. */
+/** Each lane is its own ordering domain: one semantic, one control, one per member for inbox, and one per
+ *  (member, track) for binary. */
 type LaneId =
   | { kind: 'semantic' }
   | { kind: 'control' }

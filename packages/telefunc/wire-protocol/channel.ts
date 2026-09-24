@@ -16,6 +16,7 @@ export type {
   ChannelBinaryListener,
   BroadcastListener,
   BroadcastBinaryListener,
+  BroadcastListeners,
 }
 
 import type { TELEFUNC_SHIELDS } from '../node/shared/transformer/generateShield/shield-key.js'
@@ -68,6 +69,8 @@ type ChannelBinaryListener = (data: Uint8Array) => unknown | Promise<unknown>
 type BroadcastListener<T> = (data: ChannelData<T>, info: ChannelPublishInfo) => ChannelListenReturn<T>
 /** Callback for `Broadcast.subscribeBinary()` — receives raw binary data and publish info. */
 type BroadcastBinaryListener = (data: Uint8Array, info: ChannelPublishInfo) => unknown | Promise<unknown>
+/** A broadcast's local listeners, by kind. */
+type BroadcastListeners<T> = { text: Array<BroadcastListener<T>>; binary: Array<BroadcastBinaryListener> }
 type ChannelCloseOptions = {
   timeout?: number
 }

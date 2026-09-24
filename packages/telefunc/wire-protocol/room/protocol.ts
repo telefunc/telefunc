@@ -13,7 +13,6 @@ export type {
   RoomCtrlEnvelope,
   RoomDataEnvelope,
   RoomDataPublish,
-  RoomOrder,
   RoomDmEnvelope,
   RoomDmAckEnvelope,
   DmReply,
@@ -94,9 +93,6 @@ type RoomCtrlEnvelope =
   // Demand gossip between instances, never relayed to clients.
   | { __r: 'want'; member: string; track: string; instance: string; on: boolean }
   | { __r: 'closed' }
-
-/** A lane frame's position: `seq` increases strictly per lane within an incarnation; `timestamp` is authority time. */
-type RoomOrder = { seq: number; timestamp: number }
 
 /** A `LeaveCause` on the wire: no `cause` means the member left on its own. */
 type WireLeaveCause = { cause?: 'removed' | 'disconnected' | 'closed'; reason?: unknown }

@@ -10,7 +10,7 @@ import {
   ROOM_DM_ACK_TIMEOUT_MS,
   ROOM_HEARTBEAT_INTERVAL_MS,
   ROOM_MEMBER_TTL_MS,
-  ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS,
+  ROOM_HORIZON_MS,
   ROOM_TAIL_ATTACH_TIMEOUT_MS,
   ROOM_TAIL_HOLD_CODE_UNITS_MAX,
   ROOM_TAIL_HOLD_MAX,
@@ -639,7 +639,7 @@ describe('Room public behavior', () => {
     const onClose = vi.fn()
     observer.onClose(onClose)
     observer.subscribe(() => {})
-    await vi.advanceTimersByTimeAsync(ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS + 100)
+    await vi.advanceTimersByTimeAsync(ROOM_HORIZON_MS + 100)
     const textSlot = subsOf(observer)._semantic
     expect((await backend.readHead(observer.id))?.state).toBe('open')
     expect({ closed: observer.isClosed, onClose: onClose.mock.calls.length }).toEqual({ closed: false, onClose: 0 })
@@ -650,7 +650,7 @@ describe('Room public behavior', () => {
     const { started } = rejectLaneSubscriptions('inbox', 'persistent inbox subscription failure')
     const outcome = captureOutcome(room.join())
     await started
-    await vi.advanceTimersByTimeAsync(ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS + 100)
+    await vi.advanceTimersByTimeAsync(ROOM_HORIZON_MS + 100)
     expect(outcome.value).toBeInstanceOf(RoomError)
     expect(room.isClosed).toBe(false)
     expect(room.count).toBe(0)
@@ -665,7 +665,7 @@ describe('Room public behavior', () => {
     stub._onPeerBroadcastSubscribe(false)
     const outcome = captureOutcome(observer._replayRetainedText(stub, { all: false, members: [] }))
     await started
-    await vi.advanceTimersByTimeAsync(ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS + 100)
+    await vi.advanceTimersByTimeAsync(ROOM_HORIZON_MS + 100)
     expect(outcome.value).toBeInstanceOf(RoomError)
     expect(observer.isClosed).toBe(false)
   })
@@ -963,7 +963,7 @@ describe('Room public behavior', () => {
     const publishing = member.publish('lost')
     // The member's next publish commits without waiting on the handoff still pending.
     await expect(member.publish('rejected')).resolves.toMatchObject({ seq: expect.any(Number) })
-    await vi.advanceTimersByTimeAsync(ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS)
+    await vi.advanceTimersByTimeAsync(ROOM_HORIZON_MS)
     await expect(publishing).resolves.toMatchObject({ seq: expect.any(Number) })
     expect(report).toHaveBeenCalled()
   })

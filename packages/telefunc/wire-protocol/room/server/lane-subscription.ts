@@ -94,7 +94,7 @@ class LaneSubscription {
   }
 
   /** Exhausted policy keeps demand and holder readiness pending, but drops the dead attempt until the next planning pass. */
-  markLost(): void {
+  dropAttempt(): void {
     this._dropSubscription()
   }
 

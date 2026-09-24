@@ -22,7 +22,7 @@ import type { CommitAccepted, LaneId, RoomHead, StaleCommit, CommitOptions } fro
 import type { RoomConfigRecord, RoomCtrlEnvelope } from '../protocol.js'
 import { RoomError, participantGoneError, roomClosedError } from '../errors.js'
 import { assert } from '../../../utils/assert.js'
-import { ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS } from '../constants.js'
+import { ROOM_HORIZON_MS } from '../constants.js'
 import { reportRoomError } from './errors.js'
 import { memberIdOfCellKey } from './cells.js'
 
@@ -78,7 +78,7 @@ async function commitRoomLane(
       () => true,
       () => false,
     ),
-    ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS,
+    ROOM_HORIZON_MS,
     () => false,
   )
   if (!(await delivered))

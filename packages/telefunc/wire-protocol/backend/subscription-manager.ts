@@ -1,7 +1,7 @@
 export { SubscriptionManager }
 
 import { assert } from '../../utils/assert.js'
-import { createDeferred } from '../../utils/createDeferred.js'
+import { createDeferred, type Deferred } from '../../utils/createDeferred.js'
 import type {
   BackendReceiver,
   BackendSubscription,
@@ -11,7 +11,6 @@ import type {
   SubscriptionState,
 } from './subscription.js'
 
-type ReadinessGeneration = ReturnType<typeof createReadinessGeneration>
 type StateListener = (state: SubscriptionState) => void
 
 type SubscriptionSlotConfig<Source> = {
@@ -106,7 +105,7 @@ class SubscriptionSlot<Source> {
   private readonly _listeners = new Set<StateListener>()
   private _attempt: SubscriptionAttempt | null = null
   private _unobserve: (() => void) | null = null
-  private _readiness: ReadinessGeneration = createReadinessGeneration()
+  private _readiness: Deferred<void> = createReadiness()
   /** The first readiness, settled by the first ready, a stop or an end; a later loss opens a new one. */
   readonly established: Promise<void> = this._readiness.promise.then(
     () => {},
@@ -218,7 +217,7 @@ class SubscriptionSlot<Source> {
     const failure = error instanceof Error ? error : new Error(String(error))
     this._stopPromise ??= this._attempt === null ? Promise.resolve() : this.config.cleanup(this._attempt)
     // A resolved readiness cannot carry the failure, so `ready` read from here on is a fresh, rejected one.
-    if (this._state === 'ready') this._readiness = createReadinessGeneration()
+    if (this._state === 'ready') this._readiness = createReadiness()
     this._transition('closed')
     this._clearCurrent()
     this.config.onEmpty()
@@ -226,7 +225,7 @@ class SubscriptionSlot<Source> {
   }
 
   private _markUnavailable(state: 'establishing' | 'lost'): void {
-    if (this._state === 'ready') this._readiness = createReadinessGeneration()
+    if (this._state === 'ready') this._readiness = createReadiness()
     this._transition(state)
   }
 
@@ -258,7 +257,7 @@ class SubscriptionSlot<Source> {
   }
 }
 
-function createReadinessGeneration() {
+function createReadiness(): Deferred<void> {
   const readiness = createDeferred()
   void readiness.promise.catch(() => {})
   return readiness

@@ -26,12 +26,12 @@ import { TailHold, type TailEntry } from './tail.js'
 import { binaryWantsCovers, emptyBinaryWants, laneTrack, type BinaryFrame, type BinaryWants } from '../binary.js'
 import { DM_FAILURE, RoomError, roomAckError } from '../errors.js'
 import { leaveCauseToWire } from '../model.js'
+import type { OrderingInfo } from '../../ordering-frame.js'
 import {
   decodeDmReply,
   wireDmFromInbox,
   type DmReply,
   type MemberWants,
-  type RoomOrder,
   type ParticipantStubRequest,
   type RoomCtrlEnvelope,
   type RoomDataEnvelope,
@@ -246,11 +246,11 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
     if (hiddenMember === null || this._grantedHidden.has(hiddenMember)) this._sendPublish(wireText)
   }
 
-  _relayAnnouncement(wireText: string, ord: RoomOrder): void {
+  _relayAnnouncement(wireText: string, ord: OrderingInfo): void {
     if (this._announce) this._relayTextLive(ANNOUNCE_KEY, wireText, ord)
   }
 
-  _relayText(serialized: string, wireText: string, from: string, ord: RoomOrder): void {
+  _relayText(serialized: string, wireText: string, from: string, ord: OrderingInfo): void {
     if (this._tail !== null) this._tail.push({ serialized, ord, from })
     else if (this._wantsTextFrom(from)) this._relayTextLive(from, wireText, ord)
   }
@@ -275,7 +275,7 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
       this._sendPublishBinary(encodePublishBinary(framed, info))
   }
 
-  private _relayTextLive(key: string, wireText: string, ord: RoomOrder): void {
+  private _relayTextLive(key: string, wireText: string, ord: OrderingInfo): void {
     if (this._replay.admit(key, ord.seq)) this._sendPublish(wireText)
   }
 
