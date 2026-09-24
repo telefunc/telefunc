@@ -510,10 +510,8 @@ class ServerRoom extends RoomStateView implements Room {
   }
   /** Drops a duplicate; a gap means control events were lost, so the room reconciles. */
   private _acceptControlSeq(seq: number): boolean {
-    const previous = this._controlSeq
-    if (seq <= previous) return false
+    if (seq <= this._controlSeq) return false
     this._controlSeq = seq
-    if (previous !== 0 && seq !== previous + 1) void this._subs.reconcileAuthority().catch(reportRoomError)
     return true
   }
   /** @internal */
@@ -546,7 +544,6 @@ class ServerRoom extends RoomStateView implements Room {
 
   private _applyMemberData(event: RoomDataEnvelope, rawInfo: WirePublishInfo): void {
     this._local.relayText(event, rawInfo)
-    this._subs.healUnknownSender(event.from)
   }
 
   private _relayMemberData(serialized: string, event: RoomDataEnvelope, rawInfo: WirePublishInfo): void {
@@ -569,7 +566,6 @@ class ServerRoom extends RoomStateView implements Room {
     const unframed = decodeBinaryFrame(framed)
     assert(unframed)
     this._local.relayBinary(unframed, rawInfo)
-    this._subs.healUnknownSender(unframed.from)
     if (this._stubs.size > 0) {
       const wireData = encodePublishBinary(framed, rawInfo)
       const track = laneTrack(unframed.track)

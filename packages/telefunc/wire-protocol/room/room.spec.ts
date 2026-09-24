@@ -498,7 +498,7 @@ describe('Room public behavior', () => {
       .map((frame) => (JSON.parse(frame.text) as { __r: string }).__r)
     expect(relayed).toContain('closed')
   })
-  it('reconciles authority after a control gap or same-attempt recovery', async () => {
+  it('reconciles authority after a same-attempt recovery', async () => {
     const room = (await Room.create('control-reconcile')) as ServerRoom
     const backend = getRoomBackend()
     const subscribeLane = backend.subscribeLane.bind(backend)
@@ -528,26 +528,6 @@ describe('Room public behavior', () => {
     transition('ready')
     await vi.waitFor(() => expect(room.count).toBe(1))
     expect((await room.getParticipants()).map(({ id }) => id)).toEqual([member.id])
-    room._state.applyLeave(member.id)
-    expect(room.count).toBe(0)
-    const onControl = (
-      room as unknown as { _onCtrlMessage(message: string, info: { seq: number; timestamp: number }): void }
-    )._onCtrlMessage.bind(room)
-    onControl('{"__r":"update","meta":{},"at":1,"by":"a"}', { seq: 1, timestamp: 1 })
-    onControl('{"__r":"update","meta":{},"at":2,"by":"a"}', { seq: 3, timestamp: 3 })
-    await vi.waitFor(() => expect(room.count).toBe(1))
-    expect((await room.getParticipants()).map(({ id }) => id)).toEqual([member.id])
-  })
-  it('heals roster drift when traffic identifies an unknown sender', async () => {
-    const authority = await Room.create('unknown-sender-reconcile')
-    const member = await authority.join()
-    const observer = (await Room.get(authority.id)) as ServerRoom
-    observer.subscribe(() => {})
-    await observer.getParticipants()
-    observer._state.applyLeave(member.id)
-    expect(observer.count).toBe(0)
-    await member.publish('unknown sender')
-    await vi.waitFor(() => expect(observer.count).toBe(1))
   })
   it('reads authority while the control subscription is establishing', async () => {
     const authority = await Room.create('establishing-roster')

@@ -37,7 +37,7 @@ type SubscriptionHost = {
   /** Read-only here: every change goes through the host's methods. */
   readonly _state: Pick<
     RoomState,
-    'closed' | 'rosterKnown' | 'listenerCount' | 'membershipVersion' | 'getRemote' | 'listMemberIds' | 'memberTracks'
+    'closed' | 'rosterKnown' | 'listenerCount' | 'membershipVersion' | 'listMemberIds' | 'memberTracks'
   >
   _holderWants(): HolderWants
   /** Whether some holder receives the pair: a publisher's own suppressed frames are no demand and need no lane. */
@@ -115,13 +115,6 @@ class RoomSubscriptions {
     const state = this._host._state
     if (state.closed || (state.rosterKnown && this._control.established)) return Promise.resolve()
     return this._refreshMembers()
-  }
-
-  /** Unknown-sender traffic heals an at-most-once roster drift through one single-flight snapshot. */
-  healUnknownSender(from: string): void {
-    const state = this._host._state
-    if (!state.rosterKnown || state.getRemote(from) !== null) return
-    void this._refreshMembers().catch(reportRoomError)
   }
 
   async reconcileAuthority(): Promise<void> {
