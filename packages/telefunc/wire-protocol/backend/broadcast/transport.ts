@@ -2,7 +2,7 @@ export { createBroadcastTransportDriver }
 export type { BroadcastTransport }
 
 import { isOrderingPosition } from '../../ordering-frame.js'
-import type { BroadcastDriver, BroadcastLane, PublishResult } from './contract.js'
+import type { BroadcastDriver, BroadcastRoute, PublishResult } from './contract.js'
 import type { BackendReceiver, SubscriptionAttempt, SubscriptionBinding } from '../subscription.js'
 import { assertUsage } from '../../../utils/assert.js'
 import { isPromise } from '../../../utils/isPromise.js'
@@ -27,22 +27,22 @@ const textDecoder = new TextDecoder()
 
 function createBroadcastTransportDriver(transport: BroadcastTransport): BroadcastDriver {
   return {
-    publish: (lane, payload) => publish(transport, lane, payload),
+    publish: (route, payload) => publish(transport, route, payload),
     subscriptions: {
-      bind: (lane) => bind(transport, lane),
+      bind: (route) => bind(transport, route),
     },
   }
 }
 
 function publish(
   transport: BroadcastTransport,
-  lane: BroadcastLane,
+  route: BroadcastRoute,
   payload: Uint8Array,
 ): PublishResult | Promise<PublishResult> {
   const result =
-    lane.kind === 'text'
-      ? transport.send(lane.key, textDecoder.decode(payload))
-      : transport.sendBinary(lane.key, payload)
+    route.kind === 'text'
+      ? transport.send(route.key, textDecoder.decode(payload))
+      : transport.sendBinary(route.key, payload)
   return isPromise(result) ? result.then(checkMark) : checkMark(result)
 }
 
@@ -54,18 +54,18 @@ function checkMark<Mark extends { seq: number; timestamp: number }>(mark: Mark):
   return mark
 }
 
-function bind(transport: BroadcastTransport, lane: BroadcastLane): SubscriptionBinding {
+function bind(transport: BroadcastTransport, route: BroadcastRoute): SubscriptionBinding {
   return {
-    partition: lane.kind,
-    open: (receiver) => open(transport, lane, receiver),
+    partition: route.kind,
+    open: (receiver) => open(transport, route, receiver),
   }
 }
 
-function open(transport: BroadcastTransport, lane: BroadcastLane, receiver: BackendReceiver): SubscriptionAttempt {
+function open(transport: BroadcastTransport, route: BroadcastRoute, receiver: BackendReceiver): SubscriptionAttempt {
   const stop =
-    lane.kind === 'text'
-      ? transport.listen(lane.key, (payload, info) => receiver(textEncoder.encode(payload), checkMark(info)))
-      : transport.listenBinary(lane.key, (payload, info) => receiver(payload, checkMark(info)))
+    route.kind === 'text'
+      ? transport.listen(route.key, (payload, info) => receiver(textEncoder.encode(payload), checkMark(info)))
+      : transport.listenBinary(route.key, (payload, info) => receiver(payload, checkMark(info)))
   return new TransportAttempt(stop)
 }
 

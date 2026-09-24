@@ -1,6 +1,6 @@
 // The in-process backend, and the reference for Room SPI semantics: this process's clock is authority time.
 
-import type { BroadcastDriver, BroadcastLane, PublishResult } from '../broadcast/contract.js'
+import type { BroadcastDriver, BroadcastRoute, PublishResult } from '../broadcast/contract.js'
 import { broadcastRouteKey } from '../broadcast/route-key.js'
 import type {
   CellMutation,
@@ -33,7 +33,7 @@ type MemoryBackendOptions = {
   state?: MemoryBackendState
 }
 
-type MemorySubscriptionSource = BroadcastLane | RoomSubscriptionSource
+type MemorySubscriptionSource = BroadcastRoute | RoomSubscriptionSource
 
 type Expiring = { expiresAt: number | null }
 type StoredHead = RoomHead & Expiring
@@ -146,9 +146,9 @@ export class MemoryBackend implements BroadcastDriver, RoomDriver {
     }
   }
 
-  publish(lane: BroadcastLane, payload: Uint8Array): PublishResult {
-    const mark = advanceOrder(this.#state.broadcastOrder, lane.key, this.#now())
-    const targets = [...(this.#state.broadcastSubs.get(broadcastRouteKey(lane)) ?? [])]
+  publish(route: BroadcastRoute, payload: Uint8Array): PublishResult {
+    const mark = advanceOrder(this.#state.broadcastOrder, route.key, this.#now())
+    const targets = [...(this.#state.broadcastSubs.get(broadcastRouteKey(route)) ?? [])]
     for (const target of targets) target.deliver(copyBytes(payload), mark)
     return { ...mark, receivers: sumReceiverCounts(targets), meta: { transport: 'in-memory' } }
   }

@@ -9,7 +9,7 @@ import {
 } from './ioredis.js'
 import type {
   BroadcastDriver,
-  BroadcastLane,
+  BroadcastRoute,
   CellMutation,
   CommitResult,
   CxResult,
@@ -69,8 +69,8 @@ export class RedisBackend implements BroadcastDriver, RoomDriver {
     })
   }
 
-  async publish(lane: BroadcastLane, payload: Uint8Array): Promise<PublishResult> {
-    const { seq, timestamp, receivers } = await this._run(REDIS_COMMANDS.publish, { lane, payload })
+  async publish(route: BroadcastRoute, payload: Uint8Array): Promise<PublishResult> {
+    const { seq, timestamp, receivers } = await this._run(REDIS_COMMANDS.publish, { route, payload })
     return { seq, timestamp, ...(this._reportsReceivers ? { receivers } : {}) }
   }
 

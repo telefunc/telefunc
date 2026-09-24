@@ -2,7 +2,7 @@
 
 import {
   encodeLaneKey,
-  type BroadcastLane,
+  type BroadcastRoute,
   type CellMutation,
   type CxResult,
   type HeadCx,
@@ -337,8 +337,8 @@ export const REDIS_COMMANDS = {
     name: 'tfPublish',
     lua: PUBLISH_LUA,
     numberOfKeys: 2,
-    invoke: (prefix, { lane, payload }: { lane: BroadcastLane; payload: Uint8Array }) => ({
-      keys: [broadcastSequenceKey(prefix, lane.key), broadcastChannel(prefix, lane)],
+    invoke: (prefix, { route, payload }: { route: BroadcastRoute; payload: Uint8Array }) => ({
+      keys: [broadcastSequenceKey(prefix, route.key), broadcastChannel(prefix, route)],
       argv: [toBuffer(payload)],
     }),
     parse: (reply) => {

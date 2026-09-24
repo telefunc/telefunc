@@ -1,6 +1,6 @@
 /// <reference types="@cloudflare/workers-types" />
 
-import type { BroadcastDriver, BroadcastLane, PublishResult } from '../../../../backend/broadcast/contract.js'
+import type { BroadcastDriver, BroadcastRoute, PublishResult } from '../../../../backend/broadcast/contract.js'
 import type {
   CellMutation,
   CellSelector,
@@ -88,7 +88,7 @@ export class CloudflareRoomSessionManager {
   }
 }
 
-type CloudflareSubscriptionSource = BroadcastLane | RoomSubscriptionSource
+type CloudflareSubscriptionSource = BroadcastRoute | RoomSubscriptionSource
 
 /** Room reads and commits address the authority straight from the bindings; only a subscription needs its session, from context. */
 export class CloudflareRoomBackend implements BroadcastDriver, RoomDriver {
@@ -104,8 +104,8 @@ export class CloudflareRoomBackend implements BroadcastDriver, RoomDriver {
     }
   }
 
-  publish(lane: BroadcastLane, payload: Uint8Array): Promise<PublishResult> {
-    return this.broadcast.publish(lane, payload)
+  publish(route: BroadcastRoute, payload: Uint8Array): Promise<PublishResult> {
+    return this.broadcast.publish(route, payload)
   }
 
   async readHead(roomId: string): Promise<RoomHead | null> {

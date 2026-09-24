@@ -1,5 +1,5 @@
 export { broadcastRouteKey }
 
-import type { BroadcastLane } from './contract.js'
+import type { BroadcastRoute } from './contract.js'
 
-const broadcastRouteKey = (lane: BroadcastLane) => `${lane.kind}:${encodeURIComponent(lane.key)}`
+const broadcastRouteKey = (route: BroadcastRoute) => `${route.kind}:${encodeURIComponent(route.key)}`

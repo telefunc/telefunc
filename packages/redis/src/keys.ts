@@ -10,7 +10,7 @@
 // Broadcast: <prefix>seq:{key} (sequence) and <prefix>{t|b}:{key} (text/binary channel), one slot per key.
 // Commands take authority time from Redis TIME, never from the caller.
 
-import type { BroadcastLane } from 'telefunc/__internal'
+import type { BroadcastRoute } from 'telefunc/__internal'
 
 export const DEFAULT_PREFIX = 'tf:'
 
@@ -26,9 +26,9 @@ function broadcastTag(key: string): string {
 export function broadcastSequenceKey(prefix: string, key: string): string {
   return `${prefix}seq:${broadcastTag(key)}`
 }
-export function broadcastChannel(prefix: string, lane: BroadcastLane): string {
-  const kind = lane.kind === 'text' ? 't' : 'b'
-  return `${prefix}${kind}:${broadcastTag(lane.key)}`
+export function broadcastChannel(prefix: string, route: BroadcastRoute): string {
+  const kind = route.kind === 'text' ? 't' : 'b'
+  return `${prefix}${kind}:${broadcastTag(route.key)}`
 }
 
 function roomTag(prefix: string, roomId: string): string {

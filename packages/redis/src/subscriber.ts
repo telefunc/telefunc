@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import type {
   BackendReceiver,
-  BroadcastLane,
+  BroadcastRoute,
   Deferred,
   RoomSubscriptionSource,
   SubscriptionAttempt,
@@ -13,7 +13,7 @@ import { broadcastChannel, channelKey, generationInvalidationChannel } from './k
 import { REDIS_DELIVERY_FENCE_BYTE } from './commands.js'
 import type { SubscriberSocket } from './ioredis.js'
 
-type RedisSubscriptionSource = BroadcastLane | RoomSubscriptionSource
+type RedisSubscriptionSource = BroadcastRoute | RoomSubscriptionSource
 
 type RedisSubscriptionDriverOptions = {
   prefix: string
@@ -48,7 +48,7 @@ export class RedisSubscriptionDriver implements SubscriptionDriver<RedisSubscrip
   private readonly _byChannel = new Map<string, Set<RedisSubscriptionAttempt>>()
   private _connection: Connection = { phase: 'idle' }
   private _nextId = 0
-  private _reconciling: Promise<void> = Promise.resolve()
+  private _syncing: Promise<void> = Promise.resolve()
   private _reconnectDelay = RECONNECT_DELAY_MIN_MS
   /** An establishing attempt reports no failure, so the first one of an outage is reported here. */
   private _outageReported = false
@@ -101,7 +101,7 @@ export class RedisSubscriptionDriver implements SubscriptionDriver<RedisSubscrip
       const attempts = this._byChannel.get(channel) ?? new Set()
       this._byChannel.set(channel, attempts.add(attempt))
     }
-    if (this._connection.phase === 'connected') this._reconcile()
+    if (this._connection.phase === 'connected') this._syncChannels()
     else if (this._connection.phase === 'idle') void this._connect()
     return attempt
   }
@@ -112,7 +112,7 @@ export class RedisSubscriptionDriver implements SubscriptionDriver<RedisSubscrip
       attempts?.delete(attempt)
       if (attempts?.size === 0) this._byChannel.delete(channel)
     }
-    if (this._byChannel.size > 0) return this._reconcile()
+    if (this._byChannel.size > 0) return this._syncChannels()
     // Nothing left to deliver to: release the connection until the next subscription.
     this._disconnect()
   }
@@ -143,7 +143,7 @@ export class RedisSubscriptionDriver implements SubscriptionDriver<RedisSubscrip
     }
     if (!this._isCurrent(id)) return
     this._connection = { phase: 'connected', id, socket, subscribed: new Set() }
-    this._reconcile()
+    this._syncChannels()
   }
 
   private _lost(id: number, error: unknown): void {
@@ -175,12 +175,12 @@ export class RedisSubscriptionDriver implements SubscriptionDriver<RedisSubscrip
   }
 
   /** Serialized: brings the connection's channel set to the attempts' and confirms what it covers. */
-  private _reconcile(): void {
-    this._reconciling = this._reconciling.then(async () => {
+  private _syncChannels(): void {
+    this._syncing = this._syncing.then(async () => {
       const connection = this._connection
       if (connection.phase !== 'connected') return
       try {
-        await this._reconcileOnce(connection)
+        await this._syncChannelsOnce(connection)
       } catch (error) {
         // A failed (UN)SUBSCRIBE leaves the channel set unknown: start over on a fresh connection.
         return this._lost(connection.id, error)
@@ -191,7 +191,7 @@ export class RedisSubscriptionDriver implements SubscriptionDriver<RedisSubscrip
     })
   }
 
-  private async _reconcileOnce({ id, socket, subscribed }: Connected): Promise<void> {
+  private async _syncChannelsOnce({ id, socket, subscribed }: Connected): Promise<void> {
     const stale = [...subscribed].filter((channel) => !this._byChannel.has(channel))
     const missing = [...this._byChannel.keys()].filter((channel) => !subscribed.has(channel))
     if (stale.length > 0) {
@@ -203,7 +203,7 @@ export class RedisSubscriptionDriver implements SubscriptionDriver<RedisSubscrip
       if (!this._isCurrent(id)) return
       for (const channel of missing) subscribed.add(channel)
     }
-    // An attempt attached during the SUBSCRIBE above waits for the reconcile it queued.
+    // An attempt attached during the SUBSCRIBE above waits for the sync it queued.
     const covered = [...this._attempts()].filter(
       (attempt) => attempt.awaitsConfirmation() && attempt.channels.every((channel) => subscribed.has(channel)),
     )

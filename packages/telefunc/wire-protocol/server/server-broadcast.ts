@@ -138,7 +138,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
   private _setPeerSubscription(kind: BroadcastKind, on: boolean): void {
     if (on) this._ensureBroadcast()
     this._peerSubscriptions[kind] = on
-    this._reconcileSubscription(kind)
+    this._syncSubscription(kind)
   }
 
   private _ensureBroadcast(): void {
@@ -155,7 +155,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
     this._ensureBroadcast()
     listeners.push(callback)
     try {
-      this._reconcileSubscription(kind)
+      this._syncSubscription(kind)
     } catch (error) {
       listeners.pop()
       throw error
@@ -164,11 +164,11 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
       const index = listeners.indexOf(callback)
       if (index < 0) return
       listeners.splice(index, 1)
-      this._reconcileSubscription(kind)
+      this._syncSubscription(kind)
     }
   }
 
-  private _reconcileSubscription(kind: BroadcastKind): void {
+  private _syncSubscription(kind: BroadcastKind): void {
     if (this._isClosed || (!this._peerSubscriptions[kind] && this._subscribers[kind].length === 0)) {
       this._clearSubscription(kind)
       return
@@ -180,7 +180,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
       else this._deliverBroadcastBinaryMessage(payload, rawInfo)
     })
     this._subscriptions[kind] = subscription
-    // A dead handle would keep the next reconcile from subscribing again.
+    // A dead handle would keep the next sync from subscribing again.
     onSubscriptionEnd(subscription, () => {
       if (this._subscriptions[kind] === subscription) this._subscriptions[kind] = null
     })
@@ -279,11 +279,11 @@ const Broadcast = {
   publish<U = unknown>(key: string, data: ChannelData<U>): PublishResult | Promise<PublishResult> {
     const backend = getBroadcastBackend()
     const serialized = stringify(data)
-    const lane = { key, kind: 'text' } as const
-    return backend.publish(lane, textEncoder.encode(serialized), bufferLimit('text'))
+    const route = { key, kind: 'text' } as const
+    return backend.publish(route, textEncoder.encode(serialized), bufferLimit('text'))
   },
   subscribe<U = unknown>(key: string, callback: BroadcastListener<U>): BroadcastUnsubscribe {
-    return subscribeLane(
+    return subscribeRoute(
       { key, kind: 'text' },
       (payload) => parse(textDecoder.decode(payload)) as ChannelData<U>,
       callback,
@@ -291,23 +291,23 @@ const Broadcast = {
   },
   publishBinary(key: string, data: Uint8Array): PublishResult | Promise<PublishResult> {
     const backend = getBroadcastBackend()
-    const lane = { key, kind: 'binary' } as const
-    return backend.publish(lane, data, bufferLimit('binary'))
+    const route = { key, kind: 'binary' } as const
+    return backend.publish(route, data, bufferLimit('binary'))
   },
   subscribeBinary(key: string, callback: BroadcastBinaryListener): BroadcastUnsubscribe {
-    return subscribeLane({ key, kind: 'binary' }, (payload) => payload, callback)
+    return subscribeRoute({ key, kind: 'binary' }, (payload) => payload, callback)
   },
 }
 
-function subscribeLane<Data>(
-  lane: { key: string; kind: BroadcastKind },
+function subscribeRoute<Data>(
+  route: { key: string; kind: BroadcastKind },
   decode: (payload: Uint8Array) => Data,
   callback: (data: Data, info: ChannelPublishInfo) => unknown,
 ): BroadcastUnsubscribe {
-  const subscription = getBroadcastBackend().subscribe(lane, (payload, info) => {
+  const subscription = getBroadcastBackend().subscribe(route, (payload, info) => {
     invokeChannelListener(
       callback,
-      [decode(payload), makePublishInfo(lane.key, info.seq, info.timestamp)],
+      [decode(payload), makePublishInfo(route.key, info.seq, info.timestamp)],
       reportStaticListenerError,
     )
   })
