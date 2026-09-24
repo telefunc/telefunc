@@ -629,7 +629,7 @@ function binaryListener<CB>(
   const listener = { cb, track: normalizeTrackFilter(opts) }
   assertUsage(
     trackWantsOf([...cbs, listener]).tracks.length <= ROOM_WANTED_TRACKS_MAX,
-    `subscribeBinary() can name at most ${ROOM_WANTED_TRACKS_MAX} tracks per participant, and as many room-wide; subscribe without a track to receive every track`,
+    `subscribeBinary() can name at most ${ROOM_WANTED_TRACKS_MAX} tracks per participant, the default track included, and as many room-wide; subscribe without a track to receive every track`,
   )
   return listener
 }

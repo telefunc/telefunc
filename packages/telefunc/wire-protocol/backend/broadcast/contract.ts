@@ -5,7 +5,7 @@ import type { BackendReceiver, BackendSubscription, SubscriptionDriver } from '.
 /** A Broadcast route; text and binary of one key share one ordering domain. */
 type BroadcastLane = { key: string; kind: 'text' | 'binary' }
 
-/** An accepted publish's position: a positive safe-integer seq and a non-decreasing authority timestamp. */
+/** An accepted publish's position: a positive safe-integer seq and the authority's timestamp. */
 type PublishResult = {
   seq: number
   timestamp: number

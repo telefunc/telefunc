@@ -154,7 +154,7 @@ room.onJoin((member) => {
 
 A member's `publish()` reaches both room-level subscribers (with `from`) and that member's subscribers. By default your own publishes echo back to your side; turn that off per participant with `join({ meta, selfDelivery: false })` (video, where you don't want your own frames back).
 
-**High-frequency updates** (cursors, live reactions) can flood a slow connection. Pass `{ coalesce: key }`, and while a publish with that key is still in flight, newer ones collapse into a single pending send carrying only the latest value:
+**High-frequency updates** (cursors, live reactions) can flood a slow connection. On the client, pass `{ coalesce: key }`, and while a publish with that key is still in flight, newer ones collapse into a single pending send carrying only the latest value (a server publish has no connection to conflate):
 
 ```js
 onCursorMove((pos) => me.publish({ pos }, { coalesce: 'cursor' }))
@@ -169,7 +169,7 @@ type ChatMsg = { kind: 'chat'; text: string }
 const room = await Room.get<ChatMeta, MemberMeta, ChatMsg>(roomId)
 ```
 
-`publish()` and `subscribe()` are now typed to `ChatMsg` end to end, and that same type becomes a runtime contract: a client that sends anything else, an untyped caller or a tampered payload, has its `publish()` rejected with a `ShieldValidationError` before the message reaches a guard, a subscriber, or the room. It's Telefunc's <Link href="/shield">shield</Link>, auto-generated from the type; there's no separate shield to write.
+`publish()` and `subscribe()` are now typed to `ChatMsg` end to end, and that same type becomes a runtime contract: a client that sends anything else, an untyped caller or a tampered payload, has its `publish()` rejected with a `ShieldValidationError` before the message reaches a guard, a subscriber, or the room. It's Telefunc's <Link href="/shield">shield</Link>, auto-generated from the type; there's no separate shield to write. It guards a room, or a `LocalParticipant` of it, that the telefunction returns where its type names `ChatMsg`; a room a client reaches only through a returned `RemoteParticipant` is unshielded, so return the room itself when clients publish to it.
 
 The shield checks shape, not authorization: it guarantees the payload matches the declared type, never that this sender is allowed to send it. Gate who may do what in a guard's `onBeforePublish`, on `identity` (see <Link href="#moderation">Moderation</Link>), and reach for a guard too for the semantic rules a type can't state, like a non-empty body or a length cap.
 
@@ -228,7 +228,7 @@ Each `onBefore*` runs before the operation commits, and rejects the caller — o
 
 Room operations can also reject for expected conditions such as a closed room, a gone participant, or a target that isn't a member. These failures aren't reported as bugs, and their safe message reaches the caller.
 
-<Warning>Guards apply only to the specific instance passed to `Room.guard()`. Attach guards in the telefunction that hands the room to clients; other Room instances are unguarded. Returning a room — or any participant of it — opens that room instance to the client, which can join through it under that instance's guards.</Warning>
+<Warning>Guards apply only to the specific instance passed to `Room.guard()`. Attach guards in the telefunction that hands the room to clients; other Room instances are unguarded. Returning a room, or a `RemoteParticipant` of it, opens that room instance to the client, which can join through it under that instance's guards; a returned `LocalParticipant` opens only that participant.</Warning>
 
 **Kick a participant**, with a reason that arrives with the removal:
 
@@ -304,7 +304,7 @@ Two properties to design around:
 
 ### Binary streams & tracks
 
-`publishBinary()` / `subscribeBinary()` carry raw bytes: canvas deltas, audio snippets, file chunks, small-scale audio/video. Mic, camera, and screen share travel over one member's stream as *named tracks*, several substreams sharing one connection. Publish with `{ track }`; subscribe with `{ track }` to receive only that substream (`{ track: null }` is the default, unnamed track). Attach per-frame `meta` for whatever the decoder needs, a keyframe marker or a timestamp, and read it back on `info.meta`. Track names are limited to 255 UTF-8 bytes and serialized metadata to 65,535 bytes. `subscribeBinary()` can filter by up to 16 different track names on one participant, and up to 16 on the room. The limit counts names, not people: `room.subscribeBinary(cb, { track: 'mic' })` is one name and receives every participant's mic. Without a `track`, you receive every track:
+`publishBinary()` / `subscribeBinary()` carry raw bytes: canvas deltas, audio snippets, file chunks, small-scale audio/video. Mic, camera, and screen share travel over one member's stream as *named tracks*, several substreams sharing one connection. Publish with `{ track }`; subscribe with `{ track }` to receive only that substream (`{ track: null }` is the default, unnamed track). Attach per-frame `meta` for whatever the decoder needs, a keyframe marker or a timestamp, and read it back on `info.meta`. Track names are limited to 255 UTF-8 bytes and serialized metadata to 65,535 bytes. `subscribeBinary()` can filter by up to 16 different tracks on one participant, and up to 16 on the room, the default track (`null`) included. The limit counts names, not people: `room.subscribeBinary(cb, { track: 'mic' })` is one name and receives every participant's mic. Without a `track`, you receive every track:
 
 ```js
 captureAndEncode(camera, (frame, isKey) => me.publishBinary(frame, { track: 'camera', meta: { key: isKey } }))
@@ -322,17 +322,17 @@ me.onDemand((track, wanted) => {
 })
 ```
 
-In-memory, standalone Redis, and Cloudflare report `receivers` because they can prove global absence — on Cloudflare, Room routes are tracked by the Room authority, unlike Broadcast presence in KV — so `0` means nobody anywhere. A positive value counts backend delivery routes, not end viewers. Redis Cluster omits the field because a node-local count cannot prove global absence. Use `onDemand` to pause and resume portably.
+In-memory, standalone Redis, and Cloudflare report `receivers` because they can prove global absence, so `0` means nobody anywhere. A positive value counts backend delivery routes, not end viewers. Redis Cluster omits the field because a node-local count cannot prove global absence. Use `onDemand` to pause and resume portably.
 
 Across nodes, `onDemand` is eventually consistent, so a viewer on another node can take a moment to appear. Treat `wanted === false` as a pause/resume signal, not a real-time interlock.
 
-**Seed late subscribers with a keyframe.** A subscriber that joins mid-stream can't apply your deltas until it gets a keyframe. Mark keyframes `{ retain: true }` and the server keeps the last one per track, replaying it before any live frame to each client or server instance that starts subscribing to it:
+**Seed late subscribers with a keyframe.** A subscriber that joins mid-stream can't apply your deltas until it gets a keyframe. Mark keyframes `{ retain: true }` and the server keeps the last one per track, replaying it to each client or server instance that starts subscribing to it:
 
 ```js
 me.publishBinary(keyframe, { track: 'camera', meta: { key: true }, retain: true }) // kept for late joiners
 ```
 
-`{ retain: true }` works the same on `publish()`: the server keeps the last retained text message and hands it to late subscribers, the current state a joiner needs (a game phase, a pinned notice). A joiner gets that frame exactly once, ordered ahead of the live stream it seeds, and never behind newer state that already reached it; listeners added later on the same client or instance share that stream and get no second copy. Last write wins per lane. A retained message clears when a newer retained message on its lane replaces it, when its publisher leaves or is removed while they still own it, or when the room closes. Retained text is the room's one last message, a single slot; retained binary is per publisher and track. For room-level state meant to outlive any member, such as a pinned notice or a game phase, publish it from a hidden participant, which stays until you close the room. Neither expires on a timer, like MQTT retained messages. Every frame carries `info.seq` and `info.timestamp`, preserved on replay, so a retained frame keeps its real place in the order instead of a fresh stamp.
+`{ retain: true }` works the same on `publish()`: the server keeps the last retained text message and hands it to late subscribers, the current state a joiner needs (a game phase, a pinned notice). A joiner gets that frame exactly once, ordered ahead of the live stream it seeds, and never behind a newer frame of the same publisher (and, for binary, the same track) that already reached it; listeners added later on the same client or instance share that stream and get no second copy. Last write wins per lane. A retained message clears when a newer retained message on its lane replaces it, when its publisher leaves or is removed while they still own it, or when the room closes. Retained text is the room's one last message, a single slot; retained binary is per publisher and track. For room-level state meant to outlive any member, such as a pinned notice or a game phase, publish it from a hidden participant, which stays until you close the room. Neither expires on a timer, like MQTT retained messages. Every frame carries `info.seq` and `info.timestamp`, preserved on replay, so a retained frame keeps its real place in the order instead of a fresh stamp.
 
 <Warning>Rooms move binary over the same reliable, ordered transport as text (WebSocket or SSE). That is right for binary *data* and for small or controlled-network A/V. It lacks what large-scale live video needs (congestion control, simulcast, jitter buffering). For production multi-party video, pair Rooms (presence, chat, signaling) with a WebRTC SFU for media. A lower-latency, unreliable media lane is tracked in [telefunc#449](https://github.com/telefunc/telefunc/issues/449).</Warning>
 
@@ -340,7 +340,7 @@ me.publishBinary(keyframe, { track: 'camera', meta: { key: true }, retain: true 
 
 Rooms deliver *live* messages; history belongs in your database, where retention, search, and pagination are your rules. Store each message as it's published, then load history and go live in one call.
 
-**Store** in the `onAfterPublish` hook. It runs once per message, on the server, after the message is sequenced, so it carries the verified sender and the message's authoritative order (`info.seq`, `info.timestamp`):
+**Store** in the `onAfterPublish` hook. It runs once per message, and once per binary frame with its bytes as `message`, on the server, after the message is sequenced, so it carries the verified sender and the message's authoritative order (`info.seq`, `info.timestamp`):
 
 ```js
 // Chat.telefunc.js (server)
@@ -453,7 +453,7 @@ onPointerMove((pos) => me.publish({ cursor: pos }, { coalesce: 'cursor' }))
 board.subscribe((d, _i, from) => d.cursor && drawCursor(from.id, from.meta.color, d.cursor))
 ```
 
-A new participant subscribing to the board gets the retained keyframe before any live delta, so it renders the current canvas immediately with nothing extra to wire up.
+A new participant subscribing to the board gets the retained keyframe and renders the current canvas right away with nothing extra to wire up, unless a newer delta reached it first; then it renders from the next keyframe.
 
 For **team chat with subgroups**, give each team, breakout, or private thread its own room (a telefunction can return several at once, e.g. `team` and `team:red`); each has its own membership and guards, so a message never leaks across the boundary.
 
@@ -518,7 +518,7 @@ type RoomGetOptions = {
 | `onParticipantUpdate(cb)` | Any member's metadata changed: `(member, meta, prev)`. |
 | `onUpdate(cb)` | The room's own metadata changed: `(meta, prev)`. |
 | `onAnnounce(cb)` | A room-authored announcement arrived. Works without `subscribe()`. |
-| `onEmpty(cb)` / `onClose(cb)` | The last participant left / the room closed. |
+| `onEmpty(cb)` / `onClose(cb)` | The last participant left / the room closed (on the client, also when its connection is gone). |
 | `onChange(cb)` / `snapshot()` | One change signal plus immutable view: the `useSyncExternalStore` pair. |
 
 State getters: `id`, `meta`, `count`, `isEmpty`, `isClosed`. Counts and presence reflect real players only; off-presence participants are read separately with `getParticipants({ hidden: true })`.
@@ -529,10 +529,10 @@ Your own handle, from `join()`. Room-wide messages arrive on the room and each `
 
 | Method | Description |
 |---|---|
-| `publish(data, { coalesce?, retain? }?)` | Publish to the whole room. `coalesce` conflates a same-key burst; `retain` keeps it as the room's last message for late subscribers. |
+| `publish(data, { coalesce?, retain? }?)` | Publish to the whole room. `coalesce` conflates a same-key burst on the client; `retain` keeps it as the room's last message for late subscribers. |
 | `publishBinary(data, { track?, meta?, retain? }?)` | Publish raw binary. `retain` keeps the last frame per track for late subscribers. When present, `receivers` counts backend delivery routes; `0` proves nobody anywhere, while Redis Cluster omits the field. |
 | `send(to, data)` | Private message to one participant (or their id). Resolves with the receipt `{ seq, timestamp }` (best-effort). |
-| `send(to, data, { ack: true })` | Confirmed send: waits up to 60 seconds for the recipient's `listen` handler and resolves with `{ response, seq, timestamp }`, rejecting on timeout, recipient leave, or pre-listener inbox overflow — or with the handler's `Abort` (a plain throw is hidden as a bug). |
+| `send(to, data, { ack: true })` | Confirmed send: waits up to 60 seconds for the recipient's `listen` handler and resolves with `{ response, seq, timestamp }`, rejecting on timeout, recipient leave, pre-listener inbox overflow, or a recipient that removed every `listen` handler — or with the handler's `Abort` (a plain throw is hidden as a bug). |
 | `listen(cb)` | Receive private messages: `(data, from)`, `from` is `null` for room-authored. Return a value to reply to a `send(…, { ack: true })` sender; `throw Abort(value)` to reject them with it. |
 | `setMeta(meta)` / `setAttributes(partial)` | Replace / merge your metadata. |
 | `onDemand(cb)` | `(track, wanted)` when a track of yours goes watched or unwatched; `wanted === false` means nobody watching. |

@@ -72,7 +72,7 @@ type RoomSendReceipt = { seq: number; timestamp: number }
 /** A delivered-message receipt plus the recipient listener's response. */
 type RoomAckReceipt = RoomSendReceipt & { response: unknown }
 
-/** Runs after a room-wide publish commits; throwing cannot undo delivery. */
+/** Runs after a room-wide text or binary publish commits (`data` is a binary frame's bytes); throwing cannot undo delivery. */
 type AfterPublishHook<P extends ParticipantMeta = ParticipantMeta> = (
   from: Sender<P>,
   data: unknown,
