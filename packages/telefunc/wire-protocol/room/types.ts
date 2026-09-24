@@ -169,7 +169,7 @@ type PublishOptions = {
 
 /** Publish-side binary options. */
 type BinaryPublishOptions = {
-  /** Named substream (≤ 255 UTF-8 bytes) — subscribers can filter by it. Default: the default track. */
+  /** Named substream (≤ 255 UTF-8 bytes). Subscribers can filter by it. Default: the default track. */
   track?: string
   /** Per-frame metadata surfaced as `info.meta` (≤ 65,535 bytes serialized). */
   meta?: Record<string, unknown>
@@ -216,7 +216,7 @@ type Room<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = Participant
   onParticipantUpdate(callback: (member: RemoteParticipant<P, Pub>, meta: P, prev: P) => void): () => void
   /** The room's metadata was replaced (`Room.setMeta()`) or merged (`Room.setAttributes()`). */
   onUpdate(callback: (meta: M, prev: M) => void): () => void
-  /** A room-authored message arrived (`Room.announce()`) — e.g. system notices. */
+  /** A room-authored message arrived (`Room.announce()`), e.g. system notices. */
   onAnnounce(callback: (data: unknown, info: ChannelPublishInfo) => void): () => void
   /** The last participant left. */
   onEmpty(callback: () => void): () => void
@@ -240,7 +240,7 @@ type ClientRoom<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = Parti
 type LocalParticipant<P extends ParticipantMeta = ParticipantMeta, Pub = unknown> = {
   readonly id: string
   readonly meta: P
-  /** The app identity this membership was joined with — `null` when none was set. */
+  /** The app identity this membership was joined with (`null` when none was set). */
   readonly identity: string | null
   /** Whether the messages you publish are delivered back to the room object on your side. Set at `join()`. */
   readonly selfDelivery: boolean
@@ -265,7 +265,7 @@ type LocalParticipant<P extends ParticipantMeta = ParticipantMeta, Pub = unknown
   setAttributes(attributes: Partial<P>): Promise<void>
 
   leave(): Promise<void>
-  /** You left. `cause.type` says how — `'left'` (you), `'removed'` (kicked, with the kick's `reason`), `'closed'` (the room), `'disconnected'` (the connection died). */
+  /** You left. `cause.type` says how: `'left'` (you), `'removed'` (kicked, with the kick's `reason`), `'closed'` (the room), `'disconnected'` (the connection died). */
   onLeave(callback: (cause: LeaveCause) => void): () => void
 } & RoomShield<Pub>
 

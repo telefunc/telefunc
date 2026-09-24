@@ -70,7 +70,7 @@ const DM_FAILURE = {
   left: { ok: false, err: PARTICIPANT_LEFT },
   noListener: { ok: false, err: 'No participant inbox listener is attached' },
   overflow: { ok: false, err: 'Inbox overflowed before the message was handled' },
-  timeout: { ok: false, err: 'send({ ack: true }) timed out — the recipient never handled the message' },
+  timeout: { ok: false, err: 'send({ ack: true }) timed out: the recipient never handled the message' },
   roomClosed: { ok: false, err: 'Room is closed' },
   // An ack response isn't decoded in the receive turn like a frame, so a malformed one fails only its DM.
   malformedReply: { ok: false, err: 'Malformed DM reply' },

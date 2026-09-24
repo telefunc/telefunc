@@ -24,7 +24,7 @@ import type {
   RoomSnapshotView,
   Sender,
 } from './types.js'
-// RoomState — the local view of a room, driven by the event stream
+// RoomState: the local view of a room, driven by the event stream
 /** A binary listener's track filter: `undefined` = every track, `null` = the default lane only, a name = that track only. */
 type TrackFilter = string | null | undefined
 type MemberEntry = {
@@ -32,11 +32,11 @@ type MemberEntry = {
   meta: ParticipantMeta
   joinedAt: number
   identity: string | null
-  /** Latest applied meta revision — stale and echoed `p-meta` events are absorbed. */
+  /** Latest applied meta revision. Stale and echoed `p-meta` events are absorbed. */
   metaSeq: number
-  /** Named tracks the member is known to publish — grown by `track` events and rosters, never shrunk (tracks live as long as the member). Drives all-track key subscriptions. */
+  /** Named tracks the member is known to publish, grown by `track` events and rosters, never shrunk (tracks live as long as the member). Drives all-track key subscriptions. */
   tracks: Set<string>
-  /** An off-presence participant — a member for routing/discovery, excluded from every presence read (`count`, `snapshot`, `onJoin`/`onLeave`/`onEmpty`). Any number per room. */
+  /** An off-presence participant: a member for routing/discovery, excluded from every presence read (`count`, `snapshot`, `onJoin`/`onLeave`/`onEmpty`). Any number per room. */
   hidden: boolean
   remote: RemoteParticipant | null
   left: boolean
@@ -52,14 +52,14 @@ type MemberEntry = {
 type RoomStateOptions = {
   roomId: string
   meta: RoomMeta
-  /** Either the authoritative roster, or just its member count — a lazy view seeds with `{ count }` and learns the members from its first `reconcile()` (KV read / streamed roster). */
+  /** Either the authoritative roster, or just its member count. A lazy view seeds with `{ count }` and learns the members from its first `reconcile()` (KV read / streamed roster). */
   seed: { members: MemberSnapshot[] } | { count: number }
   /** The LWW stamp of the config `meta` was read from (see `applyRoomUpdate`). */
   updateStamp: { at: number; by: string }
   closed?: boolean
-  /** Fired whenever the number of attached listeners changes — lets the owner (de)activate its event source (adapter subscription, wire subscription). */
+  /** Fired whenever the number of attached listeners changes. Lets the owner (de)activate its event source (adapter subscription, wire subscription). */
   onListenersChanged: () => void
-  /** A user callback threw — the owner decides how to report it. */
+  /** A user callback threw. The owner decides how to report it. */
   onCallbackError: (err: unknown) => void
   /** Every leave, from an event or a reconciled roster, after this view's callbacks; `hidden` is null for a member
    *  this view didn't know. A leave with no cause had no event. */
@@ -70,7 +70,7 @@ type RemoteBacking = { state: RoomState; entry: MemberEntry }
 const { remoteBackings } = getGlobalObject('wire-protocol/room/state.ts', () => ({
   remoteBackings: new WeakMap<object, RemoteBacking>(),
 }))
-/** The `RoomState` backing of a minted `RemoteParticipant` — `null` for anything else. */
+/** The `RoomState` backing of a minted `RemoteParticipant` (`null` for anything else). */
 function remoteBacking(value: unknown): RemoteBacking | null {
   return typeof value === 'object' && value !== null ? (remoteBackings.get(value) ?? null) : null
 }
@@ -131,14 +131,14 @@ abstract class RoomStateView {
 /** A room's local view and callbacks, shared by server and client. A `join` for a known member or a `leave` for an
  *  unknown one is a no-op, so a snapshot and a concurrent event stream compose without double-firing. */
 class RoomState {
-  /** @internal — the owning `ServerRoom`/`ClientRoom`, for serialization backing. */
+  /** @internal The owning `ServerRoom`/`ClientRoom`, for serialization backing. */
   _owner: RoomStateView | null = null
   readonly roomId: string
   meta: RoomMeta
   closed: boolean
-  /** Bumped on every membership change — guards async KV reconciles against going stale. */
+  /** Bumped on every membership change. Guards async KV reconciles against going stale. */
   membershipVersion = 0
-  /** Bumped on every observable change (membership, participant meta, room config, closure) — drives `onChange`/`snapshot()` cache invalidation. */
+  /** Bumped on every observable change (membership, participant meta, room config, closure). Drives `onChange`/`snapshot()` cache invalidation. */
   private _stateVersion = 0
   private _snapshotCache: { version: number; value: WeakRef<RoomSnapshotView> } | null = null
   private readonly _listenerCleanups = new Map<object, Set<() => void>>()
@@ -208,7 +208,7 @@ class RoomState {
   get wantsAnnounce(): boolean {
     return this._announceCbs.length > 0
   }
-  /** Which (member, track) binary streams this holder needs delivered — drives the wire/adapter subscriptions on both sides (client declares it, server aggregates it per stub). */
+  /** Which (member, track) binary streams this holder needs delivered. Drives the wire/adapter subscriptions on both sides (client declares it, server aggregates it per stub). */
   binaryWants(): BinaryWants {
     const members: Record<string, TrackWants> = Object.create(null)
     for (const entry of this._members.values()) {
@@ -221,12 +221,12 @@ class RoomState {
     const entry = this._members.get(id)
     return entry ? { meta: entry.meta, seq: entry.metaSeq } : null
   }
-  /** Named tracks the member is known to publish — `[]` for unknown members. */
+  /** Named tracks the member is known to publish (`[]` for unknown members). */
   memberTracks(id: string): string[] {
     const entry = this._members.get(id)
     return entry ? [...entry.tracks] : []
   }
-  /** Whether this member is off-presence (`join({ hidden: true })`) — `false` for unknown members. */
+  /** Whether this member is off-presence (`join({ hidden: true })`). `false` for unknown members. */
   isHidden(id: string): boolean {
     return this._members.get(id)?.hidden === true
   }
@@ -246,7 +246,7 @@ class RoomState {
   listVisible(): RemoteParticipant[] {
     return [...this._members.values()].filter((entry) => !entry.hidden).map((entry) => this._remote(entry))
   }
-  /** Member IDs currently known — drives the per-member binary key subscriptions. */
+  /** Member IDs currently known. Drives the per-member binary key subscriptions. */
   listMemberIds(): string[] {
     return [...this._members.keys()]
   }
@@ -305,13 +305,13 @@ class RoomState {
   onAnnounce(cb: (data: unknown, info: ChannelPublishInfo) => void): () => void {
     return this._register(this._announceCbs, cb)
   }
-  /** A member published its first frame on a new named track (idempotent — echoes, rosters, and the owner's local apply all land here). */
+  /** A member published its first frame on a new named track (idempotent: echoes, rosters, and the owner's local apply all land here). */
   applyTrack(id: string, track: string): void {
     const entry = this._members.get(id)
     if (entry) entry.tracks.add(track)
     else this._markUnknownMember()
   }
-  /** Immutable view of the whole room — cached by state version, so the reference is stable until something actually changes (the `useSyncExternalStore` contract). */
+  /** Immutable view of the whole room, cached by state version, so the reference is stable until something actually changes (the `useSyncExternalStore` contract). */
   snapshot(): RoomSnapshotView {
     const cached = this._snapshotCache?.version === this._stateVersion ? this._snapshotCache.value.deref() : undefined
     if (cached) return cached
@@ -331,7 +331,7 @@ class RoomState {
     this._snapshotCache = { version: this._stateVersion, value: new WeakRef(value) }
     return value
   }
-  /** State changed observably — invalidate the snapshot and tell `onChange` subscribers. */
+  /** State changed observably: invalidate the snapshot and tell `onChange` subscribers. */
   private _bumpState(): void {
     this._stateVersion++
     this._fireAll(this._changeCbs)
@@ -384,7 +384,7 @@ class RoomState {
     if (entry.hidden) return
     if (this.count === 0) this._fireAll(this._emptyCbs)
   }
-  /** Applies only revisions newer than the entry's — the origin's echo (same seq) and events arriving behind a fresher reconcile are absorbed. */
+  /** Applies only revisions newer than the entry's: the origin's echo (same seq) and events arriving behind a fresher reconcile are absorbed. */
   applyParticipantMeta(id: string, meta: ParticipantMeta, seq: number): void {
     const entry = this._members.get(id)
     if (!entry) return this._markUnknownMember()
@@ -411,7 +411,7 @@ class RoomState {
   get updateStamp(): { at: number; by: string } {
     return this._updateStamp
   }
-  /** Room closed: member-level cleanup callbacks run (decoders etc.), then `onClose`. Room-level `onLeave`/`onEmpty` intentionally don't fire — `onClose` is the signal. */
+  /** Room closed: member-level cleanup callbacks run (decoders etc.), then `onClose`. Room-level `onLeave`/`onEmpty` intentionally don't fire: `onClose` is the signal. */
   applyClosed(cause: LeaveCause = { type: 'closed' }): void {
     if (this.closed) return
     cause = ownLeaveCause(cause)

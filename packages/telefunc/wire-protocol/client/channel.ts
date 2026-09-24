@@ -621,7 +621,7 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
     return hasProp(value, CLIENT_BROADCAST_BRAND)
   }
 
-  /** @internal — register a local listener without changing wire intent. */
+  /** @internal Register a local listener without changing wire intent. */
   _subscribeLocal<K extends BroadcastKind>(kind: K, callback: BroadcastListeners<T>[K][number]): () => void {
     const listeners = this._subscribers[kind] as Array<typeof callback>
     listeners.push(callback)
@@ -631,7 +631,7 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
     }
   }
 
-  /** @internal — declare wire intent; a reconnect carries it in the RECONCILE entry. */
+  /** @internal Declare wire intent; a reconnect carries it in the RECONCILE entry. */
   _setWireSubscribed(kind: BroadcastKind, on: boolean): void {
     if (on === this._wire[kind] || this._isClosed) return
     this._wire[kind] = on

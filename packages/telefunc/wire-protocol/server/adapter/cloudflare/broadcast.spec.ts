@@ -435,7 +435,7 @@ describe('cloudflare broadcast routing', () => {
     installCloudflareTransport(transport)
     await inSession(createMember(transport), async () => {
       const room = new ServerBroadcast<{ text: string }>({ key: 'room:test' })
-      // subscribe() records presence at the authority — publish should wait for it
+      // subscribe() records presence at the authority: publish should wait for it
       room.subscribe(() => {})
       room.publish({ text: 'hello' })
       await flushMicrotasks(2)

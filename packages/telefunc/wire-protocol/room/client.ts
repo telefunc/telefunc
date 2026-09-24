@@ -57,7 +57,7 @@ function heldMemberOf(event: RoomEnvelope | RoomDmEnvelope | RoomRosterEvent | R
   }
 }
 
-/** One awaiter of a conflated publish — resolved with the winning send's receipt (see `_drainCoalesce`). */
+/** One awaiter of a conflated publish, resolved with the winning send's receipt (see `_drainCoalesce`). */
 type CoalesceWaiter = { resolve: (ack: ChannelPublishAck) => void; reject: (err: unknown) => void }
 type ParticipantMutationRequest = Extract<ParticipantStubRequest, { __r: 'req-dm' | 'req-set-meta' | 'req-set-attrs' }>
 type WantsDeclaration = Extract<RoomStubRequest, { __r: 'sub-text' | 'sub-binary' }>
@@ -82,7 +82,7 @@ class ClientRoom extends RoomStateView implements Room {
     'sub-text': JSON.stringify({ __r: 'sub-text', members: [], announce: false }),
     'sub-binary': JSON.stringify({ __r: 'sub-binary', wants: emptyBinaryWants() }),
   }
-  /** Settled by the replayable initial roster response (or wire death) — gates `getParticipants()`. */
+  /** Settled by the replayable initial roster response (or wire death). Gates `getParticipants()`. */
   private readonly _roster = createDeferred()
 
   constructor(stub: ClientBroadcast, snapshot: RoomSnapshotMetadata) {
@@ -104,10 +104,10 @@ class ClientRoom extends RoomStateView implements Room {
       this._roster.resolve()
     }
 
-    // Delivery handlers are local-only — what the server relays is driven by the declared wants: control always arrives, text while subscribed, binary per `sub-binary`.
+    // Delivery handlers are local-only. What the server relays is driven by the declared wants: control always arrives, text while subscribed, binary per `sub-binary`.
     stub._subscribeLocal('text', (envelope, info) => this._onEnvelope(envelope, info))
     stub._subscribeLocal('binary', (framed, info) => this._onBinaryFrame(framed, info))
-    // Wire death — the network gave up or the stub was GC'd. (A server `Room.close()` arrives as the `closed` ctrl event before the stub shuts down, so it takes the 'closed' path.)
+    // Wire death: the network gave up or the stub was GC'd. (A server `Room.close()` arrives as the `closed` ctrl event before the stub shuts down, so it takes the 'closed' path.)
     stub.onClose(() => this._applyClosed('disconnected'))
     // A backend rejection can arrive before the application asks for the roster. Mark it handled here while preserving the original rejection for each later getter.
     void this._roster.promise.catch(() => {})
@@ -116,7 +116,7 @@ class ClientRoom extends RoomStateView implements Room {
   async join(options?: JoinOptions): Promise<LocalParticipant> {
     assertUsage(
       options?.identity === undefined,
-      'join() options.identity is server-assigned: identity is trusted, so set it where trust lives — in the granting telefunction (server-side join()), not on the client.',
+      'join() options.identity is server-assigned: identity is trusted, so set it where trust lives, in the granting telefunction (server-side join()), not on the client.',
     )
     assertUsage(
       options?.hidden === undefined,
@@ -125,7 +125,7 @@ class ClientRoom extends RoomStateView implements Room {
     const { meta, selfDelivery } = normalizeJoinOptions(options)
     this._pendingJoins++
     try {
-      // A rejected join (guard `Abort`, or a `RoomError` like a closed room) rejects this request natively via the channel ack — no envelope to unwrap.
+      // A rejected join (guard `Abort`, or a `RoomError` like a closed room) rejects this request natively via the channel ack. No envelope to unwrap.
       const { id, joinedAt } = (await this._request({ __r: 'req-join', meta, selfDelivery })) as {
         id: string
         joinedAt: number
@@ -166,7 +166,7 @@ class ClientRoom extends RoomStateView implements Room {
     if (!this._state.rosterKnown) await this._roster.promise
   }
 
-  /** @internal — sync view read for sender resolution (delivery must not wait on I/O). */
+  /** @internal Sync view read for sender resolution (delivery must not wait on I/O). */
   _getRemote(id: string): RemoteParticipant | null {
     return this._state.getRemote(id)
   }
@@ -186,22 +186,22 @@ class ClientRoom extends RoomStateView implements Room {
     void this._stub.send({ __r: 'dm-reply', id, ackId, reply }, { ack: false }).catch(() => {})
   }
 
-  /** @internal — revival of a serialized `RemoteParticipant` (see `roomRemoteReviver`). */
+  /** @internal Revival of a serialized `RemoteParticipant` (see `roomRemoteReviver`). */
   _reviveRemote(snap: MemberSnapshot): RemoteParticipant {
     return this._state.ensureRemoteFromSnapshot(snap)
   }
 
-  // The roster streams in right behind the response — its arrival is an onChange.
+  // The roster streams in right behind the response. Its arrival is an onChange.
   snapshot(): RoomSnapshotView {
     return this._state.snapshot()
   }
 
-  /** @internal — an ack-bearing stub request. Resolves with the handler's raw return, or rejects natively (the channel rebuilds an `AbortError`/`Error` from the ack status) — no envelope. */
+  /** @internal An ack-bearing stub request. Resolves with the handler's raw return, or rejects natively (the channel rebuilds an `AbortError`/`Error` from the ack status). No envelope. */
   _request(req: RoomStubRequest): Promise<unknown> {
     return this._stub.send(req, { ack: true })
   }
 
-  /** @internal — the envelope sent upward is a claim: the server validates `from` against this stub's members and stamps the verified `fromMeta` itself before anything reaches the room. */
+  /** @internal The envelope sent upward is a claim: the server validates `from` against this stub's members and stamps the verified `fromMeta` itself before anything reaches the room. */
   async _publishText(from: string, data: unknown, retain?: boolean): Promise<ChannelPublishAck> {
     return await this._stub.publish({
       __r: 'data',
@@ -216,7 +216,7 @@ class ClientRoom extends RoomStateView implements Room {
     return await this._stub.publishBinary(framed)
   }
 
-  /** @internal — a local participant completed its voluntary leave. */
+  /** @internal A local participant completed its voluntary leave. */
   _dropParticipant(id: string): void {
     this._localParticipants.delete(id)
     this._state.applyLeave(id) // the relayed event is absorbed
@@ -265,7 +265,7 @@ class ClientRoom extends RoomStateView implements Room {
         this._localParticipants.get(event.member)?._onDemand(event.track, event.wanted)
         return
       case 'dm': {
-        // Relayed from this member's private inbox — only its own stub ever receives it.
+        // Relayed from this member's private inbox: only its own stub ever receives it.
         const local = this._localParticipants.get(event.to)
         if (local) this._deliverDm(local, inboxMessageFromWire(event))
         else if (event.ackId) this._replyDm(event.to, event.ackId, DM_FAILURE.left)
@@ -295,7 +295,7 @@ class ClientRoom extends RoomStateView implements Room {
     this._roster.resolve()
   }
 
-  /** @internal — apply an accepted member meta (event or own write's ack) and mirror it into a local participant. */
+  /** @internal Apply an accepted member meta (event or own write's ack) and mirror it into a local participant. */
   _acceptParticipantMeta(id: string, accepted: AcceptedMeta): void {
     this._state.applyParticipantMeta(id, accepted.meta, accepted.seq)
     this._localParticipants.get(id)?._acceptMeta(accepted)
@@ -319,7 +319,7 @@ class ClientRoom extends RoomStateView implements Room {
     const text = state.textWants()
     this._stub._setWireSubscribed('text', text.all)
 
-    // A room-level text subscription supersedes the member set — clear it server-side.
+    // A room-level text subscription supersedes the member set, so clear it server-side.
     this._declare({ __r: 'sub-text', members: text.all ? [] : text.members, announce: state.wantsAnnounce })
     this._declare({ __r: 'sub-binary', wants: state.binaryWants() })
   }
@@ -336,7 +336,7 @@ class ClientRoom extends RoomStateView implements Room {
 /** Client participant; server-side echo suppression leaves `selfDelivery`
  * as a public read-only flag here. */
 abstract class ClientParticipantBase extends ParticipantBase {
-  /** Per-key conflation state for `publish(data, { coalesce })` — at most one in-flight send per key; while it's in flight the newest value waits in `pending` and supersedes any earlier one. */
+  /** Per-key conflation state for `publish(data, { coalesce })`: at most one in-flight send per key; while it's in flight the newest value waits in `pending` and supersedes any earlier one. */
   private readonly _coalescers = new Map<
     string,
     { sending: boolean; pending: { data: unknown; retain?: boolean; waiters: CoalesceWaiter[] } | null }
@@ -352,7 +352,7 @@ abstract class ClientParticipantBase extends ParticipantBase {
     super(id, meta, selfDelivery, identity)
   }
 
-  /** The actual wire publish — each flavor supplies it; `publish()` wraps it with conflation. */
+  /** The actual wire publish. Each flavor supplies it; `publish()` wraps it with conflation. */
   protected abstract _sendPublish(data: unknown, retain?: boolean): Promise<ChannelPublishAck>
 
   publish(data: unknown, options?: PublishOptions): Promise<ChannelPublishAck> {
@@ -421,12 +421,12 @@ abstract class ClientParticipantBase extends ParticipantBase {
   }
 }
 
-/** `LocalParticipant` returned by `ClientRoom.join()` — operates through the room's stub. */
+/** `LocalParticipant` returned by `ClientRoom.join()`. Operates through the room's stub. */
 class ClientRoomParticipant extends ClientParticipantBase {
   private readonly _room: ClientRoom
 
   constructor(clientRoom: ClientRoom, id: string, meta: ParticipantMeta, selfDelivery: boolean) {
-    // Client-side joins carry no identity — it's server-assigned (see JoinOptions.identity).
+    // Client-side joins carry no identity: it's server-assigned (see JoinOptions.identity).
     super(id, meta, selfDelivery, null, (request) => clientRoom._request({ ...request, id } as RoomStubRequest))
     this._room = clientRoom
   }
@@ -457,7 +457,7 @@ class ClientRoomParticipant extends ClientParticipantBase {
   }
 }
 
-/** `LocalParticipant` revived from a serialized `ServerLocalParticipant` — owns its stub channel. */
+/** `LocalParticipant` revived from a serialized `ServerLocalParticipant`. Owns its stub channel. */
 class ClientStandaloneParticipant extends ClientParticipantBase {
   private readonly _channel: ClientChannel
   private readonly _request: (req: ParticipantStubRequest) => Promise<unknown>
@@ -477,7 +477,7 @@ class ClientStandaloneParticipant extends ClientParticipantBase {
         case 'demand':
           return this._onDemand(msg.track, msg.wanted)
         case 'dm':
-          // An ack DM replies through the channel's own ack — the handler's return rides it home.
+          // An ack DM replies through the channel's own ack: the handler's return rides it home.
           if (msg.ackId) return this._deliverMessageAck(inboxMessageFromWire(msg))
           return this._deliverMessage(inboxMessageFromWire(msg))
         case 'left':

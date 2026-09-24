@@ -145,11 +145,11 @@ function Room() {
           received.push({ text: (data as { text: string }).text, from: from.meta.name })
         })
 
-        // Joined server-side — arrives as a standalone participant with its own stub channel.
+        // Joined server-side: arrives as a standalone participant with its own stub channel.
         const me = await onJoinAsServer(roomId, 'Bob')
         await me.publish({ text: 'from-bob' })
         await me.setMeta({ name: 'Bobby' })
-        // Live handle (meta stays fresh); retry — the join event may still be in flight.
+        // Live handle (meta stays fresh); retry (the join event may still be in flight).
         const remoteMe = await getParticipantWhenJoined(observer, me.id)
 
         const ally = await observer.join({ meta: { name: 'Ally' } })
@@ -203,11 +203,11 @@ function Room() {
         const defaultOnly: number[] = []
         videoRoom.subscribeBinary((data) => defaultOnly.push(data[0]!), { track: null })
 
-        // selfDelivery defaults to true — our own frames come back to us.
+        // selfDelivery defaults to true: our own frames come back to us.
         for (let i = 0; i < 3; i++) {
           await me.publishBinary(new Uint8Array(64).fill(i + 1))
         }
-        // Named track + per-frame meta — mic/camera/screen multiplex over one member lane;
+        // Named track + per-frame meta: mic/camera/screen multiplex over one member lane;
         // the ack's `receivers` counts the track's live subscriptions (the pause-at-0 signal).
         const camAck = await me.publishBinary(new Uint8Array(32).fill(9), { track: 'camera', meta: { key: true } })
 
@@ -357,7 +357,7 @@ function Room() {
         const me = await lobby.join({ meta: { name: 'Zoe', score: 1 } })
         const remote = await getParticipantWhenJoined(lobby, me.id)
 
-        await me.setAttributes({ score: 2 }) // merge — name is untouched
+        await me.setAttributes({ score: 2 }) // merge: name is untouched
         await me.setAttributes({ title: 'lead' }) // add a key
         await me.setAttributes({ score: undefined }) // a key set to undefined is removed
 
@@ -495,7 +495,7 @@ function Room() {
 
         await pollUntil(async () => {
           const theirs = (await onGetWatched(roomId)) as string[]
-          // `theirs` arriving proves the publish propagated — so `mine` staying empty is meaningful.
+          // `theirs` arriving proves the publish propagated, so `mine` staying empty is meaningful.
           return { result: { mine, theirs, selfDelivery: me.selfDelivery }, done: theirs.includes('hi') }
         })
       })}
@@ -506,7 +506,7 @@ function Room() {
         'Co-return suppressed, client join delivered',
         async () => {
           const roomId = await createRoomId('self-server')
-          await onWatchRoom(roomId) // a different (server-side) client — receives everything
+          await onWatchRoom(roomId) // a different (server-side) client, which receives everything
 
           // The co-returned server join suppresses its own publish on this room view.
           const { room, me } = await onJoinRoomAsServerSelf(roomId, 'Solo')
@@ -541,7 +541,7 @@ function Room() {
         await onUpdateRoom(roomId, { topic: 'updated' })
         const secondRoomId = `${base}:b`
         await onCreateRoom(secondRoomId) // a second room under the same prefix, for list()
-        const same = await onGetOrCreateRoom(roomId) // idempotent — returns the existing room
+        const same = await onGetOrCreateRoom(roomId) // idempotent: returns the existing room
         const listed = await onListRooms(base)
 
         await pollUntil(() => {

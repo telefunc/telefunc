@@ -302,7 +302,7 @@ export class MemoryBackend implements BroadcastDriver, RoomDriver {
     const room = this.#state.rooms.get(roomId)
     if (room === undefined) return
     const gen = room.gens.get(inc)
-    if (gen === undefined) return // already dropped — the janitor is resumable
+    if (gen === undefined) return // already dropped (the janitor is resumable)
     room.gens.delete(inc)
     this.#releaseWhenLapsed(roomId, room)
   }

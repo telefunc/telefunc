@@ -40,7 +40,7 @@ function assertAtMostOnceClient(redis: RedisClient): void {
   const keyPrefix = isCluster(redis) ? redis.options.redisOptions?.keyPrefix : redis.options.keyPrefix
   if (keyPrefix)
     throw new Error(
-      "RedisBackend: ioredis keyPrefix isn't supported — it doesn't apply to Pub/Sub channels. Use installRedis(redis, { prefix }) instead",
+      "RedisBackend: ioredis keyPrefix isn't supported (it doesn't apply to Pub/Sub channels). Use installRedis(redis, { prefix }) instead",
     )
 }
 

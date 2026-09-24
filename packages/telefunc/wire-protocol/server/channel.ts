@@ -392,7 +392,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this._dispatchDataFrame(data)
   }
 
-  /** @internal — Tag-keyed data-frame switch. */
+  /** @internal Tag-keyed data-frame switch. */
   protected _dispatchDataFrame(frame: ChannelDataFrame): void {
     switch (frame.tag) {
       case TAG.TEXT:
@@ -621,13 +621,13 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this._shutdown()
   }
 
-  /** @internal — a PUBLISH frame to the peer, buffered until it attaches. */
+  /** @internal A PUBLISH frame to the peer, buffered until it attaches. */
   _sendPublish(wireText: string): void {
     if (this._peer) this._peer.sendPublish(wireText)
     else this._prePeerBuffer.pushPublish(wireText)
   }
 
-  /** @internal — a binary PUBLISH frame to the peer, buffered until it attaches. */
+  /** @internal A binary PUBLISH frame to the peer, buffered until it attaches. */
   _sendPublishBinary(wireData: Uint8Array): void {
     if (this._peer) this._peer.sendPublishBinary(wireData)
     else this._prePeerBuffer.pushPublishBinary(wireData)

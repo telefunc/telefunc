@@ -36,7 +36,7 @@ abstract class ParticipantBase implements LocalParticipant {
   private _pendingInbox: Array<{ msg: InboxMessage; ackResolve?: (reply: DmReply) => void }> | null = null
   /** When a client holds this participant, its inbox forwards there instead of to local listeners; the forwarder returns the client's reply for an ack DM (see `RoomParticipantStubChannel`). */
   private _forwarder: ((msg: InboxMessage) => Promise<DmReply> | void) | null = null
-  /** @internal — route this participant's inbox to a remote holder instead of local listeners. */
+  /** @internal Route this participant's inbox to a remote holder instead of local listeners. */
   _setForwarder(forwarder: (msg: InboxMessage) => Promise<DmReply> | void): void {
     this._forwarder = forwarder
     this._flushHeld((msg, ackResolve) => {
@@ -46,7 +46,7 @@ abstract class ParticipantBase implements LocalParticipant {
       void reply.then(ackResolve)
     })
   }
-  /** @internal — already bound to a client holder (serialized once, via `RoomParticipantStubChannel`)? */
+  /** @internal Already bound to a client holder (serialized once, via `RoomParticipantStubChannel`)? */
   get _isBound(): boolean {
     return this._forwarder !== null
   }
@@ -60,7 +60,7 @@ abstract class ParticipantBase implements LocalParticipant {
     return this._meta
   }
   #metaSeq = 0
-  /** @internal — a meta the room accepted at `seq`; an older one never replaces a newer. */
+  /** @internal A meta the room accepted at `seq`; an older one never replaces a newer. */
   _acceptMeta({ meta, seq }: AcceptedMeta): void {
     if (seq <= this.#metaSeq) return
     this.#metaSeq = seq
@@ -76,7 +76,7 @@ abstract class ParticipantBase implements LocalParticipant {
   abstract setMeta(meta: ParticipantMeta): Promise<void>
   abstract setAttributes(attributes: ParticipantMeta): Promise<void>
   abstract leave(): Promise<void>
-  /** A user callback threw — each side reports through its own pipeline. */
+  /** A user callback threw. Each side reports through its own pipeline. */
   protected abstract _reportError(err: unknown): void
   listen(callback: (data: unknown, from: Sender | null) => unknown): () => void {
     const unlisten = this._register(this._messageCbs, callback)
@@ -86,7 +86,7 @@ abstract class ParticipantBase implements LocalParticipant {
     })
     return unlisten
   }
-  /** @internal — a DM for this member: to its remote holder if bound, else its listeners (held until the first `listen()`). */
+  /** @internal A DM for this member: to its remote holder if bound, else its listeners (held until the first `listen()`). */
   _deliverMessage(msg: InboxMessage): void {
     if (this._forwarder) {
       void this._forwarder(msg)
@@ -99,7 +99,7 @@ abstract class ParticipantBase implements LocalParticipant {
     }
     this._fireInbox(msg)
   }
-  /** @internal — an `{ ack: true }` DM, resolved with the recipient's reply (or an error if it leaves first); never rejects. */
+  /** @internal An `{ ack: true }` DM, resolved with the recipient's reply (or an error if it leaves first); never rejects. */
   _deliverMessageAck(msg: InboxMessage): Promise<DmReply> {
     if (this._forwarder) {
       const reply = this._forwarder(msg)
@@ -158,7 +158,7 @@ abstract class ParticipantBase implements LocalParticipant {
     for (const track of this._wantedTracks) this._invoke(callback, track, true)
     return unlisten
   }
-  /** @internal — room-wide demand for one of this member's tracks changed; `null` is the default track. */
+  /** @internal Room-wide demand for one of this member's tracks changed; `null` is the default track. */
   _onDemand(track: string | null, wanted: boolean): void {
     if (wanted) this._wantedTracks.add(track)
     else this._wantedTracks.delete(track)
@@ -171,11 +171,11 @@ abstract class ParticipantBase implements LocalParticipant {
     }
     return this._register(this._leaveCbs, callback)
   }
-  /** @internal — the member is gone; `cause` says how. A local participant always knows its cause: its holder either initiated the leave or witnessed the event/closure that caused it. */
+  /** @internal The member is gone; `cause` says how. A local participant always knows its cause: its holder either initiated the leave or witnessed the event/closure that caused it. */
   _onLeft(cause: LeaveCause): void {
     if (this._leftCause) return
     const ownedCause = (this._leftCause = ownLeaveCause(cause))
-    // Held ack DMs will never be handled now — fail their senders instead of hanging them.
+    // Held ack DMs will never be handled now, so fail their senders instead of hanging them.
     const held = this._pendingInbox
     this._pendingInbox = null
     if (held) for (const entry of held) entry.ackResolve?.(DM_FAILURE.left)

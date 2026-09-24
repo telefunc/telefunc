@@ -146,7 +146,7 @@ type ReconcileOpenEntry = {
    *  least once) omit `initial`; the server fails them fast if they're missing rather than
    *  stalling the entire reconcile. */
   initial?: true
-  /** A broadcast's subscriptions as of this (re)attach — applied before its `onOpen` fires. */
+  /** A broadcast's subscriptions as of this (re)attach, applied before its `onOpen` fires. */
   broadcast?: BroadcastSubscriptions
 }
 
@@ -542,7 +542,7 @@ const CLIENT_TAGS: ReadonlySet<number> = new Set([
 
 /** Server ingress: `decode` owns the frame's shape, this owns its direction and the upgrade frames'
  *  size cap. Both are checked on the raw bytes because their job is to bound what an unauthenticated
- *  peer can make us parse — after `decode` they would be bounding nothing. */
+ *  peer can make us parse. After `decode` they would be bounding nothing. */
 function decodeClientFrame(raw: Uint8Array<ArrayBuffer>, maxUpgradeFrameBytes: number): DecodedFrame {
   const tag = peekTag(raw)
   assertProtocol(tag !== undefined && CLIENT_TAGS.has(tag), `client sent a server-only frame ${tag}`)

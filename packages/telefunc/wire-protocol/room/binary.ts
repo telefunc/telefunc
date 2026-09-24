@@ -22,7 +22,7 @@ import { ROOM_WANTED_TRACKS_MAX } from './constants.js'
 import { assertKnownOptions, isRecord } from './model.js'
 import type { BinaryPublishOptions } from './types.js'
 
-// Member IDs — UUIDs, framed as a fixed 16-byte prefix on binary messages
+// Member IDs: UUIDs, framed as a fixed 16-byte prefix on binary messages
 const MEMBER_ID_BYTE_LENGTH = 16
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const BYTE_TO_HEX: string[] = []
@@ -162,7 +162,7 @@ function decodeBinaryFrame(data: Uint8Array): BinaryFrame | null {
     retain: !!(flags & FRAME_FLAG_RETAIN),
   }
 }
-// Binary wants — per member, per track
+// Binary wants: per member, per track
 /** The default (unnamed) track's slot in want sets and lane keys; named tracks are non-empty, so `''` is unambiguous. */
 const DEFAULT_TRACK = ''
 function laneTrack(track: string | null): string {

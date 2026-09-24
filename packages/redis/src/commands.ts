@@ -187,7 +187,7 @@ redis.call('SREM', KEYS[1], inc)
 return 1
 `
 
-// CELLS CX — all mutations or none; success implies the head precondition (open + inc) held at apply
+// CELLS CX: all mutations or none; success implies the head precondition (open + inc) held at apply
 // time; the revision is the coarse per-generation counter, allowed to over-conflict but never mislead.
 //   KEYS: [1]=head [2]=rev [3]=generation-keys [4..]=cell keys (one per mutation, in order)
 //   ARGV: [1]=inc [2]=expectedRev, then per mutation: op('set'|'del'), value
@@ -217,7 +217,7 @@ redis.call('SADD', generation_keys_key, rev_key)
 return 'committed'
 `
 
-// COMMIT — atomic acceptance: head precondition (one boolean, two branches), order advance, optional
+// COMMIT is atomic acceptance: head precondition (one boolean, two branches), order advance, optional
 // retained install, then PUBLISH. Supplying a closing lease selects the narrow closing-control branch,
 // which is what makes every other lane stale while closing.
 //   KEYS: [1]=head [2]=order [3]=retained [4]=channel [5]=generation-keys [6..]=required live cells

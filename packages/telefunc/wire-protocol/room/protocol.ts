@@ -104,7 +104,7 @@ type RoomDataEnvelope = {
   fromIdentity?: string
   data: unknown
 }
-/** What a client sends upward to publish — its instance verifies membership and stamps `fromMeta`. */
+/** What a client sends upward to publish. Its instance verifies membership and stamps `fromMeta`. */
 type RoomDataPublish = { __r: 'data'; from: string; data: unknown; retain?: boolean }
 /** A room-authored message (`Room.announce()`), on the semantic lane so it shares one order with member text. */
 type RoomAnnounceEnvelope = { __r: 'announce'; data: unknown }
@@ -169,7 +169,7 @@ type ParticipantStubNotice =
   | { __r: 'dm'; from: string; fromMeta: ParticipantMeta | null; fromIdentity?: string; data: unknown; ackId?: string }
   | { __r: 'demand'; track: string | null; wanted: boolean }
 
-/** Which members' streams a holder wants on the text lane — `all` for room-level listeners, or a specific member set for participant-scoped ones. */
+/** Which members' streams a holder wants on the text lane: `all` for room-level listeners, or a specific member set for participant-scoped ones. */
 type MemberWants = { all: boolean; members: string[] }
 
 /** A delivered private message, as stamped by the sender's instance. `ackId` is present when the sender awaits a reply (`send(…, { ack: true })`). */
@@ -212,7 +212,7 @@ function joinedMember(event: Extract<RoomCtrlEnvelope, { __r: 'join' }>): Member
   }
 }
 
-/** All room messages are tagged with `__r` — envelopes, requests, and notices alike. */
+/** All room messages are tagged with `__r`: envelopes, requests, and notices alike. */
 function hasRoomTag(value: unknown): value is { __r: string } {
   return isRecord(value) && typeof value.__r === 'string'
 }

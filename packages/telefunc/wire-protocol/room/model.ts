@@ -63,7 +63,7 @@ function leaveCauseToWire(cause: LeaveCause): WireLeaveCause {
   return cause.type === 'left' ? {} : { cause: cause.type }
 }
 
-/** Merge `attrs` into `meta` per key, returning a new object — the `setAttributes()` semantics. A value of `undefined` deletes its key (the serializer preserves `undefined` on the wire). */
+/** Merge `attrs` into `meta` per key, returning a new object (the `setAttributes()` semantics). A value of `undefined` deletes its key (the serializer preserves `undefined` on the wire). */
 function mergeAttributes(meta: ParticipantMeta, attrs: ParticipantMeta): ParticipantMeta {
   const next: ParticipantMeta = { ...meta }
   for (const [key, value] of Object.entries(attrs)) {

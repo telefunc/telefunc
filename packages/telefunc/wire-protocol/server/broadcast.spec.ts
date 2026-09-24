@@ -654,7 +654,7 @@ describe('Broadcast shield validation', () => {
 })
 
 // ───────────────────────────────────────────────────────────────────────────
-// Static bus (`Broadcast.*`) — server-only fire-and-forget broadcast. Bypasses
+// Static bus (`Broadcast.*`): server-only fire-and-forget broadcast. Bypasses
 // the instance-lifecycle (no register, no peer) and goes straight to the adapter.
 // Bug class: regression where the static bus starts touching instance state.
 // ───────────────────────────────────────────────────────────────────────────

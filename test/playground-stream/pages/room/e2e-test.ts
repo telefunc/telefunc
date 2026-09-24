@@ -130,7 +130,7 @@ function testRoom() {
   })
   testRoomScenario<{ okAck: boolean; badError: string | null; received: string[] }>(
     'shield',
-    'room: the declared message type is shielded at runtime — a malformed publish is rejected',
+    'room: the declared message type is shielded at runtime (a malformed publish is rejected)',
     (r) => {
       expect(r.okAck).toBe(true) // the well-typed payload is admitted
       // The generated shield rejects malformed ingress through the publish promise.
@@ -181,7 +181,7 @@ function testRoom() {
     'room: onDemand turns on when a subscriber wants a track and off when it leaves',
     (r) => {
       expect(r.cam).toContain(true) // a viewer arrived (the track is wanted)
-      expect(r.cam[r.cam.length - 1]).toBe(false) // ...and left again — back to unwanted
+      expect(r.cam[r.cam.length - 1]).toBe(false) // ...and left again, back to unwanted
     },
   )
   testRoomScenario<{ received: string[] }>(

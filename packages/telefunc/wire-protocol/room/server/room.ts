@@ -161,11 +161,11 @@ class ServerRoom extends RoomStateView implements Room {
     return value !== null && typeof value === 'object' && SERVER_ROOM_BRAND in value
   }
 
-  /** @internal — see `Room.guard()`. One declaration per instance keeps the grant declarative. */
+  /** @internal See `Room.guard()`. One declaration per instance keeps the grant declarative. */
   _setGuards(guards: RoomGuards): void {
     assertUsage(
       this._guards === null,
-      'Room.guard() was already called for this room instance — declare all guards in one call',
+      'Room.guard() was already called for this room instance: declare all guards in one call',
     )
     this._guards = guards
   }
@@ -190,7 +190,7 @@ class ServerRoom extends RoomStateView implements Room {
   }
 
   snapshot(): RoomSnapshotView {
-    // Snapshot consumers want the member view — load it (need-driven, single-flight); the arrival lands as an onChange, and the next snapshot() is complete.
+    // Snapshot consumers want the member view, so load it (need-driven, single-flight); the arrival lands as an onChange, and the next snapshot() is complete.
     if (!this._state.rosterKnown) void this._subs.ensureRoster().catch(reportRoomError)
     return this._state.snapshot()
   }
@@ -270,7 +270,7 @@ class ServerRoom extends RoomStateView implements Room {
     this._applyLeave(id, cause)
   }
 
-  /** @internal — the member's holder is gone and nothing will retry: ownership ends even if eviction fails, leaving a record whose lease expires. */
+  /** @internal The member's holder is gone and nothing will retry: ownership ends even if eviction fails, leaving a record whose lease expires. */
   async _removeDepartedMember(id: string): Promise<void> {
     const cause = { type: 'disconnected' } as const
     try {
@@ -281,13 +281,13 @@ class ServerRoom extends RoomStateView implements Room {
     }
   }
 
-  /** @internal — full replace (`setMeta`). */
+  /** @internal Full replace (`setMeta`). */
   async _setMemberMeta(id: string, meta: ParticipantMeta): Promise<AcceptedMeta> {
     const owned = ownMetaArgument(meta, 'setMeta() meta')
     return await this._writeMemberMeta(id, () => owned)
   }
 
-  /** @internal — per-key merge (`setAttributes`); an `undefined` value deletes the key. */
+  /** @internal Per-key merge (`setAttributes`); an `undefined` value deletes the key. */
   async _mergeMemberMeta(id: string, attrs: ParticipantMeta): Promise<AcceptedMeta> {
     const owned = ownMetaArgument(attrs, 'setAttributes() attributes')
     return await this._writeMemberMeta(id, (current) => mergeAttributes(current, owned))
@@ -416,7 +416,7 @@ class ServerRoom extends RoomStateView implements Room {
     let timer: ReturnType<typeof setTimeout> | undefined
     const reply = new Promise<DmReply>((settle) => {
       this._pendingDmAcks.set(ackId, { to, settle })
-      // The recipient replying/leaving/overflowing settles this promptly; this bounds the one case none of those cover — a recipient that joined but never listens and never leaves.
+      // The recipient replying/leaving/overflowing settles this promptly; this bounds the one case none of those cover: a recipient that joined but never listens and never leaves.
       timer = unrefTimer(
         setTimeout(() => {
           if (this._pendingDmAcks.delete(ackId)) settle(DM_FAILURE.timeout)
@@ -563,7 +563,7 @@ class ServerRoom extends RoomStateView implements Room {
       for (const stub of this._stubs) stub._relayBinary(wireData, unframed.from, track, rawInfo)
     }
   }
-  /** @internal — a DM for a member this instance owns, routed to its holder: a server participant or its client stub. */
+  /** @internal A DM for a member this instance owns, routed to its holder: a server participant or its client stub. */
   _onDm(serialized: string, rawInfo: WirePublishInfo): void {
     const envelope = decodeLaneEnvelope(serialized) as RoomDmEnvelope | RoomDmAckEnvelope
     // A reply to one of our own `send(…, { ack: true })`s, riding our inbox back home.
@@ -632,7 +632,7 @@ class ServerRoom extends RoomStateView implements Room {
     this._demand.forgetMember(id)
     this._subs.replan()
   }
-  /** The room closed — runs once, after the `closed` event has been applied and relayed. */
+  /** The room closed. Runs once, after the `closed` event has been applied and relayed. */
   private _teardown(): void {
     this._rejectDmAcks(DM_FAILURE.roomClosed) // no recipient will reply now
     this._teardownTail()
@@ -650,7 +650,7 @@ class ServerRoom extends RoomStateView implements Room {
   _applyAuthorityRoster(members: MemberSnapshot[]): boolean {
     return this._state.reconcileCompleteRoster(members)
   }
-  /** @internal — the authority says the room closed; the lane that would have carried `closed` failed. */
+  /** @internal The authority says the room closed; the lane that would have carried `closed` failed. */
   _closeFromAuthority(): void {
     if (this._state.closed) return
     this._state.applyClosed()
@@ -672,7 +672,7 @@ class ServerRoom extends RoomStateView implements Room {
     this._tail = null
     this._subs.replan() // drop the text ingestion nothing is consuming
   }
-  /** @internal — a client's view of this room. It attaches before the snapshot, so every later event relays and every earlier one is in the snapshot. */
+  /** @internal A client's view of this room. It attaches before the snapshot, so every later event relays and every earlier one is in the snapshot. */
   _openStub(options: ConstructorParameters<typeof RoomStubChannel>[1]): {
     stub: RoomStubChannel
     metadata: RoomSnapshotMetadata
@@ -773,7 +773,7 @@ class ServerRoom extends RoomStateView implements Room {
     }
   }
 
-  /** @internal — a holder's wants changed: replan, then replay the retained frames it now wants. */
+  /** @internal A holder's wants changed: replan, then replay the retained frames it now wants. */
   _onHolderWantsChanged(holder: LaneHolder, previous: WantsChange): void {
     this._subs.replan()
     if (previous.text) void this._replayRetainedText(holder, previous.text).catch(reportRoomError)
@@ -873,7 +873,7 @@ class ServerLocalParticipant extends ParticipantBase {
     this._assertActive()
     return this._room._publishBinaryFrame(frame, framed)
   }
-  /** @internal — each meta write this room accepts for the participant, with its revision. */
+  /** @internal Each meta write this room accepts for the participant, with its revision. */
   _onAcceptedMeta(callback: (accepted: AcceptedMeta) => void): () => void {
     const state = this._room._state
     const unlisten = state.getRemote(this.id)?.onUpdate(() => {
@@ -882,7 +882,7 @@ class ServerLocalParticipant extends ParticipantBase {
     })
     return unlisten ?? (() => {})
   }
-  /** @internal — the client holding this participant went away without leaving. */
+  /** @internal The client holding this participant went away without leaving. */
   _releaseHolder(): Promise<void> {
     return this._room._removeDepartedMember(this.id)
   }
@@ -897,7 +897,7 @@ class ServerLocalParticipant extends ParticipantBase {
   async setAttributes(attrs: ParticipantMeta): Promise<void> {
     await this._setAttributes(attrs)
   }
-  /** @internal — the accepted write, which a client holder mirrors in revision order. */
+  /** @internal The accepted write, which a client holder mirrors in revision order. */
   async _setMeta(meta: ParticipantMeta): Promise<AcceptedMeta> {
     this._assertActive()
     return await this._room._setMemberMeta(this.id, meta)
@@ -912,7 +912,7 @@ class ServerLocalParticipant extends ParticipantBase {
     await this._room._removeMember(this.id, { type: 'left' })
   }
   protected override _resolveSender(id: string): Sender | null {
-    return this._room._state.getRemote(id) // sync view read — delivery must not wait on I/O
+    return this._room._state.getRemote(id) // sync view read (delivery must not wait on I/O)
   }
 
   protected _reportError(err: unknown): void {
