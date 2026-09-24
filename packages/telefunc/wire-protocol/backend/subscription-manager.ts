@@ -54,15 +54,6 @@ class SubscriptionManager<Source> {
     return slot.attach(receiver)
   }
 
-  terminate(predicate: (source: Source) => boolean): void {
-    for (const [sourceKey, route] of this._routes) {
-      const slots = [...route.values()]
-      if (!predicate(slots[0]!.config.source)) continue
-      this._routes.delete(sourceKey)
-      for (const slot of slots) void slot.stop()
-    }
-  }
-
   async dispose(): Promise<void> {
     const cleanups = [...this._routes.values()].flatMap((route) => [...route.values()].map((slot) => slot.stop()))
     this._routes.clear()

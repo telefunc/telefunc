@@ -2799,7 +2799,6 @@ describe('room binary protocol validation', () => {
     })
     await backend.dropGeneration('spi', 'inc-1')
     expect([...memoryState.rooms.get('spi')!.gens.keys()]).toEqual(['inc-2'])
-    expect(subscription.state()).toBe('closed')
     await backend.directoryPut('spi', 'inc-1')
     expect((await backend.directoryList('s')).entries).toEqual([{ roomId: 'spi', incTag: 'inc-1' }])
     await backend.directoryDelete('spi', 'wrong')

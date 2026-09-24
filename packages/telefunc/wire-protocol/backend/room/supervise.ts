@@ -37,10 +37,7 @@ function superviseRoomDriver(driver: RoomDriver): RoomBackend {
         assertDriverPosition(info)
         return receiver(payload, info)
       }),
-    dropGeneration: async (roomId, inc) => {
-      await driver.dropGeneration(roomId, inc)
-      subscriptions.terminate((source) => source.roomId === roomId && source.inc === inc)
-    },
+    dropGeneration: (roomId, inc) => driver.dropGeneration(roomId, inc),
     directoryPut: (roomId, incTag) => driver.directoryPut(roomId, incTag),
     directoryDelete: (roomId, incTag) => driver.directoryDelete(roomId, incTag),
     directoryList: (prefix, cursor) => driver.directoryList(prefix, cursor),
