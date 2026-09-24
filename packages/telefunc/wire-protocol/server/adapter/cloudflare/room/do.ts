@@ -52,7 +52,7 @@ import {
 export type CommitWire =
   | { accepted: true; seq: number; timestamp: number; receivers: number; deliveryToken: string }
   | StaleCommit
-export type RegisterWire = { ok: true } | { rejected: true; reason: string; terminal?: boolean }
+export type RegisterWire = { ok: true } | { rejected: true; reason: string }
 
 const ROOM_MAINTENANCE_RETRY_MS = 30_000
 
@@ -166,7 +166,7 @@ export class RoomAuthority {
       const now = Date.now()
       const head = readLiveHead(this.#sql, now)
       if (head === null || head.currentInc !== route.inc || head.state !== 'open')
-        return { rejected: true, reason: `room has no open incarnation '${route.inc}'`, terminal: true }
+        return { rejected: true, reason: `room has no open incarnation '${route.inc}'` }
       upsertRoute(this.#sql, route, now)
       return { ok: true }
     })

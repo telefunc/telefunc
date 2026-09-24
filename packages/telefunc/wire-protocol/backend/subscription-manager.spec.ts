@@ -1,12 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { SubscriptionManager } from './subscription-manager.js'
-import type {
-  BackendReceiver,
-  SubscriptionAttempt,
-  SubscriptionAttemptState,
-  SubscriptionDriver,
-  SubscriptionState,
-} from './subscription.js'
+import type { BackendReceiver, SubscriptionAttempt, SubscriptionDriver, SubscriptionState } from './subscription.js'
 
 const encoder = new TextEncoder()
 const decoder = new TextDecoder()
@@ -186,38 +180,6 @@ describe('shared subscription supervision', () => {
     expect(received).toEqual(['a:one', 'b:two'])
     await Promise.all([first.unsubscribe(), second.unsubscribe()])
   })
-  it('maps raw ownership termination to public closed without replanning', async () => {
-    const raw = new ControlledDriver()
-    raw.plan(() => new ControlledAttempt())
-    raw.plan(() => ControlledAttempt.ready())
-    const manager = new SubscriptionManager(raw)
-    const subscription = manager.subscribe('session', () => {})
-    const states: SubscriptionState[] = []
-    subscription.onStateChange((state) => states.push(state))
-    raw.opens[0]!.attempt.establish()
-    await subscription.ready
-    raw.opens[0]!.attempt.terminate()
-    await vi.waitFor(() => expect(subscription.state()).toBe('closed'))
-    expect(states).toEqual(['closed'])
-    expect(raw.openCalls).toBe(1)
-    const replacement = manager.subscribe('session', () => {})
-    await replacement.ready
-    expect(raw.openCalls).toBe(2)
-    await subscription.unsubscribe()
-    const sibling = manager.subscribe('session', () => {})
-    await sibling.ready
-    expect(raw.openCalls).toBe(2)
-    await Promise.all([replacement.unsubscribe(), sibling.unsubscribe()])
-    const pendingRaw = new ControlledDriver()
-    pendingRaw.plan(() => new ControlledAttempt())
-    const pending = new SubscriptionManager(pendingRaw).subscribe('pending-session', () => {})
-    const readiness = pending.ready
-    pendingRaw.opens[0]!.attempt.terminate()
-    await expect(readiness).rejects.toThrow('ownership terminated')
-    expect(pending.state()).toBe('closed')
-    expect(pendingRaw.openCalls).toBe(1)
-    await pending.unsubscribe()
-  })
 })
 type OpenRecord = {
   receiver: BackendReceiver
@@ -250,9 +212,9 @@ class ControlledDriver implements SubscriptionDriver<string> {
 }
 class ControlledAttempt implements SubscriptionAttempt {
   unsubscribeCalls = 0
-  readonly #listeners = new Set<(state: SubscriptionAttemptState, reason?: Error) => void>()
+  readonly #listeners = new Set<(state: SubscriptionState, reason?: Error) => void>()
   readonly #cleanup: Promise<void>
-  #state: SubscriptionAttemptState = 'establishing'
+  #state: SubscriptionState = 'establishing'
   constructor(cleanup: Promise<void> = Promise.resolve()) {
     this.#cleanup = cleanup
   }
@@ -261,10 +223,10 @@ class ControlledAttempt implements SubscriptionAttempt {
     attempt.establish()
     return attempt
   }
-  state(): SubscriptionAttemptState {
+  state(): SubscriptionState {
     return this.#state
   }
-  onStateChange(listener: (state: SubscriptionAttemptState, reason?: Error) => void): () => void {
+  onStateChange(listener: (state: SubscriptionState, reason?: Error) => void): () => void {
     this.#listeners.add(listener)
     return () => this.#listeners.delete(listener)
   }
@@ -282,10 +244,7 @@ class ControlledAttempt implements SubscriptionAttempt {
   close(reason?: Error): void {
     this.#transition('closed', reason)
   }
-  terminate(): void {
-    this.#transition('terminated')
-  }
-  #transition(state: SubscriptionAttemptState, reason?: Error): void {
+  #transition(state: SubscriptionState, reason?: Error): void {
     this.#state = state
     for (const listener of this.#listeners) listener(state, reason)
   }

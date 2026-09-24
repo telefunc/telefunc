@@ -40,12 +40,7 @@ import type { ChannelPublishInfo } from '../channel.js'
 import { disposeBackend, getBroadcastBackend, getRoomBackend, installBackend } from '../backend/install.js'
 import { MemoryBackend, MemoryBackendState } from '../backend/memory/backend.js'
 import type { LaneId } from '../backend/room/contract.js'
-import type {
-  BackendReceiver,
-  BackendSubscription,
-  SubscriptionAttemptState,
-  SubscriptionState,
-} from '../backend/subscription.js'
+import type { BackendReceiver, BackendSubscription, SubscriptionState } from '../backend/subscription.js'
 import { onBug } from '../../node/server/runTelefunc/onBug.js'
 import { decodeOrderingFrame, encodeOrderingFrame } from '../ordering-frame.js'
 import { GcRegistry } from '../gcRegistry.js'
@@ -390,7 +385,7 @@ describe('Room public behavior', () => {
         ...binding,
         open: (receiver, localReceiverCount) => {
           const inner = binding.open(receiver, localReceiverCount)
-          const listeners = new Set<(state: SubscriptionAttemptState, reason?: Error) => void>()
+          const listeners = new Set<(state: SubscriptionState, reason?: Error) => void>()
           let ended = false
           end = (error) => {
             ended = true

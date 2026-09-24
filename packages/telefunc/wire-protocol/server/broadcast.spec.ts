@@ -7,7 +7,7 @@ import { ChannelMux, type ServerTransport } from './mux.js'
 import { IndexedPeer } from './IndexedPeer.js'
 import { disposeBackend, installBackend } from '../backend/install.js'
 import { MemoryBackend, MemoryBackendState } from '../backend/memory/backend.js'
-import type { SubscriptionAttempt, SubscriptionAttemptState } from '../backend/subscription.js'
+import type { SubscriptionAttempt, SubscriptionState } from '../backend/subscription.js'
 import { ChannelClosedError, ChannelOverflowError } from '../channel-errors.js'
 import { BROADCAST_ESTABLISH_HOLD_MS, CHANNEL_BUFFER_LIMIT_BINARY_BYTES } from '../constants.js'
 import { Abort } from '../../shared/Abort.js'
@@ -25,9 +25,9 @@ afterEach(async () => {
 })
 
 function pendingSubscription() {
-  let state: SubscriptionAttemptState = 'establishing'
-  const listeners = new Set<(state: SubscriptionAttemptState) => void>()
-  const transition = (next: SubscriptionAttemptState) => {
+  let state: SubscriptionState = 'establishing'
+  const listeners = new Set<(state: SubscriptionState) => void>()
+  const transition = (next: SubscriptionState) => {
     state = next
     for (const listener of listeners) listener(next)
   }

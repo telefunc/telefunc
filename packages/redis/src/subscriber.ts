@@ -281,7 +281,7 @@ class RedisSubscriptionAttempt extends DriverAttempt {
   terminate(error: unknown): void {
     if (this.ended) return
     this._rejectFences(error)
-    this.transition('terminated', error)
+    this.transition('closed', error)
   }
 
   lose(error: unknown): void {

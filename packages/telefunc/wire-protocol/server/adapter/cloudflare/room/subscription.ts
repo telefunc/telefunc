@@ -49,20 +49,20 @@ export class CloudflareRoomSubscriptionAttempt extends DriverAttempt {
   }
 
   invalidate(): void {
-    this.#finish('closed')
+    this.#finish()
   }
 
   terminate(): void {
     if (this.#released) return
     this.#released = true
-    this.#finish('terminated')
+    this.#finish()
     void this.#release().catch(console.error)
   }
 
   async unsubscribe(): Promise<void> {
     if (this.#released) return
     this.#released = true
-    this.#finish('closed')
+    this.#finish()
     await this.#release()
   }
 
@@ -71,10 +71,10 @@ export class CloudflareRoomSubscriptionAttempt extends DriverAttempt {
     try {
       registered = await this.#authority.registerRoute(this.#route)
     } catch (error) {
-      return this.#finish('closed', error)
+      return this.#finish(error)
     }
     if (!('ok' in registered)) {
-      return this.#finish(registered.terminal === true ? 'terminated' : 'closed', new Error(registered.reason))
+      return this.#finish(new Error(registered.reason))
     }
     this.transition('ready')
     this.#scheduleRenewal()
@@ -94,23 +94,23 @@ export class CloudflareRoomSubscriptionAttempt extends DriverAttempt {
     try {
       renewed = await this.#authority.renewRoute(this.#route)
     } catch {
-      return this.#finish('closed')
+      return this.#finish()
     }
     if (this.state() !== 'ready') return
     if (renewed.ok) this.#scheduleRenewal()
     else if (renewed.terminal === true) this.terminate()
-    else this.#finish('closed')
+    else this.#finish()
   }
 
   async #release(): Promise<void> {
     await this.#authority.unsubscribeRoute(this.#route)
   }
 
-  #finish(state: 'closed' | 'terminated', error?: unknown): void {
+  #finish(error?: unknown): void {
     if (this.ended) return
     this.#cancelRenewal?.()
     this.#cancelRenewal = null
-    this.transition(state, error)
+    this.transition('closed', error)
     this.#onClosed()
   }
 }

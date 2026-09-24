@@ -6,7 +6,6 @@ import type {
   BackendReceiver,
   BackendSubscription,
   SubscriptionAttempt,
-  SubscriptionAttemptState,
   SubscriptionBinding,
   SubscriptionDriver,
   SubscriptionState,
@@ -208,13 +207,13 @@ class SubscriptionSlot<Source> {
     this._unobserve = attempt.onStateChange((state, reason) => this._onStateChange(attempt, state, reason))
     // The attempt may have settled inside open(), before it had an observer.
     const state = attempt.state()
-    if (state === 'ready' || state === 'closed' || state === 'terminated') this._onStateChange(attempt, state)
+    if (state === 'ready' || state === 'closed') this._onStateChange(attempt, state)
   }
 
-  private _onStateChange(attempt: SubscriptionAttempt, state: SubscriptionAttemptState, reason?: Error): void {
+  private _onStateChange(attempt: SubscriptionAttempt, state: SubscriptionState, reason?: Error): void {
     if (this._attempt !== attempt) return
     if (state === 'ready') return this._becameReady()
-    if (state === 'closed' || state === 'terminated') return this._ended(state, reason, attempt)
+    if (state === 'closed') return this._ended(reason, attempt)
     this._markUnavailable(state)
     if (state === 'lost') this.config.reportError(new Error(`Backend subscription lost: ${this.config.sourceKey}`))
   }
@@ -226,14 +225,9 @@ class SubscriptionSlot<Source> {
   }
 
   /** The driver's reason, if any, is the failure's cause. */
-  private _ended(
-    state: 'closed' | 'terminated',
-    reason?: Error,
-    attempt: SubscriptionAttempt | null = this._attempt,
-  ): void {
-    const what = state === 'closed' ? 'closed' : 'ownership terminated'
+  private _ended(reason: Error | undefined, attempt: SubscriptionAttempt | null): void {
     this._terminal(
-      new Error(`Backend subscription ${what}: ${this.config.sourceKey}`, reason && { cause: reason }),
+      new Error(`Backend subscription closed: ${this.config.sourceKey}`, reason && { cause: reason }),
       attempt,
     )
   }

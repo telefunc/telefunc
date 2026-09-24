@@ -2,16 +2,12 @@ export type {
   BackendReceiver,
   BackendSubscription,
   SubscriptionAttempt,
-  SubscriptionAttemptState,
   SubscriptionBinding,
   SubscriptionDriver,
   SubscriptionState,
 }
 
 type SubscriptionState = 'establishing' | 'ready' | 'lost' | 'closed'
-
-/** Driver-only: ownership lost; reported to consumers as `closed`. */
-type SubscriptionAttemptState = SubscriptionState | 'terminated'
 
 type BackendSubscription = {
   /** Settles when the current establishment does: replaced after loss, rejected on a terminal failure. */
@@ -25,8 +21,8 @@ type BackendReceiver = (payload: Uint8Array, info: { seq: number; timestamp: num
 
 /** One driver establishment, reporting each state change; an end carries its reason when the driver has one. */
 type SubscriptionAttempt = {
-  state(): SubscriptionAttemptState
-  onStateChange(cb: (state: SubscriptionAttemptState, reason?: Error) => void): () => void
+  state(): SubscriptionState
+  onStateChange(cb: (state: SubscriptionState, reason?: Error) => void): () => void
   /** Settles after the driver's registration and transport cleanup. */
   unsubscribe(): Promise<void>
 }

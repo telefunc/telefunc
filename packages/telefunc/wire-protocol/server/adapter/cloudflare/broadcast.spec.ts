@@ -20,7 +20,7 @@ import { CLOUDFLARE_COLO_LOCATION_HINT_MAP } from './coloLocationHintMap.js'
 import { ServerBroadcast } from '../../server-broadcast.js'
 import { disposeBackend, installBackend } from '../../../backend/install.js'
 import { CloudflareRoomBackend } from './room/backend.js'
-import type { SubscriptionAttempt, SubscriptionAttemptState } from '../../../backend/subscription.js'
+import type { SubscriptionAttempt, SubscriptionState } from '../../../backend/subscription.js'
 
 const encode = (text: string) => new TextEncoder().encode(text)
 const decode = (bytes: Uint8Array) => new TextDecoder().decode(bytes)
@@ -28,9 +28,9 @@ const decode = (bytes: Uint8Array) => new TextDecoder().decode(bytes)
 /** Resolves once the attempt is ready; rejects if it ends first. */
 function untilReady(attempt: SubscriptionAttempt): Promise<void> {
   return new Promise((resolve, reject) => {
-    const settle = (state: SubscriptionAttemptState, reason?: Error): boolean => {
+    const settle = (state: SubscriptionState, reason?: Error): boolean => {
       if (state === 'ready') resolve()
-      else if (state === 'closed' || state === 'terminated') reject(reason ?? new Error(`attempt ${state}`))
+      else if (state === 'closed') reject(reason ?? new Error(`attempt ${state}`))
       else return false
       return true
     }
