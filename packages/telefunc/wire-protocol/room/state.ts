@@ -559,9 +559,10 @@ class RoomState {
         get identity() {
           return entry.identity
         },
-        subscribe: (cb) => this._register(entry.dataCbs, cb),
-        subscribeBinary: (cb, opts) => this._register(entry.binaryCbs, binaryListener(entry.binaryCbs, cb, opts)),
-        onUpdate: (cb) => this._register(entry.updateCbs, cb),
+        subscribe: (cb) => this._registerLive(entry, entry.dataCbs, cb),
+        subscribeBinary: (cb, opts) =>
+          this._registerLive(entry, entry.binaryCbs, binaryListener(entry.binaryCbs, cb, opts)),
+        onUpdate: (cb) => this._registerLive(entry, entry.updateCbs, cb),
         onLeave: (cb: (cause?: LeaveCause) => void) => {
           if (!entry.left) return this._register(entry.leaveCbs, cb)
           invokeChannelListener(cb, [entry.leaveCause], this._onCallbackError)
@@ -572,6 +573,10 @@ class RoomState {
       remoteBackings.set(remote, { state: this, entry })
     }
     return remote
+  }
+  /** A departed member's listeners were released at its leave, so one added after it is never held. */
+  private _registerLive<T>(entry: MemberEntry, list: T[], cb: T): () => void {
+    return entry.left ? makeDisposer() : this._register(list, cb)
   }
   private _register<T>(list: T[], cb: T): () => void {
     list.push(cb)

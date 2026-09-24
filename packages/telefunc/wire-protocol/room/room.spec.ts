@@ -1807,6 +1807,20 @@ describe('Room public behavior', () => {
     stub._onPeerBroadcastSubscribe(false)
     expect(semanticFrames(peer, 'data')).toEqual([])
   })
+  it('holds no listener added to a participant after it left', async () => {
+    const authority = await Room.create('dead-entry-listener')
+    const member = await authority.join()
+    const observer = (await Room.get(authority.id)) as ServerRoom
+    const off = observer.onChange(() => {})
+    const remote = (await observer.getParticipant(member.id))!
+    await member.leave()
+    await vi.waitFor(() => expect(observer.count).toBe(0))
+    off()
+    remote.subscribe(() => {})
+    remote.subscribeBinary(() => {})
+    remote.onUpdate(() => {})
+    expect((observer as unknown as { _state: { listenerCount: number } })._state.listenerCount).toBe(0)
+  })
   it('onDemand reports named-track demand turning on and off', async () => {
     const room = await Room.create('demand')
     const camera = await room.join()
