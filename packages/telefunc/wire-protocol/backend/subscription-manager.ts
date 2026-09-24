@@ -24,7 +24,8 @@ type SubscriptionSlotConfig<Source> = {
 }
 
 class SubscriptionManager<Source> {
-  private readonly _slots = new Map<string, SubscriptionSlot<Source>>()
+  /** Slots by source key, then by driver partition. */
+  private readonly _routes = new Map<string, Map<string, SubscriptionSlot<Source>>>()
   private readonly _cleanups = new Set<Promise<void>>()
 
   constructor(
@@ -36,36 +37,43 @@ class SubscriptionManager<Source> {
   subscribe(source: Source, receiver: BackendReceiver): BackendSubscription {
     const binding = this._driver.bind(source)
     const sourceKey = this._sourceKey(source)
-    const key = JSON.stringify([sourceKey, binding.partition])
-    let slot = this._slots.get(key)
+    let route = this._routes.get(sourceKey)
+    if (route === undefined) this._routes.set(sourceKey, (route = new Map()))
+    let slot = route.get(binding.partition)
     if (slot === undefined) {
-      slot = new SubscriptionSlot({
+      const created: SubscriptionSlot<Source> = new SubscriptionSlot({
         source,
         binding,
         reportError: this._reportError,
         sourceKey,
         cleanup: (attempt) => this._cleanup(attempt),
-        onEmpty: () => {
-          if (this._slots.get(key) === slot) this._slots.delete(key)
-        },
+        onEmpty: () => this._unmap(sourceKey, binding.partition, created),
       })
-      this._slots.set(key, slot)
+      route.set(binding.partition, (slot = created))
     }
     return slot.attach(receiver)
   }
 
   terminate(predicate: (source: Source) => boolean): void {
-    for (const [key, slot] of this._slots) {
-      if (!predicate(slot.config.source)) continue
-      this._slots.delete(key)
-      void slot.stop()
+    for (const [sourceKey, route] of this._routes) {
+      const slots = [...route.values()]
+      if (!predicate(slots[0]!.config.source)) continue
+      this._routes.delete(sourceKey)
+      for (const slot of slots) void slot.stop()
     }
   }
 
   async dispose(): Promise<void> {
-    const cleanups = [...this._slots.values()].map((slot) => slot.stop())
-    this._slots.clear()
+    const cleanups = [...this._routes.values()].flatMap((route) => [...route.values()].map((slot) => slot.stop()))
+    this._routes.clear()
     await Promise.allSettled([...cleanups, ...this._cleanups])
+  }
+
+  private _unmap(sourceKey: string, partition: string, slot: SubscriptionSlot<Source>): void {
+    const route = this._routes.get(sourceKey)
+    if (route?.get(partition) !== slot) return
+    route.delete(partition)
+    if (route.size === 0) this._routes.delete(sourceKey)
   }
 
   private _cleanup(attempt: SubscriptionAttempt): Promise<void> {
@@ -79,7 +87,7 @@ class SubscriptionManager<Source> {
 
   /** Whether any subscription is open. */
   hasSubscriptions(): boolean {
-    return this._slots.size > 0
+    return this._routes.size > 0
   }
 
   /** Whether a slot on the source's route is still establishing: never ready, stopped or ended. */
@@ -98,8 +106,7 @@ class SubscriptionManager<Source> {
   }
 
   private _slotsOf(source: Source): SubscriptionSlot<Source>[] {
-    const sourceKey = this._sourceKey(source)
-    return [...this._slots.values()].filter((slot) => slot.config.sourceKey === sourceKey)
+    return [...(this._routes.get(this._sourceKey(source))?.values() ?? [])]
   }
 }
 
@@ -131,15 +138,7 @@ class SubscriptionSlot<Source> {
     if (this._attempt === null) this._start()
     let attached = true
     const listeners = new Set<StateListener>()
-    // Consumers attached while establishing await `ready`; only a later lost → ready is an event for them.
-    let suppressInitialReady = this._state === 'establishing'
-    const observer: StateListener = (state) => {
-      if (suppressInitialReady) {
-        suppressInitialReady = false
-        if (state === 'ready') return
-      }
-      this._notify(listeners, state)
-    }
+    const observer: StateListener = (state) => this._notify(listeners, state)
     this._listeners.add(observer)
     const unobserve = () => this._listeners.delete(observer)
     const slot = this
@@ -149,10 +148,7 @@ class SubscriptionSlot<Source> {
       },
       state: () => (attached ? this._state : 'closed'),
       onStateChange: (listener) => {
-        if (!attached) {
-          this._report(() => listener('closed'))
-          return () => {}
-        }
+        assert(attached)
         listeners.add(listener)
         return () => listeners.delete(listener)
       },
@@ -209,9 +205,9 @@ class SubscriptionSlot<Source> {
   }
 
   private _onStateChange(attempt: SubscriptionAttempt, state: SubscriptionState, reason?: Error): void {
-    if (this._attempt !== attempt) return
+    assert(this._attempt === attempt) // a slot opens one attempt, and unobserves it before cleanup
     if (state === 'ready') return this._becameReady()
-    if (state === 'closed') return this._ended(reason, attempt)
+    if (state === 'closed') return this._ended(reason)
     this._markUnavailable(state)
     if (state === 'lost') this.config.reportError(new Error(`Backend subscription lost: ${this.config.sourceKey}`))
   }
@@ -223,15 +219,11 @@ class SubscriptionSlot<Source> {
   }
 
   /** The driver's reason, if any, is the failure's cause. */
-  private _ended(reason: Error | undefined, attempt: SubscriptionAttempt | null): void {
-    this._terminal(
-      new Error(`Backend subscription closed: ${this.config.sourceKey}`, reason && { cause: reason }),
-      attempt,
-    )
+  private _ended(reason: Error | undefined): void {
+    this._terminal(new Error(`Backend subscription closed: ${this.config.sourceKey}`, reason && { cause: reason }))
   }
 
-  private _terminal(error: unknown, attempt: SubscriptionAttempt | null = this._attempt): void {
-    if (attempt !== null && this._attempt !== attempt) return
+  private _terminal(error: unknown): void {
     const failure = error instanceof Error ? error : new Error(String(error))
     this._stopPromise ??= this._attempt === null ? Promise.resolve() : this.config.cleanup(this._attempt)
     // A resolved readiness cannot carry the failure, so `ready` read from here on is a fresh, rejected one.

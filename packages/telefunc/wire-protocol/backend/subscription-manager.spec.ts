@@ -116,7 +116,7 @@ describe('shared subscription supervision', () => {
     raw.opens[0]!.attempt.lose()
     expect(siblingStates).toEqual(['closed'])
   })
-  it('normalizes initial readiness and surfaces raw recovery or terminal failure', async () => {
+  it('surfaces readiness, recovery and terminal failure as state changes', async () => {
     const raw = new ControlledDriver()
     raw.plan(() => new ControlledAttempt())
     const manager = new SubscriptionManager(raw, vi.fn())
@@ -125,19 +125,19 @@ describe('shared subscription supervision', () => {
     subscription.onStateChange((state) => states.push(state))
     raw.opens[0]!.attempt.establish()
     await subscription.ready
-    expect(states).toEqual([])
+    expect(states).toEqual(['ready'])
     raw.opens[0]!.attempt.lose()
     const recovered = subscription.ready
     raw.opens[0]!.attempt.establish()
     await recovered
-    expect(states).toEqual(['lost', 'ready'])
+    expect(states).toEqual(['ready', 'lost', 'ready'])
     expect(raw.openCalls).toBe(1)
     raw.opens[0]!.attempt.close()
-    expect(states).toEqual(['lost', 'ready', 'closed'])
+    expect(states).toEqual(['ready', 'lost', 'ready', 'closed'])
     await expect(subscription.ready).rejects.toThrow('Backend subscription closed')
     expect(raw.openCalls).toBe(1)
     await subscription.unsubscribe()
-    expect(states).toEqual(['lost', 'ready', 'closed'])
+    expect(states).toEqual(['ready', 'lost', 'ready', 'closed'])
     const failedRaw = new ControlledDriver()
     failedRaw.plan(() => new ControlledAttempt())
     const failed = new SubscriptionManager(failedRaw).subscribe('initial-failure', () => {})
