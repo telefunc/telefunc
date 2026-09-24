@@ -34,13 +34,10 @@ assert(wrangler.compatibility_flags.includes('nodejs_als'), 'node:async_hooks re
 assert.deepEqual(wrangler.durable_objects.bindings.map(({ name }) => name).sort(), [
   'TO_DO_LIST_DURABLE_OBJECTS',
   'TelefuncDurableObject',
-  'TelefuncRoomDurableObject',
 ])
 assert(
-  wrangler.migrations.some(
-    ({ tag, new_sqlite_classes: classes }) => tag === 'v2' && classes?.includes('TelefuncRoomDurableObject'),
-  ),
-  'missing v2 SQLite Room Durable Object migration',
+  wrangler.migrations.some(({ new_sqlite_classes: classes }) => classes?.includes('TelefuncDurableObject')),
+  'TelefuncDurableObject must be a SQLite class',
 )
 
 async function walk(directory) {
