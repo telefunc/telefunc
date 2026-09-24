@@ -78,6 +78,11 @@ class SubscriptionManager<Source> {
     return cleanup
   }
 
+  /** Whether any subscription is open. */
+  hasSubscriptions(): boolean {
+    return this._slots.size > 0
+  }
+
   /** Whether a slot on the source's route is still establishing: never ready, stopped or ended. */
   hasEstablishing(source: Source): boolean {
     return this._slotsOf(source).some((slot) => slot.establishing)

@@ -55,6 +55,16 @@ export function installBackend<Driver extends BackendDriver>(
 export function configureBroadcastTransport(transport: BroadcastTransport | undefined): void {
   const previous = state.broadcastOverride
   if (previous?.transport === transport) return
+  // Retiring a plane would leave its subscribers on a transport nothing publishes to anymore.
+  const current = previous
+    ? previous.backend
+    : state.current.phase === 'ready'
+      ? state.current.installed.broadcast
+      : null
+  assertUsage(
+    !current?.hasSubscriptions(),
+    'config.broadcast.transport changed while Broadcast subscriptions are open: set it once, before the first subscription (restart the server to change it)',
+  )
   if (previous?.backend) void previous.backend.dispose()
   if (transport === undefined) {
     // The backend's own Broadcast plane is supervised again on next use.

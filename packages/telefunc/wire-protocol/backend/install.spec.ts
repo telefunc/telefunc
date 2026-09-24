@@ -11,8 +11,8 @@ import { MemoryBackend } from './memory/backend.js'
 import { SubscriptionManager } from './subscription-manager.js'
 import { config } from '../../node/server/serverConfig.js'
 afterEach(async () => {
-  config.broadcast = {}
   await disposeBackend().catch(() => {})
+  config.broadcast = {}
   vi.restoreAllMocks()
 })
 describe('backend installation lifecycle', () => {
@@ -83,6 +83,15 @@ describe('backend installation lifecycle', () => {
     config.broadcast = {}
     expect(getRoomBackend()).toBeDefined()
     await expectBroadcastRoundTrip('removed')
+  })
+
+  it('refuses to change config.broadcast.transport while Broadcast subscriptions are open', async () => {
+    config.broadcast = { transport: localTransport() }
+    const subscription = getBroadcastBackend().subscribe({ key: 'live', kind: 'text' }, () => {})
+    expect(() => (config.broadcast = {})).toThrow('set it once, before the first subscription')
+    await subscription.unsubscribe()
+    config.broadcast = {}
+    expect(getRoomBackend()).toBeDefined()
   })
 
   it('setting config.broadcast.transport to undefined removes it too', async () => {

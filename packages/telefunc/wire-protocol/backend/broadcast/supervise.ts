@@ -67,6 +67,7 @@ function superviseBroadcastDriver(driver: BroadcastDriver): BroadcastBackend {
         assertDriverPosition(info)
         return receiver(payload, info)
       }),
+    hasSubscriptions: () => subscriptions.hasSubscriptions(),
     dispose: () => (disposal ??= subscriptions.dispose()),
   }
 }

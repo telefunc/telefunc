@@ -24,5 +24,6 @@ type BroadcastBackend = {
   /** A publish held while this instance's subscription on its route is establishing counts against `bufferLimit`. */
   publish(lane: BroadcastLane, payload: Uint8Array, bufferLimit: number): PublishResult | Promise<PublishResult>
   subscribe(lane: BroadcastLane, receiver: BackendReceiver): BackendSubscription
+  hasSubscriptions(): boolean
   dispose(): Promise<void>
 }
