@@ -200,6 +200,19 @@ describe('Room public behavior', () => {
     await subsOf(room)._heartbeatTick()
     expect(leaves(vanished)).toEqual([{ __r: 'leave', id: vanished, cause: 'removed' }])
   })
+  it("relays a hidden member's event-less leave to no client it wasn't handed to", async () => {
+    const room = (await Room.create('lost-hidden-leave')) as ServerRoom
+    const bot = await room.join({ hidden: true })
+    const { peer } = serve(room)
+    const causes: unknown[] = []
+    bot.onLeave((cause) => causes.push(cause?.type))
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    vi.spyOn(room, '_onCtrlMessage').mockImplementationOnce(() => {})
+    await Room.removeParticipant(room.id, { id: bot.id })
+    await subsOf(room)._heartbeatTick()
+    expect(causes).toEqual(['removed'])
+    expect(memberEvents(peer, bot.id)).toEqual([])
+  })
   it('creates, lists, updates, closes fully, and recreates a genuinely fresh domain', async () => {
     const room = (await Room.create('lifecycle', { meta: { topic: 'one' } })) as unknown as ServerRoom
     const firstInc = room._inc
@@ -2348,8 +2361,12 @@ describe('client Room lifecycle', () => {
     expect(causes).toEqual(['removed'])
     expect(client.count).toBe(0)
   })
-  it('rejects an option a client call does not have', async () => {
-    const { id, ack, emit, joining, client } = await pendingClientJoin('client-unknown-options')
+  it('sends DMs from a client participant, and rejects an option a client call does not have', async () => {
+    const requests: unknown[] = []
+    const { id, ack, emit, joining, client } = await pendingClientJoin('client-unknown-options', (message) => {
+      requests.push(message)
+      return { seq: requests.length, timestamp: 1 }
+    })
     emit({ __r: 'join', id, meta: {}, joinedAt: 1 }, 1)
     ack.resolve({ id, joinedAt: 1 })
     const me = await joining
@@ -2359,6 +2376,13 @@ describe('client Room lifecycle', () => {
       [() => me.send(id, 'x', { confirm: true } as never), 'Unknown send() option: confirm'],
     ]
     for (const [call, message] of calls) await expect(Promise.resolve().then(call)).rejects.toThrow(message)
+    await me.send(id, 'fire and forget')
+    await me.send(id, 'confirmed', { ack: true })
+    expect(requests).toEqual([
+      expect.objectContaining({ __r: 'req-dm', data: 'fire and forget' }),
+      expect.objectContaining({ __r: 'req-dm', data: 'confirmed', ack: true }),
+    ])
+    expect(requests[0]).not.toHaveProperty('ack')
   })
   it('ends a local participant that a roster no longer lists', async () => {
     const { id, ack, emit, joining } = await pendingClientJoin('roster-drops-local')
