@@ -416,6 +416,7 @@ describe('cloudflare adapter entrypoint', () => {
       telefuncBroadcastDeliver(request: BroadcastDeliverRequest): void
       telefuncBroadcastPresence(request: BroadcastPresenceRequest): void
       telefuncRoomInvalidate(request: unknown): void
+      telefuncRoomDeliver(request: unknown): Promise<void>
     }
     expect(mocks.crosswsAdapter.handleDurableInit).toHaveBeenCalledWith(instance, ctx, {
       TelefuncDurableObject: binding,
@@ -486,5 +487,8 @@ describe('cloudflare adapter entrypoint', () => {
       leaseId: 'lease',
     }
     instance.telefuncRoomInvalidate(invalidation)
+    // A route whose lease this session no longer holds, as after a restart.
+    const staleDelivery = { ...invalidation, payload: new ArrayBuffer(0), seq: 1, timestamp: 0 }
+    await expect(instance.telefuncRoomDeliver(staleDelivery)).resolves.toBeUndefined()
   })
 })

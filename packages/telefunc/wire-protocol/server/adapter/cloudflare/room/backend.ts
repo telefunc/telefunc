@@ -76,9 +76,11 @@ export class CloudflareRoomSessionManager {
     return attempt
   }
 
+  /** A delivery to a lease this session no longer holds, as after a restart, is dropped: delivery is at-most-once, and
+   *  the authority's route lapses with the lease. */
   async deliver(request: RoomSessionDeliveryRequest): Promise<void> {
     const entry = this.#entries.get(entryKey(request))
-    if (entry?.leaseId !== request.leaseId) throw new Error('Cloudflare Room delivery lease is not installed')
+    if (entry?.leaseId !== request.leaseId) return
     await entry.deliver(request.payload, request.seq, request.timestamp)
   }
 

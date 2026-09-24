@@ -44,7 +44,7 @@ export class CloudflareRoomSubscriptionAttempt extends DriverAttempt {
   }
 
   async deliver(payload: Uint8Array, seq: number, timestamp: number): Promise<void> {
-    if (this.state() !== 'ready') throw new Error('Cloudflare Room delivery lease is not installed')
+    if (this.state() !== 'ready') return
     await this.#receiver(new Uint8Array(payload), { seq, timestamp })
   }
 
