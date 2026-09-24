@@ -303,7 +303,7 @@ class ServerRoom extends RoomStateView implements Room {
       return { value: { meta, seq, hidden: record.hidden === true }, next: { ...record, meta, metaSeq: seq } }
     })
     this._state.applyParticipantMeta(id, meta, seq)
-    this._syncLocalMemberMeta(id)
+    this._localParticipants.get(id)?._acceptMeta({ meta, seq })
     await publishCtrl(this.id, this._inc, { __r: 'p-meta', id, meta, seq, ...(hidden ? { hidden: true } : {}) })
     return { meta, seq }
   }
@@ -596,7 +596,7 @@ class ServerRoom extends RoomStateView implements Room {
         return
       case 'p-meta': {
         this._state.applyParticipantMeta(event.id, event.meta, event.seq)
-        this._syncLocalMemberMeta(event.id)
+        this._localParticipants.get(event.id)?._acceptMeta(event)
         return
       }
       case 'update':
@@ -631,12 +631,6 @@ class ServerRoom extends RoomStateView implements Room {
     this._local.forgetMember(id)
     this._demand.forgetMember(id)
     this._subs.replan()
-  }
-  /** Mirror only the sequence-accepted projection into the local facade. */
-  private _syncLocalMemberMeta(id: string): void {
-    const local = this._localParticipants.get(id)
-    const accepted = this._state.getRemote(id)
-    if (local && accepted) local._meta = accepted.meta
   }
   /** The room closed — runs once, after the `closed` event has been applied and relayed. */
   private _teardown(): void {
@@ -881,6 +875,7 @@ class ServerLocalParticipant extends ParticipantBase {
   }
   async publishBinary(data: Uint8Array, options?: BinaryPublishOptions): Promise<ChannelPublishAck> {
     const framed = encodeBinaryFrame(this.id, data, options)
+    // Local holders get exactly what remote ones decode, not the caller's objects.
     const frame = decodeBinaryFrame(framed)
     assert(frame !== null)
     return await this._publishFrame(frame, framed)

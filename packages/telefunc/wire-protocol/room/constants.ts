@@ -11,7 +11,7 @@ export {
 }
 const ROOM_HEARTBEAT_INTERVAL_MS = 30_000
 // Four heartbeats: a member is reaped only after several renewals in a row were missed.
-const ROOM_MEMBER_TTL_MS = 120_000
+const ROOM_MEMBER_TTL_MS = ROOM_HEARTBEAT_INTERVAL_MS * 4
 // A tail is a bounded recent suffix, not history: enforce both entry count and serialized code units.
 const ROOM_TAIL_HOLD_MAX = 256
 const ROOM_TAIL_HOLD_CODE_UNITS_MAX = 1024 * 1024

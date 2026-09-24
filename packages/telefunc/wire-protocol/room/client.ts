@@ -8,14 +8,7 @@ import { ClientBroadcast } from '../client/channel.js'
 import type { ClientChannel } from '../client/channel.js'
 import { DM_FAILURE } from './errors.js'
 import { decodeBinaryFrame, emptyBinaryWants, encodeBinaryFrame } from './binary.js'
-import {
-  assertKnownOptions,
-  leaveCauseFromWire,
-  normalizeJoinOptions,
-  ownMetaArgument,
-  ownMetadata,
-  recipientId,
-} from './model.js'
+import { assertKnownOptions, leaveCauseFromWire, normalizeJoinOptions, ownMetaArgument, recipientId } from './model.js'
 import {
   hasRoomTag,
   inboxMessageFromWire,
@@ -303,10 +296,9 @@ class ClientRoom extends RoomStateView implements Room {
   }
 
   /** @internal — apply an accepted member meta (event or own write's ack) and mirror it into a local participant. */
-  _acceptParticipantMeta(id: string, { meta, seq }: AcceptedMeta): void {
-    this._state.applyParticipantMeta(id, meta, seq)
-    const local = this._localParticipants.get(id)
-    if (local) local._meta = this._state.getRemote(id)?.meta ?? meta
+  _acceptParticipantMeta(id: string, accepted: AcceptedMeta): void {
+    this._state.applyParticipantMeta(id, accepted.meta, accepted.seq)
+    this._localParticipants.get(id)?._acceptMeta(accepted)
   }
 
   private _applyClosed(causeType: 'closed' | 'disconnected'): void {
@@ -469,7 +461,6 @@ class ClientRoomParticipant extends ClientParticipantBase {
 class ClientStandaloneParticipant extends ClientParticipantBase {
   private readonly _channel: ClientChannel
   private readonly _request: (req: ParticipantStubRequest) => Promise<unknown>
-  private _metaSeq = 0
 
   constructor(channel: ClientChannel, metadata: ParticipantStubMetadata) {
     const request = (req: ParticipantStubRequest) => channel.send(req, { ack: true })
@@ -496,11 +487,9 @@ class ClientStandaloneParticipant extends ClientParticipantBase {
     channel.onClose(() => this._onLeft({ type: 'disconnected' }))
   }
 
-  /** Its own writes and the room's `p-meta` both land here; only a newer revision applies. */
-  protected override _onOwnMetaWritten({ meta, seq }: AcceptedMeta): void {
-    if (seq <= this._metaSeq) return
-    this._metaSeq = seq
-    this._meta = ownMetadata(meta)
+  /** Its own writes and the room's `p-meta` both land here. */
+  protected override _onOwnMetaWritten(accepted: AcceptedMeta): void {
+    this._acceptMeta(accepted)
   }
 
   protected async _sendPublish(data: unknown, retain?: boolean): Promise<ChannelPublishAck> {

@@ -1,6 +1,7 @@
 export { RoomState, RoomStateView, remoteBacking }
 
 import { assertUsage } from '../../utils/assert.js'
+import { getGlobalObject } from '../../utils/getGlobalObject.js'
 import { invokeChannelListener, type ChannelPublishInfo } from '../channel.js'
 import { makeDisposer, untether } from '../wrapProxy.js'
 import {
@@ -65,12 +66,10 @@ type RoomStateOptions = {
   onLeave: (id: string, cause: LeaveCause | undefined, hidden: boolean | null) => void
 }
 /** Exact-keyed backing lets the serializer recover (room, member) without exposing a public brand. */
-const ROOM_REMOTE_BACKINGS: unique symbol = Symbol.for('telefunc.RoomRemoteParticipantBackings')
 type RemoteBacking = { state: RoomState; entry: MemberEntry }
-const remoteBackingGlobal = globalThis as typeof globalThis & {
-  [ROOM_REMOTE_BACKINGS]?: WeakMap<object, RemoteBacking>
-}
-const remoteBackings = (remoteBackingGlobal[ROOM_REMOTE_BACKINGS] ??= new WeakMap())
+const { remoteBackings } = getGlobalObject('wire-protocol/room/state.ts', () => ({
+  remoteBackings: new WeakMap<object, RemoteBacking>(),
+}))
 /** The `RoomState` backing of a minted `RemoteParticipant` — `null` for anything else. */
 function remoteBacking(value: unknown): RemoteBacking | null {
   return typeof value === 'object' && value !== null ? (remoteBackings.get(value) ?? null) : null

@@ -6,7 +6,7 @@ import type { TELEFUNC_SHIELDS } from '../../node/shared/transformer/generateShi
 import { assert } from '../../utils/assert.js'
 import { DM_FAILURE, participantLeftError, toRoomFailure } from './errors.js'
 import { ownLeaveCause, ownMetadata, senderOf } from './model.js'
-import type { DmReply, InboxMessage } from './protocol.js'
+import type { AcceptedMeta, DmReply, InboxMessage } from './protocol.js'
 import type {
   BinaryPublishOptions,
   LeaveCause,
@@ -58,6 +58,13 @@ abstract class ParticipantBase implements LocalParticipant {
   }
   get meta(): ParticipantMeta {
     return this._meta
+  }
+  #metaSeq = 0
+  /** @internal — a meta the room accepted at `seq`; an older one never replaces a newer. */
+  _acceptMeta({ meta, seq }: AcceptedMeta): void {
+    if (seq <= this.#metaSeq) return
+    this.#metaSeq = seq
+    this._meta = ownMetadata(meta)
   }
   protected get _left(): boolean {
     return this._leftCause !== null

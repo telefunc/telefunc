@@ -26,7 +26,7 @@ import { ClientBroadcast, type ClientChannel } from '../client/channel.js'
 import { RoomState, remoteBacking } from './state.js'
 import { Room } from './server/statics.js'
 import { ServerRoom, type ServerLocalParticipant } from './server/room.js'
-import { configFromHead, decodeRoomText, encodeRoomConfig } from './server/lanes.js'
+import { configFromHead, decodeRoomText, encodeRoomRecord } from './server/lanes.js'
 import type { LaneSubscription } from './server/lane-subscription.js'
 import { reportRoomError } from './server/errors.js'
 import { RoomParticipantStubChannel, RoomStubChannel } from './server/stub.js'
@@ -261,7 +261,7 @@ describe('Room public behavior', () => {
         head: {
           currentInc: current.currentInc,
           state: 'closing',
-          config: encodeRoomConfig(configFromHead(current)),
+          config: encodeRoomRecord(configFromHead(current)),
           closeLease: { id: 'stalled-closer', durationMs: 1_000 },
         },
       },
@@ -307,7 +307,7 @@ describe('Room public behavior', () => {
         head: {
           currentInc: current.currentInc,
           state: 'closing',
-          config: encodeRoomConfig(configFromHead(current)),
+          config: encodeRoomRecord(configFromHead(current)),
           closeLease: { id: 'active-get-or-create-close', durationMs: 1_000 },
         },
       },

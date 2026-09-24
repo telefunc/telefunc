@@ -7,7 +7,6 @@ export {
   configFromHead,
   decodeRoomRecord,
   decodeRoomText,
-  encodeRoomConfig,
   encodeRoomRecord,
   publishCtrl,
   staleCommitError,
@@ -31,24 +30,16 @@ const roomTextDecoder = new TextDecoder()
 const SEMANTIC_LANE = { kind: 'semantic' } as const satisfies LaneId
 const CONTROL_LANE = { kind: 'control' } as const satisfies LaneId
 
-function encodeRoomText(value: string): Uint8Array {
-  return roomTextEncoder.encode(value)
-}
-
 function decodeRoomText(value: Uint8Array): string {
   return roomTextDecoder.decode(value)
 }
 
 function encodeRoomRecord(value: unknown): Uint8Array {
-  return encodeRoomText(stringify(value))
+  return roomTextEncoder.encode(stringify(value))
 }
 
 function decodeRoomRecord<T>(bytes: Uint8Array): T {
   return parse(decodeRoomText(bytes)) as T
-}
-
-function encodeRoomConfig(config: RoomConfigRecord): Uint8Array {
-  return encodeRoomRecord(config)
 }
 
 function configFromHead(head: RoomHead): RoomConfigRecord {

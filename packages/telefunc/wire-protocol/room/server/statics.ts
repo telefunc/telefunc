@@ -43,7 +43,6 @@ import {
   commitRoomLaneOrThrow,
   configFromHead,
   openConfig,
-  encodeRoomConfig,
   encodeRoomRecord,
   publishCtrl,
   staleCommitError,
@@ -164,7 +163,7 @@ async function tryCreateRoom(id: string, options: RoomOptions | undefined): Prom
   const result = await backend.compareExchangeHead(
     id,
     current === null ? { form: 'absent' } : { form: 'rev', rev: current.rev },
-    { head: { currentInc: created.inc, state: 'open', config: encodeRoomConfig(created) } },
+    { head: { currentInc: created.inc, state: 'open', config: encodeRoomRecord(created) } },
   )
   if ('conflict' in result) {
     return result.current?.state === 'closing' ? { kind: 'closing' } : { kind: 'exists' }
@@ -296,7 +295,7 @@ async function writeRoomConfig(
     const result = await backend.compareExchangeHead(
       id,
       { form: 'rev', rev: current.rev },
-      { head: { currentInc: config.inc, state: 'open', config: encodeRoomConfig({ ...next, inc: config.inc }) } },
+      { head: { currentInc: config.inc, state: 'open', config: encodeRoomRecord({ ...next, inc: config.inc }) } },
     )
     return 'conflict' in result ? CX_CONFLICT : next
   })
