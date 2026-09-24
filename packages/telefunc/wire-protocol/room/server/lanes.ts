@@ -73,14 +73,17 @@ async function commitRoomLane(
 ): Promise<CommitAccepted | StaleCommit> {
   const result = await getRoomBackend().commitLane(id, inc, lane, payload, opts)
   if ('stale' in result) return result
-  // Delivery is at-most-once: a handoff lost with its fence (e.g. a partition) must not hang the caller.
+  // Delivery is at-most-once: a handoff that rejects or never settles is lost, not the caller's failure.
   const delivered = raceTimeout(
-    result.delivery.then(() => true),
+    result.delivery.then(
+      () => true,
+      () => false,
+    ),
     ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS,
     () => false,
   )
   if (!(await delivered))
-    reportRoomError(new Error(`Room delivery unconfirmed after ${ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS} ms: ${id}`))
+    reportRoomError(new Error(`Room delivery handoff lost (rejected or unconfirmed within the horizon): ${id}`))
   return result
 }
 

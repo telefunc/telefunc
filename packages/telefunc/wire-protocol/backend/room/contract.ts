@@ -82,7 +82,7 @@ type CommitAccepted = {
   seq: number
   timestamp: number
   receivers?: number
-  /** One at-most-once backend-defined handoff: never retries/poisons. */
+  /** One at-most-once handoff that never retries; a rejection means the handoff was lost. */
   delivery: Promise<void>
 }
 
