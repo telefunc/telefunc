@@ -414,11 +414,11 @@ describe('cloudflare adapter entrypoint', () => {
     const { binding } = createBinding()
     const tf = new Telefunc({ context: vi.fn(async () => ({ userId: 'user-1' })) })
     const DurableClass = tf.TelefuncDurableObject
-    const hibernatedRoomSocket = { close: vi.fn(), deserializeAttachment: () => ({ __telefuncRoom: true }) }
-    const hibernatedPlainSocket = { close: vi.fn(), deserializeAttachment: () => ({}) }
+    // Sockets an earlier instance accepted, whatever they carried, lost their channel state with it.
+    const recoveredSockets = [{ close: vi.fn() }, { close: vi.fn() }]
     const ctx = {
       id: { name: 'telefunc-shard-weur-1' },
-      getWebSockets: () => [hibernatedRoomSocket, hibernatedPlainSocket],
+      getWebSockets: () => recoveredSockets,
     } as unknown as DurableObjectState
     const instance = new DurableClass(ctx, {
       TelefuncDurableObject: binding,
@@ -431,8 +431,9 @@ describe('cloudflare adapter entrypoint', () => {
       telefuncBroadcastDeliver(request: BroadcastDeliverRequest): void
       telefuncRoomInvalidate(request: unknown): void
     }
-    expect(hibernatedRoomSocket.close).toHaveBeenCalledWith(1012, 'Telefunc session reset; reconnect')
-    expect(hibernatedPlainSocket.close).not.toHaveBeenCalled()
+    for (const socket of recoveredSockets) {
+      expect(socket.close).toHaveBeenCalledWith(1012, 'Telefunc session reset; reconnect')
+    }
     expect(mocks.transportInstances[0]?.attachBinding).toHaveBeenCalledWith(binding, 'TelefuncDurableObject')
     expect(mocks.crosswsAdapter.handleDurableInit).toHaveBeenCalledWith(instance, ctx, {
       TelefuncDurableObject: binding,

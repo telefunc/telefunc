@@ -145,11 +145,8 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
       if (kv) broadcast.attachKV(kv)
       this.authorityState = new CloudflareBroadcastAuthorityState(ctx)
       crosswsAdapter.handleDurableInit(this, ctx, env)
-      // Room subscriptions live in memory, so a socket that used Room before this construction lost them.
-      for (const socket of ctx.getWebSockets()) {
-        if (socket.deserializeAttachment()?.__telefuncRoom === true)
-          socket.close(1012, 'Telefunc session reset; reconnect')
-      }
+      // Channel state lives in memory, so a socket that outlived an earlier instance lost it and can only reconnect.
+      for (const socket of ctx.getWebSockets()) socket.close(1012, 'Telefunc session reset; reconnect')
     }
 
     async fetch(request: Request) {
@@ -168,7 +165,7 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
     }
 
     webSocketMessage(ws: WebSocket, message: string | ArrayBuffer) {
-      return this.runWithRoomManager(() => crosswsAdapter.handleDurableMessage(this, ws, message), ws)
+      return this.runWithRoomManager(() => crosswsAdapter.handleDurableMessage(this, ws, message))
     }
 
     webSocketClose(ws: WebSocket, code: number, reason: string, wasClean: boolean) {
@@ -199,13 +196,13 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
       return dispatchRoomFanout(sessionNamespace(this.env) as unknown as RoomFanoutNamespace, request)
     }
 
-    // Only a Room subscription materializes the manager, and marks the socket it came through.
-    private runWithRoomManager<T>(fn: () => T, socket?: WebSocket): T {
+    // Only a Room subscription materializes the manager.
+    private runWithRoomManager<T>(fn: () => T): T {
       if (!isAsyncMode()) return fn()
-      return withCloudflareRoomSessionManager(() => {
-        if (socket) markRoomSocket(socket)
-        return (this.roomManager ??= new CloudflareRoomSessionManager(this.ctx.id.toString()))
-      }, fn)
+      return withCloudflareRoomSessionManager(
+        () => (this.roomManager ??= new CloudflareRoomSessionManager(this.ctx.id.toString())),
+        fn,
+      )
     }
   }
 
@@ -270,12 +267,4 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
     TelefuncDurableObject,
     TelefuncRoomDurableObject,
   }
-}
-
-/** Marks the socket in crossws's attachment state, so a later construction knows it used Room. */
-function markRoomSocket(socket: WebSocket): void {
-  const state = ((socket as WebSocket & { _crosswsState?: Record<string, unknown> })._crosswsState ??
-    socket.deserializeAttachment() ??
-    {}) as Record<string, unknown>
-  socket.serializeAttachment(Object.assign(state, { __telefuncRoom: true }))
 }
