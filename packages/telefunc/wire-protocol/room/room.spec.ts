@@ -40,7 +40,13 @@ import type { ChannelPublishInfo } from '../channel.js'
 import { disposeBackend, getBroadcastBackend, getRoomBackend, installBackend } from '../backend/install.js'
 import { MemoryBackend, MemoryBackendState } from '../backend/memory/backend.js'
 import type { LaneId } from '../backend/room/contract.js'
-import type { BackendReceiver, BackendSubscription, SubscriptionState } from '../backend/subscription.js'
+import type {
+  BackendReceiver,
+  BackendSubscription,
+  SubscriptionAttemptState,
+  SubscriptionState,
+} from '../backend/subscription.js'
+import { onBug } from '../../node/server/runTelefunc/onBug.js'
 import { decodeOrderingFrame, encodeOrderingFrame } from '../ordering-frame.js'
 import { GcRegistry } from '../gcRegistry.js'
 import { wrapProxy } from '../wrapProxy.js'
@@ -371,6 +377,43 @@ describe('Room public behavior', () => {
     await replacementReady.promise
     await publisher.publish('after-recovery')
     expect(received).toEqual(['after-recovery'])
+  })
+  it("reports a lane that ends after it was ready, with the driver's reason as the cause", async () => {
+    const room = (await Room.create('terminal-reason')) as ServerRoom
+    const reason = new Error('generation invalidated')
+    let end: ((reason: Error) => void) | undefined
+    const bind = driver.subscriptions.bind.bind(driver.subscriptions)
+    vi.spyOn(driver.subscriptions, 'bind').mockImplementation((source) => {
+      const binding = bind(source)
+      if (!('lane' in source) || source.lane.kind !== 'semantic' || end) return binding
+      return {
+        ...binding,
+        open: (receiver, localReceiverCount) => {
+          const inner = binding.open(receiver, localReceiverCount)
+          const listeners = new Set<(state: SubscriptionAttemptState, reason?: Error) => void>()
+          let ended = false
+          end = (error) => {
+            ended = true
+            for (const listener of listeners) listener('closed', error)
+          }
+          return {
+            state: () => (ended ? 'closed' : inner.state()),
+            onStateChange: (listener) => {
+              listeners.add(listener)
+              return inner.onStateChange(listener)
+            },
+            unsubscribe: () => inner.unsubscribe(),
+          }
+        },
+      }
+    })
+    const bugs: unknown[] = []
+    onBug((err) => bugs.push(err))
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    room.subscribe(() => {})
+    await subsOf(room)._semantic.ready
+    end!(reason)
+    await vi.waitFor(() => expect(bugs).toContainEqual(expect.objectContaining({ cause: reason })))
   })
   it('does not re-subscribe a recovered lane when its catch-up reconcile fails', async () => {
     const authority = await Room.create('recovered-reconcile-failure')
@@ -3071,7 +3114,7 @@ function rejectedSubscription(diagnostic: string): BackendSubscription {
   void ready.catch(() => {})
   return {
     ready,
-    state: () => 'establishing',
+    state: () => 'closed',
     onStateChange: () => () => {},
     unsubscribe: async () => {},
   }

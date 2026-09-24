@@ -53,12 +53,6 @@ class LaneSubscription {
     this._unobserve?.()
     const subscription = this._subscribe()
     this._subscription = subscription
-    let terminalNotified = false
-    const notifyTerminal = (error?: unknown) => {
-      if (terminalNotified) return
-      terminalNotified = true
-      this._onTerminal(this, error)
-    }
     let wasReady = subscription.state() === 'ready'
     if (wasReady) this._settleReady()
     let lostAfterReady = false
@@ -69,11 +63,7 @@ class LaneSubscription {
           this._settleReady()
         }
       },
-      (error: unknown) => {
-        if (this._subscription !== subscription) return
-        this._ensurePendingReady()
-        notifyTerminal(error)
-      },
+      () => {}, // an end is handled once, on `closed`
     )
     // Every reassignment of `_subscription` unobserves first, so this listener only hears the current one.
     this._unobserve = subscription.onStateChange((state) => {
@@ -86,11 +76,21 @@ class LaneSubscription {
         lostAfterReady = false
         this._settleReady()
       } else if (state === 'closed') {
-        this._ensurePendingReady()
-        notifyTerminal()
+        this._ended(subscription)
       }
     })
+    // It may have ended as it opened, before it had an observer.
+    if (subscription.state() === 'closed') this._ended(subscription)
     if (previous) void previous.unsubscribe()
+  }
+
+  /** A terminal end rejects `ready` with the driver's reason right after announcing `closed`; a stop resolves it. */
+  private _ended(subscription: BackendSubscription): void {
+    this._ensurePendingReady()
+    const end = (error?: unknown) => {
+      if (this._subscription === subscription) this._onTerminal(this, error)
+    }
+    void subscription.ready.then(() => end(), end)
   }
 
   /** Exhausted policy keeps demand and holder readiness pending, but drops the dead attempt until the next planning pass. */
