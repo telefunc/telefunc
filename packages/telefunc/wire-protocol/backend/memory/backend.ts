@@ -20,7 +20,14 @@ import type {
   DirectoryPage,
 } from '../room/contract.js'
 import { encodeLaneKey } from '../room/lane-key.js'
-import { commitPreconditionHolds, headCxMatches, nextOrderMark } from '../room/semantics.js'
+import {
+  commitPreconditionHolds,
+  headCxMatches,
+  isOpenIncarnation,
+  materializeHead,
+  nextOrderMark,
+  type StoredHead,
+} from '../room/semantics.js'
 import type { OrderingInfo } from '../../ordering-frame.js'
 import { unrefTimer } from '../../../utils/unrefTimer.js'
 import type { BackendReceiver, SubscriptionDriver } from '../subscription.js'
@@ -36,7 +43,6 @@ type MemoryBackendOptions = {
 type MemorySubscriptionSource = BroadcastRoute | RoomSubscriptionSource
 
 type Expiring = { expiresAt: number | null }
-type StoredHead = RoomHead & Expiring
 type StoredCell = { bytes: Uint8Array }
 type RetainedEntry = { lane: LaneId; payload: Uint8Array; seq: number; timestamp: number }
 
@@ -168,18 +174,8 @@ export class MemoryBackend implements BroadcastDriver, RoomDriver {
   }
 
   #storeHead(room: RoomRecord, next: HeadNext): StoredHead {
-    const now = this.#now()
-    const stored: StoredHead = {
-      rev: `rev-${++this.#state.revSeq}`,
-      currentInc: next.head.currentInc,
-      state: next.head.state,
-      config: copyBytes(next.head.config),
-      expiresAt: next.ttlMs === undefined ? null : now + next.ttlMs,
-    }
-    // The lease deadline is minted here, inside the CX, from authority time — never supplied by a caller.
-    if (next.head.closeLease !== undefined) {
-      stored.closeLease = { id: next.head.closeLease.id, until: now + next.head.closeLease.durationMs }
-    }
+    const materialized = materializeHead(next, this.#now(), `rev-${++this.#state.revSeq}`)
+    const stored = { ...materialized, config: copyBytes(materialized.config) }
     room.head = stored
     if (stored.currentInc !== null) this.#generation(room, stored.currentInc)
     return stored
@@ -209,7 +205,7 @@ export class MemoryBackend implements BroadcastDriver, RoomDriver {
   ): Promise<CxResult> {
     const room = this.#state.rooms.get(roomId)
     const head = this.#readAndExpireHead(room)
-    if (room === undefined || head === null || head.currentInc !== inc || head.state !== 'open') return 'stale-inc'
+    if (room === undefined || !isOpenIncarnation(head, inc)) return 'stale-inc'
     const gen = this.#generation(room, inc)
     if (String(gen.revision) !== revision) return 'conflict'
     for (const mutation of mutations) {
@@ -282,7 +278,7 @@ export class MemoryBackend implements BroadcastDriver, RoomDriver {
       const { roomId, inc, lane } = source
       const room = this.#state.rooms.get(roomId)
       const head = this.#readAndExpireHead(room)
-      if (room === undefined || head === null || head.currentInc !== inc || head.state !== 'open') {
+      if (room === undefined || !isOpenIncarnation(head, inc)) {
         const sub = new MemorySubscriptionAttempt(receiver, localReceiverCount)
         sub.failEstablishment(`subscribeLane: room '${roomId}' has no open incarnation '${inc}'`)
         return sub

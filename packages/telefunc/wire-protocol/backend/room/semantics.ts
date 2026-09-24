@@ -1,9 +1,31 @@
-export { headCxMatches, commitPreconditionHolds, nextOrderMark }
+export { headCxMatches, commitPreconditionHolds, isOpenIncarnation, materializeHead, nextOrderMark }
+export type { StoredHead }
 
-import type { HeadCx, LaneId, RoomHead } from './contract.js'
+import type { HeadCx, HeadNext, LaneId, RoomHead } from './contract.js'
 import type { OrderingInfo } from '../../ordering-frame.js'
 
 // The authority rules both TypeScript drivers apply; Redis spells the same rules in Lua.
+
+/** A head as an authority stores it; `expiresAt` is when a closed head's tombstone lapses. */
+type StoredHead = RoomHead & { expiresAt: number | null }
+
+/** The CX's next head as stored: its expiry and close-lease deadline are minted here, from authority time, and never
+ *  supplied by a caller. */
+function materializeHead(next: HeadNext, now: number, rev: string): StoredHead {
+  const { currentInc, state, config, closeLease } = next.head
+  return {
+    rev,
+    currentInc,
+    state,
+    config,
+    expiresAt: next.ttlMs === undefined ? null : now + next.ttlMs,
+    ...(closeLease === undefined ? {} : { closeLease: { id: closeLease.id, until: now + closeLease.durationMs } }),
+  }
+}
+
+function isOpenIncarnation(head: RoomHead | null, inc: string): boolean {
+  return head !== null && head.currentInc === inc && head.state === 'open'
+}
 
 function headCxMatches(cx: HeadCx, current: RoomHead | null, now: number): boolean {
   if (cx.form === 'absent') return current === null

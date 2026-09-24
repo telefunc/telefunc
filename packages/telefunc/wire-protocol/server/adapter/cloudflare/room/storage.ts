@@ -6,14 +6,18 @@ import type {
   CxResult,
   HeadCx,
   HeadNext,
-  RoomHead,
   CellSelector,
   CellsRead,
   DirectoryPage,
 } from '../../../../backend/room/contract.js'
-import { headCxMatches, nextOrderMark } from '../../../../backend/room/semantics.js'
+import {
+  headCxMatches,
+  isOpenIncarnation,
+  materializeHead,
+  nextOrderMark,
+  type StoredHead,
+} from '../../../../backend/room/semantics.js'
 import type { OrderingInfo } from '../../../../ordering-frame.js'
-export type StoredHead = RoomHead & { expiresAt: number | null }
 
 type HeadCxOutcome = { head: StoredHead } | { conflict: true; current: StoredHead | null }
 
@@ -127,35 +131,22 @@ export function compareExchangeHead(
 }
 
 function storeHead(sql: SqlStorage, next: HeadNext, now: number, mintRev: () => string): StoredHead {
-  const rev = mintRev()
-  const expiresAt = next.ttlMs === undefined ? null : now + next.ttlMs
-  // The lease deadline is minted here, inside the CX, from authority time — never supplied by a caller.
-  const lease = next.head.closeLease
-  const leaseUntil = lease === undefined ? null : now + lease.durationMs
-  const leaseId = lease === undefined ? null : lease.id
+  const head = materializeHead(next, now, mintRev())
   sql.exec(
     'INSERT OR REPLACE INTO head (id, rev, inc, state, config, lease_id, lease_until, expires_at) VALUES (1, ?, ?, ?, ?, ?, ?, ?)',
-    rev,
-    next.head.currentInc,
-    next.head.state,
-    next.head.config,
-    leaseId,
-    leaseUntil,
-    expiresAt,
+    head.rev,
+    head.currentInc,
+    head.state,
+    head.config,
+    head.closeLease?.id ?? null,
+    head.closeLease?.until ?? null,
+    head.expiresAt,
   )
   // A new incarnation's generation is registered inside the CX that names it.
-  if (next.head.currentInc !== null) {
-    sql.exec('INSERT OR IGNORE INTO gen (inc, revision) VALUES (?, 0)', next.head.currentInc)
+  if (head.currentInc !== null) {
+    sql.exec('INSERT OR IGNORE INTO gen (inc, revision) VALUES (?, 0)', head.currentInc)
   }
-  const stored: StoredHead = {
-    rev,
-    currentInc: next.head.currentInc,
-    state: next.head.state,
-    config: next.head.config,
-    expiresAt,
-  }
-  if (leaseId !== null && leaseUntil !== null) stored.closeLease = { id: leaseId, until: leaseUntil }
-  return stored
+  return head
 }
 
 type CellRow = { key: string; bytes: ArrayBuffer }
@@ -193,7 +184,7 @@ export function compareExchangeCells(
   now: number,
 ): CxResult {
   const head = readLiveHead(sql, now)
-  if (head === null || head.currentInc !== inc || head.state !== 'open') return 'stale-inc'
+  if (!isOpenIncarnation(head, inc)) return 'stale-inc'
   if (String(readRevision(sql, inc)) !== revision) return 'conflict'
   for (const mutation of mutations) {
     if (mutation.bytes === null) {

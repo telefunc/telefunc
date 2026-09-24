@@ -19,7 +19,7 @@ import type {
 } from '../../../../backend/room/contract.js'
 import { assert } from '../../../../../utils/assert.js'
 import { encodeLaneKey } from '../../../../backend/room/lane-key.js'
-import { commitPreconditionHolds } from '../../../../backend/room/semantics.js'
+import { commitPreconditionHolds, isOpenIncarnation, type StoredHead } from '../../../../backend/room/semantics.js'
 import { dispatchRoomFanout, Fanout, type RoomFanoutNamespace, type RoomFanoutOutcome } from './fanout.js'
 import { deleteRetained, installRetained, listRetained, readRetained } from './retained.js'
 import {
@@ -44,7 +44,6 @@ import {
   listOrphanGenerations,
   readCells,
   readLiveHead,
-  type StoredHead,
 } from './storage.js'
 
 export type CommitWire =
@@ -158,7 +157,7 @@ export class RoomAuthority {
     const result = this.#ctx.storage.transactionSync((): RegisterWire => {
       const now = Date.now()
       const head = readLiveHead(this.#sql, now)
-      if (head === null || head.currentInc !== route.inc || head.state !== 'open')
+      if (!isOpenIncarnation(head, route.inc))
         return { rejected: true, reason: `room has no open incarnation '${route.inc}'` }
       upsertRoute(this.#sql, route, now)
       return { ok: true }
