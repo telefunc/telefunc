@@ -6,7 +6,8 @@ import {
   getRoomBackend,
   installBackend,
 } from './install.js'
-import type { BroadcastTransport } from './broadcast/transport.js'
+import { createBroadcastTransportDriver, type BroadcastTransport } from './broadcast/transport.js'
+import { superviseBroadcastDriver } from './broadcast/supervise.js'
 import { MemoryBackend } from './memory/backend.js'
 import { SubscriptionManager } from './subscription-manager.js'
 import { config } from '../../node/server/serverConfig.js'
@@ -101,6 +102,20 @@ describe('backend installation lifecycle', () => {
     config.broadcast.transport = undefined
     expect(getRoomBackend()).toBeDefined()
     await expectBroadcastRoundTrip('unset')
+  })
+
+  it('a publish reaches every instance sharing the transport once, with the transport-assigned receipt', async () => {
+    const shared = localTransport()
+    const instances = [0, 1].map(() => superviseBroadcastDriver(createBroadcastTransportDriver(shared)))
+    const lane = { key: 'cross-instance', kind: 'text' } as const
+    const seen: string[] = []
+    for (const [index, instance] of instances.entries()) {
+      await instance.subscribe(lane, (bytes) => void seen.push(`${index}:${new TextDecoder().decode(bytes)}`)).ready
+    }
+    const receipt = await instances[0]!.publish(lane, new TextEncoder().encode('hi'), 1024)
+    expect(seen.sort()).toEqual(['0:hi', '1:hi'])
+    expect(receipt).toEqual({ seq: 1, timestamp: expect.any(Number) })
+    await Promise.all(instances.map((instance) => instance.dispose()))
   })
 
   it('rejects a Broadcast transport missing a binary method when it is configured', () => {

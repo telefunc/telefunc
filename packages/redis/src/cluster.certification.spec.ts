@@ -498,6 +498,8 @@ describe('Redis real three-master Cluster CI certification', () => {
     await waitFor(() => emptyObserved.length === 2)
     expect([first.seq, second.seq]).toEqual([1, 2])
     expect(emptyObserved).toEqual(['text:1:one', 'binary:2:two'])
+    // Each key counts on its own.
+    expect(await backend.publish({ key: 'other', kind: 'text' }, bytes('three'), 1024)).toMatchObject({ seq: 1 })
   })
   function own<T>(value: T, dispose: (value: T) => unknown): T {
     onTestFinished(async () => void (await dispose(value)))
