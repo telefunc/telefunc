@@ -143,8 +143,6 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
       this.authorityState = new CloudflareBroadcastAuthorityState(ctx)
       this.broadcastMember = broadcast.member(ctx.id.toString(), this.broadcastCalls)
       crosswsAdapter.handleDurableInit(this, ctx, env)
-      // Channel state lives in memory, so a socket that outlived an earlier instance lost it and can only reconnect.
-      for (const socket of ctx.getWebSockets()) socket.close(1012, 'Telefunc session reset; reconnect')
     }
 
     async fetch(request: Request) {

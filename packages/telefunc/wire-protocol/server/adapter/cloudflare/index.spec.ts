@@ -356,10 +356,7 @@ describe('cloudflare adapter entrypoint', () => {
     const tf = new Telefunc()
     const DurableClass = tf.TelefuncDurableObject
     const instance = new DurableClass(
-      {
-        id: { toString: () => 'telefunc-room-binding-probe' },
-        getWebSockets: () => [],
-      } as unknown as DurableObjectState,
+      { id: { toString: () => 'telefunc-room-binding-probe' } } as unknown as DurableObjectState,
       { TelefuncDurableObject: binding } as unknown as Cloudflare.Env,
     ) as InstanceType<typeof DurableClass> & { fetch(request: Request): Promise<Response> }
     mocks.telefuncMock.mockImplementationOnce(async () => {
@@ -377,11 +374,8 @@ describe('cloudflare adapter entrypoint', () => {
     Object.assign(mocks.workerEnv, env)
     const tf = new Telefunc({ jurisdiction: 'eu' as DurableObjectJurisdiction })
     const DurableClass = tf.TelefuncDurableObject
-    const ctx = {
-      id: { toString: () => 'jurisdiction-probe' },
-      getWebSockets: () => [],
-    } as unknown as DurableObjectState
-    // The instance's own roles — room authority fanout included — take the namespace it is constructed with.
+    const ctx = { id: { toString: () => 'jurisdiction-probe' } } as unknown as DurableObjectState
+    // The instance's roles, room authority fanout included, use the namespace it is constructed with.
     const instance = new DurableClass(ctx, env) as InstanceType<typeof DurableClass> & {
       fetch(request: Request): Promise<Response>
     }
@@ -400,8 +394,7 @@ describe('cloudflare adapter entrypoint', () => {
   it('exports one Durable Object class for every role, on the configured binding', () => {
     const tf = new Telefunc({ bindingName: 'CustomTelefuncSession' })
     expect(Object.keys(tf).sort()).toEqual(['TelefuncDurableObject', 'serve'])
-    const ctx = { getWebSockets: () => [] } as unknown as DurableObjectState
-    expect(() => new tf.TelefuncDurableObject(ctx, {} as Cloudflare.Env)).toThrow(
+    expect(() => new tf.TelefuncDurableObject({} as DurableObjectState, {} as Cloudflare.Env)).toThrow(
       'Missing Cloudflare Durable Object binding "CustomTelefuncSession". Add it to your wrangler.jsonc.',
     )
   })
@@ -410,12 +403,7 @@ describe('cloudflare adapter entrypoint', () => {
     const { binding } = createBinding()
     const tf = new Telefunc({ context: vi.fn(async () => ({ userId: 'user-1' })) })
     const DurableClass = tf.TelefuncDurableObject
-    // Sockets an earlier instance accepted, whatever they carried, lost their channel state with it.
-    const recoveredSockets = [{ close: vi.fn() }, { close: vi.fn() }]
-    const ctx = {
-      id: { toString: () => 'session-probe-id' },
-      getWebSockets: () => recoveredSockets,
-    } as unknown as DurableObjectState
+    const ctx = { id: { toString: () => 'session-probe-id' } } as unknown as DurableObjectState
     const instance = new DurableClass(ctx, {
       TelefuncDurableObject: binding,
     } as unknown as Cloudflare.Env) as InstanceType<typeof DurableClass> & {
@@ -427,9 +415,6 @@ describe('cloudflare adapter entrypoint', () => {
       telefuncBroadcastDeliver(request: BroadcastDeliverRequest): void
       telefuncBroadcastPresence(request: BroadcastPresenceRequest): void
       telefuncRoomInvalidate(request: unknown): void
-    }
-    for (const socket of recoveredSockets) {
-      expect(socket.close).toHaveBeenCalledWith(1012, 'Telefunc session reset; reconnect')
     }
     expect(mocks.transportInstances[0]?.attachBinding).toHaveBeenCalledWith(binding, 'TelefuncDurableObject')
     expect(mocks.crosswsAdapter.handleDurableInit).toHaveBeenCalledWith(instance, ctx, {
