@@ -34,7 +34,10 @@ import {
   type RoomFanoutNamespace,
   type RoomFanoutRequest,
 } from '../../packages/telefunc/wire-protocol/server/adapter/cloudflare/room/fanout.js'
-const broadcast = new CloudflareBroadcastTransport({ baseInstanceName: 'telefunc' })
+const broadcast = new CloudflareBroadcastTransport({
+  baseInstanceName: 'telefunc',
+  namespace: () => (workerEnv as unknown as Env).PUBLIC,
+})
 installBackend(
   () =>
     new CloudflareRoomBackend({
@@ -54,7 +57,6 @@ export class PublicDurableObject extends RoomAuthorityHost<Env> {
   readonly #member: CloudflareBroadcastMember
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env, fanoutNamespace(env.PUBLIC))
-    broadcast.attachBinding(env.PUBLIC, 'PUBLIC')
     this.#manager = new CloudflareRoomSessionManager(ctx.id.toString())
     this.#broadcastAuthority = new CloudflareBroadcastAuthorityState(ctx)
     this.#member = broadcast.member(ctx.id.toString(), this.#calls)

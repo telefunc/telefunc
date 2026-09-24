@@ -377,17 +377,20 @@ class CloudflareBroadcastMember {
 class CloudflareBroadcastTransport {
   private readonly baseInstanceName: string
   private readonly scale: CloudflareScale | undefined
-  private bindingName: string | null = null
-  private binding: DurableObjectNamespace | null = null
+  private readonly namespace: () => DurableObjectNamespace
 
-  constructor({ baseInstanceName, scale }: { baseInstanceName: string; scale?: CloudflareScale }) {
+  constructor({
+    baseInstanceName,
+    scale,
+    namespace,
+  }: {
+    baseInstanceName: string
+    scale?: CloudflareScale
+    namespace: () => DurableObjectNamespace
+  }) {
     this.baseInstanceName = baseInstanceName
     this.scale = scale
-  }
-
-  attachBinding(binding: DurableObjectNamespace, bindingName: string): void {
-    this.binding = binding
-    this.bindingName = bindingName
+    this.namespace = namespace
   }
 
   member(id: string, calls: BroadcastCalls): CloudflareBroadcastMember {
@@ -473,20 +476,15 @@ class CloudflareBroadcastTransport {
   }
 
   private stubByName(name: string, locationHint: LocationBucket | null): TelefuncDurableObjectStub {
-    const binding = this.requireBinding()
-    return binding.get(
-      binding.idFromName(name),
+    const namespace = this.namespace()
+    return namespace.get(
+      namespace.idFromName(name),
       locationHint === null ? undefined : { locationHint },
     ) as TelefuncDurableObjectStub
   }
 
   private stubById(id: string): TelefuncDurableObjectStub {
-    const binding = this.requireBinding()
-    return binding.get(binding.idFromString(id)) as TelefuncDurableObjectStub
-  }
-
-  private requireBinding(): DurableObjectNamespace {
-    assert(this.binding, `Missing Cloudflare Durable Object binding "${this.bindingName ?? 'unknown'}".`)
-    return this.binding
+    const namespace = this.namespace()
+    return namespace.get(namespace.idFromString(id)) as TelefuncDurableObjectStub
   }
 }

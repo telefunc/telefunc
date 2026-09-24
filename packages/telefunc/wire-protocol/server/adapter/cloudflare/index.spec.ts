@@ -18,7 +18,6 @@ const mocks = vi.hoisted(() => {
   }
   class MockCloudflareBroadcastTransport {
     readonly options: unknown
-    readonly attachBinding = vi.fn()
     readonly publishToSubscribers = vi.fn()
     readonly forwardToBucket = vi.fn()
     readonly members: Array<{ id: string; locate: Mock; deliver: Mock }> = []
@@ -310,11 +309,13 @@ describe('cloudflare adapter entrypoint', () => {
     expect(jurisdiction).toHaveBeenCalledWith('eu')
   })
 
-  it('passes base transport options to the broadcast transport', () => {
+  it('passes base transport options and the Worker env namespace to the broadcast transport', () => {
+    const { binding } = createBinding()
+    mocks.workerEnv.TelefuncDurableObject = binding
     new Telefunc()
-    expect(mocks.transportInstances[0]?.options).toEqual(
-      expect.objectContaining({ baseInstanceName: 'telefunc', scale: undefined }),
-    )
+    const options = mocks.transportInstances[0]?.options as { namespace: () => DurableObjectNamespace }
+    expect(options).toEqual(expect.objectContaining({ baseInstanceName: 'telefunc', scale: undefined }))
+    expect(options.namespace()).toBe(binding)
   })
 
   it('installs the Durable Object Room backend from the documented Cloudflare setup alone', async () => {
@@ -416,7 +417,6 @@ describe('cloudflare adapter entrypoint', () => {
       telefuncBroadcastPresence(request: BroadcastPresenceRequest): void
       telefuncRoomInvalidate(request: unknown): void
     }
-    expect(mocks.transportInstances[0]?.attachBinding).toHaveBeenCalledWith(binding, 'TelefuncDurableObject')
     expect(mocks.crosswsAdapter.handleDurableInit).toHaveBeenCalledWith(instance, ctx, {
       TelefuncDurableObject: binding,
     })

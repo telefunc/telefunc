@@ -116,7 +116,11 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
     () =>
       new CloudflareRoomBackend({
         rooms: () => sessionNamespace(workerEnv as Cloudflare.Env) as unknown as CloudflareRoomNamespace,
-        broadcast: new CloudflareBroadcastTransport({ baseInstanceName, scale }),
+        broadcast: new CloudflareBroadcastTransport({
+          baseInstanceName,
+          scale,
+          namespace: () => sessionNamespace(workerEnv as Cloudflare.Env),
+        }),
       }),
     ['cloudflare', baseInstanceName, JSON.stringify(scale ?? null), jurisdiction ?? null],
   )
@@ -139,7 +143,6 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
 
     constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
       super(ctx, env, sessionNamespace(env) as unknown as RoomFanoutNamespace)
-      broadcast.attachBinding(sessionNamespace(env), bindingName)
       this.authorityState = new CloudflareBroadcastAuthorityState(ctx)
       this.broadcastMember = broadcast.member(ctx.id.toString(), this.broadcastCalls)
       crosswsAdapter.handleDurableInit(this, ctx, env)

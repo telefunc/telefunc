@@ -5,6 +5,8 @@ import { autoRetry, expect, getServerUrl, page, test } from '@brillout/test-e2e'
 import { testCounter, testRunClassic } from '../../test/utils'
 
 function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
+  // First, so no session Durable Object exists in the isolate yet.
+  testBroadcastPublishFromWorker()
   testCloudflareBindings()
   if (cmd === 'pnpm run preview') testRoomAsyncContextRecipe()
   testRunClassic(cmd, {
@@ -19,6 +21,13 @@ function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
   testChannel()
   testChat()
   testRoom()
+}
+
+function testBroadcastPublishFromWorker() {
+  test('Broadcast.publish() from the Worker, outside any session', async () => {
+    const response = await fetch(getServerUrl() + '/__broadcast-publish-from-worker')
+    expect(response.status).toBe(204)
+  })
 }
 
 function testRoomAsyncContextRecipe() {
