@@ -21,12 +21,12 @@ import { stringify } from '@brillout/json-serializer/stringify'
 import { parse } from '@brillout/json-serializer/parse'
 import { assert, assertUsage } from '../../utils/assert.js'
 import { isPromise } from '../../utils/isPromise.js'
-import { ChannelClosedError, ChannelOverflowError, isExpectedChannelFailure } from '../channel-errors.js'
+import { ChannelClosedError, ChannelOverflowError } from '../channel-errors.js'
 import { ACK_STATUS, encodePublishText, encodePublishBinary } from '../shared-ws.js'
 import type { BroadcastKind, WirePublishInfo } from '../shared-ws.js'
 import { STATUS_BODY_INTERNAL_SERVER_ERROR } from '../../shared/constants.js'
 import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
-import { classifyTelefuncError } from '../error-classification.js'
+import { isAbort } from '../../node/server/Abort.js'
 assertIsNotBrowser()
 
 const SERVER_BROADCAST_BRAND: unique symbol = Symbol.for('ServerBroadcast')
@@ -339,7 +339,7 @@ function bufferLimit(kind: BroadcastKind): number {
   return kind === 'binary' ? channel.bufferLimitBinary : channel.bufferLimit
 }
 
+/** As for a channel listener, every error is reported but an Abort, which has no channel to close here. */
 function reportStaticListenerError(error: unknown): void {
-  if (classifyTelefuncError(error, isExpectedChannelFailure).kind !== 'bug') return
-  reportServerChannelError(error)
+  if (!isAbort(error)) reportServerChannelError(error)
 }

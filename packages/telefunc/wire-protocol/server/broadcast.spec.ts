@@ -636,12 +636,17 @@ describe('Broadcast static bus (publish/subscribe)', () => {
     const unsubscribe = Broadcast.subscribe<{ text: string }>('room:static', (msg) => received.push(msg))
     const unsubscribeBug = Broadcast.subscribe('room:static', () => Promise.reject(new Error('static text bug')))
     const unsubscribeAbort = Broadcast.subscribe('room:static', () => Promise.reject(Abort('expected')))
+    const unsubscribeClosed = Broadcast.subscribe('room:static', () => {
+      throw new ChannelClosedError()
+    })
     await Broadcast.publish('room:static', { text: 'fire-and-forget' })
-    await vi.waitFor(() => expect(report).toHaveBeenCalledOnce())
+    // Every error but the Abort, as for a channel listener.
+    await vi.waitFor(() => expect(report).toHaveBeenCalledTimes(2))
     expect(received).toEqual([{ text: 'fire-and-forget' }])
     unsubscribe()
     unsubscribeBug()
     unsubscribeAbort()
+    unsubscribeClosed()
   })
 
   it('static unsubscribe stops further deliveries', async () => {
