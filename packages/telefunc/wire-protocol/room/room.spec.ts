@@ -1639,6 +1639,23 @@ describe('Room public behavior', () => {
     await publisher.publish('after')
     await vi.waitFor(() => expect(texts).toEqual(['newest', 'after']))
   })
+  it("keeps another member's in-flight text when a retained frame replays", async () => {
+    const authority = await Room.create('retained-other-sender')
+    const a = await authority.join()
+    const b = await authority.join()
+    const observer = await Room.get(authority.id)
+    const live = holdLaneDelivery((lane) => lane.kind === 'semantic')
+    const fromA: unknown[] = []
+    const fromB: unknown[] = []
+    ;(await observer.getParticipant(a.id))!.subscribe((data) => void fromA.push(data))
+    await a.publish('a-1')
+    await b.publish('b', { retain: true })
+    ;(await observer.getParticipant(b.id))!.subscribe((data) => void fromB.push(data))
+    await vi.waitFor(() => expect(fromB).toEqual(['b']))
+    await live.release()
+    expect(fromA).toEqual(['a-1'])
+    expect(fromB).toEqual(['b'])
+  })
   it('waits for roster-derived binary routes before reading retained frames', async () => {
     const authority = await Room.create('retained-binary-roster-fence')
     const publisher = await authority.join()
@@ -1738,6 +1755,16 @@ describe('Room public behavior', () => {
     await vi.waitFor(() => expect(semanticFrames(peer, 'data')).toEqual(['early', 'held']))
     await member.publish('live')
     expect(semanticFrames(peer, 'data')).toEqual(['early', 'held', 'live'])
+  })
+  it('flushes held tail text after an announcement relayed before the first text subscription', async () => {
+    const { member, tail } = await createTail('tail-announce')
+    const { stub, peer } = serve(tail)
+    declare(stub, { __r: 'sub-text', members: [], announce: true })
+    await member.publish('held')
+    await Room.announce(tail.id, 'notice')
+    await vi.waitFor(() => expect(semanticFrames(peer, 'announce')).toEqual(['notice']))
+    stub._onPeerBroadcastSubscribe(false)
+    await vi.waitFor(() => expect(semanticFrames(peer, 'data')).toEqual(['held']))
   })
   it("applies a reattach entry's text subscription as the Room stub's want, not as a Broadcast route", async () => {
     const room = (await Room.create('reattach-text')) as ServerRoom

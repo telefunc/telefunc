@@ -1,4 +1,4 @@
-export { ReplayGate, LocalHolder, TEXT_LANE_KEY, binaryLaneKey }
+export { ReplayGate, LocalHolder, ANNOUNCE_KEY, binaryLaneKey }
 export type { LaneHolder, WantsChange }
 
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
@@ -9,24 +9,27 @@ import type { MemberWants, RoomDataEnvelope } from '../protocol.js'
 import type { RoomState } from '../state.js'
 assertIsNotBrowser()
 
-const TEXT_LANE_KEY = 'text'
+// Gate keys: a member's text by its id, announcements by a key no id takes, a binary lane by id NUL track.
+const ANNOUNCE_KEY = '\0announce'
 function binaryLaneKey(member: string, track: string): string {
   return `${member}\0${track}`
 }
 
-/** One holder's lane order across retained replay and live frames: a frame is admitted only if it is newer than every
- *  frame the holder already has on its lane. A replayed retained frame can win the race against live frames committed
- *  before it, so this drops its live echo and those older frames, and a retained frame older than the live stream. */
+/** One holder's order across retained replay and live frames, per sender: a frame is admitted only if it is newer than
+ *  every frame the holder already has from that sender on its lane. A replayed retained frame can win the race against
+ *  live frames committed before it, so this drops its live echo and the sender's older frames, and a retained frame
+ *  older than the sender's live stream. Another sender's frames are never dropped by it. */
 class ReplayGate {
   private readonly _high = new Map<string, number>()
 
-  admit(lane: string, seq: number): boolean {
-    if ((this._high.get(lane) ?? 0) >= seq) return false
-    this._high.set(lane, seq)
+  admit(key: string, seq: number): boolean {
+    if ((this._high.get(key) ?? 0) >= seq) return false
+    this._high.set(key, seq)
     return true
   }
 
   forgetMember(member: string): void {
+    this._high.delete(member)
     const prefix = binaryLaneKey(member, '')
     for (const key of this._high.keys()) if (key.startsWith(prefix)) this._high.delete(key)
   }
@@ -87,11 +90,11 @@ class LocalHolder implements LaneHolder {
   }
 
   relayText(event: RoomDataEnvelope, info: WirePublishInfo): void {
-    if (this._wantsTextFrom(event.from) && this._replay.admit(TEXT_LANE_KEY, info.seq)) this._applyText(event, info)
+    if (this._wantsTextFrom(event.from) && this._replay.admit(event.from, info.seq)) this._applyText(event, info)
   }
 
   relayAnnouncement(data: unknown, info: WirePublishInfo): void {
-    if (this._state.wantsAnnounce && this._replay.admit(TEXT_LANE_KEY, info.seq))
+    if (this._state.wantsAnnounce && this._replay.admit(ANNOUNCE_KEY, info.seq))
       this._state.applyAnnounce(data, this._publishInfo(info))
   }
 
@@ -102,7 +105,7 @@ class LocalHolder implements LaneHolder {
   }
 
   _emitRetainedText(_serialized: string, event: RoomDataEnvelope, info: WirePublishInfo): void {
-    if (this._replay.admit(TEXT_LANE_KEY, info.seq)) this._applyText(event, info)
+    if (this._replay.admit(event.from, info.seq)) this._applyText(event, info)
   }
 
   _emitRetainedBinary(_framed: Uint8Array, frame: BinaryFrame, info: WirePublishInfo): void {

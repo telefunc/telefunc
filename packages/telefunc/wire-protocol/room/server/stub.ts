@@ -21,7 +21,7 @@ import {
   decodeStubBinaryFrame,
   type RoomDeclaration,
 } from './requests.js'
-import { ReplayGate, TEXT_LANE_KEY, binaryLaneKey, type LaneHolder } from './replay.js'
+import { ANNOUNCE_KEY, ReplayGate, binaryLaneKey, type LaneHolder } from './replay.js'
 import { TailHold, type TailEntry } from './tail.js'
 import type { ParticipantMeta } from '../types.js'
 import { binaryWantsCovers, emptyBinaryWants, laneTrack, type BinaryFrame, type BinaryWants } from '../binary.js'
@@ -248,12 +248,12 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
   }
 
   _relayAnnouncement(wireText: string, ord: RoomOrder): void {
-    if (this._announce) this._relayTextLive(wireText, ord)
+    if (this._announce) this._relayTextLive(ANNOUNCE_KEY, wireText, ord)
   }
 
   _relayText(serialized: string, wireText: string, from: string, ord: RoomOrder): void {
     if (this._tail !== null) this._tail.push({ serialized, ord, from })
-    else if (this._wantsTextFrom(from)) this._relayTextLive(wireText, ord)
+    else if (this._wantsTextFrom(from)) this._relayTextLive(from, wireText, ord)
   }
 
   _relayBinary(wireData: Uint8Array, from: string, track: string, info: WirePublishInfo): void {
@@ -267,8 +267,8 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
     this._sendPublish(wireText)
   }
 
-  _emitRetainedText(serialized: string, _event: RoomDataEnvelope, info: WirePublishInfo): void {
-    if (this._replay.admit(TEXT_LANE_KEY, info.seq)) this._sendPublish(encodePublishText(serialized, info))
+  _emitRetainedText(serialized: string, event: RoomDataEnvelope, info: WirePublishInfo): void {
+    if (this._replay.admit(event.from, info.seq)) this._sendPublish(encodePublishText(serialized, info))
   }
 
   _emitRetainedBinary(framed: Uint8Array, frame: BinaryFrame, info: WirePublishInfo): void {
@@ -276,8 +276,8 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
       this._sendPublishBinary(encodePublishBinary(framed, info))
   }
 
-  private _relayTextLive(wireText: string, ord: RoomOrder): void {
-    if (this._replay.admit(TEXT_LANE_KEY, ord.seq)) this._sendPublish(wireText)
+  private _relayTextLive(key: string, wireText: string, ord: RoomOrder): void {
+    if (this._replay.admit(key, ord.seq)) this._sendPublish(wireText)
   }
 
   // Ack-DM correlations
@@ -318,7 +318,7 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
     this._tail = null
     for (const { serialized, ord, from } of held) {
       if (!this._wantsTextFrom(from)) continue
-      this._relayTextLive(encodePublishText(serialized, ord), ord)
+      this._relayTextLive(from, encodePublishText(serialized, ord), ord)
     }
   }
 
