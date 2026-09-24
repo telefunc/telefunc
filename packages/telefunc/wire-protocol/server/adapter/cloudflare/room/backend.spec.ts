@@ -7,6 +7,8 @@ import {
   type CloudflareRoomNamespace,
 } from './backend.js'
 import { encodeLaneKey } from '../../../../backend/room/lane-key.js'
+import { ROUTE_RENEW_EVERY_MS } from './routes.js'
+import type { CloudflareRoomSubscriptionAttempt } from './subscription.js'
 import { CloudflareBroadcastTransport } from '../broadcast.js'
 import { withCloudflareSession } from '../session.js'
 
@@ -77,4 +79,82 @@ test('a session delivers a frame for the lease its subscription holds, and drops
   await manager.deliver(frame(2, 'stale-lease'))
   expect(received).toEqual([1])
   await attempt.unsubscribe()
+})
+
+function openAttempt(authority: Record<string, (...args: never[]) => Promise<unknown>>, received: number[] = []) {
+  const route = {
+    registerRoute: async () => ({ ok: true }),
+    renewRoute: async () => ({ ok: true }),
+    unsubscribeRoute: async () => {},
+    ...authority,
+  }
+  const attempt = new CloudflareRoomSessionManager('session').openSubscription(
+    { roomId: 'room', inc: 'inc', lane: { kind: 'semantic' } },
+    route as unknown as CloudflareRoomAuthorityStub,
+    (payload) => void received.push(payload[0]!),
+  )
+  return attempt
+}
+
+function endOf(attempt: CloudflareRoomSubscriptionAttempt): Promise<Error | undefined> {
+  return new Promise((resolve) => attempt.onStateChange((state, reason) => state === 'closed' && resolve(reason)))
+}
+
+test.each([
+  [
+    'its registration throws',
+    async () => {
+      throw new Error('authority unreachable')
+    },
+    'authority unreachable',
+  ],
+  [
+    'the room refuses its route',
+    async () => ({ rejected: true, reason: 'no open incarnation' }),
+    'no open incarnation',
+  ],
+])('an attempt whose %s ends closed, with the reason', async (_name, registerRoute, reason) => {
+  await expect(endOf(openAttempt({ registerRoute }))).resolves.toMatchObject({ message: reason })
+})
+
+test.each([
+  ['stays ready and renews again while its route is live', async () => ({ ok: true }), 'ready', 0],
+  ['ends and releases its route once the generation is gone', async () => ({ ok: false, terminal: true }), 'closed', 1],
+  ['ends when its route lapsed, with nothing left to release', async () => ({ ok: false }), 'closed', 0],
+  [
+    'ends when the authority is unreachable',
+    async () => {
+      throw new Error('unreachable')
+    },
+    'closed',
+    0,
+  ],
+])('a ready attempt %s', async (_name, renewRoute, state, releases) => {
+  vi.useFakeTimers()
+  try {
+    let released = 0
+    const attempt = openAttempt({ renewRoute, unsubscribeRoute: async () => void released++ })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(attempt.state()).toBe('ready')
+    await vi.advanceTimersByTimeAsync(ROUTE_RENEW_EVERY_MS)
+    expect(attempt.state()).toBe(state)
+    expect(released).toBe(releases)
+    await attempt.unsubscribe()
+  } finally {
+    vi.useRealTimers()
+  }
+})
+
+test('an invalidated attempt drops later deliveries, and its route is released once', async () => {
+  let released = 0
+  const received: number[] = []
+  const attempt = openAttempt({ unsubscribeRoute: async () => void released++ }, received)
+  await vi.waitFor(() => expect(attempt.state()).toBe('ready'))
+  attempt.invalidate()
+  attempt.invalidate()
+  await attempt.deliver(new Uint8Array([1]), 1, 1)
+  expect(received).toEqual([])
+  attempt.terminate()
+  await attempt.unsubscribe()
+  expect(released).toBe(1)
 })
