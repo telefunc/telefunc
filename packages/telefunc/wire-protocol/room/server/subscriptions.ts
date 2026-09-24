@@ -40,6 +40,8 @@ type SubscriptionHost = {
     'closed' | 'rosterKnown' | 'listenerCount' | 'membershipVersion' | 'getRemote' | 'listMemberIds' | 'memberTracks'
   >
   _holderWants(): HolderWants
+  /** Whether some holder receives the pair: a publisher's own suppressed frames are no demand and need no lane. */
+  _wantsBinary(member: string, track: string): boolean
   /** A pending admission owns its inbox, but its record is renewed only once it commits. */
   _ownedMembers(): { all: string[]; renewable: string[] }
   _onCtrlMessage(serialized: string, info: WirePublishInfo): void
@@ -208,7 +210,7 @@ class RoomSubscriptions {
       const memberWants = wants.members[memberId]
       const eff = memberWants ? mergeTrackWants(wants.everyMember, memberWants) : wants.everyMember
       const tracks = eff.all ? [DEFAULT_TRACK, ...state.memberTracks(memberId)] : eff.tracks
-      for (const track of tracks) pairs.push([memberId, track])
+      for (const track of tracks) if (this._host._wantsBinary(memberId, track)) pairs.push([memberId, track])
     }
     return pairs
   }

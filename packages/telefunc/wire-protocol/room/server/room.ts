@@ -809,6 +809,11 @@ class ServerRoom extends RoomStateView implements Room {
     }
   }
 
+  /** @internal */
+  _wantsBinary(member: string, track: string): boolean {
+    return this._local._wantsBinary(member, track) || [...this._stubs].some((stub) => stub._wantsBinary(member, track))
+  }
+
   private _textWants(holders: LaneHolder[]): { all: boolean; members: Set<string> } {
     if (this._tail !== null) return { all: true, members: new Set() } // pre-attach tail: ingest everything now
     const members = new Set<string>()

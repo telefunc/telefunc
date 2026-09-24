@@ -1784,6 +1784,19 @@ describe('Room public behavior', () => {
       ]),
     )
   })
+  it("counts no demand from a selfDelivery: false publisher's own side", async () => {
+    const room = (await Room.create('self-demand')) as ServerRoom
+    const me = await room.join({ selfDelivery: false })
+    const changes: Array<[string | null, boolean]> = []
+    me.onDemand((track, wanted) => changes.push([track, wanted]))
+    room.subscribeBinary(() => {}, { track: 'mic' })
+    await subsOf(room).binaryReady()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(changes).toEqual([])
+    const { stub } = serve(room)
+    declare(stub, { __r: 'sub-binary', wants: { everyMember: { all: false, tracks: ['mic'] }, members: {} } })
+    await vi.waitFor(() => expect(changes).toEqual([['mic', true]]))
+  })
   it('replays already-true demand when the publisher attaches its handler', async () => {
     const authority = await Room.create('late-demand-handler')
     const observer = await Room.get(authority.id)
