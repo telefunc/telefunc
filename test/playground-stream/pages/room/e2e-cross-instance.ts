@@ -35,6 +35,22 @@ function testRedisRoomCrossInstance() {
       ])
     }
   })
+  test('room: a closed room leaves no Redis key without an expiry, and its next incarnation reuses no rev', async () => {
+    const roomId = `redis-closed-keys-${Date.now()}-${Math.random().toString(36).slice(2)}`
+    const redisKeys = () => request('a', '/api/room-cross-instance/redis-keys', roomId)
+    await retry(30_000, async () => {
+      expect(await request('a', '/api/room-cross-instance/join', roomId, 'POST')).to.deep.include({ ok: true })
+    })
+    const { headRev: firstRev } = await redisKeys()
+    await request('a', '/api/room-cross-instance/leave', roomId, 'DELETE')
+    await request('a', '/api/room-cross-instance/close', roomId, 'POST')
+    expect((await redisKeys()).unexpiring).to.deep.equal([])
+    // Once the tombstone lapses, the rev counter lapses with it and starts over.
+    await request('a', '/api/room-cross-instance/redis-keys', roomId, 'DELETE')
+    await request('a', '/api/room-cross-instance/join', roomId, 'POST')
+    expect((await redisKeys()).headRev).not.to.equal(firstRev)
+    await request('a', '/api/room-cross-instance/leave', roomId, 'DELETE')
+  })
 }
 
 function testRedisBroadcastCrossInstance() {

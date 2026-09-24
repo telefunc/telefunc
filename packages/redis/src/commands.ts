@@ -110,13 +110,19 @@ if not matches then
 end
 
 -- apply: mint the lease deadline from authority time inside this same atomic record, store, register gen
-local stored = { rev = 'rev-' .. redis.call('INCR', rev_key), state = nx.state, config = nx.config }
+-- The rev counter lapses with a tombstone; salted with authority time, a rev still never repeats.
+local stored = { rev = 'rev-' .. string.format('%d', now) .. '-' .. redis.call('INCR', rev_key), state = nx.state, config = nx.config }
 if nx.inc ~= nil then stored.inc = nx.inc end
 if nx.lease ~= nil then stored.lease = { id = nx.lease.id, ['until'] = now + nx.lease.durationMs } end
 if nx.ttlMs ~= nil then stored.exp = now + nx.ttlMs end
 local encoded = cjson.encode(stored)
 redis.call('SET', head_key, encoded)
-if nx.ttlMs ~= nil then redis.call('PEXPIRE', head_key, nx.ttlMs) end
+if nx.ttlMs ~= nil then
+  redis.call('PEXPIRE', head_key, nx.ttlMs)
+  redis.call('PEXPIRE', rev_key, nx.ttlMs)
+else
+  redis.call('PERSIST', rev_key)
+end
 if nx.inc ~= nil then redis.call('SADD', gens_key, nx.inc) end
 return '{"tag":"head","head":' .. encoded .. '}'
 `
