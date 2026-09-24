@@ -30,7 +30,11 @@ if (process.env.REDIS_CLUSTER_NODES) {
   installRedis(new IORedis(process.env.REDIS_URL, { maxRetriesPerRequest: 0 }))
   console.log(`[INST=${INST}] Redis backend installed`)
 }
-const inspector = process.env.REDIS_URL ? new IORedis(process.env.REDIS_URL, { maxRetriesPerRequest: 0 }) : null
+// Standalone Redis only: one node holds every key a SCAN has to see.
+const inspector =
+  process.env.REDIS_URL && !process.env.REDIS_CLUSTER_NODES
+    ? new IORedis(process.env.REDIS_URL, { maxRetriesPerRequest: 0 })
+    : null
 
 // Exit cleanly on Docker stop so V8 flushes `--cpu-prof` output.
 for (const sig of ['SIGINT', 'SIGTERM'] as const) {

@@ -1,4 +1,4 @@
-export { testRedisRoomCrossInstance, testRedisBroadcastCrossInstance }
+export { testRedisRoomCrossInstance, testRedisRoomClosedKeys, testRedisBroadcastCrossInstance }
 
 import { autoRetry, expect, getServerUrl, test } from '@brillout/test-e2e'
 
@@ -35,6 +35,9 @@ function testRedisRoomCrossInstance() {
       ])
     }
   })
+}
+
+function testRedisRoomClosedKeys() {
   test('room: a closed room leaves no Redis key without an expiry, and its next incarnation reuses no rev', async () => {
     const roomId = `redis-closed-keys-${Date.now()}-${Math.random().toString(36).slice(2)}`
     const redisKeys = () => request('a', '/api/room-cross-instance/redis-keys', roomId)
