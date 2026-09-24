@@ -192,7 +192,9 @@ describe('Redis real three-master Cluster CI certification', () => {
       await runtime.authority.dropGeneration(roomId, inc)
       runtime.releaseSubscribe.resolve()
       await waitFor(() => subscription.state() === 'closed')
-      expect(String(await ready)).toMatch(/ownership terminated/i)
+      const ended = (await ready) as Error
+      expect(ended.message).toMatch(/subscription closed/i)
+      expect(String((ended.cause as Error | undefined)?.message)).toMatch(/generation/i)
       expect(states).not.toContain('lost')
       expect(runtime.subscriberOpens()).toBe(2)
       await subscription.unsubscribe()
