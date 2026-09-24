@@ -92,12 +92,12 @@ describe('backend installation lifecycle', () => {
   it('a publish reaches every instance sharing the transport once, with the transport-assigned receipt', async () => {
     const shared = localTransport()
     const instances = [0, 1].map(() => superviseBroadcastDriver(createBroadcastTransportDriver(shared)))
-    const lane = { key: 'cross-instance', kind: 'text' } as const
+    const route = { key: 'cross-instance', kind: 'text' } as const
     const seen: string[] = []
     for (const [index, instance] of instances.entries()) {
-      await instance.subscribe(lane, (bytes) => void seen.push(`${index}:${new TextDecoder().decode(bytes)}`)).ready
+      await instance.subscribe(route, (bytes) => void seen.push(`${index}:${new TextDecoder().decode(bytes)}`)).ready
     }
-    const receipt = await instances[0]!.publish(lane, new TextEncoder().encode('hi'), 1024)
+    const receipt = await instances[0]!.publish(route, new TextEncoder().encode('hi'), 1024)
     expect(seen.sort()).toEqual(['0:hi', '1:hi'])
     expect(receipt).toEqual({ seq: 1, timestamp: expect.any(Number) })
     await Promise.all(instances.map((instance) => instance.dispose()))
@@ -175,11 +175,14 @@ function localTransport(): BroadcastTransport {
 }
 
 async function expectBroadcastRoundTrip(payload: string): Promise<void> {
-  const lane = { key: 'override-order', kind: 'text' } as const
+  const route = { key: 'override-order', kind: 'text' } as const
   const seen: string[] = []
-  const subscription = getBroadcastBackend().subscribe(lane, (bytes) => void seen.push(new TextDecoder().decode(bytes)))
+  const subscription = getBroadcastBackend().subscribe(
+    route,
+    (bytes) => void seen.push(new TextDecoder().decode(bytes)),
+  )
   await subscription.ready
-  await getBroadcastBackend().publish(lane, new TextEncoder().encode(payload), 1024)
+  await getBroadcastBackend().publish(route, new TextEncoder().encode(payload), 1024)
   expect(seen).toEqual([payload])
   await subscription.unsubscribe()
 }

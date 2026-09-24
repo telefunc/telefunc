@@ -60,12 +60,12 @@ function driverWith(
   }
 }
 
-const lane = { key: 'chat', kind: 'text' } as const
+const route = { key: 'chat', kind: 'text' } as const
 
 test('shares one subscriber connection across lanes', async () => {
   const sockets: ReturnType<typeof fakeSubscriber>[] = []
   const { driver, createSubscriber } = driverWith(sockets)
-  const first = driver.bind(lane).open(
+  const first = driver.bind(route).open(
     () => {},
     () => 1,
   )
@@ -83,7 +83,7 @@ test('re-subscribes on a fresh connection and resumes delivery after a drop', as
   const { driver } = driverWith(sockets)
   const received: number[] = []
   const states: SubscriptionState[] = []
-  const attempt = driver.bind(lane).open(
+  const attempt = driver.bind(route).open(
     (payload) => void received.push(payload[0]!),
     () => 1,
   )
@@ -126,7 +126,7 @@ test('a SUBSCRIBE that keeps failing backs off and is reported once', async () =
     return socket as unknown as SubscriberSocket
   })
   const driver = new RedisSubscriptionDriver({ prefix: 'tf:', createSubscriber, validateGeneration: async () => true })
-  const attempt = driver.bind(lane).open(
+  const attempt = driver.bind(route).open(
     () => {},
     () => 1,
   )
@@ -175,7 +175,7 @@ test('terminates a Room lane whose incarnation closed while the connection was d
 test('releases the connection once the last subscription leaves', async () => {
   const sockets: ReturnType<typeof fakeSubscriber>[] = []
   const { driver } = driverWith(sockets)
-  const attempt = driver.bind(lane).open(
+  const attempt = driver.bind(route).open(
     () => {},
     () => 1,
   )

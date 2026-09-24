@@ -49,6 +49,7 @@ export class RedisSubscriptionDriver implements SubscriptionDriver<RedisSubscrip
   private _connection: Connection = { phase: 'idle' }
   private _nextId = 0
   private _syncing: Promise<void> = Promise.resolve()
+  private _syncQueued = false
   private _reconnectDelay = RECONNECT_DELAY_MIN_MS
   /** An establishing attempt reports no failure, so the first one of an outage is reported here. */
   private _outageReported = false
@@ -174,9 +175,13 @@ export class RedisSubscriptionDriver implements SubscriptionDriver<RedisSubscrip
     return (connection.phase === 'connecting' || connection.phase === 'connected') && connection.id === id
   }
 
-  /** Serialized: brings the connection's channel set to the attempts' and confirms what it covers. */
+  /** Serialized: brings the connection's channel set to the attempts' and confirms what it covers. A sync reads the
+   *  wanted set when it starts, so one that is queued already covers any later request. */
   private _syncChannels(): void {
+    if (this._syncQueued) return
+    this._syncQueued = true
     this._syncing = this._syncing.then(async () => {
+      this._syncQueued = false
       const connection = this._connection
       if (connection.phase !== 'connected') return
       try {

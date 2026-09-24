@@ -738,13 +738,14 @@ class ServerRoom extends RoomStateView implements Room {
     return { id: admission.id, joinedAt: admission.joinedAt }
   }
   async _replayRetainedText(holder: LaneHolder, previous: MemberWants): Promise<void> {
+    if (previous.all) return
     // Read retained only after subscription readiness: a racing commit is then retained or live, never lost in the gap.
     await withinRoomHorizon(this._subs.semanticReady, ROOM_HORIZON_MS)
     const stored = await getRoomBackend().readRetained(this.id, this._inc, SEMANTIC_LANE)
     if (stored === null) return
     const serialized = decodeRoomText(stored.payload)
     const event = parse(serialized) as RoomDataEnvelope
-    if (previous.all || previous.members.includes(event.from) || !holder._wantsTextFrom(event.from)) return
+    if (previous.members.includes(event.from) || !holder._wantsTextFrom(event.from)) return
     // Replay the stored order as-is; the holder admits it only if it is newer than what it has.
     holder._emitRetainedText(serialized, event, { seq: stored.seq, timestamp: stored.timestamp })
   }
@@ -755,8 +756,12 @@ class ServerRoom extends RoomStateView implements Room {
     // Binary uses the same readiness handoff and stored receipt; its holder dedupes the live/retained race per lane.
     await this._subs.binaryReady()
     const backend = getRoomBackend()
+    // A binary lane is keyed by its frames' sender and track, so only newly wanted lanes are read.
     const lanes = (await backend.listRetained(this.id, this._inc)).filter(
-      (lane): lane is Extract<LaneId, { kind: 'binary' }> => lane.kind === 'binary',
+      (lane): lane is Extract<LaneId, { kind: 'binary' }> =>
+        lane.kind === 'binary' &&
+        !binaryWantsCovers(prevWants, lane.member, lane.track) &&
+        holder._wantsBinary(lane.member, lane.track),
     )
     for (const lane of lanes) {
       const stored = await backend.readRetained(this.id, this._inc, lane)
@@ -764,8 +769,6 @@ class ServerRoom extends RoomStateView implements Room {
       const framed = stored.payload
       const frame = decodeBinaryFrame(framed)
       assert(frame)
-      const track = laneTrack(frame.track)
-      if (binaryWantsCovers(prevWants, frame.from, track) || !holder._wantsBinary(frame.from, track)) continue
       holder._emitRetainedBinary(framed, frame, { seq: stored.seq, timestamp: stored.timestamp })
     }
   }

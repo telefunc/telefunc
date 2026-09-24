@@ -2036,25 +2036,25 @@ describe('Room public behavior', () => {
     expect(backend).not.toBeInstanceOf(MemoryBackend)
     const member = await room.join()
     expect(await member.publish('works')).toMatchObject({ seq: 1 })
-    const lane = { key: 'zero-config-supervision', kind: 'text' } as const
+    const route = { key: 'zero-config-supervision', kind: 'text' } as const
     const received: string[] = []
     const firstReceived = deferred<void>()
     let secondReceived = deferred<void>()
-    const first = broadcast.subscribe(lane, (payload) => {
+    const first = broadcast.subscribe(route, (payload) => {
       received.push(`first:${decoder.decode(payload)}`)
       firstReceived.resolve()
     })
-    const second = broadcast.subscribe(lane, (payload) => {
+    const second = broadcast.subscribe(route, (payload) => {
       received.push(`second:${decoder.decode(payload)}`)
       secondReceived.resolve()
     })
     await Promise.all([first.ready, second.ready])
-    await broadcast.publish(lane, encoder.encode('one'), 1024)
+    await broadcast.publish(route, encoder.encode('one'), 1024)
     await Promise.all([firstReceived.promise, secondReceived.promise])
     expect(received).toEqual(['first:one', 'second:one'])
     await first.unsubscribe()
     secondReceived = deferred<void>()
-    await broadcast.publish(lane, encoder.encode('two'), 1024)
+    await broadcast.publish(route, encoder.encode('two'), 1024)
     await secondReceived.promise
     expect(received).toEqual(['first:one', 'second:one', 'second:two'])
     expect(second.state()).toBe('ready')
