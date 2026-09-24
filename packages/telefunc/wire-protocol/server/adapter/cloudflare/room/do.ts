@@ -1,5 +1,5 @@
 /// <reference types="@cloudflare/workers-types" />
-// One Room DO owns authority time/state/fanout; transaction rollback and RPC structured clone preserve SPI outcomes.
+// A room's authority owns its time, state and fanout; transaction rollback and RPC structured clone preserve SPI outcomes.
 
 import { DurableObject } from 'cloudflare:workers'
 import type {
@@ -53,8 +53,6 @@ export type CommitWire =
   | { accepted: true; seq: number; timestamp: number; receivers: number; deliveryToken: string }
   | StaleCommit
 export type RegisterWire = { ok: true } | { rejected: true; reason: string; terminal?: boolean }
-/** The session Durable Object namespace fan-out delivers to, as the adapter scopes it. */
-export type SessionNamespaceResolver = (env: unknown) => DurableObjectNamespace
 
 const ROOM_MAINTENANCE_RETRY_MS = 30_000
 
@@ -75,14 +73,16 @@ function reportLostDeliveries(outcomes: RoomFanoutOutcome[]): void {
     console.error(`Cloudflare Room delivery lost to ${failed.length}/${outcomes.length} routes: ${failed[0]!.error}`)
 }
 
-export class TelefuncRoomDurableObject extends DurableObject {
+/** The room authority role of a Telefunc Durable Object: `sessions` is the namespace its fanout delivers to. */
+export class RoomAuthority {
+  readonly #ctx: DurableObjectState
   readonly #sql: SqlStorage
   readonly #fanout: Fanout
   readonly #sessions: RoomFanoutNamespace
 
-  constructor(ctx: DurableObjectState, env: unknown, sessionNamespace: SessionNamespaceResolver) {
-    super(ctx, env as never)
-    this.#sessions = sessionNamespace(env) as unknown as RoomFanoutNamespace
+  constructor(ctx: DurableObjectState, sessions: RoomFanoutNamespace) {
+    this.#ctx = ctx
+    this.#sessions = sessions
     this.#sql = ctx.storage.sql
     initSchema(this.#sql)
     this.#fanout = new Fanout(
@@ -93,9 +93,7 @@ export class TelefuncRoomDurableObject extends DurableObject {
       // A macrotask, so a commit's RPC reply is sent before its fanout starts.
       (resume) => setTimeout(resume, 0),
     )
-    this.ctx.blockConcurrencyWhile(async () => {
-      await this.#scheduleMaintenanceIfNeeded()
-    })
+    void ctx.blockConcurrencyWhile(() => this.#scheduleMaintenanceIfNeeded())
   }
 
   async readHead(): Promise<RoomHead | null> {
@@ -105,7 +103,7 @@ export class TelefuncRoomDurableObject extends DurableObject {
 
   async compareExchangeHead(cx: HeadCx, next: HeadNext): Promise<HeadCxResult> {
     const now = Date.now()
-    const outcome = this.ctx.storage.transactionSync(() =>
+    const outcome = this.#ctx.storage.transactionSync(() =>
       compareExchangeHead(this.#sql, cx, next, now, () => crypto.randomUUID()),
     )
     await this.#scheduleMaintenanceIfNeeded()
@@ -120,13 +118,13 @@ export class TelefuncRoomDurableObject extends DurableObject {
 
   async compareExchangeCells(inc: string, revision: string, mutations: CellMutation[]): Promise<CxResult> {
     const now = Date.now()
-    return this.ctx.storage.transactionSync(() => compareExchangeCells(this.#sql, inc, revision, mutations, now))
+    return this.#ctx.storage.transactionSync(() => compareExchangeCells(this.#sql, inc, revision, mutations, now))
   }
 
   async commitLane(inc: string, lane: LaneId, payload: Uint8Array, opts?: CommitOptions): Promise<CommitWire> {
     const now = Date.now()
     const key = encodeLaneKey(lane)
-    const outcome = this.ctx.storage.transactionSync(
+    const outcome = this.#ctx.storage.transactionSync(
       (): StaleCommit | { seq: number; timestamp: number; routes: RouteInstallation[] } => {
         if (!commitPreconditionHolds(readLiveHead(this.#sql, now), inc, lane.kind, opts?.closingLease, now))
           return { stale: 'incarnation' }
@@ -160,11 +158,11 @@ export class TelefuncRoomDurableObject extends DurableObject {
   }
 
   async deleteRetained(inc: string, lane: LaneId, opts?: { ifSeq?: number }): Promise<void> {
-    this.ctx.storage.transactionSync(() => deleteRetained(this.#sql, inc, lane, opts))
+    this.#ctx.storage.transactionSync(() => deleteRetained(this.#sql, inc, lane, opts))
   }
 
   async registerRoute(route: RouteInstallation): Promise<RegisterWire> {
-    const result = this.ctx.storage.transactionSync((): RegisterWire => {
+    const result = this.#ctx.storage.transactionSync((): RegisterWire => {
       const now = Date.now()
       const head = readLiveHead(this.#sql, now)
       if (head === null || head.currentInc !== route.inc || head.state !== 'open')
@@ -179,7 +177,7 @@ export class TelefuncRoomDurableObject extends DurableObject {
   async renewRoute(route: RouteInstallation): Promise<{ ok: boolean; terminal?: boolean }> {
     const now = Date.now()
     // Missing exact routes recover with a fresh lease; only a dropped generation is terminal.
-    const result = this.ctx.storage.transactionSync(() =>
+    const result = this.#ctx.storage.transactionSync(() =>
       hasGeneration(this.#sql, route.inc) ? { ok: renewRoute(this.#sql, route, now) } : { ok: false, terminal: true },
     )
     await this.#scheduleMaintenanceIfNeeded()
@@ -187,7 +185,7 @@ export class TelefuncRoomDurableObject extends DurableObject {
   }
 
   async unsubscribeRoute(route: RouteInstallation): Promise<void> {
-    this.ctx.storage.transactionSync(() => deleteRoute(this.#sql, route))
+    this.#ctx.storage.transactionSync(() => deleteRoute(this.#sql, route))
     await this.#scheduleMaintenanceIfNeeded()
   }
 
@@ -199,16 +197,16 @@ export class TelefuncRoomDurableObject extends DurableObject {
   /** Routes and rows stay durable until every exact-lease uninstall succeeds, so a failed drop is retried by the sweep. */
   async #dropGenerationNow(inc: string): Promise<void> {
     await this.#terminateInstallations(listRouteInstallations(this.#sql, inc))
-    this.ctx.storage.transactionSync(() => dropGenerationRows(this.#sql, inc))
+    this.#ctx.storage.transactionSync(() => dropGenerationRows(this.#sql, inc))
     this.#fanout.clearIncarnation(inc)
   }
 
   async directoryPut(roomId: string, incTag: string): Promise<void> {
-    this.ctx.storage.transactionSync(() => directoryPut(this.#sql, roomId, incTag))
+    this.#ctx.storage.transactionSync(() => directoryPut(this.#sql, roomId, incTag))
   }
 
   async directoryDelete(roomId: string, incTag: string): Promise<void> {
-    this.ctx.storage.transactionSync(() => directoryDelete(this.#sql, roomId, incTag))
+    this.#ctx.storage.transactionSync(() => directoryDelete(this.#sql, roomId, incTag))
   }
 
   async directoryList(prefix: string, cursor?: string): Promise<DirectoryPage> {
@@ -224,7 +222,7 @@ export class TelefuncRoomDurableObject extends DurableObject {
   }
 
   async #runSweep(now: number): Promise<void> {
-    const orphanIncs = this.ctx.storage.transactionSync(() => {
+    const orphanIncs = this.#ctx.storage.transactionSync(() => {
       const currentInc = readLiveHead(this.#sql, now)?.currentInc ?? null
       deleteLapsedTombstone(this.#sql, now)
       return listOrphanGenerations(this.#sql, currentInc)
@@ -248,7 +246,7 @@ export class TelefuncRoomDurableObject extends DurableObject {
         // Preserve this exact route row as the next sweep's retry source.
         continue
       }
-      this.ctx.storage.transactionSync(() => deleteRoute(this.#sql, installation))
+      this.#ctx.storage.transactionSync(() => deleteRoute(this.#sql, installation))
     }
   }
 
@@ -271,16 +269,16 @@ export class TelefuncRoomDurableObject extends DurableObject {
   async #scheduleMaintenanceIfNeeded(): Promise<void> {
     const now = Date.now()
     const deadline = nextMaintenanceDeadline(this.#sql, now)
-    const currentAlarm = await this.ctx.storage.getAlarm()
+    const currentAlarm = await this.#ctx.storage.getAlarm()
     if (deadline === null) {
-      if (currentAlarm !== null) await this.ctx.storage.deleteAlarm()
+      if (currentAlarm !== null) await this.#ctx.storage.deleteAlarm()
       return
     }
     const nextAlarm = deadline <= now ? now + ROOM_MAINTENANCE_RETRY_MS : deadline
     if (currentAlarm === nextAlarm) return
     // Never postpone an already-scheduled retry for work that is due now.
     if (deadline <= now && currentAlarm !== null && currentAlarm <= nextAlarm) return
-    await this.ctx.storage.setAlarm(nextAlarm)
+    await this.#ctx.storage.setAlarm(nextAlarm)
   }
 }
 
@@ -293,16 +291,86 @@ function nextMaintenanceDeadline(sql: SqlStorage, now: number): number | null {
   return deadlines.length === 0 ? null : Math.min(...deadlines)
 }
 
-export function createTelefuncRoomDurableObjectClass(
-  sessionNamespace: SessionNamespaceResolver,
-): new (
-  ctx: DurableObjectState,
-  env: unknown,
-) => TelefuncRoomDurableObject {
-  const BaseTelefuncRoomDurableObject = TelefuncRoomDurableObject
-  return class TelefuncRoomDurableObject extends BaseTelefuncRoomDurableObject {
-    constructor(ctx: DurableObjectState, env: unknown) {
-      super(ctx, env, sessionNamespace)
-    }
+/** A Durable Object that can act as a room authority: the role, built on first use, fans out through `sessions`. */
+export class RoomAuthorityHost<Env = unknown> extends DurableObject<Env> {
+  readonly #sessions: RoomFanoutNamespace
+  #role: RoomAuthority | null = null
+
+  constructor(ctx: DurableObjectState, env: Env, sessions: RoomFanoutNamespace) {
+    super(ctx, env)
+    this.#sessions = sessions
+  }
+
+  readHead(...args: Parameters<RoomAuthority['readHead']>) {
+    return this.#authority().readHead(...args)
+  }
+
+  compareExchangeHead(...args: Parameters<RoomAuthority['compareExchangeHead']>) {
+    return this.#authority().compareExchangeHead(...args)
+  }
+
+  readCells(...args: Parameters<RoomAuthority['readCells']>) {
+    return this.#authority().readCells(...args)
+  }
+
+  compareExchangeCells(...args: Parameters<RoomAuthority['compareExchangeCells']>) {
+    return this.#authority().compareExchangeCells(...args)
+  }
+
+  commitLane(...args: Parameters<RoomAuthority['commitLane']>) {
+    return this.#authority().commitLane(...args)
+  }
+
+  awaitDelivery(...args: Parameters<RoomAuthority['awaitDelivery']>) {
+    return this.#authority().awaitDelivery(...args)
+  }
+
+  readRetained(...args: Parameters<RoomAuthority['readRetained']>) {
+    return this.#authority().readRetained(...args)
+  }
+
+  listRetained(...args: Parameters<RoomAuthority['listRetained']>) {
+    return this.#authority().listRetained(...args)
+  }
+
+  deleteRetained(...args: Parameters<RoomAuthority['deleteRetained']>) {
+    return this.#authority().deleteRetained(...args)
+  }
+
+  registerRoute(...args: Parameters<RoomAuthority['registerRoute']>) {
+    return this.#authority().registerRoute(...args)
+  }
+
+  renewRoute(...args: Parameters<RoomAuthority['renewRoute']>) {
+    return this.#authority().renewRoute(...args)
+  }
+
+  unsubscribeRoute(...args: Parameters<RoomAuthority['unsubscribeRoute']>) {
+    return this.#authority().unsubscribeRoute(...args)
+  }
+
+  dropGeneration(...args: Parameters<RoomAuthority['dropGeneration']>) {
+    return this.#authority().dropGeneration(...args)
+  }
+
+  directoryPut(...args: Parameters<RoomAuthority['directoryPut']>) {
+    return this.#authority().directoryPut(...args)
+  }
+
+  directoryDelete(...args: Parameters<RoomAuthority['directoryDelete']>) {
+    return this.#authority().directoryDelete(...args)
+  }
+
+  directoryList(...args: Parameters<RoomAuthority['directoryList']>) {
+    return this.#authority().directoryList(...args)
+  }
+
+  // Only a room authority schedules alarms.
+  alarm() {
+    return this.#authority().alarm()
+  }
+
+  #authority(): RoomAuthority {
+    return (this.#role ??= new RoomAuthority(this.ctx, this.#sessions))
   }
 }

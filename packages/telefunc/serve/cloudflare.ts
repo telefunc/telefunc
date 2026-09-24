@@ -42,7 +42,7 @@ import {
   type RoomSessionDeliveryRequest,
   type RoomSessionInvalidationRequest,
 } from '../wire-protocol/server/adapter/cloudflare/room/backend.js'
-import { createTelefuncRoomDurableObjectClass } from '../wire-protocol/server/adapter/cloudflare/room/do.js'
+import { RoomAuthorityHost } from '../wire-protocol/server/adapter/cloudflare/room/do.js'
 import {
   dispatchRoomFanout,
   type RoomFanoutNamespace,
@@ -61,7 +61,6 @@ type CloudflareOptions = {
   scale?: CloudflareScale
   locationFallback?: DurableObjectLocationHint
   jurisdiction?: DurableObjectJurisdiction
-  roomBindingName?: string
 }
 
 type StoredShardToken = {
@@ -78,7 +77,6 @@ type ServeInput = {
 interface TelefuncServe {
   serve(input: ServeInput): Promise<Response | undefined>
   TelefuncDurableObject: new (ctx: DurableObjectState, env: Cloudflare.Env) => DurableObject
-  TelefuncRoomDurableObject: new (ctx: DurableObjectState, env: Cloudflare.Env) => DurableObject
 }
 
 interface Telefunc extends TelefuncServe {}
@@ -97,7 +95,6 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
   const locationFallback = options?.locationFallback ?? 'weur'
   assertLocationFallbackIsScaled(scale, locationFallback)
   const jurisdiction = options?.jurisdiction
-  const roomBindingName = options?.roomBindingName ?? 'TelefuncRoomDurableObject'
 
   const crosswsAdapter = crossws({
     bindingName,
@@ -115,9 +112,6 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
   function sessionNamespace(env: Cloudflare.Env): DurableObjectNamespace {
     return scoped(requireBinding(env, bindingName, 'Durable Object'))
   }
-  function roomNamespace(env: Cloudflare.Env): CloudflareRoomNamespace {
-    return scoped(requireBinding(env, roomBindingName, 'Room Durable Object')) as unknown as CloudflareRoomNamespace
-  }
   function kvNamespace(env: Cloudflare.Env): KVNamespace | undefined {
     return (env as Record<string, KVNamespace | undefined>)[kvBindingName]
   }
@@ -125,22 +119,24 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
   const cloudflareBackend = installBackend(
     () =>
       new CloudflareRoomBackend({
-        rooms: () => roomNamespace(workerEnv as Cloudflare.Env),
+        rooms: () => sessionNamespace(workerEnv as Cloudflare.Env) as unknown as CloudflareRoomNamespace,
         broadcast: new CloudflareBroadcastTransport({ baseInstanceName, scale }),
       }),
-    ['cloudflare', baseInstanceName, JSON.stringify(scale ?? null), roomBindingName, jurisdiction ?? null],
+    ['cloudflare', baseInstanceName, JSON.stringify(scale ?? null), jurisdiction ?? null],
   )
   const broadcast = cloudflareBackend.broadcast
 
   const getContext = options?.context
 
-  const TelefuncDurableObject = class extends DurableObject {
+  // One class for every role; an instance's name decides which: a session shard, a Broadcast key authority or
+  // coordinator, a room authority, the room directory or a room fanout coordinator.
+  const TelefuncDurableObject = class extends RoomAuthorityHost<Cloudflare.Env> {
     private readonly authorityState: CloudflareBroadcastAuthorityState
     private readonly broadcastCalls: BroadcastCalls = new OrderedStubs()
     private roomManager: CloudflareRoomSessionManager | null = null
 
     constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
-      super(ctx, env)
+      super(ctx, env, sessionNamespace(env) as unknown as RoomFanoutNamespace)
       broadcast.attachBinding(sessionNamespace(env), bindingName)
       const kv = kvNamespace(env)
       if (kv) broadcast.attachKV(kv)
@@ -206,10 +202,6 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
     }
   }
 
-  const TelefuncRoomDurableObject = createTelefuncRoomDurableObjectClass((env) =>
-    sessionNamespace(env as Cloudflare.Env),
-  )
-
   return {
     async serve({ request, env }: ServeInput): Promise<Response | undefined> {
       if (!isTelefuncRequest(request)) return undefined
@@ -265,6 +257,5 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
       return doResponse
     },
     TelefuncDurableObject,
-    TelefuncRoomDurableObject,
   }
 }

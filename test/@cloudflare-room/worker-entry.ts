@@ -13,8 +13,8 @@ import {
   type RoomSessionInvalidationRequest,
 } from '../../packages/telefunc/wire-protocol/server/adapter/cloudflare/room/backend.js'
 import {
-  TelefuncRoomDurableObject as ProductionRoomDurableObject,
-  createTelefuncRoomDurableObjectClass,
+  RoomAuthority,
+  RoomAuthorityHost,
   type CommitWire,
 } from '../../packages/telefunc/wire-protocol/server/adapter/cloudflare/room/do.js'
 import { CloudflareBroadcastTransport } from '../../packages/telefunc/wire-protocol/server/adapter/cloudflare/broadcast.js'
@@ -26,19 +26,19 @@ import {
 installBackend(
   () =>
     new CloudflareRoomBackend({
-      rooms: () => (workerEnv as unknown as Env).PUBLIC_ROOM as unknown as CloudflareRoomNamespace,
+      rooms: () => (workerEnv as unknown as Env).PUBLIC as unknown as CloudflareRoomNamespace,
       broadcast: new CloudflareBroadcastTransport({ baseInstanceName: 'telefunc' }),
     }),
   ['cloudflare-room-ci-public'],
 )
-const PublicRoomDurableObjectBase = createTelefuncRoomDurableObjectClass((env) => (env as Env).PUBLIC_SESSION)
-const productionSession = (env: unknown) => (env as Env).TelefuncDurableObject
+const fanoutNamespace = (namespace: DurableObjectNamespace) => namespace as unknown as RoomFanoutNamespace
 const textEncoder = new TextEncoder()
 const CONTROL_HORIZON_MS = 2_000
-export class PublicRoomSessionDurableObject extends DurableObject {
+// Like the production class: one namespace hosts both sessions and room authorities.
+export class PublicDurableObject extends RoomAuthorityHost<Env> {
   readonly #manager: CloudflareRoomSessionManager
-  constructor(ctx: DurableObjectState, env: unknown) {
-    super(ctx, env as Env)
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env, fanoutNamespace(env.PUBLIC))
     this.#manager = new CloudflareRoomSessionManager(ctx.id.toString())
   }
   publicRoomLifecycle(roomId: string) {
@@ -72,23 +72,21 @@ export class PublicRoomSessionDurableObject extends DurableObject {
     return this.#run(() => this.#manager.invalidate(request))
   }
   telefuncRoomFanout(request: RoomFanoutRequest) {
-    return dispatchRoomFanout((this.env as Env).PUBLIC_SESSION as unknown as RoomFanoutNamespace, request)
+    return dispatchRoomFanout(fanoutNamespace(this.env.PUBLIC), request)
   }
   #run<T>(fn: () => T): T {
     return withCloudflareRoomSessionManager(() => this.#manager, fn)
   }
 }
-export class PublicRoomDurableObject extends PublicRoomDurableObjectBase {}
+// A session without Room delivery methods, so every handoff to it fails.
 export class SessionDurableObject extends DurableObject {}
 type AuthorityControl = 'reconstruct' | 'alarm'
-export class TelefuncRoomDurableObject extends ProductionRoomDurableObject {
-  readonly #probeEnv: unknown
-  #reconstructed: ProductionRoomDurableObject | null = null
-  constructor(ctx: DurableObjectState, env: unknown) {
-    super(ctx, env, productionSession)
-    this.#probeEnv = env
+export class RoomProbeDurableObject extends RoomAuthorityHost<Env> {
+  #reconstructed: RoomAuthority | null = null
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env, fanoutNamespace(env.TelefuncDurableObject))
   }
-  override commitLane(...args: Parameters<ProductionRoomDurableObject['commitLane']>) {
+  override commitLane(...args: Parameters<RoomAuthority['commitLane']>) {
     return this.#reconstructed === null ? super.commitLane(...args) : this.#reconstructed.commitLane(...args)
   }
   override awaitDelivery(token: string): Promise<void> {
@@ -96,7 +94,7 @@ export class TelefuncRoomDurableObject extends ProductionRoomDurableObject {
   }
   async telefuncRoomControlForTest(action: AuthorityControl): Promise<number | null | void> {
     if (action === 'reconstruct') {
-      this.#reconstructed = new ProductionRoomDurableObject(this.ctx, this.#probeEnv, productionSession)
+      this.#reconstructed = new RoomAuthority(this.ctx, fanoutNamespace(this.env.TelefuncDurableObject))
       return
     }
     return this.ctx.storage.getAlarm()
@@ -107,13 +105,12 @@ type RpcMethods<T> = {
     ? (...args: Args) => Promise<Awaited<Result>>
     : never
 }
-type Authority = RpcMethods<TelefuncRoomDurableObject>
-type PublicSession = RpcMethods<Pick<PublicRoomSessionDurableObject, 'publicRoomLifecycle'>>
+type Authority = RpcMethods<RoomProbeDurableObject>
+type PublicSession = RpcMethods<Pick<PublicDurableObject, 'publicRoomLifecycle'>>
 type Env = {
   ROOM: DurableObjectNamespace
   TelefuncDurableObject: DurableObjectNamespace
-  PUBLIC_ROOM: DurableObjectNamespace
-  PUBLIC_SESSION: DurableObjectNamespace
+  PUBLIC: DurableObjectNamespace
 }
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -122,8 +119,8 @@ export default {
       if (new URL(request.url).pathname === '/large-retained') {
         return Response.json(await largeRetainedReplay(env, suffix))
       }
-      const publicSession = env.PUBLIC_SESSION.get(
-        env.PUBLIC_SESSION.idFromName(`public-session-${suffix}`),
+      const publicSession = env.PUBLIC.get(
+        env.PUBLIC.idFromName(`public-session-${suffix}`),
       ) as unknown as PublicSession
       const sessionId = env.TelefuncDurableObject.idFromName(`session-${suffix}`)
       return Response.json({

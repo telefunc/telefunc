@@ -11,10 +11,9 @@ beforeAll(async () => {
     compatibilityDate: '2025-08-06',
     compatibilityFlags: ['nodejs_compat'],
     durableObjects: {
-      ROOM: { className: 'TelefuncRoomDurableObject', useSQLite: true },
+      ROOM: { className: 'RoomProbeDurableObject', useSQLite: true },
       TelefuncDurableObject: { className: 'SessionDurableObject' },
-      PUBLIC_ROOM: { className: 'PublicRoomDurableObject', useSQLite: true },
-      PUBLIC_SESSION: { className: 'PublicRoomSessionDurableObject' },
+      PUBLIC: { className: 'PublicDurableObject', useSQLite: true },
     },
   })
 })

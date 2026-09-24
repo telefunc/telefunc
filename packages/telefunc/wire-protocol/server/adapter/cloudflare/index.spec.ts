@@ -315,16 +315,16 @@ describe('cloudflare adapter entrypoint', () => {
     const room = createBinding()
     const readHead = vi.fn(async () => null)
     room.get.mockReturnValue({ readHead } as never)
-    mocks.workerEnv.TelefuncRoomDurableObject = room.binding
+    mocks.workerEnv.TelefuncDurableObject = room.binding
     new Telefunc()
     // Outside any request or Durable Object context, as from a cron trigger.
     await expect(getRoomBackend().readHead('cloudflare-default-probe')).resolves.toBeNull()
-    expect(room.idFromName).toHaveBeenCalledWith('cloudflare-default-probe')
+    expect(room.idFromName).toHaveBeenCalledWith('__telefunc_room__:cloudflare-default-probe')
     expect(readHead).toHaveBeenCalled()
   })
 
   it('names the session a Room subscription needs when made outside one', () => {
-    mocks.workerEnv.TelefuncRoomDurableObject = createBinding().binding
+    mocks.workerEnv.TelefuncDurableObject = createBinding().binding
     new Telefunc()
     const subscribe = () => getRoomBackend().subscribeLane('r', 'i', { kind: 'control' }, () => {})
     expect(subscribe).toThrow('A Cloudflare Room subscription delivers to a Telefunc session')
@@ -345,7 +345,7 @@ describe('cloudflare adapter entrypoint', () => {
     expect(mocks.transportInstances).toHaveLength(1)
   })
 
-  it('reports the normative Room binding diagnostic instead of using the memory backend', async () => {
+  it('reports the missing binding instead of using the memory backend', async () => {
     const { binding } = createBinding()
     const tf = new Telefunc()
     const DurableClass = tf.TelefuncDurableObject
@@ -361,24 +361,26 @@ describe('cloudflare adapter entrypoint', () => {
       throw new Error('Room backend unexpectedly returned without a binding')
     })
     await expect(instance.fetch(new Request('https://telefunc.test/_telefunc'))).rejects.toThrow(
-      'Missing Cloudflare Room Durable Object binding "TelefuncRoomDurableObject". Add it to your wrangler.jsonc.',
+      'Missing Cloudflare Durable Object binding "TelefuncDurableObject". Add it to your wrangler.jsonc.',
     )
   })
 
   it('restricts the Room authority and its fan-out coordinators to the jurisdiction', async () => {
     const session = createBinding()
-    const room = createBinding()
-    const env = {
-      TelefuncDurableObject: session.binding,
-      TelefuncRoomDurableObject: room.binding,
-    } as unknown as Cloudflare.Env
+    const env = { TelefuncDurableObject: session.binding } as unknown as Cloudflare.Env
     Object.assign(mocks.workerEnv, env)
     const tf = new Telefunc({ jurisdiction: 'eu' as DurableObjectJurisdiction })
     const DurableClass = tf.TelefuncDurableObject
-    const instance = new DurableClass(
-      { id: { toString: () => 'jurisdiction-probe' }, getWebSockets: () => [] } as unknown as DurableObjectState,
-      env,
-    ) as InstanceType<typeof DurableClass> & { fetch(request: Request): Promise<Response> }
+    const ctx = {
+      id: { toString: () => 'jurisdiction-probe' },
+      getWebSockets: () => [],
+    } as unknown as DurableObjectState
+    // The instance's own roles — room authority fanout included — take the namespace it is constructed with.
+    const instance = new DurableClass(ctx, env) as InstanceType<typeof DurableClass> & {
+      fetch(request: Request): Promise<Response>
+    }
+    expect(session.jurisdiction).toHaveBeenCalledWith('eu')
+    session.jurisdiction.mockClear()
     mocks.telefuncMock.mockImplementationOnce(async () => {
       await getRoomBackend()
         .readHead('jurisdiction-probe')
@@ -386,21 +388,14 @@ describe('cloudflare adapter entrypoint', () => {
       throw new Error('probe done')
     })
     await Promise.resolve(instance.fetch(new Request('https://telefunc.test/_telefunc'))).catch(() => {})
-    expect(room.jurisdiction).toHaveBeenCalledWith('eu')
-
-    session.jurisdiction.mockClear()
-    const ctx = {
-      storage: { sql: { exec: () => ({ toArray: () => [] }) } },
-      blockConcurrencyWhile: () => Promise.resolve(),
-    } as unknown as DurableObjectState
-    new tf.TelefuncRoomDurableObject(ctx, env)
     expect(session.jurisdiction).toHaveBeenCalledWith('eu')
   })
 
-  it('publishes the named SQLite Room authority and carries the configured session binding into it', () => {
-    const tf = new Telefunc({ bindingName: 'CustomTelefuncSession', roomBindingName: 'CustomRoomAuthority' })
-    expect(tf.TelefuncRoomDurableObject.name).toBe('TelefuncRoomDurableObject')
-    expect(() => new tf.TelefuncRoomDurableObject({} as DurableObjectState, {} as Cloudflare.Env)).toThrow(
+  it('exports one Durable Object class for every role, on the configured binding', () => {
+    const tf = new Telefunc({ bindingName: 'CustomTelefuncSession' })
+    expect(Object.keys(tf).sort()).toEqual(['TelefuncDurableObject', 'serve'])
+    const ctx = { getWebSockets: () => [] } as unknown as DurableObjectState
+    expect(() => new tf.TelefuncDurableObject(ctx, {} as Cloudflare.Env)).toThrow(
       'Missing Cloudflare Durable Object binding "CustomTelefuncSession". Add it to your wrangler.jsonc.',
     )
   })

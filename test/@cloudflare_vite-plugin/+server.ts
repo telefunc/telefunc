@@ -39,7 +39,6 @@ export class TelefuncDurableObject extends TelefuncDurableObjectBase {
     }
   }
 }
-export const TelefuncRoomDurableObject = tf.TelefuncRoomDurableObject
 export { TodoListDurableObject } from './database/todoItems'
 
 // vike's docs example uses `export default vike` directly — meaning when vike is the

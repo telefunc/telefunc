@@ -19,7 +19,6 @@ import { Telefunc } from 'telefunc/cloudflare'
 const telefunc = new Telefunc()
 
 export const TelefuncDurableObject = telefunc.TelefuncDurableObject
-export const TelefuncRoomDurableObject = telefunc.TelefuncRoomDurableObject
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext) {
@@ -39,16 +38,14 @@ export default {
   "compatibility_flags": ["nodejs_als"],
   "durable_objects": {
     "bindings": [
-      { "name": "TelefuncDurableObject", "class_name": "TelefuncDurableObject" },
-      { "name": "TelefuncRoomDurableObject", "class_name": "TelefuncRoomDurableObject" }
+      { "name": "TelefuncDurableObject", "class_name": "TelefuncDurableObject" }
     ]
   },
   "kv_namespaces": [
     { "binding": "TelefuncKV", "id": "your-kv-namespace-id" }
   ],
   "migrations": [
-    { "tag": "v1", "new_classes": ["TelefuncDurableObject"] },
-    { "tag": "v2", "new_sqlite_classes": ["TelefuncRoomDurableObject"] }
+    { "tag": "v1", "new_sqlite_classes": ["TelefuncDurableObject"] }
   ]
 }
 ```
@@ -58,9 +55,11 @@ export default {
 > - **Durable Objects** provide stateful compute: each channel lives on a Durable Object, which holds the connection and its state.
 > - **KV** provides shared storage: it's how stateless workers find the Durable Object that holds the state, no matter which worker a request lands on.
 >
-> The session Durable Object and KV bindings are required whenever you use `telefunc/cloudflare`; Rooms additionally require the SQLite `TelefuncRoomDurableObject` binding shown above. If your app doesn't use `Channel`, `Broadcast`, or `Room`, you can skip these bindings and use <Link href="/serve"><code>serve()</code></Link> instead.
+> The Durable Object and KV bindings are required whenever you use `telefunc/cloudflare`. If your app doesn't use `Channel`, `Broadcast`, or `Room`, you can skip these bindings and use <Link href="/serve"><code>serve()</code></Link> instead.
 >
 > See <Link href="#architecture" /> for implementation details.
+
+> **Upgrading from a key-value-backed `TelefuncDurableObject`:** earlier releases declared it with `new_classes`. Cloudflare can't change an existing class's storage backend, so [re-provision it](https://developers.cloudflare.com/durable-objects/reference/durable-objects-migrations/): delete the class, then declare it again as a SQLite class. Its state is lost in between; Broadcast sequence numbers restart at 1.
 
 ## Context
 
@@ -115,14 +114,14 @@ On the first request, Telefunc picks a Durable Object in the nearest region, sto
 
 ### Room state
 
-<Link href="/room">Rooms</Link> use a separate SQLite-backed Durable Object namespace. Each logical room has one authority object holding its head, members, ordering watermarks, retained generations, and live delivery routes. A directory object in the same namespace backs `Room.list`. Room writes and reads therefore go through the Room authority tier; they don't use the generic Broadcast authority or a Workers KV room-state mirror.
+Each logical <Link href="/room">room</Link> has one authority, a `TelefuncDurableObject` instance of its own, holding the room's head, members, ordering watermarks, retained generations, and live delivery routes in SQLite. A directory instance backs `Room.list`. Room writes and reads therefore go through the room's authority; they don't use a Broadcast authority or a Workers KV room-state mirror.
 
 Room calls such as `Room.create()`, `Room.announce()` and `Room.close()` work anywhere in your Worker, including cron triggers and queue consumers. Server-side listeners (`subscribe()`, `onJoin()`, …) deliver to a Telefunc session, so install them inside a telefunction or a channel handler.
 
 | State | Storage | Consistency |
 |---|---|---|
-| Room head, roster, ordering, retained messages | Per-room SQLite Durable Object | Strongly consistent |
-| `Room.list` directory projection | SQLite directory Durable Object | Repairable projection, verified against the room head |
+| Room head, roster, ordering, retained messages | The room's authority Durable Object (SQLite) | Strongly consistent |
+| `Room.list` directory projection | The directory Durable Object (SQLite) | Repairable projection, verified against the room head |
 | Session affinity and generic Broadcast presence | Workers KV | Eventually consistent |
 
 ## Scaling
@@ -219,7 +218,6 @@ const telefunc = new Telefunc({
   scale: 1,                              // DOs per region (default)
   locationFallback: 'weur',              // Fallback region (default)
   jurisdiction: 'eu',                    // Restrict DOs to a jurisdiction (optional, no default)
-  roomBindingName: 'TelefuncRoomDurableObject', // Room DO binding name (default)
 })
 ```
 

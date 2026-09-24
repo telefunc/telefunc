@@ -23,9 +23,11 @@ import type { BackendReceiver, SubscriptionBinding, SubscriptionDriver } from '.
 import { CloudflareBroadcastTransport } from '../broadcast.js'
 import { encodeLaneKey } from '../../../../backend/room/lane-key.js'
 import { CloudflareRoomSubscriptionAttempt } from './subscription.js'
-import type { TelefuncRoomDurableObject } from './do.js'
+import type { RoomAuthority } from './do.js'
 import type { RouteInstallation } from './routes.js'
 
+// Room authorities share the Telefunc namespace with sessions and Broadcast, so a room id is always prefixed.
+const ROOM_AUTHORITY_PREFIX = '__telefunc_room__:'
 const DIRECTORY_DO_NAME = '__telefunc_room_directory__'
 const ROOM_MANAGER = Symbol('telefunc.cloudflare.room-manager')
 
@@ -40,7 +42,7 @@ export type RoomSessionDeliveryRequest = RouteInstallation & {
 
 export type RoomSessionInvalidationRequest = RouteInstallation & { terminal?: true }
 
-export type CloudflareRoomAuthorityStub = Omit<TelefuncRoomDurableObject, 'alarm'>
+export type CloudflareRoomAuthorityStub = Omit<RoomAuthority, 'alarm'>
 
 export type CloudflareRoomNamespace = {
   idFromName(name: string): unknown
@@ -49,10 +51,6 @@ export type CloudflareRoomNamespace = {
 
 const entryKey = (route: Pick<RouteInstallation, 'roomId' | 'inc' | 'laneKey'>) =>
   JSON.stringify([route.roomId, route.inc, route.laneKey])
-
-function roomAuthority(namespace: CloudflareRoomNamespace, roomId: string): CloudflareRoomAuthorityStub {
-  return namespace.get(namespace.idFromName(roomId))
-}
 
 export class CloudflareRoomSessionManager {
   readonly #id: string
@@ -232,10 +230,15 @@ export class CloudflareRoomBackend implements BroadcastDriver, RoomDriver {
   }
 
   #stub(roomId: string): CloudflareRoomAuthorityStub {
-    return roomAuthority(this.#rooms(), roomId)
+    return this.#object(ROOM_AUTHORITY_PREFIX + roomId)
   }
 
   #directory(): CloudflareRoomAuthorityStub {
-    return this.#stub(DIRECTORY_DO_NAME)
+    return this.#object(DIRECTORY_DO_NAME)
+  }
+
+  #object(name: string): CloudflareRoomAuthorityStub {
+    const namespace = this.#rooms()
+    return namespace.get(namespace.idFromName(name))
   }
 }

@@ -15,10 +15,6 @@
       {
         "name": "TelefuncDurableObject",
         "class_name": "TelefuncDurableObject"
-      },
-      {
-        "name": "TelefuncRoomDurableObject",
-        "class_name": "TelefuncRoomDurableObject"
       }
     ]
   },
@@ -31,12 +27,7 @@
   "migrations": [
     {
       "tag": "v1",
-      "new_sqlite_classes": ["TodoListDurableObject"],
-      "new_classes": ["TelefuncDurableObject"]
-    },
-    {
-      "tag": "v2",
-      "new_sqlite_classes": ["TelefuncRoomDurableObject"]
+      "new_sqlite_classes": ["TodoListDurableObject", "TelefuncDurableObject"]
     }
   ]
 }
