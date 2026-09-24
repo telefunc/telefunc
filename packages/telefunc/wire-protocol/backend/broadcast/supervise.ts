@@ -1,11 +1,7 @@
 export { superviseBroadcastDriver }
 
 import { ChannelOverflowError } from '../../channel-errors.js'
-import {
-  BROADCAST_ESTABLISH_HOLD_MS,
-  CHANNEL_BUFFER_LIMIT_BINARY_BYTES,
-  CHANNEL_BUFFER_LIMIT_BYTES,
-} from '../../constants.js'
+import { BROADCAST_ESTABLISH_HOLD_MS } from '../../constants.js'
 import { SubscriptionManager } from '../subscription-manager.js'
 import type { BroadcastBackend, BroadcastDriver, BroadcastLane, PublishResult } from './contract.js'
 import { broadcastRouteKey } from './route-key.js'
@@ -35,7 +31,11 @@ function superviseBroadcastDriver(driver: BroadcastDriver): BroadcastBackend {
     return isPromise(result) ? result.then(checked) : checked(result)
   }
 
-  const publish = (lane: BroadcastLane, payload: Uint8Array): PublishResult | Promise<PublishResult> => {
+  const publish = (
+    lane: BroadcastLane,
+    payload: Uint8Array,
+    bufferLimit: number,
+  ): PublishResult | Promise<PublishResult> => {
     const routeKey = broadcastRouteKey(lane)
     const waiting = pending.get(routeKey)
     if (waiting === undefined && !subscriptions.hasEstablishing(lane)) return publishNow(lane, payload)
@@ -45,8 +45,7 @@ function superviseBroadcastDriver(driver: BroadcastDriver): BroadcastBackend {
       count: 0,
       bytes: 0,
     }
-    const byteLimit = lane.kind === 'binary' ? CHANNEL_BUFFER_LIMIT_BINARY_BYTES : CHANNEL_BUFFER_LIMIT_BYTES
-    if (route.count >= PENDING_PUBLISH_LIMIT || route.bytes + owned.byteLength > byteLimit) {
+    if (route.count >= PENDING_PUBLISH_LIMIT || route.bytes + owned.byteLength > bufferLimit) {
       return Promise.reject(new ChannelOverflowError('Broadcast readiness buffer overflow'))
     }
     pending.set(routeKey, route)

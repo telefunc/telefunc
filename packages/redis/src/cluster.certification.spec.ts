@@ -157,7 +157,7 @@ describe('Redis real three-master Cluster CI certification', () => {
       await backend.directoryPut(roomId, inc)
       await backend.directoryDelete(roomId, inc)
       expect(
-        (await backend.publish({ key: 'generic} escape', kind: 'binary' }, bytes('generic'))).receivers,
+        (await backend.publish({ key: 'generic} escape', kind: 'binary' }, bytes('generic'), 1024)).receivers,
       ).toBeUndefined()
       expect((await close(authority, roomId, head)).state).toBe('closed')
       await authority.dropGeneration(roomId, inc)
@@ -491,8 +491,8 @@ describe('Redis real three-master Cluster CI certification', () => {
       ),
     )
     await Promise.all([text.ready, binary.ready])
-    const first = await backend.publish({ key: '', kind: 'text' }, bytes('one'))
-    const second = await backend.publish({ key: '', kind: 'binary' }, bytes('two'))
+    const first = await backend.publish({ key: '', kind: 'text' }, bytes('one'), 1024)
+    const second = await backend.publish({ key: '', kind: 'binary' }, bytes('two'), 1024)
     await waitFor(() => emptyObserved.length === 2)
     expect([first.seq, second.seq]).toEqual([1, 2])
     expect(emptyObserved).toEqual(['text:1:one', 'binary:2:two'])

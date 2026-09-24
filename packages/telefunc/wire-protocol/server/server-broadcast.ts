@@ -13,6 +13,7 @@ import type {
 import type { TELEFUNC_SHIELDS } from '../../node/shared/transformer/generateShield/shield-key.js'
 import { invokeChannelListener, makePublishInfo } from '../channel.js'
 import { ServerChannel, reportServerChannelError } from './channel.js'
+import { getServerConfig } from '../../node/server/serverConfig.js'
 import type { BroadcastBackend, PublishResult } from '../backend/broadcast/contract.js'
 import { getBroadcastBackend } from '../backend/install.js'
 import type { BackendSubscription } from '../backend/subscription.js'
@@ -208,7 +209,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
         meta: r.meta,
         ...(r.receivers === undefined ? {} : { receivers: r.receivers }),
       })
-    const result = this._backend.publish({ key: this.key, kind }, payload)
+    const result = this._backend.publish({ key: this.key, kind }, payload, bufferLimit(kind))
     if (isPromise(result)) return result.then(toAck)
     return toAck(result)
   }
@@ -277,7 +278,7 @@ const Broadcast = {
     const backend = getBroadcastBackend()
     const serialized = stringify(data)
     const lane = { key, kind: 'text' } as const
-    return backend.publish(lane, textEncoder.encode(serialized))
+    return backend.publish(lane, textEncoder.encode(serialized), bufferLimit('text'))
   },
   subscribe<U = unknown>(key: string, callback: BroadcastListener<U>): BroadcastUnsubscribe {
     return subscribeLane(
@@ -289,7 +290,7 @@ const Broadcast = {
   publishBinary(key: string, data: Uint8Array): PublishResult | Promise<PublishResult> {
     const backend = getBroadcastBackend()
     const lane = { key, kind: 'binary' } as const
-    return backend.publish(lane, data)
+    return backend.publish(lane, data, bufferLimit('binary'))
   },
   subscribeBinary(key: string, callback: BroadcastBinaryListener): BroadcastUnsubscribe {
     return subscribeLane({ key, kind: 'binary' }, (payload) => payload, callback)
@@ -325,6 +326,12 @@ function onSubscriptionEnd(subscription: BackendSubscription, onEnd: () => void)
   subscription.onStateChange((state) => {
     if (state === 'closed') ended()
   })
+}
+
+/** A held publish is bounded like a channel's buffered sends. */
+function bufferLimit(kind: BroadcastKind): number {
+  const { channel } = getServerConfig()
+  return kind === 'binary' ? channel.bufferLimitBinary : channel.bufferLimit
 }
 
 function reportStaticListenerError(error: unknown): void {

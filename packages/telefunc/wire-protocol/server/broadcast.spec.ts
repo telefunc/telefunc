@@ -11,6 +11,7 @@ import type { SubscriptionAttempt, SubscriptionAttemptState } from '../backend/s
 import { ChannelClosedError, ChannelOverflowError } from '../channel-errors.js'
 import { BROADCAST_ESTABLISH_HOLD_MS, CHANNEL_BUFFER_LIMIT_BINARY_BYTES } from '../constants.js'
 import { Abort } from '../../shared/Abort.js'
+import { config } from '../../node/server/serverConfig.js'
 
 let memoryState: MemoryBackendState
 beforeEach(async () => {
@@ -569,6 +570,20 @@ describe('Broadcast static bus (publish/subscribe)', () => {
       expect(report).toHaveBeenCalledWith(expect.stringContaining('Backend subscription closed'))
     } finally {
       unsubscribe()
+    }
+  })
+
+  it('holds up to config.channel.bufferLimit bytes while a subscription is establishing', async () => {
+    const { controlled, publish } = await installPendingSubscriptionBackend({ seq: 1, timestamp: 1 })
+    config.channel = { bufferLimit: 4 * 1024 * 1024 }
+    try {
+      new ServerBroadcast({ key: 'broadcast:configured-limit' }).subscribe(() => {})
+      const publishing = Broadcast.publish('broadcast:configured-limit', 'x'.repeat(600 * 1024))
+      controlled.ready()
+      await expect(publishing).resolves.toMatchObject({ seq: 1 })
+      expect(publish).toHaveBeenCalledOnce()
+    } finally {
+      config.channel = {}
     }
   })
 

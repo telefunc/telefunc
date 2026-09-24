@@ -120,8 +120,8 @@ describe('backend installation lifecycle', () => {
     })
     const backend = getBroadcastBackend()
     const usage = 'config.broadcast.transport returned'
-    await expect(backend.publish({ key: 'k', kind: 'text' }, new Uint8Array())).rejects.toThrow(usage)
-    expect(() => backend.publish({ key: 'k', kind: 'binary' }, new Uint8Array())).toThrow(usage)
+    await expect(backend.publish({ key: 'k', kind: 'text' }, new Uint8Array(), 1024)).rejects.toThrow(usage)
+    expect(() => backend.publish({ key: 'k', kind: 'binary' }, new Uint8Array(), 1024)).toThrow(usage)
 
     const received = vi.fn()
     backend.subscribe({ key: 'k', kind: 'text' }, received)
@@ -168,7 +168,7 @@ async function expectBroadcastRoundTrip(payload: string): Promise<void> {
   const seen: string[] = []
   const subscription = getBroadcastBackend().subscribe(lane, (bytes) => void seen.push(new TextDecoder().decode(bytes)))
   await subscription.ready
-  await getBroadcastBackend().publish(lane, new TextEncoder().encode(payload))
+  await getBroadcastBackend().publish(lane, new TextEncoder().encode(payload), 1024)
   expect(seen).toEqual([payload])
   await subscription.unsubscribe()
 }
