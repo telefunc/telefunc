@@ -195,6 +195,29 @@ describe('keyed in-process broadcast', () => {
     expect(received).toEqual([{ text: 'hello' }])
   })
 
+  it('reports a subscription that ends on its own, and the next subscribe opens a fresh one', async () => {
+    await disposeBackend()
+    const ending = pendingSubscription()
+    const driver = new MemoryBackend({ state: memoryState })
+    const bind = driver.subscriptions.bind.bind(driver.subscriptions)
+    let opens = 0
+    driver.subscriptions.bind = (source) => {
+      const binding = bind(source)
+      return { ...binding, open: (...args) => (opens++ === 0 ? ending.subscription : binding.open(...args)) }
+    }
+    installBackend(() => driver)
+    const report = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const receiver = new ServerBroadcast<string>({ key: 'broadcast:ended' })
+    const received: string[] = []
+    receiver.subscribe(() => {})
+    ending.close()
+    await vi.waitFor(() => expect(report).toHaveBeenCalledWith(expect.stringContaining('Backend subscription closed')))
+    receiver.subscribe((text) => received.push(text))
+    await Broadcast.publish('broadcast:ended', 'after')
+    expect(received).toEqual(['after'])
+    receiver.abort()
+  })
+
   it('waits for a sibling subscription to be ready before publishing', async () => {
     const { controlled, publish } = await installPendingSubscriptionBackend({ seq: 1, timestamp: 1 })
     const sender = new ServerBroadcast({ key: 'broadcast:sibling-ready' })
@@ -499,14 +522,16 @@ describe('Broadcast shield validation', () => {
 // ───────────────────────────────────────────────────────────────────────────
 
 describe('Broadcast static bus (publish/subscribe)', () => {
-  it('releases a queued publish when its establishing subscriber terminates', async () => {
+  it('releases a queued publish when its establishing subscriber terminates, and reports the end', async () => {
     const { controlled, publish } = await installPendingSubscriptionBackend({ seq: 1, timestamp: 1 })
+    const report = vi.spyOn(console, 'error').mockImplementation(() => {})
     const unsubscribe = Broadcast.subscribe('broadcast:terminal-ready', () => {})
     try {
       const publishing = Broadcast.publish('broadcast:terminal-ready', 'after-terminal')
       controlled.close()
       await expect(publishing).resolves.toMatchObject({ seq: 1 })
       expect(publish).toHaveBeenCalledOnce()
+      expect(report).toHaveBeenCalledWith(expect.stringContaining('Backend subscription closed'))
     } finally {
       unsubscribe()
     }
@@ -514,6 +539,7 @@ describe('Broadcast static bus (publish/subscribe)', () => {
 
   it('waits for a static subscription to be ready before publishing', async () => {
     const { controlled: pending, publish } = await installPendingSubscriptionBackend({ seq: 1, timestamp: 1 })
+    const report = vi.spyOn(console, 'error').mockImplementation(() => {})
     const unsubscribe = Broadcast.subscribe('broadcast:static-ready', () => {})
     try {
       const publishing = Broadcast.publish('broadcast:static-ready', 'after-ready')
@@ -525,6 +551,7 @@ describe('Broadcast static bus (publish/subscribe)', () => {
       pending.close()
       expect(await Broadcast.publish('broadcast:static-ready', 'after-terminal')).toBeDefined()
       expect(publish).toHaveBeenCalledTimes(2)
+      expect(report).toHaveBeenCalledWith(expect.stringContaining('Backend subscription closed'))
     } finally {
       unsubscribe()
     }

@@ -177,9 +177,14 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
     }
     if (this._subscriptions[kind] !== null) return
     assert(this._backend)
-    this._subscriptions[kind] = this._backend.subscribe({ key: this.key, kind }, (payload, rawInfo) => {
+    const subscription = this._backend.subscribe({ key: this.key, kind }, (payload, rawInfo) => {
       if (kind === 'text') this._deliverBroadcastMessage(textDecoder.decode(payload), rawInfo)
       else this._deliverBroadcastBinaryMessage(payload, rawInfo)
+    })
+    this._subscriptions[kind] = subscription
+    // A dead handle would keep the next reconcile from subscribing again.
+    onSubscriptionEnd(subscription, () => {
+      if (this._subscriptions[kind] === subscription) this._subscriptions[kind] = null
     })
   }
 
@@ -303,9 +308,23 @@ function subscribeLane<Data>(
       reportStaticListenerError,
     )
   })
+  onSubscriptionEnd(subscription, () => {})
   return () => {
     void subscription.unsubscribe()
   }
+}
+
+/** Runs `onEnd` once the subscription is closed, reporting a terminal failure: only that rejects `ready`, while an
+ *  unsubscribe or a stop resolves it. */
+function onSubscriptionEnd(subscription: BackendSubscription, onEnd: () => void): void {
+  const ended = () => {
+    subscription.ready.catch(reportServerChannelError)
+    onEnd()
+  }
+  if (subscription.state() === 'closed') return ended()
+  subscription.onStateChange((state) => {
+    if (state === 'closed') ended()
+  })
 }
 
 function reportStaticListenerError(error: unknown): void {
