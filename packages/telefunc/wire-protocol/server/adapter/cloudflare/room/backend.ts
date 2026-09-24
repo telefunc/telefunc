@@ -79,10 +79,10 @@ export class CloudflareRoomSessionManager {
 
   /** A delivery to a lease this session no longer holds, as after a restart, is dropped: delivery is at-most-once, and
    *  the authority's route lapses with the lease. */
-  async deliver(request: RoomSessionDeliveryRequest): Promise<void> {
+  deliver(request: RoomSessionDeliveryRequest): void {
     const entry = this.#entries.get(entryKey(request))
     if (entry?.leaseId !== request.leaseId) return
-    await entry.deliver(request.payload, request.seq, request.timestamp)
+    entry.deliver(request.payload, request.seq, request.timestamp)
   }
 
   invalidate(request: RoomSessionInvalidationRequest): void {

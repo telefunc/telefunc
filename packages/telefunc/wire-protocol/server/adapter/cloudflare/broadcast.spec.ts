@@ -662,7 +662,7 @@ describe('cloudflare broadcast routing', () => {
     const transport: CloudflareBroadcastTransport = createTransport(
       createRacingBinding([20], {
         onForward: (request) => transport.forwardToBucket(coordinatorCalls, request),
-        onDeliver: (request) => member.deliver(request),
+        onDeliver: async (request) => member.deliver(request),
         onPresence: async (request) => authority.setPresence(request),
       }),
     )

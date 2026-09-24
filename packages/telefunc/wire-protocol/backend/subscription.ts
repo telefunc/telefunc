@@ -17,7 +17,7 @@ type BackendSubscription = {
   unsubscribe(): Promise<void>
 }
 
-type BackendReceiver = (payload: Uint8Array, info: { seq: number; timestamp: number }) => void | Promise<void>
+type BackendReceiver = (payload: Uint8Array, info: { seq: number; timestamp: number }) => void
 
 /** One driver establishment, reporting each state change; an end carries its reason when the driver has one. */
 type SubscriptionAttempt = {

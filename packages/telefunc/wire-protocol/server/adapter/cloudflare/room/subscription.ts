@@ -43,9 +43,9 @@ export class CloudflareRoomSubscriptionAttempt extends DriverAttempt {
     return this.#route.leaseId
   }
 
-  async deliver(payload: Uint8Array, seq: number, timestamp: number): Promise<void> {
+  deliver(payload: Uint8Array, seq: number, timestamp: number): void {
     if (this.state() !== 'ready') return
-    await this.#receiver(new Uint8Array(payload), { seq, timestamp })
+    this.#receiver(new Uint8Array(payload), { seq, timestamp })
   }
 
   invalidate(): void {

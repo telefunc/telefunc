@@ -46,11 +46,9 @@ type Generation = {
   order: Map<string, OrderingInfo>
   retained: Map<string, RetainedEntry>
   subs: Map<string, Set<MemorySubscriptionAttempt>>
-  chains: Map<string, Promise<void>>
 }
 
 type RoomRecord = { head: StoredHead | null; gens: Map<string, Generation> }
-const noop = () => {}
 
 /** @internal The storage, kept apart from the backend so a reconstructed one can reuse it. */
 export class MemoryBackendState {
@@ -67,8 +65,19 @@ const sumReceiverCounts = (targets: MemorySubscriptionAttempt[]): number =>
   targets.reduce((total, target) => total + target.receiverCount(), 0)
 const isExpired = (entry: Expiring, now: number): boolean => entry.expiresAt !== null && entry.expiresAt <= now
 
+// Commits assign their seq and queue their delivery in one synchronous step, so deliveries run in seq order.
+function deliverAfterCommit(
+  targets: MemorySubscriptionAttempt[],
+  frame: Uint8Array,
+  mark: OrderingInfo,
+): Promise<void> {
+  return Promise.resolve().then(() => {
+    for (const target of targets) if (!target.ended) target.deliver(copyBytes(frame), mark)
+  })
+}
+
 function newGeneration(): Generation {
-  return { revision: 0, cells: new Map(), order: new Map(), retained: new Map(), subs: new Map(), chains: new Map() }
+  return { revision: 0, cells: new Map(), order: new Map(), retained: new Map(), subs: new Map() }
 }
 
 function advanceOrder(order: Map<string, OrderingInfo>, domain: string, now: number): OrderingInfo {
@@ -112,8 +121,8 @@ class MemorySubscriptionAttempt extends DriverAttempt {
     this.transition('closed', new Error(reason))
   }
 
-  async deliver(payload: Uint8Array, info: { seq: number; timestamp: number }): Promise<void> {
-    await this.#receiver(payload, info)
+  deliver(payload: Uint8Array, info: { seq: number; timestamp: number }): void {
+    this.#receiver(payload, info)
   }
 
   receiverCount(): number {
@@ -143,7 +152,7 @@ export class MemoryBackend implements BroadcastDriver, RoomDriver {
     this.#assertLive()
     const mark = advanceOrder(this.#state.broadcastOrder, lane.key, this.#now())
     const targets = [...(this.#state.broadcastSubs.get(broadcastRouteKey(lane)) ?? [])]
-    for (const target of targets) void target.deliver(copyBytes(payload), mark).catch(console.error)
+    for (const target of targets) target.deliver(copyBytes(payload), mark)
     return { ...mark, receivers: sumReceiverCounts(targets), meta: { transport: 'in-memory' } }
   }
 
@@ -249,26 +258,8 @@ export class MemoryBackend implements BroadcastDriver, RoomDriver {
       accepted: true,
       ...mark,
       receivers: sumReceiverCounts(targets),
-      delivery: this.#enqueueDelivery(gen, key, targets, frame, mark),
+      delivery: deliverAfterCommit(targets, frame, mark),
     }
-  }
-
-  // Per-(inc,lane) at-most-once chain: settlement gates the next delivery without poisoning it.
-  #enqueueDelivery(
-    gen: Generation,
-    key: string,
-    targets: MemorySubscriptionAttempt[],
-    frame: Uint8Array,
-    mark: OrderingInfo,
-  ): Promise<void> {
-    const previous = gen.chains.get(key) ?? Promise.resolve()
-    const delivery = previous.then(() =>
-      Promise.all(targets.map((target) => (target.ended ? undefined : target.deliver(copyBytes(frame), mark)))).then(
-        noop,
-      ),
-    )
-    gen.chains.set(key, delivery.then(noop, noop))
-    return delivery
   }
 
   async readRetained(roomId: string, inc: string, lane: LaneId): Promise<RetainedFrame | null> {

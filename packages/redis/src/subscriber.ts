@@ -303,7 +303,7 @@ class RedisSubscriptionAttempt extends DriverAttempt {
     // remain loss, never replay.
     if (info.seq <= this._lastSequence) return
     this._lastSequence = info.seq
-    void this._receiver(Uint8Array.from(payload), info)
+    this._receiver(Uint8Array.from(payload), info)
   }
 
   private async _dispose(): Promise<void> {

@@ -185,17 +185,15 @@ class SubscriptionSlot<Source> {
     let attempt: SubscriptionAttempt
     try {
       attempt = this.config.binding.open(
-        async (payload, info) => {
+        (payload, info) => {
           if (this._stopPromise !== null) return
-          await Promise.all(
-            [...this._receivers.values()].map(async (receiver) => {
-              try {
-                await receiver(payload, info)
-              } catch (error) {
-                this.config.reportError(error)
-              }
-            }),
-          )
+          for (const receiver of [...this._receivers.values()]) {
+            try {
+              receiver(payload, info)
+            } catch (error) {
+              this.config.reportError(error)
+            }
+          }
         },
         () => this._receivers.size,
       )

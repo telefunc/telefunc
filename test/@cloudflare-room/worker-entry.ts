@@ -118,7 +118,7 @@ export class PublicDurableObject extends RoomAuthorityHost<Env> {
       }
     })
   }
-  telefuncRoomDeliver(request: RoomSessionDeliveryRequest): Promise<void> {
+  telefuncRoomDeliver(request: RoomSessionDeliveryRequest): void {
     return this.#run(() => this.#manager.deliver(request))
   }
   telefuncRoomInvalidate(request: RoomSessionInvalidationRequest): void {

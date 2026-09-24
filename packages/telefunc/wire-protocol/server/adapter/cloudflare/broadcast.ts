@@ -153,9 +153,9 @@ class CloudflareBroadcastSubscriptionAttempt extends DriverAttempt {
     )
   }
 
-  async deliver(payload: Uint8Array, info: OrderingInfo): Promise<void> {
+  deliver(payload: Uint8Array, info: OrderingInfo): void {
     if (this.state() !== 'ready') return
-    await this.#receiver(payload, info)
+    this.#receiver(payload, info)
   }
 
   async unsubscribe(): Promise<void> {
@@ -304,8 +304,8 @@ class CloudflareBroadcastMember {
   }
 
   /** A coordinator's delivery to this DO's subscription. */
-  async deliver(request: BroadcastDeliverRequest): Promise<void> {
-    await this.#subscriptions.get(broadcastRouteKey(request))?.deliver(request.payload, request.info)
+  deliver(request: BroadcastDeliverRequest): void {
+    this.#subscriptions.get(broadcastRouteKey(request))?.deliver(request.payload, request.info)
   }
 
   #ensureLane(lane: BroadcastLane, routeKey: string): MemberLane {
