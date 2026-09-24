@@ -661,9 +661,11 @@ class ServerRoom extends RoomStateView implements Room {
   private _suppress(from: string): boolean {
     return this._localParticipants.get(from)?.selfDelivery === false
   }
-  _startTail(): void {
+  /** Resolves once the tail receives, so it holds everything committed after it returns. */
+  async _startTail(): Promise<void> {
     this._tail = new TailHold(() => this._teardownTail())
     this._subs.replan() // bring up text ingestion before any stub exists
+    await withinRoomHorizon(this._subs.semanticReady, ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS)
   }
   private _teardownTail(): void {
     if (this._tail === null) return // already handed off to a stub

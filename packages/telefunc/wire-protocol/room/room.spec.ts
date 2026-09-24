@@ -1756,6 +1756,19 @@ describe('Room public behavior', () => {
     await member.publish('live')
     expect(semanticFrames(peer, 'data')).toEqual(['early', 'held', 'live'])
   })
+  it('Room.get with tail resolves once the tail receives, so it holds what commits after', async () => {
+    await Room.create('tail-ready')
+    const member = await (await Room.get('tail-ready')).join()
+    const semantic = delayLaneSubscription((lane) => lane.kind === 'semantic')
+    const getting = Room.get('tail-ready', { tail: true })
+    await semantic.started
+    setTimeout(() => void semantic.release(), 10)
+    const tail = (await getting) as ServerRoom
+    await member.publish('after-get')
+    const { stub, peer } = serve(tail)
+    stub._onPeerBroadcastSubscribe(false)
+    await vi.waitFor(() => expect(semanticFrames(peer, 'data')).toEqual(['after-get']))
+  })
   it('flushes held tail text after an announcement relayed before the first text subscription', async () => {
     const { member, tail } = await createTail('tail-announce')
     const { stub, peer } = serve(tail)

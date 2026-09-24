@@ -166,7 +166,7 @@ async function createRoom(id: string, options?: RoomOptions): Promise<Room> {
 
 async function getRoom(id: string, options?: RoomGetOptions): Promise<Room> {
   const room = await openRoom(id)
-  if (options?.tail === true) room._startTail()
+  if (options?.tail === true) await room._startTail()
   return room
 }
 
