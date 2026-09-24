@@ -38,6 +38,5 @@ function commitPreconditionHolds(
 
 /** `seq` strictly increases per domain; `timestamp` is authority time, clamped so it never goes back. */
 function nextOrderMark(previous: OrderingInfo | undefined, now: number): OrderingInfo {
-  if (previous?.seq === Number.MAX_SAFE_INTEGER) throw new Error('sequence exhausted for the ordering domain')
   return { seq: (previous?.seq ?? 0) + 1, timestamp: Math.max(now, previous?.timestamp ?? 0) }
 }

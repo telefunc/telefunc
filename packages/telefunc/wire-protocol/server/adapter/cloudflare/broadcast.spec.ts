@@ -96,8 +96,8 @@ function createSqlState(): DurableObjectState {
   return { storage } as unknown as DurableObjectState
 }
 
-function createAuthorityState(state = createSqlState()) {
-  return new CloudflareBroadcastAuthorityState(state)
+function createAuthorityState() {
+  return new CloudflareBroadcastAuthorityState(createSqlState())
 }
 
 type PresenceHooks = { beforeRecord?: () => Promise<void>; beforeWithdraw?: () => Promise<void> }
@@ -418,17 +418,6 @@ describe('cloudflare broadcast routing', () => {
     expect(receipt).toMatchObject({ seq: 2, meta: { authorityBucket: 'weur' } })
     expect((receipt.meta!.fanoutBuckets as string[]).sort()).toEqual(['apac', 'weur'])
     expect(receipt.timestamp).toEqual(expect.any(Number))
-  })
-
-  it('rejects generic Broadcast sequence exhaustion before persisting an unsafe cursor', () => {
-    const key = 'room:exhausted'
-    const state = createSqlState()
-    const authority = createAuthorityState(state)
-    authority.sequence(key, 'weur')
-    state.storage.sql.exec('UPDATE broadcast_key SET seq = ? WHERE key = ?', Number.MAX_SAFE_INTEGER, key)
-    expect(() => authority.sequence(key, 'weur')).toThrow('sequence exhausted')
-    const [row] = state.storage.sql.exec<{ seq: number }>('SELECT seq FROM broadcast_key WHERE key = ?', key).toArray()
-    expect(row!.seq).toBe(Number.MAX_SAFE_INTEGER)
   })
 
   it('waits for the authority to record presence before publishing', async () => {

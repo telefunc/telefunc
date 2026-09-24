@@ -71,10 +71,6 @@ end
 //   KEYS: [1]=sequence [2]=channel
 //   ARGV: [1]=payload
 const PUBLISH_LUA = `${NOW_LUA}${REDIS_ORDERING_FRAME_LUA}
-local previous = redis.call('GET', KEYS[1])
-if previous and tonumber(previous) >= ${Number.MAX_SAFE_INTEGER} then
-  return redis.error_reply('publish: sequence exhausted for the ordering domain')
-end
 local seq = redis.call('INCR', KEYS[1])
 local ts = tf_now()
 local frame = tf_ordering_frame(seq, ts, ARGV[1])
@@ -248,7 +244,7 @@ for i = 6, #KEYS do
 end
 
 -- Advance the live lane-domain cursor exactly once. It has no TTL: generation deletion is its cleanup
--- boundary. Reject safe-integer exhaustion before SET/retained/PUBLISH can have any effect.
+-- boundary.
 local base_seq, base_ts = 0, 0
 local prev = redis.call('GET', order_key)
 if prev then
@@ -257,15 +253,11 @@ if prev then
   base_seq = tonumber(pseq)
   base_ts = tonumber(pts)
 end
-if base_seq >= ${Number.MAX_SAFE_INTEGER} then
-  return redis.error_reply('commitLane: sequence exhausted for the ordering domain')
-end
 local seq = base_seq + 1
 local ts = now
 if base_ts > ts then ts = base_ts end
--- Lua's implicit number-to-string conversion uses limited significant digits at the safe-integer
--- boundary. Format both exact integers once, then use those decimal strings for durable state and the
--- JSON receipt so the final legal commit cannot effect successfully and fail only while decoding reply.
+-- Lua's tostring keeps 14 significant digits, so both integers are formatted exactly once, for durable
+-- state and the JSON receipt.
 local seq_text = string.format('%.0f', seq)
 local ts_text = string.format('%.0f', ts)
 redis.call('SET', order_key, seq_text .. ':' .. ts_text)

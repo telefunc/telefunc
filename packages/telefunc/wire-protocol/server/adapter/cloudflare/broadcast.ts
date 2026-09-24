@@ -184,7 +184,6 @@ class CloudflareBroadcastAuthorityState {
         )
         .toArray()[0]
       const current = row?.seq ?? 0
-      assert(current < Number.MAX_SAFE_INTEGER, 'Cloudflare Broadcast sequence exhausted for the ordering domain')
       const authorityBucket = row?.authority_bucket ?? preferredBucket
       sql.exec(
         'INSERT OR REPLACE INTO broadcast_key (key, seq, authority_bucket) VALUES (?, ?, ?)',
