@@ -587,6 +587,28 @@ describe('cloudflare broadcast routing', () => {
     ])
   })
 
+  it('a member that fails to take a publish loses it: the publish resolves and the loss is logged', async () => {
+    const authority = createAuthorityState()
+    const calls: BroadcastCalls = new OrderedStubs()
+    const coordinatorCalls: BroadcastCalls = new OrderedStubs()
+    const transport: CloudflareBroadcastTransport = createTransport(
+      createBasicBinding({
+        onPresence: presenceAt(authority),
+        onPublish: (_id, request) => transport.publishToSubscribers(authority, calls, request),
+        onForward: (_id, request) => transport.forwardToBucket(coordinatorCalls, request),
+        onDeliver: () => Promise.reject(new Error('member reset')),
+      }),
+    )
+    installCloudflareTransport(transport)
+    const report = vi.spyOn(console, 'error').mockImplementation(() => {})
+    await inSession(createMember(transport), async () => {
+      const room = new ServerBroadcast<string>({ key: 'room:test' })
+      room.subscribe(() => {})
+      await expect(room.publish('lost')).resolves.toMatchObject({ receivers: 1 })
+    })
+    expect(report).toHaveBeenCalledWith(expect.stringContaining("delivery of 'room:test' lost to 1/1"))
+  })
+
   it('a forward delivers wide ordering positions to every named DO', async () => {
     const authorityState = createAuthorityState()
     const deliveredTo: string[] = []
