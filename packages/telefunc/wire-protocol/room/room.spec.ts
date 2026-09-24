@@ -167,7 +167,7 @@ describe('Room public behavior', () => {
   it('retains room-stub ownership so a transient durable-leave failure can be retried', async () => {
     const room = (await Room.create('retry-stub-leave')) as ServerRoom
     const stub = register(room)
-    const joined = (await room._handleStubRequest(stub, {
+    const joined = (await stub._handleRequest({
       __r: 'req-join',
       meta: {},
       selfDelivery: true,
@@ -175,16 +175,16 @@ describe('Room public behavior', () => {
     const request = { __r: 'req-leave' as const, id: joined.id }
     const failure = new Error('transient member delete failure')
     vi.spyOn(driver, 'compareExchangeCells').mockRejectedValueOnce(failure)
-    await expect(room._handleStubRequest(stub, request)).rejects.toBe(failure)
+    await expect(stub._handleRequest(request)).rejects.toBe(failure)
     expect(stub._holds(joined.id)).toBe(true)
-    await expect(room._handleStubRequest(stub, request)).resolves.toBeUndefined()
+    await expect(stub._handleRequest(request)).resolves.toBeUndefined()
     expect(await Room.getParticipants(room.id)).toEqual([])
   })
   it('relays a leave that reached this instance with no event, from a reconciled roster or a vanished record', async () => {
     const room = (await Room.create('lost-leave-owner')) as ServerRoom
     const { stub, peer } = serve(room)
     const join = async () =>
-      ((await room._handleStubRequest(stub, { __r: 'req-join', meta: {}, selfDelivery: true })) as { id: string }).id
+      ((await stub._handleRequest({ __r: 'req-join', meta: {}, selfDelivery: true })) as { id: string }).id
     const reconciled = await join()
     const vanished = await join()
     await vi.waitFor(() => expect(memberEvents(peer, vanished).map((event) => event.__r)).toEqual(['join']))
@@ -1248,7 +1248,7 @@ describe('Room public behavior', () => {
     const frozen: boolean[] = []
     Room.guard(room, { onBeforeJoin: ({ meta }) => void frozen.push(Object.isFrozen(meta)) })
     const { stub } = serve(room)
-    await room._handleStubRequest(stub, { __r: 'req-join', meta: { name: 'a' }, selfDelivery: true })
+    await stub._handleRequest({ __r: 'req-join', meta: { name: 'a' }, selfDelivery: true })
     await room.join({ meta: { name: 'b' } })
     expect(frozen).toEqual([true, true])
   })
@@ -1300,7 +1300,7 @@ describe('Room public behavior', () => {
   it("round-trips an ack DM through a room stub and keeps only the reply's own fields", async () => {
     const room = (await Room.create('stub-ack-dm')) as ServerRoom
     const { stub, peer } = serve(room)
-    const { id } = (await room._handleStubRequest(stub, { __r: 'req-join', meta: {}, selfDelivery: true })) as {
+    const { id } = (await stub._handleRequest({ __r: 'req-join', meta: {}, selfDelivery: true })) as {
       id: string
     }
     const victim = await room.join()
@@ -1375,8 +1375,8 @@ describe('Room public behavior', () => {
         await release.promise
       },
     })
-    const joining = room
-      ._handleStubRequest(stub, { __r: 'req-join', meta: {}, selfDelivery: true })
+    const joining = stub
+      ._handleRequest({ __r: 'req-join', meta: {}, selfDelivery: true })
       .catch((error: unknown) => error)
     await entered.promise
     stub.abort()
@@ -1396,8 +1396,8 @@ describe('Room public behavior', () => {
       return compareExchange(...args)
     })
     const departed = vi.spyOn(room, '_removeDepartedMember')
-    const joining = room
-      ._handleStubRequest(stub, { __r: 'req-join', meta: {}, selfDelivery: true })
+    const joining = stub
+      ._handleRequest({ __r: 'req-join', meta: {}, selfDelivery: true })
       .catch((error: unknown) => error)
     await writing.promise
     stub.abort()

@@ -18,6 +18,7 @@ import {
   decodeRoomDeclaration,
   decodeRoomPublish,
   decodeRoomRequest,
+  type RoomRequest,
   decodeStubBinaryFrame,
   type RoomDeclaration,
 } from './requests.js'
@@ -117,7 +118,24 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
 
   override _onPeerAckReqMessage(text: string, seq: number): Promise<void> {
     const request = decodeRoomRequest(parsePeerText(text))
-    return this._ackRoomResult(seq, this._room._handleStubRequest(this, request))
+    return this._ackRoomResult(seq, this._handleRequest(request))
+  }
+
+  async _handleRequest(req: RoomRequest): Promise<unknown> {
+    const room = this._room
+    switch (req.__r) {
+      case 'req-join':
+        return await room._joinStubMember(this, req)
+      case 'req-leave':
+        await room._removeMember(this._requireMember(req.id), { type: 'left' })
+        return undefined
+      case 'req-set-meta':
+        return await room._setMemberMeta(this._requireMember(req.id), req.meta)
+      case 'req-set-attrs':
+        return await room._mergeMemberMeta(this._requireMember(req.id), req.attrs)
+      case 'req-dm':
+        return await room._sendDm(this._requireMember(req.id), req.to, req.data, req.ack === true)
+    }
   }
 
   override _onPeerPublishAckReqMessage(text: string, seq: number): Promise<void> {
@@ -195,7 +213,7 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
     return this._members.values()
   }
 
-  _requireMember(id: string): string {
+  private _requireMember(id: string): string {
     if (!this._members.has(id)) throw new RoomError('Not a participant of this room (joined through this connection)')
     return id
   }

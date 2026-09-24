@@ -726,22 +726,7 @@ class ServerRoom extends RoomStateView implements Room {
   private _visibleRoster(): MemberSnapshot[] {
     return this._state.snapshotMembers().filter((member) => !member.hidden)
   }
-  async _handleStubRequest(stub: RoomStubChannel, req: RoomRequest): Promise<unknown> {
-    switch (req.__r) {
-      case 'req-join':
-        return await this._joinStubMember(stub, req)
-      case 'req-leave':
-        await this._removeMember(stub._requireMember(req.id), { type: 'left' })
-        return undefined
-      case 'req-set-meta':
-        return await this._setMemberMeta(stub._requireMember(req.id), req.meta)
-      case 'req-set-attrs':
-        return await this._mergeMemberMeta(stub._requireMember(req.id), req.attrs)
-      case 'req-dm':
-        return await this._sendDm(stub._requireMember(req.id), req.to, req.data, req.ack === true)
-    }
-  }
-  private async _joinStubMember(stub: RoomStubChannel, req: Extract<RoomRequest, { __r: 'req-join' }>) {
+  async _joinStubMember(stub: RoomStubChannel, req: Extract<RoomRequest, { __r: 'req-join' }>) {
     const admission = {
       id: crypto.randomUUID(),
       meta: ownMetadata(req.meta),
