@@ -367,7 +367,7 @@ for (const m of history) show(m)   // the past
 room.subscribe(show)               // flushes the held live tail, then stays live
 ```
 
-Order the stored history and live tail for the current room lifecycle by `seq`. Every accepted message in an ordering domain increments `seq` by one. `timestamp` is non-decreasing time for display and temporal context; it doesn't reset or partition `seq`.
+Order the stored history and live tail for the current room lifecycle by `seq`. Every accepted message in an ordering domain increments `seq` by one, and a participant's own publishes take their `seq` in the order it called `publish()` (per track for binary), however long a guard takes for each. `timestamp` is non-decreasing time for display and temporal context; it doesn't reset or partition `seq`.
 
 Participant text published with `publish()` and room-authored notices sent with `Room.announce()` share one ordering domain. Presence events, each `(member, binary track)`, and each recipient inbox use separate domains. Closing and recreating a room restarts its domains at `seq = 1`, so positions from different domains or lifecycles aren't comparable. If your application combines several room lifecycles into one history, persist its own lifecycle or message identity alongside `seq`.
 

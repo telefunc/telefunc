@@ -6,6 +6,7 @@ import type { TELEFUNC_SHIELDS } from '../../../node/shared/transformer/generate
 import { assert, assertUsage } from '../../../utils/assert.js'
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 import { unrefTimer } from '../../../utils/unrefTimer.js'
+import { createDeferred } from '../../../utils/createDeferred.js'
 import type { ChannelPublishAck } from '../../channel.js'
 import { ROOM_DM_ACK_TIMEOUT_MS, ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS } from '../constants.js'
 import { getRoomBackend } from '../../backend/install.js'
@@ -62,7 +63,7 @@ import { RoomDemand } from '../demand.js'
 import { ParticipantBase } from '../participant.js'
 import { RoomStubChannel } from './stub.js'
 import type { RoomRequest } from './requests.js'
-import { LocalHolder, type LaneHolder, type WantsChange } from './replay.js'
+import { LocalHolder, binaryLaneKey, type LaneHolder, type WantsChange } from './replay.js'
 import { TailHold } from './tail.js'
 import { RoomSubscriptions, type HolderWants } from './subscriptions.js'
 import {
@@ -134,6 +135,7 @@ class ServerRoom extends RoomStateView implements Room {
 
   /** (member, track) pairs this instance announced, so only a track's first frame pays for the announcement. */
   private readonly _announcedTracks = new Map<string, Set<string>>()
+  private readonly _publishTurns = new Map<string, Promise<void>>()
   /** Binary demand across instances (`onDemand`). */
   private readonly _demand: RoomDemand
   private readonly _subs: RoomSubscriptions
@@ -312,17 +314,18 @@ class ServerRoom extends RoomStateView implements Room {
   }
 
   async _publishText(from: string, data: unknown, retain = false): Promise<ChannelPublishAck> {
-    const sender = await this._admitPublish(from, data)
-    const envelope: RoomDataEnvelope = {
-      __r: 'data',
-      from,
-      fromMeta: sender.meta,
-      ...(sender.identity === null ? {} : { fromIdentity: sender.identity }),
-      data,
-    }
-    const commit = await commitRoomLaneOrThrow(this.id, this._inc, SEMANTIC_LANE, encodeRoomRecord(envelope), {
-      retain,
-      requiredCellKeys: [memberCellKey(from)],
+    const { sender, commit } = await this._inCallOrder(from, async (committed) => {
+      const sender = await this._admitPublish(from, data)
+      const envelope: RoomDataEnvelope = {
+        __r: 'data',
+        from,
+        fromMeta: sender.meta,
+        ...(sender.identity === null ? {} : { fromIdentity: sender.identity }),
+        data,
+      }
+      const record = encodeRoomRecord(envelope)
+      const opts = { retain, requiredCellKeys: [memberCellKey(from)] }
+      return { sender, commit: await commitRoomLaneOrThrow(this.id, this._inc, SEMANTIC_LANE, record, opts, committed) }
     })
     return this._finishPublish(sender, data, commit)
   }
@@ -330,16 +333,29 @@ class ServerRoom extends RoomStateView implements Room {
   /** `frame` is `framed` decoded; receivers trust its sender id, which every caller checked is the publisher's. */
   async _publishBinaryFrame(frame: BinaryFrame, framed: Uint8Array): Promise<ChannelPublishAck> {
     const { from } = frame
-    const sender = await this._admitPublish(from, frame.payload)
-    if (frame.track !== null) await this._ensureTrackAnnounced(from, frame.track)
-    const commit = await commitRoomLaneOrThrow(
-      this.id,
-      this._inc,
-      { kind: 'binary', member: from, track: laneTrack(frame.track) },
-      framed,
-      { retain: frame.retain, requiredCellKeys: [memberCellKey(from)] },
-    )
+    const lane = { kind: 'binary', member: from, track: laneTrack(frame.track) } as const
+    const { sender, commit } = await this._inCallOrder(binaryLaneKey(from, lane.track), async (committed) => {
+      const sender = await this._admitPublish(from, frame.payload)
+      if (frame.track !== null) await this._ensureTrackAnnounced(from, frame.track)
+      const opts = { retain: frame.retain, requiredCellKeys: [memberCellKey(from)] }
+      return { sender, commit: await commitRoomLaneOrThrow(this.id, this._inc, lane, framed, opts, committed) }
+    })
     return await this._finishPublish(sender, frame.payload, commit)
+  }
+
+  /** A member's publishes on one lane commit in call order: each starts once the one before it committed or failed,
+   *  never waiting on its delivery. */
+  private async _inCallOrder<T>(key: string, publish: (committed: () => void) => Promise<T>): Promise<T> {
+    const previous = this._publishTurns.get(key)
+    const turn = createDeferred()
+    this._publishTurns.set(key, turn.promise)
+    try {
+      await previous
+      return await publish(turn.resolve)
+    } finally {
+      turn.resolve()
+      if (this._publishTurns.get(key) === turn.promise) this._publishTurns.delete(key)
+    }
   }
 
   private async _admitPublish(from: string, payload: unknown): Promise<Sender> {

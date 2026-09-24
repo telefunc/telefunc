@@ -916,9 +916,10 @@ describe('Room public behavior', () => {
     })
     const report = vi.spyOn(console, 'error').mockImplementation(() => {})
     const publishing = member.publish('lost')
+    // The member's next publish commits without waiting on the handoff still pending.
+    await expect(member.publish('rejected')).resolves.toMatchObject({ seq: expect.any(Number) })
     await vi.advanceTimersByTimeAsync(ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS)
     await expect(publishing).resolves.toMatchObject({ seq: expect.any(Number) })
-    await expect(member.publish('rejected')).resolves.toMatchObject({ seq: expect.any(Number) })
     expect(report).toHaveBeenCalled()
   })
   it('applies room-wide and member-specific binary wants to both subscription and demand', async () => {
@@ -1846,6 +1847,30 @@ describe('Room public behavior', () => {
     remote.subscribeBinary(() => {})
     remote.onUpdate(() => {})
     expect((observer as unknown as { _state: { listenerCount: number } })._state.listenerCount).toBe(0)
+  })
+  it("commits a participant's publishes in call order, however long its guard takes for each", async () => {
+    const room = await Room.create('publish-call-order')
+    const slow = deferred<void>()
+    Room.guard(room, {
+      onBeforePublish: async (_from, data) => {
+        if (data === 'first' || (data instanceof Uint8Array && data[0] === 1)) await slow.promise
+      },
+    })
+    const me = await room.join()
+    const texts: unknown[] = []
+    const frames: number[] = []
+    room.subscribe((data) => void texts.push(data))
+    room.subscribeBinary((data) => void frames.push(data[0]!))
+    const published = [
+      me.publish('first'),
+      me.publish('second'),
+      me.publishBinary(new Uint8Array([1])),
+      me.publishBinary(new Uint8Array([2])),
+    ]
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    slow.resolve()
+    await Promise.all(published)
+    await vi.waitFor(() => expect({ texts, frames }).toEqual({ texts: ['first', 'second'], frames: [1, 2] }))
   })
   it('onDemand reports named-track demand turning on and off', async () => {
     const room = await Room.create('demand')

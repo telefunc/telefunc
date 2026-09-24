@@ -64,14 +64,17 @@ function openConfig(current: RoomHead | null, inc?: string): RoomConfigRecord | 
   return configFromHead(current)
 }
 
+/** `committed` runs once the driver has answered, before the delivery wait. */
 async function commitRoomLane(
   id: string,
   inc: string,
   lane: LaneId,
   payload: Uint8Array,
   opts?: CommitOptions,
+  committed?: () => void,
 ): Promise<CommitAccepted | StaleCommit> {
   const result = await getRoomBackend().commitLane(id, inc, lane, payload, opts)
+  committed?.()
   if ('stale' in result) return result
   // Delivery is at-most-once: a handoff that rejects or never settles is lost, not the caller's failure.
   const delivered = raceTimeout(
@@ -93,8 +96,9 @@ async function commitRoomLaneOrThrow(
   lane: LaneId,
   payload: Uint8Array,
   opts?: { retain?: boolean; requiredCellKeys?: string[] },
+  committed?: () => void,
 ): Promise<CommitAccepted> {
-  const result = await commitRoomLane(id, inc, lane, payload, opts)
+  const result = await commitRoomLane(id, inc, lane, payload, opts, committed)
   if ('stale' in result) throw staleCommitError(id, result)
   return result
 }
