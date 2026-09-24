@@ -34,8 +34,8 @@ type ChannelPublishInfo = {
 }
 type ChannelPublishAck = ChannelPublishInfo & {
   meta?: ChannelPublishMeta
-  /** Live subscriptions on the published key when the backend can count them; absent on Redis Cluster. A Broadcast
-   *  on Cloudflare counts eventually consistent presence, so `0` there isn't proof of absence. Not a viewer count. */
+  /** Live subscriptions on the published key when the backend can count them; absent on Redis Cluster. Not a viewer
+   *  count: on Cloudflare it counts subscribed Durable Objects. */
   receivers?: number
 }
 

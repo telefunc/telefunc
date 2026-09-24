@@ -19,6 +19,7 @@ import type {
   BroadcastCalls,
   BroadcastDeliverRequest,
   BroadcastForwardRequest,
+  BroadcastPresenceRequest,
   BroadcastPublishRequest,
 } from '../wire-protocol/server/adapter/cloudflare/broadcast.js'
 import { OrderedStubs } from '../wire-protocol/server/adapter/cloudflare/ordered-stubs.js'
@@ -112,10 +113,6 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
   function sessionNamespace(env: Cloudflare.Env): DurableObjectNamespace {
     return scoped(requireBinding(env, bindingName, 'Durable Object'))
   }
-  function kvNamespace(env: Cloudflare.Env): KVNamespace | undefined {
-    return (env as Record<string, KVNamespace | undefined>)[kvBindingName]
-  }
-
   const cloudflareBackend = installBackend(
     () =>
       new CloudflareRoomBackend({
@@ -138,8 +135,6 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
     constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
       super(ctx, env, sessionNamespace(env) as unknown as RoomFanoutNamespace)
       broadcast.attachBinding(sessionNamespace(env), bindingName)
-      const kv = kvNamespace(env)
-      if (kv) broadcast.attachKV(kv)
       this.authorityState = new CloudflareBroadcastAuthorityState(ctx)
       crosswsAdapter.handleDurableInit(this, ctx, env)
       // Channel state lives in memory, so a socket that outlived an earlier instance lost it and can only reconnect.
@@ -179,6 +174,10 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
 
     telefuncBroadcastDeliver(request: BroadcastDeliverRequest) {
       return broadcast.deliverToLocal(request)
+    }
+
+    telefuncBroadcastPresence(request: BroadcastPresenceRequest) {
+      return this.authorityState.setPresence(request)
     }
 
     telefuncRoomDeliver(request: RoomSessionDeliveryRequest): Promise<void> {

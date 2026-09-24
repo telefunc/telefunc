@@ -10,6 +10,7 @@ const mocks = vi.hoisted(() => {
   }
   class MockCloudflareBroadcastAuthorityState {
     readonly state: DurableObjectState
+    readonly setPresence = vi.fn()
     constructor(state: DurableObjectState) {
       this.state = state
       mocks.authorityInstances.push(this)
@@ -18,7 +19,6 @@ const mocks = vi.hoisted(() => {
   class MockCloudflareBroadcastTransport {
     readonly options: unknown
     readonly attachBinding = vi.fn()
-    readonly attachKV = vi.fn()
     readonly attachIsolateInfo = vi.fn()
     readonly publishToSubscribers = vi.fn()
     readonly forwardToBucket = vi.fn()
@@ -130,7 +130,12 @@ vi.mock('./routing.js', () => ({
 import { Telefunc } from '../../../../serve/cloudflare.js'
 import { disposeBackend, getRoomBackend, installBackend } from '../../../backend/install.js'
 import { MemoryBackend } from '../../../backend/memory/backend.js'
-import type { BroadcastDeliverRequest, BroadcastForwardRequest, BroadcastPublishRequest } from './broadcast.js'
+import type {
+  BroadcastDeliverRequest,
+  BroadcastForwardRequest,
+  BroadcastPresenceRequest,
+  BroadcastPublishRequest,
+} from './broadcast.js'
 
 function createMockKV(): KVNamespace {
   const store = new Map<string, { value: string; expirationTtl?: number }>()
@@ -419,6 +424,7 @@ describe('cloudflare adapter entrypoint', () => {
       telefuncBroadcastPublish(request: BroadcastPublishRequest): unknown
       telefuncBroadcastForward(request: BroadcastForwardRequest): unknown
       telefuncBroadcastDeliver(request: BroadcastDeliverRequest): void
+      telefuncBroadcastPresence(request: BroadcastPresenceRequest): void
       telefuncRoomInvalidate(request: unknown): void
     }
     for (const socket of recoveredSockets) {
@@ -475,6 +481,14 @@ describe('cloudflare adapter entrypoint', () => {
     }
     instance.telefuncBroadcastDeliver(delivery)
     expect(mocks.transportInstances[0]?.deliverToLocal).toHaveBeenCalledWith(delivery)
+    const presence = {
+      key: 'room:test',
+      kind: 'text' as const,
+      member: 'telefunc-shard-weur-0',
+      bucket: 'weur' as const,
+    }
+    instance.telefuncBroadcastPresence(presence)
+    expect(mocks.authorityInstances[0]?.setPresence).toHaveBeenCalledWith(presence)
     const invalidation = {
       roomId: 'room',
       inc: 'inc',
