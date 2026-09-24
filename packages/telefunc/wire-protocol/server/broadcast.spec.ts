@@ -9,7 +9,7 @@ import { disposeBackend, installBackend } from '../backend/install.js'
 import { MemoryBackend, MemoryBackendState } from '../backend/memory/backend.js'
 import type { SubscriptionAttempt, SubscriptionAttemptState } from '../backend/subscription.js'
 import { ChannelClosedError, ChannelOverflowError } from '../channel-errors.js'
-import { CHANNEL_BUFFER_LIMIT_BINARY_BYTES } from '../constants.js'
+import { BROADCAST_ESTABLISH_HOLD_MS, CHANNEL_BUFFER_LIMIT_BINARY_BYTES } from '../constants.js'
 import { Abort } from '../../shared/Abort.js'
 
 let memoryState: MemoryBackendState
@@ -229,14 +229,29 @@ describe('keyed in-process broadcast', () => {
       expect(publish).not.toHaveBeenCalled()
       controlled.ready()
       controlled.lost()
-      await new Promise((resolve) => setTimeout(resolve, 0))
-      expect(publish).not.toHaveBeenCalled()
-      controlled.ready()
       await publishing
       expect(publish).toHaveBeenCalledOnce()
+      // Only the establishment gates: a later loss holds nothing.
+      await sender.publish('while-lost')
+      expect(publish).toHaveBeenCalledTimes(2)
     } finally {
       sender.abort()
       receiver.abort()
+    }
+  })
+
+  it('holds a publish for a subscription that never establishes only until the hold ends', async () => {
+    vi.useFakeTimers()
+    try {
+      const { publish } = await installPendingSubscriptionBackend({ seq: 1, timestamp: 1 })
+      new ServerBroadcast({ key: 'broadcast:never-ready' }).subscribe(() => {})
+      const publishing = new ServerBroadcast({ key: 'broadcast:never-ready' }).publish('held')
+      await vi.advanceTimersByTimeAsync(BROADCAST_ESTABLISH_HOLD_MS - 1)
+      expect(publish).not.toHaveBeenCalled()
+      await vi.advanceTimersByTimeAsync(1)
+      await expect(publishing).resolves.toMatchObject({ seq: 1 })
+    } finally {
+      vi.useRealTimers()
     }
   })
 

@@ -78,19 +78,19 @@ class SubscriptionManager<Source> {
     return cleanup
   }
 
-  /** Whether a slot on the source's route is neither ready nor ended. */
-  hasUnsettled(source: Source): boolean {
-    return this._slotsOf(source).some((slot) => slot.unsettled)
+  /** Whether a slot on the source's route is still establishing: never ready, stopped or ended. */
+  hasEstablishing(source: Source): boolean {
+    return this._slotsOf(source).some((slot) => slot.establishing)
   }
 
-  /** Resolves once every slot on the source's route, including ones added meanwhile, is ready, stopped or terminal. */
-  async settled(source: Source): Promise<void> {
-    for (let waits = this._settledWaits(source); waits.length > 0; waits = this._settledWaits(source))
+  /** Resolves once every slot on the source's route, including ones added meanwhile, is past its establishment. */
+  async established(source: Source): Promise<void> {
+    for (let waits = this._establishingWaits(source); waits.length > 0; waits = this._establishingWaits(source))
       await Promise.all(waits)
   }
 
-  private _settledWaits(source: Source): Promise<void>[] {
-    return this._slotsOf(source).flatMap((slot) => (slot.unsettled ? [slot.settled()] : []))
+  private _establishingWaits(source: Source): Promise<void>[] {
+    return this._slotsOf(source).flatMap((slot) => (slot.establishing ? [slot.established] : []))
   }
 
   private _slotsOf(source: Source): SubscriptionSlot<Source>[] {
@@ -105,21 +105,19 @@ class SubscriptionSlot<Source> {
   private _attempt: SubscriptionAttempt | null = null
   private _unobserve: (() => void) | null = null
   private _readiness: ReadinessGeneration = createReadinessGeneration()
+  /** The first readiness, settled by the first ready, a stop or an end; a later loss opens a new one. */
+  readonly established: Promise<void> = this._readiness.promise.then(
+    () => {},
+    () => {},
+  )
+  private _wasReady = false
   private _state: SubscriptionState = 'establishing'
   private _stopPromise: Promise<void> | null = null
 
   constructor(readonly config: SubscriptionSlotConfig<Source>) {}
 
-  get unsettled(): boolean {
-    return this._stopPromise === null && this._state !== 'ready'
-  }
-
-  /** Resolves when the current readiness settles either way. */
-  settled(): Promise<void> {
-    return this._readiness.promise.then(
-      () => {},
-      () => {},
-    )
+  get establishing(): boolean {
+    return this._stopPromise === null && !this._wasReady
   }
 
   attach(receiver: BackendReceiver): BackendSubscription {
@@ -218,6 +216,7 @@ class SubscriptionSlot<Source> {
   }
 
   private _becameReady(): void {
+    this._wasReady = true
     this._readiness.resolve()
     this._transition('ready')
   }

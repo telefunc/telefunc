@@ -262,7 +262,7 @@ info.seq        // monotonic sequence number for this key
 info.timestamp  // server timestamp (Unix epoch ms)
 ```
 
-`seq` is monotonic per `key`, which is useful for ordering and gap detection. `publish()` resolves to `info` once the message is accepted.
+`seq` is monotonic per `key`, which is useful for ordering and gap detection. `publish()` resolves to `info` once the message is accepted. A publish right after a `subscribe()` on the same server reaches that subscriber: while the new subscription is being set up, the publish waits for it, for up to 60 seconds.
 
 The `receivers` count is authoritative with the in-memory backend and standalone Redis. On Cloudflare it is eventually consistent, so `0` isn't proof that nobody is subscribed; Redis Cluster omits it.
 

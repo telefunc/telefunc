@@ -17,7 +17,7 @@ export {
 
 import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
-import { unrefTimer } from '../../../utils/unrefTimer.js'
+import { raceTimeout } from '../../../utils/raceTimeout.js'
 import { getRoomBackend } from '../../backend/install.js'
 import type { CommitAccepted, LaneId, RoomHead, StaleCommit, CommitOptions } from '../../backend/room/contract.js'
 import type { RoomConfigRecord, RoomCtrlEnvelope } from '../protocol.js'
@@ -97,16 +97,6 @@ async function commitRoomLaneOrThrow(
   const result = await commitRoomLane(id, inc, lane, payload, opts)
   if ('stale' in result) throw staleCommitError(id, result)
   return result
-}
-
-/** Settles like `promise`, or like `onTimeout()` once `ms` pass first; a spent budget times out at once. */
-function raceTimeout<T>(promise: Promise<T>, ms: number, onTimeout: () => T): Promise<T> {
-  if (ms <= 0) return Promise.resolve().then(onTimeout)
-  let timer!: ReturnType<typeof setTimeout>
-  const timeout = new Promise<T>((resolve) => {
-    timer = unrefTimer(setTimeout(() => resolve(Promise.resolve().then(onTimeout)), ms))
-  })
-  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer))
 }
 
 function withinRoomHorizon<T>(promise: Promise<T>, ms: number): Promise<T> {
