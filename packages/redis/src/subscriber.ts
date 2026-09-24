@@ -262,7 +262,7 @@ class RedisSubscriptionAttempt extends DriverAttempt {
     return fence.promise
   }
 
-  /** Resolves the fence: its token arrived, or the commit that armed it was refused. */
+  /** Resolves the fence: its token arrived, the commit that armed it was refused, or no receiver is left. */
   settleFence(token: string): void {
     this._fences.get(token)?.resolve()
     this._fences.delete(token)
@@ -308,7 +308,7 @@ class RedisSubscriptionAttempt extends DriverAttempt {
   }
 
   private async _dispose(): Promise<void> {
-    this._rejectFences(new Error('Redis delivery fence was closed'))
+    for (const token of [...this._fences.keys()]) this.settleFence(token)
     this.transition('closed', new Error(`Redis subscription '${this.laneChannel}' was closed`))
     this._onDetach()
   }

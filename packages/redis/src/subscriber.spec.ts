@@ -98,6 +98,20 @@ test('re-subscribes on a fresh connection and resumes delivery after a drop', as
   expect(received).toEqual([1, 2])
 })
 
+test("a fence resolves when its subscription's owner releases it: no receiver is left to hand off to", async () => {
+  const sockets: ReturnType<typeof fakeSubscriber>[] = []
+  const { driver } = driverWith(sockets)
+  const source = { roomId: 'room', inc: 'inc', lane: { kind: 'control' } } as const
+  const attempt = driver.bind(source).open(
+    () => {},
+    () => 1,
+  )
+  await untilReady(attempt)
+  const fence = driver.prepareFence(source)
+  await attempt.unsubscribe()
+  await expect(fence.delivery).resolves.toBeUndefined()
+})
+
 test('a SUBSCRIBE that keeps failing backs off and is reported once', async () => {
   vi.useFakeTimers()
   onTestFinished(() => void vi.useRealTimers())
