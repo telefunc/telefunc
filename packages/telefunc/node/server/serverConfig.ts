@@ -521,8 +521,8 @@ function applyBroadcastConfig(val: unknown): void {
       assertUsage(false, `Unknown config.broadcast.${key}`)
     }
   }
-  configState.broadcast = next
   configureBroadcastTransport(next.transport)
+  configState.broadcast = next
 }
 
 function validateStreamTransport(val: unknown, configPath: string): StreamTransport {

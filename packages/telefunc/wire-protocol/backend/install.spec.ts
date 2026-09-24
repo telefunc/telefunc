@@ -86,9 +86,11 @@ describe('backend installation lifecycle', () => {
   })
 
   it('refuses to change config.broadcast.transport while Broadcast subscriptions are open', async () => {
-    config.broadcast = { transport: localTransport() }
+    const transport = localTransport()
+    config.broadcast = { transport }
     const subscription = getBroadcastBackend().subscribe({ key: 'live', kind: 'text' }, () => {})
     expect(() => (config.broadcast = {})).toThrow('set it once, before the first subscription')
+    expect(config.broadcast.transport).toBe(transport)
     await subscription.unsubscribe()
     config.broadcast = {}
     expect(getRoomBackend()).toBeDefined()
