@@ -89,7 +89,6 @@ export class RoomAuthority {
       const request = { operation: 'deliver' as const, path: 'root', routes, payload, seq, timestamp }
       reportLostDeliveries(await dispatchRoomFanout(this.#sessions, request))
     })
-    void ctx.blockConcurrencyWhile(() => this.#scheduleMaintenanceIfNeeded())
   }
 
   async readHead(): Promise<RoomHead | null> {
