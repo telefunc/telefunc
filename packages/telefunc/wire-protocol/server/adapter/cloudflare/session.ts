@@ -1,4 +1,4 @@
-export { currentCloudflareSession, materializeCloudflareSession, withCloudflareSession }
+export { currentCloudflareSession, requireCloudflareSession, withCloudflareSession }
 export type { CloudflareSession }
 
 import { getRawContext, restoreContext } from '../../../../node/server/context/context.js'
@@ -24,7 +24,7 @@ function currentCloudflareSession(): CloudflareSession | undefined {
   return getRawContext()?.[SESSION] as CloudflareSession | undefined
 }
 
-function materializeCloudflareSession(): CloudflareSession {
+function requireCloudflareSession(): CloudflareSession {
   const session = currentCloudflareSession()
   if (session === undefined) throw new Error(CLOUDFLARE_SESSION_ERROR)
   return session

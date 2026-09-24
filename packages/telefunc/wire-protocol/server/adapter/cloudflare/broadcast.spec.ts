@@ -19,7 +19,7 @@ import { OrderedStubs } from './ordered-stubs.js'
 import { CLOUDFLARE_COLO_LOCATION_HINT_MAP } from './coloLocationHintMap.js'
 import { ServerBroadcast } from '../../server-broadcast.js'
 import { disposeBackend, installBackend } from '../../../backend/install.js'
-import { CloudflareRoomBackend } from './room/backend.js'
+import { CloudflareBackend } from './room/backend.js'
 import type { SubscriptionAttempt, SubscriptionState } from '../../../backend/subscription.js'
 
 const encode = (text: string) => new TextEncoder().encode(text)
@@ -50,7 +50,7 @@ afterEach(async () => {
 function installCloudflareTransport(transport: CloudflareBroadcastTransport): void {
   installBackend(
     () =>
-      new CloudflareRoomBackend({
+      new CloudflareBackend({
         rooms: () => {
           throw new Error('Broadcast specs use no Room namespace')
         },

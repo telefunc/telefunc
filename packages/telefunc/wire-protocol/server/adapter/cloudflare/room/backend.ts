@@ -24,7 +24,7 @@ import { encodeLaneKey } from '../../../../backend/room/lane-key.js'
 import { CloudflareRoomSubscriptionAttempt } from './subscription.js'
 import type { RoomAuthority } from './do.js'
 import type { RouteInstallation } from './routes.js'
-import { currentCloudflareSession, materializeCloudflareSession } from '../session.js'
+import { currentCloudflareSession, requireCloudflareSession } from '../session.js'
 import { OrderedStubs } from '../ordered-stubs.js'
 
 // Room authorities share the Telefunc namespace with sessions and Broadcast, so a room id is always prefixed.
@@ -91,7 +91,7 @@ export class CloudflareRoomSessionManager {
 type CloudflareSubscriptionSource = BroadcastRoute | RoomSubscriptionSource
 
 /** Room reads and commits address the authority straight from the bindings; only a subscription needs its session, from context. */
-export class CloudflareRoomBackend implements BroadcastDriver, RoomDriver {
+export class CloudflareBackend implements BroadcastDriver, RoomDriver {
   readonly broadcast: CloudflareBroadcastTransport
   readonly subscriptions: SubscriptionDriver<CloudflareSubscriptionSource>
   readonly #rooms: () => CloudflareRoomNamespace
@@ -177,13 +177,13 @@ export class CloudflareRoomBackend implements BroadcastDriver, RoomDriver {
 
   #bindSubscription(source: CloudflareSubscriptionSource): SubscriptionBinding {
     if (!('roomId' in source)) {
-      const member = materializeCloudflareSession().broadcast()
+      const member = requireCloudflareSession().broadcast()
       return {
         partition: member.partition,
         open: (receiver) => member.openSubscription(source, receiver),
       }
     }
-    const manager = materializeCloudflareSession().room()
+    const manager = requireCloudflareSession().room()
     return {
       partition: manager.subscriptionPartition,
       // The authority stub resolves before the manager installs any local state.

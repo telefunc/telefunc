@@ -1,7 +1,7 @@
 import { expect, test, vi } from 'vitest'
 import '../../../../../node/server/async_hooks.js'
 import {
-  CloudflareRoomBackend,
+  CloudflareBackend,
   CloudflareRoomSessionManager,
   type CloudflareRoomAuthorityStub,
   type CloudflareRoomNamespace,
@@ -39,7 +39,7 @@ test("a session's commits to a room reach its authority in the order Room sent t
       }
     },
   } as unknown as CloudflareRoomNamespace
-  const backend = new CloudflareRoomBackend({ rooms: () => rooms, broadcast })
+  const backend = new CloudflareBackend({ rooms: () => rooms, broadcast })
   const manager = new CloudflareRoomSessionManager('session')
   const commit = (text: string) =>
     backend.commitLane('room', 'inc', { kind: 'semantic' }, new TextEncoder().encode(text))
@@ -52,7 +52,7 @@ test("a session's commits to a room reach its authority in the order Room sent t
 test('outside a session, a commit goes through a stub of its own, and a stale answer comes back as it is', async () => {
   const stale = { stale: 'head' }
   const rooms = { idFromName: (name: string) => name, get: () => ({ commitLane: async () => stale }) }
-  const backend = new CloudflareRoomBackend({ rooms: () => rooms as unknown as CloudflareRoomNamespace, broadcast })
+  const backend = new CloudflareBackend({ rooms: () => rooms as unknown as CloudflareRoomNamespace, broadcast })
   await expect(backend.commitLane('room', 'inc', { kind: 'semantic' }, new Uint8Array())).resolves.toBe(stale)
 })
 

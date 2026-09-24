@@ -5,7 +5,7 @@ import { installBackend } from '../../packages/telefunc/wire-protocol/backend/in
 import type { HeadCxResult, RoomHead } from '../../packages/telefunc/wire-protocol/backend/room/contract.js'
 import { Room } from '../../packages/telefunc/wire-protocol/room/server/statics.js'
 import {
-  CloudflareRoomBackend,
+  CloudflareBackend,
   CloudflareRoomSessionManager,
   type CloudflareRoomNamespace,
   type RoomSessionDeliveryRequest,
@@ -39,7 +39,7 @@ const broadcast = new CloudflareBroadcastTransport({
 })
 installBackend(
   () =>
-    new CloudflareRoomBackend({
+    new CloudflareBackend({
       rooms: () => (workerEnv as unknown as Env).PUBLIC as unknown as CloudflareRoomNamespace,
       broadcast,
     }),

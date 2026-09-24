@@ -36,7 +36,7 @@ import type { CloudflareScale, LocationBucket } from '../wire-protocol/server/ad
 import { CHANNEL_TRANSPORT } from '../wire-protocol/constants.js'
 import {
   CloudflareRoomSessionManager,
-  CloudflareRoomBackend,
+  CloudflareBackend,
   type CloudflareRoomNamespace,
   type RoomSessionDeliveryRequest,
 } from '../wire-protocol/server/adapter/cloudflare/room/backend.js'
@@ -107,17 +107,17 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
   function scoped(namespace: DurableObjectNamespace): DurableObjectNamespace {
     return jurisdiction ? namespace.jurisdiction(jurisdiction) : namespace
   }
-  function sessionNamespace(env: Cloudflare.Env): DurableObjectNamespace {
+  function telefuncNamespace(env: Cloudflare.Env): DurableObjectNamespace {
     return scoped(requireBinding(env, bindingName, 'Durable Object'))
   }
   const cloudflareBackend = installBackend(
     () =>
-      new CloudflareRoomBackend({
-        rooms: () => sessionNamespace(workerEnv as Cloudflare.Env) as unknown as CloudflareRoomNamespace,
+      new CloudflareBackend({
+        rooms: () => telefuncNamespace(workerEnv as Cloudflare.Env) as unknown as CloudflareRoomNamespace,
         broadcast: new CloudflareBroadcastTransport({
           baseInstanceName,
           scale,
-          namespace: () => sessionNamespace(workerEnv as Cloudflare.Env),
+          namespace: () => telefuncNamespace(workerEnv as Cloudflare.Env),
         }),
       }),
     ['cloudflare', baseInstanceName, JSON.stringify(scale ?? null), jurisdiction ?? null],
@@ -140,7 +140,7 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
     }
 
     constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
-      super(ctx, env, sessionNamespace(env) as unknown as RoomFanoutNamespace)
+      super(ctx, env, telefuncNamespace(env) as unknown as RoomFanoutNamespace)
       this.authorityState = new CloudflareBroadcastAuthorityState(ctx)
       this.broadcastMember = broadcast.member(ctx.id.toString(), this.broadcastCalls)
       crosswsAdapter.handleDurableInit(this, ctx, env)
@@ -187,7 +187,7 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
     }
 
     telefuncRoomFanout(request: RoomFanoutRequest) {
-      return dispatchRoomFanout(sessionNamespace(this.env) as unknown as RoomFanoutNamespace, request)
+      return dispatchRoomFanout(telefuncNamespace(this.env) as unknown as RoomFanoutNamespace, request)
     }
 
     private runInSession<T>(fn: () => T): T {
@@ -200,7 +200,7 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
       if (!isTelefuncRequest(request)) return undefined
       const config = getServerConfig()
 
-      const binding = sessionNamespace(env)
+      const binding = telefuncNamespace(env)
 
       const isWebSocketRequest = request.headers.get('upgrade') === 'websocket'
       if (isWebSocketRequest && !config.channel.transports.includes(CHANNEL_TRANSPORT.WS)) {
