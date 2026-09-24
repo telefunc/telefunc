@@ -277,7 +277,7 @@ A hidden participant is a full `LocalParticipant`: `publishBinary()`, `listen()`
 room.onEmpty(() => stopGameLoop(matchId)) // last player gone; the hidden authority doesn't hold the room open
 ```
 
-Join as many as you need (a game authority, a moderation bot, a metrics sink), each with its own trusted `identity`. They are server-side only (a client `join({ hidden: true })` throws) and never visible to clients. Read them back on the server with `getParticipants({ hidden: true })`, keyed by `identity` (never `meta.role`). Hand a client the one it should talk to by returning it from the telefunction:
+Join as many as you need (a game authority, a moderation bot, a metrics sink), each with its own trusted `identity`. They are server-side only (a client `join({ hidden: true })` throws) and out of every client's presence, though what they publish room-wide still reaches every room-wide subscriber, with `from`. Read them back on the server with `getParticipants({ hidden: true })`, keyed by `identity` (never `meta.role`). Hand a client the one it should talk to by returning it from the telefunction:
 
 ```js
 // Match.telefunc.js (server)
@@ -295,7 +295,7 @@ authority.subscribeBinary((frame) => world.apply(frame))                        
 authority.onLeave(() => showMatchAborted())                                         // the handle you were given stays live
 ```
 
-The client you hand a hidden participant sees that participant's `onUpdate` and `onLeave`; every other client still sees nothing of it.
+The client you hand a hidden participant sees that participant's `onUpdate` and `onLeave`; every other client sees only its room-wide messages.
 
 Two properties to design around:
 
@@ -465,6 +465,7 @@ Rooms work across multiple server nodes out of the box with <Link href="/redis">
 - **Crash-safe presence.** A clean `leave()` propagates immediately. After a crash, stale participants are removed automatically.
 - **Tuning presence latency.** A silently-dropped connection is held for <Link href="/channel-config">`config.channel.reconnectTimeout`</Link> before its members leave, so a brief blip does not flap presence. Lower it for snappier away-detection, raise it to ride out flaky mobile networks.
 
+- **What a room instance costs.** Each `Room.get()` / `Room.getOrCreate()` call opens its own instance: opening reads the member list for `count` (`getOrCreate()` also writes the room listing), and while clients or listeners observe it, it renews its members and re-reads the member list every 30 seconds. `Room.list()` reads each listed room's members in turn.
 - **Bounded tail.** The `{ tail }` backfill is limited to 256 messages / 1,048,576 characters / 60 seconds. Membership itself is uncapped; use atomic application-level admission for a hard limit (see <Link href="#switching-rooms-capacity">Capacity</Link>).
 
 ## Reference
