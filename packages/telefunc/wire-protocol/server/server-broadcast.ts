@@ -129,10 +129,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
   }
 
   protected override _shutdown(err?: Error): void {
-    for (const kind of BROADCAST_KINDS) {
-      this._peerSubscriptions[kind] = false
-      this._clearSubscription(kind)
-    }
+    for (const kind of BROADCAST_KINDS) this._clearSubscription(kind)
     super._shutdown(err)
   }
 
