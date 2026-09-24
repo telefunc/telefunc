@@ -7,8 +7,8 @@ import type { RoomBackend, RoomDriver } from './room/contract.js'
 import { superviseRoomDriver } from './room/supervise.js'
 import { assertUsage } from '../../utils/assert.js'
 
-/** A backend: one driver for both planes, which disposes itself. */
-type BackendDriver = BroadcastDriver & RoomDriver & { dispose(): Promise<void> }
+/** A backend: one driver for both planes. */
+type BackendDriver = BroadcastDriver & RoomDriver
 
 type Installed = {
   readonly driver: BackendDriver
@@ -23,18 +23,12 @@ type Installed = {
 
 type BroadcastOverride = { transport: BroadcastTransport; backend?: BroadcastBackend }
 
-type BackendState =
-  | { phase: 'empty' }
-  | { phase: 'ready'; installed: Installed }
-  | { phase: 'disposing'; promise: Promise<void> }
-
-const state = getGlobalObject<{ current: BackendState; broadcastOverride?: BroadcastOverride }>(
+const state = getGlobalObject<{ installed: Installed | null; broadcastOverride?: BroadcastOverride }>(
   'wire-protocol/backend/install.ts',
-  () => ({ current: { phase: 'empty' } }),
+  () => ({ installed: null }),
 )
 
-const DISPOSING_ERROR = 'telefunc/backend: the backend is still disposing and cannot be acquired or installed yet'
-const REPLACEMENT_ERROR = 'telefunc/backend: a backend is already active; dispose it before installing another'
+const REPLACEMENT_ERROR = 'telefunc/backend: a different backend is already installed; a process installs one backend'
 const FALLBACK_KEY = [Symbol('telefunc.memoryBackend')]
 
 /** Installs the process's one backend and returns its driver. Re-evaluating an entry with the same `key` returns the
@@ -43,10 +37,10 @@ export function installBackend<Driver extends BackendDriver>(
   factory: () => Driver,
   key: readonly unknown[] = [factory],
 ): Driver {
-  const current = state.current
-  if (current.phase !== 'ready') return install(factory, key, false).driver as Driver
-  if (!sameKey(current.installed.key, key)) throw new Error(REPLACEMENT_ERROR)
-  return current.installed.driver as Driver
+  const installed = state.installed
+  if (installed === null) return install(factory, key, false).driver as Driver
+  if (!sameKey(installed.key, key)) throw new Error(REPLACEMENT_ERROR)
+  return installed.driver as Driver
 }
 
 /** Sets the public broadcast-only override, or removes it with `undefined`; the full backend's Room plane stays. */
@@ -54,11 +48,7 @@ export function configureBroadcastTransport(transport: BroadcastTransport | unde
   const previous = state.broadcastOverride
   if (previous?.transport === transport) return
   // Retiring a plane would leave its subscribers on a transport nothing publishes to anymore.
-  const current = previous
-    ? previous.backend
-    : state.current.phase === 'ready'
-      ? state.current.installed.broadcast
-      : null
+  const current = previous ? previous.backend : state.installed?.broadcast
   assertUsage(
     !current?.hasSubscriptions(),
     'config.broadcast.transport changed while Broadcast subscriptions are open: set it once, before the first subscription (restart the server to change it)',
@@ -70,8 +60,8 @@ export function configureBroadcastTransport(transport: BroadcastTransport | unde
     return
   }
   state.broadcastOverride = { transport }
-  if (state.current.phase !== 'ready') return
-  const installed = state.current.installed
+  const installed = state.installed
+  if (installed === null) return
   // Retiring accumulates, so disposal awaits every plane a transport change retired.
   if (installed.broadcast)
     installed.retiredBroadcast = Promise.all([installed.retiredBroadcast, installed.broadcast.dispose()]).then(() => {})
@@ -79,7 +69,6 @@ export function configureBroadcastTransport(transport: BroadcastTransport | unde
 }
 
 export function getBroadcastBackend(): BroadcastBackend {
-  if (state.current.phase === 'disposing') throw new Error(DISPOSING_ERROR)
   const override = state.broadcastOverride
   if (override)
     return (override.backend ??= superviseBroadcastDriver(createBroadcastTransportDriver(override.transport)))
@@ -88,37 +77,28 @@ export function getBroadcastBackend(): BroadcastBackend {
 }
 
 export function getRoomBackend(): RoomBackend {
-  const current = state.current
-  const fallbackOnly = current.phase === 'empty' || (current.phase === 'ready' && current.installed.fallback)
   assertUsage(
-    !(state.broadcastOverride && fallbackOnly),
+    !(state.broadcastOverride && (state.installed?.fallback ?? true)),
     'config.broadcast.transport configures Broadcast only. Room requires a full backend; install the Redis backend or use the Cloudflare adapter.',
   )
   return currentBackend().room
 }
 
-/** Disposes the canonical backend behind one shared promise, blocking acquisition until settlement. */
-export function disposeBackend(): Promise<void> {
-  const current = state.current
-  const override = state.broadcastOverride
-  if (current.phase === 'empty' && !override?.backend) return Promise.resolve()
-  if (current.phase === 'disposing') return current.promise
-
-  const overrideDisposal = override?.backend?.dispose() ?? Promise.resolve()
-  if (override) delete override.backend
-  const fullDisposal = current.phase === 'ready' ? disposeInstalled(current.installed) : Promise.resolve()
-  const promise = Promise.all([overrideDisposal, fullDisposal]).then(() => {})
-  const disposing: BackendState = { phase: 'disposing', promise }
-  state.current = disposing
-  const clear = () => {
-    if (state.current === disposing) state.current = { phase: 'empty' }
-  }
-  void promise.then(clear, clear)
-  return promise
+/** For tests: forgets the backend and the transport's plane, and stops their subscriptions. */
+export async function disposeBackend(): Promise<void> {
+  const installed = state.installed
+  const overridePlane = state.broadcastOverride?.backend
+  state.installed = null
+  if (state.broadcastOverride) delete state.broadcastOverride.backend
+  await Promise.all([
+    overridePlane?.dispose(),
+    installed?.broadcast?.dispose(),
+    installed?.retiredBroadcast,
+    installed?.room.dispose(),
+  ])
 }
 
 function install(factory: () => BackendDriver, key: readonly unknown[], fallback: boolean): Installed {
-  if (state.current.phase === 'disposing') throw new Error(DISPOSING_ERROR)
   const driver = factory()
   const installed: Installed = {
     driver,
@@ -127,20 +107,12 @@ function install(factory: () => BackendDriver, key: readonly unknown[], fallback
     room: superviseRoomDriver(driver),
     broadcast: state.broadcastOverride ? null : superviseBroadcastDriver(driver),
   }
-  state.current = { phase: 'ready', installed }
+  state.installed = installed
   return installed
 }
 
 function currentBackend(): Installed {
-  const current = state.current
-  if (current.phase === 'ready') return current.installed
-  return install(() => new MemoryBackend(), FALLBACK_KEY, true)
-}
-
-async function disposeInstalled(installed: Installed): Promise<void> {
-  await Promise.all([installed.broadcast?.dispose(), installed.retiredBroadcast, installed.room.dispose()])
-  installed.broadcast = null
-  await installed.driver.dispose()
+  return state.installed ?? install(() => new MemoryBackend(), FALLBACK_KEY, true)
 }
 
 function sameKey(a: readonly unknown[], b: readonly unknown[]): boolean {

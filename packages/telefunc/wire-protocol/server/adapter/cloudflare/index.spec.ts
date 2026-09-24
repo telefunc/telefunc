@@ -358,7 +358,7 @@ describe('cloudflare adapter entrypoint', () => {
   it('rejects another backend once the Cloudflare one is installed', () => {
     new Telefunc()
     const selected = getRoomBackend()
-    expect(() => installBackend(() => new MemoryBackend())).toThrow('a backend is already active')
+    expect(() => installBackend(() => new MemoryBackend())).toThrow('a different backend is already installed')
     expect(getRoomBackend()).toBe(selected)
   })
 

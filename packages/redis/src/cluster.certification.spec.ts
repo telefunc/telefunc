@@ -61,7 +61,7 @@ describe('Redis real three-master Cluster CI certification', () => {
       cluster.options.retryDelayOnFailover = retryDelayOnFailover
     }
     const prefix = uniquePrefix('reply-loss')
-    const backend = ownRoomBackend(cluster, prefix)
+    const backend = roomBackend(cluster, prefix)
     for (const unsafePrefix of ['x{}', 'x{', '{global}']) {
       expect(() => new RedisBackend({ redis: cluster, prefix: unsafePrefix })).toThrow(/prefix/i)
     }
@@ -111,7 +111,7 @@ describe('Redis real three-master Cluster CI certification', () => {
       })
       const observation = observeCommands(client)
       const backend = ownBackend(client, prefix)
-      const authority = ownRoomBackend(client, prefix)
+      const authority = roomBackend(client, prefix)
       for (const { name } of Object.values(REDIS_COMMANDS)) observation.wrapDefinedCommand(name)
       const roomId = 'runtime-slot} proof'
       const inc = 'runtime-slot-inc'
@@ -226,7 +226,7 @@ describe('Redis real three-master Cluster CI certification', () => {
   it('round-trips MAX_SAFE seq through commit, retain and a fresh read', async () => {
     const { prefix, roomId, inc } = room('max-safe')
     const backend = ownBackend(cluster, prefix)
-    const fresh = ownRoomBackend(cluster, prefix)
+    const fresh = roomBackend(cluster, prefix)
     const observed: number[] = []
     await open(backend, roomId, inc)
     const subscription = subscribe(backend, roomId, inc, (_payload, info) => void observed.push(info.seq))
@@ -274,9 +274,9 @@ describe('Redis real three-master Cluster CI certification', () => {
     const { prefix, roomId, inc } = room('drop-overlap-race')
     const client = ownCluster()
     await client.ping()
-    const backend = ownRoomBackend(client, prefix)
-    const secondDropper = ownRoomBackend(client, prefix)
-    const authority = ownRoomBackend(client, prefix)
+    const backend = roomBackend(client, prefix)
+    const secondDropper = roomBackend(client, prefix)
+    const authority = roomBackend(client, prefix)
     const inventoryRead = deferred()
     const releaseInventory = deferred()
     const smembers = client.smembers.bind(client)
@@ -504,8 +504,8 @@ describe('Redis real three-master Cluster CI certification', () => {
     onTestFinished(() => disposeBackend())
     return { ...getBroadcastBackend(), ...getRoomBackend() }
   }
-  function ownRoomBackend(redis: Redis | Cluster, prefix: string): RedisBackend {
-    return own(new RedisBackend({ redis, prefix }), (backend) => backend.dispose())
+  function roomBackend(redis: Redis | Cluster, prefix: string): RedisBackend {
+    return new RedisBackend({ redis, prefix })
   }
   const ownCluster = (): Cluster =>
     own(clusterClient(CLUSTER_NODES), (client) => client.quit().catch(() => client.disconnect()))

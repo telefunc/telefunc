@@ -9,10 +9,9 @@ import {
 import { createBroadcastTransportDriver, type BroadcastTransport } from './broadcast/transport.js'
 import { superviseBroadcastDriver } from './broadcast/supervise.js'
 import { MemoryBackend } from './memory/backend.js'
-import { SubscriptionManager } from './subscription-manager.js'
 import { config } from '../../node/server/serverConfig.js'
 afterEach(async () => {
-  await disposeBackend().catch(() => {})
+  await disposeBackend()
   config.broadcast = {}
   vi.restoreAllMocks()
 })
@@ -39,24 +38,10 @@ describe('backend installation lifecycle', () => {
       { roomId: 'missing', inc: 'inc', lane: { kind: 'semantic' } },
     ])
   })
-  it('disposes both managers before disposing the driver exactly once', async () => {
-    const gate = Promise.withResolvers<void>()
-    const stops = vi.spyOn(SubscriptionManager.prototype, 'dispose').mockReturnValue(gate.promise)
-    const driver = new MemoryBackend()
-    const dispose = vi.spyOn(driver, 'dispose')
-    installBackend(() => driver)
-    const first = disposeBackend()
-    expect(disposeBackend()).toBe(first)
-    await Promise.resolve()
-    expect([stops.mock.calls.length, new Set(stops.mock.instances).size, dispose.mock.calls.length]).toEqual([2, 2, 0])
-    gate.resolve()
-    await first
-    expect(dispose).toHaveBeenCalledOnce()
-  })
   it('rejects a second backend without constructing it', () => {
     installBackend(() => new MemoryBackend())
     const factory = vi.fn(() => new MemoryBackend())
-    expect(() => installBackend(factory)).toThrow('a backend is already active')
+    expect(() => installBackend(factory)).toThrow('a different backend is already installed')
     expect(factory).not.toHaveBeenCalled()
   })
   it('composes a broadcast override with a full backend in either configuration order', async () => {

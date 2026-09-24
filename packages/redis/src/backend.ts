@@ -53,7 +53,6 @@ export class RedisBackend implements BroadcastDriver, RoomDriver {
   private readonly _publisher: RedisClient
   private readonly _prefix: string
   private readonly _reportsReceivers: boolean
-  private _disposed = false
 
   constructor(options: RedisBackendOptions) {
     assertAtMostOnceClient(options.redis)
@@ -109,7 +108,6 @@ export class RedisBackend implements BroadcastDriver, RoomDriver {
     payload: Uint8Array,
     opts?: CommitOptions,
   ): Promise<CommitResult> {
-    this._assertLive()
     const fence = this.subscriptions.prepareFence({ roomId, inc, lane })
     let reply
     try {
@@ -142,7 +140,6 @@ export class RedisBackend implements BroadcastDriver, RoomDriver {
   }
 
   async readRetained(roomId: string, inc: string, lane: LaneId): Promise<RetainedFrame | null> {
-    this._assertLive()
     const frame = await this._publisher.getBuffer(retainedKey(this._prefix, roomId, inc, encodeLaneKey(lane)))
     if (frame === null) return null
     const {
@@ -153,7 +150,6 @@ export class RedisBackend implements BroadcastDriver, RoomDriver {
   }
 
   async listRetained(roomId: string, inc: string): Promise<LaneId[]> {
-    this._assertLive()
     const prefix = retainedKeyPrefix(this._prefix, roomId, inc)
     const keys = (await this._generationKeys(roomId, inc)).filter((key) => key.startsWith(prefix))
     return keys.map((physical) => decodeLaneKey(physical.slice(prefix.length)))
@@ -177,7 +173,6 @@ export class RedisBackend implements BroadcastDriver, RoomDriver {
   }
 
   async directoryList(prefix: string, cursor?: string): Promise<DirectoryPage> {
-    this._assertLive()
     const index = directoryIndexKey(this._prefix)
     const min = cursor === undefined ? `[${prefix}` : `(${cursor}`
     const page = await this._publisher.zrangebylex(index, min, '+', 'LIMIT', 0, DIRECTORY_PAGE_SIZE)
@@ -199,21 +194,11 @@ export class RedisBackend implements BroadcastDriver, RoomDriver {
     return peek[0]?.startsWith(prefix) ? { entries, cursor: last } : { entries }
   }
 
-  async dispose(): Promise<void> {
-    if (this._disposed) return
-    this._disposed = true
-  }
-
-  private _assertLive(): void {
-    if (this._disposed) throw new Error('RedisBackend: used after dispose()')
-  }
-
   private _generationKeys(roomId: string, inc: string): Promise<string[]> {
     return this._publisher.smembers(generationKeysKey(this._prefix, roomId, inc))
   }
 
   private async _run<Input, Output>(command: RedisCommand<Input, Output>, input: Input): Promise<Output> {
-    this._assertLive()
     const { keys, argv } = command.invoke(this._prefix, input)
     assert(command.numberOfKeys === null || command.numberOfKeys === keys.length)
     const keysAndArgs = command.numberOfKeys === null ? [String(keys.length), ...keys, ...argv] : [...keys, ...argv]

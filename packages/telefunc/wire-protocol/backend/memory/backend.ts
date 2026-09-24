@@ -135,8 +135,6 @@ export class MemoryBackend implements BroadcastDriver, RoomDriver {
 
   readonly #now: () => number
   readonly #state: MemoryBackendState
-  #disposed = false
-
   constructor(options: MemoryBackendOptions = {}) {
     this.#now = options.authorityNow ?? (() => Date.now())
     this.#state = options.state ?? new MemoryBackendState()
@@ -149,7 +147,6 @@ export class MemoryBackend implements BroadcastDriver, RoomDriver {
   }
 
   publish(lane: BroadcastLane, payload: Uint8Array): PublishResult {
-    this.#assertLive()
     const mark = advanceOrder(this.#state.broadcastOrder, lane.key, this.#now())
     const targets = [...(this.#state.broadcastSubs.get(broadcastRouteKey(lane)) ?? [])]
     for (const target of targets) target.deliver(copyBytes(payload), mark)
@@ -157,13 +154,11 @@ export class MemoryBackend implements BroadcastDriver, RoomDriver {
   }
 
   async readHead(roomId: string): Promise<RoomHead | null> {
-    this.#assertLive()
     const head = this.#readAndExpireHead(this.#state.rooms.get(roomId))
     return head === null ? null : publicHead(head)
   }
 
   async compareExchangeHead(roomId: string, cx: HeadCx, next: HeadNext): Promise<HeadCxResult> {
-    this.#assertLive()
     const current = this.#readAndExpireHead(this.#state.rooms.get(roomId))
     if (!headCxMatches(cx, current, this.#now())) {
       return { conflict: true, current: current === null ? null : publicHead(current) }
@@ -191,7 +186,6 @@ export class MemoryBackend implements BroadcastDriver, RoomDriver {
   }
 
   async readCells(roomId: string, inc: string, sel: CellSelector): Promise<CellsRead> {
-    this.#assertLive()
     const room = this.#state.rooms.get(roomId)
     const head = this.#readAndExpireHead(room)
     // Closing tails may read; only writes require an open head.
@@ -213,7 +207,6 @@ export class MemoryBackend implements BroadcastDriver, RoomDriver {
     revision: string,
     mutations: CellMutation[],
   ): Promise<CxResult> {
-    this.#assertLive()
     const room = this.#state.rooms.get(roomId)
     const head = this.#readAndExpireHead(room)
     if (room === undefined || head === null || head.currentInc !== inc || head.state !== 'open') return 'stale-inc'
@@ -234,7 +227,6 @@ export class MemoryBackend implements BroadcastDriver, RoomDriver {
     payload: Uint8Array,
     opts?: CommitOptions,
   ): Promise<CommitResult> {
-    this.#assertLive()
     const room = this.#state.rooms.get(roomId)
     const head = this.#readAndExpireHead(room)
     if (room === undefined || !commitPreconditionHolds(head, inc, lane.kind, opts?.closingLease, this.#now())) {
@@ -263,20 +255,17 @@ export class MemoryBackend implements BroadcastDriver, RoomDriver {
   }
 
   async readRetained(roomId: string, inc: string, lane: LaneId): Promise<RetainedFrame | null> {
-    this.#assertLive()
     const entry = this.#state.rooms.get(roomId)?.gens.get(inc)?.retained.get(encodeLaneKey(lane))
     if (entry === undefined) return null
     return { payload: copyBytes(entry.payload), seq: entry.seq, timestamp: entry.timestamp }
   }
 
   async listRetained(roomId: string, inc: string): Promise<LaneId[]> {
-    this.#assertLive()
     const gen = this.#state.rooms.get(roomId)?.gens.get(inc)
     return gen === undefined ? [] : [...gen.retained.values()].map((entry) => copyLane(entry.lane))
   }
 
   async deleteRetained(roomId: string, inc: string, lane: LaneId, opts?: { ifSeq?: number }): Promise<void> {
-    this.#assertLive()
     const retained = this.#state.rooms.get(roomId)?.gens.get(inc)?.retained
     const key = encodeLaneKey(lane)
     if (opts?.ifSeq === undefined || retained?.get(key)?.seq === opts.ifSeq) retained?.delete(key)
@@ -314,7 +303,6 @@ export class MemoryBackend implements BroadcastDriver, RoomDriver {
   }
 
   async dropGeneration(roomId: string, inc: string): Promise<void> {
-    this.#assertLive()
     const room = this.#state.rooms.get(roomId)
     if (room === undefined) return
     const gen = room.gens.get(inc)
@@ -324,17 +312,14 @@ export class MemoryBackend implements BroadcastDriver, RoomDriver {
   }
 
   async directoryPut(roomId: string, incTag: string): Promise<void> {
-    this.#assertLive()
     this.#state.directory.set(roomId, incTag)
   }
 
   async directoryDelete(roomId: string, incTag: string): Promise<void> {
-    this.#assertLive()
     if (this.#state.directory.get(roomId) === incTag) this.#state.directory.delete(roomId)
   }
 
   async directoryList(prefix: string, cursor?: string): Promise<DirectoryPage> {
-    this.#assertLive()
     const entries = [...this.#state.directory]
       .filter(([roomId]) => roomId.startsWith(prefix) && (cursor === undefined || roomId > cursor))
       .sort(([left], [right]) => left.localeCompare(right))
@@ -342,20 +327,7 @@ export class MemoryBackend implements BroadcastDriver, RoomDriver {
     return { entries }
   }
 
-  async dispose(): Promise<void> {
-    if (this.#disposed) return
-    this.#disposed = true
-    this.#state.rooms.clear()
-    this.#state.directory.clear()
-    this.#state.broadcastOrder.clear()
-    this.#state.broadcastSubs.clear()
-  }
-
   // ── internals ──
-
-  #assertLive(): void {
-    if (this.#disposed) throw new Error('MemoryBackend: used after dispose()')
-  }
 
   #roomFor(roomId: string): RoomRecord {
     return getOrCreate(this.#state.rooms, roomId, () => ({ head: null, gens: new Map() }))

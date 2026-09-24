@@ -2848,7 +2848,6 @@ describe('room binary protocol validation', () => {
       encoder.encode('reconstructed'),
     )
     expect(reconstructed).toMatchObject({ accepted: true, seq: 3, timestamp: 3 })
-    await reconstructedDriver.dispose()
   })
   it('validates HeadNext shape before delegating to any raw driver', async () => {
     const backend = getRoomBackend()

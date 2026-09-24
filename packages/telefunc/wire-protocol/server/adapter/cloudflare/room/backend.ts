@@ -175,8 +175,6 @@ export class CloudflareRoomBackend implements BroadcastDriver, RoomDriver {
     return this.#directory().directoryList(prefix, cursor)
   }
 
-  async dispose(): Promise<void> {}
-
   #bindSubscription(source: CloudflareSubscriptionSource): SubscriptionBinding {
     if (!('roomId' in source)) {
       const member = materializeCloudflareSession().broadcast()
