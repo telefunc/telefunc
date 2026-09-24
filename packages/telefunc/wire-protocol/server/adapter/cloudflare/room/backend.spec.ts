@@ -158,3 +158,21 @@ test('an invalidated attempt drops later deliveries, and its route is released o
   await attempt.unsubscribe()
   expect(released).toBe(1)
 })
+
+test('an attempt that ended while a renewal was in flight renews no more', async () => {
+  vi.useFakeTimers()
+  try {
+    const renewals: Array<() => void> = []
+    const attempt = openAttempt({
+      renewRoute: () => new Promise((resolve) => renewals.push(() => resolve({ ok: true }))),
+    })
+    await vi.advanceTimersByTimeAsync(ROUTE_RENEW_EVERY_MS)
+    attempt.invalidate()
+    renewals[0]!()
+    await vi.advanceTimersByTimeAsync(ROUTE_RENEW_EVERY_MS)
+    expect(attempt.state()).toBe('closed')
+    expect(renewals).toHaveLength(1)
+  } finally {
+    vi.useRealTimers()
+  }
+})
