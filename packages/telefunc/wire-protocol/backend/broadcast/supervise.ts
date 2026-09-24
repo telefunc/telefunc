@@ -15,12 +15,7 @@ function checked(result: PublishResult): PublishResult {
 
 const PENDING_PUBLISH_LIMIT = 1024
 
-type PendingPublish = {
-  payload: Uint8Array
-  resolve: (result: PublishResult | Promise<PublishResult>) => void
-  reject: (error: unknown) => void
-}
-type PendingRoute = { lane: BroadcastLane; entries: PendingPublish[]; bytes: number }
+type PendingRoute = { settled: Promise<void>; count: number; bytes: number }
 
 /** Owns the Broadcast subscription manager and the publish-readiness gate: a publish waits until this instance's own
  *  subscriptions on its route settle, so its local subscribers receive it; one that ends instead doesn't fail the publish. */
@@ -39,36 +34,21 @@ function superviseBroadcastDriver(driver: BroadcastDriver): BroadcastBackend {
     const waiting = pending.get(routeKey)
     if (waiting === undefined && !subscriptions.hasUnsettled(lane)) return publishNow(lane, payload)
     const owned = payload.slice()
-    const route = waiting ?? { lane, entries: [], bytes: 0 }
+    const route = waiting ?? { settled: subscriptions.settled(lane), count: 0, bytes: 0 }
     const byteLimit = lane.kind === 'binary' ? CHANNEL_BUFFER_LIMIT_BINARY_BYTES : CHANNEL_BUFFER_LIMIT_BYTES
-    if (route.entries.length >= PENDING_PUBLISH_LIMIT || route.bytes + owned.byteLength > byteLimit) {
+    if (route.count >= PENDING_PUBLISH_LIMIT || route.bytes + owned.byteLength > byteLimit) {
       return Promise.reject(new ChannelOverflowError('Broadcast readiness buffer overflow'))
     }
+    pending.set(routeKey, route)
+    route.count++
     route.bytes += owned.byteLength
-    const result = new Promise<PublishResult>((resolve, reject) =>
-      route.entries.push({ payload: owned, resolve, reject }),
-    )
-    if (waiting === undefined) {
-      pending.set(routeKey, route)
-      void flush(routeKey, route)
-    }
-    return result
-  }
-
-  const flush = async (routeKey: string, route: PendingRoute): Promise<void> => {
-    while (route.entries.length > 0) {
-      await subscriptions.settled(route.lane)
-      const entries = route.entries.splice(0)
-      route.bytes = 0
-      for (const entry of entries) {
-        try {
-          entry.resolve(publishNow(route.lane, entry.payload))
-        } catch (error) {
-          entry.reject(error)
-        }
-      }
-    }
-    pending.delete(routeKey)
+    // Each caller continues in its own async context (on Cloudflare, its own session DO); reactions to one promise run
+    // in call order.
+    return route.settled.then(() => {
+      if (--route.count === 0) pending.delete(routeKey)
+      route.bytes -= owned.byteLength
+      return publishNow(lane, owned)
+    })
   }
 
   return {

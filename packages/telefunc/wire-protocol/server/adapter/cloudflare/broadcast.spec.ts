@@ -441,6 +441,31 @@ describe('cloudflare broadcast routing', () => {
     })
   })
 
+  it('a publish held behind another session’s subscription still leaves from its own session', async () => {
+    const recorded = Promise.withResolvers<void>()
+    const publishBuckets: Array<string | null> = []
+    const transport = createTransport(
+      createBasicBinding({
+        onPresence: () => recorded.promise,
+        onPublish(_id, request) {
+          publishBuckets.push(request.locationBucket)
+          return Promise.resolve({ seq: publishBuckets.length, timestamp: Date.now() })
+        },
+      }),
+    )
+    installCloudflareTransport(transport)
+    const weur = createMember(transport)
+    const enam = transport.member('member-enam-0', new OrderedStubs())
+    enam.locate('enam')
+    const publishFrom = (member: CloudflareBroadcastMember) =>
+      inSession(member, () => new ServerBroadcast<string>({ key: 'room:test' }).publish(member.bucket!))
+    inSession(weur, () => new ServerBroadcast<string>({ key: 'room:test' }).subscribe(() => {}))
+    const published = [publishFrom(weur), publishFrom(enam)]
+    recorded.resolve()
+    await Promise.all(published)
+    expect(publishBuckets).toEqual(['weur', 'enam'])
+  })
+
   it('does not deliver locally before ordered publish setup completes', async () => {
     const authority = createAuthorityState()
     const calls: BroadcastCalls = new OrderedStubs()
