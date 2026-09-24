@@ -31,10 +31,9 @@ type SubscriptionAttempt = {
   unsubscribe(): Promise<void>
 }
 
-/** A source bound to its current owner. Bindings with equal `partition` share one attempt; `valid()` is a pure read. */
+/** A source bound to its current owner. Bindings with equal `partition` share one attempt. */
 type SubscriptionBinding = {
   readonly partition: string
-  valid(): boolean
   /** `localReceiverCount` reads how many consumers currently share this attempt. */
   open(receiver: BackendReceiver, localReceiverCount: () => number): SubscriptionAttempt
 }

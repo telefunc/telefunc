@@ -134,7 +134,6 @@ export class MemoryBackend implements BroadcastDriver, RoomDriver {
     this.subscriptions = {
       bind: (source) => ({
         partition: '',
-        valid: () => true,
         open: (receiver, localReceiverCount) => this.#openSubscription(source, receiver, localReceiverCount),
       }),
     }

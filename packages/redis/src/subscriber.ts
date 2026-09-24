@@ -63,7 +63,6 @@ export class RedisSubscriptionDriver implements SubscriptionDriver<RedisSubscrip
   bind(source: RedisSubscriptionSource): SubscriptionBinding {
     return {
       partition: '',
-      valid: () => true,
       open: (receiver, localReceiverCount) => this._open(source, receiver, localReceiverCount),
     }
   }

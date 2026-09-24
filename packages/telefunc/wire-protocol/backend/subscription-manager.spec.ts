@@ -218,16 +218,6 @@ describe('shared subscription supervision', () => {
     expect(pendingRaw.openCalls).toBe(1)
     await pending.unsubscribe()
   })
-  it('checks binding ownership before opening a raw attempt', async () => {
-    const raw = new ControlledDriver()
-    raw.bindingValid = false
-    const terminal = new SubscriptionManager(raw).subscribe('invalid-owner', () => {})
-    const terminalReadiness = terminal.ready
-    expect(terminal.state()).toBe('closed')
-    expect(raw.openCalls).toBe(0)
-    await expect(terminalReadiness).rejects.toThrow('ownership terminated')
-    await terminal.unsubscribe()
-  })
 })
 type OpenRecord = {
   receiver: BackendReceiver
@@ -238,7 +228,6 @@ class ControlledDriver implements SubscriptionDriver<string> {
   readonly opens: OpenRecord[] = []
   readonly #plans: Array<() => ControlledAttempt> = []
   partition = ''
-  bindingValid = true
   openCalls = 0
   plan(plan: () => ControlledAttempt): void {
     this.#plans.push(plan)
@@ -247,7 +236,6 @@ class ControlledDriver implements SubscriptionDriver<string> {
     const partition = this.partition
     return {
       partition,
-      valid: () => this.bindingValid,
       open: (receiver: BackendReceiver, localReceiverCount: () => number): SubscriptionAttempt => {
         this.openCalls++
         const attempt = (this.#plans.shift() ?? (() => ControlledAttempt.ready()))()

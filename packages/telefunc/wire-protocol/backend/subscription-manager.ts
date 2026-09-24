@@ -183,7 +183,6 @@ class SubscriptionSlot<Source> {
   }
 
   private _start(): void {
-    if (!this.config.binding.valid()) return this._ended('terminated')
     let attempt: SubscriptionAttempt
     try {
       attempt = this.config.binding.open(

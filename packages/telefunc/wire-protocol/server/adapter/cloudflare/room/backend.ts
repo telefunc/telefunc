@@ -52,7 +52,6 @@ export class CloudflareRoomSessionManager {
   readonly #id: string
   readonly #subscriptionPartition = crypto.randomUUID()
   readonly #entries = new Map<string, CloudflareRoomSubscriptionAttempt>()
-  #disposed = false
 
   constructor(sessionId: string) {
     this.#id = sessionId
@@ -63,7 +62,6 @@ export class CloudflareRoomSessionManager {
     authority: CloudflareRoomAuthorityStub,
     receiver: BackendReceiver,
   ): CloudflareRoomSubscriptionAttempt {
-    if (this.#disposed) throw new Error('Cloudflare Room session manager is disposed')
     const source = { roomId, inc, laneKey: encodeLaneKey(lane), sessionDoId: this.#id, authority }
     const key = entryKey(source)
     const attempt: CloudflareRoomSubscriptionAttempt = new CloudflareRoomSubscriptionAttempt(source, receiver, {
@@ -92,19 +90,8 @@ export class CloudflareRoomSessionManager {
     }
   }
 
-  dispose(): void {
-    if (this.#disposed) return
-    this.#disposed = true
-    for (const attempt of this.#entries.values()) attempt.terminate()
-    this.#entries.clear()
-  }
-
   get subscriptionPartition(): string {
     return this.#subscriptionPartition
-  }
-
-  valid(): boolean {
-    return !this.#disposed
   }
 }
 
@@ -115,7 +102,6 @@ export class CloudflareRoomBackend implements BroadcastDriver, RoomDriver {
   readonly broadcast: CloudflareBroadcastTransport
   readonly subscriptions: SubscriptionDriver<CloudflareSubscriptionSource>
   readonly #rooms: () => CloudflareRoomNamespace
-  #disposed = false
 
   constructor({ rooms, broadcast }: { rooms: () => CloudflareRoomNamespace; broadcast: CloudflareBroadcastTransport }) {
     this.#rooms = rooms
@@ -192,23 +178,19 @@ export class CloudflareRoomBackend implements BroadcastDriver, RoomDriver {
     return this.#directory().directoryList(prefix, cursor)
   }
 
-  async dispose(): Promise<void> {
-    this.#disposed = true
-  }
+  async dispose(): Promise<void> {}
 
   #bindSubscription(source: CloudflareSubscriptionSource): SubscriptionBinding {
     if (!('roomId' in source)) {
       const member = materializeCloudflareSession().broadcast()
       return {
         partition: member.partition,
-        valid: () => !this.#disposed,
         open: (receiver) => member.openSubscription(source, receiver),
       }
     }
     const manager = materializeCloudflareSession().room()
     return {
       partition: manager.subscriptionPartition,
-      valid: () => manager.valid(),
       // The authority stub resolves before the manager installs any local state.
       open: (receiver) => manager.openSubscription(source, this.#stub(source.roomId), receiver),
     }
