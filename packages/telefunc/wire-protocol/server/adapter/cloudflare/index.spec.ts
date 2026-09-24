@@ -41,7 +41,6 @@ const mocks = vi.hoisted(() => {
         return new ReadableStream()
       },
     })),
-    asyncMode: false,
     rawContext: null as Record<symbol, unknown> | null,
     workerEnv: {} as Record<string, unknown>,
     transportInstances: [] as MockCloudflareBroadcastTransport[],
@@ -81,9 +80,10 @@ vi.mock('../../../../node/server/telefunc.js', () => ({
   serve: mocks.telefuncMock,
 }))
 
+vi.mock('../../../../node/server/async_hooks.js', () => ({}))
+
 vi.mock('../../../../node/server/context/context.js', () => ({
   getRawContext: () => mocks.rawContext,
-  isAsyncMode: () => mocks.asyncMode,
   restoreContext: <T>(context: Record<symbol, unknown>, fn: () => T): T => {
     const previous = mocks.rawContext
     mocks.rawContext = context
@@ -184,7 +184,6 @@ beforeEach(() => {
       return new ReadableStream()
     },
   })
-  mocks.asyncMode = false
   mocks.rawContext = null
   for (const key of Object.keys(mocks.workerEnv)) delete mocks.workerEnv[key]
   mocks.transportInstances.length = 0
@@ -324,12 +323,10 @@ describe('cloudflare adapter entrypoint', () => {
     expect(readHead).toHaveBeenCalled()
   })
 
-  it('keeps await-safe context a requirement of Room subscriptions only', () => {
+  it('names the session a Room subscription needs when made outside one', () => {
     mocks.workerEnv.TelefuncRoomDurableObject = createBinding().binding
     new Telefunc()
     const subscribe = () => getRoomBackend().subscribeLane('r', 'i', { kind: 'control' }, () => {})
-    expect(subscribe).toThrow('Cloudflare Room requires await-safe context')
-    mocks.asyncMode = true
     expect(subscribe).toThrow('A Cloudflare Room subscription delivers to a Telefunc session')
   })
 
@@ -349,7 +346,6 @@ describe('cloudflare adapter entrypoint', () => {
   })
 
   it('reports the normative Room binding diagnostic instead of using the memory backend', async () => {
-    mocks.asyncMode = true
     const { binding } = createBinding()
     const tf = new Telefunc()
     const DurableClass = tf.TelefuncDurableObject
@@ -370,7 +366,6 @@ describe('cloudflare adapter entrypoint', () => {
   })
 
   it('restricts the Room authority and its fan-out coordinators to the jurisdiction', async () => {
-    mocks.asyncMode = true
     const session = createBinding()
     const room = createBinding()
     const env = {
@@ -485,8 +480,6 @@ describe('cloudflare adapter entrypoint', () => {
     }
     instance.telefuncBroadcastDeliver(delivery)
     expect(mocks.transportInstances[0]?.deliverToLocal).toHaveBeenCalledWith(delivery)
-    // Importing and using the ordinary Cloudflare adapter remains flag-free. Only the first Room entry
-    // asks for the opt-in async carrier and reports the recipe diagnostic.
     const invalidation = {
       roomId: 'room',
       inc: 'inc',
@@ -494,8 +487,6 @@ describe('cloudflare adapter entrypoint', () => {
       sessionDoId: 'id',
       leaseId: 'lease',
     }
-    expect(() => instance.telefuncRoomInvalidate(invalidation)).toThrow('Cloudflare Room requires await-safe context')
-    mocks.asyncMode = true
     instance.telefuncRoomInvalidate(invalidation)
   })
 })

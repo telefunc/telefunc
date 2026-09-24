@@ -4,6 +4,8 @@ export { Telefunc }
 export type { CloudflareOptions }
 
 import { DurableObject, env as workerEnv } from 'cloudflare:workers'
+// A subscription finds its session through AsyncLocalStorage, which the setup's compatibility flag enables.
+import '../node/server/async_hooks.js'
 import crossws from 'crossws/adapters/cloudflare'
 import { getTelefuncChannelHooks } from '../wire-protocol/server/ws.js'
 import { getServerConfig, enableChannelTransports } from '../node/server/serverConfig.js'
@@ -46,7 +48,6 @@ import {
   type RoomFanoutNamespace,
   type RoomFanoutRequest,
 } from '../wire-protocol/server/adapter/cloudflare/room/fanout.js'
-import { isAsyncMode } from '../node/server/context/context.js'
 import { getGlobalObject } from '../utils/getGlobalObject.js'
 import { isTelefuncRequest, toResponse } from './shared.js'
 
@@ -198,7 +199,6 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
 
     // Only a Room subscription materializes the manager.
     private runWithRoomManager<T>(fn: () => T): T {
-      if (!isAsyncMode()) return fn()
       return withCloudflareRoomSessionManager(
         () => (this.roomManager ??= new CloudflareRoomSessionManager(this.ctx.id.toString())),
         fn,

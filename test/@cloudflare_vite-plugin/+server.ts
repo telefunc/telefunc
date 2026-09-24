@@ -1,5 +1,3 @@
-import 'telefunc/async_hooks'
-
 import vike from 'vike/fetch'
 import { Telefunc } from 'telefunc/cloudflare'
 

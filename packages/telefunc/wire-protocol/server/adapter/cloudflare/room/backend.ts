@@ -1,6 +1,6 @@
 /// <reference types="@cloudflare/workers-types" />
 
-import { getRawContext, isAsyncMode, restoreContext } from '../../../../../node/server/context/context.js'
+import { getRawContext, restoreContext } from '../../../../../node/server/context/context.js'
 import type { BroadcastDriver, BroadcastLane, PublishResult } from '../../../../backend/broadcast/contract.js'
 import type {
   CellMutation,
@@ -29,9 +29,6 @@ import type { RouteInstallation } from './routes.js'
 const DIRECTORY_DO_NAME = '__telefunc_room_directory__'
 const ROOM_MANAGER = Symbol('telefunc.cloudflare.room-manager')
 
-export const CLOUDFLARE_ROOM_CONTEXT_ERROR =
-  // spellcheck-ignore  nodejs_als is a real Cloudflare compatibility flag (AsyncLocalStorage), not a typo
-  'Cloudflare Room requires await-safe context. Import "telefunc/async_hooks" and enable the Cloudflare "nodejs_als" or "nodejs_compat" compatibility flag.'
 export const CLOUDFLARE_ROOM_SESSION_ERROR =
   'A Cloudflare Room subscription delivers to a Telefunc session: subscribe from a telefunction or a channel handler, not from outside a request.'
 
@@ -122,7 +119,6 @@ export function withCloudflareRoomSessionManager<T>(createManager: () => Cloudfl
 }
 
 export function materializeCloudflareRoomSessionManager(): CloudflareRoomSessionManager {
-  if (!isAsyncMode()) throw new Error(CLOUDFLARE_ROOM_CONTEXT_ERROR)
   const manager = getRawContext()?.[ROOM_MANAGER] as (() => CloudflareRoomSessionManager) | undefined
   if (manager === undefined) throw new Error(CLOUDFLARE_ROOM_SESSION_ERROR)
   return manager()

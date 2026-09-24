@@ -14,7 +14,6 @@ Use <Link href="/stream">Telefunc Stream</Link> on [Cloudflare](https://cloudfla
 // worker.ts
 // Environment: server
 
-import 'telefunc/async_hooks'
 import { Telefunc } from 'telefunc/cloudflare'
 
 const telefunc = new Telefunc()
@@ -35,6 +34,7 @@ export default {
 ```jsonc
 // wrangler.jsonc
 {
+  // Required: Telefunc finds a subscription's session through AsyncLocalStorage (`nodejs_compat` works too).
   // spellcheck-ignore  nodejs_als is Cloudflare's AsyncLocalStorage compatibility flag
   "compatibility_flags": ["nodejs_als"],
   "durable_objects": {
