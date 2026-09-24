@@ -270,7 +270,6 @@ class CloudflareBroadcastMember {
   #bucket: LocationBucket | null = null
   readonly #lanes = new Map<string, MemberLane>()
   readonly #subscriptions = new Map<string, CloudflareBroadcastSubscriptionAttempt>()
-  readonly #presenceWrites = new Map<string, Promise<void>>()
 
   constructor(transport: CloudflareBroadcastTransport, id: string, calls: BroadcastCalls) {
     this.#transport = transport
@@ -355,20 +354,11 @@ class CloudflareBroadcastMember {
     await this.#writePresence(memberLane.lane, false)
   }
 
-  /** One lane's presence writes go to the authority one at a time. */
-  async #writePresence(lane: BroadcastLane, present: boolean): Promise<void> {
-    const routeKey = broadcastRouteKey(lane)
+  /** Through the DO's ordered stubs, so one lane's writes reach its authority in the order they were made. */
+  #writePresence(lane: BroadcastLane, present: boolean): Promise<void> {
     assert(this.#bucket, 'A Broadcast member registers from a session that knows its bucket')
     const request = { key: lane.key, kind: lane.kind, member: this.#id, bucket: present ? this.#bucket : null }
-    const current = (this.#presenceWrites.get(routeKey) ?? Promise.resolve())
-      .catch(() => {})
-      .then(() => this.#transport.sendPresence(this.calls, request))
-    this.#presenceWrites.set(routeKey, current)
-    try {
-      await current
-    } finally {
-      if (this.#presenceWrites.get(routeKey) === current) this.#presenceWrites.delete(routeKey)
-    }
+    return this.#transport.sendPresence(this.calls, request)
   }
 }
 

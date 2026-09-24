@@ -102,12 +102,15 @@ function createAuthorityState(state = createSqlState()) {
 
 type PresenceHooks = { beforeRecord?: () => Promise<void>; beforeWithdraw?: () => Promise<void> }
 
-/** The key's authority as a binding reaches it: each presence write waits on its hook, then lands in `authority`. */
+/** The key's authority as a binding reaches it: presence writes arrive in call order, as through one stub, each after
+ *  its hook, and land in `authority`. */
 function presenceAt(authority: CloudflareBroadcastAuthorityState, hooks: PresenceHooks = {}) {
-  return async (_id: unknown, request: BroadcastPresenceRequest): Promise<void> => {
-    await (request.bucket === null ? hooks.beforeWithdraw : hooks.beforeRecord)?.()
-    await authority.setPresence(request)
-  }
+  let arrival = Promise.resolve()
+  return (_id: unknown, request: BroadcastPresenceRequest): Promise<void> =>
+    (arrival = arrival.then(async () => {
+      await (request.bucket === null ? hooks.beforeWithdraw : hooks.beforeRecord)?.()
+      authority.setPresence(request)
+    }))
 }
 
 function liveMembers(authority: CloudflareBroadcastAuthorityState, lane: BroadcastLane) {
