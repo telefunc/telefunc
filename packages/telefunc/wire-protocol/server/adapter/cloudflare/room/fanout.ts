@@ -36,25 +36,21 @@ const noop = (): void => {}
 
 export class Fanout {
   readonly #deliver: DeliverFn
-  readonly #defer: (resume: () => void) => void
   readonly #incarnations = new Map<string, { active: boolean; lanes: Map<string, Promise<void>> }>()
   readonly #deliveries = new Map<string, Promise<void>>()
 
-  constructor(deliver: DeliverFn, defer: (resume: () => void) => void = queueMicrotask) {
+  constructor(deliver: DeliverFn) {
     this.#deliver = deliver
-    this.#defer = defer
   }
 
   enqueue(routes: RouteInstallation[], payload: Uint8Array, info: DeliveryInfo): string {
     let incarnation = this.#incarnations.get(info.inc)
     if (!incarnation) this.#incarnations.set(info.inc, (incarnation = { active: true, lanes: new Map() }))
     const fence = incarnation
-    const delivery = (fence.lanes.get(info.laneKey) ?? Promise.resolve())
-      .then(() => new Promise<void>((resolve) => this.#defer(resolve)))
-      .then(() => {
-        if (!fence.active) throw new Error('Cloudflare Room delivery cancelled before handoff')
-        return this.#deliver(routes, payload, info)
-      })
+    const delivery = (fence.lanes.get(info.laneKey) ?? Promise.resolve()).then(() => {
+      if (!fence.active) throw new Error('Cloudflare Room delivery cancelled before handoff')
+      return this.#deliver(routes, payload, info)
+    })
     fence.lanes.set(info.laneKey, delivery.then(noop, noop))
     const token = crypto.randomUUID()
     this.#deliveries.set(token, delivery)

@@ -85,14 +85,10 @@ export class RoomAuthority {
     this.#sessions = sessions
     this.#sql = ctx.storage.sql
     initSchema(this.#sql)
-    this.#fanout = new Fanout(
-      async (routes, payload, { seq, timestamp }) => {
-        const request = { operation: 'deliver' as const, path: 'root', routes, payload, seq, timestamp }
-        reportLostDeliveries(await dispatchRoomFanout(this.#sessions, request))
-      },
-      // A macrotask, so a commit's RPC reply is sent before its fanout starts.
-      (resume) => setTimeout(resume, 0),
-    )
+    this.#fanout = new Fanout(async (routes, payload, { seq, timestamp }) => {
+      const request = { operation: 'deliver' as const, path: 'root', routes, payload, seq, timestamp }
+      reportLostDeliveries(await dispatchRoomFanout(this.#sessions, request))
+    })
     void ctx.blockConcurrencyWhile(() => this.#scheduleMaintenanceIfNeeded())
   }
 
