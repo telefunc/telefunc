@@ -135,7 +135,12 @@ function createBasicBinding(
 ) {
   return {
     idFromName(name: string) {
-      return { name }
+      return {
+        name,
+        equals(other: { name: string }) {
+          return other.name === name
+        },
+      }
     },
     idFromString(id: string) {
       return { name: id }
@@ -241,6 +246,7 @@ describe('cloudflare broadcast routing', () => {
     const warsaw = createCloudflareRequest({ colo: 'WAW' })
     const mumbai = createCloudflareRequest({ colo: 'BOM' })
     const sydney = createCloudflareRequest({ colo: 'SYD' })
+
     expect(resolveCloudflareLocationHint(losAngeles, 'weur')).toBe('wnam')
     expect(resolveCloudflareLocationHint(chicago, 'weur')).toBe('enam')
     expect(resolveCloudflareLocationHint(london, 'weur')).toBe('weur')
@@ -258,17 +264,20 @@ describe('cloudflare broadcast routing', () => {
 
   it('prefers a mapped continent bucket when the colo is unmapped', () => {
     const unknown = createCloudflareRequest({ colo: 'ZZZ', continent: 'AF' })
+
     expect(resolveCloudflareLocationHint(unknown, 'weur')).toBe('weur')
   })
 
   it('falls back to locationFallback for ambiguous continents', () => {
     const request = createCloudflareRequest({ colo: 'ZZZ', continent: 'EU' })
+
     expect(resolveCloudflareLocationHint(request, 'weur')).toBe('weur')
     expect(resolveCloudflareLocationHint(request, 'apac')).toBe('apac')
   })
 
   it('falls back to locationFallback when cf.continent is unavailable', () => {
     const request = createCloudflareRequest({ colo: 'ZZZ' })
+
     expect(resolveCloudflareLocationHint(request, 'weur')).toBe('weur')
   })
 
@@ -278,6 +287,7 @@ describe('cloudflare broadcast routing', () => {
 
   it('maps the same room to the same bucket-coordinator offset for a bucket', () => {
     const shardIndices = getBucketCoordinatorShardIndices(2, 'weur')
+
     expect(getDeterministicKeyBucketIndex('room/alpha', shardIndices.length)).toBe(
       getDeterministicKeyBucketIndex('room/alpha', shardIndices.length),
     )
@@ -287,6 +297,7 @@ describe('cloudflare broadcast routing', () => {
     const weurShards = getBucketCoordinatorShardIndices(2, 'weur')
     const apacShards = getBucketCoordinatorShardIndices(2, 'apac')
     const ocShards = getBucketCoordinatorShardIndices(2, 'oc')
+
     expect(weurShards).toContain(weurShards[getDeterministicKeyBucketIndex('room/alpha', weurShards.length)]!)
     expect(apacShards).toContain(apacShards[getDeterministicKeyBucketIndex('room/alpha', apacShards.length)]!)
     expect(ocShards).toContain(ocShards[getDeterministicKeyBucketIndex('room/alpha', ocShards.length)]!)
@@ -328,6 +339,7 @@ describe('cloudflare broadcast routing', () => {
     const unknownRequest = createCloudflareRequest({ continent: 'EU' })
     const exactTarget = resolveSessionRoutingTarget('telefunc', { weur: 2, apac: 1 }, exactRequest, 'weur')
     const fallbackTarget = resolveSessionRoutingTarget('telefunc', { weur: 1, apac: 1 }, unknownRequest, 'weur')
+
     expect(exactTarget).toMatchObject({
       sessionInstanceName: expect.stringMatching(/^telefunc-shard-weur-/),
       locationBucket: 'weur',
@@ -343,6 +355,7 @@ describe('cloudflare broadcast routing', () => {
     // `ABQ` resolves to `wnam`, which is absent from this per-region scale map.
     const wnamRequest = createCloudflareRequest({ colo: 'ABQ' })
     const target = resolveSessionRoutingTarget('telefunc', { weur: 2, apac: 1 }, wnamRequest, 'weur')
+
     expect(target).toMatchObject({
       sessionInstanceName: expect.stringMatching(/^telefunc-shard-weur-/),
       locationBucket: 'weur',
@@ -702,8 +715,11 @@ describe('cloudflare broadcast routing', () => {
     )
     installCloudflareTransport(transport)
     const room = new ServerBroadcast<{ text: string }>({ key: 'room:test:no-ctx' })
+
     expect(() => room.publish({ text: 'hello' })).not.toThrow()
+
     await flushCoordinatorTurn()
+
     expect(coordinatorPublishes).toEqual([
       {
         name: 'telefunc:broadcast:authority:room:test:no-ctx',
@@ -778,12 +794,15 @@ describe('cloudflare broadcast routing', () => {
       payload: encode('{"text":"second"}'),
     })
     await flushMicrotasks(8)
+
     expect(coordinatorPublishes).toContain('telefunc:broadcast:weur:0:{"text":"first"}')
     expect(coordinatorPublishes).toContain('telefunc:broadcast:apac:0:{"text":"first"}')
     expect(coordinatorPublishes).toContain('telefunc:broadcast:weur:0:{"text":"second"}')
     expect(coordinatorPublishes).toContain('telefunc:broadcast:apac:0:{"text":"second"}')
+
     releaseFirstRemotePublish!()
     await Promise.all([firstPublish, secondPublish])
+
     expect(coordinatorPublishes).toContain('telefunc:broadcast:weur:0:{"text":"second"}')
     expect(coordinatorPublishes).toContain('telefunc:broadcast:apac:0:{"text":"second"}')
   })

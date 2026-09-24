@@ -6,7 +6,7 @@ export type {
   BroadcastForwardRequest,
   BroadcastPresenceRequest,
   BroadcastPublishRequest,
-  TelefuncDurableObjectStub,
+  TelefuncBroadcastStub,
 }
 
 import { KNOWN_BROADCAST_BUCKETS, getBucketCoordinatorShardIndices, getDeterministicKeyBucketIndex } from './routing.js'
@@ -69,7 +69,7 @@ type BroadcastDeliverRequest = {
   info: OrderingInfo
 }
 
-type TelefuncDurableObjectStub = DurableObjectStub & {
+type TelefuncBroadcastStub = DurableObjectStub & {
   telefuncBroadcastPublish(request: BroadcastPublishRequest): Promise<PublishResult>
   telefuncBroadcastForward(request: BroadcastForwardRequest): Promise<void>
   telefuncBroadcastDeliver(request: BroadcastDeliverRequest): Promise<void>
@@ -77,7 +77,7 @@ type TelefuncDurableObjectStub = DurableObjectStub & {
 }
 
 /** One DO's outgoing Broadcast calls. */
-type BroadcastCalls = OrderedStubs<TelefuncDurableObjectStub>
+type BroadcastCalls = OrderedStubs<TelefuncBroadcastStub>
 
 /** One lane's presence at the key's authority, for one member DO. */
 class MemberLane {
@@ -411,7 +411,7 @@ class CloudflareBroadcastTransport {
     const member = currentCloudflareSession()?.broadcast()
     const locationBucket = member?.bucket ?? null
     const request = { key: lane.key, kind: lane.kind, locationBucket, payload }
-    const send = (authority: TelefuncDurableObjectStub) => authority.telefuncBroadcastPublish(request)
+    const send = (authority: TelefuncBroadcastStub) => authority.telefuncBroadcastPublish(request)
     const name = this.authorityName(lane.key)
     return unwrapRpcResult(
       member === undefined
@@ -471,7 +471,7 @@ class CloudflareBroadcastTransport {
     calls: BroadcastCalls,
     name: string,
     locationHint: LocationBucket | null,
-    invoke: (stub: TelefuncDurableObjectStub) => Promise<T>,
+    invoke: (stub: TelefuncBroadcastStub) => Promise<T>,
   ): Promise<T> {
     return calls.call(name, () => this.stubByName(name, locationHint), invoke)
   }
@@ -486,16 +486,16 @@ class CloudflareBroadcastTransport {
     return `${this.baseInstanceName}:broadcast:${locationBucket}:${bucketShardOrdinal}`
   }
 
-  private stubByName(name: string, locationHint: LocationBucket | null): TelefuncDurableObjectStub {
+  private stubByName(name: string, locationHint: LocationBucket | null): TelefuncBroadcastStub {
     const namespace = this.namespace()
     return namespace.get(
       namespace.idFromName(name),
       locationHint === null ? undefined : { locationHint },
-    ) as TelefuncDurableObjectStub
+    ) as TelefuncBroadcastStub
   }
 
-  private stubById(id: string): TelefuncDurableObjectStub {
+  private stubById(id: string): TelefuncBroadcastStub {
     const namespace = this.namespace()
-    return namespace.get(namespace.idFromString(id)) as TelefuncDurableObjectStub
+    return namespace.get(namespace.idFromString(id)) as TelefuncBroadcastStub
   }
 }

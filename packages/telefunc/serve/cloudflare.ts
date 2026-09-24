@@ -48,7 +48,6 @@ import {
   type RoomFanoutNamespace,
   type RoomFanoutRequest,
 } from '../wire-protocol/server/adapter/cloudflare/room/fanout.js'
-import { getGlobalObject } from '../utils/getGlobalObject.js'
 import { isTelefuncRequest, toResponse } from './shared.js'
 
 const SHARD_TOKEN_TTL_SECONDS = 86400

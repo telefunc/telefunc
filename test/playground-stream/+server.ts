@@ -36,7 +36,9 @@ const inspector =
     ? new IORedis(process.env.REDIS_URL, { maxRetriesPerRequest: 0 })
     : null
 
-// Exit cleanly on Docker stop so V8 flushes `--cpu-prof` output.
+// Translate Ctrl-C / docker-stop into a clean `process.exit(0)`. Without this, Node's
+// default SIGINT/SIGTERM handlers tear the process down without flushing the V8 CPU
+// profile written by `--cpu-prof`, leaving `profiles/` empty.
 for (const sig of ['SIGINT', 'SIGTERM'] as const) {
   process.on(sig, () => process.exit(0))
 }
@@ -46,7 +48,11 @@ const SERVER_CLOSE_RECONNECT_STORE_KEY = Symbol.for('telefunc__serverCloseReconn
 const tf = new Telefunc()
 const app = new Hono()
 
-// `TELEFUNC_NATIVE=1` benchmarks raw Node req/res; the default exercises Web Request.
+// Bench toggle: when `TELEFUNC_NATIVE=1` the `/_telefunc` route feeds the raw
+// Node `IncomingMessage` / `ServerResponse` into `tf.serve({ req, res })`,
+// which skips webstreams on both directions. Default is the Web Request path
+// (`tf.serve({ request })`) so the same playground exercises both setups
+// without code edits — flip the env var between bench runs to A/B them.
 const USE_NATIVE = process.env.TELEFUNC_NATIVE === '1'
 console.log(`[INST=${INST}] /_telefunc adapter: ${USE_NATIVE ? 'node-native (req/res)' : 'web request'}`)
 
@@ -194,7 +200,9 @@ app.delete('/api/broadcast-cross-instance/unsubscribe', async (c) => {
   return c.json({ ok: true, instance: INST })
 })
 
-// Deterministically exercise GC cleanup; playground scripts enable `--expose-gc`.
+// Forces server-side GC so tests can deterministically exercise GC-driven cleanup (e.g. a
+// dropped passed-callback's stub being reclaimed → its channel closing → context.onClose firing).
+// Requires the server to run with `--expose-gc` (see this playground's dev/preview scripts).
 app.post('/api/gc', async (c) => {
   const gc = (globalThis as { gc?: () => void }).gc
   if (!gc) return c.json({ ok: false, reason: 'gc not exposed (run node with --expose-gc)' }, 500)
@@ -236,7 +244,10 @@ app.post('/api/server-close-trigger', async (c) => {
 app.all('/_telefunc', async (c) => {
   if (USE_NATIVE) {
     console.log(`[INST=${INST}] Handling /_telefunc via node-native adapter`)
-    // srvx exposes raw Node req/res under `c.req.raw.runtime.node` for this adapter.
+    // srvx attaches `runtime.node = { req, res }` to the Request it constructs
+    // from each `IncomingMessage`. Reaching through `c.req.raw` to those Node
+    // primitives lets `tf.serve({ req, res })` bypass webstreams on both
+    // request body parsing and response writing.
     const { req, res } = (c.req.raw as unknown as { runtime: { node: { req: IncomingMessage; res: ServerResponse } } })
       .runtime.node
     await tf.serve({ req, res })
@@ -249,7 +260,12 @@ app.all('/_telefunc', async (c) => {
 
 vike(app)
 
-// Use local mkcert files when present; Docker's Caddy terminates TLS when `NO_HTTPS=1`.
+// HTTPS via `certs/localhost.{pem,-key.pem}` next to the playground root (resolved
+// from `process.cwd()` — start the server from `test/playground-stream/`). Generate:
+//   mkcert -install && cd test/playground-stream && mkdir -p certs && cd certs && mkcert localhost
+// Falls back to plain HTTP/1.1 otherwise. Docker compose sets `NO_HTTPS=1` because
+// Caddy is the TLS terminator there and the certs are visible via the bind mount.
+// srvx negotiates HTTP/2 vs HTTP/1.1 automatically via ALPN when `tls` is set.
 const certDir = path.resolve(process.cwd(), 'certs')
 const certPath = path.join(certDir, 'localhost.pem')
 const keyPath = path.join(certDir, 'localhost-key.pem')
@@ -262,7 +278,11 @@ export default {
     port: Number(process.env.PORT) || (httpsAvailable ? 8443 : 3000),
     ...(tls ? { tls } : {}),
     onCreate(server: { node?: { server?: HttpServer } }) {
-      // Unwrap srvx's Node server so Telefunc can install its WebSocket upgrade handler.
+      // srvx wraps the raw `http.Server` as `{ node: { server } }`. Unwrap to
+      // the underlying Node server so the WebSocket upgrade listener can be
+      // installed directly on it. The HTTP request path goes through Hono
+      // normally — the `/_telefunc` route reads `c.env.incoming`/`outgoing`
+      // to reach the Node primitives when `TELEFUNC_NATIVE=1`.
       const httpServer = server?.node?.server
       if (httpServer) tf.installWebSocket(httpServer)
     },
