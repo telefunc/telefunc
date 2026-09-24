@@ -6,7 +6,13 @@ import { assert } from '../../../utils/assert.js'
 import { isObject } from '../../../utils/isObject.js'
 import { isObjectOrFunction } from '../../../utils/isObjectOrFunction.js'
 import { createStreamingReviver } from './registry.js'
-import type { StreamSource, ClientReviverContext, ReviverType, TypeContract } from '../../types.js'
+import type {
+  StreamSource,
+  ClientReviverContext,
+  InternalClientReviverContext,
+  ReviverType,
+  TypeContract,
+} from '../../types.js'
 import { setAbortController } from '../../../client/abort.js'
 import { setCloseHandlers, addExtraCloseHandlers, type CloseHandler } from '../../../client/close.js'
 import { makeAbortError, throwAbortError, throwBugError } from '../../../client/remoteTelefunctionCall/errors.js'
@@ -104,7 +110,7 @@ async function reviveResponse(
   const headers = callContext.headers ?? undefined
   const telefuncUrl = callContext.telefuncUrl
   const promises: Promise<unknown>[] = []
-  const context: ClientReviverContext = {
+  const context: InternalClientReviverContext = {
     shareLifecycle(child, owner) {
       const close = closeHandlers.get(owner)
       assert(close)

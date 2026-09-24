@@ -7,9 +7,11 @@ export type {
   StreamingProducer,
   // ===== Contexts =====
   ClientReviverContext,
+  InternalClientReviverContext,
   ServerReviverContext,
   ClientReplacerContext,
   ServerReplacerContext,
+  InternalServerReplacerContext,
   StreamSource,
   StreamReadOptions,
   // ===== Supporting =====
@@ -135,8 +137,6 @@ type StreamSource = {
 
 /** Context for all client-side response revivers (streaming + placeholder). */
 type ClientReviverContext = {
-  /** Gives a derived value its owner's explicit-close lifetime without changing its identity. */
-  shareLifecycle(child: object, owner: object): void
   createChannel<ClientToServer = unknown, ServerToClient = unknown>(opts: {
     channelId: string
     ack?: boolean
@@ -145,6 +145,12 @@ type ClientReviverContext = {
   receiveStream(metadata: StreamingMetadata): StreamSource
   /** Awaited before the call settles — for revivers that need to buffer before the user reads. */
   waitFor(promise: Promise<unknown>): void
+}
+
+/** The built-in revivers' context, which extensions don't get. */
+type InternalClientReviverContext = ClientReviverContext & {
+  /** Gives a derived value its owner's explicit-close lifetime without changing its identity. */
+  shareLifecycle(child: object, owner: object): void
 }
 
 /** Context for all server-side request revivers (File/Blob + Function + ReadableStream). */
@@ -169,8 +175,6 @@ type ServerReplacerContext = {
   }): ServerChannel<ClientToServer, ServerToClient>
   /** Registers a channel with the response lifecycle. Also installs shield validators if the channel has shields. */
   registerChannel(channel: ServerChannel<any, any>): void
-  /** One store per response, shared by every replacer in it; `init` runs on the first call for `key`. */
-  responseState<T>(key: symbol, init: () => T): T
   sendStream(createProducer: () => StreamingProducer): {
     metadata: StreamingMetadata
     close: () => Promise<void> | void
@@ -180,6 +184,12 @@ type ServerReplacerContext = {
    *  Replacers pick the names relevant to their data flow. Each returns `true` on success or an error
    *  string — call sites decide the action (throw, drop, ...). */
   validators: ShieldValidators
+}
+
+/** The built-in replacers' context, which extensions don't get. */
+type InternalServerReplacerContext = ServerReplacerContext & {
+  /** One store per response, shared by every replacer in it; `init` runs on the first call for `key`. */
+  responseState<T>(key: symbol, init: () => T): T
 }
 
 /** Context for all client-side request replacers (File/Blob + Function + ReadableStream). */

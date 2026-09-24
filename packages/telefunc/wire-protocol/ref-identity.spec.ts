@@ -16,6 +16,8 @@ import { config, getServerConfig } from '../node/server/serverConfig.js'
 import type { AbortError } from '../shared/Abort.js'
 import type {
   ClientReviverContext,
+  InternalClientReviverContext,
+  InternalServerReplacerContext,
   ReplacerType,
   ReviverType,
   ServerReplacerContext,
@@ -43,7 +45,7 @@ function createServerHarness(extensionTypes: ReplacerType<TypeContract, ServerRe
   const producers: { createProducer: () => StreamingProducer; index: number }[] = []
   const lifecycles: Lifecycle[] = []
   let nextIndex = 0
-  const context: ServerReplacerContext = {
+  const context: InternalServerReplacerContext = {
     createChannel(opts) {
       const channel = new ServerChannel(opts)
       context.registerChannel(channel)
@@ -76,7 +78,7 @@ function createClientHarness(extensionTypes: ReviverType<TypeContract, ClientRev
   const mintedBroadcasts: { channelId: string; key: string }[] = []
   const lifecycles: { value: unknown; close: () => Promise<void> | void; abort: (abortError: AbortError) => void }[] =
     []
-  const context: ClientReviverContext = {
+  const context: InternalClientReviverContext = {
     shareLifecycle() {},
     createChannel(opts) {
       mintedChannels.push(opts)

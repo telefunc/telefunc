@@ -34,7 +34,7 @@ import { ReplayGate } from './server/replay.js'
 import { TailHold } from './server/tail.js'
 import { RoomDemand } from './demand.js'
 import { roomParticipantReplacer, roomRemoteReplacer, roomReplacer } from './response-server.js'
-import type { ServerReplacerContext } from '../types.js'
+import type { InternalServerReplacerContext } from '../types.js'
 import type { ServerChannel } from '../server/channel.js'
 import type { ChannelPublishInfo } from '../channel.js'
 import { disposeBackend, getBroadcastBackend, getRoomBackend, installBackend } from '../backend/install.js'
@@ -2862,7 +2862,7 @@ function subsOf(room: Room | ServerRoom): {
 } {
   return (room as unknown as { _subs: ReturnType<typeof subsOf> })._subs
 }
-function replacerContext(channels: ServerChannel[]): ServerReplacerContext {
+function replacerContext(channels: ServerChannel[]): InternalServerReplacerContext {
   const states = new Map<symbol, unknown>()
   return {
     registerChannel: (channel: ServerChannel) => {
@@ -2874,7 +2874,7 @@ function replacerContext(channels: ServerChannel[]): ServerReplacerContext {
       if (!states.has(key)) states.set(key, init())
       return states.get(key) as T
     },
-  } as unknown as ServerReplacerContext
+  } as unknown as InternalServerReplacerContext
 }
 function declare(stub: RoomStubChannel, declaration: unknown): void {
   stub._onPeerMessage(stringify(declaration), 0)

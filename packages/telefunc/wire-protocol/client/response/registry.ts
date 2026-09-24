@@ -2,7 +2,7 @@ export { createStreamingReviver }
 
 import type { Reviver } from '@brillout/json-serializer/parse'
 import { clientDialect } from '../dialect.js'
-import type { ClientReviverContext, ReviverType, TypeContract } from '../../types.js'
+import type { ClientReviverContext, InternalClientReviverContext, ReviverType, TypeContract } from '../../types.js'
 import type { AbortError } from '../../../shared/Abort.js'
 import { assert } from '../../../utils/assert.js'
 import { isObject } from '../../../utils/isObject.js'
@@ -14,7 +14,7 @@ import { isObject } from '../../../utils/isObject.js'
  *  value — the first occurrence revives (side effects run once), duplicates resolve to the
  *  already-revived object, and server-side `===` holds on the client too. */
 function createStreamingReviver(
-  context: ClientReviverContext,
+  context: InternalClientReviverContext,
   onRevived: (revived: {
     value: unknown
     close: () => Promise<void> | void

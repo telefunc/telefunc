@@ -21,7 +21,11 @@ import { pumpProducerToChannel } from '../../../wire-protocol/server/response/Ch
 import { STREAM_TRANSPORT, type StreamTransport } from '../../../wire-protocol/constants.js'
 import { textEncoder } from '../../../wire-protocol/frame.js'
 import { uint8ArrayToBase64url } from '../../../wire-protocol/base64url.js'
-import type { StreamingProducer, StreamingValueServer, ServerReplacerContext } from '../../../wire-protocol/types.js'
+import type {
+  InternalServerReplacerContext,
+  StreamingProducer,
+  StreamingValueServer,
+} from '../../../wire-protocol/types.js'
 import { type RequestContext } from '../context/requestContext.js'
 import type { Context } from '../context/context.js'
 import type { Readable } from 'node:stream'
@@ -121,7 +125,7 @@ function serializeTelefunctionResult(runContext: {
     return responseStates.get(key) as T
   }
   const replacer = createStreamingReplacer(
-    function getContext(value: unknown): ServerReplacerContext {
+    function getContext(value: unknown): InternalServerReplacerContext {
       return {
         createChannel,
         registerChannel,

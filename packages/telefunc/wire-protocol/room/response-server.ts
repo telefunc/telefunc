@@ -1,6 +1,6 @@
 export { roomReplacer, roomParticipantReplacer, roomRemoteReplacer }
 
-import type { ReplacerType, ServerReplacerContext, TypeContract } from '../types.js'
+import type { InternalServerReplacerContext, ReplacerType, TypeContract } from '../types.js'
 import {
   SERIALIZER_PREFIX_ROOM,
   SERIALIZER_PREFIX_ROOM_PARTICIPANT,
@@ -20,13 +20,13 @@ type RoomRemoteReplacerContract = TypeContract<RemoteParticipant, never, RemoteP
 
 const ROOM_GRANTS = Symbol('telefunc.RoomResponseGrants')
 /** Keyed by room id: `Room.join(id)` and `Room.get(id)` build separate instances of one room. */
-function responseRoomGrants(context: ServerReplacerContext, roomId: string): ResponseRoomGrants {
+function responseRoomGrants(context: InternalServerReplacerContext, roomId: string): ResponseRoomGrants {
   const byRoom = context.responseState(ROOM_GRANTS, () => new Map<string, ResponseRoomGrants>())
   let grants = byRoom.get(roomId)
   if (!grants) byRoom.set(roomId, (grants = { selfSuppressed: new Set(), hidden: new Set() }))
   return grants
 }
-const roomReplacer: ReplacerType<RoomReplacerContract, ServerReplacerContext> = {
+const roomReplacer: ReplacerType<RoomReplacerContract, InternalServerReplacerContext> = {
   prefix: SERIALIZER_PREFIX_ROOM,
   detect(value): value is RoomReplacerContract['value'] {
     return ServerRoom.isServerRoom(value)
@@ -49,7 +49,7 @@ const roomReplacer: ReplacerType<RoomReplacerContract, ServerReplacerContext> = 
   },
 }
 /** Rides its room's stub, so it has no lifecycle of its own; the recursive serializer replaces or dedupes the room it names. */
-const roomRemoteReplacer: ReplacerType<RoomRemoteReplacerContract, ServerReplacerContext> = {
+const roomRemoteReplacer: ReplacerType<RoomRemoteReplacerContract, InternalServerReplacerContext> = {
   prefix: SERIALIZER_PREFIX_ROOM_REMOTE,
   detect(value): value is RoomRemoteReplacerContract['value'] {
     // A brand, not instanceof: a dev server can load two module graphs.
@@ -76,7 +76,7 @@ const roomRemoteReplacer: ReplacerType<RoomRemoteReplacerContract, ServerReplace
     }
   },
 }
-const roomParticipantReplacer: ReplacerType<RoomParticipantReplacerContract, ServerReplacerContext> = {
+const roomParticipantReplacer: ReplacerType<RoomParticipantReplacerContract, InternalServerReplacerContext> = {
   prefix: SERIALIZER_PREFIX_ROOM_PARTICIPANT,
   detect(value): value is RoomParticipantReplacerContract['value'] {
     return ServerLocalParticipant.isServerLocalParticipant(value)

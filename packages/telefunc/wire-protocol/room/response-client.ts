@@ -1,6 +1,6 @@
 export { roomReviver, roomParticipantReviver, roomRemoteReviver }
 
-import type { ClientReviverContext, ReviverType, TypeContract } from '../types.js'
+import type { InternalClientReviverContext, ReviverType, TypeContract } from '../types.js'
 import { ClientRoom, ClientStandaloneParticipant } from './client.js'
 import type { LocalParticipant, RemoteParticipant } from './types.js'
 import type { ParticipantStubMetadata, RemoteParticipantMetadata, RoomSnapshotMetadata } from './protocol.js'
@@ -15,7 +15,7 @@ type RoomReviverContract = TypeContract<never, ClientRoom, RoomSnapshotMetadata>
 type RoomParticipantReviverContract = TypeContract<never, LocalParticipant, ParticipantStubMetadata>
 type RoomRemoteReviverContract = TypeContract<never, RemoteParticipant, RemoteParticipantMetadata>
 
-const roomReviver: ReviverType<RoomReviverContract, ClientReviverContext> = {
+const roomReviver: ReviverType<RoomReviverContract, InternalClientReviverContext> = {
   prefix: SERIALIZER_PREFIX_ROOM,
   revive(metadata, context) {
     const stub = context.createBroadcast({
@@ -33,7 +33,7 @@ const roomReviver: ReviverType<RoomReviverContract, ClientReviverContext> = {
     }
   },
 }
-const roomParticipantReviver: ReviverType<RoomParticipantReviverContract, ClientReviverContext> = {
+const roomParticipantReviver: ReviverType<RoomParticipantReviverContract, InternalClientReviverContext> = {
   prefix: SERIALIZER_PREFIX_ROOM_PARTICIPANT,
   revive(metadata, context) {
     const channel = context.createChannel({ channelId: metadata.channelId })
@@ -49,7 +49,7 @@ const roomParticipantReviver: ReviverType<RoomParticipantReviverContract, Client
   },
 }
 /** Bound to the live `ClientRoom` the parser revived first, so `room.getParticipant(m.id) === m`, and sharing its lifecycle. */
-const roomRemoteReviver: ReviverType<RoomRemoteReviverContract, ClientReviverContext> = {
+const roomRemoteReviver: ReviverType<RoomRemoteReviverContract, InternalClientReviverContext> = {
   prefix: SERIALIZER_PREFIX_ROOM_REMOTE,
   revive(metadata, context) {
     assert(metadata.room instanceof ClientRoom)
