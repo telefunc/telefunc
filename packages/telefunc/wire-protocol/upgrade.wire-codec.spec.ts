@@ -72,6 +72,19 @@ describe('upgrade wire vocabulary', () => {
     expect(decodeClientFrame(encoded, WIRE_MAX_CONN_CTRL_FRAME_BYTES)).toEqual({ tag: TAG.BARRIER, payload: max })
   })
 
+  test('a RECONCILE at the largest shape the caps admit is admissible', () => {
+    const open = Array.from({ length: MAX_CHANNELS_PER_CONNECTION }, (_, ix) => ({
+      id: String(ix).padStart(UPGRADE_MAX_ID_BYTES, 'x'),
+      ix: 0xffff - ix,
+      lastSeq: 0xffffffff,
+      initial: true as const,
+      broadcast: { text: false, binary: false },
+    }))
+    const encoded = encode.reconcile({ sessionId: 'x'.repeat(64), open })
+    expect(encoded.byteLength).toBeLessThanOrEqual(WIRE_MAX_CONN_CTRL_FRAME_BYTES)
+    expect(decodeClientFrame(encoded, WIRE_MAX_CONN_CTRL_FRAME_BYTES).tag).toBe(TAG.RECONCILE)
+  })
+
   test('a RECONCILED round-trips the commit upgradeId', () => {
     const payload = reconciled({ open: [{ ix: 0, lastSeq: 3 }], upgradeId: 'upg-1' })
     expect(decode(encode.reconciled(payload))).toEqual({ tag: TAG.RECONCILED, payload })
