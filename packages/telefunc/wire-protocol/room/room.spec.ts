@@ -180,6 +180,21 @@ describe('Room public behavior', () => {
     await expect(stub._handleRequest(request)).resolves.toBeUndefined()
     expect(await Room.getParticipants(room.id)).toEqual([])
   })
+  it("routes a client member's meta, attribute and DM requests through its Room stub", async () => {
+    const room = (await Room.create('stub-requests')) as ServerRoom
+    const stub = register(room)
+    const { id } = (await stub._handleRequest({ __r: 'req-join', meta: { name: 'a' }, selfDelivery: true })) as {
+      id: string
+    }
+    const other = await room.join()
+    const inbox: unknown[] = []
+    other.listen((data) => void inbox.push(data))
+    await stub._handleRequest({ __r: 'req-set-meta', id, meta: { name: 'b' } })
+    await stub._handleRequest({ __r: 'req-set-attrs', id, attrs: { score: 1 } })
+    await stub._handleRequest({ __r: 'req-dm', id, to: other.id, data: 'hi' })
+    expect((await room.getParticipants()).find((member) => member.id === id)?.meta).toEqual({ name: 'b', score: 1 })
+    await vi.waitFor(() => expect(inbox).toEqual(['hi']))
+  })
   it('relays a leave that reached this instance with no event, from a reconciled roster or a vanished record', async () => {
     const room = (await Room.create('lost-leave-owner')) as ServerRoom
     const { stub, peer } = serve(room)
