@@ -121,9 +121,19 @@ async function requireRoom(id: string): Promise<RoomConfigRecord> {
   return config
 }
 
-async function repairRoomIndex(id: string, listedInc: string, liveInc: string | null): Promise<void> {
-  if (liveInc === null) return await getRoomBackend().directoryDelete(id, listedInc)
-  if (liveInc !== listedInc) await getRoomBackend().directoryPut(id, liveInc)
+/** A listed incarnation no head names as current has no owner left (its close finished, or was interrupted and its
+ *  tombstone lapsed), so it is dropped with its listing. */
+async function repairRoomIndex(
+  backend: RoomBackend,
+  id: string,
+  listedInc: string,
+  head: RoomHead | null,
+): Promise<void> {
+  if (head?.currentInc === listedInc) return
+  await backend.dropGeneration(id, listedInc)
+  const live = openConfig(head)
+  if (live) await backend.directoryPut(id, live.inc)
+  else await backend.directoryDelete(id, listedInc)
 }
 type TryCreateRoomResult = { kind: 'created'; room: Room } | { kind: 'exists' } | { kind: 'closing' }
 
@@ -236,8 +246,9 @@ async function listRooms(options?: { prefix?: string }): Promise<RoomInfo[]> {
     const page = await backend.directoryList(options?.prefix ?? '', cursor)
     cursor = page.cursor
     for (const { roomId, incTag } of page.entries) {
-      const config = openConfig(await backend.readHead(roomId))
-      await repairRoomIndex(roomId, incTag, config?.inc ?? null)
+      const head = await backend.readHead(roomId)
+      await repairRoomIndex(backend, roomId, incTag, head)
+      const config = openConfig(head)
       if (config === null) continue
       const count = await presenceCount(roomId, config.inc)
       rooms.push({ id: roomId, meta: config.meta, count, isEmpty: count === 0 })

@@ -878,6 +878,32 @@ describe('Room public behavior', () => {
     expect(memoryState.rooms.has('released-record')).toBe(false)
     await expect(Room.create('released-record')).resolves.toMatchObject({ id: 'released-record' })
   })
+  it('drops an incarnation an interrupted close left, once listing finds its tombstone lapsed', async () => {
+    vi.useFakeTimers()
+    const room = (await Room.create('interrupted-close')) as ServerRoom
+    vi.spyOn(driver, 'dropGeneration').mockRejectedValueOnce(new Error('connection lost'))
+    await expect(Room.close(room.id)).rejects.toThrow('connection lost')
+    await vi.advanceTimersByTimeAsync(60_000)
+    await Room.list()
+    expect(memoryState.rooms.get(room.id)?.gens.has(room._inc) ?? false).toBe(false)
+  })
+  it('lists a closing room without dropping the incarnation its close still owns', async () => {
+    const room = (await Room.create('closing-listed')) as ServerRoom
+    const finalizing = deferred<void>()
+    const compareExchangeHead = driver.compareExchangeHead.bind(driver)
+    const cx = vi.spyOn(driver, 'compareExchangeHead').mockImplementation(async (id, expected, next) => {
+      if (expected.form === 'finalize') await finalizing.promise
+      return compareExchangeHead(id, expected, next)
+    })
+    const closing = Room.close(room.id)
+    await vi.waitFor(() =>
+      expect(cx).toHaveBeenCalledWith(room.id, expect.objectContaining({ form: 'finalize' }), expect.anything()),
+    )
+    await Room.list()
+    expect(memoryState.rooms.get(room.id)?.gens.has(room._inc)).toBe(true)
+    finalizing.resolve()
+    await closing
+  })
   it("treats a delivery handoff that never settles or rejects as lost, not as the publisher's failure", async () => {
     vi.useFakeTimers()
     const room = await Room.create('lost-delivery')
