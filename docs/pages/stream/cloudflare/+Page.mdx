@@ -172,7 +172,7 @@ Publisher (Durable Object)
 
 ### Ordering
 
-<Link href="/channel#broadcast">Broadcast</Link> publishes for a given `key` go through a single authority, which assigns a <Link href="/channel#broadcast">monotonic `seq`</Link>. Fan-out to subscribers runs in parallel, so a later publish can arrive before an earlier one; order by `info.seq` when order matters.
+<Link href="/channel#broadcast">Broadcast</Link> publishes for a given `key` go through a single authority, which assigns a <Link href="/channel#broadcast">monotonic `seq`</Link>. Every subscriber receives them in `seq` order: the authority forwards them in that order, and each hop sends through one Durable Object stub, whose calls Cloudflare delivers in the order they were made. Publishes from one session reach the authority in the order they were made.
 
 ### Presence
 
@@ -202,7 +202,7 @@ A Durable Object registers with the authority on its first subscription to a key
 
 | Guarantee | Details |
 |---|---|
-| Ordering | Publishes for a given key get a monotonic `seq`; delivery order across publishes isn't guaranteed. |
+| Ordering | Every subscriber receives a key's publishes in `seq` order. |
 | Delivery | `publish()` resolves after all Durable Objects with subscribers have received the message. Delivery to clients then happens over the channel connection. |
 | Subscription | A subscription is ready once the key's authority has recorded it; every publish sequenced after that reaches it. |
 
