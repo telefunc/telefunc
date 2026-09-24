@@ -96,10 +96,6 @@ export function readLiveHead(sql: SqlStorage, now: number): StoredHead | null {
   return head
 }
 
-export function hasGeneration(sql: SqlStorage, inc: string): boolean {
-  return sql.exec('SELECT 1 FROM gen WHERE inc = ?', inc).toArray().length > 0
-}
-
 export function hasOrphanGeneration(sql: SqlStorage, currentInc: string | null): boolean {
   return sql.exec('SELECT 1 FROM gen WHERE inc IS NOT ? LIMIT 1', currentInc).toArray().length > 0
 }

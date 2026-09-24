@@ -48,16 +48,6 @@ export class CloudflareRoomSubscriptionAttempt extends DriverAttempt {
     this.#receiver(new Uint8Array(payload), { seq, timestamp })
   }
 
-  invalidate(): void {
-    this.#finish()
-  }
-
-  terminate(): void {
-    this.#released = true
-    this.#finish()
-    void this.#release().catch(console.error)
-  }
-
   async unsubscribe(): Promise<void> {
     if (this.#released) return
     this.#released = true
@@ -86,15 +76,14 @@ export class CloudflareRoomSubscriptionAttempt extends DriverAttempt {
 
   async #renew(): Promise<void> {
     this.#cancelRenewal = null
-    let renewed: { ok: boolean; terminal?: boolean }
+    let renewed: boolean
     try {
       renewed = await this.#authority.renewRoute(this.#route)
     } catch {
       return this.#finish()
     }
     if (this.state() !== 'ready') return
-    if (renewed.ok) this.#scheduleRenewal()
-    else if (renewed.terminal === true) this.terminate()
+    if (renewed) this.#scheduleRenewal()
     else this.#finish()
   }
 

@@ -27,12 +27,8 @@ export function upsertRoute(sql: SqlStorage, route: RouteInstallation, now: numb
   )
 }
 
-export function listRouteInstallations(sql: SqlStorage, inc: string): RouteInstallation[] {
-  return sql.exec<RouteInstallation>(`SELECT ${ROUTE_COLUMNS} FROM route WHERE inc = ?`, inc).toArray()
-}
-
-export function listExpiredRouteInstallations(sql: SqlStorage, now: number): RouteInstallation[] {
-  return sql.exec<RouteInstallation>(`SELECT ${ROUTE_COLUMNS} FROM route WHERE expires_at <= ?`, now).toArray()
+export function deleteExpiredRoutes(sql: SqlStorage, now: number): void {
+  sql.exec('DELETE FROM route WHERE expires_at <= ?', now)
 }
 
 export function renewRoute(sql: SqlStorage, route: RouteInstallation, now: number): boolean {

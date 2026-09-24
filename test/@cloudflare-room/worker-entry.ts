@@ -9,7 +9,6 @@ import {
   CloudflareRoomSessionManager,
   type CloudflareRoomNamespace,
   type RoomSessionDeliveryRequest,
-  type RoomSessionInvalidationRequest,
 } from '../../packages/telefunc/wire-protocol/server/adapter/cloudflare/room/backend.js'
 import {
   RoomAuthority,
@@ -120,9 +119,6 @@ export class PublicDurableObject extends RoomAuthorityHost<Env> {
   }
   telefuncRoomDeliver(request: RoomSessionDeliveryRequest): void {
     return this.#run(() => this.#manager.deliver(request))
-  }
-  telefuncRoomInvalidate(request: RoomSessionInvalidationRequest): void {
-    return this.#run(() => this.#manager.invalidate(request))
   }
   telefuncRoomFanout(request: RoomFanoutRequest) {
     return dispatchRoomFanout(fanoutNamespace(this.env.PUBLIC), request)

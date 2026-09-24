@@ -39,7 +39,6 @@ import {
   CloudflareRoomBackend,
   type CloudflareRoomNamespace,
   type RoomSessionDeliveryRequest,
-  type RoomSessionInvalidationRequest,
 } from '../wire-protocol/server/adapter/cloudflare/room/backend.js'
 import { RoomAuthorityHost } from '../wire-protocol/server/adapter/cloudflare/room/do.js'
 import { withCloudflareSession, type CloudflareSession } from '../wire-protocol/server/adapter/cloudflare/session.js'
@@ -185,10 +184,6 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
 
     telefuncRoomDeliver(request: RoomSessionDeliveryRequest): void {
       return this.runInSession(() => this.session.room().deliver(request))
-    }
-
-    telefuncRoomInvalidate(request: RoomSessionInvalidationRequest): void {
-      return this.runInSession(() => this.session.room().invalidate(request))
     }
 
     telefuncRoomFanout(request: RoomFanoutRequest) {

@@ -37,8 +37,6 @@ export type RoomSessionDeliveryRequest = RouteInstallation & {
   timestamp: number
 }
 
-export type RoomSessionInvalidationRequest = RouteInstallation & { terminal?: true }
-
 export type CloudflareRoomAuthorityStub = Omit<RoomAuthority, 'alarm'>
 
 export type CloudflareRoomNamespace = {
@@ -83,14 +81,6 @@ export class CloudflareRoomSessionManager {
     const entry = this.#entries.get(entryKey(request))
     if (entry?.leaseId !== request.leaseId) return
     entry.deliver(request.payload, request.seq, request.timestamp)
-  }
-
-  invalidate(request: RoomSessionInvalidationRequest): void {
-    const entry = this.#entries.get(entryKey(request))
-    if (entry?.leaseId === request.leaseId) {
-      if (request.terminal === true) entry.terminate()
-      else entry.invalidate()
-    }
   }
 
   get subscriptionPartition(): string {

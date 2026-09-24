@@ -23,9 +23,8 @@ import { commitPreconditionHolds } from '../../../../backend/room/semantics.js'
 import { dispatchRoomFanout, Fanout, type RoomFanoutNamespace, type RoomFanoutOutcome } from './fanout.js'
 import { deleteRetained, installRetained, listRetained, readRetained } from './retained.js'
 import {
+  deleteExpiredRoutes,
   deleteRoute,
-  listExpiredRouteInstallations,
-  listRouteInstallations,
   renewRoute,
   snapshotRoutes,
   type RouteInstallation,
@@ -44,7 +43,6 @@ import {
   hasOrphanGeneration,
   listOrphanGenerations,
   readCells,
-  hasGeneration,
   readLiveHead,
   type StoredHead,
 } from './storage.js'
@@ -86,7 +84,7 @@ export class RoomAuthority {
     this.#sql = ctx.storage.sql
     initSchema(this.#sql)
     this.#fanout = new Fanout(async (routes, payload, { seq, timestamp }) => {
-      const request = { operation: 'deliver' as const, path: 'root', routes, payload, seq, timestamp }
+      const request = { path: 'root', routes, payload, seq, timestamp }
       reportLostDeliveries(await dispatchRoomFanout(this.#sessions, request))
     })
   }
@@ -169,14 +167,12 @@ export class RoomAuthority {
     return result
   }
 
-  async renewRoute(route: RouteInstallation): Promise<{ ok: boolean; terminal?: boolean }> {
+  /** Fails once the route lapsed or its generation was dropped; the session then ends the attempt. */
+  async renewRoute(route: RouteInstallation): Promise<boolean> {
     const now = Date.now()
-    // Missing exact routes recover with a fresh lease; only a dropped generation is terminal.
-    const result = this.#ctx.storage.transactionSync(() =>
-      hasGeneration(this.#sql, route.inc) ? { ok: renewRoute(this.#sql, route, now) } : { ok: false, terminal: true },
-    )
+    const renewed = this.#ctx.storage.transactionSync(() => renewRoute(this.#sql, route, now))
     await this.#scheduleMaintenanceIfNeeded()
-    return result
+    return renewed
   }
 
   async unsubscribeRoute(route: RouteInstallation): Promise<void> {
@@ -185,13 +181,11 @@ export class RoomAuthority {
   }
 
   async dropGeneration(inc: string): Promise<void> {
-    await this.#dropGenerationNow(inc)
+    this.#dropGenerationNow(inc)
     await this.#scheduleMaintenanceIfNeeded()
   }
 
-  /** Routes and rows stay durable until every exact-lease uninstall succeeds, so a failed drop is retried by the sweep. */
-  async #dropGenerationNow(inc: string): Promise<void> {
-    await this.#terminateInstallations(listRouteInstallations(this.#sql, inc))
+  #dropGenerationNow(inc: string): void {
     this.#ctx.storage.transactionSync(() => dropGenerationRows(this.#sql, inc))
     this.#fanout.clearIncarnation(inc)
   }
@@ -210,55 +204,21 @@ export class RoomAuthority {
 
   async alarm(): Promise<void> {
     try {
-      await this.#runSweep(Date.now())
+      this.#runSweep(Date.now())
     } finally {
       await this.#scheduleMaintenanceIfNeeded()
     }
   }
 
-  async #runSweep(now: number): Promise<void> {
+  /** Storage only: a session whose route lapsed or whose generation went learns it at its next renewal. */
+  #runSweep(now: number): void {
     const orphanIncs = this.#ctx.storage.transactionSync(() => {
       const currentInc = readLiveHead(this.#sql, now)?.currentInc ?? null
       deleteLapsedTombstone(this.#sql, now)
+      deleteExpiredRoutes(this.#sql, now)
       return listOrphanGenerations(this.#sql, currentInc)
     })
-
-    // An orphan whose drop failed keeps its expired routes, so its retried drop terminates those sessions.
-    const failedOrphans = new Set<string>()
-    for (const inc of orphanIncs) {
-      try {
-        await this.#dropGenerationNow(inc)
-      } catch {
-        failedOrphans.add(inc)
-      }
-    }
-
-    for (const installation of listExpiredRouteInstallations(this.#sql, now)) {
-      if (failedOrphans.has(installation.inc)) continue
-      try {
-        await this.#invalidateInstallation(installation)
-      } catch {
-        // Preserve this exact route row as the next sweep's retry source.
-        continue
-      }
-      this.#ctx.storage.transactionSync(() => deleteRoute(this.#sql, installation))
-    }
-  }
-
-  async #invalidateInstallation(installation: RouteInstallation): Promise<void> {
-    const session = this.#sessions
-    await session.get(session.idFromString(installation.sessionDoId)).telefuncRoomInvalidate(installation)
-  }
-
-  async #terminateInstallations(installations: RouteInstallation[]): Promise<void> {
-    const outcomes = await dispatchRoomFanout(this.#sessions, {
-      operation: 'invalidate',
-      path: 'root',
-      routes: installations,
-      terminal: true,
-    })
-    const failed = outcomes.find((outcome) => outcome.error !== undefined)
-    if (failed?.error !== undefined) throw new Error(failed.error)
+    for (const inc of orphanIncs) this.#dropGenerationNow(inc)
   }
 
   async #scheduleMaintenanceIfNeeded(): Promise<void> {

@@ -96,9 +96,6 @@ test('keeps every recursive coordinator invocation within the configured fanout 
             subrequests += 1
             delivered.add(delivery.sessionDoId)
           },
-          async telefuncRoomInvalidate() {
-            subrequests += 1
-          },
           async telefuncRoomFanout(child) {
             subrequests += 1
             if (address.kind !== 'coordinator') throw new Error('fanout targeted a session')
@@ -114,7 +111,6 @@ test('keeps every recursive coordinator invocation within the configured fanout 
   }
 
   const outcomes = await runInvocation({
-    operation: 'deliver',
     routes,
     payload: new Uint8Array([1]),
     seq: 1,

@@ -433,7 +433,6 @@ describe('cloudflare adapter entrypoint', () => {
       telefuncBroadcastForward(request: BroadcastForwardRequest): unknown
       telefuncBroadcastDeliver(request: BroadcastDeliverRequest): void
       telefuncBroadcastPresence(request: BroadcastPresenceRequest): void
-      telefuncRoomInvalidate(request: unknown): void
       telefuncRoomDeliver(request: unknown): void
     }
 
@@ -503,16 +502,9 @@ describe('cloudflare adapter entrypoint', () => {
     }
     instance.telefuncBroadcastPresence(presence)
     expect(mocks.authorityInstances[0]?.setPresence).toHaveBeenCalledWith(presence)
-    const invalidation = {
-      roomId: 'room',
-      inc: 'inc',
-      laneKey: 'lane',
-      sessionDoId: 'id',
-      leaseId: 'lease',
-    }
-    instance.telefuncRoomInvalidate(invalidation)
     // A route whose lease this session no longer holds, as after a restart.
-    const staleDelivery = { ...invalidation, payload: new ArrayBuffer(0), seq: 1, timestamp: 0 }
+    const route = { roomId: 'room', inc: 'inc', laneKey: 'lane', sessionDoId: 'id', leaseId: 'lease' }
+    const staleDelivery = { ...route, payload: new ArrayBuffer(0), seq: 1, timestamp: 0 }
     expect(instance.telefuncRoomDeliver(staleDelivery)).toBeUndefined()
   })
 })

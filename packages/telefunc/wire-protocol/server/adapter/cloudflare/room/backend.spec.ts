@@ -84,7 +84,7 @@ test('a session delivers a frame for the lease its subscription holds, and drops
 function openAttempt(authority: Record<string, (...args: never[]) => Promise<unknown>>, received: number[] = []) {
   const route = {
     registerRoute: async () => ({ ok: true }),
-    renewRoute: async () => ({ ok: true }),
+    renewRoute: async () => true,
     unsubscribeRoute: async () => {},
     ...authority,
   }
@@ -118,9 +118,8 @@ test.each([
 })
 
 test.each([
-  ['stays ready and renews again while its route is live', async () => ({ ok: true }), 'ready', 0],
-  ['ends and releases its route once the generation is gone', async () => ({ ok: false, terminal: true }), 'closed', 1],
-  ['ends when its route lapsed, with nothing left to release', async () => ({ ok: false }), 'closed', 0],
+  ['stays ready and renews again while its route is live', async () => true, 'ready', 0],
+  ['ends when its route lapsed or its generation was dropped', async () => false, 'closed', 0],
   [
     'ends when the authority is unreachable',
     async () => {
@@ -145,18 +144,25 @@ test.each([
   }
 })
 
-test('an invalidated attempt drops later deliveries, and its route is released once', async () => {
-  let released = 0
-  const received: number[] = []
-  const attempt = openAttempt({ unsubscribeRoute: async () => void released++ }, received)
-  await vi.waitFor(() => expect(attempt.state()).toBe('ready'))
-  attempt.invalidate()
-  attempt.invalidate()
-  await attempt.deliver(new Uint8Array([1]), 1, 1)
-  expect(received).toEqual([])
-  attempt.terminate()
-  await attempt.unsubscribe()
-  expect(released).toBe(1)
+test('an ended attempt drops later deliveries, and its route is released once', async () => {
+  vi.useFakeTimers()
+  try {
+    let released = 0
+    const received: number[] = []
+    const attempt = openAttempt(
+      { renewRoute: async () => false, unsubscribeRoute: async () => void released++ },
+      received,
+    )
+    await vi.advanceTimersByTimeAsync(ROUTE_RENEW_EVERY_MS)
+    expect(attempt.state()).toBe('closed')
+    attempt.deliver(new Uint8Array([1]), 1, 1)
+    expect(received).toEqual([])
+    await attempt.unsubscribe()
+    await attempt.unsubscribe()
+    expect(released).toBe(1)
+  } finally {
+    vi.useRealTimers()
+  }
 })
 
 test('an attempt that ended while a renewal was in flight renews no more', async () => {
@@ -164,10 +170,10 @@ test('an attempt that ended while a renewal was in flight renews no more', async
   try {
     const renewals: Array<() => void> = []
     const attempt = openAttempt({
-      renewRoute: () => new Promise((resolve) => renewals.push(() => resolve({ ok: true }))),
+      renewRoute: () => new Promise((resolve) => renewals.push(() => resolve(true))),
     })
     await vi.advanceTimersByTimeAsync(ROUTE_RENEW_EVERY_MS)
-    attempt.invalidate()
+    void attempt.unsubscribe()
     renewals[0]!()
     await vi.advanceTimersByTimeAsync(ROUTE_RENEW_EVERY_MS)
     expect(attempt.state()).toBe('closed')

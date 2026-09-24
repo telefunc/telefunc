@@ -3,7 +3,7 @@
 
 import type { RouteInstallation } from './routes.js'
 import { getDeterministicKeyBucketIndex } from '../routing.js'
-import type { RoomSessionDeliveryRequest, RoomSessionInvalidationRequest } from './backend.js'
+import type { RoomSessionDeliveryRequest } from './backend.js'
 
 type DeliveryInfo = { inc: string; laneKey: string; seq: number; timestamp: number }
 type DeliverFn = (routes: RouteInstallation[], payload: Uint8Array, info: DeliveryInfo) => Promise<void>
@@ -13,16 +13,18 @@ const ROOM_FANOUT_COORDINATOR_POOL_SIZE = 256
 
 // The recursive tree keeps four invariants: <=64 outgoing calls per node; depth-specific coordinators
 // cannot self-RPC; leaf outcomes stay ordered; coordinator failure expands to every descendant.
-export type RoomFanoutRequest = { routes: RouteInstallation[]; path: string } & (
-  | { operation: 'deliver'; payload: Uint8Array; seq: number; timestamp: number }
-  | { operation: 'invalidate'; terminal?: true }
-)
+export type RoomFanoutRequest = {
+  routes: RouteInstallation[]
+  path: string
+  payload: Uint8Array
+  seq: number
+  timestamp: number
+}
 
 export type RoomFanoutOutcome = { route: RouteInstallation; error?: string }
 
 type RoomFanoutStub = {
   telefuncRoomDeliver(request: RoomSessionDeliveryRequest): Promise<void>
-  telefuncRoomInvalidate(request: RoomSessionInvalidationRequest): Promise<void>
   telefuncRoomFanout(request: RoomFanoutRequest): Promise<RoomFanoutOutcome[]>
 }
 
@@ -83,12 +85,8 @@ export async function dispatchRoomFanout(
       request.routes.map(async (route): Promise<RoomFanoutOutcome> => {
         try {
           const stub = namespace.get(namespace.idFromString(route.sessionDoId))
-          if (request.operation === 'deliver') {
-            const { payload, seq, timestamp } = request
-            await stub.telefuncRoomDeliver({ ...route, payload, seq, timestamp })
-          } else {
-            await stub.telefuncRoomInvalidate({ ...route, ...(request.terminal ? { terminal: true as const } : {}) })
-          }
+          const { payload, seq, timestamp } = request
+          await stub.telefuncRoomDeliver({ ...route, payload, seq, timestamp })
           return { route }
         } catch (error) {
           return { route, error: errorMessage(error) }
@@ -109,7 +107,7 @@ async function viaCoordinator(
 ): Promise<RoomFanoutOutcome[]> {
   const first = request.routes[0]!
   const nameIndex = getDeterministicKeyBucketIndex(
-    JSON.stringify([first.roomId, first.inc, first.laneKey, request.operation, request.path]),
+    JSON.stringify([first.roomId, first.inc, first.laneKey, request.path]),
     ROOM_FANOUT_COORDINATOR_POOL_SIZE,
   )
   // Depth-specific pools prevent recursive self-RPC; stateless peers at one depth may share objects.
