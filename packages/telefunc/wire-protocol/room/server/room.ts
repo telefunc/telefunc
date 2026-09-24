@@ -34,6 +34,7 @@ import {
   roomFailureError,
 } from '../errors.js'
 import {
+  assertKnownOptions,
   leaveCauseFromWire,
   mergeAttributes,
   normalizeJoinOptions,
@@ -185,6 +186,7 @@ class ServerRoom extends RoomStateView implements Room {
   }
 
   async getParticipants(options?: { hidden?: boolean }): Promise<RemoteParticipant[]> {
+    assertKnownOptions(options, ['hidden'], 'getParticipants()')
     await this._subs.ensureRoster()
     return options?.hidden ? this._state.listHidden() : this._state.listVisible()
   }
@@ -885,6 +887,7 @@ class ServerLocalParticipant extends ParticipantBase {
     return value !== null && typeof value === 'object' && SERVER_PARTICIPANT_BRAND in value
   }
   async publish(data: unknown, options?: PublishOptions): Promise<ChannelPublishAck> {
+    assertKnownOptions(options, ['coalesce', 'retain'], 'publish()')
     // Server publish has no uplink to coalesce, but retain semantics remain identical.
     this._assertActive()
     return await this._room._publishText(this.id, data, options?.retain)
@@ -914,6 +917,7 @@ class ServerLocalParticipant extends ParticipantBase {
     return this._room._removeDepartedMember(this.id)
   }
   async send(to: string | Sender, data: unknown, options?: { ack?: boolean }): Promise<any> {
+    assertKnownOptions(options, ['ack'], 'send()')
     this._assertActive()
     return await this._room._sendDm(this.id, recipientId(to), data, options?.ack === true)
   }

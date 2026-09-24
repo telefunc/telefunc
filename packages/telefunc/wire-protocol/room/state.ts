@@ -12,7 +12,7 @@ import {
   type TrackWants,
 } from './binary.js'
 import { ROOM_WANTED_TRACKS_MAX } from './constants.js'
-import { ownLeaveCause, ownMetadata, senderOf, stampNewer } from './model.js'
+import { assertKnownOptions, ownLeaveCause, ownMetadata, senderOf, stampNewer } from './model.js'
 import type { AcceptedMeta, MemberSnapshot, MemberWants, RoomDataEnvelope } from './protocol.js'
 import type {
   BinaryFrameInfo,
@@ -616,6 +616,7 @@ function normalizeTrackFilter(opts: { track?: string | null } | undefined): Trac
     opts === undefined || (typeof opts === 'object' && opts !== null && !Array.isArray(opts)),
     'subscribeBinary() options should be an object',
   )
+  assertKnownOptions(opts, ['track'], 'subscribeBinary()')
   const track = opts?.track
   if (track === undefined || track === null) return track
   assertUsage(isNamedTrack(track), 'subscribeBinary() track should be a valid non-empty string')

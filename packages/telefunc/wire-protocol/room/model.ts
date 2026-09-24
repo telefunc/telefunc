@@ -1,4 +1,5 @@
 export {
+  assertKnownOptions,
   isRecord,
   ownMetadata,
   ownLeaveCause,
@@ -78,6 +79,10 @@ function assertParticipantIdentity(identity: unknown, where: string): asserts id
   )
 }
 /** Validates `join(options)` and resolves the participant `meta` + `selfDelivery`. */
+/** An option the call doesn't have, a misspelled one included, would otherwise be ignored silently. */
+function assertKnownOptions(options: object | null | undefined, known: readonly string[], what: string): void {
+  for (const key of Object.keys(options ?? {})) assertUsage(known.includes(key), `Unknown ${what} option: ${key}`)
+}
 function normalizeJoinOptions(options: JoinOptions | undefined): {
   meta: ParticipantMeta
   selfDelivery: boolean
@@ -85,6 +90,7 @@ function normalizeJoinOptions(options: JoinOptions | undefined): {
   hidden: boolean
 } {
   assertUsage(options === undefined || isRecord(options), 'join() options should be an object')
+  assertKnownOptions(options, ['meta', 'selfDelivery', 'identity', 'hidden'], 'join()')
   const meta = options?.meta ?? {}
   assertUsage(isRecord(meta), 'join() options.meta should be an object')
   assertUsage(

@@ -6,7 +6,14 @@ import { isObject } from '../../../utils/isObject.js'
 import { getRoomBackend } from '../../backend/install.js'
 import type { RoomBackend, RoomHead } from '../../backend/room/contract.js'
 import { RoomError, participantGoneError, roomClosedError } from '../errors.js'
-import { assertParticipantIdentity, isRecord, mergeAttributes, ownMetadata, removedCause } from '../model.js'
+import {
+  assertKnownOptions,
+  assertParticipantIdentity,
+  isRecord,
+  mergeAttributes,
+  ownMetadata,
+  removedCause,
+} from '../model.js'
 import type { MemberSnapshot, RoomConfigRecord, RoomCtrlEnvelope, RoomDmEnvelope, RoomEnvelope } from '../protocol.js'
 import type {
   AfterJoinHook,
@@ -175,6 +182,7 @@ async function createRoom(id: string, options?: RoomOptions): Promise<Room> {
 }
 
 async function getRoom(id: string, options?: RoomGetOptions): Promise<Room> {
+  assertKnownOptions(options, ['tail'], 'Room.get()')
   const room = await openRoom(id)
   if (options?.tail === true) await room._startTail()
   return room
@@ -219,6 +227,7 @@ const ROOM_GUARD_KEYS = Object.keys({
 function guardRoom(room: Room, guards: Partial<Record<keyof RoomGuardHooks, unknown>>): void {
   assertUsage(ServerRoom.isServerRoom(room), 'Room.guard() expects a room obtained from Room.get()/Room.create()')
   assertUsage(isObject(guards), 'Room.guard() guards should be an object')
+  assertKnownOptions(guards, ROOM_GUARD_KEYS, 'Room.guard()')
   for (const key of ROOM_GUARD_KEYS) {
     assertUsage(
       guards[key] === undefined || typeof guards[key] === 'function',
@@ -239,6 +248,7 @@ async function listRooms(options?: { prefix?: string }): Promise<RoomInfo[]> {
       (isObject(options) && (options.prefix === undefined || typeof options.prefix === 'string')),
     'Room.list() options.prefix should be a string',
   )
+  assertKnownOptions(options, ['prefix'], 'Room.list()')
   const backend = getRoomBackend()
   const rooms: RoomInfo[] = []
   let cursor: string | undefined
@@ -437,6 +447,7 @@ async function sendServerDm(roomId: string, inc: string, memberId: string, data:
 
 function normalizeOptions(options: RoomOptions | undefined): { meta: RoomMeta } {
   assertUsage(options === undefined || isObject(options), 'Room options should be an object')
+  assertKnownOptions(options, ['meta'], 'Room')
   const meta = options?.meta ?? {}
   assertUsage(isRecord(meta), 'options.meta should be an object')
   return { meta: ownMetadata(meta) }

@@ -8,7 +8,14 @@ import { ClientBroadcast } from '../client/channel.js'
 import type { ClientChannel } from '../client/channel.js'
 import { DM_FAILURE } from './errors.js'
 import { decodeBinaryFrame, emptyBinaryWants, encodeBinaryFrame } from './binary.js'
-import { leaveCauseFromWire, normalizeJoinOptions, ownMetaArgument, ownMetadata, recipientId } from './model.js'
+import {
+  assertKnownOptions,
+  leaveCauseFromWire,
+  normalizeJoinOptions,
+  ownMetaArgument,
+  ownMetadata,
+  recipientId,
+} from './model.js'
 import {
   hasRoomTag,
   inboxMessageFromWire,
@@ -151,6 +158,7 @@ class ClientRoom extends RoomStateView implements Room {
   }
 
   async getParticipants(options?: { hidden?: boolean }): Promise<RemoteParticipant[]> {
+    assertKnownOptions(options, ['hidden'], 'getParticipants()')
     assertUsage(!options?.hidden, 'Hidden participants can only be enumerated on the server')
     await this._awaitRoster()
     return this._state.listVisible()
@@ -355,6 +363,7 @@ abstract class ClientParticipantBase extends ParticipantBase {
   protected abstract _sendPublish(data: unknown, retain?: boolean): Promise<ChannelPublishAck>
 
   publish(data: unknown, options?: PublishOptions): Promise<ChannelPublishAck> {
+    assertKnownOptions(options, ['coalesce', 'retain'], 'publish()')
     const key = options?.coalesce
     if (key === undefined) return this._sendPublish(data, options?.retain)
     return new Promise<ChannelPublishAck>((resolve, reject) => {
@@ -371,6 +380,7 @@ abstract class ClientParticipantBase extends ParticipantBase {
 
   // Implementation of the overloaded `LocalParticipant.send`; the interface supplies precise returns.
   async send(to: string | Sender, data: unknown, options?: { ack?: boolean }): Promise<any> {
+    assertKnownOptions(options, ['ack'], 'send()')
     this._assertActive()
     return await this._requestParticipant({
       __r: 'req-dm',

@@ -21,7 +21,7 @@ import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { assert, assertUsage } from '../../utils/assert.js'
 import { ROOM_WANTED_TRACKS_MAX } from './constants.js'
-import { isRecord } from './model.js'
+import { assertKnownOptions, isRecord } from './model.js'
 import type { BinaryPublishOptions } from './types.js'
 
 // Member IDs — UUIDs, framed as a fixed 16-byte prefix on binary messages
@@ -61,6 +61,7 @@ const META_LENGTH_FIELD_MAX = 0xffff
 const frameTextEncoder = /* @__PURE__ */ new TextEncoder()
 const frameTextDecoder = /* @__PURE__ */ new TextDecoder('utf-8', { fatal: true, ignoreBOM: true })
 function encodeBinaryFrame(memberId: string, payload: Uint8Array, opts?: BinaryPublishOptions): Uint8Array {
+  assertKnownOptions(opts, ['track', 'meta', 'retain'], 'publishBinary()')
   const idBytes = uuidToBytes(memberId)
   assert(idBytes, 'room member IDs are UUIDs')
   let flags = opts?.retain === true ? FRAME_FLAG_RETAIN : 0
