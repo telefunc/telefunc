@@ -482,6 +482,11 @@ async function collect<T>(gen: AsyncGenerator<T>): Promise<T[]> {
   return out
 }
 
+async function teeAndDrop(stream: ReadableStream<Uint8Array<ArrayBuffer>>): Promise<ReadableStream<Uint8Array>> {
+  const { ret } = await roundTrip({ stream })
+  return (ret as { stream: ReadableStream<Uint8Array> }).stream.tee()[0]
+}
+
 describe('reference identity — full pipeline', () => {
   test('duplicated async generator: one producer, one client object, chunks delivered once', async () => {
     const gen = (async function* () {
@@ -568,6 +573,18 @@ describe('reference identity — full pipeline', () => {
 
     abortController.abort()
     expect(counters.clientAbort).toBe(1)
+  })
+
+  test('a tee() branch keeps a returned stream open after the stream itself is dropped', async () => {
+    let controller!: ReadableStreamDefaultController<Uint8Array<ArrayBuffer>>
+    const branch = await teeAndDrop(new ReadableStream({ start: (c) => void (controller = c) }))
+    for (let cycle = 0; cycle < 8; cycle++) {
+      ;(globalThis as { gc(): void }).gc()
+      await new Promise((resolve) => setTimeout(resolve, 20))
+    }
+    controller.enqueue(new TextEncoder().encode('tail'))
+    controller.close()
+    expect(await new Response(branch).text()).toBe('tail')
   })
 })
 
