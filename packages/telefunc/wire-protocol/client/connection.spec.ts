@@ -4,6 +4,7 @@ import { CHANNEL_RECONNECT_INITIAL_DELAY_MS, CHANNEL_TRANSPORT, RECONCILE_TIMEOU
 import { ClientConnection } from './connection.js'
 import { ClientBroadcast } from './channel.js'
 import { ACK_STATUS, type AckResultStatus } from '../shared-ws.js'
+import { ChannelOverflowError } from '../channel-errors.js'
 import { config, getServerConfig } from '../../node/server/serverConfig.js'
 
 afterEach(() => vi.restoreAllMocks())
@@ -75,6 +76,12 @@ describe.each([
   test('keeps an expected Abort quiet', async () => {
     const report = vi.spyOn(console, 'error').mockImplementation(() => {})
     await expect(publishThatSettlesWith(ACK_STATUS.ABORT, binary)).rejects.toMatchObject({ abortValue: 'expected' })
+    expect(report).not.toHaveBeenCalled()
+  })
+
+  test('keeps a refused publish quiet, as a ChannelOverflowError', async () => {
+    const report = vi.spyOn(console, 'error').mockImplementation(() => {})
+    await expect(publishThatSettlesWith(ACK_STATUS.OVERFLOW, binary)).rejects.toBeInstanceOf(ChannelOverflowError)
     expect(report).not.toHaveBeenCalled()
   })
 

@@ -39,7 +39,7 @@ import { appendSessionParam, getSessionToken } from './session-registry.js'
 import { CHANNEL_CLOSE_TIMEOUT_MS, type ChannelTransports } from '../constants.js'
 import { FlowControl } from '../flow-control/flow-control.js'
 import type { MuxChannel, MuxConnection } from './connection.js'
-import { ChannelClosedError, isExpectedChannelFailure } from '../channel-errors.js'
+import { ChannelClosedError, ChannelOverflowError, isExpectedChannelFailure } from '../channel-errors.js'
 import { isPromise } from '../../utils/isPromise.js'
 import { hasProp } from '../../utils/hasProp.js'
 import { classifyTelefuncError } from '../error-classification.js'
@@ -418,6 +418,9 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
         return
       case ACK_STATUS.SHIELD_ERROR:
         pending.reject(new ShieldValidationError(text))
+        return
+      case ACK_STATUS.OVERFLOW:
+        pending.reject(new ChannelOverflowError(text))
     }
   }
 

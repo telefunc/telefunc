@@ -21,7 +21,7 @@ import { stringify } from '@brillout/json-serializer/stringify'
 import { parse } from '@brillout/json-serializer/parse'
 import { assert, assertUsage } from '../../utils/assert.js'
 import { isPromise } from '../../utils/isPromise.js'
-import { ChannelClosedError, isExpectedChannelFailure } from '../channel-errors.js'
+import { ChannelClosedError, ChannelOverflowError, isExpectedChannelFailure } from '../channel-errors.js'
 import { ACK_STATUS, encodePublishText, encodePublishBinary } from '../shared-ws.js'
 import type { BroadcastKind, WirePublishInfo } from '../shared-ws.js'
 import { STATUS_BODY_INTERNAL_SERVER_ERROR } from '../../shared/constants.js'
@@ -231,8 +231,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
       const result = await this._publish('text', textEncoder.encode(serialized))
       this._sendAckRes(seq, stringify(result))
     } catch (err) {
-      if (this._handleCallbackError(err)) return
-      this._sendAckRes(seq, `${STATUS_BODY_INTERNAL_SERVER_ERROR} — see server logs`, ACK_STATUS.ERROR)
+      this._sendPublishFailure(seq, err)
     }
   }
 
@@ -242,9 +241,15 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
       const result = await this._publish('binary', data)
       this._sendAckRes(seq, stringify(result))
     } catch (err) {
-      if (this._handleCallbackError(err)) return
-      this._sendAckRes(seq, `${STATUS_BODY_INTERNAL_SERVER_ERROR} — see server logs`, ACK_STATUS.ERROR)
+      this._sendPublishFailure(seq, err)
     }
+  }
+
+  /** A full buffer refusing the publish is no bug: the client's publish() rejects with a ChannelOverflowError. */
+  private _sendPublishFailure(seq: number, err: unknown): void {
+    if (err instanceof ChannelOverflowError) return this._sendAckRes(seq, err.message, ACK_STATUS.OVERFLOW)
+    if (this._handleCallbackError(err)) return
+    this._sendAckRes(seq, `${STATUS_BODY_INTERNAL_SERVER_ERROR} — see server logs`, ACK_STATUS.ERROR)
   }
 }
 

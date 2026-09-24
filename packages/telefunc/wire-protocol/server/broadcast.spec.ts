@@ -500,6 +500,23 @@ describe('Broadcast lifecycle and route ownership', () => {
   })
 })
 
+describe('Broadcast client publish refused by a full buffer', () => {
+  it('acks OVERFLOW without reporting a bug', async () => {
+    const { controlled } = await installPendingSubscriptionBackend({ seq: 1, timestamp: 1 })
+    const report = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const broadcast = registeredBroadcast('broadcast:refused')
+    const frames: Uint8Array[] = []
+    broadcast._attachPeer(peer((frame) => frames.push(frame)))
+    broadcast.subscribe(() => {})
+    await broadcast._onPeerPublishAckReqMessage(JSON.stringify('x'.repeat(600 * 1024)), 1)
+    const ack = frames.map((f) => decode(f as Uint8Array<ArrayBuffer>)).find((d) => d.tag === TAG.ACK_RES)
+    if (ack?.tag !== TAG.ACK_RES) throw new Error('Expected ACK_RES')
+    expect(ack.status).toBe(ACK_STATUS.OVERFLOW)
+    expect(report).not.toHaveBeenCalled()
+    controlled.ready()
+  })
+})
+
 describe('Broadcast shield validation', () => {
   it('rejects client publishes that fail the data shield with a SHIELD_ERROR ack', () => {
     const broadcast = registeredBroadcast<{ text: string }>('room:shield')
