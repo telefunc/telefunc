@@ -24,7 +24,8 @@ import { encodeLaneKey } from '../../../../backend/room/lane-key.js'
 import { CloudflareRoomSubscriptionAttempt } from './subscription.js'
 import type { RoomAuthority } from './do.js'
 import type { RouteInstallation } from './routes.js'
-import { materializeCloudflareSession } from '../session.js'
+import { currentCloudflareSession, materializeCloudflareSession } from '../session.js'
+import { OrderedStubs } from '../ordered-stubs.js'
 
 // Room authorities share the Telefunc namespace with sessions and Broadcast, so a room id is always prefixed.
 const ROOM_AUTHORITY_PREFIX = '__telefunc_room__:'
@@ -49,6 +50,8 @@ const entryKey = (route: Pick<RouteInstallation, 'roomId' | 'inc' | 'laneKey'>) 
   JSON.stringify([route.roomId, route.inc, route.laneKey])
 
 export class CloudflareRoomSessionManager {
+  /** The session's calls to room authorities: a room's commits reach its authority in the order they were sent. */
+  readonly authorityCalls = new OrderedStubs<CloudflareRoomAuthorityStub>()
   readonly #id: string
   readonly #subscriptionPartition = crypto.randomUUID()
   readonly #entries = new Map<string, CloudflareRoomSubscriptionAttempt>()
@@ -143,10 +146,14 @@ export class CloudflareRoomBackend implements BroadcastDriver, RoomDriver {
     payload: Uint8Array,
     opts?: CommitOptions,
   ): Promise<CommitResult> {
-    const stub = this.#stub(roomId)
-    const wire = await stub.commitLane(inc, lane, payload, opts)
+    const commit = (stub: CloudflareRoomAuthorityStub) => stub.commitLane(inc, lane, payload, opts)
+    // From a session DO, through its ordered stub, so its commits to a room keep the order Room sent them in.
+    const session = currentCloudflareSession()
+    const wire = await (session
+      ? session.room().authorityCalls.call(roomId, () => this.#stub(roomId), commit)
+      : commit(this.#stub(roomId)))
     if ('stale' in wire) return wire
-    const delivery = stub.awaitDelivery(wire.deliveryToken)
+    const delivery = this.#stub(roomId).awaitDelivery(wire.deliveryToken)
     return { accepted: true, seq: wire.seq, timestamp: wire.timestamp, receivers: wire.receivers, delivery }
   }
 

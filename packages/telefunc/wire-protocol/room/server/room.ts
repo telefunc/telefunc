@@ -316,7 +316,7 @@ class ServerRoom extends RoomStateView implements Room {
   }
 
   async _publishText(from: string, data: unknown, retain = false): Promise<ChannelPublishAck> {
-    const { sender, commit } = await this._inCallOrder(from, async (committed) => {
+    const { sender, commit } = await this._inCallOrder(from, async (sent) => {
       const sender = await this._admitPublish(from, data)
       const envelope: RoomDataEnvelope = {
         __r: 'data',
@@ -327,7 +327,9 @@ class ServerRoom extends RoomStateView implements Room {
       }
       const record = encodeRoomRecord(envelope)
       const opts = { retain, requiredCellKeys: [memberCellKey(from)] }
-      return { sender, commit: await commitRoomLaneOrThrow(this.id, this._inc, SEMANTIC_LANE, record, opts, committed) }
+      const committing = commitRoomLaneOrThrow(this.id, this._inc, SEMANTIC_LANE, record, opts)
+      sent()
+      return { sender, commit: await committing }
     })
     return this._finishPublish(sender, data, commit)
   }
@@ -336,18 +338,21 @@ class ServerRoom extends RoomStateView implements Room {
   async _publishBinaryFrame(frame: BinaryFrame, framed: Uint8Array): Promise<ChannelPublishAck> {
     const { from } = frame
     const lane = { kind: 'binary', member: from, track: laneTrack(frame.track) } as const
-    const { sender, commit } = await this._inCallOrder(binaryLaneKey(from, lane.track), async (committed) => {
+    const { sender, commit } = await this._inCallOrder(binaryLaneKey(from, lane.track), async (sent) => {
       const sender = await this._admitPublish(from, frame.payload)
       if (frame.track !== null) await this._ensureTrackAnnounced(from, frame.track)
       const opts = { retain: frame.retain, requiredCellKeys: [memberCellKey(from)] }
-      return { sender, commit: await commitRoomLaneOrThrow(this.id, this._inc, lane, framed, opts, committed) }
+      const committing = commitRoomLaneOrThrow(this.id, this._inc, lane, framed, opts)
+      sent()
+      return { sender, commit: await committing }
     })
     return await this._finishPublish(sender, frame.payload, commit)
   }
 
-  /** A member's publishes on one lane commit in call order: each starts once the one before it committed or failed,
-   *  never waiting on its delivery. */
-  private async _inCallOrder<T>(key: string, publish: (committed: () => void) => Promise<T>): Promise<T> {
+  /** A member's publishes on one lane leave in call order: each starts once the one before it was sent to the backend
+   *  (its guard ran and its commit went out) or failed, never waiting on that commit's answer, which the backend
+   *  keeps in sending order. */
+  private async _inCallOrder<T>(key: string, publish: (sent: () => void) => Promise<T>): Promise<T> {
     const previous = this._publishTurns.get(key)
     const turn = createDeferred()
     this._publishTurns.set(key, turn.promise)

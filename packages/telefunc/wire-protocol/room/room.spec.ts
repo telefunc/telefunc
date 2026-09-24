@@ -1907,6 +1907,23 @@ describe('Room public behavior', () => {
     await Promise.all(published)
     await vi.waitFor(() => expect({ texts, frames }).toEqual({ texts: ['first', 'second'], frames: [1, 2] }))
   })
+  it("sends a participant's next publish before the backend has answered the one before it", async () => {
+    const room = await Room.create('publish-pipeline')
+    const me = await room.join()
+    const commitLane = driver.commitLane.bind(driver)
+    const firstAnswer = deferred<void>()
+    let sent = 0
+    vi.spyOn(driver, 'commitLane').mockImplementation(async (...args) => {
+      const first = args[2].kind === 'semantic' && ++sent === 1
+      const result = await commitLane(...args)
+      if (first) await firstAnswer.promise
+      return result
+    })
+    const published = [me.publish('first'), me.publish('second')]
+    await vi.waitFor(() => expect(sent).toBe(2))
+    firstAnswer.resolve()
+    await Promise.all(published)
+  })
   it('onDemand reports named-track demand turning on and off', async () => {
     const room = await Room.create('demand')
     const camera = await room.join()
