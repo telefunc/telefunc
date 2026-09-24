@@ -1,8 +1,15 @@
 /// <reference types="@cloudflare/workers-types" />
 export { CloudflareBroadcastTransport, CloudflareBroadcastAuthorityState }
-export type { BroadcastDeliverRequest, BroadcastForwardRequest, BroadcastPublishRequest, TelefuncDurableObjectStub }
+export type {
+  BroadcastCalls,
+  BroadcastDeliverRequest,
+  BroadcastForwardRequest,
+  BroadcastPublishRequest,
+  TelefuncDurableObjectStub,
+}
 
 import { KNOWN_BROADCAST_BUCKETS, getBucketCoordinatorShardIndices, getDeterministicKeyBucketIndex } from './routing.js'
+import type { OrderedStubs } from './ordered-stubs.js'
 import { assert } from '../../../../utils/assert.js'
 import type { BroadcastLane, PublishResult } from '../../../backend/broadcast/contract.js'
 import { broadcastRouteKey } from '../../../backend/broadcast/route-key.js'
@@ -56,6 +63,9 @@ type TelefuncDurableObjectStub = DurableObjectStub & {
   telefuncBroadcastForward(request: BroadcastForwardRequest): Promise<void>
   telefuncBroadcastDeliver(request: BroadcastDeliverRequest): Promise<void>
 }
+
+/** One DO's outgoing Broadcast calls. */
+type BroadcastCalls = OrderedStubs<TelefuncDurableObjectStub>
 
 /** One lane's KV presence for this isolate's representative DO. */
 class MemberBucketState {
@@ -316,40 +326,42 @@ class CloudflareBroadcastTransport {
     )
   }
 
-  /** At the key's authority: sequences the publish, reads KV presence and forwards once per populated bucket. */
+  /** At the key's authority: sequences the publish, reads KV presence and forwards once per populated bucket. Each
+   *  forward is sent inside the sequencing turn, through this DO's ordered stubs, so coordinators receive `seq` order. */
   async publishToSubscribers(
     authorityState: CloudflareBroadcastAuthorityState,
+    calls: BroadcastCalls,
     request: BroadcastPublishRequest,
   ): Promise<PublishResult> {
     const { key, kind, locationBucket, payload } = request
-    const { authorityBucket, seq, presenceByBucket } = await authorityState.runInAuthorityChain(async () => ({
-      authorityBucket: await authorityState.getOrInitAuthorityBucket(key, locationBucket),
-      seq: await authorityState.getNextKeySeq(key),
-      presenceByBucket: await this.listPresenceByBucket(broadcastRouteKey({ key, kind })),
-    }))
-
-    const info = { seq, timestamp: Date.now() }
-    const fanoutBuckets = Array.from(presenceByBucket.keys())
-    let receivers = 0
-    for (const doNames of presenceByBucket.values()) receivers += doNames.length
-    await Promise.all(
-      fanoutBuckets.map((activeBucket) =>
-        this.getBucketCoordinatorStub(key, activeBucket).telefuncBroadcastForward({
-          key,
-          kind,
-          payload,
-          info,
-          doNames: presenceByBucket.get(activeBucket)!,
-        }),
-      ),
-    )
-    return { seq: info.seq, timestamp: info.timestamp, receivers, meta: { authorityBucket, fanoutBuckets } }
+    const { receipt, forwarded } = await authorityState.runInAuthorityChain(async () => {
+      const authorityBucket = await authorityState.getOrInitAuthorityBucket(key, locationBucket)
+      const info = { seq: await authorityState.getNextKeySeq(key), timestamp: Date.now() }
+      const presenceByBucket = await this.listPresenceByBucket(broadcastRouteKey({ key, kind }))
+      const fanoutBuckets = Array.from(presenceByBucket.keys())
+      let receivers = 0
+      for (const doNames of presenceByBucket.values()) receivers += doNames.length
+      const forwarded = Promise.all(
+        fanoutBuckets.map((bucket) =>
+          this.call(calls, this.getBucketCoordinatorName(key, bucket), bucket, (coordinator) =>
+            coordinator.telefuncBroadcastForward({ key, kind, payload, info, doNames: presenceByBucket.get(bucket)! }),
+          ),
+        ),
+      )
+      return { receipt: { ...info, receivers, meta: { authorityBucket, fanoutBuckets } }, forwarded }
+    })
+    await forwarded
+    return receipt
   }
 
-  /** At a bucket coordinator: delivers the authority's sequenced publish to the named member DOs. */
-  async forwardToBucket(request: BroadcastForwardRequest): Promise<void> {
+  /** At a bucket coordinator: delivers the authority's sequenced publish to the named member DOs, in arrival order. */
+  async forwardToBucket(calls: BroadcastCalls, request: BroadcastForwardRequest): Promise<void> {
     const { doNames, ...delivery } = request
-    await Promise.all(doNames.map((doName) => this.getBoundStub(doName).telefuncBroadcastDeliver(delivery)))
+    await Promise.all(
+      doNames.map((doName) =>
+        this.call(calls, doName, undefined, (member) => member.telefuncBroadcastDeliver(delivery)),
+      ),
+    )
   }
 
   /** Delivers a publish to this isolate's subscription. Called via RPC on its representative DO. */
@@ -425,13 +437,20 @@ class CloudflareBroadcastTransport {
     await this.deletePresence(routeKey)
   }
 
-  private getBucketCoordinatorStub(key: string, locationBucket: LocationBucket): TelefuncDurableObjectStub {
+  /** A call from the DO owning `calls`, through its stub for `instanceName`. */
+  private call<T>(
+    calls: BroadcastCalls,
+    instanceName: string,
+    locationHint: DurableObjectLocationHint | undefined,
+    invoke: (stub: TelefuncDurableObjectStub) => Promise<T>,
+  ): Promise<T> {
+    return calls.call(instanceName, () => this.getBoundStub(instanceName, locationHint), invoke)
+  }
+
+  private getBucketCoordinatorName(key: string, locationBucket: LocationBucket): string {
     const bucketShardCount = getBucketCoordinatorShardIndices(this.scale, locationBucket).length
     const bucketShardOrdinal = getDeterministicKeyBucketIndex(key, bucketShardCount)
-    return this.getBoundStub(
-      `${this.baseInstanceName}:broadcast:${locationBucket}:${bucketShardOrdinal}`,
-      locationBucket,
-    )
+    return `${this.baseInstanceName}:broadcast:${locationBucket}:${bucketShardOrdinal}`
   }
 
   private getAuthorityStub(key: string, locationHint?: DurableObjectLocationHint): TelefuncDurableObjectStub {

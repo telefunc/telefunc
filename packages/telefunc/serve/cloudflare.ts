@@ -14,10 +14,12 @@ import {
   CloudflareBroadcastTransport,
 } from '../wire-protocol/server/adapter/cloudflare/broadcast.js'
 import type {
+  BroadcastCalls,
   BroadcastDeliverRequest,
   BroadcastForwardRequest,
   BroadcastPublishRequest,
 } from '../wire-protocol/server/adapter/cloudflare/broadcast.js'
+import { OrderedStubs } from '../wire-protocol/server/adapter/cloudflare/ordered-stubs.js'
 import {
   TELEFUNC_BROADCAST_BUCKET_HEADER,
   TELEFUNC_SESSION_HEADER,
@@ -133,6 +135,7 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
 
   const TelefuncDurableObject = class extends DurableObject {
     private readonly authorityState: CloudflareBroadcastAuthorityState
+    private readonly broadcastCalls: BroadcastCalls = new OrderedStubs()
     private roomManager: CloudflareRoomSessionManager | null = null
 
     constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
@@ -173,11 +176,11 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
     }
 
     telefuncBroadcastPublish(request: BroadcastPublishRequest) {
-      return broadcast.publishToSubscribers(this.authorityState, request)
+      return broadcast.publishToSubscribers(this.authorityState, this.broadcastCalls, request)
     }
 
     telefuncBroadcastForward(request: BroadcastForwardRequest) {
-      return broadcast.forwardToBucket(request)
+      return broadcast.forwardToBucket(this.broadcastCalls, request)
     }
 
     telefuncBroadcastDeliver(request: BroadcastDeliverRequest) {

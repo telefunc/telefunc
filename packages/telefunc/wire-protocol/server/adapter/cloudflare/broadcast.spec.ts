@@ -10,6 +10,8 @@ import {
 } from './routing.js'
 import '../../../../node/server/async_hooks.js'
 import { CloudflareBroadcastAuthorityState, CloudflareBroadcastTransport } from './broadcast.js'
+import type { BroadcastCalls } from './broadcast.js'
+import { OrderedStubs } from './ordered-stubs.js'
 import { CLOUDFLARE_COLO_LOCATION_HINT_MAP } from './coloLocationHintMap.js'
 import { ServerBroadcast } from '../../server-broadcast.js'
 import { disposeBackend, installBackend } from '../../../backend/install.js'
@@ -165,6 +167,32 @@ function createBasicBinding(
           return overrides?.onDeliver?.(id, request) ?? Promise.resolve()
         },
       }
+    },
+  } as unknown as DurableObjectNamespace
+}
+
+/** Stubs that deliver like Cloudflare's: calls through one stub arrive in call order, after that stub's latency;
+ *  calls through different stubs race. The n-th stub to carry a call gets `latencies[n]` (default 0). */
+function createRacingBinding(
+  latencies: number[],
+  handlers: { onForward: (request: any) => Promise<void>; onDeliver: (request: any) => Promise<void> },
+) {
+  let used = 0
+  return {
+    idFromName(name: string) {
+      return { name, toString: () => name }
+    },
+    get() {
+      let latency: number | undefined
+      let arrival = Promise.resolve()
+      const send =
+        (handler: (request: any) => Promise<void>) =>
+        (request: any): Promise<void> => {
+          const delay = (latency ??= latencies[used++] ?? 0)
+          arrival = arrival.then(() => new Promise((resolve) => setTimeout(resolve, delay)))
+          return arrival.then(() => handler(request))
+        }
+      return { telefuncBroadcastForward: send(handlers.onForward), telefuncBroadcastDeliver: send(handlers.onDeliver) }
     },
   } as unknown as DurableObjectNamespace
 }
@@ -333,8 +361,9 @@ describe('cloudflare broadcast routing', () => {
     const transport = new CloudflareBroadcastTransport({ baseInstanceName: 'telefunc', scale: 1 })
     const kv = createMockKV()
     const authority = createAuthorityState()
+    const calls: BroadcastCalls = new OrderedStubs()
     const binding = createBasicBinding({
-      onPublish: (_, request) => transport.publishToSubscribers(authority, request),
+      onPublish: (_, request) => transport.publishToSubscribers(authority, calls, request),
     })
     configureTransport(transport, kv, binding)
     const subscription = transport.openSubscription({ key: 'room:test', kind: 'text' }, () => {})
@@ -349,6 +378,7 @@ describe('cloudflare broadcast routing', () => {
 
   it('keeps the first-touch authority bucket in publish receipts', async () => {
     const authorityState = createAuthorityState()
+    const calls: BroadcastCalls = new OrderedStubs()
     const kv = createMockKV()
     const transport = createTransport(kv, false)
     await authorityState.getOrInitAuthorityBucket('room:first-touch', 'weur')
@@ -358,7 +388,7 @@ describe('cloudflare broadcast routing', () => {
     await kv.put('tfps:text:room%3Afirst-touch:apac:telefunc-shard-apac-0', 'telefunc-shard-apac-0', {
       expirationTtl: 90,
     })
-    const receipt = await transport.publishToSubscribers(authorityState, {
+    const receipt = await transport.publishToSubscribers(authorityState, calls, {
       key: 'room:first-touch',
       kind: 'text',
       locationBucket: 'apac',
@@ -409,6 +439,9 @@ describe('cloudflare broadcast routing', () => {
 
   it('does not deliver locally before ordered publish setup completes', async () => {
     const transport = new CloudflareBroadcastTransport({ baseInstanceName: 'telefunc', scale: 1 })
+    const authority = createAuthorityState()
+    const calls: BroadcastCalls = new OrderedStubs()
+    const coordinatorCalls: BroadcastCalls = new OrderedStubs()
     const kvPutReady = Promise.withResolvers<void>()
     const kv = createMockKV({ beforePut: () => kvPutReady.promise })
     const received: string[] = []
@@ -417,10 +450,10 @@ describe('cloudflare broadcast routing', () => {
       kv,
       createBasicBinding({
         onPublish(_id, request) {
-          return transport.publishToSubscribers(createAuthorityState(), request)
+          return transport.publishToSubscribers(authority, calls, request)
         },
         onForward(_id, request) {
-          return transport.forwardToBucket(request)
+          return transport.forwardToBucket(coordinatorCalls, request)
         },
         onDeliver(_id, request) {
           return transport.deliverToLocal(request)
@@ -443,6 +476,9 @@ describe('cloudflare broadcast routing', () => {
 
   it('resolves publish ack with authority metadata after cold-path setup completes', async () => {
     const transport = new CloudflareBroadcastTransport({ baseInstanceName: 'telefunc', scale: 1 })
+    const authority = createAuthorityState()
+    const calls: BroadcastCalls = new OrderedStubs()
+    const coordinatorCalls: BroadcastCalls = new OrderedStubs()
     const kvPutReady = Promise.withResolvers<void>()
     const kv = createMockKV({ beforePut: () => kvPutReady.promise })
     configureTransport(
@@ -450,10 +486,10 @@ describe('cloudflare broadcast routing', () => {
       kv,
       createBasicBinding({
         onPublish(_id, request) {
-          return transport.publishToSubscribers(createAuthorityState(), request)
+          return transport.publishToSubscribers(authority, calls, request)
         },
         onForward(_id, request) {
-          return transport.forwardToBucket(request)
+          return transport.forwardToBucket(coordinatorCalls, request)
         },
         onDeliver(_id, request) {
           return transport.deliverToLocal(request)
@@ -481,6 +517,7 @@ describe('cloudflare broadcast routing', () => {
 
   it('authority forwards once to each populated bucket coordinator', async () => {
     const authorityState = createAuthorityState()
+    const calls: BroadcastCalls = new OrderedStubs()
     const kv = createMockKV()
     const coordinators: string[] = []
     const transport = new CloudflareBroadcastTransport({ baseInstanceName: 'telefunc', scale: 1 })
@@ -504,7 +541,7 @@ describe('cloudflare broadcast routing', () => {
     await kv.put('tfps:text:room%3Atest:eeur:telefunc-shard-eeur-0', 'telefunc-shard-eeur-0', {
       expirationTtl: 90,
     })
-    await transport.publishToSubscribers(authorityState, {
+    await transport.publishToSubscribers(authorityState, calls, {
       key: 'room:test',
       kind: 'text',
       locationBucket: 'weur',
@@ -536,7 +573,7 @@ describe('cloudflare broadcast routing', () => {
       received.push({ text: decode(payload), ...info })
     })
     await untilReady(subscription)
-    await transport.forwardToBucket({
+    await transport.forwardToBucket(new OrderedStubs(), {
       key: 'room:test',
       kind: 'text',
       payload: encode('{"text":"hello"}'),
@@ -548,6 +585,31 @@ describe('cloudflare broadcast routing', () => {
       { text: '{"text":"hello"}', seq: 0x1_0000_0000, timestamp: 0x1_0000_0001 },
       { text: '{"text":"hello"}', seq: 0x1_0000_0000, timestamp: 0x1_0000_0001 },
     ])
+    await subscription.unsubscribe()
+  })
+
+  it('delivers a key’s publishes to each member in seq order while calls through different stubs race', async () => {
+    const transport = new CloudflareBroadcastTransport({ baseInstanceName: 'telefunc', scale: 1 })
+    const authority = createAuthorityState()
+    const calls: BroadcastCalls = new OrderedStubs()
+    const coordinatorCalls: BroadcastCalls = new OrderedStubs()
+    // The first stub opened is the slowest, so a publish sent through a fresh stub overtakes the one before it.
+    configureTransport(
+      transport,
+      createMockKV(),
+      createRacingBinding([20], {
+        onForward: (request) => transport.forwardToBucket(coordinatorCalls, request),
+        onDeliver: (request) => transport.deliverToLocal(request),
+      }),
+    )
+    const received: number[] = []
+    const lane = { key: 'room:order', kind: 'text' } as const
+    const subscription = transport.openSubscription(lane, (_payload, info) => void received.push(info.seq))
+    await untilReady(subscription)
+    const publish = () =>
+      transport.publishToSubscribers(authority, calls, { ...lane, locationBucket: 'weur', payload: encode('"x"') })
+    await Promise.all([publish(), publish(), publish()])
+    expect(received).toEqual([1, 2, 3])
     await subscription.unsubscribe()
   })
 
@@ -591,6 +653,7 @@ describe('cloudflare broadcast routing', () => {
   it('serializes authority dispatch without blocking later publishes on remote delivery completion', async () => {
     const transport = new CloudflareBroadcastTransport({ baseInstanceName: 'telefunc', scale: 1 })
     const authorityState = createAuthorityState()
+    const calls: BroadcastCalls = new OrderedStubs()
     const kv = createMockKV()
     const coordinatorPublishes: string[] = []
     let releaseFirstRemotePublish: (() => void) | null = null
@@ -631,14 +694,14 @@ describe('cloudflare broadcast routing', () => {
     await kv.put('tfps:text:room%3Atest:apac:telefunc-shard-apac-0', 'telefunc-shard-apac-0', {
       expirationTtl: 90,
     })
-    const firstPublish = transport.publishToSubscribers(authorityState, {
+    const firstPublish = transport.publishToSubscribers(authorityState, calls, {
       key: 'room:test',
       kind: 'text',
       locationBucket: 'weur',
       payload: encode('{"text":"first"}'),
     })
     await flushMicrotasks(8)
-    const secondPublish = transport.publishToSubscribers(authorityState, {
+    const secondPublish = transport.publishToSubscribers(authorityState, calls, {
       key: 'room:test',
       kind: 'text',
       locationBucket: 'weur',

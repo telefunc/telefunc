@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { OrderedStubs } from './ordered-stubs.js'
 
 const mocks = vi.hoisted(() => {
   const crosswsAdapter = {
@@ -466,10 +467,15 @@ describe('cloudflare adapter entrypoint', () => {
       payload: new Uint8Array(),
     }
     instance.telefuncBroadcastPublish(publish)
-    expect(mocks.transportInstances[0]?.publishToSubscribers).toHaveBeenCalledWith(mocks.authorityInstances[0], publish)
+    const publishToSubscribers = mocks.transportInstances[0]!.publishToSubscribers
+    expect(publishToSubscribers).toHaveBeenCalledWith(mocks.authorityInstances[0], expect.any(OrderedStubs), publish)
     const forward = { ...publish, info: { seq: 1, timestamp: 1 }, doNames: ['telefunc-shard-weur-0'] }
     instance.telefuncBroadcastForward(forward)
-    expect(mocks.transportInstances[0]?.forwardToBucket).toHaveBeenCalledWith(forward)
+    // The authority and coordinator roles send through the one DO's ordered stubs.
+    expect(mocks.transportInstances[0]?.forwardToBucket).toHaveBeenCalledWith(
+      publishToSubscribers.mock.calls[0]![1],
+      forward,
+    )
     const delivery = {
       key: 'room:test',
       kind: 'text' as const,
