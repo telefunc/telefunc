@@ -24,19 +24,6 @@ import { currentCloudflareSession } from './session.js'
 const PRESENCE_TTL_MS = 90_000
 const PRESENCE_REFRESH_INTERVAL_MS = 30_000
 
-/** Unwrap Cloudflare DO RPC proxy into a plain object.
- *  RPC properties are lazy stubs that must be awaited to resolve their values. */
-async function unwrapRpcResult(rpc: Promise<PublishResult>): Promise<PublishResult> {
-  const r = await rpc
-  const [seq, timestamp, meta, receivers] = await Promise.all([r.seq, r.timestamp, r.meta, r.receivers])
-  return {
-    seq,
-    timestamp,
-    ...(meta ? { meta } : undefined),
-    ...(receivers === undefined ? undefined : { receivers }),
-  }
-}
-
 /** `locationBucket` is the publishing session's; a publish from outside a session, as from a cron trigger, has none. */
 type BroadcastPublishRequest = {
   key: string
@@ -396,18 +383,17 @@ class CloudflareBroadcastTransport {
     return new CloudflareBroadcastMember(this, id, calls)
   }
 
-  /** From a session DO, through its ordered stubs; from elsewhere, as a cron trigger, through a fresh stub. */
-  publish(lane: BroadcastLane, payload: Uint8Array): Promise<PublishResult> {
+  /** From a session DO, through its ordered stubs; from elsewhere, as a cron trigger, through a fresh stub. Async, so
+   *  the caller gets a native promise: a stub's RpcPromise is callable, which `isPromise` doesn't take for a promise. */
+  async publish(lane: BroadcastLane, payload: Uint8Array): Promise<PublishResult> {
     const member = currentCloudflareSession()?.broadcast()
     const locationBucket = member?.bucket ?? null
     const request = { key: lane.key, kind: lane.kind, locationBucket, payload }
     const send = (authority: TelefuncBroadcastStub) => authority.telefuncBroadcastPublish(request)
     const name = this.authorityName(lane.key)
-    return unwrapRpcResult(
-      member === undefined
-        ? send(this.stubByName(name, locationBucket))
-        : this.callByName(member.calls, name, locationBucket, send),
-    )
+    return member === undefined
+      ? send(this.stubByName(name, locationBucket))
+      : this.callByName(member.calls, name, locationBucket, send)
   }
 
   sendPresence(calls: BroadcastCalls, request: BroadcastPresenceRequest): Promise<void> {
