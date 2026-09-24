@@ -20,7 +20,7 @@ import { CONTROL_LANE, SEMANTIC_LANE, decodeRoomText, withinRoomHorizon } from '
 import { readAllMembers, renewMemberLease } from './membership.js'
 assertIsNotBrowser()
 
-const ROOM_REPLAN_LIMIT = 5
+const ROSTER_REFRESH_RETRY_LIMIT = 5
 
 /** What the room's holders (client stubs, its own listeners, a pre-attach tail) want, aggregated. */
 type HolderWants = {
@@ -232,7 +232,6 @@ class RoomSubscriptions {
     )
   }
 
-  /** Recover a still-wanted terminal lane inside Room's one policy horizon. */
   private _onTerminal(slot: LaneSubscription, failure?: unknown): void {
     if (failure !== undefined) reportRoomError(failure)
     if (this._recovering.has(slot)) return
@@ -242,26 +241,20 @@ class RoomSubscriptions {
       .finally(() => this._recovering.delete(slot))
   }
 
+  /** A still-wanted terminal lane gets one replacement after a head read; if that fails too, the heartbeat's replan
+   *  subscribes it again. */
   private async _recover(slot: LaneSubscription): Promise<void> {
-    const deadline = Date.now() + ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS
-    for (let attempt = 0; attempt <= ROOM_REPLAN_LIMIT && slot.wanted && Date.now() < deadline; attempt++) {
-      const outcome = await this._attemptRecovery(slot, deadline).catch((error: unknown) => reportRoomError(error))
-      if (outcome === 'closed') return this._host._closeFromAuthority()
-      // Catch up on what the outage dropped; the lane itself is healthy.
-      if (outcome === 'ready') return await this.reconcileAuthority()
+    try {
+      const config = await withinRoomHorizon(this._host._readOpenConfig(), ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS)
+      if (config === null) return this._host._closeFromAuthority()
+      slot.retry()
+      await withinRoomHorizon(slot.attemptReady, ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS)
+    } catch (error) {
+      if (slot.wanted) slot.markLost()
+      throw error
     }
-    if (!slot.wanted) return
-    reportRoomError(new Error(`Room subscription recovery exhausted: ${this._host.id}`))
-    slot.markLost()
-  }
-
-  /** One replacement attempt, within its share of the horizon. */
-  private async _attemptRecovery(slot: LaneSubscription, deadline: number): Promise<'closed' | 'ready'> {
-    if ((await withinRoomHorizon(this._host._readOpenConfig(), deadline - Date.now())) === null) return 'closed'
-    slot.retry()
-    const attemptMs = ROOM_SUBSCRIPTION_TERMINAL_TIMEOUT_MS / (ROOM_REPLAN_LIMIT + 1)
-    await withinRoomHorizon(slot.attemptReady, Math.min(attemptMs, deadline - Date.now()))
-    return 'ready'
+    // Catch up on what the outage dropped; the lane itself is healthy.
+    await this.reconcileAuthority()
   }
 
   /** Roster refresh replans on membership-version drift and re-seeds streamed views from the committed snapshot. */
@@ -284,7 +277,7 @@ class RoomSubscriptions {
         if (drifted) host._onRosterDrift()
         return
       }
-      if (attempt === ROOM_REPLAN_LIMIT) throw new RoomError(`Room roster refresh contention: ${host.id}`)
+      if (attempt === ROSTER_REFRESH_RETRY_LIMIT) throw new RoomError(`Room roster refresh contention: ${host.id}`)
     }
   }
 

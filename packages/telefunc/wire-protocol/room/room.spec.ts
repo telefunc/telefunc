@@ -621,12 +621,16 @@ describe('Room public behavior', () => {
     let attempts = 0
     mockLaneSubscription('semantic', (subscribeLane, roomId, inc, lane, receiver) => {
       attempts++
-      return attempts < 8 ? rejectedSubscription(`attempt ${attempts}`) : subscribeLane(roomId, inc, lane, receiver)
+      return attempts < 3 ? rejectedSubscription(`attempt ${attempts}`) : subscribeLane(roomId, inc, lane, receiver)
     })
     vi.spyOn(console, 'error').mockImplementation(() => {})
     observer.subscribe(() => {})
-    await vi.advanceTimersByTimeAsync(ROOM_HEARTBEAT_INTERVAL_MS + 100)
-    expect(attempts).toBe(8)
+    await vi.advanceTimersByTimeAsync(100)
+    // The lane and its one replacement; the next attempt waits for the heartbeat.
+    expect(attempts).toBe(2)
+    await vi.advanceTimersByTimeAsync(ROOM_HEARTBEAT_INTERVAL_MS)
+    expect(attempts).toBe(3)
+    expect(subsOf(observer as ServerRoom)._semantic.established).toBe(true)
     expect(observer.isClosed).toBe(false)
   })
   it('keeps an authoritative open Room open after subscription recovery exhausts', async () => {
