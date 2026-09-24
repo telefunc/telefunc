@@ -35,6 +35,7 @@ export const STREAMING_ERROR_TYPE = {
   ABORT: 'abort',
   BUG: 'bug',
 } as const
+export type StreamingErrorType = (typeof STREAMING_ERROR_TYPE)[keyof typeof STREAMING_ERROR_TYPE]
 
 /** Streaming error frame payload: abort with value. */
 export type StreamingErrorFrameAbort = {
@@ -46,6 +47,9 @@ export type StreamingErrorFrameAbort = {
 export type StreamingErrorFrameBug = {
   type: typeof STREAMING_ERROR_TYPE.BUG
 }
+
+/** Union of all streaming error frame payloads. */
+export type StreamingErrorFramePayload = StreamingErrorFrameAbort | StreamingErrorFrameBug
 
 // ===== Transport =====
 

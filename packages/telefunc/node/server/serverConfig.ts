@@ -53,7 +53,7 @@ type StreamConfigUser = {
 }
 
 type BroadcastConfigUser = {
-  /** Cross-instance transport used by Broadcast. */
+  /** Transport for cross-node `Broadcast` delivery. */
   transport?: BroadcastTransport
 }
 
@@ -191,7 +191,7 @@ type ConfigUser = {
   stream: StreamConfigUser
   /** Enabled transports and runtime settings for Telefunc channels. */
   channel: ChannelConfigUser
-  /** Cross-instance transport settings for Broadcast. */
+  /** `Broadcast` configuration. */
   broadcast: BroadcastConfigUser
   /** Registered server extensions. Use `config.extensions.push(ext)` to add. */
   extensions: TelefuncServerExtension[]
@@ -221,15 +221,6 @@ const configState: ConfigUser = getGlobalObject('serverConfig.ts', {
   extensions: [],
 })
 
-/** The nested config objects: each validates and replaces its whole group on every write. */
-const configGroups = {
-  stream: applyStreamConfig,
-  channel: applyChannelConfig,
-  broadcast: applyBroadcastConfig,
-}
-const isConfigGroup = (prop: string | symbol): prop is keyof typeof configGroups =>
-  typeof prop === 'string' && Object.hasOwn(configGroups, prop)
-
 const configUser: ConfigUser = new Proxy({} as ConfigUser, {
   get(_target, prop) {
     if (prop === 'extensions') {
@@ -257,7 +248,42 @@ const configUser: ConfigUser = new Proxy({} as ConfigUser, {
         },
       })
     }
-    if (isConfigGroup(prop)) return configGroupProxy(() => configState[prop], configGroups[prop])
+    if (prop === 'stream') {
+      return new Proxy({} as StreamConfigUser, {
+        get(_t, subProp) {
+          return configState.stream[subProp as keyof StreamConfigUser]
+        },
+        set(_t, subProp, val) {
+          if (typeof subProp !== 'string') return true
+          applyStreamConfig({ ...configState.stream, [subProp]: val })
+          return true
+        },
+      })
+    }
+    if (prop === 'channel') {
+      return new Proxy({} as ChannelConfigUser, {
+        get(_t, subProp) {
+          return configState.channel[subProp as keyof ChannelConfigUser]
+        },
+        set(_t, subProp, val) {
+          if (typeof subProp !== 'string') return true
+          applyChannelConfig({ ...configState.channel, [subProp]: val })
+          return true
+        },
+      })
+    }
+    if (prop === 'broadcast') {
+      return new Proxy({} as ConfigUser['broadcast'], {
+        get(_t, subProp) {
+          return configState.broadcast[subProp as keyof ConfigUser['broadcast']]
+        },
+        set(_t, subProp, val) {
+          if (typeof subProp !== 'string') return true
+          applyBroadcastConfig({ ...configState.broadcast, [subProp]: val })
+          return true
+        },
+      })
+    }
     return configState[prop as keyof typeof configState]
   },
   set(_target, prop, val) {
@@ -265,19 +291,6 @@ const configUser: ConfigUser = new Proxy({} as ConfigUser, {
     return true
   },
 })
-
-function configGroupProxy<State extends object>(read: () => State, apply: (val: unknown) => void): State {
-  return new Proxy({} as State, {
-    get(_target, prop) {
-      return read()[prop as keyof State]
-    },
-    set(_target, prop, val) {
-      if (typeof prop !== 'string') return true
-      apply({ ...read(), [prop]: val })
-      return true
-    },
-  })
-}
 
 function getServerConfig(): ConfigResolved {
   return {
@@ -360,7 +373,6 @@ function enableChannelTransports(transports: ChannelTransports): void {
 
 function applyUserConfig(prop: string | symbol, val: unknown) {
   if (typeof prop !== 'string') return
-  if (isConfigGroup(prop)) return configGroups[prop](val)
 
   if (prop === 'root') {
     assertUsage(typeof val === 'string', 'config.root should be a string')
@@ -430,6 +442,12 @@ function applyUserConfig(prop: string | symbol, val: unknown) {
       }
     }
     configState.log = val as ConfigUser['log']
+  } else if (prop === 'stream') {
+    applyStreamConfig(val)
+  } else if (prop === 'channel') {
+    applyChannelConfig(val)
+  } else if (prop === 'broadcast') {
+    applyBroadcastConfig(val)
   } else if (prop === 'extensions') {
     assertUsage(Array.isArray(val), 'config.extensions should be an array')
     configState.extensions = val as TelefuncServerExtension[]
@@ -449,28 +467,6 @@ function applyStreamConfig(val: unknown): void {
     }
   }
   configState.stream = next
-}
-
-function applyBroadcastConfig(val: unknown): void {
-  assertUsage(isObject(val), 'config.broadcast should be an object')
-  const next: BroadcastConfigUser = {}
-  for (const [key, value] of Object.entries(val)) {
-    if (key === 'transport') {
-      if (value === undefined) continue // unset, like an absent key
-      assertUsage(
-        isObject(value) &&
-          (['send', 'listen', 'sendBinary', 'listenBinary'] as const).every(
-            (method) => typeof value[method] === 'function',
-          ),
-        'config.broadcast.transport must be a BroadcastTransport with send(), listen(), sendBinary() and listenBinary() methods',
-      )
-      next.transport = value as BroadcastTransport
-    } else {
-      assertUsage(false, `Unknown config.broadcast.${key}`)
-    }
-  }
-  configState.broadcast = next
-  configureBroadcastTransport(next.transport)
 }
 
 function applyChannelConfig(val: unknown): void {
@@ -505,6 +501,28 @@ function applyChannelConfig(val: unknown): void {
     }
   }
   configState.channel = next
+}
+
+function applyBroadcastConfig(val: unknown): void {
+  assertUsage(isObject(val), 'config.broadcast should be an object')
+  const next: BroadcastConfigUser = {}
+  for (const [key, value] of Object.entries(val)) {
+    if (key === 'transport') {
+      if (value === undefined) continue // unset, like an absent key
+      assertUsage(
+        isObject(value) &&
+          (['send', 'listen', 'sendBinary', 'listenBinary'] as const).every(
+            (method) => typeof value[method] === 'function',
+          ),
+        'config.broadcast.transport must be a BroadcastTransport with send(), listen(), sendBinary() and listenBinary() methods',
+      )
+      next.transport = value as BroadcastTransport
+    } else {
+      assertUsage(false, `Unknown config.broadcast.${key}`)
+    }
+  }
+  configState.broadcast = next
+  configureBroadcastTransport(next.transport)
 }
 
 function validateStreamTransport(val: unknown, configPath: string): StreamTransport {

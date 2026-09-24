@@ -48,7 +48,7 @@ describe('self-initiated close', () => {
   })
 
   test('isClosed=true on close(); onClose fires after close-ack roundtrip', async () => {
-    const channel = new ServerChannel<never, number>({ id: crypto.randomUUID() })
+    const channel = new ServerChannel<number, never>({ id: crypto.randomUUID() })
     const frames: Uint8Array[] = []
     let didFireClose = false
     let closeErr: Error | undefined | null = null
@@ -73,7 +73,7 @@ describe('self-initiated close', () => {
   })
 
   test('close() sends close frame and resolves 0 after ack', async () => {
-    const channel = new ServerChannel<never, number>({ id: crypto.randomUUID() })
+    const channel = new ServerChannel<number, never>({ id: crypto.randomUUID() })
     const frames: Uint8Array[] = []
 
     channel._attachPeer(createPeer(frames))
@@ -90,7 +90,7 @@ describe('self-initiated close', () => {
   })
 
   test('close() resolves 1 when peer never acks', async () => {
-    const channel = new ServerChannel<never, number>({ id: crypto.randomUUID() })
+    const channel = new ServerChannel<number, never>({ id: crypto.randomUUID() })
     const frames: Uint8Array[] = []
 
     channel._attachPeer(createPeer(frames))
@@ -160,7 +160,7 @@ describe('self-initiated close', () => {
   })
 
   test('close() waits for async onClose callbacks before resolving', async () => {
-    const channel = new ServerChannel<never, number>({ id: crypto.randomUUID() })
+    const channel = new ServerChannel<number, never>({ id: crypto.randomUUID() })
     const frames: Uint8Array[] = []
     let didFinishOnClose = false
 
@@ -255,7 +255,7 @@ describe('self-initiated close', () => {
 
 describe('peer-initiated close', () => {
   test('isClosed=true, onClose, and close-ack all fire immediately', async () => {
-    const channel = new ServerChannel<never, number>({ id: crypto.randomUUID() })
+    const channel = new ServerChannel<number, never>({ id: crypto.randomUUID() })
     const frames: Uint8Array[] = []
     let didFireClose = false
     let closeErr: Error | undefined | null = null
@@ -324,7 +324,7 @@ describe('peer-initiated close', () => {
   })
 
   test('shutdown waits for async onClose callbacks', async () => {
-    const channel = new ServerChannel<never, number>({ id: crypto.randomUUID() })
+    const channel = new ServerChannel<number, never>({ id: crypto.randomUUID() })
     let didFinishOnClose = false
 
     channel._attachPeer(createPeer([]))
@@ -349,7 +349,7 @@ describe('peer-initiated close', () => {
 
 describe('cross-close', () => {
   test('both sides close: close() resolves 0 when peer acks', async () => {
-    const channel = new ServerChannel<never, number>({ id: crypto.randomUUID() })
+    const channel = new ServerChannel<number, never>({ id: crypto.randomUUID() })
     const frames: Uint8Array[] = []
 
     channel._attachPeer(createPeer(frames))
@@ -375,7 +375,7 @@ describe('cross-close', () => {
   })
 
   test('both sides close: close() resolves 1 on timeout without ack', async () => {
-    const channel = new ServerChannel<never, number>({ id: crypto.randomUUID() })
+    const channel = new ServerChannel<number, never>({ id: crypto.randomUUID() })
     const frames: Uint8Array[] = []
 
     channel._attachPeer(createPeer(frames))

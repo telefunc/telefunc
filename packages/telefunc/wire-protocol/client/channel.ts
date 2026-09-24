@@ -32,6 +32,7 @@ import {
   type ChannelFrame,
   type WirePublishInfo,
 } from '../shared-ws.js'
+import { assert } from '../../utils/assert.js'
 import { makeAbortError, makeBugError } from '../../client/remoteTelefunctionCall/errors.js'
 import { ShieldValidationError } from '../../shared/ShieldValidationError.js'
 import { ClientConnection } from './connection.js'

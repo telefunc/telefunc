@@ -165,23 +165,30 @@ async function reviveResponse(
   const reviver = createStreamingReviver(
     context,
     function onRevived(revived) {
-      const { value, abort, close } = revived
-      assert(isObjectOrFunction(value))
-      // An adopted value keeps exact identity and shares its tracked owner's lifecycle.
-      if (closeHandlers.has(value)) return
-      // This is what the user gets
-      const wrapper = wrapProxy(value)
-      revived.value = wrapper
-      globalObject.gcRegistry.register(wrapper, close)
-      closeHandlers.set(wrapper, close)
-      allCloseHandlers.push(close)
-      callContext.abortController.signal.addEventListener(
-        'abort',
-        () => {
-          abort(makeAbortError(undefined, callContext))
-        },
-        { once: true },
-      )
+      {
+        const { value, close } = revived
+        assert(isObjectOrFunction(value))
+        // An adopted value keeps exact identity and shares its tracked owner's lifecycle.
+        if (closeHandlers.has(value)) return
+        const wrapper = wrapProxy(value)
+        globalObject.gcRegistry.register(wrapper, close)
+        // This is what the user gets
+        revived.value = wrapper
+      }
+
+      {
+        const { value, abort, close } = revived
+        assert(isObjectOrFunction(value))
+        closeHandlers.set(value, close)
+        allCloseHandlers.push(close)
+        callContext.abortController.signal.addEventListener(
+          'abort',
+          () => {
+            abort(makeAbortError(undefined, callContext))
+          },
+          { once: true },
+        )
+      }
     },
     extensionResponseTypes,
   )
@@ -258,7 +265,8 @@ class FrameDemuxer {
     this.totalConsumers++
   }
 
-  /** Cancel the given index (.tee() semantics): drops its frames and resolves a pending waiter with null. */
+  /** Cancel the given index. Follows .tee() semantics:
+   *  drops its buffered/future frames, resolves any pending waiter with null. */
   cancelIndex(index: number): void {
     if (this.cancelledIndices.has(index) || this.doneIndices.has(index)) return
     this.cancelledIndices.add(index)

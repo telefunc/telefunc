@@ -216,11 +216,13 @@ describe('reference identity — duplicates in one payload', () => {
     const server = createServerHarness()
     const channel = new ServerChannel()
     const body = server.serialize({ ch: channel, chDupe: channel, list: [channel, { deep: channel }] })
+
     // One registration, one lifecycle — not four.
     expect(server.registeredChannels).toEqual([channel])
     expect(server.lifecycles).toHaveLength(1)
     // One channelId on the wire, everywhere.
     expect(body.match(new RegExp(channel.id, 'g'))).toHaveLength(4)
+
     const client = createClientHarness()
     const parsed = client.parseBody(body) as {
       ch: unknown
@@ -239,8 +241,10 @@ describe('reference identity — duplicates in one payload', () => {
     const server = createServerHarness()
     const broadcast = new ServerBroadcast({ key: 'room:identity' })
     const body = server.serialize({ room: broadcast, roomDupe: broadcast, roomDupe2: broadcast })
+
     expect(server.registeredChannels).toEqual([broadcast])
     expect(server.lifecycles).toHaveLength(1)
+
     const client = createClientHarness()
     const parsed = client.parseBody(body) as { room: unknown; roomDupe: unknown; roomDupe2: unknown }
     expect(client.mintedBroadcasts).toHaveLength(1)
@@ -253,10 +257,12 @@ describe('reference identity — duplicates in one payload', () => {
     const server = createServerHarness([serverType as ReplacerType<TypeContract, ServerReplacerContext>])
     const room = new TestServerRoom('lobby')
     const body = server.serialize({ room, roomDupe: room, roomDupe2: room })
+
     // The repro: three occurrences used to mint three stub channels.
     expect(room.stubsAttached).toHaveLength(1)
     expect(server.registeredChannels).toHaveLength(1)
     expect(server.lifecycles).toHaveLength(1)
+
     const client = createClientHarness([clientType as ReviverType<TypeContract, ClientReviverContext>])
     const parsed = client.parseBody(body) as { room: unknown; roomDupe: unknown; roomDupe2: unknown }
     expect(counters.clientRevive).toBe(1)
@@ -270,8 +276,10 @@ describe('reference identity — duplicates in one payload', () => {
     const server = createServerHarness([serverType as ReplacerType<TypeContract, ServerReplacerContext>])
     const participant = new TestLocalParticipant('me')
     const body = server.serialize({ me: participant, self: participant })
+
     expect(participant.channelsMinted).toBe(1)
     expect(server.registeredChannels).toHaveLength(1)
+
     const client = createClientHarness([clientType as ReviverType<TypeContract, ClientReviverContext>])
     const parsed = client.parseBody(body) as { me: unknown; self: unknown }
     expect(counters.clientRevive).toBe(1)
@@ -282,7 +290,9 @@ describe('reference identity — duplicates in one payload', () => {
     const server = createServerHarness()
     const fn = (x: number) => x * 2
     const body = server.serialize({ fn, fnDupe: fn })
+
     expect(server.registeredChannels).toHaveLength(1)
+
     const client = createClientHarness()
     const parsed = client.parseBody(body) as { fn: unknown; fnDupe: unknown }
     expect(client.mintedChannels).toHaveLength(1)
@@ -297,6 +307,7 @@ describe('reference identity — duplicates in one payload', () => {
     })()
     const body = server.serialize({ gen, genDupe: gen })
     expect(server.producers).toHaveLength(1)
+
     // Both keys carry the same __index.
     const parsed = JSON.parse(body) as { gen: string; genDupe: string }
     expect(parsed.gen).toBe(parsed.genDupe)
@@ -307,8 +318,10 @@ describe('reference identity — duplicates in one payload', () => {
     const a = new ServerChannel()
     const b = new ServerChannel()
     const body = server.serialize({ a, b })
+
     expect(server.registeredChannels).toEqual([a, b])
     expect(server.lifecycles).toHaveLength(2)
+
     const client = createClientHarness()
     const parsed = client.parseBody(body) as { a: unknown; b: unknown }
     expect(client.mintedChannels).toHaveLength(2)
@@ -320,11 +333,13 @@ describe('reference identity — duplicates in one payload', () => {
     const server = createServerHarness([serverType as ReplacerType<TypeContract, ServerReplacerContext>])
     const room = new TestServerRoom('lifecycle')
     const body = server.serialize({ room, roomDupe: room })
+
     expect(server.lifecycles).toHaveLength(1)
     for (const { close } of server.lifecycles) await close()
     for (const { abort } of server.lifecycles) abort({ abortValue: undefined } as AbortError)
     expect(counters.serverClose).toBe(1)
     expect(counters.serverAbort).toBe(1)
+
     const client = createClientHarness([clientType as ReviverType<TypeContract, ClientReviverContext>])
     client.parseBody(body)
     expect(client.lifecycles).toHaveLength(1)
@@ -340,6 +355,7 @@ describe('reference identity — duplicates in one payload', () => {
     // '<' and '/' trigger the serializer's HTML-safety escaping; '"' exercises JSON escapes.
     const room = new TestServerRoom('a/b<c>"d"')
     const body = server.serialize({ room, roomDupe: room })
+
     const client = createClientHarness([clientType as ReviverType<TypeContract, ClientReviverContext>])
     const parsed = client.parseBody(body) as { room: { roomId: string }; roomDupe: unknown }
     expect(parsed.room).toBe(parsed.roomDupe)
@@ -381,6 +397,7 @@ describe('reference identity — duplicates in one payload', () => {
     const body = server.serialize({ a: SENTINEL, b: SENTINEL })
     // Two occurrences, two replace() calls — primitives are value-semantic.
     expect(replaceCalls).toBe(2)
+
     let reviveCalls = 0
     const primitiveReviver: ReviverType<TypeContract<string, unknown, { n: number }>, ClientReviverContext> = {
       prefix: '!TestPrimitive:',
@@ -472,15 +489,22 @@ describe('reference identity — full pipeline', () => {
       yield 2
       yield 3
     })()
-    let upstreamCancelled = false
-    const pending = new ReadableStream({ cancel: () => void (upstreamCancelled = true) })
-    const { ret } = await roundTrip({ gen, genDupe: gen, pending })
+    const { ret } = await roundTrip({ gen, genDupe: gen })
     const retTyped = ret as { gen: AsyncGenerator<number>; genDupe: AsyncGenerator<number> }
+
     expect(retTyped.gen).toBe(retTyped.genDupe)
     // One consumer sees every chunk — duplicated producers used to steal chunks
     // from one another (each occurrence pulled the same underlying generator).
     expect(await collect(retTyped.gen)).toEqual([1, 2, 3])
-    await (ret as { pending: ReadableStream }).pending.cancel()
+  })
+
+  test('the response body is cancelled once every value is done or cancelled', async () => {
+    let upstreamCancelled = false
+    const pending = new ReadableStream({ cancel: () => void (upstreamCancelled = true) })
+    const { ret } = await roundTrip({ gen: (async function* () {})(), pending })
+    const retTyped = ret as { gen: AsyncGenerator<never>; pending: ReadableStream }
+    expect(await collect(retTyped.gen)).toEqual([])
+    await retTyped.pending.cancel()
     await new Promise((resolve) => setTimeout(resolve, 0))
     expect(upstreamCancelled).toBe(true)
   })
@@ -497,6 +521,7 @@ describe('reference identity — full pipeline', () => {
     // producer called stream.getReader() on an already-locked stream.
     const { ret } = await roundTrip({ stream, streamDupe: stream })
     const retTyped = ret as { stream: ReadableStream<Uint8Array>; streamDupe: ReadableStream<Uint8Array> }
+
     expect(retTyped.stream).toBe(retTyped.streamDupe)
     const reader = retTyped.stream.getReader()
     const chunks: number[] = []
@@ -512,6 +537,7 @@ describe('reference identity — full pipeline', () => {
     const promise = Promise.resolve({ answer: 42 })
     const { ret } = await roundTrip({ p: promise, pDupe: promise })
     const retTyped = ret as { p: Promise<{ answer: number }>; pDupe: Promise<{ answer: number }> }
+
     expect(retTyped.p).toBe(retTyped.pDupe)
     expect(await retTyped.p).toEqual({ answer: 42 })
   })
@@ -520,6 +546,7 @@ describe('reference identity — full pipeline', () => {
     const file = new File(['file-contents'], 'notes.txt', { type: 'text/plain', lastModified: 1234567890 })
     const { ret } = await roundTrip({ file, fileDupe: file })
     const retTyped = ret as { file: Promise<File>; fileDupe: Promise<File> }
+
     expect(retTyped.file).toBe(retTyped.fileDupe)
     const revived = await retTyped.file
     expect(revived.name).toBe('notes.txt')
@@ -538,6 +565,7 @@ describe('reference identity — full pipeline', () => {
     )
     const retTyped = ret as { room: unknown; roomDupe: unknown }
     expect(retTyped.room).toBe(retTyped.roomDupe)
+
     abortController.abort()
     expect(counters.clientAbort).toBe(1)
   })

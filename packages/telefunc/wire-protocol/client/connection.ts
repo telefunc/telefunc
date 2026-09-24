@@ -1303,6 +1303,7 @@ class ClientConnection implements MuxConnection {
     if (ctrl.idleTimeout !== undefined) this.idleTimeoutMs = ctrl.idleTimeout
     if (ctrl.clientReplayBuffer !== undefined) this.clientReplayBufferBytes = ctrl.clientReplayBuffer
     if (ctrl.clientReplayBufferBinary !== undefined) this.clientReplayBufferBinaryBytes = ctrl.clientReplayBufferBinary
+
     const serverMap = new Map<number, number>()
     for (const channel of ctrl.open) serverMap.set(channel.ix, channel.lastSeq)
     const reconcileIxes = this.reconcileIxes

@@ -16,7 +16,7 @@ import { Abort, getContext } from 'telefunc'
 export async function getTodoList() {
   const { user } = getContext()
   if (!user) {
-    // ❌ Wrong usage
+    // ❌ Wrong usae
     throw new Error()
     // ✅ Correct usage
     throw Abort()
@@ -40,6 +40,7 @@ Because:
 - `throw Abort('some error message')` => Telefunc sends `some error message` to the client
 - `throw new Error('some error message')` => Telefunc doesn't send  `some error message` to the client.
   > To prevent leaking sensitive information, Telefunc never forwards unexpected server errors to the client.
+
 
 ## Example
 

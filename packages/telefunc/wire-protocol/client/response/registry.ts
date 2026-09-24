@@ -1,11 +1,37 @@
 export { createStreamingReviver }
 
 import type { Reviver } from '@brillout/json-serializer/parse'
-import { clientDialect } from '../dialect.js'
+import { asyncGeneratorReviver } from './async-generator.js'
+import { readableStreamReviver } from './readable-stream.js'
+import { fileReviver } from './file.js'
+import { blobReviver } from './blob.js'
+import { fileDownloadReviver } from './fileDownload.js'
+import { blobDownloadReviver } from './blobDownload.js'
+import { promiseReviver } from './promise.js'
+import { broadcastReviver } from './broadcast.js'
+import { channelReviver } from './channel.js'
+import { functionReviver } from './function.js'
+import { roomReviver, roomParticipantReviver, roomRemoteReviver } from '../../room/response-client.js'
 import type { ClientReviverContext, InternalClientReviverContext, ReviverType, TypeContract } from '../../types.js'
 import type { AbortError } from '../../../shared/Abort.js'
 import { assert } from '../../../utils/assert.js'
 import { isObject } from '../../../utils/isObject.js'
+
+const clientTypes = [
+  asyncGeneratorReviver,
+  readableStreamReviver,
+  fileReviver,
+  blobReviver,
+  fileDownloadReviver,
+  blobDownloadReviver,
+  promiseReviver,
+  roomReviver,
+  roomParticipantReviver,
+  roomRemoteReviver,
+  broadcastReviver,
+  channelReviver,
+  functionReviver,
+]
 
 /** Creates a JSON-serializer reviver that delegates to type-specific plugins.
  *
@@ -22,7 +48,7 @@ function createStreamingReviver(
   }) => void,
   extensionTypes: ReviverType<TypeContract, ClientReviverContext>[],
 ) {
-  const allTypes = [...clientDialect, ...extensionTypes]
+  const allTypes = [...clientTypes, ...extensionTypes]
   const revivedByWireString = new Map<string, unknown>()
   const reviver: Reviver = (_path, value, parser) => {
     if (revivedByWireString.has(value)) return { replacement: revivedByWireString.get(value) }

@@ -416,12 +416,7 @@ export function onBoxReturn(): Box<number> { return {} as any }`
     `)
   })
 
-  it('marker intersected onto a room-shaped interface, returned as a Promise — the Room publish shield', async () => {
-    // Faithful to `Room<M, P, Pub> = { … } & RoomShield<Pub>` (wire-protocol/room/types.ts): the marker
-    // is intersected onto an interface carrying real members (`id`, `publish`), and the telefunction
-    // returns it as a `Promise`. The transform must find the marker through both, emit *only* its `data`
-    // slot (never the sibling members), and descend `Pub` into a runtime object shield — the mechanism
-    // that makes `Room<…, ChatMsg>` validate every client `publish()` with no shield to hand-write.
+  it('marker intersected onto a room-shaped interface, returned as a Promise (the Room publish shield)', async () => {
     const code = `import type { TELEFUNC_SHIELDS } from './shield-key.js'
 type RoomShield<Pub> = { readonly [TELEFUNC_SHIELDS]: { data: Pub } }
 type Room<Pub> = {
