@@ -140,7 +140,6 @@ class ServerRoom extends RoomStateView implements Room {
   /** Binary demand across instances (`onDemand`). */
   private readonly _demand: RoomDemand
   private readonly _subs: RoomSubscriptions
-  private _controlSeq = 0
 
   constructor(roomId: string, config: RoomConfigRecord, seed: { members: MemberSnapshot[] } | { count: number }) {
     super()
@@ -514,14 +513,8 @@ class ServerRoom extends RoomStateView implements Room {
     if (this._state.closed || (await this._readOpenConfig()) === null) throw roomClosedError(this.id)
   }
   /** Drops a duplicate; a gap means control events were lost, so the room reconciles. */
-  private _acceptControlSeq(seq: number): boolean {
-    if (seq <= this._controlSeq) return false
-    this._controlSeq = seq
-    return true
-  }
   /** @internal */
   _onCtrlMessage(serialized: string, rawInfo: WirePublishInfo): void {
-    if (!this._acceptControlSeq(rawInfo.seq)) return
     const event = decodeLaneEnvelope(serialized) as RoomCtrlEnvelope
     if (event.__r === 'want') {
       this._demand.applyWant(event) // between instances only, never relayed to clients

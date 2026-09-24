@@ -498,6 +498,16 @@ describe('Room public behavior', () => {
       .map((frame) => (JSON.parse(frame.text) as { __r: string }).__r)
     expect(relayed).toContain('closed')
   })
+  it('applies a control frame whose seq restarted, as after a Redis restart without its data', async () => {
+    const room = (await Room.create('control-seq-restart')) as ServerRoom
+    const onControl = (
+      room as unknown as { _onCtrlMessage(message: string, info: { seq: number; timestamp: number }): void }
+    )._onCtrlMessage.bind(room)
+    const at = Date.now() + 1000
+    onControl(stringify({ __r: 'update', meta: { step: 1 }, at, by: 'a' }), { seq: 5, timestamp: at })
+    onControl(stringify({ __r: 'update', meta: { step: 2 }, at: at + 1, by: 'a' }), { seq: 1, timestamp: at + 1 })
+    expect(room.meta).toEqual({ step: 2 })
+  })
   it('reconciles authority after a same-attempt recovery', async () => {
     const room = (await Room.create('control-reconcile')) as ServerRoom
     const backend = getRoomBackend()
