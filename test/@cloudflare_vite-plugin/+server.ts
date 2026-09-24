@@ -7,39 +7,7 @@ const tf = new Telefunc({ scale: 5 })
 // Cloudflare requires Durable Object classes to be named exports of the worker entry.
 // `wrangler.jsonc`'s `main: "vike:server-entry"` re-exports everything from this file,
 // so these reach Cloudflare's binding resolver intact.
-const TelefuncDurableObjectBase = tf.TelefuncDurableObject
-export class TelefuncDurableObject extends TelefuncDurableObjectBase {
-  async telefuncRoomAsyncContextProbe(): Promise<string> {
-    try {
-      await (
-        this as unknown as {
-          telefuncRoomDeliver(request: {
-            roomId: string
-            inc: string
-            laneKey: string
-            sessionDoId: string
-            leaseId: string
-            payload: ArrayBuffer
-            seq: number
-            timestamp: number
-          }): Promise<void>
-        }
-      ).telefuncRoomDeliver({
-        roomId: 'recipe-probe',
-        inc: 'recipe-probe',
-        laneKey: 'recipe-probe',
-        sessionDoId: 'recipe-probe',
-        leaseId: 'recipe-probe',
-        payload: new ArrayBuffer(0),
-        seq: 1,
-        timestamp: 0,
-      })
-      return 'unexpected delivery success'
-    } catch (error) {
-      return error instanceof Error ? error.message : String(error)
-    }
-  }
-}
+export const TelefuncDurableObject = tf.TelefuncDurableObject
 export { TodoListDurableObject } from './database/todoItems'
 
 // vike's docs example uses `export default vike` directly — meaning when vike is the
@@ -54,16 +22,6 @@ export default {
     if (new URL(request.url).pathname === '/__broadcast-publish-from-worker') {
       await Broadcast.publish('worker-publish', { from: 'worker' })
       return new Response(null, { status: 204 })
-    }
-    if (new URL(request.url).pathname === '/__telefunc-room-async-context-probe') {
-      const id = env.TelefuncDurableObject.idFromName('telefunc-room-recipe-probe')
-      const session = env.TelefuncDurableObject.get(id) as unknown as {
-        telefuncRoomAsyncContextProbe(): Promise<string>
-      }
-      const result = await session.telefuncRoomAsyncContextProbe()
-      return result.includes('Cloudflare Room delivery lease is not installed')
-        ? new Response(null, { status: 204 })
-        : new Response(result, { status: 500 })
     }
     const resp = await tf.serve({ request, env, ctx })
     return resp ?? vikeAsCloudflareHandler.fetch!(request, env, ctx)

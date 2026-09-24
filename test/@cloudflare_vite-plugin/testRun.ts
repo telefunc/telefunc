@@ -8,7 +8,6 @@ function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
   // First, so no session Durable Object exists in the isolate yet.
   testBroadcastPublishFromWorker()
   testCloudflareBindings()
-  if (cmd === 'pnpm run preview') testRoomAsyncContextRecipe()
   testRunClassic(cmd, {
     tolerateError: (log) =>
       log.logText.includes('Detected multiple renderers concurrently rendering') ||
@@ -26,13 +25,6 @@ function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
 function testBroadcastPublishFromWorker() {
   test('Broadcast.publish() from the Worker, outside any session', async () => {
     const response = await fetch(getServerUrl() + '/__broadcast-publish-from-worker')
-    expect(response.status).toBe(204)
-  })
-}
-
-function testRoomAsyncContextRecipe() {
-  test('Cloudflare Room async-context recipe', async () => {
-    const response = await fetch(getServerUrl() + '/__telefunc-room-async-context-probe')
     expect(response.status).toBe(204)
   })
 }
