@@ -1574,11 +1574,11 @@ describe('Room public behavior', () => {
   })
   it('admits a retained frame once, never behind a same-or-newer frame, and drops its live echo', () => {
     const gate = new ReplayGate()
-    expect(gate.admitLive('text', 2)).toBe(true)
-    expect(gate.admitRetained('text', 1)).toBe(false)
-    expect(gate.admitRetained('text', 3)).toBe(true)
-    expect(gate.admitLive('text', 3)).toBe(false)
-    expect(gate.admitLive('text', 4)).toBe(true)
+    expect(gate.admit('text', 2)).toBe(true)
+    expect(gate.admit('text', 1)).toBe(false)
+    expect(gate.admit('text', 3)).toBe(true)
+    expect(gate.admit('text', 3)).toBe(false)
+    expect(gate.admit('text', 4)).toBe(true)
   })
   it('replays retained text and binary once to a late server-side subscriber', async () => {
     const authority = await Room.create('late-server-subscriber')
@@ -1594,6 +1594,28 @@ describe('Room public behavior', () => {
     await publisher.publish('live')
     await publisher.publishBinary(new Uint8Array([8]), { track: 'camera' })
     await vi.waitFor(() => expect({ texts, frames }).toEqual({ texts: ['state', 'live'], frames: [[7], [8]] }))
+  })
+  it('drops a live frame older than a retained frame that reached the subscriber first', async () => {
+    const authority = await Room.create('retained-before-older-live')
+    const publisher = await authority.join()
+    const observer = await Room.get(authority.id)
+    const readRetained = driver.readRetained.bind(driver)
+    const published = deferred<void>()
+    vi.spyOn(driver, 'readRetained').mockImplementationOnce(async (...args) => {
+      await published.promise
+      return readRetained(...args)
+    })
+    const live = holdLaneDelivery((lane) => lane.kind === 'semantic')
+    const texts: unknown[] = []
+    observer.subscribe((data) => void texts.push(data))
+    await publisher.publish('older')
+    await publisher.publish('newest', { retain: true })
+    // The retained read returns before the live path delivers the two frames it raced.
+    published.resolve()
+    await vi.waitFor(() => expect(texts).toEqual(['newest']))
+    await live.release()
+    await publisher.publish('after')
+    await vi.waitFor(() => expect(texts).toEqual(['newest', 'after']))
   })
   it('waits for roster-derived binary routes before reading retained frames', async () => {
     const authority = await Room.create('retained-binary-roster-fence')
@@ -2944,6 +2966,26 @@ function rejectLaneSubscriptions(kind: LaneId['kind'], diagnostic: string) {
   })
   vi.spyOn(console, 'error').mockImplementation(() => {})
   return { backend, started: started.promise }
+}
+/** Holds the frames delivered on matching lanes opened from now on, until released in delivery order. */
+function holdLaneDelivery(matches: (lane: LaneId) => boolean) {
+  const backend = getRoomBackend()
+  const subscribeLane = backend.subscribeLane.bind(backend)
+  const held: Array<() => void | Promise<void>> = []
+  let holding = true
+  vi.spyOn(backend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
+    if (!matches(lane)) return subscribeLane(roomId, inc, lane, receiver)
+    return subscribeLane(roomId, inc, lane, (payload, info) => {
+      if (!holding) return receiver(payload, info)
+      held.push(() => receiver(payload, info))
+    })
+  })
+  return {
+    async release() {
+      holding = false
+      for (const deliver of held.splice(0)) await deliver()
+    },
+  }
 }
 function delayLaneSubscription(matches: (lane: LaneId) => boolean) {
   const backend = getRoomBackend()

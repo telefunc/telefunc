@@ -257,7 +257,7 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
   }
 
   _relayBinary(wireData: Uint8Array, from: string, track: string, info: WirePublishInfo): void {
-    if (this._wantsBinary(from, track) && this._replay.admitLive(binaryLaneKey(from, track), info.seq))
+    if (this._wantsBinary(from, track) && this._replay.admit(binaryLaneKey(from, track), info.seq))
       this._sendPublishBinary(wireData)
   }
 
@@ -268,16 +268,16 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
   }
 
   _emitRetainedText(serialized: string, _event: RoomDataEnvelope, info: WirePublishInfo): void {
-    if (this._replay.admitRetained(TEXT_LANE_KEY, info.seq)) this._sendPublish(encodePublishText(serialized, info))
+    if (this._replay.admit(TEXT_LANE_KEY, info.seq)) this._sendPublish(encodePublishText(serialized, info))
   }
 
   _emitRetainedBinary(framed: Uint8Array, frame: BinaryFrame, info: WirePublishInfo): void {
-    if (this._replay.admitRetained(binaryLaneKey(frame.from, laneTrack(frame.track)), info.seq))
+    if (this._replay.admit(binaryLaneKey(frame.from, laneTrack(frame.track)), info.seq))
       this._sendPublishBinary(encodePublishBinary(framed, info))
   }
 
   private _relayTextLive(wireText: string, ord: RoomOrder): void {
-    if (this._replay.admitLive(TEXT_LANE_KEY, ord.seq)) this._sendPublish(wireText)
+    if (this._replay.admit(TEXT_LANE_KEY, ord.seq)) this._sendPublish(wireText)
   }
 
   // Ack-DM correlations

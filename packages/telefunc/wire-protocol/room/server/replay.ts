@@ -14,31 +14,21 @@ function binaryLaneKey(member: string, track: string): string {
   return `${member}\0${track}`
 }
 
-/** One holder's retained/live dedup per lane: a retained frame arrives once, never behind a same-or-newer frame, and its live echo is dropped. */
+/** One holder's lane order across retained replay and live frames: a frame is admitted only if it is newer than every
+ *  frame the holder already has on its lane. A replayed retained frame can win the race against live frames committed
+ *  before it, so this drops its live echo and those older frames, and a retained frame older than the live stream. */
 class ReplayGate {
   private readonly _high = new Map<string, number>()
-  private readonly _pendingRetained = new Map<string, number>()
 
-  admitLive(lane: string, seq: number): boolean {
-    if (this._pendingRetained.get(lane) === seq) {
-      this._pendingRetained.delete(lane)
-      return false
-    }
-    if ((this._high.get(lane) ?? 0) < seq) this._high.set(lane, seq)
-    return true
-  }
-
-  admitRetained(lane: string, seq: number): boolean {
+  admit(lane: string, seq: number): boolean {
     if ((this._high.get(lane) ?? 0) >= seq) return false
     this._high.set(lane, seq)
-    this._pendingRetained.set(lane, seq)
     return true
   }
 
   forgetMember(member: string): void {
     const prefix = binaryLaneKey(member, '')
-    for (const lanes of [this._high, this._pendingRetained])
-      for (const key of lanes.keys()) if (key.startsWith(prefix)) lanes.delete(key)
+    for (const key of this._high.keys()) if (key.startsWith(prefix)) this._high.delete(key)
   }
 }
 
@@ -97,27 +87,26 @@ class LocalHolder implements LaneHolder {
   }
 
   relayText(event: RoomDataEnvelope, info: WirePublishInfo): void {
-    if (this._wantsTextFrom(event.from) && this._replay.admitLive(TEXT_LANE_KEY, info.seq)) this._applyText(event, info)
+    if (this._wantsTextFrom(event.from) && this._replay.admit(TEXT_LANE_KEY, info.seq)) this._applyText(event, info)
   }
 
   relayAnnouncement(data: unknown, info: WirePublishInfo): void {
-    if (this._state.wantsAnnounce && this._replay.admitLive(TEXT_LANE_KEY, info.seq))
+    if (this._state.wantsAnnounce && this._replay.admit(TEXT_LANE_KEY, info.seq))
       this._state.applyAnnounce(data, this._publishInfo(info))
   }
 
   relayBinary(frame: BinaryFrame, info: WirePublishInfo): void {
     const track = laneTrack(frame.track)
-    if (this._wantsBinary(frame.from, track) && this._replay.admitLive(binaryLaneKey(frame.from, track), info.seq))
+    if (this._wantsBinary(frame.from, track) && this._replay.admit(binaryLaneKey(frame.from, track), info.seq))
       this._applyBinary(frame, info)
   }
 
   _emitRetainedText(_serialized: string, event: RoomDataEnvelope, info: WirePublishInfo): void {
-    if (this._replay.admitRetained(TEXT_LANE_KEY, info.seq)) this._applyText(event, info)
+    if (this._replay.admit(TEXT_LANE_KEY, info.seq)) this._applyText(event, info)
   }
 
   _emitRetainedBinary(_framed: Uint8Array, frame: BinaryFrame, info: WirePublishInfo): void {
-    if (this._replay.admitRetained(binaryLaneKey(frame.from, laneTrack(frame.track)), info.seq))
-      this._applyBinary(frame, info)
+    if (this._replay.admit(binaryLaneKey(frame.from, laneTrack(frame.track)), info.seq)) this._applyBinary(frame, info)
   }
 
   forgetMember(member: string): void {
