@@ -96,6 +96,7 @@ class ClientRoom extends RoomStateView implements Room {
       closed: snapshot.closed,
       onListenersChanged: () => this._syncWants(),
       onCallbackError: reportClientCallbackError,
+      onLeave: (id, cause) => this._onLeave(id, cause),
     })
     this._state._owner = this
     if (snapshot.closed) {
@@ -243,16 +244,9 @@ class ClientRoom extends RoomStateView implements Room {
       case 'join':
         this._state.applyJoin(joinedMember(event))
         return
-      case 'leave': {
-        const cause = leaveCauseFromWire(event)
-        this._state.applyLeave(event.id, cause)
-        const local = this._localParticipants.get(event.id)
-        if (local) {
-          this._localParticipants.delete(event.id)
-          local._onLeft(cause) // kicked (with the kick's reason), or left through another handle
-        }
+      case 'leave':
+        this._state.applyLeave(event.id, leaveCauseFromWire(event))
         return
-      }
       case 'p-meta':
         this._acceptParticipantMeta(event.id, event)
         return
@@ -277,6 +271,15 @@ class ClientRoom extends RoomStateView implements Room {
         return
       }
     }
+  }
+
+  /** Every leave the state applies ends the member's local participant: kicked (with the kick's reason), left through
+   *  another handle, or missing from a roster. */
+  private _onLeave(id: string, cause: LeaveCause | undefined): void {
+    const local = this._localParticipants.get(id)
+    if (!local) return
+    this._localParticipants.delete(id)
+    local._onLeft(cause ?? { type: 'removed' })
   }
 
   private _onBinaryFrame(framed: Uint8Array, rawInfo: ChannelPublishInfo): void {

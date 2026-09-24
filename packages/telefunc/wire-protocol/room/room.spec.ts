@@ -179,6 +179,26 @@ describe('Room public behavior', () => {
     await expect(room._handleStubRequest(stub, request)).resolves.toBeUndefined()
     expect(await Room.getParticipants(room.id)).toEqual([])
   })
+  it('relays a leave that reached this instance with no event, from a reconciled roster or a vanished record', async () => {
+    const room = (await Room.create('lost-leave-owner')) as ServerRoom
+    const { stub, peer } = serve(room)
+    const join = async () =>
+      ((await room._handleStubRequest(stub, { __r: 'req-join', meta: {}, selfDelivery: true })) as { id: string }).id
+    const reconciled = await join()
+    const vanished = await join()
+    await vi.waitFor(() => expect(memberEvents(peer, vanished).map((event) => event.__r)).toEqual(['join']))
+    const leaves = (id: string) => memberEvents(peer, id).filter((event) => event.__r === 'leave')
+    const loseNextControlFrame = () => vi.spyOn(room, '_onCtrlMessage').mockImplementationOnce(() => {})
+    loseNextControlFrame()
+    await Room.removeParticipant(room.id, { id: reconciled })
+    await subsOf(room).reconcileAuthority()
+    expect(leaves(reconciled)).toEqual([{ __r: 'leave', id: reconciled, cause: 'removed' }])
+    expect(stub._holds(reconciled)).toBe(false)
+    loseNextControlFrame()
+    await Room.removeParticipant(room.id, { id: vanished })
+    await subsOf(room)._heartbeatTick()
+    expect(leaves(vanished)).toEqual([{ __r: 'leave', id: vanished, cause: 'removed' }])
+  })
   it('creates, lists, updates, closes fully, and recreates a genuinely fresh domain', async () => {
     const room = (await Room.create('lifecycle', { meta: { topic: 'one' } })) as unknown as ServerRoom
     const firstInc = room._inc
@@ -1975,6 +1995,7 @@ describe('client Room lifecycle', () => {
       updateStamp: { at: 0, by: '' },
       onListenersChanged: () => {},
       onCallbackError: () => {},
+      onLeave: () => {},
     })
     const id = crypto.randomUUID()
     state.applyTrack(id, 'screen')
@@ -2001,6 +2022,7 @@ describe('client Room lifecycle', () => {
       updateStamp: { at: 0, by: '' },
       onListenersChanged: () => {},
       onCallbackError: () => {},
+      onLeave: () => {},
     })
     const observed: string[][] = []
     const joins: string[] = []
@@ -2020,6 +2042,7 @@ describe('client Room lifecycle', () => {
       updateStamp: { at: 0, by: '' },
       onListenersChanged: () => {},
       onCallbackError: (error) => errors.push(error),
+      onLeave: () => {},
     })
     const remote = state.getRemote(memberId)!
     const failures = Array.from({ length: 5 }, (_, index) => new Error(`async state callback ${index}`))
@@ -2142,6 +2165,16 @@ describe('client Room lifecycle', () => {
     participant.onLeave((cause) => causes.push(cause.type))
     expect(causes).toEqual(['removed'])
     expect(client.count).toBe(0)
+  })
+  it('ends a local participant that a roster no longer lists', async () => {
+    const { id, ack, emit, joining } = await pendingClientJoin('roster-drops-local')
+    emit({ __r: 'join', id, meta: {}, joinedAt: 1 }, 1)
+    ack.resolve({ id, joinedAt: 1 })
+    const participant = await joining
+    const causes: unknown[] = []
+    participant.onLeave((cause) => causes.push(cause.type))
+    emit({ __r: 'roster', members: [] }, 2)
+    expect(causes).toEqual(['removed'])
   })
   it("derives participant-update prev from the receiver's own applied state", async () => {
     const { client, emit } = fakeClient('receiver-local-prev')
@@ -2340,6 +2373,7 @@ describe('room binary protocol validation', () => {
       updateStamp: { at: 0, by: '' },
       onListenersChanged: () => {},
       onCallbackError: () => {},
+      onLeave: () => {},
     })
     for (const options of [null, [], 'screen']) {
       expect(() => state.subscribeBinary(() => {}, options as never)).toThrow('object')
@@ -2420,6 +2454,7 @@ describe('room binary protocol validation', () => {
       updateStamp: { at: 0, by: '' },
       onListenersChanged: () => {},
       onCallbackError: () => {},
+      onLeave: () => {},
     })
     state.getRemote('__proto__')!.subscribeBinary(() => {})
     expect(Object.getPrototypeOf(state.binaryWants().members)).toBeNull()

@@ -60,6 +60,9 @@ type RoomStateOptions = {
   onListenersChanged: () => void
   /** A user callback threw — the owner decides how to report it. */
   onCallbackError: (err: unknown) => void
+  /** Every leave, from an event or a reconciled roster, after this view's callbacks; `hidden` is null for a member
+   *  this view didn't know. A leave with no cause had no event. */
+  onLeave: (id: string, cause: LeaveCause | undefined, hidden: boolean | null) => void
 }
 /** Exact-keyed backing lets the serializer recover (room, member) without exposing a public brand. */
 const ROOM_REMOTE_BACKINGS: unique symbol = Symbol.for('telefunc.RoomRemoteParticipantBackings')
@@ -144,6 +147,7 @@ class RoomState {
   private readonly _members = new Map<string, MemberEntry>()
   private readonly _onListenersChanged: () => void
   private readonly _onCallbackError: (err: unknown) => void
+  private readonly _onLeave: RoomStateOptions['onLeave']
   private readonly _roomDataCbs: Array<(data: unknown, info: ChannelPublishInfo, from: Sender) => unknown> = []
   private readonly _roomBinaryCbs: Array<{
     cb: (data: Uint8Array, info: ChannelPublishInfo & BinaryFrameInfo, from: Sender) => unknown
@@ -169,6 +173,7 @@ class RoomState {
     this._updateStamp = opts.updateStamp
     this._onListenersChanged = opts.onListenersChanged
     this._onCallbackError = opts.onCallbackError
+    this._onLeave = opts.onLeave
     if ('members' in opts.seed) {
       this._rosterKnown = true
       for (const member of opts.seed.members) this._createEntry(member)
@@ -362,17 +367,20 @@ class RoomState {
   }
   applyLeave(id: string, cause?: LeaveCause): void {
     const entry = this._members.get(id)
-    if (!entry) return this._markUnknownMember()
-    const ownedCause = cause && ownLeaveCause(cause)
+    if (entry) this._removeEntry(entry, cause && ownLeaveCause(cause))
+    else this._markUnknownMember()
+    this._onLeave(id, cause, entry ? entry.hidden : null)
+  }
+  private _removeEntry(entry: MemberEntry, cause: LeaveCause | undefined): void {
     entry.left = true
-    entry.leaveCause = ownedCause
+    entry.leaveCause = cause
     const remote = this._remote(entry)
-    this._members.delete(id)
+    this._members.delete(entry.id)
     // A hidden participant's leave is no presence event either; its own handlers and listener release still run.
     if (!entry.hidden && !this._rosterKnown) this._seedCount = Math.max(0, this._seedCount - 1)
     this._bumpMembership()
-    this._fireAll(entry.leaveCbs, ownedCause)
-    if (!entry.hidden) this._fireAll(this._leaveCbs, remote, ownedCause)
+    this._fireAll(entry.leaveCbs, cause)
+    if (!entry.hidden) this._fireAll(this._leaveCbs, remote, cause)
     this._releaseEntryListeners(entry)
     if (entry.hidden) return
     if (this.count === 0) this._fireAll(this._emptyCbs)

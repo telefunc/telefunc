@@ -1,6 +1,7 @@
 export { ServerRoom, ServerLocalParticipant }
 
 import { parse } from '@brillout/json-serializer/parse'
+import { stringify } from '@brillout/json-serializer/stringify'
 import type { TELEFUNC_SHIELDS } from '../../../node/shared/transformer/generateShield/shield-key.js'
 import { assert, assertUsage } from '../../../utils/assert.js'
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
@@ -148,6 +149,7 @@ class ServerRoom extends RoomStateView implements Room {
       updateStamp: { at: config.at, by: config.by },
       onListenersChanged: () => this._onHolderWantsChanged(this._local, this._local.refreshWants()),
       onCallbackError: reportCallbackError,
+      onLeave: (id, cause, hidden) => this._onLeave(id, cause, hidden),
     })
     this._state._owner = this
     this._local = new LocalHolder(this._state, (member) => this._suppress(member))
@@ -602,6 +604,9 @@ class ServerRoom extends RoomStateView implements Room {
   /** @internal */
   _applyLeave(id: string, cause?: LeaveCause): void {
     this._state.applyLeave(id, cause)
+  }
+  /** Every leave the state applies, event or reconcile, runs the member's cleanup. */
+  private _onLeave(id: string, cause: LeaveCause | undefined, hidden: boolean | null): void {
     this._announcedTracks.delete(id)
     this._rejectDmAcks(DM_FAILURE.left, id) // strand no waiter on a gone member
     const local = this._localParticipants.get(id)
@@ -609,6 +614,13 @@ class ServerRoom extends RoomStateView implements Room {
       this._localParticipants.delete(id)
       // A live-heartbeating owner can't be reaped (heartbeats outpace the TTL by 4x), so a vanished record with no observed event means the member was removed.
       local._onLeft(cause ?? { type: 'removed' })
+    }
+    // No cause means no event reached this instance (a vanished record, a reconciled roster), so none reached its
+    // clients; a member this view no longer knows already left through one.
+    if (cause === undefined && hidden !== null) {
+      const leave: RoomCtrlEnvelope = { __r: 'leave', id, cause: 'removed', ...(hidden ? { hidden: true } : {}) }
+      const wireText = encodePublishText(stringify(leave), { seq: 0, timestamp: Date.now() })
+      for (const stub of this._stubs) stub._relayControl(wireText, hidden ? id : null)
     }
     for (const stub of this._stubs) stub._forgetMember(id)
     this._local.forgetMember(id)
