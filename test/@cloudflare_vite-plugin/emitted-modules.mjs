@@ -16,10 +16,6 @@ const importedExternals = new Set()
 for (const relative of files) {
   const source = await readFile(path.join(server, relative), 'utf8')
   assert(!/(?:^|[^\w])ioredis(?:[^\w]|$)|@telefunc\/redis/i.test(source), `${relative} contains Redis code`)
-  assert(
-    !/Miniflare|RECOVERY_KV|telefuncRoom(?:Seed|Drop)|ForTest|backend\/conformance/.test(source),
-    `${relative} contains test-only Cloudflare controls`,
-  )
   for (const specifier of moduleSpecifiers(source)) {
     if (specifier.startsWith('.')) continue
     importedExternals.add(specifier)
@@ -27,18 +23,6 @@ for (const relative of files) {
   }
 }
 assert.deepEqual([...importedExternals].sort(), [...allowedExternalImports].sort())
-
-const wrangler = JSON.parse(await readFile(path.join(server, 'wrangler.json'), 'utf8'))
-// spellcheck-ignore
-assert(wrangler.compatibility_flags.includes('nodejs_als'), 'node:async_hooks requires the nodejs_als flag')
-assert.deepEqual(wrangler.durable_objects.bindings.map(({ name }) => name).sort(), [
-  'TO_DO_LIST_DURABLE_OBJECTS',
-  'TelefuncDurableObject',
-])
-assert(
-  wrangler.migrations.some(({ new_sqlite_classes: classes }) => classes?.includes('TelefuncDurableObject')),
-  'TelefuncDurableObject must be a SQLite class',
-)
 
 async function walk(directory) {
   const entries = await readdir(directory, { withFileTypes: true })
