@@ -1153,20 +1153,20 @@ describe('Room public behavior', () => {
     ] as const
     for (const [channel, frame] of frames) expect(() => channel._dispatchFrame(frame)).toThrow(ProtocolViolationError)
   })
-  it('rejects an option the call does not have, as a misspelled one', async () => {
+  it('rejects an option the call does not have', async () => {
     const room = (await Room.create('unknown-options')) as ServerRoom
     const me = await room.join()
     const calls: Array<[() => unknown, string]> = [
       [() => Room.create('unknown-options-2', { size: 4 } as never), 'Unknown Room option: size'],
-      [() => Room.get(room.id, { tial: true } as never), 'Unknown Room.get() option: tial'],
-      [() => Room.list({ prfix: '' } as never), 'Unknown Room.list() option: prfix'],
-      [() => room.join({ selfDelivey: false } as never), 'Unknown join() option: selfDelivey'],
-      [() => Room.guard(room, { onBeforePublsh: () => {} } as never), 'Unknown Room.guard() option: onBeforePublsh'],
-      [() => me.publish('x', { retian: true } as never), 'Unknown publish() option: retian'],
-      [() => me.publishBinary(new Uint8Array([1]), { trak: 'mic' } as never), 'Unknown publishBinary() option: trak'],
-      [() => room.subscribeBinary(() => {}, { trak: 'mic' } as never), 'Unknown subscribeBinary() option: trak'],
-      [() => me.send(me.id, 'x', { ak: true } as never), 'Unknown send() option: ak'],
-      [() => room.getParticipants({ hiden: true } as never), 'Unknown getParticipants() option: hiden'],
+      [() => Room.get(room.id, { lazy: true } as never), 'Unknown Room.get() option: lazy'],
+      [() => Room.list({ limit: 10 } as never), 'Unknown Room.list() option: limit'],
+      [() => room.join({ echo: false } as never), 'Unknown join() option: echo'],
+      [() => Room.guard(room, { onBeforeLeave: () => {} } as never), 'Unknown Room.guard() option: onBeforeLeave'],
+      [() => me.publish('x', { persist: true } as never), 'Unknown publish() option: persist'],
+      [() => me.publishBinary(new Uint8Array([1]), { layer: 'mic' } as never), 'Unknown publishBinary() option: layer'],
+      [() => room.subscribeBinary(() => {}, { layer: 'mic' } as never), 'Unknown subscribeBinary() option: layer'],
+      [() => me.send(me.id, 'x', { confirm: true } as never), 'Unknown send() option: confirm'],
+      [() => room.getParticipants({ all: true } as never), 'Unknown getParticipants() option: all'],
     ]
     for (const [call, message] of calls) await expect(Promise.resolve().then(call)).rejects.toThrow(message)
   })
@@ -2352,9 +2352,9 @@ describe('client Room lifecycle', () => {
     ack.resolve({ id, joinedAt: 1 })
     const me = await joining
     const calls: Array<[() => unknown, string]> = [
-      [() => client.getParticipants({ hiden: true } as never), 'Unknown getParticipants() option: hiden'],
-      [() => me.publish('x', { retian: true } as never), 'Unknown publish() option: retian'],
-      [() => me.send(id, 'x', { ak: true } as never), 'Unknown send() option: ak'],
+      [() => client.getParticipants({ all: true } as never), 'Unknown getParticipants() option: all'],
+      [() => me.publish('x', { persist: true } as never), 'Unknown publish() option: persist'],
+      [() => me.send(id, 'x', { confirm: true } as never), 'Unknown send() option: confirm'],
     ]
     for (const [call, message] of calls) await expect(Promise.resolve().then(call)).rejects.toThrow(message)
   })
