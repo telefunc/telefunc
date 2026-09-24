@@ -22,15 +22,18 @@ async function addTodoItem(todoItem: TodoItem): Promise<TodoItem[]> {
 }
 
 async function resetTodoItems() {
-  const todoItemsData = env.TO_DO_LIST_DURABLE_OBJECTS.getByName('vike-todo-list-demo')
+  const todoItemsData = await getTodoItemsData()
   await todoItemsData.resetTodoItems()
   const todoItems = await todoItemsData.getTodoItems()
   return todoItems
 }
 
-async function getTodoItemsData() {
-  const todoItemsData = env.TO_DO_LIST_DURABLE_OBJECTS.getByName('vike-todo-list-demo')
-  return todoItemsData
+// wrangler's auto-generated Env types the namespace as `DurableObjectNamespace` without a
+// generic when `main` is a virtual module (`vike:server-entry`), so RPC methods aren't
+// surfaced. Cast once here to recover the typed stub.
+async function getTodoItemsData(): Promise<DurableObjectStub<TodoListDurableObject>> {
+  const namespace = env.TO_DO_LIST_DURABLE_OBJECTS as DurableObjectNamespace<TodoListDurableObject>
+  return namespace.getByName('vike-todo-list-demo')
 }
 
 class TodoListDurableObject extends DurableObject {

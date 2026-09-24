@@ -1,21 +1,16 @@
 ```tsx ts-only
-// UpdateTodo.tsx
+// Todo.tsx
 
-import { onUpdateTodoText } from './UpdateTodo.telefunc.ts'
+import { onTextChange } from './Todo.telefunc'
 
-export function CreateTodo() {
-  async function onAddTodo(event: SubmitEvent) {
-    const text = new FormData(event).get('text')
-    await onNewTodo(text)
-  }
-  
+function TodoItem({ id, text }: Todo) {
   return (
-    <form onSubmit={onAddTodo}>
-      <input input="text" />
-      <button>
-        Add To-do
-      </button>
-    </form>
+    <input
+      defaultValue={text}
+      onBlur={(ev) =>
+        onTextChange(id, ev.target.value)
+      }
+    />
   )
 }
 ```

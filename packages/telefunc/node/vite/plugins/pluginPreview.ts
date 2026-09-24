@@ -9,7 +9,7 @@ function pluginPreview(): Plugin[] {
     {
       name: 'telefunc:pluginPreview',
       apply: apply('preview'),
-      // Ensure that SvelteKit's configurePreviewServer() has precedence, see https://github.com/brillout/telefunc/pull/54
+      // Ensure that SvelteKit's configurePreviewServer() has precedence, see https://github.com/telefunc/telefunc/pull/54
       enforce: 'post',
       configurePreviewServer: {
         handler(server) {

@@ -28,11 +28,12 @@ type Job = {
   jobTests: { testFilePath: string; localConfig: LocalConfig | null }[] | null
   jobSetups: Setup[]
   jobCmd: string
+  splitFiles: boolean
 }
 type Setup = { os: string; node_version: string }
 type LocalConfig = { ci: { job: string; inspect: true } }
 type GlobalConfig = {
-  ci?: { jobs: { name: string; setups: Setup[]; command?: string }[] }
+  ci?: { jobs: { name: string; setups: Setup[]; command?: string; splitFiles?: boolean }[] }
   tolerateError?: TolerateError
 }
 
@@ -79,6 +80,7 @@ async function getJobs(testFiles: string[]): Promise<Job[]> {
         jobSetups: jobSpec.setups,
         jobCmd: jobSpec.command ?? 'pnpm exec test-e2e',
         jobTests: jobSpec.command ? null : [],
+        splitFiles: jobSpec.splitFiles ?? false,
       })
     })
   }
@@ -144,14 +146,26 @@ async function getMatrix(): Promise<MatrixEntry[]> {
   }
 
   const matrix: MatrixEntry[] = []
-  jobs.forEach(({ jobName, jobTests, jobSetups, jobCmd }) => {
+  jobs.forEach(({ jobName, jobTests, jobSetups, jobCmd, splitFiles }) => {
     jobSetups.forEach((setup) => {
-      matrix.push({
-        jobCmd,
-        jobName: jobName + getSetupName(setup),
-        TEST_FILES: (jobTests ?? []).map((jobTest) => jobTest.testFilePath).join(' '),
-        ...setup,
-      })
+      if (splitFiles && jobTests && jobTests.length > 0) {
+        // Fan out: one matrix entry per test file, so they run in parallel CI runners.
+        jobTests.forEach((jobTest) => {
+          matrix.push({
+            jobCmd,
+            jobName: `${jobName} (${path.posix.basename(jobTest.testFilePath)})` + getSetupName(setup),
+            TEST_FILES: jobTest.testFilePath,
+            ...setup,
+          })
+        })
+      } else {
+        matrix.push({
+          jobCmd,
+          jobName: jobName + getSetupName(setup),
+          TEST_FILES: (jobTests ?? []).map((jobTest) => jobTest.testFilePath).join(' '),
+          ...setup,
+        })
+      }
     })
   })
 

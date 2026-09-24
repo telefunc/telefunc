@@ -11,6 +11,16 @@ checkType<HeadingsURL>(0 as unknown as RedirectsURL)
 
 const redirects = {
   '/remix': '/react-router',
+  '/httpHeaders': '/headers',
+  '/telefunc': '/serve',
+  '/server': '/Telefunc',
   '/initial-page-data': '/initial-data',
   '/install': '/bundler',
+  '/transformer': '/how-it-works',
+  '/RPC': '/schemaless#rpc',
+  '/RPC-vs-GraphQL-REST': '/schemaless#rpc-vs-graphql-rest',
+  '/event-based': '/best-practices#event-based-architecture',
+  '/abort-vs-error': '/error-handling#error-flows',
+  '/form-validation': '/validation',
+  '/multiple-clients': '/best-practices#multiple-clients',
 } as const satisfies Config['redirects']

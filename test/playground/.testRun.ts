@@ -2,13 +2,13 @@ export { testRun }
 
 import { page, test, expect, expectLog, run, getServerUrl, autoRetry, fetchHtml } from '@brillout/test-e2e'
 import { testCounter } from '../utils'
-import { testFileUpload } from './pages/file-upload/e2e-test'
 
 function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
   run(cmd, {
-    tolerateError(log) {
-      return log.logText.includes('File arguments are being consumed out of order')
-    },
+    serverIsReadyMessage: (log) =>
+      log.includes('Listening on') ||
+      log.includes('Server running at') ||
+      (log.includes('Local:') && log.includes('http://localhost:3000')),
   })
 
   const isDev = cmd === 'pnpm run dev'
@@ -32,8 +32,6 @@ function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
   test('counter', async () => {
     await testCounter()
   })
-
-  testFileUpload()
 
   if (!isDev) {
     test('shield() generation', async () => {

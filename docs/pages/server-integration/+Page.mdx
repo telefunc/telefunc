@@ -1,7 +1,5 @@
 import { Link } from '@brillout/docpress'
 
-Using Telefunc with standalone servers
-
 ## 1. Install
 
 ```shell
@@ -12,65 +10,44 @@ npm install telefunc
 
 The Telefunc middleware intercepts and executes telefunction calls. This is also your opportunity to set any data you'd like available in the Telefunc request context. For more info, see <Link href="/getContext" />.
 
-You can add Telefunc to any server that uses the standard `Request` object, including [Hono](https://hono.dev), [Next.js](https://nextjs.org), [Nitro](https://nitro.build), [Nuxt](https://nuxt.com), and [SvelteKit](https://svelte.dev/docs/kit).
-See configuration guide for:
+See the setup guide for your stack:
 
-- <Link href="/server" text="Hono, Express, Fastify, etc." />
-- <Link href="/next" text="Next.js" />
-- <Link href="/svelte-kit" text="SvelteKit" />
-- <Link href="/vike" text="Vike" />
-- <Link href="/nuxt" text="Nuxt" />
-- <Link href="/react-router" text="React Router" />
-- <Link href="/react-native" text="React Native" />
-- <Link href="/bundler" text="Custom bundler" />
+- <Link href="/Telefunc">Hono, Express, Fastify, Bun, Deno, Cloudflare, etc.</Link>
+- <Link href="/next">Next.js</Link>
+- <Link href="/svelte-kit">SvelteKit</Link>
+- <Link href="/vike">Vike</Link>
+- <Link href="/nuxt">Nuxt</Link>
+- <Link href="/react-router">React Router</Link>
+- <Link href="/react-native">React Native</Link>
+- <Link href="/bundler">Custom bundler</Link>
 
-You can also add Telefunc to servers that use the Node.js `req` readable stream, like [Express](https://expressjs.com) or [Fastify](https://fastify.dev).
+For example, with [Hono](https://hono.dev):
 
-```js choice=Hono
-// server.js
+```ts
+// server.ts
 // Environment: server
 
 import { Hono } from 'hono'
-import { telefunc } from 'telefunc'
+import { serve } from '@hono/node-server'
+import { Telefunc } from 'telefunc/node'
 
 const app = new Hono()
+const telefunc = new Telefunc()
 
 app.all('/_telefunc', async (c) => {
-  // make sure to pass raw request
-  const httpResponse = await telefunc({ request: c.req.raw })
-
-  return new Response(httpResponse.body, {
-    status: httpResponse.statusCode,
-    headers: { 'content-type': httpResponse.contentType },
+  const response = await telefunc.serve({
+    request: c.req.raw,
     context: {
       // You can add any arbitrary contextual information here
     },
   })
+  return response ?? c.notFound()
 })
-```
 
-```js choice=Express
-// server.js
-// Environment: server
+const server = serve({ fetch: app.fetch, port: 3000 })
 
-import express from 'express'
-import { telefunc } from 'telefunc'
-
-const app = express()
-
-app.all('/_telefunc', async (req, res) => {
-  const httpResponse = await telefunc({
-    url: req.originalUrl,
-    method: req.method,
-    readable: req,
-    contentType: req.headers['content-type'] || '',
-    context: {
-      // You can add any arbitrary contextual information here
-    },
-  })
-
-  res.status(httpResponse.statusCode).type(httpResponse.contentType).send(httpResponse.body)
-})
+// Enable WebSocket support for streams
+telefunc.installWebSocket(server)
 ```
 
 ### Next
@@ -80,4 +57,5 @@ app.all('/_telefunc', async (req, res) => {
 ## See also
 
 - <Link href="/getContext" />
-- <Link href="/telefunc" />
+- <Link href="/Telefunc" />
+- <Link href="/serve" />

@@ -1,6 +1,6 @@
 import express from 'express'
 import cors from 'cors'
-import { telefunc, config } from 'telefunc'
+import { serve, config } from 'telefunc'
 import { createRequire } from 'node:module'
 
 startServer()
@@ -26,13 +26,16 @@ function start(app) {
 
 function installTelefunc(app) {
   app.all('/_telefunc', async (req, res) => {
-    const httpResponse = await telefunc({
+    const httpResponse = await serve({
       url: req.originalUrl,
       method: req.method,
       readable: req,
-      contentType: req.headers['content-type'] || '',
+      headers: req.headers,
     })
-    res.status(httpResponse.statusCode).type(httpResponse.contentType).send(httpResponse.body)
+    for (const [key, value] of httpResponse.headers) {
+      res.setHeader(key, value)
+    }
+    res.status(httpResponse.statusCode).send(httpResponse.body)
   })
 }
 

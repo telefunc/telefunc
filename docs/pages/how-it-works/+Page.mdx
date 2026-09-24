@@ -32,17 +32,15 @@ In this example, the `hello.telefunc.js` file is never actually loaded in the br
 </CodeComparison>
 
 1. Telefunc uses build plugins to crawl your app and automatically
-<Link href="/shield#automatic-from-typescript">generate type shields</Link> from your telefunction signature.
+<Link href="/shield#typescript-automatic">generate type shields</Link> from your telefunction signature.
 2. It also transforms `hello.telefunc.js` into a slim HTTP call to <Link href="/server-integration">the server</Link>:
 
 ```js
 // hello.telefunc.js (after Telefunc transformation)
 // Environment: Browser
 
-import { __internal_makeHttpRequest } from 'telefunc/client'
-export const hello = (...args) => {
-  return __internal_makeHttpRequest('/hello.telefunc.js:hello', args)
-}
+import { __remoteTelefunctionCall } from 'telefunc/client'
+export const hello = (...args) => __remoteTelefunctionCall('/hello.telefunc.js', 'hello', args)
 ```
 
 > There is work-in-progress to be able to use Telefunc without a transformer, see [#52](https://github.com/telefunc/telefunc/issues/52).
@@ -53,7 +51,7 @@ export const hello = (...args) => {
 
 When `hello('Eva')` is called in the browser,
 
-1. The HTTP client (`__internal_makeHttpRequest`) serializes the call and makes an HTTP request to the `/_telefunc` route on your server.
+1. The HTTP client (`__remoteTelefunctionCall()`) serializes the call and makes an HTTP request to the `/_telefunc` route on your server.
 
 ```sh
 POST /_telefunc HTTP/1.1
@@ -63,7 +61,7 @@ POST /_telefunc HTTP/1.1
 }
 ```
 
-2. The <Link href="/telefunc" text={(<code>telefunc</code>)} /> middleware on your server intercepts the request, executes the telefunction call, and returns the (serialized) result.
+2. The <Link href="/Telefunc">Telefunc middleware</Link> on your server intercepts the request, executes the telefunction call, and returns the (serialized) result.
 
 ```sh
 HTTP/1.1 200 OK

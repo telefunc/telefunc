@@ -28,22 +28,26 @@ export default {
 
 The Telefunc middleware intercepts and executes telefunction calls. This is also your opportunity to set any data you'd like available in the Telefunc request context. For more info, see <Link href="/getContext" />.
 
+For example, with Hono (see <Link href="/Telefunc" /> for other servers):
+
 ```ts
 // server.ts
 // Environment: server
 
 import { Hono } from 'hono'
-import { telefunc } from 'telefunc'
+import { serve } from '@hono/node-server'
+import { Telefunc } from 'telefunc/node'
 
 const app = new Hono()
+const telefunc = new Telefunc()
 
 app.all('/_telefunc', async (c) => {
-  const httpResponse = await telefunc({ request: c.req.raw })
-  return new Response(httpResponse.body, {
-    status: httpResponse.statusCode,
-    headers: { 'content-type': httpResponse.contentType },
-  })
+  const response = await telefunc.serve({ request: c.req.raw })
+  return response ?? c.notFound()
 })
+
+const server = serve({ fetch: app.fetch, port: 3000 })
+telefunc.installWebSocket(server)
 ```
 
 ### Next

@@ -2,13 +2,13 @@ export { onAbort }
 export { callOnAbortListeners }
 export { onTelefunctionRemoteCallError }
 
-import type { TelefunctionError, TelefunctionCallAbort } from '../TelefunctionError.js'
+import type { AbortError } from '../../shared/Abort.js'
 import { assertWarning } from '../../utils/assert.js'
 
-type Listener = (err: TelefunctionCallAbort) => void
+type Listener = (err: AbortError) => void
 
 /** Outdated: use onAbort() instead */
-function onTelefunctionRemoteCallError(listener: (err: TelefunctionError) => void) {
+function onTelefunctionRemoteCallError(listener: (err: Error) => void) {
   assertWarning(false, 'onTelefunctionRemoteCallError() deprecated in favor of onAbort()', {
     onlyOnce: true,
     showStackTrace: true,
@@ -21,7 +21,7 @@ function onAbort(listener: Listener) {
   window.__telefunc_errorListeners.push(listener)
 }
 
-function callOnAbortListeners(err: TelefunctionCallAbort) {
+function callOnAbortListeners(err: AbortError) {
   ;(window.__telefunc_errorListeners || []).forEach((listener) => {
     listener(err)
   })

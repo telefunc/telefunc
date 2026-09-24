@@ -14,7 +14,7 @@ npm install telefunc
 ```ts
 // vite.config.ts
 
-import { reactRouter } from '@react-router/dev/vite';
+import { reactRouter } from '@react-router/dev/vite'
 import { telefunc } from 'telefunc/vite'
 import { defineConfig } from 'vite'
 
@@ -28,22 +28,31 @@ export default defineConfig({
 The Telefunc middleware intercepts and executes telefunction calls. This is also your opportunity to set any data you'd like available in the Telefunc request context. For more info, see <Link href="/getContext" />.
 
 ```ts
-// src/routes/_telefunc.ts
+// app/routes/_telefunc.ts
 // Environment: server
 
-import { telefunc } from "telefunc";
+import { Telefunc } from 'telefunc/node'
+import type { Route } from './+types/_telefunc'
 
-export async function action({ request }: ActionFunctionArgs) {
-  const { url, method } = request;
-  const body = await request.json();
-  const httpResponse = await telefunc({
-    url: new URL(url).pathname,
-    method,
-    body: JSON.stringify(body),
-  });
+const telefunc = new Telefunc()
 
-  return JSON.parse(httpResponse.body);
+async function handler({ request }: Route.LoaderArgs | Route.ActionArgs) {
+  const response = await telefunc.serve({ request })
+  return response ?? new Response('Not found', { status: 404 })
 }
+
+export { handler as loader, handler as action }
+```
+
+```ts
+// app/routes.ts
+
+import { type RouteConfig, index, route } from '@react-router/dev/routes'
+
+export default [
+  index('routes/home.tsx'),
+  route('_telefunc', 'routes/_telefunc.ts'),
+] satisfies RouteConfig
 ```
 
 ### Next

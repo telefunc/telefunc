@@ -1,13 +1,8 @@
-import { CodeBlockTransformer, Link, Warning } from '@brillout/docpress'
-import '../../components/tabs.css'
+import { CodeBlockTransformer, Link } from '@brillout/docpress'
 
 **Environment**: server.
 
 `getContext()` allows telefunctions to type-safely access the Telefunc request context.
-
-<Warning>
-    You must populate `Telefunc.Context` using the <Link href="/telefunc" /> before trying to access it with `getContext()`.
-</Warning>
 
 It's most commonly used for implementing permissions, see <Link href="/permissions" />.
 
@@ -22,12 +17,18 @@ export async function onLoad() {
   if (!userId) {
     throw Abort()
   }
-  
+
   // ...
 }
 ```
 
-## Type safety
+## Provide
+
+You can add `context` properties when calling `telefunc.serve()` — see <Link href="/Telefunc" />.
+
+> You can also provide `context` outside the server middleware (e.g. when <Link href="/testing">testing</Link>) via <Link href="/provideTelefuncContext"><code>provideTelefuncContext()</code></Link>.
+
+## Type safety{#typescript}
 
 You can use a generic type argument to set the type locally...
 
@@ -36,7 +37,7 @@ You can use a generic type argument to set the type locally...
 
 import { getContext } from 'telefunc'
 
-type UserContext = { user: string }
+type UserContext = { userId: string }
 
 export async function someTelefunction() {
   // TypeScript knows that `userId` is a `string`
@@ -49,15 +50,18 @@ export async function someTelefunction() {
 ```ts ts-only
 // TelefuncContext.d.ts
 
-import 'telefunc'
-
-declare module 'telefunc' {
+declare global {
   namespace Telefunc {
     interface Context {
       userId: null | string
     }
   }
 }
+
+// Add this line if TypeScript complains about `declare global` (it requires the file
+// to have at least one `import` or `export` so that TypeScript treats it as a module).
+// https://typescriptlang.org/docs/handbook/2/modules.html#how-javascript-modules-are-defined
+export {}
 ```
 
 ```ts ts-only
@@ -66,13 +70,13 @@ declare module 'telefunc' {
 import { getContext } from 'telefunc'
 
 export async function someTelefunction() {
-  // TypeScript still knows that `user.id` is a `string`
-  // const { userId } = getContext<UserContext>() // [!code --]
+  // TypeScript still knows that `userId` is a `null | string`
+  const { userId } = getContext<UserContext>() // [!code --]
   const { userId } = getContext() // [!code ++]
 }
 ```
 
-## Call order
+## Call order{#access}
 
 Make sure to call `getContext()` before any `await` operators:
 
@@ -86,7 +90,7 @@ export async function myTelefunction() {
 }
 ```
 
-If you call `getContext()` called after an `await` operator...
+If you call `getContext()` after an `await` operator...
 
 ```ts
 // TodoList.telefunc.ts
@@ -101,16 +105,24 @@ export async function myTelefunction() {
 ...you will see this error:
 
 <CodeBlockTransformer lineBreak="break-word">
-    ```
-    [telefunc][Wrong Usage][getContext()] Cannot access context object, see https://telefunc.com/getContext#access
-    ```
+```
+[telefunc][Wrong Usage][getContext()] Cannot access context object, see https://telefunc.com/getContext#access
+```
 </CodeBlockTransformer>
 
-### Next:
+## `onClose()`
+
+The context object includes `onClose()`, see <Link href="/onClose#context-onclose" />.
+
+## `signal`
+
+The context object includes a `signal` (an `AbortSignal`), see <Link href="/onClose#context-signal" />.
+
+### Next
 
 <Link href="/shield" />
 
 ## See also
 
-- <Link href="/server-integration" />
 - <Link href="/permissions" />
+- <Link href="/Telefunc" />

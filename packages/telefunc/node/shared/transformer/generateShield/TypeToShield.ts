@@ -15,22 +15,75 @@ type ShieldRes<S extends string, Acc extends string[] = []> = {
   acc: Acc
 }
 
+/** Extensions augment this via `declare global { namespace Telefunc { interface ShieldTypeMap { foo: Foo } } }`. */
+declare global {
+  namespace Telefunc {
+    interface ShieldTypeMap {}
+  }
+}
+
+// On multi-match (e.g. `Subject<T>` matches both `subject` and `observable` since
+// Subject extends Observable), pick the key whose value type isn't a proper supertype
+// of another matched key's value — the most specific.
 // prettier-ignore
 // biome-ignore format:
-type SimpleType<T, Acc extends any[] = []> = Equals<T, string> extends true
+type ExtensionType<T, Acc extends any[] = [], Keys = keyof Telefunc.ShieldTypeMap> =
+  Keys extends infer K extends keyof Telefunc.ShieldTypeMap & string
+    ? T extends Telefunc.ShieldTypeMap[K]
+      ? true extends HasStricterMatch<T, K>
+        ? never
+        : ShieldRes<`__telefunc_t.${K}`, Acc>
+      : never
+    : false
+// prettier-ignore
+// biome-ignore format:
+type HasStricterMatch<T, K extends keyof Telefunc.ShieldTypeMap> =
+  keyof Telefunc.ShieldTypeMap extends infer K2
+    ? K2 extends keyof Telefunc.ShieldTypeMap
+      ? K2 extends K ? false
+        : T extends Telefunc.ShieldTypeMap[K2]
+          ? Telefunc.ShieldTypeMap[K2] extends Telefunc.ShieldTypeMap[K]
+            ? Telefunc.ShieldTypeMap[K] extends Telefunc.ShieldTypeMap[K2] ? false : true
+            : false
+          : false
+      : false
+    : false
+type ExtensionTypeResult<T, Acc extends any[] = []> = [ExtensionType<T, Acc>] extends [never]
+  ? false
+  : ExtensionType<T, Acc>
+
+// prettier-ignore
+// biome-ignore format:
+type SimpleType<T, Acc extends any[] = []> = [T] extends [never]
+  ? ShieldRes<'__telefunc_t.never', Acc>
+  : Equals<T, any> extends true
+  ? ShieldRes<'__telefunc_t.any', Acc>
+  : unknown extends T
+  ? ShieldRes<'__telefunc_t.any', Acc>
+  : Equals<T, string> extends true
   ? ShieldRes<'__telefunc_t.string', Acc>
   : Equals<T, number> extends true
   ? ShieldRes<'__telefunc_t.number', Acc>
   : Equals<T, boolean> extends true
   ? ShieldRes<'__telefunc_t.boolean', Acc>
+  : Equals<T, void> extends true
+  ? ShieldRes<'__telefunc_t.const(undefined)', Acc>
+  : Equals<T, undefined> extends true
+  ? ShieldRes<'__telefunc_t.const(undefined)', Acc>
   : Equals<T, Date> extends true
   ? ShieldRes<'__telefunc_t.date', Acc>
   : Equals<T, File> extends true
   ? ShieldRes<'__telefunc_t.file', Acc>
   : Equals<T, Blob> extends true
   ? ShieldRes<'__telefunc_t.blob', Acc>
-  : Equals<T, any> extends true
-  ? ShieldRes<'__telefunc_t.any', Acc>
+  : Equals<T, ReadableStream<Uint8Array>> extends true
+  ? ShieldRes<'__telefunc_t.readableStream', Acc>
+  : Equals<T, ReadableStream> extends true
+  ? ShieldRes<'__telefunc_t.readableStream', Acc>
+  : T extends (...args: any[]) => any
+  ? ShieldRes<'__telefunc_t.function', Acc>
+  : ExtensionTypeResult<T, Acc> extends ShieldRes<any, any>
+  ? ExtensionTypeResult<T, Acc>
   : false
 
 // prettier-ignore
@@ -168,7 +221,7 @@ type JoinStrings<T extends any[], Acc extends string = ''> = T extends [infer He
     : Acc
   : Acc
 
-type ShieldStr<T, Res = Shield<T>> = Res extends ShieldRes<any, any> ? WrapShieldRes<Res> : never
+export type ShieldStr<T, Res = Shield<T>> = Res extends ShieldRes<any, any> ? WrapShieldRes<Res> : never
 
 type Tail<L extends any[]> = L extends readonly [] ? [] : L extends readonly [any?, ...infer LTail] ? LTail : []
 
@@ -185,12 +238,30 @@ export type TypeToShield<T> = T extends (...args: any) => any
   : // export isn't a function => do nothing
     'NON_FUNCTION_EXPORT'
 
+import type { TELEFUNC_SHIELDS } from './shield-key.js'
+
+/** Pull a named field out of a type's `[TELEFUNC_SHIELDS]` slot. Identity-matches on the
+ *  symbol so unrelated symbol-keyed members can't accidentally satisfy the extraction. */
+export type ShieldField<T, K extends string> = T extends { [TELEFUNC_SHIELDS]: { [P in K]: infer V } } ? V : never
+
+/** Single-property type read once at setup to resolve `[TELEFUNC_SHIELDS]`'s exact escaped
+ *  property name (`__@TELEFUNC_SHIELDS@<id>`, where `<id>` is per-project). */
+export type _TelefuncShieldsKeyProbe = { [TELEFUNC_SHIELDS]: never }
+
 type _test = [
   Expect<Equals<ShieldStr<string>, '__telefunc_t.string'>>,
   Expect<Equals<ShieldStr<number>, '__telefunc_t.number'>>,
   Expect<Equals<ShieldStr<boolean>, '__telefunc_t.boolean'>>,
   Expect<Equals<ShieldStr<Date>, '__telefunc_t.date'>>,
   Expect<Equals<ShieldStr<any>, '__telefunc_t.any'>>,
+  // `void` and `undefined` both assert "runtime value is `undefined`" — the shield must enforce
+  // the TS type at runtime. A callback typed `() => void` returning `true` would otherwise slip
+  // through unchecked and violate caller assumptions (e.g. `if (await cb()) …`).
+  Expect<Equals<ShieldStr<void>, '__telefunc_t.const(undefined)'>>,
+  Expect<Equals<ShieldStr<undefined>, '__telefunc_t.const(undefined)'>>,
+  // `never` = "no value is permitted." Emitted for e.g. `ChannelData<never>` when a direction
+  // is disabled. Any value a non-TS client manages to send is rejected.
+  Expect<Equals<ShieldStr<never>, '__telefunc_t.never'>>,
   Expect<Equals<ShieldStr<string | null>, '__telefunc_t.nullable(__telefunc_t.string)'>>,
   Expect<Equals<ShieldStr<string | undefined>, '__telefunc_t.optional(__telefunc_t.string)'>>,
   Expect<

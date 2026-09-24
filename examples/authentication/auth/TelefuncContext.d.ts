@@ -1,7 +1,6 @@
-import 'telefunc'
 import type { User } from '#app/db'
 
-declare module 'telefunc' {
+declare global {
   namespace Telefunc {
     interface Context {
       user: null | User

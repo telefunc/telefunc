@@ -1,21 +1,23 @@
 ```ts
-// index.ts
+// server.ts
 // Environment: server
 
+import { Hono } from 'hono'
+import { Telefunc } from 'telefunc/node'
+
 const app = new Hono()
+const telefunc = new Telefunc()
 
 // ... auth, rate limiting, etc.
 
 app.all('/_telefunc', async (c) => {
-	const httpResponse = await telefunc({ request: c.req.raw })
-  
-	return new Response(httpResponse.body, {
-	    status: httpResponse.statusCode,
-	    headers: { 'content-type': httpResponse.contentType },
-	    context: {
-	      user: c.user, // Pass only what your telefunctions need
-	    },
-	})
+  const response = await telefunc.serve({
+    request: c.req.raw,
+    context: {
+      user: c.get('user'), // Pass only what your telefunctions need
+    },
+  })
+  return response ?? c.notFound()
 })
 
 export default app

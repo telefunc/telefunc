@@ -16,12 +16,12 @@ export function CTALink({
   const theme =
     variant === 'secondary'
       ? {
-          backgroundColor: 'var(--color-text)',
+          backgroundColor: 'var(--dp-color-text)',
           color: '#eee',
         }
       : {
           backgroundColor: 'rgb(247, 224, 24)',
-          color: 'var(--color-text)',
+          color: 'var(--dp-color-text)',
         }
 
   const spacing =

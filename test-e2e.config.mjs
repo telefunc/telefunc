@@ -3,6 +3,13 @@ export default {
     jobs: getCiJobs(),
   },
   tolerateError,
+  // The dockerized e2e suite (`.test-docker.*`) hits Caddy at https://localhost:8443 with a
+  // cert from Caddy's auto-generated local CA — Chromium has no reason to trust that CA, so
+  // we tell it to skip cert validation. Same flag is harmless for non-docker tests that
+  // already speak HTTP or have a real cert chain.
+  chromiumLaunchOptions: {
+    args: ['--ignore-certificate-errors'],
+  },
 }
 
 function getCiJobs() {
@@ -38,6 +45,13 @@ function getCiJobs() {
       setups,
     },
     {
+      name: 'Playground Stream',
+      // Tests use bash-only syntax (`fuser`, `rm -rf`, `2>/dev/null`) and the docker test needs Linux containers => Ubuntu-only
+      setups: setupModern,
+      // Fans out one CI runner per `.test-*.test.ts` so the suite runs in parallel instead of sequentially
+      splitFiles: true,
+    },
+    {
       name: 'React Native',
       setups,
     },
@@ -64,6 +78,13 @@ function tolerateError({ logSource, logText }) {
   return (
     // TO-DO/eventually: move everything to this array
     [
+      // [18:13:12.528][/.test-docker.binary-inline.sse.test.ts][pnpm test:docker][stderr] [PLUGIN_TIMINGS] Your build spent significant time in plugins. Here is a breakdown:
+      //   - telefunc:pluginTransformTelefuncFiles (77%)
+      //   - vike:pluginVirtualFiles (8%)
+      //   - vite:css (7%)
+      //   - ud:catch-all (7%)
+      // See https://rolldown.rs/options/checks#plugintimings for more details.
+      '[PLUGIN_TIMINGS] Your build spent significant time in plugins.',
       // [22:41:29.864][\examples\next][npm run dev][stderr] Watchpack Error (initial scan): Error: EINVAL: invalid argument, lstat 'D:\DumpStack.log.tmp'
       'Watchpack Error (initial scan)',
       // Error: [DocPress][Warning] prop `text` is deprecated

@@ -1,3 +1,71 @@
+## [0.2.24](https://github.com/telefunc/telefunc/compare/v0.2.23...v0.2.24) (2026-08-21)
+
+
+### Bug Fixes
+
+* @brillout/vite-plugin-server-entry@^0.7.20 ([16ccec6](https://github.com/telefunc/telefunc/commit/16ccec609e3ddf1797afd171d92e7119d91d6e02))
+* show usage error for re-exports in .telefunc files ([#462](https://github.com/telefunc/telefunc/issues/462)) ([#463](https://github.com/telefunc/telefunc/issues/463)) ([9407f08](https://github.com/telefunc/telefunc/commit/9407f08152835aafbd9a6765ff66700542824a74))
+
+
+
+## [0.2.23](https://github.com/telefunc/telefunc/compare/v0.2.22...v0.2.23) (2026-08-09)
+
+
+### Bug Fixes
+
+* reference-identity-preserving serialization ([#444](https://github.com/telefunc/telefunc/issues/444)) ([6f496b7](https://github.com/telefunc/telefunc/commit/6f496b72e4fb145399f1dc8c09b98c052ef390c5))
+* resolve extension types after telefunc loading ([#457](https://github.com/telefunc/telefunc/issues/457)) ([2e70d5b](https://github.com/telefunc/telefunc/commit/2e70d5be671243b5afaeae8b02c71c9f538f29a8))
+* support client Vite environment names other than `client` ([#459](https://github.com/telefunc/telefunc/issues/459)) ([18544d3](https://github.com/telefunc/telefunc/commit/18544d39cc6871edac72ebd6c91bc74d8652f894))
+
+
+
+## [0.2.22](https://github.com/telefunc/telefunc/compare/v0.2.21...v0.2.22) (2026-07-08)
+
+
+### Bug Fixes
+
+* update @brillout/json-serializer@^0.5.25 ([bed70e3](https://github.com/telefunc/telefunc/commit/bed70e370aa1681357939fa18a93d5773b74b237))
+
+
+
+## [0.2.21](https://github.com/brillout/telefunc/compare/v0.2.20...v0.2.21) (2026-07-01)
+
+
+* add runtime-specific adapters + Cloudflare Durable Object sharding ([8ca551e](https://github.com/brillout/telefunc/commit/8ca551e2837379f36a82ffdfce607c17f14291cc))
+
+
+### Bug Fixes
+
+* disable naming convention inside Cloudflare Workers ([4d34d6a](https://github.com/brillout/telefunc/commit/4d34d6a096c3693bf36cd18897434d67a57f38b3))
+* replace `declare module 'telefunc'` with `declare global` ([#279](https://github.com/brillout/telefunc/issues/279)) ([38eafc5](https://github.com/brillout/telefunc/commit/38eafc5c10b6251788ba9142219b5f5780358164))
+* use Vite's `root` as default for `config.root` ([#262](https://github.com/brillout/telefunc/issues/262)) ([00d8dd3](https://github.com/brillout/telefunc/commit/00d8dd3d54f9d528f8ffe72144040861528c2510))
+
+
+### Features
+
+* stream (closes [#135](https://github.com/brillout/telefunc/issues/135), [#36](https://github.com/brillout/telefunc/issues/36)) ([#264](https://github.com/brillout/telefunc/issues/264)) ([1f42c8e](https://github.com/brillout/telefunc/commit/1f42c8e7382785e170f19cd3ec809456c645425d))
+
+
+### MINOR BREAKING CHANGES
+
+> [!NOTE]
+> We recommend ignoring `MINOR BREAKING CHANGES` unless this version breaks your app, see [Vike Versioning](https://vike.dev/versioning).
+
+* `telefuncWebSocket()` API changed (now returns adapter object).
+Old direct calls must be updated to the new runtime-specific usage.
+
+
+
+## [0.2.20](https://github.com/brillout/telefunc/compare/v0.2.19...v0.2.20) (2026-04-10)
+
+
+### Bug Fixes
+
+* @brillout/vite-plugin-server-entry@^0.7.18 ([#238](https://github.com/brillout/telefunc/issues/238)) ([7610d4c](https://github.com/brillout/telefunc/commit/7610d4cb06575fe78ae1a61e8855ecc08a6829ff))
+* detect referenced tsconfig paths when locating function tsconfig files ([#241](https://github.com/brillout/telefunc/issues/241)) ([bf88d97](https://github.com/brillout/telefunc/commit/bf88d97b189a0c24356ad1712b6fda3a03ba82d1))
+
+
+
 ## [0.2.19](https://github.com/brillout/telefunc/compare/v0.2.18...v0.2.19) (2026-02-22)
 
 

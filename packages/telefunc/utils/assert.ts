@@ -31,7 +31,7 @@ function assert(condition: unknown, debugInfo?: unknown): asserts condition {
     return `Debug info (this is for the ${projectInfo.projectName} maintainers; you can ignore this): ${debugInfoSerialized}.`
   })()
 
-  const link = 'https://github.com/brillout/telefunc/issues/new'
+  const link = 'https://github.com/telefunc/telefunc/issues/new'
   const internalError = createErrorWithCleanStackTrace(
     [
       internalErrorPrefix,

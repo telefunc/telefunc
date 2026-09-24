@@ -1,9 +1,9 @@
 import { Link } from '@brillout/docpress'
 
 This page is about handling bugs, expected errors, and network errors.
- - To block unauthorized access, see: <Link href="/permissions" text="Permissions" />
- - To handle invalid telefunction arguments, see: <Link href="/validation" text="Validation" />
- - To install error tracking, see: <Link href="/onBug" text={(<code>onBug()</code>)} />
+ - To block unauthorized access, see: <Link href="/permissions">Permissions</Link>
+ - To handle invalid telefunction arguments, see: <Link href="/validation">Validation</Link>
+ - To install error tracking, see: <Link href="/onBug"><code>onBug()</code></Link>
 
 > To prevent leaking sensitive information, Telefunc never forwards unexpected server errors to the client.
 
@@ -29,11 +29,11 @@ If a telefunction throws an uncaught exception, then <Link href="/onBug" /> is c
 
 ### Network errors
 
-If the user's browser can't connect to your server, the error thrown client-side will include a boolean `isConnectionError` property.
+If the user's browser can't connect to your server, the error thrown client-side is a `NetworkError` (`import { NetworkError } from 'telefunc/client'`).
 
 ## Client side handling
 
-If `throw Abort()` interrupts a telefunction call, the abort data is returned to the client, and thrown as a `new Error(abortData)`. It can be accessed with the <Link href="/onAbort" /> hook, or caught and handled by your frontend:
+If `throw Abort(abortValue)` interrupts a telefunction call, the telefunction call on the client throws an error with `err.isAbort === true` and `err.abortValue`. It can be accessed with the <Link href="/onAbort" /> hook, or caught and handled by your frontend:
 
 ```html
 <!-- index.html -->
@@ -48,9 +48,13 @@ If `throw Abort()` interrupts a telefunction call, the abort data is returned to
         await hello('Eva')
         console.log("I'm never printed")
       } catch(err) {
-        console.log(err.message) // Prints 'Internal Server Error'
-        // E.g. show a popup "Something went wrong. Try again (later)."
-        // ...
+        if (err.isAbort) {
+          // The telefunction ran `throw Abort(abortValue)`
+          console.log(err.abortValue)
+        } else {
+          console.log(err.message) // Prints 'Internal Server Error'
+          // E.g. show a popup "Something went wrong. Try again (later)."
+        }
       }
     </script>
   </body>
@@ -59,22 +63,20 @@ If `throw Abort()` interrupts a telefunction call, the abort data is returned to
 
 ## Server side handling
 
-You can also handle the thrown error at your Telefunc server middleware:
+Register an <Link href="/onBug"><code>onBug()</code></Link> hook — it's called whenever a telefunction throws a bug (any error that isn't `Abort()`):
 
 ```ts
 // server.ts
+// Environment: server
 
-import { telefunc } from 'telefunc'
+import { onBug } from 'telefunc'
 
-// Add Telefunc middleware to server (Hono/Express.js/...)
-app.all('/_telefunc', async (req: Request, res: Response) => {
-  const httpResponse = await telefunc(/* ... */)
-  // Telefunc exposes any error thrown by a telefunction at httpResponse.err
-  if (httpResponse.err) {
-    // Error handling
-  }
+onBug((err) => {
+  // Error handling (e.g. report to Sentry, Bugsnag, ...)
 })
 ```
+
+> With the low-level <Link href="/serve"><code>serve()</code></Link>, the error is also exposed at `httpResponse.err`.
 
 ### Next
 
@@ -84,4 +86,4 @@ app.all('/_telefunc', async (req: Request, res: Response) => {
 
 - <Link href="/Abort" />
 - <Link href="/shield" />
-- <Link href="/telefunc" />
+- <Link href="/onBug" />

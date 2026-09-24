@@ -26,12 +26,12 @@ async function onSubmit(text) {
     const todos = await onNewTodo(text)
     // ...
   } catch (error) {
-    console.error(error) //
+    console.error(error)
   }
 }
-````
+```
 
-## Automatic (from TypeScript)
+## Automatic (from TypeScript){#typescript-automatic}
 
 If you use TypeScript, Telefunc automatically generates `shield()` for each telefunction.
 
@@ -45,14 +45,16 @@ import { shield } from 'telefunc' // [!code --]
 const t = shield.type // [!code --]
 
 shield(onNewTodo, [t.string]) // [!code --]
-export async function onNewTodo(text) {
+export async function onNewTodo(text: string) {
   // `text` is guaranteed to be a `string`
 }
 ```
 
 By default, Telefunc only generates `shield()` guards when you build for production. This improves local development speed. You can opt-in to `shield()` generation in development, see <Link href="/shield-config" />.
 
-## Manual
+> Telefunc guarantees that **every** value arriving at the server is validated — not just a telefunction's top-level arguments, but also every value the client sends through a <Link href="/stream">streaming primitive</Link> (callbacks, channels, streams).
+
+## Manual{#typescript-manual}
 
 You need to define `shield()` manually when using stacks that don't transpile server-side code (e.g. React Native or Parcel).
 
@@ -147,4 +149,5 @@ List of `shield()` types:
 ## See also
 
 - <Link href="/Abort" />
+- <Link href="/permissions" />
 - <Link href="/error-handling" />

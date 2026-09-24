@@ -1,1 +1,1 @@
-import './getContext/async.js'
+import './context/async.js'

@@ -1,14 +1,32 @@
 export { categories }
 export { headings }
+export { headingsDetached }
 export type { HeadingsURL }
 
-import type { Config, HeadingDefinition } from '@brillout/docpress'
+import type {
+  Config,
+  HeadingDefinition,
+  HeadingDetachedDefinition as HeadingDetachedDefinition_,
+} from '@brillout/docpress'
 import { iconGear, iconPlug, iconSeedling } from '@brillout/docpress' with { type: 'vike:pointer' }
+type HeadingDetachedDefinition = Omit<HeadingDetachedDefinition_, 'category'> & {
+  category: CategoryNames | 'Miscellaneous'
+}
 
 type ExtractHeadingUrl<C> = C extends { url: infer N extends string } ? N : C extends string ? C : never
-type HeadingsURL = ExtractHeadingUrl<(typeof headings)[number]>
+type HeadingsURL = ExtractHeadingUrl<(typeof headings)[number]> | ExtractHeadingUrl<(typeof headingsDetached)[number]>
+type ExtractCategoryName<C> = C extends { name: infer N extends string } ? N : C extends string ? C : never
+type CategoryNames = ExtractCategoryName<(typeof categories)[number]>
 
-const categories = ['Guides', 'Integrations', 'API'] as const satisfies Config['categories']
+const categories = [
+  'Guides',
+  'Guides (more)',
+  'Integrations',
+  'API',
+  'Miscellaneous',
+] as const satisfies Config['categories']
+
+const headingsDetached = [...misc(), ...guidesMore()] satisfies HeadingDetachedDefinition[]
 
 const headings = [
   // #region Onboarding
@@ -74,8 +92,41 @@ const headings = [
   },
   {
     level: 2,
-    title: 'File uploads',
+    title: 'Testing',
+    url: '/testing',
+  },
+  {
+    level: 4,
+    title: 'Streaming & real-time',
+  },
+  {
+    level: 2,
+    title: 'Stream',
+    url: '/stream',
+  },
+  {
+    level: 2,
+    title: '`@telefunc/tanstack-query`',
+    url: '/tanstack-query',
+  },
+  {
+    level: 2,
+    title: '`@telefunc/rxjs`',
+    url: '/rxjs',
+  },
+  {
+    level: 4,
+    title: 'Files',
+  },
+  {
+    level: 2,
+    title: 'File upload',
     url: '/file-upload',
+  },
+  {
+    level: 2,
+    title: 'File download',
+    url: '/file-download',
   },
   // #endregion
 
@@ -103,15 +154,6 @@ const headings = [
     title: 'Integrations',
     titleIcon: iconPlug,
     color: '#ffd511',
-  },
-  {
-    level: 4,
-    title: 'Server frameworks',
-  },
-  {
-    level: 2,
-    title: 'Hono, Express, etc.',
-    url: '/server',
   },
   {
     level: 4,
@@ -186,17 +228,21 @@ const headings = [
   },
   {
     level: 4,
-    title: 'Server',
+    title: 'Server Middleware',
   },
   {
     level: 2,
-    title: '`telefunc()',
-    url: '/telefunc',
+    title: '`new Telefunc()`',
+    url: '/Telefunc',
   },
   {
     level: 2,
-    title: '`throw Abort()`',
-    url: '/Abort',
+    title: '`serve()`',
+    url: '/serve',
+  },
+  {
+    level: 4,
+    title: 'Context',
   },
   {
     level: 2,
@@ -205,9 +251,32 @@ const headings = [
   },
   {
     level: 2,
+    title: '`provideTelefuncContext()`',
+    url: '/provideTelefuncContext',
+  },
+  {
+    level: 2,
+    title: '`withContext()`',
+    url: '/withContext',
+  },
+  {
+    level: 4,
+    title: 'Protection',
+  },
+  {
+    level: 2,
+    title: '`throw Abort()`',
+    url: '/Abort',
+  },
+  {
+    level: 2,
     title: '`shield()`',
     url: '/shield',
     sectionTitles: ['Automatic (from TypeScript)', 'Manual'],
+  },
+  {
+    level: 4,
+    title: 'Hooks',
   },
   {
     level: 2,
@@ -215,13 +284,30 @@ const headings = [
     url: '/onBug',
   },
   {
-    level: 4,
-    title: 'Client',
-  },
-  {
     level: 2,
     title: '`onAbort()`',
     url: '/onAbort',
+  },
+  {
+    level: 2,
+    title: '`onClose()`',
+    url: '/onClose',
+    sectionTitles: ['`context.onClose()`', '`channel.onClose()`', '`context.signal`'],
+  },
+  {
+    level: 4,
+    title: 'Stream',
+  },
+  {
+    level: 2,
+    title: '`Channel`',
+    url: '/channel',
+    sectionTitles: ['`new Channel()`', '`Broadcast`', '`new BroadcastChannel()`'],
+  },
+  {
+    level: 2,
+    title: '`close()`',
+    url: '/close',
   },
   {
     level: 4,
@@ -239,8 +325,19 @@ const headings = [
   },
   {
     level: 2,
-    title: '`httpHeaders`',
-    url: '/httpHeaders',
+    title: '`headers`',
+    url: '/headers',
+  },
+  {
+    level: 2,
+    title: '`transport`',
+    url: '/transport',
+  },
+  {
+    level: 2,
+    titleInNav: '`channel`',
+    title: '`channel` (config)',
+    url: '/channel-config',
   },
   {
     level: 2,
@@ -249,7 +346,7 @@ const headings = [
   },
   {
     level: 2,
-    title: '`telefuncFiles',
+    title: '`telefuncFiles`',
     url: '/telefuncFiles',
   },
   {
@@ -259,7 +356,8 @@ const headings = [
   },
   {
     level: 2,
-    title: '`shield`',
+    titleInNav: '`shield`',
+    title: '`shield` (config)',
     url: '/shield-config',
   },
   {
@@ -268,4 +366,34 @@ const headings = [
     url: '/log',
   },
   // #endregion
-] satisfies HeadingDefinition[]
+] as const satisfies HeadingDefinition[]
+
+function misc() {
+  return (
+    [
+      {
+        title: '❌ Non-function exports',
+        url: '/warning/non-function-export',
+      },
+    ] as const
+  ).map((h) => ({ ...h, category: 'Miscellaneous' as const })) satisfies HeadingDetachedDefinition[]
+}
+
+function guidesMore() {
+  return (
+    [
+      {
+        title: 'Stream at Scale',
+        url: '/stream/scale',
+      },
+      {
+        title: 'Stream on Cloudflare',
+        url: '/stream/cloudflare',
+      },
+      {
+        title: '`@telefunc/redis`',
+        url: '/redis',
+      },
+    ] as const
+  ).map((h) => ({ ...h, category: 'Guides (more)' as const })) satisfies HeadingDetachedDefinition[]
+}

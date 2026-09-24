@@ -96,7 +96,7 @@ describe('prepare()', () => {
                   "job": "Vite",
                 },
               },
-              "testFilePath": "test/playground/.test-dev.test.ts",
+              "testFilePath": "test/playground-streaming/.test-dev.test.ts",
             },
             {
               "localConfig": {
@@ -104,7 +104,7 @@ describe('prepare()', () => {
                   "job": "Vite",
                 },
               },
-              "testFilePath": "test/playground/.test-preview.test.ts",
+              "testFilePath": "test/playground-streaming/.test-preview.test.ts",
             },
           ],
         },

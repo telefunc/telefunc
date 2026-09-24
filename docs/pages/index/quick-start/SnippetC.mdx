@@ -18,7 +18,7 @@ function Upload() {
     <div>
       <label>Upload file</label>
       <input type="file" onChange={onChange} />
-      <div style={{ width: progress }} />
+      <div style={{ width: `${progress()}%` }} />
     </div>
   )
 }

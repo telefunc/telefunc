@@ -6,7 +6,7 @@ Add authorization checks to telefunctions using guard expressions in the functio
 
 ## DRY Permissions
 
-To implement reusable permissions logic, define helper functions that call <Link href="/getContext" text={(<code>getContext()</code>)}/>.
+To implement reusable permissions logic, define helper functions that call <Link href="/getContext"><code>getContext()</code></Link>.
 
 ```ts
 // auth/getUser.ts
@@ -50,7 +50,7 @@ import { getContext, Abort } from 'telefunc'
 /**
  * @param {string} todoId
  * @param {string} text
- * @returns {Promise<{ todos: Todo[] }>}
+ * @returns {Promise<{ todo: Todo }>}
  */
 export async function onTextChange(todoId, text) {
   const { user } = getContext()
@@ -60,8 +60,8 @@ export async function onTextChange(todoId, text) {
   }
 
   const todo = await db.query(
-    'SELECT id, text FROM todos WHERE id = :id LIMIT 1',
-    { id }
+    'SELECT id, text, authorId FROM todos WHERE id = :todoId LIMIT 1',
+    { todoId }
   )
 
   if (!todo) {
@@ -70,7 +70,7 @@ export async function onTextChange(todoId, text) {
   }
 
   // Easily implement advanced permissions schemes
-  if (todoItem.authorId !== user.id || !user.isAdmin) {
+  if (todo.authorId !== user.id && !user.isAdmin) {
     throw Abort({ code: 'unauthorized' })
   }
 
@@ -80,7 +80,9 @@ export async function onTextChange(todoId, text) {
 }
 ```
 
-Use `throw Abort()` to when rejecting access to a resource, or if a telefunction call is otherwise invalid.
+> You can use the same `getContext()` and `throw Abort()` pattern <Link href="/stream#authorization">to protect streams</Link>.
+
+Use `throw Abort()` when rejecting access to a resource, or if a telefunction call is otherwise invalid.
 
 On the frontend, use the <Link href="/onAbort" /> hook to handle redirects.
 
@@ -90,7 +92,7 @@ On the frontend, use the <Link href="/onAbort" /> hook to handle redirects.
 import { onAbort } from 'telefunc/client'
  
 onAbort((err) => {
-  if (err.abortValue.code === 'unauthorized') {
+  if (err.abortValue.code === 'unauthenticated') {
     // Redirect user to login page
     window.location.href = '/login'
   }
@@ -111,7 +113,7 @@ import { getContext, Abort } from 'telefunc'
 
 /**
  * @param {string} text
- * @returns {Promise<OnTextChangeResult>}
+ * @returns {Promise<OnNewTodoResult>}
  */
 export async function onNewTodo(text) {
   const { user } = getContext()

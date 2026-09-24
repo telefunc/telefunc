@@ -6,7 +6,12 @@ import { getTelefunctionKey } from '../../../utils/getTelefunctionKey.js'
 import { assertPosixPath } from '../../../utils/path.js'
 import { rollupSourceMapRemove } from '../../../utils/rollupSourceMap.js'
 
-function transformTelefuncFileClientSideSync(id: string, appRootDir: string, exportNames: string[]) {
+function transformTelefuncFileClientSideSync(
+  id: string,
+  appRootDir: string,
+  exportNames: string[],
+  extensionImports: string[],
+) {
   assertPosixPath(id)
   assertPosixPath(appRootDir)
 
@@ -19,14 +24,16 @@ function transformTelefuncFileClientSideSync(id: string, appRootDir: string, exp
   assert(!telefuncFilePath.startsWith('/') && !telefuncFilePath.startsWith('.'))
   telefuncFilePath = `/${telefuncFilePath}`
 
-  const code = getCode(exportNames, telefuncFilePath)
+  const code = getCode(exportNames, telefuncFilePath, extensionImports)
   return rollupSourceMapRemove(code)
 }
 
-export function getCode(exportNames: readonly string[], telefuncFilePath: string) {
+export function getCode(exportNames: readonly string[], telefuncFilePath: string, extensionImports: string[]) {
   const lines: string[] = []
 
   lines.push('// @ts-nocheck')
+
+  lines.push(...extensionImports)
 
   lines.push(`import { __remoteTelefunctionCall } from 'telefunc/client';`)
 

@@ -1,6 +1,6 @@
 export { TodoList }
 
-import React, { useState } from 'react'
+import React, { useEffect, useState } from 'react'
 import { useData } from 'vike-react/useData'
 import { onNewTodo, onReset } from './TodoList.telefunc'
 import type { Data } from './+data.js'
@@ -9,8 +9,10 @@ function TodoList() {
   const data = useData<Data>()
   const [todoItems, setTodoItems] = useState(data.todoItemsInitial)
   const [draft, setDraft] = useState('')
+  const [hydrated, setHydrated] = useState(false)
+  useEffect(() => setHydrated(true), [])
   return (
-    <>
+    <div id={hydrated ? 'hydrated' : undefined}>
       <ul>
         {todoItems.map((todoItem, i) => (
           <li key={i}>{todoItem.text}</li>
@@ -37,6 +39,6 @@ function TodoList() {
       >
         Reset
       </button>
-    </>
+    </div>
   )
 }

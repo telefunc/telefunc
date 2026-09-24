@@ -1,5 +1,7 @@
 export { default as ConfigWhereClient } from './ConfigWhereClient.mdx'
 export { default as ConfigWhereServer } from './ConfigWhereServer.mdx'
+export * from './TelefuncStreamBeta'
 export * from './Example'
 export * from './ReadingRecommendation'
 export * from './EventBasedRecommendation'
+export * from './PoweredByTelefuncStream'

@@ -50,11 +50,11 @@ function Quickstart() {
             <code>req</code>-compatible server.
           </p>
           <NoteWithCustomIcon style={{ lineHeight: 2 }} icon={'ℹ️'}>
-            Both standard JSON and <code>File</code> data are fully-supported, and&nbsp;
-            <a href="https://github.com/telefunc/telefunc/pull/236" style={{ fontWeight: 'bold' }}>
-              streaming is coming soon
-            </a>
-            !
+            JSON, <code>File</code> uploads &amp; downloads, and{' '}
+            <a href="/stream" style={{ fontWeight: 'bold' }}>
+              streaming
+            </a>{' '}
+            are all supported.
           </NoteWithCustomIcon>
         </div>
         <div style={{ flexGrow: 1 }}>
@@ -95,8 +95,8 @@ function Quickstart() {
           have to use REST or GraphQL.
         </p>
         <p>
-          But but if your goal is to seamlessly add data and interactivity to a front-end, then Telefunc can improve DX
-          and enable security and performance optimizations.
+          But if your goal is to seamlessly add data and interactivity to a front-end, then Telefunc can improve DX and
+          enable security and performance optimizations.
         </p>
       </div>
       <div

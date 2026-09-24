@@ -11,7 +11,6 @@ import { loadTelefuncFilesFromConfig } from './loadTelefuncFilesFromConfig.js'
 import pc from '@brillout/picocolors'
 
 async function loadTelefuncFiles(runContext: {
-  appRootDir: string | null
   telefuncFilesManuallyProvidedByUser: string[] | null
   telefuncFilePath: string
 }): Promise<{ telefuncFilesLoaded: TelefuncFiles; telefuncFilesAll: string[] }> {

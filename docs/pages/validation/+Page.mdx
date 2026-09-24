@@ -1,10 +1,10 @@
 import { Link } from '@brillout/docpress'
 
-Telefunc guarantees argument types at runtime with a <Link href="/shield" text={(<code>shield()</code>)} />. **This is generated automatically if you're using TypeScript.**
+Telefunc guarantees argument types at runtime with a <Link href="/shield"><code>shield()</code></Link>. **This is generated automatically if you're using TypeScript.**
 
-> If you aren't using TypeScript, or want to define the `shield` yourself, you can also <Link href="/shield#manual">define the <code>shield</code> manually</Link>.
+> If you aren't using TypeScript, or want to define the `shield` yourself, you can also <Link href="/shield#typescript-manual">define the <code>shield</code> manually</Link>.
 
-The `shield` rejects telefunction calls with invalid argument types using <Link href="/Abort" text={(<code>throw Abort()</code>)} />. 
+The `shield` rejects telefunction calls with invalid argument types using <Link href="/Abort"><code>throw Abort()</code></Link>. 
 
 ## Validating non-type rules
 
@@ -18,7 +18,7 @@ Simply return early with an error result, including any message the UI should di
 
 export async function onFormSubmit(email: string, password: string) {
   // Form validation
-  const inputErrors = {}
+  const inputErrors: { email?: string; password?: string } = {}
 
   if (!email) {
     inputErrors.email = 'Please enter your email.'
@@ -38,7 +38,7 @@ export async function onFormSubmit(email: string, password: string) {
 
   // IRL we'd want to hash the password first
   const user = await db.execute(
-    'INSERT INTO todos VALUES (:email, :password)',
+    'INSERT INTO users VALUES (:email, :password)',
     { email, password },
   )
 

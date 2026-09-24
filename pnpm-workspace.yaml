@@ -5,3 +5,12 @@ packages:
   - 'examples/*'
   - '!examples/react-native/'
   - '.github/workflows/ci'
+allowBuilds:
+  '@biomejs/biome': true
+  '@brillout/test-types': true
+  '@swc/core': true
+  esbuild: true
+  playwright-chromium: true
+  sharp: true
+  workerd: true
+minimumReleaseAge: 0

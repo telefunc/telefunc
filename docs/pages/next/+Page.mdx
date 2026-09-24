@@ -30,21 +30,16 @@ The Telefunc middleware intercepts and executes telefunction calls. This is also
 // app/api/telefunc/route.ts
 // Environment: server
 
-import { telefunc, config } from 'telefunc'
+import { Telefunc } from 'telefunc/node'
+import { config } from 'telefunc'
 
 config.telefuncUrl = '/api/telefunc'
 
-async function handler(request: Request) {
-  const httpResponse = await telefunc({
-    request:{
-      context: { /** */ }
-    }
-  })
+const telefunc = new Telefunc()
 
-  return new Response(httpResponse.body, {
-    status: httpResponse.statusCode,
-    headers: { 'content-type': httpResponse.contentType },
-  })
+async function handler(request: Request) {
+  const response = await telefunc.serve({ request })
+  return response ?? new Response('Not found', { status: 404 })
 }
 
 export { handler as GET, handler as POST }

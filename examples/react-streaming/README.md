@@ -3,7 +3,7 @@ Example of using Telefunc with [Vite](https://vitejs.dev), [Vike](https://vike.d
 To run it:
 
 ```bash
-git clone git@github.com:brillout/telefunc
+git clone git@github.com:telefunc/telefunc
 cd telefunc/examples/react-streaming/
 npm install
 npm run dev
