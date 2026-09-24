@@ -7,7 +7,6 @@ import { Room } from '../../packages/telefunc/wire-protocol/room/server/statics.
 import {
   CloudflareRoomBackend,
   CloudflareRoomSessionManager,
-  withCloudflareRoomSessionManager,
   type CloudflareRoomNamespace,
   type RoomSessionDeliveryRequest,
   type RoomSessionInvalidationRequest,
@@ -17,29 +16,81 @@ import {
   RoomAuthorityHost,
   type CommitWire,
 } from '../../packages/telefunc/wire-protocol/server/adapter/cloudflare/room/do.js'
-import { CloudflareBroadcastTransport } from '../../packages/telefunc/wire-protocol/server/adapter/cloudflare/broadcast.js'
+import {
+  CloudflareBroadcastAuthorityState,
+  CloudflareBroadcastTransport,
+  type BroadcastCalls,
+  type BroadcastDeliverRequest,
+  type BroadcastForwardRequest,
+  type BroadcastPresenceRequest,
+  type BroadcastPublishRequest,
+  type CloudflareBroadcastMember,
+} from '../../packages/telefunc/wire-protocol/server/adapter/cloudflare/broadcast.js'
+import { OrderedStubs } from '../../packages/telefunc/wire-protocol/server/adapter/cloudflare/ordered-stubs.js'
+import { withCloudflareSession } from '../../packages/telefunc/wire-protocol/server/adapter/cloudflare/session.js'
+import { ServerBroadcast } from '../../packages/telefunc/wire-protocol/server/server-broadcast.js'
 import {
   dispatchRoomFanout,
   type RoomFanoutNamespace,
   type RoomFanoutRequest,
 } from '../../packages/telefunc/wire-protocol/server/adapter/cloudflare/room/fanout.js'
+const broadcast = new CloudflareBroadcastTransport({ baseInstanceName: 'telefunc' })
 installBackend(
   () =>
     new CloudflareRoomBackend({
       rooms: () => (workerEnv as unknown as Env).PUBLIC as unknown as CloudflareRoomNamespace,
-      broadcast: new CloudflareBroadcastTransport({ baseInstanceName: 'telefunc' }),
+      broadcast,
     }),
   ['cloudflare-room-ci-public'],
 )
 const fanoutNamespace = (namespace: DurableObjectNamespace) => namespace as unknown as RoomFanoutNamespace
 const textEncoder = new TextEncoder()
 const CONTROL_HORIZON_MS = 2_000
-// Like the production class: one namespace hosts both sessions and room authorities.
+// Like the production class: one namespace hosts sessions, room authorities and Broadcast authorities.
 export class PublicDurableObject extends RoomAuthorityHost<Env> {
   readonly #manager: CloudflareRoomSessionManager
+  readonly #calls: BroadcastCalls = new OrderedStubs()
+  readonly #broadcastAuthority: CloudflareBroadcastAuthorityState
+  readonly #member: CloudflareBroadcastMember
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env, fanoutNamespace(env.PUBLIC))
+    broadcast.attachBinding(env.PUBLIC, 'PUBLIC')
     this.#manager = new CloudflareRoomSessionManager(ctx.id.toString())
+    this.#broadcastAuthority = new CloudflareBroadcastAuthorityState(ctx)
+    this.#member = broadcast.member(ctx.id.toString(), this.#calls)
+    this.#member.locate('weur')
+  }
+  // Each subscriber records into its own DO's storage: I/O that only that DO may do, like a socket send.
+  broadcastSubscribe(key: string): Promise<void> {
+    return this.#run(async () => {
+      this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS probe_received (seq INTEGER NOT NULL, text TEXT NOT NULL)')
+      new ServerBroadcast<string>({ key }).subscribe((text, info) => {
+        this.ctx.storage.sql.exec('INSERT INTO probe_received (seq, text) VALUES (?, ?)', info.seq, text)
+      })
+    })
+  }
+  broadcastPublish(key: string, texts: string[]): Promise<void> {
+    return this.#run(async () => {
+      const channel = new ServerBroadcast<string>({ key })
+      await Promise.all(texts.map((text) => channel.publish(text)))
+    })
+  }
+  broadcastReceived(): Array<{ seq: number; text: string }> {
+    return this.ctx.storage.sql
+      .exec<{ seq: number; text: string }>('SELECT seq, text FROM probe_received ORDER BY rowid')
+      .toArray()
+  }
+  telefuncBroadcastPublish(request: BroadcastPublishRequest) {
+    return broadcast.publishToSubscribers(this.#broadcastAuthority, this.#calls, request)
+  }
+  telefuncBroadcastForward(request: BroadcastForwardRequest) {
+    return broadcast.forwardToBucket(this.#calls, request)
+  }
+  telefuncBroadcastDeliver(request: BroadcastDeliverRequest) {
+    return this.#run(() => this.#member.deliver(request))
+  }
+  telefuncBroadcastPresence(request: BroadcastPresenceRequest) {
+    return this.#broadcastAuthority.setPresence(request)
   }
   publicRoomLifecycle(roomId: string) {
     return this.#run(async () => {
@@ -75,7 +126,7 @@ export class PublicDurableObject extends RoomAuthorityHost<Env> {
     return dispatchRoomFanout(fanoutNamespace(this.env.PUBLIC), request)
   }
   #run<T>(fn: () => T): T {
-    return withCloudflareRoomSessionManager(() => this.#manager, fn)
+    return withCloudflareSession({ room: () => this.#manager, broadcast: () => this.#member }, fn)
   }
 }
 // A session without Room delivery methods, so every handoff to it fails.
@@ -107,6 +158,9 @@ type RpcMethods<T> = {
 }
 type Authority = RpcMethods<RoomProbeDurableObject>
 type PublicSession = RpcMethods<Pick<PublicDurableObject, 'publicRoomLifecycle'>>
+type BroadcastSession = RpcMethods<
+  Pick<PublicDurableObject, 'broadcastSubscribe' | 'broadcastPublish' | 'broadcastReceived'>
+>
 type Env = {
   ROOM: DurableObjectNamespace
   TelefuncDurableObject: DurableObjectNamespace
@@ -118,6 +172,9 @@ export default {
       const suffix = crypto.randomUUID()
       if (new URL(request.url).pathname === '/large-retained') {
         return Response.json(await largeRetainedReplay(env, suffix))
+      }
+      if (new URL(request.url).pathname === '/broadcast-sessions') {
+        return Response.json(await broadcastAcrossSessions(env, suffix))
       }
       const publicSession = env.PUBLIC.get(
         env.PUBLIC.idFromName(`public-session-${suffix}`),
@@ -199,6 +256,17 @@ async function alarmScheduling(env: Env, sessionId: DurableObjectId, suffix: str
   })
   const afterUnsubscribe = await probe.control('alarm')
   return { idle, afterRoute, afterUnsubscribe }
+}
+// Two session DOs in one isolate, as local workerd runs them: both subscribe, one publishes.
+async function broadcastAcrossSessions(env: Env, suffix: string) {
+  const key = `broadcast-${suffix}`
+  const session = (name: string) =>
+    env.PUBLIC.get(env.PUBLIC.idFromName(`broadcast-session-${name}-${suffix}`)) as unknown as BroadcastSession
+  const [a, b] = [session('a'), session('b')]
+  await a.broadcastSubscribe(key)
+  await b.broadcastSubscribe(key)
+  await a.broadcastPublish(key, ['one', 'two', 'three'])
+  return { a: await a.broadcastReceived(), b: await b.broadcastReceived() }
 }
 async function largeRetainedReplay(env: Env, suffix: string) {
   const probe = roomProbe(env, suffix, 'large-retained')

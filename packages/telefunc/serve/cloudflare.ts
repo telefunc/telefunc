@@ -14,6 +14,7 @@ import { installBackend } from '../wire-protocol/backend/install.js'
 import {
   CloudflareBroadcastAuthorityState,
   CloudflareBroadcastTransport,
+  type CloudflareBroadcastMember,
 } from '../wire-protocol/server/adapter/cloudflare/broadcast.js'
 import type {
   BroadcastCalls,
@@ -26,7 +27,6 @@ import { OrderedStubs } from '../wire-protocol/server/adapter/cloudflare/ordered
 import {
   TELEFUNC_BROADCAST_BUCKET_HEADER,
   TELEFUNC_SESSION_HEADER,
-  TELEFUNC_SHARD_HEADER,
   assertLocationFallbackIsScaled,
   resolveSessionRoutingTarget,
 } from '../wire-protocol/server/adapter/cloudflare/routing.js'
@@ -37,13 +37,12 @@ import { CHANNEL_TRANSPORT } from '../wire-protocol/constants.js'
 import {
   CloudflareRoomSessionManager,
   CloudflareRoomBackend,
-  materializeCloudflareRoomSessionManager,
-  withCloudflareRoomSessionManager,
   type CloudflareRoomNamespace,
   type RoomSessionDeliveryRequest,
   type RoomSessionInvalidationRequest,
 } from '../wire-protocol/server/adapter/cloudflare/room/backend.js'
 import { RoomAuthorityHost } from '../wire-protocol/server/adapter/cloudflare/room/do.js'
+import { withCloudflareSession, type CloudflareSession } from '../wire-protocol/server/adapter/cloudflare/session.js'
 import {
   dispatchRoomFanout,
   type RoomFanoutNamespace,
@@ -130,24 +129,28 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
   const TelefuncDurableObject = class extends RoomAuthorityHost<Cloudflare.Env> {
     private readonly authorityState: CloudflareBroadcastAuthorityState
     private readonly broadcastCalls: BroadcastCalls = new OrderedStubs()
+    private readonly broadcastMember: CloudflareBroadcastMember
     private roomManager: CloudflareRoomSessionManager | null = null
+    // Only a Room subscription materializes the manager.
+    private readonly session: CloudflareSession = {
+      room: () => (this.roomManager ??= new CloudflareRoomSessionManager(this.ctx.id.toString())),
+      broadcast: () => this.broadcastMember,
+    }
 
     constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
       super(ctx, env, sessionNamespace(env) as unknown as RoomFanoutNamespace)
       broadcast.attachBinding(sessionNamespace(env), bindingName)
       this.authorityState = new CloudflareBroadcastAuthorityState(ctx)
+      this.broadcastMember = broadcast.member(ctx.id.toString(), this.broadcastCalls)
       crosswsAdapter.handleDurableInit(this, ctx, env)
       // Channel state lives in memory, so a socket that outlived an earlier instance lost it and can only reconnect.
       for (const socket of ctx.getWebSockets()) socket.close(1012, 'Telefunc session reset; reconnect')
     }
 
     async fetch(request: Request) {
-      return this.runWithRoomManager(async () => {
-        const shard = request.headers.get(TELEFUNC_SHARD_HEADER)
+      return this.runInSession(async () => {
         const bucket = request.headers.get(TELEFUNC_BROADCAST_BUCKET_HEADER) as LocationBucket | null
-        if (shard && bucket) {
-          broadcast.attachIsolateInfo(shard, bucket)
-        }
+        if (bucket) this.broadcastMember.locate(bucket)
         if (request.headers.get('upgrade') === 'websocket') {
           return crosswsAdapter.handleDurableUpgrade(this, request)
         }
@@ -157,11 +160,11 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
     }
 
     webSocketMessage(ws: WebSocket, message: string | ArrayBuffer) {
-      return this.runWithRoomManager(() => crosswsAdapter.handleDurableMessage(this, ws, message))
+      return this.runInSession(() => crosswsAdapter.handleDurableMessage(this, ws, message))
     }
 
     webSocketClose(ws: WebSocket, code: number, reason: string, wasClean: boolean) {
-      return this.runWithRoomManager(() => crosswsAdapter.handleDurableClose(this, ws, code, reason, wasClean))
+      return this.runInSession(() => crosswsAdapter.handleDurableClose(this, ws, code, reason, wasClean))
     }
 
     telefuncBroadcastPublish(request: BroadcastPublishRequest) {
@@ -173,7 +176,7 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
     }
 
     telefuncBroadcastDeliver(request: BroadcastDeliverRequest) {
-      return broadcast.deliverToLocal(request)
+      return this.runInSession(() => this.broadcastMember.deliver(request))
     }
 
     telefuncBroadcastPresence(request: BroadcastPresenceRequest) {
@@ -181,23 +184,19 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
     }
 
     telefuncRoomDeliver(request: RoomSessionDeliveryRequest): Promise<void> {
-      return this.runWithRoomManager(() => materializeCloudflareRoomSessionManager().deliver(request))
+      return this.runInSession(() => this.session.room().deliver(request))
     }
 
     telefuncRoomInvalidate(request: RoomSessionInvalidationRequest): void {
-      return this.runWithRoomManager(() => materializeCloudflareRoomSessionManager().invalidate(request))
+      return this.runInSession(() => this.session.room().invalidate(request))
     }
 
     telefuncRoomFanout(request: RoomFanoutRequest) {
       return dispatchRoomFanout(sessionNamespace(this.env) as unknown as RoomFanoutNamespace, request)
     }
 
-    // Only a Room subscription materializes the manager.
-    private runWithRoomManager<T>(fn: () => T): T {
-      return withCloudflareRoomSessionManager(
-        () => (this.roomManager ??= new CloudflareRoomSessionManager(this.ctx.id.toString())),
-        fn,
-      )
+    private runInSession<T>(fn: () => T): T {
+      return withCloudflareSession(this.session, fn)
     }
   }
 
@@ -239,7 +238,6 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
       }
 
       const forwardedHeaders = new Headers(request.headers as Headers)
-      forwardedHeaders.set(TELEFUNC_SHARD_HEADER, sessionInstanceName)
       forwardedHeaders.set(TELEFUNC_BROADCAST_BUCKET_HEADER, locationBucket)
       const forwardedRequest = new Request(request, { headers: forwardedHeaders })
 

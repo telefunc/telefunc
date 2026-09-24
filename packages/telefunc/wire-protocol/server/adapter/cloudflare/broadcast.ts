@@ -1,5 +1,5 @@
 /// <reference types="@cloudflare/workers-types" />
-export { CloudflareBroadcastTransport, CloudflareBroadcastAuthorityState }
+export { CloudflareBroadcastTransport, CloudflareBroadcastAuthorityState, CloudflareBroadcastMember }
 export type {
   BroadcastCalls,
   BroadcastDeliverRequest,
@@ -19,6 +19,7 @@ import { DriverAttempt } from '../../../backend/attempt.js'
 import { createDeferred } from '../../../../utils/createDeferred.js'
 import type { OrderingInfo } from '../../../ordering-frame.js'
 import type { CloudflareScale, LocationBucket } from './routing.js'
+import { currentCloudflareSession } from './session.js'
 
 const PRESENCE_TTL_MS = 90_000
 const PRESENCE_REFRESH_INTERVAL_MS = 30_000
@@ -36,23 +37,24 @@ async function unwrapRpcResult(rpc: Promise<PublishResult>): Promise<PublishResu
   }
 }
 
+/** `locationBucket` is the publishing session's; a publish from outside a session, as from a cron trigger, has none. */
 type BroadcastPublishRequest = {
   key: string
   kind: BroadcastLane['kind']
-  locationBucket: LocationBucket
+  locationBucket: LocationBucket | null
   payload: Uint8Array
 }
 
-/** The authority's sequenced publish, handed to one bucket coordinator for the member DOs it names. */
+/** The authority's sequenced publish, handed to one bucket coordinator for the member DOs it names by id. */
 type BroadcastForwardRequest = {
   key: string
   kind: BroadcastLane['kind']
   payload: Uint8Array
   info: OrderingInfo
-  doNames: string[]
+  members: string[]
 }
 
-/** A member DO's presence on a lane, at the key's authority; `bucket: null` withdraws it. */
+/** A member DO's presence on a lane, at the key's authority, by DO id; `bucket: null` withdraws it. */
 type BroadcastPresenceRequest = {
   key: string
   kind: BroadcastLane['kind']
@@ -77,20 +79,17 @@ type TelefuncDurableObjectStub = DurableObjectStub & {
 /** One DO's outgoing Broadcast calls. */
 type BroadcastCalls = OrderedStubs<TelefuncDurableObjectStub>
 
-/** One lane's presence, at the key's authority, for this isolate's representative DO. */
-class MemberBucketState {
+/** One lane's presence at the key's authority, for one member DO. */
+class MemberLane {
   state: 'establishing' | 'ready' | 'lost' = 'establishing'
   teardownRequested = false
   refreshTimer: ReturnType<typeof setInterval> | null = null
   readonly lane: BroadcastLane
-  /** Publishes reuse this stub: calls through one stub arrive in order, calls through fresh stubs don't. */
-  readonly authority: TelefuncDurableObjectStub
   readonly #setup = createDeferred()
   readonly #presenceListeners = new Set<(state: 'ready' | 'lost') => void>()
 
-  constructor(lane: BroadcastLane, authority: TelefuncDurableObjectStub) {
+  constructor(lane: BroadcastLane) {
     this.lane = lane
-    this.authority = authority
     void this.#setup.promise.catch(() => {})
   }
 
@@ -140,7 +139,7 @@ class CloudflareBroadcastSubscriptionAttempt extends DriverAttempt {
   readonly #stopPresenceObservation: () => void
   #unsubscribed = false
 
-  constructor(member: MemberBucketState, receiver: BackendReceiver, detach: () => Promise<void>) {
+  constructor(member: MemberLane, receiver: BackendReceiver, detach: () => Promise<void>) {
     super()
     this.#receiver = receiver
     this.#detach = detach
@@ -169,7 +168,7 @@ class CloudflareBroadcastSubscriptionAttempt extends DriverAttempt {
 }
 
 const AUTHORITY_SCHEMA = `
-  CREATE TABLE IF NOT EXISTS broadcast_key (key TEXT PRIMARY KEY, seq INTEGER NOT NULL, authority_bucket TEXT NOT NULL);
+  CREATE TABLE IF NOT EXISTS broadcast_key (key TEXT PRIMARY KEY, seq INTEGER NOT NULL, authority_bucket TEXT);
   CREATE TABLE IF NOT EXISTS broadcast_presence
     (route_key TEXT NOT NULL, member TEXT NOT NULL, bucket TEXT NOT NULL, expires_at INTEGER NOT NULL, PRIMARY KEY (route_key, member));
 `
@@ -184,12 +183,15 @@ class CloudflareBroadcastAuthorityState {
     this.#storage = state.storage
   }
 
-  /** The key's next `seq`; the key's first publish fixes its authority bucket. */
-  sequence(key: string, preferredBucket: LocationBucket): { seq: number; authorityBucket: LocationBucket } {
+  /** The key's next `seq`; the key's first publish from a session fixes its authority bucket. */
+  sequence(
+    key: string,
+    preferredBucket: LocationBucket | null,
+  ): { seq: number; authorityBucket: LocationBucket | null } {
     const sql = this.#sql()
     return this.#storage.transactionSync(() => {
       const row = sql
-        .exec<{ seq: number; authority_bucket: LocationBucket }>(
+        .exec<{ seq: number; authority_bucket: LocationBucket | null }>(
           'SELECT seq, authority_bucket FROM broadcast_key WHERE key = ?',
           key,
         )
@@ -257,16 +259,126 @@ class CloudflareBroadcastAuthorityState {
   }
 }
 
+/** A session DO's Broadcast membership: its lanes' presence at their key authorities, its subscriptions, and the
+ *  deliveries to them. It is addressed by the DO's id and sends through the DO's own ordered stubs. */
+class CloudflareBroadcastMember {
+  /** Subscriptions share an attempt only within one session DO. */
+  readonly partition = crypto.randomUUID()
+  readonly calls: BroadcastCalls
+  readonly #transport: CloudflareBroadcastTransport
+  readonly #id: string
+  #bucket: LocationBucket | null = null
+  readonly #lanes = new Map<string, MemberLane>()
+  readonly #subscriptions = new Map<string, CloudflareBroadcastSubscriptionAttempt>()
+  readonly #presenceWrites = new Map<string, Promise<void>>()
+
+  constructor(transport: CloudflareBroadcastTransport, id: string, calls: BroadcastCalls) {
+    this.#transport = transport
+    this.#id = id
+    this.calls = calls
+  }
+
+  get bucket(): LocationBucket | null {
+    return this.#bucket
+  }
+
+  /** The bucket the session was placed in, from the request that reached it. */
+  locate(bucket: LocationBucket): void {
+    assert(KNOWN_BROADCAST_BUCKETS.has(bucket), `Invalid Broadcast location bucket "${bucket}".`)
+    this.#bucket = bucket
+  }
+
+  openSubscription(lane: BroadcastLane, receiver: BackendReceiver): CloudflareBroadcastSubscriptionAttempt {
+    const routeKey = broadcastRouteKey(lane)
+    const memberLane = this.#ensureLane(lane, routeKey)
+    const attempt: CloudflareBroadcastSubscriptionAttempt = new CloudflareBroadcastSubscriptionAttempt(
+      memberLane,
+      receiver,
+      async () => {
+        if (this.#subscriptions.get(routeKey) === attempt) this.#subscriptions.delete(routeKey)
+        await this.#teardownIfEmpty(routeKey)
+      },
+    )
+    this.#subscriptions.set(routeKey, attempt)
+    return attempt
+  }
+
+  /** A coordinator's delivery to this DO's subscription. */
+  async deliver(request: BroadcastDeliverRequest): Promise<void> {
+    await this.#subscriptions.get(broadcastRouteKey(request))?.deliver(request.payload, request.info)
+  }
+
+  #ensureLane(lane: BroadcastLane, routeKey: string): MemberLane {
+    const existing = this.#lanes.get(routeKey)
+    if (existing !== undefined) {
+      existing.teardownRequested = false
+      return existing
+    }
+    const memberLane = new MemberLane(lane)
+    this.#lanes.set(routeKey, memberLane)
+    // Nobody awaits a deferred teardown; a failed withdrawal lapses with the presence TTL.
+    void this.#initializeLane(routeKey, memberLane).catch(() => {})
+    return memberLane
+  }
+
+  async #initializeLane(routeKey: string, memberLane: MemberLane): Promise<void> {
+    try {
+      await this.#writePresence(memberLane.lane, true)
+    } catch (error) {
+      memberLane.rejectPresence(error)
+      if (this.#lanes.get(routeKey) === memberLane) this.#lanes.delete(routeKey)
+      return
+    }
+    memberLane.acknowledgePresence()
+    if (memberLane.teardownRequested) return this.#release(routeKey, memberLane)
+    memberLane.refreshTimer = setInterval(() => {
+      void this.#writePresence(memberLane.lane, true).then(
+        () => memberLane.acknowledgePresence(),
+        () => memberLane.losePresence(),
+      )
+    }, PRESENCE_REFRESH_INTERVAL_MS)
+  }
+
+  async #teardownIfEmpty(routeKey: string): Promise<void> {
+    const memberLane = this.#lanes.get(routeKey)
+    if (memberLane === undefined || this.#subscriptions.has(routeKey)) return
+    if (memberLane.state === 'establishing') {
+      memberLane.teardownRequested = true
+      return
+    }
+    await this.#release(routeKey, memberLane)
+  }
+
+  async #release(routeKey: string, memberLane: MemberLane): Promise<void> {
+    memberLane.stopRefresh()
+    if (this.#lanes.get(routeKey) === memberLane) this.#lanes.delete(routeKey)
+    await this.#writePresence(memberLane.lane, false)
+  }
+
+  /** One lane's presence writes go to the authority one at a time. */
+  async #writePresence(lane: BroadcastLane, present: boolean): Promise<void> {
+    const routeKey = broadcastRouteKey(lane)
+    assert(this.#bucket, 'A Broadcast member registers from a session that knows its bucket')
+    const request = { key: lane.key, kind: lane.kind, member: this.#id, bucket: present ? this.#bucket : null }
+    const current = (this.#presenceWrites.get(routeKey) ?? Promise.resolve())
+      .catch(() => {})
+      .then(() => this.#transport.sendPresence(this.calls, request))
+    this.#presenceWrites.set(routeKey, current)
+    try {
+      await current
+    } finally {
+      if (this.#presenceWrites.get(routeKey) === current) this.#presenceWrites.delete(routeKey)
+    }
+  }
+}
+
+/** The isolate's Cloudflare Broadcast driver: where each key's authority and each bucket's coordinators live, and
+ *  their RPC handlers. Each session DO subscribes through its own `CloudflareBroadcastMember`. */
 class CloudflareBroadcastTransport {
   private readonly baseInstanceName: string
   private readonly scale: CloudflareScale | undefined
   private bindingName: string | null = null
   private binding: DurableObjectNamespace | null = null
-  private locationBucket: LocationBucket | null = null
-  private representativeDOName: string | null = null
-  private readonly presenceMutationChains = new Map<string, Promise<void>>()
-  private readonly memberStates = new Map<string, MemberBucketState>()
-  private readonly subscriptions = new Map<string, CloudflareBroadcastSubscriptionAttempt>()
 
   constructor({ baseInstanceName, scale }: { baseInstanceName: string; scale?: CloudflareScale }) {
     this.baseInstanceName = baseInstanceName
@@ -278,56 +390,27 @@ class CloudflareBroadcastTransport {
     this.bindingName = bindingName
   }
 
-  attachIsolateInfo(doName: string, locationBucket: LocationBucket): void {
-    assert(
-      KNOWN_BROADCAST_BUCKETS.has(locationBucket),
-      `attachIsolateInfo received invalid locationBucket "${locationBucket}".`,
-    )
-    if (!this.locationBucket) {
-      this.locationBucket = locationBucket
-      this.representativeDOName = doName
-    }
+  member(id: string, calls: BroadcastCalls): CloudflareBroadcastMember {
+    return new CloudflareBroadcastMember(this, id, calls)
   }
 
-  private requireLocationBucket(): LocationBucket {
-    assert(this.locationBucket, 'Expected attachIsolateInfo() to be called before subscribe/publish.')
-    return this.locationBucket
-  }
-
-  private requireRepresentativeDOName(): string {
-    assert(this.representativeDOName, 'Expected attachIsolateInfo() to be called before subscribe/publish.')
-    return this.representativeDOName
-  }
-
-  private async putPresence(lane: BroadcastLane): Promise<void> {
-    await this.mutatePresence(lane, this.requireLocationBucket())
-  }
-
-  private async deletePresence(lane: BroadcastLane): Promise<void> {
-    await this.mutatePresence(lane, null)
-  }
-
-  /** One lane's presence writes go one at a time, each through a fresh stub, which belongs to whichever DO calls. */
-  private async mutatePresence(lane: BroadcastLane, bucket: LocationBucket | null): Promise<void> {
-    const routeKey = broadcastRouteKey(lane)
-    const request = { key: lane.key, kind: lane.kind, member: this.requireRepresentativeDOName(), bucket }
-    const current = (this.presenceMutationChains.get(routeKey) ?? Promise.resolve())
-      .catch(() => {})
-      .then(() => this.getAuthorityStub(lane.key, this.requireLocationBucket()).telefuncBroadcastPresence(request))
-    this.presenceMutationChains.set(routeKey, current)
-    try {
-      await current
-    } finally {
-      if (this.presenceMutationChains.get(routeKey) === current) this.presenceMutationChains.delete(routeKey)
-    }
-  }
-
+  /** From a session DO, through its ordered stubs; from elsewhere, as a cron trigger, through a fresh stub. */
   publish(lane: BroadcastLane, payload: Uint8Array): Promise<PublishResult> {
-    const locationBucket = this.requireLocationBucket()
-    const authority =
-      this.memberStates.get(broadcastRouteKey(lane))?.authority ?? this.getAuthorityStub(lane.key, locationBucket)
+    const member = currentCloudflareSession()?.broadcast()
+    const locationBucket = member?.bucket ?? null
+    const request = { key: lane.key, kind: lane.kind, locationBucket, payload }
+    const send = (authority: TelefuncDurableObjectStub) => authority.telefuncBroadcastPublish(request)
+    const name = this.authorityName(lane.key)
     return unwrapRpcResult(
-      authority.telefuncBroadcastPublish({ key: lane.key, kind: lane.kind, locationBucket, payload }),
+      member === undefined
+        ? send(this.stubByName(name, locationBucket))
+        : this.callByName(member.calls, name, locationBucket, send),
+    )
+  }
+
+  sendPresence(calls: BroadcastCalls, request: BroadcastPresenceRequest): Promise<void> {
+    return this.callByName(calls, this.authorityName(request.key), request.bucket, (authority) =>
+      authority.telefuncBroadcastPresence(request),
     )
   }
 
@@ -344,11 +427,11 @@ class CloudflareBroadcastTransport {
     const presenceByBucket = authorityState.livePresence(broadcastRouteKey({ key, kind }), info.timestamp)
     const fanoutBuckets = Array.from(presenceByBucket.keys())
     let receivers = 0
-    for (const doNames of presenceByBucket.values()) receivers += doNames.length
+    for (const members of presenceByBucket.values()) receivers += members.length
     await Promise.all(
       fanoutBuckets.map((bucket) =>
-        this.call(calls, this.getBucketCoordinatorName(key, bucket), bucket, (coordinator) =>
-          coordinator.telefuncBroadcastForward({ key, kind, payload, info, doNames: presenceByBucket.get(bucket)! }),
+        this.callByName(calls, this.coordinatorName(key, bucket), bucket, (coordinator) =>
+          coordinator.telefuncBroadcastForward({ key, kind, payload, info, members: presenceByBucket.get(bucket)! }),
         ),
       ),
     )
@@ -357,112 +440,53 @@ class CloudflareBroadcastTransport {
 
   /** At a bucket coordinator: delivers the authority's sequenced publish to the named member DOs, in arrival order. */
   async forwardToBucket(calls: BroadcastCalls, request: BroadcastForwardRequest): Promise<void> {
-    const { doNames, ...delivery } = request
+    const { members, ...delivery } = request
     await Promise.all(
-      doNames.map((doName) =>
-        this.call(calls, doName, undefined, (member) => member.telefuncBroadcastDeliver(delivery)),
+      members.map((member) =>
+        calls.call(
+          member,
+          () => this.stubById(member),
+          (stub) => stub.telefuncBroadcastDeliver(delivery),
+        ),
       ),
     )
   }
 
-  /** Delivers a publish to this isolate's subscription. Called via RPC on its representative DO. */
-  async deliverToLocal(request: BroadcastDeliverRequest): Promise<void> {
-    await this.subscriptions.get(broadcastRouteKey(request))?.deliver(request.payload, request.info)
-  }
-
-  openSubscription(lane: BroadcastLane, receiver: BackendReceiver): CloudflareBroadcastSubscriptionAttempt {
-    const routeKey = broadcastRouteKey(lane)
-    const member = this.ensurePresence(lane, routeKey)
-    const attempt: CloudflareBroadcastSubscriptionAttempt = new CloudflareBroadcastSubscriptionAttempt(
-      member,
-      receiver,
-      async () => {
-        if (this.subscriptions.get(routeKey) === attempt) this.subscriptions.delete(routeKey)
-        await this.teardownPresenceIfEmpty(routeKey)
-      },
-    )
-    this.subscriptions.set(routeKey, attempt)
-    return attempt
-  }
-
-  async dispose(): Promise<void> {
-    await Promise.allSettled([...this.subscriptions.values()].map((attempt) => attempt.unsubscribe()))
-    this.subscriptions.clear()
-    await Promise.allSettled([...this.memberStates].map(([routeKey, member]) => this.releasePresence(routeKey, member)))
-  }
-
-  private ensurePresence(lane: BroadcastLane, routeKey: string): MemberBucketState {
-    const existing = this.memberStates.get(routeKey)
-    if (existing !== undefined) {
-      existing.teardownRequested = false
-      return existing
-    }
-    const member = new MemberBucketState(lane, this.getAuthorityStub(lane.key, this.requireLocationBucket()))
-    this.memberStates.set(routeKey, member)
-    // Nobody awaits a deferred teardown; a failed presence delete lapses with the presence TTL.
-    void this.initializePresence(routeKey, member).catch(() => {})
-    return member
-  }
-
-  private async initializePresence(routeKey: string, member: MemberBucketState): Promise<void> {
-    try {
-      await this.putPresence(member.lane)
-    } catch (error) {
-      member.rejectPresence(error)
-      if (this.memberStates.get(routeKey) === member) this.memberStates.delete(routeKey)
-      return
-    }
-    member.acknowledgePresence()
-    if (member.teardownRequested) return this.releasePresence(routeKey, member)
-    member.refreshTimer = setInterval(() => {
-      void this.putPresence(member.lane).then(
-        () => member.acknowledgePresence(),
-        () => member.losePresence(),
-      )
-    }, PRESENCE_REFRESH_INTERVAL_MS)
-  }
-
-  private async teardownPresenceIfEmpty(routeKey: string): Promise<void> {
-    const member = this.memberStates.get(routeKey)
-    if (member === undefined || this.subscriptions.has(routeKey)) return
-    if (member.state === 'establishing') {
-      member.teardownRequested = true
-      return
-    }
-    await this.releasePresence(routeKey, member)
-  }
-
-  private async releasePresence(routeKey: string, member: MemberBucketState): Promise<void> {
-    member.stopRefresh()
-    if (this.memberStates.get(routeKey) === member) this.memberStates.delete(routeKey)
-    await this.deletePresence(member.lane)
-  }
-
-  /** A call from the DO owning `calls`, through its stub for `instanceName`. */
-  private call<T>(
+  /** A call from the DO owning `calls`, through its stub for the named instance. */
+  private callByName<T>(
     calls: BroadcastCalls,
-    instanceName: string,
-    locationHint: DurableObjectLocationHint | undefined,
+    name: string,
+    locationHint: LocationBucket | null,
     invoke: (stub: TelefuncDurableObjectStub) => Promise<T>,
   ): Promise<T> {
-    return calls.call(instanceName, () => this.getBoundStub(instanceName, locationHint), invoke)
+    return calls.call(name, () => this.stubByName(name, locationHint), invoke)
   }
 
-  private getBucketCoordinatorName(key: string, locationBucket: LocationBucket): string {
+  private authorityName(key: string): string {
+    return `${this.baseInstanceName}:broadcast:authority:${key}`
+  }
+
+  private coordinatorName(key: string, locationBucket: LocationBucket): string {
     const bucketShardCount = getBucketCoordinatorShardIndices(this.scale, locationBucket).length
     const bucketShardOrdinal = getDeterministicKeyBucketIndex(key, bucketShardCount)
     return `${this.baseInstanceName}:broadcast:${locationBucket}:${bucketShardOrdinal}`
   }
 
-  private getAuthorityStub(key: string, locationHint?: DurableObjectLocationHint): TelefuncDurableObjectStub {
-    return this.getBoundStub(`${this.baseInstanceName}:broadcast:authority:${key}`, locationHint)
+  private stubByName(name: string, locationHint: LocationBucket | null): TelefuncDurableObjectStub {
+    const binding = this.requireBinding()
+    return binding.get(
+      binding.idFromName(name),
+      locationHint === null ? undefined : { locationHint },
+    ) as TelefuncDurableObjectStub
   }
 
-  private getBoundStub(instanceName: string, locationHint?: DurableObjectLocationHint): TelefuncDurableObjectStub {
+  private stubById(id: string): TelefuncDurableObjectStub {
+    const binding = this.requireBinding()
+    return binding.get(binding.idFromString(id)) as TelefuncDurableObjectStub
+  }
+
+  private requireBinding(): DurableObjectNamespace {
     assert(this.binding, `Missing Cloudflare Durable Object binding "${this.bindingName ?? 'unknown'}".`)
-    return this.binding.get(
-      this.binding.idFromName(instanceName),
-      locationHint ? { locationHint } : undefined,
-    ) as TelefuncDurableObjectStub
+    return this.binding
   }
 }

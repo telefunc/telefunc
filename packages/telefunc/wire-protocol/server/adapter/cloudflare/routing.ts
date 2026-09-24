@@ -4,7 +4,6 @@ export {
   KNOWN_BROADCAST_BUCKETS,
   TELEFUNC_BROADCAST_BUCKET_HEADER,
   TELEFUNC_SESSION_HEADER,
-  TELEFUNC_SHARD_HEADER,
   assertLocationFallbackIsScaled,
   getBucketCoordinatorShardIndices,
   getDeterministicKeyBucketIndex,
@@ -33,8 +32,6 @@ const DEFAULT_BROADCAST_BUCKETS = [
   'oc',
 ] as const satisfies readonly DurableObjectLocationHint[]
 const TELEFUNC_BROADCAST_BUCKET_HEADER = 'x-telefunc-broadcast-bucket'
-/** Internal: forwarded to the DO so it knows its own instance name. */
-const TELEFUNC_SHARD_HEADER = 'x-telefunc-shard'
 const KNOWN_BROADCAST_BUCKETS = new Set<string>(DEFAULT_BROADCAST_BUCKETS as readonly string[])
 
 type LocationBucket = DurableObjectLocationHint

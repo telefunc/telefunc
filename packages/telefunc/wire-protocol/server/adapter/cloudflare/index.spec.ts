@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest'
 import { OrderedStubs } from './ordered-stubs.js'
 
 const mocks = vi.hoisted(() => {
@@ -19,11 +19,14 @@ const mocks = vi.hoisted(() => {
   class MockCloudflareBroadcastTransport {
     readonly options: unknown
     readonly attachBinding = vi.fn()
-    readonly attachIsolateInfo = vi.fn()
     readonly publishToSubscribers = vi.fn()
     readonly forwardToBucket = vi.fn()
-    readonly deliverToLocal = vi.fn()
-    readonly dispose = vi.fn(async () => {})
+    readonly members: Array<{ id: string; locate: Mock; deliver: Mock }> = []
+    readonly member = vi.fn((id: string) => {
+      const member = { id, locate: vi.fn(), deliver: vi.fn() }
+      this.members.push(member)
+      return member
+    })
     constructor(options: unknown) {
       this.options = options
       mocks.transportInstances.push(this)
@@ -111,7 +114,6 @@ vi.mock('./broadcast.js', () => ({
 vi.mock('./routing.js', () => ({
   TELEFUNC_BROADCAST_BUCKET_HEADER: 'x-telefunc-broadcast-bucket',
   TELEFUNC_SESSION_HEADER: 'x-telefunc-session',
-  TELEFUNC_SHARD_HEADER: 'x-telefunc-shard',
   assertLocationFallbackIsScaled: vi.fn(),
   resolveSessionRoutingTarget: vi.fn(
     (baseInstanceName: string, scale: unknown, request: Request, locationFallback: string) => {
@@ -155,7 +157,7 @@ function createMockKV(): KVNamespace {
 }
 
 function createBinding() {
-  const fetch = vi.fn(async (request: Request) => new Response(request.headers.get('x-telefunc-shard') ?? 'missing'))
+  const fetch = vi.fn(async (request: Request) => new Response(request.headers.get('x-telefunc-broadcast-bucket')))
   const get = vi.fn((id: { name: string }, options?: { locationHint: string }) => {
     void id
     void options
@@ -218,7 +220,6 @@ describe('cloudflare adapter entrypoint', () => {
     })
     expect(fetch).toHaveBeenCalledTimes(1)
     const forwardedRequest = fetch.mock.calls[0]![0] as Request
-    expect(forwardedRequest.headers.get('x-telefunc-shard')).toBe('telefunc-shard-weur-1')
     expect(forwardedRequest.headers.get('x-telefunc-broadcast-bucket')).toBe('weur')
     expect(response?.headers.get('x-telefunc-session')).toBe('my-token')
   })
@@ -328,11 +329,11 @@ describe('cloudflare adapter entrypoint', () => {
     expect(readHead).toHaveBeenCalled()
   })
 
-  it('names the session a Room subscription needs when made outside one', () => {
+  it('names the session a subscription needs when made outside one', () => {
     mocks.workerEnv.TelefuncDurableObject = createBinding().binding
     new Telefunc()
     const subscribe = () => getRoomBackend().subscribeLane('r', 'i', { kind: 'control' }, () => {})
-    expect(subscribe).toThrow('A Cloudflare Room subscription delivers to a Telefunc session')
+    expect(subscribe).toThrow('A Cloudflare subscription delivers to a Telefunc session')
   })
 
   it('rejects another backend once the Cloudflare one is installed', () => {
@@ -412,7 +413,7 @@ describe('cloudflare adapter entrypoint', () => {
     // Sockets an earlier instance accepted, whatever they carried, lost their channel state with it.
     const recoveredSockets = [{ close: vi.fn() }, { close: vi.fn() }]
     const ctx = {
-      id: { name: 'telefunc-shard-weur-1' },
+      id: { toString: () => 'session-probe-id' },
       getWebSockets: () => recoveredSockets,
     } as unknown as DurableObjectState
     const instance = new DurableClass(ctx, {
@@ -442,11 +443,14 @@ describe('cloudflare adapter entrypoint', () => {
     expect(mocks.crosswsAdapter.handleDurableUpgrade).toHaveBeenCalled()
     await instance.fetch(
       new Request('https://telefunc.test/_telefunc', {
-        headers: { 'x-telefunc-shard': 'telefunc-shard-weur-1', 'x-telefunc-broadcast-bucket': 'weur' },
+        headers: { 'x-telefunc-broadcast-bucket': 'weur' },
       }),
     )
     expect(mocks.telefuncMock).toHaveBeenCalled()
-    expect(mocks.transportInstances[0]?.attachIsolateInfo).toHaveBeenCalledWith('telefunc-shard-weur-1', 'weur')
+    // The session DO is a Broadcast member addressed by its id, placed in the bucket its requests carry.
+    const member = mocks.transportInstances[0]!.members[0]!
+    expect(member.id).toBe('session-probe-id')
+    expect(member.locate).toHaveBeenCalledWith('weur')
     instance.webSocketMessage({} as WebSocket, 'payload')
     expect(mocks.crosswsAdapter.handleDurableMessage).toHaveBeenCalledWith(instance, expect.anything(), 'payload')
     instance.webSocketClose({} as WebSocket, 1000, 'done', true)
@@ -466,7 +470,7 @@ describe('cloudflare adapter entrypoint', () => {
     instance.telefuncBroadcastPublish(publish)
     const publishToSubscribers = mocks.transportInstances[0]!.publishToSubscribers
     expect(publishToSubscribers).toHaveBeenCalledWith(mocks.authorityInstances[0], expect.any(OrderedStubs), publish)
-    const forward = { ...publish, info: { seq: 1, timestamp: 1 }, doNames: ['telefunc-shard-weur-0'] }
+    const forward = { ...publish, info: { seq: 1, timestamp: 1 }, members: ['member-id'] }
     instance.telefuncBroadcastForward(forward)
     // The authority and coordinator roles send through the one DO's ordered stubs.
     expect(mocks.transportInstances[0]?.forwardToBucket).toHaveBeenCalledWith(
@@ -480,11 +484,11 @@ describe('cloudflare adapter entrypoint', () => {
       info: { seq: 1, timestamp: 1 },
     }
     instance.telefuncBroadcastDeliver(delivery)
-    expect(mocks.transportInstances[0]?.deliverToLocal).toHaveBeenCalledWith(delivery)
+    expect(member.deliver).toHaveBeenCalledWith(delivery)
     const presence = {
       key: 'room:test',
       kind: 'text' as const,
-      member: 'telefunc-shard-weur-0',
+      member: 'member-id',
       bucket: 'weur' as const,
     }
     instance.telefuncBroadcastPresence(presence)

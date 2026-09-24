@@ -148,6 +148,8 @@ Only specified regions get Durable Objects. Requests from unspecified regions fa
 
 <Link href="/channel#broadcast">Broadcasts</Link> fan out across all regions automatically.
 
+`publish()` works anywhere in your Worker, including cron triggers and queue consumers. A server-side `subscribe()` delivers to a Telefunc session, so subscribe inside a telefunction or a channel handler.
+
 ### How it works
 
 <Advanced>

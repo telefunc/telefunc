@@ -62,3 +62,15 @@ test('retained Room payloads above the base64-expanded RPC ceiling replay as nat
     last: 0xee,
   })
 })
+
+test('Broadcast reaches every session DO in the isolate in seq order, each through its own I/O', async () => {
+  const response = await miniflare!.dispatchFetch('https://room.test/broadcast-sessions')
+  const result = await response.json()
+  expect(response.status, JSON.stringify(result)).toBe(200)
+  const inOrder = [
+    { seq: 1, text: 'one' },
+    { seq: 2, text: 'two' },
+    { seq: 3, text: 'three' },
+  ]
+  expect(result).toEqual({ a: inOrder, b: inOrder })
+})

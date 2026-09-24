@@ -1,6 +1,5 @@
 /// <reference types="@cloudflare/workers-types" />
 
-import { getRawContext, restoreContext } from '../../../../../node/server/context/context.js'
 import type { BroadcastDriver, BroadcastLane, PublishResult } from '../../../../backend/broadcast/contract.js'
 import type {
   CellMutation,
@@ -25,14 +24,11 @@ import { encodeLaneKey } from '../../../../backend/room/lane-key.js'
 import { CloudflareRoomSubscriptionAttempt } from './subscription.js'
 import type { RoomAuthority } from './do.js'
 import type { RouteInstallation } from './routes.js'
+import { materializeCloudflareSession } from '../session.js'
 
 // Room authorities share the Telefunc namespace with sessions and Broadcast, so a room id is always prefixed.
 const ROOM_AUTHORITY_PREFIX = '__telefunc_room__:'
 const DIRECTORY_DO_NAME = '__telefunc_room_directory__'
-const ROOM_MANAGER = Symbol('telefunc.cloudflare.room-manager')
-
-export const CLOUDFLARE_ROOM_SESSION_ERROR =
-  'A Cloudflare Room subscription delivers to a Telefunc session: subscribe from a telefunction or a channel handler, not from outside a request.'
 
 export type RoomSessionDeliveryRequest = RouteInstallation & {
   payload: Uint8Array
@@ -108,18 +104,6 @@ export class CloudflareRoomSessionManager {
   valid(): boolean {
     return !this.#disposed
   }
-}
-
-/** Runs `fn` with a session's Room manager in context; `createManager` runs at most once per scope. */
-export function withCloudflareRoomSessionManager<T>(createManager: () => CloudflareRoomSessionManager, fn: () => T): T {
-  let manager: CloudflareRoomSessionManager | undefined
-  return restoreContext({ [ROOM_MANAGER]: () => (manager ??= createManager()) }, fn)
-}
-
-export function materializeCloudflareRoomSessionManager(): CloudflareRoomSessionManager {
-  const manager = getRawContext()?.[ROOM_MANAGER] as (() => CloudflareRoomSessionManager) | undefined
-  if (manager === undefined) throw new Error(CLOUDFLARE_ROOM_SESSION_ERROR)
-  return manager()
 }
 
 type CloudflareSubscriptionSource = BroadcastLane | RoomSubscriptionSource
@@ -207,20 +191,19 @@ export class CloudflareRoomBackend implements BroadcastDriver, RoomDriver {
   }
 
   async dispose(): Promise<void> {
-    if (this.#disposed) return
     this.#disposed = true
-    await this.broadcast.dispose()
   }
 
   #bindSubscription(source: CloudflareSubscriptionSource): SubscriptionBinding {
     if (!('roomId' in source)) {
+      const member = materializeCloudflareSession().broadcast()
       return {
-        partition: '',
+        partition: member.partition,
         valid: () => !this.#disposed,
-        open: (receiver) => this.broadcast.openSubscription(source, receiver),
+        open: (receiver) => member.openSubscription(source, receiver),
       }
     }
-    const manager = materializeCloudflareRoomSessionManager()
+    const manager = materializeCloudflareSession().room()
     return {
       partition: manager.subscriptionPartition,
       valid: () => manager.valid(),
