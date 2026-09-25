@@ -52,7 +52,7 @@ type MemberEntry = {
 type RoomStateOptions = {
   roomId: string
   meta: RoomMeta
-  /** Either the authoritative roster, or just its member count. A lazy view seeds with `{ count }` and learns the members from its first `reconcile()` (KV read / streamed roster). */
+  /** Either the authoritative roster, or just its member count. A lazy view seeds with `{ count }` and learns the members from its first roster (read on the server, streamed to the client). */
   seed: { members: MemberSnapshot[] } | { count: number }
   /** The LWW stamp of the config `meta` was read from (see `applyRoomUpdate`). */
   updateStamp: { at: number; by: string }
@@ -129,14 +129,14 @@ abstract class RoomStateView {
   }
 }
 /** A room's local view and callbacks, shared by server and client. A `join` for a known member or a `leave` for an
- *  unknown one is a no-op, so a snapshot and a concurrent event stream compose without double-firing. */
+ *  unknown one fires no listener, so a snapshot and a concurrent event stream compose without double-firing. */
 class RoomState {
   /** @internal The owning `ServerRoom`/`ClientRoom`, for serialization backing. */
   _owner: RoomStateView | null = null
   readonly roomId: string
   meta: RoomMeta
   closed: boolean
-  /** Bumped on every membership change. Guards async KV reconciles against going stale. */
+  /** Bumped on every membership change. Guards an in-flight roster read against going stale. */
   membershipVersion = 0
   /** Bumped on every observable change (membership, participant meta, room config, closure). Drives `onChange`/`snapshot()` cache invalidation. */
   private _stateVersion = 0
@@ -353,7 +353,7 @@ class RoomState {
     this._stateVersion++
     this._fireAll(this._changeCbs)
   }
-  /** Membership changed: guard async KV reconciles against going stale, and narrate the change. */
+  /** Membership changed: guard an in-flight roster read against going stale, and narrate the change. */
   private _bumpMembership(): void {
     this.membershipVersion++
     this._bumpState()

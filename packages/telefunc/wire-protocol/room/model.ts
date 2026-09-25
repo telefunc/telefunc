@@ -85,11 +85,11 @@ function assertParticipantIdentity(identity: unknown, where: string): asserts id
     `${where} should be a non-empty well-formed string`,
   )
 }
-/** Validates `join(options)` and resolves the participant `meta` + `selfDelivery`. */
 /** An option the call doesn't have, a misspelled one included, would otherwise be ignored silently. */
 function assertKnownOptions(options: object | null | undefined, known: readonly string[], what: string): void {
   for (const key of Object.keys(options ?? {})) assertUsage(known.includes(key), `Unknown ${what} option: ${key}`)
 }
+/** Validates `join(options)` and resolves each option's default. */
 function normalizeJoinOptions(options: JoinOptions | undefined): {
   meta: ParticipantMeta
   selfDelivery: boolean

@@ -25,7 +25,7 @@ function cleanupCellKey(memberId: string): string {
 function memberIdOfCleanupKey(key: string): string {
   return key.slice(CLEANUP_CELL_PREFIX.length)
 }
-/** One marker per (identity, member), written before the member record and cleared after it; readers confirm each against the record. */
+/** One marker per (identity, member), written and removed in the compare-exchange that writes or removes the member. */
 function identityCellPrefix(identity: string): string {
   return `identity:${encodeURIComponent(identity)}:`
 }

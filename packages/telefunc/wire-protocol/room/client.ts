@@ -234,7 +234,7 @@ class ClientRoom extends RoomStateView implements Room {
         this._roster.reject(new Error('Failed to load room participants'))
         return
       case 'data':
-        // Tail mode holds server-side (see `RoomStubChannel._tailPending`): text reaches this client only once it subscribes, already selected and ordered, so nothing is buffered here.
+        // Tail mode holds server-side (see `RoomStubChannel._tail`): text reaches this client only once it subscribes, already selected and ordered, so nothing is buffered here.
         this._state.applyData(event, makePublishInfo(this.id, rawInfo.seq, rawInfo.timestamp))
         return
       case 'join':
