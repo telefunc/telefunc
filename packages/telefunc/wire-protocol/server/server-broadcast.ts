@@ -187,9 +187,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
   }
 
   private _publishTracked(kind: BroadcastKind, payload: Uint8Array): Promise<ChannelPublishAck> {
-    const ret = this._trackAck(Promise.resolve(this._publish(kind, payload)))
-    ret.catch(() => {})
-    return ret
+    return markHandled(this._trackAck(Promise.resolve(this._publish(kind, payload))))
   }
 
   private _publish(kind: BroadcastKind, payload: Uint8Array): ChannelPublishAck | Promise<ChannelPublishAck> {
