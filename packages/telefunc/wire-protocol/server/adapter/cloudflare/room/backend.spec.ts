@@ -85,6 +85,32 @@ test('a session delivers a frame for the lease its subscription holds, and drops
   await attempt.unsubscribe()
 })
 
+test("a session's route calls to a room share one ordered stub, so a released attempt's calls can't overtake its successor's", async () => {
+  const manager = new CloudflareRoomSessionManager('session')
+  const calls: string[] = []
+  const registering = Promise.withResolvers<void>()
+  const stub = (name: string) => ({
+    registerRoute: async ({ leaseId }: { leaseId: string }) => {
+      calls.push(`${name}:register:${leaseId}`)
+      await registering.promise
+      return { ok: true }
+    },
+    unsubscribeRoute: async ({ leaseId }: { leaseId: string }) => void calls.push(`${name}:unsubscribe:${leaseId}`),
+  })
+  const source = { roomId: 'room', inc: 'inc', lane: { kind: 'semantic' } } as const
+  const first = manager.openSubscription(source, stub('first') as unknown as CloudflareRoomAuthorityStub, () => {})
+  void first.unsubscribe()
+  const second = manager.openSubscription(source, stub('second') as unknown as CloudflareRoomAuthorityStub, () => {})
+  registering.resolve()
+  await vi.waitFor(() => expect(second.state()).toBe('ready'))
+  expect(calls).toEqual([
+    `first:register:${first.leaseId}`,
+    `first:unsubscribe:${first.leaseId}`,
+    `first:register:${second.leaseId}`,
+  ])
+  await second.unsubscribe()
+})
+
 function openAttempt(authority: Record<string, (...args: never[]) => Promise<unknown>>, received: number[] = []) {
   const route = {
     registerRoute: async () => ({ ok: true }),

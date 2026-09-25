@@ -6,9 +6,10 @@ import { ROUTE_RENEW_EVERY_MS, type RouteInstallation } from './routes.js'
 import type { CloudflareRoomAuthorityStub } from './backend.js'
 import type { RegisterWire } from './do.js'
 
-type CloudflareRoomSubscriptionSource = Omit<RouteInstallation, 'leaseId'> & {
-  authority: CloudflareRoomAuthorityStub
-}
+/** A call to the room's authority through the session's ordered stub for it. */
+type AuthorityCall = <T>(invoke: (authority: CloudflareRoomAuthorityStub) => Promise<T>) => Promise<T>
+
+type CloudflareRoomSubscriptionSource = Omit<RouteInstallation, 'leaseId'> & { callAuthority: AuthorityCall }
 
 type CloudflareRoomSubscriptionOptions = {
   onClosed(): void
@@ -16,7 +17,7 @@ type CloudflareRoomSubscriptionOptions = {
 
 /** Ready once the authority has durably registered this attempt's exact route; Room owns retry and replacement. */
 class CloudflareRoomSubscriptionAttempt extends DriverAttempt {
-  readonly #authority: CloudflareRoomAuthorityStub
+  readonly #callAuthority: AuthorityCall
   readonly #route: RouteInstallation
   readonly #receiver: BackendReceiver
   readonly #onClosed: () => void
@@ -30,8 +31,8 @@ class CloudflareRoomSubscriptionAttempt extends DriverAttempt {
     options: CloudflareRoomSubscriptionOptions,
   ) {
     super()
-    const { authority, ...route } = source
-    this.#authority = authority
+    const { callAuthority, ...route } = source
+    this.#callAuthority = callAuthority
     this.#route = { ...route, leaseId: crypto.randomUUID() }
     this.#receiver = receiver
     this.#onClosed = options.onClosed
@@ -60,7 +61,7 @@ class CloudflareRoomSubscriptionAttempt extends DriverAttempt {
   async #establish(): Promise<void> {
     let registered: RegisterWire
     try {
-      registered = await this.#authority.registerRoute(this.#route)
+      registered = await this.#callAuthority((authority) => authority.registerRoute(this.#route))
     } catch (error) {
       return this.#finish(error)
     }
@@ -80,7 +81,7 @@ class CloudflareRoomSubscriptionAttempt extends DriverAttempt {
     this.#cancelRenewal = null
     let renewed: boolean
     try {
-      renewed = await this.#authority.renewRoute(this.#route)
+      renewed = await this.#callAuthority((authority) => authority.renewRoute(this.#route))
     } catch (error) {
       return this.#finish(error)
     }
@@ -90,7 +91,7 @@ class CloudflareRoomSubscriptionAttempt extends DriverAttempt {
   }
 
   async #release(): Promise<void> {
-    await this.#authority.unsubscribeRoute(this.#route)
+    await this.#callAuthority((authority) => authority.unsubscribeRoute(this.#route))
   }
 
   #finish(error?: unknown): void {

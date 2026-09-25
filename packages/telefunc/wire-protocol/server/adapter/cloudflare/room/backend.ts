@@ -50,7 +50,8 @@ const entryKey = (route: Pick<RouteInstallation, 'roomId' | 'inc' | 'laneKey'>) 
   JSON.stringify([route.roomId, route.inc, route.laneKey])
 
 class CloudflareRoomSessionManager {
-  /** The session's calls to room authorities: a room's commits reach its authority in the order they were sent. */
+  /** The session's calls to room authorities: a room's commits and route calls reach its authority in the order they
+   *  were sent. */
   readonly authorityCalls = new OrderedStubs<CloudflareRoomAuthorityStub>()
   readonly #id: string
   readonly #subscriptionPartition = crypto.randomUUID()
@@ -65,7 +66,9 @@ class CloudflareRoomSessionManager {
     authority: CloudflareRoomAuthorityStub,
     receiver: BackendReceiver,
   ): CloudflareRoomSubscriptionAttempt {
-    const source = { roomId, inc, laneKey: encodeLaneKey(lane), sessionDoId: this.#id, authority }
+    const callAuthority = <T>(invoke: (stub: CloudflareRoomAuthorityStub) => Promise<T>) =>
+      this.authorityCalls.call(roomId, () => authority, invoke)
+    const source = { roomId, inc, laneKey: encodeLaneKey(lane), sessionDoId: this.#id, callAuthority }
     const key = entryKey(source)
     const attempt: CloudflareRoomSubscriptionAttempt = new CloudflareRoomSubscriptionAttempt(source, receiver, {
       onClosed: () => {
