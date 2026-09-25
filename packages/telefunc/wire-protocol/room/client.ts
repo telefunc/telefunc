@@ -320,12 +320,10 @@ class ClientRoom extends RoomStateView implements Room {
     const state = this._state
     if (state.closed) return this._stub._setWireSubscribed('text', false) // the stub is dead: nothing to declare
     const text = state.textWants()
-    // The room-wide stream starts before the member set is cleared and stops after it is declared, so the server
-    // never passes through wanting no text (which would stop its lane).
-    if (text.all) this._stub._setWireSubscribed('text', true)
-    // A room-level text subscription supersedes the member set, so clear it server-side.
-    this._declare({ __r: 'sub-text', members: text.all ? [] : text.members, announce: state.wantsAnnounce })
-    if (!text.all) this._stub._setWireSubscribed('text', false)
+    this._stub._setWireSubscribed('text', text.all)
+    // Declared even while the room-wide stream covers them: when it stops, live or in a reattach, the server still
+    // wants these members' text and keeps its lane.
+    this._declare({ __r: 'sub-text', members: text.members, announce: state.wantsAnnounce })
     this._declare({ __r: 'sub-binary', wants: state.binaryWants() })
   }
 

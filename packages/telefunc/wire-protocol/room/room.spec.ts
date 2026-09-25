@@ -2878,7 +2878,7 @@ describe('client Room lifecycle', () => {
       process.off('unhandledRejection', onUnhandled)
     }
   })
-  it('narrows its declared text wants before it stops the room-wide stream, so the server never wants none', () => {
+  it('declares its member subscriptions while a room-wide one covers them, so the server never wants none when it stops', () => {
     const log: unknown[] = []
     const { client, emit } = fakeClient('text-want-order', {
       wireDeclarations: log as boolean[],
@@ -2889,8 +2889,10 @@ describe('client Room lifecycle', () => {
     const member = { id: crypto.randomUUID(), meta: {}, joinedAt: 1, metaSeq: 0, identity: null }
     emit({ __r: 'roster', members: [member] })
     const stopRoomWide = client.subscribe(() => {})
-    client._getRemote(member.id)!.subscribe(() => {})
     log.length = 0
+    client._getRemote(member.id)!.subscribe(() => {})
+    // Declared at once, so a stream stopped live or in a reattach's RECONCILE finds the member set in place.
+    expect(log).toEqual([[member.id]])
     stopRoomWide()
     expect(log).toEqual([[member.id], false])
   })

@@ -227,14 +227,13 @@ class RoomState {
     const entry = this._members.get(id)
     return entry ? [...entry.tracks] : []
   }
-  /** The text-lane twin of `binaryWants()`: `all` while room-level `subscribe()`rs exist, otherwise exactly the members with participant-scoped listeners. */
+  /** The text-lane twin of `binaryWants()`: `all` while room-level `subscribe()`rs exist, and the members with participant-scoped listeners either way. */
   textWants(): MemberWants {
-    if (this._roomDataCbs.length > 0) return { all: true, members: [] }
     const members: string[] = []
     for (const entry of this._members.values()) {
       if (entry.dataCbs.length > 0) members.push(entry.id)
     }
-    return { all: false, members }
+    return { all: this._roomDataCbs.length > 0, members }
   }
   getRemote(id: string): RemoteParticipant | null {
     const entry = this._members.get(id)
