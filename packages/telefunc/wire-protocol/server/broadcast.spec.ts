@@ -942,6 +942,26 @@ describe('Broadcast static bus (publish/subscribe)', () => {
     }
   })
 
+  it.each([false, true])(
+    'delivers a publish made from a listener after the message it answers, to every subscriber (async listener: %s)',
+    async (asyncBot) => {
+      const key = `broadcast:bot-${asyncBot}`
+      const seen: Array<[string, number]> = []
+      const answer = (message: string) => (message === '/roll' ? Broadcast.publish(key, 'rolled 4') : undefined)
+      const bot = asyncBot
+        ? Broadcast.subscribe<string>(key, async (message) => void (await answer(message)))
+        : Broadcast.subscribe<string>(key, (message) => void answer(message))
+      const observer = Broadcast.subscribe<string>(key, (message, info) => void seen.push([message, info.seq]))
+      await Broadcast.publish(key, '/roll')
+      await vi.waitFor(() => expect(seen).toHaveLength(2))
+      expect(seen).toEqual([
+        ['/roll', 1],
+        ['rolled 4', 2],
+      ])
+      bot()
+      observer()
+    },
+  )
   it('counts in receivers the subscribers a publish reached, when a subscriber leaves or joins during delivery', async () => {
     const received: string[] = []
     const unsubscribe = Broadcast.subscribe<string>('broadcast:receivers', (message) => {

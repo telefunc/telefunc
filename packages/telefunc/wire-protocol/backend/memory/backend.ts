@@ -134,6 +134,8 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
   readonly subscriptions: SubscriptionDriver<MemorySubscriptionSource>
 
   readonly #state: MemoryBackendState
+  /** Broadcast deliveries in seq order: the running one stays first, so a publish made inside it is delivered after. */
+  readonly #deliveries: Array<() => void> = []
   constructor(options: MemoryBackendOptions = {}) {
     this.#state = options.state ?? new MemoryBackendState()
     this.subscriptions = {
@@ -150,7 +152,11 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
     const targets = [...(this.#state.broadcastSubs.get(broadcastRouteKey(route)) ?? [])]
     // Counted before delivery, which may unsubscribe or subscribe.
     const receivers = sumReceiverCounts(targets)
-    for (const target of targets) target.deliver(copyBytes(payload), mark)
+    this.#deliveries.push(() => {
+      for (const target of targets) target.deliver(copyBytes(payload), mark)
+    })
+    if (this.#deliveries.length === 1)
+      for (; this.#deliveries.length > 0; this.#deliveries.shift()) this.#deliveries[0]!()
     return { ...mark, receivers, meta: { transport: 'in-memory' } }
   }
 
