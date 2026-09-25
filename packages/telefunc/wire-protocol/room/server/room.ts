@@ -103,10 +103,6 @@ function decodeLaneEnvelope(serialized: string): { __r: string } {
   return envelope
 }
 /** The owner that wrote the event flags a hidden member; room-level events always reach clients. */
-function relayedAheadKey(event: Extract<RoomCtrlEnvelope, { __r: 'join' | 'p-meta' }>): string {
-  return event.__r === 'join' ? 'join' : String(event.seq)
-}
-
 function hiddenMemberOf(event: RoomCtrlEnvelope): string | null {
   if (event.__r === 'join' || event.__r === 'leave' || event.__r === 'p-meta' || event.__r === 'track')
     return event.hidden === true ? event.id : null
@@ -133,9 +129,6 @@ class ServerRoom extends RoomStateView implements Room {
   private readonly _stubs = new Set<RoomStubChannel>()
   /** Stubs whose first roster read failed: the next successful refresh sends them one. */
   private readonly _rosterOwed = new Set<RoomStubChannel>()
-  /** Per member, this instance's own events its clients already got ('join', or a meta revision): their echo relays
-   *  nothing. */
-  private readonly _relayedAhead = new Map<string, Set<string>>()
   private readonly _localParticipants = new Map<string, ServerLocalParticipant>()
   /** Members whose inbox is establishing before their cell commits; the heartbeat leaves them alone. */
   private readonly _pendingAdmissions = new Set<string>()
@@ -237,7 +230,6 @@ class ServerRoom extends RoomStateView implements Room {
       })
       this._assertAdmitted(id)
       this._pendingAdmissions.delete(id)
-      this._state.applyJoin({ id, meta, joinedAt, metaSeq: 0, identity, ...(hidden ? { hidden: true } : {}) })
       const join = {
         __r: 'join',
         id,
@@ -246,7 +238,7 @@ class ServerRoom extends RoomStateView implements Room {
         ...(identity === null ? {} : { identity }),
         ...(hidden ? { hidden: true } : {}),
       } as const
-      this._relayOwn(join)
+      if (this._state.applyJoin(joinedMember(join))) this._relayApplied(join)
       // A member removed meanwhile gets no join after its leave.
       await publishCtrl(this.id, this._inc, join, { requiredCellKeys: [memberCellKey(id)] })
     } catch (error) {
@@ -312,10 +304,10 @@ class ServerRoom extends RoomStateView implements Room {
       const seq = record.metaSeq + 1
       return { value: { meta, seq, hidden: record.hidden === true }, next: { ...record, meta, metaSeq: seq } }
     })
-    this._state.applyParticipantMeta(id, meta, seq)
+    const applied = this._state.applyParticipantMeta(id, meta, seq)
     this._localParticipants.get(id)?._acceptMeta({ meta, seq })
     const accepted = { __r: 'p-meta', id, meta, seq, ...(hidden ? { hidden: true } : {}) } as const
-    this._relayOwn(accepted)
+    if (applied) this._relayApplied(accepted)
     await publishCtrl(this.id, this._inc, accepted)
     return { meta, seq }
   }
@@ -521,31 +513,12 @@ class ServerRoom extends RoomStateView implements Room {
   /** @internal */
   _onCtrlMessage(serialized: string, rawInfo: WirePublishInfo): void {
     const event = decodeLaneEnvelope(serialized) as RoomCtrlEnvelope
-    if (event.__r === 'want') {
-      this._demand.applyWant(event) // between instances only, never relayed to clients
-      return
-    }
-    const wasClosed = this._state.closed
-    this._applyCtrl(event)
-    // A leave reaches clients from `_onLeave`, like every leave this view applies.
-    if (event.__r !== 'leave' && !this._takeRelayedAhead(event))
-      this._relayControl(event, () => encodePublishText(serialized, rawInfo))
-    if (this._state.closed && !wasClosed) this._teardown()
+    if (!this._applyCtrl(event)) return
+    this._relayControl(event, () => encodePublishText(serialized, rawInfo))
+    if (event.__r === 'closed') this._teardown()
   }
 
-  /** This instance's own join or meta change reaches its clients at once, not through its echo, which a lost frame can
-   *  drop with no reconcile seeing drift here. */
-  private _relayOwn(event: Extract<RoomCtrlEnvelope, { __r: 'join' | 'p-meta' }>): void {
-    let ahead = this._relayedAhead.get(event.id)
-    if (!ahead) this._relayedAhead.set(event.id, (ahead = new Set()))
-    ahead.add(relayedAheadKey(event))
-    this._relayApplied(event)
-  }
-  private _takeRelayedAhead(event: RoomCtrlEnvelope): boolean {
-    if (event.__r !== 'join' && event.__r !== 'p-meta') return false
-    return this._relayedAhead.get(event.id)?.delete(relayedAheadKey(event)) ?? false
-  }
-  /** An event this view applied, relayed as is rather than as its lane frame. */
+  /** Relayed as this view applied it, not as a lane frame: an own event's echo may be lost with no drift to reconcile. */
   private _relayApplied(event: RoomCtrlEnvelope): void {
     this._relayControl(event, () => encodePublishText(stringify(event), { seq: 0, timestamp: Date.now() }))
   }
@@ -615,29 +588,32 @@ class ServerRoom extends RoomStateView implements Room {
       .then((reply) => this._publishDmAck(envelope.from, ackId, reply))
       .catch(reportRoomError)
   }
-  private _applyCtrl(event: RoomCtrlEnvelope): void {
+  /** Whether the event changed this view, which is what its clients get; a leave reaches them from `_onLeave`. */
+  private _applyCtrl(event: RoomCtrlEnvelope): boolean {
     switch (event.__r) {
+      case 'want':
+        this._demand.applyWant(event) // between instances only, never relayed to clients
+        return false
       case 'join':
-        this._state.applyJoin(joinedMember(event))
+        if (!this._state.applyJoin(joinedMember(event))) return false
         this._subs.replan() // a new member means a new per-member key candidate
-        return
+        return true
       case 'track':
-        this._state.applyTrack(event.id, event.track)
+        if (!this._state.applyTrack(event.id, event.track)) return false
         this._subs.replan() // all-track subscribers need the new (member, track) key
-        return
+        return true
       case 'leave':
         this._applyLeave(event.id, leaveCauseFromWire(event))
-        return
+        return false
       case 'p-meta': {
-        this._state.applyParticipantMeta(event.id, event.meta, event.seq)
+        const applied = this._state.applyParticipantMeta(event.id, event.meta, event.seq)
         this._localParticipants.get(event.id)?._acceptMeta(event)
-        return
+        return applied
       }
       case 'update':
-        this._state.applyRoomUpdate(event.meta, event.at, event.by)
-        return
+        return this._state.applyRoomUpdate(event.meta, event.at, event.by)
       case 'closed':
-        this._state.applyClosed()
+        return this._state.applyClosed()
     }
   }
   private _applyLeave(id: string, cause: LeaveCause): void {
@@ -646,7 +622,6 @@ class ServerRoom extends RoomStateView implements Room {
   /** Every leave the state applies, event or reconcile, runs the member's cleanup. */
   private _onLeave(id: string, cause: LeaveCause, hidden: boolean | null): void {
     this._announcedTracks.delete(id)
-    this._relayedAhead.delete(id)
     this._rejectDmAcks(DM_FAILURE.left, id) // strand no waiter on a gone member
     const local = this._localParticipants.get(id)
     if (local) {

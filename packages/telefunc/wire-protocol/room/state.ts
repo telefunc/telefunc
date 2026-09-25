@@ -314,10 +314,15 @@ class RoomState {
     return this._register(this._announceCbs, cb)
   }
   /** A member published its first frame on a new named track (idempotent: echoes, rosters, and the owner's local apply all land here). */
-  applyTrack(id: string, track: string): void {
+  applyTrack(id: string, track: string): boolean {
     const entry = this._members.get(id)
-    if (entry) entry.tracks.add(track)
-    else this._markUnknownMember()
+    if (!entry) {
+      this._markUnknownMember()
+      return false
+    }
+    if (entry.tracks.has(track)) return false
+    entry.tracks.add(track)
+    return true
   }
   /** Immutable view of the whole room, cached by state version, so the reference is stable until something actually changes (the `useSyncExternalStore` contract). */
   snapshot(): RoomSnapshotView {
@@ -354,19 +359,20 @@ class RoomState {
     this.membershipVersion++
   }
   // ── Event application ──
-  applyJoin(member: MemberSnapshot): void {
-    if (this.closed) return
+  applyJoin(member: MemberSnapshot): boolean {
+    if (this.closed) return false
     // A known member's join echo has nothing new: its meta is the admission meta, frozen before any guard.
-    if (this._members.has(member.id)) return
+    if (this._members.has(member.id)) return false
     const entry = this._createEntry(member)
     // A hidden participant is no presence event (no count, no `onJoin`), but the roster changed, so `onChange` fires.
     if (entry.hidden) {
       this._bumpMembership()
-      return
+      return true
     }
     if (!this._rosterKnown) this._seedCount++ // pre-roster, `count` is the seed adjusted by applied events
     this._bumpMembership()
     this._fireAll(this._joinCbs, this._remote(entry))
+    return true
   }
   applyLeave(id: string, cause: LeaveCause): void {
     const entry = this._members.get(id)
@@ -389,15 +395,15 @@ class RoomState {
     if (this.count === 0) this._fireAll(this._emptyCbs)
   }
   /** Applies only revisions newer than the entry's: the origin's echo (same seq) and events arriving behind a fresher reconcile are absorbed. */
-  applyParticipantMeta(id: string, meta: ParticipantMeta, seq: number): void {
+  applyParticipantMeta(id: string, meta: ParticipantMeta, seq: number): boolean {
     const entry = this._members.get(id)
     if (!entry) {
       // Before the first roster every member is unknown: its meta change is no drift, and the first roster applies it.
       if (this._rosterKnown) this._markUnknownMember()
       else if (seq > (this._preRosterMeta.get(id)?.seq ?? 0)) this._preRosterMeta.set(id, { meta, seq })
-      return
+      return false
     }
-    if (seq <= entry.metaSeq) return
+    if (seq <= entry.metaSeq) return false
     const prev = entry.meta
     entry.metaSeq = seq
     const next = ownMetadata(meta)
@@ -405,6 +411,7 @@ class RoomState {
     this._bumpState()
     this._fireAll(entry.updateCbs, next, prev)
     this._fireAll(this._participantUpdateCbs, this._remote(entry), next, prev)
+    return true
   }
   /** Last-writer-wins by `(at, by)`, so every instance converges; `prev` is this view's own previous meta, which can
    *  differ per instance. `true` when the update applied. */
@@ -423,8 +430,8 @@ class RoomState {
     return this._updateStamp
   }
   /** Room closed: member-level cleanup callbacks run (decoders etc.), then `onClose`. Room-level `onLeave`/`onEmpty` intentionally don't fire: `onClose` is the signal. */
-  applyClosed(cause: LeaveCause = { type: 'closed' }): void {
-    if (this.closed) return
+  applyClosed(cause: LeaveCause = { type: 'closed' }): boolean {
+    if (this.closed) return false
     cause = ownLeaveCause(cause)
     this._closedCause = cause
     const departed = [...this._members.values()]
@@ -441,6 +448,7 @@ class RoomState {
     }
     this._fireAll(this._closeCbs)
     this._releaseAllListeners()
+    return true
   }
   applyAnnounce(data: unknown, info: ChannelPublishInfo): void {
     this._fireAll(this._announceCbs, data, info)
