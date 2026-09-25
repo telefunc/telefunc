@@ -25,7 +25,7 @@ const redis = new IORedis('redis://localhost:6379', { maxRetriesPerRequest: 0 })
 installRedis(redis)
 ```
 
-That single call installs the Redis backend for both Broadcast and Room. Room state and events are then shared across server instances.
+That single call installs the Redis backend for both Broadcast and Room. Room state and events are then shared across server instances. Make it before the first Broadcast or Room use, for example in a module your server entry imports first: a use before it starts the in-memory backend, and `installRedis()` then throws.
 
 ### Sharing an existing client
 

@@ -41,8 +41,12 @@ function installBackend<Driver extends BackendDriver>(
 ): Driver {
   const installed = state.installed
   if (installed === null) return install(factory, key, false).driver as Driver
-  if (!sameKey(installed.key, key)) throw new Error(REPLACEMENT_ERROR)
-  return installed.driver as Driver
+  if (sameKey(installed.key, key)) return installed.driver as Driver
+  assertUsage(
+    !installed.fallback,
+    'Install the backend (for example with installRedis()) before the first Broadcast or Room use: an earlier use already started the in-memory backend',
+  )
+  throw new Error(REPLACEMENT_ERROR)
 }
 
 /** Sets the public broadcast-only override, or removes it with `undefined`; the full backend's Room plane stays. */

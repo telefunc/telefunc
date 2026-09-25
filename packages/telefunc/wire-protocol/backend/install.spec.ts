@@ -39,6 +39,10 @@ describe('backend installation lifecycle', () => {
       { roomId: 'missing', inc: 'inc', lane: { kind: 'semantic' } },
     ])
   })
+  it('asks for the install before the first Broadcast or Room use, which started the in-memory backend', () => {
+    getBroadcastBackend()
+    expect(() => installBackend(() => new MemoryBackend(), ['redis'])).toThrow('before the first Broadcast or Room use')
+  })
   it('rejects a second backend without constructing it', () => {
     installBackend(() => new MemoryBackend())
     const factory = vi.fn(() => new MemoryBackend())
