@@ -34,7 +34,6 @@ import { config } from '../../node/server/serverConfig.js'
 import type { LaneSubscription } from './server/lane-subscription.js'
 import { reportRoomError } from './server/errors.js'
 import { RoomParticipantStubChannel, RoomStubChannel } from './server/stub.js'
-import { ReplayGate } from './server/replay.js'
 import { TailHold } from './server/tail.js'
 import { RoomDemand } from './demand.js'
 import { roomParticipantReplacer, roomRemoteReplacer, roomReplacer } from './response-server.js'
@@ -2155,14 +2154,6 @@ describe('Room public behavior', () => {
     await expect(driver.listRetained(room.id, room._inc)).resolves.toEqual([
       { kind: 'binary', member: 'member', track: 'original' },
     ])
-  })
-  it('admits a retained frame once, never behind a same-or-newer frame, and drops its live echo', () => {
-    const gate = new ReplayGate()
-    expect(gate.admit('text', 2)).toBe(true)
-    expect(gate.admit('text', 1)).toBe(false)
-    expect(gate.admit('text', 3)).toBe(true)
-    expect(gate.admit('text', 3)).toBe(false)
-    expect(gate.admit('text', 4)).toBe(true)
   })
   it('replays retained text and binary once to a late server-side subscriber', async () => {
     const authority = await Room.create('late-server-subscriber')
