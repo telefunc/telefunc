@@ -731,6 +731,41 @@ describe('cloudflare broadcast routing', () => {
     await subscription.unsubscribe()
   })
 
+  it("publishes a caller's buffer as it was at the call, even on a line held behind a failed call", async () => {
+    const replies: Array<PromiseWithResolvers<{ seq: number; timestamp: number }>> = []
+    const published: number[][] = []
+    const transport = createTransport(
+      createBasicBinding({
+        onPublish: (_id, request) => {
+          // An RPC serializes its arguments when it is made.
+          published.push(Array.from(request.payload as Uint8Array))
+          const reply = Promise.withResolvers<{ seq: number; timestamp: number }>()
+          replies.push(reply)
+          return reply.promise
+        },
+      }),
+    )
+    const member = createMember(transport)
+    const route = { key: 'room:reused-buffer', kind: 'binary' } as const
+    const scratch = new Uint8Array([1])
+    await inSession(member, async () => {
+      const failing = transport.publish(route, scratch).catch(() => {})
+      const inFlight = transport.publish(route, scratch)
+      replies[0]!.reject(new Error('transport error'))
+      await failing
+      // The next call waits for the failed stub's calls; the caller reuses its buffer meanwhile.
+      scratch[0] = 3
+      const later = transport.publish(route, scratch)
+      scratch[0] = 9
+      replies[1]!.resolve({ seq: 2, timestamp: 1 })
+      await inFlight
+      await vi.waitFor(() => expect(replies).toHaveLength(3))
+      replies[2]!.resolve({ seq: 3, timestamp: 1 })
+      await later
+    })
+    expect(published).toEqual([[1], [1], [3]])
+  })
+
   it('publishes from outside a session, as from a cron trigger, without a bucket', async () => {
     const coordinatorPublishes: Array<{ name: string; key: string; locationBucket: string | null; text: string }> = []
     const transport: CloudflareBroadcastTransport = createTransport(
