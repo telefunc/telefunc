@@ -98,6 +98,30 @@ test('re-subscribes on a fresh connection and resumes delivery after a drop', as
   expect(received).toEqual([1, 2])
 })
 
+test("reports each outage with its own connection's error, not an earlier connection's", async () => {
+  const report = vi.spyOn(console, 'error').mockImplementation(() => {})
+  onTestFinished(() => report.mockRestore())
+  const sockets: ReturnType<typeof fakeSubscriber>[] = []
+  const { driver } = driverWith(sockets)
+  const attempt = driver.bind(route).open(
+    () => {},
+    () => 1,
+  )
+  await untilReady(attempt)
+  sockets[0]!.socket.emit('error', new Error('connect ECONNREFUSED'))
+  sockets[0]!.socket.emit('close')
+  await vi.waitFor(() => expect(sockets[1]?.subscribed).toHaveLength(1))
+  await vi.waitFor(() => expect(attempt.state()).toBe('ready'))
+  // The server closes the connection cleanly: no 'error' event.
+  sockets[1]!.socket.emit('close')
+  await vi.waitFor(() => expect(report).toHaveBeenCalledTimes(2))
+  expect(report.mock.calls.map(([error]) => (error as Error).message)).toEqual([
+    'connect ECONNREFUSED',
+    'Redis subscriber connection closed',
+  ])
+  await attempt.unsubscribe()
+})
+
 test("a fence resolves when its subscription's owner releases it: no receiver is left to hand off to", async () => {
   const sockets: ReturnType<typeof fakeSubscriber>[] = []
   const { driver } = driverWith(sockets)

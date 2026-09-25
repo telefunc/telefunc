@@ -55,7 +55,6 @@ class RedisSubscriptionDriver implements SubscriptionDriver<RedisSubscriptionSou
   private _reconnectDelay = RECONNECT_DELAY_MIN_MS
   /** An establishing attempt reports no failure, so the first one of an outage is reported here. */
   private _outageReported = false
-  private _lastError: unknown = new Error('Redis subscriber connection closed')
 
   constructor(options: RedisSubscriptionDriverOptions) {
     this._prefix = options.prefix
@@ -135,10 +134,11 @@ class RedisSubscriptionDriver implements SubscriptionDriver<RedisSubscriptionSou
     socket.on('messageBuffer', (channel: Buffer, frame: Buffer) => {
       if (this._isCurrent(id)) this._dispatch(channel.toString(), frame)
     })
+    let lastError: unknown = new Error('Redis subscriber connection closed')
     socket.on('error', (error: unknown) => {
-      this._lastError = error
+      lastError = error
     })
-    socket.on('close', () => this._lost(id, this._lastError))
+    socket.on('close', () => this._lost(id, lastError))
     try {
       await socket.connect()
     } catch (error) {
