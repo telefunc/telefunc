@@ -2688,6 +2688,14 @@ describe('client Room lifecycle', () => {
     expect(client.isClosed).toBe(false)
     expect(client._getRemote(metadata.id)).toBe(revived.value)
   })
+  it('hands out a participant revived into a closed room as having left with it', () => {
+    const { client } = fakeClient('revived-into-closed', undefined, { closed: true, count: 0 })
+    const member = client._reviveRemote({ id: crypto.randomUUID(), meta: {}, joinedAt: 1, metaSeq: 0, identity: null })
+    const causes: unknown[] = []
+    member.onLeave((cause) => causes.push(cause))
+    expect(causes).toEqual([{ type: 'closed' }])
+    expect(client.snapshot().participants).toEqual([])
+  })
   it('fires onLeave on a directly held hidden member when its leave is relayed', () => {
     const { client, emit } = fakeClient('client-hidden-leave')
     emit({ __r: 'roster', members: [] })

@@ -164,6 +164,7 @@ class RoomState {
   private _listenerCount = 0
   private _updateStamp: { at: number; by: string }
   private _rosterKnown: boolean
+  private _closedCause: LeaveCause = ownLeaveCause({ type: 'closed' })
   private _seedCount = 0
   constructor(opts: RoomStateOptions) {
     this.roomId = opts.roomId
@@ -261,6 +262,13 @@ class RoomState {
   ensureRemoteFromSnapshot(snap: MemberSnapshot): RemoteParticipant {
     const existing = this._members.get(snap.id)
     if (existing) return this._remote(existing)
+    if (this.closed) {
+      // A closed room has no members: one it hands out left with it.
+      const entry = this._newEntry(snap)
+      entry.left = true
+      entry.leaveCause = this._closedCause
+      return this._remote(entry)
+    }
     const remote = this._remote(this._createEntry(snap))
     this._bumpState()
     return remote
@@ -409,6 +417,7 @@ class RoomState {
   applyClosed(cause: LeaveCause = { type: 'closed' }): void {
     if (this.closed) return
     cause = ownLeaveCause(cause)
+    this._closedCause = cause
     const departed = [...this._members.values()]
     this.closed = true
     this._rosterKnown = true // authoritatively empty
@@ -513,6 +522,11 @@ class RoomState {
   }
   // ── Private ──
   private _createEntry(entrySeed: MemberSnapshot): MemberEntry {
+    const entry = this._newEntry(entrySeed)
+    this._members.set(entry.id, entry)
+    return entry
+  }
+  private _newEntry(entrySeed: MemberSnapshot): MemberEntry {
     const { id, meta, joinedAt } = entrySeed
     const entry: MemberEntry = {
       id,
@@ -529,7 +543,6 @@ class RoomState {
       updateCbs: [],
       leaveCbs: [],
     }
-    this._members.set(id, entry)
     return entry
   }
   private _remote(entry: MemberEntry): RemoteParticipant {
