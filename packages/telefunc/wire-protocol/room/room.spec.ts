@@ -351,6 +351,20 @@ describe('Room public behavior', () => {
     await leaving
     expect(causes).toEqual([{ type: 'left' }])
   })
+  it('lists without a room that closes between its head read and its roster read', async () => {
+    await Room.create('list-open')
+    const closing = (await Room.create('list-closing')) as ServerRoom
+    const readCells = driver.readCells.bind(driver)
+    let closed = false
+    vi.spyOn(driver, 'readCells').mockImplementation(async (roomId, inc, selector) => {
+      if (roomId === closing.id && !closed) {
+        closed = true
+        await Room.close(closing.id)
+      }
+      return readCells(roomId, inc, selector)
+    })
+    expect((await Room.list()).map(({ id }) => id)).toEqual(['list-open'])
+  })
   it('creates, lists, updates, closes fully, and recreates a genuinely fresh domain', async () => {
     const room = (await Room.create('lifecycle', { meta: { topic: 'one' } })) as unknown as ServerRoom
     const firstInc = room._inc

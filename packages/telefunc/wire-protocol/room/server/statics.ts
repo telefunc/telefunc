@@ -5,7 +5,7 @@ import { assert, assertUsage } from '../../../utils/assert.js'
 import { isObject } from '../../../utils/isObject.js'
 import { getRoomBackend } from '../../backend/install.js'
 import type { RoomBackend, RoomHead } from '../../backend/room/contract.js'
-import { RoomError, participantGoneError, roomClosedError } from '../errors.js'
+import { RoomError, isRoomError, participantGoneError, roomClosedError } from '../errors.js'
 import {
   assertKnownOptions,
   assertParticipantIdentity,
@@ -259,7 +259,12 @@ async function listRooms(options?: { prefix?: string }): Promise<RoomInfo[]> {
       await repairRoomIndex(backend, roomId, incTag, head)
       const config = openConfig(head)
       if (config === null) continue
-      const count = await presenceCount(roomId, config.inc)
+      // A room that began closing after its head read is no longer listed.
+      const count = await presenceCount(roomId, config.inc).catch(async (error: unknown) => {
+        if (isRoomError(error) && openConfig(await backend.readHead(roomId), config.inc) === null) return null
+        throw error
+      })
+      if (count === null) continue
       rooms.push({ id: roomId, meta: config.meta, count, isEmpty: count === 0 })
     }
   } while (cursor !== undefined)
