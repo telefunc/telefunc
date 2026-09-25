@@ -347,7 +347,7 @@ describe('keyed in-process broadcast', () => {
     const attempts = [pendingSubscription(), pendingSubscription(), pendingSubscription()]
     let opens = 0
     await installOpeningBackend((_source, driverOpen) => attempts[opens++]?.subscription ?? driverOpen())
-    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const report = vi.spyOn(console, 'error').mockImplementation(() => {})
     const unsubscribe = Broadcast.subscribe('broadcast:replaced-once', () => {})
     attempts[0]!.close()
     await vi.waitFor(() => expect(opens).toBe(2))
@@ -355,9 +355,24 @@ describe('keyed in-process broadcast', () => {
     attempts[1]!.close()
     await vi.waitFor(() => expect(opens).toBe(3))
     attempts[2]!.close()
-    await new Promise((resolve) => setTimeout(resolve, 0))
+    await vi.waitFor(() => expect(report).toHaveBeenCalledTimes(3))
     expect(opens).toBe(3)
     unsubscribe()
+  })
+
+  it('opens no replacement for a subscription that ends after its route was released', async () => {
+    const ending = pendingSubscription()
+    let opens = 0
+    await installOpeningBackend(() => {
+      opens++
+      return ending.subscription
+    })
+    const report = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const unsubscribe = Broadcast.subscribe('broadcast:released', () => {})
+    ending.close()
+    unsubscribe()
+    await vi.waitFor(() => expect(report).toHaveBeenCalledOnce())
+    expect(opens).toBe(1)
   })
 
   it('waits for a sibling subscription to be ready before publishing', async () => {
