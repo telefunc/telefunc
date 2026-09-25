@@ -255,7 +255,9 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
   // Relays
 
   /** An event this instance originates for this client alone, outside any lane's order. */
-  _relayEvent(event: RoomRosterEvent | RoomDemandEvent | Extract<RoomCtrlEnvelope, { __r: 'closed' }>): void {
+  _relayEvent(
+    event: RoomRosterEvent | RoomDemandEvent | Extract<RoomCtrlEnvelope, { __r: 'closed' | 'update' }>,
+  ): void {
     this._sendPublish(encodePublishText(stringify(event), { seq: 0, timestamp: Date.now() }))
   }
 

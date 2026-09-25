@@ -393,15 +393,17 @@ class RoomState {
     this._fireAll(entry.updateCbs, next, prev)
     this._fireAll(this._participantUpdateCbs, this._remote(entry), next, prev)
   }
-  /** Last-writer-wins by `(at, by)`, so every instance converges; `prev` is this view's own previous meta, which can differ per instance. */
-  applyRoomUpdate(meta: RoomMeta, at: number, by: string): void {
-    if (!stampNewer({ at, by }, this._updateStamp)) return
+  /** Last-writer-wins by `(at, by)`, so every instance converges; `prev` is this view's own previous meta, which can
+   *  differ per instance. `true` when the update applied. */
+  applyRoomUpdate(meta: RoomMeta, at: number, by: string): boolean {
+    if (!stampNewer({ at, by }, this._updateStamp)) return false
     const prev = this.meta
     this._updateStamp = { at, by }
     const next = ownMetadata(meta)
     this.meta = next
     this._bumpState()
     this._fireAll(this._updateCbs, next, prev)
+    return true
   }
   /** The stamp of the config this view currently reflects (serialized into room snapshots). */
   get updateStamp(): { at: number; by: string } {

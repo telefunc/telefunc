@@ -643,9 +643,11 @@ class ServerRoom extends RoomStateView implements Room {
     this._subs.replan()
   }
 
-  /** @internal */
+  /** @internal A newer config reaching this view through the authority never reached its clients as an event. */
   _applyAuthorityConfig(config: RoomConfigRecord): void {
-    this._state.applyRoomUpdate(config.meta, config.at, config.by)
+    if (!this._state.applyRoomUpdate(config.meta, config.at, config.by)) return
+    const update = { __r: 'update', meta: config.meta, at: config.at, by: config.by } as const
+    for (const stub of this._stubs) stub._relayEvent(update)
   }
   /** @internal */
   _applyAuthorityRoster(members: MemberSnapshot[], departing: ReadonlySet<string>): boolean {

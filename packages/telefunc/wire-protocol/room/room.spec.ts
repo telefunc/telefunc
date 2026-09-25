@@ -225,6 +225,20 @@ describe('Room public behavior', () => {
     await subsOf(room)._heartbeatTick()
     expect(leaves(vanished)).toEqual([{ __r: 'leave', id: vanished, cause: 'removed' }])
   })
+  it("relays a room meta update that reached this instance only through the authority's reconcile", async () => {
+    const room = (await Room.create('lost-update', { meta: { topic: 'old' } })) as unknown as ServerRoom
+    const { peer } = serve(room)
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    vi.spyOn(room, '_onCtrlMessage').mockImplementationOnce(() => {})
+    await Room.setMeta(room.id, { topic: 'new' })
+    await subsOf(room).reconcileAuthority()
+    const updates = peer
+      .decoded()
+      .filter((frame) => frame.tag === TAG.PUBLISH)
+      .map((frame) => JSON.parse(frame.text) as { __r: string; meta?: unknown })
+      .filter((event) => event.__r === 'update')
+    expect(updates.map((event) => event.meta)).toEqual([{ topic: 'new' }])
+  })
   it("relays a hidden member's event-less leave to no client it wasn't handed to", async () => {
     const room = (await Room.create('lost-hidden-leave')) as ServerRoom
     const bot = await room.join({ hidden: true })
