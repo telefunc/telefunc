@@ -1325,6 +1325,26 @@ describe('Room public behavior', () => {
     await Room.send('dm', { id: player.id }, { notice: true })
     expect(fromRoom).toEqual([[{ notice: true }, null]])
   })
+  it('never runs a guard with a stand-in for a member that left while its publish queued', async () => {
+    const room = await Room.create('queued-publish-kick')
+    const identities: unknown[] = []
+    const held = deferred<void>()
+    Room.guard(room, {
+      onBeforePublish: async (from) => {
+        identities.push(from.identity)
+        if (identities.length === 1) await held.promise
+      },
+    })
+    const member = await room.join({ identity: 'alice' })
+    const first = member.publish('one').catch((error: unknown) => error)
+    const queued = member.publish('two').catch((error: unknown) => error)
+    await vi.waitFor(() => expect(identities).toEqual(['alice']))
+    await Room.removeParticipant(room.id, { id: member.id })
+    held.resolve()
+    expect(isRoomError(await queued)).toBe(true)
+    await first
+    expect(identities).toEqual(['alice'])
+  })
   it('takes meta as it was at the call, nested values included', async () => {
     const created = { topic: { name: 'a' } }
     const creating = Room.create('nested-meta', { meta: created })

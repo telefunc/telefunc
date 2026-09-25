@@ -401,9 +401,11 @@ class ServerRoom extends RoomStateView implements Room {
     announced.add(track)
   }
 
+  /** A member that left while its call waited has no sender to show a guard. */
   private _memberSender(from: string): Sender {
     const known = this._state.getRemote(from) ?? this._localParticipants.get(from)
-    return senderOf(from, known?.meta ?? {}, known?.identity ?? null)
+    if (!known) throw participantLeftError()
+    return senderOf(from, known.meta, known.identity)
   }
 
   async _sendDm(from: string, to: string, data: unknown, ack: boolean): Promise<RoomSendReceipt | RoomAckReceipt> {
