@@ -51,8 +51,12 @@ async function createSubscriberSocket(redis: RedisClient): Promise<SubscriberSoc
     // A Cluster fills its node pool just before it is ready, and a lazyConnect one connects only on a command.
     if (redis.status === 'wait') await redis.connect()
     else if (redis.status === 'connecting') await clusterReady(redis)
-    const master = redis.nodes('master').find((candidate) => candidate.status !== 'end')
+    // A failed master stays pooled until the Cluster uses it, so each reconnect starts after the last one used.
+    const masters = redis.nodes('master').filter((candidate) => candidate.status !== 'end')
+    const last = subscriberMasters.get(redis)
+    const master = masters[last === undefined ? 0 : (masters.indexOf(last) + 1) % masters.length]
     if (master === undefined) throw new Error('RedisBackend: Cluster has no available masters')
+    subscriberMasters.set(redis, master)
     source = master
   } else source = redis
   return source.duplicate({
@@ -62,6 +66,9 @@ async function createSubscriberSocket(redis: RedisClient): Promise<SubscriberSoc
     retryStrategy: () => null,
   })
 }
+
+// The master each Cluster's subscriber was last duplicated from.
+const subscriberMasters = new WeakMap<Cluster, Redis>()
 
 // One wait per connecting Cluster, however often subscribers reopen during it.
 const clusterWaits = new WeakMap<Cluster, Promise<void>>()

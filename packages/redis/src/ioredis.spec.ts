@@ -106,3 +106,21 @@ test('names Pub/Sub channels per database, as Pub/Sub spans every database', asy
   )
   expect(channels[0]).not.toBe(channels[1])
 })
+
+test('moves the subscriber to the next master on each reconnect, so a failed master it never used does not hold it', async () => {
+  const cluster = new Cluster([{ host: '127.0.0.1', port: 6379 }], {
+    lazyConnect: true,
+    retryDelayOnFailover: 0,
+    redisOptions: { maxRetriesPerRequest: 0 },
+  })
+  const masters = [0, 1].map(() => new Redis({ lazyConnect: true, maxRetriesPerRequest: 0 }))
+  onTestFinished(() => [cluster, ...masters].forEach((redis) => redis.disconnect()))
+  vi.spyOn(cluster, 'connect').mockImplementation(async () => {
+    cluster.status = 'ready'
+  })
+  vi.spyOn(cluster, 'nodes').mockReturnValue(masters)
+  const duplicates = masters.map((master) => vi.spyOn(master, 'duplicate'))
+  const sockets = [await createSubscriberSocket(cluster), await createSubscriberSocket(cluster)]
+  sockets.forEach((socket) => socket.disconnect())
+  expect(duplicates.map((duplicate) => duplicate.mock.calls.length)).toEqual([1, 1])
+})
