@@ -26,7 +26,9 @@ class OrderedStubs<Stub> {
     const current = line
     current.calls++
     const result =
-      current.after === null ? invokeNow(invoke, current.stub) : current.after.then(() => invoke(current.stub))
+      current.after === null
+        ? new Promise<T>((resolve) => resolve(invoke(current.stub)))
+        : current.after.then(() => invoke(current.stub))
     result.then(
       () => this.#settle(target, current),
       () => {
@@ -41,14 +43,6 @@ class OrderedStubs<Stub> {
     if (--line.calls > 0) return
     line.idle.resolve()
     if (this.#lines.get(target) === line) this.#lines.delete(target)
-  }
-}
-
-function invokeNow<Stub, T>(invoke: (stub: Stub) => Promise<T>, stub: Stub): Promise<T> {
-  try {
-    return invoke(stub)
-  } catch (error) {
-    return Promise.reject(error)
   }
 }
 
