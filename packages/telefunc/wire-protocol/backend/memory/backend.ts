@@ -156,12 +156,12 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
   }
 
   async readHead(roomId: string): Promise<RoomHead | null> {
-    const head = this.#readAndExpireHead(this.#state.rooms.get(roomId))
+    const head = this.#liveHead(this.#state.rooms.get(roomId))
     return head === null ? null : publicHead(head)
   }
 
   async compareExchangeHead(roomId: string, cx: HeadCx, next: HeadNext): Promise<HeadCxResult> {
-    const current = this.#readAndExpireHead(this.#state.rooms.get(roomId))
+    const current = this.#liveHead(this.#state.rooms.get(roomId))
     if (!headCxMatches(cx, current, Date.now())) {
       return { conflict: true, current: current === null ? null : publicHead(current) }
     }
@@ -179,7 +179,7 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
 
   async readCells(roomId: string, inc: string, sel: CellSelector): Promise<CellsRead> {
     const room = this.#state.rooms.get(roomId)
-    const head = this.#readAndExpireHead(room)
+    const head = this.#liveHead(room)
     // Closing tails may read; only writes require an open head.
     if (room === undefined || head === null || head.currentInc !== inc) return { staleInc: true }
     const gen = this.#generation(room, inc)
@@ -200,7 +200,7 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
     mutations: CellMutation[],
   ): Promise<CxResult> {
     const room = this.#state.rooms.get(roomId)
-    const head = this.#readAndExpireHead(room)
+    const head = this.#liveHead(room)
     if (room === undefined || !isOpenIncarnation(head, inc)) return 'stale-inc'
     const gen = this.#generation(room, inc)
     if (String(gen.revision) !== revision) return 'conflict'
@@ -220,7 +220,7 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
     opts?: CommitOptions,
   ): Promise<CommitResult> {
     const room = this.#state.rooms.get(roomId)
-    const head = this.#readAndExpireHead(room)
+    const head = this.#liveHead(room)
     if (room === undefined || !commitPreconditionHolds(head, inc, lane.kind, opts?.closingLease, Date.now())) {
       return { stale: 'incarnation' }
     }
@@ -273,7 +273,7 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
     if ('roomId' in source) {
       const { roomId, inc, lane } = source
       const room = this.#state.rooms.get(roomId)
-      const head = this.#readAndExpireHead(room)
+      const head = this.#liveHead(room)
       if (room === undefined || !isOpenIncarnation(head, inc))
         throw new Error(`subscribeLane: room '${roomId}' has no open incarnation '${inc}'`)
       // Registration is durable before `ready` resolves: a commit accepted after this point must see it.
@@ -325,7 +325,7 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
   /** A room with no incarnation left is forgotten once its tombstone lapses (revs are process-global, never reused). */
   #releaseWhenLapsed(roomId: string, room: RoomRecord): void {
     if (this.#state.rooms.get(roomId) !== room || room.gens.size > 0) return
-    const head = this.#readAndExpireHead(room)
+    const head = this.#liveHead(room)
     if (head === null) {
       this.#state.rooms.delete(roomId)
       return
@@ -339,11 +339,9 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
   }
 
   // Lazy TTL: a lapsed tombstone reads as absent, which is what reopens an absence epoch.
-  #readAndExpireHead(room: RoomRecord | undefined): StoredHead | null {
-    if (room === undefined || room.head === null) return null
-    if (!isExpired(room.head, Date.now())) return room.head
-    room.head = null
-    return null
+  #liveHead(room: RoomRecord | undefined): StoredHead | null {
+    const head = room?.head ?? null
+    return head === null || isExpired(head, Date.now()) ? null : head
   }
 }
 
