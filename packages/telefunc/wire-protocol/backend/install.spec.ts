@@ -9,6 +9,7 @@ import {
 import { createBroadcastTransportDriver, type BroadcastTransport } from './broadcast/transport.js'
 import { superviseBroadcastDriver } from './broadcast/supervise.js'
 import { MemoryBackend } from './memory/backend.js'
+import { DriverAttempt } from './attempt.js'
 import { config } from '../../node/server/serverConfig.js'
 import { ServerBroadcast } from '../server/server-broadcast.js'
 afterEach(async () => {
@@ -194,6 +195,33 @@ describe('backend installation lifecycle', () => {
     expect(received).not.toHaveBeenCalled()
   })
 })
+
+describe('supervised publishes and commits', () => {
+  it('holds a publish while a subscription of the other kind on its key establishes', async () => {
+    const driver = new MemoryBackend()
+    const attempt = new ManualAttempt()
+    driver.subscriptions.bind = () => ({ partition: '', open: () => attempt })
+    const publish = vi.spyOn(driver, 'publish')
+    const backend = superviseBroadcastDriver(driver)
+    const subscription = backend.subscribe({ key: 'mixed', kind: 'binary' }, () => {})
+    const publishing = backend.publish({ key: 'mixed', kind: 'text' }, new TextEncoder().encode('text'), 1024)
+    await Promise.resolve()
+    expect(publish).not.toHaveBeenCalled()
+    attempt.ready()
+    await publishing
+    expect(publish).toHaveBeenCalledOnce()
+    await subscription.unsubscribe()
+  })
+})
+
+class ManualAttempt extends DriverAttempt {
+  async unsubscribe() {
+    this.transition('closed')
+  }
+  ready() {
+    this.transition('ready')
+  }
+}
 
 function localTransport(): BroadcastTransport {
   let seq = 0

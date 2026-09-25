@@ -32,14 +32,16 @@ function superviseBroadcastDriver(driver: BroadcastDriver): BroadcastBackend {
     return isPromise(result) ? result.then(checked) : checked(result)
   }
 
-  /** Resolves once no subscription on the key, of either kind, is establishing, including ones started meanwhile. */
-  const keyEstablished = async (key: string): Promise<void> => {
-    const routes = [
+  const keyRoutes = (key: string) =>
+    [
       { key, kind: 'text' },
       { key, kind: 'binary' },
     ] as const
-    while (routes.some((route) => subscriptions.hasEstablishing(route)))
-      await Promise.all(routes.map((route) => subscriptions.established(route)))
+  const keyEstablishing = (key: string) => keyRoutes(key).some((route) => subscriptions.hasEstablishing(route))
+
+  /** Resolves once no subscription on the key, of either kind, is establishing, including ones started meanwhile. */
+  const keyEstablished = async (key: string): Promise<void> => {
+    while (keyEstablishing(key)) await Promise.all(keyRoutes(key).map((route) => subscriptions.established(route)))
   }
 
   const publish = (
@@ -51,7 +53,7 @@ function superviseBroadcastDriver(driver: BroadcastDriver): BroadcastBackend {
     // A driver may send later (a queued or re-sent command, an ordered RPC); `slice()` of a Node Buffer is a view.
     const owned = new Uint8Array(payload)
     const waiting = pending.get(key)
-    if (waiting === undefined && !subscriptions.hasEstablishing(route)) return publishNow(route, owned)
+    if (waiting === undefined && !keyEstablishing(key)) return publishNow(route, owned)
     const held = waiting ?? {
       established: raceTimeout(keyEstablished(key), BROADCAST_ESTABLISH_HOLD_MS, () => {}),
       count: 0,
