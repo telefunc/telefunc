@@ -93,7 +93,7 @@ type AfterJoinHook<P extends ParticipantMeta = ParticipantMeta> = (
   info: { joinedAt: number },
 ) => void | Promise<void>
 
-/** Why a participant left; one a roster no longer lists was `removed`. */
+/** Why a participant left; one a roster no longer lists is reported as `removed`. */
 type LeaveCause =
   | { readonly type: 'left' }
   | { readonly type: 'removed'; readonly reason?: unknown }

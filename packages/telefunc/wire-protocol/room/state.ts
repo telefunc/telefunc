@@ -547,7 +547,7 @@ class RoomState {
     let removed = false
     for (const id of [...this._members.keys()]) {
       if (seen.has(id)) continue
-      // No leave event reached this view; an owner renews its members, so a vanished one was removed.
+      // No leave event reached this view, so its cause is unknown: it is reported as removed.
       this.applyLeave(id, removedCause(undefined))
       removed = true
     }

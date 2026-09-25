@@ -375,7 +375,7 @@ async function finishClose(backend: RoomBackend, roomId: string, closing: RoomHe
 }
 
 async function cleanupFinalizedIncarnation(backend: RoomBackend, roomId: string, closed: RoomHead): Promise<void> {
-  // The only drop: a closed tombstone's incarnation, which a random `inc` never makes current again.
+  // A closed tombstone's incarnation, which a random `inc` never makes current again.
   assert(closed.state === 'closed' && closed.currentInc === null, 'Dropping the current incarnation')
   const inc = configFromHead(closed).inc
   await backend.dropGeneration(roomId, inc)
