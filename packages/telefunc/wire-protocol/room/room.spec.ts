@@ -2878,6 +2878,22 @@ describe('client Room lifecycle', () => {
       process.off('unhandledRejection', onUnhandled)
     }
   })
+  it('narrows its declared text wants before it stops the room-wide stream, so the server never wants none', () => {
+    const log: unknown[] = []
+    const { client, emit } = fakeClient('text-want-order', {
+      wireDeclarations: log as boolean[],
+      send: async (message: any) => {
+        if (message.__r === 'sub-text') log.push(message.members)
+      },
+    })
+    const member = { id: crypto.randomUUID(), meta: {}, joinedAt: 1, metaSeq: 0, identity: null }
+    emit({ __r: 'roster', members: [member] })
+    const stopRoomWide = client.subscribe(() => {})
+    client._getRemote(member.id)!.subscribe(() => {})
+    log.length = 0
+    stopRoomWide()
+    expect(log).toEqual([[member.id], false])
+  })
   it('declares nothing while its stub is closing, so an unsubscribe during the close returns normally', () => {
     let closing = false
     const { client, fake } = fakeClient('declare-while-closing', {
