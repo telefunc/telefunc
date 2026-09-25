@@ -1,7 +1,7 @@
 export { ParticipantBase }
 
 import { invokeChannelListener, type ChannelPublishAck } from '../channel.js'
-import { makeDisposer } from '../wrapProxy.js'
+import { makeDisposer } from './disposer.js'
 import type { TELEFUNC_SHIELDS } from '../../node/shared/transformer/generateShield/shield-key.js'
 import { assert } from '../../utils/assert.js'
 import { DM_FAILURE, participantLeftError, toRoomFailure } from './errors.js'

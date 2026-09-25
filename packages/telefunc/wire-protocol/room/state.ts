@@ -3,7 +3,8 @@ export { RoomState, RoomStateView, remoteBacking }
 import { assert, assertUsage } from '../../utils/assert.js'
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
 import { invokeChannelListener, type ChannelPublishInfo } from '../channel.js'
-import { makeDisposer, untether } from '../wrapProxy.js'
+import { untether } from '../wrapProxy.js'
+import { makeDisposer } from './disposer.js'
 import {
   emptyTrackWants,
   isNamedTrack,
