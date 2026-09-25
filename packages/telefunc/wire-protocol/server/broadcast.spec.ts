@@ -122,7 +122,7 @@ describe('keyed in-process broadcast', () => {
     expect(received).toEqual([{ text: 'hello' }])
   })
 
-  // Catches a key-mixup where the adapter routes by reference instead of by key,
+  // Catches a key-mixup where the backend routes by reference instead of by key,
   // or strips the key prefix and ends up with a single global topic.
   it('isolates messages by key — publishing on key A does not reach key B subscribers', () => {
     const a = new ServerBroadcast<{ from: string }>({ key: 'room:A' })
@@ -169,7 +169,7 @@ describe('keyed in-process broadcast', () => {
     ])
   })
 
-  // Catches a reordering bug introduced by an async adapter that races publishes
+  // Catches a reordering bug introduced by an async backend that races publishes
   // (e.g. swapping `await publish(a)` with `await publish(b)` in flight).
   it('preserves publish order across multiple in-flight messages', () => {
     const sender = new ServerBroadcast<{ n: number }>({ key: 'room:order' })
@@ -422,7 +422,7 @@ describe('keyed in-process broadcast', () => {
 })
 
 // ───────────────────────────────────────────────────────────────────────────
-// Binary path — publishBinary/subscribeBinary roundtrip with high-bit bytes.
+// Binary path — publishBinary/subscribeBinary gating and roundtrip with high-bit bytes.
 // Catches accidental string-coercion or UTF-8 transcoding of binary frames.
 // ───────────────────────────────────────────────────────────────────────────
 
@@ -531,12 +531,6 @@ describe('Broadcast disallows channel methods', () => {
     expect(() => call(broadcast)).toThrow()
   })
 })
-
-// ───────────────────────────────────────────────────────────────────────────
-// Shield — the runtime gate that protects the server from untyped client
-// publishes. The shield is wired via `[TELEFUNC_SHIELDS]` on the type;
-// the runtime check lives in _dispatchPublishAckReq.
-// ───────────────────────────────────────────────────────────────────────────
 
 describe('publish frames outside a broadcast', () => {
   it('treats a publish on a plain channel as a protocol violation instead of never answering it', () => {
@@ -688,6 +682,12 @@ describe('Broadcast client publish acks', () => {
   })
 })
 
+// ───────────────────────────────────────────────────────────────────────────
+// Shield — the runtime gate that protects the server from untyped client
+// publishes. The shield is wired via `[TELEFUNC_SHIELDS]` on the type;
+// the runtime check lives in _dispatchPublishAckReq.
+// ───────────────────────────────────────────────────────────────────────────
+
 describe('Broadcast shield validation', () => {
   it('rejects client publishes that fail the data shield with a SHIELD_ERROR ack', () => {
     const broadcast = new ServerBroadcast<{ text: string }>({ key: 'room:shield' })
@@ -741,7 +741,7 @@ describe('Broadcast shield validation', () => {
 
 // ───────────────────────────────────────────────────────────────────────────
 // Static bus (`Broadcast.*`): server-only fire-and-forget broadcast. Bypasses
-// the instance-lifecycle (no register, no peer) and goes straight to the adapter.
+// the instance-lifecycle (no register, no peer) and goes straight to the backend.
 // Bug class: regression where the static bus starts touching instance state.
 // ───────────────────────────────────────────────────────────────────────────
 
