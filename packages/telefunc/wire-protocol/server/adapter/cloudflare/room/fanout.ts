@@ -1,55 +1,42 @@
-export { Fanout, dispatchRoomFanout }
-export type { RoomFanoutOutcome, RoomFanoutNamespace }
-
-// One ephemeral chain per (incarnation, lane): N+1 starts after N settles, and failed handoffs do not
-// poison later frames. Incarnation cleanup discards the chains; each accepted handoff runs at most once.
+export { Fanout }
+export type { RoomSessionNamespace }
 
 import type { RouteInstallation } from './routes.js'
 import type { RoomSessionDeliveryRequest } from './backend.js'
+import { OrderedStubs } from '../ordered-stubs.js'
 
-type DeliveryInfo = { inc: string; laneKey: string; seq: number; timestamp: number }
-type DeliverFn = (routes: RouteInstallation[], payload: Uint8Array, info: DeliveryInfo) => Promise<void>
-
-type RoomFanoutRequest = {
-  routes: RouteInstallation[]
-  payload: Uint8Array
-  seq: number
-  timestamp: number
-}
-
-type RoomFanoutOutcome = { route: RouteInstallation; error?: string }
-
-type RoomFanoutStub = {
+type RoomSessionStub = {
   telefuncRoomDeliver(request: RoomSessionDeliveryRequest): Promise<void>
 }
 
-type RoomFanoutNamespace = {
+type RoomSessionNamespace = {
   idFromString(id: string): unknown
-  get(id: unknown): RoomFanoutStub
+  get(id: unknown): RoomSessionStub
 }
 
-const noop = (): void => {}
-
+/** A room authority's deliveries. Each session DO's frames go through one ordered stub, so they arrive in commit order
+ *  without waiting on each other. A lane has one route per subscribed session DO, at most the deployment's session
+ *  shards (the sum of `scale`), so the authority calls each itself, well within an invocation's subrequest limit. */
 class Fanout {
-  readonly #deliver: DeliverFn
-  readonly #incarnations = new Map<string, { active: boolean; lanes: Map<string, Promise<void>> }>()
+  readonly #sessions: RoomSessionNamespace
+  readonly #calls = new OrderedStubs<RoomSessionStub>()
   readonly #deliveries = new Map<string, Promise<void>>()
 
-  constructor(deliver: DeliverFn) {
-    this.#deliver = deliver
+  constructor(sessions: RoomSessionNamespace) {
+    this.#sessions = sessions
   }
 
-  enqueue(routes: RouteInstallation[], payload: Uint8Array, info: DeliveryInfo): string {
-    let incarnation = this.#incarnations.get(info.inc)
-    if (!incarnation) this.#incarnations.set(info.inc, (incarnation = { active: true, lanes: new Map() }))
-    const fence = incarnation
-    const delivery = (fence.lanes.get(info.laneKey) ?? Promise.resolve()).then(() => {
-      if (!fence.active) throw new Error('Cloudflare Room delivery cancelled before handoff')
-      return this.#deliver(routes, payload, info)
-    })
-    fence.lanes.set(info.laneKey, delivery.then(noop, noop))
+  /** Hands a committed frame to every route's session DO; the returned token awaits the handoffs. */
+  send(routes: RouteInstallation[], payload: Uint8Array, seq: number, timestamp: number): string {
+    const handoffs = routes.map(async (route) =>
+      this.#calls.call(
+        route.sessionDoId,
+        () => this.#sessions.get(this.#sessions.idFromString(route.sessionDoId)),
+        (session) => session.telefuncRoomDeliver({ ...route, payload, seq, timestamp }),
+      ),
+    )
     const token = crypto.randomUUID()
-    this.#deliveries.set(token, delivery)
+    this.#deliveries.set(token, Promise.allSettled(handoffs).then(reportLostDeliveries))
     return token
   }
 
@@ -62,34 +49,11 @@ class Fanout {
       this.#deliveries.delete(token)
     }
   }
-
-  clearIncarnation(inc: string): void {
-    const incarnation = this.#incarnations.get(inc)
-    if (incarnation !== undefined) incarnation.active = false
-    this.#incarnations.delete(inc)
-  }
 }
 
-/** One call per route, straight to its session DO: a lane has one route per subscribed session DO, so at most the
- *  deployment's session shards (the sum of `scale`), well within a Durable Object invocation's subrequest limit. */
-async function dispatchRoomFanout(
-  namespace: RoomFanoutNamespace,
-  request: RoomFanoutRequest,
-): Promise<RoomFanoutOutcome[]> {
-  const { payload, seq, timestamp } = request
-  return Promise.all(
-    request.routes.map(async (route): Promise<RoomFanoutOutcome> => {
-      try {
-        const stub = namespace.get(namespace.idFromString(route.sessionDoId))
-        await stub.telefuncRoomDeliver({ ...route, payload, seq, timestamp })
-        return { route }
-      } catch (error) {
-        return { route, error: errorMessage(error) }
-      }
-    }),
-  )
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error)
+// Delivery is at-most-once: a failed target is loss, not the publisher's error; its route lapses with its lease.
+function reportLostDeliveries(outcomes: PromiseSettledResult<void>[]): void {
+  const failed = outcomes.filter((outcome) => outcome.status === 'rejected')
+  if (failed.length > 0)
+    console.error(`Cloudflare Room delivery lost to ${failed.length}/${outcomes.length} routes: ${failed[0]!.reason}`)
 }

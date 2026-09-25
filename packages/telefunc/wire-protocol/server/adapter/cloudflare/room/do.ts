@@ -23,7 +23,7 @@ import type {
 import { assert } from '../../../../../utils/assert.js'
 import { encodeLaneKey } from '../../../../backend/room/lane-key.js'
 import { commitPreconditionHolds, isOpenIncarnation, type StoredHead } from '../../../../backend/room/semantics.js'
-import { dispatchRoomFanout, Fanout, type RoomFanoutNamespace, type RoomFanoutOutcome } from './fanout.js'
+import { Fanout, type RoomSessionNamespace } from './fanout.js'
 import { deleteRetained, installRetained, listRetained, readRetained } from './retained.js'
 import {
   deleteExpiredRoutes,
@@ -66,28 +66,17 @@ function headForRpc(head: StoredHead): RoomHead {
   }
 }
 
-// Delivery is at-most-once: a failed target is loss, not the publisher's error; its route lapses with its lease.
-function reportLostDeliveries(outcomes: RoomFanoutOutcome[]): void {
-  const failed = outcomes.filter((outcome) => outcome.error !== undefined)
-  if (failed.length > 0)
-    console.error(`Cloudflare Room delivery lost to ${failed.length}/${outcomes.length} routes: ${failed[0]!.error}`)
-}
-
 /** The room authority role of a Telefunc Durable Object: `sessions` is the namespace its fanout delivers to. */
 class RoomAuthority {
   readonly #ctx: DurableObjectState
   readonly #sql: SqlStorage
   readonly #fanout: Fanout
-  readonly #sessions: RoomFanoutNamespace
 
-  constructor(ctx: DurableObjectState, sessions: RoomFanoutNamespace) {
+  constructor(ctx: DurableObjectState, sessions: RoomSessionNamespace) {
     this.#ctx = ctx
-    this.#sessions = sessions
     this.#sql = ctx.storage.sql
     initSchema(this.#sql)
-    this.#fanout = new Fanout(async (routes, payload, { seq, timestamp }) => {
-      reportLostDeliveries(await dispatchRoomFanout(this.#sessions, { routes, payload, seq, timestamp }))
-    })
+    this.#fanout = new Fanout(sessions)
   }
 
   async readHead(): Promise<RoomHead | null> {
@@ -135,7 +124,7 @@ class RoomAuthority {
     )
     if ('stale' in outcome) return outcome
     const { seq, timestamp, routes } = outcome
-    const deliveryToken = this.#fanout.enqueue(routes, payload, { inc, laneKey: key, seq, timestamp })
+    const deliveryToken = this.#fanout.send(routes, payload, seq, timestamp)
     return { accepted: true, seq, timestamp, receivers: routes.length, deliveryToken }
   }
 
@@ -182,13 +171,8 @@ class RoomAuthority {
   }
 
   async dropGeneration(inc: string): Promise<void> {
-    this.#dropGenerationNow(inc)
-    await this.#scheduleMaintenanceIfNeeded()
-  }
-
-  #dropGenerationNow(inc: string): void {
     this.#ctx.storage.transactionSync(() => dropGenerationRows(this.#sql, inc))
-    this.#fanout.clearIncarnation(inc)
+    await this.#scheduleMaintenanceIfNeeded()
   }
 
   async directoryPut(roomId: string, incTag: string): Promise<void> {
@@ -213,13 +197,12 @@ class RoomAuthority {
 
   /** Storage only: a session whose route lapsed or whose generation went learns it at its next renewal. */
   #runSweep(now: number): void {
-    const orphanIncs = this.#ctx.storage.transactionSync(() => {
+    this.#ctx.storage.transactionSync(() => {
       const currentInc = readLiveHead(this.#sql, now)?.currentInc ?? null
       deleteLapsedTombstone(this.#sql, now)
       deleteExpiredRoutes(this.#sql, now)
-      return listOrphanGenerations(this.#sql, currentInc)
+      for (const inc of listOrphanGenerations(this.#sql, currentInc)) dropGenerationRows(this.#sql, inc)
     })
-    for (const inc of orphanIncs) this.#dropGenerationNow(inc)
   }
 
   async #scheduleMaintenanceIfNeeded(): Promise<void> {
@@ -249,10 +232,10 @@ function nextMaintenanceDeadline(sql: SqlStorage, now: number): number | null {
 
 /** A Durable Object that can act as a room authority: the role, built on first use, fans out through `sessions`. */
 class RoomAuthorityHost<Env = unknown> extends DurableObject<Env> {
-  readonly #sessions: RoomFanoutNamespace
+  readonly #sessions: RoomSessionNamespace
   #role: RoomAuthority | null = null
 
-  constructor(ctx: DurableObjectState, env: Env, sessions: RoomFanoutNamespace) {
+  constructor(ctx: DurableObjectState, env: Env, sessions: RoomSessionNamespace) {
     super(ctx, env)
     this.#sessions = sessions
   }

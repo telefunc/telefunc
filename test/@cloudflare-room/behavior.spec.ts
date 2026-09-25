@@ -33,6 +33,14 @@ test('a handoff to a session that fails is lost: the commit counts the route, an
   expect(await probe('/lost-target')).toEqual({ receivers: 1, settlement: 'resolved' })
 })
 
+test("a session's Room frames leave the authority without waiting on each other, and arrive in commit order", async () => {
+  const frames = ['hold', ...Array.from({ length: 10 }, (_, index) => `frame-${index}`)]
+  expect(await probe('/pipelined-delivery')).toEqual({
+    whileHeld: frames,
+    settlements: frames.map(() => 'resolved'),
+  })
+})
+
 test('a room authority arms its alarm while it holds a route, and clears it once the route is gone', async () => {
   expect(await probe('/alarm-policy')).toEqual({ idle: null, afterRoute: 'armed', afterUnsubscribe: null })
 })

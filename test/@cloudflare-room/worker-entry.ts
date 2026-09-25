@@ -26,7 +26,7 @@ import {
 import { OrderedStubs } from '../../packages/telefunc/wire-protocol/server/adapter/cloudflare/ordered-stubs.js'
 import { withCloudflareSession } from '../../packages/telefunc/wire-protocol/server/adapter/cloudflare/session.js'
 import { ServerBroadcast } from '../../packages/telefunc/wire-protocol/server/server-broadcast.js'
-import type { RoomFanoutNamespace } from '../../packages/telefunc/wire-protocol/server/adapter/cloudflare/room/fanout.js'
+import type { RoomSessionNamespace } from '../../packages/telefunc/wire-protocol/server/adapter/cloudflare/room/fanout.js'
 const broadcast = new CloudflareBroadcastTransport({
   baseInstanceName: 'telefunc',
   locationFallback: 'weur',
@@ -40,8 +40,9 @@ installBackend(
     }),
   ['cloudflare-room-ci-public'],
 )
-const fanoutNamespace = (namespace: DurableObjectNamespace) => namespace as unknown as RoomFanoutNamespace
+const fanoutNamespace = (namespace: DurableObjectNamespace) => namespace as unknown as RoomSessionNamespace
 const textEncoder = new TextEncoder()
+const textDecoder = new TextDecoder()
 const CONTROL_HORIZON_MS = 2_000
 // Like the production class: one namespace hosts sessions, room authorities and Broadcast authorities.
 export class PublicDurableObject extends RoomAuthorityHost<Env> {
@@ -95,8 +96,28 @@ export class PublicDurableObject extends RoomAuthorityHost<Env> {
     return withCloudflareSession({ room: () => this.#manager, broadcast: () => this.#member }, fn)
   }
 }
-// A session without Room delivery methods, so every handoff to it fails.
-export class SessionDurableObject extends DurableObject {}
+// A session DO that records the Room frames it is handed, holding the one reading 'hold' until released; one told to
+// refuse fails every handoff.
+export class SessionDurableObject extends DurableObject {
+  readonly #arrived: string[] = []
+  readonly #held = Promise.withResolvers<void>()
+  #refusing = false
+  async telefuncRoomDeliver({ payload }: RoomSessionDeliveryRequest): Promise<void> {
+    if (this.#refusing) throw new Error('this session refuses Room deliveries')
+    const text = textDecoder.decode(payload)
+    this.#arrived.push(text)
+    if (text === 'hold') await this.#held.promise
+  }
+  refuse(): void {
+    this.#refusing = true
+  }
+  release(): void {
+    this.#held.resolve()
+  }
+  arrived(): string[] {
+    return this.#arrived
+  }
+}
 export class RoomProbeDurableObject extends RoomAuthorityHost<Env> {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env, fanoutNamespace(env.TelefuncDurableObject))
@@ -111,6 +132,7 @@ type RpcMethods<T> = {
     : never
 }
 type Authority = RpcMethods<RoomProbeDurableObject>
+type Session = RpcMethods<Pick<SessionDurableObject, 'refuse' | 'release' | 'arrived'>>
 type BroadcastSession = RpcMethods<
   Pick<PublicDurableObject, 'broadcastSubscribe' | 'broadcastPublish' | 'broadcastReceived'>
 >
@@ -121,6 +143,7 @@ type Env = {
 }
 const probes: Record<string, (env: Env, suffix: string) => Promise<unknown>> = {
   '/lost-target': lostTarget,
+  '/pipelined-delivery': pipelinedDelivery,
   '/alarm-policy': alarmScheduling,
   '/route-renewal': routeRenewal,
   '/native-rpc': nativeRpcRoundTrip,
@@ -139,6 +162,8 @@ export default {
   },
 }
 const sessionOf = (env: Env, suffix: string) => env.TelefuncDurableObject.idFromName(`session-${suffix}`)
+const session = (env: Env, suffix: string) =>
+  env.TelefuncDurableObject.get(sessionOf(env, suffix)) as unknown as Session
 function roomProbe(env: Env, suffix: string, name: string) {
   const roomId = `${name}-${suffix}`
   const inc = `${name}-inc-${suffix}`
@@ -172,10 +197,27 @@ function roomProbe(env: Env, suffix: string, name: string) {
 async function lostTarget(env: Env, suffix: string) {
   const probe = roomProbe(env, suffix, 'lost-target')
   await probe.open()
-  // SessionDurableObject has no telefuncRoomDeliver, so every handoff to this route fails.
+  await session(env, suffix).refuse()
   await probe.join(sessionOf(env, suffix))
   const commit = await probe.commit(1, 'lost target')
   return { receivers: commit.receivers, settlement: await rejectionOf(probe.settle(commit), 'lost-target settlement') }
+}
+// The first frame is held at the session, so a later frame arrives only if it left without waiting for it.
+async function pipelinedDelivery(env: Env, suffix: string) {
+  const probe = roomProbe(env, suffix, 'pipelined')
+  await probe.open()
+  await probe.join(sessionOf(env, suffix))
+  const frames = ['hold', ...Array.from({ length: 10 }, (_, index) => `frame-${index}`)]
+  const commits = await Promise.all(frames.map((frame) => probe.commit(frame, `pipelined ${frame}`)))
+  const whileHeld = await poll(
+    () => session(env, suffix).arrived(),
+    (arrived) => arrived.length === frames.length,
+  )
+  await session(env, suffix).release()
+  return {
+    whileHeld,
+    settlements: await Promise.all(commits.map((commit) => rejectionOf(probe.settle(commit), 'pipelined settlement'))),
+  }
 }
 async function alarmScheduling(env: Env, suffix: string) {
   const sessionId = sessionOf(env, suffix)
@@ -295,6 +337,14 @@ async function within<T>(promise: Promise<T>, label: string): Promise<T> {
     return await Promise.race([promise, timeout])
   } finally {
     clearTimeout(timer)
+  }
+}
+async function poll<T>(read: () => Promise<T>, done: (value: T) => boolean): Promise<T> {
+  const deadline = Date.now() + CONTROL_HORIZON_MS
+  for (;;) {
+    const value = await read()
+    if (done(value) || Date.now() >= deadline) return value
+    await new Promise((resolve) => setTimeout(resolve, 10))
   }
 }
 async function rejectionOf(promise: Promise<unknown>, label: string): Promise<string> {

@@ -43,7 +43,7 @@ import {
 } from '../wire-protocol/server/adapter/cloudflare/room/backend.js'
 import { RoomAuthorityHost } from '../wire-protocol/server/adapter/cloudflare/room/do.js'
 import { withCloudflareSession, type CloudflareSession } from '../wire-protocol/server/adapter/cloudflare/session.js'
-import type { RoomFanoutNamespace } from '../wire-protocol/server/adapter/cloudflare/room/fanout.js'
+import type { RoomSessionNamespace } from '../wire-protocol/server/adapter/cloudflare/room/fanout.js'
 import { isTelefuncRequest, toResponse } from './shared.js'
 
 const SHARD_TOKEN_TTL_SECONDS = 86400
@@ -138,7 +138,7 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
     }
 
     constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
-      super(ctx, env, telefuncNamespace(env) as unknown as RoomFanoutNamespace)
+      super(ctx, env, telefuncNamespace(env) as unknown as RoomSessionNamespace)
       this.authorityState = new CloudflareBroadcastAuthorityState(ctx)
       this.broadcastMember = broadcast.member(ctx.id.toString(), this.broadcastCalls)
       crosswsAdapter.handleDurableInit(this, ctx, env)
