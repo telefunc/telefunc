@@ -115,8 +115,10 @@ class RedisSubscriptionDriver implements SubscriptionDriver<RedisSubscriptionSou
       if (attempts?.size === 0) this._byChannel.delete(channel)
     }
     if (this._byChannel.size > 0) return this._syncChannels()
-    // Nothing left to deliver to: release the connection until the next subscription.
+    // Nothing left to deliver to: release the connection until the next subscription, which starts afresh.
     this._disconnect()
+    this._outageReported = false
+    this._reconnectDelay = RECONNECT_DELAY_MIN_MS
   }
 
   private async _connect(): Promise<void> {

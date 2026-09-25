@@ -122,6 +122,28 @@ test("reports each outage with its own connection's error, not an earlier connec
   await attempt.unsubscribe()
 })
 
+test('reports the outage of a connection opened after an earlier outage released the last one', async () => {
+  const report = vi.spyOn(console, 'error').mockImplementation(() => {})
+  onTestFinished(() => report.mockRestore())
+  const createSubscriber = vi.fn(async (): Promise<SubscriberSocket> => {
+    throw new Error('connect ECONNREFUSED')
+  })
+  const driver = new RedisSubscriptionDriver({ prefix: 'tf:', createSubscriber, validateGeneration: async () => true })
+  const first = driver.bind(route).open(
+    () => {},
+    () => 1,
+  )
+  await vi.waitFor(() => expect(report).toHaveBeenCalledOnce())
+  // Its last subscription leaves mid-outage, which releases the connection; a later one starts afresh.
+  await first.unsubscribe()
+  const second = driver.bind(route).open(
+    () => {},
+    () => 1,
+  )
+  await vi.waitFor(() => expect(report).toHaveBeenCalledTimes(2))
+  await second.unsubscribe()
+})
+
 test("a fence resolves when its subscription's owner releases it: no receiver is left to hand off to", async () => {
   const sockets: ReturnType<typeof fakeSubscriber>[] = []
   const { driver } = driverWith(sockets)
