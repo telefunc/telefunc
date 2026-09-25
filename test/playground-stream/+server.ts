@@ -5,7 +5,7 @@ import { Hono } from 'hono'
 import vike from '@vikejs/hono'
 import IORedis, { Cluster } from 'ioredis'
 import { installRedis } from '@telefunc/redis'
-import { BroadcastChannel, config, Room } from 'telefunc'
+import { BroadcastChannel, config, Room, type LocalParticipant } from 'telefunc'
 import { Telefunc } from 'telefunc/node'
 import { cleanupState, resetCleanupState, getCleanupStateSnapshot } from './cleanup-state'
 
@@ -60,7 +60,7 @@ app.post('/api/cleanup-state/reset', async (c) => {
 })
 
 type CrossInstanceRoomFixture = {
-  participant: { publish(data: unknown): Promise<unknown>; leave(): Promise<void> }
+  participant: LocalParticipant
   received: unknown[]
   unsubscribe(): void
 }
