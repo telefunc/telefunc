@@ -238,7 +238,7 @@ class ServerRoom extends RoomStateView implements Room {
         ...(identity === null ? {} : { identity }),
         ...(hidden ? { hidden: true } : {}),
       } as const
-      if (this._state.applyJoin(joinedMember(join))) this._relayApplied(join)
+      if (this._applyJoin(joinedMember(join))) this._relayApplied(join)
       // A member removed meanwhile gets no join after its leave.
       await publishCtrl(this.id, this._inc, join, { requiredCellKeys: [memberCellKey(id)] })
     } catch (error) {
@@ -592,9 +592,7 @@ class ServerRoom extends RoomStateView implements Room {
         this._demand.applyWant(event) // between instances only, never relayed to clients
         return false
       case 'join':
-        if (!this._state.applyJoin(joinedMember(event))) return false
-        this._subs.replan() // a new member means a new per-member key candidate
-        return true
+        return this._applyJoin(joinedMember(event))
       case 'track':
         return this._applyTrack(event.id, event.track)
       case 'leave':
@@ -610,6 +608,11 @@ class ServerRoom extends RoomStateView implements Room {
       case 'closed':
         return this._state.applyClosed()
     }
+  }
+  private _applyJoin(member: MemberSnapshot): boolean {
+    if (!this._state.applyJoin(member)) return false
+    this._subs.replan() // a new member means a new per-member key candidate
+    return true
   }
   private _applyTrack(id: string, track: string): boolean {
     if (!this._state.applyTrack(id, track)) return false

@@ -2280,6 +2280,17 @@ describe('Room public behavior', () => {
     stub._onPeerSubscription('text', true)
     await vi.waitFor(() => expect(semanticFrames(peer, 'data')).toEqual(['held']))
   })
+  it('subscribes the lanes of a member that joins through this instance for its listeners here', async () => {
+    const room = (await Room.create('own-join-replan')) as ServerRoom
+    const frames: number[] = []
+    room.subscribeBinary((data) => frames.push(data[0]!))
+    const me = await room.join()
+    const demand: Array<[string | null, boolean]> = []
+    me.onDemand((track, wanted) => demand.push([track, wanted]))
+    await vi.waitFor(() => expect(demand).toEqual([[null, true]]))
+    await me.publishBinary(new Uint8Array([7]))
+    await vi.waitFor(() => expect(frames).toEqual([7]))
+  })
   it("tells this instance's clients a member's new track whose echo arrives after it", async () => {
     const room = (await Room.create('own-track-relay')) as ServerRoom
     // The echo reaches this instance later, as over a networked backend.
