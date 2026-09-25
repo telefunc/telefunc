@@ -887,7 +887,7 @@ describe('cloudflare broadcast routing', () => {
     }
   })
 
-  it('a subscription that joins a route whose presence is lost waits for its recovery', async () => {
+  it('a subscription that joins a route whose presence is lost is established at once and shares the loss', async () => {
     vi.useFakeTimers()
     let presenceCalls = 0
     const transport = createTransport(
@@ -905,9 +905,12 @@ describe('cloudflare broadcast routing', () => {
     try {
       await vi.advanceTimersByTimeAsync(30_000)
       expect(first.state()).toBe('lost')
+      // The authority still forwards to the route's unexpired record, so the joiner's publishes are not held.
       const second = member.openSubscription(route, () => {})
+      const states: string[] = []
+      second.onStateChange((state) => states.push(state))
       await vi.advanceTimersByTimeAsync(0)
-      expect(second.state()).toBe('establishing')
+      expect(states).toEqual(['ready', 'lost'])
       await vi.advanceTimersByTimeAsync(30_000)
       expect(second.state()).toBe('ready')
       await second.unsubscribe()
