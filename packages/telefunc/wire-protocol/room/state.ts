@@ -1,6 +1,6 @@
 export { RoomState, RoomStateView, remoteBacking }
 
-import { assertUsage } from '../../utils/assert.js'
+import { assert, assertUsage } from '../../utils/assert.js'
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
 import { invokeChannelListener, type ChannelPublishInfo } from '../channel.js'
 import { makeDisposer, untether } from '../wrapProxy.js'
@@ -47,7 +47,7 @@ type MemberEntry = {
     track: TrackFilter
   }>
   updateCbs: Array<(meta: ParticipantMeta, prev: ParticipantMeta) => void>
-  leaveCbs: Array<(cause?: LeaveCause) => void>
+  leaveCbs: Array<(cause: LeaveCause) => void>
 }
 type RoomStateOptions = {
   roomId: string
@@ -104,7 +104,7 @@ abstract class RoomStateView {
   onJoin(callback: (member: RemoteParticipant) => void): () => void {
     return this._state.onJoin(callback)
   }
-  onLeave(callback: (member: RemoteParticipant, cause?: LeaveCause) => void): () => void {
+  onLeave(callback: (member: RemoteParticipant, cause: LeaveCause) => void): () => void {
     return this._state.onLeave(callback)
   }
   onParticipantUpdate(
@@ -153,7 +153,7 @@ class RoomState {
     track: TrackFilter
   }> = []
   private readonly _joinCbs: Array<(member: RemoteParticipant) => void> = []
-  private readonly _leaveCbs: Array<(member: RemoteParticipant, cause?: LeaveCause) => void> = []
+  private readonly _leaveCbs: Array<(member: RemoteParticipant, cause: LeaveCause) => void> = []
   private readonly _participantUpdateCbs: Array<
     (member: RemoteParticipant, meta: ParticipantMeta, prev: ParticipantMeta) => void
   > = []
@@ -291,7 +291,7 @@ class RoomState {
   onJoin(cb: (member: RemoteParticipant) => void): () => void {
     return this._register(this._joinCbs, cb)
   }
-  onLeave(cb: (member: RemoteParticipant, cause?: LeaveCause) => void): () => void {
+  onLeave(cb: (member: RemoteParticipant, cause: LeaveCause) => void): () => void {
     return this._register(this._leaveCbs, cb)
   }
   onParticipantUpdate(
@@ -595,8 +595,9 @@ class RoomState {
         subscribeBinary: (cb, opts) =>
           this._registerLive(entry, entry.binaryCbs, binaryListener(entry.binaryCbs, cb, opts)),
         onUpdate: (cb) => this._registerLive(entry, entry.updateCbs, cb),
-        onLeave: (cb: (cause?: LeaveCause) => void) => {
+        onLeave: (cb: (cause: LeaveCause) => void) => {
           if (!entry.left) return this._register(entry.leaveCbs, cb)
+          assert(entry.leaveCause)
           invokeChannelListener(cb, [entry.leaveCause], this._onCallbackError)
           return makeDisposer()
         },

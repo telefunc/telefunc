@@ -211,7 +211,7 @@ type Room<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = Participant
   /** A participant joined. */
   onJoin(callback: (member: RemoteParticipant<P, Pub>) => void): () => void
   /** A participant left; reconciled leaves have no cause. */
-  onLeave(callback: (member: RemoteParticipant<P, Pub>, cause?: LeaveCause) => void): () => void
+  onLeave(callback: (member: RemoteParticipant<P, Pub>, cause: LeaveCause) => void): () => void
   /** Any participant's metadata changed. */
   onParticipantUpdate(callback: (member: RemoteParticipant<P, Pub>, meta: P, prev: P) => void): () => void
   /** The room's metadata was replaced (`Room.setMeta()`) or merged (`Room.setAttributes()`). */
@@ -286,5 +286,5 @@ type RemoteParticipant<P extends ParticipantMeta = ParticipantMeta, Pub = unknow
   /** This member's metadata changed. */
   onUpdate(callback: (meta: P, prev: P) => void): () => void
   /** This member left the room. `cause` as on `Room`'s `onLeave`. */
-  onLeave(callback: (cause?: LeaveCause) => void): () => void
+  onLeave(callback: (cause: LeaveCause) => void): () => void
 }

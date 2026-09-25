@@ -517,7 +517,7 @@ type RoomGetOptions = {
 | `getParticipants(options?)` / `getParticipant(id)` | The member list / one member (or `null`). `getParticipants({ hidden: true })` reads the off-presence participants instead (see <Link href="#server-side-authority">Server-side authority</Link>). |
 | `subscribe(cb)` | All participant messages: `(data, info, from)`. Returns an unsubscribe. |
 | `subscribeBinary(cb, { track? }?)` | Same, for binary, optionally one track. `info` carries `track` and `meta`. |
-| `onJoin(cb)` / `onLeave(cb)` | A participant joined / left: `(member)` / `(member, cause?)`. |
+| `onJoin(cb)` / `onLeave(cb)` | A participant joined / left: `(member)` / `(member, cause)`. |
 | `onParticipantUpdate(cb)` | Any member's metadata changed: `(member, meta, prev)`. |
 | `onUpdate(cb)` | The room's own metadata changed: `(meta, prev)`. |
 | `onAnnounce(cb)` | A room-authored announcement arrived. Works without `subscribe()`. |
