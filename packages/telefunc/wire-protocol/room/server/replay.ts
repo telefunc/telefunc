@@ -46,8 +46,9 @@ interface LaneHolder {
   _textDemand(): 'all' | ReadonlySet<string>
   _wantsTextFrom(member: string): boolean
   _wantsBinary(member: string, track: string): boolean
-  _emitRetainedText(serialized: string, event: RoomDataEnvelope, info: WirePublishInfo): void
-  _emitRetainedBinary(framed: Uint8Array, frame: BinaryFrame, info: WirePublishInfo): void
+  // A retained frame decoded, then in its wire form, which only a holder that forwards it takes.
+  _emitRetainedText(event: RoomDataEnvelope, info: WirePublishInfo, serialized: string): void
+  _emitRetainedBinary(frame: BinaryFrame, info: WirePublishInfo, framed: Uint8Array): void
 }
 
 /** This instance's own listeners as one holder: gated like a client's stub, with wants that change only when they differ, as a client declares them. */
@@ -104,11 +105,11 @@ class LocalHolder implements LaneHolder {
       this._applyBinary(frame, info)
   }
 
-  _emitRetainedText(_serialized: string, event: RoomDataEnvelope, info: WirePublishInfo): void {
+  _emitRetainedText(event: RoomDataEnvelope, info: WirePublishInfo): void {
     if (this._replay.admit(event.from, info.seq)) this._applyText(event, info)
   }
 
-  _emitRetainedBinary(_framed: Uint8Array, frame: BinaryFrame, info: WirePublishInfo): void {
+  _emitRetainedBinary(frame: BinaryFrame, info: WirePublishInfo): void {
     if (this._replay.admit(binaryLaneKey(frame.from, laneTrack(frame.track)), info.seq)) this._applyBinary(frame, info)
   }
 

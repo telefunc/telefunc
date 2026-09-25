@@ -753,7 +753,7 @@ class ServerRoom extends RoomStateView implements Room {
     const event = parse(serialized) as RoomDataEnvelope
     if (previous.members.includes(event.from) || !holder._wantsTextFrom(event.from)) return
     // Replay the stored order as-is; the holder admits it only if it is newer than what it has.
-    holder._emitRetainedText(serialized, event, { seq: stored.seq, timestamp: stored.timestamp })
+    holder._emitRetainedText(event, { seq: stored.seq, timestamp: stored.timestamp }, serialized)
   }
   async _replayRetainedBinary(holder: LaneHolder, prevWants: BinaryWants): Promise<void> {
     if (!wantsAnyBinary(holder._binaryWants)) return
@@ -775,7 +775,7 @@ class ServerRoom extends RoomStateView implements Room {
       const framed = stored.payload
       const frame = decodeBinaryFrame(framed)
       assert(frame)
-      holder._emitRetainedBinary(framed, frame, { seq: stored.seq, timestamp: stored.timestamp })
+      holder._emitRetainedBinary(frame, { seq: stored.seq, timestamp: stored.timestamp }, framed)
     }
   }
 

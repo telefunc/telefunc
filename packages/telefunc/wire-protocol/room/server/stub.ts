@@ -303,11 +303,11 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
     this._sendPublish(wireText)
   }
 
-  _emitRetainedText(serialized: string, event: RoomDataEnvelope, info: WirePublishInfo): void {
+  _emitRetainedText(event: RoomDataEnvelope, info: WirePublishInfo, serialized: string): void {
     if (this._replay.admit(event.from, info.seq)) this._sendPublish(encodePublishText(serialized, info))
   }
 
-  _emitRetainedBinary(framed: Uint8Array, frame: BinaryFrame, info: WirePublishInfo): void {
+  _emitRetainedBinary(frame: BinaryFrame, info: WirePublishInfo, framed: Uint8Array): void {
     if (this._replay.admit(binaryLaneKey(frame.from, laneTrack(frame.track)), info.seq))
       this._sendPublishBinary(encodePublishBinary(framed, info))
   }
