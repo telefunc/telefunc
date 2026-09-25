@@ -2878,6 +2878,28 @@ describe('client Room lifecycle', () => {
     emit({ __r: 'roster', members: [] }, 2)
     expect(causes).toEqual(['removed', 'removed'])
   })
+  it('applies the newest meta change that arrived before the first roster, unless the roster has a newer one', async () => {
+    const { client, emit } = fakeClient('pre-roster-meta')
+    const [newest, rosterNewer, gone] = [crypto.randomUUID(), crypto.randomUUID(), crypto.randomUUID()]
+    emit({ __r: 'p-meta', id: newest, meta: { v: 2 }, seq: 2 }, 1)
+    emit({ __r: 'p-meta', id: newest, meta: { v: 1 }, seq: 1 }, 2)
+    emit({ __r: 'p-meta', id: rosterNewer, meta: { v: 1 }, seq: 1 }, 3)
+    emit({ __r: 'p-meta', id: gone, meta: { v: 1 }, seq: 1 }, 4)
+    emit(
+      {
+        __r: 'roster',
+        members: [
+          { id: newest, meta: { v: 0 }, joinedAt: 1, metaSeq: 0 },
+          { id: rosterNewer, meta: { v: 3 }, joinedAt: 1, metaSeq: 3 },
+        ],
+      },
+      5,
+    )
+    expect((await client.getParticipants()).map(({ id, meta }) => [id, meta])).toEqual([
+      [newest, { v: 2 }],
+      [rosterNewer, { v: 3 }],
+    ])
+  })
   it("derives participant-update prev from the receiver's own applied state", async () => {
     const { client, emit } = fakeClient('receiver-local-prev')
     const memberId = crypto.randomUUID()
