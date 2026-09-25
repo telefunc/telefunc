@@ -6,6 +6,7 @@ import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 import { assertUsage } from '../../../utils/assert.js'
 import { ROOM_DM_ACK_TIMEOUT_MS } from '../constants.js'
 import { ServerChannel, parsePeerText } from '../../server/channel.js'
+import { getServerConfig } from '../../../node/server/serverConfig.js'
 import type { ShieldValidator } from '../../../node/server/shield.js'
 import {
   encodePublishBinary,
@@ -435,7 +436,8 @@ class RoomParticipantStubChannel extends RoomRequestChannel {
     const unlistenLeave = participant.onLeave((cause) => {
       left = true
       this._notify({ __r: 'left', ...leaveCauseToWire(cause) })
-      void this.close().catch(() => {})
+      // A client offline within its reconnect window still gets its leave.
+      void this.close({ timeout: getServerConfig().channel.reconnectTimeout }).catch(() => {})
     })
 
     this.onClose(() => {

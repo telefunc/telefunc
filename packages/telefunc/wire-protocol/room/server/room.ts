@@ -76,6 +76,7 @@ import {
 } from './lanes.js'
 import { reportRoomError } from './errors.js'
 import { reportServerChannelError } from '../../server/channel.js'
+import { getServerConfig } from '../../../node/server/serverConfig.js'
 import { createMember, evictMember, readMembersById, updateMemberRecord } from './membership.js'
 import { memberCellKey } from './cells.js'
 import type {
@@ -642,7 +643,9 @@ class ServerRoom extends RoomStateView implements Room {
     this._teardownTail()
     for (const local of this._localParticipants.values()) local._onLeft({ type: 'closed' })
     this._localParticipants.clear()
-    for (const stub of this._stubs) void stub.close().catch(() => {})
+    // A client offline within its reconnect window still gets `closed`.
+    const timeout = getServerConfig().channel.reconnectTimeout
+    for (const stub of this._stubs) void stub.close({ timeout }).catch(() => {})
     this._subs.replan()
   }
 
