@@ -65,7 +65,9 @@ describe('Redis real three-master Cluster CI certification', () => {
     for (const unsafePrefix of ['x{}', 'x{', '{global}']) {
       expect(() => new RedisBackend({ redis: cluster, prefix: unsafePrefix })).toThrow(/prefix/i)
     }
-    expect(await backend.publish({ key: '}edge', kind: 'text' }, bytes('edge'))).toMatchObject({ seq: 1 })
+    expect(await backend.publish({ key: '}edge', kind: 'text' }, bytes('edge'))).toMatchObject({
+      seq: expect.any(Number),
+    })
     const commands = cluster as unknown as Record<string, (...args: unknown[]) => Promise<unknown>>
     const publish = commands.tfPublish?.bind(cluster)
     if (publish === undefined) throw new Error('tfPublish is not registered')
@@ -74,6 +76,8 @@ describe('Redis real three-master Cluster CI certification', () => {
       if (cluster.options.retryDelayOnFailover === 0) throw new Error('simulated reply loss after execution')
       return await publish(...args)
     })
+    // An existing counter isn't seeded, so it counts executions exactly.
+    await cluster.set(broadcastSequenceKey(prefix, 'once'), '0')
     await expect(backend.publish({ key: 'once', kind: 'text' }, bytes('once'))).rejects.toThrow()
     expect(await cluster.get(broadcastSequenceKey(prefix, 'once'))).toBe('1')
     expect(() => new RedisBackend({ redis: (masters[0] as Master).client })).toThrow(/at-most-once/i)
@@ -222,6 +226,24 @@ describe('Redis real three-master Cluster CI certification', () => {
         expect(new Set(await Promise.all(keys.map(slot))).size, `${call.name}: ${keys.join(', ')}`).toBe(1)
       }
     }
+  })
+  it('keeps delivering on a key whose sequence counter was flushed while its subscription stayed up', async () => {
+    const prefix = uniquePrefix('seq-flushed')
+    const backend = ownBackend(cluster, prefix)
+    const observed: string[] = []
+    const route = { key: 'invalidate', kind: 'text' } as const
+    const subscription = ownSubscription(
+      backend.subscribe(route, (payload) => void observed.push(Buffer.from(payload).toString())),
+    )
+    await subscription.ready
+    const before = await backend.publish(route, bytes('before'), 1024)
+    await waitFor(() => observed.length === 1)
+    // An eviction or a FLUSHDB: the counter is gone, the subscriber connection is not.
+    await cluster.del(`${prefix}seq:{invalidate}`)
+    const after = await backend.publish(route, bytes('after'), 1024)
+    expect(after.seq).toBeGreaterThan(before.seq)
+    await waitFor(() => observed.length === 2)
+    expect(observed).toEqual(['before', 'after'])
   })
   it('round-trips MAX_SAFE seq through commit, retain and a fresh read', async () => {
     const { prefix, roomId, inc } = room('max-safe')
@@ -490,10 +512,11 @@ describe('Redis real three-master Cluster CI certification', () => {
     const first = await backend.publish({ key: '', kind: 'text' }, bytes('one'), 1024)
     const second = await backend.publish({ key: '', kind: 'binary' }, bytes('two'), 1024)
     await waitFor(() => emptyObserved.length === 2)
-    expect([first.seq, second.seq]).toEqual([1, 2])
-    expect(emptyObserved).toEqual(['text:1:one', 'binary:2:two'])
+    expect(second.seq).toBe(first.seq + 1)
+    expect(emptyObserved).toEqual([`text:${first.seq}:one`, `binary:${second.seq}:two`])
     // Each key counts on its own.
-    expect(await backend.publish({ key: 'other', kind: 'text' }, bytes('three'), 1024)).toMatchObject({ seq: 1 })
+    const other = await backend.publish({ key: 'other', kind: 'text' }, bytes('three'), 1024)
+    expect(other.seq).not.toBe(second.seq + 1)
   })
   function own<T>(value: T, dispose: (value: T) => unknown): T {
     onTestFinished(async () => void (await dispose(value)))

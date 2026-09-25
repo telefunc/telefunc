@@ -71,6 +71,11 @@ end
 //   KEYS: [1]=sequence [2]=channel
 //   ARGV: [1]=payload
 const PUBLISH_LUA = `${NOW_LUA}${REDIS_ORDERING_FRAME_LUA}
+-- A missing counter (new, evicted or flushed) starts at authority time in microseconds, above every seq it issued.
+if redis.call('EXISTS', KEYS[1]) == 0 then
+  local t = redis.call('TIME')
+  redis.call('SET', KEYS[1], string.format('%d', tonumber(t[1]) * 1000000 + tonumber(t[2])))
+end
 local seq = redis.call('INCR', KEYS[1])
 local ts = tf_now()
 local frame = tf_ordering_frame(seq, ts, ARGV[1])
