@@ -233,8 +233,9 @@ class RoomSubscriptions {
   }
 
   private _onTerminal(slot: LaneSubscription, failure?: unknown): void {
-    if (failure !== undefined) reportRoomError(failure)
+    // A replacement that ends is its recovery's failure, which the recovery reports.
     if (this._recovering.has(slot)) return
+    if (failure !== undefined) reportRoomError(failure)
     this._recovering.add(slot)
     void this._recover(slot).catch(reportRoomError)
   }
