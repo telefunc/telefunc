@@ -167,14 +167,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
   }
 
   private _publish(kind: BroadcastKind, payload: Uint8Array): ChannelPublishAck | Promise<ChannelPublishAck> {
-    const toAck = (r: PublishResult): ChannelPublishAck =>
-      Object.assign(makePublishInfo(this.key, r.seq, r.timestamp), {
-        meta: r.meta,
-        ...(r.receivers === undefined ? {} : { receivers: r.receivers }),
-      })
-    const result = getBroadcastBackend().publish({ key: this.key, kind }, payload)
-    if (isPromise(result)) return result.then(toAck)
-    return toAck(result)
+    return publishRoute({ key: this.key, kind }, payload)
   }
 
   private async _dispatchPublishAckReq(serialized: string, seq: number): Promise<void> {
@@ -240,12 +233,9 @@ const BroadcastChannel = ServerBroadcast as {
 }
 
 const Broadcast = {
-  publish<U = unknown>(key: string, data: ChannelData<U>): PublishResult | Promise<PublishResult> {
+  publish<U = unknown>(key: string, data: ChannelData<U>): ChannelPublishAck | Promise<ChannelPublishAck> {
     assertBroadcastKey(key)
-    const backend = getBroadcastBackend()
-    const serialized = stringify(data)
-    const route = { key, kind: 'text' } as const
-    return markHandled(backend.publish(route, textEncoder.encode(serialized)))
+    return markHandled(publishRoute({ key, kind: 'text' }, textEncoder.encode(stringify(data))))
   },
   subscribe<U = unknown>(key: string, callback: BroadcastListener<U>): BroadcastUnsubscribe {
     return subscribeRoute(
@@ -254,11 +244,9 @@ const Broadcast = {
       callback,
     )
   },
-  publishBinary(key: string, data: Uint8Array): PublishResult | Promise<PublishResult> {
+  publishBinary(key: string, data: Uint8Array): ChannelPublishAck | Promise<ChannelPublishAck> {
     assertBroadcastKey(key)
-    const backend = getBroadcastBackend()
-    const route = { key, kind: 'binary' } as const
-    return markHandled(backend.publish(route, data))
+    return markHandled(publishRoute({ key, kind: 'binary' }, data))
   },
   subscribeBinary(key: string, callback: BroadcastBinaryListener): BroadcastUnsubscribe {
     return subscribeRoute({ key, kind: 'binary' }, (payload) => payload, callback)
@@ -331,6 +319,17 @@ class RouteSubscription {
       else if (state === 'closed') ended()
     })
   }
+}
+
+/** The backend's receipt as the public ack, carrying its key like a subscriber's `info`. */
+function publishRoute(route: BroadcastRoute, payload: Uint8Array): ChannelPublishAck | Promise<ChannelPublishAck> {
+  const toAck = (r: PublishResult): ChannelPublishAck =>
+    Object.assign(makePublishInfo(route.key, r.seq, r.timestamp), {
+      meta: r.meta,
+      ...(r.receivers === undefined ? {} : { receivers: r.receivers }),
+    })
+  const result = getBroadcastBackend().publish(route, payload)
+  return isPromise(result) ? result.then(toAck) : toAck(result)
 }
 
 function assertBroadcastKey(key: unknown): void {

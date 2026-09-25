@@ -988,6 +988,14 @@ describe('Broadcast static bus (publish/subscribe)', () => {
     expect(seen).toEqual(['once:one', 'other:one', 'other:two'])
     channel.abort()
   })
+  it('resolves a static publish to a receipt with its key, as a subscriber gets it', async () => {
+    const text = await Broadcast.publish('room:lobby', 'hi')
+    const binary = await Broadcast.publishBinary('room:lobby', new Uint8Array([1]))
+    expect([text, binary]).toMatchObject([
+      { key: 'room:lobby', seq: 1 },
+      { key: 'room:lobby', seq: 2 },
+    ])
+  })
   it('counts in receivers the subscribers a publish reached, when a subscriber leaves or joins during delivery', async () => {
     const received: string[] = []
     const unsubscribe = Broadcast.subscribe<string>('broadcast:receivers', (message) => {
