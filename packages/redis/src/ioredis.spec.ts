@@ -2,6 +2,7 @@ import { Cluster, Redis } from 'ioredis'
 import { expect, onTestFinished, test, vi } from 'vitest'
 import { RedisBackend } from './backend.js'
 import { createSubscriberSocket } from './ioredis.js'
+import { REDIS_COMMANDS } from './commands.js'
 
 test('requires never-resend clients', () => {
   const nodes = [{ host: '127.0.0.1', port: 6379 }]
@@ -73,4 +74,19 @@ test("waits for a connecting Cluster's masters instead of reporting none", async
   const failing = createSubscriberSocket(cluster)
   cluster.emit('close')
   await expect(failing).rejects.toThrow('RedisBackend: Cluster connection closed')
+})
+
+const publishInput = { route: { key: 'chat', kind: 'text' }, payload: new Uint8Array() } as const
+test("reads integer replies as ioredis returns them, numbers or, with a shared client's stringNumbers, strings", () => {
+  for (const reply of [
+    [7, 1_700_000_000_000, 2],
+    ['7', '1700000000000', '2'],
+  ])
+    expect(REDIS_COMMANDS.publish.parse(reply, publishInput)).toEqual({
+      seq: 7,
+      timestamp: 1_700_000_000_000,
+      receivers: 2,
+    })
+  for (const reply of [1, '1'])
+    expect(REDIS_COMMANDS.validateGeneration.parse(reply, { roomId: 'room', inc: 'inc' })).toBe(true)
 })

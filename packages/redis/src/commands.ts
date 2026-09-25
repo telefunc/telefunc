@@ -328,11 +328,10 @@ const REDIS_COMMANDS = {
       argv: [toBuffer(payload)],
     }),
     parse: (reply) => {
-      assert(
-        Array.isArray(reply) && reply.length === 3 && reply.every((value) => typeof value === 'number'),
-        'Publish script returned an unexpected reply',
-      )
-      const [seq, timestamp, receivers] = reply as [number, number, number]
+      // A shared client with ioredis's `stringNumbers` returns integer replies as decimal strings.
+      const values = Array.isArray(reply) ? reply.map(Number) : []
+      assert(values.length === 3 && values.every(Number.isSafeInteger), 'Publish script returned an unexpected reply')
+      const [seq, timestamp, receivers] = values as [number, number, number]
       return { seq, timestamp, receivers }
     },
   }),
@@ -409,7 +408,7 @@ const REDIS_COMMANDS = {
       keys: [headKey(prefix, roomId)],
       argv: [inc],
     }),
-    parse: (reply) => reply === 1,
+    parse: (reply) => Number(reply) === 1,
   }),
   dropGeneration: command({
     name: 'tfRoomDropGeneration',
