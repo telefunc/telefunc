@@ -34,6 +34,7 @@ const CLUSTER_NODES = rawNodes.split(',').map((entry): RedisClusterNode => {
 })
 if (CLUSTER_NODES.length !== 3) throw new Error('Redis Cluster CI certification requires exactly three masters')
 const SEMANTIC_LANE: LaneId = { kind: 'semantic' }
+const CONTROL_LANE: LaneId = { kind: 'control' }
 describe('Redis real three-master Cluster CI certification', () => {
   let cluster: Cluster
   let masters: Master[]
@@ -248,6 +249,27 @@ describe('Redis real three-master Cluster CI certification', () => {
     expect(after.seq).toBeGreaterThan(before.seq)
     await waitFor(() => observed.length === 2)
     expect(observed).toEqual(['before', 'after'])
+  })
+  it('leaves no room key without an expiry after a close, and a room re-created once its tombstone lapsed reuses no rev', async () => {
+    const { prefix, roomId, inc } = room('closed-keys')
+    const backend = roomBackend(cluster, prefix)
+    const opened = await open(backend, roomId, inc)
+    const cells = await backend.readCells(roomId, inc, { keys: [] })
+    if ('staleInc' in cells) throw new Error('fresh generation was unexpectedly stale')
+    const member = { key: 'm:member', bytes: bytes('member') }
+    expect(await backend.compareExchangeCells(roomId, inc, cells.revision, [member])).toBe('committed')
+    const join = { retain: true, requiredCellKeys: [member.key] }
+    accepted(await backend.commitLane(roomId, inc, CONTROL_LANE, bytes('join'), join))
+    await close(backend, roomId, opened, 500)
+    await backend.dropGeneration(roomId, inc)
+    const master = owner(await slot(headKey(prefix, roomId))).client
+    const roomKeys = () => master.keys(`${prefix}room:{${encodeURIComponent(roomId)}}*`)
+    const keys = await roomKeys()
+    expect(keys).toContain(headKey(prefix, roomId))
+    const expiries = await Promise.all(keys.map((key) => master.pttl(key)))
+    expect(keys.filter((_, i) => expiries[i] === -1)).toEqual([])
+    await waitFor(async () => (await roomKeys()).length === 0)
+    expect((await open(backend, roomId, `${inc}-next`)).rev).not.toBe(opened.rev)
   })
   it('round-trips MAX_SAFE seq through commit, retain and a fresh read', async () => {
     const { prefix, roomId, inc } = room('max-safe')
@@ -600,10 +622,12 @@ async function open(
   if (!('head' in result)) throw new Error(`failed to open '${roomId}'`)
   return result.head
 }
+/** As Room.close(): the close lease, the `closed` event under it, then the tombstone. */
 async function close(
-  backend: Pick<ManagedBackend, 'compareExchangeHead'>,
+  backend: Pick<ManagedBackend, 'compareExchangeHead' | 'commitLane'>,
   roomId: string,
   head: RoomHead,
+  tombstoneTtlMs = 60_000,
 ): Promise<RoomHead> {
   const leaseId = `lease-${Date.now().toString(36)}`
   const closing = await backend.compareExchangeHead(
@@ -619,10 +643,12 @@ async function close(
     },
   )
   if (!('head' in closing)) throw new Error(`failed to enter closing for '${roomId}'`)
+  if (head.currentInc === null) throw new Error(`'${roomId}' has no incarnation to close`)
+  accepted(await backend.commitLane(roomId, head.currentInc, CONTROL_LANE, bytes('closed'), { closingLease: leaseId }))
   const closed = await backend.compareExchangeHead(
     roomId,
     { form: 'finalize', rev: closing.head.rev, lease: leaseId },
-    { head: { currentInc: null, state: 'closed', config: closing.head.config }, ttlMs: 60_000 },
+    { head: { currentInc: null, state: 'closed', config: closing.head.config }, ttlMs: tombstoneTtlMs },
   )
   if (!('head' in closed)) throw new Error(`failed to finalize close for '${roomId}'`)
   return closed.head
