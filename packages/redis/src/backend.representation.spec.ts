@@ -1,6 +1,7 @@
 import { Cluster, Redis } from 'ioredis'
-import { expect, onTestFinished, test } from 'vitest'
+import { expect, onTestFinished, test, vi } from 'vitest'
 import { RedisBackend } from './backend.js'
+import { createSubscriberSocket } from './ioredis.js'
 
 test('keeps the ratified Redis backend representation', () => {
   const backend = new RedisBackend({ redis: new Redis({ lazyConnect: true, maxRetriesPerRequest: 0 }) })
@@ -30,4 +31,25 @@ test("rejects an ioredis keyPrefix, which Pub/Sub channel names don't get", () =
   ]
   onTestFinished(() => prefixed.forEach((redis) => redis.disconnect()))
   for (const redis of prefixed) expect(() => new RedisBackend({ redis })).toThrow('keyPrefix')
+})
+
+test('duplicates the subscriber from a standalone client or a live Cluster master, connecting a lazyConnect Cluster first', async () => {
+  const cluster = new Cluster([{ host: '127.0.0.1', port: 6379 }], {
+    lazyConnect: true,
+    retryDelayOnFailover: 0,
+    redisOptions: { maxRetriesPerRequest: 0 },
+  })
+  const ended = new Redis({ lazyConnect: true, maxRetriesPerRequest: 0 })
+  const live = new Redis({ lazyConnect: true, maxRetriesPerRequest: 0 })
+  onTestFinished(() => [cluster, ended, live].forEach((redis) => redis.disconnect()))
+  ended.disconnect()
+  const connect = vi.spyOn(cluster, 'connect').mockImplementation(async () => {
+    cluster.status = 'ready'
+  })
+  const nodes = vi.spyOn(cluster, 'nodes').mockReturnValue([ended])
+  await expect(createSubscriberSocket(cluster)).rejects.toThrow('RedisBackend: Cluster has no available masters')
+  nodes.mockReturnValue([ended, live])
+  const sockets = [await createSubscriberSocket(cluster), await createSubscriberSocket(live)]
+  sockets.forEach((socket) => socket.disconnect())
+  expect(connect).toHaveBeenCalledOnce()
 })
