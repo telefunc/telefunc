@@ -49,6 +49,7 @@ import type {
 } from '../shared-ws.js'
 import { encodeSseRequest, encodeSseRequestMetadata } from '../sse-request.js'
 import { DeadlineScheduler } from './deadlineScheduler.js'
+import { randomUuid } from '../../utils/randomUuid.js'
 
 type BufferedFrame = {
   frame: Uint8Array<ArrayBuffer>
@@ -1051,7 +1052,7 @@ class ClientConnection implements MuxConnection {
     }
     const probeHeartbeat = this.keepProbeAlive(probe, attempt)
 
-    const upgradeId = crypto.randomUUID()
+    const upgradeId = randomUuid()
     let onReady: ((payload: ReadyPayload) => void) | null = null
     probe.onFrame((frame, byteLength) => {
       if (frame.tag === TAG.READY) {
@@ -1683,7 +1684,7 @@ class SseTransport implements UpgradeSource {
   readonly type = CHANNEL_TRANSPORT.SSE
   readonly sendReconcileOnOpen = false
   readonly reconcileMode = 'batch-on-reconcile' as const
-  readonly connId = crypto.randomUUID()
+  readonly connId = randomUuid()
   get batched(): boolean {
     return this.streamRequest.tag !== 'active'
   }

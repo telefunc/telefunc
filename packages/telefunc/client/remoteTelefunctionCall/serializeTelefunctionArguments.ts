@@ -15,6 +15,7 @@ import type { ReplacerType, TypeContract, ClientReplacerContext } from '../../wi
 import { CloseHandler } from '../close.js'
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
 import { GcRegistry } from '../../wire-protocol/gcRegistry.js'
+import { randomUuid } from '../../utils/randomUuid.js'
 
 const globalObject = getGlobalObject('client/remoteTelefunctionCall/serializeTelefunctionArguments.ts', {
   gcRegistry: new GcRegistry(),
@@ -72,7 +73,7 @@ function serializeTelefunctionArguments(callContext: CallContext): SerializeResu
       },
       createChannel(opts) {
         return new ClientChannel({
-          channelId: crypto.randomUUID(),
+          channelId: randomUuid(),
           ack: opts?.ack,
           transports: channelTransports,
           connectionKey,

@@ -1,6 +1,7 @@
 export { setSessionToken, getSessionToken, getOrCreateSessionToken, appendSessionParam }
 
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
+import { randomUuid } from '../../utils/randomUuid.js'
 
 /**
  * Client-side session registry.
@@ -27,7 +28,7 @@ function getSessionToken(telefuncUrl: string): string | undefined {
 /** A page names its token before its first request, so its concurrent calls and their channels reach one session. */
 function getOrCreateSessionToken(telefuncUrl: string): string {
   let token = globalObject.registry.get(telefuncUrl)
-  if (token === undefined) globalObject.registry.set(telefuncUrl, (token = crypto.randomUUID()))
+  if (token === undefined) globalObject.registry.set(telefuncUrl, (token = randomUuid()))
   return token
 }
 
