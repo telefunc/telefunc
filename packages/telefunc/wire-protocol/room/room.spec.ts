@@ -1596,6 +1596,36 @@ describe('Room public behavior', () => {
     const data = encodeBinaryFrame(holder.id, new Uint8Array([1]))
     expect(() => channel._dispatchFrame({ tag: TAG.BINARY_ACK_REQ, index: 7, seq: 1, data })).not.toThrow()
   })
+  it('leaves no member behind a join whose member write committed but whose reply was lost', async () => {
+    const room = await Room.create('join-reply-lost')
+    const compareExchange = driver.compareExchangeCells.bind(driver)
+    vi.spyOn(driver, 'compareExchangeCells').mockImplementationOnce(async (...args) => {
+      await compareExchange(...args)
+      throw new Error('Connection is closed.')
+    })
+    await expect(room.join({ identity: 'user-1' })).rejects.toThrow('Connection is closed.')
+    expect(await Room.getParticipants(room.id)).toEqual([])
+  })
+  it('rejects a join whose member was removed before its join event committed, leaving no member behind', async () => {
+    const room = (await Room.create('join-kicked')) as ServerRoom
+    const observer = (await Room.get(room.id)) as ServerRoom
+    await observer.getParticipants()
+    const commitLane = driver.commitLane.bind(driver)
+    const committing = deferred<void>()
+    const kicked = deferred<void>()
+    vi.spyOn(driver, 'commitLane').mockImplementationOnce(async (...args) => {
+      committing.resolve()
+      await kicked.promise
+      return await commitLane(...args)
+    })
+    const joining = room.join({ identity: 'user-1' }).catch((error: unknown) => error)
+    await committing.promise
+    await Room.removeParticipant(room.id, { identity: 'user-1' })
+    kicked.resolve()
+    expect(isRoomError(await joining)).toBe(true)
+    await subsOf(observer).reconcileAuthority()
+    expect([room.count, observer.count]).toEqual([0, 0])
+  })
   it('rejects, not as a bug, a join whose client stub closed during the guard', async () => {
     const room = (await Room.create('stub-close-during-guard')) as ServerRoom
     const stub = register(room)

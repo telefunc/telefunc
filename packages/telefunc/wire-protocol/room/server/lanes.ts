@@ -95,8 +95,13 @@ function withinRoomHorizon<T>(promise: Promise<T>, ms: number): Promise<T> {
   })
 }
 
-async function publishCtrl(roomId: string, inc: string, event: RoomCtrlEnvelope): Promise<void> {
-  await commitRoomLaneOrThrow(roomId, inc, CONTROL_LANE, encodeRoomRecord(event))
+async function publishCtrl(
+  roomId: string,
+  inc: string,
+  event: RoomCtrlEnvelope,
+  opts?: { requiredCellKeys: string[] },
+): Promise<void> {
+  await commitRoomLaneOrThrow(roomId, inc, CONTROL_LANE, encodeRoomRecord(event), opts)
 }
 
 /** Required cells are member records, so a missing one names the member that left. */
