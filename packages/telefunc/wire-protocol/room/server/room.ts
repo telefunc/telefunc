@@ -121,8 +121,8 @@ class ServerRoom extends RoomStateView implements Room {
   readonly _inc: string
   /** `Room.get({ tail: true })`'s hold until a stub attaches and takes it. */
   private _tail: TailHold | null = null
-  /** In-flight `send(…, { ack: true })`s by `ackId`; `to` lets a leave or close fail the ones it strands. */
-  private readonly _pendingDmAcks = new Map<string, { to: string; settle: (reply: DmReply) => void }>()
+  /** In-flight `send(…, { ack: true })`s by `ackId`; a leave of either end, or a close, fails the ones it strands. */
+  private readonly _pendingDmAcks = new Map<string, { from: string; to: string; settle: (reply: DmReply) => void }>()
   private _guards: RoomGuards | null = null
   /** @internal */ readonly _state: RoomState
   private readonly _local: LocalHolder
@@ -415,7 +415,7 @@ class ServerRoom extends RoomStateView implements Room {
     const ackId = crypto.randomUUID()
     let timer: ReturnType<typeof setTimeout> | undefined
     const reply = new Promise<DmReply>((settle) => {
-      this._pendingDmAcks.set(ackId, { to, settle })
+      this._pendingDmAcks.set(ackId, { from, to, settle })
       // Bounds the one wait no reply, leave or overflow settles: a recipient that never listens.
       timer = unrefTimer(
         setTimeout(() => {
@@ -474,7 +474,7 @@ class ServerRoom extends RoomStateView implements Room {
       encodeRoomRecord(envelope),
       { requiredCellKeys: [memberCellKey(to)] },
     )
-    // A sender that left has no ack left to settle; only a closed room is an error.
+    // A sender that left had its wait failed by its leave; only a closed room is an error.
     if ('stale' in committed && committed.stale === 'incarnation') throw staleCommitError(this.id, committed)
   }
 
@@ -485,9 +485,9 @@ class ServerRoom extends RoomStateView implements Room {
     pending.settle(envelope)
   }
 
-  private _rejectDmAcks(reply: DmReply, to?: string): void {
+  private _rejectDmAcks(reply: DmReply, member?: string): void {
     for (const [ackId, pending] of this._pendingDmAcks) {
-      if (to !== undefined && pending.to !== to) continue
+      if (member !== undefined && pending.from !== member && pending.to !== member) continue
       this._pendingDmAcks.delete(ackId)
       pending.settle(reply)
     }
@@ -617,7 +617,7 @@ class ServerRoom extends RoomStateView implements Room {
   /** Every leave the state applies, event or reconcile, runs the member's cleanup. */
   private _onLeave(id: string, cause: LeaveCause, hidden: boolean | null): void {
     this._announcedTracks.delete(id)
-    this._rejectDmAcks(DM_FAILURE.left, id) // strand no waiter on a gone member
+    this._rejectDmAcks(DM_FAILURE.left, id) // strand no waiter on a gone sender or recipient
     const local = this._localParticipants.get(id)
     if (local) {
       this._localParticipants.delete(id)

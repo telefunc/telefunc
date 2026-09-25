@@ -1729,6 +1729,19 @@ describe('Room public behavior', () => {
     expect(report).not.toHaveBeenCalled()
     evicting.resolve()
   })
+  it("fails a member's pending ack send when that member leaves, not at the ack timeout", async () => {
+    const room = await Room.create('sender-leaves-ack')
+    const sender = await room.join()
+    const recipient = await room.join() // never listens, so never answers
+    let outcome: unknown = 'pending'
+    void sender.send(recipient.id, 'ping', { ack: true }).then(
+      () => (outcome = 'answered'),
+      (error: unknown) => (outcome = isRoomError(error) ? error.message : error),
+    )
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    await sender.leave()
+    await vi.waitFor(() => expect(outcome).toBe('Participant left the room'))
+  })
   it('stops renewing a client-held participant whose removal failed after its client went away', async () => {
     vi.useFakeTimers()
     const room = await Room.create('standalone-expire')
