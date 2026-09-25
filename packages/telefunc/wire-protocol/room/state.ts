@@ -627,8 +627,10 @@ function binaryListener<CB>(
   opts: { track?: string | null } | undefined,
 ): { cb: CB; track: TrackFilter } {
   const listener = { cb, track: normalizeTrackFilter(opts) }
+  // Named tracks count even beside an all-track listener, whose removal would declare them all.
+  const named = new Set([...cbs, listener].flatMap(({ track }) => (track === undefined ? [] : [laneTrack(track)])))
   assertUsage(
-    trackWantsOf([...cbs, listener]).tracks.length <= ROOM_WANTED_TRACKS_MAX,
+    named.size <= ROOM_WANTED_TRACKS_MAX,
     `subscribeBinary() can name at most ${ROOM_WANTED_TRACKS_MAX} tracks per participant, the default track included, and as many room-wide; subscribe without a track to receive every track`,
   )
   return listener

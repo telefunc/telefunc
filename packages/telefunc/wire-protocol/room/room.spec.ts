@@ -15,6 +15,7 @@ import {
   ROOM_TAIL_ATTACH_TIMEOUT_MS,
   ROOM_TAIL_HOLD_CODE_UNITS_MAX,
   ROOM_TAIL_HOLD_MAX,
+  ROOM_WANTED_TRACKS_MAX,
 } from './constants.js'
 import { DEFAULT_TRACK, decodeBinaryFrame, emptyTrackWants, encodeBinaryFrame, sanitizeBinaryWants } from './binary.js'
 import { RoomError, isRoomError, roomAckError, toRoomFailure } from './errors.js'
@@ -2909,6 +2910,15 @@ describe('client Room lifecycle', () => {
     const unsubscribe = client.onAnnounce(() => {})
     closing = true
     expect(() => unsubscribe()).not.toThrow()
+  })
+  it('caps named binary tracks at the call site even while an all-track listener exists', () => {
+    const { client } = fakeClient('track-cap-with-all')
+    client.subscribeBinary(() => {})
+    for (let track = 0; track < ROOM_WANTED_TRACKS_MAX; track++)
+      client.subscribeBinary(() => {}, { track: `t${track}` })
+    expect(() => client.subscribeBinary(() => {}, { track: 'one-too-many' })).toThrow(
+      'subscribeBinary() can name at most',
+    )
   })
   it('declares a room-level default binary track without an earlier all-track listener', () => {
     const sent: unknown[] = []
