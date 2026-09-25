@@ -41,7 +41,12 @@ import type { ChannelPublishInfo } from '../channel.js'
 import { disposeBackend, getBroadcastBackend, getRoomBackend, installBackend } from '../backend/install.js'
 import { MemoryBackend, MemoryBackendState } from '../backend/memory/backend.js'
 import type { LaneId } from '../backend/room/contract.js'
-import type { BackendReceiver, BackendSubscription, SubscriptionState } from '../backend/subscription.js'
+import type {
+  BackendReceiver,
+  BackendSubscription,
+  SubscriptionAttempt,
+  SubscriptionState,
+} from '../backend/subscription.js'
 import { onBug } from '../../node/server/runTelefunc/onBug.js'
 import { decodeOrderingFrame, encodeOrderingFrame } from '../ordering-frame.js'
 import { GcRegistry } from '../gcRegistry.js'
@@ -567,6 +572,18 @@ describe('Room public behavior', () => {
     transition('ready')
     await vi.waitFor(() => expect(room.count).toBe(1))
     expect((await room.getParticipants()).map(({ id }) => id)).toEqual([member.id])
+  })
+  it('a publish right after a subscribe on this instance reaches it while the lane is still establishing', async () => {
+    const room = (await Room.create('establishing-hold')) as ServerRoom
+    const member = await room.join()
+    const release = delayDriverLane((lane) => lane.kind === 'semantic')
+    const received: unknown[] = []
+    room.subscribe((data) => received.push(data))
+    const publishing = member.publish('first')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    release()
+    await publishing
+    await vi.waitFor(() => expect(received).toEqual(['first']))
   })
   it('reads authority while the control subscription is establishing', async () => {
     const authority = await Room.create('establishing-roster')
@@ -3274,6 +3291,40 @@ function holdLaneDelivery(matches: (lane: LaneId) => boolean) {
       for (const deliver of held.splice(0)) await deliver()
     },
   }
+}
+/** A matching lane's driver attempt receives only once released, as a Redis SUBSCRIBE still in flight. */
+function delayDriverLane(matches: (lane: LaneId) => boolean): () => void {
+  const bind = driver.subscriptions.bind.bind(driver.subscriptions)
+  let release: () => void = () => {}
+  vi.spyOn(driver.subscriptions, 'bind').mockImplementation((source) => {
+    const binding = bind(source)
+    if (!('lane' in source) || !matches(source.lane)) return binding
+    return {
+      ...binding,
+      open: (receiver, localReceiverCount): SubscriptionAttempt => {
+        let inner: SubscriptionAttempt | null = null
+        let state: SubscriptionState = 'establishing'
+        const listeners = new Set<(next: SubscriptionState) => void>()
+        release = () => {
+          inner = binding.open(receiver, localReceiverCount)
+          state = inner.state()
+          for (const listener of listeners) listener(state)
+        }
+        return {
+          state: () => state,
+          onStateChange: (listener) => {
+            listeners.add(listener)
+            return () => listeners.delete(listener)
+          },
+          unsubscribe: async () => {
+            state = 'closed'
+            await inner?.unsubscribe()
+          },
+        }
+      },
+    }
+  })
+  return () => release()
 }
 function delayLaneSubscription(matches: (lane: LaneId) => boolean) {
   const backend = getRoomBackend()
