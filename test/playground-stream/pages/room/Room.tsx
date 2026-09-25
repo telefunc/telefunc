@@ -145,7 +145,6 @@ function Room() {
           received.push({ text: (data as { text: string }).text, from: from.meta.name })
         })
 
-        // Joined server-side: arrives as a standalone participant with its own stub channel.
         const me = await onJoinAsServer(roomId, 'Bob')
         await me.publish({ text: 'from-bob' })
         await me.setMeta({ name: 'Bobby' })
@@ -203,7 +202,6 @@ function Room() {
         const defaultOnly: number[] = []
         videoRoom.subscribeBinary((data) => defaultOnly.push(data[0]!), { track: null })
 
-        // selfDelivery defaults to true: our own frames come back to us.
         for (let i = 0; i < 3; i++) {
           await me.publishBinary(new Uint8Array(64).fill(i + 1))
         }
@@ -343,7 +341,6 @@ function Room() {
         lobby.subscribe((data) => received.push((data as { n: number }).n))
         const me = await lobby.join({ meta: { name: 'Cursor' } })
 
-        // One key emits only the first and latest values: [1, 5].
         const acks = await Promise.all([1, 2, 3, 4, 5].map((n) => me.publish({ n }, { coalesce: 'cursor' })))
 
         await pollUntil(() => ({
@@ -401,7 +398,6 @@ function Room() {
         const me = await owner.join({ meta: { name: 'Src' } })
 
         const tailed = await onGetRoomTail(roomId)
-        // Publish after tail creation but before subscribe; it must be replayed.
         await me.publish({ t: 'between' })
 
         const received: string[] = []
@@ -508,13 +504,11 @@ function Room() {
           const roomId = await createRoomId('self-server')
           await onWatchRoom(roomId) // a different (server-side) client, which receives everything
 
-          // The co-returned server join suppresses its own publish on this room view.
           const { room, me } = await onJoinRoomAsServerSelf(roomId, 'Solo')
           const mine: string[] = []
           room.subscribe((data) => mine.push(data as string))
           await me.publish('from-me')
 
-          // A client join on the same stub keeps default self-delivery.
           const notMe = await room.join({ meta: { name: 'NotMe' } })
           await notMe.publish('from-notme')
 
