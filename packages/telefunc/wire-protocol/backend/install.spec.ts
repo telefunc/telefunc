@@ -10,6 +10,7 @@ import { createBroadcastTransportDriver, type BroadcastTransport } from './broad
 import { superviseBroadcastDriver } from './broadcast/supervise.js'
 import { MemoryBackend } from './memory/backend.js'
 import { config } from '../../node/server/serverConfig.js'
+import { ServerBroadcast } from '../server/server-broadcast.js'
 afterEach(async () => {
   await disposeBackend()
   config.broadcast = {}
@@ -82,6 +83,17 @@ describe('backend installation lifecycle', () => {
     expect(getRoomBackend()).toBeDefined()
   })
 
+  it('a Broadcast channel that published before config.broadcast.transport was set uses the transport', async () => {
+    const channel = new ServerBroadcast<string>({ key: 'late-transport' })
+    await channel.publish('before')
+    const transport = localTransport()
+    config.broadcast = { transport }
+    const seen: string[] = []
+    const unsubscribe = channel.subscribe((message) => void seen.push(message))
+    transport.send('late-transport', JSON.stringify('from another instance'))
+    await vi.waitFor(() => expect(seen).toEqual(['from another instance']))
+    unsubscribe()
+  })
   it('setting config.broadcast.transport to undefined removes it too', async () => {
     config.broadcast.transport = localTransport()
     config.broadcast.transport = undefined

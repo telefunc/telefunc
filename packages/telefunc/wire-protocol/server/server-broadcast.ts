@@ -15,12 +15,12 @@ import type { TELEFUNC_SHIELDS } from '../../node/shared/transformer/generateShi
 import { invokeChannelListener, makePublishInfo } from '../channel.js'
 import { ServerChannel, reportServerChannelError } from './channel.js'
 import { getServerConfig } from '../../node/server/serverConfig.js'
-import type { BroadcastBackend, PublishResult } from '../backend/broadcast/contract.js'
+import type { PublishResult } from '../backend/broadcast/contract.js'
 import { getBroadcastBackend } from '../backend/install.js'
 import type { BackendSubscription } from '../backend/subscription.js'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { parse } from '@brillout/json-serializer/parse'
-import { assert, assertUsage } from '../../utils/assert.js'
+import { assertUsage } from '../../utils/assert.js'
 import { isPromise } from '../../utils/isPromise.js'
 import { ChannelClosedError, ChannelOverflowError } from '../channel-errors.js'
 import { ACK_STATUS, encodePublishText, encodePublishBinary } from '../shared-ws.js'
@@ -48,7 +48,6 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
   readonly key: string
 
   private readonly _subscribers: BroadcastListeners<T> = { text: [], binary: [] }
-  private _backend: BroadcastBackend | null = null
   private readonly _subscriptions: Record<BroadcastKind, BackendSubscription | null> = { text: null, binary: null }
   private readonly _peerSubscriptions: Record<BroadcastKind, boolean> = { text: false, binary: false }
 
@@ -137,14 +136,8 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
   // --- Internal broadcast helpers ---
 
   private _setPeerSubscription(kind: BroadcastKind, on: boolean): void {
-    if (on) this._ensureBroadcast()
     this._peerSubscriptions[kind] = on
     this._syncSubscription(kind)
-  }
-
-  private _ensureBroadcast(): void {
-    if (this._backend) return
-    this._backend = getBroadcastBackend()
   }
 
   private _subscribe<K extends BroadcastKind>(
@@ -153,7 +146,6 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
   ): BroadcastUnsubscribe {
     const listeners = this._subscribers[kind] as Array<typeof callback>
     if (this._isClosed) throw new ChannelClosedError()
-    this._ensureBroadcast()
     this._openSubscription(kind)
     listeners.push(callback)
     return () => {
@@ -175,8 +167,8 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
   /** Opens the kind's backend subscription unless one is live; outside a Cloudflare session this throws. */
   private _openSubscription(kind: BroadcastKind): void {
     if (this._subscriptions[kind] !== null) return
-    assert(this._backend)
-    const subscription = this._backend.subscribe({ key: this.key, kind }, (payload, rawInfo) => {
+    // The plane in effect now; the subscription keeps its own handle.
+    const subscription = getBroadcastBackend().subscribe({ key: this.key, kind }, (payload, rawInfo) => {
       if (kind === 'text') this._deliverBroadcastMessage(textDecoder.decode(payload), rawInfo)
       else this._deliverBroadcastBinaryMessage(payload, rawInfo)
     })
@@ -194,27 +186,24 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
   }
 
   private _publishTracked(kind: BroadcastKind, payload: Uint8Array): Promise<ChannelPublishAck> {
-    this._ensureBroadcast()
     const ret = this._trackAck(Promise.resolve(this._publish(kind, payload)))
     ret.catch(() => {})
     return ret
   }
 
   private _publish(kind: BroadcastKind, payload: Uint8Array): ChannelPublishAck | Promise<ChannelPublishAck> {
-    assert(this._backend)
     const toAck = (r: PublishResult): ChannelPublishAck =>
       Object.assign(makePublishInfo(this.key, r.seq, r.timestamp), {
         meta: r.meta,
         ...(r.receivers === undefined ? {} : { receivers: r.receivers }),
       })
-    const result = this._backend.publish({ key: this.key, kind }, payload, bufferLimit(kind))
+    const result = getBroadcastBackend().publish({ key: this.key, kind }, payload, bufferLimit(kind))
     if (isPromise(result)) return result.then(toAck)
     return toAck(result)
   }
 
   private async _dispatchPublishAckReq(serialized: string, seq: number): Promise<void> {
     try {
-      this._ensureBroadcast()
       const validateData = this._validators.get('data')
       if (validateData) {
         const data = parse(serialized) as ChannelData<T>
@@ -235,7 +224,6 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
 
   private async _dispatchPublishBinaryAckReq(data: Uint8Array, seq: number): Promise<void> {
     try {
-      this._ensureBroadcast()
       const result = await this._publish('binary', data)
       this._sendAckRes(seq, stringify(result))
     } catch (err) {
