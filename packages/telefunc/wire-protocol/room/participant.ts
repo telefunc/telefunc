@@ -171,7 +171,7 @@ abstract class ParticipantBase implements LocalParticipant {
     }
     return this._register(this._leaveCbs, callback)
   }
-  /** @internal The member is gone; `cause` says how. A local participant always knows its cause: its holder either initiated the leave or witnessed the event/closure that caused it. */
+  /** @internal The member is gone; `cause` says how. */
   _onLeft(cause: LeaveCause): void {
     if (this._leftCause) return
     const ownedCause = (this._leftCause = ownLeaveCause(cause))

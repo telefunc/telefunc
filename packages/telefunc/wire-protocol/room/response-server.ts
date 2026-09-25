@@ -67,7 +67,6 @@ const roomRemoteReplacer: ReplacerType<RoomRemoteReplacerContract, InternalServe
         meta: entry.meta,
         joinedAt: entry.joinedAt,
         metaSeq: entry.metaSeq,
-        // Snapshot-only facts: a later roster doesn't re-stamp an entry the client already revived.
         identity: entry.identity,
         ...(entry.hidden ? { hidden: true } : {}),
       },

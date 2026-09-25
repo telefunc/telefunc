@@ -195,7 +195,7 @@ class ServerRoom extends RoomStateView implements Room {
   }
 
   snapshot(): RoomSnapshotView {
-    // Snapshot consumers want the member view, so load it (need-driven, single-flight); the arrival lands as an onChange, and the next snapshot() is complete.
+    // Loads the members for the next snapshot; their arrival fires onChange.
     if (!this._state.rosterKnown) void this._subs.ensureRoster().catch(reportRoomError)
     return this._state.snapshot()
   }
@@ -420,7 +420,7 @@ class ServerRoom extends RoomStateView implements Room {
     let timer: ReturnType<typeof setTimeout> | undefined
     const reply = new Promise<DmReply>((settle) => {
       this._pendingDmAcks.set(ackId, { to, settle })
-      // The recipient replying/leaving/overflowing settles this promptly; this bounds the one case none of those cover: a recipient that joined but never listens and never leaves.
+      // Bounds the one wait no reply, leave or overflow settles: a recipient that never listens.
       timer = unrefTimer(
         setTimeout(() => {
           if (this._pendingDmAcks.delete(ackId)) settle(DM_FAILURE.timeout)
@@ -621,8 +621,7 @@ class ServerRoom extends RoomStateView implements Room {
       this._localParticipants.delete(id)
       local._onLeft(cause)
     }
-    // Every leave of a member this view knew reaches its clients here, once: from an event, from this instance's own
-    // removal, whose echo a lost frame can drop, or from a roster read, where no event means a removal.
+    // Every leave of a known member reaches the clients here, once, whatever applied it.
     if (hidden !== null)
       this._relayApplied({
         __r: 'leave',
@@ -864,10 +863,8 @@ class ServerLocalParticipant extends ParticipantBase {
   static isServerLocalParticipant(value: unknown): value is ServerLocalParticipant {
     return value !== null && typeof value === 'object' && SERVER_PARTICIPANT_BRAND in value
   }
-  // Messaging is often fire-and-forget: a usage error throws, and a failure is a rejection left handled.
   publish(data: unknown, options?: PublishOptions): Promise<ChannelPublishAck> {
     assertKnownOptions(options, ['coalesce', 'retain'], 'publish()')
-    // Server publish has no uplink to coalesce, but retain semantics remain identical.
     return markHandled(this._publishText(ownMessage(data), options?.retain))
   }
   publishBinary(data: Uint8Array, options?: BinaryPublishOptions): Promise<ChannelPublishAck> {

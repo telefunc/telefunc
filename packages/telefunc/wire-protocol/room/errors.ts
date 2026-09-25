@@ -26,7 +26,6 @@ class RoomError extends Error {
   constructor(message: string) {
     super(message)
     this.name = 'RoomError'
-    // Restore the prototype chain across the down-levelled `extends Error`.
     Object.setPrototypeOf(this, new.target.prototype)
   }
 }

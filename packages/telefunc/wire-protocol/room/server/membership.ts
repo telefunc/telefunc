@@ -144,8 +144,7 @@ async function evictMember(
   return null
 }
 
-/** Every live member, and every member whose eviction is still finishing, which the read completes; lapsed members
- *  are reaped on the way. */
+/** Live members, and departing ones whose eviction the read completes; lapsed members are reaped on the way. */
 async function readRoster(roomId: string, inc: string): Promise<{ members: MemberSnapshot[]; departing: Set<string> }> {
   const cells = await readCells(roomId, inc, { prefix: MEMBER_CELL_PREFIX })
   // After the member read, so an eviction committing in between shows up as departing.

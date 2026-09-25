@@ -252,7 +252,7 @@ class RoomSubscriptions {
     } finally {
       this._recovering.delete(slot)
     }
-    // Catch up on what the outage dropped; the lane is healthy, and a later end of it gets its own recovery.
+    // Catch up on what the outage dropped; a later end of the lane gets its own recovery.
     await this.reconcileAuthority()
   }
 

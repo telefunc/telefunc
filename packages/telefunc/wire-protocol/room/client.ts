@@ -62,11 +62,7 @@ type CoalesceWaiter = { resolve: (ack: ChannelPublishAck) => void; reject: (err:
 type ParticipantMutationRequest = Extract<ParticipantStubRequest, { __r: 'req-dm' | 'req-set-meta' | 'req-set-attrs' }>
 type WantsDeclaration = Extract<RoomStubRequest, { __r: 'sub-text' | 'sub-binary' }>
 
-/**
- * Client Room composes delivery and requests over one Broadcast stub.
- * Broadcast frames carry Room events/data; acked channel messages carry mutations.
- * Its serialized membership seed stays fresh through the positioned event stream.
- */
+/** A server room through one Broadcast stub: its frames carry events and data, its acked messages requests. */
 class ClientRoom extends RoomStateView implements Room {
   /** Phantom: the publish shield rides the type only (see `RoomShield`), never a runtime field. */
   declare readonly [TELEFUNC_SHIELDS]: { data: unknown }
@@ -103,7 +99,7 @@ class ClientRoom extends RoomStateView implements Room {
     // Delivery handlers are local-only. What the server relays is driven by the declared wants: control always arrives, text while subscribed, binary per `sub-binary`.
     stub._subscribeLocal('text', (envelope, info) => this._onEnvelope(envelope, info))
     stub._subscribeLocal('binary', (framed, info) => this._onBinaryFrame(framed, info))
-    // Wire death: the network gave up or the stub was GC'd. (A server `Room.close()` arrives as the `closed` ctrl event before the stub shuts down, so it takes the 'closed' path.)
+    // Wire death; a server `Room.close()` arrives before it, as the `closed` event.
     stub.onClose(() => this._applyClosed('disconnected'))
     // A backend rejection can arrive before the application asks for the roster. Mark it handled here while preserving the original rejection for each later getter.
     void this._roster.promise.catch(() => {})
@@ -121,7 +117,6 @@ class ClientRoom extends RoomStateView implements Room {
     const { meta, selfDelivery } = normalizeJoinOptions(options)
     this._pendingJoins++
     try {
-      // A rejected join (guard `Abort`, or a `RoomError` like a closed room) rejects this request natively via the channel ack. No envelope to unwrap.
       const { id, joinedAt } = (await this._request({ __r: 'req-join', meta, selfDelivery })) as {
         id: string
         joinedAt: number
@@ -191,12 +186,12 @@ class ClientRoom extends RoomStateView implements Room {
     return this._state.snapshot()
   }
 
-  /** @internal An ack-bearing stub request. Resolves with the handler's raw return, or rejects natively (the channel rebuilds an `AbortError`/`Error` from the ack status). No envelope. */
+  /** @internal */
   _request(req: RoomStubRequest): Promise<unknown> {
     return this._stub.send(req, { ack: true })
   }
 
-  /** @internal The envelope sent upward is a claim: the server validates `from` against this stub's members and stamps the verified `fromMeta` itself before anything reaches the room. */
+  /** @internal `from` is a claim: the server checks it against this stub's members and stamps `fromMeta` itself. */
   async _publishText(from: string, data: unknown, retain?: boolean): Promise<ChannelPublishAck> {
     return await this._stub._publishUnreported({
       __r: 'data',
@@ -312,8 +307,7 @@ class ClientRoom extends RoomStateView implements Room {
     if (state.closed) return this._stub._setWireSubscribed('text', false) // the stub is dead: nothing to declare
     const text = state.textWants()
     this._stub._setWireSubscribed('text', text.all)
-    // Declared even while the room-wide stream covers them: when it stops, live or in a reattach, the server still
-    // wants these members' text and keeps its lane.
+    // Declared under the room-wide stream too, so the server keeps these members' lane when that stream stops.
     this._declare({ __r: 'sub-text', members: text.members, announce: state.wantsAnnounce })
     this._declare({ __r: 'sub-binary', wants: state.binaryWants() })
   }
@@ -332,8 +326,6 @@ class ClientRoom extends RoomStateView implements Room {
   }
 }
 
-/** Client participant; server-side echo suppression leaves `selfDelivery`
- * as a public read-only flag here. */
 abstract class ClientParticipantBase extends ParticipantBase {
   /** Per-key conflation state for `publish(data, { coalesce })`: at most one in-flight send per key; while it's in flight the newest value waits in `pending` and supersedes any earlier one. */
   private readonly _coalescers = new Map<
@@ -351,9 +343,8 @@ abstract class ClientParticipantBase extends ParticipantBase {
     super(id, meta, selfDelivery, identity)
   }
 
-  /** The actual wire publish. Each flavor supplies it; `publish()` wraps it with conflation. */
+  /** Each flavor's wire publish; `publish()` adds conflation. */
   protected abstract _sendPublish(data: unknown, retain?: boolean): Promise<ChannelPublishAck>
-  /** The actual wire publish of a framed binary message. */
   protected abstract _sendPublishBinary(framed: Uint8Array): Promise<ChannelPublishAck>
 
   // Messaging is often fire-and-forget: a usage error throws, and a failure is a rejection left handled.
