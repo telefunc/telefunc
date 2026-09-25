@@ -187,9 +187,9 @@ class SubscriptionSlot {
     }
     this._attempt = attempt
     this._unobserve = attempt.onStateChange((state, reason) => this._onStateChange(attempt, state, reason))
-    // The attempt may have settled inside open(), before it had an observer.
-    const state = attempt.state()
-    if (state === 'ready' || state === 'closed') this._onStateChange(attempt, state)
+    // A refusal known at once throws from open(), so an attempt opens establishing or ready.
+    assert(attempt.state() !== 'closed')
+    if (attempt.state() === 'ready') this._becameReady()
   }
 
   private _onStateChange(attempt: SubscriptionAttempt, state: SubscriptionState, reason?: Error): void {
