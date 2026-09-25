@@ -63,11 +63,11 @@ class CloudflareRoomSessionManager {
 
   openSubscription(
     { roomId, inc, lane }: RoomSubscriptionSource,
-    authority: CloudflareRoomAuthorityStub,
+    openAuthority: () => CloudflareRoomAuthorityStub,
     receiver: BackendReceiver,
   ): CloudflareRoomSubscriptionAttempt {
     const callAuthority = <T>(invoke: (stub: CloudflareRoomAuthorityStub) => Promise<T>) =>
-      this.authorityCalls.call(roomId, () => authority, invoke)
+      this.authorityCalls.call(roomId, openAuthority, invoke)
     const source = { roomId, inc, laneKey: encodeLaneKey(lane), sessionDoId: this.#id, callAuthority }
     const key = entryKey(source)
     const attempt: CloudflareRoomSubscriptionAttempt = new CloudflareRoomSubscriptionAttempt(source, receiver, {
@@ -191,8 +191,8 @@ class CloudflareBackend implements BroadcastDriver, RoomDriver {
     const manager = requireCloudflareSession().room()
     return {
       partition: manager.subscriptionPartition,
-      // The authority stub resolves before the manager installs any local state.
-      open: (receiver) => manager.openSubscription(source, this.#stub(source.roomId), receiver),
+      // A route call line opens a fresh stub, like a commit's: a stub that rejected may be broken.
+      open: (receiver) => manager.openSubscription(source, () => this.#stub(source.roomId), receiver),
     }
   }
 
