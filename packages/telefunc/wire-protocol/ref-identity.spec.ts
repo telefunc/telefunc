@@ -23,6 +23,7 @@ import type {
   ServerReplacerContext,
   ServerReviverContext,
   StreamingProducer,
+  StreamSource,
   TypeContract,
 } from './types.js'
 
@@ -573,6 +574,61 @@ describe('reference identity — full pipeline', () => {
 
     abortController.abort()
     expect(counters.clientAbort).toBe(1)
+  })
+
+  test('a cancelled inline stream frees the frames it buffered, even once its done frame arrived', async () => {
+    const encode = (text: string) => new TextEncoder().encode(text) as Uint8Array<ArrayBuffer>
+    class RawChunks {
+      constructor(readonly chunks: string[]) {}
+    }
+    const prefix = '!RefIdentityRawChunks:'
+    const serverType = {
+      prefix,
+      detect: (value: unknown): value is RawChunks => value instanceof RawChunks,
+      replace(value: RawChunks, context: ServerReplacerContext) {
+        const sent = context.sendStream(() => ({
+          chunks: (async function* () {
+            for (const chunk of value.chunks) yield encode(chunk)
+          })(),
+          cancel() {},
+        }))
+        return { metadata: sent.metadata, close() {}, abort() {} }
+      },
+    }
+    const clientType = {
+      prefix,
+      revive: (metadata: never, context: ClientReviverContext) => ({
+        value: context.receiveStream(metadata),
+        close() {},
+        abort() {},
+      }),
+    }
+    let releaseA!: () => void
+    const gate = new Promise<void>((resolve) => (releaseA = resolve))
+    const a = new ReadableStream<Uint8Array<ArrayBuffer>>({
+      async start(controller) {
+        controller.enqueue(encode('a1'))
+        await gate
+        controller.close()
+      },
+    })
+    const { ret } = await roundTrip(
+      { a, b: new RawChunks(['b1', 'b2']) },
+      {
+        serverExtensions: [serverType as unknown as ReplacerType<TypeContract, ServerReplacerContext>],
+        clientExtensions: [clientType as unknown as ReviverType<TypeContract, ClientReviverContext>],
+      },
+    )
+    const retTyped = ret as { a: ReadableStream<Uint8Array>; b: StreamSource }
+    const reader = retTyped.a.getReader()
+    await reader.read()
+    const pending = reader.read()
+    // While `a` waits, the demuxer reads all of `b`, its done frame included, into b's buffer.
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    releaseA()
+    await pending
+    retTyped.b.cancel()
+    expect(await retTyped.b.readNextChunk()).toBe(null)
   })
 
   test('a tee() branch keeps a returned stream open after the stream itself is dropped', async () => {

@@ -268,10 +268,11 @@ class FrameDemuxer {
   /** Cancel the given index. Follows .tee() semantics:
    *  drops its buffered/future frames, resolves any pending waiter with null. */
   cancelIndex(index: number): void {
-    if (this.cancelledIndices.has(index) || this.doneIndices.has(index)) return
-    this.cancelledIndices.add(index)
-    // Drop buffered frames for this index
+    if (this.cancelledIndices.has(index)) return
+    // Drop buffered frames for this index; a finished one is not counted as cancelled.
     this.pendingFrames.delete(index)
+    if (this.doneIndices.has(index)) return
+    this.cancelledIndices.add(index)
     // Resolve any pending waiter with null (stream ended for this consumer)
     const waiter = this.indexWaiters.get(index)
     if (waiter) {
