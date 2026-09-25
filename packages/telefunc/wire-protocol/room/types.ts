@@ -93,7 +93,7 @@ type AfterJoinHook<P extends ParticipantMeta = ParticipantMeta> = (
   info: { joinedAt: number },
 ) => void | Promise<void>
 
-/** Why a participant left; roster reconciliation may report no cause. */
+/** Why a participant left; one a roster no longer lists was `removed`. */
 type LeaveCause =
   | { readonly type: 'left' }
   | { readonly type: 'removed'; readonly reason?: unknown }
@@ -210,7 +210,7 @@ type Room<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = Participant
 
   /** A participant joined. */
   onJoin(callback: (member: RemoteParticipant<P, Pub>) => void): () => void
-  /** A participant left; reconciled leaves have no cause. */
+  /** A participant left, and why. */
   onLeave(callback: (member: RemoteParticipant<P, Pub>, cause: LeaveCause) => void): () => void
   /** Any participant's metadata changed. */
   onParticipantUpdate(callback: (member: RemoteParticipant<P, Pub>, meta: P, prev: P) => void): () => void
