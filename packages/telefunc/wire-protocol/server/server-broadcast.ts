@@ -153,13 +153,8 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
     const listeners = this._subscribers[kind] as Array<typeof callback>
     if (this._isClosed) throw new ChannelClosedError()
     this._ensureBroadcast()
+    this._openSubscription(kind)
     listeners.push(callback)
-    try {
-      this._syncSubscription(kind)
-    } catch (error) {
-      listeners.pop()
-      throw error
-    }
     return () => {
       const index = listeners.indexOf(callback)
       if (index < 0) return
@@ -173,6 +168,11 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
       this._clearSubscription(kind)
       return
     }
+    this._openSubscription(kind)
+  }
+
+  /** Opens the kind's backend subscription unless one is live; outside a Cloudflare session this throws. */
+  private _openSubscription(kind: BroadcastKind): void {
     if (this._subscriptions[kind] !== null) return
     assert(this._backend)
     const subscription = this._backend.subscribe({ key: this.key, kind }, (payload, rawInfo) => {

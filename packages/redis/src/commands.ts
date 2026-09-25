@@ -44,14 +44,11 @@ end
 const HEAD_PRELUDE = `${NOW_LUA}
 -- read the head, treating a logically-expired tombstone as absent (a lapsed tombstone reopens the
 -- absence epoch); the PX backstop only reclaims memory, it is never what makes it invisible.
-local function tf_read_and_expire_head(key, now)
+local function tf_live_head(key, now)
   local raw = redis.call('GET', key)
   if not raw then return nil end
   local h = cjson.decode(raw)
-  if h.exp and h.exp <= now then
-    redis.call('DEL', key)
-    return nil
-  end
+  if h.exp and h.exp <= now then return nil end
   return h
 end
 `
@@ -86,7 +83,7 @@ local head_key, gens_key, rev_key = KEYS[1], KEYS[2], KEYS[3]
 local now = tf_now()
 local cx = cjson.decode(ARGV[1])
 local nx = cjson.decode(ARGV[2])
-local cur = tf_read_and_expire_head(head_key, now)
+local cur = tf_live_head(head_key, now)
 
 local matches = false
 if cx.form == 'absent' then
@@ -127,7 +124,7 @@ return '{"tag":"head","head":' .. encoded .. '}'
 //   KEYS: [1]=head
 const READ_HEAD_LUA = `${HEAD_PRELUDE}
 local now = tf_now()
-local head = tf_read_and_expire_head(KEYS[1], now)
+local head = tf_live_head(KEYS[1], now)
 if not head then return '{"head":null}' end
 return '{"head":' .. cjson.encode(head) .. '}'
 `
@@ -136,7 +133,7 @@ return '{"head":' .. cjson.encode(head) .. '}'
 //   KEYS: [1]=head [2]=revision [3]=generation-keys
 //   ARGV: [1]=inc [2]=cell-key prefix [3]=cell prefix
 const FIND_CELLS_LUA = `${HEAD_PRELUDE}
-local head = tf_read_and_expire_head(KEYS[1], tf_now())
+local head = tf_live_head(KEYS[1], tf_now())
 if not head or head.inc ~= ARGV[1] then return {'stale'} end
 local reply = {'found', redis.call('GET', KEYS[2]) or '0'}
 local wanted = ARGV[2] .. ARGV[3]
@@ -151,7 +148,7 @@ return reply
 //   KEYS: [1]=head [2]=revision [3..]=cells
 //   ARGV: [1]=inc [2]=expected revision or ''
 const READ_CELLS_LUA = `${HEAD_PRELUDE}
-local head = tf_read_and_expire_head(KEYS[1], tf_now())
+local head = tf_live_head(KEYS[1], tf_now())
 if not head or head.inc ~= ARGV[1] then return {'stale'} end
 local revision = redis.call('GET', KEYS[2]) or '0'
 if ARGV[2] ~= '' and revision ~= ARGV[2] then return {'moved'} end
@@ -165,7 +162,7 @@ return reply
 //   KEYS: [1]=head [2]=gens
 //   ARGV: [1]=inc
 const VALIDATE_GENERATION_LUA = `${HEAD_PRELUDE}
-local head = tf_read_and_expire_head(KEYS[1], tf_now())
+local head = tf_live_head(KEYS[1], tf_now())
 if not head or head.state ~= 'open' or head.inc ~= ARGV[1] or redis.call('SISMEMBER', KEYS[2], ARGV[1]) ~= 1 then
   return 0
 end
@@ -194,7 +191,7 @@ return 1
 const CELLS_CX_LUA = `${HEAD_PRELUDE}
 local head_key, rev_key, generation_keys_key = KEYS[1], KEYS[2], KEYS[3]
 local now = tf_now()
-local head = tf_read_and_expire_head(head_key, now)
+local head = tf_live_head(head_key, now)
 if (not head) or head.inc ~= ARGV[1] or head.state ~= 'open' then return 'stale-inc' end
 local cur = redis.call('GET', rev_key)
 if not cur then cur = '0' end
@@ -228,7 +225,7 @@ ${REDIS_ORDERING_FRAME_LUA}
 local head_key, order_key, retained_key, channel_key, generation_keys_key =
   KEYS[1], KEYS[2], KEYS[3], KEYS[4], KEYS[5]
 local now = tf_now()
-local head = tf_read_and_expire_head(head_key, now)
+local head = tf_live_head(head_key, now)
 local ok = false
 if head and head.inc == ARGV[1] then
   if ARGV[3] == '' then

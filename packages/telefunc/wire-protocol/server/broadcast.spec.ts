@@ -200,6 +200,23 @@ describe('keyed in-process broadcast', () => {
     expect(seen).toEqual([1])
   })
 
+  it('a subscribe that throws leaves no listener behind', async () => {
+    await disposeBackend()
+    const driver = new MemoryBackend({ state: memoryState })
+    installBackend(() => driver)
+    const bind = driver.subscriptions.bind.bind(driver.subscriptions)
+    vi.spyOn(driver.subscriptions, 'bind').mockImplementationOnce(() => {
+      throw new Error('no session to deliver to')
+    })
+    const broadcast = registeredBroadcast<{ n: number }>('room:subscribe-throws')
+    const seen: string[] = []
+    expect(() => broadcast.subscribe((m) => seen.push(`first:${m.n}`))).toThrow('no session to deliver to')
+    vi.mocked(driver.subscriptions.bind).mockImplementation(bind)
+    broadcast.subscribe((m) => seen.push(`second:${m.n}`))
+    await broadcast.publish({ n: 1 })
+    expect(seen).toEqual(['second:1'])
+  })
+
   // Edge case: a Broadcast can be created and have `publish` called on it BEFORE
   // any peer attaches. The behavioral contract: when the peer eventually attaches,
   // the previously-published message is delivered to it (not silently dropped).

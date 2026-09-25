@@ -9,6 +9,7 @@ export {
   resolveIdentityMembers,
 }
 
+import { assert } from '../../../utils/assert.js'
 import { getRoomBackend } from '../../backend/install.js'
 import type { CellMutation, CellSelector } from '../../backend/room/contract.js'
 import { ROOM_MEMBER_TTL_MS } from '../constants.js'
@@ -204,7 +205,10 @@ async function resolveIdentityMembers(roomId: string, inc: string, identity: str
   const prefix = identityCellPrefix(identity)
   const markers = await readCells(roomId, inc, { prefix })
   const ids = [...markers.keys()].map((key) => key.slice(prefix.length))
-  return (await readMembersById(roomId, inc, ids)).filter((member) => member.identity === identity)
+  const members = await readMembersById(roomId, inc, ids)
+  // A member and its identity marker are written and removed in one compare-exchange.
+  assert(members.every((member) => member.identity === identity))
+  return members
 }
 
 async function dropRetainedOwnedBy(roomId: string, inc: string, memberId: string): Promise<void> {

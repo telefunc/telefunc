@@ -348,12 +348,8 @@ class RoomState {
   // ── Event application ──
   applyJoin(member: MemberSnapshot): void {
     if (this.closed) return
-    const existing = this._members.get(member.id)
-    if (existing) {
-      // The origin's own join echo carries the seq-0 meta: it must not regress a later p-meta.
-      if (existing.metaSeq === 0) existing.meta = ownMetadata(member.meta)
-      return
-    }
+    // A known member's join echo has nothing new: its meta is the admission meta, frozen before any guard.
+    if (this._members.has(member.id)) return
     const entry = this._createEntry(member)
     // A hidden participant is no presence event (no count, no `onJoin`), but the roster changed, so `onChange` fires.
     if (entry.hidden) {
