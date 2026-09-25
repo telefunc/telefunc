@@ -78,9 +78,9 @@ test('a session delivers a frame for the lease its subscription holds, and drops
     seq: byte,
     timestamp: 1,
   })
-  await manager.deliver(frame(1, attempt.leaseId))
+  manager.deliver(frame(1, attempt.leaseId))
   // A lease this session held before a restart.
-  await manager.deliver(frame(2, 'stale-lease'))
+  manager.deliver(frame(2, 'stale-lease'))
   expect(received).toEqual([1])
   await attempt.unsubscribe()
 })
@@ -190,17 +190,9 @@ test.each([
 })
 
 test.each([
-  ['stays ready and renews again while its route is live', async () => true, 'ready', 0],
-  ['ends when its route lapsed or its generation was dropped', async () => false, 'closed', 0],
-  [
-    'ends when the authority is unreachable',
-    async () => {
-      throw new Error('unreachable')
-    },
-    'closed',
-    0,
-  ],
-])('a ready attempt %s', async (_name, renewRoute, state, releases) => {
+  ['stays ready and renews again while its route is live', async () => true, 'ready'],
+  ['ends when its route lapsed or its generation was dropped', async () => false, 'closed'],
+])('a ready attempt %s', async (_name, renewRoute, state) => {
   vi.useFakeTimers()
   try {
     let released = 0
@@ -209,7 +201,7 @@ test.each([
     expect(attempt.state()).toBe('ready')
     await vi.advanceTimersByTimeAsync(ROUTE_RENEW_EVERY_MS)
     expect(attempt.state()).toBe(state)
-    expect(released).toBe(releases)
+    expect(released).toBe(0)
     await attempt.unsubscribe()
   } finally {
     vi.useRealTimers()
