@@ -35,7 +35,8 @@ import { ReplayGate } from './server/replay.js'
 import { TailHold } from './server/tail.js'
 import { RoomDemand } from './demand.js'
 import { roomParticipantReplacer, roomRemoteReplacer, roomReplacer } from './response-server.js'
-import type { InternalServerReplacerContext } from '../types.js'
+import { roomRemoteReviver } from './response-client.js'
+import type { InternalClientReviverContext, InternalServerReplacerContext } from '../types.js'
 import type { ServerChannel } from '../server/channel.js'
 import type { ChannelPublishInfo } from '../channel.js'
 import { disposeBackend, getBroadcastBackend, getRoomBackend, installBackend } from '../backend/install.js'
@@ -2368,6 +2369,14 @@ describe('client Room lifecycle', () => {
       expect(retained.member.id).toBe(gc.memberId)
       expect(gc.closed()).toBe(1)
     })
+    it('does not make a participant revived with its Room the owner of the Room wrapper', async () => {
+      const gc = gcFixture('gc-revived-owner')
+      const retained = retainOnlyRevivedRemote(gc)
+      await forceRoomGc()
+      expect(retained.room.deref()).toBeUndefined()
+      expect(retained.member.id).toBe(gc.memberId)
+      expect(gc.closed()).toBe(1)
+    })
     it('does not make a joined participant the owner of its Room wrapper', async () => {
       const gc = gcFixture('gc-join-owner', true)
       const retained = await retainOnlyJoinedParticipant(gc)
@@ -2668,6 +2677,16 @@ describe('client Room lifecycle', () => {
       snapshotCount: 0,
       participants: 0,
     })
+  })
+  it('gives a participant revived with its Room no lifecycle of its own', async () => {
+    const { client } = fakeClient('revived-no-lifecycle')
+    const context = { shareLifecycle: () => {} } as unknown as InternalClientReviverContext
+    const metadata = { room: client, id: crypto.randomUUID(), meta: {}, joinedAt: 1, metaSeq: 0, identity: null }
+    const revived = roomRemoteReviver.revive(metadata, context)
+    await revived.close()
+    revived.abort(new Error('aborted') as never)
+    expect(client.isClosed).toBe(false)
+    expect(client._getRemote(metadata.id)).toBe(revived.value)
   })
   it('fires onLeave on a directly held hidden member when its leave is relayed', () => {
     const { client, emit } = fakeClient('client-hidden-leave')
@@ -3367,6 +3386,13 @@ async function retainOnlyListedRemote({ target, fake, registry, onClose, memberI
   )
   const [member] = await room.getParticipants()
   return { member: member!, room: new WeakRef(room) }
+}
+function retainOnlyRevivedRemote({ target, registry, onClose, memberId }: GcFixture) {
+  const room = wrapProxy(target)
+  registry.register(room, onClose)
+  const context = { shareLifecycle: () => {} } as unknown as InternalClientReviverContext
+  const metadata = { room, id: memberId, meta: {}, joinedAt: 1, metaSeq: 0, identity: null }
+  return { member: roomRemoteReviver.revive(metadata, context).value, room: new WeakRef(room) }
 }
 async function retainOnlyJoinedParticipant({ target, registry, onClose }: GcFixture) {
   const room = wrapProxy(target)
