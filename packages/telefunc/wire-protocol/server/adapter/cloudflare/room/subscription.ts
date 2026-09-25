@@ -107,7 +107,7 @@ class CloudflareRoomSubscriptionAttempt extends DriverAttempt {
   }
 
   deliver(payload: Uint8Array, seq: number, timestamp: number): void {
-    if (this.state() !== 'ready') return
+    if (this.ended) return
     this.#receiver(new Uint8Array(payload), { seq, timestamp })
   }
 

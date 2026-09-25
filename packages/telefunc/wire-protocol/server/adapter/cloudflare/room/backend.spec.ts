@@ -81,6 +81,27 @@ test('a session delivers a frame for the lease its subscription holds, and drops
   await attempt.unsubscribe()
 })
 
+test('an attempt takes a frame the authority delivers before its registration reply arrives', async () => {
+  const manager = new CloudflareRoomSessionManager('session')
+  const received: number[] = []
+  const registered = Promise.withResolvers<{ ok: true }>()
+  const authority = { registerRoute: () => registered.promise, unsubscribeRoute: async () => {} }
+  const attempt = manager.openSubscription(
+    { roomId: 'room', inc: 'inc', lane: { kind: 'semantic' } },
+    () => authority as unknown as CloudflareRoomAuthorityStub,
+    (payload) => void received.push(payload[0]!),
+  )
+  const laneKey = encodeLaneKey({ kind: 'semantic' })
+  const lease = { roomId: 'room', inc: 'inc', laneKey, sessionDoId: 'session', leaseId: attempt.leaseId }
+  // The authority fans out once its transaction stored the route, over another stub than the one the reply takes.
+  manager.deliver({ ...lease, payload: new Uint8Array([1]), seq: 1, timestamp: 1 })
+  expect(attempt.state()).toBe('establishing')
+  expect(received).toEqual([1])
+  registered.resolve({ ok: true })
+  await vi.waitFor(() => expect(attempt.state()).toBe('ready'))
+  await attempt.unsubscribe()
+})
+
 test("a session's route calls to a room share one ordered stub, so a released attempt's calls can't overtake its successor's", async () => {
   const manager = new CloudflareRoomSessionManager('session')
   const calls: string[] = []
