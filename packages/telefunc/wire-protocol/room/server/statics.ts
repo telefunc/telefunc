@@ -146,31 +146,35 @@ type TryCreateRoomResult = { kind: 'created'; room: Room } | { kind: 'exists' } 
 async function tryCreateRoom(id: string, options: RoomOptions | undefined): Promise<TryCreateRoomResult> {
   const { meta } = normalizeOptions(options)
   const backend = getRoomBackend()
-  let current = await backend.readHead(id)
-  if (current?.state === 'closing') {
-    const closing = await acquireClosingLease(backend, id, current)
-    if (closing === null || !(await finishClose(backend, id, closing))) return { kind: 'closing' }
-    current = await backend.readHead(id)
-  }
-  if (current?.state === 'closed') await cleanupFinalizedIncarnation(backend, id, current)
-  if (current !== null && current.state !== 'closed') return { kind: 'exists' }
-  const created: RoomConfigRecord = {
-    meta,
-    at: Date.now(),
-    by: writerId(),
-    inc: crypto.randomUUID(),
-  }
-  const result = await backend.compareExchangeHead(
-    id,
-    current === null ? { form: 'absent' } : { form: 'rev', rev: current.rev },
-    { head: { currentInc: created.inc, state: 'open', config: encodeRoomRecord(created) } },
-  )
-  if ('conflict' in result) {
-    return result.current?.state === 'closing' ? { kind: 'closing' } : { kind: 'exists' }
-  }
-  assert('head' in result)
-  await backend.directoryPut(id, created.inc)
-  return { kind: 'created', room: new ServerRoom(id, created, { members: [] }) }
+  return await retryCompareExchange(id, async () => {
+    let current = await backend.readHead(id)
+    if (current?.state === 'closing') {
+      const closing = await acquireClosingLease(backend, id, current)
+      if (closing === null || !(await finishClose(backend, id, closing))) return { kind: 'closing' }
+      current = await backend.readHead(id)
+    }
+    if (current?.state === 'closed') await cleanupFinalizedIncarnation(backend, id, current)
+    if (current !== null && current.state !== 'closed') return { kind: 'exists' }
+    const created: RoomConfigRecord = {
+      meta,
+      at: Date.now(),
+      by: writerId(),
+      inc: crypto.randomUUID(),
+    }
+    const result = await backend.compareExchangeHead(
+      id,
+      current === null ? { form: 'absent' } : { form: 'rev', rev: current.rev },
+      { head: { currentInc: created.inc, state: 'open', config: encodeRoomRecord(created) } },
+    )
+    if ('conflict' in result) {
+      // A head that went away (a lapsed tombstone) or closed meanwhile still allows the create: try again.
+      if (result.current === null || result.current.state === 'closed') return CX_CONFLICT
+      return result.current.state === 'closing' ? { kind: 'closing' } : { kind: 'exists' }
+    }
+    assert('head' in result)
+    await backend.directoryPut(id, created.inc)
+    return { kind: 'created', room: new ServerRoom(id, created, { members: [] }) }
+  })
 }
 
 async function createRoom(id: string, options?: RoomOptions): Promise<Room> {

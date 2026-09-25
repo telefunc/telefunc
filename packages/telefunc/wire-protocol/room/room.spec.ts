@@ -369,6 +369,15 @@ describe('Room public behavior', () => {
     })
     expect((await Room.list()).map(({ id }) => id)).toEqual(['list-open'])
   })
+  it('creates a room whose head went away between its read and the create, as a lapsing tombstone does', async () => {
+    const lapsed = { conflict: true, current: null } as unknown as Awaited<
+      ReturnType<MemoryBackend['compareExchangeHead']>
+    >
+    vi.spyOn(driver, 'compareExchangeHead').mockResolvedValueOnce(lapsed)
+    expect((await Room.getOrCreate('lapsed-get-or-create')).isClosed).toBe(false)
+    vi.spyOn(driver, 'compareExchangeHead').mockResolvedValueOnce(lapsed)
+    expect((await Room.create('lapsed-create')).isClosed).toBe(false)
+  })
   it('creates, lists, updates, closes fully, and recreates a genuinely fresh domain', async () => {
     const room = (await Room.create('lifecycle', { meta: { topic: 'one' } })) as unknown as ServerRoom
     const firstInc = room._inc
