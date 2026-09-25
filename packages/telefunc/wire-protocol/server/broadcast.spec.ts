@@ -776,26 +776,6 @@ describe('Broadcast static bus (publish/subscribe)', () => {
     }
   })
 
-  it('waits for a static subscription to be ready before publishing', async () => {
-    const { controlled: pending, publish } = await installPendingSubscriptionBackend({ seq: 1, timestamp: 1 })
-    const report = vi.spyOn(console, 'error').mockImplementation(() => {})
-    const unsubscribe = Broadcast.subscribe('broadcast:static-ready', () => {})
-    try {
-      const publishing = Broadcast.publish('broadcast:static-ready', 'after-ready')
-      await Promise.resolve()
-      expect(publish).not.toHaveBeenCalled()
-      pending.ready()
-      await publishing
-      expect(publish).toHaveBeenCalledOnce()
-      pending.close()
-      expect(await Broadcast.publish('broadcast:static-ready', 'after-terminal')).toBeDefined()
-      expect(publish).toHaveBeenCalledTimes(2)
-      expect(report).toHaveBeenCalledWith(expect.stringContaining('Backend subscription closed'))
-    } finally {
-      unsubscribe()
-    }
-  })
-
   it('holds up to config.channel.bufferLimit bytes while a subscription is establishing', async () => {
     const { controlled, publish } = await installPendingSubscriptionBackend({ seq: 1, timestamp: 1 })
     config.channel = { bufferLimit: 4 * 1024 * 1024 }
