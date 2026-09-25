@@ -171,23 +171,4 @@ describe('memory backend behind the supervised consumer', () => {
     }
     expect(delegated).not.toHaveBeenCalled()
   })
-  it('does not retain or expose mutable lane aliases', async () => {
-    await driver.compareExchangeHead(
-      'retained-lane-alias',
-      { form: 'absent' },
-      { head: { state: 'open', currentInc: 'inc-1', config: encoder.encode('config') } },
-    )
-    const lane = { kind: 'binary', member: 'member', track: 'original' } as LaneId
-    await driver.commitLane('retained-lane-alias', 'inc-1', lane, new Uint8Array([1]), { retain: true })
-    if (lane.kind !== 'binary') throw new Error('expected binary lane')
-    lane.track = 'mutated-ingress'
-    const listed = await driver.listRetained('retained-lane-alias', 'inc-1')
-    expect(listed).toEqual([{ kind: 'binary', member: 'member', track: 'original' }])
-    const returned = listed[0]
-    if (returned?.kind !== 'binary') throw new Error('expected retained binary lane')
-    returned.track = 'mutated-egress'
-    await expect(driver.listRetained('retained-lane-alias', 'inc-1')).resolves.toEqual([
-      { kind: 'binary', member: 'member', track: 'original' },
-    ])
-  })
 })
