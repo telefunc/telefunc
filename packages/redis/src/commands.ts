@@ -28,7 +28,6 @@ import {
   generationKeysKey,
   gensKey,
   headKey,
-  headRevKey,
   orderKey,
   retainedKey,
   revKey,
@@ -84,10 +83,10 @@ return {seq, ts, receivers}
 `
 
 // HEAD CX: compares by form, then stores the next head.
-//   KEYS: [1]=head [2]=gens [3]=headrev
+//   KEYS: [1]=head [2]=gens
 //   ARGV: [1]=HeadCx JSON {form,rev?,lease?} [2]=nextJson{state,inc?,config,lease?,ttlMs?}
 const HEAD_CX_LUA = `${HEAD_PRELUDE}
-local head_key, gens_key, rev_key = KEYS[1], KEYS[2], KEYS[3]
+local head_key, gens_key = KEYS[1], KEYS[2]
 local now = tf_now()
 local cx = cjson.decode(ARGV[1])
 local nx = cjson.decode(ARGV[2])
@@ -110,19 +109,15 @@ if not matches then
   return '{"tag":"conflict","current":null}'
 end
 
--- The rev counter lapses with a tombstone; salted with authority time, a rev still never repeats.
-local stored = { rev = 'rev-' .. string.format('%d', now) .. '-' .. redis.call('INCR', rev_key), state = nx.state, config = nx.config }
+-- The count lapses with a tombstone; salted with authority time, a rev still never repeats.
+local n = (cur and cur.n or 0) + 1
+local stored = { rev = 'rev-' .. string.format('%d', now) .. '-' .. n, n = n, state = nx.state, config = nx.config }
 if nx.inc ~= nil then stored.inc = nx.inc end
 if nx.lease ~= nil then stored.lease = { id = nx.lease.id, ['until'] = now + nx.lease.durationMs } end
 if nx.ttlMs ~= nil then stored.exp = now + nx.ttlMs end
 local encoded = cjson.encode(stored)
 redis.call('SET', head_key, encoded)
-if nx.ttlMs ~= nil then
-  redis.call('PEXPIRE', head_key, nx.ttlMs)
-  redis.call('PEXPIRE', rev_key, nx.ttlMs)
-else
-  redis.call('PERSIST', rev_key)
-end
+if nx.ttlMs ~= nil then redis.call('PEXPIRE', head_key, nx.ttlMs) end
 if nx.inc ~= nil then redis.call('SADD', gens_key, nx.inc) end
 return '{"tag":"head","head":' .. encoded .. '}'
 `
@@ -347,9 +342,9 @@ const REDIS_COMMANDS = {
   headCx: command({
     name: 'tfRoomHeadCx',
     lua: HEAD_CX_LUA,
-    numberOfKeys: 3,
+    numberOfKeys: 2,
     invoke: (prefix, { roomId, cx, next }: { roomId: string; cx: HeadCx; next: HeadNext }) => ({
-      keys: [headKey(prefix, roomId), gensKey(prefix, roomId), headRevKey(prefix, roomId)],
+      keys: [headKey(prefix, roomId), gensKey(prefix, roomId)],
       argv: [JSON.stringify(cx), encodeNext(next)],
     }),
     parse: (reply): HeadCxResult => {
@@ -522,6 +517,7 @@ const REDIS_COMMANDS = {
 /** A head as the scripts store it: JSON, config base64, lease deadline minted from Redis TIME. */
 type StoredHead = {
   rev: string
+  n: number
   state: 'open' | 'closing' | 'closed'
   config: string
   inc?: string
