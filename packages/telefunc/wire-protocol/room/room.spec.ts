@@ -41,6 +41,9 @@ import type { ServerChannel } from '../server/channel.js'
 import type { ChannelPublishInfo } from '../channel.js'
 import { disposeBackend, getBroadcastBackend, getRoomBackend, installBackend } from '../backend/install.js'
 import { MemoryBackend, MemoryBackendState } from '../backend/memory/backend.js'
+import { superviseRoomDriver } from '../backend/room/supervise.js'
+import { DriverAttempt } from '../backend/attempt.js'
+import type { RoomDriver } from '../backend/room/contract.js'
 import type { LaneId } from '../backend/room/contract.js'
 import type {
   BackendReceiver,
@@ -736,6 +739,39 @@ describe('Room public behavior', () => {
     transition('ready')
     await vi.waitFor(() => expect(room.count).toBe(1))
     expect((await room.getParticipants()).map(({ id }) => id)).toEqual([member.id])
+  })
+  it('sends commits held for an establishing lane before any commit that arrives once it is ready', async () => {
+    class ManualAttempt extends DriverAttempt {
+      async unsubscribe() {
+        this.transition('closed')
+      }
+      ready() {
+        this.transition('ready')
+      }
+    }
+    // Whatever the microtask distance of the later commit from the lane's readiness.
+    for (let distance = 0; distance < 12; distance++) {
+      const order: string[] = []
+      let attempt!: ManualAttempt
+      const driver = {
+        subscriptions: { bind: () => ({ partition: '', open: () => (attempt = new ManualAttempt()) }) },
+        commitLane: async (_roomId: string, _inc: string, _lane: LaneId, payload: Uint8Array) => {
+          order.push(decoder.decode(payload))
+          return { accepted: true, seq: order.length, timestamp: 1, delivery: Promise.resolve() }
+        },
+      } as unknown as RoomDriver
+      const backend = superviseRoomDriver(driver)
+      const subscription = backend.subscribeLane('room', 'inc', semanticLane, () => {})
+      const held = ['a', 'b'].map((text) => backend.commitLane('room', 'inc', semanticLane, encoder.encode(text)))
+      attempt.ready()
+      let later: Promise<unknown> = Promise.resolve()
+      for (let hop = 0; hop < distance; hop++) later = later.then(() => {})
+      const overtaking = later.then(() => backend.commitLane('room', 'inc', semanticLane, encoder.encode('c')))
+      await Promise.all([...held, overtaking])
+      expect(order).toEqual(['a', 'b', 'c'])
+      await subscription.unsubscribe()
+      await backend.dispose()
+    }
   })
   it('a publish right after a subscribe on this instance reaches it while the lane is still establishing', async () => {
     const room = (await Room.create('establishing-hold')) as ServerRoom
