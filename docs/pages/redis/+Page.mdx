@@ -45,6 +45,8 @@ Telefunc duplicates the supplied client as needed without disconnecting it, so y
 
 The client must never resend a command, so a lost reply can't execute twice: a Redis client needs `maxRetriesPerRequest: 0`, a Cluster client needs `retryDelayOnFailover: 0` and `redisOptions: { maxRetriesPerRequest: 0 }`, and `reconnectOnError` must stay unset. Room reads must be consistent, so a Cluster client keeps `scaleReads: 'master'`, and Pub/Sub channels ignore an ioredis `keyPrefix`, so pass `installRedis(redis, { prefix })` instead. `installRedis()` throws for any other client.
 
+Room keeps its state (rooms, members, lane order) in Redis keys with no expiry, so Redis must never evict them: use `maxmemory-policy noeviction`, or a `volatile-*` policy, which evicts only keys with an expiry. An `allkeys-*` policy can silently break a room.
+
 ## Channels
 
 `Channel` is per-instance. Reconnects must land on the instance holding the channel's state, so multi-instance deployments need sticky sessions at the load balancer. See <Link href="/stream/scale" />.
