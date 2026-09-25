@@ -762,6 +762,54 @@ describe('Broadcast static bus (publish/subscribe)', () => {
     }
   })
 
+  it("keeps a key's text and binary publishes in call order while one kind's subscription establishes", async () => {
+    await disposeBackend()
+    const controlled = pendingSubscription()
+    const driver = new MemoryBackend({ state: memoryState })
+    const bind = driver.subscriptions.bind.bind(driver.subscriptions)
+    driver.subscriptions.bind = (source) =>
+      'kind' in source && source.kind === 'text'
+        ? { ...bind(source), open: () => controlled.subscription }
+        : bind(source)
+    const publish = vi.spyOn(driver, 'publish').mockReturnValue({ seq: 1, timestamp: 1 })
+    installBackend(() => driver)
+    const unsubscribe = Broadcast.subscribe('broadcast:cross-kind', () => {})
+    try {
+      const text = Broadcast.publish('broadcast:cross-kind', 'a')
+      const binary = Broadcast.publishBinary('broadcast:cross-kind', new Uint8Array([1]))
+      controlled.ready()
+      await Promise.all([text, binary])
+      expect(publish.mock.calls.map(([route]) => route.kind)).toEqual(['text', 'binary'])
+    } finally {
+      unsubscribe()
+    }
+  })
+
+  it('keeps holding for a subscription of the other kind that starts establishing during the hold', async () => {
+    await disposeBackend()
+    const attempts = { text: pendingSubscription(), binary: pendingSubscription() }
+    const driver = new MemoryBackend({ state: memoryState })
+    const bind = driver.subscriptions.bind.bind(driver.subscriptions)
+    driver.subscriptions.bind = (source) =>
+      'kind' in source ? { ...bind(source), open: () => attempts[source.kind].subscription } : bind(source)
+    const publish = vi.spyOn(driver, 'publish').mockReturnValue({ seq: 1, timestamp: 1 })
+    installBackend(() => driver)
+    const stops = [Broadcast.subscribe('broadcast:late-kind', () => {})]
+    try {
+      const held = [Broadcast.publish('broadcast:late-kind', 'a')]
+      stops.push(Broadcast.subscribeBinary('broadcast:late-kind', () => {}))
+      held.push(Broadcast.publishBinary('broadcast:late-kind', new Uint8Array([1])))
+      attempts.text.ready()
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      expect(publish).not.toHaveBeenCalled()
+      attempts.binary.ready()
+      await Promise.all(held)
+      expect(publish.mock.calls.map(([route]) => route.kind)).toEqual(['text', 'binary'])
+    } finally {
+      for (const stop of stops) stop()
+    }
+  })
+
   it('opens channels under a zero config.channel.bufferLimit and holds no publish', async () => {
     const { controlled } = await installPendingSubscriptionBackend({ seq: 1, timestamp: 1 })
     config.channel = { bufferLimit: 0, bufferLimitBinary: 0 }
