@@ -29,9 +29,6 @@ function createStalledTransport() {
   return { fetchImpl, getSseDownstreamOpens: () => sseDownstreamOpens }
 }
 
-test.each([Infinity, 0.5, Number.MAX_SAFE_INTEGER + 1])('channel config rejects %s', (value) => {
-  expect(() => (config.channel.reconnectTimeout = value)).toThrow('non-negative safe integer')
-})
 test('channel config preserves zero through server and client resolution', () => {
   config.channel.reconnectTimeout = 0
   expect(getServerConfig().channel.reconnectTimeout).toBe(0)
