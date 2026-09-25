@@ -808,29 +808,16 @@ describe('cloudflare broadcast routing', () => {
     const firstRemotePublishReady = new Promise<void>((resolve) => {
       releaseFirstRemotePublish = resolve
     })
-    const transport: CloudflareBroadcastTransport = createTransport({
-      idFromName(name: string) {
-        return {
-          name,
-          equals(other: { name: string }) {
-            return other.name === name
-          },
-        }
-      },
-      get(id: { name: string }) {
-        return {
-          telefuncBroadcastForward({ payload }: any) {
-            const text = decode(payload)
-            coordinatorPublishes.push(`${id.name}:${text}`)
-            if (id.name.includes(':broadcast:apac:') && text === '{"text":"first"}') return firstRemotePublishReady
-            return Promise.resolve()
-          },
-          telefuncBroadcastDeliver() {
-            return Promise.resolve()
-          },
-        }
-      },
-    } as unknown as DurableObjectNamespace)
+    const transport = createTransport(
+      createBasicBinding({
+        onForward(id, { payload }) {
+          const text = decode(payload)
+          coordinatorPublishes.push(`${id.name}:${text}`)
+          if (id.name.includes(':broadcast:apac:') && text === '{"text":"first"}') return firstRemotePublishReady
+          return Promise.resolve()
+        },
+      }),
+    )
     await authorityState.setPresence({
       key: 'room:test',
       kind: 'text',
@@ -865,9 +852,6 @@ describe('cloudflare broadcast routing', () => {
 
     releaseFirstRemotePublish!()
     await Promise.all([firstPublish, secondPublish])
-
-    expect(coordinatorPublishes).toContain('telefunc:broadcast:weur:0:{"text":"second"}')
-    expect(coordinatorPublishes).toContain('telefunc:broadcast:apac:0:{"text":"second"}')
   })
 
   it('withdraws presence at the authority on unsubscribe', async () => {

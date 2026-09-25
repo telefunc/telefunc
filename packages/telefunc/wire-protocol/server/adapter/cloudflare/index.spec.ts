@@ -214,7 +214,7 @@ describe('cloudflare adapter entrypoint', () => {
     const response = await tf.serve({
       request,
       env: { TelefuncDurableObject: binding, TelefuncKV: kv } as unknown as Cloudflare.Env,
-      ctx: { waitUntil: vi.fn() } as unknown as ExecutionContext,
+      ctx: {} as ExecutionContext,
     })
 
     expect(mocks.enableChannelTransports).toHaveBeenCalled()
@@ -238,7 +238,7 @@ describe('cloudflare adapter entrypoint', () => {
     const response = await tf.serve({
       request: new Request('https://telefunc.test/_telefunc?session=stale-token'),
       env: { TelefuncDurableObject: binding, TelefuncKV: kv } as unknown as Cloudflare.Env,
-      ctx: { waitUntil: vi.fn() } as unknown as ExecutionContext,
+      ctx: {} as ExecutionContext,
     })
     expect(get).toHaveBeenCalledWith(
       expect.objectContaining({ name: expect.stringMatching(/^telefunc-shard-weur-/) }),
@@ -259,13 +259,12 @@ describe('cloudflare adapter entrypoint', () => {
       await putGate.promise
       return originalPut(...args)
     }) as KVNamespace['put']
-    const waitUntilFns: Array<Promise<unknown>> = []
     const request = new Request('https://telefunc.test/_telefunc')
 
     const responsePromise = tf.serve({
       request,
       env: { TelefuncDurableObject: binding, TelefuncKV: kv } as unknown as Cloudflare.Env,
-      ctx: { waitUntil: (p: Promise<unknown>) => waitUntilFns.push(p) } as unknown as ExecutionContext,
+      ctx: {} as ExecutionContext,
     })
 
     expect(
@@ -285,7 +284,6 @@ describe('cloudflare adapter entrypoint', () => {
     expect(token).toBeTruthy()
     expect(token).toMatch(/^telefunc-shard-weur-0:/)
 
-    await Promise.all(waitUntilFns)
     const stored = await kv.get(`session:${token}`, 'json')
     expect(stored).toEqual({ s: 'telefunc-shard-weur-0', b: 'weur' })
   })
@@ -339,7 +337,7 @@ describe('cloudflare adapter entrypoint', () => {
     await tf.serve({
       request: new Request('https://telefunc.test/_telefunc'),
       env: { TelefuncDurableObject: binding, TelefuncKV: kv } as unknown as Cloudflare.Env,
-      ctx: { waitUntil: vi.fn() } as unknown as ExecutionContext,
+      ctx: {} as ExecutionContext,
     })
 
     expect(jurisdiction).toHaveBeenCalledWith('eu')
