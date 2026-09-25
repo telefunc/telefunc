@@ -9,6 +9,7 @@ import {
   decode,
   encode,
   encodePublishText,
+  type BroadcastKind,
   type DecodedFrame,
 } from '../shared-ws.js'
 import { ChannelMux, type ServerTransport } from './mux.js'
@@ -224,8 +225,8 @@ describe('keyed in-process broadcast', () => {
 
   it("applies a reattach's declarations to the new peer, not to one that never detached", () => {
     class Announcing extends ServerChannel {
-      override _onPeerBroadcastSubscribe(): void {
-        this._sendPublish(encodePublishText('"declared"', { seq: 1, timestamp: 1 }))
+      override _onPeerSubscription(_kind: BroadcastKind, on: boolean): void {
+        if (on) this._sendPublish(encodePublishText('"declared"', { seq: 1, timestamp: 1 }))
       }
     }
     const channel = new Announcing()
@@ -277,7 +278,7 @@ describe('keyed in-process broadcast', () => {
     const receiver = new ServerBroadcast<{ text: string }>({ key: 'room:late-attach' })
     sender._registerChannel()
     receiver._registerChannel()
-    receiver._onPeerBroadcastSubscribe(false) // simulate client subscribe over wire
+    receiver._onPeerSubscription('text', true) // simulate client subscribe over wire
 
     sender.publish({ text: 'hello' })
 
@@ -449,7 +450,7 @@ describe('binary in-process broadcast', () => {
       receivers: 1,
     })
     const broadcast = registeredBroadcast('room:bin-ready')
-    broadcast._onPeerBroadcastSubscribe(true)
+    broadcast._onPeerSubscription('binary', true)
     const publishing = broadcast.publishBinary(new Uint8Array([1, 2, 3]))
     await Promise.resolve()
     expect(publish).not.toHaveBeenCalled()
@@ -514,7 +515,7 @@ describe('binary in-process broadcast', () => {
     memoryState.broadcastOrder.set(key, { seq: 0xffff_ffff, timestamp: 10 })
     const sender = registeredBroadcast(key)
     const receiver = registeredBroadcast(key)
-    receiver._onPeerBroadcastSubscribe(true)
+    receiver._onPeerSubscription('binary', true)
     const frames: Uint8Array[] = []
     receiver._attachPeer(peer((frame) => frames.push(frame)))
     const receipt = await sender.publishBinary(new Uint8Array([7]))
@@ -564,8 +565,8 @@ describe('Broadcast lifecycle and route ownership', () => {
     const broadcast = new ServerBroadcast<string>({ key })
     const received: string[] = []
     const unsubscribe = broadcast.subscribe((message) => received.push(message))
-    broadcast._onPeerBroadcastSubscribe(false)
-    broadcast._onPeerBroadcastUnsubscribe(false)
+    broadcast._onPeerSubscription('text', true)
+    broadcast._onPeerSubscription('text', false)
     expect((await Broadcast.publish(key, 'kept')).receivers).toBe(1)
     expect(received).toEqual(['kept'])
     unsubscribe()

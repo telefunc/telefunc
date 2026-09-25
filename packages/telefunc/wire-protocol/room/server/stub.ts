@@ -7,7 +7,13 @@ import { assertUsage } from '../../../utils/assert.js'
 import { ROOM_DM_ACK_TIMEOUT_MS } from '../constants.js'
 import { ServerChannel, parsePeerText } from '../../server/channel.js'
 import type { ShieldValidator } from '../../../node/server/shield.js'
-import { encodePublishBinary, encodePublishText, type ReattachState, type WirePublishInfo } from '../../shared-ws.js'
+import {
+  encodePublishBinary,
+  encodePublishText,
+  type BroadcastKind,
+  type ReattachState,
+  type WirePublishInfo,
+} from '../../shared-ws.js'
 import type { IndexedPeer } from '../../server/IndexedPeer.js'
 import { ShieldValidationError } from '../../../shared/ShieldValidationError.js'
 import type { ChannelPublishAck } from '../../channel.js'
@@ -159,19 +165,13 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
   }
 
   // Control always flows; text follows broadcast/member wants, while binary uses `sub-binary`.
-  override _onPeerBroadcastSubscribe(binary: boolean): void {
-    if (binary || this._wantsText) return
-    const text = this._memberWants()
-    this._wantsText = true
+  override _onPeerSubscription(kind: BroadcastKind, on: boolean): void {
+    if (kind === 'binary' || on === this._wantsText) return
+    const previous = on ? { text: this._memberWants() } : {}
+    this._wantsText = on
     // The tail flush precedes the retained back-fill, so the replay dedupes against what the flush relayed.
-    this._flushTail()
-    this._room._onHolderWantsChanged(this, { text })
-  }
-
-  override _onPeerBroadcastUnsubscribe(binary: boolean): void {
-    if (binary || !this._wantsText) return
-    this._wantsText = false
-    this._room._onHolderWantsChanged(this, {})
+    if (on) this._flushTail()
+    this._room._onHolderWantsChanged(this, previous)
   }
 
   private _applyDeclaration(declaration: RoomDeclaration): void {

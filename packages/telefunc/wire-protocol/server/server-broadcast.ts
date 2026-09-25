@@ -129,12 +129,9 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
     this._sendPublishBinary(encodePublishBinary(data, rawInfo))
   }
 
-  override _onPeerBroadcastSubscribe(binary: boolean): void {
-    this._setPeerSubscription(binary ? 'binary' : 'text', true)
-  }
-
-  override _onPeerBroadcastUnsubscribe(binary: boolean): void {
-    this._setPeerSubscription(binary ? 'binary' : 'text', false)
+  override _onPeerSubscription(kind: BroadcastKind, on: boolean): void {
+    this._peerSubscriptions[kind] = on
+    this._syncSubscription(kind)
   }
 
   protected override _shutdown(err?: Error): void {
@@ -143,11 +140,6 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
   }
 
   // --- Internal broadcast helpers ---
-
-  private _setPeerSubscription(kind: BroadcastKind, on: boolean): void {
-    this._peerSubscriptions[kind] = on
-    this._syncSubscription(kind)
-  }
 
   private _subscribe<K extends BroadcastKind>(
     kind: K,

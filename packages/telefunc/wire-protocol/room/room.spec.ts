@@ -944,7 +944,7 @@ describe('Room public behavior', () => {
     const observer = (await Room.get(authority.id)) as ServerRoom
     const { stub } = serve(observer)
     const { started } = rejectLaneSubscriptions('semantic', 'persistent semantic subscription failure')
-    stub._onPeerBroadcastSubscribe(false)
+    stub._onPeerSubscription('text', true)
     const outcome = captureOutcome(observer._replayRetainedText(stub, { all: false, members: [] }))
     await started
     await vi.advanceTimersByTimeAsync(ROOM_HORIZON_MS + 100)
@@ -1101,7 +1101,7 @@ describe('Room public behavior', () => {
     roomParticipantReplacer.replace(me, context)
     const stub = channels.find((channel) => channel instanceof RoomStubChannel) as RoomStubChannel
     const peer = attachPeer(stub)
-    stub._onPeerBroadcastSubscribe(false)
+    stub._onPeerSubscription('text', true)
     const other = await room.join()
     await me.publish('echo')
     await other.publish('marker')
@@ -1122,7 +1122,7 @@ describe('Room public behavior', () => {
     const peer = attachPeer(stub)
     const replayText = vi.spyOn(room, '_replayRetainedText')
     const replayBinary = vi.spyOn(room, '_replayRetainedBinary')
-    stub._onPeerBroadcastSubscribe(false)
+    stub._onPeerSubscription('text', true)
     declare(stub, {
       __r: 'sub-binary',
       wants: { everyMember: { all: true, tracks: [] }, members: {} },
@@ -2251,7 +2251,7 @@ describe('Room public behavior', () => {
     const { stub, peer } = serve(tail)
     await member.publish('held')
     expect(semanticFrames(peer, 'data')).toEqual([])
-    stub._onPeerBroadcastSubscribe(false)
+    stub._onPeerSubscription('text', true)
     await vi.waitFor(() => expect(semanticFrames(peer, 'data')).toEqual(['early', 'held']))
     await member.publish('live')
     expect(semanticFrames(peer, 'data')).toEqual(['early', 'held', 'live'])
@@ -2266,7 +2266,7 @@ describe('Room public behavior', () => {
     const tail = (await getting) as ServerRoom
     await member.publish('after-get')
     const { stub, peer } = serve(tail)
-    stub._onPeerBroadcastSubscribe(false)
+    stub._onPeerSubscription('text', true)
     await vi.waitFor(() => expect(semanticFrames(peer, 'data')).toEqual(['after-get']))
   })
   it('flushes held tail text after an announcement relayed before the first text subscription', async () => {
@@ -2276,7 +2276,7 @@ describe('Room public behavior', () => {
     await member.publish('held')
     await Room.announce(tail.id, 'notice')
     await vi.waitFor(() => expect(semanticFrames(peer, 'announce')).toEqual(['notice']))
-    stub._onPeerBroadcastSubscribe(false)
+    stub._onPeerSubscription('text', true)
     await vi.waitFor(() => expect(semanticFrames(peer, 'data')).toEqual(['held']))
   })
   it("tells this instance's clients a member's new track whose echo arrives after it", async () => {
@@ -2337,7 +2337,7 @@ describe('Room public behavior', () => {
     await member.publish('expired')
     await vi.advanceTimersByTimeAsync(ROOM_TAIL_ATTACH_TIMEOUT_MS + 1)
     const { stub, peer } = serve(tail)
-    stub._onPeerBroadcastSubscribe(false)
+    stub._onPeerSubscription('text', true)
     expect(semanticFrames(peer, 'data')).toEqual([])
   })
   it('releases an attached tail when first text demand misses its 60 second lease', async () => {
@@ -2346,7 +2346,7 @@ describe('Room public behavior', () => {
     await member.publish('expired')
     const { stub, peer } = serve(tail)
     await vi.advanceTimersByTimeAsync(ROOM_TAIL_ATTACH_TIMEOUT_MS + 1)
-    stub._onPeerBroadcastSubscribe(false)
+    stub._onPeerSubscription('text', true)
     expect(semanticFrames(peer, 'data')).toEqual([])
   })
   it('holds no listener added to a participant after it left', async () => {

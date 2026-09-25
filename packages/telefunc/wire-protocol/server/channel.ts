@@ -40,7 +40,14 @@ import { ReplayBuffer } from '../replay-buffer.js'
 import { getServerConfig } from '../../node/server/serverConfig.js'
 import { assert } from '../../utils/assert.js'
 import { ACK_STATUS, ProtocolViolationError, TAG, isChannelCtrlTag } from '../shared-ws.js'
-import type { AckResultStatus, ReattachState, ChannelCtrlFrame, ChannelDataFrame, ChannelFrame } from '../shared-ws.js'
+import type {
+  AckResultStatus,
+  BroadcastKind,
+  ReattachState,
+  ChannelCtrlFrame,
+  ChannelDataFrame,
+  ChannelFrame,
+} from '../shared-ws.js'
 
 /** Peer-authored JSON: a parse failure is the peer's, so it surfaces as a protocol violation. */
 function parsePeerText(text: string): unknown {
@@ -334,11 +341,6 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     )
   }
 
-  private _applyPeerSubscription(binary: boolean, on: boolean): void {
-    if (on) this._onPeerBroadcastSubscribe(binary)
-    else this._onPeerBroadcastUnsubscribe(binary)
-  }
-
   /** The peer's RECONCILE declarations apply before `onOpen` fires, through the same hooks as its frames. */
   _attachPeer(peer: IndexedPeer, state?: ReattachState): void {
     if (this._didShutdown) return
@@ -366,8 +368,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this._pendingAckRes.length = 0
     // After the swap, so what they send reaches this peer even if the previous one never detached.
     if (state?.broadcast) {
-      this._applyPeerSubscription(false, state.broadcast.text)
-      this._applyPeerSubscription(true, state.broadcast.binary)
+      this._onPeerSubscription('text', state.broadcast.text)
+      this._onPeerSubscription('binary', state.broadcast.binary)
     }
     if (this._pendingCloseAck) peer.sendCloseAck()
     if (this._awaitingCloseAck) peer.sendCloseRequest(Math.max(0, this._closeDeadline - Date.now()))
@@ -446,10 +448,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         this._flow.onPingAck()
         return
       case TAG.BROADCAST_SUB:
-        this._onPeerBroadcastSubscribe(frame.binary)
-        return
       case TAG.BROADCAST_UNSUB:
-        this._onPeerBroadcastUnsubscribe(frame.binary)
+        this._onPeerSubscription(frame.binary ? 'binary' : 'text', frame.tag === TAG.BROADCAST_SUB)
     }
   }
 
@@ -460,8 +460,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   _onPeerPublishBinaryAckReqMessage(_data: Uint8Array, _seq: number): Promise<void> {
     throw new ProtocolViolationError('publish on a channel that is not a broadcast')
   }
-  _onPeerBroadcastSubscribe(_binary: boolean): void {}
-  _onPeerBroadcastUnsubscribe(_binary: boolean): void {}
+  _onPeerSubscription(_kind: BroadcastKind, _on: boolean): void {}
 
   _onPeerMessage(text: string, bytes: number): void {
     const t0 = performance.now()
