@@ -50,7 +50,7 @@ describe('backend installation lifecycle', () => {
     installBackend(() => new MemoryBackend())
     const factory = vi.fn(() => new MemoryBackend())
     expect(() => installBackend(factory)).toThrow(
-      '[Wrong Usage] Install one backend per process: a different backend is already installed',
+      'Install one backend per process: a different backend is already installed',
     )
     expect(factory).not.toHaveBeenCalled()
   })
