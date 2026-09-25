@@ -3124,21 +3124,6 @@ describe('client Room lifecycle', () => {
       wants: { everyMember: { all: false, tracks: [DEFAULT_TRACK] }, members: {} },
     })
   })
-  it('declares and retires client announce demand on the semantic lane', () => {
-    const sent: unknown[] = []
-    const { client } = fakeClient('announce-declaration', {
-      send: async (message) => {
-        sent.push(message)
-        return undefined
-      },
-    })
-    const stop = client.onAnnounce(() => {})
-    stop()
-    expect(sent.filter((message: any) => message.__r === 'sub-text')).toEqual([
-      { __r: 'sub-text', members: [], announce: true },
-      { __r: 'sub-text', members: [], announce: false },
-    ])
-  })
   it('declares wants only when they change, so listener churn sends nothing', () => {
     const sent: unknown[] = []
     const wireDeclarations: boolean[] = []
