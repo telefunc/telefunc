@@ -53,3 +53,27 @@ test('duplicates the subscriber from a standalone client or a live Cluster maste
   sockets.forEach((socket) => socket.disconnect())
   expect(connect).toHaveBeenCalledOnce()
 })
+
+test("waits for a connecting Cluster's masters instead of reporting none", async () => {
+  const cluster = new Cluster([{ host: '127.0.0.1', port: 6379 }], {
+    lazyConnect: true,
+    retryDelayOnFailover: 0,
+    redisOptions: { maxRetriesPerRequest: 0 },
+  })
+  const master = new Redis({ lazyConnect: true, maxRetriesPerRequest: 0 })
+  onTestFinished(() => [cluster, master].forEach((redis) => redis.disconnect()))
+  // A non-lazy Cluster is 'connecting' from its constructor until its node pool fills.
+  cluster.status = 'connecting'
+  const nodes = vi.spyOn(cluster, 'nodes').mockReturnValue([])
+  const opening = createSubscriberSocket(cluster)
+  nodes.mockReturnValue([master])
+  cluster.status = 'ready'
+  cluster.emit('ready')
+  const socket = await opening
+  socket.disconnect()
+  // A Cluster that gives up instead is an outage to report.
+  cluster.status = 'connecting'
+  const ending = createSubscriberSocket(cluster)
+  cluster.emit('end')
+  await expect(ending).rejects.toThrow('RedisBackend: Cluster connection ended')
+})

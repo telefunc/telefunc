@@ -48,8 +48,10 @@ function assertAtMostOnceClient(redis: RedisClient): void {
 async function createSubscriberSocket(redis: RedisClient): Promise<SubscriberSocket> {
   let source: Redis
   if (isCluster(redis)) {
-    // A lazyConnect Cluster has no nodes until it connects, and only a command would connect it.
+    // A Cluster has no nodes until it connects: a lazyConnect one connects on a command only, and a connecting one
+    // fills its node pool just before it is ready.
     if (redis.status === 'wait') await redis.connect()
+    else if (redis.status === 'connecting') await clusterReady(redis)
     const master = redis.nodes('master').find((candidate) => candidate.status !== 'end')
     if (master === undefined) throw new Error('RedisBackend: Cluster has no available masters')
     source = master
@@ -60,6 +62,21 @@ async function createSubscriberSocket(redis: RedisClient): Promise<SubscriberSoc
     lazyConnect: true,
     maxRetriesPerRequest: 1,
     retryStrategy: () => null,
+  })
+}
+
+function clusterReady(cluster: Cluster): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const settle = (error?: Error) => {
+      cluster.off('ready', onReady)
+      cluster.off('end', onEnd)
+      if (error) reject(error)
+      else resolve()
+    }
+    const onReady = () => settle()
+    const onEnd = () => settle(new Error('RedisBackend: Cluster connection ended'))
+    cluster.once('ready', onReady)
+    cluster.once('end', onEnd)
   })
 }
 
