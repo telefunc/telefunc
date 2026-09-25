@@ -35,7 +35,7 @@ ioredis applies `keyPrefix` to commands but not to Pub/Sub channels; use `instal
 
 `installRedis()` accepts an ioredis `Redis` or `Cluster` client. On a Cluster, a room's keys share one hash slot, and replica or custom read routing is rejected, since Room reads must be consistent.
 
-All subscriptions share one subscriber connection. When it drops, they resume on a fresh one; frames published in between are lost. Delivery stays at-most-once while a Cluster reshards: a frame that arrives after a newer one is dropped, never replayed, so callbacks never go back in order. A failover whose new master missed the last writes rewinds their sequence numbers, so subscribers still connected drop as many later frames as it lost. Keep master clocks synchronized: expiries use the clock of the master that owns the room's slot.
+All subscriptions share one subscriber connection. When it drops, they resume on a fresh one; frames published in between are lost. Delivery stays at-most-once while a Cluster reshards: a frame that arrives after a newer one is dropped, never replayed, so callbacks never go back in order. A failover whose new master missed the last writes rewinds their sequence numbers, so subscribers still connected drop as many later frames as it lost. When you remove a Cluster node (`redis-cli --cluster del-node`), shut it down too: a removed node left running keeps the subscribers connected to it, and they receive nothing until it stops. Keep master clocks synchronized: expiries use the clock of the master that owns the room's slot.
 
 On a Cluster, a publish's `receivers` is omitted: a master's `PUBLISH` counts only its own subscribers, so it can't prove that nobody is subscribed.
 
