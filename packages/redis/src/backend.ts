@@ -1,3 +1,5 @@
+export { RedisBackend }
+
 import { assert } from './assert.js'
 import {
   assertAtMostOnceClient,
@@ -47,7 +49,7 @@ type RedisBackendOptions = {
   prefix?: string
 }
 
-export class RedisBackend implements BroadcastDriver, RoomDriver {
+class RedisBackend implements BroadcastDriver, RoomDriver {
   readonly subscriptions: RedisSubscriptionDriver
 
   private readonly _publisher: RedisClient

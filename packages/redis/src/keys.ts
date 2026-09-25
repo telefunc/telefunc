@@ -1,3 +1,25 @@
+export {
+  DEFAULT_PREFIX,
+  redisKeyPrefix,
+  broadcastSequenceKey,
+  broadcastChannel,
+  headKey,
+  headRevKey,
+  gensKey,
+  genPrefix,
+  generationKeysKey,
+  revKey,
+  cellKeyPrefix,
+  cellKey,
+  orderKey,
+  retainedKeyPrefix,
+  retainedKey,
+  channelKey,
+  generationInvalidationChannel,
+  directoryIndexKey,
+  directoryTagsKey,
+}
+
 // Redis keys. Every per-room key shares `{rid}`, so a room is one Cluster slot.
 // head/headrev: tf:room:{rid}:{head|headrev}; JSON head plus monotonic revision.
 // cells/revision: tf:room:{rid}:g:<inc>:{c:<key>|rev}; logical cells plus coarse generation revision.
@@ -12,10 +34,10 @@
 
 import type { BroadcastRoute } from 'telefunc/__internal'
 
-export const DEFAULT_PREFIX = 'tf:'
+const DEFAULT_PREFIX = 'tf:'
 
 /** Builders take the prefix as validated here, once: a `{` would open a hash tag of its own. */
-export function redisKeyPrefix(prefix: string): string {
+function redisKeyPrefix(prefix: string): string {
   if (prefix.includes('{')) throw new Error("Redis key prefix must not contain '{'")
   return prefix
 }
@@ -23,10 +45,10 @@ export function redisKeyPrefix(prefix: string): string {
 function broadcastTag(key: string): string {
   return key === '' ? '{_}:empty' : `{${encodeURIComponent(key)}}`
 }
-export function broadcastSequenceKey(prefix: string, key: string): string {
+function broadcastSequenceKey(prefix: string, key: string): string {
   return `${prefix}seq:${broadcastTag(key)}`
 }
-export function broadcastChannel(prefix: string, route: BroadcastRoute): string {
+function broadcastChannel(prefix: string, route: BroadcastRoute): string {
   const kind = route.kind === 'text' ? 't' : 'b'
   return `${prefix}${kind}:${broadcastTag(route.key)}`
 }
@@ -36,49 +58,49 @@ function roomTag(prefix: string, roomId: string): string {
   // arbitrary room id cannot escape the tag or split one logical room across slots.
   return `${prefix}room:{${encodeURIComponent(roomId)}}`
 }
-export function headKey(prefix: string, roomId: string): string {
+function headKey(prefix: string, roomId: string): string {
   return `${roomTag(prefix, roomId)}:head`
 }
-export function headRevKey(prefix: string, roomId: string): string {
+function headRevKey(prefix: string, roomId: string): string {
   return `${roomTag(prefix, roomId)}:headrev`
 }
-export function gensKey(prefix: string, roomId: string): string {
+function gensKey(prefix: string, roomId: string): string {
   return `${roomTag(prefix, roomId)}:gens`
 }
-export function genPrefix(prefix: string, roomId: string, inc: string): string {
+function genPrefix(prefix: string, roomId: string, inc: string): string {
   return `${roomTag(prefix, roomId)}:g:${inc}`
 }
-export function generationKeysKey(prefix: string, roomId: string, inc: string): string {
+function generationKeysKey(prefix: string, roomId: string, inc: string): string {
   return `${genPrefix(prefix, roomId, inc)}:keys`
 }
-export function revKey(prefix: string, roomId: string, inc: string): string {
+function revKey(prefix: string, roomId: string, inc: string): string {
   return `${genPrefix(prefix, roomId, inc)}:rev`
 }
-export function cellKeyPrefix(prefix: string, roomId: string, inc: string): string {
+function cellKeyPrefix(prefix: string, roomId: string, inc: string): string {
   return `${genPrefix(prefix, roomId, inc)}:c:`
 }
-export function cellKey(prefix: string, roomId: string, inc: string, key: string): string {
+function cellKey(prefix: string, roomId: string, inc: string, key: string): string {
   return `${cellKeyPrefix(prefix, roomId, inc)}${key}`
 }
-export function orderKey(prefix: string, roomId: string, inc: string, laneKey: string): string {
+function orderKey(prefix: string, roomId: string, inc: string, laneKey: string): string {
   return `${genPrefix(prefix, roomId, inc)}:o:${laneKey}`
 }
-export function retainedKeyPrefix(prefix: string, roomId: string, inc: string): string {
+function retainedKeyPrefix(prefix: string, roomId: string, inc: string): string {
   return `${genPrefix(prefix, roomId, inc)}:rt:`
 }
-export function retainedKey(prefix: string, roomId: string, inc: string, laneKey: string): string {
+function retainedKey(prefix: string, roomId: string, inc: string, laneKey: string): string {
   return `${retainedKeyPrefix(prefix, roomId, inc)}${laneKey}`
 }
-export function channelKey(prefix: string, roomId: string, inc: string, laneKey: string): string {
+function channelKey(prefix: string, roomId: string, inc: string, laneKey: string): string {
   return `${roomTag(prefix, roomId)}:ch:${inc}:${laneKey}`
 }
-export function generationInvalidationChannel(prefix: string, roomId: string, inc: string): string {
+function generationInvalidationChannel(prefix: string, roomId: string, inc: string): string {
   return `${roomTag(prefix, roomId)}:invalidate:${inc}`
 }
 // The directory's two keys share their own tag so the tag-guarded delete stays one slot under Cluster.
-export function directoryIndexKey(prefix: string): string {
+function directoryIndexKey(prefix: string): string {
   return `${prefix}room-dir:{${prefix}dir}:index`
 }
-export function directoryTagsKey(prefix: string): string {
+function directoryTagsKey(prefix: string): string {
   return `${prefix}room-dir:{${prefix}dir}:tags`
 }

@@ -1,4 +1,6 @@
 /// <reference types="@cloudflare/workers-types" />
+export { CloudflareRoomSessionManager, CloudflareBackend }
+export type { RoomSessionDeliveryRequest, CloudflareRoomAuthorityStub, CloudflareRoomNamespace }
 
 import type { BroadcastDriver, BroadcastRoute, PublishResult } from '../../../../backend/broadcast/contract.js'
 import type {
@@ -31,15 +33,15 @@ import { OrderedStubs } from '../ordered-stubs.js'
 const ROOM_AUTHORITY_PREFIX = '__telefunc_room__:'
 const DIRECTORY_DO_NAME = '__telefunc_room_directory__'
 
-export type RoomSessionDeliveryRequest = RouteInstallation & {
+type RoomSessionDeliveryRequest = RouteInstallation & {
   payload: Uint8Array
   seq: number
   timestamp: number
 }
 
-export type CloudflareRoomAuthorityStub = Omit<RoomAuthority, 'alarm'>
+type CloudflareRoomAuthorityStub = Omit<RoomAuthority, 'alarm'>
 
-export type CloudflareRoomNamespace = {
+type CloudflareRoomNamespace = {
   idFromName(name: string): unknown
   get(id: unknown): CloudflareRoomAuthorityStub
 }
@@ -47,7 +49,7 @@ export type CloudflareRoomNamespace = {
 const entryKey = (route: Pick<RouteInstallation, 'roomId' | 'inc' | 'laneKey'>) =>
   JSON.stringify([route.roomId, route.inc, route.laneKey])
 
-export class CloudflareRoomSessionManager {
+class CloudflareRoomSessionManager {
   /** The session's calls to room authorities: a room's commits reach its authority in the order they were sent. */
   readonly authorityCalls = new OrderedStubs<CloudflareRoomAuthorityStub>()
   readonly #id: string
@@ -91,7 +93,7 @@ export class CloudflareRoomSessionManager {
 type CloudflareSubscriptionSource = BroadcastRoute | RoomSubscriptionSource
 
 /** Room reads and commits address the authority straight from the bindings; only a subscription needs its session, from context. */
-export class CloudflareBackend implements BroadcastDriver, RoomDriver {
+class CloudflareBackend implements BroadcastDriver, RoomDriver {
   readonly broadcast: CloudflareBroadcastTransport
   readonly subscriptions: SubscriptionDriver<CloudflareSubscriptionSource>
   readonly #rooms: () => CloudflareRoomNamespace

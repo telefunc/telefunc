@@ -1,3 +1,5 @@
+export { RedisSubscriptionDriver }
+
 import { randomUUID } from 'node:crypto'
 import type {
   BackendReceiver,
@@ -40,7 +42,7 @@ const RECONNECT_DELAY_MAX_MS = 2_000
  * across attempts. When it drops, every ready attempt goes `lost`; a fresh connection re-subscribes them
  * and reports them `ready` again (a Room lane only while its incarnation is still the open head).
  */
-export class RedisSubscriptionDriver implements SubscriptionDriver<RedisSubscriptionSource> {
+class RedisSubscriptionDriver implements SubscriptionDriver<RedisSubscriptionSource> {
   private readonly _prefix: string
   private readonly _createSubscriber: () => Promise<SubscriberSocket>
   private readonly _validateGeneration: RedisSubscriptionDriverOptions['validateGeneration']

@@ -1,3 +1,6 @@
+export { ROOM_FANOUT_WIDTH, Fanout, dispatchRoomFanout }
+export type { RoomFanoutRequest, RoomFanoutOutcome, RoomFanoutNamespace }
+
 // One ephemeral chain per (incarnation, lane): N+1 starts after N settles, and failed handoffs do not
 // poison later frames. Incarnation cleanup discards the chains; each accepted handoff runs at most once.
 
@@ -8,12 +11,12 @@ import type { RoomSessionDeliveryRequest } from './backend.js'
 type DeliveryInfo = { inc: string; laneKey: string; seq: number; timestamp: number }
 type DeliverFn = (routes: RouteInstallation[], payload: Uint8Array, info: DeliveryInfo) => Promise<void>
 
-export const ROOM_FANOUT_WIDTH = 64
+const ROOM_FANOUT_WIDTH = 64
 const ROOM_FANOUT_COORDINATOR_POOL_SIZE = 256
 
 // The recursive tree keeps four invariants: <=64 outgoing calls per node; depth-specific coordinators
 // cannot self-RPC; leaf outcomes stay ordered; coordinator failure expands to every descendant.
-export type RoomFanoutRequest = {
+type RoomFanoutRequest = {
   routes: RouteInstallation[]
   path: string
   payload: Uint8Array
@@ -21,14 +24,14 @@ export type RoomFanoutRequest = {
   timestamp: number
 }
 
-export type RoomFanoutOutcome = { route: RouteInstallation; error?: string }
+type RoomFanoutOutcome = { route: RouteInstallation; error?: string }
 
 type RoomFanoutStub = {
   telefuncRoomDeliver(request: RoomSessionDeliveryRequest): Promise<void>
   telefuncRoomFanout(request: RoomFanoutRequest): Promise<RoomFanoutOutcome[]>
 }
 
-export type RoomFanoutNamespace = {
+type RoomFanoutNamespace = {
   idFromString(id: string): unknown
   idFromName(name: string): unknown
   get(id: unknown): RoomFanoutStub
@@ -36,7 +39,7 @@ export type RoomFanoutNamespace = {
 
 const noop = (): void => {}
 
-export class Fanout {
+class Fanout {
   readonly #deliver: DeliverFn
   readonly #incarnations = new Map<string, { active: boolean; lanes: Map<string, Promise<void>> }>()
   readonly #deliveries = new Map<string, Promise<void>>()
@@ -76,7 +79,7 @@ export class Fanout {
   }
 }
 
-export async function dispatchRoomFanout(
+async function dispatchRoomFanout(
   namespace: RoomFanoutNamespace,
   request: RoomFanoutRequest,
 ): Promise<RoomFanoutOutcome[]> {

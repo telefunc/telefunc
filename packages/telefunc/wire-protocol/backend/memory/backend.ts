@@ -1,3 +1,5 @@
+export { MemoryBackendState, MemoryBackend }
+
 // The in-process backend, and the reference for Room SPI semantics: this process's clock is authority time.
 
 import type { BroadcastDriver, BroadcastRoute, PublishResult } from '../broadcast/contract.js'
@@ -57,7 +59,7 @@ type Generation = {
 type RoomRecord = { head: StoredHead | null; gens: Map<string, Generation> }
 
 /** @internal The storage, kept apart from the backend so a reconstructed one can reuse it. */
-export class MemoryBackendState {
+class MemoryBackendState {
   readonly rooms = new Map<string, RoomRecord>()
   readonly directory = new Map<string, string>()
   readonly broadcastOrder = new Map<string, OrderingInfo>()
@@ -136,7 +138,7 @@ class MemorySubscriptionAttempt extends DriverAttempt {
   }
 }
 
-export class MemoryBackend implements BroadcastDriver, RoomDriver {
+class MemoryBackend implements BroadcastDriver, RoomDriver {
   readonly subscriptions: SubscriptionDriver<MemorySubscriptionSource>
 
   readonly #now: () => number

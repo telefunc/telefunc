@@ -1,3 +1,5 @@
+export { installBackend, configureBroadcastTransport, getBroadcastBackend, getRoomBackend, disposeBackend }
+
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
 import type { BroadcastBackend, BroadcastDriver } from './broadcast/contract.js'
 import { superviseBroadcastDriver } from './broadcast/supervise.js'
@@ -33,7 +35,7 @@ const FALLBACK_KEY = [Symbol('telefunc.memoryBackend')]
 
 /** Installs the process's one backend and returns its driver. Re-evaluating an entry with the same `key` returns the
  *  installed driver; the key names the factory's configuration, so that driver is the one the factory would build. */
-export function installBackend<Driver extends BackendDriver>(
+function installBackend<Driver extends BackendDriver>(
   factory: () => Driver,
   key: readonly unknown[] = [factory],
 ): Driver {
@@ -44,7 +46,7 @@ export function installBackend<Driver extends BackendDriver>(
 }
 
 /** Sets the public broadcast-only override, or removes it with `undefined`; the full backend's Room plane stays. */
-export function configureBroadcastTransport(transport: BroadcastTransport | undefined): void {
+function configureBroadcastTransport(transport: BroadcastTransport | undefined): void {
   const previous = state.broadcastOverride
   if (previous?.transport === transport) return
   // Retiring a plane would leave its subscribers on a transport nothing publishes to anymore.
@@ -68,7 +70,7 @@ export function configureBroadcastTransport(transport: BroadcastTransport | unde
   installed.broadcast = null
 }
 
-export function getBroadcastBackend(): BroadcastBackend {
+function getBroadcastBackend(): BroadcastBackend {
   const override = state.broadcastOverride
   if (override)
     return (override.backend ??= superviseBroadcastDriver(createBroadcastTransportDriver(override.transport)))
@@ -76,7 +78,7 @@ export function getBroadcastBackend(): BroadcastBackend {
   return (installed.broadcast ??= superviseBroadcastDriver(installed.driver))
 }
 
-export function getRoomBackend(): RoomBackend {
+function getRoomBackend(): RoomBackend {
   assertUsage(
     !(state.broadcastOverride && (state.installed?.fallback ?? true)),
     'config.broadcast.transport configures Broadcast only. Room requires a full backend; install the Redis backend or use the Cloudflare adapter.',
@@ -85,7 +87,7 @@ export function getRoomBackend(): RoomBackend {
 }
 
 /** For tests: forgets the backend and the transport's plane, and stops their subscriptions. */
-export async function disposeBackend(): Promise<void> {
+async function disposeBackend(): Promise<void> {
   const installed = state.installed
   const overridePlane = state.broadcastOverride?.backend
   state.installed = null

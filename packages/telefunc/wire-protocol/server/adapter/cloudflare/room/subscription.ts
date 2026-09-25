@@ -1,3 +1,5 @@
+export { CloudflareRoomSubscriptionAttempt }
+
 import type { BackendReceiver } from '../../../../backend/subscription.js'
 import { DriverAttempt } from '../../../../backend/attempt.js'
 import { ROUTE_RENEW_EVERY_MS, type RouteInstallation } from './routes.js'
@@ -13,7 +15,7 @@ type CloudflareRoomSubscriptionOptions = {
 }
 
 /** Ready once the authority has durably registered this attempt's exact route; Room owns retry and replacement. */
-export class CloudflareRoomSubscriptionAttempt extends DriverAttempt {
+class CloudflareRoomSubscriptionAttempt extends DriverAttempt {
   readonly #authority: CloudflareRoomAuthorityStub
   readonly #route: RouteInstallation
   readonly #receiver: BackendReceiver

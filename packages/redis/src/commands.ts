@@ -1,3 +1,6 @@
+export { REDIS_DELIVERY_FENCE_BYTE, REDIS_COMMANDS }
+export type { RedisCommand }
+
 // Every Lua script and the one command table that registers and invokes them.
 
 import {
@@ -31,7 +34,7 @@ import {
   revKey,
 } from './keys.js'
 
-export const REDIS_DELIVERY_FENCE_BYTE = 0xff
+const REDIS_DELIVERY_FENCE_BYTE = 0xff
 
 // Authority time in ms from Redis TIME's [sec, µs] pair.
 const NOW_LUA = `
@@ -304,7 +307,7 @@ type Invocation = { keys: string[]; argv: Array<string | Buffer> }
 
 /** One script: its KEYS and ARGV for a call, and its reply decoded. `numberOfKeys: null` sends the key count
  *  first; `binaryReply` reads bulk strings as Buffers. */
-export type RedisCommand<Input, Output> = {
+type RedisCommand<Input, Output> = {
   readonly name: string
   readonly lua: string
   readonly numberOfKeys: number | null
@@ -329,7 +332,7 @@ type CommitReply =
   | { stale: 'cell'; index: number }
   | { accepted: true; seq: number; timestamp: number; receivers: number }
 
-export const REDIS_COMMANDS = {
+const REDIS_COMMANDS = {
   publish: command({
     name: 'tfPublish',
     lua: PUBLISH_LUA,

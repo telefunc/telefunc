@@ -1,4 +1,20 @@
 /// <reference types="@cloudflare/workers-types" />
+export {
+  initSchema,
+  directoryPut,
+  directoryDelete,
+  directoryList,
+  readLiveHead,
+  hasOrphanGeneration,
+  deleteLapsedTombstone,
+  listOrphanGenerations,
+  compareExchangeHead,
+  readCells,
+  compareExchangeCells,
+  advanceOrder,
+  dropGenerationRows,
+}
+
 // Room-DO `transactionSync` makes head CX, cell batches, and order advance atomic under authority time.
 
 import type {
@@ -32,7 +48,7 @@ type HeadRow = {
   expires_at: number | null
 }
 
-export function initSchema(sql: SqlStorage): void {
+function initSchema(sql: SqlStorage): void {
   // The DO is the room: `head` is one row or absent; `gen` is each installed incarnation's cell revision.
   sql.exec(`
     CREATE TABLE IF NOT EXISTS head
@@ -55,16 +71,16 @@ export function initSchema(sql: SqlStorage): void {
 
 const DIRECTORY_PAGE_SIZE = 100
 
-export function directoryPut(sql: SqlStorage, roomId: string, incTag: string): void {
+function directoryPut(sql: SqlStorage, roomId: string, incTag: string): void {
   sql.exec('INSERT OR REPLACE INTO directory (room_id, inc_tag) VALUES (?, ?)', roomId, incTag)
 }
 
-export function directoryDelete(sql: SqlStorage, roomId: string, incTag: string): void {
+function directoryDelete(sql: SqlStorage, roomId: string, incTag: string): void {
   // Deletes iff the stored tag matches (a stale tag is a no-op).
   sql.exec('DELETE FROM directory WHERE room_id = ? AND inc_tag = ?', roomId, incTag)
 }
 
-export function directoryList(sql: SqlStorage, prefix: string, cursor?: string): DirectoryPage {
+function directoryList(sql: SqlStorage, prefix: string, cursor?: string): DirectoryPage {
   const after = cursor ?? null
   const matching = sql
     .exec<{ room_id: string; inc_tag: string }>(
@@ -84,7 +100,7 @@ export function directoryList(sql: SqlStorage, prefix: string, cursor?: string):
 }
 
 // A lapsed tombstone reads absent; `now` is authority time.
-export function readLiveHead(sql: SqlStorage, now: number): StoredHead | null {
+function readLiveHead(sql: SqlStorage, now: number): StoredHead | null {
   const rows = sql.exec<HeadRow>('SELECT * FROM head WHERE id = 1').toArray()
   const row = rows[0]
   if (row === undefined) return null
@@ -100,17 +116,17 @@ export function readLiveHead(sql: SqlStorage, now: number): StoredHead | null {
   return head
 }
 
-export function hasOrphanGeneration(sql: SqlStorage, currentInc: string | null): boolean {
+function hasOrphanGeneration(sql: SqlStorage, currentInc: string | null): boolean {
   return sql.exec('SELECT 1 FROM gen WHERE inc IS NOT ? LIMIT 1', currentInc).toArray().length > 0
 }
 
 /** A lapsed tombstone is reclaimed here: this backend has no native head TTL. */
-export function deleteLapsedTombstone(sql: SqlStorage, now: number): void {
+function deleteLapsedTombstone(sql: SqlStorage, now: number): void {
   sql.exec("DELETE FROM head WHERE id = 1 AND state = 'closed' AND expires_at IS NOT NULL AND expires_at <= ?", now)
 }
 
 /** Installed incarnations other than `currentInc`. */
-export function listOrphanGenerations(sql: SqlStorage, currentInc: string | null): string[] {
+function listOrphanGenerations(sql: SqlStorage, currentInc: string | null): string[] {
   return sql
     .exec<{ inc: string }>('SELECT inc FROM gen WHERE inc IS NOT ?', currentInc)
     .toArray()
@@ -118,7 +134,7 @@ export function listOrphanGenerations(sql: SqlStorage, currentInc: string | null
 }
 
 // Called inside `transactionSync`; a lost race returns the current head.
-export function compareExchangeHead(
+function compareExchangeHead(
   sql: SqlStorage,
   cx: HeadCx,
   next: HeadNext,
@@ -163,7 +179,7 @@ function selectCellRows(sql: SqlStorage, inc: string, sel: CellSelector): CellRo
 }
 
 // Reads stay available while closing; staleInc means the head is absent or names another incarnation.
-export function readCells(sql: SqlStorage, inc: string, sel: CellSelector, now: number): CellsRead {
+function readCells(sql: SqlStorage, inc: string, sel: CellSelector, now: number): CellsRead {
   const head = readLiveHead(sql, now)
   if (head === null || head.currentInc !== inc) return { staleInc: true }
   const revision = String(readRevision(sql, inc))
@@ -176,7 +192,7 @@ function readRevision(sql: SqlStorage, inc: string): number {
 }
 
 // Cell writes are all-or-nothing under the read-set revision and require an open head.
-export function compareExchangeCells(
+function compareExchangeCells(
   sql: SqlStorage,
   inc: string,
   revision: string,
@@ -198,7 +214,7 @@ export function compareExchangeCells(
 }
 
 // `seq` strictly increases for the lifetime of a domain instance.
-export function advanceOrder(sql: SqlStorage, inc: string, domain: string, now: number): OrderingInfo {
+function advanceOrder(sql: SqlStorage, inc: string, domain: string, now: number): OrderingInfo {
   const row = sql
     .exec<{ seq: number; ts: number }>('SELECT seq, ts FROM ord WHERE inc = ? AND domain = ?', inc, domain)
     .toArray()[0]
@@ -214,7 +230,7 @@ export function advanceOrder(sql: SqlStorage, inc: string, domain: string, now: 
 }
 
 // Drops every generation row.
-export function dropGenerationRows(sql: SqlStorage, inc: string): void {
+function dropGenerationRows(sql: SqlStorage, inc: string): void {
   for (const table of ['cell', 'ord', 'rt_manifest', 'rt_chunk', 'route', 'gen']) {
     sql.exec(`DELETE FROM ${table} WHERE inc = ?`, inc)
   }

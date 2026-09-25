@@ -1,4 +1,7 @@
 /// <reference types="@cloudflare/workers-types" />
+export { RoomAuthority, RoomAuthorityHost }
+export type { CommitWire, RegisterWire }
+
 // A room's authority owns its time, state and fanout; transaction rollback and RPC structured clone preserve SPI outcomes.
 
 import { DurableObject } from 'cloudflare:workers'
@@ -46,10 +49,10 @@ import {
   readLiveHead,
 } from './storage.js'
 
-export type CommitWire =
+type CommitWire =
   | { accepted: true; seq: number; timestamp: number; receivers: number; deliveryToken: string }
   | StaleCommit
-export type RegisterWire = { ok: true } | { rejected: true; reason: string }
+type RegisterWire = { ok: true } | { rejected: true; reason: string }
 
 const ROOM_MAINTENANCE_RETRY_MS = 30_000
 
@@ -71,7 +74,7 @@ function reportLostDeliveries(outcomes: RoomFanoutOutcome[]): void {
 }
 
 /** The room authority role of a Telefunc Durable Object: `sessions` is the namespace its fanout delivers to. */
-export class RoomAuthority {
+class RoomAuthority {
   readonly #ctx: DurableObjectState
   readonly #sql: SqlStorage
   readonly #fanout: Fanout
@@ -246,7 +249,7 @@ function nextMaintenanceDeadline(sql: SqlStorage, now: number): number | null {
 }
 
 /** A Durable Object that can act as a room authority: the role, built on first use, fans out through `sessions`. */
-export class RoomAuthorityHost<Env = unknown> extends DurableObject<Env> {
+class RoomAuthorityHost<Env = unknown> extends DurableObject<Env> {
   readonly #sessions: RoomFanoutNamespace
   #role: RoomAuthority | null = null
 
