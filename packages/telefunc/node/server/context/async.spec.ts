@@ -1,8 +1,17 @@
-import { expect, test } from 'vitest'
+import { expect, test, vi } from 'vitest'
 import { AsyncLocalStorage } from 'node:async_hooks'
 import './async.js'
 import { getRawContext, provideContext, restoreContext } from './context.js'
 import { PROVIDED_CONTEXT } from './getContext.js'
+
+// First: the warning is once per process, and a later test provides a context.
+test('restores a serve() context without warning when provideTelefuncContext() was never used', () => {
+  const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+  const seen = restoreContext({ [PROVIDED_CONTEXT]: { user: 'u1' } }, () => getRawContext()?.[PROVIDED_CONTEXT])
+  expect(seen).toEqual({ user: 'u1' })
+  expect(warn).not.toHaveBeenCalled()
+  warn.mockRestore()
+})
 
 test("a restored context keeps the enclosing scope's other keys", () => {
   const ADAPTER = Symbol('adapter')
