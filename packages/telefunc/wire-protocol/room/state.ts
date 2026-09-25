@@ -226,10 +226,6 @@ class RoomState {
     const entry = this._members.get(id)
     return entry ? [...entry.tracks] : []
   }
-  /** Whether this member is off-presence (`join({ hidden: true })`). `false` for unknown members. */
-  isHidden(id: string): boolean {
-    return this._members.get(id)?.hidden === true
-  }
   /** The text-lane twin of `binaryWants()`: `all` while room-level `subscribe()`rs exist, otherwise exactly the members with participant-scoped listeners. */
   textWants(): MemberWants {
     if (this._roomDataCbs.length > 0) return { all: true, members: [] }
@@ -457,20 +453,9 @@ class RoomState {
       invokeChannelListener(invoke, [cb], this._onCallbackError)
     }
   }
-  /** A departing member stays until its leave event, which carries the cause. */
-  reconcileCompleteRoster(members: MemberSnapshot[], departing: ReadonlySet<string>): boolean {
-    return this._reconcileRoster(members, departing, false)
-  }
-  /** A client's roster: the server strips hidden members, and a directly held hidden handle survives it. */
-  reconcilePresenceRoster(members: MemberSnapshot[]): boolean {
-    return this._reconcileRoster(members, new Set(), true)
-  }
-  /** The first roster loads silently; later ones narrate the drift they correct as events. */
-  private _reconcileRoster(
-    roster: MemberSnapshot[],
-    departing: ReadonlySet<string>,
-    preserveMissingHidden: boolean,
-  ): boolean {
+  /** The first roster loads silently; later ones narrate the drift they correct as events. A departing member stays
+   *  until its leave event, which carries the cause. */
+  reconcileRoster(roster: MemberSnapshot[], departing: ReadonlySet<string> = new Set()): boolean {
     const narrate = this._rosterKnown
     this._rosterKnown = true
     let narratedDrift = false
@@ -481,7 +466,7 @@ class RoomState {
       viewChanged ||= outcome.viewChanged
     }
     const listed = new Set([...roster.map((member) => member.id), ...departing])
-    narratedDrift = this._removeMissingMembers(listed, preserveMissingHidden) || narratedDrift
+    narratedDrift = this._removeMissingMembers(listed) || narratedDrift
     if (!narrate) {
       this._bumpMembership()
       return false
@@ -517,10 +502,10 @@ class RoomState {
     for (const track of tracks ?? []) entry.tracks.add(track)
     return entry.tracks.size !== before
   }
-  private _removeMissingMembers(seen: Set<string>, preserveMissingHidden: boolean): boolean {
+  private _removeMissingMembers(seen: Set<string>): boolean {
     let removed = false
     for (const id of [...this._members.keys()]) {
-      if (seen.has(id) || (preserveMissingHidden && this.isHidden(id))) continue
+      if (seen.has(id)) continue
       this.applyLeave(id)
       removed = true
     }

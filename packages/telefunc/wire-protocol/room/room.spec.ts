@@ -2419,10 +2419,9 @@ describe('client Room lifecycle', () => {
     state.applyLeave(id)
     expect(state.membershipVersion).toBe(3)
     const member = { id, meta: {}, joinedAt: 1, metaSeq: 0 }
-    expect(state.reconcileCompleteRoster([member], new Set())).toBe(true)
+    expect(state.reconcileRoster([member])).toBe(true)
     const version = state.membershipVersion
-    const reconcile = (tracks: string[]) =>
-      state.reconcileCompleteRoster([{ ...member, metaSeq: 1, tracks }], new Set())
+    const reconcile = (tracks: string[]) => state.reconcileRoster([{ ...member, metaSeq: 1, tracks }])
     expect(reconcile(['screen'])).toBe(true)
     expect(state.membershipVersion).toBe(version)
     expect(reconcile(['screen', 'camera'])).toBe(false)
@@ -2445,7 +2444,7 @@ describe('client Room lifecycle', () => {
     const joins: string[] = []
     state.onChange(() => observed.push(state.snapshotMembers().map((member) => member.id)))
     state.onJoin((member) => joins.push(member.id))
-    state.reconcileCompleteRoster([alice, bob, carol], new Set())
+    state.reconcileRoster([alice, bob, carol])
     expect(observed.at(-1)).toEqual([alice.id, bob.id, carol.id])
     expect(joins).toEqual([bob.id, carol.id])
   })
@@ -2686,22 +2685,22 @@ describe('client Room lifecycle', () => {
     emit({ __r: 'leave', id: hidden.id, cause: 'removed', hidden: true }, 2)
     expect(causes).toEqual(['removed'])
   })
-  it('preserves directly held hidden members while rejecting client enumeration', async () => {
+  it('keeps a directly held hidden member while its roster carries it, and rejects client enumeration', async () => {
     const { client, emit } = fakeClient('client-hidden-roster')
     emit({ __r: 'roster', members: [] })
-    const hidden = client._reviveRemote({
-      id: crypto.randomUUID(),
-      meta: { role: 'moderator' },
-      joinedAt: 1,
-      metaSeq: 0,
-      identity: null,
-      hidden: true,
-    })
-    emit({ __r: 'roster', members: [] }, 2)
+    const member = { id: crypto.randomUUID(), meta: { role: 'moderator' }, joinedAt: 1, metaSeq: 0, identity: null }
+    const hidden = client._reviveRemote({ ...member, hidden: true })
+    let left = 0
+    hidden.onLeave(() => left++)
+    emit({ __r: 'roster', members: [{ ...member, hidden: true }] }, 2)
     expect(client._getRemote(hidden.id)).toBe(hidden)
     await expect(client.getParticipants({ hidden: true })).rejects.toThrow(
       'Hidden participants can only be enumerated on the server',
     )
+    // A roster without it: the member left before this client's stub could hear its leave.
+    emit({ __r: 'roster', members: [] }, 3)
+    expect(client._getRemote(hidden.id)).toBeNull()
+    expect(left).toBe(1)
   })
   it('declares a room-level default binary track without an earlier all-track listener', () => {
     const sent: unknown[] = []

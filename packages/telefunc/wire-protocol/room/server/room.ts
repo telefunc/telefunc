@@ -688,7 +688,7 @@ class ServerRoom extends RoomStateView implements Room {
   }
   /** @internal */
   _applyAuthorityRoster(members: MemberSnapshot[], departing: ReadonlySet<string>): boolean {
-    return this._state.reconcileCompleteRoster(members, departing)
+    return this._state.reconcileRoster(members, departing)
   }
   /** @internal The authority says the room closed; the lane that would have carried `closed` failed. */
   _closeFromAuthority(): void {
