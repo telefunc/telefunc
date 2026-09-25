@@ -283,6 +283,16 @@ function subscribeRoute<Data>(
   return () => subscription.close()
 }
 
+// Every consumer of a shared subscription gets its end as one failure object, reported once.
+const reportedEnds = new WeakSet<object>()
+function reportSubscriptionEnd(error: unknown): void {
+  if (typeof error === 'object' && error !== null) {
+    if (reportedEnds.has(error)) return
+    reportedEnds.add(error)
+  }
+  reportServerChannelError(error)
+}
+
 /** A route's subscription while wanted; one that ends on its own is reported and replaced once, as a Room lane's is. */
 class RouteSubscription {
   private _current: BackendSubscription | null = null
@@ -311,7 +321,7 @@ class RouteSubscription {
     // Only a terminal end rejects `ready`, after the manager retired the subscription; an unsubscribe resolves it.
     const ended = () =>
       void subscription.ready.catch((error: unknown) => {
-        reportServerChannelError(error)
+        reportSubscriptionEnd(error)
         if (this._current !== subscription) return
         this._current = null
         if (!replacing || wasReady) this._subscribe(true)

@@ -762,6 +762,27 @@ describe('Broadcast shield validation', () => {
 // ───────────────────────────────────────────────────────────────────────────
 
 describe('Broadcast static bus (publish/subscribe)', () => {
+  it('reports the end of a subscription its consumers share once', async () => {
+    const ending = pendingSubscription()
+    let opens = 0
+    await installOpeningBackend((_source, driverOpen) => (opens++ === 0 ? ending.subscription : driverOpen()))
+    const report = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const stops = [
+      new ServerBroadcast({ key: 'broadcast:shared-end' }).subscribe(() => {}),
+      new ServerBroadcast({ key: 'broadcast:shared-end' }).subscribe(() => {}),
+      Broadcast.subscribe('broadcast:shared-end', () => {}),
+    ]
+    try {
+      ending.close()
+      await vi.waitFor(() => expect(opens).toBe(2))
+      await new Promise((resolve) => setTimeout(resolve, 10))
+      const ends = report.mock.calls.filter(([logged]) => String(logged).includes('Backend subscription closed'))
+      expect(ends).toHaveLength(1)
+    } finally {
+      for (const stop of stops) stop()
+    }
+  })
+
   it('releases a queued publish once its key has no establishing subscription, and reports each end', async () => {
     const attempts: Array<ReturnType<typeof pendingSubscription>> = []
     const driver = await installOpeningBackend(() => {
