@@ -80,7 +80,6 @@ class TransportAttempt extends DriverAttempt {
   }
 
   async unsubscribe(): Promise<void> {
-    if (this.ended) return
     this.#stop()
     this.transition('closed')
   }

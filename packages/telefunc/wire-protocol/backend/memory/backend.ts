@@ -113,7 +113,6 @@ class MemorySubscriptionAttempt extends DriverAttempt {
   }
 
   async unsubscribe(): Promise<void> {
-    if (this.ended) return
     this.#detach()
     this.transition('closed')
   }
