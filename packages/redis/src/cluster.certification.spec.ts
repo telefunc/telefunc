@@ -5,7 +5,11 @@ import { decodeOrderingFrame, encodeLaneKey } from 'telefunc/__internal'
 import { afterAll, afterEach, beforeAll, describe, expect, it, onTestFinished, vi } from 'vitest'
 import { installRedis } from './index.js'
 import { RedisBackend } from './backend.js'
-import { disposeBackend, getBroadcastBackend, getRoomBackend } from '../../telefunc/wire-protocol/backend/install.js'
+import {
+  disposeBackend,
+  getBroadcastBackend,
+  getRoomBackend,
+} from '../../telefunc/dist/wire-protocol/backend/install.js'
 import { broadcastSequenceKey, channelKey, headKey, genPrefix, orderKey } from './keys.js'
 import { REDIS_COMMANDS, REDIS_DELIVERY_FENCE_BYTE } from './commands.js'
 type RedisClusterNode = { host: string; port: number }
@@ -161,7 +165,7 @@ describe('Redis real three-master Cluster CI certification', () => {
       await backend.directoryPut(roomId, inc)
       await backend.directoryDelete(roomId, inc)
       expect(
-        (await backend.publish({ key: 'generic} escape', kind: 'binary' }, bytes('generic'), 1024)).receivers,
+        (await backend.publish({ key: 'generic} escape', kind: 'binary' }, bytes('generic'))).receivers,
       ).toBeUndefined()
       expect((await close(authority, roomId, head)).state).toBe('closed')
       await authority.dropGeneration(roomId, inc)
@@ -236,11 +240,11 @@ describe('Redis real three-master Cluster CI certification', () => {
       backend.subscribe(route, (payload) => void observed.push(Buffer.from(payload).toString())),
     )
     await subscription.ready
-    const before = await backend.publish(route, bytes('before'), 1024)
+    const before = await backend.publish(route, bytes('before'))
     await waitFor(() => observed.length === 1)
     // An eviction or a FLUSHDB: the counter is gone, the subscriber connection is not.
     await cluster.del(`${prefix}seq:{invalidate}`)
-    const after = await backend.publish(route, bytes('after'), 1024)
+    const after = await backend.publish(route, bytes('after'))
     expect(after.seq).toBeGreaterThan(before.seq)
     await waitFor(() => observed.length === 2)
     expect(observed).toEqual(['before', 'after'])
@@ -509,13 +513,13 @@ describe('Redis real three-master Cluster CI certification', () => {
       ),
     )
     await Promise.all([text.ready, binary.ready])
-    const first = await backend.publish({ key: '', kind: 'text' }, bytes('one'), 1024)
-    const second = await backend.publish({ key: '', kind: 'binary' }, bytes('two'), 1024)
+    const first = await backend.publish({ key: '', kind: 'text' }, bytes('one'))
+    const second = await backend.publish({ key: '', kind: 'binary' }, bytes('two'))
     await waitFor(() => emptyObserved.length === 2)
     expect(second.seq).toBe(first.seq + 1)
     expect(emptyObserved).toEqual([`text:${first.seq}:one`, `binary:${second.seq}:two`])
     // Each key counts on its own.
-    const other = await backend.publish({ key: 'other', kind: 'text' }, bytes('three'), 1024)
+    const other = await backend.publish({ key: 'other', kind: 'text' }, bytes('three'))
     expect(other.seq).not.toBe(second.seq + 1)
   })
   function own<T>(value: T, dispose: (value: T) => unknown): T {

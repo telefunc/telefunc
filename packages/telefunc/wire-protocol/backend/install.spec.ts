@@ -152,7 +152,7 @@ describe('backend installation lifecycle', () => {
     for (const [index, instance] of instances.entries()) {
       await instance.subscribe(route, (bytes) => void seen.push(`${index}:${new TextDecoder().decode(bytes)}`)).ready
     }
-    const receipt = await instances[0]!.publish(route, new TextEncoder().encode('hi'), 1024)
+    const receipt = await instances[0]!.publish(route, new TextEncoder().encode('hi'))
     expect(seen.sort()).toEqual(['0:hi', '1:hi'])
     expect(receipt).toEqual({ seq: 1, timestamp: expect.any(Number) })
     await Promise.all(instances.map((instance) => instance.dispose()))
@@ -186,8 +186,8 @@ describe('backend installation lifecycle', () => {
     })
     const backend = getBroadcastBackend()
     const usage = 'config.broadcast.transport returned'
-    await expect(backend.publish({ key: 'k', kind: 'text' }, new Uint8Array(), 1024)).rejects.toThrow(usage)
-    expect(() => backend.publish({ key: 'k', kind: 'binary' }, new Uint8Array(), 1024)).toThrow(usage)
+    await expect(backend.publish({ key: 'k', kind: 'text' }, new Uint8Array())).rejects.toThrow(usage)
+    expect(() => backend.publish({ key: 'k', kind: 'binary' }, new Uint8Array())).toThrow(usage)
 
     const received = vi.fn()
     backend.subscribe({ key: 'k', kind: 'text' }, received)
@@ -206,7 +206,7 @@ describe('supervised publishes and commits', () => {
     const publish = vi.spyOn(driver, 'publish')
     const backend = superviseBroadcastDriver(driver)
     const subscription = backend.subscribe({ key: 'mixed', kind: 'binary' }, () => {})
-    const publishing = backend.publish({ key: 'mixed', kind: 'text' }, new TextEncoder().encode('text'), 1024)
+    const publishing = backend.publish({ key: 'mixed', kind: 'text' }, new TextEncoder().encode('text'))
     await Promise.resolve()
     expect(publish).not.toHaveBeenCalled()
     attempt.ready()
@@ -288,7 +288,7 @@ async function expectBroadcastRoundTrip(payload: string): Promise<void> {
     (bytes) => void seen.push(new TextDecoder().decode(bytes)),
   )
   await subscription.ready
-  await getBroadcastBackend().publish(route, new TextEncoder().encode(payload), 1024)
+  await getBroadcastBackend().publish(route, new TextEncoder().encode(payload))
   expect(seen).toEqual([payload])
   await subscription.unsubscribe()
 }
