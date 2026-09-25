@@ -277,7 +277,7 @@ A hidden participant is a full `LocalParticipant`: `publishBinary()`, `listen()`
 room.onEmpty(() => stopGameLoop(matchId)) // last player gone; the hidden authority doesn't hold the room open
 ```
 
-Join as many as you need (a game authority, a moderation bot, a metrics sink), each with its own trusted `identity`. They are server-side only (a client `join({ hidden: true })` throws) and out of every client's presence, though what they publish room-wide still reaches every room-wide subscriber, with `from`. Read them back on the server with `getParticipants({ hidden: true })`, keyed by `identity` (never `meta.role`). Hand a client the one it should talk to by returning it from the telefunction:
+Join as many as you need (a game authority, a moderation bot, a metrics sink), each with its own trusted `identity`. They are server-side only (a client `join({ hidden: true })` throws) and out of every client's presence, though what they publish room-wide still reaches every room-wide subscriber, with `from` (for binary, `from.id` only: see <Link href="#senders">Senders</Link>). Read them back on the server with `getParticipants({ hidden: true })`, keyed by `identity` (never `meta.role`). Hand a client the one it should talk to by returning it from the telefunction:
 
 ```js
 // Match.telefunc.js (server)
@@ -556,4 +556,4 @@ Read-only: `id`, `meta`, `identity`, `joinedAt`. Cleanup in `onLeave` is enough;
 
 ### Senders
 
-Every message callback receives its verified sender as `from`: `{ id, meta, identity }`, stamped by the server, impossible to spoof. When your room view already knows the sender, `from` is their live `RemoteParticipant`. Otherwise (say, a message that arrived just before its sender's join) it's a plain object with the same fields. Either way you read `from.id` and `from.meta` without special-casing. `from === null` only for room-authored messages.
+Every message callback receives its verified sender as `from`: `{ id, meta, identity }`, stamped by the server, impossible to spoof. When your room view already knows the sender, `from` is their live `RemoteParticipant`. Otherwise (say, a message that arrived just before its sender's join) it's a plain object with the same fields. Either way you read `from.id` and `from.meta` without special-casing. A binary frame carries only its sender's id, so for a binary sender your view doesn't know (including every hidden participant you weren't handed) `from` is `{ id, meta: {}, identity: null }`; to tell a hidden publisher's binary apart, hand the client that participant and use its `subscribeBinary()`. `from === null` only for room-authored messages.
