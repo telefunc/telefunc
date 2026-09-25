@@ -200,6 +200,14 @@ describe('keyed in-process broadcast', () => {
     expect(seen).toEqual([1])
   })
 
+  it('rejects a key that is not a well-formed string as a usage error', () => {
+    const lone = 'room:\ud800'
+    const usage = 'The broadcast key should be a well-formed string'
+    expect(() => new ServerBroadcast({ key: lone })).toThrow(usage)
+    expect(() => Broadcast.publish(lone, 'x')).toThrow(usage)
+    expect(() => Broadcast.subscribeBinary(lone, () => {})).toThrow(usage)
+  })
+
   it('a subscribe that throws leaves no listener behind', async () => {
     await disposeBackend()
     const driver = new MemoryBackend({ state: memoryState })

@@ -54,6 +54,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
 
   constructor(opts: { key: string }) {
     super()
+    assertBroadcastKey(opts.key)
     this.key = opts.key
   }
 
@@ -277,6 +278,7 @@ const BroadcastChannel = ServerBroadcast as {
 
 const Broadcast = {
   publish<U = unknown>(key: string, data: ChannelData<U>): PublishResult | Promise<PublishResult> {
+    assertBroadcastKey(key)
     const backend = getBroadcastBackend()
     const serialized = stringify(data)
     const route = { key, kind: 'text' } as const
@@ -290,6 +292,7 @@ const Broadcast = {
     )
   },
   publishBinary(key: string, data: Uint8Array): PublishResult | Promise<PublishResult> {
+    assertBroadcastKey(key)
     const backend = getBroadcastBackend()
     const route = { key, kind: 'binary' } as const
     return backend.publish(route, data, bufferLimit('binary'))
@@ -304,6 +307,7 @@ function subscribeRoute<Data>(
   decode: (payload: Uint8Array) => Data,
   callback: (data: Data, info: ChannelPublishInfo) => unknown,
 ): BroadcastUnsubscribe {
+  assertBroadcastKey(route.key)
   const subscription = getBroadcastBackend().subscribe(route, (payload, info) => {
     invokeChannelListener(
       callback,
@@ -339,4 +343,8 @@ function bufferLimit(kind: BroadcastKind): number {
 /** As for a channel listener, every error is reported but an Abort, which has no channel to close here. */
 function reportStaticListenerError(error: unknown): void {
   if (!isAbort(error)) reportServerChannelError(error)
+}
+
+function assertBroadcastKey(key: unknown): void {
+  assertUsage(typeof key === 'string' && key.isWellFormed(), 'The broadcast key should be a well-formed string')
 }
