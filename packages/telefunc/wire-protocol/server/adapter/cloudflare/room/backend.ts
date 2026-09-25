@@ -135,7 +135,7 @@ class CloudflareBackend implements BroadcastDriver, RoomDriver {
     }
     const manager = requireCloudflareSession().room
     return {
-      partition: manager.subscriptionPartition,
+      partition: manager.partition,
       // A route call line opens a fresh stub, like a commit's: a stub that rejected may be broken.
       open: (receiver) => manager.openSubscription(source, () => this.#stub(source.roomId), receiver),
     }

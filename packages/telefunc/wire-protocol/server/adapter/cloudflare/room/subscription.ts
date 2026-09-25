@@ -20,9 +20,10 @@ const entryKey = (route: Pick<RouteInstallation, 'roomId' | 'inc' | 'laneKey'>) 
   JSON.stringify([route.roomId, route.inc, route.laneKey])
 
 class CloudflareRoomSessionManager {
+  /** Subscriptions share an attempt only within one session DO. */
+  readonly partition = crypto.randomUUID()
   readonly #authorityCalls = new OrderedStubs<CloudflareRoomAuthorityStub>()
   readonly #id: string
-  readonly #subscriptionPartition = crypto.randomUUID()
   readonly #entries = new Map<string, CloudflareRoomSubscriptionAttempt>()
 
   constructor(sessionId: string) {
@@ -64,10 +65,6 @@ class CloudflareRoomSessionManager {
     if (entry?.leaseId !== request.leaseId) return
     entry.deliver(request.payload, request.seq, request.timestamp)
   }
-
-  get subscriptionPartition(): string {
-    return this.#subscriptionPartition
-  }
 }
 
 /** A call to the room's authority through the session's ordered stub for it. */
@@ -86,8 +83,7 @@ class CloudflareRoomSubscriptionAttempt extends DriverAttempt {
   readonly #receiver: BackendReceiver
   readonly #onClosed: () => void
   #cancelRenewal: (() => void) | null = null
-  /** The route's removal from the authority was requested. */
-  #released = false
+  #unsubscribed = false
 
   constructor(
     source: CloudflareRoomSubscriptionSource,
@@ -116,8 +112,8 @@ class CloudflareRoomSubscriptionAttempt extends DriverAttempt {
   }
 
   async unsubscribe(): Promise<void> {
-    if (this.#released) return
-    this.#released = true
+    if (this.#unsubscribed) return
+    this.#unsubscribed = true
     this.#finish()
     await this.#release()
   }
