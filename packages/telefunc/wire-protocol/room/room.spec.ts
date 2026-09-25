@@ -20,7 +20,7 @@ import {
 } from './constants.js'
 import { DEFAULT_TRACK, decodeBinaryFrame, emptyTrackWants, encodeBinaryFrame, sanitizeBinaryWants } from './binary.js'
 import { RoomError, isRoomError, roomAckError, toRoomFailure } from './errors.js'
-import { leaveCauseFromWire, leaveCauseToWire, mergeAttributes, normalizeJoinOptions } from './model.js'
+import { leaveCauseFromWire, leaveCauseToWire, mergeAttributes } from './model.js'
 import { hasRoomTag, type RoomSnapshotMetadata } from './protocol.js'
 import { MEMBER_CELL_PREFIX, memberCellKey } from './server/cells.js'
 import type { LeaveCause, Sender } from './types.js'
@@ -651,44 +651,7 @@ describe('Room public behavior', () => {
     release.resolve()
     await vi.waitFor(() => expect(semanticOpens).toBe(3))
   })
-  it('reconciles a zombie Room when terminal control state follows a lost closed frame', async () => {
-    const authority = await Room.create('terminal-control-reconcile')
-    await authority.join()
-    const remoteBackend = getRoomBackend()
-    const subscribeLane = remoteBackend.subscribeLane.bind(remoteBackend)
-    let terminal: ReturnType<typeof terminalSubscription> | undefined
-    vi.spyOn(remoteBackend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
-      const filtered =
-        lane.kind === 'control'
-          ? (payload: Uint8Array, info: { seq: number; timestamp: number }) => {
-              const envelope = parse(decoder.decode(payload)) as { __r?: string }
-              if (envelope.__r !== 'closed') receiver(payload, info)
-            }
-          : receiver
-      const subscription = subscribeLane(roomId, inc, lane, filtered)
-      if (lane.kind !== 'control' || terminal !== undefined) return subscription
-      terminal = terminalSubscription(subscription)
-      return terminal.subscription
-    })
-    const observer = await Room.get(authority.id)
-    let closes = 0
-    const closed = deferred<void>()
-    observer.onClose(() => {
-      closes++
-      closed.resolve()
-    })
-    if (!terminal) throw new Error('control subscription did not start')
-    await terminal.subscription.ready
-    await Room.close(authority.id)
-    await terminal.close()
-    await closed.promise
-    expect({ closed: observer.isClosed, count: observer.count, closes }).toEqual({
-      closed: true,
-      count: 0,
-      closes: 1,
-    })
-  })
-  it('tells clients the room closed when a terminal control lane lost the closed frame', async () => {
+  it('closes a view and tells its clients when a terminal control lane lost the closed frame', async () => {
     const authority = await Room.create('terminal-close-relay')
     await authority.join()
     const backend = getRoomBackend()
@@ -703,12 +666,15 @@ describe('Room public behavior', () => {
       return terminal.subscription
     })
     const observer = (await Room.get(authority.id)) as ServerRoom
+    let closes = 0
+    observer.onClose(() => closes++)
     const { peer } = serve(observer)
     if (!terminal) throw new Error('control subscription did not start')
     await terminal.subscription.ready
     await Room.close(authority.id)
     await terminal.close()
     await vi.waitFor(() => expect(observer.isClosed).toBe(true))
+    expect({ count: observer.count, closes }).toEqual({ count: 0, closes: 1 })
     const relayed = peer
       .decoded()
       .filter((frame) => frame.tag === TAG.PUBLISH)
@@ -1524,18 +1490,6 @@ describe('Room public behavior', () => {
     await expect(sender.send(holder.id, 'ping', { ack: true })).resolves.toMatchObject({ response: 'handled' })
     expect(victimInbox).toEqual([])
   })
-  it('treats an unparsable client payload on a Room stub as a protocol violation', async () => {
-    const stub = register((await Room.create('malformed-stub-payload')) as ServerRoom)
-    const participant = new RoomParticipantStubChannel(
-      (await Room.join('malformed-stub-payload')) as ServerLocalParticipant,
-    )
-    const frames = [
-      [stub, { tag: TAG.TEXT, index: 7, seq: 1, text: '{', bytes: 1 }],
-      [stub, { tag: TAG.TEXT_ACK_REQ, index: 7, seq: 2, text: '{' }],
-      [participant, { tag: TAG.TEXT_ACK_REQ, index: 7, seq: 1, text: '{' }],
-    ] as const
-    for (const [channel, frame] of frames) expect(() => channel._dispatchFrame(frame)).toThrow(ProtocolViolationError)
-  })
   it('rejects an option the call does not have', async () => {
     const room = (await Room.create('unknown-options')) as ServerRoom
     const me = await room.join()
@@ -1579,7 +1533,7 @@ describe('Room public behavior', () => {
     expect(() => declare(tracks.slice(0, 16))).not.toThrow()
     expect(() => declare(tracks)).toThrow(ProtocolViolationError)
   })
-  it('treats a request shape the client library never sends as a protocol violation', async () => {
+  it('treats a request the client library never sends, unparsable or misshapen, as a protocol violation', async () => {
     const stub = register((await Room.create('malformed-stub-request')) as ServerRoom)
     const holder = (await Room.join('malformed-stub-request')) as ServerLocalParticipant
     const participant = new RoomParticipantStubChannel(holder)
@@ -1621,6 +1575,9 @@ describe('Room public behavior', () => {
         participant,
         { tag: TAG.BINARY_ACK_REQ, index: 7, seq: 2, data: encodeBinaryFrame(member, new Uint8Array([1])) },
       ],
+      [stub, { tag: TAG.TEXT, index: 7, seq: 10, text: '{', bytes: 1 }],
+      [stub, { tag: TAG.TEXT_ACK_REQ, index: 7, seq: 11, text: '{' }],
+      [participant, { tag: TAG.TEXT_ACK_REQ, index: 7, seq: 3, text: '{' }],
     ] as const
     for (const [channel, frame] of frames) expect(() => channel._dispatchFrame(frame)).toThrow(ProtocolViolationError)
   })
@@ -1653,30 +1610,36 @@ describe('Room public behavior', () => {
       expect(Object.keys(sender)).toEqual(['id', 'meta', 'identity'])
     }
   })
-  it('rejects a participant ref that is not an object as a usage error', async () => {
-    const room = await Room.create('ref-shape')
-    for (const call of [
-      () => Room.removeParticipant(room.id, 'member-id' as never),
-      () => Room.send(room.id, null as never, 'hi'),
-    ])
-      await expect(call()).rejects.toThrow('The participant ref should be { id } or { identity }')
-  })
-  it('validates send() recipients and meta arguments at the API edge', async () => {
-    await Room.create('api-edge')
-    const member = await Room.join('api-edge')
-    expect(() => member.send(null as never, 'hi')).toThrow('send() recipient should be a participant or its id')
-    await expect(member.setMeta([] as never)).rejects.toThrow('setMeta() meta should be an object')
-    await expect(member.setAttributes('x' as never)).rejects.toThrow('setAttributes() attributes should be an object')
-  })
-  it('rejects a room meta that is not a plain object, like participant meta', async () => {
-    await Room.create('room-meta-edge')
-    await expect(Room.setMeta('room-meta-edge', [] as never)).rejects.toThrow('Room.setMeta() meta should be an object')
-    await expect(Room.setAttributes('room-meta-edge', [] as never)).rejects.toThrow(
-      'Room.setAttributes() attributes should be an object',
-    )
-    await expect(Room.create('room-meta-array', { meta: [] as never })).rejects.toThrow(
-      'options.meta should be an object',
-    )
+  it('rejects a malformed argument at the API edge as a usage error, before any guard runs', async () => {
+    const room = await Room.create('api-edge')
+    const me = await room.join()
+    const onBeforeJoin = vi.fn()
+    Room.guard(room, { onBeforeJoin })
+    const calls: Array<[() => unknown, string]> = [
+      [() => Room.create('\ud800'), 'well-formed'],
+      [() => room.join({ identity: '\udc00' }), 'join() options.identity should be a non-empty well-formed string'],
+      [() => Room.getParticipants(room.id, { identity: '\udc00' }), 'well-formed'],
+      [() => Room.removeParticipant(room.id, { identity: '\udc00' }), 'well-formed'],
+      [() => room.join({ selfDelivery: 'false' } as never), 'join() options.selfDelivery should be a boolean'],
+      [() => room.join({ selfDelivery: 0 } as never), 'join() options.selfDelivery should be a boolean'],
+      [
+        () => Room.removeParticipant(room.id, 'member-id' as never),
+        'The participant ref should be { id } or { identity }',
+      ],
+      [() => Room.send(room.id, null as never, 'hi'), 'The participant ref should be { id } or { identity }'],
+      [() => me.setMeta([] as never), 'setMeta() meta should be an object'],
+      [() => me.setAttributes('x' as never), 'setAttributes() attributes should be an object'],
+      [() => Room.setMeta(room.id, [] as never), 'Room.setMeta() meta should be an object'],
+      [() => Room.setAttributes(room.id, [] as never), 'Room.setAttributes() attributes should be an object'],
+      [() => Room.create('room-meta-array', { meta: [] as never }), 'options.meta should be an object'],
+      ...[null, [], 'screen'].map((options): [() => unknown, string] => [
+        () => room.subscribeBinary(() => {}, options as never),
+        'subscribeBinary() options should be an object',
+      ]),
+    ]
+    for (const [call, message] of calls) await expect(Promise.resolve().then(call)).rejects.toThrow(message)
+    expect(() => me.send(null as never, 'hi')).toThrow('send() recipient should be a participant or its id')
+    expect(onBeforeJoin).not.toHaveBeenCalled()
   })
   it("round-trips an ack DM through a room stub and keeps only the reply's own fields", async () => {
     const room = (await Room.create('stub-ack-dm')) as ServerRoom
@@ -3217,38 +3180,6 @@ describe('room demand lifecycle', () => {
   })
 })
 describe('room binary protocol validation', () => {
-  it('rejects malformed room ids and identities as usage errors', async () => {
-    await expect(Room.create('\ud800')).rejects.toThrow('well-formed')
-  })
-  it('rejects an ill-formed identity at the API edge, before any guard runs', async () => {
-    const room = await Room.create('identity-shape')
-    const onBeforeJoin = vi.fn()
-    Room.guard(room, { onBeforeJoin })
-    await expect(room.join({ identity: '\udc00' })).rejects.toThrow(
-      'join() options.identity should be a non-empty well-formed string',
-    )
-    expect(onBeforeJoin).not.toHaveBeenCalled()
-    await expect(Room.getParticipants(room.id, { identity: '\udc00' })).rejects.toThrow('well-formed')
-    await expect(Room.removeParticipant(room.id, { identity: '\udc00' })).rejects.toThrow('well-formed')
-  })
-  it('rejects non-boolean self-delivery options', () => {
-    expect(() => normalizeJoinOptions({ selfDelivery: 'false' } as never)).toThrow('boolean')
-    expect(() => normalizeJoinOptions({ selfDelivery: 0 } as never)).toThrow('boolean')
-  })
-  it('rejects invalid binary subscription option containers', () => {
-    const state = new RoomState({
-      roomId: 'strict-options',
-      meta: {},
-      seed: { members: [] },
-      updateStamp: { at: 0, by: '' },
-      onListenersChanged: () => {},
-      onCallbackError: () => {},
-      onLeave: () => {},
-    })
-    for (const options of [null, [], 'screen']) {
-      expect(() => state.subscribeBinary(() => {}, options as never)).toThrow('object')
-    }
-  })
   it('bounds tails by count and serialized code units at every cap edge', () => {
     const entry = (serialized: string, seq = 0) => ({ serialized, ord: { seq, timestamp: 0 }, from: '' })
     const byCount = new TailHold(() => {})
