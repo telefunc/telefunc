@@ -2340,6 +2340,7 @@ describe('Room public behavior', () => {
       const stub = register(room)
       const first = attachPeer(stub)
       const { id } = (await stub._handleRequest({ __r: 'req-join', meta: {}, selfDelivery: true })) as { id: string }
+      const idle = (await stub._handleRequest({ __r: 'req-join', meta: {}, selfDelivery: true })) as { id: string }
       await vi.waitFor(() => expect(controlEvents(first).map(({ __r }) => __r)).toContain('roster'))
       stub._onPeerDisconnect(60_000)
       const observer = await Room.get(room.id)
@@ -2351,6 +2352,7 @@ describe('Room public behavior', () => {
       await vi.waitFor(() =>
         expect(controlEvents(peer).filter(({ __r }) => __r === 'demand-state')).toEqual([
           { __r: 'demand-state', member: id, tracks: [null] },
+          { __r: 'demand-state', member: idle.id, tracks: [] },
         ]),
       )
     } finally {
@@ -2653,6 +2655,31 @@ describe('client Room lifecycle', () => {
     acks[0]!({ meta: { v: 'A' }, seq: 1 }) // the older write's ack arrives last
     await Promise.all([first, second])
     expect(participant.meta).toEqual({ v: 'B' })
+  })
+  it("applies a handed-out participant's whole demand set as the changes from what it had", () => {
+    let notify!: (notice: unknown) => void
+    const channel = {
+      listen: (cb: (notice: unknown) => unknown) => {
+        notify = cb
+      },
+      onClose: () => {},
+    } as unknown as ClientChannel
+    const participant = new ClientStandaloneParticipant(channel, {
+      channelId: 'channel',
+      id: 'me',
+      meta: {},
+      selfDelivery: true,
+      identity: null,
+    })
+    notify({ __r: 'demand', track: 'screen', wanted: true })
+    const demand: unknown[] = []
+    participant.onDemand((track, wanted) => demand.push([track, wanted]))
+    demand.length = 0
+    notify({ __r: 'demand-state', tracks: [null] })
+    expect(demand).toEqual([
+      ['screen', false],
+      [null, true],
+    ])
   })
   it('keeps remote serializer backing unforgeable and exact-keyed', async () => {
     const room = await Room.create('remote-backing')
