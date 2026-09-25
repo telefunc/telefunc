@@ -28,8 +28,8 @@ class SubscriptionManager<Source> {
 
   constructor(
     private readonly _driver: SubscriptionDriver<Source>,
-    private readonly _reportError: (error: unknown) => void = console.error,
-    private readonly _sourceKey: (source: Source) => string = String,
+    private readonly _reportError: (error: unknown) => void,
+    private readonly _sourceKey: (source: Source) => string,
   ) {}
 
   subscribe(source: Source, receiver: BackendReceiver): BackendSubscription {
