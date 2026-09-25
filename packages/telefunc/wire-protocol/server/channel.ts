@@ -342,10 +342,6 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   /** The peer's RECONCILE declarations apply before `onOpen` fires, through the same hooks as its frames. */
   _attachPeer(peer: IndexedPeer, state?: ReattachState): void {
     if (this._didShutdown) return
-    if (state?.broadcast) {
-      this._applyPeerSubscription(false, state.broadcast.text)
-      this._applyPeerSubscription(true, state.broadcast.binary)
-    }
     this._clearTimer('_ttlTimer')
     this._clearTimer('_reconnectTimer')
     this._flow.reset()
@@ -368,6 +364,11 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       peer.sendAckRes(ack.ackedSeq, ack.result, ack.status)
     }
     this._pendingAckRes.length = 0
+    // After the swap, so what they send reaches this peer even if the previous one never detached.
+    if (state?.broadcast) {
+      this._applyPeerSubscription(false, state.broadcast.text)
+      this._applyPeerSubscription(true, state.broadcast.binary)
+    }
     if (this._pendingCloseAck) peer.sendCloseAck()
     if (this._awaitingCloseAck) peer.sendCloseRequest(Math.max(0, this._closeDeadline - Date.now()))
     if (this._isClosed) {

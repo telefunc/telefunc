@@ -2,7 +2,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Broadcast, ServerBroadcast } from './server-broadcast.js'
 import { ServerChannel } from './channel.js'
 import { ReplayBuffer } from '../replay-buffer.js'
-import { ACK_STATUS, ProtocolViolationError, TAG, decode, encode, type DecodedFrame } from '../shared-ws.js'
+import {
+  ACK_STATUS,
+  ProtocolViolationError,
+  TAG,
+  decode,
+  encode,
+  encodePublishText,
+  type DecodedFrame,
+} from '../shared-ws.js'
 import { ChannelMux, type ServerTransport } from './mux.js'
 import { IndexedPeer } from './IndexedPeer.js'
 import { disposeBackend, installBackend } from '../backend/install.js'
@@ -198,6 +206,26 @@ describe('keyed in-process broadcast', () => {
     broadcast.publish({ n: 2 })
 
     expect(seen).toEqual([1])
+  })
+
+  it("applies a reattach's declarations to the new peer, not to one that never detached", () => {
+    class Announcing extends ServerChannel {
+      override _onPeerBroadcastSubscribe(): void {
+        this._sendPublish(encodePublishText('"declared"', { seq: 1, timestamp: 1 }))
+      }
+    }
+    const channel = new Announcing()
+    channel._registerChannel()
+    const publishes = (frames: Uint8Array[]) =>
+      frames.map((frame) => decode(frame as Uint8Array<ArrayBuffer>)).filter((frame) => frame.tag === TAG.PUBLISH)
+    const previous: Uint8Array[] = []
+    const next: Uint8Array[] = []
+    channel._attachPeer(peer((frame) => previous.push(frame)))
+    channel._attachPeer(
+      peer((frame) => next.push(frame)),
+      { broadcast: { text: true, binary: false } },
+    )
+    expect([publishes(previous).length, publishes(next).length]).toEqual([0, 1])
   })
 
   it('rejects a key that is not a well-formed string as a usage error', () => {
