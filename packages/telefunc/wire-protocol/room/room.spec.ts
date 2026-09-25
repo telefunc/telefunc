@@ -3,7 +3,7 @@ import { ChannelClosedError } from '../channel-errors.js'
 import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { IndexedPeer } from '../server/IndexedPeer.js'
-import { CHANNEL_CLOSE_TIMEOUT_MS } from '../constants.js'
+import { CHANNEL_CLOSE_TIMEOUT_MS, CHANNEL_TRANSPORT } from '../constants.js'
 import { ACK_STATUS, ProtocolViolationError, TAG, decode, type BroadcastSubscriptions } from '../shared-ws.js'
 import { ShieldValidationError, isShieldValidationError } from '../../shared/ShieldValidationError.js'
 import { Abort } from '../../shared/Abort.js'
@@ -31,6 +31,7 @@ import { Room } from './server/statics.js'
 import { ServerRoom, type ServerLocalParticipant } from './server/room.js'
 import { configFromHead, decodeRoomText, encodeRoomRecord } from './server/lanes.js'
 import { config } from '../../node/server/serverConfig.js'
+import { config as clientConfig } from '../../client/clientConfig.js'
 import type { LaneSubscription } from './server/lane-subscription.js'
 import { reportRoomError } from './server/errors.js'
 import { RoomParticipantStubChannel, RoomStubChannel } from './server/stub.js'
@@ -2998,31 +2999,28 @@ describe('client Room lifecycle', () => {
   })
   it("rejects a member's publish the server refused as expected, without reporting a client bug", async () => {
     const report = vi.spyOn(console, 'error').mockImplementation(() => {})
-    const stub = Object.assign(Object.create(ClientBroadcast.prototype) as ClientBroadcast, {
-      _isClosed: false,
-      _pendingAcks: new Map(),
-      _inflightAcks: 0,
-      _closeWaiters: [],
-      _wire: { text: false, binary: false },
-      _connection: {
-        sendPublishAckReq: (_channel: unknown, _data: unknown, register: (seq: number) => void) => register(1),
-        sendBroadcastSubscribe: () => {},
-        sendBroadcastUnsubscribe: () => {},
-      },
-      _subscribeLocal: () => () => {},
-      send: async (message: { __r?: string }) =>
-        message.__r === 'req-join' ? { id: crypto.randomUUID(), joinedAt: 1 } : undefined,
-      onClose: () => {},
+    // A real ClientBroadcast whose wire never opens: the test answers its requests.
+    clientConfig.fetch = async () => new Response(new ReadableStream({ start() {} }), { status: 200 })
+    const stub = new ClientBroadcast({
+      channelId: crypto.randomUUID(),
+      key: 'publish-refused',
+      transports: [CHANNEL_TRANSPORT.SSE],
+      telefuncUrl: 'http://publish-refused.test/_telefunc',
+      connectionKey: crypto.randomUUID(),
     })
-    const me = await new ClientRoom(stub, snapshot('publish-refused')).join()
-    const publishing = me.publish('hi')
-    ;(stub as unknown as { _onPeerAckRes(seq: number, text: string, status: number): void })._onPeerAckRes(
-      1,
-      'Participant not found (left?)',
-      ACK_STATUS.ERROR,
-    )
-    await expect(publishing).rejects.toThrow('Participant not found (left?)')
-    expect(report).not.toHaveBeenCalled()
+    vi.spyOn(stub, 'send').mockImplementation((async (message: { __r?: string }) =>
+      message.__r === 'req-join' ? { id: crypto.randomUUID(), joinedAt: 1 } : undefined) as never)
+    try {
+      const me = await new ClientRoom(stub, snapshot('publish-refused')).join()
+      const publishing = me.publish('hi')
+      const text = 'Participant not found (left?)'
+      stub._dispatchFrame({ tag: TAG.ACK_RES, index: 0, seq: 1, ackedSeq: 1, status: ACK_STATUS.ERROR, text })
+      await expect(publishing).rejects.toThrow(text)
+      expect(report).not.toHaveBeenCalled()
+    } finally {
+      stub.abort()
+      delete clientConfig.fetch
+    }
   })
   it("leaves no unhandled rejection behind a client participant's un-awaited publish, binary publish or DM that fails", async () => {
     const memberId = crypto.randomUUID()
