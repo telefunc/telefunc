@@ -862,6 +862,18 @@ describe('Broadcast static bus (publish/subscribe)', () => {
     }
   })
 
+  it('counts in receivers the subscribers a publish reached, when a subscriber leaves or joins during delivery', async () => {
+    const received: string[] = []
+    const unsubscribe = Broadcast.subscribe<string>('broadcast:receivers', (message) => {
+      received.push(message)
+      unsubscribe()
+      Broadcast.subscribe('broadcast:receivers', () => {})
+    })
+    const receipt = await Broadcast.publish('broadcast:receivers', 'hello')
+    expect(received).toEqual(['hello'])
+    expect(receipt.receivers).toBe(1)
+  })
+
   it('static unsubscribe stops further deliveries', async () => {
     const received: Array<{ text: string }> = []
     const unsubscribe = Broadcast.subscribe<{ text: string }>('room:static-unsub', (m) => received.push(m))

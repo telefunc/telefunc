@@ -153,8 +153,10 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
   publish(route: BroadcastRoute, payload: Uint8Array): PublishResult {
     const mark = advanceOrder(this.#state.broadcastOrder, route.key, this.#now())
     const targets = [...(this.#state.broadcastSubs.get(broadcastRouteKey(route)) ?? [])]
+    // Counted before delivery, which may unsubscribe or subscribe.
+    const receivers = sumReceiverCounts(targets)
     for (const target of targets) target.deliver(copyBytes(payload), mark)
-    return { ...mark, receivers: sumReceiverCounts(targets), meta: { transport: 'in-memory' } }
+    return { ...mark, receivers, meta: { transport: 'in-memory' } }
   }
 
   async readHead(roomId: string): Promise<RoomHead | null> {
