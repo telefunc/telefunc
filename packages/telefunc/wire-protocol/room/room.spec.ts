@@ -3,7 +3,12 @@ import { ChannelClosedError } from '../channel-errors.js'
 import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { IndexedPeer } from '../server/IndexedPeer.js'
-import { CHANNEL_CLOSE_TIMEOUT_MS, CHANNEL_RECONNECT_TIMEOUT_MS, CHANNEL_TRANSPORT } from '../constants.js'
+import {
+  CHANNEL_CLOSE_TIMEOUT_MS,
+  CHANNEL_PING_INTERVAL_MS,
+  CHANNEL_RECONNECT_TIMEOUT_MS,
+  CHANNEL_TRANSPORT,
+} from '../constants.js'
 import { ACK_STATUS, ProtocolViolationError, TAG, decode, type BroadcastSubscriptions } from '../shared-ws.js'
 import { ShieldValidationError, isShieldValidationError } from '../../shared/ShieldValidationError.js'
 import { Abort } from '../../shared/Abort.js'
@@ -40,7 +45,7 @@ import { RoomDemand } from './demand.js'
 import { roomParticipantReplacer, roomRemoteReplacer, roomReplacer } from './response-server.js'
 import { roomRemoteReviver } from './response-client.js'
 import type { InternalClientReviverContext, InternalServerReplacerContext } from '../types.js'
-import type { ServerChannel } from '../server/channel.js'
+import { reconnectWindow, type ServerChannel } from '../server/channel.js'
 import type { ChannelPublishInfo } from '../channel.js'
 import { disposeBackend, getBroadcastBackend, getRoomBackend, installBackend } from '../backend/install.js'
 import { MemoryBackend, MemoryBackendState } from '../backend/memory/backend.js'
@@ -1890,7 +1895,7 @@ describe('Room public behavior', () => {
     })
     const departed = vi.spyOn(room, '_removeDepartedMember')
     await holder.leave()
-    await vi.advanceTimersByTimeAsync(CHANNEL_RECONNECT_TIMEOUT_MS + 1)
+    await vi.advanceTimersByTimeAsync(reconnectWindow() + 1)
     expect(closed).toBe(true)
     expect(departed).not.toHaveBeenCalled()
   })
@@ -2418,34 +2423,46 @@ describe('Room public behavior', () => {
       config.channel = {}
     }
   })
-  it("keeps a kicked participant's leave, with its reason, for a client that reconnects after the close deadline", async () => {
-    vi.useFakeTimers()
-    const room = (await Room.create('kick-while-offline')) as ServerRoom
-    const me = (await room.join({ identity: 'user-1' })) as ServerLocalParticipant
-    const channel = new RoomParticipantStubChannel(me)
-    channel._registerChannel()
-    attachPeer(channel)
-    channel._onPeerDisconnect(CHANNEL_RECONNECT_TIMEOUT_MS)
-    await Room.removeParticipant(room.id, { identity: 'user-1', reason: 'banned' })
-    await vi.advanceTimersByTimeAsync(CHANNEL_CLOSE_TIMEOUT_MS + 1)
-    expect(channel._replayBuffer).not.toBeNull()
-    const notices = attachPeer(channel, 0)
-      .decoded()
-      .flatMap((frame) => (frame.tag === TAG.TEXT ? [parse(frame.text) as { __r: string }] : []))
-    expect(notices).toContainEqual({ __r: 'left', cause: 'removed', reason: 'banned' })
-  })
-  it("keeps a room's closed event for a client that reconnects after the close deadline", async () => {
-    vi.useFakeTimers()
-    const room = (await Room.create('close-while-offline')) as ServerRoom
-    const stub = register(room)
-    const first = attachPeer(stub)
-    await vi.waitFor(() => expect(controlEvents(first).map(({ __r }) => __r)).toContain('roster'))
-    stub._onPeerDisconnect(CHANNEL_RECONNECT_TIMEOUT_MS)
-    await Room.close(room.id)
-    await vi.advanceTimersByTimeAsync(CHANNEL_CLOSE_TIMEOUT_MS + 1)
-    expect(stub._replayBuffer).not.toBeNull()
-    expect(controlEvents(attachPeer(stub, 0)).map(({ __r }) => __r)).toContain('closed')
-  })
+  // The server notices a drop at once (the socket closed) or only at its ping deadline (a silent drop).
+  const dropNoticed = [0, 2 * CHANNEL_PING_INTERVAL_MS]
+  it.each(dropNoticed)(
+    "keeps a kicked participant's leave, with its reason, for a client back before its hold ends (drop noticed after %i ms)",
+    async (noticedAfter) => {
+      vi.useFakeTimers()
+      const room = (await Room.create('kick-while-offline')) as ServerRoom
+      const me = (await room.join({ identity: 'user-1' })) as ServerLocalParticipant
+      const channel = new RoomParticipantStubChannel(me)
+      channel._registerChannel()
+      attachPeer(channel)
+      if (noticedAfter === 0) channel._onPeerDisconnect(CHANNEL_RECONNECT_TIMEOUT_MS)
+      await Room.removeParticipant(room.id, { identity: 'user-1', reason: 'banned' })
+      await vi.advanceTimersByTimeAsync(noticedAfter)
+      if (noticedAfter > 0) channel._onPeerDisconnect(CHANNEL_RECONNECT_TIMEOUT_MS)
+      await vi.advanceTimersByTimeAsync(CHANNEL_RECONNECT_TIMEOUT_MS - 1_000)
+      expect(channel._replayBuffer).not.toBeNull()
+      const notices = attachPeer(channel, 0)
+        .decoded()
+        .flatMap((frame) => (frame.tag === TAG.TEXT ? [parse(frame.text) as { __r: string }] : []))
+      expect(notices).toContainEqual({ __r: 'left', cause: 'removed', reason: 'banned' })
+    },
+  )
+  it.each(dropNoticed)(
+    "keeps a room's closed event for a client back before its hold ends (drop noticed after %i ms)",
+    async (noticedAfter) => {
+      vi.useFakeTimers()
+      const room = (await Room.create('close-while-offline')) as ServerRoom
+      const stub = register(room)
+      const first = attachPeer(stub)
+      await vi.waitFor(() => expect(controlEvents(first).map(({ __r }) => __r)).toContain('roster'))
+      if (noticedAfter === 0) stub._onPeerDisconnect(CHANNEL_RECONNECT_TIMEOUT_MS)
+      await Room.close(room.id)
+      await vi.advanceTimersByTimeAsync(noticedAfter)
+      if (noticedAfter > 0) stub._onPeerDisconnect(CHANNEL_RECONNECT_TIMEOUT_MS)
+      await vi.advanceTimersByTimeAsync(CHANNEL_RECONNECT_TIMEOUT_MS - 1_000)
+      expect(stub._replayBuffer).not.toBeNull()
+      expect(controlEvents(attachPeer(stub, 0)).map(({ __r }) => __r)).toContain('closed')
+    },
+  )
   it('sends a reattached client the room state its offline buffer dropped', async () => {
     const room = (await Room.create('reattach-resync')) as ServerRoom
     const leaver = await room.join()
