@@ -2326,6 +2326,37 @@ describe('Room public behavior', () => {
     await new Promise((resolve) => setTimeout(resolve, 20))
     expect(seen).toEqual([])
   })
+  it('does not show a member again that a kick removed while its join announcement was confirming', async () => {
+    const room = (await Room.create('join-kick-confirming')) as ServerRoom
+    const seen: string[] = []
+    room.onJoin(() => seen.push('join'))
+    room.onLeave((_member, cause) => seen.push(cause.type))
+    const peer = attachPeer(register(room))
+    const backend = getRoomBackend()
+    const commitLane = backend.commitLane.bind(backend)
+    const committed = deferred<void>()
+    const confirm = deferred<void>()
+    vi.spyOn(backend, 'commitLane').mockImplementation(async (roomId, inc, lane, payload, options) => {
+      const result = await commitLane(roomId, inc, lane, payload, options)
+      const isJoin = lane.kind === 'control' && (parse(decoder.decode(payload)) as { __r?: string }).__r === 'join'
+      if (!isJoin || !('accepted' in result)) return result
+      committed.resolve()
+      // Its delivery is confirmed late, as when one of a Cloudflare room's session DOs is slow.
+      return { ...result, delivery: result.delivery.then(() => confirm.promise) }
+    })
+    const joining = room.join({ identity: 'user-1' }).catch((error: unknown) => error)
+    await committed.promise
+    await Room.removeParticipant(room.id, { identity: 'user-1', reason: 'banned' })
+    await vi.waitFor(() => expect(seen).toEqual(['join', 'removed']))
+    confirm.resolve()
+    expect(isRoomError(await joining)).toBe(true)
+    expect(seen).toEqual(['join', 'removed'])
+    expect(room.count).toBe(0)
+    expect(controlEvents(peer).flatMap(({ __r }) => (__r === 'join' || __r === 'leave' ? [__r] : []))).toEqual([
+      'join',
+      'leave',
+    ])
+  })
   it('subscribes the lanes of a member that joins through this instance for its listeners here', async () => {
     const room = (await Room.create('own-join-replan')) as ServerRoom
     const frames: number[] = []

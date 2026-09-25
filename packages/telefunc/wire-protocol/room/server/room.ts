@@ -236,6 +236,7 @@ class ServerRoom extends RoomStateView implements Room {
       } as const
       // A member removed meanwhile gets no join after its leave, here or anywhere.
       await publishCtrl(this.id, this._inc, join, { requiredCellKeys: [memberCellKey(id)] })
+      this._assertAdmitted(id)
       if (this._applyJoin(joinedMember(join))) this._relayApplied(join)
     } catch (error) {
       // A member write that rejected may still have committed, its reply lost; evicting an absent member only reads.
