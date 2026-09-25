@@ -13,7 +13,7 @@ import {
   type TrackWants,
 } from './binary.js'
 import { ROOM_WANTED_TRACKS_MAX } from './constants.js'
-import { assertKnownOptions, ownLeaveCause, ownMetadata, senderOf, stampNewer } from './model.js'
+import { assertKnownOptions, ownLeaveCause, ownMetadata, removedCause, senderOf, stampNewer } from './model.js'
 import type { AcceptedMeta, MemberSnapshot, MemberWants, RoomDataEnvelope } from './protocol.js'
 import type {
   BinaryFrameInfo,
@@ -62,8 +62,8 @@ type RoomStateOptions = {
   /** A user callback threw. The owner decides how to report it. */
   onCallbackError: (err: unknown) => void
   /** Every leave, from an event or a reconciled roster, after this view's callbacks; `hidden` is null for a member
-   *  this view didn't know. A leave with no cause had no event. */
-  onLeave: (id: string, cause: LeaveCause | undefined, hidden: boolean | null) => void
+   *  this view didn't know. */
+  onLeave: (id: string, cause: LeaveCause, hidden: boolean | null) => void
 }
 /** Exact-keyed backing lets the serializer recover (room, member) without exposing a public brand. */
 type RemoteBacking = { state: RoomState; entry: MemberEntry }
@@ -368,13 +368,13 @@ class RoomState {
     this._bumpMembership()
     this._fireAll(this._joinCbs, this._remote(entry))
   }
-  applyLeave(id: string, cause?: LeaveCause): void {
+  applyLeave(id: string, cause: LeaveCause): void {
     const entry = this._members.get(id)
-    if (entry) this._removeEntry(entry, cause && ownLeaveCause(cause))
+    if (entry) this._removeEntry(entry, ownLeaveCause(cause))
     else this._markUnknownMember()
     this._onLeave(id, cause, entry ? entry.hidden : null)
   }
-  private _removeEntry(entry: MemberEntry, cause: LeaveCause | undefined): void {
+  private _removeEntry(entry: MemberEntry, cause: LeaveCause): void {
     entry.left = true
     entry.leaveCause = cause
     const remote = this._remote(entry)
@@ -534,7 +534,8 @@ class RoomState {
     let removed = false
     for (const id of [...this._members.keys()]) {
       if (seen.has(id)) continue
-      this.applyLeave(id)
+      // No leave event reached this view; an owner renews its members, so a vanished one was removed.
+      this.applyLeave(id, removedCause(undefined))
       removed = true
     }
     return removed

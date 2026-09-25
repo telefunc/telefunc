@@ -222,7 +222,7 @@ class ClientRoom extends RoomStateView implements Room {
   /** @internal A local participant completed its voluntary leave. */
   _dropParticipant(id: string): void {
     this._localParticipants.delete(id)
-    this._state.applyLeave(id) // the relayed event is absorbed
+    this._state.applyLeave(id, { type: 'left' }) // the relayed event is absorbed
   }
 
   private _onEnvelope(envelope: unknown, rawInfo: ChannelPublishInfo): void {
@@ -279,11 +279,11 @@ class ClientRoom extends RoomStateView implements Room {
 
   /** Every leave the state applies ends the member's local participant: kicked (with the kick's reason), left through
    *  another handle, or missing from a roster. */
-  private _onLeave(id: string, cause: LeaveCause | undefined): void {
+  private _onLeave(id: string, cause: LeaveCause): void {
     const local = this._localParticipants.get(id)
     if (!local) return
     this._localParticipants.delete(id)
-    local._onLeft(cause ?? { type: 'removed' })
+    local._onLeft(cause)
   }
 
   private _onBinaryFrame(framed: Uint8Array, rawInfo: ChannelPublishInfo): void {

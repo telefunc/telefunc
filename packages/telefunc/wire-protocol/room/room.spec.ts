@@ -219,6 +219,8 @@ describe('Room public behavior', () => {
     const reconciled = await join()
     const vanished = await join()
     await vi.waitFor(() => expect(memberEvents(peer, vanished).map((event) => event.__r)).toEqual(['join']))
+    const causes: unknown[] = []
+    room.onLeave((_, cause) => causes.push(cause))
     const leaves = (id: string) => memberEvents(peer, id).filter((event) => event.__r === 'leave')
     const loseNextControlFrame = () => vi.spyOn(room, '_onCtrlMessage').mockImplementationOnce(() => {})
     loseNextControlFrame()
@@ -230,6 +232,7 @@ describe('Room public behavior', () => {
     await Room.removeParticipant(room.id, { id: vanished })
     await subsOf(room)._heartbeatTick()
     expect(leaves(vanished)).toEqual([{ __r: 'leave', id: vanished, cause: 'removed' }])
+    expect(causes).toEqual([{ type: 'removed' }, { type: 'removed' }])
   })
   it("relays a room meta update that reached this instance only through the authority's reconcile", async () => {
     const room = (await Room.create('lost-update', { meta: { topic: 'old' } })) as unknown as ServerRoom
@@ -744,7 +747,7 @@ describe('Room public behavior', () => {
     await controlSubscribed.promise
     const member = await room.join()
     await room.getParticipants()
-    room._state.applyLeave(member.id)
+    room._state.applyLeave(member.id, { type: 'left' })
     expect(room.count).toBe(0)
     transition('lost')
     transition('ready')
@@ -2689,7 +2692,7 @@ describe('client Room lifecycle', () => {
     const id = crypto.randomUUID()
     state.applyTrack(id, 'screen')
     state.applyParticipantMeta(id, { step: 1 }, 1)
-    state.applyLeave(id)
+    state.applyLeave(id, { type: 'left' })
     expect(state.membershipVersion).toBe(3)
     const member = { id, meta: {}, joinedAt: 1, metaSeq: 0 }
     expect(state.reconcileRoster([member])).toBe(true)
@@ -2806,10 +2809,13 @@ describe('client Room lifecycle', () => {
       },
     })
     const member = await client.join()
+    const causes: unknown[] = []
+    client.onLeave((_, cause) => causes.push(cause))
     await expect(member.leave()).rejects.toThrow('transient leave rejection')
     await expect(member.publish('still-active')).resolves.toMatchObject({ seq: 1 })
     await expect(member.leave()).resolves.toBeUndefined()
     expect(leaveAttempts).toBe(2)
+    expect(causes).toEqual([{ type: 'left' }])
   })
   it('settles a client join across a pre-ack closed event', async () => {
     const { id, ack, emit, joining } = await pendingClientJoin('pre-ack-closed')
@@ -2894,14 +2900,15 @@ describe('client Room lifecycle', () => {
     expect(requests[0]).not.toHaveProperty('ack')
   })
   it('ends a local participant that a roster no longer lists', async () => {
-    const { id, ack, emit, joining } = await pendingClientJoin('roster-drops-local')
+    const { id, ack, emit, joining, client } = await pendingClientJoin('roster-drops-local')
     emit({ __r: 'join', id, meta: {}, joinedAt: 1 }, 1)
     ack.resolve({ id, joinedAt: 1 })
     const participant = await joining
     const causes: unknown[] = []
     participant.onLeave((cause) => causes.push(cause.type))
+    client.onLeave((_, cause) => causes.push(cause?.type))
     emit({ __r: 'roster', members: [] }, 2)
-    expect(causes).toEqual(['removed'])
+    expect(causes).toEqual(['removed', 'removed'])
   })
   it("derives participant-update prev from the receiver's own applied state", async () => {
     const { client, emit } = fakeClient('receiver-local-prev')

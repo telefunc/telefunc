@@ -644,15 +644,14 @@ class ServerRoom extends RoomStateView implements Room {
     this._state.applyLeave(id, cause)
   }
   /** Every leave the state applies, event or reconcile, runs the member's cleanup. */
-  private _onLeave(id: string, cause: LeaveCause | undefined, hidden: boolean | null): void {
+  private _onLeave(id: string, cause: LeaveCause, hidden: boolean | null): void {
     this._announcedTracks.delete(id)
     this._relayedAhead.delete(id)
     this._rejectDmAcks(DM_FAILURE.left, id) // strand no waiter on a gone member
     const local = this._localParticipants.get(id)
     if (local) {
       this._localParticipants.delete(id)
-      // A live-heartbeating owner can't be reaped (heartbeats outpace the TTL by 4x), so a vanished record with no observed event means the member was removed.
-      local._onLeft(cause ?? { type: 'removed' })
+      local._onLeft(cause)
     }
     // Every leave of a member this view knew reaches its clients here, once: from an event, from this instance's own
     // removal, whose echo a lost frame can drop, or from a roster read, where no event means a removal.
@@ -660,7 +659,7 @@ class ServerRoom extends RoomStateView implements Room {
       this._relayApplied({
         __r: 'leave',
         id,
-        ...leaveCauseToWire(cause ?? { type: 'removed' }),
+        ...leaveCauseToWire(cause),
         ...(hidden ? { hidden: true } : {}),
       })
     for (const stub of this._stubs) stub._forgetMember(id)
