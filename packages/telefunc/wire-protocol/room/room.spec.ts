@@ -29,6 +29,7 @@ import { RoomState, remoteBacking } from './state.js'
 import { Room } from './server/statics.js'
 import { ServerRoom, type ServerLocalParticipant } from './server/room.js'
 import { configFromHead, decodeRoomText, encodeRoomRecord } from './server/lanes.js'
+import { config } from '../../node/server/serverConfig.js'
 import type { LaneSubscription } from './server/lane-subscription.js'
 import { reportRoomError } from './server/errors.js'
 import { RoomParticipantStubChannel, RoomStubChannel } from './server/stub.js'
@@ -2308,6 +2309,31 @@ describe('Room public behavior', () => {
     stub._onPeerBroadcastSubscribe(false)
     await vi.waitFor(() => expect(semanticFrames(peer, 'data')).toEqual(['held']))
   })
+  it('sends a reattached client the room state its offline buffer dropped', async () => {
+    const room = (await Room.create('reattach-resync')) as ServerRoom
+    const leaver = await room.join()
+    config.channel = { bufferLimit: 256 }
+    try {
+      const stub = register(room)
+      const first = attachPeer(stub)
+      await vi.waitFor(() => expect(controlEvents(first).map(({ __r }) => __r)).toContain('roster'))
+      stub._onPeerDisconnect(60_000)
+      await leaver.leave()
+      // Larger than the offline buffer: it clears the buffered leave, and is dropped too.
+      const meta = { pad: 'x'.repeat(300) }
+      await Room.setMeta(room.id, meta)
+      await vi.waitFor(() => expect(room.meta).toEqual(meta))
+      const peer = attachPeer(stub)
+      await vi.waitFor(() =>
+        expect(controlEvents(peer).map(({ __r, members, meta }) => ({ __r, members, meta }))).toEqual([
+          { __r: 'update', members: undefined, meta },
+          { __r: 'roster', members: [], meta: undefined },
+        ]),
+      )
+    } finally {
+      config.channel = {}
+    }
+  })
   it("applies a reattach entry's text subscription as the Room stub's want, not as a Broadcast route", async () => {
     const room = (await Room.create('reattach-text')) as ServerRoom
     const member = await room.join()
@@ -3126,7 +3152,7 @@ describe('client Room lifecycle', () => {
     await subsOf(room)._refreshMembers()
     expect(events()).toEqual(['roster-error', 'roster'])
   })
-  it('replays a committed server-pushed roster after reconnect without rerunning onOpen', async () => {
+  it('replays a committed server-pushed roster after reconnect, then sends a fresh one', async () => {
     const room = (await Room.create('roster-replay')) as ServerRoom
     const stub = register(room)
     const ensureRoster = vi.spyOn(subsOf(room), 'ensureRoster')
@@ -3136,7 +3162,7 @@ describe('client Room lifecycle', () => {
     const [frame] = attachPeer(stub, 0).decoded()
     if (frame?.tag !== TAG.PUBLISH) throw new Error('expected replayed roster publish')
     expect(parse(frame.text)).toMatchObject({ __r: 'roster', members: [] })
-    expect(ensureRoster).toHaveBeenCalledOnce()
+    expect(ensureRoster).toHaveBeenCalledTimes(2)
   })
 })
 describe('room demand lifecycle', () => {
@@ -3552,6 +3578,12 @@ function clientView(peer: Peer, roomId: string): ClientRoom {
   const { client, emit } = fakeClient(roomId)
   for (const frame of peer.decoded()) if (frame.tag === TAG.PUBLISH) emit(parse(frame.text), frame.info.seq)
   return client
+}
+function controlEvents(peer: Peer): Array<{ __r: string; members?: unknown[]; meta?: unknown }> {
+  return peer
+    .decoded()
+    .filter((frame) => frame.tag === TAG.PUBLISH)
+    .map((frame) => JSON.parse(frame.text) as { __r: string; members?: unknown[]; meta?: unknown })
 }
 function semanticFrames(peer: Peer, kind: 'data' | 'announce'): unknown[] {
   return peer

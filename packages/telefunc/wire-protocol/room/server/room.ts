@@ -736,9 +736,13 @@ class ServerRoom extends RoomStateView implements Room {
       stub._beginTail(this._tail.take(), () => this._subs.replan())
       this._tail = null
     }
-    stub.onOpen(() => this._sendRosterTo(stub))
     stub.onClose(() => this._detachStub(stub))
     this._subs.replan()
+  }
+  _onStubAttached(stub: RoomStubChannel, reattach: boolean): void {
+    this._sendRosterTo(stub)
+    if (reattach && this._stubs.has(stub))
+      stub._relayEvent({ __r: 'update', meta: this.meta, ...this._state.updateStamp })
   }
   private _sendRosterTo(stub: RoomStubChannel): void {
     void this._subs

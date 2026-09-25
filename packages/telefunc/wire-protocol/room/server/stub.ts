@@ -7,7 +7,8 @@ import { assertUsage } from '../../../utils/assert.js'
 import { ROOM_DM_ACK_TIMEOUT_MS } from '../constants.js'
 import { ServerChannel, parsePeerText } from '../../server/channel.js'
 import type { ShieldValidator } from '../../../node/server/shield.js'
-import { encodePublishBinary, encodePublishText, type WirePublishInfo } from '../../shared-ws.js'
+import { encodePublishBinary, encodePublishText, type ReattachState, type WirePublishInfo } from '../../shared-ws.js'
+import type { IndexedPeer } from '../../server/IndexedPeer.js'
 import { ShieldValidationError } from '../../../shared/ShieldValidationError.js'
 import type { ChannelPublishAck } from '../../channel.js'
 import type { ServerLocalParticipant, ServerRoom } from './room.js'
@@ -88,6 +89,7 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
   private _binary: BinaryWants = emptyBinaryWants()
   /** A tail waits for the client's first text selector, then flushes once in order. */
   private _tail: TailHold | null = null
+  private _attached = false
 
   constructor(
     serverRoom: ServerRoom,
@@ -98,6 +100,14 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
     this._publishShield = publishShield
     this._selfSuppressed = grants.selfSuppressed
     this._grantedHidden = grants.hidden
+  }
+
+  /** Each attach gets the room's state: a reattached client may have missed events its offline buffer dropped. */
+  override _attachPeer(peer: IndexedPeer, state?: ReattachState): void {
+    const reattach = this._attached
+    this._attached = true
+    super._attachPeer(peer, state)
+    this._room._onStubAttached(this, reattach)
   }
 
   // Client requests
