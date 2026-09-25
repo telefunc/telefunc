@@ -216,9 +216,9 @@ export async function onJoinChat(roomId) {
   const { user } = getContext()
   const room = await Room.get(roomId)
   Room.guard(room, {
-    onBeforeJoin: (member) => { if (banned.has(member.identity)) throw Abort('banned') },
+    onBeforeJoin: () => { if (banned.has(user.id)) throw Abort('banned') },
     onBeforePublish: (from, data) => { if (isSpam(data)) throw Abort('blocked') },
-    onBeforeSend: async (from, to) => { if (!(await areFriends(from.identity, to.identity))) throw Abort('not friends') },
+    onBeforeSend: async (from, to) => { if (!(await areFriends(user.id, to.identity))) throw Abort('not friends') },
   })
   return { room, me: await room.join({ meta: { name: user.name }, identity: user.id }) }
 }
@@ -227,6 +227,8 @@ export async function onJoinChat(roomId) {
 Each `onBefore*` runs before the operation commits, and rejects the caller — on the client too — following Telefunc's usual <Link href="/error-handling">error contract</Link>: `throw Abort(value)` rejects with an `Abort` carrying `value` (the caller inspects `err.abortValue` / `err instanceof Abort`), the way to surface a reason a client can act on; any other throw is treated as a bug — the caller gets a generic error and the real one is logged server-side. Each `onAfter*` (`onAfterJoin`, `onAfterSend`, `onAfterPublish`) runs once it commits, with the receipt (`{ seq, timestamp }`; `onAfterJoin` gets `{ joinedAt }`): the place to persist a message in its server-assigned order (see <Link href="#history-live-tail">History</Link>).
 
 Room operations can also reject for expected conditions such as a closed room, a gone participant, or a target that isn't a member. These failures aren't reported as bugs, and their safe message reaches the caller.
+
+A join the client makes through the returned room carries `identity: null` (identity is server-side only), so key a guard on the telefunction's own user, as above: every join and message through this instance is that user's.
 
 <Warning>Guards apply only to the specific instance passed to `Room.guard()`. Attach guards in the telefunction that hands the room to clients; other Room instances are unguarded. Returning a room, or a `RemoteParticipant` of it, opens that room instance to the client, which can join through it under that instance's guards; a returned `LocalParticipant` opens only that participant.</Warning>
 
@@ -419,10 +421,12 @@ export async function onJoinLobby(lobbyId, name) {
   return { room, me: await room.join({ meta: { name, ready: false }, identity: user.id }) }
 }
 
-// The server owns "start": it re-reads readiness and announces, so no client can fake it.
+// The server owns "start": it re-reads readiness, claims the start once in your store, and announces, so no client can
+// fake it, and two last ready-ups at once start one game.
 export async function onReadyUp(lobbyId) {
   const players = await Room.getParticipants(lobbyId)
-  if (players.length > 1 && players.every((p) => p.meta.ready)) await Room.announce(lobbyId, { type: 'start' })
+  if (players.length < 2 || !players.every((p) => p.meta.ready)) return
+  if (await db.lobbies.claimStart(lobbyId)) await Room.announce(lobbyId, { type: 'start' }) // one atomic DB operation
 }
 ```
 ```js
