@@ -6,6 +6,7 @@ import {
   decode,
   decodeClientFrame,
   encode,
+  encodePublishBinary,
   isChannelCtrlTag,
   isConnCtrlTag,
   type BarrierPayload,
@@ -194,8 +195,8 @@ describe('decodeClientFrame — direction', () => {
   })
 
   test('a server-only frame is refused before its payload is parsed', () => {
-    const versionHeader = [0x54, 0x46, 0x42, 1, 0, 0, 0, 0, 0, 0, 0xf8, 0x7f]
-    const truncatedOrdering = encode.publishBinary(0, new Uint8Array([...versionHeader, 0, 0, 0, 0]), 1)
+    const publish = encodePublishBinary(new Uint8Array(), { seq: 1, timestamp: 1 })
+    const truncatedOrdering = encode.publishBinary(0, publish.subarray(0, publish.byteLength - 1), 1)
     expect(() => clientFrame(truncatedOrdering)).toThrow(ProtocolViolationError)
   })
 
