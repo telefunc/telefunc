@@ -644,17 +644,23 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   }
 
   publish(data: ChannelData<T>): Promise<ChannelPublishAck> {
+    const ret = this._publishUnreported(data)
+    ret.catch(reportUnexpectedPublishError)
+    return ret
+  }
+
+  /** @internal A publish whose rejection its caller handles: a Room's are expected outcomes, and the server reports
+   *  its bugs. */
+  _publishUnreported(data: ChannelData<T>): Promise<ChannelPublishAck> {
     if (this._isClosed) throw new ChannelClosedError()
     const serialized = stringify(data)
-    const ret = this._trackAck(
+    return this._trackAck(
       new Promise<ChannelPublishAck>((resolve, reject) => {
         this._connection.sendPublishAckReq(this, serialized, (seq) => {
           this._pendingAcks.set(seq, { resolve, reject })
         })
       }),
     )
-    ret.catch(reportUnexpectedPublishError)
-    return ret
   }
 
   subscribe(callback: BroadcastListener<T>): () => void {
@@ -662,16 +668,21 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   }
 
   publishBinary(data: Uint8Array): Promise<ChannelPublishAck> {
+    const ret = this._publishBinaryUnreported(data)
+    ret.catch(reportUnexpectedPublishError)
+    return ret
+  }
+
+  /** @internal The binary twin of `_publishUnreported()`. */
+  _publishBinaryUnreported(data: Uint8Array): Promise<ChannelPublishAck> {
     if (this._isClosed) throw new ChannelClosedError()
-    const ret = this._trackAck(
+    return this._trackAck(
       new Promise<ChannelPublishAck>((resolve, reject) => {
         this._connection.sendPublishBinaryAckReq(this, data, (seq) => {
           this._pendingAcks.set(seq, { resolve, reject })
         })
       }),
     )
-    ret.catch(reportUnexpectedPublishError)
-    return ret
   }
 
   subscribeBinary(callback: BroadcastBinaryListener): () => void {

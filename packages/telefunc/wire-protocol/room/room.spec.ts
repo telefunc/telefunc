@@ -2721,6 +2721,34 @@ describe('client Room lifecycle', () => {
     expect(client._getRemote(hidden.id)).toBeNull()
     expect(left).toBe(1)
   })
+  it("rejects a member's publish the server refused as expected, without reporting a client bug", async () => {
+    const report = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const stub = Object.assign(Object.create(ClientBroadcast.prototype) as ClientBroadcast, {
+      _isClosed: false,
+      _pendingAcks: new Map(),
+      _inflightAcks: 0,
+      _closeWaiters: [],
+      _wire: { text: false, binary: false },
+      _connection: {
+        sendPublishAckReq: (_channel: unknown, _data: unknown, register: (seq: number) => void) => register(1),
+        sendBroadcastSubscribe: () => {},
+        sendBroadcastUnsubscribe: () => {},
+      },
+      _subscribeLocal: () => () => {},
+      send: async (message: { __r?: string }) =>
+        message.__r === 'req-join' ? { id: crypto.randomUUID(), joinedAt: 1 } : undefined,
+      onClose: () => {},
+    })
+    const me = await new ClientRoom(stub, snapshot('publish-refused')).join()
+    const publishing = me.publish('hi')
+    ;(stub as unknown as { _onPeerAckRes(seq: number, text: string, status: number): void })._onPeerAckRes(
+      1,
+      'Participant not found (left?)',
+      ACK_STATUS.ERROR,
+    )
+    await expect(publishing).rejects.toThrow('Participant not found (left?)')
+    expect(report).not.toHaveBeenCalled()
+  })
   it('declares nothing while its stub is closing, so an unsubscribe during the close returns normally', () => {
     let closing = false
     const { client, fake } = fakeClient('declare-while-closing', {
@@ -3317,8 +3345,8 @@ function createFakeStub(options?: {
     },
     _setWireSubscribed: ClientBroadcast.prototype._setWireSubscribed,
     send: options?.send ?? (async () => undefined),
-    publish: async () => ({ key: 'fake', seq: 1, timestamp: 1 }),
-    publishBinary: async () => ({ key: 'fake', seq: 1, timestamp: 1 }),
+    _publishUnreported: async () => ({ key: 'fake', seq: 1, timestamp: 1 }),
+    _publishBinaryUnreported: async () => ({ key: 'fake', seq: 1, timestamp: 1 }),
     onClose: () => {},
   } as unknown as ClientBroadcast
   return {

@@ -205,7 +205,7 @@ class ClientRoom extends RoomStateView implements Room {
 
   /** @internal The envelope sent upward is a claim: the server validates `from` against this stub's members and stamps the verified `fromMeta` itself before anything reaches the room. */
   async _publishText(from: string, data: unknown, retain?: boolean): Promise<ChannelPublishAck> {
-    return await this._stub.publish({
+    return await this._stub._publishUnreported({
       __r: 'data',
       from,
       data,
@@ -215,7 +215,7 @@ class ClientRoom extends RoomStateView implements Room {
 
   /** @internal */
   async _publishBinaryFramed(framed: Uint8Array): Promise<ChannelPublishAck> {
-    return await this._stub.publishBinary(framed)
+    return await this._stub._publishBinaryUnreported(framed)
   }
 
   /** @internal A local participant completed its voluntary leave. */
