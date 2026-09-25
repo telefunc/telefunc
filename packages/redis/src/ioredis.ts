@@ -75,14 +75,15 @@ function clusterReady(cluster: Cluster): Promise<void> {
     const settle = (error?: Error) => {
       clusterWaits.delete(cluster)
       cluster.off('ready', onReady)
-      cluster.off('end', onEnd)
+      cluster.off('close', onClose)
       if (error) reject(error)
       else resolve()
     }
     const onReady = () => settle()
-    const onEnd = () => settle(new Error('RedisBackend: Cluster connection ended'))
+    // Every failed connect closes, whether the Cluster retries it or ends.
+    const onClose = () => settle(new Error('RedisBackend: Cluster connection closed'))
     cluster.once('ready', onReady)
-    cluster.once('end', onEnd)
+    cluster.once('close', onClose)
   })
   clusterWaits.set(cluster, wait)
   return wait
