@@ -762,16 +762,27 @@ describe('Broadcast shield validation', () => {
 // ───────────────────────────────────────────────────────────────────────────
 
 describe('Broadcast static bus (publish/subscribe)', () => {
-  it('releases a queued publish when its establishing subscriber terminates, and reports the end', async () => {
-    const { controlled, publish } = await installPendingSubscriptionBackend({ seq: 1, timestamp: 1 })
+  it('releases a queued publish once its key has no establishing subscription, and reports each end', async () => {
+    const attempts: Array<ReturnType<typeof pendingSubscription>> = []
+    const driver = await installOpeningBackend(() => {
+      const attempt = pendingSubscription()
+      attempts.push(attempt)
+      return attempt.subscription
+    })
+    const publish = vi.spyOn(driver, 'publish').mockReturnValue({ seq: 1, timestamp: 1 })
     const report = vi.spyOn(console, 'error').mockImplementation(() => {})
     const unsubscribe = Broadcast.subscribe('broadcast:terminal-ready', () => {})
     try {
       const publishing = Broadcast.publish('broadcast:terminal-ready', 'after-terminal')
-      controlled.close()
+      attempts[0]!.close()
+      // The ended subscription is replaced once, and the publish waits for the replacement too.
+      await vi.waitFor(() => expect(attempts).toHaveLength(2))
+      expect(publish).not.toHaveBeenCalled()
+      attempts[1]!.close()
       await expect(publishing).resolves.toMatchObject({ seq: 1 })
       expect(publish).toHaveBeenCalledOnce()
-      expect(report).toHaveBeenCalledWith(expect.stringContaining('Backend subscription closed'))
+      const ends = report.mock.calls.filter(([logged]) => String(logged).includes('Backend subscription closed'))
+      expect(ends).toHaveLength(2)
     } finally {
       unsubscribe()
     }
