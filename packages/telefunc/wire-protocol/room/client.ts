@@ -14,7 +14,6 @@ import {
   hasRoomTag,
   inboxMessageFromWire,
   joinedMember,
-  type DmReply,
   type InboxMessage,
   type MemberSnapshot,
   type ParticipantStubMetadata,
@@ -177,13 +176,9 @@ class ClientRoom extends RoomStateView implements Room {
       return
     }
     const ackId = msg.ackId
-    void participant._deliverMessageAck(msg).then((reply) => this._replyDm(participant.id, ackId, reply))
-  }
-
-  private _replyDm(id: string, ackId: string, reply: DmReply): void {
-    // A closed stub can't carry the reply; the sender's ack times out as for any lost reply.
-    if (this._stub.isClosed) return
-    void this._stub.send({ __r: 'dm-reply', id, ackId, reply }, { ack: false }).catch(() => {})
+    void participant
+      ._deliverMessageAck(msg)
+      .then((reply) => this._notify({ __r: 'dm-reply', id: participant.id, ackId, reply }))
   }
 
   /** @internal Revival of a serialized `RemoteParticipant` (see `roomRemoteReviver`). */
@@ -268,7 +263,8 @@ class ClientRoom extends RoomStateView implements Room {
         // Relayed from this member's private inbox: only its own stub ever receives it.
         const local = this._localParticipants.get(event.to)
         if (local) this._deliverDm(local, inboxMessageFromWire(event))
-        else if (event.ackId) this._replyDm(event.to, event.ackId, DM_FAILURE.left)
+        else if (event.ackId)
+          this._notify({ __r: 'dm-reply', id: event.to, ackId: event.ackId, reply: DM_FAILURE.left })
         return
       }
     }
@@ -324,11 +320,15 @@ class ClientRoom extends RoomStateView implements Room {
 
   /** Declarations are replayed channel messages, so the server keeps them across reconnects: send only changes. */
   private _declare(declaration: WantsDeclaration): void {
-    if (this._stub.isClosed) return // a closing stub's server side drops its declarations with it
     const serialized = JSON.stringify(declaration)
     if (this._declared[declaration.__r] === serialized) return
     this._declared[declaration.__r] = serialized
-    void this._stub.send(declaration, { ack: false }).catch(() => {})
+    this._notify(declaration)
+  }
+
+  /** A closed stub's server side is gone with its wants, and a DM reply to it times out as any lost reply does. */
+  private _notify(notice: RoomStubRequest): void {
+    if (!this._stub.isClosed) void this._stub.send(notice, { ack: false }).catch(() => {})
   }
 }
 
