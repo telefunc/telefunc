@@ -843,6 +843,25 @@ describe('Broadcast static bus (publish/subscribe)', () => {
     unsubscribeClosed()
   })
 
+  it('leaves no unhandled rejection behind a fire-and-forget publish that fails', async () => {
+    await disposeBackend()
+    const driver = new MemoryBackend({ state: memoryState })
+    vi.spyOn(driver, 'publish').mockRejectedValue(new Error('connection lost'))
+    installBackend(() => driver)
+    const unhandled: unknown[] = []
+    const onUnhandled = (reason: unknown) => void unhandled.push(reason)
+    process.on('unhandledRejection', onUnhandled)
+    try {
+      Broadcast.publish('broadcast:fire-and-forget', 'text')
+      Broadcast.publishBinary('broadcast:fire-and-forget', new Uint8Array([1]))
+      await new Promise((resolve) => setTimeout(resolve, 10))
+      expect(unhandled).toEqual([])
+      await expect(Broadcast.publish('broadcast:fire-and-forget', 'awaited')).rejects.toThrow('connection lost')
+    } finally {
+      process.off('unhandledRejection', onUnhandled)
+    }
+  })
+
   it('static unsubscribe stops further deliveries', async () => {
     const received: Array<{ text: string }> = []
     const unsubscribe = Broadcast.subscribe<{ text: string }>('room:static-unsub', (m) => received.push(m))

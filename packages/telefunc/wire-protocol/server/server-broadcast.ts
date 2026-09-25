@@ -270,7 +270,7 @@ const Broadcast = {
     const backend = getBroadcastBackend()
     const serialized = stringify(data)
     const route = { key, kind: 'text' } as const
-    return backend.publish(route, textEncoder.encode(serialized), bufferLimit('text'))
+    return markHandled(backend.publish(route, textEncoder.encode(serialized), bufferLimit('text')))
   },
   subscribe<U = unknown>(key: string, callback: BroadcastListener<U>): BroadcastUnsubscribe {
     return subscribeRoute(
@@ -283,11 +283,17 @@ const Broadcast = {
     assertBroadcastKey(key)
     const backend = getBroadcastBackend()
     const route = { key, kind: 'binary' } as const
-    return backend.publish(route, data, bufferLimit('binary'))
+    return markHandled(backend.publish(route, data, bufferLimit('binary')))
   },
   subscribeBinary(key: string, callback: BroadcastBinaryListener): BroadcastUnsubscribe {
     return subscribeRoute({ key, kind: 'binary' }, (payload) => payload, callback)
   },
+}
+
+/** A fire-and-forget publish that fails leaves no unhandled rejection; a caller that awaits it still sees the error. */
+function markHandled<T>(result: T | Promise<T>): T | Promise<T> {
+  if (isPromise(result)) result.catch(() => {})
+  return result
 }
 
 function subscribeRoute<Data>(
