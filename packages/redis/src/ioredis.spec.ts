@@ -3,7 +3,7 @@ import { expect, onTestFinished, test, vi } from 'vitest'
 import { RedisBackend } from './backend.js'
 import { createSubscriberSocket } from './ioredis.js'
 
-test('requires explicit never-resend playground clients', () => {
+test('requires never-resend clients', () => {
   const nodes = [{ host: '127.0.0.1', port: 6379 }]
   const message =
     'RedisBackend: at-most-once requires maxRetriesPerRequest: 0 (standalone Redis), or retryDelayOnFailover: 0 and redisOptions.maxRetriesPerRequest: 0 (Cluster); reconnectOnError must be unset'
