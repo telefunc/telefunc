@@ -26,6 +26,7 @@ test("rejects an ioredis keyPrefix, which Pub/Sub channel names don't get", () =
   const prefixed = [
     new Redis('redis://127.0.0.1:6379', { maxRetriesPerRequest: 0, keyPrefix: 'app:' }),
     new Cluster(nodes, { retryDelayOnFailover: 0, redisOptions: { maxRetriesPerRequest: 0, keyPrefix: 'app:' } }),
+    new Cluster(nodes, { retryDelayOnFailover: 0, keyPrefix: 'app:', redisOptions: { maxRetriesPerRequest: 0 } }),
   ]
   onTestFinished(() => prefixed.forEach((redis) => redis.disconnect()))
   for (const redis of prefixed) expect(() => new RedisBackend({ redis })).toThrow('keyPrefix')

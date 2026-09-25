@@ -37,8 +37,8 @@ function assertAtMostOnceClient(redis: RedisClient): void {
     throw new Error(
       'RedisBackend: at-most-once requires maxRetriesPerRequest: 0 (standalone Redis), or retryDelayOnFailover: 0 and redisOptions.maxRetriesPerRequest: 0 (Cluster); reconnectOnError must be unset',
     )
-  const keyPrefix = isCluster(redis) ? redis.options.redisOptions?.keyPrefix : redis.options.keyPrefix
-  if (keyPrefix)
+  // A Cluster copies redisOptions.keyPrefix to its own options, so this reads either form.
+  if (redis.options.keyPrefix)
     throw new Error(
       "RedisBackend: ioredis keyPrefix isn't supported (it doesn't apply to Pub/Sub channels). Use installRedis(redis, { prefix }) instead",
     )
