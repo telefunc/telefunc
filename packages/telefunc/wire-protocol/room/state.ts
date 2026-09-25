@@ -199,6 +199,10 @@ class RoomState {
     for (const entry of this._members.values()) if (entry.hidden) n++
     return n
   }
+  /** How the room closed for this view; `null` while it is open. */
+  get closedCause(): LeaveCause | null {
+    return this.closed ? this._closedCause : null
+  }
   /** Whether this view holds the authoritative member list (vs just a count). */
   get rosterKnown(): boolean {
     return this._rosterKnown

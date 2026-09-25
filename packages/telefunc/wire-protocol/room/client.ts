@@ -74,7 +74,6 @@ class ClientRoom extends RoomStateView implements Room {
   private readonly _stub: ClientBroadcast
   protected readonly _state: RoomState
   private readonly _localParticipants = new Map<string, ClientRoomParticipant>()
-  private _closedCause: LeaveCause | null = null
   /** Joins awaiting their ack. The server relays to a member from its admission, before the ack registers it here, so events naming an unknown member wait for the joins to settle. */
   private _pendingJoins = 0
   private _heldForJoins: Array<{ envelope: unknown; rawInfo: ChannelPublishInfo }> = []
@@ -100,10 +99,7 @@ class ClientRoom extends RoomStateView implements Room {
       onLeave: (id, cause) => this._onLeave(id, cause),
     })
     this._state._owner = this
-    if (snapshot.closed) {
-      this._closedCause = { type: 'closed' }
-      this._roster.resolve()
-    }
+    if (snapshot.closed) this._roster.resolve()
 
     // Delivery handlers are local-only. What the server relays is driven by the declared wants: control always arrives, text while subscribed, binary per `sub-binary`.
     stub._subscribeLocal('text', (envelope, info) => this._onEnvelope(envelope, info))
@@ -132,8 +128,9 @@ class ClientRoom extends RoomStateView implements Room {
         joinedAt: number
       }
       const participant = new ClientRoomParticipant(this, id, meta, selfDelivery)
-      if (this._closedCause) {
-        participant._onLeft(this._closedCause)
+      const closedCause = this._state.closedCause
+      if (closedCause) {
+        participant._onLeft(closedCause)
         return participant
       }
       this._localParticipants.set(id, participant)
@@ -305,10 +302,8 @@ class ClientRoom extends RoomStateView implements Room {
   }
 
   private _applyClosed(causeType: 'closed' | 'disconnected'): void {
-    if (this._state.closed) return
     const cause: LeaveCause = { type: causeType }
-    this._closedCause = cause
-    this._state.applyClosed(cause)
+    if (!this._state.applyClosed(cause)) return
     this._roster.resolve() // unblock any getParticipants() waiting on a wire that just died
     // After onClose, like on the server: the room-level signal fires before per-handle cleanup.
     for (const local of this._localParticipants.values()) local._onLeft(cause)
