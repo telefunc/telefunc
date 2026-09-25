@@ -90,7 +90,7 @@ class CloudflareBackend implements BroadcastDriver, RoomDriver {
     // From a session DO, through its ordered stub, so its commits to a room keep the order Room sent them in.
     const session = currentCloudflareSession()
     const wire = await (session
-      ? session.room().authorityCalls.call(roomId, () => this.#stub(roomId), commit)
+      ? session.room().callAuthority(roomId, () => this.#stub(roomId), commit)
       : commit(this.#stub(roomId)))
     if ('stale' in wire) return wire
     const delivery = this.#stub(roomId).awaitDelivery(wire.deliveryToken)

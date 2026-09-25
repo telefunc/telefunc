@@ -20,9 +20,7 @@ const entryKey = (route: Pick<RouteInstallation, 'roomId' | 'inc' | 'laneKey'>) 
   JSON.stringify([route.roomId, route.inc, route.laneKey])
 
 class CloudflareRoomSessionManager {
-  /** The session's calls to room authorities: a room's commits and route calls reach its authority in the order they
-   *  were sent. */
-  readonly authorityCalls = new OrderedStubs<CloudflareRoomAuthorityStub>()
+  readonly #authorityCalls = new OrderedStubs<CloudflareRoomAuthorityStub>()
   readonly #id: string
   readonly #subscriptionPartition = crypto.randomUUID()
   readonly #entries = new Map<string, CloudflareRoomSubscriptionAttempt>()
@@ -36,8 +34,7 @@ class CloudflareRoomSessionManager {
     openAuthority: () => CloudflareRoomAuthorityStub,
     receiver: BackendReceiver,
   ): CloudflareRoomSubscriptionAttempt {
-    const callAuthority = <T>(invoke: (stub: CloudflareRoomAuthorityStub) => Promise<T>) =>
-      this.authorityCalls.call(roomId, openAuthority, invoke)
+    const callAuthority: AuthorityCall = (invoke) => this.callAuthority(roomId, openAuthority, invoke)
     const source = { roomId, inc, laneKey: encodeLaneKey(lane), sessionDoId: this.#id, callAuthority }
     const key = entryKey(source)
     const attempt: CloudflareRoomSubscriptionAttempt = new CloudflareRoomSubscriptionAttempt(source, receiver, {
@@ -48,6 +45,16 @@ class CloudflareRoomSessionManager {
     this.#entries.set(key, attempt)
     attempt.start()
     return attempt
+  }
+
+  /** A call to a room's authority through this session's ordered stub for it, so a room's commits and route calls
+   *  reach its authority in the order they were made. */
+  callAuthority<T>(
+    roomId: string,
+    open: () => CloudflareRoomAuthorityStub,
+    invoke: (authority: CloudflareRoomAuthorityStub) => Promise<T>,
+  ): Promise<T> {
+    return this.#authorityCalls.call(roomId, open, invoke)
   }
 
   /** A delivery to a lease this session no longer holds, as after a restart, is dropped: delivery is at-most-once, and

@@ -139,7 +139,7 @@ test('a route call after a failed call to its room opens a fresh stub, as a stub
     await vi.advanceTimersByTimeAsync(0)
     expect(attempt.state()).toBe('ready')
     // A commit to the room through its own stub (the second) fails, so that stub may be broken.
-    await manager.authorityCalls.call('room', openAuthority, () => Promise.reject(new Error('reset'))).catch(() => {})
+    await manager.callAuthority('room', openAuthority, () => Promise.reject(new Error('reset'))).catch(() => {})
     await vi.advanceTimersByTimeAsync(ROUTE_RENEW_EVERY_MS)
     expect(renewedThrough).toEqual([2])
     await attempt.unsubscribe()
