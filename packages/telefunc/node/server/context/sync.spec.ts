@@ -1,13 +1,11 @@
 import { expect, test } from 'vitest'
 import { getRawContext, isAsyncMode, restoreContext } from './context.js'
 
-test("a nested sync-mode restore keeps the enclosing scope's other keys", () => {
+test('a sync-mode restore holds only its own context, not what an earlier request left until the next tick', () => {
   expect(isAsyncMode()).toBe(false)
-  const ADAPTER = Symbol('adapter')
+  const PROVIDED = Symbol('provided')
   const REQUEST = Symbol('request')
-  const seen = restoreContext({ [ADAPTER]: 'outer', [REQUEST]: 'outer' }, () =>
-    restoreContext({ [REQUEST]: 'inner' }, () => getRawContext()),
-  )
-  expect(seen?.[ADAPTER]).toBe('outer')
-  expect(seen?.[REQUEST]).toBe('inner')
+  restoreContext({ [PROVIDED]: 'A', [REQUEST]: 'request A' }, () => {})
+  const seen = restoreContext({ [PROVIDED]: 'B' }, () => getRawContext())
+  expect([seen?.[PROVIDED], seen?.[REQUEST]]).toEqual(['B', undefined])
 })
