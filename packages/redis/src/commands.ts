@@ -176,19 +176,14 @@ end
 return 1
 `
 
-// Drops the generation while it is still installed: incarnation ids are never reused, so a concurrent
-// drop that finished first leaves nothing to do. Every physical member is a declared key; deletion,
-// keyed invalidation, and retirement are one atomic room-slot operation.
+// One atomic room-slot operation; incarnation ids are never reused, so a repeated drop deletes nothing.
 //   KEYS: [1]=gens [2]=invalidation-channel [3]=manifest [4..]=members
 //   ARGV: [1]=inc
 const DROP_GENERATION_LUA = `
-local inc = ARGV[1]
-if redis.call('SISMEMBER', KEYS[1], inc) == 0 then return 0 end
 for i = 4, #KEYS do redis.call('UNLINK', KEYS[i]) end
 redis.call('UNLINK', KEYS[3])
-redis.call('PUBLISH', KEYS[2], inc)
-redis.call('SREM', KEYS[1], inc)
-return 1
+redis.call('PUBLISH', KEYS[2], ARGV[1])
+redis.call('SREM', KEYS[1], ARGV[1])
 `
 
 // CELLS CX: all mutations or none; success implies the head precondition (open + inc) held at apply

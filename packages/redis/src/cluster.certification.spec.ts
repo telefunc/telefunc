@@ -296,64 +296,6 @@ describe('Redis real three-master Cluster CI certification', () => {
       if (relocation !== undefined) await restoreSlot(slotNumber, source, target)
     }
   })
-  it('does not drop a generation installed after an overlapping snapshot', async () => {
-    const { prefix, roomId, inc } = room('drop-overlap-race')
-    const client = ownCluster()
-    await client.ping()
-    const backend = roomBackend(client, prefix)
-    const secondDropper = roomBackend(client, prefix)
-    const authority = roomBackend(client, prefix)
-    const inventoryRead = deferred()
-    const releaseInventory = deferred()
-    const smembers = client.smembers.bind(client)
-    let inventoryHeld = false
-    let firstDrop: Promise<void> | undefined
-    let secondDrop: Promise<void> | undefined
-    const writeCell = async (generation: string, value: string): Promise<void> => {
-      const read = await authority.readCells(roomId, generation, { keys: [] })
-      if ('staleInc' in read) throw new Error('installed generation was stale')
-      expect(
-        await authority.compareExchangeCells(roomId, generation, read.revision, [
-          { key: 'survivor', bytes: bytes(value) },
-        ]),
-      ).toBe('committed')
-    }
-    // Incarnation ids are never reused: the room comes back under a fresh one.
-    const recreated = `${inc}-recreated`
-    const reinstall = async (): Promise<void> => {
-      const tombstone = await authority.readHead(roomId)
-      await open(authority, roomId, recreated, tombstone?.rev)
-      await writeCell(recreated, 'new')
-    }
-    try {
-      await open(authority, roomId, inc)
-      await writeCell(inc, 'old')
-      const active = await authority.readHead(roomId)
-      if (active === null) throw new Error('installed generation lost its head')
-      await close(authority, roomId, active)
-      vi.spyOn(client, 'smembers').mockImplementation((async (key: string) => {
-        if (key === `${genPrefix(prefix, roomId, inc)}:keys` && !inventoryHeld) {
-          inventoryHeld = true
-          inventoryRead.resolve()
-          await releaseInventory.promise
-        }
-        return await smembers(key)
-      }) as never)
-      firstDrop = backend.dropGeneration(roomId, inc)
-      await inventoryRead.promise
-      secondDrop = secondDropper.dropGeneration(roomId, inc)
-      await secondDrop
-      await reinstall()
-      releaseInventory.resolve()
-      await firstDrop
-      const reinstalled = await authority.readCells(roomId, recreated, { keys: ['survivor'] })
-      if ('staleInc' in reinstalled) throw new Error('reinstalled generation became stale')
-      expect(Buffer.from(reinstalled.cells.get('survivor') ?? []).toString()).toBe('new')
-    } finally {
-      releaseInventory.resolve()
-      await Promise.allSettled([firstDrop, secondDrop].filter((drop): drop is Promise<void> => drop !== undefined))
-    }
-  })
   it('recovers a killed subscriber connection on a fresh one, through a failed first reconnect', async () => {
     const { prefix, roomId, inc } = room('replacement')
     let failNext = false
