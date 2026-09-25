@@ -53,7 +53,8 @@ type SubscriptionHost = {
   /** `true` when the complete roster corrected a drift. */
   _applyAuthorityRoster(members: MemberSnapshot[]): boolean
   _closeFromAuthority(): void
-  _onRosterDrift(): void
+  /** A roster read succeeded; `drifted` when it corrected this view. */
+  _onRosterRefreshed(drifted: boolean): void
   _applyLeave(id: string): void
 }
 
@@ -274,7 +275,7 @@ class RoomSubscriptions {
       if (host._state.membershipVersion === version) {
         const drifted = host._applyAuthorityRoster(members)
         this.replan()
-        if (drifted) host._onRosterDrift()
+        host._onRosterRefreshed(drifted)
         return
       }
       if (attempt === ROSTER_REFRESH_RETRY_LIMIT) throw new RoomError(`Room roster refresh contention: ${host.id}`)

@@ -124,6 +124,8 @@ class ServerRoom extends RoomStateView implements Room {
   /** @internal */ readonly _state: RoomState
   private readonly _local: LocalHolder
   private readonly _stubs = new Set<RoomStubChannel>()
+  /** Stubs whose first roster read failed: the next successful refresh sends them one. */
+  private readonly _rosterOwed = new Set<RoomStubChannel>()
   private readonly _localParticipants = new Map<string, ServerLocalParticipant>()
   /** Members whose inbox is establishing before their cell commits; the heartbeat leaves them alone. */
   private readonly _pendingAdmissions = new Set<string>()
@@ -711,11 +713,14 @@ class ServerRoom extends RoomStateView implements Room {
       })
       .catch((error) => {
         reportRoomError(error)
-        if (this._stubs.has(stub) && !this._state.closed) stub._relayEvent({ __r: 'roster-error' })
+        if (!this._stubs.has(stub) || this._state.closed) return
+        stub._relayEvent({ __r: 'roster-error' })
+        this._rosterOwed.add(stub)
       })
   }
   private _detachStub(stub: RoomStubChannel): void {
     this._stubs.delete(stub)
+    this._rosterOwed.delete(stub)
     stub._endTail()
     for (const id of stub._heldMembers()) {
       if (this._pendingAdmissions.has(id)) continue // the admission rolls itself back
@@ -822,9 +827,12 @@ class ServerRoom extends RoomStateView implements Room {
   }
 
   /** @internal */
-  _onRosterDrift(): void {
+  _onRosterRefreshed(drifted: boolean): void {
+    const recipients = drifted ? [...this._stubs] : [...this._rosterOwed]
+    this._rosterOwed.clear()
+    if (recipients.length === 0) return
     const members = this._visibleRoster()
-    for (const stub of this._stubs) stub._relayEvent({ __r: 'roster', members })
+    for (const stub of recipients) stub._relayEvent({ __r: 'roster', members })
   }
 
   private _holderOf(id: string): ServerLocalParticipant | RoomStubChannel | undefined {

@@ -2584,6 +2584,18 @@ describe('client Room lifecycle', () => {
     await expect(participants).rejects.toThrow('Failed to load room participants')
     expect(ensureRoster).toHaveBeenCalledOnce()
   })
+  it('sends a stub its roster after the next successful refresh once its first roster read failed', async () => {
+    const room = (await Room.create('roster-error-recovery')) as ServerRoom
+    const stub = register(room)
+    vi.spyOn(subsOf(room), 'ensureRoster').mockRejectedValueOnce(new Error('backend roster read failed'))
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const peer = attachPeer(stub)
+    const events = () =>
+      peer.decoded().flatMap((frame) => (frame.tag === TAG.PUBLISH ? [(parse(frame.text) as { __r: string }).__r] : []))
+    await vi.waitFor(() => expect(events()).toContain('roster-error'))
+    await subsOf(room)._refreshMembers()
+    expect(events()).toEqual(['roster-error', 'roster'])
+  })
   it('replays a committed server-pushed roster after reconnect without rerunning onOpen', async () => {
     const room = (await Room.create('roster-replay')) as ServerRoom
     const stub = register(room)
