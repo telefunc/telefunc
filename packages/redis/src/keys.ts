@@ -21,16 +21,6 @@ export {
 }
 
 // Redis keys. Every per-room key shares `{rid}`, so a room is one Cluster slot.
-// head/headrev: tf:room:{rid}:{head|headrev}; JSON head plus monotonic revision.
-// cells/revision: tf:room:{rid}:g:<inc>:{c:<key>|rev}; logical cells plus coarse generation revision.
-// order/retained: tf:room:{rid}:g:<inc>:{o|rt}:<laneKey>; ordering mark or 16-byte mark + payload.
-// gen keys: tf:room:{rid}:g:<inc>:keys; generation-owned physical-key set.
-// channels: tf:room:{rid}:ch:<inc>:<laneKey>; incarnation-scoped PUBLISH/SUBSCRIBE.
-// invalidation: tf:room:{rid}:invalidate:<inc>; published once when a generation drops.
-// gens: tf:room:{rid}:gens; installed incarnations.
-// directory: <prefix>room-dir:{<prefix>dir}:{index|tags}; one global, co-slotted pair.
-// Broadcast: <prefix>seq:{key} (sequence) and <prefix>{t|b}:{key} (text/binary channel), one slot per key.
-// Commands take authority time from Redis TIME, never from the caller.
 
 import type { BroadcastRoute } from 'telefunc/__internal'
 

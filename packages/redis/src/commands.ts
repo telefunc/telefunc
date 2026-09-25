@@ -36,7 +36,7 @@ import {
 
 const REDIS_DELIVERY_FENCE_BYTE = 0xff
 
-// Authority time in ms from Redis TIME's [sec, µs] pair.
+// Authority time in ms from Redis TIME's [sec, µs] pair, never from the caller.
 const NOW_LUA = `
 local function tf_now()
   local t = redis.call('TIME')
