@@ -263,6 +263,25 @@ test('an ended attempt drops later deliveries, and its route is released once', 
   }
 })
 
+test('an attempt unsubscribed while its registration is in flight renews nothing', async () => {
+  vi.useFakeTimers()
+  try {
+    const registered = Promise.withResolvers<{ ok: true }>()
+    const renewals: unknown[] = []
+    const attempt = openAttempt({
+      registerRoute: () => registered.promise,
+      renewRoute: async () => renewals.push('renew') > 0,
+    })
+    const unsubscribed = attempt.unsubscribe()
+    registered.resolve({ ok: true })
+    await unsubscribed
+    await vi.advanceTimersByTimeAsync(ROUTE_RENEW_EVERY_MS * 2)
+    expect({ state: attempt.state(), renewals }).toEqual({ state: 'closed', renewals: [] })
+  } finally {
+    vi.useRealTimers()
+  }
+})
+
 test('an attempt that ended while a renewal was in flight renews no more', async () => {
   vi.useFakeTimers()
   try {

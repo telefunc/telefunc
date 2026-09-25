@@ -128,6 +128,8 @@ class CloudflareRoomSubscriptionAttempt extends DriverAttempt {
     if (!('ok' in registered)) {
       return this.#finish(new Error(registered.reason))
     }
+    // Unsubscribed while it registered: its release already went out.
+    if (this.ended) return
     this.transition('ready')
     this.#scheduleRenewal()
   }
