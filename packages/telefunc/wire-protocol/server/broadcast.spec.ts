@@ -233,6 +233,7 @@ describe('keyed in-process broadcast', () => {
     const usage = 'The broadcast key should be a well-formed string'
     expect(() => new ServerBroadcast({ key: lone })).toThrow(usage)
     expect(() => Broadcast.publish(lone, 'x')).toThrow(usage)
+    expect(() => Broadcast.publishBinary(lone, new Uint8Array([1]))).toThrow(usage)
     expect(() => Broadcast.subscribeBinary(lone, () => {})).toThrow(usage)
   })
 
