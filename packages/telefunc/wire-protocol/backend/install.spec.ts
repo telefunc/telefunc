@@ -49,7 +49,9 @@ describe('backend installation lifecycle', () => {
   it('rejects a second backend without constructing it', () => {
     installBackend(() => new MemoryBackend())
     const factory = vi.fn(() => new MemoryBackend())
-    expect(() => installBackend(factory)).toThrow('a different backend is already installed')
+    expect(() => installBackend(factory)).toThrow(
+      '[Wrong Usage] Install one backend per process: a different backend is already installed',
+    )
     expect(factory).not.toHaveBeenCalled()
   })
   it('composes a broadcast override with a full backend in either configuration order', async () => {

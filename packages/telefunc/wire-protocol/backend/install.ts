@@ -29,7 +29,6 @@ const state = getGlobalObject<{ installed: Installed | null; broadcastOverride?:
   () => ({ installed: null }),
 )
 
-const REPLACEMENT_ERROR = 'telefunc/backend: a different backend is already installed; a process installs one backend'
 const FALLBACK_KEY = [Symbol('telefunc.memoryBackend')]
 
 /** Installs the process's one backend and returns its driver. Re-evaluating an entry with the same `key` returns the
@@ -45,7 +44,7 @@ function installBackend<Driver extends BackendDriver>(
     !installed.fallback,
     'Install the backend (for example with installRedis()) before the first Broadcast or Room use: an earlier use already started the in-memory backend',
   )
-  throw new Error(REPLACEMENT_ERROR)
+  assertUsage(false, 'Install one backend per process: a different backend is already installed')
 }
 
 /** Sets the public broadcast-only override, or removes it with `undefined`; the full backend's Room plane stays. */
