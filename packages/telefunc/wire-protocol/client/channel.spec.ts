@@ -35,6 +35,28 @@ function publishThatSettlesWith(status: AckResultStatus, binary: boolean) {
   return publishing
 }
 
+test("a subscriber that unsubscribes itself doesn't make the next one miss the message", () => {
+  const broadcast = stalledBroadcast()
+  const seen: string[] = []
+  const off = broadcast.subscribe((message) => {
+    seen.push(`once:${String(message)}`)
+    off()
+  })
+  broadcast.subscribe((message) => void seen.push(`other:${String(message)}`))
+  for (const [seq, text] of [
+    [1, 'one'],
+    [2, 'two'],
+  ] as const)
+    broadcast._dispatchFrame({
+      tag: TAG.PUBLISH,
+      index: 0,
+      seq,
+      text: JSON.stringify(text),
+      info: { seq, timestamp: 1 },
+    })
+  expect(seen).toEqual(['once:one', 'other:one', 'other:two'])
+})
+
 describe.each([
   ['text', false],
   ['binary', true],

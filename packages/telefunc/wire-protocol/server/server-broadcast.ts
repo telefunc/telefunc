@@ -111,7 +111,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
   _deliverBroadcastMessage(serialized: string, rawInfo: WirePublishInfo): void {
     const info = makePublishInfo(this.key, rawInfo.seq, rawInfo.timestamp)
     const data = parse(serialized) as ChannelData<T>
-    for (const cb of this._subscribers.text) {
+    for (const cb of [...this._subscribers.text]) {
       if (invokeChannelListener(cb, [data, info], (error) => this._handleCallbackError(error))) return
     }
     if (!this._peerSubscriptions.text) return
@@ -120,7 +120,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
 
   _deliverBroadcastBinaryMessage(data: Uint8Array, rawInfo: WirePublishInfo): void {
     const info = makePublishInfo(this.key, rawInfo.seq, rawInfo.timestamp)
-    for (const cb of this._subscribers.binary) {
+    for (const cb of [...this._subscribers.binary]) {
       if (invokeChannelListener(cb, [data, info], (error) => this._handleCallbackError(error))) return
     }
     if (!this._peerSubscriptions.binary) return

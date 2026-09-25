@@ -962,6 +962,32 @@ describe('Broadcast static bus (publish/subscribe)', () => {
       observer()
     },
   )
+  it("a BroadcastChannel subscriber that unsubscribes itself doesn't make the next one miss the message", async () => {
+    const channel = new ServerBroadcast<string>({ key: 'broadcast:self-unsubscribe' })
+    const seen: string[] = []
+    const off = channel.subscribe((message) => {
+      seen.push(`once:${message}`)
+      off()
+    })
+    channel.subscribe((message) => void seen.push(`other:${message}`))
+    await channel.publish('one')
+    await channel.publish('two')
+    expect(seen).toEqual(['once:one', 'other:one', 'other:two'])
+    channel.abort()
+  })
+  it("a channel listener that stops listening itself doesn't make the next one miss the message", () => {
+    const channel = new ServerChannel<string, never>()
+    const seen: string[] = []
+    const unlisten = channel.listen((message) => {
+      seen.push(`once:${message}`)
+      unlisten()
+    })
+    channel.listen((message) => void seen.push(`other:${message}`))
+    channel._onPeerMessage(JSON.stringify('one'), 5)
+    channel._onPeerMessage(JSON.stringify('two'), 5)
+    expect(seen).toEqual(['once:one', 'other:one', 'other:two'])
+    channel.abort()
+  })
   it('counts in receivers the subscribers a publish reached, when a subscriber leaves or joins during delivery', async () => {
     const received: string[] = []
     const unsubscribe = Broadcast.subscribe<string>('broadcast:receivers', (message) => {
