@@ -30,6 +30,7 @@ function createBroadcastTransportDriver(transport: BroadcastTransport): Broadcas
     publish: (route, payload) => publish(transport, route, payload),
     subscriptions: {
       bind: (route) => bind(transport, route),
+      partitionHere: () => '',
     },
   }
 }

@@ -204,7 +204,7 @@ describe('supervised publishes and commits', () => {
     const attempt = new ManualAttempt()
     const committed: string[] = []
     const driver = {
-      subscriptions: { bind: () => ({ partition: '', open: () => attempt }) },
+      subscriptions: { bind: () => ({ partition: '', open: () => attempt }), partitionHere: () => '' },
       commitLane: async (_roomId: string, _inc: string, _lane: unknown, payload: Uint8Array) => {
         committed.push(new TextDecoder().decode(payload))
         return { accepted: true, seq: committed.length, timestamp: 1, delivery: Promise.resolve() }

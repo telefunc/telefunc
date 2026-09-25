@@ -740,7 +740,10 @@ describe('Room public behavior', () => {
       const order: string[] = []
       let attempt!: ManualAttempt
       const driver = {
-        subscriptions: { bind: () => ({ partition: '', open: () => (attempt = new ManualAttempt()) }) },
+        subscriptions: {
+          bind: () => ({ partition: '', open: () => (attempt = new ManualAttempt()) }),
+          partitionHere: () => '',
+        },
         commitLane: async (_roomId: string, _inc: string, _lane: LaneId, payload: Uint8Array) => {
           order.push(decoder.decode(payload))
           return { accepted: true, seq: order.length, timestamp: 1, delivery: Promise.resolve() }

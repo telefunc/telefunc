@@ -39,4 +39,6 @@ type SubscriptionBinding = {
 /** A driver's subscription edge: bind a source to its owner, then open attempts from the binding. */
 type SubscriptionDriver<Source> = {
   bind(source: Source): SubscriptionBinding
+  /** The partition `bind(source)` names from here, or `null` where it can't bind; a send waits only for its own. */
+  partitionHere(source: Source): string | null
 }

@@ -69,6 +69,10 @@ class RedisSubscriptionDriver implements SubscriptionDriver<RedisSubscriptionSou
     }
   }
 
+  partitionHere(): string {
+    return ''
+  }
+
   /** Arms a delivery fence on the lane's ready attempts: `delivery` settles once each saw the commit. */
   prepareFence(source: RoomSubscriptionSource): { token: string; delivery: Promise<void>; cancel(): void } {
     const token = randomUUID()

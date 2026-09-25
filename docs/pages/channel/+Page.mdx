@@ -262,7 +262,7 @@ info.seq        // monotonic sequence number for this key
 info.timestamp  // server timestamp (Unix epoch ms)
 ```
 
-`seq` is monotonic per `key`, which is useful for ordering and gap detection. `publish()` resolves to `info` once the message is accepted. A publish right after a `subscribe()` on the same server reaches that subscriber: while the new subscription is being set up, publishes on its key wait for it, in call order, for up to 60 seconds. Up to 1,024 publishes per key wait, holding at most `config.channel.bufferLimit` (`bufferLimitBinary`) bytes; a publish past either limit rejects with a `ChannelOverflowError`.
+`seq` is monotonic per `key`, which is useful for ordering and gap detection. `publish()` resolves to `info` once the message is accepted. A publish right after a `subscribe()` on the same server (on Cloudflare, in the same session) reaches that subscriber: while the new subscription is being set up, that server's publishes on its key wait for it, in call order, for up to 60 seconds. Up to 1,024 publishes per key wait, holding at most `config.channel.bufferLimit` (`bufferLimitBinary`) bytes; a publish past either limit rejects with a `ChannelOverflowError`.
 
 `receivers` counts who the message was handed to: subscribers with the in-memory backend, server instances with standalone Redis, session Durable Objects on Cloudflare. With each of them `0` means nobody anywhere is subscribed; Redis Cluster omits it, since a node counts only its own subscribers.
 

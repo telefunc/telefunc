@@ -186,6 +186,24 @@ describe('shared subscription supervision', () => {
     expect(received).toEqual(['a:one', 'b:two'])
     await Promise.all([first.unsubscribe(), second.unsubscribe()])
   })
+  it("holds a send only for its own partition's establishing subscriptions", async () => {
+    const raw = new ControlledDriver()
+    raw.plan(() => new ControlledAttempt())
+    const manager = new SubscriptionManager(raw, console.error, String)
+    const sent: string[] = []
+    raw.partition = 'session-b'
+    manager.subscribe('key', () => {})
+    const held = manager.afterEstablished('key', ['key'], () => void sent.push('b'))
+    raw.partition = 'session-a'
+    // Another session's subscription, or its hold, is not ordered before this send.
+    void manager.afterEstablished('key', ['key'], () => void sent.push('a'))
+    vi.spyOn(raw, 'partitionHere').mockReturnValueOnce(null)
+    void manager.afterEstablished('key', ['key'], () => void sent.push('no session'))
+    expect(sent).toEqual(['a', 'no session'])
+    raw.opens[0]!.attempt.establish()
+    await held
+    expect(sent).toEqual(['a', 'no session', 'b'])
+  })
 })
 type OpenRecord = {
   receiver: BackendReceiver
@@ -199,6 +217,9 @@ class ControlledDriver implements SubscriptionDriver<string> {
   openCalls = 0
   plan(plan: () => ControlledAttempt): void {
     this.#plans.push(plan)
+  }
+  partitionHere(_source: string): string | null {
+    return this.partition
   }
   bind(_source: string) {
     const partition = this.partition

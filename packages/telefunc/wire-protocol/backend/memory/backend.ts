@@ -141,6 +141,7 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
         partition: '',
         open: (receiver, localReceiverCount) => this.#openSubscription(source, receiver, localReceiverCount),
       }),
+      partitionHere: () => '',
     }
   }
 

@@ -82,18 +82,22 @@ class SubscriptionManager<Source> {
     return cleanup
   }
 
-  /** Runs `send` once no subscription on `sources` is establishing, waiting at most the hold time; while `key` is held,
-   *  later sends on it queue behind, in call order. */
+  /** Runs `send` once none of its caller's subscriptions on `sources` is establishing, waiting at most the hold time;
+   *  while the caller holds `key`, its later sends on it queue behind, in call order. `sources` share a partition. */
   afterEstablished<T>(
     key: string,
-    sources: readonly Source[],
+    sources: readonly [Source, ...Source[]],
     send: () => T | Promise<T>,
     weight?: HoldWeight,
   ): T | Promise<T> {
-    let hold = this._holds.get(key)
+    // Another partition's subscription (another Cloudflare session's) is not ordered before this send.
+    const partition = this._driver.partitionHere(sources[0])
+    if (partition === null) return send()
+    const holdKey = JSON.stringify([partition, key])
+    let hold = this._holds.get(holdKey)
     if (hold === undefined) {
-      if (this._establishingWaits(sources).length === 0) return send()
-      const established = raceTimeout(this._established(sources), ESTABLISH_HOLD_MS, () => {})
+      if (this._establishingWaits(sources, partition).length === 0) return send()
+      const established = raceTimeout(this._established(sources, partition), ESTABLISH_HOLD_MS, () => {})
       hold = { established, sends: 0, bytes: new Map() }
     }
     const current = hold
@@ -102,31 +106,32 @@ class SubscriptionManager<Source> {
       if (!weight.fits(current.sends + 1, bytes)) return Promise.reject(weight.overflow())
       current.bytes.set(weight.class, bytes)
     }
-    this._holds.set(key, current)
+    this._holds.set(holdKey, current)
     current.sends++
     // Sent inside the reaction, so a send that finds the hold gone can't reach the driver first.
     return current.established.then(() => {
-      if (--current.sends === 0) this._holds.delete(key)
+      if (--current.sends === 0) this._holds.delete(holdKey)
       if (weight !== undefined) current.bytes.set(weight.class, (current.bytes.get(weight.class) ?? 0) - weight.bytes)
       return send()
     })
   }
 
-  /** Resolves once no slot on `sources`, including ones added meanwhile, is establishing. */
-  private async _established(sources: readonly Source[]): Promise<void> {
-    for (let waits = this._establishingWaits(sources); waits.length > 0; waits = this._establishingWaits(sources))
+  /** Resolves once no slot of the partition on `sources`, including ones added meanwhile, is establishing. */
+  private async _established(sources: readonly Source[], partition: string): Promise<void> {
+    for (
+      let waits = this._establishingWaits(sources, partition);
+      waits.length > 0;
+      waits = this._establishingWaits(sources, partition)
+    )
       await Promise.all(waits)
   }
 
   /** A slot is establishing until it is first ready, stopped or ended. */
-  private _establishingWaits(sources: readonly Source[]): Promise<void>[] {
-    return sources.flatMap((source) =>
-      this._slotsOf(source).flatMap((slot) => (slot.establishing ? [slot.established] : [])),
-    )
-  }
-
-  private _slotsOf(source: Source): SubscriptionSlot[] {
-    return [...(this._routes.get(this._sourceKey(source))?.values() ?? [])]
+  private _establishingWaits(sources: readonly Source[], partition: string): Promise<void>[] {
+    return sources.flatMap((source) => {
+      const slot = this._routes.get(this._sourceKey(source))?.get(partition)
+      return slot?.establishing ? [slot.established] : []
+    })
   }
 }
 

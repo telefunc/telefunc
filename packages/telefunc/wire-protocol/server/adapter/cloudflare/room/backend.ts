@@ -51,6 +51,11 @@ class CloudflareBackend implements BroadcastDriver, RoomDriver {
     this.broadcast = broadcast
     this.subscriptions = {
       bind: (source) => this.#bindSubscription(source),
+      partitionHere: (source) => {
+        const session = currentCloudflareSession()
+        if (session === undefined) return null
+        return 'roomId' in source ? session.room.partition : session.broadcast.partition
+      },
     }
   }
 

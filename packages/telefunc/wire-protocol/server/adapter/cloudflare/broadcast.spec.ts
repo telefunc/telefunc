@@ -419,7 +419,7 @@ describe('cloudflare broadcast routing', () => {
     expect(receipt.timestamp).toEqual(expect.any(Number))
   })
 
-  it('a publish held behind another session’s subscription still leaves from its own session', async () => {
+  it('a publish waits only for its own session’s subscription, and leaves from its own session', async () => {
     const recorded = Promise.withResolvers<void>()
     const publishBuckets: Array<string | null> = []
     const transport = createTransport(
@@ -439,9 +439,10 @@ describe('cloudflare broadcast routing', () => {
       inSession(member, () => new ServerBroadcast<string>({ key: 'room:test' }).publish(member.bucket!))
     inSession(weur, () => new ServerBroadcast<string>({ key: 'room:test' }).subscribe(() => {}))
     const published = [publishFrom(weur), publishFrom(enam)]
+    await vi.waitFor(() => expect(publishBuckets).toEqual(['enam']))
     recorded.resolve()
     await Promise.all(published)
-    expect(publishBuckets).toEqual(['weur', 'enam'])
+    expect(publishBuckets).toEqual(['enam', 'weur'])
   })
 
   it('holds a publish until the authority records the subscription, then delivers it with the authority receipt', async () => {
