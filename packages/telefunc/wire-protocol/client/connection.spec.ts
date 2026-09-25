@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test, vi } from 'vitest'
 
 import { CHANNEL_RECONNECT_INITIAL_DELAY_MS, CHANNEL_TRANSPORT, RECONCILE_TIMEOUT_MS } from '../constants.js'
 import { ClientConnection } from './connection.js'
-import { TAG } from '../shared-ws.js'
+import { TAG, encode } from '../shared-ws.js'
 import { config, getServerConfig } from '../../node/server/serverConfig.js'
 
 /** Minimal `MuxChannel` — registering one is enough to make the connection open a wire. */
@@ -83,6 +83,25 @@ test("a reconnect declares a broadcast's subscriptions, not the toggles queued b
     ({ frame }: { frame: Uint8Array }) => frame[0],
   )
   expect(queued.filter((tag) => tag === TAG.BROADCAST_SUB || tag === TAG.BROADCAST_UNSUB)).toEqual([])
+  connection.dispose()
+})
+
+test('an SSE reconnect sends its reconcile, not the reconcile and toggles a failed POST left queued', () => {
+  const channel = { ...createChannel(), _reattachState: () => ({ broadcast: { text: true, binary: false } }) }
+  const connection = ClientConnection.getOrCreate('http://outbox.test', channel as never, {
+    transports: [CHANNEL_TRANSPORT.SSE],
+    fetchImpl: createStalledTransport().fetchImpl,
+    connectionKey: crypto.randomUUID(),
+  }) as any
+  // A batch POST that failed carried an older reconcile and an unsubscribe; the channel is subscribed again since.
+  connection.transport.outbox.push(
+    { frame: encode.reconcile({ open: [] }), deadline: Infinity },
+    { frame: encode.broadcastUnsub(0, false), deadline: Infinity },
+  )
+  const { initialFrames } = connection.transport.stageInitialBatch()
+  const tags = initialFrames.map(({ frame }: { frame: Uint8Array }) => frame[0])
+  expect(tags.filter((tag: number) => tag === TAG.RECONCILE)).toHaveLength(1)
+  expect(tags.filter((tag: number) => tag === TAG.BROADCAST_SUB || tag === TAG.BROADCAST_UNSUB)).toEqual([])
   connection.dispose()
 })
 

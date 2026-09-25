@@ -1910,7 +1910,10 @@ class SseTransport implements UpgradeSource {
     const initialFrames: OutboundFrame[] = []
     initialFrames.push(reconcileBatch.reconcileFrame)
     const movedBufferedFrames = reconcileBatch.movedBufferedFrames
-    const movedOutbox = this.outbox
+    // This reconcile declares every channel and its subscriptions: a failed POST's reconcile and toggles are stale.
+    const movedOutbox = this.outbox.filter(
+      ({ frame }) => frame[0] !== TAG.RECONCILE && frame[0] !== TAG.BROADCAST_SUB && frame[0] !== TAG.BROADCAST_UNSUB,
+    )
     this.outbox = []
     // Outbox contains frames carried over from earlier (failed) connect attempts —
     // they have OLDER seqs than whatever was just drained from `sendBuffer`. Sending
