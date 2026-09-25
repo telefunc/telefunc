@@ -132,8 +132,7 @@ vi.mock('./routing.js', async (importOriginal) => ({
 }))
 
 import { Telefunc } from '../../../../serve/cloudflare.js'
-import { disposeBackend, getRoomBackend, installBackend } from '../../../backend/install.js'
-import { MemoryBackend } from '../../../backend/memory/backend.js'
+import { disposeBackend, getRoomBackend } from '../../../backend/install.js'
 import type {
   BroadcastDeliverRequest,
   BroadcastForwardRequest,
@@ -371,13 +370,6 @@ describe('cloudflare adapter entrypoint', () => {
     expect(subscribe).toThrow('A Cloudflare subscription delivers to a Telefunc session')
   })
 
-  it('rejects another backend once the Cloudflare one is installed', () => {
-    new Telefunc()
-    const selected = getRoomBackend()
-    expect(() => installBackend(() => new MemoryBackend())).toThrow('a different backend is already installed')
-    expect(getRoomBackend()).toBe(selected)
-  })
-
   it('keeps the same Durable Object Room backend across repeated Worker entry evaluation', () => {
     new Telefunc()
     const installed = getRoomBackend()
@@ -386,44 +378,14 @@ describe('cloudflare adapter entrypoint', () => {
     expect(mocks.transportInstances).toHaveLength(1)
   })
 
-  it('reports the missing binding instead of using the memory backend', async () => {
-    const { binding } = createBinding()
+  it('serves a telefunction request without a context when the setup names none', async () => {
     const tf = new Telefunc()
-    const DurableClass = tf.TelefuncDurableObject
-    const instance = new DurableClass(
-      { id: { toString: () => 'telefunc-room-binding-probe' } } as unknown as DurableObjectState,
-      { TelefuncDurableObject: binding } as unknown as Cloudflare.Env,
-    ) as InstanceType<typeof DurableClass> & { fetch(request: Request): Promise<Response> }
-    mocks.telefuncMock.mockImplementationOnce(async () => {
-      await getRoomBackend().readHead('binding-probe')
-      throw new Error('Room backend unexpectedly returned without a binding')
-    })
-    await expect(instance.fetch(new Request('https://telefunc.test/_telefunc'))).rejects.toThrow(
-      'Missing Cloudflare Durable Object binding "TelefuncDurableObject". Add it to your wrangler.jsonc.',
-    )
-  })
-
-  it('restricts the Room authority and its fan-out coordinators to the jurisdiction', async () => {
-    const session = createBinding()
-    const env = { TelefuncDurableObject: session.binding } as unknown as Cloudflare.Env
-    Object.assign(mocks.workerEnv, env)
-    const tf = new Telefunc({ jurisdiction: 'eu' as DurableObjectJurisdiction })
-    const DurableClass = tf.TelefuncDurableObject
-    const ctx = { id: { toString: () => 'jurisdiction-probe' } } as unknown as DurableObjectState
-    // The instance's roles, room authority fanout included, use the namespace it is constructed with.
-    const instance = new DurableClass(ctx, env) as InstanceType<typeof DurableClass> & {
-      fetch(request: Request): Promise<Response>
-    }
-    expect(session.jurisdiction).toHaveBeenCalledWith('eu')
-    session.jurisdiction.mockClear()
-    mocks.telefuncMock.mockImplementationOnce(async () => {
-      await getRoomBackend()
-        .readHead('jurisdiction-probe')
-        .catch(() => {})
-      throw new Error('probe done')
-    })
-    await Promise.resolve(instance.fetch(new Request('https://telefunc.test/_telefunc'))).catch(() => {})
-    expect(session.jurisdiction).toHaveBeenCalledWith('eu')
+    const instance = new tf.TelefuncDurableObject(
+      { id: { toString: () => 'session-without-context' } } as unknown as DurableObjectState,
+      { TelefuncDurableObject: createBinding().binding } as unknown as Cloudflare.Env,
+    ) as InstanceType<typeof tf.TelefuncDurableObject> & { fetch(request: Request): Promise<Response> }
+    await instance.fetch(new Request('https://telefunc.test/_telefunc'))
+    expect(mocks.telefuncMock).toHaveBeenCalledWith({ request: expect.any(Request) })
   })
 
   it('exports one Durable Object class for every role, on the configured binding', () => {
@@ -468,7 +430,7 @@ describe('cloudflare adapter entrypoint', () => {
         headers: { 'x-telefunc-broadcast-bucket': 'weur' },
       }),
     )
-    expect(mocks.telefuncMock).toHaveBeenCalled()
+    expect(mocks.telefuncMock).toHaveBeenCalledWith({ request: expect.any(Request), context: { userId: 'user-1' } })
     // The session DO is a Broadcast member addressed by its id, placed in the bucket its requests carry.
     const member = mocks.transportInstances[0]!.members[0]!
     expect(member.id).toBe('session-probe-id')

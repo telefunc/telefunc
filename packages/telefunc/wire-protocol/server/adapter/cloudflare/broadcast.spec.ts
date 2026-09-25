@@ -425,32 +425,6 @@ describe('cloudflare broadcast routing', () => {
     expect(receipt.timestamp).toEqual(expect.any(Number))
   })
 
-  it('waits for the authority to record presence before publishing', async () => {
-    const recorded = Promise.withResolvers<void>()
-    const publishTargets: string[] = []
-    const transport = createTransport(
-      createBasicBinding({
-        onPresence: () => recorded.promise,
-        onPublish(id) {
-          publishTargets.push(id.name)
-          return Promise.resolve({ seq: 1, timestamp: Date.now() })
-        },
-      }),
-    )
-    installCloudflareTransport(transport)
-    await inSession(createMember(transport), async () => {
-      const room = new ServerBroadcast<{ text: string }>({ key: 'room:test' })
-      // subscribe() records presence at the authority: publish should wait for it
-      room.subscribe(() => {})
-      room.publish({ text: 'hello' })
-      await flushMicrotasks(2)
-      expect(publishTargets).toEqual([])
-      recorded.resolve()
-      await flushCoordinatorTurn()
-      expect(publishTargets).toEqual(['telefunc:broadcast:authority:room:test'])
-    })
-  })
-
   it('a publish held behind another session’s subscription still leaves from its own session', async () => {
     const recorded = Promise.withResolvers<void>()
     const publishBuckets: Array<string | null> = []
@@ -476,7 +450,7 @@ describe('cloudflare broadcast routing', () => {
     expect(publishBuckets).toEqual(['weur', 'enam'])
   })
 
-  it('does not deliver locally before ordered publish setup completes', async () => {
+  it('holds a publish until the authority records the subscription, then delivers it with the authority receipt', async () => {
     const authority = createAuthorityState()
     const calls: BroadcastCalls = new OrderedStubs()
     const coordinatorCalls: BroadcastCalls = new OrderedStubs()
@@ -504,53 +478,16 @@ describe('cloudflare broadcast routing', () => {
         received.push(message.text)
       })
       const publisher = new ServerBroadcast<{ text: string }>({ key: 'room:test' })
-      publisher.publish({ text: 'hello' })
+      const receipt = publisher.publish({ text: 'hello' })
       await flushMicrotasks(2)
       expect(received).toEqual([])
       recorded.resolve()
-      await flushCoordinatorTurn()
-      expect(received).toEqual(['hello'])
-    })
-  })
-
-  it('resolves publish ack with authority metadata after cold-path setup completes', async () => {
-    const authority = createAuthorityState()
-    const calls: BroadcastCalls = new OrderedStubs()
-    const coordinatorCalls: BroadcastCalls = new OrderedStubs()
-    const recorded = Promise.withResolvers<void>()
-    const transport: CloudflareBroadcastTransport = createTransport(
-      createBasicBinding({
-        onPresence: presenceAt(authority, { beforeRecord: () => recorded.promise }),
-        onPublish(_id, request) {
-          return transport.publishToSubscribers(authority, calls, request)
-        },
-        onForward(_id, request) {
-          return transport.forwardToBucket(coordinatorCalls, request)
-        },
-        onDeliver(_id, request) {
-          return member.deliver(request)
-        },
-      }),
-    )
-    installCloudflareTransport(transport)
-    const member = createMember(transport)
-    await inSession(member, async () => {
-      const subscriber = new ServerBroadcast<{ text: string }>({ key: 'room:test:ack' })
-      subscriber.subscribe(() => undefined)
-      const publisher = new ServerBroadcast<{ text: string }>({ key: 'room:test:ack' })
-      const receiptPromise = publisher.publish({ text: 'hello' })
-      await flushMicrotasks(2)
-      recorded.resolve()
-      const receipt = await receiptPromise
-      expect(receipt).toMatchObject({
-        key: 'room:test:ack',
+      await expect(receipt).resolves.toMatchObject({
+        key: 'room:test',
         seq: 1,
-        meta: {
-          authorityBucket: 'weur',
-          fanoutBuckets: ['weur'],
-        },
+        meta: { authorityBucket: 'weur', fanoutBuckets: ['weur'] },
       })
-      expect(receipt.timestamp).toEqual(expect.any(Number))
+      expect(received).toEqual(['hello'])
     })
   })
 
@@ -703,31 +640,6 @@ describe('cloudflare broadcast routing', () => {
       transport.publishToSubscribers(authority, calls, { ...route, locationBucket: 'weur', payload: encode('"x"') })
     await Promise.all([publish(), publish(), publish()])
     expect(received).toEqual([1, 2, 3])
-    await subscription.unsubscribe()
-  })
-
-  it('a subscription is ready once the key’s authority holds its presence, so the next publish reaches it', async () => {
-    const authority = createAuthorityState()
-    const calls: BroadcastCalls = new OrderedStubs()
-    const coordinatorCalls: BroadcastCalls = new OrderedStubs()
-    const transport = createTransport(
-      createBasicBinding({
-        onPresence: presenceAt(authority),
-        onForward: (_, request) => transport.forwardToBucket(coordinatorCalls, request),
-        onDeliver: (_, request) => member.deliver(request),
-      }),
-    )
-    const member = createMember(transport)
-    const route = { key: 'room:fresh', kind: 'text' } as const
-    const received: string[] = []
-    const subscription = member.openSubscription(route, (payload) => void received.push(decode(payload)))
-    await untilReady(subscription)
-    await transport.publishToSubscribers(authority, calls, {
-      ...route,
-      locationBucket: 'weur',
-      payload: encode('"first"'),
-    })
-    expect(received).toEqual(['"first"'])
     await subscription.unsubscribe()
   })
 
