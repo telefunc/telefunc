@@ -80,15 +80,15 @@ function directoryDelete(sql: SqlStorage, roomId: string, incTag: string): void 
   sql.exec('DELETE FROM directory WHERE room_id = ? AND inc_tag = ?', roomId, incTag)
 }
 
+// A key range, so a page seeks the primary key instead of scanning every room.
 function directoryList(sql: SqlStorage, prefix: string, cursor?: string): DirectoryPage {
-  const after = cursor ?? null
+  const end = prefixEnd(prefix)
+  const range = [cursor === undefined ? 'room_id >= ?' : 'room_id > ?', ...(end === null ? [] : ['room_id < ?'])]
   const matching = sql
     .exec<{ room_id: string; inc_tag: string }>(
-      'SELECT room_id, inc_tag FROM directory WHERE substr(room_id, 1, length(?)) = ? AND (? IS NULL OR room_id > ?) ORDER BY room_id LIMIT ?',
-      prefix,
-      prefix,
-      after,
-      after,
+      `SELECT room_id, inc_tag FROM directory WHERE ${range.join(' AND ')} ORDER BY room_id LIMIT ?`,
+      cursor ?? prefix,
+      ...(end === null ? [] : [end]),
       DIRECTORY_PAGE_SIZE + 1,
     )
     .toArray()
@@ -97,6 +97,16 @@ function directoryList(sql: SqlStorage, prefix: string, cursor?: string): Direct
   const last = page[page.length - 1]
   const more = last !== undefined && matching.length > DIRECTORY_PAGE_SIZE
   return more ? { entries, cursor: last.room_id } : { entries }
+}
+
+/** The least string above every string starting with `prefix` (TEXT compares by code point), or null for none. */
+function prefixEnd(prefix: string): string | null {
+  const codePoints = [...prefix]
+  while (codePoints.length > 0) {
+    const next = codePoints.pop()!.codePointAt(0)! + 1
+    if (next <= 0x10ffff) return codePoints.join('') + String.fromCodePoint(next === 0xd800 ? 0xe000 : next)
+  }
+  return null
 }
 
 // A lapsed tombstone reads absent; `now` is authority time.
