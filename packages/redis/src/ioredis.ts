@@ -65,9 +65,15 @@ async function createSubscriberSocket(redis: RedisClient): Promise<SubscriberSoc
   })
 }
 
+// One wait per connecting Cluster, however often subscribers reopen during it.
+const clusterWaits = new WeakMap<Cluster, Promise<void>>()
+
 function clusterReady(cluster: Cluster): Promise<void> {
-  return new Promise((resolve, reject) => {
+  let wait = clusterWaits.get(cluster)
+  if (wait) return wait
+  wait = new Promise((resolve, reject) => {
     const settle = (error?: Error) => {
+      clusterWaits.delete(cluster)
       cluster.off('ready', onReady)
       cluster.off('end', onEnd)
       if (error) reject(error)
@@ -78,6 +84,8 @@ function clusterReady(cluster: Cluster): Promise<void> {
     cluster.once('ready', onReady)
     cluster.once('end', onEnd)
   })
+  clusterWaits.set(cluster, wait)
+  return wait
 }
 
 function defineCommand(redis: RedisClient, name: string, lua: string, numberOfKeys: number | null): void {
