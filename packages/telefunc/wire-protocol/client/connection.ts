@@ -1258,7 +1258,14 @@ class ClientConnection implements MuxConnection {
         lastSeq: this.lastSeqByChannel.get(ix) ?? 0,
       }
       if (isInitial) payloadEntry.initial = true
-      Object.assign(payloadEntry, entry.channel._reattachState?.())
+      const state = entry.channel._reattachState?.()
+      Object.assign(payloadEntry, state)
+      // The declared subscriptions supersede the SUB/UNSUB frames queued before them.
+      if (state?.broadcast)
+        this.sendBuffer = this.sendBuffer.filter(
+          ({ channelIx, frame }) =>
+            channelIx !== ix || (frame[0] !== TAG.BROADCAST_SUB && frame[0] !== TAG.BROADCAST_UNSUB),
+        )
       open.push(payloadEntry)
     }
     return open

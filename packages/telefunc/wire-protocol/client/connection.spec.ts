@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test, vi } from 'vitest'
 
 import { CHANNEL_RECONNECT_INITIAL_DELAY_MS, CHANNEL_TRANSPORT, RECONCILE_TIMEOUT_MS } from '../constants.js'
 import { ClientConnection } from './connection.js'
+import { TAG } from '../shared-ws.js'
 import { config, getServerConfig } from '../../node/server/serverConfig.js'
 
 /** Minimal `MuxChannel` — registering one is enough to make the connection open a wire. */
@@ -64,6 +65,22 @@ test('channel config preserves zero through server and client resolution', () =>
 test('a zero replay budget still registers a later channel on the connection', () => {
   const { connection, options } = zeroConfiguredConnection()
   expect(ClientConnection.getOrCreate('http://zero.test', createChannel() as never, options)).toBe(connection)
+  connection.dispose()
+})
+
+test("a reconnect declares a broadcast's subscriptions, not the toggles queued before it", () => {
+  const channel = { ...createChannel(), _reattachState: () => ({ broadcast: { text: true, binary: false } }) }
+  const connection = ClientConnection.getOrCreate('http://toggle.test', channel as never, {
+    transports: [CHANNEL_TRANSPORT.SSE],
+    fetchImpl: createStalledTransport().fetchImpl,
+    connectionKey: crypto.randomUUID(),
+  }) as any
+  // Offline, the listener is swapped: an unsubscribe, then a subscribe. The reconcile entry already says subscribed.
+  connection.sendBroadcastUnsubscribe(channel, false)
+  connection.sendBroadcastSubscribe(channel, false)
+  const { movedBufferedFrames } = connection.stageReconcileBatch()
+  const queued = [...connection.sendBuffer, ...movedBufferedFrames].map(({ frame }: { frame: Uint8Array }) => frame[0])
+  expect(queued.filter((tag: number) => tag === TAG.BROADCAST_SUB || tag === TAG.BROADCAST_UNSUB)).toEqual([])
   connection.dispose()
 })
 
