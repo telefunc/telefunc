@@ -130,8 +130,6 @@ class ServerRoom extends RoomStateView implements Room {
   /** Stubs whose first roster read failed: the next successful refresh sends them one. */
   private readonly _rosterOwed = new Set<RoomStubChannel>()
   private readonly _localParticipants = new Map<string, ServerLocalParticipant>()
-  /** Members whose inbox is establishing before their cell commits; the heartbeat leaves them alone. */
-  private readonly _pendingAdmissions = new Set<string>()
 
   /** (member, track) pairs this instance announced, so only a track's first frame pays for the announcement. */
   private readonly _announcedTracks = new Map<string, Set<string>>()
@@ -216,7 +214,6 @@ class ServerRoom extends RoomStateView implements Room {
   /** The member's inbox is ready before its record is durable, and the join is announced after, so no DM or event is lost. */
   private async _commitAdmission(admission: Admission): Promise<void> {
     const { id, meta, identity, joinedAt, hidden } = admission
-    this._pendingAdmissions.add(id)
     this._subs.replan()
     try {
       await this._inboxReady(id)
@@ -229,7 +226,6 @@ class ServerRoom extends RoomStateView implements Room {
         ...(hidden ? { hidden: true } : {}),
       })
       this._assertAdmitted(id)
-      this._pendingAdmissions.delete(id)
       const join = {
         __r: 'join',
         id,
@@ -244,7 +240,7 @@ class ServerRoom extends RoomStateView implements Room {
     } catch (error) {
       // A member write that rejected may still have committed, its reply lost; evicting an absent member only reads.
       await evictMember(this.id, this._inc, id, identity, { type: 'left' }).catch(reportRoomError)
-      this._abandonAdmission(id)
+      this._state.applyLeave(id, { type: 'left' })
       throw error
     }
   }
@@ -258,10 +254,6 @@ class ServerRoom extends RoomStateView implements Room {
   private _assertAdmitted(id: string): void {
     if (this._subs.inboxOf(id) === undefined)
       throw this._state.closed ? roomClosedError(this.id) : participantLeftError()
-  }
-  private _abandonAdmission(id: string): void {
-    this._pendingAdmissions.delete(id)
-    this._state.applyLeave(id, { type: 'left' })
   }
 
   /** @internal */
@@ -736,10 +728,7 @@ class ServerRoom extends RoomStateView implements Room {
     this._stubs.delete(stub)
     this._rosterOwed.delete(stub)
     stub._endTail()
-    for (const id of stub._heldMembers()) {
-      if (this._pendingAdmissions.has(id)) continue // the admission rolls itself back
-      void this._removeDepartedMember(id).catch(reportRoomError)
-    }
+    for (const id of stub._heldMembers()) void this._removeDepartedMember(id).catch(reportRoomError)
     this._subs.replan()
   }
   async _joinStubMember(stub: RoomStubChannel, req: Extract<RoomRequest, { __r: 'req-join' }>) {
@@ -831,10 +820,10 @@ class ServerRoom extends RoomStateView implements Room {
   }
 
   /** @internal */
-  _ownedMembers(): { all: string[]; renewable: string[] } {
-    const all = [...this._localParticipants.keys()]
-    for (const stub of this._stubs) all.push(...stub._heldMembers())
-    return { all, renewable: all.filter((id) => !this._pendingAdmissions.has(id)) }
+  _ownedMembers(): string[] {
+    const owned = [...this._localParticipants.keys()]
+    for (const stub of this._stubs) owned.push(...stub._heldMembers())
+    return owned
   }
 
   /** @internal */
