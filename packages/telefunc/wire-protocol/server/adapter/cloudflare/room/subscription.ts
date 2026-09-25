@@ -39,9 +39,7 @@ class CloudflareRoomSessionManager {
     const source = { roomId, inc, laneKey: encodeLaneKey(lane), sessionDoId: this.#id, callAuthority }
     const key = entryKey(source)
     const attempt: CloudflareRoomSubscriptionAttempt = new CloudflareRoomSubscriptionAttempt(source, receiver, {
-      onClosed: () => {
-        if (this.#entries.get(key) === attempt) this.#entries.delete(key)
-      },
+      onClosed: () => this.#entries.delete(key),
     })
     this.#entries.set(key, attempt)
     attempt.start()
@@ -83,7 +81,6 @@ class CloudflareRoomSubscriptionAttempt extends DriverAttempt {
   readonly #receiver: BackendReceiver
   readonly #onClosed: () => void
   #cancelRenewal: (() => void) | null = null
-  #unsubscribed = false
 
   constructor(
     source: CloudflareRoomSubscriptionSource,
@@ -107,13 +104,10 @@ class CloudflareRoomSubscriptionAttempt extends DriverAttempt {
   }
 
   deliver(payload: Uint8Array, seq: number, timestamp: number): void {
-    if (this.ended) return
     this.#receiver(new Uint8Array(payload), { seq, timestamp })
   }
 
   async unsubscribe(): Promise<void> {
-    if (this.#unsubscribed) return
-    this.#unsubscribed = true
     this.#finish()
     await this.#release()
   }

@@ -136,7 +136,6 @@ class CloudflareBroadcastSubscriptionAttempt extends DriverAttempt {
   readonly #receiver: BackendReceiver
   readonly #detach: () => Promise<void>
   readonly #stopPresenceObservation: () => void
-  #unsubscribed = false
 
   constructor(member: MemberRoute, receiver: BackendReceiver, detach: () => Promise<void>) {
     super()
@@ -158,13 +157,10 @@ class CloudflareBroadcastSubscriptionAttempt extends DriverAttempt {
 
   // The authority forwards only to an unexpired record, so what arrives is owed, lost route or not.
   deliver(payload: Uint8Array, info: OrderingInfo): void {
-    if (this.state() === 'closed') return
     this.#receiver(payload, info)
   }
 
   async unsubscribe(): Promise<void> {
-    if (this.#unsubscribed) return
-    this.#unsubscribed = true
     this.#stopPresenceObservation()
     this.transition('closed')
     await this.#detach()
@@ -297,7 +293,7 @@ class CloudflareBroadcastMember {
       memberRoute,
       receiver,
       async () => {
-        if (this.#subscriptions.get(routeKey) === attempt) this.#subscriptions.delete(routeKey)
+        this.#subscriptions.delete(routeKey)
         await this.#teardownIfEmpty(routeKey)
       },
     )
@@ -328,7 +324,7 @@ class CloudflareBroadcastMember {
       await this.#writePresence(memberRoute.route, true)
     } catch (error) {
       memberRoute.rejectPresence(error)
-      if (this.#routes.get(routeKey) === memberRoute) this.#routes.delete(routeKey)
+      this.#routes.delete(routeKey)
       return
     }
     memberRoute.acknowledgePresence()
@@ -343,7 +339,7 @@ class CloudflareBroadcastMember {
 
   async #teardownIfEmpty(routeKey: string): Promise<void> {
     const memberRoute = this.#routes.get(routeKey)
-    if (memberRoute === undefined || this.#subscriptions.has(routeKey)) return
+    if (memberRoute === undefined) return
     if (memberRoute.state === 'establishing') {
       memberRoute.teardownRequested = true
       return
@@ -353,7 +349,7 @@ class CloudflareBroadcastMember {
 
   async #release(routeKey: string, memberRoute: MemberRoute): Promise<void> {
     memberRoute.stopRefresh()
-    if (this.#routes.get(routeKey) === memberRoute) this.#routes.delete(routeKey)
+    this.#routes.delete(routeKey)
     await this.#writePresence(memberRoute.route, false)
   }
 

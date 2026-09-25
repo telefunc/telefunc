@@ -242,20 +242,27 @@ test('an attempt whose renewal throws ends with that error as its reason', async
   }
 })
 
-test('an ended attempt drops later deliveries, and its route is released once', async () => {
+test('a session drops a delivery to an attempt that ended at renewal, and its route is released once', async () => {
   vi.useFakeTimers()
   try {
     let released = 0
     const received: number[] = []
-    const attempt = openAttempt(
-      { renewRoute: async () => false, unsubscribeRoute: async () => void released++ },
-      received,
+    const manager = new CloudflareRoomSessionManager('session')
+    const authority = {
+      registerRoute: async () => ({ ok: true }),
+      renewRoute: async () => false,
+      unsubscribeRoute: async () => void released++,
+    }
+    const attempt = manager.openSubscription(
+      { roomId: 'room', inc: 'inc', lane: { kind: 'semantic' } },
+      () => authority as unknown as CloudflareRoomAuthorityStub,
+      (payload) => void received.push(payload[0]!),
     )
     await vi.advanceTimersByTimeAsync(ROUTE_RENEW_EVERY_MS)
     expect(attempt.state()).toBe('closed')
-    attempt.deliver(new Uint8Array([1]), 1, 1)
+    const route = { roomId: 'room', inc: 'inc', laneKey: encodeLaneKey({ kind: 'semantic' }), sessionDoId: 'session' }
+    manager.deliver({ ...route, leaseId: attempt.leaseId, payload: new Uint8Array([1]), seq: 1, timestamp: 1 })
     expect(received).toEqual([])
-    await attempt.unsubscribe()
     await attempt.unsubscribe()
     expect(released).toBe(1)
   } finally {
