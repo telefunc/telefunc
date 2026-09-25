@@ -8,7 +8,6 @@ export {
   decodeRoomRecord,
   decodeRoomText,
   encodeRoomRecord,
-  ownMessage,
   publishCtrl,
   staleCommitError,
   withinRoomHorizon,
@@ -37,11 +36,6 @@ function decodeRoomText(value: Uint8Array): string {
 
 function encodeRoomRecord(value: unknown): Uint8Array {
   return roomTextEncoder.encode(stringify(value))
-}
-
-/** A server message as it is at the call, detached from the caller's object: what its receivers decode. */
-function ownMessage(data: unknown): unknown {
-  return parse(stringify(data))
 }
 
 function decodeRoomRecord<T>(bytes: Uint8Array): T {

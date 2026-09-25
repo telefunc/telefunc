@@ -11,6 +11,7 @@ import {
   assertParticipantIdentity,
   isRecord,
   mergeAttributes,
+  ownMessage,
   ownMetadata,
   removedCause,
 } from '../model.js'
@@ -44,7 +45,6 @@ import {
   configFromHead,
   openConfig,
   encodeRoomRecord,
-  ownMessage,
   publishCtrl,
   staleCommitError,
 } from './lanes.js'

@@ -1,6 +1,7 @@
 export {
   assertKnownOptions,
   isRecord,
+  ownMessage,
   ownMetadata,
   ownLeaveCause,
   stampNewer,
@@ -15,6 +16,8 @@ export {
   recipientId,
 }
 
+import { parse } from '@brillout/json-serializer/parse'
+import { stringify } from '@brillout/json-serializer/stringify'
 import { assertUsage } from '../../utils/assert.js'
 import { isObject } from '../../utils/isObject.js'
 import type { JoinOptions, LeaveCause, ParticipantMeta, RoomMeta, Sender } from './types.js'
@@ -25,9 +28,13 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   const prototype = Object.getPrototypeOf(value)
   return prototype === null || (Object.getPrototypeOf(prototype) === null && prototype.constructor?.name === 'Object')
 }
-/** Take ownership of metadata at a state boundary and expose only the immutable owned value. */
+/** A value as it is now, detached from the caller's object: what its receivers decode. */
+function ownMessage<T>(value: T): T {
+  return parse(stringify(value)) as T
+}
+/** Take ownership of metadata at a state boundary and expose only the owned value, frozen at its top. */
 function ownMetadata<T extends RoomMeta | ParticipantMeta>(meta: T): T {
-  return Object.freeze({ ...meta }) as T
+  return Object.freeze(ownMessage(meta))
 }
 const ownLeaveCause = (cause: LeaveCause): LeaveCause => Object.freeze({ ...cause })
 /** A detached snapshot of a member, for guards and for senders a view doesn't know. */

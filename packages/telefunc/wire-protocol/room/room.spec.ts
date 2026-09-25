@@ -1334,6 +1334,37 @@ describe('Room public behavior', () => {
     await Room.send('dm', { id: player.id }, { notice: true })
     expect(fromRoom).toEqual([[{ notice: true }, null]])
   })
+  it('takes meta as it was at the call, nested values included', async () => {
+    const created = { topic: { name: 'a' } }
+    const creating = Room.create('nested-meta', { meta: created })
+    created.topic.name = 'changed'
+    const room = await creating
+    const joined = { pos: { x: 0 } }
+    const joining = room.join({ meta: joined })
+    joined.pos.x = 9
+    const me = await joining
+    expect({ room: room.meta, me: me.meta }).toEqual({ room: { topic: { name: 'a' } }, me: { pos: { x: 0 } } })
+    const attrs = { pos: { x: 1 } }
+    const setting = me.setAttributes(attrs)
+    attrs.pos.x = 9
+    await setting
+    const roomMeta = { topic: { name: 'b' } }
+    const settingRoom = Room.setMeta(room.id, roomMeta)
+    roomMeta.topic.name = 'changed'
+    await settingRoom
+    await vi.waitFor(() => expect(room.meta).toEqual({ topic: { name: 'b' } }))
+    // A change after the call settled reaches nothing either.
+    attrs.pos.x = 8
+    roomMeta.topic.name = 'later'
+    const fresh = await Room.get(room.id)
+    expect({
+      view: [room.meta, me.meta],
+      stored: [fresh.meta, (await fresh.getParticipants()).map(({ meta }) => meta)],
+    }).toEqual({
+      view: [{ topic: { name: 'b' } }, { pos: { x: 1 } }],
+      stored: [{ topic: { name: 'b' } }, [{ pos: { x: 1 } }]],
+    })
+  })
   it('sends a server message as it was at the call, however the caller reuses its object', async () => {
     const room = await Room.create('reused-message')
     const n = (data: unknown) => (data as { n: number }).n
