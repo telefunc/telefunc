@@ -1,24 +1,17 @@
-export { ROOM_FANOUT_WIDTH, Fanout, dispatchRoomFanout }
-export type { RoomFanoutRequest, RoomFanoutOutcome, RoomFanoutNamespace }
+export { Fanout, dispatchRoomFanout }
+export type { RoomFanoutOutcome, RoomFanoutNamespace }
 
 // One ephemeral chain per (incarnation, lane): N+1 starts after N settles, and failed handoffs do not
 // poison later frames. Incarnation cleanup discards the chains; each accepted handoff runs at most once.
 
 import type { RouteInstallation } from './routes.js'
-import { getDeterministicKeyBucketIndex } from '../routing.js'
 import type { RoomSessionDeliveryRequest } from './backend.js'
 
 type DeliveryInfo = { inc: string; laneKey: string; seq: number; timestamp: number }
 type DeliverFn = (routes: RouteInstallation[], payload: Uint8Array, info: DeliveryInfo) => Promise<void>
 
-const ROOM_FANOUT_WIDTH = 64
-const ROOM_FANOUT_COORDINATOR_POOL_SIZE = 256
-
-// The recursive tree keeps four invariants: <=64 outgoing calls per node; depth-specific coordinators
-// cannot self-RPC; leaf outcomes stay ordered; coordinator failure expands to every descendant.
 type RoomFanoutRequest = {
   routes: RouteInstallation[]
-  path: string
   payload: Uint8Array
   seq: number
   timestamp: number
@@ -28,12 +21,10 @@ type RoomFanoutOutcome = { route: RouteInstallation; error?: string }
 
 type RoomFanoutStub = {
   telefuncRoomDeliver(request: RoomSessionDeliveryRequest): Promise<void>
-  telefuncRoomFanout(request: RoomFanoutRequest): Promise<RoomFanoutOutcome[]>
 }
 
 type RoomFanoutNamespace = {
   idFromString(id: string): unknown
-  idFromName(name: string): unknown
   get(id: unknown): RoomFanoutStub
 }
 
@@ -79,54 +70,23 @@ class Fanout {
   }
 }
 
+/** One call per route, straight to its session DO: a lane has one route per subscribed session DO, so at most the
+ *  deployment's session shards (the sum of `scale`), well within a Durable Object invocation's subrequest limit. */
 async function dispatchRoomFanout(
   namespace: RoomFanoutNamespace,
   request: RoomFanoutRequest,
 ): Promise<RoomFanoutOutcome[]> {
-  if (request.routes.length <= ROOM_FANOUT_WIDTH) {
-    return Promise.all(
-      request.routes.map(async (route): Promise<RoomFanoutOutcome> => {
-        try {
-          const stub = namespace.get(namespace.idFromString(route.sessionDoId))
-          const { payload, seq, timestamp } = request
-          await stub.telefuncRoomDeliver({ ...route, payload, seq, timestamp })
-          return { route }
-        } catch (error) {
-          return { route, error: errorMessage(error) }
-        }
-      }),
-    )
-  }
-  const groups = partitionIntoAtMost(request.routes, ROOM_FANOUT_WIDTH)
-  const outcomes = await Promise.all(
-    groups.map((routes, index) => viaCoordinator(namespace, { ...request, routes, path: `${request.path}.${index}` })),
-  )
-  return outcomes.flat()
-}
-
-async function viaCoordinator(
-  namespace: RoomFanoutNamespace,
-  request: RoomFanoutRequest,
-): Promise<RoomFanoutOutcome[]> {
-  const first = request.routes[0]!
-  const nameIndex = getDeterministicKeyBucketIndex(
-    JSON.stringify([first.roomId, first.inc, first.laneKey, request.path]),
-    ROOM_FANOUT_COORDINATOR_POOL_SIZE,
-  )
-  // Depth-specific pools prevent recursive self-RPC; stateless peers at one depth may share objects.
-  const depth = request.path.split('.').length
-  const coordinator = namespace.get(namespace.idFromName(`__telefunc_room_fanout__:${depth}:${nameIndex}`))
-  try {
-    return await coordinator.telefuncRoomFanout(request)
-  } catch (error) {
-    return request.routes.map((route) => ({ route, error: errorMessage(error) }))
-  }
-}
-
-function partitionIntoAtMost<T>(values: T[], maxGroups: number): T[][] {
-  const groupSize = Math.ceil(values.length / maxGroups)
-  return Array.from({ length: Math.ceil(values.length / groupSize) }, (_, index) =>
-    values.slice(index * groupSize, (index + 1) * groupSize),
+  const { payload, seq, timestamp } = request
+  return Promise.all(
+    request.routes.map(async (route): Promise<RoomFanoutOutcome> => {
+      try {
+        const stub = namespace.get(namespace.idFromString(route.sessionDoId))
+        await stub.telefuncRoomDeliver({ ...route, payload, seq, timestamp })
+        return { route }
+      } catch (error) {
+        return { route, error: errorMessage(error) }
+      }
+    }),
   )
 }
 

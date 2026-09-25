@@ -43,11 +43,7 @@ import {
 } from '../wire-protocol/server/adapter/cloudflare/room/backend.js'
 import { RoomAuthorityHost } from '../wire-protocol/server/adapter/cloudflare/room/do.js'
 import { withCloudflareSession, type CloudflareSession } from '../wire-protocol/server/adapter/cloudflare/session.js'
-import {
-  dispatchRoomFanout,
-  type RoomFanoutNamespace,
-  type RoomFanoutRequest,
-} from '../wire-protocol/server/adapter/cloudflare/room/fanout.js'
+import type { RoomFanoutNamespace } from '../wire-protocol/server/adapter/cloudflare/room/fanout.js'
 import { isTelefuncRequest, toResponse } from './shared.js'
 
 const SHARD_TOKEN_TTL_SECONDS = 86400
@@ -129,7 +125,7 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
   const getContext = options?.context
 
   // One class for every role; an instance's name decides which: a session shard, a Broadcast key authority or
-  // coordinator, a room authority, the room directory or a room fanout coordinator.
+  // coordinator, a room authority or the room directory.
   const TelefuncDurableObject = class extends RoomAuthorityHost<Cloudflare.Env> {
     private readonly authorityState: CloudflareBroadcastAuthorityState
     private readonly broadcastCalls: BroadcastCalls = new OrderedStubs()
@@ -186,10 +182,6 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
 
     telefuncRoomDeliver(request: RoomSessionDeliveryRequest): void {
       return this.runInSession(() => this.session.room().deliver(request))
-    }
-
-    telefuncRoomFanout(request: RoomFanoutRequest) {
-      return dispatchRoomFanout(telefuncNamespace(this.env) as unknown as RoomFanoutNamespace, request)
     }
 
     private runInSession<T>(fn: () => T): T {

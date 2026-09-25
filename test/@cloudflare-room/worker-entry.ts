@@ -26,11 +26,7 @@ import {
 import { OrderedStubs } from '../../packages/telefunc/wire-protocol/server/adapter/cloudflare/ordered-stubs.js'
 import { withCloudflareSession } from '../../packages/telefunc/wire-protocol/server/adapter/cloudflare/session.js'
 import { ServerBroadcast } from '../../packages/telefunc/wire-protocol/server/server-broadcast.js'
-import {
-  dispatchRoomFanout,
-  type RoomFanoutNamespace,
-  type RoomFanoutRequest,
-} from '../../packages/telefunc/wire-protocol/server/adapter/cloudflare/room/fanout.js'
+import type { RoomFanoutNamespace } from '../../packages/telefunc/wire-protocol/server/adapter/cloudflare/room/fanout.js'
 const broadcast = new CloudflareBroadcastTransport({
   baseInstanceName: 'telefunc',
   locationFallback: 'weur',
@@ -94,9 +90,6 @@ export class PublicDurableObject extends RoomAuthorityHost<Env> {
   }
   telefuncRoomDeliver(request: RoomSessionDeliveryRequest): void {
     return this.#run(() => this.#manager.deliver(request))
-  }
-  telefuncRoomFanout(request: RoomFanoutRequest) {
-    return dispatchRoomFanout(fanoutNamespace(this.env.PUBLIC), request)
   }
   #run<T>(fn: () => T): T {
     return withCloudflareSession({ room: () => this.#manager, broadcast: () => this.#member }, fn)

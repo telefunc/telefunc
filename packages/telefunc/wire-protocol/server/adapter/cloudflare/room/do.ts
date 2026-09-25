@@ -86,8 +86,7 @@ class RoomAuthority {
     this.#sql = ctx.storage.sql
     initSchema(this.#sql)
     this.#fanout = new Fanout(async (routes, payload, { seq, timestamp }) => {
-      const request = { path: 'root', routes, payload, seq, timestamp }
-      reportLostDeliveries(await dispatchRoomFanout(this.#sessions, request))
+      reportLostDeliveries(await dispatchRoomFanout(this.#sessions, { routes, payload, seq, timestamp }))
     })
   }
 

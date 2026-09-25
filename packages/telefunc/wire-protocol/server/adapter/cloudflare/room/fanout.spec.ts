@@ -1,11 +1,5 @@
 import { expect, test } from 'vitest'
-import {
-  dispatchRoomFanout,
-  Fanout,
-  ROOM_FANOUT_WIDTH,
-  type RoomFanoutNamespace,
-  type RoomFanoutRequest,
-} from './fanout.js'
+import { Fanout } from './fanout.js'
 
 const routeTo = (sessionDoId: string, leaseId = sessionDoId) => ({
   roomId: 'room',
@@ -15,8 +9,6 @@ const routeTo = (sessionDoId: string, leaseId = sessionDoId) => ({
   leaseId,
 })
 const deliveryInfo = (seq = 1) => ({ inc: 'inc', laneKey: 'semantic', seq, timestamp: 1 })
-const routesTo = (count: number) =>
-  Array.from({ length: count }, (_, index) => routeTo(`session-${index}`, `lease-${index}`))
 
 test('rejects a queued delivery cancelled by incarnation cleanup before handoff', async () => {
   const firstStarted = deferred<void>()
@@ -77,50 +69,6 @@ test("starts a lane's next frame only after a rejected handoff settles", async (
   await expect(fanout.await(first)).rejects.toThrow('handoff rejection')
   await expect(fanout.await(second)).resolves.toBeUndefined()
   expect(nextStarted).toBe(true)
-})
-
-test('keeps every recursive coordinator invocation within the configured fanout width', async () => {
-  const routes = routesTo(ROOM_FANOUT_WIDTH ** 2 + 1)
-  const invocationSubrequests: number[] = []
-  const delivered = new Set<string>()
-
-  const runInvocation = async (request: RoomFanoutRequest, currentCoordinator?: string) => {
-    let subrequests = 0
-    const namespace: RoomFanoutNamespace = {
-      idFromString: (id) => ({ kind: 'session' as const, id }),
-      idFromName: (name) => ({ kind: 'coordinator' as const, name }),
-      get(id) {
-        const address = id as { kind: 'session'; id: string } | { kind: 'coordinator'; name: string }
-        return {
-          async telefuncRoomDeliver(delivery) {
-            subrequests += 1
-            delivered.add(delivery.sessionDoId)
-          },
-          async telefuncRoomFanout(child) {
-            subrequests += 1
-            if (address.kind !== 'coordinator') throw new Error('fanout targeted a session')
-            if (address.name === currentCoordinator) throw new Error('fanout coordinator called itself')
-            return runInvocation(child, address.name)
-          },
-        }
-      },
-    }
-    const outcomes = await dispatchRoomFanout(namespace, request)
-    invocationSubrequests.push(subrequests)
-    return outcomes
-  }
-
-  const outcomes = await runInvocation({
-    routes,
-    payload: new Uint8Array([1]),
-    seq: 1,
-    timestamp: 1,
-    path: 'root',
-  })
-
-  expect(outcomes).toHaveLength(routes.length)
-  expect(delivered.size).toBe(routes.length)
-  expect(Math.max(...invocationSubrequests)).toBeLessThanOrEqual(ROOM_FANOUT_WIDTH)
 })
 
 function deferred<T>() {
