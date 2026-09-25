@@ -236,9 +236,7 @@ class RoomSubscriptions {
     if (failure !== undefined) reportRoomError(failure)
     if (this._recovering.has(slot)) return
     this._recovering.add(slot)
-    void this._recover(slot)
-      .catch(reportRoomError)
-      .finally(() => this._recovering.delete(slot))
+    void this._recover(slot).catch(reportRoomError)
   }
 
   /** A still-wanted terminal lane gets one replacement after a head read; if that fails too, the heartbeat's replan
@@ -252,8 +250,10 @@ class RoomSubscriptions {
     } catch (error) {
       if (slot.wanted) slot.dropAttempt()
       throw error
+    } finally {
+      this._recovering.delete(slot)
     }
-    // Catch up on what the outage dropped; the lane itself is healthy.
+    // Catch up on what the outage dropped; the lane is healthy, and a later end of it gets its own recovery.
     await this.reconcileAuthority()
   }
 
