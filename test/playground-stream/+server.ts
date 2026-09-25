@@ -154,19 +154,12 @@ app.post('/api/broadcast-cross-instance/subscribe', async (c) => {
 
   const channel = new BroadcastChannel<unknown>({ key })
   const received: unknown[] = []
-  const unsubscribe = channel.subscribe((data) => received.push(data))
-  const readiness = { __clusterReadiness: crypto.randomUUID() }
+  const readiness = crypto.randomUUID()
+  const unsubscribe = channel.subscribe((data) => {
+    if (data !== readiness) received.push(data)
+  })
+  // A publish right after a subscribe waits until the subscription is set up, so other instances' publishes reach it.
   await channel.publish(readiness)
-  await waitUntil(() =>
-    received.some(
-      (data) =>
-        typeof data === 'object' &&
-        data !== null &&
-        '__clusterReadiness' in data &&
-        data.__clusterReadiness === readiness.__clusterReadiness,
-    ),
-  )
-  received.length = 0
   crossInstanceBroadcasts.set(key, { channel, received, unsubscribe })
   return c.json({ ok: true, instance: INST })
 })
@@ -284,12 +277,4 @@ export default {
       if (httpServer) tf.installWebSocket(httpServer)
     },
   },
-}
-
-async function waitUntil(predicate: () => boolean, timeoutMs = 10_000): Promise<void> {
-  const deadline = Date.now() + timeoutMs
-  while (!predicate()) {
-    if (Date.now() >= deadline) throw new Error(`condition did not settle within ${timeoutMs} ms`)
-    await new Promise((resolve) => setTimeout(resolve, 20))
-  }
 }
