@@ -644,9 +644,7 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   }
 
   publish(data: ChannelData<T>): Promise<ChannelPublishAck> {
-    const ret = this._publishUnreported(data)
-    ret.catch(reportUnexpectedPublishError)
-    return ret
+    return reportingUnexpected(this._publishUnreported(data))
   }
 
   /** @internal A publish whose rejection its caller handles: a Room's are expected outcomes, and the server reports
@@ -654,13 +652,7 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   _publishUnreported(data: ChannelData<T>): Promise<ChannelPublishAck> {
     if (this._isClosed) throw new ChannelClosedError()
     const serialized = stringify(data)
-    return this._trackAck(
-      new Promise<ChannelPublishAck>((resolve, reject) => {
-        this._connection.sendPublishAckReq(this, serialized, (seq) => {
-          this._pendingAcks.set(seq, { resolve, reject })
-        })
-      }),
-    )
+    return this._awaitPublishAck((register) => this._connection.sendPublishAckReq(this, serialized, register))
   }
 
   subscribe(callback: BroadcastListener<T>): () => void {
@@ -668,20 +660,20 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   }
 
   publishBinary(data: Uint8Array): Promise<ChannelPublishAck> {
-    const ret = this._publishBinaryUnreported(data)
-    ret.catch(reportUnexpectedPublishError)
-    return ret
+    return reportingUnexpected(this._publishBinaryUnreported(data))
   }
 
-  /** @internal The binary twin of `_publishUnreported()`. */
+  /** @internal */
   _publishBinaryUnreported(data: Uint8Array): Promise<ChannelPublishAck> {
     if (this._isClosed) throw new ChannelClosedError()
+    return this._awaitPublishAck((register) => this._connection.sendPublishBinaryAckReq(this, data, register))
+  }
+
+  private _awaitPublishAck(send: (register: (seq: number) => void) => void): Promise<ChannelPublishAck> {
     return this._trackAck(
-      new Promise<ChannelPublishAck>((resolve, reject) => {
-        this._connection.sendPublishBinaryAckReq(this, data, (seq) => {
-          this._pendingAcks.set(seq, { resolve, reject })
-        })
-      }),
+      new Promise<ChannelPublishAck>((resolve, reject) =>
+        send((seq) => this._pendingAcks.set(seq, { resolve, reject })),
+      ),
     )
   }
 
@@ -731,8 +723,12 @@ function reportChannelError(err: unknown): void {
   console.error('[telefunc:channel-error]', err instanceof Error ? err : new Error(String(err)))
 }
 
-function reportUnexpectedPublishError(err: unknown): void {
-  if (classifyTelefuncError(err, isExpectedChannelFailure).kind === 'bug') reportChannelError(err)
+/** Reports a publish rejection that is a bug; the caller still sees every rejection. */
+function reportingUnexpected(publish: Promise<ChannelPublishAck>): Promise<ChannelPublishAck> {
+  publish.catch((err) => {
+    if (classifyTelefuncError(err, isExpectedChannelFailure).kind === 'bug') reportChannelError(err)
+  })
+  return publish
 }
 
 function normalizeCloseTimeout(timeout: number | undefined): number {
