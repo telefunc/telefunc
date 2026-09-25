@@ -453,7 +453,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     }
   }
 
-  // Only a broadcast takes publishes; an unanswered publish on another channel would hang its sender.
+  // Broadcasts and Room stubs take publishes; on another channel an unanswered publish would hang its sender.
   _onPeerPublishAckReqMessage(_text: string, _seq: number): Promise<void> {
     throw new ProtocolViolationError('publish on a channel that is not a broadcast')
   }
