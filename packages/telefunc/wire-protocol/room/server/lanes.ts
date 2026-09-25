@@ -89,8 +89,8 @@ async function commitRoomLaneOrThrow(
   return result
 }
 
-function withinRoomHorizon<T>(promise: Promise<T>, ms: number): Promise<T> {
-  return raceTimeout(promise, ms, () => {
+function withinRoomHorizon<T>(promise: Promise<T>): Promise<T> {
+  return raceTimeout(promise, ROOM_HORIZON_MS, () => {
     throw new RoomError('Room subscription recovery horizon expired')
   })
 }

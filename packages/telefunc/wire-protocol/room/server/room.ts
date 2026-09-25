@@ -9,7 +9,7 @@ import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 import { unrefTimer } from '../../../utils/unrefTimer.js'
 import { createDeferred } from '../../../utils/createDeferred.js'
 import type { ChannelPublishAck } from '../../channel.js'
-import { ROOM_DM_ACK_TIMEOUT_MS, ROOM_HORIZON_MS } from '../constants.js'
+import { ROOM_DM_ACK_TIMEOUT_MS } from '../constants.js'
 import { getRoomBackend } from '../../backend/install.js'
 import type { CommitAccepted, LaneId } from '../../backend/room/contract.js'
 import { encodePublishBinary, encodePublishText, type WirePublishInfo } from '../../shared-ws.js'
@@ -251,7 +251,7 @@ class ServerRoom extends RoomStateView implements Room {
   /** The member's inbox delivers (within the horizon) before its join is visible, and the admission still holds. */
   private async _inboxReady(id: string): Promise<void> {
     const inbox = this._subs.inboxOf(id)
-    if (inbox !== undefined) await withinRoomHorizon(inbox.ready, ROOM_HORIZON_MS)
+    if (inbox !== undefined) await withinRoomHorizon(inbox.ready)
     this._assertAdmitted(id)
   }
   /** A closed room or a departed member drops the admission's inbox. */
@@ -667,7 +667,7 @@ class ServerRoom extends RoomStateView implements Room {
   async _startTail(): Promise<void> {
     this._tail = new TailHold(() => this._teardownTail())
     this._subs.replan() // bring up text ingestion before any stub exists
-    await withinRoomHorizon(this._subs.semanticReady, ROOM_HORIZON_MS)
+    await withinRoomHorizon(this._subs.semanticReady)
   }
   private _teardownTail(): void {
     if (this._tail === null) return // already handed off to a stub
@@ -746,7 +746,7 @@ class ServerRoom extends RoomStateView implements Room {
   async _replayRetainedText(holder: LaneHolder, previous: MemberWants): Promise<void> {
     if (previous.all) return
     // Read retained only after subscription readiness: a racing commit is then retained or live, never lost in the gap.
-    await withinRoomHorizon(this._subs.semanticReady, ROOM_HORIZON_MS)
+    await withinRoomHorizon(this._subs.semanticReady)
     const stored = await getRoomBackend().readRetained(this.id, this._inc, SEMANTIC_LANE)
     if (stored === null) return
     const serialized = decodeRoomText(stored.payload)

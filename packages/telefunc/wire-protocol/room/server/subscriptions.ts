@@ -8,7 +8,7 @@ import type { LaneId } from '../../backend/room/contract.js'
 import type { BackendSubscription } from '../../backend/subscription.js'
 import type { WirePublishInfo } from '../../shared-ws.js'
 import { DEFAULT_TRACK, mergeTrackWants, wantsAnyBinary, type BinaryWants } from '../binary.js'
-import { ROOM_HEARTBEAT_INTERVAL_MS, ROOM_HORIZON_MS } from '../constants.js'
+import { ROOM_HEARTBEAT_INTERVAL_MS } from '../constants.js'
 import type { RoomDemand } from '../demand.js'
 import { RoomError } from '../errors.js'
 import type { MemberSnapshot, RoomConfigRecord } from '../protocol.js'
@@ -104,9 +104,7 @@ class RoomSubscriptions {
   binaryReady(): Promise<void> {
     const pending: Promise<void>[] = []
     for (const subscription of this._binary.values()) pending.push(subscription.ready)
-    return pending.length === 0
-      ? Promise.resolve()
-      : withinRoomHorizon(Promise.all(pending), ROOM_HORIZON_MS).then(() => undefined)
+    return pending.length === 0 ? Promise.resolve() : withinRoomHorizon(Promise.all(pending)).then(() => undefined)
   }
 
   ensureRoster(): Promise<void> {
@@ -244,10 +242,10 @@ class RoomSubscriptions {
    *  subscribes it again. */
   private async _recover(slot: LaneSubscription): Promise<void> {
     try {
-      const config = await withinRoomHorizon(this._host._readOpenConfig(), ROOM_HORIZON_MS)
+      const config = await withinRoomHorizon(this._host._readOpenConfig())
       if (config === null) return this._host._closeFromAuthority()
       slot.retry()
-      await withinRoomHorizon(slot.attemptReady, ROOM_HORIZON_MS)
+      await withinRoomHorizon(slot.attemptReady)
     } catch (error) {
       if (slot.wanted) slot.dropAttempt()
       throw error
