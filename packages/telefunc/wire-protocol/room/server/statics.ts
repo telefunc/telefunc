@@ -44,6 +44,7 @@ import {
   configFromHead,
   openConfig,
   encodeRoomRecord,
+  ownMessage,
   publishCtrl,
   staleCommitError,
 } from './lanes.js'
@@ -424,22 +425,19 @@ async function getRoomParticipants(id: string, target?: { identity: string }): P
 }
 
 async function announceToRoom(id: string, data: unknown): Promise<RoomSendReceipt> {
+  const record = encodeRoomRecord({ __r: 'announce', data } satisfies RoomEnvelope)
   const config = await requireRoom(id)
-  const commit = await commitRoomLaneOrThrow(
-    id,
-    config.inc,
-    SEMANTIC_LANE,
-    encodeRoomRecord({ __r: 'announce', data } satisfies RoomEnvelope),
-  )
+  const commit = await commitRoomLaneOrThrow(id, config.inc, SEMANTIC_LANE, record)
   return { seq: commit.seq, timestamp: commit.timestamp }
 }
 
 async function sendToParticipant(id: string, target: ParticipantRef, data: unknown): Promise<void> {
+  const message = ownMessage(data)
   const config = await requireRoom(id)
   const members = await resolveParticipantRef(id, config.inc, target)
   const exact = 'id' in target
   for (const member of members) {
-    if (!(await sendServerDm(id, config.inc, member.id, data)) && exact) throw participantGoneError(member.id)
+    if (!(await sendServerDm(id, config.inc, member.id, message)) && exact) throw participantGoneError(member.id)
   }
 }
 

@@ -67,6 +67,7 @@ import {
   commitRoomLane,
   decodeRoomText,
   encodeRoomRecord,
+  ownMessage,
   publishCtrl,
   staleCommitError,
   commitRoomLaneOrThrow,
@@ -898,7 +899,7 @@ class ServerLocalParticipant extends ParticipantBase {
   publish(data: unknown, options?: PublishOptions): Promise<ChannelPublishAck> {
     assertKnownOptions(options, ['coalesce', 'retain'], 'publish()')
     // Server publish has no uplink to coalesce, but retain semantics remain identical.
-    return markHandled(this._publishText(data, options?.retain))
+    return markHandled(this._publishText(ownMessage(data), options?.retain))
   }
   publishBinary(data: Uint8Array, options?: BinaryPublishOptions): Promise<ChannelPublishAck> {
     const framed = encodeBinaryFrame(this.id, data, options)
@@ -931,7 +932,7 @@ class ServerLocalParticipant extends ParticipantBase {
   }
   send(to: string | Sender, data: unknown, options?: { ack?: boolean }): Promise<any> {
     assertKnownOptions(options, ['ack'], 'send()')
-    return markHandled(this._sendDm(recipientId(to), data, options?.ack === true))
+    return markHandled(this._sendDm(recipientId(to), ownMessage(data), options?.ack === true))
   }
   private async _sendDm(to: string, data: unknown, ack: boolean): Promise<unknown> {
     this._assertActive()

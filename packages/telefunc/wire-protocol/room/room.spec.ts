@@ -1331,6 +1331,39 @@ describe('Room public behavior', () => {
     await Room.send('dm', { id: player.id }, { notice: true })
     expect(fromRoom).toEqual([[{ notice: true }, null]])
   })
+  it('sends a server message as it was at the call, however the caller reuses its object', async () => {
+    const room = await Room.create('reused-message')
+    const n = (data: unknown) => (data as { n: number }).n
+    const stored: number[] = []
+    Room.guard(room, { onAfterPublish: (_from, data) => void stored.push(n(data)) })
+    const bot = await room.join()
+    const bob = await room.join()
+    const published: number[] = []
+    room.subscribe((data) => published.push(n(data)))
+    const announced: number[] = []
+    room.onAnnounce((data) => announced.push(n(data)))
+    const dms: number[] = []
+    bob.listen((data) => void dms.push(n(data)))
+    const message = { n: 1 }
+    const sends: Promise<unknown>[] = [bot.publish(message)]
+    message.n = 2
+    sends.push(bot.publish(message))
+    message.n = 3
+    sends.push(Room.announce(room.id, message))
+    message.n = 4
+    sends.push(bot.send(bob.id, message))
+    message.n = 5
+    sends.push(Room.send(room.id, { id: bob.id }, message))
+    message.n = 6
+    await Promise.all(sends)
+    await vi.waitFor(() => expect(dms).toHaveLength(2))
+    expect({ published, stored, announced, dms }).toEqual({
+      published: [1, 2],
+      stored: [1, 2],
+      announced: [3],
+      dms: [4, 5],
+    })
+  })
   it('surfaces an ack timeout as the operational RoomError at the public send boundary', async () => {
     const room = await Room.create('dm-timeout-error-class')
     const sender = await room.join()
