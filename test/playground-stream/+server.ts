@@ -27,12 +27,6 @@ if (process.env.REDIS_CLUSTER_NODES) {
   installRedis(new IORedis(process.env.REDIS_URL, { maxRetriesPerRequest: 0 }))
   console.log(`[INST=${INST}] Redis backend installed`)
 }
-// Standalone Redis only: one node holds every key a SCAN has to see.
-const inspector =
-  process.env.REDIS_URL && !process.env.REDIS_CLUSTER_NODES
-    ? new IORedis(process.env.REDIS_URL, { maxRetriesPerRequest: 0 })
-    : null
-
 // Translate Ctrl-C / docker-stop into a clean `process.exit(0)`. Without this, Node's
 // default SIGINT/SIGTERM handlers tear the process down without flushing the V8 CPU
 // profile written by `--cpu-prof`, leaving `profiles/` empty.
@@ -107,43 +101,6 @@ app.delete('/api/room-cross-instance/leave', async (c) => {
   crossInstanceRooms.delete(roomId)
   fixture.unsubscribe()
   await fixture.participant.leave()
-  return c.json({ ok: true, instance: INST })
-})
-
-app.post('/api/room-cross-instance/close', async (c) => {
-  const roomId = c.req.query('roomId')
-  if (!roomId) return c.json({ ok: false, reason: 'missing roomId' }, 400)
-  await Room.close(roomId)
-  return c.json({ ok: true, instance: INST })
-})
-
-async function roomRedisKeys(roomId: string): Promise<string[]> {
-  const keys: string[] = []
-  for await (const batch of inspector!.scanStream({ match: `*room:{${encodeURIComponent(roomId)}}*` }))
-    keys.push(...(batch as string[]))
-  return keys
-}
-
-// The room's keys that would never expire, and its head's rev.
-app.get('/api/room-cross-instance/redis-keys', async (c) => {
-  const roomId = c.req.query('roomId')
-  if (!roomId || !inspector) return c.json({ ok: false, reason: 'missing roomId or standalone Redis' }, 400)
-  const keys = await roomRedisKeys(roomId)
-  const unexpiring: string[] = []
-  for (const key of keys) if ((await inspector.pttl(key)) === -1) unexpiring.push(key)
-  const head = keys.find((key) => key.endsWith(':head'))
-  const headRev = head
-    ? ((JSON.parse((await inspector.get(head)) ?? 'null') as { rev: string } | null)?.rev ?? null)
-    : null
-  return c.json({ ok: true, instance: INST, unexpiring, headRev })
-})
-
-// Stands in for a closed room's keys expiring.
-app.delete('/api/room-cross-instance/redis-keys', async (c) => {
-  const roomId = c.req.query('roomId')
-  if (!roomId || !inspector) return c.json({ ok: false, reason: 'missing roomId or standalone Redis' }, 400)
-  const keys = await roomRedisKeys(roomId)
-  if (keys.length > 0) await inspector.del(...keys)
   return c.json({ ok: true, instance: INST })
 })
 
