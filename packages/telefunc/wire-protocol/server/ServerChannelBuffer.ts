@@ -37,7 +37,6 @@ class ServerChannelBuffer<TAck = never> {
   #insertionSeq = 0
 
   constructor(maxBytes: number, binaryMaxBytes: number) {
-    if (maxBytes <= 0) throw new Error('maxBytes must be > 0')
     this.#text = new BufferLane(maxBytes)
     this.#binary = new BufferLane(binaryMaxBytes)
   }
@@ -177,7 +176,6 @@ class BufferLane {
   readonly #maxBytes: number
 
   constructor(maxBytes: number) {
-    if (maxBytes <= 0) throw new Error('maxBytes must be > 0')
     this.#maxBytes = maxBytes
   }
 

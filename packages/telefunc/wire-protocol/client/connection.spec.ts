@@ -100,12 +100,12 @@ test.each([Infinity, 0.5, Number.MAX_SAFE_INTEGER + 1])('channel config rejects 
 test('channel config preserves zero through server and client resolution', () => {
   config.channel.reconnectTimeout = 0
   expect(getServerConfig().channel.reconnectTimeout).toBe(0)
-  const channel = createChannel()
-  const connection = ClientConnection.getOrCreate('http://zero.test', channel as never, {
+  const options = {
     transports: [CHANNEL_TRANSPORT.SSE],
     fetchImpl: createStalledTransport().fetchImpl,
     connectionKey: crypto.randomUUID(),
-  }) as any
+  }
+  const connection = ClientConnection.getOrCreate('http://zero.test', createChannel() as never, options) as any
   const ctrl = new Proxy(
     { sessionId: 'zero', open: [], transports: [CHANNEL_TRANSPORT.SSE] },
     { get: (target, key) => Reflect.get(target, key) ?? 0 },
@@ -120,6 +120,8 @@ test('channel config preserves zero through server and client resolution', () =>
     connection.transport.flushThrottleMs,
     connection.transport.postIdleFlushDelayMs,
   ]).toEqual(Array(6).fill(0))
+  // A zero replay budget replays nothing; a later channel on the connection still registers.
+  expect(ClientConnection.getOrCreate('http://zero.test', createChannel() as never, options)).toBe(connection)
   connection.dispose()
 })
 

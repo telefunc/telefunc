@@ -32,7 +32,6 @@ export class ReplayBuffer {
   }
 
   constructor(maxBytes: number, maxAgeMs: number, binaryMaxBytes: number) {
-    if (maxBytes <= 0) throw new Error('maxBytes must be > 0')
     this.text = new ReplayLane(maxBytes, maxAgeMs)
     this.binary = new ReplayLane(binaryMaxBytes, maxAgeMs)
     this.maxAgeMs = maxAgeMs

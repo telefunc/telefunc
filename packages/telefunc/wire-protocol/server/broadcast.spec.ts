@@ -762,6 +762,18 @@ describe('Broadcast static bus (publish/subscribe)', () => {
     }
   })
 
+  it('opens channels under a zero config.channel.bufferLimit and holds no publish', async () => {
+    const { controlled } = await installPendingSubscriptionBackend({ seq: 1, timestamp: 1 })
+    config.channel = { bufferLimit: 0, bufferLimitBinary: 0 }
+    try {
+      new ServerBroadcast({ key: 'broadcast:zero-limit' }).subscribe(() => {})
+      await expect(Broadcast.publish('broadcast:zero-limit', 'x')).rejects.toBeInstanceOf(ChannelOverflowError)
+      controlled.ready()
+    } finally {
+      config.channel = {}
+    }
+  })
+
   it('static publish + static subscribe deliver without any instance', async () => {
     const report = vi.spyOn(console, 'error').mockImplementation(() => {})
     const received: Array<{ text: string }> = []
