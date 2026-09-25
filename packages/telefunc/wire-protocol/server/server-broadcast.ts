@@ -23,7 +23,7 @@ import { parse } from '@brillout/json-serializer/parse'
 import { assertUsage } from '../../utils/assert.js'
 import { isPromise } from '../../utils/isPromise.js'
 import { markHandled } from '../../utils/markHandled.js'
-import { ChannelClosedError, ChannelOverflowError } from '../channel-errors.js'
+import { ChannelOverflowError } from '../channel-errors.js'
 import { ACK_STATUS, encodePublishText, encodePublishBinary } from '../shared-ws.js'
 import type { BroadcastKind, WirePublishInfo } from '../shared-ws.js'
 import { STATUS_BODY_INTERNAL_SERVER_ERROR } from '../../shared/constants.js'
@@ -154,8 +154,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
     callback: BroadcastListeners<T>[K][number],
   ): BroadcastUnsubscribe {
     const listeners = this._subscribers[kind] as Array<typeof callback>
-    if (this._isClosed) throw new ChannelClosedError()
-    this._routes[kind].open()
+    if (!this._isClosed) this._routes[kind].open()
     listeners.push(callback)
     return () => {
       const index = listeners.indexOf(callback)

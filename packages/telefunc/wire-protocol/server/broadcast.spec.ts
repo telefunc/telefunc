@@ -646,13 +646,20 @@ describe('Broadcast lifecycle and route ownership', () => {
   })
 
   it.each([
-    ['subscribe', (broadcast: ServerBroadcast) => broadcast.subscribe(() => {})],
-    ['subscribeBinary', (broadcast: ServerBroadcast) => broadcast.subscribeBinary(() => {})],
-  ])('%s() throws after abort', (_name, operation) => {
-    const broadcast = new ServerBroadcast({ key: 'broadcast:closed' })
-    broadcast.abort()
-    expect(() => operation(broadcast)).toThrow(ChannelClosedError)
-  })
+    ['subscribe', (broadcast: ServerBroadcast) => broadcast.subscribe(() => {}), 'text'],
+    ['subscribeBinary', (broadcast: ServerBroadcast) => broadcast.subscribeBinary(() => {}), 'binary'],
+  ] as const)(
+    '%s() after abort opens no route, and throws nothing, as on the client',
+    async (_name, operation, kind) => {
+      const broadcast = new ServerBroadcast({ key: 'broadcast:closed' })
+      broadcast.abort()
+      operation(broadcast)
+      const receipt = await (kind === 'text'
+        ? Broadcast.publish('broadcast:closed', 'after-abort')
+        : Broadcast.publishBinary('broadcast:closed', new Uint8Array([1])))
+      expect(receipt.receivers).toBe(0)
+    },
+  )
 })
 
 describe('Broadcast client publish acks', () => {
