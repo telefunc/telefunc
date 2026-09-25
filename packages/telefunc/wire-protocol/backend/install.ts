@@ -20,7 +20,6 @@ type Installed = {
   readonly room: RoomBackend
   /** `null` while a Broadcast transport override owns the Broadcast plane. */
   broadcast: BroadcastBackend | null
-  retiredBroadcast?: Promise<void>
 }
 
 type BroadcastOverride = { transport: BroadcastTransport; backend?: BroadcastBackend }
@@ -68,9 +67,7 @@ function configureBroadcastTransport(transport: BroadcastTransport | undefined):
   state.broadcastOverride = { transport }
   const installed = state.installed
   if (installed === null) return
-  // Retiring accumulates, so disposal awaits every plane a transport change retired.
-  if (installed.broadcast)
-    installed.retiredBroadcast = Promise.all([installed.retiredBroadcast, installed.broadcast.dispose()]).then(() => {})
+  if (installed.broadcast) void installed.broadcast.dispose()
   installed.broadcast = null
 }
 
@@ -96,12 +93,7 @@ async function disposeBackend(): Promise<void> {
   const overridePlane = state.broadcastOverride?.backend
   state.installed = null
   if (state.broadcastOverride) delete state.broadcastOverride.backend
-  await Promise.all([
-    overridePlane?.dispose(),
-    installed?.broadcast?.dispose(),
-    installed?.retiredBroadcast,
-    installed?.room.dispose(),
-  ])
+  await Promise.all([overridePlane?.dispose(), installed?.broadcast?.dispose(), installed?.room.dispose()])
 }
 
 function install(factory: () => BackendDriver, key: readonly unknown[], fallback: boolean): Installed {
