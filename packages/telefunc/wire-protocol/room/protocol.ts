@@ -153,7 +153,7 @@ type RoomStubRequest =
   | { __r: 'req-set-meta'; id: string; meta: ParticipantMeta }
   | { __r: 'req-set-attrs'; id: string; attrs: ParticipantMeta }
   | { __r: 'req-dm'; id: string; to: string; data: unknown; ack?: boolean }
-  | { __r: 'dm-reply'; id: string; ackId: string; reply: DmReply }
+  | { __r: 'dm-reply'; ackId: string; reply: DmReply }
   | { __r: 'sub-binary'; wants: BinaryWants }
   | { __r: 'sub-text'; members: string[]; announce: boolean }
 

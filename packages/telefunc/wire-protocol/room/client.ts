@@ -172,9 +172,7 @@ class ClientRoom extends RoomStateView implements Room {
       return
     }
     const ackId = msg.ackId
-    void participant
-      ._deliverMessageAck(msg)
-      .then((reply) => this._notify({ __r: 'dm-reply', id: participant.id, ackId, reply }))
+    void participant._deliverMessageAck(msg).then((reply) => this._notify({ __r: 'dm-reply', ackId, reply }))
   }
 
   /** @internal Revival of a serialized `RemoteParticipant` (see `roomRemoteReviver`). */
@@ -262,8 +260,7 @@ class ClientRoom extends RoomStateView implements Room {
         // Relayed from this member's private inbox: only its own stub ever receives it.
         const local = this._localParticipants.get(event.to)
         if (local) this._deliverDm(local, inboxMessageFromWire(event))
-        else if (event.ackId)
-          this._notify({ __r: 'dm-reply', id: event.to, ackId: event.ackId, reply: DM_FAILURE.left })
+        else if (event.ackId) this._notify({ __r: 'dm-reply', ackId: event.ackId, reply: DM_FAILURE.left })
         return
       }
     }

@@ -75,7 +75,6 @@ function decodeRoomDeclaration(value: unknown): RoomDeclaration {
     case 'dm-reply':
       return {
         __r: 'dm-reply',
-        id: memberId(decl.id, 'DM reply'),
         ackId: text(decl.ackId, 'DM reply'),
         reply: decodeDmReply(decl.reply) ?? malformed('DM reply'),
       }

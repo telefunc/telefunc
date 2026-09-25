@@ -97,7 +97,7 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
   /** Hidden members this response handed the client: their events are relayed to it alone. */
   private readonly _grantedHidden: Set<string>
   /** Live ack-DM correlations, stored in their constant-offset deadline order. */
-  private readonly _pendingAckDms = new Map<string, { sender: string; recipient: string; expiresAt: number }>()
+  private readonly _pendingAckDms = new Map<string, { sender: string; expiresAt: number }>()
   private readonly _replay = new ReplayGate()
   private _wantsText = false
   private _textMemberWants: ReadonlySet<string> = new Set()
@@ -187,7 +187,7 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
       case 'sub-text':
         return this._declareTextWants(declaration.members, declaration.announce)
       case 'dm-reply':
-        return this._replyDm(declaration.id, declaration.ackId, declaration.reply)
+        return this._replyDm(declaration.ackId, declaration.reply)
     }
   }
 
@@ -303,9 +303,8 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
       this._sendPublishBinary(wireData)
   }
 
-  /** The client replies to an ack DM with `dm-reply`, which only the recipient it was relayed to may send. */
-  _relayDm(wireText: string, { from, to, ackId }: RoomDmEnvelope): void {
-    if (ackId) this._recordAckDm(ackId, from, to)
+  _relayDm(wireText: string, { from, ackId }: RoomDmEnvelope): void {
+    if (ackId) this._recordAckDm(ackId, from)
     this._sendPublish(wireText)
   }
 
@@ -325,19 +324,19 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
   // Ack-DM correlations
 
   /** Sweeps correlations whose sender already timed out. */
-  private _recordAckDm(ackId: string, sender: string, recipient: string): void {
+  private _recordAckDm(ackId: string, sender: string): void {
     const now = Date.now()
     for (const [id, entry] of this._pendingAckDms) {
       if (entry.expiresAt > now) break // constant offset ⇒ insertion order is deadline order; the rest are younger
       this._pendingAckDms.delete(id)
     }
-    this._pendingAckDms.set(ackId, { sender, recipient, expiresAt: now + ROOM_DM_ACK_TIMEOUT_MS })
+    this._pendingAckDms.set(ackId, { sender, expiresAt: now + ROOM_DM_ACK_TIMEOUT_MS })
   }
 
-  private _replyDm(replier: string, ackId: string, reply: DmReply): void {
+  private _replyDm(ackId: string, reply: DmReply): void {
     const entry = this._pendingAckDms.get(ackId)
     // The sender drops a reply after its timeout.
-    if (!entry || entry.recipient !== replier) return
+    if (!entry) return
     this._pendingAckDms.delete(ackId)
     void this._room._publishDmAck(entry.sender, ackId, reply).catch(reportRoomError)
   }

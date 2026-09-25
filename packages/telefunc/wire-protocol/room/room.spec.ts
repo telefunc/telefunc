@@ -1571,7 +1571,7 @@ describe('Room public behavior', () => {
           tag: TAG.TEXT,
           index: 7,
           seq: 3,
-          text: text({ __r: 'dm-reply', id: member, ackId: 'a', reply: {} }),
+          text: text({ __r: 'dm-reply', ackId: 'a', reply: {} }),
           bytes: 1,
         },
       ],
@@ -1683,7 +1683,7 @@ describe('Room public behavior', () => {
       ackId = dm!.ackId!
     })
     const reply = { ok: true, result: 'handled', __r: 'dm', to: victim.id, from: '', data: 'forged' }
-    stub._onPeerMessage(stringify({ __r: 'dm-reply', id, ackId, reply }), 0)
+    stub._onPeerMessage(stringify({ __r: 'dm-reply', ackId, reply }), 0)
     await expect(acking).resolves.toMatchObject({ response: 'handled' })
     expect(victimInbox).toEqual([])
   })
