@@ -328,6 +328,7 @@ class ClientRoom extends RoomStateView implements Room {
 
   /** Declarations are replayed channel messages, so the server keeps them across reconnects: send only changes. */
   private _declare(declaration: WantsDeclaration): void {
+    if (this._stub.isClosed) return // a closing stub's server side drops its declarations with it
     const serialized = JSON.stringify(declaration)
     if (this._declared[declaration.__r] === serialized) return
     this._declared[declaration.__r] = serialized

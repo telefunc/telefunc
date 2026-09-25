@@ -2721,6 +2721,20 @@ describe('client Room lifecycle', () => {
     expect(client._getRemote(hidden.id)).toBeNull()
     expect(left).toBe(1)
   })
+  it('declares nothing while its stub is closing, so an unsubscribe during the close returns normally', () => {
+    let closing = false
+    const { client, fake } = fakeClient('declare-while-closing', {
+      // Like ClientChannel.send on a closed channel: it throws synchronously.
+      send: () => {
+        if (closing) throw new ChannelClosedError()
+        return Promise.resolve(undefined)
+      },
+    })
+    Object.defineProperty(fake.stub, 'isClosed', { get: () => closing })
+    const unsubscribe = client.onAnnounce(() => {})
+    closing = true
+    expect(() => unsubscribe()).not.toThrow()
+  })
   it('declares a room-level default binary track without an earlier all-track listener', () => {
     const sent: unknown[] = []
     const { client } = fakeClient('default-track-declaration', {
