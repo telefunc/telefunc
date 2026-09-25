@@ -1776,10 +1776,16 @@ describe('Room public behavior', () => {
     const holder = (await room.join()) as ServerLocalParticipant
     const channel = new RoomParticipantStubChannel(holder)
     channel._registerChannel()
-    attachPeer(channel as unknown as RoomStubChannel)
+    const peer = attachPeer(channel as unknown as RoomStubChannel)
     await holder.leave()
     const data = encodeBinaryFrame(holder.id, new Uint8Array([1]))
-    expect(() => channel._dispatchFrame({ tag: TAG.BINARY_ACK_REQ, index: 7, seq: 1, data })).not.toThrow()
+    channel._dispatchFrame({ tag: TAG.BINARY_ACK_REQ, index: 7, seq: 1, data })
+    await vi.waitFor(() =>
+      expect(peer.decoded().find((frame) => frame.tag === TAG.ACK_RES)).toMatchObject({
+        status: ACK_STATUS.ERROR,
+        text: 'Participant left the room',
+      }),
+    )
   })
   it('leaves no member behind a join whose member write committed but whose reply was lost', async () => {
     const room = await Room.create('join-reply-lost')
