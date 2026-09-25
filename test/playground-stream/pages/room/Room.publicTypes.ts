@@ -1,5 +1,4 @@
-// The released-API snapshot owns entrypoint symbol inventories; this fixture proves that Room's
-// generics reach every public server/client view without widening, narrowing, bottoming out, or `any`.
+// Room's generics reach every public server/client view without widening, narrowing, bottoming out, or `any`.
 import type * as Server from 'telefunc'
 import type * as Client from 'telefunc/client'
 type Assert<T extends true> = T
