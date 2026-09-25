@@ -158,6 +158,16 @@ abstract class ParticipantBase implements LocalParticipant {
     for (const track of this._wantedTracks) this._invoke(callback, track, true)
     return unlisten
   }
+  /** @internal The wanted tracks, whole. */
+  get _demandedTracks(): Array<string | null> {
+    return [...this._wantedTracks]
+  }
+  /** @internal The whole wanted set, as a reattached holder hears it: only the tracks that changed fire. */
+  _applyDemandState(tracks: Array<string | null>): void {
+    const next = new Set(tracks)
+    for (const track of [...this._wantedTracks]) if (!next.has(track)) this._onDemand(track, false)
+    for (const track of next) if (!this._wantedTracks.has(track)) this._onDemand(track, true)
+  }
   /** @internal Room-wide demand for one of this member's tracks changed; `null` is the default track. */
   _onDemand(track: string | null, wanted: boolean): void {
     if (wanted) this._wantedTracks.add(track)

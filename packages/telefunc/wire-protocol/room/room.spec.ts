@@ -2333,6 +2333,61 @@ describe('Room public behavior', () => {
       config.channel = {}
     }
   })
+  it("sends a reattached client its member's demand its offline buffer dropped", async () => {
+    const room = (await Room.create('reattach-demand')) as ServerRoom
+    config.channel = { bufferLimit: 256 }
+    try {
+      const stub = register(room)
+      const first = attachPeer(stub)
+      const { id } = (await stub._handleRequest({ __r: 'req-join', meta: {}, selfDelivery: true })) as { id: string }
+      await vi.waitFor(() => expect(controlEvents(first).map(({ __r }) => __r)).toContain('roster'))
+      stub._onPeerDisconnect(60_000)
+      const observer = await Room.get(room.id)
+      ;(await observer.getParticipant(id))!.subscribeBinary(() => {})
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      // Larger than the offline buffer: it clears the buffered demand, and is dropped too.
+      await Room.setMeta(room.id, { pad: 'x'.repeat(300) })
+      const peer = attachPeer(stub)
+      await vi.waitFor(() =>
+        expect(controlEvents(peer).filter(({ __r }) => __r === 'demand-state')).toEqual([
+          { __r: 'demand-state', member: id, tracks: [null] },
+        ]),
+      )
+    } finally {
+      config.channel = {}
+    }
+  })
+  it('sends a reattached client of a handed-out participant the demand its offline buffer dropped', async () => {
+    const room = (await Room.create('reattach-participant-demand')) as ServerRoom
+    config.channel = { bufferLimit: 256 }
+    try {
+      const me = (await room.join()) as ServerLocalParticipant
+      const other = await room.join()
+      const wanted: Array<string | null> = []
+      me.onDemand((track, on) => void (on && wanted.push(track)))
+      const channel = new RoomParticipantStubChannel(me)
+      channel._registerChannel()
+      attachPeer(channel)
+      channel._onPeerDisconnect(60_000)
+      const observer = await Room.get(room.id)
+      ;(await observer.getParticipant(me.id))!.subscribeBinary(() => {})
+      await vi.waitFor(() => expect(wanted).toEqual([null]))
+      // Larger than the offline buffer: it clears the buffered demand notice.
+      await other.send(me.id, 'x'.repeat(300))
+      const peer = attachPeer(channel)
+      await vi.waitFor(() =>
+        expect(
+          peer
+            .decoded()
+            .filter((frame) => frame.tag === TAG.TEXT)
+            .map((frame) => parse(frame.text) as { __r: string })
+            .filter(({ __r }) => __r === 'demand-state'),
+        ).toEqual([{ __r: 'demand-state', tracks: [null] }]),
+      )
+    } finally {
+      config.channel = {}
+    }
+  })
   it("applies a reattach entry's text subscription as the Room stub's want, not as a Broadcast route", async () => {
     const room = (await Room.create('reattach-text')) as ServerRoom
     const member = await room.join()
@@ -2821,6 +2876,22 @@ describe('client Room lifecycle', () => {
     answer.resolve('late')
     await new Promise((resolve) => setTimeout(resolve, 0))
     expect(send).not.toHaveBeenCalled()
+  })
+  it("applies a member's whole demand set as the changes from what it had", async () => {
+    const { id, ack, emit, joining } = await pendingClientJoin('demand-state')
+    emit({ __r: 'join', id, meta: {}, joinedAt: 1 }, 1)
+    ack.resolve({ id, joinedAt: 1 })
+    const participant = await joining
+    emit({ __r: 'demand', member: id, track: 'screen', wanted: true }, 2)
+    emit({ __r: 'demand', member: id, track: 'mic', wanted: true }, 3)
+    const demand: unknown[] = []
+    participant.onDemand((track, wanted) => demand.push([track, wanted]))
+    demand.length = 0
+    emit({ __r: 'demand-state', member: id, tracks: ['mic', null] }, 4)
+    expect(demand).toEqual([
+      ['screen', false],
+      [null, true],
+    ])
   })
   it("delivers member-addressed events that arrive before the participant's join ack", async () => {
     const replies: unknown[] = []
@@ -3341,7 +3412,7 @@ describe('room protocol validation', () => {
   })
 })
 type Peer = ReturnType<typeof attachPeer>
-function attachPeer(stub: RoomStubChannel, lastSeq?: number, broadcast?: BroadcastSubscriptions) {
+function attachPeer(stub: ServerChannel, lastSeq?: number, broadcast?: BroadcastSubscriptions) {
   const frames: Uint8Array[] = []
   const replay = stub._replayBuffer!
   if (lastSeq !== undefined) frames.push(...replay.getAfter(lastSeq))

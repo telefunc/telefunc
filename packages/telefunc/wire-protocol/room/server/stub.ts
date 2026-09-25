@@ -56,6 +56,17 @@ type ResponseRoomGrants = { selfSuppressed: Set<string>; hidden: Set<string> }
 
 /** A Room stub answers each client request through its channel ack, under the Room error contract. */
 abstract class RoomRequestChannel extends ServerChannel {
+  private _attached = false
+
+  /** A reattached client may have missed state its offline buffer dropped: each stub sends its state again. */
+  override _attachPeer(peer: IndexedPeer, state?: ReattachState): void {
+    const reattach = this._attached
+    this._attached = true
+    super._attachPeer(peer, state)
+    this._onAttached(reattach)
+  }
+  protected abstract _onAttached(reattach: boolean): void
+
   protected _ackRoomResult(seq: number, work: Promise<unknown>): Promise<void> {
     return this._trackAck(
       work.then(
@@ -94,7 +105,6 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
   private _binary: BinaryWants = emptyBinaryWants()
   /** A tail waits for the client's first text selector, then flushes once in order. */
   private _tail: TailHold | null = null
-  private _attached = false
 
   constructor(
     serverRoom: ServerRoom,
@@ -107,11 +117,7 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
     this._grantedHidden = grants.hidden
   }
 
-  /** Each attach gets the room's state: a reattached client may have missed events its offline buffer dropped. */
-  override _attachPeer(peer: IndexedPeer, state?: ReattachState): void {
-    const reattach = this._attached
-    this._attached = true
-    super._attachPeer(peer, state)
+  protected override _onAttached(reattach: boolean): void {
     this._room._onStubAttached(this, reattach)
   }
 
@@ -379,6 +385,10 @@ class RoomParticipantStubChannel extends RoomRequestChannel {
     this._participant = participant
     this._publishShield = publishShield
     this._mirrorParticipant()
+  }
+
+  protected override _onAttached(reattach: boolean): void {
+    if (reattach) this._notify({ __r: 'demand-state', tracks: this._participant._demandedTracks })
   }
 
   override _onPeerAckReqMessage(text: string, seq: number): Promise<void> {

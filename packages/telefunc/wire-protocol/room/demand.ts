@@ -65,6 +65,11 @@ class RoomDemand {
     return this._local.size > 0 || this._remote.size > 0
   }
 
+  /** Owner side: the member's tracks it last pushed as wanted. */
+  wanted(member: string): string[] {
+    return [...(this._pushed.get(member)?.keys() ?? [])]
+  }
+
   forgetMember(member: string): void {
     this._remote.delete(member)
     this._pushed.delete(member)

@@ -111,8 +111,11 @@ type RoomAnnounceEnvelope = { __r: 'announce'; data: unknown }
 type RoomEnvelope = RoomCtrlEnvelope | RoomDataEnvelope | RoomAnnounceEnvelope
 /** Sent when a stub opens: it reflects every event relayed before it. A failed read says so, so roster getters don't wait forever. */
 type RoomRosterEvent = { __r: 'roster'; members: MemberSnapshot[] } | { __r: 'roster-error' }
-/** Global demand for one of a member's own published tracks, pushed on aggregate state changes. */
-type RoomDemandEvent = { __r: 'demand'; member: string; track: string | null; wanted: boolean }
+/** Global demand for one of a member's own published tracks, pushed on aggregate state changes; a reattached client
+ *  gets the member's whole wanted set, since its offline buffer may have dropped changes. */
+type RoomDemandEvent =
+  | { __r: 'demand'; member: string; track: string | null; wanted: boolean }
+  | { __r: 'demand-state'; member: string; tracks: Array<string | null> }
 /** On the recipient's inbox lane, which only its owner subscribes. `ackId` asks for a reply on the sender's inbox. */
 type RoomDmEnvelope = {
   __r: 'dm'
@@ -168,6 +171,7 @@ type ParticipantStubNotice =
   | { __r: 'p-meta'; meta: ParticipantMeta; seq: number }
   | { __r: 'dm'; from: string; fromMeta: ParticipantMeta | null; fromIdentity?: string; data: unknown; ackId?: string }
   | { __r: 'demand'; track: string | null; wanted: boolean }
+  | { __r: 'demand-state'; tracks: Array<string | null> }
 
 /** Which members' streams a holder wants on the text lane: `all` for room-level listeners, or a specific member set for participant-scoped ones. */
 type MemberWants = { all: boolean; members: string[] }

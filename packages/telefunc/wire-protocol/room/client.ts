@@ -49,6 +49,7 @@ function heldMemberOf(event: RoomEnvelope | RoomDmEnvelope | RoomRosterEvent | R
     case 'dm':
       return event.to
     case 'demand':
+    case 'demand-state':
       return event.member
     case 'leave':
       return event.id
@@ -253,6 +254,9 @@ class ClientRoom extends RoomStateView implements Room {
       case 'demand':
         // Whether anyone wants one of our own members' tracks flipped (onDemand).
         this._localParticipants.get(event.member)?._onDemand(event.track, event.wanted)
+        return
+      case 'demand-state':
+        this._localParticipants.get(event.member)?._applyDemandState(event.tracks)
         return
       case 'dm': {
         // Relayed from this member's private inbox: only its own stub ever receives it.
@@ -475,6 +479,8 @@ class ClientStandaloneParticipant extends ClientParticipantBase {
           return this._onOwnMetaWritten(msg)
         case 'demand':
           return this._onDemand(msg.track, msg.wanted)
+        case 'demand-state':
+          return this._applyDemandState(msg.tracks)
         case 'dm':
           // An ack DM replies through the channel's own ack: the handler's return rides it home.
           if (msg.ackId) return this._deliverMessageAck(inboxMessageFromWire(msg))
