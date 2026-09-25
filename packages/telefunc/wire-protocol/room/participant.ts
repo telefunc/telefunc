@@ -60,6 +60,10 @@ abstract class ParticipantBase implements LocalParticipant {
   get meta(): ParticipantMeta {
     return this._meta
   }
+  /** @internal */
+  get _acceptedMeta(): AcceptedMeta {
+    return { meta: this._meta, seq: this._metaSeq }
+  }
   /** @internal A meta the room accepted at `seq`; an older one never replaces a newer. */
   _acceptMeta({ meta, seq }: AcceptedMeta): void {
     if (seq <= this._metaSeq) return

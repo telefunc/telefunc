@@ -387,7 +387,9 @@ class RoomParticipantStubChannel extends RoomRequestChannel {
   }
 
   protected override _onAttached(reattach: boolean): void {
-    if (reattach) this._notify({ __r: 'demand-state', tracks: this._participant._demandedTracks })
+    if (!reattach) return
+    this._notify({ __r: 'p-meta', ...this._participant._acceptedMeta })
+    this._notify({ __r: 'demand-state', tracks: this._participant._demandedTracks })
   }
 
   override _onPeerAckReqMessage(text: string, seq: number): Promise<void> {

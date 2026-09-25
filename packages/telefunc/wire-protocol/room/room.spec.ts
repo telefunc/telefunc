@@ -2408,6 +2408,33 @@ describe('Room public behavior', () => {
       config.channel = {}
     }
   })
+  it('sends a reattached client of a handed-out participant its meta its offline buffer dropped', async () => {
+    const room = (await Room.create('reattach-participant-meta')) as ServerRoom
+    config.channel = { bufferLimit: 256 }
+    try {
+      const me = (await room.join({ meta: { score: 0 } })) as ServerLocalParticipant
+      const other = await room.join()
+      const channel = new RoomParticipantStubChannel(me)
+      channel._registerChannel()
+      attachPeer(channel)
+      channel._onPeerDisconnect(60_000)
+      await me.setAttributes({ score: 1 })
+      // Larger than the offline buffer: it clears the buffered meta notice.
+      await other.send(me.id, 'x'.repeat(300))
+      const peer = attachPeer(channel)
+      await vi.waitFor(() =>
+        expect(
+          peer
+            .decoded()
+            .filter((frame) => frame.tag === TAG.TEXT)
+            .map((frame) => parse(frame.text) as { __r: string })
+            .filter(({ __r }) => __r === 'p-meta'),
+        ).toEqual([{ __r: 'p-meta', meta: { score: 1 }, seq: expect.any(Number) }]),
+      )
+    } finally {
+      config.channel = {}
+    }
+  })
   it("applies a reattach entry's text subscription as the Room stub's want, not as a Broadcast route", async () => {
     const room = (await Room.create('reattach-text')) as ServerRoom
     const member = await room.join()
