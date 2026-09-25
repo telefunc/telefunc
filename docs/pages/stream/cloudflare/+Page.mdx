@@ -101,7 +101,7 @@ Each region runs its own Durable Objects so that channel state stays close to us
 
 Every telefunction call and channel message from a client must reach the **same Durable Object** — otherwise that client's channel state would be unavailable.
 
-On the first request, Telefunc picks a Durable Object in the nearest region, stores a session token in KV (TTL: 24 hours), and returns that token to the client via the `x-telefunc-session` header. Subsequent requests send this token back so Telefunc routes to the same Durable Object.
+On the first request, Telefunc returns a session token to the client via the `x-telefunc-session` header. The token picks one Durable Object of the nearest region, and KV remembers that region for it (TTL: 24 hours). Subsequent requests send the token back, so they reach the same Durable Object, even after the KV entry lapses while the client stays in that region.
 
 <Warning>
 

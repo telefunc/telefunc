@@ -133,6 +133,7 @@ vi.mock('./routing.js', () => ({
 }))
 
 import { Telefunc } from '../../../../serve/cloudflare.js'
+import { resolveSessionRoutingTarget } from './routing.js'
 import { disposeBackend, getRoomBackend } from '../../../backend/install.js'
 import type {
   BroadcastDeliverRequest,
@@ -262,11 +263,30 @@ describe('cloudflare adapter entrypoint', () => {
     expect(fetch).toHaveBeenCalledTimes(1)
 
     const token = response?.headers.get('x-telefunc-session')
-    expect(token).toBeTruthy()
-    expect(token).toMatch(/^telefunc-shard-weur-0:/)
+    expect(token).toMatch(/^[0-9a-f-]{36}$/)
 
     const stored = await kv.get(`session:${token}`, 'json')
     expect(stored).toEqual({ s: 'telefunc-shard-weur-0', b: 'weur' })
+  })
+
+  it('keeps a presented token whose KV entry lapsed, and routes it by that token again', async () => {
+    const { binding } = createBinding()
+    const tf = new Telefunc()
+    const kv = createMockKV()
+    const response = await tf.serve({
+      request: new Request('https://telefunc.test/_telefunc?session=lapsed-token'),
+      env: { TelefuncDurableObject: binding, TelefuncKV: kv } as unknown as Cloudflare.Env,
+      ctx: {} as ExecutionContext,
+    })
+    expect(vi.mocked(resolveSessionRoutingTarget)).toHaveBeenLastCalledWith(
+      'telefunc',
+      undefined,
+      expect.any(Request),
+      'weur',
+      'lapsed-token',
+    )
+    expect(response?.headers.get('x-telefunc-session')).toBe('lapsed-token')
+    expect(await kv.get('session:lapsed-token', 'json')).toEqual({ s: 'telefunc-shard-weur-0', b: 'weur' })
   })
 
   it('returns undefined for non-telefunc traffic', async () => {

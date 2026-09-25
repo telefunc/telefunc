@@ -340,11 +340,28 @@ describe('cloudflare broadcast routing', () => {
     expect(getBucketCoordinatorShardIndices({ weur: 2, apac: 1 }, 'apac')).toEqual([0])
   })
 
+  it('routes one session token to one shard of its region, however often it is routed', () => {
+    const request = createCloudflareRequest({ colo: 'LHR' })
+    const shards = new Set(
+      Array.from(
+        { length: 20 },
+        () => resolveSessionRoutingTarget('telefunc', { weur: 4 }, request, 'weur', 'token-a').shardOrdinal,
+      ),
+    )
+    expect(shards.size).toBe(1)
+  })
+
   it('resolves session targets from request location and scale', () => {
     const exactRequest = createCloudflareRequest({ colo: 'LHR' })
     const unknownRequest = createCloudflareRequest({ continent: 'EU' })
-    const exactTarget = resolveSessionRoutingTarget('telefunc', { weur: 2, apac: 1 }, exactRequest, 'weur')
-    const fallbackTarget = resolveSessionRoutingTarget('telefunc', { weur: 1, apac: 1 }, unknownRequest, 'weur')
+    const exactTarget = resolveSessionRoutingTarget('telefunc', { weur: 2, apac: 1 }, exactRequest, 'weur', 'token')
+    const fallbackTarget = resolveSessionRoutingTarget(
+      'telefunc',
+      { weur: 1, apac: 1 },
+      unknownRequest,
+      'weur',
+      'token',
+    )
 
     expect(exactTarget).toMatchObject({
       sessionInstanceName: expect.stringMatching(/^telefunc-shard-weur-/),
@@ -360,7 +377,7 @@ describe('cloudflare broadcast routing', () => {
   it('routes a recognized region missing from the scale map to locationFallback instead of throwing', () => {
     // `ABQ` resolves to `wnam`, which is absent from this per-region scale map.
     const wnamRequest = createCloudflareRequest({ colo: 'ABQ' })
-    const target = resolveSessionRoutingTarget('telefunc', { weur: 2, apac: 1 }, wnamRequest, 'weur')
+    const target = resolveSessionRoutingTarget('telefunc', { weur: 2, apac: 1 }, wnamRequest, 'weur', 'token')
 
     expect(target).toMatchObject({
       sessionInstanceName: expect.stringMatching(/^telefunc-shard-weur-/),

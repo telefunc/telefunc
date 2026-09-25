@@ -220,10 +220,11 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
       }
 
       if (!sessionInstanceName || !locationBucket) {
-        const target = resolveSessionRoutingTarget(baseInstanceName, scale, request, locationFallback)
+        // A presented token keeps its shard: a client names one before its first call, and a lapsed one stays.
+        token ??= crypto.randomUUID()
+        const target = resolveSessionRoutingTarget(baseInstanceName, scale, request, locationFallback, token)
         sessionInstanceName = target.sessionInstanceName
         locationBucket = target.locationBucket
-        token = `${sessionInstanceName}:${crypto.randomUUID()}`
         const value: StoredShardToken = { s: sessionInstanceName, b: locationBucket }
         await kv.put(`session:${token}`, JSON.stringify(value), { expirationTtl: SHARD_TOKEN_TTL_SECONDS })
       }

@@ -5,6 +5,7 @@ import { config } from '../../client/clientConfig.js'
 import { CHANNEL_TRANSPORT } from '../constants.js'
 import { ACK_STATUS, TAG, type AckResultStatus } from '../shared-ws.js'
 import { ChannelOverflowError } from '../channel-errors.js'
+import { getSessionToken } from './session-registry.js'
 
 const broadcasts: ClientBroadcast[] = []
 afterEach(() => {
@@ -103,4 +104,20 @@ describe.each([
     }
     await vi.waitFor(() => expect(report).toHaveBeenCalledOnce())
   })
+})
+
+test('a channel made before the page has a session token makes one, so the call that carries it presents the same', () => {
+  config.fetch = async () => new Response(new ReadableStream({ start() {} }), { status: 200 })
+  const telefuncUrl = 'http://first-call.test/_telefunc'
+  expect(getSessionToken(telefuncUrl)).toBeUndefined()
+  broadcasts.push(
+    new ClientBroadcast({
+      channelId: crypto.randomUUID(),
+      key: 'first-call',
+      transports: [CHANNEL_TRANSPORT.SSE],
+      telefuncUrl,
+      connectionKey: crypto.randomUUID(),
+    }),
+  )
+  expect(getSessionToken(telefuncUrl)).toEqual(expect.any(String))
 })
