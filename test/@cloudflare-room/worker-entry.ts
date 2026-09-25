@@ -95,7 +95,7 @@ export class PublicDurableObject extends RoomAuthority<Env> {
     return this.#run(() => this.#manager.deliver(request))
   }
   #run<T>(fn: () => T): T {
-    return withCloudflareSession({ room: () => this.#manager, broadcast: () => this.#member }, fn)
+    return withCloudflareSession({ room: this.#manager, broadcast: this.#member }, fn)
   }
 }
 // A session DO that records the Room frames it is handed, holding the one reading 'hold' until released; one told to

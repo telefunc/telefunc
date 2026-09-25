@@ -14,7 +14,6 @@ import { installBackend } from '../wire-protocol/backend/install.js'
 import {
   CloudflareBroadcastAuthorityState,
   CloudflareBroadcastTransport,
-  type CloudflareBroadcastMember,
 } from '../wire-protocol/server/adapter/cloudflare/broadcast.js'
 import type {
   BroadcastCalls,
@@ -131,25 +130,23 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
   const TelefuncDurableObject = class extends RoomAuthority<Cloudflare.Env> {
     private readonly authorityState: CloudflareBroadcastAuthorityState
     private readonly broadcastCalls: BroadcastCalls = new OrderedStubs()
-    private readonly broadcastMember: CloudflareBroadcastMember
-    private roomManager: CloudflareRoomSessionManager | null = null
-    // Only a Room subscription materializes the manager.
-    private readonly session: CloudflareSession = {
-      room: () => (this.roomManager ??= new CloudflareRoomSessionManager(this.ctx.id.toString())),
-      broadcast: () => this.broadcastMember,
-    }
+    private readonly session: CloudflareSession
 
     constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
       super(ctx, env, telefuncNamespace(env) as unknown as RoomSessionNamespace)
       this.authorityState = new CloudflareBroadcastAuthorityState(ctx)
-      this.broadcastMember = broadcast.member(ctx.id.toString(), this.broadcastCalls)
+      const id = ctx.id.toString()
+      this.session = {
+        room: new CloudflareRoomSessionManager(id),
+        broadcast: broadcast.member(id, this.broadcastCalls),
+      }
       crosswsAdapter.handleDurableInit(this, ctx, env)
     }
 
     async fetch(request: Request) {
       return this.runInSession(async () => {
         const bucket = request.headers.get(TELEFUNC_BROADCAST_BUCKET_HEADER) as LocationBucket | null
-        if (bucket) this.broadcastMember.locate(bucket)
+        if (bucket) this.session.broadcast.locate(bucket)
         if (request.headers.get('upgrade') === 'websocket') {
           return crosswsAdapter.handleDurableUpgrade(this, request)
         }
@@ -175,7 +172,7 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
     }
 
     telefuncBroadcastDeliver(request: BroadcastDeliverRequest) {
-      return this.runInSession(() => this.broadcastMember.deliver(request))
+      return this.runInSession(() => this.session.broadcast.deliver(request))
     }
 
     telefuncBroadcastPresence(request: BroadcastPresenceRequest) {
@@ -183,7 +180,7 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
     }
 
     telefuncRoomDeliver(request: RoomSessionDeliveryRequest): void {
-      return this.runInSession(() => this.session.room().deliver(request))
+      return this.runInSession(() => this.session.room.deliver(request))
     }
 
     private runInSession<T>(fn: () => T): T {

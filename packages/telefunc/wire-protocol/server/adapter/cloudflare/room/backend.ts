@@ -90,7 +90,7 @@ class CloudflareBackend implements BroadcastDriver, RoomDriver {
     // From a session DO, through its ordered stub, so its commits to a room keep the order Room sent them in.
     const session = currentCloudflareSession()
     const wire = await (session
-      ? session.room().callAuthority(roomId, () => this.#stub(roomId), commit)
+      ? session.room.callAuthority(roomId, () => this.#stub(roomId), commit)
       : commit(this.#stub(roomId)))
     if ('stale' in wire) return wire
     const delivery = this.#stub(roomId).awaitDelivery(wire.deliveryToken)
@@ -127,13 +127,13 @@ class CloudflareBackend implements BroadcastDriver, RoomDriver {
 
   #bindSubscription(source: CloudflareSubscriptionSource): SubscriptionBinding {
     if (!('roomId' in source)) {
-      const member = requireCloudflareSession().broadcast()
+      const member = requireCloudflareSession().broadcast
       return {
         partition: member.partition,
         open: (receiver) => member.openSubscription(source, receiver),
       }
     }
-    const manager = requireCloudflareSession().room()
+    const manager = requireCloudflareSession().room
     return {
       partition: manager.subscriptionPartition,
       // A route call line opens a fresh stub, like a commit's: a stub that rejected may be broken.

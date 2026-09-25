@@ -7,8 +7,8 @@ import type { CloudflareRoomSessionManager } from './room/subscription.js'
 
 /** What a session DO lends the code it runs: its Room manager and its Broadcast membership. */
 type CloudflareSession = {
-  room(): CloudflareRoomSessionManager
-  broadcast(): CloudflareBroadcastMember
+  room: CloudflareRoomSessionManager
+  broadcast: CloudflareBroadcastMember
 }
 
 const SESSION = Symbol('telefunc.cloudflare.session')

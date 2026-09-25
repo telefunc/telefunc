@@ -20,6 +20,7 @@ import { CLOUDFLARE_COLO_LOCATION_HINT_MAP } from './coloLocationHintMap.js'
 import { ServerBroadcast } from '../../server-broadcast.js'
 import { disposeBackend, installBackend } from '../../../backend/install.js'
 import { CloudflareBackend } from './room/backend.js'
+import { CloudflareRoomSessionManager } from './room/subscription.js'
 import type { SubscriptionAttempt, SubscriptionState } from '../../../backend/subscription.js'
 
 const encode = (text: string) => new TextEncoder().encode(text)
@@ -222,15 +223,7 @@ function createMember(transport: CloudflareBroadcastTransport, id = 'member-weur
 
 /** Runs `fn` as code in the member's session DO. */
 function inSession<T>(member: CloudflareBroadcastMember, fn: () => T): T {
-  return withCloudflareSession(
-    {
-      room: () => {
-        throw new Error('Broadcast specs use no Room')
-      },
-      broadcast: () => member,
-    },
-    fn,
-  )
+  return withCloudflareSession({ room: new CloudflareRoomSessionManager('session'), broadcast: member }, fn)
 }
 
 describe('cloudflare broadcast routing', () => {

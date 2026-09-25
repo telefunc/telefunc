@@ -6,6 +6,7 @@ import { ROUTE_RENEW_EVERY_MS } from './routes.js'
 import { CloudflareRoomSessionManager, type CloudflareRoomSubscriptionAttempt } from './subscription.js'
 import { CloudflareBroadcastTransport } from '../broadcast.js'
 import { withCloudflareSession } from '../session.js'
+import { OrderedStubs } from '../ordered-stubs.js'
 
 const noBroadcast = () => {
   throw new Error('this spec uses no Broadcast')
@@ -42,7 +43,7 @@ test("a session's commits to a room reach its authority in the order Room sent t
   const manager = new CloudflareRoomSessionManager('session')
   const commit = (text: string) =>
     backend.commitLane('room', 'inc', { kind: 'semantic' }, new TextEncoder().encode(text))
-  await withCloudflareSession({ room: () => manager, broadcast: noBroadcast }, () =>
+  await withCloudflareSession({ room: manager, broadcast: broadcast.member('session', new OrderedStubs()) }, () =>
     Promise.all([commit('first'), commit('second')]),
   )
   expect(arrived).toEqual(['first', 'second'])

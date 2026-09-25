@@ -389,7 +389,7 @@ class CloudflareBroadcastTransport {
   /** From a session DO, through its ordered stubs; from elsewhere, as a cron trigger, through a fresh stub. Async, so
    *  the caller gets a native promise: a stub's RpcPromise is callable, which `isPromise` doesn't take for a promise. */
   async publish(route: BroadcastRoute, payload: Uint8Array): Promise<PublishResult> {
-    const member = currentCloudflareSession()?.broadcast()
+    const member = currentCloudflareSession()?.broadcast
     const locationBucket = member?.bucket ?? null
     const request = { key: route.key, kind: route.kind, locationBucket, payload }
     const send = (authority: TelefuncBroadcastStub) => authority.telefuncBroadcastPublish(request)
