@@ -1,5 +1,5 @@
 // ioredis policy: the client options Room requires, subscriber creation, and calls to defined commands.
-export { assertAtMostOnceClient, createSubscriberSocket, defineCommand, callDefinedCommand, isCluster }
+export { assertAtMostOnceClient, createSubscriberSocket, callDefinedCommand, isCluster }
 export type { RedisClient, SubscriberSocket }
 
 import { randomUUID } from 'node:crypto'
@@ -87,11 +87,6 @@ function clusterReady(cluster: Cluster): Promise<void> {
   })
   clusterWaits.set(cluster, wait)
   return wait
-}
-
-function defineCommand(redis: RedisClient, name: string, lua: string, numberOfKeys: number | null): void {
-  if (numberOfKeys === null) redis.defineCommand(name, { lua })
-  else redis.defineCommand(name, { numberOfKeys, lua })
 }
 
 /** Invoke a command registered via `defineCommand`: ioredis attaches it as a dynamic method TypeScript can't see. */

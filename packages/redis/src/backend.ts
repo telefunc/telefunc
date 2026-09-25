@@ -5,7 +5,6 @@ import {
   assertAtMostOnceClient,
   callDefinedCommand,
   createSubscriberSocket,
-  defineCommand,
   isCluster,
   type RedisClient,
 } from './ioredis.js'
@@ -62,8 +61,8 @@ class RedisBackend implements BroadcastDriver, RoomDriver {
     this._prefix = redisKeyPrefix(options.prefix ?? DEFAULT_PREFIX)
     // A Cluster node's PUBLISH count is node-local, so it cannot prove global absence.
     this._reportsReceivers = !isCluster(options.redis)
-    for (const command of Object.values(REDIS_COMMANDS))
-      defineCommand(this._publisher, command.name, command.lua, command.numberOfKeys)
+    for (const { name, lua, numberOfKeys } of Object.values(REDIS_COMMANDS))
+      this._publisher.defineCommand(name, numberOfKeys === null ? { lua } : { numberOfKeys, lua })
     this.subscriptions = new RedisSubscriptionDriver({
       prefix: this._prefix,
       createSubscriber: () => createSubscriberSocket(options.redis),
