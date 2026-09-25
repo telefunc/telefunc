@@ -4,10 +4,10 @@ export type { TailEntry }
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 import { unrefTimer } from '../../../utils/unrefTimer.js'
 import { ROOM_TAIL_ATTACH_TIMEOUT_MS, ROOM_TAIL_HOLD_CODE_UNITS_MAX, ROOM_TAIL_HOLD_MAX } from '../constants.js'
-import type { OrderingInfo } from '../../ordering-frame.js'
+import type { WirePublishInfo } from '../../shared-ws.js'
 assertIsNotBrowser()
 
-type TailEntry = { serialized: string; ord: OrderingInfo; from: string }
+type TailEntry = { serialized: string; ord: WirePublishInfo; from: string }
 
 /** Recent text held drop-oldest under both caps until its holder subscribes, or until its lease expires. */
 class TailHold {
