@@ -1,8 +1,9 @@
-export { ChannelMux, getChannelMux }
+export { ChannelMux, getChannelMux, CHANNEL_MUX }
 export type { ReconcileOutcome, ServerTransport }
 
 import { assert } from '../../utils/assert.js'
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
+import { getRawContext } from '../../node/server/context/context.js'
 import { getServerConfig } from '../../node/server/serverConfig.js'
 import { unrefTimer } from '../../utils/unrefTimer.js'
 import {
@@ -125,8 +126,11 @@ type ConnectionEntry = {
   transport: ServerTransport<unknown>
 }
 
+/** The context key of a server that hosts its own channels: a Cloudflare session DO's end with it. */
+const CHANNEL_MUX = Symbol('telefunc.channelMux')
+
 function getChannelMux(): ChannelMux {
-  return getGlobals().mux
+  return (getRawContext()?.[CHANNEL_MUX] as ChannelMux | undefined) ?? getGlobals().mux
 }
 
 class ChannelMux {

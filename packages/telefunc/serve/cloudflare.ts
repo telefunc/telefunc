@@ -8,6 +8,7 @@ import { DurableObject, env as workerEnv } from 'cloudflare:workers'
 import '../node/server/async_hooks.js'
 import crossws from 'crossws/adapters/cloudflare'
 import { getTelefuncChannelHooks } from '../wire-protocol/server/ws.js'
+import { ChannelMux } from '../wire-protocol/server/mux.js'
 import { getServerConfig, enableChannelTransports } from '../node/server/serverConfig.js'
 import { serve as serveTelefunc } from '../node/server/telefunc.js'
 import { installBackend } from '../wire-protocol/backend/install.js'
@@ -140,6 +141,7 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
       this.session = {
         room: new CloudflareRoomSessionManager(id),
         broadcast: broadcast.member(id, this.broadcastCalls),
+        mux: new ChannelMux(),
       }
       crosswsAdapter.handleDurableInit(this, ctx, env)
     }

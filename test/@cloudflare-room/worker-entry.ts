@@ -24,6 +24,7 @@ import {
 } from '../../packages/telefunc/wire-protocol/server/adapter/cloudflare/broadcast.js'
 import { OrderedStubs } from '../../packages/telefunc/wire-protocol/server/adapter/cloudflare/ordered-stubs.js'
 import { withCloudflareSession } from '../../packages/telefunc/wire-protocol/server/adapter/cloudflare/session.js'
+import { ChannelMux } from '../../packages/telefunc/wire-protocol/server/mux.js'
 import { ServerBroadcast } from '../../packages/telefunc/wire-protocol/server/server-broadcast.js'
 const broadcast = new CloudflareBroadcastTransport({
   baseInstanceName: 'telefunc',
@@ -40,6 +41,7 @@ export class PublicDurableObject extends DurableObject<Env> {
   readonly #calls: BroadcastCalls = new OrderedStubs()
   readonly #broadcastAuthority: CloudflareBroadcastAuthorityState
   readonly #member: CloudflareBroadcastMember
+  readonly #mux = new ChannelMux()
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env)
     this.#manager = new CloudflareRoomSessionManager(ctx.id.toString())
@@ -80,7 +82,7 @@ export class PublicDurableObject extends DurableObject<Env> {
     return this.#broadcastAuthority.setPresence(request)
   }
   #run<T>(fn: () => T): T {
-    return withCloudflareSession({ room: this.#manager, broadcast: this.#member }, fn)
+    return withCloudflareSession({ room: this.#manager, broadcast: this.#member, mux: this.#mux }, fn)
   }
 }
 // A session DO that records the Room frames it is handed, holding the one reading 'hold' until released; one told to
