@@ -19,9 +19,6 @@ if (process.env.REDIS_CLUSTER_NODES) {
     const separator = entry.lastIndexOf(':')
     const host = entry.slice(0, separator)
     const port = Number(entry.slice(separator + 1))
-    if (!host || !Number.isInteger(port) || port <= 0 || port > 65_535) {
-      throw new Error(`Invalid REDIS_CLUSTER_NODES entry: ${entry}`)
-    }
     return { host, port }
   })
   installRedis(new Cluster(nodes, { retryDelayOnFailover: 0, redisOptions: { maxRetriesPerRequest: 0 } }))
