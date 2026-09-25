@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { ChannelClosedError } from '../channel-errors.js'
 import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { IndexedPeer } from '../server/IndexedPeer.js'
@@ -2345,6 +2346,21 @@ describe('client Room lifecycle', () => {
     const causes: unknown[] = []
     participant.onLeave((cause) => causes.push(cause))
     expect(causes).toEqual([{ type: 'closed' }])
+  })
+  it('drops an ack DM reply that settles after the client stub closed', async () => {
+    const { id, ack, fake, emit, joining } = await pendingClientJoin('dm-reply-after-close')
+    ack.resolve({ id, joinedAt: 1 })
+    const participant = await joining
+    const answer = deferred<string>()
+    participant.listen(() => answer.promise)
+    emit({ __r: 'dm', to: id, from: crypto.randomUUID(), fromMeta: {}, data: 'hi', ackId: 'ack-late' }, 1)
+    Object.defineProperty(fake.stub, 'isClosed', { value: true })
+    const send = vi.spyOn(fake.stub, 'send').mockImplementation(() => {
+      throw new ChannelClosedError()
+    })
+    answer.resolve('late')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(send).not.toHaveBeenCalled()
   })
   it("delivers member-addressed events that arrive before the participant's join ack", async () => {
     const replies: unknown[] = []

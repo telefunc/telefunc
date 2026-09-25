@@ -183,6 +183,8 @@ class ClientRoom extends RoomStateView implements Room {
   }
 
   private _replyDm(id: string, ackId: string, reply: DmReply): void {
+    // A closed stub can't carry the reply; the sender's ack times out as for any lost reply.
+    if (this._stub.isClosed) return
     void this._stub.send({ __r: 'dm-reply', id, ackId, reply }, { ack: false }).catch(() => {})
   }
 
