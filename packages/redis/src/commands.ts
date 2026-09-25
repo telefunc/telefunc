@@ -161,11 +161,11 @@ return reply
 
 // Checked once SUBSCRIBE is acknowledged: a lane subscription is live only while its incarnation is the
 // open head, so one closed or dropped during establishment is never reported ready.
-//   KEYS: [1]=head [2]=gens
+//   KEYS: [1]=head
 //   ARGV: [1]=inc
 const VALIDATE_GENERATION_LUA = `${HEAD_PRELUDE}
 local head = tf_live_head(KEYS[1], tf_now())
-if not head or head.state ~= 'open' or head.inc ~= ARGV[1] or redis.call('SISMEMBER', KEYS[2], ARGV[1]) ~= 1 then
+if not head or head.state ~= 'open' or head.inc ~= ARGV[1] then
   return 0
 end
 return 1
@@ -407,9 +407,9 @@ const REDIS_COMMANDS = {
   validateGeneration: command({
     name: 'tfRoomValidateGeneration',
     lua: VALIDATE_GENERATION_LUA,
-    numberOfKeys: 2,
+    numberOfKeys: 1,
     invoke: (prefix, { roomId, inc }: RoomInc) => ({
-      keys: [headKey(prefix, roomId), gensKey(prefix, roomId)],
+      keys: [headKey(prefix, roomId)],
       argv: [inc],
     }),
     parse: (reply) => reply === 1,
