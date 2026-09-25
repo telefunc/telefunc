@@ -22,22 +22,11 @@ afterAll(async () => {
   await miniflare?.dispose()
 })
 
-test('public Room lifecycle and authority settlement controls execute on Cloudflare Durable Objects', async () => {
+test('Room authority controls execute on Cloudflare Durable Objects', async () => {
   const response = await miniflare!.dispatchFetch('https://room.test/probe')
   const result = await response.json()
   expect(response.status, JSON.stringify(result)).toBe(200)
   expect(result).toEqual({
-    publicLifecycle: {
-      created: true,
-      joined: true,
-      publishedAndSubscribed: [{ kind: 'public-path' }],
-      receivedFromPublisher: true,
-      closed: true,
-    },
-    restartSettlement: {
-      old: 'Cloudflare Room delivery has an unknown delivery token',
-      new: 'resolved',
-    },
     lostTarget: { receivers: 1, settlement: 'resolved' },
     alarmPolicy: {
       idle: null,

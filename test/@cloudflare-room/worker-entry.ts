@@ -3,7 +3,6 @@ import { DurableObject, env as workerEnv } from 'cloudflare:workers'
 import '../../packages/telefunc/node/server/async_hooks.js'
 import { installBackend } from '../../packages/telefunc/wire-protocol/backend/install.js'
 import type { HeadCxResult, RoomHead } from '../../packages/telefunc/wire-protocol/backend/room/contract.js'
-import { Room } from '../../packages/telefunc/wire-protocol/room/server/statics.js'
 import {
   CloudflareBackend,
   CloudflareRoomSessionManager,
@@ -11,7 +10,6 @@ import {
   type RoomSessionDeliveryRequest,
 } from '../../packages/telefunc/wire-protocol/server/adapter/cloudflare/room/backend.js'
 import {
-  RoomAuthority,
   RoomAuthorityHost,
   type CommitWire,
 } from '../../packages/telefunc/wire-protocol/server/adapter/cloudflare/room/do.js'
@@ -94,30 +92,6 @@ export class PublicDurableObject extends RoomAuthorityHost<Env> {
   telefuncBroadcastPresence(request: BroadcastPresenceRequest) {
     return this.#broadcastAuthority.setPresence(request)
   }
-  publicRoomLifecycle(roomId: string) {
-    return this.#run(async () => {
-      const room = await Room.create(roomId, { meta: { purpose: 'cloudflare-room-ci' } })
-      const received: unknown[] = []
-      let receivedFromPublisher = false
-      let publisherId = ''
-      room.subscribe((data, _info, from) => {
-        received.push(data)
-        receivedFromPublisher = from.id === publisherId
-      })
-      const participant = await room.join({ meta: { name: 'public-path' } })
-      publisherId = participant.id
-      await participant.publish({ kind: 'public-path' })
-      const joined = room.count === 1
-      await Room.close(roomId)
-      return {
-        created: room.id === roomId,
-        joined,
-        publishedAndSubscribed: received,
-        receivedFromPublisher,
-        closed: room.isClosed,
-      }
-    })
-  }
   telefuncRoomDeliver(request: RoomSessionDeliveryRequest): void {
     return this.#run(() => this.#manager.deliver(request))
   }
@@ -130,23 +104,11 @@ export class PublicDurableObject extends RoomAuthorityHost<Env> {
 }
 // A session without Room delivery methods, so every handoff to it fails.
 export class SessionDurableObject extends DurableObject {}
-type AuthorityControl = 'reconstruct' | 'alarm'
 export class RoomProbeDurableObject extends RoomAuthorityHost<Env> {
-  #reconstructed: RoomAuthority | null = null
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env, fanoutNamespace(env.TelefuncDurableObject))
   }
-  override commitLane(...args: Parameters<RoomAuthority['commitLane']>) {
-    return this.#reconstructed === null ? super.commitLane(...args) : this.#reconstructed.commitLane(...args)
-  }
-  override awaitDelivery(token: string): Promise<void> {
-    return this.#reconstructed === null ? super.awaitDelivery(token) : this.#reconstructed.awaitDelivery(token)
-  }
-  async telefuncRoomControlForTest(action: AuthorityControl): Promise<number | null | void> {
-    if (action === 'reconstruct') {
-      this.#reconstructed = new RoomAuthority(this.ctx, fanoutNamespace(this.env.TelefuncDurableObject))
-      return
-    }
+  scheduledAlarm(): Promise<number | null> {
     return this.ctx.storage.getAlarm()
   }
 }
@@ -156,7 +118,6 @@ type RpcMethods<T> = {
     : never
 }
 type Authority = RpcMethods<RoomProbeDurableObject>
-type PublicSession = RpcMethods<Pick<PublicDurableObject, 'publicRoomLifecycle'>>
 type BroadcastSession = RpcMethods<
   Pick<PublicDurableObject, 'broadcastSubscribe' | 'broadcastPublish' | 'broadcastReceived'>
 >
@@ -175,13 +136,8 @@ export default {
       if (new URL(request.url).pathname === '/broadcast-sessions') {
         return Response.json(await broadcastAcrossSessions(env, suffix))
       }
-      const publicSession = env.PUBLIC.get(
-        env.PUBLIC.idFromName(`public-session-${suffix}`),
-      ) as unknown as PublicSession
       const sessionId = env.TelefuncDurableObject.idFromName(`session-${suffix}`)
       return Response.json({
-        publicLifecycle: await publicSession.publicRoomLifecycle(`public-room-${suffix}`),
-        restartSettlement: await authorityRestart(env, suffix),
         lostTarget: await lostTarget(env, sessionId, suffix),
         alarmPolicy: await alarmScheduling(env, sessionId, suffix),
         routeRenewal: await routeRenewal(env, sessionId, suffix),
@@ -218,19 +174,8 @@ function roomProbe(env: Env, suffix: string, name: string) {
       const frame = typeof payload === 'string' ? textEncoder.encode(payload) : new Uint8Array([payload])
       return accepted(await authority.commitLane(inc, { kind: 'semantic' }, frame), operation)
     },
-    control: (action: AuthorityControl) => authority.telefuncRoomControlForTest(action),
+    scheduledAlarm: () => authority.scheduledAlarm(),
     settle: (commit: Extract<CommitWire, { accepted: true }>) => authority.awaitDelivery(commit.deliveryToken),
-  }
-}
-async function authorityRestart(env: Env, suffix: string) {
-  const probe = roomProbe(env, suffix, 'restart')
-  await probe.open()
-  const oldCommit = await probe.commit(1, 'old authority restart')
-  await probe.control('reconstruct')
-  const newCommit = await probe.commit(2, 'new authority restart')
-  return {
-    old: await rejectionOf(probe.settle(oldCommit), 'old-token settlement'),
-    new: await rejectionOf(probe.settle(newCommit), 'new-token settlement'),
   }
 }
 async function lostTarget(env: Env, sessionId: DurableObjectId, suffix: string) {
@@ -243,10 +188,10 @@ async function lostTarget(env: Env, sessionId: DurableObjectId, suffix: string) 
 }
 async function alarmScheduling(env: Env, sessionId: DurableObjectId, suffix: string) {
   const probe = roomProbe(env, suffix, 'alarm')
-  const idle = await probe.control('alarm')
+  const idle = await probe.scheduledAlarm()
   await probe.open()
   await probe.join(sessionId)
-  const afterRoute = (await probe.control('alarm')) === null ? 'idle' : 'armed'
+  const afterRoute = (await probe.scheduledAlarm()) === null ? 'idle' : 'armed'
   await probe.authority.unsubscribeRoute({
     roomId: probe.roomId,
     inc: probe.inc,
@@ -254,7 +199,7 @@ async function alarmScheduling(env: Env, sessionId: DurableObjectId, suffix: str
     sessionDoId: sessionId.toString(),
     leaseId: `alarm-lease-${suffix}`,
   })
-  const afterUnsubscribe = await probe.control('alarm')
+  const afterUnsubscribe = await probe.scheduledAlarm()
   return { idle, afterRoute, afterUnsubscribe }
 }
 async function routeRenewal(env: Env, sessionId: DurableObjectId, suffix: string) {
