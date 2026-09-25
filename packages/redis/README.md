@@ -27,7 +27,7 @@ That one `installRedis()` call configures Broadcast and Room from the same clien
 | Client | Required |
 |---|---|
 | `Redis` | `maxRetriesPerRequest: 0`; no `reconnectOnError`; no `keyPrefix` |
-| `Cluster` | `retryDelayOnFailover: 0`; `redisOptions.maxRetriesPerRequest: 0`; no `redisOptions.reconnectOnError`; no `redisOptions.keyPrefix`; `scaleReads: 'master'` (the default) |
+| `Cluster` | `retryDelayOnFailover: 0`; `redisOptions.maxRetriesPerRequest: 0`; no `redisOptions.reconnectOnError`; no `redisOptions.keyPrefix`; `scaleReads: 'master'` (the default); no `enableAutoPipelining` |
 
 ioredis applies `keyPrefix` to commands but not to Pub/Sub channels; use `installRedis(redis, { prefix })` instead.
 

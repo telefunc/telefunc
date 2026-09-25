@@ -29,6 +29,16 @@ test("rejects an ioredis keyPrefix, which Pub/Sub channel names don't get", () =
   for (const redis of prefixed) expect(() => new RedisBackend({ redis })).toThrow('keyPrefix')
 })
 
+test('rejects a Cluster that autopipelines, which batches a variable-key script by its key count', () => {
+  const nodes = [{ host: '127.0.0.1', port: 6379 }]
+  const options = { retryDelayOnFailover: 0, redisOptions: { maxRetriesPerRequest: 0 } }
+  const cluster = new Cluster(nodes, { ...options, enableAutoPipelining: true })
+  const redis = new Redis('redis://127.0.0.1:6379', { maxRetriesPerRequest: 0, enableAutoPipelining: true })
+  onTestFinished(() => [cluster, redis].forEach((client) => client.disconnect()))
+  expect(() => new RedisBackend({ redis: cluster })).toThrow('enableAutoPipelining')
+  expect(() => new RedisBackend({ redis })).not.toThrow()
+})
+
 test('duplicates the subscriber from a standalone client or a live Cluster node, connecting a lazyConnect Cluster first', async () => {
   const cluster = new Cluster([{ host: '127.0.0.1', port: 6379 }], {
     lazyConnect: true,
