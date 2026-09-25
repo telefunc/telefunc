@@ -1,6 +1,6 @@
 export {
   DEFAULT_PREFIX,
-  redisKeyPrefix,
+  assertKeyPrefix,
   broadcastSequenceKey,
   broadcastChannel,
   headKey,
@@ -36,10 +36,9 @@ import type { BroadcastRoute } from 'telefunc/__internal'
 
 const DEFAULT_PREFIX = 'tf:'
 
-/** Builders take the prefix as validated here, once: a `{` would open a hash tag of its own. */
-function redisKeyPrefix(prefix: string): string {
+/** Builders take the prefix as checked here, once: a `{` would open a hash tag of its own. */
+function assertKeyPrefix(prefix: string): void {
   if (prefix.includes('{')) throw new Error("Redis key prefix must not contain '{'")
-  return prefix
 }
 // Encoded like a room id, so any key is one hash tag; an empty tag would hash the whole name instead.
 function broadcastTag(key: string): string {

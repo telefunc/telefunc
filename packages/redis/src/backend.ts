@@ -33,7 +33,7 @@ import {
   directoryIndexKey,
   directoryTagsKey,
   generationKeysKey,
-  redisKeyPrefix,
+  assertKeyPrefix,
   retainedKey,
   retainedKeyPrefix,
 } from './keys.js'
@@ -58,7 +58,9 @@ class RedisBackend implements BroadcastDriver, RoomDriver {
   constructor(options: RedisBackendOptions) {
     assertAtMostOnceClient(options.redis)
     this._publisher = options.redis
-    this._prefix = redisKeyPrefix(options.prefix ?? DEFAULT_PREFIX)
+    const prefix = options.prefix ?? DEFAULT_PREFIX
+    assertKeyPrefix(prefix)
+    this._prefix = prefix
     // A Cluster node's PUBLISH count is node-local, so it cannot prove global absence.
     this._reportsReceivers = !isCluster(options.redis)
     for (const { name, lua, numberOfKeys } of Object.values(REDIS_COMMANDS))
