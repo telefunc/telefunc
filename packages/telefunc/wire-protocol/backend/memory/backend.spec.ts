@@ -107,7 +107,8 @@ describe('memory backend behind the supervised consumer', () => {
   it('advances order before delivery and preserves it across time and driver reconstruction', async () => {
     await disposeBackend()
     let now = 1
-    driver = new MemoryBackend({ state: memoryState, authorityNow: () => now })
+    vi.spyOn(Date, 'now').mockImplementation(() => now)
+    driver = new MemoryBackend({ state: memoryState })
     installBackend(() => driver)
     const backend = getRoomBackend()
     const created = await backend.compareExchangeHead(
@@ -134,7 +135,7 @@ describe('memory backend behind the supervised consumer', () => {
     ])
     await subscription.unsubscribe()
     now = 3
-    const reconstructedDriver = new MemoryBackend({ state: memoryState, authorityNow: () => now })
+    const reconstructedDriver = new MemoryBackend({ state: memoryState })
     const reconstructed = await reconstructedDriver.commitLane(
       'order-survivor',
       'inc-1',

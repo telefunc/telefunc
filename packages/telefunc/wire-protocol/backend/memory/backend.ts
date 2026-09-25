@@ -36,8 +36,6 @@ import type { BackendReceiver, SubscriptionDriver } from '../subscription.js'
 import { DriverAttempt } from '../attempt.js'
 
 type MemoryBackendOptions = {
-  // Tests inject authority time to prove expiry independently of caller clock skew.
-  authorityNow?: () => number
   /** @internal Storage to share with a reconstructed backend. */
   state?: MemoryBackendState
 }
@@ -137,10 +135,8 @@ class MemorySubscriptionAttempt extends DriverAttempt {
 class MemoryBackend implements BroadcastDriver, RoomDriver {
   readonly subscriptions: SubscriptionDriver<MemorySubscriptionSource>
 
-  readonly #now: () => number
   readonly #state: MemoryBackendState
   constructor(options: MemoryBackendOptions = {}) {
-    this.#now = options.authorityNow ?? (() => Date.now())
     this.#state = options.state ?? new MemoryBackendState()
     this.subscriptions = {
       bind: (source) => ({
@@ -151,7 +147,7 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
   }
 
   publish(route: BroadcastRoute, payload: Uint8Array): PublishResult {
-    const mark = advanceOrder(this.#state.broadcastOrder, route.key, this.#now())
+    const mark = advanceOrder(this.#state.broadcastOrder, route.key, Date.now())
     const targets = [...(this.#state.broadcastSubs.get(broadcastRouteKey(route)) ?? [])]
     // Counted before delivery, which may unsubscribe or subscribe.
     const receivers = sumReceiverCounts(targets)
@@ -166,7 +162,7 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
 
   async compareExchangeHead(roomId: string, cx: HeadCx, next: HeadNext): Promise<HeadCxResult> {
     const current = this.#readAndExpireHead(this.#state.rooms.get(roomId))
-    if (!headCxMatches(cx, current, this.#now())) {
+    if (!headCxMatches(cx, current, Date.now())) {
       return { conflict: true, current: current === null ? null : publicHead(current) }
     }
     // Only a CX that actually applies materializes a room record.
@@ -174,7 +170,7 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
   }
 
   #storeHead(room: RoomRecord, next: HeadNext): StoredHead {
-    const materialized = materializeHead(next, this.#now(), `rev-${++this.#state.revSeq}`)
+    const materialized = materializeHead(next, Date.now(), `rev-${++this.#state.revSeq}`)
     const stored = { ...materialized, config: copyBytes(materialized.config) }
     room.head = stored
     if (stored.currentInc !== null) this.#generation(room, stored.currentInc)
@@ -225,7 +221,7 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
   ): Promise<CommitResult> {
     const room = this.#state.rooms.get(roomId)
     const head = this.#readAndExpireHead(room)
-    if (room === undefined || !commitPreconditionHolds(head, inc, lane.kind, opts?.closingLease, this.#now())) {
+    if (room === undefined || !commitPreconditionHolds(head, inc, lane.kind, opts?.closingLease, Date.now())) {
       return { stale: 'incarnation' }
     }
     const gen = this.#generation(room, inc)
@@ -233,7 +229,7 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
     if (missing !== undefined) return { stale: 'cell', key: missing }
     const key = encodeLaneKey(lane)
     const frame = copyBytes(payload)
-    const mark = advanceOrder(gen.order, key, this.#now())
+    const mark = advanceOrder(gen.order, key, Date.now())
     if (opts?.retain) {
       gen.retained.set(key, {
         lane: copyLane(lane),
@@ -335,7 +331,7 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
       return
     }
     if (head.expiresAt === null) return
-    unrefTimer(setTimeout(() => this.#releaseWhenLapsed(roomId, room), head.expiresAt - this.#now()))
+    unrefTimer(setTimeout(() => this.#releaseWhenLapsed(roomId, room), head.expiresAt - Date.now()))
   }
 
   #generation(room: RoomRecord, inc: string): Generation {
@@ -345,7 +341,7 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
   // Lazy TTL: a lapsed tombstone reads as absent, which is what reopens an absence epoch.
   #readAndExpireHead(room: RoomRecord | undefined): StoredHead | null {
     if (room === undefined || room.head === null) return null
-    if (!isExpired(room.head, this.#now())) return room.head
+    if (!isExpired(room.head, Date.now())) return room.head
     room.head = null
     return null
   }
