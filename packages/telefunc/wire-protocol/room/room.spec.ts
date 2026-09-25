@@ -213,6 +213,7 @@ describe('Room public behavior', () => {
     await expect(subscription.ready).rejects.toThrow("has no open incarnation 'refused-inc'")
   })
   it('relays a leave that reached this instance with no event, from a reconciled roster or a vanished record', async () => {
+    const control = loseLaneFrames((lane) => lane.kind === 'control')
     const room = (await Room.create('lost-leave-owner')) as ServerRoom
     const { stub, peer } = serve(room)
     const join = async () =>
@@ -223,23 +224,23 @@ describe('Room public behavior', () => {
     const causes: unknown[] = []
     room.onLeave((_, cause) => causes.push(cause))
     const leaves = (id: string) => memberEvents(peer, id).filter((event) => event.__r === 'leave')
-    const loseNextControlFrame = () => vi.spyOn(room, '_onCtrlMessage').mockImplementationOnce(() => {})
-    loseNextControlFrame()
+    control.next()
     await Room.removeParticipant(room.id, { id: reconciled })
     await subsOf(room).reconcileAuthority()
     expect(leaves(reconciled)).toEqual([{ __r: 'leave', id: reconciled, cause: 'removed' }])
     expect(stub._holds(reconciled)).toBe(false)
-    loseNextControlFrame()
+    control.next()
     await Room.removeParticipant(room.id, { id: vanished })
     await subsOf(room)._heartbeatTick()
     expect(leaves(vanished)).toEqual([{ __r: 'leave', id: vanished, cause: 'removed' }])
     expect(causes).toEqual([{ type: 'removed' }, { type: 'removed' }])
   })
   it("relays a room meta update that reached this instance only through the authority's reconcile", async () => {
+    const control = loseLaneFrames((lane) => lane.kind === 'control')
     const room = (await Room.create('lost-update', { meta: { topic: 'old' } })) as unknown as ServerRoom
     const { peer } = serve(room)
     await new Promise((resolve) => setTimeout(resolve, 0))
-    vi.spyOn(room, '_onCtrlMessage').mockImplementationOnce(() => {})
+    control.next()
     await Room.setMeta(room.id, { topic: 'new' })
     await subsOf(room).reconcileAuthority()
     const updates = peer
@@ -250,10 +251,11 @@ describe('Room public behavior', () => {
     expect(updates.map((event) => event.meta)).toEqual([{ topic: 'new' }])
   })
   it('tells its clients about its own join, meta change and leave even when the lane loses their echoes', async () => {
+    const control = loseLaneFrames((lane) => lane.kind === 'control')
     const room = (await Room.create('own-events-lost-echo')) as ServerRoom
     const { peer } = serve(room)
     await subsOf(room).reconcileAuthority()
-    vi.spyOn(room, '_onCtrlMessage').mockImplementation(() => {}) // the lane stays ready; every echo is lost
+    control.where(() => true)
     const member = await room.join({ meta: { v: 1 } })
     expect(clientView(peer, room.id)._getRemote(member.id)?.meta).toEqual({ v: 1 })
     await member.setMeta({ v: 2 })
@@ -273,12 +275,13 @@ describe('Room public behavior', () => {
     const room = (await Room.create('lost-hidden-meta')) as ServerRoom
     const holder = await Room.get(room.id)
     const bot = await holder.join({ hidden: true, meta: { mood: 'old' } })
+    const control = loseLaneFrames((lane) => lane.kind === 'control')
     const handed = new RoomStubChannel(room, { grants: { selfSuppressed: new Set(), hidden: new Set([bot.id]) } })
     handed._registerChannel()
     room._attachStub(handed)
     const peer = attachPeer(handed)
     await subsOf(room).reconcileAuthority()
-    vi.spyOn(room, '_onCtrlMessage').mockImplementationOnce(() => {})
+    control.next()
     await bot.setMeta({ mood: 'new' })
     await subsOf(room).reconcileAuthority()
     const metas = peer
@@ -291,13 +294,14 @@ describe('Room public behavior', () => {
     expect(metas.at(-1)).toEqual({ mood: 'new' })
   })
   it("relays a hidden member's event-less leave to no client it wasn't handed to", async () => {
+    const control = loseLaneFrames((lane) => lane.kind === 'control')
     const room = (await Room.create('lost-hidden-leave')) as ServerRoom
     const bot = await room.join({ hidden: true })
     const { peer } = serve(room)
     const causes: unknown[] = []
     bot.onLeave((cause) => causes.push(cause?.type))
     await new Promise((resolve) => setTimeout(resolve, 0))
-    vi.spyOn(room, '_onCtrlMessage').mockImplementationOnce(() => {})
+    control.next()
     await Room.removeParticipant(room.id, { id: bot.id })
     await subsOf(room)._heartbeatTick()
     expect(causes).toEqual(['removed'])
@@ -323,6 +327,8 @@ describe('Room public behavior', () => {
     const member = await room.join()
     const observer = (await Room.get(room.id)) as ServerRoom
     await observer.getParticipants()
+    // The leave reaches this instance after its roster read, as over a networked backend.
+    const observed = holdLaneDelivery((lane) => lane.kind === 'control')
     const causes: unknown[] = []
     observer.onLeave((_, cause) => causes.push(cause))
     await subsOf(observer).reconcileAuthority()
@@ -344,18 +350,13 @@ describe('Room public behavior', () => {
       await publish.promise
       return listRetained(roomId, inc)
     })
-    // The leave reaches this instance after its roster read, as over a networked backend.
-    const deliver = observer._onCtrlMessage.bind(observer)
-    const events: Array<Parameters<typeof deliver>> = []
-    const hold = vi.spyOn(observer, '_onCtrlMessage').mockImplementation((...event) => void events.push(event))
     const refresh = subsOf(observer).reconcileAuthority()
     await memberRead.started.promise
     const leaving = member.leave()
     await committed.promise
     memberRead.release.resolve()
     await refresh
-    hold.mockRestore()
-    for (const event of events) deliver(...event)
+    await observed.release()
     publish.resolve()
     await leaving
     expect(causes).toEqual([{ type: 'left' }])
@@ -716,13 +717,16 @@ describe('Room public behavior', () => {
     expect(relayed).toContain('closed')
   })
   it('applies a control frame whose seq restarted, as after a Redis restart without its data', async () => {
-    const room = (await Room.create('control-seq-restart')) as ServerRoom
-    const onControl = (
-      room as unknown as { _onCtrlMessage(message: string, info: { seq: number; timestamp: number }): void }
-    )._onCtrlMessage.bind(room)
+    let deliver!: BackendReceiver
+    mockLaneSubscription('control', (subscribeLane, roomId, inc, lane, receiver) => {
+      deliver = receiver
+      return subscribeLane(roomId, inc, lane, receiver)
+    })
+    const room = await Room.create('control-seq-restart')
+    room.onUpdate(() => {})
     const at = Date.now() + 1000
-    onControl(stringify({ __r: 'update', meta: { step: 1 }, at, by: 'a' }), { seq: 5, timestamp: at })
-    onControl(stringify({ __r: 'update', meta: { step: 2 }, at: at + 1, by: 'a' }), { seq: 1, timestamp: at + 1 })
+    deliver(encodeRoomRecord({ __r: 'update', meta: { step: 1 }, at, by: 'a' }), { seq: 5, timestamp: at })
+    deliver(encodeRoomRecord({ __r: 'update', meta: { step: 2 }, at: at + 1, by: 'a' }), { seq: 1, timestamp: at + 1 })
     expect(room.meta).toEqual({ step: 2 })
   })
   it('reconciles authority after a same-attempt recovery', async () => {
@@ -1929,14 +1933,11 @@ describe('Room public behavior', () => {
   })
   it('settles closure on the next heartbeat for an owning instance that missed `closed`', async () => {
     vi.useFakeTimers()
+    loseLaneFrames((lane) => lane.kind === 'control').where((text) => text.includes('"__r":"closed"'))
     const room = (await Room.create('missed-close')) as ServerRoom
     const member = await room.join()
     const causes: string[] = []
     member.onLeave((cause) => causes.push(cause.type))
-    const onCtrlMessage = room['_onCtrlMessage'].bind(room)
-    vi.spyOn(room as any, '_onCtrlMessage').mockImplementation((...args: any[]) => {
-      if (!String(args[0]).includes('"__r":"closed"')) (onCtrlMessage as any)(...args)
-    })
     vi.spyOn(driver, 'dropGeneration').mockRejectedValue(new Error('transient drop failure'))
     await expect(Room.close('missed-close')).rejects.toThrow('transient drop failure')
     expect(room.isClosed).toBe(false)
@@ -3917,6 +3918,26 @@ function rejectLaneSubscriptions(kind: LaneId['kind'], diagnostic: string) {
   })
   vi.spyOn(console, 'error').mockImplementation(() => {})
   return { backend, started: started.promise }
+}
+/** Loses the frames picked on matching lanes opened from now on, as a lane that stays ready. */
+function loseLaneFrames(matches: (lane: LaneId) => boolean) {
+  const backend = getRoomBackend()
+  const subscribeLane = backend.subscribeLane.bind(backend)
+  let pick: (text: string) => boolean = () => false
+  vi.spyOn(backend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
+    if (!matches(lane)) return subscribeLane(roomId, inc, lane, receiver)
+    return subscribeLane(roomId, inc, lane, (payload, info) => {
+      if (!pick(decoder.decode(payload))) receiver(payload, info)
+    })
+  })
+  return {
+    next() {
+      pick = () => ((pick = () => false), true)
+    },
+    where(picks: (text: string) => boolean) {
+      pick = picks
+    },
+  }
 }
 /** Holds the frames delivered on matching lanes opened from now on, until released in delivery order. */
 function holdLaneDelivery(matches: (lane: LaneId) => boolean) {
