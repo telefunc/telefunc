@@ -261,7 +261,7 @@ class ServerRoom extends RoomStateView implements Room {
   }
   private _abandonAdmission(id: string): void {
     this._pendingAdmissions.delete(id)
-    this._applyLeave(id, { type: 'left' })
+    this._state.applyLeave(id, { type: 'left' })
   }
 
   /** @internal */
@@ -269,7 +269,7 @@ class ServerRoom extends RoomStateView implements Room {
     if (this._state.closed) return // close() already removed everyone
     const identity = this._state.getRemote(id)?.identity ?? null
     await evictMember(this.id, this._inc, id, identity, cause)
-    this._applyLeave(id, cause)
+    this._state.applyLeave(id, cause)
   }
 
   /** @internal The member's holder is gone and nothing will retry: ownership ends even if eviction fails, leaving a record whose lease expires. */
@@ -278,7 +278,7 @@ class ServerRoom extends RoomStateView implements Room {
     try {
       await this._removeMember(id, cause)
     } catch (error) {
-      this._applyLeave(id, cause)
+      this._state.applyLeave(id, cause)
       throw error
     }
   }
@@ -540,10 +540,6 @@ class ServerRoom extends RoomStateView implements Room {
     for (const stub of this._stubs) stub._relayAnnouncement(wireText, rawInfo)
   }
 
-  private _applyMemberData(event: RoomDataEnvelope, rawInfo: WirePublishInfo): void {
-    this._local.relayText(event, rawInfo)
-  }
-
   private _relayMemberData(serialized: string, event: RoomDataEnvelope, rawInfo: WirePublishInfo): void {
     if (this._stubs.size === 0) {
       this._tail?.push({ serialized, ord: rawInfo, from: event.from })
@@ -556,7 +552,7 @@ class ServerRoom extends RoomStateView implements Room {
   _onTextData(serialized: string, rawInfo: WirePublishInfo): void {
     const envelope = decodeLaneEnvelope(serialized) as RoomDataEnvelope | Extract<RoomEnvelope, { __r: 'announce' }>
     if (envelope.__r === 'announce') return this._applyAnnouncement(envelope, serialized, rawInfo)
-    this._applyMemberData(envelope, rawInfo)
+    this._local.relayText(envelope, rawInfo)
     this._relayMemberData(serialized, envelope, rawInfo)
   }
   /** @internal */
@@ -603,7 +599,7 @@ class ServerRoom extends RoomStateView implements Room {
         this._subs.replan() // all-track subscribers need the new (member, track) key
         return true
       case 'leave':
-        this._applyLeave(event.id, leaveCauseFromWire(event))
+        this._state.applyLeave(event.id, leaveCauseFromWire(event))
         return false
       case 'p-meta': {
         const applied = this._state.applyParticipantMeta(event.id, event.meta, event.seq)
@@ -615,9 +611,6 @@ class ServerRoom extends RoomStateView implements Room {
       case 'closed':
         return this._state.applyClosed()
     }
-  }
-  private _applyLeave(id: string, cause: LeaveCause): void {
-    this._state.applyLeave(id, cause)
   }
   /** Every leave the state applies, event or reconcile, runs the member's cleanup. */
   private _onLeave(id: string, cause: LeaveCause, hidden: boolean | null): void {

@@ -93,19 +93,15 @@ class LaneSubscription {
     void subscription.ready.then(() => end(), end)
   }
 
-  /** Exhausted policy keeps demand and holder readiness pending, but drops the dead attempt until the next planning pass. */
-  dropAttempt(): void {
-    this._dropSubscription()
-  }
-
   stop(): void {
     this._subscribe = null
-    this._dropSubscription()
+    this.dropAttempt()
     this._settleReady()
     this._readyPromise = Promise.resolve()
   }
 
-  private _dropSubscription(): void {
+  /** Exhausted policy keeps demand and holder readiness pending, but drops the dead attempt until the next planning pass. */
+  dropAttempt(): void {
     const subscription = this._subscription
     this._subscription = null
     this._unobserve?.()
