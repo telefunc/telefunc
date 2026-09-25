@@ -15,7 +15,7 @@ import type { TELEFUNC_SHIELDS } from '../../node/shared/transformer/generateShi
 import { invokeChannelListener, makePublishInfo } from '../channel.js'
 import { ServerChannel, reportServerChannelError } from './channel.js'
 import { getServerConfig } from '../../node/server/serverConfig.js'
-import type { PublishResult } from '../backend/broadcast/contract.js'
+import type { BroadcastRoute, PublishResult } from '../backend/broadcast/contract.js'
 import { getBroadcastBackend } from '../backend/install.js'
 import type { BackendSubscription } from '../backend/subscription.js'
 import { stringify } from '@brillout/json-serializer/stringify'
@@ -292,7 +292,7 @@ const Broadcast = {
 }
 
 function subscribeRoute<Data>(
-  route: { key: string; kind: BroadcastKind },
+  route: BroadcastRoute,
   decode: (payload: Uint8Array) => Data,
   callback: (data: Data, info: ChannelPublishInfo) => unknown,
 ): BroadcastUnsubscribe {
