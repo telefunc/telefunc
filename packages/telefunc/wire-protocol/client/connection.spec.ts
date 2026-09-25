@@ -79,8 +79,10 @@ test("a reconnect declares a broadcast's subscriptions, not the toggles queued b
   connection.sendBroadcastUnsubscribe(channel, false)
   connection.sendBroadcastSubscribe(channel, false)
   const { movedBufferedFrames } = connection.stageReconcileBatch()
-  const queued = [...connection.sendBuffer, ...movedBufferedFrames].map(({ frame }: { frame: Uint8Array }) => frame[0])
-  expect(queued.filter((tag: number) => tag === TAG.BROADCAST_SUB || tag === TAG.BROADCAST_UNSUB)).toEqual([])
+  const queued: Array<number | undefined> = [...connection.sendBuffer, ...movedBufferedFrames].map(
+    ({ frame }: { frame: Uint8Array }) => frame[0],
+  )
+  expect(queued.filter((tag) => tag === TAG.BROADCAST_SUB || tag === TAG.BROADCAST_UNSUB)).toEqual([])
   connection.dispose()
 })
 
