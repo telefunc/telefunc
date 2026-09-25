@@ -676,6 +676,32 @@ describe('reference identity — full pipeline', () => {
     },
   )
 
+  test.each([STREAM_TRANSPORT.BINARY_INLINE, STREAM_TRANSPORT.SSE_INLINE])(
+    '%s: aborting a call whose body dropped leaves no unhandled rejection',
+    async (streamTransport) => {
+      const unhandled: unknown[] = []
+      const onUnhandled = (reason: unknown) => unhandled.push(reason)
+      process.on('unhandledRejection', onUnhandled)
+      // Node rethrows a rejected promise an event listener returns as an uncaught exception.
+      process.on('uncaughtException', onUnhandled)
+      try {
+        let drop!: (error: Error) => void
+        const network = new TransformStream<Uint8Array<ArrayBuffer>, Uint8Array<ArrayBuffer>>({
+          start: (controller) => void (drop = (error) => controller.error(error)),
+        })
+        const { abortController } = await roundTrip({ b: new ReadableStream() }, { streamTransport, network })
+        drop(new TypeError('network error'))
+        abortController.abort()
+        // The error reaches the client's body through the network stream's pipe, a few turns later.
+        await new Promise((resolve) => setTimeout(resolve, 20))
+        expect(unhandled).toEqual([])
+      } finally {
+        process.off('unhandledRejection', onUnhandled)
+        process.off('uncaughtException', onUnhandled)
+      }
+    },
+  )
+
   test('a tee() branch keeps a returned stream open after the stream itself is dropped', async () => {
     let controller!: ReadableStreamDefaultController<Uint8Array<ArrayBuffer>>
     const branch = await teeAndDrop(new ReadableStream({ start: (c) => void (controller = c) }))
