@@ -41,7 +41,7 @@ import {
   type CloudflareRoomNamespace,
   type RoomSessionDeliveryRequest,
 } from '../wire-protocol/server/adapter/cloudflare/room/backend.js'
-import { RoomAuthorityHost } from '../wire-protocol/server/adapter/cloudflare/room/do.js'
+import { RoomAuthority } from '../wire-protocol/server/adapter/cloudflare/room/do.js'
 import { withCloudflareSession, type CloudflareSession } from '../wire-protocol/server/adapter/cloudflare/session.js'
 import type { RoomSessionNamespace } from '../wire-protocol/server/adapter/cloudflare/room/fanout.js'
 import { isTelefuncRequest, toResponse } from './shared.js'
@@ -126,7 +126,7 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
 
   // One class for every role; an instance's name decides which: a session shard, a Broadcast key authority or
   // coordinator, a room authority or the room directory.
-  const TelefuncDurableObject = class extends RoomAuthorityHost<Cloudflare.Env> {
+  const TelefuncDurableObject = class extends RoomAuthority<Cloudflare.Env> {
     private readonly authorityState: CloudflareBroadcastAuthorityState
     private readonly broadcastCalls: BroadcastCalls = new OrderedStubs()
     private readonly broadcastMember: CloudflareBroadcastMember

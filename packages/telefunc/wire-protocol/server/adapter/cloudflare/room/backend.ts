@@ -25,6 +25,7 @@ import { CloudflareBroadcastTransport } from '../broadcast.js'
 import { encodeLaneKey } from '../../../../backend/room/lane-key.js'
 import { CloudflareRoomSubscriptionAttempt } from './subscription.js'
 import type { RoomAuthority } from './do.js'
+import type { DurableObject } from 'cloudflare:workers'
 import type { RouteInstallation } from './routes.js'
 import { currentCloudflareSession, requireCloudflareSession } from '../session.js'
 import { OrderedStubs } from '../ordered-stubs.js'
@@ -39,7 +40,8 @@ type RoomSessionDeliveryRequest = RouteInstallation & {
   timestamp: number
 }
 
-type CloudflareRoomAuthorityStub = Omit<RoomAuthority, 'alarm'>
+/** The room authority's own methods, which its Durable Object serves over RPC. */
+type CloudflareRoomAuthorityStub = Omit<RoomAuthority, keyof DurableObject>
 
 type CloudflareRoomNamespace = {
   idFromName(name: string): unknown

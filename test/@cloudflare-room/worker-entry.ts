@@ -10,7 +10,7 @@ import {
   type RoomSessionDeliveryRequest,
 } from '../../packages/telefunc/wire-protocol/server/adapter/cloudflare/room/backend.js'
 import {
-  RoomAuthorityHost,
+  RoomAuthority,
   type CommitWire,
 } from '../../packages/telefunc/wire-protocol/server/adapter/cloudflare/room/do.js'
 import {
@@ -45,7 +45,7 @@ const textEncoder = new TextEncoder()
 const textDecoder = new TextDecoder()
 const CONTROL_HORIZON_MS = 2_000
 // Like the production class: one namespace hosts sessions, room authorities and Broadcast authorities.
-export class PublicDurableObject extends RoomAuthorityHost<Env> {
+export class PublicDurableObject extends RoomAuthority<Env> {
   readonly #manager: CloudflareRoomSessionManager
   readonly #calls: BroadcastCalls = new OrderedStubs()
   readonly #broadcastAuthority: CloudflareBroadcastAuthorityState
@@ -118,7 +118,7 @@ export class SessionDurableObject extends DurableObject {
     return this.#arrived
   }
 }
-export class RoomProbeDurableObject extends RoomAuthorityHost<Env> {
+export class RoomProbeDurableObject extends RoomAuthority<Env> {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env, fanoutNamespace(env.TelefuncDurableObject))
   }
