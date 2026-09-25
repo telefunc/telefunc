@@ -400,8 +400,7 @@ class CloudflareBroadcastTransport {
   async publish(route: BroadcastRoute, payload: Uint8Array): Promise<PublishResult> {
     const member = currentCloudflareSession()?.broadcast()
     const locationBucket = member?.bucket ?? null
-    // An ordered stub may make the call later, and an RPC reads its arguments then: keep the bytes as they are now.
-    const request = { key: route.key, kind: route.kind, locationBucket, payload: member ? payload.slice() : payload }
+    const request = { key: route.key, kind: route.kind, locationBucket, payload }
     const send = (authority: TelefuncBroadcastStub) => authority.telefuncBroadcastPublish(request)
     const name = this.authorityName(route.key)
     return member === undefined

@@ -810,6 +810,36 @@ describe('Broadcast static bus (publish/subscribe)', () => {
     }
   })
 
+  it("hands the driver a publish's bytes as they were at the call, of a Node Buffer too, sent now or held", async () => {
+    await disposeBackend()
+    const attempt = pendingSubscription()
+    const driver = new MemoryBackend({ state: memoryState })
+    const bind = driver.subscriptions.bind.bind(driver.subscriptions)
+    driver.subscriptions.bind = (source) => ({ ...bind(source), open: () => attempt.subscription })
+    // A driver may read its payload later, as ioredis does for a queued command.
+    const sent: Uint8Array[] = []
+    vi.spyOn(driver, 'publish').mockImplementation((_route, payload) => {
+      sent.push(payload)
+      return { seq: sent.length, timestamp: 1 }
+    })
+    installBackend(() => driver)
+    const scratch = Buffer.from([1])
+    await Broadcast.publishBinary('broadcast:reused-buffer', scratch)
+    scratch[0] = 2
+    const unsubscribe = Broadcast.subscribeBinary('broadcast:reused-buffer', () => {})
+    try {
+      const held = [Broadcast.publishBinary('broadcast:reused-buffer', scratch)]
+      scratch[0] = 3
+      held.push(Broadcast.publishBinary('broadcast:reused-buffer', scratch))
+      scratch[0] = 4
+      attempt.ready()
+      await Promise.all(held)
+      expect(sent.map((payload) => Array.from(payload))).toEqual([[1], [2], [3]])
+    } finally {
+      unsubscribe()
+    }
+  })
+
   it('opens channels under a zero config.channel.bufferLimit and holds no publish', async () => {
     const { controlled } = await installPendingSubscriptionBackend({ seq: 1, timestamp: 1 })
     config.channel = { bufferLimit: 0, bufferLimitBinary: 0 }

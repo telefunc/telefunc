@@ -48,9 +48,10 @@ function superviseBroadcastDriver(driver: BroadcastDriver): BroadcastBackend {
     bufferLimit: number,
   ): PublishResult | Promise<PublishResult> => {
     const { key, kind } = route
+    // A driver may send later (a queued or re-sent command, an ordered RPC); `slice()` of a Node Buffer is a view.
+    const owned = new Uint8Array(payload)
     const waiting = pending.get(key)
-    if (waiting === undefined && !subscriptions.hasEstablishing(route)) return publishNow(route, payload)
-    const owned = payload.slice()
+    if (waiting === undefined && !subscriptions.hasEstablishing(route)) return publishNow(route, owned)
     const held = waiting ?? {
       established: raceTimeout(keyEstablished(key), BROADCAST_ESTABLISH_HOLD_MS, () => {}),
       count: 0,

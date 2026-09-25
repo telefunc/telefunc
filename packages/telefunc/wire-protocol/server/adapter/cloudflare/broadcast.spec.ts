@@ -745,17 +745,17 @@ describe('cloudflare broadcast routing', () => {
         },
       }),
     )
-    const member = createMember(transport)
-    const route = { key: 'room:reused-buffer', kind: 'binary' } as const
-    const scratch = new Uint8Array([1])
-    await inSession(member, async () => {
-      const failing = transport.publish(route, scratch).catch(() => {})
-      const inFlight = transport.publish(route, scratch)
+    installCloudflareTransport(transport)
+    const scratch = Buffer.from([1])
+    await inSession(createMember(transport), async () => {
+      const channel = new ServerBroadcast({ key: 'room:reused-buffer' })
+      const failing = channel.publishBinary(scratch).catch(() => {})
+      const inFlight = channel.publishBinary(scratch)
       replies[0]!.reject(new Error('transport error'))
       await failing
       // The next call waits for the failed stub's calls; the caller reuses its buffer meanwhile.
       scratch[0] = 3
-      const later = transport.publish(route, scratch)
+      const later = channel.publishBinary(scratch)
       scratch[0] = 9
       replies[1]!.resolve({ seq: 2, timestamp: 1 })
       await inFlight

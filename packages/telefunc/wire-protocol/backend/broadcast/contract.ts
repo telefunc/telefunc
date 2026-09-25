@@ -21,7 +21,8 @@ type BroadcastDriver = {
 
 /** What core consumes: the driver, supervised. */
 type BroadcastBackend = {
-  /** A publish held while this instance's subscription on its route is establishing counts against `bufferLimit`. */
+  /** Publishes `payload` as it is at the call. A publish held while this instance's subscription on its route is
+   *  establishing counts against `bufferLimit`. */
   publish(route: BroadcastRoute, payload: Uint8Array, bufferLimit: number): PublishResult | Promise<PublishResult>
   subscribe(route: BroadcastRoute, receiver: BackendReceiver): BackendSubscription
   hasSubscriptions(): boolean
