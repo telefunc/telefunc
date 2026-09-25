@@ -2788,6 +2788,12 @@ describe('client Room lifecycle', () => {
     expect(client.isClosed).toBe(false)
     expect(client._getRemote(metadata.id)).toBe(revived.value)
   })
+  it('fires onClose for a listener registered after the room closed', () => {
+    const { client } = fakeClient('closed-before-listener', undefined, { closed: true, count: 0 })
+    let closes = 0
+    client.onClose(() => closes++)
+    expect(closes).toBe(1)
+  })
   it('hands out a participant revived into a closed room as having left with it', () => {
     const { client } = fakeClient('revived-into-closed', undefined, { closed: true, count: 0 })
     const member = client._reviveRemote({ id: crypto.randomUUID(), meta: {}, joinedAt: 1, metaSeq: 0, identity: null })

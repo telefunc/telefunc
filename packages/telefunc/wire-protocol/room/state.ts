@@ -300,7 +300,10 @@ class RoomState {
     return this._register(this._emptyCbs, cb)
   }
   onClose(cb: () => void): () => void {
-    return this._register(this._closeCbs, cb)
+    if (!this.closed) return this._register(this._closeCbs, cb)
+    // Terminal, like a departed member's onLeave: a late listener hears it at once.
+    invokeChannelListener(cb, [], this._onCallbackError)
+    return makeDisposer()
   }
   onChange(cb: () => void): () => void {
     return this._register(this._changeCbs, cb)
