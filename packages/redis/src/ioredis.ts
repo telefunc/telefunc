@@ -48,8 +48,7 @@ function assertAtMostOnceClient(redis: RedisClient): void {
 async function createSubscriberSocket(redis: RedisClient): Promise<SubscriberSocket> {
   let source: Redis
   if (isCluster(redis)) {
-    // A Cluster has no nodes until it connects: a lazyConnect one connects on a command only, and a connecting one
-    // fills its node pool just before it is ready.
+    // A Cluster fills its node pool just before it is ready, and a lazyConnect one connects only on a command.
     if (redis.status === 'wait') await redis.connect()
     else if (redis.status === 'connecting') await clusterReady(redis)
     const master = redis.nodes('master').find((candidate) => candidate.status !== 'end')
