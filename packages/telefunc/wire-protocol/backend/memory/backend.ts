@@ -106,9 +106,9 @@ function publicHead(head: StoredHead): RoomHead {
 class MemorySubscriptionAttempt extends DriverAttempt {
   readonly #receiver: BackendReceiver
   readonly #localReceiverCount: () => number
-  readonly #detach?: () => void
+  readonly #detach: () => void
 
-  constructor(receiver: BackendReceiver, localReceiverCount: () => number, detach?: () => void) {
+  constructor(receiver: BackendReceiver, localReceiverCount: () => number, detach: () => void) {
     super()
     this.#receiver = receiver
     this.#localReceiverCount = localReceiverCount
@@ -117,16 +117,12 @@ class MemorySubscriptionAttempt extends DriverAttempt {
 
   async unsubscribe(): Promise<void> {
     if (this.ended) return
-    this.#detach?.()
+    this.#detach()
     this.transition('closed')
   }
 
   establish(): void {
     this.transition('ready')
-  }
-
-  failEstablishment(reason: string): void {
-    this.transition('closed', new Error(reason))
   }
 
   deliver(payload: Uint8Array, info: { seq: number; timestamp: number }): void {
@@ -280,11 +276,8 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
       const { roomId, inc, lane } = source
       const room = this.#state.rooms.get(roomId)
       const head = this.#readAndExpireHead(room)
-      if (room === undefined || !isOpenIncarnation(head, inc)) {
-        const sub = new MemorySubscriptionAttempt(receiver, localReceiverCount)
-        sub.failEstablishment(`subscribeLane: room '${roomId}' has no open incarnation '${inc}'`)
-        return sub
-      }
+      if (room === undefined || !isOpenIncarnation(head, inc))
+        throw new Error(`subscribeLane: room '${roomId}' has no open incarnation '${inc}'`)
       // Registration is durable before `ready` resolves: a commit accepted after this point must see it.
       subs = this.#generation(room, inc).subs
       key = encodeLaneKey(lane)

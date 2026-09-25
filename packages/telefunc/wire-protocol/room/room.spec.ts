@@ -201,6 +201,10 @@ describe('Room public behavior', () => {
     expect((await room.getParticipants()).find((member) => member.id === id)?.meta).toEqual({ name: 'b', score: 1 })
     await vi.waitFor(() => expect(inbox).toEqual(['hi']))
   })
+  it("ends a lane the driver refuses at subscribe with the driver's reason", async () => {
+    const subscription = getRoomBackend().subscribeLane('refused-room', 'refused-inc', semanticLane, () => {})
+    await expect(subscription.ready).rejects.toThrow("has no open incarnation 'refused-inc'")
+  })
   it('relays a leave that reached this instance with no event, from a reconciled roster or a vanished record', async () => {
     const room = (await Room.create('lost-leave-owner')) as ServerRoom
     const { stub, peer } = serve(room)

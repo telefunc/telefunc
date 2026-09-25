@@ -32,7 +32,7 @@ describe('backend installation lifecycle', () => {
     const broadcast = getBroadcastBackend().subscribe({ key: 'same', kind: 'text' }, () => {})
     const room = getRoomBackend().subscribeLane('missing', 'inc', { kind: 'semantic' }, () => {})
     await expect(broadcast.ready).resolves.toBeUndefined()
-    await expect(room.ready).rejects.toThrow('Backend subscription closed: missing:inc:semantic')
+    await expect(room.ready).rejects.toThrow("subscribeLane: room 'missing' has no open incarnation 'inc'")
     expect(bind.mock.calls.map(([source]) => source)).toEqual([
       { key: 'same', kind: 'text' },
       { roomId: 'missing', inc: 'inc', lane: { kind: 'semantic' } },

@@ -30,7 +30,8 @@ type SubscriptionAttempt = {
 /** A source bound to its current owner. Bindings with equal `partition` share one attempt. */
 type SubscriptionBinding = {
   readonly partition: string
-  /** `localReceiverCount` reads how many consumers currently share this attempt. */
+  /** `localReceiverCount` reads how many consumers currently share this attempt. A refusal known at once throws, and
+   *  the thrown error is the subscription's failure. */
   open(receiver: BackendReceiver, localReceiverCount: () => number): SubscriptionAttempt
 }
 
