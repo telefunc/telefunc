@@ -395,8 +395,9 @@ class ServerRoom extends RoomStateView implements Room {
       if (tracks.includes(track)) return { value: record.hidden === true }
       return { value: record.hidden === true, next: { ...record, tracks: [...tracks, track] } }
     })
-    await publishCtrl(this.id, this._inc, { __r: 'track', id: from, track, ...(hidden ? { hidden: true } : {}) })
-    this._state.applyTrack(from, track)
+    const event = { __r: 'track', id: from, track, ...(hidden ? { hidden: true } : {}) } as const
+    await publishCtrl(this.id, this._inc, event)
+    if (this._applyTrack(from, track)) this._relayApplied(event)
     announced.add(track)
   }
 
@@ -595,9 +596,7 @@ class ServerRoom extends RoomStateView implements Room {
         this._subs.replan() // a new member means a new per-member key candidate
         return true
       case 'track':
-        if (!this._state.applyTrack(event.id, event.track)) return false
-        this._subs.replan() // all-track subscribers need the new (member, track) key
-        return true
+        return this._applyTrack(event.id, event.track)
       case 'leave':
         this._state.applyLeave(event.id, leaveCauseFromWire(event))
         return false
@@ -611,6 +610,11 @@ class ServerRoom extends RoomStateView implements Room {
       case 'closed':
         return this._state.applyClosed()
     }
+  }
+  private _applyTrack(id: string, track: string): boolean {
+    if (!this._state.applyTrack(id, track)) return false
+    this._subs.replan() // all-track subscribers need the new (member, track) key
+    return true
   }
   /** Every leave the state applies, event or reconcile, runs the member's cleanup. */
   private _onLeave(id: string, cause: LeaveCause, hidden: boolean | null): void {

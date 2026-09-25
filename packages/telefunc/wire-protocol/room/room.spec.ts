@@ -2279,6 +2279,23 @@ describe('Room public behavior', () => {
     stub._onPeerBroadcastSubscribe(false)
     await vi.waitFor(() => expect(semanticFrames(peer, 'data')).toEqual(['held']))
   })
+  it("tells this instance's clients a member's new track whose echo arrives after it", async () => {
+    const room = (await Room.create('own-track-relay')) as ServerRoom
+    // The echo reaches this instance later, as over a networked backend.
+    const echo = holdLaneDelivery((lane) => lane.kind === 'control')
+    const member = await room.join()
+    const peer = attachPeer(register(room))
+    const frames: number[] = []
+    room.subscribeBinary((data) => frames.push(data[0]!))
+    await member.publishBinary(new Uint8Array([1]), { track: 'cam' })
+    await echo.release()
+    await member.publishBinary(new Uint8Array([2]), { track: 'cam' })
+    expect(controlEvents(peer).filter(({ __r }) => __r === 'track')).toEqual([
+      expect.objectContaining({ id: member.id, track: 'cam' }),
+    ])
+    // The all-track listener here subscribes the new track's lane before its first frame.
+    await vi.waitFor(() => expect(frames).toEqual([1, 2]))
+  })
   it('sends a reattached client the room state its offline buffer dropped', async () => {
     const room = (await Room.create('reattach-resync')) as ServerRoom
     const leaver = await room.join()
