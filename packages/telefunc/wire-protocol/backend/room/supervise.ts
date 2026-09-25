@@ -23,9 +23,11 @@ function superviseRoomDriver(driver: RoomDriver): RoomBackend {
       driver.compareExchangeCells(roomId, inc, revision, mutations),
     commitLane: async (roomId, inc, lane, payload, opts) => {
       const source = { roomId, inc, lane }
-      const result = await subscriptions.afterEstablished(roomSubscriptionSourceKey(source), [source], () =>
-        driver.commitLane(roomId, inc, lane, payload, opts),
-      )
+      const commit = () => driver.commitLane(roomId, inc, lane, payload, opts)
+      // A close commits under its lease, which would lapse before the hold ends.
+      const result = await (opts?.closingLease === undefined
+        ? subscriptions.afterEstablished(roomSubscriptionSourceKey(source), [source], commit)
+        : commit())
       if ('accepted' in result) assertDriverPosition(result)
       return result
     },

@@ -8,6 +8,8 @@ import {
 } from './install.js'
 import { createBroadcastTransportDriver, type BroadcastTransport } from './broadcast/transport.js'
 import { superviseBroadcastDriver } from './broadcast/supervise.js'
+import { superviseRoomDriver } from './room/supervise.js'
+import type { RoomDriver } from './room/contract.js'
 import { MemoryBackend } from './memory/backend.js'
 import { DriverAttempt } from './attempt.js'
 import { config } from '../../node/server/serverConfig.js'
@@ -210,6 +212,30 @@ describe('supervised publishes and commits', () => {
     attempt.ready()
     await publishing
     expect(publish).toHaveBeenCalledOnce()
+    await subscription.unsubscribe()
+  })
+  it("sends a close's leased commit at once while its lane's subscription establishes, as the lease is shorter than the hold", async () => {
+    const attempt = new ManualAttempt()
+    const committed: string[] = []
+    const driver = {
+      subscriptions: { bind: () => ({ partition: '', open: () => attempt }) },
+      commitLane: async (_roomId: string, _inc: string, _lane: unknown, payload: Uint8Array) => {
+        committed.push(new TextDecoder().decode(payload))
+        return { accepted: true, seq: committed.length, timestamp: 1, delivery: Promise.resolve() }
+      },
+    } as unknown as RoomDriver
+    const backend = superviseRoomDriver(driver)
+    const control = { kind: 'control' } as const
+    const subscription = backend.subscribeLane('room', 'inc', control, () => {})
+    const held = backend.commitLane('room', 'inc', control, new TextEncoder().encode('join'))
+    const closing = backend.commitLane('room', 'inc', control, new TextEncoder().encode('closed'), {
+      closingLease: 'lease',
+    })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(committed).toEqual(['closed'])
+    attempt.ready()
+    await Promise.all([held, closing])
+    expect(committed).toEqual(['closed', 'join'])
     await subscription.unsubscribe()
   })
 })
