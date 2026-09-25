@@ -83,7 +83,7 @@ local receivers = redis.call('PUBLISH', KEYS[2], frame)
 return {seq, ts, receivers}
 `
 
-// HEAD CX compares by form, then stores; core decides every transition and the supervisor checks its shape.
+// HEAD CX: compares by form, then stores the next head.
 //   KEYS: [1]=head [2]=gens [3]=headrev
 //   ARGV: [1]=HeadCx JSON {form,rev?,lease?} [2]=nextJson{state,inc?,config,lease?,ttlMs?}
 const HEAD_CX_LUA = `${HEAD_PRELUDE}
@@ -110,7 +110,6 @@ if not matches then
   return '{"tag":"conflict","current":null}'
 end
 
--- apply: mint the lease deadline from authority time inside this same atomic record, store, register gen
 -- The rev counter lapses with a tombstone; salted with authority time, a rev still never repeats.
 local stored = { rev = 'rev-' .. string.format('%d', now) .. '-' .. redis.call('INCR', rev_key), state = nx.state, config = nx.config }
 if nx.inc ~= nil then stored.inc = nx.inc end
@@ -222,9 +221,7 @@ redis.call('SADD', generation_keys_key, rev_key)
 return 'committed'
 `
 
-// COMMIT is atomic acceptance: head precondition (one boolean, two branches), order advance, optional
-// retained install, then PUBLISH. Supplying a closing lease selects the narrow closing-control branch,
-// which is what makes every other lane stale while closing.
+// COMMIT: while the room is closing, only the close's control commit under its lease lands.
 //   KEYS: [1]=head [2]=order [3]=retained [4]=channel [5]=generation-keys [6..]=required live cells
 //   ARGV: [1]=inc [2]=laneKind [3]=closingLease('') [4]=retain('0'|'1')
 //         [5]=payload [6]=local delivery-fence token or ''
@@ -248,8 +245,6 @@ for i = 6, #KEYS do
   if not redis.call('GET', KEYS[i]) then return '{"stale":"cell","index":' .. (i - 6) .. '}' end
 end
 
--- Advance the live lane-domain cursor exactly once. It has no TTL: generation deletion is its cleanup
--- boundary.
 local base_seq, base_ts = 0, 0
 local prev = redis.call('GET', order_key)
 if prev then
@@ -261,8 +256,7 @@ end
 local seq = base_seq + 1
 local ts = now
 if base_ts > ts then ts = base_ts end
--- Lua's tostring keeps 14 significant digits, so both integers are formatted exactly once, for durable
--- state and the JSON receipt.
+-- tostring keeps only 14 significant digits.
 local seq_text = string.format('%.0f', seq)
 local ts_text = string.format('%.0f', ts)
 redis.call('SET', order_key, seq_text .. ':' .. ts_text)
