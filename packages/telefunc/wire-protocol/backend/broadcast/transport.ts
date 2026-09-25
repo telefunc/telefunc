@@ -2,6 +2,7 @@ export { createBroadcastTransportDriver }
 export type { BroadcastTransport }
 
 import { isOrderingPosition } from '../../ordering-frame.js'
+import { broadcastRouteKey } from './route-key.js'
 import type { BroadcastDriver, BroadcastRoute, PublishResult } from './contract.js'
 import type { BackendReceiver, SubscriptionAttempt, SubscriptionBinding } from '../subscription.js'
 import { assertUsage } from '../../../utils/assert.js'
@@ -25,11 +26,15 @@ type BroadcastTransport = {
 const textEncoder = new TextEncoder()
 const textDecoder = new TextDecoder()
 
+/** A key's live listen of one kind, shared by the attempts on it. */
+type SharedListen = { receivers: Set<BackendReceiver>; stop: () => void }
+
 function createBroadcastTransportDriver(transport: BroadcastTransport): BroadcastDriver {
+  const listens = new Map<string, SharedListen>()
   return {
     publish: (route, payload) => publish(transport, route, payload),
     subscriptions: {
-      bind: (route) => bind(transport, route),
+      bind: (route) => bind(transport, listens, route),
     },
   }
 }
@@ -54,19 +59,46 @@ function checkMark<Mark extends { seq: number; timestamp: number }>(mark: Mark):
   return mark
 }
 
-function bind(transport: BroadcastTransport, route: BroadcastRoute): SubscriptionBinding {
+function bind(
+  transport: BroadcastTransport,
+  listens: Map<string, SharedListen>,
+  route: BroadcastRoute,
+): SubscriptionBinding {
   return {
     partition: route.kind,
-    open: (receiver) => open(transport, route, receiver),
+    open: (receiver) => open(transport, listens, route, receiver),
   }
 }
 
-function open(transport: BroadcastTransport, route: BroadcastRoute, receiver: BackendReceiver): SubscriptionAttempt {
-  const stop =
-    route.kind === 'text'
-      ? transport.listen(route.key, (payload, info) => receiver(textEncoder.encode(payload), checkMark(info)))
-      : transport.listenBinary(route.key, (payload, info) => receiver(payload, checkMark(info)))
-  return new TransportAttempt(stop)
+/** A key has one live listen per kind, as the docs promise: an attempt opened before the previous one's unsubscribe
+ *  ran shares its listen. */
+function open(
+  transport: BroadcastTransport,
+  listens: Map<string, SharedListen>,
+  route: BroadcastRoute,
+  receiver: BackendReceiver,
+): SubscriptionAttempt {
+  const routeKey = broadcastRouteKey(route)
+  let shared = listens.get(routeKey)
+  if (shared === undefined) {
+    const receivers = new Set<BackendReceiver>()
+    const deliver: BackendReceiver = (payload, info) => {
+      for (const current of [...receivers]) current(payload, info)
+    }
+    const stop =
+      route.kind === 'text'
+        ? transport.listen(route.key, (payload, info) => deliver(textEncoder.encode(payload), checkMark(info)))
+        : transport.listenBinary(route.key, (payload, info) => deliver(payload, checkMark(info)))
+    listens.set(routeKey, (shared = { receivers, stop }))
+  }
+  const listen = shared
+  listen.receivers.add(receiver)
+  return new TransportAttempt(() => {
+    listen.receivers.delete(receiver)
+    if (listen.receivers.size > 0) return
+    listens.delete(routeKey)
+    listen.stop()
+  })
 }
 
 /** Ready at once: a user transport's listen() has no establishment to wait for. */

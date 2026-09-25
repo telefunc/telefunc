@@ -101,6 +101,42 @@ describe('backend installation lifecycle', () => {
     await expectBroadcastRoundTrip('unset')
   })
 
+  it('keeps one live listen per key, so a per-key transport keeps delivering across a subscriber swap', async () => {
+    const handlers = new Map<string, (payload: string, info: { seq: number; timestamp: number }) => void>()
+    const calls: string[] = []
+    let seq = 0
+    const transport: BroadcastTransport = {
+      send: (key, payload) => {
+        const info = { seq: ++seq, timestamp: 1 }
+        handlers.get(key)?.(payload, info)
+        return info
+      },
+      listen: (key, onMessage) => {
+        calls.push('listen')
+        handlers.set(key, onMessage)
+        return () => {
+          calls.push('unlisten')
+          handlers.delete(key)
+        }
+      },
+      sendBinary: () => ({ seq: ++seq, timestamp: 1 }),
+      listenBinary: () => () => {},
+    }
+    config.broadcast = { transport }
+    const route = { key: 'swap', kind: 'text' } as const
+    const seen: string[] = []
+    void getBroadcastBackend()
+      .subscribe(route, () => {})
+      .unsubscribe()
+    const next = getBroadcastBackend().subscribe(route, (bytes) => void seen.push(new TextDecoder().decode(bytes)))
+    await next.ready
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    transport.send('swap', 'after the swap')
+    expect(seen).toEqual(['after the swap'])
+    expect(calls).toEqual(['listen'])
+    await next.unsubscribe()
+    expect(calls).toEqual(['listen', 'unlisten'])
+  })
   it('a publish reaches every instance sharing the transport once, with the transport-assigned receipt', async () => {
     const shared = localTransport()
     const instances = [0, 1].map(() => superviseBroadcastDriver(createBroadcastTransportDriver(shared)))
