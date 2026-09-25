@@ -3,7 +3,7 @@ export type { RoomSessionNamespace }
 
 import type { RouteInstallation } from './routes.js'
 import type { RoomSessionDeliveryRequest } from './backend.js'
-import { OrderedStubs } from '../ordered-stubs.js'
+import { OrderedStubs, reportLostDeliveries } from '../ordered-stubs.js'
 
 type RoomSessionStub = {
   telefuncRoomDeliver(request: RoomSessionDeliveryRequest): Promise<void>
@@ -36,7 +36,10 @@ class Fanout {
       ),
     )
     const token = crypto.randomUUID()
-    this.#deliveries.set(token, Promise.allSettled(handoffs).then(reportLostDeliveries))
+    const delivery = Promise.allSettled(handoffs).then((outcomes) =>
+      reportLostDeliveries('Cloudflare Room delivery', outcomes),
+    )
+    this.#deliveries.set(token, delivery)
     return token
   }
 
@@ -49,11 +52,4 @@ class Fanout {
       this.#deliveries.delete(token)
     }
   }
-}
-
-// Delivery is at-most-once: a failed target is loss, not the publisher's error; its route lapses with its lease.
-function reportLostDeliveries(outcomes: PromiseSettledResult<void>[]): void {
-  const failed = outcomes.filter((outcome) => outcome.status === 'rejected')
-  if (failed.length > 0)
-    console.error(`Cloudflare Room delivery lost to ${failed.length}/${outcomes.length} routes: ${failed[0]!.reason}`)
 }

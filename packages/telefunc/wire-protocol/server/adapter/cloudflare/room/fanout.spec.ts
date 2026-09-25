@@ -37,7 +37,7 @@ test("a failed handoff is loss: its delivery settles, the loss is logged, and th
       }),
     )
     await expect(fanout.await(fanout.send([route], new Uint8Array([1]), 1, 1))).resolves.toBeUndefined()
-    expect(report).toHaveBeenCalledWith('Cloudflare Room delivery lost to 1/1 routes: Error: session reset')
+    expect(report).toHaveBeenCalledWith('Cloudflare Room delivery lost to 1/1 Durable Objects: Error: session reset')
     await expect(fanout.await(fanout.send([route], new Uint8Array([2]), 2, 1))).resolves.toBeUndefined()
     // A stub that rejected may be broken, so the frame after the loss went through a fresh one.
     expect(handedTo).toEqual([1])

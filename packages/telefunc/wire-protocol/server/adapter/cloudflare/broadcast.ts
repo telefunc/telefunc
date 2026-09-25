@@ -15,7 +15,7 @@ import {
   getDeterministicKeyBucketIndex,
   getScaleCountForBucket,
 } from './routing.js'
-import type { OrderedStubs } from './ordered-stubs.js'
+import { reportLostDeliveries, type OrderedStubs } from './ordered-stubs.js'
 import { assert } from '../../../../utils/assert.js'
 import type { BroadcastRoute, PublishResult } from '../../../backend/broadcast/contract.js'
 import { broadcastRouteKey } from '../../../backend/broadcast/route-key.js'
@@ -357,15 +357,6 @@ class CloudflareBroadcastMember {
   }
 }
 
-// Delivery is at-most-once: a Durable Object that fails to take a publish loses it, and the publish still resolves.
-function reportLostDeliveries(key: string, outcomes: PromiseSettledResult<unknown>[]): void {
-  const failed = outcomes.filter((outcome) => outcome.status === 'rejected')
-  if (failed.length > 0)
-    console.error(
-      `Cloudflare Broadcast delivery of '${key}' lost to ${failed.length}/${outcomes.length} Durable Objects: ${failed[0]!.reason}`,
-    )
-}
-
 /** The isolate's Cloudflare Broadcast driver: where each key's authority and each bucket's coordinators live, and
  *  their RPC handlers. Each session DO subscribes through its own `CloudflareBroadcastMember`. */
 class CloudflareBroadcastTransport {
@@ -441,7 +432,7 @@ class CloudflareBroadcastTransport {
         ),
       ),
     )
-    reportLostDeliveries(key, forwards)
+    reportLostDeliveries(`Cloudflare Broadcast delivery of '${key}'`, forwards)
     return { ...info, receivers, meta: { authorityBucket, fanoutBuckets } }
   }
 
@@ -457,7 +448,7 @@ class CloudflareBroadcastTransport {
         ),
       ),
     )
-    reportLostDeliveries(delivery.key, deliveries)
+    reportLostDeliveries(`Cloudflare Broadcast delivery of '${delivery.key}'`, deliveries)
   }
 
   /** A call from the DO owning `calls`, through its stub for the named instance. */

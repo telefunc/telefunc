@@ -1,4 +1,4 @@
-export { OrderedStubs }
+export { OrderedStubs, reportLostDeliveries }
 
 import { createDeferred, type Deferred } from '../../../../utils/createDeferred.js'
 
@@ -50,4 +50,11 @@ function invokeNow<Stub, T>(invoke: (stub: Stub) => Promise<T>, stub: Stub): Pro
   } catch (error) {
     return Promise.reject(error)
   }
+}
+
+// Delivery is at-most-once: a Durable Object that fails to take a delivery loses it, and the sender goes on.
+function reportLostDeliveries(delivery: string, outcomes: PromiseSettledResult<unknown>[]): void {
+  const failed = outcomes.filter((outcome) => outcome.status === 'rejected')
+  if (failed.length > 0)
+    console.error(`${delivery} lost to ${failed.length}/${outcomes.length} Durable Objects: ${failed[0]!.reason}`)
 }
