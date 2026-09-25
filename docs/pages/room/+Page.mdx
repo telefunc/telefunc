@@ -467,7 +467,7 @@ Rooms work across multiple server nodes out of the box with <Link href="/redis">
 - **Crash-safe presence.** A clean `leave()` propagates immediately. After a crash, stale participants are removed automatically.
 - **Tuning presence latency.** A silently-dropped connection is held for <Link href="/channel-config">`config.channel.reconnectTimeout`</Link> before its members leave, so a brief blip does not flap presence. Lower it for snappier away-detection, raise it to ride out flaky mobile networks.
 
-- **What a room instance costs.** Each `Room.get()` / `Room.getOrCreate()` call opens its own instance: opening reads the member list for `count` (`getOrCreate()` also writes the room listing), and while clients or listeners observe it, it renews its members and re-reads the member list every 30 seconds. `Room.list()` reads each listed room's members in turn.
+- **What a room instance costs.** Each `Room.get()` / `Room.getOrCreate()` call opens its own instance: opening reads the member list for `count` (`getOrCreate()` also writes the room listing), and while clients or listeners observe it, it renews its members and re-reads the member list every 30 seconds. On the server, `getParticipants()` and the first `snapshot()` read the member list too. `Room.list()` reads each listed room's members in turn.
 - **Bounded tail.** The `{ tail }` backfill is limited to 256 messages / 1,048,576 characters / 60 seconds. Membership itself is uncapped; use atomic application-level admission for a hard limit (see <Link href="#switching-rooms-capacity">Capacity</Link>).
 
 ## Reference
