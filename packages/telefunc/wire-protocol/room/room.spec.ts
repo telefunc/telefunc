@@ -1494,6 +1494,31 @@ describe('Room public behavior', () => {
     channel.abort()
     await vi.waitFor(() => expect(causes).toEqual(['disconnected']))
   })
+  it('answers a DM to a client-held participant whose client closed while it leaves, and reports no bug', async () => {
+    await disposeBackend()
+    const report = vi.spyOn(console, 'error').mockImplementation(() => {})
+    installBackend(() => driver)
+    const room = await Room.create('closed-holder-dm')
+    const holder = (await room.join()) as ServerLocalParticipant
+    const sender = await room.join()
+    const channel = new RoomParticipantStubChannel(holder)
+    const compareExchange = driver.compareExchangeCells.bind(driver)
+    const evicting = deferred<void>()
+    vi.spyOn(driver, 'compareExchangeCells').mockImplementationOnce(async (...args) => {
+      await evicting.promise
+      return await compareExchange(...args)
+    })
+    channel.abort()
+    let outcome = 'pending'
+    void sender.send(holder.id, 'ack?', { ack: true }).then(
+      () => (outcome = 'answered'),
+      (error: unknown) => (outcome = isRoomError(error) ? 'left' : 'bug'),
+    )
+    await sender.send(holder.id, 'plain')
+    await vi.waitFor(() => expect(outcome).toBe('left'))
+    expect(report).not.toHaveBeenCalled()
+    evicting.resolve()
+  })
   it('stops renewing a client-held participant whose removal failed after its client went away', async () => {
     vi.useFakeTimers()
     const room = await Room.create('standalone-expire')

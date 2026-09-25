@@ -34,6 +34,7 @@ import {
   type DmReply,
   type MemberSnapshot,
   type MemberWants,
+  type ParticipantStubNotice,
   type ParticipantStubRequest,
   type RoomCtrlEnvelope,
   type RoomDataEnvelope,
@@ -402,32 +403,25 @@ class RoomParticipantStubChannel extends RoomRequestChannel {
 
   private _mirrorParticipant(): void {
     const participant = this._participant
-    const unlistenMeta = participant._onAcceptedMeta((accepted) => {
-      void this.send({ __r: 'p-meta', ...accepted }).catch(() => {})
-    })
+    const unlistenMeta = participant._onAcceptedMeta((accepted) => this._notify({ __r: 'p-meta', ...accepted }))
 
-    // The ack carries the client's reply; only a transport rejection means the holder left.
+    // The ack carries the client's reply; a closed stub or a transport rejection means the holder left.
     participant._setForwarder((msg) => {
       const notice = { __r: 'dm' as const, ...wireDmFromInbox(msg) }
-      if (!msg.ackId) {
-        void this.send(notice).catch(() => {})
-        return
-      }
+      if (!msg.ackId) return this._notify(notice)
+      if (this.isClosed) return Promise.resolve(DM_FAILURE.left)
       return this.send(notice, { ack: true }).then(
         (reply) => decodeDmReply(reply) ?? DM_FAILURE.malformedReply,
         () => DM_FAILURE.left,
       )
     })
 
-    const unlistenDemand = participant.onDemand((track, wanted) => {
-      void this.send({ __r: 'demand', track, wanted }).catch(() => {})
-    })
+    const unlistenDemand = participant.onDemand((track, wanted) => this._notify({ __r: 'demand', track, wanted }))
 
     let left = false
     const unlistenLeave = participant.onLeave((cause) => {
       left = true
-      const notice = { __r: 'left' as const, ...leaveCauseToWire(cause) }
-      void this.send(notice).catch(() => {})
+      this._notify({ __r: 'left', ...leaveCauseToWire(cause) })
       void this.close().catch(() => {})
     })
 
@@ -437,5 +431,10 @@ class RoomParticipantStubChannel extends RoomRequestChannel {
       unlistenLeave()
       if (!left) void participant._releaseHolder().catch(reportRoomError)
     })
+  }
+
+  /** The client of a closed stub is gone, and so is a notice to it. */
+  private _notify(notice: ParticipantStubNotice): void {
+    if (!this.isClosed) void this.send(notice).catch(() => {})
   }
 }
