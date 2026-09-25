@@ -8,6 +8,7 @@ import { ACK_STATUS, ProtocolViolationError, TAG, decode, type BroadcastSubscrip
 import { ShieldValidationError, isShieldValidationError } from '../../shared/ShieldValidationError.js'
 import { Abort } from '../../shared/Abort.js'
 import {
+  ROOM_DEMAND_TTL_MS,
   ROOM_DM_ACK_TIMEOUT_MS,
   ROOM_HEARTBEAT_INTERVAL_MS,
   ROOM_MEMBER_TTL_MS,
@@ -391,8 +392,9 @@ describe('Room public behavior', () => {
     let memberLeaves = 0
     observer.onClose(() => closed++)
     me.onLeave(() => memberLeaves++)
-    await Room.setMeta('lifecycle', { topic: 'two' })
-    expect(observer.meta).toEqual({ topic: 'two' })
+    await Room.setMeta('lifecycle', { topic: 'two', draft: true })
+    await Room.setAttributes('lifecycle', { draft: undefined, pinned: true })
+    expect(observer.meta).toEqual({ topic: 'two', pinned: true })
     expect((await Room.list()).map(({ id }) => id)).toContain('lifecycle')
     await Room.close('lifecycle')
     expect(closed).toBe(1)
@@ -1700,13 +1702,17 @@ describe('Room public behavior', () => {
     expect(victimInbox).toEqual([])
   })
   it('reports a client-held participant whose channel closed as disconnected', async () => {
-    const room = await Room.create('standalone-disconnect')
+    const room = (await Room.create('standalone-disconnect')) as ServerRoom
     const holder = (await room.join()) as ServerLocalParticipant
-    const causes: unknown[] = []
-    room.onLeave((member, cause) => member.id === holder.id && causes.push(cause?.type))
-    const channel = new RoomParticipantStubChannel(holder)
-    channel.abort()
-    await vi.waitFor(() => expect(causes).toEqual(['disconnected']))
+    const stub = register(room)
+    const { id } = (await stub._handleRequest({ __r: 'req-join', meta: {}, selfDelivery: true })) as { id: string }
+    const causes = new Map<string, unknown>()
+    room.onLeave((member, cause) => causes.set(member.id, cause?.type))
+    new RoomParticipantStubChannel(holder).abort()
+    stub.abort()
+    await vi.waitFor(() =>
+      expect(Object.fromEntries(causes)).toEqual({ [holder.id]: 'disconnected', [id]: 'disconnected' }),
+    )
   })
   it('answers a DM to a client-held participant whose client closed while it leaves, and reports no bug', async () => {
     await disposeBackend()
@@ -3204,6 +3210,26 @@ describe('room demand lifecycle', () => {
     demand.forgetMember('member')
     demand.applyWant({ member: 'member', track: 'screen', instance: 'remote-b', on: true })
     expect(delivered).toEqual([['member', 'screen', true]])
+    expect(demand.isActive()).toBe(false)
+  })
+  it("drops a reporter's demand once its lease lapses unrenewed, as when its instance crashed", () => {
+    vi.useFakeTimers()
+    const delivered: Array<[string, string, boolean]> = []
+    const demand = new RoomDemand(
+      () => {},
+      () => true,
+      (member, track, wanted) => delivered.push([member, track, wanted]),
+    )
+    demand.applyWant({ member: 'member', track: 'screen', instance: 'crashed', on: true })
+    vi.advanceTimersByTime(ROOM_DEMAND_TTL_MS - 1)
+    demand.heartbeat()
+    expect(demand.isActive()).toBe(true)
+    vi.advanceTimersByTime(1)
+    demand.heartbeat()
+    expect(delivered).toEqual([
+      ['member', 'screen', true],
+      ['member', 'screen', false],
+    ])
     expect(demand.isActive()).toBe(false)
   })
 })
