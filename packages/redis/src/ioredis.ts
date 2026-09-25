@@ -60,7 +60,6 @@ async function createSubscriberSocket(redis: RedisClient): Promise<SubscriberSoc
     connectionName: `telefunc-subscriber-${randomUUID()}`,
     autoResubscribe: false,
     lazyConnect: true,
-    maxRetriesPerRequest: 1,
     retryStrategy: () => null,
   })
 }
