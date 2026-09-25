@@ -56,7 +56,7 @@ function checkMark<Mark extends { seq: number; timestamp: number }>(mark: Mark):
 
 function bind(transport: BroadcastTransport, route: BroadcastRoute): SubscriptionBinding {
   return {
-    partition: route.kind,
+    partition: '',
     open: (receiver) => open(transport, route, receiver),
   }
 }
