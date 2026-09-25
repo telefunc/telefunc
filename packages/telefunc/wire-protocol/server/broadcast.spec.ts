@@ -874,25 +874,38 @@ describe('Broadcast static bus (publish/subscribe)', () => {
   })
 
   it('static publish + static subscribe deliver without any instance', async () => {
-    const report = vi.spyOn(console, 'error').mockImplementation(() => {})
     const received: Array<{ text: string }> = []
     const unsubscribe = Broadcast.subscribe<{ text: string }>('room:static', (msg) => received.push(msg))
 
-    const unsubscribeBug = Broadcast.subscribe('room:static', () => Promise.reject(new Error('static text bug')))
-    const unsubscribeAbort = Broadcast.subscribe('room:static', () => Promise.reject(Abort('expected')))
-    const unsubscribeClosed = Broadcast.subscribe('room:static', () => {
-      throw new ChannelClosedError()
-    })
     await Broadcast.publish('room:static', { text: 'fire-and-forget' })
 
-    // Every error but the Abort, as for a channel listener.
-    await vi.waitFor(() => expect(report).toHaveBeenCalledTimes(2))
     expect(received).toEqual([{ text: 'fire-and-forget' }])
     unsubscribe()
-    unsubscribeBug()
-    unsubscribeAbort()
-    unsubscribeClosed()
   })
+
+  it.each([
+    ['subscribe', Broadcast.subscribe, () => Broadcast.publish('broadcast:static-errors', 'x')],
+    [
+      'subscribeBinary',
+      Broadcast.subscribeBinary,
+      () => Broadcast.publishBinary('broadcast:static-errors', new Uint8Array()),
+    ],
+  ] as const)(
+    'a static %s() listener error is reported unless it is an Abort, as for a channel listener',
+    async (_name, subscribe, publish) => {
+      const report = vi.spyOn(console, 'error').mockImplementation(() => {})
+      const stops = [
+        subscribe('broadcast:static-errors', () => Promise.reject(new Error('static bug'))),
+        subscribe('broadcast:static-errors', () => Promise.reject(Abort('expected'))),
+        subscribe('broadcast:static-errors', () => {
+          throw new ChannelClosedError()
+        }),
+      ]
+      await publish()
+      await vi.waitFor(() => expect(report).toHaveBeenCalledTimes(2))
+      for (const stop of stops) stop()
+    },
+  )
 
   it('leaves no unhandled rejection behind a fire-and-forget publish that fails', async () => {
     await disposeBackend()
@@ -937,19 +950,9 @@ describe('Broadcast static bus (publish/subscribe)', () => {
   })
 
   it('shares one monotonic per-key sequence across text and binary routes', async () => {
-    const report = vi.spyOn(console, 'error').mockImplementation(() => {})
-    const unsubscribeBug = Broadcast.subscribeBinary('broadcast:shared-order', () =>
-      Promise.reject(new Error('static binary bug')),
-    )
-    const unsubscribeAbort = Broadcast.subscribeBinary('broadcast:shared-order', () =>
-      Promise.reject(Abort('expected')),
-    )
     const text = await Broadcast.publish('broadcast:shared-order', { text: 'one' })
     const binary = await Broadcast.publishBinary('broadcast:shared-order', new Uint8Array([2]))
-    await vi.waitFor(() => expect(report).toHaveBeenCalledOnce())
     expect(text.seq).toBe(1)
     expect(binary.seq).toBe(2)
-    unsubscribeBug()
-    unsubscribeAbort()
   })
 })
