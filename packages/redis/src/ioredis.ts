@@ -44,20 +44,22 @@ function assertAtMostOnceClient(redis: RedisClient): void {
     )
 }
 
-/** A fresh, unconnected subscriber that never retries on its own; on a Cluster it sits on a live master. */
+/** A fresh, unconnected subscriber that never retries on its own; on a Cluster it sits on a live node. */
 async function createSubscriberSocket(redis: RedisClient): Promise<SubscriberSocket> {
   let source: Redis
   if (isCluster(redis)) {
     // A Cluster fills its node pool just before it is ready, and a lazyConnect one connects only on a command.
     if (redis.status === 'wait') await redis.connect()
     else if (redis.status === 'connecting') await clusterReady(redis)
-    // A failed master stays pooled until the Cluster uses it, so each reconnect starts after the last one used.
-    const masters = redis.nodes('master').filter((candidate) => candidate.status !== 'end')
-    const last = subscriberMasters.get(redis)
-    const master = masters[last === undefined ? 0 : (masters.indexOf(last) + 1) % masters.length]
-    if (master === undefined) throw new Error('RedisBackend: Cluster has no available masters')
-    subscriberMasters.set(redis, master)
-    source = master
+    // Every Cluster node, replica or master, delivers every PUBLISH to its subscribers. A failed node stays pooled until
+    // the Cluster uses it, and a promoted replica keeps its label until a refresh, so each reconnect starts after the last
+    // node used.
+    const nodes = redis.nodes('all').filter((candidate) => candidate.status !== 'end')
+    const last = subscriberNodes.get(redis)
+    const node = nodes[last === undefined ? 0 : (nodes.indexOf(last) + 1) % nodes.length]
+    if (node === undefined) throw new Error('RedisBackend: Cluster has no available nodes')
+    subscriberNodes.set(redis, node)
+    source = node
   } else source = redis
   return source.duplicate({
     connectionName: `telefunc-subscriber-${randomUUID()}`,
@@ -67,8 +69,8 @@ async function createSubscriberSocket(redis: RedisClient): Promise<SubscriberSoc
   })
 }
 
-// The master each Cluster's subscriber was last duplicated from.
-const subscriberMasters = new WeakMap<Cluster, Redis>()
+// The node each Cluster's subscriber was last duplicated from.
+const subscriberNodes = new WeakMap<Cluster, Redis>()
 
 // One wait per connecting Cluster, however often subscribers reopen during it.
 const clusterWaits = new WeakMap<Cluster, Promise<void>>()

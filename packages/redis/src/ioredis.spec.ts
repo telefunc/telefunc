@@ -29,7 +29,7 @@ test("rejects an ioredis keyPrefix, which Pub/Sub channel names don't get", () =
   for (const redis of prefixed) expect(() => new RedisBackend({ redis })).toThrow('keyPrefix')
 })
 
-test('duplicates the subscriber from a standalone client or a live Cluster master, connecting a lazyConnect Cluster first', async () => {
+test('duplicates the subscriber from a standalone client or a live Cluster node, connecting a lazyConnect Cluster first', async () => {
   const cluster = new Cluster([{ host: '127.0.0.1', port: 6379 }], {
     lazyConnect: true,
     retryDelayOnFailover: 0,
@@ -43,7 +43,7 @@ test('duplicates the subscriber from a standalone client or a live Cluster maste
     cluster.status = 'ready'
   })
   const nodes = vi.spyOn(cluster, 'nodes').mockReturnValue([ended])
-  await expect(createSubscriberSocket(cluster)).rejects.toThrow('RedisBackend: Cluster has no available masters')
+  await expect(createSubscriberSocket(cluster)).rejects.toThrow('RedisBackend: Cluster has no available nodes')
   nodes.mockReturnValue([ended, live])
   const sockets = [await createSubscriberSocket(cluster), await createSubscriberSocket(live)]
   sockets.forEach((socket) => socket.disconnect())
@@ -123,4 +123,23 @@ test('moves the subscriber to the next master on each reconnect, so a failed mas
   const sockets = [await createSubscriberSocket(cluster), await createSubscriberSocket(cluster)]
   sockets.forEach((socket) => socket.disconnect())
   expect(duplicates.map((duplicate) => duplicate.mock.calls.length)).toEqual([1, 1])
+})
+
+test("takes the subscriber from a replica when the Cluster's pool labels no live master, as after a one-shard failover", async () => {
+  const cluster = new Cluster([{ host: '127.0.0.1', port: 6379 }], {
+    lazyConnect: true,
+    retryDelayOnFailover: 0,
+    redisOptions: { maxRetriesPerRequest: 0 },
+  })
+  const promoted = new Redis({ lazyConnect: true, maxRetriesPerRequest: 0 })
+  onTestFinished(() => [cluster, promoted].forEach((redis) => redis.disconnect()))
+  vi.spyOn(cluster, 'connect').mockImplementation(async () => {
+    cluster.status = 'ready'
+  })
+  // The pool never refreshed: the promoted replica is still labelled a replica.
+  vi.spyOn(cluster, 'nodes').mockImplementation((role) => (role === 'master' ? [] : [promoted]))
+  const duplicate = vi.spyOn(promoted, 'duplicate')
+  const socket = await createSubscriberSocket(cluster)
+  socket.disconnect()
+  expect(duplicate).toHaveBeenCalledOnce()
 })
