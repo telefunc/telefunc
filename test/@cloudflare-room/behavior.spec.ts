@@ -22,45 +22,42 @@ afterAll(async () => {
   await miniflare?.dispose()
 })
 
-test('Room authority controls execute on Cloudflare Durable Objects', async () => {
-  const response = await miniflare!.dispatchFetch('https://room.test/probe')
+async function probe(path: string): Promise<unknown> {
+  const response = await miniflare!.dispatchFetch(`https://room.test${path}`)
   const result = await response.json()
   expect(response.status, JSON.stringify(result)).toBe(200)
-  expect(result).toEqual({
-    lostTarget: { receivers: 1, settlement: 'resolved' },
-    alarmPolicy: {
-      idle: null,
-      afterRoute: 'armed',
-      afterUnsubscribe: null,
-    },
-    routeRenewal: { live: true, otherLease: false },
-    nativeRpc: {
-      headConfig: [0x11, 0x22, 0x33],
-      cell: [0x44, 0x55],
-      staleCell: { stale: 'cell', key: 'm:missing' },
-    },
+  return result
+}
+
+test('a handoff to a session that fails is lost: the commit counts the route, and its delivery still settles', async () => {
+  expect(await probe('/lost-target')).toEqual({ receivers: 1, settlement: 'resolved' })
+})
+
+test('a room authority arms its alarm while it holds a route, and clears it once the route is gone', async () => {
+  expect(await probe('/alarm-policy')).toEqual({ idle: null, afterRoute: 'armed', afterUnsubscribe: null })
+})
+
+test('a route renews under its own lease only', async () => {
+  expect(await probe('/route-renewal')).toEqual({ live: true, otherLease: false })
+})
+
+test('heads, cells and a stale commit cross native Durable Object RPC intact', async () => {
+  expect(await probe('/native-rpc')).toEqual({
+    headConfig: [0x11, 0x22, 0x33],
+    cell: [0x44, 0x55],
+    staleCell: { stale: 'cell', key: 'm:missing' },
   })
 })
 
-test('retained Room payloads above the base64-expanded RPC ceiling replay as native bytes', async () => {
-  const response = await miniflare!.dispatchFetch('https://room.test/large-retained')
-  const result = await response.json()
-  expect(response.status, JSON.stringify(result)).toBe(200)
-  expect(result).toEqual({
-    bytes: 25 * 1024 * 1024,
-    first: 0x11,
-    last: 0xee,
-  })
+test('a retained Room payload larger than a SQLite row replays whole, as native bytes', async () => {
+  expect(await probe('/large-retained')).toEqual({ bytes: 25 * 1024 * 1024, first: 0x11, last: 0xee })
 })
 
 test('Broadcast reaches every session DO in the isolate in seq order, each through its own I/O', async () => {
-  const response = await miniflare!.dispatchFetch('https://room.test/broadcast-sessions')
-  const result = await response.json()
-  expect(response.status, JSON.stringify(result)).toBe(200)
   const inOrder = [
     { seq: 1, text: 'one' },
     { seq: 2, text: 'two' },
     { seq: 3, text: 'three' },
   ]
-  expect(result).toEqual({ a: inOrder, b: inOrder })
+  expect(await probe('/broadcast-sessions')).toEqual({ a: inOrder, b: inOrder })
 })

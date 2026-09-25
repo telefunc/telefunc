@@ -126,28 +126,26 @@ type Env = {
   TelefuncDurableObject: DurableObjectNamespace
   PUBLIC: DurableObjectNamespace
 }
+const probes: Record<string, (env: Env, suffix: string) => Promise<unknown>> = {
+  '/lost-target': lostTarget,
+  '/alarm-policy': alarmScheduling,
+  '/route-renewal': routeRenewal,
+  '/native-rpc': nativeRpcRoundTrip,
+  '/large-retained': largeRetainedReplay,
+  '/broadcast-sessions': broadcastAcrossSessions,
+}
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
+    const probe = probes[new URL(request.url).pathname]
+    if (probe === undefined) return new Response(null, { status: 404 })
     try {
-      const suffix = crypto.randomUUID()
-      if (new URL(request.url).pathname === '/large-retained') {
-        return Response.json(await largeRetainedReplay(env, suffix))
-      }
-      if (new URL(request.url).pathname === '/broadcast-sessions') {
-        return Response.json(await broadcastAcrossSessions(env, suffix))
-      }
-      const sessionId = env.TelefuncDurableObject.idFromName(`session-${suffix}`)
-      return Response.json({
-        lostTarget: await lostTarget(env, sessionId, suffix),
-        alarmPolicy: await alarmScheduling(env, sessionId, suffix),
-        routeRenewal: await routeRenewal(env, sessionId, suffix),
-        nativeRpc: await nativeRpcRoundTrip(env, suffix),
-      })
+      return Response.json(await probe(env, crypto.randomUUID()))
     } catch (error) {
       return Response.json({ error: error instanceof Error ? error.message : String(error) }, { status: 500 })
     }
   },
 }
+const sessionOf = (env: Env, suffix: string) => env.TelefuncDurableObject.idFromName(`session-${suffix}`)
 function roomProbe(env: Env, suffix: string, name: string) {
   const roomId = `${name}-${suffix}`
   const inc = `${name}-inc-${suffix}`
@@ -178,15 +176,16 @@ function roomProbe(env: Env, suffix: string, name: string) {
     settle: (commit: Extract<CommitWire, { accepted: true }>) => authority.awaitDelivery(commit.deliveryToken),
   }
 }
-async function lostTarget(env: Env, sessionId: DurableObjectId, suffix: string) {
+async function lostTarget(env: Env, suffix: string) {
   const probe = roomProbe(env, suffix, 'lost-target')
   await probe.open()
   // SessionDurableObject has no telefuncRoomDeliver, so every handoff to this route fails.
-  await probe.join(sessionId)
+  await probe.join(sessionOf(env, suffix))
   const commit = await probe.commit(1, 'lost target')
   return { receivers: commit.receivers, settlement: await rejectionOf(probe.settle(commit), 'lost-target settlement') }
 }
-async function alarmScheduling(env: Env, sessionId: DurableObjectId, suffix: string) {
+async function alarmScheduling(env: Env, suffix: string) {
+  const sessionId = sessionOf(env, suffix)
   const probe = roomProbe(env, suffix, 'alarm')
   const idle = await probe.scheduledAlarm()
   await probe.open()
@@ -202,7 +201,8 @@ async function alarmScheduling(env: Env, sessionId: DurableObjectId, suffix: str
   const afterUnsubscribe = await probe.scheduledAlarm()
   return { idle, afterRoute, afterUnsubscribe }
 }
-async function routeRenewal(env: Env, sessionId: DurableObjectId, suffix: string) {
+async function routeRenewal(env: Env, suffix: string) {
+  const sessionId = sessionOf(env, suffix)
   const probe = roomProbe(env, suffix, 'renewal')
   await probe.open()
   await probe.join(sessionId)
