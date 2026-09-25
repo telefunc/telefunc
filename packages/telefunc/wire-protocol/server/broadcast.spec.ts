@@ -297,11 +297,13 @@ describe('keyed in-process broadcast', () => {
   })
 
   it.each([
-    ['as it opens', true],
-    ['after it opened', false],
-  ])(
-    'reports a subscription that ends on its own %s, and the next subscribe opens a fresh one',
-    async (_when, atOpen) => {
+    ['a BroadcastChannel', 'as it opens', true],
+    ['a BroadcastChannel', 'after it opened', false],
+    ['Broadcast.subscribe()', 'as it opens', true],
+    ['Broadcast.subscribe()', 'after it opened', false],
+  ] as const)(
+    '%s: a subscription that ends on its own %s is reported and replaced',
+    async (subscriber, _when, atOpen) => {
       await disposeBackend()
       const ending = pendingSubscription()
       const driver = new MemoryBackend({ state: memoryState })
@@ -320,19 +322,45 @@ describe('keyed in-process broadcast', () => {
       }
       installBackend(() => driver)
       const report = vi.spyOn(console, 'error').mockImplementation(() => {})
-      const receiver = new ServerBroadcast<string>({ key: 'broadcast:ended' })
       const received: string[] = []
-      receiver.subscribe(() => {})
+      const onMessage = (text: string) => void received.push(text)
+      const channel = new ServerBroadcast<string>({ key: 'broadcast:ended' })
+      const unsubscribe =
+        subscriber === 'a BroadcastChannel'
+          ? channel.subscribe(onMessage)
+          : Broadcast.subscribe<string>('broadcast:ended', onMessage)
       if (!atOpen) ending.close()
-      await vi.waitFor(() =>
-        expect(report).toHaveBeenCalledWith(expect.stringContaining(atOpen ? 'listen refused' : 'subscription closed')),
-      )
-      receiver.subscribe((text) => received.push(text))
+      await vi.waitFor(() => expect(opens).toBe(2))
+      expect(report).toHaveBeenCalledWith(expect.stringContaining(atOpen ? 'listen refused' : 'subscription closed'))
       await Broadcast.publish('broadcast:ended', 'after')
       expect(received).toEqual(['after'])
-      receiver.abort()
+      unsubscribe()
     },
   )
+
+  it('replaces a subscription once per end: a replacement that ends before it was ready is dropped', async () => {
+    await disposeBackend()
+    const attempts = [pendingSubscription(), pendingSubscription(), pendingSubscription()]
+    const driver = new MemoryBackend({ state: memoryState })
+    const bind = driver.subscriptions.bind.bind(driver.subscriptions)
+    let opens = 0
+    driver.subscriptions.bind = (source) => {
+      const binding = bind(source)
+      return { ...binding, open: (...args) => attempts[opens++]?.subscription ?? binding.open(...args) }
+    }
+    installBackend(() => driver)
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const unsubscribe = Broadcast.subscribe('broadcast:replaced-once', () => {})
+    attempts[0]!.close()
+    await vi.waitFor(() => expect(opens).toBe(2))
+    attempts[1]!.ready()
+    attempts[1]!.close()
+    await vi.waitFor(() => expect(opens).toBe(3))
+    attempts[2]!.close()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(opens).toBe(3)
+    unsubscribe()
+  })
 
   it('waits for a sibling subscription to be ready before publishing', async () => {
     const { controlled, publish } = await installPendingSubscriptionBackend({ seq: 1, timestamp: 1 })

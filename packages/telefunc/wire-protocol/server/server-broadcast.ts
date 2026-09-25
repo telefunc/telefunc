@@ -17,7 +17,7 @@ import { ServerChannel, reportServerChannelError } from './channel.js'
 import { getServerConfig } from '../../node/server/serverConfig.js'
 import type { BroadcastRoute, PublishResult } from '../backend/broadcast/contract.js'
 import { getBroadcastBackend } from '../backend/install.js'
-import type { BackendSubscription } from '../backend/subscription.js'
+import type { BackendReceiver, BackendSubscription } from '../backend/subscription.js'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { parse } from '@brillout/json-serializer/parse'
 import { assertUsage } from '../../utils/assert.js'
@@ -49,13 +49,21 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
   readonly key: string
 
   private readonly _subscribers: BroadcastListeners<T> = { text: [], binary: [] }
-  private readonly _subscriptions: Record<BroadcastKind, BackendSubscription | null> = { text: null, binary: null }
+  private readonly _routes: Record<BroadcastKind, RouteSubscription>
   private readonly _peerSubscriptions: Record<BroadcastKind, boolean> = { text: false, binary: false }
 
   constructor(opts: { key: string }) {
     super()
     assertBroadcastKey(opts.key)
     this.key = opts.key
+    this._routes = {
+      text: new RouteSubscription({ key: this.key, kind: 'text' }, (payload, rawInfo) =>
+        this._deliverBroadcastMessage(textDecoder.decode(payload), rawInfo),
+      ),
+      binary: new RouteSubscription({ key: this.key, kind: 'binary' }, (payload, rawInfo) =>
+        this._deliverBroadcastBinaryMessage(payload, rawInfo),
+      ),
+    }
   }
 
   static isServerBroadcast(value: unknown): value is ServerBroadcast {
@@ -130,7 +138,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
   }
 
   protected override _shutdown(err?: Error): void {
-    for (const kind of BROADCAST_KINDS) this._clearSubscription(kind)
+    for (const kind of BROADCAST_KINDS) this._routes[kind].close()
     super._shutdown(err)
   }
 
@@ -147,7 +155,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
   ): BroadcastUnsubscribe {
     const listeners = this._subscribers[kind] as Array<typeof callback>
     if (this._isClosed) throw new ChannelClosedError()
-    this._openSubscription(kind)
+    this._routes[kind].open()
     listeners.push(callback)
     return () => {
       const index = listeners.indexOf(callback)
@@ -159,31 +167,10 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
 
   private _syncSubscription(kind: BroadcastKind): void {
     if (this._isClosed || (!this._peerSubscriptions[kind] && this._subscribers[kind].length === 0)) {
-      this._clearSubscription(kind)
+      this._routes[kind].close()
       return
     }
-    this._openSubscription(kind)
-  }
-
-  /** Opens the kind's backend subscription unless one is live; outside a Cloudflare session this throws. */
-  private _openSubscription(kind: BroadcastKind): void {
-    if (this._subscriptions[kind] !== null) return
-    // The plane in effect now; the subscription keeps its own handle.
-    const subscription = getBroadcastBackend().subscribe({ key: this.key, kind }, (payload, rawInfo) => {
-      if (kind === 'text') this._deliverBroadcastMessage(textDecoder.decode(payload), rawInfo)
-      else this._deliverBroadcastBinaryMessage(payload, rawInfo)
-    })
-    this._subscriptions[kind] = subscription
-    // A dead handle would keep the next sync from subscribing again.
-    onSubscriptionEnd(subscription, () => {
-      if (this._subscriptions[kind] === subscription) this._subscriptions[kind] = null
-    })
-  }
-
-  private _clearSubscription(kind: BroadcastKind): void {
-    const subscription = this._subscriptions[kind]
-    if (subscription) void subscription.unsubscribe()
-    this._subscriptions[kind] = null
+    this._routes[kind].open()
   }
 
   private _publishTracked(kind: BroadcastKind, payload: Uint8Array): Promise<ChannelPublishAck> {
@@ -295,30 +282,56 @@ function subscribeRoute<Data>(
   callback: (data: Data, info: ChannelPublishInfo) => unknown,
 ): BroadcastUnsubscribe {
   assertBroadcastKey(route.key)
-  const subscription = getBroadcastBackend().subscribe(route, (payload, info) => {
+  const subscription = new RouteSubscription(route, (payload, info) => {
     invokeChannelListener(
       callback,
       [decode(payload), makePublishInfo(route.key, info.seq, info.timestamp)],
       reportStaticListenerError,
     )
   })
-  onSubscriptionEnd(subscription, () => {})
-  return () => {
-    void subscription.unsubscribe()
-  }
+  subscription.open()
+  return () => subscription.close()
 }
 
-/** Runs `onEnd` once the subscription is closed, reporting a terminal failure: only that rejects `ready`, while an
- *  unsubscribe or a stop resolves it. */
-function onSubscriptionEnd(subscription: BackendSubscription, onEnd: () => void): void {
-  const ended = () => {
-    subscription.ready.catch(reportServerChannelError)
-    onEnd()
+/** A route's subscription while wanted; one that ends on its own is reported and replaced once, as a Room lane's is. */
+class RouteSubscription {
+  private _current: BackendSubscription | null = null
+
+  constructor(
+    private readonly _route: BroadcastRoute,
+    private readonly _receiver: BackendReceiver,
+  ) {}
+
+  /** Subscribes unless a subscription is live; outside a Cloudflare session this throws. */
+  open(): void {
+    if (this._current === null) this._subscribe(false)
   }
-  if (subscription.state() === 'closed') return ended()
-  subscription.onStateChange((state) => {
-    if (state === 'closed') ended()
-  })
+
+  close(): void {
+    const current = this._current
+    this._current = null
+    void current?.unsubscribe()
+  }
+
+  private _subscribe(replacing: boolean): void {
+    // The plane in effect now; the subscription keeps its own handle.
+    const subscription = getBroadcastBackend().subscribe(this._route, this._receiver)
+    this._current = subscription
+    let wasReady = subscription.state() === 'ready'
+    // Only a terminal end rejects `ready`, after the manager retired the subscription; an unsubscribe resolves it.
+    const ended = () =>
+      void subscription.ready.catch((error: unknown) => {
+        reportServerChannelError(error)
+        if (this._current !== subscription) return
+        this._current = null
+        if (!replacing || wasReady) this._subscribe(true)
+      })
+    if (subscription.state() === 'closed') return ended()
+    subscription.onStateChange((state) => {
+      if (state === 'ready') wasReady = true
+      else if (state === 'closed') ended()
+    })
+  }
 }
 
 /** A held publish is bounded like a channel's buffered sends. */
