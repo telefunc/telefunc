@@ -65,9 +65,9 @@ class SubscriptionManager<Source> {
   }
 
   private _cleanup(attempt: SubscriptionAttempt): Promise<void> {
-    const cleanup = Promise.resolve()
-      .then(() => attempt.unsubscribe())
-      .catch((error) => this._reportError(error))
+    // Not deferred: a subscribe in the same tick opens the source's next attempt after this one let go.
+    const unsubscribing = new Promise<void>((resolve) => resolve(attempt.unsubscribe()))
+    const cleanup = unsubscribing.catch((error) => this._reportError(error))
     this._cleanups.add(cleanup)
     void cleanup.finally(() => this._cleanups.delete(cleanup))
     return cleanup
@@ -157,11 +157,9 @@ class SubscriptionSlot {
 
   stop(): Promise<void> {
     if (this._stopPromise !== null) return this._stopPromise
-    const attempt = this._attempt
-    this._stopPromise = attempt === null ? Promise.resolve() : this._config.cleanup(attempt)
+    this._stopPromise = this._release()
     this._readiness.resolve()
     this._transition('closed')
-    this._clearCurrent()
     return this._stopPromise
   }
 
@@ -213,11 +211,10 @@ class SubscriptionSlot {
 
   private _terminal(error: unknown): void {
     const failure = error instanceof Error ? error : new Error(String(error))
-    this._stopPromise ??= this._attempt === null ? Promise.resolve() : this._config.cleanup(this._attempt)
+    this._stopPromise = this._release()
     // A resolved readiness cannot carry the failure, so `ready` read from here on is a fresh, rejected one.
     if (this._state === 'ready') this._readiness = createReadiness()
     this._transition('closed')
-    this._clearCurrent()
     this._config.onEmpty()
     this._readiness.reject(failure)
   }
@@ -233,10 +230,13 @@ class SubscriptionSlot {
     this._notify(this._listeners, state)
   }
 
-  private _clearCurrent(): void {
+  /** Unobserves the attempt first: its closing on cleanup is no end. */
+  private _release(): Promise<void> {
+    const attempt = this._attempt
     this._unobserve?.()
     this._unobserve = null
     this._attempt = null
+    return attempt === null ? Promise.resolve() : this._config.cleanup(attempt)
   }
 
   /** Consumer listeners are isolated from each other; one that throws is reported. */

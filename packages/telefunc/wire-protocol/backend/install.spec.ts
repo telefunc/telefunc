@@ -105,7 +105,7 @@ describe('backend installation lifecycle', () => {
     await expectBroadcastRoundTrip('unset')
   })
 
-  it('keeps one live listen per key, so a per-key transport keeps delivering across a subscriber swap', async () => {
+  it('unlistens a key before listening to it again, so a per-key transport keeps delivering across a subscriber swap', async () => {
     const handlers = new Map<string, (payload: string, info: { seq: number; timestamp: number }) => void>()
     const calls: string[] = []
     let seq = 0
@@ -137,9 +137,9 @@ describe('backend installation lifecycle', () => {
     await new Promise((resolve) => setTimeout(resolve, 0))
     transport.send('swap', 'after the swap')
     expect(seen).toEqual(['after the swap'])
-    expect(calls).toEqual(['listen'])
+    expect(calls).toEqual(['listen', 'unlisten', 'listen'])
     await next.unsubscribe()
-    expect(calls).toEqual(['listen', 'unlisten'])
+    expect(calls).toEqual(['listen', 'unlisten', 'listen', 'unlisten'])
   })
   it('a publish reaches every instance sharing the transport once, with the transport-assigned receipt', async () => {
     const shared = localTransport()

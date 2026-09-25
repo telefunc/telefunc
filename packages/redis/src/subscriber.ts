@@ -65,7 +65,7 @@ class RedisSubscriptionDriver implements SubscriptionDriver<RedisSubscriptionSou
   bind(source: RedisSubscriptionSource): SubscriptionBinding {
     return {
       partition: '',
-      open: (receiver, localReceiverCount) => this._open(source, receiver, localReceiverCount),
+      open: (receiver) => this._open(source, receiver),
     }
   }
 
@@ -86,17 +86,12 @@ class RedisSubscriptionDriver implements SubscriptionDriver<RedisSubscriptionSou
     }
   }
 
-  private _open(
-    source: RedisSubscriptionSource,
-    receiver: BackendReceiver,
-    localReceiverCount: () => number,
-  ): SubscriptionAttempt {
+  private _open(source: RedisSubscriptionSource, receiver: BackendReceiver): SubscriptionAttempt {
     const attempt: RedisSubscriptionAttempt = new RedisSubscriptionAttempt(
       source,
       laneChannel(this._prefix, source),
       'roomId' in source ? generationInvalidationChannel(this._prefix, source.roomId, source.inc) : null,
       receiver,
-      localReceiverCount,
       () => this._detach(attempt),
     )
     for (const channel of attempt.channels) {
@@ -261,7 +256,6 @@ class RedisSubscriptionAttempt extends DriverAttempt {
     /** A Room lane's generation channel: a message on it means the generation was dropped. */
     readonly invalidationChannel: string | null,
     private readonly _receiver: BackendReceiver,
-    private readonly _localReceiverCount: () => number,
     private readonly _onDetach: () => void,
   ) {
     super()
@@ -274,7 +268,7 @@ class RedisSubscriptionAttempt extends DriverAttempt {
   }
 
   prepareFence(token: string): Promise<void> | null {
-    if (this._localReceiverCount() === 0 || this.state() !== 'ready') return null
+    if (this.state() !== 'ready') return null
     const fence = createDeferred()
     this._fences.set(token, fence)
     return fence.promise
