@@ -34,7 +34,7 @@ import type {
   RoomSendReceipt,
   SendGuard,
 } from '../types.js'
-import { evictMember, presenceCount, readAllMembers, readMembersById, resolveIdentityMembers } from './membership.js'
+import { evictMember, presenceCount, readMembersById, readRoster, resolveIdentityMembers } from './membership.js'
 import { memberCellKey } from './cells.js'
 import {
   CONTROL_LANE,
@@ -398,7 +398,7 @@ async function getRoomParticipants(id: string, target?: { identity: string }): P
   const config = await requireRoom(id)
   let members: MemberSnapshot[]
   if (target === undefined) {
-    members = await readAllMembers(id, config.inc)
+    members = (await readRoster(id, config.inc)).members
   } else {
     assertUsage(isObject(target), 'Room.getParticipants() target should be { identity }')
     assertParticipantIdentity(target.identity, 'Room.getParticipants() target identity')

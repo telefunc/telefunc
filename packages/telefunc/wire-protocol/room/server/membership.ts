@@ -3,7 +3,7 @@ export {
   updateMemberRecord,
   renewMemberLease,
   evictMember,
-  readAllMembers,
+  readRoster,
   readMembersById,
   presenceCount,
   resolveIdentityMembers,
@@ -97,10 +97,9 @@ async function updateMemberRecord<T>(
   })
 }
 
-/** `false` when the record is gone. */
-async function renewMemberLease(roomId: string, inc: string, id: string): Promise<boolean> {
-  return await mutateMember(roomId, inc, id, (record) =>
-    record === null ? { value: false } : { value: true, next: record },
+async function renewMemberLease(roomId: string, inc: string, id: string): Promise<void> {
+  await mutateMember(roomId, inc, id, (record) =>
+    record === null ? { value: undefined } : { value: undefined, next: record },
   )
 }
 
@@ -145,16 +144,24 @@ async function evictMember(
   return null
 }
 
-/** Every live member, after completing any eviction a crash interrupted; lapsed members are reaped on the way. */
-async function readAllMembers(roomId: string, inc: string): Promise<MemberSnapshot[]> {
-  const cleanups = await readCells(roomId, inc, { prefix: CLEANUP_CELL_PREFIX })
-  for (const [key, raw] of cleanups) await completeCleanup(roomId, inc, memberIdOfCleanupKey(key), raw)
+/** Every live member, and every member whose eviction is still finishing, which the read completes; lapsed members
+ *  are reaped on the way. */
+async function readRoster(roomId: string, inc: string): Promise<{ members: MemberSnapshot[]; departing: Set<string> }> {
   const cells = await readCells(roomId, inc, { prefix: MEMBER_CELL_PREFIX })
-  return await liveMembers(
+  // After the member read, so an eviction committing in between shows up as departing.
+  const cleanups = await readCells(roomId, inc, { prefix: CLEANUP_CELL_PREFIX })
+  const departing = new Set<string>()
+  for (const [key, raw] of cleanups) {
+    const id = memberIdOfCleanupKey(key)
+    departing.add(id)
+    await completeCleanup(roomId, inc, id, raw)
+  }
+  const members = await liveMembers(
     roomId,
     inc,
-    [...cells].map(([key, raw]) => [memberIdOfCellKey(key), raw]),
+    [...cells].map(([key, raw]) => [memberIdOfCellKey(key), raw] as const).filter(([id]) => !departing.has(id)),
   )
+  return { members, departing }
 }
 
 async function readMembersById(roomId: string, inc: string, ids: string[]): Promise<MemberSnapshot[]> {
@@ -198,7 +205,7 @@ function memberSnapshot(id: string, record: RoomMemberRecord): MemberSnapshot {
 }
 
 async function presenceCount(roomId: string, inc: string): Promise<number> {
-  return (await readAllMembers(roomId, inc)).filter((member) => !member.hidden).length
+  return (await readRoster(roomId, inc)).members.filter((member) => !member.hidden).length
 }
 
 async function resolveIdentityMembers(roomId: string, inc: string, identity: string): Promise<MemberSnapshot[]> {

@@ -234,6 +234,63 @@ describe('Room public behavior', () => {
     expect(causes).toEqual(['removed'])
     expect(memberEvents(peer, bot.id)).toEqual([])
   })
+  it("reports a leave as 'left' when the owner's heartbeat lands while the eviction finishes", async () => {
+    const room = (await Room.create('leave-during-heartbeat')) as ServerRoom
+    const member = await room.join()
+    const causes: unknown[] = []
+    member.onLeave((cause) => causes.push(cause))
+    room.onLeave((_, cause) => causes.push(cause))
+    const listRetained = driver.listRetained.bind(driver)
+    // The eviction's first retained read: its member delete committed, its leave isn't published.
+    vi.spyOn(driver, 'listRetained').mockImplementationOnce(async (roomId, inc) => {
+      await subsOf(room)._heartbeatTick()
+      return listRetained(roomId, inc)
+    })
+    await member.leave()
+    expect(causes).toEqual([{ type: 'left' }, { type: 'left' }])
+  })
+  it("reports a leave as 'left' on another instance whose roster read overlaps the eviction", async () => {
+    const room = (await Room.create('leave-during-roster-read')) as ServerRoom
+    const member = await room.join()
+    const observer = (await Room.get(room.id)) as ServerRoom
+    await observer.getParticipants()
+    const causes: unknown[] = []
+    observer.onLeave((_, cause) => causes.push(cause))
+    await subsOf(observer).reconcileAuthority()
+    const readCells = driver.readCells.bind(driver)
+    const memberRead = { started: deferred<void>(), release: deferred<void>(), held: false }
+    vi.spyOn(driver, 'readCells').mockImplementation(async (roomId, inc, selector) => {
+      if (!memberRead.held && 'prefix' in selector && selector.prefix === MEMBER_CELL_PREFIX) {
+        memberRead.held = true
+        memberRead.started.resolve()
+        await memberRead.release.promise
+      }
+      return readCells(roomId, inc, selector)
+    })
+    const listRetained = driver.listRetained.bind(driver)
+    const committed = deferred<void>()
+    const publish = deferred<void>()
+    vi.spyOn(driver, 'listRetained').mockImplementationOnce(async (roomId, inc) => {
+      committed.resolve()
+      await publish.promise
+      return listRetained(roomId, inc)
+    })
+    // The leave reaches this instance after its roster read, as over a networked backend.
+    const deliver = observer._onCtrlMessage.bind(observer)
+    const events: Array<Parameters<typeof deliver>> = []
+    const hold = vi.spyOn(observer, '_onCtrlMessage').mockImplementation((...event) => void events.push(event))
+    const refresh = subsOf(observer).reconcileAuthority()
+    await memberRead.started.promise
+    const leaving = member.leave()
+    await committed.promise
+    memberRead.release.resolve()
+    await refresh
+    hold.mockRestore()
+    for (const event of events) deliver(...event)
+    publish.resolve()
+    await leaving
+    expect(causes).toEqual([{ type: 'left' }])
+  })
   it('creates, lists, updates, closes fully, and recreates a genuinely fresh domain', async () => {
     const room = (await Room.create('lifecycle', { meta: { topic: 'one' } })) as unknown as ServerRoom
     const firstInc = room._inc
@@ -2235,9 +2292,10 @@ describe('client Room lifecycle', () => {
     state.applyLeave(id)
     expect(state.membershipVersion).toBe(3)
     const member = { id, meta: {}, joinedAt: 1, metaSeq: 0 }
-    expect(state.reconcileCompleteRoster([member])).toBe(true)
+    expect(state.reconcileCompleteRoster([member], new Set())).toBe(true)
     const version = state.membershipVersion
-    const reconcile = (tracks: string[]) => state.reconcileCompleteRoster([{ ...member, metaSeq: 1, tracks }])
+    const reconcile = (tracks: string[]) =>
+      state.reconcileCompleteRoster([{ ...member, metaSeq: 1, tracks }], new Set())
     expect(reconcile(['screen'])).toBe(true)
     expect(state.membershipVersion).toBe(version)
     expect(reconcile(['screen', 'camera'])).toBe(false)
@@ -2260,7 +2318,7 @@ describe('client Room lifecycle', () => {
     const joins: string[] = []
     state.onChange(() => observed.push(state.snapshotMembers().map((member) => member.id)))
     state.onJoin((member) => joins.push(member.id))
-    state.reconcileCompleteRoster([alice, bob, carol])
+    state.reconcileCompleteRoster([alice, bob, carol], new Set())
     expect(observed.at(-1)).toEqual([alice.id, bob.id, carol.id])
     expect(joins).toEqual([bob.id, carol.id])
   })

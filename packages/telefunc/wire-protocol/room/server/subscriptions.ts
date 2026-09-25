@@ -17,7 +17,7 @@ import { reportRoomError } from './errors.js'
 import { LaneSubscription } from './lane-subscription.js'
 import { binaryLaneKey } from './replay.js'
 import { CONTROL_LANE, SEMANTIC_LANE, decodeRoomText, withinRoomHorizon } from './lanes.js'
-import { readAllMembers, renewMemberLease } from './membership.js'
+import { readRoster, renewMemberLease } from './membership.js'
 assertIsNotBrowser()
 
 const ROSTER_REFRESH_RETRY_LIMIT = 5
@@ -51,11 +51,10 @@ type SubscriptionHost = {
   _readOpenConfig(): Promise<RoomConfigRecord | null>
   _applyAuthorityConfig(config: RoomConfigRecord): void
   /** `true` when the complete roster corrected a drift. */
-  _applyAuthorityRoster(members: MemberSnapshot[]): boolean
+  _applyAuthorityRoster(members: MemberSnapshot[], departing: ReadonlySet<string>): boolean
   _closeFromAuthority(): void
   /** A roster read succeeded; `drifted` when it corrected this view. */
   _onRosterRefreshed(drifted: boolean): void
-  _applyLeave(id: string): void
 }
 
 type SubscriptionPlan = {
@@ -271,9 +270,9 @@ class RoomSubscriptions {
     const host = this._host
     for (let attempt = 0; !host._state.closed; attempt++) {
       const version = host._state.membershipVersion
-      const members = await readAllMembers(host.id, host._inc)
+      const { members, departing } = await readRoster(host.id, host._inc)
       if (host._state.membershipVersion === version) {
-        const drifted = host._applyAuthorityRoster(members)
+        const drifted = host._applyAuthorityRoster(members, departing)
         this.replan()
         host._onRosterRefreshed(drifted)
         return
@@ -307,7 +306,7 @@ class RoomSubscriptions {
       let renewalFailure: { error: unknown } | null = null
       for (const id of host._ownedMembers().renewable) {
         try {
-          if (!(await renewMemberLease(host.id, host._inc, id))) host._applyLeave(id)
+          await renewMemberLease(host.id, host._inc, id)
         } catch (error) {
           renewalFailure ??= { error }
         }

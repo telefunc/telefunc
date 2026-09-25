@@ -608,8 +608,7 @@ class ServerRoom extends RoomStateView implements Room {
         this._state.applyClosed()
     }
   }
-  /** @internal */
-  _applyLeave(id: string, cause?: LeaveCause): void {
+  private _applyLeave(id: string, cause: LeaveCause): void {
     this._state.applyLeave(id, cause)
   }
   /** Every leave the state applies, event or reconcile, runs the member's cleanup. */
@@ -622,7 +621,7 @@ class ServerRoom extends RoomStateView implements Room {
       // A live-heartbeating owner can't be reaped (heartbeats outpace the TTL by 4x), so a vanished record with no observed event means the member was removed.
       local._onLeft(cause ?? { type: 'removed' })
     }
-    // No cause means no event reached this instance (a vanished record, a reconciled roster), so none reached its
+    // No cause means no event reached this instance (the roster read missed the member), so none reached its
     // clients; a member this view no longer knows already left through one.
     if (cause === undefined && hidden !== null) {
       const leave: RoomCtrlEnvelope = { __r: 'leave', id, cause: 'removed', ...(hidden ? { hidden: true } : {}) }
@@ -649,8 +648,8 @@ class ServerRoom extends RoomStateView implements Room {
     this._state.applyRoomUpdate(config.meta, config.at, config.by)
   }
   /** @internal */
-  _applyAuthorityRoster(members: MemberSnapshot[]): boolean {
-    return this._state.reconcileCompleteRoster(members)
+  _applyAuthorityRoster(members: MemberSnapshot[], departing: ReadonlySet<string>): boolean {
+    return this._state.reconcileCompleteRoster(members, departing)
   }
   /** @internal The authority says the room closed; the lane that would have carried `closed` failed. */
   _closeFromAuthority(): void {

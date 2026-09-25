@@ -455,15 +455,20 @@ class RoomState {
       invokeChannelListener(invoke, [cb], this._onCallbackError)
     }
   }
-  reconcileCompleteRoster(members: MemberSnapshot[]): boolean {
-    return this._reconcileRoster(members, false)
+  /** A departing member stays until its leave event, which carries the cause. */
+  reconcileCompleteRoster(members: MemberSnapshot[], departing: ReadonlySet<string>): boolean {
+    return this._reconcileRoster(members, departing, false)
   }
   /** A client's roster: the server strips hidden members, and a directly held hidden handle survives it. */
   reconcilePresenceRoster(members: MemberSnapshot[]): boolean {
-    return this._reconcileRoster(members, true)
+    return this._reconcileRoster(members, new Set(), true)
   }
   /** The first roster loads silently; later ones narrate the drift they correct as events. */
-  private _reconcileRoster(roster: MemberSnapshot[], preserveMissingHidden: boolean): boolean {
+  private _reconcileRoster(
+    roster: MemberSnapshot[],
+    departing: ReadonlySet<string>,
+    preserveMissingHidden: boolean,
+  ): boolean {
     const narrate = this._rosterKnown
     this._rosterKnown = true
     let narratedDrift = false
@@ -473,7 +478,7 @@ class RoomState {
       narratedDrift ||= outcome.narrated
       viewChanged ||= outcome.viewChanged
     }
-    const listed = new Set(roster.map((member) => member.id))
+    const listed = new Set([...roster.map((member) => member.id), ...departing])
     narratedDrift = this._removeMissingMembers(listed, preserveMissingHidden) || narratedDrift
     if (!narrate) {
       this._bumpMembership()
