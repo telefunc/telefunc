@@ -28,6 +28,7 @@ import {
   TELEFUNC_BROADCAST_BUCKET_HEADER,
   TELEFUNC_SESSION_HEADER,
   assertLocationFallbackIsScaled,
+  getScaleCountForBucket,
   resolveSessionRoutingTarget,
 } from '../wire-protocol/server/adapter/cloudflare/routing.js'
 import { assertUsage } from '../utils/assert.js'
@@ -217,7 +218,8 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
 
       if (token) {
         const stored = await kv.get<StoredShardToken>(`session:${token}`, 'json')
-        if (stored) {
+        // A token from before a redeploy that dropped its region routes anew: that region has no Durable Objects now.
+        if (stored && getScaleCountForBucket(scale, stored.b) > 0) {
           sessionInstanceName = stored.s
           locationBucket = stored.b
         }

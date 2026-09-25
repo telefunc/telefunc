@@ -114,9 +114,8 @@ vi.mock('./broadcast.js', () => ({
   CloudflareBroadcastTransport: mocks.MockCloudflareBroadcastTransport,
 }))
 
-vi.mock('./routing.js', () => ({
-  TELEFUNC_BROADCAST_BUCKET_HEADER: 'x-telefunc-broadcast-bucket',
-  TELEFUNC_SESSION_HEADER: 'x-telefunc-session',
+vi.mock('./routing.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./routing.js')>()),
   assertLocationFallbackIsScaled: vi.fn(),
   resolveSessionRoutingTarget: vi.fn(
     (baseInstanceName: string, scale: unknown, request: Request, locationFallback: string) => {
@@ -229,6 +228,25 @@ describe('cloudflare adapter entrypoint', () => {
     expect(forwardedRequest.headers.get('x-telefunc-broadcast-bucket')).toBe('weur')
 
     expect(response?.headers.get('x-telefunc-session')).toBe('my-token')
+  })
+
+  it('routes a token anew once a redeploy dropped its region from the scale', async () => {
+    const { binding, get } = createBinding()
+    const tf = new Telefunc({ scale: { weur: 2 } })
+    const kv = createMockKV()
+    await kv.put('session:stale-token', JSON.stringify({ s: 'telefunc-shard-apac-0', b: 'apac' }))
+    const response = await tf.serve({
+      request: new Request('https://telefunc.test/_telefunc?session=stale-token'),
+      env: { TelefuncDurableObject: binding, TelefuncKV: kv } as unknown as Cloudflare.Env,
+      ctx: { waitUntil: vi.fn() } as unknown as ExecutionContext,
+    })
+    expect(get).toHaveBeenCalledWith(
+      expect.objectContaining({ name: expect.stringMatching(/^telefunc-shard-weur-/) }),
+      {
+        locationHint: 'weur',
+      },
+    )
+    expect(response?.headers.get('x-telefunc-session')).not.toBe('stale-token')
   })
 
   it('derives a new shard and stores a KV token when no token is provided', async () => {

@@ -7,6 +7,7 @@ export {
   assertLocationFallbackIsScaled,
   getBucketCoordinatorShardIndices,
   getDeterministicKeyBucketIndex,
+  getScaleCountForBucket,
   getShardIndicesForBucket,
   resolveCloudflareLocationHint,
   resolveSessionRoutingTarget,
