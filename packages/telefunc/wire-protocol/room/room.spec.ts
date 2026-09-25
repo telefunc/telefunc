@@ -2298,6 +2298,30 @@ describe('Room public behavior', () => {
     stub._onPeerSubscription('text', true)
     await vi.waitFor(() => expect(semanticFrames(peer, 'data')).toEqual(['held']))
   })
+  it('never shows a join that an identity kick overtook while it was announced', async () => {
+    const room = (await Room.create('join-kick-overtake')) as ServerRoom
+    // The kick's leave reaches this instance after the failed join settles, as over a networked backend.
+    const held = holdLaneDelivery((lane) => lane.kind === 'control')
+    const seen: string[] = []
+    room.onJoin(() => seen.push('join'))
+    room.onLeave((_member, cause) => seen.push(cause.type))
+    await vi.waitFor(() => expect(subsOf(room)._control.established).toBe(true))
+    const backend = getRoomBackend()
+    const commitLane = backend.commitLane.bind(backend)
+    let kicked = false
+    vi.spyOn(backend, 'commitLane').mockImplementation(async (roomId, inc, lane, payload, options) => {
+      if (!kicked && lane.kind === 'control' && (parse(decoder.decode(payload)) as { __r?: string }).__r === 'join') {
+        kicked = true
+        // The user's other tab is banned while this join's announcement is in flight.
+        await Room.removeParticipant(room.id, { identity: 'user-1', reason: 'banned' })
+      }
+      return commitLane(roomId, inc, lane, payload, options)
+    })
+    await expect(room.join({ identity: 'user-1' })).rejects.toThrow()
+    await held.release()
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(seen).toEqual([])
+  })
   it('subscribes the lanes of a member that joins through this instance for its listeners here', async () => {
     const room = (await Room.create('own-join-replan')) as ServerRoom
     const frames: number[] = []
