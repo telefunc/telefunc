@@ -81,8 +81,8 @@ class CloudflareRoomSubscriptionAttempt extends DriverAttempt {
     let renewed: boolean
     try {
       renewed = await this.#authority.renewRoute(this.#route)
-    } catch {
-      return this.#finish()
+    } catch (error) {
+      return this.#finish(error)
     }
     if (this.state() !== 'ready') return
     if (renewed) this.#scheduleRenewal()

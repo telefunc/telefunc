@@ -144,6 +144,23 @@ test.each([
   }
 })
 
+test('an attempt whose renewal throws ends with that error as its reason', async () => {
+  vi.useFakeTimers()
+  try {
+    const unreachable = new Error('authority unreachable')
+    const attempt = openAttempt({
+      renewRoute: async () => {
+        throw unreachable
+      },
+    })
+    const ended = endOf(attempt)
+    await vi.advanceTimersByTimeAsync(ROUTE_RENEW_EVERY_MS)
+    await expect(ended).resolves.toBe(unreachable)
+  } finally {
+    vi.useRealTimers()
+  }
+})
+
 test('an ended attempt drops later deliveries, and its route is released once', async () => {
   vi.useFakeTimers()
   try {
