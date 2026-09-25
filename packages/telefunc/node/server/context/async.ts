@@ -5,7 +5,6 @@ import { assert, assertWarning, assertUsage } from '../../../utils/assert.js'
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
 import { isObject } from '../../../utils/isObject.js'
 import { installAsyncMode } from './context.js'
-import { getSyncContext, provideTelefuncContext_sync } from './sync.js'
 import { PROVIDED_CONTEXT } from './getContext.js'
 import type { Context } from './context.js'
 import type { Telefunc } from './TelefuncNamespace.js'
@@ -18,15 +17,17 @@ const globalObject = getGlobalObject<{ asyncStore?: AsyncLocalStorage<Context>; 
 installAsyncMode({
   provideTelefuncContext_async,
   restoreContext_async,
-  // Where the runtime lacks enterWith (workerd), provided context is held the sync way; a scope's store still wins.
-  getContextStore: () => globalObject.asyncStore?.getStore() ?? getSyncContext(),
+  getContextStore: () => globalObject.asyncStore?.getStore() ?? null,
 })
 
 function provideTelefuncContext_async(context: Telefunc.Context): void {
   assertUsage(isObject(context), '[provideTelefuncContext(context)] Argument `context` should be an object')
-  globalObject.provided = true
   globalObject.asyncStore = globalObject.asyncStore ?? new AsyncLocalStorage()
-  if (typeof globalObject.asyncStore.enterWith !== 'function') return provideTelefuncContext_sync(context)
+  assertUsage(
+    typeof globalObject.asyncStore.enterWith === 'function',
+    '[provideTelefuncContext()] This runtime does not support AsyncLocalStorage.enterWith(). Pass context directly to serve() instead.',
+  )
+  globalObject.provided = true
   globalObject.asyncStore.enterWith({ [PROVIDED_CONTEXT]: context })
 }
 

@@ -1,8 +1,6 @@
 import { expect, test } from 'vitest'
-import { AsyncLocalStorage } from 'node:async_hooks'
 import './async.js'
-import { getRawContext, provideContext, restoreContext } from './context.js'
-import { PROVIDED_CONTEXT } from './getContext.js'
+import { getRawContext, restoreContext } from './context.js'
 
 test("a restored context keeps the enclosing scope's other keys", () => {
   const ADAPTER = Symbol('adapter')
@@ -12,15 +10,4 @@ test("a restored context keeps the enclosing scope's other keys", () => {
   )
   expect(seen?.[ADAPTER]).toBe('outer')
   expect(seen?.[REQUEST]).toBe('inner')
-})
-
-test('provides context the sync way where AsyncLocalStorage has no enterWith, as on workerd', () => {
-  const { enterWith } = AsyncLocalStorage.prototype
-  Object.defineProperty(AsyncLocalStorage.prototype, 'enterWith', { value: undefined, configurable: true })
-  try {
-    provideContext({ user: 'workerd' })
-    expect(getRawContext()?.[PROVIDED_CONTEXT]).toEqual({ user: 'workerd' })
-  } finally {
-    Object.defineProperty(AsyncLocalStorage.prototype, 'enterWith', { value: enterWith, configurable: true })
-  }
 })
