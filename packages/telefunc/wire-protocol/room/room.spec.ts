@@ -3362,6 +3362,10 @@ describe('room binary protocol validation', () => {
     expect(() => encodeBinaryFrame(memberId, new Uint8Array(), { meta: { note: 'm'.repeat(70_000) } })).toThrow(
       '65535 bytes',
     )
+    const wantsTrack = (track: string) =>
+      sanitizeBinaryWants({ everyMember: { all: false, tracks: [track] }, members: {} })
+    expect(wantsTrack(`${'é'.repeat(127)}t`)).not.toBeNull()
+    expect(wantsTrack('é'.repeat(128))).toBeNull()
   })
   it('covers head/cell/lane/directory/drop postconditions through the supervised consumer', async () => {
     const backend = getRoomBackend()

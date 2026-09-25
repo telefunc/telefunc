@@ -18,6 +18,7 @@ export type { TrackWants, BinaryWants, BinaryFrame }
 import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { assert, assertUsage } from '../../utils/assert.js'
+import { utf8ByteLength } from '../../utils/utf8ByteLength.js'
 import { ROOM_WANTED_TRACKS_MAX } from './constants.js'
 import { assertKnownOptions, isRecord } from './model.js'
 import type { BinaryPublishOptions } from './types.js'
@@ -216,11 +217,7 @@ function sanitizeTrackWants(wants: unknown): TrackWants | null {
 }
 /** Bounded by UTF-8 bytes, the unit of the frame's one-byte track length; a `.length` count could admit a track that doesn't fit. */
 function isRoomTrack(track: unknown): track is string {
-  return (
-    typeof track === 'string' &&
-    track.isWellFormed() &&
-    frameTextEncoder.encode(track).byteLength <= TRACK_LENGTH_FIELD_MAX
-  )
+  return typeof track === 'string' && track.isWellFormed() && utf8ByteLength(track) <= TRACK_LENGTH_FIELD_MAX
 }
 function isNamedTrack(track: unknown): track is string {
   return isRoomTrack(track) && track.length > 0
