@@ -29,6 +29,7 @@ import { DM_FAILURE, participantGoneError, participantLeftError, roomClosedError
 import {
   assertKnownOptions,
   leaveCauseFromWire,
+  leaveCauseToWire,
   mergeAttributes,
   normalizeJoinOptions,
   ownMetaArgument,
@@ -100,6 +101,10 @@ function decodeLaneEnvelope(serialized: string): { __r: string } {
   return envelope
 }
 /** The owner that wrote the event flags a hidden member; room-level events always reach clients. */
+function relayedAheadKey(event: Extract<RoomCtrlEnvelope, { __r: 'join' | 'p-meta' }>): string {
+  return event.__r === 'join' ? 'join' : String(event.seq)
+}
+
 function hiddenMemberOf(event: RoomCtrlEnvelope): string | null {
   if (event.__r === 'join' || event.__r === 'leave' || event.__r === 'p-meta' || event.__r === 'track')
     return event.hidden === true ? event.id : null
@@ -126,6 +131,9 @@ class ServerRoom extends RoomStateView implements Room {
   private readonly _stubs = new Set<RoomStubChannel>()
   /** Stubs whose first roster read failed: the next successful refresh sends them one. */
   private readonly _rosterOwed = new Set<RoomStubChannel>()
+  /** Per member, this instance's own events its clients already got ('join', or a meta revision): their echo relays
+   *  nothing. */
+  private readonly _relayedAhead = new Map<string, Set<string>>()
   private readonly _localParticipants = new Map<string, ServerLocalParticipant>()
   /** Members whose inbox is establishing before their cell commits; the heartbeat leaves them alone. */
   private readonly _pendingAdmissions = new Set<string>()
@@ -234,14 +242,16 @@ class ServerRoom extends RoomStateView implements Room {
       this._assertAdmitted(id)
       this._pendingAdmissions.delete(id)
       this._state.applyJoin({ id, meta, joinedAt, metaSeq: 0, identity, ...(hidden ? { hidden: true } : {}) })
-      await publishCtrl(this.id, this._inc, {
+      const join = {
         __r: 'join',
         id,
         meta,
         joinedAt,
         ...(identity === null ? {} : { identity }),
         ...(hidden ? { hidden: true } : {}),
-      })
+      } as const
+      this._relayOwn(join)
+      await publishCtrl(this.id, this._inc, join)
     } catch (error) {
       await evictMember(this.id, this._inc, id, identity, { type: 'left' }).catch(reportRoomError)
       this._abandonAdmission(id)
@@ -306,7 +316,9 @@ class ServerRoom extends RoomStateView implements Room {
     })
     this._state.applyParticipantMeta(id, meta, seq)
     this._localParticipants.get(id)?._acceptMeta({ meta, seq })
-    await publishCtrl(this.id, this._inc, { __r: 'p-meta', id, meta, seq, ...(hidden ? { hidden: true } : {}) })
+    const accepted = { __r: 'p-meta', id, meta, seq, ...(hidden ? { hidden: true } : {}) } as const
+    this._relayOwn(accepted)
+    await publishCtrl(this.id, this._inc, accepted)
     return { meta, seq }
   }
 
@@ -516,13 +528,35 @@ class ServerRoom extends RoomStateView implements Room {
       return
     }
     const wasClosed = this._state.closed
-    const hiddenMember = hiddenMemberOf(event)
     this._applyCtrl(event)
-    if (this._stubs.size > 0) {
-      const wireText = encodePublishText(serialized, rawInfo)
-      for (const stub of this._stubs) stub._relayControl(wireText, hiddenMember)
-    }
+    // A leave reaches clients from `_onLeave`, like every leave this view applies.
+    if (event.__r !== 'leave' && !this._takeRelayedAhead(event))
+      this._relayControl(event, () => encodePublishText(serialized, rawInfo))
     if (this._state.closed && !wasClosed) this._teardown()
+  }
+
+  /** This instance's own join or meta change reaches its clients at once, not through its echo, which a lost frame can
+   *  drop with no reconcile seeing drift here. */
+  private _relayOwn(event: Extract<RoomCtrlEnvelope, { __r: 'join' | 'p-meta' }>): void {
+    let ahead = this._relayedAhead.get(event.id)
+    if (!ahead) this._relayedAhead.set(event.id, (ahead = new Set()))
+    ahead.add(relayedAheadKey(event))
+    this._relayApplied(event)
+  }
+  private _takeRelayedAhead(event: RoomCtrlEnvelope): boolean {
+    if (event.__r !== 'join' && event.__r !== 'p-meta') return false
+    return this._relayedAhead.get(event.id)?.delete(relayedAheadKey(event)) ?? false
+  }
+  /** An event this view applied, relayed as is rather than as its lane frame. */
+  private _relayApplied(event: RoomCtrlEnvelope): void {
+    this._relayControl(event, () => encodePublishText(stringify(event), { seq: 0, timestamp: Date.now() }))
+  }
+
+  private _relayControl(event: RoomCtrlEnvelope, wireText: () => string): void {
+    if (this._stubs.size === 0) return
+    const text = wireText()
+    const hiddenMember = hiddenMemberOf(event)
+    for (const stub of this._stubs) stub._relayControl(text, hiddenMember)
   }
 
   private _applyAnnouncement(
@@ -614,6 +648,7 @@ class ServerRoom extends RoomStateView implements Room {
   /** Every leave the state applies, event or reconcile, runs the member's cleanup. */
   private _onLeave(id: string, cause: LeaveCause | undefined, hidden: boolean | null): void {
     this._announcedTracks.delete(id)
+    this._relayedAhead.delete(id)
     this._rejectDmAcks(DM_FAILURE.left, id) // strand no waiter on a gone member
     const local = this._localParticipants.get(id)
     if (local) {
@@ -621,13 +656,15 @@ class ServerRoom extends RoomStateView implements Room {
       // A live-heartbeating owner can't be reaped (heartbeats outpace the TTL by 4x), so a vanished record with no observed event means the member was removed.
       local._onLeft(cause ?? { type: 'removed' })
     }
-    // No cause means no event reached this instance (the roster read missed the member), so none reached its
-    // clients; a member this view no longer knows already left through one.
-    if (cause === undefined && hidden !== null) {
-      const leave: RoomCtrlEnvelope = { __r: 'leave', id, cause: 'removed', ...(hidden ? { hidden: true } : {}) }
-      const wireText = encodePublishText(stringify(leave), { seq: 0, timestamp: Date.now() })
-      for (const stub of this._stubs) stub._relayControl(wireText, hidden ? id : null)
-    }
+    // Every leave of a member this view knew reaches its clients here, once: from an event, from this instance's own
+    // removal, whose echo a lost frame can drop, or from a roster read, where no event means a removal.
+    if (hidden !== null)
+      this._relayApplied({
+        __r: 'leave',
+        id,
+        ...leaveCauseToWire(cause ?? { type: 'removed' }),
+        ...(hidden ? { hidden: true } : {}),
+      })
     for (const stub of this._stubs) stub._forgetMember(id)
     this._local.forgetMember(id)
     this._demand.forgetMember(id)

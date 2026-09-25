@@ -239,6 +239,26 @@ describe('Room public behavior', () => {
       .filter((event) => event.__r === 'update')
     expect(updates.map((event) => event.meta)).toEqual([{ topic: 'new' }])
   })
+  it('tells its clients about its own join, meta change and leave even when the lane loses their echoes', async () => {
+    const room = (await Room.create('own-events-lost-echo')) as ServerRoom
+    const { peer } = serve(room)
+    await subsOf(room).reconcileAuthority()
+    vi.spyOn(room, '_onCtrlMessage').mockImplementation(() => {}) // the lane stays ready; every echo is lost
+    const member = await room.join({ meta: { v: 1 } })
+    expect(clientView(peer, room.id)._getRemote(member.id)?.meta).toEqual({ v: 1 })
+    await member.setMeta({ v: 2 })
+    expect(clientView(peer, room.id)._getRemote(member.id)?.meta).toEqual({ v: 2 })
+    await member.leave()
+    expect(clientView(peer, room.id)._getRemote(member.id)).toBeNull()
+  })
+  it('tells its clients about a meta change it committed but failed to announce', async () => {
+    const room = (await Room.create('unannounced-meta')) as ServerRoom
+    const { peer } = serve(room)
+    const member = await room.join({ meta: { v: 1 } })
+    vi.spyOn(driver, 'commitLane').mockRejectedValueOnce(new Error('publish lost'))
+    await expect(member.setMeta({ v: 2 })).rejects.toThrow('publish lost')
+    expect(clientView(peer, room.id)._getRemote(member.id)?.meta).toEqual({ v: 2 })
+  })
   it("relays a hidden member's reconciled meta to the clients handed it", async () => {
     const room = (await Room.create('lost-hidden-meta')) as ServerRoom
     const holder = await Room.get(room.id)
@@ -3181,6 +3201,12 @@ function memberEvents(peer: Peer, id: string): Array<{ __r: string }> {
     .filter((frame) => frame.tag === TAG.PUBLISH)
     .map((frame) => JSON.parse(frame.text) as { __r: string; id?: string })
     .filter((event) => event.id === id)
+}
+/** A client Room fed every event its stub relayed, in order. */
+function clientView(peer: Peer, roomId: string): ClientRoom {
+  const { client, emit } = fakeClient(roomId)
+  for (const frame of peer.decoded()) if (frame.tag === TAG.PUBLISH) emit(parse(frame.text), frame.info.seq)
+  return client
 }
 function semanticFrames(peer: Peer, kind: 'data' | 'announce'): unknown[] {
   return peer
