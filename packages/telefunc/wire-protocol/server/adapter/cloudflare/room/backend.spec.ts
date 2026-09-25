@@ -15,7 +15,11 @@ import { withCloudflareSession } from '../session.js'
 const noBroadcast = () => {
   throw new Error('this spec uses no Broadcast')
 }
-const broadcast = new CloudflareBroadcastTransport({ baseInstanceName: 'telefunc', namespace: noBroadcast })
+const broadcast = new CloudflareBroadcastTransport({
+  baseInstanceName: 'telefunc',
+  locationFallback: 'weur',
+  namespace: noBroadcast,
+})
 
 test("a session's commits to a room reach its authority in the order Room sent them", async () => {
   const arrived: string[] = []

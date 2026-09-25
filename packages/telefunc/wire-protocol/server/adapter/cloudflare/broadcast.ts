@@ -9,7 +9,12 @@ export type {
   TelefuncBroadcastStub,
 }
 
-import { KNOWN_BROADCAST_BUCKETS, getBucketCoordinatorShardIndices, getDeterministicKeyBucketIndex } from './routing.js'
+import {
+  KNOWN_BROADCAST_BUCKETS,
+  getBucketCoordinatorShardIndices,
+  getDeterministicKeyBucketIndex,
+  getScaleCountForBucket,
+} from './routing.js'
 import type { OrderedStubs } from './ordered-stubs.js'
 import { assert } from '../../../../utils/assert.js'
 import type { BroadcastRoute, PublishResult } from '../../../backend/broadcast/contract.js'
@@ -366,19 +371,23 @@ function reportLostDeliveries(key: string, outcomes: PromiseSettledResult<unknow
 class CloudflareBroadcastTransport {
   private readonly baseInstanceName: string
   private readonly scale: CloudflareScale | undefined
+  private readonly locationFallback: LocationBucket
   private readonly namespace: () => DurableObjectNamespace
 
   constructor({
     baseInstanceName,
     scale,
+    locationFallback,
     namespace,
   }: {
     baseInstanceName: string
     scale?: CloudflareScale
+    locationFallback: LocationBucket
     namespace: () => DurableObjectNamespace
   }) {
     this.baseInstanceName = baseInstanceName
     this.scale = scale
+    this.locationFallback = locationFallback
     this.namespace = namespace
   }
 
@@ -418,11 +427,17 @@ class CloudflareBroadcastTransport {
     const presenceByBucket = authorityState.livePresence(broadcastRouteKey({ key, kind }), info.timestamp)
     const fanoutBuckets = Array.from(presenceByBucket.keys())
     let receivers = 0
-    for (const members of presenceByBucket.values()) receivers += members.length
+    // Presence written before a redeploy dropped its region forwards through the fallback region's coordinators.
+    const membersByCoordinatorBucket = new Map<LocationBucket, string[]>()
+    for (const [bucket, members] of presenceByBucket) {
+      receivers += members.length
+      const via = getScaleCountForBucket(this.scale, bucket) > 0 ? bucket : this.locationFallback
+      membersByCoordinatorBucket.set(via, [...(membersByCoordinatorBucket.get(via) ?? []), ...members])
+    }
     const forwards = await Promise.allSettled(
-      fanoutBuckets.map((bucket) =>
+      Array.from(membersByCoordinatorBucket, ([bucket, members]) =>
         this.callByName(calls, this.coordinatorName(key, bucket), bucket, (coordinator) =>
-          coordinator.telefuncBroadcastForward({ key, kind, payload, info, members: presenceByBucket.get(bucket)! }),
+          coordinator.telefuncBroadcastForward({ key, kind, payload, info, members }),
         ),
       ),
     )

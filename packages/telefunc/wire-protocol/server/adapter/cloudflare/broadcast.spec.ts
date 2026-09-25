@@ -205,7 +205,12 @@ function createRacingBinding(
 }
 
 function createTransport(binding = createBasicBinding()): CloudflareBroadcastTransport {
-  return new CloudflareBroadcastTransport({ baseInstanceName: 'telefunc', scale: 1, namespace: () => binding })
+  return new CloudflareBroadcastTransport({
+    baseInstanceName: 'telefunc',
+    scale: 1,
+    locationFallback: 'weur',
+    namespace: () => binding,
+  })
 }
 
 /** A session DO's Broadcast membership, placed in weur. */
@@ -590,6 +595,38 @@ describe('cloudflare broadcast routing', () => {
       'telefunc:broadcast:eeur:0',
       'telefunc:broadcast:weur:0',
     ])
+  })
+
+  it("forwards presence from a region that left the scale through the fallback region's coordinator", async () => {
+    const authorityState = createAuthorityState()
+    const forwards: Array<{ coordinator: string; members: string[] }> = []
+    const transport = new CloudflareBroadcastTransport({
+      baseInstanceName: 'telefunc',
+      scale: { weur: 1 },
+      locationFallback: 'weur',
+      namespace: () =>
+        createBasicBinding({
+          onForward(id, request) {
+            forwards.push({ coordinator: id.name, members: [...request.members].sort() })
+            return Promise.resolve()
+          },
+        }),
+    })
+    for (const [member, bucket] of [
+      ['telefunc-shard-weur-0', 'weur'],
+      ['telefunc-shard-apac-0', 'apac'],
+    ] as const)
+      await authorityState.setPresence({ key: 'room:redeployed', kind: 'text', member, bucket })
+    const receipt = await transport.publishToSubscribers(authorityState, new OrderedStubs(), {
+      key: 'room:redeployed',
+      kind: 'text',
+      locationBucket: 'weur',
+      payload: encode('"hello"'),
+    })
+    expect(forwards).toEqual([
+      { coordinator: 'telefunc:broadcast:weur:0', members: ['telefunc-shard-apac-0', 'telefunc-shard-weur-0'] },
+    ])
+    expect(receipt.receivers).toBe(2)
   })
 
   it('a member that fails to take a publish loses it: the publish resolves and the loss is logged', async () => {

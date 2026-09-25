@@ -35,6 +35,7 @@ import {
 } from '../../packages/telefunc/wire-protocol/server/adapter/cloudflare/room/fanout.js'
 const broadcast = new CloudflareBroadcastTransport({
   baseInstanceName: 'telefunc',
+  locationFallback: 'weur',
   namespace: () => (workerEnv as unknown as Env).PUBLIC,
 })
 installBackend(
