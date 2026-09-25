@@ -812,6 +812,23 @@ describe('Room public behavior', () => {
     readiness.resolve()
     slot.stop()
   })
+  it("loads a fresh view's first roster while members' meta changes keep arriving", async () => {
+    const authority = await Room.create('first-roster-meta-traffic')
+    const player = await authority.join()
+    const observer = (await Room.get(authority.id)) as ServerRoom
+    const readCells = driver.readCells.bind(driver)
+    let score = 0
+    vi.spyOn(driver, 'readCells').mockImplementation(async (roomId, inc, selector) => {
+      const result = await readCells(roomId, inc, selector)
+      // A member's meta change reaches this view during every roster read.
+      if ('prefix' in selector && selector.prefix === MEMBER_CELL_PREFIX && score < 100)
+        await player.setAttributes({ score: ++score })
+      return result
+    })
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    observer.onJoin(() => {})
+    expect((await observer.getParticipants()).map(({ id }) => id)).toEqual([player.id])
+  })
   it('makes roster readers join one bounded authoritative refresh', async () => {
     const authority = (await Room.create('roster-refresh-owner')) as ServerRoom
     await authority.join()

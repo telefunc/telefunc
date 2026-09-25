@@ -389,7 +389,11 @@ class RoomState {
   /** Applies only revisions newer than the entry's: the origin's echo (same seq) and events arriving behind a fresher reconcile are absorbed. */
   applyParticipantMeta(id: string, meta: ParticipantMeta, seq: number): void {
     const entry = this._members.get(id)
-    if (!entry) return this._markUnknownMember()
+    if (!entry) {
+      // Before the first roster every member is unknown: its meta change is no drift, and the heartbeat heals its meta.
+      if (this._rosterKnown) this._markUnknownMember()
+      return
+    }
     if (seq <= entry.metaSeq) return
     const prev = entry.meta
     entry.metaSeq = seq
