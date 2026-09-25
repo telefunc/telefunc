@@ -84,9 +84,7 @@ class RoomAuthority<Env = unknown> extends DurableObject<Env> {
 
   async compareExchangeHead(cx: HeadCx, next: HeadNext): Promise<HeadCxResult> {
     const now = Date.now()
-    const outcome = this.ctx.storage.transactionSync(() =>
-      compareExchangeHead(this.#sql(), cx, next, now, () => crypto.randomUUID()),
-    )
+    const outcome = this.#transaction((sql) => compareExchangeHead(sql, cx, next, now, () => crypto.randomUUID()))
     await this.#scheduleMaintenanceIfNeeded()
     if ('conflict' in outcome)
       return { conflict: true, current: outcome.current === null ? null : headForRpc(outcome.current) }
@@ -99,15 +97,14 @@ class RoomAuthority<Env = unknown> extends DurableObject<Env> {
 
   async compareExchangeCells(inc: string, revision: string, mutations: CellMutation[]): Promise<CxResult> {
     const now = Date.now()
-    return this.ctx.storage.transactionSync(() => compareExchangeCells(this.#sql(), inc, revision, mutations, now))
+    return this.#transaction((sql) => compareExchangeCells(sql, inc, revision, mutations, now))
   }
 
   async commitLane(inc: string, lane: LaneId, payload: Uint8Array, opts?: CommitOptions): Promise<CommitWire> {
     const now = Date.now()
     const key = encodeLaneKey(lane)
-    const sql = this.#sql()
-    const outcome = this.ctx.storage.transactionSync(
-      (): StaleCommit | { seq: number; timestamp: number; routes: RouteInstallation[] } => {
+    const outcome = this.#transaction(
+      (sql): StaleCommit | { seq: number; timestamp: number; routes: RouteInstallation[] } => {
         if (!commitPreconditionHolds(readLiveHead(sql, now), inc, lane.kind, opts?.closingLease, now))
           return { stale: 'incarnation' }
         if (opts?.requiredCellKeys !== undefined) {
@@ -140,12 +137,11 @@ class RoomAuthority<Env = unknown> extends DurableObject<Env> {
   }
 
   async deleteRetained(inc: string, lane: LaneId, opts?: { ifSeq?: number }): Promise<void> {
-    this.ctx.storage.transactionSync(() => deleteRetained(this.#sql(), inc, lane, opts))
+    this.#transaction((sql) => deleteRetained(sql, inc, lane, opts))
   }
 
   async registerRoute(route: RouteInstallation): Promise<RegisterWire> {
-    const sql = this.#sql()
-    const result = this.ctx.storage.transactionSync((): RegisterWire => {
+    const result = this.#transaction((sql): RegisterWire => {
       const now = Date.now()
       if (!isOpenIncarnation(readLiveHead(sql, now), route.inc))
         return { rejected: true, reason: `room has no open incarnation '${route.inc}'` }
@@ -159,27 +155,27 @@ class RoomAuthority<Env = unknown> extends DurableObject<Env> {
   /** Fails once the route lapsed or its generation was dropped; the session then ends the attempt. */
   async renewRoute(route: RouteInstallation): Promise<boolean> {
     const now = Date.now()
-    const renewed = this.ctx.storage.transactionSync(() => renewRoute(this.#sql(), route, now))
+    const renewed = this.#transaction((sql) => renewRoute(sql, route, now))
     await this.#scheduleMaintenanceIfNeeded()
     return renewed
   }
 
   async unsubscribeRoute(route: RouteInstallation): Promise<void> {
-    this.ctx.storage.transactionSync(() => deleteRoute(this.#sql(), route))
+    this.#transaction((sql) => deleteRoute(sql, route))
     await this.#scheduleMaintenanceIfNeeded()
   }
 
   async dropGeneration(inc: string): Promise<void> {
-    this.ctx.storage.transactionSync(() => dropGenerationRows(this.#sql(), inc))
+    this.#transaction((sql) => dropGenerationRows(sql, inc))
     await this.#scheduleMaintenanceIfNeeded()
   }
 
   async directoryPut(roomId: string, incTag: string): Promise<void> {
-    this.ctx.storage.transactionSync(() => directoryPut(this.#sql(), roomId, incTag))
+    this.#transaction((sql) => directoryPut(sql, roomId, incTag))
   }
 
   async directoryDelete(roomId: string, incTag: string): Promise<void> {
-    this.ctx.storage.transactionSync(() => directoryDelete(this.#sql(), roomId, incTag))
+    this.#transaction((sql) => directoryDelete(sql, roomId, incTag))
   }
 
   async directoryList(prefix: string, cursor?: string): Promise<DirectoryPage> {
@@ -197,13 +193,18 @@ class RoomAuthority<Env = unknown> extends DurableObject<Env> {
 
   /** Storage only: a session whose route lapsed or whose generation went learns it at its next renewal. */
   #runSweep(now: number): void {
-    const sql = this.#sql()
-    this.ctx.storage.transactionSync(() => {
+    this.#transaction((sql) => {
       const currentInc = readLiveHead(sql, now)?.currentInc ?? null
       deleteLapsedTombstone(sql, now)
       deleteExpiredRoutes(sql, now)
       for (const inc of listOrphanGenerations(sql, currentInc)) dropGenerationRows(sql, inc)
     })
+  }
+
+  /** The schema is created outside the transaction, so a refused first write can't roll it back. */
+  #transaction<T>(fn: (sql: SqlStorage) => T): T {
+    const sql = this.#sql()
+    return this.ctx.storage.transactionSync(() => fn(sql))
   }
 
   #sql(): SqlStorage {

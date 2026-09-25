@@ -132,6 +132,7 @@ const probes: Record<string, (env: Env, suffix: string) => Promise<unknown>> = {
   '/native-rpc': nativeRpcRoundTrip,
   '/large-retained': largeRetainedReplay,
   '/broadcast-sessions': broadcastAcrossSessions,
+  '/refused-first-write': refusedFirstWrite,
 }
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -336,5 +337,16 @@ async function rejectionOf(promise: Promise<unknown>, label: string): Promise<st
     return 'resolved'
   } catch (error) {
     return error instanceof Error ? error.message : String(error)
+  }
+}
+
+/** A fresh authority whose first SQL use is a write SQLite refuses keeps its tables for the next calls. */
+async function refusedFirstWrite(env: Env, suffix: string) {
+  const authority = env.ROOM.get(env.ROOM.idFromName(`refused-first-write-${suffix}`)) as unknown as Authority
+  const refused = await rejectionOf(authority.directoryPut('x'.repeat(3 * 1024 * 1024), 'inc'), 'oversized id')
+  await authority.directoryPut('room', 'inc')
+  return {
+    refused: refused.includes('SQLITE_TOOBIG'),
+    listed: (await authority.directoryList('')).entries.map(({ roomId }) => roomId),
   }
 }

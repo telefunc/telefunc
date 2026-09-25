@@ -61,6 +61,10 @@ test('a retained Room payload larger than a SQLite row replays whole, as native 
   expect(await probe('/large-retained')).toEqual({ bytes: 25 * 1024 * 1024, first: 0x11, last: 0xee })
 })
 
+test("a room authority's first write that SQLite refuses leaves its tables for the next calls", async () => {
+  expect(await probe('/refused-first-write')).toEqual({ refused: true, listed: ['room'] })
+})
+
 test('Broadcast reaches every session DO in the isolate in seq order, each through its own I/O', async () => {
   const inOrder = [
     { seq: 1, text: 'one' },
