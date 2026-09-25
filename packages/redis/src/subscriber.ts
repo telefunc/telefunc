@@ -220,10 +220,20 @@ class RedisSubscriptionDriver implements SubscriptionDriver<RedisSubscriptionSou
   /** Its channels are subscribed on a live connection: ready, unless its incarnation is no longer open. */
   private async _confirm(attempt: RedisSubscriptionAttempt, id: number): Promise<void> {
     const { source } = attempt
-    if ('roomId' in source && !(await this._validateGeneration(source))) {
-      if (this._isCurrent(id))
-        attempt.terminate(new Error(`subscribeLane: generation '${source.roomId}/${source.inc}' is not open`))
-      return
+    if ('roomId' in source) {
+      let open: boolean
+      try {
+        open = await this._validateGeneration(source)
+      } catch (error) {
+        // A failed check (a command-connection error) fails this attempt, not the shared subscriber connection.
+        if (this._isCurrent(id)) attempt.terminate(error)
+        return
+      }
+      if (!open) {
+        if (this._isCurrent(id))
+          attempt.terminate(new Error(`subscribeLane: generation '${source.roomId}/${source.inc}' is not open`))
+        return
+      }
     }
     if (this._isCurrent(id)) attempt.markReady()
   }

@@ -158,6 +158,26 @@ test('a subscriber dropping before the commit returns rejects its delivery witho
   await expect(fence.delivery).rejects.toThrow()
 })
 
+test('a failed generation check ends that Room lane only, not the shared connection', async () => {
+  const sockets: ReturnType<typeof fakeSubscriber>[] = []
+  const failure = new Error('command connection lost')
+  const { driver } = driverWith(sockets, async () => {
+    throw failure
+  })
+  const broadcast = driver.bind(route).open(
+    () => {},
+    () => 1,
+  )
+  await untilReady(broadcast)
+  const room = driver.bind({ roomId: 'room', inc: 'inc', lane: { kind: 'semantic' } }).open(
+    () => {},
+    () => 1,
+  )
+  await expect(untilReady(room)).rejects.toBe(failure)
+  expect(broadcast.state()).toBe('ready')
+  expect(sockets).toHaveLength(1)
+})
+
 test('terminates a Room lane whose incarnation closed while the connection was down', async () => {
   const sockets: ReturnType<typeof fakeSubscriber>[] = []
   let open = true
