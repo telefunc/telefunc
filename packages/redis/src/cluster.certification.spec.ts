@@ -10,7 +10,7 @@ import {
   getBroadcastBackend,
   getRoomBackend,
 } from '../../telefunc/dist/wire-protocol/backend/install.js'
-import { broadcastSequenceKey, channelKey, headKey, genPrefix, orderKey } from './keys.js'
+import { broadcastSequenceKey, channelKey, generationKeysKey, headKey, orderKey } from './keys.js'
 import { REDIS_COMMANDS, REDIS_DELIVERY_FENCE_BYTE } from './commands.js'
 type RedisClusterNode = { host: string; port: number }
 type Master = RedisClusterNode & { id: string; ranges: Array<[number, number]>; client: Redis }
@@ -243,7 +243,7 @@ describe('Redis real three-master Cluster CI certification', () => {
     const before = await backend.publish(route, bytes('before'))
     await waitFor(() => observed.length === 1)
     // An eviction or a FLUSHDB: the counter is gone, the subscriber connection is not.
-    await cluster.del(`${prefix}seq:{invalidate}`)
+    await cluster.del(broadcastSequenceKey(prefix, 'invalidate'))
     const after = await backend.publish(route, bytes('after'))
     expect(after.seq).toBeGreaterThan(before.seq)
     await waitFor(() => observed.length === 2)
@@ -284,7 +284,7 @@ describe('Redis real three-master Cluster CI certification', () => {
     const smembers = client.smembers.bind(client)
     let relocation: Promise<void> | undefined
     vi.spyOn(client, 'smembers').mockImplementation((async (key: string) => {
-      if (key === `${genPrefix(prefix, roomId, inc)}:keys`) await (relocation ??= moveSlot(slotNumber, source, target))
+      if (key === generationKeysKey(prefix, roomId, inc)) await (relocation ??= moveSlot(slotNumber, source, target))
       return await smembers(key)
     }) as never)
     try {

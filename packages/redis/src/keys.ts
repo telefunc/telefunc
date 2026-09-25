@@ -6,7 +6,6 @@ export {
   headKey,
   headRevKey,
   gensKey,
-  genPrefix,
   generationKeysKey,
   revKey,
   cellKeyPrefix,
