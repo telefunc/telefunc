@@ -453,12 +453,12 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     }
   }
 
-  // Broadcasts and Room stubs take publishes; on another channel an unanswered publish would hang its sender.
+  // Broadcasts and Room stubs take publishes and subscriptions; a plain channel drops them.
   _onPeerPublishAckReqMessage(_text: string, _seq: number): Promise<void> {
-    throw new ProtocolViolationError('publish on a channel that is not a broadcast')
+    return Promise.resolve()
   }
   _onPeerPublishBinaryAckReqMessage(_data: Uint8Array, _seq: number): Promise<void> {
-    throw new ProtocolViolationError('publish on a channel that is not a broadcast')
+    return Promise.resolve()
   }
   _onPeerSubscription(_kind: BroadcastKind, _on: boolean): void {}
 

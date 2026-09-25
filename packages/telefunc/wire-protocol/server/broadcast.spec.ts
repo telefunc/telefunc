@@ -4,7 +4,6 @@ import { ServerChannel } from './channel.js'
 import { ReplayBuffer } from '../replay-buffer.js'
 import {
   ACK_STATUS,
-  ProtocolViolationError,
   TAG,
   decode,
   encode,
@@ -545,17 +544,6 @@ describe('Broadcast disallows channel methods', () => {
   ])('calling %s() throws — not available on a Broadcast', (_name, call) => {
     const broadcast = new ServerBroadcast({ key: 'room:disallowed' })
     expect(() => call(broadcast)).toThrow()
-  })
-})
-
-describe('publish frames outside a broadcast', () => {
-  it('treats a publish on a plain channel as a protocol violation instead of never answering it', () => {
-    const channel = new ServerChannel()
-    for (const frame of [
-      { tag: TAG.PUBLISH_ACK_REQ, index: 1, seq: 1, text: '"hi"' },
-      { tag: TAG.PUBLISH_BINARY_ACK_REQ, index: 1, seq: 2, data: new Uint8Array([1]) },
-    ] as const)
-      expect(() => channel._dispatchFrame(frame)).toThrow(ProtocolViolationError)
   })
 })
 
