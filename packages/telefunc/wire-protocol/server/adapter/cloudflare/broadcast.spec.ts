@@ -890,6 +890,41 @@ describe('cloudflare broadcast routing', () => {
     }
   })
 
+  it('keeps delivering while a failed refresh has the route lost, as the authority still forwards to it', async () => {
+    vi.useFakeTimers()
+    const authority = createAuthorityState()
+    const calls: BroadcastCalls = new OrderedStubs()
+    const coordinatorCalls: BroadcastCalls = new OrderedStubs()
+    const record = presenceAt(authority)
+    let presenceCalls = 0
+    const transport = createTransport(
+      createBasicBinding({
+        onPresence: (id, request) =>
+          ++presenceCalls === 2 ? Promise.reject(new Error('presence refresh rejected')) : record(id, request),
+        onForward: (_, request) => transport.forwardToBucket(coordinatorCalls, request),
+        onDeliver: (_, request) => member.deliver(request),
+      }),
+    )
+    const member = createMember(transport)
+    const route = { key: 'room:lost-delivery', kind: 'text' } as const
+    const received: string[] = []
+    const subscription = member.openSubscription(route, (payload) => void received.push(decode(payload)))
+    try {
+      await untilReady(subscription)
+      await vi.advanceTimersByTimeAsync(30_000)
+      expect(subscription.state()).toBe('lost')
+      await transport.publishToSubscribers(authority, calls, {
+        ...route,
+        locationBucket: 'weur',
+        payload: encode('"during"'),
+      })
+      expect(received).toEqual(['"during"'])
+    } finally {
+      await subscription.unsubscribe()
+      vi.useRealTimers()
+    }
+  })
+
   it('a subscription that joins a route whose presence is lost waits for its recovery', async () => {
     vi.useFakeTimers()
     let presenceCalls = 0

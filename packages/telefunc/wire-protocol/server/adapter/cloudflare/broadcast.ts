@@ -143,8 +143,9 @@ class CloudflareBroadcastSubscriptionAttempt extends DriverAttempt {
     )
   }
 
+  // The authority forwards only to an unexpired record, so what arrives is owed, lost route or not.
   deliver(payload: Uint8Array, info: OrderingInfo): void {
-    if (this.state() !== 'ready') return
+    if (this.state() === 'closed') return
     this.#receiver(payload, info)
   }
 
