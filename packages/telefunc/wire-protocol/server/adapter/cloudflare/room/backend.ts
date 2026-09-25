@@ -1,6 +1,6 @@
 /// <reference types="@cloudflare/workers-types" />
-export { CloudflareRoomSessionManager, CloudflareBackend }
-export type { RoomSessionDeliveryRequest, CloudflareRoomAuthorityStub, CloudflareRoomNamespace }
+export { CloudflareBackend }
+export type { CloudflareRoomAuthorityStub, CloudflareRoomNamespace }
 
 import type { BroadcastDriver, BroadcastRoute, PublishResult } from '../../../../backend/broadcast/contract.js'
 import type {
@@ -20,25 +20,15 @@ import type {
   RoomHead,
   RoomSubscriptionSource,
 } from '../../../../backend/room/contract.js'
-import type { BackendReceiver, SubscriptionBinding, SubscriptionDriver } from '../../../../backend/subscription.js'
+import type { SubscriptionBinding, SubscriptionDriver } from '../../../../backend/subscription.js'
 import { CloudflareBroadcastTransport } from '../broadcast.js'
-import { encodeLaneKey } from '../../../../backend/room/lane-key.js'
-import { CloudflareRoomSubscriptionAttempt } from './subscription.js'
 import type { RoomAuthority } from './do.js'
 import type { DurableObject } from 'cloudflare:workers'
-import type { RouteInstallation } from './routes.js'
 import { currentCloudflareSession, requireCloudflareSession } from '../session.js'
-import { OrderedStubs } from '../ordered-stubs.js'
 
 // Room authorities share the Telefunc namespace with sessions and Broadcast, so a room id is always prefixed.
 const ROOM_AUTHORITY_PREFIX = '__telefunc_room__:'
 const DIRECTORY_DO_NAME = '__telefunc_room_directory__'
-
-type RoomSessionDeliveryRequest = RouteInstallation & {
-  payload: Uint8Array
-  seq: number
-  timestamp: number
-}
 
 /** The room authority's own methods, which its Durable Object serves over RPC. */
 type CloudflareRoomAuthorityStub = Omit<RoomAuthority, keyof DurableObject>
@@ -46,53 +36,6 @@ type CloudflareRoomAuthorityStub = Omit<RoomAuthority, keyof DurableObject>
 type CloudflareRoomNamespace = {
   idFromName(name: string): unknown
   get(id: unknown): CloudflareRoomAuthorityStub
-}
-
-const entryKey = (route: Pick<RouteInstallation, 'roomId' | 'inc' | 'laneKey'>) =>
-  JSON.stringify([route.roomId, route.inc, route.laneKey])
-
-class CloudflareRoomSessionManager {
-  /** The session's calls to room authorities: a room's commits and route calls reach its authority in the order they
-   *  were sent. */
-  readonly authorityCalls = new OrderedStubs<CloudflareRoomAuthorityStub>()
-  readonly #id: string
-  readonly #subscriptionPartition = crypto.randomUUID()
-  readonly #entries = new Map<string, CloudflareRoomSubscriptionAttempt>()
-
-  constructor(sessionId: string) {
-    this.#id = sessionId
-  }
-
-  openSubscription(
-    { roomId, inc, lane }: RoomSubscriptionSource,
-    openAuthority: () => CloudflareRoomAuthorityStub,
-    receiver: BackendReceiver,
-  ): CloudflareRoomSubscriptionAttempt {
-    const callAuthority = <T>(invoke: (stub: CloudflareRoomAuthorityStub) => Promise<T>) =>
-      this.authorityCalls.call(roomId, openAuthority, invoke)
-    const source = { roomId, inc, laneKey: encodeLaneKey(lane), sessionDoId: this.#id, callAuthority }
-    const key = entryKey(source)
-    const attempt: CloudflareRoomSubscriptionAttempt = new CloudflareRoomSubscriptionAttempt(source, receiver, {
-      onClosed: () => {
-        if (this.#entries.get(key) === attempt) this.#entries.delete(key)
-      },
-    })
-    this.#entries.set(key, attempt)
-    attempt.start()
-    return attempt
-  }
-
-  /** A delivery to a lease this session no longer holds, as after a restart, is dropped: delivery is at-most-once, and
-   *  the authority's route lapses with the lease. */
-  deliver(request: RoomSessionDeliveryRequest): void {
-    const entry = this.#entries.get(entryKey(request))
-    if (entry?.leaseId !== request.leaseId) return
-    entry.deliver(request.payload, request.seq, request.timestamp)
-  }
-
-  get subscriptionPartition(): string {
-    return this.#subscriptionPartition
-  }
 }
 
 type CloudflareSubscriptionSource = BroadcastRoute | RoomSubscriptionSource

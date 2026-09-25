@@ -1,6 +1,6 @@
 import { expect, test, vi } from 'vitest'
 import { Fanout, type RoomSessionNamespace } from './fanout.js'
-import type { RoomSessionDeliveryRequest } from './backend.js'
+import type { RoomSessionDeliveryRequest } from './subscription.js'
 
 const route = { roomId: 'room', inc: 'inc', laneKey: 'semantic', sessionDoId: 'session', leaseId: 'lease' }
 

@@ -1,14 +1,9 @@
 import { expect, test, vi } from 'vitest'
 import '../../../../../node/server/async_hooks.js'
-import {
-  CloudflareBackend,
-  CloudflareRoomSessionManager,
-  type CloudflareRoomAuthorityStub,
-  type CloudflareRoomNamespace,
-} from './backend.js'
+import { CloudflareBackend, type CloudflareRoomAuthorityStub, type CloudflareRoomNamespace } from './backend.js'
 import { encodeLaneKey } from '../../../../backend/room/lane-key.js'
 import { ROUTE_RENEW_EVERY_MS } from './routes.js'
-import type { CloudflareRoomSubscriptionAttempt } from './subscription.js'
+import { CloudflareRoomSessionManager, type CloudflareRoomSubscriptionAttempt } from './subscription.js'
 import { CloudflareBroadcastTransport } from '../broadcast.js'
 import { withCloudflareSession } from '../session.js'
 

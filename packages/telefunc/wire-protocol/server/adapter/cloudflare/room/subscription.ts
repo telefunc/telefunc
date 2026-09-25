@@ -1,10 +1,67 @@
-export { CloudflareRoomSubscriptionAttempt }
+export { CloudflareRoomSessionManager, CloudflareRoomSubscriptionAttempt }
+export type { RoomSessionDeliveryRequest }
 
 import type { BackendReceiver } from '../../../../backend/subscription.js'
+import type { RoomSubscriptionSource } from '../../../../backend/room/contract.js'
+import { encodeLaneKey } from '../../../../backend/room/lane-key.js'
 import { DriverAttempt } from '../../../../backend/attempt.js'
+import { OrderedStubs } from '../ordered-stubs.js'
 import { ROUTE_RENEW_EVERY_MS, type RouteInstallation } from './routes.js'
 import type { CloudflareRoomAuthorityStub } from './backend.js'
 import type { RegisterWire } from './do.js'
+
+type RoomSessionDeliveryRequest = RouteInstallation & {
+  payload: Uint8Array
+  seq: number
+  timestamp: number
+}
+
+const entryKey = (route: Pick<RouteInstallation, 'roomId' | 'inc' | 'laneKey'>) =>
+  JSON.stringify([route.roomId, route.inc, route.laneKey])
+
+class CloudflareRoomSessionManager {
+  /** The session's calls to room authorities: a room's commits and route calls reach its authority in the order they
+   *  were sent. */
+  readonly authorityCalls = new OrderedStubs<CloudflareRoomAuthorityStub>()
+  readonly #id: string
+  readonly #subscriptionPartition = crypto.randomUUID()
+  readonly #entries = new Map<string, CloudflareRoomSubscriptionAttempt>()
+
+  constructor(sessionId: string) {
+    this.#id = sessionId
+  }
+
+  openSubscription(
+    { roomId, inc, lane }: RoomSubscriptionSource,
+    openAuthority: () => CloudflareRoomAuthorityStub,
+    receiver: BackendReceiver,
+  ): CloudflareRoomSubscriptionAttempt {
+    const callAuthority = <T>(invoke: (stub: CloudflareRoomAuthorityStub) => Promise<T>) =>
+      this.authorityCalls.call(roomId, openAuthority, invoke)
+    const source = { roomId, inc, laneKey: encodeLaneKey(lane), sessionDoId: this.#id, callAuthority }
+    const key = entryKey(source)
+    const attempt: CloudflareRoomSubscriptionAttempt = new CloudflareRoomSubscriptionAttempt(source, receiver, {
+      onClosed: () => {
+        if (this.#entries.get(key) === attempt) this.#entries.delete(key)
+      },
+    })
+    this.#entries.set(key, attempt)
+    attempt.start()
+    return attempt
+  }
+
+  /** A delivery to a lease this session no longer holds, as after a restart, is dropped: delivery is at-most-once, and
+   *  the authority's route lapses with the lease. */
+  deliver(request: RoomSessionDeliveryRequest): void {
+    const entry = this.#entries.get(entryKey(request))
+    if (entry?.leaseId !== request.leaseId) return
+    entry.deliver(request.payload, request.seq, request.timestamp)
+  }
+
+  get subscriptionPartition(): string {
+    return this.#subscriptionPartition
+  }
+}
 
 /** A call to the room's authority through the session's ordered stub for it. */
 type AuthorityCall = <T>(invoke: (authority: CloudflareRoomAuthorityStub) => Promise<T>) => Promise<T>

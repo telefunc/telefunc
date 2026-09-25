@@ -3,7 +3,7 @@ export type { CloudflareSession }
 
 import { getRawContext, restoreContext } from '../../../../node/server/context/context.js'
 import type { CloudflareBroadcastMember } from './broadcast.js'
-import type { CloudflareRoomSessionManager } from './room/backend.js'
+import type { CloudflareRoomSessionManager } from './room/subscription.js'
 
 /** What a session DO lends the code it runs: its Room manager and its Broadcast membership. */
 type CloudflareSession = {

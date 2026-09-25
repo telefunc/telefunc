@@ -2,7 +2,7 @@ export { Fanout }
 export type { RoomSessionNamespace }
 
 import type { RouteInstallation } from './routes.js'
-import type { RoomSessionDeliveryRequest } from './backend.js'
+import type { RoomSessionDeliveryRequest } from './subscription.js'
 import { OrderedStubs, reportLostDeliveries } from '../ordered-stubs.js'
 
 type RoomSessionStub = {

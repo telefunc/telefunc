@@ -36,11 +36,13 @@ import type { Telefunc as TelefuncNamespace } from '../node/server/context/getCo
 import type { CloudflareScale, LocationBucket } from '../wire-protocol/server/adapter/cloudflare/routing.js'
 import { CHANNEL_TRANSPORT } from '../wire-protocol/constants.js'
 import {
-  CloudflareRoomSessionManager,
   CloudflareBackend,
   type CloudflareRoomNamespace,
-  type RoomSessionDeliveryRequest,
 } from '../wire-protocol/server/adapter/cloudflare/room/backend.js'
+import {
+  CloudflareRoomSessionManager,
+  type RoomSessionDeliveryRequest,
+} from '../wire-protocol/server/adapter/cloudflare/room/subscription.js'
 import { RoomAuthority } from '../wire-protocol/server/adapter/cloudflare/room/do.js'
 import { withCloudflareSession, type CloudflareSession } from '../wire-protocol/server/adapter/cloudflare/session.js'
 import type { RoomSessionNamespace } from '../wire-protocol/server/adapter/cloudflare/room/fanout.js'

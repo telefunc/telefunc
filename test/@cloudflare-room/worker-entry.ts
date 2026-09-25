@@ -5,10 +5,12 @@ import { installBackend } from '../../packages/telefunc/wire-protocol/backend/in
 import type { HeadCxResult, RoomHead } from '../../packages/telefunc/wire-protocol/backend/room/contract.js'
 import {
   CloudflareBackend,
-  CloudflareRoomSessionManager,
   type CloudflareRoomNamespace,
-  type RoomSessionDeliveryRequest,
 } from '../../packages/telefunc/wire-protocol/server/adapter/cloudflare/room/backend.js'
+import {
+  CloudflareRoomSessionManager,
+  type RoomSessionDeliveryRequest,
+} from '../../packages/telefunc/wire-protocol/server/adapter/cloudflare/room/subscription.js'
 import {
   RoomAuthority,
   type CommitWire,
