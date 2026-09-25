@@ -827,7 +827,10 @@ describe('Room public behavior', () => {
     })
     vi.spyOn(console, 'error').mockImplementation(() => {})
     observer.onJoin(() => {})
-    expect((await observer.getParticipants()).map(({ id }) => id)).toEqual([player.id])
+    // The last change reached this view after the read that loaded it, and is newer than what the read saw.
+    expect((await observer.getParticipants()).map(({ id, meta }) => ({ id, meta }))).toEqual([
+      { id: player.id, meta: { score } },
+    ])
   })
   it('makes roster readers join one bounded authoritative refresh', async () => {
     const authority = (await Room.create('roster-refresh-owner')) as ServerRoom

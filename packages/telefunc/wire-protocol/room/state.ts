@@ -166,6 +166,8 @@ class RoomState {
   private _rosterKnown: boolean
   private _closedCause: LeaveCause = ownLeaveCause({ type: 'closed' })
   private _seedCount = 0
+  /** The newest meta change per member that reached this view before its first roster. */
+  private readonly _preRosterMeta = new Map<string, { meta: ParticipantMeta; seq: number }>()
   constructor(opts: RoomStateOptions) {
     this.roomId = opts.roomId
     this.meta = ownMetadata(opts.meta)
@@ -390,8 +392,9 @@ class RoomState {
   applyParticipantMeta(id: string, meta: ParticipantMeta, seq: number): void {
     const entry = this._members.get(id)
     if (!entry) {
-      // Before the first roster every member is unknown: its meta change is no drift, and the heartbeat heals its meta.
+      // Before the first roster every member is unknown: its meta change is no drift, and the first roster applies it.
       if (this._rosterKnown) this._markUnknownMember()
+      else if (seq > (this._preRosterMeta.get(id)?.seq ?? 0)) this._preRosterMeta.set(id, { meta, seq })
       return
     }
     if (seq <= entry.metaSeq) return
@@ -483,6 +486,7 @@ class RoomState {
     const listed = new Set([...roster.map((member) => member.id), ...departing])
     narratedDrift = this._removeMissingMembers(listed) || narratedDrift
     if (!narrate) {
+      this._applyPreRosterMeta()
       this._bumpMembership()
       return false
     }
@@ -511,6 +515,15 @@ class RoomState {
     }
     entry.joinedAt = member.joinedAt
     return { narrated, viewChanged: this._mergeKnownTracks(entry, member.tracks) }
+  }
+  private _applyPreRosterMeta(): void {
+    for (const [id, { meta, seq }] of this._preRosterMeta) {
+      const entry = this._members.get(id)
+      if (!entry || seq <= entry.metaSeq) continue
+      entry.meta = ownMetadata(meta)
+      entry.metaSeq = seq
+    }
+    this._preRosterMeta.clear()
   }
   private _mergeKnownTracks(entry: MemberEntry, tracks: string[] | undefined): boolean {
     const before = entry.tracks.size
