@@ -858,6 +858,35 @@ describe('Room public behavior', () => {
     await vi.advanceTimersByTimeAsync(ROOM_HEARTBEAT_INTERVAL_MS)
     expect(heartbeat).toHaveBeenCalledOnce()
   })
+  it("resubscribes a pure observer's control lane on the heartbeat when its recovery fails after a replan", async () => {
+    vi.useFakeTimers()
+    const observer = (await Room.get((await Room.create('observer-recovery-heartbeat')).id)) as ServerRoom
+    const first = terminalSubscription()
+    let opens = 0
+    mockLaneSubscription('control', (subscribeLane, roomId, inc, lane, receiver) => {
+      opens++
+      if (opens === 1) return first.subscription
+      if (opens === 2) return rejectedSubscription('replacement refused')
+      return subscribeLane(roomId, inc, lane, receiver)
+    })
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    observer.onJoin(() => {})
+    const headRead = deferred<void>()
+    const readOpenConfig = observer._readOpenConfig.bind(observer)
+    vi.spyOn(observer, '_readOpenConfig').mockImplementationOnce(async () => {
+      await headRead.promise
+      return readOpenConfig()
+    })
+    await first.close()
+    // A replan while the recovery reads the head.
+    observer.onLeave(() => {})
+    headRead.resolve()
+    await vi.advanceTimersByTimeAsync(100)
+    expect(opens).toBe(2)
+    await vi.advanceTimersByTimeAsync(ROOM_HEARTBEAT_INTERVAL_MS)
+    expect(opens).toBe(3)
+    expect(subsOf(observer)._control.established).toBe(true)
+  })
   it('retries a still-wanted lost subscription on the next planning pass', async () => {
     vi.useFakeTimers()
     const observer = await Room.get((await Room.create('single-recovery-horizon')).id)

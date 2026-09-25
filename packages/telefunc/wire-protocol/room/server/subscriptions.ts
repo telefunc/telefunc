@@ -285,7 +285,7 @@ class RoomSubscriptions {
   private _syncHeartbeat(): void {
     const host = this._host
     const want =
-      !host._state.closed && (this._control.active || host._ownedMembers().all.length > 0 || this._demand.isActive())
+      !host._state.closed && (this._control.wanted || host._ownedMembers().all.length > 0 || this._demand.isActive())
     if (want && !this._heartbeatTimer) {
       this._heartbeatTimer = unrefTimer(
         setInterval(() => void this._heartbeatTick().catch(reportRoomError), ROOM_HEARTBEAT_INTERVAL_MS),
