@@ -183,6 +183,7 @@ export default {
         restartSettlement: await authorityRestart(env, suffix),
         lostTarget: await lostTarget(env, sessionId, suffix),
         alarmPolicy: await alarmScheduling(env, sessionId, suffix),
+        routeRenewal: await routeRenewal(env, sessionId, suffix),
         nativeRpc: await nativeRpcRoundTrip(env, suffix),
       })
     } catch (error) {
@@ -254,6 +255,16 @@ async function alarmScheduling(env: Env, sessionId: DurableObjectId, suffix: str
   })
   const afterUnsubscribe = await probe.control('alarm')
   return { idle, afterRoute, afterUnsubscribe }
+}
+async function routeRenewal(env: Env, sessionId: DurableObjectId, suffix: string) {
+  const probe = roomProbe(env, suffix, 'renewal')
+  await probe.open()
+  await probe.join(sessionId)
+  const route = { roomId: probe.roomId, inc: probe.inc, laneKey: 'semantic', sessionDoId: sessionId.toString() }
+  return {
+    live: await probe.authority.renewRoute({ ...route, leaseId: `renewal-lease-${suffix}` }),
+    otherLease: await probe.authority.renewRoute({ ...route, leaseId: 'another-lease' }),
+  }
 }
 // Two session DOs in one isolate, as local workerd runs them: both subscribe, one publishes.
 async function broadcastAcrossSessions(env: Env, suffix: string) {

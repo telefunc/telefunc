@@ -41,7 +41,8 @@ function renewRoute(sql: SqlStorage, route: RouteInstallation, now: number): boo
     ...exact(route),
     now,
   ).rowsWritten
-  return changed === 1
+  // The key and lease match one row at most; rowsWritten also counts the expires_at index entry.
+  return changed > 0
 }
 
 // Exact-lease deletion prevents a racing old lease from removing its successor.

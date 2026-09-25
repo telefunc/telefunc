@@ -44,6 +44,7 @@ test('public Room lifecycle and authority settlement controls execute on Cloudfl
       afterRoute: 'armed',
       afterUnsubscribe: null,
     },
+    routeRenewal: { live: true, otherLease: false },
     nativeRpc: {
       headConfig: [0x11, 0x22, 0x33],
       cell: [0x44, 0x55],
