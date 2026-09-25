@@ -370,6 +370,13 @@ describe('cloudflare adapter entrypoint', () => {
     expect(subscribe).toThrow('A Cloudflare subscription delivers to a Telefunc session')
   })
 
+  it('refuses a second setup on another binding, which the installed backend would not address', () => {
+    new Telefunc()
+    expect(() => new Telefunc({ bindingName: 'OtherTelefuncDurableObject' })).toThrow(
+      'a different backend is already installed',
+    )
+  })
+
   it('keeps the same Durable Object Room backend across repeated Worker entry evaluation', () => {
     new Telefunc()
     const installed = getRoomBackend()
