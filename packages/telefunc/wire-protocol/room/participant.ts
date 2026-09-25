@@ -24,7 +24,8 @@ abstract class ParticipantBase implements LocalParticipant {
   readonly id: string
   readonly identity: string | null
   readonly selfDelivery: boolean
-  /** @internal */ _meta: ParticipantMeta
+  private _meta: ParticipantMeta
+  private _metaSeq = 0
   private _leftCause: LeaveCause | null = null
   private _leaveCbs: Array<(cause: LeaveCause) => unknown> = []
   private readonly _messageCbs: Array<(data: unknown, from: Sender | null) => unknown> = []
@@ -59,11 +60,10 @@ abstract class ParticipantBase implements LocalParticipant {
   get meta(): ParticipantMeta {
     return this._meta
   }
-  #metaSeq = 0
   /** @internal A meta the room accepted at `seq`; an older one never replaces a newer. */
   _acceptMeta({ meta, seq }: AcceptedMeta): void {
-    if (seq <= this.#metaSeq) return
-    this.#metaSeq = seq
+    if (seq <= this._metaSeq) return
+    this._metaSeq = seq
     this._meta = ownMetadata(meta)
   }
   protected get _left(): boolean {
