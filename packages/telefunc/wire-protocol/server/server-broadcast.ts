@@ -27,7 +27,6 @@ import { ACK_STATUS, encodePublishText, encodePublishBinary } from '../shared-ws
 import type { BroadcastKind, WirePublishInfo } from '../shared-ws.js'
 import { STATUS_BODY_INTERNAL_SERVER_ERROR } from '../../shared/constants.js'
 import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
-import { isAbort } from '../../node/server/Abort.js'
 assertIsNotBrowser()
 
 const SERVER_BROADCAST_BRAND: unique symbol = Symbol.for('ServerBroadcast')
@@ -276,7 +275,7 @@ function subscribeRoute<Data>(
     invokeChannelListener(
       callback,
       [decode(payload), makePublishInfo(route.key, info.seq, info.timestamp)],
-      reportStaticListenerError,
+      reportServerChannelError,
     )
   })
   subscription.open()
@@ -332,11 +331,6 @@ class RouteSubscription {
       else if (state === 'closed') ended()
     })
   }
-}
-
-/** As for a channel listener, every error is reported but an Abort, which has no channel to close here. */
-function reportStaticListenerError(error: unknown): void {
-  if (!isAbort(error)) reportServerChannelError(error)
 }
 
 function assertBroadcastKey(key: unknown): void {

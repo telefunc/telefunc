@@ -907,7 +907,7 @@ describe('Broadcast static bus (publish/subscribe)', () => {
       () => Broadcast.publishBinary('broadcast:static-errors', new Uint8Array()),
     ],
   ] as const)(
-    'a static %s() listener error is reported unless it is an Abort, as for a channel listener',
+    'a static %s() listener error is reported, an Abort too, since there is no channel for it to end',
     async (_name, subscribe, publish) => {
       const report = vi.spyOn(console, 'error').mockImplementation(() => {})
       const stops = [
@@ -918,7 +918,7 @@ describe('Broadcast static bus (publish/subscribe)', () => {
         }),
       ]
       await publish()
-      await vi.waitFor(() => expect(report).toHaveBeenCalledTimes(2))
+      await vi.waitFor(() => expect(report).toHaveBeenCalledTimes(3))
       for (const stop of stops) stop()
     },
   )
