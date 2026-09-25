@@ -82,11 +82,6 @@ class SubscriptionManager<Source> {
     return cleanup
   }
 
-  /** Whether any subscription is open. */
-  hasSubscriptions(): boolean {
-    return this._routes.size > 0
-  }
-
   /** Runs `send` once no subscription on `sources` is establishing, waiting at most the hold time; while `key` is held,
    *  later sends on it queue behind, in call order. */
   afterEstablished<T>(

@@ -14,8 +14,12 @@ import { MemoryBackend } from './memory/backend.js'
 import { DriverAttempt } from './attempt.js'
 import { config } from '../../node/server/serverConfig.js'
 import { ServerBroadcast } from '../server/server-broadcast.js'
+import { getGlobalObject } from '../../utils/getGlobalObject.js'
+const installState = getGlobalObject<{ broadcastOverride?: unknown }>('wire-protocol/backend/install.ts', () => ({}))
 afterEach(async () => {
   await disposeBackend()
+  // A configured transport stays for the process; each test starts without one.
+  delete installState.broadcastOverride
   config.broadcast = {}
   vi.restoreAllMocks()
 })
@@ -73,25 +77,6 @@ describe('backend installation lifecycle', () => {
     expect(() => getRoomBackend()).toThrow('Room requires a full backend')
   })
 
-  it('removing config.broadcast.transport hands Broadcast back to the backend', async () => {
-    config.broadcast = { transport: localTransport() }
-    expect(() => getRoomBackend()).toThrow('Room requires a full backend')
-    config.broadcast = {}
-    expect(getRoomBackend()).toBeDefined()
-    await expectBroadcastRoundTrip('removed')
-  })
-
-  it('refuses to change config.broadcast.transport while Broadcast subscriptions are open', async () => {
-    const transport = localTransport()
-    config.broadcast = { transport }
-    const subscription = getBroadcastBackend().subscribe({ key: 'live', kind: 'text' }, () => {})
-    expect(() => (config.broadcast = {})).toThrow('set it once, before the first subscription')
-    expect(config.broadcast.transport).toBe(transport)
-    await subscription.unsubscribe()
-    config.broadcast = {}
-    expect(getRoomBackend()).toBeDefined()
-  })
-
   it('a Broadcast channel that published before config.broadcast.transport was set uses the transport', async () => {
     const channel = new ServerBroadcast<string>({ key: 'late-transport' })
     await channel.publish('before')
@@ -103,11 +88,10 @@ describe('backend installation lifecycle', () => {
     await vi.waitFor(() => expect(seen).toEqual(['from another instance']))
     unsubscribe()
   })
-  it('setting config.broadcast.transport to undefined removes it too', async () => {
-    config.broadcast.transport = localTransport()
-    config.broadcast.transport = undefined
-    expect(getRoomBackend()).toBeDefined()
-    await expectBroadcastRoundTrip('unset')
+  it('rejects an undefined config.broadcast.transport as a usage error', () => {
+    expect(() => {
+      config.broadcast.transport = undefined
+    }).toThrow('config.broadcast.transport must be a BroadcastTransport')
   })
 
   it('unlistens a key before listening to it again, so a per-key transport keeps delivering across a subscriber swap', async () => {

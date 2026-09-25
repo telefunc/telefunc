@@ -82,7 +82,7 @@ type BroadcastTransport = {
 }
 ```
 
-`send()` and `sendBinary()` return the assigned `{ seq, timestamp }`, giving every node one global order per key (shared by text and binary): `seq` is a positive safe integer and `timestamp` a non-negative safe integer such as `Date.now()`. `listen()` and `listenBinary()` return an unsubscribe function, and a key has at most one live listen of each kind: the next listen for it comes after that function ran. A `send()` on the same node after `listen()` returned must reach that listener: that is what delivers a publish made right after a `subscribe()`. A configured broadcast transport takes precedence over an installed backend's broadcast plane, which takes precedence over the in-memory default. Set it once, before the first Broadcast subscription: changing it while subscriptions are open throws, since they would stay on the replaced transport.
+`send()` and `sendBinary()` return the assigned `{ seq, timestamp }`, giving every node one global order per key (shared by text and binary): `seq` is a positive safe integer and `timestamp` a non-negative safe integer such as `Date.now()`. `listen()` and `listenBinary()` return an unsubscribe function, and a key has at most one live listen of each kind: the next listen for it comes after that function ran. A `send()` on the same node after `listen()` returned must reach that listener: that is what delivers a publish made right after a `subscribe()`. A configured broadcast transport takes precedence over an installed backend's broadcast plane, which takes precedence over the in-memory default.
 
 ## Cloudflare
 

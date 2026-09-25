@@ -508,7 +508,6 @@ function applyBroadcastConfig(val: unknown): void {
   const next: BroadcastConfigUser = {}
   for (const [key, value] of Object.entries(val)) {
     if (key === 'transport') {
-      if (value === undefined) continue // unset, like an absent key
       assertUsage(
         isObject(value) &&
           (['send', 'listen', 'sendBinary', 'listenBinary'] as const).every(
@@ -521,8 +520,8 @@ function applyBroadcastConfig(val: unknown): void {
       assertUsage(false, `Unknown config.broadcast.${key}`)
     }
   }
-  configureBroadcastTransport(next.transport)
   configState.broadcast = next
+  if (next.transport) configureBroadcastTransport(next.transport)
 }
 
 function validateStreamTransport(val: unknown, configPath: string): StreamTransport {

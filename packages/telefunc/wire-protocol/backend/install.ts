@@ -47,23 +47,12 @@ function installBackend<Driver extends BackendDriver>(
   assertUsage(false, 'Install one backend per process: a different backend is already installed')
 }
 
-/** Sets the public broadcast-only override, or removes it with `undefined`; the full backend's Room plane stays. */
-function configureBroadcastTransport(transport: BroadcastTransport | undefined): void {
+/** Installs the public broadcast-only override without displacing the full backend's Room plane. */
+function configureBroadcastTransport(transport: BroadcastTransport): void {
   const previous = state.broadcastOverride
   if (previous?.transport === transport) return
-  // Retiring a plane would leave its subscribers on a transport nothing publishes to anymore.
-  const current = previous ? previous.backend : state.installed?.broadcast
-  assertUsage(
-    !current?.hasSubscriptions(),
-    'config.broadcast.transport changed while Broadcast subscriptions are open: set it once, before the first subscription (restart the server to change it)',
-  )
-  if (previous?.backend) void previous.backend.dispose()
-  if (transport === undefined) {
-    // The backend's own Broadcast plane is supervised again on next use.
-    delete state.broadcastOverride
-    return
-  }
   state.broadcastOverride = { transport }
+  if (previous?.backend) void previous.backend.dispose()
   const installed = state.installed
   if (installed === null) return
   if (installed.broadcast) void installed.broadcast.dispose()

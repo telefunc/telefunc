@@ -26,6 +26,5 @@ type BroadcastBackend = {
    *  counts against `config.channel.bufferLimit` (`bufferLimitBinary`). */
   publish(route: BroadcastRoute, payload: Uint8Array): PublishResult | Promise<PublishResult>
   subscribe(route: BroadcastRoute, receiver: BackendReceiver): BackendSubscription
-  hasSubscriptions(): boolean
   dispose(): Promise<void>
 }
