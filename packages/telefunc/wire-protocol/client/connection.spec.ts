@@ -29,9 +29,8 @@ function createStalledTransport() {
   return { fetchImpl, getSseDownstreamOpens: () => sseDownstreamOpens }
 }
 
-test('channel config preserves zero through server and client resolution', () => {
-  config.channel.reconnectTimeout = 0
-  expect(getServerConfig().channel.reconnectTimeout).toBe(0)
+/** A connection that applied a RECONCILED whose every setting is zero. */
+function zeroConfiguredConnection() {
   const options = {
     transports: [CHANNEL_TRANSPORT.SSE],
     fetchImpl: createStalledTransport().fetchImpl,
@@ -44,6 +43,13 @@ test('channel config preserves zero through server and client resolution', () =>
   )
   connection.applyReconciled(ctrl)
   connection.transport.applyReconciledSettings(ctrl)
+  return { connection, options }
+}
+
+test('channel config preserves zero through server and client resolution', () => {
+  config.channel.reconnectTimeout = 0
+  expect(getServerConfig().channel.reconnectTimeout).toBe(0)
+  const { connection } = zeroConfiguredConnection()
   expect([
     connection.reconnectTimeoutMs,
     connection.idleTimeoutMs,
@@ -52,7 +58,11 @@ test('channel config preserves zero through server and client resolution', () =>
     connection.transport.flushThrottleMs,
     connection.transport.postIdleFlushDelayMs,
   ]).toEqual(Array(6).fill(0))
-  // A zero replay budget replays nothing; a later channel on the connection still registers.
+  connection.dispose()
+})
+
+test('a zero replay budget still registers a later channel on the connection', () => {
+  const { connection, options } = zeroConfiguredConnection()
   expect(ClientConnection.getOrCreate('http://zero.test', createChannel() as never, options)).toBe(connection)
   connection.dispose()
 })
