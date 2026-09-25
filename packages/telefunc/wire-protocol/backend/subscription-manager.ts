@@ -13,8 +13,7 @@ import type {
 
 type StateListener = (state: SubscriptionState) => void
 
-type SubscriptionSlotConfig<Source> = {
-  source: Source
+type SubscriptionSlotConfig = {
   binding: SubscriptionBinding
   reportError: (error: unknown) => void
   sourceKey: string
@@ -24,7 +23,7 @@ type SubscriptionSlotConfig<Source> = {
 
 class SubscriptionManager<Source> {
   /** Slots by source key, then by driver partition. */
-  private readonly _routes = new Map<string, Map<string, SubscriptionSlot<Source>>>()
+  private readonly _routes = new Map<string, Map<string, SubscriptionSlot>>()
   private readonly _cleanups = new Set<Promise<void>>()
 
   constructor(
@@ -40,8 +39,7 @@ class SubscriptionManager<Source> {
     if (route === undefined) this._routes.set(sourceKey, (route = new Map()))
     let slot = route.get(binding.partition)
     if (slot === undefined) {
-      const created: SubscriptionSlot<Source> = new SubscriptionSlot({
-        source,
+      const created: SubscriptionSlot = new SubscriptionSlot({
         binding,
         reportError: this._reportError,
         sourceKey,
@@ -59,7 +57,7 @@ class SubscriptionManager<Source> {
     await Promise.allSettled([...cleanups, ...this._cleanups])
   }
 
-  private _unmap(sourceKey: string, partition: string, slot: SubscriptionSlot<Source>): void {
+  private _unmap(sourceKey: string, partition: string, slot: SubscriptionSlot): void {
     const route = this._routes.get(sourceKey)
     if (route?.get(partition) !== slot) return
     route.delete(partition)
@@ -95,12 +93,12 @@ class SubscriptionManager<Source> {
     return this._slotsOf(source).flatMap((slot) => (slot.establishing ? [slot.established] : []))
   }
 
-  private _slotsOf(source: Source): SubscriptionSlot<Source>[] {
+  private _slotsOf(source: Source): SubscriptionSlot[] {
     return [...(this._routes.get(this._sourceKey(source))?.values() ?? [])]
   }
 }
 
-class SubscriptionSlot<Source> {
+class SubscriptionSlot {
   private readonly _receivers = new Map<symbol, BackendReceiver>()
   private readonly _listeners = new Set<StateListener>()
   private _attempt: SubscriptionAttempt | null = null
@@ -115,7 +113,7 @@ class SubscriptionSlot<Source> {
   private _state: SubscriptionState = 'establishing'
   private _stopPromise: Promise<void> | null = null
 
-  constructor(readonly config: SubscriptionSlotConfig<Source>) {}
+  constructor(private readonly _config: SubscriptionSlotConfig) {}
 
   get establishing(): boolean {
     return this._stopPromise === null && !this._wasReady
@@ -150,7 +148,7 @@ class SubscriptionSlot<Source> {
         unobserve()
         this._receivers.delete(attachment)
         if (this._receivers.size === 0) {
-          this.config.onEmpty()
+          this._config.onEmpty()
           await this.stop()
         }
       },
@@ -160,7 +158,7 @@ class SubscriptionSlot<Source> {
   stop(): Promise<void> {
     if (this._stopPromise !== null) return this._stopPromise
     const attempt = this._attempt
-    this._stopPromise = attempt === null ? Promise.resolve() : this.config.cleanup(attempt)
+    this._stopPromise = attempt === null ? Promise.resolve() : this._config.cleanup(attempt)
     this._readiness.resolve()
     this._transition('closed')
     this._clearCurrent()
@@ -170,14 +168,14 @@ class SubscriptionSlot<Source> {
   private _start(): void {
     let attempt: SubscriptionAttempt
     try {
-      attempt = this.config.binding.open(
+      attempt = this._config.binding.open(
         (payload, info) => {
           if (this._stopPromise !== null) return
           for (const receiver of [...this._receivers.values()]) {
             try {
               receiver(payload, info)
             } catch (error) {
-              this.config.reportError(error)
+              this._config.reportError(error)
             }
           }
         },
@@ -199,7 +197,7 @@ class SubscriptionSlot<Source> {
     if (state === 'ready') return this._becameReady()
     if (state === 'closed') return this._ended(reason)
     this._markUnavailable(state)
-    if (state === 'lost') this.config.reportError(new Error(`Backend subscription lost: ${this.config.sourceKey}`))
+    if (state === 'lost') this._config.reportError(new Error(`Backend subscription lost: ${this._config.sourceKey}`))
   }
 
   private _becameReady(): void {
@@ -210,17 +208,17 @@ class SubscriptionSlot<Source> {
 
   /** The driver's reason, if any, is the failure's cause. */
   private _ended(reason: Error | undefined): void {
-    this._terminal(new Error(`Backend subscription closed: ${this.config.sourceKey}`, reason && { cause: reason }))
+    this._terminal(new Error(`Backend subscription closed: ${this._config.sourceKey}`, reason && { cause: reason }))
   }
 
   private _terminal(error: unknown): void {
     const failure = error instanceof Error ? error : new Error(String(error))
-    this._stopPromise ??= this._attempt === null ? Promise.resolve() : this.config.cleanup(this._attempt)
+    this._stopPromise ??= this._attempt === null ? Promise.resolve() : this._config.cleanup(this._attempt)
     // A resolved readiness cannot carry the failure, so `ready` read from here on is a fresh, rejected one.
     if (this._state === 'ready') this._readiness = createReadiness()
     this._transition('closed')
     this._clearCurrent()
-    this.config.onEmpty()
+    this._config.onEmpty()
     this._readiness.reject(failure)
   }
 
@@ -252,7 +250,7 @@ class SubscriptionSlot<Source> {
     try {
       notify()
     } catch (error) {
-      this.config.reportError(error)
+      this._config.reportError(error)
     }
   }
 }
