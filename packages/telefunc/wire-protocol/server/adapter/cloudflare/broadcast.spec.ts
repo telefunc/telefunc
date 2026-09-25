@@ -16,6 +16,7 @@ import { withCloudflareSession } from './session.js'
 import type { BroadcastRoute } from '../../../backend/broadcast/contract.js'
 import { broadcastRouteKey } from '../../../backend/broadcast/route-key.js'
 import { OrderedStubs } from './ordered-stubs.js'
+import type { TelefuncDurableObjectNamespace } from './namespace.js'
 import { CLOUDFLARE_COLO_LOCATION_HINT_MAP } from './coloLocationHintMap.js'
 import { ServerBroadcast } from '../../server-broadcast.js'
 import { disposeBackend, installBackend } from '../../../backend/install.js'
@@ -165,7 +166,7 @@ function createBasicBinding(
         },
       }
     },
-  } as unknown as DurableObjectNamespace
+  } as unknown as TelefuncDurableObjectNamespace
 }
 
 /** Stubs that deliver like Cloudflare's: calls through one stub arrive in call order, after that stub's latency;
@@ -202,7 +203,7 @@ function createRacingBinding(
         telefuncBroadcastPresence: handlers.onPresence,
       }
     },
-  } as unknown as DurableObjectNamespace
+  } as unknown as TelefuncDurableObjectNamespace
 }
 
 function createTransport(binding = createBasicBinding()): CloudflareBroadcastTransport {

@@ -3,10 +3,7 @@ import { DurableObject, env as workerEnv } from 'cloudflare:workers'
 import '../../packages/telefunc/node/server/async_hooks.js'
 import { installBackend } from '../../packages/telefunc/wire-protocol/backend/install.js'
 import type { HeadCxResult, RoomHead } from '../../packages/telefunc/wire-protocol/backend/room/contract.js'
-import {
-  CloudflareBackend,
-  type CloudflareRoomNamespace,
-} from '../../packages/telefunc/wire-protocol/server/adapter/cloudflare/room/backend.js'
+import { CloudflareBackend } from '../../packages/telefunc/wire-protocol/server/adapter/cloudflare/room/backend.js'
 import {
   CloudflareRoomSessionManager,
   type RoomSessionDeliveryRequest,
@@ -28,21 +25,12 @@ import {
 import { OrderedStubs } from '../../packages/telefunc/wire-protocol/server/adapter/cloudflare/ordered-stubs.js'
 import { withCloudflareSession } from '../../packages/telefunc/wire-protocol/server/adapter/cloudflare/session.js'
 import { ServerBroadcast } from '../../packages/telefunc/wire-protocol/server/server-broadcast.js'
-import type { RoomSessionNamespace } from '../../packages/telefunc/wire-protocol/server/adapter/cloudflare/room/fanout.js'
 const broadcast = new CloudflareBroadcastTransport({
   baseInstanceName: 'telefunc',
   locationFallback: 'weur',
-  namespace: () => (workerEnv as unknown as Env).PUBLIC,
+  namespace: () => workerEnv.PUBLIC,
 })
-installBackend(
-  () =>
-    new CloudflareBackend({
-      rooms: () => (workerEnv as unknown as Env).PUBLIC as unknown as CloudflareRoomNamespace,
-      broadcast,
-    }),
-  ['cloudflare-room-ci-public'],
-)
-const fanoutNamespace = (namespace: DurableObjectNamespace) => namespace as unknown as RoomSessionNamespace
+installBackend(() => new CloudflareBackend({ rooms: () => workerEnv.PUBLIC, broadcast }), ['cloudflare-room-ci-public'])
 const textEncoder = new TextEncoder()
 const textDecoder = new TextDecoder()
 const CONTROL_HORIZON_MS = 2_000
@@ -53,7 +41,7 @@ export class PublicDurableObject extends RoomAuthority<Env> {
   readonly #broadcastAuthority: CloudflareBroadcastAuthorityState
   readonly #member: CloudflareBroadcastMember
   constructor(ctx: DurableObjectState, env: Env) {
-    super(ctx, env, fanoutNamespace(env.PUBLIC))
+    super(ctx, env, env.PUBLIC)
     this.#manager = new CloudflareRoomSessionManager(ctx.id.toString())
     this.#broadcastAuthority = new CloudflareBroadcastAuthorityState(ctx)
     this.#member = broadcast.member(ctx.id.toString(), this.#calls)
@@ -122,7 +110,7 @@ export class SessionDurableObject extends DurableObject {
 }
 export class RoomProbeDurableObject extends RoomAuthority<Env> {
   constructor(ctx: DurableObjectState, env: Env) {
-    super(ctx, env, fanoutNamespace(env.TelefuncDurableObject))
+    super(ctx, env, env.TelefuncDurableObject)
   }
   scheduledAlarm(): Promise<number | null> {
     return this.ctx.storage.getAlarm()
@@ -138,11 +126,7 @@ type Session = RpcMethods<Pick<SessionDurableObject, 'refuse' | 'release' | 'arr
 type BroadcastSession = RpcMethods<
   Pick<PublicDurableObject, 'broadcastSubscribe' | 'broadcastPublish' | 'broadcastReceived'>
 >
-type Env = {
-  ROOM: DurableObjectNamespace
-  TelefuncDurableObject: DurableObjectNamespace
-  PUBLIC: DurableObjectNamespace
-}
+type Env = Cloudflare.Env
 const probes: Record<string, (env: Env, suffix: string) => Promise<unknown>> = {
   '/lost-target': lostTarget,
   '/pipelined-delivery': pipelinedDelivery,

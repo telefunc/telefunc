@@ -1,5 +1,5 @@
 export { Fanout }
-export type { RoomSessionNamespace }
+export type { RoomSessionNamespace, RoomSessionStub }
 
 import type { RouteInstallation } from './routes.js'
 import type { RoomSessionDeliveryRequest } from './subscription.js'

@@ -34,17 +34,14 @@ import { assertUsage } from '../utils/assert.js'
 import type { Telefunc as TelefuncNamespace } from '../node/server/context/getContext.js'
 import type { CloudflareScale, LocationBucket } from '../wire-protocol/server/adapter/cloudflare/routing.js'
 import { CHANNEL_TRANSPORT } from '../wire-protocol/constants.js'
-import {
-  CloudflareBackend,
-  type CloudflareRoomNamespace,
-} from '../wire-protocol/server/adapter/cloudflare/room/backend.js'
+import { CloudflareBackend } from '../wire-protocol/server/adapter/cloudflare/room/backend.js'
 import {
   CloudflareRoomSessionManager,
   type RoomSessionDeliveryRequest,
 } from '../wire-protocol/server/adapter/cloudflare/room/subscription.js'
 import { RoomAuthority } from '../wire-protocol/server/adapter/cloudflare/room/do.js'
 import { withCloudflareSession, type CloudflareSession } from '../wire-protocol/server/adapter/cloudflare/session.js'
-import type { RoomSessionNamespace } from '../wire-protocol/server/adapter/cloudflare/room/fanout.js'
+import type { TelefuncDurableObjectNamespace } from '../wire-protocol/server/adapter/cloudflare/namespace.js'
 import { isTelefuncRequest, toResponse } from './shared.js'
 
 const SHARD_TOKEN_TTL_SECONDS = 86400
@@ -102,21 +99,19 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
     assertUsage(binding, `Missing Cloudflare ${kind} binding "${name}". Add it to your wrangler.jsonc.`)
     return binding
   }
-  function scoped(namespace: DurableObjectNamespace): DurableObjectNamespace {
+  function telefuncNamespace(env: Cloudflare.Env): TelefuncDurableObjectNamespace {
+    const namespace = requireBinding<TelefuncDurableObjectNamespace>(env, bindingName, 'Durable Object')
     return jurisdiction ? namespace.jurisdiction(jurisdiction) : namespace
-  }
-  function telefuncNamespace(env: Cloudflare.Env): DurableObjectNamespace {
-    return scoped(requireBinding(env, bindingName, 'Durable Object'))
   }
   const cloudflareBackend = installBackend(
     () =>
       new CloudflareBackend({
-        rooms: () => telefuncNamespace(workerEnv as Cloudflare.Env) as unknown as CloudflareRoomNamespace,
+        rooms: () => telefuncNamespace(workerEnv),
         broadcast: new CloudflareBroadcastTransport({
           baseInstanceName,
           scale,
           locationFallback,
-          namespace: () => telefuncNamespace(workerEnv as Cloudflare.Env),
+          namespace: () => telefuncNamespace(workerEnv),
         }),
       }),
     ['cloudflare', baseInstanceName, JSON.stringify(scale ?? null), locationFallback, jurisdiction ?? null],
@@ -133,7 +128,7 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
     private readonly session: CloudflareSession
 
     constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
-      super(ctx, env, telefuncNamespace(env) as unknown as RoomSessionNamespace)
+      super(ctx, env, telefuncNamespace(env))
       this.authorityState = new CloudflareBroadcastAuthorityState(ctx)
       const id = ctx.id.toString()
       this.session = {

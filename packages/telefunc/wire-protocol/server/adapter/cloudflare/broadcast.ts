@@ -61,7 +61,7 @@ type BroadcastDeliverRequest = {
   info: OrderingInfo
 }
 
-type TelefuncBroadcastStub = DurableObjectStub & {
+type TelefuncBroadcastStub = {
   telefuncBroadcastPublish(request: BroadcastPublishRequest): Promise<PublishResult>
   telefuncBroadcastForward(request: BroadcastForwardRequest): Promise<void>
   telefuncBroadcastDeliver(request: BroadcastDeliverRequest): Promise<void>
@@ -70,6 +70,12 @@ type TelefuncBroadcastStub = DurableObjectStub & {
 
 /** One DO's outgoing Broadcast calls. */
 type BroadcastCalls = OrderedStubs<TelefuncBroadcastStub>
+
+type BroadcastNamespace = {
+  idFromName(name: string): unknown
+  idFromString(id: string): unknown
+  get(id: unknown, options?: { locationHint: LocationBucket }): TelefuncBroadcastStub
+}
 
 /** One route's presence at the key's authority, for one member DO. */
 class MemberRoute {
@@ -363,7 +369,7 @@ class CloudflareBroadcastTransport {
   private readonly baseInstanceName: string
   private readonly scale: CloudflareScale | undefined
   private readonly locationFallback: LocationBucket
-  private readonly namespace: () => DurableObjectNamespace
+  private readonly namespace: () => BroadcastNamespace
 
   constructor({
     baseInstanceName,
@@ -374,7 +380,7 @@ class CloudflareBroadcastTransport {
     baseInstanceName: string
     scale?: CloudflareScale
     locationFallback: LocationBucket
-    namespace: () => DurableObjectNamespace
+    namespace: () => BroadcastNamespace
   }) {
     this.baseInstanceName = baseInstanceName
     this.scale = scale
@@ -473,14 +479,11 @@ class CloudflareBroadcastTransport {
 
   private stubByName(name: string, locationHint: LocationBucket | null): TelefuncBroadcastStub {
     const namespace = this.namespace()
-    return namespace.get(
-      namespace.idFromName(name),
-      locationHint === null ? undefined : { locationHint },
-    ) as TelefuncBroadcastStub
+    return namespace.get(namespace.idFromName(name), locationHint === null ? undefined : { locationHint })
   }
 
   private stubById(id: string): TelefuncBroadcastStub {
     const namespace = this.namespace()
-    return namespace.get(namespace.idFromString(id)) as TelefuncBroadcastStub
+    return namespace.get(namespace.idFromString(id))
   }
 }
