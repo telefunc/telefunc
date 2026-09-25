@@ -60,7 +60,8 @@ class RedisBackend implements BroadcastDriver, RoomDriver {
     this._publisher = options.redis
     const prefix = options.prefix ?? DEFAULT_PREFIX
     assertKeyPrefix(prefix)
-    this._prefix = prefix
+    // Pub/Sub channels span every database, so a standalone client's names carry its database.
+    this._prefix = isCluster(options.redis) ? prefix : `${prefix}${options.redis.options.db ?? 0}:`
     // A Cluster node's PUBLISH count is node-local, so it cannot prove global absence.
     this._reportsReceivers = !isCluster(options.redis)
     for (const { name, lua, numberOfKeys } of Object.values(REDIS_COMMANDS))

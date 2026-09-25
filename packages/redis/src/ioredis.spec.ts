@@ -90,3 +90,19 @@ test("reads integer replies as ioredis returns them, numbers or, with a shared c
   for (const reply of [1, '1'])
     expect(REDIS_COMMANDS.validateGeneration.parse(reply, { roomId: 'room', inc: 'inc' })).toBe(true)
 })
+
+test('names Pub/Sub channels per database, as Pub/Sub spans every database', async () => {
+  const clients = [0, 1].map((db) => new Redis({ lazyConnect: true, maxRetriesPerRequest: 0, db }))
+  onTestFinished(() => clients.forEach((redis) => redis.disconnect()))
+  const channels = await Promise.all(
+    clients.map(async (redis) => {
+      const backend = new RedisBackend({ redis })
+      const publish = vi
+        .spyOn(redis as unknown as Record<string, () => Promise<unknown>>, REDIS_COMMANDS.publish.name)
+        .mockResolvedValue([1, 1, 0])
+      await backend.publish({ key: 'chat', kind: 'text' }, new Uint8Array())
+      return (publish.mock.calls[0] as unknown[])[1]
+    }),
+  )
+  expect(channels[0]).not.toBe(channels[1])
+})
