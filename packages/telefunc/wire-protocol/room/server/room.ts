@@ -876,9 +876,9 @@ class ServerLocalParticipant extends ParticipantBase {
     return await this._publishFrame(frame, framed)
   }
   /** @internal */
-  _publishFrame(frame: BinaryFrame, framed: Uint8Array): Promise<ChannelPublishAck> {
+  async _publishFrame(frame: BinaryFrame, framed: Uint8Array): Promise<ChannelPublishAck> {
     this._assertActive()
-    return this._room._publishBinaryFrame(frame, framed)
+    return await this._room._publishBinaryFrame(frame, framed)
   }
   /** @internal Each meta write this room accepts for the participant, with its revision. */
   _onAcceptedMeta(callback: (accepted: AcceptedMeta) => void): () => void {

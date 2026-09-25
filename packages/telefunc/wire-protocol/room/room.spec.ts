@@ -1454,6 +1454,16 @@ describe('Room public behavior', () => {
     )
     expect(responseAbort).not.toHaveBeenCalled()
   })
+  it("answers, not throws, a client-held participant's binary frame that arrives after it left", async () => {
+    const room = await Room.create('standalone-binary-after-leave')
+    const holder = (await room.join()) as ServerLocalParticipant
+    const channel = new RoomParticipantStubChannel(holder)
+    channel._registerChannel()
+    attachPeer(channel as unknown as RoomStubChannel)
+    await holder.leave()
+    const data = encodeBinaryFrame(holder.id, new Uint8Array([1]))
+    expect(() => channel._dispatchFrame({ tag: TAG.BINARY_ACK_REQ, index: 7, seq: 1, data })).not.toThrow()
+  })
   it('rejects, not as a bug, a join whose client stub closed during the guard', async () => {
     const room = (await Room.create('stub-close-during-guard')) as ServerRoom
     const stub = register(room)
