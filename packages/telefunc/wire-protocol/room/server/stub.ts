@@ -56,16 +56,12 @@ type ResponseRoomGrants = { selfSuppressed: Set<string>; hidden: Set<string> }
 
 /** A Room stub answers each client request through its channel ack, under the Room error contract. */
 abstract class RoomRequestChannel extends ServerChannel {
-  private _attached = false
-
-  /** A reattached client may have missed state its offline buffer dropped: each stub sends its state again. */
+  /** A client may have missed state its buffer dropped, before it first connected or while offline: each attach sends it. */
   override _attachPeer(peer: IndexedPeer, state?: ReattachState): void {
-    const reattach = this._attached
-    this._attached = true
     super._attachPeer(peer, state)
-    this._onAttached(reattach)
+    this._onAttached()
   }
-  protected abstract _onAttached(reattach: boolean): void
+  protected abstract _onAttached(): void
 
   protected _ackRoomResult(seq: number, work: Promise<unknown>): Promise<void> {
     return this._trackAck(
@@ -117,8 +113,8 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
     this._grantedHidden = grants.hidden
   }
 
-  protected override _onAttached(reattach: boolean): void {
-    this._room._onStubAttached(this, reattach)
+  protected override _onAttached(): void {
+    this._room._onStubAttached(this)
   }
 
   // Client requests
@@ -386,8 +382,7 @@ class RoomParticipantStubChannel extends RoomRequestChannel {
     this._mirrorParticipant()
   }
 
-  protected override _onAttached(reattach: boolean): void {
-    if (!reattach) return
+  protected override _onAttached(): void {
     this._notify({ __r: 'p-meta', ...this._participant._acceptedMeta })
     this._notify({ __r: 'demand-state', tracks: this._participant._demandedTracks })
   }

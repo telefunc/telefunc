@@ -247,7 +247,8 @@ describe('Room public behavior', () => {
       .filter((frame) => frame.tag === TAG.PUBLISH)
       .map((frame) => JSON.parse(frame.text) as { __r: string; meta?: unknown })
       .filter((event) => event.__r === 'update')
-    expect(updates.map((event) => event.meta)).toEqual([{ topic: 'new' }])
+    // The first is the attach's own resend.
+    expect(updates.map((event) => event.meta)).toEqual([{ topic: 'old' }, { topic: 'new' }])
   })
   it('tells its clients about its own join, meta change and leave even when the lane loses their echoes', async () => {
     const control = loseLaneFrames((lane) => lane.kind === 'control')
@@ -2350,6 +2351,26 @@ describe('Room public behavior', () => {
     // The all-track listener here subscribes the new track's lane before its first frame.
     await vi.waitFor(() => expect(frames).toEqual([1, 2]))
   })
+  it('sends a client on its first attach the room meta its pre-attach buffer dropped', async () => {
+    const room = (await Room.create('first-attach-meta')) as ServerRoom
+    config.channel = { bufferLimit: 256 }
+    try {
+      const stub = register(room)
+      // Between the response and the client's connect, larger than the buffer, so it is dropped.
+      const meta = { pad: 'x'.repeat(300) }
+      await Room.setMeta(room.id, meta)
+      await vi.waitFor(() => expect(room.meta).toEqual(meta))
+      const peer = attachPeer(stub)
+      await vi.waitFor(() =>
+        expect(controlEvents(peer).map(({ __r, meta }) => ({ __r, meta }))).toEqual([
+          { __r: 'update', meta },
+          { __r: 'roster', meta: undefined },
+        ]),
+      )
+    } finally {
+      config.channel = {}
+    }
+  })
   it('sends a reattached client the room state its offline buffer dropped', async () => {
     const room = (await Room.create('reattach-resync')) as ServerRoom
     const leaver = await room.join()
@@ -2400,6 +2421,27 @@ describe('Room public behavior', () => {
     } finally {
       config.channel = {}
     }
+  })
+  it('tells the client of a handed-out participant the demand it already had when it was returned', async () => {
+    const room = (await Room.create('handed-out-demand')) as ServerRoom
+    room.subscribeBinary(() => {})
+    const me = (await room.join()) as ServerLocalParticipant
+    const wanted: Array<string | null> = []
+    me.onDemand((track, on) => void (on && wanted.push(track)))
+    // Known before the telefunction returns it, as after an onAfterJoin that awaits I/O.
+    await vi.waitFor(() => expect(wanted).toEqual([null]))
+    const channel = new RoomParticipantStubChannel(me)
+    channel._registerChannel()
+    const peer = attachPeer(channel)
+    await vi.waitFor(() =>
+      expect(
+        peer
+          .decoded()
+          .filter((frame) => frame.tag === TAG.TEXT)
+          .map((frame) => parse(frame.text) as { __r: string })
+          .filter(({ __r }) => __r === 'demand-state'),
+      ).toEqual([{ __r: 'demand-state', tracks: [null] }]),
+    )
   })
   it('sends a reattached client of a handed-out participant the demand its offline buffer dropped', async () => {
     const room = (await Room.create('reattach-participant-demand')) as ServerRoom
@@ -3305,8 +3347,12 @@ describe('client Room lifecycle', () => {
     const ensureRoster = vi.spyOn(subsOf(room), 'ensureRoster').mockRejectedValue(failure)
     vi.spyOn(console, 'error').mockImplementation(() => {})
     const peer = attachPeer(stub)
-    await vi.waitFor(() => expect(peer.decoded().some((frame) => frame.tag === TAG.PUBLISH)).toBe(true))
-    const frame = peer.decoded().find((candidate) => candidate.tag === TAG.PUBLISH)!
+    const rosterError = () =>
+      peer
+        .decoded()
+        .find((frame) => frame.tag === TAG.PUBLISH && (parse(frame.text) as { __r: string }).__r === 'roster-error')
+    await vi.waitFor(() => expect(rosterError()).toBeDefined())
+    const frame = rosterError()!
     if (frame.tag !== TAG.PUBLISH) throw new Error('expected roster error publish')
     const { client, emit } = fakeClient('roster-error-event')
     const participants = client.getParticipants()
@@ -3324,18 +3370,17 @@ describe('client Room lifecycle', () => {
       peer.decoded().flatMap((frame) => (frame.tag === TAG.PUBLISH ? [(parse(frame.text) as { __r: string }).__r] : []))
     await vi.waitFor(() => expect(events()).toContain('roster-error'))
     await subsOf(room)._refreshMembers()
-    expect(events()).toEqual(['roster-error', 'roster'])
+    expect(events()).toEqual(['update', 'roster-error', 'roster'])
   })
   it('replays a committed server-pushed roster after reconnect, then sends a fresh one', async () => {
     const room = (await Room.create('roster-replay')) as ServerRoom
     const stub = register(room)
     const ensureRoster = vi.spyOn(subsOf(room), 'ensureRoster')
     const peer = attachPeer(stub)
-    await vi.waitFor(() => expect(peer.decoded().some((frame) => frame.tag === TAG.PUBLISH)).toBe(true))
+    await vi.waitFor(() => expect(controlEvents(peer).map(({ __r }) => __r)).toContain('roster'))
     stub._onPeerDisconnect(1_000)
-    const [frame] = attachPeer(stub, 0).decoded()
-    if (frame?.tag !== TAG.PUBLISH) throw new Error('expected replayed roster publish')
-    expect(parse(frame.text)).toMatchObject({ __r: 'roster', members: [] })
+    const replayed = controlEvents(attachPeer(stub, 0))
+    expect(replayed.slice(0, 2)).toMatchObject([{ __r: 'update' }, { __r: 'roster', members: [] }])
     expect(ensureRoster).toHaveBeenCalledTimes(2)
   })
 })
