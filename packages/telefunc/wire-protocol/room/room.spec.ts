@@ -239,6 +239,27 @@ describe('Room public behavior', () => {
       .filter((event) => event.__r === 'update')
     expect(updates.map((event) => event.meta)).toEqual([{ topic: 'new' }])
   })
+  it("relays a hidden member's reconciled meta to the clients handed it", async () => {
+    const room = (await Room.create('lost-hidden-meta')) as ServerRoom
+    const holder = await Room.get(room.id)
+    const bot = await holder.join({ hidden: true, meta: { mood: 'old' } })
+    const handed = new RoomStubChannel(room, { grants: { selfSuppressed: new Set(), hidden: new Set([bot.id]) } })
+    handed._registerChannel()
+    room._attachStub(handed)
+    const peer = attachPeer(handed)
+    await subsOf(room).reconcileAuthority()
+    vi.spyOn(room, '_onCtrlMessage').mockImplementationOnce(() => {})
+    await bot.setMeta({ mood: 'new' })
+    await subsOf(room).reconcileAuthority()
+    const metas = peer
+      .decoded()
+      .filter((frame) => frame.tag === TAG.PUBLISH)
+      .map((frame) => JSON.parse(frame.text) as { __r: string; members?: Array<{ id: string; meta: unknown }> })
+      .flatMap((event) => (event.__r === 'roster' ? event.members! : []))
+      .filter((member) => member.id === bot.id)
+      .map((member) => member.meta)
+    expect(metas.at(-1)).toEqual({ mood: 'new' })
+  })
   it("relays a hidden member's event-less leave to no client it wasn't handed to", async () => {
     const room = (await Room.create('lost-hidden-leave')) as ServerRoom
     const bot = await room.join({ hidden: true })

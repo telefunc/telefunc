@@ -32,6 +32,7 @@ import {
   decodeDmReply,
   wireDmFromInbox,
   type DmReply,
+  type MemberSnapshot,
   type MemberWants,
   type ParticipantStubRequest,
   type RoomCtrlEnvelope,
@@ -259,6 +260,14 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
     event: RoomRosterEvent | RoomDemandEvent | Extract<RoomCtrlEnvelope, { __r: 'closed' | 'update' }>,
   ): void {
     this._sendPublish(encodePublishText(stringify(event), { seq: 0, timestamp: Date.now() }))
+  }
+
+  /** The roster holds the hidden members this client was handed, whose meta it heals too. */
+  _relayRoster(members: MemberSnapshot[]): void {
+    this._relayEvent({
+      __r: 'roster',
+      members: members.filter(({ id, hidden }) => !hidden || this._grantedHidden.has(id)),
+    })
   }
 
   /** A hidden member's events reach only the clients that were handed it. */

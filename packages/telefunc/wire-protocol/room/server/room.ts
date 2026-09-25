@@ -709,8 +709,7 @@ class ServerRoom extends RoomStateView implements Room {
     void this._subs
       .ensureRoster()
       .then(() => {
-        if (this._stubs.has(stub) && !this._state.closed)
-          stub._relayEvent({ __r: 'roster', members: this._visibleRoster() })
+        if (this._stubs.has(stub) && !this._state.closed) stub._relayRoster(this._state.snapshotMembers())
       })
       .catch((error) => {
         reportRoomError(error)
@@ -728,9 +727,6 @@ class ServerRoom extends RoomStateView implements Room {
       void this._removeDepartedMember(id).catch(reportRoomError)
     }
     this._subs.replan()
-  }
-  private _visibleRoster(): MemberSnapshot[] {
-    return this._state.snapshotMembers().filter((member) => !member.hidden)
   }
   async _joinStubMember(stub: RoomStubChannel, req: Extract<RoomRequest, { __r: 'req-join' }>) {
     const admission = {
@@ -832,8 +828,8 @@ class ServerRoom extends RoomStateView implements Room {
     const recipients = drifted ? [...this._stubs] : [...this._rosterOwed]
     this._rosterOwed.clear()
     if (recipients.length === 0) return
-    const members = this._visibleRoster()
-    for (const stub of recipients) stub._relayEvent({ __r: 'roster', members })
+    const members = this._state.snapshotMembers()
+    for (const stub of recipients) stub._relayRoster(members)
   }
 
   private _holderOf(id: string): ServerLocalParticipant | RoomStubChannel | undefined {
