@@ -15,7 +15,7 @@ import { textEncoder } from '../frame.js'
 import { parseSseRequestMetadata, type SseRequestMetadata } from '../sse-request.js'
 import { OversizeFrameError, StreamReader, StreamTruncatedError } from './request/StreamReader.js'
 import { getChannelMux } from './mux.js'
-import type { ReconcileOutcome, ServerTransport } from './mux.js'
+import type { ChannelMux, ReconcileOutcome, ServerTransport } from './mux.js'
 import { encode, ProtocolViolationError } from '../shared-ws.js'
 
 type SseChannelHttpResponse = {
@@ -53,7 +53,10 @@ class SseConnectionTransport {
    *  connection — covers the same-instance race where the long-lived stream-request POST
    *  lands before the stream-response POST. */
   private readonly pendingConnections = new Map<string, Set<(connection: SseConnection | null) => void>>()
-  private readonly mux = getChannelMux()
+  /** Per use: a Cloudflare session DO hosts its own channels, and this transport serves every one in the isolate. */
+  private get mux(): ChannelMux {
+    return getChannelMux()
+  }
   private readonly transport: ServerTransport<SseConnection> = {
     getSessionId: (connection) => connection.sessionId ?? undefined,
     setSessionId: (connection, sessionId) => {
