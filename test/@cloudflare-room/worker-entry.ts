@@ -34,14 +34,14 @@ installBackend(() => new CloudflareBackend({ rooms: () => workerEnv.PUBLIC, broa
 const textEncoder = new TextEncoder()
 const textDecoder = new TextDecoder()
 const CONTROL_HORIZON_MS = 2_000
-// Like the production class: one namespace hosts sessions, room authorities and Broadcast authorities.
-export class PublicDurableObject extends RoomAuthority<Env> {
+// Broadcast's roles as the production class plays them: each instance is a session, a key authority and a coordinator.
+export class PublicDurableObject extends DurableObject<Env> {
   readonly #manager: CloudflareRoomSessionManager
   readonly #calls: BroadcastCalls = new OrderedStubs()
   readonly #broadcastAuthority: CloudflareBroadcastAuthorityState
   readonly #member: CloudflareBroadcastMember
   constructor(ctx: DurableObjectState, env: Env) {
-    super(ctx, env, env.PUBLIC)
+    super(ctx, env)
     this.#manager = new CloudflareRoomSessionManager(ctx.id.toString())
     this.#broadcastAuthority = new CloudflareBroadcastAuthorityState(ctx)
     this.#member = broadcast.member(ctx.id.toString(), this.#calls)
@@ -78,9 +78,6 @@ export class PublicDurableObject extends RoomAuthority<Env> {
   }
   telefuncBroadcastPresence(request: BroadcastPresenceRequest) {
     return this.#broadcastAuthority.setPresence(request)
-  }
-  telefuncRoomDeliver(request: RoomSessionDeliveryRequest): void {
-    return this.#run(() => this.#manager.deliver(request))
   }
   #run<T>(fn: () => T): T {
     return withCloudflareSession({ room: this.#manager, broadcast: this.#member }, fn)
