@@ -28,7 +28,9 @@ type ChannelPublishMeta = Record<string, unknown>
 /** Metadata delivered to broadcast subscribers alongside each message. */
 type ChannelPublishInfo = {
   key: string
-  /** Strict per-key counter (1, 2, 3…). Resets if the authority restarts. Use for gap detection. */
+  /** Per-key counter, one more than the key's previous publish. It starts at 1 (in memory, again after a restart); on
+   *  Redis a key starts at the Redis clock in microseconds, so a lost counter never goes backwards. Use for gap
+   *  detection. */
   seq: number
   /** Server timestamp, Unix epoch milliseconds. */
   timestamp: number
