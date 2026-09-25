@@ -8,8 +8,8 @@ import { getGlobalObject } from '../../utils/getGlobalObject.js'
  * Keeps the client's latest session token in memory for each `telefuncUrl`,
  * so follow-up requests stay routed to the same server-side session shard.
  *
- * - `getSessionToken` — the token a call presents, if the page has one yet.
- * - `getOrCreateSessionToken` — the token a `ClientChannel` connects with, named by the channel if the page has none.
+ * - `getSessionToken` — the page's token, if it named one yet.
+ * - `getOrCreateSessionToken` — the token a call or a `ClientChannel` presents, named by the first of them.
  */
 
 const globalObject = getGlobalObject<{ registry: Map<string, string> }>('session-registry.ts', {
@@ -24,8 +24,7 @@ function getSessionToken(telefuncUrl: string): string | undefined {
   return globalObject.registry.get(telefuncUrl)
 }
 
-/** A channel made before the first response brings a token names one, so the call that carries it presents the same
- *  token and both reach one session. */
+/** A page names its token before its first request, so its concurrent calls and their channels reach one session. */
 function getOrCreateSessionToken(telefuncUrl: string): string {
   let token = globalObject.registry.get(telefuncUrl)
   if (token === undefined) globalObject.registry.set(telefuncUrl, (token = crypto.randomUUID()))

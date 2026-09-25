@@ -235,28 +235,15 @@ describe('cloudflare adapter entrypoint', () => {
     const { binding, get, fetch } = createBinding()
     const tf = new Telefunc()
     const kv = createMockKV()
-    const putGate = Promise.withResolvers<void>()
-    const originalPut = kv.put.bind(kv)
-    kv.put = (async (...args: Parameters<KVNamespace['put']>) => {
-      await putGate.promise
-      return originalPut(...args)
-    }) as KVNamespace['put']
+    const waitUntilFns: Array<Promise<unknown>> = []
     const request = new Request('https://telefunc.test/_telefunc')
 
-    const responsePromise = tf.serve({
+    const response = await tf.serve({
       request,
       env: { TelefuncDurableObject: binding, TelefuncKV: kv } as unknown as Cloudflare.Env,
-      ctx: {} as ExecutionContext,
+      ctx: { waitUntil: (p: Promise<unknown>) => waitUntilFns.push(p) } as unknown as ExecutionContext,
     })
 
-    expect(
-      await Promise.race([
-        responsePromise.then(() => 'exposed' as const),
-        new Promise<'pending'>((resolve) => setTimeout(() => resolve('pending'), 0)),
-      ]),
-    ).toBe('pending')
-    putGate.resolve()
-    const response = await responsePromise
     expect(get).toHaveBeenCalledWith(expect.objectContaining({ name: 'telefunc-shard-weur-0' }), {
       locationHint: 'weur',
     })
@@ -265,6 +252,7 @@ describe('cloudflare adapter entrypoint', () => {
     const token = response?.headers.get('x-telefunc-session')
     expect(token).toMatch(/^[0-9a-f-]{36}$/)
 
+    await Promise.all(waitUntilFns)
     const stored = await kv.get(`session:${token}`, 'json')
     expect(stored).toEqual({ s: 'telefunc-shard-weur-0', b: 'weur' })
   })
@@ -276,8 +264,9 @@ describe('cloudflare adapter entrypoint', () => {
     const response = await tf.serve({
       request: new Request('https://telefunc.test/_telefunc?session=lapsed-token'),
       env: { TelefuncDurableObject: binding, TelefuncKV: kv } as unknown as Cloudflare.Env,
-      ctx: {} as ExecutionContext,
+      ctx: { waitUntil: (p: Promise<unknown>) => void p.then(() => {}) } as unknown as ExecutionContext,
     })
+    await new Promise((resolve) => setTimeout(resolve, 0))
     expect(vi.mocked(resolveSessionRoutingTarget)).toHaveBeenLastCalledWith(
       'telefunc',
       undefined,
@@ -338,7 +327,7 @@ describe('cloudflare adapter entrypoint', () => {
     await tf.serve({
       request: new Request('https://telefunc.test/_telefunc'),
       env: { TelefuncDurableObject: binding, TelefuncKV: kv } as unknown as Cloudflare.Env,
-      ctx: {} as ExecutionContext,
+      ctx: { waitUntil: vi.fn() } as unknown as ExecutionContext,
     })
 
     expect(jurisdiction).toHaveBeenCalledWith('eu')

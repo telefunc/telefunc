@@ -192,7 +192,7 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
   }
 
   return {
-    async serve({ request, env }: ServeInput): Promise<Response | undefined> {
+    async serve({ request, env, ctx }: ServeInput): Promise<Response | undefined> {
       if (!isTelefuncRequest(request)) return undefined
       const config = getServerConfig()
 
@@ -226,7 +226,11 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
         sessionInstanceName = target.sessionInstanceName
         locationBucket = target.locationBucket
         const value: StoredShardToken = { s: sessionInstanceName, b: locationBucket }
-        await kv.put(`session:${token}`, JSON.stringify(value), { expirationTtl: SHARD_TOKEN_TTL_SECONDS })
+        // Routing doesn't wait on it (the token routes the same way without it): it pins the region for the token's later
+        // requests. A page's concurrent first requests write the one key, and KV refuses a second write within a second.
+        ctx.waitUntil(
+          kv.put(`session:${token}`, JSON.stringify(value), { expirationTtl: SHARD_TOKEN_TTL_SECONDS }).catch(() => {}),
+        )
       }
 
       const forwardedHeaders = new Headers(request.headers as Headers)
