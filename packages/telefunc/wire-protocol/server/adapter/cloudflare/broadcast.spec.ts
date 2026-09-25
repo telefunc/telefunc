@@ -889,4 +889,34 @@ describe('cloudflare broadcast routing', () => {
       vi.useRealTimers()
     }
   })
+
+  it('a subscription that joins a route whose presence is lost waits for its recovery', async () => {
+    vi.useFakeTimers()
+    let presenceCalls = 0
+    const transport = createTransport(
+      createBasicBinding({
+        onPresence: () => {
+          presenceCalls += 1
+          return presenceCalls === 2 ? Promise.reject(new Error('presence refresh rejected')) : Promise.resolve()
+        },
+      }),
+    )
+    const member = createMember(transport)
+    const route = { key: 'room:join-lost', kind: 'text' } as const
+    const first = member.openSubscription(route, () => {})
+    await untilReady(first)
+    try {
+      await vi.advanceTimersByTimeAsync(30_000)
+      expect(first.state()).toBe('lost')
+      const second = member.openSubscription(route, () => {})
+      await vi.advanceTimersByTimeAsync(0)
+      expect(second.state()).toBe('establishing')
+      await vi.advanceTimersByTimeAsync(30_000)
+      expect(second.state()).toBe('ready')
+      await second.unsubscribe()
+    } finally {
+      await first.unsubscribe()
+      vi.useRealTimers()
+    }
+  })
 })
