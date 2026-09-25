@@ -26,7 +26,6 @@ import {
   directoryTagsKey,
   generationInvalidationChannel,
   generationKeysKey,
-  gensKey,
   headKey,
   orderKey,
   retainedKey,
@@ -83,10 +82,10 @@ return {seq, ts, receivers}
 `
 
 // HEAD CX: compares by form, then stores the next head.
-//   KEYS: [1]=head [2]=gens
+//   KEYS: [1]=head
 //   ARGV: [1]=HeadCx JSON {form,rev?,lease?} [2]=nextJson{state,inc?,config,lease?,ttlMs?}
 const HEAD_CX_LUA = `${HEAD_PRELUDE}
-local head_key, gens_key = KEYS[1], KEYS[2]
+local head_key = KEYS[1]
 local now = tf_now()
 local cx = cjson.decode(ARGV[1])
 local nx = cjson.decode(ARGV[2])
@@ -118,7 +117,6 @@ if nx.ttlMs ~= nil then stored.exp = now + nx.ttlMs end
 local encoded = cjson.encode(stored)
 redis.call('SET', head_key, encoded)
 if nx.ttlMs ~= nil then redis.call('PEXPIRE', head_key, nx.ttlMs) end
-if nx.inc ~= nil then redis.call('SADD', gens_key, nx.inc) end
 return '{"tag":"head","head":' .. encoded .. '}'
 `
 
@@ -172,13 +170,12 @@ return 1
 `
 
 // One atomic room-slot operation; incarnation ids are never reused, so a repeated drop deletes nothing.
-//   KEYS: [1]=gens [2]=invalidation-channel [3]=manifest [4..]=members
+//   KEYS: [1]=invalidation-channel [2]=manifest [3..]=members
 //   ARGV: [1]=inc
 const DROP_GENERATION_LUA = `
-for i = 4, #KEYS do redis.call('UNLINK', KEYS[i]) end
-redis.call('UNLINK', KEYS[3])
-redis.call('PUBLISH', KEYS[2], ARGV[1])
-redis.call('SREM', KEYS[1], ARGV[1])
+for i = 3, #KEYS do redis.call('UNLINK', KEYS[i]) end
+redis.call('UNLINK', KEYS[2])
+redis.call('PUBLISH', KEYS[1], ARGV[1])
 `
 
 // CELLS CX: all mutations or none; success implies the head precondition (open + inc) held at apply
@@ -342,9 +339,9 @@ const REDIS_COMMANDS = {
   headCx: command({
     name: 'tfRoomHeadCx',
     lua: HEAD_CX_LUA,
-    numberOfKeys: 2,
+    numberOfKeys: 1,
     invoke: (prefix, { roomId, cx, next }: { roomId: string; cx: HeadCx; next: HeadNext }) => ({
-      keys: [headKey(prefix, roomId), gensKey(prefix, roomId)],
+      keys: [headKey(prefix, roomId)],
       argv: [JSON.stringify(cx), encodeNext(next)],
     }),
     parse: (reply): HeadCxResult => {
@@ -420,7 +417,6 @@ const REDIS_COMMANDS = {
     numberOfKeys: null,
     invoke: (prefix, { roomId, inc, generationKeys }: RoomInc & { generationKeys: readonly string[] }) => ({
       keys: [
-        gensKey(prefix, roomId),
         generationInvalidationChannel(prefix, roomId, inc),
         generationKeysKey(prefix, roomId, inc),
         ...generationKeys,

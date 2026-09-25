@@ -4,7 +4,6 @@ export {
   broadcastSequenceKey,
   broadcastChannel,
   headKey,
-  gensKey,
   generationKeysKey,
   revKey,
   cellKeyPrefix,
@@ -47,9 +46,6 @@ function roomTag(prefix: string, roomId: string): string {
 }
 function headKey(prefix: string, roomId: string): string {
   return `${roomTag(prefix, roomId)}:head`
-}
-function gensKey(prefix: string, roomId: string): string {
-  return `${roomTag(prefix, roomId)}:gens`
 }
 function genPrefix(prefix: string, roomId: string, inc: string): string {
   return `${roomTag(prefix, roomId)}:g:${inc}`
