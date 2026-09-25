@@ -183,8 +183,8 @@ export const CHANNEL_CLIENT_REPLAY_BUFFER_BINARY_BYTES = 2 * 1024 * 1024
 export const CHANNEL_BUFFER_LIMIT_BYTES = 512 * 1024
 /** Maximum bytes buffered per channel for binary messages sent before a peer connects. */
 export const CHANNEL_BUFFER_LIMIT_BINARY_BYTES = 2 * 1024 * 1024
-/** How long a Broadcast publish waits for this instance's new subscription on its key to be established. */
-export const BROADCAST_ESTABLISH_HOLD_MS = 60_000
+/** How long a Broadcast publish or a Room commit waits for this instance's new subscriptions on its key or lane. */
+export const ESTABLISH_HOLD_MS = 60_000
 
 /** How long a channel waits for a peer to connect after the server→client
  *  HTTP response carrying `channel.client` has been serialized. */

@@ -18,7 +18,7 @@ import { disposeBackend, installBackend } from '../backend/install.js'
 import { MemoryBackend, MemoryBackendState } from '../backend/memory/backend.js'
 import type { SubscriptionAttempt, SubscriptionState } from '../backend/subscription.js'
 import { ChannelClosedError, ChannelOverflowError } from '../channel-errors.js'
-import { BROADCAST_ESTABLISH_HOLD_MS, CHANNEL_BUFFER_LIMIT_BINARY_BYTES } from '../constants.js'
+import { ESTABLISH_HOLD_MS, CHANNEL_BUFFER_LIMIT_BINARY_BYTES } from '../constants.js'
 import { Abort } from '../../shared/Abort.js'
 import { config } from '../../node/server/serverConfig.js'
 
@@ -404,7 +404,7 @@ describe('keyed in-process broadcast', () => {
       const { publish } = await installPendingSubscriptionBackend({ seq: 1, timestamp: 1 })
       new ServerBroadcast({ key: 'broadcast:never-ready' }).subscribe(() => {})
       const publishing = new ServerBroadcast({ key: 'broadcast:never-ready' }).publish('held')
-      await vi.advanceTimersByTimeAsync(BROADCAST_ESTABLISH_HOLD_MS - 1)
+      await vi.advanceTimersByTimeAsync(ESTABLISH_HOLD_MS - 1)
       expect(publish).not.toHaveBeenCalled()
       await vi.advanceTimersByTimeAsync(1)
       await expect(publishing).resolves.toMatchObject({ seq: 1 })

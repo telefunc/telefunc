@@ -2,6 +2,8 @@ export { SubscriptionManager }
 
 import { assert } from '../../utils/assert.js'
 import { createDeferred, type Deferred } from '../../utils/createDeferred.js'
+import { raceTimeout } from '../../utils/raceTimeout.js'
+import { ESTABLISH_HOLD_MS } from '../constants.js'
 import type {
   BackendReceiver,
   BackendSubscription,
@@ -12,6 +14,12 @@ import type {
 } from './subscription.js'
 
 type StateListener = (state: SubscriptionState) => void
+
+/** Sends on one key waiting for this instance's establishing subscriptions, and the bytes they hold per class. */
+type Hold = { readonly established: Promise<void>; sends: number; readonly bytes: Map<string, number> }
+
+/** A held send's bytes, counted in its class; a send its hold can't fit is refused with `overflow()`. */
+type HoldWeight = { class: string; bytes: number; fits(sends: number, bytes: number): boolean; overflow(): Error }
 
 type SubscriptionSlotConfig = {
   binding: SubscriptionBinding
@@ -25,6 +33,7 @@ class SubscriptionManager<Source> {
   /** Slots by source key, then by driver partition. */
   private readonly _routes = new Map<string, Map<string, SubscriptionSlot>>()
   private readonly _cleanups = new Set<Promise<void>>()
+  private readonly _holds = new Map<string, Hold>()
 
   constructor(
     private readonly _driver: SubscriptionDriver<Source>,
@@ -78,19 +87,47 @@ class SubscriptionManager<Source> {
     return this._routes.size > 0
   }
 
-  /** Whether a slot on the source's route is still establishing: never ready, stopped or ended. */
-  hasEstablishing(source: Source): boolean {
-    return this._slotsOf(source).some((slot) => slot.establishing)
+  /** Runs `send` once no subscription on `sources` is establishing, waiting at most the hold time; while `key` is held,
+   *  later sends on it queue behind, in call order. */
+  afterEstablished<T>(
+    key: string,
+    sources: readonly Source[],
+    send: () => T | Promise<T>,
+    weight?: HoldWeight,
+  ): T | Promise<T> {
+    let hold = this._holds.get(key)
+    if (hold === undefined) {
+      if (this._establishingWaits(sources).length === 0) return send()
+      const established = raceTimeout(this._established(sources), ESTABLISH_HOLD_MS, () => {})
+      hold = { established, sends: 0, bytes: new Map() }
+    }
+    const current = hold
+    if (weight !== undefined) {
+      const bytes = (current.bytes.get(weight.class) ?? 0) + weight.bytes
+      if (!weight.fits(current.sends + 1, bytes)) return Promise.reject(weight.overflow())
+      current.bytes.set(weight.class, bytes)
+    }
+    this._holds.set(key, current)
+    current.sends++
+    // Sent inside the reaction, so a send that finds the hold gone can't reach the driver first.
+    return current.established.then(() => {
+      if (--current.sends === 0) this._holds.delete(key)
+      if (weight !== undefined) current.bytes.set(weight.class, (current.bytes.get(weight.class) ?? 0) - weight.bytes)
+      return send()
+    })
   }
 
-  /** Resolves once every slot on the source's route, including ones added meanwhile, is past its establishment. */
-  async established(source: Source): Promise<void> {
-    for (let waits = this._establishingWaits(source); waits.length > 0; waits = this._establishingWaits(source))
+  /** Resolves once no slot on `sources`, including ones added meanwhile, is establishing. */
+  private async _established(sources: readonly Source[]): Promise<void> {
+    for (let waits = this._establishingWaits(sources); waits.length > 0; waits = this._establishingWaits(sources))
       await Promise.all(waits)
   }
 
-  private _establishingWaits(source: Source): Promise<void>[] {
-    return this._slotsOf(source).flatMap((slot) => (slot.establishing ? [slot.established] : []))
+  /** A slot is establishing until it is first ready, stopped or ended. */
+  private _establishingWaits(sources: readonly Source[]): Promise<void>[] {
+    return sources.flatMap((source) =>
+      this._slotsOf(source).flatMap((slot) => (slot.establishing ? [slot.established] : [])),
+    )
   }
 
   private _slotsOf(source: Source): SubscriptionSlot[] {
