@@ -654,9 +654,8 @@ class ServerRoom extends RoomStateView implements Room {
 
   /** @internal A newer config reaching this view through the authority never reached its clients as an event. */
   _applyAuthorityConfig(config: RoomConfigRecord): void {
-    if (!this._state.applyRoomUpdate(config.meta, config.at, config.by)) return
-    const update = { __r: 'update', meta: config.meta, at: config.at, by: config.by } as const
-    for (const stub of this._stubs) stub._relayEvent(update)
+    if (this._state.applyRoomUpdate(config.meta, config.at, config.by))
+      this._relayApplied({ __r: 'update', meta: config.meta, at: config.at, by: config.by })
   }
   /** @internal */
   _applyAuthorityRoster(members: MemberSnapshot[], departing: ReadonlySet<string>): boolean {
@@ -664,9 +663,8 @@ class ServerRoom extends RoomStateView implements Room {
   }
   /** @internal The authority says the room closed; the lane that would have carried `closed` failed. */
   _closeFromAuthority(): void {
-    if (this._state.closed) return
-    this._state.applyClosed()
-    for (const stub of this._stubs) stub._relayEvent({ __r: 'closed' })
+    if (!this._state.applyClosed()) return
+    this._relayApplied({ __r: 'closed' })
     this._teardown()
   }
   private _suppress(from: string): boolean {
