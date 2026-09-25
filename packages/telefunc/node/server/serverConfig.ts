@@ -214,12 +214,12 @@ type ConfigResolved = {
   extensions: TelefuncServerExtension[]
 }
 
-const configState: ConfigUser = getGlobalObject('serverConfig.ts', {
-  stream: {},
-  channel: {},
-  broadcast: {},
-  extensions: [],
+const globalObject = getGlobalObject('serverConfig.ts', {
+  config: { stream: {}, channel: {}, broadcast: {}, extensions: [] } as ConfigUser,
+  /** Transports a server adapter enables: kept apart from the user's config, which a later assignment replaces. */
+  adapterChannelTransports: new Set<ChannelTransports[number]>(),
 })
+const configState = globalObject.config
 
 const configUser: ConfigUser = new Proxy({} as ConfigUser, {
   get(_target, prop) {
@@ -333,7 +333,9 @@ function getServerConfig(): ConfigResolved {
       transport: configState.stream.transport || DEFAULT_STREAM_TRANSPORT,
     },
     channel: {
-      transports: configState.channel.transports ?? [...DEFAULT_SERVER_CHANNEL_TRANSPORTS],
+      transports: configState.channel.transports ?? [
+        ...new Set([...DEFAULT_SERVER_CHANNEL_TRANSPORTS, ...globalObject.adapterChannelTransports]),
+      ],
       reconnectTimeout: configState.channel.reconnectTimeout ?? CHANNEL_RECONNECT_TIMEOUT_MS,
       idleTimeout: configState.channel.idleTimeout ?? CHANNEL_IDLE_TIMEOUT_MS,
       pingInterval: configState.channel.pingInterval ?? CHANNEL_PING_INTERVAL_MS,
@@ -362,13 +364,9 @@ function getServerExtensionTypes() {
   }
 }
 
-/** @internal Push additional transports into the default only if the user hasn't set one. */
+/** @internal Adds transports to the defaults, which apply while the user sets none. */
 function enableChannelTransports(transports: ChannelTransports): void {
-  if (!configState.channel.transports) {
-    configState.channel.transports = [
-      ...new Set([...DEFAULT_SERVER_CHANNEL_TRANSPORTS, ...transports]),
-    ] as ChannelTransports
-  }
+  for (const transport of transports) globalObject.adapterChannelTransports.add(transport)
 }
 
 function applyUserConfig(prop: string | symbol, val: unknown) {
