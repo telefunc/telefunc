@@ -14,7 +14,12 @@ function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
       // The Channel/Chat streaming (SSE) connection surfaces a benign
       // `net::ERR_ALPN_NEGOTIATION_FAILED` browser error; the channel still works
       // (the message flow is asserted by testChannel()/testChat()).
-      log.logText.includes('ERR_ALPN_NEGOTIATION_FAILED'),
+      log.logText.includes('ERR_ALPN_NEGOTIATION_FAILED') ||
+      // Leaving the Chat page while its SSE response is being written makes workerd log the write to the gone
+      // browser; the next test navigates away from it.
+      (log.logSource === 'stderr' &&
+        log.logText.includes('disconnected: ::write') &&
+        log.logText.includes('Broken pipe')),
   })
   testTodolist()
   testChannel()
