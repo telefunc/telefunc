@@ -22,6 +22,7 @@ import { stringify } from '@brillout/json-serializer/stringify'
 import { parse } from '@brillout/json-serializer/parse'
 import { assertUsage } from '../../utils/assert.js'
 import { isPromise } from '../../utils/isPromise.js'
+import { markHandled } from '../../utils/markHandled.js'
 import { ChannelClosedError, ChannelOverflowError } from '../channel-errors.js'
 import { ACK_STATUS, encodePublishText, encodePublishBinary } from '../shared-ws.js'
 import type { BroadcastKind, WirePublishInfo } from '../shared-ws.js'
@@ -288,12 +289,6 @@ const Broadcast = {
   subscribeBinary(key: string, callback: BroadcastBinaryListener): BroadcastUnsubscribe {
     return subscribeRoute({ key, kind: 'binary' }, (payload) => payload, callback)
   },
-}
-
-/** A fire-and-forget publish that fails leaves no unhandled rejection; a caller that awaits it still sees the error. */
-function markHandled<T>(result: T | Promise<T>): T | Promise<T> {
-  if (isPromise(result)) result.catch(() => {})
-  return result
 }
 
 function subscribeRoute<Data>(

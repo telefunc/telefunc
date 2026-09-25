@@ -2,6 +2,7 @@ export { ClientRoom, ClientStandaloneParticipant }
 
 import { createDeferred } from '../../utils/createDeferred.js'
 import { assert, assertUsage } from '../../utils/assert.js'
+import { markHandled } from '../../utils/markHandled.js'
 import type { TELEFUNC_SHIELDS } from '../../node/shared/transformer/generateShield/shield-key.js'
 import { makePublishInfo, type ChannelPublishAck, type ChannelPublishInfo } from '../channel.js'
 import { ClientBroadcast } from '../client/channel.js'
@@ -357,33 +358,42 @@ abstract class ClientParticipantBase extends ParticipantBase {
 
   /** The actual wire publish. Each flavor supplies it; `publish()` wraps it with conflation. */
   protected abstract _sendPublish(data: unknown, retain?: boolean): Promise<ChannelPublishAck>
+  /** The actual wire publish of a framed binary message. */
+  protected abstract _sendPublishBinary(framed: Uint8Array): Promise<ChannelPublishAck>
 
+  // Messaging is often fire-and-forget: a usage error throws, and a failure is a rejection left handled.
   publish(data: unknown, options?: PublishOptions): Promise<ChannelPublishAck> {
     assertKnownOptions(options, ['coalesce', 'retain'], 'publish()')
     const key = options?.coalesce
-    if (key === undefined) return this._sendPublish(data, options?.retain)
-    return new Promise<ChannelPublishAck>((resolve, reject) => {
-      let slot = this._coalescers.get(key)
-      if (!slot) {
-        slot = { sending: false, pending: null }
-        this._coalescers.set(key, slot)
-      }
-      // Supersede any queued value; its waiters ride along and all resolve with the winning send.
-      slot.pending = { data, retain: options?.retain, waiters: [...(slot.pending?.waiters ?? []), { resolve, reject }] }
-      this._drainCoalesce(key)
-    })
+    if (key === undefined) return markHandled(this._sendPublish(data, options?.retain))
+    return markHandled(
+      new Promise<ChannelPublishAck>((resolve, reject) => {
+        let slot = this._coalescers.get(key)
+        if (!slot) {
+          slot = { sending: false, pending: null }
+          this._coalescers.set(key, slot)
+        }
+        // Supersede any queued value; its waiters ride along and all resolve with the winning send.
+        const waiters = [...(slot.pending?.waiters ?? []), { resolve, reject }]
+        slot.pending = { data, retain: options?.retain, waiters }
+        this._drainCoalesce(key)
+      }),
+    )
+  }
+
+  publishBinary(data: Uint8Array, options?: BinaryPublishOptions): Promise<ChannelPublishAck> {
+    return markHandled(this._sendPublishBinary(encodeBinaryFrame(this.id, data, options)))
   }
 
   // Implementation of the overloaded `LocalParticipant.send`; the interface supplies precise returns.
-  async send(to: string | Sender, data: unknown, options?: { ack?: boolean }): Promise<any> {
+  send(to: string | Sender, data: unknown, options?: { ack?: boolean }): Promise<any> {
     assertKnownOptions(options, ['ack'], 'send()')
+    return markHandled(this._sendDm(recipientId(to), data, options?.ack === true))
+  }
+
+  private async _sendDm(to: string, data: unknown, ack: boolean): Promise<unknown> {
     this._assertActive()
-    return await this._requestParticipant({
-      __r: 'req-dm',
-      to: recipientId(to),
-      data,
-      ...(options?.ack ? { ack: true } : {}),
-    })
+    return await this._requestParticipant({ __r: 'req-dm', to, data, ...(ack ? { ack: true } : {}) })
   }
 
   async setMeta(meta: ParticipantMeta): Promise<void> {
@@ -447,9 +457,9 @@ class ClientRoomParticipant extends ClientParticipantBase {
     return await this._room._publishText(this.id, data, retain)
   }
 
-  async publishBinary(data: Uint8Array, options?: BinaryPublishOptions): Promise<ChannelPublishAck> {
+  protected async _sendPublishBinary(framed: Uint8Array): Promise<ChannelPublishAck> {
     this._assertActive()
-    return await this._room._publishBinaryFramed(encodeBinaryFrame(this.id, data, options))
+    return await this._room._publishBinaryFramed(framed)
   }
 
   async leave(): Promise<void> {
@@ -500,11 +510,9 @@ class ClientStandaloneParticipant extends ClientParticipantBase {
     return (await this._request({ __r: 'req-publish', data, ...(retain ? { retain: true } : {}) })) as ChannelPublishAck
   }
 
-  async publishBinary(data: Uint8Array, options?: BinaryPublishOptions): Promise<ChannelPublishAck> {
+  protected async _sendPublishBinary(framed: Uint8Array): Promise<ChannelPublishAck> {
     this._assertActive()
-    return (await this._channel.sendBinary(encodeBinaryFrame(this.id, data, options), {
-      ack: true,
-    })) as ChannelPublishAck
+    return (await this._channel.sendBinary(framed, { ack: true })) as ChannelPublishAck
   }
 
   async leave(): Promise<void> {

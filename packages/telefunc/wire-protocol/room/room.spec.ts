@@ -1480,7 +1480,7 @@ describe('Room public behavior', () => {
   it('validates send() recipients and meta arguments at the API edge', async () => {
     await Room.create('api-edge')
     const member = await Room.join('api-edge')
-    await expect(member.send(null as never, 'hi')).rejects.toThrow('send() recipient should be a participant or its id')
+    expect(() => member.send(null as never, 'hi')).toThrow('send() recipient should be a participant or its id')
     await expect(member.setMeta([] as never)).rejects.toThrow('setMeta() meta should be an object')
     await expect(member.setAttributes('x' as never)).rejects.toThrow('setAttributes() attributes should be an object')
   })
@@ -1625,6 +1625,25 @@ describe('Room public behavior', () => {
     expect(isRoomError(await joining)).toBe(true)
     await subsOf(observer).reconcileAuthority()
     expect([room.count, observer.count]).toEqual([0, 0])
+  })
+  it("leaves no unhandled rejection behind a participant's un-awaited publish, binary publish or DM that fails", async () => {
+    const room = await Room.create('fire-and-forget-participant')
+    const authority = await room.join({ identity: 'authority', hidden: true })
+    const peer = await room.join()
+    await Room.close(room.id)
+    const unhandled: unknown[] = []
+    const onUnhandled = (reason: unknown) => void unhandled.push(reason)
+    process.on('unhandledRejection', onUnhandled)
+    try {
+      authority.publish('tick')
+      authority.publishBinary(new Uint8Array([1]))
+      authority.send(peer.id, 'dm')
+      await new Promise((resolve) => setTimeout(resolve, 10))
+      expect(unhandled).toEqual([])
+      await expect(authority.publishBinary(new Uint8Array([1]))).rejects.toThrow('Participant left the room')
+    } finally {
+      process.off('unhandledRejection', onUnhandled)
+    }
   })
   it('rejects, not as a bug, a join whose client stub closed during the guard', async () => {
     const room = (await Room.create('stub-close-during-guard')) as ServerRoom
@@ -2800,6 +2819,28 @@ describe('client Room lifecycle', () => {
     )
     await expect(publishing).rejects.toThrow('Participant not found (left?)')
     expect(report).not.toHaveBeenCalled()
+  })
+  it("leaves no unhandled rejection behind a client participant's un-awaited publish, binary publish or DM that fails", async () => {
+    const memberId = crypto.randomUUID()
+    const { client } = fakeClient('client-fire-and-forget', {
+      send: async (message: any) => (message.__r === 'req-join' ? { id: memberId, joinedAt: 1 } : undefined),
+    })
+    const me = await client.join()
+    await me.leave()
+    const unhandled: unknown[] = []
+    const onUnhandled = (reason: unknown) => void unhandled.push(reason)
+    process.on('unhandledRejection', onUnhandled)
+    try {
+      me.publish({ cursor: 1 })
+      me.publish({ cursor: 2 }, { coalesce: 'cursor' })
+      me.publishBinary(new Uint8Array([1]))
+      me.send(memberId, 'dm')
+      await new Promise((resolve) => setTimeout(resolve, 10))
+      expect(unhandled).toEqual([])
+      await expect(me.publish({ cursor: 3 })).rejects.toThrow('Participant left the room')
+    } finally {
+      process.off('unhandledRejection', onUnhandled)
+    }
   })
   it('declares nothing while its stub is closing, so an unsubscribe during the close returns normally', () => {
     let closing = false

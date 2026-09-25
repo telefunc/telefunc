@@ -4,6 +4,7 @@ import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
 import type { TELEFUNC_SHIELDS } from '../../../node/shared/transformer/generateShield/shield-key.js'
 import { assert, assertUsage } from '../../../utils/assert.js'
+import { markHandled } from '../../../utils/markHandled.js'
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 import { unrefTimer } from '../../../utils/unrefTimer.js'
 import { createDeferred } from '../../../utils/createDeferred.js'
@@ -893,18 +894,22 @@ class ServerLocalParticipant extends ParticipantBase {
   static isServerLocalParticipant(value: unknown): value is ServerLocalParticipant {
     return value !== null && typeof value === 'object' && SERVER_PARTICIPANT_BRAND in value
   }
-  async publish(data: unknown, options?: PublishOptions): Promise<ChannelPublishAck> {
+  // Messaging is often fire-and-forget: a usage error throws, and a failure is a rejection left handled.
+  publish(data: unknown, options?: PublishOptions): Promise<ChannelPublishAck> {
     assertKnownOptions(options, ['coalesce', 'retain'], 'publish()')
     // Server publish has no uplink to coalesce, but retain semantics remain identical.
-    this._assertActive()
-    return await this._room._publishText(this.id, data, options?.retain)
+    return markHandled(this._publishText(data, options?.retain))
   }
-  async publishBinary(data: Uint8Array, options?: BinaryPublishOptions): Promise<ChannelPublishAck> {
+  publishBinary(data: Uint8Array, options?: BinaryPublishOptions): Promise<ChannelPublishAck> {
     const framed = encodeBinaryFrame(this.id, data, options)
     // Local holders get exactly what remote ones decode, not the caller's objects.
     const frame = decodeBinaryFrame(framed)
     assert(frame !== null)
-    return await this._publishFrame(frame, framed)
+    return markHandled(this._publishFrame(frame, framed))
+  }
+  private async _publishText(data: unknown, retain: boolean | undefined): Promise<ChannelPublishAck> {
+    this._assertActive()
+    return await this._room._publishText(this.id, data, retain)
   }
   /** @internal */
   async _publishFrame(frame: BinaryFrame, framed: Uint8Array): Promise<ChannelPublishAck> {
@@ -924,10 +929,13 @@ class ServerLocalParticipant extends ParticipantBase {
   _releaseHolder(): Promise<void> {
     return this._room._removeDepartedMember(this.id)
   }
-  async send(to: string | Sender, data: unknown, options?: { ack?: boolean }): Promise<any> {
+  send(to: string | Sender, data: unknown, options?: { ack?: boolean }): Promise<any> {
     assertKnownOptions(options, ['ack'], 'send()')
+    return markHandled(this._sendDm(recipientId(to), data, options?.ack === true))
+  }
+  private async _sendDm(to: string, data: unknown, ack: boolean): Promise<unknown> {
     this._assertActive()
-    return await this._room._sendDm(this.id, recipientId(to), data, options?.ack === true)
+    return await this._room._sendDm(this.id, to, data, ack)
   }
   async setMeta(meta: ParticipantMeta): Promise<void> {
     await this._setMeta(meta)
