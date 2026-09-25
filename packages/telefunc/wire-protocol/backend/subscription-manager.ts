@@ -195,7 +195,6 @@ class SubscriptionSlot {
     if (state === 'ready') return this._becameReady()
     if (state === 'closed') return this._ended(reason)
     this._markUnavailable(state)
-    if (state === 'lost') this._config.reportError(new Error(`Backend subscription lost: ${this._config.sourceKey}`))
   }
 
   private _becameReady(): void {

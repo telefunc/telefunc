@@ -122,7 +122,8 @@ describe('shared subscription supervision', () => {
   it('surfaces readiness, recovery and terminal failure as state changes', async () => {
     const raw = new ControlledDriver()
     raw.plan(() => new ControlledAttempt())
-    const manager = new SubscriptionManager(raw, vi.fn(), String)
+    const report = vi.fn()
+    const manager = new SubscriptionManager(raw, report, String)
     const subscription = manager.subscribe('async-ready', () => {})
     const states: SubscriptionState[] = []
     subscription.onStateChange((state) => states.push(state))
@@ -130,6 +131,8 @@ describe('shared subscription supervision', () => {
     await subscription.ready
     expect(states).toEqual(['ready'])
     raw.opens[0]!.attempt.lose()
+    // A driver reports its own outage, once, however many subscriptions it takes down.
+    expect(report).not.toHaveBeenCalled()
     const recovered = subscription.ready
     raw.opens[0]!.attempt.establish()
     await recovered

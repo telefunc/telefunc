@@ -822,8 +822,9 @@ describe('cloudflare broadcast routing', () => {
     await replacement.unsubscribe()
   })
 
-  it('surfaces presence refresh loss and recovery through subscription state', async () => {
+  it('surfaces presence refresh loss and recovery through subscription state, and reports the loss once', async () => {
     vi.useFakeTimers()
+    const report = vi.spyOn(console, 'error').mockImplementation(() => {})
     let presenceCalls = 0
     const transport = createTransport(
       createBasicBinding({
@@ -845,6 +846,8 @@ describe('cloudflare broadcast routing', () => {
       await vi.advanceTimersByTimeAsync(30_000)
       expect(subscription.state()).toBe('ready')
       expect(states).toEqual(['lost', 'ready'])
+      expect(report).toHaveBeenCalledOnce()
+      expect(report.mock.calls[0]![0]).toMatchObject({ cause: { message: 'presence refresh rejected' } })
     } finally {
       stopObserving()
       await subscription.unsubscribe()

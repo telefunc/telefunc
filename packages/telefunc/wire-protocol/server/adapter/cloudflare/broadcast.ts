@@ -107,9 +107,10 @@ class MemberRoute {
     this.#setup.reject(error)
   }
 
-  losePresence(): void {
+  losePresence(error: unknown): void {
     if (this.state !== 'ready') return
     this.state = 'lost'
+    console.error(new Error(`Cloudflare Broadcast presence for '${this.route.key}' lost`, { cause: error }))
     this.#notifyPresenceState('lost')
   }
 
@@ -335,7 +336,7 @@ class CloudflareBroadcastMember {
     memberRoute.refreshTimer = setInterval(() => {
       void this.#writePresence(memberRoute.route, true).then(
         () => memberRoute.acknowledgePresence(),
-        () => memberRoute.losePresence(),
+        (error: unknown) => memberRoute.losePresence(error),
       )
     }, PRESENCE_REFRESH_INTERVAL_MS)
   }
