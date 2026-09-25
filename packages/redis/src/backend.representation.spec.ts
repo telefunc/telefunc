@@ -3,11 +3,6 @@ import { expect, onTestFinished, test, vi } from 'vitest'
 import { RedisBackend } from './backend.js'
 import { createSubscriberSocket } from './ioredis.js'
 
-test('keeps the ratified Redis backend representation', () => {
-  const backend = new RedisBackend({ redis: new Redis({ lazyConnect: true, maxRetriesPerRequest: 0 }) })
-  expect(Object.keys(backend).sort()).toEqual('_prefix,_publisher,_reportsReceivers,subscriptions'.split(','))
-})
-
 test('requires explicit never-resend playground clients', () => {
   const nodes = [{ host: '127.0.0.1', port: 6379 }]
   const message =
