@@ -1,6 +1,6 @@
 # `@telefunc/redis`
 
-Redis-backed broadcast fan-out and Room state for Telefunc — one setup call makes both work across instances.
+Redis-backed broadcast fan-out and Room state for Telefunc: one setup call makes both work across instances.
 
 ## Install
 
@@ -33,14 +33,11 @@ ioredis applies `keyPrefix` to commands but not to Pub/Sub channels; use `instal
 
 ## Room storage
 
-The installed backend accepts either an ioredis `Redis` or `Cluster` client. Cluster keeps each room's atomic records and generation manifest in one hash slot and follows `MOVED`/`ASK`; replica or custom routing is rejected because Room reads are strongly consistent. Head expiry uses keyed Lua `TIME` from the room-slot master.
+`installRedis()` accepts an ioredis `Redis` or `Cluster` client. On a Cluster, a room's keys share one hash slot, and replica or custom read routing is rejected, since Room reads must be consistent.
 
-Redis Cluster delivery stays at-most-once during resharding. While a slot changes owner, an old-master frame can arrive after a newer frame or generation invalidation; Telefunc drops that late lower sequence (and ignores frames after invalidation).
-Callbacks never move backward, but the in-flight frame is lost rather than replayed; a frame arriving before invalidation may still be handed off after cleanup starts. Commands follow pre-execution `MOVED`/`ASK` replies but never resend after connection loss. Keep master clocks synchronized: expiries use the new owner's clock.
+All subscriptions share one subscriber connection. When it drops, they resume on a fresh one; frames published in between are lost. Delivery stays at-most-once while a Cluster reshards: a frame that arrives after a newer one is dropped, never replayed, so callbacks never go back in order. Keep master clocks synchronized: expiries use the clock of the master that owns the room's slot.
 
-All subscriptions share one subscriber connection on a live master. When it drops, they resume on a fresh connection; frames published in between are lost.
-
-The Cluster `receivers` capability is `none`: cluster-wide Pub/Sub can reach another master's subscriber, but the executing master's `PUBLISH` count cannot report that global receiver total.
+On a Cluster, a publish's `receivers` is omitted: a master's `PUBLISH` counts only its own subscribers, so it can't prove that nobody is subscribed.
 
 ```ts
 import { Cluster } from 'ioredis'
