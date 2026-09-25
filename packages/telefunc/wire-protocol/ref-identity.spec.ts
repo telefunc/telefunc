@@ -11,7 +11,7 @@ import { serializeTelefunctionResult } from '../node/server/runTelefunc/serializ
 import { parseHttpRequest } from '../node/server/runTelefunc/parseHttpRequest.js'
 import { createRequestContext } from '../node/server/context/requestContext.js'
 import { parseResponse } from './client/response/parse.js'
-import { STREAM_TRANSPORT } from './constants.js'
+import { STREAM_TRANSPORT, type StreamTransport } from './constants.js'
 import { config, getServerConfig } from '../node/server/serverConfig.js'
 import type { AbortError } from '../shared/Abort.js'
 import type {
@@ -425,8 +425,12 @@ async function roundTrip(
   opts: {
     serverExtensions?: ReplacerType<TypeContract, ServerReplacerContext>[]
     clientExtensions?: ReviverType<TypeContract, ClientReviverContext>[]
+    streamTransport?: StreamTransport
+    /** The network between the server's body and the client's. */
+    network?: TransformStream<Uint8Array<ArrayBuffer>, Uint8Array<ArrayBuffer>>
   } = {},
 ) {
+  const streamTransport = opts.streamTransport ?? STREAM_TRANSPORT.BINARY_INLINE
   const extensionName = `ref-identity-spec-${nextExtensionId++}`
   if (opts.serverExtensions) {
     config.extensions.push({ name: extensionName, responseTypes: opts.serverExtensions })
@@ -441,17 +445,21 @@ async function roundTrip(
       context: {},
       requestContext,
       abortSignal: requestContext.abortSignal,
-      streamTransport: STREAM_TRANSPORT.BINARY_INLINE,
+      streamTransport,
       useNodeStream: false,
       serverConfig: {
         log: { shieldErrors: { dev: false, prod: false } },
       },
     })
+    const body = result.body as ReadableStream<Uint8Array<ArrayBuffer>>
     const response =
       result.type === 'text'
         ? new Response(result.body)
-        : new Response(result.body as ReadableStream<Uint8Array<ArrayBuffer>>, {
-            headers: { 'content-type': 'application/octet-stream' },
+        : new Response(opts.network ? body.pipeThrough(opts.network) : body, {
+            headers: {
+              'content-type':
+                streamTransport === STREAM_TRANSPORT.SSE_INLINE ? 'text/event-stream' : 'application/octet-stream',
+            },
           })
     const abortController = new AbortController()
     const parsed = (await parseResponse(
@@ -630,6 +638,43 @@ describe('reference identity — full pipeline', () => {
     retTyped.b.cancel()
     expect(await retTyped.b.readNextChunk()).toBe(null)
   })
+
+  test.each([STREAM_TRANSPORT.BINARY_INLINE, STREAM_TRANSPORT.SSE_INLINE])(
+    '%s: a body that drops after one inline stream finished leaves no unhandled rejection',
+    async (streamTransport) => {
+      const encode = (text: string) => new TextEncoder().encode(text) as Uint8Array<ArrayBuffer>
+      const unhandled: unknown[] = []
+      const onUnhandled = (reason: unknown) => unhandled.push(reason)
+      process.on('unhandledRejection', onUnhandled)
+      try {
+        let drop!: (error: Error) => void
+        const network = new TransformStream<Uint8Array<ArrayBuffer>, Uint8Array<ArrayBuffer>>({
+          start: (controller) => void (drop = (error) => controller.error(error)),
+        })
+        const a = new ReadableStream<Uint8Array<ArrayBuffer>>({
+          start(controller) {
+            controller.enqueue(encode('a1'))
+            controller.close()
+          },
+        })
+        const b = new ReadableStream<Uint8Array<ArrayBuffer>>({
+          start: (controller) => controller.enqueue(encode('b1')),
+        })
+        const { ret } = await roundTrip({ a, b }, { streamTransport, network })
+        const streams = ret as { a: ReadableStream<Uint8Array>; b: ReadableStream<Uint8Array> }
+        const readerA = streams.a.getReader()
+        while (!(await readerA.read()).done);
+        const readerB = streams.b.getReader()
+        await readerB.read()
+        drop(new TypeError('network error'))
+        await expect(readerB.read()).rejects.toThrow('network error')
+        await new Promise((resolve) => setTimeout(resolve, 0))
+        expect(unhandled).toEqual([])
+      } finally {
+        process.off('unhandledRejection', onUnhandled)
+      }
+    },
+  )
 
   test('a tee() branch keeps a returned stream open after the stream itself is dropped', async () => {
     let controller!: ReadableStreamDefaultController<Uint8Array<ArrayBuffer>>
