@@ -1,8 +1,9 @@
-export { ChannelMux, getChannelMux }
+export { ChannelMux, getChannelMux, CHANNEL_MUX }
 export type { ReconcileOutcome, ServerTransport }
 
 import { assert } from '../../utils/assert.js'
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
+import { getRawContext } from '../../node/server/context/context.js'
 import { getServerConfig } from '../../node/server/serverConfig.js'
 import { unrefTimer } from '../../utils/unrefTimer.js'
 import {
@@ -27,7 +28,14 @@ import {
   isConnCtrlTag,
   peekTag,
 } from '../shared-ws.js'
-import type { BarrierPayload, ChannelFrame, PreparePayload, ReconcilePayload, ReconciledPayload } from '../shared-ws.js'
+import type {
+  BarrierPayload,
+  ChannelFrame,
+  PreparePayload,
+  ReconcileOpenEntry,
+  ReconcilePayload,
+  ReconciledPayload,
+} from '../shared-ws.js'
 import { IndexedPeer, type PeerSender } from './IndexedPeer.js'
 import type { ServerChannel } from './channel.js'
 
@@ -38,8 +46,6 @@ type Wire = unknown
 // Single-instance kernel: owns channels, sessions, per-connection runtime. Transports talk
 // to this class via `onConnectionOpen` and from then on identify connections by object
 // identity. Multi-instance deployments rely on sticky sessions at the load balancer.
-
-type SendFn = (frame: Uint8Array<ArrayBuffer>, onCommit?: () => void) => void
 
 type ServerTransport<TConnection> = {
   getSessionId(connection: TConnection): string | undefined
@@ -98,7 +104,7 @@ const DETACH_REASON = {
 }
 type DetachReason = (typeof DETACH_REASON)[keyof typeof DETACH_REASON]
 
-type ChannelHandle = { channel: ServerChannel; ix: number }
+type ChannelHandle = { channel: ServerChannel; ix: number; peer: IndexedPeer }
 type SessionFinalizer = () => void
 
 type ConnectionState = {
@@ -116,10 +122,15 @@ type ConnectionState = {
 type ConnectionEntry = {
   state: ConnectionState
   transport: ServerTransport<unknown>
+  /** One per wire: the peers of every reconcile on this wire share it. */
+  sender: PeerSender
 }
 
+/** The context key of a server that hosts its own channels: a Cloudflare session DO's end with it. */
+const CHANNEL_MUX = Symbol('telefunc.channelMux')
+
 function getChannelMux(): ChannelMux {
-  return getGlobals().mux
+  return (getRawContext()?.[CHANNEL_MUX] as ChannelMux | undefined) ?? getGlobals().mux
 }
 
 class ChannelMux {
@@ -191,6 +202,7 @@ class ChannelMux {
         recvBacklogFrames: 0,
       },
       transport: transport as ServerTransport<unknown>,
+      sender: { send: (frame, onCommit) => this.send(connection, frame as Uint8Array<ArrayBuffer>, onCommit) },
     })
     const connId = transport.getConnId(connection)
     if (connId !== null) this.connectionsByConnId.set(connId, connection)
@@ -491,9 +503,8 @@ class ChannelMux {
     const finalizeUpgrade = isBarrier && ctrl.sessionId ? (this.sessionFinalizers.get(ctrl.sessionId) ?? null) : null
     state.reconciling = true
     this.resetPingTimer(connection)
-    const send: SendFn = (frame, onCommit) => this.send(connection, frame, onCommit)
     const newSessionId = crypto.randomUUID()
-    const openList = await this.reconcileSession(ctrl.sessionId, newSessionId, ctrl.open, send)
+    const openList = await this.reconcileSession(ctrl.sessionId, newSessionId, ctrl.open, entry.sender)
 
     // The connection may have closed during the await. The client never received this
     // session's id (`reconciled` was never sent), so no future reconcile can reference it —
@@ -518,9 +529,9 @@ class ChannelMux {
     prevSessionId: string | undefined,
     newSessionId: string,
     open: ReconcilePayload['open'],
-    send: SendFn,
+    sender: PeerSender,
   ): Promise<ReconciledPayload['open']> {
-    const handles = (await Promise.all(open.map((entry) => this.attach(entry, send)))).filter(
+    const handles = (await Promise.all(open.map((entry) => this.attach(entry, sender)))).filter(
       (h): h is ChannelHandle => h !== null,
     )
 
@@ -539,27 +550,27 @@ class ChannelMux {
 
   /** First reconcile (`initial:true`) races channel registration against `connectTtl`; later
    *  reconciles fail fast if the channel is gone. */
-  private async attach(entry: ReconcilePayload['open'][number], send: SendFn): Promise<ChannelHandle | null> {
+  private async attach(entry: ReconcilePayload['open'][number], sender: PeerSender): Promise<ChannelHandle | null> {
     const existing = this.channels.get(entry.id)
-    if (existing) return this.attachChannel(existing, entry.ix, entry.lastSeq, send)
+    if (existing) return this.attachChannel(existing, entry, sender)
     if (!entry.initial) return null
     return new Promise<ChannelHandle | null>((resolve) => {
       this.waitForChannelRegistration(entry.id, this.options.connectTtl, (channel) => {
-        resolve(channel ? this.attachChannel(channel, entry.ix, entry.lastSeq, send) : null)
+        resolve(channel ? this.attachChannel(channel, entry, sender) : null)
       })
     })
   }
 
   /** Drains replay frames missed since `lastSeq` (sends are sync — see `send`), then
    *  attaches an `IndexedPeer`. Returns null if the channel already shut down. */
-  private attachChannel(channel: ServerChannel, ix: number, lastSeq: number, send: SendFn): ChannelHandle | null {
+  private attachChannel(channel: ServerChannel, entry: ReconcileOpenEntry, sender: PeerSender): ChannelHandle | null {
     if (channel._didShutdown) return null
     const replay = channel._replayBuffer
     assert(replay !== null, `ServerChannel "${channel.id}" attached without a replay buffer`)
-    for (const frame of replay.getAfter(lastSeq)) send(frame as Uint8Array<ArrayBuffer>)
-    const sender: PeerSender = { send }
-    channel._attachPeer(new IndexedPeer(sender, ix, replay))
-    return { channel, ix }
+    for (const frame of replay.getAfter(entry.lastSeq)) sender.send(frame)
+    const peer = new IndexedPeer(sender, entry.ix, replay)
+    channel._attachPeer(peer, entry)
+    return { channel, ix: entry.ix, peer }
   }
 
   private waitForChannelRegistration(
@@ -600,7 +611,7 @@ class ChannelMux {
         h.channel._onPeerClose()
         return
       case DETACH_REASON.TRANSIENT:
-        h.channel._onPeerDisconnect(getServerConfig().channel.reconnectTimeout)
+        h.channel._onPeerDisconnect(h.peer, getServerConfig().channel.reconnectTimeout)
         return
       case DETACH_REASON.RECOVERY_FAILED:
         h.channel._onPeerRecoveryFailure()
@@ -613,9 +624,10 @@ class ChannelMux {
   /** Sole server→client send path; sync so wire order = call order. Per-channel
    *  byte+msg credit (see `flow-control/`) bounds queue growth. */
   private send(connection: Wire, frame: Uint8Array<ArrayBuffer>, onCommit?: () => void): void {
+    // Stored for replay even when the wire is gone, as a frame sent into a silently dead wire is.
+    onCommit?.()
     const entry = this.connectionEntries.get(connection)
     if (!entry) return
-    onCommit?.()
     entry.transport.sendNow(connection, frame)
   }
 
@@ -646,7 +658,6 @@ class ChannelMux {
         // Transient close so each channel gets its `reconnectTimeout` grace via
         // `_onPeerDisconnect`. Connection-level state is rebuilt by the next reconcile.
         transport.terminateConnection(connection)
-        state.terminatePermanently = false
       }, this.options.pingDeadline),
     )
   }

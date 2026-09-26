@@ -1,4 +1,4 @@
-export { Channel, ServerChannel, SERVER_CHANNEL_BRAND }
+export { Channel, ServerChannel, SERVER_CHANNEL_BRAND, parsePeerText, reportServerChannelError, reconnectWindow }
 export { ChannelClosedError, ChannelOverflowError } from '../channel-errors.js'
 export { NetworkError } from '../../shared/NetworkError.js'
 
@@ -40,7 +40,14 @@ import { ReplayBuffer } from '../replay-buffer.js'
 import { getServerConfig } from '../../node/server/serverConfig.js'
 import { assert } from '../../utils/assert.js'
 import { ACK_STATUS, ProtocolViolationError, TAG, isChannelCtrlTag } from '../shared-ws.js'
-import type { AckResultStatus, ChannelCtrlFrame, ChannelDataFrame, ChannelFrame } from '../shared-ws.js'
+import type {
+  AckResultStatus,
+  BroadcastKind,
+  ReattachState,
+  ChannelCtrlFrame,
+  ChannelDataFrame,
+  ChannelFrame,
+} from '../shared-ws.js'
 
 /** Peer-authored JSON: a parse failure is the peer's, so it surfaces as a protocol violation. */
 function parsePeerText(text: string): unknown {
@@ -315,26 +322,24 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this._didRegister = true
     // Allocate the replay buffer up-front: registration is the moment the channel
     // becomes addressable on the wire, so a peer can attach immediately after this
-    // returns. Its TTL covers a full ping-deadline + reconnect-timeout window.
+    // returns. Its TTL covers a full reconnect window.
     const c = getServerConfig().channel
-    const pingDeadline = Math.max(c.pingInterval, CHANNEL_PING_INTERVAL_MIN_MS) * 2
-    this._replayBuffer = new ReplayBuffer(
-      c.serverReplayBuffer,
-      pingDeadline + c.reconnectTimeout + 1_000,
-      c.serverReplayBufferBinary,
-    )
+    this._replayBuffer = new ReplayBuffer(c.serverReplayBuffer, reconnectWindow() + 1_000, c.serverReplayBufferBinary)
     this._clearTimer('_ttlTimer')
+    // Its client reconciles it only after the reconcile it has in flight, which the server holds up to connectTtl for a
+    // channel not registered yet.
     this._ttlTimer = unrefTimer(
       setTimeout(() => {
         this._ttlTimer = null
         this._shutdown(
           new NetworkError('Channel timed out: no client connected within TTL after response was sent', true),
         )
-      }, c.connectTtl),
+      }, 2 * c.connectTtl),
     )
   }
 
-  _attachPeer(peer: IndexedPeer): void {
+  /** The peer's RECONCILE declarations apply before `onOpen` fires, through the same hooks as its frames. */
+  _attachPeer(peer: IndexedPeer, state?: ReattachState): void {
     if (this._didShutdown) return
     this._clearTimer('_ttlTimer')
     this._clearTimer('_reconnectTimer')
@@ -358,6 +363,11 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       peer.sendAckRes(ack.ackedSeq, ack.result, ack.status)
     }
     this._pendingAckRes.length = 0
+    // After the swap, so what they send reaches this peer even if the previous one never detached.
+    if (state?.broadcast) {
+      this._onPeerSubscription('text', state.broadcast.text)
+      this._onPeerSubscription('binary', state.broadcast.binary)
+    }
     if (this._pendingCloseAck) peer.sendCloseAck()
     if (this._awaitingCloseAck) peer.sendCloseRequest(Math.max(0, this._closeDeadline - Date.now()))
     if (this._isClosed) {
@@ -382,8 +392,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this._dispatchDataFrame(data)
   }
 
-  /** @internal — Tag-keyed data-frame switch. Subclasses (`ServerBroadcast`) override
-   *  to handle their extra tags and fall back to `super` for the common cases. */
+  /** @internal Tag-keyed data-frame switch. */
   protected _dispatchDataFrame(frame: ChannelDataFrame): void {
     switch (frame.tag) {
       case TAG.TEXT:
@@ -400,6 +409,12 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         return
       case TAG.ACK_RES:
         this._onPeerAckRes(frame.ackedSeq, frame.text, frame.status)
+        return
+      case TAG.PUBLISH_ACK_REQ:
+        void this._onPeerPublishAckReqMessage(frame.text, frame.seq)
+        return
+      case TAG.PUBLISH_BINARY_ACK_REQ:
+        void this._onPeerPublishBinaryAckReqMessage(frame.data, frame.seq)
         return
       case TAG.PUBLISH:
       case TAG.PUBLISH_BINARY:
@@ -429,9 +444,20 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       case TAG.BDP_PING_ACK:
         this._flow.onPingAck()
         return
-      // BROADCAST_SUB / BROADCAST_UNSUB: dropped on plain channels; ServerBroadcast overrides.
+      case TAG.BROADCAST_SUB:
+      case TAG.BROADCAST_UNSUB:
+        this._onPeerSubscription(frame.binary ? 'binary' : 'text', frame.tag === TAG.BROADCAST_SUB)
     }
   }
+
+  // Broadcasts and Room stubs take publishes and subscriptions; a plain channel drops them.
+  _onPeerPublishAckReqMessage(_text: string, _seq: number): Promise<void> {
+    return Promise.resolve()
+  }
+  _onPeerPublishBinaryAckReqMessage(_data: Uint8Array, _seq: number): Promise<void> {
+    return Promise.resolve()
+  }
+  _onPeerSubscription(_kind: BroadcastKind, _on: boolean): void {}
 
   _onPeerMessage(text: string, bytes: number): void {
     const t0 = performance.now()
@@ -450,7 +476,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         return
       }
       const pending: Promise<unknown>[] = []
-      for (const cb of this._listeners) {
+      for (const cb of [...this._listeners]) {
         try {
           const result = cb(data)
           if (isPromise(result)) {
@@ -486,7 +512,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     try {
       this._flow.onReceived(bytes)
       const pending: Promise<unknown>[] = []
-      for (const cb of this._binaryListeners) {
+      for (const cb of [...this._binaryListeners]) {
         try {
           const result = cb(data)
           if (isPromise(result)) {
@@ -569,8 +595,9 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this._notifyCloseProgress()
   }
 
-  _onPeerDisconnect(reconnectTimeout: number): void {
-    if (this._didShutdown || !this._peer) return
+  /** @internal `peer`'s wire went away. A channel a later reconcile moved to another wire keeps that one. */
+  _onPeerDisconnect(peer: IndexedPeer, reconnectTimeout: number): void {
+    if (this._didShutdown || this._peer?.sender !== peer.sender) return
     this._peer = null
     this._reconnectTimer = unrefTimer(
       setTimeout(() => {
@@ -590,6 +617,18 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     if (this._didShutdown) return
     this._peer = null
     this._shutdown()
+  }
+
+  /** @internal A PUBLISH frame to the peer, buffered until it attaches. */
+  _sendPublish(wireText: string): void {
+    if (this._peer) this._peer.sendPublish(wireText)
+    else this._prePeerBuffer.pushPublish(wireText)
+  }
+
+  /** @internal A binary PUBLISH frame to the peer, buffered until it attaches. */
+  _sendPublishBinary(wireData: Uint8Array): void {
+    if (this._peer) this._peer.sendPublishBinary(wireData)
+    else this._prePeerBuffer.pushPublishBinary(wireData)
   }
 
   /** Send an ack response, buffering it if the peer is currently disconnected. */
@@ -669,7 +708,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       }
     }
     let lastResult: unknown
-    for (const cb of this._listeners) {
+    for (const cb of [...this._listeners]) {
       try {
         lastResult = await cb(data)
       } catch (err) {
@@ -687,7 +726,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       return
     }
     let lastResult: unknown
-    for (const cb of this._binaryListeners) {
+    for (const cb of [...this._binaryListeners]) {
       try {
         lastResult = await cb(data)
       } catch (err) {
@@ -808,6 +847,12 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
 
 function reportServerChannelError(err: unknown): void {
   handleTelefunctionBug(err instanceof Error ? err : new Error(String(err)))
+}
+
+/** How long a gone client is still held: until its drop is noticed at the ping deadline, then for `reconnectTimeout`. */
+function reconnectWindow(): number {
+  const c = getServerConfig().channel
+  return Math.max(c.pingInterval, CHANNEL_PING_INTERVAL_MIN_MS) * 2 + c.reconnectTimeout
 }
 
 function normalizeCloseTimeout(timeout: number | undefined): number {

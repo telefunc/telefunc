@@ -6,6 +6,7 @@ import {
   decode,
   decodeClientFrame,
   encode,
+  encodePublishBinary,
   isChannelCtrlTag,
   isConnCtrlTag,
   type BarrierPayload,
@@ -54,7 +55,7 @@ describe('upgrade wire vocabulary', () => {
     expect(() => decode(reserved)).toThrow()
   })
 
-  test('a BARRIER round-trips at one entry and at the largest shape the caps admit', () => {
+  test('a BARRIER round-trips at one entry, and it and a RECONCILE at the largest shape the caps admit', () => {
     const one: BarrierPayload = { sessionId: 'sess-0', upgradeId: 'upg-1', open: goodOpen }
     expect(decode(encode.barrier(one))).toEqual({ tag: TAG.BARRIER, payload: one })
     const open = Array.from({ length: MAX_CHANNELS_PER_CONNECTION }, (_, ix) => ({
@@ -62,6 +63,7 @@ describe('upgrade wire vocabulary', () => {
       ix: 0xffff - ix,
       lastSeq: 0xffffffff,
       initial: true as const,
+      broadcast: { text: false, binary: false },
     }))
     const max: BarrierPayload = { sessionId: 'x'.repeat(64), upgradeId: 'y'.repeat(64), open }
     const encoded = encode.barrier(max)
@@ -70,6 +72,9 @@ describe('upgrade wire vocabulary', () => {
     expect(encoded.byteLength).toBeGreaterThan(MAX_CHANNELS_PER_CONNECTION * UPGRADE_MAX_ID_BYTES)
     expect(encoded.byteLength).toBeLessThanOrEqual(WIRE_MAX_CONN_CTRL_FRAME_BYTES)
     expect(decodeClientFrame(encoded, WIRE_MAX_CONN_CTRL_FRAME_BYTES)).toEqual({ tag: TAG.BARRIER, payload: max })
+    const reconcile: ReconcilePayload = { sessionId: max.sessionId, open }
+    const decoded = decodeClientFrame(encode.reconcile(reconcile), WIRE_MAX_CONN_CTRL_FRAME_BYTES)
+    expect(decoded).toEqual({ tag: TAG.RECONCILE, payload: reconcile })
   })
 
   test('a RECONCILED round-trips the commit upgradeId', () => {
@@ -151,6 +156,17 @@ describe('decodeClientFrame — hostile schemas', () => {
     expect(() => clientFrame(hostile(encode.reconcile, payload))).toThrow(ProtocolViolationError)
   })
 
+  test("a RECONCILE entry's broadcast subscriptions must be two booleans", () => {
+    const entry = { id: 'A', ix: 0, lastSeq: 0 }
+    const legal = encode.reconcile({ open: [{ ...entry, broadcast: { text: true, binary: false } }] })
+    expect(clientFrame(legal)).toMatchObject({ payload: { open: [{ broadcast: { text: true, binary: false } }] } })
+    for (const broadcast of [null, true, { text: true }, { text: 'yes', binary: false }]) {
+      expect(() => clientFrame(hostile(encode.reconcile, { open: [{ ...entry, broadcast }] }))).toThrow(
+        ProtocolViolationError,
+      )
+    }
+  })
+
   test('truncated bytes, unparsable JSON and an unknown tag are all violations', () => {
     expect(() => clientFrame(new Uint8Array(2) as Uint8Array<ArrayBuffer>)).toThrow(ProtocolViolationError)
     const junk = encode.text(0, 'not json', 1)
@@ -176,6 +192,12 @@ describe('decodeClientFrame — direction', () => {
   ]
   test.each(serverOnly)('a client-sent %s is refused', (_name, frame) => {
     expect(() => clientFrame(frame)).toThrow(ProtocolViolationError)
+  })
+
+  test('a server-only frame is refused before its payload is parsed', () => {
+    const publish = encodePublishBinary(new Uint8Array(), { seq: 1, timestamp: 1 })
+    const truncatedOrdering = encode.publishBinary(0, publish.subarray(0, publish.byteLength - 1), 1)
+    expect(() => clientFrame(truncatedOrdering)).toThrow(ProtocolViolationError)
   })
 
   const clientLegal: [string, Uint8Array<ArrayBuffer>][] = [

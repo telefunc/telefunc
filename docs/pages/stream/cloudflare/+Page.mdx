@@ -33,6 +33,9 @@ export default {
 ```jsonc
 // wrangler.jsonc
 {
+  // Required: Telefunc finds a subscription's session through AsyncLocalStorage (`nodejs_compat` works too).
+  // spellcheck-ignore  nodejs_als is Cloudflare's AsyncLocalStorage compatibility flag
+  "compatibility_flags": ["nodejs_als"],
   "durable_objects": {
     "bindings": [
       { "name": "TelefuncDurableObject", "class_name": "TelefuncDurableObject" }
@@ -42,7 +45,7 @@ export default {
     { "binding": "TelefuncKV", "id": "your-kv-namespace-id" }
   ],
   "migrations": [
-    { "tag": "v1", "new_classes": ["TelefuncDurableObject"] }
+    { "tag": "v1", "new_sqlite_classes": ["TelefuncDurableObject"] }
   ]
 }
 ```
@@ -52,9 +55,11 @@ export default {
 > - **Durable Objects** provide stateful compute: each channel lives on a Durable Object, which holds the connection and its state.
 > - **KV** provides shared storage: it's how stateless workers find the Durable Object that holds the state, no matter which worker a request lands on.
 >
-> Both bindings are required whenever you use `telefunc/cloudflare`. If your app doesn't use `Channel` or `BroadcastChannel`, there's no state to keep — you can skip both bindings and use <Link href="/serve"><code>serve()</code></Link> instead.
+> The Durable Object and KV bindings are required whenever you use `telefunc/cloudflare`. If your app doesn't use `Channel`, `Broadcast`, or `Room`, you can skip these bindings and use <Link href="/serve"><code>serve()</code></Link> instead.
 >
 > See <Link href="#architecture" /> for implementation details.
+
+> **Upgrading from a key-value-backed `TelefuncDurableObject`:** earlier releases declared it with `new_classes`. Cloudflare can't change an existing class's storage backend, so [re-provision it](https://developers.cloudflare.com/durable-objects/reference/durable-objects-migrations/): delete the class, then declare it again as a SQLite class. Its state is lost in between; Broadcast sequence numbers restart at 1.
 
 ## Context
 
@@ -75,9 +80,7 @@ See: <Link href="/Telefunc" />.
 
 Telefunc uses [Durable Objects](https://developers.cloudflare.com/durable-objects/) for <Link href="/channel">channel</Link> state and <Link href="/channel#broadcast">broadcast</Link> fan-out. Channel state is in-memory JavaScript (closures, callbacks, local variables), so it must live on the same Durable Object that holds the WebSocket connection.
 
-[KV](https://developers.cloudflare.com/kv/) stores two things:
-- **Session tokens** — pin a browser to the same Durable Object across requests.
-- **Broadcast presence** — tracks which Durable Objects have active subscribers for each key.
+[KV](https://developers.cloudflare.com/kv/) stores session tokens, which pin a browser to the same Durable Object across requests.
 
 ### Regions
 
@@ -98,7 +101,7 @@ Each region runs its own Durable Objects so that channel state stays close to us
 
 Every telefunction call and channel message from a client must reach the **same Durable Object** — otherwise that client's channel state would be unavailable.
 
-On the first request, Telefunc picks a Durable Object in the nearest region, stores a session token in KV (TTL: 24 hours), and returns that token to the client via the `x-telefunc-session` header. Subsequent requests send this token back so Telefunc routes to the same Durable Object.
+On the first request, Telefunc returns a session token to the client via the `x-telefunc-session` header. The token picks one Durable Object of the nearest region, and KV remembers that region for it (TTL: 24 hours). Subsequent requests send the token back, so they reach the same Durable Object, even after the KV entry lapses while the client stays in that region.
 
 <Warning>
 
@@ -106,6 +109,19 @@ On the first request, Telefunc picks a Durable Object in the nearest region, sto
 
 </Warning>
 
+
+### Room state
+
+Each logical <Link href="/room">room</Link> has one authority, a `TelefuncDurableObject` instance of its own, holding the room's head, members, ordering watermarks, retained generations, and live delivery routes in SQLite. A directory instance backs `Room.list`. Room writes and reads therefore go through the room's authority; they don't use a Broadcast authority or a Workers KV room-state mirror.
+
+Room calls such as `Room.create()`, `Room.announce()` and `Room.close()` work anywhere in your Worker, including cron triggers and queue consumers. Server-side listeners (`subscribe()`, `onJoin()`, …) deliver to a Telefunc session, so install them inside a telefunction or a channel handler.
+
+| State | Storage | Consistency |
+|---|---|---|
+| Room head, roster, ordering, retained messages | The room's authority Durable Object (SQLite) | Strongly consistent |
+| `Room.list` directory projection | The directory Durable Object (SQLite) | Repairable projection, verified against the room head |
+| Broadcast sequence numbers and presence | The key's authority Durable Object (SQLite) | Strongly consistent |
+| Session affinity | Workers KV | Eventually consistent |
 
 ## Scaling
 
@@ -132,6 +148,8 @@ Only specified regions get Durable Objects. Requests from unspecified regions fa
 
 <Link href="/channel#broadcast">Broadcasts</Link> fan out across all regions automatically.
 
+`publish()` works anywhere in your Worker, including cron triggers and queue consumers. A server-side `subscribe()` delivers to a Telefunc session, so subscribe inside a telefunction or a channel handler.
+
 ### How it works
 
 <Advanced>
@@ -148,24 +166,24 @@ Publisher (Durable Object)
 ```
 
 1. The publisher forwards the message to an **authority** Durable Object for the key.
-2. The authority assigns a monotonic sequence number, reads active presence from KV, and forwards to each region with subscribers.
+2. The authority assigns a monotonic sequence number, reads the key's presence from its own storage, and forwards to each region with subscribers.
 3. Each region's coordinator fans out to the Durable Objects in that region.
 4. Each Durable Object delivers to its local subscribers.
 
 ### Ordering
 
-<Link href="/channel#broadcast">Broadcast</Link> publishes for a given `key` go through a single authority, so subscribers receive messages in order with a <Link href="/channel#broadcast">monotonic `seq`</Link>.
+<Link href="/channel#broadcast">Broadcast</Link> publishes for a given `key` go through a single authority, which assigns a <Link href="/channel#broadcast">monotonic `seq`</Link>. Every subscriber receives them in `seq` order: the authority forwards them in that order, and each hop sends through one Durable Object stub, whose calls Cloudflare delivers in the order they were made. Publishes from one session reach the authority in the order they were made.
 
 ### Presence
 
-Telefunc uses KV to track which Durable Objects have active subscribers:
+Each key's authority records which Durable Objects have subscribers, in its own storage:
 
 | Setting | Value |
 |---|---|
 | TTL | 90 seconds |
 | Refresh | every 30 seconds |
 
-A KV record is created on subscribe and deleted on unsubscribe. If a Durable Object is evicted (e.g. during a deployment), the record expires after 90 seconds and the region is excluded from fan-out.
+A Durable Object registers with the authority on its first subscription to a key and withdraws on its last unsubscribe. A subscription is ready once the authority has recorded it, so every publish sequenced after that reaches it. If a Durable Object is evicted (e.g. during a deployment), its record lapses after 90 seconds and fan-out skips it.
 
 
 ## Delivery guarantees
@@ -184,9 +202,9 @@ A KV record is created on subscribe and deleted on unsubscribe. If a Durable Obj
 
 | Guarantee | Details |
 |---|---|
-| Ordering | Publishes for a given key are serialized and delivered in order. |
-| Delivery | `publish()` resolves after all Durable Objects with subscribers have received the message. Delivery to clients then happens over the channel connection. |
-| Presence lag | A new subscriber may miss publishes during the few milliseconds it takes to write its KV presence record. |
+| Ordering | Every subscriber receives a key's publishes in `seq` order. |
+| Delivery | `publish()` resolves once the key's authority has handed the message to every Durable Object with subscribers. Delivery is at-most-once: one that fails to take it loses it, and the loss is logged. Delivery to clients then happens over the channel connection. |
+| Subscription | A subscription is ready once the key's authority has recorded it; every publish sequenced after that reaches it. |
 
 > Once a broadcast message reaches a Durable Object, it has the same buffering and replay guarantees as regular channel messages.
 

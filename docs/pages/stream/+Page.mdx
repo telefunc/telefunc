@@ -57,13 +57,15 @@ import { TelefuncStreamBeta } from '../../components'
    // Compress.telefunc.ts
    // Environment: server
 
-   export function onCompress(data: ReadableStream<Uint8Array>): ReadableStream<Uint8Array> {
+   export async function onCompress(data: ReadableStream<Uint8Array>): Promise<ReadableStream<Uint8Array>> {
      // A stream flows in, a transformed stream flows back out
      return data.pipeThrough(new CompressionStream('gzip'))
    }
    ```
 
 1. <Link href="#channel"><code>Channel</code></Link>: API for advanced real-time use cases.
+
+1. <Link href="#room"><code>Room</code></Link>: multi-party rooms with presence — who's connected, join/leave events, per-member streams.
 
 > A single telefunction can [mix primitives](https://gist.github.com/brillout/155c8eb4cbaa043bc52e96c0c2ed7086) (generators, channels, promises, ...) side by side, each resolving independently.
 
@@ -279,7 +281,7 @@ Return a `ReadableStream`:
 import fs from 'node:fs'
 import { Readable } from 'node:stream'
 
-export function onDownload(fileName: string): ReadableStream<Uint8Array> {
+export async function onDownload(fileName: string): Promise<ReadableStream<Uint8Array>> {
   return Readable.toWeb(fs.createReadStream(`./files/${fileName}`)) as ReadableStream<Uint8Array>
 }
 ```
@@ -346,7 +348,7 @@ A simple example transform with gzip compression:
 // Compress.telefunc.ts
 // Environment: server
 
-export function onCompress(data: ReadableStream<Uint8Array>): ReadableStream<Uint8Array> {
+export async function onCompress(data: ReadableStream<Uint8Array>): Promise<ReadableStream<Uint8Array>> {
   return data.pipeThrough(new CompressionStream('gzip'))
 }
 ```
@@ -371,7 +373,7 @@ import { getContext } from 'telefunc'
 import { spawn } from 'node:child_process'
 import { Readable, Writable } from 'node:stream'
 
-export function onCompressVideo(video: ReadableStream<Uint8Array>): ReadableStream<Uint8Array> {
+export async function onCompressVideo(video: ReadableStream<Uint8Array>): Promise<ReadableStream<Uint8Array>> {
   const { onClose } = getContext()
 
   // Re-encode to a smaller H.264/MP4, on the fly
@@ -380,7 +382,8 @@ export function onCompressVideo(video: ReadableStream<Uint8Array>): ReadableStre
   // Kill the encoder if the client disconnects mid-stream — otherwise the process leaks
   onClose(() => ffmpeg.kill())
 
-  video.pipeTo(Writable.toWeb(ffmpeg.stdin))
+  // A client that drops mid-upload rejects the pipe: stop the encoder rather than leave the rejection unhandled
+  video.pipeTo(Writable.toWeb(ffmpeg.stdin)).catch(() => ffmpeg.kill())
   return Readable.toWeb(ffmpeg.stdout) as ReadableStream<Uint8Array>
 }
 ```
@@ -428,6 +431,13 @@ const channel = await onDashboard()
 channel.listen((metrics) => updateCharts(metrics))
 ```
 
+
+## Primitive: `Room` {#room}
+
+For multi-party use cases where *who is connected* matters — chat, game lobbies, collaboration — you can use a room:
+- <Link href="/room" />
+
+> Built on top of channels: a `Room` adds presence, participant metadata, private messages, and admin controls.
 
 ## Cleanup
 
@@ -568,14 +578,14 @@ export async function* onSearch(query: string) {
 
 ## Scaling
 
-You can scale Telefunc horizontally (multiple server instances across multiple processes, containers, or machines) by adding sticky sessions and a cross-instance broadcast transport.
+You can scale Telefunc horizontally (multiple server instances across multiple processes, containers, or machines) by adding sticky sessions and a cross-instance backend.
 
 See: <Link href="/stream/scale" />.
 
 
 ## Cloudflare
 
-On Cloudflare Workers, Telefunc routes channels through Durable Objects and fans out broadcasts across regions automatically — so neither a sticky load balancer nor a broadcast transport is needed.
+On Cloudflare Workers, Telefunc routes channels through Durable Objects and fans out broadcasts across regions automatically — so neither a sticky load balancer nor a separately installed backend is needed.
 
 See: <Link href="/stream/cloudflare" />.
 

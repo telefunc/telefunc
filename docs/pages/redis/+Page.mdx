@@ -5,7 +5,7 @@ import { TelefuncStreamBeta } from '../../components'
 
 <TelefuncStreamBeta />
 
-Redis-backed <Link href="/channel#broadcast">broadcast</Link> fan-out across server instances — a `publish()` on any instance reaches every `subscribe()` on every other instance.
+Redis-backed <Link href="/channel#broadcast">broadcast</Link> fan-out across server instances — a `publish()` on any instance reaches every `subscribe()` on every other instance. <Link href="/room">Rooms</Link> work across instances too.
 
 > You only need this if you scale horizontally — see <Link href="/stream/scale" />.
 
@@ -21,15 +21,15 @@ npm install @telefunc/redis ioredis
 import IORedis from 'ioredis'
 import { installRedis } from '@telefunc/redis'
 
-const redis = new IORedis('redis://localhost:6379')
+const redis = new IORedis('redis://localhost:6379', { maxRetriesPerRequest: 0 })
 installRedis(redis)
 ```
 
-That swaps the default in-memory broadcast transport for one backed by Redis Pub/Sub. All subscribers across the cluster observe the same publish order for a given key.
+That single call installs the Redis backend for both Broadcast and Room. Room state and events are then shared across server instances. Make it before the first Broadcast or Room use, for example in a module your server entry imports first: a use before it starts the in-memory backend, and `installRedis()` then throws.
 
 ### Sharing an existing client
 
-Pass an existing [`ioredis`](https://github.com/redis/ioredis) Redis or Cluster instance when you want to share a connection or set custom options such as TLS or a retry strategy.
+Pass an existing [`ioredis`](https://github.com/redis/ioredis) Redis or Cluster instance when you want to share a connection or set options such as TLS or authentication.
 
 ```ts
 // Environment: server
@@ -37,11 +37,15 @@ Pass an existing [`ioredis`](https://github.com/redis/ioredis) Redis or Cluster 
 import IORedis from 'ioredis'
 import { installRedis } from '@telefunc/redis'
 
-const redis = new IORedis(process.env.REDIS_URL, { tls: {} })
+const redis = new IORedis(process.env.REDIS_URL, { tls: {}, maxRetriesPerRequest: 0 })
 installRedis(redis)
 ```
 
-Internally, Telefunc calls `duplicate()` on the client to open a dedicated subscriber connection — your instance is never mutated or disconnected. You can continue to use it alongside Telefunc without interference.
+Telefunc duplicates the supplied client as needed without disconnecting it, so you can continue to use it alongside Telefunc. Subscriptions share one duplicated connection; when it drops (a Redis restart, a failover), they resume on a fresh one. Messages published while it was down are lost, as delivery is at-most-once. A failover whose new master missed the last writes rewinds their sequence numbers: subscribers still connected then drop as many later messages as it lost, since delivery never goes back in order. When you remove a Cluster node (`redis-cli --cluster del-node`), shut it down too: a removed node left running keeps the subscribers connected to it, and they receive nothing until it stops.
+
+The client must never resend a command, so a lost reply can't execute twice: a Redis client needs `maxRetriesPerRequest: 0`, a Cluster client needs `retryDelayOnFailover: 0` and `redisOptions: { maxRetriesPerRequest: 0 }`, and `reconnectOnError` must stay unset. Room reads must be consistent, so a Cluster client keeps `scaleReads: 'master'`, and Pub/Sub channels ignore an ioredis `keyPrefix`, so pass `installRedis(redis, { prefix })` instead. A Cluster client can't set `enableAutoPipelining`, which batches Room's variable-key scripts by their key count and refuses a batch whose keys span masters. `installRedis()` throws for any other client.
+
+Room keeps its state (rooms, members, lane order) in Redis keys with no expiry, so Redis must never evict them: use `maxmemory-policy noeviction`, or a `volatile-*` policy, which evicts only keys with an expiry. An `allkeys-*` policy can silently break a room.
 
 ## Channels
 

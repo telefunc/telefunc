@@ -123,6 +123,15 @@ function testAbort() {
     await resetCleanupState()
 
     await page.click('#test-slow-normal-telefunc')
+    // Deterministic in-flight gate: abort only once the server telefunc is actually running (its
+    // `onClose` is registered, so the abort is guaranteed to land mid-flight and break the loop). This
+    // replaces the client's old fixed 1500ms abort timer, which raced call-establishment on slow preview
+    // variants and intermittently let the call complete normally (isAbort undefined).
+    await autoRetry(async () => {
+      const state = await getCleanupState()
+      expect(state.slowNormal).toBe('running')
+    })
+    await page.click('#test-slow-normal-abort')
     await autoRetry(async () => {
       const result = await getResult('#abort-result')
       expect(result.isAbort).toBe(true)
@@ -145,6 +154,12 @@ function testAbort() {
     await resetCleanupState()
 
     await page.click('#test-upload-abort-single')
+    // Abort once the server reads the file: a page timer doesn't reliably fire on time in CI.
+    await autoRetry(async () => {
+      const state = await getCleanupState()
+      expect(state.uploadAbortSingle).toBe('running')
+    })
+    await page.click('#test-upload-abort-single-abort')
     await autoRetry(async () => {
       const result = await getResult('#abort-result')
       expect(result.isAbort).toBe(true)
@@ -160,13 +175,19 @@ function testAbort() {
     })
   })
 
-  // Three 50MB files — file1 consumed fully, client aborts at 3s during
+  // Three 50MB files — file1 consumed fully, the client aborts during the
   // post-file1 sleep, file2+file3 error on disconnect
   test('abort: multiple file upload — file1 received, file2+file3 error on disconnect', async () => {
     await navigate(`${getServerUrl()}/abort`)
     await resetCleanupState()
 
     await page.click('#test-upload-abort-multiple')
+    // Abort once the server has read file1: a page timer doesn't reliably fire on time in CI.
+    await autoRetry(async () => {
+      const state = await getCleanupState()
+      expect(state.uploadAbortMultiFilesRead).toBe('1')
+    })
+    await page.click('#test-upload-abort-multiple-abort')
     await autoRetry(async () => {
       const result = await getResult('#abort-result')
       expect(result.isAbort).toBe(true)

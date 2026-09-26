@@ -27,8 +27,7 @@
   "migrations": [
     {
       "tag": "v1",
-      "new_sqlite_classes": ["TodoListDurableObject"],
-      "new_classes": ["TelefuncDurableObject"]
+      "new_sqlite_classes": ["TodoListDurableObject", "TelefuncDurableObject"]
     }
   ]
 }

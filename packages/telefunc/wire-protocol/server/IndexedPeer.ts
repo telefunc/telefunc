@@ -10,11 +10,11 @@ interface PeerSender {
 }
 
 /** Wraps a crossws peer, encodes frames with a fixed channel index.
- *  Assigns sequence numbers. Frames are added to the replay buffer only once
- *  they are committed to a transport send path. */
+ *  Assigns sequence numbers. Frames join the replay buffer as they are sent, even to a wire that's gone, so a
+ *  reconnect replays them. */
 class IndexedPeer {
   constructor(
-    private sender: PeerSender,
+    readonly sender: PeerSender,
     private index: number,
     private replay: ReplayBuffer,
   ) {}

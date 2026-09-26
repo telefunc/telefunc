@@ -3,24 +3,30 @@
 export { Telefunc }
 export type { CloudflareOptions }
 
-import { DurableObject } from 'cloudflare:workers'
+import { DurableObject, env as workerEnv } from 'cloudflare:workers'
+// A subscription finds its session through AsyncLocalStorage, which the setup's compatibility flag enables.
+import '../node/server/async_hooks.js'
 import crossws from 'crossws/adapters/cloudflare'
 import { getTelefuncChannelHooks } from '../wire-protocol/server/ws.js'
+import { ChannelMux } from '../wire-protocol/server/mux.js'
 import { getServerConfig, enableChannelTransports } from '../node/server/serverConfig.js'
 import { serve as serveTelefunc } from '../node/server/telefunc.js'
-import { installBroadcastAdapter } from '../wire-protocol/server/broadcast.js'
+import { installBackend } from '../wire-protocol/backend/install.js'
 import {
   CloudflareBroadcastAuthorityState,
   CloudflareBroadcastTransport,
 } from '../wire-protocol/server/adapter/cloudflare/broadcast.js'
 import type {
+  BroadcastCalls,
   BroadcastDeliverRequest,
+  BroadcastForwardRequest,
+  BroadcastPresenceRequest,
   BroadcastPublishRequest,
 } from '../wire-protocol/server/adapter/cloudflare/broadcast.js'
+import { OrderedStubs } from '../wire-protocol/server/adapter/cloudflare/ordered-stubs.js'
 import {
   TELEFUNC_BROADCAST_BUCKET_HEADER,
   TELEFUNC_SESSION_HEADER,
-  TELEFUNC_SHARD_HEADER,
   assertLocationFallbackIsScaled,
   resolveSessionRoutingTarget,
 } from '../wire-protocol/server/adapter/cloudflare/routing.js'
@@ -28,6 +34,15 @@ import { assertUsage } from '../utils/assert.js'
 import type { Telefunc as TelefuncNamespace } from '../node/server/context/getContext.js'
 import type { CloudflareScale, LocationBucket } from '../wire-protocol/server/adapter/cloudflare/routing.js'
 import { CHANNEL_TRANSPORT } from '../wire-protocol/constants.js'
+import { CloudflareBackend } from '../wire-protocol/server/adapter/cloudflare/room/backend.js'
+import {
+  CloudflareRoomSessionManager,
+  type RoomSessionDeliveryRequest,
+} from '../wire-protocol/server/adapter/cloudflare/room/subscription.js'
+import { RoomAuthority } from '../wire-protocol/server/adapter/cloudflare/room/do.js'
+import { withCloudflareSession, type CloudflareSession } from '../wire-protocol/server/adapter/cloudflare/session.js'
+import type { TelefuncDurableObjectNamespace } from '../wire-protocol/server/adapter/cloudflare/namespace.js'
+import { isTelefuncRequest, toResponse } from './shared.js'
 
 const SHARD_TOKEN_TTL_SECONDS = 86400
 
@@ -79,84 +94,116 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
     instanceName: baseInstanceName,
     hooks: getTelefuncChannelHooks(),
   })
-  // Factory runs only on first install. Bundler quirks can evaluate the user's entry twice in the same isolate;
-  // we want every evaluation to share one transport instance.
-  const broadcast = installBroadcastAdapter(() => new CloudflareBroadcastTransport({ baseInstanceName, scale }))
-
-  function getBinding(env: Cloudflare.Env): DurableObjectNamespace | undefined {
-    const baseBinding = (env as Record<string, DurableObjectNamespace | undefined>)[bindingName]
-    return baseBinding && jurisdiction ? baseBinding.jurisdiction(jurisdiction) : baseBinding
+  function requireBinding<T>(env: Cloudflare.Env, name: string, kind: string): T {
+    const binding = (env as Record<string, T | undefined>)[name]
+    assertUsage(binding, `Missing Cloudflare ${kind} binding "${name}". Add it to your wrangler.jsonc.`)
+    return binding
   }
-
-  function getKVBinding(env: Cloudflare.Env): KVNamespace | undefined {
-    return (env as Record<string, KVNamespace | undefined>)[kvBindingName]
+  function telefuncNamespace(env: Cloudflare.Env): TelefuncDurableObjectNamespace {
+    const namespace = requireBinding<TelefuncDurableObjectNamespace>(env, bindingName, 'Durable Object')
+    return jurisdiction ? namespace.jurisdiction(jurisdiction) : namespace
   }
+  const cloudflareBackend = installBackend(
+    () =>
+      new CloudflareBackend({
+        rooms: () => telefuncNamespace(workerEnv),
+        broadcast: new CloudflareBroadcastTransport({
+          baseInstanceName,
+          scale,
+          locationFallback,
+          namespace: () => telefuncNamespace(workerEnv),
+        }),
+      }),
+    [
+      'cloudflare',
+      bindingName,
+      baseInstanceName,
+      JSON.stringify(scale ?? null),
+      locationFallback,
+      jurisdiction ?? null,
+    ],
+  )
+  const broadcast = cloudflareBackend.broadcast
 
   const getContext = options?.context
 
-  const TelefuncDurableObject = class extends DurableObject {
+  // One class for every role; an instance's name decides which: a session shard, a Broadcast key authority or
+  // coordinator, a room authority or the room directory.
+  const TelefuncDurableObject = class extends RoomAuthority<Cloudflare.Env> {
     private readonly authorityState: CloudflareBroadcastAuthorityState
+    private readonly broadcastCalls: BroadcastCalls = new OrderedStubs()
+    private readonly session: CloudflareSession
 
     constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
-      super(ctx, env)
-      const binding = getBinding(env)
-      assertUsage(binding, `Missing Cloudflare Durable Object binding "${bindingName}" in Durable Object constructor.`)
-      broadcast.attachBinding(binding, bindingName)
-      const kv = getKVBinding(env)
-      if (kv) broadcast.attachKV(kv)
+      super(ctx, env, telefuncNamespace(env))
       this.authorityState = new CloudflareBroadcastAuthorityState(ctx)
+      const id = ctx.id.toString()
+      this.session = {
+        room: new CloudflareRoomSessionManager(id),
+        broadcast: broadcast.member(id, this.broadcastCalls),
+        mux: new ChannelMux(),
+      }
       crosswsAdapter.handleDurableInit(this, ctx, env)
     }
 
     async fetch(request: Request) {
-      const shard = request.headers.get(TELEFUNC_SHARD_HEADER)
-      const bucket = request.headers.get(TELEFUNC_BROADCAST_BUCKET_HEADER) as LocationBucket | null
-      if (shard && bucket) {
-        broadcast.attachIsolateInfo(shard, bucket)
-      }
-      if (request.headers.get('upgrade') === 'websocket') {
-        return crosswsAdapter.handleDurableUpgrade(this, request)
-      }
-      const context = getContext ? await getContext(request, this.env as Cloudflare.Env) : undefined
-      const httpResponse = await serveTelefunc(context ? { request, context } : { request })
-      return new Response(httpResponse.getReadableWebStream(), {
-        status: httpResponse.statusCode,
-        headers: httpResponse.headers,
+      return this.runInSession(async () => {
+        const bucket = request.headers.get(TELEFUNC_BROADCAST_BUCKET_HEADER) as LocationBucket | null
+        if (bucket) this.session.broadcast.locate(bucket)
+        if (request.headers.get('upgrade') === 'websocket') {
+          return crosswsAdapter.handleDurableUpgrade(this, request)
+        }
+        const context = getContext ? await getContext(request, this.env as Cloudflare.Env) : undefined
+        return toResponse(await serveTelefunc(context ? { request, context } : { request }))
       })
     }
 
     webSocketMessage(ws: WebSocket, message: string | ArrayBuffer) {
-      return crosswsAdapter.handleDurableMessage(this, ws, message)
+      return this.runInSession(() => crosswsAdapter.handleDurableMessage(this, ws, message))
     }
 
     webSocketClose(ws: WebSocket, code: number, reason: string, wasClean: boolean) {
-      return crosswsAdapter.handleDurableClose(this, ws, code, reason, wasClean)
+      return this.runInSession(() => crosswsAdapter.handleDurableClose(this, ws, code, reason, wasClean))
     }
 
     telefuncBroadcastPublish(request: BroadcastPublishRequest) {
-      return broadcast.publishToSubscribers(this.authorityState, request)
+      return broadcast.publishToSubscribers(this.authorityState, this.broadcastCalls, request)
+    }
+
+    telefuncBroadcastForward(request: BroadcastForwardRequest) {
+      return broadcast.forwardToBucket(this.broadcastCalls, request)
     }
 
     telefuncBroadcastDeliver(request: BroadcastDeliverRequest) {
-      broadcast.deliverToLocal(request)
+      return this.runInSession(() => this.session.broadcast.deliver(request))
+    }
+
+    telefuncBroadcastPresence(request: BroadcastPresenceRequest) {
+      return this.authorityState.setPresence(request)
+    }
+
+    telefuncRoomDeliver(request: RoomSessionDeliveryRequest): void {
+      return this.runInSession(() => this.session.room.deliver(request))
+    }
+
+    private runInSession<T>(fn: () => T): T {
+      return withCloudflareSession(this.session, fn)
     }
   }
 
   return {
     async serve({ request, env, ctx }: ServeInput): Promise<Response | undefined> {
+      if (!isTelefuncRequest(request)) return undefined
       const config = getServerConfig()
-      if (!new URL(request.url).pathname.startsWith(config.telefuncUrl)) return undefined
 
-      const binding = getBinding(env)
-      assertUsage(binding, `Missing Cloudflare Durable Object binding "${bindingName}". Add it to your wrangler.jsonc.`)
+      const binding = telefuncNamespace(env)
 
       const isWebSocketRequest = request.headers.get('upgrade') === 'websocket'
       if (isWebSocketRequest && !config.channel.transports.includes(CHANNEL_TRANSPORT.WS)) {
         return new Response(null, { status: 400 })
       }
 
-      const kv = getKVBinding(env)
-      assertUsage(kv, `Missing Cloudflare KV namespace binding "${kvBindingName}". Add it to your wrangler.jsonc.`)
+      const kv = requireBinding<KVNamespace>(env, kvBindingName, 'KV namespace')
       const sessionToken =
         request.headers.get(TELEFUNC_SESSION_HEADER) || new URL(request.url).searchParams.get('session')
 
@@ -173,16 +220,20 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
       }
 
       if (!sessionInstanceName || !locationBucket) {
-        const target = resolveSessionRoutingTarget(baseInstanceName, scale, request, locationFallback)
+        // A presented token keeps its shard: a client names one before its first call, and a lapsed one stays.
+        token ??= crypto.randomUUID()
+        const target = resolveSessionRoutingTarget(baseInstanceName, scale, request, locationFallback, token)
         sessionInstanceName = target.sessionInstanceName
         locationBucket = target.locationBucket
-        token = `${sessionInstanceName}:${crypto.randomUUID()}`
         const value: StoredShardToken = { s: sessionInstanceName, b: locationBucket }
-        ctx.waitUntil(kv.put(`session:${token}`, JSON.stringify(value), { expirationTtl: SHARD_TOKEN_TTL_SECONDS }))
+        // Routing doesn't wait on it (the token routes the same way without it): it pins the region for the token's later
+        // requests. A page's concurrent first requests write the one key, and KV refuses a second write within a second.
+        ctx.waitUntil(
+          kv.put(`session:${token}`, JSON.stringify(value), { expirationTtl: SHARD_TOKEN_TTL_SECONDS }).catch(() => {}),
+        )
       }
 
       const forwardedHeaders = new Headers(request.headers as Headers)
-      forwardedHeaders.set(TELEFUNC_SHARD_HEADER, sessionInstanceName)
       forwardedHeaders.set(TELEFUNC_BROADCAST_BUCKET_HEADER, locationBucket)
       const forwardedRequest = new Request(request, { headers: forwardedHeaders })
 

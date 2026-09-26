@@ -11,16 +11,19 @@ import { serializeTelefunctionResult } from '../node/server/runTelefunc/serializ
 import { parseHttpRequest } from '../node/server/runTelefunc/parseHttpRequest.js'
 import { createRequestContext } from '../node/server/context/requestContext.js'
 import { parseResponse } from './client/response/parse.js'
-import { STREAM_TRANSPORT } from './constants.js'
+import { STREAM_TRANSPORT, type StreamTransport } from './constants.js'
 import { config, getServerConfig } from '../node/server/serverConfig.js'
 import type { AbortError } from '../shared/Abort.js'
 import type {
   ClientReviverContext,
+  InternalClientReviverContext,
+  InternalServerReplacerContext,
   ReplacerType,
   ReviverType,
   ServerReplacerContext,
   ServerReviverContext,
   StreamingProducer,
+  StreamSource,
   TypeContract,
 } from './types.js'
 
@@ -43,7 +46,7 @@ function createServerHarness(extensionTypes: ReplacerType<TypeContract, ServerRe
   const producers: { createProducer: () => StreamingProducer; index: number }[] = []
   const lifecycles: Lifecycle[] = []
   let nextIndex = 0
-  const context: ServerReplacerContext = {
+  const context: InternalServerReplacerContext = {
     createChannel(opts) {
       const channel = new ServerChannel(opts)
       context.registerChannel(channel)
@@ -58,6 +61,7 @@ function createServerHarness(extensionTypes: ReplacerType<TypeContract, ServerRe
       return { metadata: { __index: index }, close() {}, abort() {} }
     },
     validators: new Map(),
+    responseState: (_key, init) => init(),
   }
   const replacer = createStreamingReplacer(
     () => context,
@@ -75,7 +79,8 @@ function createClientHarness(extensionTypes: ReviverType<TypeContract, ClientRev
   const mintedBroadcasts: { channelId: string; key: string }[] = []
   const lifecycles: { value: unknown; close: () => Promise<void> | void; abort: (abortError: AbortError) => void }[] =
     []
-  const context: ClientReviverContext = {
+  const context: InternalClientReviverContext = {
+    shareLifecycle() {},
     createChannel(opts) {
       mintedChannels.push(opts)
       return { kind: 'client-channel', ...opts, close: async () => {}, abort: () => {} } as never
@@ -420,8 +425,12 @@ async function roundTrip(
   opts: {
     serverExtensions?: ReplacerType<TypeContract, ServerReplacerContext>[]
     clientExtensions?: ReviverType<TypeContract, ClientReviverContext>[]
+    streamTransport?: StreamTransport
+    /** The network between the server's body and the client's. */
+    network?: TransformStream<Uint8Array<ArrayBuffer>, Uint8Array<ArrayBuffer>>
   } = {},
 ) {
+  const streamTransport = opts.streamTransport ?? STREAM_TRANSPORT.BINARY_INLINE
   const extensionName = `ref-identity-spec-${nextExtensionId++}`
   if (opts.serverExtensions) {
     config.extensions.push({ name: extensionName, responseTypes: opts.serverExtensions })
@@ -436,29 +445,37 @@ async function roundTrip(
       context: {},
       requestContext,
       abortSignal: requestContext.abortSignal,
-      streamTransport: STREAM_TRANSPORT.BINARY_INLINE,
+      streamTransport,
       useNodeStream: false,
       serverConfig: {
         log: { shieldErrors: { dev: false, prod: false } },
       },
     })
+    const body = result.body as ReadableStream<Uint8Array<ArrayBuffer>>
     const response =
       result.type === 'text'
         ? new Response(result.body)
-        : new Response(result.body as ReadableStream<Uint8Array<ArrayBuffer>>, {
-            headers: { 'content-type': 'application/octet-stream' },
+        : new Response(opts.network ? body.pipeThrough(opts.network) : body, {
+            headers: {
+              'content-type':
+                streamTransport === STREAM_TRANSPORT.SSE_INLINE ? 'text/event-stream' : 'application/octet-stream',
+            },
           })
     const abortController = new AbortController()
-    const parsed = (await parseResponse(response, {
-      telefunctionName: 'testFn',
-      telefuncFilePath: '/pages/spec/ref-identity.telefunc.ts',
-      abortController,
-      channel: { transports: ['sse'] },
-      requestCloseHandlers: [],
-      extensionResponseTypes: opts.clientExtensions ?? [],
-      headers: null,
-      telefuncUrl: 'http://localhost/_telefunc',
-    })) as { ret: unknown }
+    const parsed = (await parseResponse(
+      response,
+      {
+        telefunctionName: 'testFn',
+        telefuncFilePath: '/pages/spec/ref-identity.telefunc.ts',
+        abortController,
+        channel: { transports: ['sse'] },
+        requestCloseHandlers: [],
+        extensionResponseTypes: opts.clientExtensions ?? [],
+        headers: null,
+        telefuncUrl: 'http://localhost/_telefunc',
+      },
+      undefined,
+    )) as { ret: unknown }
     return { ret: parsed.ret, abortController }
   } finally {
     const index = config.extensions.findIndex((extension) => extension.name === extensionName)
@@ -474,7 +491,31 @@ async function collect<T>(gen: AsyncGenerator<T>): Promise<T[]> {
   return out
 }
 
+async function teeAndDrop(stream: ReadableStream<Uint8Array<ArrayBuffer>>): Promise<ReadableStream<Uint8Array>> {
+  const { ret } = await roundTrip({ stream })
+  return (ret as { stream: ReadableStream<Uint8Array> }).stream.tee()[0]
+}
+
 describe('reference identity — full pipeline', () => {
+  test("two returned streams read one after the other both complete, as the docs' concurrent downloads may be", async () => {
+    const source = () => {
+      let sent = 0
+      return new ReadableStream<Uint8Array<ArrayBuffer>>({
+        pull(controller) {
+          if (sent++ === 32)
+            controller.close() // 2 MiB
+          else controller.enqueue(new Uint8Array(64 * 1024))
+        },
+      })
+    }
+    const { ret } = await roundTrip({ first: source(), second: source() })
+    const { first, second } = ret as Record<'first' | 'second', ReadableStream<Uint8Array>>
+    const bytes = async (stream: ReadableStream<Uint8Array>) => (await new Response(stream).arrayBuffer()).byteLength
+    // The second one first, as `await dl2.saveToMemory()` before dl1's: the first one's bytes arrive meanwhile.
+    expect(await bytes(second)).toBe(2 * 1024 * 1024)
+    expect(await bytes(first)).toBe(2 * 1024 * 1024)
+  })
+
   test('duplicated async generator: one producer, one client object, chunks delivered once', async () => {
     const gen = (async function* () {
       yield 1
@@ -488,6 +529,17 @@ describe('reference identity — full pipeline', () => {
     // One consumer sees every chunk — duplicated producers used to steal chunks
     // from one another (each occurrence pulled the same underlying generator).
     expect(await collect(retTyped.gen)).toEqual([1, 2, 3])
+  })
+
+  test('the response body is cancelled once every value is done or cancelled', async () => {
+    let upstreamCancelled = false
+    const pending = new ReadableStream({ cancel: () => void (upstreamCancelled = true) })
+    const { ret } = await roundTrip({ gen: (async function* () {})(), pending })
+    const retTyped = ret as { gen: AsyncGenerator<never>; pending: ReadableStream }
+    expect(await collect(retTyped.gen)).toEqual([])
+    await retTyped.pending.cancel()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(upstreamCancelled).toBe(true)
   })
 
   test('duplicated ReadableStream: previously crashed with a locked-stream error', async () => {
@@ -549,6 +601,136 @@ describe('reference identity — full pipeline', () => {
 
     abortController.abort()
     expect(counters.clientAbort).toBe(1)
+  })
+
+  test('a cancelled inline stream frees the frames it buffered, even once its done frame arrived', async () => {
+    const encode = (text: string) => new TextEncoder().encode(text) as Uint8Array<ArrayBuffer>
+    class RawChunks {
+      constructor(readonly chunks: string[]) {}
+    }
+    const prefix = '!RefIdentityRawChunks:'
+    const serverType = {
+      prefix,
+      detect: (value: unknown): value is RawChunks => value instanceof RawChunks,
+      replace(value: RawChunks, context: ServerReplacerContext) {
+        const sent = context.sendStream(() => ({
+          chunks: (async function* () {
+            for (const chunk of value.chunks) yield encode(chunk)
+          })(),
+          cancel() {},
+        }))
+        return { metadata: sent.metadata, close() {}, abort() {} }
+      },
+    }
+    const clientType = {
+      prefix,
+      revive: (metadata: never, context: ClientReviverContext) => ({
+        value: context.receiveStream(metadata),
+        close() {},
+        abort() {},
+      }),
+    }
+    let releaseA!: () => void
+    const gate = new Promise<void>((resolve) => (releaseA = resolve))
+    const a = new ReadableStream<Uint8Array<ArrayBuffer>>({
+      async start(controller) {
+        controller.enqueue(encode('a1'))
+        await gate
+        controller.close()
+      },
+    })
+    const { ret } = await roundTrip(
+      { a, b: new RawChunks(['b1', 'b2']) },
+      {
+        serverExtensions: [serverType as unknown as ReplacerType<TypeContract, ServerReplacerContext>],
+        clientExtensions: [clientType as unknown as ReviverType<TypeContract, ClientReviverContext>],
+      },
+    )
+    const retTyped = ret as { a: ReadableStream<Uint8Array>; b: StreamSource }
+    const reader = retTyped.a.getReader()
+    await reader.read()
+    const pending = reader.read()
+    // While `a` waits, the demuxer reads all of `b`, its done frame included, into b's buffer.
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    releaseA()
+    await pending
+    retTyped.b.cancel()
+    expect(await retTyped.b.readNextChunk()).toBe(null)
+  })
+
+  test.each([STREAM_TRANSPORT.BINARY_INLINE, STREAM_TRANSPORT.SSE_INLINE])(
+    '%s: a body that drops after one inline stream finished leaves no unhandled rejection',
+    async (streamTransport) => {
+      const encode = (text: string) => new TextEncoder().encode(text) as Uint8Array<ArrayBuffer>
+      const unhandled: unknown[] = []
+      const onUnhandled = (reason: unknown) => unhandled.push(reason)
+      process.on('unhandledRejection', onUnhandled)
+      try {
+        let drop!: (error: Error) => void
+        const network = new TransformStream<Uint8Array<ArrayBuffer>, Uint8Array<ArrayBuffer>>({
+          start: (controller) => void (drop = (error) => controller.error(error)),
+        })
+        const a = new ReadableStream<Uint8Array<ArrayBuffer>>({
+          start(controller) {
+            controller.enqueue(encode('a1'))
+            controller.close()
+          },
+        })
+        const b = new ReadableStream<Uint8Array<ArrayBuffer>>({
+          start: (controller) => controller.enqueue(encode('b1')),
+        })
+        const { ret } = await roundTrip({ a, b }, { streamTransport, network })
+        const streams = ret as { a: ReadableStream<Uint8Array>; b: ReadableStream<Uint8Array> }
+        const readerA = streams.a.getReader()
+        while (!(await readerA.read()).done);
+        const readerB = streams.b.getReader()
+        await readerB.read()
+        drop(new TypeError('network error'))
+        await expect(readerB.read()).rejects.toThrow('network error')
+        await new Promise((resolve) => setTimeout(resolve, 0))
+        expect(unhandled).toEqual([])
+      } finally {
+        process.off('unhandledRejection', onUnhandled)
+      }
+    },
+  )
+
+  test.each([STREAM_TRANSPORT.BINARY_INLINE, STREAM_TRANSPORT.SSE_INLINE])(
+    '%s: aborting a call whose body dropped leaves no unhandled rejection',
+    async (streamTransport) => {
+      const unhandled: unknown[] = []
+      const onUnhandled = (reason: unknown) => unhandled.push(reason)
+      process.on('unhandledRejection', onUnhandled)
+      // Node rethrows a rejected promise an event listener returns as an uncaught exception.
+      process.on('uncaughtException', onUnhandled)
+      try {
+        let drop!: (error: Error) => void
+        const network = new TransformStream<Uint8Array<ArrayBuffer>, Uint8Array<ArrayBuffer>>({
+          start: (controller) => void (drop = (error) => controller.error(error)),
+        })
+        const { abortController } = await roundTrip({ b: new ReadableStream() }, { streamTransport, network })
+        drop(new TypeError('network error'))
+        abortController.abort()
+        // The error reaches the client's body through the network stream's pipe, a few turns later.
+        await new Promise((resolve) => setTimeout(resolve, 20))
+        expect(unhandled).toEqual([])
+      } finally {
+        process.off('unhandledRejection', onUnhandled)
+        process.off('uncaughtException', onUnhandled)
+      }
+    },
+  )
+
+  test('a tee() branch keeps a returned stream open after the stream itself is dropped', async () => {
+    let controller!: ReadableStreamDefaultController<Uint8Array<ArrayBuffer>>
+    const branch = await teeAndDrop(new ReadableStream({ start: (c) => void (controller = c) }))
+    for (let cycle = 0; cycle < 8; cycle++) {
+      ;(globalThis as { gc(): void }).gc()
+      await new Promise((resolve) => setTimeout(resolve, 20))
+    }
+    controller.enqueue(new TextEncoder().encode('tail'))
+    controller.close()
+    expect(await new Response(branch).text()).toBe('tail')
   })
 })
 

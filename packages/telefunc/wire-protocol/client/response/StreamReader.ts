@@ -27,12 +27,13 @@ class StreamReader extends BaseStreamReader {
 
     // When the fetch is aborted, cancel the reader first to prevent the browser
     // from generating a spurious unhandled "BodyStreamBuffer was aborted" rejection.
-    callContext.abortController.signal.addEventListener('abort', () => reader.cancel(), { once: true })
+    callContext.abortController.signal.addEventListener('abort', () => reader.cancel().catch(() => {}), { once: true })
   }
 
   cancel(): void {
     this.cancelled = true
-    this.reader.cancel()
+    // An errored body rejects its cancel; that error already reached the reads.
+    this.reader.cancel().catch(() => {})
   }
 
   async readExact(n: number): Promise<Uint8Array<ArrayBuffer>> {

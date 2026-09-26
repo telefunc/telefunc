@@ -12,9 +12,10 @@ import type {
   ChannelPublishAck,
   BroadcastBinaryListener,
   BroadcastListener,
+  BroadcastListeners,
 } from '../channel.js'
 import type { TELEFUNC_SHIELDS } from '../../node/shared/transformer/generateShield/shield-key.js'
-import { makePublishInfo } from '../channel.js'
+import { invokeChannelListener, makePublishInfo } from '../channel.js'
 import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { resolveClientConfig } from '../../client/clientConfig.js'
@@ -24,6 +25,9 @@ import {
   TAG,
   isChannelCtrlTag,
   type AckResultStatus,
+  type BroadcastKind,
+  type BroadcastSubscriptions,
+  type ReattachState,
   type ChannelCtrlFrame,
   type ChannelDataFrame,
   type ChannelFrame,
@@ -33,13 +37,14 @@ import { assert } from '../../utils/assert.js'
 import { makeAbortError, makeBugError } from '../../client/remoteTelefunctionCall/errors.js'
 import { ShieldValidationError } from '../../shared/ShieldValidationError.js'
 import { ClientConnection } from './connection.js'
-import { appendSessionParam, getSessionToken } from './session-registry.js'
+import { appendSessionParam, getOrCreateSessionToken } from './session-registry.js'
 import { CHANNEL_CLOSE_TIMEOUT_MS, type ChannelTransports } from '../constants.js'
 import { FlowControl } from '../flow-control/flow-control.js'
 import type { MuxChannel, MuxConnection } from './connection.js'
-import { ChannelClosedError } from '../channel-errors.js'
+import { ChannelClosedError, ChannelOverflowError, isExpectedChannelFailure } from '../channel-errors.js'
 import { isPromise } from '../../utils/isPromise.js'
 import { hasProp } from '../../utils/hasProp.js'
+import { classifyTelefuncError } from '../error-classification.js'
 
 const CLIENT_BROADCAST_BRAND = Symbol.for('telefunc.ClientBroadcast')
 
@@ -111,12 +116,9 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
       bdpPing: () => this._connection.sendBdpPing(this),
     })
     const config = resolveClientConfig()
-    // Read the latest stored session token for this URL. `makeHttpRequest` writes the freshest
-    // server-issued token to the registry before this constructor runs (on the response side),
-    // and the request side reads whatever was stored from the prior round-trip. Either way,
-    // querying here keeps the channel's transport in sync with whatever HTTP is using.
-    const sessionToken = getSessionToken(telefuncUrl)
-    const url = sessionToken ? appendSessionParam(telefuncUrl, sessionToken) : telefuncUrl
+    // The call that carries or returns this channel presents the same token, so both reach one session.
+    const sessionToken = getOrCreateSessionToken(telefuncUrl)
+    const url = appendSessionParam(telefuncUrl, sessionToken)
     this._connection = ClientConnection.getOrCreate(url, this, {
       transports,
       fetchImpl: (config.fetch ?? globalThis.fetch).bind(globalThis),
@@ -181,6 +183,11 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     } finally {
       this._flow._recordSelfTime(performance.now() - t0)
     }
+  }
+
+  /** @internal How long a server that is away is waited for. */
+  _reconnectWindow(): number {
+    return this._connection.reconnectWindow()
   }
 
   _sendBinary(data: Uint8Array, opts?: { ack?: boolean }): void | Promise<unknown> | Promise<void> {
@@ -266,6 +273,9 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   // ── Called by transport connection ──
 
   _onTransportOpen(batched: boolean): void {
+    // A close request is not replayed, so one written to a WebSocket that had already died is lost. As the server's
+    // `_attachPeer` does, it goes out again on every attach until acknowledged.
+    if (this._expectCloseAck) this._connection.sendCloseRequest(this, Math.max(0, this._closeDeadline - Date.now()))
     if (this._isClosed) return
     this._flow.reset()
     if (batched) this._flow.useBatchTransportInitial()
@@ -278,7 +288,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
       this._flow.onReceived(bytes)
       const parsed = parse(data) as ChannelData<ServerToClient>
       const pending: Promise<unknown>[] = []
-      for (const cb of this._listeners) {
+      for (const cb of [...this._listeners]) {
         try {
           const result = cb(parsed)
           if (isPromise(result)) {
@@ -312,7 +322,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     try {
       this._flow.onReceived(bytes)
       const pending: Promise<unknown>[] = []
-      for (const cb of this._binaryListeners) {
+      for (const cb of [...this._binaryListeners]) {
         try {
           const result = cb(data)
           if (isPromise(result)) {
@@ -415,6 +425,9 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
         return
       case ACK_STATUS.SHIELD_ERROR:
         pending.reject(new ShieldValidationError(text))
+        return
+      case ACK_STATUS.OVERFLOW:
+        pending.reject(new ChannelOverflowError(text))
     }
   }
 
@@ -440,7 +453,8 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
 
   _onTransportClose(err?: Error): void {
     this._isClosed = true
-    this._finalizeClose(err)
+    // A close the server acknowledged is graceful, whatever takes the channel off the wire before it finishes.
+    this._finalizeClose(this._didReceiveCloseAck ? undefined : err)
   }
 
   // ── Private ──
@@ -524,7 +538,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     }
     const parsed = parse(data) as ChannelData<ServerToClient>
     let lastResult: unknown
-    for (const cb of this._listeners) {
+    for (const cb of [...this._listeners]) {
       try {
         lastResult = await cb(parsed)
       } catch (err) {
@@ -542,7 +556,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
       return
     }
     let lastResult: unknown
-    for (const cb of this._binaryListeners) {
+    for (const cb of [...this._binaryListeners]) {
       try {
         lastResult = await cb(data)
       } catch (err) {
@@ -606,65 +620,80 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
 
 class ClientBroadcast<T = unknown> extends ClientChannel {
   readonly [CLIENT_BROADCAST_BRAND] = true
-  private _broadcastListeners: Array<BroadcastListener<T>> = []
-  private _broadcastBinaryListeners: Array<BroadcastBinaryListener> = []
+  private readonly _subscribers: BroadcastListeners<T> = { text: [], binary: [] }
+  private readonly _wire: BroadcastSubscriptions = { text: false, binary: false }
 
   static isClientBroadcast(value: unknown): value is ClientBroadcast {
     return hasProp(value, CLIENT_BROADCAST_BRAND)
   }
 
+  /** @internal Register a local listener without changing wire intent. */
+  _subscribeLocal<K extends BroadcastKind>(kind: K, callback: BroadcastListeners<T>[K][number]): () => void {
+    const listeners = this._subscribers[kind] as Array<typeof callback>
+    listeners.push(callback)
+    return () => {
+      const index = listeners.indexOf(callback)
+      if (index >= 0) listeners.splice(index, 1)
+    }
+  }
+
+  /** @internal Declare wire intent; a reconnect carries it in the RECONCILE entry. */
+  _setWireSubscribed(kind: BroadcastKind, on: boolean): void {
+    if (on === this._wire[kind] || this._isClosed) return
+    this._wire[kind] = on
+    if (on) this._connection.sendBroadcastSubscribe(this, kind === 'binary')
+    else this._connection.sendBroadcastUnsubscribe(this, kind === 'binary')
+  }
+
+  _reattachState(): ReattachState {
+    return { broadcast: { ...this._wire } }
+  }
+
   publish(data: ChannelData<T>): Promise<ChannelPublishAck> {
+    return reportingUnexpected(this._publishUnreported(data))
+  }
+
+  /** @internal A publish whose rejection its caller handles: a Room's are expected outcomes, and the server reports
+   *  its bugs. */
+  _publishUnreported(data: ChannelData<T>): Promise<ChannelPublishAck> {
     if (this._isClosed) throw new ChannelClosedError()
     const serialized = stringify(data)
-    const ret = this._trackAck(
-      new Promise<ChannelPublishAck>((resolve, reject) => {
-        this._connection.sendPublishAckReq(this, serialized, (seq) => {
-          this._pendingAcks.set(seq, { resolve, reject })
-        })
-      }),
-    )
-    ret.catch(reportChannelError)
-    return ret
+    return this._awaitPublishAck((register) => this._connection.sendPublishAckReq(this, serialized, register))
   }
 
   subscribe(callback: BroadcastListener<T>): () => void {
-    if (this._broadcastListeners.length === 0) {
-      this._connection.sendBroadcastSubscribe(this, false)
-    }
-    this._broadcastListeners.push(callback)
-    return () => {
-      const index = this._broadcastListeners.indexOf(callback)
-      if (index >= 0) this._broadcastListeners.splice(index, 1)
-      if (this._broadcastListeners.length === 0) {
-        this._connection.sendBroadcastUnsubscribe(this, false)
-      }
-    }
+    return this._subscribeWired('text', callback)
   }
 
   publishBinary(data: Uint8Array): Promise<ChannelPublishAck> {
+    return reportingUnexpected(this._publishBinaryUnreported(data))
+  }
+
+  /** @internal */
+  _publishBinaryUnreported(data: Uint8Array): Promise<ChannelPublishAck> {
     if (this._isClosed) throw new ChannelClosedError()
-    const ret = this._trackAck(
-      new Promise<ChannelPublishAck>((resolve, reject) => {
-        this._connection.sendPublishBinaryAckReq(this, data, (seq) => {
-          this._pendingAcks.set(seq, { resolve, reject })
-        })
-      }),
+    return this._awaitPublishAck((register) => this._connection.sendPublishBinaryAckReq(this, data, register))
+  }
+
+  private _awaitPublishAck(send: (register: (seq: number) => void) => void): Promise<ChannelPublishAck> {
+    return this._trackAck(
+      new Promise<ChannelPublishAck>((resolve, reject) =>
+        send((seq) => this._pendingAcks.set(seq, { resolve, reject })),
+      ),
     )
-    ret.catch(reportChannelError)
-    return ret
   }
 
   subscribeBinary(callback: BroadcastBinaryListener): () => void {
-    if (this._broadcastBinaryListeners.length === 0) {
-      this._connection.sendBroadcastSubscribe(this, true)
-    }
-    this._broadcastBinaryListeners.push(callback)
+    return this._subscribeWired('binary', callback)
+  }
+
+  /** The first listener of a kind subscribes the wire, and the last one unsubscribes it. */
+  private _subscribeWired<K extends BroadcastKind>(kind: K, callback: BroadcastListeners<T>[K][number]): () => void {
+    if (this._subscribers[kind].length === 0) this._setWireSubscribed(kind, true)
+    const unsubscribe = this._subscribeLocal(kind, callback)
     return () => {
-      const index = this._broadcastBinaryListeners.indexOf(callback)
-      if (index >= 0) this._broadcastBinaryListeners.splice(index, 1)
-      if (this._broadcastBinaryListeners.length === 0) {
-        this._connection.sendBroadcastUnsubscribe(this, true)
-      }
+      unsubscribe()
+      if (this._subscribers[kind].length === 0) this._setWireSubscribed(kind, false)
     }
   }
 
@@ -683,29 +712,29 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   _onTransportPublish(data: string, wireInfo: WirePublishInfo): void {
     const parsed = parse(data) as ChannelData<T>
     const info = makePublishInfo(this.key!, wireInfo.seq, wireInfo.timestamp)
-    for (const cb of this._broadcastListeners) {
-      try {
-        cb(parsed, info)
-      } catch (err) {
-        if (this._handleCallbackError(err)) return
-      }
+    for (const cb of [...this._subscribers.text]) {
+      if (invokeChannelListener(cb, [parsed, info], (error) => this._handleCallbackError(error))) return
     }
   }
 
   _onTransportPublishBinary(data: Uint8Array, wireInfo: WirePublishInfo): void {
     const info = makePublishInfo(this.key!, wireInfo.seq, wireInfo.timestamp)
-    for (const cb of this._broadcastBinaryListeners) {
-      try {
-        cb(data, info)
-      } catch (err) {
-        if (this._handleCallbackError(err)) return
-      }
+    for (const cb of [...this._subscribers.binary]) {
+      if (invokeChannelListener(cb, [data, info], (error) => this._handleCallbackError(error))) return
     }
   }
 }
 
 function reportChannelError(err: unknown): void {
   console.error('[telefunc:channel-error]', err instanceof Error ? err : new Error(String(err)))
+}
+
+/** Reports a publish rejection that is a bug; the caller still sees every rejection. */
+function reportingUnexpected(publish: Promise<ChannelPublishAck>): Promise<ChannelPublishAck> {
+  publish.catch((err) => {
+    if (classifyTelefuncError(err, isExpectedChannelFailure).kind === 'bug') reportChannelError(err)
+  })
+  return publish
 }
 
 function normalizeCloseTimeout(timeout: number | undefined): number {

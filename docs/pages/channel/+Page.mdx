@@ -11,6 +11,8 @@ The following low-level **primitives** enable all kinds of <Link href="/stream">
 - <Link href="#broadcast"><code>Broadcast</code></Link> — a keyed pub/sub bus (`publish()`/`subscribe()`), server-side.
 - <Link href="#new-broadcastchannel"><code>new BroadcastChannel()</code></Link> — broadcast also on the client-side.
 
+> Building on these, <Link href="/room">`Room`</Link> adds multi-party rooms with presence, participant metadata, private messages, and admin controls.
+
 > You can use them for one-way streams (aka streaming) as well as two-way streams (aka real-time):
 > - Chat rooms
 > - Live feeds (sports scores, stock tickers)
@@ -260,7 +262,9 @@ info.seq        // monotonic sequence number for this key
 info.timestamp  // server timestamp (Unix epoch ms)
 ```
 
-`seq` is monotonic per `key`, which is useful for ordering and gap detection. `publish()` resolves to `info` once the message is accepted.
+`seq` is monotonic per `key`, which is useful for ordering and gap detection. `publish()` resolves to `info` once the message is accepted. A publish right after a `subscribe()` on the same server (on Cloudflare, in the same session) reaches that subscriber: while the new subscription is being set up, that server's publishes on its key wait for it, in call order, for up to 60 seconds. Up to 1,024 publishes per key wait, holding at most `config.channel.bufferLimit` (`bufferLimitBinary`) bytes; a publish past either limit rejects with a `ChannelOverflowError`.
+
+`receivers` counts who the message was handed to: subscribers with the in-memory backend, server instances with standalone Redis, session Durable Objects on Cloudflare. With each of them `0` means nobody anywhere is subscribed; Redis Cluster omits it, since a node counts only its own subscribers.
 
 > By default, broadcast is in-memory — messages only reach subscribers on the same server. This works out-of-the-box for single-server deployments.
 >
@@ -401,7 +405,7 @@ Only the two ends of a channel can use it, while anything that knows a broadcast
 | Message type | Asymmetric:<ul><li>Two different types: `Channel<ClientMessageType, ServerMessageType>`</li><li>The server uses the `new Channel()` instance, and returns `channel.client` to the client</li></ul> | Symmetric:<ul><li>Same type for every member: `BroadcastChannel<MessageType>`</li><li>The server uses and returns the same `BroadcastChannel` instance</li></ul> |
 | Message return | The other end's reply (if `{ ack: true }`) | A receipt: `{ key, seq, timestamp }` |
 | `close()` | Closes the channel for both ends | Detaches this member; the group lives on |
-| Multi-server | <Link href="/stream/scale#sticky-sessions">Sticky sessions</Link> | <Link href="/stream/scale#broadcast">Broadcast transport</Link> |
+| Multi-server | <Link href="/stream/scale#sticky-sessions">Sticky sessions</Link> | <Link href="/stream/scale#broadcast">Cross-instance backend</Link> |
 
 
 ## Errors

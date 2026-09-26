@@ -20,11 +20,8 @@ import type { TelefuncServerExtension } from './extensions.js'
 import { registerShieldType } from './shield.js'
 import { isTelefuncFilePath } from '../../utils/isTelefuncFilePath.js'
 import { toPosixPath, pathIsAbsolute, assertPosixPath } from '../../utils/path.js'
-import {
-  installBroadcastAdapter,
-  DefaultBroadcastAdapter,
-  type BroadcastTransport,
-} from '../../wire-protocol/server/broadcast.js'
+import { configureBroadcastTransport } from '../../wire-protocol/backend/install.js'
+import type { BroadcastTransport } from '../../wire-protocol/backend/broadcast/transport.js'
 import {
   CHANNEL_BUFFER_LIMIT_BYTES,
   CHANNEL_BUFFER_LIMIT_BINARY_BYTES,
@@ -217,12 +214,12 @@ type ConfigResolved = {
   extensions: TelefuncServerExtension[]
 }
 
-const configState: ConfigUser = getGlobalObject('serverConfig.ts', {
-  stream: {},
-  channel: {},
-  broadcast: {},
-  extensions: [],
+const globalObject = getGlobalObject('serverConfig.ts', {
+  config: { stream: {}, channel: {}, broadcast: {}, extensions: [] } as ConfigUser,
+  /** Transports a server adapter enables: kept apart from the user's config, which a later assignment replaces. */
+  adapterChannelTransports: new Set<ChannelTransports[number]>(),
 })
+const configState = globalObject.config
 
 const configUser: ConfigUser = new Proxy({} as ConfigUser, {
   get(_target, prop) {
@@ -336,7 +333,9 @@ function getServerConfig(): ConfigResolved {
       transport: configState.stream.transport || DEFAULT_STREAM_TRANSPORT,
     },
     channel: {
-      transports: configState.channel.transports ?? [...DEFAULT_SERVER_CHANNEL_TRANSPORTS],
+      transports: configState.channel.transports ?? [
+        ...new Set([...DEFAULT_SERVER_CHANNEL_TRANSPORTS, ...globalObject.adapterChannelTransports]),
+      ],
       reconnectTimeout: configState.channel.reconnectTimeout ?? CHANNEL_RECONNECT_TIMEOUT_MS,
       idleTimeout: configState.channel.idleTimeout ?? CHANNEL_IDLE_TIMEOUT_MS,
       pingInterval: configState.channel.pingInterval ?? CHANNEL_PING_INTERVAL_MS,
@@ -365,13 +364,9 @@ function getServerExtensionTypes() {
   }
 }
 
-/** @internal Push additional transports into the default only if the user hasn't set one. */
+/** @internal Adds transports to the defaults, which apply while the user sets none. */
 function enableChannelTransports(transports: ChannelTransports): void {
-  if (!configState.channel.transports) {
-    configState.channel.transports = [
-      ...new Set([...DEFAULT_SERVER_CHANNEL_TRANSPORTS, ...transports]),
-    ] as ChannelTransports
-  }
+  for (const transport of transports) globalObject.adapterChannelTransports.add(transport)
 }
 
 function applyUserConfig(prop: string | symbol, val: unknown) {
@@ -493,8 +488,10 @@ function applyChannelConfig(val: unknown): void {
       case 'bufferLimitBinary':
       case 'sseFlushThrottle':
       case 'ssePostIdleFlushDelay':
-        assertUsage(typeof value === 'number', `\`${configPath}\` should be a number`)
-        assertUsage(value >= 0, `\`${configPath}\` should be a non-negative number`)
+        assertUsage(
+          typeof value === 'number' && Number.isSafeInteger(value) && value >= 0,
+          `\`${configPath}\` should be a non-negative safe integer`,
+        )
         ;(next as Record<string, unknown>)[key] = value
         break
       default:
@@ -506,18 +503,23 @@ function applyChannelConfig(val: unknown): void {
 
 function applyBroadcastConfig(val: unknown): void {
   assertUsage(isObject(val), 'config.broadcast should be an object')
+  const next: BroadcastConfigUser = {}
   for (const [key, value] of Object.entries(val)) {
     if (key === 'transport') {
       assertUsage(
-        isObject(value) && typeof (value as any).send === 'function' && typeof (value as any).listen === 'function',
-        'config.broadcast.transport must be a BroadcastTransport with send() and listen() methods',
+        isObject(value) &&
+          (['send', 'listen', 'sendBinary', 'listenBinary'] as const).every(
+            (method) => typeof value[method] === 'function',
+          ),
+        'config.broadcast.transport must be a BroadcastTransport with send(), listen(), sendBinary() and listenBinary() methods',
       )
-      configState.broadcast.transport = value as BroadcastTransport
-      installBroadcastAdapter(() => new DefaultBroadcastAdapter(value as BroadcastTransport))
+      next.transport = value as BroadcastTransport
     } else {
       assertUsage(false, `Unknown config.broadcast.${key}`)
     }
   }
+  configState.broadcast = next
+  if (next.transport) configureBroadcastTransport(next.transport)
 }
 
 function validateStreamTransport(val: unknown, configPath: string): StreamTransport {

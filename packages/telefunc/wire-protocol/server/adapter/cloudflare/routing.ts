@@ -4,10 +4,10 @@ export {
   KNOWN_BROADCAST_BUCKETS,
   TELEFUNC_BROADCAST_BUCKET_HEADER,
   TELEFUNC_SESSION_HEADER,
-  TELEFUNC_SHARD_HEADER,
   assertLocationFallbackIsScaled,
   getBucketCoordinatorShardIndices,
   getDeterministicKeyBucketIndex,
+  getScaleCountForBucket,
   getShardIndicesForBucket,
   resolveCloudflareLocationHint,
   resolveSessionRoutingTarget,
@@ -33,8 +33,6 @@ const DEFAULT_BROADCAST_BUCKETS = [
   'oc',
 ] as const satisfies readonly DurableObjectLocationHint[]
 const TELEFUNC_BROADCAST_BUCKET_HEADER = 'x-telefunc-broadcast-bucket'
-/** Internal: forwarded to the DO so it knows its own instance name. */
-const TELEFUNC_SHARD_HEADER = 'x-telefunc-shard'
 const KNOWN_BROADCAST_BUCKETS = new Set<string>(DEFAULT_BROADCAST_BUCKETS as readonly string[])
 
 type LocationBucket = DurableObjectLocationHint
@@ -99,6 +97,7 @@ function resolveSessionRoutingTarget(
   scale: CloudflareScale | undefined,
   request: Request,
   locationFallback: DurableObjectLocationHint,
+  token: string,
 ): SessionRoutingTarget {
   let locationBucket = resolveCloudflareLocationHint(request, locationFallback)
   // With a per-region `scale` map, a recognized region the user didn't list has no Durable Objects
@@ -107,7 +106,9 @@ function resolveSessionRoutingTarget(
     locationBucket = locationFallback
   }
   const shardIndices = getShardIndicesForBucket(scale, locationBucket)
-  const shardOrdinal = shardIndices[Math.floor(Math.random() * shardIndices.length)]!
+  // By the session's token, so its calls and channels reach one shard even without a KV entry (a first call's, or a
+  // lapsed one's).
+  const shardOrdinal = shardIndices[getDeterministicKeyBucketIndex(token, shardIndices.length)]!
   const sessionInstanceName = getSessionShardName(baseInstanceName, locationBucket, shardOrdinal)
 
   return { sessionInstanceName, locationBucket, shardOrdinal }

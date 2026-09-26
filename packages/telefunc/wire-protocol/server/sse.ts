@@ -15,7 +15,7 @@ import { textEncoder } from '../frame.js'
 import { parseSseRequestMetadata, type SseRequestMetadata } from '../sse-request.js'
 import { OversizeFrameError, StreamReader, StreamTruncatedError } from './request/StreamReader.js'
 import { getChannelMux } from './mux.js'
-import type { ReconcileOutcome, ServerTransport } from './mux.js'
+import type { ChannelMux, ReconcileOutcome, ServerTransport } from './mux.js'
 import { encode, ProtocolViolationError } from '../shared-ws.js'
 
 type SseChannelHttpResponse = {
@@ -53,7 +53,10 @@ class SseConnectionTransport {
    *  connection — covers the same-instance race where the long-lived stream-request POST
    *  lands before the stream-response POST. */
   private readonly pendingConnections = new Map<string, Set<(connection: SseConnection | null) => void>>()
-  private readonly mux = getChannelMux()
+  /** Per use: a Cloudflare session DO hosts its own channels, and this transport serves every one in the isolate. */
+  private get mux(): ChannelMux {
+    return getChannelMux()
+  }
   private readonly transport: ServerTransport<SseConnection> = {
     getSessionId: (connection) => connection.sessionId ?? undefined,
     setSessionId: (connection, sessionId) => {
@@ -155,7 +158,10 @@ class SseConnectionTransport {
     // sticky batch. Dispatch safety is owned by `runStreamResponse` releasing `ready` only after
     // RECONCILED — the read loop below still waits on that gate, so early bytes sit unread until then.
     this.sendNow(connection, encode.streamRequestOpenAck())
-    if (!(await this.waitReady(connection))) return badRequest()
+    // No deadline: the client trusts this POST from the ack on, and a reconcile held for connectTtl can outlast one. The
+    // gate opens on every path, when runStreamResponse ends or the connection closes.
+    await connection.ready
+    if (connection.closed) return badRequest()
     try {
       while (true) {
         const raw = await reader.readLengthPrefixedBytesOrNull(WIRE_MAX_RAW_FRAME_BYTES)

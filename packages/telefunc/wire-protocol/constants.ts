@@ -10,6 +10,9 @@ export const SERIALIZER_PREFIX_PROMISE = '!TelefuncPromise:'
 export const SERIALIZER_PREFIX_CHANNEL = '!TelefuncChannel:'
 export const SERIALIZER_PREFIX_FUNCTION = '!TelefuncFunction:'
 export const SERIALIZER_PREFIX_BROADCAST = '!TelefuncBroadcast:'
+export const SERIALIZER_PREFIX_ROOM = '!TelefuncRoom:'
+export const SERIALIZER_PREFIX_ROOM_PARTICIPANT = '!TelefuncRoomParticipant:'
+export const SERIALIZER_PREFIX_ROOM_REMOTE = '!TelefuncRoomRemoteParticipant:'
 
 /** Marker key used on the ack payload of a server-returned function when its arg shield
  *  rejects the incoming args. The client-side reviver detects this and throws on the
@@ -104,8 +107,8 @@ export const UPGRADE_STAGE_TTL_MS = 10_000
 export const UPGRADE_MAX_ID_BYTES = 256
 
 /** Worst case for one open entry beyond its id: the key names, `"ix":65535`,
- *  `"lastSeq":4294967295`, `"initial":true` and the separator. */
-const RECONCILE_ENTRY_ENVELOPE_BYTES = 96
+ *  `"lastSeq":4294967295`, `"initial":true`, `"broadcast":{"text":false,"binary":false}` and the separator. */
+const RECONCILE_ENTRY_ENVELOPE_BYTES = 99
 
 /** Bounds what unauthenticated PREPARE frames can pin in memory before any of them commits. */
 export const UPGRADE_MAX_STAGED_RECORDS = 1_024
@@ -180,6 +183,8 @@ export const CHANNEL_CLIENT_REPLAY_BUFFER_BINARY_BYTES = 2 * 1024 * 1024
 export const CHANNEL_BUFFER_LIMIT_BYTES = 512 * 1024
 /** Maximum bytes buffered per channel for binary messages sent before a peer connects. */
 export const CHANNEL_BUFFER_LIMIT_BINARY_BYTES = 2 * 1024 * 1024
+/** How long a Broadcast publish or a Room commit waits for this instance's new subscriptions on its key or lane. */
+export const ESTABLISH_HOLD_MS = 60_000
 
 /** How long a channel waits for a peer to connect after the server→client
  *  HTTP response carrying `channel.client` has been serialized. */

@@ -1,13 +1,15 @@
 export { pumpClientProducerToChannel }
 
-import { CHANNEL_PUMP_TAG_DATA } from '../../constants.js'
-import { concat } from '../../frame.js'
+import { CHANNEL_PUMP_TAG_DATA, CHANNEL_PUMP_TAG_ERROR } from '../../constants.js'
+import { concat, textEncoder } from '../../frame.js'
 import { ChannelClosedError } from '../../channel-errors.js'
 import { ClientChannel } from '../channel.js'
 import type { ChannelTransports } from '../../constants.js'
 import type { StreamingProducer } from '../../types.js'
+import { randomUuid } from '../../../utils/randomUuid.js'
 
 const TAG_DATA = new Uint8Array([CHANNEL_PUMP_TAG_DATA])
+const TAG_ERROR = new Uint8Array([CHANNEL_PUMP_TAG_ERROR])
 
 /**
  * Pump a single producer's chunks to the server through a dedicated ClientChannel.
@@ -27,13 +29,15 @@ function pumpClientProducerToChannel(
   telefuncUrl: string,
   connectionKey?: string,
   headers?: Record<string, string>,
+  idleTimeout?: number,
 ) {
   const channel = new ClientChannel({
-    channelId: crypto.randomUUID(),
+    channelId: randomUuid(),
     transports: channelTransports,
     connectionKey,
     headers,
     telefuncUrl,
+    idleTimeout,
   })
 
   const producer = createProducer()
@@ -64,14 +68,18 @@ function pumpClientProducerToChannel(
         const pending = channel._sendBinary(concat(TAG_DATA, value))
         if (pending) await pending
       }
-    } catch {
+    } catch (err) {
       // ChannelClosedError — either from onOpen rejection (closed before connect)
       // or from sendBinary (closed mid-send, e.g. by abort(res)).
       // Abort semantics propagate through doCancel(err) → producer.cancel(err) →
       // reader.cancel(err), not through this catch.
+      // Anything else is the source failing: the server's stream errors rather than end as if complete.
+      if (!(err instanceof ChannelClosedError) && !channel.isClosed)
+        channel._sendBinary(concat(TAG_ERROR, textEncoder.encode('{}')))
     } finally {
       doCancel()
-      channel.close()
+      // A server that is away gets the upload's end once back, as an open channel waits for it.
+      channel.close({ timeout: channel._reconnectWindow() })
     }
   })()
 

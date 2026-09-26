@@ -65,7 +65,7 @@ async function parseBlobBody(blob: Blob): Promise<{ metadata: any; frames: Uint8
 /** Incrementally yield length-prefixed chunks from a ReadableStream (streamRequest body). */
 async function* readLengthPrefixed(stream: ReadableStream<Uint8Array>): AsyncGenerator<Uint8Array> {
   const reader = stream.getReader()
-  let buf = new Uint8Array(0)
+  let buf: Uint8Array = new Uint8Array(0)
   const pull = async (): Promise<boolean> => {
     const { value, done } = await reader.read()
     if (done) return false
@@ -93,7 +93,7 @@ async function* readLengthPrefixed(stream: ReadableStream<Uint8Array>): AsyncGen
 async function runScenario(loseSeq1: boolean): Promise<{ received: number[]; wire2Upstream: number[] }> {
   const received: number[] = []
   const serverCh = new ServerChannel<(n: number) => void, never>()
-  serverCh.listen((n) => received.push(n))
+  serverCh.listen((n) => void received.push(n))
 
   const upstreamSeqsByPost: number[][] = []
   let streamReqCount = 0

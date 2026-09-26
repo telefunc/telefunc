@@ -26,6 +26,11 @@ type ServerBroadcastResult = {
   done: boolean
 }
 
+/** A fresh key's first seq depends on the backend (Redis seeds it from its clock): assert three in a row. */
+function consecutive(first: number): number[] {
+  return [first, first + 1, first + 2]
+}
+
 function testPublish() {
   test('broadcast: paired text publish/subscribe roundtrip', async () => {
     await navigate(`${getServerUrl()}/publish`)
@@ -34,15 +39,16 @@ function testPublish() {
     await autoRetry(async () => {
       const result = await getResult<TextBroadcastResult>('#publish-result')
 
-      // 3 publishes → 3 acks with monotonically increasing seq, all keyed to the shared topic.
+      // 3 publishes → 3 acks with consecutive seqs, all keyed to the shared topic.
       expect(result.acks.length).toBe(3)
-      expect(result.acks.map((a) => a.seq)).deep.equal([1, 2, 3])
+      const seqs = consecutive(result.acks[0]!.seq)
+      expect(result.acks.map((a) => a.seq)).deep.equal(seqs)
       for (const ack of result.acks) expect(ack.key).match(/^room:text-test:/)
 
       // Subscriber on the same key received all 3 messages in publish order.
       expect(result.received.map((r) => r.text)).deep.equal(['msg-0', 'msg-1', 'msg-2'])
       for (const r of result.received) expect(r.from).toBe('client')
-      expect(result.received.map((r) => r.seq)).deep.equal([1, 2, 3])
+      expect(result.received.map((r) => r.seq)).deep.equal(seqs)
     })
   })
 
@@ -54,14 +60,15 @@ function testPublish() {
       const result = await getResult<BinaryPairResult>('#publish-result')
 
       expect(result.acks.length).toBe(3)
-      expect(result.acks.map((a) => a.seq)).deep.equal([1, 2, 3])
+      const seqs = consecutive(result.acks[0]!.seq)
+      expect(result.acks.map((a) => a.seq)).deep.equal(seqs)
       for (const ack of result.acks) expect(ack.key).match(/^room:binary-test:/)
 
       // Each frame is 128 bytes filled with i + 10 (10, 11, 12).
       expect(result.received.length).toBe(3)
       expect(result.received.map((r) => r.size)).deep.equal([128, 128, 128])
       expect(result.received.map((r) => r.firstByte)).deep.equal([10, 11, 12])
-      expect(result.received.map((r) => r.seq)).deep.equal([1, 2, 3])
+      expect(result.received.map((r) => r.seq)).deep.equal(seqs)
     })
   })
 
