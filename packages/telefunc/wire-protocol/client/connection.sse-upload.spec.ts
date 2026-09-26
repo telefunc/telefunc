@@ -6,6 +6,8 @@ import { expect, test } from 'vitest'
 import { stringify } from '@brillout/json-serializer/stringify'
 
 import { ClientConnection } from './connection.js'
+import { ClientChannel } from './channel.js'
+import { config as clientConfig } from '../../client/clientConfig.js'
 import { ServerChannel } from '../server/channel.js'
 import { decode, encode, TAG } from '../shared-ws.js'
 import { decodeU32 } from '../frame.js'
@@ -153,4 +155,68 @@ test("a reconnect's wire gets its own connection id, so a POST still in flight f
   expect(wires.length).toBeGreaterThan(1)
   expect(wires[1]!.connId).not.toBe(wires[0]!.connId)
   connection.dispose()
+})
+
+test("a server close that reaches the page before its upload request settles gets the page's acknowledgement", async () => {
+  const acked: number[] = []
+  let ix = 0
+  let serverSend!: (frame: Uint8Array) => void
+  let refuseUpload!: () => void
+  clientConfig.fetch = (async (_url: string, init: RequestInit) => {
+    const body = init.body as unknown
+    if (!(body instanceof Blob)) {
+      return await new Promise<Response>((resolve) => {
+        refuseUpload = () => resolve(new Response('bad request', { status: 400 }))
+      })
+    }
+    const { metadata, frames } = await parseBlobBody(body)
+    if (metadata.streamResponse) {
+      for (const raw of frames) {
+        const frame = decode(raw as never)
+        if (frame.tag === TAG.RECONCILE) ix = frame.payload.open[0]!.ix
+      }
+      const encoder = new TextEncoder()
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(encoder.encode(': open\n\n'))
+          serverSend = (frame) =>
+            controller.enqueue(encoder.encode(`data: ${uint8ArrayToBase64url(frame as never)}\n\n`))
+        },
+      })
+      return new Response(stream as never, { status: 200, headers: { 'Content-Type': 'text/event-stream' } })
+    }
+    for (const raw of frames) {
+      const frame = decode(raw as never)
+      if (frame.tag === TAG.CLOSE_ACK) acked.push(frame.index)
+    }
+    return new Response('', { status: 200 })
+  }) as unknown as typeof fetch
+  const channel = new ClientChannel({
+    channelId: crypto.randomUUID(),
+    transports: ['sse'],
+    telefuncUrl: 'http://close-ack.test/_telefunc',
+    connectionKey: crypto.randomUUID(),
+  })
+  const closed = new Promise((resolve) => channel.onClose(resolve))
+  await delay(20)
+  serverSend(
+    encode.reconciled({
+      sessionId: crypto.randomUUID(),
+      open: [{ ix, lastSeq: 0 }],
+      reconnectTimeout: 60_000,
+      idleTimeout: 60_000,
+      pingInterval: 100_000,
+      clientReplayBuffer: 1_000_000,
+      clientReplayBufferBinary: 2_000_000,
+      sseFlushThrottle: 0,
+      ssePostIdleFlushDelay: 0,
+      transports: ['sse'],
+    }),
+  )
+  await delay(20)
+  serverSend(encode.close(ix, 5_000)) // the server's close()
+  expect(await closed).toBeUndefined()
+  refuseUpload() // a page that can't stream a request body (Firefox)
+  await delay(100)
+  expect(acked).toEqual([ix])
 })

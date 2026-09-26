@@ -1172,7 +1172,8 @@ class ClientConnection implements MuxConnection {
   }
 
   private drainBufferedFramesToWire(): void {
-    for (const frame of this.drainBufferedFrames(this.channels)) this.transport.sendFrame(frame)
+    // A released channel's frames too: the server may still wait on them, such as a close on its CLOSE_ACK.
+    for (const frame of this.drainBufferedFrames(null)) this.transport.sendFrame(frame)
   }
 
   private handleTransportLoss(err: Error, rejected = false): void {
@@ -1421,7 +1422,8 @@ class ClientConnection implements MuxConnection {
   }
 
   private drainBufferedFrames(
-    releasableChannels: Set<number> | Map<number, unknown>,
+    /** Frames for these channels are sent; null: every frame. */
+    releasableChannels: Set<number> | Map<number, unknown> | null,
     /** Frames for these channels stay in the buffer. Omitted: nothing is retained. */
     retainedChannels?: Set<number> | Map<number, unknown>,
   ): OutboundFrame[] {
@@ -1433,7 +1435,7 @@ class ClientConnection implements MuxConnection {
       const frame = entry.frame
       const channelIx = entry.channelIx
       const seq = entry.seq
-      if (!releasableChannels.has(channelIx)) {
+      if (releasableChannels !== null && !releasableChannels.has(channelIx)) {
         if (retainedChannels?.has(channelIx)) sendBuffer[writeIx++] = entry
         continue
       }
