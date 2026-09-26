@@ -159,6 +159,16 @@ test('a buffered acked binary send is kept in the binary replay lane, not the te
   connection.dispose()
 })
 
+test('a sent frame stays replayable through the pong deadline and the reconnect timeout after it', () => {
+  const channel = createChannel()
+  const connection = ClientConnection.getOrCreate('http://replay-age.test', channel as never, stalledOptions()) as any
+  const replay = connection.replayBuffers.get(0)
+  replay.push(replay.nextSeq(), encode.text(0, 'sent as the wire died', 1))
+  replay.evict(Date.now() + 2 * connection.pingIntervalMs + connection.reconnectTimeoutMs)
+  expect(replay.getAfter(0)).toHaveLength(1)
+  connection.dispose()
+})
+
 describe('SSE reconcile watchdog', () => {
   afterEach(() => {
     vi.clearAllTimers()

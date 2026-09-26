@@ -498,9 +498,12 @@ class ClientConnection implements MuxConnection {
     )
     const ix = this.nextIndex++
     this.enterChannelPending(ix, channel, true)
+    // As the server's does, a frame stays replayable through the pong deadline, when a silent drop is noticed, then
+    // `reconnectTimeout`, plus a second for the reconnect itself.
+    const maxAgeMs = 2 * this.pingIntervalMs + this.reconnectTimeoutMs + 1_000
     this.replayBuffers.set(
       ix,
-      new ReplayBuffer(this.clientReplayBufferBytes, this.reconnectTimeoutMs, this.clientReplayBufferBinaryBytes),
+      new ReplayBuffer(this.clientReplayBufferBytes, maxAgeMs, this.clientReplayBufferBinaryBytes),
     )
 
     if (!this.transport.hasWire() && !this.transport.isConnecting()) {
