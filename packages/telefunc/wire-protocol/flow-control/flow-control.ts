@@ -34,10 +34,6 @@ class FlowControl {
   private _bdp = new BdpEstimator()
   private _peerWindow: number = CREDIT_WINDOW_INITIAL_BYTES
   private _peerMsgWindow: number = CREDIT_MSG_WINDOW_INITIAL
-  /** What the peer last advertised, which a reattach restores: the peer refreshes after consuming a quarter of its own
-   *  window, and that window can outgrow the initial one. */
-  private _peerGrantBytes: number = CREDIT_WINDOW_INITIAL_BYTES
-  private _peerGrantMessages: number = CREDIT_MSG_WINDOW_INITIAL
   private _consumedBytes = 0
   private _consumedMessages = 0
   /** Single deferred shared by all senders blocked on credit. */
@@ -74,12 +70,12 @@ class FlowControl {
   }
 
   onPeerByteWindow(bytes: number): void {
-    this._peerWindow = this._peerGrantBytes = bytes
+    this._peerWindow = bytes
     this._tryWakeCreditWaiters()
   }
 
   onPeerMessageWindow(count: number): void {
-    this._peerMsgWindow = this._peerGrantMessages = count
+    this._peerMsgWindow = count
     this._tryWakeCreditWaiters()
   }
 
@@ -161,10 +157,10 @@ class FlowControl {
     this._curBucketStart = now
   }
 
-  /** Transport reattach: reset sender-side credit on both axes to the peer's last grant. */
+  /** Transport reattach: reset sender-side credit on both axes to initial. */
   reset(): void {
-    this._peerWindow = this._peerGrantBytes
-    this._peerMsgWindow = this._peerGrantMessages
+    this._peerWindow = CREDIT_WINDOW_INITIAL_BYTES
+    this._peerMsgWindow = CREDIT_MSG_WINDOW_INITIAL
     this._bdp.reset()
     this._tryWakeCreditWaiters()
   }

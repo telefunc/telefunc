@@ -693,24 +693,21 @@ class ClientConnection implements MuxConnection {
   }
 
   sendByteWindowUpdate(channel: MuxChannel, bytes: number): void {
-    this.sendWindowUpdate(channel, (ix) => encode.window(ix, bytes))
+    const ix = this.channelIndex.get(channel)
+    if (ix === undefined) return
+    // Window updates are ephemeral — the sender resets `_peerWindow` to the initial
+    // value on reconnect and re-adopts the peer's advertised `W` from the next update,
+    // so dropping one mid-disconnect is harmless.
+    if (!this.canSendImmediately()) return
+    this.transport.sendFrame({ kind: 'flow-control', frame: encode.window(ix, bytes) })
   }
 
   sendMsgWindowUpdate(channel: MuxChannel, count: number): void {
-    this.sendWindowUpdate(channel, (ix) => encode.msgWindow(ix, count))
-  }
-
-  /** Buffered, not dropped: the server resets its credit when a reconcile attaches the channel, before that reconcile's
-   *  RECONCILED reaches this client, and until the next attach only these refreshes restore it. */
-  private sendWindowUpdate(channel: MuxChannel, buildFrame: (ix: number) => Uint8Array<ArrayBuffer>): void {
     const ix = this.channelIndex.get(channel)
     if (ix === undefined) return
-    const frame = buildFrame(ix)
-    if (!this.canSendImmediately()) {
-      this.sendBuffer.push({ frame, channelIx: ix, seq: undefined })
-      return
-    }
-    this.transport.sendFrame({ kind: 'flow-control', frame })
+    // Ephemeral — same rationale as `sendByteWindowUpdate`.
+    if (!this.canSendImmediately()) return
+    this.transport.sendFrame({ kind: 'flow-control', frame: encode.msgWindow(ix, count) })
   }
 
   sendBdpPing(channel: MuxChannel): void {

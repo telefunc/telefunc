@@ -253,19 +253,6 @@ test('a reconnect re-attaches a channel still closing, so its close request can 
   connection.dispose()
 })
 
-test("a window refresh made while the wire can't send waits in the send buffer instead of being dropped", () => {
-  const channel = createChannel()
-  const connection = ClientConnection.getOrCreate('http://window.test', channel as never, stalledOptions()) as any
-  // The server reset this channel's credit when its reconcile attached it; only these refreshes restore it.
-  connection.sendByteWindowUpdate(channel, 65_536)
-  connection.sendMsgWindowUpdate(channel, 100)
-  expect(connection.sendBuffer.map(({ frame }: { frame: Uint8Array }) => frame[0])).toEqual([
-    TAG.WINDOW,
-    TAG.MSG_WINDOW,
-  ])
-  connection.dispose()
-})
-
 test("a first connect's retry holds back a newer frame behind the ones its failed attempt sent", () => {
   const channel = createChannel()
   const connection = ClientConnection.getOrCreate('http://first-retry.test', channel as never, stalledOptions()) as any
