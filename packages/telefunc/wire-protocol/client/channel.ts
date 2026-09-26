@@ -246,7 +246,9 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   close(opts?: ChannelCloseOptions): Promise<ChannelCloseResult> {
     if (this._closePromise) return this._closePromise
     if (this._didTerminate) return Promise.resolve(this._didReceiveCloseAck ? 0 : 1)
-    const timeout = normalizeCloseTimeout(opts?.timeout)
+    // A closing channel waits for a gone server as long as an open one does, so a server back within that still gets it.
+    const timeout =
+      opts?.timeout === undefined ? this._connection.reconnectWindow() : normalizeCloseTimeout(opts.timeout)
     this._closeDeadline = Date.now() + timeout
     this._expectCloseAck = true
     this._isClosed = true

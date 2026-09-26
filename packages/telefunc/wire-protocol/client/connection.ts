@@ -170,6 +170,7 @@ interface MuxConnection {
   sendBroadcastSubscribe(channel: MuxChannel, binary: boolean): void
   sendBroadcastUnsubscribe(channel: MuxChannel, binary: boolean): void
   unregister(channel: MuxChannel, err?: Error): void
+  reconnectWindow(): number
 }
 
 type ReconcileOutcome = {
@@ -512,6 +513,11 @@ class ClientConnection implements MuxConnection {
       return
     }
     this.scheduleRegisterReconcile()
+  }
+
+  /** How long a gone server is still held: until its loss is noticed at the pong deadline, then for `reconnectTimeout`. */
+  reconnectWindow(): number {
+    return 2 * this.pingIntervalMs + this.reconnectTimeoutMs
   }
 
   /** As the server's does, a frame stays replayable through the pong deadline, when a silent drop is noticed, then
