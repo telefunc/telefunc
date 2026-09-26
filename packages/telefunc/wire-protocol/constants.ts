@@ -225,8 +225,9 @@ export const CHANNEL_RECONNECT_MAX_DELAY_MS = 5_000
 //   PUBLISH, PUBLISH_BINARY   broadcast fan-out, separate flow control entirely.
 //
 // Window semantics — `WINDOW` frame advertises an absolute value (not additive like
-// HTTP/2). Sender resets `_peerWindow` to `CREDIT_WINDOW_INITIAL_BYTES` on transport
-// reattach; receiver preserves its grown `W` across reconnect (BDP is a property of
+// HTTP/2). Sender resets `_peerWindow` to the last `W` its receiver advertised (at first
+// `CREDIT_WINDOW_INITIAL_BYTES`) on transport reattach; receiver preserves its grown `W`
+// across reconnect (BDP is a property of
 // the path, not of any single wire instance — slight divergence from gRPC's
 // per-connection reset, acceptable for typical transport hiccups).
 

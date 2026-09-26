@@ -235,6 +235,18 @@ describe('FlowControl — reset (transport reattach)', () => {
     expect(flow.decrement(CREDIT_WINDOW_INITIAL_BYTES - 1)).toBeUndefined()
   })
 
+  // The receiver keeps its grown window across a reattach and refreshes only after consuming a quarter of it, so
+  // the sender resumes with that grant: reset to the initial credit, it would stall long before the next refresh.
+  it("resets sender-side credit to the peer's last grant", () => {
+    const { flow } = makeFlow()
+    const grant = CREDIT_WINDOW_INITIAL_BYTES * 8
+    flow.onPeerByteWindow(grant)
+    flow.onPeerMessageWindow(10_000)
+    flow.decrement(grant)
+    flow.reset()
+    for (let message = 0; message < 1_000; message++) expect(flow.decrement(grant / 2_000)).toBeUndefined()
+  })
+
   // After reset, any senders blocked on the prior depletion are released —
   // they'll retry under the fresh transport. Catches a reset that leaks waiters.
   it('drains pending senders on reset', async () => {
