@@ -107,6 +107,23 @@ test("a reconnect declares a broadcast's subscriptions, not the toggles queued b
   connection.dispose()
 })
 
+test("an SSE reconnect leaves a dead POST's messages to the replay, which can't overtake the ones still in flight", () => {
+  const channel = createChannel()
+  const connection = ClientConnection.getOrCreate(
+    'http://outbox-replay.test',
+    channel as never,
+    stalledOptions(),
+  ) as any
+  connection.transport.outbox.push(
+    { frame: encode.text(0, 'queued', 7), deadline: Infinity },
+    { frame: encode.window(0, 65_536), deadline: Infinity },
+  )
+  const { initialFrames } = connection.transport.stageInitialBatch()
+  const tags = initialFrames.map(({ frame }: { frame: Uint8Array }) => frame[0])
+  expect(tags).toEqual([TAG.RECONCILE, TAG.WINDOW])
+  connection.dispose()
+})
+
 test('an SSE reconnect sends its reconcile, not the reconcile and toggles a failed POST left queued', () => {
   const channel = { ...createChannel(), _reattachState: () => ({ broadcast: { text: true, binary: false } }) }
   const connection = ClientConnection.getOrCreate('http://outbox.test', channel as never, {
