@@ -440,6 +440,7 @@ const { room, me } = await onJoinLobby('room-42', 'Alice')
 
 room.onChange(renderRoster)                             // ready checkmarks and player count, on any change
 room.onAnnounce((e) => { if (e.type === 'start') startGame() })
+room.onLeave(() => void onReadyUp('room-42'))          // a leave can leave everyone else ready
 
 onReadyClick(async () => {
   await me.setAttributes({ ready: true }) // my checkmark, seen by everyone
