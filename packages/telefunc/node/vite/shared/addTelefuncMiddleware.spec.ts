@@ -47,3 +47,8 @@ test("a call through Vite's dev and preview server reaches the telefunction", as
   })
   expect(result).toBe('Hello Eva')
 })
+
+test('a request whose path is not a URL, such as //, passes the middleware by', async () => {
+  const response = await fetch(`${origin}//`)
+  expect(response.status).toBe(404)
+})

@@ -2,6 +2,7 @@ export { addTelefuncMiddleware }
 
 import { serve } from '../../server/index.js'
 import type { ViteDevServer } from 'vite'
+import { getRequestPathname } from '../../../utils/getUrlPathname.js'
 
 type ConnectServer = ViteDevServer['middlewares']
 function addTelefuncMiddleware(middlewares: ConnectServer) {
@@ -11,7 +12,7 @@ function addTelefuncMiddleware(middlewares: ConnectServer) {
     const url = req.originalUrl || req.url
     if (!url) return next()
 
-    if (new URL(url, 'http://localhost').pathname !== '/_telefunc') return next()
+    if (getRequestPathname(url) !== '/_telefunc') return next()
 
     const httpResponse = await serve({
       readable: req,
