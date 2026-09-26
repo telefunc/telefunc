@@ -448,7 +448,8 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
 
   _onTransportClose(err?: Error): void {
     this._isClosed = true
-    this._finalizeClose(err)
+    // A close the server acknowledged is graceful, whatever takes the channel off the wire before it finishes.
+    this._finalizeClose(this._didReceiveCloseAck ? undefined : err)
   }
 
   // ── Private ──

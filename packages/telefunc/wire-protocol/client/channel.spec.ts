@@ -135,3 +135,21 @@ test('a close request goes out again when its channel re-attaches before the clo
   channel._onTransportOpen(false) // the reconcile of a reconnect: the first request may have died with the old wire
   expect(sendCloseRequest).toHaveBeenCalledTimes(2)
 })
+
+test('a close the server acknowledged ends gracefully, though a reconnect then drops the channel', async () => {
+  config.fetch = async () => new Response(new ReadableStream({ start() {} }), { status: 200 })
+  const channel = new ClientChannel({
+    channelId: crypto.randomUUID(),
+    transports: [CHANNEL_TRANSPORT.SSE],
+    telefuncUrl: 'http://close-acked.test/_telefunc',
+    connectionKey: crypto.randomUUID(),
+  })
+  const closedWith: unknown[] = []
+  channel.onClose((err) => void closedWith.push(err))
+  const closing = channel.close({ timeout: 5_000 })
+  channel._onTransportCloseAck()
+  // An upgrade's RECONCILED, applied in the same turn, no longer lists the channel the server closed.
+  channel._onTransportClose(new Error('Channel not acknowledged by server after reconnect'))
+  expect(await closing).toBe(0)
+  expect(closedWith).toEqual([undefined])
+})
