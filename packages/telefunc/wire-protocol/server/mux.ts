@@ -657,7 +657,6 @@ class ChannelMux {
         // Transient close so each channel gets its `reconnectTimeout` grace via
         // `_onPeerDisconnect`. Connection-level state is rebuilt by the next reconcile.
         transport.terminateConnection(connection)
-        state.terminatePermanently = false
       }, this.options.pingDeadline),
     )
   }
