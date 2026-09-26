@@ -296,11 +296,14 @@ function isJoinLimb(frame: DecodedFrame): boolean {
 }
 
 /** Per-channel lifecycle. `releasing` = unregistered before the server confirmed —
- *  entry stays so the upcoming RECONCILE carries the ix and buffered ABORT/CLOSE flow alongside. */
+ *  entry stays so the upcoming RECONCILE carries the ix and buffered ABORT/CLOSE flow alongside.
+ *  `draining` = unregistered while frames it queued wait: listed until they are sent, since a RECONCILE or barrier
+ *  leaving it out tells the server it's gone, before its CLOSE_ACK or abort arrives. */
 type ChannelState =
   | { tag: 'pending'; initial: boolean }
   | { tag: 'open' }
   | { tag: 'releasing'; initial: boolean; err: Error }
+  | { tag: 'draining' }
 
 type ChannelEntry = {
   channel: MuxChannel
@@ -488,6 +491,12 @@ class ClientConnection implements MuxConnection {
     entry.state = { tag: 'releasing', initial: entry.state.initial, err }
   }
 
+  private enterChannelDraining(ix: number): void {
+    const entry = this.channels.get(ix)
+    assert(entry && entry.state.tag === 'open')
+    entry.state = { tag: 'draining' }
+  }
+
   private register(channel: MuxChannel): void {
     if (this.ttl) {
       clearTimeout(this.ttl)
@@ -576,6 +585,10 @@ class ClientConnection implements MuxConnection {
     const entry = this.channels.get(ix)!
     if (entry.state.tag === 'pending') {
       this.enterChannelReleasing(ix, err)
+      return
+    }
+    if (entry.state.tag === 'open' && this.sendBuffer.some(({ channelIx }) => channelIx === ix)) {
+      this.enterChannelDraining(ix)
       return
     }
     this.releaseChannel(ix, channel)
@@ -1172,8 +1185,9 @@ class ClientConnection implements MuxConnection {
   }
 
   private drainBufferedFramesToWire(): void {
-    // A released channel's frames too: the server may still wait on them, such as a close on its CLOSE_ACK.
-    for (const frame of this.drainBufferedFrames(null)) this.transport.sendFrame(frame)
+    for (const frame of this.drainBufferedFrames(this.channels)) this.transport.sendFrame(frame)
+    for (const [ix, entry] of this.channels) if (entry.state.tag === 'draining') this.releaseChannel(ix, entry.channel)
+    this.startTtlIfIdle()
   }
 
   private handleTransportLoss(err: Error, rejected = false): void {
@@ -1269,7 +1283,7 @@ class ClientConnection implements MuxConnection {
     this.reconcileIxes = new Set()
     const open: ReconcileOpenEntry[] = []
     for (const [ix, entry] of this.channels) {
-      const isInitial = entry.state.tag !== 'open' && entry.state.initial
+      const isInitial = (entry.state.tag === 'pending' || entry.state.tag === 'releasing') && entry.state.initial
       if (skipInitial && isInitial) continue
       this.reconcileIxes.add(ix)
       const payloadEntry: ReconcileOpenEntry = {
@@ -1355,7 +1369,7 @@ class ClientConnection implements MuxConnection {
         if (!serverMap.has(ix)) hasNewChannels = true
         continue
       }
-      if (entry.state.tag === 'releasing') {
+      if (entry.state.tag === 'releasing' || entry.state.tag === 'draining') {
         this.releaseChannel(ix, entry.channel)
         continue
       }
@@ -1422,8 +1436,7 @@ class ClientConnection implements MuxConnection {
   }
 
   private drainBufferedFrames(
-    /** Frames for these channels are sent; null: every frame. */
-    releasableChannels: Set<number> | Map<number, unknown> | null,
+    releasableChannels: Set<number> | Map<number, unknown>,
     /** Frames for these channels stay in the buffer. Omitted: nothing is retained. */
     retainedChannels?: Set<number> | Map<number, unknown>,
   ): OutboundFrame[] {
@@ -1435,7 +1448,7 @@ class ClientConnection implements MuxConnection {
       const frame = entry.frame
       const channelIx = entry.channelIx
       const seq = entry.seq
-      if (releasableChannels !== null && !releasableChannels.has(channelIx)) {
+      if (!releasableChannels.has(channelIx)) {
         if (retainedChannels?.has(channelIx)) sendBuffer[writeIx++] = entry
         continue
       }

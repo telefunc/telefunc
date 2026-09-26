@@ -220,3 +220,78 @@ test("a server close that reaches the page before its upload request settles get
   await delay(100)
   expect(acked).toEqual([ix])
 })
+
+test("a server close that reaches the page before its upload request settles, while the page opens another channel, gets the page's acknowledgement first", async () => {
+  // In order: 'ack:<ix>' for a CLOSE_ACK, 'reconcile:<ixes>' for a RECONCILE.
+  const received: string[] = []
+  let ix = 0
+  let serverSend!: (frame: Uint8Array) => void
+  let refuseUpload!: () => void
+  clientConfig.fetch = (async (_url: string, init: RequestInit) => {
+    const body = init.body as unknown
+    if (!(body instanceof Blob)) {
+      return await new Promise<Response>((resolve) => {
+        refuseUpload = () => resolve(new Response('bad request', { status: 400 }))
+      })
+    }
+    const { metadata, frames } = await parseBlobBody(body)
+    if (metadata.streamResponse) {
+      for (const raw of frames) {
+        const frame = decode(raw as never)
+        if (frame.tag === TAG.RECONCILE) ix = frame.payload.open[0]!.ix
+      }
+      const encoder = new TextEncoder()
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(encoder.encode(': open\n\n'))
+          serverSend = (frame) =>
+            controller.enqueue(encoder.encode(`data: ${uint8ArrayToBase64url(frame as never)}\n\n`))
+        },
+      })
+      return new Response(stream as never, { status: 200, headers: { 'Content-Type': 'text/event-stream' } })
+    }
+    for (const raw of frames) {
+      const frame = decode(raw as never)
+      if (frame.tag === TAG.CLOSE_ACK) received.push(`ack:${frame.index}`)
+      if (frame.tag === TAG.RECONCILE)
+        received.push(`reconcile:${frame.payload.open.map((entry) => entry.ix).join(',')}`)
+    }
+    return new Response('', { status: 200 })
+  }) as unknown as typeof fetch
+  const telefuncUrl = 'http://close-ack-register.test/_telefunc'
+  const connectionKey = crypto.randomUUID()
+  const channel = new ClientChannel({ channelId: crypto.randomUUID(), transports: ['sse'], telefuncUrl, connectionKey })
+  const closed = new Promise((resolve) => channel.onClose(resolve))
+  await delay(20)
+  serverSend(
+    encode.reconciled({
+      sessionId: crypto.randomUUID(),
+      open: [{ ix, lastSeq: 0 }],
+      reconnectTimeout: 60_000,
+      idleTimeout: 60_000,
+      pingInterval: 100_000,
+      clientReplayBuffer: 1_000_000,
+      clientReplayBufferBinary: 2_000_000,
+      sseFlushThrottle: 0,
+      ssePostIdleFlushDelay: 0,
+      transports: ['sse'],
+    }),
+  )
+  await delay(20)
+  serverSend(encode.close(ix, 5_000)) // the server's close()
+  expect(await closed).toBeUndefined()
+  // Another channel, such as the stream page's onUpload(file, onProgress) callback
+  new ClientChannel({ channelId: crypto.randomUUID(), transports: ['sse'], telefuncUrl, connectionKey })
+  await delay(20)
+  refuseUpload() // a page that can't stream a request body (Firefox)
+  await delay(100)
+  // A RECONCILE that leaves the channel out before its CLOSE_ACK tells the server the page lost it.
+  const ackAt = received.indexOf(`ack:${ix}`)
+  expect(ackAt).not.toBe(-1)
+  const omittingBefore = received
+    .slice(0, ackAt)
+    .filter(
+      (entry) => entry.startsWith('reconcile:') && !entry.slice('reconcile:'.length).split(',').includes(String(ix)),
+    )
+  expect(omittingBefore).toEqual([])
+})
