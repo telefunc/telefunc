@@ -1,7 +1,8 @@
-import { expect, test } from 'vitest'
+import { expect, test, vi } from 'vitest'
 import { ChannelMux, type ServerTransport } from './mux.js'
 import { ServerChannel } from './channel.js'
 import { decode, encode, TAG, type DecodedFrame } from '../shared-ws.js'
+import { getServerConfig } from '../../node/server/serverConfig.js'
 
 test("a reconnect waiting for a new channel keeps the channels it moved when the previous wire's close lands", async () => {
   const mux = new ChannelMux()
@@ -88,4 +89,23 @@ test('a stale session whose RECONCILED never reached the page leaves the channel
   mux.onConnectionClosed(lost, { permanent: false }) // the dead wire's ping deadline
   void clock.send('tick')
   expect(sent.get(live)!.some((frame) => frame.tag === TAG.TEXT && frame.text.includes('tick'))).toBe(true)
+})
+
+test("a new channel outwaits a reconcile its client has in flight for a channel the server hasn't registered", async () => {
+  vi.useFakeTimers()
+  try {
+    const mux = new ChannelMux()
+    const clock = new ServerChannel<string, string>({ id: 'clock-ttl' })
+    let closedWith: unknown = 'open'
+    clock.onClose((err) => void (closedWith = err))
+    mux.registerChannel(clock)
+    const { connectTtl } = getServerConfig().channel
+    // The client names this channel only once the server answers its held reconcile, up to connectTtl later.
+    await vi.advanceTimersByTimeAsync(connectTtl + 500)
+    expect(closedWith).toBe('open')
+    await vi.advanceTimersByTimeAsync(connectTtl)
+    expect(closedWith).toBeInstanceOf(Error)
+  } finally {
+    vi.useRealTimers()
+  }
 })

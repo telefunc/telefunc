@@ -326,13 +326,15 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     const c = getServerConfig().channel
     this._replayBuffer = new ReplayBuffer(c.serverReplayBuffer, reconnectWindow() + 1_000, c.serverReplayBufferBinary)
     this._clearTimer('_ttlTimer')
+    // Its client reconciles it only after the reconcile it has in flight, which the server holds up to connectTtl for a
+    // channel not registered yet.
     this._ttlTimer = unrefTimer(
       setTimeout(() => {
         this._ttlTimer = null
         this._shutdown(
           new NetworkError('Channel timed out: no client connected within TTL after response was sent', true),
         )
-      }, c.connectTtl),
+      }, 2 * c.connectTtl),
     )
   }
 

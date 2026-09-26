@@ -14,7 +14,7 @@ config.channel = {
   reconnectTimeout: 60_000,             // Hold channels open after disconnect (ms)
   idleTimeout: 60_000,                  // Keep connection alive after last channel closes (ms)
   pingInterval: 5_000,                  // Client ping interval (ms)
-  connectTtl: 5_000,                    // Wait for client to connect to new channel (ms)
+  connectTtl: 5_000,                    // Wait for client to connect to new channel (ms; a server channel waits twice this)
 
   // Text buffers
   serverReplayBuffer: 262_144,          // Server replay buffer for text frames (bytes)
