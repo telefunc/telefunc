@@ -382,7 +382,8 @@ export async function onCompressVideo(video: ReadableStream<Uint8Array>): Promis
   // Kill the encoder if the client disconnects mid-stream — otherwise the process leaks
   onClose(() => ffmpeg.kill())
 
-  video.pipeTo(Writable.toWeb(ffmpeg.stdin))
+  // A client that drops mid-upload rejects the pipe: stop the encoder rather than leave the rejection unhandled
+  video.pipeTo(Writable.toWeb(ffmpeg.stdin)).catch(() => ffmpeg.kill())
   return Readable.toWeb(ffmpeg.stdout) as ReadableStream<Uint8Array>
 }
 ```
