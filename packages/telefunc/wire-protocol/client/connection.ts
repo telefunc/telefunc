@@ -500,7 +500,11 @@ class ClientConnection implements MuxConnection {
     this.enterChannelPending(ix, channel, true)
     this.replayBuffers.set(
       ix,
-      new ReplayBuffer(this.clientReplayBufferBytes, this.replayMaxAgeMs(), this.clientReplayBufferBinaryBytes),
+      new ReplayBuffer(
+        this.clientReplayBufferBytes,
+        this.replayMaxAgeMs(this.pingIntervalMs),
+        this.clientReplayBufferBinaryBytes,
+      ),
     )
 
     if (!this.transport.hasWire() && !this.transport.isConnecting()) {
@@ -512,8 +516,8 @@ class ClientConnection implements MuxConnection {
 
   /** As the server's does, a frame stays replayable through the pong deadline, when a silent drop is noticed, then
    *  `reconnectTimeout`, plus a second for the reconnect itself. */
-  private replayMaxAgeMs(): number {
-    return 2 * this.pingIntervalMs + this.reconnectTimeoutMs + 1_000
+  private replayMaxAgeMs(pingIntervalMs: number): number {
+    return 2 * pingIntervalMs + this.reconnectTimeoutMs + 1_000
   }
 
   private registerReconcileTimer: ReturnType<typeof setTimeout> | null = null
@@ -983,10 +987,6 @@ class ClientConnection implements MuxConnection {
     const deferredOmitted = committing?.deferredOmitted ?? null
     const outcome = this.applyReconciled(ctrl, deferredOmitted)
     this.installHeartbeat(this.transport, ctrl.pingInterval)
-    // A channel registered before the first RECONCILED was sized with the defaults.
-    for (const replay of this.replayBuffers.values()) {
-      replay.setLimits(this.clientReplayBufferBytes, this.replayMaxAgeMs(), this.clientReplayBufferBinaryBytes)
-    }
     this.transport.closeAbandonedTransport()
     for (const frame of outcome.frames) this.transport.sendFrame(frame)
     for (const channel of outcome.channelsToOpen) channel._onTransportOpen(this.transport.batched)
@@ -1326,6 +1326,11 @@ class ClientConnection implements MuxConnection {
     }
     if (ctrl.clientReplayBuffer !== undefined) this.clientReplayBufferBytes = ctrl.clientReplayBuffer
     if (ctrl.clientReplayBufferBinary !== undefined) this.clientReplayBufferBinaryBytes = ctrl.clientReplayBufferBinary
+    // Before this reconcile stores anything: a channel registered before the first RECONCILED was sized with the defaults.
+    const maxAgeMs = this.replayMaxAgeMs(ctrl.pingInterval)
+    for (const replay of this.replayBuffers.values()) {
+      replay.setLimits(this.clientReplayBufferBytes, maxAgeMs, this.clientReplayBufferBinaryBytes)
+    }
 
     const serverMap = new Map<number, number>()
     for (const channel of ctrl.open) serverMap.set(channel.ix, channel.lastSeq)

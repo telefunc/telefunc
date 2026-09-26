@@ -194,6 +194,19 @@ test("a channel registered before the first reconcile takes the server's replay 
   connection.dispose()
 })
 
+test("a frame buffered before the first reconcile is stored under the server's replay budget", () => {
+  const channel = createChannel()
+  const connection = ClientConnection.getOrCreate('http://replay-drain.test', channel as never, stalledOptions()) as any
+  connection.send(channel, 'x'.repeat(2 * 1024 * 1024)) // over the default 1 MiB, waiting for the wire
+  connection.buildReconcileFrame()
+  connection.applyReconciled(
+    { sessionId: 'drain', open: [{ ix: 0, lastSeq: 0 }], pingInterval: 5_000, clientReplayBuffer: 8 * 1024 * 1024 },
+    null,
+  )
+  expect(connection.replayBuffers.get(0).getAfter(0)).toHaveLength(1)
+  connection.dispose()
+})
+
 test('a reconnect re-attaches a channel still closing, so its close request can go out again', () => {
   const channel = createChannel()
   const connection = ClientConnection.getOrCreate('http://closing.test', channel as never, stalledOptions()) as any
