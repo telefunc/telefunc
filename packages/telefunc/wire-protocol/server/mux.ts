@@ -47,8 +47,6 @@ type Wire = unknown
 // to this class via `onConnectionOpen` and from then on identify connections by object
 // identity. Multi-instance deployments rely on sticky sessions at the load balancer.
 
-type SendFn = (frame: Uint8Array<ArrayBuffer>, onCommit?: () => void) => void
-
 type ServerTransport<TConnection> = {
   getSessionId(connection: TConnection): string | undefined
   setSessionId(connection: TConnection, sessionId: string): void
@@ -124,6 +122,8 @@ type ConnectionState = {
 type ConnectionEntry = {
   state: ConnectionState
   transport: ServerTransport<unknown>
+  /** One per wire: the peers of every reconcile on this wire share it. */
+  sender: PeerSender
 }
 
 /** The context key of a server that hosts its own channels: a Cloudflare session DO's end with it. */
@@ -202,6 +202,7 @@ class ChannelMux {
         recvBacklogFrames: 0,
       },
       transport: transport as ServerTransport<unknown>,
+      sender: { send: (frame, onCommit) => this.send(connection, frame as Uint8Array<ArrayBuffer>, onCommit) },
     })
     const connId = transport.getConnId(connection)
     if (connId !== null) this.connectionsByConnId.set(connId, connection)
@@ -502,9 +503,8 @@ class ChannelMux {
     const finalizeUpgrade = isBarrier && ctrl.sessionId ? (this.sessionFinalizers.get(ctrl.sessionId) ?? null) : null
     state.reconciling = true
     this.resetPingTimer(connection)
-    const send: SendFn = (frame, onCommit) => this.send(connection, frame, onCommit)
     const newSessionId = crypto.randomUUID()
-    const openList = await this.reconcileSession(ctrl.sessionId, newSessionId, ctrl.open, send)
+    const openList = await this.reconcileSession(ctrl.sessionId, newSessionId, ctrl.open, entry.sender)
 
     // The connection may have closed during the await. The client never received this
     // session's id (`reconciled` was never sent), so no future reconcile can reference it —
@@ -529,9 +529,9 @@ class ChannelMux {
     prevSessionId: string | undefined,
     newSessionId: string,
     open: ReconcilePayload['open'],
-    send: SendFn,
+    sender: PeerSender,
   ): Promise<ReconciledPayload['open']> {
-    const handles = (await Promise.all(open.map((entry) => this.attach(entry, send)))).filter(
+    const handles = (await Promise.all(open.map((entry) => this.attach(entry, sender)))).filter(
       (h): h is ChannelHandle => h !== null,
     )
 
@@ -550,25 +550,24 @@ class ChannelMux {
 
   /** First reconcile (`initial:true`) races channel registration against `connectTtl`; later
    *  reconciles fail fast if the channel is gone. */
-  private async attach(entry: ReconcilePayload['open'][number], send: SendFn): Promise<ChannelHandle | null> {
+  private async attach(entry: ReconcilePayload['open'][number], sender: PeerSender): Promise<ChannelHandle | null> {
     const existing = this.channels.get(entry.id)
-    if (existing) return this.attachChannel(existing, entry, send)
+    if (existing) return this.attachChannel(existing, entry, sender)
     if (!entry.initial) return null
     return new Promise<ChannelHandle | null>((resolve) => {
       this.waitForChannelRegistration(entry.id, this.options.connectTtl, (channel) => {
-        resolve(channel ? this.attachChannel(channel, entry, send) : null)
+        resolve(channel ? this.attachChannel(channel, entry, sender) : null)
       })
     })
   }
 
   /** Drains replay frames missed since `lastSeq` (sends are sync — see `send`), then
    *  attaches an `IndexedPeer`. Returns null if the channel already shut down. */
-  private attachChannel(channel: ServerChannel, entry: ReconcileOpenEntry, send: SendFn): ChannelHandle | null {
+  private attachChannel(channel: ServerChannel, entry: ReconcileOpenEntry, sender: PeerSender): ChannelHandle | null {
     if (channel._didShutdown) return null
     const replay = channel._replayBuffer
     assert(replay !== null, `ServerChannel "${channel.id}" attached without a replay buffer`)
-    for (const frame of replay.getAfter(entry.lastSeq)) send(frame as Uint8Array<ArrayBuffer>)
-    const sender: PeerSender = { send }
+    for (const frame of replay.getAfter(entry.lastSeq)) sender.send(frame)
     const peer = new IndexedPeer(sender, entry.ix, replay)
     channel._attachPeer(peer, entry)
     return { channel, ix: entry.ix, peer }

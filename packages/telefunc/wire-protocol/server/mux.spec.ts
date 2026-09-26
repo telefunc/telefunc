@@ -109,3 +109,52 @@ test("a new channel outwaits a reconcile its client has in flight for a channel 
     vi.useRealTimers()
   }
 })
+
+test('a wire that drops while a reconcile on it is held still detaches its channels, so what they send meanwhile replays', async () => {
+  const mux = new ChannelMux()
+  const clock = new ServerChannel<string, string>({ id: 'clock-held' })
+  mux.registerChannel(clock)
+  const sessions = new Map<object, string>()
+  const sent = new Map<object, DecodedFrame[]>()
+  const transport: ServerTransport<object> = {
+    getSessionId: (wire) => sessions.get(wire),
+    setSessionId: (wire, id) => void sessions.set(wire, id),
+    getConnId: () => null,
+    sendNow: (wire, frame) => void sent.get(wire)!.push(decode(frame)),
+    terminateConnection: () => {},
+  }
+  const open = () => {
+    const wire = {}
+    sent.set(wire, [])
+    mux.onConnectionOpen(wire, transport)
+    return wire
+  }
+  const wire = open()
+  await mux.onConnectionRawMessage(
+    wire,
+    encode.reconcile({ open: [{ id: 'clock-held', ix: 0, lastSeq: 0, initial: true }] }),
+  )
+  const known = sessions.get(wire)!
+  // The page adds a callback whose call was aborted: the server holds this reconcile, which re-attached the Clock.
+  void mux.onConnectionRawMessage(
+    wire,
+    encode.reconcile({
+      sessionId: known,
+      open: [
+        { id: 'clock-held', ix: 0, lastSeq: 0 },
+        { id: 'aborted-callback', ix: 1, lastSeq: 0, initial: true },
+      ],
+    }),
+  )
+  await new Promise((resolve) => setTimeout(resolve, 10))
+  mux.onConnectionClosed(wire, { permanent: false }) // the network drops during the hold
+  void clock.send('while-offline')
+  const reconnected = open()
+  await mux.onConnectionRawMessage(
+    reconnected,
+    encode.reconcile({ sessionId: known, open: [{ id: 'clock-held', ix: 0, lastSeq: 0 }] }),
+  )
+  expect(sent.get(reconnected)!.some((frame) => frame.tag === TAG.TEXT && frame.text.includes('while-offline'))).toBe(
+    true,
+  )
+})

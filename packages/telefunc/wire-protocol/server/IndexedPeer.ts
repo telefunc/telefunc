@@ -14,7 +14,7 @@ interface PeerSender {
  *  they are committed to a transport send path. */
 class IndexedPeer {
   constructor(
-    private sender: PeerSender,
+    readonly sender: PeerSender,
     private index: number,
     private replay: ReplayBuffer,
   ) {}
