@@ -1295,10 +1295,12 @@ class ClientConnection implements MuxConnection {
     // would reach the server first, advance its `lastClientSeq` past the older one, and get the
     // older one dup-dropped on replay — silent message loss. Defer to the post-RECONCILED
     // release there (same ordering discipline as the WS 'release-after-reconciled' mode).
-    // Every other reconcile is on a live wire: a fresh connect has no prior server state, and a
+    // A connect retried before its first RECONCILED is a reconnect too: its earlier batch's frames are only in the
+    // replay buffers. Every other reconcile is on a live wire: a first attempt has sent nothing yet, and a
     // reconcile on an established wire (new-channel registration, chained reconcile) has no
     // in-transit replay frame to jump ahead of — so eager-batch, it saves a round-trip.
-    if (isInitialBatch && this.sessionId !== null) return []
+    const sentBefore = [...this.replayBuffers.values()].some((replay) => replay.length > 0)
+    if (isInitialBatch && (this.sessionId !== null || sentBefore)) return []
     return this.drainBufferedFrames(this.channels)
   }
 
