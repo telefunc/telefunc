@@ -46,6 +46,7 @@ import type { ClientChannel, ClientBroadcast } from './client/channel.js'
 import type { AbortError } from '../shared/Abort.js'
 import type { ShieldValidators } from '../node/server/shield.js'
 import type { FileDownload, BlobDownload } from './client/response/DownloadClasses.js'
+import type { PendingValue } from './client/response/PendingValue.js'
 
 // ===== Base types =====
 
@@ -141,8 +142,6 @@ type ClientReviverContext = {
   }): ClientChannel<ClientToServer, ServerToClient>
   createBroadcast<T = unknown>(opts: { channelId: string; key: string }): ClientBroadcast<T>
   receiveStream(metadata: StreamingMetadata): StreamSource
-  /** Awaited before the call settles — for revivers that need to buffer before the user reads. */
-  waitFor(promise: Promise<unknown>): void
 }
 
 /** Context for all server-side request revivers (File/Blob + Function + ReadableStream). */
@@ -230,8 +229,8 @@ type ReadableStreamRequestContract = TypeContract<
 type PromiseContract = TypeContract<Promise<unknown>, Promise<unknown>, StreamingMetadata>
 type FileRequestContract = TypeContract<File, File, FileMetadata>
 type BlobRequestContract = TypeContract<Blob, Blob, BlobMetadata>
-type FileResponseContract = TypeContract<File, Promise<File>, FileResponseMetadata>
-type BlobResponseContract = TypeContract<Blob, Promise<Blob>, BlobResponseMetadata>
+type FileResponseContract = TypeContract<File, PendingValue<File>, FileResponseMetadata>
+type BlobResponseContract = TypeContract<Blob, PendingValue<Blob>, BlobResponseMetadata>
 
 type FileDownloadResponseContract = TypeContract<FileDownload, FileDownload, FileDownloadMetadata>
 type BlobDownloadResponseContract = TypeContract<BlobDownload, BlobDownload, BlobDownloadMetadata>

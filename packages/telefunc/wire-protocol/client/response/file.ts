@@ -2,6 +2,7 @@ export { fileReviver }
 
 import type { ReviverType, FileResponseContract, ClientReviverContext } from '../../types.js'
 import { SERIALIZER_PREFIX_FILE } from '../../constants.js'
+import { PendingValue } from './PendingValue.js'
 
 const fileReviver: ReviverType<FileResponseContract, ClientReviverContext> = {
   prefix: SERIALIZER_PREFIX_FILE,
@@ -14,7 +15,6 @@ const fileReviver: ReviverType<FileResponseContract, ClientReviverContext> = {
           lastModified: metadata.lastModified,
         }),
     )
-    context.waitFor(filePromise)
-    return { value: filePromise, close: cancel, abort }
+    return { value: new PendingValue(filePromise), close: cancel, abort }
   },
 }

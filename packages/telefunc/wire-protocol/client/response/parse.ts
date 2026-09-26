@@ -1,7 +1,7 @@
 export { parseResponse }
 export { BaseStreamReader } from './BaseStreamReader.js'
 
-import { parse } from '@brillout/json-serializer/parse'
+import { parse, type Reviver } from '@brillout/json-serializer/parse'
 import { assert } from '../../../utils/assert.js'
 import { isObject } from '../../../utils/isObject.js'
 import { isObjectOrFunction } from '../../../utils/isObjectOrFunction.js'
@@ -11,6 +11,7 @@ import { setAbortController } from '../../../client/abort.js'
 import { setCloseHandlers, addExtraCloseHandlers, type CloseHandler } from '../../../client/close.js'
 import { makeAbortError, throwAbortError, throwBugError } from '../../../client/remoteTelefunctionCall/errors.js'
 import { BaseStreamReader } from './BaseStreamReader.js'
+import { PendingValue } from './PendingValue.js'
 import { StreamReader } from './StreamReader.js'
 import { SSEStreamReader } from './SSEStreamReader.js'
 import { ClientChannel, ClientBroadcast } from '../channel.js'
@@ -103,13 +104,8 @@ async function reviveResponse(
 
   const headers = callContext.headers ?? undefined
   const telefuncUrl = callContext.telefuncUrl
-  const promises: Promise<unknown>[] = []
+  const pendingValues: PendingValue<unknown>[] = []
   const context: ClientReviverContext = {
-    waitFor(promise) {
-      // Suppress unhandled-rejection noise if `parse()` throws before `Promise.all(promises)`.
-      promise.catch(() => {})
-      promises.push(promise)
-    },
     createChannel(opts) {
       return new ClientChannel({
         channelId: opts.channelId,
@@ -154,28 +150,29 @@ async function reviveResponse(
   const reviver = createStreamingReviver(
     context,
     function onRevived(revived) {
-      {
-        const { value, close } = revived
-        assert(isObjectOrFunction(value))
-        const wrapper = wrapProxy(value)
-        globalObject.gcRegistry.register(wrapper, close)
-        // This is what the user gets
-        revived.value = wrapper
+      const { value, abort, close } = revived
+      allCloseHandlers.push(close)
+      callContext.abortController.signal.addEventListener(
+        'abort',
+        () => {
+          abort(makeAbortError(undefined, callContext))
+        },
+        { once: true },
+      )
+
+      if (value instanceof PendingValue) {
+        // Suppress unhandled-rejection noise if `parse()` throws before the pending values are awaited.
+        value.promise.catch(() => {})
+        pendingValues.push(value)
+        return
       }
 
-      {
-        const { value, abort, close } = revived
-        assert(isObjectOrFunction(value))
-        closeHandlers.set(value, close)
-        allCloseHandlers.push(close)
-        callContext.abortController.signal.addEventListener(
-          'abort',
-          () => {
-            abort(makeAbortError(undefined, callContext))
-          },
-          { once: true },
-        )
-      }
+      assert(isObjectOrFunction(value))
+      const wrapper = wrapProxy(value)
+      globalObject.gcRegistry.register(wrapper, close)
+      closeHandlers.set(wrapper, close)
+      // This is what the user gets
+      revived.value = wrapper
     },
     extensionResponseTypes,
   )
@@ -183,7 +180,18 @@ async function reviveResponse(
   let parsed: unknown
   try {
     parsed = parse(body, { reviver })
-    if (promises.length > 0) await Promise.all(promises)
+    if (pendingValues.length > 0) {
+      const resolved = await Promise.all(pendingValues.map((pending) => pending.promise))
+      const resolvedByPending = new Map<unknown, unknown>(pendingValues.map((pending, i) => [pending, resolved[i]]))
+      // Re-parse to put each resolved value in its slot(s): every revived wire string hits the reviver's cache, so no reviver runs twice.
+      const settledReviver: Reviver = (path, value, parser) => {
+        const res = reviver(path, value, parser)
+        if (res && resolvedByPending.has(res.replacement))
+          return { replacement: resolvedByPending.get(res.replacement) }
+        return res
+      }
+      parsed = parse(body, { reviver: settledReviver })
+    }
   } catch (err) {
     for (const close of allCloseHandlers) close()
     throw err
