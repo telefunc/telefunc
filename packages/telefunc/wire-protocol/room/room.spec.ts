@@ -3345,6 +3345,27 @@ describe('client Room lifecycle', () => {
       delete clientConfig.fetch
     }
   })
+  it('takes a coalesced publish that waits behind its key as it was at the call', async () => {
+    const memberId = crypto.randomUUID()
+    const { fake, client } = fakeClient('client-coalesce-owned', {
+      send: async (message: any) => (message.__r === 'req-join' ? { id: memberId, joinedAt: 1 } : undefined),
+    })
+    const me = await client.join()
+    const sent: string[] = []
+    let releaseFirst!: () => void
+    vi.spyOn(fake.stub as any, '_publishUnreported').mockImplementation(async (...args: unknown[]) => {
+      sent.push(JSON.stringify(args))
+      if (sent.length === 1) await new Promise<void>((resolve) => (releaseFirst = resolve))
+      return { key: 'fake', seq: sent.length, timestamp: 1 }
+    })
+    void me.publish({ draft: 'first' }, { coalesce: 'draft' })
+    const draft = { draft: 'hello' }
+    const queued = me.publish(draft, { coalesce: 'draft' }) // waits behind the first
+    draft.draft = '' // the page clears its draft once submitted
+    releaseFirst()
+    await queued
+    expect(sent[1]).toContain('hello')
+  })
   it("leaves no unhandled rejection behind a client participant's un-awaited publish, binary publish or DM that fails", async () => {
     const memberId = crypto.randomUUID()
     const { client } = fakeClient('client-fire-and-forget', {

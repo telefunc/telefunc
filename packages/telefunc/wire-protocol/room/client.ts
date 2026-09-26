@@ -9,7 +9,14 @@ import { ClientBroadcast } from '../client/channel.js'
 import type { ClientChannel } from '../client/channel.js'
 import { DM_FAILURE } from './errors.js'
 import { decodeBinaryFrame, emptyBinaryWants, encodeBinaryFrame } from './binary.js'
-import { assertKnownOptions, leaveCauseFromWire, normalizeJoinOptions, ownMetaArgument, recipientId } from './model.js'
+import {
+  assertKnownOptions,
+  leaveCauseFromWire,
+  normalizeJoinOptions,
+  ownMessage,
+  ownMetaArgument,
+  recipientId,
+} from './model.js'
 import {
   hasRoomTag,
   inboxMessageFromWire,
@@ -362,7 +369,7 @@ abstract class ClientParticipantBase extends ParticipantBase {
         }
         // Supersede any queued value; its waiters ride along and all resolve with the winning send.
         const waiters = [...(slot.pending?.waiters ?? []), { resolve, reject }]
-        slot.pending = { data, retain: options?.retain, waiters }
+        slot.pending = { data: ownMessage(data), retain: options?.retain, waiters }
         this._drainCoalesce(key)
       }),
     )
