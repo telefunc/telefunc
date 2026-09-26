@@ -1956,7 +1956,7 @@ class SseTransport implements UpgradeSource {
     // subscriptions, a close request goes out again on reattach, and sequenced frames replay after RECONCILED from the
     // server's lastSeq: sent first, they could overtake older ones a POST still in flight carries, whose frames the
     // server would then drop as duplicates.
-    const movedOutbox = this.outbox.filter(({ frame }) => frame[0] === TAG.WINDOW || frame[0] === TAG.MSG_WINDOW)
+    const movedOutbox = this.outbox.filter(isWindowRefresh)
     this.outbox = []
     for (const entry of movedOutbox) initialFrames.push({ kind: 'data', frame: entry.frame })
     for (const frame of movedBufferedFrames) initialFrames.push(frame)
@@ -1994,9 +1994,13 @@ class SseTransport implements UpgradeSource {
         )
         if (!response.ok) throw new Error('POST failed')
       } catch {
+        // A POST that failed with its wire: that wire's close already reported the loss, and what it carried goes the
+        // way of that wire's outbox (stageInitialBatch), also when the next wire has reconciled already.
+        if (wire !== this.transportAbort) {
+          this.outbox = queued.filter(isWindowRefresh).concat(this.outbox)
+          return
+        }
         this.outbox = queued.concat(this.outbox)
-        // A POST that failed with its wire: that wire's close already reported the loss.
-        if (wire !== this.transportAbort) return
         this.abandonActiveTransport()
         this.owner._onTransportClosed(this)
         return
@@ -2181,6 +2185,10 @@ const UPGRADE_TARGET_REGISTRY: Record<
   (telefuncUrl: string, owner: ClientConnection) => UpgradeTarget
 > = {
   [CHANNEL_TRANSPORT.WS]: (telefuncUrl, owner) => new WsTransport(telefuncUrl, owner),
+}
+
+function isWindowRefresh({ frame }: OutboxEntry): boolean {
+  return frame[0] === TAG.WINDOW || frame[0] === TAG.MSG_WINDOW
 }
 
 function createSseEventStreamReader(

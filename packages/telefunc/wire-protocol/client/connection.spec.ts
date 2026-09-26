@@ -124,6 +124,25 @@ test("an SSE reconnect leaves a dead POST's messages to the replay, which can't 
   connection.dispose()
 })
 
+test('a batch POST that fails after the next wire started puts back only its window refreshes', async () => {
+  const channel = createChannel()
+  const connection = ClientConnection.getOrCreate('http://late-post.test', channel as never, stalledOptions()) as any
+  const transport = connection.transport
+  let fail!: () => void
+  transport.post = () => new Promise((_resolve, reject) => void (fail = () => reject(new Error('aborted'))))
+  transport.transportAbort = new AbortController()
+  transport.outbox = [
+    { frame: encode.broadcastUnsub(0, false), deadline: 0 },
+    { frame: encode.window(0, 65_536), deadline: 0 },
+  ]
+  const flushing = transport.flushOutbox()
+  transport.transportAbort = new AbortController() // the next wire reconciled while that POST hung
+  fail()
+  await flushing
+  expect(transport.outbox.map(({ frame }: { frame: Uint8Array }) => frame[0])).toEqual([TAG.WINDOW])
+  connection.dispose()
+})
+
 test('an SSE reconnect sends its reconcile, not the reconcile and toggles a failed POST left queued', () => {
   const channel = { ...createChannel(), _reattachState: () => ({ broadcast: { text: true, binary: false } }) }
   const connection = ClientConnection.getOrCreate('http://outbox.test', channel as never, {
