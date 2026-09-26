@@ -1,7 +1,7 @@
 import { Cluster, Redis } from 'ioredis'
 import { expect, onTestFinished, test, vi } from 'vitest'
 import { RedisBackend } from './backend.js'
-import { createSubscriberSocket } from './ioredis.js'
+import { callDefinedCommand, createSubscriberSocket } from './ioredis.js'
 import { REDIS_COMMANDS } from './commands.js'
 
 test('requires never-resend clients', () => {
@@ -111,7 +111,7 @@ test('names Pub/Sub channels per database, as Pub/Sub spans every database', asy
         .spyOn(redis as unknown as Record<string, () => Promise<unknown>>, REDIS_COMMANDS.publish.name)
         .mockResolvedValue([1, 1, 0])
       await backend.publish({ key: 'chat', kind: 'text' }, new Uint8Array())
-      return (publish.mock.calls[0] as unknown[])[1]
+      return (publish.mock.calls[0] as unknown as [unknown[]])[0][1]
     }),
   )
   expect(channels[0]).not.toBe(channels[1])
@@ -152,4 +152,12 @@ test("takes the subscriber from a replica when the Cluster's pool labels no live
   const socket = await createSubscriberSocket(cluster)
   socket.disconnect()
   expect(duplicate).toHaveBeenCalledOnce()
+})
+
+test("passes a script more keys than a function call takes arguments, as a long-lived room's close does", async () => {
+  const received: unknown[][] = []
+  const redis = { dropGeneration: async (...args: unknown[]) => void received.push(args) }
+  const keys = Array.from({ length: 500_000 }, (_, index) => `lane:${index}`)
+  await callDefinedCommand(redis as never, 'dropGeneration', keys)
+  expect((received[0] as [string[]])[0]).toHaveLength(500_000)
 })

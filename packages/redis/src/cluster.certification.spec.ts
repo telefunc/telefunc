@@ -749,7 +749,9 @@ function observeCommands(client: Cluster): {
         const command = target[method]
         if (command === undefined) throw new Error(`defined command '${method}' was not installed`)
         const bound = command.bind(client)
-        vi.spyOn(target, method).mockImplementation(async (...args) => {
+        vi.spyOn(target, method).mockImplementation(async (...passed) => {
+          // ioredis flattens an array argument into the command, as it sends it.
+          const args = passed.flat()
           observed.push(args)
           const definition = [...definitions].reverse().find((candidate) => candidate.name === name)
           if (definition !== undefined) {
@@ -760,7 +762,7 @@ function observeCommands(client: Cluster): {
               args: dynamic ? args.slice(1) : args,
             })
           }
-          return await bound(...args)
+          return await bound(...passed)
         })
       }
       return observed

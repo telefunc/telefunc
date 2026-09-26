@@ -111,5 +111,6 @@ function callDefinedCommand(
 ): Promise<unknown> {
   const fn = (redis as unknown as Record<string, (...args: unknown[]) => Promise<unknown>>)[command]
   assert(typeof fn === 'function', `Redis command "${command}" was not registered via defineCommand`)
-  return fn.apply(redis, keysAndArgs as unknown[])
+  // One array argument, which ioredis flattens into the command: a generation's keys can outnumber a call's arguments.
+  return fn.call(redis, keysAndArgs)
 }
