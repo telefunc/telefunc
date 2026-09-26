@@ -11,7 +11,7 @@ declare module 'crossws' {
   }
 }
 
-function getTelefuncChannelHooks() {
+function getTelefuncChannelHooks(terminate: (peer: Peer) => void = (peer) => peer.terminate()) {
   enableChannelTransports(['ws'])
   const transport: ServerTransport<Peer> = {
     getSessionId: (peer) => peer.context.telefuncSessionId,
@@ -29,7 +29,7 @@ function getTelefuncChannelHooks() {
     terminateConnection: (peer) => {
       const mux = getChannelMux()
       const permanent = mux.readPermanentTermination(peer) === true
-      peer.terminate()
+      terminate(peer)
       mux.onConnectionClosed(peer, { permanent })
     },
   }
