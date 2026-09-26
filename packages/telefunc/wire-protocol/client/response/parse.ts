@@ -217,24 +217,16 @@ async function reviveResponse(
 
 /** Demultiplexes indexed frames from a single HTTP stream to multiple consumers.
  *
- *  Best-effort backpressure: stops reading when an idle consumer's buffer hits
- *  MAX_BUFFER_BYTES_PER_INDEX, resumes when drained. Active consumers (registered as
- *  waiters) receive frames via direct dispatch — zero buffering, zero delay.
- *
- *  Note: an index's buffer may briefly exceed MAX_BUFFER_BYTES_PER_INDEX. This happens when
- *  another consumer's drain restarts the read loop, and the next frame on the wire
- *  is for the already-full index. Each restart adds at most 1 frame of overshoot.
- *  This is the unavoidable cost of multiplexing over a single stream — we can't
- *  peek at the next frame's index without reading it.
+ *  Reads only while a consumer waits. Waiting consumers receive frames via direct dispatch; frames for a consumer that
+ *  isn't reading are buffered until it reads, as a `.tee()` branch's are: a waiting consumer's next frame can be behind
+ *  them on the wire.
  *
  *  Cancellation follows .tee() semantics: cancelling one consumer marks its index
  *  as cancelled and drops future frames for it. Other consumers continue normally.
  *  The upstream reader is cancelled once every consumer is terminal and at least one cancelled. */
 class FrameDemuxer {
-  private static readonly MAX_BUFFER_BYTES_PER_INDEX = 1024 * 1024 // 1 MB
   private streamReader: BaseStreamReader
   private pendingFrames = new Map<number, Uint8Array<ArrayBuffer>[]>()
-  private pendingBytes = new Map<number, number>()
   private indexWaiters = new Map<
     number,
     { resolve: (v: Uint8Array<ArrayBuffer> | null) => void; reject: (e: unknown) => void }
@@ -293,12 +285,7 @@ class FrameDemuxer {
     if (this.streamError) throw this.streamError
 
     const pending = this.pendingFrames.get(index)
-    if (pending && pending.length > 0) {
-      const frame = pending.shift()!
-      this.pendingBytes.set(index, (this.pendingBytes.get(index) ?? 0) - frame.byteLength)
-      this.ensureReading()
-      return frame
-    }
+    if (pending && pending.length > 0) return pending.shift()!
     if (this.doneIndices.has(index)) return null
     if (this.ended) return null
 
@@ -368,12 +355,6 @@ class FrameDemuxer {
         const pending = this.pendingFrames.get(frame.index)
         if (pending) pending.push(frame.payload)
         else this.pendingFrames.set(frame.index, [frame.payload])
-        const newBytes = (this.pendingBytes.get(frame.index) ?? 0) + frame.payload.byteLength
-        this.pendingBytes.set(frame.index, newBytes)
-
-        // Per-index backpressure: stop reading when this index's buffer exceeds 1 MB.
-        // The loop restarts when the consumer drains via readNextChunkForIndex().
-        if (newBytes >= FrameDemuxer.MAX_BUFFER_BYTES_PER_INDEX) break
       }
     } catch (err) {
       this.streamError ??= err

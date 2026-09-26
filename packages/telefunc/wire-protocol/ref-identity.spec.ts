@@ -497,6 +497,25 @@ async function teeAndDrop(stream: ReadableStream<Uint8Array<ArrayBuffer>>): Prom
 }
 
 describe('reference identity — full pipeline', () => {
+  test("two returned streams read one after the other both complete, as the docs' concurrent downloads may be", async () => {
+    const source = () => {
+      let sent = 0
+      return new ReadableStream<Uint8Array<ArrayBuffer>>({
+        pull(controller) {
+          if (sent++ === 32)
+            controller.close() // 2 MiB
+          else controller.enqueue(new Uint8Array(64 * 1024))
+        },
+      })
+    }
+    const { ret } = await roundTrip({ first: source(), second: source() })
+    const { first, second } = ret as Record<'first' | 'second', ReadableStream<Uint8Array>>
+    const bytes = async (stream: ReadableStream<Uint8Array>) => (await new Response(stream).arrayBuffer()).byteLength
+    // The second one first, as `await dl2.saveToMemory()` before dl1's: the first one's bytes arrive meanwhile.
+    expect(await bytes(second)).toBe(2 * 1024 * 1024)
+    expect(await bytes(first)).toBe(2 * 1024 * 1024)
+  })
+
   test('duplicated async generator: one producer, one client object, chunks delivered once', async () => {
     const gen = (async function* () {
       yield 1
