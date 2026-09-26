@@ -35,7 +35,9 @@ import {
 const REDIS_DELIVERY_FENCE_BYTE = 0xff
 
 // Authority time in ms from Redis TIME's [sec, µs] pair, never from the caller.
+// Redis 4 refuses a script's write after TIME unless the script replicates its effects, the default since Redis 5.
 const NOW_LUA = `
+redis.replicate_commands()
 local function tf_now()
   local t = redis.call('TIME')
   return tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
