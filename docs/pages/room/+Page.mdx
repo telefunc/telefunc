@@ -99,16 +99,17 @@ Participant IDs are per-membership: the same person is a different `id` in every
 
 ### Presence & membership
 
-`getParticipants()` gives you the member list; `onJoin`/`onLeave` keep it fresh; each member's `onUpdate` tracks their metadata:
+`getParticipants()` gives you the member list; `onJoin` and each member's `onLeave` keep it fresh; each member's `onUpdate` tracks their metadata. Listen before you read: events keep arriving while `getParticipants()` resolves, so a join then reaches you both ways, and a member that left meanwhile fires its `onLeave` at once:
 
 ```js
-for (const member of await room.getParticipants()) addToList(member)
 room.onJoin((member) => addToList(member))
-room.onLeave((member) => removeFromList(member.id))
+for (const member of await room.getParticipants()) addToList(member)
 
 function addToList(member) {
+  if (isListed(member.id)) return
   render(member.id, member.meta)
   member.onUpdate((meta) => render(member.id, meta))
+  member.onLeave(() => removeFromList(member.id))
 }
 ```
 
@@ -567,7 +568,7 @@ Another member, seen through a room.
 | Method | Description |
 |---|---|
 | `subscribe(cb)` / `subscribeBinary(cb, { track? }?)` | Receive this member's messages. Binary subscribing starts that member's stream flowing to you. |
-| `onUpdate(cb)` / `onLeave(cb)` | This member's metadata changed / this member left. |
+| `onUpdate(cb)` / `onLeave(cb)` | This member's metadata changed / this member left (at once if it already has). |
 
 Read-only: `id`, `meta`, `identity`, `joinedAt`. Cleanup in `onLeave` is enough; a member's listeners are released when it leaves.
 
