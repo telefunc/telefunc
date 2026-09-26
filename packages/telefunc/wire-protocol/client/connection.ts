@@ -1862,11 +1862,13 @@ class SseTransport implements UpgradeSource {
       abortController.signal,
       { accept: 'text/event-stream' },
     )
-    // The duplex:'half' POST never resolves while the body stays open. `fetchEndedP`
-    // catches its rejection eagerly so it's always handled even if openStream exits early.
+    // The duplex:'half' POST ends with its body, or earlier when something on the way cuts it (Node's `requestTimeout`).
+    // `fetchEndedP` catches its rejection eagerly so it's always handled even if openStream exits early.
     let fetchEndedP: Promise<'fetch-ended'> | undefined
+    let uploadBody: PushReadableStream<Uint8Array<ArrayBuffer>> | undefined
     if (this.streamRequest.tag !== 'failed') {
       const body = createPushReadableStream<Uint8Array<ArrayBuffer>>()
+      uploadBody = body
       // Metadata header first — the server classifies the POST by it; `streamRequest: true`
       // makes it emit `reconciled` inline (the body never ends, can't defer to body-end).
       body.push(encodeSseRequestMetadata({ connId: this.connId, streamRequest: true }))
@@ -1958,6 +1960,11 @@ class SseTransport implements UpgradeSource {
       if (result !== 'ok') {
         this.closeStreamRequest()
         this.streamRequest = { tag: 'failed' }
+      } else {
+        // Ended while its body is still ours: nothing written to it reaches the server any more, so this wire ends.
+        void fetchEndedP.then(() => {
+          if (this.streamRequest.tag === 'active' && this.streamRequest.body === uploadBody) abortController.abort()
+        })
       }
       // It ended without the open-ack, so the server may not have read what went into its body: resend it, first.
       if (unsent) this.outbox = [...unsent.map((frame) => ({ frame, deadline: Date.now() })), ...this.outbox]
