@@ -35,6 +35,14 @@ function createStalledTransport() {
   return { fetchImpl, getSseDownstreamOpens: () => sseDownstreamOpens }
 }
 
+function stalledOptions() {
+  return {
+    transports: [CHANNEL_TRANSPORT.SSE],
+    fetchImpl: createStalledTransport().fetchImpl,
+    connectionKey: crypto.randomUUID(),
+  }
+}
+
 /** A connection that applied a RECONCILED whose every setting is zero. */
 function zeroConfiguredConnection() {
   const options = {
@@ -64,6 +72,14 @@ test('channel config preserves zero through server and client resolution', () =>
     connection.transport.flushThrottleMs,
     connection.transport.postIdleFlushDelayMs,
   ]).toEqual(Array(6).fill(0))
+  connection.dispose()
+})
+
+test("a per-call idleTimeout is kept over the server's", () => {
+  const options = { ...stalledOptions(), idleTimeout: 0 }
+  const connection = ClientConnection.getOrCreate('http://idle.test', createChannel() as never, options) as any
+  connection.applyReconciled({ sessionId: 'idle', open: [], idleTimeout: 60_000 }, null)
+  expect(connection.idleTimeoutMs).toBe(0)
   connection.dispose()
 })
 
@@ -109,14 +125,6 @@ test('an SSE reconnect sends its reconcile, not the reconcile and toggles a fail
   expect(tags.filter((tag: number) => tag === TAG.BROADCAST_SUB || tag === TAG.BROADCAST_UNSUB)).toEqual([])
   connection.dispose()
 })
-
-function stalledOptions() {
-  return {
-    transports: [CHANNEL_TRANSPORT.SSE],
-    fetchImpl: createStalledTransport().fetchImpl,
-    connectionKey: crypto.randomUUID(),
-  }
-}
 
 test('the channel cap counts the open channels, not every channel the connection opened', () => {
   const options = stalledOptions()
