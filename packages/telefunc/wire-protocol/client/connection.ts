@@ -1359,7 +1359,7 @@ class ClientConnection implements MuxConnection {
       const replay = this.replayBuffers.get(ix)
       if (replay)
         for (const frame of replay.getAfter(serverMap.get(ix)!)) releaseFrames.push({ kind: 'reconcile', frame })
-      if (!entry.channel.isClosed) channelsToOpen.push(entry.channel)
+      channelsToOpen.push(entry.channel)
     }
 
     for (const frame of this.drainBufferedFrames(serverMap, this.channels)) releaseFrames.push(frame)

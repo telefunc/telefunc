@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test, vi } from 'vitest'
 
-import { ClientBroadcast } from './channel.js'
+import { ClientBroadcast, ClientChannel } from './channel.js'
 import { config } from '../../client/clientConfig.js'
 import { CHANNEL_TRANSPORT } from '../constants.js'
 import { ACK_STATUS, TAG, type AckResultStatus } from '../shared-ws.js'
@@ -120,4 +120,18 @@ test('a channel made before the page has a session token makes one, so the call 
     }),
   )
   expect(getSessionToken(telefuncUrl)).toEqual(expect.any(String))
+})
+
+test('a close request goes out again when its channel re-attaches before the close is acknowledged', () => {
+  config.fetch = async () => new Response(new ReadableStream({ start() {} }), { status: 200 })
+  const channel = new ClientChannel({
+    channelId: crypto.randomUUID(),
+    transports: [CHANNEL_TRANSPORT.SSE],
+    telefuncUrl: 'http://close-resend.test/_telefunc',
+    connectionKey: crypto.randomUUID(),
+  })
+  const sendCloseRequest = vi.spyOn((channel as any)._connection, 'sendCloseRequest')
+  void channel.close({ timeout: 5_000 })
+  channel._onTransportOpen(false) // the reconcile of a reconnect: the first request may have died with the old wire
+  expect(sendCloseRequest).toHaveBeenCalledTimes(2)
 })
