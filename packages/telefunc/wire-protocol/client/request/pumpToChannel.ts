@@ -78,7 +78,8 @@ function pumpClientProducerToChannel(
         channel._sendBinary(concat(TAG_ERROR, textEncoder.encode('{}')))
     } finally {
       doCancel()
-      channel.close()
+      // A server that is away gets the upload's end once back, as an open channel waits for it.
+      channel.close({ timeout: channel._reconnectWindow() })
     }
   })()
 

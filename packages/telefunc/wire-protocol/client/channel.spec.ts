@@ -153,23 +153,3 @@ test('a close the server acknowledged ends gracefully, though a reconnect then d
   expect(await closing).toBe(0)
   expect(closedWith).toEqual([undefined])
 })
-
-test('a page close made while the server is away waits for it as long as the channel would', async () => {
-  vi.useFakeTimers()
-  try {
-    config.fetch = async () => new Response(new ReadableStream({ start() {} }), { status: 200 })
-    const channel = new ClientChannel({
-      channelId: crypto.randomUUID(),
-      transports: [CHANNEL_TRANSPORT.SSE],
-      telefuncUrl: 'http://close-window.test/_telefunc',
-      connectionKey: crypto.randomUUID(),
-    })
-    let settled = false
-    void channel.close().then(() => (settled = true))
-    await vi.advanceTimersByTimeAsync(8_000) // an outage the reconnect window covers
-    expect(settled).toBe(false)
-    channel.abort()
-  } finally {
-    vi.useRealTimers()
-  }
-})

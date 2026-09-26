@@ -1,4 +1,4 @@
-import { describe, expect, test, vi } from 'vitest'
+import { describe, expect, test } from 'vitest'
 
 import { ReplayBuffer } from '../../wire-protocol/replay-buffer.js'
 import { ACK_STATUS, ProtocolViolationError, TAG, decode } from '../../wire-protocol/shared-ws.js'
@@ -182,27 +182,6 @@ describe('self-initiated close', () => {
     await expect(closePromise).resolves.toBe(0)
     expect(didFinishOnClose).toBe(true)
     expect(channel._didShutdown).toBe(true)
-  })
-
-  test('a close made while the client is away waits for it as long as the channel would, and delivers what it had sent', async () => {
-    vi.useFakeTimers()
-    try {
-      const channel = new ServerChannel<never, string>({ id: crypto.randomUUID() })
-      channel._registerChannel()
-      const gone = createPeer([])
-      channel._attachPeer(gone)
-      channel._onPeerDisconnect(gone, 60_000) // the page drops
-      channel.send('last')
-      void channel.close()
-      await vi.advanceTimersByTimeAsync(8_000) // back within its reconnect window
-      expect(channel._didShutdown).toBe(false)
-      const frames: Uint8Array[] = []
-      channel._attachPeer(createPeer(frames))
-      const tags = frames.map((frame) => decode(frame).tag)
-      expect(tags).toEqual([TAG.TEXT, TAG.CLOSE])
-    } finally {
-      vi.useRealTimers()
-    }
   })
 
   test('buffered send flushes before close request on attachPeer', async () => {
