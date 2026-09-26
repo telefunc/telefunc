@@ -449,22 +449,27 @@ onReadyClick(async () => {
 
 ### Collaborative canvas
 
-Strokes go out as binary deltas on a member's default track; a retained keyframe seeds late joiners; cursors ride a coalesced text lane so a fast pointer never floods the link:
+Each member draws on its own layer: its strokes go out as binary deltas on its default track, and a retained keyframe of its layer seeds late joiners (the room keeps one per member); cursors ride a coalesced text lane so a fast pointer never floods the link:
 
 ```js
 // Client
 const me = await board.join({ meta: { name, color } })
 
-// Draw: publish stroke deltas as binary; retain a full-canvas keyframe now and then.
+// Draw: publish stroke deltas as binary; retain a keyframe of your whole layer now and then.
 onStroke((bytes, isSnapshot) => me.publishBinary(bytes, { meta: { key: isSnapshot }, retain: isSnapshot }))
-board.subscribeBinary((bytes, { meta }) => (meta?.key ? canvas.reset(bytes) : canvas.applyDelta(bytes)))
+// A member's frames touch only its own layer, so no keyframe overwrites another member's strokes.
+board.subscribeBinary((bytes, { meta }, from) => {
+  const layer = canvas.layer(from.id)
+  if (meta?.key) layer.reset(bytes)
+  else layer.applyDelta(bytes)
+})
 
 // Cursors: coalesced, so only the latest position is in flight per pointer.
 onPointerMove((pos) => me.publish({ cursor: pos }, { coalesce: 'cursor' }))
 board.subscribe((d, _i, from) => d.cursor && drawCursor(from.id, from.meta.color, d.cursor))
 ```
 
-A new participant subscribing to the board gets the retained keyframe and renders the current canvas right away with nothing extra to wire up, unless a newer delta reached it first; then it renders from the next keyframe.
+A new participant subscribing to the board gets each present member's retained keyframe and renders their layers right away with nothing extra to wire up. A member's strokes that its keyframe doesn't hold (drawn after it, or a newer delta that reached you first) show once its next keyframe arrives. A member's retained keyframe clears when it leaves, so a later joiner doesn't get that layer: keep a board that outlives its members in your database (see <Link href="#history-live-tail">History</Link>).
 
 For **team chat with subgroups**, give each team, breakout, or private thread its own room (a telefunction can return several at once, e.g. `team` and `team:red`); each has its own membership and guards, so a message never leaks across the boundary.
 
