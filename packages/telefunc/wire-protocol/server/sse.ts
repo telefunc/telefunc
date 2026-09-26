@@ -158,7 +158,10 @@ class SseConnectionTransport {
     // sticky batch. Dispatch safety is owned by `runStreamResponse` releasing `ready` only after
     // RECONCILED — the read loop below still waits on that gate, so early bytes sit unread until then.
     this.sendNow(connection, encode.streamRequestOpenAck())
-    if (!(await this.waitReady(connection))) return badRequest()
+    // No deadline: the client trusts this POST from the ack on, and a reconcile held for connectTtl can outlast one. The
+    // gate opens on every path, when runStreamResponse ends or the connection closes.
+    await connection.ready
+    if (connection.closed) return badRequest()
     try {
       while (true) {
         const raw = await reader.readLengthPrefixedBytesOrNull(WIRE_MAX_RAW_FRAME_BYTES)
