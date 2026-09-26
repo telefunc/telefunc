@@ -96,3 +96,61 @@ test('a frame written into an upload POST the server refused before its open-ack
   expect(received).toEqual([7])
   connection.dispose()
 })
+
+test("a reconnect's wire gets its own connection id, so a POST still in flight for the dead wire isn't adopted by it", async () => {
+  const wires: { connId: string; close: () => void }[] = []
+  const fetchImpl = (async (_url: string, init: RequestInit) => {
+    const body = init.body as unknown
+    if (!(body instanceof Blob)) return await new Promise<Response>(() => {}) // the upload POST stays open
+    const { metadata, frames } = await parseBlobBody(body)
+    if (!metadata.streamResponse) return new Response('', { status: 200 })
+    let ix = 0
+    for (const raw of frames) {
+      const frame = decode(raw as never)
+      if (frame.tag === TAG.RECONCILE) ix = frame.payload.open[0]?.ix ?? 0
+    }
+    let controller!: ReadableStreamDefaultController<Uint8Array>
+    const stream = new ReadableStream<Uint8Array>({
+      start(c) {
+        controller = c
+        const encoder = new TextEncoder()
+        c.enqueue(encoder.encode(': open\n\n'))
+        const openAck = encode.streamRequestOpenAck()
+        c.enqueue(encoder.encode(`data: ${uint8ArrayToBase64url(openAck as never)}\n\n`))
+        const reconciled = encode.reconciled({
+          sessionId: crypto.randomUUID(),
+          open: [{ ix, lastSeq: 0 }],
+          reconnectTimeout: 60_000,
+          idleTimeout: 60_000,
+          pingInterval: 100_000,
+          clientReplayBuffer: 1_000_000,
+          clientReplayBufferBinary: 2_000_000,
+          sseFlushThrottle: 0,
+          ssePostIdleFlushDelay: 0,
+          transports: ['sse'],
+        })
+        c.enqueue(encoder.encode(`data: ${uint8ArrayToBase64url(reconciled as never)}\n\n`))
+      },
+    })
+    wires.push({ connId: (metadata as { connId: string }).connId, close: () => controller.close() })
+    return new Response(stream as never, { status: 200, headers: { 'Content-Type': 'text/event-stream' } })
+  }) as unknown as typeof fetch
+  const channel = {
+    id: crypto.randomUUID(),
+    isClosed: false,
+    _onTransportOpen() {},
+    _dispatchFrame() {},
+    _onTransportClose() {},
+  }
+  const connection = ClientConnection.getOrCreate('http://conn-id.test/_telefunc', channel as never, {
+    transports: ['sse'],
+    fetchImpl,
+    connectionKey: crypto.randomUUID(),
+  }) as any
+  await delay(20)
+  wires[0]!.close() // the wire dies; the client reconnects
+  await delay(1_500)
+  expect(wires.length).toBeGreaterThan(1)
+  expect(wires[1]!.connId).not.toBe(wires[0]!.connId)
+  connection.dispose()
+})
