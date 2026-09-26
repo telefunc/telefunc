@@ -5,7 +5,7 @@ import { decode, encode, TAG, type DecodedFrame } from '../shared-ws.js'
 
 test("a reconnect waiting for a new channel keeps the channels it moved when the previous wire's close lands", async () => {
   const mux = new ChannelMux()
-  const clock = new ServerChannel<never, string>({ id: 'clock' })
+  const clock = new ServerChannel<string, string>({ id: 'clock' })
   mux.registerChannel(clock)
   const sessions = new Map<object, string>()
   const sent = new Map<object, DecodedFrame[]>()
