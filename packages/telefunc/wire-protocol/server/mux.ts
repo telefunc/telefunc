@@ -106,7 +106,7 @@ const DETACH_REASON = {
 }
 type DetachReason = (typeof DETACH_REASON)[keyof typeof DETACH_REASON]
 
-type ChannelHandle = { channel: ServerChannel; ix: number }
+type ChannelHandle = { channel: ServerChannel; ix: number; peer: IndexedPeer }
 type SessionFinalizer = () => void
 
 type ConnectionState = {
@@ -531,17 +531,18 @@ class ChannelMux {
     open: ReconcilePayload['open'],
     send: SendFn,
   ): Promise<ReconciledPayload['open']> {
-    // Taken before an attach waits for a registration, so the previous wire's close in that wait finds nothing to detach.
-    const prev = prevSessionId ? this.sessions.removeSession(prevSessionId) : undefined
     const handles = (await Promise.all(open.map((entry) => this.attach(entry, send)))).filter(
       (h): h is ChannelHandle => h !== null,
     )
 
     // Channels in the previous session that the client did NOT re-include are recovery-failed.
-    if (prev) {
-      const keptIxes = new Set(handles.map((h) => h.ix))
-      for (const [ix, prevHandle] of prev)
-        if (!keptIxes.has(ix)) this.detachHandle(prevHandle, DETACH_REASON.RECOVERY_FAILED)
+    if (prevSessionId) {
+      const prev = this.sessions.removeSession(prevSessionId)
+      if (prev) {
+        const keptIxes = new Set(handles.map((h) => h.ix))
+        for (const [ix, prevHandle] of prev)
+          if (!keptIxes.has(ix)) this.detachHandle(prevHandle, DETACH_REASON.RECOVERY_FAILED)
+      }
     }
     this.sessions.setSession(newSessionId, handles)
     return handles.map((h) => ({ ix: h.ix, lastSeq: h.channel._lastClientSeq }))
@@ -568,8 +569,9 @@ class ChannelMux {
     assert(replay !== null, `ServerChannel "${channel.id}" attached without a replay buffer`)
     for (const frame of replay.getAfter(entry.lastSeq)) send(frame as Uint8Array<ArrayBuffer>)
     const sender: PeerSender = { send }
-    channel._attachPeer(new IndexedPeer(sender, entry.ix, replay), entry)
-    return { channel, ix: entry.ix }
+    const peer = new IndexedPeer(sender, entry.ix, replay)
+    channel._attachPeer(peer, entry)
+    return { channel, ix: entry.ix, peer }
   }
 
   private waitForChannelRegistration(
@@ -610,7 +612,7 @@ class ChannelMux {
         h.channel._onPeerClose()
         return
       case DETACH_REASON.TRANSIENT:
-        h.channel._onPeerDisconnect(getServerConfig().channel.reconnectTimeout)
+        h.channel._onPeerDisconnect(h.peer, getServerConfig().channel.reconnectTimeout)
         return
       case DETACH_REASON.RECOVERY_FAILED:
         h.channel._onPeerRecoveryFailure()

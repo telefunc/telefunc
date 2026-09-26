@@ -593,8 +593,9 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this._notifyCloseProgress()
   }
 
-  _onPeerDisconnect(reconnectTimeout: number): void {
-    if (this._didShutdown || !this._peer) return
+  /** @internal `peer`'s wire went away. A channel a later reconcile moved to another wire keeps that one. */
+  _onPeerDisconnect(peer: IndexedPeer, reconnectTimeout: number): void {
+    if (this._didShutdown || this._peer !== peer) return
     this._peer = null
     this._reconnectTimer = unrefTimer(
       setTimeout(() => {

@@ -2444,11 +2444,11 @@ describe('Room public behavior', () => {
       const me = (await room.join({ identity: 'user-1' })) as ServerLocalParticipant
       const channel = new RoomParticipantStubChannel(me)
       channel._registerChannel()
-      attachPeer(channel)
-      if (noticedAfter === 0) channel._onPeerDisconnect(CHANNEL_RECONNECT_TIMEOUT_MS)
+      const first = attachPeer(channel)
+      if (noticedAfter === 0) channel._onPeerDisconnect(first.peer, CHANNEL_RECONNECT_TIMEOUT_MS)
       await Room.removeParticipant(room.id, { identity: 'user-1', reason: 'banned' })
       await vi.advanceTimersByTimeAsync(noticedAfter)
-      if (noticedAfter > 0) channel._onPeerDisconnect(CHANNEL_RECONNECT_TIMEOUT_MS)
+      if (noticedAfter > 0) channel._onPeerDisconnect(first.peer, CHANNEL_RECONNECT_TIMEOUT_MS)
       await vi.advanceTimersByTimeAsync(CHANNEL_RECONNECT_TIMEOUT_MS - 1_000)
       expect(channel._replayBuffer).not.toBeNull()
       const notices = attachPeer(channel, 0)
@@ -2465,10 +2465,10 @@ describe('Room public behavior', () => {
       const stub = register(room)
       const first = attachPeer(stub)
       await vi.waitFor(() => expect(controlEvents(first).map(({ __r }) => __r)).toContain('roster'))
-      if (noticedAfter === 0) stub._onPeerDisconnect(CHANNEL_RECONNECT_TIMEOUT_MS)
+      if (noticedAfter === 0) stub._onPeerDisconnect(first.peer, CHANNEL_RECONNECT_TIMEOUT_MS)
       await Room.close(room.id)
       await vi.advanceTimersByTimeAsync(noticedAfter)
-      if (noticedAfter > 0) stub._onPeerDisconnect(CHANNEL_RECONNECT_TIMEOUT_MS)
+      if (noticedAfter > 0) stub._onPeerDisconnect(first.peer, CHANNEL_RECONNECT_TIMEOUT_MS)
       await vi.advanceTimersByTimeAsync(CHANNEL_RECONNECT_TIMEOUT_MS - 1_000)
       expect(stub._replayBuffer).not.toBeNull()
       expect(controlEvents(attachPeer(stub, 0)).map(({ __r }) => __r)).toContain('closed')
@@ -2482,7 +2482,7 @@ describe('Room public behavior', () => {
       const stub = register(room)
       const first = attachPeer(stub)
       await vi.waitFor(() => expect(controlEvents(first).map(({ __r }) => __r)).toContain('roster'))
-      stub._onPeerDisconnect(60_000)
+      stub._onPeerDisconnect(first.peer, 60_000)
       await leaver.leave()
       // Larger than the offline buffer: it clears the buffered leave, and is dropped too.
       const meta = { pad: 'x'.repeat(300) }
@@ -2508,7 +2508,7 @@ describe('Room public behavior', () => {
       const { id } = (await stub._handleRequest({ __r: 'req-join', meta: {}, selfDelivery: true })) as { id: string }
       const idle = (await stub._handleRequest({ __r: 'req-join', meta: {}, selfDelivery: true })) as { id: string }
       await vi.waitFor(() => expect(controlEvents(first).map(({ __r }) => __r)).toContain('roster'))
-      stub._onPeerDisconnect(60_000)
+      stub._onPeerDisconnect(first.peer, 60_000)
       const observer = await Room.get(room.id)
       ;(await observer.getParticipant(id))!.subscribeBinary(() => {})
       await new Promise((resolve) => setTimeout(resolve, 20))
@@ -2556,8 +2556,8 @@ describe('Room public behavior', () => {
       me.onDemand((track, on) => void (on && wanted.push(track)))
       const channel = new RoomParticipantStubChannel(me)
       channel._registerChannel()
-      attachPeer(channel)
-      channel._onPeerDisconnect(60_000)
+      const first = attachPeer(channel)
+      channel._onPeerDisconnect(first.peer, 60_000)
       const observer = await Room.get(room.id)
       ;(await observer.getParticipant(me.id))!.subscribeBinary(() => {})
       await vi.waitFor(() => expect(wanted).toEqual([null]))
@@ -2585,8 +2585,8 @@ describe('Room public behavior', () => {
       const other = await room.join()
       const channel = new RoomParticipantStubChannel(me)
       channel._registerChannel()
-      attachPeer(channel)
-      channel._onPeerDisconnect(60_000)
+      const first = attachPeer(channel)
+      channel._onPeerDisconnect(first.peer, 60_000)
       await me.setAttributes({ score: 1 })
       // Larger than the offline buffer: it clears the buffered meta notice.
       await other.send(me.id, 'x'.repeat(300))
@@ -3479,9 +3479,9 @@ describe('client Room lifecycle', () => {
     const room = (await Room.create('roster-replay')) as ServerRoom
     const stub = register(room)
     const ensureRoster = vi.spyOn(subsOf(room), 'ensureRoster')
-    const peer = attachPeer(stub)
-    await vi.waitFor(() => expect(controlEvents(peer).map(({ __r }) => __r)).toContain('roster'))
-    stub._onPeerDisconnect(1_000)
+    const first = attachPeer(stub)
+    await vi.waitFor(() => expect(controlEvents(first).map(({ __r }) => __r)).toContain('roster'))
+    stub._onPeerDisconnect(first.peer, 1_000)
     const replayed = controlEvents(attachPeer(stub, 0))
     expect(replayed.slice(0, 2)).toMatchObject([{ __r: 'update' }, { __r: 'roster', members: [] }])
     expect(ensureRoster).toHaveBeenCalledTimes(2)
@@ -3660,20 +3660,18 @@ function attachPeer(stub: ServerChannel, lastSeq?: number, broadcast?: Broadcast
   const frames: Uint8Array[] = []
   const replay = stub._replayBuffer!
   if (lastSeq !== undefined) frames.push(...replay.getAfter(lastSeq))
-  stub._attachPeer(
-    new IndexedPeer(
-      {
-        send: (frame, onCommit) => {
-          frames.push(frame)
-          onCommit?.()
-        },
+  const peer = new IndexedPeer(
+    {
+      send: (frame, onCommit) => {
+        frames.push(frame)
+        onCommit?.()
       },
-      7,
-      replay,
-    ),
-    { broadcast },
+    },
+    7,
+    replay,
   )
-  return { decoded: () => frames.map((frame) => decode(frame as Uint8Array<ArrayBuffer>)) }
+  stub._attachPeer(peer, { broadcast })
+  return { peer, decoded: () => frames.map((frame) => decode(frame as Uint8Array<ArrayBuffer>)) }
 }
 function subsOf(room: Room | ServerRoom): {
   _control: LaneSubscription
