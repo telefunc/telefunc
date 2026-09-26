@@ -11,7 +11,7 @@ function addTelefuncMiddleware(middlewares: ConnectServer) {
     const url = req.originalUrl || req.url
     if (!url) return next()
 
-    if (url !== '/_telefunc') return next()
+    if (new URL(url, 'http://localhost').pathname !== '/_telefunc') return next()
 
     const httpResponse = await serve({
       readable: req,
