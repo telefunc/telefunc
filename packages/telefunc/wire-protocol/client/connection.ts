@@ -828,8 +828,9 @@ class ClientConnection implements MuxConnection {
     // here is per-channel and carries `index`.
     const channelFrame = frame as ChannelFrame
     const entry = this.channels.get(channelFrame.index)
-    // A draining channel has closed: it stays listed only until the frames it queued are sent.
-    if (entry && entry.state.tag !== 'draining') entry.channel._dispatchFrame(channelFrame)
+    // A releasing or draining channel has closed: it stays listed only for what it still has to tell the server.
+    if (entry && entry.state.tag !== 'releasing' && entry.state.tag !== 'draining')
+      entry.channel._dispatchFrame(channelFrame)
   }
 
   /** Every frame arriving mid-handoff lands here — the one charge site. Before the flip the probe

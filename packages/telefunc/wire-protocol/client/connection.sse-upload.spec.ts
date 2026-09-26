@@ -346,3 +346,39 @@ test('a channel the page aborted while the frame saying so waits gets no more me
   await delay(20)
   expect(received).toEqual([])
 })
+
+test('a channel the page aborted before the server confirmed it gets none of what the server sent it first', async () => {
+  let ix = 0
+  let serverSend!: (frame: Uint8Array) => void
+  clientConfig.fetch = (async (_url: string, init: RequestInit) => {
+    const body = init.body as unknown
+    if (!(body instanceof Blob)) return await new Promise<Response>(() => {})
+    const { metadata, frames } = await parseBlobBody(body)
+    if (!metadata.streamResponse) return new Response('', { status: 200 })
+    for (const raw of frames) {
+      const frame = decode(raw as never)
+      if (frame.tag === TAG.RECONCILE) ix = frame.payload.open[0]!.ix
+    }
+    const encoder = new TextEncoder()
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode(': open\n\n'))
+        serverSend = (frame) => controller.enqueue(encoder.encode(`data: ${uint8ArrayToBase64url(frame as never)}\n\n`))
+      },
+    })
+    return new Response(stream as never, { status: 200, headers: { 'Content-Type': 'text/event-stream' } })
+  }) as unknown as typeof fetch
+  const channel = new ClientChannel<never, number>({
+    channelId: crypto.randomUUID(),
+    transports: ['sse'],
+    telefuncUrl: 'http://abort-releasing.test/_telefunc',
+    connectionKey: crypto.randomUUID(),
+  })
+  const received: number[] = []
+  channel.listen((n) => void received.push(n))
+  await delay(20)
+  channel.abort() // as a StrictMode effect's cleanup does, before the RECONCILED
+  serverSend(encode.text(ix, stringify(1), 1)) // what the server queued before the page connected
+  await delay(20)
+  expect(received).toEqual([])
+})
