@@ -21,7 +21,7 @@ import { unrefTimer } from '../utils/unrefTimer.js'
 export class ReplayBuffer {
   private readonly text: ReplayLane
   private readonly binary: ReplayLane
-  private readonly maxAgeMs: number
+  private maxAgeMs: number
   private _seq = 0
   private cleanupTimer: ReturnType<typeof setTimeout> | null = null
   private cleanupScheduledAt = Infinity
@@ -35,6 +35,14 @@ export class ReplayBuffer {
     this.text = new ReplayLane(maxBytes, maxAgeMs)
     this.binary = new ReplayLane(binaryMaxBytes, maxAgeMs)
     this.maxAgeMs = maxAgeMs
+  }
+
+  /** Applies new budgets to what is stored and to what comes next. */
+  setLimits(maxBytes: number, maxAgeMs: number, binaryMaxBytes: number): void {
+    this.maxAgeMs = maxAgeMs
+    this.text.setLimits(maxBytes, maxAgeMs)
+    this.binary.setLimits(binaryMaxBytes, maxAgeMs)
+    this.scheduleCleanup()
   }
 
   /** Increment and return the next sequence number. */
@@ -160,8 +168,8 @@ class ReplayLane {
   private times: number[] = []
   private head = 0
   private totalBytes = 0
-  private readonly maxBytes: number
-  private readonly maxAgeMs: number
+  private maxBytes: number
+  private maxAgeMs: number
 
   constructor(maxBytes: number, maxAgeMs: number) {
     this.maxBytes = maxBytes
@@ -205,6 +213,12 @@ class ReplayLane {
     this.totalBytes += frame.byteLength
     this._evict(now)
     return true
+  }
+
+  setLimits(maxBytes: number, maxAgeMs: number): void {
+    this.maxBytes = maxBytes
+    this.maxAgeMs = maxAgeMs
+    this._evict(Date.now())
   }
 
   /** Get all frames with seq > afterSeq, stopping at the first gap. */
