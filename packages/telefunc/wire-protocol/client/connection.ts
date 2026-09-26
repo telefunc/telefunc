@@ -1416,7 +1416,11 @@ class ClientConnection implements MuxConnection {
       }
       if (seq !== undefined) {
         const tag = frame[0]
-        const isBinary = tag === TAG.BINARY || tag === TAG.PUBLISH_BINARY || tag === TAG.PUBLISH_BINARY_ACK_REQ
+        const isBinary =
+          tag === TAG.BINARY ||
+          tag === TAG.BINARY_ACK_REQ ||
+          tag === TAG.PUBLISH_BINARY ||
+          tag === TAG.PUBLISH_BINARY_ACK_REQ
         this.replayBuffers.get(channelIx)?.push(seq, frame, isBinary)
       }
       frames.push({ kind: 'reconcile', frame })

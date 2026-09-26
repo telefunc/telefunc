@@ -150,6 +150,15 @@ test('a connection out of wire indexes hands a new channel to a fresh connection
   fresh.dispose()
 })
 
+test('a buffered acked binary send is kept in the binary replay lane, not the text one', () => {
+  const channel = createChannel()
+  const connection = ClientConnection.getOrCreate('http://binary-ack.test', channel as never, stalledOptions()) as any
+  connection.sendBinaryAckReq(channel, new Uint8Array(1_500_000), () => {}) // over the text lane's 1 MiB, within binary's 2
+  connection.drainBufferedFrames(new Set([0]))
+  expect(connection.replayBuffers.get(0).getAfter(0)).toHaveLength(1)
+  connection.dispose()
+})
+
 describe('SSE reconcile watchdog', () => {
   afterEach(() => {
     vi.clearAllTimers()
