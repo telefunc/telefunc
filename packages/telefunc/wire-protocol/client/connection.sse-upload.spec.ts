@@ -295,3 +295,54 @@ test("a server close that reaches the page before its upload request settles, wh
     )
   expect(omittingBefore).toEqual([])
 })
+
+test('a channel the page aborted while the frame saying so waits gets no more messages', async () => {
+  let ix = 0
+  let serverSend!: (frame: Uint8Array) => void
+  clientConfig.fetch = (async (_url: string, init: RequestInit) => {
+    const body = init.body as unknown
+    if (!(body instanceof Blob)) return await new Promise<Response>(() => {}) // the upload request stays unsettled
+    const { metadata, frames } = await parseBlobBody(body)
+    if (!metadata.streamResponse) return new Response('', { status: 200 })
+    for (const raw of frames) {
+      const frame = decode(raw as never)
+      if (frame.tag === TAG.RECONCILE) ix = frame.payload.open[0]!.ix
+    }
+    const encoder = new TextEncoder()
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode(': open\n\n'))
+        serverSend = (frame) => controller.enqueue(encoder.encode(`data: ${uint8ArrayToBase64url(frame as never)}\n\n`))
+      },
+    })
+    return new Response(stream as never, { status: 200, headers: { 'Content-Type': 'text/event-stream' } })
+  }) as unknown as typeof fetch
+  const channel = new ClientChannel<never, number>({
+    channelId: crypto.randomUUID(),
+    transports: ['sse'],
+    telefuncUrl: 'http://abort-draining.test/_telefunc',
+    connectionKey: crypto.randomUUID(),
+  })
+  const received: number[] = []
+  channel.listen((n) => void received.push(n))
+  await delay(20)
+  serverSend(
+    encode.reconciled({
+      sessionId: crypto.randomUUID(),
+      open: [{ ix, lastSeq: 0 }],
+      reconnectTimeout: 60_000,
+      idleTimeout: 60_000,
+      pingInterval: 100_000,
+      clientReplayBuffer: 1_000_000,
+      clientReplayBufferBinary: 2_000_000,
+      sseFlushThrottle: 0,
+      ssePostIdleFlushDelay: 0,
+      transports: ['sse'],
+    }),
+  )
+  await delay(20)
+  channel.abort() // its abort waits for the upload request to settle
+  serverSend(encode.text(ix, stringify(1), 1))
+  await delay(20)
+  expect(received).toEqual([])
+})

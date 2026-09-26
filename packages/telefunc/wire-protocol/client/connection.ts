@@ -827,7 +827,9 @@ class ClientConnection implements MuxConnection {
     // transports peel them off in their own receive paths. Everything that lands
     // here is per-channel and carries `index`.
     const channelFrame = frame as ChannelFrame
-    this.channels.get(channelFrame.index)?.channel._dispatchFrame(channelFrame)
+    const entry = this.channels.get(channelFrame.index)
+    // A draining channel has closed: it stays listed only until the frames it queued are sent.
+    if (entry && entry.state.tag !== 'draining') entry.channel._dispatchFrame(channelFrame)
   }
 
   /** Every frame arriving mid-handoff lands here — the one charge site. Before the flip the probe
