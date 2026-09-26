@@ -531,18 +531,17 @@ class ChannelMux {
     open: ReconcilePayload['open'],
     send: SendFn,
   ): Promise<ReconciledPayload['open']> {
+    // Taken before an attach waits for a registration, so the previous wire's close in that wait finds nothing to detach.
+    const prev = prevSessionId ? this.sessions.removeSession(prevSessionId) : undefined
     const handles = (await Promise.all(open.map((entry) => this.attach(entry, send)))).filter(
       (h): h is ChannelHandle => h !== null,
     )
 
     // Channels in the previous session that the client did NOT re-include are recovery-failed.
-    if (prevSessionId) {
-      const prev = this.sessions.removeSession(prevSessionId)
-      if (prev) {
-        const keptIxes = new Set(handles.map((h) => h.ix))
-        for (const [ix, prevHandle] of prev)
-          if (!keptIxes.has(ix)) this.detachHandle(prevHandle, DETACH_REASON.RECOVERY_FAILED)
-      }
+    if (prev) {
+      const keptIxes = new Set(handles.map((h) => h.ix))
+      for (const [ix, prevHandle] of prev)
+        if (!keptIxes.has(ix)) this.detachHandle(prevHandle, DETACH_REASON.RECOVERY_FAILED)
     }
     this.sessions.setSession(newSessionId, handles)
     return handles.map((h) => ({ ix: h.ix, lastSeq: h.channel._lastClientSeq }))
