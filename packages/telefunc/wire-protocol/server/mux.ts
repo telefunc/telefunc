@@ -624,9 +624,10 @@ class ChannelMux {
   /** Sole server→client send path; sync so wire order = call order. Per-channel
    *  byte+msg credit (see `flow-control/`) bounds queue growth. */
   private send(connection: Wire, frame: Uint8Array<ArrayBuffer>, onCommit?: () => void): void {
+    // Stored for replay even when the wire is gone, as a frame sent into a silently dead wire is.
+    onCommit?.()
     const entry = this.connectionEntries.get(connection)
     if (!entry) return
-    onCommit?.()
     entry.transport.sendNow(connection, frame)
   }
 
