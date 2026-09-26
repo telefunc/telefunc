@@ -1,6 +1,11 @@
 import { afterEach, describe, expect, test, vi } from 'vitest'
 
-import { CHANNEL_RECONNECT_INITIAL_DELAY_MS, CHANNEL_TRANSPORT, RECONCILE_TIMEOUT_MS } from '../constants.js'
+import {
+  CHANNEL_RECONNECT_INITIAL_DELAY_MS,
+  CHANNEL_TRANSPORT,
+  MAX_CHANNELS_PER_CONNECTION,
+  RECONCILE_TIMEOUT_MS,
+} from '../constants.js'
 import { ClientConnection } from './connection.js'
 import { TAG, encode } from '../shared-ws.js'
 import { config, getServerConfig } from '../../node/server/serverConfig.js'
@@ -103,6 +108,38 @@ test('an SSE reconnect sends its reconcile, not the reconcile and toggles a fail
   expect(tags.filter((tag: number) => tag === TAG.RECONCILE)).toHaveLength(1)
   expect(tags.filter((tag: number) => tag === TAG.BROADCAST_SUB || tag === TAG.BROADCAST_UNSUB)).toEqual([])
   connection.dispose()
+})
+
+function stalledOptions() {
+  return {
+    transports: [CHANNEL_TRANSPORT.SSE],
+    fetchImpl: createStalledTransport().fetchImpl,
+    connectionKey: crypto.randomUUID(),
+  }
+}
+
+test('the channel cap counts the open channels, not every channel the connection opened', () => {
+  const options = stalledOptions()
+  const connection = ClientConnection.getOrCreate('http://cap.test', createChannel() as never, options) as any
+  connection.nextIndex = MAX_CHANNELS_PER_CONNECTION // what 4,095 channels opened and closed on it leave
+  for (let open = 1; open < MAX_CHANNELS_PER_CONNECTION; open++) {
+    expect(ClientConnection.getOrCreate('http://cap.test', createChannel() as never, options)).toBe(connection)
+  }
+  expect(() => ClientConnection.getOrCreate('http://cap.test', createChannel() as never, options)).toThrow(
+    'Too many channels',
+  )
+  connection.dispose()
+})
+
+test('a connection out of wire indexes hands a new channel to a fresh connection, which its dispose leaves cached', () => {
+  const options = stalledOptions()
+  const spent = ClientConnection.getOrCreate('http://rotate.test', createChannel() as never, options) as any
+  spent.nextIndex = 0x10000
+  const fresh = ClientConnection.getOrCreate('http://rotate.test', createChannel() as never, options) as any
+  expect(fresh).not.toBe(spent)
+  spent.dispose()
+  expect(ClientConnection.getOrCreate('http://rotate.test', createChannel() as never, options)).toBe(fresh)
+  fresh.dispose()
 })
 
 describe('SSE reconcile watchdog', () => {

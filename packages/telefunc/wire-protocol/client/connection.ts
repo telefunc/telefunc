@@ -313,7 +313,8 @@ class ClientConnection implements MuxConnection {
     // `connectionKey` opts callers out of the shared connection without the server seeing it.
     const key = `${options.transports.join(',')}:${telefuncUrl}|${options.connectionKey ?? ''}`
     let connection = ClientConnection.cache.get(key)
-    if (!connection || connection.closed) {
+    // Wire indexes are u16 and never reused, so a new channel starts a fresh connection once they run out.
+    if (!connection || connection.closed || connection.nextIndex > 0xffff) {
       connection = new ClientConnection(telefuncUrl, options, key)
       ClientConnection.cache.set(key, connection)
     }
@@ -492,7 +493,7 @@ class ClientConnection implements MuxConnection {
       this.ttl = null
     }
     assertUsage(
-      this.nextIndex < MAX_CHANNELS_PER_CONNECTION,
+      this.channels.size < MAX_CHANNELS_PER_CONNECTION,
       `Too many channels on one connection (${MAX_CHANNELS_PER_CONNECTION} max) — open another with \`connectionKey\``,
     )
     const ix = this.nextIndex++
@@ -1227,7 +1228,8 @@ class ClientConnection implements MuxConnection {
     this.replayBuffers.clear()
     this.reconcileIxes.clear()
     this.exitReconciling()
-    ClientConnection.cache.delete(this.cacheKey)
+    // A fresh connection replaces this one once its indexes run out.
+    if (ClientConnection.cache.get(this.cacheKey) === this) ClientConnection.cache.delete(this.cacheKey)
   }
 
   // ── Protocol internals ──
