@@ -318,6 +318,33 @@ describe('Redis real three-master Cluster CI certification', () => {
       if (relocation !== undefined) await restoreSlot(slotNumber, source, target)
     }
   })
+  it("keeps a lane's commits in call order through a TRYAGAIN during a reshard", async () => {
+    const prefix = uniquePrefix('reshard-order')
+    const client = ownCluster()
+    await client.ping()
+    const backend = ownBackend(client, prefix)
+    const target = masters[0] as Master
+    const source = masters[1] as Master
+    const roomId = await roomOnMaster(prefix, source.id, 'reshard-order')
+    const inc = 'reshard-order-inc'
+    await open(backend, roomId, inc)
+    accepted(await backend.commitLane(roomId, inc, SEMANTIC_LANE, bytes('warm')))
+    const slotNumber = await slot(headKey(prefix, roomId))
+    try {
+      // Mid-migration with the head already moved, the source refuses the commit's keys with TRYAGAIN.
+      await target.client.cluster('SETSLOT', slotNumber, 'IMPORTING', source.id)
+      await source.client.cluster('SETSLOT', slotNumber, 'MIGRATING', target.id)
+      await migrateKeys(source, target, [headKey(prefix, roomId)])
+      const first = backend.commitLane(roomId, inc, SEMANTIC_LANE, bytes('first'))
+      await migrateKeys(source, target, (await source.client.cluster('GETKEYSINSLOT', slotNumber, 10_000)) as string[])
+      await Promise.all(masters.map(({ client }) => client.cluster('SETSLOT', slotNumber, 'NODE', target.id)))
+      const second = backend.commitLane(roomId, inc, SEMANTIC_LANE, bytes('second'))
+      const [firstSeq, secondSeq] = (await Promise.all([first, second])).map((result) => accepted(result).seq)
+      expect(firstSeq).toBeLessThan(secondSeq as number)
+    } finally {
+      await restoreSlot(slotNumber, source, target)
+    }
+  })
   it('recovers a killed subscriber connection on a fresh one, through a failed first reconnect', async () => {
     const { prefix, roomId, inc } = room('replacement')
     let failNext = false

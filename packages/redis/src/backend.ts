@@ -54,6 +54,8 @@ class RedisBackend implements BroadcastDriver, RoomDriver {
   private readonly _publisher: RedisClient
   private readonly _prefix: string
   private readonly _reportsReceivers: boolean
+  /** A Cluster's last commit per lane. */
+  private readonly _laneTurns = new Map<string, Promise<void>>()
 
   constructor(options: RedisBackendOptions) {
     assertAtMostOnceClient(options.redis)
@@ -105,7 +107,32 @@ class RedisBackend implements BroadcastDriver, RoomDriver {
     return this._run(REDIS_COMMANDS.cellsCx, { roomId, inc, revision, mutations })
   }
 
-  async commitLane(
+  commitLane(
+    roomId: string,
+    inc: string,
+    lane: LaneId,
+    payload: Uint8Array,
+    opts?: CommitOptions,
+  ): Promise<CommitResult> {
+    if (!isCluster(this._publisher)) return this._commitLane(roomId, inc, lane, payload, opts)
+    // A Cluster re-sends a command Redis refused with TRYAGAIN (its slot migrating) or CLUSTERDOWN (a failover) after a
+    // delay, so a later commit on the lane could land first: each is sent once the one before it was answered.
+    const turnKey = JSON.stringify([roomId, inc, encodeLaneKey(lane)])
+    const previous = this._laneTurns.get(turnKey)
+    const commit = () => this._commitLane(roomId, inc, lane, payload, opts)
+    const committing = previous === undefined ? commit() : previous.then(commit)
+    const turn = committing.then(
+      () => {},
+      () => {},
+    )
+    this._laneTurns.set(turnKey, turn)
+    void turn.then(() => {
+      if (this._laneTurns.get(turnKey) === turn) this._laneTurns.delete(turnKey)
+    })
+    return committing
+  }
+
+  private async _commitLane(
     roomId: string,
     inc: string,
     lane: LaneId,
