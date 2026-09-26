@@ -9,7 +9,7 @@ import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 import { unrefTimer } from '../../../utils/unrefTimer.js'
 import { createDeferred } from '../../../utils/createDeferred.js'
 import type { ChannelPublishAck } from '../../channel.js'
-import { ROOM_DM_ACK_TIMEOUT_MS } from '../constants.js'
+import { ROOM_DM_ACK_TIMEOUT_MS, ROOM_WANTED_TRACKS_MAX } from '../constants.js'
 import { getRoomBackend } from '../../backend/install.js'
 import type { CommitAccepted, LaneId } from '../../backend/room/contract.js'
 import { encodePublishBinary, encodePublishText, type WirePublishInfo } from '../../shared-ws.js'
@@ -26,7 +26,14 @@ import {
   type BinaryWants,
   type TrackWants,
 } from '../binary.js'
-import { DM_FAILURE, participantGoneError, participantLeftError, roomClosedError, roomFailureError } from '../errors.js'
+import {
+  DM_FAILURE,
+  RoomError,
+  participantGoneError,
+  participantLeftError,
+  roomClosedError,
+  roomFailureError,
+} from '../errors.js'
 import {
   assertKnownOptions,
   leaveCauseFromWire,
@@ -386,6 +393,8 @@ class ServerRoom extends RoomStateView implements Room {
       const tracks = record.tracks ?? []
       // Already recorded by an attempt whose announcement failed: announce it now.
       if (tracks.includes(track)) return { value: record.hidden === true }
+      if (tracks.length >= ROOM_WANTED_TRACKS_MAX)
+        throw new RoomError(`A participant publishes on at most ${ROOM_WANTED_TRACKS_MAX} named tracks`)
       return { value: record.hidden === true, next: { ...record, tracks: [...tracks, track] } }
     })
     const event = { __r: 'track', id: from, track, ...(hidden ? { hidden: true } : {}) } as const

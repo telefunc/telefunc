@@ -22,5 +22,6 @@ const ROOM_DEMAND_TTL_MS = ROOM_HEARTBEAT_INTERVAL_MS * 3
 const ROOM_DM_ACK_TIMEOUT_MS = 60_000
 /** The horizon: Room's one bound on waiting for a subscription or a delivery; driver attempts have none. */
 const ROOM_HORIZON_MS = 60_000
-// Each named track a subscriber wants opens a lane before its first frame, so a client can't name unbounded tracks.
+// Each named track opens a lane at every instance listening to it, so neither a subscriber nor a publisher can name
+// unbounded tracks.
 const ROOM_WANTED_TRACKS_MAX = 16

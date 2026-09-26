@@ -1536,6 +1536,17 @@ describe('Room public behavior', () => {
     ]
     for (const [call, message] of calls) await expect(Promise.resolve().then(call)).rejects.toThrow(message)
   })
+  it('bounds the named tracks a publisher can open', async () => {
+    const room = (await Room.create('publish-track-cap')) as ServerRoom
+    const me = await room.join()
+    for (let track = 0; track < ROOM_WANTED_TRACKS_MAX; track++)
+      await me.publishBinary(new Uint8Array([1]), { track: `t${track}` })
+    await expect(me.publishBinary(new Uint8Array([1]), { track: 'one-too-many' })).rejects.toThrow(
+      'at most 16 named tracks',
+    )
+    await me.publishBinary(new Uint8Array([2]), { track: 't0' })
+    await me.publishBinary(new Uint8Array([3]))
+  })
   it('bounds the named tracks a subscriber can want, on the API and on the wire', async () => {
     const room = (await Room.create('track-cap')) as ServerRoom
     const member = await room.join()
