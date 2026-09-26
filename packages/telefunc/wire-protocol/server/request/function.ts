@@ -4,6 +4,7 @@ import type { FunctionContract, ReviverType, ServerReviverContext } from '../../
 import { SERIALIZER_PREFIX_FUNCTION } from '../../constants.js'
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 import { ShieldValidationError } from '../../../shared/ShieldValidationError.js'
+import { markHandled } from '../../../utils/markHandled.js'
 assertIsNotBrowser()
 
 const functionReviver: ReviverType<FunctionContract, ServerReviverContext> = {
@@ -11,7 +12,7 @@ const functionReviver: ReviverType<FunctionContract, ServerReviverContext> = {
   revive: ({ channelId }, { createChannel, validators }) => {
     const channel = createChannel({ id: channelId, ack: true })
     const validateReturn = validators.get('return')
-    const fn = async (...args: unknown[]) => {
+    const call = async (args: unknown[]) => {
       const res = await channel.send(args, { ack: true })
       if (validateReturn) {
         const r = validateReturn(res)
@@ -23,7 +24,7 @@ const functionReviver: ReviverType<FunctionContract, ServerReviverContext> = {
       return res
     }
     return {
-      value: fn,
+      value: (...args: unknown[]) => markHandled(call(args)),
       async close() {
         await channel.close()
       },
