@@ -1740,6 +1740,8 @@ class SseTransport implements UpgradeSource {
     | {
         tag: 'active'
         body: PushReadableStream<Uint8Array<ArrayBuffer>>
+        /** Written before the server acknowledged the POST; null once it did. */
+        unconfirmed: Uint8Array<ArrayBuffer>[] | null
       }
     | { tag: 'failed' } = { tag: 'idle' }
 
@@ -1813,6 +1815,7 @@ class SseTransport implements UpgradeSource {
     if (this.streamRequest.tag === 'active') {
       this.streamRequest.body.push(encodeU32(frame.frame.byteLength))
       this.streamRequest.body.push(frame.frame)
+      this.streamRequest.unconfirmed?.push(frame.frame)
       return
     }
     const now = Date.now()
@@ -1845,7 +1848,7 @@ class SseTransport implements UpgradeSource {
       // makes it emit `reconciled` inline (the body never ends, can't defer to body-end).
       body.push(encodeSseRequestMetadata({ connId: this.connId, streamRequest: true }))
       const fetch = this.openStreamRequest(body, abortController.signal)
-      this.streamRequest = { tag: 'active', body }
+      this.streamRequest = { tag: 'active', body, unconfirmed: [] }
       fetchEndedP = (async (): Promise<'fetch-ended'> => {
         try {
           await fetch
@@ -1924,10 +1927,15 @@ class SseTransport implements UpgradeSource {
         setTimeout(() => resolve('timeout'), STREAM_REQUEST_HANDSHAKE_TIMEOUT_MS),
       )
       const result = await Promise.race([handshakeOkP, timeoutP, fetchEndedP])
+      const unsent =
+        result === 'fetch-ended' && this.streamRequest.tag === 'active' ? this.streamRequest.unconfirmed : null
+      if (result === 'ok' && this.streamRequest.tag === 'active') this.streamRequest.unconfirmed = null
       if (result !== 'ok') {
         this.closeStreamRequest()
         this.streamRequest = { tag: 'failed' }
       }
+      // It ended without the open-ack, so the server may not have read what went into its body: resend it, first.
+      if (unsent) this.outbox = [...unsent.map((frame) => ({ frame, deadline: Date.now() })), ...this.outbox]
     }
 
     this.connecting = false
