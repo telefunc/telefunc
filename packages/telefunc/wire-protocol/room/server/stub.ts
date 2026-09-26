@@ -76,7 +76,7 @@ abstract class RoomRequestChannel extends ServerChannel {
   }
 }
 
-/** The publish shield validates Room data at ingress only; the base channel's validators see every request envelope. */
+/** The publish shield validates Room data at ingress only. */
 function assertPublishShield(validate: ShieldValidator | undefined, data: unknown): void {
   if (!validate) return
   const result = validate(data)
