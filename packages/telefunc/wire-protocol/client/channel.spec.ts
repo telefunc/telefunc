@@ -65,13 +65,7 @@ test('a channel made before the page has a session token names one, which the ca
 })
 
 test('a close request goes out again when its channel re-attaches before the close is acknowledged', () => {
-  config.fetch = async () => new Response(new ReadableStream({ start() {} }), { status: 200 })
-  const channel = new ClientChannel({
-    channelId: crypto.randomUUID(),
-    transports: [CHANNEL_TRANSPORT.SSE],
-    telefuncUrl: 'http://close-resend.test/_telefunc',
-    connectionKey: crypto.randomUUID(),
-  })
+  const channel = stalledChannel()
   const sendCloseRequest = vi.spyOn((channel as any)._connection, 'sendCloseRequest')
   void channel.close({ timeout: 5_000 })
   channel._onTransportOpen(false) // the reconcile of a reconnect: the first request may have died with the old wire
@@ -79,13 +73,7 @@ test('a close request goes out again when its channel re-attaches before the clo
 })
 
 test('a close the server acknowledged ends gracefully, though a reconnect then drops the channel', async () => {
-  config.fetch = async () => new Response(new ReadableStream({ start() {} }), { status: 200 })
-  const channel = new ClientChannel({
-    channelId: crypto.randomUUID(),
-    transports: [CHANNEL_TRANSPORT.SSE],
-    telefuncUrl: 'http://close-acked.test/_telefunc',
-    connectionKey: crypto.randomUUID(),
-  })
+  const channel = stalledChannel()
   const closedWith: unknown[] = []
   channel.onClose((err) => void closedWith.push(err))
   const closing = channel.close({ timeout: 5_000 })
