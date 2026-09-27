@@ -30,9 +30,9 @@ for (let byte = 0; byte < 256; byte++) BYTE_TO_HEX.push(byte.toString(16).padSta
 function isMemberId(value: unknown): value is string {
   return typeof value === 'string' && UUID_REGEX.test(value)
 }
-/** Canonical UUID string → 16 bytes. Returns `null` for anything else. */
-function uuidToBytes(uuid: string): Uint8Array | null {
-  if (!UUID_REGEX.test(uuid)) return null
+/** Canonical UUID string → 16 bytes. */
+function uuidToBytes(uuid: string): Uint8Array {
+  assert(isMemberId(uuid), 'room member IDs are UUIDs')
   const hex = uuid.split('-').join('')
   const bytes = new Uint8Array(MEMBER_ID_BYTE_LENGTH)
   for (let i = 0; i < MEMBER_ID_BYTE_LENGTH; i++) bytes[i] = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16)
@@ -61,7 +61,6 @@ const frameTextDecoder = /* @__PURE__ */ new TextDecoder('utf-8', { fatal: true,
 function encodeBinaryFrame(memberId: string, payload: Uint8Array, opts?: BinaryPublishOptions): Uint8Array {
   assertKnownOptions(opts, ['track', 'meta', 'retain'], 'publishBinary()')
   const idBytes = uuidToBytes(memberId)
-  assert(idBytes, 'room member IDs are UUIDs')
   let flags = opts?.retain === true ? FRAME_FLAG_RETAIN : 0
   let trackBytes: Uint8Array | null = null
   if (opts?.track !== undefined) {
