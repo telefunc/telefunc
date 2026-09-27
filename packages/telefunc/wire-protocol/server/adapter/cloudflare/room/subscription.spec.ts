@@ -19,8 +19,7 @@ test('a session delivers a frame for the lease its subscription holds, and drops
     ...route,
     leaseId,
     payload: new Uint8Array([byte]),
-    seq: byte,
-    timestamp: 1,
+    info: { seq: byte, timestamp: 1 },
   })
   manager.deliver(frame(1, attempt.leaseId))
   // A lease this session held before a restart.
@@ -42,7 +41,7 @@ test('an attempt takes a frame the authority delivers before its registration re
   const laneKey = encodeLaneKey({ kind: 'semantic' })
   const lease = { roomId: 'room', inc: 'inc', laneKey, sessionDoId: 'session', leaseId: attempt.leaseId }
   // The authority fans out once its transaction stored the route, over another stub than the one the reply takes.
-  manager.deliver({ ...lease, payload: new Uint8Array([1]), seq: 1, timestamp: 1 })
+  manager.deliver({ ...lease, payload: new Uint8Array([1]), info: { seq: 1, timestamp: 1 } })
   expect(attempt.state()).toBe('establishing')
   expect(received).toEqual([1])
   registered.resolve({ ok: true })
@@ -209,7 +208,12 @@ test('a session drops a delivery to an attempt that ended at renewal, and its ro
     await vi.advanceTimersByTimeAsync(ROUTE_RENEW_EVERY_MS)
     expect(attempt.state()).toBe('closed')
     const route = { roomId: 'room', inc: 'inc', laneKey: encodeLaneKey({ kind: 'semantic' }), sessionDoId: 'session' }
-    manager.deliver({ ...route, leaseId: attempt.leaseId, payload: new Uint8Array([1]), seq: 1, timestamp: 1 })
+    manager.deliver({
+      ...route,
+      leaseId: attempt.leaseId,
+      payload: new Uint8Array([1]),
+      info: { seq: 1, timestamp: 1 },
+    })
     expect(received).toEqual([])
     await attempt.unsubscribe()
     expect(released).toBe(1)

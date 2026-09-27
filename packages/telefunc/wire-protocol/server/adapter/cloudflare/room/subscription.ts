@@ -2,6 +2,7 @@ export { CloudflareRoomSessionManager, CloudflareRoomSubscriptionAttempt }
 export type { RoomSessionDeliveryRequest }
 
 import type { BackendReceiver } from '../../../../backend/subscription.js'
+import type { OrderingInfo } from '../../../../ordering-frame.js'
 import type { RoomSubscriptionSource } from '../../../../backend/room/contract.js'
 import { encodeLaneKey } from '../../../../backend/room/lane-key.js'
 import { DriverAttempt } from '../../../../backend/attempt.js'
@@ -12,8 +13,7 @@ import type { RegisterWire } from './do.js'
 
 type RoomSessionDeliveryRequest = RouteInstallation & {
   payload: Uint8Array
-  seq: number
-  timestamp: number
+  info: OrderingInfo
 }
 
 const entryKey = (route: Pick<RouteInstallation, 'roomId' | 'inc' | 'laneKey'>) =>
@@ -61,7 +61,7 @@ class CloudflareRoomSessionManager {
   deliver(request: RoomSessionDeliveryRequest): void {
     const entry = this.#entries.get(entryKey(request))
     if (entry?.leaseId !== request.leaseId) return
-    entry.deliver(request.payload, request.seq, request.timestamp)
+    entry.deliver(request.payload, request.info)
   }
 }
 
@@ -103,8 +103,8 @@ class CloudflareRoomSubscriptionAttempt extends DriverAttempt {
     return this.#route.leaseId
   }
 
-  deliver(payload: Uint8Array, seq: number, timestamp: number): void {
-    this.#receiver(new Uint8Array(payload), { seq, timestamp })
+  deliver(payload: Uint8Array, info: OrderingInfo): void {
+    this.#receiver(new Uint8Array(payload), info)
   }
 
   async unsubscribe(): Promise<void> {

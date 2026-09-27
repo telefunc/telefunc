@@ -1,6 +1,7 @@
 export { Fanout }
 export type { RoomSessionNamespace, RoomSessionStub }
 
+import type { OrderingInfo } from '../../../../ordering-frame.js'
 import type { RouteInstallation } from './routes.js'
 import type { RoomSessionDeliveryRequest } from './subscription.js'
 import { OrderedStubs, reportLostDeliveries } from '../ordered-stubs.js'
@@ -27,12 +28,12 @@ class Fanout {
   }
 
   /** Hands a committed frame to every route's session DO; the returned token awaits the handoffs. */
-  send(routes: RouteInstallation[], payload: Uint8Array, seq: number, timestamp: number): string {
+  send(routes: RouteInstallation[], payload: Uint8Array, info: OrderingInfo): string {
     const handoffs = routes.map(async (route) =>
       this.#calls.call(
         route.sessionDoId,
         () => this.#sessions.get(this.#sessions.idFromString(route.sessionDoId)),
-        (session) => session.telefuncRoomDeliver({ ...route, payload, seq, timestamp }),
+        (session) => session.telefuncRoomDeliver({ ...route, payload, info }),
       ),
     )
     const token = crypto.randomUUID()

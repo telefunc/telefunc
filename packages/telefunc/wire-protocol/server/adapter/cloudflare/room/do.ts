@@ -120,7 +120,7 @@ class RoomAuthority<Env = unknown> extends DurableObject<Env> {
     )
     if ('stale' in outcome) return outcome
     const { seq, timestamp, routes } = outcome
-    const deliveryToken = this.#fanout.send(routes, payload, seq, timestamp)
+    const deliveryToken = this.#fanout.send(routes, payload, { seq, timestamp })
     return { accepted: true, seq, timestamp, receivers: routes.length, deliveryToken }
   }
 
