@@ -29,7 +29,6 @@ import type {
 } from 'telefunc/__internal'
 import { decodeLaneKey, decodeOrderingFrame, encodeLaneKey } from 'telefunc/__internal'
 import {
-  DEFAULT_PREFIX,
   directoryIndexKey,
   directoryTagsKey,
   generationKeysKey,
@@ -45,7 +44,7 @@ const STABLE_READ_ATTEMPTS = 8
 
 type RedisBackendOptions = {
   redis: RedisClient
-  prefix?: string
+  prefix: string
 }
 
 class RedisBackend implements BroadcastDriver, RoomDriver {
@@ -60,10 +59,9 @@ class RedisBackend implements BroadcastDriver, RoomDriver {
   constructor(options: RedisBackendOptions) {
     assertSupportedClient(options.redis)
     this._publisher = options.redis
-    const prefix = options.prefix ?? DEFAULT_PREFIX
-    assertKeyPrefix(prefix)
+    assertKeyPrefix(options.prefix)
     // Pub/Sub channels span every database, so a standalone client's names carry its database.
-    this._prefix = isCluster(options.redis) ? prefix : `${prefix}${options.redis.options.db ?? 0}:`
+    this._prefix = isCluster(options.redis) ? options.prefix : `${options.prefix}${options.redis.options.db ?? 0}:`
     // A Cluster node's PUBLISH count is node-local, so it cannot prove global absence.
     this._reportsReceivers = !isCluster(options.redis)
     for (const { name, lua, numberOfKeys } of Object.values(REDIS_COMMANDS))

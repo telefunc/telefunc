@@ -14,8 +14,8 @@ test('requires never-resend clients', () => {
     new Cluster(nodes, { retryDelayOnFailover: 0, redisOptions: { maxRetriesPerRequest: 0 } }),
   ]
   onTestFinished(() => [...defaults, ...safe].forEach((redis) => redis.disconnect()))
-  for (const redis of defaults) expect(() => new RedisBackend({ redis })).toThrow(message)
-  for (const redis of safe) expect(() => new RedisBackend({ redis })).not.toThrow()
+  for (const redis of defaults) expect(() => new RedisBackend({ redis, prefix: 'tf:' })).toThrow(message)
+  for (const redis of safe) expect(() => new RedisBackend({ redis, prefix: 'tf:' })).not.toThrow()
 })
 
 test("rejects an ioredis keyPrefix, which Pub/Sub channel names don't get", () => {
@@ -26,7 +26,7 @@ test("rejects an ioredis keyPrefix, which Pub/Sub channel names don't get", () =
     new Cluster(nodes, { retryDelayOnFailover: 0, keyPrefix: 'app:', redisOptions: { maxRetriesPerRequest: 0 } }),
   ]
   onTestFinished(() => prefixed.forEach((redis) => redis.disconnect()))
-  for (const redis of prefixed) expect(() => new RedisBackend({ redis })).toThrow('keyPrefix')
+  for (const redis of prefixed) expect(() => new RedisBackend({ redis, prefix: 'tf:' })).toThrow('keyPrefix')
 })
 
 test('rejects a Cluster that autopipelines, which batches a variable-key script by its key count', () => {
@@ -35,8 +35,8 @@ test('rejects a Cluster that autopipelines, which batches a variable-key script 
   const cluster = new Cluster(nodes, { ...options, enableAutoPipelining: true })
   const redis = new Redis('redis://127.0.0.1:6379', { maxRetriesPerRequest: 0, enableAutoPipelining: true })
   onTestFinished(() => [cluster, redis].forEach((client) => client.disconnect()))
-  expect(() => new RedisBackend({ redis: cluster })).toThrow('enableAutoPipelining')
-  expect(() => new RedisBackend({ redis })).not.toThrow()
+  expect(() => new RedisBackend({ redis: cluster, prefix: 'tf:' })).toThrow('enableAutoPipelining')
+  expect(() => new RedisBackend({ redis, prefix: 'tf:' })).not.toThrow()
 })
 
 test('duplicates the subscriber from a standalone client or a live Cluster node, connecting a lazyConnect Cluster first', async () => {
@@ -106,7 +106,7 @@ test('names Pub/Sub channels per database, as Pub/Sub spans every database', asy
   onTestFinished(() => clients.forEach((redis) => redis.disconnect()))
   const channels = await Promise.all(
     clients.map(async (redis) => {
-      const backend = new RedisBackend({ redis })
+      const backend = new RedisBackend({ redis, prefix: 'tf:' })
       const publish = vi
         .spyOn(redis as unknown as Record<string, () => Promise<unknown>>, REDIS_COMMANDS.publish.name)
         .mockResolvedValue([1, 1, 0])

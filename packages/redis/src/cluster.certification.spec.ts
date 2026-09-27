@@ -85,7 +85,7 @@ describe('Redis real three-master Cluster CI certification', () => {
     await cluster.set(broadcastSequenceKey(prefix, 'once'), '0')
     await expect(backend.publish({ key: 'once', kind: 'text' }, bytes('once'))).rejects.toThrow()
     expect(await cluster.get(broadcastSequenceKey(prefix, 'once'))).toBe('1')
-    expect(() => new RedisBackend({ redis: (masters[0] as Master).client })).toThrow(/at-most-once/i)
+    expect(() => new RedisBackend({ redis: (masters[0] as Master).client, prefix: 'tf:' })).toThrow(/at-most-once/i)
   })
   it('covers shipped command KEYS and terminates live and in-flight attempts when their generation drops', async () => {
     const runtime = await exerciseRuntimeSlotCommands()
