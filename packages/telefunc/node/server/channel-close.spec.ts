@@ -134,7 +134,7 @@ describe('self-initiated close', () => {
   })
 
   test('close() waits for inflight outbound ack before resolving', async () => {
-    const channel = new ServerChannel<(v: string) => string, never>({ ack: true, id: crypto.randomUUID() })
+    const channel = new ServerChannel<never, (v: string) => string>({ ack: true, id: crypto.randomUUID() })
     const frames: Uint8Array[] = []
 
     channel._attachPeer(createPeer(frames))
@@ -185,7 +185,7 @@ describe('self-initiated close', () => {
   })
 
   test('buffered send flushes before close request on attachPeer', async () => {
-    const channel = new ServerChannel<number, never>({ id: crypto.randomUUID() })
+    const channel = new ServerChannel<never, number>({ id: crypto.randomUUID() })
     const frames: Uint8Array[] = []
 
     channel.send(1)
@@ -207,7 +207,7 @@ describe('self-initiated close', () => {
   })
 
   test('send({ack:true}) resolves and close() resolves 0 when both acks arrive', async () => {
-    const channel = new ServerChannel<(v: string) => string, never>({ ack: true, id: crypto.randomUUID() })
+    const channel = new ServerChannel<never, (v: string) => string>({ ack: true, id: crypto.randomUUID() })
     const frames: Uint8Array[] = []
 
     channel._attachPeer(createPeer(frames))
@@ -225,7 +225,7 @@ describe('self-initiated close', () => {
   })
 
   test('outbound ack that arrives after timeout rejects with close error', async () => {
-    const channel = new ServerChannel<(v: string) => string, never>({ ack: true, id: crypto.randomUUID() })
+    const channel = new ServerChannel<never, (v: string) => string>({ ack: true, id: crypto.randomUUID() })
     const frames: Uint8Array[] = []
 
     channel._attachPeer(createPeer(frames))

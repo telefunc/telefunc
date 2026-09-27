@@ -349,7 +349,7 @@ describe('cloudflare broadcast routing', () => {
 
     transport.attachBinding(
       createBasicBinding({
-        onPublish(id, request) {
+        onPublish(id) {
           publishTargets.push(id.name)
           return Promise.resolve({ seq: 1, timestamp: Date.now() })
         },
@@ -403,13 +403,13 @@ describe('cloudflare broadcast routing', () => {
 
     transport.attachBinding(
       createBasicBinding({
-        onPublish(id, request) {
+        onPublish(_id, request) {
           return transport.publishToSubscribers(createAuthorityState(), {
             ...request,
             locationBucket: request.locationBucket,
           })
         },
-        onDeliver(id, request) {
+        onDeliver(_id, request) {
           transport.deliverToLocal(request)
           return Promise.resolve()
         },
@@ -455,13 +455,13 @@ describe('cloudflare broadcast routing', () => {
     transport.attachIsolateInfo('telefunc-shard-weur-0', 'weur')
     transport.attachBinding(
       createBasicBinding({
-        onPublish(id, request) {
+        onPublish(_id, request) {
           return transport.publishToSubscribers(createAuthorityState(), {
             ...request,
             locationBucket: request.locationBucket,
           })
         },
-        onDeliver(id, request) {
+        onDeliver(_id, request) {
           transport.deliverToLocal(request)
           return Promise.resolve()
         },
@@ -502,7 +502,7 @@ describe('cloudflare broadcast routing', () => {
 
     transport.attachBinding(
       createBasicBinding({
-        onPublish(id, { locationBucket }) {
+        onPublish(_id, { locationBucket }) {
           forwardedBuckets.push(locationBucket)
           return Promise.resolve()
         },

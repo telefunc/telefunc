@@ -7,7 +7,7 @@ import { TAG } from '../shared-ws.js'
 import { getSessionUrl } from './session-registry.js'
 
 const broadcasts: ClientBroadcast[] = []
-const channels: ClientChannel[] = []
+const channels: ClientChannel<never, string>[] = []
 afterEach(() => {
   for (const broadcast of broadcasts.splice(0)) broadcast.abort()
   for (const channel of channels.splice(0)) channel.abort()
