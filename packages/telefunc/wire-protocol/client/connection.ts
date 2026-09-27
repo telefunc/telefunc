@@ -1206,6 +1206,12 @@ class ClientConnection implements MuxConnection {
       clearTimeout(this.ttl)
       this.ttl = null
     }
+    // A draining channel whose frames went down with this wire is left out of the next RECONCILE, which tells the
+    // server it's gone.
+    for (const [ix, entry] of this.channels) {
+      if (entry.state.tag === 'draining' && !this.sendBuffer.some(({ channelIx }) => channelIx === ix))
+        this.releaseChannel(ix, entry.channel)
+    }
 
     const { attempt: prevAttempt, startedAt: prevStartedAt } =
       this.state.tag === 'reconnecting' ? this.state : { attempt: 0, startedAt: 0 }
@@ -1372,7 +1378,7 @@ class ClientConnection implements MuxConnection {
         if (!serverMap.has(ix)) hasNewChannels = true
         continue
       }
-      if (entry.state.tag === 'releasing' || entry.state.tag === 'draining') {
+      if (entry.state.tag === 'releasing' || (entry.state.tag === 'draining' && !serverMap.has(ix))) {
         this.releaseChannel(ix, entry.channel)
         continue
       }
@@ -1390,7 +1396,9 @@ class ClientConnection implements MuxConnection {
       const replay = this.replayBuffers.get(ix)
       if (replay)
         for (const frame of replay.getAfter(serverMap.get(ix)!)) releaseFrames.push({ kind: 'reconcile', frame })
-      channelsToOpen.push(entry.channel)
+      // A draining channel's queued frames follow its replay; then it has nothing left to send.
+      if (entry.state.tag === 'draining') this.releaseChannel(ix, entry.channel)
+      else channelsToOpen.push(entry.channel)
     }
 
     for (const frame of this.drainBufferedFrames(serverMap, this.channels)) releaseFrames.push(frame)

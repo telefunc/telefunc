@@ -14,7 +14,7 @@ import {
   SSE_POST_IDLE_FLUSH_DELAY_MS,
 } from '../constants.js'
 import { ClientConnection } from './connection.js'
-import { TAG, encode, type ReconciledPayload } from '../shared-ws.js'
+import { TAG, decode, encode, type ReconciledPayload } from '../shared-ws.js'
 
 /** Minimal `MuxChannel` — registering one is enough to make the connection open a wire. */
 function createChannel(id = crypto.randomUUID()) {
@@ -251,6 +251,51 @@ test('a reconnect re-attaches a channel still closing, so its close request can 
   channel.isClosed = true
   const outcome = connection.applyReconciled(reconciled({ sessionId: 'closing', open: [{ ix: 0, lastSeq: 0 }] }), null)
   expect(outcome.channelsToOpen).toEqual([channel])
+  connection.dispose()
+})
+
+test('a channel closed during a reconnect sends what the dead wire lost before what it queued', () => {
+  const channel = createChannel()
+  const connection = ClientConnection.getOrCreate(
+    'http://draining-replay.test',
+    channel as never,
+    stalledOptions(),
+  ) as any
+  connection.buildReconcileFrame()
+  connection.applyReconciled(reconciled({ sessionId: 'draining', open: [{ ix: 0, lastSeq: 0 }] }), null)
+  const replay = connection.replayBuffers.get(0)
+  replay.push(replay.nextSeq(), encode.text(0, 'lost with the wire', 1))
+  connection.buildReconcileFrame() // the reconnect's: sends wait for its RECONCILED
+  connection.send(channel, 'queued')
+  connection.sendAbort(channel)
+  connection.unregister(channel)
+  const { frames } = connection.applyReconciled(
+    reconciled({ sessionId: 'draining', open: [{ ix: 0, lastSeq: 0 }] }),
+    null,
+  )
+  const sent = frames.map(({ frame }: { frame: Uint8Array<ArrayBuffer> }) => decode(frame))
+  expect(sent.map((frame: { tag: number; seq?: number }) => [frame.tag, frame.seq])).toEqual([
+    [TAG.TEXT, 1],
+    [TAG.TEXT, 2],
+    [TAG.CLOSE, undefined],
+  ])
+  connection.dispose()
+})
+
+test('a channel whose close went out with a reconcile on a wire that then died is left out of the next reconcile', () => {
+  const closing = createChannel()
+  const options = stalledOptions()
+  const connection = ClientConnection.getOrCreate('http://draining-lost.test', closing as never, options) as any
+  connection.buildReconcileFrame()
+  connection.applyReconciled(reconciled({ sessionId: 'lost', open: [{ ix: 0, lastSeq: 0 }] }), null)
+  ClientConnection.getOrCreate('http://draining-lost.test', createChannel() as never, options) // a call's callback
+  connection.buildReconcileFrame() // its registration: sends wait for the RECONCILED
+  connection.sendAbort(closing)
+  connection.unregister(closing)
+  connection.stageReconcileBatch() // the abort leaves with the registration's reconcile
+  connection.handleTransportLoss(new Error('the wire died'))
+  const reconcile = decode(connection.buildReconcileFrame().frame) as { payload: { open: { ix: number }[] } }
+  expect(reconcile.payload.open.map((entry) => entry.ix)).toEqual([1])
   connection.dispose()
 })
 
