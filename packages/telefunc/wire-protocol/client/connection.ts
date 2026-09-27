@@ -589,7 +589,11 @@ class ClientConnection implements MuxConnection {
       this.enterChannelReleasing(ix, err)
       return
     }
-    if (entry.state.tag === 'open' && this.sendBuffer.some(({ channelIx }) => channelIx === ix)) {
+    // It stays listed only while the frame that ends it on the server waits; anything else it queued goes with it.
+    if (
+      entry.state.tag === 'open' &&
+      this.sendBuffer.some(({ channelIx, frame }) => channelIx === ix && isClosingFrame(frame))
+    ) {
       this.enterChannelDraining(ix)
       return
     }
