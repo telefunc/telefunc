@@ -72,23 +72,17 @@ describe.each([
     expect(report.mock.calls[0]?.[1]).toMatchObject({ message: 'unexpected publish bug' })
   })
 
-  test('keeps an expected Abort quiet', async () => {
+  test.each([
+    ['an expected Abort', ACK_STATUS.ABORT, expect.objectContaining({ abortValue: 'expected' })],
+    ['a refused publish', ACK_STATUS.OVERFLOW, expect.any(ChannelOverflowError)],
+    [
+      'a shield validation failure',
+      ACK_STATUS.SHIELD_ERROR,
+      expect.objectContaining({ name: 'ShieldValidationError' }),
+    ],
+  ] as const)('keeps %s quiet', async (_name, status, rejection) => {
     const report = vi.spyOn(console, 'error').mockImplementation(() => {})
-    await expect(publishThatSettlesWith(ACK_STATUS.ABORT, binary)).rejects.toMatchObject({ abortValue: 'expected' })
-    expect(report).not.toHaveBeenCalled()
-  })
-
-  test('keeps a refused publish quiet, as a ChannelOverflowError', async () => {
-    const report = vi.spyOn(console, 'error').mockImplementation(() => {})
-    await expect(publishThatSettlesWith(ACK_STATUS.OVERFLOW, binary)).rejects.toBeInstanceOf(ChannelOverflowError)
-    expect(report).not.toHaveBeenCalled()
-  })
-
-  test('keeps a shield validation failure quiet', async () => {
-    const report = vi.spyOn(console, 'error').mockImplementation(() => {})
-    await expect(publishThatSettlesWith(ACK_STATUS.SHIELD_ERROR, binary)).rejects.toMatchObject({
-      name: 'ShieldValidationError',
-    })
+    await expect(publishThatSettlesWith(status, binary)).rejects.toEqual(rejection)
     expect(report).not.toHaveBeenCalled()
   })
 
