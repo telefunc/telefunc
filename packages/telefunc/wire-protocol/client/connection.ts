@@ -522,14 +522,13 @@ class ClientConnection implements MuxConnection {
   }
 
   /** How long a gone server is still held: until its loss is noticed at the pong deadline, then for `reconnectTimeout`. */
-  reconnectWindow(): number {
-    return 2 * this.pingIntervalMs + this.reconnectTimeoutMs
+  reconnectWindow(pingIntervalMs = this.pingIntervalMs): number {
+    return 2 * pingIntervalMs + this.reconnectTimeoutMs
   }
 
-  /** As the server's does, a frame stays replayable through the pong deadline, when a silent drop is noticed, then
-   *  `reconnectTimeout`, plus a second for the reconnect itself. */
+  /** As the server's, a frame stays replayable through the reconnect window, plus a second for the reconnect itself. */
   private replayMaxAgeMs(pingIntervalMs: number): number {
-    return 2 * pingIntervalMs + this.reconnectTimeoutMs + 1_000
+    return this.reconnectWindow(pingIntervalMs) + 1_000
   }
 
   private registerReconcileTimer: ReturnType<typeof setTimeout> | null = null
@@ -1342,13 +1341,11 @@ class ClientConnection implements MuxConnection {
 
   private applyReconciled(ctrl: ReconciledPayload, deferredOmitted: number[] | null): ReconcileOutcome {
     this.sessionId = ctrl.sessionId
-    if (ctrl.reconnectTimeout !== undefined) this.reconnectTimeoutMs = ctrl.reconnectTimeout
+    this.reconnectTimeoutMs = ctrl.reconnectTimeout
     // A per-call `idleTimeout` (withContext) is kept over the server's.
-    if (ctrl.idleTimeout !== undefined && this.connectionOptions.idleTimeout === undefined) {
-      this.idleTimeoutMs = ctrl.idleTimeout
-    }
-    if (ctrl.clientReplayBuffer !== undefined) this.clientReplayBufferBytes = ctrl.clientReplayBuffer
-    if (ctrl.clientReplayBufferBinary !== undefined) this.clientReplayBufferBinaryBytes = ctrl.clientReplayBufferBinary
+    if (this.connectionOptions.idleTimeout === undefined) this.idleTimeoutMs = ctrl.idleTimeout
+    this.clientReplayBufferBytes = ctrl.clientReplayBuffer
+    this.clientReplayBufferBinaryBytes = ctrl.clientReplayBufferBinary
     // Before this reconcile stores anything: a channel registered before the first RECONCILED was sized with the defaults.
     const maxAgeMs = this.replayMaxAgeMs(ctrl.pingInterval)
     for (const replay of this.replayBuffers.values()) {
@@ -1950,20 +1947,20 @@ class SseTransport implements UpgradeSource {
         setTimeout(() => resolve('timeout'), STREAM_REQUEST_HANDSHAKE_TIMEOUT_MS),
       )
       const result = await Promise.race([handshakeOkP, timeoutP, fetchEndedP])
-      const unsent =
-        result === 'fetch-ended' && this.streamRequest.tag === 'active' ? this.streamRequest.unconfirmed : null
-      if (result === 'ok' && this.streamRequest.tag === 'active') this.streamRequest.unconfirmed = null
-      if (result !== 'ok') {
-        this.closeStreamRequest()
-        this.streamRequest = { tag: 'failed' }
-      } else {
+      if (result === 'ok') {
+        if (this.streamRequest.tag === 'active') this.streamRequest.unconfirmed = null
         // Ended while its body is still ours: nothing written to it reaches the server any more, so this wire ends.
         void fetchEndedP.then(() => {
           if (this.streamRequest.tag === 'active' && this.streamRequest.body === uploadBody) abortController.abort()
         })
+      } else {
+        // It ended without the open-ack, so the server may not have read what went into its body: resend it, first.
+        const unsent =
+          result === 'fetch-ended' && this.streamRequest.tag === 'active' ? this.streamRequest.unconfirmed : null
+        this.closeStreamRequest()
+        this.streamRequest = { tag: 'failed' }
+        if (unsent) this.outbox = [...unsent.map((frame) => ({ frame, deadline: Date.now() })), ...this.outbox]
       }
-      // It ended without the open-ack, so the server may not have read what went into its body: resend it, first.
-      if (unsent) this.outbox = [...unsent.map((frame) => ({ frame, deadline: Date.now() })), ...this.outbox]
     }
 
     this.connecting = false
@@ -2128,8 +2125,8 @@ class SseTransport implements UpgradeSource {
   }
 
   applyReconciledSettings(ctrl: ReconciledPayload): void {
-    if (ctrl.sseFlushThrottle !== undefined) this.flushThrottleMs = ctrl.sseFlushThrottle
-    if (ctrl.ssePostIdleFlushDelay !== undefined) this.postIdleFlushDelayMs = ctrl.ssePostIdleFlushDelay
+    this.flushThrottleMs = ctrl.sseFlushThrottle
+    this.postIdleFlushDelayMs = ctrl.ssePostIdleFlushDelay
     this.heartbeatFlushDelayMs = Math.floor(ctrl.pingInterval / 2)
   }
 

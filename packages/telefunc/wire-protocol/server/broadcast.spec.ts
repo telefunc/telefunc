@@ -975,19 +975,7 @@ describe('Broadcast static bus (publish/subscribe)', () => {
     expect(seen).toEqual(['once:one', 'other:one', 'other:two'])
     channel.abort()
   })
-  it("a channel listener that stops listening itself doesn't make the next one miss the message", () => {
-    const channel = new ServerChannel<string, never>()
-    const seen: string[] = []
-    const unlisten = channel.listen((message) => {
-      seen.push(`once:${message}`)
-      unlisten()
-    })
-    channel.listen((message) => void seen.push(`other:${message}`))
-    channel._onPeerMessage(JSON.stringify('one'), 5)
-    channel._onPeerMessage(JSON.stringify('two'), 5)
-    expect(seen).toEqual(['once:one', 'other:one', 'other:two'])
-    channel.abort()
-  })
+
   it('resolves a static publish to a receipt with its key, as a subscriber gets it', async () => {
     const text = await Broadcast.publish('room:lobby', 'hi')
     const binary = await Broadcast.publishBinary('room:lobby', new Uint8Array([1]))

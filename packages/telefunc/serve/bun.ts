@@ -34,9 +34,8 @@ function telefunc(): TelefuncServe {
   const ws = crossws({ hooks: getTelefuncChannelHooks() })
 
   return {
-    // Bun drops a send once 16 MiB wait on the socket (its default backpressureLimit), which leaves a gap in a channel.
-    // 0 turns the limit off (uWebSockets drops only above a non-zero maxBackpressure): the socket queues every frame,
-    // as Node's ws and Deno's WebSocket do.
+    // Bun drops a send once 16 MiB wait on the socket (its default backpressureLimit), leaving a gap in a channel.
+    // 0 is no limit in uWebSockets: the socket queues every frame, as Node's ws and Deno's WebSocket do.
     websocket: { ...ws.websocket, backpressureLimit: 0 },
     async serve({ request, server, context }: ServeInput): Promise<Response | undefined> {
       const url = new URL(request.url)

@@ -5,7 +5,7 @@ import { config } from '../../client/clientConfig.js'
 import { CHANNEL_TRANSPORT } from '../constants.js'
 import { ACK_STATUS, TAG, type AckResultStatus } from '../shared-ws.js'
 import { ChannelOverflowError } from '../channel-errors.js'
-import { getSessionToken } from './session-registry.js'
+import { getSessionUrl } from './session-registry.js'
 
 const broadcasts: ClientBroadcast[] = []
 const channels: ClientChannel<never, string>[] = []
@@ -108,30 +108,28 @@ describe.each([
   })
 })
 
-test('a channel made before the page has a session token makes one, so the call that carries it presents the same', () => {
-  config.fetch = async () => new Response(new ReadableStream({ start() {} }), { status: 200 })
+test('a channel made before the page has a session token names one, which the call that carries it presents too', async () => {
+  const requested: string[] = []
+  config.fetch = async (url) => {
+    requested.push(String(url))
+    return new Response(new ReadableStream({ start() {} }), { status: 200 })
+  }
   const telefuncUrl = 'http://first-call.test/_telefunc'
-  expect(getSessionToken(telefuncUrl)).toBeUndefined()
-  broadcasts.push(
-    new ClientBroadcast({
+  channels.push(
+    new ClientChannel({
       channelId: crypto.randomUUID(),
-      key: 'first-call',
       transports: [CHANNEL_TRANSPORT.SSE],
       telefuncUrl,
       connectionKey: crypto.randomUUID(),
     }),
   )
-  expect(getSessionToken(telefuncUrl)).toEqual(expect.any(String))
+  await vi.waitFor(() => expect(requested).not.toEqual([]))
+  const session = new URL(requested[0]!).searchParams.get('session')
+  expect(getSessionUrl(telefuncUrl)).toBe(`${telefuncUrl}?session=${session}`)
 })
 
 test('a close request goes out again when its channel re-attaches before the close is acknowledged', () => {
-  config.fetch = async () => new Response(new ReadableStream({ start() {} }), { status: 200 })
-  const channel = new ClientChannel({
-    channelId: crypto.randomUUID(),
-    transports: [CHANNEL_TRANSPORT.SSE],
-    telefuncUrl: 'http://close-resend.test/_telefunc',
-    connectionKey: crypto.randomUUID(),
-  })
+  const channel = stalledChannel()
   const sendCloseRequest = vi.spyOn((channel as any)._connection, 'sendCloseRequest')
   void channel.close({ timeout: 5_000 })
   channel._onTransportOpen(false) // the reconcile of a reconnect: the first request may have died with the old wire
@@ -139,13 +137,7 @@ test('a close request goes out again when its channel re-attaches before the clo
 })
 
 test('a close the server acknowledged ends gracefully, though a reconnect then drops the channel', async () => {
-  config.fetch = async () => new Response(new ReadableStream({ start() {} }), { status: 200 })
-  const channel = new ClientChannel({
-    channelId: crypto.randomUUID(),
-    transports: [CHANNEL_TRANSPORT.SSE],
-    telefuncUrl: 'http://close-acked.test/_telefunc',
-    connectionKey: crypto.randomUUID(),
-  })
+  const channel = stalledChannel()
   const closedWith: unknown[] = []
   channel.onClose((err) => void closedWith.push(err))
   const closing = channel.close({ timeout: 5_000 })
