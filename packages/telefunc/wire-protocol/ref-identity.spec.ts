@@ -482,6 +482,31 @@ async function collect<T>(gen: AsyncGenerator<T>): Promise<T[]> {
   return out
 }
 
+const utf8 = (text: string) => new TextEncoder().encode(text) as Uint8Array<ArrayBuffer>
+
+function droppableNetwork() {
+  let drop!: (error: Error) => void
+  const network = new TransformStream<Uint8Array<ArrayBuffer>, Uint8Array<ArrayBuffer>>({
+    start: (controller) => void (drop = (error) => controller.error(error)),
+  })
+  return { network, drop }
+}
+
+async function expectNoUnhandled(run: () => Promise<void>) {
+  const unhandled: unknown[] = []
+  const onUnhandled = (reason: unknown) => unhandled.push(reason)
+  process.on('unhandledRejection', onUnhandled)
+  // Node rethrows a rejected promise an event listener returns as an uncaught exception.
+  process.on('uncaughtException', onUnhandled)
+  try {
+    await run()
+    expect(unhandled).toEqual([])
+  } finally {
+    process.off('unhandledRejection', onUnhandled)
+    process.off('uncaughtException', onUnhandled)
+  }
+}
+
 describe('reference identity — full pipeline', () => {
   test("two returned streams read one after the other both complete, as the docs' concurrent downloads may be", async () => {
     const source = () => {
@@ -534,14 +559,20 @@ describe('reference identity — full pipeline', () => {
     expect(upstreamCancelled).toBe(true)
   })
 
-  test('the response body is cancelled once every value is done or cancelled', async () => {
+  test('the response body is cancelled once one stream was cancelled and the other then finished', async () => {
     let upstreamCancelled = false
+    let finish!: () => void
+    const finishing = new Promise<void>((resolve) => (finish = resolve))
+    const done = new ReadableStream<Uint8Array<ArrayBuffer>>({
+      start: (controller) => finishing.then(() => controller.close()),
+    })
     const pending = new ReadableStream({ cancel: () => void (upstreamCancelled = true) })
-    const { ret } = await roundTrip({ gen: (async function* () {})(), pending })
-    const retTyped = ret as { gen: AsyncGenerator<never>; pending: ReadableStream }
-    expect(await collect(retTyped.gen)).toEqual([])
+    const { ret } = await roundTrip({ done, pending })
+    const retTyped = ret as { done: ReadableStream<Uint8Array>; pending: ReadableStream }
     await retTyped.pending.cancel()
-    await new Promise((resolve) => setTimeout(resolve, 0))
+    finish()
+    await new Response(retTyped.done).arrayBuffer()
+    await new Promise((resolve) => setTimeout(resolve, 50))
     expect(upstreamCancelled).toBe(true)
   })
 
@@ -608,60 +639,33 @@ describe('reference identity — full pipeline', () => {
 
   test.each([STREAM_TRANSPORT.BINARY_INLINE, STREAM_TRANSPORT.SSE_INLINE])(
     '%s: a body that drops under an inline stream leaves no unhandled rejection',
-    async (streamTransport) => {
-      const encode = (text: string) => new TextEncoder().encode(text) as Uint8Array<ArrayBuffer>
-      const unhandled: unknown[] = []
-      const onUnhandled = (reason: unknown) => unhandled.push(reason)
-      process.on('unhandledRejection', onUnhandled)
-      try {
-        let drop!: (error: Error) => void
-        const network = new TransformStream<Uint8Array<ArrayBuffer>, Uint8Array<ArrayBuffer>>({
-          start: (controller) => void (drop = (error) => controller.error(error)),
-        })
-        const b = new ReadableStream<Uint8Array<ArrayBuffer>>({
-          start: (controller) => controller.enqueue(encode('b1')),
-        })
+    (streamTransport) =>
+      expectNoUnhandled(async () => {
+        const { network, drop } = droppableNetwork()
+        const b = new ReadableStream<Uint8Array<ArrayBuffer>>({ start: (controller) => controller.enqueue(utf8('b1')) })
         const { ret } = await roundTrip({ b }, { streamTransport, network })
         const readerB = (ret as { b: ReadableStream<Uint8Array> }).b.getReader()
         await readerB.read()
         drop(new TypeError('network error'))
         await expect(readerB.read()).rejects.toThrow('network error')
         await new Promise((resolve) => setTimeout(resolve, 0))
-        expect(unhandled).toEqual([])
-      } finally {
-        process.off('unhandledRejection', onUnhandled)
-      }
-    },
+      }),
   )
 
   test.each([STREAM_TRANSPORT.BINARY_INLINE, STREAM_TRANSPORT.SSE_INLINE])(
     '%s: aborting a call whose body dropped leaves no unhandled rejection',
-    async (streamTransport) => {
-      const unhandled: unknown[] = []
-      const onUnhandled = (reason: unknown) => unhandled.push(reason)
-      process.on('unhandledRejection', onUnhandled)
-      // Node rethrows a rejected promise an event listener returns as an uncaught exception.
-      process.on('uncaughtException', onUnhandled)
-      try {
-        let drop!: (error: Error) => void
-        const network = new TransformStream<Uint8Array<ArrayBuffer>, Uint8Array<ArrayBuffer>>({
-          start: (controller) => void (drop = (error) => controller.error(error)),
-        })
+    (streamTransport) =>
+      expectNoUnhandled(async () => {
+        const { network, drop } = droppableNetwork()
         const { abortController } = await roundTrip({ b: new ReadableStream() }, { streamTransport, network })
         drop(new TypeError('network error'))
         abortController.abort()
         // The error reaches the client's body through the network stream's pipe, a few turns later.
         await new Promise((resolve) => setTimeout(resolve, 20))
-        expect(unhandled).toEqual([])
-      } finally {
-        process.off('unhandledRejection', onUnhandled)
-        process.off('uncaughtException', onUnhandled)
-      }
-    },
+      }),
   )
 
   test('a cancelled inline stream frees the frames it buffered, even once its done frame arrived', async () => {
-    const encode = (text: string) => new TextEncoder().encode(text) as Uint8Array<ArrayBuffer>
     class RawChunks {
       constructor(readonly chunks: string[]) {}
     }
@@ -672,7 +676,7 @@ describe('reference identity — full pipeline', () => {
       replace(value: RawChunks, context: ServerReplacerContext) {
         const sent = context.sendStream(() => ({
           chunks: (async function* () {
-            for (const chunk of value.chunks) yield encode(chunk)
+            for (const chunk of value.chunks) yield utf8(chunk)
           })(),
           cancel() {},
         }))
@@ -691,7 +695,7 @@ describe('reference identity — full pipeline', () => {
     const gate = new Promise<void>((resolve) => (releaseA = resolve))
     const a = new ReadableStream<Uint8Array<ArrayBuffer>>({
       async start(controller) {
-        controller.enqueue(encode('a1'))
+        controller.enqueue(utf8('a1'))
         await gate
         controller.close()
       },
@@ -714,69 +718,6 @@ describe('reference identity — full pipeline', () => {
     retTyped.b.cancel()
     expect(await retTyped.b.readNextChunk()).toBe(null)
   })
-
-  test.each([STREAM_TRANSPORT.BINARY_INLINE, STREAM_TRANSPORT.SSE_INLINE])(
-    '%s: a body that drops after one inline stream finished leaves no unhandled rejection',
-    async (streamTransport) => {
-      const encode = (text: string) => new TextEncoder().encode(text) as Uint8Array<ArrayBuffer>
-      const unhandled: unknown[] = []
-      const onUnhandled = (reason: unknown) => unhandled.push(reason)
-      process.on('unhandledRejection', onUnhandled)
-      try {
-        let drop!: (error: Error) => void
-        const network = new TransformStream<Uint8Array<ArrayBuffer>, Uint8Array<ArrayBuffer>>({
-          start: (controller) => void (drop = (error) => controller.error(error)),
-        })
-        const a = new ReadableStream<Uint8Array<ArrayBuffer>>({
-          start(controller) {
-            controller.enqueue(encode('a1'))
-            controller.close()
-          },
-        })
-        const b = new ReadableStream<Uint8Array<ArrayBuffer>>({
-          start: (controller) => controller.enqueue(encode('b1')),
-        })
-        const { ret } = await roundTrip({ a, b }, { streamTransport, network })
-        const streams = ret as { a: ReadableStream<Uint8Array>; b: ReadableStream<Uint8Array> }
-        const readerA = streams.a.getReader()
-        while (!(await readerA.read()).done);
-        const readerB = streams.b.getReader()
-        await readerB.read()
-        drop(new TypeError('network error'))
-        await expect(readerB.read()).rejects.toThrow('network error')
-        await new Promise((resolve) => setTimeout(resolve, 0))
-        expect(unhandled).toEqual([])
-      } finally {
-        process.off('unhandledRejection', onUnhandled)
-      }
-    },
-  )
-
-  test.each([STREAM_TRANSPORT.BINARY_INLINE, STREAM_TRANSPORT.SSE_INLINE])(
-    '%s: aborting a call whose body dropped leaves no unhandled rejection',
-    async (streamTransport) => {
-      const unhandled: unknown[] = []
-      const onUnhandled = (reason: unknown) => unhandled.push(reason)
-      process.on('unhandledRejection', onUnhandled)
-      // Node rethrows a rejected promise an event listener returns as an uncaught exception.
-      process.on('uncaughtException', onUnhandled)
-      try {
-        let drop!: (error: Error) => void
-        const network = new TransformStream<Uint8Array<ArrayBuffer>, Uint8Array<ArrayBuffer>>({
-          start: (controller) => void (drop = (error) => controller.error(error)),
-        })
-        const { abortController } = await roundTrip({ b: new ReadableStream() }, { streamTransport, network })
-        drop(new TypeError('network error'))
-        abortController.abort()
-        // The error reaches the client's body through the network stream's pipe, a few turns later.
-        await new Promise((resolve) => setTimeout(resolve, 20))
-        expect(unhandled).toEqual([])
-      } finally {
-        process.off('unhandledRejection', onUnhandled)
-        process.off('uncaughtException', onUnhandled)
-      }
-    },
-  )
 })
 
 // ───────────────────────────────────────────────────────────────────────────
