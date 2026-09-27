@@ -5,7 +5,6 @@ export {
   directoryDelete,
   directoryList,
   readLiveHead,
-  hasOrphanGeneration,
   deleteLapsedTombstone,
   listOrphanGenerations,
   compareExchangeHead,
@@ -124,10 +123,6 @@ function readLiveHead(sql: SqlStorage, now: number): StoredHead | null {
   }
   if (row.lease_id !== null && row.lease_until !== null) head.closeLease = { id: row.lease_id, until: row.lease_until }
   return head
-}
-
-function hasOrphanGeneration(sql: SqlStorage, currentInc: string | null): boolean {
-  return sql.exec('SELECT 1 FROM gen WHERE inc IS NOT ? LIMIT 1', currentInc).toArray().length > 0
 }
 
 /** A lapsed tombstone is reclaimed here: this backend has no native head TTL. */

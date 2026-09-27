@@ -43,7 +43,6 @@ import {
   dropGenerationRows,
   initSchema,
   deleteLapsedTombstone,
-  hasOrphanGeneration,
   listOrphanGenerations,
   readCells,
   readLiveHead,
@@ -236,6 +235,6 @@ function nextMaintenanceDeadline(sql: SqlStorage, now: number): number | null {
     sql.exec<{ deadline: number | null }>('SELECT MIN(expires_at) AS deadline FROM head').toArray()[0]?.deadline,
     sql.exec<{ deadline: number | null }>('SELECT MIN(expires_at) AS deadline FROM route').toArray()[0]?.deadline,
   ].filter((deadline): deadline is number => deadline !== null && deadline !== undefined)
-  if (hasOrphanGeneration(sql, readLiveHead(sql, now)?.currentInc ?? null)) deadlines.push(now)
+  if (listOrphanGenerations(sql, readLiveHead(sql, now)?.currentInc ?? null).length > 0) deadlines.push(now)
   return deadlines.length === 0 ? null : Math.min(...deadlines)
 }
