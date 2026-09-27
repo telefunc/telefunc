@@ -23,3 +23,17 @@ describe('channel transports a server adapter enables', () => {
 test.each([Infinity, 0.5, Number.MAX_SAFE_INTEGER + 1])('channel config rejects %s', (value) => {
   expect(() => (config.channel.reconnectTimeout = value)).toThrow('non-negative safe integer')
 })
+
+describe('config.broadcast', () => {
+  it('rejects an undefined config.broadcast.transport as a usage error', () => {
+    expect(() => {
+      config.broadcast.transport = undefined
+    }).toThrow('config.broadcast.transport must be a BroadcastTransport')
+  })
+  it('rejects a Broadcast transport missing a binary method when it is configured', () => {
+    const textOnly = { send: () => ({ seq: 1, timestamp: 1 }), listen: () => () => {}, listenBinary: () => () => {} }
+    expect(() => {
+      config.broadcast = { transport: textOnly as never }
+    }).toThrow('config.broadcast.transport must be a BroadcastTransport with send(), listen(), sendBinary()')
+  })
+})

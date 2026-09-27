@@ -86,11 +86,6 @@ describe('backend installation lifecycle', () => {
     await vi.waitFor(() => expect(seen).toEqual(['from another instance']))
     unsubscribe()
   })
-  it('rejects an undefined config.broadcast.transport as a usage error', () => {
-    expect(() => {
-      config.broadcast.transport = undefined
-    }).toThrow('config.broadcast.transport must be a BroadcastTransport')
-  })
 
   it('unlistens a key before listening to it again, so a per-key transport keeps delivering across a subscriber swap', async () => {
     const handlers = new Map<string, (payload: string, info: { seq: number; timestamp: number }) => void>()
@@ -140,13 +135,6 @@ describe('backend installation lifecycle', () => {
     expect(seen.sort()).toEqual(['0:hi', '1:hi'])
     expect(receipt).toEqual({ seq: 1, timestamp: expect.any(Number) })
     await Promise.all(instances.map((instance) => instance.dispose()))
-  })
-
-  it('rejects a Broadcast transport missing a binary method when it is configured', () => {
-    const { sendBinary: _, ...textOnly } = localTransport()
-    expect(() => {
-      config.broadcast = { transport: textOnly as BroadcastTransport }
-    }).toThrow('config.broadcast.transport must be a BroadcastTransport with send(), listen(), sendBinary()')
   })
 
   it.each([
