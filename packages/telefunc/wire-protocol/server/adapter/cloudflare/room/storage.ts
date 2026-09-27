@@ -228,7 +228,6 @@ function advanceOrder(sql: SqlStorage, inc: string, domain: string, now: number)
   return mark
 }
 
-// Drops every generation row.
 function dropGenerationRows(sql: SqlStorage, inc: string): void {
   for (const table of ['cell', 'ord', 'rt_manifest', 'rt_chunk', 'route', 'gen']) {
     sql.exec(`DELETE FROM ${table} WHERE inc = ?`, inc)
