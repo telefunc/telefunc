@@ -710,7 +710,6 @@ class ServerRoom extends RoomStateView implements Room {
         meta: this.meta,
         closed: this.isClosed,
         stamp: this._state.updateStamp,
-        // Scalars only: the roster streams over the stub once its peer attaches.
         count: this.count,
       },
     }

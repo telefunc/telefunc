@@ -25,7 +25,6 @@ import type {
   RoomSnapshotView,
   Sender,
 } from './types.js'
-// RoomState: the local view of a room, driven by the event stream
 /** A binary listener's track filter: `undefined` = every track, `null` = the default lane only, a name = that track only. */
 type TrackFilter = string | null | undefined
 type MemberEntry = {

@@ -187,7 +187,6 @@ class ClientRoom extends RoomStateView implements Room {
     return this._state.ensureRemoteFromSnapshot(snap)
   }
 
-  // The roster streams in right behind the response. Its arrival is an onChange.
   snapshot(): RoomSnapshotView {
     return this._state.snapshot()
   }
@@ -235,7 +234,6 @@ class ClientRoom extends RoomStateView implements Room {
         this._roster.reject(new Error('Failed to load room participants'))
         return
       case 'data':
-        // Tail mode holds server-side (see `RoomStubChannel._tail`): text reaches this client only once it subscribes, already selected and ordered, so nothing is buffered here.
         this._state.applyData(event, makePublishInfo(this.id, rawInfo.seq, rawInfo.timestamp))
         return
       case 'join':
