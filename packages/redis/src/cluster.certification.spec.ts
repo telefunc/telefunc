@@ -513,6 +513,19 @@ describe('Redis real three-master Cluster CI certification', () => {
     const other = await backend.publish({ key: 'other', kind: 'text' }, bytes('three'))
     expect(other.seq).not.toBe(second.seq + 1)
   })
+  it('pages the room directory 100 rooms at a time, with a cursor only while rooms remain', async () => {
+    const backend = roomBackend(cluster, uniquePrefix('directory-paging'))
+    const entries = Array.from({ length: 101 }, (_, index) => {
+      const roomId = `room-${String(index).padStart(3, '0')}`
+      return { roomId, incTag: `${roomId}-inc` }
+    })
+    for (const { roomId, incTag } of entries) await backend.directoryPut(roomId, incTag)
+    const first = await backend.directoryList('room-')
+    expect(first).toEqual({ entries: entries.slice(0, 100), cursor: 'room-099' })
+    expect(await backend.directoryList('room-', first.cursor)).toEqual({ entries: entries.slice(100) })
+    // Exactly one page of matches, then a room outside the prefix.
+    expect(await backend.directoryList('room-0')).toEqual({ entries: entries.slice(0, 100) })
+  })
   function own<T>(value: T, dispose: (value: T) => unknown): T {
     onTestFinished(async () => void (await dispose(value)))
     return value
