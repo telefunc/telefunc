@@ -191,10 +191,12 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
   _onPeerBroadcastUnsubscribe(binary: boolean): void {
     if (binary) {
       this._peerSubscribedBinary = false
+      if (this._broadcastBinaryListeners.length > 0) return
       this._unsubBinaryBroadcast?.()
       this._unsubBinaryBroadcast = null
     } else {
       this._peerSubscribedText = false
+      if (this._broadcastListeners.length > 0) return
       this._unsubBroadcast?.()
       this._unsubBroadcast = null
     }

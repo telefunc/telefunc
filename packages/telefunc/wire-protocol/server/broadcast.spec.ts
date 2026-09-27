@@ -143,6 +143,24 @@ describe('keyed in-process broadcast', () => {
     expect(seen).toEqual([1])
   })
 
+  it("keeps delivering to the server's own listeners after the page unsubscribes", () => {
+    const broadcast = new ServerBroadcast<string>({ key: 'room:page-unsub' })
+    broadcast._registerChannel()
+    const seen: string[] = []
+    const seenBinary: number[] = []
+    broadcast.subscribe((m) => seen.push(m))
+    broadcast.subscribeBinary((data) => seenBinary.push(data.length))
+    for (const binary of [false, true]) {
+      broadcast._onPeerBroadcastSubscribe(binary)
+      broadcast._onPeerBroadcastUnsubscribe(binary)
+    }
+
+    broadcast.publish('after')
+    broadcast.publishBinary(new Uint8Array(3))
+
+    expect([seen, seenBinary]).toEqual([['after'], [3]])
+  })
+
   // Edge case: a Broadcast can be created and have `publish` called on it BEFORE
   // any peer attaches. The behavioral contract: when the peer eventually attaches,
   // the previously-published message is delivered to it (not silently dropped).
