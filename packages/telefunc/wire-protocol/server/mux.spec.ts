@@ -4,10 +4,8 @@ import { ServerChannel } from './channel.js'
 import { decode, encode, TAG, type DecodedFrame } from '../shared-ws.js'
 import { getServerConfig } from '../../node/server/serverConfig.js'
 
-test("a reconnect waiting for a new channel keeps the channels it moved when the previous wire's close lands", async () => {
-  const mux = new ChannelMux()
-  const clock = new ServerChannel<string, string>({ id: 'clock' })
-  mux.registerChannel(clock)
+/** Wires the test opens on `mux`, each recording what the server sends on it. */
+function wires(mux: ChannelMux) {
   const sessions = new Map<object, string>()
   const sent = new Map<object, DecodedFrame[]>()
   const transport: ServerTransport<object> = {
@@ -23,6 +21,15 @@ test("a reconnect waiting for a new channel keeps the channels it moved when the
     mux.onConnectionOpen(wire, transport)
     return wire
   }
+  const texts = (wire: object) => sent.get(wire)!.flatMap((frame) => (frame.tag === TAG.TEXT ? [frame.text] : []))
+  return { sessions, open, texts }
+}
+
+test("a reconnect waiting for a new channel keeps the channels it moved when the previous wire's close lands", async () => {
+  const mux = new ChannelMux()
+  const clock = new ServerChannel<string, string>({ id: 'clock' })
+  mux.registerChannel(clock)
+  const { sessions, open, texts } = wires(mux)
   const previous = open()
   await mux.onConnectionRawMessage(
     previous,
@@ -45,28 +52,14 @@ test("a reconnect waiting for a new channel keeps the channels it moved when the
   mux.registerChannel(new ServerChannel({ id: 'callback' }))
   await reconciling
   void clock.send('tick')
-  expect(sent.get(next)!.some((frame) => frame.tag === TAG.TEXT && frame.text.includes('tick'))).toBe(true)
+  expect(texts(next).some((text) => text.includes('tick'))).toBe(true)
 })
 
 test('a stale session whose RECONCILED never reached the page leaves the channels a later reconnect moved', async () => {
   const mux = new ChannelMux()
   const clock = new ServerChannel<string, string>({ id: 'clock' })
   mux.registerChannel(clock)
-  const sessions = new Map<object, string>()
-  const sent = new Map<object, DecodedFrame[]>()
-  const transport: ServerTransport<object> = {
-    getSessionId: (wire) => sessions.get(wire),
-    setSessionId: (wire, id) => void sessions.set(wire, id),
-    getConnId: () => null,
-    sendNow: (wire, frame) => void sent.get(wire)!.push(decode(frame)),
-    terminateConnection: () => {},
-  }
-  const open = () => {
-    const wire = {}
-    sent.set(wire, [])
-    mux.onConnectionOpen(wire, transport)
-    return wire
-  }
+  const { sessions, open, texts } = wires(mux)
   const first = open()
   await mux.onConnectionRawMessage(
     first,
@@ -88,7 +81,7 @@ test('a stale session whose RECONCILED never reached the page leaves the channel
   )
   mux.onConnectionClosed(lost, { permanent: false }) // the dead wire's ping deadline
   void clock.send('tick')
-  expect(sent.get(live)!.some((frame) => frame.tag === TAG.TEXT && frame.text.includes('tick'))).toBe(true)
+  expect(texts(live).some((text) => text.includes('tick'))).toBe(true)
 })
 
 test("a new channel outwaits a reconcile its client has in flight for a channel the server hasn't registered", async () => {
@@ -114,21 +107,7 @@ test('a wire that drops while a reconcile on it is held still detaches its chann
   const mux = new ChannelMux()
   const clock = new ServerChannel<string, string>({ id: 'clock-held' })
   mux.registerChannel(clock)
-  const sessions = new Map<object, string>()
-  const sent = new Map<object, DecodedFrame[]>()
-  const transport: ServerTransport<object> = {
-    getSessionId: (wire) => sessions.get(wire),
-    setSessionId: (wire, id) => void sessions.set(wire, id),
-    getConnId: () => null,
-    sendNow: (wire, frame) => void sent.get(wire)!.push(decode(frame)),
-    terminateConnection: () => {},
-  }
-  const open = () => {
-    const wire = {}
-    sent.set(wire, [])
-    mux.onConnectionOpen(wire, transport)
-    return wire
-  }
+  const { sessions, open, texts } = wires(mux)
   const wire = open()
   await mux.onConnectionRawMessage(
     wire,
@@ -148,36 +127,21 @@ test('a wire that drops while a reconcile on it is held still detaches its chann
   )
   await new Promise((resolve) => setTimeout(resolve, 10))
   mux.onConnectionClosed(wire, { permanent: false }) // the network drops during the hold
+  expect((clock as unknown as { _peer: unknown })._peer).toBeNull()
   void clock.send('while-offline')
   const reconnected = open()
   await mux.onConnectionRawMessage(
     reconnected,
     encode.reconcile({ sessionId: known, open: [{ id: 'clock-held', ix: 0, lastSeq: 0 }] }),
   )
-  expect(sent.get(reconnected)!.some((frame) => frame.tag === TAG.TEXT && frame.text.includes('while-offline'))).toBe(
-    true,
-  )
+  expect(texts(reconnected).some((text) => text.includes('while-offline'))).toBe(true)
 })
 
 test("a frame sent to a reconnect's wire that dropped while its first reconcile was held replays on the next reconnect", async () => {
   const mux = new ChannelMux()
   const clock = new ServerChannel<string, string>({ id: 'clock-first' })
   mux.registerChannel(clock)
-  const sessions = new Map<object, string>()
-  const sent = new Map<object, DecodedFrame[]>()
-  const transport: ServerTransport<object> = {
-    getSessionId: (wire) => sessions.get(wire),
-    setSessionId: (wire, id) => void sessions.set(wire, id),
-    getConnId: () => null,
-    sendNow: (wire, frame) => void sent.get(wire)!.push(decode(frame)),
-    terminateConnection: () => {},
-  }
-  const open = () => {
-    const wire = {}
-    sent.set(wire, [])
-    mux.onConnectionOpen(wire, transport)
-    return wire
-  }
+  const { sessions, open, texts } = wires(mux)
   const first = open()
   await mux.onConnectionRawMessage(
     first,
@@ -205,5 +169,5 @@ test("a frame sent to a reconnect's wire that dropped while its first reconcile 
     live,
     encode.reconcile({ sessionId: known, open: [{ id: 'clock-first', ix: 0, lastSeq: 0 }] }),
   )
-  expect(sent.get(live)!.some((frame) => frame.tag === TAG.TEXT && frame.text.includes('in-the-hold'))).toBe(true)
+  expect(texts(live).some((text) => text.includes('in-the-hold'))).toBe(true)
 })
