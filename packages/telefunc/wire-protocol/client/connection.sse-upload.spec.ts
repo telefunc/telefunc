@@ -324,3 +324,63 @@ test('a channel the page aborted before the server confirmed it gets none of wha
   await delay(20)
   expect(received).toEqual([])
 })
+
+test("an upload request the server ends after its open-ack, as Node's requestTimeout does, replaces the wire", async () => {
+  let wires = 0
+  let endUpload!: () => void
+  const fetchImpl = (async (_url: string, init: RequestInit) => {
+    const body = init.body as unknown
+    if (!(body instanceof Blob)) {
+      return await new Promise<Response>((resolve) => {
+        endUpload = () => resolve(new Response('', { status: 408 }))
+      })
+    }
+    const { metadata, frames } = await parseBlobBody(body)
+    if (!metadata.streamResponse) return new Response('', { status: 200 })
+    wires++
+    let ix = 0
+    for (const raw of frames) {
+      const frame = decode(raw as never)
+      if (frame.tag === TAG.RECONCILE) ix = frame.payload.open[0]?.ix ?? 0
+    }
+    const encoder = new TextEncoder()
+    const stream = new ReadableStream<Uint8Array>({
+      start(c) {
+        c.enqueue(encoder.encode(': open\n\n'))
+        c.enqueue(encoder.encode(`data: ${uint8ArrayToBase64url(encode.streamRequestOpenAck() as never)}\n\n`))
+        const reconciled = encode.reconciled({
+          sessionId: crypto.randomUUID(),
+          open: [{ ix, lastSeq: 0 }],
+          reconnectTimeout: 60_000,
+          idleTimeout: 60_000,
+          pingInterval: 100_000,
+          clientReplayBuffer: 1_000_000,
+          clientReplayBufferBinary: 2_000_000,
+          sseFlushThrottle: 0,
+          ssePostIdleFlushDelay: 0,
+          transports: ['sse'],
+        })
+        c.enqueue(encoder.encode(`data: ${uint8ArrayToBase64url(reconciled as never)}\n\n`))
+      },
+    })
+    return new Response(stream as never, { status: 200, headers: { 'Content-Type': 'text/event-stream' } })
+  }) as unknown as typeof fetch
+  const channel = {
+    id: crypto.randomUUID(),
+    isClosed: false,
+    _onTransportOpen() {},
+    _dispatchFrame() {},
+    _onTransportClose() {},
+  }
+  const connection = ClientConnection.getOrCreate('http://upload-cut.test/_telefunc', channel as never, {
+    transports: ['sse'],
+    fetchImpl,
+    connectionKey: crypto.randomUUID(),
+  }) as any
+  await delay(20)
+  expect(wires).toBe(1)
+  endUpload() // the SSE stream stays up; what the page writes into the upload no longer reaches the server
+  await delay(1_500)
+  expect(wires).toBe(2)
+  connection.dispose()
+})
