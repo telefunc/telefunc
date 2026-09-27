@@ -78,7 +78,7 @@ function deliverAfterCommit(
   mark: OrderingInfo,
 ): Promise<void> {
   return Promise.resolve().then(() => {
-    for (const target of targets) if (!target.ended) target.deliver(copyBytes(frame), mark)
+    for (const target of targets) target.deliver(copyBytes(frame), mark)
   })
 }
 
