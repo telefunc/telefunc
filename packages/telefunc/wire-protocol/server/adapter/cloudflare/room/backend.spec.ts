@@ -50,7 +50,7 @@ test("a session's commits to a room reach its authority in the order Room sent t
 })
 
 test('outside a session, a commit goes through a stub of its own, and a stale answer comes back as it is', async () => {
-  const stale = { stale: 'head' }
+  const stale = { stale: 'incarnation' as const }
   const rooms = { idFromName: (name: string) => name, get: () => ({ commitLane: async () => stale }) }
   const backend = new CloudflareBackend({ rooms: () => rooms as unknown as CloudflareRoomNamespace, broadcast })
   await expect(backend.commitLane('room', 'inc', { kind: 'semantic' }, new Uint8Array())).resolves.toBe(stale)
