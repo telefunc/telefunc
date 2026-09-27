@@ -289,11 +289,11 @@ type BufferedWireFrame = { frame: DecodedFrame; byteLength: number }
  *  are largely non-recoverable (seq-less terminal ctrls) while new-wire frames all replay. */
 type UpgradeBuffer = { old: BufferedWireFrame[]; new: BufferedWireFrame[] }
 
-/** FIN (old wire) and RECONCILED (new wire) are the join's two limbs; everything else is payload. */
 function isClosingFrame(frame: Uint8Array): boolean {
   return frame[0] === TAG.CLOSE || frame[0] === TAG.CLOSE_ACK
 }
 
+/** FIN (old wire) and RECONCILED (new wire) are the join's two limbs; everything else is payload. */
 function isJoinLimb(frame: DecodedFrame): boolean {
   return frame.tag === TAG.FIN || frame.tag === TAG.RECONCILED
 }
