@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { SubscriptionManager } from './subscription-manager.js'
 import type { BackendReceiver, SubscriptionAttempt, SubscriptionDriver, SubscriptionState } from './subscription.js'
+import { DriverAttempt } from './attempt.js'
 
 const encoder = new TextEncoder()
 const decoder = new TextDecoder()
@@ -237,12 +238,11 @@ class ControlledDriver implements SubscriptionDriver<string> {
     await (this.opens[index]!.receiver(encoder.encode(value), { seq: index + 1, timestamp: 1 }) as unknown)
   }
 }
-class ControlledAttempt implements SubscriptionAttempt {
+class ControlledAttempt extends DriverAttempt {
   unsubscribeCalls = 0
-  readonly #listeners = new Set<(state: SubscriptionState, reason?: Error) => void>()
   readonly #cleanup: Promise<void>
-  #state: SubscriptionState = 'establishing'
   constructor(cleanup: Promise<void> = Promise.resolve()) {
+    super()
     this.#cleanup = cleanup
   }
   static ready(cleanup?: Promise<void>): ControlledAttempt {
@@ -250,29 +250,18 @@ class ControlledAttempt implements SubscriptionAttempt {
     attempt.establish()
     return attempt
   }
-  state(): SubscriptionState {
-    return this.#state
-  }
-  onStateChange(listener: (state: SubscriptionState, reason?: Error) => void): () => void {
-    this.#listeners.add(listener)
-    return () => this.#listeners.delete(listener)
-  }
   async unsubscribe(): Promise<void> {
     this.unsubscribeCalls++
-    this.#transition('closed')
+    this.transition('closed')
     await this.#cleanup
   }
   establish(): void {
-    this.#transition('ready')
+    this.transition('ready')
   }
   lose(): void {
-    this.#transition('lost')
+    this.transition('lost')
   }
   close(reason?: Error): void {
-    this.#transition('closed', reason)
-  }
-  #transition(state: SubscriptionState, reason?: Error): void {
-    this.#state = state
-    for (const listener of this.#listeners) listener(state, reason)
+    this.transition('closed', reason)
   }
 }

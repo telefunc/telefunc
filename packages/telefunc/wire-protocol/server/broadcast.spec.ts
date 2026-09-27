@@ -15,7 +15,8 @@ import { ChannelMux, type ServerTransport } from './mux.js'
 import { IndexedPeer } from './IndexedPeer.js'
 import { disposeBackend, installBackend } from '../backend/install.js'
 import { MemoryBackend, MemoryBackendState } from '../backend/memory/backend.js'
-import type { SubscriptionAttempt, SubscriptionState } from '../backend/subscription.js'
+import type { SubscriptionAttempt } from '../backend/subscription.js'
+import { DriverAttempt } from '../backend/attempt.js'
 import { ChannelClosedError, ChannelOverflowError } from '../channel-errors.js'
 import { ESTABLISH_HOLD_MS, CHANNEL_BUFFER_LIMIT_BINARY_BYTES } from '../constants.js'
 import { Abort } from '../../shared/Abort.js'
@@ -32,26 +33,23 @@ afterEach(async () => {
   vi.restoreAllMocks()
 })
 
-function pendingSubscription() {
-  let state: SubscriptionState = 'establishing'
-  const listeners = new Set<(state: SubscriptionState) => void>()
-  const transition = (next: SubscriptionState) => {
-    state = next
-    for (const listener of listeners) listener(next)
+class PendingAttempt extends DriverAttempt {
+  async unsubscribe(): Promise<void> {
+    this.transition('closed')
   }
-  return {
-    subscription: {
-      state: () => state,
-      onStateChange: (listener) => {
-        listeners.add(listener)
-        return () => listeners.delete(listener)
-      },
-      unsubscribe: async () => transition('closed'),
-    } satisfies SubscriptionAttempt,
-    ready: () => transition('ready'),
-    lost: () => transition('lost'),
-    close: () => transition('closed'),
+  ready(): void {
+    this.transition('ready')
   }
+  lost(): void {
+    this.transition('lost')
+  }
+  close(): void {
+    this.transition('closed')
+  }
+}
+
+function pendingSubscription(): PendingAttempt {
+  return new PendingAttempt()
 }
 
 /** A memory backend whose subscription attempts come from `open`, which may defer to the driver's own. */
@@ -74,7 +72,7 @@ async function installOpeningBackend(
 
 async function installPendingSubscriptionBackend(result: { seq: number; timestamp: number; receivers?: number }) {
   const controlled = pendingSubscription()
-  const driver = await installOpeningBackend(() => controlled.subscription)
+  const driver = await installOpeningBackend(() => controlled)
   const publish = vi.spyOn(driver, 'publish').mockReturnValue(result)
   return { controlled, publish }
 }
@@ -324,7 +322,7 @@ describe('keyed in-process broadcast', () => {
       await installOpeningBackend((_source, driverOpen) => {
         if (opens++ > 0) return driverOpen()
         if (atOpen) throw new Error('listen refused')
-        return ending.subscription
+        return ending
       })
       const report = vi.spyOn(console, 'error').mockImplementation(() => {})
       const received: string[] = []
@@ -346,7 +344,7 @@ describe('keyed in-process broadcast', () => {
   it('replaces a subscription once per end: a replacement that ends before it was ready is dropped', async () => {
     const attempts = [pendingSubscription(), pendingSubscription(), pendingSubscription()]
     let opens = 0
-    await installOpeningBackend((_source, driverOpen) => attempts[opens++]?.subscription ?? driverOpen())
+    await installOpeningBackend((_source, driverOpen) => attempts[opens++] ?? driverOpen())
     const report = vi.spyOn(console, 'error').mockImplementation(() => {})
     const unsubscribe = Broadcast.subscribe('broadcast:replaced-once', () => {})
     attempts[0]!.close()
@@ -365,7 +363,7 @@ describe('keyed in-process broadcast', () => {
     let opens = 0
     await installOpeningBackend(() => {
       opens++
-      return ending.subscription
+      return ending
     })
     const report = vi.spyOn(console, 'error').mockImplementation(() => {})
     const unsubscribe = Broadcast.subscribe('broadcast:released', () => {})
@@ -753,7 +751,7 @@ describe('Broadcast static bus (publish/subscribe)', () => {
   it('reports the end of a subscription its consumers share once', async () => {
     const ending = pendingSubscription()
     let opens = 0
-    await installOpeningBackend((_source, driverOpen) => (opens++ === 0 ? ending.subscription : driverOpen()))
+    await installOpeningBackend((_source, driverOpen) => (opens++ === 0 ? ending : driverOpen()))
     const report = vi.spyOn(console, 'error').mockImplementation(() => {})
     const stops = [
       new ServerBroadcast({ key: 'broadcast:shared-end' }).subscribe(() => {}),
@@ -776,7 +774,7 @@ describe('Broadcast static bus (publish/subscribe)', () => {
     const driver = await installOpeningBackend(() => {
       const attempt = pendingSubscription()
       attempts.push(attempt)
-      return attempt.subscription
+      return attempt
     })
     const publish = vi.spyOn(driver, 'publish').mockReturnValue({ seq: 1, timestamp: 1 })
     const report = vi.spyOn(console, 'error').mockImplementation(() => {})
@@ -814,7 +812,7 @@ describe('Broadcast static bus (publish/subscribe)', () => {
   it("keeps a key's text and binary publishes in call order while one kind's subscription establishes", async () => {
     const controlled = pendingSubscription()
     const driver = await installOpeningBackend((source, driverOpen) =>
-      'kind' in source && source.kind === 'text' ? controlled.subscription : driverOpen(),
+      'kind' in source && source.kind === 'text' ? controlled : driverOpen(),
     )
     const publish = vi.spyOn(driver, 'publish').mockReturnValue({ seq: 1, timestamp: 1 })
     const unsubscribe = Broadcast.subscribe('broadcast:cross-kind', () => {})
@@ -832,7 +830,7 @@ describe('Broadcast static bus (publish/subscribe)', () => {
   it('keeps holding for a subscription of the other kind that starts establishing during the hold', async () => {
     const attempts = { text: pendingSubscription(), binary: pendingSubscription() }
     const driver = await installOpeningBackend((source, driverOpen) =>
-      'kind' in source ? attempts[source.kind].subscription : driverOpen(),
+      'kind' in source ? attempts[source.kind] : driverOpen(),
     )
     const publish = vi.spyOn(driver, 'publish').mockReturnValue({ seq: 1, timestamp: 1 })
     const stops = [Broadcast.subscribe('broadcast:late-kind', () => {})]
@@ -853,7 +851,7 @@ describe('Broadcast static bus (publish/subscribe)', () => {
 
   it("hands the driver a publish's bytes as they were at the call, of a Node Buffer too, sent now or held", async () => {
     const attempt = pendingSubscription()
-    const driver = await installOpeningBackend(() => attempt.subscription)
+    const driver = await installOpeningBackend(() => attempt)
     // A driver may read its payload later, as ioredis does for a queued command.
     const sent: Uint8Array[] = []
     vi.spyOn(driver, 'publish').mockImplementation((_route, payload) => {
