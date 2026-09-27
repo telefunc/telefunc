@@ -1,5 +1,5 @@
 export { Room }
-export type { RoomGuards }
+export type { RoomGuardHooks }
 
 import { assert, assertUsage } from '../../../utils/assert.js'
 import { isObject } from '../../../utils/isObject.js'
@@ -223,7 +223,6 @@ type RoomGuardHooks<P extends ParticipantMeta = ParticipantMeta> = {
   onBeforePublish: PublishGuard<P>
   onAfterPublish: AfterPublishHook<P>
 }
-type RoomGuards = { [K in keyof RoomGuardHooks]: RoomGuardHooks[K] | null }
 
 const ROOM_GUARD_KEYS = Object.keys({
   onBeforeJoin: true,
@@ -244,7 +243,7 @@ function guardRoom(room: Room, guards: Partial<Record<keyof RoomGuardHooks, unkn
       `Room.guard() ${key} should be a function`,
     )
   }
-  room._setGuards(Object.fromEntries(ROOM_GUARD_KEYS.map((key) => [key, guards[key] ?? null])) as RoomGuards)
+  room._setGuards(Object.fromEntries(ROOM_GUARD_KEYS.map((key) => [key, guards[key]])) as Partial<RoomGuardHooks>)
 }
 
 async function joinRoom(id: string, options?: JoinOptions): Promise<LocalParticipant> {

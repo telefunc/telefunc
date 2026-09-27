@@ -97,7 +97,7 @@ import type {
   RoomSnapshotView,
   Sender,
 } from '../types.js'
-import type { Room, RoomGuards } from './statics.js'
+import type { Room, RoomGuardHooks } from './statics.js'
 assertIsNotBrowser()
 
 const SERVER_ROOM_BRAND: unique symbol = Symbol.for('telefunc.ServerRoom')
@@ -129,7 +129,7 @@ class ServerRoom extends RoomStateView implements Room {
   private _tail: TailHold | null = null
   /** In-flight `send(…, { ack: true })`s by `ackId`; a leave of either end, or a close, fails the ones it strands. */
   private readonly _pendingDmAcks = new Map<string, { from: string; to: string; settle: (reply: DmReply) => void }>()
-  private _guards: RoomGuards | null = null
+  private _guards: Partial<RoomGuardHooks> | null = null
   /** @internal */ readonly _state: RoomState
   private readonly _local: LocalHolder
   private readonly _stubs = new Set<RoomStubChannel>()
@@ -173,7 +173,7 @@ class ServerRoom extends RoomStateView implements Room {
   }
 
   /** @internal See `Room.guard()`. One declaration per instance keeps the grant declarative. */
-  _setGuards(guards: RoomGuards): void {
+  _setGuards(guards: Partial<RoomGuardHooks>): void {
     assertUsage(
       this._guards === null,
       'Room.guard() was already called for this room instance: declare all guards in one call',
