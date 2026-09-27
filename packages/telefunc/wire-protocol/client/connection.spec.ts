@@ -1,6 +1,11 @@
 import { afterEach, describe, expect, test, vi } from 'vitest'
 
-import { CHANNEL_RECONNECT_INITIAL_DELAY_MS, CHANNEL_TRANSPORT, RECONCILE_TIMEOUT_MS } from '../constants.js'
+import {
+  CHANNEL_RECONNECT_INITIAL_DELAY_MS,
+  CHANNEL_TRANSPORT,
+  MAX_CHANNELS_PER_CONNECTION,
+  RECONCILE_TIMEOUT_MS,
+} from '../constants.js'
 import { ClientConnection } from './connection.js'
 
 /** Minimal `MuxChannel` — registering one is enough to make the connection open a wire. */
@@ -27,6 +32,38 @@ function createStalledTransport() {
   }) as unknown as typeof fetch
   return { fetchImpl, getSseDownstreamOpens: () => sseDownstreamOpens }
 }
+
+function stalledOptions() {
+  return {
+    transports: [CHANNEL_TRANSPORT.SSE],
+    fetchImpl: createStalledTransport().fetchImpl,
+    connectionKey: crypto.randomUUID(),
+  }
+}
+
+test('the channel cap counts the open channels, not every channel the connection opened', () => {
+  const options = stalledOptions()
+  const connection = ClientConnection.getOrCreate('http://cap.test', createChannel() as never, options) as any
+  connection.nextIndex = MAX_CHANNELS_PER_CONNECTION // what 4,095 channels opened and closed on it leave
+  for (let open = 1; open < MAX_CHANNELS_PER_CONNECTION; open++) {
+    expect(ClientConnection.getOrCreate('http://cap.test', createChannel() as never, options)).toBe(connection)
+  }
+  expect(() => ClientConnection.getOrCreate('http://cap.test', createChannel() as never, options)).toThrow(
+    'Too many channels',
+  )
+  connection.dispose()
+})
+
+test('a connection out of wire indexes hands a new channel to a fresh connection, which its dispose leaves cached', () => {
+  const options = stalledOptions()
+  const spent = ClientConnection.getOrCreate('http://rotate.test', createChannel() as never, options) as any
+  spent.nextIndex = 0x10000
+  const fresh = ClientConnection.getOrCreate('http://rotate.test', createChannel() as never, options) as any
+  expect(fresh).not.toBe(spent)
+  spent.dispose()
+  expect(ClientConnection.getOrCreate('http://rotate.test', createChannel() as never, options)).toBe(fresh)
+  fresh.dispose()
+})
 
 describe('SSE reconcile watchdog', () => {
   afterEach(() => {
