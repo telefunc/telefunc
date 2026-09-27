@@ -206,23 +206,21 @@ class RedisBackend implements BroadcastDriver, RoomDriver {
   async directoryList(prefix: string, cursor?: string): Promise<DirectoryPage> {
     const index = directoryIndexKey(this._prefix)
     const min = cursor === undefined ? `[${prefix}` : `(${cursor}`
-    const page = await this._publisher.zrangebylex(index, min, '+', 'LIMIT', 0, DIRECTORY_PAGE_SIZE)
+    const page = await this._publisher.zrangebylex(index, min, '+', 'LIMIT', 0, DIRECTORY_PAGE_SIZE + 1)
     const matching: string[] = []
     for (const member of page) {
       if (member.startsWith(prefix)) matching.push(member)
       else break
     }
-    const last = matching.at(-1)
+    const roomIds = matching.slice(0, DIRECTORY_PAGE_SIZE)
+    const last = roomIds.at(-1)
     if (last === undefined) return { entries: [] }
-    const [tags, peek] = await Promise.all([
-      this._publisher.hmget(directoryTagsKey(this._prefix), ...matching),
-      matching.length === DIRECTORY_PAGE_SIZE ? this._publisher.zrangebylex(index, `(${last}`, '+', 'LIMIT', 0, 1) : [],
-    ])
-    const entries = matching.flatMap((roomId, i) => {
+    const tags = await this._publisher.hmget(directoryTagsKey(this._prefix), ...roomIds)
+    const entries = roomIds.flatMap((roomId, i) => {
       const incTag = tags[i]
       return incTag === null || incTag === undefined ? [] : [{ roomId, incTag }]
     })
-    return peek[0]?.startsWith(prefix) ? { entries, cursor: last } : { entries }
+    return matching.length > DIRECTORY_PAGE_SIZE ? { entries, cursor: last } : { entries }
   }
 
   private _generationKeys(roomId: string, inc: string): Promise<string[]> {
