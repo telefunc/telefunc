@@ -651,6 +651,36 @@ describe('reference identity — full pipeline', () => {
     expect(counters.clientAbort).toBe(1)
   })
 
+  test("a value that shares its owner's lifecycle keeps its identity, with no wrapper of its own", async () => {
+    const owner = makeRoomExtension()
+    class Member {
+      constructor(readonly room: TestServerRoom) {}
+    }
+    const prefix = '!RefIdentityMember:'
+    const serverType: ReplacerType<TypeContract, ServerReplacerContext> = {
+      prefix,
+      detect: (value): value is Member => value instanceof Member,
+      replace: (member) => ({ metadata: { room: (member as Member).room }, close() {}, abort() {} }),
+    }
+    const member = { kind: 'client-member' }
+    const clientType: ReviverType<TypeContract, ClientReviverContext> = {
+      prefix,
+      revive(metadata, context) {
+        ;(context as InternalClientReviverContext).shareLifecycle(member, metadata.room as object)
+        return { value: member, close() {}, abort() {} }
+      },
+    }
+    const room = new TestServerRoom('owner')
+    const { ret } = await roundTrip(
+      { room, member: new Member(room) },
+      {
+        serverExtensions: [owner.serverType as ReplacerType<TypeContract, ServerReplacerContext>, serverType],
+        clientExtensions: [owner.clientType as ReviverType<TypeContract, ClientReviverContext>, clientType],
+      },
+    )
+    expect((ret as { member: unknown }).member).toBe(member)
+  })
+
   test.each([STREAM_TRANSPORT.BINARY_INLINE, STREAM_TRANSPORT.SSE_INLINE])(
     '%s: a body that drops under an inline stream leaves no unhandled rejection',
     (streamTransport) =>
