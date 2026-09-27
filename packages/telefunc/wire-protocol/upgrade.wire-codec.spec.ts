@@ -55,7 +55,7 @@ describe('upgrade wire vocabulary', () => {
     expect(() => decode(reserved)).toThrow()
   })
 
-  test('a BARRIER round-trips at one entry, and it and a RECONCILE at the largest shape the caps admit', () => {
+  test('a BARRIER round-trips at one entry, and a BARRIER and a RECONCILE at the largest shape the caps admit', () => {
     const one: BarrierPayload = { sessionId: 'sess-0', upgradeId: 'upg-1', open: goodOpen }
     expect(decode(encode.barrier(one))).toEqual({ tag: TAG.BARRIER, payload: one })
     const open = Array.from({ length: MAX_CHANNELS_PER_CONNECTION }, (_, ix) => ({
