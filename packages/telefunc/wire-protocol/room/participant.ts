@@ -40,10 +40,7 @@ abstract class ParticipantBase implements LocalParticipant {
   /** @internal Route this participant's inbox to a remote holder instead of local listeners. */
   _setForwarder(forwarder: InboxForwarder): void {
     this._forwarder = forwarder
-    this._flushHeld((msg, ackResolve) => {
-      if (ackResolve) void forwarder.deliverAck(msg).then(ackResolve)
-      else forwarder.deliver(msg)
-    })
+    this._flushHeld(forwarder)
   }
   /** @internal Already bound to a client holder (serialized once, via `RoomParticipantStubChannel`)? */
   get _isBound(): boolean {
@@ -82,10 +79,7 @@ abstract class ParticipantBase implements LocalParticipant {
   protected abstract _reportError(err: unknown): void
   listen(callback: (data: unknown, from: Sender | null) => unknown): () => void {
     const unlisten = this._register(this._messageCbs, callback)
-    this._flushHeld((msg, ackResolve) => {
-      if (ackResolve) void this._fireInboxAck(msg).then(ackResolve)
-      else this._fireInbox(msg)
-    })
+    this._flushHeld({ deliver: (msg) => this._fireInbox(msg), deliverAck: (msg) => this._fireInboxAck(msg) })
     return unlisten
   }
   /** @internal A DM for this member: to its remote holder if bound, else its listeners (held until the first `listen()`). */
@@ -109,11 +103,14 @@ abstract class ParticipantBase implements LocalParticipant {
     return this._fireInboxAck(msg)
   }
   /** The inbox attached: DMs held until now go out in order, and nothing is held again. */
-  private _flushHeld(deliver: (msg: InboxMessage, ackResolve?: (reply: DmReply) => void) => void): void {
+  private _flushHeld(to: InboxForwarder): void {
     this._inboxAttached = true
     const held = this._pendingInbox
     this._pendingInbox = null
-    for (const { msg, ackResolve } of held ?? []) deliver(msg, ackResolve)
+    for (const { msg, ackResolve } of held ?? []) {
+      if (ackResolve) void to.deliverAck(msg).then(ackResolve)
+      else to.deliver(msg)
+    }
   }
   private _hold(msg: InboxMessage, ackResolve?: (reply: DmReply) => void): void {
     const pending = (this._pendingInbox ??= [])
