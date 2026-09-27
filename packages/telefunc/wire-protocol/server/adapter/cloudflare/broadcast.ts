@@ -81,10 +81,10 @@ type BroadcastNamespace = {
 class MemberRoute {
   state: 'establishing' | 'ready' | 'lost' = 'establishing'
   teardownRequested = false
-  refreshTimer: ReturnType<typeof setInterval> | null = null
   readonly route: BroadcastRoute
   readonly #setup = createDeferred()
   readonly #presenceListeners = new Set<(state: 'ready' | 'lost') => void>()
+  #refreshTimer: ReturnType<typeof setInterval> | null = null
 
   constructor(route: BroadcastRoute) {
     this.route = route
@@ -119,10 +119,19 @@ class MemberRoute {
     return () => this.#presenceListeners.delete(cb)
   }
 
+  startRefresh(refresh: () => Promise<void>): void {
+    this.#refreshTimer = setInterval(() => {
+      void refresh().then(
+        () => this.acknowledgePresence(),
+        (error: unknown) => this.losePresence(error),
+      )
+    }, PRESENCE_REFRESH_INTERVAL_MS)
+  }
+
   stopRefresh(): void {
-    if (this.refreshTimer) {
-      clearInterval(this.refreshTimer)
-      this.refreshTimer = null
+    if (this.#refreshTimer) {
+      clearInterval(this.#refreshTimer)
+      this.#refreshTimer = null
     }
   }
 
@@ -329,12 +338,7 @@ class CloudflareBroadcastMember {
     }
     memberRoute.acknowledgePresence()
     if (memberRoute.teardownRequested) return this.#release(routeKey, memberRoute)
-    memberRoute.refreshTimer = setInterval(() => {
-      void this.#writePresence(memberRoute.route, true).then(
-        () => memberRoute.acknowledgePresence(),
-        (error: unknown) => memberRoute.losePresence(error),
-      )
-    }, PRESENCE_REFRESH_INTERVAL_MS)
+    memberRoute.startRefresh(() => this.#writePresence(memberRoute.route, true))
   }
 
   async #teardownIfEmpty(routeKey: string): Promise<void> {
