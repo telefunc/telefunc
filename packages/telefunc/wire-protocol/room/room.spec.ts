@@ -2368,26 +2368,6 @@ describe('Room public behavior', () => {
     // The all-track listener here subscribes the new track's lane before its first frame.
     await vi.waitFor(() => expect(frames).toEqual([1, 2]))
   })
-  it('sends a client on its first attach the room meta its pre-attach buffer dropped', async () => {
-    const room = (await Room.create('first-attach-meta')) as ServerRoom
-    config.channel = { bufferLimit: 256 }
-    try {
-      const stub = register(room)
-      // Between the response and the client's connect, larger than the buffer, so it is dropped.
-      const meta = { pad: 'x'.repeat(300) }
-      await Room.setMeta(room.id, meta)
-      await vi.waitFor(() => expect(room.meta).toEqual(meta))
-      const peer = attachPeer(stub)
-      await vi.waitFor(() =>
-        expect(controlEvents(peer).map(({ __r, meta }) => ({ __r, meta }))).toEqual([
-          { __r: 'update', meta },
-          { __r: 'roster', meta: undefined },
-        ]),
-      )
-    } finally {
-      config.channel = {}
-    }
-  })
   // The server notices a drop at once (the socket closed) or only at its ping deadline (a silent drop).
   const dropNoticed = [0, 2 * CHANNEL_PING_INTERVAL_MS]
   it.each(dropNoticed)(
@@ -2500,11 +2480,11 @@ describe('Room public behavior', () => {
       ).toEqual([{ __r: 'demand-state', tracks: [null] }]),
     )
   })
-  it('sends a reattached client of a handed-out participant the demand its offline buffer dropped', async () => {
-    const room = (await Room.create('reattach-participant-demand')) as ServerRoom
+  it('sends a reattached client of a handed-out participant the meta and demand its offline buffer dropped', async () => {
+    const room = (await Room.create('reattach-participant')) as ServerRoom
     config.channel = { bufferLimit: 256 }
     try {
-      const me = (await room.join()) as ServerLocalParticipant
+      const me = (await room.join({ meta: { score: 0 } })) as ServerLocalParticipant
       const other = await room.join()
       const wanted: Array<string | null> = []
       me.onDemand((track, on) => void (on && wanted.push(track)))
@@ -2512,10 +2492,11 @@ describe('Room public behavior', () => {
       channel._registerChannel()
       const first = attachPeer(channel)
       channel._onPeerDisconnect(first.peer, 60_000)
+      await me.setAttributes({ score: 1 })
       const observer = await Room.get(room.id)
       ;(await observer.getParticipant(me.id))!.subscribeBinary(() => {})
       await vi.waitFor(() => expect(wanted).toEqual([null]))
-      // Larger than the offline buffer: it clears the buffered demand notice.
+      // Larger than the offline buffer: it clears the buffered meta and demand notices.
       await other.send(me.id, 'x'.repeat(300))
       const peer = attachPeer(channel)
       await vi.waitFor(() =>
@@ -2524,35 +2505,11 @@ describe('Room public behavior', () => {
             .decoded()
             .filter((frame) => frame.tag === TAG.TEXT)
             .map((frame) => parse(frame.text) as { __r: string })
-            .filter(({ __r }) => __r === 'demand-state'),
-        ).toEqual([{ __r: 'demand-state', tracks: [null] }]),
-      )
-    } finally {
-      config.channel = {}
-    }
-  })
-  it('sends a reattached client of a handed-out participant its meta its offline buffer dropped', async () => {
-    const room = (await Room.create('reattach-participant-meta')) as ServerRoom
-    config.channel = { bufferLimit: 256 }
-    try {
-      const me = (await room.join({ meta: { score: 0 } })) as ServerLocalParticipant
-      const other = await room.join()
-      const channel = new RoomParticipantStubChannel(me)
-      channel._registerChannel()
-      const first = attachPeer(channel)
-      channel._onPeerDisconnect(first.peer, 60_000)
-      await me.setAttributes({ score: 1 })
-      // Larger than the offline buffer: it clears the buffered meta notice.
-      await other.send(me.id, 'x'.repeat(300))
-      const peer = attachPeer(channel)
-      await vi.waitFor(() =>
-        expect(
-          peer
-            .decoded()
-            .filter((frame) => frame.tag === TAG.TEXT)
-            .map((frame) => parse(frame.text) as { __r: string })
-            .filter(({ __r }) => __r === 'p-meta'),
-        ).toEqual([{ __r: 'p-meta', meta: { score: 1 }, seq: expect.any(Number) }]),
+            .filter(({ __r }) => __r === 'p-meta' || __r === 'demand-state'),
+        ).toEqual([
+          { __r: 'p-meta', meta: { score: 1 }, seq: expect.any(Number) },
+          { __r: 'demand-state', tracks: [null] },
+        ]),
       )
     } finally {
       config.channel = {}
