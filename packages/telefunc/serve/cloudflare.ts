@@ -180,9 +180,8 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
         sessionInstanceName = target.sessionInstanceName
         locationBucket = target.locationBucket
         const value: StoredShardToken = { s: sessionInstanceName, b: locationBucket }
-        // Routing doesn't wait on it (the token routes the same way without it): it pins the region for the token's later
-        // requests. A page's concurrent first requests write the one key, and KV refuses a second write within a second.
-        // A failed write only loses the pin.
+        // It pins the token's region, so a later request from elsewhere still reaches this shard. A page's concurrent
+        // first requests write one key, and KV takes one write per key per second: a failed write loses only the pin.
         ctx.waitUntil(
           kv.put(`session:${token}`, JSON.stringify(value), { expirationTtl: SHARD_TOKEN_TTL_SECONDS }).catch(() => {}),
         )
