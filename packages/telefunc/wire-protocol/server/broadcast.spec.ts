@@ -216,6 +216,24 @@ describe('keyed in-process broadcast', () => {
     expect(seen).toEqual([1])
   })
 
+  it("keeps delivering to the server's own listeners after the page unsubscribes", () => {
+    const broadcast = new ServerBroadcast<string>({ key: 'room:page-unsub' })
+    broadcast._registerChannel()
+    const seen: string[] = []
+    const seenBinary: number[] = []
+    broadcast.subscribe((m) => seen.push(m))
+    broadcast.subscribeBinary((data) => seenBinary.push(data.length))
+    for (const kind of ['text', 'binary'] as const) {
+      broadcast._onPeerSubscription(kind, true)
+      broadcast._onPeerSubscription(kind, false)
+    }
+
+    broadcast.publish('after')
+    broadcast.publishBinary(new Uint8Array(3))
+
+    expect([seen, seenBinary]).toEqual([['after'], [3]])
+  })
+
   it("applies a reattach's declarations to the new peer, not to one that never detached", () => {
     class Announcing extends ServerChannel {
       override _onPeerSubscription(_kind: BroadcastKind, on: boolean): void {

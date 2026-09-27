@@ -183,3 +183,12 @@ describe.each([
     await vi.waitFor(() => expect(report).toHaveBeenCalledOnce())
   })
 })
+
+test('a broadcast declares its subscriptions on every attach, as a subscribe written to a wire already dead is lost', () => {
+  const broadcast = stalledBroadcast()
+  broadcast.subscribe(() => {})
+  const offBinary = broadcast.subscribeBinary(() => {})
+  expect(broadcast._reattachState()).toEqual({ broadcast: { text: true, binary: true } })
+  offBinary()
+  expect(broadcast._reattachState()).toEqual({ broadcast: { text: true, binary: false } })
+})
