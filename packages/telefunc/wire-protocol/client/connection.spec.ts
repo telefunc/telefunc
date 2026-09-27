@@ -282,7 +282,7 @@ test('a channel closed during a reconnect sends what the dead wire lost before w
   connection.dispose()
 })
 
-test('a channel whose close went out with a reconcile on a wire that then died is left out of the next reconcile', () => {
+test('a channel whose abort went out with a reconcile on a wire that then died is left out of the next reconcile, though its listener answered after', () => {
   const closing = createChannel()
   const options = stalledOptions()
   const connection = ClientConnection.getOrCreate('http://draining-lost.test', closing as never, options) as any
@@ -293,6 +293,7 @@ test('a channel whose close went out with a reconcile on a wire that then died i
   connection.sendAbort(closing)
   connection.unregister(closing)
   connection.stageReconcileBatch() // the abort leaves with the registration's reconcile
+  connection.sendAckRes(closing, 1, '"answer"') // its async listener answers a server send({ ack: true }) after that
   connection.handleTransportLoss(new Error('the wire died'))
   const reconcile = decode(connection.buildReconcileFrame().frame) as { payload: { open: { ix: number }[] } }
   expect(reconcile.payload.open.map((entry) => entry.ix)).toEqual([1])
