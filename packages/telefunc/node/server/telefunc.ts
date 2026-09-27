@@ -1,4 +1,4 @@
-export { serve, telefunc }
+export { serve, serveNode, telefunc }
 
 import { runTelefunc, HttpResponse } from './runTelefunc.js'
 import { Telefunc } from './context/getContext.js'
@@ -6,7 +6,7 @@ import { assertUsage, assertWarning } from '../../utils/assert.js'
 import { hasProp } from '../../utils/hasProp.js'
 import { isObject } from '../../utils/isObject.js'
 import { nodeReadableToWebRequest } from '../../utils/nodeReadableToWebRequest.js'
-import type { Readable } from 'node:stream'
+import type { Readable, Writable } from 'node:stream'
 
 type HttpRequestResolved = {
   request: Request
@@ -58,6 +58,17 @@ async function serve(httpRequest: HttpRequest): Promise<HttpResponse> {
   return httpResponse
 }
 
+/** `serve()` for adapters holding the Node.js `res`, so that a client disconnect aborts `request.signal`. */
+async function serveNode(
+  httpRequest: Extract<HttpRequest, { readable: Readable }>,
+  response: Writable,
+): Promise<HttpResponse> {
+  assertHttpRequest(httpRequest, 1)
+  const httpRequestResolved = await resolveHttpRequest(httpRequest, response)
+  const httpResponse = await runTelefunc(httpRequestResolved)
+  return httpResponse
+}
+
 /** @deprecated `telefunc()` is deprecated, use `new Telefunc()` instead, see https://telefunc.com/Telefunc */
 async function telefunc(httpRequest: HttpRequest): Promise<HttpResponse> {
   // TO-DO/next-major-release: remove
@@ -67,7 +78,7 @@ async function telefunc(httpRequest: HttpRequest): Promise<HttpResponse> {
   return serve(httpRequest)
 }
 
-async function resolveHttpRequest(httpRequest: HttpRequest): Promise<HttpRequestResolved> {
+async function resolveHttpRequest(httpRequest: HttpRequest, response?: Writable): Promise<HttpRequestResolved> {
   if ('request' in httpRequest) {
     return { request: httpRequest.request, context: httpRequest.context }
   }
@@ -77,6 +88,7 @@ async function resolveHttpRequest(httpRequest: HttpRequest): Promise<HttpRequest
       'http://localhost' + httpRequest.url,
       httpRequest.method,
       httpRequest.headers,
+      response,
     )
     return { request, readable: httpRequest.readable, context: httpRequest.context }
   }

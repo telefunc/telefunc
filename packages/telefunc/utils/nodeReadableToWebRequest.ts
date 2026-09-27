@@ -1,6 +1,6 @@
 export { nodeReadableToWebRequest }
 
-import type { Readable } from 'node:stream'
+import type { Readable, Writable } from 'node:stream'
 import { loadStreamNodeModule } from './loadStreamNodeModule.js'
 import { assertIsNotBrowser } from './assertIsNotBrowser.js'
 assertIsNotBrowser()
@@ -12,6 +12,7 @@ async function nodeReadableToWebRequest(
   url: string,
   method: string,
   headers: HeadersInput,
+  response?: Writable,
 ): Promise<Request> {
   const { Readable: ReadableClass } = await loadStreamNodeModule()
   const body = ReadableClass.toWeb(readable) as ReadableStream<Uint8Array>
@@ -26,6 +27,10 @@ async function nodeReadableToWebRequest(
   const abortController = new AbortController()
   readable.on('close', () => {
     if (readable.readableAborted && !abortController.signal.aborted) abortController.abort()
+  })
+  // The readable closes as soon as its body is read: a later disconnect only shows on the response.
+  response?.once('close', () => {
+    if (!response.writableEnded && !abortController.signal.aborted) abortController.abort()
   })
   return new Request(url, {
     method,
