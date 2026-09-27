@@ -2792,44 +2792,18 @@ describe('client Room lifecycle', () => {
     expect(Object.getOwnPropertySymbols(remote!)).toEqual([])
   })
   describe('Room-derived handle ownership (real GC)', () => {
-    it('does not make a roster participant the owner of its Room wrapper', async () => {
-      const gc = gcFixture('gc-list-owner')
-      const retained = await retainOnlyListedRemote(gc)
+    it.each([
+      ['a roster participant', 'gc-list-owner', false, retainOnlyListedRemote],
+      ['a participant revived with its Room', 'gc-revived-owner', false, retainOnlyRevivedRemote],
+      ['a joined participant', 'gc-join-owner', true, retainOnlyJoinedParticipant],
+      ['a callback participant', 'gc-callback-owner', false, retainOnlyCallbackRemote],
+      ['a departed participant', 'gc-departed-owner', true, retainOnlyDepartedParticipant],
+    ] as const)('does not make %s the owner of its Room wrapper', async (_handle, roomId, join, retainOnly) => {
+      const gc = gcFixture(roomId, join)
+      const retained = await retainOnly(gc)
       await forceRoomGc()
       expect(retained.room.deref()).toBeUndefined()
       expect(retained.member.id).toBe(gc.memberId)
-      expect(gc.closed()).toBe(1)
-    })
-    it('does not make a participant revived with its Room the owner of the Room wrapper', async () => {
-      const gc = gcFixture('gc-revived-owner')
-      const retained = retainOnlyRevivedRemote(gc)
-      await forceRoomGc()
-      expect(retained.room.deref()).toBeUndefined()
-      expect(retained.member.id).toBe(gc.memberId)
-      expect(gc.closed()).toBe(1)
-    })
-    it('does not make a joined participant the owner of its Room wrapper', async () => {
-      const gc = gcFixture('gc-join-owner', true)
-      const retained = await retainOnlyJoinedParticipant(gc)
-      await forceRoomGc()
-      expect(retained.room.deref()).toBeUndefined()
-      expect(retained.member.id).toBe(gc.memberId)
-      expect(gc.closed()).toBe(1)
-    })
-    it('does not make a callback participant the owner of its Room wrapper', async () => {
-      const gc = gcFixture('gc-callback-owner')
-      const retained = await retainOnlyCallbackRemote(gc)
-      await forceRoomGc()
-      expect(retained.room.deref()).toBeUndefined()
-      expect(retained.member.id).toBe(gc.memberId)
-      expect(gc.closed()).toBe(1)
-    })
-    it('releases the Room wrapper from a departed participant handle', async () => {
-      const gc = gcFixture('gc-departed-owner', true)
-      const retained = await retainOnlyDepartedParticipant(gc)
-      await forceRoomGc()
-      expect(retained.member.id).toBe(gc.memberId)
-      expect(retained.room.deref()).toBeUndefined()
       expect(gc.closed()).toBe(1)
     })
   })
