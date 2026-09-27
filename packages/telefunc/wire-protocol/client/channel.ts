@@ -641,6 +641,7 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
     else this._connection.sendBroadcastUnsubscribe(this, kind === 'binary')
   }
 
+  /** @internal */
   _reattachState(): ReattachState {
     return { broadcast: { ...this._wire } }
   }
@@ -649,8 +650,7 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
     return reportingUnexpected(this._publishUnreported(data))
   }
 
-  /** @internal A publish whose rejection its caller handles: a Room's are expected outcomes, and the server reports
-   *  its bugs. */
+  /** @internal A publish that leaves reporting its rejection to the caller. */
   _publishUnreported(data: ChannelData<T>): Promise<ChannelPublishAck> {
     if (this._isClosed) throw new ChannelClosedError()
     const serialized = stringify(data)
@@ -665,7 +665,7 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
     return reportingUnexpected(this._publishBinaryUnreported(data))
   }
 
-  /** @internal */
+  /** @internal A publish that leaves reporting its rejection to the caller. */
   _publishBinaryUnreported(data: Uint8Array): Promise<ChannelPublishAck> {
     if (this._isClosed) throw new ChannelClosedError()
     return this._awaitPublishAck((register) => this._connection.sendPublishBinaryAckReq(this, data, register))
