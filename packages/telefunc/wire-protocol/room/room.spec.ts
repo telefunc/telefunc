@@ -1555,6 +1555,7 @@ describe('Room public behavior', () => {
     for (const track of tracks.slice(0, 16)) remote.subscribeBinary(() => {}, { track })
     expect(() => remote.subscribeBinary(() => {}, { track: tracks[16] })).toThrow('at most 16 tracks per participant')
     remote.subscribeBinary(() => {}, { track: tracks[0] })
+    room.subscribeBinary(() => {})
     for (const track of tracks.slice(0, 16)) room.subscribeBinary(() => {}, { track })
     expect(() => room.subscribeBinary(() => {}, { track: tracks[16] })).toThrow('at most 16 tracks per participant')
     const stub = register(room)
@@ -3421,15 +3422,6 @@ describe('client Room lifecycle', () => {
     const unsubscribe = client.onAnnounce(() => {})
     closing = true
     expect(() => unsubscribe()).not.toThrow()
-  })
-  it('caps named binary tracks at the call site even while an all-track listener exists', () => {
-    const { client } = fakeClient('track-cap-with-all')
-    client.subscribeBinary(() => {})
-    for (let track = 0; track < ROOM_WANTED_TRACKS_MAX; track++)
-      client.subscribeBinary(() => {}, { track: `t${track}` })
-    expect(() => client.subscribeBinary(() => {}, { track: 'one-too-many' })).toThrow(
-      'subscribeBinary() can name at most',
-    )
   })
   it('declares a room-level default binary track without an earlier all-track listener', () => {
     const sent: unknown[] = []
