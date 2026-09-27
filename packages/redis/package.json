@@ -25,7 +25,7 @@
     "dev": "tsc --build --watch tsconfig.build.json"
   },
   "peerDependencies": {
-    "ioredis": "^5.10.1",
+    "ioredis": "^5.10.1 || ^6",
     "telefunc": ">=0.2.25"
   },
   "devDependencies": {
