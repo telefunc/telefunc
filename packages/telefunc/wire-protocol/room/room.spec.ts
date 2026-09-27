@@ -3,12 +3,7 @@ import { ChannelClosedError } from '../channel-errors.js'
 import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { IndexedPeer } from '../server/IndexedPeer.js'
-import {
-  CHANNEL_CLOSE_TIMEOUT_MS,
-  CHANNEL_PING_INTERVAL_MS,
-  CHANNEL_RECONNECT_TIMEOUT_MS,
-  CHANNEL_TRANSPORT,
-} from '../constants.js'
+import { CHANNEL_PING_INTERVAL_MS, CHANNEL_RECONNECT_TIMEOUT_MS, CHANNEL_TRANSPORT } from '../constants.js'
 import { ACK_STATUS, ProtocolViolationError, TAG, decode, type BroadcastSubscriptions } from '../shared-ws.js'
 import { ShieldValidationError, isShieldValidationError } from '../../shared/ShieldValidationError.js'
 import { Abort } from '../../shared/Abort.js'
@@ -29,7 +24,7 @@ import { RoomError, isRoomError, roomAckError, toRoomFailure } from './errors.js
 import { leaveCauseFromWire, leaveCauseToWire, mergeAttributes } from './model.js'
 import { hasRoomTag, type InboxMessage, type RoomSnapshotMetadata } from './protocol.js'
 import { MEMBER_CELL_PREFIX, memberCellKey } from './server/cells.js'
-import type { LeaveCause, Sender } from './types.js'
+import type { LeaveCause, ParticipantMeta, Sender } from './types.js'
 import { ClientRoom, ClientStandaloneParticipant } from './client.js'
 import { ClientBroadcast, type ClientChannel } from '../client/channel.js'
 import { RoomState, type RoomStateView, remoteBacking } from './state.js'
@@ -172,25 +167,19 @@ describe('Room public behavior', () => {
   it('retains room-stub ownership so a transient durable-leave failure can be retried', async () => {
     const room = (await Room.create('retry-stub-leave')) as ServerRoom
     const stub = register(room)
-    const joined = (await stub._handleRequest({
-      __r: 'req-join',
-      meta: {},
-      selfDelivery: true,
-    })) as { id: string }
-    const request = { __r: 'req-leave' as const, id: joined.id }
+    const id = await joinThrough(stub)
+    const request = { __r: 'req-leave' as const, id }
     const failure = new Error('transient member delete failure')
     vi.spyOn(driver, 'compareExchangeCells').mockRejectedValueOnce(failure)
     await expect(stub._handleRequest(request)).rejects.toBe(failure)
-    expect(stub._holds(joined.id)).toBe(true)
+    expect(stub._holds(id)).toBe(true)
     await expect(stub._handleRequest(request)).resolves.toBeUndefined()
     expect(await Room.getParticipants(room.id)).toEqual([])
   })
   it("routes a client member's meta, attribute and DM requests through its Room stub", async () => {
     const room = (await Room.create('stub-requests')) as ServerRoom
     const stub = register(room)
-    const { id } = (await stub._handleRequest({ __r: 'req-join', meta: { name: 'a' }, selfDelivery: true })) as {
-      id: string
-    }
+    const id = await joinThrough(stub, { name: 'a' })
     const other = await room.join()
     const inbox: unknown[] = []
     other.listen((data) => void inbox.push(data))
@@ -204,10 +193,8 @@ describe('Room public behavior', () => {
     const control = loseLaneFrames((lane) => lane.kind === 'control')
     const room = (await Room.create('lost-leave-owner')) as ServerRoom
     const { stub, peer } = serve(room)
-    const join = async () =>
-      ((await stub._handleRequest({ __r: 'req-join', meta: {}, selfDelivery: true })) as { id: string }).id
-    const reconciled = await join()
-    const vanished = await join()
+    const reconciled = await joinThrough(stub)
+    const vanished = await joinThrough(stub)
     await vi.waitFor(() => expect(memberEvents(peer, vanished).map((event) => event.__r)).toEqual(['join']))
     const causes: unknown[] = []
     room.onLeave((_, cause) => causes.push(cause))
@@ -1528,7 +1515,7 @@ describe('Room public behavior', () => {
     const frozen: boolean[] = []
     Room.guard(room, { onBeforeJoin: ({ meta }) => void frozen.push(Object.isFrozen(meta)) })
     const { stub } = serve(room)
-    await stub._handleRequest({ __r: 'req-join', meta: { name: 'a' }, selfDelivery: true })
+    await joinThrough(stub, { name: 'a' })
     await room.join({ meta: { name: 'b' } })
     expect(frozen).toEqual([true, true])
   })
@@ -1586,9 +1573,7 @@ describe('Room public behavior', () => {
   it("round-trips an ack DM through a room stub and keeps only the reply's own fields", async () => {
     const room = (await Room.create('stub-ack-dm')) as ServerRoom
     const { stub, peer } = serve(room)
-    const { id } = (await stub._handleRequest({ __r: 'req-join', meta: {}, selfDelivery: true })) as {
-      id: string
-    }
+    const id = await joinThrough(stub)
     const victim = await room.join()
     const victimInbox: unknown[] = []
     victim.listen((data) => victimInbox.push(data))
@@ -1609,7 +1594,7 @@ describe('Room public behavior', () => {
     const room = (await Room.create('standalone-disconnect')) as ServerRoom
     const holder = (await room.join()) as ServerLocalParticipant
     const stub = register(room)
-    const { id } = (await stub._handleRequest({ __r: 'req-join', meta: {}, selfDelivery: true })) as { id: string }
+    const id = await joinThrough(stub)
     const causes = new Map<string, unknown>()
     room.onLeave((member, cause) => causes.set(member.id, cause?.type))
     new RoomParticipantStubChannel(holder).abort()
@@ -1764,9 +1749,7 @@ describe('Room public behavior', () => {
         await release.promise
       },
     })
-    const joining = stub
-      ._handleRequest({ __r: 'req-join', meta: {}, selfDelivery: true })
-      .catch((error: unknown) => error)
+    const joining = joinThrough(stub).catch((error: unknown) => error)
     await entered.promise
     stub.abort()
     release.resolve()
@@ -1785,9 +1768,7 @@ describe('Room public behavior', () => {
       return compareExchange(...args)
     })
     const departed = vi.spyOn(room, '_removeDepartedMember')
-    const joining = stub
-      ._handleRequest({ __r: 'req-join', meta: {}, selfDelivery: true })
-      .catch((error: unknown) => error)
+    const joining = joinThrough(stub).catch((error: unknown) => error)
     await writing.promise
     stub.abort()
     release.resolve()
@@ -2362,10 +2343,8 @@ describe('Room public behavior', () => {
     try {
       const stub = register(room)
       const first = attachPeer(stub)
-      const join = async () =>
-        ((await stub._handleRequest({ __r: 'req-join', meta: {}, selfDelivery: true })) as { id: string }).id
-      const wanted = await join()
-      const idle = await join()
+      const wanted = await joinThrough(stub)
+      const idle = await joinThrough(stub)
       await vi.waitFor(() => expect(relayed(first).map(({ __r }) => __r)).toContain('roster'))
       stub._onPeerDisconnect(first.peer, 60_000)
       await leaver.leave()
@@ -2756,22 +2735,8 @@ describe('Room public behavior', () => {
 })
 describe('client Room lifecycle', () => {
   it("keeps a client-held participant's meta in accepted revision order", async () => {
-    let notify!: (notice: unknown) => unknown
     const acks: Array<(accepted: unknown) => void> = []
-    const channel = {
-      listen: (cb: (notice: unknown) => unknown) => {
-        notify = cb
-      },
-      onClose: () => {},
-      send: () => new Promise((resolve) => acks.push(resolve)),
-    } as unknown as ClientChannel
-    const participant = new ClientStandaloneParticipant(channel, {
-      channelId: 'channel',
-      id: 'me',
-      meta: { v: 0 },
-      selfDelivery: true,
-      identity: null,
-    })
+    const { participant, notify } = standaloneParticipant({ v: 0 }, () => new Promise((resolve) => acks.push(resolve)))
     const first = participant.setMeta({ v: 'A' })
     const second = participant.setMeta({ v: 'B' })
     notify({ __r: 'p-meta', meta: { v: 'B' }, seq: 2 })
@@ -2781,20 +2746,7 @@ describe('client Room lifecycle', () => {
     expect(participant.meta).toEqual({ v: 'B' })
   })
   it("applies a handed-out participant's whole demand set as the changes from what it had", () => {
-    let notify!: (notice: unknown) => void
-    const channel = {
-      listen: (cb: (notice: unknown) => unknown) => {
-        notify = cb
-      },
-      onClose: () => {},
-    } as unknown as ClientChannel
-    const participant = new ClientStandaloneParticipant(channel, {
-      channelId: 'channel',
-      id: 'me',
-      meta: {},
-      selfDelivery: true,
-      identity: null,
-    })
+    const { participant, notify } = standaloneParticipant({})
     notify({ __r: 'demand', track: 'screen', wanted: true })
     const demand: unknown[] = []
     participant.onDemand((track, wanted) => demand.push([track, wanted]))
@@ -3339,7 +3291,7 @@ describe('room protocol validation', () => {
       Array.from({ length: 0x1_0000 }, (_, code) => String.fromCharCode(code)),
       (track: string) => encodeBinaryFrame('12345678-1234-1234-1234-123456789abc', new Uint8Array(), { track }),
     ],
-  ] as const)('encodes every accepted %s input injectively', (_name, inputs, encode) => {
+  ] as const)('encodes every accepted %s input injectively', (name, inputs, encode) => {
     const seen = new Set<string>()
     for (const input of inputs) {
       let frame: Uint8Array
@@ -3351,7 +3303,7 @@ describe('room protocol validation', () => {
       const key = String.fromCharCode(...frame)
       expect(seen.has(key)).toBe(false)
       seen.add(key)
-      if (_name === 'single-unit tracks') expect(decodeBinaryFrame(frame)?.track).toBe(input)
+      if (name === 'single-unit tracks') expect(decodeBinaryFrame(frame)?.track).toBe(input)
     }
   })
   it('preserves __proto__ as data and builds prototype-safe binary wants', () => {
@@ -3493,6 +3445,10 @@ function serve(room: ServerRoom): { stub: RoomStubChannel; peer: Peer } {
   const stub = register(room)
   return { stub, peer: attachPeer(stub) }
 }
+/** A client's join through its Room stub; returns the member id. */
+async function joinThrough(stub: RoomStubChannel, meta: ParticipantMeta = {}): Promise<string> {
+  return ((await stub._handleRequest({ __r: 'req-join', meta, selfDelivery: true })) as { id: string }).id
+}
 async function createTail(id: string) {
   await Room.create(id)
   const source = await Room.get(id)
@@ -3621,6 +3577,25 @@ function fakeClient(
     client: new ClientRoom(fake.stub, { ...snapshot(roomId), ...snapshotOverride }),
     emit: (data: unknown, seq = 1) => fake.emitText(data, { key: roomId, seq, timestamp: seq }),
   }
+}
+/** A client-held participant whose channel the test drives: `notify` delivers a stub notice. */
+function standaloneParticipant(meta: ParticipantMeta, send?: () => Promise<unknown>) {
+  let notify!: (notice: unknown) => unknown
+  const channel = {
+    listen: (cb: (notice: unknown) => unknown) => {
+      notify = cb
+    },
+    onClose: () => {},
+    send,
+  } as unknown as ClientChannel
+  const participant = new ClientStandaloneParticipant(channel, {
+    channelId: 'channel',
+    id: 'me',
+    meta,
+    selfDelivery: true,
+    identity: null,
+  })
+  return { participant, notify: (notice: unknown) => notify(notice) }
 }
 function newState(options: Partial<ConstructorParameters<typeof RoomState>[0]>): RoomState {
   return new RoomState({
