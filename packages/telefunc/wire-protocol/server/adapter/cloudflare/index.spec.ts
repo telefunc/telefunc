@@ -215,7 +215,7 @@ describe('cloudflare adapter entrypoint', () => {
     const response = await tf.serve({
       request,
       env: { TelefuncDurableObject: binding, TelefuncKV: kv } as unknown as Cloudflare.Env,
-      ctx: {} as ExecutionContext,
+      ctx: { waitUntil: vi.fn() } as unknown as ExecutionContext,
     })
 
     expect(mocks.enableChannelTransports).toHaveBeenCalled()
