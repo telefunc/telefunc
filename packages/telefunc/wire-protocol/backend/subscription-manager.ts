@@ -62,9 +62,9 @@ class SubscriptionManager<Source> {
   }
 
   async dispose(): Promise<void> {
-    const cleanups = [...this._slots.values()].map((slot) => slot.stop())
+    const slots = [...this._slots.values()]
     this._slots.clear()
-    await Promise.allSettled([...cleanups, ...this._cleanups])
+    await Promise.allSettled([...slots.map((slot) => slot.stop()), ...this._cleanups])
   }
 
   private _cleanup(attempt: SubscriptionAttempt): Promise<void> {
@@ -241,11 +241,11 @@ class SubscriptionSlot {
 
   private _terminal(error: unknown): void {
     const failure = error instanceof Error ? error : new Error(String(error))
+    this._config.onEmpty()
     this._stopPromise = this._release()
     // A resolved readiness cannot carry the failure, so `ready` read from here on is a fresh, rejected one.
     if (this._state === 'ready') this._readiness = createReadiness()
     this._transition('closed')
-    this._config.onEmpty()
     this._readiness.reject(failure)
   }
 
