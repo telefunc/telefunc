@@ -30,6 +30,9 @@ type RoomRequest = Extract<
   { __r: 'req-join' | 'req-leave' | 'req-set-meta' | 'req-set-attrs' | 'req-dm' }
 >
 type RoomDeclaration = Exclude<RoomStubRequest, RoomRequest>
+/** A member's meta, attributes and DM requests, by the API call each serves. */
+const MEMBER_MUTATIONS = { 'req-set-meta': 'setMeta', 'req-set-attrs': 'setAttributes', 'req-dm': 'send' } as const
+type MemberMutation = Extract<ParticipantStubRequest, { __r: keyof typeof MEMBER_MUTATIONS }>
 
 // A stub's client library sends only these shapes, so anything else comes from a broken or hostile peer and ends its connection.
 function malformed(what: string): never {
@@ -64,17 +67,11 @@ function decodeRoomRequest(value: unknown): RoomRequest {
     case 'req-leave':
       return { __r: 'req-leave', id: memberId(req.id, 'leave') }
     case 'req-set-meta':
-      return { __r: 'req-set-meta', id: memberId(req.id, 'setMeta'), meta: record(req.meta, 'setMeta meta') }
     case 'req-set-attrs':
-      return { __r: 'req-set-attrs', id: memberId(req.id, 'setAttributes'), attrs: record(req.attrs, 'attributes') }
-    case 'req-dm':
-      return {
-        __r: 'req-dm',
-        id: memberId(req.id, 'send'),
-        to: text(req.to, 'send recipient'),
-        data: req.data,
-        ...(optionalTrue(req.ack, 'send ack') ? { ack: true } : {}),
-      }
+    case 'req-dm': {
+      const id = memberId(req.id, MEMBER_MUTATIONS[req.__r])
+      return { ...decodeMemberMutation(req.__r, req), id }
+    }
   }
   return malformed('request')
 }
@@ -160,6 +157,19 @@ function decodeParticipantRequest(value: unknown): ParticipantStubRequest {
         ...(optionalTrue(req.retain, 'publish retain') ? { retain: true } : {}),
       }
     case 'req-set-meta':
+    case 'req-set-attrs':
+    case 'req-dm':
+      return decodeMemberMutation(req.__r, req)
+    case 'req-leave':
+      return { __r: 'req-leave' }
+  }
+  return malformed('participant request')
+}
+
+/** One of those requests, as both stubs decode it; a Room stub's also names the acting member. */
+function decodeMemberMutation(kind: MemberMutation['__r'], req: Record<string, unknown>): MemberMutation {
+  switch (kind) {
+    case 'req-set-meta':
       return { __r: 'req-set-meta', meta: record(req.meta, 'setMeta meta') }
     case 'req-set-attrs':
       return { __r: 'req-set-attrs', attrs: record(req.attrs, 'attributes') }
@@ -170,8 +180,5 @@ function decodeParticipantRequest(value: unknown): ParticipantStubRequest {
         data: req.data,
         ...(optionalTrue(req.ack, 'send ack') ? { ack: true } : {}),
       }
-    case 'req-leave':
-      return { __r: 'req-leave' }
   }
-  return malformed('participant request')
 }
