@@ -38,10 +38,10 @@ import { REQUEST_KIND, REQUEST_KIND_HEADER, getMarkedRequestUrl } from '../reque
 import { ACK_STATUS, TAG, decode, encode, isChannelDataFrame, payloadBytes } from '../shared-ws.js'
 import type {
   AckResultStatus,
-  ReattachState,
   ChannelFrame,
   DecodedFrame,
   ReadyPayload,
+  ReattachState,
   ReconcileOpenEntry,
   ReconcilePayload,
   ReconciledPayload,
@@ -2041,8 +2041,8 @@ class SseTransport implements UpgradeSource {
         )
         if (!response.ok) throw new Error('POST failed')
       } catch {
-        // A POST that failed with its wire: that wire's close already reported the loss, and what it carried goes the
-        // way of that wire's outbox (stageInitialBatch), also when the next wire has reconciled already.
+        // Its wire has ended already: what the POST carried goes the way of that wire's outbox (stageInitialBatch),
+        // also when the next wire has reconciled already.
         if (wire !== this.transportAbort) {
           this.outbox = queued.filter(isWindowRefresh).concat(this.outbox)
           return
