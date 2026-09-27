@@ -64,7 +64,7 @@ async function createSubscriberSocket(redis: RedisClient): Promise<SubscriberSoc
     const nodes = redis.nodes('all').filter((candidate) => candidate.status !== 'end')
     const last = subscriberNodes.get(redis)
     const node = nodes[last === undefined ? 0 : (nodes.indexOf(last) + 1) % nodes.length]
-    if (node === undefined) throw new Error('RedisBackend: Cluster has no available nodes')
+    if (node === undefined) throw new Error('Redis Cluster has no available nodes')
     subscriberNodes.set(redis, node)
     source = node
   } else source = redis
@@ -89,7 +89,7 @@ function clusterReady(cluster: Cluster): Promise<void> {
     }
     const onReady = () => settle()
     // Every failed connect closes, whether the Cluster retries it or ends.
-    const onClose = () => settle(new Error('RedisBackend: Cluster connection closed'))
+    const onClose = () => settle(new Error('Redis Cluster connection closed'))
     cluster.once('ready', onReady)
     cluster.once('close', onClose)
   })

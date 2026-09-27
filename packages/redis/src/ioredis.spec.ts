@@ -53,7 +53,7 @@ test('duplicates the subscriber from a standalone client or a live Cluster node,
     cluster.status = 'ready'
   })
   const nodes = vi.spyOn(cluster, 'nodes').mockReturnValue([ended])
-  await expect(createSubscriberSocket(cluster)).rejects.toThrow('RedisBackend: Cluster has no available nodes')
+  await expect(createSubscriberSocket(cluster)).rejects.toThrow('Redis Cluster has no available nodes')
   nodes.mockReturnValue([ended, live])
   const sockets = [await createSubscriberSocket(cluster), await createSubscriberSocket(live)]
   sockets.forEach((socket) => socket.disconnect())
@@ -81,7 +81,7 @@ test("waits for a connecting Cluster's masters instead of reporting none", async
   cluster.status = 'connecting'
   const failing = createSubscriberSocket(cluster)
   cluster.emit('close')
-  await expect(failing).rejects.toThrow('RedisBackend: Cluster connection closed')
+  await expect(failing).rejects.toThrow('Redis Cluster connection closed')
 })
 
 const publishInput = { route: { key: 'chat', kind: 'text' }, payload: new Uint8Array() } as const
