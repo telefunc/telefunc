@@ -452,7 +452,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         return
       }
       const pending: Promise<unknown>[] = []
-      for (const cb of this._listeners) {
+      for (const cb of [...this._listeners]) {
         try {
           const result = cb(data)
           if (isPromise(result)) {
@@ -488,7 +488,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     try {
       this._flow.onReceived(bytes)
       const pending: Promise<unknown>[] = []
-      for (const cb of this._binaryListeners) {
+      for (const cb of [...this._binaryListeners]) {
         try {
           const result = cb(data)
           if (isPromise(result)) {
@@ -672,7 +672,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       }
     }
     let lastResult: unknown
-    for (const cb of this._listeners) {
+    for (const cb of [...this._listeners]) {
       try {
         lastResult = await cb(data)
       } catch (err) {
@@ -690,7 +690,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       return
     }
     let lastResult: unknown
-    for (const cb of this._binaryListeners) {
+    for (const cb of [...this._binaryListeners]) {
       try {
         lastResult = await cb(data)
       } catch (err) {

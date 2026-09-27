@@ -3,6 +3,7 @@ import { Broadcast, ServerBroadcast } from './server-broadcast.js'
 import { ReplayBuffer } from '../replay-buffer.js'
 import { ACK_STATUS, TAG, decode } from '../shared-ws.js'
 import { IndexedPeer } from './IndexedPeer.js'
+import { ServerChannel } from './channel.js'
 import { getBroadcastAdapter, _resetBroadcastAdapterForTesting, DefaultBroadcastAdapter } from './broadcast.js'
 import type { BroadcastTransport } from './broadcast.js'
 
@@ -474,5 +475,18 @@ describe('Broadcast static bus (publish/subscribe)', () => {
     await Broadcast.publish('room:static-unsub', { text: 'second' })
 
     expect(received).toEqual([{ text: 'first' }])
+  })
+  it("a channel listener that stops listening itself doesn't make the next one miss the message", () => {
+    const channel = new ServerChannel<string, never>()
+    const seen: string[] = []
+    const unlisten = channel.listen((message) => {
+      seen.push(`once:${message}`)
+      unlisten()
+    })
+    channel.listen((message) => void seen.push(`other:${message}`))
+    channel._onPeerMessage(JSON.stringify('one'), 5)
+    channel._onPeerMessage(JSON.stringify('two'), 5)
+    expect(seen).toEqual(['once:one', 'other:one', 'other:two'])
+    channel.abort()
   })
 })
