@@ -4,23 +4,43 @@ import { encodeLaneKey } from '../../../../backend/room/lane-key.js'
 import { ROUTE_RENEW_EVERY_MS } from './routes.js'
 import { CloudflareRoomSessionManager, type CloudflareRoomSubscriptionAttempt } from './subscription.js'
 
+const source = { roomId: 'room', inc: 'inc', lane: { kind: 'semantic' } } as const
+const route = { roomId: 'room', inc: 'inc', laneKey: encodeLaneKey({ kind: 'semantic' }), sessionDoId: 'session' }
+const frame = (byte: number, leaseId: string) => ({
+  ...route,
+  leaseId,
+  payload: new Uint8Array([byte]),
+  info: { seq: byte, timestamp: 1 },
+})
+
+function openAttempt(
+  authority: Record<string, (...args: never[]) => Promise<unknown>> = {},
+  received: number[] = [],
+  manager = new CloudflareRoomSessionManager('session'),
+) {
+  const stub = {
+    registerRoute: async () => ({ ok: true }),
+    renewRoute: async () => true,
+    unsubscribeRoute: async () => {},
+    ...authority,
+  }
+  const attempt = manager.openSubscription(
+    source,
+    () => stub as unknown as CloudflareRoomAuthorityStub,
+    (payload) => void received.push(payload[0]!),
+  )
+  return attempt
+}
+
+function endOf(attempt: CloudflareRoomSubscriptionAttempt): Promise<Error | undefined> {
+  return new Promise((resolve) => attempt.onStateChange((state, reason) => state === 'closed' && resolve(reason)))
+}
+
 test('a session delivers a frame for the lease its subscription holds, and drops one for another lease', async () => {
   const manager = new CloudflareRoomSessionManager('session')
   const received: number[] = []
-  const authority = { registerRoute: async () => ({ ok: true }), unsubscribeRoute: async () => {} }
-  const attempt = manager.openSubscription(
-    { roomId: 'room', inc: 'inc', lane: { kind: 'semantic' } },
-    () => authority as unknown as CloudflareRoomAuthorityStub,
-    (payload) => void received.push(payload[0]!),
-  )
+  const attempt = openAttempt({}, received, manager)
   await vi.waitFor(() => expect(attempt.state()).toBe('ready'))
-  const route = { roomId: 'room', inc: 'inc', laneKey: encodeLaneKey({ kind: 'semantic' }), sessionDoId: 'session' }
-  const frame = (byte: number, leaseId: string) => ({
-    ...route,
-    leaseId,
-    payload: new Uint8Array([byte]),
-    info: { seq: byte, timestamp: 1 },
-  })
   manager.deliver(frame(1, attempt.leaseId))
   // A lease this session held before a restart.
   manager.deliver(frame(2, 'stale-lease'))
@@ -32,16 +52,9 @@ test('an attempt takes a frame the authority delivers before its registration re
   const manager = new CloudflareRoomSessionManager('session')
   const received: number[] = []
   const registered = Promise.withResolvers<{ ok: true }>()
-  const authority = { registerRoute: () => registered.promise, unsubscribeRoute: async () => {} }
-  const attempt = manager.openSubscription(
-    { roomId: 'room', inc: 'inc', lane: { kind: 'semantic' } },
-    () => authority as unknown as CloudflareRoomAuthorityStub,
-    (payload) => void received.push(payload[0]!),
-  )
-  const laneKey = encodeLaneKey({ kind: 'semantic' })
-  const lease = { roomId: 'room', inc: 'inc', laneKey, sessionDoId: 'session', leaseId: attempt.leaseId }
+  const attempt = openAttempt({ registerRoute: () => registered.promise }, received, manager)
   // The authority fans out once its transaction stored the route, over another stub than the one the reply takes.
-  manager.deliver({ ...lease, payload: new Uint8Array([1]), info: { seq: 1, timestamp: 1 } })
+  manager.deliver(frame(1, attempt.leaseId))
   expect(attempt.state()).toBe('establishing')
   expect(received).toEqual([1])
   registered.resolve({ ok: true })
@@ -61,18 +74,9 @@ test("a session's route calls to a room share one ordered stub, so a released at
     },
     unsubscribeRoute: async ({ leaseId }: { leaseId: string }) => void calls.push(`${name}:unsubscribe:${leaseId}`),
   })
-  const source = { roomId: 'room', inc: 'inc', lane: { kind: 'semantic' } } as const
-  const first = manager.openSubscription(
-    source,
-    () => stub('first') as unknown as CloudflareRoomAuthorityStub,
-    () => {},
-  )
+  const first = openAttempt(stub('first'), [], manager)
   void first.unsubscribe()
-  const second = manager.openSubscription(
-    source,
-    () => stub('second') as unknown as CloudflareRoomAuthorityStub,
-    () => {},
-  )
+  const second = openAttempt(stub('second'), [], manager)
   registering.resolve()
   await vi.waitFor(() => expect(second.state()).toBe('ready'))
   expect(calls).toEqual([
@@ -100,11 +104,7 @@ test('a route call after a failed call to its room opens a fresh stub, as a stub
         unsubscribeRoute: async () => {},
       } as unknown as CloudflareRoomAuthorityStub
     }
-    const attempt = manager.openSubscription(
-      { roomId: 'room', inc: 'inc', lane: { kind: 'semantic' } },
-      openAuthority,
-      () => {},
-    )
+    const attempt = manager.openSubscription(source, openAuthority, () => {})
     await vi.advanceTimersByTimeAsync(0)
     expect(attempt.state()).toBe('ready')
     // A commit to the room through its own stub (the second) fails, so that stub may be broken.
@@ -116,25 +116,6 @@ test('a route call after a failed call to its room opens a fresh stub, as a stub
     vi.useRealTimers()
   }
 })
-
-function openAttempt(authority: Record<string, (...args: never[]) => Promise<unknown>>, received: number[] = []) {
-  const route = {
-    registerRoute: async () => ({ ok: true }),
-    renewRoute: async () => true,
-    unsubscribeRoute: async () => {},
-    ...authority,
-  }
-  const attempt = new CloudflareRoomSessionManager('session').openSubscription(
-    { roomId: 'room', inc: 'inc', lane: { kind: 'semantic' } },
-    () => route as unknown as CloudflareRoomAuthorityStub,
-    (payload) => void received.push(payload[0]!),
-  )
-  return attempt
-}
-
-function endOf(attempt: CloudflareRoomSubscriptionAttempt): Promise<Error | undefined> {
-  return new Promise((resolve) => attempt.onStateChange((state, reason) => state === 'closed' && resolve(reason)))
-}
 
 test.each([
   [
@@ -195,25 +176,14 @@ test('a session drops a delivery to an attempt that ended at renewal, and its ro
     let released = 0
     const received: number[] = []
     const manager = new CloudflareRoomSessionManager('session')
-    const authority = {
-      registerRoute: async () => ({ ok: true }),
-      renewRoute: async () => false,
-      unsubscribeRoute: async () => void released++,
-    }
-    const attempt = manager.openSubscription(
-      { roomId: 'room', inc: 'inc', lane: { kind: 'semantic' } },
-      () => authority as unknown as CloudflareRoomAuthorityStub,
-      (payload) => void received.push(payload[0]!),
+    const attempt = openAttempt(
+      { renewRoute: async () => false, unsubscribeRoute: async () => void released++ },
+      received,
+      manager,
     )
     await vi.advanceTimersByTimeAsync(ROUTE_RENEW_EVERY_MS)
     expect(attempt.state()).toBe('closed')
-    const route = { roomId: 'room', inc: 'inc', laneKey: encodeLaneKey({ kind: 'semantic' }), sessionDoId: 'session' }
-    manager.deliver({
-      ...route,
-      leaseId: attempt.leaseId,
-      payload: new Uint8Array([1]),
-      info: { seq: 1, timestamp: 1 },
-    })
+    manager.deliver(frame(1, attempt.leaseId))
     expect(received).toEqual([])
     await attempt.unsubscribe()
     expect(released).toBe(1)
