@@ -7,7 +7,7 @@ declare global {
     interface Env {
       ROOM: DurableObjectNamespace
       TelefuncDurableObject: DurableObjectNamespace & RoomSessionNamespace
-      PUBLIC: TelefuncDurableObjectNamespace
+      TELEFUNC: TelefuncDurableObjectNamespace
     }
   }
 }

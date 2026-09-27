@@ -29,14 +29,17 @@ import { ServerBroadcast } from '../../packages/telefunc/wire-protocol/server/se
 const broadcast = new CloudflareBroadcastTransport({
   baseInstanceName: 'telefunc',
   locationFallback: 'weur',
-  namespace: () => workerEnv.PUBLIC,
+  namespace: () => workerEnv.TELEFUNC,
 })
-installBackend(() => new CloudflareBackend({ rooms: () => workerEnv.PUBLIC, broadcast }), ['cloudflare-room-ci-public'])
+installBackend(
+  () => new CloudflareBackend({ rooms: () => workerEnv.TELEFUNC, broadcast }),
+  ['cloudflare-room-ci-public'],
+)
 const textEncoder = new TextEncoder()
 const textDecoder = new TextDecoder()
 const CONTROL_HORIZON_MS = 2_000
 // Broadcast's roles as the production class plays them: each instance is a session, a key authority and a coordinator.
-export class PublicDurableObject extends DurableObject<Env> {
+export class TelefuncProbeDurableObject extends DurableObject<Env> {
   readonly #manager: CloudflareRoomSessionManager
   readonly #calls: BroadcastCalls = new OrderedStubs()
   readonly #broadcastAuthority: CloudflareBroadcastAuthorityState
@@ -123,7 +126,7 @@ type RpcMethods<T> = {
 type Authority = RpcMethods<RoomProbeDurableObject>
 type Session = RpcMethods<Pick<SessionDurableObject, 'refuse' | 'release' | 'arrived'>>
 type BroadcastSession = RpcMethods<
-  Pick<PublicDurableObject, 'broadcastSubscribe' | 'broadcastPublish' | 'broadcastReceived'>
+  Pick<TelefuncProbeDurableObject, 'broadcastSubscribe' | 'broadcastPublish' | 'broadcastReceived'>
 >
 type Env = Cloudflare.Env
 const probes: Record<string, (env: Env, suffix: string) => Promise<unknown>> = {
@@ -237,7 +240,7 @@ async function routeRenewal(env: Env, suffix: string) {
 async function broadcastAcrossSessions(env: Env, suffix: string) {
   const key = `broadcast-${suffix}`
   const session = (name: string) =>
-    env.PUBLIC.get(env.PUBLIC.idFromName(`broadcast-session-${name}-${suffix}`)) as unknown as BroadcastSession
+    env.TELEFUNC.get(env.TELEFUNC.idFromName(`broadcast-session-${name}-${suffix}`)) as unknown as BroadcastSession
   const [a, b] = [session('a'), session('b')]
   await a.broadcastSubscribe(key)
   await b.broadcastSubscribe(key)

@@ -13,7 +13,7 @@ beforeAll(async () => {
     durableObjects: {
       ROOM: { className: 'RoomProbeDurableObject', useSQLite: true },
       TelefuncDurableObject: { className: 'SessionDurableObject' },
-      PUBLIC: { className: 'PublicDurableObject', useSQLite: true },
+      TELEFUNC: { className: 'TelefuncProbeDurableObject', useSQLite: true },
     },
   })
 })
