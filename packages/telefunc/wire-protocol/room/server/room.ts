@@ -82,7 +82,7 @@ import {
 } from './lanes.js'
 import { reportRoomError } from './errors.js'
 import { reconnectWindow, reportServerChannelError } from '../../server/channel.js'
-import { createMember, evictMember, readMembersById, updateMemberRecord } from './membership.js'
+import { createMember, evictMember, reapAndReadMembersById, updateMemberRecord } from './membership.js'
 import { memberCellKey } from './cells.js'
 import type {
   BinaryPublishOptions,
@@ -506,7 +506,7 @@ class ServerRoom extends RoomStateView implements Room {
   private async _resolveMember(id: string): Promise<Sender | null> {
     const remote = this._state.getRemote(id)
     if (remote) return senderOf(id, remote.meta, remote.identity)
-    const [member] = await readMembersById(this.id, this._inc, [id])
+    const [member] = await reapAndReadMembersById(this.id, this._inc, [id])
     return member === undefined ? null : senderOf(id, member.meta, member.identity ?? null)
   }
   /** @internal */

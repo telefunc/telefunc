@@ -17,7 +17,7 @@ import { reportRoomError } from './errors.js'
 import { LaneSubscription } from './lane-subscription.js'
 import { binaryLaneKey } from './replay.js'
 import { CONTROL_LANE, SEMANTIC_LANE, decodeRoomText, withinRoomHorizon } from './lanes.js'
-import { readRoster, renewMemberLease } from './membership.js'
+import { reapAndReadRoster, renewMemberLease } from './membership.js'
 assertIsNotBrowser()
 
 const ROSTER_REFRESH_RETRY_LIMIT = 5
@@ -267,7 +267,7 @@ class RoomSubscriptions {
     const host = this._host
     for (let attempt = 0; !host._state.closed; attempt++) {
       const version = host._state.membershipVersion
-      const { members, departing } = await readRoster(host.id, host._inc)
+      const { members, departing } = await reapAndReadRoster(host.id, host._inc)
       if (host._state.membershipVersion === version) {
         host._applyAuthorityRoster(members, departing)
         this.replan()

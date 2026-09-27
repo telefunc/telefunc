@@ -35,7 +35,13 @@ import type {
   RoomSendReceipt,
   SendGuard,
 } from '../types.js'
-import { evictMember, presenceCount, readMembersById, readRoster, resolveIdentityMembers } from './membership.js'
+import {
+  evictMember,
+  reapAndCountPresence,
+  reapAndReadMembersById,
+  reapAndReadRoster,
+  reapAndResolveIdentity,
+} from './membership.js'
 import { memberCellKey } from './cells.js'
 import {
   CONTROL_LANE,
@@ -194,7 +200,7 @@ async function getRoom(id: string, options?: RoomGetOptions): Promise<Room> {
 
 async function openRoom(id: string): Promise<ServerRoom> {
   const config = await requireRoom(id)
-  return new ServerRoom(id, config, { count: await presenceCount(id, config.inc) })
+  return new ServerRoom(id, config, { count: await reapAndCountPresence(id, config.inc) })
 }
 
 async function getOrCreateRoom(id: string, options?: RoomOptions): Promise<Room> {
@@ -265,7 +271,7 @@ async function listRooms(options?: { prefix?: string }): Promise<RoomInfo[]> {
       const config = openConfig(head)
       if (config === null) continue
       // A room that began closing after its head read is no longer listed.
-      const count = await presenceCount(roomId, config.inc).catch(async (error: unknown) => {
+      const count = await reapAndCountPresence(roomId, config.inc).catch(async (error: unknown) => {
         if (isRoomError(error) && openConfig(await backend.readHead(roomId), config.inc) === null) return null
         throw error
       })
@@ -389,12 +395,12 @@ async function resolveParticipantRef(roomId: string, inc: string, target: Partic
       typeof target.id === 'string' && target.id.length > 0,
       'The participant { id } should be a non-empty string',
     )
-    const members = await readMembersById(roomId, inc, [target.id])
+    const members = await reapAndReadMembersById(roomId, inc, [target.id])
     if (members.length === 0) throw participantGoneError(target.id)
     return members
   }
   assertParticipantIdentity(target.identity, 'The participant ref { identity }')
-  return await resolveIdentityMembers(roomId, inc, target.identity)
+  return await reapAndResolveIdentity(roomId, inc, target.identity)
 }
 
 async function removeParticipant(id: string, target: ParticipantRef & { reason?: unknown }): Promise<void> {
@@ -408,11 +414,11 @@ async function getRoomParticipants(id: string, target?: { identity: string }): P
   const config = await requireRoom(id)
   let members: MemberSnapshot[]
   if (target === undefined) {
-    members = (await readRoster(id, config.inc)).members
+    members = (await reapAndReadRoster(id, config.inc)).members
   } else {
     assertUsage(isObject(target), 'Room.getParticipants() target should be { identity }')
     assertParticipantIdentity(target.identity, 'Room.getParticipants() target identity')
-    members = await resolveIdentityMembers(id, config.inc, target.identity)
+    members = await reapAndResolveIdentity(id, config.inc, target.identity)
   }
   return members
     .filter((member) => !member.hidden)

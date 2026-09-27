@@ -3,10 +3,10 @@ export {
   updateMemberRecord,
   renewMemberLease,
   evictMember,
-  readRoster,
-  readMembersById,
-  presenceCount,
-  resolveIdentityMembers,
+  reapAndReadRoster,
+  reapAndReadMembersById,
+  reapAndCountPresence,
+  reapAndResolveIdentity,
 }
 
 import { assert } from '../../../utils/assert.js'
@@ -145,7 +145,10 @@ async function evictMember(
 }
 
 /** Live members, and departing ones whose eviction the read completes; lapsed members are reaped on the way. */
-async function readRoster(roomId: string, inc: string): Promise<{ members: MemberSnapshot[]; departing: Set<string> }> {
+async function reapAndReadRoster(
+  roomId: string,
+  inc: string,
+): Promise<{ members: MemberSnapshot[]; departing: Set<string> }> {
   const cells = await readCells(roomId, inc, { prefix: MEMBER_CELL_PREFIX })
   // After the member read, so an eviction committing in between shows up as departing.
   const cleanups = await readCells(roomId, inc, { prefix: CLEANUP_CELL_PREFIX })
@@ -163,7 +166,7 @@ async function readRoster(roomId: string, inc: string): Promise<{ members: Membe
   return { members, departing }
 }
 
-async function readMembersById(roomId: string, inc: string, ids: string[]): Promise<MemberSnapshot[]> {
+async function reapAndReadMembersById(roomId: string, inc: string, ids: string[]): Promise<MemberSnapshot[]> {
   const cells = await readCells(roomId, inc, { keys: ids.map(memberCellKey) })
   return await liveMembers(
     roomId,
@@ -203,15 +206,15 @@ function memberSnapshot(id: string, record: RoomMemberRecord): MemberSnapshot {
   }
 }
 
-async function presenceCount(roomId: string, inc: string): Promise<number> {
-  return (await readRoster(roomId, inc)).members.filter((member) => !member.hidden).length
+async function reapAndCountPresence(roomId: string, inc: string): Promise<number> {
+  return (await reapAndReadRoster(roomId, inc)).members.filter((member) => !member.hidden).length
 }
 
-async function resolveIdentityMembers(roomId: string, inc: string, identity: string): Promise<MemberSnapshot[]> {
+async function reapAndResolveIdentity(roomId: string, inc: string, identity: string): Promise<MemberSnapshot[]> {
   const prefix = identityCellPrefix(identity)
   const markers = await readCells(roomId, inc, { prefix })
   const ids = [...markers.keys()].map((key) => key.slice(prefix.length))
-  const members = await readMembersById(roomId, inc, ids)
+  const members = await reapAndReadMembersById(roomId, inc, ids)
   // A member and its identity marker are written and removed in one compare-exchange.
   assert(members.every((member) => member.identity === identity))
   return members
