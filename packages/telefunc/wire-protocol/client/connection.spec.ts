@@ -106,15 +106,14 @@ test('a zero replay budget still registers a later channel on the connection', (
 
 test("a reconnect declares a broadcast's subscriptions, not the toggles queued before it", () => {
   const channel = { ...createChannel(), _reattachState: () => ({ broadcast: { text: true, binary: false } }) }
-  const connection = ClientConnection.getOrCreate('http://toggle.test', channel as never, {
-    transports: [CHANNEL_TRANSPORT.SSE],
-    fetchImpl: createStalledTransport().fetchImpl,
-    connectionKey: crypto.randomUUID(),
-  }) as any
+  const connection = ClientConnection.getOrCreate('http://toggle.test', channel as never, stalledOptions()) as any
   // Offline, the listener is swapped: an unsubscribe, then a subscribe. The reconcile entry already says subscribed.
   connection.sendBroadcastUnsubscribe(channel, false)
   connection.sendBroadcastSubscribe(channel, false)
-  const { movedBufferedFrames } = connection.stageReconcileBatch()
+  const { reconcileFrame, movedBufferedFrames } = connection.stageReconcileBatch()
+  expect(decode(reconcileFrame.frame)).toMatchObject({
+    payload: { open: [{ broadcast: { text: true, binary: false } }] },
+  })
   const queued: Array<number | undefined> = [...connection.sendBuffer, ...movedBufferedFrames].map(
     ({ frame }: { frame: Uint8Array }) => frame[0],
   )
