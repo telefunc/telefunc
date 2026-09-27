@@ -447,7 +447,7 @@ class ServerRoom extends RoomStateView implements Room {
     return { ...receipt, response: settled.result }
   }
 
-  async _publishDm(from: string, to: string, data: unknown, ackId?: string): Promise<RoomSendReceipt> {
+  private async _publishDm(from: string, to: string, data: unknown, ackId?: string): Promise<RoomSendReceipt> {
     if (this._state.closed) throw roomClosedError(this.id)
     const target = await this._resolveMember(to)
     if (!target) throw participantGoneError(to)
