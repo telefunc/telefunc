@@ -30,7 +30,7 @@ async function nodeReadableToWebRequest(
   })
   // The readable closes as soon as its body is read: a later disconnect only shows on the response.
   response?.once('close', () => {
-    if (!response.writableEnded && !abortController.signal.aborted) abortController.abort()
+    if (!response.writableEnded) abortController.abort()
   })
   return new Request(url, {
     method,
