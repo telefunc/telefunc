@@ -33,7 +33,6 @@ const SERVER_BROADCAST_BRAND: unique symbol = Symbol.for('ServerBroadcast')
 const textEncoder = new TextEncoder()
 const textDecoder = new TextDecoder()
 type BroadcastUnsubscribe = () => void
-const BROADCAST_KINDS = ['text', 'binary'] as const
 
 class ServerBroadcast<T = unknown> extends ServerChannel {
   readonly [SERVER_BROADCAST_BRAND] = true
@@ -133,7 +132,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
   }
 
   protected override _shutdown(err?: Error): void {
-    for (const kind of BROADCAST_KINDS) this._routes[kind].close()
+    for (const route of Object.values(this._routes)) route.close()
     super._shutdown(err)
   }
 
