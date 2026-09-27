@@ -546,7 +546,7 @@ class ChannelMux {
 
   /** First reconcile (`initial:true`) races channel registration against `connectTtl`; later
    *  reconciles fail fast if the channel is gone. */
-  private async attach(entry: ReconcilePayload['open'][number], sender: PeerSender): Promise<ChannelHandle | null> {
+  private async attach(entry: ReconcileOpenEntry, sender: PeerSender): Promise<ChannelHandle | null> {
     const existing = this.channels.get(entry.id)
     if (existing) return this.attachChannel(existing, entry, sender)
     if (!entry.initial) return null

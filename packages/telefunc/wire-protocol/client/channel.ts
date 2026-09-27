@@ -611,7 +611,7 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   readonly [CLIENT_BROADCAST_BRAND] = true
   private _broadcastListeners: Array<BroadcastListener<T>> = []
   private _broadcastBinaryListeners: Array<BroadcastBinaryListener> = []
-  /** What the server was last told this page subscribes to. */
+  /** The subscriptions this page asks the server for. */
   private readonly _wire = { text: false, binary: false }
 
   static isClientBroadcast(value: unknown): value is ClientBroadcast {
