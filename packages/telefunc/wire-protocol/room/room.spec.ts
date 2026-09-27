@@ -1467,20 +1467,12 @@ describe('Room public behavior', () => {
     for (const track of tracks.slice(0, 16)) room.subscribeBinary(() => {}, { track })
     expect(() => room.subscribeBinary(() => {}, { track: tracks[16] })).toThrow('at most 16 tracks per participant')
     const stub = register(room)
-    let seq = 0
-    const declare = (wanted: string[]) =>
-      stub._dispatchFrame({
-        tag: TAG.TEXT,
-        index: 7,
-        seq: ++seq,
-        text: stringify({
-          __r: 'sub-binary',
-          wants: { everyMember: emptyTrackWants(), members: { [member.id]: { all: false, tracks: wanted } } },
-        }),
-        bytes: 1,
-      })
-    expect(() => declare(tracks.slice(0, 16))).not.toThrow()
-    expect(() => declare(tracks)).toThrow(ProtocolViolationError)
+    const subBinary = (wanted: string[]) => ({
+      __r: 'sub-binary',
+      wants: { everyMember: emptyTrackWants(), members: { [member.id]: { all: false, tracks: wanted } } },
+    })
+    expect(() => declare(stub, subBinary(tracks.slice(0, 16)))).not.toThrow()
+    expect(() => declare(stub, subBinary(tracks))).toThrow(ProtocolViolationError)
   })
   it('treats a request the client library never sends, unparsable or misshapen, as a protocol violation', async () => {
     const stub = register((await Room.create('malformed-stub-request')) as ServerRoom)
@@ -1608,7 +1600,7 @@ describe('Room public behavior', () => {
       ackId = dm!.ackId!
     })
     const reply = { ok: true, result: 'handled', __r: 'dm', to: victim.id, from: '', data: 'forged' }
-    stub._onPeerMessage(stringify({ __r: 'dm-reply', ackId, reply }), 0)
+    declare(stub, { __r: 'dm-reply', ackId, reply })
     await expect(acking).resolves.toMatchObject({ response: 'handled' })
     expect(victimInbox).toEqual([])
   })
@@ -2016,7 +2008,7 @@ describe('Room public behavior', () => {
     })
     const wanted = serve(room)
     const silent = serve(room)
-    wanted.stub._onPeerMessage(JSON.stringify({ __r: 'sub-text', members: [], announce: true }), 1)
+    declare(wanted.stub, { __r: 'sub-text', members: [], announce: true })
     await semanticReady.promise
     await Room.announce(room.id, 'wanted')
     await vi.waitFor(() => expect(semanticFrames(wanted.peer, 'announce')).toEqual(['wanted']))
