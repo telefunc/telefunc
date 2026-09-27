@@ -160,7 +160,7 @@ function createMockKV(): KVNamespace {
 }
 
 function createBinding() {
-  const fetch = vi.fn(async (request: Request) => new Response(request.headers.get('x-telefunc-broadcast-bucket')))
+  const fetch = vi.fn(async (_request: Request) => new Response())
   const get = vi.fn((id: { name: string }, options?: { locationHint: string }) => {
     void id
     void options
@@ -333,7 +333,7 @@ describe('cloudflare adapter entrypoint', () => {
     expect(jurisdiction).toHaveBeenCalledWith('eu')
   })
 
-  it('passes base transport options and the Worker env namespace to the broadcast transport', () => {
+  it('passes base options and the Worker env namespace to the Cloudflare Broadcast driver', () => {
     const { binding } = createBinding()
     mocks.workerEnv.TelefuncDurableObject = binding
     new Telefunc()
