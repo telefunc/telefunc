@@ -673,6 +673,15 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
     }
   }
 
+  override _onTransportOpen(batched: boolean): void {
+    super._onTransportOpen(batched)
+    // A subscribe is not replayed, so one written to a wire that had already died is lost: it goes out again on every
+    // attach, as a pending close request does.
+    if (this._isClosed) return
+    if (this._broadcastListeners.length > 0) this._connection.sendBroadcastSubscribe(this, false)
+    if (this._broadcastBinaryListeners.length > 0) this._connection.sendBroadcastSubscribe(this, true)
+  }
+
   override _dispatchDataFrame(frame: ChannelDataFrame): void {
     if (frame.tag === TAG.PUBLISH) {
       this._onTransportPublish(frame.text, frame.info)
