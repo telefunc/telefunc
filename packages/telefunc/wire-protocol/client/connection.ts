@@ -168,7 +168,7 @@ interface MuxConnection {
   sendBdpPingAck(channel: MuxChannel): void
   sendBroadcastSubscribe(channel: MuxChannel, binary: boolean): void
   sendBroadcastUnsubscribe(channel: MuxChannel, binary: boolean): void
-  unregister(channel: MuxChannel, err?: Error): void
+  unregister(channel: MuxChannel, err?: Error, options?: { closeTimedOut: boolean }): void
   reconnectWindow(): number
 }
 
@@ -581,7 +581,7 @@ class ClientConnection implements MuxConnection {
     if (droppedAny) this.startTtlIfIdle()
   }
 
-  unregister(channel: MuxChannel, err = new ChannelClosedError()): void {
+  unregister(channel: MuxChannel, err = new ChannelClosedError(), { closeTimedOut = false } = {}): void {
     const ix = this.channelIndex.get(channel)
     if (ix === undefined) return
     const entry = this.channels.get(ix)!
@@ -589,10 +589,11 @@ class ClientConnection implements MuxConnection {
       this.enterChannelReleasing(ix, err)
       return
     }
-    // It stays listed only while the frame that ends it on the server waits; anything else it queued goes with it.
+    // It stays listed while what it queued waits. After a close that timed out, nothing confirmed the server has its
+    // end, so only a closing frame keeps it; what else it queued goes with it.
     if (
       entry.state.tag === 'open' &&
-      this.sendBuffer.some(({ channelIx, frame }) => channelIx === ix && isClosingFrame(frame))
+      this.sendBuffer.some(({ channelIx, frame }) => channelIx === ix && (!closeTimedOut || isClosingFrame(frame)))
     ) {
       this.enterChannelDraining(ix)
       return

@@ -490,7 +490,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
       }
       const remaining = this._closeDeadline - Date.now()
       if (remaining <= 0) {
-        this._finalizeClose(new ChannelClosedError('Channel close timed out'))
+        this._finalizeClose(new ChannelClosedError('Channel close timed out'), { closeTimedOut: true })
         break
       }
       await this._waitForCloseProgress(remaining)
@@ -572,7 +572,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     })
   }
 
-  private _finalizeClose(err?: Error): void {
+  private _finalizeClose(err?: Error, options?: { closeTimedOut: boolean }): void {
     if (this._didTerminate) return
     this._didTerminate = true
     this._closeError = err
@@ -580,7 +580,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     const ackErr = err ?? new ChannelClosedError()
     for (const { reject } of this._pendingAcks.values()) reject(ackErr)
     this._pendingAcks.clear()
-    this._connection.unregister(this, ackErr)
+    this._connection.unregister(this, ackErr, options)
     this._fireClose(err)
     this._notifyCloseProgress()
   }

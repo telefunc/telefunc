@@ -29,6 +29,13 @@ function stalledChannel(): ClientChannel<never, string> {
   return channel
 }
 
+test('a close that times out tells the connection, which then holds the channel only for its closing frame', async () => {
+  const channel = stalledChannel()
+  const unregister = vi.spyOn((channel as any)._connection, 'unregister')
+  expect(await channel.close({ timeout: 10 })).toBe(1)
+  expect(unregister).toHaveBeenCalledWith(channel, expect.any(Error), { closeTimedOut: true })
+})
+
 test("a channel listener that stops listening itself doesn't make the next one miss the message", () => {
   const channel = stalledChannel()
   const seen: string[] = []
