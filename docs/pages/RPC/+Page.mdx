@@ -45,6 +45,8 @@ async function hello({ name }) {
 
 The central aspect here is that `hello()` is always executed on the server side, which enables `hello()` to use server-side utilities such as SQL and ORMs.
 
+> A telefunction is always defined as `async function`, or as `async function*` to stream values (see <Link href="/stream" />).
+
 
 ## ORM & SQL
 
