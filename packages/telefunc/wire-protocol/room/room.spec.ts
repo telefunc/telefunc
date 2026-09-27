@@ -24,7 +24,7 @@ import {
   ROOM_TAIL_HOLD_MAX,
   ROOM_WANTED_TRACKS_MAX,
 } from './constants.js'
-import { DEFAULT_TRACK, decodeBinaryFrame, emptyTrackWants, encodeBinaryFrame, sanitizeBinaryWants } from './binary.js'
+import { DEFAULT_TRACK, decodeBinaryFrame, emptyTrackWants, encodeBinaryFrame } from './binary.js'
 import { RoomError, isRoomError, roomAckError, toRoomFailure } from './errors.js'
 import { leaveCauseFromWire, leaveCauseToWire, mergeAttributes } from './model.js'
 import { hasRoomTag, type InboxMessage, type RoomSnapshotMetadata } from './protocol.js'
@@ -36,6 +36,7 @@ import { RoomState, type RoomStateView, remoteBacking } from './state.js'
 import { Room } from './server/statics.js'
 import { ServerRoom, type ServerLocalParticipant } from './server/room.js'
 import { configFromHead, decodeRoomText, encodeRoomRecord } from './server/lanes.js'
+import { sanitizeBinaryWants } from './server/requests.js'
 import { config } from '../../node/server/serverConfig.js'
 import { config as clientConfig } from '../../client/clientConfig.js'
 import type { LaneSubscription } from './server/lane-subscription.js'
@@ -3514,17 +3515,18 @@ describe('room protocol validation', () => {
       everyMember: { all: false, tracks: [] },
       members: { [memberId]: { all: false, tracks: ['screen'] } },
     })
-    expect(sanitized).not.toBeNull()
-    expect(Object.getPrototypeOf(sanitized!.members)).toBeNull()
+    expect(Object.getPrototypeOf(sanitized.members)).toBeNull()
     const hostileMembers = Object.create(null) as Record<string, unknown>
     hostileMembers.__proto__ = { all: true, tracks: [] }
-    expect(sanitizeBinaryWants({ everyMember: { all: false, tracks: [] }, members: hostileMembers })).toBeNull()
-    expect(
+    expect(() => sanitizeBinaryWants({ everyMember: { all: false, tracks: [] }, members: hostileMembers })).toThrow(
+      ProtocolViolationError,
+    )
+    expect(() =>
       sanitizeBinaryWants({
         everyMember: { all: false, tracks: [] },
         members: { 'not-a-member-id': { all: false, tracks: [] } },
       }),
-    ).toBeNull()
+    ).toThrow(ProtocolViolationError)
     const state = newState({
       roomId: 'state-wants',
       seed: { members: [{ id: '__proto__', meta: {}, joinedAt: 1, metaSeq: 0 }] },
@@ -3539,7 +3541,9 @@ describe('room protocol validation', () => {
       expect(() => encodeBinaryFrame(memberId, new Uint8Array(), { meta: meta as never })).toThrow(
         'meta should be an object',
       )
-      expect(sanitizeBinaryWants({ everyMember: { all: false, tracks: [] }, members: meta })).toBeNull()
+      expect(() => sanitizeBinaryWants({ everyMember: { all: false, tracks: [] }, members: meta })).toThrow(
+        ProtocolViolationError,
+      )
     }
     const arrayMeta = encodeBinaryFrame(memberId, new Uint8Array(), { meta: {} })
     arrayMeta[19] = '['.charCodeAt(0)
@@ -3576,8 +3580,8 @@ describe('room protocol validation', () => {
     )
     const wantsTrack = (track: string) =>
       sanitizeBinaryWants({ everyMember: { all: false, tracks: [track] }, members: {} })
-    expect(wantsTrack(`${'é'.repeat(127)}t`)).not.toBeNull()
-    expect(wantsTrack('é'.repeat(128))).toBeNull()
+    expect(() => wantsTrack(`${'é'.repeat(127)}t`)).not.toThrow()
+    expect(() => wantsTrack('é'.repeat(128))).toThrow(ProtocolViolationError)
   })
 })
 type Peer = ReturnType<typeof attachPeer>

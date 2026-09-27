@@ -1,5 +1,5 @@
 // Shared Room storage records and wire envelopes.
-export { hasRoomTag, joinedMember, decodeDmReply, inboxMessageFromWire, wireDmFromInbox }
+export { hasRoomTag, joinedMember, inboxMessageFromWire, wireDmFromInbox }
 export type {
   RoomConfigRecord,
   RoomMemberRecord,
@@ -130,15 +130,6 @@ type RoomDmEnvelope = {
 type RoomDmAckEnvelope = { __r: 'dm-ack'; to: string; ackId: string } & DmReply
 /** The recipient handler's return, or its failure. */
 type DmReply = { ok: true; result: unknown } | RoomFailure
-
-/** A client-supplied reply, rebuilt field by field so no other key rides into the `dm-ack` envelope. */
-function decodeDmReply(reply: unknown): DmReply | null {
-  if (!isRecord(reply)) return null
-  if (reply.ok === true) return { ok: true, result: reply.result }
-  if (reply.ok !== false) return null
-  if (reply.abort === true) return { ok: false, abort: true, abortValue: reply.abortValue }
-  return typeof reply.err === 'string' ? { ok: false, err: reply.err } : null
-}
 
 /** The ack of a member meta write: the committed value and its sequence. */
 type AcceptedMeta = { meta: ParticipantMeta; seq: number }

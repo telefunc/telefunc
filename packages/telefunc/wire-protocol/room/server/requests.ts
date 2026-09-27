@@ -5,14 +5,24 @@ export {
   decodeStubBinaryFrame,
   decodeParticipantRequest,
   decodeParticipantFrame,
+  decodeDmReply,
+  sanitizeBinaryWants,
 }
 export type { RoomRequest, RoomDeclaration }
 
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 import { ProtocolViolationError } from '../../shared-ws.js'
-import { decodeBinaryFrame, isMemberId, sanitizeBinaryWants, type BinaryFrame } from '../binary.js'
+import {
+  decodeBinaryFrame,
+  isMemberId,
+  isRoomTrack,
+  type BinaryFrame,
+  type BinaryWants,
+  type TrackWants,
+} from '../binary.js'
+import { ROOM_WANTED_TRACKS_MAX } from '../constants.js'
 import { isRecord } from '../model.js'
-import { decodeDmReply, type ParticipantStubRequest, type RoomDataPublish, type RoomStubRequest } from '../protocol.js'
+import type { DmReply, ParticipantStubRequest, RoomDataPublish, RoomStubRequest } from '../protocol.js'
 assertIsNotBrowser()
 
 type RoomRequest = Extract<
@@ -79,7 +89,7 @@ function decodeRoomDeclaration(value: unknown): RoomDeclaration {
         reply: decodeDmReply(decl.reply) ?? malformed('DM reply'),
       }
     case 'sub-binary':
-      return { __r: 'sub-binary', wants: sanitizeBinaryWants(decl.wants) ?? malformed('binary wants') }
+      return { __r: 'sub-binary', wants: sanitizeBinaryWants(decl.wants) }
     case 'sub-text': {
       if (!Array.isArray(decl.members)) malformed('text wants')
       return {
@@ -90,6 +100,33 @@ function decodeRoomDeclaration(value: unknown): RoomDeclaration {
     }
   }
   return malformed('declaration')
+}
+
+/** A client-supplied reply, rebuilt field by field so no other key rides into the `dm-ack` envelope. */
+function decodeDmReply(reply: unknown): DmReply | null {
+  if (!isRecord(reply)) return null
+  if (reply.ok === true) return { ok: true, result: reply.result }
+  if (reply.ok !== false) return null
+  if (reply.abort === true) return { ok: false, abort: true, abortValue: reply.abortValue }
+  return typeof reply.err === 'string' ? { ok: false, err: reply.err } : null
+}
+
+/** A client-declared `sub-binary` want. */
+function sanitizeBinaryWants(wants: unknown): BinaryWants {
+  if (!isRecord(wants)) malformed('binary wants')
+  const everyMember = sanitizeTrackWants(wants.everyMember)
+  if (!isRecord(wants.members)) malformed('binary wants')
+  const members: Record<string, TrackWants> = Object.create(null)
+  for (const [memberId, trackWants] of Object.entries(wants.members)) {
+    if (!isMemberId(memberId)) malformed('binary wants')
+    members[memberId] = sanitizeTrackWants(trackWants)
+  }
+  return { everyMember, members }
+}
+function sanitizeTrackWants(wants: unknown): TrackWants {
+  if (!isRecord(wants) || typeof wants.all !== 'boolean' || !Array.isArray(wants.tracks)) malformed('binary wants')
+  if (wants.tracks.length > ROOM_WANTED_TRACKS_MAX || !wants.tracks.every(isRoomTrack)) malformed('binary wants')
+  return { all: wants.all, tracks: wants.tracks as string[] }
 }
 
 function decodeRoomPublish(value: unknown): RoomDataPublish {

@@ -11,7 +11,7 @@ export {
   mergeTrackWants,
   wantsAnyBinary,
   binaryWantsCovers,
-  sanitizeBinaryWants,
+  isRoomTrack,
 }
 export type { TrackWants, BinaryWants, BinaryFrame }
 
@@ -19,7 +19,6 @@ import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { assert, assertUsage } from '../../utils/assert.js'
 import { utf8ByteLength } from '../../utils/utf8ByteLength.js'
-import { ROOM_WANTED_TRACKS_MAX } from './constants.js'
 import { assertKnownOptions, isRecord } from './model.js'
 import type { BinaryPublishOptions } from './types.js'
 
@@ -195,25 +194,6 @@ function binaryWantsCovers(wants: BinaryWants, memberId: string, track: string):
 }
 function wantsAnyBinary(wants: BinaryWants): boolean {
   return wants.everyMember.all || wants.everyMember.tracks.length > 0 || Object.keys(wants.members).length > 0
-}
-/** Validate a client-declared `sub-binary` want (untrusted input), or return `null`. */
-function sanitizeBinaryWants(wants: unknown): BinaryWants | null {
-  if (!isRecord(wants)) return null
-  const everyMember = sanitizeTrackWants(wants.everyMember)
-  if (!everyMember || !isRecord(wants.members)) return null
-  const members: Record<string, TrackWants> = Object.create(null)
-  for (const [memberId, trackWants] of Object.entries(wants.members)) {
-    if (!isMemberId(memberId)) return null
-    const sanitized = sanitizeTrackWants(trackWants)
-    if (!sanitized) return null
-    members[memberId] = sanitized
-  }
-  return { everyMember, members }
-}
-function sanitizeTrackWants(wants: unknown): TrackWants | null {
-  if (!isRecord(wants) || typeof wants.all !== 'boolean' || !Array.isArray(wants.tracks)) return null
-  if (wants.tracks.length > ROOM_WANTED_TRACKS_MAX || !wants.tracks.every(isRoomTrack)) return null
-  return { all: wants.all, tracks: wants.tracks as string[] }
 }
 /** Bounded by UTF-8 bytes, the unit of the frame's one-byte track length; a `.length` count could admit a track that doesn't fit. */
 function isRoomTrack(track: unknown): track is string {

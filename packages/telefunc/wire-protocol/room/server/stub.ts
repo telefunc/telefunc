@@ -20,6 +20,7 @@ import type { ChannelPublishAck } from '../../channel.js'
 import type { ServerLocalParticipant, ServerRoom } from './room.js'
 import { reportRoomError } from './errors.js'
 import {
+  decodeDmReply,
   decodeParticipantFrame,
   decodeParticipantRequest,
   decodeRoomDeclaration,
@@ -35,7 +36,6 @@ import { binaryWantsCovers, emptyBinaryWants, laneTrack, type BinaryFrame, type 
 import { DM_FAILURE, RoomError, roomAckError } from '../errors.js'
 import { leaveCauseToWire } from '../model.js'
 import {
-  decodeDmReply,
   wireDmFromInbox,
   type DmReply,
   type MemberSnapshot,
