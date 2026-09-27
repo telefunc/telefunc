@@ -27,7 +27,8 @@ const readableStreamReplacer: StreamingReplacerType<ReadableStreamRequestContrac
       chunks,
       cancel: (reason) => {
         chunks.return(undefined)
-        // An errored stream's cancel rejects with the error its read already threw.
+        // Nothing awaits this cancel: it rejects with the error an errored stream's read already threw, or with a
+        // source's own cancel() failure.
         reader.cancel(reason).catch(() => {})
       },
     }

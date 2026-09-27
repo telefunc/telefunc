@@ -40,7 +40,7 @@ class MacrotaskYield {
 
   /** Constructed on first yield, not at module load — some toolchains evaluate the
    *  module in a context without `MessageChannel` (Cloudflare Vite plugin
-   *  pre-bundling). Workers / Node have it at runtime. */
+   *  pre-bundling). Node has it at runtime, and workerd from the compatibility date yield() names. */
   private ensureChannel(): MessageChannel {
     if (this.channel) return this.channel
     const channel = new MessageChannel()

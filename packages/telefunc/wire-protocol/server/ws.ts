@@ -25,7 +25,7 @@ function getTelefuncChannelHooks(terminate: (peer: Peer) => void = (peer) => pee
       peer.send(frame)
     },
     // Closed at once, as an SSE wire is: a Durable Object peer's terminate() is a close handshake a vanished client
-    // never answers, so its close hook would never run.
+    // never answers, so its close hook would run late, if at all.
     terminateConnection: (peer) => {
       const mux = getChannelMux()
       const permanent = mux.readPermanentTermination(peer) === true
