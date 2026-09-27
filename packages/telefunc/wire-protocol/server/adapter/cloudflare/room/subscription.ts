@@ -104,7 +104,7 @@ class CloudflareRoomSubscriptionAttempt extends DriverAttempt {
   }
 
   deliver(payload: Uint8Array, info: OrderingInfo): void {
-    this.#receiver(new Uint8Array(payload), info)
+    this.#receiver(payload, info)
   }
 
   async unsubscribe(): Promise<void> {
