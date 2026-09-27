@@ -138,6 +138,10 @@ describe('shared subscription supervision', () => {
     // A driver reports its own outage, once, however many subscriptions it takes down.
     expect(report).not.toHaveBeenCalled()
     const recovered = subscription.ready
+    let recoveredEarly = false
+    void recovered.then(() => (recoveredEarly = true))
+    await Promise.resolve()
+    expect(recoveredEarly).toBe(false)
     raw.opens[0]!.attempt.establish()
     await recovered
     expect(states).toEqual(['ready', 'lost', 'ready'])
