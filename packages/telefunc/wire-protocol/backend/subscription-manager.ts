@@ -26,7 +26,7 @@ type SubscriptionSlotConfig = {
   reportError: (error: unknown) => void
   sourceKey: string
   cleanup: (attempt: SubscriptionAttempt) => Promise<void>
-  onEmpty: () => void
+  unmap: () => void
 }
 
 class SubscriptionManager<Source> {
@@ -52,7 +52,7 @@ class SubscriptionManager<Source> {
         reportError: this._reportError,
         sourceKey,
         cleanup: (attempt) => this._cleanup(attempt),
-        onEmpty: () => {
+        unmap: () => {
           if (this._slots.get(slotKey) === created) this._slots.delete(slotKey)
         },
       })
@@ -179,7 +179,7 @@ class SubscriptionSlot {
         unobserve()
         this._receivers.delete(attachment)
         if (this._receivers.size === 0) {
-          this._config.onEmpty()
+          this._config.unmap()
           await this.stop()
         }
       },
@@ -241,7 +241,7 @@ class SubscriptionSlot {
 
   private _terminal(error: unknown): void {
     const failure = error instanceof Error ? error : new Error(String(error))
-    this._config.onEmpty()
+    this._config.unmap()
     this._stopPromise = this._release()
     // A resolved readiness cannot carry the failure, so `ready` read from here on is a fresh, rejected one.
     if (this._state === 'ready') this._readiness = createReadiness()
