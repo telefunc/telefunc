@@ -48,10 +48,6 @@ class PendingAttempt extends DriverAttempt {
   }
 }
 
-function pendingSubscription(): PendingAttempt {
-  return new PendingAttempt()
-}
-
 /** A memory backend whose subscription attempts come from `open`, which may defer to the driver's own. */
 async function installOpeningBackend(
   open: (
@@ -71,7 +67,7 @@ async function installOpeningBackend(
 }
 
 async function installPendingSubscriptionBackend(result: { seq: number; timestamp: number; receivers?: number }) {
-  const controlled = pendingSubscription()
+  const controlled = new PendingAttempt()
   const driver = await installOpeningBackend(() => controlled)
   const publish = vi.spyOn(driver, 'publish').mockReturnValue(result)
   return { controlled, publish }
@@ -317,7 +313,7 @@ describe('keyed in-process broadcast', () => {
   ] as const)(
     '%s: a subscription that ends on its own %s is reported and replaced',
     async (subscriber, _when, atOpen) => {
-      const ending = pendingSubscription()
+      const ending = new PendingAttempt()
       let opens = 0
       await installOpeningBackend((_source, driverOpen) => {
         if (opens++ > 0) return driverOpen()
@@ -342,7 +338,7 @@ describe('keyed in-process broadcast', () => {
   )
 
   it('replaces a subscription once per end: a replacement that ends before it was ready is dropped', async () => {
-    const attempts = [pendingSubscription(), pendingSubscription(), pendingSubscription()]
+    const attempts = [new PendingAttempt(), new PendingAttempt(), new PendingAttempt()]
     let opens = 0
     await installOpeningBackend((_source, driverOpen) => attempts[opens++] ?? driverOpen())
     const report = vi.spyOn(console, 'error').mockImplementation(() => {})
@@ -359,7 +355,7 @@ describe('keyed in-process broadcast', () => {
   })
 
   it('opens no replacement for a subscription that ends after its route was released', async () => {
-    const ending = pendingSubscription()
+    const ending = new PendingAttempt()
     let opens = 0
     await installOpeningBackend(() => {
       opens++
@@ -749,7 +745,7 @@ describe('Broadcast shield validation', () => {
 
 describe('Broadcast static bus (publish/subscribe)', () => {
   it('reports the end of a subscription its consumers share once', async () => {
-    const ending = pendingSubscription()
+    const ending = new PendingAttempt()
     let opens = 0
     await installOpeningBackend((_source, driverOpen) => (opens++ === 0 ? ending : driverOpen()))
     const report = vi.spyOn(console, 'error').mockImplementation(() => {})
@@ -770,9 +766,9 @@ describe('Broadcast static bus (publish/subscribe)', () => {
   })
 
   it('releases a queued publish once its key has no establishing subscription, and reports each end', async () => {
-    const attempts: Array<ReturnType<typeof pendingSubscription>> = []
+    const attempts: PendingAttempt[] = []
     const driver = await installOpeningBackend(() => {
-      const attempt = pendingSubscription()
+      const attempt = new PendingAttempt()
       attempts.push(attempt)
       return attempt
     })
@@ -810,7 +806,7 @@ describe('Broadcast static bus (publish/subscribe)', () => {
   })
 
   it("keeps a key's text and binary publishes in call order while one kind's subscription establishes", async () => {
-    const controlled = pendingSubscription()
+    const controlled = new PendingAttempt()
     const driver = await installOpeningBackend((source, driverOpen) =>
       'kind' in source && source.kind === 'text' ? controlled : driverOpen(),
     )
@@ -828,7 +824,7 @@ describe('Broadcast static bus (publish/subscribe)', () => {
   })
 
   it('keeps holding for a subscription of the other kind that starts establishing during the hold', async () => {
-    const attempts = { text: pendingSubscription(), binary: pendingSubscription() }
+    const attempts = { text: new PendingAttempt(), binary: new PendingAttempt() }
     const driver = await installOpeningBackend((source, driverOpen) =>
       'kind' in source ? attempts[source.kind] : driverOpen(),
     )
@@ -850,7 +846,7 @@ describe('Broadcast static bus (publish/subscribe)', () => {
   })
 
   it("hands the driver a publish's bytes as they were at the call, of a Node Buffer too, sent now or held", async () => {
-    const attempt = pendingSubscription()
+    const attempt = new PendingAttempt()
     const driver = await installOpeningBackend(() => attempt)
     // A driver may read its payload later, as ioredis does for a queued command.
     const sent: Uint8Array[] = []
