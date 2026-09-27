@@ -347,8 +347,8 @@ const REDIS_COMMANDS = {
     }),
     parse: (reply): HeadCxResult => {
       const parsed = JSON.parse(reply as string) as
-        | { tag: 'head'; head: StoredHead }
-        | { tag: 'conflict'; current: StoredHead | null }
+        | { tag: 'head'; head: ScriptHead }
+        | { tag: 'conflict'; current: ScriptHead | null }
       if (parsed.tag === 'head') return { head: toPublicHead(parsed.head) }
       return { conflict: true, current: parsed.current === null ? null : toPublicHead(parsed.current) }
     },
@@ -359,7 +359,7 @@ const REDIS_COMMANDS = {
     numberOfKeys: 1,
     invoke: (prefix, roomId: string) => ({ keys: [headKey(prefix, roomId)], argv: [] }),
     parse: (reply): RoomHead | null => {
-      const { head } = JSON.parse(reply as string) as { head: StoredHead | null }
+      const { head } = JSON.parse(reply as string) as { head: ScriptHead | null }
       return head === null ? null : toPublicHead(head)
     },
   }),
@@ -512,7 +512,7 @@ const REDIS_COMMANDS = {
 }
 
 /** A head as the scripts store it: JSON, config base64, lease deadline minted from Redis TIME. */
-type StoredHead = {
+type ScriptHead = {
   rev: string
   n: number
   state: 'open' | 'closing' | 'closed'
@@ -522,7 +522,7 @@ type StoredHead = {
   exp?: number
 }
 
-function toPublicHead(stored: StoredHead): RoomHead {
+function toPublicHead(stored: ScriptHead): RoomHead {
   const head: RoomHead = {
     rev: stored.rev,
     currentInc: stored.inc ?? null,
