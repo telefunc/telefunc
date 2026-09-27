@@ -610,7 +610,8 @@ class RoomState {
   }
   /** A departed member's listeners were released at its leave, so one added after it is never held. */
   private _registerLive<T>(entry: MemberEntry, list: T[], cb: T): () => void {
-    return entry.left ? makeDisposer() : this._register(list, cb)
+    if (entry.left) return makeDisposer()
+    return this._register(list, cb)
   }
   private _register<T>(list: T[], cb: T): () => void {
     list.push(cb)
