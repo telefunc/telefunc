@@ -87,3 +87,16 @@ test('a close the server acknowledged ends gracefully, though a reconnect then d
   expect(await closing).toBe(0)
   expect(closedWith).toEqual([undefined])
 })
+
+test('a channel opens on a page served over plain http, which has no crypto.randomUUID()', () => {
+  config.fetch = async () => new Response(new ReadableStream({ start() {} }), { status: 200 })
+  const channelId = crypto.randomUUID()
+  const connectionKey = crypto.randomUUID()
+  vi.spyOn(crypto, 'randomUUID').mockImplementation(() => {
+    throw new TypeError('crypto.randomUUID is not a function')
+  })
+  const telefuncUrl = 'http://192.168.1.2:3000/_telefunc'
+  expect(
+    () => new ClientChannel({ channelId, transports: [CHANNEL_TRANSPORT.SSE], telefuncUrl, connectionKey }),
+  ).not.toThrow()
+})

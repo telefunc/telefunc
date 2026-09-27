@@ -6,6 +6,7 @@ import { ChannelClosedError } from '../../channel-errors.js'
 import { ClientChannel } from '../channel.js'
 import type { ChannelTransports } from '../../constants.js'
 import type { StreamingProducer } from '../../types.js'
+import { randomUuid } from '../../../utils/randomUuid.js'
 
 const TAG_DATA = new Uint8Array([CHANNEL_PUMP_TAG_DATA])
 const TAG_ERROR = new Uint8Array([CHANNEL_PUMP_TAG_ERROR])
@@ -31,7 +32,7 @@ function pumpClientProducerToChannel(
   idleTimeout?: number,
 ) {
   const channel = new ClientChannel({
-    channelId: crypto.randomUUID(),
+    channelId: randomUuid(),
     transports: channelTransports,
     connectionKey,
     headers,
