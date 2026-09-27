@@ -34,6 +34,10 @@ describe('shared subscription supervision', () => {
     const retiring = Promise.all([first.unsubscribe(), second.unsubscribe()])
     firstCleanup.resolve()
     await retiring
+    // The ended slot's last consumer leaving keeps its replacement mapped.
+    const sharing = manager.subscribe('source', () => {})
+    expect(raw.opens).toHaveLength(2)
+    await sharing.unsubscribe()
     const stopping = replacement.unsubscribe()
     secondCleanup.resolve()
     await stopping
