@@ -33,7 +33,7 @@ import { assert } from '../../utils/assert.js'
 import { makeAbortError, makeBugError } from '../../client/remoteTelefunctionCall/errors.js'
 import { ShieldValidationError } from '../../shared/ShieldValidationError.js'
 import { ClientConnection } from './connection.js'
-import { appendSessionParam, getOrCreateSessionToken } from './session-registry.js'
+import { getSessionUrl } from './session-registry.js'
 import { CHANNEL_CLOSE_TIMEOUT_MS, type ChannelTransports } from '../constants.js'
 import { FlowControl } from '../flow-control/flow-control.js'
 import type { MuxChannel, MuxConnection } from './connection.js'
@@ -111,10 +111,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
       bdpPing: () => this._connection.sendBdpPing(this),
     })
     const config = resolveClientConfig()
-    // The call that carries or returns this channel presents the same token, so both reach one session.
-    const sessionToken = getOrCreateSessionToken(telefuncUrl)
-    const url = appendSessionParam(telefuncUrl, sessionToken)
-    this._connection = ClientConnection.getOrCreate(url, this, {
+    this._connection = ClientConnection.getOrCreate(getSessionUrl(telefuncUrl), this, {
       transports,
       fetchImpl: (config.fetch ?? globalThis.fetch).bind(globalThis),
       connectionKey,
