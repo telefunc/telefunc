@@ -7,6 +7,7 @@ import {
   RECONCILE_TIMEOUT_MS,
 } from '../constants.js'
 import { ClientConnection } from './connection.js'
+import { encode } from '../shared-ws.js'
 
 /** Minimal `MuxChannel` — registering one is enough to make the connection open a wire. */
 function createChannel(id = crypto.randomUUID()) {
@@ -79,6 +80,16 @@ test('a buffered acked binary send is kept in the binary replay lane, not the te
   connection.sendBinaryAckReq(channel, new Uint8Array(1_500_000), () => {}) // over the text lane's 1 MiB, within binary's 2
   connection.drainBufferedFrames(new Set([0]))
   expect(connection.replayBuffers.get(0).getAfter(0)).toHaveLength(1)
+  connection.dispose()
+})
+
+test('a sent frame stays replayable through the pong deadline and the reconnect timeout after it', () => {
+  const channel = createChannel()
+  const connection = ClientConnection.getOrCreate('http://replay-age.test', channel as never, stalledOptions()) as any
+  const replay = connection.replayBuffers.get(0)
+  replay.push(replay.nextSeq(), encode.text(0, 'sent as the wire died', 1))
+  replay.evict(Date.now() + 2 * connection.pingIntervalMs + connection.reconnectTimeoutMs)
+  expect(replay.getAfter(0)).toHaveLength(1)
   connection.dispose()
 })
 
