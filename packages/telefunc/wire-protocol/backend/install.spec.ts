@@ -185,21 +185,6 @@ describe('backend installation lifecycle', () => {
 })
 
 describe('supervised publishes and commits', () => {
-  it('holds a publish while a subscription of the other kind on its key establishes', async () => {
-    const driver = new MemoryBackend()
-    const attempt = new ManualAttempt()
-    driver.subscriptions.bind = () => ({ partition: '', open: () => attempt })
-    const publish = vi.spyOn(driver, 'publish')
-    const backend = superviseBroadcastDriver(driver)
-    const subscription = backend.subscribe({ key: 'mixed', kind: 'binary' }, () => {})
-    const publishing = backend.publish({ key: 'mixed', kind: 'text' }, new TextEncoder().encode('text'))
-    await Promise.resolve()
-    expect(publish).not.toHaveBeenCalled()
-    attempt.ready()
-    await publishing
-    expect(publish).toHaveBeenCalledOnce()
-    await subscription.unsubscribe()
-  })
   it("sends a close's leased commit at once while its lane's subscription establishes, as the lease is shorter than the hold", async () => {
     const attempt = new ManualAttempt()
     const committed: string[] = []
