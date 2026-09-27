@@ -2355,25 +2355,37 @@ describe('Room public behavior', () => {
       expect(relayed(attachPeer(stub, 0)).map(({ __r }) => __r)).toContain('closed')
     },
   )
-  it('sends a reattached client the room state its offline buffer dropped', async () => {
+  it("sends a reattached client the room state and its members' demand its offline buffer dropped", async () => {
     const room = (await Room.create('reattach-resync')) as ServerRoom
     const leaver = await room.join()
     config.channel = { bufferLimit: 256 }
     try {
       const stub = register(room)
       const first = attachPeer(stub)
+      const join = async () =>
+        ((await stub._handleRequest({ __r: 'req-join', meta: {}, selfDelivery: true })) as { id: string }).id
+      const wanted = await join()
+      const idle = await join()
       await vi.waitFor(() => expect(relayed(first).map(({ __r }) => __r)).toContain('roster'))
       stub._onPeerDisconnect(first.peer, 60_000)
       await leaver.leave()
-      // Larger than the offline buffer: it clears the buffered leave, and is dropped too.
+      const observer = await Room.get(room.id)
+      ;(await observer.getParticipant(wanted))!.subscribeBinary(() => {})
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      // Larger than the offline buffer: it clears the buffered leave and demand, and is dropped too.
       const meta = { pad: 'x'.repeat(300) }
       await Room.setMeta(room.id, meta)
       await vi.waitFor(() => expect(room.meta).toEqual(meta))
       const peer = attachPeer(stub)
       await vi.waitFor(() =>
-        expect(relayed(peer).map(({ __r, members, meta }) => ({ __r, members, meta }))).toEqual([
-          { __r: 'update', members: undefined, meta },
-          { __r: 'roster', members: [], meta: undefined },
+        expect(relayed(peer)).toEqual([
+          expect.objectContaining({ __r: 'update', meta }),
+          { __r: 'demand-state', member: wanted, tracks: [null] },
+          { __r: 'demand-state', member: idle, tracks: [] },
+          expect.objectContaining({
+            __r: 'roster',
+            members: [expect.objectContaining({ id: wanted }), expect.objectContaining({ id: idle })],
+          }),
         ]),
       )
     } finally {
@@ -2416,32 +2428,6 @@ describe('Room public behavior', () => {
     const replayed = relayed(attachPeer(stub, 0))
     expect(replayed.slice(0, 2)).toMatchObject([{ __r: 'update' }, { __r: 'roster', members: [] }])
     expect(ensureRoster).toHaveBeenCalledTimes(2)
-  })
-  it("sends a reattached client its member's demand its offline buffer dropped", async () => {
-    const room = (await Room.create('reattach-demand')) as ServerRoom
-    config.channel = { bufferLimit: 256 }
-    try {
-      const stub = register(room)
-      const first = attachPeer(stub)
-      const { id } = (await stub._handleRequest({ __r: 'req-join', meta: {}, selfDelivery: true })) as { id: string }
-      const idle = (await stub._handleRequest({ __r: 'req-join', meta: {}, selfDelivery: true })) as { id: string }
-      await vi.waitFor(() => expect(relayed(first).map(({ __r }) => __r)).toContain('roster'))
-      stub._onPeerDisconnect(first.peer, 60_000)
-      const observer = await Room.get(room.id)
-      ;(await observer.getParticipant(id))!.subscribeBinary(() => {})
-      await new Promise((resolve) => setTimeout(resolve, 20))
-      // Larger than the offline buffer: it clears the buffered demand, and is dropped too.
-      await Room.setMeta(room.id, { pad: 'x'.repeat(300) })
-      const peer = attachPeer(stub)
-      await vi.waitFor(() =>
-        expect(relayed(peer).filter(({ __r }) => __r === 'demand-state')).toEqual([
-          { __r: 'demand-state', member: id, tracks: [null] },
-          { __r: 'demand-state', member: idle.id, tracks: [] },
-        ]),
-      )
-    } finally {
-      config.channel = {}
-    }
   })
   it('tells the client of a handed-out participant the demand it already had when it was returned', async () => {
     const room = (await Room.create('handed-out-demand')) as ServerRoom
