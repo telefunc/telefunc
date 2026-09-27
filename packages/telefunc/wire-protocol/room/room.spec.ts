@@ -2632,6 +2632,24 @@ describe('Room public behavior', () => {
     expect(received).toEqual([])
     expect(reply).toMatchObject({ ok: false })
   })
+  it('holds at most 64 DMs before the first listen(), failing the ack sender of the oldest it drops', async () => {
+    const room = await Room.create('inbox-overflow')
+    const recipient = await room.join()
+    const sender = await room.join()
+    const oldestHeld = createDeferred()
+    Room.guard(room, {
+      onAfterSend: (_from, _to, data) => {
+        if (data === 0) oldestHeld.resolve()
+      },
+    })
+    const oldest = sender.send(recipient.id, 0, { ack: true })
+    await oldestHeld.promise
+    for (let n = 1; n <= 64; n++) await sender.send(recipient.id, n)
+    const received: unknown[] = []
+    recipient.listen((data) => void received.push(data))
+    expect(received).toEqual(Array.from({ length: 64 }, (_, i) => i + 1))
+    await expect(oldest).rejects.toThrow('Inbox overflowed before the message was handled')
+  })
   it('reports rejected async participant inbox, demand, and leave callbacks', async () => {
     const room = await Room.create('async-participant-callbacks')
     const participant = await room.join()
