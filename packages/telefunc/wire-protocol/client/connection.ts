@@ -1754,7 +1754,8 @@ class SseTransport implements UpgradeSource {
   readonly type = CHANNEL_TRANSPORT.SSE
   readonly sendReconcileOnOpen = false
   readonly reconcileMode = 'batch-on-reconcile' as const
-  readonly connId = randomUuid()
+  /** Each wire's own, so a POST still in flight for a wire that died isn't dispatched on the next one. */
+  private connId = randomUuid()
   get batched(): boolean {
     return this.streamRequest.tag !== 'active'
   }
@@ -1866,6 +1867,7 @@ class SseTransport implements UpgradeSource {
   }
 
   private async openStream(): Promise<void> {
+    this.connId = randomUuid()
     const abortController = new AbortController()
     this.transportAbort = abortController
     const stage = this.stageInitialBatch()
@@ -1957,6 +1959,8 @@ class SseTransport implements UpgradeSource {
         if (this.transportAbort === abortController) {
           this.closeStreamRequest()
           this.transportAbort = null
+          // Its batch POST still in flight settles now rather than hold the next wire's outbox.
+          abortController.abort()
         }
         // Abandoned controllers are owned by a successor transport — don't notify closed.
         if (!this.abandonedControllers.has(abortController)) this.owner._onTransportClosed(this)
@@ -2025,18 +2029,24 @@ class SseTransport implements UpgradeSource {
       const now = Date.now()
       const queued = this.outbox.splice(0, this.outbox.length)
       this.lastPostStartedAt = now
+      const wire = this.transportAbort
 
       try {
-        assert(this.transportAbort)
         const response = await this.post(
           encodeSseRequest(
             { connId: this.connId },
             encodeLengthPrefixedFrames(queued, (entry) => entry.frame),
           ),
-          this.transportAbort.signal,
+          wire.signal,
         )
         if (!response.ok) throw new Error('POST failed')
       } catch {
+        // A POST that failed with its wire: that wire's close already reported the loss, and what it carried goes the
+        // way of that wire's outbox (stageInitialBatch), also when the next wire has reconciled already.
+        if (wire !== this.transportAbort) {
+          this.outbox = queued.filter(isWindowRefresh).concat(this.outbox)
+          return
+        }
         this.outbox = queued.concat(this.outbox)
         this.abandonActiveTransport()
         this.owner._onTransportClosed(this)

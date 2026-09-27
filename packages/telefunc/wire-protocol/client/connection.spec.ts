@@ -141,6 +141,51 @@ test("an SSE reconnect sends its own reconcile and leaves a dead POST's messages
   connection.dispose()
 })
 
+test('a batch POST that fails after the next wire started puts back only its window refreshes', async () => {
+  const channel = createChannel()
+  const connection = ClientConnection.getOrCreate('http://late-post.test', channel as never, stalledOptions()) as any
+  const transport = connection.transport
+  let fail!: () => void
+  transport.post = () => new Promise((_resolve, reject) => void (fail = () => reject(new Error('aborted'))))
+  transport.transportAbort = new AbortController()
+  transport.outbox = [
+    { frame: encode.broadcastUnsub(0, false), deadline: 0 },
+    { frame: encode.window(0, 65_536), deadline: 0 },
+  ]
+  const flushing = transport.flushOutbox()
+  transport.transportAbort = new AbortController() // the next wire reconciled while that POST hung
+  fail()
+  await flushing
+  expect(transport.outbox.map(({ frame }: { frame: Uint8Array }) => frame[0])).toEqual([TAG.WINDOW])
+  connection.dispose()
+})
+
+test("a wire's end aborts its batch POST still in flight, which would otherwise hold the next wire's outbox", async () => {
+  let endWire: (() => void) | undefined
+  const fetchImpl = (async (_url: string, init: RequestInit) => {
+    if ((init.headers as Record<string, string>).Accept !== 'text/event-stream')
+      return await new Promise<Response>(() => {})
+    return new Response(
+      new ReadableStream<Uint8Array>({ start: (controller) => void (endWire = () => controller.close()) }),
+    )
+  }) as unknown as typeof fetch
+  const connection = ClientConnection.getOrCreate('http://hung-post.test', createChannel() as never, {
+    transports: [CHANNEL_TRANSPORT.SSE],
+    fetchImpl,
+    connectionKey: crypto.randomUUID(),
+  }) as any
+  await vi.waitFor(() => expect(endWire).toBeDefined())
+  const transport = connection.transport
+  // A batch POST hung on a dead TCP connection settles only when its wire aborts it.
+  transport.post = (_body: unknown, signal: AbortSignal) =>
+    new Promise((_resolve, reject) => signal.addEventListener('abort', () => reject(signal.reason)))
+  transport.outbox = [{ frame: encode.window(0, 65_536), deadline: 0 }]
+  void transport.flushOutbox()
+  endWire!()
+  await vi.waitFor(() => expect(transport.flushing).toBe(false))
+  connection.dispose()
+})
+
 test('the channel cap counts the open channels, not every channel the connection opened', () => {
   const options = stalledOptions()
   const connection = ClientConnection.getOrCreate('http://cap.test', createChannel() as never, options) as any

@@ -1,10 +1,14 @@
-import { afterEach, expect, test } from 'vitest'
+import { afterEach, expect, test, vi } from 'vitest'
 import { stringify } from '@brillout/json-serializer/stringify'
 
 import { ClientConnection } from './connection.js'
-import { ClientChannel } from './channel.js'
+import { ClientBroadcast, ClientChannel } from './channel.js'
 import { config } from '../../client/clientConfig.js'
 import { ServerChannel } from '../server/channel.js'
+import { ServerBroadcast } from '../server/server-broadcast.js'
+import { getChannelMux } from '../server/mux.js'
+import { getTelefuncSseChannelHooks } from '../server/sse.js'
+import { CHANNEL_TRANSPORT } from '../constants.js'
 import { decode, encode, TAG } from '../shared-ws.js'
 import { decodeU32 } from '../frame.js'
 import { uint8ArrayToBase64url } from '../base64url.js'
@@ -114,6 +118,98 @@ test('a frame written into an upload POST the server refused before its open-ack
   server.refuseUpload()
   await delay(100)
   expect(received).toEqual([7])
+  connection.dispose()
+})
+
+test("a batch POST still in flight for a dead wire can't unsubscribe the listener the page swapped in across the reconnect", async () => {
+  const sse = getTelefuncSseChannelHooks()
+  const toServer = async (body: Blob): Promise<Response> => {
+    const response = (await sse.handleRequest(new Request('http://localhost/_telefunc', { method: 'POST', body })))!
+    return new Response(response.body as never, {
+      status: response.statusCode,
+      headers: { 'Content-Type': response.contentType },
+    })
+  }
+  let wires = 0
+  let cutWire = () => {}
+  let holdBatches = false
+  const held: Blob[] = []
+  config.fetch = (async (_url: string, init: RequestInit) => {
+    const body = init.body as unknown
+    // A browser that can't stream a request body (Firefox, Safari) is answered 400: the page sends batch POSTs.
+    if (!(body instanceof Blob)) return new Response('bad request', { status: 400 })
+    if ((await parseBlobBody(body)).metadata.streamResponse) {
+      wires++
+      const reader = (await toServer(body)).body!.getReader()
+      let cut = false
+      const wire = new ReadableStream<Uint8Array>({
+        start(controller) {
+          cutWire = () => {
+            cut = true
+            controller.close()
+          }
+          void (async () => {
+            for (let read = await reader.read(); !read.done && !cut; read = await reader.read())
+              controller.enqueue(read.value)
+          })()
+        },
+      })
+      return new Response(wire, { status: 200, headers: { 'Content-Type': 'text/event-stream' } })
+    }
+    if (!holdBatches) return await toServer(body)
+    // Sent into a wire that died silently: the server gets it late, whatever the page does meanwhile.
+    held.push(body)
+    return await new Promise<Response>((_resolve, reject) =>
+      init.signal?.addEventListener('abort', () => reject(init.signal!.reason)),
+    )
+  }) as unknown as typeof fetch
+  const key = 'chat:swapped-listener'
+  const server = new ServerBroadcast<string>({ key })
+  getChannelMux().registerChannel(server)
+  const page = new ClientBroadcast<string>({
+    channelId: server.id,
+    key,
+    transports: [CHANNEL_TRANSPORT.SSE],
+    telefuncUrl: 'http://swap.test/_telefunc',
+    connectionKey: crypto.randomUUID(),
+  })
+  const first: string[] = []
+  const offFirst = page.subscribe((message) => void first.push(message))
+  await vi.waitFor(async () => {
+    await server.publish('before')
+    expect(first).toContain('before')
+  })
+  holdBatches = true
+  offFirst()
+  const second: string[] = []
+  page.subscribe((message) => void second.push(message))
+  await vi.waitFor(() => expect(held).toHaveLength(1))
+  cutWire()
+  await vi.waitFor(() => expect(wires).toBe(2), { timeout: 5_000 })
+  await vi.waitFor(() => expect((page as any)._connection.state.tag).toBe('open'))
+  // The dead wire's POST, the unsubscribe in it, arrives now. A server that doesn't take it holds it for connectTtl.
+  await Promise.race([Promise.all(held.map(toServer)), delay(1_000)])
+  await server.publish('after')
+  await vi.waitFor(() => expect(second).toEqual(['after']))
+  page.abort()
+})
+
+test("a reconnect's wire gets its own connection id, so a POST still in flight for the dead wire isn't adopted by it", async () => {
+  const connIds: string[] = []
+  const fetchImpl = (async (_url: string, init: RequestInit) => {
+    if (init.body instanceof Blob)
+      connIds.push(((await parseBlobBody(init.body)).metadata as { connId: string }).connId)
+    return await new Promise<Response>(() => {})
+  }) as unknown as typeof fetch
+  const connection = ClientConnection.getOrCreate('http://conn-id.test/_telefunc', createChannel() as never, {
+    transports: ['sse'],
+    fetchImpl,
+    connectionKey: crypto.randomUUID(),
+  }) as any
+  await vi.waitFor(() => expect(connIds).toHaveLength(1))
+  void connection.transport.openStream()
+  await vi.waitFor(() => expect(connIds).toHaveLength(2))
+  expect(connIds[1]).not.toBe(connIds[0])
   connection.dispose()
 })
 
