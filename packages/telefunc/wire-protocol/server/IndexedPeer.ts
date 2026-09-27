@@ -14,7 +14,7 @@ interface PeerSender {
  *  reconnect replays them. */
 class IndexedPeer {
   constructor(
-    private sender: PeerSender,
+    readonly sender: PeerSender,
     private index: number,
     private replay: ReplayBuffer,
   ) {}
