@@ -506,6 +506,19 @@ describe('Broadcast static bus (publish/subscribe)', () => {
 
     expect(received).toEqual([{ text: 'first' }])
   })
+  it("a BroadcastChannel subscriber that unsubscribes itself doesn't make the next one miss the message", async () => {
+    const channel = new ServerBroadcast<string>({ key: 'broadcast:self-unsubscribe' })
+    const seen: string[] = []
+    const off = channel.subscribe((message) => {
+      seen.push(`once:${message}`)
+      off()
+    })
+    channel.subscribe((message) => void seen.push(`other:${message}`))
+    await channel.publish('one')
+    await channel.publish('two')
+    expect(seen).toEqual(['once:one', 'other:one', 'other:two'])
+    channel.abort()
+  })
   it("a channel listener that stops listening itself doesn't make the next one miss the message", () => {
     const channel = new ServerChannel<string, never>()
     const seen: string[] = []

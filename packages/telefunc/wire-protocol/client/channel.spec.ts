@@ -1,13 +1,15 @@
 import { afterEach, expect, test, vi } from 'vitest'
 
-import { ClientChannel } from './channel.js'
+import { ClientBroadcast, ClientChannel } from './channel.js'
 import { config } from '../../client/clientConfig.js'
 import { CHANNEL_TRANSPORT } from '../constants.js'
 import { TAG } from '../shared-ws.js'
 import { getSessionToken } from './session-registry.js'
 
+const broadcasts: ClientBroadcast[] = []
 const channels: ClientChannel[] = []
 afterEach(() => {
+  for (const broadcast of broadcasts.splice(0)) broadcast.abort()
   for (const channel of channels.splice(0)) channel.abort()
   delete config.fetch
   vi.restoreAllMocks()
@@ -99,4 +101,40 @@ test('a channel opens on a page served over plain http, which has no crypto.rand
   expect(
     () => new ClientChannel({ channelId, transports: [CHANNEL_TRANSPORT.SSE], telefuncUrl, connectionKey }),
   ).not.toThrow()
+})
+
+/** A ClientBroadcast whose wire never opens, so the test hands it each frame. */
+function stalledBroadcast(): ClientBroadcast {
+  config.fetch = async () => new Response(new ReadableStream({ start() {} }), { status: 200 })
+  const broadcast = new ClientBroadcast({
+    channelId: crypto.randomUUID(),
+    key: 'client-broadcast',
+    transports: [CHANNEL_TRANSPORT.SSE],
+    telefuncUrl: 'http://client-broadcast.test/_telefunc',
+    connectionKey: crypto.randomUUID(),
+  })
+  broadcasts.push(broadcast)
+  return broadcast
+}
+
+test("a subscriber that unsubscribes itself doesn't make the next one miss the message", () => {
+  const broadcast = stalledBroadcast()
+  const seen: string[] = []
+  const off = broadcast.subscribe((message) => {
+    seen.push(`once:${String(message)}`)
+    off()
+  })
+  broadcast.subscribe((message) => void seen.push(`other:${String(message)}`))
+  for (const [seq, text] of [
+    [1, 'one'],
+    [2, 'two'],
+  ] as const)
+    broadcast._dispatchFrame({
+      tag: TAG.PUBLISH,
+      index: 0,
+      seq,
+      text: JSON.stringify(text),
+      info: { seq, timestamp: 1 },
+    })
+  expect(seen).toEqual(['once:one', 'other:one', 'other:two'])
 })

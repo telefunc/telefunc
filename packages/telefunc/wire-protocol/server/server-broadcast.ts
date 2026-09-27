@@ -143,7 +143,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
   _deliverBroadcastMessage(serialized: string, rawInfo: WirePublishInfo): void {
     const info = makePublishInfo(this.key, rawInfo.seq, rawInfo.timestamp)
     const data = parse(serialized) as ChannelData<T>
-    for (const cb of this._broadcastListeners) {
+    for (const cb of [...this._broadcastListeners]) {
       try {
         cb(data, info)
       } catch (err) {
@@ -161,7 +161,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
 
   _deliverBroadcastBinaryMessage(data: Uint8Array, rawInfo: WirePublishInfo): void {
     const info = makePublishInfo(this.key, rawInfo.seq, rawInfo.timestamp)
-    for (const cb of this._broadcastBinaryListeners) {
+    for (const cb of [...this._broadcastBinaryListeners]) {
       try {
         cb(data, info)
       } catch (err) {
