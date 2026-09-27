@@ -666,7 +666,7 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   }
 
   private _setWireSubscribed(kind: 'text' | 'binary', on: boolean): void {
-    if (on === this._wire[kind] || this._isClosed) return
+    if (on === this._wire[kind]) return
     this._wire[kind] = on
     if (on) this._connection.sendBroadcastSubscribe(this, kind === 'binary')
     else this._connection.sendBroadcastUnsubscribe(this, kind === 'binary')
