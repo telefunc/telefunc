@@ -87,11 +87,9 @@ afterEach(async () => {
 describe('Room public behavior', () => {
   it('opens semantic ingestion only when a semantic listener wants delivery', async () => {
     const room = (await Room.create('semantic-demand')) as ServerRoom
-    const backend = getRoomBackend()
-    const subscribeLane = backend.subscribeLane.bind(backend)
     let semanticSubscriptions = 0
-    vi.spyOn(backend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
-      if (lane.kind === 'semantic') semanticSubscriptions++
+    mockLaneSubscription('semantic', (subscribeLane, roomId, inc, lane, receiver) => {
+      semanticSubscriptions++
       return subscribeLane(roomId, inc, lane, receiver)
     })
     const member = await room.join()
@@ -103,16 +101,7 @@ describe('Room public behavior', () => {
     expect(received).toEqual(['wanted'])
   })
   it('does not let a removed member publish or receive a DM when its leave frame is lost', async () => {
-    const backend = getRoomBackend()
-    const subscribeLane = backend.subscribeLane.bind(backend)
-    vi.spyOn(backend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
-      if (lane.kind !== 'control') return subscribeLane(roomId, inc, lane, receiver)
-      return subscribeLane(roomId, inc, lane, (payload, info) => {
-        const envelope = parse(decoder.decode(payload)) as { __r?: string }
-        if (envelope.__r === 'leave') return
-        receiver(payload, info)
-      })
-    })
+    loseLaneFrames((lane) => lane.kind === 'control').where((text) => (parse(text) as { __r?: string }).__r === 'leave')
     const room = await Room.create('removed-authority-fence')
     const removed = await room.join({ meta: { name: 'removed' }, identity: 'removed-user' })
     const sender = await room.join({ meta: { name: 'sender' } })
@@ -540,12 +529,9 @@ describe('Room public behavior', () => {
     const authority = await Room.create('terminal-subscription-recovery')
     const publisher = await authority.join()
     const observer = await Room.get(authority.id)
-    const backend = getRoomBackend()
-    const subscribeLane = backend.subscribeLane.bind(backend)
     let terminal: ReturnType<typeof terminalSubscription> | undefined
     const replacementReady = deferred<void>()
-    vi.spyOn(backend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
-      if (lane.kind !== 'semantic') return subscribeLane(roomId, inc, lane, receiver)
+    mockLaneSubscription('semantic', (subscribeLane, roomId, inc, lane, receiver) => {
       if (terminal === undefined) {
         terminal = terminalSubscription()
         return terminal.subscription
@@ -603,12 +589,9 @@ describe('Room public behavior', () => {
   it('does not re-subscribe a recovered lane when its catch-up reconcile fails', async () => {
     const authority = await Room.create('recovered-reconcile-failure')
     const observer = (await Room.get(authority.id)) as ServerRoom
-    const backend = getRoomBackend()
-    const subscribeLane = backend.subscribeLane.bind(backend)
     let terminal: ReturnType<typeof terminalSubscription> | undefined
     let semanticOpens = 0
-    vi.spyOn(backend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
-      if (lane.kind !== 'semantic') return subscribeLane(roomId, inc, lane, receiver)
+    mockLaneSubscription('semantic', (subscribeLane, roomId, inc, lane, receiver) => {
       semanticOpens++
       if (terminal === undefined) return (terminal = terminalSubscription()).subscription
       return subscribeLane(roomId, inc, lane, receiver)
@@ -627,12 +610,9 @@ describe('Room public behavior', () => {
   it('replaces a recovered lane again when it ends while the recovery catches up', async () => {
     const authority = await Room.create('recovered-lane-ends-again')
     const observer = (await Room.get(authority.id)) as ServerRoom
-    const backend = getRoomBackend()
-    const subscribeLane = backend.subscribeLane.bind(backend)
     const terminals: Array<ReturnType<typeof terminalSubscription>> = []
     let semanticOpens = 0
-    vi.spyOn(backend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
-      if (lane.kind !== 'semantic') return subscribeLane(roomId, inc, lane, receiver)
+    mockLaneSubscription('semantic', (subscribeLane, roomId, inc, lane, receiver) => {
       semanticOpens++
       if (terminals.length === 2) return subscribeLane(roomId, inc, lane, receiver)
       const terminal = terminalSubscription()
@@ -660,11 +640,8 @@ describe('Room public behavior', () => {
   it('closes a view and tells its clients when a terminal control lane lost the closed frame', async () => {
     const authority = await Room.create('terminal-close-relay')
     await authority.join()
-    const backend = getRoomBackend()
-    const subscribeLane = backend.subscribeLane.bind(backend)
     let terminal: ReturnType<typeof terminalSubscription> | undefined
-    vi.spyOn(backend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
-      if (lane.kind !== 'control') return subscribeLane(roomId, inc, lane, receiver)
+    mockLaneSubscription('control', (subscribeLane, roomId, inc, lane, receiver) => {
       const withoutClosed = (payload: Uint8Array, info: { seq: number; timestamp: number }) => {
         if ((parse(decoder.decode(payload)) as { __r?: string }).__r !== 'closed') receiver(payload, info)
       }
@@ -702,13 +679,10 @@ describe('Room public behavior', () => {
   })
   it('reconciles authority after a same-attempt recovery', async () => {
     const room = (await Room.create('control-reconcile')) as ServerRoom
-    const backend = getRoomBackend()
-    const subscribeLane = backend.subscribeLane.bind(backend)
     const controlSubscribed = deferred<void>()
     let transition!: (state: SubscriptionState) => void
-    vi.spyOn(backend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
+    mockLaneSubscription('control', (subscribeLane, roomId, inc, lane, receiver) => {
       const inner = subscribeLane(roomId, inc, lane, receiver)
-      if (lane.kind !== 'control') return inner
       return {
         ready: inner.ready,
         state: () => inner.state(),
@@ -2050,12 +2024,10 @@ describe('Room public behavior', () => {
     const member = await room.join()
     const observer = await Room.get(room.id)
     const observed: Array<[unknown, number]> = []
-    const backend = getRoomBackend()
-    const subscribeLane = backend.subscribeLane.bind(backend)
     const controlReady = deferred<void>()
-    vi.spyOn(backend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
+    mockLaneSubscription('control', (subscribeLane, roomId, inc, lane, receiver) => {
       const subscription = subscribeLane(roomId, inc, lane, receiver)
-      if (lane.kind === 'control') void subscription.ready.then(() => controlReady.resolve())
+      void subscription.ready.then(() => controlReady.resolve())
       return subscription
     })
     observer.onAnnounce((data, info) => observed.push([data, info.seq]))
@@ -2070,12 +2042,10 @@ describe('Room public behavior', () => {
   })
   it('relays semantic announcements only to stubs that declared announce demand', async () => {
     const room = (await Room.create('announce-want-gate')) as ServerRoom
-    const backend = getRoomBackend()
-    const subscribeLane = backend.subscribeLane.bind(backend)
     const semanticReady = deferred<void>()
-    vi.spyOn(backend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
+    mockLaneSubscription('semantic', (subscribeLane, roomId, inc, lane, receiver) => {
       const subscription = subscribeLane(roomId, inc, lane, receiver)
-      if (lane.kind === 'semantic') void subscription.ready.then(() => semanticReady.resolve())
+      void subscription.ready.then(() => semanticReady.resolve())
       return subscription
     })
     const wanted = serve(room)
