@@ -40,7 +40,7 @@ type CloudflareRoomNamespace = {
 
 type CloudflareSubscriptionSource = BroadcastRoute | RoomSubscriptionSource
 
-/** Room reads and commits address the authority straight from the bindings; only a subscription needs its session, from context. */
+/** A subscription requires its session DO's context; a lane commit made in one goes through that session's ordered stub. */
 class CloudflareBackend implements BroadcastDriver, RoomDriver {
   readonly broadcast: CloudflareBroadcastTransport
   readonly subscriptions: SubscriptionDriver<CloudflareSubscriptionSource>
