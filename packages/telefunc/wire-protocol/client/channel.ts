@@ -179,6 +179,11 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     }
   }
 
+  /** @internal How long a server that is away is waited for. */
+  _reconnectWindow(): number {
+    return this._connection.reconnectWindow()
+  }
+
   _sendBinary(data: Uint8Array, opts?: { ack?: boolean }): void | Promise<unknown> | Promise<void> {
     if (this._isClosed) throw new ChannelClosedError()
     // Ack-bearing path bypasses credit; see `_send` for rationale.
