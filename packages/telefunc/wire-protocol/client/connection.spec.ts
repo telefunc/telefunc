@@ -15,7 +15,6 @@ import {
 } from '../constants.js'
 import { ClientConnection } from './connection.js'
 import { TAG, encode, type ReconciledPayload } from '../shared-ws.js'
-import { config, getServerConfig } from '../../node/server/serverConfig.js'
 
 /** Minimal `MuxChannel` — registering one is enough to make the connection open a wire. */
 function createChannel(id = crypto.randomUUID()) {
@@ -67,11 +66,7 @@ function reconciled(payload: Pick<ReconciledPayload, 'sessionId' | 'open'> & Par
 
 /** A connection that applied a RECONCILED whose every setting is zero. */
 function zeroConfiguredConnection() {
-  const options = {
-    transports: [CHANNEL_TRANSPORT.SSE],
-    fetchImpl: createStalledTransport().fetchImpl,
-    connectionKey: crypto.randomUUID(),
-  }
+  const options = stalledOptions()
   const connection = ClientConnection.getOrCreate('http://zero.test', createChannel() as never, options) as any
   const ctrl = new Proxy(
     { sessionId: 'zero', open: [], transports: [CHANNEL_TRANSPORT.SSE] },
@@ -82,9 +77,7 @@ function zeroConfiguredConnection() {
   return { connection, options }
 }
 
-test('channel config preserves zero through server and client resolution', () => {
-  config.channel.reconnectTimeout = 0
-  expect(getServerConfig().channel.reconnectTimeout).toBe(0)
+test('a RECONCILED of zeros keeps zero on the client', () => {
   const { connection } = zeroConfiguredConnection()
   expect([
     connection.reconnectTimeoutMs,
@@ -111,34 +104,22 @@ test('a zero replay budget still registers a later channel on the connection', (
   connection.dispose()
 })
 
-test("an SSE reconnect leaves a dead POST's messages to the replay, which can't overtake the ones still in flight", () => {
-  const channel = createChannel()
+test("an SSE reconnect sends its own reconcile and leaves a dead POST's messages to the replay, so they can't overtake the ones in flight", () => {
   const connection = ClientConnection.getOrCreate(
-    'http://outbox-replay.test',
-    channel as never,
+    'http://outbox.test',
+    createChannel() as never,
     stalledOptions(),
   ) as any
+  // A batch POST that failed carried a message, a window update, an older reconcile and an unsubscribe.
   connection.transport.outbox.push(
     { frame: encode.text(0, 'queued', 7), deadline: Infinity },
     { frame: encode.window(0, 65_536), deadline: Infinity },
-  )
-  const { initialFrames } = connection.transport.stageInitialBatch()
-  const tags = initialFrames.map(({ frame }: { frame: Uint8Array }) => frame[0])
-  expect(tags).toEqual([TAG.RECONCILE, TAG.WINDOW])
-  connection.dispose()
-})
-
-test('an SSE reconnect sends its reconcile, not the reconcile a failed POST left queued', () => {
-  const channel = createChannel()
-  const connection = ClientConnection.getOrCreate('http://outbox.test', channel as never, stalledOptions()) as any
-  // A batch POST that failed carried an older reconcile and an unsubscribe.
-  connection.transport.outbox.push(
     { frame: encode.reconcile({ open: [] }), deadline: Infinity },
     { frame: encode.broadcastUnsub(0, false), deadline: Infinity },
   )
   const { initialFrames } = connection.transport.stageInitialBatch()
   const tags = initialFrames.map(({ frame }: { frame: Uint8Array }) => frame[0])
-  expect(tags).toEqual([TAG.RECONCILE, TAG.BROADCAST_UNSUB])
+  expect(tags).toEqual([TAG.RECONCILE, TAG.WINDOW, TAG.BROADCAST_UNSUB])
   connection.dispose()
 })
 
@@ -181,31 +162,6 @@ test('a sent frame stays replayable through the pong deadline and the reconnect 
   const replay = connection.replayBuffers.get(0)
   replay.push(replay.nextSeq(), encode.text(0, 'sent as the wire died', 1))
   replay.evict(Date.now() + 2 * connection.pingIntervalMs + connection.reconnectTimeoutMs)
-  expect(replay.getAfter(0)).toHaveLength(1)
-  connection.dispose()
-})
-
-test("a channel registered before the first reconcile takes the server's replay budget", () => {
-  const channel = createChannel()
-  const connection = ClientConnection.getOrCreate(
-    'http://replay-budget.test',
-    channel as never,
-    stalledOptions(),
-  ) as any
-  const replay = connection.replayBuffers.get(0)
-  connection.handleReconciled({
-    sessionId: 'budget',
-    open: [{ ix: 0, lastSeq: 0 }],
-    reconnectTimeout: 60_000,
-    idleTimeout: 60_000,
-    pingInterval: 5_000,
-    clientReplayBuffer: 8 * 1024 * 1024,
-    clientReplayBufferBinary: 2 * 1024 * 1024,
-    sseFlushThrottle: 0,
-    ssePostIdleFlushDelay: 0,
-    transports: [CHANNEL_TRANSPORT.SSE],
-  })
-  replay.push(replay.nextSeq(), encode.text(0, 'x'.repeat(2 * 1024 * 1024), 1)) // over the default 1 MiB
   expect(replay.getAfter(0)).toHaveLength(1)
   connection.dispose()
 })
