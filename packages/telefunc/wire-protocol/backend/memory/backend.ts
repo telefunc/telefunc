@@ -111,15 +111,12 @@ class MemorySubscriptionAttempt extends DriverAttempt {
     this.#receiver = receiver
     this.#localReceiverCount = localReceiverCount
     this.#detach = detach
+    this.transition('ready')
   }
 
   async unsubscribe(): Promise<void> {
     this.#detach()
     this.transition('closed')
-  }
-
-  establish(): void {
-    this.transition('ready')
   }
 
   deliver(payload: Uint8Array, info: { seq: number; timestamp: number }): void {
@@ -293,7 +290,6 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
       removeFromSet(subs, key, sub),
     )
     getOrCreate(subs, key, () => new Set()).add(sub)
-    sub.establish()
     return sub
   }
 
