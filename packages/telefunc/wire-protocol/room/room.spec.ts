@@ -2826,62 +2826,6 @@ describe('client Room lifecycle', () => {
     expect(client.count).toBe(2)
     expect(empty).toBe(0)
   })
-  it('dirties unknown events and keeps reconcile outcomes distinct', () => {
-    const state = newState({ roomId: 'unknown-member-epoch' })
-    const id = crypto.randomUUID()
-    state.applyTrack(id, 'screen')
-    state.applyParticipantMeta(id, { step: 1 }, 1)
-    state.applyLeave(id, { type: 'left' })
-    expect(state.membershipVersion).toBe(3)
-    const member = { id, meta: {}, joinedAt: 1, metaSeq: 0 }
-    expect(state.reconcileRoster([member])).toBe(true)
-    const version = state.membershipVersion
-    const reconcile = (tracks: string[]) => state.reconcileRoster([{ ...member, metaSeq: 1, tracks }])
-    expect(reconcile(['screen'])).toBe(true)
-    expect(state.membershipVersion).toBe(version)
-    expect(reconcile(['screen', 'camera'])).toBe(false)
-    expect(state.membershipVersion).toBe(version + 1)
-  })
-  it('reconciles every member to the final state and preserves semantic joins', () => {
-    const alice = { id: crypto.randomUUID(), meta: {}, joinedAt: 1, metaSeq: 0 }
-    const bob = { id: crypto.randomUUID(), meta: {}, joinedAt: 2, metaSeq: 0 }
-    const carol = { id: crypto.randomUUID(), meta: {}, joinedAt: 3, metaSeq: 0 }
-    const state = newState({ roomId: 'reconcile-change-count', seed: { members: [alice] } })
-    const observed: string[][] = []
-    const joins: string[] = []
-    state.onChange(() => observed.push(state.snapshotMembers().map((member) => member.id)))
-    state.onJoin((member) => joins.push(member.id))
-    state.reconcileRoster([alice, bob, carol])
-    expect(observed.at(-1)).toEqual([alice.id, bob.id, carol.id])
-    expect(joins).toEqual([bob.id, carol.id])
-  })
-  it('reports rejected async RoomState callbacks without awaiting delivery', async () => {
-    const memberId = crypto.randomUUID()
-    const errors: unknown[] = []
-    const state = newState({
-      roomId: 'async-state-callbacks',
-      seed: { members: [{ id: memberId, meta: {}, joinedAt: 1, metaSeq: 0 }] },
-      onCallbackError: (error) => errors.push(error),
-    })
-    const remote = state.getRemote(memberId)!
-    const failures = Array.from({ length: 5 }, (_, index) => new Error(`async state callback ${index}`))
-    const rejected = failures.map((failure) => {
-      const promise = Promise.reject(failure)
-      void promise.catch(() => {})
-      return promise
-    })
-    state.subscribe(() => rejected[0])
-    remote.subscribe(() => rejected[1])
-    state.subscribeBinary(() => rejected[2])
-    remote.subscribeBinary(() => rejected[3])
-    state.onClose(() => rejected[4])
-    const info = { key: state.roomId, seq: 1, timestamp: 1 }
-    state.applyData({ __r: 'data', from: memberId, fromMeta: {}, data: 'text' }, info)
-    state.applyBinary({ from: memberId, payload: new Uint8Array(), track: null, meta: null, retain: false }, info)
-    state.applyClosed()
-    await Promise.resolve()
-    expect(errors).toEqual(failures)
-  })
   it('keeps a client participant active so a rejected leave request can be retried', async () => {
     let leaveAttempts = 0
     const { client } = fakeClient('retry-client-leave', {
@@ -3262,6 +3206,64 @@ describe('client Room lifecycle', () => {
       { __r: 'sub-text', members: [], announce: false },
     ])
     expect(wireDeclarations).toEqual([])
+  })
+})
+describe('RoomState', () => {
+  it('dirties unknown events and keeps reconcile outcomes distinct', () => {
+    const state = newState({ roomId: 'unknown-member-epoch' })
+    const id = crypto.randomUUID()
+    state.applyTrack(id, 'screen')
+    state.applyParticipantMeta(id, { step: 1 }, 1)
+    state.applyLeave(id, { type: 'left' })
+    expect(state.membershipVersion).toBe(3)
+    const member = { id, meta: {}, joinedAt: 1, metaSeq: 0 }
+    expect(state.reconcileRoster([member])).toBe(true)
+    const version = state.membershipVersion
+    const reconcile = (tracks: string[]) => state.reconcileRoster([{ ...member, metaSeq: 1, tracks }])
+    expect(reconcile(['screen'])).toBe(true)
+    expect(state.membershipVersion).toBe(version)
+    expect(reconcile(['screen', 'camera'])).toBe(false)
+    expect(state.membershipVersion).toBe(version + 1)
+  })
+  it('reconciles every member to the final state and preserves semantic joins', () => {
+    const alice = { id: crypto.randomUUID(), meta: {}, joinedAt: 1, metaSeq: 0 }
+    const bob = { id: crypto.randomUUID(), meta: {}, joinedAt: 2, metaSeq: 0 }
+    const carol = { id: crypto.randomUUID(), meta: {}, joinedAt: 3, metaSeq: 0 }
+    const state = newState({ roomId: 'reconcile-change-count', seed: { members: [alice] } })
+    const observed: string[][] = []
+    const joins: string[] = []
+    state.onChange(() => observed.push(state.snapshotMembers().map((member) => member.id)))
+    state.onJoin((member) => joins.push(member.id))
+    state.reconcileRoster([alice, bob, carol])
+    expect(observed.at(-1)).toEqual([alice.id, bob.id, carol.id])
+    expect(joins).toEqual([bob.id, carol.id])
+  })
+  it('reports rejected async RoomState callbacks without awaiting delivery', async () => {
+    const memberId = crypto.randomUUID()
+    const errors: unknown[] = []
+    const state = newState({
+      roomId: 'async-state-callbacks',
+      seed: { members: [{ id: memberId, meta: {}, joinedAt: 1, metaSeq: 0 }] },
+      onCallbackError: (error) => errors.push(error),
+    })
+    const remote = state.getRemote(memberId)!
+    const failures = Array.from({ length: 5 }, (_, index) => new Error(`async state callback ${index}`))
+    const rejected = failures.map((failure) => {
+      const promise = Promise.reject(failure)
+      void promise.catch(() => {})
+      return promise
+    })
+    state.subscribe(() => rejected[0])
+    remote.subscribe(() => rejected[1])
+    state.subscribeBinary(() => rejected[2])
+    remote.subscribeBinary(() => rejected[3])
+    state.onClose(() => rejected[4])
+    const info = { key: state.roomId, seq: 1, timestamp: 1 }
+    state.applyData({ __r: 'data', from: memberId, fromMeta: {}, data: 'text' }, info)
+    state.applyBinary({ from: memberId, payload: new Uint8Array(), track: null, meta: null, retain: false }, info)
+    state.applyClosed()
+    await Promise.resolve()
+    expect(errors).toEqual(failures)
   })
 })
 describe('room demand lifecycle', () => {
