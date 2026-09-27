@@ -144,20 +144,14 @@ function listOrphanGenerations(sql: SqlStorage, currentInc: string | null): stri
 }
 
 // Called inside `transactionSync`; a lost race returns the current head.
-function compareExchangeHead(
-  sql: SqlStorage,
-  cx: HeadCx,
-  next: HeadNext,
-  now: number,
-  mintRev: () => string,
-): HeadCxOutcome {
+function compareExchangeHead(sql: SqlStorage, cx: HeadCx, next: HeadNext, now: number): HeadCxOutcome {
   const current = readLiveHead(sql, now)
   if (!headCxMatches(cx, current, now)) return { conflict: true, current }
-  return { head: storeHead(sql, next, now, mintRev) }
+  return { head: storeHead(sql, next, now) }
 }
 
-function storeHead(sql: SqlStorage, next: HeadNext, now: number, mintRev: () => string): StoredHead {
-  const head = materializeHead(next, now, mintRev())
+function storeHead(sql: SqlStorage, next: HeadNext, now: number): StoredHead {
+  const head = materializeHead(next, now, crypto.randomUUID())
   sql.exec(
     'INSERT OR REPLACE INTO head (id, rev, inc, state, config, lease_id, lease_until, expires_at) VALUES (1, ?, ?, ?, ?, ?, ?, ?)',
     head.rev,

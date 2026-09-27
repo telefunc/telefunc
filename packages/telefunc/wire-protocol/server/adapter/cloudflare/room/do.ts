@@ -84,7 +84,7 @@ class RoomAuthority<Env = unknown> extends DurableObject<Env> {
 
   async compareExchangeHead(cx: HeadCx, next: HeadNext): Promise<HeadCxResult> {
     const now = Date.now()
-    const outcome = this.#transaction((sql) => compareExchangeHead(sql, cx, next, now, () => crypto.randomUUID()))
+    const outcome = this.#transaction((sql) => compareExchangeHead(sql, cx, next, now))
     await this.#scheduleMaintenanceIfNeeded()
     if ('conflict' in outcome)
       return { conflict: true, current: outcome.current === null ? null : headForRpc(outcome.current) }
