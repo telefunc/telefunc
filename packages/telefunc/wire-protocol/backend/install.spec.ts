@@ -207,6 +207,35 @@ describe('supervised publishes and commits', () => {
     expect(committed).toEqual(['closed', 'join'])
     await subscription.unsubscribe()
   })
+  it('sends commits held for an establishing lane before any commit that arrives once it is ready', async () => {
+    // Whatever the microtask distance of the later commit from the lane's readiness.
+    for (let distance = 0; distance < 12; distance++) {
+      const order: string[] = []
+      let attempt!: ManualAttempt
+      const driver = {
+        subscriptions: {
+          bind: () => ({ partition: '', open: () => (attempt = new ManualAttempt()) }),
+          partitionHere: () => '',
+        },
+        commitLane: async (_roomId: string, _inc: string, _lane: unknown, payload: Uint8Array) => {
+          order.push(new TextDecoder().decode(payload))
+          return { accepted: true, seq: order.length, timestamp: 1, delivery: Promise.resolve() }
+        },
+      } as unknown as RoomDriver
+      const backend = superviseRoomDriver(driver)
+      const semantic = { kind: 'semantic' } as const
+      const subscription = backend.subscribeLane('room', 'inc', semantic, () => {})
+      const held = ['a', 'b'].map((text) => backend.commitLane('room', 'inc', semantic, new TextEncoder().encode(text)))
+      attempt.ready()
+      let later: Promise<unknown> = Promise.resolve()
+      for (let hop = 0; hop < distance; hop++) later = later.then(() => {})
+      const overtaking = later.then(() => backend.commitLane('room', 'inc', semantic, new TextEncoder().encode('c')))
+      await Promise.all([...held, overtaking])
+      expect(order).toEqual(['a', 'b', 'c'])
+      await subscription.unsubscribe()
+      await backend.dispose()
+    }
+  })
 })
 
 class ManualAttempt extends DriverAttempt {

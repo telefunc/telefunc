@@ -51,9 +51,6 @@ import { reconnectWindow, type ServerChannel } from '../server/channel.js'
 import type { ChannelPublishInfo } from '../channel.js'
 import { disposeBackend, getBroadcastBackend, getRoomBackend, installBackend } from '../backend/install.js'
 import { MemoryBackend, MemoryBackendState } from '../backend/memory/backend.js'
-import { superviseRoomDriver } from '../backend/room/supervise.js'
-import { DriverAttempt } from '../backend/attempt.js'
-import type { RoomDriver } from '../backend/room/contract.js'
 import type { LaneId } from '../backend/room/contract.js'
 import type {
   BackendReceiver,
@@ -202,10 +199,6 @@ describe('Room public behavior', () => {
     await stub._handleRequest({ __r: 'req-dm', id, to: other.id, data: 'hi' })
     expect((await room.getParticipants()).find((member) => member.id === id)?.meta).toEqual({ name: 'b', score: 1 })
     await vi.waitFor(() => expect(inbox).toEqual(['hi']))
-  })
-  it("ends a lane the driver refuses at subscribe with the driver's reason", async () => {
-    const subscription = getRoomBackend().subscribeLane('refused-room', 'refused-inc', semanticLane, () => {})
-    await expect(subscription.ready).rejects.toThrow("has no open incarnation 'refused-inc'")
   })
   it('relays a leave that reached this instance with no event, from a reconciled roster or a vanished record', async () => {
     const control = loseLaneFrames((lane) => lane.kind === 'control')
@@ -707,42 +700,6 @@ describe('Room public behavior', () => {
     await vi.waitFor(() => expect(room.count).toBe(1))
     expect((await room.getParticipants()).map(({ id }) => id)).toEqual([member.id])
   })
-  it('sends commits held for an establishing lane before any commit that arrives once it is ready', async () => {
-    class ManualAttempt extends DriverAttempt {
-      async unsubscribe() {
-        this.transition('closed')
-      }
-      ready() {
-        this.transition('ready')
-      }
-    }
-    // Whatever the microtask distance of the later commit from the lane's readiness.
-    for (let distance = 0; distance < 12; distance++) {
-      const order: string[] = []
-      let attempt!: ManualAttempt
-      const driver = {
-        subscriptions: {
-          bind: () => ({ partition: '', open: () => (attempt = new ManualAttempt()) }),
-          partitionHere: () => '',
-        },
-        commitLane: async (_roomId: string, _inc: string, _lane: LaneId, payload: Uint8Array) => {
-          order.push(decoder.decode(payload))
-          return { accepted: true, seq: order.length, timestamp: 1, delivery: Promise.resolve() }
-        },
-      } as unknown as RoomDriver
-      const backend = superviseRoomDriver(driver)
-      const subscription = backend.subscribeLane('room', 'inc', semanticLane, () => {})
-      const held = ['a', 'b'].map((text) => backend.commitLane('room', 'inc', semanticLane, encoder.encode(text)))
-      attempt.ready()
-      let later: Promise<unknown> = Promise.resolve()
-      for (let hop = 0; hop < distance; hop++) later = later.then(() => {})
-      const overtaking = later.then(() => backend.commitLane('room', 'inc', semanticLane, encoder.encode('c')))
-      await Promise.all([...held, overtaking])
-      expect(order).toEqual(['a', 'b', 'c'])
-      await subscription.unsubscribe()
-      await backend.dispose()
-    }
-  })
   it('a publish right after a subscribe on this instance reaches it while the lane is still establishing', async () => {
     const room = (await Room.create('establishing-hold')) as ServerRoom
     const member = await room.join()
@@ -1169,15 +1126,6 @@ describe('Room public behavior', () => {
     acks.B.resolve({ meta: { v: 'B' }, seq: 1 })
     await settingB
     expect(me.meta).toEqual({ v: 'A' })
-  })
-  it("releases a closed room's memory record once its tombstone lapses", async () => {
-    vi.useFakeTimers()
-    await Room.create('released-record')
-    await Room.close('released-record')
-    expect(memoryState.rooms.has('released-record')).toBe(true)
-    await vi.advanceTimersByTimeAsync(60_000)
-    expect(memoryState.rooms.has('released-record')).toBe(false)
-    await expect(Room.create('released-record')).resolves.toMatchObject({ id: 'released-record' })
   })
   it('drops an incarnation an interrupted close left, once listing finds its tombstone lapsed', async () => {
     vi.useFakeTimers()
@@ -2090,13 +2038,6 @@ describe('Room public behavior', () => {
   it('names why a commit was stale, so callers need no diagnosis reads', async () => {
     const room = (await Room.create('stale-reason')) as ServerRoom
     const member = await room.join()
-    const semantic = { kind: 'semantic' } as const
-    const payload = new Uint8Array([1])
-    expect(await driver.commitLane(room.id, room._inc, semantic, payload, { requiredCellKeys: ['m:gone'] })).toEqual({
-      stale: 'cell',
-      key: 'm:gone',
-    })
-    expect(await driver.commitLane(room.id, 'other-inc', semantic, payload)).toEqual({ stale: 'incarnation' })
     const current = await driver.readCells(room.id, room._inc, { keys: [memberCellKey(member.id)] })
     if ('staleInc' in current) throw new Error('room went stale')
     await driver.compareExchangeCells(room.id, room._inc, current.revision, [

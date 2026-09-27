@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { disposeBackend, getRoomBackend, installBackend } from '../install.js'
 import type { LaneId } from '../room/contract.js'
 import { MemoryBackend, MemoryBackendState } from './backend.js'
+import { Room } from '../../room/server/statics.js'
 const encoder = new TextEncoder()
 const decoder = new TextDecoder()
 const semanticLane = { kind: 'semantic' } as const satisfies LaneId
@@ -14,6 +15,7 @@ beforeEach(async () => {
   installBackend(() => driver)
 })
 afterEach(async () => {
+  vi.useRealTimers()
   vi.restoreAllMocks()
   await disposeBackend()
 })
@@ -189,5 +191,18 @@ describe('memory backend behind the supervised consumer', () => {
     await expect(driver.listRetained('retained-lane-alias', 'inc-1')).resolves.toEqual([
       { kind: 'binary', member: 'member', track: 'original' },
     ])
+  })
+  it("ends a lane the driver refuses at subscribe with the driver's reason", async () => {
+    const subscription = getRoomBackend().subscribeLane('refused-room', 'refused-inc', semanticLane, () => {})
+    await expect(subscription.ready).rejects.toThrow("has no open incarnation 'refused-inc'")
+  })
+  it("releases a closed room's memory record once its tombstone lapses", async () => {
+    vi.useFakeTimers()
+    await Room.create('released-record')
+    await Room.close('released-record')
+    expect(memoryState.rooms.has('released-record')).toBe(true)
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(memoryState.rooms.has('released-record')).toBe(false)
+    await expect(Room.create('released-record')).resolves.toMatchObject({ id: 'released-record' })
   })
 })
