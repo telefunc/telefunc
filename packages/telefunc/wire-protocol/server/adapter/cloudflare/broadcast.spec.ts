@@ -50,14 +50,14 @@ afterEach(async () => {
   await disposeBackend()
 })
 
-function installCloudflareTransport(transport: CloudflareBroadcast): void {
+function installCloudflareBroadcast(broadcast: CloudflareBroadcast): void {
   installBackend(
     () =>
       new CloudflareBackend({
         rooms: () => {
           throw new Error('Broadcast specs use no Room namespace')
         },
-        broadcast: transport,
+        broadcast,
       }),
   )
 }
@@ -207,7 +207,7 @@ function createRacingBinding(
   } as unknown as TelefuncDurableObjectNamespace
 }
 
-function createTransport(binding = createBasicBinding()): CloudflareBroadcast {
+function createBroadcast(binding = createBasicBinding()): CloudflareBroadcast {
   return new CloudflareBroadcast({
     baseInstanceName: 'telefunc',
     scale: 1,
@@ -217,8 +217,8 @@ function createTransport(binding = createBasicBinding()): CloudflareBroadcast {
 }
 
 /** A session DO's Broadcast membership, placed in weur. */
-function createMember(transport: CloudflareBroadcast, id = 'member-weur-0'): CloudflareBroadcastMember {
-  const member = transport.member(id, new OrderedStubs())
+function createMember(broadcast: CloudflareBroadcast, id = 'member-weur-0'): CloudflareBroadcastMember {
+  const member = broadcast.member(id, new OrderedStubs())
   member.locate('weur')
   return member
 }
@@ -398,19 +398,19 @@ describe('cloudflare broadcast routing', () => {
   it('records presence at the key’s authority on subscribe and reads it during publish fanout', async () => {
     const authority = createAuthorityState()
     const calls: BroadcastCalls = new OrderedStubs()
-    const transport = createTransport(
+    const broadcast = createBroadcast(
       createBasicBinding({
         onPresence: presenceAt(authority),
-        onPublish: (_, request) => transport.publishToSubscribers(authority, calls, request),
+        onPublish: (_, request) => broadcast.publishToSubscribers(authority, calls, request),
       }),
     )
-    const member = createMember(transport)
+    const member = createMember(broadcast)
     const route = { key: 'room:test', kind: 'text' } as const
     const subscription = member.openSubscription(route, () => {})
     await untilReady(subscription)
     expect(liveMembers(authority, route)).toEqual({ weur: ['member-weur-0'] })
-    const binary = await transport.publish({ key: 'room:test', kind: 'binary' }, new Uint8Array([1]))
-    const text = await transport.publish(route, encode('"text"'))
+    const binary = await broadcast.publish({ key: 'room:test', kind: 'binary' }, new Uint8Array([1]))
+    const text = await broadcast.publish(route, encode('"text"'))
     expect([binary.receivers, text.receivers]).toEqual([0, 1])
     await subscription.unsubscribe()
   })
@@ -418,7 +418,7 @@ describe('cloudflare broadcast routing', () => {
   it('keeps the first-touch authority bucket in publish receipts', async () => {
     const authorityState = createAuthorityState()
     const calls: BroadcastCalls = new OrderedStubs()
-    const transport = createTransport(createBasicBinding())
+    const broadcast = createBroadcast(createBasicBinding())
     // The key's first publish, from weur, fixes its authority bucket.
     authorityState.nextSequence('room:first-touch', 'weur')
     for (const bucket of ['weur', 'apac'] as const) {
@@ -429,7 +429,7 @@ describe('cloudflare broadcast routing', () => {
         bucket,
       })
     }
-    const receipt = await transport.publishToSubscribers(authorityState, calls, {
+    const receipt = await broadcast.publishToSubscribers(authorityState, calls, {
       key: 'room:first-touch',
       kind: 'text',
       locationBucket: 'apac',
@@ -443,7 +443,7 @@ describe('cloudflare broadcast routing', () => {
   it('a publish waits only for its own session’s subscription, and leaves from its own session', async () => {
     const recorded = Promise.withResolvers<void>()
     const publishBuckets: Array<string | null> = []
-    const transport = createTransport(
+    const broadcast = createBroadcast(
       createBasicBinding({
         onPresence: () => recorded.promise,
         onPublish(_id, request) {
@@ -452,9 +452,9 @@ describe('cloudflare broadcast routing', () => {
         },
       }),
     )
-    installCloudflareTransport(transport)
-    const weur = createMember(transport)
-    const enam = transport.member('member-enam-0', new OrderedStubs())
+    installCloudflareBroadcast(broadcast)
+    const weur = createMember(broadcast)
+    const enam = broadcast.member('member-enam-0', new OrderedStubs())
     enam.locate('enam')
     const publishFrom = (member: CloudflareBroadcastMember) =>
       inSession(member, () => new ServerBroadcast<string>({ key: 'room:test' }).publish(member.bucket!))
@@ -472,22 +472,22 @@ describe('cloudflare broadcast routing', () => {
     const coordinatorCalls: BroadcastCalls = new OrderedStubs()
     const recorded = Promise.withResolvers<void>()
     const received: string[] = []
-    const transport: CloudflareBroadcast = createTransport(
+    const broadcast: CloudflareBroadcast = createBroadcast(
       createBasicBinding({
         onPresence: presenceAt(authority, { beforeRecord: () => recorded.promise }),
         onPublish(_id, request) {
-          return transport.publishToSubscribers(authority, calls, request)
+          return broadcast.publishToSubscribers(authority, calls, request)
         },
         onForward(_id, request) {
-          return transport.forwardToBucket(coordinatorCalls, request)
+          return broadcast.forwardToBucket(coordinatorCalls, request)
         },
         onDeliver(_id, request) {
           return member.deliver(request)
         },
       }),
     )
-    installCloudflareTransport(transport)
-    const member = createMember(transport)
+    installCloudflareBroadcast(broadcast)
+    const member = createMember(broadcast)
     await inSession(member, async () => {
       const subscriber = new ServerBroadcast<{ text: string }>({ key: 'room:test' })
       subscriber.subscribe((message) => {
@@ -511,7 +511,7 @@ describe('cloudflare broadcast routing', () => {
     const authorityState = createAuthorityState()
     const calls: BroadcastCalls = new OrderedStubs()
     const coordinators: string[] = []
-    const transport: CloudflareBroadcast = createTransport(
+    const broadcast: CloudflareBroadcast = createBroadcast(
       createBasicBinding({
         onForward(id) {
           coordinators.push(id.name)
@@ -537,7 +537,7 @@ describe('cloudflare broadcast routing', () => {
       member: 'telefunc-shard-eeur-0',
       bucket: 'eeur',
     })
-    await transport.publishToSubscribers(authorityState, calls, {
+    await broadcast.publishToSubscribers(authorityState, calls, {
       key: 'room:test',
       kind: 'text',
       locationBucket: 'weur',
@@ -553,7 +553,7 @@ describe('cloudflare broadcast routing', () => {
   it("forwards presence from a region that left the scale through the fallback region's coordinator", async () => {
     const authorityState = createAuthorityState()
     const forwards: Array<{ coordinator: string; members: string[] }> = []
-    const transport = new CloudflareBroadcast({
+    const broadcast = new CloudflareBroadcast({
       baseInstanceName: 'telefunc',
       scale: { weur: 1 },
       locationFallback: 'weur',
@@ -570,7 +570,7 @@ describe('cloudflare broadcast routing', () => {
       ['telefunc-shard-apac-0', 'apac'],
     ] as const)
       await authorityState.setPresence({ key: 'room:redeployed', kind: 'text', member, bucket })
-    const receipt = await transport.publishToSubscribers(authorityState, new OrderedStubs(), {
+    const receipt = await broadcast.publishToSubscribers(authorityState, new OrderedStubs(), {
       key: 'room:redeployed',
       kind: 'text',
       locationBucket: 'weur',
@@ -586,17 +586,17 @@ describe('cloudflare broadcast routing', () => {
     const authority = createAuthorityState()
     const calls: BroadcastCalls = new OrderedStubs()
     const coordinatorCalls: BroadcastCalls = new OrderedStubs()
-    const transport: CloudflareBroadcast = createTransport(
+    const broadcast: CloudflareBroadcast = createBroadcast(
       createBasicBinding({
         onPresence: presenceAt(authority),
-        onPublish: (_id, request) => transport.publishToSubscribers(authority, calls, request),
-        onForward: (_id, request) => transport.forwardToBucket(coordinatorCalls, request),
+        onPublish: (_id, request) => broadcast.publishToSubscribers(authority, calls, request),
+        onForward: (_id, request) => broadcast.forwardToBucket(coordinatorCalls, request),
         onDeliver: () => Promise.reject(new Error('member reset')),
       }),
     )
-    installCloudflareTransport(transport)
+    installCloudflareBroadcast(broadcast)
     const report = vi.spyOn(console, 'error').mockImplementation(() => {})
-    await inSession(createMember(transport), async () => {
+    await inSession(createMember(broadcast), async () => {
       const room = new ServerBroadcast<string>({ key: 'room:test' })
       room.subscribe(() => {})
       await expect(room.publish('lost')).resolves.toMatchObject({ receivers: 1 })
@@ -607,7 +607,7 @@ describe('cloudflare broadcast routing', () => {
   it('a forward delivers wide ordering positions to every named DO', async () => {
     const deliveredTo: string[] = []
     const received: Array<{ text: string; seq: number; timestamp: number }> = []
-    const transport: CloudflareBroadcast = createTransport(
+    const broadcast: CloudflareBroadcast = createBroadcast(
       createBasicBinding({
         onDeliver(id, request) {
           deliveredTo.push(id.name)
@@ -615,12 +615,12 @@ describe('cloudflare broadcast routing', () => {
         },
       }),
     )
-    const member = createMember(transport)
+    const member = createMember(broadcast)
     const subscription = member.openSubscription({ key: 'room:test', kind: 'text' }, (payload, info) => {
       received.push({ text: decode(payload), ...info })
     })
     await untilReady(subscription)
-    await transport.forwardToBucket(new OrderedStubs(), {
+    await broadcast.forwardToBucket(new OrderedStubs(), {
       key: 'room:test',
       kind: 'text',
       payload: encode('{"text":"hello"}'),
@@ -640,20 +640,20 @@ describe('cloudflare broadcast routing', () => {
     const calls: BroadcastCalls = new OrderedStubs()
     const coordinatorCalls: BroadcastCalls = new OrderedStubs()
     // The first stub opened is the slowest, so a publish sent through a fresh stub overtakes the one before it.
-    const transport: CloudflareBroadcast = createTransport(
+    const broadcast: CloudflareBroadcast = createBroadcast(
       createRacingBinding([20], {
-        onForward: (request) => transport.forwardToBucket(coordinatorCalls, request),
+        onForward: (request) => broadcast.forwardToBucket(coordinatorCalls, request),
         onDeliver: async (request) => member.deliver(request),
         onPresence: async (request) => authority.setPresence(request),
       }),
     )
-    const member = createMember(transport)
+    const member = createMember(broadcast)
     const received: number[] = []
     const route = { key: 'room:order', kind: 'text' } as const
     const subscription = member.openSubscription(route, (_payload, info) => void received.push(info.seq))
     await untilReady(subscription)
     const publish = () =>
-      transport.publishToSubscribers(authority, calls, { ...route, locationBucket: 'weur', payload: encode('"x"') })
+      broadcast.publishToSubscribers(authority, calls, { ...route, locationBucket: 'weur', payload: encode('"x"') })
     await Promise.all([publish(), publish(), publish()])
     expect(received).toEqual([1, 2, 3])
     await subscription.unsubscribe()
@@ -662,7 +662,7 @@ describe('cloudflare broadcast routing', () => {
   it("publishes a caller's buffer as it was at the call, even on a line held behind a failed call", async () => {
     const replies: Array<PromiseWithResolvers<{ seq: number; timestamp: number }>> = []
     const published: number[][] = []
-    const transport = createTransport(
+    const broadcast = createBroadcast(
       createBasicBinding({
         onPublish: (_id, request) => {
           // An RPC serializes its arguments when it is made.
@@ -673,9 +673,9 @@ describe('cloudflare broadcast routing', () => {
         },
       }),
     )
-    installCloudflareTransport(transport)
+    installCloudflareBroadcast(broadcast)
     const scratch = Buffer.from([1])
-    await inSession(createMember(transport), async () => {
+    await inSession(createMember(broadcast), async () => {
       const channel = new ServerBroadcast({ key: 'room:reused-buffer' })
       const failing = channel.publishBinary(scratch).catch(() => {})
       const inFlight = channel.publishBinary(scratch)
@@ -696,7 +696,7 @@ describe('cloudflare broadcast routing', () => {
 
   it('publishes from outside a session, as from a cron trigger, without a bucket', async () => {
     const coordinatorPublishes: Array<{ name: string; key: string; locationBucket: string | null; text: string }> = []
-    const transport: CloudflareBroadcast = createTransport(
+    const broadcast: CloudflareBroadcast = createBroadcast(
       createBasicBinding({
         onPublish(id, { key, locationBucket, payload }) {
           coordinatorPublishes.push({ name: id.name, key, locationBucket, text: decode(payload) })
@@ -704,7 +704,7 @@ describe('cloudflare broadcast routing', () => {
         },
       }),
     )
-    installCloudflareTransport(transport)
+    installCloudflareBroadcast(broadcast)
     const room = new ServerBroadcast<{ text: string }>({ key: 'room:test:no-ctx' })
 
     expect(() => room.publish({ text: 'hello' })).not.toThrow()
@@ -722,8 +722,8 @@ describe('cloudflare broadcast routing', () => {
   })
 
   it('a member registers presence only once it knows its bucket', async () => {
-    const transport = createTransport()
-    const member = transport.member('member-unplaced', new OrderedStubs())
+    const broadcast = createBroadcast()
+    const member = broadcast.member('member-unplaced', new OrderedStubs())
     const subscription = member.openSubscription({ key: 'room:test', kind: 'text' }, () => {})
     await expect(untilReady(subscription)).rejects.toThrow('knows its bucket')
   })
@@ -736,7 +736,7 @@ describe('cloudflare broadcast routing', () => {
     const firstRemotePublishReady = new Promise<void>((resolve) => {
       releaseFirstRemotePublish = resolve
     })
-    const transport = createTransport(
+    const broadcast = createBroadcast(
       createBasicBinding({
         onForward(id, { payload }) {
           const text = decode(payload)
@@ -758,14 +758,14 @@ describe('cloudflare broadcast routing', () => {
       member: 'telefunc-shard-apac-0',
       bucket: 'apac',
     })
-    const firstPublish = transport.publishToSubscribers(authorityState, calls, {
+    const firstPublish = broadcast.publishToSubscribers(authorityState, calls, {
       key: 'room:test',
       kind: 'text',
       locationBucket: 'weur',
       payload: encode('{"text":"first"}'),
     })
     await flushMicrotasks(8)
-    const secondPublish = transport.publishToSubscribers(authorityState, calls, {
+    const secondPublish = broadcast.publishToSubscribers(authorityState, calls, {
       key: 'room:test',
       kind: 'text',
       locationBucket: 'weur',
@@ -784,8 +784,8 @@ describe('cloudflare broadcast routing', () => {
 
   it('withdraws presence at the authority on unsubscribe', async () => {
     const authority = createAuthorityState()
-    const transport = createTransport(createBasicBinding({ onPresence: presenceAt(authority) }))
-    const member = createMember(transport)
+    const broadcast = createBroadcast(createBasicBinding({ onPresence: presenceAt(authority) }))
+    const member = createMember(broadcast)
     const route = { key: 'room:test', kind: 'text' } as const
     const subscription = member.openSubscription(route, () => {})
     await untilReady(subscription)
@@ -798,8 +798,8 @@ describe('cloudflare broadcast routing', () => {
     const setup = Promise.withResolvers<void>()
     const hooks: PresenceHooks = { beforeRecord: () => setup.promise }
     const authority = createAuthorityState()
-    const transport = createTransport(createBasicBinding({ onPresence: presenceAt(authority, hooks) }))
-    const member = createMember(transport)
+    const broadcast = createBroadcast(createBasicBinding({ onPresence: presenceAt(authority, hooks) }))
+    const member = createMember(broadcast)
     const route = { key: 'room:presence-churn', kind: 'text' } as const
     const first = member.openSubscription(route, () => {})
     await first.unsubscribe()
@@ -826,8 +826,8 @@ describe('cloudflare broadcast routing', () => {
     const withdrawal = Promise.withResolvers<void>()
     const hooks: PresenceHooks = { beforeRecord: () => setup.promise }
     const authority = createAuthorityState()
-    const transport = createTransport(createBasicBinding({ onPresence: presenceAt(authority, hooks) }))
-    const member = createMember(transport)
+    const broadcast = createBroadcast(createBasicBinding({ onPresence: presenceAt(authority, hooks) }))
+    const member = createMember(broadcast)
     const route = { key: 'room:deferred-teardown', kind: 'text' } as const
     await member.openSubscription(route, () => {}).unsubscribe()
     hooks.beforeWithdraw = () => {
@@ -848,7 +848,7 @@ describe('cloudflare broadcast routing', () => {
     vi.useFakeTimers()
     const report = vi.spyOn(console, 'error').mockImplementation(() => {})
     let presenceCalls = 0
-    const transport = createTransport(
+    const broadcast = createBroadcast(
       createBasicBinding({
         onPresence: () => {
           presenceCalls += 1
@@ -856,7 +856,7 @@ describe('cloudflare broadcast routing', () => {
         },
       }),
     )
-    const member = createMember(transport)
+    const member = createMember(broadcast)
     const subscription = member.openSubscription({ key: 'room:refresh', kind: 'text' }, () => {})
     await untilReady(subscription)
     const states: string[] = []
@@ -884,15 +884,15 @@ describe('cloudflare broadcast routing', () => {
     const coordinatorCalls: BroadcastCalls = new OrderedStubs()
     const record = presenceAt(authority)
     let presenceCalls = 0
-    const transport = createTransport(
+    const broadcast = createBroadcast(
       createBasicBinding({
         onPresence: (id, request) =>
           ++presenceCalls === 2 ? Promise.reject(new Error('presence refresh rejected')) : record(id, request),
-        onForward: (_, request) => transport.forwardToBucket(coordinatorCalls, request),
+        onForward: (_, request) => broadcast.forwardToBucket(coordinatorCalls, request),
         onDeliver: (_, request) => member.deliver(request),
       }),
     )
-    const member = createMember(transport)
+    const member = createMember(broadcast)
     const route = { key: 'room:lost-delivery', kind: 'text' } as const
     const received: string[] = []
     const subscription = member.openSubscription(route, (payload) => void received.push(decode(payload)))
@@ -900,7 +900,7 @@ describe('cloudflare broadcast routing', () => {
       await untilReady(subscription)
       await vi.advanceTimersByTimeAsync(30_000)
       expect(subscription.state()).toBe('lost')
-      await transport.publishToSubscribers(authority, calls, {
+      await broadcast.publishToSubscribers(authority, calls, {
         ...route,
         locationBucket: 'weur',
         payload: encode('"during"'),

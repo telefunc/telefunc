@@ -146,12 +146,12 @@ class CloudflareBroadcastSubscriptionAttempt extends DriverAttempt {
   readonly #detach: () => Promise<void>
   readonly #stopPresenceObservation: () => void
 
-  constructor(member: MemberRoute, receiver: BackendReceiver, detach: () => Promise<void>) {
+  constructor(memberRoute: MemberRoute, receiver: BackendReceiver, detach: () => Promise<void>) {
     super()
     this.#receiver = receiver
     this.#detach = detach
-    this.#stopPresenceObservation = member.onPresenceStateChange((state) => this.transition(state))
-    member.ready.then(
+    this.#stopPresenceObservation = memberRoute.onPresenceStateChange((state) => this.transition(state))
+    memberRoute.ready.then(
       () => this.transition('ready'),
       (error: unknown) => {
         this.#stopPresenceObservation()
@@ -269,14 +269,14 @@ class CloudflareBroadcastMember {
   /** Subscriptions share an attempt only within one session DO. */
   readonly partition = crypto.randomUUID()
   readonly calls: BroadcastCalls
-  readonly #transport: CloudflareBroadcast
+  readonly #broadcast: CloudflareBroadcast
   readonly #id: string
   #bucket: LocationBucket | null = null
   readonly #routes = new Map<string, MemberRoute>()
   readonly #subscriptions = new Map<string, CloudflareBroadcastSubscriptionAttempt>()
 
-  constructor(transport: CloudflareBroadcast, id: string, calls: BroadcastCalls) {
-    this.#transport = transport
+  constructor(broadcast: CloudflareBroadcast, id: string, calls: BroadcastCalls) {
+    this.#broadcast = broadcast
     this.#id = id
     this.calls = calls
   }
@@ -357,12 +357,12 @@ class CloudflareBroadcastMember {
   #recordPresence(route: BroadcastRoute): Promise<void> {
     assert(this.#bucket, 'A Broadcast member registers from a session that knows its bucket')
     const request = { key: route.key, kind: route.kind, member: this.#id, bucket: this.#bucket }
-    return this.#transport.sendPresence(this.calls, request)
+    return this.#broadcast.sendPresence(this.calls, request)
   }
 
   #withdrawPresence(route: BroadcastRoute): Promise<void> {
     const request = { key: route.key, kind: route.kind, member: this.#id, bucket: null }
-    return this.#transport.sendPresence(this.calls, request)
+    return this.#broadcast.sendPresence(this.calls, request)
   }
 }
 
