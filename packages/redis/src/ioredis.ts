@@ -79,9 +79,15 @@ async function createSubscriberSocket(redis: RedisClient): Promise<SubscriberSoc
 // The node each Cluster's subscriber was last duplicated from.
 const subscriberNodes = new WeakMap<Cluster, Redis>()
 
+// One wait per connecting Cluster, however often subscribers reopen during it.
+const clusterWaits = new WeakMap<Cluster, Promise<void>>()
+
 function clusterReady(cluster: Cluster): Promise<void> {
-  return new Promise((resolve, reject) => {
+  let wait = clusterWaits.get(cluster)
+  if (wait) return wait
+  wait = new Promise((resolve, reject) => {
     const settle = (error?: Error) => {
+      clusterWaits.delete(cluster)
       cluster.off('ready', onReady)
       cluster.off('close', onClose)
       if (error) reject(error)
@@ -93,6 +99,8 @@ function clusterReady(cluster: Cluster): Promise<void> {
     cluster.once('ready', onReady)
     cluster.once('close', onClose)
   })
+  clusterWaits.set(cluster, wait)
+  return wait
 }
 
 /** Invoke a command registered via `defineCommand`: ioredis attaches it as a dynamic method TypeScript can't see. */
