@@ -1,7 +1,7 @@
 import { EventEmitter } from 'node:events'
 import type { SubscriberSocket } from './ioredis.js'
 import { expect, onTestFinished, test, vi } from 'vitest'
-import type { SubscriptionAttempt, SubscriptionState } from 'telefunc/__internal'
+import type { BackendReceiver, SubscriptionAttempt, SubscriptionState } from 'telefunc/__internal'
 import { RedisSubscriptionDriver } from './subscriber.js'
 
 /** Resolves once the attempt is ready; rejects if it ends first. */
@@ -60,19 +60,21 @@ function driverWith(
   }
 }
 
+function openAttempt(
+  driver: RedisSubscriptionDriver,
+  source: Parameters<RedisSubscriptionDriver['bind']>[0],
+  receiver: BackendReceiver = () => {},
+) {
+  return driver.bind(source).open(receiver, () => 1)
+}
+
 const route = { key: 'chat', kind: 'text' } as const
 
 test('shares one subscriber connection across lanes', async () => {
   const sockets: ReturnType<typeof fakeSubscriber>[] = []
   const { driver, createSubscriber } = driverWith(sockets)
-  const first = driver.bind(route).open(
-    () => {},
-    () => 1,
-  )
-  const second = driver.bind({ key: 'other', kind: 'binary' }).open(
-    () => {},
-    () => 1,
-  )
+  const first = openAttempt(driver, route)
+  const second = openAttempt(driver, { key: 'other', kind: 'binary' })
   await Promise.all([untilReady(first), untilReady(second)])
   expect(createSubscriber).toHaveBeenCalledOnce()
   expect(sockets[0]!.subscribed.flat()).toHaveLength(2)
@@ -83,10 +85,7 @@ test('re-subscribes on a fresh connection and resumes delivery after a drop', as
   const { driver } = driverWith(sockets)
   const received: number[] = []
   const states: SubscriptionState[] = []
-  const attempt = driver.bind(route).open(
-    (payload) => void received.push(payload[0]!),
-    () => 1,
-  )
+  const attempt = openAttempt(driver, route, (payload) => void received.push(payload[0]!))
   await untilReady(attempt)
   attempt.onStateChange((state) => states.push(state))
   const channel = sockets[0]!.subscribed[0]![0]!
@@ -103,10 +102,7 @@ test("reports each outage with its own connection's error, not an earlier connec
   onTestFinished(() => report.mockRestore())
   const sockets: ReturnType<typeof fakeSubscriber>[] = []
   const { driver } = driverWith(sockets)
-  const attempt = driver.bind(route).open(
-    () => {},
-    () => 1,
-  )
+  const attempt = openAttempt(driver, route)
   await untilReady(attempt)
   sockets[0]!.socket.emit('error', new Error('connect ECONNREFUSED'))
   sockets[0]!.socket.emit('close')
@@ -129,17 +125,11 @@ test('reports the outage of a connection opened after an earlier outage released
     throw new Error('connect ECONNREFUSED')
   })
   const driver = new RedisSubscriptionDriver({ prefix: 'tf:', createSubscriber, validateGeneration: async () => true })
-  const first = driver.bind(route).open(
-    () => {},
-    () => 1,
-  )
+  const first = openAttempt(driver, route)
   await vi.waitFor(() => expect(report).toHaveBeenCalledOnce())
   // Its last subscription leaves mid-outage, which releases the connection; a later one starts afresh.
   await first.unsubscribe()
-  const second = driver.bind(route).open(
-    () => {},
-    () => 1,
-  )
+  const second = openAttempt(driver, route)
   await vi.waitFor(() => expect(report).toHaveBeenCalledTimes(2))
   await second.unsubscribe()
 })
@@ -148,10 +138,7 @@ test("a fence resolves when its subscription's owner releases it: no receiver is
   const sockets: ReturnType<typeof fakeSubscriber>[] = []
   const { driver } = driverWith(sockets)
   const source = { roomId: 'room', inc: 'inc', lane: { kind: 'control' } } as const
-  const attempt = driver.bind(source).open(
-    () => {},
-    () => 1,
-  )
+  const attempt = openAttempt(driver, source)
   await untilReady(attempt)
   const fence = driver.prepareFence(source)
   await attempt.unsubscribe()
@@ -172,10 +159,7 @@ test('a SUBSCRIBE that keeps failing backs off and is reported once', async () =
     return socket as unknown as SubscriberSocket
   })
   const driver = new RedisSubscriptionDriver({ prefix: 'tf:', createSubscriber, validateGeneration: async () => true })
-  const attempt = driver.bind(route).open(
-    () => {},
-    () => 1,
-  )
+  const attempt = openAttempt(driver, route)
   await vi.advanceTimersByTimeAsync(10_000)
   // The delay doubles from 50 ms to 2 s: ten connections in ten seconds, not one every 50 ms.
   expect(createSubscriber).toHaveBeenCalledTimes(10)
@@ -192,10 +176,7 @@ test('a subscriber dropping before the commit returns rejects its delivery witho
   const sockets: ReturnType<typeof fakeSubscriber>[] = []
   const { driver } = driverWith(sockets)
   const source = { roomId: 'room', inc: 'inc', lane: { kind: 'semantic' } } as const
-  const attempt = driver.bind(source).open(
-    () => {},
-    () => 1,
-  )
+  const attempt = openAttempt(driver, source)
   await untilReady(attempt)
   const fence = driver.prepareFence(source)
   sockets[0]!.socket.emit('close')
@@ -210,15 +191,9 @@ test('a failed generation check ends that Room lane only, not the shared connect
   const { driver } = driverWith(sockets, async () => {
     throw failure
   })
-  const broadcast = driver.bind(route).open(
-    () => {},
-    () => 1,
-  )
+  const broadcast = openAttempt(driver, route)
   await untilReady(broadcast)
-  const room = driver.bind({ roomId: 'room', inc: 'inc', lane: { kind: 'semantic' } }).open(
-    () => {},
-    () => 1,
-  )
+  const room = openAttempt(driver, { roomId: 'room', inc: 'inc', lane: { kind: 'semantic' } })
   await expect(untilReady(room)).rejects.toBe(failure)
   expect(broadcast.state()).toBe('ready')
   expect(sockets).toHaveLength(1)
@@ -228,10 +203,7 @@ test('terminates a Room lane whose incarnation closed while the connection was d
   const sockets: ReturnType<typeof fakeSubscriber>[] = []
   let open = true
   const { driver } = driverWith(sockets, async () => open)
-  const attempt = driver.bind({ roomId: 'room', inc: 'inc', lane: { kind: 'control' } }).open(
-    () => {},
-    () => 1,
-  )
+  const attempt = openAttempt(driver, { roomId: 'room', inc: 'inc', lane: { kind: 'control' } })
   await untilReady(attempt)
   open = false
   sockets[0]!.socket.emit('close')
@@ -241,10 +213,7 @@ test('terminates a Room lane whose incarnation closed while the connection was d
 test('releases the connection once the last subscription leaves', async () => {
   const sockets: ReturnType<typeof fakeSubscriber>[] = []
   const { driver } = driverWith(sockets)
-  const attempt = driver.bind(route).open(
-    () => {},
-    () => 1,
-  )
+  const attempt = openAttempt(driver, route)
   await untilReady(attempt)
   const disconnect = vi.spyOn(sockets[0]!.socket, 'disconnect')
   await attempt.unsubscribe()
