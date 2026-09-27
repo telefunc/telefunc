@@ -7,7 +7,7 @@ import {
   RECONCILE_TIMEOUT_MS,
 } from '../constants.js'
 import { ClientConnection } from './connection.js'
-import { encode } from '../shared-ws.js'
+import { TAG, encode } from '../shared-ws.js'
 import { config, getServerConfig } from '../../node/server/serverConfig.js'
 
 /** Minimal `MuxChannel` — registering one is enough to make the connection open a wire. */
@@ -86,6 +86,37 @@ test("a per-call idleTimeout is kept over the server's", () => {
 test('a zero replay budget still registers a later channel on the connection', () => {
   const { connection, options } = zeroConfiguredConnection()
   expect(ClientConnection.getOrCreate('http://zero.test', createChannel() as never, options)).toBe(connection)
+  connection.dispose()
+})
+
+test("an SSE reconnect leaves a dead POST's messages to the replay, which can't overtake the ones still in flight", () => {
+  const channel = createChannel()
+  const connection = ClientConnection.getOrCreate(
+    'http://outbox-replay.test',
+    channel as never,
+    stalledOptions(),
+  ) as any
+  connection.transport.outbox.push(
+    { frame: encode.text(0, 'queued', 7), deadline: Infinity },
+    { frame: encode.window(0, 65_536), deadline: Infinity },
+  )
+  const { initialFrames } = connection.transport.stageInitialBatch()
+  const tags = initialFrames.map(({ frame }: { frame: Uint8Array }) => frame[0])
+  expect(tags).toEqual([TAG.RECONCILE, TAG.WINDOW])
+  connection.dispose()
+})
+
+test('an SSE reconnect sends its reconcile, not the reconcile a failed POST left queued', () => {
+  const channel = createChannel()
+  const connection = ClientConnection.getOrCreate('http://outbox.test', channel as never, stalledOptions()) as any
+  // A batch POST that failed carried an older reconcile and an unsubscribe.
+  connection.transport.outbox.push(
+    { frame: encode.reconcile({ open: [] }), deadline: Infinity },
+    { frame: encode.broadcastUnsub(0, false), deadline: Infinity },
+  )
+  const { initialFrames } = connection.transport.stageInitialBatch()
+  const tags = initialFrames.map(({ frame }: { frame: Uint8Array }) => frame[0])
+  expect(tags).toEqual([TAG.RECONCILE, TAG.BROADCAST_UNSUB])
   connection.dispose()
 })
 

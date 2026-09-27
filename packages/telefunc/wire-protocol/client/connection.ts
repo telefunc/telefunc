@@ -1929,13 +1929,18 @@ class SseTransport implements UpgradeSource {
     const initialFrames: OutboundFrame[] = []
     initialFrames.push(reconcileBatch.reconcileFrame)
     const movedBufferedFrames = reconcileBatch.movedBufferedFrames
-    const movedOutbox = this.outbox
+    // A dead wire's outbox carries only its window refreshes and broadcast toggles. This reconcile declares every
+    // channel, a close request goes out again on reattach, and sequenced frames replay after RECONCILED from the
+    // server's lastSeq: sent first, they could overtake older ones a POST still in flight carries, whose frames the
+    // server would then drop as duplicates.
+    const movedOutbox = this.outbox.filter(
+      ({ frame }) =>
+        frame[0] === TAG.WINDOW ||
+        frame[0] === TAG.MSG_WINDOW ||
+        frame[0] === TAG.BROADCAST_SUB ||
+        frame[0] === TAG.BROADCAST_UNSUB,
+    )
     this.outbox = []
-    // Outbox contains frames carried over from earlier (failed) connect attempts —
-    // they have OLDER seqs than whatever was just drained from `sendBuffer`. Sending
-    // them first preserves monotonic seq order on the wire; otherwise the server
-    // accepts the newer batch first, advances `lastClientSeq`, then dup-drops the
-    // older batch (losing user messages sent while offline).
     for (const entry of movedOutbox) initialFrames.push({ kind: 'data', frame: entry.frame })
     for (const frame of movedBufferedFrames) initialFrames.push(frame)
     return { initialFrames, movedOutbox, movedBufferedFrames }
