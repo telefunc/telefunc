@@ -1,7 +1,7 @@
 export { superviseRoomDriver }
 
 import { SubscriptionManager } from '../subscription-manager.js'
-import type { HeadCx, HeadNext, RoomBackend, RoomDriver } from './contract.js'
+import type { HeadNext, RoomBackend, RoomDriver } from './contract.js'
 import { roomSubscriptionSourceKey } from './lane-key.js'
 import { assertDriverPosition } from '../driver-position.js'
 import { assert } from '../../../utils/assert.js'
@@ -14,7 +14,7 @@ function superviseRoomDriver(driver: RoomDriver): RoomBackend {
 
   return {
     readHead: (roomId) => driver.readHead(roomId),
-    compareExchangeHead: async (roomId: string, cx: HeadCx, next: HeadNext) => {
+    compareExchangeHead: async (roomId, cx, next) => {
       assertHeadNextWellFormed(next)
       return driver.compareExchangeHead(roomId, cx, next)
     },
