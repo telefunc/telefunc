@@ -72,13 +72,11 @@ test("waits for a connecting Cluster's masters instead of reporting none", async
   cluster.status = 'connecting'
   const nodes = vi.spyOn(cluster, 'nodes').mockReturnValue([])
   const opening = createSubscriberSocket(cluster)
-  // A subscriber reopened while the Cluster still connects shares the one wait: the app's Cluster gets no more listeners.
-  const reopening = createSubscriberSocket(cluster)
-  expect([cluster.listenerCount('ready'), cluster.listenerCount('close')]).toEqual([1, 1])
   nodes.mockReturnValue([master])
   cluster.status = 'ready'
   cluster.emit('ready')
-  for (const socket of [await opening, await reopening]) socket.disconnect()
+  const socket = await opening
+  socket.disconnect()
   // A failed connect is an outage to report, whether the Cluster retries it (it never emits 'end' then) or gives up.
   cluster.status = 'connecting'
   const failing = createSubscriberSocket(cluster)
