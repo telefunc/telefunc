@@ -37,7 +37,8 @@ class SSEStreamReader extends BaseStreamReader {
 
   cancel(): void {
     this.cancelled = true
-    this.reader.cancel()
+    // An errored body rejects its cancel; that error already reached the reads.
+    this.reader.cancel().catch(() => {})
   }
 
   async readExact(n: number): Promise<Uint8Array<ArrayBuffer>> {
