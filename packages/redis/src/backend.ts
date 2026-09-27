@@ -114,21 +114,21 @@ class RedisBackend implements BroadcastDriver, RoomDriver {
     payload: Uint8Array,
     opts?: CommitOptions,
   ): Promise<CommitResult> {
-    if (!isCluster(this._publisher)) return this._commitLane(roomId, inc, lane, payload, opts)
+    const commit = () => this._commitLane(roomId, inc, lane, payload, opts)
+    if (!isCluster(this._publisher)) return commit()
     // A Cluster re-sends a command Redis refused with TRYAGAIN (its slot migrating) or CLUSTERDOWN (a failover) after a
     // delay, so a later commit on the lane could land first: each is sent once the one before it was answered.
-    const turnKey = JSON.stringify([roomId, inc, encodeLaneKey(lane)])
+    return this._inLaneTurn(JSON.stringify([roomId, inc, encodeLaneKey(lane)]), commit)
+  }
+
+  private _inLaneTurn<T>(turnKey: string, commit: () => Promise<T>): Promise<T> {
     const previous = this._laneTurns.get(turnKey)
-    const commit = () => this._commitLane(roomId, inc, lane, payload, opts)
     const committing = previous === undefined ? commit() : previous.then(commit)
-    const turn = committing.then(
-      () => {},
-      () => {},
-    )
-    this._laneTurns.set(turnKey, turn)
-    void turn.then(() => {
+    const release = () => {
       if (this._laneTurns.get(turnKey) === turn) this._laneTurns.delete(turnKey)
-    })
+    }
+    const turn: Promise<void> = committing.then(release, release)
+    this._laneTurns.set(turnKey, turn)
     return committing
   }
 
