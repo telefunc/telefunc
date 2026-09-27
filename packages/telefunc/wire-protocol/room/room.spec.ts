@@ -231,11 +231,7 @@ describe('Room public behavior', () => {
     control.next()
     await Room.setMeta(room.id, { topic: 'new' })
     await subsOf(room).reconcileAuthority()
-    const updates = peer
-      .decoded()
-      .filter((frame) => frame.tag === TAG.PUBLISH)
-      .map((frame) => JSON.parse(frame.text) as { __r: string; meta?: unknown })
-      .filter((event) => event.__r === 'update')
+    const updates = relayed(peer).filter((event) => event.__r === 'update')
     // The first is the attach's own resend.
     expect(updates.map((event) => event.meta)).toEqual([{ topic: 'old' }, { topic: 'new' }])
   })
@@ -273,10 +269,7 @@ describe('Room public behavior', () => {
     control.next()
     await bot.setMeta({ mood: 'new' })
     await subsOf(room).reconcileAuthority()
-    const metas = peer
-      .decoded()
-      .filter((frame) => frame.tag === TAG.PUBLISH)
-      .map((frame) => JSON.parse(frame.text) as { __r: string; members?: Array<{ id: string; meta: unknown }> })
+    const metas = relayed(peer)
       .flatMap((event) => (event.__r === 'roster' ? event.members! : []))
       .filter((member) => member.id === bot.id)
       .map((member) => member.meta)
@@ -653,11 +646,7 @@ describe('Room public behavior', () => {
     await terminal.close()
     await vi.waitFor(() => expect(observer.isClosed).toBe(true))
     expect({ count: observer.count, closes }).toEqual({ count: 0, closes: 1 })
-    const relayed = peer
-      .decoded()
-      .filter((frame) => frame.tag === TAG.PUBLISH)
-      .map((frame) => (JSON.parse(frame.text) as { __r: string }).__r)
-    expect(relayed).toContain('closed')
+    expect(relayed(peer).map(({ __r }) => __r)).toContain('closed')
   })
   it('applies a control frame whose seq restarted, as after a Redis restart without its data', async () => {
     let deliver!: BackendReceiver
@@ -1614,11 +1603,7 @@ describe('Room public behavior', () => {
     const acking = sender.send(id, 'ping', { ack: true })
     let ackId = ''
     await vi.waitFor(() => {
-      const dm = peer
-        .decoded()
-        .filter((frame) => frame.tag === TAG.PUBLISH)
-        .map((frame) => JSON.parse(frame.text) as { __r: string; ackId?: string })
-        .find((envelope) => envelope.__r === 'dm')
+      const dm = relayed(peer).find((event) => event.__r === 'dm')
       expect(dm?.ackId).toBeTypeOf('string')
       ackId = dm!.ackId!
     })
@@ -2307,7 +2292,7 @@ describe('Room public behavior', () => {
     expect(isRoomError(await joining)).toBe(true)
     expect(seen).toEqual(['join', 'removed'])
     expect(room.count).toBe(0)
-    expect(controlEvents(peer).flatMap(({ __r }) => (__r === 'join' || __r === 'leave' ? [__r] : []))).toEqual([
+    expect(relayed(peer).flatMap(({ __r }) => (__r === 'join' || __r === 'leave' ? [__r] : []))).toEqual([
       'join',
       'leave',
     ])
@@ -2334,7 +2319,7 @@ describe('Room public behavior', () => {
     await member.publishBinary(new Uint8Array([1]), { track: 'cam' })
     await echo.release()
     await member.publishBinary(new Uint8Array([2]), { track: 'cam' })
-    expect(controlEvents(peer).filter(({ __r }) => __r === 'track')).toEqual([
+    expect(relayed(peer).filter(({ __r }) => __r === 'track')).toEqual([
       expect.objectContaining({ id: member.id, track: 'cam' }),
     ])
     // The all-track listener here subscribes the new track's lane before its first frame.
@@ -2367,14 +2352,14 @@ describe('Room public behavior', () => {
       const room = (await Room.create('close-while-offline')) as ServerRoom
       const stub = register(room)
       const first = attachPeer(stub)
-      await vi.waitFor(() => expect(controlEvents(first).map(({ __r }) => __r)).toContain('roster'))
+      await vi.waitFor(() => expect(relayed(first).map(({ __r }) => __r)).toContain('roster'))
       if (noticedAfter === 0) stub._onPeerDisconnect(first.peer, CHANNEL_RECONNECT_TIMEOUT_MS)
       await Room.close(room.id)
       await vi.advanceTimersByTimeAsync(noticedAfter)
       if (noticedAfter > 0) stub._onPeerDisconnect(first.peer, CHANNEL_RECONNECT_TIMEOUT_MS)
       await vi.advanceTimersByTimeAsync(CHANNEL_RECONNECT_TIMEOUT_MS - 1_000)
       expect(stub._replayBuffer).not.toBeNull()
-      expect(controlEvents(attachPeer(stub, 0)).map(({ __r }) => __r)).toContain('closed')
+      expect(relayed(attachPeer(stub, 0)).map(({ __r }) => __r)).toContain('closed')
     },
   )
   it('sends a reattached client the room state its offline buffer dropped', async () => {
@@ -2384,7 +2369,7 @@ describe('Room public behavior', () => {
     try {
       const stub = register(room)
       const first = attachPeer(stub)
-      await vi.waitFor(() => expect(controlEvents(first).map(({ __r }) => __r)).toContain('roster'))
+      await vi.waitFor(() => expect(relayed(first).map(({ __r }) => __r)).toContain('roster'))
       stub._onPeerDisconnect(first.peer, 60_000)
       await leaver.leave()
       // Larger than the offline buffer: it clears the buffered leave, and is dropped too.
@@ -2393,7 +2378,7 @@ describe('Room public behavior', () => {
       await vi.waitFor(() => expect(room.meta).toEqual(meta))
       const peer = attachPeer(stub)
       await vi.waitFor(() =>
-        expect(controlEvents(peer).map(({ __r, members, meta }) => ({ __r, members, meta }))).toEqual([
+        expect(relayed(peer).map(({ __r, members, meta }) => ({ __r, members, meta }))).toEqual([
           { __r: 'update', members: undefined, meta },
           { __r: 'roster', members: [], meta: undefined },
         ]),
@@ -2409,16 +2394,11 @@ describe('Room public behavior', () => {
     const ensureRoster = vi.spyOn(subsOf(room), 'ensureRoster').mockRejectedValue(failure)
     vi.spyOn(console, 'error').mockImplementation(() => {})
     const peer = attachPeer(stub)
-    const rosterError = () =>
-      peer
-        .decoded()
-        .find((frame) => frame.tag === TAG.PUBLISH && (parse(frame.text) as { __r: string }).__r === 'roster-error')
+    const rosterError = () => relayed(peer).find(({ __r }) => __r === 'roster-error')
     await vi.waitFor(() => expect(rosterError()).toBeDefined())
-    const frame = rosterError()!
-    if (frame.tag !== TAG.PUBLISH) throw new Error('expected roster error publish')
     const { client, emit } = fakeClient('roster-error-event')
     const participants = client.getParticipants()
-    emit(parse(frame.text))
+    emit(rosterError())
     await expect(participants).rejects.toThrow('Failed to load room participants')
     expect(ensureRoster).toHaveBeenCalledOnce()
   })
@@ -2428,8 +2408,7 @@ describe('Room public behavior', () => {
     vi.spyOn(subsOf(room), 'ensureRoster').mockRejectedValueOnce(new Error('backend roster read failed'))
     vi.spyOn(console, 'error').mockImplementation(() => {})
     const peer = attachPeer(stub)
-    const events = () =>
-      peer.decoded().flatMap((frame) => (frame.tag === TAG.PUBLISH ? [(parse(frame.text) as { __r: string }).__r] : []))
+    const events = () => relayed(peer).map(({ __r }) => __r)
     await vi.waitFor(() => expect(events()).toContain('roster-error'))
     await subsOf(room)._refreshMembers()
     expect(events()).toEqual(['update', 'roster-error', 'roster'])
@@ -2439,9 +2418,9 @@ describe('Room public behavior', () => {
     const stub = register(room)
     const ensureRoster = vi.spyOn(subsOf(room), 'ensureRoster')
     const first = attachPeer(stub)
-    await vi.waitFor(() => expect(controlEvents(first).map(({ __r }) => __r)).toContain('roster'))
+    await vi.waitFor(() => expect(relayed(first).map(({ __r }) => __r)).toContain('roster'))
     stub._onPeerDisconnect(first.peer, 1_000)
-    const replayed = controlEvents(attachPeer(stub, 0))
+    const replayed = relayed(attachPeer(stub, 0))
     expect(replayed.slice(0, 2)).toMatchObject([{ __r: 'update' }, { __r: 'roster', members: [] }])
     expect(ensureRoster).toHaveBeenCalledTimes(2)
   })
@@ -2453,7 +2432,7 @@ describe('Room public behavior', () => {
       const first = attachPeer(stub)
       const { id } = (await stub._handleRequest({ __r: 'req-join', meta: {}, selfDelivery: true })) as { id: string }
       const idle = (await stub._handleRequest({ __r: 'req-join', meta: {}, selfDelivery: true })) as { id: string }
-      await vi.waitFor(() => expect(controlEvents(first).map(({ __r }) => __r)).toContain('roster'))
+      await vi.waitFor(() => expect(relayed(first).map(({ __r }) => __r)).toContain('roster'))
       stub._onPeerDisconnect(first.peer, 60_000)
       const observer = await Room.get(room.id)
       ;(await observer.getParticipant(id))!.subscribeBinary(() => {})
@@ -2462,7 +2441,7 @@ describe('Room public behavior', () => {
       await Room.setMeta(room.id, { pad: 'x'.repeat(300) })
       const peer = attachPeer(stub)
       await vi.waitFor(() =>
-        expect(controlEvents(peer).filter(({ __r }) => __r === 'demand-state')).toEqual([
+        expect(relayed(peer).filter(({ __r }) => __r === 'demand-state')).toEqual([
           { __r: 'demand-state', member: id, tracks: [null] },
           { __r: 'demand-state', member: idle.id, tracks: [] },
         ]),
@@ -3523,12 +3502,20 @@ async function createTail(id: string) {
     tail: (await Room.get(id, { tail: true })) as ServerRoom,
   }
 }
-function memberEvents(peer: Peer, id: string): Array<{ __r: string }> {
-  return peer
-    .decoded()
-    .filter((frame) => frame.tag === TAG.PUBLISH)
-    .map((frame) => JSON.parse(frame.text) as { __r: string; id?: string })
-    .filter((event) => event.id === id)
+type RelayedEvent = {
+  __r: string
+  id?: string
+  members?: Array<{ id: string; meta: unknown }>
+  meta?: unknown
+  data?: unknown
+  ackId?: string
+}
+/** Every event a Room stub relayed to its client, in order. */
+function relayed(peer: Peer): RelayedEvent[] {
+  return peer.decoded().flatMap((frame) => (frame.tag === TAG.PUBLISH ? [parse(frame.text) as RelayedEvent] : []))
+}
+function memberEvents(peer: Peer, id: string): RelayedEvent[] {
+  return relayed(peer).filter((event) => event.id === id)
 }
 /** A client Room fed every event its stub relayed, in order. */
 function clientView(peer: Peer, roomId: string): ClientRoom {
@@ -3536,23 +3523,14 @@ function clientView(peer: Peer, roomId: string): ClientRoom {
   for (const frame of peer.decoded()) if (frame.tag === TAG.PUBLISH) emit(parse(frame.text), frame.info.seq)
   return client
 }
-function controlEvents(peer: Peer): Array<{ __r: string; members?: unknown[]; meta?: unknown }> {
-  return peer
-    .decoded()
-    .filter((frame) => frame.tag === TAG.PUBLISH)
-    .map((frame) => JSON.parse(frame.text) as { __r: string; members?: unknown[]; meta?: unknown })
-}
 /** A participant stub's notices to its client. */
 function notices(peer: Peer): Array<{ __r: string }> {
   return peer.decoded().flatMap((frame) => (frame.tag === TAG.TEXT ? [parse(frame.text) as { __r: string }] : []))
 }
 function semanticFrames(peer: Peer, kind: 'data' | 'announce'): unknown[] {
-  return peer
-    .decoded()
-    .filter((frame) => frame.tag === TAG.PUBLISH)
-    .map((frame) => JSON.parse(frame.text) as { __r: string; data?: unknown })
-    .filter((frame) => frame.__r === kind)
-    .map((frame) => frame.data)
+  return relayed(peer)
+    .filter((event) => event.__r === kind)
+    .map((event) => event.data)
 }
 
 function delayRosterRead(roomId: string): { started: Promise<void>; release: () => void } {
