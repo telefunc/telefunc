@@ -10,7 +10,11 @@ import { throwAbortError, throwBugError } from './errors.js'
 import { ShieldValidationError } from '../../shared/ShieldValidationError.js'
 import type { CloseHandler } from '../close.js'
 import { ConnectionError } from '../ConnectionError.js'
-import { appendSessionParam, getSessionToken, setSessionToken } from '../../wire-protocol/client/session-registry.js'
+import {
+  appendSessionParam,
+  getOrCreateSessionToken,
+  setSessionToken,
+} from '../../wire-protocol/client/session-registry.js'
 import { TELEFUNC_SESSION_HEADER, type ChannelTransports } from '../../wire-protocol/constants.js'
 import {
   STATUS_CODE_SUCCESS,
@@ -41,8 +45,10 @@ async function makeHttpRequest(callContext: {
 }): Promise<unknown> {
   const isBinaryFrame = typeof callContext.httpRequestBody !== 'string'
   const requestKind = isBinaryFrame ? REQUEST_KIND.BINARY : REQUEST_KIND.TEXT
-  const sessionToken = getSessionToken(callContext.telefuncUrl)
-  const fetchUrl = sessionToken ? appendSessionParam(callContext.telefuncUrl, sessionToken) : callContext.telefuncUrl
+  // A page names its session before its first request, so its concurrent first calls and their channels share it. It
+  // travels as a query parameter, which a cross-origin server doesn't have to allow as it would a header.
+  const sessionToken = getOrCreateSessionToken(callContext.telefuncUrl)
+  const fetchUrl = appendSessionParam(callContext.telefuncUrl, sessionToken)
   const requestUrl = getMarkedRequestUrl(fetchUrl, requestKind)
   const contentType = isBinaryFrame ? { 'Content-Type': 'application/octet-stream' } : { 'Content-Type': 'text/plain' }
   const requestKindHeader = { [REQUEST_KIND_HEADER]: requestKind }
@@ -57,7 +63,6 @@ async function makeHttpRequest(callContext: {
         ...contentType,
         ...requestKindHeader,
         ...callContext.headers,
-        ...(sessionToken ? { [TELEFUNC_SESSION_HEADER]: sessionToken } : undefined),
       },
       signal: callContext.abortController.signal,
     })
