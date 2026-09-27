@@ -31,10 +31,7 @@ const broadcast = new CloudflareBroadcast({
   locationFallback: 'weur',
   namespace: () => workerEnv.TELEFUNC,
 })
-installBackend(
-  () => new CloudflareBackend({ rooms: () => workerEnv.TELEFUNC, broadcast }),
-  ['cloudflare-room-ci-public'],
-)
+installBackend(() => new CloudflareBackend({ rooms: () => workerEnv.TELEFUNC, broadcast }), ['cloudflare-room-ci'])
 const textEncoder = new TextEncoder()
 const textDecoder = new TextDecoder()
 const CONTROL_HORIZON_MS = 2_000
