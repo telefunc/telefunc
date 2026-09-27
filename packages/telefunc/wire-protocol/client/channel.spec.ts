@@ -133,15 +133,11 @@ test("a subscriber that unsubscribes itself doesn't make the next one miss the m
   expect(seen).toEqual(['once:one', 'other:one', 'other:two'])
 })
 
-test('a subscribe goes out again when its broadcast re-attaches, as one written to a wire already dead is lost', () => {
+test('a broadcast declares its subscriptions on every attach, as a subscribe written to a wire already dead is lost', () => {
   const broadcast = stalledBroadcast()
-  const sendBroadcastSubscribe = vi.spyOn((broadcast as any)._connection, 'sendBroadcastSubscribe')
   broadcast.subscribe(() => {})
-  broadcast.subscribeBinary(() => {})
-  expect(sendBroadcastSubscribe).toHaveBeenCalledTimes(2)
-  broadcast._onTransportOpen(false) // the reconcile of a reconnect: the first subscribe may have died with the old wire
-  expect(sendBroadcastSubscribe.mock.calls.slice(2)).toEqual([
-    [broadcast, false],
-    [broadcast, true],
-  ])
+  const offBinary = broadcast.subscribeBinary(() => {})
+  expect(broadcast._reattachState()).toEqual({ broadcast: { text: true, binary: true } })
+  offBinary()
+  expect(broadcast._reattachState()).toEqual({ broadcast: { text: true, binary: false } })
 })

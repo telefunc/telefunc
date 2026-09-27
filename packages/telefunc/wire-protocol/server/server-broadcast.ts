@@ -20,7 +20,7 @@ import { assert, assertUsage } from '../../utils/assert.js'
 import { isPromise } from '../../utils/isPromise.js'
 import { ChannelClosedError } from '../channel-errors.js'
 import { ACK_STATUS, encodePublishText, encodePublishBinary, TAG } from '../shared-ws.js'
-import type { ChannelCtrlFrame, ChannelDataFrame, WirePublishInfo } from '../shared-ws.js'
+import type { ChannelDataFrame, WirePublishInfo } from '../shared-ws.js'
 import { STATUS_BODY_INTERNAL_SERVER_ERROR } from '../../shared/constants.js'
 import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
 assertIsNotBrowser()
@@ -120,18 +120,6 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
     super._dispatchDataFrame(frame)
   }
 
-  override _dispatchCtrl(frame: ChannelCtrlFrame): void {
-    if (frame.tag === TAG.BROADCAST_SUB) {
-      this._onPeerBroadcastSubscribe(frame.binary)
-      return
-    }
-    if (frame.tag === TAG.BROADCAST_UNSUB) {
-      this._onPeerBroadcastUnsubscribe(frame.binary)
-      return
-    }
-    super._dispatchCtrl(frame)
-  }
-
   _onPeerPublishAckReqMessage(text: string, seq: number): Promise<void> {
     return this._trackAck(this._dispatchPublishAckReq(text, seq))
   }
@@ -175,6 +163,11 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
       return
     }
     this._prePeerBuffer.pushPublishBinary(wireData)
+  }
+
+  override _onPeerSubscription(kind: 'text' | 'binary', on: boolean): void {
+    if (on) this._onPeerBroadcastSubscribe(kind === 'binary')
+    else this._onPeerBroadcastUnsubscribe(kind === 'binary')
   }
 
   _onPeerBroadcastSubscribe(binary: boolean): void {

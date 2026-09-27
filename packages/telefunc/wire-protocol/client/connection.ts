@@ -38,6 +38,7 @@ import { REQUEST_KIND, REQUEST_KIND_HEADER, getMarkedRequestUrl } from '../reque
 import { ACK_STATUS, TAG, decode, encode, isChannelDataFrame, payloadBytes } from '../shared-ws.js'
 import type {
   AckResultStatus,
+  ReattachState,
   ChannelFrame,
   DecodedFrame,
   ReadyPayload,
@@ -146,6 +147,8 @@ interface MuxChannel {
    *  connection — they involve connection-side cleanup. */
   _dispatchFrame(frame: ChannelFrame): void
   _onTransportClose(err?: Error): void
+  /** What this channel declares in its RECONCILE entry on every (re)attach. */
+  _reattachState?(): ReattachState
 }
 
 interface MuxConnection {
@@ -1281,7 +1284,7 @@ class ClientConnection implements MuxConnection {
   // ── Protocol internals ──
 
   buildReconcileFrame(): OutboundFrame {
-    const open = this.collectOpenEntries({ skipInitial: false })
+    const open = this.declareOpenEntries({ skipInitial: false })
     const reconcile: ReconcilePayload = { open, ...(this.sessionId ? { sessionId: this.sessionId } : {}) }
     return { kind: 'reconcile', frame: encode.reconcile(reconcile) }
   }
@@ -1289,11 +1292,11 @@ class ClientConnection implements MuxConnection {
   /** The old wire's last frame. Channels the server has not acknowledged yet are left out: the
    *  staged probe has no record of them, so they reconcile again after the handoff. */
   private buildBarrierFrame(sessionId: string, upgradeId: string): OutboundFrame {
-    const open = this.collectOpenEntries({ skipInitial: true })
+    const open = this.declareOpenEntries({ skipInitial: true })
     return { kind: 'reconcile', frame: encode.barrier({ sessionId, upgradeId, open }) }
   }
 
-  private collectOpenEntries({ skipInitial }: { skipInitial: boolean }): ReconcileOpenEntry[] {
+  private declareOpenEntries({ skipInitial }: { skipInitial: boolean }): ReconcileOpenEntry[] {
     this.enterReconciling()
     this.reconcileIxes = new Set()
     const open: ReconcileOpenEntry[] = []
@@ -1307,6 +1310,14 @@ class ClientConnection implements MuxConnection {
         lastSeq: this.lastSeqByChannel.get(ix) ?? 0,
       }
       if (isInitial) payloadEntry.initial = true
+      const state = entry.channel._reattachState?.()
+      Object.assign(payloadEntry, state)
+      // The declared subscriptions supersede the SUB/UNSUB frames queued before them.
+      if (state?.broadcast)
+        this.sendBuffer = this.sendBuffer.filter(
+          ({ channelIx, frame }) =>
+            channelIx !== ix || (frame[0] !== TAG.BROADCAST_SUB && frame[0] !== TAG.BROADCAST_UNSUB),
+        )
       open.push(payloadEntry)
     }
     return open
@@ -1984,17 +1995,11 @@ class SseTransport implements UpgradeSource {
     const initialFrames: OutboundFrame[] = []
     initialFrames.push(reconcileBatch.reconcileFrame)
     const movedBufferedFrames = reconcileBatch.movedBufferedFrames
-    // A dead wire's outbox carries only its window refreshes and broadcast toggles. This reconcile declares every
-    // channel, a close request goes out again on reattach, and sequenced frames replay after RECONCILED from the
+    // A dead wire's outbox carries only its window refreshes. This reconcile declares every channel and its
+    // subscriptions, a close request goes out again on reattach, and sequenced frames replay after RECONCILED from the
     // server's lastSeq: sent first, they could overtake older ones a POST still in flight carries, whose frames the
     // server would then drop as duplicates.
-    const movedOutbox = this.outbox.filter(
-      ({ frame }) =>
-        frame[0] === TAG.WINDOW ||
-        frame[0] === TAG.MSG_WINDOW ||
-        frame[0] === TAG.BROADCAST_SUB ||
-        frame[0] === TAG.BROADCAST_UNSUB,
-    )
+    const movedOutbox = this.outbox.filter(isWindowRefresh)
     this.outbox = []
     for (const entry of movedOutbox) initialFrames.push({ kind: 'data', frame: entry.frame })
     for (const frame of movedBufferedFrames) initialFrames.push(frame)
@@ -2221,6 +2226,10 @@ const UPGRADE_TARGET_REGISTRY: Record<
   (telefuncUrl: string, owner: ClientConnection) => UpgradeTarget
 > = {
   [CHANNEL_TRANSPORT.WS]: (telefuncUrl, owner) => new WsTransport(telefuncUrl, owner),
+}
+
+function isWindowRefresh({ frame }: OutboxEntry): boolean {
+  return frame[0] === TAG.WINDOW || frame[0] === TAG.MSG_WINDOW
 }
 
 function createSseEventStreamReader(

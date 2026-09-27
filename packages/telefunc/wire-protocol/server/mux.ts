@@ -27,7 +27,14 @@ import {
   isConnCtrlTag,
   peekTag,
 } from '../shared-ws.js'
-import type { BarrierPayload, ChannelFrame, PreparePayload, ReconcilePayload, ReconciledPayload } from '../shared-ws.js'
+import type {
+  BarrierPayload,
+  ChannelFrame,
+  PreparePayload,
+  ReconcileOpenEntry,
+  ReconcilePayload,
+  ReconciledPayload,
+} from '../shared-ws.js'
 import { IndexedPeer, type PeerSender } from './IndexedPeer.js'
 import type { ServerChannel } from './channel.js'
 
@@ -541,25 +548,25 @@ class ChannelMux {
    *  reconciles fail fast if the channel is gone. */
   private async attach(entry: ReconcilePayload['open'][number], sender: PeerSender): Promise<ChannelHandle | null> {
     const existing = this.channels.get(entry.id)
-    if (existing) return this.attachChannel(existing, entry.ix, entry.lastSeq, sender)
+    if (existing) return this.attachChannel(existing, entry, sender)
     if (!entry.initial) return null
     return new Promise<ChannelHandle | null>((resolve) => {
       this.waitForChannelRegistration(entry.id, this.options.connectTtl, (channel) => {
-        resolve(channel ? this.attachChannel(channel, entry.ix, entry.lastSeq, sender) : null)
+        resolve(channel ? this.attachChannel(channel, entry, sender) : null)
       })
     })
   }
 
   /** Drains replay frames missed since `lastSeq` (sends are sync — see `send`), then
    *  attaches an `IndexedPeer`. Returns null if the channel already shut down. */
-  private attachChannel(channel: ServerChannel, ix: number, lastSeq: number, sender: PeerSender): ChannelHandle | null {
+  private attachChannel(channel: ServerChannel, entry: ReconcileOpenEntry, sender: PeerSender): ChannelHandle | null {
     if (channel._didShutdown) return null
     const replay = channel._replayBuffer
     assert(replay !== null, `ServerChannel "${channel.id}" attached without a replay buffer`)
-    for (const frame of replay.getAfter(lastSeq)) sender.send(frame)
-    const peer = new IndexedPeer(sender, ix, replay)
-    channel._attachPeer(peer)
-    return { channel, ix, peer }
+    for (const frame of replay.getAfter(entry.lastSeq)) sender.send(frame)
+    const peer = new IndexedPeer(sender, entry.ix, replay)
+    channel._attachPeer(peer, entry)
+    return { channel, ix: entry.ix, peer }
   }
 
   private waitForChannelRegistration(

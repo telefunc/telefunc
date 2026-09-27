@@ -1,8 +1,9 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Broadcast, ServerBroadcast } from './server-broadcast.js'
 import { ReplayBuffer } from '../replay-buffer.js'
-import { ACK_STATUS, TAG, decode } from '../shared-ws.js'
+import { ACK_STATUS, TAG, decode, encode, type DecodedFrame } from '../shared-ws.js'
 import { IndexedPeer } from './IndexedPeer.js'
+import { ChannelMux, type ServerTransport } from './mux.js'
 import { getBroadcastAdapter, _resetBroadcastAdapterForTesting, DefaultBroadcastAdapter } from './broadcast.js'
 import type { BroadcastTransport } from './broadcast.js'
 import { config } from '../../node/server/serverConfig.js'
@@ -536,5 +537,60 @@ describe('Broadcast static bus (publish/subscribe)', () => {
     await channel.publish('two')
     expect(seen).toEqual(['once:one', 'other:one', 'other:two'])
     channel.abort()
+  })
+})
+
+describe('Broadcast subscriptions declared on attach', () => {
+  it("delivers onOpen's publish to the client whose open declared its subscription", async () => {
+    const mux = new ChannelMux()
+    const connection = {}
+    const sent: DecodedFrame[] = []
+    let sessionId: string | undefined
+    const transport: ServerTransport<object> = {
+      getSessionId: () => sessionId,
+      setSessionId: (_connection, id) => (sessionId = id),
+      getConnId: () => null,
+      sendNow: (_connection, frame) => sent.push(decode(frame)),
+      terminateConnection: () => {},
+    }
+    mux.onConnectionOpen(connection, transport)
+    const chat = new ServerBroadcast<string>({ key: 'broadcast:joined-on-open' })
+    chat.onOpen(() => void chat.publish('joined'))
+    mux.registerChannel(chat)
+    const entry = { id: chat.id, ix: 0, lastSeq: 0, initial: true, broadcast: { text: true, binary: false } } as const
+    await mux.onConnectionRawMessage(connection, encode.reconcile({ open: [entry] }))
+    await vi.waitFor(() =>
+      expect(sent.some((frame) => frame.tag === TAG.PUBLISH && frame.text === '"joined"')).toBe(true),
+    )
+  })
+
+  it('restores a subscription whose BROADCAST_SUB died with the previous transport from the reconnect entry', async () => {
+    const mux = new ChannelMux()
+    const sent: DecodedFrame[] = []
+    const sessions = new Map<object, string>()
+    const transport: ServerTransport<object> = {
+      getSessionId: (connection) => sessions.get(connection),
+      setSessionId: (connection, id) => void sessions.set(connection, id),
+      getConnId: () => null,
+      sendNow: (_connection, frame) => sent.push(decode(frame)),
+      terminateConnection: () => {},
+    }
+    const key = 'broadcast:reconnect-entry'
+    const chat = new ServerBroadcast<string>({ key })
+    mux.registerChannel(chat)
+    const first = {}
+    mux.onConnectionOpen(first, transport)
+    const entry = { id: chat.id, ix: 0, lastSeq: 0, broadcast: { text: false, binary: false } }
+    await mux.onConnectionRawMessage(first, encode.reconcile({ open: [{ ...entry, initial: true }] }))
+    mux.onConnectionClosed(first, { permanent: false })
+
+    const second = {}
+    mux.onConnectionOpen(second, transport)
+    const reopened = { ...entry, broadcast: { text: true, binary: false } }
+    await mux.onConnectionRawMessage(second, encode.reconcile({ sessionId: sessions.get(first), open: [reopened] }))
+    await Broadcast.publish(key, 'after-reconnect')
+    await vi.waitFor(() =>
+      expect(sent.some((frame) => frame.tag === TAG.PUBLISH && frame.text === '"after-reconnect"')).toBe(true),
+    )
   })
 })

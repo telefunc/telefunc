@@ -27,6 +27,7 @@ import {
   type ChannelCtrlFrame,
   type ChannelDataFrame,
   type ChannelFrame,
+  type ReattachState,
   type WirePublishInfo,
 } from '../shared-ws.js'
 import { assert } from '../../utils/assert.js'
@@ -610,6 +611,8 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   readonly [CLIENT_BROADCAST_BRAND] = true
   private _broadcastListeners: Array<BroadcastListener<T>> = []
   private _broadcastBinaryListeners: Array<BroadcastBinaryListener> = []
+  /** What the server was last told this page subscribes to. */
+  private readonly _wire = { text: false, binary: false }
 
   static isClientBroadcast(value: unknown): value is ClientBroadcast {
     return hasProp(value, CLIENT_BROADCAST_BRAND)
@@ -630,16 +633,12 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   }
 
   subscribe(callback: BroadcastListener<T>): () => void {
-    if (this._broadcastListeners.length === 0) {
-      this._connection.sendBroadcastSubscribe(this, false)
-    }
+    if (this._broadcastListeners.length === 0) this._setWireSubscribed('text', true)
     this._broadcastListeners.push(callback)
     return () => {
       const index = this._broadcastListeners.indexOf(callback)
       if (index >= 0) this._broadcastListeners.splice(index, 1)
-      if (this._broadcastListeners.length === 0) {
-        this._connection.sendBroadcastUnsubscribe(this, false)
-      }
+      if (this._broadcastListeners.length === 0) this._setWireSubscribed('text', false)
     }
   }
 
@@ -657,26 +656,25 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   }
 
   subscribeBinary(callback: BroadcastBinaryListener): () => void {
-    if (this._broadcastBinaryListeners.length === 0) {
-      this._connection.sendBroadcastSubscribe(this, true)
-    }
+    if (this._broadcastBinaryListeners.length === 0) this._setWireSubscribed('binary', true)
     this._broadcastBinaryListeners.push(callback)
     return () => {
       const index = this._broadcastBinaryListeners.indexOf(callback)
       if (index >= 0) this._broadcastBinaryListeners.splice(index, 1)
-      if (this._broadcastBinaryListeners.length === 0) {
-        this._connection.sendBroadcastUnsubscribe(this, true)
-      }
+      if (this._broadcastBinaryListeners.length === 0) this._setWireSubscribed('binary', false)
     }
   }
 
-  override _onTransportOpen(batched: boolean): void {
-    super._onTransportOpen(batched)
-    // A subscribe is not replayed, so one written to a wire that had already died is lost: it goes out again on every
-    // attach, as a pending close request does.
-    if (this._isClosed) return
-    if (this._broadcastListeners.length > 0) this._connection.sendBroadcastSubscribe(this, false)
-    if (this._broadcastBinaryListeners.length > 0) this._connection.sendBroadcastSubscribe(this, true)
+  private _setWireSubscribed(kind: 'text' | 'binary', on: boolean): void {
+    if (on === this._wire[kind] || this._isClosed) return
+    this._wire[kind] = on
+    if (on) this._connection.sendBroadcastSubscribe(this, kind === 'binary')
+    else this._connection.sendBroadcastUnsubscribe(this, kind === 'binary')
+  }
+
+  /** @internal Every (re)attach declares the subscriptions: a SUB or UNSUB written to a wire that died isn't replayed. */
+  _reattachState(): ReattachState {
+    return { broadcast: { ...this._wire } }
   }
 
   override _dispatchDataFrame(frame: ChannelDataFrame): void {

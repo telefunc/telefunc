@@ -104,6 +104,24 @@ test('a zero replay budget still registers a later channel on the connection', (
   connection.dispose()
 })
 
+test("a reconnect declares a broadcast's subscriptions, not the toggles queued before it", () => {
+  const channel = { ...createChannel(), _reattachState: () => ({ broadcast: { text: true, binary: false } }) }
+  const connection = ClientConnection.getOrCreate('http://toggle.test', channel as never, {
+    transports: [CHANNEL_TRANSPORT.SSE],
+    fetchImpl: createStalledTransport().fetchImpl,
+    connectionKey: crypto.randomUUID(),
+  }) as any
+  // Offline, the listener is swapped: an unsubscribe, then a subscribe. The reconcile entry already says subscribed.
+  connection.sendBroadcastUnsubscribe(channel, false)
+  connection.sendBroadcastSubscribe(channel, false)
+  const { movedBufferedFrames } = connection.stageReconcileBatch()
+  const queued: Array<number | undefined> = [...connection.sendBuffer, ...movedBufferedFrames].map(
+    ({ frame }: { frame: Uint8Array }) => frame[0],
+  )
+  expect(queued.filter((tag) => tag === TAG.BROADCAST_SUB || tag === TAG.BROADCAST_UNSUB)).toEqual([])
+  connection.dispose()
+})
+
 test("an SSE reconnect sends its own reconcile and leaves a dead POST's messages to the replay, so they can't overtake the ones in flight", () => {
   const connection = ClientConnection.getOrCreate(
     'http://outbox.test',
@@ -119,7 +137,7 @@ test("an SSE reconnect sends its own reconcile and leaves a dead POST's messages
   )
   const { initialFrames } = connection.transport.stageInitialBatch()
   const tags = initialFrames.map(({ frame }: { frame: Uint8Array }) => frame[0])
-  expect(tags).toEqual([TAG.RECONCILE, TAG.WINDOW, TAG.BROADCAST_UNSUB])
+  expect(tags).toEqual([TAG.RECONCILE, TAG.WINDOW])
   connection.dispose()
 })
 

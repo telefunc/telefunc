@@ -40,7 +40,7 @@ import { ReplayBuffer } from '../replay-buffer.js'
 import { getServerConfig } from '../../node/server/serverConfig.js'
 import { assert } from '../../utils/assert.js'
 import { ACK_STATUS, ProtocolViolationError, TAG, isChannelCtrlTag } from '../shared-ws.js'
-import type { AckResultStatus, ChannelCtrlFrame, ChannelDataFrame, ChannelFrame } from '../shared-ws.js'
+import type { AckResultStatus, ChannelCtrlFrame, ChannelDataFrame, ChannelFrame, ReattachState } from '../shared-ws.js'
 
 /** Peer-authored JSON: a parse failure is the peer's, so it surfaces as a protocol violation. */
 function parsePeerText(text: string): unknown {
@@ -331,7 +331,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     )
   }
 
-  _attachPeer(peer: IndexedPeer): void {
+  /** The peer's RECONCILE declarations apply before `onOpen` fires, through the same hooks as its frames. */
+  _attachPeer(peer: IndexedPeer, state?: ReattachState): void {
     if (this._didShutdown) return
     this._clearTimer('_ttlTimer')
     this._clearTimer('_reconnectTimer')
@@ -355,6 +356,10 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       peer.sendAckRes(ack.ackedSeq, ack.result, ack.status)
     }
     this._pendingAckRes.length = 0
+    if (state?.broadcast) {
+      this._onPeerSubscription('text', state.broadcast.text)
+      this._onPeerSubscription('binary', state.broadcast.binary)
+    }
     if (this._pendingCloseAck) peer.sendCloseAck()
     if (this._awaitingCloseAck) peer.sendCloseRequest(Math.max(0, this._closeDeadline - Date.now()))
     if (this._isClosed) {
@@ -426,9 +431,14 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       case TAG.BDP_PING_ACK:
         this._flow.onPingAck()
         return
-      // BROADCAST_SUB / BROADCAST_UNSUB: dropped on plain channels; ServerBroadcast overrides.
+      case TAG.BROADCAST_SUB:
+      case TAG.BROADCAST_UNSUB:
+        this._onPeerSubscription(frame.binary ? 'binary' : 'text', frame.tag === TAG.BROADCAST_SUB)
     }
   }
+
+  // A broadcast takes subscriptions; a plain channel drops them.
+  _onPeerSubscription(_kind: 'text' | 'binary', _on: boolean): void {}
 
   _onPeerMessage(text: string, bytes: number): void {
     const t0 = performance.now()
