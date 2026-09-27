@@ -770,7 +770,7 @@ describe('reference identity — full pipeline', () => {
       ;(globalThis as { gc(): void }).gc()
       await new Promise((resolve) => setTimeout(resolve, 20))
     }
-    controller.enqueue(new TextEncoder().encode('tail'))
+    controller.enqueue(utf8('tail'))
     controller.close()
     expect(await new Response(branch).text()).toBe('tail')
   })
