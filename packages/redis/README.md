@@ -18,7 +18,7 @@ const redis = new IORedis('redis://localhost:6379', { maxRetriesPerRequest: 0 })
 installRedis(redis)
 ```
 
-That one `installRedis()` call configures Broadcast and Room from the same client. Never-resend options make a lost command reply reject rather than execute twice.
+That one `installRedis()` call configures Broadcast and Room from the same client. Never-resend options make a lost command reply reject rather than execute twice. Make the call before the first Broadcast or Room use: an earlier use starts the in-memory backend, and `installRedis()` then throws.
 
 ### Required client options
 
@@ -36,6 +36,8 @@ ioredis applies `keyPrefix` to commands but not to Pub/Sub channels; use `instal
 On a Cluster, a room's keys share one hash slot.
 
 All subscriptions share one subscriber connection. When it drops, they resume on a fresh one; messages published in between are lost. Delivery stays at-most-once while a Cluster reshards: a message that arrives after a newer one is dropped, never replayed, so callbacks never go back in order. A failover whose new master missed the last writes rewinds their sequence numbers, so subscribers still connected drop as many later messages as it lost. When you remove a Cluster node (`redis-cli --cluster del-node`), shut it down too: a removed node left running keeps the subscribers connected to it, and they receive nothing until it stops. Keep master clocks synchronized: expiries use the clock of the master that owns the room's slot.
+
+Room keeps its state (rooms, members, lane order) in keys with no expiry, so Redis must never evict them: use `maxmemory-policy noeviction`, or a `volatile-*` policy, which evicts only keys with an expiry.
 
 On a Cluster, a publish's `receivers` is omitted: a master's `PUBLISH` counts only its own subscribers, so it can't prove that nobody is subscribed.
 
