@@ -709,8 +709,8 @@ class ServerRoom extends RoomStateView implements Room {
     this._subs.replan()
   }
   _onStubAttached(stub: RoomStubChannel): void {
-    this._sendRosterTo(stub)
     if (!this._stubs.has(stub)) return
+    this._sendRosterTo(stub)
     stub._relayEvent({ __r: 'update', meta: this.meta, ...this._state.updateStamp })
     for (const member of stub._heldMembers())
       stub._relayEvent({ __r: 'demand-state', member, tracks: this._demand.wanted(member).map(publicTrack) })
