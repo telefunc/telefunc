@@ -316,6 +316,23 @@ test('a channel whose abort went out with a reconcile on a wire that then died i
   connection.dispose()
 })
 
+test("a closing channel's listener answer, held while another channel registers on a live wire, reaches the server", () => {
+  const closing = createChannel()
+  const options = stalledOptions()
+  const connection = ClientConnection.getOrCreate('http://answer-held.test', closing as never, options) as any
+  connection.buildReconcileFrame()
+  connection.applyReconciled(reconciled({ sessionId: 'answer-held', open: [{ ix: 0, lastSeq: 0 }] }), null)
+  ClientConnection.getOrCreate('http://answer-held.test', createChannel() as never, options) // the listener opens a channel
+  connection.sendAckRes(closing, 1, '"answer"') // then answers; the registration holds it
+  connection.unregister(closing) // its close round trip is done
+  const { reconcileFrame, movedBufferedFrames } = connection.stageReconcileBatch()
+  const reconcile = decode(reconcileFrame.frame) as { payload: { open: { ix: number }[] } }
+  const listed = reconcile.payload.open.map((entry) => entry.ix)
+  const queued = [...movedBufferedFrames, ...connection.sendBuffer].map(({ frame }: { frame: Uint8Array }) => frame[0])
+  expect({ listed: listed.includes(0), answer: queued.includes(TAG.ACK_RES) }).toEqual({ listed: true, answer: true })
+  connection.dispose()
+})
+
 /** Two open channels; the first one's close request went down with a wire whose loss is then noticed. */
 function closeLostWithWire(url: string) {
   const closing = createChannel()
@@ -340,7 +357,7 @@ function closeLostWithWire(url: string) {
 test('a channel whose close request went down with the wire is left out of the reconnect once its close timed out, though its listener answered after the loss', () => {
   const { connection, closing } = closeLostWithWire('http://close-lost.test')
   connection.sendAckRes(closing, 1, '"answer"') // its async listener answers a server send({ ack: true })
-  connection.unregister(closing) // its close times out
+  connection.unregister(closing, undefined, { closeTimedOut: true })
   const reconcile = decode(connection.buildReconcileFrame().frame) as { payload: { open: { ix: number }[] } }
   expect(reconcile.payload.open.map((entry) => entry.ix)).toEqual([1])
   connection.dispose()
@@ -350,7 +367,7 @@ test('such a channel, released while the reconnect listing it is in flight, is l
   const { connection, closing } = closeLostWithWire('http://close-lost-in-flight.test')
   connection.buildReconcileFrame() // the attempt's, built when it starts, listing both
   connection.sendAckRes(closing, 1, '"answer"')
-  connection.unregister(closing)
+  connection.unregister(closing, undefined, { closeTimedOut: true })
   const open = [
     { ix: 0, lastSeq: 0 },
     { ix: 1, lastSeq: 0 },
