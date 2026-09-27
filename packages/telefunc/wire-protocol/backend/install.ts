@@ -75,12 +75,12 @@ function getRoomBackend(): RoomBackend {
   return currentBackend().room
 }
 
-/** For tests: forgets the backend and the transport's plane, and stops their subscriptions. */
+/** For tests: forgets the backend and the transport override, and stops their subscriptions. */
 async function disposeBackend(): Promise<void> {
   const installed = state.installed
   const overridePlane = state.broadcastOverride?.backend
   state.installed = null
-  if (state.broadcastOverride) delete state.broadcastOverride.backend
+  delete state.broadcastOverride
   await Promise.all([overridePlane?.dispose(), installed?.broadcast?.dispose(), installed?.room.dispose()])
 }
 

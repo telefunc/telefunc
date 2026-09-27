@@ -14,12 +14,8 @@ import { MemoryBackend } from './memory/backend.js'
 import { DriverAttempt } from './attempt.js'
 import { config } from '../../node/server/serverConfig.js'
 import { ServerBroadcast } from '../server/server-broadcast.js'
-import { getGlobalObject } from '../../utils/getGlobalObject.js'
-const installState = getGlobalObject<{ broadcastOverride?: unknown }>('wire-protocol/backend/install.ts', () => ({}))
 afterEach(async () => {
   await disposeBackend()
-  // A configured transport stays for the process; each test starts without one.
-  delete installState.broadcastOverride
   config.broadcast = {}
   vi.restoreAllMocks()
 })
@@ -67,12 +63,14 @@ describe('backend installation lifecycle', () => {
     expect(getRoomBackend()).toBe(roomInstalledFirst)
 
     await disposeBackend()
+    configureBroadcastTransport(transport)
     installBackend(() => new MemoryBackend())
     const roomConfiguredFirst = getRoomBackend()
     await expectBroadcastRoundTrip('configured-first')
     expect(getRoomBackend()).toBe(roomConfiguredFirst)
 
     await disposeBackend()
+    configureBroadcastTransport(transport)
     await expectBroadcastRoundTrip('transport-only')
     expect(() => getRoomBackend()).toThrow('Room requires a full backend')
   })
