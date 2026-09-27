@@ -1378,6 +1378,8 @@ class ClientConnection implements MuxConnection {
     const releaseFrames: OutboundFrame[] = []
     const channelsToOpen: MuxChannel[] = []
     let hasNewChannels = false
+    // A channel released while this reconcile was in flight is attached on the server; the next reconcile ends it.
+    const releasedMeanwhile = [...serverMap.keys()].some((ix) => !this.channels.has(ix))
 
     for (const [ix, entry] of this.channels) {
       if (!reconcileIxes.has(ix)) {
@@ -1410,14 +1412,15 @@ class ClientConnection implements MuxConnection {
 
     for (const frame of this.drainBufferedFrames(serverMap, this.channels)) releaseFrames.push(frame)
 
-    if (hasNewChannels) {
+    const reconcileAgain = hasNewChannels || releasedMeanwhile
+    if (reconcileAgain) {
       const reconcileBatch = this.stageReconcileBatch()
       this.appendReconcileBatch(releaseFrames, reconcileBatch)
     } else {
       this.exitReconciling()
     }
 
-    return { frames: releaseFrames, channelsToOpen, reconcileComplete: !hasNewChannels }
+    return { frames: releaseFrames, channelsToOpen, reconcileComplete: !reconcileAgain }
   }
 
   private releaseDeferredOmitted(ixes: number[]): void {
