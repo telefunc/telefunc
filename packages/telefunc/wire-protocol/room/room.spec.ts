@@ -3768,7 +3768,7 @@ function captureOutcome<T>(promise: Promise<T>) {
   return outcome
 }
 function mockLaneSubscription(
-  kind: LaneId['kind'],
+  match: LaneId['kind'] | ((lane: LaneId) => boolean),
   replacement: (
     subscribeLane: ReturnType<typeof getRoomBackend>['subscribeLane'],
     roomId: string,
@@ -3779,8 +3779,9 @@ function mockLaneSubscription(
 ) {
   const backend = getRoomBackend()
   const subscribeLane = backend.subscribeLane.bind(backend)
+  const matches = typeof match === 'function' ? match : (lane: LaneId) => lane.kind === match
   vi.spyOn(backend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) =>
-    lane.kind === kind
+    matches(lane)
       ? replacement(subscribeLane, roomId, inc, lane, receiver)
       : subscribeLane(roomId, inc, lane, receiver),
   )
@@ -3798,15 +3799,12 @@ function rejectLaneSubscriptions(kind: LaneId['kind'], diagnostic: string) {
 }
 /** Loses the frames picked on matching lanes opened from now on, as a lane that stays ready. */
 function loseLaneFrames(matches: (lane: LaneId) => boolean) {
-  const backend = getRoomBackend()
-  const subscribeLane = backend.subscribeLane.bind(backend)
   let pick: (text: string) => boolean = () => false
-  vi.spyOn(backend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
-    if (!matches(lane)) return subscribeLane(roomId, inc, lane, receiver)
-    return subscribeLane(roomId, inc, lane, (payload, info) => {
+  mockLaneSubscription(matches, (subscribeLane, roomId, inc, lane, receiver) =>
+    subscribeLane(roomId, inc, lane, (payload, info) => {
       if (!pick(decoder.decode(payload))) receiver(payload, info)
-    })
-  })
+    }),
+  )
   return {
     next() {
       pick = () => ((pick = () => false), true)
@@ -3818,17 +3816,14 @@ function loseLaneFrames(matches: (lane: LaneId) => boolean) {
 }
 /** Holds the frames delivered on matching lanes opened from now on, until released in delivery order. */
 function holdLaneDelivery(matches: (lane: LaneId) => boolean) {
-  const backend = getRoomBackend()
-  const subscribeLane = backend.subscribeLane.bind(backend)
   const held: Array<() => void | Promise<void>> = []
   let holding = true
-  vi.spyOn(backend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
-    if (!matches(lane)) return subscribeLane(roomId, inc, lane, receiver)
-    return subscribeLane(roomId, inc, lane, (payload, info) => {
+  mockLaneSubscription(matches, (subscribeLane, roomId, inc, lane, receiver) =>
+    subscribeLane(roomId, inc, lane, (payload, info) => {
       if (!holding) return receiver(payload, info)
       held.push(() => receiver(payload, info))
-    })
-  })
+    }),
+  )
   return {
     async release() {
       holding = false
@@ -3871,12 +3866,9 @@ function delayDriverLane(matches: (lane: LaneId) => boolean): () => void {
   return () => release()
 }
 function delayLaneSubscription(matches: (lane: LaneId) => boolean) {
-  const backend = getRoomBackend()
-  const subscribeLane = backend.subscribeLane.bind(backend)
   const started = createDeferred()
   let release!: () => Promise<void>
-  vi.spyOn(backend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
-    if (!matches(lane)) return subscribeLane(roomId, inc, lane, receiver)
+  mockLaneSubscription(matches, (subscribeLane, roomId, inc, lane, receiver) => {
     let inner: BackendSubscription | null = null
     let state: SubscriptionState = 'establishing'
     const readiness = createDeferred()
