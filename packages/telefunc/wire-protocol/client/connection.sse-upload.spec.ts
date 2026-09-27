@@ -8,7 +8,6 @@ import { ServerChannel } from '../server/channel.js'
 import { ServerBroadcast } from '../server/server-broadcast.js'
 import { getChannelMux } from '../server/mux.js'
 import { getTelefuncSseChannelHooks } from '../server/sse.js'
-import { CHANNEL_TRANSPORT } from '../constants.js'
 import { decode, encode, TAG } from '../shared-ws.js'
 import { decodeU32 } from '../frame.js'
 import { uint8ArrayToBase64url } from '../base64url.js'
@@ -169,7 +168,7 @@ test("a batch POST still in flight for a dead wire can't unsubscribe the listene
   const page = new ClientBroadcast<string>({
     channelId: server.id,
     key,
-    transports: [CHANNEL_TRANSPORT.SSE],
+    transports: ['sse'],
     telefuncUrl: 'http://swap.test/_telefunc',
     connectionKey: crypto.randomUUID(),
   })

@@ -168,11 +168,8 @@ test("a wire's end aborts its batch POST still in flight, which would otherwise 
       new ReadableStream<Uint8Array>({ start: (controller) => void (endWire = () => controller.close()) }),
     )
   }) as unknown as typeof fetch
-  const connection = ClientConnection.getOrCreate('http://hung-post.test', createChannel() as never, {
-    transports: [CHANNEL_TRANSPORT.SSE],
-    fetchImpl,
-    connectionKey: crypto.randomUUID(),
-  }) as any
+  const options = { ...stalledOptions(), fetchImpl }
+  const connection = ClientConnection.getOrCreate('http://hung-post.test', createChannel() as never, options) as any
   await vi.waitFor(() => expect(endWire).toBeDefined())
   const transport = connection.transport
   // A batch POST hung on a dead TCP connection settles only when its wire aborts it.
