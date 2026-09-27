@@ -30,8 +30,8 @@ type SubscriptionSlotConfig = {
 }
 
 class SubscriptionManager<Source> {
-  /** Slots by source key, then by driver partition. */
-  private readonly _routes = new Map<string, Map<string, SubscriptionSlot>>()
+  /** Slots by driver partition and source key. */
+  private readonly _slots = new Map<string, SubscriptionSlot>()
   private readonly _cleanups = new Set<Promise<void>>()
   private readonly _holds = new Map<string, Hold>()
 
@@ -44,33 +44,27 @@ class SubscriptionManager<Source> {
   subscribe(source: Source, receiver: BackendReceiver): BackendSubscription {
     const binding = this._driver.bind(source)
     const sourceKey = this._sourceKey(source)
-    let route = this._routes.get(sourceKey)
-    if (route === undefined) this._routes.set(sourceKey, (route = new Map()))
-    let slot = route.get(binding.partition)
+    const slotKey = JSON.stringify([binding.partition, sourceKey])
+    let slot = this._slots.get(slotKey)
     if (slot === undefined) {
       const created: SubscriptionSlot = new SubscriptionSlot({
         binding,
         reportError: this._reportError,
         sourceKey,
         cleanup: (attempt) => this._cleanup(attempt),
-        onEmpty: () => this._unmap(sourceKey, binding.partition, created),
+        onEmpty: () => {
+          if (this._slots.get(slotKey) === created) this._slots.delete(slotKey)
+        },
       })
-      route.set(binding.partition, (slot = created))
+      this._slots.set(slotKey, (slot = created))
     }
     return slot.attach(receiver)
   }
 
   async dispose(): Promise<void> {
-    const cleanups = [...this._routes.values()].flatMap((route) => [...route.values()].map((slot) => slot.stop()))
-    this._routes.clear()
+    const cleanups = [...this._slots.values()].map((slot) => slot.stop())
+    this._slots.clear()
     await Promise.allSettled([...cleanups, ...this._cleanups])
-  }
-
-  private _unmap(sourceKey: string, partition: string, slot: SubscriptionSlot): void {
-    const route = this._routes.get(sourceKey)
-    if (route?.get(partition) !== slot) return
-    route.delete(partition)
-    if (route.size === 0) this._routes.delete(sourceKey)
   }
 
   private _cleanup(attempt: SubscriptionAttempt): Promise<void> {
@@ -129,7 +123,7 @@ class SubscriptionManager<Source> {
   /** A slot is establishing until it is first ready, stopped or ended. */
   private _establishingWaits(sources: readonly Source[], partition: string): Promise<void>[] {
     return sources.flatMap((source) => {
-      const slot = this._routes.get(this._sourceKey(source))?.get(partition)
+      const slot = this._slots.get(JSON.stringify([partition, this._sourceKey(source)]))
       return slot?.establishing ? [slot.established] : []
     })
   }
@@ -278,15 +272,12 @@ class SubscriptionSlot {
   /** Consumer listeners are isolated from each other; one that throws is reported. */
   private _notify(listeners: Set<StateListener>, state: SubscriptionState): void {
     for (const listener of [...listeners]) {
-      if (listeners.has(listener)) this._report(() => listener(state))
-    }
-  }
-
-  private _report(notify: () => void): void {
-    try {
-      notify()
-    } catch (error) {
-      this._config.reportError(error)
+      if (!listeners.has(listener)) continue
+      try {
+        listener(state)
+      } catch (error) {
+        this._config.reportError(error)
+      }
     }
   }
 }
