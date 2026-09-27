@@ -1,6 +1,12 @@
 {
   "extends": "./tsconfig.json",
   "compilerOptions": { "noEmit": true },
-  "include": ["client/**/*", "node/**/*", "serve/**/*", "wire-protocol/**/*"],
+  "include": [
+    "client/**/*",
+    "node/**/*",
+    "serve/**/*",
+    "utils/**/*.spec.ts",
+    "wire-protocol/**/*"
+  ],
   "exclude": []
 }
