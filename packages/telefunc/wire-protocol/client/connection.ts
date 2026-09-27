@@ -287,6 +287,10 @@ type BufferedWireFrame = { frame: DecodedFrame; byteLength: number }
 type UpgradeBuffer = { old: BufferedWireFrame[]; new: BufferedWireFrame[] }
 
 /** FIN (old wire) and RECONCILED (new wire) are the join's two limbs; everything else is payload. */
+function isClosingFrame(frame: Uint8Array): boolean {
+  return frame[0] === TAG.CLOSE || frame[0] === TAG.CLOSE_ACK
+}
+
 function isJoinLimb(frame: DecodedFrame): boolean {
   return frame.tag === TAG.FIN || frame.tag === TAG.RECONCILED
 }
@@ -1203,10 +1207,13 @@ class ClientConnection implements MuxConnection {
       clearTimeout(this.ttl)
       this.ttl = null
     }
-    // A draining channel whose frames went down with this wire is left out of the next RECONCILE, which tells the
-    // server it's gone.
+    // A draining channel whose abort or close acknowledgement went down with this wire is left out of the next
+    // RECONCILE, which tells the server it's gone; what it queued after that frame goes with it.
     for (const [ix, entry] of this.channels) {
-      if (entry.state.tag === 'draining' && !this.sendBuffer.some(({ channelIx }) => channelIx === ix))
+      if (
+        entry.state.tag === 'draining' &&
+        !this.sendBuffer.some(({ channelIx, frame }) => channelIx === ix && isClosingFrame(frame))
+      )
         this.releaseChannel(ix, entry.channel)
     }
 
