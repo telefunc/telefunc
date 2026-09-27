@@ -1,4 +1,4 @@
-export { Channel, ServerChannel, SERVER_CHANNEL_BRAND }
+export { Channel, ServerChannel, SERVER_CHANNEL_BRAND, reconnectWindow }
 export { ChannelClosedError, ChannelOverflowError } from '../channel-errors.js'
 export { NetworkError } from '../../shared/NetworkError.js'
 
@@ -315,14 +315,9 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this._didRegister = true
     // Allocate the replay buffer up-front: registration is the moment the channel
     // becomes addressable on the wire, so a peer can attach immediately after this
-    // returns. Its TTL covers a full ping-deadline + reconnect-timeout window.
+    // returns. Its TTL covers a full reconnect window.
     const c = getServerConfig().channel
-    const pingDeadline = Math.max(c.pingInterval, CHANNEL_PING_INTERVAL_MIN_MS) * 2
-    this._replayBuffer = new ReplayBuffer(
-      c.serverReplayBuffer,
-      pingDeadline + c.reconnectTimeout + 1_000,
-      c.serverReplayBufferBinary,
-    )
+    this._replayBuffer = new ReplayBuffer(c.serverReplayBuffer, reconnectWindow() + 1_000, c.serverReplayBufferBinary)
     this._clearTimer('_ttlTimer')
     // Its client reconciles it only after the reconcile it has in flight, which the server holds up to connectTtl for a
     // channel not registered yet.
@@ -811,6 +806,12 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
 
 function reportServerChannelError(err: unknown): void {
   handleTelefunctionBug(err instanceof Error ? err : new Error(String(err)))
+}
+
+/** How long a gone client is still held: until its drop is noticed at the ping deadline, then for `reconnectTimeout`. */
+function reconnectWindow(): number {
+  const c = getServerConfig().channel
+  return Math.max(c.pingInterval, CHANNEL_PING_INTERVAL_MIN_MS) * 2 + c.reconnectTimeout
 }
 
 function normalizeCloseTimeout(timeout: number | undefined): number {

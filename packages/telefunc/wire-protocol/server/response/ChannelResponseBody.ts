@@ -4,7 +4,7 @@ export type { ChannelPumpRunContext }
 import type { StreamingProducer } from '../../types.js'
 import { concat } from '../../frame.js'
 import { CHANNEL_PUMP_TAG_DATA, CHANNEL_PUMP_TAG_ERROR } from '../../constants.js'
-import { ChannelClosedError, ServerChannel } from '../channel.js'
+import { ChannelClosedError, ServerChannel, reconnectWindow } from '../channel.js'
 import { getChannelMux } from '../mux.js'
 import { isAbort } from '../../../node/server/Abort.js'
 import { encodeErrorPayload } from './StreamingResponseBody.js'
@@ -101,7 +101,8 @@ function pumpProducerToChannel(
       }
     } finally {
       doCancel()
-      channel.close()
+      // A page that is away gets the stream's end once back, as an open channel waits for it.
+      channel.close({ timeout: reconnectWindow() })
       onComplete?.()
     }
   })()
