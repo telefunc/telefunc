@@ -269,7 +269,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   // ── Called by transport connection ──
 
   _onTransportOpen(batched: boolean): void {
-    // A close request is not replayed, so one written to a WebSocket that had already died is lost. As the server's
+    // A close request is not replayed, so one written to a wire that had already died is lost. As the server's
     // `_attachPeer` does, it goes out again on every attach until acknowledged.
     if (this._expectCloseAck) this._connection.sendCloseRequest(this, Math.max(0, this._closeDeadline - Date.now()))
     if (this._isClosed) return

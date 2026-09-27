@@ -145,7 +145,7 @@ function testAbort() {
 
   // ── Upload abort ────────────────────────────────────────────────────
 
-  // 1MB file with sleep(100) between reads — client aborts at 300ms
+  // 1MB file with sleep(100) between reads — the client aborts while the server reads it
   test('abort: single file upload — client cancel, server disconnect error', async () => {
     await navigate(`${getServerUrl()}/abort`)
     await resetCleanupState()
