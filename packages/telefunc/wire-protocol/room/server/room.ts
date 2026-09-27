@@ -670,9 +670,14 @@ class ServerRoom extends RoomStateView implements Room {
     if (this._state.applyRoomUpdate(config.meta, config.at, config.by))
       this._relayApplied({ __r: 'update', meta: config.meta, at: config.at, by: config.by })
   }
-  /** @internal */
-  _applyAuthorityRoster(members: MemberSnapshot[], departing: ReadonlySet<string>): boolean {
-    return this._state.reconcileRoster(members, departing)
+  /** @internal Every client gets a roster that corrected a drift; otherwise only the clients still owed their first. */
+  _applyAuthorityRoster(members: MemberSnapshot[], departing: ReadonlySet<string>): void {
+    const drifted = this._state.reconcileRoster(members, departing)
+    const recipients = drifted ? [...this._stubs] : [...this._rosterOwed]
+    this._rosterOwed.clear()
+    if (recipients.length === 0) return
+    const snapshot = this._state.snapshotMembers()
+    for (const stub of recipients) stub._relayRoster(snapshot)
   }
   /** @internal The authority says the room closed; the lane that would have carried `closed` failed. */
   _closeFromAuthority(): void {
@@ -846,15 +851,6 @@ class ServerRoom extends RoomStateView implements Room {
     const all = [...this._localParticipants.keys()]
     for (const stub of this._stubs) all.push(...stub._heldMembers())
     return { all, renewable: all.filter((id) => !this._pendingAdmissions.has(id)) }
-  }
-
-  /** @internal */
-  _onRosterRefreshed(drifted: boolean): void {
-    const recipients = drifted ? [...this._stubs] : [...this._rosterOwed]
-    this._rosterOwed.clear()
-    if (recipients.length === 0) return
-    const members = this._state.snapshotMembers()
-    for (const stub of recipients) stub._relayRoster(members)
   }
 
   private _holderOf(id: string): ServerLocalParticipant | RoomStubChannel | undefined {

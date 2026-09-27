@@ -50,11 +50,9 @@ type SubscriptionHost = {
   _onDm(serialized: string, info: WirePublishInfo): void
   _readOpenConfig(): Promise<RoomConfigRecord | null>
   _applyAuthorityConfig(config: RoomConfigRecord): void
-  /** `true` when the complete roster corrected a drift. */
-  _applyAuthorityRoster(members: MemberSnapshot[], departing: ReadonlySet<string>): boolean
+  /** A complete roster read: applied, and sent to the clients it concerns. */
+  _applyAuthorityRoster(members: MemberSnapshot[], departing: ReadonlySet<string>): void
   _closeFromAuthority(): void
-  /** A roster read succeeded; `drifted` when it corrected this view. */
-  _onRosterRefreshed(drifted: boolean): void
 }
 
 type SubscriptionPlan = {
@@ -271,9 +269,8 @@ class RoomSubscriptions {
       const version = host._state.membershipVersion
       const { members, departing } = await readRoster(host.id, host._inc)
       if (host._state.membershipVersion === version) {
-        const drifted = host._applyAuthorityRoster(members, departing)
+        host._applyAuthorityRoster(members, departing)
         this.replan()
-        host._onRosterRefreshed(drifted)
         return
       }
       if (attempt === ROSTER_REFRESH_RETRY_LIMIT) throw new RoomError(`Room roster refresh contention: ${host.id}`)
