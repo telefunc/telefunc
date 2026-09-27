@@ -16,9 +16,6 @@ type CloudflareSession = {
 
 const SESSION = Symbol('telefunc.cloudflare.session')
 
-const CLOUDFLARE_SESSION_ERROR =
-  'A Cloudflare subscription delivers to a Telefunc session: subscribe from a telefunction or a channel handler, not from outside a request.'
-
 function withCloudflareSession<T>(session: CloudflareSession, fn: () => T): T {
   return restoreContext({ [SESSION]: session, [CHANNEL_MUX]: session.mux }, fn)
 }
@@ -29,6 +26,9 @@ function currentCloudflareSession(): CloudflareSession | undefined {
 
 function requireCloudflareSession(): CloudflareSession {
   const session = currentCloudflareSession()
-  if (session === undefined) throw new Error(CLOUDFLARE_SESSION_ERROR)
+  if (session === undefined)
+    throw new Error(
+      'A Cloudflare subscription delivers to a Telefunc session: subscribe from a telefunction or a channel handler, not from outside a request.',
+    )
   return session
 }
