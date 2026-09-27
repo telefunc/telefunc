@@ -330,7 +330,7 @@ class CloudflareBroadcastMember {
 
   async #initializeRoute(routeKey: string, memberRoute: MemberRoute): Promise<void> {
     try {
-      await this.#writePresence(memberRoute.route, true)
+      await this.#recordPresence(memberRoute.route)
     } catch (error) {
       memberRoute.rejectPresence(error)
       this.#routes.delete(routeKey)
@@ -338,7 +338,7 @@ class CloudflareBroadcastMember {
     }
     memberRoute.acknowledgePresence()
     if (memberRoute.teardownRequested) return this.#release(routeKey, memberRoute)
-    memberRoute.startRefresh(() => this.#writePresence(memberRoute.route, true))
+    memberRoute.startRefresh(() => this.#recordPresence(memberRoute.route))
   }
 
   async #teardownIfEmpty(routeKey: string): Promise<void> {
@@ -354,13 +354,18 @@ class CloudflareBroadcastMember {
   async #release(routeKey: string, memberRoute: MemberRoute): Promise<void> {
     memberRoute.stopRefresh()
     this.#routes.delete(routeKey)
-    await this.#writePresence(memberRoute.route, false)
+    await this.#withdrawPresence(memberRoute.route)
   }
 
   /** Through the DO's ordered stubs, so one route's writes reach its authority in the order they were made. */
-  #writePresence(route: BroadcastRoute, present: boolean): Promise<void> {
+  #recordPresence(route: BroadcastRoute): Promise<void> {
     assert(this.#bucket, 'A Broadcast member registers from a session that knows its bucket')
-    const request = { key: route.key, kind: route.kind, member: this.#id, bucket: present ? this.#bucket : null }
+    const request = { key: route.key, kind: route.kind, member: this.#id, bucket: this.#bucket }
+    return this.#transport.sendPresence(this.calls, request)
+  }
+
+  #withdrawPresence(route: BroadcastRoute): Promise<void> {
+    const request = { key: route.key, kind: route.kind, member: this.#id, bucket: null }
     return this.#transport.sendPresence(this.calls, request)
   }
 }
