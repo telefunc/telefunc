@@ -321,6 +321,8 @@ describe('Redis real three-master Cluster CI certification', () => {
   it("keeps a lane's commits in call order through a TRYAGAIN during a reshard", async () => {
     const prefix = uniquePrefix('reshard-order')
     const client = ownCluster()
+    // The refused commit is re-sent a second later, after the test made the later one.
+    client.options.retryDelayOnTryAgain = 1_000
     await client.ping()
     const backend = ownBackend(client, prefix)
     const target = masters[0] as Master
@@ -336,6 +338,8 @@ describe('Redis real three-master Cluster CI certification', () => {
       await source.client.cluster('SETSLOT', slotNumber, 'MIGRATING', target.id)
       await migrateKeys(source, target, [headKey(prefix, roomId)])
       const first = backend.commitLane(roomId, inc, SEMANTIC_LANE, bytes('first'))
+      // It reaches the source, and is refused, before the slot's other keys move.
+      await new Promise((resolve) => setTimeout(resolve, 50))
       await migrateKeys(source, target, (await source.client.cluster('GETKEYSINSLOT', slotNumber, 10_000)) as string[])
       await Promise.all(masters.map(({ client }) => client.cluster('SETSLOT', slotNumber, 'NODE', target.id)))
       const second = backend.commitLane(roomId, inc, SEMANTIC_LANE, bytes('second'))
