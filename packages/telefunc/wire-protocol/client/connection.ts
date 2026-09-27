@@ -590,7 +590,7 @@ class ClientConnection implements MuxConnection {
       return
     }
     // It stays listed while what it queued waits. After a close that timed out, nothing confirmed the server has its
-    // end, so only a closing frame keeps it; what else it queued goes with it.
+    // end, so only a closing frame keeps it.
     if (
       entry.state.tag === 'open' &&
       this.sendBuffer.some(({ channelIx, frame }) => channelIx === ix && (!closeTimedOut || isClosingFrame(frame)))
@@ -598,6 +598,8 @@ class ClientConnection implements MuxConnection {
       this.enterChannelDraining(ix)
       return
     }
+    // Its queued frames go with its replay; a reconcile already listing it would otherwise send them without it.
+    this.sendBuffer = this.sendBuffer.filter(({ channelIx }) => channelIx !== ix)
     this.releaseChannel(ix, channel)
     this.startTtlIfIdle()
   }

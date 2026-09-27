@@ -380,6 +380,29 @@ test('such a channel, released while the reconnect listing it is in flight, is l
   connection.dispose()
 })
 
+test('a channel whose close timed out while the reconnect listing it is in flight sends nothing more, not its reply without the message the dead wire lost before it', () => {
+  const closing = createChannel()
+  const options = stalledOptions()
+  const connection = ClientConnection.getOrCreate('http://gap.test', closing as never, options) as any
+  ClientConnection.getOrCreate('http://gap.test', createChannel() as never, options) // another channel on the page
+  const open = [
+    { ix: 0, lastSeq: 0 },
+    { ix: 1, lastSeq: 0 },
+  ]
+  connection.buildReconcileFrame()
+  connection.applyReconciled(reconciled({ sessionId: 'gap', open }), null)
+  const replay = connection.replayBuffers.get(0)
+  replay.push(replay.nextSeq(), encode.text(0, '"m4"', 1)) // sent into a wire that is dead, not yet noticed
+  connection.handleTransportLoss(new Error('the wire died')) // its close request went down with it too
+  connection.buildReconcileFrame() // the SSE attempt's, built when it starts, listing both
+  connection.sendAckRes(closing, 1, '"answer"') // its async listener answers a server send({ ack: true })
+  connection.unregister(closing, undefined, { closeTimedOut: true }) // its close times out while the attempt is held
+  const { frames } = connection.applyReconciled(reconciled({ sessionId: 'gap', open }), null)
+  const sent = frames.map(({ frame }: { frame: Uint8Array<ArrayBuffer> }) => decode(frame))
+  expect(sent.filter((frame: { index?: number }) => frame.index === 0)).toEqual([])
+  connection.dispose()
+})
+
 test("a first connect's retry holds back a newer frame behind the ones its failed attempt sent", () => {
   const channel = createChannel()
   const connection = ClientConnection.getOrCreate('http://first-retry.test', channel as never, stalledOptions()) as any
