@@ -2,17 +2,18 @@ import { expect, test } from 'vitest'
 import { makeHttpRequest } from './makeHttpRequest.js'
 import { TELEFUNC_SESSION_HEADER } from '../../wire-protocol/constants.js'
 
-function callFrom(telefuncUrl: string) {
-  const presented: Array<string | undefined> = []
+test("a page's concurrent first calls present one session token, so they reach one session", async () => {
+  const requests: Array<{ session: string | null; headers: Record<string, string> }> = []
   const fetch = (async (url: string, init: RequestInit) => {
-    // Only the Cloudflare adapter sends the header, in its responses: a page's request never carries it.
-    expect(init.headers as Record<string, string>).not.toHaveProperty(TELEFUNC_SESSION_HEADER)
-    presented.push(new URL(url).searchParams.get('session') ?? undefined)
+    requests.push({
+      session: new URL(url).searchParams.get('session'),
+      headers: init.headers as Record<string, string>,
+    })
     return new Response('', { status: 500 })
   }) as unknown as typeof globalThis.fetch
   const call = () =>
     makeHttpRequest({
-      telefuncUrl,
+      telefuncUrl: 'http://first-calls.test/_telefunc',
       httpRequestBody: '{}',
       telefunctionName: 'onLoad',
       telefuncFilePath: '/page.telefunc.ts',
@@ -23,12 +24,9 @@ function callFrom(telefuncUrl: string) {
       requestCloseHandlers: [],
       extensionResponseTypes: [],
     }).catch(() => {})
-  return { presented, call }
-}
-
-test("a page's concurrent first calls present one session token, so they reach one session", async () => {
-  const { presented, call } = callFrom('http://first-calls.test/_telefunc')
   await Promise.all([call(), call()])
-  expect(presented[0]).toEqual(expect.any(String))
-  expect(presented[1]).toBe(presented[0])
+  expect(requests[0]!.session).toEqual(expect.any(String))
+  expect(requests[1]!.session).toBe(requests[0]!.session)
+  // Only the Cloudflare adapter sends the header, in its responses: a page's request never carries it.
+  for (const { headers } of requests) expect(headers).not.toHaveProperty(TELEFUNC_SESSION_HEADER)
 })
