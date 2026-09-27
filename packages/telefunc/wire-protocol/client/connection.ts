@@ -217,6 +217,8 @@ type ClientChannelTransport = {
   attachHeartbeat(hb: Heartbeat): void
   detachHeartbeat(): void
   hasHeartbeat(): boolean
+  /** Settles once the frames it was handed have left it, or its wire is gone. */
+  drained(): Promise<void>
   dispose(): void
 }
 
@@ -1229,9 +1231,13 @@ class ClientConnection implements MuxConnection {
 
   private startTtlIfIdle(): void {
     if (this.closed || this.channels.size > 0 || this.ttl) return
-    this.ttl = setTimeout(() => {
-      if (this.channels.size === 0) this.dispose()
+    const ttl = setTimeout(() => {
+      // What the last channels queued, such as a close acknowledgement, leaves before the wire does.
+      void this.transport.drained().then(() => {
+        if (this.ttl === ttl && this.channels.size === 0) this.dispose()
+      })
     }, this.idleTimeoutMs)
+    this.ttl = ttl
   }
 
   private dispose(): void {
@@ -1636,6 +1642,11 @@ class WsTransport implements UpgradeTarget {
 
   hasHeartbeat(): boolean {
     return this.heartbeat !== null
+  }
+
+  drained(): Promise<void> {
+    // A socket sends what it buffered before its close.
+    return Promise.resolve()
   }
 
   private setupHandlers(ws: WebSocket): void {
@@ -2146,6 +2157,11 @@ class SseTransport implements UpgradeSource {
 
   hasHeartbeat(): boolean {
     return this.heartbeat !== null
+  }
+
+  drained(): Promise<void> {
+    if (!this.hasWire() || (!this.flushing && this.outbox.length === 0)) return Promise.resolve()
+    return new Promise((resolve) => this.drainCallbacks.push(resolve))
   }
 
   dispose(): void {
