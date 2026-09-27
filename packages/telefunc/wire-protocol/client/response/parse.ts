@@ -210,7 +210,7 @@ async function reviveResponse(
  *
  *  Cancellation follows .tee() semantics: cancelling one consumer marks its index
  *  as cancelled and drops future frames for it. Other consumers continue normally.
- *  The upstream reader is only cancelled when ALL consumers are cancelled. */
+ *  The upstream reader is cancelled once every consumer is terminal and at least one cancelled. */
 class FrameDemuxer {
   private streamReader: BaseStreamReader
   private pendingFrames = new Map<number, Uint8Array<ArrayBuffer>[]>()
@@ -245,21 +245,24 @@ class FrameDemuxer {
   }
 
   /** Cancel the given index. Follows .tee() semantics:
-   *  drops its buffered/future frames, resolves any pending waiter with null.
-   *  Upstream is cancelled only when all consumers are cancelled. */
+   *  drops its buffered/future frames, resolves any pending waiter with null. */
   cancelIndex(index: number): void {
     if (this.cancelledIndices.has(index)) return
-    this.cancelledIndices.add(index)
-    // Drop buffered frames for this index
+    // Drop buffered frames for this index; a finished one is not counted as cancelled.
     this.pendingFrames.delete(index)
+    if (this.doneIndices.has(index)) return
+    this.cancelledIndices.add(index)
     // Resolve any pending waiter with null (stream ended for this consumer)
     const waiter = this.indexWaiters.get(index)
     if (waiter) {
       this.indexWaiters.delete(index)
       waiter.resolve(null)
     }
-    // Cancel upstream when all consumers are cancelled
-    if (this.cancelledIndices.size >= this.totalConsumers) {
+    this.cancelUpstreamIfAllTerminal()
+  }
+
+  private cancelUpstreamIfAllTerminal(): void {
+    if (this.cancelledIndices.size > 0 && this.cancelledIndices.size + this.doneIndices.size >= this.totalConsumers) {
       this.streamReader.cancel()
     }
   }
@@ -320,6 +323,7 @@ class FrameDemuxer {
         // Empty payload = per-index "done" signal
         if (frame.payload.length === 0) {
           this.doneIndices.add(frame.index)
+          this.cancelUpstreamIfAllTerminal()
           if (waiter) {
             this.indexWaiters.delete(frame.index)
             waiter.resolve(null)
