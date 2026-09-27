@@ -12,6 +12,7 @@ import {
 import { ACK_STATUS, ProtocolViolationError, TAG, decode, type BroadcastSubscriptions } from '../shared-ws.js'
 import { ShieldValidationError, isShieldValidationError } from '../../shared/ShieldValidationError.js'
 import { Abort } from '../../shared/Abort.js'
+import { createDeferred } from '../../utils/createDeferred.js'
 import {
   ROOM_DEMAND_TTL_MS,
   ROOM_DM_ACK_TIMEOUT_MS,
@@ -26,7 +27,7 @@ import {
 import { DEFAULT_TRACK, decodeBinaryFrame, emptyTrackWants, encodeBinaryFrame, sanitizeBinaryWants } from './binary.js'
 import { RoomError, isRoomError, roomAckError, toRoomFailure } from './errors.js'
 import { leaveCauseFromWire, leaveCauseToWire, mergeAttributes } from './model.js'
-import { hasRoomTag, type RoomSnapshotMetadata } from './protocol.js'
+import { hasRoomTag, type InboxMessage, type RoomSnapshotMetadata } from './protocol.js'
 import { MEMBER_CELL_PREFIX, memberCellKey } from './server/cells.js'
 import type { LeaveCause, Sender } from './types.js'
 import { ClientRoom, ClientStandaloneParticipant } from './client.js'
@@ -327,7 +328,7 @@ describe('Room public behavior', () => {
     observer.onLeave((_, cause) => causes.push(cause))
     await subsOf(observer).reconcileAuthority()
     const readCells = driver.readCells.bind(driver)
-    const memberRead = { started: deferred<void>(), release: deferred<void>(), held: false }
+    const memberRead = { started: createDeferred(), release: createDeferred(), held: false }
     vi.spyOn(driver, 'readCells').mockImplementation(async (roomId, inc, selector) => {
       if (!memberRead.held && 'prefix' in selector && selector.prefix === MEMBER_CELL_PREFIX) {
         memberRead.held = true
@@ -337,8 +338,8 @@ describe('Room public behavior', () => {
       return readCells(roomId, inc, selector)
     })
     const listRetained = driver.listRetained.bind(driver)
-    const committed = deferred<void>()
-    const publish = deferred<void>()
+    const committed = createDeferred()
+    const publish = createDeferred()
     vi.spyOn(driver, 'listRetained').mockImplementationOnce(async (roomId, inc) => {
       committed.resolve()
       await publish.promise
@@ -495,8 +496,8 @@ describe('Room public behavior', () => {
     const remoteBackend = getRoomBackend()
     const unsubscribed: string[] = []
     const observedLanes = new Set<string>()
-    const observationReady = deferred<void>()
-    const observationStopped = deferred<void>()
+    const observationReady = createDeferred()
+    const observationStopped = createDeferred()
     const subscribeLane = remoteBackend.subscribeLane.bind(remoteBackend)
     vi.spyOn(remoteBackend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
       const subscription = subscribeLane(roomId, inc, lane, receiver)
@@ -517,7 +518,7 @@ describe('Room public behavior', () => {
     })
     const observer = await Room.get('remote-close-teardown')
     observer.onAnnounce(() => {})
-    const closed = deferred<void>()
+    const closed = createDeferred()
     observer.onClose(() => closed.resolve())
     await observationReady.promise
     await Room.close('remote-close-teardown')
@@ -530,7 +531,7 @@ describe('Room public behavior', () => {
     const publisher = await authority.join()
     const observer = await Room.get(authority.id)
     let terminal: ReturnType<typeof terminalSubscription> | undefined
-    const replacementReady = deferred<void>()
+    const replacementReady = createDeferred()
     mockLaneSubscription('semantic', (subscribeLane, roomId, inc, lane, receiver) => {
       if (terminal === undefined) {
         terminal = terminalSubscription()
@@ -624,8 +625,8 @@ describe('Room public behavior', () => {
     vi.spyOn(console, 'error').mockImplementation(() => {})
     const subs = subsOf(observer)
     const reconcile = subs.reconcileAuthority.bind(subs)
-    const catchingUp = deferred<void>()
-    const release = deferred<void>()
+    const catchingUp = createDeferred()
+    const release = createDeferred()
     vi.spyOn(subs, 'reconcileAuthority').mockImplementationOnce(async () => {
       catchingUp.resolve()
       await release.promise
@@ -679,7 +680,7 @@ describe('Room public behavior', () => {
   })
   it('reconciles authority after a same-attempt recovery', async () => {
     const room = (await Room.create('control-reconcile')) as ServerRoom
-    const controlSubscribed = deferred<void>()
+    const controlSubscribed = createDeferred()
     let transition!: (state: SubscriptionState) => void
     mockLaneSubscription('control', (subscribeLane, roomId, inc, lane, receiver) => {
       const inner = subscribeLane(roomId, inc, lane, receiver)
@@ -757,7 +758,7 @@ describe('Room public behavior', () => {
     const authority = await Room.create('establishing-roster')
     const observer = (await Room.get(authority.id)) as ServerRoom
     expect(await observer.getParticipants()).toEqual([])
-    const readiness = deferred<void>()
+    const readiness = createDeferred()
     const slot = subsOf(observer)._control
     slot.sync(true, () => ({
       ready: readiness.promise,
@@ -799,8 +800,8 @@ describe('Room public behavior', () => {
     await vi.waitFor(() => expect(subsOf(observer)._control.established).toBe(true))
     expect(observer._state.rosterKnown).toBe(true)
     const readCells = driver.readCells.bind(driver)
-    const started = deferred<void>()
-    const release = deferred<void>()
+    const started = createDeferred()
+    const release = createDeferred()
     let held = false
     let churn = 0
     vi.spyOn(driver, 'readCells').mockImplementation(async (roomId, inc, selector) => {
@@ -849,7 +850,7 @@ describe('Room public behavior', () => {
     })
     vi.spyOn(console, 'error').mockImplementation(() => {})
     observer.onJoin(() => {})
-    const headRead = deferred<void>()
+    const headRead = createDeferred()
     const readOpenConfig = observer._readOpenConfig.bind(observer)
     vi.spyOn(observer, '_readOpenConfig').mockImplementationOnce(async () => {
       await headRead.promise
@@ -980,8 +981,8 @@ describe('Room public behavior', () => {
     const senderMeta: unknown[] = []
     observer.subscribe((_data, _info, from) => senderMeta.push(from.meta))
     const commitLane = driver.commitLane.bind(driver)
-    const firstCommit = deferred<void>()
-    const releaseFirst = deferred<void>()
+    const firstCommit = createDeferred()
+    const releaseFirst = createDeferred()
     vi.spyOn(driver, 'commitLane').mockImplementation(async (roomId, inc, lane, payload, options) => {
       if (lane.kind === 'control') {
         const event = parse(decodeRoomText(payload)) as { __r?: string; seq?: number }
@@ -1147,7 +1148,7 @@ describe('Room public behavior', () => {
     expect(memberEvents(other, bot.id)).toEqual([])
   })
   it("keeps a client participant's own meta on the value every observer converged to", async () => {
-    const acks = { A: deferred<unknown>(), B: deferred<unknown>() }
+    const acks = { A: createDeferred<unknown>(), B: createDeferred<unknown>() }
     const { client, emit } = fakeClient('own-meta', {
       send: async (message) => {
         const request = message as { __r: string; meta?: { v: 'A' | 'B' } }
@@ -1188,7 +1189,7 @@ describe('Room public behavior', () => {
   })
   it('lists a closing room without dropping the incarnation its close still owns', async () => {
     const room = (await Room.create('closing-listed')) as ServerRoom
-    const finalizing = deferred<void>()
+    const finalizing = createDeferred()
     const compareExchangeHead = driver.compareExchangeHead.bind(driver)
     const cx = vi.spyOn(driver, 'compareExchangeHead').mockImplementation(async (id, expected, next) => {
       if (expected.form === 'finalize') await finalizing.promise
@@ -1253,7 +1254,7 @@ describe('Room public behavior', () => {
     const frames: number[] = []
     let demandStarted = false
     let publishing: Promise<unknown> | undefined
-    const demandReady = deferred<void>()
+    const demandReady = createDeferred()
     publisher.onDemand((track, wanted) => {
       if (track === 'screen' && wanted) {
         demandStarted = true
@@ -1299,7 +1300,7 @@ describe('Room public behavior', () => {
   it('never runs a guard with a stand-in for a member that left while its publish queued', async () => {
     const room = await Room.create('queued-publish-kick')
     const identities: unknown[] = []
-    const held = deferred<void>()
+    const held = createDeferred()
     Room.guard(room, {
       onBeforePublish: async (from) => {
         identities.push(from.identity)
@@ -1431,12 +1432,12 @@ describe('Room public behavior', () => {
     const sender = await room.join()
     const internal = target as unknown as {
       readonly _isBound: boolean
-      _deliverMessage(message: { data: unknown }): void
-      _deliverMessageAck(message: { data: unknown }): Promise<unknown>
-      _setForwarder(forwarder: (message: { data: unknown }) => unknown): void
+      _deliverMessage(message: InboxMessage): void
+      _deliverMessageAck(message: InboxMessage): Promise<unknown>
+      _setForwarder(forwarder: (message: InboxMessage) => unknown): void
     }
-    const plainArrived = deferred<void>()
-    const ackArrived = deferred<void>()
+    const plainArrived = createDeferred()
+    const ackArrived = createDeferred()
     const deliverMessage = internal._deliverMessage.bind(target)
     const deliverMessageAck = internal._deliverMessageAck.bind(target)
     vi.spyOn(internal, '_deliverMessage').mockImplementation((message) => {
@@ -1683,7 +1684,7 @@ describe('Room public behavior', () => {
     const sender = await room.join()
     const channel = new RoomParticipantStubChannel(holder)
     const compareExchange = driver.compareExchangeCells.bind(driver)
-    const evicting = deferred<void>()
+    const evicting = createDeferred()
     vi.spyOn(driver, 'compareExchangeCells').mockImplementationOnce(async (...args) => {
       await evicting.promise
       return await compareExchange(...args)
@@ -1775,8 +1776,8 @@ describe('Room public behavior', () => {
     const observer = (await Room.get(room.id)) as ServerRoom
     await observer.getParticipants()
     const commitLane = driver.commitLane.bind(driver)
-    const committing = deferred<void>()
-    const kicked = deferred<void>()
+    const committing = createDeferred()
+    const kicked = createDeferred()
     vi.spyOn(driver, 'commitLane').mockImplementationOnce(async (...args) => {
       committing.resolve()
       await kicked.promise
@@ -1812,8 +1813,8 @@ describe('Room public behavior', () => {
   it('rejects, not as a bug, a join whose client stub closed during the guard', async () => {
     const room = (await Room.create('stub-close-during-guard')) as ServerRoom
     const stub = register(room)
-    const entered = deferred<void>()
-    const release = deferred<void>()
+    const entered = createDeferred()
+    const release = createDeferred()
     Room.guard(room, {
       onBeforeJoin: async () => {
         entered.resolve()
@@ -1833,8 +1834,8 @@ describe('Room public behavior', () => {
     const room = (await Room.create('stub-close-during-join')) as ServerRoom
     const stub = register(room)
     const compareExchange = driver.compareExchangeCells.bind(driver)
-    const writing = deferred<void>()
-    const release = deferred<void>()
+    const writing = createDeferred()
+    const release = createDeferred()
     vi.spyOn(driver, 'compareExchangeCells').mockImplementationOnce(async (...args) => {
       writing.resolve()
       await release.promise
@@ -2024,7 +2025,7 @@ describe('Room public behavior', () => {
     const member = await room.join()
     const observer = await Room.get(room.id)
     const observed: Array<[unknown, number]> = []
-    const controlReady = deferred<void>()
+    const controlReady = createDeferred()
     mockLaneSubscription('control', (subscribeLane, roomId, inc, lane, receiver) => {
       const subscription = subscribeLane(roomId, inc, lane, receiver)
       void subscription.ready.then(() => controlReady.resolve())
@@ -2042,7 +2043,7 @@ describe('Room public behavior', () => {
   })
   it('relays semantic announcements only to stubs that declared announce demand', async () => {
     const room = (await Room.create('announce-want-gate')) as ServerRoom
-    const semanticReady = deferred<void>()
+    const semanticReady = createDeferred()
     mockLaneSubscription('semantic', (subscribeLane, roomId, inc, lane, receiver) => {
       const subscription = subscribeLane(roomId, inc, lane, receiver)
       void subscription.ready.then(() => semanticReady.resolve())
@@ -2126,7 +2127,7 @@ describe('Room public behavior', () => {
     const publisher = await authority.join()
     const observer = await Room.get(authority.id)
     const readRetained = driver.readRetained.bind(driver)
-    const published = deferred<void>()
+    const published = createDeferred()
     vi.spyOn(driver, 'readRetained').mockImplementationOnce(async (...args) => {
       await published.promise
       return readRetained(...args)
@@ -2315,8 +2316,8 @@ describe('Room public behavior', () => {
     const peer = attachPeer(register(room))
     const backend = getRoomBackend()
     const commitLane = backend.commitLane.bind(backend)
-    const committed = deferred<void>()
-    const confirm = deferred<void>()
+    const committed = createDeferred()
+    const confirm = createDeferred()
     vi.spyOn(backend, 'commitLane').mockImplementation(async (roomId, inc, lane, payload, options) => {
       const result = await commitLane(roomId, inc, lane, payload, options)
       const isJoin = lane.kind === 'control' && (parse(decoder.decode(payload)) as { __r?: string }).__r === 'join'
@@ -2596,11 +2597,11 @@ describe('Room public behavior', () => {
     remote.subscribe(() => {})
     remote.subscribeBinary(() => {})
     remote.onUpdate(() => {})
-    expect((observer as unknown as { _state: { listenerCount: number } })._state.listenerCount).toBe(0)
+    expect(observer._state.listenerCount).toBe(0)
   })
   it("commits a participant's publishes in call order, however long its guard takes for each", async () => {
     const room = await Room.create('publish-call-order')
-    const slow = deferred<void>()
+    const slow = createDeferred()
     Room.guard(room, {
       onBeforePublish: async (_from, data) => {
         if (data === 'first' || (data instanceof Uint8Array && data[0] === 1)) await slow.promise
@@ -2626,7 +2627,7 @@ describe('Room public behavior', () => {
     const room = await Room.create('publish-pipeline')
     const me = await room.join()
     const commitLane = driver.commitLane.bind(driver)
-    const firstAnswer = deferred<void>()
+    const firstAnswer = createDeferred()
     let sent = 0
     vi.spyOn(driver, 'commitLane').mockImplementation(async (...args) => {
       const first = args[2].kind === 'semantic' && ++sent === 1
@@ -2684,18 +2685,8 @@ describe('Room public behavior', () => {
     const room = await Room.create('one-shot-inbox-hold')
     const member = await room.join()
     const internal = member as unknown as {
-      _deliverMessage(message: {
-        from: string
-        fromMeta: Record<string, unknown> | null
-        fromIdentity: string | null
-        data: unknown
-      }): void
-      _deliverMessageAck(message: {
-        from: string
-        fromMeta: Record<string, unknown> | null
-        fromIdentity: string | null
-        data: unknown
-      }): Promise<unknown>
+      _deliverMessage(message: InboxMessage): void
+      _deliverMessageAck(message: InboxMessage): Promise<unknown>
     }
     const received: unknown[] = []
     const unlisten = member.listen((data) => received.push(data))
@@ -2726,8 +2717,8 @@ describe('Room public behavior', () => {
     expect(await member.publish('works')).toMatchObject({ seq: 1 })
     const route = { key: 'zero-config-supervision', kind: 'text' } as const
     const received: string[] = []
-    const firstReceived = deferred<void>()
-    let secondReceived = deferred<void>()
+    const firstReceived = createDeferred()
+    let secondReceived = createDeferred()
     const first = broadcast.subscribe(route, (payload) => {
       received.push(`first:${decoder.decode(payload)}`)
       firstReceived.resolve()
@@ -2741,7 +2732,7 @@ describe('Room public behavior', () => {
     await Promise.all([firstReceived.promise, secondReceived.promise])
     expect(received).toEqual(['first:one', 'second:one'])
     await first.unsubscribe()
-    secondReceived = deferred<void>()
+    secondReceived = createDeferred()
     await broadcast.publish(route, encoder.encode('two'))
     await secondReceived.promise
     expect(received).toEqual(['first:one', 'second:one', 'second:two'])
@@ -2908,15 +2899,7 @@ describe('client Room lifecycle', () => {
     expect(empty).toBe(0)
   })
   it('dirties unknown events and keeps reconcile outcomes distinct', () => {
-    const state = new RoomState({
-      roomId: 'unknown-member-epoch',
-      meta: {},
-      seed: { members: [] },
-      updateStamp: { at: 0, by: '' },
-      onListenersChanged: () => {},
-      onCallbackError: () => {},
-      onLeave: () => {},
-    })
+    const state = newState({ roomId: 'unknown-member-epoch' })
     const id = crypto.randomUUID()
     state.applyTrack(id, 'screen')
     state.applyParticipantMeta(id, { step: 1 }, 1)
@@ -2935,15 +2918,7 @@ describe('client Room lifecycle', () => {
     const alice = { id: crypto.randomUUID(), meta: {}, joinedAt: 1, metaSeq: 0 }
     const bob = { id: crypto.randomUUID(), meta: {}, joinedAt: 2, metaSeq: 0 }
     const carol = { id: crypto.randomUUID(), meta: {}, joinedAt: 3, metaSeq: 0 }
-    const state = new RoomState({
-      roomId: 'reconcile-change-count',
-      meta: {},
-      seed: { members: [alice] },
-      updateStamp: { at: 0, by: '' },
-      onListenersChanged: () => {},
-      onCallbackError: () => {},
-      onLeave: () => {},
-    })
+    const state = newState({ roomId: 'reconcile-change-count', seed: { members: [alice] } })
     const observed: string[][] = []
     const joins: string[] = []
     state.onChange(() => observed.push(state.snapshotMembers().map((member) => member.id)))
@@ -2955,14 +2930,10 @@ describe('client Room lifecycle', () => {
   it('reports rejected async RoomState callbacks without awaiting delivery', async () => {
     const memberId = crypto.randomUUID()
     const errors: unknown[] = []
-    const state = new RoomState({
+    const state = newState({
       roomId: 'async-state-callbacks',
-      meta: {},
       seed: { members: [{ id: memberId, meta: {}, joinedAt: 1, metaSeq: 0 }] },
-      updateStamp: { at: 0, by: '' },
-      onListenersChanged: () => {},
       onCallbackError: (error) => errors.push(error),
-      onLeave: () => {},
     })
     const remote = state.getRemote(memberId)!
     const failures = Array.from({ length: 5 }, (_, index) => new Error(`async state callback ${index}`))
@@ -2989,12 +2960,7 @@ describe('client Room lifecycle', () => {
     const errors: unknown[] = []
     const internal = participant as unknown as {
       _reportError(error: unknown): void
-      _deliverMessage(message: {
-        from: string
-        fromMeta: Record<string, unknown> | null
-        fromIdentity: string | null
-        data: unknown
-      }): void
+      _deliverMessage(message: InboxMessage): void
       _onDemand(track: string | null, wanted: boolean): void
       _onLeft(cause: { type: 'left' }): void
     }
@@ -3059,7 +3025,7 @@ describe('client Room lifecycle', () => {
     const { id, ack, fake, emit, joining } = await pendingClientJoin('dm-reply-after-close')
     ack.resolve({ id, joinedAt: 1 })
     const participant = await joining
-    const answer = deferred<string>()
+    const answer = createDeferred<string>()
     participant.listen(() => answer.promise)
     emit({ __r: 'dm', to: id, from: crypto.randomUUID(), fromMeta: {}, data: 'hi', ackId: 'ack-late' }, 1)
     Object.defineProperty(fake.stub, 'isClosed', { value: true })
@@ -3559,14 +3525,9 @@ describe('room protocol validation', () => {
         members: { 'not-a-member-id': { all: false, tracks: [] } },
       }),
     ).toBeNull()
-    const state = new RoomState({
+    const state = newState({
       roomId: 'state-wants',
-      meta: {},
       seed: { members: [{ id: '__proto__', meta: {}, joinedAt: 1, metaSeq: 0 }] },
-      updateStamp: { at: 0, by: '' },
-      onListenersChanged: () => {},
-      onCallbackError: () => {},
-      onLeave: () => {},
     })
     state.getRemote('__proto__')!.subscribeBinary(() => {})
     expect(Object.getPrototypeOf(state.binaryWants().members)).toBeNull()
@@ -3713,7 +3674,7 @@ function semanticFrames(peer: Peer, kind: 'data' | 'announce'): unknown[] {
 
 function delayRosterRead(roomId: string): { started: Promise<void>; release: () => void } {
   const readCells = driver.readCells.bind(driver)
-  const roster = { started: deferred<void>(), release: deferred<void>() }
+  const roster = { started: createDeferred(), release: createDeferred() }
   vi.spyOn(driver, 'readCells').mockImplementation(async (candidateRoomId, inc, selector) => {
     if (candidateRoomId === roomId && 'prefix' in selector) {
       roster.started.resolve()
@@ -3801,6 +3762,18 @@ function fakeClient(
     emit: (data: unknown, seq = 1) => fake.emitText(data, { key: roomId, seq, timestamp: seq }),
   }
 }
+function newState(options: Partial<ConstructorParameters<typeof RoomState>[0]>): RoomState {
+  return new RoomState({
+    roomId: 'state',
+    meta: {},
+    seed: { members: [] },
+    updateStamp: { at: 0, by: '' },
+    onListenersChanged: () => {},
+    onCallbackError: () => {},
+    onLeave: () => {},
+    ...options,
+  })
+}
 function snapshot(roomId: string): RoomSnapshotMetadata {
   return {
     channelId: 'channel',
@@ -3813,7 +3786,7 @@ function snapshot(roomId: string): RoomSnapshotMetadata {
 }
 async function pendingClientJoin(roomId: string, onSend?: (message: unknown) => unknown) {
   const id = crypto.randomUUID()
-  const ack = deferred<{ id: string; joinedAt: number }>()
+  const ack = createDeferred<{ id: string; joinedAt: number }>()
   const { fake, client, emit } = fakeClient(roomId, {
     send: async (message) => {
       if ((message as { __r?: string }).__r === 'req-join') return await ack.promise
@@ -3940,13 +3913,6 @@ function captureOutcome<T>(promise: Promise<T>) {
   )
   return outcome
 }
-function deferred<T>() {
-  let resolve!: (value?: T) => void
-  const promise = new Promise<T>((resolvePromise) => {
-    resolve = resolvePromise as (value?: T) => void
-  })
-  return { promise, resolve }
-}
 function mockLaneSubscription(
   kind: LaneId['kind'],
   replacement: (
@@ -3968,7 +3934,7 @@ function mockLaneSubscription(
 }
 function rejectLaneSubscriptions(kind: LaneId['kind'], diagnostic: string) {
   vi.useFakeTimers()
-  const started = deferred<void>()
+  const started = createDeferred()
   const backend = mockLaneSubscription(kind, () => {
     started.resolve()
     return rejectedSubscription(diagnostic)
@@ -4053,13 +4019,13 @@ function delayDriverLane(matches: (lane: LaneId) => boolean): () => void {
 function delayLaneSubscription(matches: (lane: LaneId) => boolean) {
   const backend = getRoomBackend()
   const subscribeLane = backend.subscribeLane.bind(backend)
-  const started = deferred<void>()
+  const started = createDeferred()
   let release!: () => Promise<void>
   vi.spyOn(backend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) => {
     if (!matches(lane)) return subscribeLane(roomId, inc, lane, receiver)
     let inner: BackendSubscription | null = null
     let state: SubscriptionState = 'establishing'
-    const readiness = deferred<void>()
+    const readiness = createDeferred()
     const listeners = new Set<(next: SubscriptionState) => void>()
     started.resolve()
     release = async () => {
