@@ -9,7 +9,7 @@ abstract class DriverAttempt implements SubscriptionAttempt {
   readonly #listeners = new Set<StateListener>()
   #state: SubscriptionState = 'establishing'
 
-  get ended(): boolean {
+  protected get ended(): boolean {
     return this.#state === 'closed'
   }
 
