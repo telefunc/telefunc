@@ -422,7 +422,7 @@ describe('cloudflare broadcast routing', () => {
     // The key's first publish, from weur, fixes its authority bucket.
     authorityState.nextSequence('room:first-touch', 'weur')
     for (const bucket of ['weur', 'apac'] as const) {
-      await authorityState.setPresence({
+      authorityState.setPresence({
         key: 'room:first-touch',
         kind: 'text',
         member: `telefunc-shard-${bucket}-0`,
@@ -519,24 +519,8 @@ describe('cloudflare broadcast routing', () => {
         },
       }),
     )
-    await authorityState.setPresence({
-      key: 'room:test',
-      kind: 'text',
-      member: 'telefunc-shard-weur-0',
-      bucket: 'weur',
-    })
-    await authorityState.setPresence({
-      key: 'room:test',
-      kind: 'text',
-      member: 'telefunc-shard-apac-0',
-      bucket: 'apac',
-    })
-    await authorityState.setPresence({
-      key: 'room:test',
-      kind: 'text',
-      member: 'telefunc-shard-eeur-0',
-      bucket: 'eeur',
-    })
+    for (const bucket of ['weur', 'apac', 'eeur'] as const)
+      authorityState.setPresence({ key: 'room:test', kind: 'text', member: `telefunc-shard-${bucket}-0`, bucket })
     await broadcast.publishToSubscribers(authorityState, calls, {
       key: 'room:test',
       kind: 'text',
@@ -569,7 +553,7 @@ describe('cloudflare broadcast routing', () => {
       ['telefunc-shard-weur-0', 'weur'],
       ['telefunc-shard-apac-0', 'apac'],
     ] as const)
-      await authorityState.setPresence({ key: 'room:redeployed', kind: 'text', member, bucket })
+      authorityState.setPresence({ key: 'room:redeployed', kind: 'text', member, bucket })
     const receipt = await broadcast.publishToSubscribers(authorityState, new OrderedStubs(), {
       key: 'room:redeployed',
       kind: 'text',
@@ -732,32 +716,19 @@ describe('cloudflare broadcast routing', () => {
     const authorityState = createAuthorityState()
     const calls: BroadcastCalls = new OrderedStubs()
     const coordinatorPublishes: string[] = []
-    let releaseFirstRemotePublish: (() => void) | null = null
-    const firstRemotePublishReady = new Promise<void>((resolve) => {
-      releaseFirstRemotePublish = resolve
-    })
+    const firstRemotePublish = Promise.withResolvers<void>()
     const broadcast = createBroadcast(
       createBasicBinding({
         onForward(id, { payload }) {
           const text = decode(payload)
           coordinatorPublishes.push(`${id.name}:${text}`)
-          if (id.name.includes(':broadcast:apac:') && text === '{"text":"first"}') return firstRemotePublishReady
+          if (id.name.includes(':broadcast:apac:') && text === '{"text":"first"}') return firstRemotePublish.promise
           return Promise.resolve()
         },
       }),
     )
-    await authorityState.setPresence({
-      key: 'room:test',
-      kind: 'text',
-      member: 'telefunc-shard-weur-0',
-      bucket: 'weur',
-    })
-    await authorityState.setPresence({
-      key: 'room:test',
-      kind: 'text',
-      member: 'telefunc-shard-apac-0',
-      bucket: 'apac',
-    })
+    for (const bucket of ['weur', 'apac'] as const)
+      authorityState.setPresence({ key: 'room:test', kind: 'text', member: `telefunc-shard-${bucket}-0`, bucket })
     const firstPublish = broadcast.publishToSubscribers(authorityState, calls, {
       key: 'room:test',
       kind: 'text',
@@ -778,7 +749,7 @@ describe('cloudflare broadcast routing', () => {
     expect(coordinatorPublishes).toContain('telefunc:broadcast:weur:0:{"text":"second"}')
     expect(coordinatorPublishes).toContain('telefunc:broadcast:apac:0:{"text":"second"}')
 
-    releaseFirstRemotePublish!()
+    firstRemotePublish.resolve()
     await Promise.all([firstPublish, secondPublish])
   })
 
