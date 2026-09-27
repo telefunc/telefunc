@@ -5,12 +5,11 @@ import { DriverAttempt } from './attempt.js'
 
 const encoder = new TextEncoder()
 const decoder = new TextDecoder()
-const deferred = <T>() => Promise.withResolvers<T>()
 
 describe('shared subscription supervision', () => {
   it('owns fan-out, refcount, epochs, and raw terminal signalling once', async () => {
-    const firstCleanup = deferred<void>()
-    const secondCleanup = deferred<void>()
+    const firstCleanup = Promise.withResolvers<void>()
+    const secondCleanup = Promise.withResolvers<void>()
     const raw = new ControlledDriver()
     raw.plan(() => ControlledAttempt.ready(firstCleanup.promise))
     raw.plan(() => ControlledAttempt.ready(secondCleanup.promise))
@@ -40,9 +39,9 @@ describe('shared subscription supervision', () => {
     await stopping
   })
   it('does not convert pending raw cleanup into successful settlement', async () => {
-    const unsubscribeCleanup = deferred<void>()
-    const disposeCleanup = deferred<void>()
-    const terminalCleanup = deferred<void>()
+    const unsubscribeCleanup = Promise.withResolvers<void>()
+    const disposeCleanup = Promise.withResolvers<void>()
+    const terminalCleanup = Promise.withResolvers<void>()
     const raw = new ControlledDriver()
     raw.plan(() => ControlledAttempt.ready(unsubscribeCleanup.promise))
     raw.plan(() => ControlledAttempt.ready(disposeCleanup.promise))
@@ -78,7 +77,7 @@ describe('shared subscription supervision', () => {
     expect(disposeSettled).toBe(true)
   })
   it('isolates throwing state listeners from siblings and last-detach cleanup', async () => {
-    const cleanup = deferred<void>()
+    const cleanup = Promise.withResolvers<void>()
     const raw = new ControlledDriver()
     raw.plan(() => ControlledAttempt.ready(cleanup.promise))
     const reports: unknown[] = []
@@ -138,11 +137,11 @@ describe('shared subscription supervision', () => {
     raw.opens[0]!.attempt.establish()
     await recovered
     expect(states).toEqual(['ready', 'lost', 'ready'])
-    expect(raw.openCalls).toBe(1)
+    expect(raw.opens).toHaveLength(1)
     raw.opens[0]!.attempt.close()
     expect(states).toEqual(['ready', 'lost', 'ready', 'closed'])
     await expect(subscription.ready).rejects.toThrow('Backend subscription closed')
-    expect(raw.openCalls).toBe(1)
+    expect(raw.opens).toHaveLength(1)
     await subscription.unsubscribe()
     expect(states).toEqual(['ready', 'lost', 'ready', 'closed'])
     const failedRaw = new ControlledDriver()
@@ -154,7 +153,7 @@ describe('shared subscription supervision', () => {
     failedRaw.opens[0]!.attempt.close()
     await expect(failedReadiness).rejects.toThrow('Backend subscription closed')
     expect(failedStates).toEqual(['closed'])
-    expect(failedRaw.openCalls).toBe(1)
+    expect(failedRaw.opens).toHaveLength(1)
     await failed.unsubscribe()
   })
   it("keeps a driver's reason for an end as the failure's cause", async () => {
@@ -215,7 +214,6 @@ class ControlledDriver implements SubscriptionDriver<string> {
   readonly opens: OpenRecord[] = []
   readonly #plans: Array<() => ControlledAttempt> = []
   partition = ''
-  openCalls = 0
   plan(plan: () => ControlledAttempt): void {
     this.#plans.push(plan)
   }
@@ -227,7 +225,6 @@ class ControlledDriver implements SubscriptionDriver<string> {
     return {
       partition,
       open: (receiver: BackendReceiver, localReceiverCount: () => number): SubscriptionAttempt => {
-        this.openCalls++
         const attempt = (this.#plans.shift() ?? (() => ControlledAttempt.ready()))()
         this.opens.push({ receiver, localReceiverCount, attempt })
         return attempt
