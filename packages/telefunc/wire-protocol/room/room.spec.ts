@@ -2385,10 +2385,7 @@ describe('Room public behavior', () => {
       if (noticedAfter > 0) channel._onPeerDisconnect(first.peer, CHANNEL_RECONNECT_TIMEOUT_MS)
       await vi.advanceTimersByTimeAsync(CHANNEL_RECONNECT_TIMEOUT_MS - 1_000)
       expect(channel._replayBuffer).not.toBeNull()
-      const notices = attachPeer(channel, 0)
-        .decoded()
-        .flatMap((frame) => (frame.tag === TAG.TEXT ? [parse(frame.text) as { __r: string }] : []))
-      expect(notices).toContainEqual({ __r: 'left', cause: 'removed', reason: 'banned' })
+      expect(notices(attachPeer(channel, 0))).toContainEqual({ __r: 'left', cause: 'removed', reason: 'banned' })
     },
   )
   it.each(dropNoticed)(
@@ -2471,13 +2468,9 @@ describe('Room public behavior', () => {
     channel._registerChannel()
     const peer = attachPeer(channel)
     await vi.waitFor(() =>
-      expect(
-        peer
-          .decoded()
-          .filter((frame) => frame.tag === TAG.TEXT)
-          .map((frame) => parse(frame.text) as { __r: string })
-          .filter(({ __r }) => __r === 'demand-state'),
-      ).toEqual([{ __r: 'demand-state', tracks: [null] }]),
+      expect(notices(peer).filter(({ __r }) => __r === 'demand-state')).toEqual([
+        { __r: 'demand-state', tracks: [null] },
+      ]),
     )
   })
   it('sends a reattached client of a handed-out participant the meta and demand its offline buffer dropped', async () => {
@@ -2500,13 +2493,7 @@ describe('Room public behavior', () => {
       await other.send(me.id, 'x'.repeat(300))
       const peer = attachPeer(channel)
       await vi.waitFor(() =>
-        expect(
-          peer
-            .decoded()
-            .filter((frame) => frame.tag === TAG.TEXT)
-            .map((frame) => parse(frame.text) as { __r: string })
-            .filter(({ __r }) => __r === 'p-meta' || __r === 'demand-state'),
-        ).toEqual([
+        expect(notices(peer).filter(({ __r }) => __r === 'p-meta' || __r === 'demand-state')).toEqual([
           { __r: 'p-meta', meta: { score: 1 }, seq: expect.any(Number) },
           { __r: 'demand-state', tracks: [null] },
         ]),
@@ -3623,6 +3610,10 @@ function controlEvents(peer: Peer): Array<{ __r: string; members?: unknown[]; me
     .decoded()
     .filter((frame) => frame.tag === TAG.PUBLISH)
     .map((frame) => JSON.parse(frame.text) as { __r: string; members?: unknown[]; meta?: unknown })
+}
+/** A participant stub's notices to its client. */
+function notices(peer: Peer): Array<{ __r: string }> {
+  return peer.decoded().flatMap((frame) => (frame.tag === TAG.TEXT ? [parse(frame.text) as { __r: string }] : []))
 }
 function semanticFrames(peer: Peer, kind: 'data' | 'announce'): unknown[] {
   return peer
