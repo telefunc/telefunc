@@ -423,15 +423,16 @@ class RoomParticipantStubChannel extends RoomRequestChannel {
     const participant = this._participant
     const unlistenMeta = participant._onAcceptedMeta((accepted) => this._notify({ __r: 'p-meta', ...accepted }))
 
-    // The ack carries the client's reply; a closed stub or a transport rejection means the holder left.
-    participant._setForwarder((msg) => {
-      const notice = { __r: 'dm' as const, ...wireDmFromInbox(msg) }
-      if (!msg.ackId) return this._notify(notice)
-      if (this.isClosed) return Promise.resolve(DM_FAILURE.left)
-      return this.send(notice, { ack: true }).then(
-        (reply) => decodeDmReply(reply) ?? DM_FAILURE.malformedReply,
-        () => DM_FAILURE.left,
-      )
+    participant._setForwarder({
+      deliver: (msg) => this._notify({ __r: 'dm', ...wireDmFromInbox(msg) }),
+      // The ack carries the client's reply; a closed stub or a transport rejection means the holder left.
+      deliverAck: (msg) => {
+        if (this.isClosed) return Promise.resolve(DM_FAILURE.left)
+        return this.send({ __r: 'dm', ...wireDmFromInbox(msg) }, { ack: true }).then(
+          (reply) => decodeDmReply(reply) ?? DM_FAILURE.malformedReply,
+          () => DM_FAILURE.left,
+        )
+      },
     })
 
     const unlistenDemand = participant.onDemand((track, wanted) => this._notify({ __r: 'demand', track, wanted }))

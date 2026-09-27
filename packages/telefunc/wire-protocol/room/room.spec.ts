@@ -1393,7 +1393,10 @@ describe('Room public behavior', () => {
       readonly _isBound: boolean
       _deliverMessage(message: InboxMessage): void
       _deliverMessageAck(message: InboxMessage): Promise<unknown>
-      _setForwarder(forwarder: (message: InboxMessage) => unknown): void
+      _setForwarder(forwarder: {
+        deliver(message: InboxMessage): void
+        deliverAck(message: InboxMessage): Promise<unknown>
+      }): void
     }
     const plainArrived = createDeferred()
     const ackArrived = createDeferred()
@@ -1412,9 +1415,12 @@ describe('Room public behavior', () => {
     await Promise.all([plainArrived.promise, ackArrived.promise])
     expect(internal._isBound).toBe(false)
     const forwarded: unknown[] = []
-    internal._setForwarder((message) => {
-      forwarded.push(message.data)
-      return Promise.resolve({ ok: true, result: `handled:${String(message.data)}` })
+    internal._setForwarder({
+      deliver: (message) => void forwarded.push(message.data),
+      deliverAck: (message) => {
+        forwarded.push(message.data)
+        return Promise.resolve({ ok: true, result: `handled:${String(message.data)}` })
+      },
     })
     expect(forwarded).toEqual(['plain-before-bind', 'ack-before-bind'])
     await expect(acknowledging).resolves.toMatchObject({ response: 'handled:ack-before-bind' })

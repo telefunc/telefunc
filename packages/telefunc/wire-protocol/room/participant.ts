@@ -3,7 +3,6 @@ export { ParticipantBase }
 import { invokeChannelListener, type ChannelPublishAck } from '../channel.js'
 import { makeDisposer } from './disposer.js'
 import type { TELEFUNC_SHIELDS } from '../../node/shared/transformer/generateShield/shield-key.js'
-import { assert } from '../../utils/assert.js'
 import { DM_FAILURE, participantLeftError, toRoomFailure } from './errors.js'
 import { ownLeaveCause, ownMetadata, senderOf } from './model.js'
 import type { AcceptedMeta, DmReply, InboxMessage } from './protocol.js'
@@ -17,6 +16,7 @@ import type {
 } from './types.js'
 /** DMs held before the first `listen()`, dropping the oldest. The inbox is the one lane no want gates, so the only one to bridge. */
 const PENDING_INBOX_MAX_COUNT = 64
+type InboxForwarder = { deliver(msg: InboxMessage): void; deliverAck(msg: InboxMessage): Promise<DmReply> }
 /** The private-message inbox and the leave lifecycle, identical on server and client; flavors supply the transport. */
 abstract class ParticipantBase implements LocalParticipant {
   /** Phantom: the publish shield rides the type only (see `RoomShield`), never a runtime field. */
@@ -35,16 +35,14 @@ abstract class ParticipantBase implements LocalParticipant {
   private _inboxAttached = false
   /** DMs held until the first `listen()` (`null` once flushed); an ack DM carries the resolver of its reply. */
   private _pendingInbox: Array<{ msg: InboxMessage; ackResolve?: (reply: DmReply) => void }> | null = null
-  /** When a client holds this participant, its inbox forwards there instead of to local listeners; the forwarder returns the client's reply for an ack DM (see `RoomParticipantStubChannel`). */
-  private _forwarder: ((msg: InboxMessage) => Promise<DmReply> | void) | null = null
+  /** When a client holds this participant, its inbox forwards there instead of to local listeners (see `RoomParticipantStubChannel`). */
+  private _forwarder: InboxForwarder | null = null
   /** @internal Route this participant's inbox to a remote holder instead of local listeners. */
-  _setForwarder(forwarder: (msg: InboxMessage) => Promise<DmReply> | void): void {
+  _setForwarder(forwarder: InboxForwarder): void {
     this._forwarder = forwarder
     this._flushHeld((msg, ackResolve) => {
-      const reply = forwarder(msg)
-      if (!ackResolve) return
-      assert(reply) // an ack DM's forwarder answers
-      void reply.then(ackResolve)
+      if (ackResolve) void forwarder.deliverAck(msg).then(ackResolve)
+      else forwarder.deliver(msg)
     })
   }
   /** @internal Already bound to a client holder (serialized once, via `RoomParticipantStubChannel`)? */
@@ -92,10 +90,7 @@ abstract class ParticipantBase implements LocalParticipant {
   }
   /** @internal A DM for this member: to its remote holder if bound, else its listeners (held until the first `listen()`). */
   _deliverMessage(msg: InboxMessage): void {
-    if (this._forwarder) {
-      void this._forwarder(msg)
-      return
-    }
+    if (this._forwarder) return this._forwarder.deliver(msg)
     if (this._messageCbs.length === 0) {
       if (this._left || this._inboxAttached) return
       this._hold(msg)
@@ -105,11 +100,7 @@ abstract class ParticipantBase implements LocalParticipant {
   }
   /** @internal An `{ ack: true }` DM, resolved with the recipient's reply (or an error if it leaves first); never rejects. */
   _deliverMessageAck(msg: InboxMessage): Promise<DmReply> {
-    if (this._forwarder) {
-      const reply = this._forwarder(msg)
-      assert(reply) // an ack DM's forwarder answers
-      return reply
-    }
+    if (this._forwarder) return this._forwarder.deliverAck(msg)
     if (this._messageCbs.length === 0) {
       if (this._left) return Promise.resolve(DM_FAILURE.left)
       if (this._inboxAttached) return Promise.resolve(DM_FAILURE.noListener)
