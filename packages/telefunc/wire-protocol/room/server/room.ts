@@ -222,28 +222,15 @@ class ServerRoom extends RoomStateView implements Room {
   /** The member's inbox is ready before its record is durable, and the join is announced after, so no DM or event is lost. */
   private async _commitAdmission(admission: Admission): Promise<void> {
     const { id, meta, identity, joinedAt, hidden } = admission
+    const optional = { ...(identity === null ? {} : { identity }), ...(hidden ? { hidden: true } : {}) } as const
     this._pendingAdmissions.add(id)
     this._subs.replan()
     try {
       await this._inboxReady(id)
-      await createMember(this.id, this._inc, id, {
-        meta,
-        joinedAt,
-        seenAt: joinedAt,
-        metaSeq: 0,
-        ...(identity === null ? {} : { identity }),
-        ...(hidden ? { hidden: true } : {}),
-      })
+      await createMember(this.id, this._inc, id, { meta, joinedAt, seenAt: joinedAt, metaSeq: 0, ...optional })
       this._assertAdmitted(id)
       this._pendingAdmissions.delete(id)
-      const join = {
-        __r: 'join',
-        id,
-        meta,
-        joinedAt,
-        ...(identity === null ? {} : { identity }),
-        ...(hidden ? { hidden: true } : {}),
-      } as const
+      const join = { __r: 'join', id, meta, joinedAt, ...optional } as const
       // A member removed meanwhile gets no join after its leave, here or anywhere.
       await publishCtrl(this.id, this._inc, join, { requiredCellKeys: [memberCellKey(id)] })
       this._assertAdmitted(id)
