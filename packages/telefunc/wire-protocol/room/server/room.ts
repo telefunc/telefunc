@@ -419,16 +419,9 @@ class ServerRoom extends RoomStateView implements Room {
   }
 
   async _sendDm(from: string, to: string, data: unknown, ack: boolean): Promise<RoomSendReceipt | RoomAckReceipt> {
-    if (!ack) return await this._publishDm(from, to, data)
-    const { receipt, reply } = await this._sendDmAck(from, to, data)
-    if (!reply.ok) throw roomFailureError(reply)
-    return { ...receipt, response: reply.result }
+    return ack ? await this._sendDmAck(from, to, data) : await this._publishDm(from, to, data)
   }
-  private async _sendDmAck(
-    from: string,
-    to: string,
-    data: unknown,
-  ): Promise<{ receipt: RoomSendReceipt; reply: DmReply }> {
+  private async _sendDmAck(from: string, to: string, data: unknown): Promise<RoomAckReceipt> {
     const ackId = crypto.randomUUID()
     let timer: ReturnType<typeof setTimeout> | undefined
     const reply = new Promise<DmReply>((settle) => {
@@ -450,7 +443,8 @@ class ServerRoom extends RoomStateView implements Room {
     }
     const settled = await reply
     clearTimeout(timer)
-    return { receipt, reply: settled }
+    if (!settled.ok) throw roomFailureError(settled)
+    return { ...receipt, response: settled.result }
   }
 
   async _publishDm(from: string, to: string, data: unknown, ackId?: string): Promise<RoomSendReceipt> {
