@@ -18,7 +18,7 @@ type Installed = {
   /** The memory backend a process falls back to when it installed none. */
   readonly fallback: boolean
   readonly room: RoomBackend
-  /** `null` while a Broadcast transport override owns the Broadcast plane. */
+  /** Built on first Broadcast use; `null` while a transport override owns the plane. */
   broadcast: BroadcastBackend | null
 }
 
@@ -91,7 +91,7 @@ function install(factory: () => BackendDriver, key: readonly unknown[], fallback
     key,
     fallback,
     room: superviseRoomDriver(driver),
-    broadcast: state.broadcastOverride ? null : superviseBroadcastDriver(driver),
+    broadcast: null,
   }
   state.installed = installed
   return installed
