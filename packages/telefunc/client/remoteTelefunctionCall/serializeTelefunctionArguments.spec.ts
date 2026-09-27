@@ -24,3 +24,21 @@ test("a callback argument's channel gets the call's channel idleTimeout", () => 
     expect.objectContaining({ idleTimeout: 0 }),
   )
 })
+
+test('a callback argument gets its channel on a page served over plain http, which has no crypto.randomUUID()', () => {
+  vi.spyOn(ClientConnection, 'getOrCreate').mockReturnValue({} as ClientConnection)
+  vi.spyOn(crypto, 'randomUUID').mockImplementation(() => {
+    throw new TypeError('crypto.randomUUID is not a function')
+  })
+  expect(() =>
+    serializeTelefunctionArguments({
+      telefuncFilePath: '/upload.telefunc.ts',
+      telefunctionName: 'onUpload',
+      telefunctionArgs: [() => {}],
+      channel: { transports: ['sse'] },
+      abortController: new AbortController(),
+      extensionRequestTypes: [],
+      telefuncUrl: 'http://192.168.1.2:3000/_telefunc',
+    }),
+  ).not.toThrow()
+})

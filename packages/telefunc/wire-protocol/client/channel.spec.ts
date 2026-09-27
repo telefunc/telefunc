@@ -8,8 +8,10 @@ import { ChannelOverflowError } from '../channel-errors.js'
 import { getSessionToken } from './session-registry.js'
 
 const broadcasts: ClientBroadcast[] = []
+const channels: ClientChannel<never, string>[] = []
 afterEach(() => {
   for (const broadcast of broadcasts.splice(0)) broadcast.abort()
+  for (const channel of channels.splice(0)) channel.abort()
   delete config.fetch
   vi.restoreAllMocks()
 })
@@ -152,4 +154,46 @@ test('a close the server acknowledged ends gracefully, though a reconnect then d
   channel._onTransportClose(new Error('Channel not acknowledged by server after reconnect'))
   expect(await closing).toBe(0)
   expect(closedWith).toEqual([undefined])
+})
+
+/** A ClientChannel whose wire never opens, so the test hands it each frame. */
+function stalledChannel(): ClientChannel<never, string> {
+  config.fetch = async () => new Response(new ReadableStream({ start() {} }), { status: 200 })
+  const channel = new ClientChannel<never, string>({
+    channelId: crypto.randomUUID(),
+    transports: [CHANNEL_TRANSPORT.SSE],
+    telefuncUrl: 'http://client-channel.test/_telefunc',
+    connectionKey: crypto.randomUUID(),
+  })
+  channels.push(channel)
+  return channel
+}
+
+test("a channel listener that stops listening itself doesn't make the next one miss the message", () => {
+  const channel = stalledChannel()
+  const seen: string[] = []
+  const unlisten = channel.listen((message) => {
+    seen.push(`once:${message}`)
+    unlisten()
+  })
+  channel.listen((message) => void seen.push(`other:${message}`))
+  for (const [seq, text] of [
+    [1, 'one'],
+    [2, 'two'],
+  ] as const)
+    channel._dispatchFrame({ tag: TAG.TEXT, index: 0, seq, text: JSON.stringify(text), bytes: 5 })
+  expect(seen).toEqual(['once:one', 'other:one', 'other:two'])
+})
+
+test('a channel opens on a page served over plain http, which has no crypto.randomUUID()', () => {
+  config.fetch = async () => new Response(new ReadableStream({ start() {} }), { status: 200 })
+  const channelId = crypto.randomUUID()
+  const connectionKey = crypto.randomUUID()
+  vi.spyOn(crypto, 'randomUUID').mockImplementation(() => {
+    throw new TypeError('crypto.randomUUID is not a function')
+  })
+  const telefuncUrl = 'http://192.168.1.2:3000/_telefunc'
+  expect(
+    () => new ClientChannel({ channelId, transports: [CHANNEL_TRANSPORT.SSE], telefuncUrl, connectionKey }),
+  ).not.toThrow()
 })

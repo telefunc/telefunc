@@ -2,8 +2,9 @@ import { afterEach, expect, test, vi } from 'vitest'
 import type { Peer } from 'crossws'
 import { getTelefuncChannelHooks } from './ws.js'
 import { getChannelMux } from './mux.js'
-import { ServerChannel, reconnectWindow } from './channel.js'
+import { ServerChannel } from './channel.js'
 import { encode } from '../shared-ws.js'
+import { getServerConfig } from '../../node/server/serverConfig.js'
 
 afterEach(() => {
   vi.useRealTimers()
@@ -23,6 +24,7 @@ test("a client that goes silent is detached at its ping deadline, though the pee
   await hooks.open!(peer)
   const reconcile = encode.reconcile({ open: [{ id: channel.id, ix: 0, lastSeq: 0, initial: true }] })
   await hooks.message!(peer, { uint8Array: () => reconcile } as never)
-  await vi.advanceTimersByTimeAsync(reconnectWindow() + 1_000)
+  const { pingInterval, reconnectTimeout } = getServerConfig().channel
+  await vi.advanceTimersByTimeAsync(2 * pingInterval + reconnectTimeout + 1_000)
   expect(closed).toBe(true)
 })

@@ -1,6 +1,6 @@
 export { addTelefuncMiddleware }
 
-import { serve } from '../../server/index.js'
+import { serveNode } from '../../server/telefunc.js'
 import type { ViteDevServer } from 'vite'
 import { getRequestPathname } from '../../../utils/getUrlPathname.js'
 
@@ -14,12 +14,15 @@ function addTelefuncMiddleware(middlewares: ConnectServer) {
 
     if (getRequestPathname(url) !== '/_telefunc') return next()
 
-    const httpResponse = await serve({
-      readable: req,
-      url,
-      method: req.method || 'GET',
-      headers: req.headers,
-    })
+    const httpResponse = await serveNode(
+      {
+        readable: req,
+        url,
+        method: req.method || 'GET',
+        headers: req.headers,
+      },
+      res,
+    )
     httpResponse.headers.forEach(([name, value]) => res.setHeader(name, value))
     res.statusCode = httpResponse.statusCode
     res.socket?.setNoDelay(true)

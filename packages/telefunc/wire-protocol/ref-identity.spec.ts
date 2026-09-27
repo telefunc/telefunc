@@ -531,6 +531,23 @@ describe('reference identity — full pipeline', () => {
     expect(await collect(retTyped.gen)).toEqual([1, 2, 3])
   })
 
+  test('the response body is cancelled once one stream finished and the other was cancelled', async () => {
+    let upstreamCancelled = false
+    const done = new ReadableStream<Uint8Array<ArrayBuffer>>({
+      start: (c) => {
+        c.enqueue(new Uint8Array([1]) as Uint8Array<ArrayBuffer>)
+        c.close()
+      },
+    })
+    const pending = new ReadableStream({ cancel: () => void (upstreamCancelled = true) })
+    const { ret } = await roundTrip({ done, pending })
+    const retTyped = ret as { done: ReadableStream<Uint8Array>; pending: ReadableStream }
+    await new Response(retTyped.done).arrayBuffer()
+    await retTyped.pending.cancel()
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(upstreamCancelled).toBe(true)
+  })
+
   test('the response body is cancelled once every value is done or cancelled', async () => {
     let upstreamCancelled = false
     const pending = new ReadableStream({ cancel: () => void (upstreamCancelled = true) })

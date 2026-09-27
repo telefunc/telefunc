@@ -2,10 +2,6 @@ import { afterEach, describe, expect, it, test } from 'vitest'
 
 import { config, enableChannelTransports, getServerConfig } from './serverConfig.js'
 
-test.each([Infinity, 0.5, Number.MAX_SAFE_INTEGER + 1])('channel config rejects %s', (value) => {
-  expect(() => (config.channel.reconnectTimeout = value)).toThrow('non-negative safe integer')
-})
-
 describe('channel transports a server adapter enables', () => {
   afterEach(() => {
     config.channel = {}
@@ -22,4 +18,8 @@ describe('channel transports a server adapter enables', () => {
     config.channel = { transports: ['sse'] }
     expect(getServerConfig().channel.transports).toEqual(['sse'])
   })
+})
+
+test.each([Infinity, 0.5, Number.MAX_SAFE_INTEGER + 1])('channel config rejects %s', (value) => {
+  expect(() => (config.channel.reconnectTimeout = value)).toThrow('non-negative safe integer')
 })
