@@ -13,11 +13,26 @@ import { Abort as TelefuncAbort, abort, withContext } from 'telefunc/client'
 function Abort() {
   const [hydrated, setHydrated] = useState(false)
   const [result, setResult] = useState<string>('')
-  // The in-flight non-streaming call, stashed so the e2e test can abort it deterministically once it has
-  // confirmed (by polling server cleanup-state) that the telefunc is running — see the button below.
-  const slowNormalCall = useRef<ReturnType<typeof onSlowNormalTelefunc> | null>(null)
-  const uploadSingleCall = useRef<ReturnType<typeof onUploadAbortSingle> | null>(null)
-  const uploadMultipleCall = useRef<ReturnType<typeof onUploadAbortMultiple> | null>(null)
+  // The e2e tests abort these calls with the buttons below, once the server has them.
+  const calls = useRef<Record<string, Promise<unknown>>>({})
+  const startAbortable = (name: string, call: Promise<unknown>) => {
+    calls.current[name] = call
+    call.then(
+      (res) => setResult(JSON.stringify({ result: res, error: null })),
+      (e: any) => setResult(JSON.stringify({ error: e.message, isAbort: e instanceof TelefuncAbort })),
+    )
+  }
+  const abortButton = (name: string, label: string) => (
+    <button
+      id={`test-${name}-abort`}
+      onClick={() => {
+        const call = calls.current[name]
+        if (call) abort(call)
+      }}
+    >
+      {label}
+    </button>
+  )
   useEffect(() => setHydrated(true), [])
 
   return (
@@ -176,30 +191,13 @@ function Abort() {
         id="test-slow-normal-telefunc"
         onClick={() => {
           setResult('')
-          // Fire the call and stash it. The abort is triggered separately (button below), driven by the
-          // e2e test AFTER it confirms the telefunc is running server-side. The old fixed
-          // `setTimeout(() => abort(promise), 1500)` raced call-establishment on slow preview variants:
-          // when the abort fired before/around server start it was effectively lost, the call ran to
-          // normal completion, and `isAbort` came back undefined ("expected undefined to equal true").
-          const promise = onSlowNormalTelefunc()
-          slowNormalCall.current = promise
-          promise.then(
-            (res) => setResult(JSON.stringify({ result: res, error: null })),
-            (e: any) => setResult(JSON.stringify({ error: e.message, isAbort: e instanceof TelefuncAbort })),
-          )
+          startAbortable('slow-normal', onSlowNormalTelefunc())
         }}
       >
         Slow normal telefunc
       </button>
 
-      <button
-        id="test-slow-normal-abort"
-        onClick={() => {
-          if (slowNormalCall.current) abort(slowNormalCall.current)
-        }}
-      >
-        Abort slow normal telefunc
-      </button>
+      {abortButton('slow-normal', 'Abort slow normal telefunc')}
 
       <h2>Upload abort tests</h2>
 
@@ -211,26 +209,13 @@ function Abort() {
           // between reads stretches consumption to ~1.6s, giving abortion time to land
           const content = 'x'.repeat(1_000_000)
           const file = new File([content], 'abort-test.txt', { type: 'text/plain' })
-          // The test aborts it once the server reads it, with the button below.
-          const promise = onUploadAbortSingle(file)
-          uploadSingleCall.current = promise
-          promise.then(
-            (res) => setResult(JSON.stringify({ result: res, error: null })),
-            (e: any) => setResult(JSON.stringify({ error: e.message, isAbort: e instanceof TelefuncAbort })),
-          )
+          startAbortable('upload-abort-single', onUploadAbortSingle(file))
         }}
       >
         Upload abort (single file)
       </button>
 
-      <button
-        id="test-upload-abort-single-abort"
-        onClick={() => {
-          if (uploadSingleCall.current) abort(uploadSingleCall.current)
-        }}
-      >
-        Abort upload (single file)
-      </button>
+      {abortButton('upload-abort-single', 'Abort upload (single file)')}
 
       <button
         id="test-upload-abort-multiple"
@@ -241,26 +226,13 @@ function Abort() {
           const file1 = new File([content], 'file1.txt', { type: 'text/plain' })
           const file2 = new File([content], 'file2.txt', { type: 'text/plain' })
           const file3 = new File([content], 'file3.txt', { type: 'text/plain' })
-          // The test aborts it once the server has read file1 and sleeps, with the button below.
-          const promise = onUploadAbortMultiple(file1, file2, file3)
-          uploadMultipleCall.current = promise
-          promise.then(
-            (res) => setResult(JSON.stringify({ result: res, error: null })),
-            (e: any) => setResult(JSON.stringify({ error: e.message, isAbort: e instanceof TelefuncAbort })),
-          )
+          startAbortable('upload-abort-multiple', onUploadAbortMultiple(file1, file2, file3))
         }}
       >
         Upload abort (multiple files)
       </button>
 
-      <button
-        id="test-upload-abort-multiple-abort"
-        onClick={() => {
-          if (uploadMultipleCall.current) abort(uploadMultipleCall.current)
-        }}
-      >
-        Abort upload (multiple files)
-      </button>
+      {abortButton('upload-abort-multiple', 'Abort upload (multiple files)')}
     </div>
   )
 }
