@@ -385,6 +385,7 @@ describe('Room public behavior', () => {
     expect(await driver.readHead('lifecycle')).toMatchObject({ state: 'closed', currentInc: null })
     expect([...memoryState.rooms.get('lifecycle')!.gens.keys()]).toEqual([])
     expect((await driver.directoryList('lifecycle')).entries).toEqual([])
+    await expect(Room.close('lifecycle-never-created')).resolves.toBeUndefined()
     await expect(room.join()).rejects.toThrow(/closed/i)
     await expect(Room.get('lifecycle')).rejects.toThrow('Room not found')
     const recreated = (await Room.create('lifecycle')) as ServerRoom
