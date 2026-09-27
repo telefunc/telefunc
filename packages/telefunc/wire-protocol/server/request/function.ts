@@ -12,7 +12,7 @@ const functionReviver: ReviverType<FunctionContract, ServerReviverContext> = {
   revive: ({ channelId }, { createChannel, validators }) => {
     const channel = createChannel({ id: channelId, ack: true })
     const validateReturn = validators.get('return')
-    const call = async (args: unknown[]) => {
+    const fn = async (...args: unknown[]) => {
       const res = await channel.send(args, { ack: true })
       if (validateReturn) {
         const r = validateReturn(res)
@@ -24,7 +24,7 @@ const functionReviver: ReviverType<FunctionContract, ServerReviverContext> = {
       return res
     }
     return {
-      value: (...args: unknown[]) => markHandled(call(args)),
+      value: (...args: unknown[]) => markHandled(fn(...args)),
       async close() {
         await channel.close()
       },

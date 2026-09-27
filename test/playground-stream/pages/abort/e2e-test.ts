@@ -123,7 +123,7 @@ function testAbort() {
     await resetCleanupState()
 
     await page.click('#test-slow-normal-telefunc')
-    // Abort once the server runs the telefunc: a page timer doesn't reliably fire on time in CI.
+    // Abort once the server runs the telefunc.
     await autoRetry(async () => {
       const state = await getCleanupState()
       expect(state.slowNormal).toBe('running')
@@ -151,7 +151,7 @@ function testAbort() {
     await resetCleanupState()
 
     await page.click('#test-upload-abort-single')
-    // Abort once the server reads the file: a page timer doesn't reliably fire on time in CI.
+    // Abort once the server reads the file.
     await autoRetry(async () => {
       const state = await getCleanupState()
       expect(state.uploadAbortSingle).toBe('running')
@@ -179,7 +179,7 @@ function testAbort() {
     await resetCleanupState()
 
     await page.click('#test-upload-abort-multiple')
-    // Abort once the server has read file1: a page timer doesn't reliably fire on time in CI.
+    // Abort once the server has read file1.
     await autoRetry(async () => {
       const state = await getCleanupState()
       expect(state.uploadAbortMultiFilesRead).toBe('1')

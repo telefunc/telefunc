@@ -196,6 +196,7 @@ test("a server close that reaches the page before its upload request settles get
   server.refuseUpload()
   await delay(100)
   expect(acked).toEqual([server.ix])
+  expect((channel as any)._connection.channels.size).toBe(0) // released once its acknowledgement went out
 })
 
 test("a server close that reaches the page before its upload request settles, while the page opens another channel, gets the page's acknowledgement first", async () => {
