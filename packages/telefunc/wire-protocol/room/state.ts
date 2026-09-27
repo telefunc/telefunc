@@ -527,7 +527,6 @@ class RoomState {
         entry.metaSeq = member.metaSeq
       }
     }
-    entry.joinedAt = member.joinedAt
     return { narrated, viewChanged: this._mergeKnownTracks(entry, member.tracks) }
   }
   private _applyPreRosterMeta(): void {
