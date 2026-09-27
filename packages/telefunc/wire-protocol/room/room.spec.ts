@@ -32,7 +32,7 @@ import { MEMBER_CELL_PREFIX, memberCellKey } from './server/cells.js'
 import type { LeaveCause, Sender } from './types.js'
 import { ClientRoom, ClientStandaloneParticipant } from './client.js'
 import { ClientBroadcast, type ClientChannel } from '../client/channel.js'
-import { RoomState, remoteBacking } from './state.js'
+import { RoomState, type RoomStateView, remoteBacking } from './state.js'
 import { Room } from './server/statics.js'
 import { ServerRoom, type ServerLocalParticipant } from './server/room.js'
 import { configFromHead, decodeRoomText, encodeRoomRecord } from './server/lanes.js'
@@ -3764,6 +3764,7 @@ function fakeClient(
 }
 function newState(options: Partial<ConstructorParameters<typeof RoomState>[0]>): RoomState {
   return new RoomState({
+    owner: {} as RoomStateView, // read only by the serializer
     roomId: 'state',
     meta: {},
     seed: { members: [] },

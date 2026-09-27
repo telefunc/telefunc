@@ -92,6 +92,7 @@ class ClientRoom extends RoomStateView implements Room {
     super()
     this._stub = stub
     this._state = new RoomState({
+      owner: this,
       roomId: snapshot.roomId,
       meta: snapshot.meta,
       seed: { count: snapshot.count }, // the roster itself streams right behind the response
@@ -101,7 +102,6 @@ class ClientRoom extends RoomStateView implements Room {
       onCallbackError: reportClientCallbackError,
       onLeave: (id, cause) => this._onLeave(id, cause),
     })
-    this._state._owner = this
     if (snapshot.closed) this._roster.resolve()
 
     // Delivery handlers are local-only. What the server relays is driven by the declared wants: control always arrives, text while subscribed, binary per `sub-binary`.

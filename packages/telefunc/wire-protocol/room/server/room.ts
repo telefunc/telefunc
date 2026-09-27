@@ -150,6 +150,7 @@ class ServerRoom extends RoomStateView implements Room {
     super()
     this._inc = config.inc
     this._state = new RoomState({
+      owner: this,
       roomId,
       meta: config.meta,
       seed,
@@ -158,7 +159,6 @@ class ServerRoom extends RoomStateView implements Room {
       onCallbackError: reportServerChannelError,
       onLeave: (id, cause, hidden) => this._onLeave(id, cause, hidden),
     })
-    this._state._owner = this
     this._local = new LocalHolder(this._state, (member) => this._suppress(member))
     this._demand = new RoomDemand(
       (event) => void publishCtrl(roomId, config.inc, { __r: 'want', ...event }).catch(reportRoomError),

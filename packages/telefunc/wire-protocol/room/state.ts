@@ -50,6 +50,7 @@ type MemberEntry = {
   leaveCbs: Array<(cause: LeaveCause) => void>
 }
 type RoomStateOptions = {
+  owner: RoomStateView
   roomId: string
   meta: RoomMeta
   /** Either the authoritative roster, or just its member count. A lazy view seeds with `{ count }` and learns the members from its first roster (read on the server, streamed to the client). */
@@ -132,7 +133,7 @@ abstract class RoomStateView {
  *  unknown one fires no listener, so a snapshot and a concurrent event stream compose without double-firing. */
 class RoomState {
   /** @internal The owning `ServerRoom`/`ClientRoom`, for serialization backing. */
-  _owner: RoomStateView | null = null
+  readonly _owner: RoomStateView
   readonly roomId: string
   meta: RoomMeta
   closed: boolean
@@ -169,6 +170,7 @@ class RoomState {
   /** The newest meta change per member that reached this view before its first roster. */
   private readonly _preRosterMeta = new Map<string, { meta: ParticipantMeta; seq: number }>()
   constructor(opts: RoomStateOptions) {
+    this._owner = opts.owner
     this.roomId = opts.roomId
     this.meta = ownMetadata(opts.meta)
     this.closed = opts.closed === true
