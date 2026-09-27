@@ -1886,6 +1886,7 @@ describe('Room public behavior', () => {
       await release.promise
       return compareExchange(...args)
     })
+    const departed = vi.spyOn(room, '_removeDepartedMember')
     const joining = stub
       ._handleRequest({ __r: 'req-join', meta: {}, selfDelivery: true })
       .catch((error: unknown) => error)
@@ -1894,6 +1895,7 @@ describe('Room public behavior', () => {
     release.resolve()
     expect(isRoomError(await joining)).toBe(true)
     expect(await Room.getParticipants(room.id)).toEqual([])
+    expect(departed).not.toHaveBeenCalled() // the admission rolls itself back
   })
   it('does not evict a client-held participant again once it left', async () => {
     vi.useFakeTimers()

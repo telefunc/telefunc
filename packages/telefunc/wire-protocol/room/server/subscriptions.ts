@@ -42,7 +42,8 @@ type SubscriptionHost = {
   _holderWants(): HolderWants
   /** Whether some holder receives the pair: a publisher's own suppressed frames are no demand and need no lane. */
   _wantsBinary(member: string, track: string): boolean
-  _ownedMembers(): string[]
+  /** A pending admission owns its inbox, but its record is renewed only once it commits. */
+  _ownedMembers(): { all: string[]; renewable: string[] }
   _onCtrlMessage(serialized: string, info: WirePublishInfo): void
   _onTextData(serialized: string, info: WirePublishInfo): void
   _onBinary(framed: Uint8Array, info: WirePublishInfo): void
@@ -179,7 +180,7 @@ class RoomSubscriptions {
 
   private _syncInbox(plan: SubscriptionPlan): void {
     const host = this._host
-    const owned = plan.open ? host._ownedMembers() : []
+    const owned = plan.open ? host._ownedMembers().all : []
     this._syncKeyedSubs(
       this._inbox,
       owned.map((member) => ({ key: member, value: { kind: 'inbox', member } as const })),
@@ -283,7 +284,7 @@ class RoomSubscriptions {
   private _syncHeartbeat(): void {
     const host = this._host
     const want =
-      !host._state.closed && (this._control.wanted || host._ownedMembers().length > 0 || this._demand.isActive())
+      !host._state.closed && (this._control.wanted || host._ownedMembers().all.length > 0 || this._demand.isActive())
     if (want && !this._heartbeatTimer) {
       this._heartbeatTimer = unrefTimer(
         setInterval(() => void this._heartbeatTick().catch(reportRoomError), ROOM_HEARTBEAT_INTERVAL_MS),
@@ -302,7 +303,7 @@ class RoomSubscriptions {
       // No cell I/O, so member-cell latency never delays demand renewal.
       this._demand.heartbeat()
       let renewalFailure: { error: unknown } | null = null
-      for (const id of host._ownedMembers()) {
+      for (const id of host._ownedMembers().renewable) {
         try {
           await renewMemberLease(host.id, host._inc, id)
         } catch (error) {
