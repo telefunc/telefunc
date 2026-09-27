@@ -13,7 +13,7 @@ import {
   type BinaryWants,
   type TrackWants,
 } from './binary.js'
-import { ROOM_WANTED_TRACKS_MAX } from './constants.js'
+import { ROOM_NAMED_TRACKS_MAX } from './constants.js'
 import { assertKnownOptions, ownLeaveCause, ownMetadata, removedCause, senderOf, stampNewer } from './model.js'
 import type { AcceptedMeta, MemberSnapshot, MemberWants, RoomDataEnvelope } from './protocol.js'
 import type {
@@ -666,8 +666,8 @@ function binaryListener<CB>(
   // Named tracks count even beside an all-track listener, whose removal would declare them all.
   const named = new Set([...cbs, listener].flatMap(({ track }) => (track === undefined ? [] : [laneTrack(track)])))
   assertUsage(
-    named.size <= ROOM_WANTED_TRACKS_MAX,
-    `subscribeBinary() can name at most ${ROOM_WANTED_TRACKS_MAX} tracks per participant, the default track included, and as many room-wide; subscribe without a track to receive every track`,
+    named.size <= ROOM_NAMED_TRACKS_MAX,
+    `subscribeBinary() can name at most ${ROOM_NAMED_TRACKS_MAX} tracks per participant, the default track included, and as many room-wide; subscribe without a track to receive every track`,
   )
   return listener
 }

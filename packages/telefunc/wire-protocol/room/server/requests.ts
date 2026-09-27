@@ -20,7 +20,7 @@ import {
   type BinaryWants,
   type TrackWants,
 } from '../binary.js'
-import { ROOM_WANTED_TRACKS_MAX } from '../constants.js'
+import { ROOM_NAMED_TRACKS_MAX } from '../constants.js'
 import { isRecord } from '../model.js'
 import type { DmReply, ParticipantStubRequest, RoomDataPublish, RoomStubRequest } from '../protocol.js'
 assertIsNotBrowser()
@@ -125,7 +125,7 @@ function sanitizeBinaryWants(wants: unknown): BinaryWants {
 }
 function sanitizeTrackWants(wants: unknown): TrackWants {
   if (!isRecord(wants) || typeof wants.all !== 'boolean' || !Array.isArray(wants.tracks)) malformed('binary wants')
-  if (wants.tracks.length > ROOM_WANTED_TRACKS_MAX || !wants.tracks.every(isRoomTrack)) malformed('binary wants')
+  if (wants.tracks.length > ROOM_NAMED_TRACKS_MAX || !wants.tracks.every(isRoomTrack)) malformed('binary wants')
   return { all: wants.all, tracks: wants.tracks as string[] }
 }
 

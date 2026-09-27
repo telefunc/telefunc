@@ -7,7 +7,7 @@ export {
   ROOM_DEMAND_TTL_MS,
   ROOM_DM_ACK_TIMEOUT_MS,
   ROOM_HORIZON_MS,
-  ROOM_WANTED_TRACKS_MAX,
+  ROOM_NAMED_TRACKS_MAX,
 }
 const ROOM_HEARTBEAT_INTERVAL_MS = 30_000
 // Four heartbeats: a member is reaped only after several renewals in a row were missed.
@@ -24,4 +24,4 @@ const ROOM_DM_ACK_TIMEOUT_MS = 60_000
 const ROOM_HORIZON_MS = 60_000
 // Each named track opens a lane at every instance listening to it, so neither a subscriber nor a publisher can name
 // unbounded tracks.
-const ROOM_WANTED_TRACKS_MAX = 16
+const ROOM_NAMED_TRACKS_MAX = 16

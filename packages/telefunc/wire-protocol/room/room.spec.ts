@@ -22,7 +22,7 @@ import {
   ROOM_TAIL_ATTACH_TIMEOUT_MS,
   ROOM_TAIL_HOLD_CODE_UNITS_MAX,
   ROOM_TAIL_HOLD_MAX,
-  ROOM_WANTED_TRACKS_MAX,
+  ROOM_NAMED_TRACKS_MAX,
 } from './constants.js'
 import { DEFAULT_TRACK, decodeBinaryFrame, emptyTrackWants, encodeBinaryFrame } from './binary.js'
 import { RoomError, isRoomError, roomAckError, toRoomFailure } from './errors.js'
@@ -1494,7 +1494,7 @@ describe('Room public behavior', () => {
   it('bounds the named tracks a publisher can open', async () => {
     const room = (await Room.create('publish-track-cap')) as ServerRoom
     const me = await room.join()
-    for (let track = 0; track < ROOM_WANTED_TRACKS_MAX; track++)
+    for (let track = 0; track < ROOM_NAMED_TRACKS_MAX; track++)
       await me.publishBinary(new Uint8Array([1]), { track: `t${track}` })
     await expect(me.publishBinary(new Uint8Array([1]), { track: 'one-too-many' })).rejects.toThrow(
       'at most 16 named tracks',
