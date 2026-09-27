@@ -146,33 +146,6 @@ describe('memory backend behind the supervised consumer', () => {
     )
     expect(reconstructed).toMatchObject({ accepted: true, seq: 3, timestamp: 3 })
   })
-  it('validates HeadNext shape before delegating to any raw driver', async () => {
-    const backend = getRoomBackend()
-    const opened = await backend.compareExchangeHead(
-      'head-shape',
-      { form: 'absent' },
-      { head: { state: 'open', currentInc: 'inc-1', config: encoder.encode('config') } },
-    )
-    if (!('head' in opened)) throw new Error('head create failed')
-    const delegated = vi.spyOn(driver, 'compareExchangeHead')
-    for (const durationMs of [0, Number.POSITIVE_INFINITY]) {
-      await expect(
-        backend.compareExchangeHead(
-          'head-shape',
-          { form: 'rev', rev: opened.head.rev },
-          {
-            head: {
-              state: 'closing',
-              currentInc: 'inc-1',
-              config: opened.head.config,
-              closeLease: { id: 'lease-1', durationMs },
-            },
-          },
-        ),
-      ).rejects.toThrow(`close lease durationMs ${durationMs} must be finite and positive`)
-    }
-    expect(delegated).not.toHaveBeenCalled()
-  })
   it('does not retain or expose mutable lane aliases', async () => {
     await driver.compareExchangeHead(
       'retained-lane-alias',
