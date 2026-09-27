@@ -6,6 +6,7 @@ import { IndexedPeer } from './IndexedPeer.js'
 import { ServerChannel } from './channel.js'
 import { getBroadcastAdapter, _resetBroadcastAdapterForTesting, DefaultBroadcastAdapter } from './broadcast.js'
 import type { BroadcastTransport } from './broadcast.js'
+import { config } from '../../node/server/serverConfig.js'
 
 const previousBroadcastAdapter = getBroadcastAdapter()
 afterEach(() => _resetBroadcastAdapterForTesting(previousBroadcastAdapter))
@@ -171,6 +172,35 @@ describe('keyed in-process broadcast', () => {
 
     // One publish made before attach → exactly one frame replayed on attach.
     expect(frames.length).toBe(1)
+  })
+
+  it('opens channels under a zero config.channel.bufferLimit and holds no publish', () => {
+    config.channel = { bufferLimit: 0, bufferLimitBinary: 0 }
+    try {
+      const sender = new ServerBroadcast<{ text: string }>({ key: 'room:zero-limit' })
+      const receiver = new ServerBroadcast<{ text: string }>({ key: 'room:zero-limit' })
+      sender._registerChannel()
+      receiver._registerChannel()
+      receiver._onPeerBroadcastSubscribe(false)
+
+      sender.publish({ text: 'hello' })
+
+      const frames: Uint8Array[] = []
+      receiver._attachPeer(
+        new IndexedPeer(
+          {
+            send: (frame) => {
+              frames.push(frame)
+            },
+          },
+          7,
+          new ReplayBuffer(1024 * 1024, 60_000, 2 * 1024 * 1024),
+        ),
+      )
+      expect(frames).toEqual([])
+    } finally {
+      config.channel = {}
+    }
   })
 
   it('buffers keyed publishes that arrive before a sibling has registered yet', () => {

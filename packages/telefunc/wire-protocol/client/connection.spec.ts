@@ -8,6 +8,7 @@ import {
 } from '../constants.js'
 import { ClientConnection } from './connection.js'
 import { encode } from '../shared-ws.js'
+import { config, getServerConfig } from '../../node/server/serverConfig.js'
 
 /** Minimal `MuxChannel` — registering one is enough to make the connection open a wire. */
 function createChannel(id = crypto.randomUUID()) {
@@ -42,11 +43,49 @@ function stalledOptions() {
   }
 }
 
+/** A connection that applied a RECONCILED whose every setting is zero. */
+function zeroConfiguredConnection() {
+  const options = {
+    transports: [CHANNEL_TRANSPORT.SSE],
+    fetchImpl: createStalledTransport().fetchImpl,
+    connectionKey: crypto.randomUUID(),
+  }
+  const connection = ClientConnection.getOrCreate('http://zero.test', createChannel() as never, options) as any
+  const ctrl = new Proxy(
+    { sessionId: 'zero', open: [], transports: [CHANNEL_TRANSPORT.SSE] },
+    { get: (target, key) => Reflect.get(target, key) ?? 0 },
+  )
+  connection.applyReconciled(ctrl)
+  connection.transport.applyReconciledSettings(ctrl)
+  return { connection, options }
+}
+
+test('channel config preserves zero through server and client resolution', () => {
+  config.channel.reconnectTimeout = 0
+  expect(getServerConfig().channel.reconnectTimeout).toBe(0)
+  const { connection } = zeroConfiguredConnection()
+  expect([
+    connection.reconnectTimeoutMs,
+    connection.idleTimeoutMs,
+    connection.clientReplayBufferBytes,
+    connection.clientReplayBufferBinaryBytes,
+    connection.transport.flushThrottleMs,
+    connection.transport.postIdleFlushDelayMs,
+  ]).toEqual(Array(6).fill(0))
+  connection.dispose()
+})
+
 test("a per-call idleTimeout is kept over the server's", () => {
   const options = { ...stalledOptions(), idleTimeout: 0 }
   const connection = ClientConnection.getOrCreate('http://idle.test', createChannel() as never, options) as any
   connection.applyReconciled({ sessionId: 'idle', open: [], idleTimeout: 60_000 }, null)
   expect(connection.idleTimeoutMs).toBe(0)
+  connection.dispose()
+})
+
+test('a zero replay budget still registers a later channel on the connection', () => {
+  const { connection, options } = zeroConfiguredConnection()
+  expect(ClientConnection.getOrCreate('http://zero.test', createChannel() as never, options)).toBe(connection)
   connection.dispose()
 })
 
