@@ -250,6 +250,26 @@ test('a reconnect re-attaches a channel still closing, so its close request can 
   connection.dispose()
 })
 
+test("a channel released while its reconnect's reconcile is in flight is left out of a follow-up reconcile, which ends it on the server", () => {
+  const channel = createChannel()
+  const connection = ClientConnection.getOrCreate(
+    'http://released-meanwhile.test',
+    channel as never,
+    stalledOptions(),
+  ) as any
+  connection.buildReconcileFrame()
+  connection.applyReconciled(reconciled({ sessionId: 'meanwhile', open: [{ ix: 0, lastSeq: 0 }] }), null)
+  connection.buildReconcileFrame() // the reconnect's, listing the channel
+  connection.unregister(channel) // its close timed out, its request lost with the dead wire
+  const { frames } = connection.applyReconciled(
+    reconciled({ sessionId: 'meanwhile', open: [{ ix: 0, lastSeq: 0 }] }),
+    null,
+  )
+  const reconciles = frames.map(({ frame }: { frame: Uint8Array<ArrayBuffer> }) => decode(frame))
+  expect(reconciles).toMatchObject([{ tag: TAG.RECONCILE, payload: { sessionId: 'meanwhile', open: [] } }])
+  connection.dispose()
+})
+
 test('a channel closed during a reconnect sends what the dead wire lost before what it queued', () => {
   const channel = createChannel()
   const connection = ClientConnection.getOrCreate(

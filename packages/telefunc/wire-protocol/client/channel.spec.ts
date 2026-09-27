@@ -193,6 +193,18 @@ test('a broadcast declares its subscriptions on every attach, as a subscribe wri
   expect(broadcast._reattachState()).toEqual({ broadcast: { text: true, binary: false } })
 })
 
+test("a broadcast's toggles after close() send nothing, so none can hold its channel for a reconcile that would re-attach it", () => {
+  const broadcast = stalledBroadcast()
+  const off = broadcast.subscribe(() => {})
+  void broadcast.close().catch(() => {})
+  off()
+  broadcast.subscribeBinary(() => {})
+  const tags = (broadcast as any)._connection.sendBuffer.map(({ frame }: { frame: Uint8Array }) => frame[0])
+  expect(tags.filter((tag: number) => tag === TAG.BROADCAST_UNSUB || tag === TAG.BROADCAST_SUB)).toEqual([
+    TAG.BROADCAST_SUB,
+  ])
+})
+
 test('a broadcast subscribes the page to a kind with its first listener, and unsubscribes it with the last', () => {
   const broadcast = stalledBroadcast()
   broadcast.subscribeBinary(() => {})()
