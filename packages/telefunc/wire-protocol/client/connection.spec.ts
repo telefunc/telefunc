@@ -41,6 +41,14 @@ function stalledOptions() {
   }
 }
 
+test("a per-call idleTimeout is kept over the server's", () => {
+  const options = { ...stalledOptions(), idleTimeout: 0 }
+  const connection = ClientConnection.getOrCreate('http://idle.test', createChannel() as never, options) as any
+  connection.applyReconciled({ sessionId: 'idle', open: [], idleTimeout: 60_000 }, null)
+  expect(connection.idleTimeoutMs).toBe(0)
+  connection.dispose()
+})
+
 test('the channel cap counts the open channels, not every channel the connection opened', () => {
   const options = stalledOptions()
   const connection = ClientConnection.getOrCreate('http://cap.test', createChannel() as never, options) as any

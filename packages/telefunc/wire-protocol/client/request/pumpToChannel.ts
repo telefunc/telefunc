@@ -27,6 +27,7 @@ function pumpClientProducerToChannel(
   telefuncUrl: string,
   connectionKey?: string,
   headers?: Record<string, string>,
+  idleTimeout?: number,
 ) {
   const channel = new ClientChannel({
     channelId: crypto.randomUUID(),
@@ -34,6 +35,7 @@ function pumpClientProducerToChannel(
     connectionKey,
     headers,
     telefuncUrl,
+    idleTimeout,
   })
 
   const producer = createProducer()

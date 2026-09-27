@@ -30,6 +30,7 @@ type CallContext = {
   extensions?: Record<string, unknown>
   extensionRequestTypes: ReplacerType<TypeContract, ClientReplacerContext>[]
   connectionKey?: string
+  channelIdleTimeout?: number
   headers?: Record<string, string> | null
   telefuncUrl: string
 }
@@ -57,6 +58,7 @@ function serializeTelefunctionArguments(callContext: CallContext): SerializeResu
 
   const channelTransports = callContext.channel.transports
   const connectionKey = callContext.connectionKey
+  const idleTimeout = callContext.channelIdleTimeout
   const headers = callContext.headers ?? undefined
   const telefuncUrl = callContext.telefuncUrl
   const abortSignal = callContext.abortController.signal
@@ -78,10 +80,18 @@ function serializeTelefunctionArguments(callContext: CallContext): SerializeResu
           connectionKey,
           headers,
           telefuncUrl,
+          idleTimeout,
         })
       },
       sendStream(createProducer) {
-        return pumpClientProducerToChannel(createProducer, channelTransports, telefuncUrl, connectionKey, headers)
+        return pumpClientProducerToChannel(
+          createProducer,
+          channelTransports,
+          telefuncUrl,
+          connectionKey,
+          headers,
+          idleTimeout,
+        )
       },
     },
     function onReplaced(replaced) {

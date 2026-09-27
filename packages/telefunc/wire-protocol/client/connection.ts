@@ -1295,7 +1295,10 @@ class ClientConnection implements MuxConnection {
   private applyReconciled(ctrl: ReconciledPayload, deferredOmitted: number[] | null): ReconcileOutcome {
     this.sessionId = ctrl.sessionId
     if (ctrl.reconnectTimeout) this.reconnectTimeoutMs = ctrl.reconnectTimeout
-    if (ctrl.idleTimeout) this.idleTimeoutMs = ctrl.idleTimeout
+    // A per-call `idleTimeout` (withContext) is kept over the server's.
+    if (ctrl.idleTimeout && this.connectionOptions.idleTimeout === undefined) {
+      this.idleTimeoutMs = ctrl.idleTimeout
+    }
     if (ctrl.clientReplayBuffer) this.clientReplayBufferBytes = ctrl.clientReplayBuffer
     if (ctrl.clientReplayBufferBinary) this.clientReplayBufferBinaryBytes = ctrl.clientReplayBufferBinary
 
