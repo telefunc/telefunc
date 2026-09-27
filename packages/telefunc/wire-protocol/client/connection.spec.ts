@@ -180,6 +180,16 @@ test('a reconnect re-attaches a channel still closing, so its close request can 
   connection.dispose()
 })
 
+test("a first connect's retry holds back a newer frame behind the ones its failed attempt sent", () => {
+  const channel = createChannel()
+  const connection = ClientConnection.getOrCreate('http://first-retry.test', channel as never, stalledOptions()) as any
+  const replay = connection.replayBuffers.get(0)
+  replay.push(replay.nextSeq(), encode.text(0, 'join', 1)) // sent by the attempt that failed before its RECONCILED
+  connection.send(channel, 'second')
+  expect(connection.drainBufferedFramesForReconcile(true)).toEqual([])
+  connection.dispose()
+})
+
 describe('SSE reconcile watchdog', () => {
   afterEach(() => {
     vi.clearAllTimers()
