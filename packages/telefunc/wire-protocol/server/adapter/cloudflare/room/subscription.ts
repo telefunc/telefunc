@@ -109,7 +109,7 @@ class CloudflareRoomSubscriptionAttempt extends DriverAttempt {
 
   async unsubscribe(): Promise<void> {
     this.#finish()
-    await this.#release()
+    await this.#callAuthority((authority) => authority.unsubscribeRoute(this.#route))
   }
 
   async #establish(): Promise<void> {
@@ -144,10 +144,6 @@ class CloudflareRoomSubscriptionAttempt extends DriverAttempt {
     if (this.state() !== 'ready') return
     if (renewed) this.#scheduleRenewal()
     else this.#finish()
-  }
-
-  async #release(): Promise<void> {
-    await this.#callAuthority((authority) => authority.unsubscribeRoute(this.#route))
   }
 
   #finish(error?: unknown): void {
