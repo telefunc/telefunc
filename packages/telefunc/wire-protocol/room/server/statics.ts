@@ -151,7 +151,7 @@ async function repairRoomIndex(
 type TryCreateRoomResult = { kind: 'created'; room: Room } | { kind: 'exists' } | { kind: 'closing' }
 
 async function tryCreateRoom(id: string, options: RoomOptions | undefined): Promise<TryCreateRoomResult> {
-  const { meta } = normalizeOptions(options)
+  const { meta } = normalizeRoomOptions(options)
   const backend = getRoomBackend()
   return await retryCompareExchange(id, async () => {
     let current = await backend.readHead(id)
@@ -457,7 +457,7 @@ async function sendServerDm(roomId: string, inc: string, memberId: string, data:
   throw staleCommitError(roomId, committed)
 }
 
-function normalizeOptions(options: RoomOptions | undefined): { meta: RoomMeta } {
+function normalizeRoomOptions(options: RoomOptions | undefined): { meta: RoomMeta } {
   assertUsage(options === undefined || isObject(options), 'Room options should be an object')
   assertKnownOptions(options, ['meta'], 'Room')
   const meta = options?.meta ?? {}
