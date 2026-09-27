@@ -1,5 +1,5 @@
-// ioredis policy: the client options Room requires, subscriber creation, and calls to defined commands.
-export { assertAtMostOnceClient, createSubscriberSocket, callDefinedCommand, isCluster }
+// ioredis policy: the client options the backend requires, subscriber creation, and calls to defined commands.
+export { assertSupportedClient, createSubscriberSocket, callDefinedCommand, isCluster }
 export type { RedisClient, SubscriberSocket }
 
 import { randomUUID } from 'node:crypto'
@@ -25,9 +25,9 @@ function isCluster(redis: RedisClient): redis is Cluster {
 
 /** Rejects clients that could resend a command (at-most-once), read a replica (Room reads are strongly consistent),
  *  batch a Cluster script by its key count, or prefix keys but not channels. */
-function assertAtMostOnceClient(redis: RedisClient): void {
+function assertSupportedClient(redis: RedisClient): void {
   if (isCluster(redis) && redis.options.scaleReads !== 'master') {
-    throw new Error("RedisBackend: ioredis Cluster scaleReads must be 'master' for consistent Room reads")
+    throw new Error("installRedis(): ioredis Cluster scaleReads must be 'master' for consistent Room reads")
   }
   const retries = isCluster(redis)
     ? redis.options.retryDelayOnFailover !== 0 ||
@@ -36,18 +36,18 @@ function assertAtMostOnceClient(redis: RedisClient): void {
     : redis.options.maxRetriesPerRequest !== 0 || redis.options.reconnectOnError != null
   if (retries)
     throw new Error(
-      'RedisBackend: at-most-once requires maxRetriesPerRequest: 0 (standalone Redis), or retryDelayOnFailover: 0 and redisOptions.maxRetriesPerRequest: 0 (Cluster); reconnectOnError must be unset',
+      'installRedis(): at-most-once requires maxRetriesPerRequest: 0 (standalone Redis), or retryDelayOnFailover: 0 and redisOptions.maxRetriesPerRequest: 0 (Cluster); reconnectOnError must be unset',
     )
   // Autopipelining batches a Cluster command by the node of its first argument, which for a script with a variable key
   // count is the count, and refuses a batch whose keys span masters.
   if (isCluster(redis) && redis.options.enableAutoPipelining)
     throw new Error(
-      "RedisBackend: ioredis Cluster enableAutoPipelining isn't supported (it batches Room's variable-key scripts by their key count, not their keys)",
+      "installRedis(): ioredis Cluster enableAutoPipelining isn't supported (it batches Room's variable-key scripts by their key count, not their keys)",
     )
   // A Cluster copies redisOptions.keyPrefix to its own options, so this reads either form.
   if (redis.options.keyPrefix)
     throw new Error(
-      "RedisBackend: ioredis keyPrefix isn't supported (it doesn't apply to Pub/Sub channels). Use installRedis(redis, { prefix }) instead",
+      "installRedis(): ioredis keyPrefix isn't supported (it doesn't apply to Pub/Sub channels). Use installRedis(redis, { prefix }) instead",
     )
 }
 

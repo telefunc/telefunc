@@ -7,7 +7,7 @@ import { REDIS_COMMANDS } from './commands.js'
 test('requires never-resend clients', () => {
   const nodes = [{ host: '127.0.0.1', port: 6379 }]
   const message =
-    'RedisBackend: at-most-once requires maxRetriesPerRequest: 0 (standalone Redis), or retryDelayOnFailover: 0 and redisOptions.maxRetriesPerRequest: 0 (Cluster); reconnectOnError must be unset'
+    'installRedis(): at-most-once requires maxRetriesPerRequest: 0 (standalone Redis), or retryDelayOnFailover: 0 and redisOptions.maxRetriesPerRequest: 0 (Cluster); reconnectOnError must be unset'
   const defaults = [new Redis('redis://127.0.0.1:6379'), new Cluster(nodes)]
   const safe = [
     new Redis('redis://127.0.0.1:6379', { maxRetriesPerRequest: 0 }),

@@ -2,7 +2,7 @@ export { RedisBackend }
 
 import { assert } from './assert.js'
 import {
-  assertAtMostOnceClient,
+  assertSupportedClient,
   callDefinedCommand,
   createSubscriberSocket,
   isCluster,
@@ -58,7 +58,7 @@ class RedisBackend implements BroadcastDriver, RoomDriver {
   private readonly _laneTurns = new Map<string, Promise<void>>()
 
   constructor(options: RedisBackendOptions) {
-    assertAtMostOnceClient(options.redis)
+    assertSupportedClient(options.redis)
     this._publisher = options.redis
     const prefix = options.prefix ?? DEFAULT_PREFIX
     assertKeyPrefix(prefix)
