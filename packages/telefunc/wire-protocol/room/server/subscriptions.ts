@@ -256,7 +256,7 @@ class RoomSubscriptions {
     await this.reconcileAuthority()
   }
 
-  /** Roster refresh replans on membership-version drift and re-seeds streamed views from the committed snapshot. */
+  /** One roster refresh at a time; concurrent callers join it. */
   private _refreshMembers(): Promise<void> {
     this._pendingRefresh ??= this._runMemberRefresh().finally(() => {
       this._pendingRefresh = null

@@ -85,7 +85,7 @@ class ClientRoom extends RoomStateView implements Room {
     'sub-text': JSON.stringify({ __r: 'sub-text', members: [], announce: false }),
     'sub-binary': JSON.stringify({ __r: 'sub-binary', wants: emptyBinaryWants() }),
   }
-  /** Settled by the replayable initial roster response (or wire death). Gates `getParticipants()`. */
+  /** Settled by the first `roster` or `roster-error` event, or when this view closes. Gates `getParticipants()`. */
   private readonly _roster = createDeferred()
 
   constructor(stub: ClientBroadcast, snapshot: RoomSnapshotMetadata) {
@@ -302,7 +302,7 @@ class ClientRoom extends RoomStateView implements Room {
     const cause: LeaveCause = { type: causeType }
     if (!this._state.applyClosed(cause)) return
     this._roster.resolve() // unblock any getParticipants() waiting on a wire that just died
-    // After onClose, like on the server: the room-level signal fires before per-handle cleanup.
+    // Local participants end after onClose, as on the server.
     for (const local of this._localParticipants.values()) local._onLeft(cause)
     this._localParticipants.clear()
   }
@@ -310,7 +310,7 @@ class ClientRoom extends RoomStateView implements Room {
   /** Room-wide text wants ride the Broadcast subscription, which reattaches before the stub's `onOpen`. */
   private _syncWants(): void {
     const state = this._state
-    if (state.closed) return this._stub._setWireSubscribed('text', false) // the stub is dead: nothing to declare
+    if (state.closed) return this._stub._setWireSubscribed('text', false) // a closed room takes no declaration
     const text = state.textWants()
     this._stub._setWireSubscribed('text', text.all)
     // Declared under the room-wide stream too, so the server keeps these members' lane when that stream stops.

@@ -433,7 +433,7 @@ class ServerRoom extends RoomStateView implements Room {
     let timer: ReturnType<typeof setTimeout> | undefined
     const reply = new Promise<DmReply>((settle) => {
       this._pendingDmAcks.set(ackId, { from, to, settle })
-      // Bounds the one wait no reply, leave or overflow settles: a recipient that never listens.
+      // Bounds the wait nothing else settles: a lost DM or reply, or a recipient that never listens.
       timer = unrefTimer(
         setTimeout(() => {
           if (this._pendingDmAcks.delete(ackId)) settle(DM_FAILURE.timeout)
