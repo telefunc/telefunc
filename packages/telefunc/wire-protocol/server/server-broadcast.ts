@@ -289,7 +289,7 @@ class RouteSubscription {
     private readonly _receiver: BackendReceiver,
   ) {}
 
-  /** Subscribes unless a subscription is live; outside a Cloudflare session this throws. */
+  /** Subscribes unless a subscription is live; throws where the backend can't bind the route. */
   open(): void {
     if (this._current === null) this._subscribe(false)
   }
