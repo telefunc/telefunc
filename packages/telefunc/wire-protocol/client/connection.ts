@@ -1932,20 +1932,20 @@ class SseTransport implements UpgradeSource {
         setTimeout(() => resolve('timeout'), STREAM_REQUEST_HANDSHAKE_TIMEOUT_MS),
       )
       const result = await Promise.race([handshakeOkP, timeoutP, fetchEndedP])
-      const unsent =
-        result === 'fetch-ended' && this.streamRequest.tag === 'active' ? this.streamRequest.unconfirmed : null
-      if (result === 'ok' && this.streamRequest.tag === 'active') this.streamRequest.unconfirmed = null
-      if (result !== 'ok') {
-        this.closeStreamRequest()
-        this.streamRequest = { tag: 'failed' }
-      } else {
+      if (result === 'ok') {
+        if (this.streamRequest.tag === 'active') this.streamRequest.unconfirmed = null
         // Ended while its body is still ours: nothing written to it reaches the server any more, so this wire ends.
         void fetchEndedP.then(() => {
           if (this.streamRequest.tag === 'active' && this.streamRequest.body === uploadBody) abortController.abort()
         })
+      } else {
+        // It ended without the open-ack, so the server may not have read what went into its body: resend it, first.
+        const unsent =
+          result === 'fetch-ended' && this.streamRequest.tag === 'active' ? this.streamRequest.unconfirmed : null
+        this.closeStreamRequest()
+        this.streamRequest = { tag: 'failed' }
+        if (unsent) this.outbox = [...unsent.map((frame) => ({ frame, deadline: Date.now() })), ...this.outbox]
       }
-      // It ended without the open-ack, so the server may not have read what went into its body: resend it, first.
-      if (unsent) this.outbox = [...unsent.map((frame) => ({ frame, deadline: Date.now() })), ...this.outbox]
     }
 
     this.connecting = false
