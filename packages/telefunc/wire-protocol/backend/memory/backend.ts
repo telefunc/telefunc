@@ -36,7 +36,7 @@ import type { BackendReceiver, SubscriptionDriver } from '../subscription.js'
 import { DriverAttempt } from '../attempt.js'
 
 type MemoryBackendOptions = {
-  /** @internal The storage, for specs that inspect or seed it. */
+  /** @internal Storage to share with a reconstructed backend. */
   state?: MemoryBackendState
 }
 
@@ -56,7 +56,7 @@ type Generation = {
 
 type RoomRecord = { head: StoredHead | null; gens: Map<string, Generation> }
 
-/** @internal The storage, kept apart from the backend so a spec can inspect or seed it. */
+/** @internal The storage, kept apart from the backend so a reconstructed one can reuse it. */
 class MemoryBackendState {
   readonly rooms = new Map<string, RoomRecord>()
   readonly directory = new Map<string, string>()
@@ -66,6 +66,7 @@ class MemoryBackendState {
 }
 
 const copyBytes = (bytes: Uint8Array): Uint8Array => new Uint8Array(bytes)
+const copyLane = (lane: LaneId): LaneId => ({ ...lane })
 const sumReceiverCounts = (targets: MemorySubscriptionAttempt[]): number =>
   targets.reduce((total, target) => total + target.receiverCount(), 0)
 const isExpired = (entry: Expiring, now: number): boolean => entry.expiresAt !== null && entry.expiresAt <= now
@@ -237,7 +238,7 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
     const mark = advanceOrder(gen.order, key, Date.now())
     if (opts?.retain) {
       gen.retained.set(key, {
-        lane,
+        lane: copyLane(lane),
         payload: frame,
         ...mark,
       })
@@ -259,7 +260,7 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
 
   async listRetained(roomId: string, inc: string): Promise<LaneId[]> {
     const gen = this.#state.rooms.get(roomId)?.gens.get(inc)
-    return gen === undefined ? [] : [...gen.retained.values()].map((entry) => entry.lane)
+    return gen === undefined ? [] : [...gen.retained.values()].map((entry) => copyLane(entry.lane))
   }
 
   async deleteRetained(roomId: string, inc: string, lane: LaneId, opts?: { ifSeq?: number }): Promise<void> {
