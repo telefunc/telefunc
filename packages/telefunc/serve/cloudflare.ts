@@ -28,6 +28,7 @@ import { assertUsage } from '../utils/assert.js'
 import type { Telefunc as TelefuncNamespace } from '../node/server/context/getContext.js'
 import type { CloudflareScale, LocationBucket } from '../wire-protocol/server/adapter/cloudflare/routing.js'
 import { CHANNEL_TRANSPORT } from '../wire-protocol/constants.js'
+import { isTelefuncRequest } from './shared.js'
 
 const SHARD_TOKEN_TTL_SECONDS = 86400
 
@@ -144,8 +145,8 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
 
   return {
     async serve({ request, env, ctx }: ServeInput): Promise<Response | undefined> {
+      if (!isTelefuncRequest(request)) return undefined
       const config = getServerConfig()
-      if (!new URL(request.url).pathname.startsWith(config.telefuncUrl)) return undefined
 
       const binding = getBinding(env)
       assertUsage(binding, `Missing Cloudflare Durable Object binding "${bindingName}". Add it to your wrangler.jsonc.`)
