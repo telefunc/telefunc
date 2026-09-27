@@ -3,7 +3,7 @@ import { afterEach, describe, expect, test, vi } from 'vitest'
 import { ClientBroadcast, ClientChannel } from './channel.js'
 import { config } from '../../client/clientConfig.js'
 import { CHANNEL_TRANSPORT } from '../constants.js'
-import { ACK_STATUS, TAG, type AckResultStatus } from '../shared-ws.js'
+import { ACK_STATUS, TAG, decode, type AckResultStatus } from '../shared-ws.js'
 import { ChannelOverflowError } from '../channel-errors.js'
 import { getSessionUrl } from './session-registry.js'
 
@@ -191,4 +191,14 @@ test('a broadcast declares its subscriptions on every attach, as a subscribe wri
   expect(broadcast._reattachState()).toEqual({ broadcast: { text: true, binary: true } })
   offBinary()
   expect(broadcast._reattachState()).toEqual({ broadcast: { text: true, binary: false } })
+})
+
+test('a broadcast subscribes the page to a kind with its first listener, and unsubscribes it with the last', () => {
+  const broadcast = stalledBroadcast()
+  broadcast.subscribeBinary(() => {})()
+  const frames = (broadcast as any)._connection.sendBuffer.map(({ frame }: { frame: Uint8Array }) => decode(frame))
+  expect(frames).toMatchObject([
+    { tag: TAG.BROADCAST_SUB, binary: true },
+    { tag: TAG.BROADCAST_UNSUB, binary: true },
+  ])
 })
