@@ -184,7 +184,7 @@ class CloudflareBroadcastAuthorityState {
   }
 
   /** The key's next `seq`; the key's first publish from a session fixes its authority bucket. */
-  sequence(
+  nextSequence(
     key: string,
     preferredBucket: LocationBucket | null,
   ): { seq: number; authorityBucket: LocationBucket | null } {
@@ -417,7 +417,7 @@ class CloudflareBroadcast {
     request: BroadcastPublishRequest,
   ): Promise<PublishResult> {
     const { key, kind, locationBucket, payload } = request
-    const { seq, authorityBucket } = authorityState.sequence(key, locationBucket)
+    const { seq, authorityBucket } = authorityState.nextSequence(key, locationBucket)
     const info = { seq, timestamp: Date.now() }
     const presenceByBucket = authorityState.livePresence(broadcastRouteKey({ key, kind }), info.timestamp)
     const fanoutBuckets = Array.from(presenceByBucket.keys())

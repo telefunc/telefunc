@@ -420,7 +420,7 @@ describe('cloudflare broadcast routing', () => {
     const calls: BroadcastCalls = new OrderedStubs()
     const transport = createTransport(createBasicBinding())
     // The key's first publish, from weur, fixes its authority bucket.
-    authorityState.sequence('room:first-touch', 'weur')
+    authorityState.nextSequence('room:first-touch', 'weur')
     for (const bucket of ['weur', 'apac'] as const) {
       await authorityState.setPresence({
         key: 'room:first-touch',
