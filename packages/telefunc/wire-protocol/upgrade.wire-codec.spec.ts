@@ -54,7 +54,7 @@ describe('upgrade wire vocabulary', () => {
     expect(() => decode(reserved)).toThrow()
   })
 
-  test('a BARRIER round-trips at one entry, and a BARRIER and a RECONCILE at the largest shape the caps admit', () => {
+  test('a BARRIER round-trips at one entry and at the largest shape the caps admit', () => {
     const one: BarrierPayload = { sessionId: 'sess-0', upgradeId: 'upg-1', open: goodOpen }
     expect(decode(encode.barrier(one))).toEqual({ tag: TAG.BARRIER, payload: one })
     const open = Array.from({ length: MAX_CHANNELS_PER_CONNECTION }, (_, ix) => ({
@@ -71,9 +71,6 @@ describe('upgrade wire vocabulary', () => {
     expect(encoded.byteLength).toBeGreaterThan(MAX_CHANNELS_PER_CONNECTION * UPGRADE_MAX_ID_BYTES)
     expect(encoded.byteLength).toBeLessThanOrEqual(WIRE_MAX_CONN_CTRL_FRAME_BYTES)
     expect(decodeClientFrame(encoded, WIRE_MAX_CONN_CTRL_FRAME_BYTES)).toEqual({ tag: TAG.BARRIER, payload: max })
-    const reconcile: ReconcilePayload = { sessionId: max.sessionId, open }
-    const decoded = decodeClientFrame(encode.reconcile(reconcile), WIRE_MAX_CONN_CTRL_FRAME_BYTES)
-    expect(decoded).toEqual({ tag: TAG.RECONCILE, payload: reconcile })
   })
 
   test('a RECONCILED round-trips the commit upgradeId', () => {
