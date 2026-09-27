@@ -1,13 +1,20 @@
 import { afterEach, describe, expect, test, vi } from 'vitest'
 
 import {
+  CHANNEL_CLIENT_REPLAY_BUFFER_BINARY_BYTES,
+  CHANNEL_CLIENT_REPLAY_BUFFER_BYTES,
+  CHANNEL_IDLE_TIMEOUT_MS,
+  CHANNEL_PING_INTERVAL_MS,
   CHANNEL_RECONNECT_INITIAL_DELAY_MS,
+  CHANNEL_RECONNECT_TIMEOUT_MS,
   CHANNEL_TRANSPORT,
   MAX_CHANNELS_PER_CONNECTION,
   RECONCILE_TIMEOUT_MS,
+  SSE_FLUSH_THROTTLE_MS,
+  SSE_POST_IDLE_FLUSH_DELAY_MS,
 } from '../constants.js'
 import { ClientConnection } from './connection.js'
-import { TAG, encode } from '../shared-ws.js'
+import { TAG, encode, type ReconciledPayload } from '../shared-ws.js'
 import { config, getServerConfig } from '../../node/server/serverConfig.js'
 
 /** Minimal `MuxChannel` — registering one is enough to make the connection open a wire. */
@@ -41,6 +48,21 @@ function stalledOptions() {
     fetchImpl: createStalledTransport().fetchImpl,
     connectionKey: crypto.randomUUID(),
   }
+}
+
+/** A RECONCILED from a server with the default channel config. */
+function reconciled(payload: Pick<ReconciledPayload, 'sessionId' | 'open'> & Partial<ReconciledPayload>) {
+  return {
+    reconnectTimeout: CHANNEL_RECONNECT_TIMEOUT_MS,
+    idleTimeout: CHANNEL_IDLE_TIMEOUT_MS,
+    pingInterval: CHANNEL_PING_INTERVAL_MS,
+    clientReplayBuffer: CHANNEL_CLIENT_REPLAY_BUFFER_BYTES,
+    clientReplayBufferBinary: CHANNEL_CLIENT_REPLAY_BUFFER_BINARY_BYTES,
+    sseFlushThrottle: SSE_FLUSH_THROTTLE_MS,
+    ssePostIdleFlushDelay: SSE_POST_IDLE_FLUSH_DELAY_MS,
+    transports: [CHANNEL_TRANSPORT.SSE],
+    ...payload,
+  } satisfies ReconciledPayload
 }
 
 /** A connection that applied a RECONCILED whose every setting is zero. */
@@ -78,7 +100,7 @@ test('channel config preserves zero through server and client resolution', () =>
 test("a per-call idleTimeout is kept over the server's", () => {
   const options = { ...stalledOptions(), idleTimeout: 0 }
   const connection = ClientConnection.getOrCreate('http://idle.test', createChannel() as never, options) as any
-  connection.applyReconciled({ sessionId: 'idle', open: [], idleTimeout: 60_000 }, null)
+  connection.applyReconciled(reconciled({ sessionId: 'idle', open: [] }), null)
   expect(connection.idleTimeoutMs).toBe(0)
   connection.dispose()
 })
@@ -194,7 +216,7 @@ test("a frame buffered before the first reconcile is stored under the server's r
   connection.send(channel, 'x'.repeat(2 * 1024 * 1024)) // over the default 1 MiB, waiting for the wire
   connection.buildReconcileFrame()
   connection.applyReconciled(
-    { sessionId: 'drain', open: [{ ix: 0, lastSeq: 0 }], pingInterval: 5_000, clientReplayBuffer: 8 * 1024 * 1024 },
+    reconciled({ sessionId: 'drain', open: [{ ix: 0, lastSeq: 0 }], clientReplayBuffer: 8 * 1024 * 1024 }),
     null,
   )
   expect(connection.replayBuffers.get(0).getAfter(0)).toHaveLength(1)
@@ -206,7 +228,7 @@ test('a reconnect re-attaches a channel still closing, so its close request can 
   const connection = ClientConnection.getOrCreate('http://closing.test', channel as never, stalledOptions()) as any
   connection.buildReconcileFrame()
   channel.isClosed = true
-  const outcome = connection.applyReconciled({ sessionId: 'closing', open: [{ ix: 0, lastSeq: 0 }] }, null)
+  const outcome = connection.applyReconciled(reconciled({ sessionId: 'closing', open: [{ ix: 0, lastSeq: 0 }] }), null)
   expect(outcome.channelsToOpen).toEqual([channel])
   connection.dispose()
 })

@@ -1331,13 +1331,11 @@ class ClientConnection implements MuxConnection {
 
   private applyReconciled(ctrl: ReconciledPayload, deferredOmitted: number[] | null): ReconcileOutcome {
     this.sessionId = ctrl.sessionId
-    if (ctrl.reconnectTimeout !== undefined) this.reconnectTimeoutMs = ctrl.reconnectTimeout
+    this.reconnectTimeoutMs = ctrl.reconnectTimeout
     // A per-call `idleTimeout` (withContext) is kept over the server's.
-    if (ctrl.idleTimeout !== undefined && this.connectionOptions.idleTimeout === undefined) {
-      this.idleTimeoutMs = ctrl.idleTimeout
-    }
-    if (ctrl.clientReplayBuffer !== undefined) this.clientReplayBufferBytes = ctrl.clientReplayBuffer
-    if (ctrl.clientReplayBufferBinary !== undefined) this.clientReplayBufferBinaryBytes = ctrl.clientReplayBufferBinary
+    if (this.connectionOptions.idleTimeout === undefined) this.idleTimeoutMs = ctrl.idleTimeout
+    this.clientReplayBufferBytes = ctrl.clientReplayBuffer
+    this.clientReplayBufferBinaryBytes = ctrl.clientReplayBufferBinary
     // Before this reconcile stores anything: a channel registered before the first RECONCILED was sized with the defaults.
     const maxAgeMs = this.replayMaxAgeMs(ctrl.pingInterval)
     for (const replay of this.replayBuffers.values()) {
@@ -2113,8 +2111,8 @@ class SseTransport implements UpgradeSource {
   }
 
   applyReconciledSettings(ctrl: ReconciledPayload): void {
-    if (ctrl.sseFlushThrottle !== undefined) this.flushThrottleMs = ctrl.sseFlushThrottle
-    if (ctrl.ssePostIdleFlushDelay !== undefined) this.postIdleFlushDelayMs = ctrl.ssePostIdleFlushDelay
+    this.flushThrottleMs = ctrl.sseFlushThrottle
+    this.postIdleFlushDelayMs = ctrl.ssePostIdleFlushDelay
     this.heartbeatFlushDelayMs = Math.floor(ctrl.pingInterval / 2)
   }
 
