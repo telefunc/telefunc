@@ -908,6 +908,16 @@ describe('Room public behavior', () => {
     expect(events.at(-1)).toBe('leave:Alicia')
     expect((await observer.getParticipants({ hidden: true })).map((member) => member.id)).toEqual([hidden.id])
   })
+  it('fires onEmpty when the last player leaves while a hidden participant stays seated', async () => {
+    const room = await Room.create('empty-beside-hidden')
+    const authority = await room.join({ identity: 'authority', hidden: true })
+    const player = await room.join()
+    let empty = 0
+    room.onEmpty(() => empty++)
+    await player.leave()
+    expect({ empty, count: room.count }).toEqual({ empty: 1, count: 0 })
+    await expect(authority.publish('tick')).resolves.toMatchObject({ seq: expect.any(Number) })
+  })
   it('rejects exact sends to an expired member and excludes it from static presence', async () => {
     const room = (await Room.create('expired-static-presence')) as ServerRoom
     const member = await room.join()
