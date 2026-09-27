@@ -891,22 +891,6 @@ describe('Room public behavior', () => {
     expect(opens).toBe(3)
     expect(subsOf(observer)._control.established).toBe(true)
   })
-  it("reports a lane's replacement that ends before it is ready once", async () => {
-    vi.useFakeTimers()
-    const observer = await Room.get((await Room.create('replacement-reported-once')).id)
-    let attempts = 0
-    mockLaneSubscription('semantic', (subscribeLane, roomId, inc, lane, receiver) => {
-      attempts++
-      return attempts < 3 ? rejectedSubscription(`attempt ${attempts}`) : subscribeLane(roomId, inc, lane, receiver)
-    })
-    const report = vi.spyOn(console, 'error').mockImplementation(() => {})
-    observer.subscribe(() => {})
-    await vi.advanceTimersByTimeAsync(100)
-    expect(report.mock.calls.map(([logged]) => String(logged).split('\n')[0])).toEqual([
-      'Error: attempt 1',
-      'Error: attempt 2',
-    ])
-  })
   it('retries a still-wanted lost subscription on the next planning pass', async () => {
     vi.useFakeTimers()
     const observer = await Room.get((await Room.create('single-recovery-horizon')).id)
@@ -915,11 +899,15 @@ describe('Room public behavior', () => {
       attempts++
       return attempts < 3 ? rejectedSubscription(`attempt ${attempts}`) : subscribeLane(roomId, inc, lane, receiver)
     })
-    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const report = vi.spyOn(console, 'error').mockImplementation(() => {})
     observer.subscribe(() => {})
     await vi.advanceTimersByTimeAsync(100)
     // The lane and its one replacement; the next attempt waits for the heartbeat.
     expect(attempts).toBe(2)
+    expect(report.mock.calls.map(([logged]) => String(logged).split('\n')[0])).toEqual([
+      'Error: attempt 1',
+      'Error: attempt 2',
+    ])
     await vi.advanceTimersByTimeAsync(ROOM_HEARTBEAT_INTERVAL_MS)
     expect(attempts).toBe(3)
     expect(subsOf(observer as ServerRoom)._semantic.established).toBe(true)
