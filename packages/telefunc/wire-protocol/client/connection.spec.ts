@@ -316,6 +316,53 @@ test('a channel whose abort went out with a reconcile on a wire that then died i
   connection.dispose()
 })
 
+/** Two open channels; the first one's close request went down with a wire whose loss is then noticed. */
+function closeLostWithWire(url: string) {
+  const closing = createChannel()
+  const options = stalledOptions()
+  const connection = ClientConnection.getOrCreate(url, closing as never, options) as any
+  ClientConnection.getOrCreate(url, createChannel() as never, options) // another channel on the page
+  connection.buildReconcileFrame()
+  connection.applyReconciled(
+    reconciled({
+      sessionId: 'close-lost',
+      open: [
+        { ix: 0, lastSeq: 0 },
+        { ix: 1, lastSeq: 0 },
+      ],
+    }),
+    null,
+  )
+  connection.handleTransportLoss(new Error('the wire died')) // the close request was written to it
+  return { connection, closing }
+}
+
+test('a channel whose close request went down with the wire is left out of the reconnect once its close timed out, though its listener answered after the loss', () => {
+  const { connection, closing } = closeLostWithWire('http://close-lost.test')
+  connection.sendAckRes(closing, 1, '"answer"') // its async listener answers a server send({ ack: true })
+  connection.unregister(closing) // its close times out
+  const reconcile = decode(connection.buildReconcileFrame().frame) as { payload: { open: { ix: number }[] } }
+  expect(reconcile.payload.open.map((entry) => entry.ix)).toEqual([1])
+  connection.dispose()
+})
+
+test('such a channel, released while the reconnect listing it is in flight, is left out of a follow-up reconcile', () => {
+  const { connection, closing } = closeLostWithWire('http://close-lost-in-flight.test')
+  connection.buildReconcileFrame() // the attempt's, built when it starts, listing both
+  connection.sendAckRes(closing, 1, '"answer"')
+  connection.unregister(closing)
+  const open = [
+    { ix: 0, lastSeq: 0 },
+    { ix: 1, lastSeq: 0 },
+  ]
+  const { frames } = connection.applyReconciled(reconciled({ sessionId: 'close-lost', open }), null)
+  const reconciles = frames
+    .map(({ frame }: { frame: Uint8Array<ArrayBuffer> }) => decode(frame))
+    .filter((frame: { tag: number }) => frame.tag === TAG.RECONCILE)
+  expect(reconciles.map((frame: any) => frame.payload.open.map((entry: { ix: number }) => entry.ix))).toEqual([[1]])
+  connection.dispose()
+})
+
 test("a first connect's retry holds back a newer frame behind the ones its failed attempt sent", () => {
   const channel = createChannel()
   const connection = ClientConnection.getOrCreate('http://first-retry.test', channel as never, stalledOptions()) as any
