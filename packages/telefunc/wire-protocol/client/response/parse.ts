@@ -1,7 +1,7 @@
 export { parseResponse }
 export { BaseStreamReader } from './BaseStreamReader.js'
 
-import { parse, type Reviver } from '@brillout/json-serializer/parse'
+import { parse } from '@brillout/json-serializer/parse'
 import { assert } from '../../../utils/assert.js'
 import { isObject } from '../../../utils/isObject.js'
 import { isObjectOrFunction } from '../../../utils/isObjectOrFunction.js'
@@ -11,7 +11,7 @@ import { setAbortController } from '../../../client/abort.js'
 import { setCloseHandlers, addExtraCloseHandlers, type CloseHandler } from '../../../client/close.js'
 import { makeAbortError, throwAbortError, throwBugError } from '../../../client/remoteTelefunctionCall/errors.js'
 import { BaseStreamReader } from './BaseStreamReader.js'
-import { PendingValue } from './PendingValue.js'
+import { PendingValue, resolvePendingValues } from './PendingValue.js'
 import { StreamReader } from './StreamReader.js'
 import { SSEStreamReader } from './SSEStreamReader.js'
 import { ClientChannel, ClientBroadcast } from '../channel.js'
@@ -181,16 +181,7 @@ async function reviveResponse(
   try {
     parsed = parse(body, { reviver })
     if (pendingValues.length > 0) {
-      const resolved = await Promise.all(pendingValues.map((pending) => pending.promise))
-      const resolvedByPending = new Map<unknown, unknown>(pendingValues.map((pending, i) => [pending, resolved[i]]))
-      // Re-parse to put each resolved value in its slot(s): every revived wire string hits the reviver's cache, so no reviver runs twice.
-      const settledReviver: Reviver = (path, value, parser) => {
-        const res = reviver(path, value, parser)
-        if (res && resolvedByPending.has(res.replacement))
-          return { replacement: resolvedByPending.get(res.replacement) }
-        return res
-      }
-      parsed = parse(body, { reviver: settledReviver })
+      parsed = await resolvePendingValues(parsed, pendingValues, (value) => closeHandlers.has(value))
     }
   } catch (err) {
     for (const close of allCloseHandlers) close()
