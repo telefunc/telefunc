@@ -114,6 +114,9 @@ export class RoomProbeDurableObject extends RoomAuthority<Env> {
   scheduledAlarm(): Promise<number | null> {
     return this.ctx.storage.getAlarm()
   }
+  fireAlarm(): Promise<void> {
+    return this.alarm()
+  }
 }
 type RpcMethods<T> = {
   [K in keyof T]: T[K] extends (...args: infer Args) => infer Result
@@ -209,7 +212,7 @@ async function alarmScheduling(env: Env, suffix: string) {
   const sessionId = sessionOf(env, suffix)
   const probe = roomProbe(env, suffix, 'alarm')
   const idle = await probe.scheduledAlarm()
-  await probe.open()
+  const head = await probe.open()
   await probe.join(sessionId)
   const afterRoute = (await probe.scheduledAlarm()) === null ? 'idle' : 'armed'
   await probe.authority.unsubscribeRoute({
@@ -220,7 +223,12 @@ async function alarmScheduling(env: Env, suffix: string) {
     leaseId: `alarm-lease-${suffix}`,
   })
   const afterUnsubscribe = await probe.scheduledAlarm()
-  return { idle, afterRoute, afterUnsubscribe }
+  // A head naming another incarnation leaves the first one's generation orphaned.
+  const next = { head: { currentInc: `${probe.inc}-next`, state: 'open' as const, config: head.config } }
+  expectHead(await probe.authority.compareExchangeHead({ form: 'rev', rev: head.rev }, next), 'alarm reopen')
+  const afterReopen = (await probe.scheduledAlarm()) === null ? 'idle' : 'armed'
+  await probe.authority.fireAlarm()
+  return { idle, afterRoute, afterUnsubscribe, afterReopen, afterAlarm: await probe.scheduledAlarm() }
 }
 async function routeRenewal(env: Env, suffix: string) {
   const sessionId = sessionOf(env, suffix)
