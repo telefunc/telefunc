@@ -1,4 +1,4 @@
-import { afterEach, expect, test, vi } from 'vitest'
+import { afterEach, test, vi } from 'vitest'
 import { macrotaskYield } from './macrotask-yield.js'
 
 afterEach(() => {
