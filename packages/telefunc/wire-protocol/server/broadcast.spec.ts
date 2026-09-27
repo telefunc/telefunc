@@ -162,6 +162,19 @@ describe('keyed in-process broadcast', () => {
     expect([seen, seenBinary]).toEqual([['after'], [3]])
   })
 
+  it("takes the page's subscribe and unsubscribe frames", async () => {
+    const broadcast = new ServerBroadcast<string>({ key: 'room:page-frames' })
+    broadcast._registerChannel()
+    const sent: DecodedFrame[] = []
+    const replay = new ReplayBuffer(1024 * 1024, 60_000, 2 * 1024 * 1024)
+    broadcast._attachPeer(new IndexedPeer({ send: (frame) => void sent.push(decode(frame)) }, 7, replay))
+    broadcast._dispatchFrame({ tag: TAG.BROADCAST_SUB, index: 7, binary: false })
+    await broadcast.publish('on')
+    broadcast._dispatchFrame({ tag: TAG.BROADCAST_UNSUB, index: 7, binary: false })
+    await broadcast.publish('off')
+    expect(sent.flatMap((frame) => (frame.tag === TAG.PUBLISH ? [frame.text] : []))).toEqual(['"on"'])
+  })
+
   // Edge case: a Broadcast can be created and have `publish` called on it BEFORE
   // any peer attaches. The behavioral contract: when the peer eventually attaches,
   // the previously-published message is delivered to it (not silently dropped).
