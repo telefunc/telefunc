@@ -182,7 +182,7 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
       return this.authorityState.setPresence(request)
     }
 
-    telefuncRoomDeliver(request: RoomSessionDeliveryRequest): void {
+    telefuncRoomDeliver(request: RoomSessionDeliveryRequest) {
       return this.runInSession(() => this.session.room.deliver(request))
     }
 
