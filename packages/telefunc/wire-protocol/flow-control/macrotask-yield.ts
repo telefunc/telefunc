@@ -26,21 +26,25 @@ class MacrotaskYield {
       this.waiters.push(resolve)
       if (this.posted) return
       this.posted = true
-      this.ensureChannel().port2.postMessage(null)
+      // workerd has MessageChannel from compatibility date 2025-08-15 (or `expose_global_message_channel`) on.
+      if (typeof MessageChannel !== 'function') setTimeout(() => this.resume(), 0)
+      else this.ensureChannel().port2.postMessage(null)
     })
+  }
+
+  private resume(): void {
+    this.posted = false
+    const waiters = this.waiters.splice(0)
+    for (const w of waiters) w()
   }
 
   /** Constructed on first yield, not at module load — some toolchains evaluate the
    *  module in a context without `MessageChannel` (Cloudflare Vite plugin
-   *  pre-bundling). Workers / Node have it at runtime. */
+   *  pre-bundling). Node has it at runtime, and workerd from the compatibility date yield() names. */
   private ensureChannel(): MessageChannel {
     if (this.channel) return this.channel
     const channel = new MessageChannel()
-    channel.port1.onmessage = () => {
-      this.posted = false
-      const waiters = this.waiters.splice(0)
-      for (const w of waiters) w()
-    }
+    channel.port1.onmessage = () => this.resume()
     // Node: don't keep the process alive just for this channel.
     const port = channel.port1 as { unref?: () => void }
     port.unref?.()
