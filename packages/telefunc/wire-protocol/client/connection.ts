@@ -519,14 +519,13 @@ class ClientConnection implements MuxConnection {
   }
 
   /** How long a gone server is still held: until its loss is noticed at the pong deadline, then for `reconnectTimeout`. */
-  reconnectWindow(): number {
-    return 2 * this.pingIntervalMs + this.reconnectTimeoutMs
+  reconnectWindow(pingIntervalMs = this.pingIntervalMs): number {
+    return 2 * pingIntervalMs + this.reconnectTimeoutMs
   }
 
-  /** As the server's does, a frame stays replayable through the pong deadline, when a silent drop is noticed, then
-   *  `reconnectTimeout`, plus a second for the reconnect itself. */
+  /** As the server's, a frame stays replayable through the reconnect window, plus a second for the reconnect itself. */
   private replayMaxAgeMs(pingIntervalMs: number): number {
-    return 2 * pingIntervalMs + this.reconnectTimeoutMs + 1_000
+    return this.reconnectWindow(pingIntervalMs) + 1_000
   }
 
   private registerReconcileTimer: ReturnType<typeof setTimeout> | null = null
