@@ -36,7 +36,7 @@ import { RoomState, type RoomStateView, remoteBacking } from './state.js'
 import { Room } from './server/statics.js'
 import { ServerRoom, type ServerLocalParticipant } from './server/room.js'
 import { configFromHead, decodeRoomText, encodeRoomRecord } from './server/lanes.js'
-import { sanitizeBinaryWants } from './server/requests.js'
+import { decodeBinaryWants } from './server/requests.js'
 import { config } from '../../node/server/serverConfig.js'
 import { config as clientConfig } from '../../client/clientConfig.js'
 import type { LaneSubscription } from './server/lane-subscription.js'
@@ -3386,18 +3386,18 @@ describe('room protocol validation', () => {
     Object.defineProperty(attrs, '__proto__', { value: undefined, enumerable: true, configurable: true })
     expect(Object.hasOwn(mergeAttributes(merged, attrs), '__proto__')).toBe(false)
     const memberId = crypto.randomUUID()
-    const sanitized = sanitizeBinaryWants({
+    const sanitized = decodeBinaryWants({
       everyMember: { all: false, tracks: [] },
       members: { [memberId]: { all: false, tracks: ['screen'] } },
     })
     expect(Object.getPrototypeOf(sanitized.members)).toBeNull()
     const hostileMembers = Object.create(null) as Record<string, unknown>
     hostileMembers.__proto__ = { all: true, tracks: [] }
-    expect(() => sanitizeBinaryWants({ everyMember: { all: false, tracks: [] }, members: hostileMembers })).toThrow(
+    expect(() => decodeBinaryWants({ everyMember: { all: false, tracks: [] }, members: hostileMembers })).toThrow(
       ProtocolViolationError,
     )
     expect(() =>
-      sanitizeBinaryWants({
+      decodeBinaryWants({
         everyMember: { all: false, tracks: [] },
         members: { 'not-a-member-id': { all: false, tracks: [] } },
       }),
@@ -3416,7 +3416,7 @@ describe('room protocol validation', () => {
       expect(() => encodeBinaryFrame(memberId, new Uint8Array(), { meta: meta as never })).toThrow(
         'meta should be an object',
       )
-      expect(() => sanitizeBinaryWants({ everyMember: { all: false, tracks: [] }, members: meta })).toThrow(
+      expect(() => decodeBinaryWants({ everyMember: { all: false, tracks: [] }, members: meta })).toThrow(
         ProtocolViolationError,
       )
     }
@@ -3454,7 +3454,7 @@ describe('room protocol validation', () => {
       '65535 bytes',
     )
     const wantsTrack = (track: string) =>
-      sanitizeBinaryWants({ everyMember: { all: false, tracks: [track] }, members: {} })
+      decodeBinaryWants({ everyMember: { all: false, tracks: [track] }, members: {} })
     expect(() => wantsTrack(`${'é'.repeat(127)}t`)).not.toThrow()
     expect(() => wantsTrack('é'.repeat(128))).toThrow(ProtocolViolationError)
   })

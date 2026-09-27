@@ -6,7 +6,7 @@ export {
   decodeParticipantRequest,
   decodeParticipantFrame,
   decodeDmReply,
-  sanitizeBinaryWants,
+  decodeBinaryWants,
 }
 export type { RoomRequest, RoomDeclaration }
 
@@ -86,7 +86,7 @@ function decodeRoomDeclaration(value: unknown): RoomDeclaration {
         reply: decodeDmReply(decl.reply) ?? malformed('DM reply'),
       }
     case 'sub-binary':
-      return { __r: 'sub-binary', wants: sanitizeBinaryWants(decl.wants) }
+      return { __r: 'sub-binary', wants: decodeBinaryWants(decl.wants) }
     case 'sub-text': {
       if (!Array.isArray(decl.members)) malformed('text wants')
       return {
@@ -109,18 +109,18 @@ function decodeDmReply(reply: unknown): DmReply | null {
 }
 
 /** A client-declared `sub-binary` want. */
-function sanitizeBinaryWants(wants: unknown): BinaryWants {
+function decodeBinaryWants(wants: unknown): BinaryWants {
   if (!isRecord(wants)) malformed('binary wants')
-  const everyMember = sanitizeTrackWants(wants.everyMember)
+  const everyMember = decodeTrackWants(wants.everyMember)
   if (!isRecord(wants.members)) malformed('binary wants')
   const members: Record<string, TrackWants> = Object.create(null)
   for (const [memberId, trackWants] of Object.entries(wants.members)) {
     if (!isMemberId(memberId)) malformed('binary wants')
-    members[memberId] = sanitizeTrackWants(trackWants)
+    members[memberId] = decodeTrackWants(trackWants)
   }
   return { everyMember, members }
 }
-function sanitizeTrackWants(wants: unknown): TrackWants {
+function decodeTrackWants(wants: unknown): TrackWants {
   if (!isRecord(wants) || typeof wants.all !== 'boolean' || !Array.isArray(wants.tracks)) malformed('binary wants')
   if (wants.tracks.length > ROOM_NAMED_TRACKS_MAX || !wants.tracks.every(isRoomTrack)) malformed('binary wants')
   return { all: wants.all, tracks: wants.tracks as string[] }
@@ -166,7 +166,7 @@ function decodeParticipantRequest(value: unknown): ParticipantStubRequest {
   return malformed('participant request')
 }
 
-/** One of those requests, as both stubs decode it; a Room stub's also names the acting member. */
+/** A member's meta, attributes or DM request, as both stubs decode it; a Room stub's also names the acting member. */
 function decodeMemberMutation(kind: MemberMutation['__r'], req: Record<string, unknown>): MemberMutation {
   switch (kind) {
     case 'req-set-meta':
