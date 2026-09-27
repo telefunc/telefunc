@@ -165,7 +165,7 @@ type ParticipantStubNotice =
   | { __r: 'demand-state'; tracks: Array<string | null> }
 
 /** Which members' streams a holder wants on the text lane: `all` for room-level listeners, or a specific member set for participant-scoped ones. */
-type MemberWants = { all: boolean; members: string[] }
+type MemberWants = { all: boolean; members: ReadonlySet<string> }
 
 /** A delivered private message, as stamped by the sender's instance. `ackId` is present when the sender awaits a reply (`send(…, { ack: true })`). */
 type InboxMessage = {

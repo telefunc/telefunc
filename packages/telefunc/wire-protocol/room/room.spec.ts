@@ -919,7 +919,7 @@ describe('Room public behavior', () => {
     const { stub } = serve(observer)
     const { started } = rejectLaneSubscriptions('semantic', 'persistent semantic subscription failure')
     stub._onPeerSubscription('text', true)
-    const outcome = captureOutcome(observer._replayRetainedText(stub, { all: false, members: [] }))
+    const outcome = captureOutcome(observer._replayRetainedText(stub, { all: false, members: new Set() }))
     await started
     await vi.advanceTimersByTimeAsync(ROOM_HORIZON_MS + 100)
     expect(outcome.value).toBeInstanceOf(RoomError)

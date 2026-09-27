@@ -11,7 +11,7 @@ import { DEFAULT_TRACK, mergeTrackWants, wantsAnyBinary, type BinaryWants } from
 import { ROOM_HEARTBEAT_INTERVAL_MS } from '../constants.js'
 import type { RoomDemand } from '../demand.js'
 import { RoomError } from '../errors.js'
-import type { MemberSnapshot, RoomConfigRecord } from '../protocol.js'
+import type { MemberSnapshot, MemberWants, RoomConfigRecord } from '../protocol.js'
 import type { RoomState } from '../state.js'
 import { reportRoomError } from './errors.js'
 import { LaneSubscription } from './lane-subscription.js'
@@ -25,7 +25,7 @@ const ROSTER_REFRESH_RETRY_LIMIT = 5
 /** What the room's holders (client stubs, its own listeners, a pre-attach tail) want, aggregated. */
 type HolderWants = {
   observed: boolean
-  text: { all: boolean; members: ReadonlySet<string> }
+  text: MemberWants
   announce: boolean
   binary: BinaryWants
 }

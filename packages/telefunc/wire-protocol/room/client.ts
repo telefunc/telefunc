@@ -314,7 +314,7 @@ class ClientRoom extends RoomStateView implements Room {
     const text = state.textWants()
     this._stub._setWireSubscribed('text', text.all)
     // Declared under the room-wide stream too, so the server keeps these members' lane when that stream stops.
-    this._declare({ __r: 'sub-text', members: text.members, announce: state.wantsAnnounce })
+    this._declare({ __r: 'sub-text', members: [...text.members], announce: state.wantsAnnounce })
     this._declare({ __r: 'sub-binary', wants: state.binaryWants() })
   }
 

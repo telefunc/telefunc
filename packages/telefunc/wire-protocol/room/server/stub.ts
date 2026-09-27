@@ -207,7 +207,7 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
   }
 
   private _memberWants(): MemberWants {
-    return { all: this._wantsText, members: [...this._textMemberWants] }
+    return { all: this._wantsText, members: this._textMemberWants }
   }
 
   private async _publishText(publish: RoomDataPublish): Promise<ChannelPublishAck> {
@@ -258,8 +258,8 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
   }
 
   /** A tail-pending stub ingests all text so its hold captures the whole recent tail; its selector applies at flush. */
-  _textDemand(): 'all' | ReadonlySet<string> {
-    return this._wantsText || this._tail !== null ? 'all' : this._textMemberWants
+  _textDemand(): MemberWants {
+    return { all: this._wantsText || this._tail !== null, members: this._textMemberWants }
   }
 
   _wantsTextFrom(memberId: string): boolean {

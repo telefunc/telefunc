@@ -35,6 +35,10 @@ class ReplayGate {
   }
 }
 
+function sameMemberWants(a: MemberWants, b: MemberWants): boolean {
+  return a.all === b.all && a.members.size === b.members.size && [...a.members].every((id) => b.members.has(id))
+}
+
 /** The previous wants of each lane kind whose wants changed. */
 type WantsChange = { text?: MemberWants; binary?: BinaryWants }
 
@@ -43,7 +47,7 @@ interface LaneHolder {
   readonly _binaryWants: BinaryWants
   readonly _wantsAnnounce: boolean
   /** The text the holder needs ingested; its relay filters further. */
-  _textDemand(): 'all' | ReadonlySet<string>
+  _textDemand(): MemberWants
   _wantsTextFrom(member: string): boolean
   _wantsBinary(member: string, track: string): boolean
   // A retained frame decoded, then in its wire form, which only a holder that forwards it takes.
@@ -54,7 +58,7 @@ interface LaneHolder {
 /** This instance's own listeners as one holder: gated like a client's stub, with wants that change only when they differ, as a client declares them. */
 class LocalHolder implements LaneHolder {
   private readonly _replay = new ReplayGate()
-  private _textWants: MemberWants = { all: false, members: [] }
+  private _textWants: MemberWants = { all: false, members: new Set() }
   _binaryWants: BinaryWants = emptyBinaryWants()
 
   constructor(
@@ -69,7 +73,7 @@ class LocalHolder implements LaneHolder {
     this._textWants = this._state.textWants()
     this._binaryWants = this._state.binaryWants()
     return {
-      ...(JSON.stringify(text) === JSON.stringify(this._textWants) ? {} : { text }),
+      ...(sameMemberWants(text, this._textWants) ? {} : { text }),
       ...(JSON.stringify(binary) === JSON.stringify(this._binaryWants) ? {} : { binary }),
     }
   }
@@ -78,12 +82,12 @@ class LocalHolder implements LaneHolder {
     return this._state.wantsAnnounce
   }
 
-  _textDemand(): 'all' | ReadonlySet<string> {
-    return this._textWants.all ? 'all' : new Set(this._textWants.members)
+  _textDemand(): MemberWants {
+    return this._textWants
   }
 
   _wantsTextFrom(member: string): boolean {
-    return !this._suppress(member) && (this._textWants.all || this._textWants.members.includes(member))
+    return !this._suppress(member) && (this._textWants.all || this._textWants.members.has(member))
   }
 
   _wantsBinary(member: string, track: string): boolean {

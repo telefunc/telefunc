@@ -237,9 +237,9 @@ class RoomState {
   }
   /** The text-lane twin of `binaryWants()`: `all` while room-level `subscribe()`rs exist, and the members with participant-scoped listeners either way. */
   textWants(): MemberWants {
-    const members: string[] = []
+    const members = new Set<string>()
     for (const entry of this._members.values()) {
-      if (entry.dataCbs.length > 0) members.push(entry.id)
+      if (entry.dataCbs.length > 0) members.add(entry.id)
     }
     return { all: this._roomDataCbs.length > 0, members }
   }

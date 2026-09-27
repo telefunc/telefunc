@@ -757,7 +757,7 @@ class ServerRoom extends RoomStateView implements Room {
     if (stored === null) return
     const serialized = decodeRoomText(stored.payload)
     const event = parse(serialized) as RoomDataEnvelope
-    if (previous.members.includes(event.from) || !holder._wantsTextFrom(event.from)) return
+    if (previous.members.has(event.from) || !holder._wantsTextFrom(event.from)) return
     // Replay the stored order as-is; the holder admits it only if it is newer than what it has.
     holder._emitRetainedText(event, { seq: stored.seq, timestamp: stored.timestamp }, serialized)
   }
@@ -815,13 +815,13 @@ class ServerRoom extends RoomStateView implements Room {
     return this._local._wantsBinary(member, track) || [...this._stubs].some((stub) => stub._wantsBinary(member, track))
   }
 
-  private _textWants(holders: LaneHolder[]): { all: boolean; members: Set<string> } {
+  private _textWants(holders: LaneHolder[]): MemberWants {
     if (this._tail !== null) return { all: true, members: new Set() } // pre-attach tail: ingest everything now
     const members = new Set<string>()
     for (const holder of holders) {
       const demand = holder._textDemand()
-      if (demand === 'all') return { all: true, members: new Set() }
-      for (const id of demand) members.add(id)
+      if (demand.all) return { all: true, members: new Set() }
+      for (const id of demand.members) members.add(id)
     }
     return { all: false, members }
   }
