@@ -44,7 +44,7 @@ class Fanout {
     return token
   }
 
-  async await(token: string): Promise<void> {
+  async awaitDelivery(token: string): Promise<void> {
     const delivery = this.#deliveries.get(token)
     if (delivery === undefined) throw new Error('Cloudflare Room delivery has an unknown delivery token')
     try {

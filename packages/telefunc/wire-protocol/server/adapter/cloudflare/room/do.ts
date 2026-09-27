@@ -124,7 +124,7 @@ class RoomAuthority<Env = unknown> extends DurableObject<Env> {
   }
 
   async awaitDelivery(token: string): Promise<void> {
-    await this.#fanout.await(token)
+    await this.#fanout.awaitDelivery(token)
   }
 
   async readRetained(inc: string, lane: LaneId): Promise<RetainedFrame | null> {
