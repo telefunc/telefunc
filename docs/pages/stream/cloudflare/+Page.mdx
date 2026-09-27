@@ -102,7 +102,7 @@ Before its first request, the client names a session token, and every request ca
 
 <Warning>
 
-**CDN / reverse proxy** — make sure the `session` query parameter isn't stripped from requests, nor `x-telefunc-session` from responses. Without it, each request would be routed to a random Durable Object and channel state would be lost.
+**CDN / reverse proxy** — make sure the `session` query parameter isn't stripped from requests. Without it, each request would be routed to a random Durable Object and channel state would be lost.
 
 </Warning>
 
