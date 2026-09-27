@@ -21,7 +21,6 @@ import {
   SSE_POST_IDLE_FLUSH_DELAY_MS,
   SSE_RECONCILE_DEADLINE_MS,
   STREAM_REQUEST_HANDSHAKE_TIMEOUT_MS,
-  TELEFUNC_SESSION_HEADER,
   MAX_CHANNELS_PER_CONNECTION,
   UPGRADE_HANDOFF_BUFFER_BYTES,
   UPGRADE_HANDOFF_BUFFER_FRAMES,
@@ -189,8 +188,6 @@ type ReconcileBufferedFramesMode = 'batch-on-reconcile' | 'release-after-reconci
 type ClientConnectionOptions = {
   transports: ChannelTransports
   fetchImpl: typeof fetch
-  /** Server-issued sticky-routing token (e.g. Cloudflare DO pinning). Sent as URL param + header. */
-  sessionToken?: string
   /** Client-side cache-key extension — distinct values get distinct `ClientConnection` instances. Never sent on the wire. */
   connectionKey?: string
   /** User headers (config.headers + per-call `withContext({ headers })`) merged into every transport fetch. */
@@ -1770,7 +1767,6 @@ class SseTransport implements UpgradeSource {
   constructor(
     private readonly telefuncUrl: string,
     private readonly fetchImpl: typeof fetch,
-    private readonly sessionToken: string | undefined,
     private readonly userHeaders: Record<string, string> | undefined,
     private readonly owner: ClientConnection,
   ) {}
@@ -2066,7 +2062,6 @@ class SseTransport implements UpgradeSource {
         ...(extra?.accept ? { Accept: extra.accept } : undefined),
         'Content-Type': 'application/octet-stream',
         [REQUEST_KIND_HEADER]: REQUEST_KIND.SSE,
-        ...(this.sessionToken ? { [TELEFUNC_SESSION_HEADER]: this.sessionToken } : undefined),
       },
       body,
       signal,
@@ -2198,7 +2193,7 @@ const TRANSPORT_REGISTRY: Record<
 > = {
   [CHANNEL_TRANSPORT.WS]: (telefuncUrl, _options, owner) => new WsTransport(telefuncUrl, owner),
   [CHANNEL_TRANSPORT.SSE]: (telefuncUrl, options, owner) =>
-    new SseTransport(telefuncUrl, options.fetchImpl, options.sessionToken, options.headers, owner),
+    new SseTransport(telefuncUrl, options.fetchImpl, options.headers, owner),
 }
 
 /** Defines which transport can upgrade to which. */

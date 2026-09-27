@@ -122,7 +122,6 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     this._connection = ClientConnection.getOrCreate(url, this, {
       transports,
       fetchImpl: (config.fetch ?? globalThis.fetch).bind(globalThis),
-      sessionToken,
       connectionKey,
       headers,
       idleTimeout,

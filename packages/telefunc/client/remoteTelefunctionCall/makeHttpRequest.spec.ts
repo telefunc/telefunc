@@ -8,8 +8,10 @@ afterEach(() => {
 
 function callFrom(telefuncUrl: string) {
   const presented: Array<string | undefined> = []
-  const fetch = (async (_url: string, init: RequestInit) => {
-    presented.push((init.headers as Record<string, string>)[TELEFUNC_SESSION_HEADER])
+  const fetch = (async (url: string, init: RequestInit) => {
+    // Only the Cloudflare adapter sends the header, in its responses: a page's request never carries it.
+    expect(init.headers as Record<string, string>).not.toHaveProperty(TELEFUNC_SESSION_HEADER)
+    presented.push(new URL(url).searchParams.get('session') ?? undefined)
     return new Response('', { status: 500 })
   }) as unknown as typeof globalThis.fetch
   const call = () =>
