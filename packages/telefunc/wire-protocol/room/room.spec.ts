@@ -1898,6 +1898,21 @@ describe('Room public behavior', () => {
     reportRoomError(new Error('a real bug'))
     expect(report).toHaveBeenCalled()
   })
+  it('keeps RoomError precedence when an error also matches ShieldValidationError', () => {
+    const error = Object.assign(new ShieldValidationError('overlap'), {
+      [Symbol.for('telefunc.RoomError')]: true,
+    })
+    expect(isRoomError(error)).toBe(true)
+    expect(isShieldValidationError(error)).toBe(true)
+    expect(roomAckError(error, vi.fn())).toEqual({ text: 'overlap', status: ACK_STATUS.ERROR })
+  })
+  it('renders a shield failure to the caller on both failure carriers, and reports no bug', () => {
+    const report = vi.fn()
+    const error = new ShieldValidationError('data.text should be a string')
+    expect(roomAckError(error, report)).toEqual({ text: error.message, status: ACK_STATUS.SHIELD_ERROR })
+    expect(toRoomFailure(error, report)).toEqual({ ok: false, err: error.message })
+    expect(report).not.toHaveBeenCalled()
+  })
   it('announces a named track on the next publish after its first announcement failed', async () => {
     const room = await Room.create('track-announce-retry')
     const publisher = await room.join()
@@ -2381,6 +2396,49 @@ describe('Room public behavior', () => {
       config.channel = {}
     }
   })
+  it('turns a server roster read rejection into an explicit client-settling event', async () => {
+    const room = (await Room.create('roster-error-event')) as ServerRoom
+    const stub = register(room)
+    const failure = new Error('backend roster read failed')
+    const ensureRoster = vi.spyOn(subsOf(room), 'ensureRoster').mockRejectedValue(failure)
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const peer = attachPeer(stub)
+    const rosterError = () =>
+      peer
+        .decoded()
+        .find((frame) => frame.tag === TAG.PUBLISH && (parse(frame.text) as { __r: string }).__r === 'roster-error')
+    await vi.waitFor(() => expect(rosterError()).toBeDefined())
+    const frame = rosterError()!
+    if (frame.tag !== TAG.PUBLISH) throw new Error('expected roster error publish')
+    const { client, emit } = fakeClient('roster-error-event')
+    const participants = client.getParticipants()
+    emit(parse(frame.text))
+    await expect(participants).rejects.toThrow('Failed to load room participants')
+    expect(ensureRoster).toHaveBeenCalledOnce()
+  })
+  it('sends a stub its roster after the next successful refresh once its first roster read failed', async () => {
+    const room = (await Room.create('roster-error-recovery')) as ServerRoom
+    const stub = register(room)
+    vi.spyOn(subsOf(room), 'ensureRoster').mockRejectedValueOnce(new Error('backend roster read failed'))
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const peer = attachPeer(stub)
+    const events = () =>
+      peer.decoded().flatMap((frame) => (frame.tag === TAG.PUBLISH ? [(parse(frame.text) as { __r: string }).__r] : []))
+    await vi.waitFor(() => expect(events()).toContain('roster-error'))
+    await subsOf(room)._refreshMembers()
+    expect(events()).toEqual(['update', 'roster-error', 'roster'])
+  })
+  it('replays a committed server-pushed roster after reconnect, then sends a fresh one', async () => {
+    const room = (await Room.create('roster-replay')) as ServerRoom
+    const stub = register(room)
+    const ensureRoster = vi.spyOn(subsOf(room), 'ensureRoster')
+    const first = attachPeer(stub)
+    await vi.waitFor(() => expect(controlEvents(first).map(({ __r }) => __r)).toContain('roster'))
+    stub._onPeerDisconnect(first.peer, 1_000)
+    const replayed = controlEvents(attachPeer(stub, 0))
+    expect(replayed.slice(0, 2)).toMatchObject([{ __r: 'update' }, { __r: 'roster', members: [] }])
+    expect(ensureRoster).toHaveBeenCalledTimes(2)
+  })
   it("sends a reattached client its member's demand its offline buffer dropped", async () => {
     const room = (await Room.create('reattach-demand')) as ServerRoom
     config.channel = { bufferLimit: 256 }
@@ -2597,6 +2655,44 @@ describe('Room public behavior', () => {
     expect(received).toEqual([])
     expect(reply).toMatchObject({ ok: false })
   })
+  it('reports rejected async participant inbox, demand, and leave callbacks', async () => {
+    const room = await Room.create('async-participant-callbacks')
+    const participant = await room.join()
+    const errors: unknown[] = []
+    const internal = participant as unknown as {
+      _reportError(error: unknown): void
+      _deliverMessage(message: InboxMessage): void
+      _onDemand(track: string | null, wanted: boolean): void
+      _onLeft(cause: { type: 'left' }): void
+    }
+    internal._reportError = (error) => errors.push(error)
+    const failures = Array.from({ length: 3 }, (_, index) => new Error(`async participant callback ${index}`))
+    const rejected = failures.map((failure) => {
+      const promise = Promise.reject(failure)
+      void promise.catch(() => {})
+      return promise
+    })
+    participant.listen(() => rejected[0])
+    participant.onDemand(() => rejected[1])
+    participant.onLeave(() => rejected[2])
+    internal._deliverMessage({ from: '', fromMeta: null, fromIdentity: null, data: 'text' })
+    internal._onDemand(null, true)
+    internal._onLeft({ type: 'left' })
+    await Promise.resolve()
+    expect(errors).toEqual(failures)
+  })
+  it('owns fallback sender snapshots before listener fan-out', async () => {
+    const participant = await (await Room.create('owned-fallback-sender')).join()
+    const seen: Sender[] = []
+    participant.listen((_data, from) => Reflect.set(from!.meta, 'name', 'listener mutation'))
+    participant.listen((_data, from) => seen.push(from!))
+    const meta = { name: 'owned' }
+    const raw = participant as unknown as { _deliverMessage(message: unknown): void }
+    raw._deliverMessage({ from: 'unknown', fromMeta: meta, fromIdentity: null, data: null })
+    meta.name = 'wire mutation'
+    expect(seen.map(({ meta }) => meta)).toEqual([{ name: 'owned' }])
+    expect(Object.isFrozen(seen[0]) && Object.isFrozen(seen[0]!.meta)).toBe(true)
+  })
   it('keeps live and retained binary seq above 2^32 through server and public client decode', async () => {
     const live = await wideBinaryScenario('wide-live', false, 7)
     const retained = await wideBinaryScenario('wide-retained', true, 9)
@@ -2651,6 +2747,14 @@ describe('Room public behavior', () => {
     expect(Object.isFrozen(changed.participants[0]!.meta)).toBe(true)
     expect(changes).toBe(1)
   })
+  it('keeps remote serializer backing unforgeable and exact-keyed', async () => {
+    const room = await Room.create('remote-backing')
+    const joined = await room.join()
+    const remote = await room.getParticipant(joined.id)
+    expect(remoteBacking(remote)).not.toBeNull()
+    expect(remoteBacking(Object.create(remote!))).toBeNull()
+    expect(Object.getOwnPropertySymbols(remote!)).toEqual([])
+  })
   it('copies metadata into state and freezes every public metadata view', async () => {
     const roomMeta = { topic: 'original' }
     const room = await Room.create('owned-meta', { meta: roomMeta })
@@ -2669,21 +2773,6 @@ describe('Room public behavior', () => {
   })
 })
 describe('client Room lifecycle', () => {
-  it('keeps RoomError precedence when an error also matches ShieldValidationError', () => {
-    const error = Object.assign(new ShieldValidationError('overlap'), {
-      [Symbol.for('telefunc.RoomError')]: true,
-    })
-    expect(isRoomError(error)).toBe(true)
-    expect(isShieldValidationError(error)).toBe(true)
-    expect(roomAckError(error, vi.fn())).toEqual({ text: 'overlap', status: ACK_STATUS.ERROR })
-  })
-  it('renders a shield failure to the caller on both failure carriers, and reports no bug', () => {
-    const report = vi.fn()
-    const error = new ShieldValidationError('data.text should be a string')
-    expect(roomAckError(error, report)).toEqual({ text: error.message, status: ACK_STATUS.SHIELD_ERROR })
-    expect(toRoomFailure(error, report)).toEqual({ ok: false, err: error.message })
-    expect(report).not.toHaveBeenCalled()
-  })
   it("keeps a client-held participant's meta in accepted revision order", async () => {
     let notify!: (notice: unknown) => unknown
     const acks: Array<(accepted: unknown) => void> = []
@@ -2733,14 +2822,6 @@ describe('client Room lifecycle', () => {
       ['screen', false],
       [null, true],
     ])
-  })
-  it('keeps remote serializer backing unforgeable and exact-keyed', async () => {
-    const room = await Room.create('remote-backing')
-    const joined = await room.join()
-    const remote = await room.getParticipant(joined.id)
-    expect(remoteBacking(remote)).not.toBeNull()
-    expect(remoteBacking(Object.create(remote!))).toBeNull()
-    expect(Object.getOwnPropertySymbols(remote!)).toEqual([])
   })
   describe('Room-derived handle ownership (real GC)', () => {
     it.each([
@@ -2823,44 +2904,6 @@ describe('client Room lifecycle', () => {
     state.applyClosed()
     await Promise.resolve()
     expect(errors).toEqual(failures)
-  })
-  it('reports rejected async participant inbox, demand, and leave callbacks', async () => {
-    const room = await Room.create('async-participant-callbacks')
-    const participant = await room.join()
-    const errors: unknown[] = []
-    const internal = participant as unknown as {
-      _reportError(error: unknown): void
-      _deliverMessage(message: InboxMessage): void
-      _onDemand(track: string | null, wanted: boolean): void
-      _onLeft(cause: { type: 'left' }): void
-    }
-    internal._reportError = (error) => errors.push(error)
-    const failures = Array.from({ length: 3 }, (_, index) => new Error(`async participant callback ${index}`))
-    const rejected = failures.map((failure) => {
-      const promise = Promise.reject(failure)
-      void promise.catch(() => {})
-      return promise
-    })
-    participant.listen(() => rejected[0])
-    participant.onDemand(() => rejected[1])
-    participant.onLeave(() => rejected[2])
-    internal._deliverMessage({ from: '', fromMeta: null, fromIdentity: null, data: 'text' })
-    internal._onDemand(null, true)
-    internal._onLeft({ type: 'left' })
-    await Promise.resolve()
-    expect(errors).toEqual(failures)
-  })
-  it('owns fallback sender snapshots before listener fan-out', async () => {
-    const participant = await (await Room.create('owned-fallback-sender')).join()
-    const seen: Sender[] = []
-    participant.listen((_data, from) => Reflect.set(from!.meta, 'name', 'listener mutation'))
-    participant.listen((_data, from) => seen.push(from!))
-    const meta = { name: 'owned' }
-    const raw = participant as unknown as { _deliverMessage(message: unknown): void }
-    raw._deliverMessage({ from: 'unknown', fromMeta: meta, fromIdentity: null, data: null })
-    meta.name = 'wire mutation'
-    expect(seen.map(({ meta }) => meta)).toEqual([{ name: 'owned' }])
-    expect(Object.isFrozen(seen[0]) && Object.isFrozen(seen[0]!.meta)).toBe(true)
   })
   it('keeps a client participant active so a rejected leave request can be retried', async () => {
     let leaveAttempts = 0
@@ -3242,49 +3285,6 @@ describe('client Room lifecycle', () => {
       { __r: 'sub-text', members: [], announce: false },
     ])
     expect(wireDeclarations).toEqual([])
-  })
-  it('turns a server roster read rejection into an explicit client-settling event', async () => {
-    const room = (await Room.create('roster-error-event')) as ServerRoom
-    const stub = register(room)
-    const failure = new Error('backend roster read failed')
-    const ensureRoster = vi.spyOn(subsOf(room), 'ensureRoster').mockRejectedValue(failure)
-    vi.spyOn(console, 'error').mockImplementation(() => {})
-    const peer = attachPeer(stub)
-    const rosterError = () =>
-      peer
-        .decoded()
-        .find((frame) => frame.tag === TAG.PUBLISH && (parse(frame.text) as { __r: string }).__r === 'roster-error')
-    await vi.waitFor(() => expect(rosterError()).toBeDefined())
-    const frame = rosterError()!
-    if (frame.tag !== TAG.PUBLISH) throw new Error('expected roster error publish')
-    const { client, emit } = fakeClient('roster-error-event')
-    const participants = client.getParticipants()
-    emit(parse(frame.text))
-    await expect(participants).rejects.toThrow('Failed to load room participants')
-    expect(ensureRoster).toHaveBeenCalledOnce()
-  })
-  it('sends a stub its roster after the next successful refresh once its first roster read failed', async () => {
-    const room = (await Room.create('roster-error-recovery')) as ServerRoom
-    const stub = register(room)
-    vi.spyOn(subsOf(room), 'ensureRoster').mockRejectedValueOnce(new Error('backend roster read failed'))
-    vi.spyOn(console, 'error').mockImplementation(() => {})
-    const peer = attachPeer(stub)
-    const events = () =>
-      peer.decoded().flatMap((frame) => (frame.tag === TAG.PUBLISH ? [(parse(frame.text) as { __r: string }).__r] : []))
-    await vi.waitFor(() => expect(events()).toContain('roster-error'))
-    await subsOf(room)._refreshMembers()
-    expect(events()).toEqual(['update', 'roster-error', 'roster'])
-  })
-  it('replays a committed server-pushed roster after reconnect, then sends a fresh one', async () => {
-    const room = (await Room.create('roster-replay')) as ServerRoom
-    const stub = register(room)
-    const ensureRoster = vi.spyOn(subsOf(room), 'ensureRoster')
-    const first = attachPeer(stub)
-    await vi.waitFor(() => expect(controlEvents(first).map(({ __r }) => __r)).toContain('roster'))
-    stub._onPeerDisconnect(first.peer, 1_000)
-    const replayed = controlEvents(attachPeer(stub, 0))
-    expect(replayed.slice(0, 2)).toMatchObject([{ __r: 'update' }, { __r: 'roster', members: [] }])
-    expect(ensureRoster).toHaveBeenCalledTimes(2)
   })
 })
 describe('room demand lifecycle', () => {
