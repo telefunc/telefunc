@@ -1,7 +1,6 @@
 export { ServerRoom, ServerLocalParticipant }
 
 import { parse } from '@brillout/json-serializer/parse'
-import { stringify } from '@brillout/json-serializer/stringify'
 import type { TELEFUNC_SHIELDS } from '../../../node/shared/transformer/generateShield/shield-key.js'
 import { assert, assertUsage } from '../../../utils/assert.js'
 import { markHandled } from '../../../utils/markHandled.js'
@@ -65,7 +64,7 @@ import {
 import { RoomState, RoomStateView } from '../state.js'
 import { RoomDemand } from '../demand.js'
 import { ParticipantBase } from '../participant.js'
-import { RoomStubChannel } from './stub.js'
+import { RoomStubChannel, unorderedEventText } from './stub.js'
 import type { RoomRequest } from './requests.js'
 import { LocalHolder, binaryLaneKey, type LaneHolder, type WantsChange } from './replay.js'
 import { TailHold } from './tail.js'
@@ -527,7 +526,7 @@ class ServerRoom extends RoomStateView implements Room {
 
   /** Relayed as this view applied it, not as a lane frame: an own event's echo may be lost with no drift to reconcile. */
   private _relayApplied(event: RoomCtrlEnvelope): void {
-    this._relayControl(event, () => encodePublishText(stringify(event), { seq: 0, timestamp: Date.now() }))
+    this._relayControl(event, () => unorderedEventText(event))
   }
 
   private _relayControl(event: RoomCtrlEnvelope, wireText: () => string): void {

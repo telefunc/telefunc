@@ -1,4 +1,4 @@
-export { RoomStubChannel, RoomParticipantStubChannel }
+export { RoomStubChannel, RoomParticipantStubChannel, unorderedEventText }
 export type { ResponseRoomGrants }
 
 import { stringify } from '@brillout/json-serializer/stringify'
@@ -74,6 +74,11 @@ abstract class RoomRequestChannel extends ServerChannel {
       ),
     )
   }
+}
+
+/** An event an instance originates, outside any lane's order. */
+function unorderedEventText(event: RoomCtrlEnvelope | RoomRosterEvent | RoomDemandEvent): string {
+  return encodePublishText(stringify(event), { seq: 0, timestamp: Date.now() })
 }
 
 /** The publish shield validates Room data at ingress only. */
@@ -267,9 +272,9 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
 
   // Relays
 
-  /** An event this instance originates for this client alone, outside any lane's order. */
+  /** An event this instance originates for this client alone. */
   _relayEvent(event: RoomRosterEvent | RoomDemandEvent | Extract<RoomCtrlEnvelope, { __r: 'update' }>): void {
-    this._sendPublish(encodePublishText(stringify(event), { seq: 0, timestamp: Date.now() }))
+    this._sendPublish(unorderedEventText(event))
   }
 
   /** The roster holds the hidden members this client was handed, whose meta it heals too. */
