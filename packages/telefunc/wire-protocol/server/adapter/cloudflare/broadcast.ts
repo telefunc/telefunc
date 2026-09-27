@@ -152,11 +152,7 @@ class CloudflareBroadcastSubscriptionAttempt extends DriverAttempt {
     this.#detach = detach
     this.#stopPresenceObservation = member.onPresenceStateChange((state) => this.transition(state))
     member.ready.then(
-      // A route's record outlives a failed refresh, so a joiner to a lost route is established and shares its loss.
-      () => {
-        this.transition('ready')
-        if (member.state === 'lost') this.transition('lost')
-      },
+      () => this.transition('ready'),
       (error: unknown) => {
         this.#stopPresenceObservation()
         this.transition('closed', error)
