@@ -1265,7 +1265,7 @@ class ClientConnection implements MuxConnection {
   // ── Protocol internals ──
 
   buildReconcileFrame(): OutboundFrame {
-    const open = this.collectOpenEntries({ skipInitial: false })
+    const open = this.declareOpenEntries({ skipInitial: false })
     const reconcile: ReconcilePayload = { open, ...(this.sessionId ? { sessionId: this.sessionId } : {}) }
     return { kind: 'reconcile', frame: encode.reconcile(reconcile) }
   }
@@ -1273,11 +1273,11 @@ class ClientConnection implements MuxConnection {
   /** The old wire's last frame. Channels the server has not acknowledged yet are left out: the
    *  staged probe has no record of them, so they reconcile again after the handoff. */
   private buildBarrierFrame(sessionId: string, upgradeId: string): OutboundFrame {
-    const open = this.collectOpenEntries({ skipInitial: true })
+    const open = this.declareOpenEntries({ skipInitial: true })
     return { kind: 'reconcile', frame: encode.barrier({ sessionId, upgradeId, open }) }
   }
 
-  private collectOpenEntries({ skipInitial }: { skipInitial: boolean }): ReconcileOpenEntry[] {
+  private declareOpenEntries({ skipInitial }: { skipInitial: boolean }): ReconcileOpenEntry[] {
     this.enterReconciling()
     this.reconcileIxes = new Set()
     const open: ReconcileOpenEntry[] = []
