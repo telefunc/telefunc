@@ -141,6 +141,36 @@ test("a server close that reaches the page before its upload request settles get
   expect((channel as any)._connection.channels.size).toBe(0) // released once its acknowledgement went out
 })
 
+test("a page's last channel gets its close acknowledgement out on SSE batch POSTs, though its idle timeout is 0", async () => {
+  const acked: number[] = []
+  const server = fakeServer((frame) => {
+    if (frame.tag === TAG.CLOSE_ACK) acked.push(frame.index)
+  })
+  // A request aborted before the server read it (here, within 5 ms of the call) never arrives.
+  config.fetch = (async (url: string, init: RequestInit) => {
+    await delay(5)
+    if (init.signal?.aborted) throw new DOMException('The operation was aborted.', 'AbortError')
+    return server.fetch(url, init)
+  }) as typeof fetch
+  const channel = new ClientChannel({
+    channelId: crypto.randomUUID(),
+    transports: ['sse'],
+    telefuncUrl: 'http://idle-zero.test/_telefunc',
+    connectionKey: crypto.randomUUID(),
+    idleTimeout: 0,
+  })
+  const closed = new Promise((resolve) => channel.onClose(resolve))
+  await delay(20)
+  server.reconcile()
+  await delay(20)
+  server.refuseUpload()
+  await delay(20)
+  server.send(encode.close(server.ix, 5_000)) // the server's close()
+  expect(await closed).toBeUndefined()
+  await delay(100)
+  expect(acked).toEqual([server.ix])
+})
+
 test("a server close that reaches the page before its upload request settles, while the page opens another channel, gets the page's acknowledgement first", async () => {
   // In order: 'ack:<ix>' for a CLOSE_ACK, 'reconcile:<ixes>' for a RECONCILE.
   const received: string[] = []
