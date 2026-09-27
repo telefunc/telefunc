@@ -19,7 +19,7 @@ const mocks = vi.hoisted(() => {
     }
   }
 
-  class MockCloudflareBroadcastTransport {
+  class MockCloudflareBroadcast {
     readonly options: unknown
     readonly publishToSubscribers = vi.fn()
     readonly forwardToBucket = vi.fn()
@@ -49,10 +49,10 @@ const mocks = vi.hoisted(() => {
     })),
     rawContext: null as Record<symbol, unknown> | null,
     workerEnv: {} as Record<string, unknown>,
-    transportInstances: [] as MockCloudflareBroadcastTransport[],
+    transportInstances: [] as MockCloudflareBroadcast[],
     authorityInstances: [] as MockCloudflareBroadcastAuthorityState[],
     MockCloudflareBroadcastAuthorityState,
-    MockCloudflareBroadcastTransport,
+    MockCloudflareBroadcast,
   }
 })
 
@@ -111,7 +111,7 @@ vi.mock('../../../../node/server/context/context.js', () => ({
 
 vi.mock('./broadcast.js', () => ({
   CloudflareBroadcastAuthorityState: mocks.MockCloudflareBroadcastAuthorityState,
-  CloudflareBroadcastTransport: mocks.MockCloudflareBroadcastTransport,
+  CloudflareBroadcast: mocks.MockCloudflareBroadcast,
 }))
 
 vi.mock('./routing.js', () => ({

@@ -21,7 +21,7 @@ import type {
   RoomSubscriptionSource,
 } from '../../../../backend/room/contract.js'
 import type { SubscriptionBinding, SubscriptionDriver } from '../../../../backend/subscription.js'
-import { CloudflareBroadcastTransport } from '../broadcast.js'
+import { CloudflareBroadcast } from '../broadcast.js'
 import type { RoomAuthority } from './do.js'
 import type { DurableObject } from 'cloudflare:workers'
 import { currentCloudflareSession, requireCloudflareSession } from '../session.js'
@@ -42,11 +42,11 @@ type CloudflareSubscriptionSource = BroadcastRoute | RoomSubscriptionSource
 
 /** A subscription requires its session DO's context; a lane commit made in one goes through that session's ordered stub. */
 class CloudflareBackend implements BroadcastDriver, RoomDriver {
-  readonly broadcast: CloudflareBroadcastTransport
+  readonly broadcast: CloudflareBroadcast
   readonly subscriptions: SubscriptionDriver<CloudflareSubscriptionSource>
   readonly #rooms: () => CloudflareRoomNamespace
 
-  constructor({ rooms, broadcast }: { rooms: () => CloudflareRoomNamespace; broadcast: CloudflareBroadcastTransport }) {
+  constructor({ rooms, broadcast }: { rooms: () => CloudflareRoomNamespace; broadcast: CloudflareBroadcast }) {
     this.#rooms = rooms
     this.broadcast = broadcast
     this.subscriptions = {

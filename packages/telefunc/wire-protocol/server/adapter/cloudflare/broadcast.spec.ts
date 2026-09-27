@@ -10,7 +10,7 @@ import {
   resolveSessionRoutingTarget,
 } from './routing.js'
 import '../../../../node/server/async_hooks.js'
-import { CloudflareBroadcastAuthorityState, CloudflareBroadcastTransport } from './broadcast.js'
+import { CloudflareBroadcastAuthorityState, CloudflareBroadcast } from './broadcast.js'
 import type { BroadcastCalls, BroadcastPresenceRequest, CloudflareBroadcastMember } from './broadcast.js'
 import { withCloudflareSession } from './session.js'
 import type { BroadcastRoute } from '../../../backend/broadcast/contract.js'
@@ -50,7 +50,7 @@ afterEach(async () => {
   await disposeBackend()
 })
 
-function installCloudflareTransport(transport: CloudflareBroadcastTransport): void {
+function installCloudflareTransport(transport: CloudflareBroadcast): void {
   installBackend(
     () =>
       new CloudflareBackend({
@@ -207,8 +207,8 @@ function createRacingBinding(
   } as unknown as TelefuncDurableObjectNamespace
 }
 
-function createTransport(binding = createBasicBinding()): CloudflareBroadcastTransport {
-  return new CloudflareBroadcastTransport({
+function createTransport(binding = createBasicBinding()): CloudflareBroadcast {
+  return new CloudflareBroadcast({
     baseInstanceName: 'telefunc',
     scale: 1,
     locationFallback: 'weur',
@@ -217,7 +217,7 @@ function createTransport(binding = createBasicBinding()): CloudflareBroadcastTra
 }
 
 /** A session DO's Broadcast membership, placed in weur. */
-function createMember(transport: CloudflareBroadcastTransport, id = 'member-weur-0'): CloudflareBroadcastMember {
+function createMember(transport: CloudflareBroadcast, id = 'member-weur-0'): CloudflareBroadcastMember {
   const member = transport.member(id, new OrderedStubs())
   member.locate('weur')
   return member
@@ -472,7 +472,7 @@ describe('cloudflare broadcast routing', () => {
     const coordinatorCalls: BroadcastCalls = new OrderedStubs()
     const recorded = Promise.withResolvers<void>()
     const received: string[] = []
-    const transport: CloudflareBroadcastTransport = createTransport(
+    const transport: CloudflareBroadcast = createTransport(
       createBasicBinding({
         onPresence: presenceAt(authority, { beforeRecord: () => recorded.promise }),
         onPublish(_id, request) {
@@ -511,7 +511,7 @@ describe('cloudflare broadcast routing', () => {
     const authorityState = createAuthorityState()
     const calls: BroadcastCalls = new OrderedStubs()
     const coordinators: string[] = []
-    const transport: CloudflareBroadcastTransport = createTransport(
+    const transport: CloudflareBroadcast = createTransport(
       createBasicBinding({
         onForward(id) {
           coordinators.push(id.name)
@@ -553,7 +553,7 @@ describe('cloudflare broadcast routing', () => {
   it("forwards presence from a region that left the scale through the fallback region's coordinator", async () => {
     const authorityState = createAuthorityState()
     const forwards: Array<{ coordinator: string; members: string[] }> = []
-    const transport = new CloudflareBroadcastTransport({
+    const transport = new CloudflareBroadcast({
       baseInstanceName: 'telefunc',
       scale: { weur: 1 },
       locationFallback: 'weur',
@@ -586,7 +586,7 @@ describe('cloudflare broadcast routing', () => {
     const authority = createAuthorityState()
     const calls: BroadcastCalls = new OrderedStubs()
     const coordinatorCalls: BroadcastCalls = new OrderedStubs()
-    const transport: CloudflareBroadcastTransport = createTransport(
+    const transport: CloudflareBroadcast = createTransport(
       createBasicBinding({
         onPresence: presenceAt(authority),
         onPublish: (_id, request) => transport.publishToSubscribers(authority, calls, request),
@@ -607,7 +607,7 @@ describe('cloudflare broadcast routing', () => {
   it('a forward delivers wide ordering positions to every named DO', async () => {
     const deliveredTo: string[] = []
     const received: Array<{ text: string; seq: number; timestamp: number }> = []
-    const transport: CloudflareBroadcastTransport = createTransport(
+    const transport: CloudflareBroadcast = createTransport(
       createBasicBinding({
         onDeliver(id, request) {
           deliveredTo.push(id.name)
@@ -640,7 +640,7 @@ describe('cloudflare broadcast routing', () => {
     const calls: BroadcastCalls = new OrderedStubs()
     const coordinatorCalls: BroadcastCalls = new OrderedStubs()
     // The first stub opened is the slowest, so a publish sent through a fresh stub overtakes the one before it.
-    const transport: CloudflareBroadcastTransport = createTransport(
+    const transport: CloudflareBroadcast = createTransport(
       createRacingBinding([20], {
         onForward: (request) => transport.forwardToBucket(coordinatorCalls, request),
         onDeliver: async (request) => member.deliver(request),
@@ -696,7 +696,7 @@ describe('cloudflare broadcast routing', () => {
 
   it('publishes from outside a session, as from a cron trigger, without a bucket', async () => {
     const coordinatorPublishes: Array<{ name: string; key: string; locationBucket: string | null; text: string }> = []
-    const transport: CloudflareBroadcastTransport = createTransport(
+    const transport: CloudflareBroadcast = createTransport(
       createBasicBinding({
         onPublish(id, { key, locationBucket, payload }) {
           coordinatorPublishes.push({ name: id.name, key, locationBucket, text: decode(payload) })

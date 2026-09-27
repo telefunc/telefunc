@@ -2,7 +2,7 @@ import { expect, test } from 'vitest'
 import '../../../../../node/server/async_hooks.js'
 import { CloudflareBackend, type CloudflareRoomNamespace } from './backend.js'
 import { CloudflareRoomSessionManager } from './subscription.js'
-import { CloudflareBroadcastTransport } from '../broadcast.js'
+import { CloudflareBroadcast } from '../broadcast.js'
 import { withCloudflareSession } from '../session.js'
 import { OrderedStubs } from '../ordered-stubs.js'
 import { ChannelMux } from '../../../mux.js'
@@ -10,7 +10,7 @@ import { ChannelMux } from '../../../mux.js'
 const noBroadcast = () => {
   throw new Error('this spec uses no Broadcast')
 }
-const broadcast = new CloudflareBroadcastTransport({
+const broadcast = new CloudflareBroadcast({
   baseInstanceName: 'telefunc',
   locationFallback: 'weur',
   namespace: noBroadcast,

@@ -14,7 +14,7 @@ import {
 } from '../../packages/telefunc/wire-protocol/server/adapter/cloudflare/room/do.js'
 import {
   CloudflareBroadcastAuthorityState,
-  CloudflareBroadcastTransport,
+  CloudflareBroadcast,
   type BroadcastCalls,
   type BroadcastDeliverRequest,
   type BroadcastForwardRequest,
@@ -26,7 +26,7 @@ import { OrderedStubs } from '../../packages/telefunc/wire-protocol/server/adapt
 import { withCloudflareSession } from '../../packages/telefunc/wire-protocol/server/adapter/cloudflare/session.js'
 import { ChannelMux } from '../../packages/telefunc/wire-protocol/server/mux.js'
 import { ServerBroadcast } from '../../packages/telefunc/wire-protocol/server/server-broadcast.js'
-const broadcast = new CloudflareBroadcastTransport({
+const broadcast = new CloudflareBroadcast({
   baseInstanceName: 'telefunc',
   locationFallback: 'weur',
   namespace: () => workerEnv.TELEFUNC,

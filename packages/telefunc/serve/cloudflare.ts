@@ -14,7 +14,7 @@ import { serve as serveTelefunc } from '../node/server/telefunc.js'
 import { installBackend } from '../wire-protocol/backend/install.js'
 import {
   CloudflareBroadcastAuthorityState,
-  CloudflareBroadcastTransport,
+  CloudflareBroadcast,
 } from '../wire-protocol/server/adapter/cloudflare/broadcast.js'
 import type {
   BroadcastCalls,
@@ -107,7 +107,7 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
     () =>
       new CloudflareBackend({
         rooms: () => telefuncNamespace(workerEnv),
-        broadcast: new CloudflareBroadcastTransport({
+        broadcast: new CloudflareBroadcast({
           baseInstanceName,
           scale,
           locationFallback,

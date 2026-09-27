@@ -1,5 +1,5 @@
 /// <reference types="@cloudflare/workers-types" />
-export { CloudflareBroadcastTransport, CloudflareBroadcastAuthorityState, CloudflareBroadcastMember }
+export { CloudflareBroadcast, CloudflareBroadcastAuthorityState, CloudflareBroadcastMember }
 export type {
   BroadcastCalls,
   BroadcastDeliverRequest,
@@ -264,13 +264,13 @@ class CloudflareBroadcastMember {
   /** Subscriptions share an attempt only within one session DO. */
   readonly partition = crypto.randomUUID()
   readonly calls: BroadcastCalls
-  readonly #transport: CloudflareBroadcastTransport
+  readonly #transport: CloudflareBroadcast
   readonly #id: string
   #bucket: LocationBucket | null = null
   readonly #routes = new Map<string, MemberRoute>()
   readonly #subscriptions = new Map<string, CloudflareBroadcastSubscriptionAttempt>()
 
-  constructor(transport: CloudflareBroadcastTransport, id: string, calls: BroadcastCalls) {
+  constructor(transport: CloudflareBroadcast, id: string, calls: BroadcastCalls) {
     this.#transport = transport
     this.#id = id
     this.calls = calls
@@ -363,7 +363,7 @@ class CloudflareBroadcastMember {
 
 /** The isolate's Cloudflare Broadcast driver: where each key's authority and each bucket's coordinators live, and
  *  their RPC handlers. Each session DO subscribes through its own `CloudflareBroadcastMember`. */
-class CloudflareBroadcastTransport {
+class CloudflareBroadcast {
   private readonly baseInstanceName: string
   private readonly scale: CloudflareScale | undefined
   private readonly locationFallback: LocationBucket
