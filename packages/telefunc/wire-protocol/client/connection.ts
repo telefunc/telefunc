@@ -40,6 +40,8 @@ import type {
   AckResultStatus,
   ChannelFrame,
   DecodedFrame,
+  PingEntry,
+  PongEntry,
   ReadyPayload,
   ReattachState,
   ReconcileOpenEntry,
@@ -210,7 +212,7 @@ type ClientChannelTransport = {
   hasWire(): boolean
   isConnecting(): boolean
   /** Send a connection-level ping on this wire. Heartbeat's send callback calls this. */
-  sendPing(): void
+  sendPing(frame: Uint8Array<ArrayBuffer>): void
   sendFrame(frame: OutboundFrame): void
   abandonActiveTransport(): void
   closeAbandonedTransport(): void
@@ -299,10 +301,18 @@ function isJoinLimb(frame: DecodedFrame): boolean {
   return frame.tag === TAG.FIN || frame.tag === TAG.RECONCILED
 }
 
-/** Per-channel lifecycle. `closed` = unregistered, its closing frame sent or queued: it stays listed, and what it sent
- *  replays, until the server has it all or no longer has the channel, since a RECONCILE leaving it out ends it there.
- *  `initial` is the pending one's: the server may not have registered it. */
-type ChannelState = { tag: 'pending'; initial: boolean } | { tag: 'open' } | { tag: 'closed'; initial: boolean }
+/** Per-channel lifecycle. `closed` = unregistered, its closing frame sent or queued. It stays listed, since a RECONCILE
+ *  leaving it out ends it on the server, and what it sent replays, until the server no longer holds it, it is
+ *  `delivered` as a RECONCILE is built or its wire is lost, or a PING finds nothing of it left to replay or send. Once
+ *  the server attached it, each PING names it with how far the page has what the server sent on it. `initial`: the
+ *  server may not have registered it, until a RECONCILED or ATTACH_RESULT attaches it. `delivered`: the server has all
+ *  the page sent on it, or ended it and needs none of it. `reported`: a PING named it. */
+type ChannelState =
+  | { tag: 'pending'; initial: boolean }
+  | { tag: 'open' }
+  | { tag: 'closed'; initial: boolean; delivered: boolean; reported: boolean }
+
+type ClosedState = Extract<ChannelState, { tag: 'closed' }>
 
 type ChannelEntry = {
   channel: MuxChannel
@@ -521,7 +531,8 @@ class ClientConnection implements MuxConnection {
   private enterChannelClosed(ix: number): void {
     const entry = this.channels.get(ix)
     assert(entry && entry.state.tag !== 'closed')
-    entry.state = { tag: 'closed', initial: entry.state.tag === 'pending' && entry.state.initial }
+    const initial = entry.state.tag === 'pending' && entry.state.initial
+    entry.state = { tag: 'closed', initial, delivered: false, reported: false }
   }
 
   private register(channel: MuxChannel): void {
@@ -897,11 +908,50 @@ class ClientConnection implements MuxConnection {
     const hb = new Heartbeat(
       intervalMs,
       intervalMs * 2,
-      () => transport.sendPing(),
+      () => transport.sendPing(this.buildPing()),
       () => this.handlePongTimeout(transport),
     )
     transport.attachHeartbeat(hb)
     hb.start()
+  }
+
+  /** Names each closed channel the server attached, with how far the page has what the server sent on it, which the
+   *  server answers with how far it has what the page sent on it, or that it no longer holds it. One a PING named
+   *  before, with nothing left to replay or to send, is let go instead: nothing it holds can reach the server now. */
+  private buildPing(): Uint8Array<ArrayBuffer> {
+    const ended: PingEntry[] = []
+    for (const [ix, entry] of this.channels) {
+      const state = entry.state
+      if (state.tag !== 'closed' || state.initial) continue
+      if (
+        state.reported &&
+        this.replayBuffers.get(ix)!.length === 0 &&
+        !this.sendBuffer.some(({ channelIx }) => channelIx === ix)
+      ) {
+        this.releaseChannel(ix, entry.channel)
+        continue
+      }
+      state.reported = true
+      ended.push({ ix, lastSeq: this.lastSeqByChannel.get(ix) ?? 0 })
+    }
+    return encode.ping(ended)
+  }
+
+  /** The server's answer to a PING: how far it has what the page sent on each channel named, or that it no longer holds
+   *  the channel. */
+  _onTransportPong(ended: PongEntry[]): void {
+    for (const { ix, lastSeq } of ended) {
+      const entry = this.channels.get(ix)
+      if (entry === undefined || entry.state.tag !== 'closed') continue
+      if (lastSeq === null) this.releaseChannel(ix, entry.channel)
+      else this.serverHas(ix, entry.state, lastSeq)
+    }
+  }
+
+  /** A closed channel the server attached has what the page sent on it through `lastSeq`. */
+  private serverHas(ix: number, state: ClosedState, lastSeq: number): void {
+    state.initial = false
+    if (lastSeq >= this.replayBuffers.get(ix)!.seq) state.delivered = true
   }
 
   private dropWire(transport: ClientChannelTransport): void {
@@ -1248,6 +1298,9 @@ class ClientConnection implements MuxConnection {
       this.dispose()
       return
     }
+    // A closed channel the server has all of needs nothing from another wire.
+    for (const [ix, entry] of this.channels)
+      if (entry.state.tag === 'closed' && entry.state.delivered) this.releaseChannel(ix, entry.channel)
     if (this.channels.size === 0) {
       this.dispose()
       return
@@ -1331,6 +1384,11 @@ class ClientConnection implements MuxConnection {
     this.carriedFrom = new Map()
     const open: ReconcileOpenEntry[] = []
     for (const [ix, entry] of this.channels) {
+      // The server has all a delivered one sent it, or ended it: leaving it out lets it go there too.
+      if (entry.state.tag === 'closed' && entry.state.delivered) {
+        this.releaseChannel(ix, entry.channel)
+        continue
+      }
       const isInitial = entry.state.tag !== 'open' && entry.state.initial
       if (skipUnnamed && isInitial && !this.awaitedIxes.has(ix)) continue
       this.reconcileIxes.set(ix, isInitial)
@@ -1442,11 +1500,12 @@ class ClientConnection implements MuxConnection {
       if (this.awaitedIxes.has(ix)) continue
       if (entry.state.tag === 'closed') {
         const lastSeq = serverMap.get(ix)
-        // One the server has ended, or has all of, needs nothing more from the page.
-        if (lastSeq === undefined || lastSeq >= this.replayBuffers.get(ix)!.seq) {
+        // One the server no longer has needs nothing more from the page.
+        if (lastSeq === undefined) {
           this.releaseChannel(ix, entry.channel)
           continue
         }
+        this.serverHas(ix, entry.state, lastSeq)
       }
       if (!serverMap.has(ix)) {
         if (deferredOmitted) {
@@ -1509,18 +1568,21 @@ class ClientConnection implements MuxConnection {
       if (entry.state.tag === 'pending') {
         this.enterChannelOpen(ix)
         entry.channel._onTransportOpen(this.transport.batched, this.wire)
-      } else if (lastSeq >= replay.seq) {
-        this.releaseChannel(ix, entry.channel)
+      } else if (entry.state.tag === 'closed') {
+        this.serverHas(ix, entry.state, lastSeq)
       }
     }
     this.startTtlIfIdle()
     this.maybeStartUpgrade()
   }
 
+  /** The server ended it, so it needs nothing more the page sent on it. */
   private closeRemoteChannel(ix: number, err?: Error): void {
     const entry = this.channels.get(ix)
     if (!entry) return
-    this.releaseChannel(ix, entry.channel)
+    this.unregister(entry.channel)
+    assert(entry.state.tag === 'closed')
+    entry.state.delivered = true
     entry.channel._onTransportClose(err)
   }
 
@@ -1532,8 +1594,10 @@ class ClientConnection implements MuxConnection {
   }
 
   /** Dedup against double-delivery. Transports are TCP-ordered and replay sends a contiguous slice
-   *  starting at our reported `lastSeq + 1`, so duplicates shouldn't occur in normal operation. */
+   *  starting at our reported `lastSeq + 1`, so duplicates shouldn't occur in normal operation. One for a channel the
+   *  page let go is dropped too. */
   private trackSeq(ix: number, seq: number): 'accept' | 'dup' {
+    if (!this.channels.has(ix)) return 'dup'
     const prev = this.lastSeqByChannel.get(ix) ?? 0
     if (seq <= prev) return 'dup'
     this.lastSeqByChannel.set(ix, seq)
@@ -1764,6 +1828,7 @@ class WsTransport implements UpgradeTarget {
       }
       if (frame.tag === TAG.PONG) {
         this.heartbeat?.resetPong()
+        this.owner._onTransportPong(frame.ended)
         return
       }
       this.owner._onTransportFrame(frame, this, raw.byteLength)
@@ -1811,9 +1876,9 @@ class WsTransport implements UpgradeTarget {
 
   applyReconciledSettings(): void {}
 
-  sendPing(): void {
+  sendPing(frame: Uint8Array<ArrayBuffer>): void {
     if (this.ws?.readyState !== WebSocket.OPEN) return
-    this.ws.send(encode.ping())
+    this.ws.send(frame)
   }
 
   dispose(): void {
@@ -2034,6 +2099,7 @@ class SseTransport implements UpgradeSource {
           const frame = decode(raw)
           if (frame.tag === TAG.PONG) {
             this.heartbeat?.resetPong()
+            this.owner._onTransportPong(frame.ended)
             continue
           }
           this.owner._onTransportFrame(frame, this, raw.byteLength)
@@ -2088,9 +2154,9 @@ class SseTransport implements UpgradeSource {
     initialFrames.push(reconcileBatch.reconcileFrame)
     const movedBufferedFrames = reconcileBatch.movedBufferedFrames
     // A dead wire's outbox carries only its window refreshes. This reconcile declares every channel and its
-    // subscriptions, a close request goes out again on reattach, and sequenced frames replay after RECONCILED from the
-    // server's lastSeq: sent first, they could overtake older ones a POST still in flight carries, whose frames the
-    // server would then drop as duplicates.
+    // subscriptions, and sequenced frames, a close request among them, replay after RECONCILED from the server's
+    // lastSeq: sent first, they could overtake older ones a POST still in flight carries, whose frames the server would
+    // then drop as duplicates.
     const movedOutbox = this.outbox.filter(isWindowRefresh)
     this.outbox = []
     for (const entry of movedOutbox) initialFrames.push({ kind: 'data', frame: entry.frame })
@@ -2244,9 +2310,9 @@ class SseTransport implements UpgradeSource {
     this.heartbeatFlushDelayMs = Math.floor(ctrl.pingInterval / 2)
   }
 
-  sendPing(): void {
+  sendPing(frame: Uint8Array<ArrayBuffer>): void {
     if (!this.hasWire()) return
-    this.sendFrame({ kind: 'heartbeat', frame: encode.ping() })
+    this.sendFrame({ kind: 'heartbeat', frame })
   }
 
   attachHeartbeat(hb: Heartbeat): void {

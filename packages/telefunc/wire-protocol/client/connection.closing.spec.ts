@@ -11,7 +11,7 @@ import { ServerChannel } from '../server/channel.js'
 import { getChannelMux } from '../server/mux.js'
 import { getTelefuncSseChannelHooks } from '../server/sse.js'
 import { getTelefuncChannelHooks } from '../server/ws.js'
-import { TAG } from '../shared-ws.js'
+import { TAG, decode, type ReconcilePayload } from '../shared-ws.js'
 import { decodeU32 } from '../frame.js'
 import { base64urlToUint8Array } from '../base64url.js'
 import { config as serverConfig } from '../../node/server/serverConfig.js'
@@ -51,8 +51,9 @@ type Link = {
 class Net {
   readonly links: Link[] = []
   private readonly byConnId = new Map<string, Link>()
-  private readonly onPageGets = new Map<number, () => void>()
-  private readonly onPageSends = new Map<number, () => void>()
+  private readonly losing = new Set<number>()
+  private readonly onPageGets = new Map<number, (frame: Uint8Array) => void>()
+  private readonly onPageSends = new Map<number, (frame: Uint8Array) => void>()
   open(connId?: string): Link {
     const link = { dead: false, holdingPosts: false }
     this.links.push(link)
@@ -71,7 +72,7 @@ class Net {
     this.onPageGets.set(tag, then)
   }
   /** Runs `then` once, as the page writes its next frame of `tag` to the wire: that frame is lost if it kills it. */
-  whenPageSends(tag: number, then: () => void): void {
+  whenPageSends(tag: number, then: (frame: Uint8Array) => void): void {
     this.onPageSends.set(tag, then)
   }
   pageGets(frame: Uint8Array): void {
@@ -80,11 +81,18 @@ class Net {
   pageSends(frame: Uint8Array): void {
     this.fire(this.onPageSends, frame)
   }
-  private fire(hooks: Map<number, () => void>, frame: Uint8Array): void {
+  /** The page's next frame of `tag` is lost, and its wire lives on: a loss no replay repairs. */
+  losePageFrame(tag: number): void {
+    this.losing.add(tag)
+  }
+  loses(frame: Uint8Array): boolean {
+    return this.losing.delete(frame[0]!)
+  }
+  private fire(hooks: Map<number, (frame: Uint8Array) => void>, frame: Uint8Array): void {
     const then = hooks.get(frame[0]!)
     if (!then) return
     hooks.delete(frame[0]!)
-    then()
+    then(frame)
   }
 }
 
@@ -284,7 +292,7 @@ function webSocketTo(net: Net) {
     send(data: Uint8Array) {
       const frame = data.slice()
       if (!this.link.dead) net.pageSends(frame)
-      if (this.link.dead) return
+      if (this.link.dead || net.loses(frame)) return
       void hooks.message!(this.peer, { uint8Array: () => frame } as never)
     }
     close() {
@@ -449,6 +457,60 @@ describe.each(WIRES)('over %s', (wire) => {
   })
 })
 
+describe.each(WIRES)('over %s, from the server', (wire) => {
+  test('a page whose channels the server closes on a healthy wire lets each go within a ping round trip, and its next RECONCILE lists only the open ones', async () => {
+    const { net, channel } = page(wire)
+    const kept = channel(register().id)
+    const servers = Array.from({ length: 20 }, () => register())
+    const closes = servers.map((server) => closedWith(channel(server.id)))
+    await advance(500)
+    for (const server of servers) void server.close()
+    await advance(3_000)
+    expect(closes.every((closed) => closed.err === undefined)).toBe(true)
+    const connection = (kept as unknown as { _connection: { channels: Map<number, unknown> } })._connection
+    expect(connection.channels.size).toBe(1)
+    expect(servers.filter((server) => getChannelMux()['channels'].has(server.id))).toEqual([])
+    let listed: unknown[] = []
+    net.whenPageSends(TAG.RECONCILE, (frame) => {
+      listed = (decode(frame) as { payload: ReconcilePayload }).payload.open.map(({ id }) => id)
+    })
+    net.die()
+    await advance(5_000)
+    expect(listed).toEqual([kept.id])
+  })
+
+  test('a page whose last channel closed goes away with its wire once the server has all it sent, and reconnects for it before', async () => {
+    const { net, channel } = page(wire)
+    const server = register()
+    const pageChannel = channel(server.id)
+    const connection = (pageChannel as unknown as { _connection: { closed: boolean } })._connection
+    await advance(500)
+    void pageChannel.close()
+    await advance(1_500) // a ping round trip
+    let reconciles = 0
+    net.whenPageSends(TAG.RECONCILE, () => reconciles++)
+    net.die()
+    await advance(5_000)
+    expect(reconciles).toBe(0)
+    expect(connection.closed).toBe(true)
+
+    const again = page(wire)
+    const aborted = register()
+    const abortedClosed = closedWith(aborted)
+    const unconfirmed = again.channel(aborted.id)
+    await advance(500)
+    let reconciled = 0
+    again.net.whenPageSends(TAG.CLOSE, () => {
+      again.net.die()
+      again.net.whenPageSends(TAG.RECONCILE, () => reconciled++)
+    })
+    unconfirmed.abort() // its abort goes down with the wire
+    await advance(5_000)
+    expect(reconciled).toBe(1)
+    expect(abortedClosed.err).toBeUndefined()
+  })
+})
+
 test('on SSE batch POSTs, a close acknowledgement held behind an upgrade barrier that a dying wire never lets out reaches the server (#485)', async () => {
   const { net, channel } = page('sse-batch', { upgrade: true })
   const other = register<string, never>()
@@ -474,4 +536,19 @@ test('on SSE batch POSTs, a close acknowledgement held behind an upgrade barrier
   await advance(10_000)
   expect(serverClosed.err).toBeUndefined()
   expect(closing.value).toBe(0)
+})
+
+test('over ws, a page lets go of a closed channel whose close the server never got once nothing of it is left to replay', async () => {
+  const { net, channel } = page('ws')
+  const kept = channel(register().id)
+  const pageChannel = channel(register().id)
+  await advance(500)
+  net.losePageFrame(TAG.CLOSE)
+  const closing = settled(pageChannel.close({ timeout: 1_000 }))
+  await advance(5_000)
+  expect(closing.value).toBe(1)
+  const connection = (kept as unknown as { _connection: { channels: Map<number, unknown> } })._connection
+  expect(connection.channels.size).toBe(2) // the server may lack its close
+  await advance(65_000) // its replay's age passes
+  expect(connection.channels.size).toBe(1)
 })

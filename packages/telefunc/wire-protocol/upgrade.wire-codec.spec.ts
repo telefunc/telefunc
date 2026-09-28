@@ -187,6 +187,27 @@ describe('decodeClientFrame — hostile schemas', () => {
   })
 })
 
+describe('heartbeat', () => {
+  test("a PING names each channel the page ended with its seq, and a PONG answers each with the server's seq or none", () => {
+    const ended = [
+      { ix: 3, lastSeq: 7 },
+      { ix: 65_535, lastSeq: 2 ** 31 - 1 },
+    ]
+    expect(clientFrame(encode.ping(ended))).toEqual({ tag: TAG.PING, ended })
+    expect(clientFrame(encode.ping())).toEqual({ tag: TAG.PING, ended: [] })
+    const answers = [
+      { ix: 3, lastSeq: 5 },
+      { ix: 4, lastSeq: null },
+    ]
+    expect(decode(encode.pong(answers))).toEqual({ tag: TAG.PONG, ended: answers })
+  })
+
+  test('a PING whose payload splits an entry is a violation', () => {
+    const ragged = encode.ping([{ ix: 1, lastSeq: 1 }]).slice(0, 12)
+    expect(() => clientFrame(ragged)).toThrow(ProtocolViolationError)
+  })
+})
+
 describe('decodeClientFrame — direction', () => {
   const serverOnly: [string, Uint8Array<ArrayBuffer>][] = [
     ['PONG', encode.pong()],

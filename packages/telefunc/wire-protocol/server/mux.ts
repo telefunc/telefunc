@@ -33,6 +33,8 @@ import {
 import type {
   BarrierPayload,
   ChannelFrame,
+  PingEntry,
+  PongEntry,
   PreparePayload,
   ReconcileOpenEntry,
   ReconcilePayload,
@@ -110,7 +112,6 @@ const DETACH_REASON = {
 type DetachReason = (typeof DETACH_REASON)[keyof typeof DETACH_REASON]
 
 type ChannelHandle = { channel: ServerChannel; ix: number; peer: IndexedPeer }
-type SessionFinalizer = () => void
 
 /** An initial channel a RECONCILE on this wire named before the server registered it. The RECONCILED leaves it out,
  *  and an ATTACH_RESULT settles it. */
@@ -157,7 +158,8 @@ class ChannelMux {
    *  Fired synchronously from `registerChannel`. */
   private readonly pendingRegisterWaiters = new Map<string, Set<(channel: ServerChannel) => void>>()
   private readonly sessions = new SessionRegistry()
-  private readonly sessionFinalizers = new Map<string, SessionFinalizer>()
+  /** The wire each session is on: the last to reconcile it, until another reconciles it or the wire closes. */
+  private readonly sessionWires = new Map<string, Wire>()
   private readonly connectionEntries = new Map<unknown, ConnectionEntry>()
   /** Reverse index for transports with a stable connId (SSE). Lets data POSTs locate the
    *  live stream connection, and catches a duplicate-connId reconnect racing teardown. */
@@ -282,10 +284,9 @@ class ChannelMux {
     const stagedWs = this.stagedByPrevSession.get(sessionId)
     if (stagedWs !== undefined) this.abandonStage(stagedWs)
     // Channels survive a transient close (`_onPeerDisconnect`'s reconnectTimeout grace);
-    // permanent tears them down. The session-level finalizer is dropped on any close;
-    // reconcile rebuilds it on next attach.
+    // permanent tears them down.
     this.detachSession(sessionId, permanent ? DETACH_REASON.PERMANENT : DETACH_REASON.TRANSIENT)
-    this.sessionFinalizers.delete(sessionId)
+    if (this.sessionWires.get(sessionId) === connection) this.sessionWires.delete(sessionId)
   }
 
   readPermanentTermination(connection: Wire): boolean {
@@ -375,7 +376,7 @@ class ChannelMux {
     const frame = decodeClientFrame(rawFrame, WIRE_MAX_CONN_CTRL_FRAME_BYTES)
     if (frame.tag === TAG.PING) {
       this.resetPingTimer(connection)
-      this.send(connection, encode.pong())
+      this.send(connection, encode.pong(this.answerPing(entry, connection, frame.ended)))
       return null
     }
     assertProtocol(!entry.state.retiredByBarrier, 'frame on a wire retired by its barrier')
@@ -399,6 +400,16 @@ class ChannelMux {
     }
     this.dispatchChannelFrame(sessionId, channelFrame)
     return null
+  }
+
+  /** The page lists its closed channels the server attached, each with how far it has what the server sent on it. Each
+   *  is answered with how far the server has what the page sent on it, or that the server no longer holds it. Only the
+   *  wire its session is on answers: that session has each channel the page lists that the server holds. */
+  private answerPing(entry: ConnectionEntry, connection: Wire, ended: PingEntry[]): PongEntry[] {
+    assertProtocol(ended.length <= MAX_CHANNELS_PER_CONNECTION, 'PING over entry cap')
+    const sessionId = entry.transport.getSessionId(connection)
+    if (sessionId === undefined || this.sessionWires.get(sessionId) !== connection) return []
+    return ended.map(({ ix }) => ({ ix, lastSeq: this.sessions.get(sessionId, ix)?.channel._lastClientSeq ?? null }))
   }
 
   private dispatchChannelFrame(sessionId: string, frame: ChannelFrame): void {
@@ -546,7 +557,8 @@ class ChannelMux {
     isBarrier = false,
   ): Promise<ReconcileOutcome> {
     const { state, transport } = entry
-    const finalizeUpgrade = isBarrier && ctrl.sessionId ? (this.sessionFinalizers.get(ctrl.sessionId) ?? null) : null
+    const oldWire = isBarrier && ctrl.sessionId ? this.sessionWires.get(ctrl.sessionId) : undefined
+    const finalizeUpgrade = oldWire === undefined ? null : () => this.send(oldWire, encode.fin())
     this.resetPingTimer(connection)
     // One on the wire that holds the session it names keeps it, and so what is bound to it: a staged upgrade.
     const newSessionId =
@@ -554,6 +566,8 @@ class ChannelMux {
         ? ctrl.sessionId
         : crypto.randomUUID()
     const attached = this.reconcileSession(ctrl.sessionId, newSessionId, ctrl.open, entry, connection)
+    // Its wire no longer has the session it names, which is gone with the handles it had.
+    if (ctrl.sessionId) this.sessionWires.delete(ctrl.sessionId)
 
     // The connection may have closed since this frame arrived, so its RECONCILED never goes out.
     // Remove the session outright, one the client never received or its own, but preserve the
@@ -572,8 +586,7 @@ class ChannelMux {
     for (const [ix, awaited] of state.awaited)
       if (awaited.phase === 'expired' && !named.has(ix)) state.awaited.delete(ix)
 
-    if (ctrl.sessionId) this.sessionFinalizers.delete(ctrl.sessionId)
-    this.sessionFinalizers.set(newSessionId, () => this.send(connection, encode.fin()))
+    this.sessionWires.set(newSessionId, connection)
     transport.setSessionId(connection, newSessionId)
     return { sessionId: newSessionId, attached, finalizeUpgrade, deliverTo: connection }
   }

@@ -29,6 +29,8 @@ export type {
   ReconciledPayload,
   PreparePayload,
   ReadyPayload,
+  PingEntry,
+  PongEntry,
   WirePublishInfo,
 }
 
@@ -54,6 +56,8 @@ import type { ChannelTransports } from './constants.js'
 // Each side tracks the highest seq received and replays after reconnect via reconcile.
 
 const HEADER = 7
+const PING_ENTRY_BYTES = 6
+const PONG_ENTRY_BYTES = 7
 const payloadBytes = (frame: Uint8Array): number => frame.byteLength - HEADER
 const DATA_TAG_MIN = 0x10
 
@@ -66,7 +70,11 @@ const textDecoder = new TextDecoder()
 
 const TAG = {
   // ─── Connection-level control (no ix, no seq) ───
+  /** Client → server heartbeat. Payload: a `PingEntry` for each closed channel the page holds that the server
+   *  attached. */
   PING: 0x01 as const,
+  /** Server → client heartbeat. Payload: a `PongEntry` for each channel the PING names, if the page's session is on this
+   *  wire. */
   PONG: 0x02 as const,
   /** Server → client on old transport after upgrade drain: signals last frame on this transport. */
   FIN: 0x03 as const,
@@ -183,6 +191,12 @@ type ReadyPayload = {
   upgradeId: string
 }
 
+/** A closed channel of the page's: the last seq the page has of what the server sent on it. */
+type PingEntry = { ix: number; lastSeq: number }
+
+/** The last seq the server has of what the page sent on that channel, or null: the server no longer holds it. */
+type PongEntry = { ix: number; lastSeq: number | null }
+
 /** Per-channel acknowledgment: the server confirms each `ix` it attached and tells the
  *  client which `lastSeq` it has on file, so the client can replay frames after that. */
 type ReconciledPayload = {
@@ -266,8 +280,8 @@ type ChannelCtrlFrame =
 type ChannelFrame = ChannelDataFrame | ChannelCtrlFrame
 
 type ConnCtrlFrame =
-  | { tag: typeof TAG.PING }
-  | { tag: typeof TAG.PONG }
+  | { tag: typeof TAG.PING; ended: PingEntry[] }
+  | { tag: typeof TAG.PONG; ended: PongEntry[] }
   | { tag: typeof TAG.FIN }
   | { tag: typeof TAG.RECONCILE; payload: ReconcilePayload }
   | { tag: typeof TAG.BARRIER; payload: BarrierPayload }
@@ -290,11 +304,20 @@ function writeHeader(frame: Uint8Array, tag: number, index: number, seq: number)
   frame[6] = (seq >> 24) & 0xff
 }
 
+function writeU16(frame: Uint8Array, offset: number, n: number): void {
+  frame[offset] = n & 0xff
+  frame[offset + 1] = (n >> 8) & 0xff
+}
+
 function writeU32(frame: Uint8Array, offset: number, n: number): void {
   frame[offset] = n & 0xff
   frame[offset + 1] = (n >> 8) & 0xff
   frame[offset + 2] = (n >> 16) & 0xff
   frame[offset + 3] = (n >> 24) & 0xff
+}
+
+function readU16(buf: Uint8Array, offset: number): number {
+  return (buf[offset] as number) | ((buf[offset + 1] as number) << 8)
 }
 
 function readU32(buf: Uint8Array, offset: number): number {
@@ -367,8 +390,31 @@ const encode = {
   },
 
   // ── Connection-level ctrls ──
-  ping: () => encodeBareFrame(TAG.PING),
-  pong: () => encodeBareFrame(TAG.PONG),
+  /** Wire: [header]([u16 ix][u32 lastSeq])* */
+  ping(ended: PingEntry[] = []): Uint8Array<ArrayBuffer> {
+    const frame = new Uint8Array(HEADER + PING_ENTRY_BYTES * ended.length)
+    writeHeader(frame, TAG.PING, 0, 0)
+    let offset = HEADER
+    for (const { ix, lastSeq } of ended) {
+      writeU16(frame, offset, ix)
+      writeU32(frame, offset + 2, lastSeq)
+      offset += PING_ENTRY_BYTES
+    }
+    return frame
+  },
+  /** Wire: [header]([u16 ix][u8 held][u32 lastSeq])* */
+  pong(ended: PongEntry[] = []): Uint8Array<ArrayBuffer> {
+    const frame = new Uint8Array(HEADER + PONG_ENTRY_BYTES * ended.length)
+    writeHeader(frame, TAG.PONG, 0, 0)
+    let offset = HEADER
+    for (const { ix, lastSeq } of ended) {
+      writeU16(frame, offset, ix)
+      frame[offset + 2] = lastSeq === null ? 0 : 1
+      writeU32(frame, offset + 3, lastSeq ?? 0)
+      offset += PONG_ENTRY_BYTES
+    }
+    return frame
+  },
   fin: () => encodeBareFrame(TAG.FIN),
   reconcile: (payload: ReconcilePayload) => encodeJsonFrame(TAG.RECONCILE, payload),
   barrier: (payload: BarrierPayload) => encodeJsonFrame(TAG.BARRIER, payload),
@@ -511,10 +557,23 @@ function decode(frame: Uint8Array): DecodedFrame {
       return { tag: TAG.ACK_RES, index, seq, ackedSeq, status, text: textDecoder.decode(payload.subarray(5)) }
     }
 
-    case TAG.PING:
-      return { tag: TAG.PING }
-    case TAG.PONG:
-      return { tag: TAG.PONG }
+    case TAG.PING: {
+      assertProtocol(payload.length % PING_ENTRY_BYTES === 0, 'PING payload')
+      const ended: PingEntry[] = []
+      for (let offset = 0; offset < payload.length; offset += PING_ENTRY_BYTES)
+        ended.push({ ix: readU16(payload, offset), lastSeq: readU32(payload, offset + 2) })
+      return { tag: TAG.PING, ended }
+    }
+    case TAG.PONG: {
+      assertProtocol(payload.length % PONG_ENTRY_BYTES === 0, 'PONG payload')
+      const ended: PongEntry[] = []
+      for (let offset = 0; offset < payload.length; offset += PONG_ENTRY_BYTES)
+        ended.push({
+          ix: readU16(payload, offset),
+          lastSeq: payload[offset + 2] === 1 ? readU32(payload, offset + 3) : null,
+        })
+      return { tag: TAG.PONG, ended }
+    }
     case TAG.FIN:
       return { tag: TAG.FIN }
     // Client→server payloads are validated here, at the trust boundary; server→client ones are
