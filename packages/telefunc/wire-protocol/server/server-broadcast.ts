@@ -342,18 +342,17 @@ class RouteSubscription<Kind extends BroadcastKind> {
   }
 }
 
-/** The backend's receipt as the public ack, carrying its key like a subscriber's `info`. */
 function publishRoute<Kind extends BroadcastKind>(
   route: BroadcastRoute<Kind>,
   payload: BroadcastPayload<Kind>,
 ): ChannelPublishAck | Promise<ChannelPublishAck> {
-  const toAck = (r: PublishResult): ChannelPublishAck =>
-    Object.assign(makePublishInfo(route.key, r.seq, r.timestamp), {
-      meta: r.meta,
-      ...(r.receivers === undefined ? {} : { receivers: r.receivers }),
-    })
   const result = getBroadcastBackend().publish(route, payload)
-  return isPromise(result) ? result.then(toAck) : toAck(result)
+  return isPromise(result) ? result.then((receipt) => toAck(route.key, receipt)) : toAck(route.key, result)
+}
+
+/** The backend's receipt as the public ack, carrying its key like a subscriber's `info`. */
+function toAck(key: string, { seq, timestamp, meta, receivers }: PublishResult): ChannelPublishAck {
+  return receivers === undefined ? { key, seq, timestamp, meta } : { key, seq, timestamp, meta, receivers }
 }
 
 function assertBroadcastKey(key: unknown): void {
