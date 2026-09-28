@@ -43,6 +43,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
   }
   readonly key: string
 
+  /** Each kind's array is replaced, never mutated, so a delivery iterates the listeners it started with. */
   private readonly _subscribers: BroadcastListeners<T> = { text: [], binary: [] }
   private readonly _routes: { [Kind in BroadcastKind]: RouteSubscription<Kind> }
   private readonly _peerSubscriptions: Record<BroadcastKind, boolean> = { text: false, binary: false }
@@ -126,7 +127,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
     rawInfo: WirePublishInfo,
   ): boolean {
     const info = makePublishInfo(this.key, rawInfo.seq, rawInfo.timestamp)
-    for (const cb of [...listeners]) {
+    for (const cb of listeners) {
       try {
         const result = cb(data, info)
         if (isPromise(result)) void result.catch((error: unknown) => this._handleCallbackError(error))
@@ -153,13 +154,12 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
     kind: K,
     callback: BroadcastListeners<T>[K][number],
   ): BroadcastUnsubscribe {
-    const listeners = this._subscribers[kind] as Array<typeof callback>
     if (!this._isClosed) this._routes[kind].open()
-    listeners.push(callback)
+    this._subscribers[kind] = [...this._subscribers[kind], callback] as BroadcastListeners<T>[K]
     return () => {
-      const index = listeners.indexOf(callback)
+      const index = (this._subscribers[kind] as Array<typeof callback>).indexOf(callback)
       if (index < 0) return
-      listeners.splice(index, 1)
+      this._subscribers[kind] = this._subscribers[kind].filter((_, j) => j !== index) as BroadcastListeners<T>[K]
       this._syncSubscription(kind)
     }
   }

@@ -143,7 +143,8 @@ class SubscriptionManager<Source> {
 }
 
 class SubscriptionSlot {
-  private readonly _attachments = new Set<SlotAttachment>()
+  /** Replaced, never mutated, so a delivery iterates the attachments it started with. */
+  private _attachments = new Set<SlotAttachment>()
   private _attempt: SubscriptionAttempt | null = null
   private _unobserve: (() => void) | null = null
   private _readiness: Deferred<void> = createReadiness()
@@ -173,14 +174,16 @@ class SubscriptionSlot {
   attach(receiver: BackendReceiver<BackendPayload>): BackendSubscription {
     assert(this._stopPromise === null) // the manager unmaps a slot before stopping it
     const attachment = new SlotAttachment(this, receiver)
-    this._attachments.add(attachment)
+    this._attachments = new Set(this._attachments).add(attachment)
     if (this._attempt === null) this._start()
     return attachment
   }
 
   async detach(attachment: SlotAttachment): Promise<void> {
-    this._attachments.delete(attachment)
-    if (this._attachments.size > 0) return
+    const attachments = new Set(this._attachments)
+    attachments.delete(attachment)
+    this._attachments = attachments
+    if (attachments.size > 0) return
     this._config.unmap()
     await this.stop()
   }
@@ -208,7 +211,7 @@ class SubscriptionSlot {
           } catch (error) {
             return this._config.reportError(error)
           }
-          for (const attachment of [...this._attachments]) {
+          for (const attachment of this._attachments) {
             try {
               attachment.receiver(payload, info)
             } catch (error) {
@@ -265,7 +268,7 @@ class SubscriptionSlot {
   private _transition(state: SubscriptionState): void {
     if (this._state === state) return
     this._state = state
-    for (const attachment of [...this._attachments]) attachment.notify(state)
+    for (const attachment of this._attachments) attachment.notify(state)
   }
 
   /** Unobserves the attempt first: its closing on cleanup is no end. */
