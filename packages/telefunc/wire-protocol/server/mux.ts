@@ -786,12 +786,11 @@ class ChannelMux {
   // ── Per-connection plumbing (send, recv chain, ping) ────────────────
 
   /** Sole server→client send path; sync so wire order = call order. What a channel's sends and publishes queue on it
-   *  is bounded by the channel's credit (see `flow-control/`) and, past that, its bufferLimit. */
+   *  is bounded by the channel's credit (see `flow-control/`) and, past that, its bufferLimit. A frame for a wire that
+   *  closed is committed all the same: it replays as one a dying wire lost does. */
   private send(connection: Wire, frame: Uint8Array<ArrayBuffer>, onCommit?: () => void): void {
-    const entry = this.connectionEntries.get(connection)
-    if (!entry) return
     onCommit?.()
-    entry.transport.sendNow(connection, frame)
+    this.connectionEntries.get(connection)?.transport.sendNow(connection, frame)
   }
 
   /** A wire that's gone holds nothing. */

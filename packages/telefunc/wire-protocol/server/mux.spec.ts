@@ -207,6 +207,34 @@ test("what a channel sends once its reconnect's wire dropped while awaiting a lo
   expect(texts(live).some((text) => text.includes('in-the-hold'))).toBe(true)
 })
 
+test("what a reconnect's RECONCILE sends a channel's page, run once its wire closed, replays on the next", async () => {
+  const mux = new ChannelMux()
+  const clock = new ServerChannel<string, string>({ id: 'clock-queued' })
+  mux.registerChannel(clock)
+  const { sessions, open, texts } = wires(mux)
+  const first = open()
+  await mux.onConnectionRawMessage(
+    first,
+    encode.reconcile({ open: [{ id: 'clock-queued', ix: 0, lastSeq: 0, initial: true }] }),
+  )
+  const known = sessions.get(first)!
+  mux.onConnectionClosed(first, { permanent: false })
+  void clock.send('while-away') // queued for the page's return
+  const lost = open()
+  const reconciling = mux.onConnectionRawMessage(
+    lost,
+    encode.reconcile({ sessionId: known, open: [{ id: 'clock-queued', ix: 0, lastSeq: 0 }] }),
+  )
+  mux.onConnectionClosed(lost, { permanent: false }) // before its RECONCILE ran
+  await reconciling
+  const live = open()
+  await mux.onConnectionRawMessage(
+    live,
+    encode.reconcile({ sessionId: known, open: [{ id: 'clock-queued', ix: 0, lastSeq: 0 }] }),
+  )
+  expect(texts(live).some((text) => text.includes('while-away'))).toBe(true)
+})
+
 test("a burst of a channel's full message window, with the refresh and probe a page sends among it, is processed", async () => {
   const wire = await attachedWire()
   const frames = Array.from({ length: CREDIT_MSG_WINDOW_MAX }, (_, i) => encode.text(0, '1', i + 1))
