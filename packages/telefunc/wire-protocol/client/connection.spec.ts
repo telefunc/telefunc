@@ -195,6 +195,20 @@ test('the channel cap counts the open channels, not every channel the connection
   connection.dispose()
 })
 
+test('a closed channel counts against neither the channel cap nor, when a new one needs its place, what a RECONCILE lists', () => {
+  const options = stalledOptions()
+  const closing = createChannel()
+  const connection = ClientConnection.getOrCreate('http://cap-closed.test', closing as never, options) as any
+  for (let open = 1; open < MAX_CHANNELS_PER_CONNECTION; open++)
+    ClientConnection.getOrCreate('http://cap-closed.test', createChannel() as never, options)
+  connection.sendAbort(closing) // its abort waits for the wire
+  connection.unregister(closing)
+  expect(ClientConnection.getOrCreate('http://cap-closed.test', createChannel() as never, options)).toBe(connection)
+  expect(connection.channels.size).toBe(MAX_CHANNELS_PER_CONNECTION)
+  expect(connection.channels.has(0)).toBe(false)
+  connection.dispose()
+})
+
 test('a connection out of wire indexes hands a new channel to a fresh connection, which its dispose leaves cached', () => {
   const options = stalledOptions()
   const spent = ClientConnection.getOrCreate('http://rotate.test', createChannel() as never, options) as any
@@ -240,33 +254,25 @@ test("a frame buffered before the first reconcile is stored under the server's r
   connection.dispose()
 })
 
-test('a reconnect re-attaches a channel still closing, so its close request can go out again', () => {
-  const channel = createChannel()
-  const connection = ClientConnection.getOrCreate('http://closing.test', channel as never, stalledOptions()) as any
-  connection.buildReconcileFrame()
-  channel.isClosed = true
-  const outcome = connection.applyReconciled(reconciled({ sessionId: 'closing', open: [{ ix: 0, lastSeq: 0 }] }), null)
-  expect(outcome.channelsToOpen).toEqual([channel])
-  connection.dispose()
-})
-
-test("a channel released while its reconnect's reconcile is in flight is left out of a follow-up reconcile, which ends it on the server", () => {
+test("a channel whose close timed out while its reconnect's reconcile is in flight sends its close request after that RECONCILED, which ends it on the server", () => {
   const channel = createChannel()
   const connection = ClientConnection.getOrCreate(
-    'http://released-meanwhile.test',
+    'http://closed-meanwhile.test',
     channel as never,
     stalledOptions(),
   ) as any
   connection.buildReconcileFrame()
   connection.applyReconciled(reconciled({ sessionId: 'meanwhile', open: [{ ix: 0, lastSeq: 0 }] }), null)
+  const replay = connection.replayBuffers.get(0)
+  replay.push(replay.nextSeq(), encode.close(0, 5_000, 1)) // its close request, lost with the dead wire
   connection.buildReconcileFrame() // the reconnect's, listing the channel
-  connection.unregister(channel) // its close timed out, its request lost with the dead wire
+  connection.unregister(channel) // its close timed out
   const { frames } = connection.applyReconciled(
     reconciled({ sessionId: 'meanwhile', open: [{ ix: 0, lastSeq: 0 }] }),
     null,
   )
-  const reconciles = frames.map(({ frame }: { frame: Uint8Array<ArrayBuffer> }) => decode(frame))
-  expect(reconciles).toMatchObject([{ tag: TAG.RECONCILE, payload: { sessionId: 'meanwhile', open: [] } }])
+  const sent = frames.map(({ frame }: { frame: Uint8Array<ArrayBuffer> }) => decode(frame))
+  expect(sent).toMatchObject([{ tag: TAG.CLOSE, index: 0, seq: 1 }])
   connection.dispose()
 })
 
@@ -293,26 +299,34 @@ test('a channel closed during a reconnect sends what the dead wire lost before w
   expect(sent.map((frame: { tag: number; seq?: number }) => [frame.tag, frame.seq])).toEqual([
     [TAG.TEXT, 1],
     [TAG.TEXT, 2],
-    [TAG.CLOSE, undefined],
+    [TAG.CLOSE, 3],
   ])
   connection.dispose()
 })
 
-test('a channel whose abort went out with a reconcile on a wire that then died is left out of the next reconcile, though its listener answered after', () => {
+test('a channel whose abort went out with a reconcile on a wire that then died sends it again after the next RECONCILED, not what its listener answered after', () => {
   const closing = createChannel()
   const options = stalledOptions()
-  const connection = ClientConnection.getOrCreate('http://draining-lost.test', closing as never, options) as any
+  const connection = ClientConnection.getOrCreate('http://abort-lost.test', closing as never, options) as any
   connection.buildReconcileFrame()
   connection.applyReconciled(reconciled({ sessionId: 'lost', open: [{ ix: 0, lastSeq: 0 }] }), null)
-  ClientConnection.getOrCreate('http://draining-lost.test', createChannel() as never, options) // a call's callback
+  ClientConnection.getOrCreate('http://abort-lost.test', createChannel() as never, options) // a call's callback
   connection.buildReconcileFrame() // its registration: sends wait for the RECONCILED
   connection.sendAbort(closing)
   connection.unregister(closing)
   connection.stageReconcileBatch() // the abort leaves with the registration's reconcile
   connection.sendAckRes(closing, 1, '"answer"') // its async listener answers a server send({ ack: true }) after that
   connection.handleTransportLoss(new Error('the wire died'))
-  const reconcile = decode(connection.buildReconcileFrame().frame) as { payload: { open: { ix: number }[] } }
-  expect(reconcile.payload.open.map((entry) => entry.ix)).toEqual([1])
+  connection.buildReconcileFrame()
+  const open = [
+    { ix: 0, lastSeq: 0 },
+    { ix: 1, lastSeq: 0 },
+  ]
+  const { frames } = connection.applyReconciled(reconciled({ sessionId: 'lost', open }), null)
+  const sent = frames.map(({ frame }: { frame: Uint8Array<ArrayBuffer> }) => decode(frame))
+  expect(sent.filter((frame: { index?: number }) => frame.index === 0)).toMatchObject([
+    { tag: TAG.CLOSE, seq: 1, timeoutMs: 0 },
+  ])
   connection.dispose()
 })
 
@@ -350,37 +364,51 @@ function closeLostWithWire(url: string) {
     }),
     null,
   )
-  connection.handleTransportLoss(new Error('the wire died')) // the close request was written to it
+  const replay = connection.replayBuffers.get(0)
+  replay.push(replay.nextSeq(), encode.close(0, 5_000, 1)) // the close request, written to it
+  connection.handleTransportLoss(new Error('the wire died'))
   return { connection, closing }
 }
 
-test('a channel whose close request went down with the wire is left out of the reconnect once its close timed out, though its listener answered after the loss', () => {
+test('a channel whose close request went down with the wire stays in the reconnect once its close timed out, which sends the request, then what its listener answered after the loss', () => {
   const { connection, closing } = closeLostWithWire('http://close-lost.test')
   connection.sendAckRes(closing, 1, '"answer"') // its async listener answers a server send({ ack: true })
-  connection.unregister(closing, undefined, { closeTimedOut: true })
+  connection.unregister(closing) // its close times out
   const reconcile = decode(connection.buildReconcileFrame().frame) as { payload: { open: { ix: number }[] } }
-  expect(reconcile.payload.open.map((entry) => entry.ix)).toEqual([1])
-  connection.dispose()
-})
-
-test('such a channel, released while the reconnect listing it is in flight, is left out of a follow-up reconcile', () => {
-  const { connection, closing } = closeLostWithWire('http://close-lost-in-flight.test')
-  connection.buildReconcileFrame() // the attempt's, built when it starts, listing both
-  connection.sendAckRes(closing, 1, '"answer"')
-  connection.unregister(closing, undefined, { closeTimedOut: true })
+  expect(reconcile.payload.open.map((entry) => entry.ix)).toEqual([0, 1])
   const open = [
     { ix: 0, lastSeq: 0 },
     { ix: 1, lastSeq: 0 },
   ]
   const { frames } = connection.applyReconciled(reconciled({ sessionId: 'close-lost', open }), null)
-  const reconciles = frames
-    .map(({ frame }: { frame: Uint8Array<ArrayBuffer> }) => decode(frame))
-    .filter((frame: { tag: number }) => frame.tag === TAG.RECONCILE)
-  expect(reconciles.map((frame: any) => frame.payload.open.map((entry: { ix: number }) => entry.ix))).toEqual([[1]])
+  const sent = frames.map(({ frame }: { frame: Uint8Array<ArrayBuffer> }) => decode(frame))
+  expect(sent.filter((frame: { index?: number }) => frame.index === 0)).toMatchObject([
+    { tag: TAG.CLOSE, seq: 1 },
+    { tag: TAG.ACK_RES, seq: 2 },
+  ])
   connection.dispose()
 })
 
-test('a channel whose close timed out while the reconnect listing it is in flight sends nothing more, not its reply without the message the dead wire lost before it', () => {
+test('such a channel, closed while the reconnect listing it is in flight, sends the request, then the answer, after its RECONCILED, which needs no follow-up', () => {
+  const { connection, closing } = closeLostWithWire('http://close-lost-in-flight.test')
+  connection.buildReconcileFrame() // the attempt's, built when it starts, listing both
+  connection.sendAckRes(closing, 1, '"answer"')
+  connection.unregister(closing)
+  const open = [
+    { ix: 0, lastSeq: 0 },
+    { ix: 1, lastSeq: 0 },
+  ]
+  const { frames } = connection.applyReconciled(reconciled({ sessionId: 'close-lost', open }), null)
+  const sent = frames.map(({ frame }: { frame: Uint8Array<ArrayBuffer> }) => decode(frame))
+  expect(sent.filter((frame: { tag: number }) => frame.tag === TAG.RECONCILE)).toEqual([])
+  expect(sent.filter((frame: { index?: number }) => frame.index === 0)).toMatchObject([
+    { tag: TAG.CLOSE, seq: 1 },
+    { tag: TAG.ACK_RES, seq: 2 },
+  ])
+  connection.dispose()
+})
+
+test('a channel whose close timed out while the reconnect listing it is in flight sends its reply after the message the dead wire lost before it', () => {
   const closing = createChannel()
   const options = stalledOptions()
   const connection = ClientConnection.getOrCreate('http://gap.test', closing as never, options) as any
@@ -393,13 +421,18 @@ test('a channel whose close timed out while the reconnect listing it is in fligh
   connection.applyReconciled(reconciled({ sessionId: 'gap', open }), null)
   const replay = connection.replayBuffers.get(0)
   replay.push(replay.nextSeq(), encode.text(0, '"m4"', 1)) // sent into a wire that is dead, not yet noticed
-  connection.handleTransportLoss(new Error('the wire died')) // its close request went down with it too
+  replay.push(replay.nextSeq(), encode.close(0, 5_000, 2)) // its close request went down with it too
+  connection.handleTransportLoss(new Error('the wire died'))
   connection.buildReconcileFrame() // the SSE attempt's, built when it starts, listing both
   connection.sendAckRes(closing, 1, '"answer"') // its async listener answers a server send({ ack: true })
-  connection.unregister(closing, undefined, { closeTimedOut: true }) // its close times out while the attempt is held
+  connection.unregister(closing) // its close times out while the attempt is held
   const { frames } = connection.applyReconciled(reconciled({ sessionId: 'gap', open }), null)
   const sent = frames.map(({ frame }: { frame: Uint8Array<ArrayBuffer> }) => decode(frame))
-  expect(sent.filter((frame: { index?: number }) => frame.index === 0)).toEqual([])
+  expect(sent.filter((frame: { index?: number }) => frame.index === 0)).toMatchObject([
+    { tag: TAG.TEXT, seq: 1 },
+    { tag: TAG.CLOSE, seq: 2 },
+    { tag: TAG.ACK_RES, seq: 3 },
+  ])
   connection.dispose()
 })
 

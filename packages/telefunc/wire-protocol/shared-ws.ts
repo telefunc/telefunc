@@ -41,13 +41,13 @@ import type { ChannelTransports } from './constants.js'
 //
 // `tag` discriminates the frame variant (data, connection ctrl, per-channel ctrl).
 // `index` is the channel ix for per-channel frames; 0 for connection-level frames.
-// `seq` is the replay sequence number for sequenced data frames; `SENT` carries the last one its totals cover, other
-// ctrl frames 0.
+// `seq` is the replay sequence number of a sequenced frame: a data frame, or a page's CLOSE or CLOSE_ACK. `SENT` carries
+// the last one its totals cover, other ctrl frames 0.
 //
 // Tag layout — sparse ranges so range checks classify:
 //   0x01–0x09  connection-level control (no ix, no seq)
 //   0x10–0x29  data plane (carries seq, payload varies)
-//   0x30–      per-channel control (carries ix; seq 0 except on `SENT`)
+//   0x30–      per-channel control (carries ix; seq 0 except on `SENT` and a page's CLOSE and CLOSE_ACK)
 //
 // Channel indices are client-owned and stable for the channel's lifetime.
 // Sequence numbers are sender-assigned for replayable data frames in both directions.
@@ -101,8 +101,10 @@ const TAG = {
   /** Replayable keyed binary publish frame that requests an acknowledgement receipt. */
   PUBLISH_BINARY_ACK_REQ: 0x18 as const,
 
-  // ─── Per-channel control (carries ix, no seq) ───
+  // ─── Per-channel control (carries ix) ───
+  /** A close request, or a page's abort (timeout 0). The page's is sequenced, so it replays like its data. */
   CLOSE: 0x30 as const,
+  /** The page's is sequenced, as its CLOSE is. */
   CLOSE_ACK: 0x31 as const,
   /** Server → client: channel closed with an abort value (analogous to `throw Abort()`). */
   ABORT: 0x32 as const,
@@ -246,8 +248,8 @@ type ChannelDataFrame =
   | { tag: typeof TAG.PUBLISH_BINARY_ACK_REQ; index: number; seq: number; data: Uint8Array }
 
 type ChannelCtrlFrame =
-  | { tag: typeof TAG.CLOSE; index: number; timeoutMs: number }
-  | { tag: typeof TAG.CLOSE_ACK; index: number }
+  | { tag: typeof TAG.CLOSE; index: number; seq: number; timeoutMs: number }
+  | { tag: typeof TAG.CLOSE_ACK; index: number; seq: number }
   | { tag: typeof TAG.ABORT; index: number; abortValue: string }
   | { tag: typeof TAG.ERROR; index: number; reason: number }
   | { tag: typeof TAG.WINDOW; index: number; bytes: number }
@@ -376,13 +378,17 @@ const encode = {
   ready: (payload: ReadyPayload) => encodeJsonFrame(TAG.READY, payload),
 
   // ── Per-channel ctrls ──
-  close(index: number, timeoutMs: number): Uint8Array<ArrayBuffer> {
+  close(index: number, timeoutMs: number, seq = 0): Uint8Array<ArrayBuffer> {
     const frame = new Uint8Array(HEADER + 4)
-    writeHeader(frame, TAG.CLOSE, index, 0)
+    writeHeader(frame, TAG.CLOSE, index, seq)
     writeU32(frame, HEADER, timeoutMs)
     return frame
   },
-  closeAck: (index: number) => encodeBareFrame(TAG.CLOSE_ACK, index),
+  closeAck(index: number, seq = 0): Uint8Array<ArrayBuffer> {
+    const frame = new Uint8Array(HEADER)
+    writeHeader(frame, TAG.CLOSE_ACK, index, seq)
+    return frame
+  },
   abort(index: number, abortValue: string): Uint8Array<ArrayBuffer> {
     const payload = textEncoder.encode(abortValue)
     const frame = new Uint8Array(HEADER + payload.byteLength)
@@ -528,9 +534,9 @@ function decode(frame: Uint8Array): DecodedFrame {
 
     case TAG.CLOSE:
       assertProtocol(payload.length >= 4, 'CLOSE payload too short')
-      return { tag: TAG.CLOSE, index, timeoutMs: readU32(payload, 0) }
+      return { tag: TAG.CLOSE, index, seq, timeoutMs: readU32(payload, 0) }
     case TAG.CLOSE_ACK:
-      return { tag: TAG.CLOSE_ACK, index }
+      return { tag: TAG.CLOSE_ACK, index, seq }
     case TAG.ABORT:
       return { tag: TAG.ABORT, index, abortValue: textDecoder.decode(payload) }
     case TAG.ERROR:

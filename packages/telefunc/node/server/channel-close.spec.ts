@@ -1,7 +1,8 @@
 import { describe, expect, test } from 'vitest'
 
 import { ReplayBuffer } from '../../wire-protocol/replay-buffer.js'
-import { ACK_STATUS, ProtocolViolationError, TAG, decode } from '../../wire-protocol/shared-ws.js'
+import { ACK_STATUS, ProtocolViolationError, TAG, decode, encode } from '../../wire-protocol/shared-ws.js'
+import type { ChannelFrame } from '../../wire-protocol/shared-ws.js'
 import { IndexedPeer } from '../../wire-protocol/server/IndexedPeer.js'
 import { ServerChannel } from '../../wire-protocol/server/channel.js'
 
@@ -391,4 +392,27 @@ describe('cross-close', () => {
     await expect(closePromise).resolves.toBe(1)
     expect(channel._didShutdown).toBe(true)
   })
+})
+
+describe("a page's closing frames", () => {
+  test.each([
+    ['CLOSE', encode.close(7, 1_000, 2)],
+    ['CLOSE_ACK', encode.closeAck(7, 2)],
+  ])(
+    'a %s counts toward the lastSeq a RECONCILED reports, as data does, and one delivered twice is handled once',
+    (_tag, raw) => {
+      const channel = new ServerChannel<number, string>({ ack: true })
+      const frames: Uint8Array[] = []
+      channel._attachPeer(createPeer(frames))
+      void channel.send('question', { ack: true }).catch(() => {}) // the close waits for its answer
+      if (raw[0] === TAG.CLOSE_ACK) void channel.close({ timeout: 1_000 })
+      channel._dispatchFrame(decode(encode.text(7, '1', 1)) as ChannelFrame)
+      const frame = decode(raw) as ChannelFrame
+      channel._dispatchFrame(frame)
+      channel._dispatchFrame(frame)
+      expect(channel._lastClientSeq).toBe(2)
+      expect(frames.filter((frame) => frame[0] === TAG.CLOSE_ACK)).toHaveLength(raw[0] === TAG.CLOSE ? 1 : 0)
+      channel.abort()
+    },
+  )
 })

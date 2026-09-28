@@ -28,13 +28,6 @@ function stalledChannel(): ClientChannel<never, string> {
   return channel
 }
 
-test('a close that times out tells the connection, which then holds the channel only for its closing frame', async () => {
-  const channel = stalledChannel()
-  const unregister = vi.spyOn((channel as any)._connection, 'unregister')
-  expect(await channel.close({ timeout: 10 })).toBe(1)
-  expect(unregister).toHaveBeenCalledWith(channel, expect.any(Error), { closeTimedOut: true })
-})
-
 test("a channel listener that stops listening itself doesn't make the next one miss the message", () => {
   const channel = stalledChannel()
   const seen: string[] = []
@@ -69,14 +62,6 @@ test('a channel made before the page has a session token names one, which the ca
   await vi.waitFor(() => expect(requested).not.toEqual([]))
   const session = new URL(requested[0]!).searchParams.get('session')
   expect(getSessionUrl(telefuncUrl)).toBe(`${telefuncUrl}?session=${session}`)
-})
-
-test('a close request goes out again when its channel re-attaches before the close is acknowledged', () => {
-  const channel = stalledChannel()
-  const sendCloseRequest = vi.spyOn((channel as any)._connection, 'sendCloseRequest')
-  void channel.close({ timeout: 5_000 })
-  channel._onTransportOpen(false, 1) // the reconcile of a reconnect: the first request may have died with the old wire
-  expect(sendCloseRequest).toHaveBeenCalledTimes(2)
 })
 
 test('a close the server acknowledged ends gracefully, though a reconnect then drops the channel', async () => {

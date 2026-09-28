@@ -233,7 +233,7 @@ test("a server close that reaches the page before its upload request settles get
   server.refuseUpload()
   await delay(100)
   expect(acked).toEqual([server.ix])
-  expect((channel as any)._connection.channels.size).toBe(0) // released once its acknowledgement went out
+  expect((channel as any)._connection.ttl).not.toBe(null) // nothing holds the connection once its acknowledgement went out
 })
 
 test("a page's last channel gets its close acknowledgement out on SSE batch POSTs, though its idle timeout is 0", async () => {

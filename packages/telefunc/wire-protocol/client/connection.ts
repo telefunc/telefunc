@@ -4,7 +4,7 @@ export type { MuxChannel, MuxConnection }
 import { parse } from '@brillout/json-serializer/parse'
 import { makeAbortError, makeBugError } from '../../client/remoteTelefunctionCall/errors.js'
 import { assert, assertUsage } from '../../utils/assert.js'
-import { ChannelClosedError, ChannelOverflowError } from '../channel-errors.js'
+import { ChannelOverflowError } from '../channel-errors.js'
 import { NetworkError } from '../../shared/NetworkError.js'
 import { base64urlToUint8Array } from '../base64url.js'
 import {
@@ -171,7 +171,7 @@ interface MuxConnection {
   sendBdpPingAck(channel: MuxChannel): void
   sendBroadcastSubscribe(channel: MuxChannel, binary: boolean): void
   sendBroadcastUnsubscribe(channel: MuxChannel, binary: boolean): void
-  unregister(channel: MuxChannel, err?: Error, options?: { closeTimedOut: boolean }): void
+  unregister(channel: MuxChannel): void
   reconnectWindow(): number
 }
 
@@ -294,24 +294,15 @@ type BufferedWireFrame = { frame: DecodedFrame; byteLength: number }
  *  are largely non-recoverable (seq-less terminal ctrls) while new-wire frames all replay. */
 type UpgradeBuffer = { old: BufferedWireFrame[]; new: BufferedWireFrame[] }
 
-function isClosingFrame(frame: Uint8Array): boolean {
-  return frame[0] === TAG.CLOSE || frame[0] === TAG.CLOSE_ACK
-}
-
 /** FIN (old wire) and RECONCILED (new wire) are the join's two limbs; everything else is payload. */
 function isJoinLimb(frame: DecodedFrame): boolean {
   return frame.tag === TAG.FIN || frame.tag === TAG.RECONCILED
 }
 
-/** Per-channel lifecycle. `releasing` = unregistered before the server confirmed —
- *  entry stays so the upcoming RECONCILE carries the ix and buffered ABORT/CLOSE flow alongside.
- *  `draining` = unregistered while frames it queued wait: listed until they are sent, since a RECONCILE or barrier
- *  leaving it out tells the server it's gone, before its CLOSE_ACK or abort arrives. */
-type ChannelState =
-  | { tag: 'pending'; initial: boolean }
-  | { tag: 'open' }
-  | { tag: 'releasing'; initial: boolean; err: Error }
-  | { tag: 'draining' }
+/** Per-channel lifecycle. `closed` = unregistered, its closing frame sent or queued: it stays listed, and what it sent
+ *  replays, until the server has it all or no longer has the channel, since a RECONCILE leaving it out ends it there.
+ *  `initial` is the pending one's: the server may not have registered it. */
+type ChannelState = { tag: 'pending'; initial: boolean } | { tag: 'open' } | { tag: 'closed'; initial: boolean }
 
 type ChannelEntry = {
   channel: MuxChannel
@@ -527,16 +518,10 @@ class ClientConnection implements MuxConnection {
     entry.state = { tag: 'open' }
   }
 
-  private enterChannelReleasing(ix: number, err: Error): void {
+  private enterChannelClosed(ix: number): void {
     const entry = this.channels.get(ix)
-    assert(entry && entry.state.tag === 'pending')
-    entry.state = { tag: 'releasing', initial: entry.state.initial, err }
-  }
-
-  private enterChannelDraining(ix: number): void {
-    const entry = this.channels.get(ix)
-    assert(entry && entry.state.tag === 'open')
-    entry.state = { tag: 'draining' }
+    assert(entry && entry.state.tag !== 'closed')
+    entry.state = { tag: 'closed', initial: entry.state.tag === 'pending' && entry.state.initial }
   }
 
   private register(channel: MuxChannel): void {
@@ -545,9 +530,14 @@ class ClientConnection implements MuxConnection {
       this.ttl = null
     }
     assertUsage(
-      this.channels.size < MAX_CHANNELS_PER_CONNECTION,
+      this.openChannelCount() < MAX_CHANNELS_PER_CONNECTION,
       `Too many channels on one connection (${MAX_CHANNELS_PER_CONNECTION} max) — open another with \`connectionKey\``,
     )
+    // Every RECONCILE lists every channel, the closed ones too, so the oldest closed one makes way.
+    if (this.channels.size === MAX_CHANNELS_PER_CONNECTION) {
+      const [ix, entry] = [...this.channels].find(([, entry]) => entry.state.tag === 'closed')!
+      this.releaseChannel(ix, entry.channel)
+    }
     const ix = this.nextIndex++
     this.enterChannelPending(ix, channel, true)
     this.replayBuffers.set(
@@ -594,14 +584,6 @@ class ClientConnection implements MuxConnection {
     if (this.state.tag !== 'open' || this.state.upgrade.tag === 'committing' || this.upgradeReady) return
     if (this.reconciling) return
     this.sendReconcileBatch(this.stageReconcileBatch())
-    this.releaseUnconfirmedReleasing()
-  }
-
-  /** Cancel without sending — wire is dying. Drops releasing entries so they don't
-   *  leak onto the post-reconnect RECONCILE. */
-  private cancelPendingRegisterReconcile(): void {
-    this.cancelRegisterReconcileTimer()
-    this.releaseUnconfirmedReleasing()
   }
 
   private cancelRegisterReconcileTimer(): void {
@@ -610,37 +592,12 @@ class ClientConnection implements MuxConnection {
     this.registerReconcileTimer = null
   }
 
-  private releaseUnconfirmedReleasing(): void {
-    let droppedAny = false
-    for (const [ix, entry] of this.channels) {
-      if (entry.state.tag === 'releasing' && entry.state.initial) {
-        this.releaseChannel(ix, entry.channel)
-        droppedAny = true
-      }
-    }
-    if (droppedAny) this.startTtlIfIdle()
-  }
-
-  unregister(channel: MuxChannel, err = new ChannelClosedError(), { closeTimedOut = false } = {}): void {
+  /** The channel sends nothing more. */
+  unregister(channel: MuxChannel): void {
     const ix = this.channelIndex.get(channel)
     if (ix === undefined) return
-    const entry = this.channels.get(ix)!
-    if (entry.state.tag === 'pending') {
-      this.enterChannelReleasing(ix, err)
-      return
-    }
-    // It stays listed while what it queued waits. After a close that timed out, nothing confirmed the server has its
-    // end, so only a closing frame keeps it.
-    if (
-      entry.state.tag === 'open' &&
-      this.sendBuffer.some(({ channelIx, frame }) => channelIx === ix && (!closeTimedOut || isClosingFrame(frame)))
-    ) {
-      this.enterChannelDraining(ix)
-      return
-    }
-    // Its queued frames go with its replay; a reconcile already listing it would otherwise send them without it.
-    this.sendBuffer = this.sendBuffer.filter(({ channelIx }) => channelIx !== ix)
-    this.releaseChannel(ix, channel)
+    this.channelIndex.delete(channel)
+    this.enterChannelClosed(ix)
     this.startTtlIfIdle()
   }
 
@@ -728,35 +685,32 @@ class ClientConnection implements MuxConnection {
   }
 
   sendAbort(channel: MuxChannel): void {
-    const ix = this.channelIndex.get(channel)
-    if (ix === undefined) return
-    const frame = encode.close(ix, 0)
-    if (!this.canSendImmediately(ix)) {
-      this.sendBuffer.push({ frame, channelIx: ix, seq: undefined })
-      return
-    }
-    this.transport.sendFrame({ kind: 'control', frame })
+    this.sendClosingFrame(channel, (ix, seq) => encode.close(ix, 0, seq))
   }
 
   sendCloseRequest(channel: MuxChannel, timeoutMs: number): void {
-    const ix = this.channelIndex.get(channel)
-    if (ix === undefined) return
-    const frame = encode.close(ix, timeoutMs)
-    if (!this.canSendImmediately(ix)) {
-      this.sendBuffer.push({ frame, channelIx: ix, seq: undefined })
-      return
-    }
-    this.transport.sendFrame({ kind: 'control', frame })
+    this.sendClosingFrame(channel, (ix, seq) => encode.close(ix, timeoutMs, seq))
   }
 
   sendCloseAck(channel: MuxChannel): void {
+    this.sendClosingFrame(channel, (ix, seq) => encode.closeAck(ix, seq))
+  }
+
+  /** Sequenced as data is, so a closing frame a dead wire lost replays. */
+  private sendClosingFrame(
+    channel: MuxChannel,
+    buildFrame: (ix: number, seq: number) => Uint8Array<ArrayBuffer>,
+  ): void {
     const ix = this.channelIndex.get(channel)
     if (ix === undefined) return
-    const frame = encode.closeAck(ix)
+    const replay = this.replayBuffers.get(ix)!
+    const seq = replay.nextSeq()
+    const frame = buildFrame(ix, seq)
     if (!this.canSendImmediately(ix)) {
-      this.sendBuffer.push({ frame, channelIx: ix, seq: undefined })
+      this.sendBuffer.push({ frame, channelIx: ix, seq })
       return
     }
+    replay.pushClosing(seq, frame)
     this.transport.sendFrame({ kind: 'control', frame })
   }
 
@@ -892,9 +846,8 @@ class ClientConnection implements MuxConnection {
     // here is per-channel and carries `index`.
     const channelFrame = frame as ChannelFrame
     const entry = this.channels.get(channelFrame.index)
-    // A releasing or draining channel has closed: it stays listed only for what it still has to tell the server.
-    if (entry && entry.state.tag !== 'releasing' && entry.state.tag !== 'draining')
-      entry.channel._dispatchFrame(channelFrame)
+    // A closed channel stays listed only for what it still has to tell the server.
+    if (entry && entry.state.tag !== 'closed') entry.channel._dispatchFrame(channelFrame)
   }
 
   /** Every frame arriving mid-handoff lands here — the one charge site. Before the flip the probe
@@ -1010,8 +963,6 @@ class ClientConnection implements MuxConnection {
     for (const entry of buffer.old) this.dispatchFrame(entry.frame)
     this.releaseDeferredOmitted(deferredOmitted)
     for (const entry of buffer.new) this.dispatchFrame(entry.frame)
-    // Before the RECONCILE: one it names that the page released meanwhile keeps its queued abort or close until the
-    // RECONCILED, whatever the transport carries with it.
     this.pruneSendBufferForReleasedChannels()
     this.flushPendingRegisterReconcile()
     this.startTtlIfIdle()
@@ -1267,7 +1218,6 @@ class ClientConnection implements MuxConnection {
   private drainBufferedFramesToWire(): void {
     for (const frame of this.drainBufferedFrames(this.sendableChannels(), this.awaitedIxes))
       this.transport.sendFrame(frame)
-    for (const [ix, entry] of this.channels) if (entry.state.tag === 'draining') this.releaseChannel(ix, entry.channel)
     this.startTtlIfIdle()
   }
 
@@ -1281,23 +1231,13 @@ class ClientConnection implements MuxConnection {
     // The server stops awaiting channels when their wire goes; the next wire's RECONCILE lists them again.
     this.awaitedIxes.clear()
     this.earlyAttachResults.clear()
-    // The wire is dying — cancel the queued RECONCILE (no point sending) and release
-    // unconfirmed-releasing entries so they don't leak onto the post-reconnect RECONCILE.
-    this.cancelPendingRegisterReconcile()
+    // The wire is dying: the queued RECONCILE isn't sent, the reconnect's lists every channel.
+    this.cancelRegisterReconcileTimer()
     this.exitReconciling()
     this.reconcileIxes.clear()
     if (this.ttl) {
       clearTimeout(this.ttl)
       this.ttl = null
-    }
-    // A draining channel whose abort or close acknowledgement went down with this wire is left out of the next
-    // RECONCILE, which tells the server it's gone; what it queued after that frame goes with it.
-    for (const [ix, entry] of this.channels) {
-      if (
-        entry.state.tag === 'draining' &&
-        !this.sendBuffer.some(({ channelIx, frame }) => channelIx === ix && isClosingFrame(frame))
-      )
-        this.releaseChannel(ix, entry.channel)
     }
 
     const { attempt: prevAttempt, startedAt: prevStartedAt } =
@@ -1322,15 +1262,22 @@ class ClientConnection implements MuxConnection {
     this.enterReconnecting(prevAttempt + 1, startedAt, delay)
   }
 
+  /** On a live wire once no channel is open and nothing is queued: a closed one's frames went out, and what the
+   *  transport holds leaves before the wire does. */
   private startTtlIfIdle(): void {
-    if (this.closed || this.channels.size > 0 || this.ttl) return
+    if (!this.connected || this.ttl || this.sendBuffer.length > 0 || this.openChannelCount() > 0) return
     const ttl = setTimeout(() => {
-      // What the last channels queued, such as a close acknowledgement, leaves before the wire does.
       void this.transport.drained().then(() => {
-        if (this.ttl === ttl && this.channels.size === 0) this.dispose()
+        if (this.ttl === ttl && this.openChannelCount() === 0) this.dispose()
       })
     }, this.idleTimeoutMs)
     this.ttl = ttl
+  }
+
+  private openChannelCount(): number {
+    let count = 0
+    for (const entry of this.channels.values()) if (entry.state.tag !== 'closed') count++
+    return count
   }
 
   private dispose(): void {
@@ -1384,7 +1331,7 @@ class ClientConnection implements MuxConnection {
     this.carriedFrom = new Map()
     const open: ReconcileOpenEntry[] = []
     for (const [ix, entry] of this.channels) {
-      const isInitial = (entry.state.tag === 'pending' || entry.state.tag === 'releasing') && entry.state.initial
+      const isInitial = entry.state.tag !== 'open' && entry.state.initial
       if (skipUnnamed && isInitial && !this.awaitedIxes.has(ix)) continue
       this.reconcileIxes.set(ix, isInitial)
       const payloadEntry: ReconcileOpenEntry = {
@@ -1495,9 +1442,13 @@ class ClientConnection implements MuxConnection {
         continue
       }
       if (this.awaitedIxes.has(ix)) continue
-      if (entry.state.tag === 'releasing' || (entry.state.tag === 'draining' && !serverMap.has(ix))) {
-        this.releaseChannel(ix, entry.channel)
-        continue
+      if (entry.state.tag === 'closed') {
+        const lastSeq = serverMap.get(ix)
+        // One the server has ended, or has all of, needs nothing more from the page.
+        if (lastSeq === undefined || lastSeq >= this.replayBuffers.get(ix)!.seq) {
+          this.releaseChannel(ix, entry.channel)
+          continue
+        }
       }
       if (!serverMap.has(ix)) {
         if (deferredOmitted) {
@@ -1514,9 +1465,7 @@ class ClientConnection implements MuxConnection {
       if (replay)
         for (const frame of replay.getAfter(serverMap.get(ix)!, (carriedFrom.get(ix) ?? Infinity) - 1))
           releaseFrames.push({ kind: 'reconcile', frame })
-      // A draining channel's queued frames follow its replay; then it has nothing left to send.
-      if (entry.state.tag === 'draining') this.releaseChannel(ix, entry.channel)
-      else channelsToOpen.push(entry.channel)
+      if (entry.state.tag !== 'closed') channelsToOpen.push(entry.channel)
     }
 
     for (const frame of this.drainBufferedFrames(releasable, this.channels)) releaseFrames.push(frame)
@@ -1557,15 +1506,14 @@ class ClientConnection implements MuxConnection {
       this.releaseDeferredOmitted([ix])
     } else if (entry) {
       // As `applyReconciled` does: its replay, then what it queued.
-      if (entry.state.tag === 'pending')
-        for (const frame of this.replayBuffers.get(ix)?.getAfter(lastSeq) ?? [])
-          this.transport.sendFrame({ kind: 'reconcile', frame })
+      const replay = this.replayBuffers.get(ix)!
+      for (const frame of replay.getAfter(lastSeq)) this.transport.sendFrame({ kind: 'reconcile', frame })
       for (const frame of this.drainBufferedFrames(new Set([ix]), this.channels)) this.transport.sendFrame(frame)
-      if (entry.state.tag === 'releasing') {
-        this.releaseChannel(ix, entry.channel)
-      } else {
+      if (entry.state.tag === 'pending') {
         this.enterChannelOpen(ix)
         entry.channel._onTransportOpen(this.transport.batched, this.wire)
+      } else if (lastSeq >= replay.seq) {
+        this.releaseChannel(ix, entry.channel)
       }
     }
     this.startTtlIfIdle()
@@ -1619,7 +1567,8 @@ class ClientConnection implements MuxConnection {
           tag === TAG.BINARY_ACK_REQ ||
           tag === TAG.PUBLISH_BINARY ||
           tag === TAG.PUBLISH_BINARY_ACK_REQ
-        this.replayBuffers.get(channelIx)?.push(seq, frame, isBinary)
+        if (tag === TAG.CLOSE || tag === TAG.CLOSE_ACK) this.replayBuffers.get(channelIx)?.pushClosing(seq, frame)
+        else this.replayBuffers.get(channelIx)?.push(seq, frame, isBinary)
       }
       frames.push({ kind: 'reconcile', frame })
     }

@@ -39,7 +39,7 @@ import { ServerChannelBuffer } from './ServerChannelBuffer.js'
 import { ReplayBuffer } from '../replay-buffer.js'
 import { getServerConfig } from '../../node/server/serverConfig.js'
 import { assert } from '../../utils/assert.js'
-import { ACK_STATUS, ProtocolViolationError, TAG, isChannelCtrlTag } from '../shared-ws.js'
+import { ACK_STATUS, ProtocolViolationError, TAG, isChannelCtrlTag, isChannelDataFrame } from '../shared-ws.js'
 import type { AckResultStatus, ChannelCtrlFrame, ChannelDataFrame, ChannelFrame, ReattachState } from '../shared-ws.js'
 
 /** Peer-authored JSON: a parse failure is the peer's, so it surfaces as a protocol violation. */
@@ -394,16 +394,16 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   /** @internal — Entry point from the mux for an incoming wire frame. Handles ctrl routing,
    *  client→server seq dedup, and delegation to `_dispatchDataFrame`. */
   _dispatchFrame(frame: ChannelFrame): void {
+    // The page's CLOSE and CLOSE_ACK are sequenced with its data, so a replay repeats none of them.
+    if ((isChannelDataFrame(frame) || frame.tag === TAG.CLOSE || frame.tag === TAG.CLOSE_ACK) && frame.seq) {
+      if (frame.seq <= this._lastClientSeq) return
+      this._lastClientSeq = frame.seq
+    }
     if (isChannelCtrlTag(frame.tag)) {
       this._dispatchCtrl(frame as ChannelCtrlFrame)
       return
     }
-    const data = frame as ChannelDataFrame
-    if (data.seq) {
-      if (data.seq <= this._lastClientSeq) return
-      this._lastClientSeq = data.seq
-    }
-    this._dispatchDataFrame(data)
+    this._dispatchDataFrame(frame as ChannelDataFrame)
   }
 
   /** @internal — Tag-keyed data-frame switch. Subclasses (`ServerBroadcast`) override

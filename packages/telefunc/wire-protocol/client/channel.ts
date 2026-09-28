@@ -268,9 +268,6 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   // ── Called by transport connection ──
 
   _onTransportOpen(batched: boolean, wire: number): void {
-    // A close request is not replayed, so one written to a wire that had already died is lost. As the server's
-    // `_attachPeer` does, it goes out again on every attach until acknowledged.
-    if (this._expectCloseAck) this._connection.sendCloseRequest(this, Math.max(0, this._closeDeadline - Date.now()))
     if (this._isClosed) return
     if (batched) this._flow.useBatchTransportInitial()
     // The wire of the last attach lost nothing to repair, and still answers the probe in flight.
@@ -491,7 +488,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
       }
       const remaining = this._closeDeadline - Date.now()
       if (remaining <= 0) {
-        this._finalizeClose(new ChannelClosedError('Channel close timed out'), { closeTimedOut: true })
+        this._finalizeClose(new ChannelClosedError('Channel close timed out'))
         break
       }
       await this._waitForCloseProgress(remaining)
@@ -573,7 +570,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     })
   }
 
-  private _finalizeClose(err?: Error, options?: { closeTimedOut: boolean }): void {
+  private _finalizeClose(err?: Error): void {
     if (this._didTerminate) return
     this._didTerminate = true
     this._closeError = err
@@ -581,7 +578,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     const ackErr = err ?? new ChannelClosedError()
     for (const { reject } of this._pendingAcks.values()) reject(ackErr)
     this._pendingAcks.clear()
-    this._connection.unregister(this, ackErr, options)
+    this._connection.unregister(this)
     this._fireClose(err)
     this._notifyCloseProgress()
   }
