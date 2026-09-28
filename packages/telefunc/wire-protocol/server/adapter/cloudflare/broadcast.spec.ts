@@ -172,21 +172,19 @@ describe('cloudflare broadcast routing', () => {
   })
 
   it('maps the same room to the same bucket-coordinator offset for a bucket', () => {
-    const shardIndices = getBucketCoordinatorShardIndices(2, 'weur')
-
-    expect(getDeterministicKeyBucketIndex('room/alpha', shardIndices.length)).toBe(
-      getDeterministicKeyBucketIndex('room/alpha', shardIndices.length),
-    )
+    // A hash of the key alone, so every isolate, and every version of a gradual deploy, picks the same coordinator.
+    expect(getDeterministicKeyBucketIndex('room/alpha', 2)).toBe(0)
+    expect(getDeterministicKeyBucketIndex('room/alpha', 3)).toBe(2)
   })
 
   it('assigns room keys only within the bucket-coordinator subset', () => {
-    const weurShards = getBucketCoordinatorShardIndices(2, 'weur')
-    const apacShards = getBucketCoordinatorShardIndices(2, 'apac')
-    const ocShards = getBucketCoordinatorShardIndices(2, 'oc')
-
-    expect(weurShards).toContain(weurShards[getDeterministicKeyBucketIndex('room/alpha', weurShards.length)]!)
-    expect(apacShards).toContain(apacShards[getDeterministicKeyBucketIndex('room/alpha', apacShards.length)]!)
-    expect(ocShards).toContain(ocShards[getDeterministicKeyBucketIndex('room/alpha', ocShards.length)]!)
+    for (const bucket of ['weur', 'apac', 'oc'] as const) {
+      const shards = getBucketCoordinatorShardIndices(6, bucket)
+      const picked = new Set(
+        Array.from({ length: 20 }, (_, n) => shards[getDeterministicKeyBucketIndex(`room/${n}`, shards.length)]),
+      )
+      expect([...picked].sort()).toEqual(shards)
+    }
   })
 
   it('partitions shards by bucket when the scale is uniform', () => {
