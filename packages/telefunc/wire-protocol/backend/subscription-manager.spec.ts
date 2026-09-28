@@ -240,12 +240,21 @@ describe('shared subscription supervision', () => {
     const sent: string[] = []
     raw.partition = 'session-b'
     manager.subscribe('key', () => {})
-    const held = manager.afterEstablished('key', ['key'], () => void sent.push('b'))
+    const held = manager.afterEstablished(
+      () => void sent.push('b'),
+      () => ({ key: 'key', sources: ['key'] }),
+    )
     raw.partition = 'session-a'
     // Another session's subscription, or its hold, is not ordered before this send.
-    void manager.afterEstablished('key', ['key'], () => void sent.push('a'))
+    void manager.afterEstablished(
+      () => void sent.push('a'),
+      () => ({ key: 'key', sources: ['key'] }),
+    )
     vi.spyOn(raw, 'partitionHere').mockReturnValueOnce(null)
-    void manager.afterEstablished('key', ['key'], () => void sent.push('no session'))
+    void manager.afterEstablished(
+      () => void sent.push('no session'),
+      () => ({ key: 'key', sources: ['key'] }),
+    )
     expect(sent).toEqual(['a', 'no session'])
     raw.opens[0]!.attempt.establish()
     await held

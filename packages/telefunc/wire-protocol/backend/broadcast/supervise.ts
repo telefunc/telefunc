@@ -49,16 +49,22 @@ function superviseBroadcastDriver(driver: BroadcastDriver): BroadcastBackend {
     // A driver may send later (a queued or re-sent command, an ordered RPC), so bytes are copied: `slice()` of a Node
     // Buffer is a view. A string can't change.
     const owned = typeof payload === 'string' ? payload : new Uint8Array(payload)
-    const keyRoutes = [
-      { key, kind: 'text' },
-      { key, kind: 'binary' },
-    ] as const
-    return subscriptions.afterEstablished(key, keyRoutes, () => publishNow(route, owned), {
-      class: kind,
-      bytes: () => (typeof owned === 'string' ? utf8ByteLength(owned) : owned.byteLength),
-      fits: (sends, bytes) => sends <= PENDING_PUBLISH_LIMIT && bytes <= heldByteLimit(kind),
-      overflow: () => new ChannelOverflowError('Broadcast readiness buffer overflow'),
-    })
+    return subscriptions.afterEstablished(
+      () => publishNow(route, owned),
+      () => ({
+        key,
+        sources: [
+          { key, kind: 'text' },
+          { key, kind: 'binary' },
+        ],
+        weight: {
+          class: kind,
+          bytes: () => (typeof owned === 'string' ? utf8ByteLength(owned) : owned.byteLength),
+          fits: (sends, bytes) => sends <= PENDING_PUBLISH_LIMIT && bytes <= heldByteLimit(kind),
+          overflow: () => new ChannelOverflowError('Broadcast readiness buffer overflow'),
+        },
+      }),
+    )
   }
 
   return {

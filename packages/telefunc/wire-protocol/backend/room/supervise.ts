@@ -39,7 +39,7 @@ function superviseRoomDriver(driver: RoomDriver): RoomBackend {
       const commit = () => driver.commitLane(roomId, inc, lane, payload, opts)
       // A close commits under its lease, which would lapse before the hold ends.
       const result = await (opts?.closingLease === undefined
-        ? subscriptions.afterEstablished(roomSubscriptionSourceKey(source), [source], commit)
+        ? subscriptions.afterEstablished(commit, () => ({ key: roomSubscriptionSourceKey(source), sources: [source] }))
         : commit())
       if ('accepted' in result) assertDriverPosition(result)
       return result

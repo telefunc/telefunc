@@ -2487,7 +2487,7 @@ describe('Room public behavior', () => {
     const peer = attachPeer(stub, undefined, { text: true, binary: false })
     await member.publish('after-reattach')
     await vi.waitFor(() => expect(semanticFrames(peer, 'data')).toEqual(['after-reattach']))
-    expect(memoryState.broadcastSubs.size).toBe(0)
+    expect([memoryState.broadcastSubs.text.size, memoryState.broadcastSubs.binary.size]).toEqual([0, 0])
   })
   it('releases a tail that is not attached within its 60 second lease', async () => {
     vi.useFakeTimers()
