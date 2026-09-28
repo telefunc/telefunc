@@ -11,6 +11,7 @@ import { setAbortController } from '../../../client/abort.js'
 import { setCloseHandlers, addExtraCloseHandlers, type CloseHandler } from '../../../client/close.js'
 import { makeAbortError, throwAbortError, throwBugError } from '../../../client/remoteTelefunctionCall/errors.js'
 import { BaseStreamReader } from './BaseStreamReader.js'
+import { PendingValue, resolvePendingValues } from './PendingValue.js'
 import { StreamReader } from './StreamReader.js'
 import { SSEStreamReader } from './SSEStreamReader.js'
 import { ClientChannel, ClientBroadcast } from '../channel.js'
@@ -103,13 +104,8 @@ async function reviveResponse(
 
   const headers = callContext.headers ?? undefined
   const telefuncUrl = callContext.telefuncUrl
-  const promises: Promise<unknown>[] = []
+  const pendingValues: PendingValue<unknown>[] = []
   const context: ClientReviverContext = {
-    waitFor(promise) {
-      // Suppress unhandled-rejection noise if `parse()` throws before `Promise.all(promises)`.
-      promise.catch(() => {})
-      promises.push(promise)
-    },
     createChannel(opts) {
       return new ClientChannel({
         channelId: opts.channelId,
@@ -154,28 +150,29 @@ async function reviveResponse(
   const reviver = createStreamingReviver(
     context,
     function onRevived(revived) {
-      {
-        const { value, close } = revived
-        assert(isObjectOrFunction(value))
-        const wrapper = wrapProxy(value)
-        globalObject.gcRegistry.register(wrapper, close)
-        // This is what the user gets
-        revived.value = wrapper
+      const { value, abort, close } = revived
+      allCloseHandlers.push(close)
+      callContext.abortController.signal.addEventListener(
+        'abort',
+        () => {
+          abort(makeAbortError(undefined, callContext))
+        },
+        { once: true },
+      )
+
+      if (value instanceof PendingValue) {
+        // Suppress unhandled-rejection noise if `parse()` throws before the pending values are awaited.
+        value.promise.catch(() => {})
+        pendingValues.push(value)
+        return
       }
 
-      {
-        const { value, abort, close } = revived
-        assert(isObjectOrFunction(value))
-        closeHandlers.set(value, close)
-        allCloseHandlers.push(close)
-        callContext.abortController.signal.addEventListener(
-          'abort',
-          () => {
-            abort(makeAbortError(undefined, callContext))
-          },
-          { once: true },
-        )
-      }
+      assert(isObjectOrFunction(value))
+      const wrapper = wrapProxy(value)
+      globalObject.gcRegistry.register(wrapper, close)
+      closeHandlers.set(wrapper, close)
+      // This is what the user gets
+      revived.value = wrapper
     },
     extensionResponseTypes,
   )
@@ -183,7 +180,9 @@ async function reviveResponse(
   let parsed: unknown
   try {
     parsed = parse(body, { reviver })
-    if (promises.length > 0) await Promise.all(promises)
+    if (pendingValues.length > 0) {
+      parsed = await resolvePendingValues(parsed, pendingValues, (value) => closeHandlers.has(value))
+    }
   } catch (err) {
     for (const close of allCloseHandlers) close()
     throw err

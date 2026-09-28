@@ -4,6 +4,7 @@ import React, { useEffect, useState } from 'react'
 import {
   onDownloadFileEager,
   onDownloadBlobEager,
+  onDownloadEagerNested,
   onDownloadFileStream,
   onDownloadFileStreamNoSize,
   onDownloadBlobStream,
@@ -65,6 +66,40 @@ function FileDownload() {
         }}
       >
         new Blob() eager
+      </button>
+
+      {/* native File/Blob nested in the result — materialized like top-level ones */}
+      <button
+        id="test-eager-nested"
+        onClick={async () => {
+          const { title, file, blob } = await onDownloadEagerNested()
+          const readObjectUrl = async (b: Blob) => {
+            try {
+              const url = URL.createObjectURL(b)
+              const text = await (await fetch(url)).text()
+              URL.revokeObjectURL(url)
+              return text
+            } catch (err) {
+              return String(err)
+            }
+          }
+          setResult(
+            JSON.stringify(
+              {
+                title,
+                isFile: file instanceof File,
+                name: file.name,
+                isBlob: blob instanceof Blob,
+                fileObjectUrlContent: await readObjectUrl(file),
+                blobObjectUrlContent: await readObjectUrl(blob),
+              },
+              null,
+              2,
+            ),
+          )
+        }}
+      >
+        nested new File() / new Blob() eager
       </button>
 
       {/* download(stream, {name, ...}) — returns FileDownload tuple */}
