@@ -636,20 +636,11 @@ function decodePublishText(wire: string): { text: string; info: WirePublishInfo 
   return { text: wire.slice(nl + 1), info: { seq, timestamp } }
 }
 
-// Current binary publish frames are explicitly versioned. The NaN timestamp sentinel makes an
-// older 12-byte reader fail loudly instead of silently shifting payload bytes.
-const PUBLISH_BINARY_PREFIX = new Uint8Array([0x54, 0x46, 0x42, 1, 0, 0, 0, 0, 0, 0, 0xf8, 0x7f])
-const PUBLISH_BINARY_VERSION_BYTE = 3
-
 function encodePublishBinary(data: Uint8Array, info: WirePublishInfo): Uint8Array {
-  return encodeOrderingFrame(data, info, PUBLISH_BINARY_PREFIX)
+  return encodeOrderingFrame(data, info)
 }
 
 function decodePublishBinary(wire: Uint8Array): { data: Uint8Array; info: WirePublishInfo } {
-  const versioned = PUBLISH_BINARY_PREFIX.every((byte, i) => i === PUBLISH_BINARY_VERSION_BYTE || wire[i] === byte)
-  assertProtocol(versioned, 'PUBLISH_BINARY frame uses an unsupported legacy wire format')
-  const version = wire[PUBLISH_BINARY_VERSION_BYTE]
-  assertProtocol(version === 1, `Unsupported PUBLISH_BINARY wire version ${version}`)
-  const { payload, info } = decodeOrderingFrame(wire.subarray(PUBLISH_BINARY_PREFIX.byteLength))
+  const { payload, info } = decodeOrderingFrame(wire)
   return { data: payload, info }
 }
