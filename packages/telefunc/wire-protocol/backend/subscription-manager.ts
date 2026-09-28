@@ -40,6 +40,8 @@ class SubscriptionManager<Source> {
   private readonly _slots = new Map<string, SubscriptionSlot>()
   private readonly _cleanups = new Set<Promise<void>>()
   private readonly _holds = new Map<string, Hold>()
+  /** Slots not yet established, counted down a microtask after: at 0, no send has anything to wait for. */
+  private _establishing = 0
 
   constructor(
     private readonly _driver: SubscriptionDriver<Source>,
@@ -65,6 +67,8 @@ class SubscriptionManager<Source> {
         },
       })
       this._slots.set(slotKey, (slot = created))
+      this._establishing++
+      void created.established.then(() => this._establishing--)
     }
     return slot.attach(receiver)
   }
@@ -92,6 +96,7 @@ class SubscriptionManager<Source> {
     send: () => T | Promise<T>,
     weight?: HoldWeight,
   ): T | Promise<T> {
+    if (this._establishing === 0 && this._holds.size === 0) return send()
     // Another partition's subscription (another Cloudflare session's) is not ordered before this send.
     const partition = this._driver.partitionHere(sources[0])
     if (partition === null) return send()
