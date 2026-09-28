@@ -488,6 +488,22 @@ describe.each(WIRES)('over %s', (wire) => {
       mux.resolvedOptions = null
     }
   })
+
+  test("what a channel sends once its reconnect's wire dropped, while the server awaits a callback that reconnect named, reaches the page", async () => {
+    const { channel, cut } = page(wire)
+    const clock = register<string, string>()
+    const received: string[] = []
+    channel<string, string>(clock.id).listen((message) => void received.push(message))
+    await vi.advanceTimersByTimeAsync(200)
+    channel() // a callback whose call is lost in the cut
+    cut()
+    await vi.advanceTimersByTimeAsync(1_000) // the reconnect names the clock and the callback
+    cut()
+    await vi.advanceTimersByTimeAsync(10) // the server notices the drop
+    void clock.send('after the wire dropped', { ack: false })
+    await vi.advanceTimersByTimeAsync(3_000)
+    expect(received).toEqual(['after the wire dropped'])
+  })
 })
 
 describe('with every channel registered, a page sends and gets the frames it did before', () => {
