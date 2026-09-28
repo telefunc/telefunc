@@ -14,7 +14,7 @@ import { getTelefuncChannelHooks } from '../server/ws.js'
 import { TAG } from '../shared-ws.js'
 import { decodeU32 } from '../frame.js'
 import { base64urlToUint8Array } from '../base64url.js'
-import { getServerConfig } from '../../node/server/serverConfig.js'
+import { config as serverConfig, getServerConfig } from '../../node/server/serverConfig.js'
 import { NetworkError } from '../../shared/NetworkError.js'
 
 type Wire = 'sse' | 'sse-batch' | 'ws'
@@ -50,6 +50,8 @@ function page(wire: Wire, { upgrade = false, delays = {} as Partial<Record<numbe
   return {
     traffic,
     cut: () => cuts.at(-1)!(),
+    /** How many wires the page opened. */
+    wires: () => cuts.length,
     /** A channel the page opens, such as a call's callback. */
     channel<ClientToServer = unknown, ServerToClient = unknown>(channelId: string = crypto.randomUUID()) {
       return new ClientChannel<ClientToServer, ServerToClient>({
@@ -463,6 +465,28 @@ describe.each(['sse', 'sse-batch'] as const)('over %s, while an upgrade attempt 
     expect(openedAfter.length).toBeGreaterThan(0)
     expect(Math.max(...openedAfter)).toBeLessThan(500)
     expect(connection.transport.type).toBe('ws')
+  })
+})
+
+describe.each(WIRES)('over %s', (wire) => {
+  test('a wire stays up while the server awaits a channel its first RECONCILE named, past the ping deadline', async () => {
+    serverConfig.channel = { connectTtl: 9_000, pingInterval: 2_000 }
+    const mux = getChannelMux() as unknown as { resolvedOptions: unknown }
+    mux.resolvedOptions = null
+    try {
+      const { channel, wires } = page(wire)
+      const callbackId = crypto.randomUUID()
+      let opened = false
+      channel(callbackId).onOpen(() => void (opened = true))
+      await vi.advanceTimersByTimeAsync(8_000) // twice the ping interval, the server's deadline, and more
+      register(callbackId)
+      await vi.advanceTimersByTimeAsync(200)
+      expect(opened).toBe(true)
+      expect(wires()).toBe(1)
+    } finally {
+      serverConfig.channel = {}
+      mux.resolvedOptions = null
+    }
   })
 })
 

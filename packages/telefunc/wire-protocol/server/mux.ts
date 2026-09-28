@@ -128,7 +128,6 @@ type AwaitedChannel = {
 type ConnectionState = {
   pingTimer: ReturnType<typeof setTimeout> | null
   terminatePermanently: boolean
-  reconciling: boolean
   recvChain: Promise<unknown> | null
   /** Set by `onConnectionClosed` so an in-flight `reconcile` can see the close and its kind. */
   closed: { isPermanent: boolean } | null
@@ -210,7 +209,6 @@ class ChannelMux {
       state: {
         pingTimer: null,
         terminatePermanently: false,
-        reconciling: false,
         recvChain: null,
         closed: null,
         retiredByBarrier: false,
@@ -543,7 +541,6 @@ class ChannelMux {
   ): Promise<ReconcileOutcome> {
     const { state, transport } = entry
     const finalizeUpgrade = isBarrier && ctrl.sessionId ? (this.sessionFinalizers.get(ctrl.sessionId) ?? null) : null
-    state.reconciling = true
     this.resetPingTimer(connection)
     // One on the wire that holds the session it names keeps it, and so what is bound to it: a staged upgrade.
     const newSessionId =
@@ -572,8 +569,6 @@ class ChannelMux {
     if (ctrl.sessionId) this.sessionFinalizers.delete(ctrl.sessionId)
     this.sessionFinalizers.set(newSessionId, () => this.send(connection, encode.fin()))
     transport.setSessionId(connection, newSessionId)
-    state.reconciling = false
-    this.resetPingTimer(connection)
     return { sessionId: newSessionId, openList, finalizeUpgrade, deliverTo: connection }
   }
 
@@ -817,7 +812,6 @@ class ChannelMux {
     state.pingTimer = unrefTimer(
       setTimeout(() => {
         state.pingTimer = null
-        if (state.reconciling) return
         // Transient close so each channel gets its `reconnectTimeout` grace via
         // `_onPeerDisconnect`. Connection-level state is rebuilt by the next reconcile.
         transport.terminateConnection(connection)
