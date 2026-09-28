@@ -7,6 +7,7 @@ import { encodeLengthPrefixedFrames } from '../frame.js'
 import { base64urlToUint8Array } from '../base64url.js'
 import { decode, encode, TAG, type DecodedFrame } from '../shared-ws.js'
 import { getServerConfig } from '../../node/server/serverConfig.js'
+import { CREDIT_MSG_WINDOW_MAX } from '../constants.js'
 
 function openPost(metadata: SseRequestMetadata) {
   let controller!: ReadableStreamDefaultController<Uint8Array>
@@ -16,6 +17,8 @@ function openPost(metadata: SseRequestMetadata) {
   return {
     request,
     push: (frame: Uint8Array<ArrayBuffer>) => controller.enqueue(encodeLengthPrefixedFrames([frame])),
+    /** All of `frames` in one chunk, as a body read hands them over. */
+    pushAll: (frames: Uint8Array<ArrayBuffer>[]) => controller.enqueue(encodeLengthPrefixedFrames(frames)),
     end: () => controller.close(),
   }
 }
@@ -76,4 +79,51 @@ test("an acknowledged upload POST waits out a reconcile held for a channel the s
   } finally {
     vi.useRealTimers()
   }
+})
+
+/** An SSE wire whose page has one channel attached, which counts what reaches its listener. */
+async function reconciledSseWire() {
+  const sse = getTelefuncSseChannelHooks()
+  const connId = crypto.randomUUID()
+  const channel = new ServerChannel<unknown, never>()
+  const received = { count: 0 }
+  channel.listen(() => void received.count++)
+  getChannelMux().registerChannel(channel)
+  const downstream = openPost({ connId, streamResponse: true })
+  const response = await sse.handleRequest(downstream.request)
+  const frames = collectFrames(response!.body as ReadableStream<Uint8Array>)
+  downstream.push(encode.reconcile({ open: [{ id: channel.id, ix: 0, lastSeq: 0, initial: true }] }))
+  downstream.end()
+  await vi.waitFor(() => expect(frames.some((frame) => frame.tag === TAG.RECONCILED)).toBe(true))
+  return { sse, connId, received, isOpen: () => getChannelMux().getConnectionByConnId(connId) !== undefined }
+}
+
+/** A channel's full message window, with the refresh and probe a page sends among it. */
+function fullWindow() {
+  const frames = Array.from({ length: CREDIT_MSG_WINDOW_MAX }, (_, i) => encode.text(0, '1', i + 1))
+  frames.push(encode.msgWindow(0, 2 * CREDIT_MSG_WINDOW_MAX), encode.bdpPing(0))
+  return frames
+}
+
+test("a batch POST carrying a channel's full message window is processed", async () => {
+  const wire = await reconciledSseWire()
+  const batch = openPost({ connId: wire.connId })
+  batch.pushAll(fullWindow())
+  batch.end()
+  expect((await wire.sse.handleRequest(batch.request))!.statusCode).toBe(200)
+  expect(wire.isOpen()).toBe(true)
+  expect(wire.received.count).toBe(CREDIT_MSG_WINDOW_MAX)
+})
+
+test("an upload stream handed a channel's full message window at once is processed", async () => {
+  const wire = await reconciledSseWire()
+  const upload = openPost({ connId: wire.connId, streamRequest: true })
+  void wire.sse.handleRequest(upload.request)
+  upload.pushAll(fullWindow())
+  await vi.waitFor(() => expect(wire.received.count === CREDIT_MSG_WINDOW_MAX || !wire.isOpen()).toBe(true), {
+    timeout: 10_000,
+  })
+  expect(wire.isOpen()).toBe(true)
+  expect(wire.received.count).toBe(CREDIT_MSG_WINDOW_MAX)
+  upload.end()
 })

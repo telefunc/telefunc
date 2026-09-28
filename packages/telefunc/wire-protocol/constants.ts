@@ -129,9 +129,13 @@ export const WIRE_MAX_CONN_CTRL_FRAME_BYTES =
   MAX_CHANNELS_PER_CONNECTION * (UPGRADE_MAX_ID_BYTES + RECONCILE_ENTRY_ENVELOPE_BYTES) + 1_024
 
 /** Per-connection ceiling on accepted-but-unprocessed frames: a peer that outruns its recv chain
- *  is terminated rather than allowed to queue without bound. */
-export const WIRE_MAX_RECV_BACKLOG_BYTES = 64 * 1024 * 1024
-export const WIRE_MAX_RECV_BACKLOG_FRAMES = 50_000
+ *  is terminated rather than allowed to queue without bound. This base is the allowance for what
+ *  credit doesn't govern: control frames, ack-bearing sends, sends nobody awaits. Each channel
+ *  attached to the wire adds a window at `CREDIT_WINDOW_MAX_BYTES` and `CREDIT_MSG_WINDOW_MAX`,
+ *  the most a peer that awaits its sends can have in flight on it: a cap that refuses a legal
+ *  burst is worse than no cap. */
+export const WIRE_RECV_BACKLOG_BASE_BYTES = 64 * 1024 * 1024
+export const WIRE_RECV_BACKLOG_BASE_FRAMES = 50_000
 
 /** Largest SSE request metadata header the server will read off a POST body. */
 export const SSE_METADATA_MAX_BYTES = 64 * 1024

@@ -3,17 +3,19 @@ import { ChannelMux, type ServerTransport } from './mux.js'
 import { ServerChannel } from './channel.js'
 import { decode, encode, TAG, type DecodedFrame } from '../shared-ws.js'
 import { getServerConfig } from '../../node/server/serverConfig.js'
+import { CREDIT_MSG_WINDOW_MAX, CREDIT_WINDOW_MAX_BYTES, WIRE_RECV_BACKLOG_BASE_FRAMES } from '../constants.js'
 
 /** Wires the test opens on `mux`, each recording what the server sends on it. */
 function wires(mux: ChannelMux) {
   const sessions = new Map<object, string>()
   const sent = new Map<object, DecodedFrame[]>()
+  const terminated = new Set<object>()
   const transport: ServerTransport<object> = {
     getSessionId: (wire) => sessions.get(wire),
     setSessionId: (wire, id) => void sessions.set(wire, id),
     getConnId: () => null,
     sendNow: (wire, frame) => void sent.get(wire)!.push(decode(frame)),
-    terminateConnection: () => {},
+    terminateConnection: (wire) => void terminated.add(wire),
   }
   const open = () => {
     const wire = {}
@@ -22,7 +24,27 @@ function wires(mux: ChannelMux) {
     return wire
   }
   const texts = (wire: object) => sent.get(wire)!.flatMap((frame) => (frame.tag === TAG.TEXT ? [frame.text] : []))
-  return { sessions, open, texts }
+  return { sessions, open, texts, terminated }
+}
+
+/** A wire whose page has one channel attached, which counts what reaches its listeners. */
+async function attachedWire() {
+  const mux = new ChannelMux()
+  const channel = new ServerChannel<unknown, never>({ id: 'burst' })
+  const received = { count: 0 }
+  channel.listen(() => void received.count++)
+  channel.listenBinary(() => void received.count++)
+  mux.registerChannel(channel)
+  const { open, terminated } = wires(mux)
+  const wire = open()
+  await mux.onConnectionRawMessage(
+    wire,
+    encode.reconcile({ open: [{ id: 'burst', ix: 0, lastSeq: 0, initial: true }] }),
+  )
+  /** As a socket hands over every message of one read: all at once, before the server gets to any of them. */
+  const deliver = (frames: Uint8Array<ArrayBuffer>[]) =>
+    Promise.all(frames.map((frame) => mux.onConnectionRawMessage(wire, frame)))
+  return { deliver, received, terminated: () => terminated.has(wire) }
 }
 
 test("a reconnect waiting for a new channel keeps the channels it moved when the previous wire's close lands", async () => {
@@ -170,4 +192,33 @@ test("a frame sent to a reconnect's wire that dropped while its first reconcile 
     encode.reconcile({ sessionId: known, open: [{ id: 'clock-first', ix: 0, lastSeq: 0 }] }),
   )
   expect(texts(live).some((text) => text.includes('in-the-hold'))).toBe(true)
+})
+
+test("a burst of a channel's full message window, with the refresh and probe a page sends among it, is processed", async () => {
+  const wire = await attachedWire()
+  const frames = Array.from({ length: CREDIT_MSG_WINDOW_MAX }, (_, i) => encode.text(0, '1', i + 1))
+  frames.push(encode.msgWindow(0, 2 * CREDIT_MSG_WINDOW_MAX), encode.bdpPing(0))
+  await wire.deliver(frames)
+  expect(wire.terminated()).toBe(false)
+  expect(wire.received.count).toBe(CREDIT_MSG_WINDOW_MAX)
+})
+
+test("a burst of a channel's full byte window is processed", async () => {
+  const wire = await attachedWire()
+  const chunk = new Uint8Array(64 * 1024)
+  const frames = Array.from({ length: CREDIT_WINDOW_MAX_BYTES / chunk.byteLength }, (_, i) =>
+    encode.binary(0, chunk, i + 1),
+  )
+  await wire.deliver(frames)
+  expect(wire.terminated()).toBe(false)
+  expect(wire.received.count).toBe(frames.length)
+})
+
+test('a peer flooding past what its channels can have in flight is still terminated', async () => {
+  const wire = await attachedWire()
+  const frames = Array.from({ length: WIRE_RECV_BACKLOG_BASE_FRAMES + CREDIT_MSG_WINDOW_MAX + 1 }, (_, i) =>
+    encode.text(0, '1', i + 1),
+  )
+  await wire.deliver(frames)
+  expect(wire.terminated()).toBe(true)
 })

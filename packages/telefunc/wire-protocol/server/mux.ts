@@ -7,6 +7,8 @@ import { getServerConfig } from '../../node/server/serverConfig.js'
 import { unrefTimer } from '../../utils/unrefTimer.js'
 import {
   CHANNEL_PING_INTERVAL_MIN_MS,
+  CREDIT_MSG_WINDOW_MAX,
+  CREDIT_WINDOW_MAX_BYTES,
   MAX_CHANNELS_PER_CONNECTION,
   UPGRADE_MAX_ID_BYTES,
   UPGRADE_MAX_STAGED_BYTES,
@@ -14,8 +16,8 @@ import {
   UPGRADE_STAGE_TTL_MS,
   WIRE_MAX_CONN_CTRL_FRAME_BYTES,
   WIRE_MAX_RAW_FRAME_BYTES,
-  WIRE_MAX_RECV_BACKLOG_BYTES,
-  WIRE_MAX_RECV_BACKLOG_FRAMES,
+  WIRE_RECV_BACKLOG_BASE_BYTES,
+  WIRE_RECV_BACKLOG_BASE_FRAMES,
   type ChannelTransports,
 } from '../constants.js'
 import {
@@ -281,7 +283,7 @@ class ChannelMux {
     if (!entry) return Promise.resolve(null)
     const { state } = entry
     const byteLength = rawFrame.byteLength
-    if (this.isOverBudget(state, rawFrame)) {
+    if (this.isOverBudget(entry, connection, rawFrame)) {
       this.terminateWire(connection)
       return Promise.resolve(null)
     }
@@ -294,16 +296,20 @@ class ChannelMux {
   }
 
   /** Control frames are bounded by what the protocol itself can describe; only the data plane
-   *  carries user payloads, and only it gets the multi-megabyte allowance. */
-  private isOverBudget(state: ConnectionState, rawFrame: Uint8Array<ArrayBuffer>): boolean {
+   *  carries user payloads, and only it gets the multi-megabyte allowance. The backlog allows a full
+   *  window per channel attached to the wire, on top of the base (see `WIRE_RECV_BACKLOG_BASE_BYTES`). */
+  private isOverBudget(entry: ConnectionEntry, connection: Wire, rawFrame: Uint8Array<ArrayBuffer>): boolean {
     const tag = peekTag(rawFrame)
     const maxFrameBytes =
       tag !== undefined && isConnCtrlTag(tag) ? WIRE_MAX_CONN_CTRL_FRAME_BYTES : WIRE_MAX_RAW_FRAME_BYTES
     const byteLength = rawFrame.byteLength
+    if (byteLength > maxFrameBytes) return true
+    const { state, transport } = entry
+    const sessionId = transport.getSessionId(connection)
+    const channels = sessionId === undefined ? 0 : (this.sessions.peekSession(sessionId)?.size ?? 0)
     return (
-      byteLength > maxFrameBytes ||
-      state.recvBacklogBytes + byteLength > WIRE_MAX_RECV_BACKLOG_BYTES ||
-      state.recvBacklogFrames >= WIRE_MAX_RECV_BACKLOG_FRAMES
+      state.recvBacklogBytes + byteLength > WIRE_RECV_BACKLOG_BASE_BYTES + channels * CREDIT_WINDOW_MAX_BYTES ||
+      state.recvBacklogFrames >= WIRE_RECV_BACKLOG_BASE_FRAMES + channels * CREDIT_MSG_WINDOW_MAX
     )
   }
 
