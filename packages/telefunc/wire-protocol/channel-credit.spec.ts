@@ -245,6 +245,12 @@ const flowOf = (channel: unknown) => (channel as { _flow: { msgWindow: number; b
 
 const KIB = 1024
 
+/** The server's credit left with its page, in bytes. */
+const creditOf = (channel: unknown) => {
+  const flow = (channel as { _flow: { _limitBytes: number; _sentBytes: number } })._flow
+  return flow._limitBytes - flow._sentBytes
+}
+
 /** A 16 KiB message that names its place in the stream. */
 const message = (n: number) => String(n).padEnd(16 * KIB)
 
@@ -554,8 +560,7 @@ test("a page's consumption of what a broadcast publishes moves the server's limi
   const seen: string[] = []
   room.page.subscribe((text) => void seen.push(text))
   await run(100)
-  const flow = (room.server as unknown as { _flow: { bytesBeyondCredit: number } })._flow
-  expect(flow.bytesBeyondCredit).toBe(-CREDIT_WINDOW_MAX_BYTES)
+  expect(creditOf(room.server)).toBe(CREDIT_WINDOW_MAX_BYTES)
   // A limit goes out once a quarter of the window is consumed.
   const publications = CREDIT_WINDOW_MAX_BYTES / 4 / KIB / KIB + 1
   for (let n = 0; n < publications; n++) {
@@ -565,7 +570,7 @@ test("a page's consumption of what a broadcast publishes moves the server's limi
   await runUntil(() => seen.length === publications, 1_000)
   await run(100)
   // Sent 17 MiB, of which the last limit leaves one not yet counted consumed.
-  expect(flow.bytesBeyondCredit).toBeLessThan(-CREDIT_WINDOW_MAX_BYTES + 2 * KIB * KIB)
+  expect(creditOf(room.server)).toBeGreaterThan(CREDIT_WINDOW_MAX_BYTES - 2 * KIB * KIB)
 })
 
 test('on a slow link, producers that await their sends are handed the credit one at a time, so none is refused however far past bufferLimit a frame from each would add up', async () => {
@@ -591,4 +596,42 @@ test('on a slow link, producers that await their sends are handed the credit one
   expect(error).toBeUndefined()
   expect(held).toBeGreaterThan(CHANNEL_BUFFER_LIMIT_BYTES)
   expect(page.received.length - before).toBeGreaterThan(40)
+})
+
+test('on a slow link, a producer that awaits its sends is not refused a message larger than bufferLimit, sent with little credit left', async () => {
+  const feed = loop.open<never, string>()
+  const page = consume(feed.page)
+  await run(100)
+  loop.socket.toPage.bytesPerMs = 1_000 // 1 MB/s
+  let error: unknown
+  let left = Infinity
+  void (async () => {
+    // 64 KiB messages, so the byte window binds before the message window does.
+    while (creditOf(feed.server) > 64 * KIB) await feed.server.send('x'.repeat(64 * KIB))
+    left = creditOf(feed.server)
+    await feed.server.send('x'.repeat(CHANNEL_BUFFER_LIMIT_BYTES + 64 * KIB))
+    for (let n = 0; n < 8; n++) await feed.server.send(message(n))
+  })().catch((err: unknown) => (error ??= err))
+  await runUntil(() => page.received.length > 0 && page.received.at(-1) === message(7), 10_000)
+  expect(left).toBeGreaterThan(0)
+  expect(left).toBeLessThanOrEqual(64 * KIB)
+  expect(error).toBeUndefined()
+  expect(page.received.at(-1)).toBe(message(7))
+})
+
+test('on a slow link, a producer that awaits its sends is not refused for the credit another one took with a message larger than bufferLimit', async () => {
+  const feed = loop.open<never, string>()
+  const page = consume(feed.page)
+  await run(100)
+  loop.socket.toPage.bytesPerMs = 1_000 // 1 MB/s
+  // 64 KiB messages, 32 of them in the page's 2 MiB window: the byte window binds before the message window does.
+  while (creditOf(feed.server) > 64 * KIB) await feed.server.send('x'.repeat(64 * KIB))
+  // Both producers' last sends resolved with credit left. One sends a message past it, then the other sends its next.
+  const settled = Promise.allSettled([
+    feed.server.send('x'.repeat(CHANNEL_BUFFER_LIMIT_BYTES + 64 * KIB)),
+    feed.server.send(message(1)),
+  ])
+  await runUntil(() => page.received.at(-1) === message(1), 10_000)
+  expect((await settled).map((result) => result.status)).toEqual(['fulfilled', 'fulfilled'])
+  expect(page.received.at(-1)).toBe(message(1))
 })

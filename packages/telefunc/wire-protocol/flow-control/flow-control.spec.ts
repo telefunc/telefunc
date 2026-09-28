@@ -152,6 +152,24 @@ describe('FlowControl — sender-side credit', () => {
     for (let n = 0; n < 10; n++) expect(flow.decrement(1024)).toBeUndefined()
   })
 
+  // The frame that crosses the limit is credit flow control's normal overshoot; what is sent after it is not.
+  it('counts as sent past credit only frames sent once none was left, until a limit covers them', () => {
+    const { flow } = makeFlow()
+    flow.decrement(CREDIT_WINDOW_INITIAL_BYTES - 10)
+    flow.decrement(1_000_000) // crosses the limit by 999 990 bytes
+    expect(flow.isPastByteCredit).toBe(true)
+    expect(flow.bytesSentPastCredit).toBe(0)
+    flow.decrement(100)
+    flow.decrement(100)
+    expect(flow.bytesSentPastCredit).toBe(200)
+    // A limit covering the crossing frame and half of the next.
+    flow.onPeerByteWindow(CREDIT_WINDOW_INITIAL_BYTES + 999_990 + 50)
+    expect(flow.bytesSentPastCredit).toBe(150)
+    flow.onPeerByteWindow(2 * CREDIT_WINDOW_INITIAL_BYTES)
+    expect(flow.isPastByteCredit).toBe(false)
+    expect(flow.bytesSentPastCredit).toBe(0)
+  })
+
   // Limits can arrive late or twice: a refresh queued while the wire couldn't take it, one a reattach repeats.
   it('ignores a limit that does not raise the current one', async () => {
     const { flow } = makeFlow()

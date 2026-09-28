@@ -208,7 +208,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     }
     // Cooperative credit model: the send already fired; `decrement` only gates the return
     // value. Awaiting throttles the caller's next send; not awaiting bypasses credit, up to the peer buffer.
-    if (this._flow.bytesBeyondCredit > 0 && this._isPeerBufferFull(this._bufferLimit)) return rejectOverflow()
+    if (this._flow.isPastByteCredit && this._isPeerBufferFull(this._bufferLimit)) return rejectOverflow()
     return this._flow.decrement(this._peer.sendText(serialized))
   }
 
@@ -249,15 +249,15 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       )
     }
     // Cooperative credit model; see `_send`.
-    if (this._flow.bytesBeyondCredit > 0 && this._isPeerBufferFull(this._bufferLimitBinary)) return rejectOverflow()
+    if (this._flow.isPastByteCredit && this._isPeerBufferFull(this._bufferLimitBinary)) return rejectOverflow()
     this._peer.sendBinary(data)
     return this._flow.decrement(data.byteLength)
   }
 
-  /** The peer is behind by what this channel sent past its credit and the ack requests it hasn't answered. The server
-   *  holds no more of that than its wire does, and all of it where the runtime can't tell. */
+  /** The peer is behind by what this channel sent once past its credit and the ack requests it hasn't answered. The
+   *  server holds no more of that than its wire does, and all of it where the runtime can't tell. */
   protected _isPeerBufferFull(limit: number): boolean {
-    const behind = Math.max(0, this._flow.bytesBeyondCredit) + this._pendingAckBytes
+    const behind = this._flow.bytesSentPastCredit + this._pendingAckBytes
     if (behind < limit) return false
     const buffered = this._peer!.sender.bufferedAmount()
     return (buffered === undefined ? behind : Math.min(behind, buffered)) >= limit

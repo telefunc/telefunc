@@ -144,7 +144,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
     if (!this._peerSubscribedText) return
     const wireText = encodePublishText(serialized, rawInfo)
     if (this._peer) {
-      if (this._flow.bytesBeyondCredit > 0 && this._isPeerBufferFull(this._bufferLimit)) {
+      if (this._flow.isPastByteCredit && this._isPeerBufferFull(this._bufferLimit)) {
         this._closeBehind()
         return
       }
@@ -166,7 +166,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
     if (!this._peerSubscribedBinary) return
     const wireData = encodePublishBinary(data, rawInfo)
     if (this._peer) {
-      if (this._flow.bytesBeyondCredit > 0 && this._isPeerBufferFull(this._bufferLimitBinary)) {
+      if (this._flow.isPastByteCredit && this._isPeerBufferFull(this._bufferLimitBinary)) {
         this._closeBehind()
         return
       }

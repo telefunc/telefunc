@@ -47,6 +47,8 @@ class FlowControl {
   private _sentMessages = 0
   private _limitBytes: number = CREDIT_WINDOW_INITIAL_BYTES
   private _limitMessages: number = CREDIT_MSG_WINDOW_INITIAL
+  /** `_sentBytes` after the last frame sent while the byte limit was ahead of it. */
+  private _sentWithCredit = 0
   // Receiver side: what arrived, what was consumed, and what had been consumed when each limit last went out.
   private _receivedBytes = 0
   private _receivedMessages = 0
@@ -79,9 +81,15 @@ class FlowControl {
     return this._bdp.msgWindow
   }
 
-  /** Sender-side: bytes sent past the peer's byte limit, negative while within it. */
-  get bytesBeyondCredit(): number {
-    return this._sentBytes - this._limitBytes
+  /** Sender-side: no byte credit is left. */
+  get isPastByteCredit(): boolean {
+    return this._limitBytes - this._sentBytes <= 0
+  }
+
+  /** Sender-side: bytes of the frames sent once past the byte limit that are still past it. The frame that crossed it,
+   *  sent with credit, is credit flow control's one-frame overshoot and isn't counted. */
+  get bytesSentPastCredit(): number {
+    return Math.max(0, this._sentBytes - Math.max(this._limitBytes, this._sentWithCredit))
   }
 
   /** Sender-side: count one frame of `bytes` against credit. Returns `void` when
@@ -103,7 +111,7 @@ class FlowControl {
 
   /** Sender-side: count a frame that went out without a credit gate, one buffered while no peer was attached. */
   countSent(bytes: number): void {
-    this._sentBytes += bytes
+    this._countSentBytes(bytes)
     this._sentMessages += 1
   }
 
@@ -221,7 +229,7 @@ class FlowControl {
   // nothing waits on.
 
   countSentBytes(bytes: number): void {
-    this._sentBytes += bytes
+    this._countSentBytes(bytes)
   }
 
   onReceivedBytes(bytes: number): void {
@@ -260,6 +268,12 @@ class FlowControl {
   private _advertiseMessages(): void {
     this._advertisedMessages = this._consumedMessages
     this._emit.msgWindowUpdate((this._consumedMessages + this._bdp.msgWindow) >>> 0)
+  }
+
+  private _countSentBytes(bytes: number): void {
+    const hadCredit = !this.isPastByteCredit
+    this._sentBytes += bytes
+    if (hadCredit) this._sentWithCredit = this._sentBytes
   }
 
   private _isOutOfCredit(): boolean {
