@@ -391,6 +391,9 @@ class ClientConnection implements MuxConnection {
   /** The attach results of channels the RECONCILE in flight lists, applied with its RECONCILED, which the server may have
    *  built before them (an SSE batch POST's RECONCILED goes once the POST's body is read). */
   private earlyAttachResults = new Map<number, number | null>()
+  /** Per channel, the first seq the RECONCILE in flight carries behind it on its wire. Its RECONCILED replays only what
+   *  comes before: the wire delivers the rest after the RECONCILE, or is gone, and the next one's RECONCILE replays it. */
+  private carriedFrom = new Map<number, number>()
   private channels = new Map<number, ChannelEntry>()
   private channelIndex = new Map<MuxChannel, number>()
   private sendBuffer: BufferedFrame[] = []
@@ -1371,6 +1374,7 @@ class ClientConnection implements MuxConnection {
   private declareOpenEntries({ skipUnnamed }: { skipUnnamed: boolean }): ReconcileOpenEntry[] {
     this.enterReconciling()
     this.reconcileIxes = new Map()
+    this.carriedFrom = new Map()
     const open: ReconcileOpenEntry[] = []
     for (const [ix, entry] of this.channels) {
       const isInitial = (entry.state.tag === 'pending' || entry.state.tag === 'releasing') && entry.state.initial
@@ -1410,7 +1414,11 @@ class ClientConnection implements MuxConnection {
     // A channel the server awaits is left out: its replay waits for its ATTACH_RESULT.
     const sentBefore = [...this.replayBuffers.values()].some((replay) => replay.length > 0)
     if (isInitialBatch && (this.sessionId !== null || sentBefore)) return []
-    return this.drainBufferedFrames(this.sendableChannels(), this.awaitedIxes)
+    const sendable = this.sendableChannels()
+    for (const { channelIx, seq } of this.sendBuffer)
+      if (seq !== undefined && sendable.has(channelIx) && !this.carriedFrom.has(channelIx))
+        this.carriedFrom.set(channelIx, seq)
+    return this.drainBufferedFrames(sendable, this.awaitedIxes)
   }
 
   private sendableChannels(): Set<number> | Map<number, ChannelEntry> {
@@ -1455,6 +1463,8 @@ class ClientConnection implements MuxConnection {
     this.reconcileIxes = new Map()
     const attachResults = this.earlyAttachResults
     this.earlyAttachResults = new Map()
+    const carriedFrom = this.carriedFrom
+    this.carriedFrom = new Map()
     for (const [ix, lastSeq] of attachResults) if (lastSeq !== null && !serverMap.has(ix)) serverMap.set(ix, lastSeq)
     // An initial channel left out is one the server awaits, until its ATTACH_RESULT. What one released meanwhile
     // queued goes out now: the server holds it for the attach.
@@ -1495,7 +1505,8 @@ class ClientConnection implements MuxConnection {
       if (entry.state.tag === 'pending') this.enterChannelOpen(ix)
       const replay = this.replayBuffers.get(ix)
       if (replay)
-        for (const frame of replay.getAfter(serverMap.get(ix)!)) releaseFrames.push({ kind: 'reconcile', frame })
+        for (const frame of replay.getAfter(serverMap.get(ix)!, (carriedFrom.get(ix) ?? Infinity) - 1))
+          releaseFrames.push({ kind: 'reconcile', frame })
       // A draining channel's queued frames follow its replay; then it has nothing left to send.
       if (entry.state.tag === 'draining') this.releaseChannel(ix, entry.channel)
       else channelsToOpen.push(entry.channel)

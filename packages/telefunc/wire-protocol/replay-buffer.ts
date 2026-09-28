@@ -71,11 +71,11 @@ export class ReplayBuffer {
     return stored
   }
 
-  /** Get all frames with seq > afterSeq, stopping at the first gap per lane.
+  /** Get all frames with afterSeq < seq <= throughSeq, stopping at the first gap per lane.
    *  When binary lane is active, merge-iterates both lanes by seq order. */
-  getAfter(afterSeq: number): Uint8Array<ArrayBuffer>[] {
-    const t = this.text.getAfter(afterSeq)
-    const b = this.binary.getAfter(afterSeq)
+  getAfter(afterSeq: number, throughSeq = Infinity): Uint8Array<ArrayBuffer>[] {
+    const t = this.text.getAfter(afterSeq, throughSeq)
+    const b = this.binary.getAfter(afterSeq, throughSeq)
     if (t.frames.length === 0) return b.frames
     if (b.frames.length === 0) return t.frames
 
@@ -221,8 +221,8 @@ class ReplayLane {
     this._evict(Date.now())
   }
 
-  /** Get all frames with seq > afterSeq, stopping at the first gap. */
-  getAfter(afterSeq: number): { seqs: number[]; frames: Uint8Array<ArrayBuffer>[] } {
+  /** Get all frames with afterSeq < seq <= throughSeq, stopping at the first gap. */
+  getAfter(afterSeq: number, throughSeq: number): { seqs: number[]; frames: Uint8Array<ArrayBuffer>[] } {
     const len = this.frames.length
     let lo = this.head
 
@@ -230,11 +230,11 @@ class ReplayLane {
     while (lo < len && this.seqs[lo]! <= afterSeq) lo++
 
     // 2. Nothing left or the very next frame is unrecoverable → abort
-    if (lo >= len || this.frames[lo] === null) return { seqs: [], frames: [] }
+    if (lo >= len || this.seqs[lo]! > throughSeq || this.frames[lo] === null) return { seqs: [], frames: [] }
 
     // 3. Collect continuous real frames (stop at next gap)
     let hi = lo + 1
-    while (hi < len && this.frames[hi] !== null) hi++
+    while (hi < len && this.seqs[hi]! <= throughSeq && this.frames[hi] !== null) hi++
 
     return {
       seqs: this.seqs.slice(lo, hi),

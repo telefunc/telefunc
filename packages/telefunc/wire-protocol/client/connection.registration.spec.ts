@@ -38,14 +38,16 @@ afterEach(() => {
 })
 
 /** A page on `wire`, and the server it talks to. `upgrade`: an SSE page that may move to a WebSocket. `delays`: how
- *  long a frame of a tag takes to reach the page, the ones after it on its wire waiting behind it. */
-function page(wire: Wire, { upgrade = false, delays = {} as Partial<Record<number, number>> } = {}) {
+ *  long a frame of a tag takes to reach the page, the ones after it on its wire waiting behind it. `refusedAfter`: how
+ *  long an SSE-batch page's upload request takes to be refused. */
+function page(wire: Wire, { upgrade = false, delays = {} as Partial<Record<number, number>>, refusedAfter = 0 } = {}) {
   const traffic: Traffic = { requests: 0, toServer: [], toPage: [] }
   /** Ends a wire as a network drop does, the latest last. */
   const cuts: (() => void)[] = []
   const failing: FailingPost = { next: null }
+  const upload: Upload = { endAfterNextReconcile: false, refusedAfter }
   if (wire === 'ws' || upgrade) vi.stubGlobal('WebSocket', webSocketTo(traffic, cuts, delays))
-  if (wire !== 'ws') config.fetch = sseServer(traffic, wire === 'sse-batch', cuts, delays, failing)
+  if (wire !== 'ws') config.fetch = sseServer(traffic, wire === 'sse-batch', cuts, delays, failing, upload)
   const telefuncUrl = `http://${crypto.randomUUID()}.test/_telefunc`
   const connectionKey = crypto.randomUUID()
   return {
@@ -55,6 +57,8 @@ function page(wire: Wire, { upgrade = false, delays = {} as Partial<Record<numbe
     wires: () => cuts.length,
     /** The next batch POST carrying a RECONCILE fails, before or after the server reads it. */
     failNextReconcilePost: (after: 'read' | 'unread') => void (failing.next = after),
+    /** The upload request loses what follows the next RECONCILE it carries, and ends 50 ms later. */
+    endUploadAfterNextReconcile: () => void (upload.endAfterNextReconcile = true),
     /** A channel the page opens, such as a call's callback. */
     channel<ClientToServer = unknown, ServerToClient = unknown>(channelId: string = crypto.randomUUID()) {
       return new ClientChannel<ClientToServer, ServerToClient>({
@@ -97,6 +101,7 @@ async function searchBox(channel: ReturnType<typeof page>['channel'], keystrokes
 }
 
 type FailingPost = { next: 'read' | 'unread' | null }
+type Upload = { endAfterNextReconcile: boolean; refusedAfter: number }
 
 function sseServer(
   traffic: Traffic,
@@ -104,13 +109,17 @@ function sseServer(
   cuts: (() => void)[],
   delays: Partial<Record<number, number>>,
   failing: FailingPost,
+  upload: Upload,
 ): typeof fetch {
   const sse = getTelefuncSseChannelHooks()
   return (async (url: string, init: RequestInit) => {
     traffic.requests++
     const body = init.body as Blob | ReadableStream<Uint8Array>
     // A browser that can't stream a request body (Firefox, Safari) gets a 400 and the page sends batch POSTs.
-    if (!(body instanceof Blob) && refuseUpload) return new Response('', { status: 400 })
+    if (!(body instanceof Blob) && refuseUpload) {
+      if (upload.refusedAfter) await new Promise((resolve) => setTimeout(resolve, upload.refusedAfter))
+      return new Response('', { status: 400 })
+    }
     // Bytes rather than the Blob: a Request reads a Blob body on a later event-loop turn, which fake timers don't give.
     let logged: Uint8Array | ReadableStream<Uint8Array>
     let fails: FailingPost['next'] = null
@@ -123,7 +132,7 @@ function sseServer(
       }
       if (fails === 'unread') throw new TypeError('fetch failed')
     } else {
-      logged = body.pipeThrough(framesThrough((frame) => traffic.toServer.push(frame[0]!)))
+      logged = body.pipeThrough(framesThrough((frame) => traffic.toServer.push(frame[0]!), upload))
     }
     const request = new Request(url, { method: 'POST', body: logged, duplex: 'half' } as RequestInit)
     const response = (await sse.handleRequest(request))!
@@ -152,12 +161,13 @@ function lengthPrefixed(bytes: Uint8Array): Uint8Array[] {
 }
 
 /** Passes an upload POST's body through, calling `onFrame` with each frame after its metadata header. */
-function framesThrough(onFrame: (frame: Uint8Array) => void) {
+function framesThrough(onFrame: (frame: Uint8Array) => void, upload: Upload) {
   let pending = new Uint8Array(0)
   let seenMetadata = false
+  let losing = false
   return new TransformStream<Uint8Array, Uint8Array>({
     transform(chunk, controller) {
-      controller.enqueue(chunk)
+      if (losing) return
       const joined = new Uint8Array(pending.length + chunk.length)
       joined.set(pending)
       joined.set(chunk, pending.length)
@@ -165,9 +175,20 @@ function framesThrough(onFrame: (frame: Uint8Array) => void) {
       while (offset + 4 <= joined.length) {
         const length = decodeU32(joined.subarray(offset, offset + 4) as Uint8Array<ArrayBuffer>)
         if (offset + 4 + length > joined.length) break
-        if (seenMetadata) onFrame(joined.subarray(offset + 4, offset + 4 + length))
-        seenMetadata = true
+        const frame = joined.slice(offset + 4, offset + 4 + length)
+        controller.enqueue(joined.slice(offset, offset + 4 + length))
         offset += 4 + length
+        if (!seenMetadata) {
+          seenMetadata = true
+          continue
+        }
+        onFrame(frame)
+        if (upload.endAfterNextReconcile && frame[0] === TAG.RECONCILE) {
+          upload.endAfterNextReconcile = false
+          losing = true
+          setTimeout(() => controller.terminate(), 50)
+          return
+        }
       }
       pending = joined.slice(offset)
     },
@@ -539,6 +560,69 @@ test.each([
     expect(received).toEqual(['carried'])
   },
 )
+
+describe.each(WIRES)('over %s', (wire) => {
+  test('a message the page queues in the tick it registers a channel goes to the server once', async () => {
+    const { channel, traffic } = page(wire)
+    const clock = register<string, string>()
+    const received: string[] = []
+    clock.listen((message) => void received.push(message))
+    const pageClock = channel<string, string>(clock.id)
+    await vi.advanceTimersByTimeAsync(500)
+    const texts = () => traffic.toServer.filter((tag) => tag === TAG.TEXT).length
+    const before = texts()
+    channel(register().id)
+    void pageClock.send('queued', { ack: false }) // goes behind the registration's RECONCILE
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(received).toEqual(['queued'])
+    expect(texts() - before).toBe(1)
+  })
+})
+
+test('a message queued with a registration, lost with the upload request that carried that RECONCILE, reaches the server on the next wire', async () => {
+  const { channel, wires, endUploadAfterNextReconcile } = page('sse')
+  const clock = register<string, string>()
+  const received: string[] = []
+  clock.listen((message) => void received.push(message))
+  const pageClock = channel<string, string>(clock.id)
+  await vi.advanceTimersByTimeAsync(500)
+  endUploadAfterNextReconcile()
+  channel(register().id)
+  void pageClock.send('queued', { ack: false })
+  await vi.advanceTimersByTimeAsync(3_000)
+  expect(wires()).toBe(2)
+  expect(received).toEqual(['queued'])
+})
+
+test('a message a follow-up RECONCILE carried into an upload request the server refuses late reaches the server once', async () => {
+  const { channel, traffic } = page('sse-batch', { refusedAfter: 300, delays: { [TAG.RECONCILED]: 100 } })
+  channel(register().id)
+  await vi.advanceTimersByTimeAsync(50) // the first RECONCILE is out, its RECONCILED on its way
+  const late = register<string, string>()
+  const received: string[] = []
+  late.listen((message) => void received.push(message))
+  void channel<string, string>(late.id).send('carried', { ack: false })
+  await vi.advanceTimersByTimeAsync(2_000)
+  expect(received).toEqual(['carried'])
+  expect(traffic.toServer.filter((tag) => tag === TAG.TEXT)).toHaveLength(1)
+})
+
+test('a message queued with a registration while an upgrade attempt stages goes to the server once, and the page still moves to a WebSocket', async () => {
+  const { channel, traffic } = page('sse', { upgrade: true, delays: { [TAG.READY]: 2_000 } })
+  const clock = register<string, string>()
+  const received: string[] = []
+  clock.listen((message) => void received.push(message))
+  const pageClock = channel<string, string>(clock.id)
+  await vi.advanceTimersByTimeAsync(500)
+  const connection = (pageClock as any)._connection
+  expect(connection.state.upgrade.tag).toBe('staging')
+  channel(register().id)
+  void pageClock.send('queued', { ack: false })
+  await vi.advanceTimersByTimeAsync(3_000)
+  expect(connection.transport.type).toBe('ws')
+  expect(received).toEqual(['queued'])
+  expect(traffic.toServer.filter((tag) => tag === TAG.TEXT)).toHaveLength(1)
+})
 
 describe('with every channel registered, a page sends each message once, and no frame it did not before', () => {
   const tags = (list: number[]) => list.filter((tag) => tag !== TAG.PING && tag !== TAG.PONG)
