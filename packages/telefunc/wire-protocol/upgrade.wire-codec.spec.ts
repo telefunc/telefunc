@@ -55,6 +55,18 @@ describe('upgrade wire vocabulary', () => {
     expect(() => decode(reserved)).toThrow()
   })
 
+  test('every tag names one frame', () => {
+    const tags = Object.values(TAG)
+    expect(new Set(tags).size).toBe(tags.length)
+  })
+
+  test("ATTACH_RESULT is a channel ctrl at 0x3b, and round-trips an attach's lastSeq or its absence", () => {
+    expect(TAG.ATTACH_RESULT).toBe(0x3b)
+    expect(isChannelCtrlTag(TAG.ATTACH_RESULT)).toBe(true)
+    expect(decode(encode.attachResult(3, 7))).toEqual({ tag: TAG.ATTACH_RESULT, index: 3, lastSeq: 7 })
+    expect(decode(encode.attachResult(3, null))).toEqual({ tag: TAG.ATTACH_RESULT, index: 3, lastSeq: null })
+  })
+
   test('a BARRIER round-trips at one entry and at the largest shape the caps admit', () => {
     const one: BarrierPayload = { sessionId: 'sess-0', upgradeId: 'upg-1', open: goodOpen }
     expect(decode(encode.barrier(one))).toEqual({ tag: TAG.BARRIER, payload: one })
@@ -186,6 +198,7 @@ describe('decodeClientFrame — direction', () => {
     ['ABORT', encode.abort(0, JSON.stringify('nope'))],
     ['ERROR', encode.error(0)],
     ['RECONCILED', encode.reconciled(reconciled())],
+    ['ATTACH_RESULT', encode.attachResult(0, 0)],
   ]
   test.each(serverOnly)('a client-sent %s is refused', (_name, frame) => {
     expect(() => clientFrame(frame)).toThrow(ProtocolViolationError)

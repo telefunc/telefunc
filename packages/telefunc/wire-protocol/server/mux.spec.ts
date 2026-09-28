@@ -24,7 +24,10 @@ function wires(mux: ChannelMux) {
     return wire
   }
   const texts = (wire: object) => sent.get(wire)!.flatMap((frame) => (frame.tag === TAG.TEXT ? [frame.text] : []))
-  return { sessions, open, texts, terminated }
+  const attachResults = (wire: object) =>
+    sent.get(wire)!.flatMap((frame) => (frame.tag === TAG.ATTACH_RESULT ? [frame.lastSeq] : []))
+  const count = (wire: object, tag: number) => sent.get(wire)!.filter((frame) => frame.tag === tag).length
+  return { sessions, open, texts, attachResults, count, terminated }
 }
 
 /** A wire whose page has one channel attached, which counts what reaches its listeners. */
@@ -106,26 +109,35 @@ test('a stale session whose RECONCILED never reached the page leaves the channel
   expect(texts(live).some((text) => text.includes('tick'))).toBe(true)
 })
 
-test("a new channel outwaits a reconcile its client has in flight for a channel the server hasn't registered", async () => {
+test("a new channel its client names after a reconcile naming one the server hasn't registered attaches within connectTtl, which ends one it never names", async () => {
   vi.useFakeTimers()
   try {
     const mux = new ChannelMux()
-    const clock = new ServerChannel<string, string>({ id: 'clock-ttl' })
-    let closedWith: unknown = 'open'
-    clock.onClose((err) => void (closedWith = err))
-    mux.registerChannel(clock)
-    const { connectTtl } = getServerConfig().channel
-    // The client names this channel only once the server answers its held reconcile, up to connectTtl later.
-    await vi.advanceTimersByTimeAsync(connectTtl + 500)
-    expect(closedWith).toBe('open')
-    await vi.advanceTimersByTimeAsync(connectTtl)
-    expect(closedWith).toBeInstanceOf(Error)
+    const { sessions, open, count } = wires(mux)
+    const wire = open()
+    const closedWith = new Map<string, unknown>()
+    for (const id of ['clock-ttl', 'never-named']) {
+      const channel = new ServerChannel<string, string>({ id })
+      channel.onClose((err) => void closedWith.set(id, err))
+      mux.registerChannel(channel)
+    }
+    // The reconcile the client has in flight names a callback whose call was aborted, and is answered at once.
+    const aborted = { id: 'aborted-callback', ix: 0, lastSeq: 0, initial: true as const }
+    void mux.onConnectionRawMessage(wire, encode.reconcile({ open: [aborted] }))
+    await vi.advanceTimersByTimeAsync(0)
+    expect(count(wire, TAG.RECONCILED)).toBe(1)
+    // So the client's next one names the new channel.
+    const clock = { id: 'clock-ttl', ix: 1, lastSeq: 0, initial: true as const }
+    await mux.onConnectionRawMessage(wire, encode.reconcile({ sessionId: sessions.get(wire), open: [aborted, clock] }))
+    await vi.advanceTimersByTimeAsync(getServerConfig().channel.connectTtl + 500)
+    expect(closedWith.has('clock-ttl')).toBe(false)
+    expect(closedWith.get('never-named')).toBeInstanceOf(Error)
   } finally {
     vi.useRealTimers()
   }
 })
 
-test('a wire that drops while a reconcile on it is held still detaches its channels, so what they send meanwhile replays', async () => {
+test('a wire that drops while it awaits a channel still detaches the ones its reconcile re-attached, so what they send meanwhile replays', async () => {
   const mux = new ChannelMux()
   const clock = new ServerChannel<string, string>({ id: 'clock-held' })
   mux.registerChannel(clock)
@@ -136,7 +148,7 @@ test('a wire that drops while a reconcile on it is held still detaches its chann
     encode.reconcile({ open: [{ id: 'clock-held', ix: 0, lastSeq: 0, initial: true }] }),
   )
   const known = sessions.get(wire)!
-  // The page adds a callback whose call was aborted: the server holds this reconcile, which re-attached the Clock.
+  // The page adds a callback whose call was aborted, which the wire awaits; this reconcile re-attached the Clock.
   void mux.onConnectionRawMessage(
     wire,
     encode.reconcile({
@@ -148,7 +160,7 @@ test('a wire that drops while a reconcile on it is held still detaches its chann
     }),
   )
   await new Promise((resolve) => setTimeout(resolve, 10))
-  mux.onConnectionClosed(wire, { permanent: false }) // the network drops during the hold
+  mux.onConnectionClosed(wire, { permanent: false }) // the network drops while the wire awaits the callback
   expect((clock as unknown as { _peer: unknown })._peer).toBeNull()
   void clock.send('while-offline')
   const reconnected = open()
@@ -159,7 +171,7 @@ test('a wire that drops while a reconcile on it is held still detaches its chann
   expect(texts(reconnected).some((text) => text.includes('while-offline'))).toBe(true)
 })
 
-test("a frame sent to a reconnect's wire that dropped while its first reconcile was held replays on the next reconnect", async () => {
+test("what a channel sends once its reconnect's wire dropped while awaiting a lost callback replays on the next reconnect", async () => {
   const mux = new ChannelMux()
   const clock = new ServerChannel<string, string>({ id: 'clock-first' })
   mux.registerChannel(clock)
@@ -171,7 +183,7 @@ test("a frame sent to a reconnect's wire that dropped while its first reconcile 
   )
   const known = sessions.get(first)!
   mux.onConnectionClosed(first, { permanent: false })
-  // The reconnect names a callback whose call was lost in the cut, so the server holds its first reconcile.
+  // The reconnect names a callback whose call was lost in the cut, so its wire awaits it.
   const held = open()
   void mux.onConnectionRawMessage(
     held,
@@ -184,7 +196,7 @@ test("a frame sent to a reconnect's wire that dropped while its first reconcile 
     }),
   )
   await new Promise((resolve) => setTimeout(resolve, 10))
-  mux.onConnectionClosed(held, { permanent: false }) // cut again, inside the hold
+  mux.onConnectionClosed(held, { permanent: false }) // cut again, while it awaits the callback
   void clock.send('in-the-hold')
   const live = open()
   await mux.onConnectionRawMessage(
@@ -221,4 +233,167 @@ test('a peer flooding past what its channels can have in flight is still termina
   )
   await wire.deliver(frames)
   expect(wire.terminated()).toBe(true)
+})
+
+test("a RECONCILE that crossed the ATTACH_RESULT saying its channel never registered doesn't await it again", async () => {
+  vi.useFakeTimers()
+  try {
+    const mux = new ChannelMux()
+    const { sessions, open, attachResults } = wires(mux)
+    const wire = open()
+    const lost = { id: 'lost-call-callback', ix: 0, lastSeq: 0, initial: true as const }
+    await mux.onConnectionRawMessage(wire, encode.reconcile({ open: [lost] }))
+    await vi.advanceTimersByTimeAsync(getServerConfig().channel.connectTtl)
+    // The page named it again before that ATTACH_RESULT reached it, and releases it once it does.
+    await mux.onConnectionRawMessage(wire, encode.reconcile({ sessionId: sessions.get(wire), open: [lost] }))
+    const late = new ServerChannel({ id: lost.id })
+    mux.registerChannel(late) // its call arrives after all
+    await vi.advanceTimersByTimeAsync(10)
+    expect(attachResults(wire)).toEqual([null])
+    expect((late as unknown as { _peer: unknown })._peer).toBeNull()
+  } finally {
+    vi.useRealTimers()
+  }
+})
+
+test('a wire that closes stops awaiting the channels it named', async () => {
+  const mux = new ChannelMux()
+  const { open } = wires(mux)
+  const wire = open()
+  await mux.onConnectionRawMessage(
+    wire,
+    encode.reconcile({ open: [{ id: 'callback-on-its-way', ix: 0, lastSeq: 0, initial: true }] }),
+  )
+  mux.onConnectionClosed(wire, { permanent: false })
+  expect((mux as unknown as { pendingRegisterWaiters: Map<string, unknown> }).pendingRegisterWaiters.size).toBe(0)
+  const late = new ServerChannel({ id: 'callback-on-its-way' })
+  mux.registerChannel(late)
+  expect((late as unknown as { _peer: unknown })._peer).toBeNull()
+})
+
+test('what a wire holds for a channel it awaits counts against its recv backlog', async () => {
+  const mux = new ChannelMux()
+  const { open, terminated } = wires(mux)
+  const wire = open()
+  await mux.onConnectionRawMessage(
+    wire,
+    encode.reconcile({ open: [{ id: 'never-registered', ix: 0, lastSeq: 0, initial: true }] }),
+  )
+  for (let seq = 1; seq <= WIRE_RECV_BACKLOG_BASE_FRAMES + 1 && !terminated.has(wire); seq++)
+    await mux.onConnectionRawMessage(wire, encode.text(0, '0', seq))
+  expect(terminated.has(wire)).toBe(true)
+})
+
+/** A page's SSE wire with a channel attached and a callback the server awaits, and the WebSocket it staged. */
+async function upgradingWithAwaitedCallback(mux: ChannelMux) {
+  mux.registerChannel(new ServerChannel({ id: 'clock-upgrading' }))
+  const { sessions, open, texts, attachResults } = wires(mux)
+  const old = open()
+  const clock = { id: 'clock-upgrading', ix: 0, lastSeq: 0 }
+  const callback = { id: 'callback-upgrading', ix: 1, lastSeq: 0, initial: true as const }
+  await mux.onConnectionRawMessage(old, encode.reconcile({ open: [{ ...clock, initial: true }, callback] }))
+  await mux.onConnectionRawMessage(old, encode.text(1, '"sent before its call arrived"', 1))
+  const ws = open()
+  const sessionId = sessions.get(old)!
+  await mux.onConnectionRawMessage(ws, encode.prepare({ upgradeId: 'upgrade', sessionId }))
+  const barrier = encode.barrier({ sessionId, upgradeId: 'upgrade', open: [clock, callback] })
+  const backlog = (wire: object) =>
+    (
+      mux as unknown as { connectionEntries: Map<object, { state: { recvBacklogFrames: number } }> }
+    ).connectionEntries.get(wire)!.state.recvBacklogFrames
+  return { old, ws, barrier, callback, texts, attachResults, backlog }
+}
+
+test('a callback the barrier moves to the WebSocket gets what the old wire held for it once its call arrives there', async () => {
+  const mux = new ChannelMux()
+  const { old, ws, barrier, callback, texts, attachResults, backlog } = await upgradingWithAwaitedCallback(mux)
+  await mux.onConnectionRawMessage(old, barrier)
+  expect(backlog(ws)).toBe(1)
+  const server = new ServerChannel<string, string>({ id: callback.id })
+  const received: string[] = []
+  server.listen((message) => void received.push(message))
+  mux.registerChannel(server)
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  expect(received).toEqual(['sent before its call arrived'])
+  expect(attachResults(ws)).toEqual([1])
+  expect(backlog(ws)).toBe(0)
+  void server.send('over the WebSocket')
+  expect(texts(ws).some((text) => text.includes('over the WebSocket'))).toBe(true)
+})
+
+test('a callback whose call arrives while the barrier listing it waits its turn gets what the old wire held for it, on the WebSocket', async () => {
+  const mux = new ChannelMux()
+  const { old, ws, barrier, callback, texts, attachResults } = await upgradingWithAwaitedCallback(mux)
+  const committing = mux.onConnectionRawMessage(old, barrier)
+  const server = new ServerChannel<string, string>({ id: callback.id })
+  const received: string[] = []
+  server.listen((message) => void received.push(message))
+  mux.registerChannel(server) // before the barrier's turn
+  await committing
+  expect(received).toEqual(['sent before its call arrived'])
+  expect([...attachResults(old), ...attachResults(ws)]).toEqual([])
+  void server.send('over the WebSocket')
+  expect(texts(ws).some((text) => text.includes('over the WebSocket'))).toBe(true)
+})
+
+/** A page's SSE wire with a channel attached, a channel returned to it later, and what its upgrade sends. */
+async function upgradeOf(mux: ChannelMux) {
+  const clock = { id: crypto.randomUUID(), ix: 0, lastSeq: 0 }
+  const returned = { id: crypto.randomUUID(), ix: 1, lastSeq: 0 }
+  for (const { id } of [clock, returned]) mux.registerChannel(new ServerChannel({ id }))
+  const { sessions, open, count, terminated } = wires(mux)
+  const old = open()
+  await mux.onConnectionRawMessage(old, encode.reconcile({ open: [{ ...clock, initial: true }] }))
+  const sessionId = sessions.get(old)!
+  return {
+    old,
+    sessionId,
+    open,
+    count,
+    terminated,
+    session: () => sessions.get(old),
+    prepare: (ws: object, upgradeId: string) =>
+      mux.onConnectionRawMessage(ws, encode.prepare({ upgradeId, sessionId })),
+    register: () =>
+      mux.onConnectionRawMessage(old, encode.reconcile({ sessionId, open: [clock, { ...returned, initial: true }] })),
+    barrier: (upgradeId: string) =>
+      mux.onConnectionRawMessage(old, encode.barrier({ sessionId, upgradeId, open: [clock, returned] })),
+  }
+}
+
+test('a channel the page registers on its SSE wire while its upgrade is staged leaves the session and the stage, so the barrier commits', async () => {
+  const mux = new ChannelMux()
+  const upgrade = await upgradeOf(mux)
+  const ws = upgrade.open()
+  await upgrade.prepare(ws, 'upgrade')
+  await upgrade.register()
+  expect(upgrade.session()).toBe(upgrade.sessionId)
+  expect(upgrade.terminated.has(ws)).toBe(false)
+  await upgrade.barrier('upgrade')
+  expect(upgrade.count(ws, TAG.RECONCILED)).toBe(1)
+})
+
+test('a PREPARE the server reads after a registration on the SSE wire still stages, since the session stays', async () => {
+  const mux = new ChannelMux()
+  const upgrade = await upgradeOf(mux)
+  const ws = upgrade.open()
+  await upgrade.register()
+  await upgrade.prepare(ws, 'upgrade')
+  expect(upgrade.count(ws, TAG.READY)).toBe(1)
+  await upgrade.barrier('upgrade')
+  expect(upgrade.count(ws, TAG.RECONCILED)).toBe(1)
+})
+
+test("a page's next upgrade attempt replaces the stage its previous one left on the server", async () => {
+  const mux = new ChannelMux()
+  const upgrade = await upgradeOf(mux)
+  const abandoned = upgrade.open()
+  await upgrade.prepare(abandoned, 'first') // its READY never reached the page, and its close never reaches the server
+  await upgrade.register()
+  const ws = upgrade.open()
+  await upgrade.prepare(ws, 'second')
+  expect(upgrade.count(ws, TAG.READY)).toBe(1)
+  expect(upgrade.terminated.has(abandoned)).toBe(true)
+  await upgrade.barrier('second')
+  expect(upgrade.count(ws, TAG.RECONCILED)).toBe(1)
 })

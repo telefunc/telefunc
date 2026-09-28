@@ -403,6 +403,17 @@ test('a channel whose close timed out while the reconnect listing it is in fligh
   connection.dispose()
 })
 
+test('a channel whose ATTACH_RESULT overtakes the RECONCILED leaving it out opens with that RECONCILED', () => {
+  const channel = createChannel()
+  const connection = ClientConnection.getOrCreate('http://attach-early.test', channel as never, stalledOptions()) as any
+  connection.buildReconcileFrame()
+  // Its call reached the server before the end of the batch POST carrying the RECONCILE, whose RECONCILED goes then.
+  connection.dispatchFrame(decode(encode.attachResult(0, 0)))
+  const { channelsToOpen } = connection.applyReconciled(reconciled({ sessionId: 'early', open: [] }), null)
+  expect(channelsToOpen).toEqual([channel])
+  connection.dispose()
+})
+
 test("a first connect's retry holds back a newer frame behind the ones its failed attempt sent", () => {
   const channel = createChannel()
   const connection = ClientConnection.getOrCreate('http://first-retry.test', channel as never, stalledOptions()) as any

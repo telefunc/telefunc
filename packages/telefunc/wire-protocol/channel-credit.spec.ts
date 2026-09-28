@@ -224,17 +224,18 @@ afterEach(() => {
   serverConfig.channel = {}
 })
 
-test('a stream the page consumes while its first reconcile waits on another channel keeps flowing past 100 messages', async () => {
+test('a stream the page consumes while the server awaits another channel its first reconcile named keeps flowing past 100 messages', async () => {
   const clock = loop.open<never, number>()
   const page = consume(clock.page)
   produce(clock.server)
-  // The page opens a second channel whose server side isn't registered yet, so the server holds RECONCILED for it.
+  // The page opens a second channel whose server side isn't registered yet, which the server awaits.
   const late = loop.open<never, number>({ registered: false })
-  await run(1_000)
-  expect(page.received.length).toBeGreaterThanOrEqual(CREDIT_MSG_WINDOW_INITIAL)
+  await run(50)
+  expect(page.received.length).toBeGreaterThan(CREDIT_MSG_WINDOW_INITIAL)
   late.register()
-  await run(200)
-  expect(page.received.length).toBeGreaterThan(10 * CREDIT_MSG_WINDOW_INITIAL)
+  const before = page.received.length
+  await run(50)
+  expect(page.received.length).toBeGreaterThan(before + CREDIT_MSG_WINDOW_INITIAL)
   expect(page.received).toEqual([...page.received.keys()])
 })
 

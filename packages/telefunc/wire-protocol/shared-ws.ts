@@ -124,6 +124,9 @@ const TAG = {
    *  credit through the header's seq, mod 2^32. What of them hasn't reached the receiver by then was lost beyond the
    *  replay buffer. */
   SENT: 0x3a as const,
+  /** Server → client: settles an initial channel a RECONCILED left out because the server hadn't registered it yet,
+   *  either attached with the server's `lastSeq`, or not registered within `connectTtl`. */
+  ATTACH_RESULT: 0x3b as const,
 }
 
 function isConnCtrlTag(tag: number): boolean {
@@ -146,9 +149,9 @@ type ReconcileOpenEntry = {
   lastSeq: number
   /** `initial: true` means this is the first reconcile for that channel — the server may
    *  not have created it yet (late-creation race during request body parse), so the server
-   *  should wait up to `connectTtl` for it. Established channels (already reconciled at
-   *  least once) omit `initial`; the server fails them fast if they're missing rather than
-   *  stalling the entire reconcile. */
+   *  awaits it up to `connectTtl`, and an ATTACH_RESULT settles it. Established channels
+   *  (already reconciled at least once) omit `initial`; the server fails them fast if they're
+   *  missing. */
   initial?: true
   /** A broadcast's subscriptions as of this (re)attach, applied before its `onOpen` fires. */
   broadcast?: BroadcastSubscriptions
@@ -244,6 +247,8 @@ type ChannelCtrlFrame =
   | { tag: typeof TAG.BROADCAST_UNSUB; index: number; binary: boolean }
   | { tag: typeof TAG.BDP_PING; index: number }
   | { tag: typeof TAG.BDP_PING_ACK; index: number }
+  /** `lastSeq` is null when the channel wasn't attached. */
+  | { tag: typeof TAG.ATTACH_RESULT; index: number; lastSeq: number | null }
 
 /** Frames that carry an `index` (channel ix) — both data and per-channel ctrl. */
 type ChannelFrame = ChannelDataFrame | ChannelCtrlFrame
@@ -397,6 +402,14 @@ const encode = {
   },
   bdpPing: (index: number) => encodeBareFrame(TAG.BDP_PING, index),
   bdpPingAck: (index: number) => encodeBareFrame(TAG.BDP_PING_ACK, index),
+  /** Wire: [header][u8 attached][u32 lastSeq] */
+  attachResult(index: number, lastSeq: number | null): Uint8Array<ArrayBuffer> {
+    const frame = new Uint8Array(HEADER + 5)
+    writeHeader(frame, TAG.ATTACH_RESULT, index, 0)
+    frame[HEADER] = lastSeq === null ? 0 : 1
+    writeU32(frame, HEADER + 1, lastSeq ?? 0)
+    return frame
+  },
   broadcastSub(index: number, binary: boolean): Uint8Array<ArrayBuffer> {
     const frame = new Uint8Array(HEADER + 1)
     writeHeader(frame, TAG.BROADCAST_SUB, index, 0)
@@ -527,6 +540,9 @@ function decode(frame: Uint8Array): DecodedFrame {
     case TAG.BROADCAST_UNSUB:
       assertProtocol(payload.length >= 1, 'BROADCAST_UNSUB payload too short')
       return { tag: TAG.BROADCAST_UNSUB, index, binary: payload[0] === 1 }
+    case TAG.ATTACH_RESULT:
+      assertProtocol(payload.length >= 5, 'ATTACH_RESULT payload too short')
+      return { tag: TAG.ATTACH_RESULT, index, lastSeq: payload[0] === 1 ? readU32(payload, 1) : null }
 
     default:
       throw new ProtocolViolationError(`unknown wire frame tag ${tag}`)
