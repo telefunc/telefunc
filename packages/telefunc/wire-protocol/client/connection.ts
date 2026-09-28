@@ -262,6 +262,8 @@ type UpgradeState =
       tag: 'staging'
       attempt: AbortController
       deadline: ReturnType<typeof setTimeout> | null
+      /** READY arrived: the barrier comes next, and a registration waits for the handoff. */
+      ready: boolean
     }
   | {
       tag: 'committing'
@@ -350,6 +352,8 @@ class ClientConnection implements MuxConnection {
    *  the state it guards. */
   private reconciling = false
   private reconcileTimer: ReturnType<typeof setTimeout> | null = null
+  /** Resolved once no RECONCILE is in flight. */
+  private reconcileSettledWaiters: (() => void)[] = []
   private ttl: ReturnType<typeof setTimeout> | null = null
   private get closed(): boolean {
     return this.state.tag === 'closed'
@@ -425,7 +429,20 @@ class ClientConnection implements MuxConnection {
 
   private enterUpgradeStaging(attempt: AbortController): void {
     assert(this.state.tag === 'open' && this.state.upgrade.tag === 'none')
-    this.state = { tag: 'open', upgrade: { tag: 'staging', attempt, deadline: null } }
+    this.state = { tag: 'open', upgrade: { tag: 'staging', attempt, deadline: null, ready: false } }
+  }
+
+  private enterUpgradeReady(attempt: AbortController): void {
+    assert(this.state.tag === 'open')
+    const u = this.state.upgrade
+    assert(u.tag === 'staging' && u.attempt === attempt)
+    u.ready = true
+  }
+
+  /** READY arrived, so the barrier comes next. It is a RECONCILE too, one at a time, and lists what the server has on
+   *  the old wire, so no other RECONCILE goes out until the handoff. */
+  private get upgradeReady(): boolean {
+    return this.state.tag === 'open' && this.state.upgrade.tag === 'staging' && this.state.upgrade.ready
   }
 
   private armAttemptDeadline(attempt: AbortController): void {
@@ -564,14 +581,15 @@ class ClientConnection implements MuxConnection {
   }
 
   /** Send the queued RECONCILE on the live wire. No-op when nothing's queued. While the wire
-   *  can't take it (connecting, awaiting RECONCILED, mid-upgrade) the obligation is KEPT, not
-   *  consumed — `registerReconcileTimer` stays non-null as the marker (which also keeps
+   *  can't take it (connecting, awaiting RECONCILED, from an upgrade's READY until its handoff)
+   *  the obligation is KEPT, not consumed — `registerReconcileTimer` stays non-null as the marker (which also keeps
    *  `canSendImmediately` false so data frames buffer behind the RECONCILE), and the
    *  transitions that make the wire sendable re-invoke this: `_onTransportOpen`, a settled
    *  RECONCILED, upgrade-attempt exit, and handoff completion. */
   private flushPendingRegisterReconcile(): void {
     if (this.registerReconcileTimer === null) return
-    if (this.state.tag !== 'open' || this.state.upgrade.tag !== 'none' || this.reconciling) return
+    if (this.state.tag !== 'open' || this.state.upgrade.tag === 'committing' || this.upgradeReady) return
+    if (this.reconciling) return
     this.sendReconcileBatch(this.stageReconcileBatch())
     this.releaseUnconfirmedReleasing()
   }
@@ -951,6 +969,12 @@ class ClientConnection implements MuxConnection {
       clearTimeout(this.reconcileTimer)
       this.reconcileTimer = null
     }
+    for (const resolve of this.reconcileSettledWaiters.splice(0)) resolve()
+  }
+
+  private reconcileSettled(signal: AbortSignal): Promise<void> {
+    if (!this.reconciling) return Promise.resolve()
+    return settledOrAborted(new Promise<void>((resolve) => this.reconcileSettledWaiters.push(resolve)), signal)
   }
 
   /** RECONCILED never arrived on a silently-stalled wire — same outcome as a missed pong:
@@ -1145,6 +1169,7 @@ class ClientConnection implements MuxConnection {
       if (this.registerReconcileTimer === null) this.drainBufferedFramesToWire()
       return null
     }
+    this.enterUpgradeReady(attempt)
     return { upgradeId, probeHeartbeat }
   }
 
@@ -1178,6 +1203,9 @@ class ClientConnection implements MuxConnection {
     sessionId: string,
     attempt: AbortController,
   ): Promise<void> {
+    // After the RECONCILED of the one in flight, which may name a channel the barrier lists.
+    await this.reconcileSettled(attempt.signal)
+    if (attempt.signal.aborted) return
     this.enterUpgradeCommitting(from, to, session, attempt)
     const emission = await from.emitBarrier(() => this.buildBarrierFrame(sessionId, session.upgradeId), attempt.signal)
 
@@ -1476,11 +1504,13 @@ class ClientConnection implements MuxConnection {
     for (const frame of this.drainBufferedFrames(releasable, this.channels)) releaseFrames.push(frame)
 
     const reconcileAgain = hasNewChannels || releasedMeanwhile
-    if (reconcileAgain) {
+    if (reconcileAgain && !this.upgradeReady) {
       const reconcileBatch = this.stageReconcileBatch()
       this.appendReconcileBatch(releaseFrames, reconcileBatch)
     } else {
       this.exitReconciling()
+      // The barrier leaves out what the follow-up would name, and ends what it would leave out.
+      if (reconcileAgain) this.scheduleRegisterReconcile()
     }
 
     return { frames: releaseFrames, channelsToOpen, reconcileComplete: !reconcileAgain }

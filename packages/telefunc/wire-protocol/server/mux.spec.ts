@@ -26,8 +26,8 @@ function wires(mux: ChannelMux) {
   const texts = (wire: object) => sent.get(wire)!.flatMap((frame) => (frame.tag === TAG.TEXT ? [frame.text] : []))
   const attachResults = (wire: object) =>
     sent.get(wire)!.flatMap((frame) => (frame.tag === TAG.ATTACH_RESULT ? [frame.lastSeq] : []))
-  const reconcileds = (wire: object) => sent.get(wire)!.filter((frame) => frame.tag === TAG.RECONCILED).length
-  return { sessions, open, texts, attachResults, reconcileds, terminated }
+  const count = (wire: object, tag: number) => sent.get(wire)!.filter((frame) => frame.tag === tag).length
+  return { sessions, open, texts, attachResults, count, terminated }
 }
 
 /** A wire whose page has one channel attached, which counts what reaches its listeners. */
@@ -113,7 +113,7 @@ test("a new channel its client names after a reconcile naming one the server has
   vi.useFakeTimers()
   try {
     const mux = new ChannelMux()
-    const { sessions, open, reconcileds } = wires(mux)
+    const { sessions, open, count } = wires(mux)
     const wire = open()
     const closedWith = new Map<string, unknown>()
     for (const id of ['clock-ttl', 'never-named']) {
@@ -125,7 +125,7 @@ test("a new channel its client names after a reconcile naming one the server has
     const aborted = { id: 'aborted-callback', ix: 0, lastSeq: 0, initial: true as const }
     void mux.onConnectionRawMessage(wire, encode.reconcile({ open: [aborted] }))
     await vi.advanceTimersByTimeAsync(0)
-    expect(reconcileds(wire)).toBe(1)
+    expect(count(wire, TAG.RECONCILED)).toBe(1)
     // So the client's next one names the new channel.
     const clock = { id: 'clock-ttl', ix: 1, lastSeq: 0, initial: true as const }
     await mux.onConnectionRawMessage(wire, encode.reconcile({ sessionId: sessions.get(wire), open: [aborted, clock] }))
@@ -334,4 +334,66 @@ test('a callback whose call arrives while the barrier listing it waits its turn 
   expect([...attachResults(old), ...attachResults(ws)]).toEqual([])
   void server.send('over the WebSocket')
   expect(texts(ws).some((text) => text.includes('over the WebSocket'))).toBe(true)
+})
+
+/** A page's SSE wire with a channel attached, a channel returned to it later, and what its upgrade sends. */
+async function upgradeOf(mux: ChannelMux) {
+  const clock = { id: crypto.randomUUID(), ix: 0, lastSeq: 0 }
+  const returned = { id: crypto.randomUUID(), ix: 1, lastSeq: 0 }
+  for (const { id } of [clock, returned]) mux.registerChannel(new ServerChannel({ id }))
+  const { sessions, open, count, terminated } = wires(mux)
+  const old = open()
+  await mux.onConnectionRawMessage(old, encode.reconcile({ open: [{ ...clock, initial: true }] }))
+  const sessionId = sessions.get(old)!
+  return {
+    old,
+    sessionId,
+    open,
+    count,
+    terminated,
+    session: () => sessions.get(old),
+    prepare: (ws: object, upgradeId: string) =>
+      mux.onConnectionRawMessage(ws, encode.prepare({ upgradeId, sessionId })),
+    register: () =>
+      mux.onConnectionRawMessage(old, encode.reconcile({ sessionId, open: [clock, { ...returned, initial: true }] })),
+    barrier: (upgradeId: string) =>
+      mux.onConnectionRawMessage(old, encode.barrier({ sessionId, upgradeId, open: [clock, returned] })),
+  }
+}
+
+test('a channel the page registers on its SSE wire while its upgrade is staged leaves the session and the stage, so the barrier commits', async () => {
+  const mux = new ChannelMux()
+  const upgrade = await upgradeOf(mux)
+  const ws = upgrade.open()
+  await upgrade.prepare(ws, 'upgrade')
+  await upgrade.register()
+  expect(upgrade.session()).toBe(upgrade.sessionId)
+  expect(upgrade.terminated.has(ws)).toBe(false)
+  await upgrade.barrier('upgrade')
+  expect(upgrade.count(ws, TAG.RECONCILED)).toBe(1)
+})
+
+test('a PREPARE the server reads after a registration on the SSE wire still stages, since the session stays', async () => {
+  const mux = new ChannelMux()
+  const upgrade = await upgradeOf(mux)
+  const ws = upgrade.open()
+  await upgrade.register()
+  await upgrade.prepare(ws, 'upgrade')
+  expect(upgrade.count(ws, TAG.READY)).toBe(1)
+  await upgrade.barrier('upgrade')
+  expect(upgrade.count(ws, TAG.RECONCILED)).toBe(1)
+})
+
+test("a page's next upgrade attempt replaces the stage its previous one left on the server", async () => {
+  const mux = new ChannelMux()
+  const upgrade = await upgradeOf(mux)
+  const abandoned = upgrade.open()
+  await upgrade.prepare(abandoned, 'first') // its READY never reached the page, and its close never reaches the server
+  await upgrade.register()
+  const ws = upgrade.open()
+  await upgrade.prepare(ws, 'second')
+  expect(upgrade.count(ws, TAG.READY)).toBe(1)
+  expect(upgrade.terminated.has(abandoned)).toBe(true)
+  await upgrade.barrier('second')
+  expect(upgrade.count(ws, TAG.RECONCILED)).toBe(1)
 })

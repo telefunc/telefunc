@@ -404,9 +404,12 @@ class ChannelMux {
   }
 
   /** An ordinary reconcile claims its session, abandoning any probe staged on it — unless a barrier
-   *  is mid-commit on that session, in which case the claim is refused instead. */
+   *  is mid-commit on that session, in which case the claim is refused instead. One on the wire that
+   *  holds the session is that wire's own, and leaves the page's upgrade attempt be. */
   private claimSessionForReconcile(ctrl: ReconcilePayload, entry: ConnectionEntry, connection: Wire): void {
-    for (const claimed of [ctrl.sessionId, entry.transport.getSessionId(connection)]) {
+    const own = entry.transport.getSessionId(connection)
+    if (ctrl.sessionId !== undefined && ctrl.sessionId === own) return
+    for (const claimed of [ctrl.sessionId, own]) {
       if (claimed === undefined) continue
       const staleProbe = this.stagedByPrevSession.get(claimed)
       if (staleProbe === undefined) continue
@@ -425,7 +428,12 @@ class ChannelMux {
   ): null {
     assertProtocol(!entry.transport.getSessionId(connection), 'PREPARE on a reconciled wire')
     assertProtocol(this.sessions.peekSession(payload.sessionId), 'PREPARE for an unknown session')
-    assertProtocol(!this.stagedByPrevSession.has(payload.sessionId), 'session already staged')
+    // A page stages one attempt at a time, so a newer PREPARE replaces what an earlier attempt left staged.
+    const staged = this.stagedByPrevSession.get(payload.sessionId)
+    if (staged !== undefined) {
+      assertProtocol(this.stagedUpgrades.get(staged)?.phase === 'staged', 'session already committing')
+      this.abandonStage(staged)
+    }
     assertProtocol(this.stagedUpgrades.size < UPGRADE_MAX_STAGED_RECORDS, 'staged record budget')
     assertProtocol(this.stagedBytes + rawByteLength <= UPGRADE_MAX_STAGED_BYTES, 'staged byte budget')
 
@@ -537,13 +545,17 @@ class ChannelMux {
     const finalizeUpgrade = isBarrier && ctrl.sessionId ? (this.sessionFinalizers.get(ctrl.sessionId) ?? null) : null
     state.reconciling = true
     this.resetPingTimer(connection)
-    const newSessionId = crypto.randomUUID()
+    // One on the wire that holds the session it names keeps it, and so what is bound to it: a staged upgrade.
+    const newSessionId =
+      ctrl.sessionId !== undefined && ctrl.sessionId === transport.getSessionId(connection)
+        ? ctrl.sessionId
+        : crypto.randomUUID()
     const openList = this.reconcileSession(ctrl.sessionId, newSessionId, ctrl.open, entry, connection)
 
-    // The connection may have closed since this frame arrived. The client never received this
-    // session's id (`reconciled` was never sent), so no future reconcile can reference it —
-    // remove the session outright, but preserve the close kind: a transient close leaves the
-    // channels their `_onPeerDisconnect` grace so the client's retry can re-attach them.
+    // The connection may have closed since this frame arrived, so its RECONCILED never goes out.
+    // Remove the session outright, one the client never received or its own, but preserve the
+    // close kind: a transient close leaves the channels their `_onPeerDisconnect` grace so the
+    // client's retry can re-attach them.
     if (state.closed) {
       const reason = state.closed.isPermanent ? DETACH_REASON.PERMANENT : DETACH_REASON.TRANSIENT
       const session = this.sessions.removeSession(newSessionId)

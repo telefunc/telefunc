@@ -70,6 +70,27 @@ function register<ClientToServer = unknown, ServerToClient = unknown>(id: string
   return channel
 }
 
+/** A keystroke every `everyMs`, each aborting the previous call, whose request had left, and making a callback the
+ *  server registers. `openedAfter`: how long each callback that opened took. */
+async function searchBox(channel: ReturnType<typeof page>['channel'], keystrokes: number, everyMs: number) {
+  const openedAfter: number[] = []
+  const networkErrors: unknown[] = []
+  const onClose = (err: unknown) => void (err instanceof NetworkError && networkErrors.push(err))
+  let previous: ClientChannel<unknown, unknown> | null = null
+  for (let keystroke = 0; keystroke < keystrokes; keystroke++) {
+    previous?.abort()
+    const server = register()
+    server.onClose(onClose)
+    const callback = channel(server.id)
+    const createdAt = Date.now()
+    callback.onOpen(() => void openedAfter.push(Date.now() - createdAt))
+    callback.onClose(onClose)
+    previous = callback
+    await vi.advanceTimersByTimeAsync(everyMs)
+  }
+  return { openedAfter, networkErrors }
+}
+
 function sseServer(
   traffic: Traffic,
   refuseUpload: boolean,
@@ -382,6 +403,66 @@ describe.each(['sse', 'sse-batch'] as const)('over %s', (wire) => {
     expect(connection.transport.type).toBe('ws')
     expect(closedWith).not.toBe('open')
     expect(closedWith).not.toBeInstanceOf(NetworkError)
+  })
+})
+
+describe.each(['sse', 'sse-batch'] as const)('over %s, while an upgrade attempt waits for its READY', (wire) => {
+  test('a channel the server returns opens at once, what the page sends goes out, and the page still moves to a WebSocket', async () => {
+    const { channel } = page(wire, { upgrade: true, delays: { [TAG.READY]: 6_000 } })
+    const clock = register<string, string>()
+    const received: string[] = []
+    clock.listen((message) => void received.push(message))
+    const pageClock = channel<string, string>(clock.id)
+    await vi.advanceTimersByTimeAsync(500)
+    const connection = (pageClock as any)._connection
+    expect(connection.state.upgrade.tag).toBe('staging')
+    const returned = register<string, string>()
+    const closedWith: unknown[] = []
+    returned.onClose((err) => void closedWith.push(err))
+    const pageReturned = channel<string, string>(returned.id)
+    pageReturned.onClose((err) => void closedWith.push(err))
+    const messages: string[] = []
+    pageReturned.listen((message) => void messages.push(message))
+    const createdAt = Date.now()
+    let openedAfter = -1
+    pageReturned.onOpen(() => void (openedAfter = Date.now() - createdAt))
+    void pageClock.send('tick', { ack: false })
+    await vi.advanceTimersByTimeAsync(500)
+    expect(openedAfter).toBeGreaterThanOrEqual(0)
+    expect(openedAfter).toBeLessThan(500)
+    expect(received).toEqual(['tick'])
+    await vi.advanceTimersByTimeAsync(9_000)
+    expect(closedWith).toEqual([])
+    expect(connection.transport.type).toBe('ws')
+    void returned.send('over the WebSocket', { ack: false })
+    await vi.advanceTimersByTimeAsync(200)
+    expect(messages).toEqual(['over the WebSocket'])
+  })
+
+  test('a search box registering a callback on every keystroke while the attempt stages opens each before the next keystroke, and the page still moves to a WebSocket', async () => {
+    const { channel } = page(wire, { upgrade: true, delays: { [TAG.READY]: 3_000 } })
+    const connection = (channel(register().id) as any)._connection
+    await vi.advanceTimersByTimeAsync(500)
+    expect(connection.state.upgrade.tag).toBe('staging')
+    const { openedAfter, networkErrors } = await searchBox(channel, 27, 90)
+    expect(connection.state.upgrade.tag).toBe('staging')
+    expect(openedAfter).toHaveLength(27)
+    expect(Math.max(...openedAfter)).toBeLessThan(90)
+    await vi.advanceTimersByTimeAsync(2_000)
+    expect(networkErrors).toEqual([])
+    expect(connection.transport.type).toBe('ws')
+  })
+
+  test('a search box typing faster than a RECONCILE goes round, through READY and the handoff, gets no NetworkError, and the page still moves to a WebSocket', async () => {
+    const { channel } = page(wire, { upgrade: true, delays: { [TAG.READY]: 3_000, [TAG.RECONCILED]: 100 } })
+    const connection = (channel(register().id) as any)._connection
+    await vi.advanceTimersByTimeAsync(500)
+    const { openedAfter, networkErrors } = await searchBox(channel, 200, 60)
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(networkErrors).toEqual([])
+    expect(openedAfter.length).toBeGreaterThan(0)
+    expect(Math.max(...openedAfter)).toBeLessThan(500)
+    expect(connection.transport.type).toBe('ws')
   })
 })
 
