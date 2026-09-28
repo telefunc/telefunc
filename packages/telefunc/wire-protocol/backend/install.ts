@@ -1,4 +1,12 @@
-export { installBackend, configureBroadcastTransport, getBroadcastBackend, getRoomBackend, disposeBackend }
+export {
+  installBackend,
+  configureBroadcastTransport,
+  getBroadcastBackend,
+  followBroadcastPlane,
+  unfollowBroadcastPlane,
+  getRoomBackend,
+  disposeBackend,
+}
 
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
 import type { BroadcastBackend, BroadcastDriver } from './broadcast/contract.js'
@@ -24,10 +32,14 @@ type Installed = {
 
 type BroadcastOverride = { transport: BroadcastTransport; backend?: BroadcastBackend }
 
-const state = getGlobalObject<{ installed: Installed | null; broadcastOverride?: BroadcastOverride }>(
-  'wire-protocol/backend/install.ts',
-  () => ({ installed: null }),
-)
+/** A consumer of the Broadcast plane that moves to the plane a transport replaces it with. */
+type BroadcastPlaneFollower = { planeReplaced(): void }
+
+const state = getGlobalObject<{
+  installed: Installed | null
+  broadcastOverride?: BroadcastOverride
+  planeFollowers: Set<BroadcastPlaneFollower>
+}>('wire-protocol/backend/install.ts', () => ({ installed: null, planeFollowers: new Set() }))
 
 const FALLBACK_KEY = [Symbol('telefunc.memoryBackend')]
 
@@ -52,11 +64,22 @@ function configureBroadcastTransport(transport: BroadcastTransport): void {
   const previous = state.broadcastOverride
   if (previous?.transport === transport) return
   state.broadcastOverride = { transport }
-  if (previous?.backend) void previous.backend.dispose()
   const installed = state.installed
-  if (installed === null) return
-  if (installed.broadcast) void installed.broadcast.dispose()
-  installed.broadcast = null
+  const retired = installed?.broadcast
+  if (installed) installed.broadcast = null
+  // Live subscriptions move to the new plane before the retired ones stop.
+  for (const follower of [...state.planeFollowers]) follower.planeReplaced()
+  void previous?.backend?.dispose()
+  void retired?.dispose()
+}
+
+/** Has `follower.planeReplaced()` called, once the new plane is in effect, each time a transport replaces the plane. */
+function followBroadcastPlane(follower: BroadcastPlaneFollower): void {
+  state.planeFollowers.add(follower)
+}
+
+function unfollowBroadcastPlane(follower: BroadcastPlaneFollower): void {
+  state.planeFollowers.delete(follower)
 }
 
 function getBroadcastBackend(): BroadcastBackend {
@@ -75,12 +98,13 @@ function getRoomBackend(): RoomBackend {
   return currentBackend().room
 }
 
-/** For tests: forgets the backend and the transport override, and stops their subscriptions. */
+/** For tests: forgets the backend, the transport override and the plane's followers, and stops their subscriptions. */
 async function disposeBackend(): Promise<void> {
   const installed = state.installed
   const overridePlane = state.broadcastOverride?.backend
   state.installed = null
   delete state.broadcastOverride
+  state.planeFollowers.clear()
   await Promise.all([overridePlane?.dispose(), installed?.broadcast?.dispose(), installed?.room.dispose()])
 }
 

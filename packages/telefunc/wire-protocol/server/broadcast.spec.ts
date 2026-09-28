@@ -16,6 +16,7 @@ import { IndexedPeer } from './IndexedPeer.js'
 import { disposeBackend, installBackend } from '../backend/install.js'
 import { MemoryBackend, MemoryBackendState } from '../backend/memory/backend.js'
 import type { SubscriptionAttempt } from '../backend/subscription.js'
+import type { BroadcastPayload } from '../backend/broadcast/contract.js'
 import { DriverAttempt } from '../backend/attempt.js'
 import { ChannelClosedError, ChannelOverflowError } from '../channel-errors.js'
 import { ESTABLISH_HOLD_MS, CHANNEL_BUFFER_LIMIT_BINARY_BYTES } from '../constants.js'
@@ -878,7 +879,7 @@ describe('Broadcast static bus (publish/subscribe)', () => {
     const attempt = new PendingAttempt()
     const driver = await installOpeningBackend(() => attempt)
     // A driver may read its payload later, as ioredis does for a queued command.
-    const sent: Uint8Array[] = []
+    const sent: BroadcastPayload[] = []
     vi.spyOn(driver, 'publish').mockImplementation((_route, payload) => {
       sent.push(payload)
       return { seq: sent.length, timestamp: 1 }
@@ -894,7 +895,7 @@ describe('Broadcast static bus (publish/subscribe)', () => {
       scratch[0] = 4
       attempt.ready()
       await Promise.all(held)
-      expect(sent.map((payload) => Array.from(payload))).toEqual([[1], [2], [3]])
+      expect(sent).toEqual([new Uint8Array([1]), new Uint8Array([2]), new Uint8Array([3])])
     } finally {
       unsubscribe()
     }
@@ -985,6 +986,52 @@ describe('Broadcast static bus (publish/subscribe)', () => {
       observer()
     },
   )
+  it.each([false, true])(
+    'lets a 0 ms timer fire while a listener answers every message on its key (after an await: %s)',
+    async (afterAwait) => {
+      const key = `broadcast:echo-${afterAwait}`
+      let timerFired = false
+      setTimeout(() => (timerFired = true), 0)
+      const stopped = Promise.withResolvers<number>()
+      // Bounded, so the spec ends where the answers starve the timer.
+      const answer = (depth: number) => {
+        if (timerFired || depth === 100_000) return stopped.resolve(depth)
+        Promise.resolve(Broadcast.publish(key, depth + 1)).catch(stopped.reject)
+      }
+      const echo = afterAwait
+        ? Broadcast.subscribe<number>(key, async (depth) => {
+            await null
+            answer(depth)
+          })
+        : Broadcast.subscribe<number>(key, answer)
+      void Broadcast.publish(key, 0)
+      expect(await stopped.promise).toBeLessThan(100_000)
+      echo()
+    },
+  )
+  it("keeps a key's order across kinds when a turn's deliveries run out and the rest wait for the next one", async () => {
+    const key = 'broadcast:next-turn'
+    const seen: Array<[BroadcastKind, number]> = []
+    const stops = [
+      Broadcast.subscribe(key, (_, info) => void seen.push(['text', info.seq])),
+      Broadcast.subscribeBinary(key, (_, info) => void seen.push(['binary', info.seq])),
+    ]
+    const receipts = Array.from({ length: 4096 }, (_, i) =>
+      i % 2 === 0 ? Broadcast.publish(key, i) : Broadcast.publishBinary(key, new Uint8Array([i])),
+    )
+    expect(seen.length).toBeLessThan(receipts.length)
+    await vi.waitFor(() => expect(seen).toHaveLength(receipts.length))
+    const acks = await Promise.all(receipts)
+    expect(seen).toEqual(acks.map((ack, i) => [i % 2 === 0 ? 'text' : 'binary', ack.seq]))
+    for (const stop of stops) stop()
+  })
+  it('delivers a fan-out published within one turn as it is published', () => {
+    const key = 'broadcast:fan-out'
+    let received = 0
+    for (let i = 0; i < 100; i++) new ServerBroadcast<number>({ key }).subscribe(() => void received++)
+    for (let i = 0; i < 500; i++) void Broadcast.publish(key, i)
+    expect(received).toBe(100 * 500)
+  })
   it("a BroadcastChannel subscriber that unsubscribes itself doesn't make the next one miss the message", async () => {
     const channel = new ServerBroadcast<string>({ key: 'broadcast:self-unsubscribe' })
     const seen: string[] = []

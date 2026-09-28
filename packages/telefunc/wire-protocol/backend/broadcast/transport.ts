@@ -2,8 +2,8 @@ export { createBroadcastTransportDriver }
 export type { BroadcastTransport }
 
 import { isOrderingPosition } from '../../ordering-frame.js'
-import type { BroadcastDriver, BroadcastRoute, PublishResult } from './contract.js'
-import type { BackendReceiver, SubscriptionAttempt, SubscriptionBinding } from '../subscription.js'
+import type { BroadcastDriver, BroadcastPayload, BroadcastRoute, PublishResult } from './contract.js'
+import type { BackendPayload, BackendReceiver, SubscriptionAttempt, SubscriptionBinding } from '../subscription.js'
 import { assertUsage } from '../../../utils/assert.js'
 import { isPromise } from '../../../utils/isPromise.js'
 import { DriverAttempt } from '../attempt.js'
@@ -22,9 +22,6 @@ type BroadcastTransport = {
   ): () => void
 }
 
-const textEncoder = new TextEncoder()
-const textDecoder = new TextDecoder()
-
 function createBroadcastTransportDriver(transport: BroadcastTransport): BroadcastDriver {
   return {
     publish: (route, payload) => publish(transport, route, payload),
@@ -38,12 +35,10 @@ function createBroadcastTransportDriver(transport: BroadcastTransport): Broadcas
 function publish(
   transport: BroadcastTransport,
   route: BroadcastRoute,
-  payload: Uint8Array,
+  payload: BroadcastPayload,
 ): PublishResult | Promise<PublishResult> {
   const result =
-    route.kind === 'text'
-      ? transport.send(route.key, textDecoder.decode(payload))
-      : transport.sendBinary(route.key, payload)
+    typeof payload === 'string' ? transport.send(route.key, payload) : transport.sendBinary(route.key, payload)
   return isPromise(result) ? result.then(checkMark) : checkMark(result)
 }
 
@@ -62,10 +57,14 @@ function bind(transport: BroadcastTransport, route: BroadcastRoute): Subscriptio
   }
 }
 
-function open(transport: BroadcastTransport, route: BroadcastRoute, receiver: BackendReceiver): SubscriptionAttempt {
+function open(
+  transport: BroadcastTransport,
+  route: BroadcastRoute,
+  receiver: BackendReceiver<BackendPayload>,
+): SubscriptionAttempt {
   const stop =
     route.kind === 'text'
-      ? transport.listen(route.key, (payload, info) => receiver(textEncoder.encode(payload), checkMark(info)))
+      ? transport.listen(route.key, (payload, info) => receiver(payload, checkMark(info)))
       : transport.listenBinary(route.key, (payload, info) => receiver(payload, checkMark(info)))
   return new TransportAttempt(stop)
 }

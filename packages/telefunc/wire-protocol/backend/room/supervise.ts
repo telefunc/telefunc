@@ -1,15 +1,28 @@
 export { superviseRoomDriver }
 
 import { SubscriptionManager } from '../subscription-manager.js'
-import type { HeadNext, RoomBackend, RoomDriver } from './contract.js'
+import type { HeadNext, RoomBackend, RoomDriver, RoomSubscriptionSource } from './contract.js'
+import type { BackendPayload, BackendReceiver } from '../subscription.js'
+import type { OrderingInfo } from '../../ordering-frame.js'
 import { roomSubscriptionSourceKey } from './lane-key.js'
 import { assertDriverPosition } from '../driver-position.js'
 import { assert } from '../../../utils/assert.js'
 
+/** A lane carries bytes. */
+function checkDelivery(_source: RoomSubscriptionSource, payload: BackendPayload, info: OrderingInfo): void {
+  assertDriverPosition(info)
+  assert(typeof payload !== 'string')
+}
+
 /** Owns the Room subscription manager, holds a lane's commits while this instance's subscription on it establishes,
  *  and checks what the driver is given and returns. */
 function superviseRoomDriver(driver: RoomDriver): RoomBackend {
-  const subscriptions = new SubscriptionManager(driver.subscriptions, console.error, roomSubscriptionSourceKey)
+  const subscriptions = new SubscriptionManager(
+    driver.subscriptions,
+    console.error,
+    roomSubscriptionSourceKey,
+    checkDelivery,
+  )
   let disposal: Promise<void> | undefined
 
   return {
@@ -38,11 +51,9 @@ function superviseRoomDriver(driver: RoomDriver): RoomBackend {
     },
     listRetained: (roomId, inc) => driver.listRetained(roomId, inc),
     deleteRetained: (roomId, inc, lane, opts) => driver.deleteRetained(roomId, inc, lane, opts),
+    // The manager hands a lane's consumers only the deliveries checkDelivery passed.
     subscribeLane: (roomId, inc, lane, receiver) =>
-      subscriptions.subscribe({ roomId, inc, lane }, (payload, info) => {
-        assertDriverPosition(info)
-        return receiver(payload, info)
-      }),
+      subscriptions.subscribe({ roomId, inc, lane }, receiver as BackendReceiver<BackendPayload>),
     dropGeneration: (roomId, inc) => driver.dropGeneration(roomId, inc),
     directoryPut: (roomId, incTag) => driver.directoryPut(roomId, incTag),
     directoryDelete: (roomId, incTag) => driver.directoryDelete(roomId, incTag),

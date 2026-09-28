@@ -17,9 +17,9 @@ import {
 } from './routing.js'
 import { reportLostDeliveries, type OrderedStubs } from './ordered-stubs.js'
 import { assert } from '../../../../utils/assert.js'
-import type { BroadcastRoute, PublishResult } from '../../../backend/broadcast/contract.js'
+import type { BroadcastPayload, BroadcastRoute, PublishResult } from '../../../backend/broadcast/contract.js'
 import { broadcastRouteKey } from '../../../backend/broadcast/route-key.js'
-import type { BackendReceiver } from '../../../backend/subscription.js'
+import type { BackendPayload, BackendReceiver } from '../../../backend/subscription.js'
 import { DriverAttempt } from '../../../backend/attempt.js'
 import { createDeferred } from '../../../../utils/createDeferred.js'
 import type { OrderingInfo } from '../../../ordering-frame.js'
@@ -34,14 +34,14 @@ type BroadcastPublishRequest = {
   key: string
   kind: BroadcastRoute['kind']
   locationBucket: LocationBucket | null
-  payload: Uint8Array
+  payload: BroadcastPayload
 }
 
 /** The authority's sequenced publish, handed to one bucket coordinator for the member DOs it names by id. */
 type BroadcastForwardRequest = {
   key: string
   kind: BroadcastRoute['kind']
-  payload: Uint8Array
+  payload: BroadcastPayload
   info: OrderingInfo
   members: string[]
 }
@@ -57,7 +57,7 @@ type BroadcastPresenceRequest = {
 type BroadcastDeliverRequest = {
   key: string
   kind: BroadcastRoute['kind']
-  payload: Uint8Array
+  payload: BroadcastPayload
   info: OrderingInfo
 }
 
@@ -142,11 +142,11 @@ class MemberRoute {
 
 /** Follows its route's presence: ready once the authority holds it, lost while a refresh fails. */
 class CloudflareBroadcastSubscriptionAttempt extends DriverAttempt {
-  readonly #receiver: BackendReceiver
+  readonly #receiver: BackendReceiver<BackendPayload>
   readonly #detach: () => Promise<void>
   readonly #stopPresenceObservation: () => void
 
-  constructor(memberRoute: MemberRoute, receiver: BackendReceiver, detach: () => Promise<void>) {
+  constructor(memberRoute: MemberRoute, receiver: BackendReceiver<BackendPayload>, detach: () => Promise<void>) {
     super()
     this.#receiver = receiver
     this.#detach = detach
@@ -161,7 +161,7 @@ class CloudflareBroadcastSubscriptionAttempt extends DriverAttempt {
   }
 
   // The authority forwards only to an unexpired record, so what arrives is owed, lost route or not.
-  deliver(payload: Uint8Array, info: OrderingInfo): void {
+  deliver(payload: BroadcastPayload, info: OrderingInfo): void {
     this.#receiver(payload, info)
   }
 
@@ -291,7 +291,10 @@ class CloudflareBroadcastMember {
     this.#bucket = bucket
   }
 
-  openSubscription(route: BroadcastRoute, receiver: BackendReceiver): CloudflareBroadcastSubscriptionAttempt {
+  openSubscription(
+    route: BroadcastRoute,
+    receiver: BackendReceiver<BackendPayload>,
+  ): CloudflareBroadcastSubscriptionAttempt {
     const routeKey = broadcastRouteKey(route)
     const memberRoute = this.#ensureRoute(route, routeKey)
     const attempt: CloudflareBroadcastSubscriptionAttempt = new CloudflareBroadcastSubscriptionAttempt(
@@ -397,7 +400,7 @@ class CloudflareBroadcast {
 
   /** From a session DO, through its ordered stubs; from elsewhere, as a cron trigger, through a fresh stub. Async, so
    *  the caller gets a native promise: a stub's RpcPromise is callable, which `isPromise` doesn't take for a promise. */
-  async publish(route: BroadcastRoute, payload: Uint8Array): Promise<PublishResult> {
+  async publish(route: BroadcastRoute, payload: BroadcastPayload): Promise<PublishResult> {
     const member = currentCloudflareSession()?.broadcast
     const locationBucket = member?.bucket ?? null
     const request = { key: route.key, kind: route.kind, locationBucket, payload }

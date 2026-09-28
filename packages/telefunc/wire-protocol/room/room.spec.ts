@@ -1284,6 +1284,31 @@ describe('Room public behavior', () => {
       stored: [{ topic: { name: 'b' } }, [{ pos: { x: 1 } }]],
     })
   })
+  it.each([false, true])(
+    'lets a 0 ms timer fire while a listener answers every message it gets (after an await: %s)',
+    async (afterAwait) => {
+      const room = await Room.create(`echo-${afterAwait}`)
+      const member = await room.join()
+      let timerFired = false
+      setTimeout(() => (timerFired = true), 0)
+      const stopped = Promise.withResolvers<number>()
+      // Bounded, so the spec ends where the answers starve the timer.
+      const answer = (depth: number) => {
+        if (timerFired || depth === 20_000) return stopped.resolve(depth)
+        member.publish(depth + 1).catch(stopped.reject)
+      }
+      room.subscribe(
+        afterAwait
+          ? async (data) => {
+              await null
+              answer(data as number)
+            }
+          : (data) => answer(data as number),
+      )
+      await member.publish(0)
+      expect(await stopped.promise).toBeLessThan(20_000)
+    },
+  )
   it('sends a server message as it was at the call, however the caller reuses its object', async () => {
     const room = await Room.create('reused-message')
     const n = (data: unknown) => (data as { n: number }).n
@@ -2673,20 +2698,20 @@ describe('Room public behavior', () => {
     const firstReceived = createDeferred()
     let secondReceived = createDeferred()
     const first = broadcast.subscribe(route, (payload) => {
-      received.push(`first:${decoder.decode(payload)}`)
+      received.push(`first:${payload}`)
       firstReceived.resolve()
     })
     const second = broadcast.subscribe(route, (payload) => {
-      received.push(`second:${decoder.decode(payload)}`)
+      received.push(`second:${payload}`)
       secondReceived.resolve()
     })
     await Promise.all([first.ready, second.ready])
-    await broadcast.publish(route, encoder.encode('one'))
+    await broadcast.publish(route, 'one')
     await Promise.all([firstReceived.promise, secondReceived.promise])
     expect(received).toEqual(['first:one', 'second:one'])
     await first.unsubscribe()
     secondReceived = createDeferred()
-    await broadcast.publish(route, encoder.encode('two'))
+    await broadcast.publish(route, 'two')
     await secondReceived.promise
     expect(received).toEqual(['first:one', 'second:one', 'second:two'])
     expect(second.state()).toBe('ready')

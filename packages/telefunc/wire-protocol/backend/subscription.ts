@@ -1,4 +1,5 @@
 export type {
+  BackendPayload,
   BackendReceiver,
   BackendSubscription,
   SubscriptionAttempt,
@@ -17,7 +18,10 @@ type BackendSubscription = {
   unsubscribe(): Promise<void>
 }
 
-type BackendReceiver = (payload: Uint8Array, info: { seq: number; timestamp: number }) => void
+/** What a driver delivers: a string on a text Broadcast route, bytes on a binary route or a Room lane. */
+type BackendPayload = string | Uint8Array
+
+type BackendReceiver<Payload = Uint8Array> = (payload: Payload, info: { seq: number; timestamp: number }) => void
 
 /** One driver establishment, reporting each state change; an end carries its reason when the driver has one. */
 type SubscriptionAttempt = {
@@ -33,7 +37,7 @@ type SubscriptionBinding = {
   readonly partition: string
   /** `localReceiverCount` reads how many consumers currently share this attempt. A refusal known at once throws, and
    *  the thrown error is the subscription's failure. */
-  open(receiver: BackendReceiver, localReceiverCount: () => number): SubscriptionAttempt
+  open(receiver: BackendReceiver<BackendPayload>, localReceiverCount: () => number): SubscriptionAttempt
 }
 
 /** A driver's subscription edge: bind a source to its owner, then open attempts from the binding. */

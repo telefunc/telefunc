@@ -10,7 +10,7 @@ import { createBroadcastTransportDriver, type BroadcastTransport } from './broad
 import { superviseBroadcastDriver } from './broadcast/supervise.js'
 import { MemoryBackend } from './memory/backend.js'
 import { config } from '../../node/server/serverConfig.js'
-import { ServerBroadcast } from '../server/server-broadcast.js'
+import { Broadcast, ServerBroadcast } from '../server/server-broadcast.js'
 afterEach(async () => {
   await disposeBackend()
   config.broadcast = {}
@@ -84,6 +84,23 @@ describe('backend installation lifecycle', () => {
     unsubscribe()
   })
 
+  it('moves live subscriptions to each transport that replaces the Broadcast plane', () => {
+    const seen: string[] = []
+    const stops = [
+      new ServerBroadcast<string>({ key: 'moved' }).subscribe((message) => void seen.push(`channel:${message}`)),
+      Broadcast.subscribe<string>('moved', (message) => void seen.push(`static:${message}`)),
+    ]
+    const first = localTransport()
+    config.broadcast = { transport: first }
+    first.send('moved', JSON.stringify('first'))
+    const second = localTransport()
+    config.broadcast = { transport: second }
+    first.send('moved', JSON.stringify('replaced'))
+    second.send('moved', JSON.stringify('second'))
+    expect(seen.sort()).toEqual(['channel:first', 'channel:second', 'static:first', 'static:second'])
+    for (const stop of stops) stop()
+  })
+
   it('unlistens a key before listening to it again, so a per-key transport keeps delivering across a subscriber swap', async () => {
     const handlers = new Map<string, (payload: string, info: { seq: number; timestamp: number }) => void>()
     const calls: string[] = []
@@ -111,7 +128,7 @@ describe('backend installation lifecycle', () => {
     void getBroadcastBackend()
       .subscribe(route, () => {})
       .unsubscribe()
-    const next = getBroadcastBackend().subscribe(route, (bytes) => void seen.push(new TextDecoder().decode(bytes)))
+    const next = getBroadcastBackend().subscribe(route, (text) => void seen.push(text))
     await next.ready
     await new Promise((resolve) => setTimeout(resolve, 0))
     transport.send('swap', 'after the swap')
@@ -126,9 +143,9 @@ describe('backend installation lifecycle', () => {
     const route = { key: 'cross-instance', kind: 'text' } as const
     const seen: string[] = []
     for (const [index, instance] of instances.entries()) {
-      await instance.subscribe(route, (bytes) => void seen.push(`${index}:${new TextDecoder().decode(bytes)}`)).ready
+      await instance.subscribe(route, (text) => void seen.push(`${index}:${text}`)).ready
     }
-    const receipt = await instances[0]!.publish(route, new TextEncoder().encode('hi'))
+    const receipt = await instances[0]!.publish(route, 'hi')
     expect(seen.sort()).toEqual(['0:hi', '1:hi'])
     expect(receipt).toEqual({ seq: 1, timestamp: expect.any(Number) })
     await Promise.all(instances.map((instance) => instance.dispose()))
@@ -155,7 +172,7 @@ describe('backend installation lifecycle', () => {
     })
     const backend = getBroadcastBackend()
     const usage = 'config.broadcast.transport returned'
-    await expect(backend.publish({ key: 'k', kind: 'text' }, new Uint8Array())).rejects.toThrow(usage)
+    await expect(backend.publish({ key: 'k', kind: 'text' }, '')).rejects.toThrow(usage)
     expect(() => backend.publish({ key: 'k', kind: 'binary' }, new Uint8Array())).toThrow(usage)
 
     const received = vi.fn()
@@ -201,12 +218,9 @@ function localTransport(): BroadcastTransport {
 async function expectBroadcastRoundTrip(payload: string): Promise<void> {
   const route = { key: 'override-order', kind: 'text' } as const
   const seen: string[] = []
-  const subscription = getBroadcastBackend().subscribe(
-    route,
-    (bytes) => void seen.push(new TextDecoder().decode(bytes)),
-  )
+  const subscription = getBroadcastBackend().subscribe(route, (text) => void seen.push(text))
   await subscription.ready
-  await getBroadcastBackend().publish(route, new TextEncoder().encode(payload))
+  await getBroadcastBackend().publish(route, payload)
   expect(seen).toEqual([payload])
   await subscription.unsubscribe()
 }

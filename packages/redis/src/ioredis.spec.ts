@@ -86,7 +86,7 @@ test("waits for a connecting Cluster's masters instead of reporting none", async
   await expect(failing).rejects.toThrow('Redis Cluster connection closed')
 })
 
-const publishInput = { route: { key: 'chat', kind: 'text' }, payload: new Uint8Array() } as const
+const publishInput = { route: { key: 'chat', kind: 'text' }, payload: '' } as const
 test("reads integer replies as ioredis returns them, numbers or, with a shared client's stringNumbers, strings", () => {
   for (const reply of [
     [7, 1_700_000_000_000, 2],
@@ -110,7 +110,7 @@ test('names Pub/Sub channels per database, as Pub/Sub spans every database', asy
       const publish = vi
         .spyOn(redis as unknown as Record<string, () => Promise<unknown>>, REDIS_COMMANDS.publish.name)
         .mockResolvedValue([1, 1, 0])
-      await backend.publish({ key: 'chat', kind: 'text' }, new Uint8Array())
+      await backend.publish({ key: 'chat', kind: 'text' }, '')
       return (publish.mock.calls[0] as unknown as [unknown[]])[0][1]
     }),
   )
