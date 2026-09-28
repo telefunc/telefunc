@@ -26,7 +26,8 @@ function wires(mux: ChannelMux) {
   const texts = (wire: object) => sent.get(wire)!.flatMap((frame) => (frame.tag === TAG.TEXT ? [frame.text] : []))
   const attachResults = (wire: object) =>
     sent.get(wire)!.flatMap((frame) => (frame.tag === TAG.ATTACH_RESULT ? [frame.lastSeq] : []))
-  return { sessions, open, texts, attachResults, terminated }
+  const reconcileds = (wire: object) => sent.get(wire)!.filter((frame) => frame.tag === TAG.RECONCILED).length
+  return { sessions, open, texts, attachResults, reconcileds, terminated }
 }
 
 /** A wire whose page has one channel attached, which counts what reaches its listeners. */
@@ -108,20 +109,29 @@ test('a stale session whose RECONCILED never reached the page leaves the channel
   expect(texts(live).some((text) => text.includes('tick'))).toBe(true)
 })
 
-test("a new channel outwaits a reconcile its client has in flight for a channel the server hasn't registered", async () => {
+test("a new channel its client names after a reconcile naming one the server hasn't registered attaches within connectTtl, which ends one it never names", async () => {
   vi.useFakeTimers()
   try {
     const mux = new ChannelMux()
-    const clock = new ServerChannel<string, string>({ id: 'clock-ttl' })
-    let closedWith: unknown = 'open'
-    clock.onClose((err) => void (closedWith = err))
-    mux.registerChannel(clock)
-    const { connectTtl } = getServerConfig().channel
-    // The client names this channel only once the server answers its held reconcile, up to connectTtl later.
-    await vi.advanceTimersByTimeAsync(connectTtl + 500)
-    expect(closedWith).toBe('open')
-    await vi.advanceTimersByTimeAsync(connectTtl)
-    expect(closedWith).toBeInstanceOf(Error)
+    const { sessions, open, reconcileds } = wires(mux)
+    const wire = open()
+    const closedWith = new Map<string, unknown>()
+    for (const id of ['clock-ttl', 'never-named']) {
+      const channel = new ServerChannel<string, string>({ id })
+      channel.onClose((err) => void closedWith.set(id, err))
+      mux.registerChannel(channel)
+    }
+    // The reconcile the client has in flight names a callback whose call was aborted, and is answered at once.
+    const aborted = { id: 'aborted-callback', ix: 0, lastSeq: 0, initial: true as const }
+    void mux.onConnectionRawMessage(wire, encode.reconcile({ open: [aborted] }))
+    await vi.advanceTimersByTimeAsync(0)
+    expect(reconcileds(wire)).toBe(1)
+    // So the client's next one names the new channel.
+    const clock = { id: 'clock-ttl', ix: 1, lastSeq: 0, initial: true as const }
+    await mux.onConnectionRawMessage(wire, encode.reconcile({ sessionId: sessions.get(wire), open: [aborted, clock] }))
+    await vi.advanceTimersByTimeAsync(getServerConfig().channel.connectTtl + 500)
+    expect(closedWith.has('clock-ttl')).toBe(false)
+    expect(closedWith.get('never-named')).toBeInstanceOf(Error)
   } finally {
     vi.useRealTimers()
   }
