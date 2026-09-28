@@ -208,18 +208,18 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   }
 
   listen(callback: ChannelListener<ServerToClient>): () => void {
-    this._listeners.push(callback)
+    this._listeners = [...this._listeners, callback]
     return () => {
       const i = this._listeners.indexOf(callback)
-      if (i >= 0) this._listeners.splice(i, 1)
+      if (i >= 0) this._listeners = this._listeners.filter((_, j) => j !== i)
     }
   }
 
   listenBinary(callback: ChannelBinaryListener): () => void {
-    this._binaryListeners.push(callback)
+    this._binaryListeners = [...this._binaryListeners, callback]
     return () => {
       const i = this._binaryListeners.indexOf(callback)
-      if (i >= 0) this._binaryListeners.splice(i, 1)
+      if (i >= 0) this._binaryListeners = this._binaryListeners.filter((_, j) => j !== i)
     }
   }
 
@@ -284,7 +284,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
       this._flow.onReceived(bytes)
       const parsed = parse(data) as ChannelData<ServerToClient>
       const pending: Promise<unknown>[] = []
-      for (const cb of [...this._listeners]) {
+      for (const cb of this._listeners) {
         try {
           const result = cb(parsed)
           if (isPromise(result)) {
@@ -318,7 +318,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     try {
       this._flow.onReceived(bytes)
       const pending: Promise<unknown>[] = []
-      for (const cb of [...this._binaryListeners]) {
+      for (const cb of this._binaryListeners) {
         try {
           const result = cb(data)
           if (isPromise(result)) {
@@ -534,7 +534,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     }
     const parsed = parse(data) as ChannelData<ServerToClient>
     let lastResult: unknown
-    for (const cb of [...this._listeners]) {
+    for (const cb of this._listeners) {
       try {
         lastResult = await cb(parsed)
       } catch (err) {
@@ -552,7 +552,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
       return
     }
     let lastResult: unknown
-    for (const cb of [...this._binaryListeners]) {
+    for (const cb of this._binaryListeners) {
       try {
         lastResult = await cb(data)
       } catch (err) {
@@ -616,7 +616,9 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
 
 class ClientBroadcast<T = unknown> extends ClientChannel {
   readonly [CLIENT_BROADCAST_BRAND] = true
+  /** Each kind's array is replaced, never mutated, so a delivery iterates the listeners it started with. */
   private readonly _subscribers: BroadcastListeners<T> = { text: [], binary: [] }
+  private readonly _onListenerError = (error: unknown) => this._handleCallbackError(error)
   private readonly _wire: BroadcastSubscriptions = { text: false, binary: false }
 
   static isClientBroadcast(value: unknown): value is ClientBroadcast {
@@ -625,11 +627,11 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
 
   /** @internal Register a local listener without changing wire intent. */
   _subscribeLocal<K extends BroadcastKind>(kind: K, callback: BroadcastListeners<T>[K][number]): () => void {
-    const listeners = this._subscribers[kind] as Array<typeof callback>
-    listeners.push(callback)
+    this._subscribers[kind] = [...this._subscribers[kind], callback] as BroadcastListeners<T>[K]
     return () => {
-      const index = listeners.indexOf(callback)
-      if (index >= 0) listeners.splice(index, 1)
+      const index = (this._subscribers[kind] as Array<typeof callback>).indexOf(callback)
+      if (index >= 0)
+        this._subscribers[kind] = this._subscribers[kind].filter((_, j) => j !== index) as BroadcastListeners<T>[K]
     }
   }
 
@@ -708,15 +710,15 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   _onTransportPublish(data: string, wireInfo: WirePublishInfo): void {
     const parsed = parse(data) as ChannelData<T>
     const info = makePublishInfo(this.key!, wireInfo.seq, wireInfo.timestamp)
-    for (const cb of [...this._subscribers.text]) {
-      if (invokeChannelListener(cb, [parsed, info], (error) => this._handleCallbackError(error))) return
+    for (const cb of this._subscribers.text) {
+      if (invokeChannelListener(cb, [parsed, info], this._onListenerError)) return
     }
   }
 
   _onTransportPublishBinary(data: Uint8Array, wireInfo: WirePublishInfo): void {
     const info = makePublishInfo(this.key!, wireInfo.seq, wireInfo.timestamp)
-    for (const cb of [...this._subscribers.binary]) {
-      if (invokeChannelListener(cb, [data, info], (error) => this._handleCallbackError(error))) return
+    for (const cb of this._subscribers.binary) {
+      if (invokeChannelListener(cb, [data, info], this._onListenerError)) return
     }
   }
 }

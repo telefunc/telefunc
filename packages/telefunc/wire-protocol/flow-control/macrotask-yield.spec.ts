@@ -1,12 +1,13 @@
-import { afterEach, test, vi } from 'vitest'
-import { macrotaskYield } from './macrotask-yield.js'
+import { afterEach, expect, test, vi } from 'vitest'
+import { FlowControl } from './flow-control.js'
 
 afterEach(() => {
   vi.unstubAllGlobals()
 })
 
-test('yields a macrotask where MessageChannel is missing, as in workerd before compatibility date 2025-08-15', async () => {
+test('a channel created where MessageChannel is missing is a usage error naming the Workers compatibility date', () => {
   vi.stubGlobal('MessageChannel', undefined)
-  await macrotaskYield.yield()
-  await macrotaskYield.yield()
+  expect(() => new FlowControl({ byteWindowUpdate() {}, msgWindowUpdate() {}, bdpPing() {} })).toThrow(
+    'compatibility_date to 2025-08-15',
+  )
 })

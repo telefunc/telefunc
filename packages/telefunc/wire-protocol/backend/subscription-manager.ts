@@ -130,7 +130,8 @@ class SubscriptionManager<Source> {
 }
 
 class SubscriptionSlot {
-  private readonly _receivers = new Map<symbol, BackendReceiver>()
+  /** Replaced, never mutated, so a delivery iterates the receivers it started with. */
+  private _receivers = new Map<symbol, BackendReceiver>()
   private readonly _listeners = new Set<StateListener>()
   private _attempt: SubscriptionAttempt | null = null
   private _unobserve: (() => void) | null = null
@@ -153,7 +154,7 @@ class SubscriptionSlot {
   attach(receiver: BackendReceiver): BackendSubscription {
     assert(this._stopPromise === null) // the manager unmaps a slot before stopping it
     const attachment = Symbol()
-    this._receivers.set(attachment, receiver)
+    this._receivers = new Map(this._receivers).set(attachment, receiver)
     if (this._attempt === null) this._start()
     let attached = true
     const listeners = new Set<StateListener>()
@@ -177,7 +178,9 @@ class SubscriptionSlot {
         if (this._state !== 'closed') this._notify(listeners, 'closed')
         listeners.clear()
         unobserve()
-        this._receivers.delete(attachment)
+        const receivers = new Map(this._receivers)
+        receivers.delete(attachment)
+        this._receivers = receivers
         if (this._receivers.size === 0) {
           this._config.unmap()
           await this.stop()
@@ -200,7 +203,7 @@ class SubscriptionSlot {
       attempt = this._config.binding.open(
         (payload, info) => {
           if (this._stopPromise !== null) return
-          for (const receiver of [...this._receivers.values()]) {
+          for (const receiver of this._receivers.values()) {
             try {
               receiver(payload, info)
             } catch (error) {

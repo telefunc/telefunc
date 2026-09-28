@@ -33,6 +33,7 @@ export default {
 ```jsonc
 // wrangler.jsonc
 {
+  "compatibility_date": "2025-08-15", // or later: channels need MessageChannel
   // Required: Telefunc finds a subscription's session through AsyncLocalStorage (`nodejs_compat` works too).
   // spellcheck-ignore  nodejs_als is Cloudflare's AsyncLocalStorage compatibility flag
   "compatibility_flags": ["nodejs_als"],
