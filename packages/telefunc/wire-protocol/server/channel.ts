@@ -337,8 +337,10 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     if (this._didShutdown) return
     this._clearTimer('_ttlTimer')
     this._clearTimer('_reconnectTimer')
+    // The wire of the last peer lost nothing to repair, and still answers the probe in flight.
+    const rewired = this._peer?.sender !== peer.sender
     this._peer = peer
-    this._flow.reattach()
+    if (rewired) this._flow.reattach()
     this._prePeerBuffer.flush({
       sendText: (msg) => this._flow.countSent(peer.sendText(msg)),
       sendPublish: (msg) => peer.sendPublish(msg),

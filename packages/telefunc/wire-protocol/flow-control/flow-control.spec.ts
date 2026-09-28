@@ -6,6 +6,7 @@ import {
   BDP_PING_MIN_INTERVAL_MS,
   CREDIT_MSG_WINDOW_INITIAL,
   CREDIT_WINDOW_INITIAL_BYTES,
+  CREDIT_WINDOW_INITIAL_BYTES_BATCH,
   CREDIT_WINDOW_MAX_BYTES,
 } from '../constants.js'
 import { decode, encode } from '../shared-ws.js'
@@ -291,6 +292,16 @@ describe('FlowControl — reattach', () => {
     vi.advanceTimersByTime(BDP_PING_MIN_INTERVAL_MS)
     flow.onReceived(1024)
     expect(emit.bdpPingCalls).toBe(2)
+  })
+
+  // An SSE wire's upload can fall back to batch POSTs after its first attach, and a later attach on that same wire
+  // skips the reattach, so the larger window goes out on its own.
+  it('advertises the batch-POST window as it grows, once', () => {
+    const { flow, emit } = makeFlow()
+    flow.onConsumed(100)
+    flow.useBatchTransportInitial()
+    flow.useBatchTransportInitial()
+    expect(emit.windowCalls).toEqual([100 + CREDIT_WINDOW_INITIAL_BYTES_BATCH])
   })
 
   // Frames the sender counted but the receiver never gets, lost beyond the replay buffer on a reattach, count as

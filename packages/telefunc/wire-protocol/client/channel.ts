@@ -83,6 +83,8 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
    *  and the queue of senders blocked on credit refresh. Credit governs fire-and-
    *  forget TEXT/BINARY only — see `constants.ts`. */
   private _flow: FlowControl
+  /** The connection's wire at the last attach. */
+  private _attachedWire: number | null = null
 
   constructor({
     channelId,
@@ -265,13 +267,15 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
 
   // ── Called by transport connection ──
 
-  _onTransportOpen(batched: boolean): void {
+  _onTransportOpen(batched: boolean, wire: number): void {
     // A close request is not replayed, so one written to a wire that had already died is lost. As the server's
     // `_attachPeer` does, it goes out again on every attach until acknowledged.
     if (this._expectCloseAck) this._connection.sendCloseRequest(this, Math.max(0, this._closeDeadline - Date.now()))
     if (this._isClosed) return
     if (batched) this._flow.useBatchTransportInitial()
-    this._flow.reattach()
+    // The wire of the last attach lost nothing to repair, and still answers the probe in flight.
+    if (wire !== this._attachedWire) this._flow.reattach()
+    this._attachedWire = wire
     this._fireOpen()
   }
 

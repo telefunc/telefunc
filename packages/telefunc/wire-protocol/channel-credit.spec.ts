@@ -116,11 +116,14 @@ class Loopback {
   private readonly connectionKey = crypto.randomUUID()
   private readonly pages: ClientChannel[] = []
   private watch: { from: 'page' | 'server'; tag: number; then: () => void } | null = null
+  /** Every frame each side sent, as `[tag, channel ix]`. */
+  readonly sent = { page: [] as [number, number][], server: [] as [number, number][] }
   /** Runs `then` once, as `from` sends its next frame of `tag`. */
   onSend(from: 'page' | 'server', tag: number, then: () => void): void {
     this.watch = { from, tag, then }
   }
   sends(from: 'page' | 'server', frame: Uint8Array): void {
+    this.sent[from].push([frame[0]!, frame[1]! | (frame[2]! << 8)])
     const watch = this.watch
     if (!watch || watch.from !== from || watch.tag !== frame[0]) return
     this.watch = null
@@ -254,6 +257,29 @@ test('a stream keeps flowing past its grown window after the page opens another 
   await runUntil(() => page.received.length - before > 2 * window, 1_000)
   expect(page.received.length - before).toBeGreaterThan(2 * window)
   expect(page.received).toEqual([...page.received.keys()])
+})
+
+test('a reattach on the live wire sends no flow-control frames, and one on a new wire repairs with them', async () => {
+  const clock = loop.open<never, number>()
+  await run(100)
+  const flowControl = (from: 'page' | 'server') =>
+    loop.sent[from].filter(
+      ([tag, ix]) => ix === 0 && (tag === TAG.WINDOW || tag === TAG.MSG_WINDOW || tag === TAG.SENT),
+    ).length
+  const before = { page: flowControl('page'), server: flowControl('server') }
+
+  loop.open<never, number>() // its RECONCILE attaches the clock again, on the same wire
+  await run(100)
+  expect(clock.page.isClosed).toBe(false)
+  expect({ page: flowControl('page'), server: flowControl('server') }).toEqual(before)
+
+  loop.socket.cut()
+  await run(1_000)
+  expect(loop.sockets).toHaveLength(2)
+  expect({ page: flowControl('page'), server: flowControl('server') }).toEqual({
+    page: before.page + 3,
+    server: before.server + 3,
+  })
 })
 
 test("what the server has in flight to a slow page never exceeds the page's window, also right after a refresh", async () => {

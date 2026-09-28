@@ -186,8 +186,8 @@ class FlowControl {
     this._curBucketStart = now
   }
 
-  /** Transport (re)attach. The probe in flight rode the prior wire, and the limits and totals go out again, which
-   *  repairs what the prior wire lost of them. Credit carries over: it is cumulative. */
+  /** Attach on another wire than the last. The probe in flight rode the prior wire, and the limits and totals go out
+   *  again, which repairs what the prior wire lost of them. Credit carries over: it is cumulative. */
   reattach(): void {
     this._bdp.reset()
     this._advertiseBytes()
@@ -195,9 +195,11 @@ class FlowControl {
     this._emit.sent(this._sentBytes >>> 0, this._sentMessages >>> 0)
   }
 
-  /** Bump to the batch-POST initial window, which the `reattach` that follows advertises. Grow-only / idempotent. */
+  /** Bump to the batch-POST initial window and advertise it. Grow-only / idempotent. */
   useBatchTransportInitial(): void {
+    const prev = this._bdp.byteWindow
     this._bdp.bumpInitialByteWindow(CREDIT_WINDOW_INITIAL_BYTES_BATCH)
+    if (this._bdp.byteWindow > prev) this._advertiseBytes()
   }
 
   shutdown(): void {

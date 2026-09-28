@@ -140,7 +140,9 @@ type OutboundFrame = {
 interface MuxChannel {
   readonly id: string
   readonly isClosed: boolean
-  _onTransportOpen(batched: boolean): void
+  /** `wire` numbers the connection's wire: the number of the channel's last attach means that same wire, which lost
+   *  nothing. */
+  _onTransportOpen(batched: boolean, wire: number): void
   /** Entry point for every per-channel wire frame (data + per-channel ctrl). The
    *  channel splits ctrl vs data internally. Connection-level frames (PING/PONG/
    *  FIN/RECONCILED) and channel-termination ctrls (ABORT/ERROR) stay with the
@@ -373,6 +375,8 @@ class ClientConnection implements MuxConnection {
   }
 
   private sessionId: string | null = null
+  /** Advances each time the connection moves to another wire: what went out on the one before may not have arrived. */
+  private wire = 0
   private nextIndex = 0
   private reconcileIxes = new Set<number>()
   private channels = new Map<number, ChannelEntry>()
@@ -1026,7 +1030,7 @@ class ClientConnection implements MuxConnection {
     this.installHeartbeat(this.transport, ctrl.pingInterval)
     this.transport.closeAbandonedTransport()
     for (const frame of outcome.frames) this.transport.sendFrame(frame)
-    for (const channel of outcome.channelsToOpen) channel._onTransportOpen(this.transport.batched)
+    for (const channel of outcome.channelsToOpen) channel._onTransportOpen(this.transport.batched, this.wire)
     this.tryCompleteUpgrade()
     if (outcome.reconcileComplete) {
       this.serverTransports = ctrl.transports
@@ -1184,6 +1188,7 @@ class ClientConnection implements MuxConnection {
     }
     u.probeHeartbeat.stop()
     this.transport = u.to
+    this.wire++
     u.to.adoptProbe()
     u.joinTimer = setTimeout(() => this.onJoinTimeout(), UPGRADE_HANDOFF_JOIN_TIMEOUT_MS)
     // What the probe delivered before the swap can be acted on now. The buffer is made whole
@@ -1214,6 +1219,7 @@ class ClientConnection implements MuxConnection {
       this.fallbackToSse(err)
       return
     }
+    this.wire++
     // The wire is dying — cancel the queued RECONCILE (no point sending) and release
     // unconfirmed-releasing entries so they don't leak onto the post-reconnect RECONCILE.
     this.cancelPendingRegisterReconcile()

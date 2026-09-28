@@ -117,8 +117,9 @@ const TAG = {
   /** Flow-control message-count limit. Parallel to `WINDOW` but counted in messages, not bytes,
    *  to bound receiver dispatch CPU regardless of message size. */
   MSG_WINDOW: 0x39 as const,
-  /** Flow-control totals, sender → receiver on every attach: the bytes and messages counted against credit through
-   *  the header's seq, mod 2^32. What of them hasn't reached the receiver by then was lost beyond the replay buffer. */
+  /** Flow-control totals, sender → receiver on an attach to another wire: the bytes and messages counted against
+   *  credit through the header's seq, mod 2^32. What of them hasn't reached the receiver by then was lost beyond the
+   *  replay buffer. */
   SENT: 0x3a as const,
 }
 
