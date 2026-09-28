@@ -22,13 +22,20 @@ class MacrotaskYield {
   private waiters: Array<() => void> = []
   private posted = false
 
+  /** Called as each channel is created, so a runtime without MessageChannel fails there rather than on a busy send. */
+  assertSupported(): void {
+    assertUsage(
+      typeof MessageChannel === 'function',
+      'Telefunc channels need MessageChannel. On Cloudflare Workers, set compatibility_date to 2025-08-15 or later.',
+    )
+  }
+
   yield(): Promise<void> {
-    const channel = this.ensureChannel()
     return new Promise<void>((resolve) => {
       this.waiters.push(resolve)
       if (this.posted) return
       this.posted = true
-      channel.port2.postMessage(null)
+      this.ensureChannel().port2.postMessage(null)
     })
   }
 
@@ -37,10 +44,6 @@ class MacrotaskYield {
    *  pre-bundling). Workers / Node have it at runtime. */
   private ensureChannel(): MessageChannel {
     if (this.channel) return this.channel
-    assertUsage(
-      typeof MessageChannel === 'function',
-      'Telefunc channels need MessageChannel: on Cloudflare Workers, set compatibility_date to 2025-08-15 or later.',
-    )
     const channel = new MessageChannel()
     channel.port1.onmessage = () => {
       this.posted = false

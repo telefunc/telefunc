@@ -46,7 +46,9 @@ class FlowControl {
   private _curBucketStart = performance.now()
   private _openedAt = performance.now()
 
-  constructor(private readonly _emit: FlowControlEmit) {}
+  constructor(private readonly _emit: FlowControlEmit) {
+    macrotaskYield.assertSupported()
+  }
 
   get byteWindow(): number {
     return this._bdp.byteWindow
