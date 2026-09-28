@@ -108,7 +108,7 @@ type SessionFinalizer = () => void
 
 type ConnectionState = {
   pingTimer: ReturnType<typeof setTimeout> | null
-  terminatePermanently: boolean | null
+  terminatePermanently: boolean
   reconciling: boolean
   recvChain: Promise<unknown> | null
   /** Set by `onConnectionClosed` so an in-flight `reconcile` can see the close and its kind. */
@@ -189,7 +189,7 @@ class ChannelMux {
     this.connectionEntries.set(connection, {
       state: {
         pingTimer: null,
-        terminatePermanently: null,
+        terminatePermanently: false,
         reconciling: false,
         recvChain: null,
         closed: null,
@@ -262,8 +262,8 @@ class ChannelMux {
     this.sessionFinalizers.delete(sessionId)
   }
 
-  readPermanentTermination(connection: Wire): boolean | null {
-    return this.connectionEntries.get(connection)?.state.terminatePermanently ?? null
+  readPermanentTermination(connection: Wire): boolean {
+    return this.connectionEntries.get(connection)?.state.terminatePermanently ?? false
   }
 
   /** SSE data POST: resolve the stream connection by its stable connId. Undefined when the

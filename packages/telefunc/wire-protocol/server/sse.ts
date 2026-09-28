@@ -310,8 +310,7 @@ class SseConnectionTransport {
   }
 
   private terminateConnection(connection: SseConnection): void {
-    const terminatePermanently = this.mux.readPermanentTermination(connection)
-    this.closeConnection(connection, { permanent: terminatePermanently === true })
+    this.closeConnection(connection, { permanent: this.mux.readPermanentTermination(connection) })
   }
 }
 
