@@ -388,7 +388,7 @@ class ClientConnection implements MuxConnection {
    *  comes on the wire awaiting them, the old one or, after a barrier, the WebSocket. What they queue waits for it, so
    *  their replay goes first. */
   private awaitedIxes = new Set<number>()
-  /** ATTACH_RESULTs for channels the RECONCILE in flight lists, applied with its RECONCILED, which the server may have
+  /** The attach results of channels the RECONCILE in flight lists, applied with its RECONCILED, which the server may have
    *  built before them (an SSE batch POST's RECONCILED goes once the POST's body is read). */
   private earlyAttachResults = new Map<number, number | null>()
   private channels = new Map<number, ChannelEntry>()
