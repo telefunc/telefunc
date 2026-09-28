@@ -5,6 +5,7 @@ import { assert } from '../../utils/assert.js'
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
 import { getServerConfig } from '../../node/server/serverConfig.js'
 import { unrefTimer } from '../../utils/unrefTimer.js'
+import { handleTelefunctionBug } from '../../node/server/runTelefunc/validateTelefunctionError.js'
 import {
   CHANNEL_PING_INTERVAL_MIN_MS,
   CREDIT_MSG_WINDOW_MAX,
@@ -108,6 +109,19 @@ type DetachReason = (typeof DETACH_REASON)[keyof typeof DETACH_REASON]
 type ChannelHandle = { channel: ServerChannel; ix: number; peer: IndexedPeer }
 type SessionFinalizer = () => void
 
+/** An initial channel a RECONCILE on this wire named before the server registered it. The RECONCILED leaves it out,
+ *  and an ATTACH_RESULT settles it. */
+type AwaitedChannel = {
+  /** The latest RECONCILE entry naming it. */
+  entry: ReconcileOpenEntry
+  /** What the page sent it meanwhile, dispatched after its attach. */
+  held: { frame: ChannelFrame; bytes: number }[]
+  /** `attached` until what it holds is dispatched. `expired` once `connectTtl` passed, and kept until a RECONCILE no
+   *  longer names it, so one that crossed its ATTACH_RESULT doesn't await it again. */
+  phase: 'waiting' | 'attached' | 'expired'
+  stopWaiting: () => void
+}
+
 type ConnectionState = {
   pingTimer: ReturnType<typeof setTimeout> | null
   terminatePermanently: boolean
@@ -118,6 +132,7 @@ type ConnectionState = {
   retiredByBarrier: boolean
   recvBacklogBytes: number
   recvBacklogFrames: number
+  awaited: Map<number, AwaitedChannel>
 }
 
 type ConnectionEntry = {
@@ -198,6 +213,7 @@ class ChannelMux {
         retiredByBarrier: false,
         recvBacklogBytes: 0,
         recvBacklogFrames: 0,
+        awaited: new Map(),
       },
       transport: transport as ServerTransport<unknown>,
       sender: { send: (frame, onCommit) => this.send(connection, frame as Uint8Array<ArrayBuffer>, onCommit) },
@@ -245,6 +261,7 @@ class ChannelMux {
     if (!entry) return
     entry.state.closed = { isPermanent: permanent }
     this.clearPingTimer(entry.state)
+    this.stopAwaiting(entry.state)
     this.connectionEntries.delete(connection)
     const connId = entry.transport.getConnId(connection)
     // Identity-equality guards against deleting a *replacement* connection's entry when
@@ -364,10 +381,23 @@ class ChannelMux {
     }
     const sessionId = entry.transport.getSessionId(connection)
     assertProtocol(sessionId, 'frame before reconcile')
+    const channelFrame = frame as ChannelFrame
+    // One for a channel the wire awaits is held for after its attach, and stays in the recv backlog until then.
+    const awaited = entry.state.awaited.get(channelFrame.index)
+    if (awaited && awaited.phase !== 'expired') {
+      awaited.held.push({ frame: channelFrame, bytes: rawFrame.byteLength })
+      entry.state.recvBacklogBytes += rawFrame.byteLength
+      entry.state.recvBacklogFrames++
+      return null
+    }
+    this.dispatchChannelFrame(sessionId, channelFrame)
+    return null
+  }
+
+  private dispatchChannelFrame(sessionId: string, frame: ChannelFrame): void {
     // Frame for an ix that's no longer in the session — client closed the channel and the
     // server reconciled it out, but a frame was still in flight. Drop silently.
-    this.sessions.get(sessionId, (frame as ChannelFrame).index)?.channel._dispatchFrame(frame as ChannelFrame)
-    return null
+    this.sessions.get(sessionId, frame.index)?.channel._dispatchFrame(frame)
   }
 
   /** An ordinary reconcile claims its session, abandoning any probe staged on it — unless a barrier
@@ -506,9 +536,9 @@ class ChannelMux {
     state.reconciling = true
     this.resetPingTimer(connection)
     const newSessionId = crypto.randomUUID()
-    const openList = await this.reconcileSession(ctrl.sessionId, newSessionId, ctrl.open, entry.sender)
+    const openList = this.reconcileSession(ctrl.sessionId, newSessionId, ctrl.open, entry, connection)
 
-    // The connection may have closed during the await. The client never received this
+    // The connection may have closed since this frame arrived. The client never received this
     // session's id (`reconciled` was never sent), so no future reconcile can reference it —
     // remove the session outright, but preserve the close kind: a transient close leaves the
     // channels their `_onPeerDisconnect` grace so the client's retry can re-attach them.
@@ -516,8 +546,14 @@ class ChannelMux {
       const reason = state.closed.isPermanent ? DETACH_REASON.PERMANENT : DETACH_REASON.TRANSIENT
       const session = this.sessions.removeSession(newSessionId)
       if (session) for (const handle of session.values()) this.detachHandle(handle, reason)
+      this.stopAwaiting(state)
       throw new ProtocolViolationError('connection closed mid-reconcile')
     }
+
+    // What the wire stopped awaiting is forgotten once a RECONCILE no longer names it: the client has released it.
+    const named = new Set(ctrl.open.map((open) => open.ix))
+    for (const [ix, awaited] of state.awaited)
+      if (awaited.phase === 'expired' && !named.has(ix)) state.awaited.delete(ix)
 
     if (ctrl.sessionId) this.sessionFinalizers.delete(ctrl.sessionId)
     this.sessionFinalizers.set(newSessionId, () => this.send(connection, encode.fin()))
@@ -527,15 +563,16 @@ class ChannelMux {
     return { sessionId: newSessionId, openList, finalizeUpgrade, deliverTo: connection }
   }
 
-  private async reconcileSession(
+  private reconcileSession(
     prevSessionId: string | undefined,
     newSessionId: string,
     open: ReconcilePayload['open'],
-    sender: PeerSender,
-  ): Promise<ReconciledPayload['open']> {
-    const handles = (await Promise.all(open.map((entry) => this.attach(entry, sender)))).filter(
-      (h): h is ChannelHandle => h !== null,
-    )
+    conn: ConnectionEntry,
+    connection: Wire,
+  ): ReconciledPayload['open'] {
+    const handles = open
+      .map((entry) => this.attach(entry, conn, connection))
+      .filter((h): h is ChannelHandle => h !== null)
 
     // Channels in the previous session that the client did NOT re-include are recovery-failed.
     if (prevSessionId) {
@@ -550,17 +587,92 @@ class ChannelMux {
     return handles.map((h) => ({ ix: h.ix, lastSeq: h.channel._lastClientSeq }))
   }
 
-  /** First reconcile (`initial:true`) races channel registration against `connectTtl`; later
-   *  reconciles fail fast if the channel is gone. */
-  private async attach(entry: ReconcileOpenEntry, sender: PeerSender): Promise<ChannelHandle | null> {
+  /** Null leaves the channel out of the RECONCILED. The wire awaits an initial one the server hasn't registered, and
+   *  one it awaits stays out until attached; its ATTACH_RESULT settles it. Later reconciles fail fast if the channel
+   *  is gone. */
+  private attach(entry: ReconcileOpenEntry, conn: ConnectionEntry, connection: Wire): ChannelHandle | null {
+    const awaited = conn.state.awaited.get(entry.ix)
+    if (awaited) {
+      awaited.entry = entry
+      if (awaited.phase !== 'attached') return null
+    }
     const existing = this.channels.get(entry.id)
-    if (existing) return this.attachChannel(existing, entry, sender)
-    if (!entry.initial) return null
-    return new Promise<ChannelHandle | null>((resolve) => {
-      this.waitForChannelRegistration(entry.id, this.options.connectTtl, (channel) => {
-        resolve(channel ? this.attachChannel(channel, entry, sender) : null)
-      })
-    })
+    if (existing) return this.attachChannel(existing, entry, conn.sender)
+    if (entry.initial && !awaited) this.awaitChannel(entry, conn, connection)
+    return null
+  }
+
+  private awaitChannel(entry: ReconcileOpenEntry, conn: ConnectionEntry, connection: Wire): void {
+    const onResult = (channel: ServerChannel | null): void => {
+      if (channel) this.attachAwaited(awaited, channel, conn, connection)
+      else this.expireAwaited(awaited, conn, connection)
+    }
+    const awaited: AwaitedChannel = {
+      entry,
+      held: [],
+      phase: 'waiting',
+      stopWaiting: this.waitForChannelRegistration(entry.id, this.options.connectTtl, onResult),
+    }
+    conn.state.awaited.set(entry.ix, awaited)
+  }
+
+  /** Runs in `registerChannel`, so the waiters of several wires attach in the order they began waiting and the latest
+   *  keeps the channel. A reconcile is one synchronous turn, so this lands between two, never within one. */
+  private attachAwaited(
+    awaited: AwaitedChannel,
+    channel: ServerChannel,
+    conn: ConnectionEntry,
+    connection: Wire,
+  ): void {
+    const { ix } = awaited.entry
+    const sessionId = conn.transport.getSessionId(connection)
+    assert(sessionId, 'a channel awaited on a wire that never reconciled')
+    const handle = this.attachChannel(channel, awaited.entry, conn.sender)
+    if (!handle) {
+      this.expireAwaited(awaited, conn, connection)
+      return
+    }
+    this.sessions.add(sessionId, handle)
+    awaited.phase = 'attached'
+    // On the wire's recv chain, once the code that registered the channel has added its listeners; the wire holds
+    // what arrives meanwhile. The ATTACH_RESULT follows, so its lastSeq counts what the wire held.
+    const dispatchHeld = async (): Promise<void> => {
+      if (conn.state.awaited.get(ix) !== awaited) return
+      conn.state.awaited.delete(ix)
+      const sessionId = conn.transport.getSessionId(connection)
+      assert(sessionId)
+      try {
+        for (const { frame } of awaited.held) this.dispatchChannelFrame(sessionId, frame)
+      } catch (err) {
+        if (!(err instanceof ProtocolViolationError)) throw err
+        this.terminateWire(connection)
+        return
+      } finally {
+        this.releaseHeld(awaited, conn.state)
+      }
+      this.send(connection, encode.attachResult(ix, channel._lastClientSeq))
+    }
+    void this.chainRecv(conn, dispatchHeld).catch(handleTelefunctionBug)
+  }
+
+  /** Not registered within `connectTtl`, or shut down as it registered. */
+  private expireAwaited(awaited: AwaitedChannel, conn: ConnectionEntry, connection: Wire): void {
+    awaited.phase = 'expired'
+    this.releaseHeld(awaited, conn.state)
+    this.send(connection, encode.attachResult(awaited.entry.ix, null))
+  }
+
+  private releaseHeld(awaited: AwaitedChannel, state: ConnectionState): void {
+    for (const { bytes } of awaited.held) {
+      state.recvBacklogBytes -= bytes
+      state.recvBacklogFrames--
+    }
+    awaited.held = []
+  }
+
+  private stopAwaiting(state: ConnectionState): void {
+    for (const awaited of state.awaited.values()) awaited.stopWaiting()
+    state.awaited.clear()
   }
 
   /** Drains replay frames missed since `lastSeq` (sends are sync — see `send`), then
@@ -575,27 +687,33 @@ class ChannelMux {
     return { channel, ix: entry.ix, peer }
   }
 
+  /** Returns what ends the wait without a result. */
   private waitForChannelRegistration(
     channelId: string,
     ttlMs: number,
     onResult: (channel: ServerChannel | null) => void,
-  ): void {
+  ): () => void {
     let settled = false
     let timer: ReturnType<typeof setTimeout>
     const waiterSet = this.pendingRegisterWaiters.get(channelId) ?? new Set()
     this.pendingRegisterWaiters.set(channelId, waiterSet)
 
-    const settle = (channel: ServerChannel | null): void => {
-      if (settled) return
+    const stop = (): boolean => {
+      if (settled) return false
       settled = true
       waiterSet.delete(waiter)
       if (waiterSet.size === 0) this.pendingRegisterWaiters.delete(channelId)
       clearTimeout(timer)
-      onResult(channel)
+      return true
     }
-    const waiter = (channel: ServerChannel): void => settle(channel)
+    const waiter = (channel: ServerChannel): void => {
+      if (stop()) onResult(channel)
+    }
     waiterSet.add(waiter)
-    timer = setTimeout(() => settle(null), ttlMs)
+    timer = setTimeout(() => {
+      if (stop()) onResult(null)
+    }, ttlMs)
+    return () => void stop()
   }
 
   /** Transient: leave registry entries so the next reconcile's prev-comparison can fire
@@ -684,21 +802,25 @@ class SessionRegistry {
 
   setSession(sessionId: string, handles: Iterable<ChannelHandle>): void {
     this.removeSession(sessionId)
-    const session = new Map<number, ChannelHandle>()
-    for (const h of handles) {
-      session.set(h.ix, h)
-      let bindings = this.byChannel.get(h.channel.id)
-      if (!bindings) {
-        bindings = new Map()
-        this.byChannel.set(h.channel.id, bindings)
-      }
-      bindings.set(sessionId, h.ix)
+    for (const h of handles) this.add(sessionId, h)
+  }
+
+  /** An empty session is never stored: it has nothing to route, detach, or recovery-fail, and storing
+   *  it would leak, as only `removeSession` (a future reconcile naming this id, or a permanent close)
+   *  ever deletes entries, and a session abandoned by a transient close sees neither. */
+  add(sessionId: string, h: ChannelHandle): void {
+    let session = this.bySession.get(sessionId)
+    if (!session) {
+      session = new Map()
+      this.bySession.set(sessionId, session)
     }
-    // An empty session has nothing to route, detach, or recovery-fail — storing it would
-    // leak: only `removeSession` (a future reconcile naming this id, or a permanent close)
-    // ever deletes entries, and a session abandoned by a transient close sees neither.
-    if (session.size === 0) return
-    this.bySession.set(sessionId, session)
+    session.set(h.ix, h)
+    let bindings = this.byChannel.get(h.channel.id)
+    if (!bindings) {
+      bindings = new Map()
+      this.byChannel.set(h.channel.id, bindings)
+    }
+    bindings.set(sessionId, h.ix)
   }
 
   /** Returns the removed session so callers can drive per-handle lifecycle side effects. */

@@ -145,7 +145,7 @@ interface MuxChannel {
   _onTransportOpen(batched: boolean, wire: number): void
   /** Entry point for every per-channel wire frame (data + per-channel ctrl). The
    *  channel splits ctrl vs data internally. Connection-level frames (PING/PONG/
-   *  FIN/RECONCILED) and channel-termination ctrls (ABORT/ERROR) stay with the
+   *  FIN/RECONCILED), channel-termination ctrls (ABORT/ERROR) and ATTACH_RESULT stay with the
    *  connection — they involve connection-side cleanup. */
   _dispatchFrame(frame: ChannelFrame): void
   _onTransportClose(err?: Error): void
@@ -378,7 +378,14 @@ class ClientConnection implements MuxConnection {
   /** Advances each time the connection moves to another wire: what went out on the one before may not have arrived. */
   private wire = 0
   private nextIndex = 0
-  private reconcileIxes = new Set<number>()
+  /** What the RECONCILE in flight lists, and whether as `initial`. */
+  private reconcileIxes = new Map<number, boolean>()
+  /** Initial channels a RECONCILED on this wire left out because the server hadn't registered them, until their
+   *  ATTACH_RESULT. What they queue waits for it, so their replay goes first. */
+  private awaitedIxes = new Set<number>()
+  /** ATTACH_RESULTs for channels the RECONCILE in flight lists, applied with its RECONCILED, which the server may have
+   *  built before them (an SSE batch POST's RECONCILED goes once the POST's body is read). */
+  private earlyAttachResults = new Map<number, number | null>()
   private channels = new Map<number, ChannelEntry>()
   private channelIndex = new Map<MuxChannel, number>()
   private sendBuffer: BufferedFrame[] = []
@@ -476,8 +483,14 @@ class ClientConnection implements MuxConnection {
     return u
   }
 
-  private canSendImmediately(): boolean {
-    return this.connected && !this.reconciling && !this.upgradeGatesSends && this.registerReconcileTimer === null
+  private canSendImmediately(ix: number): boolean {
+    return (
+      this.connected &&
+      !this.reconciling &&
+      !this.upgradeGatesSends &&
+      this.registerReconcileTimer === null &&
+      !this.awaitedIxes.has(ix)
+    )
   }
 
   // ── Per-channel state transitions: every `entry.state =` write goes through these. ──
@@ -615,7 +628,7 @@ class ClientConnection implements MuxConnection {
     const replay = this.replayBuffers.get(ix)!
     const seq = replay.nextSeq()
     const frame = encode.text(ix, data, seq)
-    if (!this.canSendImmediately()) {
+    if (!this.canSendImmediately(ix)) {
       this.sendBuffer.push({ frame, channelIx: ix, seq })
     } else {
       replay.push(seq, frame)
@@ -656,7 +669,7 @@ class ClientConnection implements MuxConnection {
     const seq = replay.nextSeq()
     const frame = buildFrame(ix, seq)
     onQueued(seq)
-    if (!this.canSendImmediately()) {
+    if (!this.canSendImmediately(ix)) {
       this.sendBuffer.push({ frame, channelIx: ix, seq })
       return
     }
@@ -670,7 +683,7 @@ class ClientConnection implements MuxConnection {
     const replay = this.replayBuffers.get(ix)!
     const seq = replay.nextSeq()
     const frame = encode.binary(ix, data, seq)
-    if (!this.canSendImmediately()) {
+    if (!this.canSendImmediately(ix)) {
       this.sendBuffer.push({ frame, channelIx: ix, seq })
       return
     }
@@ -684,7 +697,7 @@ class ClientConnection implements MuxConnection {
     const replay = this.replayBuffers.get(ix)!
     const seq = replay.nextSeq()
     const frame = encode.ackRes(ix, seq, ackedSeq, result, status)
-    if (!this.canSendImmediately()) {
+    if (!this.canSendImmediately(ix)) {
       this.sendBuffer.push({ frame, channelIx: ix, seq })
       return
     }
@@ -696,7 +709,7 @@ class ClientConnection implements MuxConnection {
     const ix = this.channelIndex.get(channel)
     if (ix === undefined) return
     const frame = encode.close(ix, 0)
-    if (!this.canSendImmediately()) {
+    if (!this.canSendImmediately(ix)) {
       this.sendBuffer.push({ frame, channelIx: ix, seq: undefined })
       return
     }
@@ -707,7 +720,7 @@ class ClientConnection implements MuxConnection {
     const ix = this.channelIndex.get(channel)
     if (ix === undefined) return
     const frame = encode.close(ix, timeoutMs)
-    if (!this.canSendImmediately()) {
+    if (!this.canSendImmediately(ix)) {
       this.sendBuffer.push({ frame, channelIx: ix, seq: undefined })
       return
     }
@@ -718,7 +731,7 @@ class ClientConnection implements MuxConnection {
     const ix = this.channelIndex.get(channel)
     if (ix === undefined) return
     const frame = encode.closeAck(ix)
-    if (!this.canSendImmediately()) {
+    if (!this.canSendImmediately(ix)) {
       this.sendBuffer.push({ frame, channelIx: ix, seq: undefined })
       return
     }
@@ -760,7 +773,7 @@ class ClientConnection implements MuxConnection {
    *  dropped one could stall the peer: an upgrade attempt that ends without its barrier lifts the hold with no reattach
    *  to advertise it again. */
   private sendFlowControl(ix: number, frame: Uint8Array<ArrayBuffer>): void {
-    if (!this.canSendImmediately()) {
+    if (!this.canSendImmediately(ix)) {
       this.sendBuffer.push({ frame, channelIx: ix, seq: undefined })
       return
     }
@@ -771,7 +784,7 @@ class ClientConnection implements MuxConnection {
     const ix = this.channelIndex.get(channel)
     if (ix === undefined) return
     const frame = encode.broadcastSub(ix, binary)
-    if (!this.canSendImmediately()) {
+    if (!this.canSendImmediately(ix)) {
       this.sendBuffer.push({ frame, channelIx: ix, seq: undefined })
       return
     }
@@ -782,7 +795,7 @@ class ClientConnection implements MuxConnection {
     const ix = this.channelIndex.get(channel)
     if (ix === undefined) return
     const frame = encode.broadcastUnsub(ix, binary)
-    if (!this.canSendImmediately()) {
+    if (!this.canSendImmediately(ix)) {
       this.sendBuffer.push({ frame, channelIx: ix, seq: undefined })
       return
     }
@@ -823,8 +836,8 @@ class ClientConnection implements MuxConnection {
     // What the server sent through this seq and hasn't arrived is lost and now counted consumed, so no replay may bring
     // it back.
     if (frame.tag === TAG.SENT) this.trackSeq(frame.index, frame.seq)
-    // Connection-level + channel-termination ctrls stay here; they involve connection bookkeeping
-    // (upgrade state, channel release, TTL). Everything else is per-channel and goes through
+    // Connection-level + channel-termination ctrls and ATTACH_RESULT stay here; they involve connection
+    // bookkeeping (upgrade state, channel release, TTL). Everything else is per-channel and goes through
     // `channel._dispatchFrame`.
     switch (frame.tag) {
       case TAG.FIN:
@@ -832,6 +845,9 @@ class ClientConnection implements MuxConnection {
         return
       case TAG.RECONCILED:
         this.handleReconciled(frame.payload)
+        return
+      case TAG.ATTACH_RESULT:
+        this.handleAttachResult(frame.index, frame.lastSeq)
         return
       case TAG.ABORT:
         this.closeRemoteChannel(frame.index, makeAbortError(parse(frame.abortValue)))
@@ -1048,6 +1064,8 @@ class ClientConnection implements MuxConnection {
     // Settled-reconcile gate; a flush above may have just re-armed `reconciling` — the next
     // RECONCILED retries via `handleReconciled`.
     if (this.reconciling) return
+    // The server would attach them to this wire, which a barrier retires; the last ATTACH_RESULT retries.
+    if (this.awaitedIxes.size > 0) return
     const nextTransport = UPGRADE_PATH[this.transport.type]
     if (!nextTransport) return
     if (!this.isTransportUpgradeAllowed(nextTransport)) return
@@ -1208,7 +1226,8 @@ class ClientConnection implements MuxConnection {
   }
 
   private drainBufferedFramesToWire(): void {
-    for (const frame of this.drainBufferedFrames(this.channels)) this.transport.sendFrame(frame)
+    for (const frame of this.drainBufferedFrames(this.sendableChannels(), this.awaitedIxes))
+      this.transport.sendFrame(frame)
     for (const [ix, entry] of this.channels) if (entry.state.tag === 'draining') this.releaseChannel(ix, entry.channel)
     this.startTtlIfIdle()
   }
@@ -1220,6 +1239,9 @@ class ClientConnection implements MuxConnection {
       return
     }
     this.wire++
+    // The server stops awaiting channels when their wire goes; the next wire's RECONCILE lists them again.
+    this.awaitedIxes.clear()
+    this.earlyAttachResults.clear()
     // The wire is dying — cancel the queued RECONCILE (no point sending) and release
     // unconfirmed-releasing entries so they don't leak onto the post-reconnect RECONCILE.
     this.cancelPendingRegisterReconcile()
@@ -1295,6 +1317,8 @@ class ClientConnection implements MuxConnection {
     this.lastSeqByChannel.clear()
     this.replayBuffers.clear()
     this.reconcileIxes.clear()
+    this.awaitedIxes.clear()
+    this.earlyAttachResults.clear()
     this.exitReconciling()
     // A fresh connection replaces this one once its indexes run out.
     if (ClientConnection.cache.get(this.cacheKey) === this) ClientConnection.cache.delete(this.cacheKey)
@@ -1317,12 +1341,12 @@ class ClientConnection implements MuxConnection {
 
   private declareOpenEntries({ skipInitial }: { skipInitial: boolean }): ReconcileOpenEntry[] {
     this.enterReconciling()
-    this.reconcileIxes = new Set()
+    this.reconcileIxes = new Map()
     const open: ReconcileOpenEntry[] = []
     for (const [ix, entry] of this.channels) {
       const isInitial = (entry.state.tag === 'pending' || entry.state.tag === 'releasing') && entry.state.initial
       if (skipInitial && isInitial) continue
-      this.reconcileIxes.add(ix)
+      this.reconcileIxes.set(ix, isInitial)
       const payloadEntry: ReconcileOpenEntry = {
         id: entry.channel.id,
         ix,
@@ -1354,9 +1378,15 @@ class ClientConnection implements MuxConnection {
     // replay buffers. Every other reconcile is on a live wire: a first attempt has sent nothing yet, and a
     // reconcile on an established wire (new-channel registration, chained reconcile) has no
     // in-transit replay frame to jump ahead of — so eager-batch, it saves a round-trip.
+    // A channel the server awaits is left out: its replay waits for its ATTACH_RESULT.
     const sentBefore = [...this.replayBuffers.values()].some((replay) => replay.length > 0)
     if (isInitialBatch && (this.sessionId !== null || sentBefore)) return []
-    return this.drainBufferedFrames(this.channels)
+    return this.drainBufferedFrames(this.sendableChannels(), this.awaitedIxes)
+  }
+
+  private sendableChannels(): Set<number> | Map<number, ChannelEntry> {
+    if (this.awaitedIxes.size === 0) return this.channels
+    return new Set([...this.channels.keys()].filter((ix) => !this.awaitedIxes.has(ix)))
   }
 
   stageReconcileBatch(isInitialBatch = false): ReconcileBatch {
@@ -1393,7 +1423,19 @@ class ClientConnection implements MuxConnection {
     const serverMap = new Map<number, number>()
     for (const channel of ctrl.open) serverMap.set(channel.ix, channel.lastSeq)
     const reconcileIxes = this.reconcileIxes
-    this.reconcileIxes = new Set()
+    this.reconcileIxes = new Map()
+    const attachResults = this.earlyAttachResults
+    this.earlyAttachResults = new Map()
+    for (const [ix, lastSeq] of attachResults) if (lastSeq !== null && !serverMap.has(ix)) serverMap.set(ix, lastSeq)
+    // An initial channel left out is one the server awaits, until its ATTACH_RESULT. What one released meanwhile
+    // queued goes out now: the server holds it for the attach.
+    const releasable = new Set(serverMap.keys())
+    for (const [ix, initial] of reconcileIxes) {
+      this.awaitedIxes.delete(ix)
+      if (!initial || serverMap.has(ix) || attachResults.has(ix)) continue
+      this.awaitedIxes.add(ix)
+      if (!this.channels.has(ix)) releasable.add(ix)
+    }
     const releaseFrames: OutboundFrame[] = []
     const channelsToOpen: MuxChannel[] = []
     let hasNewChannels = false
@@ -1406,6 +1448,7 @@ class ClientConnection implements MuxConnection {
         if (!serverMap.has(ix)) hasNewChannels = true
         continue
       }
+      if (this.awaitedIxes.has(ix)) continue
       if (entry.state.tag === 'releasing' || (entry.state.tag === 'draining' && !serverMap.has(ix))) {
         this.releaseChannel(ix, entry.channel)
         continue
@@ -1429,7 +1472,7 @@ class ClientConnection implements MuxConnection {
       else channelsToOpen.push(entry.channel)
     }
 
-    for (const frame of this.drainBufferedFrames(serverMap, this.channels)) releaseFrames.push(frame)
+    for (const frame of this.drainBufferedFrames(releasable, this.channels)) releaseFrames.push(frame)
 
     const reconcileAgain = hasNewChannels || releasedMeanwhile
     if (reconcileAgain) {
@@ -1450,6 +1493,34 @@ class ClientConnection implements MuxConnection {
       this.releaseChannel(ix, entry.channel)
       entry.channel._onTransportClose(err)
     }
+  }
+
+  /** An awaited channel's own RECONCILED entry: `lastSeq` if the server attached it, null if not. */
+  private handleAttachResult(ix: number, lastSeq: number | null): void {
+    if (this.reconcileIxes.has(ix)) {
+      this.earlyAttachResults.set(ix, lastSeq)
+      return
+    }
+    if (!this.awaitedIxes.delete(ix)) return
+    const entry = this.channels.get(ix)
+    // Nothing for one released meanwhile: the server held its closing frame for the attach, or closed it itself.
+    if (lastSeq === null) {
+      this.releaseDeferredOmitted([ix])
+    } else if (entry) {
+      // As `applyReconciled` does: its replay, then what it queued.
+      if (entry.state.tag === 'pending')
+        for (const frame of this.replayBuffers.get(ix)?.getAfter(lastSeq) ?? [])
+          this.transport.sendFrame({ kind: 'reconcile', frame })
+      for (const frame of this.drainBufferedFrames(new Set([ix]), this.channels)) this.transport.sendFrame(frame)
+      if (entry.state.tag === 'releasing') {
+        this.releaseChannel(ix, entry.channel)
+      } else {
+        this.enterChannelOpen(ix)
+        entry.channel._onTransportOpen(this.transport.batched, this.wire)
+      }
+    }
+    this.startTtlIfIdle()
+    this.maybeStartUpgrade()
   }
 
   private closeRemoteChannel(ix: number, err?: Error): void {

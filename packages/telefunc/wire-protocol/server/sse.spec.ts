@@ -44,7 +44,7 @@ function collectFrames(body: ReadableStream<Uint8Array>): DecodedFrame[] {
   return frames
 }
 
-test("an acknowledged upload POST waits out a reconcile held for a channel the server hasn't registered", async () => {
+test("an acknowledged upload POST waits out the connection's first reconcile, however long that reconcile's POST takes", async () => {
   vi.useFakeTimers()
   try {
     const sse = getTelefuncSseChannelHooks()
@@ -57,10 +57,11 @@ test("an acknowledged upload POST waits out a reconcile held for a channel the s
     await vi.advanceTimersByTimeAsync(100)
     // The page trusts the upload from its open-ack on.
     expect(received.some((frame) => frame.tag === TAG.STREAM_REQUEST_OPEN_ACK)).toBe(true)
-    // Its first RECONCILE names a callback whose call was aborted, so the server holds it up to connectTtl.
-    downstream.push(encode.reconcile({ open: [{ id: 'aborted-callback', ix: 0, lastSeq: 0, initial: true }] }))
-    downstream.end()
+    // Its first RECONCILE's POST body ends past connectTtl, as on a slow link, and the RECONCILED waits for that.
+    downstream.push(encode.reconcile({ open: [] }))
     await vi.advanceTimersByTimeAsync(getServerConfig().channel.connectTtl)
+    downstream.end()
+    await vi.advanceTimersByTimeAsync(10)
     const reconciled = received.flatMap((frame) => (frame.tag === TAG.RECONCILED ? [frame.payload] : []))[0]
     expect(reconciled).toBeDefined()
     // A channel the page opened meanwhile is reconciled on that upload.
