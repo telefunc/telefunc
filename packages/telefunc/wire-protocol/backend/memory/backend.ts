@@ -3,7 +3,6 @@ export { MemoryBackendState, MemoryBackend }
 // The in-process backend, and the reference for Room SPI semantics: this process's clock is authority time.
 
 import type { BroadcastDriver, BroadcastPayload, BroadcastRoute, PublishResult } from '../broadcast/contract.js'
-import { broadcastRouteKey } from '../broadcast/route-key.js'
 import type {
   CellMutation,
   HeadCxResult,
@@ -31,6 +30,7 @@ import {
   type StoredHead,
 } from '../room/semantics.js'
 import type { OrderingInfo } from '../../ordering-frame.js'
+import type { BroadcastKind } from '../../shared-ws.js'
 import { unrefTimer } from '../../../utils/unrefTimer.js'
 import type { BackendPayload, BackendReceiver, SubscriptionDriver } from '../subscription.js'
 import { DriverAttempt } from '../attempt.js'
@@ -62,7 +62,10 @@ class MemoryBackendState {
   readonly rooms = new Map<string, RoomRecord>()
   readonly directory = new Map<string, string>()
   readonly broadcastOrder = new Map<string, OrderingInfo>()
-  readonly broadcastSubs = new Map<string, Set<MemorySubscriptionAttempt>>()
+  readonly broadcastSubs: Record<BroadcastKind, Map<string, Set<MemorySubscriptionAttempt>>> = {
+    text: new Map(),
+    binary: new Map(),
+  }
   revSeq = 0
 }
 
@@ -147,14 +150,14 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
 
   publish(route: BroadcastRoute, payload: BroadcastPayload): PublishResult {
     const mark = advanceOrder(this._state.broadcastOrder, route.key, Date.now())
-    const targets = [...(this._state.broadcastSubs.get(broadcastRouteKey(route)) ?? [])]
+    const targets = [...(this._state.broadcastSubs[route.kind].get(route.key) ?? [])]
     // Counted before delivery, which may unsubscribe or subscribe.
     const receivers = sumReceiverCounts(targets)
     this._deliver(() => {
       // A string can't change, so every subscription gets the same one; bytes are copied for each.
       for (const target of targets) target.deliver(typeof payload === 'string' ? payload : copyBytes(payload), mark)
     })
-    return { ...mark, receivers, meta: { transport: 'in-memory' } }
+    return { seq: mark.seq, timestamp: mark.timestamp, receivers, meta: { transport: 'in-memory' } }
   }
 
   /** Runs `delivery` after those queued before it: now, unless one is running or this turn's deliveries ran out. */
@@ -305,8 +308,8 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
       subs = this._generation(room, inc).subs
       key = encodeLaneKey(lane)
     } else {
-      subs = this._state.broadcastSubs
-      key = broadcastRouteKey(source)
+      subs = this._state.broadcastSubs[source.kind]
+      key = source.key
     }
     const sub: MemorySubscriptionAttempt = new MemorySubscriptionAttempt(receiver, localReceiverCount, () =>
       removeFromSet(subs, key, sub),
