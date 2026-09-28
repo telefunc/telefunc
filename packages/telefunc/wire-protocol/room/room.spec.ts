@@ -1284,6 +1284,31 @@ describe('Room public behavior', () => {
       stored: [{ topic: { name: 'b' } }, [{ pos: { x: 1 } }]],
     })
   })
+  it.each([false, true])(
+    'lets a 0 ms timer fire while a listener answers every message it gets (after an await: %s)',
+    async (afterAwait) => {
+      const room = await Room.create(`echo-${afterAwait}`)
+      const member = await room.join()
+      let timerFired = false
+      setTimeout(() => (timerFired = true), 0)
+      const stopped = Promise.withResolvers<number>()
+      // Bounded, so the spec ends where the answers starve the timer.
+      const answer = (depth: number) => {
+        if (timerFired || depth === 20_000) return stopped.resolve(depth)
+        member.publish(depth + 1).catch(stopped.reject)
+      }
+      room.subscribe(
+        afterAwait
+          ? async (data) => {
+              await null
+              answer(data as number)
+            }
+          : (data) => answer(data as number),
+      )
+      await member.publish(0)
+      expect(await stopped.promise).toBeLessThan(20_000)
+    },
+  )
   it('sends a server message as it was at the call, however the caller reuses its object', async () => {
     const room = await Room.create('reused-message')
     const n = (data: unknown) => (data as { n: number }).n

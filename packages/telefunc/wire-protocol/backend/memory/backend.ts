@@ -34,7 +34,7 @@ import type { OrderingInfo } from '../../ordering-frame.js'
 import { unrefTimer } from '../../../utils/unrefTimer.js'
 import type { BackendPayload, BackendReceiver, SubscriptionDriver } from '../subscription.js'
 import { DriverAttempt } from '../attempt.js'
-import { ChannelOverflowError } from '../../channel-errors.js'
+import { macrotaskYield } from '../../flow-control/macrotask-yield.js'
 
 type MemoryBackendOptions = {
   /** @internal Storage to share with a reconstructed backend. */
@@ -66,8 +66,8 @@ class MemoryBackendState {
   revSeq = 0
 }
 
-/** How deep publishes made from listeners may nest; a listener answering every message on its key stops there. */
-const NESTED_PUBLISH_LIMIT = 1024
+/** Deliveries one event-loop turn runs; the rest wait for the next, so a listener answering itself can't starve the loop. */
+const DELIVERIES_PER_TURN = 1024
 
 const copyBytes = (bytes: Uint8Array): Uint8Array => new Uint8Array(bytes)
 const copyLane = (lane: LaneId): LaneId => ({ ...lane })
@@ -75,15 +75,10 @@ const sumReceiverCounts = (targets: MemorySubscriptionAttempt[]): number =>
   targets.reduce((total, target) => total + target.receiverCount(), 0)
 const isExpired = (entry: Expiring, now: number): boolean => entry.expiresAt !== null && entry.expiresAt <= now
 
-// Commits assign their seq and queue their delivery in one synchronous step, so deliveries run in seq order.
-function deliverAfterCommit(
-  targets: MemorySubscriptionAttempt[],
-  frame: Uint8Array,
-  mark: OrderingInfo,
-): Promise<void> {
-  return Promise.resolve().then(() => {
-    for (const target of targets) target.deliver(copyBytes(frame), mark)
-  })
+/** A later macrotask; setImmediate keeps the process alive for it, where the runtime has one. */
+function nextTurn(callback: () => void): void {
+  if (typeof setImmediate === 'function') setImmediate(callback)
+  else void macrotaskYield.yield().then(callback)
 }
 
 function newGeneration(): Generation {
@@ -136,9 +131,9 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
   readonly subscriptions: SubscriptionDriver<MemorySubscriptionSource>
 
   readonly #state: MemoryBackendState
-  /** Broadcast deliveries in seq order: the running one stays first, so a publish made inside it is delivered after, one
-   *  level deeper. */
-  readonly #deliveries: Array<{ depth: number; deliver: () => void }> = []
+  /** Deliveries in seq order: the running one stays first, so a publish made inside it is delivered after. */
+  readonly #deliveries: Array<() => void> = []
+  #deliveredThisTurn = 0
   constructor(options: MemoryBackendOptions = {}) {
     this.#state = options.state ?? new MemoryBackendState()
     this.subscriptions = {
@@ -150,29 +145,35 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
     }
   }
 
-  publish(route: BroadcastRoute, payload: BroadcastPayload): PublishResult | Promise<PublishResult> {
-    const depth = this.#deliveries.length === 0 ? 0 : this.#deliveries[0]!.depth + 1
-    if (depth > NESTED_PUBLISH_LIMIT) {
-      return Promise.reject(
-        new ChannelOverflowError(
-          `A Broadcast publish made from a listener nests more than ${NESTED_PUBLISH_LIMIT} deep`,
-        ),
-      )
-    }
+  publish(route: BroadcastRoute, payload: BroadcastPayload): PublishResult {
     const mark = advanceOrder(this.#state.broadcastOrder, route.key, Date.now())
     const targets = [...(this.#state.broadcastSubs.get(broadcastRouteKey(route)) ?? [])]
     // Counted before delivery, which may unsubscribe or subscribe.
     const receivers = sumReceiverCounts(targets)
-    this.#deliveries.push({
-      depth,
-      deliver: () => {
-        // A string can't change, so every subscription gets the same one; bytes are copied for each.
-        for (const target of targets) target.deliver(typeof payload === 'string' ? payload : copyBytes(payload), mark)
-      },
+    this.#deliver(() => {
+      // A string can't change, so every subscription gets the same one; bytes are copied for each.
+      for (const target of targets) target.deliver(typeof payload === 'string' ? payload : copyBytes(payload), mark)
     })
-    if (this.#deliveries.length === 1)
-      for (; this.#deliveries.length > 0; this.#deliveries.shift()) this.#deliveries[0]!.deliver()
     return { ...mark, receivers, meta: { transport: 'in-memory' } }
+  }
+
+  /** Runs `delivery` after those queued before it: now, unless one is running or this turn's deliveries ran out. */
+  #deliver(delivery: () => void): void {
+    this.#deliveries.push(delivery)
+    if (this.#deliveries.length === 1) this.#drain()
+  }
+
+  #drain(): void {
+    for (; this.#deliveries.length > 0; this.#deliveries.shift()) {
+      if (this.#deliveredThisTurn === DELIVERIES_PER_TURN) return
+      if (this.#deliveredThisTurn++ === 0) nextTurn(() => this.#nextTurn())
+      this.#deliveries[0]!()
+    }
+  }
+
+  #nextTurn(): void {
+    this.#deliveredThisTurn = 0
+    if (this.#deliveries.length > 0) this.#drain()
   }
 
   async readHead(roomId: string): Promise<RoomHead | null> {
@@ -258,12 +259,16 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
       })
     }
     const targets = [...(gen.subs.get(key) ?? [])]
-    return {
-      accepted: true,
-      ...mark,
-      receivers: sumReceiverCounts(targets),
-      delivery: deliverAfterCommit(targets, frame, mark),
-    }
+    // Commits assign their seq and queue their delivery in one synchronous step, so deliveries run in seq order.
+    const delivery = new Promise<void>((resolve) =>
+      queueMicrotask(() =>
+        this.#deliver(() => {
+          for (const target of targets) target.deliver(copyBytes(frame), mark)
+          resolve()
+        }),
+      ),
+    )
+    return { accepted: true, ...mark, receivers: sumReceiverCounts(targets), delivery }
   }
 
   async readRetained(roomId: string, inc: string, lane: LaneId): Promise<RetainedFrame | null> {
