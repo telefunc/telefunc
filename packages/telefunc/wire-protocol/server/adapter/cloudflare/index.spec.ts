@@ -244,6 +244,17 @@ describe('cloudflare adapter entrypoint', () => {
     expect(await kv.get('session:lapsed-token', 'json')).toEqual({ s: 'telefunc-shard-weur-0', b: 'weur' })
   })
 
+  it('takes the session token from the session query parameter only', async () => {
+    const { binding } = createBinding()
+    const tf = new Telefunc()
+    const response = await tf.serve({
+      request: new Request('https://telefunc.test/_telefunc', { headers: { 'x-telefunc-session': 'header-token' } }),
+      env: { TelefuncDurableObject: binding, TelefuncKV: createMockKV() } as unknown as Cloudflare.Env,
+      ctx: { waitUntil: (p: Promise<unknown>) => void p.then(() => {}) } as unknown as ExecutionContext,
+    })
+    expect(response?.headers.get('x-telefunc-session')).toMatch(/^[0-9a-f-]{36}$/)
+  })
+
   it('returns undefined for non-telefunc traffic', async () => {
     const tf = new Telefunc()
 

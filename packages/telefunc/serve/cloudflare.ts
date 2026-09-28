@@ -158,8 +158,7 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
 
       const kv = getKVBinding(env)
       assertUsage(kv, `Missing Cloudflare KV namespace binding "${kvBindingName}". Add it to your wrangler.jsonc.`)
-      const sessionToken =
-        request.headers.get(TELEFUNC_SESSION_HEADER) || new URL(request.url).searchParams.get('session')
+      const sessionToken = new URL(request.url).searchParams.get('session')
 
       let sessionInstanceName: string | undefined
       let locationBucket: LocationBucket | undefined
