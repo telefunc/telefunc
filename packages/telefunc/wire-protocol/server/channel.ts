@@ -1,4 +1,4 @@
-export { Channel, ServerChannel, SERVER_CHANNEL_BRAND, reconnectWindow }
+export { Channel, ServerChannel, SERVER_CHANNEL_BRAND, reconnectWindow, replayMaxAge }
 export { ChannelClosedError, ChannelOverflowError } from '../channel-errors.js'
 export { NetworkError } from '../../shared/NetworkError.js'
 
@@ -39,7 +39,7 @@ import { ServerChannelBuffer } from './ServerChannelBuffer.js'
 import { ReplayBuffer } from '../replay-buffer.js'
 import { getServerConfig } from '../../node/server/serverConfig.js'
 import { assert } from '../../utils/assert.js'
-import { ACK_STATUS, ProtocolViolationError, TAG, isChannelCtrlTag, isChannelDataFrame } from '../shared-ws.js'
+import { ACK_STATUS, ProtocolViolationError, TAG, isChannelCtrlTag, isSequencedFrame } from '../shared-ws.js'
 import type { AckResultStatus, ChannelCtrlFrame, ChannelDataFrame, ChannelFrame, ReattachState } from '../shared-ws.js'
 
 /** Peer-authored JSON: a parse failure is the peer's, so it surfaces as a protocol violation. */
@@ -106,8 +106,14 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   private _reconnectTimer: ReturnType<typeof setTimeout> | null = null
   private _responseAbort: ((abortValue?: unknown) => void) | null = null
   private _pendingAckRes: Array<{ ackedSeq: number; result: string; status: AckResultStatus }> = []
-  private _shutdownCallback: (() => void) | null = null
+  private _shutdownCallback: ((keep: boolean) => void) | null = null
+  // The closing frames made while no peer was attached, sent to the next.
   private _pendingCloseAck = false
+  private _pendingCloseRequest = false
+  private _pendingAbort: string | null = null
+  private _closeRequestSeq = 0
+  /** How far the page is known to have what this channel sent it. */
+  private _pageLastSeq = 0
 
   // ── Wire state — channel-owned, persistent across attach-mode transitions ────
   /** Buffer of outgoing wire frames, used to replay missed frames on reconnect.
@@ -154,9 +160,9 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     return this._isClosed
   }
 
-  /** @internal — Register a one-shot callback that fires when the transport shuts down.
-   *  Replaces any previously registered callback (does not accumulate). */
-  _onShutdown(cb: () => void): void {
+  /** @internal — Register a one-shot callback that fires when the transport shuts down, with whether the channel keeps
+   *  what its page may still lack of it (see `_release`). Replaces any previously registered callback. */
+  _onShutdown(cb: (keep: boolean) => void): void {
     this._shutdownCallback = cb
   }
 
@@ -314,10 +320,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     if (this._didShutdown || this._isClosed) return
     this._isClosed = true
     const serializedAbortValue = stringify(abortValue)
-    if (this._peer) {
-      this._peer.sendAbort(serializedAbortValue)
-      this._peer = null
-    }
+    if (this._peer) this._peer.sendAbort(serializedAbortValue)
+    else this._pendingAbort = serializedAbortValue
     this._shutdown(createAbortError(abortValue, message))
   }
 
@@ -328,7 +332,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this._closeDeadline = Date.now() + timeout
     this._awaitingCloseAck = true
     this._startClose()
-    if (this._peer) this._peer.sendCloseRequest(timeout)
+    if (this._peer) this._closeRequestSeq = this._peer.sendCloseRequest(timeout)
+    else this._pendingCloseRequest = true
     this._closePromise = this._runFinalizationLoop()
     return this._closePromise
   }
@@ -342,21 +347,27 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     // becomes addressable on the wire, so a peer can attach immediately after this
     // returns. Its TTL covers a full reconnect window.
     const c = getServerConfig().channel
-    this._replayBuffer = new ReplayBuffer(c.serverReplayBuffer, reconnectWindow() + 1_000, c.serverReplayBufferBinary)
+    this._replayBuffer = new ReplayBuffer(c.serverReplayBuffer, replayMaxAge(), c.serverReplayBufferBinary)
     this._clearTimer('_ttlTimer')
     this._ttlTimer = unrefTimer(
       setTimeout(() => {
         this._ttlTimer = null
         this._shutdown(
           new NetworkError('Channel timed out: no client connected within TTL after response was sent', true),
+          true,
         )
       }, c.connectTtl),
     )
   }
 
-  /** The peer's RECONCILE declarations apply before `onOpen` fires, through the same hooks as its frames. */
+  /** The peer's RECONCILE declarations apply before `onOpen` fires, through the same hooks as its frames. An ended
+   *  channel sends only what it made while no peer was attached: its answers and its end. */
   _attachPeer(peer: IndexedPeer, state?: ReattachState): void {
-    if (this._didShutdown) return
+    if (this._didShutdown) {
+      this._sendPendingAckRes(peer)
+      this._sendPendingEnd(peer)
+      return
+    }
     this._clearTimer('_ttlTimer')
     this._clearTimer('_reconnectTimer')
     // The wire of the last peer lost nothing to repair, and still answers the probe in flight.
@@ -374,16 +385,12 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       sendBinaryAck: (data, cb) => peer.sendBinaryAckReq(data, (seq, bytes) => this._addPendingAck(seq, bytes, cb)),
       sendPublishBinary: (msg) => this._flow.countSentBytes(peer.sendPublishBinary(msg)),
     })
-    for (const ack of this._pendingAckRes) {
-      peer.sendAckRes(ack.ackedSeq, ack.result, ack.status)
-    }
-    this._pendingAckRes.length = 0
+    this._sendPendingAckRes(peer)
     if (state?.broadcast) {
       this._onPeerSubscription('text', state.broadcast.text)
       this._onPeerSubscription('binary', state.broadcast.binary)
     }
-    if (this._pendingCloseAck) peer.sendCloseAck()
-    if (this._awaitingCloseAck) peer.sendCloseRequest(Math.max(0, this._closeDeadline - Date.now()))
+    this._sendPendingEnd(peer)
     if (this._isClosed) {
       this._notifyCloseProgress()
       return
@@ -394,11 +401,13 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   /** @internal — Entry point from the mux for an incoming wire frame. Handles ctrl routing,
    *  client→server seq dedup, and delegation to `_dispatchDataFrame`. */
   _dispatchFrame(frame: ChannelFrame): void {
-    // The page's CLOSE and CLOSE_ACK are sequenced with its data, so a replay repeats none of them.
-    if ((isChannelDataFrame(frame) || frame.tag === TAG.CLOSE || frame.tag === TAG.CLOSE_ACK) && frame.seq) {
+    // The page's closing frames are sequenced with its data, so a replay repeats none of them.
+    if (isSequencedFrame(frame) && frame.seq) {
       if (frame.seq <= this._lastClientSeq) return
       this._lastClientSeq = frame.seq
     }
+    // An ended channel keeps only how far the page's frames reached it.
+    if (this._didShutdown) return
     if (isChannelCtrlTag(frame.tag)) {
       this._dispatchCtrl(frame as ChannelCtrlFrame)
       return
@@ -588,8 +597,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     if (this._didShutdown) return
     const peerDeadline = Date.now() + normalizeCloseTimeout(timeoutMs)
     if (!this._closeDeadline || peerDeadline < this._closeDeadline) this._closeDeadline = peerDeadline
-    this._pendingCloseAck = true
     if (this._peer) this._peer.sendCloseAck()
+    else this._pendingCloseAck = true
     if (this._isClosed) {
       this._notifyCloseProgress()
       return
@@ -600,6 +609,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
 
   _onPeerCloseAck(): void {
     if (this._didShutdown) return
+    // The page acknowledges the close request as it gets it, so it has all sent before it.
+    this._onPageHas(this._closeRequestSeq)
     this._didReceiveCloseAck = true
     this._awaitingCloseAck = false
     this._notifyCloseProgress()
@@ -612,7 +623,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this._reconnectTimer = unrefTimer(
       setTimeout(() => {
         this._reconnectTimer = null
-        this._shutdown(new NetworkError('Channel timed out: client did not reconnect within grace period', true))
+        this._shutdown(new NetworkError('Channel timed out: client did not reconnect within grace period', true), true)
       }, reconnectTimeout),
     )
   }
@@ -620,13 +631,45 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   _onPeerRecoveryFailure(): void {
     if (this._didShutdown) return
     this._peer = null
-    this._shutdown(new NetworkError('Channel not acknowledged by client after reconnect', true))
+    this._shutdown(new NetworkError('Channel not acknowledged by client after reconnect', true), true)
   }
 
   _onPeerClose(): void {
     if (this._didShutdown) return
     this._peer = null
-    this._shutdown()
+    this._shutdown(undefined, true)
+  }
+
+  /** @internal The page has what this channel sent it through `lastSeq`. */
+  _onPageHas(lastSeq: number): void {
+    if (lastSeq > this._pageLastSeq) this._pageLastSeq = lastSeq
+  }
+
+  /** @internal Its page has all this channel sent it, and it has nothing more to send. */
+  _pageHasAll(): boolean {
+    return (
+      this._replayBuffer !== null &&
+      this._pageLastSeq >= this._replayBuffer.seq &&
+      this._pendingAckRes.length === 0 &&
+      !this._pendingCloseAck &&
+      !this._pendingCloseRequest &&
+      this._pendingAbort === null
+    )
+  }
+
+  private _sendPendingAckRes(peer: IndexedPeer): void {
+    for (const ack of this._pendingAckRes) peer.sendAckRes(ack.ackedSeq, ack.result, ack.status)
+    this._pendingAckRes.length = 0
+  }
+
+  private _sendPendingEnd(peer: IndexedPeer): void {
+    if (this._pendingCloseAck) peer.sendCloseAck()
+    if (this._pendingCloseRequest)
+      this._closeRequestSeq = peer.sendCloseRequest(Math.max(0, this._closeDeadline - Date.now()))
+    if (this._pendingAbort !== null) peer.sendAbort(this._pendingAbort)
+    this._pendingCloseAck = false
+    this._pendingCloseRequest = false
+    this._pendingAbort = null
   }
 
   /** Send an ack response, buffering it if the peer is currently disconnected. */
@@ -744,34 +787,41 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     })
   }
 
-  protected _shutdown(err?: Error): void {
+  /** `pageGone`: its page left it, or never came, so nothing it lacks of the channel can reach it. */
+  protected _shutdown(err?: Error, pageGone = false): void {
     if (this._didShutdown) return
     this._didShutdown = true
     this._isClosed = true
     this._closeError = err
     this._peer = null
-    this._pendingCloseAck = false
     this._awaitingCloseAck = false
     this._clearTimer('_ttlTimer')
     this._clearTimer('_reconnectTimer')
-    if (this._replayBuffer) {
-      this._replayBuffer.dispose()
-      this._replayBuffer = null
-    }
     // The mux subscribes to this callback in `registerChannel` to evict its bookkeeping —
     // keeping the channel agnostic of who's listening.
     const shutdownCb = this._shutdownCallback
     this._shutdownCallback = null
-    shutdownCb?.()
+    const keep = !pageGone && shutdownCb !== null && !this._pageHasAll()
+    if (!keep) this._release()
+    shutdownCb?.(keep)
     this._fireClose(err)
     this._flow.shutdown()
     this._notifyCloseProgress()
-    this._pendingAckRes.length = 0
     const ackErr = err ?? new ChannelClosedError()
     for (const { reject } of this._pendingAcks.values()) reject(ackErr)
     this._pendingAcks.clear()
     this._pendingAckBytes = 0
     this._prePeerBuffer.clear(ackErr)
+  }
+
+  /** @internal Drops what the channel keeps for its page: its replay, and what it made while no peer was attached. */
+  _release(): void {
+    this._replayBuffer?.dispose()
+    this._replayBuffer = null
+    this._pendingAckRes.length = 0
+    this._pendingCloseAck = false
+    this._pendingCloseRequest = false
+    this._pendingAbort = null
   }
 
   private _fireClose(err?: Error): void {
@@ -856,6 +906,11 @@ function reportServerChannelError(err: unknown): void {
 function reconnectWindow(): number {
   const c = getServerConfig().channel
   return Math.max(c.pingInterval, CHANNEL_PING_INTERVAL_MIN_MS) * 2 + c.reconnectTimeout
+}
+
+/** How long a frame stays replayable: through the reconnect window, plus a second for the reconnect itself. */
+function replayMaxAge(): number {
+  return reconnectWindow() + 1_000
 }
 
 function normalizeCloseTimeout(timeout: number | undefined): number {

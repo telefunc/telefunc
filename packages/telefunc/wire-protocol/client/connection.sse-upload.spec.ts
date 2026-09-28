@@ -228,7 +228,7 @@ test("a server close that reaches the page before its upload request settles get
   await delay(20)
   server.reconcile()
   await delay(20)
-  server.send(encode.close(server.ix, 5_000)) // the server's close()
+  server.send(encode.close(server.ix, 5_000, 1)) // the server's close()
   expect(await closed).toBeUndefined()
   server.refuseUpload()
   await delay(100)
@@ -260,7 +260,7 @@ test("a page's last channel gets its close acknowledgement out on SSE batch POST
   await delay(20)
   server.refuseUpload()
   await delay(20)
-  server.send(encode.close(server.ix, 5_000)) // the server's close()
+  server.send(encode.close(server.ix, 5_000, 1)) // the server's close()
   expect(await closed).toBeUndefined()
   await delay(100)
   expect(acked).toEqual([server.ix])
@@ -282,7 +282,7 @@ test("a server close that reaches the page before its upload request settles, wh
   server.reconcile()
   await delay(20)
   const { ix } = server
-  server.send(encode.close(ix, 5_000)) // the server's close()
+  server.send(encode.close(ix, 5_000, 1)) // the server's close()
   expect(await closed).toBeUndefined()
   // Another channel, such as the stream page's onUpload(file, onProgress) callback
   new ClientChannel({ channelId: crypto.randomUUID(), transports: ['sse'], telefuncUrl, connectionKey })

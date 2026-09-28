@@ -35,7 +35,7 @@ import { encodeU32, encodeLengthPrefixedFrames } from '../frame.js'
 import { createPushReadableStream, type PushReadableStream } from '../push-readable-stream.js'
 import { ReplayBuffer } from '../replay-buffer.js'
 import { REQUEST_KIND, REQUEST_KIND_HEADER, getMarkedRequestUrl } from '../request-kind.js'
-import { ACK_STATUS, ERROR_REASON, TAG, decode, encode, isChannelDataFrame, payloadBytes } from '../shared-ws.js'
+import { ACK_STATUS, ERROR_REASON, TAG, decode, encode, isSequencedFrame, payloadBytes } from '../shared-ws.js'
 import type {
   AckResultStatus,
   ChannelFrame,
@@ -292,8 +292,8 @@ type CommittingUpgrade = Extract<UpgradeState, { tag: 'committing' }>
 
 type BufferedWireFrame = { frame: DecodedFrame; byteLength: number }
 
-/** Partitioned by SOURCE WIRE, not one arrival-ordered list, and `old` drains FIRST: old-wire frames
- *  are largely non-recoverable (seq-less terminal ctrls) while new-wire frames all replay. */
+/** Partitioned by SOURCE WIRE, not one arrival-ordered list, and `old` drains FIRST: the server wrote all of it before
+ *  anything the new wire carries, which repeats only what of it has a seq. */
 type UpgradeBuffer = { old: BufferedWireFrame[]; new: BufferedWireFrame[] }
 
 /** FIN (old wire) and RECONCILED (new wire) are the join's two limbs; everything else is payload. */
@@ -816,10 +816,8 @@ class ClientConnection implements MuxConnection {
   }
 
   private dispatchFrame(frame: DecodedFrame): void {
-    // Track seq for ALL data frames including ACK_RES; otherwise reconciles under-report lastSeq.
-    if (isChannelDataFrame(frame)) {
-      if (this.trackSeq(frame.index, frame.seq) === 'dup') return
-    }
+    // Track seq for ALL sequenced frames, ACK_RES and the closing ones too; otherwise reconciles under-report lastSeq.
+    if (isSequencedFrame(frame) && this.trackSeq(frame.index, frame.seq) === 'dup') return
     // What the server sent through this seq and hasn't arrived is lost and now counted consumed, so no replay may bring
     // it back.
     if (frame.tag === TAG.SENT) this.trackSeq(frame.index, frame.seq)

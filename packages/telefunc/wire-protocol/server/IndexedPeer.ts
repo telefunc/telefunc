@@ -63,36 +63,33 @@ class IndexedPeer {
     }
   }
 
-  sendCloseRequest(timeoutMs: number): void {
-    try {
-      this.sender.send(encode.close(this.index, timeoutMs))
-    } catch {
-      /* transport may already be closed */
-    }
+  /** Returns its seq. */
+  sendCloseRequest(timeoutMs: number): number {
+    return this.sendClosing((seq) => encode.close(this.index, timeoutMs, seq))
   }
 
   sendCloseAck(): void {
-    try {
-      this.sender.send(encode.closeAck(this.index))
-    } catch {
-      /* transport may already be closed */
-    }
+    this.sendClosing((seq) => encode.closeAck(this.index, seq))
   }
 
   sendAbort(abortValue: string): void {
-    try {
-      this.sender.send(encode.abort(this.index, abortValue))
-    } catch {
-      /* transport may already be closed */
-    }
+    this.sendClosing((seq) => encode.abort(this.index, abortValue, seq))
   }
 
   sendError(reason: ErrorReason): void {
+    this.sendClosing((seq) => encode.error(this.index, reason, seq))
+  }
+
+  /** Sequenced as data is, so a closing frame a dead wire lost replays. */
+  private sendClosing(buildFrame: (seq: number) => Uint8Array<ArrayBuffer>): number {
+    const seq = this.replay.nextSeq()
+    const frame = buildFrame(seq)
     try {
-      this.sender.send(encode.error(this.index, reason))
+      this.sender.send(frame, () => this.replay.pushClosing(seq, frame))
     } catch {
       /* transport may already be closed */
     }
+    return seq
   }
 
   sendByteWindowUpdate(limit: number): void {

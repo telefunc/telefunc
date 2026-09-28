@@ -40,7 +40,7 @@ import type {
   ReconcilePayload,
 } from '../shared-ws.js'
 import { IndexedPeer, type PeerSender } from './IndexedPeer.js'
-import type { ServerChannel } from './channel.js'
+import { replayMaxAge, type ServerChannel } from './channel.js'
 
 /** A transport-owned connection handle. The mux never looks inside one — it only compares them by
  *  identity and hands them back to the transport that created it. */
@@ -167,6 +167,8 @@ class ChannelMux {
   private readonly stagedUpgrades = new Map<Wire, StagedUpgrade>()
   private readonly stagedByPrevSession = new Map<string, Wire>()
   private stagedBytes = 0
+  /** Channels that ended while their page may still lack their last frames, each let go at its timer at the latest. */
+  private readonly endedChannels = new Map<ServerChannel, ReturnType<typeof setTimeout>>()
 
   /** Resolved lazily so the mux can be constructed at module-load (the globalObject factory
    *  runs before `serverConfig` is initialized). */
@@ -190,17 +192,31 @@ class ChannelMux {
     if (channel._didShutdown) return
     channel._registerChannel()
     this.channels.set(channel.id, channel)
+    // Before a waiter attaches it: its `onOpen` may end it.
+    channel._onShutdown((keep) => (keep ? this.keepEnded(channel) : this.unregisterChannel(channel.id)))
     const waiters = this.pendingRegisterWaiters.get(channel.id)
     if (waiters) {
       this.pendingRegisterWaiters.delete(channel.id)
       for (const cb of waiters) cb(channel)
     }
-    channel._onShutdown(() => this.unregisterChannel(channel.id))
   }
 
   unregisterChannel(channelId: string): void {
     this.channels.delete(channelId)
     this.sessions.removeChannel(channelId)
+  }
+
+  /** An ended channel stays attachable, so what its page lacks of it replays, until the page has it all, leaves it out
+   *  of a RECONCILE or closes its wire for good, or its replay's age passes. */
+  private keepEnded(channel: ServerChannel): void {
+    this.endedChannels.set(channel, unrefTimer(setTimeout(() => this.releaseEnded(channel), replayMaxAge())))
+  }
+
+  private releaseEnded(channel: ServerChannel): void {
+    clearTimeout(this.endedChannels.get(channel))
+    this.endedChannels.delete(channel)
+    this.unregisterChannel(channel.id)
+    channel._release()
   }
 
   hasChannels(): boolean {
@@ -403,13 +419,21 @@ class ChannelMux {
   }
 
   /** The page lists its closed channels the server attached, each with how far it has what the server sent on it. Each
-   *  is answered with how far the server has what the page sent on it, or that the server no longer holds it. Only the
-   *  wire its session is on answers: that session has each channel the page lists that the server holds. */
+   *  is answered with how far the server has what the page sent on it, or that the server no longer holds it: one that
+   *  ended here is let go once its page has all of it. Only the wire its session is on answers: that session has each
+   *  channel the page lists that the server holds. */
   private answerPing(entry: ConnectionEntry, connection: Wire, ended: PingEntry[]): PongEntry[] {
     assertProtocol(ended.length <= MAX_CHANNELS_PER_CONNECTION, 'PING over entry cap')
     const sessionId = entry.transport.getSessionId(connection)
     if (sessionId === undefined || this.sessionWires.get(sessionId) !== connection) return []
-    return ended.map(({ ix }) => ({ ix, lastSeq: this.sessions.get(sessionId, ix)?.channel._lastClientSeq ?? null }))
+    return ended.map(({ ix, lastSeq }) => {
+      const channel = this.sessions.get(sessionId, ix)?.channel
+      if (channel === undefined) return { ix, lastSeq: null }
+      channel._onPageHas(lastSeq)
+      if (!this.endedChannels.has(channel) || !channel._pageHasAll()) return { ix, lastSeq: channel._lastClientSeq }
+      this.releaseEnded(channel)
+      return { ix, lastSeq: null }
+    })
   }
 
   private dispatchChannelFrame(sessionId: string, frame: ChannelFrame): void {
@@ -733,11 +757,11 @@ class ChannelMux {
   }
 
   /** Drains replay frames missed since `lastSeq` (sends are sync — see `send`), then
-   *  attaches an `IndexedPeer`. Returns null if the channel already shut down. */
+   *  attaches an `IndexedPeer`. Returns null if the channel shut down and kept nothing for its page. */
   private attachChannel(channel: ServerChannel, entry: ReconcileOpenEntry, sender: PeerSender): ChannelHandle | null {
-    if (channel._didShutdown) return null
     const replay = channel._replayBuffer
-    assert(replay !== null, `ServerChannel "${channel.id}" attached without a replay buffer`)
+    if (replay === null) return null
+    channel._onPageHas(entry.lastSeq)
     for (const frame of replay.getAfter(entry.lastSeq)) sender.send(frame)
     const peer = new IndexedPeer(sender, entry.ix, replay)
     channel._attachPeer(peer, entry)
@@ -783,6 +807,11 @@ class ChannelMux {
   }
 
   private detachHandle(h: ChannelHandle, reason: DetachReason): void {
+    // An ended channel waits out a lost wire for its page, which lets it go by leaving it out or leaving for good.
+    if (this.endedChannels.has(h.channel)) {
+      if (reason !== DETACH_REASON.TRANSIENT) this.releaseEnded(h.channel)
+      return
+    }
     switch (reason) {
       case DETACH_REASON.PERMANENT:
         h.channel._onPeerClose()

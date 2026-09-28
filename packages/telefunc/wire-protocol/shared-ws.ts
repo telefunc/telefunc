@@ -10,6 +10,7 @@ export {
   ProtocolViolationError,
   isChannelCtrlTag,
   isChannelDataFrame,
+  isSequencedFrame,
   isConnCtrlTag,
   encodePublishText,
   encodePublishBinary,
@@ -43,13 +44,13 @@ import type { ChannelTransports } from './constants.js'
 //
 // `tag` discriminates the frame variant (data, connection ctrl, per-channel ctrl).
 // `index` is the channel ix for per-channel frames; 0 for connection-level frames.
-// `seq` is the replay sequence number of a sequenced frame: a data frame, or a page's CLOSE or CLOSE_ACK. `SENT` carries
-// the last one its totals cover, other ctrl frames 0.
+// `seq` is the replay sequence number of a sequenced frame: a data frame, or a CLOSE, CLOSE_ACK, ABORT or ERROR. `SENT`
+// carries the last one its totals cover, other ctrl frames 0.
 //
 // Tag layout — sparse ranges so range checks classify:
 //   0x01–0x09  connection-level control (no ix, no seq)
 //   0x10–0x29  data plane (carries seq, payload varies)
-//   0x30–      per-channel control (carries ix; seq 0 except on `SENT` and a page's CLOSE and CLOSE_ACK)
+//   0x30–      per-channel control (carries ix; seq 0 except on `SENT` and the four closing frames)
 //
 // Channel indices are client-owned and stable for the channel's lifetime.
 // Sequence numbers are sender-assigned for replayable data frames in both directions.
@@ -110,13 +111,13 @@ const TAG = {
   PUBLISH_BINARY_ACK_REQ: 0x18 as const,
 
   // ─── Per-channel control (carries ix) ───
-  /** A close request, or a page's abort (timeout 0). The page's is sequenced, so it replays like its data. */
+  /** A close request, or a page's abort (timeout 0). Sequenced, so it replays like data. */
   CLOSE: 0x30 as const,
-  /** The page's is sequenced, as its CLOSE is. */
+  /** Sequenced, as CLOSE is. */
   CLOSE_ACK: 0x31 as const,
-  /** Server → client: channel closed with an abort value (analogous to `throw Abort()`). */
+  /** Server → client: channel closed with an abort value (analogous to `throw Abort()`). Sequenced, as CLOSE is. */
   ABORT: 0x32 as const,
-  /** Server → client: channel closed with an error. Payload: u8 `ERROR_REASON`. */
+  /** Server → client: channel closed with an error. Payload: u8 `ERROR_REASON`. Sequenced, as CLOSE is. */
   ERROR: 0x33 as const,
   /** Flow-control byte limit, receiver → sender: what the receiver has consumed plus its window, mod 2^32. */
   WINDOW: 0x34 as const,
@@ -148,6 +149,17 @@ function isChannelCtrlTag(tag: number): boolean {
 
 function isChannelDataFrame(frame: DecodedFrame): frame is ChannelDataFrame {
   return frame.tag >= DATA_TAG_MIN && frame.tag < CHANNEL_CTRL_TAG_MIN
+}
+
+/** What a replay holds: data, and the closing frames. */
+function isSequencedFrame(frame: DecodedFrame): frame is SequencedFrame {
+  return (
+    isChannelDataFrame(frame) ||
+    frame.tag === TAG.CLOSE ||
+    frame.tag === TAG.CLOSE_ACK ||
+    frame.tag === TAG.ABORT ||
+    frame.tag === TAG.ERROR
+  )
 }
 
 // ===== Reconcile payloads (JSON-encoded after the header) =====
@@ -264,8 +276,8 @@ type ChannelDataFrame =
 type ChannelCtrlFrame =
   | { tag: typeof TAG.CLOSE; index: number; seq: number; timeoutMs: number }
   | { tag: typeof TAG.CLOSE_ACK; index: number; seq: number }
-  | { tag: typeof TAG.ABORT; index: number; abortValue: string }
-  | { tag: typeof TAG.ERROR; index: number; reason: number }
+  | { tag: typeof TAG.ABORT; index: number; seq: number; abortValue: string }
+  | { tag: typeof TAG.ERROR; index: number; seq: number; reason: number }
   | { tag: typeof TAG.WINDOW; index: number; bytes: number }
   | { tag: typeof TAG.MSG_WINDOW; index: number; count: number }
   | { tag: typeof TAG.SENT; index: number; seq: number; bytes: number; messages: number }
@@ -278,6 +290,10 @@ type ChannelCtrlFrame =
 
 /** Frames that carry an `index` (channel ix) — both data and per-channel ctrl. */
 type ChannelFrame = ChannelDataFrame | ChannelCtrlFrame
+
+type SequencedFrame =
+  | ChannelDataFrame
+  | Extract<ChannelCtrlFrame, { tag: typeof TAG.CLOSE | typeof TAG.CLOSE_ACK | typeof TAG.ABORT | typeof TAG.ERROR }>
 
 type ConnCtrlFrame =
   | { tag: typeof TAG.PING; ended: PingEntry[] }
@@ -435,16 +451,16 @@ const encode = {
     writeHeader(frame, TAG.CLOSE_ACK, index, seq)
     return frame
   },
-  abort(index: number, abortValue: string): Uint8Array<ArrayBuffer> {
+  abort(index: number, abortValue: string, seq = 0): Uint8Array<ArrayBuffer> {
     const payload = textEncoder.encode(abortValue)
     const frame = new Uint8Array(HEADER + payload.byteLength)
-    writeHeader(frame, TAG.ABORT, index, 0)
+    writeHeader(frame, TAG.ABORT, index, seq)
     frame.set(payload, HEADER)
     return frame
   },
-  error(index: number, reason: ErrorReason): Uint8Array<ArrayBuffer> {
+  error(index: number, reason: ErrorReason, seq = 0): Uint8Array<ArrayBuffer> {
     const frame = new Uint8Array(HEADER + 1)
-    writeHeader(frame, TAG.ERROR, index, 0)
+    writeHeader(frame, TAG.ERROR, index, seq)
     frame[HEADER] = reason
     return frame
   },
@@ -597,10 +613,10 @@ function decode(frame: Uint8Array): DecodedFrame {
     case TAG.CLOSE_ACK:
       return { tag: TAG.CLOSE_ACK, index, seq }
     case TAG.ABORT:
-      return { tag: TAG.ABORT, index, abortValue: textDecoder.decode(payload) }
+      return { tag: TAG.ABORT, index, seq, abortValue: textDecoder.decode(payload) }
     case TAG.ERROR:
       assertProtocol(payload.length >= 1, 'ERROR payload too short')
-      return { tag: TAG.ERROR, index, reason: payload[0] as number }
+      return { tag: TAG.ERROR, index, seq, reason: payload[0] as number }
     case TAG.WINDOW:
       assertProtocol(payload.length >= 4, 'WINDOW payload too short')
       return { tag: TAG.WINDOW, index, bytes: readU32(payload, 0) }

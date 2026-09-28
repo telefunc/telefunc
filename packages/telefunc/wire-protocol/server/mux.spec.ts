@@ -210,29 +210,50 @@ test("what a channel sends once its reconnect's wire dropped while awaiting a lo
 test("what a reconnect's RECONCILE sends a channel's page, run once its wire closed, replays on the next", async () => {
   const mux = new ChannelMux()
   const clock = new ServerChannel<string, string>({ id: 'clock-queued' })
+  const aborted = new ServerChannel({ id: 'aborted-away' })
   mux.registerChannel(clock)
-  const { sessions, open, texts } = wires(mux)
+  mux.registerChannel(aborted)
+  const { sessions, open, texts, count } = wires(mux)
   const first = open()
   await mux.onConnectionRawMessage(
     first,
-    encode.reconcile({ open: [{ id: 'clock-queued', ix: 0, lastSeq: 0, initial: true }] }),
+    encode.reconcile({
+      open: [
+        { id: 'clock-queued', ix: 0, lastSeq: 0, initial: true },
+        { id: 'aborted-away', ix: 1, lastSeq: 0, initial: true },
+      ],
+    }),
   )
   const known = sessions.get(first)!
   mux.onConnectionClosed(first, { permanent: false })
   void clock.send('while-away') // queued for the page's return
+  aborted.abort('gone') // the end it has to tell the page on its return
   const lost = open()
   const reconciling = mux.onConnectionRawMessage(
     lost,
-    encode.reconcile({ sessionId: known, open: [{ id: 'clock-queued', ix: 0, lastSeq: 0 }] }),
+    encode.reconcile({
+      sessionId: known,
+      open: [
+        { id: 'clock-queued', ix: 0, lastSeq: 0 },
+        { id: 'aborted-away', ix: 1, lastSeq: 0 },
+      ],
+    }),
   )
   mux.onConnectionClosed(lost, { permanent: false }) // before its RECONCILE ran
   await reconciling
   const live = open()
   await mux.onConnectionRawMessage(
     live,
-    encode.reconcile({ sessionId: known, open: [{ id: 'clock-queued', ix: 0, lastSeq: 0 }] }),
+    encode.reconcile({
+      sessionId: known,
+      open: [
+        { id: 'clock-queued', ix: 0, lastSeq: 0 },
+        { id: 'aborted-away', ix: 1, lastSeq: 0 },
+      ],
+    }),
   )
   expect(texts(live).some((text) => text.includes('while-away'))).toBe(true)
+  expect(count(live, TAG.ABORT)).toBe(1)
 })
 
 test("a burst of a channel's full message window, with the refresh and probe a page sends among it, is processed", async () => {
