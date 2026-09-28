@@ -35,6 +35,10 @@ interface FlowControlEmit {
  * Limits are cumulative, as QUIC's MAX_DATA: the receiver advertises what it has consumed plus its window, and the
  * sender's credit is that limit minus what it has sent, so what is still in flight counts against it. Totals are exact
  * here and travel mod 2^32: a value off the wire is read as its signed 32-bit distance from the one it updates.
+ *
+ * Senders waiting on credit get it one at a time, oldest first: while others wait, a send that leaves credit hands it
+ * to the next and waits behind them. So senders that each await their sends, once waiting, pass the limit by one
+ * frame together. Senders still sending freely as the credit runs out each have a frame out past it.
  */
 class FlowControl {
   private _bdp = new BdpEstimator()
@@ -50,8 +54,11 @@ class FlowControl {
   private _consumedMessages = 0
   private _advertisedBytes = 0
   private _advertisedMessages = 0
-  /** Single deferred shared by all senders blocked on credit. */
-  private _creditReady: { promise: Promise<void>; resolve: () => void } | null = null
+  /** Senders waiting on credit, oldest first. */
+  private _waiters: Array<() => void> = []
+  /** A waiter was handed the credit and no send was counted since. */
+  private _released = false
+  private _releases = 0
   private _shutdown = false
 
   // Self-utilisation rolling-sum state. Two buckets, phase-weighted blend.
@@ -78,12 +85,17 @@ class FlowControl {
   }
 
   /** Sender-side: count one frame of `bytes` against credit. Returns `void` when
-   *  both credit axes have headroom AND our loop utilisation is below the gate.
-   *  Otherwise a Promise that resolves on credit refresh (credit-gated) or one
+   *  both credit axes have headroom, no other sender waits, AND our loop utilisation is below the gate.
+   *  Otherwise a Promise that resolves at the sender's turn with credit (credit-gated) or one
    *  macrotask later (util-gated — single yield, no re-check). */
   decrement(bytes: number): void | Promise<void> {
     this.countSent(bytes)
+    this._released = false
     if (this._isOutOfCredit()) return this._waitForCredit()
+    if (this._waiters.length > 0) {
+      this._releaseOne()
+      return this._waitForCredit()
+    }
     if (this._selfUtilisation() > FC_SELF_UTIL_THRESHOLD) {
       return macrotaskYield.yield()
     }
@@ -255,25 +267,32 @@ class FlowControl {
   }
 
   private _tryWakeCreditWaiters(): void {
-    if (!this._creditReady) return
-    if (!this._shutdown && this._isOutOfCredit()) return
-    const ready = this._creditReady
-    this._creditReady = null
-    ready.resolve()
+    if (this._shutdown) {
+      for (const resolve of this._waiters.splice(0)) resolve()
+      return
+    }
+    if (this._released || this._isOutOfCredit()) return
+    this._releaseOne()
+  }
+
+  /** The oldest waiter's turn. One that hasn't sent by the next macrotask, as one that is done sending, passes it on. */
+  private _releaseOne(): void {
+    const resolve = this._waiters.shift()
+    if (!resolve) return
+    this._released = true
+    const release = ++this._releases
+    resolve()
+    if (this._waiters.length === 0) return
+    void macrotaskYield.yield().then(() => {
+      if (!this._released || this._releases !== release) return
+      this._released = false
+      this._tryWakeCreditWaiters()
+    })
   }
 
   private _waitForCredit(): Promise<void> {
-    if (this._shutdown || !this._isOutOfCredit()) {
-      return resolvedPromise
-    }
-    if (!this._creditReady) {
-      let resolve!: () => void
-      const promise = new Promise<void>((r) => {
-        resolve = r
-      })
-      this._creditReady = { promise, resolve }
-    }
-    return this._creditReady.promise
+    if (this._shutdown) return resolvedPromise
+    return new Promise<void>((resolve) => this._waiters.push(resolve))
   }
 }
 

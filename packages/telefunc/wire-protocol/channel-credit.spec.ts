@@ -567,3 +567,28 @@ test("a page's consumption of what a broadcast publishes moves the server's limi
   // Sent 17 MiB, of which the last limit leaves one not yet counted consumed.
   expect(flow.bytesBeyondCredit).toBeLessThan(-CREDIT_WINDOW_MAX_BYTES + 2 * KIB * KIB)
 })
+
+test('on a slow link, producers that await their sends are handed the credit one at a time, so none is refused however far past bufferLimit a frame from each would add up', async () => {
+  const feed = loop.open<never, string>()
+  const page = consume(feed.page)
+  await run(100)
+  loop.socket.toPage.bytesPerMs = 4_000 // 4 MB/s
+  let size = KIB
+  let error: unknown
+  for (let p = 0; p < 8; p++)
+    void (async () => {
+      while (!feed.server.isClosed) await feed.server.send('x'.repeat(size))
+    })().catch((err: unknown) => (error ??= err))
+  // They start small: producers that start together each have a frame out as the credit first runs out, and those count.
+  await run(100)
+  // Every producer waits on credit by now. From here on each frame is 128 KiB: 1 MiB from the eight, twice bufferLimit.
+  size = 128 * KIB
+  let held = 0
+  const watch = setInterval(() => (held = Math.max(held, loop.socket.toPage.bytes)), 1)
+  const before = page.received.length
+  await run(2_000)
+  clearInterval(watch)
+  expect(error).toBeUndefined()
+  expect(held).toBeGreaterThan(CHANNEL_BUFFER_LIMIT_BYTES)
+  expect(page.received.length - before).toBeGreaterThan(40)
+})

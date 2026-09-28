@@ -22,6 +22,25 @@ async function flushMicrotasks(): Promise<void> {
   for (let i = 0; i < 6; i++) await Promise.resolve()
 }
 
+/** Resolves on the next macrotask, which fake timers don't hold back. */
+function nextMacrotask(): Promise<void> {
+  const { port1, port2 } = new MessageChannel()
+  return new Promise<void>((resolve) => {
+    port1.onmessage = () => {
+      port1.close()
+      resolve()
+    }
+    port2.postMessage(null)
+  })
+}
+
+/** Whether each promise has resolved, as of now. */
+function watch(promises: (void | Promise<void>)[]): boolean[] {
+  const resolved = promises.map(() => false)
+  promises.forEach((p, i) => void (p as Promise<void>).then(() => (resolved[i] = true)))
+  return resolved
+}
+
 // Spy emit — captures calls so tests can assert which wire frames the flow
 // would have produced. Each test starts with a fresh `Emit` so the spec
 // doesn't need cross-test reset hygiene.
@@ -86,42 +105,51 @@ describe('FlowControl — sender-side credit', () => {
   // was sent, so a limit that only covers what is already in flight leaves a sender blocked.
   it('a limit wakes a pending sender only once it exceeds what was sent', async () => {
     const { flow } = makeFlow()
-    flow.decrement(CREDIT_WINDOW_INITIAL_BYTES)
+    flow.decrement(CREDIT_WINDOW_INITIAL_BYTES - 1)
     const gate = flow.decrement(100)
     expect(gate).toBeInstanceOf(Promise)
+    const resolved = watch([gate])
 
-    let resolved = false
-    void (gate as Promise<void>).then(() => {
-      resolved = true
-    })
-
-    flow.onPeerByteWindow(CREDIT_WINDOW_INITIAL_BYTES + 100)
+    flow.onPeerByteWindow(CREDIT_WINDOW_INITIAL_BYTES + 99)
     await flushMicrotasks()
-    expect(resolved).toBe(false)
+    expect(resolved).toEqual([false])
     flow.onPeerByteWindow(2 * CREDIT_WINDOW_INITIAL_BYTES)
     await flushMicrotasks()
-    expect(resolved).toBe(true)
+    expect(resolved).toEqual([true])
   })
 
-  // Multiple senders blocked on the same depletion event all wake when WINDOW
-  // arrives — catches a "splice but only resolve first" bug.
-  it('onPeerByteWindow wakes all blocked senders', async () => {
+  // Woken together, senders that each await their sends would all send, each past the limit by a frame.
+  it('a limit wakes one blocked sender, and each send it makes within credit hands the credit to the next', async () => {
     const { flow } = makeFlow()
-    flow.decrement(CREDIT_WINDOW_INITIAL_BYTES)
-
-    const gates = [flow.decrement(100), flow.decrement(100), flow.decrement(100)]
+    const gates = [flow.decrement(CREDIT_WINDOW_INITIAL_BYTES), flow.decrement(100), flow.decrement(100)]
     for (const g of gates) expect(g).toBeInstanceOf(Promise)
+    const resolved = watch(gates)
 
-    const resolved: boolean[] = [false, false, false]
-    gates.forEach((g, i) => {
-      void (g as Promise<void>).then(() => {
-        resolved[i] = true
-      })
-    })
-
-    flow.onPeerByteWindow(2 * CREDIT_WINDOW_INITIAL_BYTES)
+    flow.onPeerByteWindow(3 * CREDIT_WINDOW_INITIAL_BYTES)
     await flushMicrotasks()
-    expect(resolved).toEqual([true, true, true])
+    expect(resolved).toEqual([true, false, false])
+    // The first sends again, within credit: the second's turn, and the first waits behind the third.
+    const again = flow.decrement(100)
+    expect(again).toBeInstanceOf(Promise)
+    await flushMicrotasks()
+    expect([...resolved, ...watch([again])]).toEqual([true, true, false, false])
+  })
+
+  it('a sender woken to its turn that sends nothing passes the credit on a macrotask later', async () => {
+    const { flow } = makeFlow()
+    const gates = [flow.decrement(CREDIT_WINDOW_INITIAL_BYTES), flow.decrement(100)]
+    const resolved = watch(gates)
+    flow.onPeerByteWindow(3 * CREDIT_WINDOW_INITIAL_BYTES)
+    await flushMicrotasks()
+    expect(resolved).toEqual([true, false])
+    await nextMacrotask()
+    await flushMicrotasks()
+    expect(resolved).toEqual([true, true])
+  })
+
+  it('a send within credit resolves at once while no other sender waits', () => {
+    const { flow } = makeFlow()
+    for (let n = 0; n < 10; n++) expect(flow.decrement(1024)).toBeUndefined()
   })
 
   // Limits can arrive late or twice: a refresh queued while the wire couldn't take it, one a reattach repeats.
@@ -265,21 +293,17 @@ describe('FlowControl — reattach', () => {
   // lost with the prior wire would have raised. Catches a reattach that leaks waiters.
   it('wakes a sender blocked across it on the limit the peer advertises again', async () => {
     const { flow } = makeFlow()
-    flow.decrement(CREDIT_WINDOW_INITIAL_BYTES)
+    flow.decrement(CREDIT_WINDOW_INITIAL_BYTES - 1)
     const gate = flow.decrement(100)
     expect(gate).toBeInstanceOf(Promise)
-
-    let resolved = false
-    void (gate as Promise<void>).then(() => {
-      resolved = true
-    })
+    const resolved = watch([gate])
 
     flow.reattach()
     await flushMicrotasks()
-    expect(resolved).toBe(false)
+    expect(resolved).toEqual([false])
     flow.onPeerByteWindow(CREDIT_WINDOW_INITIAL_BYTES + CREDIT_WINDOW_INITIAL_BYTES)
     await flushMicrotasks()
-    expect(resolved).toBe(true)
+    expect(resolved).toEqual([true])
   })
 
   // The BDP estimator's in-flight ping is dropped on reattach (its ack rode the
@@ -385,7 +409,7 @@ describe('FlowControl — 32-bit wraparound', () => {
       receiver.onConsumed(size)
     }
     // A window's worth is sent, and lost with the wire.
-    for (let n = 0; n < CREDIT_WINDOW_INITIAL_BYTES / size; n++) sender.decrement(size)
+    for (let n = 1; n < CREDIT_WINDOW_INITIAL_BYTES / size; n++) sender.decrement(size)
     const gate = sender.decrement(size)
     expect(gate).toBeInstanceOf(Promise)
     let resolved = false
