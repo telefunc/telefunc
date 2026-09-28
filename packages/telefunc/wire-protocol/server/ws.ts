@@ -28,7 +28,7 @@ function getTelefuncChannelHooks(terminate: (peer: Peer) => void = (peer) => pee
     // never answers, so its close hook would run late, if at all.
     terminateConnection: (peer) => {
       const mux = getChannelMux()
-      const permanent = mux.readPermanentTermination(peer) === true
+      const permanent = mux.readPermanentTermination(peer)
       terminate(peer)
       mux.onConnectionClosed(peer, { permanent })
     },
@@ -40,10 +40,7 @@ function getTelefuncChannelHooks(terminate: (peer: Peer) => void = (peer) => pee
       getChannelMux().onConnectionRawMessage(peer, message.uint8Array() as Uint8Array<ArrayBuffer>),
     close: (peer, details) => {
       const mux = getChannelMux()
-      const terminatePermanently = mux.readPermanentTermination(peer)
-      const isPermanent =
-        terminatePermanently === true ||
-        (terminatePermanently === null && (details?.code === 1000 || details?.code === 1001))
+      const isPermanent = mux.readPermanentTermination(peer) || details?.code === 1000 || details?.code === 1001
       mux.onConnectionClosed(peer, { permanent: isPermanent })
     },
     error: (peer) => getChannelMux().onConnectionClosed(peer, { permanent: false }),

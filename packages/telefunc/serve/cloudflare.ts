@@ -204,8 +204,7 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
       }
 
       const kv = requireBinding<KVNamespace>(env, kvBindingName, 'KV namespace')
-      const sessionToken =
-        request.headers.get(TELEFUNC_SESSION_HEADER) || new URL(request.url).searchParams.get('session')
+      const sessionToken = new URL(request.url).searchParams.get('session')
 
       let sessionInstanceName: string | undefined
       let locationBucket: LocationBucket | undefined
