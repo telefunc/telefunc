@@ -132,9 +132,13 @@ export const WIRE_MAX_CONN_CTRL_FRAME_BYTES =
   MAX_CHANNELS_PER_CONNECTION * (UPGRADE_MAX_ID_BYTES + RECONCILE_ENTRY_ENVELOPE_BYTES) + 1_024
 
 /** Per-connection ceiling on accepted-but-unprocessed frames: a peer that outruns its recv chain
- *  is terminated rather than allowed to queue without bound. */
-export const WIRE_MAX_RECV_BACKLOG_BYTES = 64 * 1024 * 1024
-export const WIRE_MAX_RECV_BACKLOG_FRAMES = 50_000
+ *  is terminated rather than allowed to queue without bound. This base is the allowance for what
+ *  credit doesn't govern: control frames, ack-bearing sends, sends nobody awaits. Each channel
+ *  attached to the wire adds a window at `CREDIT_WINDOW_MAX_BYTES` and `CREDIT_MSG_WINDOW_MAX`,
+ *  the most a peer that awaits its sends can have in flight on it: a cap that refuses a legal
+ *  burst is worse than no cap. */
+export const WIRE_RECV_BACKLOG_BASE_BYTES = 64 * 1024 * 1024
+export const WIRE_RECV_BACKLOG_BASE_FRAMES = 50_000
 
 /** Largest SSE request metadata header the server will read off a POST body. */
 export const SSE_METADATA_MAX_BYTES = 64 * 1024
@@ -224,11 +228,15 @@ export const CHANNEL_RECONNECT_MAX_DELAY_MS = 5_000
 //                             to free credit).
 //   PUBLISH, PUBLISH_BINARY   broadcast fan-out, separate flow control entirely.
 //
-// Window semantics — `WINDOW` frame advertises an absolute value (not additive like
-// HTTP/2). Sender resets `_peerWindow` to `CREDIT_WINDOW_INITIAL_BYTES` on transport
-// reattach; receiver preserves its grown `W` across reconnect (BDP is a property of
-// the path, not of any single wire instance — slight divergence from gRPC's
-// per-connection reset, acceptable for typical transport hiccups).
+// Window semantics: `WINDOW` and `MSG_WINDOW` advertise cumulative limits, as QUIC's MAX_DATA
+// does: what the receiver has consumed plus its window. The sender's credit is that limit
+// minus what it has sent, so what is still in flight counts against it. Each side advertises
+// its limits again on a reattach to another wire, and the receiver keeps its grown `W` across
+// one (BDP is a property of the path, not of any single wire instance: slight divergence from
+// gRPC's per-connection reset, acceptable for typical transport hiccups). On such a reattach
+// the sender also sends its totals (`SENT`): what of them never arrived was lost beyond the
+// replay buffer, and the receiver counts it as consumed. A reattach on the same wire lost
+// nothing and sends neither.
 
 /** Initial credit window — sized so a typical ~MB-scale burst doesn't stall on
  *  the BDP ramp-up. Grows further via the estimator up to `CREDIT_WINDOW_MAX_BYTES`. */

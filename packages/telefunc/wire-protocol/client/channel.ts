@@ -87,6 +87,8 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
    *  and the queue of senders blocked on credit refresh. Credit governs fire-and-
    *  forget TEXT/BINARY only — see `constants.ts`. */
   private _flow: FlowControl
+  /** The connection's wire at the last attach. */
+  private _attachedWire: number | null = null
 
   constructor({
     channelId,
@@ -111,8 +113,9 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     this.ack = ack
     this.key = key
     this._flow = new FlowControl({
-      byteWindowUpdate: (bytes) => this._connection.sendByteWindowUpdate(this, bytes),
-      msgWindowUpdate: (count) => this._connection.sendMsgWindowUpdate(this, count),
+      byteWindowUpdate: (limit) => this._connection.sendByteWindowUpdate(this, limit),
+      msgWindowUpdate: (limit) => this._connection.sendMsgWindowUpdate(this, limit),
+      sent: (bytes, messages) => this._connection.sendSent(this, bytes, messages),
       bdpPing: () => this._connection.sendBdpPing(this),
     })
     const config = resolveClientConfig()
@@ -268,13 +271,15 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
 
   // ── Called by transport connection ──
 
-  _onTransportOpen(batched: boolean): void {
+  _onTransportOpen(batched: boolean, wire: number): void {
     // A close request is not replayed, so one written to a wire that had already died is lost. As the server's
     // `_attachPeer` does, it goes out again on every attach until acknowledged.
     if (this._expectCloseAck) this._connection.sendCloseRequest(this, Math.max(0, this._closeDeadline - Date.now()))
     if (this._isClosed) return
-    this._flow.reset()
     if (batched) this._flow.useBatchTransportInitial()
+    // The wire of the last attach lost nothing to repair, and still answers the probe in flight.
+    if (wire !== this._attachedWire) this._flow.reattach()
+    this._attachedWire = wire
     this._fireOpen()
   }
 
@@ -393,6 +398,9 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
         return
       case TAG.MSG_WINDOW:
         this._flow.onPeerMessageWindow(frame.count)
+        return
+      case TAG.SENT:
+        this._flow.onPeerSent(frame.bytes, frame.messages)
         return
       case TAG.BDP_PING:
         this._connection.sendBdpPingAck(this)

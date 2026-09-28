@@ -8,7 +8,7 @@ beforeAll(async () => {
   miniflare = new Miniflare({
     modules: true,
     script: await bundleWorker(),
-    compatibilityDate: '2025-08-06',
+    compatibilityDate: '2025-08-15',
     compatibilityFlags: ['nodejs_compat'],
     durableObjects: {
       ROOM: { className: 'RoomProbeDurableObject', useSQLite: true },

@@ -139,8 +139,9 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this.ack = ack
     this.id = id ?? crypto.randomUUID()
     this._flow = new FlowControl({
-      byteWindowUpdate: (bytes) => this._peer?.sendByteWindowUpdate(bytes),
-      msgWindowUpdate: (count) => this._peer?.sendMsgWindowUpdate(count),
+      byteWindowUpdate: (limit) => this._peer?.sendByteWindowUpdate(limit),
+      msgWindowUpdate: (limit) => this._peer?.sendMsgWindowUpdate(limit),
+      sent: (bytes, messages) => this._peer?.sendSent(bytes, messages),
       bdpPing: () => this._peer?.sendBdpPing(),
     })
     const c = getServerConfig().channel
@@ -343,12 +344,17 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     if (this._didShutdown) return
     this._clearTimer('_ttlTimer')
     this._clearTimer('_reconnectTimer')
-    this._flow.reset()
+    // The wire of the last peer lost nothing to repair, and still answers the probe in flight.
+    const rewired = this._peer?.sender !== peer.sender
     this._peer = peer
+    if (rewired) this._flow.reattach()
     this._prePeerBuffer.flush({
-      sendText: (msg) => peer.sendText(msg),
+      sendText: (msg) => this._flow.countSent(peer.sendText(msg)),
       sendPublish: (msg) => peer.sendPublish(msg),
-      sendBinary: (msg) => peer.sendBinary(msg),
+      sendBinary: (msg) => {
+        peer.sendBinary(msg)
+        this._flow.countSent(msg.byteLength)
+      },
       sendTextAck: (data, cb) => {
         const seq = peer.sendTextAckReq(data)
         this._pendingAcks.set(seq, cb)
@@ -437,6 +443,12 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         return
       case TAG.MSG_WINDOW:
         this._flow.onPeerMessageWindow(frame.count)
+        return
+      case TAG.SENT:
+        // What the page sent through this seq and hasn't arrived is lost and now counted consumed, so no replay may
+        // bring it back.
+        if (frame.seq > this._lastClientSeq) this._lastClientSeq = frame.seq
+        this._flow.onPeerSent(frame.bytes, frame.messages)
         return
       case TAG.BDP_PING:
         this._peer?.sendBdpPingAck()

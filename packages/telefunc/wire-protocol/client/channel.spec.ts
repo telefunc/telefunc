@@ -76,7 +76,7 @@ test('a close request goes out again when its channel re-attaches before the clo
   const channel = stalledChannel()
   const sendCloseRequest = vi.spyOn((channel as any)._connection, 'sendCloseRequest')
   void channel.close({ timeout: 5_000 })
-  channel._onTransportOpen(false) // the reconcile of a reconnect: the first request may have died with the old wire
+  channel._onTransportOpen(false, 1) // the reconcile of a reconnect: the first request may have died with the old wire
   expect(sendCloseRequest).toHaveBeenCalledTimes(2)
 })
 

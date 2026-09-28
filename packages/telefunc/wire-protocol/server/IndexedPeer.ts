@@ -95,17 +95,26 @@ class IndexedPeer {
     }
   }
 
-  sendByteWindowUpdate(bytes: number): void {
+  sendByteWindowUpdate(limit: number): void {
     try {
-      this.sender.send(encode.window(this.index, bytes))
+      this.sender.send(encode.window(this.index, limit))
     } catch {
       /* transport may already be closed */
     }
   }
 
-  sendMsgWindowUpdate(count: number): void {
+  sendMsgWindowUpdate(limit: number): void {
     try {
-      this.sender.send(encode.msgWindow(this.index, count))
+      this.sender.send(encode.msgWindow(this.index, limit))
+    } catch {
+      /* transport may already be closed */
+    }
+  }
+
+  /** The totals cover every frame through the latest seq. */
+  sendSent(bytes: number, messages: number): void {
+    try {
+      this.sender.send(encode.sent(this.index, this.replay.seq, bytes, messages))
     } catch {
       /* transport may already be closed */
     }

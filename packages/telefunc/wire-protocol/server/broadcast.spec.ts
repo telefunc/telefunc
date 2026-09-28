@@ -342,8 +342,8 @@ describe('keyed in-process broadcast', () => {
       ),
     )
 
-    // One publish made before attach → exactly one frame replayed on attach.
-    expect(frames.length).toBe(1)
+    // One publish made before attach → exactly one publish frame flushed on attach.
+    expect(frames.filter((frame) => frame[0] === TAG.PUBLISH).length).toBe(1)
   })
 
   it('buffers keyed publishes that arrive before a sibling has registered yet', () => {
