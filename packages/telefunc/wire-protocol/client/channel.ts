@@ -108,11 +108,14 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     this.id = channelId
     this.ack = ack
     this.key = key
-    this._flow = new FlowControl({
-      byteWindowUpdate: (limit) => this._connection.sendByteWindowUpdate(this, limit),
-      msgWindowUpdate: (limit) => this._connection.sendMsgWindowUpdate(this, limit),
-      bdpPing: () => this._connection.sendBdpPing(this),
-    })
+    this._flow = new FlowControl(
+      {
+        byteWindowUpdate: (limit) => this._connection.sendByteWindowUpdate(this, limit),
+        msgWindowUpdate: (limit) => this._connection.sendMsgWindowUpdate(this, limit),
+        bdpPing: (probe) => this._connection.sendBdpPing(this, probe),
+      },
+      () => this._connection.bufferedAmount(),
+    )
     const config = resolveClientConfig()
     this._connection = ClientConnection.getOrCreate(getSessionUrl(telefuncUrl), this, {
       transports,
@@ -266,6 +269,13 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
 
   // ── Called by transport connection ──
 
+  /** @internal A probe of the path on an attach to a wire whose round trip it hasn't measured, unless its flow-control
+   *  frames wait for a batched POST, which the RECONCILE doesn't: the RECONCILE's round trip wouldn't be theirs. */
+  _reattachState(wire: number, batched: boolean): ReattachState {
+    const probe = batched ? undefined : this._flow.probeAttach(wire)
+    return probe === undefined ? {} : { probe }
+  }
+
   _onTransportOpen(batched: boolean, wire: number): void {
     if (this._isClosed) return
     if (batched) this._flow.useBatchTransportInitial()
@@ -392,10 +402,10 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
         this._flow.onPeerMessageWindow(frame.count)
         return
       case TAG.BDP_PING:
-        this._connection.sendBdpPingAck(this)
+        this._connection.sendBdpPingAck(this, frame.probe, this._flow.onPing())
         return
       case TAG.BDP_PING_ACK:
-        this._flow.onPingAck()
+        this._flow.onPingAck(frame.probe, frame.starved)
         return
       // BROADCAST_SUB/UNSUB are server-side only; ABORT/ERROR handled by connection.
     }
@@ -679,8 +689,9 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
     else this._connection.sendBroadcastUnsubscribe(this, kind === 'binary')
   }
 
-  /** @internal Every (re)attach declares the subscriptions: a SUB or UNSUB written to a wire that died isn't replayed. */
-  _reattachState(): ReattachState {
+  /** @internal Every (re)attach declares the subscriptions: a SUB or UNSUB written to a wire that died isn't replayed.
+   *  Publishes start no BDP probe, so it probes no path. */
+  override _reattachState(): ReattachState {
     return { broadcast: { ...this._wire } }
   }
 

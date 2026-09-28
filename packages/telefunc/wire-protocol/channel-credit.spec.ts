@@ -546,6 +546,36 @@ test('on a slow link, an awaited stream keeps flowing while a send nobody awaits
   )
 })
 
+test('on a slow link, a chat nobody awaits that the page keeps up with is neither refused nor held up for seconds behind an awaited stream on the same wire', async () => {
+  const stream = loop.open<never, string>()
+  const chat = loop.open<never, { at: number; text: string }>()
+  consume(stream.page)
+  const delays: number[] = []
+  chat.page.listen(({ at }) => void delays.push(Date.now() - at))
+  await run(100)
+  loop.socket.toPage.bytesPerMs = 4_000 // 4 MB/s
+  let streamError: unknown
+  void (async () => {
+    while (!stream.server.isClosed) await stream.server.send('x'.repeat(64 * KIB))
+  })().catch((err: unknown) => (streamError = err))
+  // 1.6 MB/s of 16 KiB messages.
+  let chatError: unknown
+  let sent = 0
+  const chatting = setInterval(() => {
+    chat.server.send({ at: Date.now(), text: message(sent++) }).catch((err: unknown) => (chatError ??= err))
+  }, 10)
+  // By then, probes that counted the stream's own queue as in flight had doubled its window to 8 MiB.
+  await run(4_000)
+  clearInterval(chatting)
+  await runUntil(() => delays.length === sent, 10_000)
+  expect(chatError).toBeUndefined()
+  expect(streamError).toBeUndefined()
+  expect(delays).toHaveLength(sent)
+  // Nothing holds it up past the stream's window, drained at the 2.4 MB/s the chat leaves of the link.
+  expect(Math.max(...delays)).toBeLessThan(CREDIT_WINDOW_INITIAL_BYTES / 2_400 + 100)
+  expect(flowOf(stream.page).byteWindow).toBe(CREDIT_WINDOW_INITIAL_BYTES)
+})
+
 test('a send nobody awaits goes out past the window of a page whose listener lags, while the wire holds less than bufferLimit', async () => {
   const feed = loop.open<never, string>()
   const page = consume(feed.page, { slow: true })

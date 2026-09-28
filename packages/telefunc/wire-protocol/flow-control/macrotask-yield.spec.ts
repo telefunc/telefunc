@@ -7,7 +7,7 @@ afterEach(() => {
 
 test('a channel created where MessageChannel is missing is a usage error naming the Workers compatibility date', () => {
   vi.stubGlobal('MessageChannel', undefined)
-  expect(() => new FlowControl({ byteWindowUpdate() {}, msgWindowUpdate() {}, bdpPing() {} })).toThrow(
+  expect(() => new FlowControl({ byteWindowUpdate() {}, msgWindowUpdate() {}, bdpPing() {} }, () => 0)).toThrow(
     'compatibility_date to 2025-08-15',
   )
 })

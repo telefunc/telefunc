@@ -161,8 +161,9 @@ interface MuxChannel {
    *  connection — they involve connection-side cleanup. */
   _dispatchFrame(frame: ChannelFrame): void
   _onTransportClose(err?: Error): void
-  /** What this channel declares in its RECONCILE entry on every (re)attach. */
-  _reattachState?(): ReattachState
+  /** What this channel declares in its RECONCILE entry on every (re)attach, on `wire`, whose flow-control frames wait
+   *  for a batched POST when `batched`. */
+  _reattachState?(wire: number, batched: boolean): ReattachState
 }
 
 interface MuxConnection {
@@ -178,8 +179,10 @@ interface MuxConnection {
   sendCloseAck(channel: MuxChannel): void
   sendByteWindowUpdate(channel: MuxChannel, limit: number): void
   sendMsgWindowUpdate(channel: MuxChannel, limit: number): void
-  sendBdpPing(channel: MuxChannel): void
-  sendBdpPingAck(channel: MuxChannel): void
+  sendBdpPing(channel: MuxChannel, probe: number): void
+  sendBdpPingAck(channel: MuxChannel, probe: number, starved: boolean): void
+  /** Bytes the wire holds that haven't gone out. */
+  bufferedAmount(): number
   sendBroadcastSubscribe(channel: MuxChannel, binary: boolean): void
   sendBroadcastUnsubscribe(channel: MuxChannel, binary: boolean): void
   unregister(channel: MuxChannel): void
@@ -223,6 +226,8 @@ type ClientChannelTransport = {
   /** Send a connection-level ping on this wire. Heartbeat's send callback calls this. */
   sendPing(frame: Uint8Array<ArrayBuffer>): void
   sendFrame(frame: OutboundFrame): void
+  /** Bytes of the frames it was handed that haven't gone out to the network. */
+  bufferedAmount(): number
   abandonActiveTransport(): void
   closeAbandonedTransport(): void
   applyReconciledSettings(ctrl: ReconciledPayload): void
@@ -745,16 +750,20 @@ class ClientConnection implements MuxConnection {
     this.sendFlowControl(ix, encode.msgWindow(ix, limit))
   }
 
-  sendBdpPing(channel: MuxChannel): void {
+  sendBdpPing(channel: MuxChannel, probe: number): void {
     const ix = this.channelIndex.get(channel)
     if (ix === undefined) return
-    this.sendFlowControl(ix, encode.bdpPing(ix))
+    this.sendFlowControl(ix, encode.bdpPing(ix, probe))
   }
 
-  sendBdpPingAck(channel: MuxChannel): void {
+  sendBdpPingAck(channel: MuxChannel, probe: number, starved: boolean): void {
     const ix = this.channelIndex.get(channel)
     if (ix === undefined) return
-    this.sendFlowControl(ix, encode.bdpPingAck(ix))
+    this.sendFlowControl(ix, encode.bdpPingAck(ix, probe, starved))
+  }
+
+  bufferedAmount(): number {
+    return this.transport.bufferedAmount()
   }
 
   /** Held with the rest while sends are held. A limit is cumulative, so one that waited is still right, where a
@@ -1364,7 +1373,7 @@ class ClientConnection implements MuxConnection {
   // ── Protocol internals ──
 
   buildReconcileFrame(): OutboundFrame {
-    const open = this.declareOpenEntries({ skipUnnamed: false })
+    const open = this.declareOpenEntries({ skipUnnamed: false, wire: this.wire, batched: this.transport.batched })
     const reconcile: ReconcilePayload = { open, ...(this.sessionId ? { sessionId: this.sessionId } : {}) }
     return { kind: 'reconcile', frame: encode.reconcile(reconcile) }
   }
@@ -1372,11 +1381,20 @@ class ClientConnection implements MuxConnection {
   /** The old wire's last frame. A channel the server awaits is listed, and its await moves to the new wire. One no
    *  RECONCILE has named yet is left out: the server has no record of it, so it reconciles after the handoff. */
   private buildBarrierFrame(sessionId: string, upgradeId: string): OutboundFrame {
-    const open = this.declareOpenEntries({ skipUnnamed: true })
+    // Its entries attach on the WebSocket, the wire after this one.
+    const open = this.declareOpenEntries({ skipUnnamed: true, wire: this.wire + 1, batched: false })
     return { kind: 'reconcile', frame: encode.barrier({ sessionId, upgradeId, open }) }
   }
 
-  private declareOpenEntries({ skipUnnamed }: { skipUnnamed: boolean }): ReconcileOpenEntry[] {
+  private declareOpenEntries({
+    skipUnnamed,
+    wire,
+    batched,
+  }: {
+    skipUnnamed: boolean
+    wire: number
+    batched: boolean
+  }): ReconcileOpenEntry[] {
     this.enterReconciling()
     this.reconcileIxes = new Map()
     this.carriedFrom = new Map()
@@ -1396,7 +1414,7 @@ class ClientConnection implements MuxConnection {
         lastSeq: this.lastSeqByChannel.get(ix) ?? 0,
       }
       if (isInitial) payloadEntry.initial = true
-      const state = entry.channel._reattachState?.()
+      const state = entry.channel._reattachState?.(wire, batched)
       Object.assign(payloadEntry, state)
       // The declared subscriptions supersede the SUB/UNSUB frames queued before them.
       if (state?.broadcast)
@@ -1858,6 +1876,10 @@ class WsTransport implements UpgradeTarget {
     ws.send(frame.frame)
   }
 
+  bufferedAmount(): number {
+    return this.ws?.bufferedAmount ?? 0
+  }
+
   abandonActiveTransport(): void {
     const ws = this.ws
     if (!ws) return
@@ -2261,6 +2283,14 @@ class SseTransport implements UpgradeSource {
         this.transportAbort.signal,
       )
     } catch {}
+  }
+
+  /** What a POST under way carries has gone out. */
+  bufferedAmount(): number {
+    if (this.streamRequest.tag === 'active') return this.streamRequest.body.bufferedAmount
+    let bytes = 0
+    for (const entry of this.outbox) bytes += entry.frame.byteLength
+    return bytes
   }
 
   private scheduleFlush(): void {

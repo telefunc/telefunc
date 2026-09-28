@@ -650,7 +650,9 @@ describe('with every channel registered, a page sends each message once, and no 
 const { RECONCILE, RECONCILED, TEXT, WINDOW, MSG_WINDOW, BDP_PING, BDP_PING_ACK, STREAM_REQUEST_OPEN_ACK } = TAG
 /** As recorded before initial channels the server hasn't registered were answered at once, less the TEXT an SSE page
  *  sent twice: with its first RECONCILE, and again as the replay that RECONCILE's RECONCILED asked for. SENT, which
- *  each attach to another wire sent then, is gone. */
+ *  each attach to another wire sent then, is gone. With the server's BDP_PING_ACK to the probe a RECONCILE entry
+ *  carries on a wire whose round trip its channel hasn't measured; an SSE page's first RECONCILE, sent before its
+ *  upload request streams, carries none. */
 const EXPECTED_TRAFFIC: Record<Wire, Traffic> = {
   sse: {
     requests: 2,
@@ -662,6 +664,8 @@ const EXPECTED_TRAFFIC: Record<Wire, Traffic> = {
       BDP_PING,
       RECONCILED,
       TEXT,
+      BDP_PING_ACK,
+      BDP_PING_ACK,
       WINDOW,
       MSG_WINDOW,
       RECONCILED,
@@ -688,6 +692,18 @@ const EXPECTED_TRAFFIC: Record<Wire, Traffic> = {
   ws: {
     requests: 1,
     toServer: [RECONCILE, TEXT, WINDOW, MSG_WINDOW, BDP_PING_ACK, RECONCILE, BDP_PING, WINDOW, MSG_WINDOW],
-    toPage: [WINDOW, MSG_WINDOW, RECONCILED, BDP_PING, TEXT, WINDOW, MSG_WINDOW, RECONCILED, BDP_PING_ACK],
+    toPage: [
+      BDP_PING_ACK,
+      WINDOW,
+      MSG_WINDOW,
+      RECONCILED,
+      BDP_PING,
+      TEXT,
+      BDP_PING_ACK,
+      WINDOW,
+      MSG_WINDOW,
+      RECONCILED,
+      BDP_PING_ACK,
+    ],
   },
 }

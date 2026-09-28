@@ -67,6 +67,17 @@ describe('upgrade wire vocabulary', () => {
     expect(decode(encode.attachResult(3, null))).toEqual({ tag: TAG.ATTACH_RESULT, index: 3, lastSeq: null })
   })
 
+  test('BDP_PING round-trips its probe, and BDP_PING_ACK the probe and whether the window starved its sender', () => {
+    expect(decode(encode.bdpPing(3, 0xffff_ffff))).toEqual({ tag: TAG.BDP_PING, index: 3, probe: 0xffff_ffff })
+    expect(decode(encode.bdpPingAck(3, 7, true))).toEqual({ tag: TAG.BDP_PING_ACK, index: 3, probe: 7, starved: true })
+    expect(decode(encode.bdpPingAck(3, 7, false))).toEqual({
+      tag: TAG.BDP_PING_ACK,
+      index: 3,
+      probe: 7,
+      starved: false,
+    })
+  })
+
   test('a BARRIER round-trips at one entry and at the largest shape the caps admit', () => {
     const one: BarrierPayload = { sessionId: 'sess-0', upgradeId: 'upg-1', open: goodOpen }
     expect(decode(encode.barrier(one))).toEqual({ tag: TAG.BARRIER, payload: one })
@@ -241,8 +252,8 @@ describe('decodeClientFrame — direction', () => {
     ['ERROR', encode.error(0, ERROR_REASON.LOST, 1)],
     ['WINDOW', encode.window(0, 1_024)],
     ['MSG_WINDOW', encode.msgWindow(0, 8)],
-    ['BDP_PING', encode.bdpPing(0)],
-    ['BDP_PING_ACK', encode.bdpPingAck(0)],
+    ['BDP_PING', encode.bdpPing(0, 1)],
+    ['BDP_PING_ACK', encode.bdpPingAck(0, 1, true)],
     ['BROADCAST_SUB', encode.broadcastSub(0, false)],
     ['BROADCAST_UNSUB', encode.broadcastUnsub(0, false)],
   ]

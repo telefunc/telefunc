@@ -28,7 +28,7 @@ function wires(mux: ChannelMux) {
   const attachResults = (wire: object) =>
     sent.get(wire)!.flatMap((frame) => (frame.tag === TAG.ATTACH_RESULT ? [frame.lastSeq] : []))
   const count = (wire: object, tag: number) => sent.get(wire)!.filter((frame) => frame.tag === tag).length
-  return { sessions, open, texts, attachResults, count, terminated }
+  return { sessions, open, sent, texts, attachResults, count, terminated }
 }
 
 /** A wire whose page has one channel attached, which counts what reaches its listeners. */
@@ -256,10 +256,36 @@ test("what a reconnect's RECONCILE sends a channel's page, run once its wire clo
   expect(count(live, TAG.ABORT)).toBe(1)
 })
 
+// The ack of an attach's probe measures the path's round trip, so it goes out as the server reads the entry: held
+// until the channel registers, it would count the wait for its call.
+test("an attach's probe is answered as the RECONCILE naming it is read, for a channel the server awaits too", async () => {
+  const mux = new ChannelMux()
+  mux.registerChannel(new ServerChannel({ id: 'known' }))
+  const { open, sent } = wires(mux)
+  const wire = open()
+  await mux.onConnectionRawMessage(
+    wire,
+    encode.reconcile({
+      open: [
+        { id: 'known', ix: 0, lastSeq: 0, initial: true, probe: 7 },
+        { id: 'late', ix: 1, lastSeq: 0, initial: true, probe: 8 },
+      ],
+    }),
+  )
+  const acks = sent
+    .get(wire)!
+    .flatMap((frame) => (frame.tag === TAG.BDP_PING_ACK ? [[frame.index, frame.probe, frame.starved]] : []))
+  expect(acks).toEqual([
+    [0, 7, false],
+    [1, 8, false],
+  ])
+  mux.registerChannel(new ServerChannel({ id: 'late' }))
+})
+
 test("a burst of a channel's full message window, with the refresh and probe a page sends among it, is processed", async () => {
   const wire = await attachedWire()
   const frames = Array.from({ length: CREDIT_MSG_WINDOW_MAX }, (_, i) => encode.text(0, '1', i + 1))
-  frames.push(encode.msgWindow(0, 2 * CREDIT_MSG_WINDOW_MAX), encode.bdpPing(0))
+  frames.push(encode.msgWindow(0, 2 * CREDIT_MSG_WINDOW_MAX), encode.bdpPing(0, 1))
   await wire.deliver(frames)
   expect(wire.terminated()).toBe(false)
   expect(wire.received.count).toBe(CREDIT_MSG_WINDOW_MAX)

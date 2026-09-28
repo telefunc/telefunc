@@ -156,11 +156,14 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   } = {}) {
     this.ack = ack
     this.id = id ?? crypto.randomUUID()
-    this._flow = new FlowControl({
-      byteWindowUpdate: (limit) => this._peer?.sendByteWindowUpdate(limit),
-      msgWindowUpdate: (limit) => this._peer?.sendMsgWindowUpdate(limit),
-      bdpPing: () => this._peer?.sendBdpPing(),
-    })
+    this._flow = new FlowControl(
+      {
+        byteWindowUpdate: (limit) => this._peer?.sendByteWindowUpdate(limit),
+        msgWindowUpdate: (limit) => this._peer?.sendMsgWindowUpdate(limit),
+        bdpPing: (probe) => this._peer?.sendBdpPing(probe),
+      },
+      () => this._peer?.sender.bufferedAmount(),
+    )
     const c = getServerConfig().channel
     this._bufferLimit = bufferLimit ?? c.bufferLimit
     this._bufferLimitBinary = c.bufferLimitBinary
@@ -475,10 +478,10 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         this._flow.onPeerMessageWindow(frame.count)
         return
       case TAG.BDP_PING:
-        this._peer?.sendBdpPingAck()
+        this._peer?.sendBdpPingAck(frame.probe, this._flow.onPing())
         return
       case TAG.BDP_PING_ACK:
-        this._flow.onPingAck()
+        this._flow.onPingAck(frame.probe, frame.starved)
         return
       case TAG.BROADCAST_SUB:
       case TAG.BROADCAST_UNSUB:

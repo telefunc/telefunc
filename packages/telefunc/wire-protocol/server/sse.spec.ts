@@ -107,7 +107,7 @@ async function reconciledSseWire() {
 /** A channel's full message window, with the refresh and probe a page sends among it. */
 function fullWindow() {
   const frames = Array.from({ length: CREDIT_MSG_WINDOW_MAX }, (_, i) => encode.text(0, '1', i + 1))
-  frames.push(encode.msgWindow(0, 2 * CREDIT_MSG_WINDOW_MAX), encode.bdpPing(0))
+  frames.push(encode.msgWindow(0, 2 * CREDIT_MSG_WINDOW_MAX), encode.bdpPing(0, 1))
   return frames
 }
 

@@ -15,7 +15,7 @@ import {
 interface FlowControlEmit {
   byteWindowUpdate(limit: number): void
   msgWindowUpdate(limit: number): void
-  bdpPing(): void
+  bdpPing(probe: number): void
 }
 
 /**
@@ -61,6 +61,9 @@ class FlowControl {
   private _released = false
   private _releases = 0
   private _shutdown = false
+  /** Since this side last answered a `BDP_PING`: whether its credit ran out, as more came or as the ping did, while its
+   *  wire held nothing. */
+  private _starved = false
 
   // Self-utilisation rolling-sum state. Two buckets, phase-weighted blend.
   private _prevBucket = 0
@@ -68,7 +71,11 @@ class FlowControl {
   private _curBucketStart = performance.now()
   private _openedAt = performance.now()
 
-  constructor(private readonly _emit: FlowControlEmit) {
+  /** `backlog`: bytes the channel's wire holds that haven't gone out, `undefined` where the runtime can't tell. */
+  constructor(
+    private readonly _emit: FlowControlEmit,
+    private readonly _backlog: () => number | undefined,
+  ) {
     macrotaskYield.assertSupported()
   }
 
@@ -118,6 +125,7 @@ class FlowControl {
   onPeerByteWindow(limit: number): void {
     const raise = (limit - this._limitBytes) | 0
     if (raise <= 0) return
+    this._noteStarved()
     this._limitBytes += raise
     this._tryWakeCreditWaiters()
   }
@@ -125,8 +133,19 @@ class FlowControl {
   onPeerMessageWindow(limit: number): void {
     const raise = (limit - this._limitMessages) | 0
     if (raise <= 0) return
+    this._noteStarved()
     this._limitMessages += raise
     this._tryWakeCreditWaiters()
+  }
+
+  /** Sender-side: answer a `BDP_PING`. Returns whether, since the last one, the window starved the wire: its credit ran
+   *  out, as more came or as the ping did, while the wire held nothing, or what the runtime can't tell. A wire that
+   *  held a backlog each time was busy, and a larger window would only have queued more on it. */
+  onPing(): boolean {
+    this._noteStarved()
+    const starved = this._starved
+    this._starved = false
+    return starved
   }
 
   /** Receiver-side: account one received frame off the wire. Emits a
@@ -134,7 +153,13 @@ class FlowControl {
   onReceived(bytes: number): void {
     this._receivedBytes += bytes
     this._receivedMessages += 1
-    if (this._bdp.onReceive(bytes)) this._emit.bdpPing()
+    if (this._bdp.onReceive(bytes)) this._emit.bdpPing(this._bdp.probe)
+  }
+
+  /** Receiver-side: the number of a probe for the RECONCILE entry of an attach on `wire`, which the peer answers before
+   *  any of the channel's frames (see `BdpEstimator`), or `undefined` where that wire's round trip is measured already. */
+  probeAttach(wire: number): number | undefined {
+    return this._bdp.probeAttach(wire)
   }
 
   /** Receiver-side: account post-callback consumption of one frame. Emits
@@ -144,11 +169,12 @@ class FlowControl {
     this._consume(bytes, 1)
   }
 
-  /** Settle `BDP_PING_ACK`. Each axis grows iff its own sample saturated ≥ 2/3
-   *  of its current window AND our own self-utilisation is below threshold.
+  /** Settle `BDP_PING_ACK`, which says whether the window starved the peer's wire. Each axis grows iff its own sample
+   *  saturated ≥ 2/3 of its current window, the byte sample leaving out the peer's queue (see `BdpEstimator`), AND our
+   *  own self-utilisation is below threshold.
    *  On growth, the new limit goes out to the peer immediately. */
-  onPingAck(): void {
-    const suggest = this._bdp.onPingAck()
+  onPingAck(probe: number, starved: boolean): void {
+    const suggest = this._bdp.onPingAck(probe, starved)
     if (!suggest.acknowledged) return
     const wantBytes = suggest.bytes === 'grow'
     const wantMsgs = suggest.msgs === 'grow'
@@ -262,6 +288,12 @@ class FlowControl {
     const hadCredit = !this.isPastByteCredit
     this._sentBytes += bytes
     if (hadCredit) this._sentWithCredit = this._sentBytes
+  }
+
+  private _noteStarved(): void {
+    if (this._starved || !this._isOutOfCredit()) return
+    const backlog = this._backlog()
+    this._starved = backlog === undefined || backlog === 0
   }
 
   private _isOutOfCredit(): boolean {

@@ -130,8 +130,10 @@ const TAG = {
   BROADCAST_SUB: 0x35 as const,
   BROADCAST_UNSUB: 0x36 as const,
   /** BDP probe — receiver→sender. Sender echoes `BDP_PING_ACK` immediately so the
-   *  receiver can measure bytes-in-flight during one RTT and grow `WINDOW` to BDP. */
+   *  receiver can measure bytes-in-flight during one RTT and grow `WINDOW` to BDP. Payload: u32, the probe's number. */
   BDP_PING: 0x37 as const,
+  /** Payload: u32, the probe it answers, and u8 1 when the sender's credit ran out while its wire held nothing, since it
+   *  last sent one. */
   BDP_PING_ACK: 0x38 as const,
   /** Flow-control message-count limit. Parallel to `WINDOW` but counted in messages, not bytes,
    *  to bound receiver dispatch CPU regardless of message size. */
@@ -191,10 +193,14 @@ type ReconcileOpenEntry = {
   initial?: true
   /** A broadcast's subscriptions as of this (re)attach, applied before its `onOpen` fires. */
   broadcast?: { text: boolean; binary: boolean }
+  /** A BDP probe's number, which the server answers as it reads the entry, ahead of what the attach sends of the
+   *  channel: on another wire than the last, the ack queues behind none of the channel's data, so its round trip is the
+   *  path's. */
+  probe?: number
 }
 
 /** What a channel adds to its own RECONCILE entry. */
-type ReattachState = Pick<ReconcileOpenEntry, 'broadcast'>
+type ReattachState = Pick<ReconcileOpenEntry, 'broadcast' | 'probe'>
 
 type ReconcilePayload = {
   sessionId?: string
@@ -308,8 +314,8 @@ type ChannelCtrlFrame =
   | { tag: typeof TAG.MSG_WINDOW; index: number; count: number }
   | { tag: typeof TAG.BROADCAST_SUB; index: number; binary: boolean }
   | { tag: typeof TAG.BROADCAST_UNSUB; index: number; binary: boolean }
-  | { tag: typeof TAG.BDP_PING; index: number }
-  | { tag: typeof TAG.BDP_PING_ACK; index: number }
+  | { tag: typeof TAG.BDP_PING; index: number; probe: number }
+  | { tag: typeof TAG.BDP_PING_ACK; index: number; probe: number; starved: boolean }
   /** `lastSeq` is null when the channel wasn't attached. */
   | { tag: typeof TAG.ATTACH_RESULT; index: number; lastSeq: number | null }
 
@@ -501,8 +507,19 @@ const encode = {
     writeU32(frame, HEADER, count)
     return frame
   },
-  bdpPing: (index: number) => encodeBareFrame(TAG.BDP_PING, index),
-  bdpPingAck: (index: number) => encodeBareFrame(TAG.BDP_PING_ACK, index),
+  bdpPing(index: number, probe: number): Uint8Array<ArrayBuffer> {
+    const frame = new Uint8Array(HEADER + 4)
+    writeHeader(frame, TAG.BDP_PING, index, 0)
+    writeU32(frame, HEADER, probe)
+    return frame
+  },
+  bdpPingAck(index: number, probe: number, starved: boolean): Uint8Array<ArrayBuffer> {
+    const frame = new Uint8Array(HEADER + 5)
+    writeHeader(frame, TAG.BDP_PING_ACK, index, 0)
+    writeU32(frame, HEADER, probe)
+    frame[HEADER + 4] = starved ? 1 : 0
+    return frame
+  },
   /** Wire: [header][u8 attached][u32 lastSeq] */
   attachResult(index: number, lastSeq: number | null): Uint8Array<ArrayBuffer> {
     const frame = new Uint8Array(HEADER + 5)
@@ -642,9 +659,11 @@ function decode(frame: Uint8Array): DecodedFrame {
       assertProtocol(payload.length >= 4, 'MSG_WINDOW payload too short')
       return { tag: TAG.MSG_WINDOW, index, count: readU32(payload, 0) }
     case TAG.BDP_PING:
-      return { tag: TAG.BDP_PING, index }
+      assertProtocol(payload.length >= 4, 'BDP_PING payload too short')
+      return { tag: TAG.BDP_PING, index, probe: readU32(payload, 0) >>> 0 }
     case TAG.BDP_PING_ACK:
-      return { tag: TAG.BDP_PING_ACK, index }
+      assertProtocol(payload.length >= 5, 'BDP_PING_ACK payload too short')
+      return { tag: TAG.BDP_PING_ACK, index, probe: readU32(payload, 0) >>> 0, starved: payload[4] === 1 }
     case TAG.BROADCAST_SUB:
       assertProtocol(payload.length >= 1, 'BROADCAST_SUB payload too short')
       return { tag: TAG.BROADCAST_SUB, index, binary: payload[0] === 1 }
@@ -734,6 +753,7 @@ function parseOpenList(payload: Record<string, unknown>): void {
     indexes.add(entry.ix)
     assertProtocol(isUint(entry.lastSeq, 0xffffffff), 'RECONCILE entry lastSeq')
     assertProtocol(entry.initial === undefined || entry.initial === true, 'RECONCILE entry initial')
+    assertProtocol(entry.probe === undefined || isUint(entry.probe, 0xffffffff), 'RECONCILE entry probe')
     if (entry.broadcast !== undefined) {
       const broadcast = asObject(entry.broadcast)
       assertProtocol(

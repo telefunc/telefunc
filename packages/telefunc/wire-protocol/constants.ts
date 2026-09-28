@@ -104,8 +104,9 @@ export const UPGRADE_STAGE_TTL_MS = 10_000
 export const UPGRADE_MAX_ID_BYTES = 256
 
 /** Worst case for one open entry beyond its id: the key names, `"ix":65535`,
- *  `"lastSeq":4294967295`, `"initial":true`, `"broadcast":{"text":false,"binary":false}` and the separator. */
-const RECONCILE_ENTRY_ENVELOPE_BYTES = 99
+ *  `"lastSeq":4294967295`, `"initial":true`, `"broadcast":{"text":false,"binary":false}`, `"probe":4294967295` and the
+ *  separator. */
+const RECONCILE_ENTRY_ENVELOPE_BYTES = 118
 
 /** Bounds what unauthenticated PREPARE frames can pin in memory before any of them commits. */
 export const UPGRADE_MAX_STAGED_RECORDS = 1_024
@@ -200,9 +201,9 @@ export const CHANNEL_RECONNECT_MAX_DELAY_MS = 5_000
 // link's BDP is the only way to avoid this stall (no algorithm beats W/RTT). Rather
 // than picking a single fixed `W`, the receiver maintains a gRPC-style BDP estimator
 // (see `bdp-estimator.ts`) that probes the in-flight byte count once per RTT and
-// doubles `W` whenever the sample saturates ≥ 2/3 of the current window. Idle channels
-// stay at the small initial cost; fat-pipe channels climb to the cap within a handful
-// of RTTs.
+// doubles `W` whenever the sample saturates ≥ 2/3 of the current window, unless a queue
+// the probe's ack waited behind accounts for it. Idle channels stay at the small initial
+// cost; fat-pipe channels climb to the cap within a handful of RTTs.
 //
 // Scope — which frames credit governs:
 //
