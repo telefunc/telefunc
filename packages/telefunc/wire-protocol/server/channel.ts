@@ -248,18 +248,18 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   }
 
   listen(callback: ChannelListener<ClientToServer>): () => void {
-    this._listeners.push(callback)
+    this._listeners = [...this._listeners, callback]
     return () => {
       const i = this._listeners.indexOf(callback)
-      if (i >= 0) this._listeners.splice(i, 1)
+      if (i >= 0) this._listeners = this._listeners.filter((_, j) => j !== i)
     }
   }
 
   listenBinary(callback: ChannelBinaryListener): () => void {
-    this._binaryListeners.push(callback)
+    this._binaryListeners = [...this._binaryListeners, callback]
     return () => {
       const i = this._binaryListeners.indexOf(callback)
-      if (i >= 0) this._binaryListeners.splice(i, 1)
+      if (i >= 0) this._binaryListeners = this._binaryListeners.filter((_, j) => j !== i)
     }
   }
 
@@ -457,7 +457,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         return
       }
       const pending: Promise<unknown>[] = []
-      for (const cb of [...this._listeners]) {
+      for (const cb of this._listeners) {
         try {
           const result = cb(data)
           if (isPromise(result)) {
@@ -493,7 +493,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     try {
       this._flow.onReceived(bytes)
       const pending: Promise<unknown>[] = []
-      for (const cb of [...this._binaryListeners]) {
+      for (const cb of this._binaryListeners) {
         try {
           const result = cb(data)
           if (isPromise(result)) {
@@ -677,7 +677,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       }
     }
     let lastResult: unknown
-    for (const cb of [...this._listeners]) {
+    for (const cb of this._listeners) {
       try {
         lastResult = await cb(data)
       } catch (err) {
@@ -695,7 +695,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       return
     }
     let lastResult: unknown
-    for (const cb of [...this._binaryListeners]) {
+    for (const cb of this._binaryListeners) {
       try {
         lastResult = await cb(data)
       } catch (err) {
