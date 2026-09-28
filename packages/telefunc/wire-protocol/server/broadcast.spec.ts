@@ -167,7 +167,9 @@ describe('keyed in-process broadcast', () => {
     broadcast._registerChannel()
     const sent: DecodedFrame[] = []
     const replay = new ReplayBuffer(1024 * 1024, 60_000, 2 * 1024 * 1024)
-    broadcast._attachPeer(new IndexedPeer({ send: (frame) => void sent.push(decode(frame)) }, 7, replay))
+    broadcast._attachPeer(
+      new IndexedPeer({ send: (frame) => void sent.push(decode(frame)), bufferedAmount: () => 0 }, 7, replay),
+    )
     broadcast._dispatchFrame({ tag: TAG.BROADCAST_SUB, index: 7, binary: false })
     await broadcast.publish('on')
     broadcast._dispatchFrame({ tag: TAG.BROADCAST_UNSUB, index: 7, binary: false })
@@ -195,6 +197,7 @@ describe('keyed in-process broadcast', () => {
           send: (frame) => {
             frames.push(frame)
           },
+          bufferedAmount: () => 0,
         },
         7,
         new ReplayBuffer(1024 * 1024, 60_000, 2 * 1024 * 1024),
@@ -223,6 +226,7 @@ describe('keyed in-process broadcast', () => {
             send: (frame) => {
               frames.push(frame)
             },
+            bufferedAmount: () => 0,
           },
           7,
           new ReplayBuffer(1024 * 1024, 60_000, 2 * 1024 * 1024),
@@ -349,6 +353,7 @@ describe('Broadcast shield validation', () => {
           send: (frame) => {
             frames.push(frame)
           },
+          bufferedAmount: () => 0,
         },
         7,
         new ReplayBuffer(1024 * 1024, 60_000, 2 * 1024 * 1024),
@@ -377,7 +382,13 @@ describe('Broadcast shield validation', () => {
     const seen: Array<{ text: string }> = []
     receiver.subscribe((m) => seen.push(m))
 
-    sender._attachPeer(new IndexedPeer({ send: () => {} }, 7, new ReplayBuffer(1024 * 1024, 60_000, 2 * 1024 * 1024)))
+    sender._attachPeer(
+      new IndexedPeer(
+        { send: () => {}, bufferedAmount: () => 0 },
+        7,
+        new ReplayBuffer(1024 * 1024, 60_000, 2 * 1024 * 1024),
+      ),
+    )
     void sender._onPeerPublishAckReqMessage(JSON.stringify({ text: 'malicious' }), 1)
 
     expect(seen).toEqual([])
@@ -608,6 +619,7 @@ describe('Broadcast subscriptions declared on attach', () => {
         const decoded = decode(frame)
         if (decoded.tag === TAG.PUBLISH) published.push(decoded.text)
       },
+      bufferedAmount: () => 0,
       terminateConnection: () => {},
     }
     const open = () => {

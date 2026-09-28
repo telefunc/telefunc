@@ -6,7 +6,13 @@ import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 import { ClientChannel } from './client/channel.js'
 import { ServerChannel } from './server/channel.js'
 import { ChannelMux, type ServerTransport } from './server/mux.js'
-import { CHANNEL_TRANSPORT, CREDIT_MSG_WINDOW_INITIAL } from './constants.js'
+import {
+  CHANNEL_BUFFER_LIMIT_BYTES,
+  CHANNEL_TRANSPORT,
+  CREDIT_MSG_WINDOW_INITIAL,
+  CREDIT_WINDOW_INITIAL_BYTES,
+} from './constants.js'
+import { ChannelOverflowError } from './channel-errors.js'
 import { TAG } from './shared-ws.js'
 import { config as serverConfig } from '../node/server/serverConfig.js'
 
@@ -20,9 +26,17 @@ class Pipe {
   private queue: { frame: Uint8Array<ArrayBuffer>; at: number }[] = []
   private timer: ReturnType<typeof setTimeout> | null = null
   private held = false
+  /** What the pipe carries, in bytes: the sender's `bufferedAmount`. */
+  bytes = 0
+  /** A slow link carries a frame only once the one before it has gone through. */
+  bytesPerMs = Infinity
+  private lastAt = 0
   constructor(private readonly deliver: (frame: Uint8Array<ArrayBuffer>) => void) {}
   push(frame: Uint8Array<ArrayBuffer>): void {
-    this.queue.push({ frame, at: Date.now() + LATENCY_MS })
+    const at = Math.max(Date.now() + LATENCY_MS, this.lastAt + frame.byteLength / this.bytesPerMs)
+    this.lastAt = at
+    this.queue.push({ frame, at })
+    this.bytes += frame.byteLength
     this.schedule()
   }
   /** What the network still carries stops arriving, until `release`. */
@@ -36,6 +50,7 @@ class Pipe {
   /** The wire is cut: what it still carries is lost. */
   clear(): void {
     this.queue.length = 0
+    this.bytes = 0
   }
   get length(): number {
     return this.queue.length
@@ -49,6 +64,7 @@ class Pipe {
         while (!this.held && read < READ_BYTES && this.queue.length > 0 && this.queue[0]!.at <= Date.now()) {
           const { frame } = this.queue.shift()!
           read += frame.byteLength
+          this.bytes -= frame.byteLength
           this.deliver(frame)
         }
         this.schedule()
@@ -111,6 +127,7 @@ class Loopback {
       this.sends('server', frame)
       socket.toPage.push(frame.slice())
     },
+    bufferedAmount: (socket) => socket.toPage.bytes,
     terminateConnection: (socket) => socket.cut(),
   }
   private readonly connectionKey = crypto.randomUUID()
@@ -209,6 +226,22 @@ function consume<T = number>(
 }
 
 const flowOf = (channel: unknown) => (channel as { _flow: { msgWindow: number; byteWindow: number } })._flow
+
+const KIB = 1024
+
+/** A 16 KiB message that names its place in the stream. */
+const message = (n: number) => String(n).padEnd(16 * KIB)
+
+/** `send(n)` for n = 0, 1, 2…, none awaited, until one rejects. */
+async function sendUntilRejected(send: (n: number) => Promise<unknown>) {
+  let error: unknown
+  let sends = 0
+  while (error === undefined && sends < 2_000) {
+    send(sends++).catch((err: unknown) => (error = err))
+    await run(0)
+  }
+  return { error, sends }
+}
 
 beforeEach(() => {
   vi.useFakeTimers()
@@ -354,4 +387,93 @@ test("an upload keeps flowing after a reconnect that loses more than the page's 
   expect(server.received.length - before).toBeGreaterThan(2 * window)
   expect(server.received.some((n, i) => i > 0 && n > server.received[i - 1]! + 1)).toBe(true)
   expect(server.received.every((n, i) => i === 0 || n > server.received[i - 1]!)).toBe(true)
+})
+
+test("a page that stops reading holds a channel's sends nobody awaits to its window and bufferLimit: the next rejects with ChannelOverflowError, and the channel stays open", async () => {
+  const feed = loop.open<never, string>()
+  const page = consume(feed.page)
+  await run(100)
+  loop.socket.toPage.hold()
+  const { error, sends } = await sendUntilRejected((n) => feed.server.send(message(n)))
+  expect(error).toBeInstanceOf(ChannelOverflowError)
+  expect(loop.socket.toPage.bytes).toBeLessThanOrEqual(
+    CREDIT_WINDOW_INITIAL_BYTES + CHANNEL_BUFFER_LIMIT_BYTES + 32 * KIB,
+  )
+
+  // Once the page reads again it gets every message but the refused one, and what is sent after it caught up.
+  loop.socket.toPage.release()
+  await runUntil(() => page.received.length === sends - 1, 1_000)
+  await feed.server.send(message(sends))
+  await runUntil(() => page.received.length === sends, 1_000)
+  expect(page.received).toEqual([...Array.from({ length: sends - 1 }, (_, n) => message(n)), message(sends)])
+})
+
+test("a page that stops reading holds a channel's ack requests nobody awaits to bufferLimit: the next rejects with ChannelOverflowError", async () => {
+  const feed = loop.open<never, string>()
+  feed.page.listen(() => 'ok')
+  await run(100)
+  loop.socket.toPage.hold()
+  const acks: Promise<unknown>[] = []
+  const { error, sends } = await sendUntilRejected((n) => {
+    const ack = feed.server.send(message(n), { ack: true })
+    acks.push(ack)
+    return ack
+  })
+  expect(error).toBeInstanceOf(ChannelOverflowError)
+  expect(loop.socket.toPage.bytes).toBeLessThanOrEqual(CHANNEL_BUFFER_LIMIT_BYTES + 32 * KIB)
+
+  loop.socket.toPage.release()
+  await run(100)
+  expect(await Promise.all(acks.slice(0, sends - 1))).toEqual(Array(sends - 1).fill('ok'))
+})
+
+test('on a slow link, an awaited stream keeps flowing while a send nobody awaits on the same wire is refused past bufferLimit', async () => {
+  const stream = loop.open<never, string>()
+  const flood = loop.open<never, string>()
+  const streamed = consume(stream.page)
+  consume(flood.page)
+  await run(100)
+  loop.socket.toPage.bytesPerMs = 4_000 // 4 MB/s
+  let streamError: unknown
+  void (async () => {
+    while (!stream.server.isClosed) await stream.server.send('x'.repeat(64 * KIB))
+  })().catch((err: unknown) => (streamError = err))
+  let floodError: unknown
+  let held = 0
+  const flooding = setInterval(() => {
+    held = Math.max(held, loop.socket.toPage.bytes)
+    if (floodError === undefined) flood.server.send(message(0)).catch((err: unknown) => (floodError = err))
+  }, 1)
+  await run(1_000)
+  expect(floodError).toBeInstanceOf(ChannelOverflowError)
+  const midway = streamed.received.length
+  await run(1_000)
+  clearInterval(flooding)
+
+  expect(streamError).toBeUndefined()
+  expect(midway).toBeGreaterThan(10)
+  expect(streamed.received.length - midway).toBeGreaterThan(40)
+  // The stream alone keeps more than bufferLimit on the wire, and nothing past the windows and bufferLimit is added.
+  expect(held).toBeGreaterThan(CHANNEL_BUFFER_LIMIT_BYTES)
+  expect(held).toBeLessThanOrEqual(
+    flowOf(stream.page).byteWindow + flowOf(flood.page).byteWindow + CHANNEL_BUFFER_LIMIT_BYTES + 128 * KIB,
+  )
+})
+
+test('a send nobody awaits goes out past the window of a page whose listener lags, while the wire holds less than bufferLimit', async () => {
+  const feed = loop.open<never, string>()
+  const page = consume(feed.page, { slow: true })
+  await run(100)
+  let error: unknown
+  let behind = 0
+  for (let n = 0; n < 400; n++) {
+    feed.server.send(message(n)).catch((err: unknown) => (error = err))
+    behind = Math.max(behind, (n + 1 - page.consumed) * (16 * KIB) - flowOf(feed.page).byteWindow)
+    await run(5)
+  }
+  expect(error).toBeUndefined()
+  // The page's limit is at most what it consumed and its window, so the server sent this far past it.
+  expect(behind).toBeGreaterThan(CHANNEL_BUFFER_LIMIT_BYTES)
+  await runUntil(() => page.received.length === 400, 5_000)
+  expect(page.received).toEqual(Array.from({ length: 400 }, (_, n) => message(n)))
 })

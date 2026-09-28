@@ -72,6 +72,11 @@ class FlowControl {
     return this._bdp.msgWindow
   }
 
+  /** Sender-side: bytes sent past the peer's byte limit, negative while within it. */
+  get bytesBeyondCredit(): number {
+    return this._sentBytes - this._limitBytes
+  }
+
   /** Sender-side: count one frame of `bytes` against credit. Returns `void` when
    *  both credit axes have headroom AND our loop utilisation is below the gate.
    *  Otherwise a Promise that resolves on credit refresh (credit-gated) or one

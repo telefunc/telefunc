@@ -7,6 +7,8 @@ import { ReplayBuffer } from '../replay-buffer.js'
 
 interface PeerSender {
   send(frame: Uint8Array, onCommit?: () => void): void
+  /** Bytes the wire holds for the peer, not yet written out; `undefined` where the runtime can't tell. */
+  bufferedAmount(): number | undefined
 }
 
 /** Wraps a crossws peer, encodes frames with a fixed channel index.
@@ -27,13 +29,12 @@ class IndexedPeer {
     return payloadBytes(frame)
   }
 
-  /** Send a text frame that requests an ack response from the receiver. Returns seq. */
-  sendTextAckReq(data: string, onQueued?: (seq: number) => void): number {
+  /** Send a text frame that requests an ack response from the receiver. `onQueued` gets its seq and payload bytes. */
+  sendTextAckReq(data: string, onQueued: (seq: number, bytes: number) => void): void {
     const seq = this.replay.nextSeq()
     const frame = encode.textAckReq(this.index, data, seq)
-    onQueued?.(seq)
+    onQueued(seq, payloadBytes(frame))
     this.sender.send(frame, () => this.replay.push(seq, frame))
-    return seq
   }
 
   sendBinary(data: Uint8Array): void {
@@ -42,13 +43,12 @@ class IndexedPeer {
     this.sender.send(frame, () => this.replay.push(seq, frame, true))
   }
 
-  /** Send a binary frame that requests an ack response from the receiver. Returns seq. */
-  sendBinaryAckReq(data: Uint8Array, onQueued?: (seq: number) => void): number {
+  /** Send a binary frame that requests an ack response from the receiver. `onQueued` gets its seq and payload bytes. */
+  sendBinaryAckReq(data: Uint8Array, onQueued: (seq: number, bytes: number) => void): void {
     const seq = this.replay.nextSeq()
     const frame = encode.binaryAckReq(this.index, data, seq)
-    onQueued?.(seq)
+    onQueued(seq, data.byteLength)
     this.sender.send(frame, () => this.replay.push(seq, frame, true))
-    return seq
   }
 
   /** Send an acknowledgement response for a message the client sent.

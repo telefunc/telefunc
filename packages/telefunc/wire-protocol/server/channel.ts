@@ -29,7 +29,7 @@ import type { ShieldValidators } from '../../node/server/shield.js'
 import { createAbortError, type AbortError } from '../../shared/Abort.js'
 import { ShieldValidationError } from '../../shared/ShieldValidationError.js'
 import { handleTelefunctionBug } from '../../node/server/runTelefunc/validateTelefunctionError.js'
-import { ChannelClosedError } from '../channel-errors.js'
+import { ChannelClosedError, ChannelOverflowError } from '../channel-errors.js'
 import { NetworkError } from '../../shared/NetworkError.js'
 import { isPromise } from '../../utils/isPromise.js'
 import { CHANNEL_CLOSE_TIMEOUT_MS, CHANNEL_PING_INTERVAL_MIN_MS } from '../constants.js'
@@ -80,8 +80,12 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   protected _prePeerBuffer: ServerChannelBuffer<ChannelAck<ServerToClient>>
   protected _pendingAcks = new Map<
     number,
-    { resolve: (result: ChannelAck<ServerToClient>) => void; reject: (err: Error) => void }
+    { resolve: (result: ChannelAck<ServerToClient>) => void; reject: (err: Error) => void; bytes: number }
   >()
+  /** Payload bytes of the ack requests in `_pendingAcks`. */
+  private _pendingAckBytes = 0
+  private readonly _bufferLimit: number
+  private readonly _bufferLimitBinary: number
   private _closeCallbacks: Array<ChannelCloseCallback> = []
   private _openCallbacks: Array<() => void> = []
   private _closeError: Error | undefined
@@ -138,9 +142,11 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       bdpPing: () => this._peer?.sendBdpPing(),
     })
     const c = getServerConfig().channel
+    this._bufferLimit = bufferLimit ?? c.bufferLimit
+    this._bufferLimitBinary = c.bufferLimitBinary
     this._prePeerBuffer = new ServerChannelBuffer<ChannelAck<ServerToClient>>(
-      bufferLimit ?? c.bufferLimit,
-      c.bufferLimitBinary,
+      this._bufferLimit,
+      this._bufferLimitBinary,
     )
   }
 
@@ -193,16 +199,16 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     // Ack-bearing sends bypass credit accounting — the caller's `await` on the ack
     // Promise already serializes the next send, so credit would add nothing.
     if (needsAck) {
+      if (this._isPeerBufferFull(this._bufferLimit)) return rejectOverflow()
       return this._trackAck(
         new Promise<ChannelAck<ServerToClient>>((resolve, reject) => {
-          this._peer!.sendTextAckReq(serialized, (seq) => {
-            this._pendingAcks.set(seq, { resolve, reject })
-          })
+          this._peer!.sendTextAckReq(serialized, (seq, bytes) => this._addPendingAck(seq, bytes, { resolve, reject }))
         }),
       )
     }
     // Cooperative credit model: the send already fired; `decrement` only gates the return
-    // value. Awaiting throttles the caller's next send; not awaiting bypasses.
+    // value. Awaiting throttles the caller's next send; not awaiting bypasses credit, up to the peer buffer.
+    if (this._flow.bytesBeyondCredit > 0 && this._isPeerBufferFull(this._bufferLimit)) return rejectOverflow()
     return this._flow.decrement(this._peer.sendText(serialized))
   }
 
@@ -235,17 +241,35 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     }
     // Ack-bearing path bypasses credit; see `_send` for rationale.
     if (needsAck) {
+      if (this._isPeerBufferFull(this._bufferLimitBinary)) return rejectOverflow()
       return this._trackAck(
         new Promise<unknown>((resolve, reject) => {
-          this._peer!.sendBinaryAckReq(data, (seq) => {
-            this._pendingAcks.set(seq, { resolve, reject })
-          })
+          this._peer!.sendBinaryAckReq(data, (seq, bytes) => this._addPendingAck(seq, bytes, { resolve, reject }))
         }),
       )
     }
-    this._peer.sendBinary(data)
     // Cooperative credit model; see `_send`.
+    if (this._flow.bytesBeyondCredit > 0 && this._isPeerBufferFull(this._bufferLimitBinary)) return rejectOverflow()
+    this._peer.sendBinary(data)
     return this._flow.decrement(data.byteLength)
+  }
+
+  /** The peer is behind by what this channel sent past its credit and the ack requests it hasn't answered. The server
+   *  holds no more of that than its wire does, and all of it where the runtime can't tell. */
+  private _isPeerBufferFull(limit: number): boolean {
+    const behind = Math.max(0, this._flow.bytesBeyondCredit) + this._pendingAckBytes
+    if (behind < limit) return false
+    const buffered = this._peer!.sender.bufferedAmount()
+    return (buffered === undefined ? behind : Math.min(behind, buffered)) >= limit
+  }
+
+  private _addPendingAck(
+    seq: number,
+    bytes: number,
+    settle: { resolve: (result: ChannelAck<ServerToClient>) => void; reject: (err: Error) => void },
+  ): void {
+    this._pendingAcks.set(seq, { ...settle, bytes })
+    this._pendingAckBytes += bytes
   }
 
   listen(callback: ChannelListener<ClientToServer>): () => void {
@@ -346,14 +370,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         peer.sendBinary(msg)
         this._flow.countSent(msg.byteLength)
       },
-      sendTextAck: (data, cb) => {
-        const seq = peer.sendTextAckReq(data)
-        this._pendingAcks.set(seq, cb)
-      },
-      sendBinaryAck: (data, cb) => {
-        const seq = peer.sendBinaryAckReq(data)
-        this._pendingAcks.set(seq, cb)
-      },
+      sendTextAck: (data, cb) => peer.sendTextAckReq(data, (seq, bytes) => this._addPendingAck(seq, bytes, cb)),
+      sendBinaryAck: (data, cb) => peer.sendBinaryAckReq(data, (seq, bytes) => this._addPendingAck(seq, bytes, cb)),
       sendPublishBinary: (msg) => peer.sendPublishBinary(msg),
     })
     for (const ack of this._pendingAckRes) {
@@ -562,6 +580,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       throw err
     } finally {
       this._pendingAcks.delete(ackedSeq)
+      this._pendingAckBytes -= pending.bytes
     }
   }
 
@@ -751,6 +770,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     const ackErr = err ?? new ChannelClosedError()
     for (const { reject } of this._pendingAcks.values()) reject(ackErr)
     this._pendingAcks.clear()
+    this._pendingAckBytes = 0
     this._prePeerBuffer.clear(ackErr)
   }
 
@@ -822,6 +842,10 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     }
     this._reconnectTimer = null
   }
+}
+
+function rejectOverflow(): Promise<never> {
+  return Promise.reject(new ChannelOverflowError())
 }
 
 function reportServerChannelError(err: unknown): void {

@@ -15,6 +15,7 @@ function wires(mux: ChannelMux) {
     setSessionId: (wire, id) => void sessions.set(wire, id),
     getConnId: () => null,
     sendNow: (wire, frame) => void sent.get(wire)!.push(decode(frame)),
+    bufferedAmount: () => 0,
     terminateConnection: (wire) => void terminated.add(wire),
   }
   const open = () => {

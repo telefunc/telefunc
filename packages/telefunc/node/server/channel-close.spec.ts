@@ -13,6 +13,7 @@ function createPeer(frames: Uint8Array[]) {
         if (frame[0] === TAG.WINDOW || frame[0] === TAG.MSG_WINDOW || frame[0] === TAG.SENT) return
         frames.push(frame)
       },
+      bufferedAmount: () => 0,
     },
     7,
     new ReplayBuffer(1024 * 1024, 60_000, 2 * 1024 * 1024),

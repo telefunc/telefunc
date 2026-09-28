@@ -16,6 +16,7 @@ function createHarness() {
       setSessionId: (_conn, id) => (sessionId = id),
       getConnId: () => null,
       sendNow: (_conn, frame) => sent.push(decode(frame)),
+      bufferedAmount: () => 0,
       terminateConnection: () => (terminated = true),
     }
     mux.onConnectionOpen(conn, transport)

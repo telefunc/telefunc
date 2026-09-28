@@ -55,6 +55,8 @@ type ServerTransport<TConnection> = {
    *  traffic across requests (WebSocket: every frame already lands on the same socket). */
   getConnId(connection: TConnection): string | null
   sendNow(connection: TConnection, frame: Uint8Array<ArrayBuffer>): void
+  /** Bytes sent that still wait in the connection, or `undefined` where the runtime doesn't report them. */
+  bufferedAmount(connection: TConnection): number | undefined
   terminateConnection(connection: TConnection): void
 }
 
@@ -218,7 +220,10 @@ class ChannelMux {
         awaited: new Map(),
       },
       transport: transport as ServerTransport<unknown>,
-      sender: { send: (frame, onCommit) => this.send(connection, frame as Uint8Array<ArrayBuffer>, onCommit) },
+      sender: {
+        send: (frame, onCommit) => this.send(connection, frame as Uint8Array<ArrayBuffer>, onCommit),
+        bufferedAmount: () => this.bufferedAmount(connection),
+      },
     })
     const connId = transport.getConnId(connection)
     if (connId !== null) this.connectionsByConnId.set(connId, connection)
@@ -780,13 +785,20 @@ class ChannelMux {
 
   // ── Per-connection plumbing (send, recv chain, ping) ────────────────
 
-  /** Sole server→client send path; sync so wire order = call order. Per-channel
-   *  byte+msg credit (see `flow-control/`) bounds queue growth. */
+  /** Sole server→client send path; sync so wire order = call order. What a channel's sends queue on it is bounded by
+   *  the channel's credit (see `flow-control/`) and, past that, its bufferLimit. */
   private send(connection: Wire, frame: Uint8Array<ArrayBuffer>, onCommit?: () => void): void {
     const entry = this.connectionEntries.get(connection)
     if (!entry) return
     onCommit?.()
     entry.transport.sendNow(connection, frame)
+  }
+
+  /** A wire that's gone holds nothing. */
+  private bufferedAmount(connection: Wire): number | undefined {
+    const entry = this.connectionEntries.get(connection)
+    if (!entry) return 0
+    return entry.transport.bufferedAmount(connection)
   }
 
   private chainRecv<T>(entry: ConnectionEntry, fn: () => Promise<T>): Promise<T> {

@@ -61,6 +61,7 @@ class SseConnectionTransport {
     },
     getConnId: (connection) => connection.connId,
     sendNow: (connection, frame) => this.sendNow(connection, frame),
+    bufferedAmount: (connection) => connection.stream.bufferedAmount,
     terminateConnection: (connection) => this.terminateConnection(connection),
   }
 
