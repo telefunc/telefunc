@@ -14,7 +14,7 @@ import type {
 import type { TELEFUNC_SHIELDS } from '../../node/shared/transformer/generateShield/shield-key.js'
 import { invokeChannelListener, makePublishInfo } from '../channel.js'
 import { ServerChannel, reportServerChannelError } from './channel.js'
-import type { BroadcastRoute, PublishResult } from '../backend/broadcast/contract.js'
+import type { BroadcastPayload, BroadcastRoute, PublishResult } from '../backend/broadcast/contract.js'
 import { getBroadcastBackend } from '../backend/install.js'
 import type { BackendReceiver, BackendSubscription } from '../backend/subscription.js'
 import { stringify } from '@brillout/json-serializer/stringify'
@@ -30,8 +30,6 @@ import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
 assertIsNotBrowser()
 
 const SERVER_BROADCAST_BRAND: unique symbol = Symbol.for('ServerBroadcast')
-const textEncoder = new TextEncoder()
-const textDecoder = new TextDecoder()
 type BroadcastUnsubscribe = () => void
 
 class ServerBroadcast<T = unknown> extends ServerChannel {
@@ -46,7 +44,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
   readonly key: string
 
   private readonly _subscribers: BroadcastListeners<T> = { text: [], binary: [] }
-  private readonly _routes: Record<BroadcastKind, RouteSubscription>
+  private readonly _routes: { [Kind in BroadcastKind]: RouteSubscription<Kind> }
   private readonly _peerSubscriptions: Record<BroadcastKind, boolean> = { text: false, binary: false }
 
   constructor(opts: { key: string }) {
@@ -55,7 +53,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
     this.key = opts.key
     this._routes = {
       text: new RouteSubscription({ key: this.key, kind: 'text' }, (payload, rawInfo) =>
-        this._deliverBroadcastMessage(textDecoder.decode(payload), rawInfo),
+        this._deliverBroadcastMessage(payload, rawInfo),
       ),
       binary: new RouteSubscription({ key: this.key, kind: 'binary' }, (payload, rawInfo) =>
         this._deliverBroadcastBinaryMessage(payload, rawInfo),
@@ -82,7 +80,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
   }
 
   publish(data: ChannelData<T>): Promise<ChannelPublishAck> {
-    return this._publishTracked('text', textEncoder.encode(stringify(data)))
+    return this._publishTracked('text', stringify(data))
   }
 
   subscribe(callback: BroadcastListener<T>): () => void {
@@ -161,11 +159,17 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
     this._routes[kind].open()
   }
 
-  private _publishTracked(kind: BroadcastKind, payload: Uint8Array): Promise<ChannelPublishAck> {
+  private _publishTracked<Kind extends BroadcastKind>(
+    kind: Kind,
+    payload: BroadcastPayload<Kind>,
+  ): Promise<ChannelPublishAck> {
     return markHandled(this._trackAck(Promise.resolve(this._publish(kind, payload))))
   }
 
-  private _publish(kind: BroadcastKind, payload: Uint8Array): ChannelPublishAck | Promise<ChannelPublishAck> {
+  private _publish<Kind extends BroadcastKind>(
+    kind: Kind,
+    payload: BroadcastPayload<Kind>,
+  ): ChannelPublishAck | Promise<ChannelPublishAck> {
     return publishRoute({ key: this.key, kind }, payload)
   }
 
@@ -182,7 +186,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
           return
         }
       }
-      const result = await this._publish('text', textEncoder.encode(serialized))
+      const result = await this._publish('text', serialized)
       this._sendAckRes(seq, stringify(result))
     } catch (err) {
       this._sendPublishFailure(seq, err)
@@ -234,14 +238,10 @@ const BroadcastChannel = ServerBroadcast as {
 const Broadcast = {
   publish<U = unknown>(key: string, data: ChannelData<U>): ChannelPublishAck | Promise<ChannelPublishAck> {
     assertBroadcastKey(key)
-    return markHandled(publishRoute({ key, kind: 'text' }, textEncoder.encode(stringify(data))))
+    return markHandled(publishRoute({ key, kind: 'text' }, stringify(data)))
   },
   subscribe<U = unknown>(key: string, callback: BroadcastListener<U>): BroadcastUnsubscribe {
-    return subscribeRoute(
-      { key, kind: 'text' },
-      (payload) => parse(textDecoder.decode(payload)) as ChannelData<U>,
-      callback,
-    )
+    return subscribeRoute({ key, kind: 'text' }, (payload) => parse(payload) as ChannelData<U>, callback)
   },
   publishBinary(key: string, data: Uint8Array): ChannelPublishAck | Promise<ChannelPublishAck> {
     assertBroadcastKey(key)
@@ -252,9 +252,9 @@ const Broadcast = {
   },
 }
 
-function subscribeRoute<Data>(
-  route: BroadcastRoute,
-  decode: (payload: Uint8Array) => Data,
+function subscribeRoute<Kind extends BroadcastKind, Data>(
+  route: BroadcastRoute<Kind>,
+  decode: (payload: BroadcastPayload<Kind>) => Data,
   callback: (data: Data, info: ChannelPublishInfo) => unknown,
 ): BroadcastUnsubscribe {
   assertBroadcastKey(route.key)
@@ -280,12 +280,12 @@ function reportSubscriptionEnd(error: unknown): void {
 }
 
 /** A route's subscription while wanted; one that ends on its own is reported and replaced once, as a Room lane's is. */
-class RouteSubscription {
+class RouteSubscription<Kind extends BroadcastKind> {
   private _current: BackendSubscription | null = null
 
   constructor(
-    private readonly _route: BroadcastRoute,
-    private readonly _receiver: BackendReceiver,
+    private readonly _route: BroadcastRoute<Kind>,
+    private readonly _receiver: BackendReceiver<BroadcastPayload<Kind>>,
   ) {}
 
   /** Subscribes unless a subscription is live; throws where the backend can't bind the route. */
@@ -321,7 +321,10 @@ class RouteSubscription {
 }
 
 /** The backend's receipt as the public ack, carrying its key like a subscriber's `info`. */
-function publishRoute(route: BroadcastRoute, payload: Uint8Array): ChannelPublishAck | Promise<ChannelPublishAck> {
+function publishRoute<Kind extends BroadcastKind>(
+  route: BroadcastRoute<Kind>,
+  payload: BroadcastPayload<Kind>,
+): ChannelPublishAck | Promise<ChannelPublishAck> {
   const toAck = (r: PublishResult): ChannelPublishAck =>
     Object.assign(makePublishInfo(route.key, r.seq, r.timestamp), {
       meta: r.meta,

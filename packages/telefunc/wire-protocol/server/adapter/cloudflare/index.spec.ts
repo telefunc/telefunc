@@ -460,7 +460,7 @@ describe('cloudflare adapter entrypoint', () => {
       key: 'room:test',
       kind: 'text' as const,
       locationBucket: 'weur' as const,
-      payload: new Uint8Array(),
+      payload: '"hello"',
     }
     instance.telefuncBroadcastPublish(publish)
     const publishToSubscribers = mocks.transportInstances[0]!.publishToSubscribers
@@ -475,7 +475,7 @@ describe('cloudflare adapter entrypoint', () => {
     const delivery = {
       key: 'room:test',
       kind: 'text' as const,
-      payload: new Uint8Array([1]),
+      payload: '"hello"',
       info: { seq: 1, timestamp: 1 },
     }
     instance.telefuncBroadcastDeliver(delivery)

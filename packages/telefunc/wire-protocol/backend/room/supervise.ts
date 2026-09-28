@@ -41,6 +41,7 @@ function superviseRoomDriver(driver: RoomDriver): RoomBackend {
     subscribeLane: (roomId, inc, lane, receiver) =>
       subscriptions.subscribe({ roomId, inc, lane }, (payload, info) => {
         assertDriverPosition(info)
+        assert(typeof payload !== 'string')
         return receiver(payload, info)
       }),
     dropGeneration: (roomId, inc) => driver.dropGeneration(roomId, inc),

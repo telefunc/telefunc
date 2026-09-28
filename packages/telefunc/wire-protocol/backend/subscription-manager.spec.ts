@@ -1,10 +1,13 @@
 import { describe, expect, it, vi } from 'vitest'
 import { SubscriptionManager } from './subscription-manager.js'
-import type { BackendReceiver, SubscriptionAttempt, SubscriptionDriver, SubscriptionState } from './subscription.js'
+import type {
+  BackendPayload,
+  BackendReceiver,
+  SubscriptionAttempt,
+  SubscriptionDriver,
+  SubscriptionState,
+} from './subscription.js'
 import { DriverAttempt } from './attempt.js'
-
-const encoder = new TextEncoder()
-const decoder = new TextDecoder()
 
 describe('shared subscription supervision', () => {
   it('owns fan-out, refcount, epochs, and raw terminal signalling once', async () => {
@@ -15,8 +18,8 @@ describe('shared subscription supervision', () => {
     raw.plan(() => ControlledAttempt.ready(secondCleanup.promise))
     const manager = new SubscriptionManager(raw, vi.fn(), String)
     const received: string[] = []
-    const first = manager.subscribe('source', (payload) => void received.push(`a:${decoder.decode(payload)}`))
-    const second = manager.subscribe('source', (payload) => void received.push(`b:${decoder.decode(payload)}`))
+    const first = manager.subscribe('source', (payload) => void received.push(`a:${payload}`))
+    const second = manager.subscribe('source', (payload) => void received.push(`b:${payload}`))
     await first.ready
     expect(raw.opens).toHaveLength(1)
     expect(raw.opens[0]!.localReceiverCount()).toBe(2)
@@ -26,7 +29,7 @@ describe('shared subscription supervision', () => {
     expect(raw.opens).toHaveLength(1)
     await raw.deliver(0, 'stale')
     expect(received).toEqual([])
-    const replacement = manager.subscribe('source', (payload) => void received.push(`c:${decoder.decode(payload)}`))
+    const replacement = manager.subscribe('source', (payload) => void received.push(`c:${payload}`))
     await replacement.ready
     expect(raw.opens).toHaveLength(2)
     await raw.deliver(1, 'current')
@@ -184,9 +187,9 @@ describe('shared subscription supervision', () => {
     const manager = new SubscriptionManager(raw, console.error, String)
     const received: string[] = []
     raw.partition = 'session-a'
-    const first = manager.subscribe('same-source', (payload) => void received.push(`a:${decoder.decode(payload)}`))
+    const first = manager.subscribe('same-source', (payload) => void received.push(`a:${payload}`))
     raw.partition = 'session-b'
-    const second = manager.subscribe('same-source', (payload) => void received.push(`b:${decoder.decode(payload)}`))
+    const second = manager.subscribe('same-source', (payload) => void received.push(`b:${payload}`))
     await Promise.all([first.ready, second.ready])
     expect(raw.opens).toHaveLength(2)
     await raw.deliver(0, 'one')
@@ -214,7 +217,7 @@ describe('shared subscription supervision', () => {
   })
 })
 type OpenRecord = {
-  receiver: BackendReceiver
+  receiver: BackendReceiver<BackendPayload>
   localReceiverCount: () => number
   attempt: ControlledAttempt
 }
@@ -232,7 +235,7 @@ class ControlledDriver implements SubscriptionDriver<string> {
     const partition = this.partition
     return {
       partition,
-      open: (receiver: BackendReceiver, localReceiverCount: () => number): SubscriptionAttempt => {
+      open: (receiver: BackendReceiver<BackendPayload>, localReceiverCount: () => number): SubscriptionAttempt => {
         const attempt = (this.#plans.shift() ?? (() => ControlledAttempt.ready()))()
         this.opens.push({ receiver, localReceiverCount, attempt })
         return attempt
@@ -240,7 +243,7 @@ class ControlledDriver implements SubscriptionDriver<string> {
     }
   }
   async deliver(index: number, value: string): Promise<void> {
-    await (this.opens[index]!.receiver(encoder.encode(value), { seq: index + 1, timestamp: 1 }) as unknown)
+    await (this.opens[index]!.receiver(value, { seq: index + 1, timestamp: 1 }) as unknown)
   }
 }
 class ControlledAttempt extends DriverAttempt {

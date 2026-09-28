@@ -23,10 +23,7 @@ import { disposeBackend, installBackend } from '../../../backend/install.js'
 import { CloudflareBackend } from './room/backend.js'
 import { CloudflareRoomSessionManager } from './room/subscription.js'
 import { ChannelMux } from '../../mux.js'
-import type { SubscriptionAttempt, SubscriptionState } from '../../../backend/subscription.js'
-
-const encode = (text: string) => new TextEncoder().encode(text)
-const decode = (bytes: Uint8Array) => new TextDecoder().decode(bytes)
+import type { BackendPayload, SubscriptionAttempt, SubscriptionState } from '../../../backend/subscription.js'
 
 /** Resolves once the attempt is ready; rejects if it ends first. */
 function untilReady(attempt: SubscriptionAttempt): Promise<void> {
@@ -408,7 +405,7 @@ describe('cloudflare broadcast routing', () => {
     await untilReady(subscription)
     expect(liveMembers(authority, route)).toEqual({ weur: ['member-weur-0'] })
     const binary = await broadcast.publish({ key: 'room:test', kind: 'binary' }, new Uint8Array([1]))
-    const text = await broadcast.publish(route, encode('"text"'))
+    const text = await broadcast.publish(route, '"text"')
     expect([binary.receivers, text.receivers]).toEqual([0, 1])
     await subscription.unsubscribe()
   })
@@ -431,7 +428,7 @@ describe('cloudflare broadcast routing', () => {
       key: 'room:first-touch',
       kind: 'text',
       locationBucket: 'apac',
-      payload: encode('{"text":"hello"}'),
+      payload: '{"text":"hello"}',
     })
     expect(receipt).toMatchObject({ seq: 2, meta: { authorityBucket: 'weur' } })
     expect((receipt.meta!.fanoutBuckets as string[]).sort()).toEqual(['apac', 'weur'])
@@ -523,7 +520,7 @@ describe('cloudflare broadcast routing', () => {
       key: 'room:test',
       kind: 'text',
       locationBucket: 'weur',
-      payload: encode('{"text":"hello"}'),
+      payload: '{"text":"hello"}',
     })
     expect(coordinators.sort()).toEqual([
       'telefunc:broadcast:apac:0',
@@ -556,7 +553,7 @@ describe('cloudflare broadcast routing', () => {
       key: 'room:redeployed',
       kind: 'text',
       locationBucket: 'weur',
-      payload: encode('"hello"'),
+      payload: '"hello"',
     })
     expect(forwards).toEqual([
       { coordinator: 'telefunc:broadcast:weur:0', members: ['telefunc-shard-apac-0', 'telefunc-shard-weur-0'] },
@@ -588,7 +585,7 @@ describe('cloudflare broadcast routing', () => {
 
   it('a forward delivers wide ordering positions to every named DO', async () => {
     const deliveredTo: string[] = []
-    const received: Array<{ text: string; seq: number; timestamp: number }> = []
+    const received: Array<{ text: BackendPayload; seq: number; timestamp: number }> = []
     const broadcast: CloudflareBroadcast = createBroadcast(
       createBasicBinding({
         onDeliver(id, request) {
@@ -599,13 +596,13 @@ describe('cloudflare broadcast routing', () => {
     )
     const member = createMember(broadcast)
     const subscription = member.openSubscription({ key: 'room:test', kind: 'text' }, (payload, info) => {
-      received.push({ text: decode(payload), ...info })
+      received.push({ text: payload, ...info })
     })
     await untilReady(subscription)
     await broadcast.forwardToBucket(new OrderedStubs(), {
       key: 'room:test',
       kind: 'text',
-      payload: encode('{"text":"hello"}'),
+      payload: '{"text":"hello"}',
       info: { seq: 0x1_0000_0000, timestamp: 0x1_0000_0001 },
       members: ['member-weur-0', 'member-weur-1'],
     })
@@ -635,7 +632,7 @@ describe('cloudflare broadcast routing', () => {
     const subscription = member.openSubscription(route, (_payload, info) => void received.push(info.seq))
     await untilReady(subscription)
     const publish = () =>
-      broadcast.publishToSubscribers(authority, calls, { ...route, locationBucket: 'weur', payload: encode('"x"') })
+      broadcast.publishToSubscribers(authority, calls, { ...route, locationBucket: 'weur', payload: '"x"' })
     await Promise.all([publish(), publish(), publish()])
     expect(received).toEqual([1, 2, 3])
     await subscription.unsubscribe()
@@ -681,7 +678,7 @@ describe('cloudflare broadcast routing', () => {
     const broadcast: CloudflareBroadcast = createBroadcast(
       createBasicBinding({
         onPublish(id, { key, locationBucket, payload }) {
-          coordinatorPublishes.push({ name: id.name, key, locationBucket, text: decode(payload) })
+          coordinatorPublishes.push({ name: id.name, key, locationBucket, text: payload })
           return Promise.resolve({ seq: 1, timestamp: Date.now() })
         },
       }),
@@ -717,8 +714,7 @@ describe('cloudflare broadcast routing', () => {
     const firstRemotePublish = Promise.withResolvers<void>()
     const broadcast = createBroadcast(
       createBasicBinding({
-        onForward(id, { payload }) {
-          const text = decode(payload)
+        onForward(id, { payload: text }) {
           coordinatorPublishes.push(`${id.name}:${text}`)
           if (id.name.includes(':broadcast:apac:') && text === '{"text":"first"}') return firstRemotePublish.promise
           return Promise.resolve()
@@ -731,14 +727,14 @@ describe('cloudflare broadcast routing', () => {
       key: 'room:test',
       kind: 'text',
       locationBucket: 'weur',
-      payload: encode('{"text":"first"}'),
+      payload: '{"text":"first"}',
     })
     await flushMicrotasks(8)
     const secondPublish = broadcast.publishToSubscribers(authorityState, calls, {
       key: 'room:test',
       kind: 'text',
       locationBucket: 'weur',
-      payload: encode('{"text":"second"}'),
+      payload: '{"text":"second"}',
     })
     await flushMicrotasks(8)
 
@@ -863,8 +859,8 @@ describe('cloudflare broadcast routing', () => {
     )
     const member = createMember(broadcast)
     const route = { key: 'room:lost-delivery', kind: 'text' } as const
-    const received: string[] = []
-    const subscription = member.openSubscription(route, (payload) => void received.push(decode(payload)))
+    const received: BackendPayload[] = []
+    const subscription = member.openSubscription(route, (payload) => void received.push(payload))
     try {
       await untilReady(subscription)
       await vi.advanceTimersByTimeAsync(30_000)
@@ -872,7 +868,7 @@ describe('cloudflare broadcast routing', () => {
       await broadcast.publishToSubscribers(authority, calls, {
         ...route,
         locationBucket: 'weur',
-        payload: encode('"during"'),
+        payload: '"during"',
       })
       expect(received).toEqual(['"during"'])
     } finally {

@@ -5,6 +5,7 @@ export type { RedisCommand }
 
 import {
   encodeLaneKey,
+  type BroadcastPayload,
   type BroadcastRoute,
   type CellMutation,
   type CxResult,
@@ -325,9 +326,10 @@ const REDIS_COMMANDS = {
     name: 'tfPublish',
     lua: PUBLISH_LUA,
     numberOfKeys: 2,
-    invoke: (prefix, { route, payload }: { route: BroadcastRoute; payload: Uint8Array }) => ({
+    invoke: (prefix, { route, payload }: { route: BroadcastRoute; payload: BroadcastPayload }) => ({
       keys: [broadcastSequenceKey(prefix, route.key), broadcastChannel(prefix, route)],
-      argv: [toBuffer(payload)],
+      // ioredis sends a string as UTF-8.
+      argv: [typeof payload === 'string' ? payload : toBuffer(payload)],
     }),
     parse: (reply) => {
       // A shared client with ioredis's `stringNumbers` returns integer replies as decimal strings.

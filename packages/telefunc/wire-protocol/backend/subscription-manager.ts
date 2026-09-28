@@ -5,6 +5,7 @@ import { createDeferred, type Deferred } from '../../utils/createDeferred.js'
 import { raceTimeout } from '../../utils/raceTimeout.js'
 import { ESTABLISH_HOLD_MS } from '../constants.js'
 import type {
+  BackendPayload,
   BackendReceiver,
   BackendSubscription,
   SubscriptionAttempt,
@@ -18,8 +19,9 @@ type StateListener = (state: SubscriptionState) => void
 /** Sends on one key waiting for this instance's establishing subscriptions, and the bytes they hold per class. */
 type Hold = { readonly established: Promise<void>; sends: number; readonly bytes: Map<string, number> }
 
-/** A held send's bytes, counted in its class; a send its hold can't fit is refused with `overflow()`. */
-type HoldWeight = { class: string; bytes: number; fits(sends: number, bytes: number): boolean; overflow(): Error }
+/** A held send's bytes, counted in its class and read only for a send that is held; a send its hold can't fit is refused
+ *  with `overflow()`. */
+type HoldWeight = { class: string; bytes(): number; fits(sends: number, bytes: number): boolean; overflow(): Error }
 
 type SubscriptionSlotConfig = {
   binding: SubscriptionBinding
@@ -41,7 +43,7 @@ class SubscriptionManager<Source> {
     private readonly _sourceKey: (source: Source) => string,
   ) {}
 
-  subscribe(source: Source, receiver: BackendReceiver): BackendSubscription {
+  subscribe(source: Source, receiver: BackendReceiver<BackendPayload>): BackendSubscription {
     const binding = this._driver.bind(source)
     const sourceKey = this._sourceKey(source)
     const slotKey = JSON.stringify([binding.partition, sourceKey])
@@ -95,17 +97,18 @@ class SubscriptionManager<Source> {
       hold = { established, sends: 0, bytes: new Map() }
     }
     const current = hold
+    const bytes = weight?.bytes() ?? 0
     if (weight !== undefined) {
-      const bytes = (current.bytes.get(weight.class) ?? 0) + weight.bytes
-      if (!weight.fits(current.sends + 1, bytes)) return Promise.reject(weight.overflow())
-      current.bytes.set(weight.class, bytes)
+      const held = (current.bytes.get(weight.class) ?? 0) + bytes
+      if (!weight.fits(current.sends + 1, held)) return Promise.reject(weight.overflow())
+      current.bytes.set(weight.class, held)
     }
     this._holds.set(holdKey, current)
     current.sends++
     // Sent inside the reaction, so a send that finds the hold gone can't reach the driver first.
     return current.established.then(() => {
       if (--current.sends === 0) this._holds.delete(holdKey)
-      if (weight !== undefined) current.bytes.set(weight.class, (current.bytes.get(weight.class) ?? 0) - weight.bytes)
+      if (weight !== undefined) current.bytes.set(weight.class, (current.bytes.get(weight.class) ?? 0) - bytes)
       return send()
     })
   }
@@ -130,7 +133,7 @@ class SubscriptionManager<Source> {
 }
 
 class SubscriptionSlot {
-  private readonly _receivers = new Map<symbol, BackendReceiver>()
+  private readonly _receivers = new Map<symbol, BackendReceiver<BackendPayload>>()
   private readonly _listeners = new Set<StateListener>()
   private _attempt: SubscriptionAttempt | null = null
   private _unobserve: (() => void) | null = null
@@ -150,7 +153,7 @@ class SubscriptionSlot {
     return this._stopPromise === null && !this._wasReady
   }
 
-  attach(receiver: BackendReceiver): BackendSubscription {
+  attach(receiver: BackendReceiver<BackendPayload>): BackendSubscription {
     assert(this._stopPromise === null) // the manager unmaps a slot before stopping it
     const attachment = Symbol()
     this._receivers.set(attachment, receiver)

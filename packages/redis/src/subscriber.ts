@@ -2,6 +2,7 @@ export { RedisSubscriptionDriver }
 
 import { randomUUID } from 'node:crypto'
 import type {
+  BackendPayload,
   BackendReceiver,
   BroadcastRoute,
   Deferred,
@@ -33,6 +34,8 @@ type Connection =
   | { phase: 'connected'; id: number; socket: SubscriberSocket; subscribed: Set<string> }
 
 type Connected = Extract<Connection, { phase: 'connected' }>
+
+const textDecoder = new TextDecoder()
 
 const RECONNECT_DELAY_MIN_MS = 50
 const RECONNECT_DELAY_MAX_MS = 2_000
@@ -90,7 +93,7 @@ class RedisSubscriptionDriver implements SubscriptionDriver<RedisSubscriptionSou
     }
   }
 
-  private _open(source: RedisSubscriptionSource, receiver: BackendReceiver): SubscriptionAttempt {
+  private _open(source: RedisSubscriptionSource, receiver: BackendReceiver<BackendPayload>): SubscriptionAttempt {
     const attempt: RedisSubscriptionAttempt = new RedisSubscriptionAttempt(
       source,
       laneChannel(this._prefix, source),
@@ -259,7 +262,7 @@ class RedisSubscriptionAttempt extends DriverAttempt {
     readonly laneChannel: string,
     /** A Room lane's generation channel: a message on it means the generation was dropped. */
     readonly invalidationChannel: string | null,
-    private readonly _receiver: BackendReceiver,
+    private readonly _receiver: BackendReceiver<BackendPayload>,
     private readonly _onDetach: () => void,
   ) {
     super()
@@ -320,7 +323,8 @@ class RedisSubscriptionAttempt extends DriverAttempt {
     // remain loss, never replay.
     if (info.seq <= this._lastSequence) return
     this._lastSequence = info.seq
-    this._receiver(Uint8Array.from(payload), info)
+    const text = !('roomId' in this.source) && this.source.kind === 'text'
+    this._receiver(text ? textDecoder.decode(payload) : Uint8Array.from(payload), info)
   }
 
   private async _dispose(): Promise<void> {

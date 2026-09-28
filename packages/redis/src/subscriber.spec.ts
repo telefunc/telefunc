@@ -1,7 +1,7 @@
 import { EventEmitter } from 'node:events'
 import type { SubscriberSocket } from './ioredis.js'
 import { expect, onTestFinished, test, vi } from 'vitest'
-import type { BackendReceiver, SubscriptionAttempt, SubscriptionState } from 'telefunc/__internal'
+import type { BackendPayload, BackendReceiver, SubscriptionAttempt, SubscriptionState } from 'telefunc/__internal'
 import { RedisSubscriptionDriver } from './subscriber.js'
 
 /** Resolves once the attempt is ready; rejects if it ends first. */
@@ -36,12 +36,13 @@ function fakeSubscriber() {
   }
 }
 
-function orderingFrame(seq: number, payload: number): Uint8Array {
-  const frame = new Uint8Array(17)
+function orderingFrame(seq: number, payload: string): Uint8Array {
+  const bytes = new TextEncoder().encode(payload)
+  const frame = new Uint8Array(16 + bytes.byteLength)
   const view = new DataView(frame.buffer)
   view.setUint32(4, seq)
   view.setUint32(12, 1)
-  frame[16] = payload
+  frame.set(bytes, 16)
   return frame
 }
 
@@ -63,7 +64,7 @@ function driverWith(
 function openAttempt(
   driver: RedisSubscriptionDriver,
   source: Parameters<RedisSubscriptionDriver['bind']>[0],
-  receiver: BackendReceiver = () => {},
+  receiver: BackendReceiver<BackendPayload> = () => {},
 ) {
   return driver.bind(source).open(receiver, () => 1)
 }
@@ -83,18 +84,18 @@ test('shares one subscriber connection across lanes', async () => {
 test('re-subscribes on a fresh connection and resumes delivery after a drop', async () => {
   const sockets: ReturnType<typeof fakeSubscriber>[] = []
   const { driver } = driverWith(sockets)
-  const received: number[] = []
+  const received: BackendPayload[] = []
   const states: SubscriptionState[] = []
-  const attempt = openAttempt(driver, route, (payload) => void received.push(payload[0]!))
+  const attempt = openAttempt(driver, route, (payload) => void received.push(payload))
   await untilReady(attempt)
   attempt.onStateChange((state) => states.push(state))
   const channel = sockets[0]!.subscribed[0]![0]!
-  sockets[0]!.deliver(channel, orderingFrame(5, 1))
+  sockets[0]!.deliver(channel, orderingFrame(5, 'one'))
   sockets[0]!.socket.emit('close')
   await vi.waitFor(() => expect(states).toEqual(['lost', 'ready']))
   expect(sockets[1]!.subscribed).toEqual([[channel]])
-  sockets[1]!.deliver(channel, orderingFrame(1, 2))
-  expect(received).toEqual([1, 2])
+  sockets[1]!.deliver(channel, orderingFrame(1, 'two'))
+  expect(received).toEqual(['one', 'two'])
 })
 
 test("reports each outage with its own connection's error, not an earlier connection's", async () => {

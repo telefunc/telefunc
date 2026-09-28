@@ -2,7 +2,7 @@ export { MemoryBackendState, MemoryBackend }
 
 // The in-process backend, and the reference for Room SPI semantics: this process's clock is authority time.
 
-import type { BroadcastDriver, BroadcastRoute, PublishResult } from '../broadcast/contract.js'
+import type { BroadcastDriver, BroadcastPayload, BroadcastRoute, PublishResult } from '../broadcast/contract.js'
 import { broadcastRouteKey } from '../broadcast/route-key.js'
 import type {
   CellMutation,
@@ -32,7 +32,7 @@ import {
 } from '../room/semantics.js'
 import type { OrderingInfo } from '../../ordering-frame.js'
 import { unrefTimer } from '../../../utils/unrefTimer.js'
-import type { BackendReceiver, SubscriptionDriver } from '../subscription.js'
+import type { BackendPayload, BackendReceiver, SubscriptionDriver } from '../subscription.js'
 import { DriverAttempt } from '../attempt.js'
 import { ChannelOverflowError } from '../../channel-errors.js'
 
@@ -106,11 +106,11 @@ function publicHead(head: StoredHead): RoomHead {
 }
 
 class MemorySubscriptionAttempt extends DriverAttempt {
-  readonly #receiver: BackendReceiver
+  readonly #receiver: BackendReceiver<BackendPayload>
   readonly #localReceiverCount: () => number
   readonly #detach: () => void
 
-  constructor(receiver: BackendReceiver, localReceiverCount: () => number, detach: () => void) {
+  constructor(receiver: BackendReceiver<BackendPayload>, localReceiverCount: () => number, detach: () => void) {
     super()
     this.#receiver = receiver
     this.#localReceiverCount = localReceiverCount
@@ -123,7 +123,7 @@ class MemorySubscriptionAttempt extends DriverAttempt {
     this.transition('closed')
   }
 
-  deliver(payload: Uint8Array, info: { seq: number; timestamp: number }): void {
+  deliver(payload: BackendPayload, info: { seq: number; timestamp: number }): void {
     this.#receiver(payload, info)
   }
 
@@ -150,7 +150,7 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
     }
   }
 
-  publish(route: BroadcastRoute, payload: Uint8Array): PublishResult | Promise<PublishResult> {
+  publish(route: BroadcastRoute, payload: BroadcastPayload): PublishResult | Promise<PublishResult> {
     const depth = this.#deliveries.length === 0 ? 0 : this.#deliveries[0]!.depth + 1
     if (depth > NESTED_PUBLISH_LIMIT) {
       return Promise.reject(
@@ -166,7 +166,8 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
     this.#deliveries.push({
       depth,
       deliver: () => {
-        for (const target of targets) target.deliver(copyBytes(payload), mark)
+        // A string can't change, so every subscription gets the same one; bytes are copied for each.
+        for (const target of targets) target.deliver(typeof payload === 'string' ? payload : copyBytes(payload), mark)
       },
     })
     if (this.#deliveries.length === 1)
@@ -284,7 +285,7 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
 
   #openSubscription(
     source: MemorySubscriptionSource,
-    receiver: BackendReceiver,
+    receiver: BackendReceiver<BackendPayload>,
     localReceiverCount: () => number,
   ): MemorySubscriptionAttempt {
     let subs: Map<string, Set<MemorySubscriptionAttempt>>

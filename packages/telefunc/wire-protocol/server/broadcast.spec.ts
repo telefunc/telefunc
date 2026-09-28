@@ -16,6 +16,7 @@ import { IndexedPeer } from './IndexedPeer.js'
 import { disposeBackend, installBackend } from '../backend/install.js'
 import { MemoryBackend, MemoryBackendState } from '../backend/memory/backend.js'
 import type { SubscriptionAttempt } from '../backend/subscription.js'
+import type { BroadcastPayload } from '../backend/broadcast/contract.js'
 import { DriverAttempt } from '../backend/attempt.js'
 import { ChannelClosedError, ChannelOverflowError } from '../channel-errors.js'
 import { ESTABLISH_HOLD_MS, CHANNEL_BUFFER_LIMIT_BINARY_BYTES } from '../constants.js'
@@ -878,7 +879,7 @@ describe('Broadcast static bus (publish/subscribe)', () => {
     const attempt = new PendingAttempt()
     const driver = await installOpeningBackend(() => attempt)
     // A driver may read its payload later, as ioredis does for a queued command.
-    const sent: Uint8Array[] = []
+    const sent: BroadcastPayload[] = []
     vi.spyOn(driver, 'publish').mockImplementation((_route, payload) => {
       sent.push(payload)
       return { seq: sent.length, timestamp: 1 }
@@ -894,7 +895,7 @@ describe('Broadcast static bus (publish/subscribe)', () => {
       scratch[0] = 4
       attempt.ready()
       await Promise.all(held)
-      expect(sent.map((payload) => Array.from(payload))).toEqual([[1], [2], [3]])
+      expect(sent).toEqual([new Uint8Array([1]), new Uint8Array([2]), new Uint8Array([3])])
     } finally {
       unsubscribe()
     }

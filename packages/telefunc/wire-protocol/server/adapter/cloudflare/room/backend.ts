@@ -2,7 +2,12 @@
 export { CloudflareBackend }
 export type { CloudflareRoomAuthorityStub, CloudflareRoomNamespace }
 
-import type { BroadcastDriver, BroadcastRoute, PublishResult } from '../../../../backend/broadcast/contract.js'
+import type {
+  BroadcastDriver,
+  BroadcastPayload,
+  BroadcastRoute,
+  PublishResult,
+} from '../../../../backend/broadcast/contract.js'
 import type {
   CellMutation,
   CellSelector,
@@ -59,7 +64,7 @@ class CloudflareBackend implements BroadcastDriver, RoomDriver {
     }
   }
 
-  publish(route: BroadcastRoute, payload: Uint8Array): Promise<PublishResult> {
+  publish(route: BroadcastRoute, payload: BroadcastPayload): Promise<PublishResult> {
     return this.broadcast.publish(route, payload)
   }
 
