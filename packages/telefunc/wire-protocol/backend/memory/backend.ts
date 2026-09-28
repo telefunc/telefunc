@@ -34,6 +34,7 @@ import type { OrderingInfo } from '../../ordering-frame.js'
 import { unrefTimer } from '../../../utils/unrefTimer.js'
 import type { BackendReceiver, SubscriptionDriver } from '../subscription.js'
 import { DriverAttempt } from '../attempt.js'
+import { ChannelOverflowError } from '../../channel-errors.js'
 
 type MemoryBackendOptions = {
   /** @internal Storage to share with a reconstructed backend. */
@@ -64,6 +65,9 @@ class MemoryBackendState {
   readonly broadcastSubs = new Map<string, Set<MemorySubscriptionAttempt>>()
   revSeq = 0
 }
+
+/** How deep publishes made from listeners may nest; a listener answering every message on its key stops there. */
+const NESTED_PUBLISH_LIMIT = 1024
 
 const copyBytes = (bytes: Uint8Array): Uint8Array => new Uint8Array(bytes)
 const copyLane = (lane: LaneId): LaneId => ({ ...lane })
@@ -132,8 +136,9 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
   readonly subscriptions: SubscriptionDriver<MemorySubscriptionSource>
 
   readonly #state: MemoryBackendState
-  /** Broadcast deliveries in seq order: the running one stays first, so a publish made inside it is delivered after. */
-  readonly #deliveries: Array<() => void> = []
+  /** Broadcast deliveries in seq order: the running one stays first, so a publish made inside it is delivered after, one
+   *  level deeper. */
+  readonly #deliveries: Array<{ depth: number; deliver: () => void }> = []
   constructor(options: MemoryBackendOptions = {}) {
     this.#state = options.state ?? new MemoryBackendState()
     this.subscriptions = {
@@ -145,16 +150,27 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
     }
   }
 
-  publish(route: BroadcastRoute, payload: Uint8Array): PublishResult {
+  publish(route: BroadcastRoute, payload: Uint8Array): PublishResult | Promise<PublishResult> {
+    const depth = this.#deliveries.length === 0 ? 0 : this.#deliveries[0]!.depth + 1
+    if (depth > NESTED_PUBLISH_LIMIT) {
+      return Promise.reject(
+        new ChannelOverflowError(
+          `A Broadcast publish made from a listener nests more than ${NESTED_PUBLISH_LIMIT} deep`,
+        ),
+      )
+    }
     const mark = advanceOrder(this.#state.broadcastOrder, route.key, Date.now())
     const targets = [...(this.#state.broadcastSubs.get(broadcastRouteKey(route)) ?? [])]
     // Counted before delivery, which may unsubscribe or subscribe.
     const receivers = sumReceiverCounts(targets)
-    this.#deliveries.push(() => {
-      for (const target of targets) target.deliver(copyBytes(payload), mark)
+    this.#deliveries.push({
+      depth,
+      deliver: () => {
+        for (const target of targets) target.deliver(copyBytes(payload), mark)
+      },
     })
     if (this.#deliveries.length === 1)
-      for (; this.#deliveries.length > 0; this.#deliveries.shift()) this.#deliveries[0]!()
+      for (; this.#deliveries.length > 0; this.#deliveries.shift()) this.#deliveries[0]!.deliver()
     return { ...mark, receivers, meta: { transport: 'in-memory' } }
   }
 

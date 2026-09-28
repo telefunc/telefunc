@@ -985,6 +985,19 @@ describe('Broadcast static bus (publish/subscribe)', () => {
       observer()
     },
   )
+  it('rejects a publish made from a listener nested more than 1,024 deep, so a listener answering itself stops', async () => {
+    const key = 'broadcast:echo'
+    const answers: Array<ReturnType<typeof Broadcast.publish>> = []
+    // Bounded here, so the spec ends even where the backend doesn't.
+    const echo = Broadcast.subscribe<number>(key, (depth) => {
+      if (depth < 4096) answers.push(Broadcast.publish(key, depth + 1))
+    })
+    await Broadcast.publish(key, 0)
+    expect(answers).toHaveLength(1025)
+    await expect(answers.pop()).rejects.toBeInstanceOf(ChannelOverflowError)
+    await expect(Promise.all(answers)).resolves.toHaveLength(1024)
+    echo()
+  })
   it("a BroadcastChannel subscriber that unsubscribes itself doesn't make the next one miss the message", async () => {
     const channel = new ServerBroadcast<string>({ key: 'broadcast:self-unsubscribe' })
     const seen: string[] = []
