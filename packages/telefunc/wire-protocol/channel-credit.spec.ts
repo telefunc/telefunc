@@ -3,14 +3,16 @@
 
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 
-import { ClientChannel } from './client/channel.js'
+import { ClientBroadcast, ClientChannel } from './client/channel.js'
 import { ServerChannel } from './server/channel.js'
+import { Broadcast, ServerBroadcast } from './server/server-broadcast.js'
 import { ChannelMux, type ServerTransport } from './server/mux.js'
 import {
   CHANNEL_BUFFER_LIMIT_BYTES,
   CHANNEL_TRANSPORT,
   CREDIT_MSG_WINDOW_INITIAL,
   CREDIT_WINDOW_INITIAL_BYTES,
+  CREDIT_WINDOW_MAX_BYTES,
 } from './constants.js'
 import { ChannelOverflowError } from './channel-errors.js'
 import { TAG } from './shared-ws.js'
@@ -165,6 +167,20 @@ class Loopback {
     })
     this.pages.push(page as ClientChannel)
     return { server, page, register: () => this.mux.registerChannel(server) }
+  }
+  /** A broadcast the server has registered, and its page end, on the same connection. */
+  openBroadcast<T>(key: string) {
+    const server = new ServerBroadcast<T>({ key })
+    this.mux.registerChannel(server)
+    const page = new ClientBroadcast<T>({
+      channelId: server.id,
+      key,
+      transports: [CHANNEL_TRANSPORT.WS],
+      telefuncUrl: 'http://loopback.test/_telefunc',
+      connectionKey: this.connectionKey,
+    })
+    this.pages.push(page as ClientChannel)
+    return { server, page }
   }
   dispose(): void {
     for (const page of this.pages) page.abort()
@@ -476,4 +492,78 @@ test('a send nobody awaits goes out past the window of a page whose listener lag
   expect(behind).toBeGreaterThan(CHANNEL_BUFFER_LIMIT_BYTES)
   await runUntil(() => page.received.length === 400, 5_000)
   expect(page.received).toEqual(Array.from({ length: 400 }, (_, n) => message(n)))
+})
+
+test('a page that stops reading a broadcast leaves it with ChannelOverflowError on both ends once the server holds the largest window and bufferLimit of publishes for it', async () => {
+  const key = `room:${crypto.randomUUID()}`
+  const room = loop.openBroadcast<string>(key)
+  const errors: { server?: Error; page?: Error } = {}
+  room.server.onClose((err) => void (errors.server = err))
+  room.page.onClose((err) => void (errors.page = err))
+  const seen: string[] = []
+  room.page.subscribe((text) => void seen.push(text))
+  await run(100)
+  loop.socket.toPage.hold()
+  const publication = (n: number) => String(n).padEnd(256 * KIB)
+  let published = 0
+  while (!room.server.isClosed && published < 1_000) {
+    Broadcast.publish(key, publication(published++))
+    await run(0)
+  }
+  expect(errors.server).toBeInstanceOf(ChannelOverflowError)
+  expect(loop.socket.toPage.bytes).toBeGreaterThan(CREDIT_WINDOW_MAX_BYTES)
+  expect(loop.socket.toPage.bytes).toBeLessThanOrEqual(CREDIT_WINDOW_MAX_BYTES + CHANNEL_BUFFER_LIMIT_BYTES + 512 * KIB)
+
+  // Once the page reads again it gets every publish sent before the one that found it behind, then the close.
+  loop.socket.toPage.release()
+  await runUntil(() => errors.page !== undefined, 1_000)
+  expect(errors.page).toBeInstanceOf(ChannelOverflowError)
+  expect(seen).toEqual(Array.from({ length: published - 1 }, (_, n) => publication(n)))
+})
+
+test('on a slow link, a page that keeps up with a broadcast stays in it while an awaited stream fills the wire', async () => {
+  const key = `room:${crypto.randomUUID()}`
+  const stream = loop.open<never, string>()
+  consume(stream.page)
+  const room = loop.openBroadcast<string>(key)
+  let closed: Error | undefined | null = null
+  room.server.onClose((err) => void (closed = err))
+  const seen: string[] = []
+  room.page.subscribe((text) => void seen.push(text))
+  await run(100)
+  loop.socket.toPage.bytesPerMs = 4_000 // 4 MB/s
+  void (async () => {
+    while (!stream.server.isClosed) await stream.server.send('x'.repeat(64 * KIB))
+  })().catch(() => {})
+  let held = 0
+  // 1.6 MB/s of publishes, which wait behind the stream's window on the wire.
+  for (let n = 0; n < 300; n++) {
+    Broadcast.publish(key, message(n))
+    held = Math.max(held, loop.socket.toPage.bytes)
+    await run(10)
+  }
+  await runUntil(() => seen.length === 300, 2_000)
+  expect(closed).toBe(null)
+  expect(held).toBeGreaterThan(CHANNEL_BUFFER_LIMIT_BYTES)
+  expect(seen).toEqual(Array.from({ length: 300 }, (_, n) => message(n)))
+})
+
+test("a page's consumption of what a broadcast publishes moves the server's limit for it", async () => {
+  const key = `room:${crypto.randomUUID()}`
+  const room = loop.openBroadcast<string>(key)
+  const seen: string[] = []
+  room.page.subscribe((text) => void seen.push(text))
+  await run(100)
+  const flow = (room.server as unknown as { _flow: { bytesBeyondCredit: number } })._flow
+  expect(flow.bytesBeyondCredit).toBe(-CREDIT_WINDOW_MAX_BYTES)
+  // A limit goes out once a quarter of the window is consumed.
+  const publications = CREDIT_WINDOW_MAX_BYTES / 4 / KIB / KIB + 1
+  for (let n = 0; n < publications; n++) {
+    Broadcast.publish(key, 'x'.repeat(KIB * KIB))
+    await run(1)
+  }
+  await runUntil(() => seen.length === publications, 1_000)
+  await run(100)
+  // Sent 17 MiB, of which the last limit leaves one not yet counted consumed.
+  expect(flow.bytesBeyondCredit).toBeLessThan(-CREDIT_WINDOW_MAX_BYTES + 2 * KIB * KIB)
 })

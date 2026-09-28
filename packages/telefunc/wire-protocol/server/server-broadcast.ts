@@ -18,10 +18,11 @@ import { stringify } from '@brillout/json-serializer/stringify'
 import { parse } from '@brillout/json-serializer/parse'
 import { assert, assertUsage } from '../../utils/assert.js'
 import { isPromise } from '../../utils/isPromise.js'
-import { ChannelClosedError } from '../channel-errors.js'
-import { ACK_STATUS, encodePublishText, encodePublishBinary, TAG } from '../shared-ws.js'
+import { ChannelClosedError, ChannelOverflowError } from '../channel-errors.js'
+import { ACK_STATUS, ERROR_REASON, encodePublishText, encodePublishBinary, TAG } from '../shared-ws.js'
 import type { ChannelDataFrame, WirePublishInfo } from '../shared-ws.js'
 import { STATUS_BODY_INTERNAL_SERVER_ERROR } from '../../shared/constants.js'
+import { CREDIT_WINDOW_MAX_BYTES } from '../constants.js'
 import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
 assertIsNotBrowser()
 
@@ -49,6 +50,8 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
   constructor(opts: { key: string }) {
     super()
     this.key = opts.key
+    // Its page grants it the largest window from the start (see `ClientBroadcast`).
+    this._flow.onPeerByteWindow(CREDIT_WINDOW_MAX_BYTES)
   }
 
   static isServerBroadcast(value: unknown): value is ServerBroadcast {
@@ -141,7 +144,11 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
     if (!this._peerSubscribedText) return
     const wireText = encodePublishText(serialized, rawInfo)
     if (this._peer) {
-      this._peer.sendPublish(wireText)
+      if (this._flow.bytesBeyondCredit > 0 && this._isPeerBufferFull(this._bufferLimit)) {
+        this._closeBehind()
+        return
+      }
+      this._flow.countSentBytes(this._peer.sendPublish(wireText))
       return
     }
     this._prePeerBuffer.pushPublish(wireText)
@@ -159,10 +166,25 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
     if (!this._peerSubscribedBinary) return
     const wireData = encodePublishBinary(data, rawInfo)
     if (this._peer) {
-      this._peer.sendPublishBinary(wireData)
+      if (this._flow.bytesBeyondCredit > 0 && this._isPeerBufferFull(this._bufferLimitBinary)) {
+        this._closeBehind()
+        return
+      }
+      this._flow.countSentBytes(this._peer.sendPublishBinary(wireData))
       return
     }
     this._prePeerBuffer.pushPublishBinary(wireData)
+  }
+
+  /** A page that can't keep up with the broadcast has no send to reject: past its bufferLimit it leaves the group, on
+   *  both ends, rather than be sent a gap. */
+  private _closeBehind(): void {
+    this._peer!.sendError(ERROR_REASON.OVERFLOW)
+    this._shutdown(
+      new ChannelOverflowError(
+        'Broadcast closed: its client fell further behind than config.channel.bufferLimit lets the server hold',
+      ),
+    )
   }
 
   override _onPeerSubscription(kind: 'text' | 'binary', on: boolean): void {

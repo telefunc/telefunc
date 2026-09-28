@@ -4,7 +4,7 @@ export type { MuxChannel, MuxConnection }
 import { parse } from '@brillout/json-serializer/parse'
 import { makeAbortError, makeBugError } from '../../client/remoteTelefunctionCall/errors.js'
 import { assert, assertUsage } from '../../utils/assert.js'
-import { ChannelClosedError } from '../channel-errors.js'
+import { ChannelClosedError, ChannelOverflowError } from '../channel-errors.js'
 import { NetworkError } from '../../shared/NetworkError.js'
 import { base64urlToUint8Array } from '../base64url.js'
 import {
@@ -35,7 +35,7 @@ import { encodeU32, encodeLengthPrefixedFrames } from '../frame.js'
 import { createPushReadableStream, type PushReadableStream } from '../push-readable-stream.js'
 import { ReplayBuffer } from '../replay-buffer.js'
 import { REQUEST_KIND, REQUEST_KIND_HEADER, getMarkedRequestUrl } from '../request-kind.js'
-import { ACK_STATUS, TAG, decode, encode, isChannelDataFrame, payloadBytes } from '../shared-ws.js'
+import { ACK_STATUS, ERROR_REASON, TAG, decode, encode, isChannelDataFrame, payloadBytes } from '../shared-ws.js'
 import type {
   AckResultStatus,
   ChannelFrame,
@@ -876,7 +876,14 @@ class ClientConnection implements MuxConnection {
         this.startTtlIfIdle()
         return
       case TAG.ERROR:
-        this.closeRemoteChannel(frame.index, makeBugError())
+        this.closeRemoteChannel(
+          frame.index,
+          frame.reason === ERROR_REASON.OVERFLOW
+            ? new ChannelOverflowError(
+                'Broadcast closed: this client fell further behind than config.channel.bufferLimit lets the server hold',
+              )
+            : makeBugError(),
+        )
         this.startTtlIfIdle()
         return
     }

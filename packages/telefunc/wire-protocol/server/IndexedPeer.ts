@@ -2,7 +2,7 @@ export { IndexedPeer }
 export type { PeerSender }
 
 import { ACK_STATUS, encode, payloadBytes } from '../shared-ws.js'
-import type { AckResultStatus } from '../shared-ws.js'
+import type { AckResultStatus, ErrorReason } from '../shared-ws.js'
 import { ReplayBuffer } from '../replay-buffer.js'
 
 interface PeerSender {
@@ -87,9 +87,9 @@ class IndexedPeer {
     }
   }
 
-  sendError(): void {
+  sendError(reason: ErrorReason): void {
     try {
-      this.sender.send(encode.error(this.index))
+      this.sender.send(encode.error(this.index, reason))
     } catch {
       /* transport may already be closed */
     }
@@ -136,7 +136,8 @@ class IndexedPeer {
     }
   }
 
-  sendPublish(data: string): void {
+  /** Returns the frame's payload byte count. */
+  sendPublish(data: string): number {
     const seq = this.replay.nextSeq()
     const frame = encode.publish(this.index, data, seq)
     try {
@@ -144,9 +145,11 @@ class IndexedPeer {
     } catch {
       /* transport may already be closed */
     }
+    return payloadBytes(frame)
   }
 
-  sendPublishBinary(data: Uint8Array): void {
+  /** Returns the frame's payload byte count. */
+  sendPublishBinary(data: Uint8Array): number {
     const seq = this.replay.nextSeq()
     const frame = encode.publishBinary(this.index, data, seq)
     try {
@@ -154,5 +157,6 @@ class IndexedPeer {
     } catch {
       /* transport may already be closed */
     }
+    return payloadBytes(frame)
   }
 }

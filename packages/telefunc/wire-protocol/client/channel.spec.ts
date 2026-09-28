@@ -136,6 +136,7 @@ test("a subscriber that unsubscribes itself doesn't make the next one miss the m
       seq,
       text: JSON.stringify(text),
       info: { seq, timestamp: 1 },
+      bytes: 0,
     })
   expect(seen).toEqual(['once:one', 'other:one', 'other:two'])
 })

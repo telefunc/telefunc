@@ -35,7 +35,7 @@ import { makeAbortError, makeBugError } from '../../client/remoteTelefunctionCal
 import { ShieldValidationError } from '../../shared/ShieldValidationError.js'
 import { ClientConnection } from './connection.js'
 import { getSessionUrl } from './session-registry.js'
-import { CHANNEL_CLOSE_TIMEOUT_MS, type ChannelTransports } from '../constants.js'
+import { CHANNEL_CLOSE_TIMEOUT_MS, CREDIT_WINDOW_MAX_BYTES, type ChannelTransports } from '../constants.js'
 import { FlowControl } from '../flow-control/flow-control.js'
 import type { MuxChannel, MuxConnection } from './connection.js'
 import { ChannelClosedError } from '../channel-errors.js'
@@ -81,8 +81,8 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   protected _pendingAcks = new Map<number, { resolve: (v: any) => void; reject: (err: Error) => void }>()
   /** Owns sender-side credit, receiver-side consumption tracking, BDP estimator,
    *  and the queue of senders blocked on credit refresh. Credit governs fire-and-
-   *  forget TEXT/BINARY only — see `constants.ts`. */
-  private _flow: FlowControl
+   *  forget TEXT/BINARY, and PUBLISH in bytes — see `constants.ts`. */
+  protected _flow: FlowControl
   /** The connection's wire at the last attach. */
   private _attachedWire: number | null = null
 
@@ -622,6 +622,12 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   /** The subscriptions this page asks the server for. */
   private readonly _wire = { text: false, binary: false }
 
+  constructor(...args: ConstructorParameters<typeof ClientChannel>) {
+    super(...args)
+    // Nothing waits on a publish's credit: the window only bounds how far behind the server lets the page fall.
+    this._flow.widenByteWindow(CREDIT_WINDOW_MAX_BYTES)
+  }
+
   static isClientBroadcast(value: unknown): value is ClientBroadcast {
     return hasProp(value, CLIENT_BROADCAST_BRAND)
   }
@@ -687,17 +693,20 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
 
   override _dispatchDataFrame(frame: ChannelDataFrame): void {
     if (frame.tag === TAG.PUBLISH) {
-      this._onTransportPublish(frame.text, frame.info)
+      this._onTransportPublish(frame.text, frame.info, frame.bytes)
       return
     }
     if (frame.tag === TAG.PUBLISH_BINARY) {
-      this._onTransportPublishBinary(frame.data as Uint8Array<ArrayBuffer>, frame.info)
+      this._onTransportPublishBinary(frame.data as Uint8Array<ArrayBuffer>, frame.info, frame.bytes)
       return
     }
     super._dispatchDataFrame(frame)
   }
 
-  _onTransportPublish(data: string, wireInfo: WirePublishInfo): void {
+  // A publish counts in bytes, consumed once the listeners ran, so the server sees how far behind the page is.
+
+  _onTransportPublish(data: string, wireInfo: WirePublishInfo, bytes: number): void {
+    this._flow.onReceivedBytes(bytes)
     const parsed = parse(data) as ChannelData<T>
     const info = makePublishInfo(this.key!, wireInfo.seq, wireInfo.timestamp)
     for (const cb of this._broadcastListeners) {
@@ -707,9 +716,11 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
         if (this._handleCallbackError(err)) return
       }
     }
+    this._flow.onConsumedBytes(bytes)
   }
 
-  _onTransportPublishBinary(data: Uint8Array, wireInfo: WirePublishInfo): void {
+  _onTransportPublishBinary(data: Uint8Array, wireInfo: WirePublishInfo, bytes: number): void {
+    this._flow.onReceivedBytes(bytes)
     const info = makePublishInfo(this.key!, wireInfo.seq, wireInfo.timestamp)
     for (const cb of this._broadcastBinaryListeners) {
       try {
@@ -718,6 +729,7 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
         if (this._handleCallbackError(err)) return
       }
     }
+    this._flow.onConsumedBytes(bytes)
   }
 }
 

@@ -221,7 +221,12 @@ export const CHANNEL_RECONNECT_MAX_DELAY_MS = 5_000
 //                             deadlocks (server with depleted credit could otherwise
 //                             never reply to a client that's waiting for that reply
 //                             to free credit).
-//   PUBLISH, PUBLISH_BINARY   broadcast fan-out, separate flow control entirely.
+//   PUBLISH, PUBLISH_BINARY   broadcast fan-out: counted in bytes only, taking no
+//                             message credit and starting no BDP probe, against a
+//                             byte window the page sets at CREDIT_WINDOW_MAX_BYTES.
+//                             Nothing waits on them: the count tells the server how
+//                             far behind the page is, past which it closes the
+//                             page's broadcast channel.
 //
 // Window semantics: `WINDOW` and `MSG_WINDOW` advertise cumulative limits, as QUIC's MAX_DATA
 // does: what the receiver has consumed plus its window. The sender's credit is that limit

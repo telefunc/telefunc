@@ -84,8 +84,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   >()
   /** Payload bytes of the ack requests in `_pendingAcks`. */
   private _pendingAckBytes = 0
-  private readonly _bufferLimit: number
-  private readonly _bufferLimitBinary: number
+  protected readonly _bufferLimit: number
+  protected readonly _bufferLimitBinary: number
   private _closeCallbacks: Array<ChannelCloseCallback> = []
   private _openCallbacks: Array<() => void> = []
   private _closeError: Error | undefined
@@ -101,7 +101,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   private _ttlTimer: ReturnType<typeof setTimeout> | null = null
   /** Owns sender-side credit, receiver-side consumption tracking, BDP estimator,
    *  and the queue of senders blocked on credit refresh. Credit governs fire-and-
-   *  forget TEXT/BINARY only — see `constants.ts`. */
+   *  forget TEXT/BINARY, and PUBLISH in bytes — see `constants.ts`. */
   protected _flow: FlowControl
   private _reconnectTimer: ReturnType<typeof setTimeout> | null = null
   private _responseAbort: ((abortValue?: unknown) => void) | null = null
@@ -256,7 +256,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
 
   /** The peer is behind by what this channel sent past its credit and the ack requests it hasn't answered. The server
    *  holds no more of that than its wire does, and all of it where the runtime can't tell. */
-  private _isPeerBufferFull(limit: number): boolean {
+  protected _isPeerBufferFull(limit: number): boolean {
     const behind = Math.max(0, this._flow.bytesBeyondCredit) + this._pendingAckBytes
     if (behind < limit) return false
     const buffered = this._peer!.sender.bufferedAmount()
@@ -365,14 +365,14 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     if (rewired) this._flow.reattach()
     this._prePeerBuffer.flush({
       sendText: (msg) => this._flow.countSent(peer.sendText(msg)),
-      sendPublish: (msg) => peer.sendPublish(msg),
+      sendPublish: (msg) => this._flow.countSentBytes(peer.sendPublish(msg)),
       sendBinary: (msg) => {
         peer.sendBinary(msg)
         this._flow.countSent(msg.byteLength)
       },
       sendTextAck: (data, cb) => peer.sendTextAckReq(data, (seq, bytes) => this._addPendingAck(seq, bytes, cb)),
       sendBinaryAck: (data, cb) => peer.sendBinaryAckReq(data, (seq, bytes) => this._addPendingAck(seq, bytes, cb)),
-      sendPublishBinary: (msg) => peer.sendPublishBinary(msg),
+      sendPublishBinary: (msg) => this._flow.countSentBytes(peer.sendPublishBinary(msg)),
     })
     for (const ack of this._pendingAckRes) {
       peer.sendAckRes(ack.ackedSeq, ack.result, ack.status)

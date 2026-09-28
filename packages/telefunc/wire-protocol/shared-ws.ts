@@ -1,6 +1,7 @@
 export {
   TAG,
   ACK_STATUS,
+  ERROR_REASON,
   encode,
   decode,
   decodeClientFrame,
@@ -16,6 +17,7 @@ export {
 }
 export type {
   AckResultStatus,
+  ErrorReason,
   DecodedFrame,
   ChannelFrame,
   ChannelCtrlFrame,
@@ -104,7 +106,7 @@ const TAG = {
   CLOSE_ACK: 0x31 as const,
   /** Server → client: channel closed with an abort value (analogous to `throw Abort()`). */
   ABORT: 0x32 as const,
-  /** Server → client: channel closed due to an unhandled server error (no payload). */
+  /** Server → client: channel closed with an error. Payload: u8 `ERROR_REASON`. */
   ERROR: 0x33 as const,
   /** Flow-control byte limit, receiver → sender: what the receiver has consumed plus its window, mod 2^32. */
   WINDOW: 0x34 as const,
@@ -210,6 +212,16 @@ const ACK_STATUS = {
 
 type AckResultStatus = (typeof ACK_STATUS)[keyof typeof ACK_STATUS]
 
+/** Why the server closed a channel with `ERROR`. */
+const ERROR_REASON = {
+  /** An unhandled server error. */
+  BUG: 0x00 as const,
+  /** Its page fell further behind a broadcast than the server holds for it. */
+  OVERFLOW: 0x01 as const,
+}
+
+type ErrorReason = (typeof ERROR_REASON)[keyof typeof ERROR_REASON]
+
 /** Ordering metadata embedded in PUBLISH frames on the wire. */
 type WirePublishInfo = { seq: number; timestamp: number }
 
@@ -221,16 +233,23 @@ type ChannelDataFrame =
   | { tag: typeof TAG.TEXT_ACK_REQ; index: number; seq: number; text: string }
   | { tag: typeof TAG.BINARY_ACK_REQ; index: number; seq: number; data: Uint8Array }
   | { tag: typeof TAG.ACK_RES; index: number; seq: number; ackedSeq: number; status: AckResultStatus; text: string }
-  | { tag: typeof TAG.PUBLISH; index: number; seq: number; text: string; info: WirePublishInfo }
+  | { tag: typeof TAG.PUBLISH; index: number; seq: number; text: string; info: WirePublishInfo; bytes: number }
   | { tag: typeof TAG.PUBLISH_ACK_REQ; index: number; seq: number; text: string }
-  | { tag: typeof TAG.PUBLISH_BINARY; index: number; seq: number; data: Uint8Array; info: WirePublishInfo }
+  | {
+      tag: typeof TAG.PUBLISH_BINARY
+      index: number
+      seq: number
+      data: Uint8Array
+      info: WirePublishInfo
+      bytes: number
+    }
   | { tag: typeof TAG.PUBLISH_BINARY_ACK_REQ; index: number; seq: number; data: Uint8Array }
 
 type ChannelCtrlFrame =
   | { tag: typeof TAG.CLOSE; index: number; timeoutMs: number }
   | { tag: typeof TAG.CLOSE_ACK; index: number }
   | { tag: typeof TAG.ABORT; index: number; abortValue: string }
-  | { tag: typeof TAG.ERROR; index: number }
+  | { tag: typeof TAG.ERROR; index: number; reason: number }
   | { tag: typeof TAG.WINDOW; index: number; bytes: number }
   | { tag: typeof TAG.MSG_WINDOW; index: number; count: number }
   | { tag: typeof TAG.SENT; index: number; seq: number; bytes: number; messages: number }
@@ -371,7 +390,12 @@ const encode = {
     frame.set(payload, HEADER)
     return frame
   },
-  error: (index: number) => encodeBareFrame(TAG.ERROR, index),
+  error(index: number, reason: ErrorReason): Uint8Array<ArrayBuffer> {
+    const frame = new Uint8Array(HEADER + 1)
+    writeHeader(frame, TAG.ERROR, index, 0)
+    frame[HEADER] = reason
+    return frame
+  },
   window(index: number, bytes: number): Uint8Array<ArrayBuffer> {
     const frame = new Uint8Array(HEADER + 4)
     writeHeader(frame, TAG.WINDOW, index, 0)
@@ -457,13 +481,13 @@ function decode(frame: Uint8Array): DecodedFrame {
       return { tag: TAG.BINARY_ACK_REQ, index, seq, data: payload }
     case TAG.PUBLISH: {
       const { text, info } = decodePublishText(textDecoder.decode(payload))
-      return { tag: TAG.PUBLISH, index, seq, text, info }
+      return { tag: TAG.PUBLISH, index, seq, text, info, bytes: payload.byteLength }
     }
     case TAG.PUBLISH_ACK_REQ:
       return { tag: TAG.PUBLISH_ACK_REQ, index, seq, text: textDecoder.decode(payload) }
     case TAG.PUBLISH_BINARY: {
       const { data, info } = decodePublishBinary(payload)
-      return { tag: TAG.PUBLISH_BINARY, index, seq, data, info }
+      return { tag: TAG.PUBLISH_BINARY, index, seq, data, info, bytes: payload.byteLength }
     }
     case TAG.PUBLISH_BINARY_ACK_REQ:
       return { tag: TAG.PUBLISH_BINARY_ACK_REQ, index, seq, data: payload }
@@ -510,7 +534,8 @@ function decode(frame: Uint8Array): DecodedFrame {
     case TAG.ABORT:
       return { tag: TAG.ABORT, index, abortValue: textDecoder.decode(payload) }
     case TAG.ERROR:
-      return { tag: TAG.ERROR, index }
+      assertProtocol(payload.length >= 1, 'ERROR payload too short')
+      return { tag: TAG.ERROR, index, reason: payload[0] as number }
     case TAG.WINDOW:
       assertProtocol(payload.length >= 4, 'WINDOW payload too short')
       return { tag: TAG.WINDOW, index, bytes: readU32(payload, 0) }

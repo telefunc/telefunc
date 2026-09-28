@@ -419,6 +419,8 @@ Channels and broadcasts signal failure through four errors:
 
 > A graceful `close()` isn't an error (`onClose(err)` receives `undefined`).
 
+> A `BroadcastChannel` whose client falls behind the messages published to it by more than 64 MiB plus `config.channel.bufferLimit` (`bufferLimitBinary` for binary) is closed on both ends with `ChannelOverflowError`, as there is no `send()` to reject. Call its telefunction again to rejoin.
+
 See also:
 - <Link href="/stream#error-handling" />
 - <Link href="/error-handling" />

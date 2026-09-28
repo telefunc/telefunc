@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'vitest'
 
 import {
+  ERROR_REASON,
   ProtocolViolationError,
   TAG,
   decode,
@@ -195,7 +196,7 @@ describe('decodeClientFrame — direction', () => {
     ['PUBLISH', encode.publish(0, `9,1700000000000\n${JSON.stringify(1)}`, 1)],
     ['PUBLISH_BINARY', encode.publishBinary(0, new Uint8Array(14), 1)],
     ['ABORT', encode.abort(0, JSON.stringify('nope'))],
-    ['ERROR', encode.error(0)],
+    ['ERROR', encode.error(0, ERROR_REASON.BUG)],
     ['RECONCILED', encode.reconciled(reconciled())],
     ['ATTACH_RESULT', encode.attachResult(0, 0)],
   ]

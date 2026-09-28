@@ -200,6 +200,26 @@ class FlowControl {
     this._emit.sent(this._sentBytes >>> 0, this._sentMessages >>> 0)
   }
 
+  /** Receiver-side: a byte window of at least `bytes`, advertised with the next limit. Grow-only. */
+  widenByteWindow(bytes: number): void {
+    this._bdp.bumpInitialByteWindow(bytes)
+  }
+
+  // A frame counted in bytes only takes no message credit and starts no BDP probe: a broadcast's publish, which
+  // nothing waits on.
+
+  countSentBytes(bytes: number): void {
+    this._sentBytes += bytes
+  }
+
+  onReceivedBytes(bytes: number): void {
+    this._receivedBytes += bytes
+  }
+
+  onConsumedBytes(bytes: number): void {
+    this._consume(bytes, 0)
+  }
+
   /** Bump to the batch-POST initial window and advertise it. Grow-only / idempotent. */
   useBatchTransportInitial(): void {
     const prev = this._bdp.byteWindow
