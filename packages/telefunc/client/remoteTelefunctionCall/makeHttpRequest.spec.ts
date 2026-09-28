@@ -30,3 +30,27 @@ test("a page's concurrent first calls present one session token, so they reach o
   // Only the Cloudflare adapter sends the header, in its responses: a page's request never carries it.
   for (const { headers } of requests) expect(headers).not.toHaveProperty(TELEFUNC_SESSION_HEADER)
 })
+
+test('a page keeps the session token it named, whatever a response names', async () => {
+  const sessions: Array<string | null> = []
+  const fetch = (async (url: string) => {
+    sessions.push(new URL(url).searchParams.get('session'))
+    return new Response('', { status: 500, headers: { [TELEFUNC_SESSION_HEADER]: 'named-by-the-server' } })
+  }) as unknown as typeof globalThis.fetch
+  const call = () =>
+    makeHttpRequest({
+      telefuncUrl: 'http://kept-token.test/_telefunc',
+      httpRequestBody: '{}',
+      telefunctionName: 'onLoad',
+      telefuncFilePath: '/page.telefunc.ts',
+      headers: null,
+      fetch,
+      abortController: new AbortController(),
+      channel: { transports: ['sse'] },
+      requestCloseHandlers: [],
+      extensionResponseTypes: [],
+    }).catch(() => {})
+  await call()
+  await call()
+  expect(sessions[1]).toBe(sessions[0])
+})
