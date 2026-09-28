@@ -106,22 +106,35 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
   }
 
   _deliverBroadcastMessage(serialized: string, rawInfo: WirePublishInfo): void {
-    const info = makePublishInfo(this.key, rawInfo.seq, rawInfo.timestamp)
     const data = parse(serialized) as ChannelData<T>
-    for (const cb of [...this._subscribers.text]) {
-      if (invokeChannelListener(cb, [data, info], (error) => this._handleCallbackError(error))) return
-    }
+    if (!this._callListeners(this._subscribers.text, data, rawInfo)) return
     if (!this._peerSubscriptions.text) return
     this._sendPublish(encodePublishText(serialized, rawInfo))
   }
 
   _deliverBroadcastBinaryMessage(data: Uint8Array, rawInfo: WirePublishInfo): void {
-    const info = makePublishInfo(this.key, rawInfo.seq, rawInfo.timestamp)
-    for (const cb of [...this._subscribers.binary]) {
-      if (invokeChannelListener(cb, [data, info], (error) => this._handleCallbackError(error))) return
-    }
+    if (!this._callListeners(this._subscribers.binary, data, rawInfo)) return
     if (!this._peerSubscriptions.binary) return
     this._sendPublishBinary(encodePublishBinary(data, rawInfo))
+  }
+
+  /** Calls each listener directly, as a channel's receive does, since this runs per subscriber per message; false once a
+   *  listener's error ended the channel. */
+  private _callListeners<Data>(
+    listeners: Array<(data: Data, info: ChannelPublishInfo) => unknown>,
+    data: Data,
+    rawInfo: WirePublishInfo,
+  ): boolean {
+    const info = makePublishInfo(this.key, rawInfo.seq, rawInfo.timestamp)
+    for (const cb of [...listeners]) {
+      try {
+        const result = cb(data, info)
+        if (isPromise(result)) void result.catch((error: unknown) => this._handleCallbackError(error))
+      } catch (error) {
+        if (this._handleCallbackError(error)) return false
+      }
+    }
+    return true
   }
 
   override _onPeerSubscription(kind: BroadcastKind, on: boolean): void {
