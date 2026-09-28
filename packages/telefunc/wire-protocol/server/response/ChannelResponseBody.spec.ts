@@ -7,9 +7,15 @@ import { IndexedPeer } from '../IndexedPeer.js'
 import { ReplayBuffer } from '../../replay-buffer.js'
 import { TAG, decode } from '../../shared-ws.js'
 
+/** Records what the channel sends, but for the flow-control limits and totals every attach sends. */
 function createPeer(frames: Uint8Array[]) {
   return new IndexedPeer(
-    { send: (frame) => void frames.push(frame) },
+    {
+      send: (frame) => {
+        if (frame[0] === TAG.WINDOW || frame[0] === TAG.MSG_WINDOW || frame[0] === TAG.SENT) return
+        frames.push(frame)
+      },
+    },
     7,
     new ReplayBuffer(1024 * 1024, 60_000, 2 * 1024 * 1024),
   )

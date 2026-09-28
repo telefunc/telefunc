@@ -219,11 +219,14 @@ export const CHANNEL_RECONNECT_MAX_DELAY_MS = 5_000
 //                             to free credit).
 //   PUBLISH, PUBLISH_BINARY   broadcast fan-out, separate flow control entirely.
 //
-// Window semantics — `WINDOW` frame advertises an absolute value (not additive like
-// HTTP/2). Sender resets `_peerWindow` to `CREDIT_WINDOW_INITIAL_BYTES` on transport
-// reattach; receiver preserves its grown `W` across reconnect (BDP is a property of
-// the path, not of any single wire instance — slight divergence from gRPC's
-// per-connection reset, acceptable for typical transport hiccups).
+// Window semantics: `WINDOW` and `MSG_WINDOW` advertise cumulative limits, as QUIC's MAX_DATA
+// does: what the receiver has consumed plus its window. The sender's credit is that limit
+// minus what it has sent, so what is still in flight counts against it. Each side advertises
+// its limits again on every reattach, and the receiver keeps its grown `W` across one (BDP
+// is a property of the path, not of any single wire instance: slight divergence from
+// gRPC's per-connection reset, acceptable for typical transport hiccups). On a reattach the
+// sender also sends its totals (`SENT`): what of them never arrived was lost beyond the
+// replay buffer, and the receiver counts it as consumed.
 
 /** Initial credit window — sized so a typical ~MB-scale burst doesn't stall on
  *  the BDP ramp-up. Grows further via the estimator up to `CREDIT_WINDOW_MAX_BYTES`. */

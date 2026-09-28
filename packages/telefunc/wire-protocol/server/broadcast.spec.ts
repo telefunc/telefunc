@@ -201,8 +201,8 @@ describe('keyed in-process broadcast', () => {
       ),
     )
 
-    // One publish made before attach → exactly one frame replayed on attach.
-    expect(frames.length).toBe(1)
+    // One publish made before attach → exactly one publish frame flushed on attach.
+    expect(frames.filter((frame) => frame[0] === TAG.PUBLISH).length).toBe(1)
   })
 
   it('opens channels under a zero config.channel.bufferLimit and holds no publish', () => {
@@ -228,7 +228,7 @@ describe('keyed in-process broadcast', () => {
           new ReplayBuffer(1024 * 1024, 60_000, 2 * 1024 * 1024),
         ),
       )
-      expect(frames).toEqual([])
+      expect(frames.filter((frame) => frame[0] === TAG.PUBLISH)).toEqual([])
     } finally {
       config.channel = {}
     }

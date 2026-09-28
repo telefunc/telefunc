@@ -162,8 +162,9 @@ interface MuxConnection {
   sendAbort(channel: MuxChannel): void
   sendCloseRequest(channel: MuxChannel, timeoutMs: number): void
   sendCloseAck(channel: MuxChannel): void
-  sendByteWindowUpdate(channel: MuxChannel, bytes: number): void
-  sendMsgWindowUpdate(channel: MuxChannel, count: number): void
+  sendByteWindowUpdate(channel: MuxChannel, limit: number): void
+  sendMsgWindowUpdate(channel: MuxChannel, limit: number): void
+  sendSent(channel: MuxChannel, bytes: number, messages: number): void
   sendBdpPing(channel: MuxChannel): void
   sendBdpPingAck(channel: MuxChannel): void
   sendBroadcastSubscribe(channel: MuxChannel, binary: boolean): void
@@ -720,39 +721,41 @@ class ClientConnection implements MuxConnection {
     this.transport.sendFrame({ kind: 'control', frame })
   }
 
-  sendByteWindowUpdate(channel: MuxChannel, bytes: number): void {
+  sendByteWindowUpdate(channel: MuxChannel, limit: number): void {
     const ix = this.channelIndex.get(channel)
     if (ix === undefined) return
-    // Window updates are ephemeral — the sender resets `_peerWindow` to the initial
-    // value on reconnect and re-adopts the peer's advertised `W` from the next update,
-    // so dropping one mid-disconnect is harmless.
-    if (!this.canSendImmediately()) return
-    this.transport.sendFrame({ kind: 'flow-control', frame: encode.window(ix, bytes) })
+    this.sendFlowControl(ix, encode.window(ix, limit))
   }
 
-  sendMsgWindowUpdate(channel: MuxChannel, count: number): void {
+  sendMsgWindowUpdate(channel: MuxChannel, limit: number): void {
     const ix = this.channelIndex.get(channel)
     if (ix === undefined) return
-    // Ephemeral — same rationale as `sendByteWindowUpdate`.
-    if (!this.canSendImmediately()) return
-    this.transport.sendFrame({ kind: 'flow-control', frame: encode.msgWindow(ix, count) })
+    this.sendFlowControl(ix, encode.msgWindow(ix, limit))
+  }
+
+  /** The totals cover every frame through the latest seq. */
+  sendSent(channel: MuxChannel, bytes: number, messages: number): void {
+    const ix = this.channelIndex.get(channel)
+    if (ix === undefined) return
+    this.sendFlowControl(ix, encode.sent(ix, this.replayBuffers.get(ix)!.seq, bytes, messages))
   }
 
   sendBdpPing(channel: MuxChannel): void {
     const ix = this.channelIndex.get(channel)
     if (ix === undefined) return
-    const frame = encode.bdpPing(ix)
-    if (!this.canSendImmediately()) {
-      this.sendBuffer.push({ frame, channelIx: ix, seq: undefined })
-      return
-    }
-    this.transport.sendFrame({ kind: 'flow-control', frame })
+    this.sendFlowControl(ix, encode.bdpPing(ix))
   }
 
   sendBdpPingAck(channel: MuxChannel): void {
     const ix = this.channelIndex.get(channel)
     if (ix === undefined) return
-    const frame = encode.bdpPingAck(ix)
+    this.sendFlowControl(ix, encode.bdpPingAck(ix))
+  }
+
+  /** Held with the rest while sends are held. A limit is cumulative, so one that waited is still right, where a
+   *  dropped one could stall the peer: an upgrade attempt that ends without its barrier lifts the hold with no reattach
+   *  to advertise it again. */
+  private sendFlowControl(ix: number, frame: Uint8Array<ArrayBuffer>): void {
     if (!this.canSendImmediately()) {
       this.sendBuffer.push({ frame, channelIx: ix, seq: undefined })
       return
@@ -813,6 +816,9 @@ class ClientConnection implements MuxConnection {
     if (isChannelDataFrame(frame)) {
       if (this.trackSeq(frame.index, frame.seq) === 'dup') return
     }
+    // What the server sent through this seq and hasn't arrived is lost and now counted consumed, so no replay may bring
+    // it back.
+    if (frame.tag === TAG.SENT) this.trackSeq(frame.index, frame.seq)
     // Connection-level + channel-termination ctrls stay here; they involve connection bookkeeping
     // (upgrade state, channel release, TTL). Everything else is per-channel and goes through
     // `channel._dispatchFrame`.

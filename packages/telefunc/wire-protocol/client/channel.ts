@@ -107,8 +107,9 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     this.ack = ack
     this.key = key
     this._flow = new FlowControl({
-      byteWindowUpdate: (bytes) => this._connection.sendByteWindowUpdate(this, bytes),
-      msgWindowUpdate: (count) => this._connection.sendMsgWindowUpdate(this, count),
+      byteWindowUpdate: (limit) => this._connection.sendByteWindowUpdate(this, limit),
+      msgWindowUpdate: (limit) => this._connection.sendMsgWindowUpdate(this, limit),
+      sent: (bytes, messages) => this._connection.sendSent(this, bytes, messages),
       bdpPing: () => this._connection.sendBdpPing(this),
     })
     const config = resolveClientConfig()
@@ -269,8 +270,8 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     // `_attachPeer` does, it goes out again on every attach until acknowledged.
     if (this._expectCloseAck) this._connection.sendCloseRequest(this, Math.max(0, this._closeDeadline - Date.now()))
     if (this._isClosed) return
-    this._flow.reset()
     if (batched) this._flow.useBatchTransportInitial()
+    this._flow.reattach()
     this._fireOpen()
   }
 
@@ -389,6 +390,9 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
         return
       case TAG.MSG_WINDOW:
         this._flow.onPeerMessageWindow(frame.count)
+        return
+      case TAG.SENT:
+        this._flow.onPeerSent(frame.bytes, frame.messages)
         return
       case TAG.BDP_PING:
         this._connection.sendBdpPingAck(this)
