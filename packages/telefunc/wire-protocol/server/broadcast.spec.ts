@@ -517,6 +517,47 @@ describe('DefaultBroadcastAdapter — multi-node transport', () => {
 // ───────────────────────────────────────────────────────────────────────────
 
 describe('Broadcast static bus (publish/subscribe)', () => {
+  it('delivers a publish made from a listener after the message it answers, to every subscriber', () => {
+    const seen: string[] = []
+    Broadcast.subscribe<number>('room:answer-order', (n) => {
+      seen.push(`first:${n}`)
+      if (n === 1) Broadcast.publish('room:answer-order', 2)
+    })
+    Broadcast.subscribe<number>('room:answer-order', (n) => void seen.push(`second:${n}`))
+    Broadcast.publish('room:answer-order', 1)
+    expect(seen).toEqual(['first:1', 'second:1', 'first:2', 'second:2'])
+  })
+
+  it('lets the event loop run while a listener answers every message on its own key', async () => {
+    let answers = 0
+    const unsubscribe = Broadcast.subscribe<number>('room:self-answer', (n) => {
+      answers++
+      void Broadcast.publish('room:self-answer', n + 1)
+    })
+    const unsubscribeAsync = Broadcast.subscribe<number>('room:self-answer-async', async (n) => {
+      await Promise.resolve()
+      answers++
+      void Broadcast.publish('room:self-answer-async', n + 1)
+    })
+    Broadcast.publish('room:self-answer', 0)
+    Broadcast.publish('room:self-answer-async', 0)
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    unsubscribe()
+    unsubscribeAsync()
+    expect(answers).toBeGreaterThan(0)
+  })
+
+  it('delivers a burst in order, publishes past 1,024 after the event loop runs', async () => {
+    const adapter = new DefaultBroadcastAdapter()
+    const seen: number[] = []
+    adapter.subscribe('burst', (_, info) => void seen.push(info.seq))
+    const results = Array.from({ length: 1025 }, () => adapter.publish('burst', '"x"'))
+    expect(results.filter((result) => result instanceof Promise)).toHaveLength(1)
+    expect(seen).toHaveLength(1024)
+    await results[1024]
+    expect(seen).toEqual(Array.from({ length: 1025 }, (_, i) => i + 1))
+  })
+
   it('static publish + static subscribe deliver without any instance', async () => {
     const received: Array<{ text: string }> = []
     const unsubscribe = Broadcast.subscribe<{ text: string }>('room:static', (msg) => received.push(msg))
