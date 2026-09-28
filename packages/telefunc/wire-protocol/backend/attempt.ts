@@ -6,29 +6,29 @@ type StateListener = (state: SubscriptionState, reason?: Error) => void
 
 /** A driver attempt's state and listeners; an ended attempt never transitions again. */
 abstract class DriverAttempt implements SubscriptionAttempt {
-  readonly #listeners = new Set<StateListener>()
-  #state: SubscriptionState = 'establishing'
+  private readonly _listeners = new Set<StateListener>()
+  private _state: SubscriptionState = 'establishing'
 
   protected get ended(): boolean {
-    return this.#state === 'closed'
+    return this._state === 'closed'
   }
 
   state(): SubscriptionState {
-    return this.#state
+    return this._state
   }
 
   onStateChange(listener: StateListener): () => void {
-    this.#listeners.add(listener)
-    return () => this.#listeners.delete(listener)
+    this._listeners.add(listener)
+    return () => this._listeners.delete(listener)
   }
 
   abstract unsubscribe(): Promise<void>
 
   /** `reason` explains an end, when the driver has one. */
   protected transition(state: SubscriptionState, reason?: unknown): void {
-    if (this.#state === state || this.ended) return
-    this.#state = state
+    if (this._state === state || this.ended) return
+    this._state = state
     const error = reason === undefined || reason instanceof Error ? reason : new Error(String(reason))
-    for (const listener of [...this.#listeners]) listener(state, error)
+    for (const listener of [...this._listeners]) listener(state, error)
   }
 }
