@@ -976,8 +976,10 @@ class ClientConnection implements MuxConnection {
     for (const entry of buffer.old) this.dispatchFrame(entry.frame)
     this.releaseDeferredOmitted(deferredOmitted)
     for (const entry of buffer.new) this.dispatchFrame(entry.frame)
-    this.flushPendingRegisterReconcile()
+    // Before the RECONCILE: one it names that the page released meanwhile keeps its queued abort or close until the
+    // RECONCILED, whatever the transport carries with it.
     this.pruneSendBufferForReleasedChannels()
+    this.flushPendingRegisterReconcile()
     this.startTtlIfIdle()
   }
 

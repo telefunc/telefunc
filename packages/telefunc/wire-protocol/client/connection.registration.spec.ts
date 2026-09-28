@@ -15,6 +15,7 @@ import { TAG } from '../shared-ws.js'
 import { decodeU32 } from '../frame.js'
 import { base64urlToUint8Array } from '../base64url.js'
 import { getServerConfig } from '../../node/server/serverConfig.js'
+import { NetworkError } from '../../shared/NetworkError.js'
 
 type Wire = 'sse' | 'sse-batch' | 'ws'
 const WIRES: Wire[] = ['sse', 'sse-batch', 'ws']
@@ -36,14 +37,14 @@ afterEach(() => {
   delete config.fetch
 })
 
-/** A page on `wire`, and the server it talks to. `upgrade`: an SSE page that may move to a WebSocket, whose READY
- *  reaches the page `readyAfter` ms after the server sent it. */
-function page(wire: Wire, { upgrade = false, readyAfter = 0 } = {}) {
+/** A page on `wire`, and the server it talks to. `upgrade`: an SSE page that may move to a WebSocket. `delays`: how
+ *  long a frame of a tag takes to reach the page, the ones after it on its wire waiting behind it. */
+function page(wire: Wire, { upgrade = false, delays = {} as Partial<Record<number, number>> } = {}) {
   const traffic: Traffic = { requests: 0, toServer: [], toPage: [] }
   /** Ends a wire as a network drop does, the latest last. */
   const cuts: (() => void)[] = []
-  if (wire === 'ws' || upgrade) vi.stubGlobal('WebSocket', webSocketTo(traffic, cuts, readyAfter))
-  if (wire !== 'ws') config.fetch = sseServer(traffic, wire === 'sse-batch', cuts)
+  if (wire === 'ws' || upgrade) vi.stubGlobal('WebSocket', webSocketTo(traffic, cuts, delays))
+  if (wire !== 'ws') config.fetch = sseServer(traffic, wire === 'sse-batch', cuts, delays)
   const telefuncUrl = `http://${crypto.randomUUID()}.test/_telefunc`
   const connectionKey = crypto.randomUUID()
   return {
@@ -69,7 +70,12 @@ function register<ClientToServer = unknown, ServerToClient = unknown>(id: string
   return channel
 }
 
-function sseServer(traffic: Traffic, refuseUpload: boolean, cuts: (() => void)[]): typeof fetch {
+function sseServer(
+  traffic: Traffic,
+  refuseUpload: boolean,
+  cuts: (() => void)[],
+  delays: Partial<Record<number, number>>,
+): typeof fetch {
   const sse = getTelefuncSseChannelHooks()
   return (async (url: string, init: RequestInit) => {
     traffic.requests++
@@ -88,7 +94,7 @@ function sseServer(traffic: Traffic, refuseUpload: boolean, cuts: (() => void)[]
     const response = (await sse.handleRequest(request))!
     const responseBody =
       response.body instanceof ReadableStream
-        ? response.body.pipeThrough(eventsThrough((frame) => traffic.toPage.push(frame[0]!), cuts))
+        ? response.body.pipeThrough(eventsThrough((frame) => traffic.toPage.push(frame[0]!), cuts, delays))
         : (response.body as string)
     return new Response(responseBody, {
       status: response.statusCode,
@@ -133,26 +139,38 @@ function framesThrough(onFrame: (frame: Uint8Array) => void) {
 }
 
 /** Passes an SSE downstream through, calling `onFrame` with each frame it carries. */
-function eventsThrough(onFrame: (frame: Uint8Array) => void, cuts: (() => void)[]) {
+function eventsThrough(
+  onFrame: (frame: Uint8Array) => void,
+  cuts: (() => void)[],
+  delays: Partial<Record<number, number>>,
+) {
   const decoder = new TextDecoder()
+  const encoder = new TextEncoder()
   let text = ''
+  let delivered = Promise.resolve()
   return new TransformStream<Uint8Array, Uint8Array>({
     start: (controller) => void cuts.push(() => controller.terminate()),
     transform(chunk, controller) {
-      controller.enqueue(chunk)
       text += decoder.decode(chunk, { stream: true })
       let end: number
       while ((end = text.indexOf('\n\n')) !== -1) {
         const event = text.slice(0, end)
         text = text.slice(end + 2)
-        if (event.startsWith('data: ')) onFrame(base64urlToUint8Array(event.slice('data: '.length)))
+        const frame = event.startsWith('data: ') ? base64urlToUint8Array(event.slice('data: '.length)) : null
+        if (frame) onFrame(frame)
+        const delay = frame ? delays[frame[0]!] : undefined
+        const bytes = encoder.encode(`${event}\n\n`)
+        delivered = delivered
+          .then(() => delay && new Promise((resolve) => setTimeout(resolve, delay)))
+          .then(() => controller.enqueue(bytes))
       }
     },
+    flush: () => delivered,
   })
 }
 
 /** A `WebSocket` whose far end is the server's crossws hooks. */
-function webSocketTo(traffic: Traffic, cuts: (() => void)[], readyAfter: number) {
+function webSocketTo(traffic: Traffic, cuts: (() => void)[], delays: Partial<Record<number, number>>) {
   const hooks = getTelefuncChannelHooks()
   return class {
     static readonly OPEN = 1
@@ -168,7 +186,8 @@ function webSocketTo(traffic: Traffic, cuts: (() => void)[], readyAfter: number)
         traffic.toPage.push(frame[0]!)
         const data = frame.slice().buffer
         const deliver = () => this.onmessage?.({ data })
-        if (frame[0] === TAG.READY && readyAfter > 0) setTimeout(deliver, readyAfter)
+        const delay = delays[frame[0]!]
+        if (delay) setTimeout(deliver, delay)
         else queueMicrotask(deliver)
       },
       terminate: () => this.close(),
@@ -344,6 +363,25 @@ describe.each(['sse', 'sse-batch'] as const)('over %s', (wire) => {
       await vi.advanceTimersByTimeAsync(1_000)
     }
     expect(connection.transport.type).toBe('ws')
+  })
+})
+
+describe.each(['sse', 'sse-batch'] as const)('over %s', (wire) => {
+  test("a callback the page aborts while its upgrade waits for the old wire's FIN gets the abort after the handoff, not a NetworkError", async () => {
+    // The WebSocket commits the upgrade, and the old wire's last frame takes 300 ms.
+    const { channel } = page(wire, { upgrade: true, delays: { [TAG.READY]: 1_000, [TAG.FIN]: 300 } })
+    const connection = (channel(register().id) as any)._connection
+    const committed = () => connection.state.upgrade?.tag === 'committing' && connection.state.upgrade.committed
+    for (let waited = 0; waited < 3_000 && !committed(); waited += 5) await vi.advanceTimersByTimeAsync(5)
+    expect(committed()).toBe(true)
+    const callback = register()
+    let closedWith: unknown = 'open'
+    callback.onClose((err) => void (closedWith = err))
+    channel(callback.id).abort() // its call's request had left
+    await vi.advanceTimersByTimeAsync(2_000)
+    expect(connection.transport.type).toBe('ws')
+    expect(closedWith).not.toBe('open')
+    expect(closedWith).not.toBeInstanceOf(NetworkError)
   })
 })
 
