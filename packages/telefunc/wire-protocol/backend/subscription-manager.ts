@@ -23,8 +23,12 @@ type Hold = { readonly established: Promise<void>; sends: number; readonly bytes
  *  with `overflow()`. */
 type HoldWeight = { class: string; bytes(): number; fits(sends: number, bytes: number): boolean; overflow(): Error }
 
+/** Checks a delivery against the driver contract, once for all its consumers; one it throws for is reported and dropped. */
+type DeliveryCheck<Source> = (source: Source, payload: BackendPayload, info: { seq: number; timestamp: number }) => void
+
 type SubscriptionSlotConfig = {
   binding: SubscriptionBinding
+  checkDelivery: (payload: BackendPayload, info: { seq: number; timestamp: number }) => void
   reportError: (error: unknown) => void
   sourceKey: string
   cleanup: (attempt: SubscriptionAttempt) => Promise<void>
@@ -41,6 +45,7 @@ class SubscriptionManager<Source> {
     private readonly _driver: SubscriptionDriver<Source>,
     private readonly _reportError: (error: unknown) => void,
     private readonly _sourceKey: (source: Source) => string,
+    private readonly _checkDelivery: DeliveryCheck<Source>,
   ) {}
 
   subscribe(source: Source, receiver: BackendReceiver<BackendPayload>): BackendSubscription {
@@ -51,6 +56,7 @@ class SubscriptionManager<Source> {
     if (slot === undefined) {
       const created: SubscriptionSlot = new SubscriptionSlot({
         binding,
+        checkDelivery: (payload, info) => this._checkDelivery(source, payload, info),
         reportError: this._reportError,
         sourceKey,
         cleanup: (attempt) => this._cleanup(attempt),
@@ -203,6 +209,11 @@ class SubscriptionSlot {
       attempt = this._config.binding.open(
         (payload, info) => {
           if (this._stopPromise !== null) return
+          try {
+            this._config.checkDelivery(payload, info)
+          } catch (error) {
+            return this._config.reportError(error)
+          }
           for (const receiver of [...this._receivers.values()]) {
             try {
               receiver(payload, info)

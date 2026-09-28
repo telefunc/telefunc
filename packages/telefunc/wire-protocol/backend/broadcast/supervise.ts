@@ -3,8 +3,8 @@ export { superviseBroadcastDriver }
 import { ChannelOverflowError } from '../../channel-errors.js'
 import { SubscriptionManager } from '../subscription-manager.js'
 import type { BroadcastBackend, BroadcastDriver, BroadcastPayload, BroadcastRoute, PublishResult } from './contract.js'
-import type { BroadcastKind } from '../../shared-ws.js'
-import type { BackendPayload } from '../subscription.js'
+import type { BackendPayload, BackendReceiver } from '../subscription.js'
+import type { OrderingInfo } from '../../ordering-frame.js'
 import { broadcastRouteKey } from './route-key.js'
 import { assertDriverPosition } from '../driver-position.js'
 import { assert } from '../../../utils/assert.js'
@@ -26,11 +26,9 @@ function heldByteLimit(kind: BroadcastRoute['kind']): number {
 }
 
 /** A text route carries a string, a binary route bytes. */
-function isPayloadOf<Kind extends BroadcastKind>(
-  route: BroadcastRoute<Kind>,
-  payload: BackendPayload,
-): payload is BroadcastPayload<Kind> {
-  return (route.kind === 'text') === (typeof payload === 'string')
+function checkDelivery(route: BroadcastRoute, payload: BackendPayload, info: OrderingInfo): void {
+  assertDriverPosition(info)
+  assert((route.kind === 'text') === (typeof payload === 'string'))
 }
 
 /** Owns the Broadcast subscription manager and the publish-readiness gate: a publish waits, within the hold, until this
@@ -38,7 +36,7 @@ function isPayloadOf<Kind extends BroadcastKind>(
  *  on the key, of either kind, queue behind it. One that ends or never establishes doesn't fail the publish, and a
  *  later loss holds nothing. */
 function superviseBroadcastDriver(driver: BroadcastDriver): BroadcastBackend {
-  const subscriptions = new SubscriptionManager(driver.subscriptions, console.error, broadcastRouteKey)
+  const subscriptions = new SubscriptionManager(driver.subscriptions, console.error, broadcastRouteKey, checkDelivery)
   let disposal: Promise<void> | undefined
 
   const publishNow = (route: BroadcastRoute, payload: BroadcastPayload): PublishResult | Promise<PublishResult> => {
@@ -65,12 +63,8 @@ function superviseBroadcastDriver(driver: BroadcastDriver): BroadcastBackend {
 
   return {
     publish,
-    subscribe: (route, receiver) =>
-      subscriptions.subscribe(route, (payload, info) => {
-        assertDriverPosition(info)
-        assert(isPayloadOf(route, payload))
-        return receiver(payload, info)
-      }),
+    // The manager hands a route's consumers only the deliveries checkDelivery passed.
+    subscribe: (route, receiver) => subscriptions.subscribe(route, receiver as BackendReceiver<BackendPayload>),
     dispose: () => (disposal ??= subscriptions.dispose()),
   }
 }
