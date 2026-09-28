@@ -1,5 +1,6 @@
-// A page's RECONCILE can name an initial channel the server hasn't registered: a call's callback whose request is still
-// on its way, or never arrives. These drive the real ClientChannel against the real server over each wire.
+// A page registers a new channel by naming it in a RECONCILE: the server may not have registered it yet (a call's callback
+// whose request is still on its way, or never arrives), and the page may be moving to a WebSocket. These drive the real
+// ClientChannel against the real server over each wire.
 
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 import type { Peer } from 'crossws'
@@ -35,12 +36,13 @@ afterEach(() => {
   delete config.fetch
 })
 
-/** A page on `wire`, and the server it talks to. `upgrade`: an SSE page that may move to a WebSocket. */
-function page(wire: Wire, { upgrade = false } = {}) {
+/** A page on `wire`, and the server it talks to. `upgrade`: an SSE page that may move to a WebSocket, whose READY
+ *  reaches the page `readyAfter` ms after the server sent it. */
+function page(wire: Wire, { upgrade = false, readyAfter = 0 } = {}) {
   const traffic: Traffic = { requests: 0, toServer: [], toPage: [] }
   /** Ends a wire as a network drop does, the latest last. */
   const cuts: (() => void)[] = []
-  if (wire === 'ws' || upgrade) vi.stubGlobal('WebSocket', webSocketTo(traffic, cuts))
+  if (wire === 'ws' || upgrade) vi.stubGlobal('WebSocket', webSocketTo(traffic, cuts, readyAfter))
   if (wire !== 'ws') config.fetch = sseServer(traffic, wire === 'sse-batch', cuts)
   const telefuncUrl = `http://${crypto.randomUUID()}.test/_telefunc`
   const connectionKey = crypto.randomUUID()
@@ -150,7 +152,7 @@ function eventsThrough(onFrame: (frame: Uint8Array) => void, cuts: (() => void)[
 }
 
 /** A `WebSocket` whose far end is the server's crossws hooks. */
-function webSocketTo(traffic: Traffic, cuts: (() => void)[]) {
+function webSocketTo(traffic: Traffic, cuts: (() => void)[], readyAfter: number) {
   const hooks = getTelefuncChannelHooks()
   return class {
     static readonly OPEN = 1
@@ -165,7 +167,9 @@ function webSocketTo(traffic: Traffic, cuts: (() => void)[]) {
       send: (frame: Uint8Array) => {
         traffic.toPage.push(frame[0]!)
         const data = frame.slice().buffer
-        queueMicrotask(() => this.onmessage?.({ data }))
+        const deliver = () => this.onmessage?.({ data })
+        if (frame[0] === TAG.READY && readyAfter > 0) setTimeout(deliver, readyAfter)
+        else queueMicrotask(deliver)
       },
       terminate: () => this.close(),
     } as unknown as Peer
@@ -310,7 +314,7 @@ describe.each(WIRES)('over %s', (wire) => {
 })
 
 describe.each(['sse', 'sse-batch'] as const)('over %s', (wire) => {
-  test('a page moves to a WebSocket once the server settled the callback it awaits, so the abort it holds reaches it', async () => {
+  test('a page moves to a WebSocket while the server awaits a callback, and the abort it holds reaches the callback there', async () => {
     const { channel } = page(wire, { upgrade: true })
     const server = register<string, string>()
     const open = channel<string, string>(server.id)
@@ -320,16 +324,26 @@ describe.each(['sse', 'sse-batch'] as const)('over %s', (wire) => {
     channel(callbackId).abort()
     await vi.advanceTimersByTimeAsync(1_000)
     const connection = (open as any)._connection
-    expect(connection.transport.type).toBe('sse')
+    expect(connection.transport.type).toBe('ws')
     const callback = register(callbackId)
     let closedWith: unknown = 'open'
     callback.onClose((err) => void (closedWith = err))
-    await vi.advanceTimersByTimeAsync(1_000)
+    await vi.advanceTimersByTimeAsync(200)
     expect(closedWith).toBeUndefined()
-    expect(connection.transport.type).toBe('ws')
     void server.send('over the WebSocket', { ack: false })
     await vi.advanceTimersByTimeAsync(200)
     expect(received).toEqual(['over the WebSocket'])
+  })
+
+  test("a search box whose aborted calls' callbacks never register doesn't keep the page off the WebSocket", async () => {
+    const { channel } = page(wire, { upgrade: true })
+    const connection = (channel(register().id) as any)._connection
+    // A keystroke a second, each aborting its call before its request leaves.
+    for (let keystroke = 0; keystroke < 8; keystroke++) {
+      channel().abort()
+      await vi.advanceTimersByTimeAsync(1_000)
+    }
+    expect(connection.transport.type).toBe('ws')
   })
 })
 

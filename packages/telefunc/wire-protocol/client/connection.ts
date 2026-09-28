@@ -380,8 +380,9 @@ class ClientConnection implements MuxConnection {
   private nextIndex = 0
   /** What the RECONCILE in flight lists, and whether as `initial`. */
   private reconcileIxes = new Map<number, boolean>()
-  /** Initial channels a RECONCILED on this wire left out because the server hadn't registered them, until their
-   *  ATTACH_RESULT. What they queue waits for it, so their replay goes first. */
+  /** Initial channels a RECONCILED left out because the server hadn't registered them, until their ATTACH_RESULT, which
+   *  comes on the wire awaiting them, the old one or, after a barrier, the WebSocket. What they queue waits for it, so
+   *  their replay goes first. */
   private awaitedIxes = new Set<number>()
   /** ATTACH_RESULTs for channels the RECONCILE in flight lists, applied with its RECONCILED, which the server may have
    *  built before them (an SSE batch POST's RECONCILED goes once the POST's body is read). */
@@ -1064,8 +1065,6 @@ class ClientConnection implements MuxConnection {
     // Settled-reconcile gate; a flush above may have just re-armed `reconciling` — the next
     // RECONCILED retries via `handleReconciled`.
     if (this.reconciling) return
-    // The server would attach them to this wire, which a barrier retires; the last ATTACH_RESULT retries.
-    if (this.awaitedIxes.size > 0) return
     const nextTransport = UPGRADE_PATH[this.transport.type]
     if (!nextTransport) return
     if (!this.isTransportUpgradeAllowed(nextTransport)) return
@@ -1327,25 +1326,25 @@ class ClientConnection implements MuxConnection {
   // ── Protocol internals ──
 
   buildReconcileFrame(): OutboundFrame {
-    const open = this.declareOpenEntries({ skipInitial: false })
+    const open = this.declareOpenEntries({ skipUnnamed: false })
     const reconcile: ReconcilePayload = { open, ...(this.sessionId ? { sessionId: this.sessionId } : {}) }
     return { kind: 'reconcile', frame: encode.reconcile(reconcile) }
   }
 
-  /** The old wire's last frame. Channels the server has not acknowledged yet are left out: the
-   *  staged probe has no record of them, so they reconcile again after the handoff. */
+  /** The old wire's last frame. A channel the server awaits is listed, and its await moves to the new wire. One no
+   *  RECONCILE has named yet is left out: the server has no record of it, so it reconciles after the handoff. */
   private buildBarrierFrame(sessionId: string, upgradeId: string): OutboundFrame {
-    const open = this.declareOpenEntries({ skipInitial: true })
+    const open = this.declareOpenEntries({ skipUnnamed: true })
     return { kind: 'reconcile', frame: encode.barrier({ sessionId, upgradeId, open }) }
   }
 
-  private declareOpenEntries({ skipInitial }: { skipInitial: boolean }): ReconcileOpenEntry[] {
+  private declareOpenEntries({ skipUnnamed }: { skipUnnamed: boolean }): ReconcileOpenEntry[] {
     this.enterReconciling()
     this.reconcileIxes = new Map()
     const open: ReconcileOpenEntry[] = []
     for (const [ix, entry] of this.channels) {
       const isInitial = (entry.state.tag === 'pending' || entry.state.tag === 'releasing') && entry.state.initial
-      if (skipInitial && isInitial) continue
+      if (skipUnnamed && isInitial && !this.awaitedIxes.has(ix)) continue
       this.reconcileIxes.set(ix, isInitial)
       const payloadEntry: ReconcileOpenEntry = {
         id: entry.channel.id,

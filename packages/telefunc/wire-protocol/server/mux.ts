@@ -114,6 +114,9 @@ type SessionFinalizer = () => void
 type AwaitedChannel = {
   /** The latest RECONCILE entry naming it. */
   entry: ReconcileOpenEntry
+  /** The wire awaiting it: the one whose RECONCILE named it, until a barrier moves it to the WebSocket. */
+  conn: ConnectionEntry
+  wire: Wire
   /** What the page sent it meanwhile, dispatched after its attach. */
   held: { frame: ChannelFrame; bytes: number }[]
   /** `attached` until what it holds is dispatched. `expired` once `connectTtl` passed, and kept until a RECONCILE no
@@ -459,8 +462,6 @@ class ChannelMux {
       for (const channel of ctrl.open) {
         assertProtocol(textEncoder.encode(channel.id).byteLength <= UPGRADE_MAX_ID_BYTES, 'channel id over byte cap')
       }
-      for (const channel of ctrl.open)
-        assertProtocol(!channel.initial, 'barrier carries an initial channel', wsConnection)
       assertProtocol(ctrl.upgradeId === stage.upgradeId, 'barrier upgradeId mismatch', wsConnection)
       assertProtocol(
         entry.transport.getSessionId(connection) === stage.prevSessionId,
@@ -473,6 +474,7 @@ class ChannelMux {
 
       stage.phase = 'committing'
       entry.state.retiredByBarrier = true
+      this.moveAwaited(entry, wsEntry, wsConnection, ctrl.open)
       return this.settleBarrierCommit(entry, wsEntry, wsConnection, ctrl, stage.upgradeId)
     } catch (err) {
       this.clearStage(wsConnection)
@@ -604,11 +606,13 @@ class ChannelMux {
 
   private awaitChannel(entry: ReconcileOpenEntry, conn: ConnectionEntry, connection: Wire): void {
     const onResult = (channel: ServerChannel | null): void => {
-      if (channel) this.attachAwaited(awaited, channel, conn, connection)
-      else this.expireAwaited(awaited, conn, connection)
+      if (channel) this.attachAwaited(awaited, channel)
+      else this.expireAwaited(awaited)
     }
     const awaited: AwaitedChannel = {
       entry,
+      conn,
+      wire: connection,
       held: [],
       phase: 'waiting',
       stopWaiting: this.waitForChannelRegistration(entry.id, this.options.connectTtl, onResult),
@@ -618,56 +622,83 @@ class ChannelMux {
 
   /** Runs in `registerChannel`, so the waiters of several wires attach in the order they began waiting and the latest
    *  keeps the channel. A reconcile is one synchronous turn, so this lands between two, never within one. */
-  private attachAwaited(
-    awaited: AwaitedChannel,
-    channel: ServerChannel,
-    conn: ConnectionEntry,
-    connection: Wire,
-  ): void {
-    const { ix } = awaited.entry
-    const sessionId = conn.transport.getSessionId(connection)
+  private attachAwaited(awaited: AwaitedChannel, channel: ServerChannel): void {
+    const { conn, wire } = awaited
+    const sessionId = conn.transport.getSessionId(wire)
     assert(sessionId, 'a channel awaited on a wire that never reconciled')
     const handle = this.attachChannel(channel, awaited.entry, conn.sender)
     if (!handle) {
-      this.expireAwaited(awaited, conn, connection)
+      this.expireAwaited(awaited)
       return
     }
     this.sessions.add(sessionId, handle)
     awaited.phase = 'attached'
     // On the wire's recv chain, once the code that registered the channel has added its listeners; the wire holds
     // what arrives meanwhile. The ATTACH_RESULT follows, so its lastSeq counts what the wire held.
-    const dispatchHeld = async (): Promise<void> => {
-      if (conn.state.awaited.get(ix) !== awaited) return
-      conn.state.awaited.delete(ix)
-      const sessionId = conn.transport.getSessionId(connection)
-      assert(sessionId)
-      try {
-        for (const { frame } of awaited.held) this.dispatchChannelFrame(sessionId, frame)
-      } catch (err) {
-        if (!(err instanceof ProtocolViolationError)) throw err
-        this.terminateWire(connection)
-        return
-      } finally {
-        this.releaseHeld(awaited, conn.state)
-      }
-      this.send(connection, encode.attachResult(ix, channel._lastClientSeq))
+    const settle = async (): Promise<void> => {
+      if (conn.state.awaited.get(awaited.entry.ix) !== awaited) return
+      if (this.dispatchHeld(awaited)) this.send(wire, encode.attachResult(awaited.entry.ix, channel._lastClientSeq))
     }
-    void this.chainRecv(conn, dispatchHeld).catch(handleTelefunctionBug)
+    void this.chainRecv(conn, settle).catch(handleTelefunctionBug)
+  }
+
+  /** Returns false if what it held broke the protocol, which ends its wire. */
+  private dispatchHeld(awaited: AwaitedChannel): boolean {
+    const { conn, wire } = awaited
+    conn.state.awaited.delete(awaited.entry.ix)
+    const sessionId = conn.transport.getSessionId(wire)
+    assert(sessionId)
+    try {
+      for (const { frame } of awaited.held) this.dispatchChannelFrame(sessionId, frame)
+      return true
+    } catch (err) {
+      if (!(err instanceof ProtocolViolationError)) throw err
+      this.terminateWire(wire)
+      return false
+    } finally {
+      this.chargeHeld(awaited, -1)
+      awaited.held = []
+    }
   }
 
   /** Not registered within `connectTtl`, or shut down as it registered. */
-  private expireAwaited(awaited: AwaitedChannel, conn: ConnectionEntry, connection: Wire): void {
+  private expireAwaited(awaited: AwaitedChannel): void {
     awaited.phase = 'expired'
-    this.releaseHeld(awaited, conn.state)
-    this.send(connection, encode.attachResult(awaited.entry.ix, null))
+    this.chargeHeld(awaited, -1)
+    awaited.held = []
+    this.send(awaited.wire, encode.attachResult(awaited.entry.ix, null))
   }
 
-  private releaseHeld(awaited: AwaitedChannel, state: ConnectionState): void {
+  /** What a wire holds counts against its recv backlog. */
+  private chargeHeld(awaited: AwaitedChannel, sign: 1 | -1): void {
     for (const { bytes } of awaited.held) {
-      state.recvBacklogBytes -= bytes
-      state.recvBacklogFrames--
+      awaited.conn.state.recvBacklogBytes += sign * bytes
+      awaited.conn.state.recvBacklogFrames += sign
     }
-    awaited.held = []
+  }
+
+  /** A channel the old wire awaits moves with the barrier listing it, so the WebSocket awaits it from then on. One
+   *  attached already gets what the old wire held for it first, and the barrier's reconcile moves it as it is. */
+  private moveAwaited(
+    oldEntry: ConnectionEntry,
+    wsEntry: ConnectionEntry,
+    wsConnection: Wire,
+    open: ReconcileOpenEntry[],
+  ): void {
+    for (const entry of open) {
+      const awaited = oldEntry.state.awaited.get(entry.ix)
+      if (!awaited) continue
+      if (awaited.phase === 'attached') {
+        this.dispatchHeld(awaited)
+        continue
+      }
+      oldEntry.state.awaited.delete(entry.ix)
+      this.chargeHeld(awaited, -1)
+      awaited.conn = wsEntry
+      awaited.wire = wsConnection
+      this.chargeHeld(awaited, 1)
+      wsEntry.state.awaited.set(entry.ix, awaited)
+    }
   }
 
   private stopAwaiting(state: ConnectionState): void {

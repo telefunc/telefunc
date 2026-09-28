@@ -283,3 +283,55 @@ test('what a wire holds for a channel it awaits counts against its recv backlog'
     await mux.onConnectionRawMessage(wire, encode.text(0, '0', seq))
   expect(terminated.has(wire)).toBe(true)
 })
+
+/** A page's SSE wire with a channel attached and a callback the server awaits, and the WebSocket it staged. */
+async function upgradingWithAwaitedCallback(mux: ChannelMux) {
+  mux.registerChannel(new ServerChannel({ id: 'clock-upgrading' }))
+  const { sessions, open, texts, attachResults } = wires(mux)
+  const old = open()
+  const clock = { id: 'clock-upgrading', ix: 0, lastSeq: 0 }
+  const callback = { id: 'callback-upgrading', ix: 1, lastSeq: 0, initial: true as const }
+  await mux.onConnectionRawMessage(old, encode.reconcile({ open: [{ ...clock, initial: true }, callback] }))
+  await mux.onConnectionRawMessage(old, encode.text(1, '"sent before its call arrived"', 1))
+  const ws = open()
+  const sessionId = sessions.get(old)!
+  await mux.onConnectionRawMessage(ws, encode.prepare({ upgradeId: 'upgrade', sessionId }))
+  const barrier = encode.barrier({ sessionId, upgradeId: 'upgrade', open: [clock, callback] })
+  const backlog = (wire: object) =>
+    (
+      mux as unknown as { connectionEntries: Map<object, { state: { recvBacklogFrames: number } }> }
+    ).connectionEntries.get(wire)!.state.recvBacklogFrames
+  return { old, ws, barrier, callback, texts, attachResults, backlog }
+}
+
+test('a callback the barrier moves to the WebSocket gets what the old wire held for it once its call arrives there', async () => {
+  const mux = new ChannelMux()
+  const { old, ws, barrier, callback, texts, attachResults, backlog } = await upgradingWithAwaitedCallback(mux)
+  await mux.onConnectionRawMessage(old, barrier)
+  expect(backlog(ws)).toBe(1)
+  const server = new ServerChannel<string, string>({ id: callback.id })
+  const received: string[] = []
+  server.listen((message) => void received.push(message))
+  mux.registerChannel(server)
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  expect(received).toEqual(['sent before its call arrived'])
+  expect(attachResults(ws)).toEqual([1])
+  expect(backlog(ws)).toBe(0)
+  void server.send('over the WebSocket')
+  expect(texts(ws).some((text) => text.includes('over the WebSocket'))).toBe(true)
+})
+
+test('a callback whose call arrives while the barrier listing it waits its turn gets what the old wire held for it, on the WebSocket', async () => {
+  const mux = new ChannelMux()
+  const { old, ws, barrier, callback, texts, attachResults } = await upgradingWithAwaitedCallback(mux)
+  const committing = mux.onConnectionRawMessage(old, barrier)
+  const server = new ServerChannel<string, string>({ id: callback.id })
+  const received: string[] = []
+  server.listen((message) => void received.push(message))
+  mux.registerChannel(server) // before the barrier's turn
+  await committing
+  expect(received).toEqual(['sent before its call arrived'])
+  expect([...attachResults(old), ...attachResults(ws)]).toEqual([])
+  void server.send('over the WebSocket')
+  expect(texts(ws).some((text) => text.includes('over the WebSocket'))).toBe(true)
+})
