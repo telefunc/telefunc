@@ -277,6 +277,14 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     return this._flow.decrement(data.byteLength)
   }
 
+  /** @internal The most this channel's flow control lets wait on its wire for a page that reads: its credit, which a
+   *  page never grants past `CREDIT_WINDOW_MAX_BYTES`, as much again past it (see `_isPeerBehind`), and what it buffered
+   *  while the page was offline, `bufferLimit` of text and `bufferLimitBinary` of binary, which an attach sends at once
+   *  whatever the credit. What a reattach replays is what the first two let go out. */
+  _sendAllowance(): number {
+    return 2 * CREDIT_WINDOW_MAX_BYTES + this._bufferLimit + this._bufferLimitBinary
+  }
+
   /** What this channel sent once past its credit, and the ack requests the peer hasn't answered, as far as its wire
    *  still holds them, or all of them where the runtime can't tell. Up to the largest window a page grants, that is a
    *  burst a page that reads is sent, however fast it reads; past it, the peer is behind. */

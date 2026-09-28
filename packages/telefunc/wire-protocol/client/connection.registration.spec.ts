@@ -239,6 +239,8 @@ function webSocketTo(traffic: Traffic, cuts: (() => void)[], delays: Partial<Rec
     onerror: (() => void) | null = null
     private readonly peer = {
       context: {},
+      // It hands each frame on as it is sent, so its socket holds none.
+      websocket: { bufferedAmount: 0 },
       send: (frame: Uint8Array) => {
         traffic.toPage.push(frame[0]!)
         const data = frame.slice().buffer

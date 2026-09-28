@@ -138,6 +138,14 @@ export const WIRE_MAX_CONN_CTRL_FRAME_BYTES =
 export const WIRE_RECV_BACKLOG_BASE_BYTES = 64 * 1024 * 1024
 export const WIRE_RECV_BACKLOG_BASE_FRAMES = 50_000
 
+/** Per-connection ceiling on what the server's wire holds for its peer, where the runtime reports it. Each channel
+ *  attached to the wire adds the most its flow control lets wait there for a page that reads (see
+ *  `ServerChannel._sendAllowance`), and the largest frame sent on the wire, as a send puts one frame past a limit. This
+ *  base is room for what flow control doesn't count, control frames and the answers to a page's ack requests, as much
+ *  as the largest frame a page may send. A wire holding more serves a peer that grants credit it can't take, or doesn't
+ *  read what it asked for, and is terminated as a transient loss. */
+export const WIRE_SEND_BACKLOG_BASE_BYTES = WIRE_MAX_RAW_FRAME_BYTES
+
 /** Largest SSE request metadata header the server will read off a POST body. */
 export const SSE_METADATA_MAX_BYTES = 64 * 1024
 

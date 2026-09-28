@@ -310,6 +310,8 @@ function webSocketTo(net: Net) {
     private readonly link = net.open()
     private readonly peer = {
       context: {},
+      // It hands each frame on as it is sent, so its socket holds none.
+      websocket: { bufferedAmount: 0 },
       send: (frame: Uint8Array) => {
         if (!this.link.dead) net.serverSends(frame)
         if (this.link.dead) return

@@ -3,7 +3,12 @@ import { ChannelMux, type ServerTransport } from './mux.js'
 import { ServerChannel } from './channel.js'
 import { decode, encode, TAG, type DecodedFrame } from '../shared-ws.js'
 import { getServerConfig } from '../../node/server/serverConfig.js'
-import { CREDIT_MSG_WINDOW_MAX, CREDIT_WINDOW_MAX_BYTES, WIRE_RECV_BACKLOG_BASE_FRAMES } from '../constants.js'
+import {
+  CREDIT_MSG_WINDOW_MAX,
+  CREDIT_WINDOW_MAX_BYTES,
+  WIRE_RECV_BACKLOG_BASE_FRAMES,
+  WIRE_SEND_BACKLOG_BASE_BYTES,
+} from '../constants.js'
 
 /** Wires the test opens on `mux`, each recording what the server sends on it. */
 function wires(mux: ChannelMux) {
@@ -472,4 +477,43 @@ test("a page's next upgrade attempt replaces the stage its previous one left on 
   expect(upgrade.terminated.has(abandoned)).toBe(true)
   await upgrade.barrier('second')
   expect(upgrade.count(ws, TAG.RECONCILED)).toBe(1)
+})
+
+// A page grants what it can take, so what a channel queues for it is bounded by its credit and how far behind it may
+// fall. One that grants credit it doesn't have and doesn't read would have the server hold all of it.
+test("a page that grants credit it doesn't have and doesn't read has its wire terminated once it holds more than its channels' flow control allows, as a transient loss", async () => {
+  const mux = new ChannelMux()
+  const channel = new ServerChannel<unknown, never>({ id: 'hog' })
+  mux.registerChannel(channel)
+  const sessions = new Map<object, string>()
+  const wire = {}
+  let held = 0
+  let terminatedHolding: number | null = null
+  let permanent: boolean | null = null
+  // Everything written stays on the wire.
+  const transport: ServerTransport<object> = {
+    getSessionId: (w) => sessions.get(w),
+    setSessionId: (w, id) => void sessions.set(w, id),
+    getConnId: () => null,
+    sendNow: (_, frame) => void (held += frame.byteLength),
+    bufferedAmount: () => held,
+    terminateConnection: (w) => {
+      terminatedHolding = held
+      permanent = mux.readPermanentTermination(w)
+      mux.onConnectionClosed(w, { permanent })
+    },
+  }
+  mux.onConnectionOpen(wire, transport)
+  await mux.onConnectionRawMessage(wire, encode.reconcile({ open: [{ id: 'hog', ix: 0, lastSeq: 0, initial: true }] }))
+  await mux.onConnectionRawMessage(wire, encode.window(0, 0x7fff_ffff))
+  await mux.onConnectionRawMessage(wire, encode.msgWindow(0, 0x7fff_ffff))
+  const chunk = new Uint8Array(1024 * 1024)
+  for (let sent = 0; terminatedHolding === null && sent < 512; sent++) await channel.sendBinary(chunk)
+  // The largest frame sent is a chunk with its header.
+  const allowed = WIRE_SEND_BACKLOG_BASE_BYTES + channel._sendAllowance() + chunk.byteLength + 7
+  expect(terminatedHolding).toBeGreaterThan(allowed)
+  expect(terminatedHolding).toBeLessThanOrEqual(allowed + chunk.byteLength + 1024)
+  expect(permanent).toBe(false)
+  // It waits for the page to come back, as through any lost wire.
+  expect(channel.isClosed).toBe(false)
 })

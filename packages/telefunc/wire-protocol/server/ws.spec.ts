@@ -15,8 +15,9 @@ afterEach(() => {
 test("a client that goes silent is detached at its ping deadline, though the peer's terminate() never closes", async () => {
   vi.useFakeTimers()
   const hooks = getTelefuncChannelHooks()
-  // A Durable Object peer: terminate() starts a close handshake the vanished client never answers.
-  const peer = { context: {}, send() {}, terminate() {} } as unknown as Peer
+  // A Durable Object peer: terminate() starts a close handshake the vanished client never answers, and its socket
+  // reports no bufferedAmount.
+  const peer = { context: {}, websocket: {}, send() {}, terminate() {} } as unknown as Peer
   const channel = new ServerChannel<string, string>()
   let closed = false
   channel.onClose(() => {

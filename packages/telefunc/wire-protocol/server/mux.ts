@@ -19,6 +19,7 @@ import {
   WIRE_MAX_RAW_FRAME_BYTES,
   WIRE_RECV_BACKLOG_BASE_BYTES,
   WIRE_RECV_BACKLOG_BASE_FRAMES,
+  WIRE_SEND_BACKLOG_BASE_BYTES,
   type ChannelTransports,
 } from '../constants.js'
 import {
@@ -57,7 +58,8 @@ type ServerTransport<TConnection> = {
    *  traffic across requests (WebSocket: every frame already lands on the same socket). */
   getConnId(connection: TConnection): string | null
   sendNow(connection: TConnection, frame: Uint8Array<ArrayBuffer>): void
-  /** Bytes sent that still wait in the connection, or `undefined` where the runtime doesn't report them. */
+  /** Bytes of the frames sent that still wait in the connection, never fewer than there are, or `undefined` where the
+   *  runtime doesn't report them. */
   bufferedAmount(connection: TConnection): number | undefined
   terminateConnection(connection: TConnection): void
 }
@@ -139,6 +141,13 @@ type ConnectionState = {
   recvBacklogBytes: number
   recvBacklogFrames: number
   awaited: Map<number, AwaitedChannel>
+  /** What may be written to the wire before its backlog, which only writes grow, can pass what its channels' flow
+   *  control allowed when it was last read (see `WIRE_SEND_BACKLOG_BASE_BYTES`), and is read again. */
+  sendHeadroom: number
+  /** The largest frame sent on the wire. */
+  largestSent: number
+  /** Its backlog passed that, and the wire is being terminated. */
+  pastSendBacklog: boolean
 }
 
 type ConnectionEntry = {
@@ -236,6 +245,9 @@ class ChannelMux {
         recvBacklogBytes: 0,
         recvBacklogFrames: 0,
         awaited: new Map(),
+        sendHeadroom: 0,
+        largestSent: 0,
+        pastSendBacklog: false,
       },
       transport: transport as ServerTransport<unknown>,
       sender: {
@@ -851,11 +863,39 @@ class ChannelMux {
   // ── Per-connection plumbing (send, recv chain, ping) ────────────────
 
   /** Sole server→client send path; sync so wire order = call order. What a channel's sends and publishes queue on it
-   *  is bounded by the channel's credit (see `flow-control/`) and, past that, its bufferLimit. A frame for a wire that
-   *  closed is committed all the same: it replays as one a dying wire lost does. */
+   *  is bounded by the channel's credit (see `flow-control/`) and, past that, by how far behind it lets its peer be. A
+   *  frame for a wire that closed is committed all the same: it replays as one a dying wire lost does. So is one for a
+   *  wire found holding more than that allows, which takes no more frames and is terminated after this turn as the
+   *  ping deadline terminates one: the page reconnects, and what it lost replays from there. */
   private send(connection: Wire, frame: Uint8Array<ArrayBuffer>, onCommit?: () => void): void {
     onCommit?.()
-    this.connectionEntries.get(connection)?.transport.sendNow(connection, frame)
+    const entry = this.connectionEntries.get(connection)
+    if (!entry) return
+    const { state } = entry
+    if (state.pastSendBacklog) return
+    if (frame.byteLength > state.largestSent) state.largestSent = frame.byteLength
+    if (frame.byteLength > state.sendHeadroom) {
+      state.sendHeadroom = this.sendHeadroom(entry, connection)
+      if (state.sendHeadroom < 0) {
+        state.pastSendBacklog = true
+        queueMicrotask(() => entry.transport.terminateConnection(connection))
+        return
+      }
+    }
+    state.sendHeadroom -= frame.byteLength
+    entry.transport.sendNow(connection, frame)
+  }
+
+  /** What its channels' flow control allows the wire to hold, less what it holds: `Infinity` where the runtime can't
+   *  tell. */
+  private sendHeadroom(entry: ConnectionEntry, connection: Wire): number {
+    const backlog = entry.transport.bufferedAmount(connection)
+    if (backlog === undefined) return Infinity
+    const sessionId = entry.transport.getSessionId(connection)
+    const session = sessionId === undefined ? undefined : this.sessions.peekSession(sessionId)
+    let allowed = WIRE_SEND_BACKLOG_BASE_BYTES
+    for (const { channel } of session?.values() ?? []) allowed += channel._sendAllowance() + entry.state.largestSent
+    return allowed - backlog
   }
 
   /** A wire that's gone holds nothing. */
