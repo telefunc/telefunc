@@ -202,6 +202,27 @@ async function reviveResponse(
 
 // ===== Frame demultiplexer =====
 
+/** A FIFO of frames with O(1) amortized reads, where `Array#shift` would copy what's left on every read. */
+class FrameQueue {
+  private frames: (Uint8Array<ArrayBuffer> | undefined)[] = []
+  private head = 0
+
+  push(frame: Uint8Array<ArrayBuffer>): void {
+    this.frames.push(frame)
+  }
+
+  shift(): Uint8Array<ArrayBuffer> | undefined {
+    const frame = this.frames[this.head]
+    if (!frame) return undefined
+    this.frames[this.head++] = undefined
+    if (this.head > 16 && this.head >= this.frames.length >>> 1) {
+      this.frames = this.frames.slice(this.head)
+      this.head = 0
+    }
+    return frame
+  }
+}
+
 /** Demultiplexes indexed frames from a single HTTP stream to multiple consumers.
  *
  *  Reads only while a consumer waits. Waiting consumers receive frames via direct dispatch; frames for a consumer that
@@ -213,7 +234,7 @@ async function reviveResponse(
  *  The upstream reader is cancelled once every consumer is terminal and at least one cancelled. */
 class FrameDemuxer {
   private streamReader: BaseStreamReader
-  private pendingFrames = new Map<number, Uint8Array<ArrayBuffer>[]>()
+  private pendingFrames = new Map<number, FrameQueue>()
   private indexWaiters = new Map<
     number,
     { resolve: (v: Uint8Array<ArrayBuffer> | null) => void; reject: (e: unknown) => void }
@@ -271,8 +292,8 @@ class FrameDemuxer {
     if (this.cancelledIndices.has(index)) return null
     if (this.streamError) throw this.streamError
 
-    const pending = this.pendingFrames.get(index)
-    if (pending && pending.length > 0) return pending.shift()!
+    const buffered = this.pendingFrames.get(index)?.shift()
+    if (buffered) return buffered
     if (this.doneIndices.has(index)) return null
     if (this.ended) return null
 
@@ -339,9 +360,9 @@ class FrameDemuxer {
         }
 
         // No consumer waiting — buffer it
-        const pending = this.pendingFrames.get(frame.index)
-        if (pending) pending.push(frame.payload)
-        else this.pendingFrames.set(frame.index, [frame.payload])
+        let pending = this.pendingFrames.get(frame.index)
+        if (!pending) this.pendingFrames.set(frame.index, (pending = new FrameQueue()))
+        pending.push(frame.payload)
       }
     } catch (err) {
       this.streamError ??= err
