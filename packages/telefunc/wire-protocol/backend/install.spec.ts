@@ -10,7 +10,7 @@ import { createBroadcastTransportDriver, type BroadcastTransport } from './broad
 import { superviseBroadcastDriver } from './broadcast/supervise.js'
 import { MemoryBackend } from './memory/backend.js'
 import { config } from '../../node/server/serverConfig.js'
-import { ServerBroadcast } from '../server/server-broadcast.js'
+import { Broadcast, ServerBroadcast } from '../server/server-broadcast.js'
 afterEach(async () => {
   await disposeBackend()
   config.broadcast = {}
@@ -82,6 +82,23 @@ describe('backend installation lifecycle', () => {
     transport.send('late-transport', JSON.stringify('from another instance'))
     await vi.waitFor(() => expect(seen).toEqual(['from another instance']))
     unsubscribe()
+  })
+
+  it('moves live subscriptions to each transport that replaces the Broadcast plane', () => {
+    const seen: string[] = []
+    const stops = [
+      new ServerBroadcast<string>({ key: 'moved' }).subscribe((message) => void seen.push(`channel:${message}`)),
+      Broadcast.subscribe<string>('moved', (message) => void seen.push(`static:${message}`)),
+    ]
+    const first = localTransport()
+    config.broadcast = { transport: first }
+    first.send('moved', JSON.stringify('first'))
+    const second = localTransport()
+    config.broadcast = { transport: second }
+    first.send('moved', JSON.stringify('replaced'))
+    second.send('moved', JSON.stringify('second'))
+    expect(seen.sort()).toEqual(['channel:first', 'channel:second', 'static:first', 'static:second'])
+    for (const stop of stops) stop()
   })
 
   it('unlistens a key before listening to it again, so a per-key transport keeps delivering across a subscriber swap', async () => {

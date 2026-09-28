@@ -15,7 +15,7 @@ import type { TELEFUNC_SHIELDS } from '../../node/shared/transformer/generateShi
 import { invokeChannelListener, makePublishInfo } from '../channel.js'
 import { ServerChannel, reportServerChannelError } from './channel.js'
 import type { BroadcastPayload, BroadcastRoute, PublishResult } from '../backend/broadcast/contract.js'
-import { getBroadcastBackend } from '../backend/install.js'
+import { followBroadcastPlane, getBroadcastBackend, unfollowBroadcastPlane } from '../backend/install.js'
 import type { BackendReceiver, BackendSubscription } from '../backend/subscription.js'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { parse } from '@brillout/json-serializer/parse'
@@ -279,7 +279,8 @@ function reportSubscriptionEnd(error: unknown): void {
   reportServerChannelError(error)
 }
 
-/** A route's subscription while wanted; one that ends on its own is reported and replaced once, as a Room lane's is. */
+/** A route's subscription while wanted; one that ends on its own is reported and replaced once, as a Room lane's is, and
+ *  a transport that replaces the plane gets it. */
 class RouteSubscription<Kind extends BroadcastKind> {
   private _current: BackendSubscription | null = null
 
@@ -291,12 +292,20 @@ class RouteSubscription<Kind extends BroadcastKind> {
   /** Subscribes unless a subscription is live; throws where the backend can't bind the route. */
   open(): void {
     if (this._current === null) this._subscribe(false)
+    followBroadcastPlane(this)
   }
 
   close(): void {
+    unfollowBroadcastPlane(this)
     const current = this._current
     this._current = null
     void current?.unsubscribe()
+  }
+
+  /** Subscribes on the plane that replaced this subscription's. */
+  planeReplaced(): void {
+    this.close()
+    this.open()
   }
 
   private _subscribe(replacing: boolean): void {
