@@ -52,17 +52,20 @@ type Generation = {
   cells: Map<string, StoredCell>
   order: Map<string, OrderingInfo>
   retained: Map<string, RetainedEntry>
-  subs: Map<string, Set<MemorySubscriptionAttempt>>
+  subs: Subscriptions
 }
 
 type RoomRecord = { head: StoredHead | null; gens: Map<string, Generation> }
+
+/** Subscriptions by key; a change replaces a key's array, so an array read at a publish or commit is its targets. */
+type Subscriptions = Map<string, readonly MemorySubscriptionAttempt[]>
 
 /** @internal The storage, kept apart from the backend so a reconstructed one can reuse it. */
 class MemoryBackendState {
   readonly rooms = new Map<string, RoomRecord>()
   readonly directory = new Map<string, string>()
   readonly broadcastOrder = new Map<string, OrderingInfo>()
-  readonly broadcastSubs: Record<BroadcastKind, Map<string, Set<MemorySubscriptionAttempt>>> = {
+  readonly broadcastSubs: Record<BroadcastKind, Subscriptions> = {
     text: new Map(),
     binary: new Map(),
   }
@@ -74,7 +77,7 @@ const DELIVERIES_PER_TURN = 1024
 
 const copyBytes = (bytes: Uint8Array): Uint8Array => new Uint8Array(bytes)
 const copyLane = (lane: LaneId): LaneId => ({ ...lane })
-const sumReceiverCounts = (targets: MemorySubscriptionAttempt[]): number =>
+const sumReceiverCounts = (targets: readonly MemorySubscriptionAttempt[]): number =>
   targets.reduce((total, target) => total + target.receiverCount(), 0)
 const isExpired = (entry: Expiring, now: number): boolean => entry.expiresAt !== null && entry.expiresAt <= now
 
@@ -150,7 +153,7 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
 
   publish(route: BroadcastRoute, payload: BroadcastPayload): PublishResult {
     const mark = advanceOrder(this._state.broadcastOrder, route.key, Date.now())
-    const targets = [...(this._state.broadcastSubs[route.kind].get(route.key) ?? [])]
+    const targets = this._state.broadcastSubs[route.kind].get(route.key) ?? []
     // Counted before delivery, which may unsubscribe or subscribe.
     const receivers = sumReceiverCounts(targets)
     this._deliver(() => {
@@ -261,7 +264,7 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
         ...mark,
       })
     }
-    const targets = [...(gen.subs.get(key) ?? [])]
+    const targets = gen.subs.get(key) ?? []
     // Commits assign their seq and queue their delivery in one synchronous step, so deliveries run in seq order.
     const delivery = new Promise<void>((resolve) =>
       queueMicrotask(() =>
@@ -296,7 +299,7 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
     receiver: BackendReceiver<BackendPayload>,
     localReceiverCount: () => number,
   ): MemorySubscriptionAttempt {
-    let subs: Map<string, Set<MemorySubscriptionAttempt>>
+    let subs: Subscriptions
     let key: string
     if ('roomId' in source) {
       const { roomId, inc, lane } = source
@@ -312,9 +315,9 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
       key = source.key
     }
     const sub: MemorySubscriptionAttempt = new MemorySubscriptionAttempt(receiver, localReceiverCount, () =>
-      removeFromSet(subs, key, sub),
+      removeSubscription(subs, key, sub),
     )
-    getOrCreate(subs, key, () => new Set()).add(sub)
+    subs.set(key, [...(subs.get(key) ?? []), sub])
     return sub
   }
 
@@ -372,9 +375,12 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
   }
 }
 
-function removeFromSet<Key, Value>(map: Map<Key, Set<Value>>, key: Key, value: Value): void {
-  const set = map.get(key)
-  if (set?.delete(value) && set.size === 0) map.delete(key)
+function removeSubscription(subs: Subscriptions, key: string, sub: MemorySubscriptionAttempt): void {
+  const current = subs.get(key)
+  if (current === undefined || !current.includes(sub)) return
+  const rest = current.filter((other) => other !== sub)
+  if (rest.length === 0) subs.delete(key)
+  else subs.set(key, rest)
 }
 
 function getOrCreate<Key, Value>(map: Map<Key, Value>, key: Key, create: () => Value): Value {
