@@ -233,7 +233,7 @@ Fire-and-forget is also fine — data is sent immediately whether or not you awa
 channel.send({ type: 'ping' }) // sent immediately, no await needed
 ```
 
-If the receiver falls behind, the server holds up to `config.channel.bufferLimit` of such sends made once it has no room left (`bufferLimitBinary` for binary); a send past that rejects with `ChannelOverflowError`.
+If the receiver falls behind, the server holds up to `config.channel.bufferLimit` (`bufferLimitBinary` for binary) of what the channel sends once the receiver has no room left; a send past that rejects with `ChannelOverflowError`. An awaited `send()` waits for room, so a producer that awaits each send isn't refused for a message within the limit, while producers sending on one channel at once share it.
 
 
 ## `Broadcast`
