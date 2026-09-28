@@ -43,8 +43,9 @@ function page(wire: Wire, { upgrade = false, delays = {} as Partial<Record<numbe
   const traffic: Traffic = { requests: 0, toServer: [], toPage: [] }
   /** Ends a wire as a network drop does, the latest last. */
   const cuts: (() => void)[] = []
+  const failing: FailingPost = { next: null }
   if (wire === 'ws' || upgrade) vi.stubGlobal('WebSocket', webSocketTo(traffic, cuts, delays))
-  if (wire !== 'ws') config.fetch = sseServer(traffic, wire === 'sse-batch', cuts, delays)
+  if (wire !== 'ws') config.fetch = sseServer(traffic, wire === 'sse-batch', cuts, delays, failing)
   const telefuncUrl = `http://${crypto.randomUUID()}.test/_telefunc`
   const connectionKey = crypto.randomUUID()
   return {
@@ -52,6 +53,8 @@ function page(wire: Wire, { upgrade = false, delays = {} as Partial<Record<numbe
     cut: () => cuts.at(-1)!(),
     /** How many wires the page opened. */
     wires: () => cuts.length,
+    /** The next batch POST carrying a RECONCILE fails, before or after the server reads it. */
+    failNextReconcilePost: (after: 'read' | 'unread') => void (failing.next = after),
     /** A channel the page opens, such as a call's callback. */
     channel<ClientToServer = unknown, ServerToClient = unknown>(channelId: string = crypto.randomUUID()) {
       return new ClientChannel<ClientToServer, ServerToClient>({
@@ -93,11 +96,14 @@ async function searchBox(channel: ReturnType<typeof page>['channel'], keystrokes
   return { openedAfter, networkErrors }
 }
 
+type FailingPost = { next: 'read' | 'unread' | null }
+
 function sseServer(
   traffic: Traffic,
   refuseUpload: boolean,
   cuts: (() => void)[],
   delays: Partial<Record<number, number>>,
+  failing: FailingPost,
 ): typeof fetch {
   const sse = getTelefuncSseChannelHooks()
   return (async (url: string, init: RequestInit) => {
@@ -107,14 +113,21 @@ function sseServer(
     if (!(body instanceof Blob) && refuseUpload) return new Response('', { status: 400 })
     // Bytes rather than the Blob: a Request reads a Blob body on a later event-loop turn, which fake timers don't give.
     let logged: Uint8Array | ReadableStream<Uint8Array>
+    let fails: FailingPost['next'] = null
     if (body instanceof Blob) {
       logged = new Uint8Array(await body.arrayBuffer())
-      for (const frame of lengthPrefixed(logged)) traffic.toServer.push(frame[0]!)
+      const frames = lengthPrefixed(logged)
+      for (const frame of frames) traffic.toServer.push(frame[0]!)
+      if (failing.next && init.headers && !JSON.stringify(init.headers).includes('text/event-stream')) {
+        if (frames.some((frame) => frame[0] === TAG.RECONCILE)) [fails, failing.next] = [failing.next, null]
+      }
+      if (fails === 'unread') throw new TypeError('fetch failed')
     } else {
       logged = body.pipeThrough(framesThrough((frame) => traffic.toServer.push(frame[0]!)))
     }
     const request = new Request(url, { method: 'POST', body: logged, duplex: 'half' } as RequestInit)
     const response = (await sse.handleRequest(request))!
+    if (fails === 'read') throw new TypeError('fetch failed')
     const responseBody =
       response.body instanceof ReadableStream
         ? response.body.pipeThrough(eventsThrough((frame) => traffic.toPage.push(frame[0]!), cuts, delays))
@@ -506,7 +519,28 @@ describe.each(WIRES)('over %s', (wire) => {
   })
 })
 
-describe('with every channel registered, a page sends and gets the frames it did before', () => {
+test.each([
+  ['before the server read it', 'unread'],
+  ['after the server read it', 'read'],
+] as const)(
+  'what a registration carries behind its RECONCILE on SSE batch POSTs arrives when that POST fails %s',
+  async (_when, after) => {
+    const { channel, failNextReconcilePost, wires } = page('sse-batch')
+    const clock = register<string, string>()
+    const received: string[] = []
+    clock.listen((message) => void received.push(message))
+    const pageClock = channel<string, string>(clock.id)
+    await vi.advanceTimersByTimeAsync(500)
+    failNextReconcilePost(after)
+    channel(register().id)
+    void pageClock.send('carried', { ack: false }) // queued behind the registration's RECONCILE
+    await vi.advanceTimersByTimeAsync(3_000)
+    expect(wires()).toBe(2) // the failed POST ended its wire
+    expect(received).toEqual(['carried'])
+  },
+)
+
+describe('with every channel registered, a page sends each message once, and no frame it did not before', () => {
   const tags = (list: number[]) => list.filter((tag) => tag !== TAG.PING && tag !== TAG.PONG)
   // A returned channel the page writes to at once, the server's reply, then a second returned channel.
   async function run(wire: Wire) {
@@ -530,24 +564,12 @@ describe('with every channel registered, a page sends and gets the frames it did
 })
 
 const { RECONCILE, RECONCILED, TEXT, WINDOW, MSG_WINDOW, SENT, BDP_PING, BDP_PING_ACK, STREAM_REQUEST_OPEN_ACK } = TAG
-/** As recorded before initial channels the server hasn't registered were answered at once. */
+/** As recorded before initial channels the server hasn't registered were answered at once, less the TEXT an SSE page
+ *  sent twice: with its first RECONCILE, and again as the replay that RECONCILE's RECONCILED asked for. */
 const EXPECTED_TRAFFIC: Record<Wire, Traffic> = {
   sse: {
     requests: 2,
-    toServer: [
-      RECONCILE,
-      TEXT,
-      TEXT,
-      BDP_PING_ACK,
-      WINDOW,
-      MSG_WINDOW,
-      SENT,
-      RECONCILE,
-      BDP_PING,
-      WINDOW,
-      MSG_WINDOW,
-      SENT,
-    ],
+    toServer: [RECONCILE, TEXT, BDP_PING_ACK, WINDOW, MSG_WINDOW, SENT, RECONCILE, BDP_PING, WINDOW, MSG_WINDOW, SENT],
     toPage: [
       STREAM_REQUEST_OPEN_ACK,
       WINDOW,
@@ -567,7 +589,6 @@ const EXPECTED_TRAFFIC: Record<Wire, Traffic> = {
     requests: 5,
     toServer: [
       RECONCILE,
-      TEXT,
       TEXT,
       BDP_PING_ACK,
       WINDOW,

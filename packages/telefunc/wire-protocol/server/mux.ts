@@ -36,7 +36,6 @@ import type {
   PreparePayload,
   ReconcileOpenEntry,
   ReconcilePayload,
-  ReconciledPayload,
 } from '../shared-ws.js'
 import { IndexedPeer, type PeerSender } from './IndexedPeer.js'
 import type { ServerChannel } from './channel.js'
@@ -64,7 +63,9 @@ type ServerTransport<TConnection> = {
  *  `finalizeUpgrade` is null when this isn't an SSE→WS upgrade. */
 type ReconcileOutcome = {
   sessionId: string
-  openList: ReconciledPayload['open']
+  /** Each one's `lastSeq` is read as the RECONCILED goes out, so it counts what the batch carried behind the RECONCILE
+   *  when the transport sends it after that batch. */
+  attached: ChannelHandle[]
   finalizeUpgrade: (() => void) | null
   /** The wire this RECONCILED belongs on — a barrier reconciles the staged WS, not the sender. */
   deliverTo: Wire
@@ -242,7 +243,7 @@ class ChannelMux {
       encode.reconciled({
         upgradeId: outcome.upgradeId,
         sessionId: outcome.sessionId,
-        open: outcome.openList,
+        open: outcome.attached.map((h) => ({ ix: h.ix, lastSeq: h.channel._lastClientSeq })),
         reconnectTimeout: this.options.reconnectTimeout,
         idleTimeout: this.options.idleTimeout,
         pingInterval: this.options.pingInterval,
@@ -547,7 +548,7 @@ class ChannelMux {
       ctrl.sessionId !== undefined && ctrl.sessionId === transport.getSessionId(connection)
         ? ctrl.sessionId
         : crypto.randomUUID()
-    const openList = this.reconcileSession(ctrl.sessionId, newSessionId, ctrl.open, entry, connection)
+    const attached = this.reconcileSession(ctrl.sessionId, newSessionId, ctrl.open, entry, connection)
 
     // The connection may have closed since this frame arrived, so its RECONCILED never goes out.
     // Remove the session outright, one the client never received or its own, but preserve the
@@ -569,7 +570,7 @@ class ChannelMux {
     if (ctrl.sessionId) this.sessionFinalizers.delete(ctrl.sessionId)
     this.sessionFinalizers.set(newSessionId, () => this.send(connection, encode.fin()))
     transport.setSessionId(connection, newSessionId)
-    return { sessionId: newSessionId, openList, finalizeUpgrade, deliverTo: connection }
+    return { sessionId: newSessionId, attached, finalizeUpgrade, deliverTo: connection }
   }
 
   private reconcileSession(
@@ -578,7 +579,7 @@ class ChannelMux {
     open: ReconcilePayload['open'],
     conn: ConnectionEntry,
     connection: Wire,
-  ): ReconciledPayload['open'] {
+  ): ChannelHandle[] {
     const handles = open
       .map((entry) => this.attach(entry, conn, connection))
       .filter((h): h is ChannelHandle => h !== null)
@@ -593,7 +594,7 @@ class ChannelMux {
       }
     }
     this.sessions.setSession(newSessionId, handles)
-    return handles.map((h) => ({ ix: h.ix, lastSeq: h.channel._lastClientSeq }))
+    return handles
   }
 
   /** Null leaves the channel out of the RECONCILED. The wire awaits an initial one the server hasn't registered, and
