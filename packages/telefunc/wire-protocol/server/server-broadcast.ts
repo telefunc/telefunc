@@ -144,7 +144,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
     if (!this._peerSubscribedText) return
     const wireText = encodePublishText(serialized, rawInfo)
     if (this._peer) {
-      if (this._flow.isPastByteCredit && this._isPeerBufferFull(this._bufferLimit)) {
+      if (this._flow.isPastByteCredit && this._isPeerBehind()) {
         this._closeBehind()
         return
       }
@@ -166,7 +166,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
     if (!this._peerSubscribedBinary) return
     const wireData = encodePublishBinary(data, rawInfo)
     if (this._peer) {
-      if (this._flow.isPastByteCredit && this._isPeerBufferFull(this._bufferLimitBinary)) {
+      if (this._flow.isPastByteCredit && this._isPeerBehind()) {
         this._closeBehind()
         return
       }
@@ -176,14 +176,12 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
     this._prePeerBuffer.pushPublishBinary(wireData)
   }
 
-  /** A page that can't keep up with the broadcast has no send to reject: past its bufferLimit it leaves the group, on
-   *  both ends, rather than be sent a gap. */
+  /** A page that can't keep up with the broadcast has no send to reject: once behind, it leaves the group, on both
+   *  ends, rather than be sent a gap. */
   private _closeBehind(): void {
     this._peer!.sendError(ERROR_REASON.OVERFLOW)
     this._shutdown(
-      new ChannelOverflowError(
-        'Broadcast closed: its client fell further behind than config.channel.bufferLimit lets the server hold',
-      ),
+      new ChannelOverflowError('Broadcast closed: its client fell further behind than the server holds for a client'),
     )
   }
 

@@ -4,7 +4,7 @@ import { getChannelMux } from '../wire-protocol/server/mux.js'
 import { ServerChannel } from '../wire-protocol/server/channel.js'
 import { ChannelOverflowError } from '../wire-protocol/channel-errors.js'
 import { encode } from '../wire-protocol/shared-ws.js'
-import { CHANNEL_BUFFER_LIMIT_BYTES, CREDIT_WINDOW_INITIAL_BYTES } from '../wire-protocol/constants.js'
+import { CREDIT_WINDOW_INITIAL_BYTES, CREDIT_WINDOW_MAX_BYTES } from '../wire-protocol/constants.js'
 
 afterEach(() => {
   vi.unstubAllGlobals()
@@ -47,7 +47,7 @@ async function attach(buffered: (written: number) => number) {
 }
 
 /** 16 KiB sends, none awaited, until one rejects. */
-async function sendUntilRejected(channel: ServerChannel<unknown, string>, maxSends = 2_000) {
+async function sendUntilRejected(channel: ServerChannel<unknown, string>, maxSends = 6_000) {
   let error: unknown
   for (let n = 0; error === undefined && n < maxSends; n++) {
     channel.send(String(n).padEnd(16 * 1024)).catch((err: unknown) => (error = err))
@@ -56,10 +56,11 @@ async function sendUntilRejected(channel: ServerChannel<unknown, string>, maxSen
   return error
 }
 
-test("a page that stops reading its Bun socket holds what a channel sends nobody awaits to the page's window and bufferLimit: the next send rejects with ChannelOverflowError", async () => {
+test("a page that stops reading its Bun socket holds what a channel sends nobody awaits to the page's window and the largest window a page grants: the next send rejects with ChannelOverflowError", async () => {
   const { channel, written } = await attach((written) => written)
   expect(await sendUntilRejected(channel)).toBeInstanceOf(ChannelOverflowError)
-  expect(written()).toBeLessThanOrEqual(CREDIT_WINDOW_INITIAL_BYTES + CHANNEL_BUFFER_LIMIT_BYTES + 32 * 1024)
+  // One message past them, and each one's header.
+  expect(written()).toBeLessThanOrEqual(CREDIT_WINDOW_INITIAL_BYTES + CREDIT_WINDOW_MAX_BYTES + 64 * 1024)
 })
 
 test('a Bun socket that writes everything out at once holds nothing for the page, so a channel refuses no send nobody awaits', async () => {

@@ -32,7 +32,7 @@ import { handleTelefunctionBug } from '../../node/server/runTelefunc/validateTel
 import { ChannelClosedError, ChannelOverflowError, replayLossError } from '../channel-errors.js'
 import { NetworkError } from '../../shared/NetworkError.js'
 import { isPromise } from '../../utils/isPromise.js'
-import { CHANNEL_CLOSE_TIMEOUT_MS, CHANNEL_PING_INTERVAL_MIN_MS } from '../constants.js'
+import { CHANNEL_CLOSE_TIMEOUT_MS, CHANNEL_PING_INTERVAL_MIN_MS, CREDIT_WINDOW_MAX_BYTES } from '../constants.js'
 import { FlowControl } from '../flow-control/flow-control.js'
 import { STATUS_BODY_INTERNAL_SERVER_ERROR } from '../../shared/constants.js'
 import { ServerChannelBuffer } from './ServerChannelBuffer.js'
@@ -222,7 +222,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     // Ack-bearing sends bypass credit accounting — the caller's `await` on the ack
     // Promise already serializes the next send, so credit would add nothing.
     if (needsAck) {
-      if (this._isPeerBufferFull(this._bufferLimit)) return rejectOverflow()
+      if (this._isPeerBehind()) return rejectOverflow()
       return this._trackAck(
         new Promise<ChannelAck<ServerToClient>>((resolve, reject) => {
           this._peer!.sendTextAckReq(serialized, (seq, bytes) => this._addPendingAck(seq, bytes, { resolve, reject }))
@@ -230,8 +230,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       )
     }
     // Cooperative credit model: the send already fired; `decrement` only gates the return
-    // value. Awaiting throttles the caller's next send; not awaiting bypasses credit, up to the peer buffer.
-    if (this._flow.isPastByteCredit && this._isPeerBufferFull(this._bufferLimit)) return rejectOverflow()
+    // value. Awaiting throttles the caller's next send; not awaiting bypasses credit, until the peer is behind.
+    if (this._flow.isPastByteCredit && this._isPeerBehind()) return rejectOverflow()
     return this._flow.decrement(this._peer.sendText(serialized))
   }
 
@@ -264,7 +264,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     }
     // Ack-bearing path bypasses credit; see `_send` for rationale.
     if (needsAck) {
-      if (this._isPeerBufferFull(this._bufferLimitBinary)) return rejectOverflow()
+      if (this._isPeerBehind()) return rejectOverflow()
       return this._trackAck(
         new Promise<unknown>((resolve, reject) => {
           this._peer!.sendBinaryAckReq(data, (seq, bytes) => this._addPendingAck(seq, bytes, { resolve, reject }))
@@ -272,18 +272,19 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       )
     }
     // Cooperative credit model; see `_send`.
-    if (this._flow.isPastByteCredit && this._isPeerBufferFull(this._bufferLimitBinary)) return rejectOverflow()
+    if (this._flow.isPastByteCredit && this._isPeerBehind()) return rejectOverflow()
     this._peer.sendBinary(data)
     return this._flow.decrement(data.byteLength)
   }
 
-  /** The peer is behind by what this channel sent once past its credit and the ack requests it hasn't answered. The
-   *  server holds no more of that than its wire does, and all of it where the runtime can't tell. */
-  protected _isPeerBufferFull(limit: number): boolean {
+  /** What this channel sent once past its credit, and the ack requests the peer hasn't answered, as far as its wire
+   *  still holds them, or all of them where the runtime can't tell. Up to the largest window a page grants, that is a
+   *  burst a page that reads is sent, however fast it reads; past it, the peer is behind. */
+  protected _isPeerBehind(): boolean {
     const behind = this._flow.bytesSentPastCredit + this._pendingAckBytes
-    if (behind < limit) return false
+    if (behind < CREDIT_WINDOW_MAX_BYTES) return false
     const buffered = this._peer!.sender.bufferedAmount()
-    return (buffered === undefined ? behind : Math.min(behind, buffered)) >= limit
+    return (buffered === undefined ? behind : Math.min(behind, buffered)) >= CREDIT_WINDOW_MAX_BYTES
   }
 
   private _addPendingAck(

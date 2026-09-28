@@ -8,7 +8,7 @@ import { base64urlToUint8Array } from '../base64url.js'
 import { decode, encode, TAG, type DecodedFrame } from '../shared-ws.js'
 import { Readable } from 'node:stream'
 import { getServerConfig } from '../../node/server/serverConfig.js'
-import { CHANNEL_BUFFER_LIMIT_BYTES, CREDIT_MSG_WINDOW_MAX, CREDIT_WINDOW_INITIAL_BYTES } from '../constants.js'
+import { CREDIT_MSG_WINDOW_MAX, CREDIT_WINDOW_INITIAL_BYTES, CREDIT_WINDOW_MAX_BYTES } from '../constants.js'
 import { ChannelOverflowError } from '../channel-errors.js'
 import type { PushReadable } from '../push-readable.js'
 import type { PushReadableStream } from '../push-readable-stream.js'
@@ -138,7 +138,7 @@ test.each([
   ['a Node', true],
   ['a web', false],
 ])(
-  "a page that stops reading %s SSE stream holds what a channel sends nobody awaits to the page's window and bufferLimit: the next send rejects with ChannelOverflowError",
+  "a page that stops reading %s SSE stream holds what a channel sends nobody awaits to the page's window and the largest window a page grants: the next send rejects with ChannelOverflowError",
   async (_, node) => {
     await loadStreamNodeModuleOnce() // as runTelefunc does before an SSE request reaches the transport
     const sse = getTelefuncSseChannelHooks()
@@ -157,13 +157,14 @@ test.each([
     await vi.waitFor(() => expect(opened).toBe(true))
 
     let error: unknown
-    for (let n = 0; error === undefined && n < 2_000; n++) {
+    for (let n = 0; error === undefined && n < 6_000; n++) {
       channel.send(String(n).padEnd(16 * 1024)).catch((err: unknown) => (error = err))
       await Promise.resolve()
     }
     expect(error).toBeInstanceOf(ChannelOverflowError)
     // An event carries its frame in base64.
-    const bound = ((CREDIT_WINDOW_INITIAL_BYTES + CHANNEL_BUFFER_LIMIT_BYTES + 32 * 1024) * 4) / 3
+    // One message past them, and each one's header and event framing.
+    const bound = ((CREDIT_WINDOW_INITIAL_BYTES + CREDIT_WINDOW_MAX_BYTES + 128 * 1024) * 4) / 3
     expect(body.bufferedAmount).toBeGreaterThan(CREDIT_WINDOW_INITIAL_BYTES)
     expect(body.bufferedAmount).toBeLessThanOrEqual(bound)
   },

@@ -6,7 +6,7 @@ import { ServerChannel } from './channel.js'
 import { encode } from '../shared-ws.js'
 import { getServerConfig } from '../../node/server/serverConfig.js'
 import { ChannelOverflowError } from '../channel-errors.js'
-import { CHANNEL_BUFFER_LIMIT_BYTES, CREDIT_WINDOW_INITIAL_BYTES } from '../constants.js'
+import { CREDIT_WINDOW_INITIAL_BYTES, CREDIT_WINDOW_MAX_BYTES } from '../constants.js'
 
 afterEach(() => {
   vi.useRealTimers()
@@ -52,7 +52,7 @@ async function attachToStalledPage(websocket: (written: () => number) => object)
 }
 
 /** 16 KiB sends, none awaited, until one rejects. */
-async function sendUntilRejected(channel: ServerChannel<unknown, string>, maxSends = 2_000) {
+async function sendUntilRejected(channel: ServerChannel<unknown, string>, maxSends = 6_000) {
   let error: unknown
   let sends = 0
   while (error === undefined && sends < maxSends) {
@@ -62,9 +62,10 @@ async function sendUntilRejected(channel: ServerChannel<unknown, string>, maxSen
   return { error, sends }
 }
 
-const BOUND = CREDIT_WINDOW_INITIAL_BYTES + CHANNEL_BUFFER_LIMIT_BYTES + 32 * 1024
+/** One message past the page's window and the largest window a page grants, and each message's header. */
+const BOUND = CREDIT_WINDOW_INITIAL_BYTES + CREDIT_WINDOW_MAX_BYTES + 64 * 1024
 
-test("a page that stops reading its Node or Deno socket holds what a channel sends nobody awaits to the page's window and bufferLimit: the next send rejects with ChannelOverflowError", async () => {
+test("a page that stops reading its Node or Deno socket holds what a channel sends nobody awaits to the page's window and the largest window a page grants: the next send rejects with ChannelOverflowError", async () => {
   // What is written stays in the socket.
   const { channel, written } = await attachToStalledPage((written) => ({
     get bufferedAmount() {
@@ -77,7 +78,7 @@ test("a page that stops reading its Node or Deno socket holds what a channel sen
   expect(channel.isClosed).toBe(false)
 })
 
-test("a Durable Object's socket reports no bufferedAmount, so the page's window and bufferLimit alone bound what a channel sends nobody awaits", async () => {
+test("a Durable Object's socket reports no bufferedAmount, so the page's window and the largest window a page grants alone bound what a channel sends nobody awaits", async () => {
   const { channel, written } = await attachToStalledPage(() => ({}))
   const { error } = await sendUntilRejected(channel)
   expect(error).toBeInstanceOf(ChannelOverflowError)
@@ -86,7 +87,7 @@ test("a Durable Object's socket reports no bufferedAmount, so the page's window 
 
 test('a socket that writes everything out at once holds nothing for the page, so a channel refuses no send nobody awaits', async () => {
   const { channel, written } = await attachToStalledPage(() => ({ bufferedAmount: 0 }))
-  const { error } = await sendUntilRejected(channel, 400)
+  const { error } = await sendUntilRejected(channel, (3 * BOUND) / (16 * 1024))
   expect(error).toBeUndefined()
   expect(written()).toBeGreaterThan(2 * BOUND)
 })

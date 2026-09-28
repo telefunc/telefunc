@@ -233,7 +233,7 @@ Fire-and-forget is also fine — data is sent immediately whether or not you awa
 channel.send({ type: 'ping' }) // sent immediately, no await needed
 ```
 
-If the receiver falls behind, the server holds up to `config.channel.bufferLimit` (`bufferLimitBinary` for binary) of what the channel sends once the receiver has no room left; a send past that rejects with `ChannelOverflowError`. An awaited `send()` waits for room, so a producer that awaits each send isn't refused for a message within the limit, while producers sending on one channel at once share it.
+If the receiver falls behind, the server holds up to 64 MiB of what the channel sends once the receiver has no room left, as much as a receiver ever grants, so a burst that size reaches a receiver that reads it; a send past that rejects with `ChannelOverflowError`. An awaited `send()` waits for room, so a producer that awaits each send isn't refused for a message within those 64 MiB, while producers sending on one channel at once share them. `config.channel.bufferLimit` only bounds what the server holds while the receiver is offline.
 
 
 ## `Broadcast`
@@ -415,11 +415,11 @@ Channels and broadcasts signal failure through four errors:
 | `Abort` | Either side called `abort(value)`, or a callback threw `Abort` | Closed | Inspect `err.abortValue` |
 | `NetworkError` (`isChannel: true`) | Connection lost beyond `reconnectTimeout`, or a reconnect needed messages a replay buffer no longer held | Closed | Auto-closed — recreate if needed |
 | `ChannelClosedError` | `send()` on a closed channel | Closed | Recreate the channel |
-| `ChannelOverflowError` | A send was dropped — what the server holds for a peer that is offline or behind exceeded `config.channel.bufferLimit` | **Open** | Only the dropped `send()` rejects; `await` your sends to apply backpressure |
+| `ChannelOverflowError` | A send was dropped — what the server holds for a peer exceeded `config.channel.bufferLimit` while it was offline, or 64 MiB past the room it granted while connected | **Open** | Only the dropped `send()` rejects; `await` your sends to apply backpressure |
 
 > A graceful `close()` isn't an error (`onClose(err)` receives `undefined`).
 
-> A `BroadcastChannel` whose client falls behind the messages published to it by more than 64 MiB plus `config.channel.bufferLimit` (`bufferLimitBinary` for binary) is closed on both ends with `ChannelOverflowError`, as there is no `send()` to reject. Call its telefunction again to rejoin.
+> A `BroadcastChannel` whose client falls behind the messages published to it by more than 128 MiB, its 64 MiB of room and 64 MiB past it, is closed on both ends with `ChannelOverflowError`, as there is no `send()` to reject. Call its telefunction again to rejoin.
 
 See also:
 - <Link href="/stream#error-handling" />
