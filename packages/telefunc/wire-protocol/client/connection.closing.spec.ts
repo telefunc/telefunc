@@ -667,6 +667,90 @@ describe.each(WIRES)('over %s, from the server', (wire) => {
     expect((pageClosed.err as { abortValue: unknown }).abortValue).toBe('gone')
   })
 
+  test('a server close that times out while its page is away gets the page what the server sent meanwhile, then closes it gracefully', async () => {
+    const { net, channel } = page(wire)
+    channel(register().id) // another channel on the page
+    const server = register<never, string>()
+    const pageChannel = channel<never, string>(server.id)
+    const got: string[] = []
+    pageChannel.listen((message) => void got.push(message))
+    const pageClosed = closedWith(pageChannel)
+    const serverClosed = closedWith(server)
+    await advance(500)
+    void server.send('m0', { ack: false })
+    await advance(100)
+    net.cut()
+    await advance(3_000) // the server notices the page is gone
+    const sent = [settled(server.send('m1', { ack: false })), settled(server.send('m2', { ack: false }))]
+    const closing = settled(server.close())
+    await advance(6_000)
+    expect(closing.value).toBe(1)
+    expect((serverClosed.err as Error).message).toBe('Channel close timed out')
+    net.heal()
+    await advance(10_000)
+    expect(got).toEqual(['m0', 'm1', 'm2'])
+    expect(pageClosed.err).toBeUndefined()
+    expect(sent.map(({ value }) => value)).toEqual([undefined, undefined])
+  })
+
+  test('a channel the server sends on and closes before its page attaches, whose close times out first, gets the page what it sent, then closes it gracefully', async () => {
+    const { channel } = page(wire)
+    const server = register<never, string>()
+    const sent = [settled(server.send('m1', { ack: false })), settled(server.send('m2', { ack: false }))]
+    const closing = settled(server.close({ timeout: 300 }))
+    await advance(1_000) // the page's connection is slow to open
+    expect(closing.value).toBe(1)
+    const pageChannel = channel<never, string>(server.id)
+    const got: string[] = []
+    pageChannel.listen((message) => void got.push(message))
+    const pageClosed = closedWith(pageChannel)
+    await advance(1_000)
+    expect(got).toEqual(['m1', 'm2'])
+    expect(pageClosed.err).toBeUndefined()
+    expect(sent.map(({ value }) => value)).toEqual([undefined, undefined])
+  })
+
+  test('a server abort made while its page is away gets the page what the server sent before it, then the abort', async () => {
+    const { net, channel } = page(wire)
+    channel(register().id) // another channel on the page
+    const server = register<never, string>()
+    const pageChannel = channel<never, string>(server.id)
+    const got: string[] = []
+    pageChannel.listen((message) => void got.push(message))
+    const pageClosed = closedWith(pageChannel)
+    await advance(500)
+    net.cut()
+    await advance(3_000) // the server notices the page is gone
+    const sent = settled(server.send('m1', { ack: false }))
+    server.abort('gone')
+    await advance(100)
+    net.heal()
+    await advance(10_000)
+    expect(got).toEqual(['m1'])
+    expect(isAbort(pageClosed.err)).toBe(true)
+    expect(sent.value).toBeUndefined()
+  })
+
+  test('an ack request a server makes while its page is away rejects as its close times out, as no answer can reach it, and still reaches the page', async () => {
+    const { net, channel } = page(wire)
+    channel(register().id) // another channel on the page
+    const server = register<never, string>()
+    const pageChannel = channel<never, string>(server.id)
+    const got: string[] = []
+    pageChannel.listen((message) => void got.push(message))
+    await advance(500)
+    net.cut()
+    await advance(3_000) // the server notices the page is gone
+    const asked = settled(server.send('question', { ack: true }))
+    const closing = settled(server.close())
+    await advance(6_000)
+    expect(closing.value).toBe(1)
+    expect((asked.value as Error).message).toBe('Channel close timed out')
+    net.heal()
+    await advance(10_000)
+    expect(got).toEqual(['question'])
+  })
+
   test('a page whose channels the server closes on a healthy wire lets each go within a ping round trip, and its next RECONCILE lists only the open ones', async () => {
     const { net, channel } = page(wire)
     const kept = channel(register().id)
