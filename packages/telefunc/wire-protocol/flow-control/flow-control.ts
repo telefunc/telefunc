@@ -239,8 +239,7 @@ class FlowControl {
     this._bdp.bumpInitialByteWindow(bytes)
   }
 
-  // A frame counted in bytes only takes no message credit and starts no BDP probe: a broadcast's publish, which
-  // nothing waits on.
+  // A frame counted in bytes only takes no message credit and starts no BDP probe: a publish, which nothing waits on.
 
   countSentBytes(bytes: number): void {
     this._countSentBytes(bytes)

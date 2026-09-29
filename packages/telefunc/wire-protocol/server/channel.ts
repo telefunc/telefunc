@@ -49,6 +49,7 @@ import { getServerConfig } from '../../node/server/serverConfig.js'
 import { assert } from '../../utils/assert.js'
 import {
   ACK_STATUS,
+  ERROR_REASON,
   ProtocolViolationError,
   TAG,
   assertProtocol,
@@ -127,6 +128,11 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
    *  and the queue of senders blocked on credit refresh. Credit governs fire-and-
    *  forget TEXT/BINARY, and PUBLISH in bytes — see `constants.ts`. */
   protected _flow: FlowControl
+  /** How far past its credit the peer can be sent while it reads: a burst up to the largest window a page grants,
+   *  however small the window this one granted. A page taking publishes grants that window from the start, which a
+   *  burst fits in: past it, that page is behind by more than what it read and hasn't reported, which it does once a
+   *  quarter of that window. */
+  private readonly _pastCreditAllowance: number
   private _reconnectTimer: ReturnType<typeof setTimeout> | null = null
   private _responseAbort: ((abortValue?: unknown) => void) | null = null
   private _pendingAckRes: Array<{ ackedSeq: number; result: string; status: AckResultStatus }> = []
@@ -158,10 +164,14 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     ack = false,
     id,
     bufferLimit,
+    publishes = false,
   }: {
     ack?: boolean
     id?: string
     bufferLimit?: number
+    /** Its page is a `ClientBroadcast`, which takes what this channel publishes: nothing waits on a publish's credit,
+     *  so that page grants the largest window from the start, and this channel counts it granted. */
+    publishes?: boolean
   } = {}) {
     this.ack = ack
     this.id = id ?? crypto.randomUUID()
@@ -173,6 +183,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       },
       () => this._peer?.sender.bufferedAmount(),
     )
+    if (publishes) this._flow.onPeerByteWindow(CREDIT_WINDOW_MAX_BYTES)
+    this._pastCreditAllowance = publishes ? CREDIT_WINDOW_MAX_BYTES >> 2 : CREDIT_WINDOW_MAX_BYTES
     const c = getServerConfig().channel
     this._bufferLimit = bufferLimit ?? c.bufferLimit
     this._bufferLimitBinary = c.bufferLimitBinary
@@ -291,19 +303,13 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
    *  while the page was offline, `bufferLimit` of text and `bufferLimitBinary` of binary, which an attach sends at once
    *  whatever the credit. What a reattach replays is what the first two let go out. */
   _sendAllowance(): number {
-    return CREDIT_WINDOW_MAX_BYTES + this._pastCreditAllowance() + this._bufferLimit + this._bufferLimitBinary
-  }
-
-  /** How far past its credit the peer can be sent while it reads: a burst up to the largest window a page grants,
-   *  however small the window this one granted. */
-  protected _pastCreditAllowance(): number {
-    return CREDIT_WINDOW_MAX_BYTES
+    return CREDIT_WINDOW_MAX_BYTES + this._pastCreditAllowance + this._bufferLimit + this._bufferLimitBinary
   }
 
   /** What this channel sent once past its credit, and the ack requests the peer hasn't answered, as far as its wire
    *  still holds them, or all of them where the runtime can't tell. Past `_pastCreditAllowance`, the peer is behind. */
-  protected _isPeerBehind(): boolean {
-    const allowance = this._pastCreditAllowance()
+  private _isPeerBehind(): boolean {
+    const allowance = this._pastCreditAllowance
     const behind = this._flow.bytesSentPastCredit + this._pendingAckBytes
     if (behind < allowance) return false
     const buffered = this._peer!.sender.bufferedAmount()
@@ -734,14 +740,27 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
 
   /** @internal A PUBLISH frame to the peer, buffered until it attaches. */
   _sendPublish(wireText: string): void {
-    if (this._peer) this._peer.sendPublish(wireText)
-    else this._prePeerBuffer.pushPublish(wireText)
+    const peer = this._peer
+    if (peer === null) this._prePeerBuffer.pushPublish(wireText)
+    else if (this._flow.isPastByteCredit && this._isPeerBehind()) this._closeBehind(peer)
+    else this._flow.countSentBytes(peer.sendPublish(wireText))
   }
 
   /** @internal A binary PUBLISH frame to the peer, buffered until it attaches. */
   _sendPublishBinary(wireData: Uint8Array): void {
-    if (this._peer) this._peer.sendPublishBinary(wireData)
-    else this._prePeerBuffer.pushPublishBinary(wireData)
+    const peer = this._peer
+    if (peer === null) this._prePeerBuffer.pushPublishBinary(wireData)
+    else if (this._flow.isPastByteCredit && this._isPeerBehind()) this._closeBehind(peer)
+    else this._flow.countSentBytes(peer.sendPublishBinary(wireData))
+  }
+
+  /** A page that can't keep up with what is published to it has no send to reject: once behind, it leaves, on both
+   *  ends, rather than be sent a gap. */
+  private _closeBehind(peer: IndexedPeer): void {
+    peer.sendError(ERROR_REASON.OVERFLOW)
+    this._shutdown(
+      new ChannelOverflowError('Channel closed: its client fell further behind than the server holds for a client'),
+    )
   }
 
   /** Send an ack response, buffering it if the peer is currently disconnected. */

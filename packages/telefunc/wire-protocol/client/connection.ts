@@ -850,7 +850,7 @@ class ClientConnection implements MuxConnection {
           frame.index,
           frame.reason === ERROR_REASON.OVERFLOW
             ? new ChannelOverflowError(
-                'Broadcast closed: this client fell further behind than the server holds for a client',
+                'Channel closed: this client fell further behind than the server holds for a client',
               )
             : isReplayLoss(frame.reason)
               ? replayLossError('server', frame.reason)

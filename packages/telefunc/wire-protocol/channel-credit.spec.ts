@@ -17,6 +17,9 @@ import { ChannelOverflowError } from './channel-errors.js'
 import { TAG } from './shared-ws.js'
 import { NetworkError } from '../shared/NetworkError.js'
 import { config as serverConfig } from '../node/server/serverConfig.js'
+import { Room } from './room/server/statics.js'
+import type { ServerRoom } from './room/server/room.js'
+import { ClientRoom } from './room/client.js'
 
 const LATENCY_MS = 5
 
@@ -129,9 +132,11 @@ class Loopback {
       this.sends('server', frame)
       socket.toPage.push(frame.slice())
     },
-    bufferedAmount: (socket) => socket.toPage.bytes,
+    bufferedAmount: (socket) => (this.reportsBacklog ? socket.toPage.bytes : undefined),
     terminateConnection: (socket) => socket.cut(),
   }
+  /** Whether the server's runtime tells what waits on a socket, as workerd's doesn't. */
+  reportsBacklog = true
   private readonly connectionKey = crypto.randomUUID()
   private readonly pages: ClientChannel[] = []
   private watch: { from: 'page' | 'server'; tag: number; then: () => void } | null = null
@@ -181,6 +186,21 @@ class Loopback {
     })
     this.pages.push(page as ClientChannel)
     return { server, page }
+  }
+  /** A room's stub the server has registered, and the page's view of the room through it, on the same connection. */
+  async openRoom() {
+    const room = (await Room.create(`room:${crypto.randomUUID()}`)) as ServerRoom
+    const { stub, metadata } = room._openStub({ grants: { selfSuppressed: new Set(), hidden: new Set() } })
+    this.mux.registerChannel(stub)
+    const page = new ClientBroadcast({
+      channelId: stub.id,
+      key: room.id,
+      transports: [CHANNEL_TRANSPORT.WS],
+      telefuncUrl: 'http://loopback.test/_telefunc',
+      connectionKey: this.connectionKey,
+    })
+    this.pages.push(page as ClientChannel)
+    return { room, stub, view: new ClientRoom(page, metadata) }
   }
   dispose(): void {
     for (const page of this.pages) page.abort()
@@ -744,4 +764,144 @@ test('on a slow link, a producer that awaits its sends is not refused for the cr
   await runUntil(() => page.received.at(-1) === message(1), 10_000)
   expect((await settled).map((result) => result.status)).toEqual(['fulfilled', 'fulfilled'])
   expect(page.received.at(-1)).toBe(message(1))
+})
+
+test.each([
+  ['tells what waits on a socket', true],
+  ["can't tell what waits on a socket, as a Durable Object's", false],
+])(
+  "on a runtime that %s, a Room member's page that stops reading is let go with ChannelOverflowError once the server holds its room and a quarter more of the room's messages for it: its view closes and its member leaves",
+  async (_, reportsBacklog) => {
+    loop.reportsBacklog = reportsBacklog
+    const { room, stub, view } = await loop.openRoom()
+    let serverEnd: Error | undefined
+    stub.onClose((err) => void (serverEnd = err))
+    const seen: string[] = []
+    view.subscribe((data) => void seen.push(data as string))
+    let viewClosed = false
+    view.onClose(() => void (viewClosed = true))
+    const joining = view.join()
+    await runUntil(() => view.count === 1, 1_000)
+    const me = await joining
+    const left: unknown[] = []
+    me.onLeave((cause) => void left.push(cause))
+    const leftOnServer: unknown[] = []
+    room.onLeave((member, cause) => void leftOnServer.push([member.id, cause]))
+    const speaker = await room.join()
+    await run(100)
+    loop.socket.toPage.hold()
+    const publication = (n: number) => String(n).padEnd(256 * KIB)
+    let published = 0
+    while (!stub.isClosed && published < 1_000) {
+      void speaker.publish(publication(published++))
+      await run(0)
+    }
+    expect(serverEnd).toBeInstanceOf(ChannelOverflowError)
+    expect(loop.socket.toPage.bytes).toBeGreaterThan(CREDIT_WINDOW_MAX_BYTES * 1.25)
+    expect(loop.socket.toPage.bytes).toBeLessThanOrEqual(CREDIT_WINDOW_MAX_BYTES * 1.25 + 512 * KIB)
+    await runUntil(() => leftOnServer.length > 0, 1_000)
+    expect(leftOnServer).toEqual([[me.id, { type: 'disconnected' }]])
+    const inFlight = me.publish('in flight').catch((err: unknown) => err)
+
+    // Once the page reads again it gets, in order, every message the server sent before the one that found it behind,
+    // then the end.
+    loop.socket.toPage.release()
+    await runUntil(() => viewClosed, 1_000)
+    expect(left).toEqual([{ type: 'disconnected' }])
+    expect(await inFlight).toBeInstanceOf(ChannelOverflowError)
+    expect(seen.length).toBeGreaterThan((CREDIT_WINDOW_MAX_BYTES * 1.25) / (256 * KIB) - 1)
+    expect(seen).toEqual(Array.from({ length: seen.length }, (_, n) => publication(n)))
+  },
+)
+
+test.each([
+  ['tells what waits on a socket', true],
+  ["can't tell what waits on a socket, as a Durable Object's", false],
+])(
+  "on a slow link and a runtime that %s, a Room member's page that keeps up with the room stays in through a burst as it attaches, and through more in all than the server holds for a page behind, while an awaited stream fills the wire",
+  async (_, reportsBacklog) => {
+    loop.reportsBacklog = reportsBacklog
+    const stream = loop.open<never, string>()
+    consume(stream.page)
+    const { room, stub, view } = await loop.openRoom()
+    let serverEnd: unknown = 'open'
+    stub.onClose((err) => void (serverEnd = err))
+    const seen: string[] = []
+    view.subscribe((data) => void seen.push(data as string))
+    const speaker = await room.join()
+    const publication = (n: number) => String(n).padEnd(256 * KIB)
+    // 20 MiB as the server attaches the page, before the window the page grants reaches it, then 26 MB/s, 100 MiB in all.
+    const burst = 80
+    const count = 400
+    loop.onSend('server', TAG.RECONCILED, () => {
+      loop.socket.toPage.bytesPerMs = 40_000 // 40 MB/s
+      for (let n = 0; n < burst; n++) void speaker.publish(publication(n))
+    })
+    let held = 0
+    for (let elapsed = 0; elapsed < 1_000 && seen.length < burst; elapsed++) {
+      held = Math.max(held, loop.sockets[0]?.toPage.bytes ?? 0)
+      await run(1)
+    }
+    void (async () => {
+      while (!stream.server.isClosed) await stream.server.send('x'.repeat(64 * KIB))
+    })().catch(() => {})
+    for (let n = burst; n < count; n++) {
+      void speaker.publish(publication(n))
+      await run(10)
+    }
+    await runUntil(() => seen.length === count, 2_000)
+    expect(serverEnd).toBe('open')
+    expect(held).toBeGreaterThan(CREDIT_WINDOW_INITIAL_BYTES + CREDIT_WINDOW_MAX_BYTES / 4)
+    expect(count * 256 * KIB).toBeGreaterThan(CREDIT_WINDOW_MAX_BYTES * 1.25)
+    expect(seen).toEqual(Array.from({ length: count }, (_, n) => publication(n)))
+  },
+)
+
+test("a Room member's page whose reconnect needs more of the room's messages than the server's replay buffer holds is let go with NetworkError: its view closes and its member leaves", async () => {
+  serverConfig.channel.serverReplayBuffer = 1_024
+  const { room, stub, view } = await loop.openRoom()
+  let serverEnd: unknown = 'open'
+  stub.onClose((err) => void (serverEnd = err))
+  const seen: string[] = []
+  view.subscribe((data) => void seen.push(data as string))
+  let viewClosed = false
+  view.onClose(() => void (viewClosed = true))
+  const joining = view.join()
+  await runUntil(() => view.count === 1, 1_000)
+  const me = await joining
+  const left: unknown[] = []
+  me.onLeave((cause) => void left.push(cause))
+  const speaker = await room.join()
+  await run(100)
+  void speaker.publish('before')
+  await run(50)
+  loop.socket.toPage.hold()
+  for (let n = 0; n < 8; n++) void speaker.publish(String(n).padEnd(256))
+  await run(50)
+  loop.socket.cut()
+  await runUntil(() => viewClosed, 1_000)
+  expect(serverEnd).toEqual(lostOn('server'))
+  expect(left).toEqual([{ type: 'disconnected' }])
+  expect(seen).toEqual(['before'])
+})
+
+test("a Room closed while its page's wire dies reaches the page once it reconnects: its view closes and its member leaves with 'closed'", async () => {
+  const { room, stub, view } = await loop.openRoom()
+  let serverEnd: unknown = 'open'
+  stub.onClose((err) => void (serverEnd = err))
+  let viewClosed = false
+  view.onClose(() => void (viewClosed = true))
+  const joining = view.join()
+  await runUntil(() => view.count === 1, 1_000)
+  const me = await joining
+  const left: unknown[] = []
+  me.onLeave((cause) => void left.push(cause))
+  await run(100)
+  loop.socket.toPage.hold()
+  void Room.close(room.id)
+  await run(50)
+  loop.socket.cut()
+  await runUntil(() => viewClosed && serverEnd !== 'open', 5_000)
+  expect(left).toEqual([{ type: 'closed' }])
+  expect(serverEnd).toBe(undefined)
 })

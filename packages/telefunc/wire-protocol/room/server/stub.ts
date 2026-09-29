@@ -111,7 +111,7 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
     serverRoom: ServerRoom,
     { publishShield, grants }: { publishShield?: ShieldValidator; grants: ResponseRoomGrants },
   ) {
-    super()
+    super({ publishes: true })
     this._room = serverRoom
     this._publishShield = publishShield
     this._selfSuppressed = grants.selfSuppressed

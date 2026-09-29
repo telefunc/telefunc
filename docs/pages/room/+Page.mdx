@@ -161,6 +161,8 @@ A member's `publish()` reaches both room-level subscribers (with `from`) and tha
 onCursorMove((pos) => me.publish({ pos }, { coalesce: 'cursor' }))
 ```
 
+A client that falls further behind the room's messages than the server holds for it, 80 MiB as for a <Link href="/channel#errors">`BroadcastChannel`</Link>, is let go rather than sent a gap: on that client the room closes and its members leave with `'disconnected'`, everyone else sees them leave with `'disconnected'`, and its requests still in flight reject with `ChannelOverflowError`. Return the room from a telefunction again to rejoin.
+
 ### Validating messages
 
 Declare the room's message type and every client `publish()` is checked against it at the server, before any guard or subscriber runs. Pass it as the third type parameter to `Room.create` / `Room.get` / `Room.getOrCreate`:
@@ -536,7 +538,7 @@ type RoomGetOptions = {
 | `onParticipantUpdate(cb)` | Any member's metadata changed: `(member, meta, prev)`. |
 | `onUpdate(cb)` | The room's own metadata changed: `(meta, prev)`. |
 | `onAnnounce(cb)` | A room-authored announcement arrived. Works without `subscribe()`. |
-| `onEmpty(cb)` / `onClose(cb)` | The last participant left / the room closed (on the client, also when its connection is gone). |
+| `onEmpty(cb)` / `onClose(cb)` | The last participant left / the room closed (on the client, also when its connection is gone or it fell further behind the room than the server holds for it). |
 | `onChange(cb)` / `snapshot()` | One change signal plus immutable view: the `useSyncExternalStore` pair. |
 
 State getters: `id`, `meta`, `count`, `isEmpty`, `isClosed`. Counts and presence reflect real players only; off-presence participants are read separately with `getParticipants({ hidden: true })`.
@@ -556,7 +558,7 @@ Your own handle, from `join()`. Room-wide messages arrive on the room and each `
 | `onDemand(cb)` | `(track, wanted)` when a track of yours goes watched or unwatched; `wanted === false` means nobody watching. |
 | `leave()` / `onLeave(cb)` | Leave / observe your own departure: `cause.type` is `'left' \| 'removed' \| 'closed' \| 'disconnected'`. |
 
-Read-only: `id`, `meta`, `identity`, `selfDelivery`. A participant leaves automatically when its holder's connection is gone (`cause: 'disconnected'`).
+Read-only: `id`, `meta`, `identity`, `selfDelivery`. A participant leaves automatically when its holder's connection is gone, or when the client it joined through falls further behind the room than the server holds for it (`cause: 'disconnected'`).
 
 Before the first `listen()`, a participant holds at most 64 private messages and drops the oldest on overflow. If that message requested an acknowledgement, its sender rejects with an inbox-overflow error; an unacknowledged send has no delivery confirmation.
 
