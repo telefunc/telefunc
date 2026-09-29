@@ -151,6 +151,9 @@ type ConnectionState = {
   largestSent: number
   /** Its backlog passed that, and the wire is being terminated. */
   pastSendBacklog: boolean
+  /** Channels attaching to the wire in this turn, before its session holds them: what they send as they attach (their
+   *  replay, what they buffered, what `onOpen` sends) counts under their flow control too. */
+  attaching: Set<ServerChannel>
 }
 
 type ConnectionEntry = {
@@ -257,6 +260,7 @@ class ChannelMux {
         sendHeadroom: 0,
         largestSent: 0,
         pastSendBacklog: false,
+        attaching: new Set(),
       },
       transport: transport as ServerTransport<unknown>,
       sender: {
@@ -637,6 +641,7 @@ class ChannelMux {
     // close kind: a transient close leaves the channels their `_onPeerDisconnect` grace so the
     // client's retry can re-attach them.
     if (state.closed) {
+      state.attaching.clear()
       const reason = state.closed.isPermanent ? DETACH_REASON.PERMANENT : DETACH_REASON.TRANSIENT
       const session = this.sessions.removeSession(newSessionId)
       if (session) for (const handle of session.values()) this.detachHandle(handle, reason)
@@ -651,6 +656,7 @@ class ChannelMux {
 
     this.sessionWires.set(newSessionId, connection)
     transport.setSessionId(connection, newSessionId)
+    state.attaching.clear()
     return { sessionId: newSessionId, attached, finalizeUpgrade, deliverTo: connection }
   }
 
@@ -697,7 +703,10 @@ class ChannelMux {
       if (awaited.phase !== 'attached') return null
     }
     const existing = this.channels.get(entry.id)
-    if (existing) return this.attachChannel(existing, entry, conn.sender, replay)
+    if (existing) {
+      conn.state.attaching.add(existing)
+      return this.attachChannel(existing, entry, conn.sender, replay)
+    }
     if (entry.initial && !awaited) this.awaitChannel(entry, conn, connection)
     return null
   }
@@ -724,7 +733,9 @@ class ChannelMux {
     const { conn, wire } = awaited
     const sessionId = conn.transport.getSessionId(wire)
     assert(sessionId, 'a channel awaited on a wire that never reconciled')
+    conn.state.attaching.add(channel)
     const handle = this.attachChannel(channel, awaited.entry, conn.sender, false)
+    conn.state.attaching.delete(channel)
     if (!handle) {
       this.expireAwaited(awaited)
       return
@@ -917,8 +928,10 @@ class ChannelMux {
     if (backlog === undefined) return Infinity
     const sessionId = entry.transport.getSessionId(connection)
     const session = sessionId === undefined ? undefined : this.sessions.peekSession(sessionId)
+    const channels = new Set(entry.state.attaching)
+    for (const { channel } of session?.values() ?? []) channels.add(channel)
     let allowed = WIRE_SEND_BACKLOG_BASE_BYTES
-    for (const { channel } of session?.values() ?? []) allowed += channel._sendAllowance() + entry.state.largestSent
+    for (const channel of channels) allowed += channel._sendAllowance() + entry.state.largestSent
     return allowed - backlog
   }
 
