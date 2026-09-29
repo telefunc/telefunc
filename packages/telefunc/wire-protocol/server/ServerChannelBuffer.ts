@@ -49,6 +49,11 @@ class ServerChannelBuffer<TAck = never> {
     return this.#text.size + this.#binary.size
   }
 
+  /** A publish was dropped to stay within the budget since the last flush: nothing waits on it to be told. */
+  get droppedPublish(): boolean {
+    return this.#text.droppedPublish || this.#binary.droppedPublish
+  }
+
   pushText(data: string, resolve: () => void, reject: (err: Error) => void): void {
     this.#text.push(TAG.TEXT, data, utf8ByteLength(data), { resolve, reject }, this.#insertionSeq++)
   }
@@ -174,6 +179,7 @@ class BufferLane {
   #head = 0
   #totalBytes = 0
   readonly #maxBytes: number
+  droppedPublish = false
 
   constructor(maxBytes: number) {
     this.#maxBytes = maxBytes
@@ -220,7 +226,9 @@ class BufferLane {
   ): void {
     const overflowErr = new ChannelOverflowError()
     if (bytes > this.#maxBytes) {
+      const dropsPublish = isPublishTag(tag) || this.#tags.slice(this.#head).some(isPublishTag)
       this.clear(overflowErr)
+      if (dropsPublish) this.droppedPublish = true
       callback?.reject(overflowErr)
       return
     }
@@ -246,6 +254,7 @@ class BufferLane {
     this.#order.length = 0
     this.#head = 0
     this.#totalBytes = 0
+    this.droppedPublish = false
   }
 
   // ── Private ──
@@ -255,6 +264,7 @@ class BufferLane {
     // Safe to run after push: the oversized guard ensures the new entry has
     // bytes ≤ maxBytes, so eviction drains old entries and always leaves it.
     while (this.#totalBytes > this.#maxBytes && this.#head < this.#data.length) {
+      if (isPublishTag(this.#tags[this.#head]!)) this.droppedPublish = true
       this.#callbacks[this.#head]?.reject(evictionErr)
       this.#totalBytes -= this.#sizes[this.#head]!
       this.#head++
@@ -269,4 +279,8 @@ class BufferLane {
       this.#head = 0
     }
   }
+}
+
+function isPublishTag(tag: number): boolean {
+  return tag === TAG.PUBLISH || tag === TAG.PUBLISH_BINARY
 }

@@ -158,6 +158,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
       return
     }
     this._prePeerBuffer.pushPublish(wireText)
+    this._closeIfDroppedOffline()
   }
 
   _deliverBroadcastBinaryMessage(data: Uint8Array, rawInfo: WirePublishInfo): void {
@@ -180,14 +181,26 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
       return
     }
     this._prePeerBuffer.pushPublishBinary(wireData)
+    this._closeIfDroppedOffline()
   }
 
   /** A page that can't keep up with the broadcast has no send to reject: once behind, it leaves the group, on both
    *  ends, rather than be sent a gap. */
   private _closeBehind(): void {
-    this._peer!.sendError(ERROR_REASON.OVERFLOW)
-    this._shutdown(
+    this._endWithError(
+      ERROR_REASON.OVERFLOW,
       new ChannelOverflowError('Broadcast closed: its client fell further behind than the server holds for a client'),
+    )
+  }
+
+  /** A publish the buffer for an offline page dropped would leave it a gap: it gets the end at its next attach instead. */
+  private _closeIfDroppedOffline(): void {
+    if (!this._prePeerBuffer.droppedPublish) return
+    this._endWithError(
+      ERROR_REASON.OVERFLOW,
+      new ChannelOverflowError(
+        'Broadcast closed: more was published to its client while it was offline than config.channel.bufferLimit lets the server hold',
+      ),
     )
   }
 

@@ -53,6 +53,7 @@ import type {
   ChannelCtrlFrame,
   ChannelDataFrame,
   ChannelFrame,
+  ErrorReason,
   ReattachState,
   ReplayLoss,
 } from '../shared-ws.js'
@@ -126,6 +127,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   private _pendingCloseAck = false
   private _pendingCloseRequest = false
   private _pendingAbort: string | null = null
+  private _pendingError: ErrorReason | null = null
   private _closeRequestSeq = 0
   /** How far the page is known to have what this channel sent it. */
   private _pageLastSeq = 0
@@ -692,7 +694,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       this._pendingAckRes.length === 0 &&
       !this._pendingCloseAck &&
       !this._pendingCloseRequest &&
-      this._pendingAbort === null
+      this._pendingAbort === null &&
+      this._pendingError === null
     )
   }
 
@@ -706,9 +709,19 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     if (this._pendingCloseRequest)
       this._closeRequestSeq = peer.sendCloseRequest(Math.max(0, this._closeDeadline - Date.now()))
     if (this._pendingAbort !== null) peer.sendAbort(this._pendingAbort)
+    if (this._pendingError !== null) peer.sendError(this._pendingError)
     this._pendingCloseAck = false
     this._pendingCloseRequest = false
     this._pendingAbort = null
+    this._pendingError = null
+  }
+
+  /** Ends the channel on both ends with an ERROR of `reason`, which a page not attached gets at its next attach. */
+  protected _endWithError(reason: ErrorReason, err: Error): void {
+    if (this._didShutdown) return
+    if (this._peer) this._peer.sendError(reason)
+    else this._pendingError = reason
+    this._shutdown(err)
   }
 
   /** Send an ack response, buffering it if the peer is currently disconnected. */
@@ -865,6 +878,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this._pendingCloseAck = false
     this._pendingCloseRequest = false
     this._pendingAbort = null
+    this._pendingError = null
   }
 
   private _fireClose(err?: Error): void {

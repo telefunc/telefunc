@@ -474,6 +474,38 @@ test("a broadcast whose reconnect needs more publishes than the server's replay 
   expect(seen).toEqual(['before'])
 })
 
+test('a broadcast whose page was offline while more was published than config.channel.bufferLimit holds closes on both ends with ChannelOverflowError at its reconnect', async () => {
+  const key = `room:${crypto.randomUUID()}`
+  const room = loop.openBroadcast<string>(key)
+  const closed = closedWith(room)
+  const seen: string[] = []
+  room.page.subscribe((text) => void seen.push(text))
+  await run(100)
+  Broadcast.publish(key, 'before')
+  await run(50)
+  loop.socket.cut()
+  // Offline, the server holds 512 KiB of text for the page: these are 1 MiB.
+  for (let n = 0; n < 8; n++) Broadcast.publish(key, String(n).padEnd(128 * KIB))
+  await runUntil(() => closed.page !== 'open', 2_000)
+  expect(closed.server).toBeInstanceOf(ChannelOverflowError)
+  expect(closed.page).toBeInstanceOf(ChannelOverflowError)
+  expect(seen).toEqual(['before'])
+})
+
+test('a broadcast whose page was offline while less was published than config.channel.bufferLimit holds gets it all at its reconnect', async () => {
+  const key = `room:${crypto.randomUUID()}`
+  const room = loop.openBroadcast<string>(key)
+  const closed = closedWith(room)
+  const seen: string[] = []
+  room.page.subscribe((text) => void seen.push(text))
+  await run(100)
+  loop.socket.cut()
+  for (let n = 0; n < 3; n++) Broadcast.publish(key, String(n).padEnd(128 * KIB))
+  await runUntil(() => seen.length === 3, 2_000)
+  expect(seen).toEqual(Array.from({ length: 3 }, (_, n) => String(n).padEnd(128 * KIB)))
+  expect(closed).toEqual({ page: 'open', server: 'open' })
+})
+
 // Written in one turn, a burst waits on the wire whatever the page's pace: a bound on it smaller than the largest window
 // a page grants refused it to a page that reads at full speed.
 test("a burst of sends nobody awaits, past the page's window and within the largest one a page grants, reaches a page that reads", async () => {
