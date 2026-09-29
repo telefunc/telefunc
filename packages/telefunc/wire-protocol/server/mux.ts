@@ -408,6 +408,7 @@ class ChannelMux {
     const frame = decodeClientFrame(rawFrame, WIRE_MAX_CONN_CTRL_FRAME_BYTES)
     if (frame.tag === TAG.PING) {
       this.resetPingTimer(connection)
+      this.acknowledgeArrivals(entry, connection)
       this.send(connection, encode.pong(this.answerPing(entry, connection, frame.ended)))
       return null
     }
@@ -450,6 +451,14 @@ class ChannelMux {
       this.releaseEnded(channel)
       return { ix, lastSeq: null }
     })
+  }
+
+  /** At each of the page's heartbeats, the channels of the session on this wire acknowledge what arrived since their
+   *  last WINDOW, so the page's replay lets it go while a channel is quiet. */
+  private acknowledgeArrivals(entry: ConnectionEntry, connection: Wire): void {
+    const sessionId = entry.transport.getSessionId(connection)
+    if (sessionId === undefined || this.sessionWires.get(sessionId) !== connection) return
+    for (const { channel } of this.sessions.peekSession(sessionId)?.values() ?? []) channel._acknowledge()
   }
 
   private dispatchChannelFrame(sessionId: string, frame: ChannelFrame): void {

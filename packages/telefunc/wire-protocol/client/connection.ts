@@ -169,6 +169,9 @@ interface MuxChannel {
   _reattachState?(wire: number, batched: boolean): ReattachState
   /** The largest windows the replay buffers allow: the one the page grants, and the one the server grants it. */
   _fitReplays?(window: number, peerWindow: number): void
+  /** At each heartbeat: a WINDOW for what arrived since the last, so the server's replay lets it go while the channel is
+   *  quiet. */
+  _acknowledge?(): void
 }
 
 interface MuxConnection {
@@ -933,11 +936,17 @@ class ClientConnection implements MuxConnection {
     const hb = new Heartbeat(
       intervalMs,
       intervalMs * 2,
-      () => transport.sendPing(this.buildPing()),
+      () => this.beat(transport),
       () => this.handlePongTimeout(transport),
     )
     transport.attachHeartbeat(hb)
     hb.start()
+  }
+
+  /** Each open channel acknowledges what arrived since its last WINDOW, then the PING goes. */
+  private beat(transport: ClientChannelTransport): void {
+    for (const { channel, state } of this.channels.values()) if (state.tag !== 'closed') channel._acknowledge?.()
+    transport.sendPing(this.buildPing())
   }
 
   /** Names each closed channel the server attached, with how far the page has what the server sent on it, which the

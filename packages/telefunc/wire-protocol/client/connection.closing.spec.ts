@@ -850,6 +850,43 @@ describe.each(WIRES)('over %s, a stream that awaits its sends, whose wire drops 
   })
 })
 
+describe.each(WIRES)('over %s, a channel gone quiet', (wire) => {
+  test("has each end's replay let go of what the other end got within a heartbeat, and a heartbeat with nothing new sends no WINDOW", async () => {
+    const { net, channel } = page(wire)
+    const server = register<string, string>()
+    server.listen(() => {})
+    const pageChannel = channel<string, string>(server.id)
+    pageChannel.listen(() => {})
+    await advance(500)
+    // Less than a quarter window each way, which no limit acknowledges.
+    for (let n = 0; n < 8; n++) {
+      void server.send(String(n).padEnd(16 * 1_024), { ack: false })
+      void pageChannel.send(String(n).padEnd(16 * 1_024), { ack: false })
+    }
+    await advance(100)
+    const connection = (pageChannel as any)._connection
+    const pageReplay = connection.replayBuffers.get(connection.channelIndex.get(pageChannel))
+    const held = () => [server._replayBuffer!.byteLength, pageReplay.byteLength]
+    expect(held().every((bytes) => bytes > 0)).toBe(true)
+    await advance(1_000) // a heartbeat
+    expect(held()).toEqual([0, 0])
+
+    const windows = { page: 0, server: 0 }
+    const countPage = () => {
+      windows.page++
+      net.whenPageSends(TAG.WINDOW, countPage)
+    }
+    const countServer = () => {
+      windows.server++
+      net.whenServerSends(TAG.WINDOW, countServer)
+    }
+    net.whenPageSends(TAG.WINDOW, countPage)
+    net.whenServerSends(TAG.WINDOW, countServer)
+    await advance(5_000)
+    expect(windows).toEqual({ page: 0, server: 0 })
+  })
+})
+
 describe.each(WIRES)('over %s, past the replay', (wire) => {
   /** Chunks of a stream of `size` bytes each: the first, then, once `resume` is called, eight more. */
   function chunks(size: number) {

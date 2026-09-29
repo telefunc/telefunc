@@ -689,6 +689,11 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this._shutdown(replayLossError('server', loss))
   }
 
+  /** @internal At each of its page's heartbeats: see `FlowControl.acknowledge`. */
+  _acknowledge(): void {
+    this._flow.acknowledge()
+  }
+
   /** @internal The page has what this channel sent it through `lastSeq`, which its replay lets go. */
   _onPageHas(lastSeq: number): void {
     if (lastSeq > this._pageLastSeq) this._pageLastSeq = lastSeq

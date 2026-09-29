@@ -282,6 +282,11 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     this._flow.fitReplays(window, peerWindow)
   }
 
+  /** @internal At each heartbeat: see `FlowControl.acknowledge`. */
+  _acknowledge(): void {
+    this._flow.acknowledge()
+  }
+
   _onTransportOpen(batched: boolean, wire: number): void {
     if (this._isClosed) return
     if (batched) this._flow.useBatchTransportInitial()

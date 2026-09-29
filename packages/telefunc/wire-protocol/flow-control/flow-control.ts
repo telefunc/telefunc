@@ -70,6 +70,8 @@ class FlowControl {
   private _advertisedMessages = 0
   /** Bytes of the frames credit doesn't count that arrived since the byte limit last went out. */
   private _uncountedBytes = 0
+  /** A frame arrived since the byte limit last went out, which acknowledges what arrived. */
+  private _arrived = false
   /** Senders waiting on credit, oldest first. */
   private _waiters: Array<() => void> = []
   /** A waiter was handed the credit and no send was counted since. */
@@ -183,6 +185,7 @@ class FlowControl {
   onReceived(bytes: number): void {
     this._receivedBytes += bytes
     this._receivedMessages += 1
+    this._arrived = true
     if (this._bdp.onReceive(bytes)) this._emit.bdpPing(this._bdp.probe)
   }
 
@@ -202,8 +205,15 @@ class FlowControl {
   /** Receiver-side: a frame credit doesn't count, an ack request or its answer, arrived. A `WINDOW` acknowledges it, so
    *  one goes out once a quarter window of these arrived since the last, and the sender's replay lets them go. */
   onReceivedUncounted(bytes: number): void {
+    this._arrived = true
     this._uncountedBytes += bytes
     if (this._uncountedBytes >= this._bdp.byteWindow >> 2) this._advertiseBytes()
+  }
+
+  /** Receiver-side, at each heartbeat: a `WINDOW` for what arrived since the last, so the sender's replay lets it go
+   *  while the channel is quiet. */
+  acknowledge(): void {
+    if (this._arrived) this._advertiseBytes()
   }
 
   /** Settle `BDP_PING_ACK`, which says whether the window starved the peer's wire. Each axis grows iff its own sample
@@ -285,6 +295,7 @@ class FlowControl {
 
   onReceivedBytes(bytes: number): void {
     this._receivedBytes += bytes
+    this._arrived = true
   }
 
   onConsumedBytes(bytes: number): void {
@@ -314,6 +325,7 @@ class FlowControl {
   private _advertiseBytes(): void {
     this._advertisedBytes = this._consumedBytes
     this._uncountedBytes = 0
+    this._arrived = false
     this._emit.byteWindowUpdate((this._consumedBytes + this._bdp.byteWindow) >>> 0)
   }
 

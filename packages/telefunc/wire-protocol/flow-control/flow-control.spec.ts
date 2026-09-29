@@ -439,6 +439,21 @@ describe('FlowControl — replay buffers', () => {
     flow.onReceivedUncounted(1)
     expect(emit.windowCalls).toEqual([CREDIT_WINDOW_INITIAL_BYTES, quarter + CREDIT_WINDOW_INITIAL_BYTES])
   })
+
+  // A quiet channel's last frames are acknowledged at the next heartbeat, and a heartbeat with nothing new sends nothing.
+  it('a heartbeat sends a WINDOW only for what arrived since the last', () => {
+    const { flow, emit } = makeFlow()
+    flow.acknowledge()
+    expect(emit.windowCalls).toEqual([])
+    flow.onReceived(100)
+    flow.onConsumed(100)
+    flow.acknowledge()
+    flow.acknowledge()
+    expect(emit.windowCalls).toEqual([100 + CREDIT_WINDOW_INITIAL_BYTES])
+    flow.onReceivedUncounted(10)
+    flow.acknowledge()
+    expect(emit.windowCalls).toHaveLength(2)
+  })
 })
 
 /** A sender and a receiver linked by the u32 wire, as `WINDOW` and `MSG_WINDOW` frames link a channel's ends.

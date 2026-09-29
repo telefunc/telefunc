@@ -238,12 +238,13 @@ export const CHANNEL_RECONNECT_MAX_DELAY_MS = 5_000
 // same wire lost nothing and advertises nothing.
 //
 // Replay: each end keeps what it sent on a channel until its peer acknowledges it, to replay after a reconnect. A
-// `WINDOW` carries the last seq the receiver has, so each one acknowledges: one goes out as a limit does, and once a
-// quarter window of what credit doesn't count, ack requests and their answers, arrived since the last. A receiver never
-// grants a window past half the smaller lane of its peer's replay buffer (`replayWindow`), so what credit lets be in
-// flight, and a message up to as large sent as the credit ran out, always fit it. What credit doesn't hold back, sends
-// nobody awaits past it, ack requests and their answers, takes the rest, and a reconnect that needs what a replay dropped
-// ends the channel on both ends with `NetworkError`.
+// `WINDOW` carries the last seq the receiver has, so each one acknowledges: one goes out as a limit does, once a
+// quarter window of what credit doesn't count, ack requests and their answers, arrived since the last, and at each
+// heartbeat for what arrived since the last, so a quiet channel's replay empties. A receiver never grants a window past
+// half the smaller lane of its peer's replay buffer (`replayWindow`), so what credit lets be in flight, and a message
+// up to as large sent as the credit ran out, always fit it. What credit doesn't hold back, sends nobody awaits past it,
+// ack requests and their answers, takes the rest, and a reconnect that needs what a replay dropped ends the channel on
+// both ends with `NetworkError`.
 
 /** Initial credit window — sized so a typical ~MB-scale burst doesn't stall on
  *  the BDP ramp-up. Grows further via the estimator up to `CREDIT_WINDOW_MAX_BYTES`. */
