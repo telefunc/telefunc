@@ -2426,6 +2426,7 @@ describe('Room public behavior', () => {
           }),
         ]),
       )
+      expect(stub.isClosed).toBe(false)
     } finally {
       config.channel = {}
     }
@@ -2489,7 +2490,6 @@ describe('Room public behavior', () => {
     config.channel = { bufferLimit: 256 }
     try {
       const me = (await room.join({ meta: { score: 0 } })) as ServerLocalParticipant
-      const other = await room.join()
       const wanted: Array<string | null> = []
       me.onDemand((track, on) => void (on && wanted.push(track)))
       const channel = new RoomParticipantStubChannel(me)
@@ -2500,15 +2500,17 @@ describe('Room public behavior', () => {
       const observer = await Room.get(room.id)
       ;(await observer.getParticipant(me.id))!.subscribeBinary(() => {})
       await vi.waitFor(() => expect(wanted).toEqual([null]))
-      // Larger than the offline buffer: it clears the buffered meta and demand notices.
-      await other.send(me.id, 'x'.repeat(300))
+      // Larger than the offline buffer: it clears the buffered meta and demand notices, and is dropped too.
+      const pad = 'x'.repeat(300)
+      await me.setAttributes({ pad })
       const peer = attachPeer(channel)
       await vi.waitFor(() =>
         expect(notices(peer).filter(({ __r }) => __r === 'p-meta' || __r === 'demand-state')).toEqual([
-          { __r: 'p-meta', meta: { score: 1 }, seq: expect.any(Number) },
+          { __r: 'p-meta', meta: { score: 1, pad }, seq: expect.any(Number) },
           { __r: 'demand-state', tracks: [null] },
         ]),
       )
+      expect(channel.isClosed).toBe(false)
     } finally {
       config.channel = {}
     }
@@ -2617,7 +2619,7 @@ describe('Room public behavior', () => {
     const room = (await Room.create('self-demand')) as ServerRoom
     const me = (await room.join({ selfDelivery: false })) as ServerLocalParticipant
     // `me` is held by its client, which is told its demand.
-    const toClient = vi.spyOn(new RoomParticipantStubChannel(me), 'send').mockResolvedValue(undefined as never)
+    const toClient = vi.spyOn(new RoomParticipantStubChannel(me), '_send').mockReturnValue(undefined)
     const demand = () =>
       toClient.mock.calls.map(([message]) => message as { __r: string }).filter((message) => message.__r === 'demand')
     room.subscribeBinary(() => {}, { track: 'mic' })

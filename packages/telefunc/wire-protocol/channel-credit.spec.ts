@@ -969,6 +969,48 @@ test("a Room member's page cut off further behind than the server's replay buffe
   expect(seen).toEqual(['before', ...seen.slice(1).map((_, n) => publication(n))])
 })
 
+test("a Room member's page offline while more of the room's messages were sent to it than config.channel.bufferLimit holds is let go with ChannelOverflowError at its reconnect: its view closes and its member leaves", async () => {
+  const { room, stub, view } = await loop.openRoom()
+  let serverEnd: unknown = 'open'
+  stub.onClose((err) => void (serverEnd = err))
+  const seen: string[] = []
+  view.subscribe((data) => void seen.push(data as string))
+  let viewClosed = false
+  view.onClose(() => void (viewClosed = true))
+  const joining = view.join()
+  await runUntil(() => view.count === 1, 1_000)
+  const me = await joining
+  const left: unknown[] = []
+  me.onLeave((cause) => void left.push(cause))
+  const speaker = await room.join()
+  await run(100)
+  void speaker.publish('before')
+  await run(50)
+  loop.socket.cut()
+  // Offline, the server holds 512 KiB of text for the page: these are 1 MiB.
+  for (let n = 0; n < 8; n++) void speaker.publish(String(n).padEnd(128 * KIB))
+  await runUntil(() => viewClosed, 2_000)
+  expect(serverEnd).toBeInstanceOf(ChannelOverflowError)
+  expect(left).toEqual([{ type: 'disconnected' }])
+  expect(seen).toEqual(['before'])
+})
+
+test("a Room member's page offline while less of the room's messages were sent to it than config.channel.bufferLimit holds gets them all at its reconnect", async () => {
+  const { room, stub, view } = await loop.openRoom()
+  let serverEnd: unknown = 'open'
+  stub.onClose((err) => void (serverEnd = err))
+  const seen: string[] = []
+  view.subscribe((data) => void seen.push(data as string))
+  const speaker = await room.join()
+  await run(100)
+  loop.socket.cut()
+  const publication = (n: number) => String(n).padEnd(128 * KIB)
+  for (let n = 0; n < 3; n++) void speaker.publish(publication(n))
+  await runUntil(() => seen.length === 3, 2_000)
+  expect(seen).toEqual(Array.from({ length: 3 }, (_, n) => publication(n)))
+  expect(serverEnd).toBe('open')
+})
+
 test("a Room closed while its page's wire dies reaches the page once it reconnects: its view closes and its member leaves with 'closed'", async () => {
   const { room, stub, view } = await loop.openRoom()
   let serverEnd: unknown = 'open'
@@ -1032,6 +1074,46 @@ test.each([
     expect(inbox).toEqual(Array.from({ length: inbox.length }, (_, n) => message(n)))
   },
 )
+
+test('the page of a participant handed to it, offline while more messages were sent to its participant than config.channel.bufferLimit holds, is let go with ChannelOverflowError at its reconnect, instead of missing them', async () => {
+  const { room, participant, stub, member } = await loop.openParticipant()
+  let serverEnd: unknown = 'open'
+  stub.onClose((err) => void (serverEnd = err))
+  const leftOnServer: unknown[] = []
+  participant.onLeave((cause) => void leftOnServer.push(cause))
+  const inbox: string[] = []
+  member.listen((data) => void inbox.push(data as string))
+  const left: unknown[] = []
+  member.onLeave((cause) => void left.push(cause))
+  const sender = await room.join()
+  await run(100)
+  void sender.send(participant.id, 'before')
+  await run(50)
+  loop.socket.cut()
+  // Offline, the server holds 512 KiB of text for the page: these are 1 MiB.
+  for (let n = 0; n < 8; n++) void sender.send(participant.id, String(n).padEnd(128 * KIB))
+  await runUntil(() => left.length > 0, 2_000)
+  expect(serverEnd).toBeInstanceOf(ChannelOverflowError)
+  expect(leftOnServer).toEqual([{ type: 'disconnected' }])
+  expect(left).toEqual([{ type: 'disconnected' }])
+  expect(inbox).toEqual(['before'])
+})
+
+test('the page of a participant handed to it, offline while less was sent to its participant than config.channel.bufferLimit holds, gets it all at its reconnect', async () => {
+  const { room, participant, stub, member } = await loop.openParticipant()
+  let serverEnd: unknown = 'open'
+  stub.onClose((err) => void (serverEnd = err))
+  const inbox: string[] = []
+  member.listen((data) => void inbox.push(data as string))
+  const sender = await room.join()
+  await run(100)
+  loop.socket.cut()
+  const message = (n: number) => String(n).padEnd(128 * KIB)
+  for (let n = 0; n < 3; n++) void sender.send(participant.id, message(n))
+  await runUntil(() => inbox.length === 3, 2_000)
+  expect(inbox).toEqual(Array.from({ length: 3 }, (_, n) => message(n)))
+  expect(serverEnd).toBe('open')
+})
 
 test.each([
   ['tells what waits on a socket', true],

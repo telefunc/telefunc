@@ -30,6 +30,9 @@ type EntryCallback = {
  *
  * Sequential delivery is guaranteed: flush() sends all buffered messages
  * in insertion order by merge-iterating both lanes. There are no gaps or null markers.
+ *
+ * An entry pushed as a `gap` is one its page would lack, if dropped, with nothing to tell it so: `droppedGap` says one
+ * was.
  */
 class ServerChannelBuffer<TAck = never> {
   readonly #text: BufferLane
@@ -49,33 +52,33 @@ class ServerChannelBuffer<TAck = never> {
     return this.#text.size + this.#binary.size
   }
 
-  /** A publish was dropped to stay within the budget since the last flush: nothing waits on it to be told. */
-  get droppedPublish(): boolean {
-    return this.#text.droppedPublish || this.#binary.droppedPublish
+  /** An entry pushed as a `gap` was dropped to stay within the budget since the last flush. */
+  get droppedGap(): boolean {
+    return this.#text.droppedGap || this.#binary.droppedGap
   }
 
-  pushText(data: string, resolve: () => void, reject: (err: Error) => void): void {
-    this.#text.push(TAG.TEXT, data, utf8ByteLength(data), { resolve, reject }, this.#insertionSeq++)
+  pushText(data: string, resolve: () => void, reject: (err: Error) => void, gap: boolean): void {
+    this.#text.push(TAG.TEXT, data, utf8ByteLength(data), { resolve, reject }, this.#insertionSeq++, gap)
   }
 
-  pushTextAck(data: string, resolve: (value: TAck) => void, reject: (err: Error) => void): void {
-    this.#text.push(TAG.TEXT_ACK_REQ, data, utf8ByteLength(data), { resolve, reject }, this.#insertionSeq++)
+  pushTextAck(data: string, resolve: (value: TAck) => void, reject: (err: Error) => void, gap: boolean): void {
+    this.#text.push(TAG.TEXT_ACK_REQ, data, utf8ByteLength(data), { resolve, reject }, this.#insertionSeq++, gap)
   }
 
-  pushPublish(data: string): void {
-    this.#text.push(TAG.PUBLISH, data, utf8ByteLength(data), null, this.#insertionSeq++)
+  pushPublish(data: string, gap: boolean): void {
+    this.#text.push(TAG.PUBLISH, data, utf8ByteLength(data), null, this.#insertionSeq++, gap)
   }
 
-  pushBinary(data: Uint8Array, resolve: () => void, reject: (err: Error) => void): void {
-    this.#binary.push(TAG.BINARY, data, data.byteLength, { resolve, reject }, this.#insertionSeq++)
+  pushBinary(data: Uint8Array, resolve: () => void, reject: (err: Error) => void, gap: boolean): void {
+    this.#binary.push(TAG.BINARY, data, data.byteLength, { resolve, reject }, this.#insertionSeq++, gap)
   }
 
-  pushBinaryAck(data: Uint8Array, resolve: (value: unknown) => void, reject: (err: Error) => void): void {
-    this.#binary.push(TAG.BINARY_ACK_REQ, data, data.byteLength, { resolve, reject }, this.#insertionSeq++)
+  pushBinaryAck(data: Uint8Array, resolve: (value: unknown) => void, reject: (err: Error) => void, gap: boolean): void {
+    this.#binary.push(TAG.BINARY_ACK_REQ, data, data.byteLength, { resolve, reject }, this.#insertionSeq++, gap)
   }
 
-  pushPublishBinary(data: Uint8Array): void {
-    this.#binary.push(TAG.PUBLISH_BINARY, data, data.byteLength, null, this.#insertionSeq++)
+  pushPublishBinary(data: Uint8Array, gap: boolean): void {
+    this.#binary.push(TAG.PUBLISH_BINARY, data, data.byteLength, null, this.#insertionSeq++, gap)
   }
 
   /**
@@ -176,10 +179,11 @@ class BufferLane {
   #sizes: number[] = []
   #callbacks: (EntryCallback | EntryCallback | null)[] = []
   #order: number[] = []
+  #gaps: boolean[] = []
   #head = 0
   #totalBytes = 0
   readonly #maxBytes: number
-  droppedPublish = false
+  droppedGap = false
 
   constructor(maxBytes: number) {
     this.#maxBytes = maxBytes
@@ -223,12 +227,13 @@ class BufferLane {
     bytes: number,
     callback: EntryCallback | EntryCallback | null,
     order: number,
+    gap: boolean,
   ): void {
     const overflowErr = new ChannelOverflowError()
     if (bytes > this.#maxBytes) {
-      const dropsPublish = isPublishTag(tag) || this.#tags.slice(this.#head).some(isPublishTag)
+      const dropsGap = gap || this.#gaps.includes(true, this.#head)
       this.clear(overflowErr)
-      if (dropsPublish) this.droppedPublish = true
+      if (dropsGap) this.droppedGap = true
       callback?.reject(overflowErr)
       return
     }
@@ -237,6 +242,7 @@ class BufferLane {
     this.#sizes.push(bytes)
     this.#callbacks.push(callback)
     this.#order.push(order)
+    this.#gaps.push(gap)
     this.#totalBytes += bytes
     this.#evict(overflowErr)
   }
@@ -252,9 +258,10 @@ class BufferLane {
     this.#sizes.length = 0
     this.#callbacks.length = 0
     this.#order.length = 0
+    this.#gaps.length = 0
     this.#head = 0
     this.#totalBytes = 0
-    this.droppedPublish = false
+    this.droppedGap = false
   }
 
   // ── Private ──
@@ -264,7 +271,7 @@ class BufferLane {
     // Safe to run after push: the oversized guard ensures the new entry has
     // bytes ≤ maxBytes, so eviction drains old entries and always leaves it.
     while (this.#totalBytes > this.#maxBytes && this.#head < this.#data.length) {
-      if (isPublishTag(this.#tags[this.#head]!)) this.droppedPublish = true
+      if (this.#gaps[this.#head]) this.droppedGap = true
       this.#callbacks[this.#head]?.reject(evictionErr)
       this.#totalBytes -= this.#sizes[this.#head]!
       this.#head++
@@ -276,11 +283,8 @@ class BufferLane {
       this.#sizes = this.#sizes.slice(this.#head)
       this.#callbacks = this.#callbacks.slice(this.#head)
       this.#order = this.#order.slice(this.#head)
+      this.#gaps = this.#gaps.slice(this.#head)
       this.#head = 0
     }
   }
-}
-
-function isPublishTag(tag: number): boolean {
-  return tag === TAG.PUBLISH || tag === TAG.PUBLISH_BINARY
 }

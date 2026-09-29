@@ -272,9 +272,9 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
 
   // Relays
 
-  /** An event this instance originates for this client alone. */
+  /** An event this instance originates for this client alone: state each attach sends again. */
   _relayEvent(event: RoomRosterEvent | RoomDemandEvent | Extract<RoomCtrlEnvelope, { __r: 'update' }>): void {
-    this._sendPublish(unorderedEventText(event))
+    this._sendPublish(unorderedEventText(event), true)
   }
 
   /** The roster holds the hidden members this client was handed, whose meta it heals too. */
@@ -286,8 +286,8 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
   }
 
   /** A hidden member's events reach only the clients that were handed it. */
-  _relayControl(wireText: string, hiddenMember: string | null): void {
-    if (hiddenMember === null || this._grantedHidden.has(hiddenMember)) this._sendPublish(wireText)
+  _relayControl(wireText: string, hiddenMember: string | null, resentOnAttach: boolean): void {
+    if (hiddenMember === null || this._grantedHidden.has(hiddenMember)) this._sendPublish(wireText, resentOnAttach)
   }
 
   _relayAnnouncement(wireText: string, ord: WirePublishInfo): void {
@@ -456,6 +456,9 @@ class RoomParticipantStubChannel extends RoomRequestChannel {
 
   /** The client of a closed stub is gone, and so is a notice to it. */
   private _notify(notice: ParticipantStubNotice): void {
-    if (!this.isClosed) void this.send(notice).catch(() => {})
+    if (this.isClosed) return
+    // Each attach sends the meta and the demand again.
+    const resentOnAttach = notice.__r === 'p-meta' || notice.__r === 'demand' || notice.__r === 'demand-state'
+    void this._send(notice, { resentOnAttach })?.catch(() => {})
   }
 }

@@ -23,7 +23,7 @@ import { assertUsage } from '../../utils/assert.js'
 import { isPromise } from '../../utils/isPromise.js'
 import { markHandled } from '../../utils/markHandled.js'
 import { ChannelOverflowError } from '../channel-errors.js'
-import { ACK_STATUS, ERROR_REASON, encodePublishText, encodePublishBinary } from '../shared-ws.js'
+import { ACK_STATUS, encodePublishText, encodePublishBinary } from '../shared-ws.js'
 import type { BroadcastKind, WirePublishInfo } from '../shared-ws.js'
 import { STATUS_BODY_INTERNAL_SERVER_ERROR } from '../../shared/constants.js'
 import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
@@ -111,25 +111,12 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
     if (!this._callListeners(this._subscribers.text, data, rawInfo)) return
     if (!this._peerSubscriptions.text) return
     this._sendPublish(encodePublishText(serialized, rawInfo))
-    this._closeIfDroppedOffline()
   }
 
   _deliverBroadcastBinaryMessage(data: Uint8Array, rawInfo: WirePublishInfo): void {
     if (!this._callListeners(this._subscribers.binary, data, rawInfo)) return
     if (!this._peerSubscriptions.binary) return
     this._sendPublishBinary(encodePublishBinary(data, rawInfo))
-    this._closeIfDroppedOffline()
-  }
-
-  /** A publish the buffer for an offline page dropped would leave it a gap: it gets the end at its next attach instead. */
-  private _closeIfDroppedOffline(): void {
-    if (!this._prePeerBuffer.droppedPublish) return
-    this._endWithError(
-      ERROR_REASON.OVERFLOW,
-      new ChannelOverflowError(
-        'Broadcast closed: more was published to its client while it was offline than config.channel.bufferLimit lets the server hold',
-      ),
-    )
   }
 
   /** Calls each listener directly, as a channel's receive does, since this runs per subscriber per message; false once a

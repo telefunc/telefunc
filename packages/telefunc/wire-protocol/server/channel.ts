@@ -182,8 +182,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     /** Its page is a `ClientBroadcast`, which takes what this channel publishes: nothing waits on a publish's credit,
      *  so that page grants the largest window from the start, and this channel counts it granted. */
     publishes?: boolean
-    /** Nothing that sends on it can be refused: a page a send finds behind is let go, on both ends, as one a publish
-     *  finds behind is. */
+    /** Nothing that sends on it can be refused: a page a send finds behind, or one offline whose buffer drops a send, is
+     *  let go, on both ends, as for a publish. */
     letsBehindGo?: boolean
   } = {}) {
     this.ack = ack
@@ -239,24 +239,27 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     }
   }
 
+  /** `resentOnAttach`: its page gets it again at each attach (see `_sendPublish`). */
   _send(
     data: ChannelData<ServerToClient>,
-    opts?: { ack?: boolean },
+    opts?: { ack?: boolean; resentOnAttach?: boolean },
   ): void | Promise<ChannelAck<ServerToClient>> | Promise<void> {
     if (this._isClosed) throw new ChannelClosedError()
     const needsAck = opts?.ack !== false && (opts?.ack === true || this.ack === true)
     const serialized = stringify(data)
     if (!this._peer) {
-      if (needsAck) {
-        return this._trackAck(
-          new Promise<ChannelAck<ServerToClient>>((resolve, reject) => {
-            this._prePeerBuffer.pushTextAck(serialized, resolve, reject)
-          }),
-        )
-      }
-      return new Promise<void>((resolve, reject) => {
-        this._prePeerBuffer.pushText(serialized, resolve, reject)
-      })
+      const gap = this._letsBehindGo && opts?.resentOnAttach !== true
+      const buffered = needsAck
+        ? this._trackAck(
+            new Promise<ChannelAck<ServerToClient>>((resolve, reject) => {
+              this._prePeerBuffer.pushTextAck(serialized, resolve, reject, gap)
+            }),
+          )
+        : new Promise<void>((resolve, reject) => {
+            this._prePeerBuffer.pushText(serialized, resolve, reject, gap)
+          })
+      this._closeIfDroppedOffline()
+      return buffered
     }
     // Ack-bearing sends bypass credit accounting — the caller's `await` on the ack
     // Promise already serializes the next send, so credit would add nothing.
@@ -292,14 +295,16 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     if (this._isClosed) throw new ChannelClosedError()
     const needsAck = opts?.ack === true
     if (!this._peer) {
-      if (needsAck) {
-        return new Promise<unknown>((resolve, reject) => {
-          this._prePeerBuffer.pushBinaryAck(data, resolve, reject)
-        })
-      }
-      return new Promise<void>((resolve, reject) => {
-        this._prePeerBuffer.pushBinary(data, resolve, reject)
-      })
+      const gap = this._letsBehindGo
+      const buffered = needsAck
+        ? new Promise<unknown>((resolve, reject) => {
+            this._prePeerBuffer.pushBinaryAck(data, resolve, reject, gap)
+          })
+        : new Promise<void>((resolve, reject) => {
+            this._prePeerBuffer.pushBinary(data, resolve, reject, gap)
+          })
+      this._closeIfDroppedOffline()
+      return buffered
     }
     // Ack-bearing path bypasses credit; see `_send` for rationale.
     if (needsAck) {
@@ -784,19 +789,24 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this._shutdown(err)
   }
 
-  /** @internal A PUBLISH frame to the peer, buffered until it attaches. */
-  _sendPublish(wireText: string): void {
+  /** @internal A PUBLISH frame to the peer, buffered until it attaches. The buffer may drop one `resentOnAttach`, which
+   *  its page gets again at each attach, without leaving it a gap. */
+  _sendPublish(wireText: string, resentOnAttach = false): void {
     const peer = this._peer
-    if (peer === null) this._prePeerBuffer.pushPublish(wireText)
-    else if (this._flow.isPastByteCredit && this._isPeerBehind()) this._closeBehind()
+    if (peer === null) {
+      this._prePeerBuffer.pushPublish(wireText, !resentOnAttach)
+      this._closeIfDroppedOffline()
+    } else if (this._flow.isPastByteCredit && this._isPeerBehind()) this._closeBehind()
     else this._flow.countSentBytes(peer.sendPublish(wireText))
   }
 
   /** @internal A binary PUBLISH frame to the peer, buffered until it attaches. */
   _sendPublishBinary(wireData: Uint8Array): void {
     const peer = this._peer
-    if (peer === null) this._prePeerBuffer.pushPublishBinary(wireData)
-    else if (this._flow.isPastByteCredit && this._isPeerBehind()) this._closeBehind()
+    if (peer === null) {
+      this._prePeerBuffer.pushPublishBinary(wireData, true)
+      this._closeIfDroppedOffline()
+    } else if (this._flow.isPastByteCredit && this._isPeerBehind()) this._closeBehind()
     else this._flow.countSentBytes(peer.sendPublishBinary(wireData))
   }
 
@@ -806,6 +816,18 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this._endWithError(
       ERROR_REASON.OVERFLOW,
       new ChannelOverflowError('Channel closed: its client fell further behind than the server holds for a client'),
+    )
+  }
+
+  /** The buffer for an offline page dropped a publish, or a send where no sender can be refused, that its page doesn't
+   *  get again as it attaches: rather than be sent a gap, it gets the end at its next attach. */
+  private _closeIfDroppedOffline(): void {
+    if (!this._prePeerBuffer.droppedGap) return
+    this._endWithError(
+      ERROR_REASON.OVERFLOW,
+      new ChannelOverflowError(
+        'Channel closed: more was sent to its client while it was offline than config.channel.bufferLimit, or bufferLimitBinary for binary, lets the server hold',
+      ),
     )
   }
 

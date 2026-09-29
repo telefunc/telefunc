@@ -520,7 +520,9 @@ class ServerRoom extends RoomStateView implements Room {
     if (this._stubs.size === 0) return
     const text = wireText()
     const hiddenMember = hiddenMemberOf(event)
-    for (const stub of this._stubs) stub._relayControl(text, hiddenMember)
+    // Each attach sends the roster and the room's meta again, which carry every event but the close.
+    const resentOnAttach = event.__r !== 'closed'
+    for (const stub of this._stubs) stub._relayControl(text, hiddenMember, resentOnAttach)
   }
 
   private _applyAnnouncement(
