@@ -120,6 +120,11 @@ class Heartbeat {
     this.lastReceivedAt = performance.now()
   }
 
+  /** How long the wire has delivered nothing, since the pong deadline was last set. */
+  quietFor(): number {
+    return performance.now() - this.lastReceivedAt
+  }
+
   private armPongDeadline(ms: number): void {
     if (this.pongTimer) clearTimeout(this.pongTimer)
     this.pongTimer = setTimeout(this.onPongDeadline, ms)
@@ -264,6 +269,8 @@ type ClientChannelTransport = {
   attachHeartbeat(hb: Heartbeat): void
   detachHeartbeat(): void
   hasHeartbeat(): boolean
+  /** How long its wire has delivered nothing, as its heartbeat tracks it: `Infinity` without one. */
+  quietFor(): number
   /** Settles once the frames it was handed have left it, or its wire is gone. */
   drained(): Promise<void>
   dispose(): void
@@ -1036,8 +1043,12 @@ class ClientConnection implements MuxConnection {
    *  late registrations re-enters and restarts the deadline from scratch. */
   private enterReconciling(): void {
     this.reconciling = true
+    this.armReconcileDeadline(RECONCILE_TIMEOUT_MS)
+  }
+
+  private armReconcileDeadline(ms: number): void {
     if (this.reconcileTimer) clearTimeout(this.reconcileTimer)
-    this.reconcileTimer = setTimeout(() => this.onReconcileTimeout(), RECONCILE_TIMEOUT_MS)
+    this.reconcileTimer = setTimeout(() => this.onReconcileTimeout(), ms)
   }
 
   /** Leave the await-RECONCILED window: RECONCILED settled, the wire was lost, or disposed. */
@@ -1059,6 +1070,10 @@ class ClientConnection implements MuxConnection {
    *  drop the wire and let `handleTransportLoss` reconnect. */
   private onReconcileTimeout(): void {
     if (this.closed || !this.reconciling) return
+    // A RECONCILE waits behind what the page sent before it, as an upload on a slow link: the wire is dead once it has
+    // delivered nothing for the deadline.
+    const quiet = this.transport.quietFor()
+    if (quiet < RECONCILE_TIMEOUT_MS) return this.armReconcileDeadline(RECONCILE_TIMEOUT_MS - quiet)
     this.dropWire(this.transport)
   }
 
@@ -1881,6 +1896,10 @@ class WsTransport implements UpgradeTarget {
     return this.heartbeat !== null
   }
 
+  quietFor(): number {
+    return this.heartbeat?.quietFor() ?? Infinity
+  }
+
   drained(): Promise<void> {
     // A socket sends what it buffered before its close.
     return Promise.resolve()
@@ -2410,6 +2429,10 @@ class SseTransport implements UpgradeSource {
 
   hasHeartbeat(): boolean {
     return this.heartbeat !== null
+  }
+
+  quietFor(): number {
+    return this.heartbeat?.quietFor() ?? Infinity
   }
 
   drained(): Promise<void> {

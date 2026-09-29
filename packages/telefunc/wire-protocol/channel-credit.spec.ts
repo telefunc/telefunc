@@ -14,6 +14,7 @@ import {
   CREDIT_WINDOW_MAX_BYTES,
   CHANNEL_PING_INTERVAL_MS,
   CHANNEL_RECONNECT_INITIAL_DELAY_MS,
+  RECONCILE_TIMEOUT_MS,
 } from './constants.js'
 import { ChannelOverflowError } from './channel-errors.js'
 import { TAG } from './shared-ws.js'
@@ -840,6 +841,46 @@ test("on a slow uplink, the server's window for an upload stays at its initial s
   await run(60_000)
   expect(flowOf(feed.server).byteWindow).toBe(CREDIT_WINDOW_INITIAL_BYTES)
   expect(server.received.length).toBeGreaterThan(80)
+})
+
+// 100 KB/s: the RECONCILE naming the new channel waits 20 s behind the 2 MiB window of the upload, twice the time a page
+// waits for its RECONCILED on a wire that delivers nothing. The server holds the new channel that long.
+test('a channel the page opens while its upload fills a slow uplink attaches on the same wire, however long its RECONCILE waits behind the upload', async () => {
+  serverConfig.channel.connectTtl = 60_000
+  const upload = loop.open<string, never>()
+  let uploaded = 0
+  upload.server.listen(() => void uploaded++)
+  await run(100)
+  loop.socket.toServer.bytesPerMs = 100
+  produce(upload.page, { message: () => 'x'.repeat(64 * KIB) })
+  await run(10_000)
+  const late = loop.open<string, never>()
+  let arrived = 0
+  late.server.listen(() => void arrived++)
+  produce(late.page, { message: () => 'y'.repeat(64 * KIB) })
+  await run(40_000)
+  expect(loop.sockets).toHaveLength(1)
+  expect(arrived).toBeGreaterThan(0)
+  expect(uploaded).toBeGreaterThan(30)
+})
+
+test('a page whose downlink stops while its RECONCILE waits behind its upload takes the wire for dead once it has delivered nothing for the time a page waits for its RECONCILED', async () => {
+  serverConfig.channel.connectTtl = 60_000
+  const upload = loop.open<string, never>()
+  consume(upload.server)
+  await run(100)
+  loop.socket.toServer.bytesPerMs = 100
+  produce(upload.page, { message: () => 'x'.repeat(64 * KIB) })
+  await run(10_000)
+  loop.open<string, never>()
+  await run(1_000)
+  // The server doesn't cut it: the page finds out on its own, as when the server can't reach it.
+  vi.spyOn(loop.transport, 'terminateConnection').mockImplementation(() => {})
+  loop.socket.toPage.hold()
+  const stoppedAt = Date.now()
+  await runUntil(() => loop.sockets.length === 2, 30_000)
+  expect(loop.sockets).toHaveLength(2)
+  expect(Date.now() - stoppedAt).toBeLessThanOrEqual(RECONCILE_TIMEOUT_MS + CHANNEL_RECONNECT_INITIAL_DELAY_MS + 100)
 })
 
 test('a page whose uplink stops with its upload queued on it takes the wire for dead within a pong deadline', async () => {

@@ -150,7 +150,8 @@ export const WIRE_SEND_BACKLOG_BASE_BYTES = WIRE_MAX_RAW_FRAME_BYTES
 export const SSE_METADATA_MAX_BYTES = 64 * 1024
 
 /** How long the client waits for RECONCILED after sending a RECONCILE before declaring the
- *  wire dead and reconnecting. A downstream that stalls without erroring (bytes stop, no FIN)
+ *  wire dead and reconnecting, and then only once the wire has delivered nothing that long, where
+ *  its heartbeat tracks it. A downstream that stalls without erroring (bytes stop, no FIN)
  *  otherwise wedges the connection: the upstream keeps sending pings but `handlePongTimeout`
  *  is suppressed while reconciling, so nothing notices the dead wire and every call buffered
  *  behind the un-acked RECONCILE hangs. */
