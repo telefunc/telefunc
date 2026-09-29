@@ -38,16 +38,23 @@ async function parseBlobBody(blob: Blob): Promise<{ metadata: { streamResponse?:
 }
 
 /** A server the test drives: it streams what the test sends down the latest SSE wire, hands each frame of a batch
- *  POST to `onBatchFrame`, and leaves the upload POST unsettled until the test settles it. */
+ *  POST to `onBatchFrame`, and leaves the upload POST unsettled until the test settles it. What the test sends before
+ *  the page's first SSE request reaches it goes out once it does, and an upload the test settles before the page's
+ *  request reaches it is settled as it does, as a server can only answer requests it has. */
 function fakeServer(onBatchFrame: (frame: ReturnType<typeof decode>) => void = () => {}) {
   const encoder = new TextEncoder()
+  let write: ((frame: Uint8Array) => void) | null = null
+  const unwritten: (() => Uint8Array)[] = []
+  const emit = (frame: () => Uint8Array) => (write ? write(frame()) : void unwritten.push(frame))
+  let pendingUpload: ((response: Response) => void) | null = null
+  let uploadSettlement: Response | null = null
   const server = {
     /** The index the latest wire's RECONCILE opened. */
     ix: 0,
     wires: 0,
-    send(_frame: Uint8Array) {},
+    send: (frame: Uint8Array) => emit(() => frame),
     reconcile: () =>
-      server.send(
+      emit(() =>
         encode.reconciled({
           sessionId: crypto.randomUUID(),
           open: [{ ix: server.ix, lastSeq: 0 }],
@@ -66,10 +73,18 @@ function fakeServer(onBatchFrame: (frame: ReturnType<typeof decode>) => void = (
     // A browser that can't stream a request body (Firefox) sends it as "[object ReadableStream]", and the server
     // answers 400 without reading a frame or sending the open-ack.
     refuseUpload: () => server.settleUpload(new Response('bad request', { status: 400 })),
-    settleUpload(_response: Response) {},
+    settleUpload(response: Response) {
+      if (pendingUpload === null) uploadSettlement = response
+      else pendingUpload(response)
+      pendingUpload = null
+    },
     fetch: (async (_url: string, init: RequestInit) => {
       const body = init.body as unknown
-      if (!(body instanceof Blob)) return await new Promise<Response>((resolve) => (server.settleUpload = resolve))
+      if (!(body instanceof Blob)) {
+        const settlement = uploadSettlement
+        uploadSettlement = null
+        return settlement ?? (await new Promise<Response>((resolve) => (pendingUpload = resolve)))
+      }
       const { metadata, frames } = await parseBlobBody(body)
       if (!metadata.streamResponse) {
         for (const raw of frames) onBatchFrame(decode(raw as never, wireSeqs))
@@ -83,8 +98,8 @@ function fakeServer(onBatchFrame: (frame: ReturnType<typeof decode>) => void = (
       const stream = new ReadableStream<Uint8Array>({
         start(controller) {
           controller.enqueue(encoder.encode(': open\n\n'))
-          server.send = (frame) =>
-            controller.enqueue(encoder.encode(`data: ${uint8ArrayToBase64url(frame as never)}\n\n`))
+          write = (frame) => controller.enqueue(encoder.encode(`data: ${uint8ArrayToBase64url(frame as never)}\n\n`))
+          for (const frame of unwritten.splice(0)) write(frame())
         },
       })
       return new Response(stream as never, { status: 200, headers: { 'Content-Type': 'text/event-stream' } })
