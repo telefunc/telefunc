@@ -87,6 +87,9 @@ class Net {
   refusing = false
   /** Bytes a second each way of the wires the page opens from now on: 0 carries at once. */
   readonly rate = { down: 0, up: 0 }
+  /** Milliseconds after the page makes it that an upload request reaches the server, as one that opens a connection of
+   *  its own does. */
+  uploadLag = 0
   private readonly byConnId = new Map<string, Link>()
   private readonly losing = new Set<number>()
   private readonly onPageGets = new Map<number, (frame: Uint8Array) => void>()
@@ -224,6 +227,7 @@ function sseServer(net: Net, refuseUpload: boolean): typeof fetch {
     if (!(body instanceof Blob)) {
       // A browser that can't stream a request body (Firefox, Safari) gets a 400 and the page sends batch POSTs.
       if (refuseUpload) return new Response('', { status: 400 })
+      if (net.uploadLag) await until(Date.now() + net.uploadLag)
       const request = new Request(url, {
         method: 'POST',
         body: body.pipeThrough(uploadThrough(net)),
@@ -1060,6 +1064,91 @@ function reconnectTimeout5s() {
   serverConfig.channel = { pingInterval: 1_000, reconnectTimeout: 5_000 }
   ;(getChannelMux() as unknown as { resolvedOptions: unknown }).resolvedOptions = null
 }
+
+describe.each(WIRES)(
+  'over %s, a first attach whose RECONCILED waits behind what the server buffered for the page',
+  (wire) => {
+    beforeEach(reconnectTimeout5s)
+
+    test('keeps its wire over a link that takes longer than the ping deadline to carry that, and the page gets all of it', async () => {
+      const { net, channel } = page(wire)
+      net.rate.down = SLOW
+      const server = register()
+      for (let n = 0; n < 24; n++) void server.sendBinary(block(n)) // before the page attaches
+      const pageChannel = channel(server.id)
+      const got: number[] = []
+      pageChannel.listenBinary((data) => void got.push(data[0]!))
+      const closed = [closedWith(pageChannel), closedWith(server)]
+      await advance(40_000)
+      expect(closed.map(({ err }) => (err instanceof Error ? err.message : err))).toEqual(['open', 'open'])
+      expect(got).toEqual(inOrder(24))
+      expect(net.links).toHaveLength(1)
+    })
+
+    test('sends no PING before it over a link that carries it within a second, and so no frame or request more', async () => {
+      const { net, channel } = page(wire)
+      // 2 KiB a second each way, which carries a RECONCILE and its RECONCILED in well under a second.
+      net.rate.down = net.rate.up = 2 * 1_024
+      const t0 = Date.now()
+      const events: string[] = []
+      const pageSends = net.pageSends.bind(net)
+      net.pageSends = (frame) => {
+        if (frame[0] === TAG.PING) events.push('PING')
+        pageSends(frame)
+      }
+      const pageGets = net.pageGets.bind(net)
+      net.pageGets = (frame) => {
+        if (frame[0] === TAG.RECONCILED)
+          events.push(`RECONCILED ${Date.now() - t0 < 1_000 ? 'within' : 'past'} a second`)
+        pageGets(frame)
+      }
+      const server = register()
+      channel(server.id)
+      await advance(2_500)
+      // The RECONCILED installs the server's heartbeat, which pings as it starts, then each pingInterval.
+      expect(events.slice(0, 2)).toEqual(['RECONCILED within a second', 'PING'])
+    })
+  },
+)
+
+describe('over sse, with its upload request reaching the server after the request that opens the wire', () => {
+  beforeEach(reconnectTimeout5s)
+
+  test('a first attach whose RECONCILED waits behind what the server buffered for the page keeps its wire over a link that takes longer than the ping deadline to carry that', async () => {
+    const { net, channel } = page('sse')
+    net.uploadLag = 500
+    net.rate.down = SLOW
+    const server = register()
+    for (let n = 0; n < 24; n++) void server.sendBinary(block(n)) // before the page attaches
+    const pageChannel = channel(server.id)
+    const got: number[] = []
+    pageChannel.listenBinary((data) => void got.push(data[0]!))
+    const closed = [closedWith(pageChannel), closedWith(server)]
+    await advance(40_000)
+    expect(closed.map(({ err }) => (err instanceof Error ? err.message : err))).toEqual(['open', 'open'])
+    expect(got).toEqual(inOrder(24))
+    expect(net.links).toHaveLength(1)
+  })
+
+  test('a reconnect whose replay takes longer than the ping deadline to cross the link keeps its wire', async () => {
+    const { net, channel } = page('sse')
+    net.uploadLag = 500
+    net.rate.down = SLOW
+    const server = register()
+    const pageChannel = channel(server.id)
+    const got: number[] = []
+    pageChannel.listenBinary((data) => void got.push(data[0]!))
+    const closed = [closedWith(pageChannel), closedWith(server)]
+    await advance(1_500)
+    produce((n) => server.sendBinary(block(n)), 20, 0)
+    await advance(1_000)
+    net.die() // with most of the stream in flight, which the page reconnects for over a link as slow
+    await advance(40_000)
+    expect(closed.map(({ err }) => (err instanceof Error ? err.message : err))).toEqual(['open', 'open'])
+    expect(got).toEqual(inOrder(20))
+    expect(net.links).toHaveLength(2)
+  })
+})
 
 describe.each(WIRES)(
   'over %s, a reconnect whose replay takes longer than the ping deadline to cross the link',
