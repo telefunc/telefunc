@@ -419,7 +419,7 @@ Channels and broadcasts signal failure through four errors:
 
 > A graceful `close()` isn't an error (`onClose(err)` receives `undefined`).
 
-> A `BroadcastChannel` whose client falls behind the messages published to it by more than its room, 64 MiB or half the server's replay buffer if that's less, and a quarter more it may have read before saying so, 80 MiB with the defaults, or by more than `config.channel.bufferLimit` (`bufferLimitBinary` for binary) while it's offline, is closed on both ends with `ChannelOverflowError`, as there is no `send()` to reject. Call its telefunction again to rejoin.
+> A `BroadcastChannel` whose client falls behind the messages published to it by more than its room, 64 MiB or half the server's replay buffer if that's less, and a quarter more, 80 MiB with the defaults, or by more than `config.channel.bufferLimit` (`bufferLimitBinary` for binary) while it's offline, is closed on both ends with `ChannelOverflowError`, as there is no `send()` to reject. Call its telefunction again to rejoin.
 
 See also:
 - <Link href="/stream#error-handling" />

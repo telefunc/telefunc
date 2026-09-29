@@ -53,8 +53,8 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
     this._flow.onPeerByteWindow(this._flow.peerByteWindowMax)
   }
 
-  /** Its page grants the largest window from the start, which a burst fits in: past it, the page is behind by more
-   *  than what it read and hasn't reported, which it does once a quarter of that window. */
+  /** Its page grants the largest window from the start, which a burst fits in: past it and a quarter more, the page is
+   *  behind by more than what it read and hasn't reported, which it reports sooner than that. */
   protected override _pastCreditAllowance(): number {
     return this._flow.peerByteWindowMax >> 2
   }

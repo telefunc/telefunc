@@ -72,6 +72,8 @@ class FlowControl {
   private _uncountedBytes = 0
   /** A frame arrived since the byte limit last went out, which acknowledges what arrived. */
   private _arrived = false
+  /** The least byte window granted, past the estimator's (see `widenByteWindow`). */
+  private _byteWindowFloor = 0
   /** Senders waiting on credit, oldest first. */
   private _waiters: Array<() => void> = []
   /** A waiter was handed the credit and no send was counted since. */
@@ -96,8 +98,9 @@ class FlowControl {
     macrotaskYield.assertSupported()
   }
 
+  /** Receiver-side: the byte window granted. */
   get byteWindow(): number {
-    return this._bdp.byteWindow
+    return Math.max(this._bdp.byteWindow, Math.min(this._byteWindowFloor, this._bdp.byteWindowMax))
   }
 
   get msgWindow(): number {
@@ -196,8 +199,8 @@ class FlowControl {
   }
 
   /** Receiver-side: account post-callback consumption of one frame. Emits
-   *  refresh `WINDOW` / `MSG_WINDOW` frames once a quarter of either window
-   *  has been consumed since that limit last went out. */
+   *  refresh `WINDOW` / `MSG_WINDOW` frames once a quarter of the estimator's
+   *  byte window, or of the message window, has been consumed since that limit last went out. */
   onConsumed(bytes: number): void {
     this._consume(bytes, 1)
   }
@@ -281,9 +284,11 @@ class FlowControl {
     this._advertiseMessages()
   }
 
-  /** Receiver-side: a byte window of at least `bytes`, advertised with the next limit. Grow-only. */
+  /** Receiver-side: a byte window of at least `bytes`, advertised with the next limit, while limits still go out once a
+   *  quarter of the estimator's window was consumed: a broadcast's page, whose window sets how far behind the server
+   *  may have it, acknowledges what it read as often as a stream's does. */
   widenByteWindow(bytes: number): void {
-    this._bdp.bumpInitialByteWindow(bytes)
+    this._byteWindowFloor = bytes
   }
 
   // A frame counted in bytes only takes no message credit and starts no BDP probe: a broadcast's publish, which
@@ -304,9 +309,9 @@ class FlowControl {
 
   /** Bump to the batch-POST initial window and advertise it. Grow-only / idempotent. */
   useBatchTransportInitial(): void {
-    const prev = this._bdp.byteWindow
+    const prev = this.byteWindow
     this._bdp.bumpInitialByteWindow(CREDIT_WINDOW_INITIAL_BYTES_BATCH)
-    if (this._bdp.byteWindow > prev) this._advertiseBytes()
+    if (this.byteWindow > prev) this._advertiseBytes()
   }
 
   shutdown(): void {
@@ -326,7 +331,7 @@ class FlowControl {
     this._advertisedBytes = this._consumedBytes
     this._uncountedBytes = 0
     this._arrived = false
-    this._emit.byteWindowUpdate((this._consumedBytes + this._bdp.byteWindow) >>> 0)
+    this._emit.byteWindowUpdate((this._consumedBytes + this.byteWindow) >>> 0)
   }
 
   private _advertiseMessages(): void {

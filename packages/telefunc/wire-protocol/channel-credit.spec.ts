@@ -721,7 +721,6 @@ test("a page's consumption of what a broadcast publishes moves the server's limi
   room.page.subscribe((text) => void seen.push(text))
   await run(100)
   expect(creditOf(room.server)).toBe(CREDIT_WINDOW_MAX_BYTES)
-  // A limit goes out once a quarter of the window is consumed.
   const publications = CREDIT_WINDOW_MAX_BYTES / 4 / KIB / KIB + 1
   for (let n = 0; n < publications; n++) {
     Broadcast.publish(key, 'x'.repeat(KIB * KIB))
@@ -729,8 +728,24 @@ test("a page's consumption of what a broadcast publishes moves the server's limi
   }
   await runUntil(() => seen.length === publications, 1_000)
   await run(100)
-  // Sent 17 MiB, of which the last limit leaves one not yet counted consumed.
-  expect(creditOf(room.server)).toBeGreaterThan(CREDIT_WINDOW_MAX_BYTES - 2 * KIB * KIB)
+  // Sent 17 MiB, of which the last limit leaves less than one not yet counted consumed.
+  expect(creditOf(room.server)).toBeGreaterThan(CREDIT_WINDOW_MAX_BYTES - KIB * KIB)
+})
+
+test("a broadcast's page acknowledges what it read as a stream's page does, however large its room, so the server's replay for it holds less than a quarter of a stream's window of it", async () => {
+  const key = `room:${crypto.randomUUID()}`
+  const room = loop.openBroadcast<string>(key)
+  const seen: string[] = []
+  room.page.subscribe((text) => void seen.push(text))
+  await run(100)
+  for (let n = 0; n < 12; n++) {
+    Broadcast.publish(key, 'x'.repeat(KIB * KIB))
+    await run(20)
+  }
+  await runUntil(() => seen.length === 12, 1_000)
+  await run(50)
+  const replay = (room.server as unknown as { _replayBuffer: { byteLength: number } })._replayBuffer
+  expect(replay.byteLength).toBeLessThan(CREDIT_WINDOW_INITIAL_BYTES / 4)
 })
 
 test('on a slow link, producers that await their sends are handed the credit one at a time, and none is refused', async () => {
