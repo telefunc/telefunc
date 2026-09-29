@@ -637,19 +637,19 @@ class ClientConnection implements MuxConnection {
   }
 
   sendPublishAckReq(channel: MuxChannel, data: string, onQueued: (seq: number) => void): void {
-    this.sendAckReq(channel, (ix, seq) => encode.publishAckReq(ix, data, seq), false, onQueued)
+    this.sendAckReq(channel, (ix, seq) => encode.publishAckReq(ix, data, seq), onQueued)
   }
 
   sendPublishBinaryAckReq(channel: MuxChannel, data: Uint8Array, onQueued: (seq: number) => void): void {
-    this.sendAckReq(channel, (ix, seq) => encode.publishBinaryAckReq(ix, data, seq), true, onQueued)
+    this.sendAckReq(channel, (ix, seq) => encode.publishBinaryAckReq(ix, data, seq), onQueued)
   }
 
   sendTextAckReq(channel: MuxChannel, data: string, onQueued: (seq: number) => void): void {
-    this.sendAckReq(channel, (ix, seq) => encode.textAckReq(ix, data, seq), false, onQueued)
+    this.sendAckReq(channel, (ix, seq) => encode.textAckReq(ix, data, seq), onQueued)
   }
 
   sendBinaryAckReq(channel: MuxChannel, data: Uint8Array, onQueued: (seq: number) => void): void {
-    this.sendAckReq(channel, (ix, seq) => encode.binaryAckReq(ix, data, seq), true, onQueued)
+    this.sendAckReq(channel, (ix, seq) => encode.binaryAckReq(ix, data, seq), onQueued)
   }
 
   /** Shared ack-req issuance — encodes via `buildFrame`, invokes `onQueued(seq)` so the
@@ -659,7 +659,6 @@ class ClientConnection implements MuxConnection {
   private sendAckReq(
     channel: MuxChannel,
     buildFrame: (ix: number, seq: number) => Uint8Array<ArrayBuffer>,
-    binary: boolean,
     onQueued: (seq: number) => void,
   ): void {
     const ix = this.channelIndex.get(channel)
@@ -672,7 +671,7 @@ class ClientConnection implements MuxConnection {
       this.sendBuffer.push({ frame, channelIx: ix, seq })
       return
     }
-    replay.push(seq, frame, binary)
+    replay.push(seq, frame)
     this.transport.sendFrame({ kind: 'ack', frame })
   }
 
@@ -686,7 +685,7 @@ class ClientConnection implements MuxConnection {
       this.sendBuffer.push({ frame, channelIx: ix, seq })
       return
     }
-    replay.push(seq, frame, true)
+    replay.push(seq, frame)
     this.transport.sendFrame({ kind: 'data', frame })
   }
 
@@ -730,7 +729,7 @@ class ClientConnection implements MuxConnection {
       this.sendBuffer.push({ frame, channelIx: ix, seq })
       return
     }
-    replay.pushClosing(seq, frame)
+    replay.push(seq, frame)
     this.transport.sendFrame({ kind: 'control', frame })
   }
 
@@ -1634,16 +1633,7 @@ class ClientConnection implements MuxConnection {
         if (retainedChannels?.has(channelIx)) sendBuffer[writeIx++] = entry
         continue
       }
-      if (seq !== undefined) {
-        const tag = frame[0]
-        const isBinary =
-          tag === TAG.BINARY ||
-          tag === TAG.BINARY_ACK_REQ ||
-          tag === TAG.PUBLISH_BINARY ||
-          tag === TAG.PUBLISH_BINARY_ACK_REQ
-        if (tag === TAG.CLOSE || tag === TAG.CLOSE_ACK) this.replayBuffers.get(channelIx)?.pushClosing(seq, frame)
-        else this.replayBuffers.get(channelIx)?.push(seq, frame, isBinary)
-      }
+      if (seq !== undefined) this.replayBuffers.get(channelIx)?.push(seq, frame)
       frames.push({ kind: 'reconcile', frame })
     }
     sendBuffer.length = writeIx

@@ -40,7 +40,7 @@ class IndexedPeer {
   sendBinary(data: Uint8Array): void {
     const seq = this.replay.nextSeq()
     const frame = encode.binary(this.index, data, seq)
-    this.sender.send(frame, () => this.replay.push(seq, frame, true))
+    this.sender.send(frame, () => this.replay.push(seq, frame))
   }
 
   /** Send a binary frame that requests an ack response from the receiver. `onQueued` gets its seq and payload bytes. */
@@ -48,7 +48,7 @@ class IndexedPeer {
     const seq = this.replay.nextSeq()
     const frame = encode.binaryAckReq(this.index, data, seq)
     onQueued(seq, data.byteLength)
-    this.sender.send(frame, () => this.replay.push(seq, frame, true))
+    this.sender.send(frame, () => this.replay.push(seq, frame))
   }
 
   /** Send an acknowledgement response for a message the client sent.
@@ -85,7 +85,7 @@ class IndexedPeer {
     const seq = this.replay.nextSeq()
     const frame = buildFrame(seq)
     try {
-      this.sender.send(frame, () => this.replay.pushClosing(seq, frame))
+      this.sender.send(frame, () => this.replay.push(seq, frame))
     } catch {
       /* transport may already be closed */
     }
@@ -141,7 +141,7 @@ class IndexedPeer {
     const seq = this.replay.nextSeq()
     const frame = encode.publishBinary(this.index, data, seq)
     try {
-      this.sender.send(frame, () => this.replay.push(seq, frame, true))
+      this.sender.send(frame, () => this.replay.push(seq, frame))
     } catch {
       /* transport may already be closed */
     }

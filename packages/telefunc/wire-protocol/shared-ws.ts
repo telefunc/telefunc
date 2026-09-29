@@ -11,6 +11,7 @@ export {
   isChannelCtrlTag,
   isChannelDataFrame,
   isSequencedFrame,
+  replayLaneOf,
   isConnCtrlTag,
   isReplayLoss,
   encodePublishText,
@@ -21,6 +22,7 @@ export type {
   AckResultStatus,
   ErrorReason,
   ReplayLoss,
+  ReplayLaneKind,
   DecodedFrame,
   ChannelFrame,
   ChannelCtrlFrame,
@@ -38,6 +40,7 @@ export type {
 }
 
 import type { ChannelTransports } from './constants.js'
+import { assert } from '../utils/assert.js'
 
 // ===== Wire protocol =====
 //
@@ -152,13 +155,26 @@ function isChannelDataFrame(frame: DecodedFrame): frame is ChannelDataFrame {
 
 /** What a replay holds: data, and the closing frames. */
 function isSequencedFrame(frame: DecodedFrame): frame is SequencedFrame {
-  return (
-    isChannelDataFrame(frame) ||
-    frame.tag === TAG.CLOSE ||
-    frame.tag === TAG.CLOSE_ACK ||
-    frame.tag === TAG.ABORT ||
-    frame.tag === TAG.ERROR
-  )
+  return isChannelDataFrame(frame) || isClosingTag(frame.tag)
+}
+
+function isClosingTag(tag: number): boolean {
+  return tag === TAG.CLOSE || tag === TAG.CLOSE_ACK || tag === TAG.ABORT || tag === TAG.ERROR
+}
+
+/** The replay lane a sequenced frame goes in: a data lane under its byte budget, or, for the frame that ends a channel,
+ *  one no byte budget drops from. */
+type ReplayLaneKind = 'text' | 'binary' | 'closing'
+
+function replayLaneOf(tag: number): ReplayLaneKind {
+  if (isClosingTag(tag)) return 'closing'
+  assert(tag >= DATA_TAG_MIN && tag < CHANNEL_CTRL_TAG_MIN)
+  return tag === TAG.BINARY ||
+    tag === TAG.BINARY_ACK_REQ ||
+    tag === TAG.PUBLISH_BINARY ||
+    tag === TAG.PUBLISH_BINARY_ACK_REQ
+    ? 'binary'
+    : 'text'
 }
 
 // ===== Reconcile payloads (JSON-encoded after the header) =====

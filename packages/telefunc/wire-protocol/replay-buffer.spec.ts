@@ -13,8 +13,8 @@ afterEach(() => {
 test('gives a peer all it lacks, text, binary and closing frames merged by seq', () => {
   const replay = new ReplayBuffer(1_024, 60_000, 1_024)
   replay.push(1, text(1))
-  replay.push(2, encode.binary(0, new Uint8Array(8), 2), true)
-  replay.pushClosing(3, encode.close(0, 1_000, 3))
+  replay.push(2, encode.binary(0, new Uint8Array(8), 2))
+  replay.push(3, encode.close(0, 1_000, 3))
   expect(replay.getAfter(0)).toEqual([text(1), encode.binary(0, new Uint8Array(8), 2), encode.close(0, 1_000, 3)])
   expect(replay.getAfter(2)).toEqual([encode.close(0, 1_000, 3)])
   expect(replay.getAfter(3)).toEqual([])
@@ -25,7 +25,7 @@ test('a frame it dropped to stay within its size, and one larger than that, fail
   replay.push(1, text(1, 200))
   replay.push(2, text(2, 200)) // drops 1
   replay.push(3, text(3, 300)) // larger than the text budget
-  replay.push(4, encode.binary(0, new Uint8Array(8), 4), true)
+  replay.push(4, encode.binary(0, new Uint8Array(8), 4))
   replay.push(5, text(5, 100)) // drops 2
   expect(replay.getAfter(0)).toBe(ERROR_REASON.LOST)
   expect(replay.getAfter(2)).toBe(ERROR_REASON.LOST)
@@ -52,6 +52,6 @@ test('what is past `throughSeq` is not asked for, so its loss fails no one', () 
 
 test('a closing frame is kept past the data budgets', () => {
   const replay = new ReplayBuffer(8, 60_000, 8)
-  replay.pushClosing(1, encode.close(0, 1_000, 1))
+  replay.push(1, encode.close(0, 1_000, 1))
   expect(replay.getAfter(0)).toEqual([encode.close(0, 1_000, 1)])
 })
