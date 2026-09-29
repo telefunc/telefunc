@@ -6,7 +6,8 @@ import { ERROR_REASON, payloadBytes, replayLaneOf, type ReplayLaneKind, type Rep
  *
  * Stores encoded frames keyed by monotonic sequence number for replay on reconnect, until the peer acknowledges them.
  * Bounded by the bytes of their payloads, what flow control counts: oldest entries are evicted when full. Also bounded
- * by age: entries older than `maxAgeMs` are evicted.
+ * by age: entries older than `maxAgeMs` are evicted. A budget lowered while the peer lacks frames sent under the higher
+ * one applies once the peer has them.
  *
  * A frame goes in the lane its tag names (`replayLaneOf`), each with its own byte budget, and the frame that ends a
  * channel is dropped for its age alone.
@@ -23,6 +24,10 @@ export class ReplayBuffer {
   private _seq = 0
   /** The highest seq pushed. */
   private pushedSeq = 0
+  /** The highest seq the peer acknowledged. */
+  private acknowledgedSeq = 0
+  /** Lower budgets than the lanes', which apply once the peer acknowledged every seq through `throughSeq`. */
+  private lowered: { budgets: Record<ReplayLaneKind, number>; throughSeq: number } | null = null
   private cleanupTimer: ReturnType<typeof setTimeout> | null = null
   private cleanupScheduledAt = Infinity
 
@@ -42,11 +47,19 @@ export class ReplayBuffer {
     this.maxAgeMs = maxAgeMs
   }
 
-  /** Applies new budgets to what is stored and to what comes next. */
+  /** Applies new budgets to what is stored and to what comes next. One lower than a lane's applies once the peer has
+   *  every seq issued before it was first set: flow control let them be in flight under the higher one. */
   setLimits(maxBytes: number, maxAgeMs: number, binaryMaxBytes: number): void {
     this.maxAgeMs = maxAgeMs
     const budgets = laneBudgets(maxBytes, binaryMaxBytes)
-    for (const kind of Object.keys(this.lanes) as ReplayLaneKind[]) this.lanes[kind].setLimits(budgets[kind], maxAgeMs)
+    const unacknowledged = this.acknowledgedSeq < this._seq
+    let lowered = false
+    for (const kind of LANE_KINDS) {
+      const lane = this.lanes[kind]
+      if (unacknowledged && budgets[kind] < lane.budget) lowered = true
+      lane.setLimits(unacknowledged ? Math.max(budgets[kind], lane.budget) : budgets[kind], maxAgeMs)
+    }
+    this.lowered = lowered ? { budgets, throughSeq: this.lowered?.throughSeq ?? this._seq } : null
     this.scheduleCleanup()
   }
 
@@ -68,7 +81,12 @@ export class ReplayBuffer {
 
   /** The peer has every frame through `lastSeq`, which a reconnect never asks for again: they go. */
   acknowledge(lastSeq: number): void {
+    if (lastSeq > this.acknowledgedSeq) this.acknowledgedSeq = lastSeq
     for (const lane of this.allLanes) lane.acknowledge(lastSeq)
+    if (this.lowered === null || lastSeq < this.lowered.throughSeq) return
+    const { budgets } = this.lowered
+    this.lowered = null
+    for (const kind of LANE_KINDS) this.lanes[kind].setLimits(budgets[kind], this.maxAgeMs)
   }
 
   /** The frames with afterSeq < seq <= throughSeq, merged by seq, or why they can't all be given. */
@@ -108,6 +126,8 @@ export class ReplayBuffer {
     for (const lane of this.allLanes) lane.dispose()
     this._seq = 0
     this.pushedSeq = 0
+    this.acknowledgedSeq = 0
+    this.lowered = null
     if (this.cleanupTimer !== null) {
       clearTimeout(this.cleanupTimer)
       this.cleanupTimer = null
@@ -151,6 +171,8 @@ export class ReplayBuffer {
     this.cleanupTimer = timer
   }
 }
+
+const LANE_KINDS: readonly ReplayLaneKind[] = ['text', 'binary', 'closing']
 
 /** A lane's byte budget by kind: the frame that ends a channel is small, and none is dropped for size. */
 function laneBudgets(maxBytes: number, binaryMaxBytes: number): Record<ReplayLaneKind, number> {
@@ -210,6 +232,10 @@ class ReplayLane {
 
   get byteLength(): number {
     return this.totalBytes
+  }
+
+  get budget(): number {
+    return this.maxBytes
   }
 
   /**

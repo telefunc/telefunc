@@ -47,6 +47,9 @@ function replayWindow(text: number, binary: number): number {
  * Senders waiting on credit get it one at a time, oldest first: while others wait, a send that leaves credit hands it
  * to the next and waits behind them. So senders that each await their sends, once waiting, pass the limit by one
  * frame together. Senders still sending freely as the credit runs out each have a frame out past it.
+ *
+ * Until `fitReplays` says the replay buffers that bound its windows, it advertises no byte limit, so its peer's
+ * assumption of the initial one stands: its peer's replay couldn't keep what a larger window let be in flight.
  */
 class FlowControl {
   private _bdp = new BdpEstimator()
@@ -59,6 +62,8 @@ class FlowControl {
   private _peerByteWindowMax: number = CREDIT_WINDOW_MAX_BYTES
   /** A `WINDOW` raised the byte limit past the one this side assumed the peer starts with. */
   private _limitRaised = false
+  /** `fitReplays` said the replay buffers that bound the windows. */
+  private _fitted = false
   /** `_sentBytes` after the last frame sent while the byte limit was ahead of it. */
   private _sentWithCredit = 0
   // Receiver side: what arrived, what was consumed, and what had been consumed when each limit last went out.
@@ -116,6 +121,7 @@ class FlowControl {
    *  `window` at most, and its peer grants it `peerWindow` at most. The limit this side assumes its peer starts with,
    *  while no `WINDOW` raised it, doesn't pass that. */
   fitReplays(window: number, peerWindow: number): void {
+    this._fitted = true
     this._bdp.capByteWindow(window)
     this._peerByteWindowMax = Math.min(CREDIT_WINDOW_MAX_BYTES, peerWindow)
     if (!this._limitRaised) this._limitBytes = Math.min(CREDIT_WINDOW_INITIAL_BYTES, this._peerByteWindowMax)
@@ -327,6 +333,7 @@ class FlowControl {
   }
 
   private _advertiseBytes(): void {
+    if (!this._fitted) return
     this._advertisedBytes = this._consumedBytes
     this._uncountedBytes = 0
     this._arrived = false

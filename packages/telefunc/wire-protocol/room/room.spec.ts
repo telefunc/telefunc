@@ -2486,7 +2486,7 @@ describe('Room public behavior', () => {
     )
   })
   it("closes its clients' stubs as it closes, at the longest reconnect window config.channel accepts", async () => {
-    config.channel = { reconnectTimeout: 2 ** 31 - 1 - 1_000 - 10_000, pingInterval: 5_000 }
+    config.channel = { reconnectTimeout: 2 ** 31 - 1, pingInterval: 2 ** 30 - 1 }
     try {
       const room = (await Room.create('longest-reconnect-window')) as ServerRoom
       const stub = register(room)

@@ -90,8 +90,8 @@ class ServerChannelBuffer<TAck = never> {
     sendText: (data: string) => void
     sendPublish: (data: string) => void
     sendBinary: (data: Uint8Array) => void
-    sendTextAck: (data: string, cb: EntryCallback) => void
-    sendBinaryAck: (data: Uint8Array, cb: EntryCallback) => void
+    sendTextAck: (data: string, cb: EntryCallback | null) => void
+    sendBinaryAck: (data: Uint8Array, cb: EntryCallback | null) => void
     sendPublishBinary: (data: Uint8Array) => void
   }): void {
     let ti = this.#text.head
@@ -121,8 +121,8 @@ class ServerChannelBuffer<TAck = never> {
       sendText: (data: string) => void
       sendPublish: (data: string) => void
       sendBinary: (data: Uint8Array) => void
-      sendTextAck: (data: string, cb: EntryCallback) => void
-      sendBinaryAck: (data: Uint8Array, cb: EntryCallback) => void
+      sendTextAck: (data: string, cb: EntryCallback | null) => void
+      sendBinaryAck: (data: Uint8Array, cb: EntryCallback | null) => void
       sendPublishBinary: (data: Uint8Array) => void
     },
   ): void {
@@ -136,7 +136,7 @@ class ServerChannelBuffer<TAck = never> {
         cb.resolve()
         break
       case TAG.TEXT_ACK_REQ:
-        assert(typeof data === 'string' && cb)
+        assert(typeof data === 'string')
         h.sendTextAck(data, cb)
         break
       case TAG.PUBLISH:
@@ -149,7 +149,7 @@ class ServerChannelBuffer<TAck = never> {
         cb.resolve()
         break
       case TAG.BINARY_ACK_REQ:
-        assert(data instanceof Uint8Array && cb)
+        assert(data instanceof Uint8Array)
         h.sendBinaryAck(data, cb)
         break
       case TAG.PUBLISH_BINARY:
@@ -163,6 +163,12 @@ class ServerChannelBuffer<TAck = never> {
     this.#text.clear(err)
     this.#binary.clear(err)
     this.#insertionSeq = 0
+  }
+
+  /** Rejects the ack requests, whose answers can't be taken, and keeps them to flush with the rest. */
+  rejectAcks(err: Error): void {
+    this.#text.rejectAcks(err)
+    this.#binary.rejectAcks(err)
   }
 }
 
@@ -264,6 +270,14 @@ class BufferLane {
     this.droppedGap = false
   }
 
+  rejectAcks(err: Error): void {
+    for (let i = this.#head; i < this.#callbacks.length; i++) {
+      if (!isAckTag(this.#tags[i]!)) continue
+      this.#callbacks[i]?.reject(err)
+      this.#callbacks[i] = null
+    }
+  }
+
   // ── Private ──
 
   #evict(evictionErr: Error): void {
@@ -287,4 +301,8 @@ class BufferLane {
       this.#head = 0
     }
   }
+}
+
+function isAckTag(tag: number): boolean {
+  return tag === TAG.TEXT_ACK_REQ || tag === TAG.BINARY_ACK_REQ
 }

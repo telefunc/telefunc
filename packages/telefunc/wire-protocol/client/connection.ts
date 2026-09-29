@@ -10,8 +10,6 @@ import { base64urlToUint8Array } from '../base64url.js'
 import {
   CHANNEL_CLIENT_REPLAY_BUFFER_BYTES,
   CHANNEL_CLIENT_REPLAY_BUFFER_BINARY_BYTES,
-  CHANNEL_SERVER_REPLAY_BUFFER_BYTES,
-  CHANNEL_SERVER_REPLAY_BUFFER_BINARY_BYTES,
   CHANNEL_IDLE_TIMEOUT_MS,
   CHANNEL_PING_INTERVAL_MS,
   CHANNEL_RECONNECT_INITIAL_DELAY_MS,
@@ -32,6 +30,7 @@ import {
   WS_PROBE_TIMEOUT_MS,
   type ChannelTransport,
   type ChannelTransports,
+  TIMER_DELAY_MAX_MS,
 } from '../constants.js'
 import { encodeU32, encodeLengthPrefixedFrames } from '../frame.js'
 import { createPushReadableStream, type PushReadableStream } from '../push-readable-stream.js'
@@ -95,6 +94,8 @@ type ProbeSession = {
 class Heartbeat {
   private pingTimer: ReturnType<typeof setInterval> | null = null
   private pongTimer: ReturnType<typeof setTimeout> | null = null
+  /** When the wire last delivered a frame, or the pong deadline was last set. */
+  private lastReceivedAt = 0
 
   constructor(
     private readonly intervalMs: number,
@@ -111,8 +112,25 @@ class Heartbeat {
   }
 
   resetPong(): void {
+    this.lastReceivedAt = performance.now()
+    this.armPongDeadline(this.pongTimeoutMs)
+  }
+
+  noteReceived(): void {
+    this.lastReceivedAt = performance.now()
+  }
+
+  private armPongDeadline(ms: number): void {
     if (this.pongTimer) clearTimeout(this.pongTimer)
-    this.pongTimer = setTimeout(this.onDead, this.pongTimeoutMs)
+    this.pongTimer = setTimeout(this.onPongDeadline, ms)
+  }
+
+  // A PONG arrives behind what the server queued before it, as much as a window on a slow link: the wire is dead once it
+  // has delivered nothing for the deadline.
+  private readonly onPongDeadline = (): void => {
+    const quiet = performance.now() - this.lastReceivedAt
+    if (quiet < this.pongTimeoutMs) this.armPongDeadline(this.pongTimeoutMs - quiet)
+    else this.onDead()
   }
 
   stop(): void {
@@ -433,8 +451,9 @@ class ClientConnection implements MuxConnection {
   private pingIntervalMs = CHANNEL_PING_INTERVAL_MS
   private clientReplayBufferBytes = CHANNEL_CLIENT_REPLAY_BUFFER_BYTES
   private clientReplayBufferBinaryBytes = CHANNEL_CLIENT_REPLAY_BUFFER_BINARY_BYTES
-  private serverReplayBufferBytes = CHANNEL_SERVER_REPLAY_BUFFER_BYTES
-  private serverReplayBufferBinaryBytes = CHANNEL_SERVER_REPLAY_BUFFER_BINARY_BYTES
+  /** The largest windows the replay buffers allow, the one the page grants and the one the server grants it, as the
+   *  last RECONCILED says them: unknown before the first. */
+  private replayWindows: { window: number; peerWindow: number } | null = null
   private constructor(telefuncUrl: string, options: ClientConnectionOptions, cacheKey: string) {
     this.cacheKey = cacheKey
     this.telefuncUrl = telefuncUrl
@@ -598,23 +617,22 @@ class ClientConnection implements MuxConnection {
     this.scheduleRegisterReconcile()
   }
 
-  /** Its window fits the server's replay, and the server's fits the page's: as the first RECONCILED says, the defaults
-   *  until then. */
+  /** Its window fits the server's replay, and the server's fits the page's, once a RECONCILED says them. Until then it
+   *  sends within the initial window of the defaults, which its replay keeps whatever budget the RECONCILED sets (see
+   *  `ReplayBuffer.setLimits`), and advertises no byte limit (see `FlowControl`). */
   private fitReplays(channel: MuxChannel): void {
-    channel._fitReplays?.(
-      replayWindow(this.serverReplayBufferBytes, this.serverReplayBufferBinaryBytes),
-      replayWindow(this.clientReplayBufferBytes, this.clientReplayBufferBinaryBytes),
-    )
+    if (this.replayWindows === null) return
+    channel._fitReplays?.(this.replayWindows.window, this.replayWindows.peerWindow)
   }
 
   /** How long a gone server is still held: until its loss is noticed at the pong deadline, then for `reconnectTimeout`. */
   reconnectWindow(pingIntervalMs = this.pingIntervalMs): number {
-    return 2 * pingIntervalMs + this.reconnectTimeoutMs
+    return Math.min(TIMER_DELAY_MAX_MS, 2 * pingIntervalMs + this.reconnectTimeoutMs)
   }
 
   /** As the server's, a frame stays replayable through the reconnect window, plus a second for the reconnect itself. */
   private replayMaxAgeMs(pingIntervalMs: number): number {
-    return this.reconnectWindow(pingIntervalMs) + 1_000
+    return Math.min(TIMER_DELAY_MAX_MS, this.reconnectWindow(pingIntervalMs) + 1_000)
   }
 
   private registerReconcileTimer: ReturnType<typeof setTimeout> | null = null
@@ -1059,7 +1077,6 @@ class ClientConnection implements MuxConnection {
     for (const entry of buffer.old) this.dispatchFrame(entry.frame)
     this.releaseDeferredOmitted(deferredOmitted)
     for (const entry of buffer.new) this.dispatchFrame(entry.frame)
-    this.pruneSendBufferForReleasedChannels()
     this.flushPendingRegisterReconcile()
     this.startTtlIfIdle()
   }
@@ -1083,17 +1100,6 @@ class ClientConnection implements MuxConnection {
     transport.detachHeartbeat()
     transport.abandonActiveTransport()
     transport.dispose()
-  }
-
-  private pruneSendBufferForReleasedChannels(): void {
-    const sendBuffer = this.sendBuffer
-    if (sendBuffer.length === 0) return
-    let writeIx = 0
-    for (let readIx = 0; readIx < sendBuffer.length; readIx++) {
-      const entry = sendBuffer[readIx]!
-      if (this.channels.has(entry.channelIx)) sendBuffer[writeIx++] = entry
-    }
-    sendBuffer.length = writeIx
   }
 
   _onTransportClosed(transport: ClientChannelTransport, { rejectedByServer = false } = {}): void {
@@ -1312,8 +1318,7 @@ class ClientConnection implements MuxConnection {
   }
 
   private drainBufferedFramesToWire(): void {
-    for (const frame of this.drainBufferedFrames(this.sendableChannels(), this.awaitedIxes))
-      this.transport.sendFrame(frame)
+    for (const frame of this.drainBufferedFrames(this.sendableChannels())) this.transport.sendFrame(frame)
     this.startTtlIfIdle()
   }
 
@@ -1485,7 +1490,7 @@ class ClientConnection implements MuxConnection {
     for (const { channelIx, seq } of this.sendBuffer)
       if (seq !== undefined && sendable.has(channelIx) && !this.carriedFrom.has(channelIx))
         this.carriedFrom.set(channelIx, seq)
-    return this.drainBufferedFrames(sendable, this.awaitedIxes)
+    return this.drainBufferedFrames(sendable)
   }
 
   private sendableChannels(): Set<number> | Map<number, ChannelEntry> {
@@ -1518,8 +1523,10 @@ class ClientConnection implements MuxConnection {
     if (this.connectionOptions.idleTimeout === undefined) this.idleTimeoutMs = ctrl.idleTimeout
     this.clientReplayBufferBytes = ctrl.clientReplayBuffer
     this.clientReplayBufferBinaryBytes = ctrl.clientReplayBufferBinary
-    this.serverReplayBufferBytes = ctrl.serverReplayBuffer
-    this.serverReplayBufferBinaryBytes = ctrl.serverReplayBufferBinary
+    this.replayWindows = {
+      window: replayWindow(ctrl.serverReplayBuffer, ctrl.serverReplayBufferBinary),
+      peerWindow: replayWindow(ctrl.clientReplayBuffer, ctrl.clientReplayBufferBinary),
+    }
     // Before this reconcile stores anything: a channel registered before the first RECONCILED was sized with the defaults.
     const maxAgeMs = this.replayMaxAgeMs(ctrl.pingInterval)
     for (const replay of this.replayBuffers.values()) {
@@ -1536,14 +1543,11 @@ class ClientConnection implements MuxConnection {
     const carriedFrom = this.carriedFrom
     this.carriedFrom = new Map()
     for (const [ix, lastSeq] of attachResults) if (lastSeq !== null && !serverMap.has(ix)) serverMap.set(ix, lastSeq)
-    // An initial channel left out is one the server awaits, until its ATTACH_RESULT. What one released meanwhile
-    // queued goes out now: the server holds it for the attach.
-    const releasable = new Set(serverMap.keys())
+    // An initial channel left out is one the server awaits, until its ATTACH_RESULT.
     for (const [ix, initial] of reconcileIxes) {
       this.awaitedIxes.delete(ix)
-      if (!initial || serverMap.has(ix) || attachResults.has(ix)) continue
+      if (!initial || serverMap.has(ix) || attachResults.has(ix) || !this.channels.has(ix)) continue
       this.awaitedIxes.add(ix)
-      if (!this.channels.has(ix)) releasable.add(ix)
     }
     const releaseFrames: OutboundFrame[] = []
     const channelsToOpen: MuxChannel[] = []
@@ -1581,7 +1585,7 @@ class ClientConnection implements MuxConnection {
       if (entry.state.tag !== 'closed') channelsToOpen.push(entry.channel)
     }
 
-    for (const frame of this.drainBufferedFrames(releasable, this.channels)) releaseFrames.push(frame)
+    for (const frame of this.drainBufferedFrames(serverMap)) releaseFrames.push(frame)
 
     if (hasNewChannels && !this.upgradeReady) {
       const reconcileBatch = this.stageReconcileBatch()
@@ -1612,17 +1616,16 @@ class ClientConnection implements MuxConnection {
       return
     }
     if (!this.awaitedIxes.delete(ix)) return
-    const entry = this.channels.get(ix)
-    // Nothing for one released meanwhile: the server held its closing frame for the attach, or closed it itself.
+    const entry = this.channels.get(ix)!
     if (lastSeq === null) {
       this.releaseDeferredOmitted([ix])
-    } else if (entry) {
+    } else {
       const opened = entry.state.tag === 'pending'
       if (opened) this.enterChannelOpen(ix)
       else if (entry.state.tag === 'closed') this.serverHas(ix, entry.state, lastSeq)
       // As `applyReconciled` does: its replay, then what it queued.
       for (const frame of this.replayTo(ix, entry, lastSeq)) this.transport.sendFrame(frame)
-      for (const frame of this.drainBufferedFrames(new Set([ix]), this.channels)) this.transport.sendFrame(frame)
+      for (const frame of this.drainBufferedFrames(new Set([ix]))) this.transport.sendFrame(frame)
       if (opened && entry.state.tag === 'open') entry.channel._onTransportOpen(this.transport.batched, this.wire)
     }
     this.startTtlIfIdle()
@@ -1677,11 +1680,9 @@ class ClientConnection implements MuxConnection {
     return 'accept'
   }
 
-  private drainBufferedFrames(
-    releasableChannels: Set<number> | Map<number, unknown>,
-    /** Frames for these channels stay in the buffer. Omitted: nothing is retained. */
-    retainedChannels?: Set<number> | Map<number, unknown>,
-  ): OutboundFrame[] {
+  /** Takes out what the channels in `releasableChannels` queued, storing what replays in their replays. What the others
+   *  queued stays. */
+  private drainBufferedFrames(releasableChannels: Set<number> | Map<number, unknown>): OutboundFrame[] {
     const frames: OutboundFrame[] = []
     const sendBuffer = this.sendBuffer
     let writeIx = 0
@@ -1691,7 +1692,7 @@ class ClientConnection implements MuxConnection {
       const channelIx = entry.channelIx
       const seq = entry.seq
       if (!releasableChannels.has(channelIx)) {
-        if (retainedChannels?.has(channelIx)) sendBuffer[writeIx++] = entry
+        sendBuffer[writeIx++] = entry
         continue
       }
       if (seq !== undefined) this.replayBuffers.get(channelIx)?.push(seq, frame)
@@ -1701,13 +1702,17 @@ class ClientConnection implements MuxConnection {
     return frames
   }
 
+  /** The channel goes, and all it holds with it: its replay, what it queued, how far it has what the server sent, and
+   *  its wait for an ATTACH_RESULT, as a RECONCILE leaving it out ends that on the server. */
   private releaseChannel(ix: number, channel: MuxChannel): void {
     this.channels.delete(ix)
     this.channelIndex.delete(channel)
+    this.awaitedIxes.delete(ix)
     this.lastSeqByChannel.delete(ix)
     const replayBuffer = this.replayBuffers.get(ix)
     replayBuffer?.dispose()
     this.replayBuffers.delete(ix)
+    if (this.sendBuffer.length > 0) this.sendBuffer = this.sendBuffer.filter(({ channelIx }) => channelIx !== ix)
   }
 }
 
@@ -1890,6 +1895,7 @@ class WsTransport implements UpgradeTarget {
         ws.close()
         return
       }
+      this.heartbeat?.noteReceived()
       if (frame.tag === TAG.PONG) {
         this.heartbeat?.resetPong()
         this.owner._onTransportPong(frame.ended)
@@ -2165,6 +2171,7 @@ class SseTransport implements UpgradeSource {
             continue
           }
           const frame = decode(raw, this.owner.seqs)
+          this.heartbeat?.noteReceived()
           if (frame.tag === TAG.PONG) {
             this.heartbeat?.resetPong()
             this.owner._onTransportPong(frame.ended)

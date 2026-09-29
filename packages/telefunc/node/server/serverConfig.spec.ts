@@ -1,7 +1,6 @@
 import { afterEach, describe, expect, it, test } from 'vitest'
 
 import { config, enableChannelTransports, getServerConfig } from './serverConfig.js'
-import { ServerChannel, reconnectWindow } from '../../wire-protocol/server/channel.js'
 
 describe('channel transports a server adapter enables', () => {
   afterEach(() => {
@@ -25,18 +24,24 @@ test.each([Infinity, 0.5, Number.MAX_SAFE_INTEGER + 1])('channel config rejects 
   expect(() => (config.channel.reconnectTimeout = value)).toThrow('non-negative safe integer')
 })
 
-test("channel config refuses a reconnect window longer than a timer waits, which a Room's close and a stream's close wait", () => {
-  const longest = 2 ** 31 - 1 - 1_000
+test.each(['reconnectTimeout', 'idleTimeout', 'connectTtl', 'sseFlushThrottle', 'ssePostIdleFlushDelay'])(
+  'channel config refuses a %s longer than a timer waits, which would fire at once',
+  (key) => {
+    try {
+      expect(() => (config.channel = { [key]: 2 ** 31 })).toThrow('at most 2147483647')
+      config.channel = { [key]: 2 ** 31 - 1 }
+      expect((getServerConfig().channel as Record<string, unknown>)[key]).toBe(2 ** 31 - 1)
+    } finally {
+      config.channel = {}
+    }
+  },
+)
+
+test('channel config refuses a pingInterval whose deadline, twice it, is longer than a timer waits', () => {
   try {
-    expect(() => (config.channel = { reconnectTimeout: 2 ** 31 })).toThrow(`at most ${longest} ms`)
-    expect(() => (config.channel = { reconnectTimeout: longest - 9_000, pingInterval: 5_000 })).toThrow(
-      `at most ${longest} ms`,
-    )
-    config.channel = { reconnectTimeout: longest - 10_000, pingInterval: 5_000 }
-    expect(reconnectWindow()).toBe(longest)
-    const channel = new ServerChannel()
-    expect(() => channel.close({ timeout: reconnectWindow() })).not.toThrow()
-    channel.abort()
+    expect(() => (config.channel = { pingInterval: 2 ** 30 })).toThrow('at most 1073741823')
+    config.channel = { pingInterval: 2 ** 30 - 1 }
+    expect(getServerConfig().channel.pingInterval).toBe(2 ** 30 - 1)
   } finally {
     config.channel = {}
   }

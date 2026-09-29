@@ -963,6 +963,16 @@ describe('Broadcast static bus (publish/subscribe)', () => {
     }
   })
 
+  it('resolves a static publish to a receipt with its key, as a subscriber gets it', async () => {
+    const key = `room:receipt-${crypto.randomUUID()}`
+    const text = await Broadcast.publish(key, 'hi')
+    const binary = await Broadcast.publishBinary(key, new Uint8Array([1]))
+    expect([text, binary]).toMatchObject([
+      { key, seq: 1 },
+      { key, seq: 2 },
+    ])
+  })
+
   it('static publish + static subscribe deliver without any instance', async () => {
     const received: Array<{ text: string }> = []
     const unsubscribe = Broadcast.subscribe<{ text: string }>('room:static', (msg) => received.push(msg))

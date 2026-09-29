@@ -22,6 +22,7 @@ import { isAbort } from '../../shared/Abort.js'
 import { NetworkError } from '../../shared/NetworkError.js'
 import { decodeU32 } from '../frame.js'
 import { base64urlToUint8Array } from '../base64url.js'
+import { SSE_FLUSH_THROTTLE_MS } from '../constants.js'
 import { config as serverConfig } from '../../node/server/serverConfig.js'
 
 /** A receiver with nothing of any channel: each seq reads as its low 32 bits. */
@@ -507,7 +508,46 @@ describe.each(WIRES)('over %s', (wire) => {
     expect(asked.value).toBe('reply')
     expect(serverClosed.err).toBeUndefined()
   })
+
+  test('a page goes idle once its last channel closes, after the server gave up on one the page aborted before the server had it', async () => {
+    idleWithAbortedCallback()
+    const { channel } = page(wire)
+    const pageChannel = channel(register().id)
+    await advance(500)
+    await expectIdleAfterAbortedCallback(channel, pageChannel)
+  })
 })
+
+test('over sse upgraded to a WebSocket, a page goes idle once its last channel closes, after the server gave up on one the page aborted before the server had it', async () => {
+  idleWithAbortedCallback()
+  const { channel } = page('sse', { upgrade: true })
+  const pageChannel = channel(register().id)
+  const connection = (pageChannel as any)._connection
+  for (let waited = 0; waited < 5_000 && connection.transport.type !== 'ws'; waited += 5) await advance(5)
+  await advance(500)
+  expect(connection.transport.type).toBe('ws')
+  await expectIdleAfterAbortedCallback(channel, pageChannel)
+})
+
+/** The server gives up on a channel it hasn't registered after 1 s, and a connection goes 300 ms after its last channel. */
+function idleWithAbortedCallback() {
+  serverConfig.channel = { pingInterval: 1_000, connectTtl: 1_000, idleTimeout: 300 }
+  ;(getChannelMux() as unknown as { resolvedOptions: unknown }).resolvedOptions = null
+}
+
+/** The page aborts a call's callback before the call reaches the server, which never registers it, then closes
+ *  `pageChannel`, its last channel, once the server gave up on the callback. */
+async function expectIdleAfterAbortedCallback(
+  channel: (channelId: string) => ClientChannel,
+  pageChannel: ClientChannel,
+) {
+  const connection = (pageChannel as unknown as { _connection: { closed: boolean } })._connection
+  channel(crypto.randomUUID()).abort()
+  await advance(2_000)
+  void pageChannel.close()
+  await advance(2_000)
+  expect(connection.closed).toBe(true)
+}
 
 describe.each(WIRES)('over %s, from the server', (wire) => {
   test('a page close whose acknowledgement goes down with a dying wire completes gracefully on both ends', async () => {
@@ -625,6 +665,90 @@ describe.each(WIRES)('over %s, from the server', (wire) => {
     await advance(10_000)
     expect(isAbort(pageClosed.err)).toBe(true)
     expect((pageClosed.err as { abortValue: unknown }).abortValue).toBe('gone')
+  })
+
+  test('a server close that times out while its page is away gets the page what the server sent meanwhile, then closes it gracefully', async () => {
+    const { net, channel } = page(wire)
+    channel(register().id) // another channel on the page
+    const server = register<never, string>()
+    const pageChannel = channel<never, string>(server.id)
+    const got: string[] = []
+    pageChannel.listen((message) => void got.push(message))
+    const pageClosed = closedWith(pageChannel)
+    const serverClosed = closedWith(server)
+    await advance(500)
+    void server.send('m0', { ack: false })
+    await advance(100)
+    net.cut()
+    await advance(3_000) // the server notices the page is gone
+    const sent = [settled(server.send('m1', { ack: false })), settled(server.send('m2', { ack: false }))]
+    const closing = settled(server.close())
+    await advance(6_000)
+    expect(closing.value).toBe(1)
+    expect((serverClosed.err as Error).message).toBe('Channel close timed out')
+    net.heal()
+    await advance(10_000)
+    expect(got).toEqual(['m0', 'm1', 'm2'])
+    expect(pageClosed.err).toBeUndefined()
+    expect(sent.map(({ value }) => value)).toEqual([undefined, undefined])
+  })
+
+  test('a channel the server sends on and closes before its page attaches, whose close times out first, gets the page what it sent, then closes it gracefully', async () => {
+    const { channel } = page(wire)
+    const server = register<never, string>()
+    const sent = [settled(server.send('m1', { ack: false })), settled(server.send('m2', { ack: false }))]
+    const closing = settled(server.close({ timeout: 300 }))
+    await advance(1_000) // the page's connection is slow to open
+    expect(closing.value).toBe(1)
+    const pageChannel = channel<never, string>(server.id)
+    const got: string[] = []
+    pageChannel.listen((message) => void got.push(message))
+    const pageClosed = closedWith(pageChannel)
+    await advance(1_000)
+    expect(got).toEqual(['m1', 'm2'])
+    expect(pageClosed.err).toBeUndefined()
+    expect(sent.map(({ value }) => value)).toEqual([undefined, undefined])
+  })
+
+  test('a server abort made while its page is away gets the page what the server sent before it, then the abort', async () => {
+    const { net, channel } = page(wire)
+    channel(register().id) // another channel on the page
+    const server = register<never, string>()
+    const pageChannel = channel<never, string>(server.id)
+    const got: string[] = []
+    pageChannel.listen((message) => void got.push(message))
+    const pageClosed = closedWith(pageChannel)
+    await advance(500)
+    net.cut()
+    await advance(3_000) // the server notices the page is gone
+    const sent = settled(server.send('m1', { ack: false }))
+    server.abort('gone')
+    await advance(100)
+    net.heal()
+    await advance(10_000)
+    expect(got).toEqual(['m1'])
+    expect(isAbort(pageClosed.err)).toBe(true)
+    expect(sent.value).toBeUndefined()
+  })
+
+  test('an ack request a server makes while its page is away rejects as its close times out, as no answer can reach it, and still reaches the page', async () => {
+    const { net, channel } = page(wire)
+    channel(register().id) // another channel on the page
+    const server = register<never, string>()
+    const pageChannel = channel<never, string>(server.id)
+    const got: string[] = []
+    pageChannel.listen((message) => void got.push(message))
+    await advance(500)
+    net.cut()
+    await advance(3_000) // the server notices the page is gone
+    const asked = settled(server.send('question', { ack: true }))
+    const closing = settled(server.close())
+    await advance(6_000)
+    expect(closing.value).toBe(1)
+    expect((asked.value as Error).message).toBe('Channel close timed out')
+    net.heal()
+    await advance(10_000)
+    expect(got).toEqual(['question'])
   })
 
   test('a page whose channels the server closes on a healthy wire lets each go within a ping round trip, and its next RECONCILE lists only the open ones', async () => {
@@ -854,6 +978,80 @@ describe.each(WIRES)('over %s, a stream that awaits its sends, whose wire drops 
   })
 })
 
+describe.each(WIRES)("over %s, a stream that awaits its sends, begun before its page's first RECONCILED,", (wire) => {
+  test("from the page, on a channel it passes to the server, resumes without loss when its wire drops with it in flight, however small the page's replay", async () => {
+    serverConfig.channel = { pingInterval: 1_000, clientReplayBuffer: 64 * 1_024 }
+    ;(getChannelMux() as unknown as { resolvedOptions: unknown }).resolvedOptions = null
+    const { net, channel } = page(wire)
+    // The first wire dies as its RECONCILED arrives, and the next as the server attaches the channel.
+    net.whenPageGets(TAG.RECONCILED, () => net.die())
+    net.whenPageGets(TAG.ATTACH_RESULT, () => net.die())
+    const pageChannel = channel<string, never>(crypto.randomUUID())
+    void (async () => {
+      for (let n = 0; n < 40; n++) await pageChannel.send(text(n), { ack: false })
+    })()
+    await advance(5_000)
+    // The call passing it reaches the server once the first wire's loss was noticed on both ends.
+    const server = new ServerChannel<string, never>({ id: pageChannel.id })
+    getChannelMux().registerChannel(server)
+    const got: number[] = []
+    server.listen((message) => void got.push(Number.parseInt(message)))
+    const closed = [closedWith(pageChannel), closedWith(server)]
+    await advance(20_000)
+    expect(got).toEqual(inOrder(40))
+    expect(closed.map(({ err }) => err)).toEqual(['open', 'open'])
+  })
+
+  test("from the server, after the page read what the server sent it before, resumes without loss when its wire drops with it in flight, however small the server's replay", async () => {
+    serverConfig.channel = {
+      pingInterval: 1_000,
+      serverReplayBuffer: 256 * 1_024,
+      serverReplayBufferBinary: 256 * 1_024,
+    }
+    ;(getChannelMux() as unknown as { resolvedOptions: unknown }).resolvedOptions = null
+    const { net, channel } = page(wire)
+    const server = register<never, string>()
+    void server.sendBinary(new Uint8Array(1_024 * 1_024)) // nobody awaits it: the page reads it as it attaches
+    const pageChannel = channel<never, string>(server.id)
+    let read = 0
+    pageChannel.listenBinary((data) => void (read += data.byteLength))
+    const got: number[] = []
+    pageChannel.listen((message) => void got.push(Number.parseInt(message)))
+    const closed = [closedWith(pageChannel), closedWith(server)]
+    await advance(500)
+    expect(read).toBe(1_024 * 1_024)
+    produce((n) => server.send(text(n), { ack: false }), 400, 1)
+    await advance(100)
+    await dieWithCredit(net, server, pageChannel)
+    await advance(20_000)
+    expect(got).toEqual(inOrder(400))
+    expect(closed.map(({ err }) => err)).toEqual(['open', 'open'])
+  })
+})
+
+test("over ws, a stream that awaits its sends from the page on a channel the server returned, begun before the page's first RECONCILED, resumes without loss when its wire drops with it in flight, however small the page's replay", async () => {
+  // The server waits for the page past the first wire's reconcile timeout.
+  serverConfig.channel = { pingInterval: 1_000, connectTtl: 20_000, clientReplayBuffer: 64 * 1_024 }
+  ;(getChannelMux() as unknown as { resolvedOptions: unknown }).resolvedOptions = null
+  const { net, channel } = page('ws')
+  const server = register<string, never>()
+  const got: number[] = []
+  server.listen((message) => void got.push(Number.parseInt(message)))
+  // Its first RECONCILE goes down with the wire, and the next wire dies as the page gets its RECONCILED.
+  net.whenPageSends(TAG.RECONCILE, () => {
+    net.die()
+    net.whenPageGets(TAG.RECONCILED, () => net.die())
+  })
+  const pageChannel = channel<string, never>(server.id)
+  const closed = [closedWith(pageChannel), closedWith(server)]
+  void (async () => {
+    for (let n = 0; n < 40; n++) await pageChannel.send(text(n), { ack: false })
+  })()
+  await advance(30_000)
+  expect(got).toEqual(inOrder(40))
+  expect(closed.map(({ err }) => err)).toEqual(['open', 'open'])
+})
+
 describe.each(WIRES)('over %s, a channel gone quiet', (wire) => {
   test("has each end's replay let go of what the other end got within a heartbeat, and a heartbeat with nothing new sends no WINDOW", async () => {
     const { net, channel } = page(wire)
@@ -977,7 +1175,8 @@ describe.each(WIRES)('over %s, past the replay', (wire) => {
     await advance(10_000)
     void server.send('after', { ack: false })
     void pageChannel.send('after', { ack: false })
-    await advance(100)
+    // Over SSE batch POSTs, a page's send waits for the next flush, at most one each SSE_FLUSH_THROTTLE_MS.
+    await advance(SSE_FLUSH_THROTTLE_MS + 100)
     expect(pageGot.map((message) => message.trim())).toEqual(['large', 's0', 's1', 's2', 'after'])
     expect(serverGot.map((message) => message.trim())).toEqual(['large', 'p0', 'p1', 'p2', 'after'])
     expect(pageClosed.err).toBe('open')

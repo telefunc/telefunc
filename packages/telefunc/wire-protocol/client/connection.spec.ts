@@ -91,11 +91,11 @@ test('a RECONCILED of zeros keeps zero on the client', () => {
     connection.idleTimeoutMs,
     connection.clientReplayBufferBytes,
     connection.clientReplayBufferBinaryBytes,
-    connection.serverReplayBufferBytes,
-    connection.serverReplayBufferBinaryBytes,
     connection.transport.flushThrottleMs,
     connection.transport.postIdleFlushDelayMs,
-  ]).toEqual(Array(8).fill(0))
+  ]).toEqual(Array(6).fill(0))
+  // What a zero replay allows each way: a byte.
+  expect(connection.replayWindows).toEqual({ window: 1, peerWindow: 1 })
   connection.dispose()
 })
 

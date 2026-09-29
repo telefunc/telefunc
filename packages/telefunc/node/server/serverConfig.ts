@@ -27,7 +27,6 @@ import {
   CHANNEL_BUFFER_LIMIT_BYTES,
   CHANNEL_BUFFER_LIMIT_BINARY_BYTES,
   CHANNEL_CLIENT_REPLAY_BUFFER_BYTES,
-  CHANNEL_CLOSE_TIMEOUT_MAX_MS,
   CHANNEL_CLIENT_REPLAY_BUFFER_BINARY_BYTES,
   CHANNEL_CONNECT_TTL_MS,
   CHANNEL_IDLE_TIMEOUT_MS,
@@ -42,6 +41,7 @@ import {
   SSE_POST_IDLE_FLUSH_DELAY_MS,
   type ChannelTransports,
   type StreamTransport,
+  TIMER_DELAY_MAX_MS,
 } from '../../wire-protocol/constants.js'
 
 type StreamConfigUser = {
@@ -74,7 +74,7 @@ type ChannelConfigUser = {
   transports?: ChannelTransports
   /**
    * How long, in milliseconds, the server keeps channel state after a client
-   * disconnects while waiting for a reconnect. With twice `pingInterval`, at most about 24.8 days.
+   * disconnects while waiting for a reconnect.
    */
   reconnectTimeout?: number
   /**
@@ -477,18 +477,31 @@ function applyChannelConfig(val: unknown): void {
       case 'transports':
         next.transports = validateChannelTransports(value, configPath)
         break
+      case 'pingInterval':
+        // Its deadline, twice it, is a timer too.
+        assertUsage(
+          typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 && value <= TIMER_DELAY_MAX_MS >> 1,
+          `\`${configPath}\` should be a non-negative safe integer of milliseconds, at most ${TIMER_DELAY_MAX_MS >> 1}, as its deadline, twice it, is at most the longest a timer waits`,
+        )
+        ;(next as Record<string, unknown>)[key] = value
+        break
       case 'reconnectTimeout':
       case 'idleTimeout':
-      case 'pingInterval':
+      case 'connectTtl':
+      case 'sseFlushThrottle':
+      case 'ssePostIdleFlushDelay':
+        assertUsage(
+          typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 && value <= TIMER_DELAY_MAX_MS,
+          `\`${configPath}\` should be a non-negative safe integer of milliseconds, at most ${TIMER_DELAY_MAX_MS}, the longest a timer waits`,
+        )
+        ;(next as Record<string, unknown>)[key] = value
+        break
       case 'serverReplayBuffer':
       case 'serverReplayBufferBinary':
       case 'clientReplayBuffer':
       case 'clientReplayBufferBinary':
-      case 'connectTtl':
       case 'bufferLimit':
       case 'bufferLimitBinary':
-      case 'sseFlushThrottle':
-      case 'ssePostIdleFlushDelay':
         assertUsage(
           typeof value === 'number' && Number.isSafeInteger(value) && value >= 0,
           `\`${configPath}\` should be a non-negative safe integer`,
@@ -499,31 +512,22 @@ function applyChannelConfig(val: unknown): void {
         assertUsage(false, `Unknown ${configPath}`)
     }
   }
-  const held = {
-    pingInterval: next.pingInterval ?? CHANNEL_PING_INTERVAL_MS,
-    reconnectTimeout: next.reconnectTimeout ?? CHANNEL_RECONNECT_TIMEOUT_MS,
-  }
-  assertUsage(
-    replayMaxAgeOf(held) <= CHANNEL_CLOSE_TIMEOUT_MAX_MS,
-    `\`config.channel.reconnectTimeout\` plus the ping deadline, twice \`pingInterval\` and at least 2 seconds, is how long the server holds a gone client's channels: it should be at most ${CHANNEL_CLOSE_TIMEOUT_MAX_MS - REPLAY_SLACK_MS} ms (about 24.8 days), as no timer waits longer than that and a second more`,
-  )
   configState.channel = next
 }
 
-/** How long a gone client is still held: until its drop is noticed at the ping deadline, then for `reconnectTimeout`. */
+/** How long a gone client is still held, up to the longest a timer waits: until its drop is noticed at the ping
+ *  deadline, then for `reconnectTimeout`. */
 function reconnectWindowOf({
   pingInterval,
   reconnectTimeout,
 }: Pick<ChannelConfigResolved, 'pingInterval' | 'reconnectTimeout'>): number {
-  return Math.max(pingInterval, CHANNEL_PING_INTERVAL_MIN_MS) * 2 + reconnectTimeout
+  return Math.min(TIMER_DELAY_MAX_MS, Math.max(pingInterval, CHANNEL_PING_INTERVAL_MIN_MS) * 2 + reconnectTimeout)
 }
 
-/** A second for the reconnect itself, which a frame stays replayable past the reconnect window. */
-const REPLAY_SLACK_MS = 1_000
-
-/** How long a frame stays replayable: through the reconnect window, plus a second for the reconnect itself. */
+/** How long a frame stays replayable, up to the longest a timer waits: through the reconnect window, plus a second for
+ *  the reconnect itself. */
 function replayMaxAgeOf(channel: Pick<ChannelConfigResolved, 'pingInterval' | 'reconnectTimeout'>): number {
-  return reconnectWindowOf(channel) + REPLAY_SLACK_MS
+  return Math.min(TIMER_DELAY_MAX_MS, reconnectWindowOf(channel) + 1_000)
 }
 
 function applyBroadcastConfig(val: unknown): void {

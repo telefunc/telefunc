@@ -40,7 +40,7 @@ import { handleTelefunctionBug } from '../../node/server/runTelefunc/validateTel
 import { ChannelClosedError, ChannelOverflowError, replayLossError } from '../channel-errors.js'
 import { NetworkError } from '../../shared/NetworkError.js'
 import { isPromise } from '../../utils/isPromise.js'
-import { CHANNEL_CLOSE_TIMEOUT_MAX_MS, CHANNEL_CLOSE_TIMEOUT_MS, CREDIT_WINDOW_MAX_BYTES } from '../constants.js'
+import { TIMER_DELAY_MAX_MS, CHANNEL_CLOSE_TIMEOUT_MS, CREDIT_WINDOW_MAX_BYTES } from '../constants.js'
 import { FlowControl, replayWindow } from '../flow-control/flow-control.js'
 import { STATUS_BODY_INTERNAL_SERVER_ERROR } from '../../shared/constants.js'
 import { ServerChannelBuffer } from './ServerChannelBuffer.js'
@@ -433,9 +433,10 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   }
 
   /** The peer's RECONCILE declarations apply before `onOpen` fires, through the same hooks as its frames. An ended
-   *  channel sends only what it made while no peer was attached: its answers and its end. */
+   *  channel sends only what it made while no peer was attached: its messages, its answers and its end. */
   _attachPeer(peer: IndexedPeer, state?: ReattachState): void {
     if (this._didShutdown) {
+      this._flushPrePeerBuffer(peer)
       this._sendPendingAckRes(peer)
       this._sendPendingEnd(peer)
       return
@@ -446,17 +447,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     const rewired = this._peer?.sender !== peer.sender
     this._peer = peer
     if (rewired) this._flow.reattach()
-    this._prePeerBuffer.flush({
-      sendText: (msg) => this._flow.countSent(peer.sendText(msg)),
-      sendPublish: (msg) => this._flow.countSentBytes(peer.sendPublish(msg)),
-      sendBinary: (msg) => {
-        peer.sendBinary(msg)
-        this._flow.countSent(msg.byteLength)
-      },
-      sendTextAck: (data, cb) => peer.sendTextAckReq(data, (seq, bytes) => this._addPendingAck(seq, bytes, cb)),
-      sendBinaryAck: (data, cb) => peer.sendBinaryAckReq(data, (seq, bytes) => this._addPendingAck(seq, bytes, cb)),
-      sendPublishBinary: (msg) => this._flow.countSentBytes(peer.sendPublishBinary(msg)),
-    })
+    this._flushPrePeerBuffer(peer)
     this._sendPendingAckRes(peer)
     // After the swap, so what they send reaches this peer even if the previous one never detached.
     if (state?.broadcast) {
@@ -680,7 +671,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
 
   _onPeerCloseRequest(timeoutMs: number): void {
     if (this._didShutdown) return
-    assertProtocol(timeoutMs <= CHANNEL_CLOSE_TIMEOUT_MAX_MS, `CLOSE timeout ${timeoutMs}`)
+    assertProtocol(timeoutMs <= TIMER_DELAY_MAX_MS, `CLOSE timeout ${timeoutMs}`)
     const peerDeadline = Date.now() + timeoutMs
     if (!this._closeDeadline || peerDeadline < this._closeDeadline) this._closeDeadline = peerDeadline
     if (this._peer) this._peer.sendCloseAck()
@@ -730,9 +721,10 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
    *  page so in place of the replay. What it made while no peer was attached is dropped, as it would reach the page
    *  past the hole. */
   _onReplayLost(peer: IndexedPeer, loss: ReplayLoss): void {
-    this._dropPending()
+    const err = replayLossError('server', loss)
+    this._dropPending(err)
     peer.sendError(loss)
-    this._shutdown(replayLossError('server', loss))
+    this._shutdown(err)
   }
 
   /** @internal At each of its page's heartbeats: see `FlowControl.acknowledge`. */
@@ -751,12 +743,30 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     return (
       this._replayBuffer !== null &&
       this._pageLastSeq >= this._replayBuffer.seq &&
+      this._prePeerBuffer.size === 0 &&
       this._pendingAckRes.length === 0 &&
       !this._pendingCloseAck &&
       !this._pendingCloseRequest &&
       this._pendingAbort === null &&
       this._pendingError === null
     )
+  }
+
+  /** What was sent while no peer was attached goes to `peer`. An ended channel's ack requests were rejected as it
+   *  ended, and take no answer. */
+  private _flushPrePeerBuffer(peer: IndexedPeer): void {
+    this._prePeerBuffer.flush({
+      sendText: (msg) => this._flow.countSent(peer.sendText(msg)),
+      sendPublish: (msg) => this._flow.countSentBytes(peer.sendPublish(msg)),
+      sendBinary: (msg) => {
+        peer.sendBinary(msg)
+        this._flow.countSent(msg.byteLength)
+      },
+      sendTextAck: (data, cb) => peer.sendTextAckReq(data, (seq, bytes) => cb && this._addPendingAck(seq, bytes, cb)),
+      sendBinaryAck: (data, cb) =>
+        peer.sendBinaryAckReq(data, (seq, bytes) => cb && this._addPendingAck(seq, bytes, cb)),
+      sendPublishBinary: (msg) => this._flow.countSentBytes(peer.sendPublishBinary(msg)),
+    })
   }
 
   private _sendPendingAckRes(peer: IndexedPeer): void {
@@ -776,9 +786,11 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this._pendingError = null
   }
 
-  /** Ends the channel on both ends with an ERROR of `reason`, which a page not attached gets at its next attach. */
+  /** Ends the channel on both ends with an ERROR of `reason`, which a page not attached gets at its next attach, in place
+   *  of what the channel held for it, past what it lost. */
   protected _endWithError(reason: ErrorReason, err: Error): void {
     if (this._didShutdown) return
+    this._prePeerBuffer.clear(err)
     if (this._peer) this._peer.sendError(reason)
     else this._pendingError = reason
     this._shutdown(err)
@@ -965,17 +977,20 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     for (const { reject } of this._pendingAcks.values()) reject(ackErr)
     this._pendingAcks.clear()
     this._pendingAckBytes = 0
-    this._prePeerBuffer.clear(ackErr)
+    // What it keeps for its page takes no answer.
+    this._prePeerBuffer.rejectAcks(ackErr)
   }
 
   /** @internal Drops what the channel keeps for its page: its replay, and what it made while no peer was attached. */
   _release(): void {
     this._replayBuffer?.dispose()
     this._replayBuffer = null
-    this._dropPending()
+    this._dropPending(this._closeError ?? new ChannelClosedError())
   }
 
-  private _dropPending(): void {
+  /** What was sent while no peer was attached rejects with `err`. */
+  private _dropPending(err: Error): void {
+    this._prePeerBuffer.clear(err)
     this._pendingAckRes.length = 0
     this._pendingCloseAck = false
     this._pendingCloseRequest = false
@@ -1072,8 +1087,8 @@ function replayMaxAge(): number {
 function normalizeCloseTimeout(timeout: number | undefined): number {
   if (timeout === undefined) return CHANNEL_CLOSE_TIMEOUT_MS
   assertUsage(
-    Number.isFinite(timeout) && timeout >= 0 && timeout <= CHANNEL_CLOSE_TIMEOUT_MAX_MS,
-    `Channel close timeout must be a non-negative number of milliseconds, at most ${CHANNEL_CLOSE_TIMEOUT_MAX_MS}`,
+    Number.isFinite(timeout) && timeout >= 0 && timeout <= TIMER_DELAY_MAX_MS,
+    `Channel close timeout must be a non-negative number of milliseconds, at most ${TIMER_DELAY_MAX_MS}`,
   )
   return timeout
 }

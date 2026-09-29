@@ -11,7 +11,8 @@ import {
 } from '../../wire-protocol/shared-ws.js'
 import type { ChannelFrame } from '../../wire-protocol/shared-ws.js'
 import { IndexedPeer } from '../../wire-protocol/server/IndexedPeer.js'
-import { ServerChannel } from '../../wire-protocol/server/channel.js'
+import { ServerChannel, reconnectWindow, replayMaxAge } from '../../wire-protocol/server/channel.js'
+import { config } from './serverConfig.js'
 
 /** A receiver with nothing of any channel: each seq reads as its low 32 bits. */
 const wireSeqs: SeqReader = { received: () => 0, sent: () => 0 }
@@ -53,6 +54,19 @@ describe('self-initiated close', () => {
     channel._attachPeer(createPeer([]))
     expect(() => channel.close({ timeout: 2 ** 31 })).toThrow('at most 2147483647')
     expect(channel.isClosed).toBe(false)
+  })
+
+  test('a channel closes within the reconnect window of the longest reconnectTimeout, as a returned stream does', () => {
+    config.channel = { reconnectTimeout: 2 ** 31 - 1 }
+    try {
+      const channel = new ServerChannel<never, never>()
+      channel._attachPeer(createPeer([]))
+      expect(reconnectWindow()).toBe(2 ** 31 - 1)
+      expect(replayMaxAge()).toBe(2 ** 31 - 1)
+      expect(() => channel.close({ timeout: reconnectWindow() })).not.toThrow()
+    } finally {
+      config.channel = {}
+    }
   })
 
   test("a page's close request for longer than a timer waits is a protocol violation", () => {

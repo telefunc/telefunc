@@ -137,6 +137,8 @@ type AwaitedChannel = {
 
 type ConnectionState = {
   pingTimer: ReturnType<typeof setTimeout> | null
+  /** When the wire last delivered a frame, or the ping deadline was last set. */
+  lastReceivedAt: number
   terminatePermanently: boolean
   recvChain: Promise<unknown> | null
   /** Set by `onConnectionClosed` so an in-flight `reconcile` can see the close and its kind. */
@@ -152,6 +154,9 @@ type ConnectionState = {
   largestSent: number
   /** Its backlog passed that, and the wire is being terminated. */
   pastSendBacklog: boolean
+  /** Channels attaching to the wire in this turn, before its session holds them: what they send as they attach (their
+   *  replay, what they buffered, what `onOpen` sends) counts under their flow control too. */
+  attaching: Set<ServerChannel>
 }
 
 type ConnectionEntry = {
@@ -251,6 +256,7 @@ class ChannelMux {
     this.connectionEntries.set(connection, {
       state: {
         pingTimer: null,
+        lastReceivedAt: 0,
         terminatePermanently: false,
         recvChain: null,
         closed: null,
@@ -261,6 +267,7 @@ class ChannelMux {
         sendHeadroom: 0,
         largestSent: 0,
         pastSendBacklog: false,
+        attaching: new Set(),
       },
       transport: transport as ServerTransport<unknown>,
       sender: {
@@ -361,6 +368,7 @@ class ChannelMux {
     }
     state.recvBacklogBytes += byteLength
     state.recvBacklogFrames++
+    state.lastReceivedAt = performance.now()
     const tag = peekTag(rawFrame)
     const exec = (): Promise<ReconcileOutcome | null> => this.runInboundTurn(entry, connection, rawFrame, byteLength)
     if (tag === TAG.PING) return exec()
@@ -641,6 +649,7 @@ class ChannelMux {
     // close kind: a transient close leaves the channels their `_onPeerDisconnect` grace so the
     // client's retry can re-attach them.
     if (state.closed) {
+      state.attaching.clear()
       const reason = state.closed.isPermanent ? DETACH_REASON.PERMANENT : DETACH_REASON.TRANSIENT
       const session = this.sessions.removeSession(newSessionId)
       if (session) for (const handle of session.values()) this.detachHandle(handle, reason)
@@ -648,13 +657,13 @@ class ChannelMux {
       throw new ProtocolViolationError('connection closed mid-reconcile')
     }
 
-    // What the wire stopped awaiting is forgotten once a RECONCILE no longer names it: the client has released it.
+    // What the wire awaits is forgotten once a RECONCILE no longer names it: the page has let it go.
     const named = new Set(ctrl.open.map((open) => open.ix))
-    for (const [ix, awaited] of state.awaited)
-      if (awaited.phase === 'expired' && !named.has(ix)) state.awaited.delete(ix)
+    for (const [ix, awaited] of state.awaited) if (!named.has(ix)) this.forgetAwaited(state, ix, awaited)
 
     this.sessionWires.set(newSessionId, connection)
     transport.setSessionId(connection, newSessionId)
+    state.attaching.clear()
     return { sessionId: newSessionId, attached, finalizeUpgrade, deliverTo: connection }
   }
 
@@ -701,7 +710,10 @@ class ChannelMux {
       if (awaited.phase !== 'attached') return null
     }
     const existing = this.channels.get(entry.id)
-    if (existing) return this.attachChannel(existing, entry, conn.sender, replay)
+    if (existing) {
+      conn.state.attaching.add(existing)
+      return this.attachChannel(existing, entry, conn.sender, replay)
+    }
     if (entry.initial && !awaited) this.awaitChannel(entry, conn, connection)
     return null
   }
@@ -728,7 +740,9 @@ class ChannelMux {
     const { conn, wire } = awaited
     const sessionId = conn.transport.getSessionId(wire)
     assert(sessionId, 'a channel awaited on a wire that never reconciled')
+    conn.state.attaching.add(channel)
     const handle = this.attachChannel(channel, awaited.entry, conn.sender, false)
+    conn.state.attaching.delete(channel)
     if (!handle) {
       this.expireAwaited(awaited)
       return
@@ -769,6 +783,15 @@ class ChannelMux {
     this.chargeHeld(awaited, -1)
     awaited.held = []
     this.send(awaited.wire, encode.attachResult(awaited.entry.ix, null))
+  }
+
+  /** The wire awaits it no more, and drops what it held for it. One attached meanwhile, the RECONCILE left out of the
+   *  session, which ended it. */
+  private forgetAwaited(state: ConnectionState, ix: number, awaited: AwaitedChannel): void {
+    awaited.stopWaiting()
+    this.chargeHeld(awaited, -1)
+    awaited.held = []
+    state.awaited.delete(ix)
   }
 
   /** What a wire holds counts against its recv backlog. */
@@ -921,8 +944,10 @@ class ChannelMux {
     if (backlog === undefined) return Infinity
     const sessionId = entry.transport.getSessionId(connection)
     const session = sessionId === undefined ? undefined : this.sessions.peekSession(sessionId)
+    const channels = new Set(entry.state.attaching)
+    for (const { channel } of session?.values() ?? []) channels.add(channel)
     let allowed = WIRE_SEND_BACKLOG_BASE_BYTES
-    for (const { channel } of session?.values() ?? []) allowed += channel._sendAllowance() + entry.state.largestSent
+    for (const channel of channels) allowed += channel._sendAllowance() + entry.state.largestSent
     return allowed - backlog
   }
 
@@ -951,15 +976,25 @@ class ChannelMux {
   private resetPingTimer(connection: Wire): void {
     const entry = this.connectionEntries.get(connection)
     if (!entry) return
+    entry.state.lastReceivedAt = performance.now()
+    this.armPingDeadline(connection, entry, this.options.pingDeadline)
+  }
+
+  private armPingDeadline(connection: Wire, entry: ConnectionEntry, ms: number): void {
     const { state, transport } = entry
     this.clearPingTimer(state)
     state.pingTimer = unrefTimer(
       setTimeout(() => {
         state.pingTimer = null
+        // A PING arrives behind what the page queued before it, as an upload on a slow link: the wire is dead once it
+        // has delivered nothing for the deadline.
+        const quiet = performance.now() - state.lastReceivedAt
+        if (quiet < this.options.pingDeadline)
+          return this.armPingDeadline(connection, entry, this.options.pingDeadline - quiet)
         // Transient close so each channel gets its `reconnectTimeout` grace via
         // `_onPeerDisconnect`. Connection-level state is rebuilt by the next reconcile.
         transport.terminateConnection(connection)
-      }, this.options.pingDeadline),
+      }, ms),
     )
   }
 }
