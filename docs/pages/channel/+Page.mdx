@@ -419,7 +419,7 @@ Channels and broadcasts signal failure through four errors:
 
 > A graceful `close()` isn't an error (`onClose(err)` receives `undefined`).
 
-> A `BroadcastChannel` whose client falls behind the messages published to it by more than 80 MiB, its 64 MiB of room and the 16 MiB it may have read before saying so, or by more than `config.channel.bufferLimit` (`bufferLimitBinary` for binary) while it's offline, is closed on both ends with `ChannelOverflowError`, as there is no `send()` to reject. Call its telefunction again to rejoin.
+> A `BroadcastChannel` whose client falls behind the messages published to it by more than its room, 64 MiB or half the server's replay buffer if that's less, and a quarter more it may have read before saying so, 80 MiB with the defaults, or by more than `config.channel.bufferLimit` (`bufferLimitBinary` for binary) while it's offline, is closed on both ends with `ChannelOverflowError`, as there is no `send()` to reject. Call its telefunction again to rejoin.
 
 See also:
 - <Link href="/stream#error-handling" />
@@ -431,8 +431,8 @@ See also:
 If the connection drops, Telefunc reconnects automatically and resumes existing channels and broadcasts:
 
 - Messages sent while offline are buffered and delivered in order on reconnect.
-- Both sides keep a bounded replay buffer; after reconnect, missing frames are replayed.
-- If a reconnect needs frames a replay buffer no longer holds, the channel closes on both ends with `NetworkError` instead of skipping them, and so does a stream riding it. The error names the setting to raise (see <Link href="/channel-config" />).
+- Each side keeps the messages it sent until the other acknowledges them; after reconnect, missing ones are replayed. Flow control never lets more be in flight than that replay buffer holds, so a stream that `await`s its sends resumes without loss.
+- Sends nobody awaits can outrun it: if a reconnect needs messages a replay buffer no longer holds, the channel closes on both ends with `NetworkError` instead of skipping them, and so does a stream riding it. The error names the setting to raise (see <Link href="/channel-config" />).
 - `onOpen()` fires only on initial open, `onClose()` only on permanent close.
 
 > Reconnection is automatic — you don't need to handle it in your application code.

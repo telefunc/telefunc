@@ -177,14 +177,6 @@ export const CHANNEL_IDLE_TIMEOUT_MS = 60_000
 export const CHANNEL_PING_INTERVAL_MS = 5_000
 export const CHANNEL_PING_INTERVAL_MIN_MS = 1_000
 export const CHANNEL_CLOSE_TIMEOUT_MS = 5_000
-/** Per-channel replay buffer for text frames kept on the server for reconnect recovery. */
-export const CHANNEL_SERVER_REPLAY_BUFFER_BYTES = 256 * 1024
-/** Per-channel replay buffer for binary frames kept on the server for reconnect recovery. */
-export const CHANNEL_SERVER_REPLAY_BUFFER_BINARY_BYTES = 2 * 1024 * 1024
-/** Per-channel replay buffer for text frames advertised to the client for reconnect replay. */
-export const CHANNEL_CLIENT_REPLAY_BUFFER_BYTES = 1024 * 1024
-/** Per-channel replay buffer for binary frames advertised to the client for reconnect replay. */
-export const CHANNEL_CLIENT_REPLAY_BUFFER_BINARY_BYTES = 2 * 1024 * 1024
 /**
  * Maximum bytes buffered per channel for text messages sent before a peer connects.
  * When the budget is exceeded the oldest entries are evicted (FIFO) so the
@@ -231,8 +223,8 @@ export const CHANNEL_RECONNECT_MAX_DELAY_MS = 5_000
 //                             never reply to a client that's waiting for that reply
 //                             to free credit).
 //   PUBLISH, PUBLISH_BINARY   broadcast fan-out: counted in bytes only, taking no
-//                             message credit and starting no BDP probe, against a
-//                             byte window the page sets at CREDIT_WINDOW_MAX_BYTES.
+//                             message credit and starting no BDP probe, against the
+//                             largest byte window the page grants, from the start.
 //                             Nothing waits on them: the count tells the server how
 //                             far behind the page is, past which it closes the
 //                             page's broadcast channel.
@@ -244,6 +236,14 @@ export const CHANNEL_RECONNECT_MAX_DELAY_MS = 5_000
 // one (BDP is a property of the path, not of any single wire instance: slight divergence from
 // gRPC's per-connection reset, acceptable for typical transport hiccups). A reattach on the
 // same wire lost nothing and advertises nothing.
+//
+// Replay: each end keeps what it sent on a channel until its peer acknowledges it, to replay after a reconnect. A
+// `WINDOW` carries the last seq the receiver has, so each one acknowledges: one goes out as a limit does, and once a
+// quarter window of what credit doesn't count, ack requests and their answers, arrived since the last. A receiver never
+// grants a window past half the smaller lane of its peer's replay buffer (`replayWindow`), so what credit lets be in
+// flight, and a message up to as large sent as the credit ran out, always fit it. What credit doesn't hold back, sends
+// nobody awaits past it, ack requests and their answers, takes the rest, and a reconnect that needs what a replay dropped
+// ends the channel on both ends with `NetworkError`.
 
 /** Initial credit window — sized so a typical ~MB-scale burst doesn't stall on
  *  the BDP ramp-up. Grows further via the estimator up to `CREDIT_WINDOW_MAX_BYTES`. */
@@ -256,6 +256,14 @@ export const CREDIT_WINDOW_INITIAL_BYTES_BATCH = 8 * 1024 * 1024
 /** Hard cap on the adaptive credit window — bounds per-channel buffering worst case.
  *  Covers ~5 Gbit/s × 100 ms RTT or ~500 Mbit/s × 1 s RTT. */
 export const CREDIT_WINDOW_MAX_BYTES = 64 * 1024 * 1024
+
+/** Each lane of a channel's replay buffer, text and binary, on the server and on the page: twice the largest window, so
+ *  nothing but `CREDIT_WINDOW_MAX_BYTES` caps a window (see `replayWindow`). A replay holds what its peer hasn't
+ *  acknowledged: for a stream that awaits its sends, its window and a message at most. */
+export const CHANNEL_SERVER_REPLAY_BUFFER_BYTES = 2 * CREDIT_WINDOW_MAX_BYTES
+export const CHANNEL_SERVER_REPLAY_BUFFER_BINARY_BYTES = 2 * CREDIT_WINDOW_MAX_BYTES
+export const CHANNEL_CLIENT_REPLAY_BUFFER_BYTES = 2 * CREDIT_WINDOW_MAX_BYTES
+export const CHANNEL_CLIENT_REPLAY_BUFFER_BINARY_BYTES = 2 * CREDIT_WINDOW_MAX_BYTES
 
 /** Initial per-channel message-count credit. Independent of the byte budget:
  *  many tiny frames within a normal byte window can still bury the receive loop

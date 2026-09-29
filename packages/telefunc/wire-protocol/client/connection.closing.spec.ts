@@ -1,7 +1,7 @@
-// A channel's end across a wire that dies without a word: the page's close request, close acknowledgement or abort, and
-// the answers that complete a close, replay after the reconnect as its data does, and a reconnect that needs what a
-// replay dropped ends the channel on both ends. These drive the real ClientChannel against the real server over each
-// wire.
+// A channel across a wire that dies without a word: a stream that awaits its sends resumes after the reconnect without
+// loss, the page's close request, close acknowledgement or abort, and the answers that complete a close, replay as its
+// data does, and a reconnect that needs what a replay dropped ends the channel on both ends. These drive the real
+// ClientChannel against the real server over each wire.
 
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 import type { Peer } from 'crossws'
@@ -166,6 +166,8 @@ function closedWith(channel: { onClose(callback: (err?: Error) => void): void })
   channel.onClose((err) => void (closed.err = err))
   return closed
 }
+
+const flowOf = (channel: unknown) => (channel as { _flow: { byteWindow: number } })._flow
 
 /** Expects the error a channel ends with when a reconnect needs messages `side`'s replay buffer dropped. */
 function expectLost(err: unknown, side: 'server' | 'client') {
@@ -710,12 +712,150 @@ describe.each(WIRES)('over %s, from the server', (wire) => {
   })
 })
 
+describe.each(WIRES)('over %s, a stream that awaits its sends, whose wire drops with its window in flight,', (wire) => {
+  /** Awaits each of `count` sends, one every `everyMs`, as a stream that awaits its sends does. */
+  function produce(send: (n: number) => Promise<unknown>, count: number, everyMs: number) {
+    void (async () => {
+      for (let n = 0; n < count; n++) {
+        await send(n)
+        await new Promise((resolve) => setTimeout(resolve, everyMs))
+      }
+    })().catch(() => {})
+  }
+  /** A 16 KiB message that names its place in the stream. */
+  const text = (n: number) => String(n).padEnd(16 * 1_024)
+  /** A 1 MiB binary message that names its place in the stream: two of them take the page's 2 MiB window. */
+  const chunk = (n: number) => new Uint8Array(1_024 * 1_024).fill(n)
+  const inOrder = (count: number) => Array.from({ length: count }, (_, n) => n)
+  /** The wire dies once `sender` may send more than half of `receiver`'s window, which then goes into the dead wire. */
+  async function dieWithCredit(net: Net, sender: unknown, receiver: unknown) {
+    const flow = (sender as { _flow: { _limitBytes: number; _sentBytes: number } })._flow
+    while (flow._limitBytes - flow._sentBytes <= flowOf(receiver).byteWindow / 2) await advance(1)
+    net.die()
+  }
+
+  test('from the server, as text, resumes after the reconnect without loss', async () => {
+    const { net, channel } = page(wire)
+    const server = register<never, string>()
+    const pageChannel = channel<never, string>(server.id)
+    const got: number[] = []
+    pageChannel.listen((message) => void got.push(Number.parseInt(message)))
+    const closed = [closedWith(pageChannel), closedWith(server)]
+    await advance(500)
+    produce((n) => server.send(text(n), { ack: false }), 400, 1)
+    await advance(100)
+    await dieWithCredit(net, server, pageChannel)
+    await advance(10_000)
+    expect(got).toEqual(inOrder(400))
+    expect(closed.map(({ err }) => err)).toEqual(['open', 'open'])
+  })
+
+  test('from the server, as binary, resumes after the reconnect without loss', async () => {
+    const { net, channel } = page(wire)
+    const server = register()
+    const pageChannel = channel(server.id)
+    const got: number[] = []
+    pageChannel.listenBinary((data) => void got.push(data[0]!))
+    const closed = [closedWith(pageChannel), closedWith(server)]
+    await advance(500)
+    produce((n) => server.sendBinary(chunk(n)), 24, 10)
+    await advance(100)
+    await dieWithCredit(net, server, pageChannel)
+    await advance(10_000)
+    expect(got).toEqual(inOrder(24))
+    expect(closed.map(({ err }) => err)).toEqual(['open', 'open'])
+  })
+
+  test('from the page, as text, resumes after the reconnect without loss', async () => {
+    const { net, channel } = page(wire)
+    const server = register<string, never>()
+    const got: number[] = []
+    server.listen((message) => void got.push(Number.parseInt(message)))
+    const pageChannel = channel<string, never>(server.id)
+    const closed = [closedWith(pageChannel), closedWith(server)]
+    await advance(500)
+    produce((n) => pageChannel.send(text(n), { ack: false }), 400, 1)
+    await advance(100)
+    await dieWithCredit(net, pageChannel, server)
+    await advance(10_000)
+    expect(got).toEqual(inOrder(400))
+    expect(closed.map(({ err }) => err)).toEqual(['open', 'open'])
+  })
+
+  test('from the page, as binary, resumes after the reconnect without loss', async () => {
+    const { net, channel } = page(wire)
+    const server = register()
+    const got: number[] = []
+    server.listenBinary((data) => void got.push(data[0]!))
+    const pageChannel = channel(server.id)
+    const closed = [closedWith(pageChannel), closedWith(server)]
+    await advance(500)
+    produce((n) => pageChannel.sendBinary(chunk(n)), 24, 10)
+    await advance(100)
+    await dieWithCredit(net, pageChannel, server)
+    await advance(10_000)
+    expect(got).toEqual(inOrder(24))
+    expect(closed.map(({ err }) => err)).toEqual(['open', 'open'])
+  })
+
+  test("the server's replay lets go of what the page acknowledges, holding the page's window and a message at most", async () => {
+    const { channel } = page(wire)
+    const server = register<never, string>()
+    const pageChannel = channel<never, string>(server.id)
+    let got = 0
+    pageChannel.listen(() => void got++)
+    await advance(500)
+    const held = () => server._replayBuffer!.byteLength
+    let most = 0
+    let shrank = 0
+    const dispatchCtrl = server._dispatchCtrl.bind(server)
+    server._dispatchCtrl = (frame) => {
+      const before = held()
+      dispatchCtrl(frame)
+      if (frame.tag === TAG.WINDOW && held() < before) shrank++
+    }
+    produce((n) => server.send(text(n), { ack: false }), 400, 1)
+    const watch = setInterval(() => (most = Math.max(most, held())), 1)
+    await advance(2_000)
+    clearInterval(watch)
+    expect(got).toBe(400)
+    expect(shrank).toBeGreaterThan(0)
+    expect(most).toBeLessThanOrEqual(flowOf(pageChannel).byteWindow + 16 * 1_024)
+  })
+
+  test("the page's replay lets go of what the server acknowledges, holding the server's window and a message at most", async () => {
+    const { channel } = page(wire)
+    const server = register<string, never>()
+    let got = 0
+    server.listen(() => void got++)
+    const pageChannel = channel<string, never>(server.id)
+    await advance(500)
+    const connection = (pageChannel as any)._connection
+    const held = () => connection.replayBuffers.get(connection.channelIndex.get(pageChannel)).byteLength as number
+    let most = 0
+    let shrank = 0
+    const dispatchFrame = connection.dispatchFrame.bind(connection)
+    connection.dispatchFrame = (frame: { tag: number }) => {
+      const before = held()
+      dispatchFrame(frame)
+      if (frame.tag === TAG.WINDOW && held() < before) shrank++
+    }
+    produce((n) => pageChannel.send(text(n), { ack: false }), 400, 1)
+    const watch = setInterval(() => (most = Math.max(most, held())), 1)
+    await advance(2_000)
+    clearInterval(watch)
+    expect(got).toBe(400)
+    expect(shrank).toBeGreaterThan(0)
+    expect(most).toBeLessThanOrEqual(flowOf(server).byteWindow + 16 * 1_024)
+  })
+})
+
 describe.each(WIRES)('over %s, past the replay', (wire) => {
-  /** Chunks of a stream: the first, then, once `resume` is called, eight more. */
-  function chunks() {
+  /** Chunks of a stream of `size` bytes each: the first, then, once `resume` is called, eight more. */
+  function chunks(size: number) {
     let resume!: () => void
     const resumed = new Promise<void>((resolve) => (resume = resolve))
-    const chunk = (n: number) => new Uint8Array(1_024).fill(n) as Uint8Array<ArrayBuffer>
+    const chunk = (n: number) => new Uint8Array(size).fill(n) as Uint8Array<ArrayBuffer>
     const producer = {
       chunks: (async function* () {
         yield chunk(0)
@@ -724,7 +864,9 @@ describe.each(WIRES)('over %s, past the replay', (wire) => {
       })(),
       cancel: () => {},
     }
-    return { producer, resume }
+    const all = new Uint8Array(9 * size)
+    for (let n = 0; n <= 8; n++) all.set(chunk(n), n * size)
+    return { producer, resume, all }
   }
 
   test("a reconnect that needs messages the server's replay dropped ends the channel with NetworkError on both ends, and the page gets none after them", async () => {
@@ -740,7 +882,7 @@ describe.each(WIRES)('over %s, past the replay', (wire) => {
     void server.send('before', { ack: false })
     await advance(100)
     net.die()
-    // Sent into the dead wire, more than the server's replay holds.
+    // Sent into the dead wire, nobody awaiting them: past the page's window, and more than the server's replay holds.
     for (let n = 0; n < 8; n++) void server.send(String(n).padEnd(256), { ack: false })
     await advance(10_000)
     expect(got).toEqual(['before'])
@@ -762,7 +904,7 @@ describe.each(WIRES)('over %s, past the replay', (wire) => {
     void pageChannel.send('before', { ack: false })
     await advance(100)
     net.die()
-    // Sent into the dead wire, more than the page's replay holds.
+    // Sent into the dead wire, nobody awaiting them: past the server's window, and more than the page's replay holds.
     for (let n = 0; n < 8; n++) void pageChannel.send(String(n).padEnd(256), { ack: false })
     await advance(10_000)
     expect(got).toEqual(['before'])
@@ -801,29 +943,23 @@ describe.each(WIRES)('over %s, past the replay', (wire) => {
     expect(serverClosed.err).toBe('open')
   })
 
-  test("a stream over the 'channel' transport that a reconnect needs more of than the server's replay holds errors on the page rather than completing short", async () => {
-    serverConfig.channel = { pingInterval: 1_000, serverReplayBufferBinary: 4_096 }
+  /** A stream over the 'channel' transport, from the server, of chunks of `size` bytes, and what the page reads of it. */
+  function download(wire: Wire, size: number) {
     const { net, channel } = page(wire)
-    const { producer, resume } = chunks()
+    const { producer, resume, all } = chunks(size)
     const channelId = pumpProducerToChannel(() => producer, {
       context: {} as never,
       requestContext: { responseAbort: { errorPromise: new Promise(() => {}), abort: () => {} } } as never,
       telefunctionName: 'onDownload',
       telefuncFilePath: '/download.telefunc.ts',
     })
-    const read = settled(ChannelStreamSource.create(channel(channelId)).bytes())
-    await advance(500)
-    net.die()
-    resume() // the rest of the stream, and its end, go into the dead wire
-    await advance(10_000)
-    expectLost(read.value, 'server')
-  })
+    return { net, resume, all, read: settled(ChannelStreamSource.create(channel(channelId)).bytes()) }
+  }
 
-  test("an upload over the 'channel' transport that a reconnect needs more of than the page's replay holds errors on the server rather than completing short", async () => {
-    serverConfig.channel = { pingInterval: 1_000, clientReplayBufferBinary: 4_096 }
-    ;(getChannelMux() as unknown as { resolvedOptions: unknown }).resolvedOptions = null
+  /** An upload over the 'channel' transport of chunks of `size` bytes, and what the server reads of it. */
+  function upload(wire: Wire, size: number) {
     const { net } = page(wire)
-    const { producer, resume } = chunks()
+    const { producer, resume, all } = chunks(size)
     const upload = pumpClientProducerToChannel(
       () => producer,
       wire === 'ws' ? ['ws'] : ['sse'],
@@ -831,7 +967,44 @@ describe.each(WIRES)('over %s, past the replay', (wire) => {
     )
     const server = new ServerChannel({ id: upload.metadata.channelId })
     getChannelMux().registerChannel(server)
-    const read = settled(ChannelStreamSource.create(server).bytes())
+    return { net, resume, all, read: settled(ChannelStreamSource.create(server).bytes()) }
+  }
+
+  test("a stream over the 'channel' transport whose wire drops mid-stream completes after the reconnect, however small the server's replay", async () => {
+    serverConfig.channel = { pingInterval: 1_000, serverReplayBufferBinary: 4_096 }
+    const { net, resume, all, read } = download(wire, 1_024)
+    await advance(500)
+    net.die()
+    resume() // the rest of the stream, and its end, go into the dead wire
+    await advance(10_000)
+    expect(read.value).toEqual(all)
+  })
+
+  test("an upload over the 'channel' transport whose wire drops mid-stream completes after the reconnect, however small the page's replay", async () => {
+    serverConfig.channel = { pingInterval: 1_000, clientReplayBufferBinary: 4_096 }
+    ;(getChannelMux() as unknown as { resolvedOptions: unknown }).resolvedOptions = null
+    const { net, resume, all, read } = upload(wire, 1_024)
+    await advance(500)
+    net.die()
+    resume() // the rest of the upload, and its end, go into the dead wire
+    await advance(10_000)
+    expect(read.value).toEqual(all)
+  })
+
+  test("a stream over the 'channel' transport that a reconnect needs a chunk of larger than the server's replay errors on the page rather than completing short", async () => {
+    serverConfig.channel = { pingInterval: 1_000, serverReplayBufferBinary: 4_096 }
+    const { net, resume, read } = download(wire, 8_192)
+    await advance(500)
+    net.die()
+    resume() // the rest of the stream, and its end, go into the dead wire
+    await advance(10_000)
+    expectLost(read.value, 'server')
+  })
+
+  test("an upload over the 'channel' transport that a reconnect needs a chunk of larger than the page's replay errors on the server rather than completing short", async () => {
+    serverConfig.channel = { pingInterval: 1_000, clientReplayBufferBinary: 4_096 }
+    ;(getChannelMux() as unknown as { resolvedOptions: unknown }).resolvedOptions = null
+    const { net, resume, read } = upload(wire, 8_192)
     await advance(500)
     net.die()
     resume() // the rest of the upload, and its end, go into the dead wire

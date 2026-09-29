@@ -12,6 +12,7 @@ export {
   isChannelDataFrame,
   isSequencedFrame,
   replayLaneOf,
+  countsCredit,
   isConnCtrlTag,
   isReplayLoss,
   encodePublishText,
@@ -125,7 +126,8 @@ const TAG = {
   /** Channel closed with an error. Payload: u8 `ERROR_REASON`. Server → client, and client → server for a `ReplayLoss`
    *  only. Sequenced, as CLOSE is. */
   ERROR: 0x33 as const,
-  /** Flow-control byte limit, receiver → sender: what the receiver has consumed plus its window, mod 2^32. */
+  /** Flow-control byte limit, receiver → sender: what the receiver has consumed plus its window, mod 2^32, and the last seq
+   *  it has of what the sender sent on the channel, which the sender's replay no longer needs to keep. */
   WINDOW: 0x34 as const,
   BROADCAST_SUB: 0x35 as const,
   BROADCAST_UNSUB: 0x36 as const,
@@ -177,6 +179,11 @@ function replayLaneOf(tag: number): ReplayLaneKind {
     tag === TAG.PUBLISH_BINARY_ACK_REQ
     ? 'binary'
     : 'text'
+}
+
+/** Whether flow control counts a data frame (see `constants.ts`): a message, not an ack request or its answer. */
+function countsCredit(tag: number): boolean {
+  return tag === TAG.TEXT || tag === TAG.BINARY || tag === TAG.PUBLISH || tag === TAG.PUBLISH_BINARY
 }
 
 // ===== Reconcile payloads (JSON-encoded after the header) =====
@@ -238,6 +245,8 @@ type ReconciledPayload = {
   reconnectTimeout: number
   idleTimeout: number
   pingInterval: number
+  serverReplayBuffer: number
+  serverReplayBufferBinary: number
   clientReplayBuffer: number
   clientReplayBufferBinary: number
   sseFlushThrottle: number
@@ -287,30 +296,25 @@ type WirePublishInfo = { seq: number; timestamp: number }
 
 // ===== Decoded frame =====
 
-type ChannelDataFrame =
-  | { tag: typeof TAG.TEXT; index: number; seq: number; text: string; bytes: number }
-  | { tag: typeof TAG.BINARY; index: number; seq: number; data: Uint8Array }
-  | { tag: typeof TAG.TEXT_ACK_REQ; index: number; seq: number; text: string }
-  | { tag: typeof TAG.BINARY_ACK_REQ; index: number; seq: number; data: Uint8Array }
-  | { tag: typeof TAG.ACK_RES; index: number; seq: number; ackedSeq: number; status: AckResultStatus; text: string }
-  | { tag: typeof TAG.PUBLISH; index: number; seq: number; text: string; info: WirePublishInfo; bytes: number }
-  | { tag: typeof TAG.PUBLISH_ACK_REQ; index: number; seq: number; text: string }
-  | {
-      tag: typeof TAG.PUBLISH_BINARY
-      index: number
-      seq: number
-      data: Uint8Array
-      info: WirePublishInfo
-      bytes: number
-    }
-  | { tag: typeof TAG.PUBLISH_BINARY_ACK_REQ; index: number; seq: number; data: Uint8Array }
+/** `bytes`: the payload's size, what flow control counts. */
+type ChannelDataFrame = { index: number; seq: number; bytes: number } & (
+  | { tag: typeof TAG.TEXT; text: string }
+  | { tag: typeof TAG.BINARY; data: Uint8Array }
+  | { tag: typeof TAG.TEXT_ACK_REQ; text: string }
+  | { tag: typeof TAG.BINARY_ACK_REQ; data: Uint8Array }
+  | { tag: typeof TAG.ACK_RES; ackedSeq: number; status: AckResultStatus; text: string }
+  | { tag: typeof TAG.PUBLISH; text: string; info: WirePublishInfo }
+  | { tag: typeof TAG.PUBLISH_ACK_REQ; text: string }
+  | { tag: typeof TAG.PUBLISH_BINARY; data: Uint8Array; info: WirePublishInfo }
+  | { tag: typeof TAG.PUBLISH_BINARY_ACK_REQ; data: Uint8Array }
+)
 
 type ChannelCtrlFrame =
   | { tag: typeof TAG.CLOSE; index: number; seq: number; timeoutMs: number }
   | { tag: typeof TAG.CLOSE_ACK; index: number; seq: number }
   | { tag: typeof TAG.ABORT; index: number; seq: number; abortValue: string }
   | { tag: typeof TAG.ERROR; index: number; seq: number; reason: number }
-  | { tag: typeof TAG.WINDOW; index: number; bytes: number }
+  | { tag: typeof TAG.WINDOW; index: number; bytes: number; lastSeq: number }
   | { tag: typeof TAG.MSG_WINDOW; index: number; count: number }
   | { tag: typeof TAG.BROADCAST_SUB; index: number; binary: boolean }
   | { tag: typeof TAG.BROADCAST_UNSUB; index: number; binary: boolean }
@@ -495,10 +499,12 @@ const encode = {
     frame[HEADER] = reason
     return frame
   },
-  window(index: number, bytes: number): Uint8Array<ArrayBuffer> {
-    const frame = new Uint8Array(HEADER + 4)
+  /** Wire: [header][u32 limit][u32 lastSeq] */
+  window(index: number, bytes: number, lastSeq: number): Uint8Array<ArrayBuffer> {
+    const frame = new Uint8Array(HEADER + 8)
     writeHeader(frame, TAG.WINDOW, index, 0)
     writeU32(frame, HEADER, bytes)
+    writeU32(frame, HEADER + 4, lastSeq)
     return frame
   },
   msgWindow(index: number, count: number): Uint8Array<ArrayBuffer> {
@@ -573,27 +579,29 @@ function decode(frame: Uint8Array): DecodedFrame {
   const seq = readU32(frame, 3)
   const payload = frame.subarray(HEADER)
 
+  const bytes = payload.byteLength
+
   switch (tag) {
     case TAG.TEXT:
-      return { tag: TAG.TEXT, index, seq, text: textDecoder.decode(payload), bytes: payload.byteLength }
+      return { tag: TAG.TEXT, index, seq, bytes, text: textDecoder.decode(payload) }
     case TAG.BINARY:
-      return { tag: TAG.BINARY, index, seq, data: payload }
+      return { tag: TAG.BINARY, index, seq, bytes, data: payload }
     case TAG.TEXT_ACK_REQ:
-      return { tag: TAG.TEXT_ACK_REQ, index, seq, text: textDecoder.decode(payload) }
+      return { tag: TAG.TEXT_ACK_REQ, index, seq, bytes, text: textDecoder.decode(payload) }
     case TAG.BINARY_ACK_REQ:
-      return { tag: TAG.BINARY_ACK_REQ, index, seq, data: payload }
+      return { tag: TAG.BINARY_ACK_REQ, index, seq, bytes, data: payload }
     case TAG.PUBLISH: {
       const { text, info } = decodePublishText(textDecoder.decode(payload))
-      return { tag: TAG.PUBLISH, index, seq, text, info, bytes: payload.byteLength }
+      return { tag: TAG.PUBLISH, index, seq, bytes, text, info }
     }
     case TAG.PUBLISH_ACK_REQ:
-      return { tag: TAG.PUBLISH_ACK_REQ, index, seq, text: textDecoder.decode(payload) }
+      return { tag: TAG.PUBLISH_ACK_REQ, index, seq, bytes, text: textDecoder.decode(payload) }
     case TAG.PUBLISH_BINARY: {
       const { data, info } = decodePublishBinary(payload)
-      return { tag: TAG.PUBLISH_BINARY, index, seq, data, info, bytes: payload.byteLength }
+      return { tag: TAG.PUBLISH_BINARY, index, seq, bytes, data, info }
     }
     case TAG.PUBLISH_BINARY_ACK_REQ:
-      return { tag: TAG.PUBLISH_BINARY_ACK_REQ, index, seq, data: payload }
+      return { tag: TAG.PUBLISH_BINARY_ACK_REQ, index, seq, bytes, data: payload }
     case TAG.ACK_RES: {
       assertProtocol(payload.length >= 5, 'ACK_RES payload too short')
       const ackedSeq = readU32(payload, 0)
@@ -605,7 +613,7 @@ function decode(frame: Uint8Array): DecodedFrame {
           status === ACK_STATUS.SHIELD_ERROR,
         `ACK_RES unknown status ${status}`,
       )
-      return { tag: TAG.ACK_RES, index, seq, ackedSeq, status, text: textDecoder.decode(payload.subarray(5)) }
+      return { tag: TAG.ACK_RES, index, seq, bytes, ackedSeq, status, text: textDecoder.decode(payload.subarray(5)) }
     }
 
     case TAG.PING: {
@@ -653,8 +661,8 @@ function decode(frame: Uint8Array): DecodedFrame {
       assertProtocol(payload.length >= 1, 'ERROR payload too short')
       return { tag: TAG.ERROR, index, seq, reason: payload[0] as number }
     case TAG.WINDOW:
-      assertProtocol(payload.length >= 4, 'WINDOW payload too short')
-      return { tag: TAG.WINDOW, index, bytes: readU32(payload, 0) }
+      assertProtocol(payload.length >= 8, 'WINDOW payload too short')
+      return { tag: TAG.WINDOW, index, bytes: readU32(payload, 0), lastSeq: readU32(payload, 4) >>> 0 }
     case TAG.MSG_WINDOW:
       assertProtocol(payload.length >= 4, 'MSG_WINDOW payload too short')
       return { tag: TAG.MSG_WINDOW, index, count: readU32(payload, 0) }

@@ -505,7 +505,7 @@ test("a page that grants credit it doesn't have and doesn't read has its wire te
   }
   mux.onConnectionOpen(wire, transport)
   await mux.onConnectionRawMessage(wire, encode.reconcile({ open: [{ id: 'hog', ix: 0, lastSeq: 0, initial: true }] }))
-  await mux.onConnectionRawMessage(wire, encode.window(0, 0x7fff_ffff))
+  await mux.onConnectionRawMessage(wire, encode.window(0, 0x7fff_ffff, 0))
   await mux.onConnectionRawMessage(wire, encode.msgWindow(0, 0x7fff_ffff))
   const chunk = new Uint8Array(1024 * 1024)
   for (let sent = 0; terminatedHolding === null && sent < 512; sent++) await channel.sendBinary(chunk)

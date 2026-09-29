@@ -10,6 +10,8 @@ import { base64urlToUint8Array } from '../base64url.js'
 import {
   CHANNEL_CLIENT_REPLAY_BUFFER_BYTES,
   CHANNEL_CLIENT_REPLAY_BUFFER_BINARY_BYTES,
+  CHANNEL_SERVER_REPLAY_BUFFER_BYTES,
+  CHANNEL_SERVER_REPLAY_BUFFER_BINARY_BYTES,
   CHANNEL_IDLE_TIMEOUT_MS,
   CHANNEL_PING_INTERVAL_MS,
   CHANNEL_RECONNECT_INITIAL_DELAY_MS,
@@ -33,6 +35,7 @@ import {
 } from '../constants.js'
 import { encodeU32, encodeLengthPrefixedFrames } from '../frame.js'
 import { createPushReadableStream, type PushReadableStream } from '../push-readable-stream.js'
+import { replayWindow } from '../flow-control/flow-control.js'
 import { ReplayBuffer } from '../replay-buffer.js'
 import { REQUEST_KIND, REQUEST_KIND_HEADER, getMarkedRequestUrl } from '../request-kind.js'
 import {
@@ -164,6 +167,8 @@ interface MuxChannel {
   /** What this channel declares in its RECONCILE entry on every (re)attach, on `wire`, whose flow-control frames wait
    *  for a batched POST when `batched`. */
   _reattachState?(wire: number, batched: boolean): ReattachState
+  /** The largest windows the replay buffers allow: the one the page grants, and the one the server grants it. */
+  _fitReplays?(window: number, peerWindow: number): void
 }
 
 interface MuxConnection {
@@ -419,6 +424,8 @@ class ClientConnection implements MuxConnection {
   private pingIntervalMs = CHANNEL_PING_INTERVAL_MS
   private clientReplayBufferBytes = CHANNEL_CLIENT_REPLAY_BUFFER_BYTES
   private clientReplayBufferBinaryBytes = CHANNEL_CLIENT_REPLAY_BUFFER_BINARY_BYTES
+  private serverReplayBufferBytes = CHANNEL_SERVER_REPLAY_BUFFER_BYTES
+  private serverReplayBufferBinaryBytes = CHANNEL_SERVER_REPLAY_BUFFER_BINARY_BYTES
   private constructor(telefuncUrl: string, options: ClientConnectionOptions, cacheKey: string) {
     this.cacheKey = cacheKey
     this.telefuncUrl = telefuncUrl
@@ -573,12 +580,22 @@ class ClientConnection implements MuxConnection {
         this.clientReplayBufferBinaryBytes,
       ),
     )
+    this.fitReplays(channel)
 
     if (!this.transport.hasWire() && !this.transport.isConnecting()) {
       this.transport.start()
       return
     }
     this.scheduleRegisterReconcile()
+  }
+
+  /** Its window fits the server's replay, and the server's fits the page's: as the first RECONCILED says, the defaults
+   *  until then. */
+  private fitReplays(channel: MuxChannel): void {
+    channel._fitReplays?.(
+      replayWindow(this.serverReplayBufferBytes, this.serverReplayBufferBinaryBytes),
+      replayWindow(this.clientReplayBufferBytes, this.clientReplayBufferBinaryBytes),
+    )
   }
 
   /** How long a gone server is still held: until its loss is noticed at the pong deadline, then for `reconnectTimeout`. */
@@ -741,7 +758,7 @@ class ClientConnection implements MuxConnection {
   sendByteWindowUpdate(channel: MuxChannel, limit: number): void {
     const ix = this.channelIndex.get(channel)
     if (ix === undefined) return
-    this.sendFlowControl(ix, encode.window(ix, limit))
+    this.sendFlowControl(ix, encode.window(ix, limit, this.lastSeqByChannel.get(ix) ?? 0))
   }
 
   sendMsgWindowUpdate(channel: MuxChannel, limit: number): void {
@@ -828,6 +845,7 @@ class ClientConnection implements MuxConnection {
   private dispatchFrame(frame: DecodedFrame): void {
     // Track seq for ALL sequenced frames, ACK_RES and the closing ones too; otherwise reconciles under-report lastSeq.
     if (isSequencedFrame(frame) && this.trackSeq(frame.index, frame.seq) === 'dup') return
+    if (frame.tag === TAG.WINDOW) this.serverHasThrough(frame.index, frame.lastSeq)
     // Connection-level + channel-termination ctrls and ATTACH_RESULT stay here; they involve connection
     // bookkeeping (upgrade state, channel release, TTL). Everything else is per-channel and goes through
     // `channel._dispatchFrame`.
@@ -958,7 +976,13 @@ class ClientConnection implements MuxConnection {
   /** A closed channel the server attached has what the page sent on it through `lastSeq`. */
   private serverHas(ix: number, state: ClosedState, lastSeq: number): void {
     state.initial = false
+    this.serverHasThrough(ix, lastSeq)
     if (lastSeq >= this.replayBuffers.get(ix)!.seq) state.delivered = true
+  }
+
+  /** The server has what the page sent on the channel through `lastSeq`, which its replay lets go. */
+  private serverHasThrough(ix: number, lastSeq: number): void {
+    this.replayBuffers.get(ix)?.acknowledge(lastSeq)
   }
 
   private dropWire(transport: ClientChannelTransport): void {
@@ -1479,11 +1503,14 @@ class ClientConnection implements MuxConnection {
     if (this.connectionOptions.idleTimeout === undefined) this.idleTimeoutMs = ctrl.idleTimeout
     this.clientReplayBufferBytes = ctrl.clientReplayBuffer
     this.clientReplayBufferBinaryBytes = ctrl.clientReplayBufferBinary
+    this.serverReplayBufferBytes = ctrl.serverReplayBuffer
+    this.serverReplayBufferBinaryBytes = ctrl.serverReplayBufferBinary
     // Before this reconcile stores anything: a channel registered before the first RECONCILED was sized with the defaults.
     const maxAgeMs = this.replayMaxAgeMs(ctrl.pingInterval)
     for (const replay of this.replayBuffers.values()) {
       replay.setLimits(this.clientReplayBufferBytes, maxAgeMs, this.clientReplayBufferBinaryBytes)
     }
+    for (const { channel } of this.channels.values()) this.fitReplays(channel)
 
     const serverMap = new Map<number, number>()
     for (const channel of ctrl.open) serverMap.set(channel.ix, channel.lastSeq)
@@ -1590,6 +1617,7 @@ class ClientConnection implements MuxConnection {
   /** What the server, which attached the channel with `lastSeq`, lacks of it through `throughSeq`: its replay, or, if
    *  the replay no longer holds all of it, the ERROR that ends the channel on both ends in its place. */
   private replayTo(ix: number, entry: ChannelEntry, lastSeq: number, throughSeq = Infinity): OutboundFrame[] {
+    this.serverHasThrough(ix, lastSeq)
     const missed = this.replayBuffers.get(ix)!.getAfter(lastSeq, throughSeq)
     if (typeof missed !== 'number') return missed.map((frame) => ({ kind: 'reconcile', frame }))
     // One the server ended needs nothing more.

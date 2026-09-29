@@ -88,18 +88,16 @@ type ChannelConfigUser = {
    */
   pingInterval?: number
   /**
-   * Per-channel replay buffer size, in bytes, kept on the server for
-   * reconnect recovery.
+   * The most bytes of text messages the server keeps per channel, of those it sent that the client hasn't acknowledged,
+   * to replay after a reconnect. The client's window never passes half of this or of `serverReplayBufferBinary`,
+   * whichever is smaller, so what flow control lets be in flight always fits.
    */
   serverReplayBuffer?: number
-  /** Per-channel replay buffer size for binary frames, in bytes, kept on the server. */
+  /** As `serverReplayBuffer`, for binary messages. */
   serverReplayBufferBinary?: number
-  /**
-   * Per-channel replay buffer size, in bytes, advertised to the client so it
-   * can replay recent client-to-server frames after reconnect.
-   */
+  /** As `serverReplayBuffer`, for what the client sends: the client keeps that replay, sized as the server tells it. */
   clientReplayBuffer?: number
-  /** Per-channel replay buffer size for binary frames, in bytes, advertised to the client. */
+  /** As `clientReplayBuffer`, for binary messages. */
   clientReplayBufferBinary?: number
   /**
    * How long, in milliseconds, a newly created channel waits for the client to

@@ -393,69 +393,85 @@ test("what a page has in flight to a slow server listener never exceeds the serv
   expect(excess).toBeLessThanOrEqual(0)
 })
 
-test("a stream whose reconnect needs more than the server's replay buffer holds ends with NetworkError on both ends, the page having got it in order up to there", async () => {
-  serverConfig.channel.serverReplayBuffer = 512
-  const clock = loop.open<never, number>()
-  const page = consume(clock.page)
+test('a stream whose window grew to 16 MiB, cut off with its window on the wire, resumes after the reconnect without loss', async () => {
+  const clock = loop.open<never, string>()
+  const got: number[] = []
+  clock.page.listen((text) => void got.push(Number.parseInt(text)))
   const closed = closedWith(clock)
-  produce(clock.server)
-  await runUntil(() => flowOf(clock.page).msgWindow > 4 * CREDIT_MSG_WINDOW_INITIAL, 1_000)
-  const window = flowOf(clock.page).msgWindow
-  expect(window).toBeGreaterThan(4 * CREDIT_MSG_WINDOW_INITIAL)
+  // As the estimator grows it on a path whose BDP is that large (see flow-control.spec.ts).
+  const estimator = (clock.page as unknown as { _flow: { _bdp: { growBytes(): void } } })._flow._bdp
+  for (let n = 0; n < 3; n++) estimator.growBytes()
+  const window = flowOf(clock.page).byteWindow
+  expect(window).toBe(16 * KIB * KIB)
+  const text = (n: number) => String(n).padEnd(256 * KIB)
+  produce(clock.server, { message: text })
+  await run(100)
 
   // From its next refresh on, the page stops hearing from the server, which sends the window that refresh grants. Then
   // the wire drops, with all of it on the way.
-  loop.onSend('page', TAG.MSG_WINDOW, () => loop.socket.toPage.hold())
+  loop.onSend('page', TAG.WINDOW, () => loop.socket.toPage.hold())
   await run(50)
-  expect(loop.socket.toPage.length).toBeGreaterThanOrEqual(window)
+  expect(loop.socket.toPage.bytes).toBeGreaterThan(window / 2)
+  loop.socket.cut()
+  const before = got.length
+  await runUntil(() => got.length > before + (2 * window) / (256 * KIB), 2_000)
+  expect(got.length).toBeGreaterThan(before + (2 * window) / (256 * KIB))
+  expect(got).toEqual([...got.keys()])
+  expect(closed).toEqual({ page: 'open', server: 'open' })
+})
+
+test("sends nobody awaits, past the page's window and more than the server's replay holds, end the channel with NetworkError on both ends at a reconnect, the page having got them in order up to there", async () => {
+  serverConfig.channel.serverReplayBuffer = 4 * KIB
+  const feed = loop.open<never, string>()
+  const page = consume(feed.page)
+  const closed = closedWith(feed)
+  await run(100)
+  loop.socket.toPage.hold()
+  const text = (n: number) => String(n).padEnd(256)
+  for (let n = 0; n < 64; n++) feed.server.send(text(n)).catch(() => {})
+  await run(50)
   loop.socket.cut()
   await runUntil(() => closed.page !== 'open', 1_000)
   expect(closed).toEqual({ page: lostOn('server'), server: lostOn('server') })
-  expect(page.received).toEqual([...page.received.keys()])
+  expect(page.received).toEqual(page.received.map((_, n) => text(n)))
 })
 
-test("an upload whose reconnect needs more than the page's replay buffer holds ends with NetworkError on both ends, the server having got it in order up to there", async () => {
-  serverConfig.channel.clientReplayBuffer = 512
-  const upload = loop.open<number, never>()
+test("sends nobody awaits, past the server's window and more than the page's replay holds, end the channel with NetworkError on both ends at a reconnect, the server having got them in order up to there", async () => {
+  serverConfig.channel.clientReplayBuffer = 4 * KIB
+  const upload = loop.open<string, never>()
   const server = consume(upload.server)
   const closed = closedWith(upload)
-  produce(upload.page)
-  await runUntil(() => flowOf(upload.server).msgWindow > 4 * CREDIT_MSG_WINDOW_INITIAL, 1_000)
-  const window = flowOf(upload.server).msgWindow
-  expect(window).toBeGreaterThan(4 * CREDIT_MSG_WINDOW_INITIAL)
-
-  // From its next refresh on, the server stops hearing from the page, which sends the window that refresh grants.
-  // Then the wire drops, with all of it on the way.
-  loop.onSend('server', TAG.MSG_WINDOW, () => loop.socket.toServer.hold())
+  await run(100)
+  loop.socket.toServer.hold()
+  const text = (n: number) => String(n).padEnd(256)
+  for (let n = 0; n < 64; n++) upload.page.send(text(n)).catch(() => {})
   await run(50)
-  expect(loop.socket.toServer.length).toBeGreaterThanOrEqual(window)
   loop.socket.cut()
   await runUntil(() => closed.server !== 'open', 1_000)
   expect(closed).toEqual({ page: lostOn('client'), server: lostOn('client') })
-  expect(server.received).toEqual([...server.received.keys()])
+  expect(server.received).toEqual(server.received.map((_, n) => text(n)))
 })
 
-test("a page that opens another channel while more of a stream is on the wire than the server's replay buffer holds keeps the stream whole", async () => {
+test("a page that opens another channel while more of what the server sent is on the wire than the server's replay buffer holds gets it all", async () => {
   serverConfig.channel.serverReplayBuffer = 512
-  const clock = loop.open<never, number>()
-  const page = consume(clock.page)
-  const closed = closedWith(clock)
-  produce(clock.server)
+  const feed = loop.open<never, string>()
+  const page = consume(feed.page)
+  const closed = closedWith(feed)
   await run(50)
   loop.socket.toPage.hold()
+  const text = (n: number) => String(n).padEnd(64)
+  for (let n = 0; n < 32; n++) feed.server.send(text(n)).catch(() => {})
   await run(20)
-  expect(loop.socket.toPage.bytes).toBeGreaterThan(512)
-  loop.open<never, number>() // its RECONCILE attaches the stream's channel again, on the wire that carries the stream
+  expect(loop.socket.toPage.bytes).toBeGreaterThan(2 * 1_024)
+  loop.open<never, number>() // its RECONCILE attaches the channel again, on the wire that carries what it sent
   await run(50)
   loop.socket.toPage.release()
-  const before = page.received.length
   await run(100)
-  expect(page.received.length).toBeGreaterThan(before)
+  expect(page.received).toEqual(Array.from({ length: 32 }, (_, n) => text(n)))
   expect(closed).toEqual({ page: 'open', server: 'open' })
-  expect(page.received).toEqual([...page.received.keys()])
 })
 
-test("a broadcast whose reconnect needs more publishes than the server's replay buffer holds closes on both ends with NetworkError", async () => {
+test("a broadcast whose page is cut off further behind than the server's replay buffer holds leaves it with ChannelOverflowError on both ends, having got what was published before it in order", async () => {
   serverConfig.channel.serverReplayBuffer = 1_024
   const key = `room:${crypto.randomUUID()}`
   const room = loop.openBroadcast<string>(key)
@@ -466,12 +482,14 @@ test("a broadcast whose reconnect needs more publishes than the server's replay 
   Broadcast.publish(key, 'before')
   await run(50)
   loop.socket.toPage.hold()
-  for (let n = 0; n < 8; n++) Broadcast.publish(key, String(n).padEnd(256))
+  const publication = (n: number) => String(n).padEnd(256)
+  for (let n = 0; n < 8; n++) Broadcast.publish(key, publication(n))
   await run(50)
   loop.socket.cut()
   await runUntil(() => closed.page !== 'open', 1_000)
-  expect(closed).toEqual({ page: lostOn('server'), server: lostOn('server') })
-  expect(seen).toEqual(['before'])
+  expect(closed.page).toBeInstanceOf(ChannelOverflowError)
+  expect(closed.server).toBeInstanceOf(ChannelOverflowError)
+  expect(seen).toEqual(['before', ...seen.slice(1).map((_, n) => publication(n))])
 })
 
 test('a broadcast whose page was offline while more was published than config.channel.bufferLimit holds closes on both ends with ChannelOverflowError at its reconnect', async () => {

@@ -22,7 +22,6 @@ import { ChannelClosedError, ChannelOverflowError } from '../channel-errors.js'
 import { ACK_STATUS, ERROR_REASON, encodePublishText, encodePublishBinary, TAG } from '../shared-ws.js'
 import type { ChannelDataFrame, WirePublishInfo } from '../shared-ws.js'
 import { STATUS_BODY_INTERNAL_SERVER_ERROR } from '../../shared/constants.js'
-import { CREDIT_WINDOW_MAX_BYTES } from '../constants.js'
 import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
 assertIsNotBrowser()
 
@@ -51,13 +50,13 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
     super()
     this.key = opts.key
     // Its page grants it the largest window from the start (see `ClientBroadcast`).
-    this._flow.onPeerByteWindow(CREDIT_WINDOW_MAX_BYTES)
+    this._flow.onPeerByteWindow(this._flow.peerByteWindowMax)
   }
 
   /** Its page grants the largest window from the start, which a burst fits in: past it, the page is behind by more
    *  than what it read and hasn't reported, which it does once a quarter of that window. */
   protected override _pastCreditAllowance(): number {
-    return CREDIT_WINDOW_MAX_BYTES >> 2
+    return this._flow.peerByteWindowMax >> 2
   }
 
   static isServerBroadcast(value: unknown): value is ServerBroadcast {

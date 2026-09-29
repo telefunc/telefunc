@@ -122,6 +122,8 @@ async function runScenario(loseSeq1: boolean): Promise<{ received: number[]; wir
         reconnectTimeout: 60_000,
         idleTimeout: 60_000,
         pingInterval: 100_000,
+        serverReplayBuffer: 1_000_000,
+        serverReplayBufferBinary: 2_000_000,
         clientReplayBuffer: 1_000_000,
         clientReplayBufferBinary: 2_000_000,
         sseFlushThrottle: 300,

@@ -33,7 +33,7 @@ import { ChannelClosedError, ChannelOverflowError, replayLossError } from '../ch
 import { NetworkError } from '../../shared/NetworkError.js'
 import { isPromise } from '../../utils/isPromise.js'
 import { CHANNEL_CLOSE_TIMEOUT_MS, CHANNEL_PING_INTERVAL_MIN_MS, CREDIT_WINDOW_MAX_BYTES } from '../constants.js'
-import { FlowControl } from '../flow-control/flow-control.js'
+import { FlowControl, replayWindow } from '../flow-control/flow-control.js'
 import { STATUS_BODY_INTERNAL_SERVER_ERROR } from '../../shared/constants.js'
 import { ServerChannelBuffer } from './ServerChannelBuffer.js'
 import { ReplayBuffer } from '../replay-buffer.js'
@@ -44,6 +44,7 @@ import {
   ProtocolViolationError,
   TAG,
   assertProtocol,
+  countsCredit,
   isChannelCtrlTag,
   isReplayLoss,
   isSequencedFrame,
@@ -160,13 +161,17 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this.id = id ?? crypto.randomUUID()
     this._flow = new FlowControl(
       {
-        byteWindowUpdate: (limit) => this._peer?.sendByteWindowUpdate(limit),
+        byteWindowUpdate: (limit) => this._peer?.sendByteWindowUpdate(limit, this._lastClientSeq),
         msgWindowUpdate: (limit) => this._peer?.sendMsgWindowUpdate(limit),
         bdpPing: (probe) => this._peer?.sendBdpPing(probe),
       },
       () => this._peer?.sender.bufferedAmount(),
     )
     const c = getServerConfig().channel
+    this._flow.fitReplays(
+      replayWindow(c.clientReplayBuffer, c.clientReplayBufferBinary),
+      replayWindow(c.serverReplayBuffer, c.serverReplayBufferBinary),
+    )
     this._bufferLimit = bufferLimit ?? c.bufferLimit
     this._bufferLimitBinary = c.bufferLimitBinary
     this._prePeerBuffer = new ServerChannelBuffer<ChannelAck<ServerToClient>>(
@@ -446,7 +451,9 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       this._dispatchCtrl(frame as ChannelCtrlFrame)
       return
     }
-    this._dispatchDataFrame(frame as ChannelDataFrame)
+    const data = frame as ChannelDataFrame
+    if (!countsCredit(data.tag)) this._flow.onReceivedUncounted(data.bytes)
+    this._dispatchDataFrame(data)
   }
 
   /** @internal — Tag-keyed data-frame switch. Subclasses (`ServerBroadcast`) override
@@ -490,6 +497,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         return
       case TAG.WINDOW:
         this._flow.onPeerByteWindow(frame.bytes)
+        this._onPageHas(frame.lastSeq)
         return
       case TAG.MSG_WINDOW:
         this._flow.onPeerMessageWindow(frame.count)
@@ -681,9 +689,10 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this._shutdown(replayLossError('server', loss))
   }
 
-  /** @internal The page has what this channel sent it through `lastSeq`. */
+  /** @internal The page has what this channel sent it through `lastSeq`, which its replay lets go. */
   _onPageHas(lastSeq: number): void {
     if (lastSeq > this._pageLastSeq) this._pageLastSeq = lastSeq
+    this._replayBuffer?.acknowledge(lastSeq)
   }
 
   /** @internal Its page has all this channel sent it, and it has nothing more to send. */

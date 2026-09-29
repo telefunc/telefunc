@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { FlowControl } from './flow-control.js'
+import { FlowControl, replayWindow } from './flow-control.js'
 import type { FlowControlEmit } from './flow-control.js'
 import {
   BDP_PING_MIN_INTERVAL_MS,
@@ -396,11 +396,57 @@ describe('FlowControl — reattach', () => {
   })
 })
 
+describe('FlowControl — replay buffers', () => {
+  it("a receiver's window is half the smaller lane of its peer's replay buffer, at least a byte", () => {
+    expect(replayWindow(4 * 1024 * 1024, 2 * 1024 * 1024)).toBe(1024 * 1024)
+    expect(replayWindow(1, 0)).toBe(1)
+  })
+
+  // What credit lets be in flight, and a message as large sent as the credit ran out, must fit the sender's replay.
+  it("a window grows no larger than its peer's replay allows, whatever asks it to", () => {
+    const { flow } = makeFlow()
+    flow.fitReplays(1024 * 1024, CREDIT_WINDOW_MAX_BYTES)
+    expect(flow.byteWindow).toBe(1024 * 1024)
+    flow.useBatchTransportInitial()
+    flow.widenByteWindow(CREDIT_WINDOW_MAX_BYTES)
+    expect(flow.byteWindow).toBe(1024 * 1024)
+    flow.fitReplays(4 * CREDIT_WINDOW_MAX_BYTES, CREDIT_WINDOW_MAX_BYTES)
+    flow.widenByteWindow(4 * CREDIT_WINDOW_MAX_BYTES)
+    expect(flow.byteWindow).toBe(CREDIT_WINDOW_MAX_BYTES)
+  })
+
+  // The peer assumes the same initial window its own replay allows, so a sender's credit starts there.
+  it("a sender's credit starts at what its own replay allows, until a WINDOW raises it", () => {
+    const { flow } = makeFlow()
+    flow.fitReplays(CREDIT_WINDOW_MAX_BYTES, 512 * 1024)
+    expect(flow.peerByteWindowMax).toBe(512 * 1024)
+    expect(flow.decrement(512 * 1024)).toBeInstanceOf(Promise)
+    flow.onPeerByteWindow(4 * 1024 * 1024)
+    flow.fitReplays(CREDIT_WINDOW_MAX_BYTES, 256 * 1024)
+    expect(flow.decrement(1024)).toBeUndefined()
+  })
+
+  // Ack requests and their answers take no credit, so no limit goes out for them: a WINDOW acknowledges them instead.
+  it('a quarter window of what credit does not count sends a WINDOW, which acknowledges it, and one sent for any reason starts the count again', () => {
+    const { flow, emit } = makeFlow()
+    const quarter = CREDIT_WINDOW_INITIAL_BYTES / 4
+    flow.onReceivedUncounted(quarter - 1)
+    expect(emit.windowCalls).toEqual([])
+    flow.onReceivedUncounted(1)
+    expect(emit.windowCalls).toEqual([CREDIT_WINDOW_INITIAL_BYTES])
+    flow.onReceivedUncounted(quarter - 1)
+    flow.onConsumed(quarter)
+    flow.onReceivedUncounted(1)
+    expect(emit.windowCalls).toEqual([CREDIT_WINDOW_INITIAL_BYTES, quarter + CREDIT_WINDOW_INITIAL_BYTES])
+  })
+})
+
 /** A sender and a receiver linked by the u32 wire, as `WINDOW` and `MSG_WINDOW` frames link a channel's ends.
  *  BDP pings go unanswered, so the windows stay at their initial size. */
 function makePair() {
   const toSender: FlowControlEmit = {
-    byteWindowUpdate: (limit) => sender.onPeerByteWindow((decode(encode.window(0, limit)) as { bytes: number }).bytes),
+    byteWindowUpdate: (limit) =>
+      sender.onPeerByteWindow((decode(encode.window(0, limit, 0)) as { bytes: number }).bytes),
     msgWindowUpdate: (limit) =>
       sender.onPeerMessageWindow((decode(encode.msgWindow(0, limit)) as { count: number }).count),
     bdpPing: () => {},

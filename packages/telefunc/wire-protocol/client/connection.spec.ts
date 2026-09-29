@@ -7,6 +7,8 @@ import {
   CHANNEL_PING_INTERVAL_MS,
   CHANNEL_RECONNECT_INITIAL_DELAY_MS,
   CHANNEL_RECONNECT_TIMEOUT_MS,
+  CHANNEL_SERVER_REPLAY_BUFFER_BINARY_BYTES,
+  CHANNEL_SERVER_REPLAY_BUFFER_BYTES,
   CHANNEL_TRANSPORT,
   MAX_CHANNELS_PER_CONNECTION,
   RECONCILE_TIMEOUT_MS,
@@ -55,6 +57,8 @@ function reconciled(payload: Pick<ReconciledPayload, 'sessionId' | 'open'> & Par
     reconnectTimeout: CHANNEL_RECONNECT_TIMEOUT_MS,
     idleTimeout: CHANNEL_IDLE_TIMEOUT_MS,
     pingInterval: CHANNEL_PING_INTERVAL_MS,
+    serverReplayBuffer: CHANNEL_SERVER_REPLAY_BUFFER_BYTES,
+    serverReplayBufferBinary: CHANNEL_SERVER_REPLAY_BUFFER_BINARY_BYTES,
     clientReplayBuffer: CHANNEL_CLIENT_REPLAY_BUFFER_BYTES,
     clientReplayBufferBinary: CHANNEL_CLIENT_REPLAY_BUFFER_BINARY_BYTES,
     sseFlushThrottle: SSE_FLUSH_THROTTLE_MS,
@@ -84,9 +88,11 @@ test('a RECONCILED of zeros keeps zero on the client', () => {
     connection.idleTimeoutMs,
     connection.clientReplayBufferBytes,
     connection.clientReplayBufferBinaryBytes,
+    connection.serverReplayBufferBytes,
+    connection.serverReplayBufferBinaryBytes,
     connection.transport.flushThrottleMs,
     connection.transport.postIdleFlushDelayMs,
-  ]).toEqual(Array(6).fill(0))
+  ]).toEqual(Array(8).fill(0))
   connection.dispose()
 })
 
@@ -130,7 +136,7 @@ test("an SSE reconnect sends its own reconcile and leaves a dead POST's messages
   // A batch POST that failed carried a message, a window update, an older reconcile and an unsubscribe.
   connection.transport.outbox.push(
     { frame: encode.text(0, 'queued', 7), deadline: Infinity },
-    { frame: encode.window(0, 65_536), deadline: Infinity },
+    { frame: encode.window(0, 65_536, 0), deadline: Infinity },
     { frame: encode.reconcile({ open: [] }), deadline: Infinity },
     { frame: encode.broadcastUnsub(0, false), deadline: Infinity },
   )
@@ -149,7 +155,7 @@ test('a batch POST that fails after the next wire started puts back only its win
   transport.transportAbort = new AbortController()
   transport.outbox = [
     { frame: encode.broadcastUnsub(0, false), deadline: 0 },
-    { frame: encode.window(0, 65_536), deadline: 0 },
+    { frame: encode.window(0, 65_536, 0), deadline: 0 },
   ]
   const flushing = transport.flushOutbox()
   transport.transportAbort = new AbortController() // the next wire reconciled while that POST hung
@@ -175,7 +181,7 @@ test("a wire's end aborts its batch POST still in flight, which would otherwise 
   // A batch POST hung on a dead TCP connection settles only when its wire aborts it.
   transport.post = (_body: unknown, signal: AbortSignal) =>
     new Promise((_resolve, reject) => signal.addEventListener('abort', () => reject(signal.reason)))
-  transport.outbox = [{ frame: encode.window(0, 65_536), deadline: 0 }]
+  transport.outbox = [{ frame: encode.window(0, 65_536, 0), deadline: 0 }]
   void transport.flushOutbox()
   endWire!()
   await vi.waitFor(() => expect(transport.flushing).toBe(false))

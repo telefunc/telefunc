@@ -22,6 +22,7 @@ import { createAbortError, isAbort } from '../../shared/Abort.js'
 import {
   ACK_STATUS,
   TAG,
+  countsCredit,
   isChannelCtrlTag,
   type AckResultStatus,
   type ChannelCtrlFrame,
@@ -276,6 +277,11 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     return probe === undefined ? {} : { probe }
   }
 
+  /** @internal */
+  _fitReplays(window: number, peerWindow: number): void {
+    this._flow.fitReplays(window, peerWindow)
+  }
+
   _onTransportOpen(batched: boolean, wire: number): void {
     if (this._isClosed) return
     if (batched) this._flow.useBatchTransportInitial()
@@ -352,7 +358,9 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
       this._dispatchCtrl(frame as ChannelCtrlFrame)
       return
     }
-    this._dispatchDataFrame(frame as ChannelDataFrame)
+    const data = frame as ChannelDataFrame
+    if (!countsCredit(data.tag)) this._flow.onReceivedUncounted(data.bytes)
+    this._dispatchDataFrame(data)
   }
 
   /** @internal — Tag-keyed data-frame switch. `ClientBroadcast` overrides to add the

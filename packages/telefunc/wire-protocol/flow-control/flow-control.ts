@@ -1,4 +1,4 @@
-export { FlowControl }
+export { FlowControl, replayWindow }
 export type { FlowControlEmit }
 
 import { BdpEstimator } from './bdp-estimator.js'
@@ -7,15 +7,24 @@ import {
   CREDIT_MSG_WINDOW_INITIAL,
   CREDIT_WINDOW_INITIAL_BYTES,
   CREDIT_WINDOW_INITIAL_BYTES_BATCH,
+  CREDIT_WINDOW_MAX_BYTES,
   FC_SELF_TIME_WINDOW_MS,
   FC_SELF_UTIL_THRESHOLD,
 } from '../constants.js'
 
-/** Limits go out mod 2^32. */
+/** Limits go out mod 2^32. A byte limit goes out with the last seq this side has of the channel, which acknowledges what
+ *  arrived (see `constants.ts`). */
 interface FlowControlEmit {
   byteWindowUpdate(limit: number): void
   msgWindowUpdate(limit: number): void
   bdpPing(probe: number): void
+}
+
+/** The largest window a receiver grants a sender whose replay buffer's lanes hold `text` and `binary` bytes: half the
+ *  smaller, so what credit lets be in flight, and a message up to as large sent as the credit ran out, fit it. At least
+ *  a byte, so credit lets a message through each round trip. */
+function replayWindow(text: number, binary: number): number {
+  return Math.max(1, Math.floor(Math.min(text, binary) / 2))
 }
 
 /**
@@ -46,6 +55,10 @@ class FlowControl {
   private _sentMessages = 0
   private _limitBytes: number = CREDIT_WINDOW_INITIAL_BYTES
   private _limitMessages: number = CREDIT_MSG_WINDOW_INITIAL
+  /** The largest window the peer grants: what this side's replay holds (see `fitReplays`). */
+  private _peerByteWindowMax: number = CREDIT_WINDOW_MAX_BYTES
+  /** A `WINDOW` raised the byte limit past the one this side assumed the peer starts with. */
+  private _limitRaised = false
   /** `_sentBytes` after the last frame sent while the byte limit was ahead of it. */
   private _sentWithCredit = 0
   // Receiver side: what arrived, what was consumed, and what had been consumed when each limit last went out.
@@ -55,6 +68,8 @@ class FlowControl {
   private _consumedMessages = 0
   private _advertisedBytes = 0
   private _advertisedMessages = 0
+  /** Bytes of the frames credit doesn't count that arrived since the byte limit last went out. */
+  private _uncountedBytes = 0
   /** Senders waiting on credit, oldest first. */
   private _waiters: Array<() => void> = []
   /** A waiter was handed the credit and no send was counted since. */
@@ -85,6 +100,20 @@ class FlowControl {
 
   get msgWindow(): number {
     return this._bdp.msgWindow
+  }
+
+  /** Sender-side: the largest window the peer grants. */
+  get peerByteWindowMax(): number {
+    return this._peerByteWindowMax
+  }
+
+  /** Keeps what credit lets be in flight within the replay buffers (see `replayWindow`): this side grants its peer
+   *  `window` at most, and its peer grants it `peerWindow` at most. The limit this side assumes its peer starts with,
+   *  while no `WINDOW` raised it, doesn't pass that. */
+  fitReplays(window: number, peerWindow: number): void {
+    this._bdp.capByteWindow(window)
+    this._peerByteWindowMax = Math.min(CREDIT_WINDOW_MAX_BYTES, peerWindow)
+    if (!this._limitRaised) this._limitBytes = Math.min(CREDIT_WINDOW_INITIAL_BYTES, this._peerByteWindowMax)
   }
 
   /** Sender-side: no byte credit is left. */
@@ -127,6 +156,7 @@ class FlowControl {
     if (raise <= 0) return
     this._noteStarved()
     this._limitBytes += raise
+    this._limitRaised = true
     this._tryWakeCreditWaiters()
   }
 
@@ -167,6 +197,13 @@ class FlowControl {
    *  has been consumed since that limit last went out. */
   onConsumed(bytes: number): void {
     this._consume(bytes, 1)
+  }
+
+  /** Receiver-side: a frame credit doesn't count, an ack request or its answer, arrived. A `WINDOW` acknowledges it, so
+   *  one goes out once a quarter window of these arrived since the last, and the sender's replay lets them go. */
+  onReceivedUncounted(bytes: number): void {
+    this._uncountedBytes += bytes
+    if (this._uncountedBytes >= this._bdp.byteWindow >> 2) this._advertiseBytes()
   }
 
   /** Settle `BDP_PING_ACK`, which says whether the window starved the peer's wire. Each axis grows iff its own sample
@@ -276,6 +313,7 @@ class FlowControl {
 
   private _advertiseBytes(): void {
     this._advertisedBytes = this._consumedBytes
+    this._uncountedBytes = 0
     this._emit.byteWindowUpdate((this._consumedBytes + this._bdp.byteWindow) >>> 0)
   }
 

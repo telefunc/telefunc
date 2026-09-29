@@ -98,6 +98,8 @@ type MuxServerOptions = {
   idleTimeout: number
   pingInterval: number
   pingDeadline: number
+  serverReplayBuffer: number
+  serverReplayBufferBinary: number
   clientReplayBuffer: number
   clientReplayBufferBinary: number
   connectTtl: number
@@ -282,6 +284,8 @@ class ChannelMux {
         reconnectTimeout: this.options.reconnectTimeout,
         idleTimeout: this.options.idleTimeout,
         pingInterval: this.options.pingInterval,
+        serverReplayBuffer: this.options.serverReplayBuffer,
+        serverReplayBufferBinary: this.options.serverReplayBufferBinary,
         clientReplayBuffer: this.options.clientReplayBuffer,
         clientReplayBufferBinary: this.options.clientReplayBufferBinary,
         sseFlushThrottle: this.options.sseFlushThrottle,
@@ -1013,6 +1017,8 @@ function resolveMuxServerOptions(): MuxServerOptions {
     idleTimeout: c.idleTimeout,
     pingInterval,
     pingDeadline: pingInterval * 2,
+    serverReplayBuffer: c.serverReplayBuffer,
+    serverReplayBufferBinary: c.serverReplayBufferBinary,
     clientReplayBuffer: c.clientReplayBuffer,
     clientReplayBufferBinary: c.clientReplayBufferBinary,
     connectTtl: c.connectTtl,

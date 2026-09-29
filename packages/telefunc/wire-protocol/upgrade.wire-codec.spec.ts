@@ -29,6 +29,8 @@ const reconciled = (extra: Partial<ReconciledPayload> = {}): ReconciledPayload =
   reconnectTimeout: 1,
   idleTimeout: 2,
   pingInterval: 3,
+  serverReplayBuffer: 8,
+  serverReplayBufferBinary: 9,
   clientReplayBuffer: 4,
   clientReplayBufferBinary: 5,
   sseFlushThrottle: 6,
@@ -75,6 +77,15 @@ describe('upgrade wire vocabulary', () => {
       index: 3,
       probe: 7,
       starved: false,
+    })
+  })
+
+  test('WINDOW round-trips its limit and the last seq its receiver has', () => {
+    expect(decode(encode.window(3, 1_024, 0xffff_fffe))).toEqual({
+      tag: TAG.WINDOW,
+      index: 3,
+      bytes: 1_024,
+      lastSeq: 0xffff_fffe,
     })
   })
 
@@ -250,7 +261,7 @@ describe('decodeClientFrame — direction', () => {
     ['CLOSE', encode.close(0, 1_000)],
     ['CLOSE_ACK', encode.closeAck(0)],
     ['ERROR', encode.error(0, ERROR_REASON.LOST, 1)],
-    ['WINDOW', encode.window(0, 1_024)],
+    ['WINDOW', encode.window(0, 1_024, 7)],
     ['MSG_WINDOW', encode.msgWindow(0, 8)],
     ['BDP_PING', encode.bdpPing(0, 1)],
     ['BDP_PING_ACK', encode.bdpPingAck(0, 1, true)],
