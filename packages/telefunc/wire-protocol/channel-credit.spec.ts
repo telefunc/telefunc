@@ -928,6 +928,36 @@ test("on an uplink slower than a window per ping deadline, the server doesn't cu
   expect(server.received.length).toBeGreaterThan(30)
 })
 
+// A Room member's page grants the largest window from the start: all of it can be on the wire ahead of its pong.
+test("on a link slower than the room's messages per ping deadline, a Room member's page keeps its wire while they keep arriving ahead of its pong", async () => {
+  const { room, view } = await loop.openRoom()
+  const seen: string[] = []
+  view.subscribe((data) => void seen.push(data as string))
+  const speaker = await room.join()
+  await run(100)
+  loop.socket.toPage.bytesPerMs = 100
+  const publication = (n: number) => String(n).padEnd(64 * KIB)
+  for (let n = 0; n < 32; n++) void speaker.publish(publication(n))
+  await run(30_000)
+  expect(loop.sockets).toHaveLength(1)
+  expect(seen).toEqual(Array.from({ length: 32 }, (_, n) => publication(n)))
+})
+
+test("on an uplink slower than a window per ping deadline, the server doesn't cut the wire of a Room member's page while its publishes keep arriving ahead of its ping", async () => {
+  const { view } = await loop.openRoom()
+  const joining = view.join()
+  await runUntil(() => view.count === 1, 1_000)
+  const me = await joining
+  await run(100)
+  loop.socket.toServer.bytesPerMs = 100
+  const terminateConnection = vi.spyOn(loop.transport, 'terminateConnection')
+  const receipts: unknown[] = []
+  for (let n = 0; n < 32; n++) void me.publish(String(n).padEnd(64 * KIB)).then((receipt) => receipts.push(receipt))
+  await run(30_000)
+  expect(terminateConnection).not.toHaveBeenCalled()
+  expect(receipts).toHaveLength(32)
+})
+
 test('on a slow link, a producer that awaits its sends is not refused a message larger than its credit, sent with little credit left', async () => {
   const feed = loop.open<never, string>()
   const page = consume(feed.page)
