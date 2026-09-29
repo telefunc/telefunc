@@ -340,6 +340,25 @@ test("a RECONCILE that crossed the ATTACH_RESULT saying its channel never regist
   }
 })
 
+test('a wire stops awaiting a channel once a RECONCILE no longer names it, as the page let it go', async () => {
+  const mux = new ChannelMux()
+  mux.registerChannel(new ServerChannel({ id: 'other' }))
+  const { sessions, open, attachResults } = wires(mux)
+  const wire = open()
+  const released = { id: 'released-callback', ix: 0, lastSeq: 0, initial: true as const }
+  await mux.onConnectionRawMessage(wire, encode.reconcile({ open: [released] }))
+  // The page lets it go to make way for another at its channel cap.
+  await mux.onConnectionRawMessage(
+    wire,
+    encode.reconcile({ sessionId: sessions.get(wire), open: [{ id: 'other', ix: 1, lastSeq: 0, initial: true }] }),
+  )
+  const late = new ServerChannel({ id: released.id })
+  mux.registerChannel(late) // its call arrives after all
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  expect(attachResults(wire)).toEqual([])
+  expect((late as unknown as { _peer: unknown })._peer).toBeNull()
+})
+
 test('a wire that closes stops awaiting the channels it named', async () => {
   const mux = new ChannelMux()
   const { open } = wires(mux)

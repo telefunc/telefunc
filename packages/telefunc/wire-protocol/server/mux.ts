@@ -653,10 +653,9 @@ class ChannelMux {
       throw new ProtocolViolationError('connection closed mid-reconcile')
     }
 
-    // What the wire stopped awaiting is forgotten once a RECONCILE no longer names it: the client has released it.
+    // What the wire awaits is forgotten once a RECONCILE no longer names it: the page has let it go.
     const named = new Set(ctrl.open.map((open) => open.ix))
-    for (const [ix, awaited] of state.awaited)
-      if (awaited.phase === 'expired' && !named.has(ix)) state.awaited.delete(ix)
+    for (const [ix, awaited] of state.awaited) if (!named.has(ix)) this.forgetAwaited(state, ix, awaited)
 
     this.sessionWires.set(newSessionId, connection)
     transport.setSessionId(connection, newSessionId)
@@ -780,6 +779,15 @@ class ChannelMux {
     this.chargeHeld(awaited, -1)
     awaited.held = []
     this.send(awaited.wire, encode.attachResult(awaited.entry.ix, null))
+  }
+
+  /** The wire awaits it no more, and drops what it held for it. One attached meanwhile, the RECONCILE left out of the
+   *  session, which ended it. */
+  private forgetAwaited(state: ConnectionState, ix: number, awaited: AwaitedChannel): void {
+    awaited.stopWaiting()
+    this.chargeHeld(awaited, -1)
+    awaited.held = []
+    state.awaited.delete(ix)
   }
 
   /** What a wire holds counts against its recv backlog. */

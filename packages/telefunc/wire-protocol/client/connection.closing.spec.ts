@@ -508,7 +508,46 @@ describe.each(WIRES)('over %s', (wire) => {
     expect(asked.value).toBe('reply')
     expect(serverClosed.err).toBeUndefined()
   })
+
+  test('a page goes idle once its last channel closes, after the server gave up on one the page aborted before the server had it', async () => {
+    idleWithAbortedCallback()
+    const { channel } = page(wire)
+    const pageChannel = channel(register().id)
+    await advance(500)
+    await expectIdleAfterAbortedCallback(channel, pageChannel)
+  })
 })
+
+test('over sse upgraded to a WebSocket, a page goes idle once its last channel closes, after the server gave up on one the page aborted before the server had it', async () => {
+  idleWithAbortedCallback()
+  const { channel } = page('sse', { upgrade: true })
+  const pageChannel = channel(register().id)
+  const connection = (pageChannel as any)._connection
+  for (let waited = 0; waited < 5_000 && connection.transport.type !== 'ws'; waited += 5) await advance(5)
+  await advance(500)
+  expect(connection.transport.type).toBe('ws')
+  await expectIdleAfterAbortedCallback(channel, pageChannel)
+})
+
+/** The server gives up on a channel it hasn't registered after 1 s, and a connection goes 300 ms after its last channel. */
+function idleWithAbortedCallback() {
+  serverConfig.channel = { pingInterval: 1_000, connectTtl: 1_000, idleTimeout: 300 }
+  ;(getChannelMux() as unknown as { resolvedOptions: unknown }).resolvedOptions = null
+}
+
+/** The page aborts a call's callback before the call reaches the server, which never registers it, then closes
+ *  `pageChannel`, its last channel, once the server gave up on the callback. */
+async function expectIdleAfterAbortedCallback(
+  channel: (channelId: string) => ClientChannel,
+  pageChannel: ClientChannel,
+) {
+  const connection = (pageChannel as unknown as { _connection: { closed: boolean } })._connection
+  channel(crypto.randomUUID()).abort()
+  await advance(2_000)
+  void pageChannel.close()
+  await advance(2_000)
+  expect(connection.closed).toBe(true)
+}
 
 describe.each(WIRES)('over %s, from the server', (wire) => {
   test('a page close whose acknowledgement goes down with a dying wire completes gracefully on both ends', async () => {
