@@ -478,9 +478,16 @@ function applyChannelConfig(val: unknown): void {
       case 'transports':
         next.transports = validateChannelTransports(value, configPath)
         break
+      case 'pingInterval':
+        // Its deadline, twice it, is a timer too.
+        assertUsage(
+          typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 && value <= TIMER_DELAY_MAX_MS >> 1,
+          `\`${configPath}\` should be a non-negative safe integer of milliseconds, at most ${TIMER_DELAY_MAX_MS >> 1}, as its deadline, twice it, is at most the longest a timer waits`,
+        )
+        ;(next as Record<string, unknown>)[key] = value
+        break
       case 'reconnectTimeout':
       case 'idleTimeout':
-      case 'pingInterval':
       case 'connectTtl':
       case 'sseFlushThrottle':
       case 'ssePostIdleFlushDelay':

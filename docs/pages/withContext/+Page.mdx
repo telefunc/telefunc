@@ -40,7 +40,7 @@ for await (const message of gen) {
 | `stream.transport` | <Link href="/transport#stream-transport">Stream transport</Link> | Override `config.stream.transport` for streaming. |
 | `channel.transports` | <Link href="/transport#channel-transport">Channel transport</Link> | Override `config.channel.transports` for channels. |
 | `channel.connectionKey` | `string` | By default, all channel calls to the same URL share one connection. Set a key to split calls across separate connections: calls with the same key share a connection, while different keys each get their own (keyless calls all share the default connection). |
-| `channel.idleTimeout` | `number` | How long (ms) to keep the underlying connection open after all channels close. Default `60_000`; `0` closes it immediately. |
+| `channel.idleTimeout` | `number` | How long (ms) to keep the underlying connection open after all channels close. Default `60_000`; `0` closes it immediately; at most `2147483647`, the longest a timer waits. |
 
 
 ## See also

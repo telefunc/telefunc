@@ -32,7 +32,7 @@ A replay buffer keeps, per channel, the messages its side sent that the other si
 
 `bufferLimit`/`bufferLimitBinary` bound what the server holds for a channel while no client is connected.
 
-Durations are in milliseconds, at most 2147483647 (about 24.8 days): the longest a timer waits, as a longer one fires at once.
+Durations are in milliseconds, at most 2147483647 (about 24.8 days): the longest a timer waits, as a longer one fires at once. `pingInterval` is at most half that, as its deadline is twice it.
 
 > This is the **server-side** `config.channel` — a separate object from the **client-side** <Link href="/transport"><code>config.channel.transports</code></Link> (`telefunc/client`).
 

@@ -24,18 +24,24 @@ test.each([Infinity, 0.5, Number.MAX_SAFE_INTEGER + 1])('channel config rejects 
   expect(() => (config.channel.reconnectTimeout = value)).toThrow('non-negative safe integer')
 })
 
-test.each([
-  'reconnectTimeout',
-  'idleTimeout',
-  'pingInterval',
-  'connectTtl',
-  'sseFlushThrottle',
-  'ssePostIdleFlushDelay',
-])('channel config refuses a %s longer than a timer waits, which would fire at once', (key) => {
+test.each(['reconnectTimeout', 'idleTimeout', 'connectTtl', 'sseFlushThrottle', 'ssePostIdleFlushDelay'])(
+  'channel config refuses a %s longer than a timer waits, which would fire at once',
+  (key) => {
+    try {
+      expect(() => (config.channel = { [key]: 2 ** 31 })).toThrow('at most 2147483647')
+      config.channel = { [key]: 2 ** 31 - 1 }
+      expect((getServerConfig().channel as Record<string, unknown>)[key]).toBe(2 ** 31 - 1)
+    } finally {
+      config.channel = {}
+    }
+  },
+)
+
+test('channel config refuses a pingInterval whose deadline, twice it, is longer than a timer waits', () => {
   try {
-    expect(() => (config.channel = { [key]: 2 ** 31 })).toThrow('at most 2147483647')
-    config.channel = { [key]: 2 ** 31 - 1 }
-    expect((getServerConfig().channel as Record<string, unknown>)[key]).toBe(2 ** 31 - 1)
+    expect(() => (config.channel = { pingInterval: 2 ** 30 })).toThrow('at most 1073741823')
+    config.channel = { pingInterval: 2 ** 30 - 1 }
+    expect(getServerConfig().channel.pingInterval).toBe(2 ** 30 - 1)
   } finally {
     config.channel = {}
   }
