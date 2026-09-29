@@ -62,7 +62,7 @@ import type {
   ReplayLoss,
   SeqReader,
 } from '../shared-ws.js'
-import { encodeSseRequest, encodeSseRequestMetadata } from '../sse-request.js'
+import { encodeSseRequest, encodeSseRequestMetadata, SSE_FLUSH_READ, SSE_FLUSH_TAKEN } from '../sse-request.js'
 import { DeadlineScheduler } from './deadlineScheduler.js'
 import { randomUuid } from '../../utils/randomUuid.js'
 
@@ -2079,7 +2079,10 @@ class SseTransport implements UpgradeSource {
   private readonly flushScheduler = new DeadlineScheduler(() => {
     void this.flushOutbox()
   })
-  private flushing = false
+  /** A flush the server hasn't begun to read: the next one waits for its answer. */
+  private flushAwaitingTurn = false
+  /** Flushes the server hasn't read all of. */
+  private flushesUnread = 0
   private lastPostStartedAt = 0
   private flushThrottleMs = SSE_FLUSH_THROTTLE_MS
   private postIdleFlushDelayMs = SSE_POST_IDLE_FLUSH_DELAY_MS
@@ -2109,7 +2112,7 @@ class SseTransport implements UpgradeSource {
   }
 
   private emitBarrierStreamRequest(buildFrame: () => OutboundFrame): BarrierEmission {
-    assert(this.streamRequest.tag === 'active' && !this.flushing && this.outbox.length === 0)
+    assert(this.streamRequest.tag === 'active' && this.flushesUnread === 0 && this.outbox.length === 0)
     const frame = buildFrame()
     this.streamRequest.body.push(encodeU32(frame.frame.byteLength))
     this.streamRequest.body.push(frame.frame)
@@ -2118,11 +2121,11 @@ class SseTransport implements UpgradeSource {
   }
 
   private async emitBarrierBatch(buildFrame: () => OutboundFrame, signal: AbortSignal): Promise<BarrierEmission> {
-    if (this.flushing || this.outbox.length > 0) {
+    if (this.flushesUnread > 0 || this.outbox.length > 0) {
       const drained = new Promise<void>((resolve) => this.drainCallbacks.push(resolve))
       await Promise.race([drained, new Promise<void>((resolve) => setTimeout(resolve, UPGRADE_DRAIN_TIMEOUT_MS))])
     }
-    while (this.flushing) {
+    while (this.flushesUnread > 0) {
       if (!this.hasWire()) return 'not-emitted'
       if (signal.aborted) return 'wedged'
       await settledOrAborted(new Promise<void>((resolve) => this.drainCallbacks.push(resolve)), signal)
@@ -2158,7 +2161,7 @@ class SseTransport implements UpgradeSource {
   }
 
   sendFrame(frame: OutboundFrame): void {
-    if (this.flushing && frame.kind === 'heartbeat') {
+    if (this.flushesUnread > 0 && frame.kind === 'heartbeat') {
       this.schedulePingDuringFlush(frame)
       return
     }
@@ -2338,26 +2341,34 @@ class SseTransport implements UpgradeSource {
   }
 
   private async flushOutbox(): Promise<void> {
-    if (!this.hasWire() || this.flushing || this.outbox.length === 0) return
+    if (!this.hasWire() || this.flushAwaitingTurn || this.outbox.length === 0) return
     assert(this.transportAbort)
     this.flushScheduler.cancel()
-    this.flushing = true
+    this.flushAwaitingTurn = true
+    this.flushesUnread++
+    let answered = false
     try {
       const now = Date.now()
       const queued = this.outbox.splice(0, this.outbox.length)
       this.lastPostStartedAt = now
       const wire = this.transportAbort
+      // None is unread as a PING goes into the outbox, so the flush it rides in is read at once.
       for (const { frame } of queued) if (frame[0] === TAG.PING) this.pings.sent(frame)
 
       try {
         const response = await this.post(
           encodeSseRequest(
-            { connId: this.connId },
+            { connId: this.connId, flush: true },
             encodeLengthPrefixedFrames(queued, (entry) => entry.frame),
           ),
           wire.signal,
         )
         if (!response.ok) throw new Error('POST failed')
+        // The server has begun to read it: the next flush can go, and waits its turn behind this one.
+        answered = true
+        this.flushAwaitingTurn = false
+        this.scheduleFlush()
+        if ((await response.text()) !== SSE_FLUSH_TAKEN + SSE_FLUSH_READ) throw new Error('POST failed')
       } catch {
         // Its wire has ended already: what the POST carried goes the way of that wire's outbox (stageInitialBatch),
         // also when the next wire has reconciled already.
@@ -2371,10 +2382,11 @@ class SseTransport implements UpgradeSource {
         return
       }
     } finally {
-      this.flushing = false
+      if (!answered) this.flushAwaitingTurn = false
+      this.flushesUnread--
       if (this.outbox.length > 0) {
         this.scheduleFlush()
-      } else {
+      } else if (this.flushesUnread === 0) {
         const cbs = this.drainCallbacks.splice(0)
         for (const cb of cbs) cb()
       }
@@ -2385,7 +2397,7 @@ class SseTransport implements UpgradeSource {
   private schedulePingDuringFlush(frame: OutboundFrame): void {
     const delay = Math.max(0, this.getFrameDeadline(frame.kind) - Date.now())
     setTimeout(() => {
-      if (this.flushing) {
+      if (this.flushesUnread > 0) {
         void this.sendStandalonePost([frame.frame])
       } else {
         this.sendFrame(frame)
@@ -2511,7 +2523,7 @@ class SseTransport implements UpgradeSource {
   }
 
   drained(): Promise<void> {
-    if (!this.hasWire() || (!this.flushing && this.outbox.length === 0)) return Promise.resolve()
+    if (!this.hasWire() || (this.flushesUnread === 0 && this.outbox.length === 0)) return Promise.resolve()
     return new Promise((resolve) => this.drainCallbacks.push(resolve))
   }
 

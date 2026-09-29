@@ -219,7 +219,9 @@ function sseServer(net: Net, refuseUpload: boolean): typeof fetch {
     if (link.dead || (link.holdingPosts && !streamResponse)) return await aborted
     const response = (await sse.handleRequest(new Request(url, { method: 'POST', body: bytes })))!
     const responseBody =
-      response.body instanceof ReadableStream ? downstream(response.body, link, net) : (response.body as string)
+      response.contentType === 'text/event-stream'
+        ? downstream(response.body as ReadableStream<Uint8Array>, link, net)
+        : (response.body as BodyInit)
     return new Response(responseBody, {
       status: response.statusCode,
       headers: { 'Content-Type': response.contentType },

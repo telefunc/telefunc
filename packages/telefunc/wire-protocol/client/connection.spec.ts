@@ -187,7 +187,7 @@ test("a wire's end aborts its batch POST still in flight, which would otherwise 
   transport.outbox = [{ frame: encode.window(0, 65_536, 0), deadline: 0 }]
   void transport.flushOutbox()
   endWire!()
-  await vi.waitFor(() => expect(transport.flushing).toBe(false))
+  await vi.waitFor(() => expect(transport.flushesUnread).toBe(0))
   connection.dispose()
 })
 

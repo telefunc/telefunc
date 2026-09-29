@@ -9,6 +9,7 @@ import { ServerBroadcast } from '../server/server-broadcast.js'
 import { getChannelMux } from '../server/mux.js'
 import { getTelefuncSseChannelHooks } from '../server/sse.js'
 import { decode, encode, TAG, type SeqReader } from '../shared-ws.js'
+import { SSE_FLUSH_READ, SSE_FLUSH_TAKEN } from '../sse-request.js'
 import { decodeU32 } from '../frame.js'
 import { uint8ArrayToBase64url } from '../base64url.js'
 
@@ -21,7 +22,9 @@ afterEach(() => {
 
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
-async function parseBlobBody(blob: Blob): Promise<{ metadata: { streamResponse?: boolean }; frames: Uint8Array[] }> {
+async function parseBlobBody(
+  blob: Blob,
+): Promise<{ metadata: { streamResponse?: boolean; flush?: boolean }; frames: Uint8Array[] }> {
   const bytes = new Uint8Array(await blob.arrayBuffer())
   let offset = 0
   const next = (): Uint8Array => {
@@ -88,7 +91,7 @@ function fakeServer(onBatchFrame: (frame: ReturnType<typeof decode>) => void = (
       const { metadata, frames } = await parseBlobBody(body)
       if (!metadata.streamResponse) {
         for (const raw of frames) onBatchFrame(decode(raw as never, wireSeqs))
-        return new Response('', { status: 200 })
+        return new Response(metadata.flush ? SSE_FLUSH_TAKEN + SSE_FLUSH_READ : '', { status: 200 })
       }
       server.wires++
       for (const raw of frames) {
