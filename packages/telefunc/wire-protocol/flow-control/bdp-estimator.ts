@@ -41,13 +41,17 @@ const NOT_SETTLED: GrowDecision = { acknowledged: false, bytes: 'sample-too-smal
  *      its sample leaves the queue out; the message window bounds how many frames the
  *      receiver dispatches per round trip, which `FlowControl` gates on its own load. Two
  *      things tell the queue from the path:
- *      - an attach carries a probe the sender answers before any of the channel's frames,
- *        so its round trip is the path's. A later sample counts at that round trip, as its
- *        delivery rate times the path's RTT, which is BBR's estimate: that leaves out a
- *        queue wherever it is, the kernel's send buffer included. A server's receive side
- *        has no attach of its own to probe: each ack of its sender, the page, says the round
- *        trip the page's attach measured. Where the page's frames wait for a batch POST, each
- *        round of credit takes that wait more than the path, and the page adds it;
+ *      - an attach carries a probe the sender answers before any of the channel's frames, so its
+ *        round trip is the path's. The page's first PING on a wire goes out ahead of all it sends
+ *        there but its heartbeat's WINDOW frames, and its round trip counts the same way, which
+ *        covers an attach whose answer waited: a browser hands an SSE page its stream only once
+ *        the request that opened it has sent what the page queued before. A later sample counts
+ *        at the least round trip either took, as its delivery rate times the path's RTT, which is
+ *        BBR's estimate: that leaves out a queue wherever it is, the kernel's send buffer
+ *        included. A server's receive side has no attach of its own to probe: each ack of its
+ *        sender, the page, says the round trip the page measured. Where the page's frames wait
+ *        for a batch POST, each round of credit takes that wait more than the path, and the page
+ *        adds it;
  *      - where neither side measured, the ack says whether, since the sender last answered
  *        one, its credit ran out while its wire held nothing (see `FlowControl.onPing`),
  *        which sees what the runtime buffers.
@@ -168,9 +172,9 @@ class BdpEstimator {
     return this._probes
   }
 
-  /** A round trip of the path on `wire`, which nothing the channel sent waited ahead of. Wires are numbered in the order
-   *  they attach: one measures a round trip for a later wire than the last measured, lowers it for that wire, and one
-   *  for an earlier wire, gone since, is ignored. */
+  /** A round trip measured on `wire`, an attach's probe's or a PING's, which is never less than the path's: the least
+   *  counts as the path's. Wires are numbered in the order they attach: one measures a round trip for a later wire than
+   *  the last measured, lowers it for that wire, and one for an earlier wire, gone since, is ignored. */
   notePathRtt(wire: number, rtt: number): void {
     if (wire < this._pathWire) return
     this._pathRtt = wire === this._pathWire ? Math.min(this._pathRtt, rtt) : rtt

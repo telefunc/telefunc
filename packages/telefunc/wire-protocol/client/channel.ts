@@ -285,7 +285,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     return probe === undefined ? {} : { probe }
   }
 
-  /** @internal A round trip of the path on `wire` the connection measured. */
+  /** @internal The least round trip the connection measured on `wire`. */
   _onPathRtt(wire: number, rtt: number): void {
     this._flow.notePathRtt(wire, rtt)
   }

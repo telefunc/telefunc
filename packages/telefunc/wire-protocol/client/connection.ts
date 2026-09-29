@@ -210,7 +210,7 @@ interface MuxChannel {
   _onTransportClose(err?: Error): void
   /** What this channel declares in its RECONCILE entry on every (re)attach, on `wire`. */
   _reattachState?(wire: number): ReattachState
-  /** A round trip of the path on `wire` the connection measured, which nothing the channel sent waited ahead of. */
+  /** The least round trip the connection measured on `wire` (see `ClientConnection._onTransportRoundTrip`). */
   _onPathRtt?(wire: number, rtt: number): void
   /** The largest windows the replay buffers allow: the one the page grants, and the one the server grants it. */
   _fitReplays?(window: number, peerWindow: number): void

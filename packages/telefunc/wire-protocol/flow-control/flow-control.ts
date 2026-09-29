@@ -213,8 +213,7 @@ class FlowControl {
     return this._bdp.probeAttach(wire)
   }
 
-  /** A round trip of the path on `wire` the connection measured, which nothing the channel sent waited ahead of (see
-   *  `BdpEstimator.notePathRtt`). */
+  /** A round trip the connection measured on `wire` (see `BdpEstimator.notePathRtt`). */
   notePathRtt(wire: number, rtt: number): void {
     this._bdp.notePathRtt(wire, rtt)
   }
