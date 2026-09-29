@@ -978,6 +978,80 @@ describe.each(WIRES)('over %s, a stream that awaits its sends, whose wire drops 
   })
 })
 
+describe.each(WIRES)("over %s, a stream that awaits its sends, begun before its page's first RECONCILED,", (wire) => {
+  test("from the page, on a channel it passes to the server, resumes without loss when its wire drops with it in flight, however small the page's replay", async () => {
+    serverConfig.channel = { pingInterval: 1_000, clientReplayBuffer: 64 * 1_024 }
+    ;(getChannelMux() as unknown as { resolvedOptions: unknown }).resolvedOptions = null
+    const { net, channel } = page(wire)
+    // The first wire dies as its RECONCILED arrives, and the next as the server attaches the channel.
+    net.whenPageGets(TAG.RECONCILED, () => net.die())
+    net.whenPageGets(TAG.ATTACH_RESULT, () => net.die())
+    const pageChannel = channel<string, never>(crypto.randomUUID())
+    void (async () => {
+      for (let n = 0; n < 40; n++) await pageChannel.send(text(n), { ack: false })
+    })()
+    await advance(5_000)
+    // The call passing it reaches the server once the first wire's loss was noticed on both ends.
+    const server = new ServerChannel<string, never>({ id: pageChannel.id })
+    getChannelMux().registerChannel(server)
+    const got: number[] = []
+    server.listen((message) => void got.push(Number.parseInt(message)))
+    const closed = [closedWith(pageChannel), closedWith(server)]
+    await advance(20_000)
+    expect(got).toEqual(inOrder(40))
+    expect(closed.map(({ err }) => err)).toEqual(['open', 'open'])
+  })
+
+  test("from the server, after the page read what the server sent it before, resumes without loss when its wire drops with it in flight, however small the server's replay", async () => {
+    serverConfig.channel = {
+      pingInterval: 1_000,
+      serverReplayBuffer: 256 * 1_024,
+      serverReplayBufferBinary: 256 * 1_024,
+    }
+    ;(getChannelMux() as unknown as { resolvedOptions: unknown }).resolvedOptions = null
+    const { net, channel } = page(wire)
+    const server = register<never, string>()
+    void server.sendBinary(new Uint8Array(1_024 * 1_024)) // nobody awaits it: the page reads it as it attaches
+    const pageChannel = channel<never, string>(server.id)
+    let read = 0
+    pageChannel.listenBinary((data) => void (read += data.byteLength))
+    const got: number[] = []
+    pageChannel.listen((message) => void got.push(Number.parseInt(message)))
+    const closed = [closedWith(pageChannel), closedWith(server)]
+    await advance(500)
+    expect(read).toBe(1_024 * 1_024)
+    produce((n) => server.send(text(n), { ack: false }), 400, 1)
+    await advance(100)
+    await dieWithCredit(net, server, pageChannel)
+    await advance(20_000)
+    expect(got).toEqual(inOrder(400))
+    expect(closed.map(({ err }) => err)).toEqual(['open', 'open'])
+  })
+})
+
+test("over ws, a stream that awaits its sends from the page on a channel the server returned, begun before the page's first RECONCILED, resumes without loss when its wire drops with it in flight, however small the page's replay", async () => {
+  // The server waits for the page past the first wire's reconcile timeout.
+  serverConfig.channel = { pingInterval: 1_000, connectTtl: 20_000, clientReplayBuffer: 64 * 1_024 }
+  ;(getChannelMux() as unknown as { resolvedOptions: unknown }).resolvedOptions = null
+  const { net, channel } = page('ws')
+  const server = register<string, never>()
+  const got: number[] = []
+  server.listen((message) => void got.push(Number.parseInt(message)))
+  // Its first RECONCILE goes down with the wire, and the next wire dies as the page gets its RECONCILED.
+  net.whenPageSends(TAG.RECONCILE, () => {
+    net.die()
+    net.whenPageGets(TAG.RECONCILED, () => net.die())
+  })
+  const pageChannel = channel<string, never>(server.id)
+  const closed = [closedWith(pageChannel), closedWith(server)]
+  void (async () => {
+    for (let n = 0; n < 40; n++) await pageChannel.send(text(n), { ack: false })
+  })()
+  await advance(30_000)
+  expect(got).toEqual(inOrder(40))
+  expect(closed.map(({ err }) => err)).toEqual(['open', 'open'])
+})
+
 describe.each(WIRES)('over %s, a channel gone quiet', (wire) => {
   test("has each end's replay let go of what the other end got within a heartbeat, and a heartbeat with nothing new sends no WINDOW", async () => {
     const { net, channel } = page(wire)

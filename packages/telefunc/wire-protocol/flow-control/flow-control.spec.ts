@@ -76,7 +76,12 @@ function makeEmit(): Emit {
 /** `backlog` is what its wire holds, nothing unless a test says otherwise. */
 function makeFlow(backlog: () => number | undefined = () => 0) {
   const emit = makeEmit()
-  return { emit, flow: new FlowControl(emit, backlog) }
+  return { emit, flow: fitted(new FlowControl(emit, backlog)) }
+}
+/** Fitted to the default replay buffers, which allow the largest window either way. */
+function fitted(flow: FlowControl): FlowControl {
+  flow.fitReplays(CREDIT_WINDOW_MAX_BYTES, CREDIT_WINDOW_MAX_BYTES)
+  return flow
 }
 
 describe('FlowControl — sender-side credit', () => {
@@ -418,6 +423,21 @@ describe('FlowControl — replay buffers', () => {
     expect(flow.byteWindow).toBe(CREDIT_WINDOW_MAX_BYTES)
   })
 
+  // A page learns the server's replay buffer from its first RECONCILED. A limit it advertised before could let the server
+  // have more in flight than that holds.
+  it('until it knows the replay buffers, a receiver advertises no byte limit, and a sender assumes the initial window', () => {
+    const emit = makeEmit()
+    const flow = new FlowControl(emit, () => 0)
+    expect(flow.decrement(CREDIT_WINDOW_INITIAL_BYTES - 1)).toBeUndefined()
+    flow.onReceived(CREDIT_WINDOW_INITIAL_BYTES)
+    flow.onConsumed(CREDIT_WINDOW_INITIAL_BYTES)
+    flow.reattach()
+    expect(emit.windowCalls).toEqual([])
+    flow.fitReplays(64 * 1024, CREDIT_WINDOW_MAX_BYTES)
+    flow.reattach()
+    expect(emit.windowCalls).toEqual([CREDIT_WINDOW_INITIAL_BYTES + 64 * 1024])
+  })
+
   // The peer assumes the same initial window its own replay allows, so a sender's credit starts there.
   it("a sender's credit starts at what its own replay allows, until a WINDOW raises it", () => {
     const { flow } = makeFlow()
@@ -474,8 +494,8 @@ function makePair() {
     msgWindowUpdate: () => {},
     bdpPing: () => {},
   }
-  const receiver = new FlowControl(toSender, () => 0)
-  const sender = new FlowControl(toReceiver, () => 0)
+  const receiver = fitted(new FlowControl(toSender, () => 0))
+  const sender = fitted(new FlowControl(toReceiver, () => 0))
   return { sender, receiver }
 }
 
@@ -534,16 +554,18 @@ async function runPath({
   const toSender: { at: number; deliver: () => void }[] = []
   let now = 0
   const upstream = (deliver: () => void) => toSender.push({ at: now + delayMs, deliver })
-  const sender = new FlowControl({ byteWindowUpdate() {}, msgWindowUpdate() {}, bdpPing() {} }, () => wireBytes)
+  const sender = fitted(new FlowControl({ byteWindowUpdate() {}, msgWindowUpdate() {}, bdpPing() {} }, () => wireBytes))
   const answer = (probe: number, starved: boolean) =>
     wire.push(decode(encode.bdpPingAck(0, probe, starved), wireSeqs) as Ack)
-  const receiver = new FlowControl(
-    {
-      byteWindowUpdate: (limit) => upstream(() => sender.onPeerByteWindow(limit)),
-      msgWindowUpdate: (limit) => upstream(() => sender.onPeerMessageWindow(limit)),
-      bdpPing: (probe) => upstream(() => answer(probe, sender.onPing())),
-    },
-    () => 0,
+  const receiver = fitted(
+    new FlowControl(
+      {
+        byteWindowUpdate: (limit) => upstream(() => sender.onPeerByteWindow(limit)),
+        msgWindowUpdate: (limit) => upstream(() => sender.onPeerMessageWindow(limit)),
+        bdpPing: (probe) => upstream(() => answer(probe, sender.onPing())),
+      },
+      () => 0,
+    ),
   )
   let attached = false
   const attachProbe = attach ? receiver.probeAttach(0)! : undefined

@@ -10,8 +10,6 @@ import { base64urlToUint8Array } from '../base64url.js'
 import {
   CHANNEL_CLIENT_REPLAY_BUFFER_BYTES,
   CHANNEL_CLIENT_REPLAY_BUFFER_BINARY_BYTES,
-  CHANNEL_SERVER_REPLAY_BUFFER_BYTES,
-  CHANNEL_SERVER_REPLAY_BUFFER_BINARY_BYTES,
   CHANNEL_IDLE_TIMEOUT_MS,
   CHANNEL_PING_INTERVAL_MS,
   CHANNEL_RECONNECT_INITIAL_DELAY_MS,
@@ -453,8 +451,9 @@ class ClientConnection implements MuxConnection {
   private pingIntervalMs = CHANNEL_PING_INTERVAL_MS
   private clientReplayBufferBytes = CHANNEL_CLIENT_REPLAY_BUFFER_BYTES
   private clientReplayBufferBinaryBytes = CHANNEL_CLIENT_REPLAY_BUFFER_BINARY_BYTES
-  private serverReplayBufferBytes = CHANNEL_SERVER_REPLAY_BUFFER_BYTES
-  private serverReplayBufferBinaryBytes = CHANNEL_SERVER_REPLAY_BUFFER_BINARY_BYTES
+  /** The largest windows the replay buffers allow, the one the page grants and the one the server grants it, as the
+   *  last RECONCILED says them: unknown before the first. */
+  private replayWindows: { window: number; peerWindow: number } | null = null
   private constructor(telefuncUrl: string, options: ClientConnectionOptions, cacheKey: string) {
     this.cacheKey = cacheKey
     this.telefuncUrl = telefuncUrl
@@ -618,13 +617,12 @@ class ClientConnection implements MuxConnection {
     this.scheduleRegisterReconcile()
   }
 
-  /** Its window fits the server's replay, and the server's fits the page's: as the first RECONCILED says, the defaults
-   *  until then. */
+  /** Its window fits the server's replay, and the server's fits the page's, once a RECONCILED says them. Until then it
+   *  sends within the initial window of the defaults, which its replay keeps whatever budget the RECONCILED sets (see
+   *  `ReplayBuffer.setLimits`), and advertises no byte limit (see `FlowControl`). */
   private fitReplays(channel: MuxChannel): void {
-    channel._fitReplays?.(
-      replayWindow(this.serverReplayBufferBytes, this.serverReplayBufferBinaryBytes),
-      replayWindow(this.clientReplayBufferBytes, this.clientReplayBufferBinaryBytes),
-    )
+    if (this.replayWindows === null) return
+    channel._fitReplays?.(this.replayWindows.window, this.replayWindows.peerWindow)
   }
 
   /** How long a gone server is still held: until its loss is noticed at the pong deadline, then for `reconnectTimeout`. */
@@ -1525,8 +1523,10 @@ class ClientConnection implements MuxConnection {
     if (this.connectionOptions.idleTimeout === undefined) this.idleTimeoutMs = ctrl.idleTimeout
     this.clientReplayBufferBytes = ctrl.clientReplayBuffer
     this.clientReplayBufferBinaryBytes = ctrl.clientReplayBufferBinary
-    this.serverReplayBufferBytes = ctrl.serverReplayBuffer
-    this.serverReplayBufferBinaryBytes = ctrl.serverReplayBufferBinary
+    this.replayWindows = {
+      window: replayWindow(ctrl.serverReplayBuffer, ctrl.serverReplayBufferBinary),
+      peerWindow: replayWindow(ctrl.clientReplayBuffer, ctrl.clientReplayBufferBinary),
+    }
     // Before this reconcile stores anything: a channel registered before the first RECONCILED was sized with the defaults.
     const maxAgeMs = this.replayMaxAgeMs(ctrl.pingInterval)
     for (const replay of this.replayBuffers.values()) {

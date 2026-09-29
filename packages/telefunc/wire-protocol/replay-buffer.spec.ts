@@ -78,3 +78,37 @@ test('counts what flow control counts, the bytes of the payloads', () => {
   expect(replay.byteLength).toBe(300)
   expect(replay.getAfter(0)).toEqual([text(1, 150), text(2, 150)])
 })
+
+test('a lower budget keeps what was sent under the higher one until the peer has it, then holds what came after to it', () => {
+  const replay = new ReplayBuffer(1_024, 60_000, 1_024)
+  const send = (bytes: number) => {
+    const seq = replay.nextSeq()
+    replay.push(seq, text(seq, bytes))
+  }
+  send(300)
+  send(300)
+  const queued = replay.nextSeq() // sent before the budget was known, stored after it
+  replay.setLimits(256, 60_000, 1_024)
+  replay.push(queued, text(queued, 200))
+  send(200)
+  expect(replay.getAfter(0)).toEqual([text(1, 300), text(2, 300), text(3, 200), text(4, 200)])
+  replay.acknowledge(2)
+  expect(replay.getAfter(2)).toEqual([text(3, 200), text(4, 200)])
+  replay.acknowledge(3)
+  expect(replay.getAfter(3)).toEqual([text(4, 200)])
+  send(200) // with 4, past the lower budget
+  expect(replay.getAfter(3)).toBe(ERROR_REASON.LOST)
+})
+
+test('a higher budget applies at once, and a lower one at once when the peer has all that was sent', () => {
+  const replay = new ReplayBuffer(256, 60_000, 1_024)
+  replay.setLimits(1_024, 60_000, 1_024)
+  replay.push(1, text(1, 400))
+  replay.push(2, text(2, 400))
+  expect(replay.getAfter(0)).toEqual([text(1, 400), text(2, 400)])
+  replay.acknowledge(2)
+  replay.setLimits(256, 60_000, 1_024)
+  replay.push(3, text(3, 200))
+  replay.push(4, text(4, 200))
+  expect(replay.getAfter(2)).toBe(ERROR_REASON.LOST)
+})
