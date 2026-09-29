@@ -1,0 +1,52 @@
+@import 'tailwindcss';
+
+@theme {
+  --font-sans: 'Rajdhani', 'Inter', ui-sans-serif, system-ui, sans-serif;
+  --color-steel-950: #05070d;
+  --color-steel-900: #0a0e17;
+  --color-steel-850: #0f1420;
+  --color-steel-800: #141b2b;
+  --color-steel-700: #1e2740;
+  --color-steel-600: #2c3856;
+  --color-steel-400: #6b7ba6;
+  --color-steel-300: #9aa8cc;
+  --color-team-red: #ff4d5e;
+  --color-team-blue: #4d9dff;
+  --color-crystal: #52e0c4;
+  --color-gold: #ffcf5c;
+}
+
+html,
+body,
+#page-view {
+  height: 100%;
+  margin: 0;
+  background: var(--color-steel-950);
+  color: var(--color-steel-300);
+  font-family: var(--font-sans);
+  overflow: hidden;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+/* The match viewport must never show text selection or a context menu — right-click is an
+   in-game order, and drag is a selection box. */
+.no-select {
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+canvas {
+  display: block;
+}
+
+@keyframes pulse-ring {
+  0% {
+    box-shadow: 0 0 0 0 rgba(82, 224, 196, 0.5);
+  }
+  100% {
+    box-shadow: 0 0 0 12px rgba(82, 224, 196, 0);
+  }
+}
