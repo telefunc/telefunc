@@ -712,28 +712,28 @@ describe.each(WIRES)('over %s, from the server', (wire) => {
   })
 })
 
-describe.each(WIRES)('over %s, a stream that awaits its sends, whose wire drops with its window in flight,', (wire) => {
-  /** Awaits each of `count` sends, one every `everyMs`, as a stream that awaits its sends does. */
-  function produce(send: (n: number) => Promise<unknown>, count: number, everyMs: number) {
-    void (async () => {
-      for (let n = 0; n < count; n++) {
-        await send(n)
-        await new Promise((resolve) => setTimeout(resolve, everyMs))
-      }
-    })().catch(() => {})
-  }
-  /** A 16 KiB message that names its place in the stream. */
-  const text = (n: number) => String(n).padEnd(16 * 1_024)
-  /** A 1 MiB binary message that names its place in the stream: two of them take the page's 2 MiB window. */
-  const chunk = (n: number) => new Uint8Array(1_024 * 1_024).fill(n)
-  const inOrder = (count: number) => Array.from({ length: count }, (_, n) => n)
-  /** The wire dies once `sender` may send more than half of `receiver`'s window, which then goes into the dead wire. */
-  async function dieWithCredit(net: Net, sender: unknown, receiver: unknown) {
-    const flow = (sender as { _flow: { _limitBytes: number; _sentBytes: number } })._flow
-    while (flow._limitBytes - flow._sentBytes <= flowOf(receiver).byteWindow / 2) await advance(1)
-    net.die()
-  }
+/** Awaits each of `count` sends, one every `everyMs`, as a stream that awaits its sends does. */
+function produce(send: (n: number) => Promise<unknown>, count: number, everyMs: number) {
+  void (async () => {
+    for (let n = 0; n < count; n++) {
+      await send(n)
+      await new Promise((resolve) => setTimeout(resolve, everyMs))
+    }
+  })().catch(() => {})
+}
+/** A 16 KiB message that names its place in the stream. */
+const text = (n: number) => String(n).padEnd(16 * 1_024)
+/** A 1 MiB binary message that names its place in the stream: two of them take the page's 2 MiB window. */
+const chunk = (n: number) => new Uint8Array(1_024 * 1_024).fill(n)
+const inOrder = (count: number) => Array.from({ length: count }, (_, n) => n)
+/** The wire dies once `sender` may send more than half of `receiver`'s window, which then goes into the dead wire. */
+async function dieWithCredit(net: Net, sender: unknown, receiver: unknown) {
+  const flow = (sender as { _flow: { _limitBytes: number; _sentBytes: number } })._flow
+  while (flow._limitBytes - flow._sentBytes <= flowOf(receiver).byteWindow / 2) await advance(1)
+  net.die()
+}
 
+describe.each(WIRES)('over %s, a stream that awaits its sends, whose wire drops with its window in flight,', (wire) => {
   test('from the server, as text, resumes after the reconnect without loss', async () => {
     const { net, channel } = page(wire)
     const server = register<never, string>()
@@ -1095,6 +1095,22 @@ test("over sse, an upgrade whose barrier finds more on the old wire than the ser
   expect(got).toEqual(['0', '1', '2', '3', '4', '5', '6', '7'])
   expect(pageClosed.err).toBe('open')
   expect(serverClosed.err).toBe('open')
+})
+
+test('over sse, a stream that awaits its sends keeps whole across the upgrade to a WebSocket, and resumes without loss when that drops with its window in flight', async () => {
+  const { net, channel } = page('sse', { upgrade: true })
+  const server = register<never, string>()
+  const pageChannel = channel<never, string>(server.id)
+  const got: number[] = []
+  pageChannel.listen((message) => void got.push(Number.parseInt(message)))
+  const closed = [closedWith(pageChannel), closedWith(server)]
+  produce((n) => server.send(text(n), { ack: false }), 600, 5)
+  await advance(1_500)
+  expect((pageChannel as any)._connection.transport.type).toBe('ws')
+  await dieWithCredit(net, server, pageChannel)
+  await advance(10_000)
+  expect(got).toEqual(inOrder(600))
+  expect(closed.map(({ err }) => err)).toEqual(['open', 'open'])
 })
 
 test('over ws, a page lets go of a closed channel whose close the server never got once nothing of it is left to replay', async () => {
