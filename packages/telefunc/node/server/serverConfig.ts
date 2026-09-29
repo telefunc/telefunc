@@ -42,6 +42,7 @@ import {
   SSE_POST_IDLE_FLUSH_DELAY_MS,
   type ChannelTransports,
   type StreamTransport,
+  TIMER_DELAY_MAX_MS,
 } from '../../wire-protocol/constants.js'
 
 type StreamConfigUser = {
@@ -480,15 +481,21 @@ function applyChannelConfig(val: unknown): void {
       case 'reconnectTimeout':
       case 'idleTimeout':
       case 'pingInterval':
+      case 'connectTtl':
+      case 'sseFlushThrottle':
+      case 'ssePostIdleFlushDelay':
+        assertUsage(
+          typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 && value <= TIMER_DELAY_MAX_MS,
+          `\`${configPath}\` should be a non-negative safe integer of milliseconds, at most ${TIMER_DELAY_MAX_MS}, the longest a timer waits`,
+        )
+        ;(next as Record<string, unknown>)[key] = value
+        break
       case 'serverReplayBuffer':
       case 'serverReplayBufferBinary':
       case 'clientReplayBuffer':
       case 'clientReplayBufferBinary':
-      case 'connectTtl':
       case 'bufferLimit':
       case 'bufferLimitBinary':
-      case 'sseFlushThrottle':
-      case 'ssePostIdleFlushDelay':
         assertUsage(
           typeof value === 'number' && Number.isSafeInteger(value) && value >= 0,
           `\`${configPath}\` should be a non-negative safe integer`,

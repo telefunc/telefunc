@@ -37,7 +37,7 @@ import { ShieldValidationError } from '../../shared/ShieldValidationError.js'
 import { ClientConnection } from './connection.js'
 import { getSessionUrl } from './session-registry.js'
 import {
-  CHANNEL_CLOSE_TIMEOUT_MAX_MS,
+  TIMER_DELAY_MAX_MS,
   CHANNEL_CLOSE_TIMEOUT_MS,
   CREDIT_WINDOW_MAX_BYTES,
   type ChannelTransports,
@@ -761,9 +761,9 @@ function reportChannelError(err: unknown): void {
 
 function normalizeCloseTimeout(timeout: number | undefined): number {
   if (timeout === undefined) return CHANNEL_CLOSE_TIMEOUT_MS
-  if (!Number.isFinite(timeout) || timeout < 0 || timeout > CHANNEL_CLOSE_TIMEOUT_MAX_MS)
+  if (!Number.isFinite(timeout) || timeout < 0 || timeout > TIMER_DELAY_MAX_MS)
     throw new Error(
-      `Channel close timeout must be a non-negative number of milliseconds, at most ${CHANNEL_CLOSE_TIMEOUT_MAX_MS}`,
+      `Channel close timeout must be a non-negative number of milliseconds, at most ${TIMER_DELAY_MAX_MS}`,
     )
   return timeout
 }

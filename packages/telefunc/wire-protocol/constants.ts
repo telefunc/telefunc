@@ -177,8 +177,8 @@ export const CHANNEL_IDLE_TIMEOUT_MS = 60_000
 export const CHANNEL_PING_INTERVAL_MS = 5_000
 export const CHANNEL_PING_INTERVAL_MIN_MS = 1_000
 export const CHANNEL_CLOSE_TIMEOUT_MS = 5_000
-/** The longest close timeout: the longest delay a timer takes, past which it fires at once. */
-export const CHANNEL_CLOSE_TIMEOUT_MAX_MS = 2 ** 31 - 1
+/** The longest delay a timer takes: past it, setTimeout fires at once. Bounds every duration a channel waits out. */
+export const TIMER_DELAY_MAX_MS = 2 ** 31 - 1
 /**
  * Maximum bytes buffered per channel for text messages sent before a peer connects.
  * When the budget is exceeded the oldest entries are evicted (FIFO) so the

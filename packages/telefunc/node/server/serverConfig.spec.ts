@@ -23,3 +23,20 @@ describe('channel transports a server adapter enables', () => {
 test.each([Infinity, 0.5, Number.MAX_SAFE_INTEGER + 1])('channel config rejects %s', (value) => {
   expect(() => (config.channel.reconnectTimeout = value)).toThrow('non-negative safe integer')
 })
+
+test.each([
+  'reconnectTimeout',
+  'idleTimeout',
+  'pingInterval',
+  'connectTtl',
+  'sseFlushThrottle',
+  'ssePostIdleFlushDelay',
+])('channel config refuses a %s longer than a timer waits, which would fire at once', (key) => {
+  try {
+    expect(() => (config.channel = { [key]: 2 ** 31 })).toThrow('at most 2147483647')
+    config.channel = { [key]: 2 ** 31 - 1 }
+    expect((getServerConfig().channel as Record<string, unknown>)[key]).toBe(2 ** 31 - 1)
+  } finally {
+    config.channel = {}
+  }
+})

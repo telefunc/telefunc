@@ -32,6 +32,7 @@ import {
   WS_PROBE_TIMEOUT_MS,
   type ChannelTransport,
   type ChannelTransports,
+  TIMER_DELAY_MAX_MS,
 } from '../constants.js'
 import { encodeU32, encodeLengthPrefixedFrames } from '../frame.js'
 import { createPushReadableStream, type PushReadableStream } from '../push-readable-stream.js'
@@ -609,12 +610,12 @@ class ClientConnection implements MuxConnection {
 
   /** How long a gone server is still held: until its loss is noticed at the pong deadline, then for `reconnectTimeout`. */
   reconnectWindow(pingIntervalMs = this.pingIntervalMs): number {
-    return 2 * pingIntervalMs + this.reconnectTimeoutMs
+    return Math.min(TIMER_DELAY_MAX_MS, 2 * pingIntervalMs + this.reconnectTimeoutMs)
   }
 
   /** As the server's, a frame stays replayable through the reconnect window, plus a second for the reconnect itself. */
   private replayMaxAgeMs(pingIntervalMs: number): number {
-    return this.reconnectWindow(pingIntervalMs) + 1_000
+    return Math.min(TIMER_DELAY_MAX_MS, this.reconnectWindow(pingIntervalMs) + 1_000)
   }
 
   private registerReconcileTimer: ReturnType<typeof setTimeout> | null = null
