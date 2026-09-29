@@ -91,6 +91,8 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   protected _flow: FlowControl
   /** The connection's wire at the last attach. */
   private _attachedWire: number | null = null
+  /** The wire of its last RECONCILE entry, or a barrier's, which its frames go on from then. */
+  private _declaredWire: number | null = null
 
   constructor({
     channelId,
@@ -121,6 +123,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
         bdpPing: (probe) => this._connection.sendBdpPing(this, probe),
       },
       () => this._connection.bufferedAmount(),
+      () => this._connection.sendDelay(),
     )
     const config = resolveClientConfig()
     this._connection = ClientConnection.getOrCreate(getSessionUrl(telefuncUrl), this, {
@@ -275,10 +278,10 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
 
   // ── Called by transport connection ──
 
-  /** @internal A probe of the path on an attach to a wire whose round trip it hasn't measured, unless its flow-control
-   *  frames wait for a batched POST, which the RECONCILE doesn't: the RECONCILE's round trip wouldn't be theirs. */
-  _reattachState(wire: number, batched: boolean): ReattachState {
-    const probe = batched ? undefined : this._flow.probeAttach(wire)
+  /** @internal A probe of the path on an attach to a wire whose round trip it hasn't measured. */
+  _reattachState(wire: number): ReattachState {
+    this._declaredWire = wire
+    const probe = this._flow.probeAttach(wire)
     return probe === undefined ? {} : { probe }
   }
 
@@ -424,7 +427,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
           this,
           frame.probe,
           this._flow.onPing(),
-          this._attachedWire === null ? Infinity : this._flow.pathRtt(this._attachedWire),
+          this._declaredWire === null ? Infinity : this._flow.pathRtt(this._declaredWire),
         )
         return
       case TAG.BDP_PING_ACK:

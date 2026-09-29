@@ -653,22 +653,22 @@ const { RECONCILE, RECONCILED, TEXT, WINDOW, MSG_WINDOW, BDP_PING, BDP_PING_ACK,
 /** As recorded before initial channels the server hasn't registered were answered at once, less the TEXT an SSE page
  *  sent twice: with its first RECONCILE, and again as the replay that RECONCILE's RECONCILED asked for. SENT, which
  *  each attach to another wire sent then, is gone. With the server's BDP_PING_ACK to the probe a RECONCILE entry
- *  carries on a wire whose round trip its channel hasn't measured; an SSE page's first RECONCILE, sent before its
- *  upload request streams, carries none. With the WINDOW the server sends at the page's first heartbeat on SSE, which
- *  acknowledges the TEXT that RECONCILE carried: on a WebSocket, the TEXT follows that heartbeat. */
+ *  carries on a wire whose round trip its channel hasn't measured. With the WINDOW the server sends at the page's first
+ *  heartbeat on SSE, which acknowledges the TEXT that RECONCILE carried: on a WebSocket, the TEXT follows that
+ *  heartbeat. */
 const EXPECTED_TRAFFIC: Record<Wire, Traffic> = {
   sse: {
     requests: 2,
     toServer: [RECONCILE, TEXT, BDP_PING_ACK, WINDOW, MSG_WINDOW, RECONCILE, BDP_PING, WINDOW, MSG_WINDOW],
     toPage: [
       STREAM_REQUEST_OPEN_ACK,
+      BDP_PING_ACK,
       WINDOW,
       MSG_WINDOW,
       BDP_PING,
       RECONCILED,
       WINDOW,
       TEXT,
-      BDP_PING_ACK,
       BDP_PING_ACK,
       WINDOW,
       MSG_WINDOW,
@@ -691,7 +691,20 @@ const EXPECTED_TRAFFIC: Record<Wire, Traffic> = {
       WINDOW,
       MSG_WINDOW,
     ],
-    toPage: [WINDOW, MSG_WINDOW, BDP_PING, RECONCILED, WINDOW, TEXT, WINDOW, MSG_WINDOW, BDP_PING_ACK, RECONCILED],
+    toPage: [
+      BDP_PING_ACK,
+      WINDOW,
+      MSG_WINDOW,
+      BDP_PING,
+      RECONCILED,
+      WINDOW,
+      TEXT,
+      BDP_PING_ACK,
+      WINDOW,
+      MSG_WINDOW,
+      BDP_PING_ACK,
+      RECONCILED,
+    ],
   },
   ws: {
     requests: 1,

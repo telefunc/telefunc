@@ -188,9 +188,8 @@ interface MuxChannel {
    *  connection — they involve connection-side cleanup. */
   _dispatchFrame(frame: ChannelFrame): void
   _onTransportClose(err?: Error): void
-  /** What this channel declares in its RECONCILE entry on every (re)attach, on `wire`, whose flow-control frames wait
-   *  for a batched POST when `batched`. */
-  _reattachState?(wire: number, batched: boolean): ReattachState
+  /** What this channel declares in its RECONCILE entry on every (re)attach, on `wire`. */
+  _reattachState?(wire: number): ReattachState
   /** The largest windows the replay buffers allow: the one the page grants, and the one the server grants it. */
   _fitReplays?(window: number, peerWindow: number): void
   /** At each heartbeat: a WINDOW for what arrived since the last, so the server's replay lets it go while the channel is
@@ -216,6 +215,8 @@ interface MuxConnection {
   sendBdpPingAck(channel: MuxChannel, probe: number, starved: boolean, pathRtt: number): void
   /** Bytes the wire holds that haven't gone out. */
   bufferedAmount(): number
+  /** How long a data or flow-control frame may wait for the wire to take it (see `ClientChannelTransport.sendDelay`). */
+  sendDelay(): number
   sendBroadcastSubscribe(channel: MuxChannel, binary: boolean): void
   sendBroadcastUnsubscribe(channel: MuxChannel, binary: boolean): void
   unregister(channel: MuxChannel): void
@@ -261,6 +262,9 @@ type ClientChannelTransport = {
   sendFrame(frame: OutboundFrame): void
   /** Bytes of the frames it was handed that haven't gone out to the network. */
   bufferedAmount(): number
+  /** How long a data or flow-control frame it is handed may wait before it goes out, beyond what the wire holds ahead
+   *  of it. */
+  sendDelay(): number
   abandonActiveTransport(): void
   closeAbandonedTransport(): void
   applyReconciledSettings(ctrl: ReconciledPayload): void
@@ -816,6 +820,10 @@ class ClientConnection implements MuxConnection {
 
   bufferedAmount(): number {
     return this.transport.bufferedAmount()
+  }
+
+  sendDelay(): number {
+    return this.transport.sendDelay()
   }
 
   /** Held with the rest while sends are held. A limit is cumulative, so one that waited is still right, where a
@@ -1433,7 +1441,7 @@ class ClientConnection implements MuxConnection {
   // ── Protocol internals ──
 
   buildReconcileFrame(): OutboundFrame {
-    const open = this.declareOpenEntries({ skipUnnamed: false, wire: this.wire, batched: this.transport.batched })
+    const open = this.declareOpenEntries({ skipUnnamed: false, wire: this.wire })
     const reconcile: ReconcilePayload = { open, ...(this.sessionId ? { sessionId: this.sessionId } : {}) }
     return { kind: 'reconcile', frame: encode.reconcile(reconcile) }
   }
@@ -1442,19 +1450,11 @@ class ClientConnection implements MuxConnection {
    *  RECONCILE has named yet is left out: the server has no record of it, so it reconciles after the handoff. */
   private buildBarrierFrame(sessionId: string, upgradeId: string): OutboundFrame {
     // Its entries attach on the WebSocket, the wire after this one.
-    const open = this.declareOpenEntries({ skipUnnamed: true, wire: this.wire + 1, batched: false })
+    const open = this.declareOpenEntries({ skipUnnamed: true, wire: this.wire + 1 })
     return { kind: 'reconcile', frame: encode.barrier({ sessionId, upgradeId, open }) }
   }
 
-  private declareOpenEntries({
-    skipUnnamed,
-    wire,
-    batched,
-  }: {
-    skipUnnamed: boolean
-    wire: number
-    batched: boolean
-  }): ReconcileOpenEntry[] {
+  private declareOpenEntries({ skipUnnamed, wire }: { skipUnnamed: boolean; wire: number }): ReconcileOpenEntry[] {
     this.enterReconciling()
     this.reconcileIxes = new Map()
     this.carriedFrom = new Map()
@@ -1474,7 +1474,7 @@ class ClientConnection implements MuxConnection {
         lastSeq: this.lastSeqByChannel.get(ix) ?? 0,
       }
       if (isInitial) payloadEntry.initial = true
-      const state = entry.channel._reattachState?.(wire, batched)
+      const state = entry.channel._reattachState?.(wire)
       Object.assign(payloadEntry, state)
       // The declared subscriptions supersede the SUB/UNSUB frames queued before them.
       if (state?.broadcast)
@@ -1949,6 +1949,10 @@ class WsTransport implements UpgradeTarget {
     return this.ws?.bufferedAmount ?? 0
   }
 
+  sendDelay(): number {
+    return 0
+  }
+
   abandonActiveTransport(): void {
     const ws = this.ws
     if (!ws) return
@@ -2361,6 +2365,11 @@ class SseTransport implements UpgradeSource {
     let bytes = 0
     for (const entry of this.outbox) bytes += entry.frame.byteLength
     return bytes
+  }
+
+  /** On batch POSTs, the longest a data or flow-control frame waits for its POST (see `getFrameDeadline`). */
+  sendDelay(): number {
+    return this.batched ? Math.max(this.flushThrottleMs, this.postIdleFlushDelayMs) : 0
   }
 
   private scheduleFlush(): void {

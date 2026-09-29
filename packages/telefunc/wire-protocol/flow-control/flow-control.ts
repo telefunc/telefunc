@@ -95,10 +95,12 @@ class FlowControl {
   private _curBucketStart = performance.now()
   private _openedAt = performance.now()
 
-  /** `backlog`: bytes the channel's wire holds that haven't gone out, `undefined` where the runtime can't tell. */
+  /** `backlog`: bytes the channel's wire holds that haven't gone out, `undefined` where the runtime can't tell.
+   *  `sendDelay`: how long a frame this side sends may wait for its wire to take it, as on SSE batch POSTs. */
   constructor(
     private readonly _emit: FlowControlEmit,
     private readonly _backlog: () => number | undefined,
+    private readonly _sendDelay: () => number,
   ) {
     macrotaskYield.assertSupported()
   }
@@ -117,10 +119,11 @@ class FlowControl {
     return this._peerByteWindowMax
   }
 
-  /** The round trip of the path an attach's probe on `wire` measured, `Infinity` where none did: what this side's answer
-   *  to a `BDP_PING` says, for a receiver with no attach of its own to probe. */
+  /** The round trip of the path an attach's probe on `wire` measured, and what a frame this side sends waits for its
+   *  wire to take it, `Infinity` where no probe measured: what this side's answer to a `BDP_PING` says, for a receiver
+   *  with no attach of its own to probe. */
   pathRtt(wire: number): number {
-    return this._bdp.pathRtt(wire)
+    return this._bdp.pathRtt(wire) + this._sendDelay()
   }
 
   /** Keeps what credit lets be in flight within the replay buffers (see `replayWindow`): this side grants its peer
@@ -232,11 +235,12 @@ class FlowControl {
   }
 
   /** Settle `BDP_PING_ACK`, which says whether the window starved the peer's wire, and the path's round trip as the peer
-   *  measured it. Each axis grows iff its own sample saturated ≥ 2/3 of its current window, the byte sample leaving out
-   *  the peer's queue (see `BdpEstimator`), AND our own self-utilisation is below threshold.
+   *  measured it, with what its frames wait for their wire (see `pathRtt`). Each axis grows iff its own sample
+   *  saturated ≥ 2/3 of its current window, the byte sample leaving out the peer's queue (see `BdpEstimator`), AND our
+   *  own self-utilisation is below threshold.
    *  On growth, the new limit goes out to the peer immediately. */
   onPingAck(probe: number, starved: boolean, peerPathRtt: number): void {
-    const suggest = this._bdp.onPingAck(probe, starved, peerPathRtt)
+    const suggest = this._bdp.onPingAck(probe, starved, peerPathRtt, this._sendDelay())
     if (!suggest.acknowledged) return
     const wantBytes = suggest.bytes === 'grow'
     const wantMsgs = suggest.msgs === 'grow'

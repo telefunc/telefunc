@@ -46,8 +46,8 @@ const NOT_SETTLED: GrowDecision = { acknowledged: false, bytes: 'sample-too-smal
  *        delivery rate times the path's RTT, which is BBR's estimate: that leaves out a
  *        queue wherever it is, the kernel's send buffer included. A server's receive side
  *        has no attach of its own to probe: each ack of its sender, the page, says the round
- *        trip the page's attach measured, where it probed one. Where flow-control frames wait
- *        for a batched POST, which an attach's RECONCILE doesn't, the attach isn't probed;
+ *        trip the page's attach measured. Where the page's frames wait for a batch POST, each
+ *        round of credit takes that wait more than the path, and the page adds it;
  *      - where neither side measured, the ack says whether, since the sender last answered
  *        one, its credit ran out while its wire held nothing (see `FlowControl.onPing`),
  *        which sees what the runtime buffers.
@@ -170,10 +170,11 @@ class BdpEstimator {
   }
 
   /** Settle the `BDP_PING` in flight against its `BDP_PING_ACK`, which says whether the window starved the sender's
-   *  wire, and the path's round trip as the sender measured it, `Infinity` where it measured none. Returns per-axis
-   *  grow suggestions. Caller decides whether to actually `growBytes()` / `growMsgs()` (e.g. after applying the CPU-lag
+   *  wire, and the path's round trip as the sender measured it, with what its frames wait for their wire, `Infinity`
+   *  where it measured none. `sendDelay`: what a frame this side sends waits for its wire. Returns per-axis grow
+   *  suggestions. Caller decides whether to actually `growBytes()` / `growMsgs()` (e.g. after applying the CPU-lag
    *  gate). */
-  onPingAck(probe: number, starved: boolean, senderPathRtt: number): GrowDecision {
+  onPingAck(probe: number, starved: boolean, senderPathRtt: number, sendDelay: number): GrowDecision {
     const attach = this._attachProbes.find((pending) => pending.probe === probe)
     if (attach) {
       this._attachProbes = this._attachProbes.filter((pending) => pending !== attach)
@@ -191,8 +192,9 @@ class BdpEstimator {
     // that took less shows the path takes no more.
     if (this._pathRtt < Infinity && rtt < this._pathRtt) this._pathRtt = rtt
     // Where an attach measured the path's round trip, here or at the sender, that tells a queue from the path, wherever
-    // the queue is. Else only the sender can, where its runtime reports what its wire holds.
-    const pathRtt = Math.min(this._pathRtt, senderPathRtt)
+    // the queue is. Else only the sender can, where its runtime reports what its wire holds. Where this side's frames
+    // wait for their wire, its credit does too, each round.
+    const pathRtt = Math.min(this._pathRtt + sendDelay, senderPathRtt)
     const measured = pathRtt < Infinity
     const atPathRtt = pathRtt < rtt ? pathRtt / rtt : 1
     const byteSample = (this._bytesReceived - this._bytesAtPingSent) * atPathRtt
