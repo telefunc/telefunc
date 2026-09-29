@@ -68,7 +68,7 @@ vi.mock('crossws/adapters/cloudflare', () => ({
 }))
 
 vi.mock('../../ws.js', () => ({
-  getTelefuncChannelHooks: vi.fn(() => ({ onMessage: vi.fn() })),
+  getTelefuncChannelHooks: vi.fn(() => ({ message: vi.fn() })),
 }))
 
 vi.mock('../../../../node/server/serverConfig.js', () => ({
@@ -436,6 +436,32 @@ describe("the session Durable Object's pin", () => {
     vi.useFakeTimers({ now: Date.now() + 13 * 60 * 60 * 1000 })
     try {
       await request('token-a')
+    } finally {
+      vi.useRealTimers()
+    }
+    await settled()
+    expect(put).toHaveBeenCalledTimes(2)
+  })
+
+  it("renews a page's pin as the WebSocket it opened keeps carrying its messages, with no request in between", async () => {
+    const kv = createMockKV()
+    const put = vi.spyOn(kv, 'put')
+    const { request, settled } = sessionObject(kv)
+    const hooks = (mocks.crosswsFactory.mock.calls.at(-1) as unknown as [{ hooks: Record<string, Function> }])[0].hooks
+    // The request the page's WebSocket was opened with, as the socket's peer keeps it.
+    const upgrade = new Request('https://telefunc.test/_telefunc?session=token-c', {
+      headers: {
+        'x-telefunc-shard': 'telefunc-shard-weur-0',
+        'x-telefunc-broadcast-bucket': 'weur',
+        'x-telefunc-session': 'token-c',
+      },
+    })
+    await request('token-c')
+    await settled()
+    expect(put).toHaveBeenCalledTimes(1)
+    vi.useFakeTimers({ now: Date.now() + 13 * 60 * 60 * 1000 })
+    try {
+      hooks.message!({ request: upgrade }, { uint8Array: () => new Uint8Array() })
     } finally {
       vi.useRealTimers()
     }
