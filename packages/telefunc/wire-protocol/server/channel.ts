@@ -278,21 +278,27 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   }
 
   /** @internal The most this channel's flow control lets wait on its wire for a page that reads: its credit, which a
-   *  page never grants past `CREDIT_WINDOW_MAX_BYTES`, as much again past it (see `_isPeerBehind`), and what it buffered
+   *  page never grants past `CREDIT_WINDOW_MAX_BYTES`, what `_pastCreditAllowance` lets past it, and what it buffered
    *  while the page was offline, `bufferLimit` of text and `bufferLimitBinary` of binary, which an attach sends at once
    *  whatever the credit. What a reattach replays is what the first two let go out. */
   _sendAllowance(): number {
-    return 2 * CREDIT_WINDOW_MAX_BYTES + this._bufferLimit + this._bufferLimitBinary
+    return CREDIT_WINDOW_MAX_BYTES + this._pastCreditAllowance() + this._bufferLimit + this._bufferLimitBinary
+  }
+
+  /** How far past its credit the peer can be sent while it reads: a burst up to the largest window a page grants,
+   *  however small the window this one granted. */
+  protected _pastCreditAllowance(): number {
+    return CREDIT_WINDOW_MAX_BYTES
   }
 
   /** What this channel sent once past its credit, and the ack requests the peer hasn't answered, as far as its wire
-   *  still holds them, or all of them where the runtime can't tell. Up to the largest window a page grants, that is a
-   *  burst a page that reads is sent, however fast it reads; past it, the peer is behind. */
+   *  still holds them, or all of them where the runtime can't tell. Past `_pastCreditAllowance`, the peer is behind. */
   protected _isPeerBehind(): boolean {
+    const allowance = this._pastCreditAllowance()
     const behind = this._flow.bytesSentPastCredit + this._pendingAckBytes
-    if (behind < CREDIT_WINDOW_MAX_BYTES) return false
+    if (behind < allowance) return false
     const buffered = this._peer!.sender.bufferedAmount()
-    return (buffered === undefined ? behind : Math.min(behind, buffered)) >= CREDIT_WINDOW_MAX_BYTES
+    return (buffered === undefined ? behind : Math.min(behind, buffered)) >= allowance
   }
 
   private _addPendingAck(

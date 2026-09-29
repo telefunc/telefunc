@@ -610,7 +610,7 @@ test('a send nobody awaits goes out past the window of a page whose listener lag
   expect(page.received).toEqual(Array.from({ length: 320 }, (_, n) => big(n)))
 })
 
-test('a page that stops reading a broadcast leaves it with ChannelOverflowError on both ends once the server holds twice the largest window of publishes for it', async () => {
+test('a page that stops reading a broadcast leaves it with ChannelOverflowError on both ends once the server holds its room and a quarter more of publishes for it', async () => {
   const key = `room:${crypto.randomUUID()}`
   const room = loop.openBroadcast<string>(key)
   const errors: { server?: Error; page?: Error } = {}
@@ -627,8 +627,8 @@ test('a page that stops reading a broadcast leaves it with ChannelOverflowError 
     await run(0)
   }
   expect(errors.server).toBeInstanceOf(ChannelOverflowError)
-  expect(loop.socket.toPage.bytes).toBeGreaterThan(2 * CREDIT_WINDOW_MAX_BYTES)
-  expect(loop.socket.toPage.bytes).toBeLessThanOrEqual(2 * CREDIT_WINDOW_MAX_BYTES + 512 * KIB)
+  expect(loop.socket.toPage.bytes).toBeGreaterThan(CREDIT_WINDOW_MAX_BYTES * 1.25)
+  expect(loop.socket.toPage.bytes).toBeLessThanOrEqual(CREDIT_WINDOW_MAX_BYTES * 1.25 + 512 * KIB)
 
   // Once the page reads again it gets every publish sent before the one that found it behind, then the close.
   loop.socket.toPage.release()
