@@ -133,6 +133,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
    *  burst fits in: past it, that page is behind by more than what it read and hasn't reported, which it does once a
    *  quarter of that window. */
   private readonly _pastCreditAllowance: number
+  private readonly _letsBehindGo: boolean
   private _reconnectTimer: ReturnType<typeof setTimeout> | null = null
   private _responseAbort: ((abortValue?: unknown) => void) | null = null
   private _pendingAckRes: Array<{ ackedSeq: number; result: string; status: AckResultStatus }> = []
@@ -165,6 +166,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     id,
     bufferLimit,
     publishes = false,
+    letsBehindGo = false,
   }: {
     ack?: boolean
     id?: string
@@ -172,6 +174,9 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     /** Its page is a `ClientBroadcast`, which takes what this channel publishes: nothing waits on a publish's credit,
      *  so that page grants the largest window from the start, and this channel counts it granted. */
     publishes?: boolean
+    /** Nothing that sends on it can be refused: a page a send finds behind is let go, on both ends, as one a publish
+     *  finds behind is. */
+    letsBehindGo?: boolean
   } = {}) {
     this.ack = ack
     this.id = id ?? crypto.randomUUID()
@@ -185,6 +190,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     )
     if (publishes) this._flow.onPeerByteWindow(CREDIT_WINDOW_MAX_BYTES)
     this._pastCreditAllowance = publishes ? CREDIT_WINDOW_MAX_BYTES >> 2 : CREDIT_WINDOW_MAX_BYTES
+    this._letsBehindGo = letsBehindGo
     const c = getServerConfig().channel
     this._bufferLimit = bufferLimit ?? c.bufferLimit
     this._bufferLimitBinary = c.bufferLimitBinary
@@ -243,7 +249,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     // Ack-bearing sends bypass credit accounting — the caller's `await` on the ack
     // Promise already serializes the next send, so credit would add nothing.
     if (needsAck) {
-      if (this._isPeerBehind()) return rejectOverflow()
+      if (this._isPeerBehind()) return this._refuseBehind()
       return this._trackAck(
         new Promise<ChannelAck<ServerToClient>>((resolve, reject) => {
           this._peer!.sendTextAckReq(serialized, (seq, bytes) => this._addPendingAck(seq, bytes, { resolve, reject }))
@@ -252,7 +258,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     }
     // Cooperative credit model: the send already fired; `decrement` only gates the return
     // value. Awaiting throttles the caller's next send; not awaiting bypasses credit, until the peer is behind.
-    if (this._flow.isPastByteCredit && this._isPeerBehind()) return rejectOverflow()
+    if (this._flow.isPastByteCredit && this._isPeerBehind()) return this._refuseBehind()
     return this._flow.decrement(this._peer.sendText(serialized))
   }
 
@@ -285,7 +291,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     }
     // Ack-bearing path bypasses credit; see `_send` for rationale.
     if (needsAck) {
-      if (this._isPeerBehind()) return rejectOverflow()
+      if (this._isPeerBehind()) return this._refuseBehind()
       return this._trackAck(
         new Promise<unknown>((resolve, reject) => {
           this._peer!.sendBinaryAckReq(data, (seq, bytes) => this._addPendingAck(seq, bytes, { resolve, reject }))
@@ -293,7 +299,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       )
     }
     // Cooperative credit model; see `_send`.
-    if (this._flow.isPastByteCredit && this._isPeerBehind()) return rejectOverflow()
+    if (this._flow.isPastByteCredit && this._isPeerBehind()) return this._refuseBehind()
     this._peer.sendBinary(data)
     return this._flow.decrement(data.byteLength)
   }
@@ -314,6 +320,13 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     if (behind < allowance) return false
     const buffered = this._peer!.sender.bufferedAmount()
     return (buffered === undefined ? behind : Math.min(behind, buffered)) >= allowance
+  }
+
+  /** A send that finds its page behind rejects with ChannelOverflowError without going out, and the channel stays open,
+   *  unless nothing that sends on it can be refused. */
+  private _refuseBehind(): Promise<never> {
+    if (this._letsBehindGo) this._closeBehind(this._peer!)
+    return rejectOverflow()
   }
 
   private _addPendingAck(
@@ -754,8 +767,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     else this._flow.countSentBytes(peer.sendPublishBinary(wireData))
   }
 
-  /** A page that can't keep up with what is published to it has no send to reject: once behind, it leaves, on both
-   *  ends, rather than be sent a gap. */
+  /** A page that can't keep up, where no sender can be refused: once behind, it leaves, on both ends, rather than be
+   *  sent a gap. */
   private _closeBehind(peer: IndexedPeer): void {
     peer.sendError(ERROR_REASON.OVERFLOW)
     this._shutdown(

@@ -274,7 +274,7 @@ type AckResultStatus = (typeof ACK_STATUS)[keyof typeof ACK_STATUS]
 const ERROR_REASON = {
   /** An unhandled server error. */
   BUG: 0x00 as const,
-  /** Its page fell further behind what the channel published to it than the server holds for it. */
+  /** Its page fell further behind than the server holds for it, where no sender could be refused. */
   OVERFLOW: 0x01 as const,
   /** A reconnect needed frames its sender's replay buffer had dropped to stay within its size. */
   LOST: 0x02 as const,

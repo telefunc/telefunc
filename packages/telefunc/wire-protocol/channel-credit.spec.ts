@@ -18,8 +18,9 @@ import { TAG } from './shared-ws.js'
 import { NetworkError } from '../shared/NetworkError.js'
 import { config as serverConfig } from '../node/server/serverConfig.js'
 import { Room } from './room/server/statics.js'
-import type { ServerRoom } from './room/server/room.js'
-import { ClientRoom } from './room/client.js'
+import type { ServerLocalParticipant, ServerRoom } from './room/server/room.js'
+import { RoomParticipantStubChannel } from './room/server/stub.js'
+import { ClientRoom, ClientStandaloneParticipant } from './room/client.js'
 
 const LATENCY_MS = 5
 
@@ -201,6 +202,23 @@ class Loopback {
     })
     this.pages.push(page as ClientChannel)
     return { room, stub, view: new ClientRoom(page, metadata) }
+  }
+  /** A server participant handed to the page: its stub, which the server has registered, and the page's handle. */
+  async openParticipant() {
+    const room = (await Room.create(`room:${crypto.randomUUID()}`)) as ServerRoom
+    const participant = (await room.join()) as ServerLocalParticipant
+    const stub = new RoomParticipantStubChannel(participant)
+    this.mux.registerChannel(stub)
+    const page = new ClientChannel({
+      channelId: stub.id,
+      transports: [CHANNEL_TRANSPORT.WS],
+      telefuncUrl: 'http://loopback.test/_telefunc',
+      connectionKey: this.connectionKey,
+    })
+    this.pages.push(page as ClientChannel)
+    const { id, meta, selfDelivery, identity } = participant
+    const member = new ClientStandaloneParticipant(page, { channelId: stub.id, id, meta, selfDelivery, identity })
+    return { room, participant, stub, member }
   }
   dispose(): void {
     for (const page of this.pages) page.abort()
@@ -905,3 +923,80 @@ test("a Room closed while its page's wire dies reaches the page once it reconnec
   expect(left).toEqual([{ type: 'closed' }])
   expect(serverEnd).toBe(undefined)
 })
+
+test.each([
+  ['tells what waits on a socket', true],
+  ["can't tell what waits on a socket, as a Durable Object's", false],
+])(
+  'on a runtime that %s, the page of a participant handed to it that stops reading is let go with ChannelOverflowError once the server holds the largest window a page grants past its credit, instead of losing the messages refused past it',
+  async (_, reportsBacklog) => {
+    loop.reportsBacklog = reportsBacklog
+    const { room, participant, stub, member } = await loop.openParticipant()
+    let serverEnd: Error | undefined
+    stub.onClose((err) => void (serverEnd = err))
+    const leftOnServer: unknown[] = []
+    participant.onLeave((cause) => void leftOnServer.push(cause))
+    const inbox: string[] = []
+    member.listen((data) => void inbox.push(data as string))
+    const left: unknown[] = []
+    member.onLeave((cause) => void left.push(cause))
+    const sender = await room.join()
+    await run(100)
+    loop.socket.toPage.hold()
+    const message = (n: number) => String(n).padEnd(256 * KIB)
+    let sent = 0
+    while (!stub.isClosed && sent < 1_000) {
+      void sender.send(participant.id, message(sent++))
+      await run(0)
+    }
+    expect(serverEnd).toBeInstanceOf(ChannelOverflowError)
+    expect(loop.socket.toPage.bytes).toBeGreaterThan(CREDIT_WINDOW_MAX_BYTES)
+    expect(loop.socket.toPage.bytes).toBeLessThanOrEqual(
+      CREDIT_WINDOW_MAX_BYTES + CREDIT_WINDOW_INITIAL_BYTES + 512 * KIB,
+    )
+    await runUntil(() => leftOnServer.length > 0, 1_000)
+    expect(leftOnServer).toEqual([{ type: 'disconnected' }])
+
+    // Once the page reads again it gets, in order, every message the server sent before the one that found it behind,
+    // then the end.
+    loop.socket.toPage.release()
+    await runUntil(() => left.length > 0, 1_000)
+    expect(left).toEqual([{ type: 'disconnected' }])
+    expect(inbox.length).toBeGreaterThan(CREDIT_WINDOW_MAX_BYTES / (256 * KIB))
+    expect(inbox).toEqual(Array.from({ length: inbox.length }, (_, n) => message(n)))
+  },
+)
+
+test.each([
+  ['tells what waits on a socket', true],
+  ["can't tell what waits on a socket, as a Durable Object's", false],
+])(
+  'on a slow link and a runtime that %s, the page of a participant handed to it that keeps up stays in through more in all than the server holds for a page behind, while an awaited stream fills the wire',
+  async (_, reportsBacklog) => {
+    loop.reportsBacklog = reportsBacklog
+    const stream = loop.open<never, string>()
+    consume(stream.page)
+    const { room, participant, stub, member } = await loop.openParticipant()
+    let serverEnd: unknown = 'open'
+    stub.onClose((err) => void (serverEnd = err))
+    const inbox: string[] = []
+    member.listen((data) => void inbox.push(data as string))
+    const sender = await room.join()
+    await run(100)
+    loop.socket.toPage.bytesPerMs = 40_000 // 40 MB/s
+    void (async () => {
+      while (!stream.server.isClosed) await stream.server.send('x'.repeat(64 * KIB))
+    })().catch(() => {})
+    const message = (n: number) => String(n).padEnd(256 * KIB)
+    // 26 MB/s of messages, 100 MiB in all.
+    const count = 400
+    for (let n = 0; n < count; n++) {
+      void sender.send(participant.id, message(n))
+      await run(10)
+    }
+    await runUntil(() => inbox.length === count, 2_000)
+    expect(serverEnd).toBe('open')
+    expect(count * 256 * KIB).toBeGreaterThan(CREDIT_WINDOW_MAX_BYTES + CREDIT_WINDOW_INITIAL_BYTES)
+    expect(inbox).toEqual(Array.from({ length: count }, (_, n) => message(n)))
+  },
+)

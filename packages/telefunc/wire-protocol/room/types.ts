@@ -266,7 +266,7 @@ type LocalParticipant<P extends ParticipantMeta = ParticipantMeta, Pub = unknown
   setAttributes(attributes: Partial<P>): Promise<void>
 
   leave(): Promise<void>
-  /** You left. `cause.type` says how: `'left'` (you), `'removed'` (kicked, with the kick's `reason`), `'closed'` (the room), `'disconnected'` (the connection died, or fell further behind the room than the server holds for it). */
+  /** You left. `cause.type` says how: `'left'` (you), `'removed'` (kicked, with the kick's `reason`), `'closed'` (the room), `'disconnected'` (the connection died, or fell further behind than the server holds for it). */
   onLeave(callback: (cause: LeaveCause) => void): () => void
 } & RoomShield<Pub>
 
