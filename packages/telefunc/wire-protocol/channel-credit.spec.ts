@@ -8,6 +8,7 @@ import { ServerChannel } from './server/channel.js'
 import { Broadcast, ServerBroadcast } from './server/server-broadcast.js'
 import { ChannelMux, type ServerTransport } from './server/mux.js'
 import {
+  CHANNEL_PING_INTERVAL_MS,
   CHANNEL_TRANSPORT,
   CREDIT_MSG_WINDOW_INITIAL,
   CREDIT_WINDOW_INITIAL_BYTES,
@@ -201,7 +202,7 @@ class Loopback {
       connectionKey: this.connectionKey,
     })
     this.pages.push(page as ClientChannel)
-    return { room, stub, view: new ClientRoom(page, metadata) }
+    return { room, stub, page, view: new ClientRoom(page, metadata) }
   }
   /** A server participant handed to the page: its stub, which the server has registered, and the page's handle. */
   async openParticipant() {
@@ -784,6 +785,45 @@ test("a broadcast's page acknowledges what it read as a stream's page does, howe
   await run(50)
   const replay = (room.server as unknown as { _replayBuffer: { byteLength: number } })._replayBuffer
   expect(replay.byteLength).toBeLessThan(CREDIT_WINDOW_INITIAL_BYTES / 4)
+})
+
+test("a Room member's page acknowledges what it read of the room as a broadcast's page does, so the server's replay for it holds less than a quarter of a stream's window of it", async () => {
+  const { room, stub, view } = await loop.openRoom()
+  const seen: unknown[] = []
+  view.subscribe((data) => void seen.push(data))
+  const speaker = await room.join()
+  await run(100)
+  for (let n = 0; n < 12; n++) {
+    void speaker.publish('x'.repeat(KIB * KIB))
+    await run(20)
+  }
+  await runUntil(() => seen.length === 12, 1_000)
+  await run(50)
+  expect(stub._replayBuffer!.byteLength).toBeLessThan(CREDIT_WINDOW_INITIAL_BYTES / 4)
+})
+
+test("a Room member's page gone quiet has its replay, and its room's, let go of what the other end got within a heartbeat", async () => {
+  const { room, stub, page, view } = await loop.openRoom()
+  const seen: unknown[] = []
+  view.subscribe((data) => void seen.push(data))
+  const joining = view.join()
+  await runUntil(() => view.count === 1, 1_000)
+  const me = await joining
+  const speaker = await room.join()
+  await run(100)
+  // Less than a quarter window each way, which no limit acknowledges.
+  for (let n = 0; n < 8; n++) {
+    void speaker.publish(String(n).padEnd(16 * KIB))
+    void me.publish(String(n).padEnd(16 * KIB))
+  }
+  await runUntil(() => seen.length === 16, 1_000)
+  const connection = (page as unknown as { _connection: { replayBuffers: Map<number, { byteLength: number }> } })
+    ._connection
+  const pageReplay = [...connection.replayBuffers.values()][0]!
+  const held = () => [stub._replayBuffer!.byteLength, pageReplay.byteLength]
+  expect(held().every((bytes) => bytes > 0)).toBe(true)
+  await run(CHANNEL_PING_INTERVAL_MS)
+  expect(held()).toEqual([0, 0])
 })
 
 test('on a slow link, producers that await their sends are handed the credit one at a time, and none is refused', async () => {
