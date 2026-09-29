@@ -266,20 +266,12 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
 
   private _publishBroadcast(serialized: string): ChannelPublishAck | Promise<ChannelPublishAck> {
     assert(this._adapter)
-    const toAck = (r: BroadcastPublishResult): ChannelPublishAck =>
-      Object.assign(makePublishInfo(this.key, r.seq, r.timestamp), { meta: r.meta })
-    const result = this._adapter.publish(this.key, serialized)
-    if (isPromise(result)) return result.then(toAck)
-    return toAck(result)
+    return receiptOf(this.key, this._adapter.publish(this.key, serialized))
   }
 
   private _publishBinaryBroadcast(data: Uint8Array): ChannelPublishAck | Promise<ChannelPublishAck> {
     assert(this._adapter)
-    const toAck = (r: BroadcastPublishResult): ChannelPublishAck =>
-      Object.assign(makePublishInfo(this.key, r.seq, r.timestamp), { meta: r.meta })
-    const result = this._adapter.publishBinary(this.key, data)
-    if (isPromise(result)) return result.then(toAck)
-    return toAck(result)
+    return receiptOf(this.key, this._adapter.publishBinary(this.key, data))
   }
 
   private async _dispatchPublishAckReq(serialized: string, seq: number): Promise<void> {
@@ -341,11 +333,21 @@ const BroadcastChannel = ServerBroadcast as {
   new <T = unknown>(opts: { key: string }): BroadcastChannel<T>
 }
 
+/** The adapter's receipt as the public one, carrying its key like a subscriber's `info`. */
+function receiptOf(
+  key: string,
+  result: BroadcastPublishResult | Promise<BroadcastPublishResult>,
+): ChannelPublishAck | Promise<ChannelPublishAck> {
+  const toAck = (r: BroadcastPublishResult): ChannelPublishAck =>
+    Object.assign(makePublishInfo(key, r.seq, r.timestamp), { meta: r.meta })
+  return isPromise(result) ? result.then(toAck) : toAck(result)
+}
+
 const Broadcast = {
-  publish<U = unknown>(key: string, data: ChannelData<U>): BroadcastPublishResult | Promise<BroadcastPublishResult> {
+  publish<U = unknown>(key: string, data: ChannelData<U>): ChannelPublishAck | Promise<ChannelPublishAck> {
     const adapter = getBroadcastAdapter()
     const serialized = stringify(data)
-    return adapter.publish(key, serialized)
+    return receiptOf(key, adapter.publish(key, serialized))
   },
   subscribe<U = unknown>(key: string, callback: BroadcastListener<U>): BroadcastUnsubscribe {
     const adapter = getBroadcastAdapter()
@@ -354,9 +356,9 @@ const Broadcast = {
       callback(data, { key, seq: info.seq, timestamp: info.timestamp })
     })
   },
-  publishBinary(key: string, data: Uint8Array): BroadcastPublishResult | Promise<BroadcastPublishResult> {
+  publishBinary(key: string, data: Uint8Array): ChannelPublishAck | Promise<ChannelPublishAck> {
     const adapter = getBroadcastAdapter()
-    return adapter.publishBinary(key, data)
+    return receiptOf(key, adapter.publishBinary(key, data))
   },
   subscribeBinary(key: string, callback: BroadcastBinaryListener): BroadcastUnsubscribe {
     const adapter = getBroadcastAdapter()
