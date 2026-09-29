@@ -3,6 +3,7 @@ export { getServerConfig }
 export { getServerExtensionTypes }
 export { enableChannelTransports }
 export { setRootFromVite }
+export { reconnectWindowOf, replayMaxAgeOf }
 export type {
   ConfigUser,
   ConfigResolved,
@@ -26,9 +27,11 @@ import {
   CHANNEL_BUFFER_LIMIT_BYTES,
   CHANNEL_BUFFER_LIMIT_BINARY_BYTES,
   CHANNEL_CLIENT_REPLAY_BUFFER_BYTES,
+  CHANNEL_CLOSE_TIMEOUT_MAX_MS,
   CHANNEL_CLIENT_REPLAY_BUFFER_BINARY_BYTES,
   CHANNEL_CONNECT_TTL_MS,
   CHANNEL_IDLE_TIMEOUT_MS,
+  CHANNEL_PING_INTERVAL_MIN_MS,
   CHANNEL_PING_INTERVAL_MS,
   CHANNEL_RECONNECT_TIMEOUT_MS,
   CHANNEL_SERVER_REPLAY_BUFFER_BYTES,
@@ -71,7 +74,7 @@ type ChannelConfigUser = {
   transports?: ChannelTransports
   /**
    * How long, in milliseconds, the server keeps channel state after a client
-   * disconnects while waiting for a reconnect.
+   * disconnects while waiting for a reconnect. With twice `pingInterval`, at most about 24.8 days.
    */
   reconnectTimeout?: number
   /**
@@ -496,7 +499,31 @@ function applyChannelConfig(val: unknown): void {
         assertUsage(false, `Unknown ${configPath}`)
     }
   }
+  const held = {
+    pingInterval: next.pingInterval ?? CHANNEL_PING_INTERVAL_MS,
+    reconnectTimeout: next.reconnectTimeout ?? CHANNEL_RECONNECT_TIMEOUT_MS,
+  }
+  assertUsage(
+    replayMaxAgeOf(held) <= CHANNEL_CLOSE_TIMEOUT_MAX_MS,
+    `\`config.channel.reconnectTimeout\` plus the ping deadline, twice \`pingInterval\` and at least 2 seconds, is how long the server holds a gone client's channels: it should be at most ${CHANNEL_CLOSE_TIMEOUT_MAX_MS - REPLAY_SLACK_MS} ms (about 24.8 days), as no timer waits longer than that and a second more`,
+  )
   configState.channel = next
+}
+
+/** How long a gone client is still held: until its drop is noticed at the ping deadline, then for `reconnectTimeout`. */
+function reconnectWindowOf({
+  pingInterval,
+  reconnectTimeout,
+}: Pick<ChannelConfigResolved, 'pingInterval' | 'reconnectTimeout'>): number {
+  return Math.max(pingInterval, CHANNEL_PING_INTERVAL_MIN_MS) * 2 + reconnectTimeout
+}
+
+/** A second for the reconnect itself, which a frame stays replayable past the reconnect window. */
+const REPLAY_SLACK_MS = 1_000
+
+/** How long a frame stays replayable: through the reconnect window, plus a second for the reconnect itself. */
+function replayMaxAgeOf(channel: Pick<ChannelConfigResolved, 'pingInterval' | 'reconnectTimeout'>): number {
+  return reconnectWindowOf(channel) + REPLAY_SLACK_MS
 }
 
 function applyBroadcastConfig(val: unknown): void {

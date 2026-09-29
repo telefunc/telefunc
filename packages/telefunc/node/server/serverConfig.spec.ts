@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, test } from 'vitest'
 
 import { config, enableChannelTransports, getServerConfig } from './serverConfig.js'
+import { ServerChannel, reconnectWindow } from '../../wire-protocol/server/channel.js'
 
 describe('channel transports a server adapter enables', () => {
   afterEach(() => {
@@ -22,6 +23,23 @@ describe('channel transports a server adapter enables', () => {
 
 test.each([Infinity, 0.5, Number.MAX_SAFE_INTEGER + 1])('channel config rejects %s', (value) => {
   expect(() => (config.channel.reconnectTimeout = value)).toThrow('non-negative safe integer')
+})
+
+test("channel config refuses a reconnect window longer than a timer waits, which a Room's close and a stream's close wait", () => {
+  const longest = 2 ** 31 - 1 - 1_000
+  try {
+    expect(() => (config.channel = { reconnectTimeout: 2 ** 31 })).toThrow(`at most ${longest} ms`)
+    expect(() => (config.channel = { reconnectTimeout: longest - 9_000, pingInterval: 5_000 })).toThrow(
+      `at most ${longest} ms`,
+    )
+    config.channel = { reconnectTimeout: longest - 10_000, pingInterval: 5_000 }
+    expect(reconnectWindow()).toBe(longest)
+    const channel = new ServerChannel()
+    expect(() => channel.close({ timeout: reconnectWindow() })).not.toThrow()
+    channel.abort()
+  } finally {
+    config.channel = {}
+  }
 })
 
 describe('config.broadcast', () => {

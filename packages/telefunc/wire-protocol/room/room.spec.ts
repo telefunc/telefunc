@@ -2485,6 +2485,23 @@ describe('Room public behavior', () => {
       ]),
     )
   })
+  it("closes its clients' stubs as it closes, at the longest reconnect window config.channel accepts", async () => {
+    config.channel = { reconnectTimeout: 2 ** 31 - 1 - 1_000 - 10_000, pingInterval: 5_000 }
+    try {
+      const room = (await Room.create('longest-reconnect-window')) as ServerRoom
+      const stub = register(room)
+      const held = new RoomParticipantStubChannel((await room.join()) as ServerLocalParticipant)
+      held._registerChannel()
+      const report = vi.spyOn(console, 'error')
+      await Room.close(room.id)
+      await vi.waitFor(() => expect([stub.isClosed, held.isClosed]).toEqual([true, true]))
+      expect(report).not.toHaveBeenCalled()
+      stub.abort()
+      held.abort()
+    } finally {
+      config.channel = {}
+    }
+  })
   it('sends a reattached client of a handed-out participant the meta and demand its offline buffer dropped', async () => {
     const room = (await Room.create('reattach-participant')) as ServerRoom
     config.channel = { bufferLimit: 256 }

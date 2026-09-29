@@ -32,6 +32,8 @@ A replay buffer keeps, per channel, the messages its side sent that the other si
 
 `bufferLimit`/`bufferLimitBinary` bound what the server holds for a channel while no client is connected.
 
+`reconnectTimeout` plus twice `pingInterval`, how long the server holds a gone client's channels, can be at most about 24.8 days, as no timer waits longer.
+
 > This is the **server-side** `config.channel` — a separate object from the **client-side** <Link href="/transport"><code>config.channel.transports</code></Link> (`telefunc/client`).
 
 > **What to tune**: the defaults suit typical stream use cases; tune these only if you run into one of the issues below:
