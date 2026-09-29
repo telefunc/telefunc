@@ -815,6 +815,38 @@ test("on an uplink slower than a window per ping deadline, the server doesn't cu
   expect(server.received.length).toBeGreaterThan(30)
 })
 
+// 100 KB/s, with a ping every second: the page's ping waits 20 s behind its 2 MiB window, and the server's refresh for a
+// quarter of it comes every 5 s, both past the page's 2 s pong deadline.
+test("on an uplink slower than a quarter window per pong deadline, an upload's page keeps its wire while the upload keeps arriving ahead of its ping", async () => {
+  serverConfig.channel.pingInterval = 1_000
+  const feed = loop.open<string, never>()
+  const server = consume(feed.server)
+  await run(100)
+  loop.socket.toServer.bytesPerMs = 100
+  produce(feed.page, { message: () => 'x'.repeat(64 * KIB) })
+  await run(30_000)
+  expect(loop.sockets).toHaveLength(1)
+  expect(server.received.length).toBeGreaterThan(40)
+})
+
+test('a page whose uplink stops with its upload queued on it takes the wire for dead within a pong deadline', async () => {
+  serverConfig.channel.pingInterval = 1_000
+  const feed = loop.open<string, never>()
+  consume(feed.server)
+  await run(100)
+  loop.socket.toServer.bytesPerMs = 100
+  produce(feed.page, { message: () => 'x'.repeat(64 * KIB) })
+  await run(10_000)
+  // The server doesn't cut it: the page finds out on its own, as when the server can't reach it either.
+  vi.spyOn(loop.transport, 'terminateConnection').mockImplementation(() => {})
+  loop.socket.toServer.hold()
+  const stoppedAt = Date.now()
+  await runUntil(() => loop.sockets.length === 2, 10_000)
+  expect(loop.sockets).toHaveLength(2)
+  // The pong deadline is two ping intervals; then the first reconnect waits its delay.
+  expect(Date.now() - stoppedAt).toBeLessThanOrEqual(2 * 1_000 + CHANNEL_RECONNECT_INITIAL_DELAY_MS + 100)
+})
+
 test('on a slow link, a producer that awaits its sends is not refused a message larger than its credit, sent with little credit left', async () => {
   const feed = loop.open<never, string>()
   const page = consume(feed.page)

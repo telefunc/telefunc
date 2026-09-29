@@ -138,6 +138,8 @@ type ConnectionState = {
   pingTimer: ReturnType<typeof setTimeout> | null
   /** When the wire last delivered a frame, or the ping deadline was last set. */
   lastReceivedAt: number
+  /** When the last PONG went out. */
+  pongedAt: number
   terminatePermanently: boolean
   recvChain: Promise<unknown> | null
   /** Set by `onConnectionClosed` so an in-flight `reconcile` can see the close and its kind. */
@@ -253,6 +255,7 @@ class ChannelMux {
       state: {
         pingTimer: null,
         lastReceivedAt: 0,
+        pongedAt: performance.now(),
         terminatePermanently: false,
         recvChain: null,
         closed: null,
@@ -368,6 +371,9 @@ class ChannelMux {
     const tag = peekTag(rawFrame)
     const exec = (): Promise<ReconcileOutcome | null> => this.runInboundTurn(entry, connection, rawFrame, byteLength)
     if (tag === TAG.PING) return exec()
+    // A PING waits behind what the page sent before it, as an upload on a slow link: a wire whose frames keep arriving
+    // is answered all the same, once a ping interval, so the page knows they arrive.
+    if (performance.now() - state.pongedAt >= this.options.pingInterval) this.pong(entry, connection, [])
     return this.chainRecv(entry, exec)
   }
 
@@ -428,7 +434,7 @@ class ChannelMux {
     if (frame.tag === TAG.PING) {
       this.resetPingTimer(connection)
       this.acknowledgeArrivals(entry, connection)
-      this.send(connection, encode.pong(this.answerPing(entry, connection, frame.ended)))
+      this.pong(entry, connection, this.answerPing(entry, connection, frame.ended))
       return null
     }
     assertProtocol(!entry.state.retiredByBarrier, 'frame on a wire retired by its barrier')
@@ -478,6 +484,11 @@ class ChannelMux {
     const sessionId = entry.transport.getSessionId(connection)
     if (sessionId === undefined || this.sessionWires.get(sessionId) !== connection) return
     for (const { channel } of this.sessions.peekSession(sessionId)?.values() ?? []) channel._acknowledge()
+  }
+
+  private pong(entry: ConnectionEntry, connection: Wire, ended: PongEntry[]): void {
+    entry.state.pongedAt = performance.now()
+    this.send(connection, encode.pong(ended))
   }
 
   private dispatchChannelFrame(sessionId: string, frame: ChannelFrame): void {
