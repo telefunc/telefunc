@@ -857,8 +857,10 @@ class ClientConnection implements MuxConnection {
     this.enterOpen()
     if (this.transport.sendReconcileOnOpen) {
       this.sendReconcileBatch(this.stageReconcileBatch())
+      this.beatFromReconcile(transport)
       return
     }
+    this.beatFromReconcile(transport)
     if (!this.reconciling) {
       // A register-reconcile queued during the connecting window sends its RECONCILE here and
       // carries the buffered frames after it, emptying the buffer; with none queued, flush
@@ -958,6 +960,13 @@ class ClientConnection implements MuxConnection {
     u.joinTimer = null
     const waitingFor = u.finReceived ? 'RECONCILED' : 'FIN'
     this.fallbackToSse(new NetworkError(`Upgrade handoff timed out waiting for ${waitingFor}`, true))
+  }
+
+  /** A reconnect's RECONCILED comes behind what the server replays, so the heartbeat, at the interval the last RECONCILED
+   *  said, runs from the RECONCILE on: the server hears from the page, and the page tells a wire that delivers from a
+   *  dead one, however long the replay takes. */
+  private beatFromReconcile(transport: ClientChannelTransport): void {
+    if (this.sessionId !== null) this.installHeartbeat(transport, this.pingIntervalMs)
   }
 
   /** Idempotent. Detaches first either way so a fresh install can never leak the prior. */

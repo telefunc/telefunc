@@ -51,12 +51,32 @@ afterEach(() => {
   ;(getChannelMux() as unknown as { resolvedOptions: unknown }).resolvedOptions = null
 })
 
+/** One way of a link that carries `rate` bytes a second: what is written to it arrives in order, as fast as that. */
+class Pipe {
+  private busyUntil = 0
+  constructor(private readonly rate: number) {}
+  /** When `bytes` written now have arrived. */
+  arrival(bytes: number): number {
+    this.busyUntil = Math.max(Date.now(), this.busyUntil) + (bytes / this.rate) * 1_000
+    return this.busyUntil
+  }
+  /** Bytes written to it that haven't arrived, as a socket's `bufferedAmount` says them. */
+  get bufferedAmount(): number {
+    return (Math.max(0, this.busyUntil - Date.now()) * this.rate) / 1_000
+  }
+}
+
+const until = (at: number) => new Promise<void>((resolve) => setTimeout(resolve, at - Date.now()))
+
 /** One wire of the page's connection: a WebSocket, or an SSE downstream and the POSTs that go with it. */
 type Link = {
   /** Nothing either end writes to it arrives, and nothing tells either end. */
   dead: boolean
   /** Its batch POSTs stay in flight. */
   holdingPosts: boolean
+  /** How it carries what the server writes to the page, and what the page writes to the server: at once if null. */
+  down: Pipe | null
+  up: Pipe | null
 }
 
 /** The network between the page and the server. */
@@ -64,13 +84,20 @@ class Net {
   readonly links: Link[] = []
   /** The page's attempts to open a wire fail. */
   refusing = false
+  /** Bytes a second each way of the wires the page opens from now on: 0 carries at once. */
+  readonly rate = { down: 0, up: 0 }
   private readonly byConnId = new Map<string, Link>()
   private readonly losing = new Set<number>()
   private readonly onPageGets = new Map<number, (frame: Uint8Array) => void>()
   private readonly onPageSends = new Map<number, (frame: Uint8Array) => void>()
   private readonly onServerSends = new Map<number, (frame: Uint8Array) => void>()
   open(connId?: string): Link {
-    const link = { dead: false, holdingPosts: false }
+    const link = {
+      dead: false,
+      holdingPosts: false,
+      down: this.rate.down ? new Pipe(this.rate.down) : null,
+      up: this.rate.up ? new Pipe(this.rate.up) : null,
+    }
     this.links.push(link)
     if (connId) this.byConnId.set(connId, link)
     return link
@@ -206,7 +233,7 @@ function sseServer(net: Net, refuseUpload: boolean): typeof fetch {
     }
     // Bytes rather than the Blob: a Request reads a Blob body on a later event-loop turn, which fake timers don't give.
     const bytes = new Uint8Array(await body.arrayBuffer())
-    const [metadata, ...frames] = lengthPrefixed(bytes)
+    const [metadata, ...frames] = lengthPrefixed(bytes).map(({ frame }) => frame)
     const { connId, streamResponse } = JSON.parse(new TextDecoder().decode(metadata)) as {
       connId: string
       streamResponse?: true
@@ -217,7 +244,12 @@ function sseServer(net: Net, refuseUpload: boolean): typeof fetch {
       net.pageSends(frame)
     }
     if (link.dead || (link.holdingPosts && !streamResponse)) return await aborted
-    const response = (await sse.handleRequest(new Request(url, { method: 'POST', body: bytes })))!
+    const request = link.up
+      ? new Request(url, { method: 'POST', body: carried(bytes, link, link.up), duplex: 'half' } as RequestInit)
+      : new Request(url, { method: 'POST', body: bytes })
+    // A body cut by the link's death fails the server's read, which nothing tells the page.
+    const response = await sse.handleRequest(request).catch(() => null)
+    if (link.dead || !response) return await aborted
     const responseBody =
       response.body instanceof ReadableStream ? downstream(response.body, link, net) : (response.body as string)
     return new Response(responseBody, {
@@ -227,16 +259,33 @@ function sseServer(net: Net, refuseUpload: boolean): typeof fetch {
   }) as typeof fetch
 }
 
-/** `[u32 length][bytes]` chunks: an SSE POST's metadata header, then its frames. */
-function lengthPrefixed(bytes: Uint8Array): Uint8Array[] {
-  const chunks: Uint8Array[] = []
+/** `[u32 length][bytes]` chunks, each `prefixed` and its `frame`: an SSE POST's metadata header, then its frames. */
+function lengthPrefixed(bytes: Uint8Array): { prefixed: Uint8Array; frame: Uint8Array }[] {
+  const chunks: { prefixed: Uint8Array; frame: Uint8Array }[] = []
   let offset = 0
   while (offset + 4 <= bytes.length) {
     const length = decodeU32(bytes.subarray(offset, offset + 4) as Uint8Array<ArrayBuffer>)
-    chunks.push(bytes.subarray(offset + 4, offset + 4 + length))
+    chunks.push({
+      prefixed: bytes.subarray(offset, offset + 4 + length),
+      frame: bytes.subarray(offset + 4, offset + 4 + length),
+    })
     offset += 4 + length
   }
   return chunks
+}
+
+/** A POST's body on its way to the server over `pipe`: each chunk once the link carried it, and none once it died. */
+function carried(bytes: Uint8Array, link: Link, pipe: Pipe): ReadableStream<Uint8Array> {
+  const chunks = lengthPrefixed(bytes).map(({ prefixed }) => ({ prefixed, at: pipe.arrival(prefixed.byteLength) }))
+  let next = 0
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      await until(chunks[next]!.at)
+      if (link.dead) return controller.error(new TypeError('network error'))
+      controller.enqueue(chunks[next++]!.prefixed)
+      if (next === chunks.length) controller.close()
+    },
+  })
 }
 
 /** An upload request's body on its way to the server: what the page writes once its wire died is lost. */
@@ -244,7 +293,7 @@ function uploadThrough(net: Net) {
   let pending = new Uint8Array(0)
   let link: Link | undefined
   return new TransformStream<Uint8Array, Uint8Array>({
-    transform(chunk, controller) {
+    async transform(chunk, controller) {
       const joined = new Uint8Array(pending.length + chunk.length)
       joined.set(pending)
       joined.set(chunk, pending.length)
@@ -259,6 +308,7 @@ function uploadThrough(net: Net) {
           link = net.linkOf((JSON.parse(new TextDecoder().decode(frame)) as { connId: string }).connId)
         } else {
           if (!link.dead) net.pageSends(frame)
+          if (link.up) await until(link.up.arrival(prefixed.byteLength))
           if (link.dead) continue
         }
         controller.enqueue(prefixed)
@@ -291,6 +341,7 @@ function downstream(body: ReadableStream<Uint8Array>, link: Link, net: Net): Rea
           text = text.slice(end + 2)
           const frame = event.startsWith('data: ') ? base64urlToUint8Array(event.slice('data: '.length)) : null
           if (frame && !link.dead) net.serverSends(frame)
+          if (link.down) await until(link.down.arrival(event.length + 2))
           if (link.dead) continue
           if (frame) net.pageGets(frame)
           controller.enqueue(encoder.encode(`${event}\n\n`))
@@ -317,16 +368,25 @@ function webSocketTo(net: Net) {
     private readonly link = net.open()
     private readonly peer = {
       context: {},
-      // It hands each frame on as it is sent, so its socket holds none.
-      websocket: { bufferedAmount: 0 },
+      // It hands each frame on as it is sent, or holds what its link hasn't carried.
+      websocket: this.link.down ?? { bufferedAmount: 0 },
       send: (frame: Uint8Array) => {
         if (!this.link.dead) net.serverSends(frame)
         if (this.link.dead) return
-        net.pageGets(frame)
         const data = frame.slice().buffer
+        if (this.link.down) {
+          void until(this.link.down.arrival(frame.byteLength)).then(() => {
+            if (this.link.dead) return
+            net.pageGets(new Uint8Array(data))
+            this.onmessage?.({ data })
+          })
+          return
+        }
+        net.pageGets(frame)
         queueMicrotask(() => this.onmessage?.({ data }))
       },
-      terminate: () => this.end(),
+      // A socket the server destroys closes with 1006, without a close frame.
+      terminate: () => this.end(1006),
     } as unknown as Peer
     constructor(_url: string) {
       queueMicrotask(async () => {
@@ -340,21 +400,32 @@ function webSocketTo(net: Net) {
         this.onopen?.()
       })
     }
+    get bufferedAmount(): number {
+      return this.link.up?.bufferedAmount ?? 0
+    }
     send(data: Uint8Array) {
       const frame = data.slice()
       if (!this.link.dead) net.pageSends(frame)
       if (this.link.dead || net.loses(frame)) return
+      if (this.link.up) {
+        void until(this.link.up.arrival(frame.byteLength)).then(() => {
+          if (!this.link.dead) void hooks.message!(this.peer, { uint8Array: () => frame } as never)
+        })
+        return
+      }
       void hooks.message!(this.peer, { uint8Array: () => frame } as never)
     }
     close() {
-      this.end()
+      this.end(1000)
     }
-    private end() {
+    private end(code: number) {
       if (this.readyState === 3) return
       this.readyState = 3
       if (this.link.dead) return
-      void hooks.close!(this.peer, { code: 1000 } as never)
-      this.onclose?.()
+      void hooks.close!(this.peer, { code } as never)
+      // The page hears of it once its link carried what went before.
+      if (this.link.down) void until(this.link.down.arrival(0)).then(() => this.onclose?.())
+      else this.onclose?.()
     }
   }
 }
@@ -977,6 +1048,41 @@ describe.each(WIRES)('over %s, a stream that awaits its sends, whose wire drops 
     expect(most).toBeLessThanOrEqual(flowOf(server).byteWindow + 16 * 1_024)
   })
 })
+
+/** A 64 KiB binary message that names its place in the stream. */
+const block = (n: number) => new Uint8Array(64 * 1_024).fill(n)
+/** Bytes a second of a link that carries a message a second. */
+const SLOW = 64 * 1_024
+
+function reconnectTimeout5s() {
+  serverConfig.channel = { pingInterval: 1_000, reconnectTimeout: 5_000 }
+  ;(getChannelMux() as unknown as { resolvedOptions: unknown }).resolvedOptions = null
+}
+
+describe.each(WIRES)(
+  'over %s, a reconnect whose replay takes longer than the ping deadline to cross the link',
+  (wire) => {
+    beforeEach(reconnectTimeout5s)
+
+    test('keeps its wire, and the stream resumes without loss', async () => {
+      const { net, channel } = page(wire)
+      net.rate.down = SLOW
+      const server = register()
+      const pageChannel = channel(server.id)
+      const got: number[] = []
+      pageChannel.listenBinary((data) => void got.push(data[0]!))
+      const closed = [closedWith(pageChannel), closedWith(server)]
+      await advance(500)
+      produce((n) => server.sendBinary(block(n)), 20, 0)
+      await advance(1_000)
+      net.die() // with most of the stream in flight, which the page reconnects for over a link as slow
+      await advance(40_000)
+      expect(closed.map(({ err }) => (err instanceof Error ? err.message : err))).toEqual(['open', 'open'])
+      expect(got).toEqual(inOrder(20))
+      expect(net.links).toHaveLength(2)
+    })
+  },
+)
 
 describe.each(WIRES)("over %s, a stream that awaits its sends, begun before its page's first RECONCILED,", (wire) => {
   test("from the page, on a channel it passes to the server, resumes without loss when its wire drops with it in flight, however small the page's replay", async () => {
