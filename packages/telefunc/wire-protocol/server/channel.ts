@@ -32,7 +32,12 @@ import { handleTelefunctionBug } from '../../node/server/runTelefunc/validateTel
 import { ChannelClosedError, ChannelOverflowError, replayLossError } from '../channel-errors.js'
 import { NetworkError } from '../../shared/NetworkError.js'
 import { isPromise } from '../../utils/isPromise.js'
-import { CHANNEL_CLOSE_TIMEOUT_MS, CHANNEL_PING_INTERVAL_MIN_MS, CREDIT_WINDOW_MAX_BYTES } from '../constants.js'
+import {
+  CHANNEL_CLOSE_TIMEOUT_MAX_MS,
+  CHANNEL_CLOSE_TIMEOUT_MS,
+  CHANNEL_PING_INTERVAL_MIN_MS,
+  CREDIT_WINDOW_MAX_BYTES,
+} from '../constants.js'
 import { FlowControl, replayWindow } from '../flow-control/flow-control.js'
 import { STATUS_BODY_INTERNAL_SERVER_ERROR } from '../../shared/constants.js'
 import { ServerChannelBuffer } from './ServerChannelBuffer.js'
@@ -635,7 +640,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
 
   _onPeerCloseRequest(timeoutMs: number): void {
     if (this._didShutdown) return
-    const peerDeadline = Date.now() + normalizeCloseTimeout(timeoutMs)
+    assertProtocol(timeoutMs <= CHANNEL_CLOSE_TIMEOUT_MAX_MS, `CLOSE timeout ${timeoutMs}`)
+    const peerDeadline = Date.now() + timeoutMs
     if (!this._closeDeadline || peerDeadline < this._closeDeadline) this._closeDeadline = peerDeadline
     if (this._peer) this._peer.sendCloseAck()
     else this._pendingCloseAck = true
@@ -986,7 +992,10 @@ function replayMaxAge(): number {
 
 function normalizeCloseTimeout(timeout: number | undefined): number {
   if (timeout === undefined) return CHANNEL_CLOSE_TIMEOUT_MS
-  assertUsage(Number.isFinite(timeout) && timeout >= 0, 'Channel close timeout must be a non-negative finite number')
+  assertUsage(
+    Number.isFinite(timeout) && timeout >= 0 && timeout <= CHANNEL_CLOSE_TIMEOUT_MAX_MS,
+    `Channel close timeout must be a non-negative number of milliseconds, at most ${CHANNEL_CLOSE_TIMEOUT_MAX_MS}`,
+  )
   return timeout
 }
 

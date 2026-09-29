@@ -48,6 +48,19 @@ function expectCloseAckFrame(frame: Uint8Array) {
 // ── Self-initiated close ──
 
 describe('self-initiated close', () => {
+  test('close() refuses a timeout longer than a timer waits, which would fire at once', () => {
+    const channel = new ServerChannel<never, never>()
+    channel._attachPeer(createPeer([]))
+    expect(() => channel.close({ timeout: 2 ** 31 })).toThrow('at most 2147483647')
+    expect(channel.isClosed).toBe(false)
+  })
+
+  test("a page's close request for longer than a timer waits is a protocol violation", () => {
+    const channel = new ServerChannel<never, never>()
+    channel._attachPeer(createPeer([]))
+    expect(() => channel._onPeerCloseRequest(2 ** 31)).toThrow(ProtocolViolationError)
+  })
+
   test.each([ACK_STATUS.OK, ACK_STATUS.ABORT])('malformed ack status %s rejects its waiter', async (status) => {
     const channel = new ServerChannel<string, string>({ ack: true })
     const frames: Uint8Array[] = []

@@ -39,6 +39,12 @@ function stalledChannel(): ClientChannel<never, string> {
   return channel
 }
 
+test('close() refuses a timeout longer than a timer waits, which would fire at once', () => {
+  const channel = stalledChannel()
+  expect(() => channel.close({ timeout: 2 ** 31 })).toThrow('at most 2147483647')
+  expect(channel.isClosed).toBe(false)
+})
+
 test("a channel listener that stops listening itself doesn't make the next one miss the message", () => {
   const channel = stalledChannel()
   const seen: string[] = []
