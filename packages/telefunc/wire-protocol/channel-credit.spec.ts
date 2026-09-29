@@ -192,35 +192,51 @@ class Loopback {
   }
   /** A room's stub the server has registered, and the page's view of the room through it, on the same connection. */
   async openRoom() {
+    const { room, stub, openPage } = await this.roomStub()
+    return { room, stub, ...openPage() }
+  }
+  /** A room's stub the server has registered, and `openPage`, which opens the page's view of the room through it. */
+  async roomStub() {
     const room = (await Room.create(`room:${crypto.randomUUID()}`)) as ServerRoom
     const { stub, metadata } = room._openStub({ grants: { selfSuppressed: new Set(), hidden: new Set() } })
     this.mux.registerChannel(stub)
-    const page = new ClientBroadcast({
-      channelId: stub.id,
-      key: room.id,
-      transports: [CHANNEL_TRANSPORT.WS],
-      telefuncUrl: 'http://loopback.test/_telefunc',
-      connectionKey: this.connectionKey,
-    })
-    this.pages.push(page as ClientChannel)
-    return { room, stub, page, view: new ClientRoom(page, metadata) }
+    const openPage = () => {
+      const page = new ClientBroadcast({
+        channelId: stub.id,
+        key: room.id,
+        transports: [CHANNEL_TRANSPORT.WS],
+        telefuncUrl: 'http://loopback.test/_telefunc',
+        connectionKey: this.connectionKey,
+      })
+      this.pages.push(page as ClientChannel)
+      return { page, view: new ClientRoom(page, metadata) }
+    }
+    return { room, stub, openPage }
   }
   /** A server participant handed to the page: its stub, which the server has registered, and the page's handle. */
   async openParticipant() {
+    const { room, participant, stub, openPage } = await this.participantStub()
+    return { room, participant, stub, member: openPage() }
+  }
+  /** A server participant's stub the server has registered, and `openPage`, which opens the page's handle on it. */
+  async participantStub() {
     const room = (await Room.create(`room:${crypto.randomUUID()}`)) as ServerRoom
     const participant = (await room.join()) as ServerLocalParticipant
     const stub = new RoomParticipantStubChannel(participant)
     this.mux.registerChannel(stub)
-    const page = new ClientChannel({
-      channelId: stub.id,
-      transports: [CHANNEL_TRANSPORT.WS],
-      telefuncUrl: 'http://loopback.test/_telefunc',
-      connectionKey: this.connectionKey,
-    })
-    this.pages.push(page as ClientChannel)
+    // As the response handing it to the page carries it.
     const { id, meta, selfDelivery, identity } = participant
-    const member = new ClientStandaloneParticipant(page, { channelId: stub.id, id, meta, selfDelivery, identity })
-    return { room, participant, stub, member }
+    const openPage = () => {
+      const page = new ClientChannel({
+        channelId: stub.id,
+        transports: [CHANNEL_TRANSPORT.WS],
+        telefuncUrl: 'http://loopback.test/_telefunc',
+        connectionKey: this.connectionKey,
+      })
+      this.pages.push(page as ClientChannel)
+      return new ClientStandaloneParticipant(page, { channelId: stub.id, id, meta, selfDelivery, identity })
+    }
+    return { room, participant, stub, openPage }
   }
   dispose(): void {
     for (const page of this.pages) page.abort()
@@ -1204,6 +1220,30 @@ test("a Room closed while its page's wire dies reaches the page once it reconnec
   expect(serverEnd).toBe(undefined)
 })
 
+// A stub's close waits the reconnect window, 70 s with the defaults, for a page that attaches only after it.
+test("a Room closed before its page attaches, with a connectTtl longer than its stub's close waits, reaches the page as it attaches, after what the room sent it meanwhile: the members it holds leave with 'closed'", async () => {
+  serverConfig.channel = { connectTtl: 120_000 }
+  const { room, stub, openPage } = await loop.roomStub()
+  let serverEnd: unknown = 'open'
+  stub.onClose((err) => void (serverEnd = err))
+  const other = await room.join()
+  const later = await room.join()
+  await Room.close(room.id)
+  await run(71_000)
+  expect((serverEnd as Error).message).toBe('Channel close timed out')
+
+  const { view } = openPage()
+  const joined: string[] = []
+  view.onJoin((member) => void joined.push(member.id))
+  // Returned with the room, as a telefunction may.
+  const held = view._reviveRemote({ id: other.id, meta: {}, joinedAt: Date.now(), metaSeq: 0, identity: null })
+  const left: unknown[] = []
+  held.onLeave((cause) => void left.push(cause))
+  await run(1_000)
+  expect(joined).toEqual([later.id])
+  expect(left).toEqual([{ type: 'closed' }])
+})
+
 test.each([
   ['tells what waits on a socket', true],
   ["can't tell what waits on a socket, as a Durable Object's", false],
@@ -1246,6 +1286,29 @@ test.each([
     expect(inbox).toEqual(Array.from({ length: inbox.length }, (_, n) => message(n)))
   },
 )
+
+test("the page of a participant handed to it that the room removes before the page attaches, with a connectTtl longer than its stub's close waits, gets as it attaches the messages sent to the participant and its meta, then its leave", async () => {
+  serverConfig.channel = { connectTtl: 120_000 }
+  const { room, participant, stub, openPage } = await loop.participantStub()
+  let serverEnd: unknown = 'open'
+  stub.onClose((err) => void (serverEnd = err))
+  const sender = await room.join()
+  await sender.send(participant.id, 'hello')
+  await participant.setMeta({ mood: 'away' })
+  await Room.removeParticipant(room.id, { id: participant.id, reason: 'kicked' })
+  await run(71_000)
+  expect((serverEnd as Error).message).toBe('Channel close timed out')
+
+  const member = openPage()
+  const inbox: unknown[] = []
+  member.listen((data) => void inbox.push(data))
+  const left: unknown[] = []
+  member.onLeave((cause) => void left.push(cause))
+  await run(1_000)
+  expect(inbox).toEqual(['hello'])
+  expect(member.meta).toEqual({ mood: 'away' })
+  expect(left).toEqual([{ type: 'removed', reason: 'kicked' }])
+})
 
 test('the page of a participant handed to it, offline while more messages were sent to its participant than config.channel.bufferLimit holds, is let go with ChannelOverflowError at its reconnect, instead of missing them', async () => {
   const { room, participant, stub, member } = await loop.openParticipant()
