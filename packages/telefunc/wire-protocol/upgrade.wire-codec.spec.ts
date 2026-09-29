@@ -348,6 +348,16 @@ describe('seqs past 32 bits', () => {
         expect(decode(encode.ackRes(3, 1, ackedSeq, '"x"'), standing(0, sent))).toMatchObject({ ackedSeq })
   })
 
+  test("a binary publish carries its key's seq as a text publish does, past 2^32", () => {
+    for (const seq of [0, 1, ...boundaries.flatMap(around), Number.MAX_SAFE_INTEGER]) {
+      const info = { seq, timestamp: 1_700_000_000_000 }
+      const binary = encode.publishBinary(3, encodePublishBinary(new Uint8Array([7]), info), 1)
+      const text = encode.publish(3, encodePublishText('"x"', info), 1)
+      expect(decode(binary, wireSeqs)).toMatchObject({ info, data: new Uint8Array([7]) })
+      expect(decode(text, wireSeqs)).toMatchObject({ info, text: '"x"' })
+    }
+  })
+
   test('a seq never reads below 0, whatever its bits', () => {
     for (const bits of [0, 1, 2 ** 31 - 1, 2 ** 31, 2 ** 31 + 1, 2 ** 32 - 1])
       for (const at of [0, 1, 7]) {

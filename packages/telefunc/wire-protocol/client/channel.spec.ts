@@ -3,7 +3,15 @@ import { afterEach, expect, test, vi } from 'vitest'
 import { ClientBroadcast, ClientChannel } from './channel.js'
 import { config } from '../../client/clientConfig.js'
 import { CHANNEL_TRANSPORT } from '../constants.js'
-import { TAG, decode, type SeqReader } from '../shared-ws.js'
+import {
+  TAG,
+  decode,
+  encode,
+  encodePublishBinary,
+  encodePublishText,
+  type ChannelFrame,
+  type SeqReader,
+} from '../shared-ws.js'
 import { getSessionUrl } from './session-registry.js'
 
 /** A receiver with nothing of any channel: each seq reads as its low 32 bits. */
@@ -127,6 +135,24 @@ test("a subscriber that unsubscribes itself doesn't make the next one miss the m
       bytes: 0,
     })
   expect(seen).toEqual(['once:one', 'other:one', 'other:two'])
+})
+
+test('a broadcast delivers each publish with the seq its key was given, to text and binary subscribers alike, past 2^32', () => {
+  const broadcast = stalledBroadcast()
+  const seen: number[] = []
+  broadcast.subscribe((_, info) => void seen.push(info.seq))
+  broadcast.subscribeBinary((_, info) => void seen.push(info.seq))
+  const seqs = [2 ** 32 - 1, 2 ** 32, 2 ** 32 + 1, 2 ** 32 + 2, Number.MAX_SAFE_INTEGER - 1, Number.MAX_SAFE_INTEGER]
+  // As the server sends each: alternately text and binary.
+  for (const [n, seq] of seqs.entries()) {
+    const info = { seq, timestamp: 1 }
+    const frame =
+      n % 2 === 0
+        ? encode.publish(0, encodePublishText('"x"', info), n + 1)
+        : encode.publishBinary(0, encodePublishBinary(new Uint8Array([1]), info), n + 1)
+    broadcast._dispatchFrame(decode(frame, wireSeqs) as ChannelFrame)
+  }
+  expect(seen).toEqual(seqs)
 })
 
 test('a broadcast declares its subscriptions on every attach, as a subscribe written to a wire already dead is lost', () => {

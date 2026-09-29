@@ -868,15 +868,16 @@ function decodePublishText(wire: string): { text: string; info: WirePublishInfo 
 }
 
 // ===== Binary publish info helpers =====
-// Format: [4 bytes: seq as u32 LE][8 bytes: timestamp as f64 LE][binary data]
+// Format: [8 bytes: seq as f64 LE][8 bytes: timestamp as f64 LE][binary data]
+// The seq goes as the number a text publish's decimal carries, so both deliver the same one.
 
-const PUBLISH_BINARY_HEADER = 12
+const PUBLISH_BINARY_HEADER = 16
 
 function encodePublishBinary(data: Uint8Array, info: WirePublishInfo): Uint8Array {
   const result = new Uint8Array(PUBLISH_BINARY_HEADER + data.byteLength)
   const view = new DataView(result.buffer)
-  view.setUint32(0, info.seq, true)
-  view.setFloat64(4, info.timestamp, true)
+  view.setFloat64(0, info.seq, true)
+  view.setFloat64(8, info.timestamp, true)
   result.set(data, PUBLISH_BINARY_HEADER)
   return result
 }
@@ -884,8 +885,8 @@ function encodePublishBinary(data: Uint8Array, info: WirePublishInfo): Uint8Arra
 function decodePublishBinary(wire: Uint8Array): { data: Uint8Array; info: WirePublishInfo } {
   assertProtocol(wire.byteLength >= PUBLISH_BINARY_HEADER, 'PUBLISH_BINARY frame too short for info header')
   const view = new DataView(wire.buffer, wire.byteOffset, wire.byteLength)
-  const seq = view.getUint32(0, true)
-  const timestamp = view.getFloat64(4, true)
+  const seq = view.getFloat64(0, true)
+  const timestamp = view.getFloat64(8, true)
   assertProtocol(Number.isFinite(seq) && Number.isFinite(timestamp), 'PUBLISH_BINARY frame info must be finite numbers')
   return { data: wire.subarray(PUBLISH_BINARY_HEADER), info: { seq, timestamp } }
 }
