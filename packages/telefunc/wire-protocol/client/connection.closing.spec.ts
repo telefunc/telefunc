@@ -1,7 +1,7 @@
 // A channel across a wire that dies without a word: a stream that awaits its sends resumes after the reconnect without
 // loss, the page's close request, close acknowledgement or abort, and the answers that complete a close, replay as its
-// data does, and a reconnect that needs what a replay dropped ends the channel on both ends. These drive the real
-// ClientChannel against the real server over each wire.
+// data does, and a reconnect that needs what a replay dropped ends the channel on both ends. Past seqs 2^31 and 2^32, a
+// channel does all it does before them. These drive the real ClientChannel against the real server over each wire.
 
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 import type { Peer } from 'crossws'
@@ -16,12 +16,16 @@ import { pumpProducerToChannel } from '../server/response/ChannelResponseBody.js
 import { getTelefuncSseChannelHooks } from '../server/sse.js'
 import { getTelefuncChannelHooks } from '../server/ws.js'
 import { ChannelStreamSource } from '../ChannelStreamSource.js'
-import { TAG, decode, type ReconcilePayload } from '../shared-ws.js'
+import type { ReplayBuffer } from '../replay-buffer.js'
+import { TAG, decode, type ReconcilePayload, type SeqReader } from '../shared-ws.js'
 import { isAbort } from '../../shared/Abort.js'
 import { NetworkError } from '../../shared/NetworkError.js'
 import { decodeU32 } from '../frame.js'
 import { base64urlToUint8Array } from '../base64url.js'
 import { config as serverConfig } from '../../node/server/serverConfig.js'
+
+/** A receiver with nothing of any channel: each seq reads as its low 32 bits. */
+const wireSeqs: SeqReader = { received: () => 0, sent: () => 0 }
 
 type Wire = 'sse' | 'sse-batch' | 'ws'
 const WIRES: Wire[] = ['ws', 'sse', 'sse-batch']
@@ -637,7 +641,7 @@ describe.each(WIRES)('over %s, from the server', (wire) => {
     expect(servers.filter((server) => getChannelMux()['channels'].has(server.id))).toEqual([])
     let listed: unknown[] = []
     net.whenPageSends(TAG.RECONCILE, (frame) => {
-      listed = (decode(frame) as { payload: ReconcilePayload }).payload.open.map(({ id }) => id)
+      listed = (decode(frame, wireSeqs) as { payload: ReconcilePayload }).payload.open.map(({ id }) => id)
     })
     net.die()
     await advance(5_000)
@@ -1127,3 +1131,185 @@ test('over ws, a page lets go of a closed channel whose close the server never g
   await advance(65_000) // its replay's age passes
   expect(connection.channels.size).toBe(1)
 })
+
+/** Moves a quiet channel's seqs on by `count` each way, as if `count` more frames had gone each way and arrived. */
+function skipSeqs(
+  server: { _replayBuffer: ReplayBuffer | null; _lastClientSeq: number },
+  pageChannel: unknown,
+  count: number,
+) {
+  const connection = (pageChannel as any)._connection
+  const ix = connection.channelIndex.get(pageChannel)
+  for (const replay of [server._replayBuffer, replayOf(pageChannel)] as any[]) {
+    replay._seq += count
+    replay.pushedSeq += count
+  }
+  server._lastClientSeq += count
+  ;(server as any)._pageLastSeq += count
+  connection.lastSeqByChannel.set(ix, (connection.lastSeqByChannel.get(ix) ?? 0) + count)
+}
+const replayOf = (pageChannel: unknown) => {
+  const connection = (pageChannel as any)._connection
+  return connection.replayBuffers.get(connection.channelIndex.get(pageChannel)) as ReplayBuffer
+}
+/** The highest seq the page has of what the server sent on the channel. */
+const pageHas = (pageChannel: unknown) => {
+  const connection = (pageChannel as any)._connection
+  return connection.lastSeqByChannel.get(connection.channelIndex.get(pageChannel)) as number
+}
+
+describe.each(WIRES)('over %s, a channel whose seqs pass 2^31 and 2^32', (wire) => {
+  test.each([2 ** 31, 2 ** 32])(
+    'delivers each way in order across %d, answers its ack requests, and has each replay let go of what the other end got',
+    async (boundary) => {
+      const { channel } = page(wire)
+      const server = register<string, string>()
+      const serverGot: number[] = []
+      server.listen((message) => {
+        serverGot.push(Number.parseInt(message))
+        return 'server'
+      })
+      const pageChannel = channel<string, string>(server.id)
+      const pageGot: number[] = []
+      pageChannel.listen((message) => {
+        pageGot.push(Number.parseInt(message))
+        return 'page'
+      })
+      const closed = [closedWith(pageChannel), closedWith(server)]
+      await advance(500)
+      skipSeqs(server, pageChannel, boundary - 4)
+      const answers: { value: unknown }[] = []
+      for (let n = 0; n < 8; n++) {
+        if (n % 3 === 0) {
+          answers.push(
+            settled(server.send(String(n), { ack: true })),
+            settled(pageChannel.send(String(n), { ack: true })),
+          )
+          continue
+        }
+        void server.send(String(n), { ack: false })
+        void pageChannel.send(String(n), { ack: false })
+      }
+      await advance(100)
+      expect(pageGot).toEqual(inOrder(8))
+      expect(serverGot).toEqual(inOrder(8))
+      expect(answers.map(({ value }) => value)).toEqual(['page', 'server', 'page', 'server', 'page', 'server'])
+      expect(server._replayBuffer!.seq).toBeGreaterThan(boundary)
+      expect(replayOf(pageChannel).seq).toBeGreaterThan(boundary)
+      await advance(1_000) // a heartbeat
+      expect([server._replayBuffer!.byteLength, replayOf(pageChannel).byteLength]).toEqual([0, 0])
+      expect(closed.map(({ err }) => err)).toEqual(['open', 'open'])
+    },
+  )
+
+  // The wire drops as the sender reaches `dieAt`, with its window in flight: from before the boundary, the reconnect
+  // replays across it; from past 2^32, the RECONCILE or RECONCILED names a lastSeq past it.
+  const drops = [
+    [2 ** 31, 2 ** 31 - 10],
+    [2 ** 32, 2 ** 32 - 10],
+    [2 ** 32, 2 ** 32 + 10],
+  ]
+
+  test.each(drops)(
+    'resumes a stream from the server across %d, whose wire drops at %d with its window in flight, without loss',
+    async (boundary, dieAt) => {
+      const { net, channel } = page(wire)
+      const server = register<never, string>()
+      const pageChannel = channel<never, string>(server.id)
+      const got: number[] = []
+      pageChannel.listen((message) => void got.push(Number.parseInt(message)))
+      const closed = [closedWith(pageChannel), closedWith(server)]
+      await advance(500)
+      skipSeqs(server, pageChannel, boundary - 100)
+      produce((n) => server.send(text(n), { ack: false }), 400, 1)
+      while (server._replayBuffer!.seq < dieAt) await advance(1)
+      await dieWithCredit(net, server, pageChannel)
+      await advance(50)
+      const lost = [pageHas(pageChannel), server._replayBuffer!.seq]
+      await advance(10_000)
+      // What the reconnect replays starts before the boundary and passes it, or starts past it.
+      expect(lost[0]! < boundary).toBe(dieAt < boundary)
+      expect(lost[1]!).toBeGreaterThan(Math.max(lost[0]!, boundary))
+      expect(got).toEqual(inOrder(400))
+      expect(closed.map(({ err }) => err)).toEqual(['open', 'open'])
+    },
+  )
+
+  test.each(drops)(
+    'resumes a stream from the page across %d, whose wire drops at %d with its window in flight, without loss',
+    async (boundary, dieAt) => {
+      const { net, channel } = page(wire)
+      const server = register<string, never>()
+      const got: number[] = []
+      server.listen((message) => void got.push(Number.parseInt(message)))
+      const pageChannel = channel<string, never>(server.id)
+      const closed = [closedWith(pageChannel), closedWith(server)]
+      await advance(500)
+      skipSeqs(server, pageChannel, boundary - 100)
+      produce((n) => pageChannel.send(text(n), { ack: false }), 400, 1)
+      while (replayOf(pageChannel).seq < dieAt) await advance(1)
+      await dieWithCredit(net, pageChannel, server)
+      await advance(50)
+      const lost = [server._lastClientSeq, replayOf(pageChannel).seq]
+      await advance(10_000)
+      // What the reconnect replays starts before the boundary and passes it, or starts past it.
+      expect(lost[0]! < boundary).toBe(dieAt < boundary)
+      expect(lost[1]!).toBeGreaterThan(Math.max(lost[0]!, boundary))
+      expect(got).toEqual(inOrder(400))
+      expect(closed.map(({ err }) => err)).toEqual(['open', 'open'])
+    },
+  )
+
+  test.each([2 ** 31, 2 ** 32])(
+    'closes gracefully from either end at %d, and the server lets each go within a ping round trip',
+    async (boundary) => {
+      const { channel } = page(wire)
+      channel(register().id) // another channel on the page
+      const servers = [register(), register()]
+      const pages = servers.map((server) => channel(server.id))
+      const closed = [...servers, ...pages].map(closedWith)
+      await advance(500)
+      for (const [n, server] of servers.entries()) skipSeqs(server, pages[n], boundary - 1)
+      // The first closes from the server, the second from the page.
+      const closing = [settled(servers[0]!.close()), settled(pages[1]!.close())]
+      await advance(100)
+      expect(closing.map(({ value }) => value)).toEqual([0, 0])
+      expect(closed.map(({ err }) => err)).toEqual([undefined, undefined, undefined, undefined])
+      await advance(1_500)
+      expect(servers.filter((server) => getChannelMux()['channels'].has(server.id))).toEqual([])
+    },
+  )
+})
+
+test.each([2 ** 32 - 4, 2 ** 32 + 4])(
+  'over sse, a channel at seq %d keeps whole across the upgrade to a WebSocket, each way in order',
+  async (seq) => {
+    const { net, channel } = page('sse', { upgrade: true })
+    const server = register<string, string>()
+    const serverGot: number[] = []
+    server.listen((message) => void serverGot.push(Number.parseInt(message)))
+    const pageChannel = channel<string, string>(server.id)
+    const pageGot: number[] = []
+    pageChannel.listen((message) => void pageGot.push(Number.parseInt(message)))
+    const closed = [closedWith(pageChannel), closedWith(server)]
+    // Once the channel is attached over SSE, as the page opens its WebSocket.
+    net.whenPageSends(TAG.PREPARE, () => skipSeqs(server, pageChannel, seq))
+    // As the page writes its barrier, each end sends: the server on the old wire, the page once the barrier commits.
+    net.whenPageSends(TAG.BARRIER, () => {
+      for (let n = 0; n < 8; n++) {
+        void server.send(String(n), { ack: false })
+        void pageChannel.send(String(n), { ack: false })
+      }
+    })
+    await advance(5_000)
+    expect((pageChannel as any)._connection.transport.type).toBe('ws')
+    for (let n = 8; n < 16; n++) {
+      void server.send(String(n), { ack: false })
+      void pageChannel.send(String(n), { ack: false })
+    }
+    await advance(100)
+    expect(pageGot).toEqual(inOrder(16))
+    expect(serverGot).toEqual(inOrder(16))
+    expect(closed.map(({ err }) => err)).toEqual(['open', 'open'])
+  },
+)

@@ -9,7 +9,10 @@ import {
   CREDIT_WINDOW_INITIAL_BYTES_BATCH,
   CREDIT_WINDOW_MAX_BYTES,
 } from '../constants.js'
-import { decode, encode } from '../shared-ws.js'
+import { decode, encode, type SeqReader } from '../shared-ws.js'
+
+/** A receiver with nothing of any channel: each seq reads as its low 32 bits. */
+const wireSeqs: SeqReader = { received: () => 0, sent: () => 0 }
 
 beforeEach(() => vi.useFakeTimers({ now: 1_000_000 }))
 afterEach(() => vi.useRealTimers())
@@ -461,9 +464,9 @@ describe('FlowControl — replay buffers', () => {
 function makePair() {
   const toSender: FlowControlEmit = {
     byteWindowUpdate: (limit) =>
-      sender.onPeerByteWindow((decode(encode.window(0, limit, 0)) as { bytes: number }).bytes),
+      sender.onPeerByteWindow((decode(encode.window(0, limit, 0), wireSeqs) as { bytes: number }).bytes),
     msgWindowUpdate: (limit) =>
-      sender.onPeerMessageWindow((decode(encode.msgWindow(0, limit)) as { count: number }).count),
+      sender.onPeerMessageWindow((decode(encode.msgWindow(0, limit), wireSeqs) as { count: number }).count),
     bdpPing: () => {},
   }
   const toReceiver: FlowControlEmit = {
@@ -532,7 +535,8 @@ async function runPath({
   let now = 0
   const upstream = (deliver: () => void) => toSender.push({ at: now + delayMs, deliver })
   const sender = new FlowControl({ byteWindowUpdate() {}, msgWindowUpdate() {}, bdpPing() {} }, () => wireBytes)
-  const answer = (probe: number, starved: boolean) => wire.push(decode(encode.bdpPingAck(0, probe, starved)) as Ack)
+  const answer = (probe: number, starved: boolean) =>
+    wire.push(decode(encode.bdpPingAck(0, probe, starved), wireSeqs) as Ack)
   const receiver = new FlowControl(
     {
       byteWindowUpdate: (limit) => upstream(() => sender.onPeerByteWindow(limit)),

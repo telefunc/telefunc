@@ -10,10 +10,13 @@
 import { afterEach, beforeEach, describe, expect, test } from 'vitest'
 
 import { ClientConnection } from './connection.js'
-import { decode, encode, TAG } from '../shared-ws.js'
+import { decode, encode, TAG, type SeqReader } from '../shared-ws.js'
 import type { DecodedFrame } from '../shared-ws.js'
 import { decodeU32 } from '../frame.js'
 import { uint8ArrayToBase64url } from '../base64url.js'
+
+/** A receiver with nothing of any channel: each seq reads as its low 32 bits. */
+const wireSeqs: SeqReader = { received: () => 0, sent: () => 0 }
 
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms))
 /** Long enough for the connect POST, the probe handshake and any chained microtasks to drain. */
@@ -53,7 +56,7 @@ class FakeWebSocket {
     queueMicrotask(() => this.onopen?.())
   }
   send(data: ArrayBuffer | Uint8Array): void {
-    const frame = decode(new Uint8Array(data instanceof Uint8Array ? data : new Uint8Array(data)))
+    const frame = decode(new Uint8Array(data instanceof Uint8Array ? data : new Uint8Array(data)), wireSeqs)
     this.sent.push(frame)
     this.onSent?.(frame)
   }
@@ -148,7 +151,7 @@ async function upgradeToBarrier(): Promise<Harness> {
       const frames = parseLengthPrefixed(new Uint8Array(await body.arrayBuffer()))
       const metadata = JSON.parse(new TextDecoder().decode(frames[0]!))
       for (const raw of frames.slice(1)) {
-        const frame = decode(bytes(raw))
+        const frame = decode(bytes(raw), wireSeqs)
         if (frame.tag === TAG.RECONCILE) ix = frame.payload.open[0]?.ix ?? 0
         onUpstreamFrame(frame)
       }
@@ -186,7 +189,7 @@ async function upgradeToBarrier(): Promise<Harness> {
               sawMetadata = true
               continue
             }
-            onUpstreamFrame(decode(bytes(raw)))
+            onUpstreamFrame(decode(bytes(raw), wireSeqs))
           }
         }
         resolve(new Response('', { status: 200 }))
@@ -288,7 +291,7 @@ describe('flow control across an upgrade attempt', () => {
       // No upload stream: every client→server frame goes in a batch POST.
       if (!(body instanceof Blob)) throw new TypeError('upload streams are not supported')
       const [metadata, ...frames] = parseLengthPrefixed(new Uint8Array(await body.arrayBuffer()))
-      const decoded = frames.map((raw) => decode(bytes(raw)))
+      const decoded = frames.map((raw) => decode(bytes(raw), wireSeqs))
       if (JSON.parse(new TextDecoder().decode(metadata)).streamResponse) {
         const reconcile = decoded.find((frame) => frame.tag === TAG.RECONCILE)!
         const ix = reconcile.tag === TAG.RECONCILE ? reconcile.payload.open[0]!.ix : 0

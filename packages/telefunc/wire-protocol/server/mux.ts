@@ -39,6 +39,7 @@ import type {
   PreparePayload,
   ReconcileOpenEntry,
   ReconcilePayload,
+  SeqReader,
 } from '../shared-ws.js'
 import { IndexedPeer, type PeerSender } from './IndexedPeer.js'
 import { replayMaxAge, type ServerChannel } from './channel.js'
@@ -157,6 +158,8 @@ type ConnectionEntry = {
   transport: ServerTransport<unknown>
   /** One per wire: the peers of every reconcile on this wire share it. */
   sender: PeerSender
+  /** Where the server stands on each channel of the wire's session, from which a frame's seqs are read. */
+  seqs: SeqReader
 }
 
 function getChannelMux(): ChannelMux {
@@ -237,6 +240,10 @@ class ChannelMux {
   // ── Connection lifecycle (transport-facing) ─────────────────────────
 
   onConnectionOpen<TConnection>(connection: TConnection, transport: ServerTransport<TConnection>): void {
+    const channelOn = (ix: number): ServerChannel | undefined => {
+      const sessionId = transport.getSessionId(connection)
+      return sessionId === undefined ? undefined : this.sessions.get(sessionId, ix)?.channel
+    }
     this.connectionEntries.set(connection, {
       state: {
         pingTimer: null,
@@ -255,6 +262,10 @@ class ChannelMux {
       sender: {
         send: (frame, onCommit) => this.send(connection, frame as Uint8Array<ArrayBuffer>, onCommit),
         bufferedAmount: () => this.bufferedAmount(connection),
+      },
+      seqs: {
+        received: (ix) => channelOn(ix)?._lastClientSeq ?? 0,
+        sent: (ix) => channelOn(ix)?._replayBuffer?.seq ?? 0,
       },
     })
     const connId = transport.getConnId(connection)
@@ -405,7 +416,7 @@ class ChannelMux {
     connection: Wire,
     rawFrame: Uint8Array<ArrayBuffer>,
   ): null | Promise<ReconcileOutcome | null> {
-    const frame = decodeClientFrame(rawFrame, WIRE_MAX_CONN_CTRL_FRAME_BYTES)
+    const frame = decodeClientFrame(rawFrame, WIRE_MAX_CONN_CTRL_FRAME_BYTES, entry.seqs)
     if (frame.tag === TAG.PING) {
       this.resetPingTimer(connection)
       this.acknowledgeArrivals(entry, connection)

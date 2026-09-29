@@ -60,6 +60,7 @@ import type {
   ReconcilePayload,
   ReconciledPayload,
   ReplayLoss,
+  SeqReader,
 } from '../shared-ws.js'
 import { encodeSseRequest, encodeSseRequestMetadata } from '../sse-request.js'
 import { DeadlineScheduler } from './deadlineScheduler.js'
@@ -422,6 +423,11 @@ class ClientConnection implements MuxConnection {
   private sendBuffer: BufferedFrame[] = []
   private lastSeqByChannel = new Map<number, number>()
   private replayBuffers = new Map<number, ReplayBuffer>()
+  /** Where the page stands on each channel, from which a frame's seqs are read. */
+  readonly seqs: SeqReader = {
+    received: (ix) => this.lastSeqByChannel.get(ix) ?? 0,
+    sent: (ix) => this.replayBuffers.get(ix)?.seq ?? 0,
+  }
   private reconnectTimeoutMs = CHANNEL_RECONNECT_TIMEOUT_MS
   private idleTimeoutMs: number
   private pingIntervalMs = CHANNEL_PING_INTERVAL_MS
@@ -1745,7 +1751,7 @@ class WsTransport implements UpgradeTarget {
       const raw = new Uint8Array(data as ArrayBuffer)
       let frame: DecodedFrame
       try {
-        frame = decode(raw)
+        frame = decode(raw, this.owner.seqs)
       } catch {
         ws.close()
         return
@@ -1879,7 +1885,7 @@ class WsTransport implements UpgradeTarget {
       const raw = new Uint8Array(data as ArrayBuffer)
       let frame: DecodedFrame
       try {
-        frame = decode(raw)
+        frame = decode(raw, this.owner.seqs)
       } catch {
         ws.close()
         return
@@ -2158,7 +2164,7 @@ class SseTransport implements UpgradeSource {
             resolveHandshakeOk()
             continue
           }
-          const frame = decode(raw)
+          const frame = decode(raw, this.owner.seqs)
           if (frame.tag === TAG.PONG) {
             this.heartbeat?.resetPong()
             this.owner._onTransportPong(frame.ended)

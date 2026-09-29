@@ -5,7 +5,7 @@ import { ServerChannel } from './channel.js'
 import { encodeSseRequestMetadata, type SseRequestMetadata } from '../sse-request.js'
 import { encodeLengthPrefixedFrames } from '../frame.js'
 import { base64urlToUint8Array } from '../base64url.js'
-import { decode, encode, TAG, type DecodedFrame } from '../shared-ws.js'
+import { decode, encode, TAG, type DecodedFrame, type SeqReader } from '../shared-ws.js'
 import { Readable } from 'node:stream'
 import { getServerConfig } from '../../node/server/serverConfig.js'
 import { CREDIT_MSG_WINDOW_MAX, CREDIT_WINDOW_INITIAL_BYTES, CREDIT_WINDOW_MAX_BYTES } from '../constants.js'
@@ -13,6 +13,9 @@ import { ChannelOverflowError } from '../channel-errors.js'
 import type { PushReadable } from '../push-readable.js'
 import type { PushReadableStream } from '../push-readable-stream.js'
 import { loadStreamNodeModuleOnce } from '../../utils/loadStreamNodeModule.js'
+
+/** A receiver with nothing of any channel: each seq reads as its low 32 bits. */
+const wireSeqs: SeqReader = { received: () => 0, sent: () => 0 }
 
 function openPost(metadata: SseRequestMetadata) {
   let controller!: ReadableStreamDefaultController<Uint8Array>
@@ -42,7 +45,8 @@ function collectFrames(body: ReadableStream<Uint8Array>): DecodedFrame[] {
       while ((end = text.indexOf('\n\n')) !== -1) {
         const event = text.slice(0, end)
         text = text.slice(end + 2)
-        if (event.startsWith('data: ')) frames.push(decode(base64urlToUint8Array(event.slice('data: '.length))))
+        if (event.startsWith('data: '))
+          frames.push(decode(base64urlToUint8Array(event.slice('data: '.length)), wireSeqs))
       }
     }
   })()

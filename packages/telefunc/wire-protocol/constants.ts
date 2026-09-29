@@ -104,9 +104,9 @@ export const UPGRADE_STAGE_TTL_MS = 10_000
 export const UPGRADE_MAX_ID_BYTES = 256
 
 /** Worst case for one open entry beyond its id: the key names, `"ix":65535`,
- *  `"lastSeq":4294967295`, `"initial":true`, `"broadcast":{"text":false,"binary":false}`, `"probe":4294967295` and the
- *  separator. */
-const RECONCILE_ENTRY_ENVELOPE_BYTES = 118
+ *  `"lastSeq":9007199254740991`, `"initial":true`, `"broadcast":{"text":false,"binary":false}`, `"probe":4294967295`
+ *  and the separator. */
+const RECONCILE_ENTRY_ENVELOPE_BYTES = 124
 
 /** Bounds what unauthenticated PREPARE frames can pin in memory before any of them commits. */
 export const UPGRADE_MAX_STAGED_RECORDS = 1_024

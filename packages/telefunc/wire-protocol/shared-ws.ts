@@ -37,6 +37,7 @@ export type {
   ReadyPayload,
   PingEntry,
   PongEntry,
+  SeqReader,
   WirePublishInfo,
 }
 
@@ -51,7 +52,8 @@ import { assert } from '../utils/assert.js'
 // `tag` discriminates the frame variant (data, connection ctrl, per-channel ctrl).
 // `index` is the channel ix for per-channel frames; 0 for connection-level frames.
 // `seq` is the replay sequence number of a sequenced frame: a data frame, or a CLOSE, CLOSE_ACK, ABORT or ERROR. Other
-// ctrl frames carry 0.
+// ctrl frames carry 0. Seqs count on past 32 bits, and a u32 seq on the wire is their low 32 bits, which `decode` reads
+// as the whole seq from where its receiver stands on the channel (see `SeqReader`).
 //
 // Tag layout — sparse ranges so range checks classify:
 //   0x01–0x09  connection-level control (no ix, no seq)
@@ -63,6 +65,8 @@ import { assert } from '../utils/assert.js'
 // Each side tracks the highest seq received and replays after reconnect via reconcile.
 
 const HEADER = 7
+/** How many seqs a u32 tells apart. */
+const SEQ_SPAN = 2 ** 32
 const PING_ENTRY_BYTES = 6
 const PONG_ENTRY_BYTES = 7
 const payloadBytes = (frame: Uint8Array): number => frame.byteLength - HEADER
@@ -159,7 +163,11 @@ function isChannelDataFrame(frame: DecodedFrame): frame is ChannelDataFrame {
 
 /** What a replay holds: data, and the closing frames. */
 function isSequencedFrame(frame: DecodedFrame): frame is SequencedFrame {
-  return isChannelDataFrame(frame) || isClosingTag(frame.tag)
+  return isSequencedTag(frame.tag)
+}
+
+function isSequencedTag(tag: number): boolean {
+  return (tag >= DATA_TAG_MIN && tag < CHANNEL_CTRL_TAG_MIN) || isClosingTag(tag)
 }
 
 function isClosingTag(tag: number): boolean {
@@ -373,11 +381,39 @@ function readU16(buf: Uint8Array, offset: number): number {
 
 function readU32(buf: Uint8Array, offset: number): number {
   return (
-    (buf[offset] as number) |
-    ((buf[offset + 1] as number) << 8) |
-    ((buf[offset + 2] as number) << 16) |
-    ((buf[offset + 3] as number) << 24)
+    ((buf[offset] as number) |
+      ((buf[offset + 1] as number) << 8) |
+      ((buf[offset + 2] as number) << 16) |
+      ((buf[offset + 3] as number) << 24)) >>>
+    0
   )
+}
+
+// ===== Seqs off the wire =====
+
+/** Where a frame's receiver stands on each channel, from which `decode` reads the low 32 bits of a seq as the whole. */
+type SeqReader = {
+  /** The highest seq it has of what its peer sent on channel `ix`. */
+  received(ix: number): number
+  /** The last seq it gave what it sent on channel `ix`. */
+  sent(ix: number): number
+}
+
+/** A frame's seq: the one with those low bits nearest the next its receiver expects, as QUIC reads a packet number
+ *  (RFC 9000, appendix A.3). A seq reaches its receiver less than 2^31 frames from the next it expects: no wire or
+ *  replay holds that many. */
+function seqNear(bits: number, expected: number): number {
+  const seq = expected - (expected % SEQ_SPAN) + bits
+  if (seq <= expected - SEQ_SPAN / 2) return seq + SEQ_SPAN
+  if (seq > expected + SEQ_SPAN / 2 && seq >= SEQ_SPAN) return seq - SEQ_SPAN
+  return seq
+}
+
+/** A peer's acknowledgement of what this side sent: the latest seq with those low bits through `sent`, the last this
+ *  side gave. A peer never lacks 2^32 frames of what was sent: no wire or replay holds that many. */
+function seqThrough(bits: number, sent: number): number {
+  const seq = sent - (sent % SEQ_SPAN) + bits
+  return seq > sent && seq >= SEQ_SPAN ? seq - SEQ_SPAN : seq
 }
 
 function encodeTextFrame(tag: number, index: number, text: string, seq: number): Uint8Array<ArrayBuffer> {
@@ -572,11 +608,11 @@ function peekTag(raw: Uint8Array): number | undefined {
   return raw[0]
 }
 
-function decode(frame: Uint8Array): DecodedFrame {
+function decode(frame: Uint8Array, seqs: SeqReader): DecodedFrame {
   assertProtocol(frame.length >= HEADER, 'frame too short')
   const tag = frame[0] as number
   const index = (frame[1] as number) | ((frame[2] as number) << 8)
-  const seq = readU32(frame, 3)
+  const seq = isSequencedTag(tag) ? seqNear(readU32(frame, 3), seqs.received(index) + 1) : 0
   const payload = frame.subarray(HEADER)
 
   const bytes = payload.byteLength
@@ -604,7 +640,7 @@ function decode(frame: Uint8Array): DecodedFrame {
       return { tag: TAG.PUBLISH_BINARY_ACK_REQ, index, seq, bytes, data: payload }
     case TAG.ACK_RES: {
       assertProtocol(payload.length >= 5, 'ACK_RES payload too short')
-      const ackedSeq = readU32(payload, 0)
+      const ackedSeq = seqThrough(readU32(payload, 0), seqs.sent(index))
       const status = payload[4] as number
       assertProtocol(
         status === ACK_STATUS.OK ||
@@ -619,18 +655,20 @@ function decode(frame: Uint8Array): DecodedFrame {
     case TAG.PING: {
       assertProtocol(payload.length % PING_ENTRY_BYTES === 0, 'PING payload')
       const ended: PingEntry[] = []
-      for (let offset = 0; offset < payload.length; offset += PING_ENTRY_BYTES)
-        ended.push({ ix: readU16(payload, offset), lastSeq: readU32(payload, offset + 2) })
+      for (let offset = 0; offset < payload.length; offset += PING_ENTRY_BYTES) {
+        const ix = readU16(payload, offset)
+        ended.push({ ix, lastSeq: seqThrough(readU32(payload, offset + 2), seqs.sent(ix)) })
+      }
       return { tag: TAG.PING, ended }
     }
     case TAG.PONG: {
       assertProtocol(payload.length % PONG_ENTRY_BYTES === 0, 'PONG payload')
       const ended: PongEntry[] = []
-      for (let offset = 0; offset < payload.length; offset += PONG_ENTRY_BYTES)
-        ended.push({
-          ix: readU16(payload, offset),
-          lastSeq: payload[offset + 2] === 1 ? readU32(payload, offset + 3) : null,
-        })
+      for (let offset = 0; offset < payload.length; offset += PONG_ENTRY_BYTES) {
+        const ix = readU16(payload, offset)
+        const held = payload[offset + 2] === 1
+        ended.push({ ix, lastSeq: held ? seqThrough(readU32(payload, offset + 3), seqs.sent(ix)) : null })
+      }
       return { tag: TAG.PONG, ended }
     }
     case TAG.FIN:
@@ -662,25 +700,32 @@ function decode(frame: Uint8Array): DecodedFrame {
       return { tag: TAG.ERROR, index, seq, reason: payload[0] as number }
     case TAG.WINDOW:
       assertProtocol(payload.length >= 8, 'WINDOW payload too short')
-      return { tag: TAG.WINDOW, index, bytes: readU32(payload, 0), lastSeq: readU32(payload, 4) >>> 0 }
+      return {
+        tag: TAG.WINDOW,
+        index,
+        bytes: readU32(payload, 0),
+        lastSeq: seqThrough(readU32(payload, 4), seqs.sent(index)),
+      }
     case TAG.MSG_WINDOW:
       assertProtocol(payload.length >= 4, 'MSG_WINDOW payload too short')
       return { tag: TAG.MSG_WINDOW, index, count: readU32(payload, 0) }
     case TAG.BDP_PING:
       assertProtocol(payload.length >= 4, 'BDP_PING payload too short')
-      return { tag: TAG.BDP_PING, index, probe: readU32(payload, 0) >>> 0 }
+      return { tag: TAG.BDP_PING, index, probe: readU32(payload, 0) }
     case TAG.BDP_PING_ACK:
       assertProtocol(payload.length >= 5, 'BDP_PING_ACK payload too short')
-      return { tag: TAG.BDP_PING_ACK, index, probe: readU32(payload, 0) >>> 0, starved: payload[4] === 1 }
+      return { tag: TAG.BDP_PING_ACK, index, probe: readU32(payload, 0), starved: payload[4] === 1 }
     case TAG.BROADCAST_SUB:
       assertProtocol(payload.length >= 1, 'BROADCAST_SUB payload too short')
       return { tag: TAG.BROADCAST_SUB, index, binary: payload[0] === 1 }
     case TAG.BROADCAST_UNSUB:
       assertProtocol(payload.length >= 1, 'BROADCAST_UNSUB payload too short')
       return { tag: TAG.BROADCAST_UNSUB, index, binary: payload[0] === 1 }
-    case TAG.ATTACH_RESULT:
+    case TAG.ATTACH_RESULT: {
       assertProtocol(payload.length >= 5, 'ATTACH_RESULT payload too short')
-      return { tag: TAG.ATTACH_RESULT, index, lastSeq: payload[0] === 1 ? readU32(payload, 1) : null }
+      const lastSeq = payload[0] === 1 ? seqThrough(readU32(payload, 1), seqs.sent(index)) : null
+      return { tag: TAG.ATTACH_RESULT, index, lastSeq }
+    }
 
     default:
       throw new ProtocolViolationError(`unknown wire frame tag ${tag}`)
@@ -713,11 +758,11 @@ const CLIENT_TAGS: ReadonlySet<number> = new Set([
 /** Server ingress: `decode` owns the frame's shape, this owns its direction and the upgrade frames'
  *  size cap. The cap is checked on the raw bytes because its job is to bound what an unauthenticated
  *  peer can make us parse — after `decode` it would be bounding nothing. */
-function decodeClientFrame(raw: Uint8Array<ArrayBuffer>, maxUpgradeFrameBytes: number): DecodedFrame {
+function decodeClientFrame(raw: Uint8Array<ArrayBuffer>, maxUpgradeFrameBytes: number, seqs: SeqReader): DecodedFrame {
   const tag = peekTag(raw)
   const isUpgradeFrame = tag === TAG.PREPARE || tag === TAG.BARRIER
   assertProtocol(!isUpgradeFrame || raw.byteLength <= maxUpgradeFrameBytes, 'upgrade frame over byte cap')
-  const frame = decode(raw)
+  const frame = decode(raw, seqs)
   assertProtocol(CLIENT_TAGS.has(frame.tag), `client sent a server-only frame ${frame.tag}`)
   return frame
 }
@@ -759,7 +804,7 @@ function parseOpenList(payload: Record<string, unknown>): void {
     // `ix` is truncated to u16 by the header writer, so a wider one would alias onto another channel.
     assertProtocol(isUint(entry.ix, 0xffff) && !indexes.has(entry.ix), 'RECONCILE entry ix')
     indexes.add(entry.ix)
-    assertProtocol(isUint(entry.lastSeq, 0xffffffff), 'RECONCILE entry lastSeq')
+    assertProtocol(isUint(entry.lastSeq, Number.MAX_SAFE_INTEGER), 'RECONCILE entry lastSeq')
     assertProtocol(entry.initial === undefined || entry.initial === true, 'RECONCILE entry initial')
     assertProtocol(entry.probe === undefined || isUint(entry.probe, 0xffffffff), 'RECONCILE entry probe')
     if (entry.broadcast !== undefined) {

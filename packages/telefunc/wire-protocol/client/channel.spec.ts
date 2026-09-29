@@ -3,8 +3,11 @@ import { afterEach, expect, test, vi } from 'vitest'
 import { ClientBroadcast, ClientChannel } from './channel.js'
 import { config } from '../../client/clientConfig.js'
 import { CHANNEL_TRANSPORT } from '../constants.js'
-import { TAG, decode } from '../shared-ws.js'
+import { TAG, decode, type SeqReader } from '../shared-ws.js'
 import { getSessionUrl } from './session-registry.js'
+
+/** A receiver with nothing of any channel: each seq reads as its low 32 bits. */
+const wireSeqs: SeqReader = { received: () => 0, sent: () => 0 }
 
 const broadcasts: ClientBroadcast[] = []
 const channels: ClientChannel<never, string>[] = []
@@ -150,7 +153,9 @@ test("a broadcast's toggles after close() send nothing, so none can hold its cha
 test('a broadcast subscribes the page to a kind with its first listener, and unsubscribes it with the last', () => {
   const broadcast = stalledBroadcast()
   broadcast.subscribeBinary(() => {})()
-  const frames = (broadcast as any)._connection.sendBuffer.map(({ frame }: { frame: Uint8Array }) => decode(frame))
+  const frames = (broadcast as any)._connection.sendBuffer.map(({ frame }: { frame: Uint8Array }) =>
+    decode(frame, wireSeqs),
+  )
   expect(frames).toMatchObject([
     { tag: TAG.BROADCAST_SUB, binary: true },
     { tag: TAG.BROADCAST_UNSUB, binary: true },
