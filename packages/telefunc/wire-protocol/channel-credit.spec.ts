@@ -826,6 +826,42 @@ test("a Room member's page gone quiet has its replay, and its room's, let go of 
   expect(held()).toEqual([0, 0])
 })
 
+test.each([2 ** 31, 2 ** 32])(
+  "a Room member's page whose channel passes seq %d gets the room's messages in order, and its publishes answered",
+  async (boundary) => {
+    const { room, stub, page, view } = await loop.openRoom()
+    const seen: string[] = []
+    view.subscribe((data) => void seen.push(data as string))
+    const joining = view.join()
+    await runUntil(() => view.count === 1, 1_000)
+    const me = await joining
+    const speaker = await room.join()
+    await run(100)
+    // As if `boundary - 4` more frames had gone each way and arrived.
+    const connection = (page as unknown as { _connection: any })._connection
+    const ix = connection.channelIndex.get(page)
+    for (const replay of [stub._replayBuffer, connection.replayBuffers.get(ix)]) {
+      replay._seq += boundary - 4
+      replay.pushedSeq += boundary - 4
+    }
+    stub._lastClientSeq += boundary - 4
+    ;(stub as unknown as { _pageLastSeq: number })._pageLastSeq += boundary - 4
+    connection.lastSeqByChannel.set(ix, connection.lastSeqByChannel.get(ix) + boundary - 4)
+    const receipts: Promise<unknown>[] = []
+    for (let n = 0; n < 8; n++) {
+      if (n % 2 === 0) receipts.push(me.publish(String(n)))
+      else void speaker.publish(String(n))
+      await run(10)
+    }
+    await runUntil(() => seen.length === 8, 1_000)
+    expect(seen).toEqual(Array.from({ length: 8 }, (_, n) => String(n)))
+    expect(await Promise.all(receipts)).toHaveLength(4)
+    expect(stub._replayBuffer!.seq).toBeGreaterThan(boundary)
+    expect(connection.replayBuffers.get(ix).seq).toBeGreaterThan(boundary)
+    expect(stub.isClosed).toBe(false)
+  },
+)
+
 test('on a slow link, producers that await their sends are handed the credit one at a time, and none is refused', async () => {
   const feed = loop.open<never, string>()
   const page = consume(feed.page)
