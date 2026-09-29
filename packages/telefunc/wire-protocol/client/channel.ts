@@ -420,10 +420,15 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
         this._flow.onPeerMessageWindow(frame.count)
         return
       case TAG.BDP_PING:
-        this._connection.sendBdpPingAck(this, frame.probe, this._flow.onPing())
+        this._connection.sendBdpPingAck(
+          this,
+          frame.probe,
+          this._flow.onPing(),
+          this._attachedWire === null ? Infinity : this._flow.pathRtt(this._attachedWire),
+        )
         return
       case TAG.BDP_PING_ACK:
-        this._flow.onPingAck(frame.probe, frame.starved)
+        this._flow.onPingAck(frame.probe, frame.starved, frame.pathRtt)
         return
       // BROADCAST_SUB/UNSUB are server-side only; ABORT/ERROR handled by connection.
     }

@@ -499,10 +499,11 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         this._flow.onPeerMessageWindow(frame.count)
         return
       case TAG.BDP_PING:
-        this._peer?.sendBdpPingAck(frame.probe, this._flow.onPing())
+        // It has no attach of its own to probe the path with.
+        this._peer?.sendBdpPingAck(frame.probe, this._flow.onPing(), Infinity)
         return
       case TAG.BDP_PING_ACK:
-        this._flow.onPingAck(frame.probe, frame.starved)
+        this._flow.onPingAck(frame.probe, frame.starved, frame.pathRtt)
         return
       case TAG.BROADCAST_SUB:
       case TAG.BROADCAST_UNSUB:

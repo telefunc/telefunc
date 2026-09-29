@@ -12,9 +12,9 @@ import {
 
 /** Per-axis verdict on a settled probe. `grow` = the sample saturated ≥ 2/3 of the current window, which is not at
  *  cap, and for the byte window, the sample leaves the sender's queue out: taken at the path's round trip where an
- *  attach measured it, and where none did, the window starved the sender's wire. `sample-too-small` = the sample
- *  didn't. `wire-busy` = the sender's wire held a backlog whenever its credit ran out. `window-grew` = the probe went
- *  out after a window grew, so what the sender says covers the smaller one. */
+ *  attach measured it, the receiver's or the sender's, and where none did, the window starved the sender's wire.
+ *  `sample-too-small` = the sample didn't. `wire-busy` = the sender's wire held a backlog whenever its credit ran out.
+ *  `window-grew` = the probe went out after a window grew, so what the sender says covers the smaller one. */
 type AxisDecision = 'grow' | 'sample-too-small' | 'wire-busy' | 'window-grew' | 'at-cap'
 
 /** `acknowledged` is true when a ping was in flight to settle (false for
@@ -44,12 +44,13 @@ const NOT_SETTLED: GrowDecision = { acknowledged: false, bytes: 'sample-too-smal
  *      - an attach carries a probe the sender answers before any of the channel's frames,
  *        so its round trip is the path's. A later sample counts at that round trip, as its
  *        delivery rate times the path's RTT, which is BBR's estimate: that leaves out a
- *        queue wherever it is, the kernel's send buffer included. Where flow-control frames
- *        wait for a batched POST, which an attach's RECONCILE doesn't, the attach isn't
- *        probed, and a server's receive side has no attach to probe;
- *      - there, the ack says whether, since the sender last answered one, its credit ran
- *        out while its wire held nothing (see `FlowControl.onPing`), which sees what the
- *        runtime buffers.
+ *        queue wherever it is, the kernel's send buffer included. A server's receive side
+ *        has no attach of its own to probe: each ack of its sender, the page, says the round
+ *        trip the page's attach measured, where it probed one. Where flow-control frames wait
+ *        for a batched POST, which an attach's RECONCILE doesn't, the attach isn't probed;
+ *      - where neither side measured, the ack says whether, since the sender last answered
+ *        one, its credit ran out while its wire held nothing (see `FlowControl.onPing`),
+ *        which sees what the runtime buffers.
  *   3. If the sample saturates ≥ 2/3 of the window, and the queue can't account for it, the
  *      window was the bottleneck → that axis's decision is `grow`; caller may call
  *      `grow()` to double it (clamped to its cap, see `capByteWindow`). The caller applies any
@@ -126,6 +127,11 @@ class BdpEstimator {
     return this._ping
   }
 
+  /** The round trip of the path an attach's probe on `wire` measured (see `probeAttach`), `Infinity` where none did. */
+  pathRtt(wire: number): number {
+    return wire === this._pathWire ? this._pathRtt : Infinity
+  }
+
   /** Record one received frame (pre-app-processing). Returns true iff a `BDP_PING`, of the
    *  number `probe` reads, should be emitted: caller fires `sendBdpPing()` synchronously. A single probe
    *  collects samples for both axes — `onPingAck` then derives independent
@@ -164,9 +170,10 @@ class BdpEstimator {
   }
 
   /** Settle the `BDP_PING` in flight against its `BDP_PING_ACK`, which says whether the window starved the sender's
-   *  wire. Returns per-axis grow suggestions. Caller decides whether to actually `growBytes()` / `growMsgs()` (e.g.
-   *  after applying the CPU-lag gate). */
-  onPingAck(probe: number, starved: boolean): GrowDecision {
+   *  wire, and the path's round trip as the sender measured it, `Infinity` where it measured none. Returns per-axis
+   *  grow suggestions. Caller decides whether to actually `growBytes()` / `growMsgs()` (e.g. after applying the CPU-lag
+   *  gate). */
+  onPingAck(probe: number, starved: boolean, senderPathRtt: number): GrowDecision {
     const attach = this._attachProbes.find((pending) => pending.probe === probe)
     if (attach) {
       this._attachProbes = this._attachProbes.filter((pending) => pending !== attach)
@@ -180,13 +187,14 @@ class BdpEstimator {
     if (!this._pingInFlight || probe !== this._ping) return NOT_SETTLED
     this._pingInFlight = false
     const rtt = performance.now() - this._pingSentAt
-    // Where an attach measured the path's round trip, that tells a queue from the path, wherever the queue is. Else
-    // only the sender can, where its runtime reports what its wire holds.
-    const measured = this._pathRtt < Infinity
     // An attach's probe may have waited behind other channels' frames, or on the channel's registration: a later one
     // that took less shows the path takes no more.
-    if (measured && rtt < this._pathRtt) this._pathRtt = rtt
-    const atPathRtt = this._pathRtt < rtt ? this._pathRtt / rtt : 1
+    if (this._pathRtt < Infinity && rtt < this._pathRtt) this._pathRtt = rtt
+    // Where an attach measured the path's round trip, here or at the sender, that tells a queue from the path, wherever
+    // the queue is. Else only the sender can, where its runtime reports what its wire holds.
+    const pathRtt = Math.min(this._pathRtt, senderPathRtt)
+    const measured = pathRtt < Infinity
+    const atPathRtt = pathRtt < rtt ? pathRtt / rtt : 1
     const byteSample = (this._bytesReceived - this._bytesAtPingSent) * atPathRtt
     const msgSample = this._msgsReceived - this._msgsAtPingSent
     const bytes: AxisDecision =

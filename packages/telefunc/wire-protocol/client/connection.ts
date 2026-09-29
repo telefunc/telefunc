@@ -207,7 +207,8 @@ interface MuxConnection {
   sendByteWindowUpdate(channel: MuxChannel, limit: number): void
   sendMsgWindowUpdate(channel: MuxChannel, limit: number): void
   sendBdpPing(channel: MuxChannel, probe: number): void
-  sendBdpPingAck(channel: MuxChannel, probe: number, starved: boolean): void
+  /** `pathRtt`: the path's round trip as the channel measured it, `Infinity` where it measured none. */
+  sendBdpPingAck(channel: MuxChannel, probe: number, starved: boolean, pathRtt: number): void
   /** Bytes the wire holds that haven't gone out. */
   bufferedAmount(): number
   sendBroadcastSubscribe(channel: MuxChannel, binary: boolean): void
@@ -800,10 +801,10 @@ class ClientConnection implements MuxConnection {
     this.sendFlowControl(ix, encode.bdpPing(ix, probe))
   }
 
-  sendBdpPingAck(channel: MuxChannel, probe: number, starved: boolean): void {
+  sendBdpPingAck(channel: MuxChannel, probe: number, starved: boolean, pathRtt: number): void {
     const ix = this.channelIndex.get(channel)
     if (ix === undefined) return
-    this.sendFlowControl(ix, encode.bdpPingAck(ix, probe, starved))
+    this.sendFlowControl(ix, encode.bdpPingAck(ix, probe, starved, pathRtt))
   }
 
   bufferedAmount(): number {

@@ -829,6 +829,19 @@ test("on an uplink slower than a quarter window per pong deadline, an upload's p
   expect(server.received.length).toBeGreaterThan(40)
 })
 
+// The page's socket here reports nothing it holds, as a browser's does of what its network stack and kernel hold: a
+// WebSocket's bufferedAmount reads 0 in Chromium while more than a megabyte of the upload waits below it.
+test("on a slow uplink, the server's window for an upload stays at its initial size, however little the page's socket reports it holds", async () => {
+  const feed = loop.open<string, never>()
+  const server = consume(feed.server)
+  await run(100)
+  loop.socket.toServer.bytesPerMs = 100
+  produce(feed.page, { message: () => 'x'.repeat(64 * KIB) })
+  await run(60_000)
+  expect(flowOf(feed.server).byteWindow).toBe(CREDIT_WINDOW_INITIAL_BYTES)
+  expect(server.received.length).toBeGreaterThan(80)
+})
+
 test('a page whose uplink stops with its upload queued on it takes the wire for dead within a pong deadline', async () => {
   serverConfig.channel.pingInterval = 1_000
   const feed = loop.open<string, never>()
