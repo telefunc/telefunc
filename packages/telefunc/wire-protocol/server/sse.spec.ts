@@ -6,8 +6,13 @@ import { encodeSseRequestMetadata, type SseRequestMetadata } from '../sse-reques
 import { encodeLengthPrefixedFrames } from '../frame.js'
 import { base64urlToUint8Array } from '../base64url.js'
 import { decode, encode, TAG, type DecodedFrame } from '../shared-ws.js'
+import { Readable } from 'node:stream'
 import { getServerConfig } from '../../node/server/serverConfig.js'
-import { CREDIT_MSG_WINDOW_MAX } from '../constants.js'
+import { CREDIT_MSG_WINDOW_MAX, CREDIT_WINDOW_INITIAL_BYTES, CREDIT_WINDOW_MAX_BYTES } from '../constants.js'
+import { ChannelOverflowError } from '../channel-errors.js'
+import type { PushReadable } from '../push-readable.js'
+import type { PushReadableStream } from '../push-readable-stream.js'
+import { loadStreamNodeModuleOnce } from '../../utils/loadStreamNodeModule.js'
 
 function openPost(metadata: SseRequestMetadata) {
   let controller!: ReadableStreamDefaultController<Uint8Array>
@@ -102,7 +107,7 @@ async function reconciledSseWire() {
 /** A channel's full message window, with the refresh and probe a page sends among it. */
 function fullWindow() {
   const frames = Array.from({ length: CREDIT_MSG_WINDOW_MAX }, (_, i) => encode.text(0, '1', i + 1))
-  frames.push(encode.msgWindow(0, 2 * CREDIT_MSG_WINDOW_MAX), encode.bdpPing(0))
+  frames.push(encode.msgWindow(0, 2 * CREDIT_MSG_WINDOW_MAX), encode.bdpPing(0, 1))
   return frames
 }
 
@@ -128,3 +133,39 @@ test("an upload stream handed a channel's full message window at once is process
   expect(wire.received.count).toBe(CREDIT_MSG_WINDOW_MAX)
   upload.end()
 })
+
+test.each([
+  ['a Node', true],
+  ['a web', false],
+])(
+  "a page that stops reading %s SSE stream holds what a channel sends nobody awaits to the page's window and the largest window a page grants: the next send rejects with ChannelOverflowError",
+  async (_, node) => {
+    await loadStreamNodeModuleOnce() // as runTelefunc does before an SSE request reaches the transport
+    const sse = getTelefuncSseChannelHooks()
+    const channel = new ServerChannel<unknown, string>()
+    let opened = false
+    channel.onOpen(() => void (opened = true))
+    getChannelMux().registerChannel(channel)
+    const downstream = openPost({ connId: crypto.randomUUID(), streamResponse: true })
+    const response = node
+      ? await sse.handleRequest(downstream.request, Readable.fromWeb(downstream.request.body! as never))
+      : await sse.handleRequest(downstream.request)
+    // Nothing reads the event stream.
+    const body = response!.body as PushReadable | PushReadableStream
+    downstream.push(encode.reconcile({ open: [{ id: channel.id, ix: 0, lastSeq: 0, initial: true }] }))
+    downstream.end()
+    await vi.waitFor(() => expect(opened).toBe(true))
+
+    let error: unknown
+    for (let n = 0; error === undefined && n < 6_000; n++) {
+      channel.send(String(n).padEnd(16 * 1024)).catch((err: unknown) => (error = err))
+      await Promise.resolve()
+    }
+    expect(error).toBeInstanceOf(ChannelOverflowError)
+    // An event carries its frame in base64.
+    // One message past them, and each one's header and event framing.
+    const bound = ((CREDIT_WINDOW_INITIAL_BYTES + CREDIT_WINDOW_MAX_BYTES + 128 * 1024) * 4) / 3
+    expect(body.bufferedAmount).toBeGreaterThan(CREDIT_WINDOW_INITIAL_BYTES)
+    expect(body.bufferedAmount).toBeLessThanOrEqual(bound)
+  },
+)

@@ -3,11 +3,19 @@
 
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 
-import { ClientChannel } from './client/channel.js'
+import { ClientBroadcast, ClientChannel } from './client/channel.js'
 import { ServerChannel } from './server/channel.js'
+import { Broadcast, ServerBroadcast } from './server/server-broadcast.js'
 import { ChannelMux, type ServerTransport } from './server/mux.js'
-import { CHANNEL_TRANSPORT, CREDIT_MSG_WINDOW_INITIAL } from './constants.js'
+import {
+  CHANNEL_TRANSPORT,
+  CREDIT_MSG_WINDOW_INITIAL,
+  CREDIT_WINDOW_INITIAL_BYTES,
+  CREDIT_WINDOW_MAX_BYTES,
+} from './constants.js'
+import { ChannelOverflowError } from './channel-errors.js'
 import { TAG } from './shared-ws.js'
+import { NetworkError } from '../shared/NetworkError.js'
 import { config as serverConfig } from '../node/server/serverConfig.js'
 
 const LATENCY_MS = 5
@@ -20,9 +28,17 @@ class Pipe {
   private queue: { frame: Uint8Array<ArrayBuffer>; at: number }[] = []
   private timer: ReturnType<typeof setTimeout> | null = null
   private held = false
+  /** What the pipe carries, in bytes: the sender's `bufferedAmount`. */
+  bytes = 0
+  /** A slow link carries a frame only once the one before it has gone through. */
+  bytesPerMs = Infinity
+  private lastAt = 0
   constructor(private readonly deliver: (frame: Uint8Array<ArrayBuffer>) => void) {}
   push(frame: Uint8Array<ArrayBuffer>): void {
-    this.queue.push({ frame, at: Date.now() + LATENCY_MS })
+    const at = Math.max(Date.now() + LATENCY_MS, this.lastAt + frame.byteLength / this.bytesPerMs)
+    this.lastAt = at
+    this.queue.push({ frame, at })
+    this.bytes += frame.byteLength
     this.schedule()
   }
   /** What the network still carries stops arriving, until `release`. */
@@ -36,6 +52,7 @@ class Pipe {
   /** The wire is cut: what it still carries is lost. */
   clear(): void {
     this.queue.length = 0
+    this.bytes = 0
   }
   get length(): number {
     return this.queue.length
@@ -49,6 +66,7 @@ class Pipe {
         while (!this.held && read < READ_BYTES && this.queue.length > 0 && this.queue[0]!.at <= Date.now()) {
           const { frame } = this.queue.shift()!
           read += frame.byteLength
+          this.bytes -= frame.byteLength
           this.deliver(frame)
         }
         this.schedule()
@@ -111,6 +129,7 @@ class Loopback {
       this.sends('server', frame)
       socket.toPage.push(frame.slice())
     },
+    bufferedAmount: (socket) => socket.toPage.bytes,
     terminateConnection: (socket) => socket.cut(),
   }
   private readonly connectionKey = crypto.randomUUID()
@@ -148,6 +167,20 @@ class Loopback {
     })
     this.pages.push(page as ClientChannel)
     return { server, page, register: () => this.mux.registerChannel(server) }
+  }
+  /** A broadcast the server has registered, and its page end, on the same connection. */
+  openBroadcast<T>(key: string) {
+    const server = new ServerBroadcast<T>({ key })
+    this.mux.registerChannel(server)
+    const page = new ClientBroadcast<T>({
+      channelId: server.id,
+      key,
+      transports: [CHANNEL_TRANSPORT.WS],
+      telefuncUrl: 'http://loopback.test/_telefunc',
+      connectionKey: this.connectionKey,
+    })
+    this.pages.push(page as ClientChannel)
+    return { server, page }
   }
   dispose(): void {
     for (const page of this.pages) page.abort()
@@ -210,6 +243,43 @@ function consume<T = number>(
 
 const flowOf = (channel: unknown) => (channel as { _flow: { msgWindow: number; byteWindow: number } })._flow
 
+/** Where each end's `onClose` leaves what it got: `'open'` until it fires. */
+function closedWith(ends: { page: { onClose(cb: (err?: Error) => void): void }; server: typeof ends.page }) {
+  const closed: { page: unknown; server: unknown } = { page: 'open', server: 'open' }
+  ends.page.onClose((err) => void (closed.page = err))
+  ends.server.onClose((err) => void (closed.server = err))
+  return closed
+}
+
+/** What a channel ends with when a reconnect needs messages `side`'s replay buffer dropped to stay within its size. */
+const lostOn = (side: 'server' | 'client') =>
+  new NetworkError(
+    `Channel closed: a reconnect needed messages the ${side}'s replay buffer had dropped to stay within its size. Raise config.channel.${side}ReplayBuffer, or ${side}ReplayBufferBinary for binary messages and streams.`,
+    true,
+  )
+
+const KIB = 1024
+
+/** The server's credit left with its page, in bytes. */
+const creditOf = (channel: unknown) => {
+  const flow = (channel as { _flow: { _limitBytes: number; _sentBytes: number } })._flow
+  return flow._limitBytes - flow._sentBytes
+}
+
+/** A 16 KiB message that names its place in the stream. */
+const message = (n: number) => String(n).padEnd(16 * KIB)
+
+/** `send(n)` for n = 0, 1, 2…, none awaited, until one rejects. */
+async function sendUntilRejected(send: (n: number) => Promise<unknown>) {
+  let error: unknown
+  let sends = 0
+  while (error === undefined && sends < 6_000) {
+    send(sends++).catch((err: unknown) => (error = err))
+    await run(0)
+  }
+  return { error, sends }
+}
+
 beforeEach(() => {
   vi.useFakeTimers()
   loop = new Loopback()
@@ -260,13 +330,25 @@ test('a stream keeps flowing past its grown window after the page opens another 
   expect(page.received).toEqual([...page.received.keys()])
 })
 
+test('an upload keeps flowing past its grown window after a reconnect, the server getting it all in order', async () => {
+  const upload = loop.open<number, never>()
+  const server = consume(upload.server)
+  produce(upload.page)
+  await runUntil(() => flowOf(upload.server).msgWindow > 4 * CREDIT_MSG_WINDOW_INITIAL, 1_000)
+  const window = flowOf(upload.server).msgWindow
+  expect(window).toBeGreaterThan(4 * CREDIT_MSG_WINDOW_INITIAL)
+  loop.socket.cut() // what it carries is lost, and replays
+  const before = server.received.length
+  await runUntil(() => server.received.length - before > 2 * window, 1_000)
+  expect(server.received.length - before).toBeGreaterThan(2 * window)
+  expect(server.received).toEqual([...server.received.keys()])
+})
+
 test('a reattach on the live wire sends no flow-control frames, and one on a new wire repairs with them', async () => {
   const clock = loop.open<never, number>()
   await run(100)
   const flowControl = (from: 'page' | 'server') =>
-    loop.sent[from].filter(
-      ([tag, ix]) => ix === 0 && (tag === TAG.WINDOW || tag === TAG.MSG_WINDOW || tag === TAG.SENT),
-    ).length
+    loop.sent[from].filter(([tag, ix]) => ix === 0 && (tag === TAG.WINDOW || tag === TAG.MSG_WINDOW)).length
   const before = { page: flowControl('page'), server: flowControl('server') }
 
   loop.open<never, number>() // its RECONCILE attaches the clock again, on the same wire
@@ -278,8 +360,8 @@ test('a reattach on the live wire sends no flow-control frames, and one on a new
   await run(1_000)
   expect(loop.sockets).toHaveLength(2)
   expect({ page: flowControl('page'), server: flowControl('server') }).toEqual({
-    page: before.page + 3,
-    server: before.server + 3,
+    page: before.page + 2,
+    server: before.server + 2,
   })
 })
 
@@ -311,10 +393,11 @@ test("what a page has in flight to a slow server listener never exceeds the serv
   expect(excess).toBeLessThanOrEqual(0)
 })
 
-test('a stream keeps flowing after a reconnect that loses more than the replay buffer holds', async () => {
+test("a stream whose reconnect needs more than the server's replay buffer holds ends with NetworkError on both ends, the page having got it in order up to there", async () => {
   serverConfig.channel.serverReplayBuffer = 512
   const clock = loop.open<never, number>()
   const page = consume(clock.page)
+  const closed = closedWith(clock)
   produce(clock.server)
   await runUntil(() => flowOf(clock.page).msgWindow > 4 * CREDIT_MSG_WINDOW_INITIAL, 1_000)
   const window = flowOf(clock.page).msgWindow
@@ -326,18 +409,16 @@ test('a stream keeps flowing after a reconnect that loses more than the replay b
   await run(50)
   expect(loop.socket.toPage.length).toBeGreaterThanOrEqual(window)
   loop.socket.cut()
-  const before = page.received.length
-  await runUntil(() => page.received.length - before > 2 * window, 1_000)
-  expect(page.received.length - before).toBeGreaterThan(2 * window)
-  // Values were lost, and the ones that arrived are in order.
-  expect(page.received.some((n, i) => i > 0 && n > page.received[i - 1]! + 1)).toBe(true)
-  expect(page.received.every((n, i) => i === 0 || n > page.received[i - 1]!)).toBe(true)
+  await runUntil(() => closed.page !== 'open', 1_000)
+  expect(closed).toEqual({ page: lostOn('server'), server: lostOn('server') })
+  expect(page.received).toEqual([...page.received.keys()])
 })
 
-test("an upload keeps flowing after a reconnect that loses more than the page's replay buffer holds", async () => {
+test("an upload whose reconnect needs more than the page's replay buffer holds ends with NetworkError on both ends, the server having got it in order up to there", async () => {
   serverConfig.channel.clientReplayBuffer = 512
   const upload = loop.open<number, never>()
   const server = consume(upload.server)
+  const closed = closedWith(upload)
   produce(upload.page)
   await runUntil(() => flowOf(upload.server).msgWindow > 4 * CREDIT_MSG_WINDOW_INITIAL, 1_000)
   const window = flowOf(upload.server).msgWindow
@@ -349,9 +430,318 @@ test("an upload keeps flowing after a reconnect that loses more than the page's 
   await run(50)
   expect(loop.socket.toServer.length).toBeGreaterThanOrEqual(window)
   loop.socket.cut()
-  const before = server.received.length
-  await runUntil(() => server.received.length - before > 2 * window, 1_000)
-  expect(server.received.length - before).toBeGreaterThan(2 * window)
-  expect(server.received.some((n, i) => i > 0 && n > server.received[i - 1]! + 1)).toBe(true)
-  expect(server.received.every((n, i) => i === 0 || n > server.received[i - 1]!)).toBe(true)
+  await runUntil(() => closed.server !== 'open', 1_000)
+  expect(closed).toEqual({ page: lostOn('client'), server: lostOn('client') })
+  expect(server.received).toEqual([...server.received.keys()])
+})
+
+test("a page that opens another channel while more of a stream is on the wire than the server's replay buffer holds keeps the stream whole", async () => {
+  serverConfig.channel.serverReplayBuffer = 512
+  const clock = loop.open<never, number>()
+  const page = consume(clock.page)
+  const closed = closedWith(clock)
+  produce(clock.server)
+  await run(50)
+  loop.socket.toPage.hold()
+  await run(20)
+  expect(loop.socket.toPage.bytes).toBeGreaterThan(512)
+  loop.open<never, number>() // its RECONCILE attaches the stream's channel again, on the wire that carries the stream
+  await run(50)
+  loop.socket.toPage.release()
+  const before = page.received.length
+  await run(100)
+  expect(page.received.length).toBeGreaterThan(before)
+  expect(closed).toEqual({ page: 'open', server: 'open' })
+  expect(page.received).toEqual([...page.received.keys()])
+})
+
+test("a broadcast whose reconnect needs more publishes than the server's replay buffer holds closes on both ends with NetworkError", async () => {
+  serverConfig.channel.serverReplayBuffer = 1_024
+  const key = `room:${crypto.randomUUID()}`
+  const room = loop.openBroadcast<string>(key)
+  const closed = closedWith(room)
+  const seen: string[] = []
+  room.page.subscribe((text) => void seen.push(text))
+  await run(100)
+  Broadcast.publish(key, 'before')
+  await run(50)
+  loop.socket.toPage.hold()
+  for (let n = 0; n < 8; n++) Broadcast.publish(key, String(n).padEnd(256))
+  await run(50)
+  loop.socket.cut()
+  await runUntil(() => closed.page !== 'open', 1_000)
+  expect(closed).toEqual({ page: lostOn('server'), server: lostOn('server') })
+  expect(seen).toEqual(['before'])
+})
+
+// Written in one turn, a burst waits on the wire whatever the page's pace: a bound on it smaller than the largest window
+// a page grants refused it to a page that reads at full speed.
+test("a burst of sends nobody awaits, past the page's window and within the largest one a page grants, reaches a page that reads", async () => {
+  const feed = loop.open<never, string>()
+  const page = consume(feed.page)
+  await run(100)
+  // 30 MiB in one turn, as the playground's push benchmark sends.
+  const burst = (n: number) => String(n).padEnd(512 * KIB)
+  let error: unknown
+  for (let n = 0; n < 60; n++) feed.server.send(burst(n)).catch((err: unknown) => (error ??= err))
+  await runUntil(() => page.received.length === 60, 5_000)
+  expect(error).toBeUndefined()
+  expect(page.received).toEqual(Array.from({ length: 60 }, (_, n) => burst(n)))
+})
+
+test("a page that stops reading holds a channel's sends nobody awaits to its window and the largest window a page grants: the next rejects with ChannelOverflowError, and the channel stays open", async () => {
+  const feed = loop.open<never, string>()
+  const page = consume(feed.page)
+  await run(100)
+  loop.socket.toPage.hold()
+  const { error, sends } = await sendUntilRejected((n) => feed.server.send(message(n)))
+  expect(error).toBeInstanceOf(ChannelOverflowError)
+  expect(loop.socket.toPage.bytes).toBeGreaterThan(CREDIT_WINDOW_INITIAL_BYTES + CREDIT_WINDOW_MAX_BYTES)
+  // One message past them, and each one's header.
+  expect(loop.socket.toPage.bytes).toBeLessThanOrEqual(CREDIT_WINDOW_INITIAL_BYTES + CREDIT_WINDOW_MAX_BYTES + 64 * KIB)
+
+  // Once the page reads again it gets every message but the refused one, and what is sent after it caught up.
+  loop.socket.toPage.release()
+  await runUntil(() => page.received.length === sends - 1, 5_000)
+  await feed.server.send(message(sends))
+  await runUntil(() => page.received.length === sends, 1_000)
+  expect(page.received).toEqual([...Array.from({ length: sends - 1 }, (_, n) => message(n)), message(sends)])
+})
+
+test("a page that stops reading holds a channel's ack requests nobody awaits to the largest window a page grants: the next rejects with ChannelOverflowError", async () => {
+  const feed = loop.open<never, string>()
+  feed.page.listen(() => 'ok')
+  await run(100)
+  loop.socket.toPage.hold()
+  const acks: Promise<unknown>[] = []
+  const { error, sends } = await sendUntilRejected((n) => {
+    const ack = feed.server.send(message(n), { ack: true })
+    acks.push(ack)
+    return ack
+  })
+  expect(error).toBeInstanceOf(ChannelOverflowError)
+  expect(loop.socket.toPage.bytes).toBeGreaterThan(CREDIT_WINDOW_MAX_BYTES)
+  expect(loop.socket.toPage.bytes).toBeLessThanOrEqual(CREDIT_WINDOW_MAX_BYTES + 64 * KIB)
+
+  loop.socket.toPage.release()
+  await run(5_000)
+  expect(await Promise.all(acks.slice(0, sends - 1))).toEqual(Array(sends - 1).fill('ok'))
+})
+
+test('on a slow link, an awaited stream keeps flowing while a send nobody awaits on the same wire is refused past the largest window a page grants', async () => {
+  const stream = loop.open<never, string>()
+  const flood = loop.open<never, string>()
+  const streamed = consume(stream.page)
+  consume(flood.page)
+  await run(100)
+  loop.socket.toPage.bytesPerMs = 64_000 // 64 MB/s
+  let streamError: unknown
+  void (async () => {
+    while (!stream.server.isClosed) await stream.server.send('x'.repeat(64 * KIB))
+  })().catch((err: unknown) => (streamError = err))
+  // 256 MB/s.
+  let floodError: unknown
+  let held = 0
+  const flooding = setInterval(() => {
+    held = Math.max(held, loop.socket.toPage.bytes)
+    if (floodError === undefined) flood.server.send('x'.repeat(256 * KIB)).catch((err: unknown) => (floodError = err))
+  }, 1)
+  await run(1_000)
+  expect(floodError).toBeInstanceOf(ChannelOverflowError)
+  const midway = streamed.received.length
+  await run(1_000)
+  clearInterval(flooding)
+
+  expect(streamError).toBeUndefined()
+  expect(midway).toBeGreaterThan(10)
+  expect(streamed.received.length - midway).toBeGreaterThan(40)
+  // Nothing past the windows and, past the flood's, the largest window a page grants is added.
+  expect(held).toBeLessThanOrEqual(
+    flowOf(stream.page).byteWindow + flowOf(flood.page).byteWindow + CREDIT_WINDOW_MAX_BYTES + 512 * KIB,
+  )
+})
+
+test('on a slow link, a chat nobody awaits that the page keeps up with is neither refused nor held up for seconds behind an awaited stream on the same wire', async () => {
+  const stream = loop.open<never, string>()
+  const chat = loop.open<never, { at: number; text: string }>()
+  consume(stream.page)
+  const delays: number[] = []
+  chat.page.listen(({ at }) => void delays.push(Date.now() - at))
+  await run(100)
+  loop.socket.toPage.bytesPerMs = 4_000 // 4 MB/s
+  let streamError: unknown
+  void (async () => {
+    while (!stream.server.isClosed) await stream.server.send('x'.repeat(64 * KIB))
+  })().catch((err: unknown) => (streamError = err))
+  // 1.6 MB/s of 16 KiB messages.
+  let chatError: unknown
+  let sent = 0
+  const chatting = setInterval(() => {
+    chat.server.send({ at: Date.now(), text: message(sent++) }).catch((err: unknown) => (chatError ??= err))
+  }, 10)
+  // By then, probes that counted the stream's own queue as in flight had doubled its window to 8 MiB.
+  await run(4_000)
+  clearInterval(chatting)
+  await runUntil(() => delays.length === sent, 10_000)
+  expect(chatError).toBeUndefined()
+  expect(streamError).toBeUndefined()
+  expect(delays).toHaveLength(sent)
+  // Nothing holds it up past the stream's window, drained at the 2.4 MB/s the chat leaves of the link.
+  expect(Math.max(...delays)).toBeLessThan(CREDIT_WINDOW_INITIAL_BYTES / 2_400 + 100)
+  expect(flowOf(stream.page).byteWindow).toBe(CREDIT_WINDOW_INITIAL_BYTES)
+})
+
+test('a send nobody awaits goes out past the window of a page whose listener lags, while the wire holds less than the largest window a page grants', async () => {
+  const feed = loop.open<never, string>()
+  const page = consume(feed.page, { slow: true })
+  await run(100)
+  const big = (n: number) => String(n).padEnd(256 * KIB)
+  let error: unknown
+  let behind = 0
+  for (let n = 0; n < 320; n++) {
+    feed.server.send(big(n)).catch((err: unknown) => (error = err))
+    behind = Math.max(behind, (n + 1 - page.consumed) * (256 * KIB) - flowOf(feed.page).byteWindow)
+    await run(1)
+  }
+  expect(error).toBeUndefined()
+  // The page's limit is at most what it consumed and its window, so the server sent this far past it.
+  expect(behind).toBeGreaterThan(CREDIT_WINDOW_MAX_BYTES)
+  await runUntil(() => page.received.length === 320, 5_000)
+  expect(page.received).toEqual(Array.from({ length: 320 }, (_, n) => big(n)))
+})
+
+test('a page that stops reading a broadcast leaves it with ChannelOverflowError on both ends once the server holds its room and a quarter more of publishes for it', async () => {
+  const key = `room:${crypto.randomUUID()}`
+  const room = loop.openBroadcast<string>(key)
+  const errors: { server?: Error; page?: Error } = {}
+  room.server.onClose((err) => void (errors.server = err))
+  room.page.onClose((err) => void (errors.page = err))
+  const seen: string[] = []
+  room.page.subscribe((text) => void seen.push(text))
+  await run(100)
+  loop.socket.toPage.hold()
+  const publication = (n: number) => String(n).padEnd(256 * KIB)
+  let published = 0
+  while (!room.server.isClosed && published < 1_000) {
+    Broadcast.publish(key, publication(published++))
+    await run(0)
+  }
+  expect(errors.server).toBeInstanceOf(ChannelOverflowError)
+  expect(loop.socket.toPage.bytes).toBeGreaterThan(CREDIT_WINDOW_MAX_BYTES * 1.25)
+  expect(loop.socket.toPage.bytes).toBeLessThanOrEqual(CREDIT_WINDOW_MAX_BYTES * 1.25 + 512 * KIB)
+
+  // Once the page reads again it gets every publish sent before the one that found it behind, then the close.
+  loop.socket.toPage.release()
+  await runUntil(() => errors.page !== undefined, 1_000)
+  expect(errors.page).toBeInstanceOf(ChannelOverflowError)
+  expect(seen).toEqual(Array.from({ length: published - 1 }, (_, n) => publication(n)))
+})
+
+test('on a slow link, a page that keeps up with a broadcast stays in it while an awaited stream fills the wire', async () => {
+  const key = `room:${crypto.randomUUID()}`
+  const stream = loop.open<never, string>()
+  consume(stream.page)
+  const room = loop.openBroadcast<string>(key)
+  let closed: Error | undefined | null = null
+  room.server.onClose((err) => void (closed = err))
+  const seen: string[] = []
+  room.page.subscribe((text) => void seen.push(text))
+  await run(100)
+  loop.socket.toPage.bytesPerMs = 4_000 // 4 MB/s
+  void (async () => {
+    while (!stream.server.isClosed) await stream.server.send('x'.repeat(64 * KIB))
+  })().catch(() => {})
+  let held = 0
+  // 1.6 MB/s of publishes, which wait behind the stream's window on the wire.
+  for (let n = 0; n < 300; n++) {
+    Broadcast.publish(key, message(n))
+    held = Math.max(held, loop.socket.toPage.bytes)
+    await run(10)
+  }
+  await runUntil(() => seen.length === 300, 2_000)
+  expect(closed).toBe(null)
+  expect(held).toBeGreaterThan(CREDIT_WINDOW_INITIAL_BYTES)
+  expect(seen).toEqual(Array.from({ length: 300 }, (_, n) => message(n)))
+})
+
+test("a page's consumption of what a broadcast publishes moves the server's limit for it", async () => {
+  const key = `room:${crypto.randomUUID()}`
+  const room = loop.openBroadcast<string>(key)
+  const seen: string[] = []
+  room.page.subscribe((text) => void seen.push(text))
+  await run(100)
+  expect(creditOf(room.server)).toBe(CREDIT_WINDOW_MAX_BYTES)
+  // A limit goes out once a quarter of the window is consumed.
+  const publications = CREDIT_WINDOW_MAX_BYTES / 4 / KIB / KIB + 1
+  for (let n = 0; n < publications; n++) {
+    Broadcast.publish(key, 'x'.repeat(KIB * KIB))
+    await run(1)
+  }
+  await runUntil(() => seen.length === publications, 1_000)
+  await run(100)
+  // Sent 17 MiB, of which the last limit leaves one not yet counted consumed.
+  expect(creditOf(room.server)).toBeGreaterThan(CREDIT_WINDOW_MAX_BYTES - 2 * KIB * KIB)
+})
+
+test('on a slow link, producers that await their sends are handed the credit one at a time, and none is refused', async () => {
+  const feed = loop.open<never, string>()
+  const page = consume(feed.page)
+  await run(100)
+  loop.socket.toPage.bytesPerMs = 4_000 // 4 MB/s
+  let size = KIB
+  let error: unknown
+  for (let p = 0; p < 8; p++)
+    void (async () => {
+      while (!feed.server.isClosed) await feed.server.send('x'.repeat(size))
+    })().catch((err: unknown) => (error ??= err))
+  // They start small: producers that start together each have a frame out as the credit first runs out, and those count.
+  await run(100)
+  // Every producer waits on credit by now. From here on each frame is 128 KiB.
+  size = 128 * KIB
+  let held = 0
+  const watch = setInterval(() => (held = Math.max(held, loop.socket.toPage.bytes)), 1)
+  const before = page.received.length
+  await run(2_000)
+  clearInterval(watch)
+  expect(error).toBeUndefined()
+  expect(held).toBeGreaterThan(CREDIT_WINDOW_INITIAL_BYTES)
+  expect(page.received.length - before).toBeGreaterThan(40)
+})
+
+test('on a slow link, a producer that awaits its sends is not refused a message larger than its credit, sent with little credit left', async () => {
+  const feed = loop.open<never, string>()
+  const page = consume(feed.page)
+  await run(100)
+  loop.socket.toPage.bytesPerMs = 1_000 // 1 MB/s
+  let error: unknown
+  let left = Infinity
+  void (async () => {
+    // 64 KiB messages, so the byte window binds before the message window does.
+    while (creditOf(feed.server) > 64 * KIB) await feed.server.send('x'.repeat(64 * KIB))
+    left = creditOf(feed.server)
+    await feed.server.send('x'.repeat(CREDIT_WINDOW_INITIAL_BYTES))
+    for (let n = 0; n < 8; n++) await feed.server.send(message(n))
+  })().catch((err: unknown) => (error ??= err))
+  await runUntil(() => page.received.length > 0 && page.received.at(-1) === message(7), 10_000)
+  expect(left).toBeGreaterThan(0)
+  expect(left).toBeLessThanOrEqual(64 * KIB)
+  expect(error).toBeUndefined()
+  expect(page.received.at(-1)).toBe(message(7))
+})
+
+test('on a slow link, a producer that awaits its sends is not refused for the credit another one took with a message larger than it', async () => {
+  const feed = loop.open<never, string>()
+  const page = consume(feed.page)
+  await run(100)
+  loop.socket.toPage.bytesPerMs = 1_000 // 1 MB/s
+  // 64 KiB messages, 32 of them in the page's 2 MiB window: the byte window binds before the message window does.
+  while (creditOf(feed.server) > 64 * KIB) await feed.server.send('x'.repeat(64 * KIB))
+  // Both producers' last sends resolved with credit left. One sends a message past it, then the other sends its next.
+  const settled = Promise.allSettled([
+    feed.server.send('x'.repeat(CREDIT_WINDOW_INITIAL_BYTES)),
+    feed.server.send(message(1)),
+  ])
+  await runUntil(() => page.received.at(-1) === message(1), 10_000)
+  expect((await settled).map((result) => result.status)).toEqual(['fulfilled', 'fulfilled'])
+  expect(page.received.at(-1)).toBe(message(1))
 })

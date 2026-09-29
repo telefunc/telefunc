@@ -20,6 +20,7 @@ import {
   WIRE_MAX_RAW_FRAME_BYTES,
   WIRE_RECV_BACKLOG_BASE_BYTES,
   WIRE_RECV_BACKLOG_BASE_FRAMES,
+  WIRE_SEND_BACKLOG_BASE_BYTES,
   type ChannelTransports,
 } from '../constants.js'
 import {
@@ -34,12 +35,14 @@ import {
 import type {
   BarrierPayload,
   ChannelFrame,
+  PingEntry,
+  PongEntry,
   PreparePayload,
   ReconcileOpenEntry,
   ReconcilePayload,
 } from '../shared-ws.js'
 import { IndexedPeer, type PeerSender } from './IndexedPeer.js'
-import type { ServerChannel } from './channel.js'
+import { replayMaxAge, type ServerChannel } from './channel.js'
 
 /** A transport-owned connection handle. The mux never looks inside one — it only compares them by
  *  identity and hands them back to the transport that created it. */
@@ -56,6 +59,9 @@ type ServerTransport<TConnection> = {
    *  traffic across requests (WebSocket: every frame already lands on the same socket). */
   getConnId(connection: TConnection): string | null
   sendNow(connection: TConnection, frame: Uint8Array<ArrayBuffer>): void
+  /** Bytes of the frames sent that still wait in the connection, never fewer than there are, or `undefined` where the
+   *  runtime doesn't report them. */
+  bufferedAmount(connection: TConnection): number | undefined
   terminateConnection(connection: TConnection): void
 }
 
@@ -109,7 +115,6 @@ const DETACH_REASON = {
 type DetachReason = (typeof DETACH_REASON)[keyof typeof DETACH_REASON]
 
 type ChannelHandle = { channel: ServerChannel; ix: number; peer: IndexedPeer }
-type SessionFinalizer = () => void
 
 /** An initial channel a RECONCILE on this wire named before the server registered it. The RECONCILED leaves it out,
  *  and an ATTACH_RESULT settles it. */
@@ -137,6 +142,13 @@ type ConnectionState = {
   recvBacklogBytes: number
   recvBacklogFrames: number
   awaited: Map<number, AwaitedChannel>
+  /** What may be written to the wire before its backlog, which only writes grow, can pass what its channels' flow
+   *  control allowed when it was last read (see `WIRE_SEND_BACKLOG_BASE_BYTES`), and is read again. */
+  sendHeadroom: number
+  /** The largest frame sent on the wire. */
+  largestSent: number
+  /** Its backlog passed that, and the wire is being terminated. */
+  pastSendBacklog: boolean
 }
 
 type ConnectionEntry = {
@@ -159,7 +171,8 @@ class ChannelMux {
    *  Fired synchronously from `registerChannel`. */
   private readonly pendingRegisterWaiters = new Map<string, Set<(channel: ServerChannel) => void>>()
   private readonly sessions = new SessionRegistry()
-  private readonly sessionFinalizers = new Map<string, SessionFinalizer>()
+  /** The wire each session is on: the last to reconcile it, until another reconciles it or the wire closes. */
+  private readonly sessionWires = new Map<string, Wire>()
   private readonly connectionEntries = new Map<unknown, ConnectionEntry>()
   /** Reverse index for transports with a stable connId (SSE). Lets data POSTs locate the
    *  live stream connection, and catches a duplicate-connId reconnect racing teardown. */
@@ -167,6 +180,8 @@ class ChannelMux {
   private readonly stagedUpgrades = new Map<Wire, StagedUpgrade>()
   private readonly stagedByPrevSession = new Map<string, Wire>()
   private stagedBytes = 0
+  /** Channels that ended while their page may still lack their last frames, each let go at its timer at the latest. */
+  private readonly endedChannels = new Map<ServerChannel, ReturnType<typeof setTimeout>>()
 
   /** Resolved lazily so the mux can be constructed at module-load (the globalObject factory
    *  runs before `serverConfig` is initialized). */
@@ -190,17 +205,31 @@ class ChannelMux {
     if (channel._didShutdown) return
     channel._registerChannel()
     this.channels.set(channel.id, channel)
+    // Before a waiter attaches it: its `onOpen` may end it.
+    channel._onShutdown((keep) => (keep ? this.keepEnded(channel) : this.unregisterChannel(channel.id)))
     const waiters = this.pendingRegisterWaiters.get(channel.id)
     if (waiters) {
       this.pendingRegisterWaiters.delete(channel.id)
       for (const cb of waiters) cb(channel)
     }
-    channel._onShutdown(() => this.unregisterChannel(channel.id))
   }
 
   unregisterChannel(channelId: string): void {
     this.channels.delete(channelId)
     this.sessions.removeChannel(channelId)
+  }
+
+  /** An ended channel stays attachable, so what its page lacks of it replays, until the page has it all, leaves it out
+   *  of a RECONCILE or closes its wire for good, or its replay's age passes. */
+  private keepEnded(channel: ServerChannel): void {
+    this.endedChannels.set(channel, unrefTimer(setTimeout(() => this.releaseEnded(channel), replayMaxAge())))
+  }
+
+  private releaseEnded(channel: ServerChannel): void {
+    clearTimeout(this.endedChannels.get(channel))
+    this.endedChannels.delete(channel)
+    this.unregisterChannel(channel.id)
+    channel._release()
   }
 
   hasChannels(): boolean {
@@ -220,9 +249,15 @@ class ChannelMux {
         recvBacklogBytes: 0,
         recvBacklogFrames: 0,
         awaited: new Map(),
+        sendHeadroom: 0,
+        largestSent: 0,
+        pastSendBacklog: false,
       },
       transport: transport as ServerTransport<unknown>,
-      sender: { send: (frame, onCommit) => this.send(connection, frame as Uint8Array<ArrayBuffer>, onCommit) },
+      sender: {
+        send: (frame, onCommit) => this.send(connection, frame as Uint8Array<ArrayBuffer>, onCommit),
+        bufferedAmount: () => this.bufferedAmount(connection),
+      },
     })
     const connId = transport.getConnId(connection)
     if (connId !== null) this.connectionsByConnId.set(connId, connection)
@@ -281,10 +316,9 @@ class ChannelMux {
     const stagedWs = this.stagedByPrevSession.get(sessionId)
     if (stagedWs !== undefined) this.abandonStage(stagedWs)
     // Channels survive a transient close (`_onPeerDisconnect`'s reconnectTimeout grace);
-    // permanent tears them down. The session-level finalizer is dropped on any close;
-    // reconcile rebuilds it on next attach.
+    // permanent tears them down.
     this.detachSession(sessionId, permanent ? DETACH_REASON.PERMANENT : DETACH_REASON.TRANSIENT)
-    this.sessionFinalizers.delete(sessionId)
+    if (this.sessionWires.get(sessionId) === connection) this.sessionWires.delete(sessionId)
   }
 
   readPermanentTermination(connection: Wire): boolean {
@@ -374,7 +408,7 @@ class ChannelMux {
     const frame = decodeClientFrame(rawFrame, WIRE_MAX_CONN_CTRL_FRAME_BYTES)
     if (frame.tag === TAG.PING) {
       this.resetPingTimer(connection)
-      this.send(connection, encode.pong())
+      this.send(connection, encode.pong(this.answerPing(entry, connection, frame.ended)))
       return null
     }
     assertProtocol(!entry.state.retiredByBarrier, 'frame on a wire retired by its barrier')
@@ -398,6 +432,24 @@ class ChannelMux {
     }
     this.dispatchChannelFrame(sessionId, channelFrame)
     return null
+  }
+
+  /** The page lists its closed channels the server attached, each with how far it has what the server sent on it. Each
+   *  is answered with how far the server has what the page sent on it, or that the server no longer holds it: one that
+   *  ended here is let go once its page has all of it. Only the wire its session is on answers: that session has each
+   *  channel the page lists that the server holds. */
+  private answerPing(entry: ConnectionEntry, connection: Wire, ended: PingEntry[]): PongEntry[] {
+    assertProtocol(ended.length <= MAX_CHANNELS_PER_CONNECTION, 'PING over entry cap')
+    const sessionId = entry.transport.getSessionId(connection)
+    if (sessionId === undefined || this.sessionWires.get(sessionId) !== connection) return []
+    return ended.map(({ ix, lastSeq }) => {
+      const channel = this.sessions.get(sessionId, ix)?.channel
+      if (channel === undefined) return { ix, lastSeq: null }
+      channel._onPageHas(lastSeq)
+      if (!this.endedChannels.has(channel) || !channel._pageHasAll()) return { ix, lastSeq: channel._lastClientSeq }
+      this.releaseEnded(channel)
+      return { ix, lastSeq: null }
+    })
   }
 
   private dispatchChannelFrame(sessionId: string, frame: ChannelFrame): void {
@@ -545,14 +597,20 @@ class ChannelMux {
     isBarrier = false,
   ): Promise<ReconcileOutcome> {
     const { state, transport } = entry
-    const finalizeUpgrade = isBarrier && ctrl.sessionId ? (this.sessionFinalizers.get(ctrl.sessionId) ?? null) : null
+    const oldWire = isBarrier && ctrl.sessionId ? this.sessionWires.get(ctrl.sessionId) : undefined
+    const finalizeUpgrade = oldWire === undefined ? null : () => this.send(oldWire, encode.fin())
     this.resetPingTimer(connection)
     // One on the wire that holds the session it names keeps it, and so what is bound to it: a staged upgrade.
     const newSessionId =
       ctrl.sessionId !== undefined && ctrl.sessionId === transport.getSessionId(connection)
         ? ctrl.sessionId
         : crypto.randomUUID()
-    const attached = this.reconcileSession(ctrl.sessionId, newSessionId, ctrl.open, entry, connection)
+    // What the server sent the page is on a wire that delivers it, unless the page reconnected: the one that holds the
+    // session, or a barrier's old wire, which the page reads to its FIN first.
+    const replay = !isBarrier && newSessionId !== ctrl.sessionId
+    const attached = this.reconcileSession(ctrl.sessionId, newSessionId, ctrl.open, entry, connection, replay)
+    // Its wire no longer has the session it names, which is gone with the handles it had.
+    if (ctrl.sessionId) this.sessionWires.delete(ctrl.sessionId)
 
     // The connection may have closed since this frame arrived, so its RECONCILED never goes out.
     // Remove the session outright, one the client never received or its own, but preserve the
@@ -571,8 +629,7 @@ class ChannelMux {
     for (const [ix, awaited] of state.awaited)
       if (awaited.phase === 'expired' && !named.has(ix)) state.awaited.delete(ix)
 
-    if (ctrl.sessionId) this.sessionFinalizers.delete(ctrl.sessionId)
-    this.sessionFinalizers.set(newSessionId, () => this.send(connection, encode.fin()))
+    this.sessionWires.set(newSessionId, connection)
     transport.setSessionId(connection, newSessionId)
     return { sessionId: newSessionId, attached, finalizeUpgrade, deliverTo: connection }
   }
@@ -583,9 +640,10 @@ class ChannelMux {
     open: ReconcilePayload['open'],
     conn: ConnectionEntry,
     connection: Wire,
+    replay: boolean,
   ): ChannelHandle[] {
     const handles = open
-      .map((entry) => this.attach(entry, conn, connection))
+      .map((entry) => this.attach(entry, conn, connection, replay))
       .filter((h): h is ChannelHandle => h !== null)
 
     // Channels in the previous session that the client did NOT re-include are recovery-failed.
@@ -604,14 +662,22 @@ class ChannelMux {
   /** Null leaves the channel out of the RECONCILED. The wire awaits an initial one the server hasn't registered, and
    *  one it awaits stays out until attached; its ATTACH_RESULT settles it. Later reconciles fail fast if the channel
    *  is gone. */
-  private attach(entry: ReconcileOpenEntry, conn: ConnectionEntry, connection: Wire): ChannelHandle | null {
+  private attach(
+    entry: ReconcileOpenEntry,
+    conn: ConnectionEntry,
+    connection: Wire,
+    replay: boolean,
+  ): ChannelHandle | null {
+    // Ahead of every frame of the channel, and of its registration where the wire awaits it: its round trip is the
+    // path's. It measures, so it says nothing starved.
+    if (entry.probe !== undefined) conn.sender.send(encode.bdpPingAck(entry.ix, entry.probe, false))
     const awaited = conn.state.awaited.get(entry.ix)
     if (awaited) {
       awaited.entry = entry
       if (awaited.phase !== 'attached') return null
     }
     const existing = this.channels.get(entry.id)
-    if (existing) return this.attachChannel(existing, entry, conn.sender)
+    if (existing) return this.attachChannel(existing, entry, conn.sender, replay)
     if (entry.initial && !awaited) this.awaitChannel(entry, conn, connection)
     return null
   }
@@ -638,7 +704,7 @@ class ChannelMux {
     const { conn, wire } = awaited
     const sessionId = conn.transport.getSessionId(wire)
     assert(sessionId, 'a channel awaited on a wire that never reconciled')
-    const handle = this.attachChannel(channel, awaited.entry, conn.sender)
+    const handle = this.attachChannel(channel, awaited.entry, conn.sender, false)
     if (!handle) {
       this.expireAwaited(awaited)
       return
@@ -718,15 +784,26 @@ class ChannelMux {
     state.awaited.clear()
   }
 
-  /** Drains replay frames missed since `lastSeq` (sends are sync — see `send`), then
-   *  attaches an `IndexedPeer`. Returns null if the channel already shut down. */
-  private attachChannel(channel: ServerChannel, entry: ReconcileOpenEntry, sender: PeerSender): ChannelHandle | null {
-    if (channel._didShutdown) return null
-    const replay = channel._replayBuffer
-    assert(replay !== null, `ServerChannel "${channel.id}" attached without a replay buffer`)
-    for (const frame of replay.getAfter(entry.lastSeq)) sender.send(frame)
-    const peer = new IndexedPeer(sender, entry.ix, replay)
-    channel._attachPeer(peer, entry)
+  /** Attaches an `IndexedPeer`, after draining, with `replay`, the replay frames missed since `lastSeq` (sends are
+   *  sync, see `send`). If the replay no longer holds them the channel ends instead. Returns null if the channel shut
+   *  down and kept nothing for its page. */
+  private attachChannel(
+    channel: ServerChannel,
+    entry: ReconcileOpenEntry,
+    sender: PeerSender,
+    replay: boolean,
+  ): ChannelHandle | null {
+    const buffer = channel._replayBuffer
+    if (buffer === null) return null
+    channel._onPageHas(entry.lastSeq)
+    const peer = new IndexedPeer(sender, entry.ix, buffer)
+    const missed = replay ? buffer.getAfter(entry.lastSeq) : []
+    if (typeof missed === 'number') {
+      channel._onReplayLost(peer, missed)
+    } else {
+      for (const frame of missed) sender.send(frame)
+      channel._attachPeer(peer, entry)
+    }
     return { channel, ix: entry.ix, peer }
   }
 
@@ -769,6 +846,11 @@ class ChannelMux {
   }
 
   private detachHandle(h: ChannelHandle, reason: DetachReason): void {
+    // An ended channel waits out a lost wire for its page, which lets it go by leaving it out or leaving for good.
+    if (this.endedChannels.has(h.channel)) {
+      if (reason !== DETACH_REASON.TRANSIENT) this.releaseEnded(h.channel)
+      return
+    }
     switch (reason) {
       case DETACH_REASON.PERMANENT:
         h.channel._onPeerClose()
@@ -784,13 +866,47 @@ class ChannelMux {
 
   // ── Per-connection plumbing (send, recv chain, ping) ────────────────
 
-  /** Sole server→client send path; sync so wire order = call order. Per-channel
-   *  byte+msg credit (see `flow-control/`) bounds queue growth. */
+  /** Sole server→client send path; sync so wire order = call order. What a channel's sends and publishes queue on it
+   *  is bounded by the channel's credit (see `flow-control/`) and, past that, by how far behind it lets its peer be. A
+   *  frame for a wire that closed is committed all the same: it replays as one a dying wire lost does. So is one for a
+   *  wire found holding more than that allows, which takes no more frames and is terminated after this turn as the
+   *  ping deadline terminates one: the page reconnects, and what it lost replays from there. */
   private send(connection: Wire, frame: Uint8Array<ArrayBuffer>, onCommit?: () => void): void {
+    onCommit?.()
     const entry = this.connectionEntries.get(connection)
     if (!entry) return
-    onCommit?.()
+    const { state } = entry
+    if (state.pastSendBacklog) return
+    if (frame.byteLength > state.largestSent) state.largestSent = frame.byteLength
+    if (frame.byteLength > state.sendHeadroom) {
+      state.sendHeadroom = this.sendHeadroom(entry, connection)
+      if (state.sendHeadroom < 0) {
+        state.pastSendBacklog = true
+        queueMicrotask(() => entry.transport.terminateConnection(connection))
+        return
+      }
+    }
+    state.sendHeadroom -= frame.byteLength
     entry.transport.sendNow(connection, frame)
+  }
+
+  /** What its channels' flow control allows the wire to hold, less what it holds: `Infinity` where the runtime can't
+   *  tell. */
+  private sendHeadroom(entry: ConnectionEntry, connection: Wire): number {
+    const backlog = entry.transport.bufferedAmount(connection)
+    if (backlog === undefined) return Infinity
+    const sessionId = entry.transport.getSessionId(connection)
+    const session = sessionId === undefined ? undefined : this.sessions.peekSession(sessionId)
+    let allowed = WIRE_SEND_BACKLOG_BASE_BYTES
+    for (const { channel } of session?.values() ?? []) allowed += channel._sendAllowance() + entry.state.largestSent
+    return allowed - backlog
+  }
+
+  /** A wire that's gone holds nothing. */
+  private bufferedAmount(connection: Wire): number | undefined {
+    const entry = this.connectionEntries.get(connection)
+    if (!entry) return 0
+    return entry.transport.bufferedAmount(connection)
   }
 
   private chainRecv<T>(entry: ConnectionEntry, fn: () => Promise<T>): Promise<T> {

@@ -23,9 +23,10 @@ import { assertUsage } from '../../utils/assert.js'
 import { isPromise } from '../../utils/isPromise.js'
 import { markHandled } from '../../utils/markHandled.js'
 import { ChannelOverflowError } from '../channel-errors.js'
-import { ACK_STATUS, encodePublishText, encodePublishBinary } from '../shared-ws.js'
+import { ACK_STATUS, ERROR_REASON, encodePublishText, encodePublishBinary } from '../shared-ws.js'
 import type { BroadcastKind, WirePublishInfo } from '../shared-ws.js'
 import { STATUS_BODY_INTERNAL_SERVER_ERROR } from '../../shared/constants.js'
+import { CREDIT_WINDOW_MAX_BYTES } from '../constants.js'
 import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
 assertIsNotBrowser()
 
@@ -60,6 +61,14 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
         this._deliverBroadcastBinaryMessage(payload, rawInfo),
       ),
     }
+    // Its page grants it the largest window from the start (see `ClientBroadcast`).
+    this._flow.onPeerByteWindow(CREDIT_WINDOW_MAX_BYTES)
+  }
+
+  /** Its page grants the largest window from the start, which a burst fits in: past it, the page is behind by more
+   *  than what it read and hasn't reported, which it does once a quarter of that window. */
+  protected override _pastCreditAllowance(): number {
+    return CREDIT_WINDOW_MAX_BYTES >> 2
   }
 
   static isServerBroadcast(value: unknown): value is ServerBroadcast {
@@ -110,13 +119,31 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
     const data = parse(serialized) as ChannelData<T>
     if (!this._callListeners(this._subscribers.text, data, rawInfo)) return
     if (!this._peerSubscriptions.text) return
-    this._sendPublish(encodePublishText(serialized, rawInfo))
+    const wireText = encodePublishText(serialized, rawInfo)
+    if (this._peer) {
+      if (this._flow.isPastByteCredit && this._isPeerBehind()) {
+        this._closeBehind()
+        return
+      }
+      this._flow.countSentBytes(this._peer.sendPublish(wireText))
+      return
+    }
+    this._prePeerBuffer.pushPublish(wireText)
   }
 
   _deliverBroadcastBinaryMessage(data: Uint8Array, rawInfo: WirePublishInfo): void {
     if (!this._callListeners(this._subscribers.binary, data, rawInfo)) return
     if (!this._peerSubscriptions.binary) return
-    this._sendPublishBinary(encodePublishBinary(data, rawInfo))
+    const wireData = encodePublishBinary(data, rawInfo)
+    if (this._peer) {
+      if (this._flow.isPastByteCredit && this._isPeerBehind()) {
+        this._closeBehind()
+        return
+      }
+      this._flow.countSentBytes(this._peer.sendPublishBinary(wireData))
+      return
+    }
+    this._prePeerBuffer.pushPublishBinary(wireData)
   }
 
   /** Calls each listener directly, as a channel's receive does, since this runs per subscriber per message; false once a
@@ -138,14 +165,23 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
     return true
   }
 
+  /** A page that can't keep up with the broadcast has no send to reject: once behind, it leaves the group, on both
+   *  ends, rather than be sent a gap. */
+  private _closeBehind(): void {
+    this._peer!.sendError(ERROR_REASON.OVERFLOW)
+    this._shutdown(
+      new ChannelOverflowError('Broadcast closed: its client fell further behind than the server holds for a client'),
+    )
+  }
+
   override _onPeerSubscription(kind: BroadcastKind, on: boolean): void {
     this._peerSubscriptions[kind] = on
     this._syncSubscription(kind)
   }
 
-  protected override _shutdown(err?: Error): void {
+  protected override _shutdown(err?: Error, pageGone?: boolean): void {
     for (const route of Object.values(this._routes)) route.close()
-    super._shutdown(err)
+    super._shutdown(err, pageGone)
   }
 
   // --- Internal broadcast helpers ---

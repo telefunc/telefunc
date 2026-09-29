@@ -1,28 +1,28 @@
 import { unrefTimer } from '../utils/unrefTimer.js'
+import { ERROR_REASON, replayLaneOf, type ReplayLaneKind, type ReplayLoss } from './shared-ws.js'
 
 /**
  * High-performance replay buffer for outgoing WebSocket data frames.
  *
  * Stores encoded frames keyed by monotonic sequence number for replay
  * on reconnect. Bounded by byte size — oldest entries are evicted when full.
- * Optionally also bounded by age — entries older than `maxAgeMs` are evicted
- * at push time, which matches the reconnect window: frames that arrived before
- * the reconnect deadline can never be replayed anyway.
+ * Also bounded by age: entries older than `maxAgeMs` are evicted.
  *
- * When `binaryMaxBytes` is provided, binary frames are stored in a separate
- * lane with its own byte budget. A large binary cannot evict text frames,
- * and a binary gap does not block text replay.
+ * A frame goes in the lane its tag names (`replayLaneOf`), each with its own byte budget: a large binary can't evict
+ * text, and the frame that ends a channel is dropped for its age alone.
  *
- * Oversized frames are stored as `null` gap markers. `getAfter` stops at the
- * first gap per lane so the peer only receives a continuous run.
+ * A frame larger than its lane's budget isn't stored. `getAfter` gives a peer
+ * all it lacks, or, if a dropped frame is among it, why it can't.
  *
- * Requires non-decreasing seq values (use `nextSeq()` / `pushFrame()` for normal operation).
+ * Requires non-decreasing seq values.
  */
 export class ReplayBuffer {
-  private readonly text: ReplayLane
-  private readonly binary: ReplayLane
+  private readonly lanes: Record<ReplayLaneKind, ReplayLane>
+  private readonly allLanes: readonly ReplayLane[]
   private maxAgeMs: number
   private _seq = 0
+  /** The highest seq pushed. */
+  private pushedSeq = 0
   private cleanupTimer: ReturnType<typeof setTimeout> | null = null
   private cleanupScheduledAt = Infinity
 
@@ -32,16 +32,21 @@ export class ReplayBuffer {
   }
 
   constructor(maxBytes: number, maxAgeMs: number, binaryMaxBytes: number) {
-    this.text = new ReplayLane(maxBytes, maxAgeMs)
-    this.binary = new ReplayLane(binaryMaxBytes, maxAgeMs)
+    const budgets = laneBudgets(maxBytes, binaryMaxBytes)
+    this.lanes = {
+      text: new ReplayLane(budgets.text, maxAgeMs),
+      binary: new ReplayLane(budgets.binary, maxAgeMs),
+      closing: new ReplayLane(budgets.closing, maxAgeMs),
+    }
+    this.allLanes = Object.values(this.lanes)
     this.maxAgeMs = maxAgeMs
   }
 
   /** Applies new budgets to what is stored and to what comes next. */
   setLimits(maxBytes: number, maxAgeMs: number, binaryMaxBytes: number): void {
     this.maxAgeMs = maxAgeMs
-    this.text.setLimits(maxBytes, maxAgeMs)
-    this.binary.setLimits(binaryMaxBytes, maxAgeMs)
+    const budgets = laneBudgets(maxBytes, binaryMaxBytes)
+    for (const kind of Object.keys(this.lanes) as ReplayLaneKind[]) this.lanes[kind].setLimits(budgets[kind], maxAgeMs)
     this.scheduleCleanup()
   }
 
@@ -51,49 +56,27 @@ export class ReplayBuffer {
   }
 
   /**
-   * Convenience wrapper: advance the internal seq and push the frame.
-   * Equivalent to `push(buf.nextSeq(), frame)`.
+   * Store an already-encoded sequenced frame in its lane.
+   * @returns `true` if the frame was stored, `false` if it was larger than its lane's budget.
    */
-  pushFrame(frame: Uint8Array<ArrayBuffer>, isBinary?: boolean): boolean {
-    return this.push(this.nextSeq(), frame, isBinary)
-  }
-
-  /**
-   * Store an already-encoded frame.
-   * Oversized frames are stored as a `null` gap marker so `getAfter` stops there.
-   * @returns `true` if the frame was stored, `false` if it was too large.
-   */
-  push(seq: number, frame: Uint8Array<ArrayBuffer>, isBinary?: boolean): boolean {
-    if (seq > this._seq) this._seq = seq
-    const lane = isBinary ? this.binary : this.text
-    const stored = lane.push(seq, frame)
+  push(seq: number, frame: Uint8Array<ArrayBuffer>): boolean {
+    this.pushed(seq)
+    const stored = this.lanes[replayLaneOf(frame[0]!)].push(seq, frame)
     this.scheduleCleanup()
     return stored
   }
 
-  /** Get all frames with afterSeq < seq <= throughSeq, stopping at the first gap per lane.
-   *  When binary lane is active, merge-iterates both lanes by seq order. */
-  getAfter(afterSeq: number, throughSeq = Infinity): Uint8Array<ArrayBuffer>[] {
-    const t = this.text.getAfter(afterSeq, throughSeq)
-    const b = this.binary.getAfter(afterSeq, throughSeq)
-    if (t.frames.length === 0) return b.frames
-    if (b.frames.length === 0) return t.frames
-
-    // Merge two sorted runs by their stored seq values.
-    const result: Uint8Array<ArrayBuffer>[] = new Array(t.frames.length + b.frames.length)
-    let ti = 0
-    let bi = 0
-    let ri = 0
-    while (ti < t.frames.length && bi < b.frames.length) {
-      if (t.seqs[ti]! <= b.seqs[bi]!) {
-        result[ri++] = t.frames[ti++]!
-      } else {
-        result[ri++] = b.frames[bi++]!
-      }
+  /** The frames with afterSeq < seq <= throughSeq, merged by seq, or why they can't all be given. */
+  getAfter(afterSeq: number, throughSeq = Infinity): Uint8Array<ArrayBuffer>[] | ReplayLoss {
+    let run: Run = { seqs: [], frames: [] }
+    let overBudgetThrough = 0
+    for (const lane of this.allLanes) {
+      run = mergeBySeq(run, lane.getAfter(afterSeq, throughSeq))
+      overBudgetThrough = Math.max(overBudgetThrough, lane.overBudgetThrough)
     }
-    while (ti < t.frames.length) result[ri++] = t.frames[ti++]!
-    while (bi < b.frames.length) result[ri++] = b.frames[bi++]!
-    return result
+    // Every seq through the highest pushed was pushed, each to one lane, so one missing was dropped.
+    if (run.frames.length >= Math.min(throughSeq, this.pushedSeq) - afterSeq) return run.frames
+    return overBudgetThrough > afterSeq ? ERROR_REASON.LOST : ERROR_REASON.EXPIRED
   }
 
   /**
@@ -101,22 +84,25 @@ export class ReplayBuffer {
    * Call this periodically on idle channels to return memory promptly.
    */
   evict(now = Date.now()): void {
-    this.text.evict(now)
-    this.binary.evict(now)
+    for (const lane of this.allLanes) lane.evict(now)
   }
 
   get length(): number {
-    return this.text.length + this.binary.length
+    let length = 0
+    for (const lane of this.allLanes) length += lane.length
+    return length
   }
 
   get byteLength(): number {
-    return this.text.byteLength + this.binary.byteLength
+    let byteLength = 0
+    for (const lane of this.allLanes) byteLength += lane.byteLength
+    return byteLength
   }
 
   dispose(): void {
-    this.text.dispose()
-    this.binary.dispose()
+    for (const lane of this.allLanes) lane.dispose()
     this._seq = 0
+    this.pushedSeq = 0
     if (this.cleanupTimer !== null) {
       clearTimeout(this.cleanupTimer)
       this.cleanupTimer = null
@@ -126,11 +112,17 @@ export class ReplayBuffer {
 
   // ── Private ──
 
+  private pushed(seq: number): void {
+    if (seq > this._seq) this._seq = seq
+    if (seq > this.pushedSeq) this.pushedSeq = seq
+  }
+
   /** Schedule cleanup for the oldest entry's expiry. Skips if a timer already
    *  fires at or before that deadline — new entries are always newer than existing
    *  ones (FIFO), so the oldest entry never moves earlier on push. */
   private scheduleCleanup(): void {
-    const oldest = Math.min(this.text.oldestTime, this.binary.oldestTime)
+    let oldest = Infinity
+    for (const lane of this.allLanes) oldest = Math.min(oldest, lane.oldestTime)
     if (oldest === Infinity) return
 
     const deadlineAt = oldest + this.maxAgeMs
@@ -155,17 +147,43 @@ export class ReplayBuffer {
   }
 }
 
-/**
- * Bounded FIFO lane with parallel arrays and amortised O(1) compaction.
- * ReplayBuffer uses two instances — one for text, one for binary —
- * each with its own byte budget so binary can never evict text.
- */
+/** A lane's byte budget by kind: the frame that ends a channel is small, and none is dropped for size. */
+function laneBudgets(maxBytes: number, binaryMaxBytes: number): Record<ReplayLaneKind, number> {
+  return { text: maxBytes, binary: binaryMaxBytes, closing: Infinity }
+}
+
+type Run = { seqs: number[]; frames: Uint8Array<ArrayBuffer>[] }
+
+/** Merges two sorted runs by their stored seq values. */
+function mergeBySeq(a: Run, b: Run): Run {
+  if (a.frames.length === 0) return b
+  if (b.frames.length === 0) return a
+  const length = a.frames.length + b.frames.length
+  const seqs: number[] = new Array(length)
+  const frames: Uint8Array<ArrayBuffer>[] = new Array(length)
+  let ai = 0
+  let bi = 0
+  for (let ri = 0; ri < length; ri++) {
+    if (bi >= b.frames.length || (ai < a.frames.length && a.seqs[ai]! <= b.seqs[bi]!)) {
+      seqs[ri] = a.seqs[ai]!
+      frames[ri] = a.frames[ai++]!
+    } else {
+      seqs[ri] = b.seqs[bi]!
+      frames[ri] = b.frames[bi++]!
+    }
+  }
+  return { seqs, frames }
+}
+
+/** Bounded FIFO lane with parallel arrays and amortised O(1) compaction. */
 
 class ReplayLane {
   // Parallel arrays — seqs separate for cache-friendly access
   private seqs: number[] = []
-  private frames: (Uint8Array<ArrayBuffer> | null)[] = []
+  private frames: Uint8Array<ArrayBuffer>[] = []
   private times: number[] = []
+  /** The highest seq dropped to stay within the byte budget. */
+  overBudgetThrough = 0
   private head = 0
   private totalBytes = 0
   private maxBytes: number
@@ -191,18 +209,14 @@ class ReplayLane {
 
   /**
    * Store an already-encoded frame.
-   * Oversized frames are stored as a `null` gap marker so `getAfter` stops there.
-   * @returns `true` if the frame was stored, `false` if it was too large.
+   * @returns `true` if the frame was stored, `false` if it was larger than the budget.
    */
   push(seq: number, frame: Uint8Array<ArrayBuffer>): boolean {
     const now = Date.now()
 
     if (frame.byteLength > this.maxBytes) {
-      // Mark gap — replay must stop here. Still evict age/size so the buffer
-      // stays as fresh as possible (consistent with the normal push path).
-      this.seqs.push(seq)
-      this.frames.push(null)
-      this.times.push(now)
+      this.overBudgetThrough = seq
+      // Still evict by age, as the normal push path does.
       this._evict(now)
       return false
     }
@@ -221,25 +235,14 @@ class ReplayLane {
     this._evict(Date.now())
   }
 
-  /** Get all frames with afterSeq < seq <= throughSeq, stopping at the first gap. */
-  getAfter(afterSeq: number, throughSeq: number): { seqs: number[]; frames: Uint8Array<ArrayBuffer>[] } {
+  /** The stored frames with afterSeq < seq <= throughSeq. */
+  getAfter(afterSeq: number, throughSeq: number): Run {
     const len = this.frames.length
     let lo = this.head
-
-    // 1. Skip everything the peer already received (ignore past gaps)
     while (lo < len && this.seqs[lo]! <= afterSeq) lo++
-
-    // 2. Nothing left or the very next frame is unrecoverable → abort
-    if (lo >= len || this.seqs[lo]! > throughSeq || this.frames[lo] === null) return { seqs: [], frames: [] }
-
-    // 3. Collect continuous real frames (stop at next gap)
-    let hi = lo + 1
-    while (hi < len && this.seqs[hi]! <= throughSeq && this.frames[hi] !== null) hi++
-
-    return {
-      seqs: this.seqs.slice(lo, hi),
-      frames: this.frames.slice(lo, hi) as Uint8Array<ArrayBuffer>[],
-    }
+    let hi = lo
+    while (hi < len && this.seqs[hi]! <= throughSeq) hi++
+    return { seqs: this.seqs.slice(lo, hi), frames: this.frames.slice(lo, hi) }
   }
 
   /**
@@ -249,8 +252,7 @@ class ReplayLane {
     if (this.head >= this.frames.length) return
     const cutoff = now - this.maxAgeMs
     while (this.head < this.frames.length && this.times[this.head]! < cutoff) {
-      const f = this.frames[this.head]
-      if (f) this.totalBytes -= f.byteLength
+      this.totalBytes -= this.frames[this.head]!.byteLength
       this.head++
     }
     this.compact()
@@ -262,6 +264,7 @@ class ReplayLane {
     this.times.length = 0
     this.head = 0
     this.totalBytes = 0
+    this.overBudgetThrough = 0
   }
 
   // ── Private ──
@@ -270,9 +273,10 @@ class ReplayLane {
     // Single pass: evict entries that are too old OR push us over the byte budget.
     const cutoff = now - this.maxAgeMs
     while (this.head < this.frames.length) {
-      if (this.times[this.head]! >= cutoff && this.totalBytes <= this.maxBytes) break
-      const f = this.frames[this.head]
-      if (f) this.totalBytes -= f.byteLength
+      const expired = this.times[this.head]! < cutoff
+      if (!expired && this.totalBytes <= this.maxBytes) break
+      if (!expired) this.overBudgetThrough = Math.max(this.overBudgetThrough, this.seqs[this.head]!)
+      this.totalBytes -= this.frames[this.head]!.byteLength
       this.head++
     }
     this.compact()

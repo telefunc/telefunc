@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'vitest'
 
 import {
+  ERROR_REASON,
   ProtocolViolationError,
   TAG,
   decode,
@@ -65,6 +66,17 @@ describe('upgrade wire vocabulary', () => {
     expect(isChannelCtrlTag(TAG.ATTACH_RESULT)).toBe(true)
     expect(decode(encode.attachResult(3, 7))).toEqual({ tag: TAG.ATTACH_RESULT, index: 3, lastSeq: 7 })
     expect(decode(encode.attachResult(3, null))).toEqual({ tag: TAG.ATTACH_RESULT, index: 3, lastSeq: null })
+  })
+
+  test('BDP_PING round-trips its probe, and BDP_PING_ACK the probe and whether the window starved its sender', () => {
+    expect(decode(encode.bdpPing(3, 0xffff_ffff))).toEqual({ tag: TAG.BDP_PING, index: 3, probe: 0xffff_ffff })
+    expect(decode(encode.bdpPingAck(3, 7, true))).toEqual({ tag: TAG.BDP_PING_ACK, index: 3, probe: 7, starved: true })
+    expect(decode(encode.bdpPingAck(3, 7, false))).toEqual({
+      tag: TAG.BDP_PING_ACK,
+      index: 3,
+      probe: 7,
+      starved: false,
+    })
   })
 
   test('a BARRIER round-trips at one entry and at the largest shape the caps admit', () => {
@@ -187,6 +199,27 @@ describe('decodeClientFrame — hostile schemas', () => {
   })
 })
 
+describe('heartbeat', () => {
+  test("a PING names each channel the page ended with its seq, and a PONG answers each with the server's seq or none", () => {
+    const ended = [
+      { ix: 3, lastSeq: 7 },
+      { ix: 65_535, lastSeq: 2 ** 31 - 1 },
+    ]
+    expect(clientFrame(encode.ping(ended))).toEqual({ tag: TAG.PING, ended })
+    expect(clientFrame(encode.ping())).toEqual({ tag: TAG.PING, ended: [] })
+    const answers = [
+      { ix: 3, lastSeq: 5 },
+      { ix: 4, lastSeq: null },
+    ]
+    expect(decode(encode.pong(answers))).toEqual({ tag: TAG.PONG, ended: answers })
+  })
+
+  test('a PING whose payload splits an entry is a violation', () => {
+    const ragged = encode.ping([{ ix: 1, lastSeq: 1 }]).slice(0, 12)
+    expect(() => clientFrame(ragged)).toThrow(ProtocolViolationError)
+  })
+})
+
 describe('decodeClientFrame — direction', () => {
   const serverOnly: [string, Uint8Array<ArrayBuffer>][] = [
     ['PONG', encode.pong()],
@@ -196,7 +229,6 @@ describe('decodeClientFrame — direction', () => {
     ['PUBLISH', encode.publish(0, `9,1700000000000\n${JSON.stringify(1)}`, 1)],
     ['PUBLISH_BINARY', encode.publishBinary(0, new Uint8Array(14), 1)],
     ['ABORT', encode.abort(0, JSON.stringify('nope'))],
-    ['ERROR', encode.error(0)],
     ['RECONCILED', encode.reconciled(reconciled())],
     ['ATTACH_RESULT', encode.attachResult(0, 0)],
   ]
@@ -224,11 +256,11 @@ describe('decodeClientFrame — direction', () => {
     ['PUBLISH_BINARY_ACK_REQ', encode.publishBinaryAckReq(0, new Uint8Array([1]), 1)],
     ['CLOSE', encode.close(0, 1_000)],
     ['CLOSE_ACK', encode.closeAck(0)],
+    ['ERROR', encode.error(0, ERROR_REASON.LOST, 1)],
     ['WINDOW', encode.window(0, 1_024)],
     ['MSG_WINDOW', encode.msgWindow(0, 8)],
-    ['SENT', encode.sent(0, 1, 1_024, 8)],
-    ['BDP_PING', encode.bdpPing(0)],
-    ['BDP_PING_ACK', encode.bdpPingAck(0)],
+    ['BDP_PING', encode.bdpPing(0, 1)],
+    ['BDP_PING_ACK', encode.bdpPingAck(0, 1, true)],
     ['BROADCAST_SUB', encode.broadcastSub(0, false)],
     ['BROADCAST_UNSUB', encode.broadcastUnsub(0, false)],
   ]

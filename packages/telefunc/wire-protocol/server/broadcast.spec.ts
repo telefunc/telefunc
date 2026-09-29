@@ -81,7 +81,7 @@ function registeredBroadcast<T = unknown>(key: string): ServerBroadcast<T> {
 }
 
 function peer(send: (frame: Uint8Array) => void): IndexedPeer {
-  return new IndexedPeer({ send }, 7, new ReplayBuffer(1024 * 1024, 60_000, 2 * 1024 * 1024))
+  return new IndexedPeer({ send, bufferedAmount: () => 0 }, 7, new ReplayBuffer(1024 * 1024, 60_000, 2 * 1024 * 1024))
 }
 
 /** A mux, and the texts of the PUBLISH frames it sends down any wire. */
@@ -97,6 +97,7 @@ function muxWires() {
       const decoded = decode(frame)
       if (decoded.tag === TAG.PUBLISH) published.push(decoded.text)
     },
+    bufferedAmount: () => 0,
     terminateConnection: () => {},
   }
   const open = () => {
@@ -309,7 +310,9 @@ describe('keyed in-process broadcast', () => {
     broadcast._registerChannel()
     const sent: DecodedFrame[] = []
     const replay = new ReplayBuffer(1024 * 1024, 60_000, 2 * 1024 * 1024)
-    broadcast._attachPeer(new IndexedPeer({ send: (frame) => void sent.push(decode(frame)) }, 7, replay))
+    broadcast._attachPeer(
+      new IndexedPeer({ send: (frame) => void sent.push(decode(frame)), bufferedAmount: () => 0 }, 7, replay),
+    )
     broadcast._dispatchFrame({ tag: TAG.BROADCAST_SUB, index: 7, binary: false })
     await broadcast.publish('on')
     broadcast._dispatchFrame({ tag: TAG.BROADCAST_UNSUB, index: 7, binary: false })
@@ -337,6 +340,7 @@ describe('keyed in-process broadcast', () => {
           send: (frame) => {
             frames.push(frame)
           },
+          bufferedAmount: () => 0,
         },
         7,
         new ReplayBuffer(1024 * 1024, 60_000, 2 * 1024 * 1024),
@@ -732,6 +736,7 @@ describe('Broadcast shield validation', () => {
           send: (frame) => {
             frames.push(frame)
           },
+          bufferedAmount: () => 0,
         },
         7,
         new ReplayBuffer(1024 * 1024, 60_000, 2 * 1024 * 1024),
@@ -760,7 +765,13 @@ describe('Broadcast shield validation', () => {
     const seen: Array<{ text: string }> = []
     receiver.subscribe((m) => seen.push(m))
 
-    sender._attachPeer(new IndexedPeer({ send: () => {} }, 7, new ReplayBuffer(1024 * 1024, 60_000, 2 * 1024 * 1024)))
+    sender._attachPeer(
+      new IndexedPeer(
+        { send: () => {}, bufferedAmount: () => 0 },
+        7,
+        new ReplayBuffer(1024 * 1024, 60_000, 2 * 1024 * 1024),
+      ),
+    )
     void sender._onPeerPublishAckReqMessage(JSON.stringify({ text: 'malicious' }), 1)
 
     expect(seen).toEqual([])
@@ -774,6 +785,39 @@ describe('Broadcast shield validation', () => {
 // ───────────────────────────────────────────────────────────────────────────
 
 describe('Broadcast static bus (publish/subscribe)', () => {
+  it('delivers a publish made from a listener after the message it answers, to every subscriber', async () => {
+    const seen: string[] = []
+    const unsubscribeFirst = Broadcast.subscribe<number>('room:answer-order', (n) => {
+      seen.push(`first:${n}`)
+      if (n === 1) void Broadcast.publish('room:answer-order', 2)
+    })
+    const unsubscribeSecond = Broadcast.subscribe<number>('room:answer-order', (n) => void seen.push(`second:${n}`))
+    await Broadcast.publish('room:answer-order', 1)
+    await vi.waitFor(() => expect(seen).toHaveLength(4))
+    unsubscribeFirst()
+    unsubscribeSecond()
+    expect(seen).toEqual(['first:1', 'second:1', 'first:2', 'second:2'])
+  })
+
+  it('lets the event loop run while a listener answers every message on its own key', async () => {
+    let answers = 0
+    const unsubscribe = Broadcast.subscribe<number>('room:self-answer', (n) => {
+      answers++
+      void Broadcast.publish('room:self-answer', n + 1)
+    })
+    const unsubscribeAsync = Broadcast.subscribe<number>('room:self-answer-async', async (n) => {
+      await Promise.resolve()
+      answers++
+      void Broadcast.publish('room:self-answer-async', n + 1)
+    })
+    void Broadcast.publish('room:self-answer', 0)
+    void Broadcast.publish('room:self-answer-async', 0)
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    unsubscribe()
+    unsubscribeAsync()
+    expect(answers).toBeGreaterThan(0)
+  })
+
   it('reports the end of a subscription its consumers share once', async () => {
     const ending = new PendingAttempt()
     let opens = 0

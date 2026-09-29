@@ -3418,13 +3418,18 @@ type Peer = ReturnType<typeof attachPeer>
 function attachPeer(stub: ServerChannel, lastSeq?: number, broadcast?: BroadcastSubscriptions) {
   const frames: Uint8Array[] = []
   const replay = stub._replayBuffer!
-  if (lastSeq !== undefined) frames.push(...replay.getAfter(lastSeq))
+  if (lastSeq !== undefined) {
+    const missed = replay.getAfter(lastSeq)
+    if (typeof missed === 'number') throw new Error('The replay dropped a frame the peer lacks')
+    frames.push(...missed)
+  }
   const peer = new IndexedPeer(
     {
       send: (frame, onCommit) => {
         frames.push(frame)
         onCommit?.()
       },
+      bufferedAmount: () => 0,
     },
     7,
     replay,

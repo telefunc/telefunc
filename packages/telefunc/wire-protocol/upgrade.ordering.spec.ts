@@ -16,6 +16,7 @@ function createHarness() {
       setSessionId: (_conn, id) => (sessionId = id),
       getConnId: () => null,
       sendNow: (_conn, frame) => sent.push(decode(frame)),
+      bufferedAmount: () => 0,
       terminateConnection: () => (terminated = true),
     }
     mux.onConnectionOpen(conn, transport)
@@ -78,7 +79,11 @@ test('a control frame is bounded by what the protocol can describe, a data frame
   // A perfectly well-formed RECONCILE, just larger than a connection could legitimately need.
   // Well-formed matters: a malformed one would be refused by the parser either way, which is
   // exactly what this has to distinguish — the cap has to reject it without parsing it.
-  const open = Array.from({ length: 5_200 }, (_, ix) => ({ id: 'x'.repeat(256), ix, lastSeq: 0 }))
+  const open = Array.from({ length: Math.ceil(WIRE_MAX_CONN_CTRL_FRAME_BYTES / 256) }, (_, ix) => ({
+    id: 'x'.repeat(256),
+    ix,
+    lastSeq: 0,
+  }))
   const oversize = encode.reconcile({ open })
   expect(oversize.byteLength).toBeGreaterThan(WIRE_MAX_CONN_CTRL_FRAME_BYTES)
   await wire.deliver(oversize)

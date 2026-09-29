@@ -197,7 +197,7 @@ A Durable Object registers with the authority on its first subscription to a key
 | Buffering | The server buffers messages while the client is disconnected: up to `config.channel.bufferLimit` for text (default: 512 KB) and up to `config.channel.bufferLimitBinary` for binary (default: 2 MB). Binary frames have a separate budget and can never evict text. |
 | Replay | Both sides keep a replay buffer. On reconnect, missing messages are replayed and duplicates are ignored. |
 | Acknowledgements | `send(data, { ack: true })` resolves when the other side processes the message. |
-| Loss | If the disconnection lasts longer than `config.channel.reconnectTimeout`, the channel closes with <Link href="/channel#errors">`NetworkError`</Link>. |
+| Loss | If the disconnection lasts longer than `config.channel.reconnectTimeout`, or a reconnect needs messages a replay buffer no longer holds, the channel closes with <Link href="/channel#errors">`NetworkError`</Link>. |
 
 ### Broadcast messages (`publish` / `subscribe`)
 

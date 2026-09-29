@@ -107,8 +107,9 @@ export const UPGRADE_STAGE_TTL_MS = 10_000
 export const UPGRADE_MAX_ID_BYTES = 256
 
 /** Worst case for one open entry beyond its id: the key names, `"ix":65535`,
- *  `"lastSeq":4294967295`, `"initial":true`, `"broadcast":{"text":false,"binary":false}` and the separator. */
-const RECONCILE_ENTRY_ENVELOPE_BYTES = 99
+ *  `"lastSeq":4294967295`, `"initial":true`, `"broadcast":{"text":false,"binary":false}`, `"probe":4294967295` and the
+ *  separator. */
+const RECONCILE_ENTRY_ENVELOPE_BYTES = 118
 
 /** Bounds what unauthenticated PREPARE frames can pin in memory before any of them commits. */
 export const UPGRADE_MAX_STAGED_RECORDS = 1_024
@@ -139,6 +140,14 @@ export const WIRE_MAX_CONN_CTRL_FRAME_BYTES =
  *  burst is worse than no cap. */
 export const WIRE_RECV_BACKLOG_BASE_BYTES = 64 * 1024 * 1024
 export const WIRE_RECV_BACKLOG_BASE_FRAMES = 50_000
+
+/** Per-connection ceiling on what the server's wire holds for its peer, where the runtime reports it. Each channel
+ *  attached to the wire adds the most its flow control lets wait there for a page that reads (see
+ *  `ServerChannel._sendAllowance`), and the largest frame sent on the wire, as a send puts one frame past a limit. This
+ *  base is room for what flow control doesn't count, control frames and the answers to a page's ack requests, as much
+ *  as the largest frame a page may send. A wire holding more serves a peer that grants credit it can't take, or doesn't
+ *  read what it asked for, and is terminated as a transient loss. */
+export const WIRE_SEND_BACKLOG_BASE_BYTES = WIRE_MAX_RAW_FRAME_BYTES
 
 /** Largest SSE request metadata header the server will read off a POST body. */
 export const SSE_METADATA_MAX_BYTES = 64 * 1024
@@ -205,9 +214,9 @@ export const CHANNEL_RECONNECT_MAX_DELAY_MS = 5_000
 // link's BDP is the only way to avoid this stall (no algorithm beats W/RTT). Rather
 // than picking a single fixed `W`, the receiver maintains a gRPC-style BDP estimator
 // (see `bdp-estimator.ts`) that probes the in-flight byte count once per RTT and
-// doubles `W` whenever the sample saturates ≥ 2/3 of the current window. Idle channels
-// stay at the small initial cost; fat-pipe channels climb to the cap within a handful
-// of RTTs.
+// doubles `W` whenever the sample saturates ≥ 2/3 of the current window, unless a queue
+// the probe's ack waited behind accounts for it. Idle channels stay at the small initial
+// cost; fat-pipe channels climb to the cap within a handful of RTTs.
 //
 // Scope — which frames credit governs:
 //
@@ -226,17 +235,20 @@ export const CHANNEL_RECONNECT_MAX_DELAY_MS = 5_000
 //                             deadlocks (server with depleted credit could otherwise
 //                             never reply to a client that's waiting for that reply
 //                             to free credit).
-//   PUBLISH, PUBLISH_BINARY   broadcast fan-out, separate flow control entirely.
+//   PUBLISH, PUBLISH_BINARY   broadcast fan-out: counted in bytes only, taking no
+//                             message credit and starting no BDP probe, against a
+//                             byte window the page sets at CREDIT_WINDOW_MAX_BYTES.
+//                             Nothing waits on them: the count tells the server how
+//                             far behind the page is, past which it closes the
+//                             page's broadcast channel.
 //
 // Window semantics: `WINDOW` and `MSG_WINDOW` advertise cumulative limits, as QUIC's MAX_DATA
 // does: what the receiver has consumed plus its window. The sender's credit is that limit
 // minus what it has sent, so what is still in flight counts against it. Each side advertises
 // its limits again on a reattach to another wire, and the receiver keeps its grown `W` across
 // one (BDP is a property of the path, not of any single wire instance: slight divergence from
-// gRPC's per-connection reset, acceptable for typical transport hiccups). On such a reattach
-// the sender also sends its totals (`SENT`): what of them never arrived was lost beyond the
-// replay buffer, and the receiver counts it as consumed. A reattach on the same wire lost
-// nothing and sends neither.
+// gRPC's per-connection reset, acceptable for typical transport hiccups). A reattach on the
+// same wire lost nothing and advertises nothing.
 
 /** Initial credit window — sized so a typical ~MB-scale burst doesn't stall on
  *  the BDP ramp-up. Grows further via the estimator up to `CREDIT_WINDOW_MAX_BYTES`. */

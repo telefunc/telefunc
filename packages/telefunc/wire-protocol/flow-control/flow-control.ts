@@ -11,12 +11,11 @@ import {
   FC_SELF_UTIL_THRESHOLD,
 } from '../constants.js'
 
-/** Limits and totals go out mod 2^32. */
+/** Limits go out mod 2^32. */
 interface FlowControlEmit {
   byteWindowUpdate(limit: number): void
   msgWindowUpdate(limit: number): void
-  sent(bytes: number, messages: number): void
-  bdpPing(): void
+  bdpPing(probe: number): void
 }
 
 /**
@@ -34,7 +33,11 @@ interface FlowControlEmit {
  *
  * Limits are cumulative, as QUIC's MAX_DATA: the receiver advertises what it has consumed plus its window, and the
  * sender's credit is that limit minus what it has sent, so what is still in flight counts against it. Totals are exact
- * here and travel mod 2^32: a value off the wire is read as its signed 32-bit distance from the one it updates.
+ * here, and limits travel mod 2^32: a limit off the wire is read as its signed 32-bit distance from the one it updates.
+ *
+ * Senders waiting on credit get it one at a time, oldest first: while others wait, a send that leaves credit hands it
+ * to the next and waits behind them. So senders that each await their sends, once waiting, pass the limit by one
+ * frame together. Senders still sending freely as the credit runs out each have a frame out past it.
  */
 class FlowControl {
   private _bdp = new BdpEstimator()
@@ -43,6 +46,8 @@ class FlowControl {
   private _sentMessages = 0
   private _limitBytes: number = CREDIT_WINDOW_INITIAL_BYTES
   private _limitMessages: number = CREDIT_MSG_WINDOW_INITIAL
+  /** `_sentBytes` after the last frame sent while the byte limit was ahead of it. */
+  private _sentWithCredit = 0
   // Receiver side: what arrived, what was consumed, and what had been consumed when each limit last went out.
   private _receivedBytes = 0
   private _receivedMessages = 0
@@ -50,9 +55,15 @@ class FlowControl {
   private _consumedMessages = 0
   private _advertisedBytes = 0
   private _advertisedMessages = 0
-  /** Single deferred shared by all senders blocked on credit. */
-  private _creditReady: { promise: Promise<void>; resolve: () => void } | null = null
+  /** Senders waiting on credit, oldest first. */
+  private _waiters: Array<() => void> = []
+  /** A waiter was handed the credit and no send was counted since. */
+  private _released = false
+  private _releases = 0
   private _shutdown = false
+  /** Since this side last answered a `BDP_PING`: whether its credit ran out, as more came or as the ping did, while its
+   *  wire held nothing. */
+  private _starved = false
 
   // Self-utilisation rolling-sum state. Two buckets, phase-weighted blend.
   private _prevBucket = 0
@@ -60,7 +71,11 @@ class FlowControl {
   private _curBucketStart = performance.now()
   private _openedAt = performance.now()
 
-  constructor(private readonly _emit: FlowControlEmit) {
+  /** `backlog`: bytes the channel's wire holds that haven't gone out, `undefined` where the runtime can't tell. */
+  constructor(
+    private readonly _emit: FlowControlEmit,
+    private readonly _backlog: () => number | undefined,
+  ) {
     macrotaskYield.assertSupported()
   }
 
@@ -72,13 +87,29 @@ class FlowControl {
     return this._bdp.msgWindow
   }
 
+  /** Sender-side: no byte credit is left. */
+  get isPastByteCredit(): boolean {
+    return this._limitBytes - this._sentBytes <= 0
+  }
+
+  /** Sender-side: bytes of the frames sent once past the byte limit that are still past it. The frame that crossed it,
+   *  sent with credit, is credit flow control's one-frame overshoot and isn't counted. */
+  get bytesSentPastCredit(): number {
+    return Math.max(0, this._sentBytes - Math.max(this._limitBytes, this._sentWithCredit))
+  }
+
   /** Sender-side: count one frame of `bytes` against credit. Returns `void` when
-   *  both credit axes have headroom AND our loop utilisation is below the gate.
-   *  Otherwise a Promise that resolves on credit refresh (credit-gated) or one
+   *  both credit axes have headroom, no other sender waits, AND our loop utilisation is below the gate.
+   *  Otherwise a Promise that resolves at the sender's turn with credit (credit-gated) or one
    *  macrotask later (util-gated — single yield, no re-check). */
   decrement(bytes: number): void | Promise<void> {
     this.countSent(bytes)
+    this._released = false
     if (this._isOutOfCredit()) return this._waitForCredit()
+    if (this._waiters.length > 0) {
+      this._releaseOne()
+      return this._waitForCredit()
+    }
     if (this._selfUtilisation() > FC_SELF_UTIL_THRESHOLD) {
       return macrotaskYield.yield()
     }
@@ -86,7 +117,7 @@ class FlowControl {
 
   /** Sender-side: count a frame that went out without a credit gate, one buffered while no peer was attached. */
   countSent(bytes: number): void {
-    this._sentBytes += bytes
+    this._countSentBytes(bytes)
     this._sentMessages += 1
   }
 
@@ -94,6 +125,7 @@ class FlowControl {
   onPeerByteWindow(limit: number): void {
     const raise = (limit - this._limitBytes) | 0
     if (raise <= 0) return
+    this._noteStarved()
     this._limitBytes += raise
     this._tryWakeCreditWaiters()
   }
@@ -101,18 +133,19 @@ class FlowControl {
   onPeerMessageWindow(limit: number): void {
     const raise = (limit - this._limitMessages) | 0
     if (raise <= 0) return
+    this._noteStarved()
     this._limitMessages += raise
     this._tryWakeCreditWaiters()
   }
 
-  /** Receiver-side: the peer's totals through the frame's seq. What didn't arrive by then was lost beyond its replay
-   *  buffer, and counts as consumed, as the final size of a reset QUIC stream does: the peer counted it as sent. */
-  onPeerSent(bytes: number, messages: number): void {
-    const lostBytes = (bytes - this._receivedBytes) | 0
-    const lostMessages = (messages - this._receivedMessages) | 0
-    this._receivedBytes += lostBytes
-    this._receivedMessages += lostMessages
-    this._consume(lostBytes, lostMessages)
+  /** Sender-side: answer a `BDP_PING`. Returns whether, since the last one, the window starved the wire: its credit ran
+   *  out, as more came or as the ping did, while the wire held nothing, or what the runtime can't tell. A wire that
+   *  held a backlog each time was busy, and a larger window would only have queued more on it. */
+  onPing(): boolean {
+    this._noteStarved()
+    const starved = this._starved
+    this._starved = false
+    return starved
   }
 
   /** Receiver-side: account one received frame off the wire. Emits a
@@ -120,7 +153,13 @@ class FlowControl {
   onReceived(bytes: number): void {
     this._receivedBytes += bytes
     this._receivedMessages += 1
-    if (this._bdp.onReceive(bytes)) this._emit.bdpPing()
+    if (this._bdp.onReceive(bytes)) this._emit.bdpPing(this._bdp.probe)
+  }
+
+  /** Receiver-side: the number of a probe for the RECONCILE entry of an attach on `wire`, which the peer answers before
+   *  any of the channel's frames (see `BdpEstimator`), or `undefined` where that wire's round trip is measured already. */
+  probeAttach(wire: number): number | undefined {
+    return this._bdp.probeAttach(wire)
   }
 
   /** Receiver-side: account post-callback consumption of one frame. Emits
@@ -130,11 +169,12 @@ class FlowControl {
     this._consume(bytes, 1)
   }
 
-  /** Settle `BDP_PING_ACK`. Each axis grows iff its own sample saturated ≥ 2/3
-   *  of its current window AND our own self-utilisation is below threshold.
+  /** Settle `BDP_PING_ACK`, which says whether the window starved the peer's wire. Each axis grows iff its own sample
+   *  saturated ≥ 2/3 of its current window, the byte sample leaving out the peer's queue (see `BdpEstimator`), AND our
+   *  own self-utilisation is below threshold.
    *  On growth, the new limit goes out to the peer immediately. */
-  onPingAck(): void {
-    const suggest = this._bdp.onPingAck()
+  onPingAck(probe: number, starved: boolean): void {
+    const suggest = this._bdp.onPingAck(probe, starved)
     if (!suggest.acknowledged) return
     const wantBytes = suggest.bytes === 'grow'
     const wantMsgs = suggest.msgs === 'grow'
@@ -186,13 +226,32 @@ class FlowControl {
     this._curBucketStart = now
   }
 
-  /** Attach on another wire than the last. The probe in flight rode the prior wire, and the limits and totals go out
-   *  again, which repairs what the prior wire lost of them. Credit carries over: it is cumulative. */
+  /** Attach on another wire than the last. The probe in flight rode the prior wire, and the limits go out again,
+   *  which repairs what the prior wire lost of them. Credit carries over: it is cumulative. */
   reattach(): void {
     this._bdp.reset()
     this._advertiseBytes()
     this._advertiseMessages()
-    this._emit.sent(this._sentBytes >>> 0, this._sentMessages >>> 0)
+  }
+
+  /** Receiver-side: a byte window of at least `bytes`, advertised with the next limit. Grow-only. */
+  widenByteWindow(bytes: number): void {
+    this._bdp.bumpInitialByteWindow(bytes)
+  }
+
+  // A frame counted in bytes only takes no message credit and starts no BDP probe: a broadcast's publish, which
+  // nothing waits on.
+
+  countSentBytes(bytes: number): void {
+    this._countSentBytes(bytes)
+  }
+
+  onReceivedBytes(bytes: number): void {
+    this._receivedBytes += bytes
+  }
+
+  onConsumedBytes(bytes: number): void {
+    this._consume(bytes, 0)
   }
 
   /** Bump to the batch-POST initial window and advertise it. Grow-only / idempotent. */
@@ -225,30 +284,49 @@ class FlowControl {
     this._emit.msgWindowUpdate((this._consumedMessages + this._bdp.msgWindow) >>> 0)
   }
 
+  private _countSentBytes(bytes: number): void {
+    const hadCredit = !this.isPastByteCredit
+    this._sentBytes += bytes
+    if (hadCredit) this._sentWithCredit = this._sentBytes
+  }
+
+  private _noteStarved(): void {
+    if (this._starved || !this._isOutOfCredit()) return
+    const backlog = this._backlog()
+    this._starved = backlog === undefined || backlog === 0
+  }
+
   private _isOutOfCredit(): boolean {
     return this._limitBytes - this._sentBytes <= 0 || this._limitMessages - this._sentMessages <= 0
   }
 
   private _tryWakeCreditWaiters(): void {
-    if (!this._creditReady) return
-    if (!this._shutdown && this._isOutOfCredit()) return
-    const ready = this._creditReady
-    this._creditReady = null
-    ready.resolve()
+    if (this._shutdown) {
+      for (const resolve of this._waiters.splice(0)) resolve()
+      return
+    }
+    if (this._released || this._isOutOfCredit()) return
+    this._releaseOne()
+  }
+
+  /** The oldest waiter's turn. One that hasn't sent by the next macrotask, as one that is done sending, passes it on. */
+  private _releaseOne(): void {
+    const resolve = this._waiters.shift()
+    if (!resolve) return
+    this._released = true
+    const release = ++this._releases
+    resolve()
+    if (this._waiters.length === 0) return
+    void macrotaskYield.yield().then(() => {
+      if (!this._released || this._releases !== release) return
+      this._released = false
+      this._tryWakeCreditWaiters()
+    })
   }
 
   private _waitForCredit(): Promise<void> {
-    if (this._shutdown || !this._isOutOfCredit()) {
-      return resolvedPromise
-    }
-    if (!this._creditReady) {
-      let resolve!: () => void
-      const promise = new Promise<void>((r) => {
-        resolve = r
-      })
-      this._creditReady = { promise, resolve }
-    }
-    return this._creditReady.promise
+    if (this._shutdown) return resolvedPromise
+    return new Promise<void>((resolve) => this._waiters.push(resolve))
   }
 }
 
