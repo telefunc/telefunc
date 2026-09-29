@@ -37,16 +37,7 @@ import { createPushReadableStream, type PushReadableStream } from '../push-reada
 import { replayWindow } from '../flow-control/flow-control.js'
 import { ReplayBuffer } from '../replay-buffer.js'
 import { REQUEST_KIND, REQUEST_KIND_HEADER, getMarkedRequestUrl } from '../request-kind.js'
-import {
-  ACK_STATUS,
-  ERROR_REASON,
-  TAG,
-  decode,
-  encode,
-  isReplayLoss,
-  isSequencedFrame,
-  payloadBytes,
-} from '../shared-ws.js'
+import { ACK_STATUS, ERROR_REASON, TAG, decode, encode, isSequencedFrame, payloadBytes } from '../shared-ws.js'
 import type {
   AckResultStatus,
   ChannelFrame,
@@ -58,7 +49,6 @@ import type {
   ReconcileOpenEntry,
   ReconcilePayload,
   ReconciledPayload,
-  ReplayLoss,
   SeqReader,
 } from '../shared-ws.js'
 import { encodeSseRequest, encodeSseRequestMetadata } from '../sse-request.js'
@@ -608,14 +598,7 @@ class ClientConnection implements MuxConnection {
     }
     const ix = this.nextIndex++
     this.enterChannelPending(ix, channel, true)
-    this.replayBuffers.set(
-      ix,
-      new ReplayBuffer(
-        this.clientReplayBufferBytes,
-        this.replayMaxAgeMs(this.pingIntervalMs),
-        this.clientReplayBufferBinaryBytes,
-      ),
-    )
+    this.replayBuffers.set(ix, new ReplayBuffer(this.clientReplayBufferBytes, this.clientReplayBufferBinaryBytes))
     this.fitReplays(channel)
 
     if (!this.transport.hasWire() && !this.transport.isConnecting()) {
@@ -634,13 +617,8 @@ class ClientConnection implements MuxConnection {
   }
 
   /** How long a gone server is still held: until its loss is noticed at the pong deadline, then for `reconnectTimeout`. */
-  reconnectWindow(pingIntervalMs = this.pingIntervalMs): number {
-    return Math.min(TIMER_DELAY_MAX_MS, 2 * pingIntervalMs + this.reconnectTimeoutMs)
-  }
-
-  /** As the server's, a frame stays replayable through the reconnect window, plus a second for the reconnect itself. */
-  private replayMaxAgeMs(pingIntervalMs: number): number {
-    return Math.min(TIMER_DELAY_MAX_MS, this.reconnectWindow(pingIntervalMs) + 1_000)
+  reconnectWindow(): number {
+    return Math.min(TIMER_DELAY_MAX_MS, 2 * this.pingIntervalMs + this.reconnectTimeoutMs)
   }
 
   private registerReconcileTimer: ReturnType<typeof setTimeout> | null = null
@@ -907,8 +885,8 @@ class ClientConnection implements MuxConnection {
             ? new ChannelOverflowError(
                 'Broadcast closed: this client fell further behind than the server holds for a client',
               )
-            : isReplayLoss(frame.reason)
-              ? replayLossError('server', frame.reason)
+            : frame.reason === ERROR_REASON.LOST
+              ? replayLossError('server')
               : makeBugError(),
         )
         this.startTtlIfIdle()
@@ -1553,9 +1531,8 @@ class ClientConnection implements MuxConnection {
       peerWindow: replayWindow(ctrl.clientReplayBuffer, ctrl.clientReplayBufferBinary),
     }
     // Before this reconcile stores anything: a channel registered before the first RECONCILED was sized with the defaults.
-    const maxAgeMs = this.replayMaxAgeMs(ctrl.pingInterval)
     for (const replay of this.replayBuffers.values()) {
-      replay.setLimits(this.clientReplayBufferBytes, maxAgeMs, this.clientReplayBufferBinaryBytes)
+      replay.setLimits(this.clientReplayBufferBytes, this.clientReplayBufferBinaryBytes)
     }
     for (const { channel } of this.channels.values()) this.fitReplays(channel)
 
@@ -1662,18 +1639,18 @@ class ClientConnection implements MuxConnection {
   private replayTo(ix: number, entry: ChannelEntry, lastSeq: number, throughSeq = Infinity): OutboundFrame[] {
     this.serverHasThrough(ix, lastSeq)
     const missed = this.replayBuffers.get(ix)!.getAfter(lastSeq, throughSeq)
-    if (typeof missed !== 'number') return missed.map((frame) => ({ kind: 'reconcile', frame }))
+    if (missed !== null) return missed.map((frame) => ({ kind: 'reconcile', frame }))
     // One the server ended needs nothing more.
     if (entry.state.tag === 'closed' && entry.state.delivered) return []
-    return [this.loseChannel(ix, entry, missed)]
+    return [this.loseChannel(ix, entry)]
   }
 
   /** Ends the channel on both ends. What it queued is dropped, as it would reach the server past the hole. The ERROR
    *  isn't kept in the replay: a later reconcile finds the same hole and sends another. */
-  private loseChannel(ix: number, entry: ChannelEntry, loss: ReplayLoss): OutboundFrame {
+  private loseChannel(ix: number, entry: ChannelEntry): OutboundFrame {
     this.sendBuffer = this.sendBuffer.filter(({ channelIx }) => channelIx !== ix)
-    const frame = encode.error(ix, loss, this.replayBuffers.get(ix)!.nextSeq())
-    entry.channel._onTransportClose(replayLossError('client', loss))
+    const frame = encode.error(ix, ERROR_REASON.LOST, this.replayBuffers.get(ix)!.nextSeq())
+    entry.channel._onTransportClose(replayLossError('client'))
     return { kind: 'control', frame }
   }
 

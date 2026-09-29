@@ -1,7 +1,8 @@
 // A channel across a wire that dies without a word: a stream that awaits its sends resumes after the reconnect without
-// loss, the page's close request, close acknowledgement or abort, and the answers that complete a close, replay as its
-// data does, and a reconnect that needs what a replay dropped ends the channel on both ends. Past seqs 2^31 and 2^32, a
-// channel does all it does before them. These drive the real ClientChannel against the real server over each wire.
+// loss, however slow the link, the page's close request, close acknowledgement or abort, and the answers that complete
+// a close, replay as its data does, and a reconnect that needs what a replay dropped ends the channel on both ends.
+// Past seqs 2^31 and 2^32, a channel does all it does before them. These drive the real ClientChannel against the real
+// server over each wire.
 
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 import type { Peer } from 'crossws'
@@ -1051,7 +1052,8 @@ describe.each(WIRES)('over %s, a stream that awaits its sends, whose wire drops 
 
 /** A 64 KiB binary message that names its place in the stream. */
 const block = (n: number) => new Uint8Array(64 * 1_024).fill(n)
-/** Bytes a second of a link that carries a message a second. */
+/** Bytes a second of a link that carries a message a second, and a window, 32 of them or more, in far longer than the
+ *  reconnect window, 7 s with a 1 s pingInterval and a 5 s reconnectTimeout. */
 const SLOW = 64 * 1_024
 
 function reconnectTimeout5s() {
@@ -1083,6 +1085,160 @@ describe.each(WIRES)(
     })
   },
 )
+
+describe.each(WIRES)(
+  'over %s, a stream that awaits its sends over a link slower than its window per reconnect window,',
+  (wire) => {
+    beforeEach(reconnectTimeout5s)
+
+    test('from the server, resumes without loss when its wire drops', async () => {
+      const { net, channel } = page(wire)
+      net.rate.down = SLOW
+      const server = register()
+      const pageChannel = channel(server.id)
+      const got: number[] = []
+      pageChannel.listenBinary((data) => void got.push(data[0]!))
+      const closed = [closedWith(pageChannel), closedWith(server)]
+      await advance(500)
+      produce((n) => server.sendBinary(block(n)), 60, 0)
+      await advance(12_000)
+      expect(got.length).toBeGreaterThan(0)
+      net.die() // the page reconnects over a link as slow
+      await advance(90_000)
+      expect(closed.map(({ err }) => (err instanceof Error ? err.message : err))).toEqual(['open', 'open'])
+      expect(got).toEqual(inOrder(60))
+    })
+
+    test('from the page, resumes without loss when its wire drops', async () => {
+      const { net, channel } = page(wire)
+      net.rate.up = SLOW
+      const server = register()
+      const got: number[] = []
+      server.listenBinary((data) => void got.push(data[0]!))
+      const pageChannel = channel(server.id)
+      const closed = [closedWith(pageChannel), closedWith(server)]
+      await advance(500)
+      produce((n) => pageChannel.sendBinary(block(n)), 60, 0)
+      await advance(12_000)
+      expect(got.length).toBeGreaterThan(0)
+      net.die() // the page reconnects over a link as slow
+      await advance(90_000)
+      expect(closed.map(({ err }) => (err instanceof Error ? err.message : err))).toEqual(['open', 'open'])
+      expect(got).toEqual(inOrder(60))
+    })
+
+    test('from the server, which closes the channel while the page is behind, gets the page all of it when its wire drops, then closes it gracefully', async () => {
+      const { net, channel } = page(wire)
+      net.rate.down = SLOW
+      const server = register()
+      const pageChannel = channel(server.id)
+      const got: number[] = []
+      pageChannel.listenBinary((data) => void got.push(data[0]!))
+      const pageClosed = closedWith(pageChannel)
+      await advance(500)
+      const closing = settled(
+        (async () => {
+          for (let n = 0; n < 40; n++) await server.sendBinary(block(n))
+          return server.close()
+        })(),
+      )
+      await advance(24_500)
+      expect(closing.value).toBe(1) // it timed out with the page behind
+      expect(got.length).toBeLessThan(40)
+      net.die() // the page reconnects over a link as slow
+      await advance(60_000)
+      expect((pageClosed.err as Error | undefined)?.message).toBeUndefined()
+      expect(got).toEqual(inOrder(40))
+    })
+
+    test("from the server, which the page aborts with the server's messages still on their way, is let go on the server at the page's next heartbeat", async () => {
+      const { net, channel } = page(wire)
+      net.rate.down = SLOW
+      const server = register()
+      const pageChannel = channel(server.id)
+      await advance(500)
+      produce((n) => server.sendBinary(block(n)), 20, 0)
+      await advance(3_000)
+      pageChannel.abort()
+      await advance(2_000)
+      expect(getChannelMux()['channels'].has(server.id)).toBe(false)
+      expect(server._replayBuffer).toBe(null)
+    })
+  },
+)
+
+describe.each(WIRES)('over %s, past the reconnect window,', (wire) => {
+  beforeEach(reconnectTimeout5s)
+
+  test('a page that stays away has the server let go of what it kept for it, and its reconnect after that ends the channel with NetworkError', async () => {
+    const { net, channel } = page(wire)
+    net.rate.down = SLOW
+    const server = register()
+    const pageChannel = channel(server.id)
+    const pageClosed = closedWith(pageChannel)
+    const serverClosed = closedWith(server)
+    await advance(500)
+    produce((n) => server.sendBinary(block(n)), 200, 0)
+    await advance(5_000)
+    net.rate.down = 0
+    net.cut()
+    await advance(1_000)
+    expect(server._replayBuffer!.byteLength).toBeGreaterThan(1_024 * 1_024) // what the page lacks
+    await advance(7_000) // the server notices the page is gone, then waits out reconnectTimeout
+    expect((serverClosed.err as Error).message).toBe('Channel timed out: client did not reconnect within grace period')
+    expect(server._replayBuffer).toBe(null)
+    expect(getChannelMux()['channels'].has(server.id)).toBe(false)
+    net.heal()
+    await advance(10_000)
+    expect((pageClosed.err as Error).message).toBe('Channel not acknowledged by server after reconnect')
+  })
+
+  test('a channel the server ended while its page was behind is let go once that page stays away', async () => {
+    const { net, channel } = page(wire)
+    net.rate.down = SLOW
+    const server = register()
+    channel(server.id)
+    await advance(500)
+    const closing = settled(
+      (async () => {
+        for (let n = 0; n < 40; n++) await server.sendBinary(block(n))
+        return server.close()
+      })(),
+    )
+    for (let waited = 0; waited < 30_000 && closing.value === 'pending'; waited += 500) await advance(500)
+    expect(closing.value).toBe(1) // it timed out with the page behind
+    await advance(10_000)
+    expect(server._replayBuffer!.byteLength).toBeGreaterThan(1_024 * 1_024) // what the page lacks
+    net.rate.down = 0
+    net.cut()
+    await advance(5_000)
+    expect(getChannelMux()['channels'].has(server.id)).toBe(true)
+    await advance(4_000) // the server noticed the page is gone within 2 s, and waited out reconnectTimeout
+    expect(server._replayBuffer).toBe(null)
+    expect(getChannelMux()['channels'].has(server.id)).toBe(false)
+  })
+
+  test('a server that stays away has the page let go of what it kept for it, and end the channel with NetworkError', async () => {
+    const { net, channel } = page(wire)
+    net.rate.up = SLOW
+    const server = register()
+    const pageChannel = channel(server.id)
+    const pageClosed = closedWith(pageChannel)
+    const connection = (pageChannel as any)._connection
+    await advance(500)
+    produce((n) => pageChannel.sendBinary(block(n)), 200, 0)
+    await advance(5_000)
+    net.rate.up = 0
+    net.cut()
+    await advance(1_000)
+    expect(connection.replayBuffers.get(connection.channelIndex.get(pageChannel)).byteLength).toBeGreaterThan(
+      1_024 * 1_024,
+    ) // what the server lacks
+    await advance(15_000)
+    expect(pageClosed.err).toBeInstanceOf(NetworkError)
+    expect(connection.replayBuffers.size).toBe(0)
+  })
+})
 
 describe.each(WIRES)("over %s, a stream that awaits its sends, begun before its page's first RECONCILED,", (wire) => {
   test("from the page, on a channel it passes to the server, resumes without loss when its wire drops with it in flight, however small the page's replay", async () => {
@@ -1422,18 +1578,24 @@ test('over sse, a stream that awaits its sends keeps whole across the upgrade to
   expect(closed.map(({ err }) => err)).toEqual(['open', 'open'])
 })
 
-test('over ws, a page lets go of a closed channel whose close the server never got once nothing of it is left to replay', async () => {
+test("over ws, a page keeps a closed channel whose close the server never got while its wire lives, and lets it go once a reconnect's replay gets the close there", async () => {
   const { net, channel } = page('ws')
   const kept = channel(register().id)
-  const pageChannel = channel(register().id)
+  const server = register()
+  const serverClosed = closedWith(server)
+  const pageChannel = channel(server.id)
   await advance(500)
   net.losePageFrame(TAG.CLOSE)
   const closing = settled(pageChannel.close({ timeout: 1_000 }))
   await advance(5_000)
   expect(closing.value).toBe(1)
   const connection = (kept as unknown as { _connection: { channels: Map<number, unknown> } })._connection
-  expect(connection.channels.size).toBe(2) // the server may lack its close
-  await advance(65_000) // its replay's age passes
+  await advance(65_000)
+  expect(connection.channels.size).toBe(2) // the server lacks its close
+  expect(serverClosed.err).toBe('open')
+  net.die()
+  await advance(5_000)
+  expect(serverClosed.err).toBeUndefined()
   expect(connection.channels.size).toBe(1)
 })
 
