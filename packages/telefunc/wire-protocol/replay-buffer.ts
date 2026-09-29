@@ -6,9 +6,7 @@ import { ERROR_REASON, type ReplayLoss } from './shared-ws.js'
  *
  * Stores encoded frames keyed by monotonic sequence number for replay
  * on reconnect. Bounded by byte size — oldest entries are evicted when full.
- * Optionally also bounded by age — entries older than `maxAgeMs` are evicted
- * at push time, which matches the reconnect window: frames that arrived before
- * the reconnect deadline can never be replayed anyway.
+ * Also bounded by age: entries older than `maxAgeMs` are evicted.
  *
  * Binary frames are stored in a separate lane with its own byte budget, so a
  * large binary cannot evict text frames.
