@@ -46,6 +46,7 @@ import {
   isReplayLoss,
   isSequencedFrame,
   payloadBytes,
+  pingProbe,
 } from '../shared-ws.js'
 import type {
   AckResultStatus,
@@ -150,6 +151,25 @@ class Heartbeat {
   }
 }
 
+/** When each PING a wire carries went out, until the PONG that echoes its probe comes back. */
+class PingClock {
+  private readonly sentAt = new Map<number, number>()
+
+  /** A PING went out on the wire. One sent again keeps the time it first went. */
+  sent(ping: Uint8Array): void {
+    const probe = pingProbe(ping)
+    if (!this.sentAt.has(probe)) this.sentAt.set(probe, performance.now())
+  }
+
+  /** The round trip of the PING whose probe a PONG echoes, the first time; `undefined` for a PONG sent unasked. */
+  pong(probe: number): number | undefined {
+    const sentAt = this.sentAt.get(probe)
+    if (sentAt === undefined) return undefined
+    this.sentAt.delete(probe)
+    return performance.now() - sentAt
+  }
+}
+
 /** Settles on either, discards both outcomes — a caller that needs to know re-reads the signal.
  *  Taking the rejection matters: on an abort-first race nothing else would handle it. */
 function settledOrAborted(promise: Promise<unknown>, signal: AbortSignal): Promise<void> {
@@ -190,6 +210,8 @@ interface MuxChannel {
   _onTransportClose(err?: Error): void
   /** What this channel declares in its RECONCILE entry on every (re)attach, on `wire`. */
   _reattachState?(wire: number): ReattachState
+  /** A round trip of the path on `wire` the connection measured, which nothing the channel sent waited ahead of. */
+  _onPathRtt?(wire: number, rtt: number): void
   /** The largest windows the replay buffers allow: the one the page grants, and the one the server grants it. */
   _fitReplays?(window: number, peerWindow: number): void
   /** At each heartbeat: a WINDOW for what arrived since the last, so the server's replay lets it go while the channel is
@@ -435,6 +457,10 @@ class ClientConnection implements MuxConnection {
   private sessionId: string | null = null
   /** Advances each time the connection moves to another wire: what went out on the one before may not have arrived. */
   private wire = 0
+  /** PINGs sent, which numbers each. */
+  private pings = 0
+  /** The least round trip of a PING on the wire (see `_onTransportRoundTrip`). */
+  private pingRtt: { wire: number; rtt: number } | null = null
   private nextIndex = 0
   /** What the RECONCILE in flight lists, and whether as `initial`. */
   private reconcileIxes = new Map<number, boolean>()
@@ -991,7 +1017,8 @@ class ClientConnection implements MuxConnection {
 
   /** Names each closed channel the server attached, with how far the page has what the server sent on it, which the
    *  server answers with how far it has what the page sent on it, or that it no longer holds it. One a PING named
-   *  before, with nothing left to replay or to send, is let go instead: nothing it holds can reach the server now. */
+   *  before, with nothing left to replay or to send, is let go instead: nothing it holds can reach the server now. Its
+   *  probe number tells its PONG from another. */
   private buildPing(): Uint8Array<ArrayBuffer> {
     const ended: PingEntry[] = []
     for (const [ix, entry] of this.channels) {
@@ -1008,7 +1035,20 @@ class ClientConnection implements MuxConnection {
       state.reported = true
       ended.push({ ix, lastSeq: this.lastSeqByChannel.get(ix) ?? 0 })
     }
-    return encode.ping(ended)
+    this.pings = (this.pings % 0xffffffff) + 1
+    return encode.ping(ended, this.pings)
+  }
+
+  /** A PING's round trip on `transport`'s wire, from when it went out to its PONG. Until its wire's first RECONCILED
+   *  the page holds what it sends, and its heartbeat's first PING goes out as that settles, before what it releases:
+   *  nothing but the WINDOW frames of that heartbeat waits ahead of it. Each channel takes the least as a round trip of
+   *  the path (see `BdpEstimator.notePathRtt`), as one attaching later does. */
+  _onTransportRoundTrip(transport: ClientChannelTransport, rtt: number): void {
+    if (transport !== this.transport) return
+    if (this.pingRtt !== null && this.pingRtt.wire === this.wire && this.pingRtt.rtt <= rtt) return
+    this.pingRtt = { wire: this.wire, rtt }
+    for (const { channel, state } of this.channels.values())
+      if (state.tag !== 'closed') channel._onPathRtt?.(this.wire, rtt)
   }
 
   /** The server's answer to a PING: how far it has what the page sent on each channel named, or that it no longer holds
@@ -1474,6 +1514,7 @@ class ClientConnection implements MuxConnection {
         lastSeq: this.lastSeqByChannel.get(ix) ?? 0,
       }
       if (isInitial) payloadEntry.initial = true
+      if (this.pingRtt?.wire === wire) entry.channel._onPathRtt?.(wire, this.pingRtt.rtt)
       const state = entry.channel._reattachState?.(wire)
       Object.assign(payloadEntry, state)
       // The declared subscriptions supersede the SUB/UNSUB frames queued before them.
@@ -1738,6 +1779,8 @@ class WsTransport implements UpgradeTarget {
   readonly reconcileMode = 'release-after-reconciled' as const
   readonly batched = false
   private heartbeat: Heartbeat | null = null
+  /** Its WebSocket's, a new one for each (see `setupHandlers`). */
+  private pings: PingClock | null = null
   private probedWs: WebSocket | null = null
   private ws: WebSocket | null = null
   private abandonedWs: WebSocket | null = null
@@ -1906,6 +1949,7 @@ class WsTransport implements UpgradeTarget {
   }
 
   private setupHandlers(ws: WebSocket): void {
+    const pings = (this.pings = new PingClock())
     ws.onmessage = ({ data }: MessageEvent) => {
       const raw = new Uint8Array(data as ArrayBuffer)
       let frame: DecodedFrame
@@ -1918,6 +1962,8 @@ class WsTransport implements UpgradeTarget {
       this.heartbeat?.noteReceived()
       if (frame.tag === TAG.PONG) {
         this.heartbeat?.resetPong()
+        const rtt = pings.pong(frame.probe)
+        if (rtt !== undefined && this.ws === ws) this.owner._onTransportRoundTrip(this, rtt)
         this.owner._onTransportPong(frame.ended)
         return
       }
@@ -1977,6 +2023,7 @@ class WsTransport implements UpgradeTarget {
   sendPing(frame: Uint8Array<ArrayBuffer>): void {
     if (this.ws?.readyState !== WebSocket.OPEN) return
     this.ws.send(frame)
+    this.pings?.sent(frame)
   }
 
   dispose(): void {
@@ -2011,6 +2058,8 @@ class SseTransport implements UpgradeSource {
     return this.streamRequest.tag !== 'active'
   }
   private heartbeat: Heartbeat | null = null
+  /** Its wire's, a new one as `openStream` opens each. */
+  private pings = new PingClock()
   private connecting = false
   private startTimer: ReturnType<typeof setTimeout> | null = null
   /** Abort handle for the active transport's fetches. `null` means no active transport. */
@@ -2108,6 +2157,7 @@ class SseTransport implements UpgradeSource {
       this.streamRequest.body.push(encodeU32(frame.frame.byteLength))
       this.streamRequest.body.push(frame.frame)
       this.streamRequest.unconfirmed?.push(frame.frame)
+      if (frame.kind === 'heartbeat') this.pings.sent(frame.frame)
       return
     }
     const now = Date.now()
@@ -2119,6 +2169,7 @@ class SseTransport implements UpgradeSource {
 
   private async openStream(): Promise<void> {
     this.connId = randomUuid()
+    const pings = (this.pings = new PingClock())
     const abortController = new AbortController()
     this.transportAbort = abortController
     const stage = this.stageInitialBatch()
@@ -2198,6 +2249,9 @@ class SseTransport implements UpgradeSource {
           this.heartbeat?.noteReceived()
           if (frame.tag === TAG.PONG) {
             this.heartbeat?.resetPong()
+            const rtt = pings.pong(frame.probe)
+            if (rtt !== undefined && this.transportAbort === abortController)
+              this.owner._onTransportRoundTrip(this, rtt)
             this.owner._onTransportPong(frame.ended)
             continue
           }
@@ -2283,6 +2337,7 @@ class SseTransport implements UpgradeSource {
       const queued = this.outbox.splice(0, this.outbox.length)
       this.lastPostStartedAt = now
       const wire = this.transportAbort
+      for (const { frame } of queued) if (frame[0] === TAG.PING) this.pings.sent(frame)
 
       try {
         const response = await this.post(
@@ -2351,6 +2406,7 @@ class SseTransport implements UpgradeSource {
   private async sendStandalonePost(frames: Uint8Array<ArrayBuffer>[]): Promise<void> {
     if (!this.hasWire()) return
     assert(this.transportAbort)
+    for (const frame of frames) if (frame[0] === TAG.PING) this.pings.sent(frame)
     try {
       await this.post(
         encodeSseRequest({ connId: this.connId }, encodeLengthPrefixedFrames(frames)),

@@ -239,18 +239,23 @@ describe('decodeClientFrame — hostile schemas', () => {
 })
 
 describe('heartbeat', () => {
-  test("a PING names each channel the page ended with its seq, and a PONG answers each with the server's seq or none", () => {
+  test("a PING names each channel the page ended with its seq, and a PONG answers each with the server's seq or none, and echoes the PING's probe", () => {
     const ended = [
       { ix: 3, lastSeq: 7 },
       { ix: 65_535, lastSeq: 2 ** 31 - 1 },
     ]
-    expect(clientFrame(encode.ping(ended))).toEqual({ tag: TAG.PING, ended })
-    expect(clientFrame(encode.ping())).toEqual({ tag: TAG.PING, ended: [] })
+    expect(clientFrame(encode.ping(ended, 2 ** 32 - 1))).toEqual({ tag: TAG.PING, probe: 2 ** 32 - 1, ended })
+    expect(clientFrame(encode.ping())).toEqual({ tag: TAG.PING, probe: 0, ended: [] })
     const answers = [
       { ix: 3, lastSeq: 5 },
       { ix: 4, lastSeq: null },
     ]
-    expect(decode(encode.pong(answers), wireSeqs)).toEqual({ tag: TAG.PONG, ended: answers })
+    expect(decode(encode.pong(answers, 2 ** 32 - 1), wireSeqs)).toEqual({
+      tag: TAG.PONG,
+      probe: 2 ** 32 - 1,
+      ended: answers,
+    })
+    expect(decode(encode.pong(), wireSeqs)).toEqual({ tag: TAG.PONG, probe: 0, ended: [] })
   })
 
   test('a PING whose payload splits an entry is a violation', () => {

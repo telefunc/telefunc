@@ -119,9 +119,9 @@ class FlowControl {
     return this._peerByteWindowMax
   }
 
-  /** The round trip of the path an attach's probe on `wire` measured, and what a frame this side sends waits for its
-   *  wire to take it, `Infinity` where no probe measured: what this side's answer to a `BDP_PING` says, for a receiver
-   *  with no attach of its own to probe. */
+  /** The round trip of the path on `wire` an attach's probe or the connection measured, and what a frame this side
+   *  sends waits for its wire to take it, `Infinity` where none was measured: what this side's answer to a `BDP_PING`
+   *  says, for a receiver with no attach of its own to probe. */
   pathRtt(wire: number): number {
     return this._bdp.pathRtt(wire) + this._sendDelay()
   }
@@ -211,6 +211,12 @@ class FlowControl {
    *  any of the channel's frames (see `BdpEstimator`), or `undefined` where that wire's round trip is measured already. */
   probeAttach(wire: number): number | undefined {
     return this._bdp.probeAttach(wire)
+  }
+
+  /** A round trip of the path on `wire` the connection measured, which nothing the channel sent waited ahead of (see
+   *  `BdpEstimator.notePathRtt`). */
+  notePathRtt(wire: number, rtt: number): void {
+    this._bdp.notePathRtt(wire, rtt)
   }
 
   /** Receiver-side: account post-callback consumption of one frame. Emits

@@ -285,6 +285,11 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     return probe === undefined ? {} : { probe }
   }
 
+  /** @internal A round trip of the path on `wire` the connection measured. */
+  _onPathRtt(wire: number, rtt: number): void {
+    this._flow.notePathRtt(wire, rtt)
+  }
+
   /** @internal */
   _fitReplays(window: number, peerWindow: number): void {
     this._flow.fitReplays(window, peerWindow)
@@ -422,14 +427,16 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
       case TAG.MSG_WINDOW:
         this._flow.onPeerMessageWindow(frame.count)
         return
-      case TAG.BDP_PING:
-        this._connection.sendBdpPingAck(
-          this,
-          frame.probe,
-          this._flow.onPing(),
-          this._declaredWire === null ? Infinity : this._flow.pathRtt(this._declaredWire),
-        )
+      case TAG.BDP_PING: {
+        const starved = this._flow.onPing()
+        const wire = this._attachedWire
+        // Until its attach on the wire settles, the page holds the answer, and all it sends, for its RECONCILED: the
+        // probe's round trip is that wait's, and says nothing of the window.
+        if (wire === null || wire !== this._declaredWire)
+          this._connection.sendBdpPingAck(this, frame.probe, false, Infinity)
+        else this._connection.sendBdpPingAck(this, frame.probe, starved, this._flow.pathRtt(wire))
         return
+      }
       case TAG.BDP_PING_ACK:
         this._flow.onPingAck(frame.probe, frame.starved, frame.pathRtt)
         return

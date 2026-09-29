@@ -2,7 +2,8 @@
 // handler over a link with a fixed latency and a bandwidth each way, on fake timers, so each run is deterministic. What
 // the link carries has left the page and the server, as what a browser's network stack and the kernel hold has: a
 // streaming upload's body and the server's event stream read empty, and a batch POST under way is no longer in the
-// page's outbox.
+// page's outbox. The page gets a request's response only once the link has carried its body: Chromium and Firefox hand
+// it over only once they have written the body to the socket.
 
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 
@@ -67,11 +68,13 @@ function link({ batched }: { batched: boolean }) {
     const send = (chunk: Uint8Array) => up.push(chunk.byteLength, () => signal.aborted || toServer.enqueue(chunk))
     const end = () => up.push(0, () => signal.aborted || toServer.close())
     signal.addEventListener('abort', () => toServer.error(new TypeError('network error')))
+    let sent: Promise<unknown> = Promise.resolve()
     if (body instanceof Blob) {
       // Bytes rather than the Blob: a Request reads a Blob on a later event-loop turn, which fake timers don't give.
       const bytes = new Uint8Array(await body.arrayBuffer())
       for (let offset = 0; offset < bytes.length; offset += CHUNK_BYTES) send(bytes.slice(offset, offset + CHUNK_BYTES))
       end()
+      sent = new Promise((resolve) => up.push(0, () => resolve(undefined)))
     } else {
       // Taken as it is written, so the body reads empty while the link carries it.
       void (async () => {
@@ -105,7 +108,7 @@ function link({ batched }: { batched: boolean }) {
         },
       })
     }
-    await Promise.race([new Promise((resolve) => down.push(0, () => resolve(undefined))), aborted])
+    await Promise.race([Promise.all([new Promise((resolve) => down.push(0, () => resolve(undefined))), sent]), aborted])
     return new Response(pageBody, { status: response.statusCode, headers: { 'Content-Type': response.contentType } })
   }) as typeof globalThis.fetch
   clientConfig.fetch = fetch
@@ -201,6 +204,25 @@ describe.each([
     expect(flowOf(download.page).byteWindow).toBe(pageWindow)
     // An event carries its frame in base64, 4 bytes for every 3: the link stays full.
     expect(got.bytes / 30_000).toBeGreaterThan(0.9 * 1_250 * (3 / 4))
+  })
+
+  // Its RECONCILE, and the probe it carries, wait behind the first channel's upload, 2 MiB at 1.25 MB/s.
+  test("on a slow uplink, the server's window for an upload a channel begins while another uploads stays at its initial size, however long its attach waited", async () => {
+    const sse = (current = link({ batched }))
+    sse.up.bytesPerMs = 1_250
+    const first = sse.open<string, never>()
+    received(first.server)
+    produce(first.page, 'x'.repeat(64 * KIB))
+    await run(10_000)
+    const late = sse.open<string, never>()
+    const got = received(late.server)
+    produce(late.page, 'y'.repeat(64 * KIB))
+    await run(3_000)
+    first.page.abort()
+    await run(30_000)
+    expect(sse.batched).toBe(batched)
+    expect(flowOf(late.server).byteWindow).toBe(CREDIT_WINDOW_INITIAL_BYTES)
+    expect(got.bytes / 30_000).toBeGreaterThan(0.9 * 1_250)
   })
 
   // Unshaped, the loop a window has to cover is the round trip, and on batch POSTs the flush throttle a frame waits

@@ -7,6 +7,7 @@ export {
   decodeClientFrame,
   assertProtocol,
   peekTag,
+  pingProbe,
   ProtocolViolationError,
   isChannelCtrlTag,
   isChannelDataFrame,
@@ -67,6 +68,8 @@ import { assert } from '../utils/assert.js'
 const HEADER = 7
 /** How many seqs a u32 tells apart. */
 const SEQ_SPAN = 2 ** 32
+/** A PING's probe number, and its PONG's. */
+const PROBE_BYTES = 4
 const PING_ENTRY_BYTES = 6
 const PONG_ENTRY_BYTES = 7
 /** An ACK_RES's `ackedSeq` and status. */
@@ -83,11 +86,11 @@ const textDecoder = new TextDecoder()
 
 const TAG = {
   // ─── Connection-level control (no ix, no seq) ───
-  /** Client → server heartbeat. Payload: a `PingEntry` for each closed channel the page holds that the server
-   *  attached. */
+  /** Client → server heartbeat. Payload: u32, a probe number its PONG echoes, then a `PingEntry` for each closed
+   *  channel the page holds that the server attached. */
   PING: 0x01 as const,
-  /** Server → client heartbeat. Payload: a `PongEntry` for each channel the PING names, if the page's session is on this
-   *  wire. */
+  /** Server → client heartbeat. Payload: u32, the probe number of the PING it answers, 0 for one the server sends
+   *  unasked, then a `PongEntry` for each channel the PING names, if the page's session is on this wire. */
   PONG: 0x02 as const,
   /** Server → client on old transport after upgrade drain: signals last frame on this transport. */
   FIN: 0x03 as const,
@@ -343,8 +346,8 @@ type SequencedFrame =
   | Extract<ChannelCtrlFrame, { tag: typeof TAG.CLOSE | typeof TAG.CLOSE_ACK | typeof TAG.ABORT | typeof TAG.ERROR }>
 
 type ConnCtrlFrame =
-  | { tag: typeof TAG.PING; ended: PingEntry[] }
-  | { tag: typeof TAG.PONG; ended: PongEntry[] }
+  | { tag: typeof TAG.PING; probe: number; ended: PingEntry[] }
+  | { tag: typeof TAG.PONG; probe: number; ended: PongEntry[] }
   | { tag: typeof TAG.FIN }
   | { tag: typeof TAG.RECONCILE; payload: ReconcilePayload }
   | { tag: typeof TAG.BARRIER; payload: BarrierPayload }
@@ -491,11 +494,12 @@ const encode = {
   },
 
   // ── Connection-level ctrls ──
-  /** Wire: [header]([u16 ix][u32 lastSeq])* */
-  ping(ended: PingEntry[] = []): Uint8Array<ArrayBuffer> {
-    const frame = new Uint8Array(HEADER + PING_ENTRY_BYTES * ended.length)
+  /** Wire: [header][u32 probe]([u16 ix][u32 lastSeq])* */
+  ping(ended: PingEntry[] = [], probe = 0): Uint8Array<ArrayBuffer> {
+    const frame = new Uint8Array(HEADER + PROBE_BYTES + PING_ENTRY_BYTES * ended.length)
     writeHeader(frame, TAG.PING, 0, 0)
-    let offset = HEADER
+    writeU32(frame, HEADER, probe)
+    let offset = HEADER + PROBE_BYTES
     for (const { ix, lastSeq } of ended) {
       writeU16(frame, offset, ix)
       writeU32(frame, offset + 2, lastSeq)
@@ -503,11 +507,12 @@ const encode = {
     }
     return frame
   },
-  /** Wire: [header]([u16 ix][u8 held][u32 lastSeq])* */
-  pong(ended: PongEntry[] = []): Uint8Array<ArrayBuffer> {
-    const frame = new Uint8Array(HEADER + PONG_ENTRY_BYTES * ended.length)
+  /** Wire: [header][u32 probe]([u16 ix][u8 held][u32 lastSeq])* */
+  pong(ended: PongEntry[] = [], probe = 0): Uint8Array<ArrayBuffer> {
+    const frame = new Uint8Array(HEADER + PROBE_BYTES + PONG_ENTRY_BYTES * ended.length)
     writeHeader(frame, TAG.PONG, 0, 0)
-    let offset = HEADER
+    writeU32(frame, HEADER, probe)
+    let offset = HEADER + PROBE_BYTES
     for (const { ix, lastSeq } of ended) {
       writeU16(frame, offset, ix)
       frame[offset + 2] = lastSeq === null ? 0 : 1
@@ -628,6 +633,11 @@ function peekTag(raw: Uint8Array): number | undefined {
   return raw[0]
 }
 
+/** The probe number of a PING this side encoded. */
+function pingProbe(ping: Uint8Array): number {
+  return readU32(ping, HEADER)
+}
+
 function decode(frame: Uint8Array, seqs: SeqReader): DecodedFrame {
   assertProtocol(frame.length >= HEADER, 'frame too short')
   const tag = frame[0] as number
@@ -674,23 +684,29 @@ function decode(frame: Uint8Array, seqs: SeqReader): DecodedFrame {
     }
 
     case TAG.PING: {
-      assertProtocol(payload.length % PING_ENTRY_BYTES === 0, 'PING payload')
+      assertProtocol(
+        payload.length >= PROBE_BYTES && (payload.length - PROBE_BYTES) % PING_ENTRY_BYTES === 0,
+        'PING payload',
+      )
       const ended: PingEntry[] = []
-      for (let offset = 0; offset < payload.length; offset += PING_ENTRY_BYTES) {
+      for (let offset = PROBE_BYTES; offset < payload.length; offset += PING_ENTRY_BYTES) {
         const ix = readU16(payload, offset)
         ended.push({ ix, lastSeq: seqThrough(readU32(payload, offset + 2), seqs.sent(ix)) })
       }
-      return { tag: TAG.PING, ended }
+      return { tag: TAG.PING, probe: readU32(payload, 0), ended }
     }
     case TAG.PONG: {
-      assertProtocol(payload.length % PONG_ENTRY_BYTES === 0, 'PONG payload')
+      assertProtocol(
+        payload.length >= PROBE_BYTES && (payload.length - PROBE_BYTES) % PONG_ENTRY_BYTES === 0,
+        'PONG payload',
+      )
       const ended: PongEntry[] = []
-      for (let offset = 0; offset < payload.length; offset += PONG_ENTRY_BYTES) {
+      for (let offset = PROBE_BYTES; offset < payload.length; offset += PONG_ENTRY_BYTES) {
         const ix = readU16(payload, offset)
         const held = payload[offset + 2] === 1
         ended.push({ ix, lastSeq: held ? seqThrough(readU32(payload, offset + 3), seqs.sent(ix)) : null })
       }
-      return { tag: TAG.PONG, ended }
+      return { tag: TAG.PONG, probe: readU32(payload, 0), ended }
     }
     case TAG.FIN:
       return { tag: TAG.FIN }

@@ -94,7 +94,7 @@ class BdpEstimator {
   /** Attach probes not answered yet. Each measures its wire's round trip and settles no growth, so none holds up a ping:
    *  one lost with its wire, or with an upgrade that didn't happen, costs nothing. */
   private _attachProbes: { probe: number; sentAt: number; wire: number }[] = []
-  /** The least round trip a probe took on the wire an attach's probe last measured, since it did. `Infinity` before. */
+  /** The least round trip of the path on `_pathWire` (see `notePathRtt`), and of a probe since. `Infinity` before. */
   private _pathRtt = Infinity
   private _pathWire = -1
   private _lastPingAt = 0
@@ -127,7 +127,7 @@ class BdpEstimator {
     return this._ping
   }
 
-  /** The round trip of the path an attach's probe on `wire` measured (see `probeAttach`), `Infinity` where none did. */
+  /** The round trip of the path on `wire` (see `notePathRtt`), `Infinity` where none was measured. */
   pathRtt(wire: number): number {
     return wire === this._pathWire ? this._pathRtt : Infinity
   }
@@ -158,15 +158,23 @@ class BdpEstimator {
   }
 
   /** Start a probe that goes out with an attach on `wire`, and return its number, which the RECONCILE entry carries, or
-   *  `undefined` where that wire's round trip is measured already. Wires are numbered in the order they attach: an
-   *  answer measures a round trip for a later wire than the last measured, lowers it for that wire, and one for an
-   *  earlier wire, gone since, is ignored. */
+   *  `undefined` where that wire's round trip is measured already. Its answer is a round trip of `wire` (see
+   *  `notePathRtt`). */
   probeAttach(wire: number): number | undefined {
     if (wire === this._pathWire) return undefined
     this._attachProbes = this._attachProbes.filter((attach) => attach.wire >= wire)
     this._probes = (this._probes + 1) >>> 0
     this._attachProbes.push({ probe: this._probes, sentAt: performance.now(), wire })
     return this._probes
+  }
+
+  /** A round trip of the path on `wire`, which nothing the channel sent waited ahead of. Wires are numbered in the order
+   *  they attach: one measures a round trip for a later wire than the last measured, lowers it for that wire, and one
+   *  for an earlier wire, gone since, is ignored. */
+  notePathRtt(wire: number, rtt: number): void {
+    if (wire < this._pathWire) return
+    this._pathRtt = wire === this._pathWire ? Math.min(this._pathRtt, rtt) : rtt
+    this._pathWire = wire
   }
 
   /** Settle the `BDP_PING` in flight against its `BDP_PING_ACK`, which says whether the window starved the sender's
@@ -178,11 +186,7 @@ class BdpEstimator {
     const attach = this._attachProbes.find((pending) => pending.probe === probe)
     if (attach) {
       this._attachProbes = this._attachProbes.filter((pending) => pending !== attach)
-      const { sentAt, wire } = attach
-      if (wire < this._pathWire) return NOT_SETTLED
-      const rtt = performance.now() - sentAt
-      this._pathRtt = wire === this._pathWire ? Math.min(this._pathRtt, rtt) : rtt
-      this._pathWire = wire
+      this.notePathRtt(attach.wire, performance.now() - attach.sentAt)
       return NOT_SETTLED
     }
     if (!this._pingInFlight || probe !== this._ping) return NOT_SETTLED

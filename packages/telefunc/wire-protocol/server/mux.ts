@@ -373,7 +373,7 @@ class ChannelMux {
     if (tag === TAG.PING) return exec()
     // A PING waits behind what the page sent before it, as an upload on a slow link: a wire whose frames keep arriving
     // is answered all the same, once a ping interval, so the page knows they arrive.
-    if (performance.now() - state.pongedAt >= this.options.pingInterval) this.pong(entry, connection, [])
+    if (performance.now() - state.pongedAt >= this.options.pingInterval) this.pong(entry, connection, [], 0)
     return this.chainRecv(entry, exec)
   }
 
@@ -434,7 +434,7 @@ class ChannelMux {
     if (frame.tag === TAG.PING) {
       this.resetPingTimer(connection)
       this.acknowledgeArrivals(entry, connection)
-      this.pong(entry, connection, this.answerPing(entry, connection, frame.ended))
+      this.pong(entry, connection, this.answerPing(entry, connection, frame.ended), frame.probe)
       return null
     }
     assertProtocol(!entry.state.retiredByBarrier, 'frame on a wire retired by its barrier')
@@ -486,9 +486,10 @@ class ChannelMux {
     for (const { channel } of this.sessions.peekSession(sessionId)?.values() ?? []) channel._acknowledge()
   }
 
-  private pong(entry: ConnectionEntry, connection: Wire, ended: PongEntry[]): void {
+  /** `probe`: the PING's it answers, 0 for one sent unasked. */
+  private pong(entry: ConnectionEntry, connection: Wire, ended: PongEntry[], probe: number): void {
     entry.state.pongedAt = performance.now()
-    this.send(connection, encode.pong(ended))
+    this.send(connection, encode.pong(ended, probe))
   }
 
   private dispatchChannelFrame(sessionId: string, frame: ChannelFrame): void {

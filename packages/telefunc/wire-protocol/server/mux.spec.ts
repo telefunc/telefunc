@@ -290,6 +290,28 @@ test("an attach's probe is answered as the RECONCILE naming it is read, for a ch
   mux.registerChannel(new ServerChannel({ id: 'late' }))
 })
 
+// The page times a PING to its PONG, which it tells from another by the probe: one the server sends unasked carries none.
+test("a PONG echoes the probe of the PING it answers, and one the server sends unasked as the page's frames arrive carries none", async () => {
+  vi.useFakeTimers()
+  try {
+    const mux = new ChannelMux()
+    mux.registerChannel(new ServerChannel({ id: 'upload' }))
+    const { open, sent } = wires(mux)
+    const wire = open()
+    await mux.onConnectionRawMessage(
+      wire,
+      encode.reconcile({ open: [{ id: 'upload', ix: 0, lastSeq: 0, initial: true }] }),
+    )
+    await mux.onConnectionRawMessage(wire, encode.ping([], 7))
+    await vi.advanceTimersByTimeAsync(getServerConfig().channel.pingInterval)
+    await mux.onConnectionRawMessage(wire, encode.text(0, '"x"', 1))
+    const pongs = sent.get(wire)!.flatMap((frame) => (frame.tag === TAG.PONG ? [frame.probe] : []))
+    expect(pongs).toEqual([7, 0])
+  } finally {
+    vi.useRealTimers()
+  }
+})
+
 test("a burst of a channel's full message window, with the refresh and probe a page sends among it, is processed", async () => {
   const wire = await attachedWire()
   const frames = Array.from({ length: CREDIT_MSG_WINDOW_MAX }, (_, i) => encode.text(0, '1', i + 1))
