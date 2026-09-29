@@ -12,6 +12,8 @@ import {
   CREDIT_MSG_WINDOW_INITIAL,
   CREDIT_WINDOW_INITIAL_BYTES,
   CREDIT_WINDOW_MAX_BYTES,
+  CHANNEL_PING_INTERVAL_MS,
+  CHANNEL_RECONNECT_INITIAL_DELAY_MS,
 } from './constants.js'
 import { ChannelOverflowError } from './channel-errors.js'
 import { TAG } from './shared-ws.js'
@@ -771,6 +773,46 @@ test('on a slow link, producers that await their sends are handed the credit one
   expect(error).toBeUndefined()
   expect(held).toBeGreaterThan(CREDIT_WINDOW_INITIAL_BYTES)
   expect(page.received.length - before).toBeGreaterThan(40)
+})
+
+// 100 KB/s: a 2 MiB window takes 20 s to go through, twice the deadline a ping or pong has, which waits behind it.
+test("on a link slower than a window per ping deadline, a stream's page keeps its wire while the stream keeps arriving ahead of its pong", async () => {
+  const feed = loop.open<never, string>()
+  const page = consume(feed.page)
+  await run(100)
+  loop.socket.toPage.bytesPerMs = 100
+  produce(feed.server, { message: () => 'x'.repeat(64 * KIB) })
+  await run(30_000)
+  expect(loop.sockets).toHaveLength(1)
+  expect(page.received.length).toBeGreaterThan(30)
+})
+
+test('a wire that stops delivering in the middle of a stream is taken for dead one pong deadline after its last frame', async () => {
+  const feed = loop.open<never, string>()
+  consume(feed.page)
+  await run(100)
+  produce(feed.server, { message: () => 'x'.repeat(16 * KIB) })
+  await run(7_000)
+  loop.socket.toPage.hold()
+  const stoppedAt = Date.now()
+  await runUntil(() => loop.sockets.length === 2, 30_000)
+  expect(loop.sockets).toHaveLength(2)
+  // The pong deadline is two ping intervals; then the first reconnect waits its delay.
+  expect(Date.now() - stoppedAt).toBeLessThanOrEqual(
+    2 * CHANNEL_PING_INTERVAL_MS + CHANNEL_RECONNECT_INITIAL_DELAY_MS + 100,
+  )
+})
+
+test("on an uplink slower than a window per ping deadline, the server doesn't cut an upload's wire while the upload keeps arriving ahead of its ping", async () => {
+  const feed = loop.open<string, never>()
+  const server = consume(feed.server)
+  await run(100)
+  loop.socket.toServer.bytesPerMs = 100
+  const terminateConnection = vi.spyOn(loop.transport, 'terminateConnection')
+  produce(feed.page, { message: () => 'x'.repeat(64 * KIB) })
+  await run(30_000)
+  expect(terminateConnection).not.toHaveBeenCalled()
+  expect(server.received.length).toBeGreaterThan(30)
 })
 
 test('on a slow link, a producer that awaits its sends is not refused a message larger than its credit, sent with little credit left', async () => {

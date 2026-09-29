@@ -96,6 +96,8 @@ type ProbeSession = {
 class Heartbeat {
   private pingTimer: ReturnType<typeof setInterval> | null = null
   private pongTimer: ReturnType<typeof setTimeout> | null = null
+  /** When the wire last delivered a frame, or the pong deadline was last set. */
+  private lastReceivedAt = 0
 
   constructor(
     private readonly intervalMs: number,
@@ -112,8 +114,25 @@ class Heartbeat {
   }
 
   resetPong(): void {
+    this.lastReceivedAt = performance.now()
+    this.armPongDeadline(this.pongTimeoutMs)
+  }
+
+  noteReceived(): void {
+    this.lastReceivedAt = performance.now()
+  }
+
+  private armPongDeadline(ms: number): void {
     if (this.pongTimer) clearTimeout(this.pongTimer)
-    this.pongTimer = setTimeout(this.onDead, this.pongTimeoutMs)
+    this.pongTimer = setTimeout(this.onPongDeadline, ms)
+  }
+
+  // A PONG arrives behind what the server queued before it, as much as a window on a slow link: the wire is dead once it
+  // has delivered nothing for the deadline.
+  private readonly onPongDeadline = (): void => {
+    const quiet = performance.now() - this.lastReceivedAt
+    if (quiet < this.pongTimeoutMs) this.armPongDeadline(this.pongTimeoutMs - quiet)
+    else this.onDead()
   }
 
   stop(): void {
@@ -1891,6 +1910,7 @@ class WsTransport implements UpgradeTarget {
         ws.close()
         return
       }
+      this.heartbeat?.noteReceived()
       if (frame.tag === TAG.PONG) {
         this.heartbeat?.resetPong()
         this.owner._onTransportPong(frame.ended)
@@ -2166,6 +2186,7 @@ class SseTransport implements UpgradeSource {
             continue
           }
           const frame = decode(raw, this.owner.seqs)
+          this.heartbeat?.noteReceived()
           if (frame.tag === TAG.PONG) {
             this.heartbeat?.resetPong()
             this.owner._onTransportPong(frame.ended)

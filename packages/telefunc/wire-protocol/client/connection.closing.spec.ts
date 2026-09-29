@@ -22,6 +22,7 @@ import { isAbort } from '../../shared/Abort.js'
 import { NetworkError } from '../../shared/NetworkError.js'
 import { decodeU32 } from '../frame.js'
 import { base64urlToUint8Array } from '../base64url.js'
+import { SSE_FLUSH_THROTTLE_MS } from '../constants.js'
 import { config as serverConfig } from '../../node/server/serverConfig.js'
 
 /** A receiver with nothing of any channel: each seq reads as its low 32 bits. */
@@ -977,7 +978,8 @@ describe.each(WIRES)('over %s, past the replay', (wire) => {
     await advance(10_000)
     void server.send('after', { ack: false })
     void pageChannel.send('after', { ack: false })
-    await advance(100)
+    // Over SSE batch POSTs, a page's send waits for the next flush, at most one each SSE_FLUSH_THROTTLE_MS.
+    await advance(SSE_FLUSH_THROTTLE_MS + 100)
     expect(pageGot.map((message) => message.trim())).toEqual(['large', 's0', 's1', 's2', 'after'])
     expect(serverGot.map((message) => message.trim())).toEqual(['large', 'p0', 'p1', 'p2', 'after'])
     expect(pageClosed.err).toBe('open')

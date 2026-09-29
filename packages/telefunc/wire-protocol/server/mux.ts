@@ -136,6 +136,8 @@ type AwaitedChannel = {
 
 type ConnectionState = {
   pingTimer: ReturnType<typeof setTimeout> | null
+  /** When the wire last delivered a frame, or the ping deadline was last set. */
+  lastReceivedAt: number
   terminatePermanently: boolean
   recvChain: Promise<unknown> | null
   /** Set by `onConnectionClosed` so an in-flight `reconcile` can see the close and its kind. */
@@ -250,6 +252,7 @@ class ChannelMux {
     this.connectionEntries.set(connection, {
       state: {
         pingTimer: null,
+        lastReceivedAt: 0,
         terminatePermanently: false,
         recvChain: null,
         closed: null,
@@ -361,6 +364,7 @@ class ChannelMux {
     }
     state.recvBacklogBytes += byteLength
     state.recvBacklogFrames++
+    state.lastReceivedAt = performance.now()
     const tag = peekTag(rawFrame)
     const exec = (): Promise<ReconcileOutcome | null> => this.runInboundTurn(entry, connection, rawFrame, byteLength)
     if (tag === TAG.PING) return exec()
@@ -960,15 +964,25 @@ class ChannelMux {
   private resetPingTimer(connection: Wire): void {
     const entry = this.connectionEntries.get(connection)
     if (!entry) return
+    entry.state.lastReceivedAt = performance.now()
+    this.armPingDeadline(connection, entry, this.options.pingDeadline)
+  }
+
+  private armPingDeadline(connection: Wire, entry: ConnectionEntry, ms: number): void {
     const { state, transport } = entry
     this.clearPingTimer(state)
     state.pingTimer = unrefTimer(
       setTimeout(() => {
         state.pingTimer = null
+        // A PING arrives behind what the page queued before it, as an upload on a slow link: the wire is dead once it
+        // has delivered nothing for the deadline.
+        const quiet = performance.now() - state.lastReceivedAt
+        if (quiet < this.options.pingDeadline)
+          return this.armPingDeadline(connection, entry, this.options.pingDeadline - quiet)
         // Transient close so each channel gets its `reconnectTimeout` grace via
         // `_onPeerDisconnect`. Connection-level state is rebuilt by the next reconcile.
         transport.terminateConnection(connection)
-      }, this.options.pingDeadline),
+      }, ms),
     )
   }
 }
