@@ -159,7 +159,6 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this._flow = new FlowControl({
       byteWindowUpdate: (limit) => this._peer?.sendByteWindowUpdate(limit),
       msgWindowUpdate: (limit) => this._peer?.sendMsgWindowUpdate(limit),
-      sent: (bytes, messages) => this._peer?.sendSent(bytes, messages),
       bdpPing: () => this._peer?.sendBdpPing(),
     })
     const c = getServerConfig().channel
@@ -474,12 +473,6 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         return
       case TAG.MSG_WINDOW:
         this._flow.onPeerMessageWindow(frame.count)
-        return
-      case TAG.SENT:
-        // What the page sent through this seq and hasn't arrived is lost and now counted consumed, so no replay may
-        // bring it back.
-        if (frame.seq > this._lastClientSeq) this._lastClientSeq = frame.seq
-        this._flow.onPeerSent(frame.bytes, frame.messages)
         return
       case TAG.BDP_PING:
         this._peer?.sendBdpPingAck()

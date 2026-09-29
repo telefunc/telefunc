@@ -11,11 +11,10 @@ import {
   FC_SELF_UTIL_THRESHOLD,
 } from '../constants.js'
 
-/** Limits and totals go out mod 2^32. */
+/** Limits go out mod 2^32. */
 interface FlowControlEmit {
   byteWindowUpdate(limit: number): void
   msgWindowUpdate(limit: number): void
-  sent(bytes: number, messages: number): void
   bdpPing(): void
 }
 
@@ -34,7 +33,7 @@ interface FlowControlEmit {
  *
  * Limits are cumulative, as QUIC's MAX_DATA: the receiver advertises what it has consumed plus its window, and the
  * sender's credit is that limit minus what it has sent, so what is still in flight counts against it. Totals are exact
- * here and travel mod 2^32: a value off the wire is read as its signed 32-bit distance from the one it updates.
+ * here, and limits travel mod 2^32: a limit off the wire is read as its signed 32-bit distance from the one it updates.
  *
  * Senders waiting on credit get it one at a time, oldest first: while others wait, a send that leaves credit hands it
  * to the next and waits behind them. So senders that each await their sends, once waiting, pass the limit by one
@@ -130,16 +129,6 @@ class FlowControl {
     this._tryWakeCreditWaiters()
   }
 
-  /** Receiver-side: the peer's totals through the frame's seq. What didn't arrive by then was lost beyond its replay
-   *  buffer, and counts as consumed, as the final size of a reset QUIC stream does: the peer counted it as sent. */
-  onPeerSent(bytes: number, messages: number): void {
-    const lostBytes = (bytes - this._receivedBytes) | 0
-    const lostMessages = (messages - this._receivedMessages) | 0
-    this._receivedBytes += lostBytes
-    this._receivedMessages += lostMessages
-    this._consume(lostBytes, lostMessages)
-  }
-
   /** Receiver-side: account one received frame off the wire. Emits a
    *  `BDP_PING` via the channel's emit callback iff the estimator opens a probe. */
   onReceived(bytes: number): void {
@@ -211,13 +200,12 @@ class FlowControl {
     this._curBucketStart = now
   }
 
-  /** Attach on another wire than the last. The probe in flight rode the prior wire, and the limits and totals go out
-   *  again, which repairs what the prior wire lost of them. Credit carries over: it is cumulative. */
+  /** Attach on another wire than the last. The probe in flight rode the prior wire, and the limits go out again,
+   *  which repairs what the prior wire lost of them. Credit carries over: it is cumulative. */
   reattach(): void {
     this._bdp.reset()
     this._advertiseBytes()
     this._advertiseMessages()
-    this._emit.sent(this._sentBytes >>> 0, this._sentMessages >>> 0)
   }
 
   /** Receiver-side: a byte window of at least `bytes`, advertised with the next limit. Grow-only. */

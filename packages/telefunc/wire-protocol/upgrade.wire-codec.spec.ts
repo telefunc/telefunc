@@ -241,7 +241,6 @@ describe('decodeClientFrame — direction', () => {
     ['ERROR', encode.error(0, ERROR_REASON.LOST, 1)],
     ['WINDOW', encode.window(0, 1_024)],
     ['MSG_WINDOW', encode.msgWindow(0, 8)],
-    ['SENT', encode.sent(0, 1, 1_024, 8)],
     ['BDP_PING', encode.bdpPing(0)],
     ['BDP_PING_ACK', encode.bdpPingAck(0)],
     ['BROADCAST_SUB', encode.broadcastSub(0, false)],

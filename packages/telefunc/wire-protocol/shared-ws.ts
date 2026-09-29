@@ -46,13 +46,13 @@ import type { ChannelTransports } from './constants.js'
 //
 // `tag` discriminates the frame variant (data, connection ctrl, per-channel ctrl).
 // `index` is the channel ix for per-channel frames; 0 for connection-level frames.
-// `seq` is the replay sequence number of a sequenced frame: a data frame, or a CLOSE, CLOSE_ACK, ABORT or ERROR. `SENT`
-// carries the last one its totals cover, other ctrl frames 0.
+// `seq` is the replay sequence number of a sequenced frame: a data frame, or a CLOSE, CLOSE_ACK, ABORT or ERROR. Other
+// ctrl frames carry 0.
 //
 // Tag layout — sparse ranges so range checks classify:
 //   0x01–0x09  connection-level control (no ix, no seq)
 //   0x10–0x29  data plane (carries seq, payload varies)
-//   0x30–      per-channel control (carries ix; seq 0 except on `SENT` and the four closing frames)
+//   0x30–      per-channel control (carries ix; seq 0 except on the four closing frames)
 //
 // Channel indices are client-owned and stable for the channel's lifetime.
 // Sequence numbers are sender-assigned for replayable data frames in both directions.
@@ -133,10 +133,6 @@ const TAG = {
   /** Flow-control message-count limit. Parallel to `WINDOW` but counted in messages, not bytes,
    *  to bound receiver dispatch CPU regardless of message size. */
   MSG_WINDOW: 0x39 as const,
-  /** Flow-control totals, sender → receiver on an attach to another wire: the bytes and messages counted against
-   *  credit through the header's seq, mod 2^32. What of them hasn't reached the receiver by then was lost beyond the
-   *  replay buffer. */
-  SENT: 0x3a as const,
   /** Server → client: settles an initial channel a RECONCILED left out because the server hadn't registered it yet,
    *  either attached with the server's `lastSeq`, or not registered within `connectTtl`. */
   ATTACH_RESULT: 0x3b as const,
@@ -294,7 +290,6 @@ type ChannelCtrlFrame =
   | { tag: typeof TAG.ERROR; index: number; seq: number; reason: number }
   | { tag: typeof TAG.WINDOW; index: number; bytes: number }
   | { tag: typeof TAG.MSG_WINDOW; index: number; count: number }
-  | { tag: typeof TAG.SENT; index: number; seq: number; bytes: number; messages: number }
   | { tag: typeof TAG.BROADCAST_SUB; index: number; binary: boolean }
   | { tag: typeof TAG.BROADCAST_UNSUB; index: number; binary: boolean }
   | { tag: typeof TAG.BDP_PING; index: number }
@@ -490,13 +485,6 @@ const encode = {
     writeU32(frame, HEADER, count)
     return frame
   },
-  sent(index: number, seq: number, bytes: number, messages: number): Uint8Array<ArrayBuffer> {
-    const frame = new Uint8Array(HEADER + 8)
-    writeHeader(frame, TAG.SENT, index, seq)
-    writeU32(frame, HEADER, bytes)
-    writeU32(frame, HEADER + 4, messages)
-    return frame
-  },
   bdpPing: (index: number) => encodeBareFrame(TAG.BDP_PING, index),
   bdpPingAck: (index: number) => encodeBareFrame(TAG.BDP_PING_ACK, index),
   /** Wire: [header][u8 attached][u32 lastSeq] */
@@ -637,9 +625,6 @@ function decode(frame: Uint8Array): DecodedFrame {
     case TAG.MSG_WINDOW:
       assertProtocol(payload.length >= 4, 'MSG_WINDOW payload too short')
       return { tag: TAG.MSG_WINDOW, index, count: readU32(payload, 0) }
-    case TAG.SENT:
-      assertProtocol(payload.length >= 8, 'SENT payload too short')
-      return { tag: TAG.SENT, index, seq, bytes: readU32(payload, 0), messages: readU32(payload, 4) }
     case TAG.BDP_PING:
       return { tag: TAG.BDP_PING, index }
     case TAG.BDP_PING_ACK:
@@ -676,7 +661,6 @@ const CLIENT_TAGS: ReadonlySet<number> = new Set([
   TAG.ERROR,
   TAG.WINDOW,
   TAG.MSG_WINDOW,
-  TAG.SENT,
   TAG.BDP_PING,
   TAG.BDP_PING_ACK,
   TAG.BROADCAST_SUB,

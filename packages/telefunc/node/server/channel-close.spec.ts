@@ -6,12 +6,12 @@ import type { ChannelFrame } from '../../wire-protocol/shared-ws.js'
 import { IndexedPeer } from '../../wire-protocol/server/IndexedPeer.js'
 import { ServerChannel } from '../../wire-protocol/server/channel.js'
 
-/** Records what the channel sends, but for the flow-control limits and totals every attach sends. */
+/** Records what the channel sends, but for the flow-control limits every attach sends. */
 function createPeer(frames: Uint8Array[]) {
   return new IndexedPeer(
     {
       send(frame) {
-        if (frame[0] === TAG.WINDOW || frame[0] === TAG.MSG_WINDOW || frame[0] === TAG.SENT) return
+        if (frame[0] === TAG.WINDOW || frame[0] === TAG.MSG_WINDOW) return
         frames.push(frame)
       },
       bufferedAmount: () => 0,

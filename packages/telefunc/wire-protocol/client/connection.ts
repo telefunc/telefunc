@@ -178,7 +178,6 @@ interface MuxConnection {
   sendCloseAck(channel: MuxChannel): void
   sendByteWindowUpdate(channel: MuxChannel, limit: number): void
   sendMsgWindowUpdate(channel: MuxChannel, limit: number): void
-  sendSent(channel: MuxChannel, bytes: number, messages: number): void
   sendBdpPing(channel: MuxChannel): void
   sendBdpPingAck(channel: MuxChannel): void
   sendBroadcastSubscribe(channel: MuxChannel, binary: boolean): void
@@ -747,13 +746,6 @@ class ClientConnection implements MuxConnection {
     this.sendFlowControl(ix, encode.msgWindow(ix, limit))
   }
 
-  /** The totals cover every frame through the latest seq. */
-  sendSent(channel: MuxChannel, bytes: number, messages: number): void {
-    const ix = this.channelIndex.get(channel)
-    if (ix === undefined) return
-    this.sendFlowControl(ix, encode.sent(ix, this.replayBuffers.get(ix)!.seq, bytes, messages))
-  }
-
   sendBdpPing(channel: MuxChannel): void {
     const ix = this.channelIndex.get(channel)
     if (ix === undefined) return
@@ -828,9 +820,6 @@ class ClientConnection implements MuxConnection {
   private dispatchFrame(frame: DecodedFrame): void {
     // Track seq for ALL sequenced frames, ACK_RES and the closing ones too; otherwise reconciles under-report lastSeq.
     if (isSequencedFrame(frame) && this.trackSeq(frame.index, frame.seq) === 'dup') return
-    // What the server sent through this seq and hasn't arrived is lost and now counted consumed, so no replay may bring
-    // it back.
-    if (frame.tag === TAG.SENT) this.trackSeq(frame.index, frame.seq)
     // Connection-level + channel-termination ctrls and ATTACH_RESULT stay here; they involve connection
     // bookkeeping (upgrade state, channel release, TTL). Everything else is per-channel and goes through
     // `channel._dispatchFrame`.

@@ -108,15 +108,6 @@ class IndexedPeer {
     }
   }
 
-  /** The totals cover every frame through the latest seq. */
-  sendSent(bytes: number, messages: number): void {
-    try {
-      this.sender.send(encode.sent(this.index, this.replay.seq, bytes, messages))
-    } catch {
-      /* transport may already be closed */
-    }
-  }
-
   sendBdpPing(): void {
     try {
       this.sender.send(encode.bdpPing(this.index))

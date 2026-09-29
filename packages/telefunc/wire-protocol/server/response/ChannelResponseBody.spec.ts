@@ -6,12 +6,12 @@ import type { ServerChannel } from '../channel.js'
 import { IndexedPeer, type PeerSender } from '../IndexedPeer.js'
 import { TAG, decode } from '../../shared-ws.js'
 
-/** Records what the channel sends, but for the flow-control limits and totals every attach sends. */
+/** Records what the channel sends, but for the flow-control limits every attach sends. */
 function createSender(frames: Uint8Array[]): PeerSender {
   return {
     send: (frame, onCommit) => {
       onCommit?.()
-      if (frame[0] === TAG.WINDOW || frame[0] === TAG.MSG_WINDOW || frame[0] === TAG.SENT) return
+      if (frame[0] === TAG.WINDOW || frame[0] === TAG.MSG_WINDOW) return
       frames.push(frame)
     },
     bufferedAmount: () => 0,

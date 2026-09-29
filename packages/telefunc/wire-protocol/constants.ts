@@ -233,10 +233,8 @@ export const CHANNEL_RECONNECT_MAX_DELAY_MS = 5_000
 // minus what it has sent, so what is still in flight counts against it. Each side advertises
 // its limits again on a reattach to another wire, and the receiver keeps its grown `W` across
 // one (BDP is a property of the path, not of any single wire instance: slight divergence from
-// gRPC's per-connection reset, acceptable for typical transport hiccups). On such a reattach
-// the sender also sends its totals (`SENT`): what of them never arrived was lost beyond the
-// replay buffer, and the receiver counts it as consumed. A reattach on the same wire lost
-// nothing and sends neither.
+// gRPC's per-connection reset, acceptable for typical transport hiccups). A reattach on the
+// same wire lost nothing and advertises nothing.
 
 /** Initial credit window — sized so a typical ~MB-scale burst doesn't stall on
  *  the BDP ramp-up. Grows further via the estimator up to `CREDIT_WINDOW_MAX_BYTES`. */

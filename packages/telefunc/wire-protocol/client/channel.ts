@@ -111,7 +111,6 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     this._flow = new FlowControl({
       byteWindowUpdate: (limit) => this._connection.sendByteWindowUpdate(this, limit),
       msgWindowUpdate: (limit) => this._connection.sendMsgWindowUpdate(this, limit),
-      sent: (bytes, messages) => this._connection.sendSent(this, bytes, messages),
       bdpPing: () => this._connection.sendBdpPing(this),
     })
     const config = resolveClientConfig()
@@ -391,9 +390,6 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
         return
       case TAG.MSG_WINDOW:
         this._flow.onPeerMessageWindow(frame.count)
-        return
-      case TAG.SENT:
-        this._flow.onPeerSent(frame.bytes, frame.messages)
         return
       case TAG.BDP_PING:
         this._connection.sendBdpPingAck(this)

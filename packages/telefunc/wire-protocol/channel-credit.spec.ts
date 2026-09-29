@@ -331,13 +331,25 @@ test('a stream keeps flowing past its grown window after the page opens another 
   expect(page.received).toEqual([...page.received.keys()])
 })
 
+test('an upload keeps flowing past its grown window after a reconnect, the server getting it all in order', async () => {
+  const upload = loop.open<number, never>()
+  const server = consume(upload.server)
+  produce(upload.page)
+  await runUntil(() => flowOf(upload.server).msgWindow > 4 * CREDIT_MSG_WINDOW_INITIAL, 1_000)
+  const window = flowOf(upload.server).msgWindow
+  expect(window).toBeGreaterThan(4 * CREDIT_MSG_WINDOW_INITIAL)
+  loop.socket.cut() // what it carries is lost, and replays
+  const before = server.received.length
+  await runUntil(() => server.received.length - before > 2 * window, 1_000)
+  expect(server.received.length - before).toBeGreaterThan(2 * window)
+  expect(server.received).toEqual([...server.received.keys()])
+})
+
 test('a reattach on the live wire sends no flow-control frames, and one on a new wire repairs with them', async () => {
   const clock = loop.open<never, number>()
   await run(100)
   const flowControl = (from: 'page' | 'server') =>
-    loop.sent[from].filter(
-      ([tag, ix]) => ix === 0 && (tag === TAG.WINDOW || tag === TAG.MSG_WINDOW || tag === TAG.SENT),
-    ).length
+    loop.sent[from].filter(([tag, ix]) => ix === 0 && (tag === TAG.WINDOW || tag === TAG.MSG_WINDOW)).length
   const before = { page: flowControl('page'), server: flowControl('server') }
 
   loop.open<never, number>() // its RECONCILE attaches the clock again, on the same wire
@@ -349,8 +361,8 @@ test('a reattach on the live wire sends no flow-control frames, and one on a new
   await run(1_000)
   expect(loop.sockets).toHaveLength(2)
   expect({ page: flowControl('page'), server: flowControl('server') }).toEqual({
-    page: before.page + 3,
-    server: before.server + 3,
+    page: before.page + 2,
+    server: before.server + 2,
   })
 })
 

@@ -47,23 +47,18 @@ function watch(promises: (void | Promise<void>)[]): boolean[] {
 type Emit = FlowControlEmit & {
   windowCalls: number[]
   msgWindowCalls: number[]
-  sentCalls: [number, number][]
   bdpPingCalls: number
 }
 function makeEmit(): Emit {
   const e: Emit = {
     windowCalls: [],
     msgWindowCalls: [],
-    sentCalls: [],
     bdpPingCalls: 0,
     byteWindowUpdate(b) {
       e.windowCalls.push(b)
     },
     msgWindowUpdate(c) {
       e.msgWindowCalls.push(c)
-    },
-    sent(bytes, messages) {
-      e.sentCalls.push([bytes, messages])
     },
     bdpPing() {
       e.bdpPingCalls++
@@ -284,7 +279,7 @@ describe('FlowControl — reattach', () => {
   // Credit is cumulative, so a reattach keeps it: resetting it to the initial window let a sender run a window
   // ahead of what was in flight, and stalled one whose receiver waits for a quarter of its grown window. The
   // receive window grown by BDP is kept too (the link's BDP doesn't change across transport hiccups).
-  it('keeps credit and the grown receive window, and advertises the limits and the totals again', () => {
+  it('keeps credit and the grown receive window, and advertises the limits again', () => {
     const { flow, emit } = makeFlow()
     // Grow W via BDP first — fire ping, accumulate saturating sample, settle.
     flow.onReceived(1)
@@ -304,7 +299,6 @@ describe('FlowControl — reattach', () => {
     expect(flow.decrement(1)).toBeInstanceOf(Promise)
     expect(emit.windowCalls).toEqual([100 + grownWindow])
     expect(emit.msgWindowCalls).toEqual([1 + CREDIT_MSG_WINDOW_INITIAL])
-    expect(emit.sentCalls).toEqual([[CREDIT_WINDOW_INITIAL_BYTES, 1]])
   })
 
   // A sender blocked across a reattach wakes on the limit the peer advertises again on its end, the one a refresh
@@ -345,41 +339,20 @@ describe('FlowControl — reattach', () => {
     flow.useBatchTransportInitial()
     expect(emit.windowCalls).toEqual([100 + CREDIT_WINDOW_INITIAL_BYTES_BATCH])
   })
-
-  // Frames the sender counted but the receiver never gets, lost beyond the replay buffer on a reattach, count as
-  // consumed once the sender's totals arrive: otherwise their credit never returns, and a loss of most of a
-  // window stalls the stream for good.
-  it('counts what the sender sent and never arrived as consumed', () => {
-    const { flow, emit } = makeFlow()
-    flow.onReceived(1_000)
-    flow.onConsumed(1_000)
-    flow.onPeerSent(1_000 + CREDIT_WINDOW_INITIAL_BYTES, CREDIT_MSG_WINDOW_INITIAL)
-    expect(emit.windowCalls).toEqual([1_000 + CREDIT_WINDOW_INITIAL_BYTES + CREDIT_WINDOW_INITIAL_BYTES])
-    expect(emit.msgWindowCalls).toEqual([CREDIT_MSG_WINDOW_INITIAL + CREDIT_MSG_WINDOW_INITIAL])
-    // Totals already accounted for, as the next reattach repeats them, count nothing twice.
-    flow.onPeerSent(1_000 + CREDIT_WINDOW_INITIAL_BYTES, CREDIT_MSG_WINDOW_INITIAL)
-    flow.onConsumed(CREDIT_WINDOW_INITIAL_BYTES / 4 - 1)
-    expect(emit.windowCalls).toHaveLength(1)
-  })
 })
 
-/** A sender and a receiver linked by the u32 wire, as `WINDOW`, `MSG_WINDOW` and `SENT` frames link a channel's ends.
+/** A sender and a receiver linked by the u32 wire, as `WINDOW` and `MSG_WINDOW` frames link a channel's ends.
  *  BDP pings go unanswered, so the windows stay at their initial size. */
 function makePair() {
   const toSender: FlowControlEmit = {
     byteWindowUpdate: (limit) => sender.onPeerByteWindow((decode(encode.window(0, limit)) as { bytes: number }).bytes),
     msgWindowUpdate: (limit) =>
       sender.onPeerMessageWindow((decode(encode.msgWindow(0, limit)) as { count: number }).count),
-    sent: () => {},
     bdpPing: () => {},
   }
   const toReceiver: FlowControlEmit = {
     byteWindowUpdate: () => {},
     msgWindowUpdate: () => {},
-    sent: (bytes, messages) => {
-      const frame = decode(encode.sent(0, 0, bytes, messages)) as { bytes: number; messages: number }
-      receiver.onPeerSent(frame.bytes, frame.messages)
-    },
     bdpPing: () => {},
   }
   const receiver = new FlowControl(toSender)
@@ -388,7 +361,7 @@ function makePair() {
 }
 
 describe('FlowControl — 32-bit wraparound', () => {
-  // Limits and totals travel mod 2^32. A stream past 4 GiB must keep what is in flight within the window, and
+  // Limits travel mod 2^32. A stream past 4 GiB must keep what is in flight within the window, and
   // keep flowing, as its wire values wrap.
   it('keeps what is in flight within the window as the byte totals cross 2^32', async () => {
     const { sender, receiver } = makePair()
@@ -415,26 +388,6 @@ describe('FlowControl — 32-bit wraparound', () => {
       await flushMicrotasks()
     }
     expect(inFlight).toBe(CREDIT_WINDOW_INITIAL_BYTES)
-  })
-
-  // The sender's totals wrap as well: what was lost past the wrap still counts as consumed.
-  it('counts a loss as consumed when the totals have wrapped', async () => {
-    const { sender, receiver } = makePair()
-    const size = 1 << 20
-    for (let n = 0; n < 2 ** 32 / size; n++) {
-      sender.decrement(size)
-      receiver.onReceived(size)
-      receiver.onConsumed(size)
-    }
-    // A window's worth is sent, and lost with the wire.
-    for (let n = 1; n < CREDIT_WINDOW_INITIAL_BYTES / size; n++) sender.decrement(size)
-    const gate = sender.decrement(size)
-    expect(gate).toBeInstanceOf(Promise)
-    let resolved = false
-    void gate!.then(() => (resolved = true))
-    sender.reattach()
-    await flushMicrotasks()
-    expect(resolved).toBe(true)
   })
 })
 
