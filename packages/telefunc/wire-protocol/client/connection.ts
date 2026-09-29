@@ -202,6 +202,8 @@ interface MuxChannel {
   /** `wire` numbers the connection's wire: the number of the channel's last attach means that same wire, which lost
    *  nothing. */
   _onTransportOpen(batched: boolean, wire: number): void
+  /** Its frames go in batch POSTs from now on: the wire's streaming upload failed after the channel opened. */
+  _onTransportBatched?(): void
   /** Entry point for every per-channel wire frame (data + per-channel ctrl). The
    *  channel splits ctrl vs data internally. Connection-level frames (PING/PONG/
    *  FIN/RECONCILED), channel-termination ctrls (ABORT/ERROR) and ATTACH_RESULT stay with the
@@ -900,6 +902,13 @@ class ClientConnection implements MuxConnection {
       this.drainBufferedFramesToWire()
     }
     this.maybeStartUpgrade()
+  }
+
+  /** The wire's upload falls back to batch POSTs, which a channel may have opened before: see `_onTransportOpen`'s
+   *  `batched`. */
+  _onTransportBatched(transport: ClientChannelTransport): void {
+    if (transport !== this.transport) return
+    for (const { channel, state } of this.channels.values()) if (state.tag !== 'closed') channel._onTransportBatched?.()
   }
 
   _onTransportFrame(frame: DecodedFrame, source: ClientChannelTransport, byteLength: number): void {
@@ -2293,6 +2302,7 @@ class SseTransport implements UpgradeSource {
         this.closeStreamRequest()
         this.streamRequest = { tag: 'failed' }
         if (unsent) this.outbox = [...unsent.map((frame) => ({ frame, deadline: Date.now() })), ...this.outbox]
+        this.owner._onTransportBatched(this)
       }
     }
 

@@ -47,8 +47,9 @@ class Pipe {
 }
 
 /** The page's end of the link, and the server's SSE handler at the other. `batched`: the page's streaming upload is
- *  refused, as a browser that can't stream a request body gets, and the page sends batch POSTs. */
-function link({ batched }: { batched: boolean }) {
+ *  refused, as a browser that can't stream a request body gets, `refusedAfter` ms after it went out, and the page sends
+ *  batch POSTs. */
+function link({ batched, refusedAfter = 2 * LATENCY_MS }: { batched: boolean; refusedAfter?: number }) {
   const up = new Pipe()
   const down = new Pipe()
   const sse = getTelefuncSseChannelHooks()
@@ -60,7 +61,7 @@ function link({ batched }: { batched: boolean }) {
     aborted.catch(() => {})
     const body = init.body as Blob | ReadableStream<Uint8Array>
     if (!(body instanceof Blob) && batched) {
-      await new Promise((resolve) => setTimeout(resolve, 2 * LATENCY_MS))
+      await new Promise((resolve) => setTimeout(resolve, refusedAfter))
       return new Response('', { status: 400 })
     }
     let toServer!: ReadableStreamDefaultController<Uint8Array>
@@ -246,4 +247,15 @@ describe.each([
     expect(sse.batched).toBe(batched)
     expect(flowOf(download.page).byteWindow).toBeGreaterThan(pageWindow)
   })
+})
+
+// Firefox answers the streaming upload it can't send with the server's 400, a round trip after the page's first RECONCILE
+// went out: that RECONCILE's RECONCILED, which opens the page's channels, may come first.
+test("a page's window for a download starts at the batched initial window, though its upload falls back to batch POSTs only after the download opened", async () => {
+  const sse = (current = link({ batched: true, refusedAfter: 500 }))
+  const download = sse.open<never, string>()
+  received(download.page)
+  await run(1_000)
+  expect(sse.batched).toBe(true)
+  expect(flowOf(download.page).byteWindow).toBe(CREDIT_WINDOW_INITIAL_BYTES_BATCH)
 })

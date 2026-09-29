@@ -677,19 +677,7 @@ const EXPECTED_TRAFFIC: Record<Wire, Traffic> = {
   },
   'sse-batch': {
     requests: 5,
-    toServer: [
-      RECONCILE,
-      TEXT,
-      BDP_PING_ACK,
-      WINDOW,
-      WINDOW,
-      MSG_WINDOW,
-      RECONCILE,
-      BDP_PING,
-      WINDOW,
-      WINDOW,
-      MSG_WINDOW,
-    ],
+    toServer: [RECONCILE, TEXT, BDP_PING_ACK, WINDOW, MSG_WINDOW, RECONCILE, BDP_PING, WINDOW, WINDOW, MSG_WINDOW],
     toPage: [
       BDP_PING_ACK,
       WINDOW,

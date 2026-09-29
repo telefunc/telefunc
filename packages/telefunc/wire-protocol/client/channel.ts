@@ -300,6 +300,11 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     this._flow.acknowledge()
   }
 
+  /** @internal */
+  _onTransportBatched(): void {
+    if (!this._isClosed) this._flow.useBatchTransportInitial()
+  }
+
   _onTransportOpen(batched: boolean, wire: number): void {
     if (this._isClosed) return
     if (batched) this._flow.useBatchTransportInitial()
