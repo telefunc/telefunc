@@ -4,7 +4,14 @@ import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { IndexedPeer } from '../server/IndexedPeer.js'
 import { CHANNEL_PING_INTERVAL_MS, CHANNEL_RECONNECT_TIMEOUT_MS, CHANNEL_TRANSPORT } from '../constants.js'
-import { ACK_STATUS, ProtocolViolationError, TAG, decode, type BroadcastSubscriptions } from '../shared-ws.js'
+import {
+  ACK_STATUS,
+  ProtocolViolationError,
+  TAG,
+  decode,
+  type BroadcastSubscriptions,
+  type SeqReader,
+} from '../shared-ws.js'
 import { ShieldValidationError, isShieldValidationError } from '../../shared/ShieldValidationError.js'
 import { Abort } from '../../shared/Abort.js'
 import { createDeferred } from '../../utils/createDeferred.js'
@@ -1515,23 +1522,50 @@ describe('Room public behavior', () => {
       ],
       [
         stub,
-        { tag: TAG.TEXT_ACK_REQ, index: 7, seq: 5, text: text({ __r: 'req-join', meta: [], selfDelivery: true }) },
+        {
+          tag: TAG.TEXT_ACK_REQ,
+          index: 7,
+          seq: 5,
+          text: text({ __r: 'req-join', meta: [], selfDelivery: true }),
+          bytes: 1,
+        },
       ],
-      [stub, { tag: TAG.TEXT_ACK_REQ, index: 7, seq: 6, text: text({ __r: 'req-set-meta', id: 'nope', meta: {} }) }],
       [
         stub,
-        { tag: TAG.TEXT_ACK_REQ, index: 7, seq: 7, text: text({ __r: 'sub-text', members: [], announce: false }) },
+        {
+          tag: TAG.TEXT_ACK_REQ,
+          index: 7,
+          seq: 6,
+          text: text({ __r: 'req-set-meta', id: 'nope', meta: {} }),
+          bytes: 1,
+        },
       ],
-      [stub, { tag: TAG.PUBLISH_ACK_REQ, index: 7, seq: 8, text: text({ __r: 'data', from: member, retain: 1 }) }],
-      [stub, { tag: TAG.PUBLISH_BINARY_ACK_REQ, index: 7, seq: 9, data: new Uint8Array([1, 2]) }],
-      [participant, { tag: TAG.TEXT_ACK_REQ, index: 7, seq: 1, text: text({ __r: 'req-set-attrs', attrs: 'x' }) }],
+      [
+        stub,
+        {
+          tag: TAG.TEXT_ACK_REQ,
+          index: 7,
+          seq: 7,
+          text: text({ __r: 'sub-text', members: [], announce: false }),
+          bytes: 1,
+        },
+      ],
+      [
+        stub,
+        { tag: TAG.PUBLISH_ACK_REQ, index: 7, seq: 8, text: text({ __r: 'data', from: member, retain: 1 }), bytes: 1 },
+      ],
+      [stub, { tag: TAG.PUBLISH_BINARY_ACK_REQ, index: 7, seq: 9, data: new Uint8Array([1, 2]), bytes: 2 }],
       [
         participant,
-        { tag: TAG.BINARY_ACK_REQ, index: 7, seq: 2, data: encodeBinaryFrame(member, new Uint8Array([1])) },
+        { tag: TAG.TEXT_ACK_REQ, index: 7, seq: 1, text: text({ __r: 'req-set-attrs', attrs: 'x' }), bytes: 1 },
+      ],
+      [
+        participant,
+        { tag: TAG.BINARY_ACK_REQ, index: 7, seq: 2, data: encodeBinaryFrame(member, new Uint8Array([1])), bytes: 1 },
       ],
       [stub, { tag: TAG.TEXT, index: 7, seq: 10, text: '{', bytes: 1 }],
-      [stub, { tag: TAG.TEXT_ACK_REQ, index: 7, seq: 11, text: '{' }],
-      [participant, { tag: TAG.TEXT_ACK_REQ, index: 7, seq: 3, text: '{' }],
+      [stub, { tag: TAG.TEXT_ACK_REQ, index: 7, seq: 11, text: '{', bytes: 1 }],
+      [participant, { tag: TAG.TEXT_ACK_REQ, index: 7, seq: 3, text: '{', bytes: 1 }],
     ] as const
     for (const [channel, frame] of frames) expect(() => channel._dispatchFrame(frame)).toThrow(ProtocolViolationError)
   })
@@ -1692,7 +1726,7 @@ describe('Room public behavior', () => {
     channel._setResponseAbort(responseAbort)
     const peer = attachPeer(channel as unknown as RoomStubChannel)
     const data = encodeBinaryFrame(holder.id, new Uint8Array([1]))
-    channel._dispatchFrame({ tag: TAG.BINARY_ACK_REQ, index: 7, seq: 1, data })
+    channel._dispatchFrame({ tag: TAG.BINARY_ACK_REQ, index: 7, seq: 1, data, bytes: data.byteLength })
     await vi.waitFor(() =>
       expect(peer.decoded().find((frame) => frame.tag === TAG.ACK_RES)).toMatchObject({ status: ACK_STATUS.ABORT }),
     )
@@ -1706,7 +1740,7 @@ describe('Room public behavior', () => {
     const peer = attachPeer(channel as unknown as RoomStubChannel)
     await holder.leave()
     const data = encodeBinaryFrame(holder.id, new Uint8Array([1]))
-    channel._dispatchFrame({ tag: TAG.BINARY_ACK_REQ, index: 7, seq: 1, data })
+    channel._dispatchFrame({ tag: TAG.BINARY_ACK_REQ, index: 7, seq: 1, data, bytes: data.byteLength })
     await vi.waitFor(() =>
       expect(peer.decoded().find((frame) => frame.tag === TAG.ACK_RES)).toMatchObject({
         status: ACK_STATUS.ERROR,
@@ -3071,7 +3105,7 @@ describe('client Room lifecycle', () => {
       const me = await new ClientRoom(stub, snapshot('publish-refused')).join()
       const publishing = me.publish('hi')
       const text = 'Participant not found (left?)'
-      stub._dispatchFrame({ tag: TAG.ACK_RES, index: 0, seq: 1, ackedSeq: 1, status: ACK_STATUS.ERROR, text })
+      stub._dispatchFrame({ tag: TAG.ACK_RES, index: 0, seq: 1, bytes: 0, ackedSeq: 1, status: ACK_STATUS.ERROR, text })
       await expect(publishing).rejects.toThrow(text)
       expect(report).not.toHaveBeenCalled()
     } finally {
@@ -3415,6 +3449,8 @@ describe('room protocol validation', () => {
   })
 })
 type Peer = ReturnType<typeof attachPeer>
+/** A receiver with nothing of any channel: each seq reads as its low 32 bits. */
+const wireSeqs: SeqReader = { received: () => 0, sent: () => 0 }
 function attachPeer(stub: ServerChannel, lastSeq?: number, broadcast?: BroadcastSubscriptions) {
   const frames: Uint8Array[] = []
   const replay = stub._replayBuffer!
@@ -3435,7 +3471,7 @@ function attachPeer(stub: ServerChannel, lastSeq?: number, broadcast?: Broadcast
     replay,
   )
   stub._attachPeer(peer, { broadcast })
-  return { peer, decoded: () => frames.map((frame) => decode(frame as Uint8Array<ArrayBuffer>)) }
+  return { peer, decoded: () => frames.map((frame) => decode(frame as Uint8Array<ArrayBuffer>, wireSeqs)) }
 }
 function subsOf(room: Room | ServerRoom): {
   _control: LaneSubscription

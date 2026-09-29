@@ -17,23 +17,28 @@ config.channel = {
   connectTtl: 5_000,                    // Wait for client to connect to new channel (ms)
 
   // Text buffers
-  serverReplayBuffer: 262_144,          // Server replay buffer for text frames (bytes)
-  clientReplayBuffer: 1_048_576,        // Client replay buffer for text frames (bytes)
-  bufferLimit: 524_288,                 // Per-peer buffer for text messages (bytes)
+  serverReplayBuffer: 134_217_728,        // Server replay buffer for text messages (bytes)
+  clientReplayBuffer: 134_217_728,        // Client replay buffer for text messages (bytes)
+  bufferLimit: 524_288,                   // Per-peer buffer for text messages (bytes)
 
   // Binary buffers — separate budget so binary can never evict text
-  serverReplayBufferBinary: 2_097_152,  // Server replay buffer for binary frames (bytes)
-  clientReplayBufferBinary: 2_097_152,  // Client replay buffer for binary frames (bytes)
-  bufferLimitBinary: 2_097_152,         // Per-peer buffer for binary messages (bytes)
+  serverReplayBufferBinary: 134_217_728,  // Server replay buffer for binary messages (bytes)
+  clientReplayBufferBinary: 134_217_728,  // Client replay buffer for binary messages (bytes)
+  bufferLimitBinary: 2_097_152,           // Per-peer buffer for binary messages (bytes)
 }
 ```
+
+A replay buffer keeps, per channel, the messages its side sent that the other side hasn't acknowledged, to replay after a reconnect, and nothing else. The other side never grants a flow-control window larger than half the smaller of the two (text and binary), so what flow control lets be in flight always fits, with a message up to that size sent as the window ran out: a stream that `await`s its sends resumes after a reconnect without loss, and its replay buffer holds its window and one message at most. What goes past that window, sends nobody awaits, and sends with `{ ack: true }` and their replies, counts against the rest, and a reconnect that needs more of it than the replay buffer holds closes the channel with `NetworkError`. The defaults, 128 MiB, allow the largest window, 64 MiB, and as much again past it: how far behind the server lets a connected client be sent a channel's messages before it refuses a send with `ChannelOverflowError`.
+
+`bufferLimit`/`bufferLimitBinary` bound what the server holds for a channel while no client is connected.
 
 > This is the **server-side** `config.channel` — a separate object from the **client-side** <Link href="/transport"><code>config.channel.transports</code></Link> (`telefunc/client`).
 
 > **What to tune**: the defaults suit typical stream use cases; tune these only if you run into one of the issues below:
 > - Slow/flaky clients dropping with `NetworkError` (`isChannel: true`) → raise `reconnectTimeout` (how long the server holds a channel open while a client is gone).
 > - `ChannelOverflowError` while a peer is briefly offline → raise `bufferLimit`/`bufferLimitBinary`, or apply backpressure by `await`-ing your `send()`s.
-> - A channel or stream closing with `NetworkError` because a reconnect needed messages a replay buffer no longer held → raise the setting the error names; lower the replay buffers to cap memory.
+> - A channel or stream closing with `NetworkError` because a reconnect needed messages a replay buffer no longer held → `await` your `send()`s, or raise the setting the error names.
+> - Lowering a replay buffer caps what one channel can have in flight, half of it, and so its throughput over a link that is fast and far: a channel moves at most its window per round trip.
 
 <ConfigWhereServer />
 

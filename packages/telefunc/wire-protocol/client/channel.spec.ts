@@ -3,9 +3,22 @@ import { afterEach, describe, expect, test, vi } from 'vitest'
 import { ClientBroadcast, ClientChannel } from './channel.js'
 import { config } from '../../client/clientConfig.js'
 import { CHANNEL_TRANSPORT } from '../constants.js'
-import { ACK_STATUS, TAG, decode, type AckResultStatus } from '../shared-ws.js'
+import {
+  ACK_STATUS,
+  TAG,
+  decode,
+  encode,
+  encodePublishBinary,
+  encodePublishText,
+  type AckResultStatus,
+  type ChannelFrame,
+  type SeqReader,
+} from '../shared-ws.js'
 import { ChannelOverflowError } from '../channel-errors.js'
 import { getSessionUrl } from './session-registry.js'
+
+/** A receiver with nothing of any channel: each seq reads as its low 32 bits. */
+const wireSeqs: SeqReader = { received: () => 0, sent: () => 0 }
 
 const broadcasts: ClientBroadcast[] = []
 const channels: ClientChannel<never, string>[] = []
@@ -28,6 +41,12 @@ function stalledChannel(): ClientChannel<never, string> {
   channels.push(channel)
   return channel
 }
+
+test('close() refuses a timeout longer than a timer waits, which would fire at once', () => {
+  const channel = stalledChannel()
+  expect(() => channel.close({ timeout: 2 ** 31 })).toThrow('at most 2147483647')
+  expect(channel.isClosed).toBe(false)
+})
 
 test("a channel listener that stops listening itself doesn't make the next one miss the message", () => {
   const channel = stalledChannel()
@@ -131,7 +150,7 @@ function publishThatSettlesWith(status: AckResultStatus, binary: boolean) {
   const broadcast = stalledBroadcast()
   const publishing = binary ? broadcast.publishBinary(new Uint8Array([1])) : broadcast.publish('message')
   const text = status === ACK_STATUS.ABORT ? JSON.stringify('expected') : 'unexpected publish bug'
-  broadcast._dispatchFrame({ tag: TAG.ACK_RES, index: 0, seq: 1, ackedSeq: 1, status, text })
+  broadcast._dispatchFrame({ tag: TAG.ACK_RES, index: 0, seq: 1, bytes: 0, ackedSeq: 1, status, text })
   return publishing
 }
 
@@ -177,6 +196,24 @@ describe.each([
   })
 })
 
+test('a broadcast delivers each publish with the seq its key was given, to text and binary subscribers alike, past 2^32', () => {
+  const broadcast = stalledBroadcast()
+  const seen: number[] = []
+  broadcast.subscribe((_, info) => void seen.push(info.seq))
+  broadcast.subscribeBinary((_, info) => void seen.push(info.seq))
+  const seqs = [2 ** 32 - 1, 2 ** 32, 2 ** 32 + 1, 2 ** 32 + 2, Number.MAX_SAFE_INTEGER - 1, Number.MAX_SAFE_INTEGER]
+  // As the server sends each: alternately text and binary.
+  for (const [n, seq] of seqs.entries()) {
+    const info = { seq, timestamp: 1 }
+    const frame =
+      n % 2 === 0
+        ? encode.publish(0, encodePublishText('"x"', info), n + 1)
+        : encode.publishBinary(0, encodePublishBinary(new Uint8Array([1]), info), n + 1)
+    broadcast._dispatchFrame(decode(frame, wireSeqs) as ChannelFrame)
+  }
+  expect(seen).toEqual(seqs)
+})
+
 test('a broadcast declares its subscriptions on every attach, as a subscribe written to a wire already dead is lost', () => {
   const broadcast = stalledBroadcast()
   broadcast.subscribe(() => {})
@@ -201,7 +238,9 @@ test("a broadcast's toggles after close() send nothing, so none can hold its cha
 test('a broadcast subscribes the page to a kind with its first listener, and unsubscribes it with the last', () => {
   const broadcast = stalledBroadcast()
   broadcast.subscribeBinary(() => {})()
-  const frames = (broadcast as any)._connection.sendBuffer.map(({ frame }: { frame: Uint8Array }) => decode(frame))
+  const frames = (broadcast as any)._connection.sendBuffer.map(({ frame }: { frame: Uint8Array }) =>
+    decode(frame, wireSeqs),
+  )
   expect(frames).toMatchObject([
     { tag: TAG.BROADCAST_SUB, binary: true },
     { tag: TAG.BROADCAST_UNSUB, binary: true },

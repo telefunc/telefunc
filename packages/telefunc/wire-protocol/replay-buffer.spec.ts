@@ -55,3 +55,26 @@ test('a closing frame is kept past the data budgets', () => {
   replay.push(1, encode.close(0, 1_000, 1))
   expect(replay.getAfter(0)).toEqual([encode.close(0, 1_000, 1)])
 })
+
+test('lets go of what the peer acknowledged, in every lane, and gives the rest', () => {
+  const replay = new ReplayBuffer(1_024, 60_000, 1_024)
+  replay.push(1, text(1))
+  replay.push(2, encode.binary(0, new Uint8Array(8), 2))
+  replay.push(3, text(3))
+  replay.push(4, encode.close(0, 1_000, 4))
+  replay.acknowledge(2)
+  expect(replay.length).toBe(2)
+  expect(replay.getAfter(2)).toEqual([text(3), encode.close(0, 1_000, 4)])
+  replay.acknowledge(4)
+  expect(replay.length).toBe(0)
+  expect(replay.byteLength).toBe(0)
+  expect(replay.getAfter(4)).toEqual([])
+})
+
+test('counts what flow control counts, the bytes of the payloads', () => {
+  const replay = new ReplayBuffer(300, 60_000, 1_024)
+  replay.push(1, text(1, 150))
+  replay.push(2, text(2, 150)) // with their headers, more than 300 bytes
+  expect(replay.byteLength).toBe(300)
+  expect(replay.getAfter(0)).toEqual([text(1, 150), text(2, 150)])
+})

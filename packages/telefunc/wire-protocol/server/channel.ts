@@ -40,8 +40,13 @@ import { handleTelefunctionBug } from '../../node/server/runTelefunc/validateTel
 import { ChannelClosedError, ChannelOverflowError, replayLossError } from '../channel-errors.js'
 import { NetworkError } from '../../shared/NetworkError.js'
 import { isPromise } from '../../utils/isPromise.js'
-import { CHANNEL_CLOSE_TIMEOUT_MS, CHANNEL_PING_INTERVAL_MIN_MS, CREDIT_WINDOW_MAX_BYTES } from '../constants.js'
-import { FlowControl } from '../flow-control/flow-control.js'
+import {
+  CHANNEL_CLOSE_TIMEOUT_MAX_MS,
+  CHANNEL_CLOSE_TIMEOUT_MS,
+  CHANNEL_PING_INTERVAL_MIN_MS,
+  CREDIT_WINDOW_MAX_BYTES,
+} from '../constants.js'
+import { FlowControl, replayWindow } from '../flow-control/flow-control.js'
 import { STATUS_BODY_INTERNAL_SERVER_ERROR } from '../../shared/constants.js'
 import { ServerChannelBuffer } from './ServerChannelBuffer.js'
 import { ReplayBuffer } from '../replay-buffer.js'
@@ -53,6 +58,7 @@ import {
   ProtocolViolationError,
   TAG,
   assertProtocol,
+  countsCredit,
   isChannelCtrlTag,
   isReplayLoss,
   isSequencedFrame,
@@ -63,6 +69,7 @@ import type {
   ChannelCtrlFrame,
   ChannelDataFrame,
   ChannelFrame,
+  ErrorReason,
   ReattachState,
   ReplayLoss,
 } from '../shared-ws.js'
@@ -130,8 +137,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   protected _flow: FlowControl
   /** How far past its credit the peer can be sent while it reads: a burst up to the largest window a page grants,
    *  however small the window this one granted. A page taking publishes grants that window from the start, which a
-   *  burst fits in: past it, that page is behind by more than what it read and hasn't reported, which it does once a
-   *  quarter of that window. */
+   *  burst fits in: past it and a quarter more, that page is behind by more than what it read and hasn't reported,
+   *  which it reports sooner than that. */
   private readonly _pastCreditAllowance: number
   private readonly _letsBehindGo: boolean
   private _reconnectTimer: ReturnType<typeof setTimeout> | null = null
@@ -142,6 +149,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   private _pendingCloseAck = false
   private _pendingCloseRequest = false
   private _pendingAbort: string | null = null
+  private _pendingError: ErrorReason | null = null
   private _closeRequestSeq = 0
   /** How far the page is known to have what this channel sent it. */
   private _pageLastSeq = 0
@@ -182,16 +190,20 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this.id = id ?? crypto.randomUUID()
     this._flow = new FlowControl(
       {
-        byteWindowUpdate: (limit) => this._peer?.sendByteWindowUpdate(limit),
+        byteWindowUpdate: (limit) => this._peer?.sendByteWindowUpdate(limit, this._lastClientSeq),
         msgWindowUpdate: (limit) => this._peer?.sendMsgWindowUpdate(limit),
         bdpPing: (probe) => this._peer?.sendBdpPing(probe),
       },
       () => this._peer?.sender.bufferedAmount(),
     )
-    if (publishes) this._flow.onPeerByteWindow(CREDIT_WINDOW_MAX_BYTES)
-    this._pastCreditAllowance = publishes ? CREDIT_WINDOW_MAX_BYTES >> 2 : CREDIT_WINDOW_MAX_BYTES
-    this._letsBehindGo = letsBehindGo
     const c = getServerConfig().channel
+    this._flow.fitReplays(
+      replayWindow(c.clientReplayBuffer, c.clientReplayBufferBinary),
+      replayWindow(c.serverReplayBuffer, c.serverReplayBufferBinary),
+    )
+    if (publishes) this._flow.onPeerByteWindow(this._flow.peerByteWindowMax)
+    this._pastCreditAllowance = publishes ? this._flow.peerByteWindowMax >> 2 : CREDIT_WINDOW_MAX_BYTES
+    this._letsBehindGo = letsBehindGo
     this._bufferLimit = bufferLimit ?? c.bufferLimit
     this._bufferLimitBinary = c.bufferLimitBinary
     this._prePeerBuffer = new ServerChannelBuffer<ChannelAck<ServerToClient>>(
@@ -325,7 +337,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   /** A send that finds its page behind rejects with ChannelOverflowError without going out, and the channel stays open,
    *  unless nothing that sends on it can be refused. */
   private _refuseBehind(): Promise<never> {
-    if (this._letsBehindGo) this._closeBehind(this._peer!)
+    if (this._letsBehindGo) this._closeBehind()
     return rejectOverflow()
   }
 
@@ -473,7 +485,9 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       this._dispatchCtrl(frame as ChannelCtrlFrame)
       return
     }
-    this._dispatchDataFrame(frame as ChannelDataFrame)
+    const data = frame as ChannelDataFrame
+    if (!countsCredit(data.tag)) this._flow.onReceivedUncounted(data.bytes)
+    this._dispatchDataFrame(data)
   }
 
   /** @internal Tag-keyed data-frame switch. */
@@ -522,6 +536,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         return
       case TAG.WINDOW:
         this._flow.onPeerByteWindow(frame.bytes)
+        this._onPageHas(frame.lastSeq)
         return
       case TAG.MSG_WINDOW:
         this._flow.onPeerMessageWindow(frame.count)
@@ -665,7 +680,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
 
   _onPeerCloseRequest(timeoutMs: number): void {
     if (this._didShutdown) return
-    const peerDeadline = Date.now() + normalizeCloseTimeout(timeoutMs)
+    assertProtocol(timeoutMs <= CHANNEL_CLOSE_TIMEOUT_MAX_MS, `CLOSE timeout ${timeoutMs}`)
+    const peerDeadline = Date.now() + timeoutMs
     if (!this._closeDeadline || peerDeadline < this._closeDeadline) this._closeDeadline = peerDeadline
     if (this._peer) this._peer.sendCloseAck()
     else this._pendingCloseAck = true
@@ -719,9 +735,15 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this._shutdown(replayLossError('server', loss))
   }
 
-  /** @internal The page has what this channel sent it through `lastSeq`. */
+  /** @internal At each of its page's heartbeats: see `FlowControl.acknowledge`. */
+  _acknowledge(): void {
+    this._flow.acknowledge()
+  }
+
+  /** @internal The page has what this channel sent it through `lastSeq`, which its replay lets go. */
   _onPageHas(lastSeq: number): void {
     if (lastSeq > this._pageLastSeq) this._pageLastSeq = lastSeq
+    this._replayBuffer?.acknowledge(lastSeq)
   }
 
   /** @internal Its page has all this channel sent it, and it has nothing more to send. */
@@ -732,7 +754,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       this._pendingAckRes.length === 0 &&
       !this._pendingCloseAck &&
       !this._pendingCloseRequest &&
-      this._pendingAbort === null
+      this._pendingAbort === null &&
+      this._pendingError === null
     )
   }
 
@@ -746,16 +769,26 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     if (this._pendingCloseRequest)
       this._closeRequestSeq = peer.sendCloseRequest(Math.max(0, this._closeDeadline - Date.now()))
     if (this._pendingAbort !== null) peer.sendAbort(this._pendingAbort)
+    if (this._pendingError !== null) peer.sendError(this._pendingError)
     this._pendingCloseAck = false
     this._pendingCloseRequest = false
     this._pendingAbort = null
+    this._pendingError = null
+  }
+
+  /** Ends the channel on both ends with an ERROR of `reason`, which a page not attached gets at its next attach. */
+  protected _endWithError(reason: ErrorReason, err: Error): void {
+    if (this._didShutdown) return
+    if (this._peer) this._peer.sendError(reason)
+    else this._pendingError = reason
+    this._shutdown(err)
   }
 
   /** @internal A PUBLISH frame to the peer, buffered until it attaches. */
   _sendPublish(wireText: string): void {
     const peer = this._peer
     if (peer === null) this._prePeerBuffer.pushPublish(wireText)
-    else if (this._flow.isPastByteCredit && this._isPeerBehind()) this._closeBehind(peer)
+    else if (this._flow.isPastByteCredit && this._isPeerBehind()) this._closeBehind()
     else this._flow.countSentBytes(peer.sendPublish(wireText))
   }
 
@@ -763,15 +796,15 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   _sendPublishBinary(wireData: Uint8Array): void {
     const peer = this._peer
     if (peer === null) this._prePeerBuffer.pushPublishBinary(wireData)
-    else if (this._flow.isPastByteCredit && this._isPeerBehind()) this._closeBehind(peer)
+    else if (this._flow.isPastByteCredit && this._isPeerBehind()) this._closeBehind()
     else this._flow.countSentBytes(peer.sendPublishBinary(wireData))
   }
 
   /** A page that can't keep up, where no sender can be refused: once behind, it leaves, on both ends, rather than be
    *  sent a gap. */
-  private _closeBehind(peer: IndexedPeer): void {
-    peer.sendError(ERROR_REASON.OVERFLOW)
-    this._shutdown(
+  private _closeBehind(): void {
+    this._endWithError(
+      ERROR_REASON.OVERFLOW,
       new ChannelOverflowError('Channel closed: its client fell further behind than the server holds for a client'),
     )
   }
@@ -930,6 +963,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this._pendingCloseAck = false
     this._pendingCloseRequest = false
     this._pendingAbort = null
+    this._pendingError = null
   }
 
   private _fireClose(err?: Error): void {
@@ -1023,7 +1057,10 @@ function replayMaxAge(): number {
 
 function normalizeCloseTimeout(timeout: number | undefined): number {
   if (timeout === undefined) return CHANNEL_CLOSE_TIMEOUT_MS
-  assertUsage(Number.isFinite(timeout) && timeout >= 0, 'Channel close timeout must be a non-negative finite number')
+  assertUsage(
+    Number.isFinite(timeout) && timeout >= 0 && timeout <= CHANNEL_CLOSE_TIMEOUT_MAX_MS,
+    `Channel close timeout must be a non-negative number of milliseconds, at most ${CHANNEL_CLOSE_TIMEOUT_MAX_MS}`,
+  )
   return timeout
 }
 

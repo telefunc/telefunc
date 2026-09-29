@@ -1,15 +1,15 @@
 import { unrefTimer } from '../utils/unrefTimer.js'
-import { ERROR_REASON, replayLaneOf, type ReplayLaneKind, type ReplayLoss } from './shared-ws.js'
+import { ERROR_REASON, payloadBytes, replayLaneOf, type ReplayLaneKind, type ReplayLoss } from './shared-ws.js'
 
 /**
  * High-performance replay buffer for outgoing WebSocket data frames.
  *
- * Stores encoded frames keyed by monotonic sequence number for replay
- * on reconnect. Bounded by byte size — oldest entries are evicted when full.
- * Also bounded by age: entries older than `maxAgeMs` are evicted.
+ * Stores encoded frames keyed by monotonic sequence number for replay on reconnect, until the peer acknowledges them.
+ * Bounded by the bytes of their payloads, what flow control counts: oldest entries are evicted when full. Also bounded
+ * by age: entries older than `maxAgeMs` are evicted.
  *
- * A frame goes in the lane its tag names (`replayLaneOf`), each with its own byte budget: a large binary can't evict
- * text, and the frame that ends a channel is dropped for its age alone.
+ * A frame goes in the lane its tag names (`replayLaneOf`), each with its own byte budget, and the frame that ends a
+ * channel is dropped for its age alone.
  *
  * A frame larger than its lane's budget isn't stored. `getAfter` gives a peer
  * all it lacks, or, if a dropped frame is among it, why it can't.
@@ -64,6 +64,11 @@ export class ReplayBuffer {
     const stored = this.lanes[replayLaneOf(frame[0]!)].push(seq, frame)
     this.scheduleCleanup()
     return stored
+  }
+
+  /** The peer has every frame through `lastSeq`, which a reconnect never asks for again: they go. */
+  acknowledge(lastSeq: number): void {
+    for (const lane of this.allLanes) lane.acknowledge(lastSeq)
   }
 
   /** The frames with afterSeq < seq <= throughSeq, merged by seq, or why they can't all be given. */
@@ -214,7 +219,7 @@ class ReplayLane {
   push(seq: number, frame: Uint8Array<ArrayBuffer>): boolean {
     const now = Date.now()
 
-    if (frame.byteLength > this.maxBytes) {
+    if (payloadBytes(frame) > this.maxBytes) {
       this.overBudgetThrough = seq
       // Still evict by age, as the normal push path does.
       this._evict(now)
@@ -224,9 +229,18 @@ class ReplayLane {
     this.seqs.push(seq)
     this.frames.push(frame)
     this.times.push(now)
-    this.totalBytes += frame.byteLength
+    this.totalBytes += payloadBytes(frame)
     this._evict(now)
     return true
+  }
+
+  acknowledge(lastSeq: number): void {
+    const head = this.head
+    while (this.head < this.frames.length && this.seqs[this.head]! <= lastSeq) {
+      this.totalBytes -= payloadBytes(this.frames[this.head]!)
+      this.head++
+    }
+    if (this.head > head) this.compact()
   }
 
   setLimits(maxBytes: number, maxAgeMs: number): void {
@@ -252,7 +266,7 @@ class ReplayLane {
     if (this.head >= this.frames.length) return
     const cutoff = now - this.maxAgeMs
     while (this.head < this.frames.length && this.times[this.head]! < cutoff) {
-      this.totalBytes -= this.frames[this.head]!.byteLength
+      this.totalBytes -= payloadBytes(this.frames[this.head]!)
       this.head++
     }
     this.compact()
@@ -276,7 +290,7 @@ class ReplayLane {
       const expired = this.times[this.head]! < cutoff
       if (!expired && this.totalBytes <= this.maxBytes) break
       if (!expired) this.overBudgetThrough = Math.max(this.overBudgetThrough, this.seqs[this.head]!)
-      this.totalBytes -= this.frames[this.head]!.byteLength
+      this.totalBytes -= payloadBytes(this.frames[this.head]!)
       this.head++
     }
     this.compact()

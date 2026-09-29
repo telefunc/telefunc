@@ -1,7 +1,7 @@
 import { expect, test, vi } from 'vitest'
 import { ChannelMux, type ServerTransport } from './mux.js'
 import { ServerChannel } from './channel.js'
-import { decode, encode, TAG, type DecodedFrame } from '../shared-ws.js'
+import { decode, encode, TAG, type DecodedFrame, type SeqReader } from '../shared-ws.js'
 import { getServerConfig } from '../../node/server/serverConfig.js'
 import {
   CREDIT_MSG_WINDOW_MAX,
@@ -9,6 +9,9 @@ import {
   WIRE_RECV_BACKLOG_BASE_FRAMES,
   WIRE_SEND_BACKLOG_BASE_BYTES,
 } from '../constants.js'
+
+/** A receiver with nothing of any channel: each seq reads as its low 32 bits. */
+const wireSeqs: SeqReader = { received: () => 0, sent: () => 0 }
 
 /** Wires the test opens on `mux`, each recording what the server sends on it. */
 function wires(mux: ChannelMux) {
@@ -19,7 +22,7 @@ function wires(mux: ChannelMux) {
     getSessionId: (wire) => sessions.get(wire),
     setSessionId: (wire, id) => void sessions.set(wire, id),
     getConnId: () => null,
-    sendNow: (wire, frame) => void sent.get(wire)!.push(decode(frame)),
+    sendNow: (wire, frame) => void sent.get(wire)!.push(decode(frame, wireSeqs)),
     bufferedAmount: () => 0,
     terminateConnection: (wire) => void terminated.add(wire),
   }
@@ -505,7 +508,7 @@ test("a page that grants credit it doesn't have and doesn't read has its wire te
   }
   mux.onConnectionOpen(wire, transport)
   await mux.onConnectionRawMessage(wire, encode.reconcile({ open: [{ id: 'hog', ix: 0, lastSeq: 0, initial: true }] }))
-  await mux.onConnectionRawMessage(wire, encode.window(0, 0x7fff_ffff))
+  await mux.onConnectionRawMessage(wire, encode.window(0, 0x7fff_ffff, 0))
   await mux.onConnectionRawMessage(wire, encode.msgWindow(0, 0x7fff_ffff))
   const chunk = new Uint8Array(1024 * 1024)
   for (let sent = 0; terminatedHolding === null && sent < 512; sent++) await channel.sendBinary(chunk)

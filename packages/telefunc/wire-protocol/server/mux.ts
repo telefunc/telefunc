@@ -40,6 +40,7 @@ import type {
   PreparePayload,
   ReconcileOpenEntry,
   ReconcilePayload,
+  SeqReader,
 } from '../shared-ws.js'
 import { IndexedPeer, type PeerSender } from './IndexedPeer.js'
 import { replayMaxAge, type ServerChannel } from './channel.js'
@@ -99,6 +100,8 @@ type MuxServerOptions = {
   idleTimeout: number
   pingInterval: number
   pingDeadline: number
+  serverReplayBuffer: number
+  serverReplayBufferBinary: number
   clientReplayBuffer: number
   clientReplayBufferBinary: number
   connectTtl: number
@@ -156,6 +159,8 @@ type ConnectionEntry = {
   transport: ServerTransport<unknown>
   /** One per wire: the peers of every reconcile on this wire share it. */
   sender: PeerSender
+  /** Where the server stands on each channel of the wire's session, from which a frame's seqs are read. */
+  seqs: SeqReader
 }
 
 /** The context key of a server that hosts its own channels: a Cloudflare session DO's end with it. */
@@ -239,6 +244,10 @@ class ChannelMux {
   // ── Connection lifecycle (transport-facing) ─────────────────────────
 
   onConnectionOpen<TConnection>(connection: TConnection, transport: ServerTransport<TConnection>): void {
+    const channelOn = (ix: number): ServerChannel | undefined => {
+      const sessionId = transport.getSessionId(connection)
+      return sessionId === undefined ? undefined : this.sessions.get(sessionId, ix)?.channel
+    }
     this.connectionEntries.set(connection, {
       state: {
         pingTimer: null,
@@ -257,6 +266,10 @@ class ChannelMux {
       sender: {
         send: (frame, onCommit) => this.send(connection, frame as Uint8Array<ArrayBuffer>, onCommit),
         bufferedAmount: () => this.bufferedAmount(connection),
+      },
+      seqs: {
+        received: (ix) => channelOn(ix)?._lastClientSeq ?? 0,
+        sent: (ix) => channelOn(ix)?._replayBuffer?.seq ?? 0,
       },
     })
     const connId = transport.getConnId(connection)
@@ -286,6 +299,8 @@ class ChannelMux {
         reconnectTimeout: this.options.reconnectTimeout,
         idleTimeout: this.options.idleTimeout,
         pingInterval: this.options.pingInterval,
+        serverReplayBuffer: this.options.serverReplayBuffer,
+        serverReplayBufferBinary: this.options.serverReplayBufferBinary,
         clientReplayBuffer: this.options.clientReplayBuffer,
         clientReplayBufferBinary: this.options.clientReplayBufferBinary,
         sseFlushThrottle: this.options.sseFlushThrottle,
@@ -405,9 +420,10 @@ class ChannelMux {
     connection: Wire,
     rawFrame: Uint8Array<ArrayBuffer>,
   ): null | Promise<ReconcileOutcome | null> {
-    const frame = decodeClientFrame(rawFrame, WIRE_MAX_CONN_CTRL_FRAME_BYTES)
+    const frame = decodeClientFrame(rawFrame, WIRE_MAX_CONN_CTRL_FRAME_BYTES, entry.seqs)
     if (frame.tag === TAG.PING) {
       this.resetPingTimer(connection)
+      this.acknowledgeArrivals(entry, connection)
       this.send(connection, encode.pong(this.answerPing(entry, connection, frame.ended)))
       return null
     }
@@ -450,6 +466,14 @@ class ChannelMux {
       this.releaseEnded(channel)
       return { ix, lastSeq: null }
     })
+  }
+
+  /** At each of the page's heartbeats, the channels of the session on this wire acknowledge what arrived since their
+   *  last WINDOW, so the page's replay lets it go while a channel is quiet. */
+  private acknowledgeArrivals(entry: ConnectionEntry, connection: Wire): void {
+    const sessionId = entry.transport.getSessionId(connection)
+    if (sessionId === undefined || this.sessionWires.get(sessionId) !== connection) return
+    for (const { channel } of this.sessions.peekSession(sessionId)?.values() ?? []) channel._acknowledge()
   }
 
   private dispatchChannelFrame(sessionId: string, frame: ChannelFrame): void {
@@ -1017,6 +1041,8 @@ function resolveMuxServerOptions(): MuxServerOptions {
     idleTimeout: c.idleTimeout,
     pingInterval,
     pingDeadline: pingInterval * 2,
+    serverReplayBuffer: c.serverReplayBuffer,
+    serverReplayBufferBinary: c.serverReplayBufferBinary,
     clientReplayBuffer: c.clientReplayBuffer,
     clientReplayBufferBinary: c.clientReplayBufferBinary,
     connectTtl: c.connectTtl,

@@ -92,9 +92,10 @@ class IndexedPeer {
     return seq
   }
 
-  sendByteWindowUpdate(limit: number): void {
+  /** `lastSeq`: the last seq the server has of what the page sent on the channel. */
+  sendByteWindowUpdate(limit: number, lastSeq: number): void {
     try {
-      this.sender.send(encode.window(this.index, limit))
+      this.sender.send(encode.window(this.index, limit, lastSeq))
     } catch {
       /* transport may already be closed */
     }

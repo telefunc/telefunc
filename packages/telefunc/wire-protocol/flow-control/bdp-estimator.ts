@@ -52,7 +52,7 @@ const NOT_SETTLED: GrowDecision = { acknowledged: false, bytes: 'sample-too-smal
  *        runtime buffers.
  *   3. If the sample saturates ≥ 2/3 of the window, and the queue can't account for it, the
  *      window was the bottleneck → that axis's decision is `grow`; caller may call
- *      `grow()` to double it (clamped to `CREDIT_WINDOW_MAX_BYTES`). The caller applies any
+ *      `grow()` to double it (clamped to its cap, see `capByteWindow`). The caller applies any
  *      additional gates (e.g. runtime saturation in `FlowControl`) before committing.
  *      Otherwise leave it; producer or wire is the limit, not us.
  *   4. Once `window` reaches the cap, probing stops entirely — no further growth
@@ -75,6 +75,8 @@ const NOT_SETTLED: GrowDecision = { acknowledged: false, bytes: 'sample-too-smal
 class BdpEstimator {
   // Byte axis
   private _byteWindow: number = CREDIT_WINDOW_INITIAL_BYTES
+  /** The largest the byte window gets: `CREDIT_WINDOW_MAX_BYTES`, or less where the sender's replay holds less. */
+  private _byteWindowMax: number = CREDIT_WINDOW_MAX_BYTES
   private _bytesAtPingSent = 0
   private _bytesReceived = 0
   // Message-count axis
@@ -104,9 +106,14 @@ class BdpEstimator {
    *  non-grow. Slows but never freezes — a real rate change rediscovers. */
   private _probeIntervalMs = BDP_PING_MIN_INTERVAL_MS
 
-  /** Currently advertised byte-credit window. */
+  /** The byte window the estimator sets, which `FlowControl` grants unless it grants more. */
   get byteWindow(): number {
     return this._byteWindow
+  }
+
+  /** The largest the byte window gets (see `capByteWindow`). */
+  get byteWindowMax(): number {
+    return this._byteWindowMax
   }
 
   /** Currently advertised message-count window. */
@@ -127,10 +134,7 @@ class BdpEstimator {
     let probe = false
     // Skip probe only when *both* axes have already hit their cap — otherwise one of them
     // might still want to grow.
-    if (
-      !this._pingInFlight &&
-      !(this._byteWindow >= CREDIT_WINDOW_MAX_BYTES && this._msgWindow >= CREDIT_MSG_WINDOW_MAX)
-    ) {
+    if (!this._pingInFlight && !(this._byteWindow >= this._byteWindowMax && this._msgWindow >= CREDIT_MSG_WINDOW_MAX)) {
       const now = Date.now()
       if (now - this._lastPingAt >= this._probeIntervalMs) {
         // Snapshot BEFORE crediting the triggering frame — it counts as the first
@@ -186,7 +190,7 @@ class BdpEstimator {
     const byteSample = (this._bytesReceived - this._bytesAtPingSent) * atPathRtt
     const msgSample = this._msgsReceived - this._msgsAtPingSent
     const bytes: AxisDecision =
-      this._byteWindow >= CREDIT_WINDOW_MAX_BYTES
+      this._byteWindow >= this._byteWindowMax
         ? 'at-cap'
         : byteSample * 3 < this._byteWindow * 2
           ? 'sample-too-small'
@@ -215,15 +219,22 @@ class BdpEstimator {
 
   /** Commit a byte-window doubling. Idempotent at the cap. */
   growBytes(): void {
-    this._byteWindow = Math.min(CREDIT_WINDOW_MAX_BYTES, this._byteWindow * 2)
+    this._byteWindow = Math.min(this._byteWindowMax, this._byteWindow * 2)
     this._grewSincePing = true
   }
 
-  /** Grow-only bump of the byte window (clamped to MAX). */
+  /** Grow-only bump of the byte window (clamped to its cap). */
   bumpInitialByteWindow(bytes: number): void {
-    if (bytes <= this._byteWindow) return
-    this._byteWindow = Math.min(CREDIT_WINDOW_MAX_BYTES, bytes)
+    const window = Math.min(this._byteWindowMax, bytes)
+    if (window <= this._byteWindow) return
+    this._byteWindow = window
     this._grewSincePing = true
+  }
+
+  /** The byte window gets to `bytes` at most, `CREDIT_WINDOW_MAX_BYTES` if more, and is lowered to it. */
+  capByteWindow(bytes: number): void {
+    this._byteWindowMax = Math.min(CREDIT_WINDOW_MAX_BYTES, bytes)
+    this._byteWindow = Math.min(this._byteWindow, this._byteWindowMax)
   }
 
   /** Commit a message-window doubling. Idempotent at the cap. */

@@ -23,6 +23,7 @@ import { createAbortError, isAbort } from '../../shared/Abort.js'
 import {
   ACK_STATUS,
   TAG,
+  countsCredit,
   isChannelCtrlTag,
   type AckResultStatus,
   type BroadcastKind,
@@ -38,7 +39,12 @@ import { makeAbortError, makeBugError } from '../../client/remoteTelefunctionCal
 import { ShieldValidationError } from '../../shared/ShieldValidationError.js'
 import { ClientConnection } from './connection.js'
 import { getSessionUrl } from './session-registry.js'
-import { CHANNEL_CLOSE_TIMEOUT_MS, CREDIT_WINDOW_MAX_BYTES, type ChannelTransports } from '../constants.js'
+import {
+  CHANNEL_CLOSE_TIMEOUT_MAX_MS,
+  CHANNEL_CLOSE_TIMEOUT_MS,
+  CREDIT_WINDOW_MAX_BYTES,
+  type ChannelTransports,
+} from '../constants.js'
 import { FlowControl } from '../flow-control/flow-control.js'
 import type { MuxChannel, MuxConnection } from './connection.js'
 import { ChannelClosedError, ChannelOverflowError, isExpectedChannelFailure } from '../channel-errors.js'
@@ -280,6 +286,16 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     return probe === undefined ? {} : { probe }
   }
 
+  /** @internal */
+  _fitReplays(window: number, peerWindow: number): void {
+    this._flow.fitReplays(window, peerWindow)
+  }
+
+  /** @internal At each heartbeat: see `FlowControl.acknowledge`. */
+  _acknowledge(): void {
+    this._flow.acknowledge()
+  }
+
   _onTransportOpen(batched: boolean, wire: number): void {
     if (this._isClosed) return
     if (batched) this._flow.useBatchTransportInitial()
@@ -356,7 +372,9 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
       this._dispatchCtrl(frame as ChannelCtrlFrame)
       return
     }
-    this._dispatchDataFrame(frame as ChannelDataFrame)
+    const data = frame as ChannelDataFrame
+    if (!countsCredit(data.tag)) this._flow.onReceivedUncounted(data.bytes)
+    this._dispatchDataFrame(data)
   }
 
   /** @internal — Tag-keyed data-frame switch. `ClientBroadcast` overrides to add the
@@ -761,7 +779,9 @@ function reportingUnexpected(publish: Promise<ChannelPublishAck>): Promise<Chann
 
 function normalizeCloseTimeout(timeout: number | undefined): number {
   if (timeout === undefined) return CHANNEL_CLOSE_TIMEOUT_MS
-  if (!Number.isFinite(timeout) || timeout < 0)
-    throw new Error('Channel close timeout must be a non-negative finite number')
+  if (!Number.isFinite(timeout) || timeout < 0 || timeout > CHANNEL_CLOSE_TIMEOUT_MAX_MS)
+    throw new Error(
+      `Channel close timeout must be a non-negative number of milliseconds, at most ${CHANNEL_CLOSE_TIMEOUT_MAX_MS}`,
+    )
   return timeout
 }

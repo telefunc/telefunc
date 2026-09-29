@@ -1,8 +1,11 @@
 import { expect, test } from 'vitest'
 import { ChannelMux, type ServerTransport } from './server/mux.js'
 import { ServerChannel } from './server/channel.js'
-import { decode, encode, TAG, type DecodedFrame } from './shared-ws.js'
+import { decode, encode, TAG, type DecodedFrame, type SeqReader } from './shared-ws.js'
 import { WIRE_MAX_CONN_CTRL_FRAME_BYTES, WIRE_MAX_RAW_FRAME_BYTES } from './constants.js'
+
+/** A receiver with nothing of any channel: each seq reads as its low 32 bits. */
+const wireSeqs: SeqReader = { received: () => 0, sent: () => 0 }
 
 function createHarness() {
   const mux = new ChannelMux()
@@ -15,7 +18,7 @@ function createHarness() {
       getSessionId: () => sessionId,
       setSessionId: (_conn, id) => (sessionId = id),
       getConnId: () => null,
-      sendNow: (_conn, frame) => sent.push(decode(frame)),
+      sendNow: (_conn, frame) => sent.push(decode(frame, wireSeqs)),
       bufferedAmount: () => 0,
       terminateConnection: () => (terminated = true),
     }

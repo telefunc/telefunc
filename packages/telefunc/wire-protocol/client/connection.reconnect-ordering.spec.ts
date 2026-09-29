@@ -17,9 +17,12 @@ import { stringify } from '@brillout/json-serializer/stringify'
 
 import { ClientConnection } from './connection.js'
 import { ServerChannel } from '../server/channel.js'
-import { decode, encode, TAG } from '../shared-ws.js'
+import { decode, encode, TAG, type SeqReader } from '../shared-ws.js'
 import { decodeU32, concat } from '../frame.js'
 import { uint8ArrayToBase64url } from '../base64url.js'
+
+/** A receiver with nothing of any channel: each seq reads as its low 32 bits. */
+const wireSeqs: SeqReader = { received: () => 0, sent: () => 0 }
 
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
@@ -107,7 +110,7 @@ async function runScenario(loseSeq1: boolean): Promise<{ received: number[]; wir
     let ix = 0
     const dataFrames: any[] = []
     for (const raw of frames) {
-      const f = decode(raw as any)
+      const f = decode(raw as any, wireSeqs)
       if (f.tag === TAG.RECONCILE) ix = f.payload.open[0]!.ix
       else if (f.tag === TAG.TEXT) dataFrames.push(f)
     }
@@ -122,6 +125,8 @@ async function runScenario(loseSeq1: boolean): Promise<{ received: number[]; wir
         reconnectTimeout: 60_000,
         idleTimeout: 60_000,
         pingInterval: 100_000,
+        serverReplayBuffer: 1_000_000,
+        serverReplayBufferBinary: 2_000_000,
         clientReplayBuffer: 1_000_000,
         clientReplayBufferBinary: 2_000_000,
         sseFlushThrottle: 300,
@@ -144,7 +149,7 @@ async function runScenario(loseSeq1: boolean): Promise<{ received: number[]; wir
         return new Response(sse.stream as any, { status: 200, headers: { 'Content-Type': 'text/event-stream' } })
       }
       for (const raw of frames) {
-        const f = decode(raw as any)
+        const f = decode(raw as any, wireSeqs)
         if (f.tag === TAG.TEXT) serverCh._dispatchFrame(f)
       }
       return new Response('', { status: 200 })
@@ -164,7 +169,7 @@ async function runScenario(loseSeq1: boolean): Promise<{ received: number[]; wir
             first = false
             continue
           } // metadata
-          const f = decode(chunk as any)
+          const f = decode(chunk as any, wireSeqs)
           if (f.tag === TAG.TEXT) {
             seen.push(f.seq)
             if (!dropUpstream) serverCh._dispatchFrame(f) // wire 1 dropped in the lost-frame case
